@@ -10,7 +10,7 @@
 SHELL := /usr/bin/env bash
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance morning snapshot fleet-report
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance morning snapshot fleet-report today
 
 help:
 	@echo "Цели:"
@@ -25,6 +25,7 @@ help:
 	@echo "  make morning     — fetch + status (утренний ритуал)"
 	@echo "  make snapshot    — полный JSON состояния флота (github-checker snapshot)"
 	@echo "  make fleet-report— markdown-отчёт о флоте в stdout (fleet_report.py)"
+	@echo "  make today       — что изменилось с полуночи: коммиты + незакоммиченное"
 
 status:      ; @./repos.sh status
 fetch:       ; @./repos.sh fetch
@@ -37,3 +38,4 @@ conformance: ; @python3 ./check-agent-id-conformance.py
 morning:     ; @./repos.sh fetch && echo && ./repos.sh status
 snapshot:    ; @uv run --project ../github-checker github-checker snapshot --workspace ..
 fleet-report:; @uv run --project ../github-checker github-checker snapshot --workspace .. | python3 ./fleet_report.py
+today:       ; @python3 ./recent_changes.py
