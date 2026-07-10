@@ -29,6 +29,8 @@
    помечать maintainer-у).
 4. **Планирование — спеками.** Задачи развития экосистемы агент оформляет как
    `tasks.md`-спеки для spec-runner в репо-владельце изменений, не исполняет сам.
+   Шаблон — `templates/tasks-spec-template.md`, процесс — скилл
+   `skills/spec-bridge/` (managed-спека, status: draft; approve — человек).
 5. Отчёт всегда содержит `host` — чьи локальные клоны он описывает
    (ahead/behind/dirty — состояние конкретной машины).
 
@@ -43,6 +45,7 @@
 | `check-contract-drift.sh` | дрейф вендоренных контрактов |
 | `check-agent-id-conformance.py` | инварианты ADR-ECO-003 |
 | `.claude/skills/fleet-check` | скилл периодической проверки флота |
+| `skills/spec-bridge` | скилл: находка/кластер → tasks.md-спека PR-ом в репо-владелец |
 
 ## Быстрый старт агента
 
