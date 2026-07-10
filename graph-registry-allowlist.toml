@@ -3,16 +3,6 @@
 # edge in the producing repo over growing this file.
 
 [[allow]]
-a = "dispatcher"
-b = "proctor"
-reason = "file-based integration (dispatcher/core/collectors/proctor.py reads config/proctor.yaml, data/state.db, logs) — invisible to prograph detectors by design; candidate for a declared edge (prograph/TODO.md, M12)"
-
-[[allow]]
-a = "dispatcher"
-b = "*"
-reason = "dispatcher is read-only by design: consumes on-disk obs .jsonl artifacts of ALL watched projects without imports/MCP/contract files — none of its edges are statically detectable (registry lists it as obs-contract consumer)"
-
-[[allow]]
 a = "Maestro"
 b = "spec-runner"
 reason = "runtime CLI integration (`spec-runner plan --full`, versioned via SPEC_RUNNER_REQUIRED_VERSION + contract tests) — process invocation, not importable/detectable statically; declared-edge candidate"
