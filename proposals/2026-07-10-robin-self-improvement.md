@@ -1,0 +1,185 @@
+# Robin: recent_changes + петля самоконтроля и самосовершенствования
+
+> Предложение (draft). Дом артефакта: `devtools/proposals/`.
+> Основание: инцидент 2026-07-09 «сегодняшние изменения» + обсуждение 2026-07-10.
+> Статус: на ревью у Andrei. Внедрение в robin-runtime — только через PR.
+
+## TL;DR
+
+1. Провал Robin на «сегодняшних изменениях» — не слабость поиска, а отсутствие
+   инструмента для темпоральных запросов + галлюцинированный негатив («изменений
+   нет» вместо «не знаю»). Семантический поиск (zvec и т.п.) этот класс не лечит.
+2. Предлагается инструмент `recent_changes` (git log + status по всем репо
+   workspace) — сначала скрипт в devtools, затем PR в robin-runtime как второй tool
+   рядом с `kb.py`.
+3. Самосовершенствование = **само-предложение**: Robin никогда не меняет свой
+   код/промпт сам; он логирует провалы, кластеризует их и выпускает PR-предложения
+   (KB-гэпы → vault, инструментальные гэпы → спеки spec-runner). Человек ревьюит.
+4. Петля из 4 ступеней: (1) компенсация формулировки в моменте → (2) фиксация
+   провалов → (3) еженедельный саморазбор → (4) провалы становятся eval-тестами
+   в atp-platform, которые гейтят каждое следующее улучшение.
+
+---
+
+## 1. Инцидент-кейс (готовый блок для `prograph-vault/QUESTIONS.md`)
+
+```markdown
+### 2026-07-09 — «какие сегодняшние изменения в проекте?»
+- **Ответ Robin:** «изменений нет» (неверно: изменения были).
+- **Причина 1 (tooling gap):** темпоральный запрос обслужен единственным
+  инструментом — поиском по KB. Ответ на «что изменилось сегодня» не лежит
+  в документах — он вычисляется из git-метаданных (log/status/mtime).
+- **Причина 2 (spec bug, negative evidence):** ноль результатов поиска
+  интерпретирован как «изменений нет». Нарушение правила «escalate "not in
+  the KB" instead of hallucinating». Hardening «negative-evidence» из
+  ROBIN-SPEC Appendix предвидел этот failure mode — не реализован.
+- **Фикс:** инструмент recent_changes (см. devtools/proposals/
+  2026-07-10-robin-self-improvement.md) + правило negative-evidence в промпт.
+- **Eval-кейс:** «сегодняшние изменения» → ожидаемый класс ответа: temporal,
+  источник git, либо честная эскалация.
+```
+
+## 2. Диагноз
+
+| Симптом | Настоящая причина | Что НЕ поможет |
+|---|---|---|
+| «нет слова "сегодняшний" в лексиконе» | один инструмент (KB-поиск) на все классы вопросов; темпоральные вопросы требуют git-метаданных, а не поиска | эмбеддинги/zvec: вектор «сегодняшний» найдёт заметки *про* даты, но не факт изменений |
+| уверенное «изменений нет» | отсутствие правила negative-evidence: пустая выдача ≠ доказательство отсутствия | увеличение recall поиска — усугубит (больше ложно-релевантного grounding) |
+
+---
+
+## 3. Инструмент `recent_changes`
+
+**Контракт.** Вход: `since` (ISO-дата | `midnight` | `"3 days ago"`), опц. `repo`.
+Выход: JSON по каждому репо: коммиты за период **плюс незакоммиченные файлы**
+(вчерашние изменения могли быть именно uncommitted — git log их не видит!).
+Строго read-only.
+
+**Эскиз (Python, ~40 строк, без зависимостей):**
+
+```python
+#!/usr/bin/env python3
+"""recent_changes — что изменилось в workspace с момента X. READ-ONLY."""
+import json, subprocess, sys
+from pathlib import Path
+
+def git(repo: Path, *args: str) -> str:
+    r = subprocess.run(["git", "-C", str(repo), *args],
+                       capture_output=True, text=True, timeout=30)
+    return r.stdout.strip()
+
+def discover_repos(root: Path):
+    return sorted(p.parent for p in root.glob("*/.git"))
+
+def recent_changes(root: Path, since: str = "midnight") -> list[dict]:
+    out = []
+    for repo in discover_repos(root):
+        commits = git(repo, "log", f"--since={since}",
+                      "--pretty=%h|%ad|%an|%s", "--date=iso").splitlines()
+        dirty = git(repo, "status", "--porcelain").splitlines()
+        if commits or dirty:
+            out.append({
+                "repo": repo.name,
+                "commits": [dict(zip(("sha", "date", "author", "subject"),
+                                     c.split("|", 3))) for c in commits],
+                "uncommitted": len(dirty),
+                "uncommitted_files": [d[3:] for d in dirty[:20]],
+            })
+    return out
+
+if __name__ == "__main__":
+    root = Path(__file__).resolve().parent.parent   # devtools/.. = workspace
+    since = sys.argv[1] if len(sys.argv) > 1 else "midnight"
+    print(json.dumps(recent_changes(root, since), ensure_ascii=False, indent=2))
+```
+
+**Путь внедрения (двухшаговый, по правилам workspace):**
+
+| Шаг | Где | Почему |
+|---|---|---|
+| 1. `devtools/recent_changes.py` + цель `make today` | devtools (наш репо, свободный коммит) | обкатка без трогания robin-runtime; сразу полезен человеку в терминале |
+| 2. PR в robin-runtime: tool рядом с `src/robin/kb.py` | robin-runtime (чужой репо → только PR) | Robin получает второй инструмент; описания инструментов позволяют LLM самому выбрать «поиск знаний» vs «изменения за период» — никакого «лексикона» не нужно |
+
+---
+
+## 4. Петля самоконтроля (4 ступени)
+
+### Ступень 1 — компенсация формулировки в моменте
+Пользователь не обязан формулировать «правильно» — Robin компенсирует:
+
+- **Query rewriting:** перед поиском LLM генерит 2–3 переформулировки вопроса
+  (синонимы, en/ru, термины экосистемы) и ищет по всем. Кривая формулировка
+  человека перестаёт быть фатальной.
+- **Встречный уточняющий вопрос:** пустая/противоречивая выдача → один короткий
+  уточняющий вопрос в чат («про изменения в git или про решение в KB?»),
+  а не молчание и не «нет».
+- **Правило negative-evidence (жёсткий инвариант):** пустой поиск →
+  «в KB не нашёл, эскалирую» — НИКОГДА утвердительное отсутствие.
+- Стоимость: правки промпта + ~20 строк; без новых репо и зависимостей.
+
+### Ступень 2 — фиксация провалов
+Каждый диалог — в append-only лог (`var/`, уже в M0-дизайне). Провал детектится по:
+
+| Сигнал | Как ловим |
+|---|---|
+| ноль результатов retrieval | из лога автоматически |
+| переформулировка вопроса тем же человеком в течение ~5 мин | сильнейший маркер неудачи первого ответа; окно по chat_id |
+| явный фидбек | Telegram: реакция 👎 на сообщение бота / команда `/gap <комментарий>` |
+| эскалация «не в KB» | уже KB-gap по определению (паттерн duty #1) |
+
+Запись: `{ts, chat, question, rewrites, retrieval_hits, answer_class, fail_signal}`.
+PII — не в общий лог открытым текстом (ROBIN-SPEC §6.5).
+
+### Ступень 3 — еженедельный саморазбор (черновик duty для `duties.md`)
+
+```markdown
+### N. Self-review — разбор провалов недели
+- **Trigger:** `0 18 * * FRI` (<TZ>).
+- **Inputs:** interaction log (var/) за неделю; QUESTIONS.md.
+- **Behavior:** кластеризовать провалы (класс вопроса × причина); для каждого
+  кластера подготовить артефакт: KB-гэп → PR-кандидат в prograph-vault
+  (staged-learning, read-back verified §6.4); инструментальный гэп → черновик
+  спеки для spec-runner; неоднозначность формулировок → кандидаты в synonyms/
+  rewrite-подсказки промпта (тоже PR).
+- **Output:** сводка «N провалов → M предложений» + ссылки на PR/спеки.
+- **Destination:** DM мейнтейнеру; сводка в team-канал.
+- **Инвариант:** Robin НЕ мержит и НЕ меняет себя сам — только предлагает.
+- **Owner:** Andrei.
+```
+
+### Ступень 4 — провалы становятся тестами (atp-platform)
+Каждый разобранный кейс → eval-кейс: `{question, expected_answer_class,
+expected_source | escalation}`. Набор гоняется через atp-platform при каждом
+изменении Robin (промпт, инструменты, retrieval) — регрессионный гейт: улучшение
+принимается, только если старые кейсы не сломались. Это тот же benchmark-gated
+паттерн, которым экосистема промоутит агентов в routing (ADR-ECO-003a).
+
+Замыкание петли: **провал → лог → разбор → PR-предложение → человек мержит →
+кейс уходит в eval → eval гейтит следующие изменения.**
+
+---
+
+## 5. Метрики (позже — панель в dispatcher)
+
+answer-rate (доля вопросов с grounded-ответом), escalation-rate (честные «не
+нашёл»), reformulation-rate (доля диалогов с переформулировкой — прокси кривых
+формулировок/слабого rewriting), gap-conversion (доля провалов, дошедших до
+смерженного PR). Тренд важнее абсолютов: петля работает, если reformulation-rate
+и повторные провалы одного класса падают от недели к неделе.
+
+## 6. Рекомендуемые действия (порядок)
+
+1. ✅ сегодня: этот файл в `devtools/proposals/`; блок из §1 — в
+   `prograph-vault/QUESTIONS.md` (PR или руками).
+2. `devtools/recent_changes.py` + `make today` — обкатка на живом workspace.
+3. Ступень 1 в robin-runtime (PR: промпт-правила + query rewriting).
+4. PR: `recent_changes` как tool Robin + выбор инструмента по описанию.
+5. Ступень 2 (лог провалов + Telegram-фидбек) → Ступень 3 (duty) →
+   Ступень 4 (eval-набор в atp-platform, стартовый кейс — из §1).
+
+## Ссылки
+
+- robin-runtime/README.md — правило «каждый вопрос без ответа → QUESTIONS.md»
+- prograph-vault/robin/duties.md — формат duty, паттерн KB-gap (duty #1)
+- devtools/repos.sh — автодискавери репо, переиспользуется recent_changes
+- ROBIN-SPEC Appendix — negative-evidence/liveness hardening (предвиден, не реализован)
