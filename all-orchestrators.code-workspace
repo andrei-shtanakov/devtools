@@ -1,0 +1,68 @@
+{
+  // ============================================================
+  //  AI Orchestrators — multi-root workspace
+  //  Поместить в КОРЕНЬ all_ai_orchestrators/ и открыть через
+  //  "File → Open Workspace from File…".
+  //  Source Control панель покажет все репозитории сразу,
+  //  каждый со своей веткой и своим remote.
+  // ============================================================
+  "folders": [
+    { "name": "00 · root (cowork)", "path": "." },
+    { "name": "Maestro",            "path": "Maestro" },
+    { "name": "arbiter",            "path": "arbiter" },
+    { "name": "atp-platform",       "path": "atp-platform" },
+    { "name": "spec-runner",        "path": "spec-runner" },
+    { "name": "proctor",            "path": "proctor" },
+    { "name": "open-prose",         "path": "open-prose" },
+    { "name": "atp-platform-testing-en", "path": "atp-platform-testing-en" },
+    { "name": "prograph (root-tracked)", "path": "prograph" }
+  ],
+  "settings": {
+    // --- общий шум прячем из дерева/поиска ---
+    "files.exclude": {
+      "**/.git": true,
+      "**/.DS_Store": true,
+      "**/__pycache__": true,
+      "**/.pytest_cache": true,
+      "**/.ruff_cache": true
+    },
+    "search.exclude": {
+      "**/.venv": true,
+      "**/target": true,
+      "**/uv.lock": true,
+      "**/node_modules": true
+    },
+    "files.watcherExclude": {
+      "**/.venv/**": true,
+      "**/target/**": true
+    },
+
+    // --- Python: каждый репо держит свой uv-venv ---
+    "python.terminal.activateEnvironment": true,
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.typeCheckingMode": "basic",
+    "ruff.enable": true,
+    "ruff.importStrategy": "fromEnvironment",
+
+    // --- Rust: arbiter — cargo workspace из 4 крейтов ---
+    "rust-analyzer.linkedProjects": [
+      "arbiter/Cargo.toml"
+    ],
+
+    // --- git: видеть все репо, не дёргать root по мелочам ---
+    "git.detectSubmodules": false,
+    "git.autofetch": true,
+    "git.autofetchPeriod": 180,
+    "git.branchProtection": ["main", "master"],
+    "scm.alwaysShowRepositories": true
+  },
+  "extensions": {
+    "recommendations": [
+      "charliermarsh.ruff",
+      "ms-python.python",
+      "ms-python.vscode-pylance",
+      "rust-lang.rust-analyzer",
+      "tamasfe.even-better-toml"
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "_meta": {
+    "purpose": "Офлайн-источник для discover_models.py: какие модели провайдеры предлагают СЕЙЧАС.",
+    "how_to_fill": "Руками из `claude --model` / доков провайдера, либо scheduled-таском. Ключи = vendor как в agents-catalog.toml (Plane 1).",
+    "note": "Отражает наблюдение 2026-07-02: Claude Code показывает Sonnet 5. sonnet-4-6 оставлен как всё ещё доступный через --model (пропажа из меню != снятие с API).",
+    "captured_at": "2026-07-02"
+  },
+  "observed": {
+    "anthropic": [
+      "claude-sonnet-5",
+      "claude-sonnet-4-6",
+      "claude-opus-4-8",
+      "claude-haiku-4-5"
+    ],
+    "openai": [
+      "gpt-5.5",
+      "gpt-5"
+    ],
+    "deepseek": [
+      "deepseek-chat"
+    ],
+    "alibaba": [
+      "qwen3.6-plus",
+      "qwen2.5:3b",
+      "qwen2.5:7b",
+      "qwen2.5:14b"
+    ],
+    "zhipu": [
+      "glm-5.1"
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+# СГЕНЕРИРОВАНО gen_agents_toml.py из benchmark_runs — проверь и вставь в
+# arbiter/config/agents.toml. cost_per_hour/avg_duration_min засеяны из данных;
+# supports_*/max_concurrent — ПОЛИТИКА (для новых агентов помечены TODO).
+
+# [обновление cost/duration] claude_code@claude-sonnet-4-6 — code-review: score=0.800 n=1
+["claude_code@claude-sonnet-4-6"]
+display_name = "Claude Code (Sonnet 4.6)"
+supports_languages = ["python", "rust", "typescript"]
+supports_types = ["feature", "bugfix", "refactor", "docs", "review", "research"]
+max_concurrent = 2
+cost_per_hour = 44.3751   # из данных (n=1)
+avg_duration_min = 1.77   # из данных (n=1)
+
+# [обновление cost/duration] codex_cli@gpt-5.5 — code-review: score=0.800 n=1
+["codex_cli@gpt-5.5"]
+display_name = "Codex CLI (GPT-5.5)"
+supports_languages = ["typescript", "go", "python"]
+supports_types = ["feature", "bugfix", "refactor", "test", "review"]
+max_concurrent = 3
+cost_per_hour = 0.0000   # из данных (n=1)
+avg_duration_min = 2.39   # из данных (n=1)
