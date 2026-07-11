@@ -167,11 +167,32 @@ def graph_pairs(db_path: Path) -> set[Pair]:
         con.close()
 
 
+def autodetect_root() -> Path:
+    """Walk upward from this script until a dir holds both required artifacts."""
+    for base in Path(__file__).resolve().parents:
+        if (base / REGISTRY_REL).is_file() and (base / GRAPH_DB_REL).is_file():
+            return base
+    sys.exit(
+        f"error: could not autodetect workspace root — no ancestor of "
+        f"{Path(__file__).resolve().parent} holds both {REGISTRY_REL} and "
+        f"{GRAPH_DB_REL}; pass --root explicitly"
+    )
+
+
 def load_allowlist() -> list[tuple[str, str, str]]:
     if not ALLOWLIST.is_file():
         return []
     data = tomllib.loads(ALLOWLIST.read_text(encoding="utf-8"))
-    return [(e["a"], e["b"], e.get("reason", "")) for e in data.get("allow", [])]
+    rules: list[tuple[str, str, str]] = []
+    for e in data.get("allow", []):
+        reason = e.get("reason", "").strip()
+        if not reason:
+            sys.exit(
+                f"error: allowlist entry {e['a']} / {e['b']} in {ALLOWLIST.name} "
+                f"has no reason (every entry must carry one)"
+            )
+        rules.append((e["a"], e["b"], reason))
+    return rules
 
 
 def allowed(pair: Pair, rules: list[tuple[str, str, str]]) -> str | None:
@@ -188,7 +209,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--root", type=Path, default=None, help="workspace root")
     args = ap.parse_args()
-    root = (args.root or Path(__file__).resolve().parent.parent).resolve()
+    root = args.root.resolve() if args.root else autodetect_root()
 
     registry_path = root / REGISTRY_REL
     db_path = root / GRAPH_DB_REL
