@@ -1,0 +1,8 @@
+# Known-acceptable diffs for check-graph-registry-drift.py (fnmatch globs, unordered).
+# Every entry MUST carry a reason. Prefer fixing the registry / adding a declared
+# edge in the producing repo over growing this file.
+
+[[allow]]
+a = "Maestro"
+b = "spec-runner"
+reason = "runtime CLI integration (`spec-runner plan --full`, versioned via SPEC_RUNNER_REQUIRED_VERSION + contract tests) — process invocation, not importable/detectable statically; declared-edge candidate"
