@@ -17,16 +17,20 @@
 
 1. **READ-ONLY к соседним репо.** Никаких прямых записей/коммитов в другие
    репозитории workspace. Изменения уходят только через PR (ветка → PR → ревью).
-2. **Сенсор — github-checker.** Состояние флота берётся из
-   `github-checker snapshot --json` (см. `../github-checker/README.md`,
-   headless-режим), не самописным парсингом. repos.sh — интерактивная обёртка
-   для человека, не источник данных для отчётов.
+2. **Сенсоров два — намеренно, не дублирование.** Текущее состояние флота
+   (ветки, ahead/behind, dirty, PRs/issues/alerts) — `github-checker snapshot`
+   (см. `../github-checker/README.md`, headless-режим). Дельта за период
+   («что изменилось с X») — `recent_changes.py` (stdlib-only: пригоден как
+   tool для Robin без pydantic-зависимости). Не сливать и не «дедуплицировать».
+   repos.sh — интерактивная обёртка для человека, не источник данных для отчётов.
 3. **Память — prograph-vault.** Отчёты fleet-check предназначены для
    `../prograph-vault/derived/fleet/` и доставляются PR-ом. Регистрация
    писателя в конституции vault — отдельным ADR (до его принятия PR-ы
    помечать maintainer-у).
 4. **Планирование — спеками.** Задачи развития экосистемы агент оформляет как
    `tasks.md`-спеки для spec-runner в репо-владельце изменений, не исполняет сам.
+   Шаблон — `templates/tasks-spec-template.md`, процесс — скилл
+   `skills/spec-bridge/` (managed-спека, status: draft; approve — человек).
 5. Отчёт всегда содержит `host` — чьи локальные клоны он описывает
    (ahead/behind/dirty — состояние конкретной машины).
 
@@ -37,9 +41,11 @@
 | `repos.sh` | интерактив: status / fetch / pull / dirty / bootstrap / exec |
 | `Makefile` | алиасы, в т.ч. `make snapshot`, `make fleet-report`, `make morning` |
 | `fleet_report.py` | snapshot-JSON → markdown-отчёт для vault `derived/fleet/` |
+| `recent_changes.py` | темпоральный сенсор: коммиты + незакоммиченное с момента X (`make today`) |
 | `check-contract-drift.sh` | дрейф вендоренных контрактов |
 | `check-agent-id-conformance.py` | инварианты ADR-ECO-003 |
 | `.claude/skills/fleet-check` | скилл периодической проверки флота |
+| `skills/spec-bridge` | скилл: находка/кластер → tasks.md-спека PR-ом в репо-владелец |
 
 ## Быстрый старт агента
 

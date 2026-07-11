@@ -46,7 +46,7 @@ compare "spec-runner/src/spec_runner/obs.py" "arbiter/orchestrator/_vendor/obs.p
 echo
 echo "${B}== report_benchmark schema (arbiter ↔ Maestro, byte-for-byte) ==${Z}"
 compare "arbiter/arbiter-mcp/tests/contract/report_benchmark-v1.schema.json" \
-        "Maestro/_cowork_output/benchmark-contract/report_benchmark-v1.schema.json" \
+        "Maestro/contracts/benchmark/report_benchmark-v1.schema.json" \
         hard "report_benchmark-v1.schema.json"
 
 echo
