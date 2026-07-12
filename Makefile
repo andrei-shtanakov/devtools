@@ -41,3 +41,6 @@ morning:     ; @./repos.sh fetch && echo && ./repos.sh status
 snapshot:    ; @uv run --project ../github-checker github-checker snapshot --workspace ..
 fleet-report:; @uv run --project ../github-checker github-checker snapshot --workspace .. | python3 ./fleet_report.py
 today:       ; @python3 ./recent_changes.py
+
+.PHONY: release-drift
+release-drift: ; @python3 ./check-release-drift.py --workspace .. --manifest ./release-manifest.toml
