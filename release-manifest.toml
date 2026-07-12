@@ -1,0 +1,197 @@
+# release-manifest.toml — SSOT согласованного релиз-набора (schema v0.2, hardened)
+#
+# Дом: devtools/. READ-ONLY по репо. Снимок фактов: 2026-07-12.
+#
+# ── Что изменилось vs v0.1 (по ревью) ──
+#   * Плоская схема разведена на явные поля (component_id != repo != package != path).
+#   * Поддержка workspace-member (atp-platform-sdk внутри atp-platform).
+#   * tag_pattern вместо "ближайшего тега" (umbrella v* vs component atp-sdk-v*).
+#   * tag="-" запрещён для установки: нужен pinned sha (install=git-sha).
+#   * Разделены pin_range (абстрактный, для pyproject потребителя) и
+#     lock_version (точный, для lock/набора). Точная версия — только в concrete-слое.
+#
+# ── Схема поля (см. check-release-drift.py: REQUIRED/OPTIONAL) ──
+#   package_name   строка, имя дистрибутива (dist name), НЕ равно component_id
+#   repo_url       git remote (владелец тегов/публикации)
+#   git_dir        путь к .git относительно workspace (для member = родительский repo)
+#   pyproject_path путь к pyproject.toml (откуда читается version) отн. workspace
+#   tag_pattern    glob для `git tag --list` (umbrella="v*", sdk="atp-sdk-v*")
+#   tag            последний тег, matching tag_pattern ("-" если тегов нет)
+#   sha            пиненый коммит; ОБЯЗАТЕЛЕН при install=git-sha; при install=git-tag
+#                  (если указан) = commit тега — иначе sha_tag_mismatch (warn)
+#   install        "pypi" | "git-tag" | "git-sha"   (HEAD запрещён)
+#   lock_version   точная версия для набора/lock (concrete)
+#   pin_range      абстрактный диапазон для pyproject потребителя (напр. ">=2.9,<3")
+#   publish        "pypi" | "none"
+#   rust           true если нужна нативная сборка (cargo/maturin)
+#   branch         фактическая ветка, если НЕ дефолтная (флаг для внимания)
+
+schema_version = "0.2.0"
+generated = "2026-07-12"
+ecosystem_release = "unreleased"
+
+# ══════════════ СЛОЙ ЯДЕР (publish=pypi, потребляются как пакеты) ══════════════
+
+[cores.spec-runner]
+package_name   = "spec-runner"
+repo_url       = "git@github.com:andrei-shtanakov/spec-runner.git"
+git_dir        = "spec-runner"
+pyproject_path = "spec-runner/pyproject.toml"
+tag_pattern    = "v*"
+tag            = "v2.9.0"
+install        = "pypi"
+lock_version   = "2.9.0"
+pin_range      = ">=2.9,<3"      # ← едет в pyproject потребителей вместо устаревшего >=0.1.x
+publish        = "pypi"
+rust           = false
+consumers      = ["arbiter", "atp-platform"]
+
+[cores.atp-platform-sdk]                 # workspace-member ВНУТРИ atp-platform
+package_name   = "atp-platform-sdk"
+repo_url       = "git@github.com:andrei-shtanakov/atp-platform.git"
+git_dir        = "atp-platform"
+pyproject_path = "atp-platform/packages/atp-sdk/pyproject.toml"
+tag_pattern    = "atp-sdk-v*"
+tag            = "atp-sdk-v2.0.0"
+install        = "pypi"
+lock_version   = "2.0.0"
+pin_range      = ">=2.0,<3"
+publish        = "pypi"
+rust           = false
+consumers      = ["Maestro"]
+
+[cores.atp-platform]                     # umbrella-дистрибутив
+package_name   = "atp-platform"
+repo_url       = "git@github.com:andrei-shtanakov/atp-platform.git"
+git_dir        = "atp-platform"
+pyproject_path = "atp-platform/pyproject.toml"
+tag_pattern    = "v*"
+tag            = "v2.1.0"
+install        = "pypi"
+lock_version   = "2.1.0"
+pin_range      = ">=2.1,<3"
+publish        = "pypi"
+rust           = false
+consumers      = []
+members        = ["atp-core","atp-adapters","atp-dashboard","atp-method","atp-games","game-environments","atp-platform-sdk"]
+
+# ══════════════ СЛОЙ ПРИЛОЖЕНИЙ ══════════════
+# Нет publish, чаще нет тега → install=git-sha с ОБЯЗАТЕЛЬНЫМ sha (HEAD запрещён).
+
+[apps.Maestro]
+package_name   = "maestro"
+repo_url       = "git@github.com:andrei-shtanakov/Maestro.git"
+git_dir        = "Maestro"
+pyproject_path = "Maestro/pyproject.toml"
+tag_pattern    = "v*"
+tag            = "v0.2.0"          # ⚠ pyproject=0.4.0 > tag: релиз не нарезан (tag_behind)
+sha            = "e4f0a9fa2884"     # commit тега v0.2.0 (провенанс, НЕ HEAD); проверяется sha_tag_mismatch
+install        = "git-tag"          # ставим на v0.2.0; поднять после нового тега
+lock_version   = "0.2.0"
+publish        = "none"
+rust           = false
+
+[apps.arbiter]
+package_name   = "arbiter"
+repo_url       = "git@github.com:andrei-shtanakov/arbiter.git"
+git_dir        = "arbiter"
+pyproject_path = "arbiter/pyproject.toml"
+tag_pattern    = "v*"
+tag            = "-"
+sha            = "532dade39dac"
+install        = "git-sha"
+lock_version   = "0.1.0+g532dade39dac"
+publish        = "none"
+rust           = true               # arbiter/Cargo.toml
+
+[apps.dispatcher]
+package_name   = "dispatcher"
+repo_url       = "git@github.com:andrei-shtanakov/dispatcher.git"
+git_dir        = "dispatcher"
+pyproject_path = "dispatcher/pyproject.toml"
+tag_pattern    = "v*"
+tag            = "-"
+sha            = "927e1aa9af9c"
+install        = "git-sha"
+lock_version   = "0.1.0+g927e1aa9af9c"
+publish        = "none"
+rust           = false
+
+[apps.steward]
+package_name   = "steward"
+repo_url       = "git@github.com:andrei-shtanakov/steward.git"
+git_dir        = "steward"
+pyproject_path = "steward/pyproject.toml"
+tag_pattern    = "v*"
+tag            = "-"
+sha            = "6ab902b36fc6"
+install        = "git-sha"
+lock_version   = "0.1.0+g6ab902b36fc6"
+publish        = "none"
+rust           = false
+branch         = "spec/ws-006-oq-resolutions"   # ⚠ НЕ дефолтная ветка — sha с фичевой ветки
+
+[apps.proctor]
+package_name   = "proctor"
+repo_url       = "git@github.com:andrei-shtanakov/proctor.git"
+git_dir        = "proctor"
+pyproject_path = "proctor/pyproject.toml"
+tag_pattern    = "v*"
+tag            = "-"
+sha            = "f52f92bf0dac"
+install        = "git-sha"
+lock_version   = "0.1.0+gf52f92bf0dac"
+publish        = "none"
+rust           = false
+
+[apps.deployer]
+package_name   = "deployer"
+repo_url       = "git@github.com:andrei-shtanakov/deployer.git"
+git_dir        = "deployer"
+pyproject_path = "deployer/pyproject.toml"
+tag_pattern    = "v*"
+tag            = "-"
+sha            = "b693768a7942"
+install        = "git-sha"
+lock_version   = "0.1.0+gb693768a7942"
+publish        = "none"
+rust           = false
+
+[apps.prograph]
+package_name   = "prograph"
+repo_url       = "git@github.com:andrei-shtanakov/prograph.git"
+git_dir        = "prograph"
+pyproject_path = "prograph/pyproject.toml"
+tag_pattern    = "v*"
+tag            = "-"
+sha            = "12b023c57805"
+install        = "git-sha"
+lock_version   = "0.1.0+g12b023c57805"
+publish        = "none"
+rust           = true               # prograph/prograph-core/Cargo.toml (maturin)
+
+[apps.robin-runtime]
+package_name   = "robin-runtime"
+repo_url       = "git@github.com:andrei-shtanakov/robin-runtime.git"
+git_dir        = "robin-runtime"
+pyproject_path = "robin-runtime/pyproject.toml"
+tag_pattern    = "v*"
+tag            = "-"
+sha            = "f1c5069f87a0"
+install        = "git-sha"
+lock_version   = "0.0.1+gf1c5069f87a0"
+publish        = "none"
+rust           = false
+
+[apps.github-checker]
+package_name   = "github-checker"
+repo_url       = "git@github.com:andrei-shtanakov/github-checker.git"
+git_dir        = "github-checker"
+pyproject_path = "github-checker/pyproject.toml"
+tag_pattern    = "v*"
+tag            = "-"
+sha            = "f0edf6d6b54a"
+install        = "git-sha"
+lock_version   = "0.1.0+gf0edf6d6b54a"
+publish        = "none"
+rust           = false
