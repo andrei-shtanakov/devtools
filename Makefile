@@ -32,7 +32,7 @@ help:
 	@echo "  make fleet-report— markdown-отчёт о флоте в stdout (fleet_report.py)"
 	@echo "  make today       — что изменилось с полуночи: коммиты + незакоммиченное"
 	@echo "  make install     — доклонировать недостающие репо набора по манифесту зонтика"
-	@echo "  make release-drift— набор из манифеста зонтика ↔ факт на диске"
+	@echo "  make release-drift — набор из манифеста зонтика ↔ факт на диске"
 
 status:      ; @./repos.sh status
 fetch:       ; @./repos.sh fetch

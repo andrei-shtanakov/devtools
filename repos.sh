@@ -121,7 +121,10 @@ cmd_install() {
   local manifest=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --manifest) manifest="${2:-}"; shift 2 ;;
+      --manifest)
+        manifest="${2:-}"
+        [ -n "$manifest" ] || { echo "нужен путь после --manifest"; return 2; }
+        shift 2 ;;
       *) echo "usage: ./repos.sh install --manifest <path-to-workspace-manifest.toml>"; return 2 ;;
     esac
   done
@@ -156,7 +159,7 @@ PYEOF
       printf "%b!! %-22s пустой repo_url в манифесте — заполни%b\n" "$C_RED" "$gd" "$C_RESET"
       continue
     fi
-    if [ -d "$ROOT/$gd/.git" ]; then
+    if [ -e "$ROOT/$gd/.git" ]; then    # dir ИЛИ file (.git-file у worktree) — как в автодискавери
       printf "%b== %-22s есть, пропуск (обновляй через ./repos.sh pull) ==%b\n" "$C_DIM" "$gd" "$C_RESET"
       continue
     fi
