@@ -165,12 +165,16 @@ def check_component(cid: str, meta: dict, ws: Path) -> list[dict]:
 
 
 def main() -> int:
+    # Дефолт манифеста якорим от расположения скрипта (devtools/), а не от cwd —
+    # голый вызов не должен зависеть от текущего каталога. Зонтик — сосед devtools.
+    default_manifest = (
+        Path(__file__).resolve().parent.parent
+        / "ai-orchestrators-workspace"
+        / "workspace-manifest.toml"
+    )
     ap = argparse.ArgumentParser()
     ap.add_argument("--workspace", default="..")
-    ap.add_argument(
-        "--manifest",
-        default="../ai-orchestrators-workspace/workspace-manifest.toml",
-    )
+    ap.add_argument("--manifest", default=str(default_manifest))
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--strict", action="store_true", help="warn тоже валит gate")
     args = ap.parse_args()
