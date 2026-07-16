@@ -54,13 +54,21 @@ def discover_repos(root: Path) -> list[Path]:
 def _head_exists(repo: Path) -> bool:
     # Unborn HEAD (свежий репо без коммитов) — валидное состояние «коммитов нет»,
     # а не ошибка git; git log на нём падает с exit 128.
-    return (
-        subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--verify", "-q", "HEAD"],
-            capture_output=True,
-            timeout=30,
-        ).returncode
-        == 0
+    # С -q неверифицируемый ref — это тихий exit 1; всё прочее (битый репо,
+    # права и т.п.) — реальная ошибка, которую нельзя превращать в commits=[].
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "-q", "HEAD"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1 and not result.stderr.strip():
+        return False
+    raise GitError(
+        f"git -C {repo} rev-parse --verify -q HEAD failed "
+        f"(exit {result.returncode}): {result.stderr.strip()}"
     )
 
 
