@@ -40,13 +40,13 @@ compare() {
 }
 
 echo "${B}== observability obs.py (reference: spec-runner@fa6b106) ==${Z}"
-compare "spec-runner/src/spec_runner/obs.py" "Maestro/maestro/_vendor/obs.py"        soft "Maestro/_vendor/obs.py"
+compare "spec-runner/src/spec_runner/obs.py" "maestro/maestro/_vendor/obs.py"        soft "maestro/_vendor/obs.py"
 compare "spec-runner/src/spec_runner/obs.py" "arbiter/orchestrator/_vendor/obs.py"   soft "arbiter/orchestrator/_vendor/obs.py"
 
 echo
 echo "${B}== report_benchmark schema (arbiter ↔ Maestro, byte-for-byte) ==${Z}"
 compare "arbiter/arbiter-mcp/tests/contract/report_benchmark-v1.schema.json" \
-        "Maestro/contracts/benchmark/report_benchmark-v1.schema.json" \
+        "maestro/contracts/benchmark/report_benchmark-v1.schema.json" \
         hard "report_benchmark-v1.schema.json"
 
 echo
