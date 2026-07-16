@@ -9,6 +9,7 @@
 #     ./repos.sh fetch       # git fetch --all --prune везде
 #     ./repos.sh pull        # git pull --ff-only по ТЕКУЩЕЙ ветке
 #     ./repos.sh dirty       # только репо с незакоммиченным
+#     ./repos.sh evening     # вечерний чек: грязь / фича-ветки / незапушенное
 #     ./repos.sh branches    # сводка веток
 #     ./repos.sh bootstrap   # uv sync (python) + cargo build (arbiter)
 #     ./repos.sh exec 'git log --oneline -3'
@@ -87,6 +88,45 @@ cmd_dirty() {
   [ "$any" -eq 0 ] && printf "%bвсё чисто%b\n" "$C_GRN" "$C_RESET"
 }
 
+cmd_evening() {
+  # Вечерний чек: не осталось ли незакоммиченного, фича-веток, незапушенного.
+  local any=0
+  for r in "${REPOS[@]}"; do _is_repo "$r" || continue
+    local issues=() br dirty up ahead default
+    br=$(git -C "$ROOT/$r" rev-parse --abbrev-ref HEAD 2>/dev/null)
+    dirty=$(git -C "$ROOT/$r" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    [ "$dirty" -gt 0 ] && issues+=("${C_YLW}незакоммичено: ${dirty} файл(ов)${C_RESET}")
+
+    # Дефолтная ветка: origin/HEAD, иначе эвристика main/master.
+    default=$(git -C "$ROOT/$r" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+    if [ -z "$default" ]; then
+      for cand in main master; do
+        if git -C "$ROOT/$r" show-ref --verify --quiet "refs/heads/$cand"; then default="$cand"; break; fi
+      done
+    fi
+    if [ "$br" = "HEAD" ]; then
+      issues+=("${C_RED}detached HEAD${C_RESET}")
+    elif [ -n "$default" ] && [ "$br" != "$default" ]; then
+      issues+=("${C_CYN}фича-ветка: ${br} (дефолт: ${default})${C_RESET}")
+    fi
+
+    up=$(git -C "$ROOT/$r" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
+    if [ -n "$up" ]; then
+      ahead=$(git -C "$ROOT/$r" rev-list --count "${up}..HEAD" 2>/dev/null || echo 0)
+      [ "$ahead" -gt 0 ] && issues+=("${C_YLW}незапушено: ↑${ahead} коммит(ов) относительно ${up}${C_RESET}")
+    elif [ "$br" != "HEAD" ] && git -C "$ROOT/$r" remote get-url origin >/dev/null 2>&1; then
+      issues+=("${C_YLW}нет upstream у ветки ${br} — коммиты не уходят на remote${C_RESET}")
+    fi
+
+    if [ "${#issues[@]}" -gt 0 ]; then
+      any=1
+      printf "%b== %s ==%b\n" "$C_BLD" "$r" "$C_RESET"
+      local i; for i in "${issues[@]}"; do printf "   %b\n" "$i"; done
+    fi
+  done
+  if [ "$any" -eq 0 ]; then printf "%bвсё чисто — можно закрывать день%b\n" "$C_GRN" "$C_RESET"; fi
+}
+
 cmd_branches() {
   for r in "${REPOS[@]}"; do _is_repo "$r" || continue
     printf "%-26s %s\n" "$r" "$(git -C "$ROOT/$r" rev-parse --abbrev-ref HEAD 2>/dev/null)"
@@ -121,8 +161,9 @@ case "$action" in
   fetch)     cmd_fetch ;;
   pull)      cmd_pull ;;
   dirty)     cmd_dirty ;;
+  evening)   cmd_evening ;;
   branches)  cmd_branches ;;
   bootstrap) cmd_bootstrap ;;
   exec)      cmd_exec "$@" ;;
-  *) echo "usage: ./repos.sh {status|fetch|pull|dirty|branches|bootstrap|exec '<cmd>'}"; exit 2 ;;
+  *) echo "usage: ./repos.sh {status|fetch|pull|dirty|evening|branches|bootstrap|exec '<cmd>'}"; exit 2 ;;
 esac
