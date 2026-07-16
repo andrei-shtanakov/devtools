@@ -48,9 +48,9 @@ def safe_agent_id(agent_id: str) -> str:
 
 
 def find_workspace_root(start: Path) -> Path | None:
-    """Walk up until a directory contains both arbiter/ and Maestro/."""
+    """Walk up until a directory contains both arbiter/ and maestro/."""
     for candidate in [start, *start.parents]:
-        if (candidate / "arbiter").is_dir() and (candidate / "Maestro").is_dir():
+        if (candidate / "arbiter").is_dir() and (candidate / "maestro").is_dir():
             return candidate
     return None
 
@@ -140,7 +140,7 @@ def main() -> int:
 
     root = args.root or find_workspace_root(Path(__file__).resolve())
     if root is None or not (root / "arbiter").is_dir():
-        print("✗ could not locate workspace root (needs arbiter/ + Maestro/)")
+        print("✗ could not locate workspace root (needs arbiter/ + maestro/)")
         return 1
 
     # Canon (2026-07-03, owner ruling): the SSOT lives INSIDE a distributable

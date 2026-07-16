@@ -39,9 +39,9 @@ BENCHMARK_ID_TO_TASK_TYPE = {
 
 
 def find_repo_root(start: Path) -> Path:
-    """Подняться вверх до папки, где лежат arbiter/ и Maestro/."""
+    """Подняться вверх до папки, где лежат arbiter/ и maestro/."""
     for p in [start, *start.parents]:
-        if (p / "arbiter").is_dir() and (p / "Maestro").is_dir():
+        if (p / "arbiter").is_dir() and (p / "maestro").is_dir():
             return p
     return start
 
@@ -49,11 +49,11 @@ def find_repo_root(start: Path) -> Path:
 def maestro_spawner_harnesses(repo: Path) -> set[str]:
     """Набор harness'ей, которых Maestro умеет спаунить (AgentType, кроме AUTO).
 
-    Парсит Maestro/maestro/models.py, чтобы оставаться в синхроне. Fallback —
+    Парсит maestro/maestro/models.py, чтобы оставаться в синхроне. Fallback —
     захардкоженный набор, если файл не найден/не распарсился.
     """
     fallback = {"claude_code", "codex_cli", "aider"}
-    models = repo / "Maestro" / "maestro" / "models.py"
+    models = repo / "maestro" / "maestro" / "models.py"
     try:
         text = models.read_text()
     except OSError:

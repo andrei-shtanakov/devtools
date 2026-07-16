@@ -8,12 +8,12 @@
   // ============================================================
   "folders": [
     { "name": "00 · root (cowork)", "path": "." },
-    { "name": "Maestro",            "path": "Maestro" },
+    { "name": "maestro",            "path": "maestro" },
     { "name": "arbiter",            "path": "arbiter" },
     { "name": "atp-platform",       "path": "atp-platform" },
     { "name": "spec-runner",        "path": "spec-runner" },
     { "name": "proctor",            "path": "proctor" },
-    { "name": "open-prose",         "path": "open-prose" },
+    { "name": "libretto",          "path": "libretto" },
     { "name": "atp-platform-testing-en", "path": "atp-platform-testing-en" },
     { "name": "prograph (root-tracked)", "path": "prograph" }
   ],
