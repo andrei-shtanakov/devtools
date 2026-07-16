@@ -97,11 +97,14 @@ cmd_evening() {
     dirty=$(git -C "$ROOT/$r" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
     [ "$dirty" -gt 0 ] && issues+=("${C_YLW}незакоммичено: ${dirty} файл(ов)${C_RESET}")
 
-    # Дефолтная ветка: origin/HEAD, иначе эвристика main/master.
+    # Дефолтная ветка: origin/HEAD, иначе эвристика main/master (локальный или remote-tracking ref).
     default=$(git -C "$ROOT/$r" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
     if [ -z "$default" ]; then
       for cand in main master; do
-        if git -C "$ROOT/$r" show-ref --verify --quiet "refs/heads/$cand"; then default="$cand"; break; fi
+        if git -C "$ROOT/$r" show-ref --verify --quiet "refs/heads/$cand" \
+           || git -C "$ROOT/$r" show-ref --verify --quiet "refs/remotes/origin/$cand"; then
+          default="$cand"; break
+        fi
       done
     fi
     if [ "$br" = "HEAD" ]; then
@@ -114,7 +117,7 @@ cmd_evening() {
     if [ -n "$up" ]; then
       ahead=$(git -C "$ROOT/$r" rev-list --count "${up}..HEAD" 2>/dev/null || echo 0)
       [ "$ahead" -gt 0 ] && issues+=("${C_YLW}незапушено: ↑${ahead} коммит(ов) относительно ${up}${C_RESET}")
-    elif [ "$br" != "HEAD" ] && git -C "$ROOT/$r" remote get-url origin >/dev/null 2>&1; then
+    elif [ "$br" != "HEAD" ] && [ -n "$(git -C "$ROOT/$r" remote 2>/dev/null)" ]; then
       issues+=("${C_YLW}нет upstream у ветки ${br} — коммиты не уходят на remote${C_RESET}")
     fi
 
