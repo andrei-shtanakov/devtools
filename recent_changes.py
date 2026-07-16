@@ -51,6 +51,19 @@ def discover_repos(root: Path) -> list[Path]:
     return sorted(p.parent for p in root.glob("*/.git"))
 
 
+def _head_exists(repo: Path) -> bool:
+    # Unborn HEAD (свежий репо без коммитов) — валидное состояние «коммитов нет»,
+    # а не ошибка git; git log на нём падает с exit 128.
+    return (
+        subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "-q", "HEAD"],
+            capture_output=True,
+            timeout=30,
+        ).returncode
+        == 0
+    )
+
+
 def _status_path(entry: str) -> str:
     # porcelain: "XY path" либо для rename/copy "XY orig -> new"
     path = entry[3:]
@@ -62,13 +75,16 @@ def _status_path(entry: str) -> str:
 def recent_changes(root: Path, since: str = "midnight") -> list[dict]:
     out: list[dict] = []
     for repo in discover_repos(root):
-        commits = git(
-            repo,
-            "log",
-            f"--since={since}",
-            f"--pretty=%h{FIELD_SEP}%ad{FIELD_SEP}%an{FIELD_SEP}%s",
-            "--date=iso",
-        ).splitlines()
+        if _head_exists(repo):
+            commits = git(
+                repo,
+                "log",
+                f"--since={since}",
+                f"--pretty=%h{FIELD_SEP}%ad{FIELD_SEP}%an{FIELD_SEP}%s",
+                "--date=iso",
+            ).splitlines()
+        else:
+            commits = []
         dirty = git(repo, "status", "--porcelain").splitlines()
         if commits or dirty:
             out.append(
