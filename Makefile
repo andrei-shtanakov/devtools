@@ -14,7 +14,7 @@ SHELL := /usr/bin/env bash
 MANIFEST ?= ../ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance graph-drift morning snapshot fleet-report today install
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance graph-drift morning evening snapshot fleet-report today install
 
 help:
 	@echo "Цели:"
@@ -28,6 +28,7 @@ help:
 	@echo "  make conformance — agent-id caталог ↔ ATP/arbiter/Maestro (ADR-ECO-003)"
 	@echo "  make graph-drift — граф prograph ↔ карта интеграций registry"
 	@echo "  make morning     — fetch + status (утренний ритуал)"
+	@echo "  make evening     — вечерний чек: незакоммиченное / фича-ветки / незапушенное"
 	@echo "  make snapshot    — полный JSON состояния флота (github-checker snapshot)"
 	@echo "  make fleet-report— markdown-отчёт о флоте в stdout (fleet_report.py)"
 	@echo "  make today       — что изменилось с полуночи: коммиты + незакоммиченное"
@@ -44,6 +45,7 @@ drift:       ; @./check-contract-drift.sh
 conformance: ; @python3 ./check-agent-id-conformance.py
 graph-drift: ; @python3 ./check-graph-registry-drift.py
 morning:     ; @./repos.sh fetch && echo && ./repos.sh status
+evening:     ; @./repos.sh evening
 snapshot:    ; @uv run --project ../github-checker github-checker snapshot --workspace ..
 fleet-report:; @uv run --project ../github-checker github-checker snapshot --workspace .. | python3 ./fleet_report.py
 today:       ; @python3 ./recent_changes.py
