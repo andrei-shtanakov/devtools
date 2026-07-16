@@ -9,8 +9,12 @@
 # ============================================================
 SHELL := /usr/bin/env bash
 
+# Манифест командного воркспейса (SSOT набора) — дом в зонтике, не в devtools.
+# Переопредели при другом расположении:  make release-drift MANIFEST=/path/to/workspace-manifest.toml
+MANIFEST ?= ../ai-orchestrators-workspace/workspace-manifest.toml
+
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance graph-drift morning evening snapshot fleet-report today
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance graph-drift morning evening snapshot fleet-report today install
 
 help:
 	@echo "Цели:"
@@ -28,6 +32,8 @@ help:
 	@echo "  make snapshot    — полный JSON состояния флота (github-checker snapshot)"
 	@echo "  make fleet-report— markdown-отчёт о флоте в stdout (fleet_report.py)"
 	@echo "  make today       — что изменилось с полуночи: коммиты + незакоммиченное"
+	@echo "  make install     — доклонировать недостающие репо набора по манифесту зонтика"
+	@echo "  make release-drift — набор из манифеста зонтика ↔ факт на диске"
 
 status:      ; @./repos.sh status
 fetch:       ; @./repos.sh fetch
@@ -45,4 +51,6 @@ fleet-report:; @uv run --project ../github-checker github-checker snapshot --wor
 today:       ; @python3 ./recent_changes.py
 
 .PHONY: release-drift
-release-drift: ; @python3 ./check-release-drift.py --workspace .. --manifest ./release-manifest.toml
+release-drift: ; @python3 ./check-release-drift.py --workspace .. --manifest $(MANIFEST)
+
+install: ; @./repos.sh install --manifest $(MANIFEST)

@@ -155,6 +155,63 @@ cmd_exec() {
   done
 }
 
+# Досинхрон недостающих репо набора по манифесту зонтика (день-2, а не первичный bootstrap).
+# Клонирует только отсутствующие git_dir; существующие пропускает. Один манифест с зонтиком.
+cmd_install() {
+  local manifest=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --manifest)
+        manifest="${2:-}"
+        [ -n "$manifest" ] || { echo "нужен путь после --manifest"; return 2; }
+        shift 2 ;;
+      *) echo "usage: ./repos.sh install --manifest <path-to-workspace-manifest.toml>"; return 2 ;;
+    esac
+  done
+  [ -n "$manifest" ] || { echo "нужен --manifest <path>"; return 2; }
+  [ -f "$manifest" ] || { echo "манифест не найден: $manifest"; return 2; }
+  command -v python3 >/dev/null 2>&1 || { echo "нужен python3"; return 1; }
+
+  python3 - "$manifest" <<'PYEOF' | while IFS=$'\t' read -r gd url ref; do
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+data = tomllib.loads(open(sys.argv[1], encoding="utf-8").read())
+seen = set()
+for section in ("cores", "apps", "tools"):
+    for cid, m in (data.get(section) or {}).items():
+        if m.get("member"):
+            continue                       # member делит git_dir с родителем — не клоним отдельно
+        gd = m.get("git_dir")
+        if not gd or gd in seen:
+            continue
+        seen.add(gd)
+        ref = m.get("sha") or ""
+        if not ref:
+            t = m.get("tag", "-")
+            ref = t if t not in ("-", None) else "@HEAD"
+        print("\t".join([gd, m.get("repo_url", ""), ref]))
+PYEOF
+    [ -n "$gd" ] || continue
+    if [ -z "$url" ]; then
+      printf "%b!! %-22s пустой repo_url в манифесте — заполни%b\n" "$C_RED" "$gd" "$C_RESET"
+      continue
+    fi
+    if [ -e "$ROOT/$gd/.git" ]; then    # dir ИЛИ file (.git-file у worktree) — как в автодискавери
+      printf "%b== %-22s есть, пропуск (обновляй через ./repos.sh pull) ==%b\n" "$C_DIM" "$gd" "$C_RESET"
+      continue
+    fi
+    printf "%b== clone %s <= %s ==%b\n" "$C_BLD" "$gd" "$url" "$C_RESET"
+    if git clone "$url" "$ROOT/$gd"; then
+      [ "$ref" != "@HEAD" ] && git -C "$ROOT/$gd" checkout --quiet "$ref"
+    else
+      printf "%b!! clone %s не удался%b\n" "$C_RED" "$gd" "$C_RESET"
+    fi
+  done
+}
+
 action="${1:-status}"; shift || true
 case "$action" in
   status)    cmd_status ;;
@@ -164,6 +221,7 @@ case "$action" in
   evening)   cmd_evening ;;
   branches)  cmd_branches ;;
   bootstrap) cmd_bootstrap ;;
+  install)   cmd_install "$@" ;;
   exec)      cmd_exec "$@" ;;
-  *) echo "usage: ./repos.sh {status|fetch|pull|dirty|evening|branches|bootstrap|exec '<cmd>'}"; exit 2 ;;
+  *) echo "usage: ./repos.sh {status|fetch|pull|dirty|evening|branches|bootstrap|install --manifest <path>|exec '<cmd>'}"; exit 2 ;;
 esac

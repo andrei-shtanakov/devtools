@@ -5,7 +5,7 @@
 (как devtools/discover_models.py). Запускать под тем же python, что остальные check-*.py.
 
 Шов тот же, что у check-agent-id-conformance.py / check-graph-registry-drift.py:
-    intended = release-manifest.toml (schema v0.2)   — что ДОЛЖНО быть в наборе
+    intended = workspace-manifest.toml (зонтик, schema v0.3) — что ДОЛЖНО быть в наборе
     observed = git-теги + pyproject.version на диске  — что фактически
     drift    = список findings с severity + exit-code для CI-gate
 
@@ -20,7 +20,7 @@
   * обработка ошибок git/subprocess (нет git / не repo / таймаут) → info, не краш.
 
 Использование:
-    ./check-release-drift.py --workspace .. --manifest release-manifest.toml
+    ./check-release-drift.py --workspace .. --manifest ../ai-orchestrators-workspace/workspace-manifest.toml
     ./check-release-drift.py --workspace .. --json      # для dispatcher (стабильный контракт)
     ./check-release-drift.py --workspace .. --strict     # warn тоже валит gate
 """
@@ -165,9 +165,16 @@ def check_component(cid: str, meta: dict, ws: Path) -> list[dict]:
 
 
 def main() -> int:
+    # Дефолт манифеста якорим от расположения скрипта (devtools/), а не от cwd —
+    # голый вызов не должен зависеть от текущего каталога. Зонтик — сосед devtools.
+    default_manifest = (
+        Path(__file__).resolve().parent.parent
+        / "ai-orchestrators-workspace"
+        / "workspace-manifest.toml"
+    )
     ap = argparse.ArgumentParser()
     ap.add_argument("--workspace", default="..")
-    ap.add_argument("--manifest", default="release-manifest.toml")
+    ap.add_argument("--manifest", default=str(default_manifest))
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--strict", action="store_true", help="warn тоже валит gate")
     args = ap.parse_args()
