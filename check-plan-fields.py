@@ -36,6 +36,10 @@ Checks:
      Failing on that would be this tool deciding a question that is not its
      to decide.
 
+Repos are named as a plain `git clone` would name them, read from the remote
+rather than from the directory on this disk — the workspace rule requires it,
+and `Maestro/` here is `maestro` upstream.
+
 Exit 0 — no stale blockers. Exit 1 — at least one waits on
 delivered work. That is the only host-independent failure here.
 Nothing is written; the script only reads.
@@ -90,6 +94,35 @@ def find_root(explicit: str | None) -> Path:
     return here.parent
 
 
+def canonical_name(repo_dir: Path) -> str:
+    """The repo's name as a plain `git clone` would produce it.
+
+    Not the directory name. `Maestro/` on this disk is `maestro` upstream
+    (renamed 2026-07-16), and the workspace rule is explicit that configs,
+    lists and docs must carry the canonical name — otherwise the list becomes
+    machine-dependent. That is not hypothetical: Robin's mirror list kept the
+    old names until 2026-07-26 and was silently blind to two active repos.
+
+    Read from `.git/config` rather than by lowercasing, because case is not
+    the only way a directory can disagree with its remote. Falls back to the
+    directory name when there is no readable origin (worktree, no remote).
+    """
+    config = repo_dir / ".git" / "config"
+    try:
+        text = config.read_text(encoding="utf-8")
+    except OSError:
+        return repo_dir.name
+    in_origin = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_origin = stripped == '[remote "origin"]'
+        elif in_origin and stripped.startswith("url ="):
+            url = stripped.split("=", 1)[1].strip().rstrip("/")
+            return url.rsplit("/", 1)[-1].removesuffix(".git") or repo_dir.name
+    return repo_dir.name
+
+
 def discover(root: Path) -> tuple[dict[str, Path], set[str]]:
     """Repos with a TODO.md, and the names of those without one.
 
@@ -106,11 +139,12 @@ def discover(root: Path) -> tuple[dict[str, Path], set[str]]:
     for child in sorted(root.iterdir()):
         if not child.is_dir() or not (child / ".git").exists():
             continue
+        name = canonical_name(child)
         todo = child / "TODO.md"
         if todo.is_file():
-            planned[child.name] = todo
+            planned[name] = todo
         else:
-            unplanned.add(normalize(child.name))
+            unplanned.add(normalize(name))
     return planned, unplanned
 
 
@@ -152,7 +186,10 @@ def check_blockers(
     report: Report,
 ) -> None:
     """Resolve every cross-repo blocker against the repo that owns it."""
-    by_name = {normalize(name): todo for name, todo in repos.items()}
+    # Keyed by normalized name; the value keeps the canonical spelling, so a
+    # message never echoes back the (possibly non-canonical) string the plan
+    # file happened to use.
+    by_name = {normalize(name): (name, todo) for name, todo in repos.items()}
     cache: dict[str, list[Item]] = {}
 
     for item in items:
@@ -179,19 +216,21 @@ def check_blockers(
                     f"cloned on this host; unresolvable here"
                 )
                 continue
+            canonical, todo = by_name[key]
             if key not in cache:
-                cache[key] = read_items(target, by_name[key])
+                cache[key] = read_items(canonical, todo)
             hits = [i for i in cache[key] if slug in i.text]
             if not hits:
                 report.warnings.append(
-                    f"{where} — '{slug}' not found in {target}/TODO.md; "
+                    f"{where} — '{slug}' not found in {canonical}/TODO.md; "
                     f"renamed, or never tracked there"
                 )
             elif all(not i.is_open for i in hits):
                 lines = ", ".join(f":{i.lineno}" for i in hits)
                 report.errors.append(
-                    f"{where} — blocked on '{target}#{slug}', which {target} "
-                    f"has already completed ({lines}); the wait is over"
+                    f"{where} — blocked on '{canonical}#{slug}', which "
+                    f"{canonical} has already completed ({lines}); the wait "
+                    f"is over"
                 )
 
 
@@ -232,6 +271,9 @@ def main() -> int:
     args = parser.parse_args()
 
     root = find_root(args.root)
+    if not root.is_dir():
+        print(f"no such workspace directory: {root}", file=sys.stderr)
+        return 1
     repos, unplanned = discover(root)
     if not repos:
         print(f"no repo with a TODO.md under {root}", file=sys.stderr)
