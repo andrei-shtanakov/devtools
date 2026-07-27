@@ -44,6 +44,7 @@
 | `recent_changes.py` | темпоральный сенсор: коммиты + незакоммиченное с момента X (`make today`) |
 | `check-contract-drift.sh` | дрейф вендоренных контрактов |
 | `check-agent-id-conformance.py` | инварианты ADR-ECO-003 |
+| `check-plan-fields.py` | кросс-репный граф `@blocked_by` — ловит пункт, ждущий уже отгруженного (режим отказа R-03) |
 | `.claude/skills/fleet-check` | скилл периодической проверки флота |
 | `skills/spec-bridge` | скилл: находка/кластер → tasks.md-спека PR-ом в репо-владелец |
 
