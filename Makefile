@@ -44,6 +44,7 @@ bootstrap:   ; @./repos.sh bootstrap
 drift:       ; @./check-contract-drift.sh
 conformance: ; @python3 ./check-agent-id-conformance.py
 graph-drift: ; @python3 ./check-graph-registry-drift.py
+plan-check:  ; @python3 ./check-plan-fields.py
 morning:     ; @./repos.sh fetch && echo && ./repos.sh status
 evening:     ; @./repos.sh evening
 snapshot:    ; @uv run --project ../github-checker github-checker snapshot --workspace ..

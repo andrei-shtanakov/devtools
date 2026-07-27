@@ -18,6 +18,7 @@ Workspace-тулинг экосистемы AI-оркестраторов. Жи�
 | `check-contract-drift.sh` | diff вендоренных контрактов между репо (obs.py, report_benchmark schema) |
 | `check-agent-id-conformance.py` | инварианты ADR-ECO-003: SSOT agents-catalog ↔ arbiter ↔ Maestro |
 | `check-graph-registry-drift.py` | граф prograph (derived) ↔ карта интеграций registry (authored); allowlist для файловых/runtime-связей |
+| `check-plan-fields.py` | граф `@blocked_by` между `TODO.md` всех репо + покрытие `@owner` + расхождение форм тегов (`make plan-check`) |
 | `discover_models.py` | discovery моделей провайдеров (ADR-ECO-003a): отчёт + Plane-1 TOML для PR |
 | `gen_agents_toml.py` | генерация секций agents.toml из benchmark_runs (arbiter.db) |
 | `discovery/` | offline-манифесты observed-моделей |
