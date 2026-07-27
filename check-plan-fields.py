@@ -48,6 +48,7 @@ Usage:
     python3 check-plan-fields.py            # autodetect workspace root
     python3 check-plan-fields.py --root /path/to/all_ai_orchestrators
     python3 check-plan-fields.py --strict   # warnings fail too
+    python3 check-plan-fields.py --selftest # built-in checks, no workspace
 """
 
 from __future__ import annotations
@@ -61,7 +62,17 @@ from pathlib import Path
 
 CHECKBOX = re.compile(r"^\s*[-*]\s*\[([ xX])\]\s+(\S.*)$")
 BLOCKED_BY = re.compile(r"@blocked_by:([A-Za-z0-9._-]+)#([A-Za-z0-9._/-]+)")
-OWNER_TAG = re.compile(r"@owner:(\S+)")
+# A backtick can never be part of a handle, so excluding it separates a *use*
+# of the tag from a *mention* of it. Plan files discuss these tags as much as
+# they carry them — robin-runtime's TODO documents the very feature — and
+# `\S+` swallowed the closing backtick of an inline-code `@owner:`, reporting
+# a lone "`" as somebody's owner value. See _selftest.
+#
+# This separates the shapes that actually occur, not every conceivable one: a
+# fully quoted `@owner:andrei` written as an example would still read as a use.
+# Telling those apart needs inline-code spans, which is a parser, and the
+# contract puts real tags unquoted in the tail of the item's first line.
+OWNER_TAG = re.compile(r"@owner:([^\s`]+)")
 STRICT_OWNER = re.compile(
     r"^(?:github:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
     r"|github-team:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"
@@ -262,13 +273,77 @@ def check_divergence(items: list[Item], report: Report) -> None:
         )
 
 
+def _selftest() -> int:
+    """Exercise tag parsing and the one failing check, without a workspace."""
+    import tempfile
+
+    # A mention of the tag is not a use of it. Both shapes below are real
+    # lines from robin-runtime/TODO.md, whose plan documents these very tags.
+    mention = Item(
+        "robin-runtime", 37, "Разобрать теги `@owner:` / `@blocked_by:`", True
+    )
+    use = Item("maestro", 5, "Ship it @owner:github:andrei-shtanakov", True)
+    loose = Item("arbiter", 9, "Ship it @owner:andrei", True)
+
+    report = Report()
+    check_divergence([mention, use, loose], report)
+    assert len(report.notes) == 1, report.notes  # only arbiter's loose handle
+    assert "arbiter" in report.notes[0] and "andrei" in report.notes[0]
+    assert "`" not in report.notes[0], report.notes[0]
+
+    # Coverage must not credit a mention as an owner.
+    report = Report()
+    check_coverage([mention], {"robin-runtime": Path("x")}, report)
+    assert report.notes == [
+        "robin-runtime: 0/1 open items carry @owner (first unowned at :37)"
+    ], report.notes
+
+    # The stale blocker — the only host-independent failure this tool has.
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "TODO.md"
+        target.write_text("- [x] done-thing shipped\n- [ ] pending-thing\n")
+        repos = {"maestro": target}
+
+        report = Report()
+        check_blockers(
+            [Item("arbiter", 3, "wait @blocked_by:Maestro#done-thing", True)],
+            repos, set(), report,
+        )
+        assert len(report.errors) == 1, report
+        # Canonical spelling, never the "Maestro" the citing plan file used.
+        assert "maestro#done-thing" in report.errors[0], report.errors[0]
+
+        report = Report()
+        check_blockers(
+            [Item("arbiter", 4, "wait @blocked_by:maestro#pending-thing", True)],
+            repos, set(), report,
+        )
+        assert not report.errors and not report.warnings, report
+
+        report = Report()
+        check_blockers(
+            [Item("arbiter", 5, "wait @blocked_by:nowhere#x", True)],
+            repos, set(), report,
+        )
+        assert not report.errors and len(report.warnings) == 1, report
+
+    print("selftest OK")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=None, help="workspace root")
     parser.add_argument(
         "--strict", action="store_true", help="treat warnings as failures"
     )
+    parser.add_argument(
+        "--selftest", action="store_true", help="run built-in checks and exit"
+    )
     args = parser.parse_args()
+
+    if args.selftest:
+        return _selftest()
 
     root = find_root(args.root)
     if not root.is_dir():
