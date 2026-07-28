@@ -14,7 +14,7 @@ SHELL := /usr/bin/env bash
 MANIFEST ?= ../ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance graph-drift morning evening snapshot fleet-report today install
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance graph-drift plan-check morning evening snapshot fleet-report today install
 
 help:
 	@echo "Цели:"
