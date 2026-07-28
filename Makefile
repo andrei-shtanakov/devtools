@@ -27,6 +27,7 @@ help:
 	@echo "  make drift       — diff вендоренных obs.py и report_benchmark schema"
 	@echo "  make conformance — agent-id caталог ↔ ATP/arbiter/Maestro (ADR-ECO-003)"
 	@echo "  make graph-drift — граф prograph ↔ карта интеграций registry"
+	@echo "  make plan-check  — cross-repo TODO/@blocked_by граф (uv + Python 3.12)"
 	@echo "  make morning     — fetch + status (утренний ритуал)"
 	@echo "  make evening     — вечерний чек: незакоммиченное / фича-ветки / незапушенное"
 	@echo "  make snapshot    — полный JSON состояния флота (github-checker snapshot)"
@@ -44,7 +45,7 @@ bootstrap:   ; @./repos.sh bootstrap
 drift:       ; @./check-contract-drift.sh
 conformance: ; @python3 ./check-agent-id-conformance.py
 graph-drift: ; @python3 ./check-graph-registry-drift.py
-plan-check:  ; @python3 ./check-plan-fields.py
+plan-check:  ; @uv run --frozen python ./check-plan-fields.py --root .. --manifest $(MANIFEST)
 morning:     ; @./repos.sh fetch && echo && ./repos.sh status
 evening:     ; @./repos.sh evening
 snapshot:    ; @uv run --project ../github-checker github-checker snapshot --workspace ..

@@ -18,7 +18,7 @@ Workspace-тулинг экосистемы AI-оркестраторов. Жи�
 | `check-contract-drift.sh` | diff вендоренных контрактов между репо (obs.py, report_benchmark schema) |
 | `check-agent-id-conformance.py` | инварианты ADR-ECO-003: SSOT agents-catalog ↔ arbiter ↔ Maestro |
 | `check-graph-registry-drift.py` | граф prograph (derived) ↔ карта интеграций registry (authored); allowlist для файловых/runtime-связей |
-| `check-plan-fields.py` | граф `@blocked_by` между `TODO.md` всех репо + покрытие `@owner` + расхождение форм тегов (`make plan-check`) |
+| `check-plan-fields.py` | граф `@blocked_by` между `TODO.md` всех репо + покрытие `@owner`/`@id` + расхождение форм тегов (`make plan-check`). **Тонкая обёртка над пакетом `plan-fields`** — парсинг/резолюция из пакета; **требует `uv` + Python 3.12** (см. ниже) |
 | `discover_models.py` | discovery моделей провайдеров (ADR-ECO-003a): отчёт + Plane-1 TOML для PR |
 | `gen_agents_toml.py` | генерация секций agents.toml из benchmark_runs (arbiter.db) |
 | `discovery/` | offline-манифесты observed-моделей |
@@ -34,6 +34,40 @@ make drift       # рассинхрон вендоренных контракт�
 make conformance # agent-id каталог ↔ потребители
 make graph-drift # граф prograph ↔ карта интеграций
 ```
+
+## `plan-check`: общий парсер, Python 3.12
+
+`check-plan-fields.py` больше не несёт собственный парсер `TODO.md` — единственная
+реализация контракта plan-fields живёт в пакете **`plan-fields`** (ADR-ECO-005 PF-7).
+Скрипт оставляет за собой только своё: дискавери воркспейса, severity-политику и
+формат вывода; парсинг, резолюцию ссылок и graph-диагностику берёт из пакета
+(`parse_fleet`/`check_fleet` — канонический граф по `@id`; `check_legacy_fleet` —
+переходный legacy `<repo>#<slug>` граф по ещё-не-`@id`-нутым пунктам, помечается
+`[legacy source: no @id]`).
+
+**Compat-gate (важно):** пакет требует **Python 3.12**, поэтому запинен как
+зависимость, и ЭТОТ скрипт запускается только через `uv`:
+
+```bash
+make plan-check                      # = uv run --frozen python check-plan-fields.py ...
+uv run --frozen python check-plan-fields.py --root .. \
+    --manifest ../ai-orchestrators-workspace/workspace-manifest.toml
+```
+
+Остальные скрипты devtools остаются **stdlib / Python 3.11** и env пакета не
+трогают — переехал только `plan-check`. `pyproject.toml` + `uv.lock` пинят пакет
+на **неизменяемый коммит dispatcher** (git+subdirectory, не workspace-путь), так
+что сборка воспроизводима и `uv run --frozen --offline` работает после первого
+`uv sync`. Бамп пина — отдельным PR. Если запустить скрипт интерпретатором без
+пакета — он честно скажет об этом и выйдет (код 2), а не отработает вхолостую.
+
+Изменения поведения относительно прежней версии (тот же набор из 17 warnings и
+exit-код на текущем флоте): legacy-находки помечаются `[legacy source: no @id]`
+и всегда warning (stale legacy-блокер больше не валит билд — без стабильной
+identity это не error; канонический stale по `@id` — валит); manifest теперь
+авторитет существования репо, поэтому «no TODO / not cloned» уточняются до
+`REPO-UNKNOWN` (plan defect) / `UNRESOLVABLE` / `NO-TODO`; в покрытие добавлен
+счётчик `@id` (backlog PF-2B), плюс строка `canonical: N resolved @id edge(s)`.
 
 ## Fleet-агент
 

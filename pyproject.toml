@@ -1,0 +1,26 @@
+# Minimal uv project that exists ONLY to pin the shared `plan-fields` package
+# for `check-plan-fields.py` (ADR-ECO-005 PF-7). The other devtools scripts are
+# stdlib / Python 3.11 and do NOT use this env — only `make plan-check` does,
+# through `uv run --frozen`.
+[project]
+name = "devtools-plan-check"
+version = "0.0.0"
+description = "Pinned env for check-plan-fields.py — the shared plan-fields parser"
+requires-python = ">=3.12"
+dependencies = ["plan-fields"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+# Pinned to an IMMUTABLE dispatcher commit, fetched by git — never a
+# workspace-relative path, so the pin is reproducible and does not follow a
+# sibling checkout. Bump deliberately in its own PR.
+plan-fields = { git = "https://github.com/andrei-shtanakov/dispatcher", rev = "8c614f533ab5916c9b144b799442aac163eaf1e9", subdirectory = "packages/plan-fields" }
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
