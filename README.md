@@ -14,7 +14,7 @@ Workspace-тулинг экосистемы AI-оркестраторов. Жи�
 | Инструмент | Назначение |
 |---|---|
 | `repos.sh` | polyrepo-обёртка: status / fetch / pull / dirty / branches / bootstrap / exec. Репо-список — автодискавери по `*/.git` |
-| `Makefile` | алиасы: `make morning` (fetch+status), `make drift`, `make conformance` и др. |
+| `Makefile` | алиасы: `make morning` (fetch+status+inbox), `make drift`, `make conformance` и др. |
 | `check-contract-drift.sh` | diff вендоренных контрактов между репо (obs.py, report_benchmark schema) |
 | `check-agent-id-conformance.py` | инварианты ADR-ECO-003: SSOT agents-catalog ↔ arbiter ↔ Maestro |
 | `check-graph-registry-drift.py` | граф prograph (derived) ↔ карта интеграций registry (authored); allowlist для файловых/runtime-связей |
