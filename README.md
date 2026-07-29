@@ -19,6 +19,7 @@ Workspace-тулинг экосистемы AI-оркестраторов. Жи�
 | `check-agent-id-conformance.py` | инварианты ADR-ECO-003: SSOT agents-catalog ↔ arbiter ↔ Maestro |
 | `check-graph-registry-drift.py` | граф prograph (derived) ↔ карта интеграций registry (authored); allowlist для файловых/runtime-связей |
 | `check-plan-fields.py` | граф `@blocked_by` между `TODO.md` всех репо + покрытие `@owner`/`@id` + расхождение форм тегов (`make plan-check`). **Тонкая обёртка над пакетом `plan-fields`** — парсинг/резолюция из пакета; **требует `uv` + Python 3.12** (см. ниже) |
+| `inbox.py` | входящие кросс-репные запросы: открытые issues с лейблом `inbox` + вывод принятия по `TODO.md` целевого репо (ADR-ECO-006); разбор пунктов — общий пакет `plan-fields`, поэтому `uv` + Python 3.12, как у `check-plan-fields.py`; `make inbox` |
 | `discover_models.py` | discovery моделей провайдеров (ADR-ECO-003a): отчёт + Plane-1 TOML для PR |
 | `gen_agents_toml.py` | генерация секций agents.toml из benchmark_runs (arbiter.db) |
 | `discovery/` | offline-манифесты observed-моделей |
@@ -28,11 +29,12 @@ Workspace-тулинг экосистемы AI-оркестраторов. Жи�
 
 ```bash
 cd devtools
-make morning     # fetch + сводка: ветка / ahead-behind / грязь по всем репо
+make morning     # fetch + сводка по всем репо + inbox-скан (утренний ритуал)
 make dirty       # только репо с незакоммиченным
 make drift       # рассинхрон вендоренных контрактов
 make conformance # agent-id каталог ↔ потребители
 make graph-drift # граф prograph ↔ карта интеграций
+make inbox       # кросс-репные запросы: что пришло и что ещё не принято
 ```
 
 ## `plan-check`: общий парсер, Python 3.12

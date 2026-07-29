@@ -5,7 +5,7 @@
 #           make status / fetch / pull / dirty / branches
 #           make bootstrap  (uv sync + cargo build)
 #           make drift      (проверка вендоренных контрактов)
-#           make morning    (fetch + status — утренний ритуал)
+#           make morning    (fetch + status + inbox — утренний ритуал)
 # ============================================================
 SHELL := /usr/bin/env bash
 
@@ -14,7 +14,7 @@ SHELL := /usr/bin/env bash
 MANIFEST ?= ../ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance graph-drift plan-check morning evening snapshot fleet-report today install
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance graph-drift plan-check inbox morning evening snapshot fleet-report today install
 
 help:
 	@echo "Цели:"
@@ -28,7 +28,8 @@ help:
 	@echo "  make conformance — agent-id caталог ↔ ATP/arbiter/Maestro (ADR-ECO-003)"
 	@echo "  make graph-drift — граф prograph ↔ карта интеграций registry"
 	@echo "  make plan-check  — cross-repo TODO/@blocked_by граф (uv + Python 3.12)"
-	@echo "  make morning     — fetch + status (утренний ритуал)"
+	@echo "  make inbox       — входящие кросс-репные запросы (issues с лейблом inbox; uv + Python 3.12)"
+	@echo "  make morning     — fetch + status + inbox (утренний ритуал; uv + Python 3.12)"
 	@echo "  make evening     — вечерний чек: незакоммиченное / фича-ветки / незапушенное"
 	@echo "  make snapshot    — полный JSON состояния флота (github-checker snapshot)"
 	@echo "  make fleet-report— markdown-отчёт о флоте в stdout (fleet_report.py)"
@@ -46,7 +47,8 @@ drift:       ; @./check-contract-drift.sh
 conformance: ; @python3 ./check-agent-id-conformance.py
 graph-drift: ; @python3 ./check-graph-registry-drift.py
 plan-check:  ; @uv run --frozen python ./check-plan-fields.py --root .. --manifest $(MANIFEST)
-morning:     ; @./repos.sh fetch && echo && ./repos.sh status
+inbox:       ; @uv run --frozen python ./inbox.py --root ..
+morning:     ; @./repos.sh fetch && echo && ./repos.sh status && echo && uv run --frozen python ./inbox.py --root ..
 evening:     ; @./repos.sh evening
 snapshot:    ; @uv run --project ../github-checker github-checker snapshot --workspace ..
 fleet-report:; @uv run --project ../github-checker github-checker snapshot --workspace .. | python3 ./fleet_report.py
