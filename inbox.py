@@ -201,6 +201,45 @@ def _selftest() -> int:
         )
         assert not is_accepted("benchmark-2", prose_only), "non-checkbox line counted"
 
+    # render() holds the repo-key matching and the state derivation — the
+    # riskiest logic here — and `--selftest` is the only regression net in a
+    # repo with no CI. Exercise every state, not just the happy one.
+    with tempfile.TemporaryDirectory() as tmp:
+        todo = Path(tmp) / "TODO.md"
+        todo.write_text(
+            "- [ ] Second task_type sweep benchmark-2 @owner:andrei\n",
+            encoding="utf-8",
+        )
+        repos = {"atp-platform": todo}
+
+        def issue(number: int, body: str, repo: str = "atp-platform") -> dict:
+            return {
+                "repository": {"name": repo},
+                "number": number,
+                "title": "t",
+                "body": body,
+            }
+
+        lines, pending = render([], repos)
+        assert lines == [] and pending == 0, "empty inbox must render nothing"
+
+        body = "slug: benchmark-2\nfrom: arbiter#crossover-gate\n"
+        lines, pending = render([issue(1, body)], repos)
+        assert pending == 0, "accepted issue must not count as pending"
+        assert "принят" in lines[0], "present slug must read as accepted"
+
+        lines, pending = render([issue(2, "slug: nope\nfrom: arbiter#x\n")], repos)
+        assert pending == 1, "not-accepted issue must count as pending"
+        assert "НЕ ПРИНЯТ" in lines[0], "absent slug must read as not accepted"
+
+        lines, pending = render([issue(3, "no fields at all\n")], repos)
+        assert pending == 0, "malformed issue must not count as pending"
+        assert "МАЛФОРМИРОВАН" in lines[0], "missing slug must be flagged"
+
+        lines, pending = render([issue(4, "slug: x\n", repo="not-cloned")], repos)
+        assert pending == 0, "unresolvable repo must not count as pending"
+        assert "не проверить" in lines[0], "uncloned repo must degrade visibly"
+
     print("selftest OK")
     return 0
 
