@@ -67,20 +67,27 @@ def parse_field(body: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
-def discover_repos(root: Path) -> dict[str, Path]:
-    """Map lowercased canonical repo name to its TODO.md, for clones present here.
+def discover_repos(root: Path) -> dict[str, Path | None]:
+    """Map lowercased canonical repo name to its TODO.md for every clone here.
+
+    A key is present for **every** cloned repo; the value is `None` when that
+    repo keeps no `TODO.md`. Dropping planless repos entirely would collapse two
+    different facts — "not cloned on this host" and "cloned but keeps no plan" —
+    into one, and only the first is a property of this machine. The second is a
+    property of the repo, and a load-bearing one: ADR-ECO-006 D9 puts the
+    acceptance decision in `<repo>/TODO.md`, so a repo without one has nowhere
+    for acceptance to live at all.
 
     Discovery is devtools' own concern (the wrapper keeps its `build_inputs` for
     the same reason); only *parsing* comes from the package. Names come from
     `canonical_name`, never from the directory: `maestro` upstream is `Maestro/`
     on this disk, and GitHub reports the canonical spelling.
     """
-    found: dict[str, Path] = {}
+    found: dict[str, Path | None] = {}
     for child in sorted(root.iterdir()):
         if child.is_dir() and (child / ".git").exists():
             todo = child / "TODO.md"
-            if todo.is_file():
-                found[canonical_name(child).lower()] = todo
+            found[canonical_name(child).lower()] = todo if todo.is_file() else None
     return found
 
 
@@ -206,13 +213,30 @@ def search_inbox(owner: str) -> list[dict] | None:
     return parse_search_output(done.stdout)
 
 
-def render(issues: list[dict], repos: dict[str, Path]) -> tuple[list[str], int]:
+def render(issues: list[dict], repos: dict[str, Path | None]) -> tuple[list[str], int]:
     """Format issues as lines, and count the ones still awaiting a decision.
 
     `repos` maps lowercased canonical repo name to its TODO.md, as
-    `discover_repos` returns it. GitHub reports the canonical name while the
-    directory on disk may differ, so lookup goes through that map and never
-    through `repository == dirname`.
+    `discover_repos` returns it — a key for every clone, `None` where that repo
+    keeps no plan file. GitHub reports the canonical name while the directory on
+    disk may differ, so lookup goes through that map and never through
+    `repository == dirname`.
+
+    Five states, and the two unverifiable ones are kept apart on purpose:
+
+    * `МАЛФОРМИРОВАН` — the request itself is unusable (no `slug:`).
+    * *not cloned here* — a property of **this host**; another machine may well
+      resolve it. Nothing is wrong with the repo or the request.
+    * *keeps no TODO.md* — a property of **the repo**, and a contract gap:
+      ADR-ECO-006 D9 puts the acceptance decision in `<repo>/TODO.md`, so
+      acceptance has nowhere to live there. The request cannot be accepted at
+      all until that repo adopts a plan file. Reporting this as "not cloned"
+      told the reader to check their own machine for a problem that is not on it.
+    * `НЕ ПРИНЯТ` / `принят` — the derived states, only reachable once a plan
+      file exists.
+
+    Neither unverifiable state counts as pending: the morning ritual must not
+    nag about a request nobody can act on from here.
 
     Records are assumed well-formed: `parse_search_output` has already dropped
     anything missing the indexed fields. Guarding again here would split one
@@ -225,17 +249,20 @@ def render(issues: list[dict], repos: dict[str, Path]) -> tuple[list[str], int]:
         ref = f"{repo}#{issue['number']}"
         slug = parse_field(issue.get("body") or "", "slug")
         sender = parse_field(issue.get("body") or "", "from") or "?"
-        todo = repos.get(repo.lower())
+        key = repo.lower()
+        todo = repos.get(key)
         if slug is None:
             state = "МАЛФОРМИРОВАН — нет slug:"
-        elif todo is None:
+        elif key not in repos:
             state = "не проверить — репо не склонирован здесь"
+        elif todo is None:
+            state = "НЕЛЬЗЯ ПРИНЯТЬ — репо не ведёт TODO.md"
         elif is_accepted(slug, todo):
             state = "принят"
         else:
             state = "НЕ ПРИНЯТ"
             pending += 1
-        lines.append(f"  {ref:<28} {state:<34} от {sender}  — {issue['title']}")
+        lines.append(f"  {ref:<28} {state:<38} от {sender}  — {issue['title']}")
     return lines, pending
 
 
@@ -337,6 +364,26 @@ def _selftest() -> int:
         lines, pending = render([issue(4, "slug: x\n", repo="not-cloned")], repos)
         assert pending == 0, "unresolvable repo must not count as pending"
         assert "не проверить" in lines[0], "uncloned repo must degrade visibly"
+
+        # A repo cloned here but keeping no TODO.md is a DIFFERENT state, and
+        # the difference is contractual: ADR-ECO-006 D9 puts the acceptance
+        # decision in <repo>/TODO.md, so there is nowhere for acceptance to
+        # live. Reporting it as "not cloned" sent the reader to inspect their
+        # own machine for a problem that is not on it.
+        planless = {**repos, "github-checker": None}
+        lines, pending = render(
+            [issue(5, "slug: x\n", repo="github-checker")], planless
+        )
+        assert pending == 0, "planless repo must not count as pending"
+        assert "НЕЛЬЗЯ ПРИНЯТЬ" in lines[0], "planless repo reported as acceptable"
+        assert (
+            "не склонирован" not in lines[0]
+        ), "planless repo still reported as not cloned"
+
+        # And the two must not be confusable in the other direction either.
+        lines, _ = render([issue(6, "slug: x\n", repo="absent")], planless)
+        assert "не склонирован" in lines[0], "absent repo lost its own state"
+        assert "TODO.md" not in lines[0], "absent repo reported as planless"
 
     print("selftest OK")
     return 0
