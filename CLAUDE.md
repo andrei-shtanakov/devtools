@@ -56,11 +56,12 @@ make fleet-report    # markdown-отчёт в stdout
 make morning         # человеческий ритуал: fetch + status
 ```
 
-# Входящие запросы (inbox)
+## Входящие запросы (inbox)
 
 В начале работы проверь входящие: `gh issue list --label inbox --state open`.
 Issue с лейблом `inbox` — запрос от соседнего репо, ещё **не** пункт плана.
 Принять = завести пункт в `TODO.md` с указанным `slug:`; принял под другим
-именем — поправь `slug:` в теле issue. Отказать = `gh issue close --reason
-"not planned"`. Нужна работа в соседнем репо — не редактируй его: заведи
-там issue (`slug:` + `from:` + проза). Правило: ADR-ECO-006.
+именем — поправь `slug:` в теле issue.
+Отказать = `gh issue close --reason "not planned"`.
+Нужна работа в соседнем репо — не редактируй его: заведи там issue
+(`slug:` + `from:` + проза). Правило: ADR-ECO-006.
