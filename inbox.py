@@ -28,6 +28,7 @@ Usage (via uv, so the pinned package resolves):
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import re
 import subprocess
@@ -50,6 +51,10 @@ except ImportError:  # pragma: no cover - exercised by humans, not the suite
 
 DEFAULT_OWNER = "andrei-shtanakov"
 LABEL = "inbox"
+# GitHub's search API returns at most 1000 results for any query; `gh` paginates
+# up to `--limit`, so this is the ceiling of what can be asked for, not a page
+# size. Reaching it means the answer may be incomplete — which we say out loud.
+SEARCH_LIMIT = 1000
 
 # A field is a line of its own; a mention inside prose is not a field. Without
 # the line anchor, "see slug: x in the docs" would be read as a declaration.
@@ -79,6 +84,21 @@ def discover_repos(root: Path) -> dict[str, Path]:
     return found
 
 
+@functools.lru_cache(maxsize=None)
+def _item_texts(todo: Path) -> tuple[str, ...]:
+    """Raw text of every checkbox item in `todo`, read and scraped once per run.
+
+    Cached because `render` asks about the same repo once per issue: three
+    requests to one repo would otherwise re-read and re-scrape the same file
+    three times. This is a short-lived CLI, so a cache that never invalidates
+    is correct here — the file cannot change under us mid-run.
+    """
+    if not todo.is_file():
+        return ()
+    text = todo.read_text(encoding="utf-8", errors="ignore")
+    return tuple(item.raw_text for item in scrape_items(text))
+
+
 def is_accepted(slug: str, todo: Path) -> bool:
     """True when `slug` appears on a checkbox item of `todo`.
 
@@ -91,10 +111,64 @@ def is_accepted(slug: str, todo: Path) -> bool:
     Tightening it is the package's call under ADR-ECO-005 D9 — a private
     stricter rule here would be exactly the divergence that ADR removes.
     """
-    if not todo.is_file():
+    return any(slug in raw for raw in _item_texts(todo))
+
+
+def _well_formed(issue: object) -> bool:
+    """True when a record carries every field `render` indexes without a guard.
+
+    `body` is deliberately not required: a request with no body is malformed as
+    a *request* (no `slug:`), which `render` already reports as
+    `МАЛФОРМИРОВАН`. That is a different failure from a record this tool cannot
+    even print, and collapsing the two would hide real requests.
+    """
+    if not isinstance(issue, dict):
         return False
-    text = todo.read_text(encoding="utf-8", errors="ignore")
-    return any(slug in item.raw_text for item in scrape_items(text))
+    repo = issue.get("repository")
+    return (
+        isinstance(issue.get("number"), int)
+        and isinstance(issue.get("title"), str)
+        and isinstance(repo, dict)
+        and isinstance(repo.get("name"), str)
+    )
+
+
+def parse_search_output(stdout: str) -> list[dict] | None:
+    """Validate gh's JSON into records `render` can trust, or None if unusable.
+
+    Three distinct failure shapes, each reported rather than crashed on:
+    unparseable JSON, a top-level value that is not a list, and records missing
+    the fields `render` indexes. A malformed record is dropped **loudly** —
+    dropping it silently would understate the inbox, and letting it through
+    would raise `KeyError` inside `make morning`, which must never fail.
+    """
+    try:
+        data = json.loads(stdout or "[]")
+    except json.JSONDecodeError:
+        print("inbox: gh returned unparseable JSON; skipping", file=sys.stderr)
+        return None
+    if not isinstance(data, list):
+        print(
+            f"inbox: gh returned {type(data).__name__}, expected a list; skipping",
+            file=sys.stderr,
+        )
+        return None
+    good = [issue for issue in data if _well_formed(issue)]
+    dropped = len(data) - len(good)
+    if dropped:
+        print(
+            f"inbox: dropped {dropped} malformed record(s) from gh output",
+            file=sys.stderr,
+        )
+    # Say so rather than quietly showing a truncated fleet: a capped list that
+    # looks complete is worse than a smaller list that admits it is capped.
+    if len(data) >= SEARCH_LIMIT:
+        print(
+            f"inbox: hit GitHub's {SEARCH_LIMIT}-result search ceiling; "
+            "the list may be truncated",
+            file=sys.stderr,
+        )
+    return good
 
 
 def search_inbox(owner: str) -> list[dict] | None:
@@ -104,13 +178,17 @@ def search_inbox(owner: str) -> list[dict] | None:
     it there is no `slug:` and acceptance cannot be derived, which would reduce
     the morning ritual to a list of requests with no indication which still need
     a decision.
+
+    `gh` paginates internally up to `--limit`, so asking for the API's own
+    ceiling costs nothing when the fleet has three requests and stops the tool
+    from inventing a lower cap of its own.
     """
     cmd = [
         "gh", "search", "issues",
         "--owner", owner,
         "--label", LABEL,
         "--state", "open",
-        "--limit", "100",
+        "--limit", str(SEARCH_LIMIT),
         "--json", "repository,number,title,body",
     ]
     try:
@@ -125,19 +203,7 @@ def search_inbox(owner: str) -> list[dict] | None:
             file=sys.stderr,
         )
         return None
-    try:
-        issues = json.loads(done.stdout or "[]")
-    except json.JSONDecodeError:
-        print("inbox: gh returned unparseable JSON; skipping", file=sys.stderr)
-        return None
-    # Say so rather than quietly showing a truncated fleet: a capped list that
-    # looks complete is worse than a smaller list that admits it is capped.
-    if len(issues) >= 100:
-        print(
-            "inbox: hit the 100-issue search cap; the list is truncated",
-            file=sys.stderr,
-        )
-    return issues
+    return parse_search_output(done.stdout)
 
 
 def render(issues: list[dict], repos: dict[str, Path]) -> tuple[list[str], int]:
@@ -147,6 +213,10 @@ def render(issues: list[dict], repos: dict[str, Path]) -> tuple[list[str], int]:
     `discover_repos` returns it. GitHub reports the canonical name while the
     directory on disk may differ, so lookup goes through that map and never
     through `repository == dirname`.
+
+    Records are assumed well-formed: `parse_search_output` has already dropped
+    anything missing the indexed fields. Guarding again here would split one
+    contract across two places and make it unclear which owns it.
     """
     lines: list[str] = []
     pending = 0
@@ -171,7 +241,34 @@ def render(issues: list[dict], repos: dict[str, Path]) -> tuple[list[str], int]:
 
 def _selftest() -> int:
     """Exercise body parsing and acceptance derivation, without GitHub."""
+    import contextlib
+    import io
     import tempfile
+
+    # `parse_search_output` is the boundary where untrusted gh output becomes
+    # records the rest of the script indexes without guards. Every failure
+    # shape must yield a reason and a usable value, never an exception —
+    # `make morning` must not break on a bad response.
+    ok = '[{"repository":{"name":"r"},"number":1,"title":"t","body":"slug: s"}]'
+    assert len(parse_search_output(ok) or []) == 1, "valid record rejected"
+    assert parse_search_output("") == [], "empty stdout must be an empty list"
+
+    noise = io.StringIO()
+    with contextlib.redirect_stderr(noise):
+        assert parse_search_output("not json at all") is None, "bad JSON not caught"
+        assert parse_search_output('{"a": 1}') is None, "non-list top level accepted"
+        # Missing `number`, and a non-dict — both unprintable, both dropped.
+        partial = '[{"repository":{"name":"r"},"title":"t"}, "junk", ' + ok[1:-1] + "]"
+        kept = parse_search_output(partial)
+        assert kept is not None and len(kept) == 1, "malformed records not dropped"
+    assert "unparseable" in noise.getvalue(), "bad JSON dropped silently"
+    assert "expected a list" in noise.getvalue(), "wrong top level dropped silently"
+    assert "malformed" in noise.getvalue(), "malformed records dropped silently"
+
+    # A body-less record is malformed as a *request*, not as a record: it must
+    # survive parsing so render can report it, rather than vanish.
+    no_body = '[{"repository":{"name":"r"},"number":2,"title":"t"}]'
+    assert len(parse_search_output(no_body) or []) == 1, "body-less record dropped"
 
     body = "slug: benchmark-2\nfrom: arbiter#crossover-gate\n\nProse here.\n"
     assert parse_field(body, "slug") == "benchmark-2", "slug not parsed"
