@@ -46,6 +46,7 @@ from pathlib import Path
 
 try:
     from plan_fields import (
+        ManifestIndex,
         RepoInput,
         check_fleet,
         check_legacy_fleet,
@@ -101,23 +102,31 @@ def default_manifest(root: Path) -> Path:
 
 
 def build_inputs(
-    root: Path, manifest: set[str]
+    root: Path, index: ManifestIndex
 ) -> tuple[list[RepoInput], dict[str, Path]]:
     """Freeze one RepoInput per manifest repo from disk — devtools' discovery.
 
-    Discovery/UX stays here; parsing does not. A manifest repo with a checkout is
-    ``available`` with its TODO text (or ``todo_text=None`` when it keeps none);
-    a manifest repo with no checkout here is ``available=False``. Repos present on
-    disk but absent from the manifest are still scanned (as sources), so their own
-    plan claims are checked, but the manifest stays the authority on existence.
+    Discovery/UX stays here; parsing and *identity* do not. Locating the
+    checkouts is ``checkout_map``'s, so this script and the package agree on what
+    a repo is called — they did not before, and the disagreement was invisible
+    because it only showed on the one repo whose ``git_dir`` differs from its key.
+
+    Two checkouts resolving to one name are the package's call too, and its rule
+    is finer than refusing on sight: a bare second clone beside a real checkout
+    has no wrong answer to prevent and must not abort the command, while two
+    plan-bearing checkouts raise, because there the loser's TODO.md would vanish
+    from the answer and which one loses would depend on directory order.
+
+    A manifest repo with a checkout is ``available`` with its TODO text (or
+    ``todo_text=None`` when it keeps none); a manifest repo with no checkout here
+    is ``available=False``. Repos present on disk but absent from the manifest are
+    still scanned (as sources), so their own plan claims are checked, but the
+    manifest stays the authority on existence.
     """
-    on_disk: dict[str, Path] = {}
-    for child in sorted(root.iterdir()):
-        if child.is_dir() and (child / ".git").exists():
-            on_disk[_pf_fleet.canonical_name(child).lower()] = child
+    on_disk = _pf_fleet.checkout_map(root, index)
     inputs: list[RepoInput] = []
     planned: dict[str, Path] = {}
-    for repo in sorted(manifest | set(on_disk)):
+    for repo in sorted(set(index.canonical_keys) | set(on_disk)):
         d = on_disk.get(repo)
         if d is None:
             inputs.append(RepoInput(repo, available=False))
@@ -130,9 +139,11 @@ def build_inputs(
     return inputs, planned
 
 
-def resolve_graph(inputs: list[RepoInput], manifest: set[str], report: Report) -> None:
+def resolve_graph(
+    inputs: list[RepoInput], index: ManifestIndex, report: Report
+) -> None:
     """Project the package's canonical + legacy diagnostics into the report."""
-    snapshot = parse_fleet(inputs, manifest)
+    snapshot = parse_fleet(inputs, index)
     canonical = list(snapshot["diagnostics"]) + check_fleet(snapshot)
     edges = snapshot["edges"]
     if edges:
@@ -149,7 +160,7 @@ def resolve_graph(inputs: list[RepoInput], manifest: set[str], report: Report) -
     exclude = {
         (r["provenance"]["repo"], r["raw_ref"]) for r in snapshot["references"]
     }
-    for d in check_legacy_fleet(inputs, manifest, exclude=exclude):
+    for d in check_legacy_fleet(inputs, index, exclude=exclude):
         # transitional: always a warning, and marked as identity-less so a reader
         # never mistakes it for a stable-identity finding.
         report.warnings.append(f"{d.message}  [legacy source: no @id]")
@@ -208,7 +219,7 @@ def _selftest() -> int:
         "- [ ] x @owner:o @blocked_by:todo://maestro/done @id:x\n"
     )
     proctor_legacy_dangling = "- [ ] y @owner:o @blocked_by:maestro#gone\n"
-    manifest = {"maestro", "proctor"}
+    index = ManifestIndex(frozenset({"maestro", "proctor"}), {})
     inputs = [
         RepoInput("maestro", maestro),
         RepoInput(
@@ -216,7 +227,7 @@ def _selftest() -> int:
         ),
     ]
     report = Report()
-    resolve_graph(inputs, manifest, report)
+    resolve_graph(inputs, index, report)
     assert any("PF-BLOCKER-STALE" in e for e in report.errors), report.errors
     assert any("[legacy source: no @id]" in w for w in report.warnings), report.warnings
     assert not any("[legacy source: no @id]" in e for e in report.errors), report.errors
@@ -256,24 +267,39 @@ def main() -> int:
     manifest_path = Path(args.manifest) if args.manifest else default_manifest(root)
     report = Report()
     if manifest_path.is_file():
-        manifest = _pf_fleet.manifest_repos(manifest_path)
+        try:
+            index = _pf_fleet.manifest_index(manifest_path)
+        except _pf_fleet.AmbiguousIdentityError as exc:
+            # A manifest that names one checkout twice, or one that cannot be
+            # told apart on disk, has no correct answer to give. Say which,
+            # rather than dropping a traceback on a `make plan-check`.
+            print(f"cannot resolve repo identity: {exc}", file=sys.stderr)
+            return 1
     else:
         # No manifest here: fall back to disk presence as the repo set, and say
         # so — REPO-UNKNOWN cannot be told from a real clone without the SSOT.
-        manifest = set()
+        # With no manifest there are no locator aliases either, so identity
+        # degrades to the origin-derived name `resolve_checkout` falls back to.
+        index = ManifestIndex(frozenset(), {})
         report.notes.append(
             f"no manifest at {manifest_path}; using disk presence as the repo set "
             f"(REPO-UNKNOWN outcomes unavailable)"
         )
 
-    inputs, planned = build_inputs(root, manifest)
-    if not manifest:
-        manifest = {i.repo for i in inputs if i.available}
+    try:
+        inputs, planned = build_inputs(root, index)
+    except _pf_fleet.AmbiguousIdentityError as exc:
+        print(f"cannot resolve repo identity: {exc}", file=sys.stderr)
+        return 1
+    if not index.canonical_keys:
+        index = ManifestIndex(
+            frozenset(i.repo for i in inputs if i.available), {}
+        )
     if not planned:
         print(f"no repo with a TODO.md under {root}", file=sys.stderr)
         return 1
 
-    resolve_graph(inputs, manifest, report)
+    resolve_graph(inputs, index, report)
     check_coverage(inputs, report)
     check_divergence(inputs, report)
 

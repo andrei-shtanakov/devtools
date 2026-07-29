@@ -8,7 +8,7 @@ once, and multiple blockers on one item must all survive.
 
 from __future__ import annotations
 
-from plan_fields import RepoInput, check_legacy_fleet, parse_fleet
+from plan_fields import ManifestIndex, RepoInput, check_legacy_fleet, parse_fleet
 from tests.legacy_oracle import flagged as oracle_flagged
 
 # --- a frozen fleet: one text per repo (None = cloned, no TODO) ---------------
@@ -28,7 +28,12 @@ PROCTOR = (
     "- [ ] leg6 @owner:o @blocked_by:absentrepo#z\n"  # manifest, no checkout
 )
 FLEET = {"maestro": MAESTRO, "proctor": PROCTOR, "emptyrepo": None}
-MANIFEST = {"maestro", "proctor", "emptyrepo", "absentrepo"}
+# The fleet API takes a ManifestIndex, not a bare name set: identity is the
+# manifest's to declare. No entry here declares a `git_dir` alias, so the index
+# is exactly the old set of keys and every outcome below is unchanged.
+MANIFEST = ManifestIndex(
+    frozenset({"maestro", "proctor", "emptyrepo", "absentrepo"}), {}
+)
 
 INPUTS = [
     RepoInput("maestro", MAESTRO),
