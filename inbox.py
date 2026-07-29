@@ -13,7 +13,8 @@ inbox issues, never resolve acceptance.
 
 Exit code is 0 whenever `gh` is missing, unauthenticated, or offline: this runs
 inside `make morning`, and a daily ritual that breaks offline stops being run.
-Exit 1 is reserved for a real inconsistency (see `main`).
+Exit 2 is reserved for a missing `plan-fields` package (see the import guard
+below); every other path, including all `gh` failures, exits 0.
 
 Runtime: the shared `plan-fields` package needs Python 3.12, so this script runs
 under `uv` like `check-plan-fields.py`. The other devtools scripts stay stdlib.

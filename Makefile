@@ -5,7 +5,7 @@
 #           make status / fetch / pull / dirty / branches
 #           make bootstrap  (uv sync + cargo build)
 #           make drift      (проверка вендоренных контрактов)
-#           make morning    (fetch + status — утренний ритуал)
+#           make morning    (fetch + status + inbox — утренний ритуал)
 # ============================================================
 SHELL := /usr/bin/env bash
 
@@ -29,7 +29,7 @@ help:
 	@echo "  make graph-drift — граф prograph ↔ карта интеграций registry"
 	@echo "  make plan-check  — cross-repo TODO/@blocked_by граф (uv + Python 3.12)"
 	@echo "  make inbox       — входящие кросс-репные запросы (issues с лейблом inbox; uv + Python 3.12)"
-	@echo "  make morning     — fetch + status (утренний ритуал)"
+	@echo "  make morning     — fetch + status + inbox (утренний ритуал; uv + Python 3.12)"
 	@echo "  make evening     — вечерний чек: незакоммиченное / фича-ветки / незапушенное"
 	@echo "  make snapshot    — полный JSON состояния флота (github-checker snapshot)"
 	@echo "  make fleet-report— markdown-отчёт о флоте в stdout (fleet_report.py)"

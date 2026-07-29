@@ -29,7 +29,7 @@ Workspace-тулинг экосистемы AI-оркестраторов. Жи�
 
 ```bash
 cd devtools
-make morning     # fetch + сводка: ветка / ahead-behind / грязь по всем репо
+make morning     # fetch + сводка по всем репо + inbox-скан (утренний ритуал)
 make dirty       # только репо с незакоммиченным
 make drift       # рассинхрон вендоренных контрактов
 make conformance # agent-id каталог ↔ потребители
