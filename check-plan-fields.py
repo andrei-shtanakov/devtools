@@ -106,11 +106,16 @@ def build_inputs(
 ) -> tuple[list[RepoInput], dict[str, Path]]:
     """Freeze one RepoInput per manifest repo from disk — devtools' discovery.
 
-    Discovery/UX stays here; parsing and *identity* do not. Checkouts resolve
-    through the package's ``resolve_checkout``, so this script and the package
-    agree on what a repo is called — they did not before, and the disagreement
-    was invisible because it only showed on the one repo whose ``git_dir``
-    differs from its key.
+    Discovery/UX stays here; parsing and *identity* do not. Locating the
+    checkouts is ``checkout_map``'s, so this script and the package agree on what
+    a repo is called — they did not before, and the disagreement was invisible
+    because it only showed on the one repo whose ``git_dir`` differs from its key.
+
+    Two checkouts resolving to one name are the package's call too, and its rule
+    is finer than refusing on sight: a bare second clone beside a real checkout
+    has no wrong answer to prevent and must not abort the command, while two
+    plan-bearing checkouts raise, because there the loser's TODO.md would vanish
+    from the answer and which one loses would depend on directory order.
 
     A manifest repo with a checkout is ``available`` with its TODO text (or
     ``todo_text=None`` when it keeps none); a manifest repo with no checkout here
@@ -118,10 +123,7 @@ def build_inputs(
     still scanned (as sources), so their own plan claims are checked, but the
     manifest stays the authority on existence.
     """
-    on_disk: dict[str, Path] = {}
-    for child in sorted(root.iterdir()):
-        if child.is_dir() and (child / ".git").exists():
-            on_disk[_pf_fleet.resolve_checkout(child, index)] = child
+    on_disk = _pf_fleet.checkout_map(root, index)
     inputs: list[RepoInput] = []
     planned: dict[str, Path] = {}
     for repo in sorted(set(index.canonical_keys) | set(on_disk)):
@@ -265,7 +267,14 @@ def main() -> int:
     manifest_path = Path(args.manifest) if args.manifest else default_manifest(root)
     report = Report()
     if manifest_path.is_file():
-        index = _pf_fleet.manifest_index(manifest_path)
+        try:
+            index = _pf_fleet.manifest_index(manifest_path)
+        except _pf_fleet.AmbiguousIdentityError as exc:
+            # A manifest that names one checkout twice, or one that cannot be
+            # told apart on disk, has no correct answer to give. Say which,
+            # rather than dropping a traceback on a `make plan-check`.
+            print(f"cannot resolve repo identity: {exc}", file=sys.stderr)
+            return 1
     else:
         # No manifest here: fall back to disk presence as the repo set, and say
         # so — REPO-UNKNOWN cannot be told from a real clone without the SSOT.
@@ -277,7 +286,11 @@ def main() -> int:
             f"(REPO-UNKNOWN outcomes unavailable)"
         )
 
-    inputs, planned = build_inputs(root, index)
+    try:
+        inputs, planned = build_inputs(root, index)
+    except _pf_fleet.AmbiguousIdentityError as exc:
+        print(f"cannot resolve repo identity: {exc}", file=sys.stderr)
+        return 1
     if not index.canonical_keys:
         index = ManifestIndex(
             frozenset(i.repo for i in inputs if i.available), {}
