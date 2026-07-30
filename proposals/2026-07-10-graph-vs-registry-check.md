@@ -1,7 +1,10 @@
 # Proposal: graph-vs-registry drift check (fleet-агент)
 
 **Дата:** 2026-07-10
-**Статус:** предложение
+**Статус:** реализовано — `check-graph-registry-drift.py`, цель `make graph-drift`,
+аллоулист `graph-registry-allowlist.toml` (коммит `354b448`). Эскиз ниже реализован
+целиком и с добавкой: сверх diff-а в обе стороны чекер репортит третий класс находок —
+устаревшее заявление реестра «not yet connected» о проекте, у которого рёбра есть.
 **Семья:** та же, что `check-contract-drift.sh` / `check-agent-id-conformance.py` —
 сверка derived-артефакта с authored-источником, уровнем выше.
 
