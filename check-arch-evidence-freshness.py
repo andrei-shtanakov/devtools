@@ -250,7 +250,7 @@ def read_status(path: Path, now: datetime) -> int:
         schema = status["schema"]
         next_expected = parse_iso(status["next_expected_at"])
         verdict = status["status"]
-    except (OSError, ValueError, KeyError, TypeError) as err:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as err:
         print(f"unknown: статус-файл отсутствует/не разбирается ({err}) — {path}")
         return 2
     if schema != STATUS_SCHEMA:

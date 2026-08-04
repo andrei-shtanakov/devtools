@@ -236,3 +236,37 @@ def test_reader_nonclean_when_fresh_with_drift(sensor, tmp_path):
     upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "m")
     _, status_path = _run(sensor, ws, tmp_path)
     assert sensor.read_status(status_path, NOW + timedelta(hours=1)) == 1
+
+
+# Fix Round 1: AttributeError handling
+
+
+def test_reader_unknown_when_status_file_next_expected_at_not_string(
+    sensor, tmp_path, capsys
+):
+    """next_expected_at as number triggers AttributeError in parse_iso.replace()."""
+    status_path = tmp_path / "status.json"
+    status_path.write_text(json.dumps({
+        "schema": sensor.STATUS_SCHEMA,
+        "next_expected_at": 12345,  # not a string
+        "status": "clean",
+        "completed_at": "2026-08-04T12:00:00Z",
+        "host": "test",
+        "classes": [],
+    }))
+    assert sensor.read_status(status_path, NOW) == 2
+    out = capsys.readouterr().out
+    assert "unknown" in out and "не разбирается" in out
+
+
+def test_reader_unknown_when_status_file_foreign_schema(sensor, tmp_path, capsys):
+    """Foreign schema is caught before next_expected_at parsing."""
+    status_path = tmp_path / "status.json"
+    status_path.write_text(json.dumps({
+        "schema": "other/v1",
+        "next_expected_at": "2026-08-05T00:00:00Z",
+        "status": "clean",
+    }))
+    assert sensor.read_status(status_path, NOW) == 2
+    out = capsys.readouterr().out
+    assert "unknown" in out and "чужая схема" in out
