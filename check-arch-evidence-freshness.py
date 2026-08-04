@@ -304,13 +304,15 @@ def read_status(path: Path, now: datetime) -> int:
     try:
         status = json.loads(path.read_text())
         schema = status["schema"]
+        # fail-fast по схеме ДО разбора остальных полей: чужой файл с кривым
+        # next_expected_at должен читаться как «чужая схема», не «не разбирается»
+        if schema != STATUS_SCHEMA:
+            print(f"unknown: чужая схема статус-файла {schema!r} — {path}")
+            return 2
         next_expected = parse_iso(status["next_expected_at"])
         verdict = status["status"]
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as err:
         print(f"unknown: статус-файл отсутствует/не разбирается ({err}) — {path}")
-        return 2
-    if schema != STATUS_SCHEMA:
-        print(f"unknown: чужая схема статус-файла {schema!r} — {path}")
         return 2
     if now > next_expected:
         print(f"unknown: статус просрочен (next_expected_at={iso(next_expected)}, "
