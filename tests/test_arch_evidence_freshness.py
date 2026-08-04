@@ -1,0 +1,354 @@
+# tests/test_arch_evidence_freshness.py
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+
+from .arch_freshness_fixtures import (
+    EVIDENCE_DIR, git, make_workspace, upstream_change,
+)
+
+NOW = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
+
+
+def test_fixture_builds_polyrepo_workspace(tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    assert (ws.prograph / "contracts/intended-graph/v1/schema.json").is_file()
+    assert (ws.steward / "contracts/prograph-intended-graph/v1/PIN").is_file()
+    report = json.loads(
+        (ws.steward / EVIDENCE_DIR / "conformance-report.json").read_text()
+    )
+    assert report["snapshot"]["indexed_at"] == "2026-08-04T11:00:00Z"
+    upstream_change(
+        ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "mutate"
+    )
+    # canon получил новый коммит, локальный клон — ещё нет
+    assert git(ws.seed, "rev-parse", "HEAD") != git(ws.prograph, "rev-parse", "HEAD")
+
+
+def test_parse_pin_reads_key_value_lines(sensor):
+    pin = sensor.parse_pin(
+        "source: prograph@8deb730 contracts/intended-graph/v1/schema.json\n"
+        "sha256: abc\nvendored: 2026-08-03\npurpose: x\n"
+    )
+    assert pin["source"].startswith("prograph@8deb730")
+    assert pin["sha256"] == "abc"
+
+
+def test_parse_iso_handles_zulu(sensor):
+    dt = sensor.parse_iso("2026-08-04T12:00:00Z")
+    assert dt.tzinfo is not None
+    assert sensor.iso(dt) == "2026-08-04T12:00:00Z"
+
+
+def test_resolve_upstream_reports_moving_default_branch(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "move")
+    up, finding = sensor.resolve_upstream(ws.prograph)
+    assert finding is None
+    # видит именно canon-HEAD, а не отставший локальный чекаут
+    assert up["head_sha"] == git(ws.seed, "rev-parse", "HEAD")
+    assert up["default_branch"] == "master"
+    assert sensor.upstream_bytes(
+        ws.prograph, up["head_sha"], "contracts/intended-graph/v1/schema.json"
+    ) == b"{}\n"
+    assert sensor.upstream_ls(
+        ws.prograph, up["head_sha"], "contracts/intended-graph/v1"
+    ) == ["schema.json"]
+
+
+def test_resolve_upstream_unavailable_when_remote_gone(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    import shutil
+    shutil.rmtree(ws.canon)
+    up, finding = sensor.resolve_upstream(ws.prograph)
+    assert up is None
+    assert finding.cls == "unavailable"
+    assert "prograph" in finding.check
+
+
+def _resolved(sensor, ws):
+    up, finding = sensor.resolve_upstream(ws.prograph)
+    assert finding is None
+    return up
+
+
+def test_vendored_clean_when_copies_match_upstream(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    findings, pins = sensor.check_vendored(ws.root, _resolved(sensor, ws))
+    assert findings == []
+    assert set(pins) == {"intended-graph", "conformance-report"}
+    assert pins["intended-graph"]["source"].startswith("prograph@")
+
+
+def test_vendored_drift_when_upstream_schema_changed(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(
+        ws, "contracts/intended-graph/v1/schema.json", b'{"v": 2}\n', "evolve"
+    )
+    findings, _ = sensor.check_vendored(ws.root, _resolved(sensor, ws))
+    assert [f.cls for f in findings] == ["drift"]
+    assert findings[0].check == "schema-drift:intended-graph"
+
+
+def test_vendored_drift_when_upstream_adds_file_to_surface(sensor, tmp_path):
+    # added-under-excluded-name: файл сверх нашей копии не выпадает молча
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(
+        ws, "contracts/conformance-report/v1/examples.json", b"[]\n", "add file"
+    )
+    findings, _ = sensor.check_vendored(ws.root, _resolved(sensor, ws))
+    assert [f.cls for f in findings] == ["drift"]
+    assert findings[0].check == "surface:conformance-report"
+    assert "examples.json" in findings[0].detail
+
+
+def test_evidence_fresh_is_clean(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW, report_age_hours=1)
+    assert sensor.check_evidence(ws.root, NOW, 30) == []
+
+
+def test_evidence_stale_by_age(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW, report_age_hours=31 * 24)
+    findings = sensor.check_evidence(ws.root, NOW, 30)
+    assert [f.cls for f in findings] == ["stale"]
+    assert findings[0].check == "evidence-age:conformance-report"
+
+
+def test_evidence_stale_when_manifest_newer_than_report(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW, report_age_hours=1)
+    manifest = ws.steward / EVIDENCE_DIR / "intended-graph.yaml"
+    manifest.write_text("components: [{id: new}]\n")
+    git(ws.steward, "add", "-A")
+    git(ws.steward, "commit", "-m", "manifest evolves")
+    findings = sensor.check_evidence(ws.root, NOW, 30)
+    assert [f.cls for f in findings] == ["stale"]
+    assert findings[0].check == "manifest-newer:intended-graph.yaml"
+
+
+def test_evidence_missing_report_is_stale(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    (ws.steward / EVIDENCE_DIR / "conformance-report.json").unlink()
+    findings = sensor.check_evidence(ws.root, NOW, 30)
+    assert [f.cls for f in findings] == ["stale"]
+    assert findings[0].check == "evidence-missing:conformance-report"
+
+
+def test_evidence_stale_when_manifest_dirty(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW, report_age_hours=1)
+    manifest = ws.steward / EVIDENCE_DIR / "intended-graph.yaml"
+    manifest.write_text("components: [{id: uncommitted}]\n")
+    findings = sensor.check_evidence(ws.root, NOW, 30)
+    assert [f.cls for f in findings] == ["stale"]
+    assert findings[0].check == "manifest-newer:intended-graph.yaml"
+    assert "не закоммичен" in findings[0].detail
+
+
+# Task 6: Full sensor run — status file, exit codes, crash path
+
+
+def _run(sensor, ws, tmp_path, *extra):
+    status = tmp_path / "status.json"
+    code = sensor.main([
+        "--workspace", str(ws.root), "--status-file", str(status),
+        "--now", "2026-08-04T12:00:00Z", *extra,
+    ])
+    return code, status
+
+
+def test_clean_run_writes_full_status_and_exits_0(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    code, status_path = _run(sensor, ws, tmp_path)
+    assert code == 0
+    status = json.loads(status_path.read_text())
+    assert status["schema"] == "arch-evidence-freshness-status/v1"
+    assert status["status"] == "clean" and status["findings"] == []
+    assert status["classes"] == []
+    assert status["completed_at"] == "2026-08-04T12:00:00Z"
+    assert status["next_expected_at"] == "2026-08-05T14:00:00Z"  # +26h
+    for key in ("host", "sensor_version", "started_at", "resolved", "escalations"):
+        assert key in status
+    assert status["resolved"]["upstream"]["default_branch"] == "master"
+    assert "intended-graph" in status["resolved"]["pins"]
+
+
+def test_drift_run_exits_1_with_drift_status(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "m")
+    code, status_path = _run(sensor, ws, tmp_path)
+    assert code == 1
+    status = json.loads(status_path.read_text())
+    assert status["status"] == "drift" and status["classes"] == ["drift"]
+
+
+def test_unavailable_never_reads_as_clean(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    import shutil
+    shutil.rmtree(ws.canon)
+    code, status_path = _run(sensor, ws, tmp_path)
+    assert code == 1
+    assert json.loads(status_path.read_text())["status"] == "unavailable"
+
+
+def test_crash_exits_4_and_leaves_status_untouched(sensor, tmp_path, monkeypatch):
+    ws = make_workspace(tmp_path, now=NOW)
+    status = tmp_path / "status.json"
+    status.write_text('{"prior": true}')
+    monkeypatch.setattr(
+        sensor, "resolve_upstream",
+        lambda *_: (_ for _ in ()).throw(RuntimeError("boom")))
+    code = sensor.main([
+        "--workspace", str(ws.root), "--status-file", str(status),
+        "--now", "2026-08-04T12:00:00Z",
+    ])
+    assert code == 4
+    assert json.loads(status.read_text()) == {"prior": True}  # не перезаписан
+
+
+# Task 7: Reader — unknown when status missing/overdue
+
+
+def test_reader_unknown_when_no_status_file(sensor, tmp_path, capsys):
+    code = sensor.read_status(tmp_path / "absent.json", NOW)
+    assert code == 2
+    assert "unknown" in capsys.readouterr().out
+
+
+def test_reader_unknown_when_overdue_even_if_last_run_was_clean(
+    sensor, tmp_path, capsys
+):
+    ws = make_workspace(tmp_path, now=NOW)
+    _, status_path = _run(sensor, ws, tmp_path)  # clean, next_expected +26h
+    late = NOW + timedelta(hours=27)
+    assert sensor.read_status(status_path, late) == 2
+    out = capsys.readouterr().out
+    assert "unknown" in out and "next_expected_at" in out
+
+
+def test_reader_clean_when_fresh_and_clean(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    _, status_path = _run(sensor, ws, tmp_path)
+    assert sensor.read_status(status_path, NOW + timedelta(hours=1)) == 0
+
+
+def test_reader_nonclean_when_fresh_with_drift(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "m")
+    _, status_path = _run(sensor, ws, tmp_path)
+    assert sensor.read_status(status_path, NOW + timedelta(hours=1)) == 1
+
+
+# Fix Round 1: AttributeError handling
+
+
+def test_reader_unknown_when_status_file_next_expected_at_not_string(
+    sensor, tmp_path, capsys
+):
+    """next_expected_at as number triggers AttributeError in parse_iso.replace()."""
+    status_path = tmp_path / "status.json"
+    status_path.write_text(json.dumps({
+        "schema": sensor.STATUS_SCHEMA,
+        "next_expected_at": 12345,  # not a string
+        "status": "clean",
+        "completed_at": "2026-08-04T12:00:00Z",
+        "host": "test",
+        "classes": [],
+    }))
+    assert sensor.read_status(status_path, NOW) == 2
+    out = capsys.readouterr().out
+    assert "unknown" in out and "не разбирается" in out
+
+
+def test_reader_unknown_when_status_file_foreign_schema(sensor, tmp_path, capsys):
+    """Foreign schema is caught before next_expected_at parsing."""
+    status_path = tmp_path / "status.json"
+    status_path.write_text(json.dumps({
+        "schema": "other/v1",
+        "next_expected_at": "2026-08-05T00:00:00Z",
+        "status": "clean",
+    }))
+    assert sensor.read_status(status_path, NOW) == 2
+    out = capsys.readouterr().out
+    assert "unknown" in out and "чужая схема" in out
+
+
+# Task 8: Escalation — inbox-issue в steward с дедуп-ключом
+
+
+def test_escalation_off_by_default_never_calls_gh(sensor, tmp_path, monkeypatch):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "m")
+    calls = []
+    monkeypatch.setattr(sensor, "_gh", lambda a: calls.append(a) or (0, "[]"))
+    code, status_path = _run(sensor, ws, tmp_path)  # без --escalate
+    assert code == 1 and calls == []
+    assert json.loads(status_path.read_text())["escalations"] == []
+
+
+def test_escalation_creates_issue_with_dedup_key_and_adr006_fields(
+    sensor, tmp_path, monkeypatch
+):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "m")
+    calls = []
+
+    def fake_gh(args):
+        calls.append(args)
+        if args[:2] == ["issue", "list"]:
+            return 0, "[]"
+        return 0, "https://github.com/o/steward/issues/7"
+
+    monkeypatch.setattr(sensor, "_gh", fake_gh)
+    monkeypatch.setattr(sensor, "steward_repo_slug", lambda p: "o/steward")
+    code, status_path = _run(sensor, ws, tmp_path, "--escalate")
+    esc = json.loads(status_path.read_text())["escalations"]
+    assert esc == [{"class": "drift", "action": "created",
+                    "detail": "https://github.com/o/steward/issues/7"}]
+    create = next(a for a in calls if a[:2] == ["issue", "create"])
+    title = create[create.index("--title") + 1]
+    body = create[create.index("--body") + 1]
+    assert title.startswith("arch-evidence-freshness-watch:drift")
+    assert "slug: arch-evidence-freshness-watch" in body
+    assert "from: devtools#arch-evidence-freshness-watch" in body
+
+
+def test_escalation_dedup_skips_when_open_issue_exists(sensor, tmp_path, monkeypatch):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "m")
+
+    def fake_gh(args):
+        if args[:2] == ["issue", "list"]:
+            return 0, json.dumps([{
+                "number": 5,
+                "title": "arch-evidence-freshness-watch:drift — старое",
+                "url": "https://github.com/o/steward/issues/5",
+            }])
+        raise AssertionError("create не должен вызываться")
+
+    monkeypatch.setattr(sensor, "_gh", fake_gh)
+    monkeypatch.setattr(sensor, "steward_repo_slug", lambda p: "o/steward")
+    _, status_path = _run(sensor, ws, tmp_path, "--escalate")
+    esc = json.loads(status_path.read_text())["escalations"]
+    assert esc[0]["action"] == "exists" and "5" in esc[0]["detail"]
+
+
+def test_escalation_gh_failure_recorded_not_raised(sensor, tmp_path, monkeypatch):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "m")
+    monkeypatch.setattr(sensor, "_gh", lambda a: (-1, "no gh"))
+    monkeypatch.setattr(sensor, "steward_repo_slug", lambda p: "o/steward")
+    code, status_path = _run(sensor, ws, tmp_path, "--escalate")
+    assert code == 1  # findings есть; сбой gh не превращается в краш
+    esc = json.loads(status_path.read_text())["escalations"]
+    assert esc[0]["action"] == "error"
+
+
+def test_evidence_unreadable_when_indexed_at_not_string(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    report_path = ws.steward / EVIDENCE_DIR / "conformance-report.json"
+    report = json.loads(report_path.read_text())
+    report["snapshot"]["indexed_at"] = 12345
+    report_path.write_text(json.dumps(report))
+    findings = sensor.check_evidence(ws.root, NOW, 30)
+    assert [f.cls for f in findings] == ["stale"]
+    assert findings[0].check == "evidence-unreadable:conformance-report"
