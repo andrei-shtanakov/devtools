@@ -163,6 +163,7 @@ def test_clean_run_writes_full_status_and_exits_0(sensor, tmp_path):
     status = json.loads(status_path.read_text())
     assert status["schema"] == "arch-evidence-freshness-status/v1"
     assert status["status"] == "clean" and status["findings"] == []
+    assert status["classes"] == []
     assert status["completed_at"] == "2026-08-04T12:00:00Z"
     assert status["next_expected_at"] == "2026-08-05T14:00:00Z"  # +26h
     for key in ("host", "sensor_version", "started_at", "resolved", "escalations"):
