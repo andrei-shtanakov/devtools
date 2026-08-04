@@ -238,9 +238,65 @@ def write_status_atomic(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 
-def escalate_findings(workspace, classes, findings, host):
-    """Task 8 заменит эту заглушку."""
-    return []
+def _gh(args: list[str]) -> tuple[int, str]:
+    """Единственная точка вызова gh — тесты подменяют её."""
+    code, out, err = sh(["gh", *args], Path.cwd(), timeout=60)
+    return code, out.decode(errors="replace").strip() if code == 0 else err.strip()
+
+
+def steward_repo_slug(steward: Path) -> str | None:
+    code, out, _ = sh(["git", "remote", "get-url", "origin"], steward)
+    if code != 0:
+        return None
+    import re
+    match = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", out.decode().strip())
+    return match.group(1) if match else None
+
+
+def escalate_findings(workspace: Path, classes: list[str],
+                      findings: list[Finding], host: str) -> list[dict]:
+    records: list[dict] = []
+    repo = steward_repo_slug(workspace / "steward")
+    if repo is None:
+        return [{"class": c, "action": "error",
+                 "detail": "origin steward не определён"} for c in classes]
+    for cls in classes:
+        prefix = f"{DEDUP_PREFIX}:{cls}"
+        code, out = _gh(["issue", "list", "-R", repo, "--label", "inbox",
+                         "--state", "open", "--limit", "100",
+                         "--json", "number,title,url"])
+        if code != 0:
+            records.append({"class": cls, "action": "error", "detail": out})
+            continue
+        try:
+            existing = [i for i in json.loads(out or "[]")
+                        if i["title"].startswith(prefix)]
+        except (ValueError, KeyError, TypeError) as err:
+            records.append({"class": cls, "action": "error",
+                            "detail": f"issue list не разбирается: {err}"})
+            continue
+        if existing:
+            records.append({"class": cls, "action": "exists",
+                            "detail": f"#{existing[0]['number']} уже открыт"})
+            continue
+        lines = "\n".join(f"- `{f.check}`: {f.detail}"
+                          for f in findings if f.cls == cls)
+        body = (
+            f"slug: {DEDUP_PREFIX}\n"
+            f"from: devtools#{DEDUP_PREFIX}\n\n"
+            f"Автосенсор devtools (host `{host}`) обнаружил класс `{cls}`:\n\n"
+            f"{lines}\n\n"
+            "Действие — осознанный re-vendor/refresh PR в steward; сенсор "
+            "READ-ONLY и ничего не меняет сам. Статус-файл: "
+            "`devtools/out/arch-evidence-freshness/status.json`.\n"
+        )
+        title = f"{prefix} — автосенсор devtools, host {host}"
+        code, out = _gh(["issue", "create", "-R", repo, "--label", "inbox",
+                         "--title", title, "--body", body])
+        records.append({"class": cls,
+                        "action": "created" if code == 0 else "error",
+                        "detail": out})
+    return records
 
 
 def read_status(path: Path, now: datetime) -> int:

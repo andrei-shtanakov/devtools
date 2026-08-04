@@ -270,3 +270,74 @@ def test_reader_unknown_when_status_file_foreign_schema(sensor, tmp_path, capsys
     assert sensor.read_status(status_path, NOW) == 2
     out = capsys.readouterr().out
     assert "unknown" in out and "чужая схема" in out
+
+
+# Task 8: Escalation — inbox-issue в steward с дедуп-ключом
+
+
+def test_escalation_off_by_default_never_calls_gh(sensor, tmp_path, monkeypatch):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "m")
+    calls = []
+    monkeypatch.setattr(sensor, "_gh", lambda a: calls.append(a) or (0, "[]"))
+    code, status_path = _run(sensor, ws, tmp_path)  # без --escalate
+    assert code == 1 and calls == []
+    assert json.loads(status_path.read_text())["escalations"] == []
+
+
+def test_escalation_creates_issue_with_dedup_key_and_adr006_fields(
+    sensor, tmp_path, monkeypatch
+):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "m")
+    calls = []
+
+    def fake_gh(args):
+        calls.append(args)
+        if args[:2] == ["issue", "list"]:
+            return 0, "[]"
+        return 0, "https://github.com/o/steward/issues/7"
+
+    monkeypatch.setattr(sensor, "_gh", fake_gh)
+    monkeypatch.setattr(sensor, "steward_repo_slug", lambda p: "o/steward")
+    code, status_path = _run(sensor, ws, tmp_path, "--escalate")
+    esc = json.loads(status_path.read_text())["escalations"]
+    assert esc == [{"class": "drift", "action": "created",
+                    "detail": "https://github.com/o/steward/issues/7"}]
+    create = next(a for a in calls if a[:2] == ["issue", "create"])
+    title = create[create.index("--title") + 1]
+    body = create[create.index("--body") + 1]
+    assert title.startswith("arch-evidence-freshness-watch:drift")
+    assert "slug: arch-evidence-freshness-watch" in body
+    assert "from: devtools#arch-evidence-freshness-watch" in body
+
+
+def test_escalation_dedup_skips_when_open_issue_exists(sensor, tmp_path, monkeypatch):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "m")
+
+    def fake_gh(args):
+        if args[:2] == ["issue", "list"]:
+            return 0, json.dumps([{
+                "number": 5,
+                "title": "arch-evidence-freshness-watch:drift — старое",
+                "url": "https://github.com/o/steward/issues/5",
+            }])
+        raise AssertionError("create не должен вызываться")
+
+    monkeypatch.setattr(sensor, "_gh", fake_gh)
+    monkeypatch.setattr(sensor, "steward_repo_slug", lambda p: "o/steward")
+    _, status_path = _run(sensor, ws, tmp_path, "--escalate")
+    esc = json.loads(status_path.read_text())["escalations"]
+    assert esc[0]["action"] == "exists" and "5" in esc[0]["detail"]
+
+
+def test_escalation_gh_failure_recorded_not_raised(sensor, tmp_path, monkeypatch):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "m")
+    monkeypatch.setattr(sensor, "_gh", lambda a: (-1, "no gh"))
+    monkeypatch.setattr(sensor, "steward_repo_slug", lambda p: "o/steward")
+    code, status_path = _run(sensor, ws, tmp_path, "--escalate")
+    assert code == 1  # findings есть; сбой gh не превращается в краш
+    esc = json.loads(status_path.read_text())["escalations"]
+    assert esc[0]["action"] == "error"
