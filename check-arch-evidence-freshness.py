@@ -223,3 +223,89 @@ def check_evidence(workspace: Path, now: datetime, max_age_days: int) -> list[Fi
     if newer:
         findings.append(Finding("manifest-newer:intended-graph.yaml", "stale", newer))
     return findings
+
+
+def overall(findings: list[Finding]) -> str:
+    if not findings:
+        return "clean"
+    return max((f.cls for f in findings), key=lambda c: CLASS_ORDER[c])
+
+
+def write_status_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=1, ensure_ascii=False) + "\n")
+    os.replace(tmp, path)
+
+
+def escalate_findings(workspace, classes, findings, host):
+    """Task 8 заменит эту заглушку."""
+    return []
+
+
+def read_status(path, now):
+    """Task 7 заменит эту заглушку."""
+    return 2
+
+
+def run_sensor(workspace: Path, status_path: Path, now: datetime,
+               max_age_days: int, next_expected_hours: int,
+               escalate: bool) -> int:
+    started = now
+    findings: list[Finding] = []
+    resolved: dict = {"workspace": str(workspace), "pins": {}}
+    up, up_finding = resolve_upstream(workspace / "prograph")
+    if up_finding:
+        findings.append(up_finding)
+    else:
+        resolved["upstream"] = up
+        vendored_findings, pins = check_vendored(workspace, up)
+        findings.extend(vendored_findings)
+        resolved["pins"] = pins
+    findings.extend(check_evidence(workspace, now, max_age_days))
+    classes = sorted({f.cls for f in findings}, key=lambda c: -CLASS_ORDER[c])
+    host = socket.gethostname()
+    escalations = (escalate_findings(workspace, classes, findings, host)
+                   if escalate and classes else [])
+    write_status_atomic(status_path, {
+        "schema": STATUS_SCHEMA,
+        "sensor_version": SENSOR_VERSION,
+        "host": host,
+        "started_at": iso(started),
+        "completed_at": iso(now),
+        "next_expected_at": iso(now + timedelta(hours=next_expected_hours)),
+        "status": overall(findings),
+        "classes": classes,
+        "findings": [f.as_json() for f in findings],
+        "resolved": resolved,
+        "escalations": escalations,
+    })
+    for f in findings:
+        print(f"[{f.cls}] {f.check}: {f.detail}")
+    print(f"status: {overall(findings)} -> {status_path}")
+    return 0 if not findings else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--workspace", type=Path,
+                        default=Path(__file__).resolve().parent.parent)
+    parser.add_argument("--status-file", type=Path, default=DEFAULT_STATUS)
+    parser.add_argument("--now", default=None,
+                        help="ISO-время 'сейчас' (тесты); по умолчанию UTC now")
+    parser.add_argument("--max-age-days", type=int, default=30)
+    parser.add_argument("--next-expected-hours", type=int, default=26)
+    parser.add_argument("--escalate", action="store_true")
+    parser.add_argument("--read", action="store_true",
+                        help="режим читателя: unknown при просрочке")
+    args = parser.parse_args(argv)
+    now = parse_iso(args.now) if args.now else datetime.now(timezone.utc)
+    if args.read:
+        return read_status(args.status_file, now)
+    try:
+        return run_sensor(args.workspace.resolve(), args.status_file, now,
+                          args.max_age_days, args.next_expected_hours,
+                          args.escalate)
+    except Exception:
+        traceback.print_exc()
+        return 4

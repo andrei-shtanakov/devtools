@@ -142,3 +142,63 @@ def test_evidence_stale_when_manifest_dirty(sensor, tmp_path):
     assert [f.cls for f in findings] == ["stale"]
     assert findings[0].check == "manifest-newer:intended-graph.yaml"
     assert "не закоммичен" in findings[0].detail
+
+
+# Task 6: Full sensor run — status file, exit codes, crash path
+
+
+def _run(sensor, ws, tmp_path, *extra):
+    status = tmp_path / "status.json"
+    code = sensor.main([
+        "--workspace", str(ws.root), "--status-file", str(status),
+        "--now", "2026-08-04T12:00:00Z", *extra,
+    ])
+    return code, status
+
+
+def test_clean_run_writes_full_status_and_exits_0(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    code, status_path = _run(sensor, ws, tmp_path)
+    assert code == 0
+    status = json.loads(status_path.read_text())
+    assert status["schema"] == "arch-evidence-freshness-status/v1"
+    assert status["status"] == "clean" and status["findings"] == []
+    assert status["completed_at"] == "2026-08-04T12:00:00Z"
+    assert status["next_expected_at"] == "2026-08-05T14:00:00Z"  # +26h
+    for key in ("host", "sensor_version", "started_at", "resolved", "escalations"):
+        assert key in status
+    assert status["resolved"]["upstream"]["default_branch"] == "master"
+    assert "intended-graph" in status["resolved"]["pins"]
+
+
+def test_drift_run_exits_1_with_drift_status(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "m")
+    code, status_path = _run(sensor, ws, tmp_path)
+    assert code == 1
+    status = json.loads(status_path.read_text())
+    assert status["status"] == "drift" and status["classes"] == ["drift"]
+
+
+def test_unavailable_never_reads_as_clean(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    import shutil
+    shutil.rmtree(ws.canon)
+    code, status_path = _run(sensor, ws, tmp_path)
+    assert code == 1
+    assert json.loads(status_path.read_text())["status"] == "unavailable"
+
+
+def test_crash_exits_4_and_leaves_status_untouched(sensor, tmp_path, monkeypatch):
+    ws = make_workspace(tmp_path, now=NOW)
+    status = tmp_path / "status.json"
+    status.write_text('{"prior": true}')
+    monkeypatch.setattr(
+        sensor, "resolve_upstream",
+        lambda *_: (_ for _ in ()).throw(RuntimeError("boom")))
+    code = sensor.main([
+        "--workspace", str(ws.root), "--status-file", str(status),
+        "--now", "2026-08-04T12:00:00Z",
+    ])
+    assert code == 4
+    assert json.loads(status.read_text()) == {"prior": True}  # не перезаписан
