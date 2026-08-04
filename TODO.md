@@ -59,6 +59,39 @@
       `make plan-check`, работать не может. Проектирование фикстуры-workspace (или
       эквивалента) — работа самого пункта, а не предусловие к нему.
 
+## Freshness-сенсор арх-evidence
+
+- [ ] Freshness/drift-сенсор: upstream-drift вендоренных prograph-схем steward + свежесть conformance-evidence WS-005 @owner:github:andrei-shtanakov @id:arch-evidence-freshness-watch
+      Исполняет scheduled-обязательство `todo://steward/arch-evidence-freshness-watch`
+      («вне CI этого репо» — здесь). Семантика — из пункта steward: обе вендоренные
+      схемы + пара манифест/отчёт WS-005; свежесть по `snapshot.indexed_at`, не
+      `generated_at`.
+      Сравнение пересчётное — prograph манифест поверхности не публикует, значит
+      состав поверхности наш: до пересчёта отдельная проверка «апстрим добавил файл
+      под неучтённым именем» (урок two-contract-guarantees / dispatcher#110).
+      READ-ONLY (инвариант №1): при красном — inbox-issue в steward (ADR-ECO-006)
+      с устойчивым ключом дедупликации `arch-evidence-freshness-watch:<status-class>`,
+      чтобы ежедневный прогон не плодил новые issue; никакого автоматического
+      ре-вендора.
+      Результат прогона — долговечный статус-файл: `host`, `started_at`,
+      `completed_at`, `next_expected_at`, разрешённые пины/манифест, статус
+      прогона `clean|drift|stale|unavailable` (`stale` — evidence
+      отсутствует/просрочено, `unavailable` — сравнение не состоялось),
+      версия сенсора. Два слоя статусов, не смешивать: `unknown` сенсор не
+      пишет никогда — это ВЫВОДИМЫЙ статус читателя. Fail-closed живёт у
+      потребителя, не в факте запуска: потребитель (steward-гейт / дайджест)
+      читает как unknown и `stale`/`unavailable`, и просроченный или
+      отсутствующий статус-файл по `next_expected_at` — выключенный ноутбук
+      не способен сам сообщить, что launchd не сработал. Так семантика
+      steward «отсутствует/просрочено ⇒ unknown, не clean» выполняется на
+      обоих уровнях: evidence и сам сенсор.
+      Планировщик — launchd на машине-хосте, ЯВНО interim; гибрид с GitHub Actions
+      отложен до появления CI у этого репо (см. `@id:ci-selftest-and-plan-check`).
+      Приёмка: два штатных прогона по расписанию + четыре синтетических кейса
+      (drift / stale / unavailable / added-under-excluded-name) дают различимые
+      статусы; отдельно проверка стороны чтения — просроченный статус читается
+      потребителем как unknown, не как последний зелёный.
+
 ## Грамматика полей плана
 
 - [ ] Нормализовать `@owner`: сначала семантика четырёх нарушающих значений, затем одно решение на весь флот @owner:github:andrei-shtanakov @id:owner-grammar-semantics
