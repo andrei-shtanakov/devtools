@@ -14,7 +14,7 @@ SHELL := /usr/bin/env bash
 MANIFEST ?= ../ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance graph-drift plan-check inbox morning evening snapshot fleet-report today install
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance graph-drift plan-check inbox morning evening snapshot fleet-report today install arch-freshness arch-freshness-read arch-freshness-schedule arch-freshness-unschedule
 
 help:
 	@echo "Цели:"
@@ -36,6 +36,10 @@ help:
 	@echo "  make today       — что изменилось с полуночи: коммиты + незакоммиченное"
 	@echo "  make install     — доклонировать недостающие репо набора по манифесту зонтика"
 	@echo "  make release-drift — набор из манифеста зонтика ↔ факт на диске"
+	@echo "  make arch-freshness       — drift/freshness арх-evidence (steward↔prograph), без эскалации"
+	@echo "  make arch-freshness-read  — читатель статуса: просрочка ⇒ unknown (exit 2)"
+	@echo "  make arch-freshness-schedule   — launchd-агент (INTERIM-планировщик), ежедневно"
+	@echo "  make arch-freshness-unschedule — снять launchd-агент"
 
 status:      ; @./repos.sh status
 fetch:       ; @./repos.sh fetch
@@ -58,3 +62,20 @@ today:       ; @python3 ./recent_changes.py
 release-drift: ; @python3 ./check-release-drift.py --workspace .. --manifest $(MANIFEST)
 
 install: ; @./repos.sh install --manifest $(MANIFEST)
+
+arch-freshness:      ; @python3 ./check-arch-evidence-freshness.py --workspace ..
+arch-freshness-read: ; @python3 ./check-arch-evidence-freshness.py --read
+
+PLIST_LABEL := com.devtools.arch-evidence-freshness
+PLIST_DST   := $(HOME)/Library/LaunchAgents/$(PLIST_LABEL).plist
+arch-freshness-schedule:
+	@mkdir -p out/arch-evidence-freshness
+	@sed -e "s|@DEVTOOLS_DIR@|$(CURDIR)|g" \
+	     templates/$(PLIST_LABEL).plist > $(PLIST_DST)
+	@launchctl unload $(PLIST_DST) 2>/dev/null || true
+	@launchctl load $(PLIST_DST)
+	@echo "launchd-агент загружен (INTERIM-планировщик): $(PLIST_DST)"
+arch-freshness-unschedule:
+	@launchctl unload $(PLIST_DST) 2>/dev/null || true
+	@rm -f $(PLIST_DST)
+	@echo "launchd-агент снят"

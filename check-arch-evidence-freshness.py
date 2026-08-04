@@ -382,3 +382,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         traceback.print_exc()
         return 4
+
+
+if __name__ == "__main__":
+    sys.exit(main())
