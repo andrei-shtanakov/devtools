@@ -203,3 +203,36 @@ def test_crash_exits_4_and_leaves_status_untouched(sensor, tmp_path, monkeypatch
     ])
     assert code == 4
     assert json.loads(status.read_text()) == {"prior": True}  # не перезаписан
+
+
+# Task 7: Reader — unknown when status missing/overdue
+
+
+def test_reader_unknown_when_no_status_file(sensor, tmp_path, capsys):
+    code = sensor.read_status(tmp_path / "absent.json", NOW)
+    assert code == 2
+    assert "unknown" in capsys.readouterr().out
+
+
+def test_reader_unknown_when_overdue_even_if_last_run_was_clean(
+    sensor, tmp_path, capsys
+):
+    ws = make_workspace(tmp_path, now=NOW)
+    _, status_path = _run(sensor, ws, tmp_path)  # clean, next_expected +26h
+    late = NOW + timedelta(hours=27)
+    assert sensor.read_status(status_path, late) == 2
+    out = capsys.readouterr().out
+    assert "unknown" in out and "next_expected_at" in out
+
+
+def test_reader_clean_when_fresh_and_clean(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    _, status_path = _run(sensor, ws, tmp_path)
+    assert sensor.read_status(status_path, NOW + timedelta(hours=1)) == 0
+
+
+def test_reader_nonclean_when_fresh_with_drift(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "m")
+    _, status_path = _run(sensor, ws, tmp_path)
+    assert sensor.read_status(status_path, NOW + timedelta(hours=1)) == 1

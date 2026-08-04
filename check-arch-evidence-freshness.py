@@ -243,9 +243,26 @@ def escalate_findings(workspace, classes, findings, host):
     return []
 
 
-def read_status(path, now):
-    """Task 7 заменит эту заглушку."""
-    return 2
+def read_status(path: Path, now: datetime) -> int:
+    """Читатель. unknown — вывод ЭТОЙ стороны: сенсор его никогда не пишет."""
+    try:
+        status = json.loads(path.read_text())
+        schema = status["schema"]
+        next_expected = parse_iso(status["next_expected_at"])
+        verdict = status["status"]
+    except (OSError, ValueError, KeyError, TypeError) as err:
+        print(f"unknown: статус-файл отсутствует/не разбирается ({err}) — {path}")
+        return 2
+    if schema != STATUS_SCHEMA:
+        print(f"unknown: чужая схема статус-файла {schema!r} — {path}")
+        return 2
+    if now > next_expected:
+        print(f"unknown: статус просрочен (next_expected_at={iso(next_expected)}, "
+              f"now={iso(now)}) — последний вердикт {verdict!r} не считается")
+        return 2
+    print(f"{verdict}: прогон {status.get('completed_at')} host="
+          f"{status.get('host')} classes={status.get('classes')}")
+    return 0 if verdict == "clean" else 1
 
 
 def run_sensor(workspace: Path, status_path: Path, now: datetime,
