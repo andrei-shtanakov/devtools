@@ -65,3 +65,39 @@ def test_resolve_upstream_unavailable_when_remote_gone(sensor, tmp_path):
     assert up is None
     assert finding.cls == "unavailable"
     assert "prograph" in finding.check
+
+
+def _resolved(sensor, ws):
+    up, finding = sensor.resolve_upstream(ws.prograph)
+    assert finding is None
+    return up
+
+
+def test_vendored_clean_when_copies_match_upstream(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    findings, pins = sensor.check_vendored(ws.root, _resolved(sensor, ws))
+    assert findings == []
+    assert set(pins) == {"intended-graph", "conformance-report"}
+    assert pins["intended-graph"]["source"].startswith("prograph@")
+
+
+def test_vendored_drift_when_upstream_schema_changed(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(
+        ws, "contracts/intended-graph/v1/schema.json", b'{"v": 2}\n', "evolve"
+    )
+    findings, _ = sensor.check_vendored(ws.root, _resolved(sensor, ws))
+    assert [f.cls for f in findings] == ["drift"]
+    assert findings[0].check == "schema-drift:intended-graph"
+
+
+def test_vendored_drift_when_upstream_adds_file_to_surface(sensor, tmp_path):
+    # added-under-excluded-name: файл сверх нашей копии не выпадает молча
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(
+        ws, "contracts/conformance-report/v1/examples.json", b"[]\n", "add file"
+    )
+    findings, _ = sensor.check_vendored(ws.root, _resolved(sensor, ws))
+    assert [f.cls for f in findings] == ["drift"]
+    assert findings[0].check == "surface:conformance-report"
+    assert "examples.json" in findings[0].detail

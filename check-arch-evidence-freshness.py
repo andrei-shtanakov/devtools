@@ -134,3 +134,45 @@ def upstream_ls(prograph: Path, sha: str, reldir: str) -> list[str]:
     if code != 0:
         return []
     return sorted(Path(line).name for line in out.decode().splitlines() if line)
+
+
+def check_vendored(workspace: Path, up: dict) -> tuple[list[Finding], dict]:
+    findings: list[Finding] = []
+    pins: dict[str, dict[str, str]] = {}
+    prograph = workspace / "prograph"
+    for name, vendored_rel, upstream_rel in VENDORED:
+        vdir = workspace / vendored_rel
+        pin_file = vdir / "PIN"
+        if not vdir.is_dir() or not pin_file.is_file():
+            findings.append(Finding(
+                f"vendored:{name}", "unavailable",
+                f"вендоренной копии/PIN нет: {vdir}"))
+            continue
+        pin = parse_pin(pin_file.read_text())
+        pins[name] = {"source": pin.get("source", "?"),
+                      "sha256": pin.get("sha256", "?")}
+        # 1) расширение поверхности — ДО пофайлового сравнения
+        ours = sorted(p.name for p in vdir.iterdir()
+                      if p.is_file() and p.name != "PIN")
+        theirs = upstream_ls(prograph, up["head_sha"], upstream_rel)
+        extra = sorted(set(theirs) - set(ours))
+        if extra:
+            findings.append(Finding(
+                f"surface:{name}", "drift",
+                f"upstream добавил в {upstream_rel}: {', '.join(extra)} — "
+                "поверхность расширилась, пересчёт её не видел бы"))
+        # 2) пофайловое сравнение нашей поверхности
+        for fname in ours:
+            theirs_bytes = upstream_bytes(
+                prograph, up["head_sha"], f"{upstream_rel}/{fname}")
+            if theirs_bytes is None:
+                findings.append(Finding(
+                    f"schema-drift:{name}", "drift",
+                    f"{fname} исчез из upstream {upstream_rel}"))
+            elif theirs_bytes != (vdir / fname).read_bytes():
+                findings.append(Finding(
+                    f"schema-drift:{name}", "drift",
+                    f"{fname}: origin/{up['default_branch']} "
+                    f"({up['head_sha'][:9]}) отличается от копии — "
+                    "нужен осознанный re-vendor PR в steward"))
+    return findings, pins
