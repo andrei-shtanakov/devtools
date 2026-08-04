@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -26,10 +27,35 @@ VENDORED_DIRS = {
 EVIDENCE_DIR = "workstreams/WS-005-gate-verdicts/spec"
 
 
-def git(cwd: Path, *args: str) -> str:
+def git(cwd: Path, *args: str, at_time: datetime | None = None) -> str:
+    env = os.environ.copy()
+    if at_time is None and "commit" in args:
+        # For commit commands without explicit time, try to use last commit time + 1 sec
+        code = subprocess.run(
+            ["git", "-C", str(cwd), "log", "-1", "--format=%cI"],
+            capture_output=True, text=True,
+        ).returncode
+        if code == 0:
+            last_output = subprocess.run(
+                ["git", "-C", str(cwd), "log", "-1", "--format=%cI"],
+                capture_output=True, text=True, check=False,
+            ).stdout.strip()
+            if last_output:
+                try:
+                    last_time = datetime.fromisoformat(
+                        last_output.replace("Z", "+00:00")
+                    )
+                    at_time = last_time + timedelta(seconds=1)
+                except (ValueError, AttributeError):
+                    pass
+    if at_time:
+        iso_time = at_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        iso_time = iso_time.replace("T", " ").replace("Z", "+00:00")
+        env["GIT_AUTHOR_DATE"] = iso_time
+        env["GIT_COMMITTER_DATE"] = iso_time
     proc = subprocess.run(
         ["git", "-C", str(cwd), *args],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, env=env,
     )
     return proc.stdout.strip()
 
@@ -101,7 +127,7 @@ def make_workspace(
         "snapshot": {"indexed_at": _iso(report_time), "id": 1, "complete": True},
     }))
     git(steward, "add", "-A")
-    git(steward, "commit", "-m", "vendored contracts + WS-005 evidence")
+    git(steward, "commit", "-m", "vendored contracts + WS-005 evidence", at_time=report_time)
     return Workspace(root, prograph, steward, seed, canon)
 
 

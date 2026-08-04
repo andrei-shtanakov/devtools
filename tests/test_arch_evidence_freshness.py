@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .arch_freshness_fixtures import (
     EVIDENCE_DIR, Workspace, git, make_workspace, upstream_change,
@@ -101,3 +101,34 @@ def test_vendored_drift_when_upstream_adds_file_to_surface(sensor, tmp_path):
     assert [f.cls for f in findings] == ["drift"]
     assert findings[0].check == "surface:conformance-report"
     assert "examples.json" in findings[0].detail
+
+
+def test_evidence_fresh_is_clean(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW, report_age_hours=1)
+    assert sensor.check_evidence(ws.root, NOW, 30) == []
+
+
+def test_evidence_stale_by_age(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW, report_age_hours=31 * 24)
+    findings = sensor.check_evidence(ws.root, NOW, 30)
+    assert [f.cls for f in findings] == ["stale"]
+    assert findings[0].check == "evidence-age:conformance-report"
+
+
+def test_evidence_stale_when_manifest_newer_than_report(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW, report_age_hours=1)
+    manifest = ws.steward / EVIDENCE_DIR / "intended-graph.yaml"
+    manifest.write_text("components: [{id: new}]\n")
+    git(ws.steward, "add", "-A")
+    git(ws.steward, "commit", "-m", "manifest evolves")
+    findings = sensor.check_evidence(ws.root, NOW, 30)
+    assert [f.cls for f in findings] == ["stale"]
+    assert findings[0].check == "manifest-newer:intended-graph.yaml"
+
+
+def test_evidence_missing_report_is_stale(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    (ws.steward / EVIDENCE_DIR / "conformance-report.json").unlink()
+    findings = sensor.check_evidence(ws.root, NOW, 30)
+    assert [f.cls for f in findings] == ["stale"]
+    assert findings[0].check == "evidence-missing:conformance-report"

@@ -176,3 +176,50 @@ def check_vendored(workspace: Path, up: dict) -> tuple[list[Finding], dict]:
                     f"({up['head_sha'][:9]}) отличается от копии — "
                     "нужен осознанный re-vendor PR в steward"))
     return findings, pins
+
+
+def _manifest_changed_after(steward: Path, rel: str, cutoff: datetime) -> str | None:
+    """Описание изменения манифеста позже cutoff, или None. Грязь тоже считается."""
+    code, out, _ = sh(["git", "status", "--porcelain", "--", rel], steward)
+    if code == 0 and out.decode().strip():
+        return "манифест изменён и не закоммичен (не отражён в отчёте)"
+    code, out, _ = sh(["git", "log", "-1", "--format=%cI", "--", rel], steward)
+    if code != 0 or not out.decode().strip():
+        return None
+    committed = parse_iso(out.decode().strip())
+    if committed > cutoff:
+        return f"манифест коммитнут {iso(committed)} — позже отчёта {iso(cutoff)}"
+    return None
+
+
+def check_evidence(workspace: Path, now: datetime, max_age_days: int) -> list[Finding]:
+    findings: list[Finding] = []
+    evidence = workspace / EVIDENCE_REL
+    steward = workspace / "steward"
+    report_path = evidence / "conformance-report.json"
+    manifest_rel = str(Path(EVIDENCE_REL).relative_to("steward") / "intended-graph.yaml")
+    if not (evidence / "intended-graph.yaml").is_file():
+        findings.append(Finding("evidence-missing:intended-graph.yaml", "stale",
+                                "манифеста WS-005 нет"))
+    if not report_path.is_file():
+        findings.append(Finding("evidence-missing:conformance-report", "stale",
+                                f"отчёта нет: {report_path}"))
+        return findings
+    try:
+        report = json.loads(report_path.read_text())
+        indexed_at = parse_iso(report["snapshot"]["indexed_at"])
+        generated_at = parse_iso(report["generated_at"])
+    except (ValueError, KeyError, TypeError) as err:
+        findings.append(Finding("evidence-unreadable:conformance-report", "stale",
+                                f"отчёт не разбирается: {err}"))
+        return findings
+    age = now - indexed_at
+    if age > timedelta(days=max_age_days):
+        findings.append(Finding(
+            "evidence-age:conformance-report", "stale",
+            f"snapshot.indexed_at={iso(indexed_at)} старше {max_age_days}д "
+            f"(возраст {age.days}д)"))
+    newer = _manifest_changed_after(steward, manifest_rel, generated_at)
+    if newer:
+        findings.append(Finding("manifest-newer:intended-graph.yaml", "stale", newer))
+    return findings
