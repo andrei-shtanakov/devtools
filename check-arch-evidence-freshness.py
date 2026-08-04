@@ -93,3 +93,44 @@ def sh(args: list[str], cwd: Path, timeout: int = 60) -> tuple[int, bytes, str]:
         return proc.returncode, proc.stdout, proc.stderr.decode(errors="replace")
     except (FileNotFoundError, subprocess.TimeoutExpired) as err:
         return -1, b"", str(err)
+
+
+def resolve_upstream(prograph: Path) -> tuple[dict | None, Finding | None]:
+    if not (prograph / ".git").exists():
+        return None, Finding("upstream:prograph", "unavailable",
+                             f"клона prograph нет: {prograph}")
+    code, out, err = sh(["git", "ls-remote", "--symref", "origin", "HEAD"], prograph)
+    if code != 0:
+        return None, Finding("upstream:prograph", "unavailable",
+                             f"origin недоступен: {err.strip() or code}")
+    branch = head_sha = None
+    for line in out.decode().splitlines():
+        if line.startswith("ref:"):
+            branch = line.split()[1].removeprefix("refs/heads/")
+        elif line.endswith("HEAD"):
+            head_sha = line.split()[0]
+    if not branch or not head_sha:
+        return None, Finding("upstream:prograph", "unavailable",
+                             "ls-remote не вернул HEAD/symref")
+    code, _, err = sh(["git", "fetch", "--quiet", "origin", branch], prograph)
+    if code != 0:
+        return None, Finding("upstream:prograph", "unavailable",
+                             f"fetch origin/{branch} не удался: {err.strip()}")
+    code, out, _ = sh(["git", "remote", "get-url", "origin"], prograph)
+    remote = out.decode().strip() if code == 0 else "?"
+    return {"remote": remote, "default_branch": branch, "head_sha": head_sha}, None
+
+
+def upstream_bytes(prograph: Path, sha: str, relpath: str) -> bytes | None:
+    code, out, _ = sh(["git", "cat-file", "blob", f"{sha}:{relpath}"], prograph)
+    return out if code == 0 else None
+
+
+def upstream_ls(prograph: Path, sha: str, reldir: str) -> list[str]:
+    code, out, _ = sh(
+        ["git", "ls-tree", "--name-only", sha, "--", reldir.rstrip("/") + "/"],
+        prograph,
+    )
+    if code != 0:
+        return []
+    return sorted(Path(line).name for line in out.decode().splitlines() if line)

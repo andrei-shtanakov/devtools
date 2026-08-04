@@ -39,3 +39,29 @@ def test_parse_iso_handles_zulu(sensor):
     dt = sensor.parse_iso("2026-08-04T12:00:00Z")
     assert dt.tzinfo is not None
     assert sensor.iso(dt) == "2026-08-04T12:00:00Z"
+
+
+def test_resolve_upstream_reports_moving_default_branch(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "move")
+    up, finding = sensor.resolve_upstream(ws.prograph)
+    assert finding is None
+    # видит именно canon-HEAD, а не отставший локальный чекаут
+    assert up["head_sha"] == git(ws.seed, "rev-parse", "HEAD")
+    assert up["default_branch"] == "master"
+    assert sensor.upstream_bytes(
+        ws.prograph, up["head_sha"], "contracts/intended-graph/v1/schema.json"
+    ) == b"{}\n"
+    assert sensor.upstream_ls(
+        ws.prograph, up["head_sha"], "contracts/intended-graph/v1"
+    ) == ["schema.json"]
+
+
+def test_resolve_upstream_unavailable_when_remote_gone(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    import shutil
+    shutil.rmtree(ws.canon)
+    up, finding = sensor.resolve_upstream(ws.prograph)
+    assert up is None
+    assert finding.cls == "unavailable"
+    assert "prograph" in finding.check
