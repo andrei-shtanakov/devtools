@@ -132,3 +132,13 @@ def test_evidence_missing_report_is_stale(sensor, tmp_path):
     findings = sensor.check_evidence(ws.root, NOW, 30)
     assert [f.cls for f in findings] == ["stale"]
     assert findings[0].check == "evidence-missing:conformance-report"
+
+
+def test_evidence_stale_when_manifest_dirty(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW, report_age_hours=1)
+    manifest = ws.steward / EVIDENCE_DIR / "intended-graph.yaml"
+    manifest.write_text("components: [{id: uncommitted}]\n")
+    findings = sensor.check_evidence(ws.root, NOW, 30)
+    assert [f.cls for f in findings] == ["stale"]
+    assert findings[0].check == "manifest-newer:intended-graph.yaml"
+    assert "не закоммичен" in findings[0].detail

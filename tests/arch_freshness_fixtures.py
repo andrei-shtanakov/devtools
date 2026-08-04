@@ -94,7 +94,7 @@ def make_workspace(
         target.parent.mkdir(parents=True)
         target.write_bytes(schemas[name])
     git(seed, "add", "-A")
-    git(seed, "commit", "-m", "contracts v1")
+    git(seed, "commit", "-m", "contracts v1", at_time=now)
 
     canon = tmp / "prograph-canon.git"
     subprocess.run(
