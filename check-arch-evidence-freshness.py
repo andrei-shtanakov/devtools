@@ -209,7 +209,7 @@ def check_evidence(workspace: Path, now: datetime, max_age_days: int) -> list[Fi
         report = json.loads(report_path.read_text())
         indexed_at = parse_iso(report["snapshot"]["indexed_at"])
         generated_at = parse_iso(report["generated_at"])
-    except (ValueError, KeyError, TypeError) as err:
+    except (ValueError, KeyError, TypeError, AttributeError) as err:
         findings.append(Finding("evidence-unreadable:conformance-report", "stale",
                                 f"отчёт не разбирается: {err}"))
         return findings

@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from .arch_freshness_fixtures import (
-    EVIDENCE_DIR, Workspace, git, make_workspace, upstream_change,
+    EVIDENCE_DIR, git, make_workspace, upstream_change,
 )
 
 NOW = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
@@ -341,3 +341,14 @@ def test_escalation_gh_failure_recorded_not_raised(sensor, tmp_path, monkeypatch
     assert code == 1  # findings есть; сбой gh не превращается в краш
     esc = json.loads(status_path.read_text())["escalations"]
     assert esc[0]["action"] == "error"
+
+
+def test_evidence_unreadable_when_indexed_at_not_string(sensor, tmp_path):
+    ws = make_workspace(tmp_path, now=NOW)
+    report_path = ws.steward / EVIDENCE_DIR / "conformance-report.json"
+    report = json.loads(report_path.read_text())
+    report["snapshot"]["indexed_at"] = 12345
+    report_path.write_text(json.dumps(report))
+    findings = sensor.check_evidence(ws.root, NOW, 30)
+    assert [f.cls for f in findings] == ["stale"]
+    assert findings[0].check == "evidence-unreadable:conformance-report"
