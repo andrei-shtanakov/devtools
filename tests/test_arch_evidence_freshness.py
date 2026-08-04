@@ -24,3 +24,18 @@ def test_fixture_builds_polyrepo_workspace(tmp_path):
     )
     # canon получил новый коммит, локальный клон — ещё нет
     assert git(ws.seed, "rev-parse", "HEAD") != git(ws.prograph, "rev-parse", "HEAD")
+
+
+def test_parse_pin_reads_key_value_lines(sensor):
+    pin = sensor.parse_pin(
+        "source: prograph@8deb730 contracts/intended-graph/v1/schema.json\n"
+        "sha256: abc\nvendored: 2026-08-03\npurpose: x\n"
+    )
+    assert pin["source"].startswith("prograph@8deb730")
+    assert pin["sha256"] == "abc"
+
+
+def test_parse_iso_handles_zulu(sensor):
+    dt = sensor.parse_iso("2026-08-04T12:00:00Z")
+    assert dt.tzinfo is not None
+    assert sensor.iso(dt) == "2026-08-04T12:00:00Z"
