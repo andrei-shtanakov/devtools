@@ -41,7 +41,19 @@
 
 ## CI собственного инструментария
 
-- [ ] Завести CI этого репо: selftest/characterization-сьют и `make plan-check` в подходящем этому репо режиме @owner:github:andrei-shtanakov @id:ci-selftest-and-plan-check
+- [x] Завести CI этого репо: selftest/characterization-сьют и `make plan-check` в подходящем этому репо режиме @owner:github:andrei-shtanakov @id:ci-selftest-and-plan-check — закрыт PR-ом этой ветки; приёмка = зелёный CI на самом PR
+      Резолюция «подходящего режима» (2026-08-06, ревью перехода launchd→CI):
+      РАЗНЫЕ режимы доказывают разное, нужны не-один. (1) PR-CI (.github/
+      workflows/ci.yml): pytest (characterization + wrapper + сенсор + fixture)
+      + `plan-check-selftest` — доказывает работоспособность ИНСТРУМЕНТА и
+      пина plan-fields, не состояние флота. Fixture-режим — pytest-тест на
+      синтетическом workspace во временном каталоге (каталог `.git` — маркер
+      чекаута для discovery — незакоммитим), доказывает ОБЕ стороны детектора:
+      clean=0 и stale=1 c PF-BLOCKER-STALE. (2) Локальный `make plan-check` —
+      диагностика конкретного workspace; `WORKSPACE ?=` параметризован.
+      (3) Scheduled fleet check (клон набора по манифесту в ephemeral
+      workspace) — ОТДЕЛЬНАЯ операция и отдельный будущий пункт по решению
+      владельца, сюда не входит. Actions запинены полными SHA.
       Обоснование: governance-инструмент флота обязан проверять свой пин и свой
       продакшн-путь автоматически. Иначе он гейтит соседей строже, чем себя.
       Факт на 2026-07-30: `.github/workflows/` не существует вовсе (в `.github/` лежит

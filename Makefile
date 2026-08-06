@@ -9,12 +9,14 @@
 # ============================================================
 SHELL := /usr/bin/env bash
 
-# Манифест командного воркспейса (SSOT набора) — дом в зонтике, не в devtools.
-# Переопредели при другом расположении:  make release-drift MANIFEST=/path/to/workspace-manifest.toml
-MANIFEST ?= ../ai-orchestrators-workspace/workspace-manifest.toml
+# Корень workspace и манифест командного воркспейса (SSOT набора — дом в
+# зонтике, не в devtools). Переопределяются для ephemeral-workspace:
+#   make plan-check WORKSPACE=/path/to/ws [MANIFEST=/path/to/manifest.toml]
+WORKSPACE ?= ..
+MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance graph-drift plan-check inbox morning evening snapshot fleet-report today install arch-freshness arch-freshness-read arch-freshness-schedule arch-freshness-unschedule
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance graph-drift plan-check plan-check-selftest plan-check-fixture inbox morning evening snapshot fleet-report today install arch-freshness arch-freshness-read arch-freshness-schedule arch-freshness-unschedule
 
 help:
 	@echo "Цели:"
@@ -27,7 +29,9 @@ help:
 	@echo "  make drift       — diff вендоренных obs.py и report_benchmark schema"
 	@echo "  make conformance — agent-id caталог ↔ ATP/arbiter/Maestro (ADR-ECO-003)"
 	@echo "  make graph-drift — граф prograph ↔ карта интеграций registry"
-	@echo "  make plan-check  — cross-repo TODO/@blocked_by граф (uv + Python 3.12)"
+	@echo "  make plan-check  — cross-repo TODO/@blocked_by граф (uv + Python 3.12; WORKSPACE=/path для другого workspace)"
+	@echo "  make plan-check-selftest — самопроверка политики чекера, без workspace"
+	@echo "  make plan-check-fixture  — вердикт чекера на синтетическом workspace (clean=0, stale=1)"
 	@echo "  make inbox       — входящие кросс-репные запросы (issues с лейблом inbox; uv + Python 3.12)"
 	@echo "  make morning     — fetch + status + inbox (утренний ритуал; uv + Python 3.12)"
 	@echo "  make evening     — вечерний чек: незакоммиченное / фича-ветки / незапушенное"
@@ -50,7 +54,9 @@ bootstrap:   ; @./repos.sh bootstrap
 drift:       ; @./check-contract-drift.sh
 conformance: ; @python3 ./check-agent-id-conformance.py
 graph-drift: ; @python3 ./check-graph-registry-drift.py
-plan-check:  ; @uv run --frozen python ./check-plan-fields.py --root .. --manifest $(MANIFEST)
+plan-check:  ; @uv run --frozen python ./check-plan-fields.py --root $(WORKSPACE) --manifest $(MANIFEST)
+plan-check-selftest: ; @uv run --frozen python ./check-plan-fields.py --selftest
+plan-check-fixture:  ; @uv run --frozen pytest tests/test_plan_check_fixture.py -q
 inbox:       ; @uv run --frozen python ./inbox.py --root ..
 morning:     ; @./repos.sh fetch && echo && ./repos.sh status && echo && uv run --frozen python ./inbox.py --root ..
 evening:     ; @./repos.sh evening
