@@ -62,7 +62,8 @@ def test_fixture_clean_workspace_exits_0(tmp_path):
     )
     code, out = _run(ws)
     assert code == 0, out
-    assert "0 error(s)" in out
+    # с запятой и пробелом: голое "0 error(s)" матчилось бы и в "10 error(s)"
+    assert ", 0 error(s)," in out
 
 
 def test_fixture_stale_blocker_exits_1_with_pf_blocker_stale(tmp_path):

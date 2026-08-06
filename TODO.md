@@ -49,7 +49,7 @@
       пина plan-fields, не состояние флота. Fixture-режим — pytest-тест на
       синтетическом workspace во временном каталоге (каталог `.git` — маркер
       чекаута для discovery — незакоммитим), доказывает ОБЕ стороны детектора:
-      clean=0 и stale=1 c PF-BLOCKER-STALE. (2) Локальный `make plan-check` —
+      clean=0 и stale=1 с PF-BLOCKER-STALE. (2) Локальный `make plan-check` —
       диагностика конкретного workspace; `WORKSPACE ?=` параметризован.
       (3) Scheduled fleet check (клон набора по манифесту в ephemeral
       workspace) — ОТДЕЛЬНАЯ операция и отдельный будущий пункт по решению
