@@ -61,7 +61,7 @@
 
 ## Freshness-сенсор арх-evidence
 
-- [ ] Freshness/drift-сенсор: upstream-drift вендоренных prograph-схем steward + свежесть conformance-evidence WS-005 @owner:github:andrei-shtanakov @id:arch-evidence-freshness-watch
+- [x] Freshness/drift-сенсор: upstream-drift вендоренных prograph-схем steward + свежесть conformance-evidence WS-005 @owner:github:andrei-shtanakov @id:arch-evidence-freshness-watch — PR #26; приёмка в контексте ниже
       Исполняет scheduled-обязательство `todo://steward/arch-evidence-freshness-watch`
       («вне CI этого репо» — здесь). Семантика — из пункта steward: обе вендоренные
       схемы + пара манифест/отчёт WS-005; свежесть по `snapshot.indexed_at`, не
@@ -91,6 +91,12 @@
       (drift / stale / unavailable / added-under-excluded-name) дают различимые
       статусы; отдельно проверка стороны чтения — просроченный статус читается
       потребителем как unknown, не как последний зелёный.
+      Приёмка пройдена 2026-08-06: два штатных launchd-прогона (08-05 и 08-06,
+      в 09:40 по местному времени) в launchd.log, оба clean; читатель clean/exit 0;
+      синтетика — 35 тестов PR #26. Показательно: prograph master уехал с пина
+      (8deb730 → efb4a5d), статус остался clean — сенсор сравнивает файлы
+      контрактной поверхности, а не коммиты (two-contract-guarantees, «files,
+      not manifests»). Обязательство steward закрыто встречным PR там же.
 
 ## Грамматика полей плана
 
