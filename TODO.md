@@ -110,6 +110,29 @@
       контрактной поверхности, а не коммиты (two-contract-guarantees, «files,
       not manifests»). Обязательство steward закрыто встречным PR там же.
 
+## Fleet plan-check по расписанию
+
+- [ ] Scheduled fleet plan-check: DAILY-прогон настоящего кросс-репного чекера над свежим клоном флота @owner:github:andrei-shtanakov @trigger:"после появления общего scheduled-run status/freshness-контракта в переходе launchd→CI" @id:scheduled-fleet-plan-check
+      Решение владельца 2026-08-06. Роль ≠ Robin (инвариант №2 соблюдён,
+      различие названо): Robin ежедневно ОБЪЯСНЯЕТ потенциальный застой
+      прозой; plan-check МАШИННО проверяет полный PF-контракт и выдаёт
+      воспроизводимый verdict/exit code — observability → enforcement
+      evidence. DAILY, не weekly: недельное окно слишком велико для
+      PF-BLOCKER-STALE (ошибочная зависимость тормозила бы работу шесть
+      дней); клоны публичных репо и прогон дёшевы.
+      Механика: workflow читает workspace-manifest.toml, клонирует
+      заявленный набор в ephemeral workspace, гоняет
+      `make plan-check WORKSPACE=$tmp` (параметризация уже есть).
+      Ограничители v1: красный Actions run + job summary + artifact, БЕЗ
+      автоматических кросс-репных issues; workflow_dispatch для ручного
+      прогона; concurrency cancel-in-progress; независимый reader проверяет
+      freshness последнего run и выводит unknown при молчании schedule;
+      Robin читает этот машинный verdict, а не пересчитывает PF-семантику.
+      Триггер НАМЕРЕННО не привязан к снятию launchd-plist: это разные
+      обязательства; общим должен быть способ публикации и контроля
+      молчания (status/freshness-контракт из перехода launchd→CI), а не
+      искусственная зависимость от удаления plist.
+
 ## Грамматика полей плана
 
 - [ ] Нормализовать `@owner`: сначала семантика четырёх нарушающих значений, затем одно решение на весь флот @owner:github:andrei-shtanakov @id:owner-grammar-semantics
