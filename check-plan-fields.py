@@ -157,16 +157,21 @@ def build_inputs(
 
 def resolve_graph(
     inputs: list[RepoInput], index: ManifestIndex, report: Report
-) -> None:
-    """Project the package's canonical + legacy diagnostics into the report."""
+) -> dict[tuple[str, int], set[str]]:
+    """Project graph diagnostics and return their one-pass per-item index."""
     snapshot = parse_fleet(inputs, index)
     canonical = list(snapshot["diagnostics"]) + check_fleet(snapshot)
+    by_item: dict[tuple[str, int], set[str]] = {}
     edges = snapshot["edges"]
     if edges:
         report.notes.append(
             f"canonical: {len(edges)} resolved cross-repo @id edge(s)"
         )
     for d in canonical:
+        prov = d.get("provenance") or {}
+        repo, line = prov.get("repo"), prov.get("line")
+        if isinstance(repo, str) and isinstance(line, int):
+            by_item.setdefault((repo, line), set()).add(d["code"])
         line = _canonical_line(d)
         if line is None:
             continue
@@ -176,10 +181,13 @@ def resolve_graph(
     exclude = {
         (r["provenance"]["repo"], r["raw_ref"]) for r in snapshot["references"]
     }
-    for d in check_legacy_fleet(inputs, index, exclude=exclude):
+    legacy = check_legacy_fleet(inputs, index, exclude=exclude)
+    for d in legacy:
+        by_item.setdefault((d.source_repo, d.source_line), set()).add(d.code)
         # transitional: always a warning, and marked as identity-less so a reader
         # never mistakes it for a stable-identity finding.
         report.warnings.append(f"{d.message}  [legacy source: no @id]")
+    return by_item
 
 
 def _canonical_line(diag: dict) -> str | None:
@@ -215,27 +223,6 @@ def _ownership_bucket(owner: str | None, index: ManifestIndex) -> str:
     raise AssertionError(f"unexpected owner kind: {owner_ref['kind']}")
 
 
-def _condition_codes(
-    inputs: list[RepoInput], index: ManifestIndex
-) -> dict[tuple[str, int], set[str]]:
-    """Condition diagnostics by source item, canonical and transitional."""
-    snapshot = parse_fleet(inputs, index)
-    diagnostics = list(snapshot["diagnostics"]) + check_fleet(snapshot)
-    by_item: dict[tuple[str, int], set[str]] = {}
-    for diag in diagnostics:
-        prov = diag.get("provenance") or {}
-        repo, line = prov.get("repo"), prov.get("line")
-        if isinstance(repo, str) and isinstance(line, int):
-            by_item.setdefault((repo, line), set()).add(diag["code"])
-    exclude = {
-        (ref["provenance"]["repo"], ref["raw_ref"])
-        for ref in snapshot["references"]
-    }
-    for diag in check_legacy_fleet(inputs, index, exclude=exclude):
-        by_item.setdefault((diag.source_repo, diag.source_line), set()).add(diag.code)
-    return by_item
-
-
 def _movement_bucket(item: ScrapedItem, codes: set[str]) -> str:
     """One movement bucket; malformed beats stale when conditions conflict."""
     if codes & _MALFORMED_BLOCKER_CODES:
@@ -250,13 +237,15 @@ def _movement_bucket(item: ScrapedItem, codes: set[str]) -> str:
 
 
 def check_reporting(
-    inputs: list[RepoInput], index: ManifestIndex, report: Report
+    inputs: list[RepoInput],
+    index: ManifestIndex,
+    condition_codes: dict[tuple[str, int], set[str]],
+    report: Report,
 ) -> None:
     """Publish independent ownership/movement totals and their full matrix."""
     ownership = {name: 0 for name in _OWNERSHIP}
     movement = {name: 0 for name in _MOVEMENT}
     matrix = {owner: {state: 0 for state in _MOVEMENT} for owner in _OWNERSHIP}
-    condition_codes = _condition_codes(inputs, index)
     open_count = 0
     for inp in sorted(inputs, key=lambda i: i.repo):
         if inp.todo_text is None:
@@ -303,7 +292,7 @@ def _selftest() -> int:
         ),
     ]
     report = Report()
-    resolve_graph(inputs, index, report)
+    condition_codes = resolve_graph(inputs, index, report)
     assert any("PF-BLOCKER-STALE" in e for e in report.errors), report.errors
     assert any("[legacy source: no @id]" in w for w in report.warnings), report.warnings
     assert not any("[legacy source: no @id]" in e for e in report.errors), report.errors
@@ -319,7 +308,9 @@ def _selftest() -> int:
             "- [ ] legacy @owner:tech-lead\n",
         )
     ]
-    check_reporting(reporting_inputs, ManifestIndex(frozenset({"m"}), {}), report)
+    reporting_index = ManifestIndex(frozenset({"m"}), {})
+    condition_codes = resolve_graph(reporting_inputs, reporting_index, report)
+    check_reporting(reporting_inputs, reporting_index, condition_codes, report)
     assert "human-owned=1" in report.notes[0], report.notes
     assert "repo-owned=1" in report.notes[0], report.notes
     assert "TBD=1" in report.notes[0], report.notes
@@ -384,8 +375,8 @@ def main() -> int:
         print(f"no repo with a TODO.md under {root}", file=sys.stderr)
         return 1
 
-    resolve_graph(inputs, index, report)
-    check_reporting(inputs, index, report)
+    condition_codes = resolve_graph(inputs, index, report)
+    check_reporting(inputs, index, condition_codes, report)
 
     for note in report.notes:
         print(f"       {note}")
