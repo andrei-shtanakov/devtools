@@ -93,9 +93,9 @@ members        = ["atp-core","atp-adapters","atp-dashboard","atp-method","atp-ga
 
 [apps.Maestro]
 package_name   = "maestro"
-repo_url       = "git@github.com:andrei-shtanakov/Maestro.git"
-git_dir        = "Maestro"
-pyproject_path = "Maestro/pyproject.toml"
+repo_url       = "git@github.com:andrei-shtanakov/maestro.git"
+git_dir        = "maestro"
+pyproject_path = "maestro/pyproject.toml"
 tag_pattern    = "v*"
 tag            = "v0.2.0"          # ⚠ pyproject=0.4.0 > tag: релиз не нарезан (tag_behind)
 sha            = "e4f0a9fa2884"     # commit тега v0.2.0 (провенанс, НЕ HEAD); проверяется sha_tag_mismatch
