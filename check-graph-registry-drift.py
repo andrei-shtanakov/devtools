@@ -39,6 +39,9 @@ Parser scope (deliberately simple; the registry is prose):
   * the "Not yet connected (0 graph edges):" name list.
 Anything the parser misses belongs in the allowlist with a reason, not in
 smarter regexes.
+
+Project names are compared case-folded on every side (registry, graph,
+allowlist) — see `_norm`.
 """
 
 from __future__ import annotations
@@ -71,9 +74,22 @@ NOT_CONNECTED_RE = re.compile(r"Not yet connected \(0 graph edges\):\**\s*([^.]+
 Pair = frozenset  # of two project names
 
 
+def _norm(name: str) -> str:
+    """Comparison key for a project name — case-folded.
+
+    Repo and path identifiers are lowercase by canon, but the registry is prose
+    and keeps product spellings: `Maestro` the product lives in `maestro/`, and
+    the map writes both. Without folding, one project splits into two nodes and
+    the SAME edge lands in UNDETECTED and UNDOCUMENTED at once — noise that
+    reads like real drift. Two projects differing only by case would collide
+    here; the workspace has none, and such a pair would be a naming bug anyway.
+    """
+    return name.casefold()
+
+
 def _clean(name: str) -> str:
     """Trim markdown/punctuation residue around a project name (`x`, *x*, x.)."""
-    return name.strip().strip("`*").rstrip(".")
+    return _norm(name.strip().strip("`*").rstrip("."))
 
 
 def _names(csv: str) -> list[str]:
@@ -103,7 +119,7 @@ def parse_registry(md: str) -> tuple[set[Pair], list[set[str]], set[str]]:
             continue
         km = COVERED_RE.search(ln)
         if km:
-            covered.append({km.group(1), *_names(km.group(2))})
+            covered.append({_clean(km.group(1)), *_names(km.group(2))})
             continue
         for am in ARROW_RE.finditer(ln):
             a = _clean(am.group("a"))
@@ -137,9 +153,12 @@ def graph_pairs(db_path: Path) -> set[Pair]:
         (latest,) = con.execute("SELECT MAX(id) FROM snapshots").fetchone()
         if latest is None:
             sys.exit(f"error: no snapshots in {db_path}")
-        name = dict(
-            con.execute("SELECT id, name FROM projects WHERE last_seen = ?", (latest,))
-        )
+        name = {
+            pid: _norm(pname)
+            for pid, pname in con.execute(
+                "SELECT id, name FROM projects WHERE last_seen = ?", (latest,)
+            )
+        }
         pairs: set[Pair] = set()
         rows = con.execute(
             "SELECT kind, from_kind, from_id, to_kind, to_id FROM edges WHERE last_seen = ?",
@@ -191,15 +210,17 @@ def load_allowlist() -> list[tuple[str, str, str]]:
                 f"error: allowlist entry {e['a']} / {e['b']} in {ALLOWLIST.name} "
                 f"has no reason (every entry must carry one)"
             )
-        rules.append((e["a"], e["b"], reason))
+        rules.append((_norm(e["a"]), _norm(e["b"]), reason))
     return rules
 
 
 def allowed(pair: Pair, rules: list[tuple[str, str, str]]) -> str | None:
     x, y = sorted(pair)
+    # fnmatchcase, not fnmatch: both sides are already folded by `_norm`, so the
+    # platform-dependent normcase fnmatch applies would only add surprise.
     for pa, pb, reason in rules:
-        if (fnmatch.fnmatch(x, pa) and fnmatch.fnmatch(y, pb)) or (
-            fnmatch.fnmatch(y, pa) and fnmatch.fnmatch(x, pb)
+        if (fnmatch.fnmatchcase(x, pa) and fnmatch.fnmatchcase(y, pb)) or (
+            fnmatch.fnmatchcase(y, pa) and fnmatch.fnmatchcase(x, pb)
         ):
             return reason or "(allowlisted)"
     return None
