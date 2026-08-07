@@ -8,6 +8,12 @@
 #
 # Оставлено как исторический snapshot (2026-07-12). НЕ редактировать как живой набор —
 # правки набора идут PR-ом в зонтик. Держать два живых манифеста = дубль SSOT (запрещено).
+#
+# Исключение (2026-08-07, решение владельца, issue #31): `Maestro` → `maestro`
+# во ВСЕХ вхождениях — component_id, пути, repo_url, ссылки consumers. Это
+# переименование идентификатора вслед за каноном репо, а не правка набора:
+# факты снимка (теги, sha, версии, install) не тронуты. Разнобой в написании
+# дороже неприкосновенности снимка — на нём уже сломался Check 3 conformance.
 # ============================================================================
 #
 # release-manifest.toml — БЫВШИЙ SSOT набора (исторический snapshot, schema v0.2).
@@ -71,7 +77,7 @@ lock_version   = "2.0.0"
 pin_range      = ">=2.0,<3"
 publish        = "pypi"
 rust           = false
-consumers      = ["Maestro"]
+consumers      = ["maestro"]
 
 [cores.atp-platform]                     # umbrella-дистрибутив
 package_name   = "atp-platform"
@@ -91,11 +97,11 @@ members        = ["atp-core","atp-adapters","atp-dashboard","atp-method","atp-ga
 # ══════════════ СЛОЙ ПРИЛОЖЕНИЙ ══════════════
 # Нет publish, чаще нет тега → install=git-sha с ОБЯЗАТЕЛЬНЫМ sha (HEAD запрещён).
 
-[apps.Maestro]
+[apps.maestro]
 package_name   = "maestro"
-repo_url       = "git@github.com:andrei-shtanakov/Maestro.git"
-git_dir        = "Maestro"
-pyproject_path = "Maestro/pyproject.toml"
+repo_url       = "git@github.com:andrei-shtanakov/maestro.git"
+git_dir        = "maestro"
+pyproject_path = "maestro/pyproject.toml"
 tag_pattern    = "v*"
 tag            = "v0.2.0"          # ⚠ pyproject=0.4.0 > tag: релиз не нарезан (tag_behind)
 sha            = "e4f0a9fa2884"     # commit тега v0.2.0 (провенанс, НЕ HEAD); проверяется sha_tag_mismatch
