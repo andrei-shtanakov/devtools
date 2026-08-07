@@ -18,7 +18,7 @@ Workspace-тулинг экосистемы AI-оркестраторов. Жи�
 | `check-contract-drift.sh` | diff вендоренных контрактов между репо (obs.py, report_benchmark schema) |
 | `check-agent-id-conformance.py` | инварианты ADR-ECO-003: SSOT agents-catalog ↔ arbiter ↔ Maestro |
 | `check-graph-registry-drift.py` | граф prograph (derived) ↔ карта интеграций registry (authored); allowlist для файловых/runtime-связей |
-| `check-plan-fields.py` | граф `@blocked_by` между `TODO.md` всех репо + покрытие `@owner`/`@id` + расхождение форм тегов (`make plan-check`). **Тонкая обёртка над пакетом `plan-fields`** — парсинг/резолюция из пакета; **требует `uv` + Python 3.12** (см. ниже) |
+| `check-plan-fields.py` | граф `@blocked_by` между `TODO.md` всех репо + ownership/movement totals и матрица (`make plan-check`). **Тонкая обёртка над пакетом `plan-fields`** — grammar/парсинг/резолюция из пакета; **требует `uv` + Python 3.12** (см. ниже) |
 | `inbox.py` | входящие кросс-репные запросы: открытые issues с лейблом `inbox` + вывод принятия по `TODO.md` целевого репо (ADR-ECO-006); разбор пунктов — общий пакет `plan-fields`, поэтому `uv` + Python 3.12, как у `check-plan-fields.py`; `make inbox` |
 | `discover_models.py` | discovery моделей провайдеров (ADR-ECO-003a): отчёт + Plane-1 TOML для PR |
 | `gen_agents_toml.py` | генерация секций agents.toml из benchmark_runs (arbiter.db) |
@@ -70,6 +70,17 @@ identity это не error; канонический stale по `@id` — вал
 авторитет существования репо, поэтому «no TODO / not cloned» уточняются до
 `REPO-UNKNOWN` (plan defect) / `UNRESOLVABLE` / `NO-TODO`; в покрытие добавлен
 счётчик `@id` (backlog PF-2B), плюс строка `canonical: N resolved @id edge(s)`.
+
+ADR-ECO-005a разделяет две независимые оси. Ownership публикуется как
+`human-owned | repo-owned | TBD | missing | invalid-owner |
+unknown-repo-owner`; movement — как `actionable | waiting-by-trigger |
+waiting-by-blocker | stale-condition | malformed-condition`. `plan-check`
+печатает обе суммы и полную матрицу ownership × movement. Каждая открытая
+строка входит ровно в одну ячейку, включая строки без `@id`; trigger или blocker
+никогда не превращается в owner. При конфликте условий fail-closed приоритет:
+`malformed-condition` → `stale-condition` → blocker → trigger → actionable.
+Owner grammar не копируется в devtools: даже для строк без `@id` используется
+публичный `plan_fields.parse_owner()` из immutable pin.
 
 ## Fleet-агент
 

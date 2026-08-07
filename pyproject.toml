@@ -16,7 +16,7 @@ package = false
 # Pinned to an IMMUTABLE dispatcher commit, fetched by git — never a
 # workspace-relative path, so the pin is reproducible and does not follow a
 # sibling checkout. Bump deliberately in its own PR.
-plan-fields = { git = "https://github.com/andrei-shtanakov/dispatcher", rev = "80e40ad6a82a7c779eb8ae84f7db067a478edfce", subdirectory = "packages/plan-fields" }
+plan-fields = { git = "https://github.com/andrei-shtanakov/dispatcher", rev = "65f03ea9e5964e4488bcd254e491fc42abb1bd96", subdirectory = "packages/plan-fields" }
 
 [dependency-groups]
 dev = ["pytest>=8"]

@@ -34,7 +34,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "plan-fields", git = "https://github.com/andrei-shtanakov/dispatcher?subdirectory=packages%2Fplan-fields&rev=80e40ad6a82a7c779eb8ae84f7db067a478edfce" }]
+requires-dist = [{ name = "plan-fields", git = "https://github.com/andrei-shtanakov/dispatcher?subdirectory=packages%2Fplan-fields&rev=65f03ea9e5964e4488bcd254e491fc42abb1bd96" }]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8" }]
@@ -86,8 +86,8 @@ wheels = [
 
 [[package]]
 name = "plan-fields"
-version = "0.7.0"
-source = { git = "https://github.com/andrei-shtanakov/dispatcher?subdirectory=packages%2Fplan-fields&rev=80e40ad6a82a7c779eb8ae84f7db067a478edfce#80e40ad6a82a7c779eb8ae84f7db067a478edfce" }
+version = "0.8.1"
+source = { git = "https://github.com/andrei-shtanakov/dispatcher?subdirectory=packages%2Fplan-fields&rev=65f03ea9e5964e4488bcd254e491fc42abb1bd96#65f03ea9e5964e4488bcd254e491fc42abb1bd96" }
 dependencies = [
     { name = "jsonschema" },
 ]
