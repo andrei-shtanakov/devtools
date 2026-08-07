@@ -38,7 +38,6 @@ Usage (via uv, so the pinned package resolves):
 from __future__ import annotations
 
 import argparse
-import re
 import socket
 import sys
 from dataclasses import dataclass, field
@@ -48,9 +47,11 @@ try:
     from plan_fields import (
         ManifestIndex,
         RepoInput,
+        ScrapedItem,
         check_fleet,
         check_legacy_fleet,
         parse_fleet,
+        parse_owner,
         scrape_items,
     )
     from plan_fields import fleet as _pf_fleet
@@ -66,16 +67,6 @@ except ImportError:  # pragma: no cover - exercised by humans, not the suite
     )
     raise SystemExit(2)
 
-# @owner strict grammar is devtools' OWN reporting policy, not the contract's —
-# reported, never failed. Applied to owner values the shared scraper extracts;
-# the contract's DEC-007 role-slug view (PF-OWNER-*) is a separate, @id-only
-# concern we deliberately do not double-report here.
-STRICT_OWNER = re.compile(
-    r"^(?:github:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
-    r"|github-team:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"
-    r"|TBD)[.,;:)]?$"
-)
-
 # devtools severity policy — a thin projection of the package's stable codes.
 # A canonical stale (stable @id identity) is the only build-failing error; every
 # other canonical finding, and every legacy finding, is a warning.
@@ -87,6 +78,31 @@ class Report:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+
+
+_OWNERSHIP = (
+    "human-owned",
+    "repo-owned",
+    "TBD",
+    "missing",
+    "invalid-owner",
+    "unknown-repo-owner",
+)
+_MOVEMENT = (
+    "actionable",
+    "waiting-by-trigger",
+    "waiting-by-blocker",
+    "stale-condition",
+    "malformed-condition",
+)
+_MALFORMED_BLOCKER_CODES = {
+    "PF-ID-DANGLING",
+    "PF-BLOCKER-DANGLING",
+    "PF-BLOCKER-UNRESOLVABLE",
+    "PF-BLOCKER-NO-TODO",
+    "PF-BLOCKER-REPO-UNKNOWN",
+    "PF-LEGACY-AMBIGUOUS",
+}
 
 
 def find_root(explicit: str | None) -> Path:
@@ -173,42 +189,102 @@ def _canonical_line(diag: dict) -> str | None:
     operational coverage/divergence notes instead, so they are skipped here.
     """
     code = diag["code"]
-    if code in {"PF-ID-MISSING", "PF-OWNER-MISSING", "PF-OWNER-GRAMMAR"}:
+    if code == "PF-ID-MISSING" or code.startswith("PF-OWNER-"):
         return None
     return f"{diag['message']} [{code}]"
 
 
-def check_coverage(inputs: list[RepoInput], report: Report) -> None:
-    """Operational @owner + @id coverage per repo, from the shared scraper."""
+def _ownership_bucket(owner: str | None, index: ManifestIndex) -> str:
+    """One ADR-ECO-005a ownership bucket, using only package grammar."""
+    owner_ref, _owner_role, diagnostic = parse_owner(owner)
+    if diagnostic == "PF-OWNER-MISSING":
+        return "missing"
+    if diagnostic is not None:
+        return "invalid-owner"
+    assert owner_ref is not None
+    if owner_ref["kind"] in {"github_user", "github_team"}:
+        return "human-owned"
+    if owner_ref["kind"] == "tbd":
+        return "TBD"
+    if owner_ref["kind"] == "repository":
+        return (
+            "repo-owned"
+            if owner_ref["id"] in index.canonical_keys
+            else "unknown-repo-owner"
+        )
+    raise AssertionError(f"unexpected owner kind: {owner_ref['kind']}")
+
+
+def _condition_codes(
+    inputs: list[RepoInput], index: ManifestIndex
+) -> dict[tuple[str, int], set[str]]:
+    """Condition diagnostics by source item, canonical and transitional."""
+    snapshot = parse_fleet(inputs, index)
+    diagnostics = list(snapshot["diagnostics"]) + check_fleet(snapshot)
+    by_item: dict[tuple[str, int], set[str]] = {}
+    for diag in diagnostics:
+        prov = diag.get("provenance") or {}
+        repo, line = prov.get("repo"), prov.get("line")
+        if isinstance(repo, str) and isinstance(line, int):
+            by_item.setdefault((repo, line), set()).add(diag["code"])
+    exclude = {
+        (ref["provenance"]["repo"], ref["raw_ref"])
+        for ref in snapshot["references"]
+    }
+    for diag in check_legacy_fleet(inputs, index, exclude=exclude):
+        by_item.setdefault((diag.source_repo, diag.source_line), set()).add(diag.code)
+    return by_item
+
+
+def _movement_bucket(item: ScrapedItem, codes: set[str]) -> str:
+    """One movement bucket; malformed beats stale when conditions conflict."""
+    if codes & _MALFORMED_BLOCKER_CODES:
+        return "malformed-condition"
+    if "PF-BLOCKER-STALE" in codes:
+        return "stale-condition"
+    if item.values("blocked_by"):
+        return "waiting-by-blocker"
+    if item.tags.get("trigger"):
+        return "waiting-by-trigger"
+    return "actionable"
+
+
+def check_reporting(
+    inputs: list[RepoInput], index: ManifestIndex, report: Report
+) -> None:
+    """Publish independent ownership/movement totals and their full matrix."""
+    ownership = {name: 0 for name in _OWNERSHIP}
+    movement = {name: 0 for name in _MOVEMENT}
+    matrix = {owner: {state: 0 for state in _MOVEMENT} for owner in _OWNERSHIP}
+    condition_codes = _condition_codes(inputs, index)
+    open_count = 0
     for inp in sorted(inputs, key=lambda i: i.repo):
         if inp.todo_text is None:
             continue
         opens = [i for i in scrape_items(inp.todo_text) if not i.checked]
-        if not opens:
-            continue
-        owned = [i for i in opens if i.tags.get("owner")]
-        ided = [i for i in opens if i.item_id]
-        note = f"{inp.repo}: {len(owned)}/{len(opens)} open items carry @owner"
-        if len(ided) < len(opens):
-            note += f", {len(ided)}/{len(opens)} carry @id (PF-2B backlog)"
-        report.notes.append(note)
-
-
-def check_divergence(inputs: list[RepoInput], report: Report) -> None:
-    """Report @owner values outside devtools' strict grammar, without failing."""
-    for inp in sorted(inputs, key=lambda i: i.repo):
-        if inp.todo_text is None:
-            continue
-        seen: set[str] = set()
-        for item in scrape_items(inp.todo_text):
-            for value in item.values("owner"):
-                if not STRICT_OWNER.match(value):
-                    seen.add(value)
-        if seen:
-            report.notes.append(
-                f"{inp.repo}: @owner values outside the strict grammar — "
-                f"{', '.join(sorted(seen))}"
+        for item in opens:
+            owner = _ownership_bucket(item.tags.get("owner"), index)
+            state = _movement_bucket(
+                item, condition_codes.get((inp.repo, item.line), set())
             )
+            ownership[owner] += 1
+            movement[state] += 1
+            matrix[owner][state] += 1
+            open_count += 1
+    assert sum(ownership.values()) == open_count
+    assert sum(movement.values()) == open_count
+    assert sum(sum(row.values()) for row in matrix.values()) == open_count
+    report.notes.append(
+        "ownership: " + ", ".join(f"{key}={ownership[key]}" for key in _OWNERSHIP)
+    )
+    report.notes.append(
+        "movement: " + ", ".join(f"{key}={movement[key]}" for key in _MOVEMENT)
+    )
+    for owner in _OWNERSHIP:
+        report.notes.append(
+            f"ownership×movement {owner}: "
+            + ", ".join(f"{state}={matrix[owner][state]}" for state in _MOVEMENT)
+        )
 
 
 def _selftest() -> int:
@@ -233,14 +309,23 @@ def _selftest() -> int:
     assert not any("[legacy source: no @id]" in e for e in report.errors), report.errors
 
     report = Report()
-    check_divergence([RepoInput("arbiter", "- [ ] a @owner:andrei\n")], report)
-    assert report.notes and "andrei" in report.notes[0], report.notes
-
-    report = Report()
-    check_coverage([RepoInput("m", "- [ ] a @owner:o\n")], report)
-    assert report.notes == ["m: 1/1 open items carry @owner, 0/1 carry @id (PF-2B backlog)"], (
-        report.notes
-    )
+    reporting_inputs = [
+        RepoInput(
+            "m",
+            "- [ ] human @owner:github:x @trigger:\"release\"\n"
+            "- [ ] repo @owner:repo:m\n"
+            "- [ ] undecided @owner:TBD\n"
+            "- [ ] absent\n"
+            "- [ ] legacy @owner:tech-lead\n",
+        )
+    ]
+    check_reporting(reporting_inputs, ManifestIndex(frozenset({"m"}), {}), report)
+    assert "human-owned=1" in report.notes[0], report.notes
+    assert "repo-owned=1" in report.notes[0], report.notes
+    assert "TBD=1" in report.notes[0], report.notes
+    assert "missing=1" in report.notes[0], report.notes
+    assert "invalid-owner=1" in report.notes[0], report.notes
+    assert "waiting-by-trigger=1" in report.notes[1], report.notes
     print("selftest OK")
     return 0
 
@@ -300,8 +385,7 @@ def main() -> int:
         return 1
 
     resolve_graph(inputs, index, report)
-    check_coverage(inputs, report)
-    check_divergence(inputs, report)
+    check_reporting(inputs, index, report)
 
     for note in report.notes:
         print(f"       {note}")
