@@ -79,6 +79,6 @@
 
 - COWORK_CONTEXT.md — реестр, карта интеграций, контрактные точки
 - .prograph/projects/*.md — паспорта (public surface, contracts, MCP tools)
-- Maestro/README.md §Optional: Arbiter routing — опциональность роутинга
+- maestro/README.md §Optional: Arbiter routing — опциональность роутинга
 - dispatcher/dispatcher/core/collectors/ — файловые read-only связи
 - devtools/check-graph-registry-drift.py — контроль граф ↔ реестр
