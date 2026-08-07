@@ -13,11 +13,25 @@
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[1] / "check-plan-fields.py"
+
+
+@pytest.fixture(scope="module")
+def plan_check():
+    spec = importlib.util.spec_from_file_location("plan_check_reporting", SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load plan checker from {SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["plan_check_reporting"] = module
+    spec.loader.exec_module(module)
+    return module
 
 MANIFEST = (
     'schema_version = "0.3.0"\n'
@@ -107,3 +121,32 @@ def test_reporting_splits_ownership_movement_and_full_matrix(tmp_path):
     assert len(matrix_lines) == 6
     assert "missing: actionable=0" in out
     assert "stale-condition=1" in next(line for line in matrix_lines if "missing:" in line)
+
+
+def test_reporting_reuses_the_graph_analysis(plan_check, monkeypatch):
+    calls = {"parse_fleet": 0, "legacy": 0}
+    real_parse_fleet = plan_check.parse_fleet
+    real_legacy = plan_check.check_legacy_fleet
+
+    def counted_parse_fleet(*args, **kwargs):
+        calls["parse_fleet"] += 1
+        return real_parse_fleet(*args, **kwargs)
+
+    def counted_legacy(*args, **kwargs):
+        calls["legacy"] += 1
+        return real_legacy(*args, **kwargs)
+
+    monkeypatch.setattr(plan_check, "parse_fleet", counted_parse_fleet)
+    monkeypatch.setattr(plan_check, "check_legacy_fleet", counted_legacy)
+    inputs = [
+        plan_check.RepoInput(
+            "demo", "- [ ] work @owner:github:x @trigger:\"go\" @id:work\n"
+        )
+    ]
+    index = plan_check.ManifestIndex(frozenset({"demo"}), {})
+    report = plan_check.Report()
+
+    condition_codes = plan_check.resolve_graph(inputs, index, report)
+    plan_check.check_reporting(inputs, index, condition_codes, report)
+
+    assert calls == {"parse_fleet": 1, "legacy": 1}
