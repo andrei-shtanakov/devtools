@@ -13,8 +13,10 @@ loud CI failure.
 Checks (ADR-ECO-003 §CI-conformance, pre-D2 variant):
   1. Every `routable = true` agent_id has a byte-for-byte `["<id>"]` section in
      arbiter/config/agents.toml.
-  2. Every non-canon copy (arbiter/config/, _cowork_output/contracts/ mirror) is
-     byte-for-byte identical to the SSOT — so all consumers see the same pairs.
+  2. Every VENDORED copy — today just arbiter/config/ — is byte-for-byte
+     identical to the SSOT, so all consumers see the same pairs. The
+     `_cowork_output/contracts/` mirror is deliberately NOT gated; see the
+     `vendored_copies` comment for the owner ruling behind that.
   3. Every `routable = true` harness has a registered Maestro spawner — i.e. a
      concrete AgentSpawner in maestro/spawners/ whose `agent_type` returns it
      (SpawnerRegistry membership, per ADR-002 D2; superseded the AgentType enum
@@ -149,11 +151,18 @@ def main() -> int:
     # dev folder into a production dependency. contracts/ = communication mirror.
     ssot = root / "atp-platform" / "method" / "agents-catalog.toml"
     # Every copy that must stay byte-for-byte identical to the SSOT.
+    #
+    # `_cowork_output/contracts/agents-catalog.toml` is deliberately absent, and
+    # re-adding it would be a regression (owner ruling 2026-08-07, item
+    # `check2-cowork-mirror-gate`). A gate needs an owner who can be told to fix
+    # it: arbiter vendors its copy inside its own repo and can. The mirror lives
+    # in the umbrella's dev scratch — outside every product repo, with no PR flow
+    # and no release step that could own it atomically. Gating it produced a red
+    # with no addressee, which is worse than no gate: it decays into a signal
+    # everyone learns to skip. So the mirror stays a communication snapshot with
+    # NO freshness guarantee, and its drift never fails conformance.
     vendored_copies = {
         "arbiter": root / "arbiter" / "config" / "agents-catalog.toml",
-        "workspace-mirror (contracts/)": (
-            root / "_cowork_output" / "contracts" / "agents-catalog.toml"
-        ),
     }
     arbiter_toml = root / "arbiter" / "config" / "agents.toml"
     maestro_spawners = root / "maestro" / "maestro" / "spawners"
@@ -206,8 +215,8 @@ def main() -> int:
             drifted = True
     if not drifted:
         oks.append(
-            f"[2] all {len(vendored_copies)} vendored copies "
-            f"({', '.join(vendored_copies)}) match SSOT byte-for-byte"
+            f"[2] vendored copies match SSOT byte-for-byte "
+            f"({', '.join(vendored_copies)})"
         )
 
     # --- Check 3: routable harness ↔ Maestro spawner registry membership (D2) ---
