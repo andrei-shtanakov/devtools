@@ -80,8 +80,10 @@ def discover_repos(root: Path) -> dict[str, Path | None]:
 
     Discovery is devtools' own concern (the wrapper keeps its `build_inputs` for
     the same reason); only *parsing* comes from the package. Names come from
-    `canonical_name`, never from the directory: `maestro` upstream is `Maestro/`
-    on this disk, and GitHub reports the canonical spelling.
+    `canonical_name` (the repo's origin URL), never from the directory, because
+    a folder is free to disagree with the clone it holds: `atp-platform-testing`
+    sits in `atp-platform-testing-en/` and `dispatcher` in `dispatcher-v1-wt/` on
+    this disk, while GitHub reports the canonical spelling either way.
     """
     found: dict[str, Path | None] = {}
     for child in sorted(root.iterdir()):

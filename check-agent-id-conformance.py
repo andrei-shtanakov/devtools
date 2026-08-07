@@ -156,7 +156,7 @@ def main() -> int:
         ),
     }
     arbiter_toml = root / "arbiter" / "config" / "agents.toml"
-    maestro_spawners = root / "Maestro" / "maestro" / "spawners"
+    maestro_spawners = root / "maestro" / "maestro" / "spawners"
 
     if not ssot.exists():
         print(f"✗ SSOT catalog missing: {ssot}")
