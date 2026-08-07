@@ -34,6 +34,7 @@ REGISTRY = """
 
 - `Maestro → spec-runner` via `plan --full` CLI.
 - `maestro → arbiter` via MCP.
+- Maestro internal sub-package graph (Arbiter, spec-runner).
 
 ## Next section
 """
@@ -44,6 +45,12 @@ def test_registry_names_fold_to_one_node(drift):
     pairs, _covered, _unconnected = drift.parse_registry(REGISTRY)
     names = {n for pair in pairs for n in pair}
     assert names == {"maestro", "spec-runner", "arbiter"}
+
+
+def test_covered_group_owner_and_members_fold_together(drift):
+    """The COVERED shorthand follows the same normalization as arrow pairs."""
+    _pairs, covered, _unconnected = drift.parse_registry(REGISTRY)
+    assert {"maestro", "arbiter", "spec-runner"} in covered
 
 
 def test_allowlist_covers_pair_whatever_the_spelling(drift):

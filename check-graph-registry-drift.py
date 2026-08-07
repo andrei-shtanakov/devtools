@@ -119,7 +119,7 @@ def parse_registry(md: str) -> tuple[set[Pair], list[set[str]], set[str]]:
             continue
         km = COVERED_RE.search(ln)
         if km:
-            covered.append({km.group(1), *_names(km.group(2))})
+            covered.append({_clean(km.group(1)), *_names(km.group(2))})
             continue
         for am in ARROW_RE.finditer(ln):
             a = _clean(am.group("a"))
