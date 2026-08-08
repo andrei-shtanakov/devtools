@@ -132,6 +132,17 @@
       обязательства; общим должен быть способ публикации и контроля
       молчания (status/freshness-контракт из перехода launchd→CI), а не
       искусственная зависимость от удаления plist.
+      Триггер СРАБОТАЛ 2026-08-08 (контракт envelope + паттерн workflow —
+      переход launchd→CI завершён). Реализация: `clone_fleet.py` (клон
+      набора по манифесту; общие git_dir дедуплицируются; недоступный
+      remote = громкий exit 3 — молча уменьшенная поверхность читалась бы
+      как чистая) + `.github/workflows/fleet-plan-check.yml` (cron 06:20
+      UTC, envelope `fleet-plan-check-run/v1`, verdict только по exit
+      чекера). Живой ephemeral-смоук на реальном манифесте: 15 клонов,
+      0 failed, plan-check 0 err/0 warn. Приёмка до закрытия пункта:
+      dispatch-smoke + synthetic=stale (красный run + PF-BLOCKER-STALE в
+      логе + envelope/artifact) + два штатных cron-прогона; затем
+      reader-запрос в robin (расширение паттерна robin-runtime#42).
 
 ## Грамматика полей плана
 
