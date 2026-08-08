@@ -92,9 +92,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="переписать ssh-URL'ы на https (CI без ключа)")
     parser.add_argument("--depth", type=int, default=1)
     args = parser.parse_args(argv)
-    return clone_fleet(
-        args.manifest, args.root, https=args.https, depth=args.depth
-    )
+    try:
+        return clone_fleet(
+            args.manifest, args.root, https=args.https, depth=args.depth
+        )
+    except (OSError, tomllib.TOMLDecodeError) as err:
+        print(f"clone-fleet: манифест не прочитан/не разобран: {err}",
+              file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

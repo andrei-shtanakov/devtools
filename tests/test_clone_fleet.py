@@ -101,6 +101,18 @@ def test_unreachable_remote_fails_loud_after_trying_all(tmp_path):
     assert (root / "beta" / "TODO.md").is_file()
 
 
+def test_unparseable_manifest_exits_2_with_message(tmp_path):
+    manifest = _manifest(tmp_path, "не toml [[[")
+    code, out = _run(manifest, tmp_path / "ws")
+    assert code == 2, out
+    assert "не разобран" in out
+
+
+def test_missing_manifest_exits_2(tmp_path):
+    code, out = _run(tmp_path / "absent.toml", tmp_path / "ws")
+    assert code == 2, out
+
+
 def test_normalize_url_rewrites_ssh_to_https_only():
     assert (
         normalize_url("git@github.com:owner/repo.git", https=True)

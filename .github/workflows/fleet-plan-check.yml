@@ -46,6 +46,13 @@ jobs:
           python3 ./clone_fleet.py \
             --manifest "$RUNNER_TEMP/ws/ai-orchestrators-workspace/workspace-manifest.toml" \
             --root "$RUNNER_TEMP/ws" --https --depth 1 | tee out/clone.log
+          clone_exit=${PIPESTATUS[0]}
+          # tee маскирует exit скрипта; частично склонированный флот обязан
+          # быть красным (infrastructure), а не тихо уменьшенной поверхностью
+          if [ "$clone_exit" != "0" ]; then
+            echo "clone-fleet failed (exit $clone_exit)"
+            exit "$clone_exit"
+          fi
 
       - name: synthetic stale (только ручной прогон)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.synthetic == 'stale' }}
