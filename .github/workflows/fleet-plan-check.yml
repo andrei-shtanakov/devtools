@@ -1,0 +1,130 @@
+# Scheduled fleet plan-check (@id:scheduled-fleet-plan-check, решение
+# владельца 2026-08-06): DAILY-прогон НАСТОЯЩЕГО кросс-репного plan-check
+# над свежим клоном флота. Роль ≠ Robin: Robin объясняет застой прозой,
+# здесь — машинный вердикт полного PF-контракта (observability →
+# enforcement evidence). Это наблюдение, НЕ гейт чьего-либо PR.
+# v1-ограничители: красный run + job summary + artifact, БЕЗ кросс-репных
+# issues. Actions запинены полными commit SHA; недоверенный ввод в
+# run-командах не интерполируется (единственный вход — choice-типизированный
+# synthetic, только в if:).
+name: fleet-plan-check
+
+on:
+  schedule:
+    - cron: "20 6 * * *" # ежедневно 06:20 UTC — после arch-freshness steward
+  workflow_dispatch:
+    inputs:
+      synthetic:
+        description: "stale — вживить в ephemeral-клон канонический блокер на закрытую работу"
+        default: "none"
+        type: choice
+        options: ["none", "stale"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fleet-plan-check
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - run: uv python install 3.12
+      - run: uv sync --frozen
+
+      - name: clone fleet (манифест зонтика → ephemeral workspace)
+        id: fleet
+        run: |
+          mkdir -p out
+          git clone --quiet --depth 1 \
+            https://github.com/andrei-shtanakov/ai-orchestrators-workspace.git \
+            "$RUNNER_TEMP/ws/ai-orchestrators-workspace"
+          python3 ./clone_fleet.py \
+            --manifest "$RUNNER_TEMP/ws/ai-orchestrators-workspace/workspace-manifest.toml" \
+            --root "$RUNNER_TEMP/ws" --https --depth 1 | tee out/clone.log
+          clone_exit=${PIPESTATUS[0]}
+          # tee маскирует exit скрипта; частично склонированный флот обязан
+          # быть красным (infrastructure), а не тихо уменьшенной поверхностью
+          if [ "$clone_exit" != "0" ]; then
+            echo "clone-fleet failed (exit $clone_exit)"
+            exit "$clone_exit"
+          fi
+
+      - name: synthetic stale (только ручной прогон)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.synthetic == 'stale' }}
+        run: |
+          printf -- '- [ ] synthetic fleet-check probe @owner:github:andrei-shtanakov @blocked_by:todo://steward/gate-verdicts-schema @id:synthetic-fleet-check-probe\n' \
+            >> "$RUNNER_TEMP/ws/steward/TODO.md"
+
+      - name: plan-check
+        id: check
+        run: |
+          set +e
+          make plan-check WORKSPACE="$RUNNER_TEMP/ws" | tee out/plan-check.log
+          echo "domain_exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          # красным job станет в шаге verdict — сначала публикуем evidence
+          exit 0
+
+      - name: envelope + job summary
+        if: always()
+        env:
+          DOMAIN_EXIT: ${{ steps.check.outputs.domain_exit }}
+        run: |
+          mkdir -p out
+          if [ -z "${DOMAIN_EXIT:-}" ] || [ ! -f out/plan-check.log ]; then
+            export EXEC_STATUS=incomplete
+          else
+            export EXEC_STATUS=completed
+          fi
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+
+          env = os.environ
+          domain = env.get("DOMAIN_EXIT") or None
+          payload = {
+              "schema": "fleet-plan-check-run/v1",
+              "execution_status": env["EXEC_STATUS"],
+              "domain_exit": int(domain) if domain is not None else None,
+              "producer": "github-actions",
+              "repository": env.get("GITHUB_REPOSITORY"),
+              "workflow": env.get("GITHUB_WORKFLOW"),
+              "run_id": env.get("GITHUB_RUN_ID"),
+              "run_attempt": env.get("GITHUB_RUN_ATTEMPT"),
+              "workflow_sha": env.get("GITHUB_SHA"),
+              "event": env.get("GITHUB_EVENT_NAME"),
+              "completed_at": datetime.datetime.now(datetime.timezone.utc)
+                  .strftime("%Y-%m-%dT%H:%M:%SZ"),
+          }
+          with open("out/run-envelope.json", "w") as fh:
+              json.dump(payload, fh, indent=1)
+          PY
+          {
+            echo "## fleet-plan-check"
+            echo '```'
+            tail -40 out/plan-check.log 2>/dev/null || echo "plan-check.log отсутствует (clone/checker не отработал)"
+            echo '```'
+            echo '```json'
+            cat out/run-envelope.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Публикация — best-effort: её транзиентный сбой не должен красить job
+      # при чистом чекере. Вердикт решает ТОЛЬКО финальный шаг verdict.
+      - name: publish artifact
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fleet-plan-check-status
+          path: out/
+
+      - name: verdict
+        env:
+          DOMAIN_EXIT: ${{ steps.check.outputs.domain_exit }}
+        run: exit "${DOMAIN_EXIT:-4}"
