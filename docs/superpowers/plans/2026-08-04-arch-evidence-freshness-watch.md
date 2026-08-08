@@ -1,5 +1,14 @@
 # Arch-Evidence Freshness Watch Implementation Plan
 
+> **ИСТОРИЧЕСКАЯ ЗАПИСЬ (реализовано PR #26, 2026-08-04).** Упоминаемый здесь
+> launchd-планировщик был ЯВНО interim и снят 2026-08-08: цели
+> `arch-freshness-schedule`/`-unschedule` и plist-шаблон удалены (devtools#38).
+> Актуальная вахта — scheduled-workflow `arch-evidence-freshness` в steward
+> (расписание у владельца обязательства; независимый reader свежести runs —
+> robin-runtime#42). Команды Task 9, ссылающиеся на планировщик, больше не
+> существуют — не исполнять. `make arch-freshness`/`-read` остаются локальной
+> диагностикой.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Scheduled READ-ONLY сенсор, исполняющий `todo://steward/arch-evidence-freshness-watch`: upstream-drift обеих вендоренных prograph-схем в steward + свежесть evidence-пары WS-005, с долговечным статус-файлом и reader-derived `unknown`.
