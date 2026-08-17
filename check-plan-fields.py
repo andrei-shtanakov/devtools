@@ -20,6 +20,13 @@ all parsing, reference resolution and graph diagnostics from the package:
     `[legacy source: no @id]` and are always warnings: without a stable identity a
     stale legacy blocker must not fail the build (it nudges @id migration instead).
 
+One resolution stays devtools' own, beside the package: the ISSUE form
+`@blocked_by:<repo>#<number>` (an ADR-ECO-006 inbox issue in the target repo).
+Its state lives on GitHub, not in any TODO.md, so `check_issue_blockers`
+resolves it via `gh`: a closed issue under an open item is a PF-BLOCKER-STALE
+error, same class as the canonical `todo://` edge; a failed lookup is an
+explicit UNAVAILABLE warning, never silently clean (two-contract-guarantees).
+
 Runtime: the `plan-fields` package needs **Python 3.12** and is a pinned
 dependency, so THIS script runs under `uv` (`make plan-check` → `uv run
 --frozen`). The other devtools scripts remain stdlib / Python 3.11 — only this
@@ -38,8 +45,13 @@ Usage (via uv, so the pinned package resolves):
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import socket
+import subprocess
 import sys
+import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -104,6 +116,155 @@ _MALFORMED_BLOCKER_CODES = {
     "PF-LEGACY-AMBIGUOUS",
 }
 
+# ADR-ECO-006 issue-form blocker: `<repo>#<number>` where the fragment is all
+# digits names an inbox ISSUE in the target repo, not a TODO slug. Its state
+# lives on GitHub, so it is resolved here (the package's legacy graph only
+# text-matches slugs and must not see these refs).
+_ISSUE_REF_RE = re.compile(r"^([a-z0-9][a-z0-9._-]*)#([0-9]+)$", re.IGNORECASE)
+_GITHUB_URL_RE = re.compile(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/*$")
+
+
+@dataclass(frozen=True)
+class IssueRef:
+    """One `@blocked_by:<repo>#<number>` on an open item — an ADR-ECO-006 wait."""
+
+    source_repo: str
+    line: int
+    target_repo: str  # canonical key (or lower-cased name if unknown)
+    number: int
+    raw_ref: str  # exactly as written — text, not identity
+
+
+class IssueStateUnavailable(Exception):
+    """GitHub did not answer; carries the honest reason. Never means 'clean'."""
+
+
+def collect_issue_refs(inputs: list[RepoInput], index: ManifestIndex) -> list[IssueRef]:
+    """Every issue-form blocker on an open item, @id'd or not.
+
+    The form is transitional either way, but its STATE is checkable today —
+    and a closed issue under an open item is exactly the wait that rots.
+    """
+    refs: list[IssueRef] = []
+    for inp in inputs:
+        if inp.todo_text is None:
+            continue
+        for item in scrape_items(inp.todo_text):
+            if item.checked:
+                continue
+            for raw in item.values("blocked_by"):
+                m = _ISSUE_REF_RE.match(raw)
+                if m is None:
+                    continue
+                refs.append(
+                    IssueRef(
+                        inp.repo,
+                        item.line,
+                        index.resolve_ref(m.group(1)),
+                        int(m.group(2)),
+                        raw,
+                    )
+                )
+    return refs
+
+
+def github_repo_map(manifest_path: Path) -> dict[str, str]:
+    """Canonical key -> `owner/name`, from each entry's GitHub `repo_url`.
+
+    The manifest is the SSOT of where a repo lives; a repo without a GitHub
+    `repo_url` simply has no resolvable issue state (reported as unavailable,
+    never guessed). Members are skipped — they mint no identity.
+    """
+    data = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    out: dict[str, str] = {}
+    for section in data.values():
+        if not isinstance(section, dict):
+            continue
+        for key, entry in section.items():
+            if not isinstance(entry, dict) or entry.get("member") is True:
+                continue
+            url = entry.get("repo_url")
+            if not isinstance(url, str):
+                continue
+            m = _GITHUB_URL_RE.search(url)
+            if m is not None:
+                out[key.lower()] = f"{m.group(1)}/{m.group(2)}"
+    return out
+
+
+def gh_issue_state(owner_repo: str, number: int) -> str:
+    """The target's state per GitHub, upper-cased as gh reports it.
+
+    'OPEN' or 'CLOSED' for an issue — but gh resolves PR numbers through
+    `gh issue view` too, and a merged PR reports 'MERGED', so callers must
+    treat the value as open-vs-anything-else, not as a two-state enum.
+    Raises IssueStateUnavailable on ANY failure to answer — missing gh,
+    no auth, network, unknown issue. Unknown must surface as unknown.
+    """
+    cmd = ["gh", "issue", "view", str(number), "-R", owner_repo, "--json", "state"]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, check=False
+        )
+    except FileNotFoundError as exc:
+        raise IssueStateUnavailable("gh CLI not found") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise IssueStateUnavailable("gh timed out") from exc
+    if proc.returncode != 0:
+        detail = proc.stderr.strip().splitlines()
+        raise IssueStateUnavailable(
+            detail[-1] if detail else f"gh exited {proc.returncode}"
+        )
+    try:
+        state = json.loads(proc.stdout)["state"]
+    except (ValueError, TypeError, KeyError) as exc:
+        raise IssueStateUnavailable("unparseable gh output") from exc
+    return str(state).upper()
+
+
+def check_issue_blockers(
+    refs: list[IssueRef],
+    repo_map: dict[str, str],
+    report: Report,
+    resolver: Callable[[str, int], str] = gh_issue_state,
+) -> dict[tuple[str, int], set[str]]:
+    """Resolve each issue-form wait; return per-item codes for movement.
+
+    Closed issue under an open item -> PF-BLOCKER-STALE error, same class as
+    the canonical todo:// edge (ADR-ECO-006's return leg). Open -> genuinely
+    waiting, no finding. Unresolvable -> an EXPLICIT unavailable warning:
+    per two-contract-guarantees, unknown-as-green is a defect, so a failed
+    lookup must never render as clean.
+    """
+    codes: dict[tuple[str, int], set[str]] = {}
+    for ref in refs:
+        where = f"{ref.source_repo}/TODO.md:{ref.line}"
+        target = repo_map.get(ref.target_repo)
+        if target is None:
+            report.warnings.append(
+                f"{where} @blocked_by:{ref.raw_ref}: no GitHub repo_url for "
+                f"'{ref.target_repo}' in the manifest — issue state UNAVAILABLE, "
+                f"not clean [DT-ISSUE-STATE-UNAVAILABLE]"
+            )
+            continue
+        try:
+            state = resolver(target, ref.number)
+        except IssueStateUnavailable as exc:
+            report.warnings.append(
+                f"{where} @blocked_by:{ref.raw_ref}: GitHub state UNAVAILABLE "
+                f"({exc}) — unknown is not green [DT-ISSUE-STATE-UNAVAILABLE]"
+            )
+            continue
+        # gh resolves PR numbers too, and a merged PR reports MERGED, not
+        # CLOSED — either way the wait is over, so stale is anything not OPEN.
+        if state != "OPEN":
+            report.errors.append(
+                f"{where} blocked on issue {target}#{ref.number}, which is "
+                f"{state.lower()}; the wait is over [PF-BLOCKER-STALE]"
+            )
+            codes.setdefault((ref.source_repo, ref.line), set()).add("PF-BLOCKER-STALE")
+    return codes
+
 
 def find_root(explicit: str | None) -> Path:
     """The workspace directory holding the repos (parent of devtools)."""
@@ -156,9 +317,18 @@ def build_inputs(
 
 
 def resolve_graph(
-    inputs: list[RepoInput], index: ManifestIndex, report: Report
+    inputs: list[RepoInput],
+    index: ManifestIndex,
+    report: Report,
+    extra_exclude: set[tuple[str, str]] | None = None,
 ) -> dict[tuple[str, int], set[str]]:
-    """Project graph diagnostics and return their one-pass per-item index."""
+    """Project graph diagnostics and return their one-pass per-item index.
+
+    ``extra_exclude`` — ``(source_repo, raw_ref)`` pairs the legacy graph must
+    not see: issue-form refs belong to ``check_issue_blockers``, and letting
+    the slug matcher text-match a number would yield noise (a dangling or a
+    false substring hit) on a ref whose state is resolved elsewhere.
+    """
     snapshot = parse_fleet(inputs, index)
     canonical = list(snapshot["diagnostics"]) + check_fleet(snapshot)
     by_item: dict[tuple[str, int], set[str]] = {}
@@ -167,9 +337,22 @@ def resolve_graph(
         report.notes.append(
             f"canonical: {len(edges)} resolved cross-repo @id edge(s)"
         )
+    excluded_by_repo: dict[str, set[str]] = {}
+    for srepo, raw in extra_exclude or set():
+        excluded_by_repo.setdefault(srepo, set()).add(raw)
     for d in canonical:
         prov = d.get("provenance") or {}
         repo, line = prov.get("repo"), prov.get("line")
+        # An @id'd source with an issue-form ref still gets the canonical
+        # "matches no item; migrate to an @id" nudge — noise for a ref whose
+        # state IS resolved (by check_issue_blockers). The raw ref only
+        # travels in the message text; the wording is stable under our
+        # pinned package (the characterization suite guards pin bumps).
+        if d["code"] == "PF-LEGACY-AMBIGUOUS" and any(
+            d["message"].startswith(f"legacy reference {raw} matches ")
+            for raw in excluded_by_repo.get(repo, ())
+        ):
+            continue
         if isinstance(repo, str) and isinstance(line, int):
             by_item.setdefault((repo, line), set()).add(d["code"])
         line = _canonical_line(d)
@@ -180,7 +363,7 @@ def resolve_graph(
 
     exclude = {
         (r["provenance"]["repo"], r["raw_ref"]) for r in snapshot["references"]
-    }
+    } | (extra_exclude or set())
     legacy = check_legacy_fleet(inputs, index, exclude=exclude)
     for d in legacy:
         by_item.setdefault((d.source_repo, d.source_line), set()).add(d.code)
@@ -317,6 +500,45 @@ def _selftest() -> int:
     assert "missing=1" in report.notes[0], report.notes
     assert "invalid-owner=1" in report.notes[0], report.notes
     assert "waiting-by-trigger=1" in report.notes[1], report.notes
+
+    # issue-form blockers (ADR-ECO-006): closed -> error, open -> clean wait,
+    # unavailable -> explicit warning. Resolver injected — no network here.
+    issue_inputs = [
+        RepoInput("maestro", "- [ ] work @owner:o @id:w\n"),
+        RepoInput("proctor", "- [ ] z @owner:o @blocked_by:maestro#7\n"),
+    ]
+    issue_index = ManifestIndex(frozenset({"maestro", "proctor"}), {})
+    refs = collect_issue_refs(issue_inputs, issue_index)
+    assert [(r.target_repo, r.number) for r in refs] == [("maestro", 7)], refs
+    for state, expect_error, expect_warn in (
+        ("CLOSED", True, False),
+        ("MERGED", True, False),  # a PR number: merged ends the wait too
+        ("OPEN", False, False),
+        (None, False, True),
+    ):
+        report = Report()
+
+        def resolver(owner_repo: str, number: int, _state: str | None = state) -> str:
+            if _state is None:
+                raise IssueStateUnavailable("no gh here")
+            return _state
+
+        codes = check_issue_blockers(
+            refs, {"maestro": "o/maestro"}, report, resolver=resolver
+        )
+        assert bool(report.errors) is expect_error, (state, report.errors)
+        assert bool(report.warnings) is expect_warn, (state, report.warnings)
+        if expect_error:
+            assert codes[("proctor", 1)] == {"PF-BLOCKER-STALE"}, codes
+    # and the legacy graph never sees an excluded issue-form ref
+    report = Report()
+    resolve_graph(
+        issue_inputs,
+        issue_index,
+        report,
+        extra_exclude={(r.source_repo, r.raw_ref) for r in refs},
+    )
+    assert not any("maestro#7" in w for w in report.warnings), report.warnings
     print("selftest OK")
     return 0
 
@@ -375,7 +597,22 @@ def main() -> int:
         print(f"no repo with a TODO.md under {root}", file=sys.stderr)
         return 1
 
-    condition_codes = resolve_graph(inputs, index, report)
+    issue_refs = collect_issue_refs(inputs, index)
+    condition_codes = resolve_graph(
+        inputs,
+        index,
+        report,
+        extra_exclude={(r.source_repo, r.raw_ref) for r in issue_refs},
+    )
+    if issue_refs:
+        repo_map = github_repo_map(manifest_path) if manifest_path.is_file() else {}
+        issue_codes = check_issue_blockers(issue_refs, repo_map, report)
+        for key, codes in issue_codes.items():
+            condition_codes.setdefault(key, set()).update(codes)
+        report.notes.append(
+            f"issue-blockers: {len(issue_refs)} <repo>#<number> ref(s) "
+            f"resolved against GitHub issue state"
+        )
     check_reporting(inputs, index, condition_codes, report)
 
     for note in report.notes:
