@@ -146,7 +146,7 @@
 
 ## Состояние issue-блокеров (обратное плечо ADR-ECO-006)
 
-- [x] Резолвить состояние issue-блокеров `@blocked_by:<repo>#<number>` через GitHub: закрытый/вмерженный target у открытого пункта → PF-BLOCKER-STALE @owner:github:andrei-shtanakov @id:blocker-issue-state-resolution — PR этой ветки; приёмка в контексте ниже
+- [x] Резолвить состояние issue-блокеров `@blocked_by:<repo>#<number>` через GitHub: закрытый/вмерженный target у открытого пункта → PF-BLOCKER-STALE @owner:github:andrei-shtanakov @id:blocker-issue-state-resolution — PR #41; приёмка в контексте ниже
       Принят из inbox-issue devtools#40 (слаг совпадает; инициатор —
       prograph-vault, правило cross-repo-waits, там PR #72). До этого
       issue-форма матчилась только текстуально slug-графом — её СОСТОЯНИЕ не
