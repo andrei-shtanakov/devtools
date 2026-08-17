@@ -193,8 +193,11 @@ def github_repo_map(manifest_path: Path) -> dict[str, str]:
 
 
 def gh_issue_state(owner_repo: str, number: int) -> str:
-    """The issue's state per GitHub, 'OPEN' or 'CLOSED'.
+    """The target's state per GitHub, upper-cased as gh reports it.
 
+    'OPEN' or 'CLOSED' for an issue — but gh resolves PR numbers through
+    `gh issue view` too, and a merged PR reports 'MERGED', so callers must
+    treat the value as open-vs-anything-else, not as a two-state enum.
     Raises IssueStateUnavailable on ANY failure to answer — missing gh,
     no auth, network, unknown issue. Unknown must surface as unknown.
     """
