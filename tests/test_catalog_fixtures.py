@@ -105,6 +105,29 @@ def test_validate_catalog_collects_all_rules(checker) -> None:
     assert warnings == ["V6", "V7", "V7"]  # unknown status + unknown kind
 
 
+def test_misshapen_catalog_is_a_case_problem_not_a_crash(
+    checker, contract_copy: Path
+) -> None:
+    """Parseable TOML with a non-contract shape fails the case, no traceback."""
+    fixture = contract_copy / "fixtures" / "valid" / "misshapen.toml"
+    fixture.write_text("models = 3\n[[agents]]\nrouted = true\n")
+    case = {"file": "fixtures/valid/misshapen.toml", "expect": "valid"}
+    problem = checker.check_case(contract_copy, case)
+    assert problem is not None and "shape not validatable" in problem
+
+
+def test_check_and_write_manifest_are_mutually_exclusive(
+    checker, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        sys, "argv", ["check-catalog-fixtures.py", "--check", "--write-manifest"]
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        checker.main()
+    assert excinfo.value.code == 2
+    assert "not allowed with" in capsys.readouterr().err
+
+
 def test_stale_manifest_is_detected(checker, contract_copy: Path) -> None:
     fixture = contract_copy / "fixtures" / "valid" / "three-planes.toml"
     fixture.write_text(fixture.read_text() + "\n# tampered\n")

@@ -144,7 +144,13 @@ def check_case(contract_dir: Path, case: dict) -> str | None:
     if expect == "parse-error":
         return f"{rel}: expected parse-error, but the file parses"
 
-    issues = validate_catalog(catalog)
+    try:
+        issues = validate_catalog(catalog)
+    except (AttributeError, LookupError, TypeError) as exc:
+        # Parseable TOML with a shape the contract does not describe (e.g.
+        # `models` not a table, an agent row without "harness") is a broken
+        # fixture, not a checker crash.
+        return f"{rel}: catalog shape not validatable: {exc!r}"
     errors = sorted({i.code for i in issues if i.severity == "error"})
     warnings = sorted({i.code for i in issues if i.severity == "warning"})
 
@@ -267,10 +273,11 @@ def main() -> int:
     parser.add_argument(
         "--root", type=Path, default=None, help="devtools repo root (default: self)"
     )
-    parser.add_argument(
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument(
         "--write-manifest", action="store_true", help="regenerate manifest.json"
     )
-    parser.add_argument(
+    action.add_argument(
         "--check",
         action="store_true",
         help="validate expectations + manifest (the default action)",
