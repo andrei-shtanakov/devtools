@@ -228,7 +228,7 @@
 
 ## SSOT-фикстуры conformance каталога (PP-103 acceptance (b))
 
-- [ ] SSOT-набор conformance-фикстур каталога для трёх загрузчиков (Maestro / ATP / arbiter) под единым owner-путём @owner:github:andrei-shtanakov @id:catalog-conformance-single-owner
+- [ ] SSOT-набор conformance-фикстур каталога для трёх загрузчиков (Maestro / ATP / arbiter) под единым owner-путём @owner:github:andrei-shtanakov @id:catalog-conformance-single-owner @blocked_by:maestro#188 @blocked_by:atp-platform#292 @blocked_by:arbiter#74
       Принят из inbox-issue devtools#43 (инициатор — impresario, PP-103
       acceptance (b), слаг совпадает). Формализует уже записанного владельца:
       arbiter пометил свой пункт `@owner:repo:devtools`
@@ -248,9 +248,12 @@
       негативный кейс one-vendor-per-model (Maestro
       models-duplicate-vendor-detection), alias/precedence (shared-lib).
       Условия готовности (из issue): (1) набор опубликован с версией/пином —
-      закрывается PR-ом этого пункта; (2) три сьюта зелёные на одном наборе —
-      работа потребителей: после мержа завести inbox-issues в maestro,
-      atp-platform, arbiter с пином merge-коммита; (3) fail-closed наблюдаем —
-      на стороне владельца доказано тестами, на стороне потребителей — их
-      wiring-тестами. Пункт закрывать после (2); devtools#43 закрыть тогда же —
-      это сигнал инициатору (ADR-ECO-006).
+      ВЫПОЛНЕНО: PR #44, merge 2a5c154 (2026-08-17); (2) три сьюта зелёные на
+      одном наборе — работа потребителей, ожидание = @blocked_by-теги выше:
+      wiring-issues maestro#188 / atp-platform#292 / arbiter#74 (слаг у всех
+      catalog-conformance-wiring, пин 2a5c154) заведены 2026-08-17;
+      (3) fail-closed наблюдаем — на стороне владельца доказано тестами, на
+      стороне потребителей — их wiring-тестами. Пункт закрывать после (2);
+      devtools#43 закрыть тогда же — это сигнал инициатору (ADR-ECO-006).
+      Закрытый wiring-issue у соседа даст PF-BLOCKER-STALE здесь — это и есть
+      «ожидание доставлено»: проверить сьют соседа и снять тег.
