@@ -144,6 +144,33 @@
       логе + envelope/artifact) + два штатных cron-прогона; затем
       reader-запрос в robin (расширение паттерна robin-runtime#42).
 
+## Состояние issue-блокеров (обратное плечо ADR-ECO-006)
+
+- [x] Резолвить состояние issue-блокеров `@blocked_by:<repo>#<number>` через GitHub: закрытый/вмерженный target у открытого пункта → PF-BLOCKER-STALE @owner:github:andrei-shtanakov @id:blocker-issue-state-resolution — PR этой ветки; приёмка в контексте ниже
+      Принят из inbox-issue devtools#40 (слаг совпадает; инициатор —
+      prograph-vault, правило cross-repo-waits, там PR #72). До этого
+      issue-форма матчилась только текстуально slug-графом — её СОСТОЯНИЕ не
+      резолвилось, и закрытие inbox-issue получателем не будило инициатора:
+      обратное плечо ADR-ECO-006 существовало только для todo://-рёбер.
+      Реализация — в самом wrapper-е `check-plan-fields.py`, не в пакете
+      (plan-fields живёт в dispatcher, сосед read-only): numeric-фрагмент
+      рефа = issue; owner/name — из `repo_url` манифеста (SSOT, никаких
+      догадок); состояние — `gh issue view --json state`. Issue-рефы изъяты
+      из legacy slug-графа (exclude) и из канонического
+      PF-LEGACY-AMBIGUOUS-шума: форма принадлежит issue-резолверу. Живой
+      смоук показал, что gh резолвит и номера PR (state MERGED) — MERGED
+      тоже завершает ожидание, stale = всё, что не OPEN.
+      Fail-honest (two-contract-guarantees): недоступный резолв — нет gh /
+      auth / сети / repo_url — даёт явный warning
+      [DT-ISSUE-STATE-UNAVAILABLE], не clean. Открытый issue →
+      waiting-by-blocker; закрытый → ERROR класса PF-BLOCKER-STALE +
+      movement stale-condition, наравне с todo://-ребром.
+      Приёмка (синтетика из issue): closed→ERROR, open→waiting-by-blocker,
+      unavailable→явный UNAVAILABLE — tests/test_issue_blockers.py +
+      расширенный `--selftest`; резолвер инжектируется, сеть в тестах не
+      используется. Закрыть devtools#40 после мержа — это и есть сигнал
+      инициатору.
+
 ## Грамматика полей плана
 
 - [x] Нормализовать `@owner`: типизированная operational-семантика и раздельный fleet-reporting @owner:github:andrei-shtanakov @id:owner-grammar-semantics — ADR-ECO-005a + plan-fields v2/v0.8.1 + этот PR
