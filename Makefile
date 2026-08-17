@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance graph-drift plan-check plan-check-selftest plan-check-fixture inbox morning evening snapshot fleet-report today install arch-freshness arch-freshness-read
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest plan-check-fixture inbox morning evening snapshot fleet-report today install arch-freshness arch-freshness-read
 
 help:
 	@echo "Цели:"
@@ -28,6 +28,7 @@ help:
 	@echo "  make bootstrap   — uv sync (python) + cargo build (arbiter)"
 	@echo "  make drift       — diff вендоренных obs.py и report_benchmark schema"
 	@echo "  make conformance — agent-id caталог ↔ ATP/arbiter/Maestro (ADR-ECO-003)"
+	@echo "  make catalog-fixtures — SSOT conformance-фикстуры каталога: expectations + manifest (devtools#43)"
 	@echo "  make graph-drift — граф prograph ↔ карта интеграций registry"
 	@echo "  make plan-check  — cross-repo TODO/@blocked_by граф (uv + Python 3.12; WORKSPACE=/path для другого workspace)"
 	@echo "  make plan-check-selftest — самопроверка политики чекера, без workspace"
@@ -51,6 +52,7 @@ branches:    ; @./repos.sh branches
 bootstrap:   ; @./repos.sh bootstrap
 drift:       ; @./check-contract-drift.sh
 conformance: ; @python3 ./check-agent-id-conformance.py
+catalog-fixtures: ; @python3 ./check-catalog-fixtures.py --check
 graph-drift: ; @python3 ./check-graph-registry-drift.py
 plan-check:  ; @uv run --frozen python ./check-plan-fields.py --root $(WORKSPACE) --manifest $(MANIFEST)
 plan-check-selftest: ; @uv run --frozen python ./check-plan-fields.py --selftest

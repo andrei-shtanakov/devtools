@@ -225,3 +225,32 @@
       проверок зелёные, `[2] vendored copies match SSOT byte-for-byte (arbiter)`.
       Сужение ничего не замаскировало: копия arbiter совпадает с SSOT
       побайтово — красным был исключительно дрейф зеркала.
+
+## SSOT-фикстуры conformance каталога (PP-103 acceptance (b))
+
+- [ ] SSOT-набор conformance-фикстур каталога для трёх загрузчиков (Maestro / ATP / arbiter) под единым owner-путём @owner:github:andrei-shtanakov @id:catalog-conformance-single-owner
+      Принят из inbox-issue devtools#43 (инициатор — impresario, PP-103
+      acceptance (b), слаг совпадает). Формализует уже записанного владельца:
+      arbiter пометил свой пункт `@owner:repo:devtools`
+      (`@id:catalog-conformance-fixtures`); Maestro shared-PyPI-lib
+      (`@id:catalog-loader-shared-lib`) остаётся отдельной опцией и этим
+      путём не блокируется.
+      Реализация: `contracts/catalog-conformance-fixtures/v1/` — фикстуры
+      (valid / invalid V1–V5 / warn V6–V7 / parse-error), машинные
+      `expectations.toml` (+ pathres-сценарии слоя `$ATP_CATALOG` по
+      ADR-ECO-003b D2), `manifest.json` (sha256 + tree_sha256 — пин-поверхность
+      для copy-integrity потребителей), README с семантикой классов и
+      зафиксированными дивергенциями загрузчиков на 2026-08-17.
+      Owner-side QA: `check-catalog-fixtures.py --check` — stdlib
+      референс-валидатор V1–V7 исполняет каждое ожидание локально;
+      tests/test_catalog_fixtures.py доказывает и невакуумность чекера.
+      Вне v1 намеренно: XDG-слои (до maestro xdg-catalog-path),
+      негативный кейс one-vendor-per-model (Maestro
+      models-duplicate-vendor-detection), alias/precedence (shared-lib).
+      Условия готовности (из issue): (1) набор опубликован с версией/пином —
+      закрывается PR-ом этого пункта; (2) три сьюта зелёные на одном наборе —
+      работа потребителей: после мержа завести inbox-issues в maestro,
+      atp-platform, arbiter с пином merge-коммита; (3) fail-closed наблюдаем —
+      на стороне владельца доказано тестами, на стороне потребителей — их
+      wiring-тестами. Пункт закрывать после (2); devtools#43 закрыть тогда же —
+      это сигнал инициатору (ADR-ECO-006).
