@@ -228,7 +228,7 @@
 
 ## SSOT-фикстуры conformance каталога (PP-103 acceptance (b))
 
-- [ ] SSOT-набор conformance-фикстур каталога для трёх загрузчиков (Maestro / ATP / arbiter) под единым owner-путём @owner:github:andrei-shtanakov @id:catalog-conformance-single-owner @blocked_by:maestro#188 @blocked_by:atp-platform#292 @blocked_by:arbiter#74
+- [x] SSOT-набор conformance-фикстур каталога для трёх загрузчиков (Maestro / ATP / arbiter) под единым owner-путём @owner:github:andrei-shtanakov @id:catalog-conformance-single-owner — PR #44 (набор, merge 2a5c154) + PR #45 (ожидание); приёмка в контексте ниже
       Принят из inbox-issue devtools#43 (инициатор — impresario, PP-103
       acceptance (b), слаг совпадает). Формализует уже записанного владельца:
       arbiter пометил свой пункт `@owner:repo:devtools`
@@ -248,12 +248,17 @@
       негативный кейс one-vendor-per-model (Maestro
       models-duplicate-vendor-detection), alias/precedence (shared-lib).
       Условия готовности (из issue): (1) набор опубликован с версией/пином —
-      ВЫПОЛНЕНО: PR #44, merge 2a5c154 (2026-08-17); (2) три сьюта зелёные на
-      одном наборе — работа потребителей, ожидание = @blocked_by-теги выше:
-      wiring-issues maestro#188 / atp-platform#292 / arbiter#74 (слаг у всех
-      catalog-conformance-wiring, пин 2a5c154) заведены 2026-08-17;
-      (3) fail-closed наблюдаем — на стороне владельца доказано тестами, на
-      стороне потребителей — их wiring-тестами. Пункт закрывать после (2);
-      devtools#43 закрыть тогда же — это сигнал инициатору (ADR-ECO-006).
-      Закрытый wiring-issue у соседа даст PF-BLOCKER-STALE здесь — это и есть
-      «ожидание доставлено»: проверить сьют соседа и снять тег.
+      PR #44, merge 2a5c154 (2026-08-17); (2) три сьюта зелёные на одном
+      наборе — wiring-issues maestro#188 / atp-platform#292 / arbiter#74
+      (слаг catalog-conformance-wiring) закрыты COMPLETED 2026-08-18:
+      maestro PR #189, atp-platform PR #293, arbiter PR #75 — все смержены с
+      зелёным CI, вендоренные копии с PIN на 2a5c154 + manifest.json
+      сверены на master всех трёх; (3) fail-closed наблюдаем — owner-side
+      tests/test_catalog_fixtures.py; arbiter дополнительно проверил кейсы
+      мутациями (поочерёдное отключение V1–V7 краснит ровно свой кейс).
+      Бонус приёмки: набор сразу нашёл реальное расхождение — обязательный
+      `harnesses.*.shim` в схеме arbiter (не входит в V1–V7; стал Option,
+      arbiter#74). Обратное плечо тоже показало себя: закрытие трёх
+      wiring-issues дало здесь ровно 3×PF-BLOCKER-STALE — «ожидание
+      доставлено», теги сняты этим PR-ом. devtools#43 закрыт как сигнал
+      инициатору (ADR-ECO-006).
