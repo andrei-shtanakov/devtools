@@ -292,7 +292,7 @@
       кейса проверены мутацией, загрузчик не правился. Остались maestro#192
       и atp-platform#294.
 
-- [ ] README набора: раздел дивергенций — штампы «дата + коммит наблюдения», обновить устаревший статус ATP и Maestro @owner:github:andrei-shtanakov @id:catalog-conformance-readme-atp-divergences-stale
+- [x] README набора: раздел дивергенций — штампы «дата + коммит наблюдения», обновить устаревший статус ATP и Maestro @owner:github:andrei-shtanakov @id:catalog-conformance-readme-atp-divergences-stale — PR #52 (merge 2f39946); devtools#50 закрыт
       Принят из inbox-issue devtools#50 (инициатор — atp-platform, из их
       pin-bump работы; слаг совпадает). Раздел кэшировал чужой статус без
       возраста утверждений и протух молча за сутки: ATP реализовал V1–V6 в
