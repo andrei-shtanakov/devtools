@@ -304,9 +304,59 @@
 - [x] README набора: раздел дивергенций — штампы «дата + коммит наблюдения», обновить устаревший статус ATP и Maestro @owner:github:andrei-shtanakov @id:catalog-conformance-readme-atp-divergences-stale — PR #52 (merge 2f39946); devtools#50 закрыт
 
 - [x] Машиночитаемый словарь enum'ов ADR-ECO-003 в наборе (vocabulary.toml) @owner:github:andrei-shtanakov @id:catalog-enum-vocabulary-machine-readable — PR #54 (merge 070acdc); devtools#51 и devtools#47 закрыты
+
+## Слепые зоны plan-check (umbrella-замер 2026-08-18)
+
+- [ ] Legacy-slug блокер на @id'd пункте: закрытая цель молчала — сделать находку @owner:github:andrei-shtanakov @id:legacy-blocker-stale-silent
+      Принят из inbox devtools#56 (umbrella-сессия; слаг совпадает). Причина
+      найдена в разделении труда двух пайплайнов: пакетный legacy-граф
+      намеренно пропускает @id-источники («их рефы — дело канонического»),
+      а канонический из legacy-формы ребра не строит — квадрант
+      «@id-источник × legacy-реф × закрытая цель» не проверял никто,
+      вопреки докстрингу враппера. Фикс на стороне враппера (прецедент
+      devtools#41): check_id_source_legacy_stale, stale-only (остальные
+      исходы уже даёт канонический PF-LEGACY-AMBIGUOUS nudge), severity
+      warning — как у всех legacy-находок (решение владельца: НЕ error,
+      форма без стабильной identity толкает миграцию на @id, не валит
+      билд). Матчер слага переиспользован из пакета (_slug_hits_item),
+      чтобы семантика «слаг называет пункт» не разъехалась.
+      Приёмка (из issue): двусторонняя синтетика (цель закрыта → находка,
+      открыта → нет) — tests/test_plan_check_detectors.py + selftest;
+      докстринг теперь честен, cross-repo-waits трогать не нужно.
+      Боевой прогон сразу дал два реальных срабатывания: maestro:131,132
+      ждут `arbiter#R-07`, который arbiter давно завершил — ровно тот
+      класс молчаливо протухших ожиданий, о котором issue.
+
+- [ ] Детектор тега не на строке чекбокса + разорванный @trigger @owner:github:andrei-shtanakov @id:plan-tag-on-continuation-line
+      Принят из inbox devtools#57 (инцидент impresario: два доставленных
+      ожидания PP-103 были невидимы всей машинерии, резолвер devtools#41
+      не получал ни одного входа при честных «0 errors»). Фикс:
+      check_tag_placement — warning DT-TAG-ON-CONTINUATION на строку-
+      продолжение, НАЧИНАЮЩУЮСЯ с одного из четырёх тегов (упоминания в
+      прозе не флагуются — иначе шум на половине флота); разорванный тег
+      `@trigger:"…"` без закрывающей кавычки на строке чекбокса — своя
+      находка DT-TRIGGER-UNTERMINATED. Боевой прогон сразу нашёл 5
+      реальных невидимых @id (disputatio ×3, kapelle ×2) и два
+      false-positive переноса прозы в нашем же TODO.md (перечитаны
+      бэктиками в этом же PR — включая перенос в тексте этого пункта).
+      Приёмка (из issue): синтетика тег-на-продолжении/тег-на-чекбоксе,
+      все четыре тега, разорванный trigger — покрыто тестами + selftest.
+
+- [ ] Ложный PF-LEGACY-AMBIGUOUS на закрытом пункте с issue-form блокером @owner:github:andrei-shtanakov @id:blocker-issue-form-on-closed-item
+      Принят из inbox devtools#58. Диагноз из issue подтверждён: исключения
+      для slug-матчера строились из collect_issue_refs (только открытые
+      пункты — для резолюции это верно), закрытый пункт выпадал и его
+      числовой реф читался как legacy-slug. Фикс: issue_ref_exclusions
+      сканирует ВСЕ пункты (конвенция флота хранит @blocked_by на [x] как
+      историю происхождения — прибор не смеет толкать чистить леджер);
+      резолюция состояния по-прежнему только для открытых. Настоящий
+      slug-реф (нечисловой) на закрытом пункте по-прежнему даёт
+      PF-LEGACY-AMBIGUOUS. Приёмка (из issue): три стороны покрыты
+      tests/test_plan_check_detectors.py + selftest; флот после фикса —
+      0 errors (warnings — только реальные находки нового детектора #57).
       Принят из inbox-issue devtools#51 (инициатор — maestro, из их pin-bump
-      работы; слаг совпадает — maestro уже ждёт по
-      @blocked_by:devtools#catalog-enum-vocabulary-machine-readable).
+      работы; слаг совпадает — maestro уже ждёт по тегу
+      `@blocked_by:devtools#catalog-enum-vocabulary-machine-readable`).
       Проблема: словарь status/kind существовал только прозой (инлайн-
       комментарий в ADR-ECO-003 + README набора), три загрузчика копируют
       руками — риск №1 ADR-ECO-003b этажом выше, на уровне вокабуляра;
