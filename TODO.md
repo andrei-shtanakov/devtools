@@ -307,7 +307,7 @@
 
 ## Слепые зоны plan-check (umbrella-замер 2026-08-18)
 
-- [ ] Legacy-slug блокер на @id'd пункте: закрытая цель молчала — сделать находку @owner:github:andrei-shtanakov @id:legacy-blocker-stale-silent
+- [x] Legacy-slug блокер на @id'd пункте: закрытая цель молчала — сделать находку @owner:github:andrei-shtanakov @id:legacy-blocker-stale-silent — PR #59 (merge 7245b4b); devtools#56 закрыт, maestro уведомлён (maestro#196)
       Принят из inbox devtools#56 (umbrella-сессия; слаг совпадает). Причина
       найдена в разделении труда двух пайплайнов: пакетный legacy-граф
       намеренно пропускает @id-источники («их рефы — дело канонического»),
@@ -327,7 +327,7 @@
       ждут `arbiter#R-07`, который arbiter давно завершил — ровно тот
       класс молчаливо протухших ожиданий, о котором issue.
 
-- [ ] Детектор тега не на строке чекбокса + разорванный @trigger @owner:github:andrei-shtanakov @id:plan-tag-on-continuation-line
+- [x] Детектор тега не на строке чекбокса + разорванный @trigger @owner:github:andrei-shtanakov @id:plan-tag-on-continuation-line — PR #59 (merge 7245b4b); devtools#57 закрыт, находки соседям: disputatio#21, kapelle#29
       Принят из inbox devtools#57 (инцидент impresario: два доставленных
       ожидания PP-103 были невидимы всей машинерии, резолвер devtools#41
       не получал ни одного входа при честных «0 errors»). Фикс:
@@ -342,7 +342,7 @@
       Приёмка (из issue): синтетика тег-на-продолжении/тег-на-чекбоксе,
       все четыре тега, разорванный trigger — покрыто тестами + selftest.
 
-- [ ] Ложный PF-LEGACY-AMBIGUOUS на закрытом пункте с issue-form блокером @owner:github:andrei-shtanakov @id:blocker-issue-form-on-closed-item
+- [x] Ложный PF-LEGACY-AMBIGUOUS на закрытом пункте с issue-form блокером @owner:github:andrei-shtanakov @id:blocker-issue-form-on-closed-item — PR #59 (merge 7245b4b); devtools#58 закрыт
       Принят из inbox devtools#58. Диагноз из issue подтверждён: исключения
       для slug-матчера строились из collect_issue_refs (только открытые
       пункты — для резолюции это верно), закрытый пункт выпадал и его
