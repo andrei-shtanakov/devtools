@@ -228,7 +228,7 @@
 
 ## SSOT-фикстуры conformance каталога (PP-103 acceptance (b))
 
-- [x] SSOT-набор conformance-фикстур каталога для трёх загрузчиков (Maestro / ATP / arbiter) под единым owner-путём @owner:github:andrei-shtanakov @id:catalog-conformance-single-owner — PR #44 (набор, merge 2a5c154) + PR #45 (ожидание); приёмка в контексте ниже
+- [x] SSOT-набор conformance-фикстур каталога для трёх загрузчиков (Maestro / ATP / arbiter) под единым owner-путём @owner:github:andrei-shtanakov @id:catalog-conformance-single-owner — PR #44 (набор, merge 2a5c154) + PR #45 (ожидание) + PR #46 (закрытие); приёмка в контексте ниже
       Принят из inbox-issue devtools#43 (инициатор — impresario, PP-103
       acceptance (b), слаг совпадает). Формализует уже записанного владельца:
       arbiter пометил свой пункт `@owner:repo:devtools`
