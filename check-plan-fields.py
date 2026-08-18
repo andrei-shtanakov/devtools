@@ -20,12 +20,23 @@ all parsing, reference resolution and graph diagnostics from the package:
     `[legacy source: no @id]` and are always warnings: without a stable identity a
     stale legacy blocker must not fail the build (it nudges @id migration instead).
 
-One resolution stays devtools' own, beside the package: the ISSUE form
-`@blocked_by:<repo>#<number>` (an ADR-ECO-006 inbox issue in the target repo).
-Its state lives on GitHub, not in any TODO.md, so `check_issue_blockers`
-resolves it via `gh`: a closed issue under an open item is a PF-BLOCKER-STALE
-error, same class as the canonical `todo://` edge; a failed lookup is an
-explicit UNAVAILABLE warning, never silently clean (two-contract-guarantees).
+Three resolutions stay devtools' own, beside the package:
+
+  * the ISSUE form `@blocked_by:<repo>#<number>` (an ADR-ECO-006 inbox issue in
+    the target repo). Its state lives on GitHub, not in any TODO.md, so
+    `check_issue_blockers` resolves it via `gh`: a closed issue under an open
+    item is a PF-BLOCKER-STALE error, same class as the canonical `todo://`
+    edge; a failed lookup is an explicit UNAVAILABLE warning, never silently
+    clean (two-contract-guarantees). The exclusion set feeding the legacy
+    graph covers issue-form refs on CLOSED items too — the fleet keeps
+    `@blocked_by` on `[x]` items as history, and it must not read as a false
+    legacy-slug ref (devtools#58).
+  * `check_id_source_legacy_stale` — the quadrant both pipelines skip: a
+    legacy `<repo>#<slug>` ref on an @id'd OPEN item whose target is already
+    completed. Warning, stale-only (devtools#56).
+  * `check_tag_placement` — plan tags no line-based parser will ever read: a
+    tag opening a continuation line, and a `@trigger:"…` whose closing quote
+    left the checkbox line (devtools#57, the impresario incident).
 
 Runtime: the `plan-fields` package needs **Python 3.12** and is a pinned
 dependency, so THIS script runs under `uv` (`make plan-check` → `uv run
@@ -67,6 +78,12 @@ try:
         scrape_items,
     )
     from plan_fields import fleet as _pf_fleet
+
+    # Private matcher, reused deliberately: THIS resolver and the package's
+    # legacy graph must agree on what "the slug names that item" means, and a
+    # second implementation would drift silently. A pin bump that moves it
+    # breaks loudly here; the characterization suite guards the pin anyway.
+    from plan_fields.fleet_api import _slug_hits_item
 except ImportError:  # pragma: no cover - exercised by humans, not the suite
     sys.stderr.write(
         "check-plan-fields.py needs the 'plan-fields' package (Python >=3.12).\n"
@@ -122,6 +139,12 @@ _MALFORMED_BLOCKER_CODES = {
 # text-matches slugs and must not see these refs).
 _ISSUE_REF_RE = re.compile(r"^([a-z0-9][a-z0-9._-]*)#([0-9]+)$", re.IGNORECASE)
 _GITHUB_URL_RE = re.compile(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/*$")
+# The transitional legacy form `<repo>#<slug>` — same shape the package
+# matches; the all-digits fragment is carved out first as the issue form.
+_LEGACY_SLUG_RE = re.compile(r"^([a-z0-9][a-z0-9-]*)#(\S+)$", re.IGNORECASE)
+# Tags the line-based parsers read ONLY from the checkbox line itself.
+_PLAN_TAG_TOKENS = ("@owner:", "@blocked_by:", "@trigger:", "@id:")
+_CHECKBOX_LINE_RE = re.compile(r"^\s*[-*] \[[ xX]\] ")
 
 
 @dataclass(frozen=True)
@@ -166,6 +189,122 @@ def collect_issue_refs(inputs: list[RepoInput], index: ManifestIndex) -> list[Is
                     )
                 )
     return refs
+
+
+def issue_ref_exclusions(inputs: list[RepoInput]) -> set[tuple[str, str]]:
+    """``(source_repo, raw)`` for EVERY issue-form ref — open AND closed items.
+
+    Resolution wants open items only (a closed item waits for nothing), but
+    the legacy slug matcher must never see the numeric form at all: the fleet
+    convention keeps ``@blocked_by`` on ``[x]`` items as history of origin,
+    and an exclusion set keyed on openness let a closed item's ref fall
+    through to the slug matcher as a false PF-LEGACY-AMBIGUOUS — a warning
+    that nudged deleting the ledger's history to please the instrument
+    (devtools#58).
+    """
+    out: set[tuple[str, str]] = set()
+    for inp in inputs:
+        if inp.todo_text is None:
+            continue
+        for item in scrape_items(inp.todo_text):
+            for raw in item.values("blocked_by"):
+                if _ISSUE_REF_RE.match(raw):
+                    out.add((inp.repo, raw))
+    return out
+
+
+def check_id_source_legacy_stale(
+    inputs: list[RepoInput],
+    index: ManifestIndex,
+    report: Report,
+) -> dict[tuple[str, int], set[str]]:
+    """The silent quadrant of the legacy graph: @id'd source × legacy ref.
+
+    The package's legacy graph deliberately skips sources that carry an @id
+    (their refs belong to the canonical pipeline) — but the canonical
+    pipeline never builds an edge from a legacy ``<repo>#<slug>`` ref, so on
+    an @id'd item nobody checked the ref's staleness: target completed →
+    silence (devtools#56). This resolves exactly that quadrant, STALE-only:
+    every other outcome (no match, unknown repo, no checkout) already
+    surfaces as the canonical PF-LEGACY-AMBIGUOUS nudge, and re-reporting it
+    would double the noise. A warning, not an error — the same policy as
+    every legacy finding: the form has no stable identity, so it nudges @id
+    migration instead of failing the build.
+    """
+    scraped: dict[str, list[ScrapedItem]] = {}
+    for inp in inputs:
+        if inp.available and inp.todo_text is not None:
+            scraped[inp.repo] = scrape_items(inp.todo_text)
+
+    codes: dict[tuple[str, int], set[str]] = {}
+    for inp in inputs:
+        for item in scraped.get(inp.repo, ()):
+            if item.checked or not item.item_id:
+                continue
+            for raw in item.values("blocked_by"):
+                if _ISSUE_REF_RE.match(raw):
+                    continue  # the issue form is check_issue_blockers' job
+                m = _LEGACY_SLUG_RE.match(raw)
+                if m is None:
+                    continue  # todo:// (canonical) or malformed — not legacy
+                tkey = index.resolve_ref(m.group(1))
+                if tkey == inp.repo or tkey not in scraped:
+                    continue
+                slug = m.group(2)
+                hits = [i for i in scraped[tkey] if _slug_hits_item(i, slug)]
+                if hits and all(i.checked for i in hits):
+                    lines = ", ".join(f":{i.line}" for i in hits)
+                    report.warnings.append(
+                        f"{inp.repo}/TODO.md:{item.line} blocked on "
+                        f"'{tkey}#{slug}', which {tkey} has already completed "
+                        f"({lines}); the wait is over — migrate the ref to "
+                        f"todo:// [PF-BLOCKER-STALE] [legacy ref on @id'd "
+                        f"source]"
+                    )
+                    codes.setdefault((inp.repo, item.line), set()).add(
+                        "PF-BLOCKER-STALE"
+                    )
+    return codes
+
+
+def check_tag_placement(inputs: list[RepoInput], report: Report) -> None:
+    """Tags no parser will ever read: continuation lines and torn @trigger.
+
+    Every consumer (plan-fields, Robin) reads tags from the checkbox line
+    ONLY; continuation lines are prose for humans. A tag that slid onto a
+    continuation line is therefore invisible to the whole machinery — the
+    impresario incident hid two delivered PP-103 waits from the fleet while
+    plan-check reported an honest 0 errors over an unread source
+    (devtools#57). Only lines BEGINNING with a tag are flagged: continuation
+    prose legitimately MENTIONS tags all the time, and flagging mentions
+    would light up half the fleet. A ``@trigger:"…`` whose closing quote
+    never comes on the checkbox line is its own finding: the parsed value is
+    garbage and the wrapped remainder is invisible.
+    """
+    for inp in inputs:
+        if inp.todo_text is None:
+            continue
+        for lineno, line in enumerate(inp.todo_text.splitlines(), 1):
+            where = f"{inp.repo}/TODO.md:{lineno}"
+            if _CHECKBOX_LINE_RE.match(line):
+                idx = line.find('@trigger:"')
+                if idx >= 0 and line[idx + len("@trigger:") :].count('"') % 2 == 1:
+                    report.warnings.append(
+                        f"{where} @trigger value's closing quote is not on "
+                        f"the checkbox line — the parsed value is garbage and "
+                        f"the wrapped remainder is invisible to every parser "
+                        f"[DT-TRIGGER-UNTERMINATED]"
+                    )
+                continue
+            stripped = line.strip()
+            if stripped.startswith(_PLAN_TAG_TOKENS):
+                report.warnings.append(
+                    f"{where} plan tag on a continuation line — parsers read "
+                    f"tags from the checkbox line only, so this tag is "
+                    f"invisible to the whole machinery; move it onto the "
+                    f"checkbox line (or backtick it if it is prose) "
+                    f"[DT-TAG-ON-CONTINUATION]"
+                )
 
 
 def github_repo_map(manifest_path: Path) -> dict[str, str]:
@@ -309,7 +448,11 @@ def build_inputs(
             inputs.append(RepoInput(repo, available=False))
             continue
         todo = d / "TODO.md"
-        text = todo.read_text(encoding="utf-8", errors="ignore") if todo.is_file() else None
+        text = (
+            todo.read_text(encoding="utf-8", errors="ignore")
+            if todo.is_file()
+            else None
+        )
         if text is not None:
             planned[repo] = todo
         inputs.append(RepoInput(repo, todo_text=text, available=True))
@@ -334,9 +477,7 @@ def resolve_graph(
     by_item: dict[tuple[str, int], set[str]] = {}
     edges = snapshot["edges"]
     if edges:
-        report.notes.append(
-            f"canonical: {len(edges)} resolved cross-repo @id edge(s)"
-        )
+        report.notes.append(f"canonical: {len(edges)} resolved cross-repo @id edge(s)")
     excluded_by_repo: dict[str, set[str]] = {}
     for srepo, raw in extra_exclude or set():
         excluded_by_repo.setdefault(srepo, set()).add(raw)
@@ -463,16 +604,12 @@ def _selftest() -> int:
     """Exercise the severity policy projection without a workspace."""
     # canonical stale -> error; canonical dangling -> warning; legacy -> warning.
     maestro = "- [x] done shipped @owner:o @id:done\n- [ ] r open @owner:o @id:r\n"
-    proctor_canonical_stale = (
-        "- [ ] x @owner:o @blocked_by:todo://maestro/done @id:x\n"
-    )
+    proctor_canonical_stale = "- [ ] x @owner:o @blocked_by:todo://maestro/done @id:x\n"
     proctor_legacy_dangling = "- [ ] y @owner:o @blocked_by:maestro#gone\n"
     index = ManifestIndex(frozenset({"maestro", "proctor"}), {})
     inputs = [
         RepoInput("maestro", maestro),
-        RepoInput(
-            "proctor", proctor_canonical_stale + proctor_legacy_dangling
-        ),
+        RepoInput("proctor", proctor_canonical_stale + proctor_legacy_dangling),
     ]
     report = Report()
     condition_codes = resolve_graph(inputs, index, report)
@@ -484,7 +621,7 @@ def _selftest() -> int:
     reporting_inputs = [
         RepoInput(
             "m",
-            "- [ ] human @owner:github:x @trigger:\"release\"\n"
+            '- [ ] human @owner:github:x @trigger:"release"\n'
             "- [ ] repo @owner:repo:m\n"
             "- [ ] undecided @owner:TBD\n"
             "- [ ] absent\n"
@@ -539,6 +676,73 @@ def _selftest() -> int:
         extra_exclude={(r.source_repo, r.raw_ref) for r in refs},
     )
     assert not any("maestro#7" in w for w in report.warnings), report.warnings
+
+    # devtools#58: a CLOSED item's issue-form ref is excluded too (the tag is
+    # kept on [x] items as history) and is never state-resolved.
+    closed_inputs = [
+        RepoInput("maestro", "- [ ] base @owner:o @id:b\n"),
+        RepoInput("proctor", "- [x] done @owner:o @blocked_by:maestro#7 @id:dw\n"),
+    ]
+    closed_index = ManifestIndex(frozenset({"maestro", "proctor"}), {})
+    assert collect_issue_refs(closed_inputs, closed_index) == []
+    excl = issue_ref_exclusions(closed_inputs)
+    assert ("proctor", "maestro#7") in excl, excl
+    report = Report()
+    resolve_graph(closed_inputs, closed_index, report, extra_exclude=excl)
+    assert not any("maestro#7" in w for w in report.warnings), report.warnings
+
+    # devtools#56: legacy slug ref on an @id'd OPEN source — completed target
+    # warns (stale-only), open target stays silent.
+    gap_index = ManifestIndex(frozenset({"maestro", "proctor"}), {})
+    waiter = RepoInput(
+        "proctor", "- [ ] w @owner:o @blocked_by:maestro#done-slug @id:w\n"
+    )
+    report = Report()
+    codes = check_id_source_legacy_stale(
+        [
+            RepoInput("maestro", "- [x] shipped done-slug @owner:o @id:done-slug\n"),
+            waiter,
+        ],
+        gap_index,
+        report,
+    )
+    assert any("legacy ref on @id'd source" in w for w in report.warnings), (
+        report.warnings
+    )
+    assert codes[("proctor", 1)] == {"PF-BLOCKER-STALE"}, codes
+    report = Report()
+    codes = check_id_source_legacy_stale(
+        [
+            RepoInput("maestro", "- [ ] shipped done-slug @owner:o @id:done-slug\n"),
+            waiter,
+        ],
+        gap_index,
+        report,
+    )
+    assert codes == {} and not report.warnings, (codes, report.warnings)
+
+    # devtools#57: tag opening a continuation line warns; prose mentions and
+    # checkbox-line tags do not; a torn @trigger quote is its own finding.
+    report = Report()
+    check_tag_placement(
+        [
+            RepoInput(
+                "m",
+                "- [ ] x @owner:o\n"
+                "      @id:hidden\n"
+                '- [ ] y @owner:o @trigger:"broken\n'
+                '      value" tail\n'
+                '- [ ] ok @owner:o @trigger:"fine" @id:ok\n'
+                "      prose mentioning @id:ok is fine\n",
+            )
+        ],
+        report,
+    )
+    tag_warns = [w for w in report.warnings if "DT-TAG-ON-CONTINUATION" in w]
+    torn_warns = [w for w in report.warnings if "DT-TRIGGER-UNTERMINATED" in w]
+    assert len(tag_warns) == 1 and ":2 " in tag_warns[0], report.warnings
+    assert len(torn_warns) == 1 and ":3 " in torn_warns[0], report.warnings
+    assert len(report.warnings) == 2, report.warnings
     print("selftest OK")
     return 0
 
@@ -590,9 +794,7 @@ def main() -> int:
         print(f"cannot resolve repo identity: {exc}", file=sys.stderr)
         return 1
     if not index.canonical_keys:
-        index = ManifestIndex(
-            frozenset(i.repo for i in inputs if i.available), {}
-        )
+        index = ManifestIndex(frozenset(i.repo for i in inputs if i.available), {})
     if not planned:
         print(f"no repo with a TODO.md under {root}", file=sys.stderr)
         return 1
@@ -602,8 +804,11 @@ def main() -> int:
         inputs,
         index,
         report,
-        extra_exclude={(r.source_repo, r.raw_ref) for r in issue_refs},
+        extra_exclude=issue_ref_exclusions(inputs),
     )
+    for key, codes in check_id_source_legacy_stale(inputs, index, report).items():
+        condition_codes.setdefault(key, set()).update(codes)
+    check_tag_placement(inputs, report)
     if issue_refs:
         repo_map = github_repo_map(manifest_path) if manifest_path.is_file() else {}
         issue_codes = check_issue_blockers(issue_refs, repo_map, report)
