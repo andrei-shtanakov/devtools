@@ -105,6 +105,27 @@ def test_validate_catalog_collects_all_rules(checker) -> None:
     assert warnings == ["V6", "V7", "V7"]  # unknown status + unknown kind
 
 
+def test_empty_harnesses_plane_is_fail_closed(checker) -> None:
+    """Canon devtools#47: present-but-empty [harnesses] + agents → V1.
+
+    Flipping the canon to "scaffolding, checks unarmed" must break exactly
+    this test (the regression-pin mirror of Maestro's opposite-reading test).
+    An empty plane WITHOUT agents stays valid.
+    """
+    with_agent = {
+        "models": {"m": {"vendor": "acme", "status": "active"}},
+        "harnesses": {},
+        "agents": [{"harness": "h", "model": "m"}],
+    }
+    issues = checker.validate_catalog(with_agent)
+    assert [i.code for i in issues if i.severity == "error"] == ["V1"]
+    without_agents = {
+        "models": {"m": {"vendor": "acme", "status": "active"}},
+        "harnesses": {},
+    }
+    assert checker.validate_catalog(without_agents) == []
+
+
 def test_misshapen_catalog_is_a_case_problem_not_a_crash(
     checker, contract_copy: Path
 ) -> None:
