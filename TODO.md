@@ -303,7 +303,7 @@
 
 - [x] README набора: раздел дивергенций — штампы «дата + коммит наблюдения», обновить устаревший статус ATP и Maestro @owner:github:andrei-shtanakov @id:catalog-conformance-readme-atp-divergences-stale — PR #52 (merge 2f39946); devtools#50 закрыт
 
-- [ ] Машиночитаемый словарь enum'ов ADR-ECO-003 в наборе (vocabulary.toml) @owner:github:andrei-shtanakov @id:catalog-enum-vocabulary-machine-readable
+- [x] Машиночитаемый словарь enum'ов ADR-ECO-003 в наборе (vocabulary.toml) @owner:github:andrei-shtanakov @id:catalog-enum-vocabulary-machine-readable — PR #54 (merge 070acdc); devtools#51 и devtools#47 закрыты
       Принят из inbox-issue devtools#51 (инициатор — maestro, из их pin-bump
       работы; слаг совпадает — maestro уже ждёт по
       @blocked_by:devtools#catalog-enum-vocabulary-machine-readable).
