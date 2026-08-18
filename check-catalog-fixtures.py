@@ -70,11 +70,27 @@ def load_vocabulary(contract_dir: Path) -> Vocabulary:
     cannot diverge (devtools#51).
     """
     doc = tomllib.loads((contract_dir / VOCABULARY_NAME).read_text(encoding="utf-8"))
-    statuses = frozenset(doc["model_status"])
-    kinds = frozenset(doc["harness_kind"])
-    if not statuses or not kinds:
-        raise ValueError("vocabulary.toml: enum list is empty")
-    return Vocabulary(model_statuses=statuses, harness_kinds=kinds)
+    if doc.get("version") != 1:
+        raise ValueError(
+            f"{VOCABULARY_NAME}: unsupported version {doc.get('version')!r}"
+        )
+
+    def str_list(key: str) -> frozenset[str]:
+        values = doc.get(key)
+        if (
+            not isinstance(values, list)
+            or not values
+            or not all(isinstance(v, str) for v in values)
+        ):
+            raise ValueError(
+                f"{VOCABULARY_NAME}: {key} must be a non-empty list of strings"
+            )
+        return frozenset(values)
+
+    return Vocabulary(
+        model_statuses=str_list("model_status"),
+        harness_kinds=str_list("harness_kind"),
+    )
 
 
 def validate_catalog(catalog: dict, vocab: Vocabulary) -> list[Issue]:

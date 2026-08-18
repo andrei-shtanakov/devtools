@@ -101,8 +101,23 @@ def test_dropped_vocabulary_value_is_observable(checker, vocab) -> None:
     assert problem is not None and "V7" in problem
 
 
-def test_unusable_vocabulary_is_detected(checker, contract_copy: Path) -> None:
-    (contract_copy / "vocabulary.toml").write_text("model_status = []\n")
+@pytest.mark.parametrize(
+    "content",
+    [
+        "model_status = []\n",  # no version
+        'version = 2\nmodel_status = ["active"]\nharness_kind = ["cli"]\n',
+        'version = 1\nmodel_status = "active"\nharness_kind = ["cli"]\n',
+        'version = 1\nmodel_status = [["active"]]\nharness_kind = ["cli"]\n',
+        'version = 1\nmodel_status = []\nharness_kind = ["cli"]\n',
+        'version = 1\nmodel_status = ["active"]\n',  # harness_kind missing
+    ],
+    ids=["no-version", "bad-version", "not-a-list", "nested", "empty", "missing-key"],
+)
+def test_unusable_vocabulary_is_detected(
+    checker, contract_copy: Path, content: str
+) -> None:
+    """Malformed vocabulary is a clear problem line, never a traceback."""
+    (contract_copy / "vocabulary.toml").write_text(content)
     problems = checker.check_all(contract_copy)
     assert any("vocabulary.toml unusable" in p for p in problems)
 
