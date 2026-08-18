@@ -5,11 +5,11 @@
   "files": [
     {
       "path": "README.md",
-      "sha256": "2bb2a38365222c035d9903631545bd09f2dd9625abd09ef6cc23411dc795fe47"
+      "sha256": "b3bf86ce2683643524767fb5df1dfe18385db3c2e6d7789ae1164371c91a3ba5"
     },
     {
       "path": "expectations.toml",
-      "sha256": "bc28cccc90c71b06a86d6fca930b82849e4cb4df956de86e0e3487d3560b8ff5"
+      "sha256": "c029d4503c2ef83b0c5ed3768116d143b916606fadf60764df6086b710867cd1"
     },
     {
       "path": "fixtures/invalid/broken.toml",
@@ -48,6 +48,10 @@
       "sha256": "2f865144c36c87f8277ea8a488965b51285906c32eceadc796e0e23b3c571901"
     },
     {
+      "path": "fixtures/valid/vocabulary-roundtrip.toml",
+      "sha256": "d673fe8b648c1dda0d1d5d88c5e7ead62c610a06bc4b2431fa4c897354c26ffa"
+    },
+    {
       "path": "fixtures/warn/v6-deprecated-ref.toml",
       "sha256": "f4fc1a4b7d1b1d70eb02b9b68a1802f37f6e37176dfc2b1934b3e0c32cef2b0a"
     },
@@ -58,7 +62,11 @@
     {
       "path": "fixtures/warn/v7-unknown-kind.toml",
       "sha256": "210e5e935c94d170dc609c53d4c0ef107febac52055e8b1f23c9323a460f1358"
+    },
+    {
+      "path": "vocabulary.toml",
+      "sha256": "12cfb36c67d9ea7d709655ce8b7785eaeb586d140418f4a920aeb437ff13ce4e"
     }
   ],
-  "tree_sha256": "b675af2b7be06537e0caa5e6b48350fe58befc60031201e316a764ea3bb3789e"
+  "tree_sha256": "bdd6f246fb7139586f9d90dce097bc462447dae4790df3a93a58385303186c55"
 }

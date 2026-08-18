@@ -34,9 +34,8 @@ from pathlib import Path
 CONTRACT_SUBDIR = Path("contracts") / "catalog-conformance-fixtures" / "v1"
 MANIFEST_NAME = "manifest.json"
 EXPECTATIONS_NAME = "expectations.toml"
+VOCABULARY_NAME = "vocabulary.toml"
 
-KNOWN_STATUSES = {"active", "deprecated", "retired"}
-KNOWN_KINDS = {"cli", "api-baseline", "local"}
 ERROR_CODES = {"V1", "V2", "V3", "V4", "V5"}
 FLAG_CODES = {"V6", "V7"}
 PATHRES_EXPECT_BY_ENV = {
@@ -55,7 +54,30 @@ class Issue:
     message: str
 
 
-def validate_catalog(catalog: dict) -> list[Issue]:
+@dataclass(frozen=True)
+class Vocabulary:
+    """ADR-ECO-003 enum vocabulary, loaded from vocabulary.toml."""
+
+    model_statuses: frozenset[str]
+    harness_kinds: frozenset[str]
+
+
+def load_vocabulary(contract_dir: Path) -> Vocabulary:
+    """Read the machine-readable enum vocabulary shipped with the set.
+
+    Deliberately the ONLY place devtools knows the vocabulary — the
+    reference validator reads the same file consumers vendor, so the two
+    cannot diverge (devtools#51).
+    """
+    doc = tomllib.loads((contract_dir / VOCABULARY_NAME).read_text(encoding="utf-8"))
+    statuses = frozenset(doc["model_status"])
+    kinds = frozenset(doc["harness_kind"])
+    if not statuses or not kinds:
+        raise ValueError("vocabulary.toml: enum list is empty")
+    return Vocabulary(model_statuses=statuses, harness_kinds=kinds)
+
+
+def validate_catalog(catalog: dict, vocab: Vocabulary) -> list[Issue]:
     """Reference implementation of contract rules V1..V7 (collects all)."""
     models: dict[str, dict] = catalog.get("models", {})
     harnesses: dict[str, dict] = catalog.get("harnesses", {})
@@ -64,13 +86,13 @@ def validate_catalog(catalog: dict) -> list[Issue]:
 
     for name, spec in models.items():
         status = spec.get("status", "active")
-        if status not in KNOWN_STATUSES:
+        if status not in vocab.model_statuses:
             issues.append(
                 Issue("V7", "warning", f"model {name!r} has unknown status {status!r}")
             )
     for name, spec in harnesses.items():
         kind = spec.get("kind")
-        if kind is not None and kind not in KNOWN_KINDS:
+        if kind is not None and kind not in vocab.harness_kinds:
             issues.append(
                 Issue("V7", "warning", f"harness {name!r} has unknown kind {kind!r}")
             )
@@ -129,7 +151,7 @@ def validate_catalog(catalog: dict) -> list[Issue]:
     return issues
 
 
-def check_case(contract_dir: Path, case: dict) -> str | None:
+def check_case(contract_dir: Path, case: dict, vocab: Vocabulary) -> str | None:
     """Run one expectations [[case]] against the reference; None if it holds."""
     rel = str(case.get("file", ""))
     expect = case.get("expect")
@@ -145,7 +167,7 @@ def check_case(contract_dir: Path, case: dict) -> str | None:
         return f"{rel}: expected parse-error, but the file parses"
 
     try:
-        issues = validate_catalog(catalog)
+        issues = validate_catalog(catalog, vocab)
     except (AttributeError, LookupError, TypeError) as exc:
         # Parseable TOML with a shape the contract does not describe (e.g.
         # `models` not a table, an agent row without "harness") is a broken
@@ -241,6 +263,11 @@ def check_all(contract_dir: Path) -> list[str]:
     expectations = tomllib.loads(expectations_path.read_text(encoding="utf-8"))
     cases: list[dict] = expectations.get("case", [])
 
+    try:
+        vocab = load_vocabulary(contract_dir)
+    except (OSError, KeyError, ValueError, tomllib.TOMLDecodeError) as exc:
+        return [f"{VOCABULARY_NAME} unusable: {exc!r}"]
+
     covered = {str(c.get("file")) for c in cases}
     on_disk = {
         p.relative_to(contract_dir).as_posix()
@@ -252,7 +279,7 @@ def check_all(contract_dir: Path) -> list[str]:
         problems.append(f"{ghost}: [[case]] points at a non-existent fixture")
 
     for case in cases:
-        problem = check_case(contract_dir, case)
+        problem = check_case(contract_dir, case, vocab)
         if problem:
             problems.append(problem)
 

@@ -34,6 +34,11 @@ def checker():
     return mod
 
 
+@pytest.fixture(scope="session")
+def vocab(checker):
+    return checker.load_vocabulary(_CONTRACT)
+
+
 @pytest.fixture()
 def contract_copy(tmp_path: Path) -> Path:
     copy = tmp_path / "v1"
@@ -51,8 +56,8 @@ def test_shipped_set_is_green(checker) -> None:
 
 
 @pytest.mark.parametrize("case", _cases(), ids=lambda c: c["file"])
-def test_each_case_holds_individually(checker, case: dict) -> None:
-    assert checker.check_case(_CONTRACT, case) is None
+def test_each_case_holds_individually(checker, vocab, case: dict) -> None:
+    assert checker.check_case(_CONTRACT, case, vocab) is None
 
 
 @pytest.mark.parametrize(
@@ -60,22 +65,49 @@ def test_each_case_holds_individually(checker, case: dict) -> None:
     [c for c in _cases() if c["expect"] in ("error", "flag", "parse-error")],
     ids=lambda c: c["file"],
 )
-def test_negative_fixtures_are_not_acceptable_as_valid(checker, case: dict) -> None:
+def test_negative_fixtures_are_not_acceptable_as_valid(
+    checker, vocab, case: dict
+) -> None:
     """A loader that accepted this fixture as healthy would diverge."""
     flipped = {"file": case["file"], "expect": "valid"}
-    assert checker.check_case(_CONTRACT, flipped) is not None
+    assert checker.check_case(_CONTRACT, flipped, vocab) is not None
 
 
-def test_valid_fixture_fails_error_expectation(checker) -> None:
+def test_valid_fixture_fails_error_expectation(checker, vocab) -> None:
     wrong = {
         "file": "fixtures/valid/three-planes.toml",
         "expect": "error",
         "code": "V1",
     }
-    assert checker.check_case(_CONTRACT, wrong) is not None
+    assert checker.check_case(_CONTRACT, wrong, vocab) is not None
 
 
-def test_validate_catalog_collects_all_rules(checker) -> None:
+def test_vocabulary_is_the_adr_set(checker, vocab) -> None:
+    """Pin of the published vocabulary content (ADR-ECO-003)."""
+    assert vocab.model_statuses == {"active", "deprecated", "retired"}
+    assert vocab.harness_kinds == {"cli", "api-baseline", "local"}
+
+
+def test_dropped_vocabulary_value_is_observable(checker, vocab) -> None:
+    """devtools#51: a loader that silently LOST a value goes red on the
+    roundtrip case — simulated by validating with a reduced vocabulary."""
+    reduced = checker.Vocabulary(
+        model_statuses=vocab.model_statuses,
+        harness_kinds=vocab.harness_kinds - {"api-baseline"},
+    )
+    case = {"file": "fixtures/valid/vocabulary-roundtrip.toml", "expect": "valid"}
+    assert checker.check_case(_CONTRACT, case, vocab) is None
+    problem = checker.check_case(_CONTRACT, case, reduced)
+    assert problem is not None and "V7" in problem
+
+
+def test_unusable_vocabulary_is_detected(checker, contract_copy: Path) -> None:
+    (contract_copy / "vocabulary.toml").write_text("model_status = []\n")
+    problems = checker.check_all(contract_copy)
+    assert any("vocabulary.toml unusable" in p for p in problems)
+
+
+def test_validate_catalog_collects_all_rules(checker, vocab) -> None:
     catalog = {
         "models": {
             "m-active": {"vendor": "acme", "status": "active"},
@@ -98,14 +130,14 @@ def test_validate_catalog_collects_all_rules(checker) -> None:
             {"harness": "h_ok", "model": "m-deprecated"},  # V6
         ],
     }
-    issues = checker.validate_catalog(catalog)
+    issues = checker.validate_catalog(catalog, vocab)
     errors = sorted(i.code for i in issues if i.severity == "error")
     warnings = sorted(i.code for i in issues if i.severity == "warning")
     assert errors == ["V1", "V2", "V3", "V4", "V5"]
     assert warnings == ["V6", "V7", "V7"]  # unknown status + unknown kind
 
 
-def test_empty_harnesses_plane_is_fail_closed(checker) -> None:
+def test_empty_harnesses_plane_is_fail_closed(checker, vocab) -> None:
     """Canon devtools#47: present-but-empty [harnesses] + agents → V1.
 
     Flipping the canon to "scaffolding, checks unarmed" must break exactly
@@ -117,23 +149,23 @@ def test_empty_harnesses_plane_is_fail_closed(checker) -> None:
         "harnesses": {},
         "agents": [{"harness": "h", "model": "m"}],
     }
-    issues = checker.validate_catalog(with_agent)
+    issues = checker.validate_catalog(with_agent, vocab)
     assert [i.code for i in issues if i.severity == "error"] == ["V1"]
     without_agents = {
         "models": {"m": {"vendor": "acme", "status": "active"}},
         "harnesses": {},
     }
-    assert checker.validate_catalog(without_agents) == []
+    assert checker.validate_catalog(without_agents, vocab) == []
 
 
 def test_misshapen_catalog_is_a_case_problem_not_a_crash(
-    checker, contract_copy: Path
+    checker, vocab, contract_copy: Path
 ) -> None:
     """Parseable TOML with a non-contract shape fails the case, no traceback."""
     fixture = contract_copy / "fixtures" / "valid" / "misshapen.toml"
     fixture.write_text("models = 3\n[[agents]]\nrouted = true\n")
     case = {"file": "fixtures/valid/misshapen.toml", "expect": "valid"}
-    problem = checker.check_case(contract_copy, case)
+    problem = checker.check_case(contract_copy, case, vocab)
     assert problem is not None and "shape not validatable" in problem
 
 
