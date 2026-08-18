@@ -263,7 +263,7 @@
       доставлено», теги сняты этим PR-ом. devtools#43 закрыт как сигнал
       инициатору (ADR-ECO-006).
 
-- [ ] Аддитивное расширение v1: кейсы на пустую плоскость harnesses и V7-only-kind @owner:github:andrei-shtanakov @id:catalog-conformance-v1-gaps @blocked_by:maestro#192 @blocked_by:atp-platform#294
+- [x] Аддитивное расширение v1: кейсы на пустую плоскость harnesses и V7-only-kind @owner:github:andrei-shtanakov @id:catalog-conformance-v1-gaps — PR #48 (кейсы, merge 2533ff7) + PR #49 (ожидание) + PR этого пункта (закрытие); devtools#47 закрыт
       Принят из inbox-issue devtools#47 (инициатор — maestro, из его
       wiring-разбора maestro#189; слаг совпадает). Две развилки, где v1 не
       выносил решения и загрузчики могли разойтись молча.
@@ -289,10 +289,41 @@
       его сьют и снять тег; после всех трёх закрыть пункт и devtools#47.
       arbiter#76 ПРИНЯТ 2026-08-18 (PF-BLOCKER-STALE отработал, тег снят):
       PR #77 merged 84114ef, CI зелёный, PIN на master = 2533ff7, оба новых
-      кейса проверены мутацией, загрузчик не правился. Остались maestro#192
-      и atp-platform#294.
+      кейса проверены мутацией, загрузчик не правился.
+      maestro#192 и atp-platform#294 ПРИНЯТЫ 2026-08-18 (второй
+      PF-BLOCKER-STALE ×2, теги сняты): maestro PR #193 merged 0285bcd —
+      выбрал ПОЧИНИТЬ обе развилки, не остаться красным (пустая плоскость →
+      V1 по «ключ объявлен»; kind — против интерим HARNESS_KINDS до
+      vocabulary.toml); atp-platform PR #295 merged 6509727 — V7-kind стал
+      CatalogWarning. PIN у обоих 2533ff7; maestro CI зелёный полностью,
+      у atp на смерженном коммите пара integration-джобов ещё бежала в
+      момент проверки (остальное зелёное). Все три сьюта на пиненом наборе
+      без известных дивергенций, кроме maestro missing-file (осознанная,
+      зафиксирована в README). devtools#47 закрыт как сигнал инициатору.
 
 - [x] README набора: раздел дивергенций — штампы «дата + коммит наблюдения», обновить устаревший статус ATP и Maestro @owner:github:andrei-shtanakov @id:catalog-conformance-readme-atp-divergences-stale — PR #52 (merge 2f39946); devtools#50 закрыт
+
+- [ ] Машиночитаемый словарь enum'ов ADR-ECO-003 в наборе (vocabulary.toml) @owner:github:andrei-shtanakov @id:catalog-enum-vocabulary-machine-readable
+      Принят из inbox-issue devtools#51 (инициатор — maestro, из их pin-bump
+      работы; слаг совпадает — maestro уже ждёт по
+      @blocked_by:devtools#catalog-enum-vocabulary-machine-readable).
+      Проблема: словарь status/kind существовал только прозой (инлайн-
+      комментарий в ADR-ECO-003 + README набора), три загрузчика копируют
+      руками — риск №1 ADR-ECO-003b этажом выше, на уровне вокабуляра;
+      выпавшее значение ненаблюдаемо (v7-кейсы ловят только лишние).
+      Реализация: vocabulary.toml в v1 (производный от ADR, источник в
+      комментарии; в пин-поверхности manifest — 16 файлов); референс-
+      валидатор читает файл вместо констант (второй копии в devtools
+      больше нет); valid/vocabulary-roundtrip.toml использует каждое
+      значение словаря — выпавшее значение красит valid-кейс, лишние ловят
+      v7-*; вместе множество наблюдаемо как точное. Аддитивность:
+      добавление значения — v1, удаление/переименование — v2 (в README).
+      Приёмка (из issue): словарь в v1 + в манифесте + потребитель может
+      заменить рукописную константу чтением вендоренного файла — закрыть с
+      мержем PR; devtools#51 закрыть тогда же (это сигнал maestro удалить
+      их интерим HARNESS_KINDS/MODEL_STATUSES — у них свой пункт с этим же
+      слагом). Отдельных pin-bump issues не заводить: открытые maestro#192
+      и atp-platform#294 подхватят свежий пин естественно.
       Принят из inbox-issue devtools#50 (инициатор — atp-platform, из их
       pin-bump работы; слаг совпадает). Раздел кэшировал чужой статус без
       возраста утверждений и протух молча за сутки: ATP реализовал V1–V6 в
