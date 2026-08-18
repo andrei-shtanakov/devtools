@@ -263,7 +263,7 @@
       доставлено», теги сняты этим PR-ом. devtools#43 закрыт как сигнал
       инициатору (ADR-ECO-006).
 
-- [ ] Аддитивное расширение v1: кейсы на пустую плоскость harnesses и V7-only-kind @owner:github:andrei-shtanakov @id:catalog-conformance-v1-gaps
+- [ ] Аддитивное расширение v1: кейсы на пустую плоскость harnesses и V7-only-kind @owner:github:andrei-shtanakov @id:catalog-conformance-v1-gaps @blocked_by:maestro#192 @blocked_by:atp-platform#294 @blocked_by:arbiter#76
       Принят из inbox-issue devtools#47 (инициатор — maestro, из его
       wiring-разбора maestro#189; слаг совпадает). Две развилки, где v1 не
       выносил решения и загрузчики могли разойтись молча.
@@ -279,7 +279,11 @@
       manifest перегенерён (14 файлов); канон закреплён регресс-тестом
       test_empty_harnesses_plane_is_fail_closed. Maestro заранее заявил обе
       фикстуры у себя красными — это рабочий режим набора.
-      Приёмка (из issue): кейсы в v1 + manifest — PR этого пункта;
-      потребители обновляют пин осознанным PR-ом и показывают новые
-      негативные кейсы красными при принятии — после мержа pin-bump
-      inbox-issues трём потребителям, ожидание @blocked_by-тегами.
+      Приёмка (из issue): кейсы в v1 + manifest — ВЫПОЛНЕНО: PR #48,
+      merge 2533ff7 (2026-08-18); потребители обновляют пин осознанным
+      PR-ом и показывают новые негативные кейсы красными при принятии —
+      ожидание = @blocked_by-теги выше: pin-bump issues maestro#192 /
+      atp-platform#294 / arbiter#76 (слаг у всех
+      catalog-conformance-pin-bump-v1-gaps, пин 2533ff7) заведены
+      2026-08-18. Закрытый issue у соседа даст PF-BLOCKER-STALE — проверить
+      его сьют и снять тег; после всех трёх закрыть пункт и devtools#47.
