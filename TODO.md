@@ -263,7 +263,7 @@
       доставлено», теги сняты этим PR-ом. devtools#43 закрыт как сигнал
       инициатору (ADR-ECO-006).
 
-- [ ] Аддитивное расширение v1: кейсы на пустую плоскость harnesses и V7-only-kind @owner:github:andrei-shtanakov @id:catalog-conformance-v1-gaps @blocked_by:maestro#192 @blocked_by:atp-platform#294 @blocked_by:arbiter#76
+- [ ] Аддитивное расширение v1: кейсы на пустую плоскость harnesses и V7-only-kind @owner:github:andrei-shtanakov @id:catalog-conformance-v1-gaps @blocked_by:maestro#192 @blocked_by:atp-platform#294
       Принят из inbox-issue devtools#47 (инициатор — maestro, из его
       wiring-разбора maestro#189; слаг совпадает). Две развилки, где v1 не
       выносил решения и загрузчики могли разойтись молча.
@@ -287,3 +287,21 @@
       catalog-conformance-pin-bump-v1-gaps, пин 2533ff7) заведены
       2026-08-18. Закрытый issue у соседа даст PF-BLOCKER-STALE — проверить
       его сьют и снять тег; после всех трёх закрыть пункт и devtools#47.
+      arbiter#76 ПРИНЯТ 2026-08-18 (PF-BLOCKER-STALE отработал, тег снят):
+      PR #77 merged 84114ef, CI зелёный, PIN на master = 2533ff7, оба новых
+      кейса проверены мутацией, загрузчик не правился. Остались maestro#192
+      и atp-platform#294.
+
+- [ ] README набора: раздел дивергенций — штампы «дата + коммит наблюдения», обновить устаревший статус ATP и Maestro @owner:github:andrei-shtanakov @id:catalog-conformance-readme-atp-divergences-stale
+      Принят из inbox-issue devtools#50 (инициатор — atp-platform, из их
+      pin-bump работы; слаг совпадает). Раздел кэшировал чужой статус без
+      возраста утверждений и протух молча за сутки: ATP реализовал V1–V6 в
+      wiring #293 (проверено по atp-platform@6678f3e), Maestro — V1–V6 в
+      wiring #189 (проверено по maestro@b244e89); обе записи 2026-08-17
+      стали ложными. Принято предложение инициатора: каждое утверждение
+      несёт дату наблюдения + коммит потребителя; раздел явно объявлен
+      наблюдательным снапшотом (контракт — только expectations.toml),
+      устаревание = дефект документации, welcome inbox-issue.
+      README — часть пин-поверхности: manifest перегенерён.
+      Ничего не блокирует (сьют ATP зелёный на 2533ff7) — закрыть с мержем
+      PR; devtools#50 закрыть тогда же.
