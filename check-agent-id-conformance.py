@@ -4,7 +4,7 @@
 Verifies the vendored/generated agent rosters across ATP, arbiter and Maestro
 stay consistent with the SSOT catalog `atp-platform/method/agents-catalog.toml`
 (canon since 2026-07-03 — the SSOT must live inside a distributable repo;
-`_cowork_output` is a dev-only coordination workspace that installed users do
+`_cowork_output` is a dev-only coordination workspace that installed users do  # gov:allow-cowork
 not have, so `contracts/agents-catalog.toml` is a communication MIRROR, not the
 source). Its whole job is to turn the "silent None → re-rank no-op" failure
 mode (a mismatched `agent_id` that the arbiter join drops without error) into a
@@ -15,7 +15,7 @@ Checks (ADR-ECO-003 §CI-conformance, pre-D2 variant):
      arbiter/config/agents.toml.
   2. Every VENDORED copy — today just arbiter/config/ — is byte-for-byte
      identical to the SSOT, so all consumers see the same pairs. The
-     `_cowork_output/contracts/` mirror is deliberately NOT gated; see the
+     `_cowork_output/contracts/` mirror is deliberately NOT gated; see the  # gov:allow-cowork
      `vendored_copies` comment for the owner ruling behind that.
   3. Every `routable = true` harness has a registered Maestro spawner — i.e. a
      concrete AgentSpawner in maestro/spawners/ whose `agent_type` returns it

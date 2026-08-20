@@ -74,7 +74,7 @@ def find_repo_root(start: Path) -> Path:
 
 def default_catalog_path(start: Path) -> Path:
     """Канонический SSOT — `atp-platform/method/agents-catalog.toml` (owner ruling
-    2026-07-03): канон обязан жить в дистрибутируемом репе. `_cowork_output` — dev-only
+    2026-07-03): канон обязан жить в дистрибутируемом репе. `_cowork_output` — dev-only  # gov:allow-cowork
     коммуникационный workspace, у установивших проекты его НЕТ; contracts/-копия —
     зеркало для коммуникации, не источник. arbiter вендорит `config/`-копию."""
     root = find_repo_root(start)
