@@ -459,6 +459,115 @@ def build_inputs(
     return inputs, planned
 
 
+def check_blocker_cycles(
+    snapshot: dict, report: Report
+) -> dict[tuple[str, int], set[str]]:
+    """Deadlocks in the wait graph — the claim no single repo can make.
+
+    A `@blocked_by` edge says "this item cannot move until that one does". A
+    cycle of such edges therefore says every member is waiting and none can
+    ever start: there is no reading under which it is correct, so it is an
+    error rather than a warning.
+
+    This lives here, not in the shared package, because a cycle is a property
+    of the assembled *fleet* graph. Half of one is invisible from inside either
+    repo — the atp-platform ↔ maestro deadlock of 2026-08-22 passed both repos'
+    own checks and was caught by hand, in an open PR, one merge away from main.
+
+    The unit reported is a strongly connected component, not a single back
+    edge: every member of an SCC transitively waits on every other, so naming
+    one edge would understate what is stuck. Members are sorted, so the same
+    graph always renders the same text.
+    """
+    adjacency: dict[str, set[str]] = {}
+    for edge in snapshot.get("edges", ()):
+        if edge.get("kind") != "blocked_by":
+            continue
+        source, target = edge.get("source_node_id"), edge.get("target_node_id")
+        if isinstance(source, str) and isinstance(target, str):
+            adjacency.setdefault(source, set()).add(target)
+            adjacency.setdefault(target, set())
+
+    where: dict[str, tuple[str, int]] = {}
+    for node in snapshot.get("nodes", ()):
+        prov = node.get("provenance") or {}
+        repo, line = prov.get("repo"), prov.get("line")
+        node_id = node.get("node_id")
+        if isinstance(node_id, str) and isinstance(repo, str) and isinstance(line, int):
+            where[node_id] = (repo, line)
+
+    codes: dict[tuple[str, int], set[str]] = {}
+    for component in _strongly_connected(adjacency):
+        self_loop = len(component) == 1 and next(iter(component)) in adjacency.get(
+            next(iter(component)), set()
+        )
+        if len(component) < 2 and not self_loop:
+            continue
+        members = sorted(component)
+        rendered = ", ".join(
+            f"{node} ({where[node][0]}/TODO.md:{where[node][1]})"
+            if node in where
+            else node
+            for node in members
+        )
+        report.errors.append(
+            f"blocker cycle across {len(members)} item(s): {rendered} — every "
+            f"member waits on another, so none can start; break the cycle by "
+            f"dropping the wait that is already satisfied [DT-BLOCKER-CYCLE]"
+        )
+        for node in members:
+            if node in where:
+                codes.setdefault(where[node], set()).add("DT-BLOCKER-CYCLE")
+    return codes
+
+
+def _strongly_connected(adjacency: dict[str, set[str]]) -> list[set[str]]:
+    """Tarjan's SCCs, iterative — a fleet graph is small but recursion is not
+    the thing to bet a linter on."""
+    index_of: dict[str, int] = {}
+    lowlink: dict[str, int] = {}
+    on_stack: set[str] = set()
+    stack: list[str] = []
+    result: list[set[str]] = []
+    counter = 0
+
+    for root in sorted(adjacency):
+        if root in index_of:
+            continue
+        work: list[tuple[str, list[str]]] = [(root, sorted(adjacency.get(root, ())))]
+        index_of[root] = lowlink[root] = counter
+        counter += 1
+        stack.append(root)
+        on_stack.add(root)
+        while work:
+            node, pending = work[-1]
+            if pending:
+                nxt = pending.pop()
+                if nxt not in index_of:
+                    index_of[nxt] = lowlink[nxt] = counter
+                    counter += 1
+                    stack.append(nxt)
+                    on_stack.add(nxt)
+                    work.append((nxt, sorted(adjacency.get(nxt, ()))))
+                elif nxt in on_stack:
+                    lowlink[node] = min(lowlink[node], index_of[nxt])
+                continue
+            work.pop()
+            if work:
+                parent = work[-1][0]
+                lowlink[parent] = min(lowlink[parent], lowlink[node])
+            if lowlink[node] == index_of[node]:
+                component: set[str] = set()
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    component.add(member)
+                    if member == node:
+                        break
+                result.append(component)
+    return result
+
+
 def resolve_graph(
     inputs: list[RepoInput],
     index: ManifestIndex,
@@ -475,6 +584,9 @@ def resolve_graph(
     snapshot = parse_fleet(inputs, index)
     canonical = list(snapshot["diagnostics"]) + check_fleet(snapshot)
     by_item: dict[tuple[str, int], set[str]] = {}
+    # Fleet-only: a cycle is invisible from inside either half of it.
+    for item, cycle_codes in check_blocker_cycles(snapshot, report).items():
+        by_item.setdefault(item, set()).update(cycle_codes)
     edges = snapshot["edges"]
     if edges:
         report.notes.append(f"canonical: {len(edges)} resolved cross-repo @id edge(s)")

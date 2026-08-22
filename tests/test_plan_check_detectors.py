@@ -211,3 +211,117 @@ def test_real_legacy_slug_still_ambiguous_on_closed_item(plan_check) -> None:
         inputs, _index("maestro", "proctor"), report, extra_exclude=excl
     )
     assert any("gone-slug" in w for w in report.warnings), report.warnings
+
+
+# --- DT-BLOCKER-CYCLE: дедлок в графе ожиданий -----------------------------
+#
+# Находка 2026-08-22: atp-platform и maestro одновременно ждали друг друга
+# (`atp-platform/TODO.md:208` ↔ `maestro/TODO.md:157`). Обе половины прошли
+# собственные проверки — цикл виден только на собранном графе флота, и был
+# пойман руками в открытом PR, за один мерж до main.
+
+
+def _snapshot(plan_check, repos: dict[str, str]) -> Any:
+    from plan_fields import parse_fleet
+
+    return parse_fleet(
+        [_repo(name, todo) for name, todo in sorted(repos.items())],
+        _index(*repos),
+    )
+
+
+def test_mutual_wait_is_an_error(plan_check) -> None:
+    """Ровно тот цикл, что был у atp-platform и maestro."""
+    report = plan_check.Report()
+    codes = plan_check.check_blocker_cycles(
+        _snapshot(
+            plan_check,
+            {
+                "atp-platform": "- [ ] sidecar @owner:o @blocked_by:todo://maestro/consume @id:publish\n",
+                "maestro": "- [ ] consume @owner:o @blocked_by:todo://atp-platform/publish @id:consume\n",
+            },
+        ),
+        report,
+    )
+
+    assert len(report.errors) == 1
+    assert "DT-BLOCKER-CYCLE" in report.errors[0]
+    assert "todo://atp-platform/publish" in report.errors[0]
+    assert "todo://maestro/consume" in report.errors[0]
+    # Указывает на строку у каждого участника, а не только называет узлы.
+    assert "atp-platform/TODO.md:1" in report.errors[0]
+    assert codes == {
+        ("atp-platform", 1): {"DT-BLOCKER-CYCLE"},
+        ("maestro", 1): {"DT-BLOCKER-CYCLE"},
+    }
+
+
+def test_three_node_cycle_reported_once_with_all_members(plan_check) -> None:
+    """Сообщается компонента целиком, а не отдельное обратное ребро.
+
+    Внутри SCC каждый ждёт каждого транзитивно, поэтому назвать одно ребро
+    значило бы преуменьшить объём застрявшего.
+    """
+    report = plan_check.Report()
+    plan_check.check_blocker_cycles(
+        _snapshot(
+            plan_check,
+            {
+                "a": "- [ ] x @owner:o @blocked_by:todo://b/y @id:x\n",
+                "b": "- [ ] y @owner:o @blocked_by:todo://c/z @id:y\n",
+                "c": "- [ ] z @owner:o @blocked_by:todo://a/x @id:z\n",
+            },
+        ),
+        report,
+    )
+
+    assert len(report.errors) == 1
+    assert "3 item(s)" in report.errors[0]
+    for node in ("todo://a/x", "todo://b/y", "todo://c/z"):
+        assert node in report.errors[0]
+
+
+def test_acyclic_chain_is_silent(plan_check) -> None:
+    """Длинная цепь ожиданий — норма, а не находка: у неё есть корень."""
+    report = plan_check.Report()
+    codes = plan_check.check_blocker_cycles(
+        _snapshot(
+            plan_check,
+            {
+                "a": "- [ ] x @owner:o @blocked_by:todo://b/y @id:x\n",
+                "b": "- [ ] y @owner:o @blocked_by:todo://c/z @id:y\n",
+                "c": "- [ ] z @owner:o @id:z\n",
+            },
+        ),
+        report,
+    )
+
+    assert report.errors == [] and codes == {}
+
+
+def test_self_block_is_an_error(plan_check) -> None:
+    """Пункт, ждущий сам себя, — вырожденный цикл, но всё ещё дедлок."""
+    report = plan_check.Report()
+    plan_check.check_blocker_cycles(
+        _snapshot(plan_check, {"a": "- [ ] x @owner:o @blocked_by:todo://a/x @id:x\n"}),
+        report,
+    )
+
+    assert len(report.errors) == 1
+    assert "1 item(s)" in report.errors[0]
+
+
+def test_message_is_deterministic(plan_check) -> None:
+    """Один и тот же граф обязан рендериться одинаково — иначе дифф отчёта шумит."""
+    graph = {
+        "z-repo": "- [ ] a @owner:o @blocked_by:todo://a-repo/b @id:a\n",
+        "a-repo": "- [ ] b @owner:o @blocked_by:todo://z-repo/a @id:b\n",
+    }
+    first, second = plan_check.Report(), plan_check.Report()
+    plan_check.check_blocker_cycles(_snapshot(plan_check, graph), first)
+    plan_check.check_blocker_cycles(_snapshot(plan_check, graph), second)
+
+    assert first.errors == second.errors
+    assert first.errors[0].index("todo://a-repo/b") < first.errors[0].index(
+        "todo://z-repo/a"
+    )
