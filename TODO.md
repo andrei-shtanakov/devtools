@@ -112,7 +112,7 @@
 
 ## Fleet plan-check по расписанию
 
-- [ ] Scheduled fleet plan-check: DAILY-прогон настоящего кросс-репного чекера над свежим клоном флота @owner:github:andrei-shtanakov @trigger:"после появления общего scheduled-run status/freshness-контракта в переходе launchd→CI" @id:scheduled-fleet-plan-check
+- [ ] Scheduled fleet plan-check: DAILY-прогон настоящего кросс-репного чекера над свежим клоном флота @owner:github:andrei-shtanakov @trigger:"после появления общего scheduled-run status/freshness-контракта в переходе launchd→CI" @id:scheduled-fleet-plan-check @epic:eco.tooling
       Решение владельца 2026-08-06. Роль ≠ Robin (инвариант №2 соблюдён,
       различие названо): Robin ежедневно ОБЪЯСНЯЕТ потенциальный застой
       прозой; plan-check МАШИННО проверяет полный PF-контракт и выдаёт
