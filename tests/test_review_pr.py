@@ -1,0 +1,316 @@
+"""Тесты review-pr.sh — терминальный прогон codex-ревью PR с публикацией
+вердикта ревью от отдельного аккаунта (профиль GH_CONFIG_DIR).
+
+Стратегия: git — настоящий (bare-репо играет роль origin, ref
+`refs/pull/N/head` создаётся руками, как это делает GitHub); `gh` и китовый
+`scripts/review/local.sh` — стабы, управляемые переменными окружения и
+пишущие свои argv в лог-файлы. Так проверяется именно обвязка: маппинг кодов
+выхода кита на действие ревью, guard «голова уехала», отказ публиковать при
+сломанном ревьюере.
+
+Контракт кодов выхода review-pr.sh:
+  0 — чисто, approve опубликован (или dry-run);
+  1 — blocker/major, request-changes опубликован (или dry-run);
+  2 — конфигурация/аргументы/состояние PR/публикация;
+  3 — ревьюер не отработал (проброс из кита);
+  4 — голова PR уехала между прогоном и публикацией.
+"""
+
+from __future__ import annotations
+
+import os
+import stat
+import subprocess
+from pathlib import Path
+
+import pytest
+
+SCRIPT = Path(__file__).resolve().parent.parent / "review-pr.sh"
+
+GH_STUB = """#!/usr/bin/env bash
+# Стаб gh: логирует каждый вызов, отвечает по переменным GH_STUB_*.
+echo "GH_CONFIG_DIR=${GH_CONFIG_DIR:-} gh $*" >> "$GH_STUB_LOG"
+case "$*" in
+  *"api user"*)
+    echo "${GH_STUB_LOGIN:-ai-prosto}" ;;
+  *baseRefName*)
+    echo "${GH_STUB_BASEREF:-master} ${GH_STUB_HEADOID:?} ${GH_STUB_STATE:-OPEN}" ;;
+  *headRefOid*)
+    echo "${GH_STUB_HEADOID2:-${GH_STUB_HEADOID:?}}" ;;
+  *"pr review"*)
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--body-file" ] && [ -n "${GH_STUB_BODY_OUT:-}" ]; then
+        cp "$a" "$GH_STUB_BODY_OUT"
+      fi
+      prev="$a"
+    done ;;
+esac
+"""
+
+LOCAL_SH_STUB = """#!/bin/sh
+# Стаб кита: логирует argv, отдаёт управляемый вердикт и код выхода.
+echo "local.sh $*" >> "$LOCAL_SH_LOG"
+echo "stub verdict body"
+if [ -n "${REVIEW_STUB_ERR:-}" ]; then
+  echo "$REVIEW_STUB_ERR" >&2
+fi
+exit "${REVIEW_STUB_EXIT:-0}"
+"""
+
+
+def _git(*args: str, cwd: Path) -> str:
+    """Запустить git и вернуть stdout (строго, с проверкой кода)."""
+    res = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return res.stdout.strip()
+
+
+class Fleet:
+    """Синтетический флот: bare-origin + клон demo с китом-стабом."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.tmp = tmp_path
+        self.origin = tmp_path / "origin.git"
+        self.fleet_root = tmp_path / "fleet"
+        self.repo = self.fleet_root / "demo"
+        self.stub_bin = tmp_path / "bin"
+        self.gh_log = tmp_path / "gh.log"
+        self.local_log = tmp_path / "local-sh.log"
+        self.body_out = tmp_path / "posted-body.md"
+        self.profile_dir = tmp_path / "gh-profile"
+        self.profile_dir.mkdir()
+
+        subprocess.run(
+            ["git", "init", "--bare", "-b", "master", str(self.origin)],
+            check=True,
+            capture_output=True,
+        )
+        seed = tmp_path / "seed"
+        seed.mkdir()
+        _git("init", "-b", "master", cwd=seed)
+        _git("config", "user.email", "t@example.com", cwd=seed)
+        _git("config", "user.name", "t", cwd=seed)
+        (seed / "a.txt").write_text("base\n")
+        _git("add", ".", cwd=seed)
+        _git("commit", "-m", "base", cwd=seed)
+        _git("remote", "add", "origin", str(self.origin), cwd=seed)
+        _git("push", "-q", "origin", "master", cwd=seed)
+        # Ветка PR: один коммит поверх master, выложен как refs/pull/7/head —
+        # ровно так PR выглядит на настоящем GitHub-remote.
+        (seed / "a.txt").write_text("changed\n")
+        _git("commit", "-am", "pr change", cwd=seed)
+        self.head_sha = _git("rev-parse", "HEAD", cwd=seed)
+        _git("push", "-q", "origin", "HEAD:refs/pull/7/head", cwd=seed)
+
+        self.fleet_root.mkdir()
+        subprocess.run(
+            ["git", "clone", "-q", str(self.origin), str(self.repo)],
+            check=True,
+            capture_output=True,
+        )
+        # Как в проде: origin смотрит на GitHub (из него выводится slug),
+        # а insteadOf молча перенаправляет фетч в локальный bare — сети нет.
+        gh_url = "git@github.com:andrei-shtanakov/demo.git"
+        _git("remote", "set-url", "origin", gh_url, cwd=self.repo)
+        _git("config", f"url.{self.origin}.insteadOf", gh_url, cwd=self.repo)
+        self.write_kit()
+
+        self.stub_bin.mkdir()
+        gh = self.stub_bin / "gh"
+        gh.write_text(GH_STUB)
+        gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+
+    def write_kit(self) -> None:
+        kit = self.repo / "scripts" / "review"
+        kit.mkdir(parents=True)
+        local_sh = kit / "local.sh"
+        local_sh.write_text(LOCAL_SH_STUB)
+        local_sh.chmod(local_sh.stat().st_mode | stat.S_IXUSR)
+
+    def env(self, **extra: str) -> dict[str, str]:
+        env = os.environ.copy()
+        env.update(
+            PATH=f"{self.stub_bin}:{env['PATH']}",
+            FLEET_ROOT=str(self.fleet_root),
+            REVIEW_GH_CONFIG_DIR=str(self.profile_dir),
+            GH_STUB_LOG=str(self.gh_log),
+            GH_STUB_HEADOID=self.head_sha,
+            GH_STUB_BODY_OUT=str(self.body_out),
+            LOCAL_SH_LOG=str(self.local_log),
+            GIT_TERMINAL_PROMPT="0",
+            GIT_SSH_COMMAND="false",
+        )
+        env.update(extra)
+        return env
+
+    def run(
+        self, *args: str, **env_extra: str
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["sh", str(SCRIPT), *args],
+            env=self.env(**env_extra),
+            capture_output=True,
+            text=True,
+        )
+
+    def gh_calls(self) -> str:
+        return self.gh_log.read_text() if self.gh_log.exists() else ""
+
+
+@pytest.fixture
+def fleet(tmp_path: Path) -> Fleet:
+    return Fleet(tmp_path)
+
+
+def test_no_args_usage(fleet: Fleet) -> None:
+    res = fleet.run()
+    assert res.returncode == 2
+    assert "usage:" in res.stderr
+
+
+def test_non_numeric_pr(fleet: Fleet) -> None:
+    res = fleet.run("demo", "abc")
+    assert res.returncode == 2
+
+
+def test_unknown_repo(fleet: Fleet) -> None:
+    res = fleet.run("nosuch", "7")
+    assert res.returncode == 2
+    assert "nosuch" in res.stderr
+
+
+def test_repo_without_kit(fleet: Fleet) -> None:
+    kit = fleet.repo / "scripts" / "review" / "local.sh"
+    kit.unlink()
+    res = fleet.run("demo", "7")
+    assert res.returncode == 2
+    assert "local.sh" in res.stderr
+
+
+def test_missing_profile_dir(fleet: Fleet) -> None:
+    res = fleet.run("demo", "7", REVIEW_GH_CONFIG_DIR=str(fleet.tmp / "nope"))
+    assert res.returncode == 2
+    assert "gh auth login" in res.stderr
+
+
+def test_wrong_login_refuses(fleet: Fleet) -> None:
+    res = fleet.run("demo", "7", GH_STUB_LOGIN="somebody-else")
+    assert res.returncode == 2
+    assert "somebody-else" in res.stderr
+    assert "pr review" not in fleet.gh_calls()
+
+
+def test_pr_not_open(fleet: Fleet) -> None:
+    res = fleet.run("demo", "7", GH_STUB_STATE="MERGED")
+    assert res.returncode == 2
+    assert "MERGED" in res.stderr
+    assert "pr review" not in fleet.gh_calls()
+
+
+def test_clean_verdict_approves(fleet: Fleet) -> None:
+    res = fleet.run("demo", "7")
+    assert res.returncode == 0, res.stderr
+    calls = fleet.gh_calls()
+    assert "pr review 7" in calls
+    assert "--approve" in calls
+    assert "--repo andrei-shtanakov/demo" in calls
+    # Публикация — единственные вызовы gh, и все под профилем ревью.
+    for line in calls.splitlines():
+        assert f"GH_CONFIG_DIR={fleet.profile_dir}" in line
+    body = fleet.body_out.read_text()
+    assert "stub verdict body" in body
+    assert fleet.head_sha in body
+    assert "codex-terminal-review" in body
+
+
+def test_kit_receives_pr_range(fleet: Fleet) -> None:
+    fleet.run("demo", "7")
+    call = fleet.local_log.read_text()
+    assert "--base origin/master" in call
+    assert "--fetch" in call
+    assert "--head refs/review/pr-7" in call
+    assert "--format markdown" in call
+
+
+def test_findings_request_changes(fleet: Fleet) -> None:
+    res = fleet.run("demo", "7", REVIEW_STUB_EXIT="1")
+    assert res.returncode == 1
+    assert "--request-changes" in fleet.gh_calls()
+
+
+def test_reviewer_failure_publishes_nothing(fleet: Fleet) -> None:
+    res = fleet.run(
+        "demo", "7", REVIEW_STUB_EXIT="3", REVIEW_STUB_ERR="reviewer down"
+    )
+    assert res.returncode == 3
+    assert "reviewer down" in res.stderr
+    assert "pr review" not in fleet.gh_calls()
+
+
+def test_kit_config_error_propagates(fleet: Fleet) -> None:
+    res = fleet.run("demo", "7", REVIEW_STUB_EXIT="2")
+    assert res.returncode == 2
+    assert "pr review" not in fleet.gh_calls()
+
+
+def test_head_moved_aborts_publish(fleet: Fleet) -> None:
+    res = fleet.run("demo", "7", GH_STUB_HEADOID2="0" * 40)
+    assert res.returncode == 4
+    assert "pr review" not in fleet.gh_calls()
+
+
+def test_dry_run_publishes_nothing(fleet: Fleet) -> None:
+    res = fleet.run("demo", "7", "--dry-run")
+    assert res.returncode == 0, res.stderr
+    assert "pr review" not in fleet.gh_calls()
+    assert "stub verdict body" in res.stdout
+    assert "--approve" in res.stdout
+
+
+def test_dry_run_keeps_findings_exit_code(fleet: Fleet) -> None:
+    res = fleet.run("demo", "7", "--dry-run", REVIEW_STUB_EXIT="1")
+    assert res.returncode == 1
+    assert "pr review" not in fleet.gh_calls()
+    assert "--request-changes" in res.stdout
+
+
+def test_slug_derived_from_ssh_remote(fleet: Fleet) -> None:
+    # origin указывает на GitHub по ssh; insteadOf на этот URL не настроен,
+    # так что фетч гарантированно падает (GIT_SSH_COMMAND=false), но slug
+    # обязан попасть в `gh pr view` ДО фетча.
+    _git(
+        "remote",
+        "set-url",
+        "origin",
+        "git@github.com:no-such-owner-xyz/demo-does-not-exist.git",
+        cwd=fleet.repo,
+    )
+    res = fleet.run("demo", "7")
+    assert res.returncode == 2  # фетч упал — это ожидаемо
+    assert "--repo no-such-owner-xyz/demo-does-not-exist" in fleet.gh_calls()
+
+
+def test_slug_derived_from_https_remote(fleet: Fleet) -> None:
+    _git(
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/no-such-owner-xyz/demo-does-not-exist.git",
+        cwd=fleet.repo,
+    )
+    res = fleet.run("demo", "7")
+    assert res.returncode == 2
+    assert "--repo no-such-owner-xyz/demo-does-not-exist" in fleet.gh_calls()
+
+
+def test_non_github_origin_refuses(fleet: Fleet) -> None:
+    _git("remote", "set-url", "origin", "/some/local/path.git", cwd=fleet.repo)
+    res = fleet.run("demo", "7")
+    assert res.returncode == 2
+    assert "origin" in res.stderr
