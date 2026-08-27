@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest plan-check-fixture inbox morning evening snapshot fleet-report today install arch-freshness arch-freshness-read
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest plan-check-fixture inbox morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read
 
 help:
 	@echo "Цели:"
@@ -39,6 +39,7 @@ help:
 	@echo "  make snapshot    — полный JSON состояния флота (github-checker snapshot)"
 	@echo "  make fleet-report— markdown-отчёт о флоте в stdout (fleet_report.py)"
 	@echo "  make today       — что изменилось с полуночи: коммиты + незакоммиченное"
+	@echo "  make salvage     — salvage-скан: orphan worktrees / ветки без PR / unpushed default / stale locks (пусто = чисто)"
 	@echo "  make install     — доклонировать недостающие репо набора по манифесту зонтика"
 	@echo "  make release-drift — набор из манифеста зонтика ↔ факт на диске"
 	@echo "  make arch-freshness       — локальная диагностика drift/freshness арх-evidence (вахта — CI steward)"
@@ -63,6 +64,7 @@ evening:     ; @./repos.sh evening
 snapshot:    ; @uv run --project ../github-checker github-checker snapshot --workspace ..
 fleet-report:; @uv run --project ../github-checker github-checker snapshot --workspace .. | python3 ./fleet_report.py
 today:       ; @python3 ./recent_changes.py
+salvage:     ; @python3 ./salvage_scan.py --workspace $(WORKSPACE) --manifest $(MANIFEST)
 
 .PHONY: release-drift
 release-drift: ; @python3 ./check-release-drift.py --workspace .. --manifest $(MANIFEST)

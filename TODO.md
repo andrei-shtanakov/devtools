@@ -386,3 +386,25 @@
       README — часть пин-поверхности: manifest перегенерён.
       Ничего не блокирует (сьют ATP зелёный на 2533ff7) — закрыть с мержем
       PR; devtools#50 закрыть тогда же.
+
+## Salvage-скан флота
+
+- [x] Salvage-скан флота: orphan worktrees / ветки без PR / unpushed default / stale locks @owner:github:andrei-shtanakov @id:fleet-salvage-scan — PR этой ветки; devtools#67 закрыть после мержа
+      Принят из inbox-issue devtools#67 (инициатор — ecosystem-kb,
+      harvesting-волна №2; слаг совпадает). Детерминированный read-only
+      `salvage_scan.py` (`make salvage`) по набору манифеста зонтика:
+      четыре класса обломков, ловившихся руками 25–28.08. Таблица
+      «репо · класс · объект · возраст» + host (инвариант 5); нормальный
+      пустой результат молчит (stdout пуст, exit 0).
+      Осознанные исключения — WAIVERS (repo, класс, префикс объекта):
+      скан ПОМЕЧАЕТ `[waived: …]`, не чинит и не скрывает; только waived →
+      exit 0. Записаны оба лица исключения волта: unpushed master
+      (снапшот-коммиты, ждёт dispatcher#199) и delivery-ветка
+      `derived-snapshots` без PR by design (резолюция ecosystem-kb#98).
+      Fail-honest: gh недоступен → ветки показываются с пометкой
+      «PR state unknown», не пропадают; ненайденный чекаут — заметка в
+      stderr (судьба набора — check-release-drift).
+      Приёмка: синтетика всех четырёх классов + waiver-семантика + молчание
+      на чистом флоте — tests/test_salvage_scan.py (23 теста); живой прогон
+      сразу дал реальные находки: orphan worktree research-bench (32d),
+      6 веток-кандидатов в 4 репо, оба waived-лица волта помечены.
