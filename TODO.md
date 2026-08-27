@@ -389,7 +389,7 @@
 
 ## Salvage-скан флота
 
-- [x] Salvage-скан флота: orphan worktrees / ветки без PR / unpushed default / stale locks @owner:github:andrei-shtanakov @id:fleet-salvage-scan — PR этой ветки; devtools#67 закрыть после мержа
+- [x] Salvage-скан флота: orphan worktrees / ветки без PR / unpushed default / stale locks @owner:github:andrei-shtanakov @id:fleet-salvage-scan — PR #68; devtools#67 закрыть после мержа
       Принят из inbox-issue devtools#67 (инициатор — ecosystem-kb,
       harvesting-волна №2; слаг совпадает). Детерминированный read-only
       `salvage_scan.py` (`make salvage`) по набору манифеста зонтика:
