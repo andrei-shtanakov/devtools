@@ -389,7 +389,7 @@
 
 ## Догоняющая волна re-vendor промпта review-kit
 
-- [ ] Догоняющая волна re-vendor промпта кита — линза ослабления тестов (steward#129): промпт → 22 репо, caller-yml → 6 @owner:github:andrei-shtanakov @id:review-kit-prompt-lens-wave
+- [x] Догоняющая волна re-vendor промпта кита — линза ослабления тестов (steward#129): промпт → 22 репо, caller-yml → 6 @owner:github:andrei-shtanakov @id:review-kit-prompt-lens-wave — PR #70 (приём + своя копия) + 21 PR соседей, все вмержены 2026-08-28; devtools#69 закрыт
       Принят из inbox-issue devtools#69 (инициатор — steward, слаг совпадает;
       встречное ожидание — steward#130). Волна 2026-08-27 разнесла кит
       @ e4c43cc ДО мержа steward#129; штатная drift-вахта разъезд не ловит —
@@ -414,6 +414,14 @@
       Приёмка (из issue): после мержей вендор-копии промпта байт-совпадают
       со steward HEAD (sha256 27792de2…); закрыть пункт и devtools#69 после
       посадки волны на default-ветки.
+      Приёмка ПРОЙДЕНА 2026-08-28: все 22 PR вмержены; сверка по
+      origin/<default> всех 22 репо — prompt 22/22 и caller-yml 6/6
+      байт-совпадают со steward HEAD (steward origin/master = ee6d85a,
+      не уехал). Ветки волны удалены на origin, локальные клоны обновлены
+      ff-only (prograph-vault master — известное waived-расхождение,
+      не трогалось; arbiter оставлен на своей рабочей ветке, fetch only).
+      Известные красные чеки НЕ волны: review/report у 6 caller-репо —
+      пустой баланс OpenAI; impresario governance/gate — pre-existing.
 
 ## Salvage-скан флота
 
