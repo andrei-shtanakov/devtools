@@ -451,6 +451,25 @@ def test_inherit_same_head_publishes_nothing(fp_fleet: Fleet) -> None:
 
 
 @needs_jq
+def test_inherit_same_head_aborts_if_head_moved(fp_fleet: Fleet) -> None:
+    """Голова уехала после вычисления отпечатка: наследование same-head
+    обязано дать exit 4, а не объявить зелёным неревьюенный head
+    (боевая находка codex-ревью №2 PR #73)."""
+    reviews = fp_fleet.write_reviews(
+        _review("APPROVED", fp_fleet.head_sha, FP)
+    )
+    res = fp_fleet.run(
+        "demo", "7",
+        REVIEW_STUB_FP=FP,
+        GH_STUB_REVIEWS_JSON=reviews,
+        GH_STUB_HEADOID2="0" * 40,
+    )
+    assert res.returncode == 4
+    assert "уехала" in res.stderr
+    assert "pr review" not in fp_fleet.gh_calls()
+
+
+@needs_jq
 def test_inherit_red_verdict_keeps_exit_code(fp_fleet: Fleet) -> None:
     reviews = fp_fleet.write_reviews(
         _review("CHANGES_REQUESTED", fp_fleet.head_sha, FP)
