@@ -410,6 +410,23 @@ if [ -n "$inh_state" ]; then
         # находка codex-ревью №2 этого же PR). dry-run симметричен
         # полному прогону — живой сверки не делает.
         [ "$dry_run" -eq 1 ] || check_head_current
+        if [ -n "$write_verdict" ]; then
+            {
+                echo "## Codex CLI review — терминальный прогон"
+                echo
+                echo "- PR: ${slug}#${pr}, head \`$head_sha\`"
+                echo "- вердикт унаследован от опубликованного review по тому же head," \
+                    "отпечаток входа совпал — codex не вызывался"
+                echo "- публикация: $REVIEW_LOGIN"
+                echo
+                echo "<!-- codex-terminal-review head=$head_sha fp=$fp -->"
+            } > "$work/body.md"
+            write_verdict_file
+            echo "=== dry-run: действие --$action (унаследовано)," \
+                "ничего не публикуется ==="
+            cat "$work/body.md"
+            exit "$kit_code"
+        fi
         echo "вердикт унаследован (--$action): отпечаток входа совпал," \
             "head тот же $head_sha — публиковать нечего."
         exit "$kit_code"
@@ -428,6 +445,7 @@ if [ -n "$inh_state" ]; then
         echo "<!-- codex-terminal-review head=$head_sha fp=$fp -->"
     } > "$work/body.md"
     if [ "$dry_run" -eq 1 ]; then
+        write_verdict_file
         echo "=== dry-run: действие --$action (унаследовано)," \
             "ничего не публикуется ==="
         cat "$work/body.md"

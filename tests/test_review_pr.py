@@ -685,3 +685,24 @@ def test_write_verdict_requires_dry_run(fp_fleet: Fleet) -> None:
     )
     assert res.returncode == 2
     assert "только вместе с --dry-run" in res.stderr
+
+
+@needs_jq
+@pytest.mark.parametrize("source_head", ["same", "old"])
+def test_inherited_dry_run_also_writes_verdict(
+    fp_fleet: Fleet, source_head: str
+) -> None:
+    head = fp_fleet.head_sha if source_head == "same" else OLD_HEAD
+    reviews = fp_fleet.write_reviews(_review("APPROVED", head, FP))
+    verdict = fp_fleet.tmp / f"inherited-{source_head}.out"
+    res = fp_fleet.run(
+        "demo", "7", "--dry-run", "--write-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+    assert res.returncode == 0, res.stderr
+    assert verdict.is_file()
+    assert f"head={fp_fleet.head_sha}\n" in verdict.read_text()
+    assert f"fp={FP}\n" in verdict.read_text()
+    calls = _kit_calls(fp_fleet)
+    assert len(calls) == 1 and "--fingerprint-only" in calls[0]
