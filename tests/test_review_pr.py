@@ -409,6 +409,24 @@ def test_fp_kit_drops_fetch_and_stamps_marker(fp_fleet: Fleet) -> None:
     assert f"head={fp_fleet.head_sha} fp={FP} -->" in body
 
 
+def test_fp_prefetch_refreshes_base_tracking_ref(fp_fleet: Fleet) -> None:
+    """База уехала ПОСЛЕ клонирования: явный pre-fetch обязан обновить
+    refs/remotes/origin/<base> — отпечаток и ревью видят свежую базу
+    (боевая находка codex-ревью PR #73)."""
+    seed = fp_fleet.tmp / "seed"
+    (seed / "b.txt").write_text("advance\n")
+    _git("add", ".", cwd=seed)
+    _git("commit", "-m", "advance base", cwd=seed)
+    _git("push", "-q", "origin", "HEAD:master", cwd=seed)
+    new_base = _git("rev-parse", "HEAD", cwd=seed)
+    stale = _git("rev-parse", "refs/remotes/origin/master", cwd=fp_fleet.repo)
+    assert stale != new_base  # предпосылка: клон реально отстал
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP)
+    assert res.returncode == 0, res.stderr
+    cur = _git("rev-parse", "refs/remotes/origin/master", cwd=fp_fleet.repo)
+    assert cur == new_base
+
+
 def test_old_kit_gets_no_fp_and_keeps_fetch(fleet: Fleet) -> None:
     """Старый кит без литерала: поведение не меняется, маркер без fp."""
     res = fleet.run("demo", "7")

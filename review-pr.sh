@@ -191,7 +191,14 @@ if [ "$fp_supported" -eq 1 ]; then
     # Согласованность диапазона: отпечаток и фактическое ревью обязаны видеть
     # ОДНО состояние базы — освежаем её явным fetch здесь, дальше оба вызова
     # кита идут без --fetch (fp-режим с --fetch несовместим по построению).
-    if ! fetch_err=$(git -C "$repo_dir" fetch -q origin "$base_ref" 2>&1); then
+    # Refspec с явным destination: оппортунистическое обновление tracking-ref
+    # (git ≥1.8.4) покрывает штатный клон, но зависит от refspec-конфигурации
+    # remote'а — single-branch клон с ДРУГОЙ базой PR оставил бы origin/<base>
+    # stale, и отпечаток с наследованием считались бы по устаревшему
+    # диапазону. Destination делает освежение безусловным (боевая находка
+    # codex-ревью этого же PR, devtools#73).
+    if ! fetch_err=$(git -C "$repo_dir" fetch -q origin \
+        "+refs/heads/$base_ref:refs/remotes/origin/$base_ref" 2>&1); then
         echo "$fetch_err" >&2
         die 2 "не удалось освежить базу origin/$base_ref перед отпечатком"
     fi
