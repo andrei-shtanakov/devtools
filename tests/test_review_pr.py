@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -31,6 +32,21 @@ GH_STUB = """#!/usr/bin/env bash
 # Стаб gh: логирует каждый вызов, отвечает по переменным GH_STUB_*.
 echo "GH_CONFIG_DIR=${GH_CONFIG_DIR:-} gh $*" >> "$GH_STUB_LOG"
 case "$*" in
+  *"/reviews"*)
+    # Ревью PR: канированный JSON страниц (как у gh --paginate --slurp)
+    # прогоняется через НАСТОЯЩИЙ jq с фильтром из argv — фильтр
+    # тестируется всерьёз, а не обходится.
+    filter=""
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "--jq" ] && filter="$a"
+      prev="$a"
+    done
+    if [ -n "${GH_STUB_REVIEWS_JSON:-}" ] && [ -f "$GH_STUB_REVIEWS_JSON" ]; then
+      jq -r "$filter" "$GH_STUB_REVIEWS_JSON"
+    else
+      echo '[[]]' | jq -r "$filter"
+    fi ;;
   *"api user"*)
     echo "${GH_STUB_LOGIN:-ai-prosto}" ;;
   *baseRefName*)
@@ -50,7 +66,29 @@ esac
 
 LOCAL_SH_STUB = """#!/bin/sh
 # Стаб кита: логирует argv, отдаёт управляемый вердикт и код выхода.
+# НЕ содержит литерала fp-флага: feature-detect обязан видеть старый кит.
 echo "local.sh $*" >> "$LOCAL_SH_LOG"
+echo "stub verdict body"
+if [ -n "${REVIEW_STUB_ERR:-}" ]; then
+  echo "$REVIEW_STUB_ERR" >&2
+fi
+exit "${REVIEW_STUB_EXIT:-0}"
+"""
+
+LOCAL_SH_FP_STUB = """#!/bin/sh
+# Стаб fp-кита: содержит литерал --fingerprint-only (feature-detect греппит
+# файл), в fp-режиме отдаёт управляемый отпечаток и код.
+echo "local.sh $*" >> "$LOCAL_SH_LOG"
+case " $* " in
+  *" --fingerprint-only "*)
+    if [ -n "${REVIEW_STUB_FP_ERR:-}" ]; then
+      echo "$REVIEW_STUB_FP_ERR" >&2
+    fi
+    if [ -n "${REVIEW_STUB_FP:-}" ]; then
+      echo "$REVIEW_STUB_FP"
+    fi
+    exit "${REVIEW_STUB_FP_EXIT:-0}" ;;
+esac
 echo "stub verdict body"
 if [ -n "${REVIEW_STUB_ERR:-}" ]; then
   echo "$REVIEW_STUB_ERR" >&2
@@ -126,12 +164,21 @@ class Fleet:
         gh.write_text(GH_STUB)
         gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
 
-    def write_kit(self) -> None:
+    def write_kit(self, text: str = LOCAL_SH_STUB) -> None:
         kit = self.repo / "scripts" / "review"
-        kit.mkdir(parents=True)
+        kit.mkdir(parents=True, exist_ok=True)
         local_sh = kit / "local.sh"
-        local_sh.write_text(LOCAL_SH_STUB)
+        local_sh.write_text(text)
         local_sh.chmod(local_sh.stat().st_mode | stat.S_IXUSR)
+
+    def write_reviews(self, *reviews: dict) -> str:
+        """Канированный ответ reviews-эндпоинта: одна страница, как отдаёт
+        `gh api --paginate --slurp` (массив страниц)."""
+        import json
+
+        path = self.tmp / "reviews.json"
+        path.write_text(json.dumps([list(reviews)]))
+        return str(path)
 
     def env(self, **extra: str) -> dict[str, str]:
         env = os.environ.copy()
@@ -149,14 +196,13 @@ class Fleet:
         env.update(extra)
         return env
 
-    def run(
-        self, *args: str, **env_extra: str
-    ) -> subprocess.CompletedProcess[str]:
+    def run(self, *args: str, **env_extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["sh", str(SCRIPT), *args],
             env=self.env(**env_extra),
             capture_output=True,
             text=True,
+            check=False,  # код выхода — предмет проверки самих тестов
         )
 
     def gh_calls(self) -> str:
@@ -245,9 +291,7 @@ def test_findings_request_changes(fleet: Fleet) -> None:
 
 
 def test_reviewer_failure_publishes_nothing(fleet: Fleet) -> None:
-    res = fleet.run(
-        "demo", "7", REVIEW_STUB_EXIT="3", REVIEW_STUB_ERR="reviewer down"
-    )
+    res = fleet.run("demo", "7", REVIEW_STUB_EXIT="3", REVIEW_STUB_ERR="reviewer down")
     assert res.returncode == 3
     assert "reviewer down" in res.stderr
     assert "pr review" not in fleet.gh_calls()
@@ -314,3 +358,242 @@ def test_non_github_origin_refuses(fleet: Fleet) -> None:
     res = fleet.run("demo", "7")
     assert res.returncode == 2
     assert "origin" in res.stderr
+
+
+# --- Дедуп по отпечатку входа (devtools#72) ---------------------------------
+
+needs_jq = pytest.mark.skipif(
+    shutil.which("jq") is None, reason="стаб reviews гоняет фильтр через jq"
+)
+
+FP = "ab" * 32
+FP_OTHER = "cd" * 32
+OLD_HEAD = "b" * 40
+
+
+def _review(
+    state: str,
+    head: str,
+    fp: str,
+    login: str = "ai-prosto",
+    markers: int = 1,
+) -> dict:
+    body = "## Codex CLI review — терминальный прогон\n\nверждикт...\n"
+    body += f"<!-- codex-terminal-review head={head} fp={fp} -->\n" * markers
+    return {"user": {"login": login}, "state": state, "body": body}
+
+
+def _kit_calls(fleet: Fleet) -> list[str]:
+    log = fleet.local_log.read_text() if fleet.local_log.exists() else ""
+    return log.strip().splitlines()
+
+
+@pytest.fixture
+def fp_fleet(tmp_path: Path) -> Fleet:
+    f = Fleet(tmp_path)
+    f.write_kit(LOCAL_SH_FP_STUB)
+    return f
+
+
+def test_fp_kit_drops_fetch_and_stamps_marker(fp_fleet: Fleet) -> None:
+    """fp-кит: база освежается явным fetch, оба вызова без --fetch,
+    маркер несёт отпечаток."""
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP)
+    assert res.returncode == 0, res.stderr
+    calls = _kit_calls(fp_fleet)
+    assert len(calls) == 2
+    assert "--fingerprint-only" in calls[0]
+    assert "--format markdown" in calls[1]
+    assert all("--fetch" not in c for c in calls)
+    body = fp_fleet.body_out.read_text()
+    assert f"head={fp_fleet.head_sha} fp={FP} -->" in body
+
+
+def test_fp_prefetch_refreshes_base_tracking_ref(fp_fleet: Fleet) -> None:
+    """База уехала ПОСЛЕ клонирования: явный pre-fetch обязан обновить
+    refs/remotes/origin/<base> — отпечаток и ревью видят свежую базу
+    (боевая находка codex-ревью PR #73)."""
+    seed = fp_fleet.tmp / "seed"
+    (seed / "b.txt").write_text("advance\n")
+    _git("add", ".", cwd=seed)
+    _git("commit", "-m", "advance base", cwd=seed)
+    _git("push", "-q", "origin", "HEAD:master", cwd=seed)
+    new_base = _git("rev-parse", "HEAD", cwd=seed)
+    stale = _git("rev-parse", "refs/remotes/origin/master", cwd=fp_fleet.repo)
+    assert stale != new_base  # предпосылка: клон реально отстал
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP)
+    assert res.returncode == 0, res.stderr
+    cur = _git("rev-parse", "refs/remotes/origin/master", cwd=fp_fleet.repo)
+    assert cur == new_base
+
+
+def test_old_kit_gets_no_fp_and_keeps_fetch(fleet: Fleet) -> None:
+    """Старый кит без литерала: поведение не меняется, маркер без fp."""
+    res = fleet.run("demo", "7")
+    assert res.returncode == 0, res.stderr
+    calls = _kit_calls(fleet)
+    assert len(calls) == 1 and "--fetch" in calls[0]
+    assert "--fingerprint-only" not in calls[0]
+    body = fleet.body_out.read_text()
+    assert f"head={fleet.head_sha} -->" in body
+    assert "fp=" not in body
+
+
+@needs_jq
+def test_inherit_same_head_publishes_nothing(fp_fleet: Fleet) -> None:
+    reviews = fp_fleet.write_reviews(_review("APPROVED", fp_fleet.head_sha, FP))
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP, GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 0, res.stderr
+    assert "унаследован" in res.stdout
+    assert "pr review" not in fp_fleet.gh_calls()
+    calls = _kit_calls(fp_fleet)  # codex не вызывался: только fp-режим
+    assert len(calls) == 1 and "--fingerprint-only" in calls[0]
+
+
+@needs_jq
+def test_inherit_same_head_aborts_if_head_moved(fp_fleet: Fleet) -> None:
+    """Голова уехала после вычисления отпечатка: наследование same-head
+    обязано дать exit 4, а не объявить зелёным неревьюенный head
+    (боевая находка codex-ревью №2 PR #73)."""
+    reviews = fp_fleet.write_reviews(
+        _review("APPROVED", fp_fleet.head_sha, FP)
+    )
+    res = fp_fleet.run(
+        "demo", "7",
+        REVIEW_STUB_FP=FP,
+        GH_STUB_REVIEWS_JSON=reviews,
+        GH_STUB_HEADOID2="0" * 40,
+    )
+    assert res.returncode == 4
+    assert "уехала" in res.stderr
+    assert "pr review" not in fp_fleet.gh_calls()
+
+
+@needs_jq
+def test_inherit_red_verdict_keeps_exit_code(fp_fleet: Fleet) -> None:
+    reviews = fp_fleet.write_reviews(
+        _review("CHANGES_REQUESTED", fp_fleet.head_sha, FP)
+    )
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP, GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 1
+    assert "унаследован" in res.stdout
+    assert "pr review" not in fp_fleet.gh_calls()
+
+
+@needs_jq
+def test_inherit_new_head_republishes_same_action(fp_fleet: Fleet) -> None:
+    """update-branch: то же действие, тело-наследование, маркер с новым head
+    и тем же fp; codex не вызывается."""
+    reviews = fp_fleet.write_reviews(_review("APPROVED", OLD_HEAD, FP))
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP, GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 0, res.stderr
+    assert "--approve" in fp_fleet.gh_calls()
+    body = fp_fleet.body_out.read_text()
+    assert "унаследован от прогона по head" in body
+    assert OLD_HEAD in body
+    assert f"head={fp_fleet.head_sha} fp={FP} -->" in body
+    calls = _kit_calls(fp_fleet)
+    assert len(calls) == 1 and "--fingerprint-only" in calls[0]
+
+
+@needs_jq
+def test_inherit_new_head_dry_run(fp_fleet: Fleet) -> None:
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", OLD_HEAD, FP))
+    res = fp_fleet.run(
+        "demo",
+        "7",
+        "--dry-run",
+        REVIEW_STUB_FP=FP,
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+    assert res.returncode == 1
+    assert "pr review" not in fp_fleet.gh_calls()
+    assert "унаследован" in res.stdout
+
+
+@needs_jq
+def test_fresh_bypasses_inheritance_but_stamps_fp(fp_fleet: Fleet) -> None:
+    reviews = fp_fleet.write_reviews(_review("APPROVED", fp_fleet.head_sha, FP))
+    res = fp_fleet.run(
+        "demo",
+        "7",
+        "--fresh",
+        REVIEW_STUB_FP=FP,
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "/reviews" not in fp_fleet.gh_calls()  # поиск вердикта обойдён
+    calls = _kit_calls(fp_fleet)
+    assert any("--format markdown" in c for c in calls)  # полный прогон
+    assert f"fp={FP} -->" in fp_fleet.body_out.read_text()  # fp публикуется
+
+
+@needs_jq
+def test_dismissed_newest_is_cache_miss(fp_fleet: Fleet) -> None:
+    """Новейшее ревью DISMISSED — miss ЦЕЛИКОМ: воскрешать более старый
+    вердикт из истории дедуп не имеет права."""
+    reviews = fp_fleet.write_reviews(
+        _review("APPROVED", fp_fleet.head_sha, FP),
+        _review("DISMISSED", fp_fleet.head_sha, FP),
+    )
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP, GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 0, res.stderr
+    calls = _kit_calls(fp_fleet)
+    assert any("--format markdown" in c for c in calls)
+    assert "--approve" in fp_fleet.gh_calls()  # опубликован СВЕЖИЙ прогон
+
+
+@needs_jq
+def test_duplicated_marker_is_cache_miss(fp_fleet: Fleet) -> None:
+    reviews = fp_fleet.write_reviews(
+        _review("APPROVED", fp_fleet.head_sha, FP, markers=2)
+    )
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP, GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 0, res.stderr
+    assert any("--format markdown" in c for c in _kit_calls(fp_fleet))
+
+
+@needs_jq
+def test_foreign_author_is_ignored(fp_fleet: Fleet) -> None:
+    """Чужое ревью с валидным маркером не наследуется — только ai-prosto."""
+    reviews = fp_fleet.write_reviews(
+        _review("APPROVED", fp_fleet.head_sha, FP, login="somebody-else")
+    )
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP, GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 0, res.stderr
+    assert any("--format markdown" in c for c in _kit_calls(fp_fleet))
+
+
+@needs_jq
+def test_fp_mismatch_runs_full(fp_fleet: Fleet) -> None:
+    reviews = fp_fleet.write_reviews(_review("APPROVED", fp_fleet.head_sha, FP_OTHER))
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP, GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 0, res.stderr
+    assert any("--format markdown" in c for c in _kit_calls(fp_fleet))
+    assert f"fp={FP} -->" in fp_fleet.body_out.read_text()
+
+
+def test_fp_mode_refusal_publishes_nothing(fp_fleet: Fleet) -> None:
+    """exit 2 fp-режима — отказ: дедуп не применяется, обычная обработка."""
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP_EXIT="2")
+    assert res.returncode == 2
+    assert "pr review" not in fp_fleet.gh_calls()
+    assert all("--format markdown" not in c for c in _kit_calls(fp_fleet))
+
+
+def test_fp_empty_stdout_falls_through_to_full_run(fp_fleet: Fleet) -> None:
+    """exit 0 + пустой stdout: наследовать нечего — обычный полный прогон,
+    маркер без fp."""
+    res = fp_fleet.run("demo", "7")
+    assert res.returncode == 0, res.stderr
+    assert "/reviews" not in fp_fleet.gh_calls()
+    assert any("--format markdown" in c for c in _kit_calls(fp_fleet))
+    assert "fp=" not in fp_fleet.body_out.read_text()
+
+
+def test_fp_garbage_stdout_skips_dedup(fp_fleet: Fleet) -> None:
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP="not-a-fingerprint")
+    assert res.returncode == 0, res.stderr
+    assert "stdout-контракт" in res.stderr
+    assert any("--format markdown" in c for c in _kit_calls(fp_fleet))
+    assert "fp=" not in fp_fleet.body_out.read_text()
