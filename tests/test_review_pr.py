@@ -678,6 +678,35 @@ def test_corrupt_verdict_body_runs_full(fp_fleet: Fleet) -> None:
     )
 
 
+@needs_jq
+def test_invalid_file_does_not_fall_through_to_github_inheritance(
+    fp_fleet: Fleet,
+) -> None:
+    verdict = fp_fleet.tmp / "verdict.out"
+    dry = fp_fleet.run(
+        "demo", "7", "--dry-run", "--write-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+    )
+    assert dry.returncode == 0, dry.stderr
+    verdict.write_text(verdict.read_text().replace(f"fp={FP}", f"fp={FP_OTHER}", 1))
+    reviews = fp_fleet.write_reviews(
+        _review("APPROVED", fp_fleet.head_sha, FP)
+    )
+    calls_after_dry = len(_kit_calls(fp_fleet))
+    gh_after_dry = len(fp_fleet.gh_calls())
+    live = fp_fleet.run(
+        "demo", "7", "--use-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+    assert live.returncode == 0, live.stderr
+    assert "/reviews" not in fp_fleet.gh_calls()[gh_after_dry:]
+    assert any(
+        "--format markdown" in call
+        for call in _kit_calls(fp_fleet)[calls_after_dry:]
+    )
+
+
 def test_write_verdict_requires_dry_run(fp_fleet: Fleet) -> None:
     res = fp_fleet.run(
         "demo", "7", "--write-verdict", str(fp_fleet.tmp / "v"),

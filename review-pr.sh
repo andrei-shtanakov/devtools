@@ -343,8 +343,12 @@ fi
 if [ -n "$use_verdict" ]; then
     if [ -z "$fp" ]; then
         echo "ЗАМЕТКА: verdict-файл нельзя проверить без fp — идёт полный прогон." >&2
+        fresh=1
     else
-        try_use_verdict_file || :
+        # Явный локальный кандидат имеет fail-to-full семантику: после его
+        # miss нельзя незаметно уйти в ДРУГОЙ канал наследования (GitHub),
+        # иначе обещанный «полный прогон» оказался бы ложью.
+        try_use_verdict_file || fresh=1
     fi
 fi
 
