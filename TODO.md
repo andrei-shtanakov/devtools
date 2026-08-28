@@ -387,6 +387,34 @@
       Ничего не блокирует (сьют ATP зелёный на 2533ff7) — закрыть с мержем
       PR; devtools#50 закрыть тогда же.
 
+## Догоняющая волна re-vendor промпта review-kit
+
+- [ ] Догоняющая волна re-vendor промпта кита — линза ослабления тестов (steward#129): промпт → 22 репо, caller-yml → 6 @owner:github:andrei-shtanakov @id:review-kit-prompt-lens-wave
+      Принят из inbox-issue devtools#69 (инициатор — steward, слаг совпадает;
+      встречное ожидание — steward#130). Волна 2026-08-27 разнесла кит
+      @ e4c43cc ДО мержа steward#129; штатная drift-вахта разъезд не ловит —
+      сверяет только 6 файлов PIN, промпт и caller-yml вне перечня по
+      конструкции. Источник волны: steward @ ee6d85a (master, 2026-08-28).
+      Содержимое: линза ослабления тестов в §4 промпта (снятый assertion /
+      skip на живом тесте / сужение параметризации / выключенная проверка в
+      конфиге без равноценной замены = минимум major; скоуп — охраняемое
+      поведение остаётся в дереве; line:0 для чистого удаления; утрата
+      покрытия живого поведения в определении major) + в caller-yml довод
+      steward#124 «потолок timeout-minutes ≠ гарантия в аварию Actions»
+      (только комментарий). PIN и схема НЕ трогаются: скрипты/схема между
+      e4c43cc и ee6d85a не менялись (решение «не расширять состав PIN» —
+      за steward, не за волной).
+      PR-ы волны (22): deployer#46, atp-platform-testing#2,
+      discovery-toolkit#9, discovery#26, disputatio#46, github-checker#28,
+      impresario#41, libretto#33, proctor#57, prograph-vault#107,
+      prograph#39, research-bench#28, robin-runtime#57, robin-toolkit#8,
+      spec-runner-vscode#31; с caller-yml: arbiter#95, atp-platform#310,
+      dispatcher#212, kapelle#40, maestro#230, spec-runner#323; devtools —
+      PR этой ветки.
+      Приёмка (из issue): после мержей вендор-копии промпта байт-совпадают
+      со steward HEAD (sha256 27792de2…); закрыть пункт и devtools#69 после
+      посадки волны на default-ветки.
+
 ## Salvage-скан флота
 
 - [x] Salvage-скан флота: orphan worktrees / ветки без PR / unpushed default / stale locks @owner:github:andrei-shtanakov @id:fleet-salvage-scan — PR #68; devtools#67 закрыть после мержа
