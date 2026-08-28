@@ -45,9 +45,12 @@
 set -eu
 
 usage() {
-    echo "usage: review-pr.sh <repo> <pr-number> [--dry-run] [--fresh]" >&2
+    echo "usage: review-pr.sh <repo> <pr-number> [--dry-run] [--fresh]" \
+        "[--write-verdict <file> | --use-verdict <file>]" >&2
     echo "  <repo> — имя каталога репо во флоте (например dispatcher)" >&2
     echo "  --fresh — не наследовать вердикт даже при совпавшем отпечатке" >&2
+    echo "  --write-verdict — атомарно сохранить результат dry-run для боевого прогона" >&2
+    echo "  --use-verdict — использовать сохранённый результат при точных head + fp" >&2
 }
 
 die() {
@@ -76,10 +79,18 @@ repo=""
 pr=""
 dry_run=0
 fresh=0
+write_verdict=""
+use_verdict=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) dry_run=1; shift ;;
         --fresh) fresh=1; shift ;;
+        --write-verdict)
+            [ $# -ge 2 ] || die 2 "--write-verdict требует путь"
+            write_verdict="$2"; shift 2 ;;
+        --use-verdict)
+            [ $# -ge 2 ] || die 2 "--use-verdict требует путь"
+            use_verdict="$2"; shift 2 ;;
         -*) usage; exit 2 ;;
         *)
             if [ -z "$repo" ]; then repo="$1"
@@ -96,6 +107,12 @@ fi
 case "$pr" in
     *[!0-9]*|"") die 2 "номер PR должен быть числом, получено: '$pr'" ;;
 esac
+[ -z "$write_verdict" ] || [ "$dry_run" -eq 1 ] \
+    || die 2 "--write-verdict разрешён только вместе с --dry-run"
+[ -z "$write_verdict" ] || [ -z "$use_verdict" ] \
+    || die 2 "--write-verdict и --use-verdict взаимоисключающие"
+[ -z "$use_verdict" ] || [ "$fresh" -eq 0 ] \
+    || die 2 "--use-verdict несовместим с --fresh"
 
 repo_dir="$FLEET_ROOT/$repo"
 [ -d "$repo_dir" ] || die 2 "репо '$repo' не найдено в $FLEET_ROOT"
@@ -185,6 +202,88 @@ publish() {
     echo "опубликовано: --$1 на ${slug}#${pr} (head $head_sha) от $login"
 }
 
+# Вердикт-файл — явный одноразовый канал между dry-run и боевым прогоном,
+# не кэш. Заголовок построчный и строгий, payload — точное body будущего
+# review. Git object id защищает и от усечения, и от незаметной правки body;
+# контекст ниже отдельно связывается с repo/pr/head/fp.
+write_verdict_file() {
+    [ -n "$write_verdict" ] || return 0
+    verdict_dir=$(dirname "$write_verdict")
+    [ -d "$verdict_dir" ] \
+        || die 2 "каталог verdict-файла не существует: $verdict_dir"
+    body_oid=$(git hash-object "$work/body.md") \
+        || die 2 "не удалось вычислить hash тела verdict-файла"
+    old_umask=$(umask)
+    umask 077
+    verdict_tmp=$(mktemp "$write_verdict.tmp.XXXXXX") \
+        || die 2 "не удалось создать временный verdict-файл"
+    umask "$old_umask"
+    {
+        echo "codex-terminal-review-verdict/v1"
+        echo "repo=$slug"
+        echo "pr=$pr"
+        echo "head=$head_sha"
+        echo "fp=$fp"
+        echo "action=$action"
+        echo "code=$kit_code"
+        echo "body_oid=$body_oid"
+        echo
+        cat "$work/body.md"
+    } > "$verdict_tmp"
+    if ! mv -f "$verdict_tmp" "$write_verdict"; then
+        rm -f "$verdict_tmp"
+        die 2 "не удалось атомарно записать verdict-файл: $write_verdict"
+    fi
+    echo "verdict-файл записан: $write_verdict"
+}
+
+try_use_verdict_file() {
+    [ -n "$use_verdict" ] || return 1
+    if [ ! -f "$use_verdict" ]; then
+        echo "ЗАМЕТКА: verdict-файл не найден — идёт полный прогон: $use_verdict" >&2
+        return 1
+    fi
+    sed -n '10,$p' "$use_verdict" > "$work/imported-body.md"
+    v_format=$(sed -n '1p' "$use_verdict")
+    v_repo=$(sed -n '2s/^repo=//p' "$use_verdict")
+    v_pr=$(sed -n '3s/^pr=//p' "$use_verdict")
+    v_head=$(sed -n '4s/^head=//p' "$use_verdict")
+    v_fp=$(sed -n '5s/^fp=//p' "$use_verdict")
+    v_action=$(sed -n '6s/^action=//p' "$use_verdict")
+    v_code=$(sed -n '7s/^code=//p' "$use_verdict")
+    v_oid=$(sed -n '8s/^body_oid=//p' "$use_verdict")
+    v_blank=$(sed -n '9p' "$use_verdict")
+    imported_oid=$(git hash-object "$work/imported-body.md" 2>/dev/null || true)
+    valid=1
+    [ "$v_format" = "codex-terminal-review-verdict/v1" ] || valid=0
+    [ "$v_repo" = "$slug" ] || valid=0
+    [ "$v_pr" = "$pr" ] || valid=0
+    [ "$v_head" = "$head_sha" ] || valid=0
+    [ "$v_fp" = "$fp" ] || valid=0
+    [ -z "$v_blank" ] || valid=0
+    [ "$v_oid" = "$imported_oid" ] || valid=0
+    case "$v_action:$v_code" in
+        approve:0|request-changes:1) : ;;
+        *) valid=0 ;;
+    esac
+    if [ "$valid" -ne 1 ]; then
+        echo "ЗАМЕТКА: verdict-файл повреждён, несовместим или не совпал" \
+            "по repo/pr/head/fp — идёт полный прогон." >&2
+        return 1
+    fi
+    action="$v_action"
+    kit_code="$v_code"
+    cp "$work/imported-body.md" "$work/body.md"
+    echo "вердикт принят из файла: head + fp совпали, codex не вызывался."
+    if [ "$dry_run" -eq 1 ]; then
+        echo "=== dry-run: действие --$action, ничего не публикуется ==="
+        cat "$work/body.md"
+    else
+        publish "$action"
+    fi
+    exit "$kit_code"
+}
+
 # --- Отпечаток входа ревью (дедуп, devtools#72) ------------------------------
 # Feature-detect по литералу в local.sh ЦЕЛЕВОГО репо — тот же паттерн, каким
 # кит сам определяет возможности build-prompt (--generated-list). Нет флага →
@@ -236,6 +335,21 @@ if [ "$fp_supported" -eq 1 ]; then
             die 3 "неожиданный код fp-режима кита: $fp_code —" \
                 "ничего не опубликовано." ;;
     esac
+fi
+
+# Локальный кандидат проверяется после вычисления свежего fp и до GitHub-
+# наследования. Старый кит или пустой fp не могут доказать идентичность входа:
+# явный miss, затем штатный полный прогон.
+if [ -n "$use_verdict" ]; then
+    if [ -z "$fp" ]; then
+        echo "ЗАМЕТКА: verdict-файл нельзя проверить без fp — идёт полный прогон." >&2
+        fresh=1
+    else
+        # Явный локальный кандидат имеет fail-to-full семантику: после его
+        # miss нельзя незаметно уйти в ДРУГОЙ канал наследования (GitHub),
+        # иначе обещанный «полный прогон» оказался бы ложью.
+        try_use_verdict_file || fresh=1
+    fi
 fi
 
 # --- Поиск наследуемого вердикта ---------------------------------------------
@@ -300,6 +414,23 @@ if [ -n "$inh_state" ]; then
         # находка codex-ревью №2 этого же PR). dry-run симметричен
         # полному прогону — живой сверки не делает.
         [ "$dry_run" -eq 1 ] || check_head_current
+        if [ -n "$write_verdict" ]; then
+            {
+                echo "## Codex CLI review — терминальный прогон"
+                echo
+                echo "- PR: ${slug}#${pr}, head \`$head_sha\`"
+                echo "- вердикт унаследован от опубликованного review по тому же head," \
+                    "отпечаток входа совпал — codex не вызывался"
+                echo "- публикация: $REVIEW_LOGIN"
+                echo
+                echo "<!-- codex-terminal-review head=$head_sha fp=$fp -->"
+            } > "$work/body.md"
+            write_verdict_file
+            echo "=== dry-run: действие --$action (унаследовано)," \
+                "ничего не публикуется ==="
+            cat "$work/body.md"
+            exit "$kit_code"
+        fi
         echo "вердикт унаследован (--$action): отпечаток входа совпал," \
             "head тот же $head_sha — публиковать нечего."
         exit "$kit_code"
@@ -318,6 +449,7 @@ if [ -n "$inh_state" ]; then
         echo "<!-- codex-terminal-review head=$head_sha fp=$fp -->"
     } > "$work/body.md"
     if [ "$dry_run" -eq 1 ]; then
+        write_verdict_file
         echo "=== dry-run: действие --$action (унаследовано)," \
             "ничего не публикуется ==="
         cat "$work/body.md"
@@ -375,6 +507,7 @@ fi
 } > "$work/body.md"
 
 if [ "$dry_run" -eq 1 ]; then
+    write_verdict_file
     echo "=== dry-run: действие --$action, ничего не публикуется ==="
     cat "$work/body.md"
     exit "$kit_code"

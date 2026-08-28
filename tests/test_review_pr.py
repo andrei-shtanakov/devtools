@@ -598,3 +598,140 @@ def test_fp_garbage_stdout_skips_dedup(fp_fleet: Fleet) -> None:
     assert "stdout-контракт" in res.stderr
     assert any("--format markdown" in c for c in _kit_calls(fp_fleet))
     assert "fp=" not in fp_fleet.body_out.read_text()
+
+
+# --- Явная передача dry-run verdict (devtools#80) ----------------------------
+
+
+def test_dry_run_writes_verdict_and_live_run_uses_it(fp_fleet: Fleet) -> None:
+    verdict = fp_fleet.tmp / "verdict.out"
+    dry = fp_fleet.run(
+        "demo", "7", "--dry-run", "--write-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+    )
+    assert dry.returncode == 0, dry.stderr
+    assert verdict.read_text().startswith("codex-terminal-review-verdict/v1\n")
+    assert stat.S_IMODE(verdict.stat().st_mode) == 0o600
+    calls_after_dry = len(_kit_calls(fp_fleet))
+
+    live = fp_fleet.run(
+        "demo", "7", "--use-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+    )
+    assert live.returncode == 0, live.stderr
+    assert "вердикт принят из файла" in live.stdout
+    assert "--approve" in fp_fleet.gh_calls()
+    # Второй прогон вызывает только fp-режим, не полный codex review.
+    new_calls = _kit_calls(fp_fleet)[calls_after_dry:]
+    assert len(new_calls) == 1 and "--fingerprint-only" in new_calls[0]
+    assert fp_fleet.body_out.read_text() == dry.stdout.split(
+        "=== dry-run: действие --approve, ничего не публикуется ===\n", 1
+    )[1]
+
+
+@pytest.mark.parametrize("field", ["head", "fp"])
+def test_verdict_context_mismatch_runs_full(fp_fleet: Fleet, field: str) -> None:
+    verdict = fp_fleet.tmp / "verdict.out"
+    dry = fp_fleet.run(
+        "demo", "7", "--dry-run", "--write-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+    )
+    assert dry.returncode == 0, dry.stderr
+    text = verdict.read_text()
+    if field == "head":
+        text = text.replace(f"head={fp_fleet.head_sha}", f"head={'0' * 40}", 1)
+    else:
+        text = text.replace(f"fp={FP}", f"fp={FP_OTHER}", 1)
+    verdict.write_text(text)
+    calls_after_dry = len(_kit_calls(fp_fleet))
+
+    live = fp_fleet.run(
+        "demo", "7", "--use-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+    )
+    assert live.returncode == 0, live.stderr
+    assert "идёт полный прогон" in live.stderr
+    assert any(
+        "--format markdown" in call
+        for call in _kit_calls(fp_fleet)[calls_after_dry:]
+    )
+
+
+def test_corrupt_verdict_body_runs_full(fp_fleet: Fleet) -> None:
+    verdict = fp_fleet.tmp / "verdict.out"
+    dry = fp_fleet.run(
+        "demo", "7", "--dry-run", "--write-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+    )
+    assert dry.returncode == 0, dry.stderr
+    verdict.write_text(verdict.read_text() + "corruption\n")
+    calls_after_dry = len(_kit_calls(fp_fleet))
+    live = fp_fleet.run(
+        "demo", "7", "--use-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+    )
+    assert live.returncode == 0, live.stderr
+    assert "повреждён" in live.stderr
+    assert any(
+        "--format markdown" in call
+        for call in _kit_calls(fp_fleet)[calls_after_dry:]
+    )
+
+
+@needs_jq
+def test_invalid_file_does_not_fall_through_to_github_inheritance(
+    fp_fleet: Fleet,
+) -> None:
+    verdict = fp_fleet.tmp / "verdict.out"
+    dry = fp_fleet.run(
+        "demo", "7", "--dry-run", "--write-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+    )
+    assert dry.returncode == 0, dry.stderr
+    verdict.write_text(verdict.read_text().replace(f"fp={FP}", f"fp={FP_OTHER}", 1))
+    reviews = fp_fleet.write_reviews(
+        _review("APPROVED", fp_fleet.head_sha, FP)
+    )
+    calls_after_dry = len(_kit_calls(fp_fleet))
+    gh_after_dry = len(fp_fleet.gh_calls())
+    live = fp_fleet.run(
+        "demo", "7", "--use-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+    assert live.returncode == 0, live.stderr
+    assert "/reviews" not in fp_fleet.gh_calls()[gh_after_dry:]
+    assert any(
+        "--format markdown" in call
+        for call in _kit_calls(fp_fleet)[calls_after_dry:]
+    )
+
+
+def test_write_verdict_requires_dry_run(fp_fleet: Fleet) -> None:
+    res = fp_fleet.run(
+        "demo", "7", "--write-verdict", str(fp_fleet.tmp / "v"),
+        REVIEW_STUB_FP=FP,
+    )
+    assert res.returncode == 2
+    assert "только вместе с --dry-run" in res.stderr
+
+
+@needs_jq
+@pytest.mark.parametrize("source_head", ["same", "old"])
+def test_inherited_dry_run_also_writes_verdict(
+    fp_fleet: Fleet, source_head: str
+) -> None:
+    head = fp_fleet.head_sha if source_head == "same" else OLD_HEAD
+    reviews = fp_fleet.write_reviews(_review("APPROVED", head, FP))
+    verdict = fp_fleet.tmp / f"inherited-{source_head}.out"
+    res = fp_fleet.run(
+        "demo", "7", "--dry-run", "--write-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+    assert res.returncode == 0, res.stderr
+    assert verdict.is_file()
+    assert f"head={fp_fleet.head_sha}\n" in verdict.read_text()
+    assert f"fp={FP}\n" in verdict.read_text()
+    calls = _kit_calls(fp_fleet)
+    assert len(calls) == 1 and "--fingerprint-only" in calls[0]
