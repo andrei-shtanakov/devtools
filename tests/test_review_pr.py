@@ -33,19 +33,19 @@ GH_STUB = """#!/usr/bin/env bash
 echo "GH_CONFIG_DIR=${GH_CONFIG_DIR:-} gh $*" >> "$GH_STUB_LOG"
 case "$*" in
   *"/reviews"*)
-    # Ревью PR: канированный JSON страниц (как у gh --paginate --slurp)
-    # прогоняется через НАСТОЯЩИЙ jq с фильтром из argv — фильтр
-    # тестируется всерьёз, а не обходится.
-    filter=""
-    prev=""
-    for a in "$@"; do
-      [ "$prev" = "--jq" ] && filter="$a"
-      prev="$a"
-    done
+    # Ревью PR: сырой JSON страниц, как отдаёт настоящий `gh api --paginate`
+    # БЕЗ --jq (devtools#75: gh отвергает --slurp+--jq, фильтр теперь гоняет
+    # сам скрипт внешним jq — и тестируется всерьёз). Комбинация с --slurp
+    # воспроизводит отказ настоящего gh 2.83.1.
+    case "$*" in
+      *--slurp*)
+        echo "the --slurp option is not supported with --jq or --template" >&2
+        exit 1 ;;
+    esac
     if [ -n "${GH_STUB_REVIEWS_JSON:-}" ] && [ -f "$GH_STUB_REVIEWS_JSON" ]; then
-      jq -r "$filter" "$GH_STUB_REVIEWS_JSON"
+      cat "$GH_STUB_REVIEWS_JSON"
     else
-      echo '[[]]' | jq -r "$filter"
+      echo '[]'
     fi ;;
   *"api user"*)
     echo "${GH_STUB_LOGIN:-ai-prosto}" ;;
@@ -172,12 +172,13 @@ class Fleet:
         local_sh.chmod(local_sh.stat().st_mode | stat.S_IXUSR)
 
     def write_reviews(self, *reviews: dict) -> str:
-        """Канированный ответ reviews-эндпоинта: одна страница, как отдаёт
-        `gh api --paginate --slurp` (массив страниц)."""
+        """Канированный ответ reviews-эндпоинта: сырая страница, как отдаёт
+        `gh api --paginate` без --jq (массив ревью; jq -s скрипта завернёт
+        поток страниц сам)."""
         import json
 
         path = self.tmp / "reviews.json"
-        path.write_text(json.dumps([list(reviews)]))
+        path.write_text(json.dumps(list(reviews)))
         return str(path)
 
     def env(self, **extra: str) -> dict[str, str]:

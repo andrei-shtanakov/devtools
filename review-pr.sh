@@ -246,12 +246,26 @@ fi
 # прогон: заглядывать в БОЛЕЕ СТАРЫЕ ревью нельзя — dismissal новейшего мог
 # быть человеческим отзывом вердикта, воскрешать его из истории — не дело
 # дедупа.
+# Фильтр гоняется ВНЕШНИМ jq, не gh --jq: комбинацию --slurp + --jq gh
+# отвергает («not supported», gh 2.83.1) — с ней кэш был мёртв на каждом
+# прогоне (devtools#75, найдено первой живой проверкой steward). Страницы
+# --paginate приходят потоком массивов; jq -s заворачивает их в тот же
+# shape [[...],[...]], что давал --slurp. gh и jq вызываются раздельно,
+# чтобы отказ каждого был виден со СВОЕЙ причиной, а не маскировался
+# пайпом под «нет ревью».
 inh_state=""
 inh_head=""
 if [ -n "$fp" ] && [ "$fresh" -eq 0 ]; then
-    if candidate=$(gh_r api --paginate --slurp \
-        "repos/$slug/pulls/$pr/reviews" \
-        --jq '([ .[][] | select(.user.login == "'"$REVIEW_LOGIN"'") ] | last) as $r
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "ЗАМЕТКА: jq не найден — поиск наследуемого вердикта пропущен," \
+            "идёт полный прогон." >&2
+    elif ! reviews_json=$(gh_r api --paginate \
+        "repos/$slug/pulls/$pr/reviews" 2> "$work/reviews.err"); then
+        cat "$work/reviews.err" >&2
+        echo "ЗАМЕТКА: прошлые ревью не прочитались (gh) — дедуп пропущен," \
+            "идёт полный прогон." >&2
+    elif ! candidate=$(printf '%s' "$reviews_json" | jq -rs \
+        '([ .[][] | select(.user.login == "'"$REVIEW_LOGIN"'") ] | last) as $r
             | if $r == null then "none none none"
               else
                 (($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) as $n
@@ -261,6 +275,10 @@ if [ -n "$fp" ] && [ "$fresh" -eq 0 ]; then
                   then $r.state + " " + $ms[0].captures[0].string + " " + $ms[0].captures[1].string
                   else "miss miss miss" end
               end' 2> "$work/reviews.err"); then
+        cat "$work/reviews.err" >&2
+        echo "ЗАМЕТКА: прошлые ревью не распарсились (jq) — дедуп пропущен," \
+            "идёт полный прогон." >&2
+    else
         read -r c_state c_head c_fp <<EOF
 $candidate
 EOF
@@ -268,10 +286,6 @@ EOF
             inh_state="$c_state"
             inh_head="$c_head"
         fi
-    else
-        cat "$work/reviews.err" >&2
-        echo "ЗАМЕТКА: прошлые ревью не прочитались — дедуп пропущен," \
-            "идёт полный прогон." >&2
     fi
 fi
 
