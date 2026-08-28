@@ -507,7 +507,7 @@
 
 ## Волна fp-кита терминального ревью
 
-- [ ] Re-vendor fp-версию review-kit по флоту, чтобы дедуп `review-pr.sh` не отключался feature-detect'ом @owner:github:andrei-shtanakov @id:review-kit-fp-wave
+- [x] Re-vendor fp-версию review-kit по флоту, чтобы дедуп `review-pr.sh` не отключался feature-detect'ом @owner:github:andrei-shtanakov @id:review-kit-fp-wave — devtools PR #83 + 22 PR волны, все вмержены 2026-08-28; devtools#79 закрыть после мержа ledger-PR
       Принят из inbox devtools#79 (инициатор — steward, слаг совпадает).
       Источник минимальной волны — steward master не ниже fee3159: только
       `scripts/review/local.sh` с `--fingerprint-only`; схема вердикта,
@@ -519,10 +519,22 @@
       vendored-копии `local.sh` байт-совпадают с выбранным steward source;
       в каждом репо fp-команда печатает ровно одну строку 64-hex, а первый
       терминальный review публикует маркер с `fp=`.
+      Приёмка ПРОЙДЕНА: 23 потребителя + steward на origin/default имеют
+      byte-identical `local.sh` sha256 32d1e084…; PIN каждого потребителя
+      обновлён только для этой поверхности. PR-ы волны: workspace#29,
+      arbiter#99, atp-platform#313, atp-platform-testing#3, deployer#48,
+      discovery#28, discovery-toolkit#11, dispatcher#219, disputatio#48,
+      github-checker#30, impresario#45, kapelle#43, libretto#35,
+      maestro#232, proctor#60, prograph#41, prograph-vault#114,
+      research-bench#30, robin-runtime#59, robin-toolkit#10,
+      spec-runner#325, spec-runner-vscode#33. Ветки волны удалены локально
+      и на origin; чистые default-checkout обновлены. Dirty checkout
+      atp-platform-testing-en намеренно не тронут, его origin/master уже
+      содержит мерж.
 
 ## Передача dry-run вердикта в боевой прогон
 
-- [ ] review-pr.sh: opt-in перенос проверенного dry-run verdict без второго вызова codex @owner:github:andrei-shtanakov @id:review-pr-inherit-dry-run
+- [x] review-pr.sh: opt-in перенос проверенного dry-run verdict без второго вызова codex @owner:github:andrei-shtanakov @id:review-pr-inherit-dry-run — PR #82 (merge bf89814); devtools#80 закрыт автоматически
       Принят из inbox devtools#80 (инициатор — steward, слаг совпадает).
       Выбран явный файловый канал: `--dry-run --write-verdict <file>`
       атомарно пишет версионированный машиночитаемый результат, а
@@ -535,3 +547,8 @@
       Приёмка: неизменные head+fp публикуют тот же review без второго
       вызова codex; изменение головы или любого байта fingerprint-входа
       гарантированно вызывает полный прогон; обе ветви покрыты тестами.
+      Приёмка ПРОЙДЕНА: envelope v1 атомарно пишется mode 0600 и связан с
+      repo/pr/head/fp, action/code и hash тела; повреждение или mismatch
+      принудительно отключают также GitHub-наследование и ведут в полный
+      прогон. 187 тестов зелёные; терминальное ревью нашло две реальные
+      major-дыры в ранних выходах, обе закрыты регрессиями до approve.
