@@ -481,7 +481,7 @@
       tests/test_review_pr.py (15 новых тестов, фильтр jq гоняется через
       настоящий jq в стабе gh). Фаза замера экономии — за steward.
 
-- [ ] review-pr.sh: кэш дедупа мёртв на живом gh (--slurp+--jq отвергается) @owner:github:andrei-shtanakov @id:review-pr-fp-slurp-compat
+- [x] review-pr.sh: кэш дедупа мёртв на живом gh (--slurp+--jq отвергается) @owner:github:andrei-shtanakov @id:review-pr-fp-slurp-compat — PR #76 (merge 87b7e76); devtools#75 закрыт после живого инцидента наследования (steward#135: полный прогон → approve с fp-маркером; повторный dry-run на том же head → «вердикт унаследован» за 10.3 сек без codex)
       Принят из inbox devtools#75 (инициатор — steward, первая живая
       проверка их стороной, steward PR #134; слаг совпадает). Дефект
       интеграции #72: gh 2.83.1 отвергает комбинацию --slurp + --jq,
