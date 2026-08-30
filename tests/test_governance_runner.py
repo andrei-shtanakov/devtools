@@ -1551,3 +1551,41 @@ def test_resume_from_stopped_review_does_not_repost_comment_when_fixed(
     assert result.status != "stopped_review"
     review_stop_comments = [c for c in ops.comments if "ревью нашло находки" in c]
     assert len(review_stop_comments) == 1
+
+
+# --- B2 Task 1: follow-ups приёмки B1 ---------------------------------------
+
+
+def test_start_rejects_invalid_merge_authority_before_reserving_run_id(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Minor из приёмки #88: невалидный `merge_authority` валидируется ДО
+    `_reserve_run_id` — раньше он навсегда резервировал `run_id` пустым
+    `run.json`, потому что единственная валидация жила в `new_run()`,
+    вызываемом ПОСЛЕ резервирования."""
+    run_id = "r-bad-authority"
+    kwargs = _start_kwargs(
+        tmp_path, run_id, FakeOps(), merge_authority="agent",
+    )
+
+    with pytest.raises(ValueError):
+        runner.start(**kwargs)
+
+    assert not (rs.run_dir(run_id) / "run.json").exists()
+
+
+def test_stop_review_comment_includes_evidence_hint(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Спека §7: стоп-комментарий S6 (exit 1) дополняется evidence-подсказкой
+    про известный ложный класс находок «файлов нет» — `git cat-file -e
+    <head>:<путь>` с реальной подставленной головой."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=1)
+    run_id = "r-review-evidence"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+
+    assert state.status == "stopped_review"
+    assert ops.comments
+    assert f"git cat-file -e {ops.head}" in ops.comments[-1]

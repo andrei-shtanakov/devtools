@@ -37,6 +37,7 @@ from governance.run_state import (
     run_dir,
     save,
     validate_id_component,
+    validate_merge_authority,
 )
 
 _ROLLUP_GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -119,11 +120,18 @@ def start(
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
-    WS-lock проверяется ДО резервирования `run_id` (круг 7): у неё нет
+    `merge_authority` валидируется ПЕРВЫМ, ДО резервирования `run_id` (B2
+    follow-up приёмки B1, minor из #88): чистая проверка входа без побочных
+    эффектов, как и WS-lock ниже — невалидное значение раньше навсегда
+    резервировало `run_id` пустым `run.json`, потому что `new_run()`
+    (единственное место валидации) вызывался ПОСЛЕ `_reserve_run_id`.
+
+    WS-lock проверяется ДО резервирования `run_id` (круг 7): у неё тоже нет
     побочных эффектов, а `_reserve_run_id` создаёт файл — так отказ по
     WS-lock не оставляет пустой `run.json`-заглушку под несостоявшимся
     `run_id`.
     """
+    validate_merge_authority(merge_authority)
     blocker = _blocking_merged_unverified(ws_id)
     if blocker is not None:
         raise ValueError(
@@ -609,9 +617,21 @@ def _step_review(state: RunState, ops: Ops) -> bool:
         op_complete(state, key, exit=exit_code)
         return True
     if exit_code == 1:
+        # Evidence-подсказка (B2 follow-up приёмки B1, спека §7): известный
+        # ложный класс находок «файлов нет» опровергается прямой проверкой
+        # `git cat-file -e <head>:<путь>` — до машинного типа находки в ките
+        # steward перегон такого false positive не автоматизирован, но
+        # подсказка сокращает ручной цикл проверки. Голова берётся живьём
+        # (`ops.head_sha`), а не из `state.head` — то поле заполняется только
+        # на S7 (`_step_merge`), на S6 оно ещё пусто.
+        head = ops.head_sha(state.target_dir, state.branch)
         _stop_with_comment(
             state, ops, "stopped_review",
-            "ревью нашло находки, прогон остановлен",
+            "ревью нашло находки, прогон остановлен\n\n"
+            "Известный ложный класс находок «файлов нет» опровергается "
+            f"прямой проверкой `git cat-file -e {head}:<путь>`; "
+            "авто-перегон появится после машинного типа находки в ките "
+            "steward.",
         )
         return False
     if exit_code in (2, 3):

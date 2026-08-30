@@ -78,6 +78,23 @@ class RunState:
     base_ref: str | None = None
 
 
+def validate_merge_authority(merge_authority: str | None) -> None:
+    """Валидирует `merge_authority` прогона (спека §6): только None/`"human"`.
+
+    Отдельная функция (B2 follow-up приёмки B1, minor из #88): вызывающая
+    сторона (`runner.start()`) обязана проверить значение ДО любых
+    побочных эффектов — раньше валидация жила только внутри `new_run()`,
+    которая вызывается ПОСЛЕ `_reserve_run_id()`, и невалидное значение
+    навсегда резервировало `run_id` пустым `run.json` без реального
+    прогона.
+    """
+    if merge_authority not in _ALLOWED_MERGE_AUTHORITY:
+        raise ValueError(
+            "merge_authority прогона может только ужесточать до 'human' "
+            f"(допустимо None или 'human'), получено {merge_authority!r}"
+        )
+
+
 def new_run(
     subject: str,
     repo: str,
@@ -90,11 +107,7 @@ def new_run(
     merge_authority: str | None = None,
 ) -> RunState:
     """Новый прогон (S0). `run_id` подаётся снаружи (вызывающая сторона)."""
-    if merge_authority not in _ALLOWED_MERGE_AUTHORITY:
-        raise ValueError(
-            "merge_authority прогона может только ужесточать до 'human' "
-            f"(допустимо None или 'human'), получено {merge_authority!r}"
-        )
+    validate_merge_authority(merge_authority)
     return RunState(
         run_id=run_id,
         subject=subject,
