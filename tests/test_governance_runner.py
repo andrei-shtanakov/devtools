@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,7 +47,10 @@ class FakeOps:
     find_pr_error: str | None = None
     dirty: bool = False
     checkout_and_pull_error: str | None = None
+    head_sha_error: str | None = None
     authored: list[str] = field(default_factory=list)
+    author_disp_calls: list[tuple[str, str]] = field(default_factory=list)
+    author_disp_exit: int = 0
     comments: list[str] = field(default_factory=list)
     merged: list[tuple[int, str]] = field(default_factory=list)
     issues: list[tuple[str, str, str]] = field(default_factory=list)
@@ -63,6 +68,8 @@ class FakeOps:
 
     def head_sha(self, target_dir: str, branch: str) -> str:
         self.calls.append(("head_sha", branch))
+        if self.head_sha_error is not None:
+            raise RuntimeError(self.head_sha_error)
         return self.head
 
     def push_branch(self, target_dir: str, branch: str) -> None:
@@ -132,6 +139,11 @@ class FakeOps:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"# {kind}\n", encoding="utf-8")
         return 0
+
+    def author_disp(self, target_dir: str, task: str) -> int:
+        self.calls.append(("author_disp", task))
+        self.author_disp_calls.append((target_dir, task))
+        return self.author_disp_exit
 
     def gate_check_s8(
         self, target_dir: str, bundle_dir: str, profile: str
@@ -370,7 +382,9 @@ def test_s8_fail_marks_merged_unverified_and_opens_issue(
     assert len(ops.issues) == 1
     repo_slug, _title, body = ops.issues[0]
     assert repo_slug == "owner/alpha"
-    assert body.startswith("slug: beh-remediation-WS-1")
+    # Round 4: slug — от cycle_id (`remediated_by or run_id`), не от
+    # ws_id; для родителя (remediated_by ещё None) cycle_id == его run_id.
+    assert body.startswith(f"slug: beh-remediation-{run_id}")
     assert f"from: devtools#{run_id}" in body
 
     with pytest.raises(ValueError):
@@ -431,7 +445,9 @@ def test_resume_after_death_between_create_issue_and_op_complete_reuses_issue(
     }
     run_dir_path = rs.run_dir(run_id)
     run_dir_path.mkdir(parents=True, exist_ok=True)
-    body_prefix = f"slug: beh-remediation-{state.ws_id}"
+    # Round 4: slug — от cycle_id (`remediated_by or run_id`); у этого
+    # состояния remediated_by ещё None (родитель), cycle_id == run_id.
+    body_prefix = f"slug: beh-remediation-{run_id}"
     findings_text = "gate-check (S8, authoritative) завершился с кодом 1\n\nGC-X\n"
     (run_dir_path / "s8-findings.txt").write_text(findings_text, encoding="utf-8")
     rs.save(state)
@@ -449,6 +465,81 @@ def test_resume_after_death_between_create_issue_and_op_complete_reuses_issue(
     assert result.ops["remediation-issue"] == {"status": "completed", "number": 901}
     assert "create_issue" not in [c[0] for c in ops.calls]
     assert ("find_issue", body_prefix) in ops.calls
+
+
+def test_s8_fail_does_not_reuse_issue_from_different_cycle(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 4, codex-major: slug строится от `cycle_id` (`remediated_by or
+    run_id`), не от `ws_id`. Старый открытый issue ДРУГОГО цикла того же
+    `ws_id` (например прошлый цикл, уже зелёно верифицированный и закрытый,
+    или просто параллельный независимый прогон по тому же `ws_id`) НЕ
+    должен реконсилироваться на текущий провал — иначе свежие findings
+    молча терялись бы под чужим issue. `find_issue` всё равно вызывается
+    (реконсиляция остаётся безусловной, round 3), но не находит совпадение
+    по своему префиксу -> `create_issue` создаёт НОВЫЙ, отдельный issue."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    run_id = "r-s8-independent-failure"
+    # Issue от ДРУГОГО цикла того же ws_id (другой parent run_id) уже
+    # открыт — например прошлый цикл, уже верифицированный и закрытый.
+    other_cycle_prefix = "slug: beh-remediation-r-earlier-cycle"
+    ops.issues.append((
+        "owner/alpha",
+        "beh-remediation: прошлый цикл (WS-1)",
+        f"{other_cycle_prefix}\nfrom: devtools#r-earlier-cycle\n\nGC-OLD\n",
+    ))
+
+    state = runner.start(**_agent_merge_kwargs(tmp_path, run_id, ops))
+
+    own_prefix = f"slug: beh-remediation-{run_id}"
+    assert state.status == "merged_unverified"
+    assert len(ops.issues) == 2  # чужой issue не переиспользован — создан новый
+    new_repo_slug, _title, new_body = ops.issues[-1]
+    assert new_repo_slug == "owner/alpha"
+    assert new_body.startswith(own_prefix)
+    assert state.ops["remediation-issue"] == {"status": "completed", "number": 902}
+    assert ("find_issue", own_prefix) in ops.calls
+    assert "create_issue" in [c[0] for c in ops.calls]
+
+
+def test_verify_child_reuses_parent_remediation_issue_same_cycle(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 4: `cycle_id = state.remediated_by or state.run_id` — у
+    verify-потомка `remediated_by` указывает на родителя, поэтому
+    `cycle_id` совпадает с собственным `run_id` родителя (у которого
+    `remediated_by` ещё `None`). Потомок с ФРЕШ `remediation-issue`
+    ("new", round 3: реконсиляция безусловна) должен найти и переиспользовать
+    issue родителя, а не открыть второй под тем же циклом."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-cycle-parent"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+    assert len(ops.issues) == 1
+    parent_issue_number = parent.ops["remediation-issue"]["number"]
+
+    child = runner.verify(parent_id, ops, "r-s8-cycle-child")
+
+    assert child.status == "merged_unverified"  # тоже проваливается
+    assert child.remediated_by == parent_id
+    assert len(ops.issues) == 1  # НЕ второй issue — тот же цикл
+    assert child.ops["remediation-issue"] == {
+        "status": "completed", "number": parent_issue_number,
+    }
 
 
 def test_verify_child_completes_parent_stays_merged_unverified(
@@ -478,6 +569,275 @@ def test_verify_child_completes_parent_stays_merged_unverified(
 
     reloaded_parent = rs.load(parent_id)
     assert reloaded_parent.status == "merged_unverified"
+
+
+def test_verify_refuses_when_parent_already_has_green_child(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 3, codex-major: tmux-дедуп в консоли защищает только пока
+    сессия жива (и после round 2 она ещё и самозакрывается) — `verify()`
+    сам по себе не проверял, есть ли у родителя уже подтверждающий
+    (`completed`) потомок. Второй `verify()`-вызов (руками, мимо консоли,
+    или после того как сессия уже закрылась) на уже зелёном потомке
+    создавал бы ЕЩЁ ОДИН verification-run поверх уже верифицированного
+    родителя."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-already-verified"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    ops.s8_exit = 0  # находки устранены фикс-PR'ом
+    child = runner.verify(parent_id, ops, "r-s8-child-green")
+    assert child.status == "completed"
+
+    with pytest.raises(ValueError, match="уже верифицирован"):
+        runner.verify(parent_id, ops, "r-s8-child-second")
+
+    # Второй потомок не зарезервирован — отказ ДО _reserve_run_id.
+    assert not (rs.run_dir("r-s8-child-second") / "run.json").exists()
+
+
+def test_verify_allowed_again_after_failed_child(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Провальный (`merged_unverified`) потомок НЕ блокирует повторный
+    `verify()` — только ЗЕЛЁНЫЙ (`completed`) значит «уже верифицирован»;
+    цикл «verify → всё ещё красный → verify снова» остаётся штатным."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-retry"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    failed_child = runner.verify(parent_id, ops, "r-s8-child-failed")
+    assert failed_child.status == "merged_unverified"  # тоже провалился
+
+    ops.s8_exit = 0  # находки устранены вторым фикс-PR'ом
+    second_child = runner.verify(parent_id, ops, "r-s8-child-retry-green")
+    assert second_child.status == "completed"
+    assert second_child.remediated_by == parent_id
+
+
+def test_verify_without_run_id_serializes_when_ids_collide(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 5 (TOCTOU): сериализация конкурентных `verify()` без `run_id`
+    держится на атомарном `_reserve_run_id` (`O_CREAT|O_EXCL`), а не на
+    конкретном способе счёта `attempt` внутри `_next_verify_run_id` (тот
+    менялся в round 6 — см. `test_next_verify_run_id_skips_dangling_
+    reservation` ниже). Настоящую гонку потоков/процессов синхронный тест
+    воспроизвести не может — форсируем через monkeypatch общий результат
+    вычисления id для "обоих конкурентов" (то, что в реальной гонке дало
+    бы им одно и то же значение из одного стартового снапшота каталогов).
+    Первый вызов резервирует и создаёт потомка, второй с тем же
+    вычисленным id получает `ValueError` вместо параллельного запуска S8
+    в одном `target_dir`."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-race"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    monkeypatch.setattr(runner, "_next_verify_run_id", lambda pid: f"{pid}-v1")
+
+    winner = runner.verify(parent_id, ops)
+    assert winner.run_id == f"{parent_id}-v1"
+
+    with pytest.raises(ValueError, match="уже существует"):
+        runner.verify(parent_id, ops)  # "проигравший" вычисляет тот же id
+
+
+def test_next_verify_run_id_skips_dangling_reservation(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 6, codex-major: гибель между `_reserve_run_id` и
+    `save(child)` оставляет ПУСТОЙ `<parent>-v1/run.json` (сам
+    `_reserve_run_id` уже создал файл через `touch`). Счёт `attempt` по
+    успешно ЗАГРУЖЕННЫМ `RunState` (round 5) молча пропускал бы этот
+    каталог — `_next_verify_run_id` вечно вычислял бы `v1` снова, а
+    `_reserve_run_id` вечно отвечал бы «уже существует» на уже занятом
+    (хоть и оборванном) слоте — постоянный deadlock на этом родителе.
+    Счёт по ИМЕНАМ каталогов (`all_run_ids()`) видит `v1` независимо от
+    валидности JSON внутри и корректно берёт следующий номер.
+
+    Файл состарен (`os.utime`, round 7): свежий пустой `run.json` теперь
+    трактуется `_active_verify_child` как «только что зарезервировано
+    конкурентом» и блокирует `verify()` (см. `test_verify_refuses_when_
+    dangling_reservation_is_fresh`) — этот тест про труп round 6, который
+    старше грейс-периода, поэтому его нужно состарить явно."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-dangling"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    # Оборванная резервация: процесс умер между _reserve_run_id и
+    # save(child) — каталог и пустой run.json есть, RunState — нет.
+    # Состарена на -300с (> _ACTIVE_VERIFY_GRACE_SECONDS=120) — труп, не
+    # свежий конкурент.
+    dangling_id = f"{parent_id}-v1"
+    rs.run_dir(dangling_id).mkdir(parents=True, exist_ok=True)
+    dangling_json = rs.run_dir(dangling_id) / "run.json"
+    dangling_json.touch()
+    old_time = time.time() - 300
+    os.utime(dangling_json, (old_time, old_time))
+
+    assert runner._next_verify_run_id(parent_id) == f"{parent_id}-v2"
+    assert runner._active_verify_child(parent_id) is None
+
+    ops.s8_exit = 0  # находки устранены фикс-PR'ом
+    child = runner.verify(parent_id, ops)
+    assert child.run_id == f"{parent_id}-v2"
+    assert child.status == "completed"
+
+
+def test_verify_refuses_when_child_is_running(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 7, codex-major: round 6 переоткрыл гонку round 5 (второй
+    конкурентный `verify()` видел уже занятый каталог и спокойно
+    резервировал следующий номер вместо коллизии). Сериализация теперь
+    держится на СОСТОЯНИИ потомков: валидный `run.json` со `status` не в
+    `{"completed", "merged_unverified"}` (например `"running"` — S8 ещё
+    не отработал) — активный потомок, второй `verify()` отказывает."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-active-child"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    # Валидный, но ещё не терминальный потомок (S8 в процессе).
+    child_id = f"{parent_id}-v1"
+    child_state = rs.new_run(
+        subject=parent.subject, repo=parent.repo, repo_slug=parent.repo_slug,
+        ws_id=parent.ws_id, target_dir=parent.target_dir,
+        bundle_dir=parent.bundle_dir, profile=parent.profile, run_id=child_id,
+    )
+    child_state.remediated_by = parent_id
+    child_state.status = "running"
+    rs.save(child_state)
+
+    assert runner._active_verify_child(parent_id) == child_id
+    with pytest.raises(ValueError, match="verify уже идёт"):
+        runner.verify(parent_id, ops)
+
+
+def test_verify_refuses_when_dangling_reservation_is_fresh(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 7: свежий (только что созданный) пустой `<parent>-v1/run.json`
+    трактуется как «конкурент только что зарезервировал слот, ещё пишет
+    свой RunState» — активный, а не труп round 6. mtime моложе
+    `_ACTIVE_VERIFY_GRACE_SECONDS` (тест не состаривает файл, в отличие от
+    `test_next_verify_run_id_skips_dangling_reservation`)."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-fresh-dangling"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    dangling_id = f"{parent_id}-v1"
+    rs.run_dir(dangling_id).mkdir(parents=True, exist_ok=True)
+    (rs.run_dir(dangling_id) / "run.json").touch()  # свежий -> "прямо сейчас"
+
+    assert runner._active_verify_child(parent_id) == dangling_id
+    with pytest.raises(ValueError, match="verify уже идёт"):
+        runner.verify(parent_id, ops)
+
+
+def test_active_verify_child_ignores_merged_unverified_child(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Провальный (`merged_unverified`) потомок — терминальный статус, НЕ
+    активный: не блокирует повторный `verify()` (round 3/round 7 согласны
+    друг с другом — только `_has_green_child` реагирует на `completed`,
+    `_active_verify_child` реагирует на нетерминальные статусы)."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-failed-not-active"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    failed_child = runner.verify(parent_id, ops)
+    assert failed_child.status == "merged_unverified"  # тоже провалился
+
+    assert runner._active_verify_child(parent_id) is None
+
+    ops.s8_exit = 0  # находки устранены вторым фикс-PR'ом
+    second_child = runner.verify(parent_id, ops)
+    assert second_child.status == "completed"
+
+
+def test_verify_without_run_id_increments_attempt_after_failed_child(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """`attempt = 1 + число существующих потомков` (любой статус) — после
+    провального (`merged_unverified`) потомка следующий `verify()` без
+    `run_id` вычисляет НОВЫЙ id (`-v2`), а не повторяет `-v1` (что упёрлось
+    бы в уже занятый `run_id` того же провального потомка)."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-attempts"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    first_child = runner.verify(parent_id, ops)
+    assert first_child.run_id == f"{parent_id}-v1"
+    assert first_child.status == "merged_unverified"
+
+    ops.s8_exit = 0  # находки устранены вторым фикс-PR'ом
+    second_child = runner.verify(parent_id, ops)
+    assert second_child.run_id == f"{parent_id}-v2"
+    assert second_child.status == "completed"
 
 
 def test_resume_waiting_human_merge_open_still_waits(
@@ -1551,3 +1911,151 @@ def test_resume_from_stopped_review_does_not_repost_comment_when_fixed(
     assert result.status != "stopped_review"
     review_stop_comments = [c for c in ops.comments if "ревью нашло находки" in c]
     assert len(review_stop_comments) == 1
+
+
+# --- B2 Task 1: follow-ups приёмки B1 ---------------------------------------
+
+
+def test_start_rejects_invalid_merge_authority_before_reserving_run_id(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Minor из приёмки #88: невалидный `merge_authority` валидируется ДО
+    `_reserve_run_id` — раньше он навсегда резервировал `run_id` пустым
+    `run.json`, потому что единственная валидация жила в `new_run()`,
+    вызываемом ПОСЛЕ резервирования."""
+    run_id = "r-bad-authority"
+    kwargs = _start_kwargs(
+        tmp_path, run_id, FakeOps(), merge_authority="agent",
+    )
+
+    with pytest.raises(ValueError):
+        runner.start(**kwargs)
+
+    assert not (rs.run_dir(run_id) / "run.json").exists()
+
+
+def test_start_rejects_invalid_author_backend_before_reserving_run_id(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Тот же класс minor, что и merge_authority выше (I-3, финальное
+    ревью): Task 1 чинил его для merge_authority (приёмка #88), Task 2
+    внесла заново для author_backend — `validate_author_backend` жила
+    только внутри `new_run()`, вызываемом ПОСЛЕ `_reserve_run_id`. Через
+    CLI недостижимо (`choices=["codex", "disp"]`), но `start()` —
+    публичный API."""
+    run_id = "r-bad-author-backend"
+    kwargs = _start_kwargs(
+        tmp_path, run_id, FakeOps(), author_backend="claude",
+    )
+
+    with pytest.raises(ValueError):
+        runner.start(**kwargs)
+
+    assert not (rs.run_dir(run_id) / "run.json").exists()
+
+
+def test_stop_review_comment_includes_evidence_hint(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Спека §7: стоп-комментарий S6 (exit 1) дополняется evidence-подсказкой
+    про известный ложный класс находок «файлов нет» — `git cat-file -e
+    <head>:<путь>` с реальной подставленной головой."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=1)
+    run_id = "r-review-evidence"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+
+    assert state.status == "stopped_review"
+    assert ops.comments
+    assert f"git cat-file -e {ops.head}" in ops.comments[-1]
+
+
+def test_stop_review_comment_survives_head_sha_failure(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """I-6, финальное ревью: `head_sha` — чисто косметическая evidence-
+    подсказка, вызывается на СТОП-пути ДО `_stop_with_comment`. Если ветки
+    нет локально/`target_dir` уехал (`RealOps.head_sha` зовёт `git
+    rev-parse` с `check=True`), штатная остановка «ревью нашло находки» не
+    должна превращаться в необработанное исключение вместо
+    comment+`stopped_review` — сбой глотается, в подсказку идёт литерал
+    `<head>`."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=1, head_sha_error="fatal: bad revision")
+    run_id = "r-review-evidence-head-fails"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+
+    assert state.status == "stopped_review"
+    assert ops.comments
+    assert "git cat-file -e <head>" in ops.comments[-1]
+
+
+# --- B2 Task 2: авторинг-бэкенд codex|disp ----------------------------------
+
+
+def test_default_author_backend_is_codex_author_disp_not_called(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Дефолт `author_backend="codex"` не меняет поведение B1: все три узла
+    идут через `ops.author`, `ops.author_disp` не вызывается вовсе."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+
+    state = runner.start(**_start_kwargs(tmp_path, "r-disp-default", ops))
+
+    assert ops.authored == ["charter", "requirements", "behaviour-spec"]
+    assert ops.author_disp_calls == []
+    assert state.author_backend == "codex"
+
+
+def test_disp_backend_used_only_for_behaviour_node(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """`author_backend="disp"` переключает ТОЛЬКО behaviour-spec узел на
+    `ops.author_disp`; charter/requirements остаются на `ops.author` (codex)
+    — disp-цикл осмыслен только для полируемого документа."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    run_id = "r-disp-behaviour"
+
+    state = runner.start(**_start_kwargs(
+        tmp_path, run_id, ops, author_backend="disp",
+    ))
+
+    assert ops.authored == ["charter", "requirements"]
+    assert len(ops.author_disp_calls) == 1
+    target_dir, task = ops.author_disp_calls[0]
+    assert target_dir == str(tmp_path / f"target-{run_id}")
+    assert "#### BEH-NN" in task
+    assert "traces:" in task
+    assert "checked_by" in task
+    assert state.ops["author-behaviour"]["status"] == "completed"
+    assert state.author_backend == "disp"
+
+
+def test_disp_backend_author_disp_failure_stops_author(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Провал `author_disp` (rc != 0) останавливает прогон так же, как
+    провал `ops.author` — `stopped_author`, статус не подменяется бэкендом."""
+    ops = FakeOps(author_disp_exit=1)
+    run_id = "r-disp-fail"
+
+    state = runner.start(**_start_kwargs(
+        tmp_path, run_id, ops, author_backend="disp",
+    ))
+
+    assert state.status == "stopped_author"
+    assert state.ops["author-behaviour"]["status"] == "started"
+
+
+def test_new_run_rejects_unknown_author_backend() -> None:
+    with pytest.raises(ValueError):
+        rs.new_run(
+            subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+            target_dir="/tmp/x", bundle_dir="spec",
+            profile="profiles/team-exp.yaml", run_id="r-bad-backend",
+            author_backend="claude",
+        )

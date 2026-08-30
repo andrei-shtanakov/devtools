@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +38,9 @@ from governance.run_state import (
     op_status,
     run_dir,
     save,
+    validate_author_backend,
     validate_id_component,
+    validate_merge_authority,
 )
 
 _ROLLUP_GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -75,17 +79,14 @@ def _reserve_run_id(run_id: str) -> None:
         ) from exc
 
 
-def _blocking_merged_unverified(ws_id: str) -> str | None:
-    """WS-lock (спека §5, финальное ревью круг 5): найти блокирующий run_id.
+def _load_all_runs() -> dict[str, RunState]:
+    """Все читаемые прогоны под `RUNS_ROOT`, id -> `RunState`.
 
-    Пока по ``ws_id`` висит ``merged_unverified`` без зелёного (``completed``)
-    потомка (``remediated_by`` == его run_id), новый авторинг-прогон по этому
-    же ``ws_id`` не стартует — fail-closed: непроверенное не читается как
-    проверенное. Возвращает run_id блокирующего прогона либо ``None``.
-
-    Обход соседей по `all_run_ids()`: битые/нечитаемые `run.json` (не тот
-    формат, отсутствующие поля, невалидный JSON) пропускаются молча — сосед
-    с испорченным леджером не должен мешать чужому прогону.
+    Общий обход для WS-lock (`_blocking_merged_unverified`) и
+    verify-дедупа (`_has_green_child`, round 3 codex-ревью): битые/
+    нечитаемые `run.json` (не тот формат, отсутствующие поля, невалидный
+    JSON) пропускаются молча — сосед с испорченным леджером не должен
+    мешать чужому прогону.
     """
     states: dict[str, RunState] = {}
     for run_id in all_run_ids():
@@ -93,6 +94,18 @@ def _blocking_merged_unverified(ws_id: str) -> str | None:
             states[run_id] = load(run_id)
         except (OSError, ValueError, TypeError, KeyError):
             continue
+    return states
+
+
+def _blocking_merged_unverified(ws_id: str) -> str | None:
+    """WS-lock (спека §5, финальное ревью круг 5): найти блокирующий run_id.
+
+    Пока по ``ws_id`` висит ``merged_unverified`` без зелёного (``completed``)
+    потомка (``remediated_by`` == его run_id), новый авторинг-прогон по этому
+    же ``ws_id`` не стартует — fail-closed: непроверенное не читается как
+    проверенное. Возвращает run_id блокирующего прогона либо ``None``.
+    """
+    states = _load_all_runs()
     verified_parents = {
         s.remediated_by
         for s in states.values()
@@ -102,6 +115,82 @@ def _blocking_merged_unverified(ws_id: str) -> str | None:
         if s.ws_id == ws_id and s.status == "merged_unverified":
             if run_id not in verified_parents:
                 return run_id
+    return None
+
+
+def _has_green_child(parent_run_id: str) -> bool:
+    """`True`, если у `parent_run_id` уже есть завершённый (`completed`)
+    verify-потомок (`remediated_by == parent_run_id`) — «уже верифицирован»
+    (round 3, codex-ревью, продолжение I-7): tmux-дедуп в консоли защищает
+    только пока сессия жива (round 2 её ещё и самозакрыл), но `verify()`
+    сам по себе не проверял, есть ли у родителя уже подтверждающий потомок
+    — второй `verify()`-вызов (например руками, мимо консоли) на уже
+    зелёном потомке создавал бы ЕЩЁ ОДИН, хотя родитель уже подтверждён.
+    Провальный потомок (`merged_unverified`) НЕ считается — повтор
+    verify после провала разрешён и остаётся штатным путём."""
+    return any(
+        s.remediated_by == parent_run_id and s.status == "completed"
+        for s in _load_all_runs().values()
+    )
+
+
+# Дольше типичного времени между _reserve_run_id и save(child) (доли
+# секунды в норме) на порядки — но короче того, за что реальный S8-прогон
+# (checkout/gate-check/create_issue) успевает продвинуться дальше "running"
+# в первый же заход (round 7): грейс-период для "это свежий конкурент,
+# ещё пишет свой RunState", не гарантия реального времени S8.
+_ACTIVE_VERIFY_GRACE_SECONDS = 120
+
+
+def _active_verify_child(parent_run_id: str) -> str | None:
+    """`run_id` активного (нетерминального) verify-потомка `parent_run_id`,
+    если такой есть, — иначе `None` (round 7, codex-major).
+
+    Round 6 починил зависание счётчика `attempt` на оборванной резервации,
+    но тем самым ПЕРЕОТКРЫЛ гонку round 5: второй конкурентный `verify()`
+    теперь видит каталог `<parent>-v1` (пусть даже пустой) и спокойно
+    резервирует `v2` — коллизии на `_reserve_run_id` больше нет, поэтому
+    round-5 сериализация через ValueError на занятом id не срабатывает.
+    Сериализация должна опираться на СОСТОЯНИЕ потомков, а не на коллизию
+    id: пока у родителя есть потомок, который ещё не дошёл до терминального
+    статуса, новый `verify()` не должен стартовать параллельный S8 в том
+    же `target_dir`.
+
+    Обходит каталоги по паттерну `^<parent>-v\\d+$` (`all_run_ids()`, как
+    `_next_verify_run_id`):
+
+    - валидный `run.json` со `status` НЕ в `{"completed",
+      "merged_unverified"}` (например `"running"` — S8 ещё идёт) —
+      активный потомок, возвращаем его `run_id`;
+    - нечитаемый/пустой `run.json` — либо труп round 6 (процесс умер между
+      `_reserve_run_id` и `save()`), либо конкурент, который только что
+      зарезервировал слот и ЕЩЁ пишет свой `RunState` (та самая гонка).
+      Различаем по `mtime` файла: моложе `_ACTIVE_VERIFY_GRACE_SECONDS` —
+      трактуем как «только что зарезервировано конкурентом», активный;
+      старше — труп, игнорируем (нумерация `_next_verify_run_id` его
+      перешагнёт).
+
+    Терминальные потомки (`completed`/`merged_unverified`) не блокируют —
+    зелёный уже отловлен `_has_green_child` отдельной проверкой с другим
+    сообщением, провальный разрешает повторный verify.
+    """
+    pattern = re.compile(rf"^{re.escape(parent_run_id)}-v(\d+)$")
+    now = time.time()
+    for candidate_id in all_run_ids():
+        if not pattern.match(candidate_id):
+            continue
+        try:
+            state = load(candidate_id)
+        except (OSError, ValueError, TypeError, KeyError):
+            try:
+                mtime = (run_dir(candidate_id) / "run.json").stat().st_mtime
+            except OSError:
+                continue
+            if now - mtime < _ACTIVE_VERIFY_GRACE_SECONDS:
+                return candidate_id
+            continue
+        if state.status not in ("completed", "merged_unverified"):
+            return candidate_id
     return None
 
 
@@ -116,14 +205,27 @@ def start(
     run_id: str,
     ops: Ops,
     merge_authority: str | None = None,
+    author_backend: str = "codex",
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
-    WS-lock проверяется ДО резервирования `run_id` (круг 7): у неё нет
+    `merge_authority`/`author_backend` валидируются ПЕРВЫМИ, ДО
+    резервирования `run_id` (B2 follow-up приёмки B1, minor из #88 —
+    `author_backend` внесла заново Task 2, финальное ревью I-3): чистая
+    проверка входа без побочных эффектов, как и WS-lock ниже — невалидное
+    значение раньше навсегда резервировало `run_id` пустым `run.json`,
+    потому что `new_run()` (единственное место валидации до этой правки)
+    вызывался ПОСЛЕ `_reserve_run_id`. Через CLI `author_backend`
+    недостижимо (`choices=["codex", "disp"]`), но `start()` — публичный
+    API, и симметрия проверок здесь — инвариант.
+
+    WS-lock проверяется ДО резервирования `run_id` (круг 7): у неё тоже нет
     побочных эффектов, а `_reserve_run_id` создаёт файл — так отказ по
     WS-lock не оставляет пустой `run.json`-заглушку под несостоявшимся
     `run_id`.
     """
+    validate_merge_authority(merge_authority)
+    validate_author_backend(author_backend)
     blocker = _blocking_merged_unverified(ws_id)
     if blocker is not None:
         raise ValueError(
@@ -142,6 +244,7 @@ def start(
         profile=profile,
         run_id=run_id,
         merge_authority=merge_authority,
+        author_backend=author_backend,
     )
     save(state)
     return advance(state, ops)
@@ -279,13 +382,79 @@ def resume(run_id: str, ops: Ops) -> RunState:
     return advance(state, ops)
 
 
-def verify(parent_run_id: str, ops: Ops, run_id: str) -> RunState:
+def _next_verify_run_id(parent_run_id: str) -> str:
+    """Детерминированный `run_id` следующей verify-попытки (round 5,
+    codex-major — TOCTOU): `f"{parent_run_id}-v{attempt}"`.
+
+    Раньше id потомка был случайным (`os.urandom`), и `_has_green_child`
+    сам по себе не сериализовал конкурентные вызовы: два одновременных
+    `verify()` на одном родителе оба проходили проверку «нет зелёного
+    потомка» (ни один ещё не сохранён), получали РАЗНЫЕ случайные id и оба
+    успевали запустить параллельный S8 в одном `target_dir`. Детерминизм
+    чинит это через уже существующий атомарный резерв: конкурентные вызовы
+    без явного `run_id` вычисляют ОДИН И ТОТ ЖЕ id — `_reserve_run_id`
+    (`O_CREAT|O_EXCL`) пропускает ровно одного, остальные получают
+    `ValueError` вместо параллельного запуска.
+
+    `attempt` считается по ИМЕНАМ каталогов под `RUNS_ROOT`
+    (`all_run_ids()`, `^<parent>-v(\\d+)$`) — `max(N) + 1`, а не по числу
+    успешно ЗАГРУЖЕННЫХ `RunState` (round 6, codex-major): гибель между
+    `_reserve_run_id` и `save(child)` оставляет ПУСТОЙ
+    `<parent>-v<N>/run.json` (сам `_reserve_run_id` уже создал файл через
+    `touch`, `save()` его ещё не заполнил). Пустой файл не парсится
+    `json.loads` — подсчёт по `_load_all_runs()` (которая тихо пропускает
+    нечитаемые леджеры) видел бы то же число потомков навсегда, поэтому
+    каждый следующий `verify()` без `run_id` вычислял бы ТОТ ЖЕ `N`, а
+    `_reserve_run_id` навсегда отвечал бы «уже существует» на уже занятом
+    (хоть и оборванном) каталоге — постоянный deadlock на этом родителе.
+    Валидность JSON тут не важна: сам факт существования каталога с
+    подходящим именем уже занимает номер попытки, следующий `verify()`
+    обязан взять следующий за ним, не спорить с ним же.
+    """
+    pattern = re.compile(rf"^{re.escape(parent_run_id)}-v(\d+)$")
+    existing_attempts = [
+        int(match.group(1))
+        for run_id in all_run_ids()
+        if (match := pattern.match(run_id))
+    ]
+    attempt = max(existing_attempts, default=0) + 1
+    return f"{parent_run_id}-v{attempt}"
+
+
+def verify(
+    parent_run_id: str, ops: Ops, run_id: str | None = None
+) -> RunState:
     """Дочерний verification-run для `merged_unverified`-родителя (спека §5).
 
     Новый ``RunState`` с теми же координатами (repo/ws_id/target_dir/
     bundle_dir/profile/branch/pr/head), полем ``remediated_by`` на родителя и
     выполняет только S8. Успех фиксируется у ПОТОМКА (``completed``);
     родитель не трогается — он остаётся `merged_unverified` навсегда.
+
+    Отказывает, если у родителя уже есть ЗЕЛЁНЫЙ (``completed``) потомок
+    (round 3, codex-ревью): «уже верифицирован», повторный `verify()`
+    создавал бы ещё один verification-run поверх уже подтверждённого.
+    Провальный потомок не блокирует — повтор после него штатный.
+
+    Отказывает, если у родителя уже есть АКТИВНЫЙ (нетерминальный) потомок
+    (`_active_verify_child`, round 7): round 6 починил зависание счётчика
+    попыток на оборванной резервации, но тем самым переоткрыл гонку
+    round 5 — второй конкурентный `verify()` видел уже занятый каталог и
+    спокойно резервировал следующий номер, коллизии на `_reserve_run_id`
+    больше не было. Сериализация теперь держится на состоянии потомков (с
+    поправкой на mtime для трупов round 6), не на коллизии id — см.
+    докстринг `_active_verify_child`.
+
+    Все три проверки (`parent.status`, `_has_green_child`,
+    `_active_verify_child`) — ДО `_reserve_run_id`, тот же порядок, что у
+    `start()` (валидация без побочных эффектов перед резервированием id).
+
+    `run_id=None` (дефолт) выводит ДЕТЕРМИНИРОВАННЫЙ id через
+    `_next_verify_run_id` (round 5) — при отсутствии активного/зелёного
+    потомка резервирует его атомарным `_reserve_run_id`. Явный `run_id`
+    остаётся для CLI-совместимости (`--run-id`, теперь опционален) и
+    валидируется как раньше (`_reserve_run_id` → `run_dir()` →
+    `validate_id_component`).
     """
     parent = load(parent_run_id)
     if parent.status != "merged_unverified":
@@ -293,6 +462,18 @@ def verify(parent_run_id: str, ops: Ops, run_id: str) -> RunState:
             f"verify: parent-run {parent_run_id!r} не merged_unverified "
             f"(текущий статус {parent.status!r})"
         )
+    if _has_green_child(parent_run_id):
+        raise ValueError(
+            f"verify: parent-run {parent_run_id!r} уже верифицирован — "
+            "у него есть завершённый (completed) потомок"
+        )
+    active_child = _active_verify_child(parent_run_id)
+    if active_child is not None:
+        raise ValueError(
+            f"verify уже идёт: {active_child} (resume или дождитесь)"
+        )
+    if run_id is None:
+        run_id = _next_verify_run_id(parent_run_id)
     _reserve_run_id(run_id)
     child = new_run(
         subject=parent.subject,
@@ -304,6 +485,7 @@ def verify(parent_run_id: str, ops: Ops, run_id: str) -> RunState:
         profile=parent.profile,
         run_id=run_id,
         merge_authority=parent.merge_authority,
+        author_backend=parent.author_backend,
     )
     child.remediated_by = parent_run_id
     child.branch = parent.branch
@@ -435,6 +617,21 @@ def _step_branch(state: RunState, ops: Ops) -> bool:
     return True
 
 
+def _disp_behaviour_task(subject: str, bundle_path: str) -> str:
+    """Task-текст для `ops.author_disp` (behaviour-spec узел, B2 Task 2).
+
+    Требует DSL поведенческого узла (иначе `gate-candidate`, S4, не признаёт
+    узел валидным): заголовок `#### BEH-NN`, поле `traces:`, пункт
+    `- **checked_by**:`.
+    """
+    return (
+        f"subject={subject!r} bundle={bundle_path}\n"
+        "Author the behaviour-spec bundle node. Каждый пункт поведения — "
+        "заголовок `#### BEH-NN`, поле `traces:` и пункт "
+        "`- **checked_by**:`."
+    )
+
+
 def _step_authoring(state: RunState, ops: Ops) -> bool:
     """S2/S3: charter/requirements/behaviour-spec — файл есть → пропустить.
 
@@ -443,6 +640,15 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     document` до сходимости, как буквально описывает спека §5 S3/§2. Замена
     осознанная для этапа B1; `disp`-цикл и критерий сходимости — предмет B2
     (OQ-1, `docs/superpowers/specs/2026-08-30-behaviour-spec-pipeline-design.md`).
+
+    B2 Task 2: `state.author_backend == "disp"` переключает ТОЛЬКО
+    behaviour-spec узел на `ops.author_disp` (`disp run --mode develop`) —
+    спека §5 называет `disp --mode document`, такого режима у disp нет
+    (факт 2026-08-30), используем `run --mode develop`; выравнивание со
+    спекой — inbox-issue в disputatio (OQ-1). charter/requirements всегда
+    остаются на `ops.author` (codex) независимо от `author_backend` —
+    disp-цикл осмыслен для полируемого документа, не для одноразовых
+    артефактов.
     """
     for key, kind, filename in _AUTHOR_STEPS:
         if op_status(state, key) == "completed":
@@ -452,9 +658,14 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
             op_complete(state, key, skipped=True)
             continue
         _ensure_started(state, key)
-        exit_code = ops.author(
-            state.target_dir, kind, state.subject, state.bundle_dir
-        )
+        if kind == "behaviour-spec" and state.author_backend == "disp":
+            bundle_path = f"{state.bundle_dir}/{filename}"
+            task = _disp_behaviour_task(state.subject, bundle_path)
+            exit_code = ops.author_disp(state.target_dir, task)
+        else:
+            exit_code = ops.author(
+                state.target_dir, kind, state.subject, state.bundle_dir
+            )
         if exit_code != 0:
             state.status = "stopped_author"
             save(state)
@@ -609,9 +820,33 @@ def _step_review(state: RunState, ops: Ops) -> bool:
         op_complete(state, key, exit=exit_code)
         return True
     if exit_code == 1:
+        # Evidence-подсказка (B2 follow-up приёмки B1, спека §7): известный
+        # ложный класс находок «файлов нет» опровергается прямой проверкой
+        # `git cat-file -e <head>:<путь>` — до машинного типа находки в ките
+        # steward перегон такого false positive не автоматизирован, но
+        # подсказка сокращает ручной цикл проверки. Голова берётся живьём
+        # (`ops.head_sha`), а не из `state.head` — то поле заполняется только
+        # на S7 (`_step_merge`), на S6 оно ещё пусто.
+        #
+        # `head_sha` — единственный git-вызов на СТОП-пути (финальное ревью
+        # I-6): `RealOps.head_sha` зовёт `git rev-parse` с `check=True`, и
+        # если ветки нет локально/`target_dir` уехал, штатная остановка
+        # «ревью нашло находки» превращалась в необработанный
+        # `CalledProcessError` — комментарий не постился, `state.status`
+        # оставался `running` на диске, и `resume()` заходил с неверным
+        # состоянием. Подсказка чисто косметическая и не стоит того, чтобы
+        # ронять стоп — сбой глотается, литерал `<head>` вместо реальной sha.
+        try:
+            head = ops.head_sha(state.target_dir, state.branch)
+        except Exception:  # noqa: BLE001 — косметика не должна ронять стоп
+            head = "<head>"
         _stop_with_comment(
             state, ops, "stopped_review",
-            "ревью нашло находки, прогон остановлен",
+            "ревью нашло находки, прогон остановлен\n\n"
+            "Известный ложный класс находок «файлов нет» опровергается "
+            f"прямой проверкой `git cat-file -e {head}:<путь>`; "
+            "авто-перегон появится после машинного типа находки в ките "
+            "steward.",
         )
         return False
     if exit_code in (2, 3):
@@ -726,8 +961,23 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
     `remediation-issue`: `create_issue` раньше не имел собственного op'а,
     и гибель между вызовом `create_issue` (эффект состоялся) и фиксацией
     результата на resume приводила к дубль-issue (`op_start` пишется ДО
-    эффекта; `started` при входе → реконсиляция через `ops.find_issue` по
-    `slug:`-префиксу вместо слепого повторного `create_issue`).
+    эффекта). Реконсиляция через `ops.find_issue` по `slug:`-префиксу
+    выполняется БЕЗУСЛОВНО перед `create_issue` (codex-ревью, round 3), не
+    только когда у ЭТОГО прогона op уже `started`.
+
+    Slug строится от ЦИКЛА (`beh-remediation-<cycle_id>`,
+    `cycle_id = state.remediated_by or state.run_id`), не от `ws_id`
+    (codex-major, round 4): раньше общий `ws_id`-slug означал, что НЕЗАВИСИМЫЙ
+    провал того же `ws_id` (новый родитель, новый цикл — например ПОСЛЕ того,
+    как предыдущий цикл был зелёно верифицирован и его issue закрыт)
+    реконсилировался на СТАРЫЙ issue по общему `ws_id` — свежие findings
+    молча терялись под чужим (обычно уже закрытым) issue. `cycle_id` — это
+    сам `merged_unverified`-родитель: у родителя `remediated_by` ещё `None`
+    (первый провал цикла) → `cycle_id = run_id` собственный; у его
+    verify-потомков `remediated_by` указывает на того же родителя →
+    `cycle_id` совпадает, и родитель с ЛЮБЫМ числом потомков делят ОДИН
+    issue. `run_id` уже несёт `ws_id`-префикс (`<ws_id>-...`) — уникальность
+    и читаемость slug'а сохраняются без явного `ws_id` в нём.
 
     Перед самим `gate_check_s8` — `sync-default` (круг 5, codex-ревью
     PR #88): `target_dir` без явного чекаута мог стоять на feature-ветке
@@ -788,26 +1038,26 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
         findings = _s8_findings_text(exit_code, output)
         findings_path.write_text(findings, encoding="utf-8")
 
+    # cycle_id — идентичность remediation-цикла (round 4): сам
+    # merged_unverified-родитель, не ws_id (см. докстринг выше).
+    cycle_id = state.remediated_by or state.run_id
     issue_title = f"beh-remediation: {state.subject} ({state.ws_id})"
-    body_prefix = f"slug: beh-remediation-{state.ws_id}"
+    body_prefix = f"slug: beh-remediation-{cycle_id}"
     issue_body = f"{body_prefix}\nfrom: devtools#{state.run_id}\n\n{findings}"
 
     issue_key = "remediation-issue"
     issue_status = op_status(state, issue_key)
     if issue_status != "completed":
-        if issue_status == "started":
-            try:
-                existing = ops.find_issue(state.repo_slug, body_prefix)
-            except RuntimeError as exc:
-                print(f"_step_s8: реконсиляция find_issue не удалась: {exc}")
-                return False
-            if existing is not None:
-                op_complete(state, issue_key, number=existing)
-            else:
-                number = ops.create_issue(state.repo_slug, issue_title, issue_body)
-                op_complete(state, issue_key, number=number)
-        else:
+        if issue_status != "started":
             op_start(state, issue_key)
+        try:
+            existing = ops.find_issue(state.repo_slug, body_prefix)
+        except RuntimeError as exc:
+            print(f"_step_s8: реконсиляция find_issue не удалась: {exc}")
+            return False
+        if existing is not None:
+            op_complete(state, issue_key, number=existing)
+        else:
             number = ops.create_issue(state.repo_slug, issue_title, issue_body)
             op_complete(state, issue_key, number=number)
 
@@ -862,6 +1112,9 @@ def main(argv: list[str] | None = None) -> int:
     start_p.add_argument("--profile", default="profiles/team-exp.yaml")
     start_p.add_argument("--merge-authority", default=None, choices=["human"])
     start_p.add_argument(
+        "--author-backend", default="codex", choices=["codex", "disp"],
+    )
+    start_p.add_argument(
         "--run-id", default=None, help="дефолт <ws-id>-<3 случайных байта hex>"
     )
 
@@ -872,7 +1125,11 @@ def main(argv: list[str] | None = None) -> int:
         "verify", help="verification-run для merged_unverified родителя"
     )
     verify_p.add_argument("--parent", required=True, help="run_id родителя")
-    verify_p.add_argument("--run-id", required=True, help="run_id потомка")
+    verify_p.add_argument(
+        "--run-id", default=None,
+        help="run_id потомка; по умолчанию детерминированный "
+        "<parent>-v<N> (round 5) — сериализует конкурентные verify",
+    )
 
     status_p = sub.add_parser("status", help="человекочитаемый дамп run.json")
     status_p.add_argument("--run-id", required=True)
@@ -904,6 +1161,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=run_id,
             ops=ops,
             merge_authority=args.merge_authority,
+            author_backend=args.author_backend,
         )
     elif args.command == "resume":
         state = resume(args.run_id, ops)

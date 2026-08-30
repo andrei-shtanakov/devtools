@@ -258,6 +258,35 @@ def test_author_command_and_prompt_contains_fields(monkeypatch):
     assert call.kwargs["cwd"] == "/tmp/devtools"
 
 
+# --- B2 Task 2: author_disp — opt-in бэкенд disp (спека §5, OQ-1) ----------
+
+
+def test_author_disp_command_and_project_path(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+
+    result = ops.author_disp("/tmp/devtools", "subject='x' bundle=spec/15.md")
+
+    assert result == 0
+    call = calls[0]
+    expected_project = str(ops_mod.DEVTOOLS_ROOT.parent / "disputatio")
+    assert call.argv == [
+        "uv", "run", "--project", expected_project,
+        "disp", "run", "--mode", "develop",
+        "--root", "/tmp/devtools", "subject='x' bundle=spec/15.md",
+    ]
+    assert call.kwargs["cwd"] == "/tmp/devtools"
+
+
+def test_author_disp_returncode_passthrough(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=2)
+    ops = RealOps()
+
+    result = ops.author_disp("/tmp/devtools", "task")
+
+    assert result == 2
+
+
 # --- Кейс 6: unresolved_threads -------------------------------------------
 
 

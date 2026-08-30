@@ -22,12 +22,17 @@ steward = { git = "https://github.com/andrei-shtanakov/steward", rev = "4a1c7c44
 [dependency-groups]
 dev = ["pytest>=8"]
 # Только для governance-контура (спека §3/§4): steward — content-check API S4,
-# textual понадобится console.py этапа B. Обычные devtools-команды группу не тянут.
-# Пин — единственно в [tool.uv.sources] (паттерн plan-fields ниже): bump'ить
+# textual — behaviour console (Task 4, интерактивная TUI-ветка). Оба импортируются
+# лениво внутри console.py (textual — в _build_app; console_model, который тянет
+# steward транзитивно через bundle_state.py, — в _bundle_summary_for/main): сам
+# `import governance.console` и --json/non-TTY plain-путь работают без группы;
+# пути, которым реально нужен list_runs()/bundle_summary(), без steward
+# недоступны и скипаются тестами (см. task-4-report.md).
+# Пин steward — единственно в [tool.uv.sources] (паттерн plan-fields ниже): bump'ить
 # rev тут значило бы держать его в двух местах, а bump — аудируемый механизм
 # включения автономной ветки (§6, §12 п.7), правка одного из двух мест либо
 # уронит резолв, либо тихо выберет одну сторону (финальное ревью M-1).
-governance = ["steward"]
+governance = ["steward", "textual>=1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -24,7 +24,7 @@ Workspace-тулинг экосистемы AI-оркестраторов. Жи�
 | `discover_models.py` | discovery моделей провайдеров (ADR-ECO-003a): отчёт + Plane-1 TOML для PR |
 | `gen_agents_toml.py` | генерация секций agents.toml из benchmark_runs (arbiter.db) |
 | `discovery/` | offline-манифесты observed-моделей |
-| `governance/` | ядро конвейера behaviour-spec (этап A): пин steward + characterization, merge_gate (оси ADR-ECO-011 × safety steward), prospective stale-адаптер, bundle_state; runner/TUI — этап B. Спека: docs/superpowers/specs/2026-08-30-behaviour-spec-pipeline-design.md. Тесты: `uv run --frozen --group governance pytest tests/test_governance_*.py` |
+| `governance/` | конвейер behaviour-spec: этап A — пин steward + characterization, merge_gate (оси ADR-ECO-011 × safety steward), prospective stale-адаптер, bundle_state; этап B — `runner.py` (шаговая машина S0–S8), `console_model.py` (read-only view-model), `console.py` (behaviour console TUI, см. ниже). Спека: docs/superpowers/specs/2026-08-30-behaviour-spec-pipeline-design.md. Тесты: `uv run --frozen --group governance pytest tests/test_governance_*.py` |
 | `all-orchestrators.code-workspace` | VSCode workspace |
 
 ## Быстрый старт
@@ -158,12 +158,59 @@ make behaviour-run ARGS="status --run-id WS-1-a1b2c3"
 целевого репо, под `devtools/out/governance-runs/<run-id>/run.json`
 (write-ahead журнал, спека §4) — не коммитятся, не публикуются.
 
+`--author-backend codex|disp` (дефолт `codex`) выбирает, чем авторится
+behaviour-spec узел: `codex` (дефолт, `ops.author`) или `disp` (opt-in,
+`ops.author_disp`, полируемый документ) — единственная точка входа в
+disp-цикл. charter/requirements авторятся `codex` независимо от значения;
+переключение затрагивает только behaviour-spec (B2 Task 2).
+
 Сегодня S7 (merge_gate) у любого прогона уходит в `waiting_human_merge`: по
 данным вендоренной копии steward-политики (`contracts/steward-actor-policy/v1/`)
 `agent_merge_allowed=false`, а `ai-prosto` не входит в `agent_identities` —
 это факт политики, не баг раннера. Включение агентского мержа — решение
 steward-а (правка политики + bump пина вендоренной копии в этом репо), не
 правка `runner.py`.
+
+### Behaviour console (TUI)
+
+`make behaviour-console` запускает `governance/console.py` — read-only TUI
+поверх готовых run-журналов из `devtools/out/governance-runs/`
+(`governance.console_model`, Task 3): сам модуль не пишет `run.json` и не
+запускает пайплайн.
+
+Клавиши: `enter` — открыть деталь выбранного прогона отдельным экраном
+(ops-журнал, findings, verdict reason, срез бандла; `q`/`escape` — назад);
+`r` — resume выбранного прогона; `v` — verify (только для ряда в статусе
+`merged_unverified` — на любом другом статусная строка объясняет отказ,
+TUI не падает); `q` — выход из консоли.
+
+**Без TUI:** non-TTY (stdin/stdout не терминал — CI, pipe) без `--json`
+даёт обычную plain-таблицу; `--json` печатает список прогонов JSON'ом на
+ЛЮБОМ терминале (TTY или нет); `--run-id <id>` печатает деталь одного
+прогона (`detail_to_json(run_detail(<id>))`) и тоже не запускает TUI:
+
+```bash
+make behaviour-console ARGS="--json"          # все прогоны JSON
+make behaviour-console ARGS="--run-id <id>"   # деталь одного прогона
+```
+
+`textual` — тяжёлая опциональная зависимость (uv-группа `governance`),
+импортируется лениво только внутри интерактивной TUI-ветки — обе ветки
+выше работают и без установленного `textual`.
+
+**Tmux-интеграция:** `r`/`v` НЕ безэффектны — они поднимают `make
+behaviour-run` в отдельной фоновой tmux-сессии (`tmux new-session -d`):
+`r` — сессию `beh-<run_id>`, `v` — `beh-verify-<parent_run_id>` (имя от
+РОДИТЕЛЯ, не от свежесгенерированного id потомка — иначе повторное
+нажатие `v` на том же ряду поднимало бы вторую сессию и создавало второй
+remediation-issue у уже помеченного родителя). Повторный вызов на уже
+запущенную цель находит существующую сессию (точный `=`-таргет, не
+префиксный матч) и подсказывает `tmux attach -t =<session>` вместо нового
+запуска. Сессия самозакрывается сразу после `make behaviour-run` (Enter —
+закрыть немедленно, автоматически — не позже чем через 60с простоя): она
+не висит вечно, поэтому дедуп по имени защищает только РЕАЛЬНО идущий
+прогон, а не любой когда-либо запущенный — повторное `r`/`v` после
+завершения прогона поднимает новую сессию, а не только даёт attach.
 
 ## Fleet-агент
 
