@@ -547,6 +547,40 @@ def test_cli_status_prints_run_state(
     assert "branch: completed" in out
 
 
+def test_cli_start_rejects_traversal_ws_id_before_default_run_id(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Круг 12 (codex-major): CLI `start` без `--run-id` строит дефолтный
+    `run_id` из `--ws-id` — грязный `ws_id` (`../`) обязан отказать ДО
+    генерации/резервирования, а не протащить traversal в автосгенерированный
+    `run_id`."""
+    with pytest.raises(ValueError):
+        runner.main([
+            "start",
+            "--subject", "s",
+            "--repo", "alpha",
+            "--repo-slug", "owner/alpha",
+            "--ws-id", "../../escape",
+            "--target-dir", str(tmp_path),
+        ])
+    assert not runs_root.exists()  # ничего не зарезервировано/создано
+
+
+def test_start_rejects_explicit_traversal_run_id(tmp_path: Path, runs_root) -> None:
+    """Круг 12: `start()` с явным `--run-id` вне разрешённого алфавита —
+    отказ через `run_dir()` (единая точка валидации, `_reserve_run_id`)."""
+    target_dir = tmp_path / "target-traversal"
+    target_dir.mkdir()
+    kwargs = dict(
+        subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+        target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id="../../outside",
+        ops=FakeOps(),
+    )
+    with pytest.raises(ValueError):
+        runner.start(**kwargs)
+
+
 # --- F-1/M-1: resume из stopped_* — reconciliation, не no-op ---------------
 
 

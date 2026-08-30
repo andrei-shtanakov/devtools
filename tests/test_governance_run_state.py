@@ -62,3 +62,28 @@ def test_run_override_only_tightens(runs_root) -> None:
         rs.new_run(subject="s", repo="a", repo_slug="o/a", ws_id="w",
                    target_dir="/t", bundle_dir="b", profile="p",
                    run_id="r-2", merge_authority="agent")
+
+
+# --- Круг 12: run_id — одно-компонентная валидация, без traversal ----------
+
+
+@pytest.mark.parametrize(
+    "bad_run_id", ["../../x", "/abs", "a/b", "..", "", ".hidden"],
+)
+def test_run_dir_rejects_path_traversal_and_absolute(
+    runs_root, bad_run_id: str,
+) -> None:
+    """Круг 12 (codex-major): без валидации `--run-id ../../outside` или
+    абсолютный путь писал `run.json` ВНЕ `RUNS_ROOT`."""
+    with pytest.raises(ValueError):
+        rs.run_dir(bad_run_id)
+
+
+def test_run_dir_accepts_normal_run_id(runs_root) -> None:
+    assert rs.run_dir("WS-1-abc123") == runs_root / "WS-1-abc123"
+
+
+def test_validate_id_component_accepts_and_rejects(runs_root) -> None:
+    rs.validate_id_component("WS-1-abc123")  # не поднимает
+    with pytest.raises(ValueError, match="ws_id"):
+        rs.validate_id_component("../escape", label="ws_id")

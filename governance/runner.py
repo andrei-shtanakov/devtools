@@ -36,6 +36,7 @@ from governance.run_state import (
     op_status,
     run_dir,
     save,
+    validate_id_component,
 )
 
 _ROLLUP_GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -885,6 +886,12 @@ def main(argv: list[str] | None = None) -> int:
     ops = RealOps()
     if args.command == "start":
         bundle_dir = args.bundle_dir or f"workstreams/{args.ws_id}/spec"
+        # Дефолтный run_id строится из ws_id — валидируем ws_id ДО генерации
+        # (круг 12): битый ws_id иначе протащил бы `../`/`/` дальше в
+        # автосгенерированный run_id (там его тоже поймает `run_dir()`, но
+        # с менее внятным сообщением об ошибке).
+        if args.run_id is None:
+            validate_id_component(args.ws_id, label="ws_id")
         run_id = args.run_id or f"{args.ws_id}-{os.urandom(3).hex()}"
         state = start(
             subject=args.subject,

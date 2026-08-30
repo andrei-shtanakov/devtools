@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -29,6 +30,27 @@ from pathlib import Path
 RUNS_ROOT = Path(__file__).resolve().parent.parent / "out" / "governance-runs"
 
 _ALLOWED_MERGE_AUTHORITY = (None, "human")
+
+# Одно-компонентное имя: буквы/цифры/`.`/`_`/`-`, первый символ — буква или
+# цифра (без ведущей точки), непустое. Ни `/`, ни `..` пройти не могут — `..`
+# начинается с `.`, что уже не в первом классе (финальное ревью, круг 12,
+# codex-major).
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def validate_id_component(value: str, *, label: str = "run_id") -> None:
+    """Проверяет, что `value` — безопасное одно-компонентное имя каталога.
+
+    Единая точка валидации для `run_id` (через `run_dir()`, круг 12) и для
+    `ws_id` там, где он идёт в построение дефолтного `run_id` до генерации
+    (CLI `start`, `runner.main`) — без неё `--run-id ../../outside` или
+    абсолютный путь писал `run.json` ВНЕ `RUNS_ROOT`.
+    """
+    if not _RUN_ID_RE.match(value):
+        raise ValueError(
+            f"{label} {value!r} невалиден: разрешены [A-Za-z0-9._-], без "
+            "ведущей точки, без '/', непустой"
+        )
 
 
 @dataclass
@@ -93,7 +115,13 @@ def new_run(
 
 
 def run_dir(run_id: str) -> Path:
-    """Каталог прогона под `RUNS_ROOT`."""
+    """Каталог прогона под `RUNS_ROOT`.
+
+    Валидирует `run_id` (круг 12): единственная точка резолва пути run'а —
+    покрывает `save`/`load`/`_reserve_run_id` разом, то есть start/resume/
+    verify/status все проходят через неё.
+    """
+    validate_id_component(run_id, label="run_id")
     return RUNS_ROOT / run_id
 
 
