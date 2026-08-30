@@ -17,12 +17,14 @@ PR человеку (`waiting_human_merge`), S8 не запускается са
 
 from __future__ import annotations
 
+import argparse
+import os
 from pathlib import Path
 from typing import Any
 
 from governance.bundle_state import candidate_state
 from governance.merge_gate import PrFacts, decide
-from governance.ops import Ops
+from governance.ops import Ops, RealOps
 from governance.policy_sources import build_authority, load_safety
 from governance.run_state import (
     RunState,
@@ -464,3 +466,93 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
     state.status = "merged_unverified"
     save(state)
     return False
+
+
+def _print_status(state: RunState) -> None:
+    """Человекочитаемый дамп `RunState` для `start`/`resume`/`verify`/`status`."""
+    print(f"run_id:        {state.run_id}")
+    print(f"status:        {state.status}")
+    print(f"subject:       {state.subject}")
+    print(f"repo:          {state.repo} ({state.repo_slug})")
+    print(f"ws_id:         {state.ws_id}")
+    print(f"branch:        {state.branch or '-'}")
+    print(f"pr:            {state.pr if state.pr is not None else '-'}")
+    if state.remediated_by:
+        print(f"remediated_by: {state.remediated_by}")
+    print("ops:")
+    for key in sorted(state.ops):
+        op = state.ops[key]
+        details = ", ".join(f"{k}={v}" for k, v in op.items() if k != "status")
+        suffix = f" ({details})" if details else ""
+        print(f"  {key}: {op['status']}{suffix}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: `python -m governance.runner start|resume|verify|status ...`.
+
+    Все команды, кроме `status` (только читает `run.json`), строят `RealOps` —
+    единственную точку внешних эффектов (git/gh/codex/gate-check, спека §5/§8).
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    start_p = sub.add_parser("start", help="новый прогон, сразу advance() (S0..)")
+    start_p.add_argument("--subject", required=True)
+    start_p.add_argument("--repo", required=True)
+    start_p.add_argument("--repo-slug", required=True)
+    start_p.add_argument("--ws-id", required=True)
+    start_p.add_argument("--target-dir", required=True)
+    start_p.add_argument(
+        "--bundle-dir", default=None, help="дефолт workstreams/<ws-id>/spec"
+    )
+    start_p.add_argument("--profile", default="profiles/team-exp.yaml")
+    start_p.add_argument("--merge-authority", default=None, choices=["human"])
+    start_p.add_argument(
+        "--run-id", default=None, help="дефолт <ws-id>-<3 случайных байта hex>"
+    )
+
+    resume_p = sub.add_parser("resume", help="подхватить сохранённый прогон")
+    resume_p.add_argument("--run-id", required=True)
+
+    verify_p = sub.add_parser(
+        "verify", help="verification-run для merged_unverified родителя"
+    )
+    verify_p.add_argument("--parent", required=True, help="run_id родителя")
+    verify_p.add_argument("--run-id", required=True, help="run_id потомка")
+
+    status_p = sub.add_parser("status", help="человекочитаемый дамп run.json")
+    status_p.add_argument("--run-id", required=True)
+
+    args = parser.parse_args(argv)
+
+    if args.command == "status":
+        _print_status(load(args.run_id))
+        return 0
+
+    ops = RealOps()
+    if args.command == "start":
+        bundle_dir = args.bundle_dir or f"workstreams/{args.ws_id}/spec"
+        run_id = args.run_id or f"{args.ws_id}-{os.urandom(3).hex()}"
+        state = start(
+            subject=args.subject,
+            repo=args.repo,
+            repo_slug=args.repo_slug,
+            ws_id=args.ws_id,
+            target_dir=args.target_dir,
+            bundle_dir=bundle_dir,
+            profile=args.profile,
+            run_id=run_id,
+            ops=ops,
+            merge_authority=args.merge_authority,
+        )
+    elif args.command == "resume":
+        state = resume(args.run_id, ops)
+    else:
+        state = verify(args.parent, ops, args.run_id)
+
+    _print_status(state)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

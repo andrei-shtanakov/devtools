@@ -560,4 +560,4 @@
 ## Behaviour-spec pipeline
 
 - [x] Governance-ядро (этап A): пин steward + characterization, merge_gate, stale-адаптер, bundle_state @owner:github:andrei-shtanakov @id:behaviour-governance-core — спека docs/superpowers/specs/2026-08-30-behaviour-spec-pipeline-design.md (v4, GO); PR #87
-- [ ] Runner + console (этап B): S0–S8, waiting_human_merge/merged_unverified, textual-TUI @owner:github:andrei-shtanakov @id:behaviour-runner @blocked_by:todo://devtools/behaviour-governance-core — план пишется после мержа этапа A (characterization может сдвинуть дизайн)
+- [ ] Runner + console (этап B): S0–S8, waiting_human_merge/merged_unverified, textual-TUI @owner:github:andrei-shtanakov @id:behaviour-runner @blocked_by:todo://devtools/behaviour-governance-core — план пишется после мержа этапа A (characterization может сдвинуть дизайн); B1 (runner) — этот PR; B2 (console) — следующий

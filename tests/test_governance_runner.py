@@ -8,6 +8,8 @@ from typing import Any
 
 import pytest
 
+pytest.importorskip("steward")
+
 from governance import bundle_state, merge_gate, runner
 from governance import run_state as rs
 
@@ -398,3 +400,32 @@ def test_resume_waiting_human_merge_merged_runs_s8(
     assert result.ops["merge"] == {"status": "completed", "merged": True}
     assert result.status == "completed"
     assert result.ops["gate-authoritative"]["status"] == "completed"
+
+
+def test_cli_status_prints_run_state(
+    tmp_path: Path, runs_root, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`python -m governance.runner status --run-id …` — argparse-проводка жива.
+
+    Только `load()` из диска (fixture `runs_root` → `rs.RUNS_ROOT`), без Ops и
+    без внешних вызовов — `status` не строит `RealOps`.
+    """
+    run_id = "r-cli-status"
+    state = rs.new_run(
+        subject="тестовый функционал", repo="alpha", repo_slug="owner/alpha",
+        ws_id="WS-1", target_dir=str(tmp_path / "target-cli"),
+        bundle_dir=BUNDLE_DIR, profile="profiles/team-exp.yaml", run_id=run_id,
+    )
+    state.branch = "spec/WS-1-behaviour"
+    state.pr = 7
+    state.ops = {"branch": {"status": "completed"}}
+    rs.save(state)
+
+    exit_code = runner.main(["status", "--run-id", run_id])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert f"run_id:        {run_id}" in out
+    assert "status:        running" in out
+    assert "pr:            7" in out
+    assert "branch: completed" in out

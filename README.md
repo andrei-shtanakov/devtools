@@ -137,6 +137,34 @@ waiting-by-blocker | stale-condition | malformed-condition`. `plan-check`
 Owner grammar не копируется в devtools: даже для строк без `@id` используется
 публичный `plan_fields.parse_owner()` из immutable pin.
 
+## Behaviour runner (governance)
+
+`governance/runner.py` — шаговая машина S0–S8 конвейера behaviour-spec (этап B,
+этап A — governance-ядро выше в таблице). CLI-обвязка строит `RealOps`
+(единственная точка внешних эффектов: git/gh/codex/gate-check) и печатает
+человекочитаемый дамп `RunState` после каждой команды:
+
+```bash
+make behaviour-run ARGS="start --subject '...' --repo alpha --repo-slug owner/alpha \
+    --ws-id WS-1 --target-dir /path/to/alpha"
+make behaviour-run ARGS="resume --run-id WS-1-a1b2c3"
+make behaviour-run ARGS="verify --parent WS-1-a1b2c3 --run-id WS-1-a1b2c3-fix"
+make behaviour-run ARGS="status --run-id WS-1-a1b2c3"
+# = uv run --frozen --group governance python -m governance.runner ...
+```
+
+`--bundle-dir` по умолчанию `workstreams/<ws-id>/spec`, `--run-id` по
+умолчанию `<ws-id>-<3 случайных байта hex>`. Прогоны живут вне worktree
+целевого репо, под `devtools/out/governance-runs/<run-id>/run.json`
+(write-ahead журнал, спека §4) — не коммитятся, не публикуются.
+
+Сегодня S7 (merge_gate) у любого прогона уходит в `waiting_human_merge`: по
+данным вендоренной копии steward-политики (`contracts/steward-actor-policy/v1/`)
+`agent_merge_allowed=false`, а `ai-prosto` не входит в `agent_identities` —
+это факт политики, не баг раннера. Включение агентского мержа — решение
+steward-а (правка политики + bump пина вендоренной копии в этом репо), не
+правка `runner.py`.
+
 ## Fleet-агент
 
 Этот репо — дом fleet-агента (наблюдает состояние флота репо и действует
