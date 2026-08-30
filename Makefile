@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run
 
 help:
 	@echo "Цели:"
@@ -45,6 +45,7 @@ help:
 	@echo "  make release-drift — набор из манифеста зонтика ↔ факт на диске"
 	@echo "  make arch-freshness       — локальная диагностика drift/freshness арх-evidence (вахта — CI steward)"
 	@echo "  make arch-freshness-read  — читатель локального статуса: просрочка ⇒ unknown (exit 2)"
+	@echo "  make behaviour-run ARGS=… — governance runner CLI: start|resume|verify|status (uv + группа governance)"
 
 status:      ; @./repos.sh status
 fetch:       ; @./repos.sh fetch
@@ -78,3 +79,5 @@ install: ; @./repos.sh install --manifest $(MANIFEST)
 # независимый читатель свежести runs — robin-runtime#42).
 arch-freshness:      ; @python3 ./check-arch-evidence-freshness.py --workspace ..
 arch-freshness-read: ; @python3 ./check-arch-evidence-freshness.py --read
+
+behaviour-run: ; @uv run --frozen --group governance python -m governance.runner $(ARGS)
