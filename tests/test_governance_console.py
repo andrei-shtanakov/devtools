@@ -216,3 +216,51 @@ def test_launch_verify_builds_parent_and_run_id_args(
         "make behaviour-run ARGS='verify --parent r-0001 --run-id r-0001-v2'; "
         "exec $SHELL"
     )
+
+
+# --- verify_plan: parent = выбранный merged_unverified ряд, свежий child --
+
+
+def _row(status: str, run_id: str = "r-0001") -> "cm.RunRow":
+    # `remediated_by` у `merged_unverified`-родителя всегда `None` (это
+    # поле потомка, указывающее на родителя) — фикс-ревью бага, где
+    # action_verify_selected путал их местами.
+    return cm.RunRow(
+        run_id=run_id, ws_id="WS-T1", repo="alpha", status=status,
+        step="—", pr=None, remediated_by=None,
+    )
+
+
+@requires_console_model
+def test_verify_plan_merged_unverified_returns_parent_and_new_child() -> None:
+    row = _row("merged_unverified", run_id="r-0001")
+    plan = console.verify_plan(row)
+    assert not isinstance(plan, str)
+    parent_run_id, child_run_id = plan
+    assert parent_run_id == "r-0001"
+    assert child_run_id != "r-0001"
+    assert child_run_id.startswith("r-0001-v")
+    rs.validate_id_component(child_run_id)  # не кидает -> валидный run_id
+
+
+@requires_console_model
+@pytest.mark.parametrize(
+    "status", ["running", "waiting_human_merge", "stopped_author", "corrupt"]
+)
+def test_verify_plan_rejects_non_merged_unverified(status: str) -> None:
+    row = _row(status, run_id="r-0002")
+    plan = console.verify_plan(row)
+    assert isinstance(plan, str)
+    assert "r-0002" in plan
+    assert "merged_unverified" in plan
+
+
+@requires_console_model
+def test_verify_plan_generates_distinct_child_ids_on_repeat_calls() -> None:
+    row = _row("merged_unverified", run_id="r-0003")
+    first = console.verify_plan(row)
+    second = console.verify_plan(row)
+    assert not isinstance(first, str)
+    assert not isinstance(second, str)
+    assert first[0] == second[0] == "r-0003"
+    assert first[1] != second[1]

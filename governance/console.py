@@ -14,6 +14,7 @@ plain-путь обязаны работать и без установленн�
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import subprocess
 import sys
@@ -74,6 +75,23 @@ def launch_verify(
     return _tmux_launch(
         session, root, f"verify --parent {parent_run_id} --run-id {run_id}"
     )
+
+
+def verify_plan(row: cm.RunRow) -> tuple[str, str] | str:
+    """`(parent_run_id, новый child run_id)` для verify выбранного ряда.
+
+    Семантика `runner.verify(parent_run_id, ops, run_id)` (спека §5): parent
+    — сам `merged_unverified`-прогон (`remediated_by` у родителя всегда
+    `None` — это поле потомка, указывающее на родителя, не наоборот; брать
+    `row.remediated_by` как parent значило бы искать родителя у родителя),
+    `run_id` — НОВЫЙ id ребёнка, который создаёт verify (`_reserve_run_id`
+    внутри `verify()` требует ещё не занятый id). Любой статус, кроме
+    `merged_unverified`, -> строка-ошибка, не молчаливый отказ.
+    """
+    if row.status != "merged_unverified":
+        return f"verify: run {row.run_id} не в merged_unverified"
+    child = f"{row.run_id}-v{os.urandom(2).hex()}"
+    return row.run_id, child
 
 
 def _bundle_summary_for(run_id: str) -> tuple[tuple[str, str], ...]:
@@ -210,12 +228,17 @@ def _build_app(rows: tuple[cm.RunRow, ...], root: Path):
             if run_id is None:
                 return
             row = next((r for r in self._rows if r.run_id == run_id), None)
-            parent = row.remediated_by if row is not None else None
-            if not parent:
-                self._set_status("verify: run has no remediated_by parent")
+            if row is None:
                 return
+            plan = verify_plan(row)
+            if isinstance(plan, str):
+                self._set_status(plan)
+                return
+            parent_run_id, child_run_id = plan
             try:
-                self._set_status(launch_verify(parent, run_id, self._root))
+                self._set_status(
+                    launch_verify(parent_run_id, child_run_id, self._root)
+                )
             except RuntimeError as exc:
                 self._set_status(f"error: {exc}")
 
