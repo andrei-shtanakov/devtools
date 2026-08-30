@@ -26,6 +26,11 @@ git-facts — регрессия закреплена тестом. Authoritativ
   (гейты по нему физически не могли отработать, потому что ни один его
   upstream-артефакт не присутствует в бандле) или ``"delegated"`` (узел
   живёт вне бандла по профилю — не считать ни absent, ни ошибкой).
+
+Объявленное профилем upstream-ребро без пина в ``upstream_hashes`` — тоже
+блокирующая находка (``GC-UNPINNED(prospective)``), а не тихий пропуск: спека
+требует пины в том же PR, так что их отсутствие на S4 читается как нарушение,
+не как «неизвестность = успех» (замена рулинга I-3 п.3, codex-ревью PR #87).
 """
 
 from __future__ import annotations
@@ -84,6 +89,22 @@ def candidate_state(profile_path: Path, bundle_dir: Path) -> BundleState:
 
     present = {a.node_id for a in artifacts if a.node_id is not None}
     profile_node_ids = set(graph.nodes)
+
+    # Объявленное профилем upstream-ребро без пина — блокирующее нарушение,
+    # не неизвестность-как-успех (codex-ревью PR #87, замена рулинга I-3 п.3):
+    # спека требует пины в том же PR, `check_stale` их отсутствие не видит
+    # вовсе (цикл идёт по тому, что ЗАПИНЕНО, не по тому, что ОБЯЗАНО быть
+    # запинено). Ловим здесь, где граф профиля уже есть.
+    for artifact in artifacts:
+        if artifact.node_id is None:
+            continue
+        pinned_upstreams = dict(artifact.meta.upstream_hashes)
+        for upstream in graph.nodes[artifact.node_id].upstream:
+            if upstream in present and upstream not in pinned_upstreams:
+                per_node.setdefault(artifact.node_id, []).append(
+                    f"error GC-UNPINNED(prospective): {artifact.node_id} — "
+                    f"объявленное ребро {upstream} без пина upstream_hashes"
+                )
 
     nodes: list[NodeState] = []
     required_absent: list[str] = []

@@ -13,6 +13,7 @@ from tests.governance_fixtures.bundles import (
     BEHAVIOUR_NO_UPSTREAM_MD,
     REQUIREMENTS_MD,
     make_bundle,
+    make_bundle_with_behaviour,
     make_profile,
 )
 
@@ -79,6 +80,33 @@ def test_upstream_absent_marks_blocked(tmp_path: Path) -> None:
     assert any("GC-UPSTREAM-ABSENT" in f for f in beh.findings)
     assert state.error_count > 0
     assert state.required_absent == ("requirements",)
+
+
+def test_unpinned_upstream_edge_is_draft(tmp_path: Path) -> None:
+    """requirements И behaviour-spec оба присутствуют в бандле, но у
+    behaviour-spec нет upstream_hashes вообще — объявленное профилем ребро
+    requirements->behaviour-spec без пина. Спека требует пины в том же PR:
+    их отсутствие — блокирующее нарушение, не неизвестность-как-успех
+    (замена рулинга I-3 п.3 после codex-ревью PR #87)."""
+    profile = make_profile(tmp_path)
+    bundle = make_bundle_with_behaviour(tmp_path, BEHAVIOUR_NO_UPSTREAM_MD)
+    state = candidate_state(profile, bundle)
+    beh = next(n for n in state.nodes if n.node_id == "behaviour-spec")
+    assert beh.status == "draft"
+    assert any("GC-UNPINNED" in f for f in beh.findings)
+    assert state.error_count > 0
+
+
+def test_pinned_upstream_edge_stays_clean(tmp_path: Path) -> None:
+    """Регрессия: хороший бандл (пин на месте) не должен получить
+    GC-UNPINNED — иначе правка накрыла бы и корректный случай."""
+    profile = make_profile(tmp_path)
+    bundle = make_bundle(tmp_path, behaviour_ok=True)
+    state = candidate_state(profile, bundle)
+    beh = next(n for n in state.nodes if n.node_id == "behaviour-spec")
+    assert beh.status == "candidate_valid"
+    assert not any("GC-UNPINNED" in f for f in beh.findings)
+    assert state.error_count == 0
 
 
 def test_empty_bundle_dir_is_not_clean(tmp_path: Path) -> None:
