@@ -76,9 +76,16 @@ def classify(title: str, body: str, labels: tuple[str, ...]) -> str:
     """Conservative deterministic classification; ambiguity stays unknown."""
     label_text = " ".join(labels).lower()
     text = f"{label_text} {title} {body[:2000]}".lower()
-    scores = {kind: sum(word in text for word in words) for kind, words in KIND_WORDS.items()}
+    scores = {
+        kind: sum(word in text for word in words)
+        for kind, words in KIND_WORDS.items()
+    }
     best = max(scores, key=scores.get)
-    winners = [kind for kind, score in scores.items() if score == scores[best] and score > 0]
+    winners = [
+        kind
+        for kind, score in scores.items()
+        if score == scores[best] and score > 0
+    ]
     return winners[0] if len(winners) == 1 else "unknown"
 
 
@@ -121,13 +128,17 @@ def _acceptance(body: str, repo_path: Path | None) -> str:
     )
 
 
-def parse_issues(raw: list[dict[str, Any]], root: Path, internal: set[str]) -> list[Issue]:
+def parse_issues(
+    raw: list[dict[str, Any]], root: Path, internal: set[str]
+) -> list[Issue]:
     repos = discover_repos(root)
     issues: list[Issue] = []
     for item in raw:
         repo_obj = item.get("repository") or {}
         author_obj = item.get("author") or {}
-        repo = str(repo_obj.get("name") or repo_obj.get("nameWithOwner") or "?").split("/")[-1]
+        repo = str(
+            repo_obj.get("name") or repo_obj.get("nameWithOwner") or "?"
+        ).split("/")[-1]
         if repo.lower() not in repos:
             continue  # спека: таблица — только флот с локальным клоном
         author = str(author_obj.get("login") or author_obj.get("name") or "?")
@@ -220,13 +231,22 @@ def launch(issue: Issue, root: Path, mode: str) -> str:
     if exists.returncode == 0:
         return f"exists: tmux attach -t {session}"
     worker = Path(__file__).with_name("issue_worker.py")
-    cmd = [sys.executable, str(worker), "--repo", issue.repo, "--number", str(issue.number),
-           "--author", issue.author, "--kind", issue.kind, "--mode", mode, "--url", issue.url,
-           "--internal", "yes" if issue.internal else "no",
-           "--output-root", str(OUT_ROOT)]
+    cmd = [
+        sys.executable, str(worker),
+        "--repo", issue.repo,
+        "--number", str(issue.number),
+        "--author", issue.author,
+        "--kind", issue.kind,
+        "--mode", mode,
+        "--url", issue.url,
+        "--internal", "yes" if issue.internal else "no",
+        "--output-root", str(OUT_ROOT),
+    ]
     shell_cmd = " ".join(shlex.quote(part) for part in cmd) + "; exec ${SHELL:-/bin/sh}"
-    done = subprocess.run(["tmux", "new-session", "-d", "-s", session, "-c", str(repo_path), shell_cmd],
-                          capture_output=True, text=True)
+    done = subprocess.run(
+        ["tmux", "new-session", "-d", "-s", session, "-c", str(repo_path), shell_cmd],
+        capture_output=True, text=True,
+    )
     if done.returncode:
         raise RuntimeError(done.stderr.strip() or "tmux failed")
     return f"started {session}"
@@ -244,7 +264,11 @@ def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:
         cursor = min(cursor, max(0, len(ordered) - 1))
         stdscr.erase()
         h, w = stdscr.getmaxyx()
-        stdscr.addnstr(0, 0, f"Issues: {len(ordered)}  selected: {len(selected)}  mode: {mode}  group: {'author' if grouped else 'repo'}", w - 1, curses.A_BOLD)
+        header = (
+            f"Issues: {len(ordered)}  selected: {len(selected)}  mode: {mode}  "
+            f"group: {'author' if grouped else 'repo'}"
+        )
+        stdscr.addnstr(0, 0, header, w - 1, curses.A_BOLD)
         visible = max(1, h - 2)
         offset = max(0, cursor - visible + 1)
         for row, issue in enumerate(ordered[offset:offset + visible], start=1):
@@ -256,9 +280,15 @@ def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:
                 "unverifiable": "U",
                 "n/a": "-",
             }[issue.accepted]
-            line = f"{mark} {issue.created_at[:10]} {inbox}/{acc} {issue.author:<18.18} {issue.kind:<8} {issue.key:<25.25} {issue.title}"
-            stdscr.addnstr(row, 0, line, w - 1,
-                           curses.A_REVERSE if offset + row - 1 == cursor else 0)
+            line = (
+                f"{mark} {issue.created_at[:10]} {inbox}/{acc} "
+                f"{issue.author:<18.18} {issue.kind:<8} {issue.key:<25.25} "
+                f"{issue.title}"
+            )
+            stdscr.addnstr(
+                row, 0, line, w - 1,
+                curses.A_REVERSE if offset + row - 1 == cursor else 0,
+            )
         stdscr.addnstr(h - 1, 0, status, w - 1)
         stdscr.refresh()
         key = stdscr.getch()
@@ -284,22 +314,32 @@ def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:
                     launched.append(launch(issue, root, mode))
                 except Exception as exc:  # UI boundary: show other launches too
                     errors.append(f"{issue.key}: {exc}")
-            status = f"launched: {', '.join(launched) or '-'}" + (f"; errors: {'; '.join(errors)}" if errors else "")
+            error_suffix = f"; errors: {'; '.join(errors)}" if errors else ""
+            status = f"launched: {', '.join(launched) or '-'}" + error_suffix
             selected.clear()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--owner", default=os.environ.get("ISSUE_CONSOLE_OWNER", "andrei-shtanakov"))
+    parser.add_argument(
+        "--owner",
+        default=os.environ.get("ISSUE_CONSOLE_OWNER", "andrei-shtanakov"),
+    )
     parser.add_argument(
         "--internal",
         action="append",
         default=[],
         help="internal-логин; повтор флага; заменяет дефолтный набор целиком",
     )
-    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
+    parser.add_argument(
+        "--root", type=Path, default=Path(__file__).resolve().parent.parent
+    )
     parser.add_argument("--input", type=Path, help="offline gh JSON fixture")
-    parser.add_argument("--json", action="store_true", help="print normalized data, do not start TUI")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print normalized data, do not start TUI",
+    )
     parser.add_argument(
         "--classify-ai",
         action="store_true",
@@ -308,7 +348,11 @@ def main() -> int:
     args = parser.parse_args()
     internal = resolve_internal(args.internal)
     try:
-        raw = json.loads(args.input.read_text()) if args.input else fetch_issues(args.owner)
+        raw = (
+            json.loads(args.input.read_text())
+            if args.input
+            else fetch_issues(args.owner)
+        )
         issues = parse_issues(raw, args.root, internal)
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
         print(f"issue-console: {exc}", file=sys.stderr)
@@ -320,7 +364,10 @@ def main() -> int:
         print(json.dumps([asdict(x) for x in issues], ensure_ascii=False, indent=2))
         return 0
     if not sys.stdin.isatty() or not sys.stdout.isatty():
-        print("issue-console: TUI requires a terminal (use --json for scripts)", file=sys.stderr)
+        print(
+            "issue-console: TUI requires a terminal (use --json for scripts)",
+            file=sys.stderr,
+        )
         return 2
     curses.wrapper(run_tui, issues, args.root)
     return 0

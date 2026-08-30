@@ -20,7 +20,7 @@ Workspace-тулинг экосистемы AI-оркестраторов. Жи�
 | `check-graph-registry-drift.py` | граф prograph (derived) ↔ карта интеграций registry (authored); allowlist для файловых/runtime-связей |
 | `check-plan-fields.py` | граф `@blocked_by` между `TODO.md` всех репо + ownership/movement totals и матрица (`make plan-check`). **Тонкая обёртка над пакетом `plan-fields`** — grammar/парсинг/резолюция из пакета; **требует `uv` + Python 3.12** (см. ниже) |
 | `inbox.py` | входящие кросс-репные запросы: открытые issues с лейблом `inbox` + вывод принятия по `TODO.md` целевого репо (ADR-ECO-006); разбор пунктов — общий пакет `plan-fields`, поэтому `uv` + Python 3.12, как у `check-plan-fields.py`; `make inbox` |
-| `issue_console.py` | TUI всех открытых issues: дата, inbox/acceptance, инициатор, тип, группировка и запуск выбранных issues в отдельных `tmux` sessions; `make issues` |
+| `issue_console.py` | TUI всех открытых issues: дата, inbox/acceptance, инициатор, тип, группировка и запуск выбранных issues в отдельных `tmux` sessions. Acceptance — через пакет `plan-fields`, поэтому `uv` + Python 3.12, как у `check-plan-fields.py`; `make issues` |
 | `discover_models.py` | discovery моделей провайдеров (ADR-ECO-003a): отчёт + Plane-1 TOML для PR |
 | `gen_agents_toml.py` | генерация секций agents.toml из benchmark_runs (arbiter.db) |
 | `discovery/` | offline-манифесты observed-моделей |
@@ -41,26 +41,42 @@ make issues      # fleet issue TUI (space — выбрать, g — группи
 
 ### Issue console (первый TUI-срез)
 
-`make issues` требует авторизованный `gh` и `tmux`. По умолчанию выбранные
-issues запускаются в безопасном режиме `plan`: отдельный Codex worker только
-анализирует issue и пишет `.issue-<number>-result.json` по JSON Schema. Клавиша
-`x` переключает режим на `execute`; в нём worker может менять файлы и запускать
-тесты, но намеренно не делает commit, push, PR или merge. Эти publish-фазы
-будут добавлены после фиксации критериев принятия и review для каждого типа.
+`make issues` требует авторизованный `gh`, `tmux` и `uv` (acceptance-колонка
+резолвится через пакет `plan-fields`, как у `check-plan-fields.py` — см. ниже).
+По умолчанию выбранные issues запускаются в безопасном режиме `plan`:
+отдельный Codex worker (`issue_worker.py`) только анализирует issue и пишет
+структурированный результат по JSON Schema в
+`out/issues/<repo>/<number>/result.json` (в `devtools/`, не в целевом репо).
+Клавиша `x` переключает режим на `execute`; в нём worker может менять файлы и
+запускать тесты, но намеренно не делает commit, push, PR или merge. Эти
+publish-фазы будут добавлены после фиксации критериев принятия и review для
+каждого типа. Decision (`accept`/`reject`) — детерминированная policy-политика
+до вызова Codex: внутренний инициатор → accept, внешний → reject; модель может
+только поднять `needs_human`, а не перевернуть политику.
 
 Клавиши: `space` — выбор, `g` — группировка repo/инициатор, `j/k` или стрелки —
-навигация, `enter` — отдельная tmux-сессия на issue, `q` — выход. Для CI и
-диагностики есть нетерминальный режим:
+навигация, `enter` — отдельная tmux-сессия на issue (повтор на уже запущенном —
+подсказка attach), `q` — выход. Колонка acceptance в списке: `A`/`N`/`U`/`-` =
+accepted / not-accepted / unverifiable / n/a (n/a — issue без лейбла `inbox`).
+Для CI и диагностики есть нетерминальный режим:
 
 ```bash
-python3 issue_console.py --json
-python3 issue_console.py --input issues.json --json  # полностью offline
+uv run --frozen python issue_console.py --json
+uv run --frozen python issue_console.py --input issues.json --json  # полностью offline
 ```
 
 Тип сначала определяется без AI по labels/title/body. Неоднозначность остаётся
 `unknown`, а не угадывается; при запуске отдельный `issue_worker.py` возвращает
 структурированный результат (`decision`, `kind`, `todo`, `next_step`,
 `changed_files`), а не свободный текст.
+
+Флаг `--classify-ai` доклассифицирует оставшиеся `unknown` батчем через codex
+(`issue_classify.py`): ответы кэшируются в `out/issue-kind-cache.json` по ключу
+`owner/repo#number@updatedAt`, применяются только при confidence ≥ 0.75, кэш
+эволюционирует по факту обновления issue. Без флага Codex не нужен — консоль
+и `--json`/`--input` полностью офлайн. `--internal <login>` (повторяемый флаг)
+**заменяет** дефолтный набор внутренних инициаторов `{andrei-shtanakov,
+ai-prosto}` целиком, а не дополняет его.
 
 ## `plan-check`: общий парсер, Python 3.12
 
