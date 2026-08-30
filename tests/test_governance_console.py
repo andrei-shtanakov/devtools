@@ -111,6 +111,25 @@ def test_plain_path_no_runs_says_so(runs_root, no_textual, capsys) -> None:
     assert capsys.readouterr().out.strip() == "no runs"
 
 
+# --- --run-id path, no textual (C-1/M-2) ----------------------------------
+
+
+@requires_console_model
+def test_run_id_flag_prints_detail_json_without_textual(
+    runs_root, no_textual, capsys,
+) -> None:
+    """`--run-id <id>` печатает `detail_to_json(run_detail(<id>))` и не
+    заходит в TUI-ветку — README документирует именно это (C-1), а
+    `detail_to_json` до этой правки был мёртвым кодом в продакшене (M-2)."""
+    _mk("r-0010")
+    rc = console.main(["--run-id", "r-0010"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    payload = cm.detail_to_json(cm.run_detail("r-0010"))
+    assert out.strip() == payload.strip()
+    assert '"run_id": "r-0010"' in out
+
+
 # --- tmux command construction: resume ------------------------------------
 
 
@@ -195,6 +214,8 @@ def test_launch_resume_raises_on_tmux_failure(
 def test_launch_verify_builds_parent_and_run_id_args(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """Сессия именуется от РОДИТЕЛЯ (`beh-verify-<parent>`), не от `run_id`
+    потомка (I-7) — ARGS в make-команде при этом несёт свежий child-id."""
     calls: list[list[str]] = []
 
     def fake_run(cmd, **kwargs):
@@ -205,17 +226,39 @@ def test_launch_verify_builds_parent_and_run_id_args(
 
     monkeypatch.setattr(console.subprocess, "run", fake_run)
     status = console.launch_verify("r-0001", "r-0001-v2", tmp_path)
-    assert status == "started beh-r-0001-v2"
+    assert status == "started beh-verify-r-0001"
 
     has_session_call = next(c for c in calls if c[:2] == ["tmux", "has-session"])
-    assert has_session_call[-1] == "=beh-r-0001-v2"
+    assert has_session_call[-1] == "=beh-verify-r-0001"
 
     new_session_call = next(c for c in calls if c[:2] == ["tmux", "new-session"])
+    assert new_session_call[4] == "beh-verify-r-0001"
     shell_cmd = new_session_call[-1]
     assert shell_cmd == (
         "make behaviour-run ARGS='verify --parent r-0001 --run-id r-0001-v2'; "
         "exec $SHELL"
     )
+
+
+def test_launch_verify_dedups_by_parent_across_distinct_child_ids(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """I-7 regression: `verify_plan` генерирует свежий child run_id на
+    КАЖДЫЙ вызов (`os.urandom`) — дедуп именем от child никогда бы не
+    совпал. Второе нажатие `v` на том же ряду (новый child, тот же parent)
+    обязано найти уже поднятую сессию, а не стартовать вторую — иначе
+    второй вызов `runner.verify()` создаёт ВТОРОЙ remediation-issue у уже
+    помеченного родителя."""
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["tmux", "has-session"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(console.subprocess, "run", fake_run)
+    first = console.launch_verify("r-0009", "r-0009-vaaaa", tmp_path)
+    second = console.launch_verify("r-0009", "r-0009-vbbbb", tmp_path)
+    assert first == second == "exists: tmux attach -t =beh-verify-r-0009"
 
 
 # --- verify_plan: parent = выбранный merged_unverified ряд, свежий child --
@@ -264,3 +307,31 @@ def test_verify_plan_generates_distinct_child_ids_on_repeat_calls() -> None:
     assert not isinstance(second, str)
     assert first[0] == second[0] == "r-0003"
     assert first[1] != second[1]
+
+
+# --- _safe_run_detail: битый run.json не роняет TUI (I-4) -----------------
+
+
+@requires_console_model
+def test_safe_run_detail_returns_detail_on_healthy_run(runs_root) -> None:
+    _mk("r-0011")
+    result = console._safe_run_detail("r-0011")
+    assert not isinstance(result, str)
+    assert result.row.run_id == "r-0011"
+
+
+@requires_console_model
+def test_safe_run_detail_returns_error_string_on_corrupt_run_json(
+    runs_root,
+) -> None:
+    """Enter на `status="corrupt"`-ряду (`list_runs` уже так его метит)
+    раньше выбрасывал исключение прямо из `DetailScreen.on_mount` и ронял
+    TUI. `_safe_run_detail` — чистая обёртка без textual: строка-ошибка
+    вместо падения, тестируется напрямую."""
+    (runs_root / "r-broken").mkdir()
+    (runs_root / "r-broken" / "run.json").write_text("{not json")
+
+    result = console._safe_run_detail("r-broken")
+    assert isinstance(result, str)
+    assert "r-broken" in result
+    assert "битый run.json" in result

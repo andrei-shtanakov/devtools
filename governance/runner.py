@@ -36,6 +36,7 @@ from governance.run_state import (
     op_status,
     run_dir,
     save,
+    validate_author_backend,
     validate_id_component,
     validate_merge_authority,
 )
@@ -121,11 +122,15 @@ def start(
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
-    `merge_authority` валидируется ПЕРВЫМ, ДО резервирования `run_id` (B2
-    follow-up приёмки B1, minor из #88): чистая проверка входа без побочных
-    эффектов, как и WS-lock ниже — невалидное значение раньше навсегда
-    резервировало `run_id` пустым `run.json`, потому что `new_run()`
-    (единственное место валидации) вызывался ПОСЛЕ `_reserve_run_id`.
+    `merge_authority`/`author_backend` валидируются ПЕРВЫМИ, ДО
+    резервирования `run_id` (B2 follow-up приёмки B1, minor из #88 —
+    `author_backend` внесла заново Task 2, финальное ревью I-3): чистая
+    проверка входа без побочных эффектов, как и WS-lock ниже — невалидное
+    значение раньше навсегда резервировало `run_id` пустым `run.json`,
+    потому что `new_run()` (единственное место валидации до этой правки)
+    вызывался ПОСЛЕ `_reserve_run_id`. Через CLI `author_backend`
+    недостижимо (`choices=["codex", "disp"]`), но `start()` — публичный
+    API, и симметрия проверок здесь — инвариант.
 
     WS-lock проверяется ДО резервирования `run_id` (круг 7): у неё тоже нет
     побочных эффектов, а `_reserve_run_id` создаёт файл — так отказ по
@@ -133,6 +138,7 @@ def start(
     `run_id`.
     """
     validate_merge_authority(merge_authority)
+    validate_author_backend(author_backend)
     blocker = _blocking_merged_unverified(ws_id)
     if blocker is not None:
         raise ValueError(
@@ -656,7 +662,19 @@ def _step_review(state: RunState, ops: Ops) -> bool:
         # подсказка сокращает ручной цикл проверки. Голова берётся живьём
         # (`ops.head_sha`), а не из `state.head` — то поле заполняется только
         # на S7 (`_step_merge`), на S6 оно ещё пусто.
-        head = ops.head_sha(state.target_dir, state.branch)
+        #
+        # `head_sha` — единственный git-вызов на СТОП-пути (финальное ревью
+        # I-6): `RealOps.head_sha` зовёт `git rev-parse` с `check=True`, и
+        # если ветки нет локально/`target_dir` уехал, штатная остановка
+        # «ревью нашло находки» превращалась в необработанный
+        # `CalledProcessError` — комментарий не постился, `state.status`
+        # оставался `running` на диске, и `resume()` заходил с неверным
+        # состоянием. Подсказка чисто косметическая и не стоит того, чтобы
+        # ронять стоп — сбой глотается, литерал `<head>` вместо реальной sha.
+        try:
+            head = ops.head_sha(state.target_dir, state.branch)
+        except Exception:  # noqa: BLE001 — косметика не должна ронять стоп
+            head = "<head>"
         _stop_with_comment(
             state, ops, "stopped_review",
             "ревью нашло находки, прогон остановлен\n\n"

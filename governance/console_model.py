@@ -39,6 +39,26 @@ PIPELINE_KEYS: tuple[str, ...] = (
 # authoritative-гейт S8 — `s8-findings.txt`.
 _FINDINGS_FILES: tuple[str, ...] = ("gate-findings.txt", "s8-findings.txt")
 
+# Ключи, которые наступают при обычном продвижении прогона до его конца.
+# `remediation-issue` из `PIPELINE_KEYS` исключён (финальное ревью I-5):
+# это УСЛОВНЫЙ op — `_step_s8` на exit 0 завершает прогон и возвращает
+# `True` ДО блока создания issue (`runner.py:833-839`), поэтому у зелёного
+# прогона он навсегда `"new"`. Считать его обязательным шагом инвертирует
+# картину: `status="completed"` показывался бы «застрявшим» на
+# `remediation-issue`, а `merged_unverified` (где issue реально создан) —
+# наоборот, финишным `"—"`. `RunDetail.ops` по-прежнему строится по полному
+# `PIPELINE_KEYS` — это только про вычисление «текущего шага» таблицы.
+_REQUIRED_STEP_KEYS: tuple[str, ...] = tuple(
+    key for key in PIPELINE_KEYS if key != "remediation-issue"
+)
+
+# Терминальные статусы прогона (спека §4/§5): `completed` — обычный зелёный
+# финиш, `merged_unverified` — S8 навсегда остановился (см. verify()).
+# `_current_step` возвращает `"—"` на них напрямую, а не только через
+# перебор `_REQUIRED_STEP_KEYS` — защита от рассинхрона status/ops, а не
+# только от условного `remediation-issue`.
+_TERMINAL_STATUSES: tuple[str, ...] = ("completed", "merged_unverified")
+
 
 @dataclass(frozen=True)
 class RunRow:
@@ -64,10 +84,18 @@ def _op_status_of(ops: dict[str, dict], key: str) -> str:
     return "new" if op is None else op.get("status", "new")
 
 
-def _current_step(ops: dict[str, dict]) -> str:
-    """Первый не-`completed` op-ключ пайплайна либо `"—"`, если всё завершено."""
-    for key in PIPELINE_KEYS:
-        if _op_status_of(ops, key) != "completed":
+def _current_step(state: rs.RunState) -> str:
+    """Первый не-`completed` обязательный op-ключ либо `"—"`.
+
+    `"—"` — либо все `_REQUIRED_STEP_KEYS` завершены, либо `status` уже
+    терминален (`_TERMINAL_STATUSES`, I-5): второе проверяется первым, так
+    что рассинхрон между `status` и `ops` (не должен случаться штатно, но
+    не должен и рисовать несуществующий шаг) не путает таблицу.
+    """
+    if state.status in _TERMINAL_STATUSES:
+        return "—"
+    for key in _REQUIRED_STEP_KEYS:
+        if _op_status_of(state.ops, key) != "completed":
             return key
     return "—"
 
@@ -78,7 +106,7 @@ def _row_from_state(state: rs.RunState) -> RunRow:
         ws_id=state.ws_id,
         repo=state.repo,
         status=state.status,
-        step=_current_step(state.ops),
+        step=_current_step(state),
         pr=state.pr,
         remediated_by=state.remediated_by,
     )

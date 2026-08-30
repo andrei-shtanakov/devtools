@@ -45,6 +45,7 @@ class FakeOps:
     find_pr_error: str | None = None
     dirty: bool = False
     checkout_and_pull_error: str | None = None
+    head_sha_error: str | None = None
     authored: list[str] = field(default_factory=list)
     author_disp_calls: list[tuple[str, str]] = field(default_factory=list)
     author_disp_exit: int = 0
@@ -65,6 +66,8 @@ class FakeOps:
 
     def head_sha(self, target_dir: str, branch: str) -> str:
         self.calls.append(("head_sha", branch))
+        if self.head_sha_error is not None:
+            raise RuntimeError(self.head_sha_error)
         return self.head
 
     def push_branch(self, target_dir: str, branch: str) -> None:
@@ -1581,6 +1584,26 @@ def test_start_rejects_invalid_merge_authority_before_reserving_run_id(
     assert not (rs.run_dir(run_id) / "run.json").exists()
 
 
+def test_start_rejects_invalid_author_backend_before_reserving_run_id(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Тот же класс minor, что и merge_authority выше (I-3, финальное
+    ревью): Task 1 чинил его для merge_authority (приёмка #88), Task 2
+    внесла заново для author_backend — `validate_author_backend` жила
+    только внутри `new_run()`, вызываемом ПОСЛЕ `_reserve_run_id`. Через
+    CLI недостижимо (`choices=["codex", "disp"]`), но `start()` —
+    публичный API."""
+    run_id = "r-bad-author-backend"
+    kwargs = _start_kwargs(
+        tmp_path, run_id, FakeOps(), author_backend="claude",
+    )
+
+    with pytest.raises(ValueError):
+        runner.start(**kwargs)
+
+    assert not (rs.run_dir(run_id) / "run.json").exists()
+
+
 def test_stop_review_comment_includes_evidence_hint(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
@@ -1596,6 +1619,27 @@ def test_stop_review_comment_includes_evidence_hint(
     assert state.status == "stopped_review"
     assert ops.comments
     assert f"git cat-file -e {ops.head}" in ops.comments[-1]
+
+
+def test_stop_review_comment_survives_head_sha_failure(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """I-6, финальное ревью: `head_sha` — чисто косметическая evidence-
+    подсказка, вызывается на СТОП-пути ДО `_stop_with_comment`. Если ветки
+    нет локально/`target_dir` уехал (`RealOps.head_sha` зовёт `git
+    rev-parse` с `check=True`), штатная остановка «ревью нашло находки» не
+    должна превращаться в необработанное исключение вместо
+    comment+`stopped_review` — сбой глотается, в подсказку идёт литерал
+    `<head>`."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=1, head_sha_error="fatal: bad revision")
+    run_id = "r-review-evidence-head-fails"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+
+    assert state.status == "stopped_review"
+    assert ops.comments
+    assert "git cat-file -e <head>" in ops.comments[-1]
 
 
 # --- B2 Task 2: авторинг-бэкенд codex|disp ----------------------------------

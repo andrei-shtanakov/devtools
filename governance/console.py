@@ -19,8 +19,12 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from governance import run_state as rs
+
+if TYPE_CHECKING:  # только для аннотаций — в рантайме не исполняется
+    from governance import console_model as cm
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
 
@@ -30,10 +34,19 @@ DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
 # дисциплиной, что и textual ниже: иначе сам `import governance.console`
 # падает без установленной группы, и `--json`/plain-путь, которому textual
 # не нужен, всё равно требовал бы steward только на этапе импорта модуля.
+# Аннотации `cm.RunRow` живут только в `TYPE_CHECKING`-импорте выше:
+# `from __future__ import annotations` не вычисляет их в рантайме (лень
+# сохраняется), но делает их видимыми `ruff`/типчекерам (F821, финальное
+# ревью C-2) — без этого блока `cm` был undefined name везде, где он
+# встречался только в сигнатурах, а не в теле функции.
 
 
 def _session_name(run_id: str) -> str:
     return f"beh-{run_id}"
+
+
+def _verify_session_name(parent_run_id: str) -> str:
+    return f"beh-verify-{parent_run_id}"
 
 
 def _tmux_launch(session: str, root: Path, make_args: str) -> str:
@@ -70,8 +83,19 @@ def launch_resume(run_id: str, root: Path = DEVTOOLS_ROOT) -> str:
 def launch_verify(
     parent_run_id: str, run_id: str, root: Path = DEVTOOLS_ROOT
 ) -> str:
-    """`make behaviour-run ARGS='verify --parent <parent> --run-id <id>'`."""
-    session = _session_name(run_id)
+    """`make behaviour-run ARGS='verify --parent <parent> --run-id <id>'`.
+
+    Сессия именуется от РОДИТЕЛЯ (`beh-verify-<parent_run_id>`), не от
+    `run_id` потомка (финальное ревью I-7): `verify_plan` генерирует свежий
+    `run_id` на КАЖДЫЙ вызов (`os.urandom`), поэтому дедуп по `=`-таргету с
+    именем от потомка никогда не совпадал бы — второе нажатие `v` на том же
+    ряду поднимало бы вторую tmux-сессию и создавало ВТОРОЙ
+    remediation-issue у уже помеченного родителя (`runner.verify()` не
+    проверяет, есть ли у родителя потомок). Имя от parent делает `=`-гвард
+    рабочим: повторный вызов находит существующую сессию раньше, чем
+    успевает стартовать новый `verify`.
+    """
+    session = _verify_session_name(parent_run_id)
     return _tmux_launch(
         session, root, f"verify --parent {parent_run_id} --run-id {run_id}"
     )
@@ -92,6 +116,24 @@ def verify_plan(row: cm.RunRow) -> tuple[str, str] | str:
         return f"verify: run {row.run_id} не в merged_unverified"
     child = f"{row.run_id}-v{os.urandom(2).hex()}"
     return row.run_id, child
+
+
+def _safe_run_detail(run_id: str) -> cm.RunDetail | str:
+    """`cm.run_detail(run_id)` либо строка-ошибка на битом `run.json`.
+
+    `list_runs()` уже показывает битый прогон как `status="corrupt"`
+    (`console_model.py`), но `run_detail()` не защищён тем же
+    `try/except` — Enter на таком ряду раньше выбрасывал
+    `ValueError`/`OSError`/`TypeError`/`KeyError` прямо в message pump
+    textual и ронял всё приложение (финальное ревью I-4). Function-level:
+    не трогает textual, тестируется напрямую.
+    """
+    from governance import console_model as cm
+
+    try:
+        return cm.run_detail(run_id)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return f"run {run_id}: битый run.json ({exc})"
 
 
 def _bundle_summary_for(run_id: str) -> tuple[tuple[str, str], ...]:
@@ -127,8 +169,6 @@ def _build_app(rows: tuple[cm.RunRow, ...], root: Path):
     from textual.screen import Screen
     from textual.widgets import DataTable, Footer, Header, Static
 
-    from governance import console_model as cm
-
     class DetailScreen(Screen):
         BINDINGS = [
             ("q", "app.pop_screen", "back"),
@@ -145,7 +185,10 @@ def _build_app(rows: tuple[cm.RunRow, ...], root: Path):
             yield Footer()
 
         def on_mount(self) -> None:
-            detail = cm.run_detail(self._run_id)
+            detail = _safe_run_detail(self._run_id)
+            if isinstance(detail, str):
+                self.query_one("#detail-body", Static).update(detail)
+                return
             bundle = _bundle_summary_for(self._run_id)
             lines = [f"run_id: {detail.row.run_id}  status: {detail.row.status}"]
             lines.append("")
@@ -205,14 +248,27 @@ def _build_app(rows: tuple[cm.RunRow, ...], root: Path):
             key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             return key.value if key is not None else None
 
+        def _selected_row(self) -> cm.RunRow | None:
+            run_id = self._selected_run_id()
+            if run_id is None:
+                return None
+            return next((r for r in self._rows if r.run_id == run_id), None)
+
         def _set_status(self, text: str) -> None:
             self._status = text
             self.query_one("#status", Static).update(text)
 
         def on_data_table_row_selected(self, event: object) -> None:
-            run_id = self._selected_run_id()
-            if run_id is not None:
-                self.push_screen(DetailScreen(run_id))
+            row = self._selected_row()
+            if row is None:
+                return
+            # Битый run.json уже виден в таблице как status="corrupt"
+            # (console_model.list_runs) — не пытаемся открыть деталь, она
+            # всё равно её не построит (I-4): статус-строка вместо падения.
+            if row.status == "corrupt":
+                self._set_status(f"run {row.run_id}: битый run.json")
+                return
+            self.push_screen(DetailScreen(row.run_id))
 
         def action_resume_selected(self) -> None:
             run_id = self._selected_run_id()
@@ -220,14 +276,11 @@ def _build_app(rows: tuple[cm.RunRow, ...], root: Path):
                 return
             try:
                 self._set_status(launch_resume(run_id, self._root))
-            except RuntimeError as exc:
+            except (RuntimeError, FileNotFoundError) as exc:
                 self._set_status(f"error: {exc}")
 
         def action_verify_selected(self) -> None:
-            run_id = self._selected_run_id()
-            if run_id is None:
-                return
-            row = next((r for r in self._rows if r.run_id == run_id), None)
+            row = self._selected_row()
             if row is None:
                 return
             plan = verify_plan(row)
@@ -239,7 +292,7 @@ def _build_app(rows: tuple[cm.RunRow, ...], root: Path):
                 self._set_status(
                     launch_verify(parent_run_id, child_run_id, self._root)
                 )
-            except RuntimeError as exc:
+            except (RuntimeError, FileNotFoundError) as exc:
                 self._set_status(f"error: {exc}")
 
     return BehaviourConsoleApp(rows, root)
@@ -257,12 +310,23 @@ def main(argv: list[str] | None = None) -> int:
         help="печать list_runs как JSON, без TUI (без импорта textual)",
     )
     parser.add_argument(
+        "--run-id", default=None,
+        help=(
+            "деталь одного прогона (detail_to_json(run_detail(<id>))), "
+            "без TUI; сочетается с --json ради единообразия вызова"
+        ),
+    )
+    parser.add_argument(
         "--root", type=Path, default=DEVTOOLS_ROOT,
         help="корень devtools для tmux -c (cwd resume/verify)",
     )
     args = parser.parse_args(argv)
 
     from governance import console_model as cm
+
+    if args.run_id is not None:
+        print(cm.detail_to_json(cm.run_detail(args.run_id)))
+        return 0
 
     rows = cm.list_runs()
     if args.json:

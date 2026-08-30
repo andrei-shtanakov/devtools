@@ -8,6 +8,13 @@ from pathlib import Path
 
 import pytest
 
+# `console_model` тянет `steward` транзитивно через `bundle_state.py`
+# (безусловный модульный import) — тот же паттерн, что и
+# `test_governance_runner.py`: без группы `governance` весь модуль
+# пропускается чисто (skip), а не падает ImportError на сборе (финальное
+# ревью, "без группы — skip-чисто" наравне с `test_governance_console.py`).
+pytest.importorskip("steward")
+
 from governance import console_model as cm
 from governance import run_state as rs
 
@@ -110,13 +117,40 @@ def test_run_detail_without_findings_or_verdict(runs_root) -> None:
 # --- step computation ------------------------------------------------------
 
 
-def test_step_all_completed_is_dash(runs_root) -> None:
+def test_step_green_run_without_remediation_issue_is_dash(runs_root) -> None:
+    """Честный зелёный сценарий (I-5, финальное ревью): `remediation-issue`
+    — УСЛОВНЫЙ op, `_step_s8` на exit 0 завершает прогон и возвращает
+    `True` ДО блока создания issue (`runner.py:833-839`), поэтому у
+    настоящего зелёного прогона он навсегда `"new"` — `_current_step` не
+    должен звать его «текущим шагом» терминально завершённого прогона.
+    """
     s = _mk("r-0005")
     for key in cm.PIPELINE_KEYS:
+        if key == "remediation-issue":
+            continue
         rs.op_start(s, key)
         rs.op_complete(s, key)
+    s.status = "completed"
+    rs.save(s)
     rows = cm.list_runs()
     row = next(r for r in rows if r.run_id == "r-0005")
+    assert row.step == "—"
+
+
+def test_step_terminal_status_short_circuits_incomplete_required_key(
+    runs_root,
+) -> None:
+    """Терминальный `status` (`completed`/`merged_unverified`) значит «шагов
+    больше нет» независимо от буквального состояния op-ключей — защита от
+    рассинхрона status/ops, отдельная от исключения `remediation-issue`."""
+    s = _mk("r-0007")
+    rs.op_start(s, "branch")
+    rs.op_complete(s, "branch")
+    # author-charter остаётся "new" — намеренно не completed
+    s.status = "merged_unverified"
+    rs.save(s)
+    rows = cm.list_runs()
+    row = next(r for r in rows if r.run_id == "r-0007")
     assert row.step == "—"
 
 
