@@ -82,6 +82,18 @@ def test_trace_matrix_surface(tmp_path: Path) -> None:
     assert matrix is None or isinstance(matrix, dict)
 
 
+def test_spec_graph_nodes_is_a_dict(tmp_path: Path) -> None:
+    """Закрепление для Task 5: ``SpecGraph.nodes`` — ``dict[id, SpecNode]``, не
+    список узлов с атрибутом ``.id`` (предположение брифа Task 5 не подтвердилось).
+    Порядок узлов профиля берётся через ``graph.topo_order() -> list[str]``.
+    """
+    graph = _graph(tmp_path)
+    assert isinstance(graph.nodes, dict)
+    assert set(graph.nodes) == {"requirements", "behaviour-spec"}
+    order = graph.topo_order()
+    assert order == ["requirements", "behaviour-spec"]
+
+
 def test_upstream_hashes_shape(tmp_path: Path) -> None:
     graph = _graph(tmp_path)
     bundle = make_bundle(tmp_path, behaviour_ok=True)
