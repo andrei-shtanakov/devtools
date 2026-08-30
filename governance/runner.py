@@ -47,6 +47,21 @@ _AUTHOR_STEPS = (
 )
 
 
+def _reject_if_run_exists(run_id: str) -> None:
+    """Отказ, если под `run_id` уже есть леджер (финальное ревью, круг 4).
+
+    `new_run` + `save` пишут `run.json` через `os.replace` — атомарно, но
+    БЕЗ проверки, что там уже есть чужой леджер: занятый `run_id` молча
+    перезаписывался (codex-ревью PR #88, major). Проверка — ДО каких-либо
+    эффектов, у обоих создателей нового `RunState` (`start`, `verify`).
+    """
+    if (run_dir(run_id) / "run.json").exists():
+        raise ValueError(
+            f"run {run_id!r} уже существует — используйте resume(...), "
+            "не start(...)/verify(...) с тем же run_id"
+        )
+
+
 def start(
     subject: str,
     repo: str,
@@ -66,6 +81,7 @@ def start(
     висит ``merged_unverified`` без зелёного потомка (финальное ревью F-8).
     Перенесено в B2, TODO.md `@id:behaviour-runner-ws-lock`.
     """
+    _reject_if_run_exists(run_id)
     state = new_run(
         subject=subject,
         repo=repo,
@@ -199,6 +215,7 @@ def verify(parent_run_id: str, ops: Ops, run_id: str) -> RunState:
             f"verify: parent-run {parent_run_id!r} не merged_unverified "
             f"(текущий статус {parent.status!r})"
         )
+    _reject_if_run_exists(run_id)
     child = new_run(
         subject=parent.subject,
         repo=parent.repo,

@@ -868,3 +868,61 @@ def test_s8_findings_include_gate_check_output(
     assert "GC-BEH-TRACE" in findings_file.read_text(encoding="utf-8")
     _repo_slug, _title, body = ops.issues[0]
     assert "GC-BEH-TRACE" in body
+
+
+# --- Круг 4: start/verify не перезаписывают занятый run_id -----------------
+
+
+def test_start_with_existing_run_id_raises_and_does_not_overwrite(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Codex-ревью PR #88 (major): `start()` с занятым `run_id` молча
+    перезаписывала `run.json` (`os.replace` — атомарно, но без проверки
+    занятости) — уничтожение чужого леджера. Отказ ДО каких-либо эффектов;
+    существующий файл не тронут ни байтом."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    run_id = "r-taken"
+    kwargs = _start_kwargs(tmp_path, run_id, FakeOps())
+    original = runner.start(**kwargs)
+    assert original.status != "merged_unverified"  # леджер реально живёт
+    before = rs.run_dir(run_id).joinpath("run.json").read_text(encoding="utf-8")
+
+    other_ops = FakeOps()
+    with pytest.raises(ValueError):
+        runner.start(**_start_kwargs(tmp_path, run_id, other_ops))
+
+    after = rs.run_dir(run_id).joinpath("run.json").read_text(encoding="utf-8")
+    assert after == before  # ни байта не изменилось
+    assert other_ops.calls == []  # отказ ДО каких-либо эффектов
+
+
+def test_verify_with_existing_run_id_raises(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """`verify()` — та же защита для дочернего run_id."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-verify-parent-taken"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    # Занятый child run_id — например, случайно совпал с чужим прогоном.
+    taken_child_id = "r-verify-child-taken"
+    runner.start(**_start_kwargs(tmp_path, taken_child_id, FakeOps()))
+    before = rs.run_dir(taken_child_id).joinpath("run.json").read_text(
+        encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError):
+        runner.verify(parent_id, ops, taken_child_id)
+
+    after = rs.run_dir(taken_child_id).joinpath("run.json").read_text(
+        encoding="utf-8"
+    )
+    assert after == before
