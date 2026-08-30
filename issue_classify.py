@@ -66,14 +66,17 @@ def _load_cache(path: Path) -> dict[str, str]:
 
 
 def _save_cache(path: Path, cache: dict[str, str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    """Атомарная запись кэша; кэш опционален — сбой записи молча глотается."""
+    tmp = ""
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
         with os.fdopen(fd, "w") as handle:
             json.dump(cache, handle, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
     except OSError:
-        Path(tmp).unlink(missing_ok=True)
+        if tmp:
+            Path(tmp).unlink(missing_ok=True)
 
 
 def run_codex(batch: list[dict]) -> list[dict]:

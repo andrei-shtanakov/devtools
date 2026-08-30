@@ -107,3 +107,12 @@ def test_confidence_threshold_is_inclusive(tmp_path: Path) -> None:
         [_unknown()], tmp_path / "c.json",
         run=lambda b: [_answer(confidence=0.75)])
     assert kinds == {"alpha#1": "fix"}
+
+
+def test_unwritable_cache_path_does_not_crash(tmp_path: Path) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("файл вместо каталога")
+    cache = blocker / "cache.json"
+    kinds = issue_classify.refine([_unknown()], cache, run=lambda b: [_answer()])
+    assert kinds == {"alpha#1": "fix"}
+    assert not cache.exists()
