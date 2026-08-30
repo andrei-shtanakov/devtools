@@ -12,6 +12,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 import governance.ops as ops_mod
 from governance.ops import RealOps
 
@@ -87,6 +89,45 @@ def test_review_command_cwd_and_passthrough_returncode(monkeypatch):
         "sh", str(ops_mod.DEVTOOLS_ROOT / "review-pr.sh"), "devtools", "7",
     ]
     assert call.kwargs["cwd"] == ops_mod.DEVTOOLS_ROOT
+
+
+# --- Кейс 2a: find_pr — сбой запроса ≠ «PR нет» (F-5, круг 2) -------------
+
+
+def test_find_pr_rc_nonzero_raises_runtime_error(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1, stderr="rate limited")
+    ops = RealOps()
+
+    with pytest.raises(RuntimeError):
+        ops.find_pr(REPO_SLUG, "feat/x")
+
+
+def test_find_pr_invalid_json_raises_runtime_error(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=0, stdout="not json")
+    ops = RealOps()
+
+    with pytest.raises(RuntimeError):
+        ops.find_pr(REPO_SLUG, "feat/x")
+
+
+def test_find_pr_valid_empty_list_returns_none(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=0, stdout="[]")
+    ops = RealOps()
+
+    result = ops.find_pr(REPO_SLUG, "feat/x")
+
+    assert result is None
+
+
+def test_find_pr_valid_list_returns_number(monkeypatch):
+    _install_fake_run(
+        monkeypatch, returncode=0, stdout=json.dumps([{"number": 42}]),
+    )
+    ops = RealOps()
+
+    result = ops.find_pr(REPO_SLUG, "feat/x")
+
+    assert result == 42
 
 
 # --- Кейс 3: create_draft_pr ---------------------------------------------

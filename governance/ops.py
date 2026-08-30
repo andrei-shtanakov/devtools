@@ -99,18 +99,28 @@ class RealOps:
         )
 
     def find_pr(self, repo_slug: str, branch: str) -> int | None:
-        """Номер открытого PR для branch, None если нет/ошибка."""
+        """Номер открытого PR для branch; None ТОЛЬКО когда открытых PR нет.
+
+        Сбой самого запроса — rc != 0, битый или неожиданный по форме JSON —
+        не то же самое, что «PR нет» (финальное ревью F-5, круг 2): поднимает
+        `RuntimeError`, чтобы reconciliation в runner'е не читала транзиентный
+        сбой `gh` как отсутствие PR и не открывала второй PR на ту же ветку.
+        """
         done = subprocess.run(
             ["gh", "pr", "list", "-R", repo_slug, "--head", branch,
              "--state", "open", "--json", "number"],
             capture_output=True, text=True,
         )
         if done.returncode != 0:
-            return None
+            raise RuntimeError(
+                f"find_pr: gh pr list rc={done.returncode}: {done.stderr.strip()}"
+            )
         try:
             found = json.loads(done.stdout)
-        except json.JSONDecodeError:
-            return None
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"find_pr: invalid JSON: {done.stdout!r}") from exc
+        if not isinstance(found, list):
+            raise RuntimeError(f"find_pr: unexpected JSON shape: {done.stdout!r}")
         return found[0]["number"] if found else None
 
     def create_draft_pr(
