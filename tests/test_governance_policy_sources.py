@@ -39,6 +39,17 @@ def test_safety_missing_copy_is_unknown(tmp_path: Path, monkeypatch) -> None:
     assert s.agent_merge_allowed is None and s.actor_class == "unknown"
 
 
+def test_safety_empty_pin_is_unknown(tmp_path: Path, monkeypatch) -> None:
+    bad = tmp_path / "v1"
+    bad.mkdir()
+    (bad / "approval-policy.yaml").write_text("agent_merge_allowed: true\n")
+    for content in ("", "   \n\n"):
+        (bad / "PIN").write_text(content)
+        monkeypatch.setattr("governance.policy_sources.CONTRACT_DIR", bad)
+        s = load_safety("ai-prosto")
+        assert s.agent_merge_allowed is None and s.actor_class == "unknown"
+
+
 def test_repo_authority_reads_claude_md(tmp_path: Path) -> None:
     (tmp_path / "CLAUDE.md").write_text("## Git workflow\n- Мерж: человек\n")
     assert repo_authority(tmp_path) == "human"

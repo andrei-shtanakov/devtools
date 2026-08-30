@@ -55,7 +55,7 @@ def load_safety(actor: str = "ai-prosto") -> Safety:
         else:
             actor_class = "unknown"
         return Safety(agent_merge_allowed=allowed, actor_class=actor_class)
-    except (OSError, ValueError, yaml.YAMLError, AttributeError):
+    except (OSError, ValueError, IndexError, yaml.YAMLError, AttributeError):
         return Safety(agent_merge_allowed=None, actor_class="unknown")
 
 
