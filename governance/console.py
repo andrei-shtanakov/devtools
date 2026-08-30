@@ -55,6 +55,15 @@ def _tmux_launch(session: str, root: Path, make_args: str) -> str:
     `=`-таргет в `has-session` — точное совпадение имени (урок
     issue_console.launch): без него tmux матчит по префиксу, и
     `beh-r-1` ложно "находит" `beh-r-10`.
+
+    Хвост команды самозакрывает сессию после `make behaviour-run`
+    (codex-ревью, круг 2): `; exec $SHELL` держал сессию живой навсегда —
+    после первого «пустого» resume (PR ещё открыт, S8 не наступил) `=`-дедуп
+    видел сессию как существующую бесконечно, и повторное `r` на том же
+    ряду только предлагало attach, а не запускало прогон дальше. Вывод
+    команды читается (`echo`), затем `read -t 60 _` — Enter закрывает
+    сразу, простой сессии — не дольше 60с; дедуп снова защищает только
+    РЕАЛЬНО идущий прогон, не любой когда-либо запущенный.
     """
     target = f"={session}"
     exists = subprocess.run(
@@ -63,7 +72,9 @@ def _tmux_launch(session: str, root: Path, make_args: str) -> str:
     if exists.returncode == 0:
         return f"exists: tmux attach -t {target}"
     shell_cmd = (
-        f"make behaviour-run ARGS={shlex.quote(make_args)}; exec $SHELL"
+        f"make behaviour-run ARGS={shlex.quote(make_args)}; echo; "
+        "echo '=== завершено; Enter — закрыть (авто через 60с)'; "
+        "read -t 60 _"
     )
     done = subprocess.run(
         ["tmux", "new-session", "-d", "-s", session, "-c", str(root), shell_cmd],

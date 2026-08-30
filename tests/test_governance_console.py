@@ -156,7 +156,38 @@ def test_launch_resume_starts_new_session(tmp_path: Path, monkeypatch) -> None:
     assert new_session_call[6] == str(tmp_path)
     shell_cmd = new_session_call[7]
     assert shell_cmd == (
-        "make behaviour-run ARGS='resume --run-id r-0001'; exec $SHELL"
+        "make behaviour-run ARGS='resume --run-id r-0001'; echo; "
+        "echo '=== завершено; Enter — закрыть (авто через 60с)'; "
+        "read -t 60 _"
+    )
+
+
+def test_tmux_shell_cmd_self_terminates_not_exec_shell(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """codex-ревью круг 2: `; exec $SHELL` держал сессию живой навсегда —
+    после первого «пустого» resume (PR ещё открыт) `=`-дедуп видел её как
+    существующую бесконечно, и повторное `r` на том же ряду только
+    подсказывало attach, а не запускало прогон дальше. Хвост команды
+    обязан читаться и самозакрывать сессию (`read -t 60 _`), не держать
+    интерактивный shell открытым."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["tmux", "has-session"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(console.subprocess, "run", fake_run)
+    console.launch_resume("r-self-terminate", tmp_path)
+
+    new_session_call = next(c for c in calls if c[:2] == ["tmux", "new-session"])
+    shell_cmd = new_session_call[-1]
+    assert "exec $SHELL" not in shell_cmd
+    assert shell_cmd.endswith("read -t 60 _")
+    assert shell_cmd.startswith(
+        "make behaviour-run ARGS='resume --run-id r-self-terminate'; "
     )
 
 
@@ -236,7 +267,8 @@ def test_launch_verify_builds_parent_and_run_id_args(
     shell_cmd = new_session_call[-1]
     assert shell_cmd == (
         "make behaviour-run ARGS='verify --parent r-0001 --run-id r-0001-v2'; "
-        "exec $SHELL"
+        "echo; echo '=== завершено; Enter — закрыть (авто через 60с)'; "
+        "read -t 60 _"
     )
 
 
