@@ -64,3 +64,29 @@ def test_gh_view_uses_full_repo_slug(monkeypatch, tmp_path: Path) -> None:
     assert gh_cmd[:4] == ["gh", "issue", "view", "7"]
     assert "--repo" in gh_cmd
     assert gh_cmd[gh_cmd.index("--repo") + 1] == "owner/alpha"
+
+
+def test_missing_codex_binary_is_clean_exit(monkeypatch, tmp_path: Path) -> None:
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kwargs):
+        calls["n"] += 1
+        if cmd[0] == "gh":
+            class R:
+                returncode = 0
+                stdout = "{}"
+                stderr = ""
+
+            return R()
+        raise FileNotFoundError("codex")
+
+    monkeypatch.setattr(issue_worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["issue_worker.py", "--repo", "alpha", "--owner", "owner",
+         "--number", "7", "--author", "a", "--kind", "fix",
+         "--internal", "yes", "--output-root", str(tmp_path)],
+    )
+    assert issue_worker.main() == 3
+    assert calls["n"] == 2
+    assert not (tmp_path / "issues" / "alpha" / "7" / "result.json").exists()

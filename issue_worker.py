@@ -105,7 +105,11 @@ Return only the structured result required by the supplied JSON schema.
         cmd = ["codex", "exec", "--ephemeral", "--output-schema", str(schema),
                "--output-last-message", str(raw), "--sandbox",
                "workspace-write" if execute else "read-only", prompt]
-        done = subprocess.run(cmd)
+        try:
+            done = subprocess.run(cmd)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"issue-worker: не удалось запустить codex: {exc}")
+            return 3
         if done.returncode:
             return done.returncode
         try:
