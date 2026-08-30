@@ -183,13 +183,27 @@ def advance(state: RunState, ops: Ops) -> RunState:
     return state
 
 
+# stopped_author/stopped_gate/stopped_review: между стопом и resume человек
+# правит файлы бандла в worktree (устраняет gate-findings, отрабатывает
+# review-находки) — сброс ТОЛЬКО op'а, отвечавшего за сам стоп, оставлял бы
+# `commit` completed со СТАРЫМ, докоррекционным деревом, и `push` уносил бы
+# уже неактуальный (возможно красный) коммит дальше по конвейеру (круг 9,
+# codex-ревью PR #88). Сбрасывается весь диапазон commit→review; `pr` НЕ
+# входит — существующий PR переиспользуется (push обновит его ветку,
+# `_step_pr`-реконсиляция не создаёт второй, F-5); `commit_paths` на чистом
+# дереве не падает (`git diff --cached --quiet`), так что повторный коммит
+# без реальных правок — no-op, не ошибка.
+_BUNDLE_EDIT_RESET_OPS: tuple[str, ...] = (
+    "commit", "gate-candidate", "push", "ready", "review",
+)
+
 # Статус stopped_* -> op'ы, которые reconciliation обязан сбросить в pending
 # перед повторным advance() (финальное ревью F-1). stopped_author не входит:
-# у него нужно найти НЕЗАВЕРШЁННЫЙ узел, а не сбрасывать по фиксированному
-# ключу (см. `_reset_stopped_author`).
+# у него дополнительно нужно найти НЕЗАВЕРШЁННЫЙ author-* узел (см.
+# `_reset_stopped_author`).
 _STOPPED_RESET_OPS: dict[str, tuple[str, ...]] = {
-    "stopped_gate": ("gate-candidate",),
-    "stopped_review": ("ready", "review"),
+    "stopped_gate": _BUNDLE_EDIT_RESET_OPS,
+    "stopped_review": _BUNDLE_EDIT_RESET_OPS,
     "stopped_merge_refused": ("verdict",),
     # stopped_dirty: `branch` ещё не стартовала (проверка идёт до
     # `_ensure_started`), сбрасывать нечего — только статус обратно в
@@ -199,10 +213,14 @@ _STOPPED_RESET_OPS: dict[str, tuple[str, ...]] = {
 
 
 def _reset_stopped_author(state: RunState) -> None:
-    """stopped_author: сбросить все незавершённые ``author-*`` op'ы (F-1)."""
+    """stopped_author: незавершённые ``author-*`` + диапазон commit→review
+    (круг 9) — та же логика, что `_BUNDLE_EDIT_RESET_OPS`, на случай, если
+    контент бандла успел измениться после починки."""
     for key, _kind, _filename in _AUTHOR_STEPS:
         if op_status(state, key) != "completed":
             state.ops.pop(key, None)
+    for key in _BUNDLE_EDIT_RESET_OPS:
+        state.ops.pop(key, None)
 
 
 def resume(run_id: str, ops: Ops) -> RunState:
@@ -216,11 +234,15 @@ def resume(run_id: str, ops: Ops) -> RunState:
 
     Из любого ``stopped_*`` — reconciliation вместо слепого no-op (финальное
     ревью F-1/M-1): op(ы), на которых прогон встал, сбрасываются в pending, и
-    только после этого зовётся `advance()`. ``stopped_gate`` (S4 красный) —
-    ``gate-candidate``; ``stopped_review`` — ``ready``+``review``;
-    ``stopped_author`` — незавершённые ``author-*``; ``stopped_merge_refused``
-    (S7 `refuse`, отдельный от ``stopped_gate`` статус — M-1) — ``verdict``,
-    хотя фактическая пересверка вердикта теперь происходит на каждом заходе в
+    только после этого зовётся `advance()`. ``stopped_gate`` (S4 красный) и
+    ``stopped_review`` — весь диапазон ``commit``→``review`` (``commit``,
+    ``gate-candidate``, ``push``, ``ready``, ``review``, но не ``pr`` —
+    круг 9: человек мог поправить бандл в worktree между стопом и resume,
+    и старый `commit`/`push` унесли бы докоррекционное дерево дальше по
+    конвейеру); ``stopped_author`` — незавершённые ``author-*`` плюс тот же
+    диапазон; ``stopped_merge_refused`` (S7 `refuse`, отдельный от
+    ``stopped_gate`` статус — M-1) — ``verdict``, хотя фактическая
+    пересверка вердикта теперь происходит на каждом заходе в
     S7 независимо от этого сброса (см. `_step_verdict`, F-2);
     ``stopped_dirty`` (S1 fail-closed dirty-гард, круг 5) — сбрасывать
     нечего (``branch`` не стартовала), только статус обратно в ``running``.

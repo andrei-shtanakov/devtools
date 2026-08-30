@@ -575,6 +575,54 @@ def test_resume_from_stopped_gate_reruns_gate_candidate(
     assert result.ops["gate-candidate"]["status"] == "completed"
 
 
+def test_resume_from_stopped_gate_recommits_edited_bundle(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Круг 9 (codex-ревью PR #88): resume из `stopped_gate` сбрасывает не
+    только `gate-candidate`, но и `commit`+`push`+`ready`+`review` — человек
+    мог поправить бандл в worktree между стопом и resume, и старый `commit`
+    (уже `completed` с первого прохода — конвейер коммитит ДО гейта) не
+    должен уехать в PR со СТАРЫМ, докоррекционным деревом."""
+    calls_n = {"n": 0}
+    red_bundle = bundle_state.BundleState(
+        (bundle_state.NodeState("charter", "draft", ("error GC-X: bad",)),),
+        1, None, (), (),
+    )
+
+    def _candidate(profile, bundle):
+        calls_n["n"] += 1
+        return red_bundle if calls_n["n"] == 1 else _green_bundle(profile, bundle)
+
+    monkeypatch.setattr(runner, "candidate_state", _candidate)
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    run_id = "r-resume-gate-recommit"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_gate"
+    # commit шёл ДО гейта в конвейере — на первом проходе он уже completed
+    # со СТАРЫМ (красным по гейту) содержимым.
+    assert state.ops["commit"]["status"] == "completed"
+    calls_before_resume = len(ops.calls)
+
+    # Человек правит бандл в worktree, устраняя находку гейта.
+    bundle_dir = Path(state.target_dir) / state.bundle_dir
+    (bundle_dir / "15-behaviour-spec.md").write_text(
+        "# behaviour (fixed)\n", encoding="utf-8"
+    )
+
+    result = runner.resume(run_id, ops)
+
+    new_calls = [c[0] for c in ops.calls[calls_before_resume:]]
+    assert "commit_paths" in new_calls  # новый коммит, не пропущен по кэшу
+    assert "push_branch" in new_calls
+    assert new_calls.index("commit_paths") < new_calls.index("push_branch")
+    assert calls_n["n"] == 2  # гейт реально переигран на отредактированном бандле
+    assert result.status != "stopped_gate"
+    assert result.ops["gate-candidate"]["status"] == "completed"
+    committed_paths = [paths for _t, paths, _m in ops.committed]
+    assert committed_paths  # commit_paths реально вызван с путями бандла
+
+
 def test_resume_from_stopped_review_reruns_ready_and_review(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
@@ -594,6 +642,48 @@ def test_resume_from_stopped_review_reruns_ready_and_review(
     assert review_calls_after  # review реально перезапустился
     assert result.status != "stopped_review"
     assert result.ops["review"]["status"] == "completed"
+
+
+def test_resume_from_stopped_review_recommits_edited_bundle(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Круг 9 (codex-ревью PR #88): resume из `stopped_review` тоже
+    сбрасывает `commit`+`gate-candidate`+`push`, не только `ready`+`review`
+    — человек мог отработать находки ревью правкой бандла; старый коммит
+    (уже `completed` с первого прохода) не должен уехать дальше со старым
+    деревом."""
+    calls_n = {"n": 0}
+
+    def _candidate(profile, bundle):
+        calls_n["n"] += 1
+        return _green_bundle(profile, bundle)
+
+    monkeypatch.setattr(runner, "candidate_state", _candidate)
+    ops = FakeOps(review_exit=1)
+    run_id = "r-resume-review-recommit"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_review"
+    assert state.ops["commit"]["status"] == "completed"
+    assert calls_n["n"] == 1  # candidate_state уже прогнан на первом проходе
+    calls_before_resume = len(ops.calls)
+
+    # Человек правит бандл в worktree, отрабатывая находки ревью.
+    bundle_dir = Path(state.target_dir) / state.bundle_dir
+    (bundle_dir / "15-behaviour-spec.md").write_text(
+        "# behaviour (review fix)\n", encoding="utf-8"
+    )
+    ops.review_exit = 0
+    result = runner.resume(run_id, ops)
+
+    new_calls = [c[0] for c in ops.calls[calls_before_resume:]]
+    assert "commit_paths" in new_calls  # новый коммит, не пропущен по кэшу
+    assert "push_branch" in new_calls
+    assert new_calls.index("commit_paths") < new_calls.index("push_branch")
+    assert calls_n["n"] == 2  # gate-candidate реально переигран, не кэш
+    assert result.status != "stopped_review"
+    assert result.ops["review"]["status"] == "completed"
+    assert result.ops["gate-candidate"]["status"] == "completed"
 
 
 def test_resume_from_stopped_author_reruns_unfinished_author(
