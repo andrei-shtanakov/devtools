@@ -277,6 +277,46 @@ def test_launch_passes_output_root(tmp_path: Path, monkeypatch) -> None:
     assert status == "started issue-alpha-7"
     assert "--output-root" in captured["shell"]
     assert str(issue_console.OUT_ROOT) in captured["shell"]
+    assert "--owner" in captured["shell"]
+
+
+def test_resolve_clone_prefers_full_slug_and_blocks_forks(tmp_path: Path) -> None:
+    fork = tmp_path / "foo"
+    repos = {"fork-owner/foo": fork}
+    assert issue_console.resolve_clone(repos, "upstream-owner", "foo") is None
+    assert issue_console.resolve_clone(repos, "fork-owner", "foo") == fork
+    bare = {"alpha": tmp_path / "alpha"}
+    assert issue_console.resolve_clone(bare, "owner", "alpha") == bare["alpha"]
+
+
+def test_discover_repos_keys_by_owner_slug(tmp_path: Path) -> None:
+    import subprocess as sp
+
+    clone = tmp_path / "foo"
+    clone.mkdir()
+    sp.run(["git", "init", "-q", str(clone)], check=True)
+    sp.run(
+        ["git", "-C", str(clone), "remote", "add", "origin",
+         "git@github.com:Fork-Owner/Foo.git"],
+        check=True,
+    )
+    repos = issue_console.discover_repos(tmp_path)
+    assert repos == {"fork-owner/foo": clone}
+
+
+def test_fleet_filter_blocks_same_name_fork(tmp_path: Path, monkeypatch) -> None:
+    _fleet(tmp_path)
+    real_discover = issue_console.discover_repos
+
+    def fork_only(root):
+        return {"fork-owner/alpha": tmp_path / "alpha"}
+
+    monkeypatch.setattr(issue_console, "discover_repos", fork_only)
+    try:
+        issues = issue_console.parse_issues([_raw()], tmp_path, {"owner"})
+    finally:
+        monkeypatch.setattr(issue_console, "discover_repos", real_discover)
+    assert issues == []
 
 
 def test_classify_ai_flag_wires_refine(tmp_path: Path, monkeypatch) -> None:

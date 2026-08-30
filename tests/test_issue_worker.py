@@ -37,3 +37,30 @@ def test_external_execute_degrades_to_read_only() -> None:
 def test_schema_keeps_decision_enum() -> None:
     assert issue_worker.SCHEMA["properties"]["decision"]["enum"] == [
         "accept", "reject", "needs_human"]
+
+
+def test_gh_view_uses_full_repo_slug(monkeypatch, tmp_path: Path) -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "boom"
+
+        return R()
+
+    monkeypatch.setattr(issue_worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["issue_worker.py", "--repo", "alpha", "--owner", "owner",
+         "--number", "7", "--author", "a", "--kind", "fix",
+         "--internal", "yes", "--output-root", str(tmp_path)],
+    )
+    assert issue_worker.main() == 2
+    gh_cmd = captured[0]
+    assert gh_cmd[:4] == ["gh", "issue", "view", "7"]
+    assert "--repo" in gh_cmd
+    assert gh_cmd[gh_cmd.index("--repo") + 1] == "owner/alpha"

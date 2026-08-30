@@ -101,6 +101,12 @@ def classify(title: str, body: str, labels: tuple[str, ...]) -> str:
 
 
 def discover_repos(root: Path) -> dict[str, Path]:
+    """Локальные клоны под root: ключ — `owner/name` из origin (lower-case).
+
+    Полный slug закрывает подмену форком с тем же коротким именем: issue
+    `upstream/foo` не совпадёт с клоном `fork/foo`. Клон без разборного
+    origin ключуется голым именем каталога — фолбэк для локальных репо.
+    """
     result: dict[str, Path] = {}
     for child in root.iterdir():
         if not (child / ".git").exists():
@@ -109,13 +115,22 @@ def discover_repos(root: Path) -> dict[str, Path]:
             ["git", "-C", str(child), "remote", "get-url", "origin"],
             capture_output=True, text=True,
         )
-        name = child.name
+        key = child.name
         if done.returncode == 0:
-            match = re.search(r"[:/]([^/]+?)(?:\.git)?$", done.stdout.strip())
+            match = re.search(
+                r"[:/]([^/:]+)/([^/]+?)(?:\.git)?$", done.stdout.strip()
+            )
             if match:
-                name = match.group(1)
-        result[name.lower()] = child
+                key = f"{match.group(1)}/{match.group(2)}"
+        result[key.lower()] = child
     return result
+
+
+def resolve_clone(
+    repos: dict[str, Path], owner: str, repo: str
+) -> Path | None:
+    """Клон для issue: сперва полный slug, затем bare-имя (клон без origin)."""
+    return repos.get(f"{owner}/{repo}".lower()) or repos.get(repo.lower())
 
 
 def _acceptance(body: str, repo_path: Path | None) -> str:
@@ -150,18 +165,19 @@ def parse_issues(
         repo = str(
             repo_obj.get("name") or repo_obj.get("nameWithOwner") or "?"
         ).split("/")[-1]
-        if repo.lower() not in repos:
-            continue  # спека: таблица — только флот с локальным клоном
-        author = str(author_obj.get("login") or author_obj.get("name") or "?")
-        labels = tuple(str(x.get("name", "")) for x in item.get("labels") or [])
-        body = str(item.get("body") or "")
-        inbox = "inbox" in labels
         name_with_owner = str(repo_obj.get("nameWithOwner") or "")
         owner = (
             name_with_owner.split("/")[0]
             if "/" in name_with_owner
             else "?"
         )
+        clone = resolve_clone(repos, owner, repo)
+        if clone is None:
+            continue  # спека: таблица — только флот с локальным клоном
+        author = str(author_obj.get("login") or author_obj.get("name") or "?")
+        labels = tuple(str(x.get("name", "")) for x in item.get("labels") or [])
+        body = str(item.get("body") or "")
+        inbox = "inbox" in labels
         issues.append(Issue(
             repo=repo,
             number=int(item["number"]),
@@ -176,7 +192,7 @@ def parse_issues(
             accepted=(
                 "n/a"
                 if not inbox
-                else _acceptance(body, repos.get(repo.lower()))
+                else _acceptance(body, clone)
             ),
             kind=classify(str(item.get("title") or ""), body, labels),
             internal=author.lower() in internal,
@@ -247,9 +263,9 @@ def apply_kinds(issues: list[Issue], kinds: dict[str, str]) -> list[Issue]:
 
 def launch(issue: Issue, root: Path, mode: str) -> str:
     """Одна tmux-сессия на issue; повторный запуск — подсказка attach."""
-    repo_path = discover_repos(root).get(issue.repo.lower())
+    repo_path = resolve_clone(discover_repos(root), issue.owner, issue.repo)
     if repo_path is None:
-        raise RuntimeError(f"local clone for {issue.repo} not found")
+        raise RuntimeError(f"local clone for {issue.owner}/{issue.repo} not found")
     session = re.sub(r"[^a-zA-Z0-9_-]", "-", f"issue-{issue.repo}-{issue.number}")[:80]
     # "=" требует точного совпадения имени сессии; без него tmux матчит по
     # префиксу, и short-номер (issue-devtools-6) ложно "находит" issue-devtools-67.
@@ -263,6 +279,7 @@ def launch(issue: Issue, root: Path, mode: str) -> str:
     cmd = [
         sys.executable, str(worker),
         "--repo", issue.repo,
+        "--owner", issue.owner,
         "--number", str(issue.number),
         "--author", issue.author,
         "--kind", issue.kind,

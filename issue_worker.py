@@ -54,6 +54,8 @@ def effective_execute(mode: str, internal: bool) -> bool:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--repo", required=True)
+    p.add_argument("--owner", required=True,
+                   help="owner репо issue — gh резолвит по slug, не по cwd")
     p.add_argument("--number", required=True, type=int)
     p.add_argument("--author", required=True)
     p.add_argument("--kind", required=True)
@@ -65,6 +67,7 @@ def main() -> int:
     args = p.parse_args()
     issue = subprocess.run(
         ["gh", "issue", "view", str(args.number),
+         "--repo", f"{args.owner}/{args.repo}",
          "--json", "title,body,author,labels,url"], capture_output=True, text=True,
     )
     if issue.returncode:
