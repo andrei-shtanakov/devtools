@@ -194,19 +194,24 @@ def test_gate_check_s8_returns_combined_output_on_failure(monkeypatch):
     assert len(calls) == 1
 
 
-# --- Кейс 8: commit_all ----------------------------------------------------
+# --- Кейс 8: commit_paths ---------------------------------------------------
 
 
-def test_commit_all_adds_and_commits_with_message(monkeypatch):
+def test_commit_paths_adds_only_given_paths_and_commits_with_message(monkeypatch):
+    """Круг 5: `git add -- <paths>`, не `git add -A` — не сгребает чужие
+    незакоммиченные изменения в target_dir."""
     calls = _install_fake_run(monkeypatch, returncode=1)  # diff --cached: dirty
     ops = RealOps()
 
-    ops.commit_all("/tmp/devtools", "docs(governance): x\n\nCo-Authored-By: y")
+    ops.commit_paths(
+        "/tmp/devtools", ["workstreams/WS-1/spec"],
+        "docs(governance): x\n\nCo-Authored-By: y",
+    )
 
     assert [c.argv[:2] for c in calls] == [
         ["git", "add"], ["git", "diff"], ["git", "commit"],
     ]
-    assert calls[0].argv == ["git", "add", "-A"]
+    assert calls[0].argv == ["git", "add", "--", "workstreams/WS-1/spec"]
     assert calls[0].kwargs["cwd"] == "/tmp/devtools"
     assert calls[2].argv == [
         "git", "commit", "-m", "docs(governance): x\n\nCo-Authored-By: y",
@@ -214,11 +219,20 @@ def test_commit_all_adds_and_commits_with_message(monkeypatch):
     assert calls[2].kwargs["check"] is True
 
 
-def test_commit_all_empty_index_does_not_commit(monkeypatch):
+def test_commit_paths_multiple_paths(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=1)
+    ops = RealOps()
+
+    ops.commit_paths("/tmp/devtools", ["a/spec", "b/spec"], "message")
+
+    assert calls[0].argv == ["git", "add", "--", "a/spec", "b/spec"]
+
+
+def test_commit_paths_empty_index_does_not_commit(monkeypatch):
     calls = _install_fake_run(monkeypatch, returncode=0)  # diff --cached: clean
     ops = RealOps()
 
-    ops.commit_all("/tmp/devtools", "message")
+    ops.commit_paths("/tmp/devtools", ["workstreams/WS-1/spec"], "message")
 
     assert [c.argv[:2] for c in calls] == [["git", "add"], ["git", "diff"]]
 
@@ -380,3 +394,67 @@ def test_find_issue_invalid_json_raises_runtime_error(monkeypatch):
 
     with pytest.raises(RuntimeError):
         ops.find_issue(REPO_SLUG, "slug: beh-remediation-WS-1")
+
+
+# --- Кейс 10: is_dirty — fail-closed гард S1 (круг 5) -----------------------
+
+
+def test_is_dirty_true_on_nonempty_porcelain(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout=" M foo.py\n")
+    ops = RealOps()
+
+    result = ops.is_dirty("/tmp/devtools")
+
+    assert result is True
+    assert calls[0].argv == ["git", "status", "--porcelain"]
+    assert calls[0].kwargs["cwd"] == "/tmp/devtools"
+
+
+def test_is_dirty_false_on_empty_porcelain(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=0, stdout="")
+    ops = RealOps()
+
+    result = ops.is_dirty("/tmp/devtools")
+
+    assert result is False
+
+
+# --- Кейс 11: checkout_and_pull — S8 на default-ветке (круг 5) -------------
+
+
+def test_checkout_and_pull_switch_then_pull_ff_only(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+
+    ops.checkout_and_pull("/tmp/devtools", "master")
+
+    assert [c.argv for c in calls] == [
+        ["git", "switch", "master"],
+        ["git", "pull", "--ff-only"],
+    ]
+    assert calls[0].kwargs["cwd"] == "/tmp/devtools"
+    assert calls[1].kwargs["cwd"] == "/tmp/devtools"
+
+
+def test_checkout_and_pull_switch_failure_raises_runtime_error(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1, stderr="unknown branch")
+    ops = RealOps()
+
+    with pytest.raises(RuntimeError):
+        ops.checkout_and_pull("/tmp/devtools", "master")
+
+
+def test_checkout_and_pull_pull_failure_raises_runtime_error(monkeypatch):
+    calls_seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls_seen.append(list(argv))
+        rc = 0 if argv[1] == "switch" else 1
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="diverged")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+
+    with pytest.raises(RuntimeError):
+        ops.checkout_and_pull("/tmp/devtools", "master")
+    assert len(calls_seen) == 2  # switch ran, then pull failed

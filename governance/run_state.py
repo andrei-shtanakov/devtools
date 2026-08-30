@@ -48,6 +48,12 @@ class RunState:
     head: str | None
     ops: dict[str, dict]
     remediated_by: str | None
+    # Default-ветка целевого репо на момент S7 (`pr_facts["baseRefName"]`,
+    # фолбэк "master"), нужна S8 для чекаута перед authoritative-гейтом
+    # (финальное ревью, круг 5). Дефолт `None` — старые поля перед ним без
+    # дефолтов, дальше в списке этот новее их всех; runner проставляет его
+    # явно в `_step_verdict`, не здесь.
+    base_ref: str | None = None
 
 
 def new_run(
@@ -112,6 +118,19 @@ def load(run_id: str) -> RunState:
     """Читает `run.json` и восстанавливает `RunState`."""
     raw = (run_dir(run_id) / "run.json").read_text(encoding="utf-8")
     return RunState(**json.loads(raw))
+
+
+def all_run_ids() -> list[str]:
+    """Все `run_id` под `RUNS_ROOT` (по имени каталога, JSON не проверяется).
+
+    Используется WS-lock'ом (`runner._blocking_merged_unverified`, финальное
+    ревью круг 5) для обхода соседних прогонов — сам список не решает,
+    читается ли каждый `run.json`; битые леджеры отсеивает вызывающая
+    сторона.
+    """
+    if not RUNS_ROOT.exists():
+        return []
+    return sorted(p.name for p in RUNS_ROOT.iterdir() if p.is_dir())
 
 
 def op_status(state: RunState, key: str) -> str:

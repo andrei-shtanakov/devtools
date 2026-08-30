@@ -28,6 +28,7 @@ from governance.ops import Ops, RealOps
 from governance.policy_sources import build_authority, load_safety
 from governance.run_state import (
     RunState,
+    all_run_ids,
     load,
     new_run,
     op_complete,
@@ -62,6 +63,36 @@ def _reject_if_run_exists(run_id: str) -> None:
         )
 
 
+def _blocking_merged_unverified(ws_id: str) -> str | None:
+    """WS-lock (спека §5, финальное ревью круг 5): найти блокирующий run_id.
+
+    Пока по ``ws_id`` висит ``merged_unverified`` без зелёного (``completed``)
+    потомка (``remediated_by`` == его run_id), новый авторинг-прогон по этому
+    же ``ws_id`` не стартует — fail-closed: непроверенное не читается как
+    проверенное. Возвращает run_id блокирующего прогона либо ``None``.
+
+    Обход соседей по `all_run_ids()`: битые/нечитаемые `run.json` (не тот
+    формат, отсутствующие поля, невалидный JSON) пропускаются молча — сосед
+    с испорченным леджером не должен мешать чужому прогону.
+    """
+    states: dict[str, RunState] = {}
+    for run_id in all_run_ids():
+        try:
+            states[run_id] = load(run_id)
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+    verified_parents = {
+        s.remediated_by
+        for s in states.values()
+        if s.remediated_by and s.status == "completed"
+    }
+    for run_id, s in states.items():
+        if s.ws_id == ws_id and s.status == "merged_unverified":
+            if run_id not in verified_parents:
+                return run_id
+    return None
+
+
 def start(
     subject: str,
     repo: str,
@@ -74,14 +105,15 @@ def start(
     ops: Ops,
     merge_authority: str | None = None,
 ) -> RunState:
-    """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
-
-    TODO: не проверяет соседние прогоны по этому же ``ws_id`` — спека §5
-    требует fail-closed блокировку нового авторинг-прогона, пока по ``ws_id``
-    висит ``merged_unverified`` без зелёного потомка (финальное ревью F-8).
-    Перенесено в B2, TODO.md `@id:behaviour-runner-ws-lock`.
-    """
+    """S0: новый прогон, затем сразу `advance()` до стопа/завершения."""
     _reject_if_run_exists(run_id)
+    blocker = _blocking_merged_unverified(ws_id)
+    if blocker is not None:
+        raise ValueError(
+            f"WS-id {ws_id!r} заблокирован merged_unverified-прогоном "
+            f"{blocker!r} без зелёного потомка — создайте verification-run "
+            "(verify(...)) прежде чем начинать новый авторинг-прогон"
+        )
     state = new_run(
         subject=subject,
         repo=repo,
@@ -142,6 +174,10 @@ _STOPPED_RESET_OPS: dict[str, tuple[str, ...]] = {
     "stopped_gate": ("gate-candidate",),
     "stopped_review": ("ready", "review"),
     "stopped_merge_refused": ("verdict",),
+    # stopped_dirty: `branch` ещё не стартовала (проверка идёт до
+    # `_ensure_started`), сбрасывать нечего — только статус обратно в
+    # running, чтобы `_step_branch` перепроверил `is_dirty` (круг 5).
+    "stopped_dirty": (),
 }
 
 
@@ -168,8 +204,10 @@ def resume(run_id: str, ops: Ops) -> RunState:
     ``stopped_author`` — незавершённые ``author-*``; ``stopped_merge_refused``
     (S7 `refuse`, отдельный от ``stopped_gate`` статус — M-1) — ``verdict``,
     хотя фактическая пересверка вердикта теперь происходит на каждом заходе в
-    S7 независимо от этого сброса (см. `_step_verdict`, F-2). Любой другой
-    статус — обычный ``advance()``.
+    S7 независимо от этого сброса (см. `_step_verdict`, F-2);
+    ``stopped_dirty`` (S1 fail-closed dirty-гард, круг 5) — сбрасывать
+    нечего (``branch`` не стартовала), только статус обратно в ``running``.
+    Любой другой статус — обычный ``advance()``.
     """
     state = load(run_id)
     if state.status == "merged_unverified":
@@ -231,6 +269,7 @@ def verify(parent_run_id: str, ops: Ops, run_id: str) -> RunState:
     child.branch = parent.branch
     child.pr = parent.pr
     child.head = parent.head
+    child.base_ref = parent.base_ref
     child.status = "running"
     save(child)
     _step_s8(child, ops)
@@ -300,11 +339,29 @@ def _ensure_started(state: RunState, key: str) -> None:
 
 
 def _step_branch(state: RunState, ops: Ops) -> bool:
-    """S1: ветка `spec/<ws_id>-behaviour`; `ensure_branch` идемпотентен."""
+    """S1: ветка `spec/<ws_id>-behaviour`; `ensure_branch` идемпотентен.
+
+    Fail-closed dirty-гард (финальное ревью, круг 5): `target_dir` грязный
+    (`git status --porcelain` непуст) ДО начала прогона — дальше по
+    конвейеру `commit_paths` закоммитил бы рядом с чужими незакоммиченными
+    правками. Проверяется, только пока `branch` ещё не заведена: ветка уже
+    создана значит проверка на ЭТОМ прогоне уже пройдена, а грязь внутри
+    неё — уже наши же авторенные файлы (S2/S3), не чужие. Resume после
+    ручной очистки — обычный `advance()`: `branch` так и не стартовала,
+    проверка просто повторяется.
+    """
     key = "branch"
     state.branch = f"spec/{state.ws_id}-behaviour"
     if op_status(state, key) == "completed":
         return True
+    if op_status(state, key) == "new" and ops.is_dirty(state.target_dir):
+        print(
+            f"_step_branch: target_dir {state.target_dir!r} грязный "
+            "(git status --porcelain непуст) — прогон не начат"
+        )
+        state.status = "stopped_dirty"
+        save(state)
+        return False
     _ensure_started(state, key)
     ops.ensure_branch(state.target_dir, state.branch)
     op_complete(state, key)
@@ -345,8 +402,12 @@ def _step_commit(state: RunState, ops: Ops) -> bool:
     Между авторингом и push не было коммита: `ops.author` (`codex exec`)
     не гарантированно коммитит сам, поэтому push уходил пустым и
     `create_draft_pr` падал неперехваченным `CalledProcessError`. Отдельный
-    op `commit`, идемпотентный (пустой индекс после `git add -A` — не
-    ошибка, см. `RealOps.commit_all`).
+    op `commit`, идемпотентный (пустой индекс — не ошибка, см.
+    `RealOps.commit_paths`).
+
+    Коммитится ТОЛЬКО `bundle_dir` (круг 5, codex-ревью PR #88): `git add
+    -A` сгребал бы в этот коммит и чужие незакоммиченные изменения где
+    угодно в `target_dir` — заменено на явный список путей.
     """
     key = "commit"
     if op_status(state, key) == "completed":
@@ -356,7 +417,7 @@ def _step_commit(state: RunState, ops: Ops) -> bool:
         f"docs(governance): behaviour bundle {state.ws_id} — {state.subject}\n\n"
         "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
     )
-    ops.commit_all(state.target_dir, message)
+    ops.commit_paths(state.target_dir, [state.bundle_dir], message)
     op_complete(state, key)
     return True
 
@@ -529,6 +590,9 @@ def _step_verdict(state: RunState, ops: Ops) -> bool:
     safety = load_safety()
     review_exit = state.ops.get("review", {}).get("exit")
     pr_facts_raw = ops.pr_facts(state.repo_slug, state.pr)
+    # S8 гейтит default-ветку целевого репо, не feature-ветку прогона — ей
+    # нужно имя (круг 5); фолбэк "master" на пустой/отсутствующий baseRefName.
+    state.base_ref = pr_facts_raw.get("baseRefName") or "master"
     files = ops.pr_files(state.repo_slug, state.pr)
     threads = ops.unresolved_threads(state.repo_slug, state.pr)
     facts = facts_from(pr_facts_raw, files, threads, state.bundle_dir)
@@ -595,6 +659,12 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
     результата на resume приводила к дубль-issue (`op_start` пишется ДО
     эффекта; `started` при входе → реконсиляция через `ops.find_issue` по
     `slug:`-префиксу вместо слепого повторного `create_issue`).
+
+    Перед самим `gate_check_s8` — op `sync-default` (круг 5, codex-ревью
+    PR #88): `target_dir` без явного чекаута мог стоять на feature-ветке
+    прогона, и authoritative-срез гейтил бы не default-ветку. Идемпотентен
+    (повторный `switch`+`pull --ff-only` безопасен), поэтому не проверяется
+    отдельно на resume — просто выполняется заново, если ещё не `completed`.
     """
     key = "gate-authoritative"
     findings_path = run_dir(state.run_id) / "s8-findings.txt"
@@ -605,6 +675,16 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
             return True
         findings = findings_path.read_text(encoding="utf-8")
     else:
+        sync_key = "sync-default"
+        if op_status(state, sync_key) != "completed":
+            _ensure_started(state, sync_key)
+            base_ref = state.base_ref or "master"
+            try:
+                ops.checkout_and_pull(state.target_dir, base_ref)
+            except RuntimeError as exc:
+                print(f"_step_s8: checkout_and_pull({base_ref!r}) не удался: {exc}")
+                return False
+            op_complete(state, sync_key)
         _ensure_started(state, key)
         exit_code, output = ops.gate_check_s8(
             state.target_dir, state.bundle_dir, state.profile

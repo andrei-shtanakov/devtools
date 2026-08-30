@@ -29,9 +29,13 @@ class Ops(Protocol):
 
     def ensure_branch(self, target_dir: str, branch: str) -> None: ...
 
+    def is_dirty(self, target_dir: str) -> bool: ...
+
     def head_sha(self, target_dir: str, branch: str) -> str: ...
 
     def push_branch(self, target_dir: str, branch: str) -> None: ...
+
+    def checkout_and_pull(self, target_dir: str, branch: str) -> None: ...
 
     def find_pr(self, repo_slug: str, branch: str) -> int | None: ...
 
@@ -63,7 +67,9 @@ class Ops(Protocol):
         self, target_dir: str, kind: str, subject: str, bundle_dir: str
     ) -> int: ...
 
-    def commit_all(self, target_dir: str, message: str) -> None: ...
+    def commit_paths(
+        self, target_dir: str, paths: list[str], message: str
+    ) -> None: ...
 
     def gate_check_s8(
         self, target_dir: str, bundle_dir: str, profile: str
@@ -86,6 +92,20 @@ class RealOps:
         flag = [] if exists.returncode == 0 else ["-c"]
         subprocess.run(["git", "switch", *flag, branch], cwd=target_dir, check=True)
 
+    def is_dirty(self, target_dir: str) -> bool:
+        """`git status --porcelain` непуст → есть незакоммиченные изменения.
+
+        Fail-closed гард S1 (финальное ревью, круг 5): грязный target_dir ДО
+        начала прогона означает, что дальнейший `commit_paths` закоммитит
+        рядом с чужими незакоммиченными правками (не сотрёт их, но перемешает
+        историю) — прогон обязан остановиться раньше, а не молча продолжить.
+        """
+        done = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=target_dir, capture_output=True, text=True, check=True,
+        )
+        return bool(done.stdout.strip())
+
     def head_sha(self, target_dir: str, branch: str) -> str:
         """SHA головы branch в target_dir."""
         done = subprocess.run(
@@ -99,6 +119,33 @@ class RealOps:
         subprocess.run(
             ["git", "push", "-u", "origin", branch], cwd=target_dir, check=True,
         )
+
+    def checkout_and_pull(self, target_dir: str, branch: str) -> None:
+        """`git switch <branch>` + `git pull --ff-only`; сбой — RuntimeError.
+
+        S8 обязан гейтить authoritative-срез на default-ветке, не на
+        feature-ветке прогона (финальное ревью, круг 5): без явного чекаута
+        `gate_check_s8` унаследовал бы содержимое той ветки, на которой
+        случайно стоит worktree.
+        """
+        switch = subprocess.run(
+            ["git", "switch", branch],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if switch.returncode != 0:
+            raise RuntimeError(
+                f"checkout_and_pull: git switch {branch} "
+                f"rc={switch.returncode}: {switch.stderr.strip()}"
+            )
+        pull = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if pull.returncode != 0:
+            raise RuntimeError(
+                f"checkout_and_pull: git pull --ff-only rc={pull.returncode}: "
+                f"{pull.stderr.strip()}"
+            )
 
     def find_pr(self, repo_slug: str, branch: str) -> int | None:
         """Номер открытого PR для branch; None ТОЛЬКО когда открытых PR нет.
@@ -232,9 +279,15 @@ class RealOps:
         )
         return done.returncode
 
-    def commit_all(self, target_dir: str, message: str) -> None:
-        """`git add -A` + коммит; пустой индекс (нечего коммитить) — не ошибка."""
-        subprocess.run(["git", "add", "-A"], cwd=target_dir, check=True)
+    def commit_paths(self, target_dir: str, paths: list[str], message: str) -> None:
+        """`git add -- <paths>` (явный список, не `-A`) + коммит.
+
+        Круг 5 (codex-ревью PR #88): `git add -A` сгребал в коммит прогона
+        чужие незакоммиченные изменения где угодно в `target_dir` — заменено
+        на явный список путей (runner передаёт ровно `[bundle_dir]`). Пустой
+        индекс после `add` (нечего коммитить) — не ошибка.
+        """
+        subprocess.run(["git", "add", "--", *paths], cwd=target_dir, check=True)
         clean = subprocess.run(
             ["git", "diff", "--cached", "--quiet"], cwd=target_dir,
         )

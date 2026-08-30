@@ -43,16 +43,23 @@ class FakeOps:
     s8_exit: int = 0
     s8_output: str = ""
     find_pr_error: str | None = None
+    dirty: bool = False
+    checkout_and_pull_error: str | None = None
     authored: list[str] = field(default_factory=list)
     comments: list[str] = field(default_factory=list)
     merged: list[tuple[int, str]] = field(default_factory=list)
     issues: list[tuple[str, str, str]] = field(default_factory=list)
-    committed: list[tuple[str, str]] = field(default_factory=list)
+    committed: list[tuple[str, list[str], str]] = field(default_factory=list)
+    checked_out: list[tuple[str, str]] = field(default_factory=list)
     calls: list[tuple] = field(default_factory=list)
 
     def ensure_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("ensure_branch", branch))
         self.existing_branches.add(branch)
+
+    def is_dirty(self, target_dir: str) -> bool:
+        self.calls.append(("is_dirty",))
+        return self.dirty
 
     def head_sha(self, target_dir: str, branch: str) -> str:
         self.calls.append(("head_sha", branch))
@@ -60,6 +67,12 @@ class FakeOps:
 
     def push_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("push_branch", branch))
+
+    def checkout_and_pull(self, target_dir: str, branch: str) -> None:
+        self.calls.append(("checkout_and_pull", branch))
+        if self.checkout_and_pull_error is not None:
+            raise RuntimeError(self.checkout_and_pull_error)
+        self.checked_out.append((target_dir, branch))
 
     def find_pr(self, repo_slug: str, branch: str) -> int | None:
         self.calls.append(("find_pr", branch))
@@ -138,9 +151,9 @@ class FakeOps:
                 return 900 + idx + 1
         return None
 
-    def commit_all(self, target_dir: str, message: str) -> None:
-        self.calls.append(("commit_all",))
-        self.committed.append((target_dir, message))
+    def commit_paths(self, target_dir: str, paths: list[str], message: str) -> None:
+        self.calls.append(("commit_paths", tuple(paths)))
+        self.committed.append((target_dir, paths, message))
 
 
 @pytest.fixture()
@@ -752,21 +765,23 @@ def test_pr_reconciliation_find_pr_failure_stops_without_duplicate(
 # --- F-6: commit перед push --------------------------------------------------
 
 
-def test_commit_all_called_between_author_and_push(
+def test_commit_paths_called_between_author_and_push(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    """F-6: `ops.commit_all` вызывается между авторингом и push."""
+    """F-6: `ops.commit_paths` вызывается между авторингом и push, только с
+    `bundle_dir` (круг 5: не `git add -A`, явный список путей)."""
     monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
     state = runner.start(**_start_kwargs(tmp_path, "r-commit", ops))
 
     call_names = [c[0] for c in ops.calls]
-    assert call_names.index("author") < call_names.index("commit_all")
-    assert call_names.index("commit_all") < call_names.index("push_branch")
+    assert call_names.index("author") < call_names.index("commit_paths")
+    assert call_names.index("commit_paths") < call_names.index("push_branch")
     assert state.ops["commit"]["status"] == "completed"
     assert len(ops.committed) == 1
-    _, message = ops.committed[0]
+    _target_dir, paths, message = ops.committed[0]
+    assert paths == [BUNDLE_DIR]
     assert "Co-Authored-By" in message
 
 
@@ -913,8 +928,12 @@ def test_verify_with_existing_run_id_raises(
     assert parent.status == "merged_unverified"
 
     # Занятый child run_id — например, случайно совпал с чужим прогоном.
+    # Другой ws_id, чтобы не наткнуться на WS-lock того же ws_id — здесь
+    # проверяется отдельно занятость run_id, не WS-lock (круг 5).
     taken_child_id = "r-verify-child-taken"
-    runner.start(**_start_kwargs(tmp_path, taken_child_id, FakeOps()))
+    runner.start(
+        **_start_kwargs(tmp_path, taken_child_id, FakeOps(), ws_id="WS-9")
+    )
     before = rs.run_dir(taken_child_id).joinpath("run.json").read_text(
         encoding="utf-8"
     )
@@ -926,3 +945,210 @@ def test_verify_with_existing_run_id_raises(
         encoding="utf-8"
     )
     assert after == before
+
+
+# --- Круг 5, часть 1: S8 на default-ветке -----------------------------------
+
+
+def test_s8_syncs_to_default_branch_before_gate_check(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """S8 чекаутит default-ветку (`base_ref` из `pr_facts.baseRefName`,
+    зафиксированный на S7) и подтягивает merge-коммит ПЕРЕД `gate_check_s8` —
+    иначе authoritative-срез читал бы feature-ветку прогона."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts={**GREEN_PR_FACTS, "baseRefName": "main"},
+        files=GREEN_BUNDLE_FILES, s8_exit=0,
+    )
+
+    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-sync", ops))
+
+    assert state.status == "completed"
+    assert state.base_ref == "main"
+    assert ops.checked_out == [(state.target_dir, "main")]
+    call_names = [c[0] for c in ops.calls]
+    assert call_names.index("checkout_and_pull") < call_names.index("gate_check_s8")
+    assert state.ops["sync-default"]["status"] == "completed"
+
+
+def test_s8_sync_falls_back_to_master_when_base_ref_missing(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts={**GREEN_PR_FACTS, "baseRefName": ""},
+        files=GREEN_BUNDLE_FILES, s8_exit=0,
+    )
+
+    state = runner.start(
+        **_agent_merge_kwargs(tmp_path, "r-s8-sync-fallback", ops)
+    )
+
+    assert state.base_ref == "master"
+    assert ops.checked_out == [(state.target_dir, "master")]
+
+
+def test_s8_sync_failure_stops_without_touching_status_or_gate(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """`checkout_and_pull` падает (например, локальные правки/дивергенция) —
+    S8 останавливается ДО `gate_check_s8`, статус run'а не меняется (retry
+    на следующем `advance()`/`resume()`, тот же паттерн, что `_step_pr`)."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        checkout_and_pull_error="ff-only diverged",
+    )
+
+    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-sync-fail", ops))
+
+    assert state.status == "running"
+    assert state.ops["sync-default"]["status"] == "started"
+    assert "gate_check_s8" not in [c[0] for c in ops.calls]
+
+
+def test_verify_child_reuses_parent_base_ref(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts={**GREEN_PR_FACTS, "baseRefName": "main"},
+        files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-sync-parent"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+    assert parent.base_ref == "main"
+
+    ops.s8_exit = 0
+    calls_before_verify = len(ops.calls)
+    child = runner.verify(parent_id, ops, "r-s8-sync-child")
+    child_calls = ops.calls[calls_before_verify:]
+
+    assert child.base_ref == "main"
+    assert ("checkout_and_pull", "main") in child_calls
+
+
+# --- Круг 5, часть 2: dirty-гард S1 -----------------------------------------
+
+
+def test_dirty_target_dir_stops_before_branch_created(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Грязный `target_dir` ДО начала прогона → `stopped_dirty`, ничего не
+    создано: `ensure_branch` не вызван, `commit_paths` тем более."""
+    ops = FakeOps(dirty=True)
+
+    state = runner.start(**_start_kwargs(tmp_path, "r-dirty", ops))
+
+    assert state.status == "stopped_dirty"
+    assert "branch" not in state.ops
+    call_names = [c[0] for c in ops.calls]
+    assert "ensure_branch" not in call_names
+    assert "commit_paths" not in call_names
+
+
+def test_resume_after_cleanup_from_stopped_dirty_proceeds(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Resume после ручной очистки — `branch` так и не стартовала, проверка
+    просто повторяется и на этот раз проходит."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        dirty=True, review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+    )
+    run_id = "r-dirty-resume"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_dirty"
+
+    ops.dirty = False  # человек прибрался
+    result = runner.resume(run_id, ops)
+
+    assert result.status != "stopped_dirty"
+    assert result.ops["branch"]["status"] == "completed"
+
+
+# --- Круг 5, часть 3: WS-lock по merged_unverified --------------------------
+
+
+def test_start_blocked_by_merged_unverified_without_green_child(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    blocked_ws = "WS-LOCK-1"
+    parent = runner.start(
+        **_agent_merge_kwargs(tmp_path, "r-lock-parent", ops, ws_id=blocked_ws)
+    )
+    assert parent.status == "merged_unverified"
+
+    with pytest.raises(ValueError, match="WS-LOCK-1"):
+        runner.start(**_start_kwargs(
+            tmp_path, "r-lock-blocked-attempt", FakeOps(), ws_id=blocked_ws,
+        ))
+
+
+def test_start_unblocked_after_verify_child_completes(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    ws = "WS-LOCK-2"
+    parent = runner.start(
+        **_agent_merge_kwargs(tmp_path, "r-lock-parent2", ops, ws_id=ws)
+    )
+    assert parent.status == "merged_unverified"
+
+    ops.s8_exit = 0  # находки устранены фикс-PR'ом
+    child = runner.verify(parent.run_id, ops, "r-lock-child2")
+    assert child.status == "completed"
+
+    # Разблокировано зелёным потомком — новый прогон стартует без ValueError.
+    unblocked = runner.start(**_start_kwargs(
+        tmp_path, "r-lock-after-fix", FakeOps(), ws_id=ws,
+    ))
+    assert unblocked.run_id == "r-lock-after-fix"
+
+
+def test_start_broken_neighbor_run_json_is_skipped(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Битый (не-JSON) `run.json` среди соседей не мешает обходу WS-lock."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    broken_dir = rs.run_dir("r-broken-neighbor")
+    broken_dir.mkdir(parents=True)
+    (broken_dir / "run.json").write_text("not json at all", encoding="utf-8")
+
+    state = runner.start(**_start_kwargs(tmp_path, "r-after-broken", FakeOps()))
+
+    assert state.run_id == "r-after-broken"
