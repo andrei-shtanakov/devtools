@@ -1152,3 +1152,140 @@ def test_start_broken_neighbor_run_json_is_skipped(
     state = runner.start(**_start_kwargs(tmp_path, "r-after-broken", FakeOps()))
 
     assert state.run_id == "r-after-broken"
+
+
+# --- Круг 6: два окна S8 (codex-ревью PR #88) -------------------------------
+
+
+def _s8_preset_ops(**gate_authoritative: object) -> dict:
+    """Общий журнал операций до захода в S8 — только gate-authoritative
+    (и опционально sync-default) варьируется между тестами круга 6."""
+    ops: dict = {
+        "branch": {"status": "completed"},
+        "author-charter": {"status": "completed", "skipped": True},
+        "author-requirements": {"status": "completed", "skipped": True},
+        "author-behaviour": {"status": "completed", "skipped": True},
+        "commit": {"status": "completed"},
+        "gate-candidate": {
+            "status": "completed", "error_count": 0, "required_absent": [],
+        },
+        "push": {"status": "completed"},
+        "pr": {"status": "completed", "number": 100},
+        "ready": {"status": "completed"},
+        "review": {"status": "completed", "exit": 0},
+        "verdict": {"status": "completed", "decision": "agent", "reason": "ok"},
+        "merge": {"status": "completed", "merged": True},
+    }
+    if gate_authoritative:
+        ops["gate-authoritative"] = gate_authoritative
+    return ops
+
+
+def test_resume_completes_when_gate_authoritative_done_but_status_stuck_running(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Окно 1 (успех): op `gate-authoritative` уже `completed(exit=0)` на
+    диске, но `status` ещё `"running"` (гибель между `op_complete` и
+    финальным `save`) — resume обязан довести до `completed`, не оставлять
+    run вечно `running`."""
+    ops = FakeOps()
+    run_id = "r-s8-stuck-ok"
+    kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
+    state = rs.new_run(
+        subject=kwargs["subject"], repo=kwargs["repo"],
+        repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
+        target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
+        profile=kwargs["profile"], run_id=run_id,
+    )
+    state.branch = "spec/WS-1-behaviour"
+    state.pr = 100
+    state.head = "deadbeef"
+    state.base_ref = "master"
+    state.ops = {
+        **_s8_preset_ops(status="completed", exit=0),
+        "sync-default": {"status": "completed"},
+    }
+    rs.save(state)
+    assert state.status == "running"
+
+    result = runner.advance(state, ops)
+
+    assert result.status == "completed"
+    assert "checkout_and_pull" not in [c[0] for c in ops.calls]
+    assert "gate_check_s8" not in [c[0] for c in ops.calls]
+
+
+def test_resume_completes_fail_path_when_status_stuck_running_after_gate_fail(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Окно 1 (провал): op `gate-authoritative` уже `completed(exit=1)` на
+    диске, но `status` ещё `"running"` и `remediation-issue` ещё не начат —
+    resume обязан довести fail-путь до конца: завести issue, выставить
+    `merged_unverified`, не выйти на полпути."""
+    ops = FakeOps()
+    run_id = "r-s8-stuck-fail"
+    kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
+    state = rs.new_run(
+        subject=kwargs["subject"], repo=kwargs["repo"],
+        repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
+        target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
+        profile=kwargs["profile"], run_id=run_id,
+    )
+    state.branch = "spec/WS-1-behaviour"
+    state.pr = 100
+    state.head = "deadbeef"
+    state.base_ref = "master"
+    state.ops = {
+        **_s8_preset_ops(status="completed", exit=1),
+        "sync-default": {"status": "completed"},
+    }
+    run_dir_path = rs.run_dir(run_id)
+    run_dir_path.mkdir(parents=True, exist_ok=True)
+    (run_dir_path / "s8-findings.txt").write_text(
+        "gate-check (S8, authoritative) завершился с кодом 1\n\nGC-X\n",
+        encoding="utf-8",
+    )
+    rs.save(state)
+    assert state.status == "running"
+
+    result = runner.advance(state, ops)
+
+    assert result.status == "merged_unverified"
+    assert len(ops.issues) == 1
+    assert result.ops["remediation-issue"]["status"] == "completed"
+    assert "checkout_and_pull" not in [c[0] for c in ops.calls]
+    assert "gate_check_s8" not in [c[0] for c in ops.calls]
+
+
+def test_sync_default_always_rechecked_even_if_already_completed(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Окно 2: `sync-default` уже `completed` в журнале (из прошлой
+    попытки), но `gate-authoritative` ещё не заведён — гибель случилась
+    между sync'ом и самим `gate_check_s8`. Resume обязан перезапустить
+    `checkout_and_pull`, а не пропустить его по журналу — default-ветка
+    могла уехать дальше за то время, что прогон простоял."""
+    ops = FakeOps(s8_exit=0)
+    run_id = "r-s8-resync"
+    kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
+    state = rs.new_run(
+        subject=kwargs["subject"], repo=kwargs["repo"],
+        repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
+        target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
+        profile=kwargs["profile"], run_id=run_id,
+    )
+    state.branch = "spec/WS-1-behaviour"
+    state.pr = 100
+    state.head = "deadbeef"
+    state.base_ref = "main"
+    state.ops = {
+        **_s8_preset_ops(),
+        "sync-default": {"status": "completed"},  # из ПРОШЛОЙ попытки
+    }
+    rs.save(state)
+
+    result = runner.advance(state, ops)
+
+    assert ("checkout_and_pull", "main") in ops.calls
+    assert result.status == "completed"
+    assert result.ops["gate-authoritative"] == {"status": "completed", "exit": 0}

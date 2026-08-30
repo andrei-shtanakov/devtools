@@ -660,11 +660,16 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
     эффекта; `started` при входе → реконсиляция через `ops.find_issue` по
     `slug:`-префиксу вместо слепого повторного `create_issue`).
 
-    Перед самим `gate_check_s8` — op `sync-default` (круг 5, codex-ревью
+    Перед самим `gate_check_s8` — `sync-default` (круг 5, codex-ревью
     PR #88): `target_dir` без явного чекаута мог стоять на feature-ветке
-    прогона, и authoritative-срез гейтил бы не default-ветку. Идемпотентен
-    (повторный `switch`+`pull --ff-only` безопасен), поэтому не проверяется
-    отдельно на resume — просто выполняется заново, если ещё не `completed`.
+    прогона, и authoritative-срез гейтил бы не default-ветку. Выполняется
+    БЕЗУСЛОВНО на каждом заходе в этот шаг, пока `gate-authoritative` не
+    `completed` — не только когда сам `sync-default` ещё не `completed`
+    (круг 6, codex-ревью PR #88): между попытками мог пройти произвольный
+    отрезок времени, за который default-ветка целевого репо могла уехать
+    дальше, а локальный чекаут — устареть; `checkout_and_pull` дёшев и
+    идемпотентен, так что журнал `sync-default` держится только для аудита,
+    не как ветка пропуска.
     """
     key = "gate-authoritative"
     findings_path = run_dir(state.run_id) / "s8-findings.txt"
@@ -672,19 +677,25 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
 
     if gate_op is not None and gate_op["status"] == "completed":
         if gate_op.get("exit") == 0:
+            # Резюме между write-ahead `op_complete(gate-authoritative)` и
+            # финальным `state.status = "completed"` (круг 6, codex-ревью
+            # PR #88): op на диске уже `completed`, но статус ещё "running" —
+            # довести до конца, не оставлять прогон вечно "running".
+            if state.status != "completed":
+                state.status = "completed"
+                save(state)
             return True
         findings = findings_path.read_text(encoding="utf-8")
     else:
         sync_key = "sync-default"
-        if op_status(state, sync_key) != "completed":
-            _ensure_started(state, sync_key)
-            base_ref = state.base_ref or "master"
-            try:
-                ops.checkout_and_pull(state.target_dir, base_ref)
-            except RuntimeError as exc:
-                print(f"_step_s8: checkout_and_pull({base_ref!r}) не удался: {exc}")
-                return False
-            op_complete(state, sync_key)
+        _ensure_started(state, sync_key)
+        base_ref = state.base_ref or "master"
+        try:
+            ops.checkout_and_pull(state.target_dir, base_ref)
+        except RuntimeError as exc:
+            print(f"_step_s8: checkout_and_pull({base_ref!r}) не удался: {exc}")
+            return False
+        op_complete(state, sync_key)
         _ensure_started(state, key)
         exit_code, output = ops.gate_check_s8(
             state.target_dir, state.bundle_dir, state.profile
@@ -724,6 +735,12 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
             number = ops.create_issue(state.repo_slug, issue_title, issue_body)
             op_complete(state, issue_key, number=number)
 
+    # Безусловный фолл-through сюда с обеих веток выше (свежий провал и
+    # резюме на уже-completed(exit!=0) gate-authoritative) — второе окно
+    # круга 6: гибель между `op_complete(gate-authoritative)` и этой строкой
+    # оставляла бы run вечно "running", если бы тут был досрочный return;
+    # его нет, так что fail-путь всегда доводится до конца независимо от
+    # того, каким статус пришёл на вход функции.
     state.status = "merged_unverified"
     save(state)
     return False
