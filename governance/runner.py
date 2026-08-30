@@ -654,6 +654,12 @@ def _step_merge(state: RunState, ops: Ops) -> bool:
     return False
 
 
+def _s8_findings_text(exit_code: int | None, output: str) -> str:
+    """Текст `s8-findings.txt`, собранный из журнала `gate-authoritative`
+    (`exit`/`output`) — файл производный, журнал источник истины (круг 8)."""
+    return f"gate-check (S8, authoritative) завершился с кодом {exit_code}\n\n{output}"
+
+
 def _step_s8(state: RunState, ops: Ops) -> bool:
     """S8: authoritative-гейт на дефолтной ветке после мержа (спека §5).
 
@@ -687,6 +693,15 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
     дальше, а локальный чекаут — устареть; `checkout_and_pull` дёшев и
     идемпотентен, так что журнал `sync-default` держится только для аудита,
     не как ветка пропуска.
+
+    `s8-findings.txt` — ПРОИЗВОДНЫЙ от журнала, не источник истины (круг 8,
+    codex-ревью PR #88): op `gate-authoritative` несёт `output` в результате
+    (`op_complete(..., exit=N, output=...)`), и findings-текст всегда
+    пересобирается из этих полей и перезаписывается на диск — и на свежем
+    провале, и на resume. Раньше файл писался ОДИН раз, после
+    `op_complete`; гибель между этими двумя шагами оставляла op `completed`
+    на диске без файла, и resume падал на `read_text()`
+    (`FileNotFoundError`) вместо того, чтобы довести fail-путь до конца.
     """
     key = "gate-authoritative"
     findings_path = run_dir(state.run_id) / "s8-findings.txt"
@@ -702,7 +717,8 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
                 state.status = "completed"
                 save(state)
             return True
-        findings = findings_path.read_text(encoding="utf-8")
+        findings = _s8_findings_text(gate_op.get("exit"), gate_op.get("output", ""))
+        findings_path.write_text(findings, encoding="utf-8")
     else:
         sync_key = "sync-default"
         _ensure_started(state, sync_key)
@@ -722,11 +738,8 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
             state.status = "completed"
             save(state)
             return True
-        op_complete(state, key, exit=exit_code)
-        findings = (
-            f"gate-check (S8, authoritative) завершился с кодом {exit_code}"
-            f"\n\n{output}"
-        )
+        op_complete(state, key, exit=exit_code, output=output)
+        findings = _s8_findings_text(exit_code, output)
         findings_path.write_text(findings, encoding="utf-8")
 
     issue_title = f"beh-remediation: {state.subject} ({state.ws_id})"

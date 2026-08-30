@@ -353,8 +353,11 @@ def test_s8_fail_marks_merged_unverified_and_opens_issue(
     assert state.status == "merged_unverified"
     # Круг 3 (codex-ревью PR #88): gate-authoritative — аудит-запись, тоже
     # completed на провале (exit хранит исход); отличает «прошёл» от «нет»
-    # exit, не сам статус op'а — run терминален в обоих случаях.
-    assert state.ops["gate-authoritative"] == {"status": "completed", "exit": 1}
+    # exit, не сам статус op'а — run терминален в обоих случаях. `output`
+    # (круг 8) — источник для s8-findings.txt на resume, файл производный.
+    assert state.ops["gate-authoritative"] == {
+        "status": "completed", "exit": 1, "output": "",
+    }
     assert state.ops["remediation-issue"] == {"status": "completed", "number": 901}
 
     findings_file = rs.run_dir(run_id) / "s8-findings.txt"
@@ -1312,3 +1315,54 @@ def test_sync_default_always_rechecked_even_if_already_completed(
     assert ("checkout_and_pull", "main") in ops.calls
     assert result.status == "completed"
     assert result.ops["gate-authoritative"] == {"status": "completed", "exit": 0}
+
+
+# --- Круг 8: s8-findings.txt производный от журнала, не источник истины ----
+
+
+def test_resume_rebuilds_missing_s8_findings_from_op_output(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Круг 8 (codex-ревью PR #88): op `gate-authoritative` уже
+    `completed(exit=1, output=...)` на диске, но `s8-findings.txt` НЕТ
+    (гибель между `op_complete` и `write_text`) и статус ещё `"running"` —
+    resume обязан довести до `merged_unverified`, восстановив findings-файл
+    из журнала (не упасть на `read_text()` c `FileNotFoundError`), и
+    завести remediation-issue."""
+    ops = FakeOps()
+    run_id = "r-s8-findings-missing"
+    kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
+    state = rs.new_run(
+        subject=kwargs["subject"], repo=kwargs["repo"],
+        repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
+        target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
+        profile=kwargs["profile"], run_id=run_id,
+    )
+    state.branch = "spec/WS-1-behaviour"
+    state.pr = 100
+    state.head = "deadbeef"
+    state.base_ref = "master"
+    state.ops = {
+        **_s8_preset_ops(
+            status="completed", exit=1, output="error GC-X: bad\n",
+        ),
+        "sync-default": {"status": "completed"},
+    }
+    rs.save(state)
+    findings_file = rs.run_dir(run_id) / "s8-findings.txt"
+    assert not findings_file.exists()  # окно круга 8: файл не успел записаться
+    assert state.status == "running"
+
+    result = runner.advance(state, ops)
+
+    assert result.status == "merged_unverified"
+    assert findings_file.exists()
+    restored = findings_file.read_text(encoding="utf-8")
+    assert "1" in restored
+    assert "GC-X" in restored
+    assert len(ops.issues) == 1
+    _repo_slug, _title, body = ops.issues[0]
+    assert "GC-X" in body
+    assert result.ops["remediation-issue"]["status"] == "completed"
+    assert "checkout_and_pull" not in [c[0] for c in ops.calls]
+    assert "gate_check_s8" not in [c[0] for c in ops.calls]
