@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -675,7 +677,13 @@ def test_next_verify_run_id_skips_dangling_reservation(
     `_reserve_run_id` вечно отвечал бы «уже существует» на уже занятом
     (хоть и оборванном) слоте — постоянный deadlock на этом родителе.
     Счёт по ИМЕНАМ каталогов (`all_run_ids()`) видит `v1` независимо от
-    валидности JSON внутри и корректно берёт следующий номер."""
+    валидности JSON внутри и корректно берёт следующий номер.
+
+    Файл состарен (`os.utime`, round 7): свежий пустой `run.json` теперь
+    трактуется `_active_verify_child` как «только что зарезервировано
+    конкурентом» и блокирует `verify()` (см. `test_verify_refuses_when_
+    dangling_reservation_is_fresh`) — этот тест про труп round 6, который
+    старше грейс-периода, поэтому его нужно состарить явно."""
     monkeypatch.setattr(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
@@ -690,16 +698,117 @@ def test_next_verify_run_id_skips_dangling_reservation(
 
     # Оборванная резервация: процесс умер между _reserve_run_id и
     # save(child) — каталог и пустой run.json есть, RunState — нет.
+    # Состарена на -300с (> _ACTIVE_VERIFY_GRACE_SECONDS=120) — труп, не
+    # свежий конкурент.
     dangling_id = f"{parent_id}-v1"
     rs.run_dir(dangling_id).mkdir(parents=True, exist_ok=True)
-    (rs.run_dir(dangling_id) / "run.json").touch()
+    dangling_json = rs.run_dir(dangling_id) / "run.json"
+    dangling_json.touch()
+    old_time = time.time() - 300
+    os.utime(dangling_json, (old_time, old_time))
 
     assert runner._next_verify_run_id(parent_id) == f"{parent_id}-v2"
+    assert runner._active_verify_child(parent_id) is None
 
     ops.s8_exit = 0  # находки устранены фикс-PR'ом
     child = runner.verify(parent_id, ops)
     assert child.run_id == f"{parent_id}-v2"
     assert child.status == "completed"
+
+
+def test_verify_refuses_when_child_is_running(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 7, codex-major: round 6 переоткрыл гонку round 5 (второй
+    конкурентный `verify()` видел уже занятый каталог и спокойно
+    резервировал следующий номер вместо коллизии). Сериализация теперь
+    держится на СОСТОЯНИИ потомков: валидный `run.json` со `status` не в
+    `{"completed", "merged_unverified"}` (например `"running"` — S8 ещё
+    не отработал) — активный потомок, второй `verify()` отказывает."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-active-child"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    # Валидный, но ещё не терминальный потомок (S8 в процессе).
+    child_id = f"{parent_id}-v1"
+    child_state = rs.new_run(
+        subject=parent.subject, repo=parent.repo, repo_slug=parent.repo_slug,
+        ws_id=parent.ws_id, target_dir=parent.target_dir,
+        bundle_dir=parent.bundle_dir, profile=parent.profile, run_id=child_id,
+    )
+    child_state.remediated_by = parent_id
+    child_state.status = "running"
+    rs.save(child_state)
+
+    assert runner._active_verify_child(parent_id) == child_id
+    with pytest.raises(ValueError, match="verify уже идёт"):
+        runner.verify(parent_id, ops)
+
+
+def test_verify_refuses_when_dangling_reservation_is_fresh(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 7: свежий (только что созданный) пустой `<parent>-v1/run.json`
+    трактуется как «конкурент только что зарезервировал слот, ещё пишет
+    свой RunState» — активный, а не труп round 6. mtime моложе
+    `_ACTIVE_VERIFY_GRACE_SECONDS` (тест не состаривает файл, в отличие от
+    `test_next_verify_run_id_skips_dangling_reservation`)."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-fresh-dangling"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    dangling_id = f"{parent_id}-v1"
+    rs.run_dir(dangling_id).mkdir(parents=True, exist_ok=True)
+    (rs.run_dir(dangling_id) / "run.json").touch()  # свежий -> "прямо сейчас"
+
+    assert runner._active_verify_child(parent_id) == dangling_id
+    with pytest.raises(ValueError, match="verify уже идёт"):
+        runner.verify(parent_id, ops)
+
+
+def test_active_verify_child_ignores_merged_unverified_child(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Провальный (`merged_unverified`) потомок — терминальный статус, НЕ
+    активный: не блокирует повторный `verify()` (round 3/round 7 согласны
+    друг с другом — только `_has_green_child` реагирует на `completed`,
+    `_active_verify_child` реагирует на нетерминальные статусы)."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-failed-not-active"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    failed_child = runner.verify(parent_id, ops)
+    assert failed_child.status == "merged_unverified"  # тоже провалился
+
+    assert runner._active_verify_child(parent_id) is None
+
+    ops.s8_exit = 0  # находки устранены вторым фикс-PR'ом
+    second_child = runner.verify(parent_id, ops)
+    assert second_child.status == "completed"
 
 
 def test_verify_without_run_id_increments_attempt_after_failed_child(

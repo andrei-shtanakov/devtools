@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -131,6 +132,66 @@ def _has_green_child(parent_run_id: str) -> bool:
         s.remediated_by == parent_run_id and s.status == "completed"
         for s in _load_all_runs().values()
     )
+
+
+# Дольше типичного времени между _reserve_run_id и save(child) (доли
+# секунды в норме) на порядки — но короче того, за что реальный S8-прогон
+# (checkout/gate-check/create_issue) успевает продвинуться дальше "running"
+# в первый же заход (round 7): грейс-период для "это свежий конкурент,
+# ещё пишет свой RunState", не гарантия реального времени S8.
+_ACTIVE_VERIFY_GRACE_SECONDS = 120
+
+
+def _active_verify_child(parent_run_id: str) -> str | None:
+    """`run_id` активного (нетерминального) verify-потомка `parent_run_id`,
+    если такой есть, — иначе `None` (round 7, codex-major).
+
+    Round 6 починил зависание счётчика `attempt` на оборванной резервации,
+    но тем самым ПЕРЕОТКРЫЛ гонку round 5: второй конкурентный `verify()`
+    теперь видит каталог `<parent>-v1` (пусть даже пустой) и спокойно
+    резервирует `v2` — коллизии на `_reserve_run_id` больше нет, поэтому
+    round-5 сериализация через ValueError на занятом id не срабатывает.
+    Сериализация должна опираться на СОСТОЯНИЕ потомков, а не на коллизию
+    id: пока у родителя есть потомок, который ещё не дошёл до терминального
+    статуса, новый `verify()` не должен стартовать параллельный S8 в том
+    же `target_dir`.
+
+    Обходит каталоги по паттерну `^<parent>-v\\d+$` (`all_run_ids()`, как
+    `_next_verify_run_id`):
+
+    - валидный `run.json` со `status` НЕ в `{"completed",
+      "merged_unverified"}` (например `"running"` — S8 ещё идёт) —
+      активный потомок, возвращаем его `run_id`;
+    - нечитаемый/пустой `run.json` — либо труп round 6 (процесс умер между
+      `_reserve_run_id` и `save()`), либо конкурент, который только что
+      зарезервировал слот и ЕЩЁ пишет свой `RunState` (та самая гонка).
+      Различаем по `mtime` файла: моложе `_ACTIVE_VERIFY_GRACE_SECONDS` —
+      трактуем как «только что зарезервировано конкурентом», активный;
+      старше — труп, игнорируем (нумерация `_next_verify_run_id` его
+      перешагнёт).
+
+    Терминальные потомки (`completed`/`merged_unverified`) не блокируют —
+    зелёный уже отловлен `_has_green_child` отдельной проверкой с другим
+    сообщением, провальный разрешает повторный verify.
+    """
+    pattern = re.compile(rf"^{re.escape(parent_run_id)}-v(\d+)$")
+    now = time.time()
+    for candidate_id in all_run_ids():
+        if not pattern.match(candidate_id):
+            continue
+        try:
+            state = load(candidate_id)
+        except (OSError, ValueError, TypeError, KeyError):
+            try:
+                mtime = (run_dir(candidate_id) / "run.json").stat().st_mtime
+            except OSError:
+                continue
+            if now - mtime < _ACTIVE_VERIFY_GRACE_SECONDS:
+                return candidate_id
+            continue
+        if state.status not in ("completed", "merged_unverified"):
+            return candidate_id
+    return None
 
 
 def start(
@@ -373,17 +434,27 @@ def verify(
     Отказывает, если у родителя уже есть ЗЕЛЁНЫЙ (``completed``) потомок
     (round 3, codex-ревью): «уже верифицирован», повторный `verify()`
     создавал бы ещё один verification-run поверх уже подтверждённого.
-    Провальный потомок не блокирует — повтор после него штатный. Обе
-    проверки (`parent.status`, `_has_green_child`) — ДО `_reserve_run_id`,
-    тот же порядок, что у `start()` (валидация без побочных эффектов перед
-    резервированием id).
+    Провальный потомок не блокирует — повтор после него штатный.
+
+    Отказывает, если у родителя уже есть АКТИВНЫЙ (нетерминальный) потомок
+    (`_active_verify_child`, round 7): round 6 починил зависание счётчика
+    попыток на оборванной резервации, но тем самым переоткрыл гонку
+    round 5 — второй конкурентный `verify()` видел уже занятый каталог и
+    спокойно резервировал следующий номер, коллизии на `_reserve_run_id`
+    больше не было. Сериализация теперь держится на состоянии потомков (с
+    поправкой на mtime для трупов round 6), не на коллизии id — см.
+    докстринг `_active_verify_child`.
+
+    Все три проверки (`parent.status`, `_has_green_child`,
+    `_active_verify_child`) — ДО `_reserve_run_id`, тот же порядок, что у
+    `start()` (валидация без побочных эффектов перед резервированием id).
 
     `run_id=None` (дефолт) выводит ДЕТЕРМИНИРОВАННЫЙ id через
-    `_next_verify_run_id` (round 5) — сериализует конкурентные вызовы
-    атомарным `_reserve_run_id` вместо случайного id, который такую гонку
-    не ловил. Явный `run_id` остаётся для CLI-совместимости
-    (`--run-id`, теперь опционален) и валидируется как раньше
-    (`_reserve_run_id` → `run_dir()` → `validate_id_component`).
+    `_next_verify_run_id` (round 5) — при отсутствии активного/зелёного
+    потомка резервирует его атомарным `_reserve_run_id`. Явный `run_id`
+    остаётся для CLI-совместимости (`--run-id`, теперь опционален) и
+    валидируется как раньше (`_reserve_run_id` → `run_dir()` →
+    `validate_id_component`).
     """
     parent = load(parent_run_id)
     if parent.status != "merged_unverified":
@@ -395,6 +466,11 @@ def verify(
         raise ValueError(
             f"verify: parent-run {parent_run_id!r} уже верифицирован — "
             "у него есть завершённый (completed) потомок"
+        )
+    active_child = _active_verify_child(parent_run_id)
+    if active_child is not None:
+        raise ValueError(
+            f"verify уже идёт: {active_child} (resume или дождитесь)"
         )
     if run_id is None:
         run_id = _next_verify_run_id(parent_run_id)
