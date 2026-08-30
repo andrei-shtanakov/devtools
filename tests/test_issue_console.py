@@ -124,6 +124,30 @@ def test_fetch_uses_gh_search_issues_compatible_flags(monkeypatch) -> None:
     assert "--type" not in captured
 
 
+def test_fetch_warns_when_search_limit_reached(monkeypatch, capsys) -> None:
+    import json as _json
+
+    full_page = _json.dumps([{"number": i} for i in range(1000)])
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=full_page, stderr="")
+
+    monkeypatch.setattr(issue_console.subprocess, "run", fake_run)
+    data = issue_console.fetch_issues("owner")
+    assert len(data) == 1000
+    err = capsys.readouterr().err
+    assert "потолок" in err and "неполным" in err
+
+
+def test_fetch_no_warning_below_limit(monkeypatch, capsys) -> None:
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="[{\"number\": 1}]", stderr="")
+
+    monkeypatch.setattr(issue_console.subprocess, "run", fake_run)
+    assert len(issue_console.fetch_issues("owner")) == 1
+    assert capsys.readouterr().err == ""
+
+
 def test_fleet_filter_drops_repos_without_clone(tmp_path: Path) -> None:
     root = _fleet(tmp_path)  # clone exists only for alpha
     raw = [_raw(), {**_raw(repo="ghost"), "repository": {

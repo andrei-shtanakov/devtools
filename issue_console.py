@@ -29,6 +29,10 @@ import issue_classify
 
 OUT_ROOT = Path(__file__).resolve().parent / "out"
 
+# Потолок GitHub search API (см. inbox.py SEARCH_LIMIT): больше запросить
+# нельзя, достижение = ответ может быть неполным.
+SEARCH_LIMIT = 1000
+
 KINDS = ("document", "research", "code", "fix", "unknown")
 ACCEPTANCE = ("accepted", "not-accepted", "unverifiable", "n/a")
 ACCEPTANCE_CHAR = {
@@ -193,7 +197,7 @@ def fetch_issues(owner: str) -> list[dict[str, Any]]:
         "--state",
         "open",
         "--limit",
-        "1000",
+        str(SEARCH_LIMIT),
         "--json",
         "repository,number,title,body,author,createdAt,updatedAt,labels,url",
     ]
@@ -203,6 +207,14 @@ def fetch_issues(owner: str) -> list[dict[str, Any]]:
     data = json.loads(done.stdout)
     if not isinstance(data, list):
         raise RuntimeError("gh returned a non-list response")
+    # Как в inbox.py: усечённый список, выглядящий полным, хуже честного
+    # признания усечения — потолок search API говорим вслух.
+    if len(data) >= SEARCH_LIMIT:
+        print(
+            f"issue-console: gh search вернул {SEARCH_LIMIT} результатов — "
+            "потолок GitHub search API; список может быть неполным",
+            file=sys.stderr,
+        )
     return data
 
 
