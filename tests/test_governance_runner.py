@@ -37,9 +37,11 @@ class FakeOps:
     threads: bool | None = False
     merge_ok: bool = True
     head: str = "deadbeef"
+    s8_exit: int = 0
     authored: list[str] = field(default_factory=list)
     comments: list[str] = field(default_factory=list)
     merged: list[tuple[int, str]] = field(default_factory=list)
+    issues: list[tuple[str, str, str]] = field(default_factory=list)
     calls: list[tuple] = field(default_factory=list)
 
     def ensure_branch(self, target_dir: str, branch: str) -> None:
@@ -111,10 +113,13 @@ class FakeOps:
         return 0
 
     def gate_check_s8(self, target_dir: str, bundle_dir: str, profile: str) -> int:
-        raise NotImplementedError("S8 вне охвата Task 4")
+        self.calls.append(("gate_check_s8", bundle_dir))
+        return self.s8_exit
 
     def create_issue(self, repo_slug: str, title: str, body: str) -> int:
-        raise NotImplementedError("S8 вне охвата Task 4")
+        self.calls.append(("create_issue", repo_slug, title))
+        self.issues.append((repo_slug, title, body))
+        return 900 + len(self.issues)
 
 
 @pytest.fixture()
@@ -273,3 +278,123 @@ def test_facts_from_fail_closed() -> None:
         ["src/main.py"], False, BUNDLE_DIR,
     )
     assert outside_bundle.diff_class == "code"
+
+
+def _agent_merge_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
+    return _start_kwargs(tmp_path, run_id, ops, **overrides)
+
+
+def test_s8_success_completes(tmp_path: Path, runs_root, monkeypatch) -> None:
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
+    )
+
+    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-ok", ops))
+
+    assert state.status == "completed"
+    assert state.ops["gate-authoritative"] == {"status": "completed", "exit": 0}
+    assert ops.issues == []
+
+
+def test_s8_fail_marks_merged_unverified_and_opens_issue(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    run_id = "r-s8-fail"
+
+    state = runner.start(**_agent_merge_kwargs(tmp_path, run_id, ops))
+
+    assert state.status == "merged_unverified"
+    # Op не помечается completed на провале — отличается от "прошёл".
+    assert state.ops["gate-authoritative"]["status"] == "started"
+
+    findings_file = rs.run_dir(run_id) / "s8-findings.txt"
+    assert findings_file.exists()
+    assert "1" in findings_file.read_text(encoding="utf-8")
+
+    assert len(ops.issues) == 1
+    repo_slug, _title, body = ops.issues[0]
+    assert repo_slug == "owner/alpha"
+    assert body.startswith("slug: beh-remediation-WS-1")
+    assert f"from: devtools#{run_id}" in body
+
+    with pytest.raises(ValueError):
+        runner.advance(state, ops)
+    with pytest.raises(ValueError):
+        runner.resume(run_id, ops)
+
+
+def test_verify_child_completes_parent_stays_merged_unverified(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    ops.s8_exit = 0  # находки устранены фикс-PR'ом в целевом репо
+    child = runner.verify(parent_id, ops, "r-s8-child")
+
+    assert child.status == "completed"
+    assert child.remediated_by == parent_id
+    assert child.ops["gate-authoritative"] == {"status": "completed", "exit": 0}
+
+    reloaded_parent = rs.load(parent_id)
+    assert reloaded_parent.status == "merged_unverified"
+
+
+def test_resume_waiting_human_merge_open_still_waits(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Без monkeypatch safety: реальная вендоренная копия — waiting_human_merge."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=0, facts=dict(GREEN_PR_FACTS), files=GREEN_BUNDLE_FILES)
+    run_id = "r-resume-open"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "waiting_human_merge"
+
+    result = runner.resume(run_id, ops)
+
+    assert result.status == "waiting_human_merge"
+    assert "gate_check_s8" not in [c[0] for c in ops.calls]
+
+
+def test_resume_waiting_human_merge_merged_runs_s8(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=dict(GREEN_PR_FACTS), files=GREEN_BUNDLE_FILES, s8_exit=0,
+    )
+    run_id = "r-resume-merged"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "waiting_human_merge"
+    assert "merge" not in state.ops
+
+    ops.facts = {**ops.facts, "state": "MERGED"}
+    result = runner.resume(run_id, ops)
+
+    assert result.ops["merge"] == {"status": "completed", "merged": True}
+    assert result.status == "completed"
+    assert result.ops["gate-authoritative"]["status"] == "completed"

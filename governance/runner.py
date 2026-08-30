@@ -7,10 +7,12 @@ key в `RunState.ops` (T2); resume (повторный `advance()` над заг
 состоянием) всегда начинается с reconciliation по фактическому состоянию,
 описанной для каждого шага ниже (спека §4, дословно перенесено в код).
 
-S8 (authoritative-фиксация после мержа, `merged_unverified`, remediation) —
-вне охвата этого модуля (Task 5); `advance()` останавливается сразу после
-завершения `merge`, оставляя `RunState.status == "running"` для дальнейшего
-подхвата.
+S8 (authoritative-фиксация после мержа) продолжает `advance()` сразу после
+успешного `merge` в рамках того же вызова (агентский мерж). Когда S7 оставил
+PR человеку (`waiting_human_merge`), S8 не запускается сам — явный `resume()`
+проверяет факт мержа и выполняет только его. Провал S8 — терминально:
+`merged_unverified` навсегда, с remediation-issue по ADR-ECO-006; дальнейшее
+продвижение — только через `verify()`, дочерний run с `remediated_by`.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from governance.ops import Ops
 from governance.policy_sources import build_authority, load_safety
 from governance.run_state import (
     RunState,
+    load,
     new_run,
     op_complete,
     op_start,
@@ -71,13 +74,22 @@ def start(
 
 
 def advance(state: RunState, ops: Ops) -> RunState:
-    """Выполняет шаги S1..S7 до стопа (не-``running`` статус) либо конца.
+    """Выполняет шаги S1..S8 до стопа (не-``running`` статус) либо конца.
 
     Каждая шаг-функция сама решает, продолжать ли (``True``) или прервать
     этот вызов ``advance()`` (``False``) — не только по смене статуса
     (`stopped_*`/`waiting_human_merge`), но и когда шаг намеренно откладывает
     продолжение на следующий вызов (S6, exit=4 — «повторить весь S6»).
+
+    ``merged_unverified`` — терминально и навсегда (спека §5): повторный
+    ``advance()`` над таким состоянием отвергается явно, продвижение — только
+    через дочерний run (`verify`).
     """
+    if state.status == "merged_unverified":
+        raise ValueError(
+            f"run {state.run_id!r} — merged_unverified навсегда; создайте "
+            "verification-run через verify(...)"
+        )
     steps = (
         _step_branch,
         _step_authoring,
@@ -87,6 +99,7 @@ def advance(state: RunState, ops: Ops) -> RunState:
         _step_ready,
         _step_review,
         _step_verdict,
+        _step_s8,
     )
     for step in steps:
         if state.status != "running":
@@ -94,6 +107,69 @@ def advance(state: RunState, ops: Ops) -> RunState:
         if not step(state, ops):
             break
     return state
+
+
+def resume(run_id: str, ops: Ops) -> RunState:
+    """Явный подхват сохранённого run'а (спека §5).
+
+    ``merged_unverified`` — отказ (навсегда, см. `advance`). Из
+    ``waiting_human_merge`` — reconciliation по факту мержа: PR ``MERGED`` →
+    фиксирует op ``merge`` (если ещё не зафиксирован) и выполняет только S8;
+    PR всё ещё ``OPEN`` — состояние не меняется, run продолжает ждать
+    человека. Любой другой статус — обычный ``advance()``.
+    """
+    state = load(run_id)
+    if state.status == "merged_unverified":
+        raise ValueError(
+            f"run {run_id!r} — merged_unverified навсегда; создайте "
+            "verification-run через verify(...)"
+        )
+    if state.status != "waiting_human_merge":
+        return advance(state, ops)
+    pr_facts_now = ops.pr_facts(state.repo_slug, state.pr)
+    if pr_facts_now.get("state") != "MERGED":
+        return state
+    if op_status(state, "merge") != "completed":
+        op_complete(state, "merge", merged=True)
+    state.status = "running"
+    save(state)
+    _step_s8(state, ops)
+    return state
+
+
+def verify(parent_run_id: str, ops: Ops, run_id: str) -> RunState:
+    """Дочерний verification-run для `merged_unverified`-родителя (спека §5).
+
+    Новый ``RunState`` с теми же координатами (repo/ws_id/target_dir/
+    bundle_dir/profile/branch/pr/head), полем ``remediated_by`` на родителя и
+    выполняет только S8. Успех фиксируется у ПОТОМКА (``completed``);
+    родитель не трогается — он остаётся `merged_unverified` навсегда.
+    """
+    parent = load(parent_run_id)
+    if parent.status != "merged_unverified":
+        raise ValueError(
+            f"verify: parent-run {parent_run_id!r} не merged_unverified "
+            f"(текущий статус {parent.status!r})"
+        )
+    child = new_run(
+        subject=parent.subject,
+        repo=parent.repo,
+        repo_slug=parent.repo_slug,
+        ws_id=parent.ws_id,
+        target_dir=parent.target_dir,
+        bundle_dir=parent.bundle_dir,
+        profile=parent.profile,
+        run_id=run_id,
+        merge_authority=parent.merge_authority,
+    )
+    child.remediated_by = parent_run_id
+    child.branch = parent.branch
+    child.pr = parent.pr
+    child.head = parent.head
+    child.status = "running"
+    save(child)
+    _step_s8(child, ops)
+    return child
 
 
 def facts_from(
@@ -349,5 +425,42 @@ def _step_merge(state: RunState, ops: Ops) -> bool:
         return True
     ops.comment(state.repo_slug, state.pr, "мерж не удался, ждёт человека")
     state.status = "waiting_human_merge"
+    save(state)
+    return False
+
+
+def _step_s8(state: RunState, ops: Ops) -> bool:
+    """S8: authoritative-гейт на дефолтной ветке после мержа (спека §5).
+
+    exit 0 → `completed`. Не-0 → `merged_unverified` НАВСЕГДА: findings в
+    `run_dir/s8-findings.txt`, remediation-issue в целевом репо по
+    inbox-контракту ADR-ECO-006 (тело начинается `slug:`/`from:`). Op
+    `gate-authoritative` завершается (`op_complete`) только при успехе —
+    как и у S4 (`gate-candidate`), провал не маркируется completed, чтобы
+    отличаться от «прошёл».
+    """
+    key = "gate-authoritative"
+    if op_status(state, key) == "completed":
+        return True
+    _ensure_started(state, key)
+    exit_code = ops.gate_check_s8(state.target_dir, state.bundle_dir, state.profile)
+    if exit_code == 0:
+        op_complete(state, key, exit=exit_code)
+        state.status = "completed"
+        save(state)
+        return True
+
+    findings = f"gate-check (S8, authoritative) завершился с кодом {exit_code}\n"
+    (run_dir(state.run_id) / "s8-findings.txt").write_text(
+        findings, encoding="utf-8"
+    )
+    issue_title = f"beh-remediation: {state.subject} ({state.ws_id})"
+    issue_body = (
+        f"slug: beh-remediation-{state.ws_id}\n"
+        f"from: devtools#{state.run_id}\n\n"
+        f"{findings}"
+    )
+    ops.create_issue(state.repo_slug, issue_title, issue_body)
+    state.status = "merged_unverified"
     save(state)
     return False
