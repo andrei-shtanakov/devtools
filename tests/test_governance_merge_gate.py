@@ -1,4 +1,7 @@
-"""Табличные тесты merge_gate — «агент может» превращается в «агенту можно» (спека §9)."""
+"""Табличные тесты merge_gate — спека §9.
+
+«Агент может» превращается в «агенту можно».
+"""
 
 from __future__ import annotations
 
@@ -25,7 +28,10 @@ def test_happy_path_agent() -> None:
 
 
 def test_today_state_is_human_by_data() -> None:
-    """Регрессия спеки §6: пока agent_merge_allowed=false — автономная ветка недостижима."""
+    """Регрессия спеки §6: пока agent_merge_allowed=false.
+
+    Автономная ветка недостижима.
+    """
     v = decide(Authority(), UNSAFE_TODAY, 0, GOOD_FACTS)
     assert v.decision == "human"
     assert "agent_merge_allowed" in v.reason
@@ -40,6 +46,20 @@ def test_today_state_is_human_by_data() -> None:
     ],
 )
 def test_any_level_tightens_to_human(auth: Authority) -> None:
+    assert decide(auth, SAFE, 0, GOOD_FACTS).decision == "human"
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        Authority(ecosystem="Human"),
+        Authority(repo=""),
+        Authority(run=" human"),
+        Authority(ecosystem="HUMAN"),
+    ],
+)
+def test_authority_garbage_is_fail_closed(auth: Authority) -> None:
+    """Garbage/typos in Authority → fail-closed to human."""
     assert decide(auth, SAFE, 0, GOOD_FACTS).decision == "human"
 
 

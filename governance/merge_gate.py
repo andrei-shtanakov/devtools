@@ -19,9 +19,10 @@ class Authority:
     run: str | None = None
 
     def effective(self) -> str:
-        if "human" in (self.ecosystem, self.repo, self.run):
-            return "human"
-        return "agent"
+        """Fail-closed: only exact "agent"/None pass agent."""
+        if all(v in ("agent", None) for v in (self.ecosystem, self.repo, self.run)):
+            return "agent"
+        return "human"
 
 
 @dataclass(frozen=True)
