@@ -59,7 +59,13 @@ def start(
     ops: Ops,
     merge_authority: str | None = None,
 ) -> RunState:
-    """S0: новый прогон, затем сразу `advance()` до стопа/завершения."""
+    """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
+
+    TODO: не проверяет соседние прогоны по этому же ``ws_id`` — спека §5
+    требует fail-closed блокировку нового авторинг-прогона, пока по ``ws_id``
+    висит ``merged_unverified`` без зелёного потомка (финальное ревью F-8).
+    Перенесено в B2, TODO.md `@id:behaviour-runner-ws-lock`.
+    """
     state = new_run(
         subject=subject,
         repo=repo,
@@ -95,6 +101,7 @@ def advance(state: RunState, ops: Ops) -> RunState:
     steps = (
         _step_branch,
         _step_authoring,
+        _step_commit,
         _step_gate,
         _step_push,
         _step_pr,
@@ -111,6 +118,24 @@ def advance(state: RunState, ops: Ops) -> RunState:
     return state
 
 
+# Статус stopped_* -> op'ы, которые reconciliation обязан сбросить в pending
+# перед повторным advance() (финальное ревью F-1). stopped_author не входит:
+# у него нужно найти НЕЗАВЕРШЁННЫЙ узел, а не сбрасывать по фиксированному
+# ключу (см. `_reset_stopped_author`).
+_STOPPED_RESET_OPS: dict[str, tuple[str, ...]] = {
+    "stopped_gate": ("gate-candidate",),
+    "stopped_review": ("ready", "review"),
+    "stopped_merge_refused": ("verdict",),
+}
+
+
+def _reset_stopped_author(state: RunState) -> None:
+    """stopped_author: сбросить все незавершённые ``author-*`` op'ы (F-1)."""
+    for key, _kind, _filename in _AUTHOR_STEPS:
+        if op_status(state, key) != "completed":
+            state.ops.pop(key, None)
+
+
 def resume(run_id: str, ops: Ops) -> RunState:
     """Явный подхват сохранённого run'а (спека §5).
 
@@ -118,7 +143,17 @@ def resume(run_id: str, ops: Ops) -> RunState:
     ``waiting_human_merge`` — reconciliation по факту мержа: PR ``MERGED`` →
     фиксирует op ``merge`` (если ещё не зафиксирован) и выполняет только S8;
     PR всё ещё ``OPEN`` — состояние не меняется, run продолжает ждать
-    человека. Любой другой статус — обычный ``advance()``.
+    человека.
+
+    Из любого ``stopped_*`` — reconciliation вместо слепого no-op (финальное
+    ревью F-1/M-1): op(ы), на которых прогон встал, сбрасываются в pending, и
+    только после этого зовётся `advance()`. ``stopped_gate`` (S4 красный) —
+    ``gate-candidate``; ``stopped_review`` — ``ready``+``review``;
+    ``stopped_author`` — незавершённые ``author-*``; ``stopped_merge_refused``
+    (S7 `refuse`, отдельный от ``stopped_gate`` статус — M-1) — ``verdict``,
+    хотя фактическая пересверка вердикта теперь происходит на каждом заходе в
+    S7 независимо от этого сброса (см. `_step_verdict`, F-2). Любой другой
+    статус — обычный ``advance()``.
     """
     state = load(run_id)
     if state.status == "merged_unverified":
@@ -126,17 +161,28 @@ def resume(run_id: str, ops: Ops) -> RunState:
             f"run {run_id!r} — merged_unverified навсегда; создайте "
             "verification-run через verify(...)"
         )
-    if state.status != "waiting_human_merge":
-        return advance(state, ops)
-    pr_facts_now = ops.pr_facts(state.repo_slug, state.pr)
-    if pr_facts_now.get("state") != "MERGED":
+    if state.status == "waiting_human_merge":
+        pr_facts_now = ops.pr_facts(state.repo_slug, state.pr)
+        if pr_facts_now.get("state") != "MERGED":
+            return state
+        if op_status(state, "merge") != "completed":
+            op_complete(state, "merge", merged=True)
+        state.status = "running"
+        save(state)
+        _step_s8(state, ops)
         return state
-    if op_status(state, "merge") != "completed":
-        op_complete(state, "merge", merged=True)
-    state.status = "running"
-    save(state)
-    _step_s8(state, ops)
-    return state
+    if state.status == "stopped_author":
+        _reset_stopped_author(state)
+        state.status = "running"
+        save(state)
+        return advance(state, ops)
+    if state.status in _STOPPED_RESET_OPS:
+        for key in _STOPPED_RESET_OPS[state.status]:
+            state.ops.pop(key, None)
+        state.status = "running"
+        save(state)
+        return advance(state, ops)
+    return advance(state, ops)
 
 
 def verify(parent_run_id: str, ops: Ops, run_id: str) -> RunState:
@@ -249,7 +295,14 @@ def _step_branch(state: RunState, ops: Ops) -> bool:
 
 
 def _step_authoring(state: RunState, ops: Ops) -> bool:
-    """S2/S3: charter/requirements/behaviour-spec — файл есть → пропустить."""
+    """S2/S3: charter/requirements/behaviour-spec — файл есть → пропустить.
+
+    B1-рулинг (финальное ревью F-6): все три узла авторятся общим
+    `ops.author` (`codex exec --ephemeral`), а не циклом `disp --mode
+    document` до сходимости, как буквально описывает спека §5 S3/§2. Замена
+    осознанная для этапа B1; `disp`-цикл и критерий сходимости — предмет B2
+    (OQ-1, `docs/superpowers/specs/2026-08-30-behaviour-spec-pipeline-design.md`).
+    """
     for key, kind, filename in _AUTHOR_STEPS:
         if op_status(state, key) == "completed":
             continue
@@ -269,8 +322,39 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     return True
 
 
+def _step_commit(state: RunState, ops: Ops) -> bool:
+    """S3 (продолжение): коммит авторенного контента до push (F-6).
+
+    Между авторингом и push не было коммита: `ops.author` (`codex exec`)
+    не гарантированно коммитит сам, поэтому push уходил пустым и
+    `create_draft_pr` падал неперехваченным `CalledProcessError`. Отдельный
+    op `commit`, идемпотентный (пустой индекс после `git add -A` — не
+    ошибка, см. `RealOps.commit_all`).
+    """
+    key = "commit"
+    if op_status(state, key) == "completed":
+        return True
+    _ensure_started(state, key)
+    message = (
+        f"docs(governance): behaviour bundle {state.ws_id} — {state.subject}\n\n"
+        "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+    )
+    ops.commit_all(state.target_dir, message)
+    op_complete(state, key)
+    return True
+
+
 def _step_gate(state: RunState, ops: Ops) -> bool:
-    """S4: prospective-гейт; error_count > 0 → stopped_gate + findings-файл."""
+    """S4: prospective-гейт; error_count/required_absent/blocked-узлы → stop.
+
+    ``error_count == 0`` сам по себе не значит «бандл зелёный»
+    (`bundle_state.py` докстринг, финальное ревью F-4): бандл без
+    frontmatter-узлов проходил бы насквозь — обязательные узлы отсутствуют
+    (``required_absent``), но это не порождало ни одной находки. Блокируем
+    явно на непустом ``required_absent`` и на любом узле в статусе
+    ``blocked`` (upstream физически не мог быть прогейтчен), не только на
+    ``error_count``.
+    """
     key = "gate-candidate"
     if op_status(state, key) == "completed":
         return True
@@ -279,9 +363,18 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         Path(state.target_dir) / state.profile,
         Path(state.target_dir) / state.bundle_dir,
     )
-    if bundle.error_count > 0:
+    blocked_nodes = [n.node_id for n in bundle.nodes if n.status == "blocked"]
+    gate_red = bool(bundle.error_count) or bool(bundle.required_absent) or bool(
+        blocked_nodes
+    )
+    if gate_red:
         findings = [f for node in bundle.nodes for f in node.findings]
         findings.extend(bundle.bundle_findings)
+        if bundle.required_absent:
+            findings.append(
+                "error GC-REQUIRED-ABSENT(prospective): обязательные узлы "
+                f"отсутствуют в бандле: {', '.join(bundle.required_absent)}"
+            )
         text = "\n".join(findings) + ("\n" if findings else "")
         (run_dir(state.run_id) / "gate-findings.txt").write_text(
             text, encoding="utf-8"
@@ -310,13 +403,24 @@ def _step_push(state: RunState, ops: Ops) -> bool:
 
 
 def _step_pr(state: RunState, ops: Ops) -> bool:
-    """S5b: PR черновиком; started → find_pr первым — второй PR не открывать."""
+    """S5b: PR черновиком; started → find_pr первым — второй PR не открывать.
+
+    ``find_pr`` поднимает ``RuntimeError`` на транзиентном сбое `gh` (не
+    отличимом от «PR нет» иначе — финальное ревью F-5): реконсиляция обязана
+    остановиться, а не читать сбой опроса как «PR не создан» и открывать
+    второй PR на ту же ветку. Op остаётся ``started``, статус run'а не
+    меняется — следующий `advance()`/`resume()` попробует снова.
+    """
     key = "pr"
     status = op_status(state, key)
     if status == "completed":
         return True
     if status == "started":
-        existing = ops.find_pr(state.repo_slug, state.branch)
+        try:
+            existing = ops.find_pr(state.repo_slug, state.branch)
+        except RuntimeError as exc:
+            print(f"_step_pr: реконсиляция find_pr не удалась: {exc}")
+            return False
         if existing is not None:
             state.pr = existing
             op_complete(state, key, number=existing)
@@ -371,8 +475,14 @@ def _step_review(state: RunState, ops: Ops) -> bool:
         state.status = "stopped_review"
         save(state)
         return False
-    # exit_code == 4 (или иной неопознанный) — голова PR уехала: сбросить
-    # весь S6 (ready+review) в pending, повторить целиком на следующем advance.
+    # exit_code == 4 (или иной неопознанный) — голова PR уехала: в ветку
+    # пришло новое содержимое, поэтому контентный гейт S4 (отработавший по
+    # СТАРОЙ голове) обязан переиграться, не только весь S6 (финальное
+    # ревью F-7) — иначе прошедший когда-то gate-candidate молча продолжает
+    # покрывать содержимое, которого он не видел. push сбрасывается вместе с
+    # gate-candidate: новый коммит после правок ещё не запушен.
+    state.ops.pop("gate-candidate", None)
+    state.ops.pop("push", None)
     state.ops.pop("ready", None)
     state.ops.pop(key, None)
     save(state)
@@ -380,29 +490,44 @@ def _step_review(state: RunState, ops: Ops) -> bool:
 
 
 def _step_verdict(state: RunState, ops: Ops) -> bool:
-    """S7: merge_gate → agent продолжает мержем, human/refuse — стоп."""
-    key = "verdict"
-    if op_status(state, key) == "completed":
-        decision = state.ops[key]["decision"]
-        reason = state.ops[key]["reason"]
-    else:
-        _ensure_started(state, key)
-        authority = build_authority(Path(state.target_dir), state.merge_authority)
-        safety = load_safety()
-        review_exit = state.ops.get("review", {}).get("exit")
-        pr_facts_raw = ops.pr_facts(state.repo_slug, state.pr)
-        files = ops.pr_files(state.repo_slug, state.pr)
-        threads = ops.unresolved_threads(state.repo_slug, state.pr)
-        facts = facts_from(pr_facts_raw, files, threads, state.bundle_dir)
-        verdict = decide(authority, safety, review_exit, facts)
-        decision, reason = verdict.decision, verdict.reason
-        op_complete(state, key, decision=decision, reason=reason)
+    """S7: merge_gate → agent продолжает мержем, human/refuse — стоп.
+
+    ``verdict`` — только аудит-запись, НЕ кэш решения (финальное ревью F-2):
+    пока op ``merge`` не ``completed``, факты PR пересобираются и `decide()`
+    вызывается заново на КАЖДОМ заходе в этот шаг. Достижимо штатным
+    write-ahead-сценарием: `_step_verdict` зафиксировал ``agent``,
+    `_step_merge` начал op ``merge`` (``started``) и процесс умер раньше
+    самого мержа — статус run'а остаётся ``running``, и без пересверки
+    следующий `advance()` домержил бы по кэшированному вердикту, хотя за
+    время простоя на том же sha мог покраснеть rollup, открыться review
+    thread или PR — отстать от base (спека §8: «resume без reconciliation
+    запрещён» — единственный неотменяемый шаг). Мерж стартует только на
+    свежем ``agent``.
+    """
+    if op_status(state, "merge") == "completed":
+        return True
+
+    _ensure_started(state, "verdict")
+    authority = build_authority(Path(state.target_dir), state.merge_authority)
+    safety = load_safety()
+    review_exit = state.ops.get("review", {}).get("exit")
+    pr_facts_raw = ops.pr_facts(state.repo_slug, state.pr)
+    files = ops.pr_files(state.repo_slug, state.pr)
+    threads = ops.unresolved_threads(state.repo_slug, state.pr)
+    facts = facts_from(pr_facts_raw, files, threads, state.bundle_dir)
+    verdict = decide(authority, safety, review_exit, facts)
+    decision, reason = verdict.decision, verdict.reason
+    op_complete(state, "verdict", decision=decision, reason=reason)
 
     if decision == "agent":
         return _step_merge(state, ops)
 
     ops.comment(state.repo_slug, state.pr, f"merge_gate: {decision} — {reason}")
-    state.status = "stopped_gate" if decision == "refuse" else "waiting_human_merge"
+    # refuse получает свой статус, отдельный от stopped_gate (S4): причины и
+    # починки разные, и resume() должен различать их (финальное ревью M-1).
+    state.status = (
+        "stopped_merge_refused" if decision == "refuse" else "waiting_human_merge"
+    )
     save(state)
     return False
 
@@ -445,14 +570,18 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
     if op_status(state, key) == "completed":
         return True
     _ensure_started(state, key)
-    exit_code = ops.gate_check_s8(state.target_dir, state.bundle_dir, state.profile)
+    exit_code, output = ops.gate_check_s8(
+        state.target_dir, state.bundle_dir, state.profile
+    )
     if exit_code == 0:
         op_complete(state, key, exit=exit_code)
         state.status = "completed"
         save(state)
         return True
 
-    findings = f"gate-check (S8, authoritative) завершился с кодом {exit_code}\n"
+    findings = (
+        f"gate-check (S8, authoritative) завершился с кодом {exit_code}\n\n{output}"
+    )
     (run_dir(state.run_id) / "s8-findings.txt").write_text(
         findings, encoding="utf-8"
     )

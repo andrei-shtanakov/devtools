@@ -125,18 +125,61 @@ def test_gate_check_s8_command_matches_real_cli(monkeypatch):
     default: spec); `--profile <str>` и `--emit-verdicts` — обычные опции.
     Реальный usage: ``gate-check [OPTIONS] [spec_dir]``.
     """
-    calls = _install_fake_run(monkeypatch, returncode=0)
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="ok\n")
     ops = RealOps()
 
     result = ops.gate_check_s8("/tmp/devtools", "/tmp/devtools/spec", "lite")
 
-    assert result == 0
+    assert result == (0, "ok\n")
     call = calls[0]
     assert call.argv[-4:] == [
         "/tmp/devtools/spec", "--profile", "lite", "--emit-verdicts",
     ]
     assert call.argv[0].endswith("gate-check")
     assert call.kwargs["cwd"] == "/tmp/devtools"
+    assert call.kwargs["capture_output"] is True
+
+
+def test_gate_check_s8_returns_combined_output_on_failure(monkeypatch):
+    """M-2: findings текста, не только код возврата — идёт в леджер и issue."""
+    calls = _install_fake_run(
+        monkeypatch, returncode=1, stdout="GC-X: bad\n", stderr="warn\n",
+    )
+    ops = RealOps()
+
+    result = ops.gate_check_s8("/tmp/devtools", "/tmp/devtools/spec", "lite")
+
+    assert result == (1, "GC-X: bad\nwarn\n")
+    assert len(calls) == 1
+
+
+# --- Кейс 8: commit_all ----------------------------------------------------
+
+
+def test_commit_all_adds_and_commits_with_message(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=1)  # diff --cached: dirty
+    ops = RealOps()
+
+    ops.commit_all("/tmp/devtools", "docs(governance): x\n\nCo-Authored-By: y")
+
+    assert [c.argv[:2] for c in calls] == [
+        ["git", "add"], ["git", "diff"], ["git", "commit"],
+    ]
+    assert calls[0].argv == ["git", "add", "-A"]
+    assert calls[0].kwargs["cwd"] == "/tmp/devtools"
+    assert calls[2].argv == [
+        "git", "commit", "-m", "docs(governance): x\n\nCo-Authored-By: y",
+    ]
+    assert calls[2].kwargs["check"] is True
+
+
+def test_commit_all_empty_index_does_not_commit(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0)  # diff --cached: clean
+    ops = RealOps()
+
+    ops.commit_all("/tmp/devtools", "message")
+
+    assert [c.argv[:2] for c in calls] == [["git", "add"], ["git", "diff"]]
 
 
 # --- Кейс 5: author -------------------------------------------------------

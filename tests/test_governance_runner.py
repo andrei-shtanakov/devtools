@@ -12,6 +12,7 @@ pytest.importorskip("steward")
 
 from governance import bundle_state, merge_gate, runner
 from governance import run_state as rs
+from tests.governance_fixtures.bundles import make_bundle, make_profile
 
 GREEN_PR_FACTS: dict[str, Any] = {
     "statusCheckRollup": [{"conclusion": "SUCCESS"}],
@@ -40,10 +41,13 @@ class FakeOps:
     merge_ok: bool = True
     head: str = "deadbeef"
     s8_exit: int = 0
+    s8_output: str = ""
+    find_pr_error: str | None = None
     authored: list[str] = field(default_factory=list)
     comments: list[str] = field(default_factory=list)
     merged: list[tuple[int, str]] = field(default_factory=list)
     issues: list[tuple[str, str, str]] = field(default_factory=list)
+    committed: list[tuple[str, str]] = field(default_factory=list)
     calls: list[tuple] = field(default_factory=list)
 
     def ensure_branch(self, target_dir: str, branch: str) -> None:
@@ -59,6 +63,8 @@ class FakeOps:
 
     def find_pr(self, repo_slug: str, branch: str) -> int | None:
         self.calls.append(("find_pr", branch))
+        if self.find_pr_error is not None:
+            raise RuntimeError(self.find_pr_error)
         return self.existing_prs.get(branch)
 
     def create_draft_pr(
@@ -114,14 +120,20 @@ class FakeOps:
         path.write_text(f"# {kind}\n", encoding="utf-8")
         return 0
 
-    def gate_check_s8(self, target_dir: str, bundle_dir: str, profile: str) -> int:
+    def gate_check_s8(
+        self, target_dir: str, bundle_dir: str, profile: str
+    ) -> tuple[int, str]:
         self.calls.append(("gate_check_s8", bundle_dir))
-        return self.s8_exit
+        return self.s8_exit, self.s8_output
 
     def create_issue(self, repo_slug: str, title: str, body: str) -> int:
         self.calls.append(("create_issue", repo_slug, title))
         self.issues.append((repo_slug, title, body))
         return 900 + len(self.issues)
+
+    def commit_all(self, target_dir: str, message: str) -> None:
+        self.calls.append(("commit_all",))
+        self.committed.append((target_dir, message))
 
 
 @pytest.fixture()
@@ -429,3 +441,345 @@ def test_cli_status_prints_run_state(
     assert "status:        running" in out
     assert "pr:            7" in out
     assert "branch: completed" in out
+
+
+# --- F-1/M-1: resume из stopped_* — reconciliation, не no-op ---------------
+
+
+def test_resume_from_stopped_gate_reruns_gate_candidate(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """F-1: resume из stopped_gate переигрывает S4, не остаётся no-op'ом."""
+    calls_n = {"n": 0}
+    red_bundle = bundle_state.BundleState(
+        (bundle_state.NodeState("charter", "draft", ("error GC-X: bad",)),),
+        1, None, (), (),
+    )
+
+    def _candidate(profile, bundle):
+        calls_n["n"] += 1
+        return red_bundle if calls_n["n"] == 1 else _green_bundle(profile, bundle)
+
+    monkeypatch.setattr(runner, "candidate_state", _candidate)
+    ops = FakeOps()
+    run_id = "r-resume-gate"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_gate"
+
+    result = runner.resume(run_id, ops)
+
+    assert calls_n["n"] == 2  # S4 реально переигран, не пропущен
+    assert result.status != "stopped_gate"
+    assert result.ops["gate-candidate"]["status"] == "completed"
+
+
+def test_resume_from_stopped_review_reruns_ready_and_review(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """F-1: resume из stopped_review переигрывает ready+review."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=1)
+    run_id = "r-resume-review"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_review"
+    calls_before = len(ops.calls)
+
+    ops.review_exit = 0
+    result = runner.resume(run_id, ops)
+
+    review_calls_after = [c for c in ops.calls[calls_before:] if c[0] == "review"]
+    assert review_calls_after  # review реально перезапустился
+    assert result.status != "stopped_review"
+    assert result.ops["review"]["status"] == "completed"
+
+
+def test_resume_from_stopped_author_reruns_unfinished_author(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """F-1: resume из stopped_author переигрывает незавершённый author-*."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    original_author = ops.author
+    fail_once = {"on": True}
+
+    def flaky_author(target_dir, kind, subject, bundle_dir):
+        if kind == "requirements" and fail_once["on"]:
+            fail_once["on"] = False
+            ops.calls.append(("author", kind))
+            return 1
+        return original_author(target_dir, kind, subject, bundle_dir)
+
+    ops.author = flaky_author  # type: ignore[method-assign]
+    run_id = "r-resume-author"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_author"
+    assert state.ops["author-charter"]["status"] == "completed"
+    assert state.ops["author-requirements"]["status"] == "started"
+    assert "author-behaviour" not in state.ops
+
+    result = runner.resume(run_id, ops)
+
+    assert result.ops["author-requirements"]["status"] == "completed"
+    assert result.ops["author-behaviour"]["status"] == "completed"
+    assert result.status != "stopped_author"
+
+
+def test_verdict_refuse_status_is_distinct_from_stopped_gate(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """M-1: S7 `refuse` получает свой статус, не путается с S4 stopped_gate —
+    у них разные причины и разная починка."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0,
+        facts={**GREEN_PR_FACTS, "statusCheckRollup": [{"conclusion": "FAILURE"}]},
+        files=GREEN_BUNDLE_FILES,
+    )
+
+    state = runner.start(**_start_kwargs(tmp_path, "r-refuse", ops))
+
+    assert state.status == "stopped_merge_refused"
+    assert state.status != "stopped_gate"
+
+
+def test_resume_from_stopped_merge_refused_reverdicts(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """F-1: resume из stopped_merge_refused пересверяет вердикт, не no-op."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0,
+        facts={**GREEN_PR_FACTS, "statusCheckRollup": [{"conclusion": "FAILURE"}]},
+        files=GREEN_BUNDLE_FILES,
+    )
+    run_id = "r-resume-refused"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_merge_refused"
+
+    ops.facts = dict(GREEN_PR_FACTS)  # rollup зазеленел
+    result = runner.resume(run_id, ops)
+
+    assert result.status != "stopped_merge_refused"
+    assert result.ops["merge"]["status"] == "completed"
+    assert ops.merged == [(result.pr, ops.head)]
+
+
+# --- F-2: verdict — аудит, не кэш решения -----------------------------------
+
+
+def test_stale_cached_agent_verdict_does_not_merge_on_fresh_red_facts(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """F-2: op verdict уже completed=agent в run.json (write-ahead между
+    _step_verdict и _step_merge), но свежий опрос PR даёт красный rollup —
+    merge НЕ вызывается, decide() пересчитывается заново на этом заходе."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    ops = FakeOps(
+        review_exit=0,
+        facts={**GREEN_PR_FACTS, "statusCheckRollup": [{"conclusion": "FAILURE"}]},
+        files=GREEN_BUNDLE_FILES,
+    )
+    kwargs = _start_kwargs(tmp_path, "r-verdict-stale", ops)
+    state = rs.new_run(
+        subject=kwargs["subject"], repo=kwargs["repo"],
+        repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
+        target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
+        profile=kwargs["profile"], run_id=kwargs["run_id"],
+    )
+    state.branch = "spec/WS-1-behaviour"
+    state.pr = 100
+    state.head = "deadbeef"
+    state.ops = {
+        "branch": {"status": "completed"},
+        "author-charter": {"status": "completed", "skipped": True},
+        "author-requirements": {"status": "completed", "skipped": True},
+        "author-behaviour": {"status": "completed", "skipped": True},
+        "commit": {"status": "completed"},
+        "gate-candidate": {
+            "status": "completed", "error_count": 0, "required_absent": [],
+        },
+        "push": {"status": "completed"},
+        "pr": {"status": "completed", "number": 100},
+        "ready": {"status": "completed"},
+        "review": {"status": "completed", "exit": 0},
+        # Кэшированный вердикт с прошлого захода — устарел за время простоя.
+        "verdict": {"status": "completed", "decision": "agent", "reason": "stale"},
+    }
+    rs.save(state)
+
+    result = runner.advance(state, ops)
+
+    assert ops.merged == []
+    assert result.ops.get("merge", {}).get("status") != "completed"
+    assert result.status == "stopped_merge_refused"
+    assert result.ops["verdict"]["decision"] == "refuse"
+
+
+# --- F-5: find_pr транзиентный сбой -----------------------------------------
+
+
+def test_pr_reconciliation_find_pr_failure_stops_without_duplicate(
+    tmp_path: Path, runs_root,
+) -> None:
+    """F-5: `find_pr` поднимает RuntimeError на сбое gh — не читать как
+    "PR нет", не открывать второй; op остаётся started, run продолжает ждать."""
+    ops = FakeOps(find_pr_error="gh pr list: transient network error")
+    kwargs = _start_kwargs(tmp_path, "r-pr-transient", ops)
+    state = rs.new_run(
+        subject=kwargs["subject"], repo=kwargs["repo"],
+        repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
+        target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
+        profile=kwargs["profile"], run_id=kwargs["run_id"],
+    )
+    state.branch = "spec/WS-1-behaviour"
+    state.ops = {
+        "branch": {"status": "completed"},
+        "author-charter": {"status": "completed", "skipped": True},
+        "author-requirements": {"status": "completed", "skipped": True},
+        "author-behaviour": {"status": "completed", "skipped": True},
+        "commit": {"status": "completed"},
+        "gate-candidate": {
+            "status": "completed", "error_count": 0, "required_absent": [],
+        },
+        "push": {"status": "completed"},
+        "pr": {"status": "started"},
+    }
+    rs.save(state)
+
+    result = runner.advance(state, ops)
+
+    assert "create_draft_pr" not in [c[0] for c in ops.calls]
+    assert result.ops["pr"] == {"status": "started"}
+    assert result.status == "running"
+
+
+# --- F-6: commit перед push --------------------------------------------------
+
+
+def test_commit_all_called_between_author_and_push(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """F-6: `ops.commit_all` вызывается между авторингом и push."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+
+    state = runner.start(**_start_kwargs(tmp_path, "r-commit", ops))
+
+    call_names = [c[0] for c in ops.calls]
+    assert call_names.index("author") < call_names.index("commit_all")
+    assert call_names.index("commit_all") < call_names.index("push_branch")
+    assert state.ops["commit"]["status"] == "completed"
+    assert len(ops.committed) == 1
+    _, message = ops.committed[0]
+    assert "Co-Authored-By" in message
+
+
+# --- F-7: exit 4 переигрывает и prospective-гейт -----------------------------
+
+
+def test_review_exit4_resets_gate_candidate_and_push_too(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """F-7: голова PR уехала (exit 4) — S4 обязан переиграться, не только S6."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=4)
+
+    state = runner.start(**_start_kwargs(tmp_path, "r-review-moved", ops))
+
+    assert state.status == "running"
+    assert "gate-candidate" not in state.ops
+    assert "push" not in state.ops
+    assert "ready" not in state.ops
+    assert "review" not in state.ops
+    assert state.ops["pr"]["status"] == "completed"  # PR не переоткрывается
+
+
+# --- F-4: шов runner ↔ bundle_state, без мока candidate_state ---------------
+
+
+def test_gate_seam_required_absent_blocks_without_mock(
+    tmp_path: Path, runs_root,
+) -> None:
+    """F-4: интеграционный тест шва — реальный `candidate_state`, не мок.
+
+    Хороший бандл (оба обязательных узла присутствуют и валидны) проходит S4
+    зелёным; бандл без единого frontmatter-узла (``required_absent``
+    непустой, ``error_count == 0``) обязан остановить S4, а не пройти
+    насквозь.
+    """
+
+    def _run_to_gate(run_id: str, build_bundle) -> rs.RunState:
+        target_dir = tmp_path / run_id
+        target_dir.mkdir()
+        make_profile(target_dir)
+        build_bundle(target_dir)
+        state = rs.new_run(
+            subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+            target_dir=str(target_dir), bundle_dir="spec",
+            profile="profiles/mini.yaml", run_id=run_id,
+        )
+        state.branch = "spec/WS-1-behaviour"
+        state.ops = {
+            "branch": {"status": "completed"},
+            "author-charter": {"status": "completed", "skipped": True},
+            "author-requirements": {"status": "completed", "skipped": True},
+            "author-behaviour": {"status": "completed", "skipped": True},
+            "commit": {"status": "completed"},
+        }
+        rs.save(state)
+        return runner.advance(state, FakeOps())
+
+    good_result = _run_to_gate(
+        "r-gate-good-seam", lambda d: make_bundle(d, behaviour_ok=True),
+    )
+    assert good_result.status != "stopped_gate"
+    assert good_result.ops["gate-candidate"]["status"] == "completed"
+
+    def _no_frontmatter(target_dir: Path) -> None:
+        bundle = target_dir / "spec"
+        bundle.mkdir()
+        (bundle / "notes.md").write_text("без frontmatter\n", encoding="utf-8")
+
+    red_result = _run_to_gate("r-gate-empty-seam", _no_frontmatter)
+
+    assert red_result.status == "stopped_gate"
+    findings_file = rs.run_dir("r-gate-empty-seam") / "gate-findings.txt"
+    assert findings_file.exists()
+    assert "GC-REQUIRED-ABSENT" in findings_file.read_text(encoding="utf-8")
+
+
+# --- M-2: s8-findings.txt несёт вывод gate-check, не только код -------------
+
+
+def test_s8_findings_include_gate_check_output(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=1, s8_output="error GC-BEH-TRACE: BEH-01 не трейсит ничего\n",
+    )
+    run_id = "r-s8-output"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+
+    assert state.status == "merged_unverified"
+    findings_file = rs.run_dir(run_id) / "s8-findings.txt"
+    assert "GC-BEH-TRACE" in findings_file.read_text(encoding="utf-8")
+    _repo_slug, _title, body = ops.issues[0]
+    assert "GC-BEH-TRACE" in body

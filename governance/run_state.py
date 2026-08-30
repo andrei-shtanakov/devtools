@@ -22,7 +22,11 @@ import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-RUNS_ROOT = Path("devtools/out/governance-runs")
+# Якорь через __file__ (как DEVTOOLS_ROOT в ops.py), не CWD-относительный
+# путь: CWD-относительная версия резолвилась в `devtools/devtools/out/…`,
+# когда процесс запускался из корня devtools (финальное ревью F-3), и делала
+# `start`/`resume` из разных каталогов несовместимыми леджерами.
+RUNS_ROOT = Path(__file__).resolve().parent.parent / "out" / "governance-runs"
 
 _ALLOWED_MERGE_AUTHORITY = (None, "human")
 

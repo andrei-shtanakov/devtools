@@ -63,9 +63,11 @@ class Ops(Protocol):
         self, target_dir: str, kind: str, subject: str, bundle_dir: str
     ) -> int: ...
 
+    def commit_all(self, target_dir: str, message: str) -> None: ...
+
     def gate_check_s8(
         self, target_dir: str, bundle_dir: str, profile: str
-    ) -> int: ...
+    ) -> tuple[int, str]: ...
 
     def create_issue(self, repo_slug: str, title: str, body: str) -> int: ...
 
@@ -218,9 +220,19 @@ class RealOps:
         )
         return done.returncode
 
+    def commit_all(self, target_dir: str, message: str) -> None:
+        """`git add -A` + коммит; пустой индекс (нечего коммитить) — не ошибка."""
+        subprocess.run(["git", "add", "-A"], cwd=target_dir, check=True)
+        clean = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"], cwd=target_dir,
+        )
+        if clean.returncode == 0:
+            return
+        subprocess.run(["git", "commit", "-m", message], cwd=target_dir, check=True)
+
     def gate_check_s8(
         self, target_dir: str, bundle_dir: str, profile: str
-    ) -> int:
+    ) -> tuple[int, str]:
         """gate-check <bundle_dir> --profile <profile> --emit-verdicts.
 
         Фактическая сигнатура CLI (``gate-check --help``, пинованный
@@ -230,14 +242,19 @@ class RealOps:
         ``--profile <str>`` (default ``lite``), ``--emit-verdicts`` (пишет
         ``<repo-root>/.steward/gate_verdicts.jsonl``, contract
         gate-verdicts/v1, требует live git provenance).
+
+        Возвращает ``(returncode, combined_output)`` (финальное ревью M-2):
+        §5 требует, чтобы findings S8 сохранялись в леджере прогона и в теле
+        remediation-issue, а не только код возврата.
         """
         exe = DEVTOOLS_ROOT / ".venv" / "bin" / "gate-check"
         cmd = str(exe) if exe.exists() else "gate-check"
         done = subprocess.run(
             [cmd, bundle_dir, "--profile", profile, "--emit-verdicts"],
-            cwd=target_dir,
+            cwd=target_dir, capture_output=True, text=True,
         )
-        return done.returncode
+        output = done.stdout + done.stderr
+        return done.returncode, output
 
     def create_issue(self, repo_slug: str, title: str, body: str) -> int:
         """gh issue create -R <slug> --label inbox; номер из URL stdout."""
