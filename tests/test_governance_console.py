@@ -275,12 +275,12 @@ def test_launch_verify_builds_parent_and_run_id_args(
 def test_launch_verify_dedups_by_parent_across_distinct_child_ids(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """I-7 regression: `verify_plan` генерирует свежий child run_id на
-    КАЖДЫЙ вызов (`os.urandom`) — дедуп именем от child никогда бы не
-    совпал. Второе нажатие `v` на том же ряду (новый child, тот же parent)
-    обязано найти уже поднятую сессию, а не стартовать вторую — иначе
-    второй вызов `runner.verify()` создаёт ВТОРОЙ remediation-issue у уже
-    помеченного родителя."""
+    """I-7 regression: дедуп именем от child (вместо parent) не совпадал бы
+    для двух разных child run_id на одном родителе. Второе нажатие `v` на
+    том же ряду обязано найти уже поднятую сессию, а не стартовать вторую
+    — иначе второй вызов `runner.verify()` создаёт ВТОРОЙ remediation-issue
+    у уже помеченного родителя (актуально и для явного `run_id`, и для
+    `None`-пути round 5, где id выводит сам runner)."""
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["tmux", "has-session"]:
@@ -291,6 +291,35 @@ def test_launch_verify_dedups_by_parent_across_distinct_child_ids(
     first = console.launch_verify("r-0009", "r-0009-vaaaa", tmp_path)
     second = console.launch_verify("r-0009", "r-0009-vbbbb", tmp_path)
     assert first == second == "exists: tmux attach -t =beh-verify-r-0009"
+
+
+def test_launch_verify_without_run_id_omits_run_id_arg(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round 5, codex-major: консольный путь (`verify_plan` -> `(parent,
+    None)`) не должен передавать `--run-id` вообще — `runner.verify()` сам
+    выводит детерминированный `<parent>-v<N>` и сериализует конкурентные
+    вызовы атомарным резервом. ARGS несёт только `--parent`."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["tmux", "has-session"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(console.subprocess, "run", fake_run)
+    status = console.launch_verify("r-0010", None, tmp_path)
+    assert status == "started beh-verify-r-0010"
+
+    new_session_call = next(c for c in calls if c[:2] == ["tmux", "new-session"])
+    shell_cmd = new_session_call[-1]
+    assert shell_cmd == (
+        "make behaviour-run ARGS='verify --parent r-0010'; "
+        "echo; echo '=== завершено; Enter — закрыть (авто через 60с)'; "
+        "read -t 60 _"
+    )
+    assert "--run-id" not in shell_cmd
 
 
 # --- verify_plan: parent = выбранный merged_unverified ряд, свежий child --
@@ -307,15 +336,17 @@ def _row(status: str, run_id: str = "r-0001") -> "cm.RunRow":
 
 
 @requires_console_model
-def test_verify_plan_merged_unverified_returns_parent_and_new_child() -> None:
+def test_verify_plan_merged_unverified_returns_parent_and_none_child() -> None:
+    """Round 5, codex-major: консоль больше не генерирует child run_id
+    (раньше случайный `os.urandom`-суффикс не сериализовал конкурентные
+    verify) — `None` означает «пусть runner выведет детерминированный
+    `<parent>-v<N>` сам» (`_next_verify_run_id`, атомарный резерв)."""
     row = _row("merged_unverified", run_id="r-0001")
     plan = console.verify_plan(row)
     assert not isinstance(plan, str)
     parent_run_id, child_run_id = plan
     assert parent_run_id == "r-0001"
-    assert child_run_id != "r-0001"
-    assert child_run_id.startswith("r-0001-v")
-    rs.validate_id_component(child_run_id)  # не кидает -> валидный run_id
+    assert child_run_id is None
 
 
 @requires_console_model
@@ -331,14 +362,15 @@ def test_verify_plan_rejects_non_merged_unverified(status: str) -> None:
 
 
 @requires_console_model
-def test_verify_plan_generates_distinct_child_ids_on_repeat_calls() -> None:
+def test_verify_plan_repeat_calls_return_same_parent_and_none() -> None:
+    """Раньше повторные вызовы давали РАЗНЫЕ случайные child-id (и это
+    само по себе было частью бага round 5 — конкурентные вызовы не
+    сериализовались). Теперь `verify_plan` детерминирован: тот же parent,
+    `None` — генерация id целиком делегирована `runner.verify()`."""
     row = _row("merged_unverified", run_id="r-0003")
     first = console.verify_plan(row)
     second = console.verify_plan(row)
-    assert not isinstance(first, str)
-    assert not isinstance(second, str)
-    assert first[0] == second[0] == "r-0003"
-    assert first[1] != second[1]
+    assert first == second == ("r-0003", None)
 
 
 # --- _safe_run_detail: битый run.json не роняет TUI (I-4) -----------------

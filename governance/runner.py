@@ -320,7 +320,34 @@ def resume(run_id: str, ops: Ops) -> RunState:
     return advance(state, ops)
 
 
-def verify(parent_run_id: str, ops: Ops, run_id: str) -> RunState:
+def _next_verify_run_id(parent_run_id: str) -> str:
+    """Детерминированный `run_id` следующей verify-попытки (round 5,
+    codex-major — TOCTOU): `f"{parent_run_id}-v{attempt}"`, где
+    `attempt = 1 + число уже существующих потомков этого родителя` (ЛЮБОЙ
+    статус — считаются и провальные, и зелёные, из `_load_all_runs()`).
+
+    Раньше id потомка был случайным (`os.urandom`), и `_has_green_child`
+    сам по себе не сериализовал конкурентные вызовы: два одновременных
+    `verify()` на одном родителе оба проходили проверку «нет зелёного
+    потомка» (ни один ещё не сохранён), получали РАЗНЫЕ случайные id и оба
+    успевали запустить параллельный S8 в одном `target_dir`. Детерминизм
+    чинит это через уже существующий атомарный резерв: конкурентные вызовы
+    без явного `run_id` считают ОДНО И ТО ЖЕ число потомков (до того, как
+    любой из них успел сохранить свой) и потому вычисляют ОДИН И ТОТ ЖЕ
+    id — `_reserve_run_id` (`O_CREAT|O_EXCL`) пропускает ровно одного,
+    остальные получают `ValueError` вместо параллельного запуска.
+    """
+    attempt = 1 + sum(
+        1
+        for s in _load_all_runs().values()
+        if s.remediated_by == parent_run_id
+    )
+    return f"{parent_run_id}-v{attempt}"
+
+
+def verify(
+    parent_run_id: str, ops: Ops, run_id: str | None = None
+) -> RunState:
     """Дочерний verification-run для `merged_unverified`-родителя (спека §5).
 
     Новый ``RunState`` с теми же координатами (repo/ws_id/target_dir/
@@ -335,6 +362,13 @@ def verify(parent_run_id: str, ops: Ops, run_id: str) -> RunState:
     проверки (`parent.status`, `_has_green_child`) — ДО `_reserve_run_id`,
     тот же порядок, что у `start()` (валидация без побочных эффектов перед
     резервированием id).
+
+    `run_id=None` (дефолт) выводит ДЕТЕРМИНИРОВАННЫЙ id через
+    `_next_verify_run_id` (round 5) — сериализует конкурентные вызовы
+    атомарным `_reserve_run_id` вместо случайного id, который такую гонку
+    не ловил. Явный `run_id` остаётся для CLI-совместимости
+    (`--run-id`, теперь опционален) и валидируется как раньше
+    (`_reserve_run_id` → `run_dir()` → `validate_id_component`).
     """
     parent = load(parent_run_id)
     if parent.status != "merged_unverified":
@@ -347,6 +381,8 @@ def verify(parent_run_id: str, ops: Ops, run_id: str) -> RunState:
             f"verify: parent-run {parent_run_id!r} уже верифицирован — "
             "у него есть завершённый (completed) потомок"
         )
+    if run_id is None:
+        run_id = _next_verify_run_id(parent_run_id)
     _reserve_run_id(run_id)
     child = new_run(
         subject=parent.subject,
@@ -998,7 +1034,11 @@ def main(argv: list[str] | None = None) -> int:
         "verify", help="verification-run для merged_unverified родителя"
     )
     verify_p.add_argument("--parent", required=True, help="run_id родителя")
-    verify_p.add_argument("--run-id", required=True, help="run_id потомка")
+    verify_p.add_argument(
+        "--run-id", default=None,
+        help="run_id потомка; по умолчанию детерминированный "
+        "<parent>-v<N> (round 5) — сериализует конкурентные verify",
+    )
 
     status_p = sub.add_parser("status", help="человекочитаемый дамп run.json")
     status_p.add_argument("--run-id", required=True)

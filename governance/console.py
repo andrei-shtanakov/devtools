@@ -14,7 +14,6 @@ plain-путь обязаны работать и без установленн�
 from __future__ import annotations
 
 import argparse
-import os
 import shlex
 import subprocess
 import sys
@@ -92,41 +91,54 @@ def launch_resume(run_id: str, root: Path = DEVTOOLS_ROOT) -> str:
 
 
 def launch_verify(
-    parent_run_id: str, run_id: str, root: Path = DEVTOOLS_ROOT
+    parent_run_id: str,
+    run_id: str | None = None,
+    root: Path = DEVTOOLS_ROOT,
 ) -> str:
-    """`make behaviour-run ARGS='verify --parent <parent> --run-id <id>'`.
+    """`make behaviour-run ARGS='verify --parent <parent> [--run-id <id>]'`.
 
     Сессия именуется от РОДИТЕЛЯ (`beh-verify-<parent_run_id>`), не от
-    `run_id` потомка (финальное ревью I-7): `verify_plan` генерирует свежий
-    `run_id` на КАЖДЫЙ вызов (`os.urandom`), поэтому дедуп по `=`-таргету с
-    именем от потомка никогда не совпадал бы — второе нажатие `v` на том же
-    ряду поднимало бы вторую tmux-сессию и создавало ВТОРОЙ
-    remediation-issue у уже помеченного родителя (`runner.verify()` не
-    проверяет, есть ли у родителя потомок). Имя от parent делает `=`-гвард
-    рабочим: повторный вызов находит существующую сессию раньше, чем
-    успевает стартовать новый `verify`.
+    `run_id` потомка (финальное ревью I-7) — повторный вызов должен
+    дедупиться по `=`-таргету, а не поднимать вторую tmux-сессию и
+    создавать ВТОРОЙ remediation-issue у уже помеченного родителя.
+
+    `run_id=None` (дефолт, round 5 — codex-major TOCTOU): ARGS не несёт
+    `--run-id` вообще — `runner.verify()` сам выводит детерминированный
+    `<parent>-v<N>` (`_next_verify_run_id`), сериализуя конкурентные
+    verify через атомарный `_reserve_run_id`. Консоль больше НЕ генерирует
+    случайный суффикс на своей стороне (`verify_plan` ниже) — раньше
+    `os.urandom`-id не сериализовал гонку: два быстрых нажатия `v`
+    вычисляли РАЗНЫЕ id и оба успевали дойти до `tmux new-session` прежде,
+    чем runner вообще видел первый. Явный `run_id` остаётся для
+    ручных/тестовых вызовов.
     """
     session = _verify_session_name(parent_run_id)
-    return _tmux_launch(
-        session, root, f"verify --parent {parent_run_id} --run-id {run_id}"
-    )
+    make_args = f"verify --parent {parent_run_id}"
+    if run_id is not None:
+        make_args += f" --run-id {run_id}"
+    return _tmux_launch(session, root, make_args)
 
 
-def verify_plan(row: cm.RunRow) -> tuple[str, str] | str:
-    """`(parent_run_id, новый child run_id)` для verify выбранного ряда.
+def verify_plan(row: cm.RunRow) -> tuple[str, str | None] | str:
+    """`(parent_run_id, None)` для verify выбранного ряда.
 
     Семантика `runner.verify(parent_run_id, ops, run_id)` (спека §5): parent
     — сам `merged_unverified`-прогон (`remediated_by` у родителя всегда
     `None` — это поле потомка, указывающее на родителя, не наоборот; брать
-    `row.remediated_by` как parent значило бы искать родителя у родителя),
-    `run_id` — НОВЫЙ id ребёнка, который создаёт verify (`_reserve_run_id`
-    внутри `verify()` требует ещё не занятый id). Любой статус, кроме
-    `merged_unverified`, -> строка-ошибка, не молчаливый отказ.
+    `row.remediated_by` как parent значило бы искать родителя у родителя).
+
+    Child `run_id` больше НЕ генерируется здесь (round 5, codex-major):
+    случайный `os.urandom`-суффикс не сериализовал конкурентные verify
+    (двойное нажатие `v` до того, как первый tmux-запуск успевал хоть
+    что-то сохранить, — оба вычисляли разные id и оба стартовали).
+    `None` означает «пусть `runner.verify()` выведет детерминированный
+    `<parent>-v<N>` сам» (`launch_verify` передаёт это дальше в ARGS —
+    без `--run-id` вообще). Любой статус, кроме `merged_unverified`, ->
+    строка-ошибка, не молчаливый отказ.
     """
     if row.status != "merged_unverified":
         return f"verify: run {row.run_id} не в merged_unverified"
-    child = f"{row.run_id}-v{os.urandom(2).hex()}"
-    return row.run_id, child
+    return row.run_id, None
 
 
 def _safe_run_detail(run_id: str) -> cm.RunDetail | str:

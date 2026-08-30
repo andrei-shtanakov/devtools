@@ -629,6 +629,68 @@ def test_verify_allowed_again_after_failed_child(
     assert second_child.remediated_by == parent_id
 
 
+def test_verify_without_run_id_serializes_concurrent_calls(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 5, codex-major (TOCTOU): без явного `run_id` `verify()` выводит
+    ДЕТЕРМИНИРОВАННЫЙ id (`_next_verify_run_id` — `<parent>-v<N>`, N — 1 +
+    число уже существующих потомков). Два конкурентных вызова ДО того, как
+    любой успел сохранить своего потомка, вычисляют ОДИН И ТОТ ЖЕ id —
+    моделируем гонку явно: слот занят "выигравшим" конкурентом
+    (`_reserve_run_id` напрямую) раньше, чем наш `verify()` успевает его
+    зарезервировать; второй ("проигравший") получает `ValueError` вместо
+    параллельного запуска S8 в одном `target_dir`."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-race"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    computed_id = runner._next_verify_run_id(parent_id)
+    same_computed_id = runner._next_verify_run_id(parent_id)
+    assert computed_id == same_computed_id == f"{parent_id}-v1"
+
+    runner._reserve_run_id(computed_id)  # "выигравший" конкурент
+
+    with pytest.raises(ValueError, match="уже существует"):
+        runner.verify(parent_id, ops)  # "проигравший" вычисляет тот же id
+
+
+def test_verify_without_run_id_increments_attempt_after_failed_child(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """`attempt = 1 + число существующих потомков` (любой статус) — после
+    провального (`merged_unverified`) потомка следующий `verify()` без
+    `run_id` вычисляет НОВЫЙ id (`-v2`), а не повторяет `-v1` (что упёрлось
+    бы в уже занятый `run_id` того же провального потомка)."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-attempts"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    first_child = runner.verify(parent_id, ops)
+    assert first_child.run_id == f"{parent_id}-v1"
+    assert first_child.status == "merged_unverified"
+
+    ops.s8_exit = 0  # находки устранены вторым фикс-PR'ом
+    second_child = runner.verify(parent_id, ops)
+    assert second_child.run_id == f"{parent_id}-v2"
+    assert second_child.status == "completed"
+
+
 def test_resume_waiting_human_merge_open_still_waits(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
