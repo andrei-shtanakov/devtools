@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 CONFIDENCE_THRESHOLD = 0.75
+# Намеренно продублировано из issue_console.KINDS: обратный импорт создал бы
+# цикл (issue_console будет импортировать issue_classify). Равенство
+# закреплено tests/test_issue_classify.py::test_kinds_match_issue_console.
 KINDS = ("document", "research", "code", "fix", "unknown")
 
 SCHEMA = {
@@ -48,6 +51,7 @@ class ClassifyError(RuntimeError):
 
 
 def cache_key(issue: Any) -> str:
+    """Ключ кэша: owner/repo#number@updatedAt."""
     return f"{issue.owner}/{issue.repo}#{issue.number}@{issue.updated_at}"
 
 
@@ -85,12 +89,15 @@ def run_codex(batch: list[dict]) -> list[dict]:
         schema = Path(tmp) / "schema.json"
         answer = Path(tmp) / "answer.json"
         schema.write_text(json.dumps(SCHEMA))
-        done = subprocess.run(
-            ["codex", "exec", "--ephemeral", "--output-schema", str(schema),
-             "--output-last-message", str(answer), "--sandbox", "read-only",
-             prompt],
-            capture_output=True, text=True, timeout=300,
-        )
+        try:
+            done = subprocess.run(
+                ["codex", "exec", "--ephemeral", "--output-schema", str(schema),
+                 "--output-last-message", str(answer), "--sandbox", "read-only",
+                 prompt],
+                capture_output=True, text=True, timeout=300,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ClassifyError(str(exc)) from exc
         if done.returncode:
             raise ClassifyError(done.stderr.strip() or "codex exec failed")
         try:

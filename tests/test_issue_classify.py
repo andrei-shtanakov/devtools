@@ -1,7 +1,9 @@
 import json
+import subprocess
 from pathlib import Path
 
 import issue_classify
+import issue_console
 from tests.test_issue_console import _issue
 
 
@@ -71,3 +73,37 @@ def test_cache_write_is_atomic_no_partial_file(tmp_path: Path) -> None:
     issue_classify.refine([_unknown()], cache, run=lambda b: [_answer()])
     assert json.loads(cache.read_text())  # валидный json, каталог создан
     assert not list(cache.parent.glob("*.tmp*"))
+
+
+def test_run_codex_raises_classify_error_on_launch_failure(monkeypatch) -> None:
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("codex")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    try:
+        issue_classify.run_codex([])
+        raise AssertionError("ожидался ClassifyError")
+    except issue_classify.ClassifyError:
+        pass
+
+
+def test_refine_survives_codex_launch_failure(tmp_path: Path, monkeypatch) -> None:
+    cache = tmp_path / "cache.json"
+
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("codex")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert issue_classify.refine(
+        [_unknown()], cache, run=issue_classify.run_codex) == {}
+
+
+def test_kinds_match_issue_console() -> None:
+    assert issue_classify.KINDS == issue_console.KINDS
+
+
+def test_confidence_threshold_is_inclusive(tmp_path: Path) -> None:
+    kinds = issue_classify.refine(
+        [_unknown()], tmp_path / "c.json",
+        run=lambda b: [_answer(confidence=0.75)])
+    assert kinds == {"alpha#1": "fix"}
