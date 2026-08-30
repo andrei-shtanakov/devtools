@@ -552,3 +552,7 @@
       принудительно отключают также GitHub-наследование и ведут в полный
       прогон. 187 тестов зелёные; терминальное ревью нашло две реальные
       major-дыры в ранних выходах, обе закрыты регрессиями до approve.
+
+## Fleet issue console (PR-1)
+
+- [x] Fleet issue console (PR-1): TUI открытых issues флота (acceptance/kind/группировка) + запуск изолированных tmux-worker-ов без publish @owner:github:andrei-shtanakov @id:fleet-issue-console — спека docs/superpowers/specs/2026-08-30-fleet-issue-console-design.md; PR #85
