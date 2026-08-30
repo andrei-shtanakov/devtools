@@ -20,8 +20,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+try:
+    from plan_fields import scrape_items
+except ImportError:  # pragma: no cover - защита запуска вне uv-окружения
+    scrape_items = None  # type: ignore[assignment]
 
 KINDS = ("document", "research", "code", "fix", "unknown")
+ACCEPTANCE = ("accepted", "not-accepted", "unverifiable", "n/a")
 KIND_WORDS = {
     "fix": ("fix", "bug", "broken", "regression", "ошиб", "почин", "дефект"),
     "document": ("doc", "readme", "adr", "documentation", "документ", "описан"),
@@ -38,12 +43,14 @@ class Issue:
     body: str
     author: str
     created_at: str
+    updated_at: str
     url: str
     labels: tuple[str, ...]
     inbox: bool
-    accepted: bool | None
+    accepted: str
     kind: str
     internal: bool
+    owner: str
 
     @property
     def key(self) -> str:
@@ -83,15 +90,25 @@ def discover_repos(root: Path) -> dict[str, Path]:
     return result
 
 
-def _accepted(body: str, repo_path: Path | None) -> bool | None:
+def _acceptance(body: str, repo_path: Path | None) -> str:
+    """Acceptance inbox-issue: derived от slug: в теле и чекбоксов TODO.md."""
+    if scrape_items is None:
+        raise RuntimeError(
+            "пакет plan-fields недоступен — запускайте через `uv run --frozen` "
+            "(make issues)"
+        )
     slug = _field(body, "slug")
     if not slug or repo_path is None:
-        return None
+        return "unverifiable"
     todo = repo_path / "TODO.md"
     if not todo.is_file():
-        return None
-    return any(slug in line for line in todo.read_text(errors="ignore").splitlines()
-               if re.match(r"^\s*[-*]\s+\[[ xX]\]", line))
+        return "unverifiable"
+    items = scrape_items(todo.read_text(errors="ignore"))
+    return (
+        "accepted"
+        if any(slug in item.raw_text for item in items)
+        else "not-accepted"
+    )
 
 
 def parse_issues(raw: list[dict[str, Any]], root: Path, internal: set[str]) -> list[Issue]:
@@ -104,13 +121,32 @@ def parse_issues(raw: list[dict[str, Any]], root: Path, internal: set[str]) -> l
         author = str(author_obj.get("login") or author_obj.get("name") or "?")
         labels = tuple(str(x.get("name", "")) for x in item.get("labels") or [])
         body = str(item.get("body") or "")
+        inbox = "inbox" in labels
+        name_with_owner = str(repo_obj.get("nameWithOwner") or "")
+        owner = (
+            name_with_owner.split("/")[0]
+            if "/" in name_with_owner
+            else "?"
+        )
         issues.append(Issue(
-            repo=repo, number=int(item["number"]), title=str(item.get("title") or ""),
-            body=body, author=author, created_at=str(item.get("createdAt") or ""),
-            url=str(item.get("url") or ""), labels=labels, inbox="inbox" in labels,
-            accepted=_accepted(body, repos.get(repo.lower())),
+            repo=repo,
+            number=int(item["number"]),
+            title=str(item.get("title") or ""),
+            body=body,
+            author=author,
+            created_at=str(item.get("createdAt") or ""),
+            updated_at=str(item.get("updatedAt") or ""),
+            url=str(item.get("url") or ""),
+            labels=labels,
+            inbox=inbox,
+            accepted=(
+                "n/a"
+                if not inbox
+                else _acceptance(body, repos.get(repo.lower()))
+            ),
             kind=classify(str(item.get("title") or ""), body, labels),
             internal=author.lower() in internal,
+            owner=owner,
         ))
     return issues
 
@@ -118,9 +154,19 @@ def parse_issues(raw: list[dict[str, Any]], root: Path, internal: set[str]) -> l
 def fetch_issues(owner: str) -> list[dict[str, Any]]:
     # `gh search issues` excludes pull requests unless `--include-prs` is
     # passed.  Older gh releases do not have a `--type` flag here.
-    cmd = ["gh", "search", "issues", "--owner", owner, "--state", "open",
-           "--limit", "1000", "--json",
-           "repository,number,title,body,author,createdAt,labels,url"]
+    cmd = [
+        "gh",
+        "search",
+        "issues",
+        "--owner",
+        owner,
+        "--state",
+        "open",
+        "--limit",
+        "1000",
+        "--json",
+        "repository,number,title,body,author,createdAt,updatedAt,labels,url",
+    ]
     done = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
     if done.returncode:
         raise RuntimeError(done.stderr.strip() or "gh search issues failed")
@@ -166,8 +212,13 @@ def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:
         for row, issue in enumerate(ordered[offset:offset + visible], start=1):
             mark = "[x]" if issue.key in selected else "[ ]"
             inbox = "I" if issue.inbox else "-"
-            accepted = "Y" if issue.accepted is True else ("N" if issue.accepted is False else "?")
-            line = f"{mark} {issue.created_at[:10]} {inbox}/{accepted} {issue.author:<18.18} {issue.kind:<8} {issue.key:<25.25} {issue.title}"
+            acc = {
+                "accepted": "A",
+                "not-accepted": "N",
+                "unverifiable": "U",
+                "n/a": "-",
+            }[issue.accepted]
+            line = f"{mark} {issue.created_at[:10]} {inbox}/{acc} {issue.author:<18.18} {issue.kind:<8} {issue.key:<25.25} {issue.title}"
             stdscr.addnstr(row, 0, line, w - 1,
                            curses.A_REVERSE if offset + row - 1 == cursor else 0)
         stdscr.addnstr(h - 1, 0, status, w - 1)
