@@ -77,17 +77,14 @@ def _reserve_run_id(run_id: str) -> None:
         ) from exc
 
 
-def _blocking_merged_unverified(ws_id: str) -> str | None:
-    """WS-lock (спека §5, финальное ревью круг 5): найти блокирующий run_id.
+def _load_all_runs() -> dict[str, RunState]:
+    """Все читаемые прогоны под `RUNS_ROOT`, id -> `RunState`.
 
-    Пока по ``ws_id`` висит ``merged_unverified`` без зелёного (``completed``)
-    потомка (``remediated_by`` == его run_id), новый авторинг-прогон по этому
-    же ``ws_id`` не стартует — fail-closed: непроверенное не читается как
-    проверенное. Возвращает run_id блокирующего прогона либо ``None``.
-
-    Обход соседей по `all_run_ids()`: битые/нечитаемые `run.json` (не тот
-    формат, отсутствующие поля, невалидный JSON) пропускаются молча — сосед
-    с испорченным леджером не должен мешать чужому прогону.
+    Общий обход для WS-lock (`_blocking_merged_unverified`) и
+    verify-дедупа (`_has_green_child`, round 3 codex-ревью): битые/
+    нечитаемые `run.json` (не тот формат, отсутствующие поля, невалидный
+    JSON) пропускаются молча — сосед с испорченным леджером не должен
+    мешать чужому прогону.
     """
     states: dict[str, RunState] = {}
     for run_id in all_run_ids():
@@ -95,6 +92,18 @@ def _blocking_merged_unverified(ws_id: str) -> str | None:
             states[run_id] = load(run_id)
         except (OSError, ValueError, TypeError, KeyError):
             continue
+    return states
+
+
+def _blocking_merged_unverified(ws_id: str) -> str | None:
+    """WS-lock (спека §5, финальное ревью круг 5): найти блокирующий run_id.
+
+    Пока по ``ws_id`` висит ``merged_unverified`` без зелёного (``completed``)
+    потомка (``remediated_by`` == его run_id), новый авторинг-прогон по этому
+    же ``ws_id`` не стартует — fail-closed: непроверенное не читается как
+    проверенное. Возвращает run_id блокирующего прогона либо ``None``.
+    """
+    states = _load_all_runs()
     verified_parents = {
         s.remediated_by
         for s in states.values()
@@ -105,6 +114,22 @@ def _blocking_merged_unverified(ws_id: str) -> str | None:
             if run_id not in verified_parents:
                 return run_id
     return None
+
+
+def _has_green_child(parent_run_id: str) -> bool:
+    """`True`, если у `parent_run_id` уже есть завершённый (`completed`)
+    verify-потомок (`remediated_by == parent_run_id`) — «уже верифицирован»
+    (round 3, codex-ревью, продолжение I-7): tmux-дедуп в консоли защищает
+    только пока сессия жива (round 2 её ещё и самозакрыл), но `verify()`
+    сам по себе не проверял, есть ли у родителя уже подтверждающий потомок
+    — второй `verify()`-вызов (например руками, мимо консоли) на уже
+    зелёном потомке создавал бы ЕЩЁ ОДИН, хотя родитель уже подтверждён.
+    Провальный потомок (`merged_unverified`) НЕ считается — повтор
+    verify после провала разрешён и остаётся штатным путём."""
+    return any(
+        s.remediated_by == parent_run_id and s.status == "completed"
+        for s in _load_all_runs().values()
+    )
 
 
 def start(
@@ -302,12 +327,25 @@ def verify(parent_run_id: str, ops: Ops, run_id: str) -> RunState:
     bundle_dir/profile/branch/pr/head), полем ``remediated_by`` на родителя и
     выполняет только S8. Успех фиксируется у ПОТОМКА (``completed``);
     родитель не трогается — он остаётся `merged_unverified` навсегда.
+
+    Отказывает, если у родителя уже есть ЗЕЛЁНЫЙ (``completed``) потомок
+    (round 3, codex-ревью): «уже верифицирован», повторный `verify()`
+    создавал бы ещё один verification-run поверх уже подтверждённого.
+    Провальный потомок не блокирует — повтор после него штатный. Обе
+    проверки (`parent.status`, `_has_green_child`) — ДО `_reserve_run_id`,
+    тот же порядок, что у `start()` (валидация без побочных эффектов перед
+    резервированием id).
     """
     parent = load(parent_run_id)
     if parent.status != "merged_unverified":
         raise ValueError(
             f"verify: parent-run {parent_run_id!r} не merged_unverified "
             f"(текущий статус {parent.status!r})"
+        )
+    if _has_green_child(parent_run_id):
+        raise ValueError(
+            f"verify: parent-run {parent_run_id!r} уже верифицирован — "
+            "у него есть завершённый (completed) потомок"
         )
     _reserve_run_id(run_id)
     child = new_run(
@@ -796,8 +834,15 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
     `remediation-issue`: `create_issue` раньше не имел собственного op'а,
     и гибель между вызовом `create_issue` (эффект состоялся) и фиксацией
     результата на resume приводила к дубль-issue (`op_start` пишется ДО
-    эффекта; `started` при входе → реконсиляция через `ops.find_issue` по
-    `slug:`-префиксу вместо слепого повторного `create_issue`).
+    эффекта). Реконсиляция через `ops.find_issue` по `slug:`-префиксу
+    выполняется БЕЗУСЛОВНО перед `create_issue` (codex-ревью, round 3), не
+    только когда у ЭТОГО прогона op уже `started`: тело issue несёт
+    `slug: beh-remediation-<ws_id>`, ОДИН И ТОТ ЖЕ у родителя и у ЛЮБОГО
+    его verify-потомка (тот же `ws_id`) — если issue уже открыт СОСЕДНИМ
+    прогоном (родителем на прошлом провале, или прошлым провальным
+    потомком), а у текущего прогона `remediation-issue` ещё "new" (первый
+    заход в S8 этого конкретного run'а), слепой `create_issue` на ветке
+    "new" плодил дубликат с тем же slug вместо переиспользования номера.
 
     Перед самим `gate_check_s8` — `sync-default` (круг 5, codex-ревью
     PR #88): `target_dir` без явного чекаута мог стоять на feature-ветке
@@ -865,19 +910,16 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
     issue_key = "remediation-issue"
     issue_status = op_status(state, issue_key)
     if issue_status != "completed":
-        if issue_status == "started":
-            try:
-                existing = ops.find_issue(state.repo_slug, body_prefix)
-            except RuntimeError as exc:
-                print(f"_step_s8: реконсиляция find_issue не удалась: {exc}")
-                return False
-            if existing is not None:
-                op_complete(state, issue_key, number=existing)
-            else:
-                number = ops.create_issue(state.repo_slug, issue_title, issue_body)
-                op_complete(state, issue_key, number=number)
-        else:
+        if issue_status != "started":
             op_start(state, issue_key)
+        try:
+            existing = ops.find_issue(state.repo_slug, body_prefix)
+        except RuntimeError as exc:
+            print(f"_step_s8: реконсиляция find_issue не удалась: {exc}")
+            return False
+        if existing is not None:
+            op_complete(state, issue_key, number=existing)
+        else:
             number = ops.create_issue(state.repo_slug, issue_title, issue_body)
             op_complete(state, issue_key, number=number)
 

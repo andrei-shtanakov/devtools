@@ -461,6 +461,45 @@ def test_resume_after_death_between_create_issue_and_op_complete_reuses_issue(
     assert ("find_issue", body_prefix) in ops.calls
 
 
+def test_s8_fail_reconciles_via_find_issue_even_on_fresh_new_op(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 3, codex-major: реконсиляция через `find_issue` раньше
+    выполнялась только когда у ЭТОГО прогона `remediation-issue` уже
+    `started` (сам он умирал между `create_issue` и `op_complete`). Slug
+    `beh-remediation-<ws_id>` одинаков у родителя и у ЛЮБОГО его
+    verify-потомка (тот же `ws_id`) — если issue уже открыт СОСЕДНИМ
+    прогоном (родителем на прошлом провале, или прошлым провальным
+    потомком), а у ТЕКУЩЕГО прогона `remediation-issue` ещё "new" (первый
+    заход в S8 именно этого run'а), старый код звал `create_issue` вслепую
+    на ветке "new" и плодил дубликат вместо переиспользования номера."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    run_id = "r-s8-sibling-issue-exists"
+    body_prefix = "slug: beh-remediation-WS-1"
+    # Issue уже открыт ДРУГИМ прогоном (тот же ws_id -> тот же slug). У
+    # ЭТОГО прогона remediation-issue ещё не трогался вообще ("new").
+    ops.issues.append((
+        "owner/alpha",
+        "beh-remediation: ранний провал (WS-1)",
+        f"{body_prefix}\nfrom: devtools#r-other-sibling-run\n\nGC-EARLIER\n",
+    ))
+
+    state = runner.start(**_agent_merge_kwargs(tmp_path, run_id, ops))
+
+    assert state.status == "merged_unverified"
+    assert len(ops.issues) == 1  # второй не создан
+    assert state.ops["remediation-issue"] == {"status": "completed", "number": 901}
+    assert "create_issue" not in [c[0] for c in ops.calls]
+    assert ("find_issue", body_prefix) in ops.calls
+
+
 def test_verify_child_completes_parent_stays_merged_unverified(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
@@ -488,6 +527,66 @@ def test_verify_child_completes_parent_stays_merged_unverified(
 
     reloaded_parent = rs.load(parent_id)
     assert reloaded_parent.status == "merged_unverified"
+
+
+def test_verify_refuses_when_parent_already_has_green_child(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 3, codex-major: tmux-дедуп в консоли защищает только пока
+    сессия жива (и после round 2 она ещё и самозакрывается) — `verify()`
+    сам по себе не проверял, есть ли у родителя уже подтверждающий
+    (`completed`) потомок. Второй `verify()`-вызов (руками, мимо консоли,
+    или после того как сессия уже закрылась) на уже зелёном потомке
+    создавал бы ЕЩЁ ОДИН verification-run поверх уже верифицированного
+    родителя."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-already-verified"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    ops.s8_exit = 0  # находки устранены фикс-PR'ом
+    child = runner.verify(parent_id, ops, "r-s8-child-green")
+    assert child.status == "completed"
+
+    with pytest.raises(ValueError, match="уже верифицирован"):
+        runner.verify(parent_id, ops, "r-s8-child-second")
+
+    # Второй потомок не зарезервирован — отказ ДО _reserve_run_id.
+    assert not (rs.run_dir("r-s8-child-second") / "run.json").exists()
+
+
+def test_verify_allowed_again_after_failed_child(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Провальный (`merged_unverified`) потомок НЕ блокирует повторный
+    `verify()` — только ЗЕЛЁНЫЙ (`completed`) значит «уже верифицирован»;
+    цикл «verify → всё ещё красный → verify снова» остаётся штатным."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-retry"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    failed_child = runner.verify(parent_id, ops, "r-s8-child-failed")
+    assert failed_child.status == "merged_unverified"  # тоже провалился
+
+    ops.s8_exit = 0  # находки устранены вторым фикс-PR'ом
+    second_child = runner.verify(parent_id, ops, "r-s8-child-retry-green")
+    assert second_child.status == "completed"
+    assert second_child.remediated_by == parent_id
 
 
 def test_resume_waiting_human_merge_open_still_waits(
