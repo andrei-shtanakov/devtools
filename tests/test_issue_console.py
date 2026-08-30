@@ -135,7 +135,7 @@ def test_fleet_filter_drops_repos_without_clone(tmp_path: Path) -> None:
 def test_sort_issues_newest_first() -> None:
     older = _issue(number=1, created="2026-08-01T00:00:00Z")
     newer = _issue(number=2, created="2026-08-29T00:00:00Z")
-    assert issue_console.sort_issues([older, newer], grouped=False) == [
+    assert issue_console.sort_issues([older, newer], mode="date") == [
         newer,
         older,
     ]
@@ -145,17 +145,33 @@ def test_sort_issues_grouped_by_author_then_newest() -> None:
     a_old = _issue(number=1, author="bob", created="2026-08-01T00:00:00Z")
     a_new = _issue(number=2, author="bob", created="2026-08-29T00:00:00Z")
     b_new = _issue(number=3, author="alice", created="2026-08-28T00:00:00Z")
-    assert issue_console.sort_issues([a_old, b_new, a_new], grouped=True) == [
+    assert issue_console.sort_issues([a_old, b_new, a_new], mode="author") == [
         b_new,
         a_new,
         a_old,
     ]
 
 
+def test_sort_issues_grouped_by_repo_then_newest() -> None:
+    a_old = _issue(number=1, repo="alpha", created="2026-08-01T00:00:00Z")
+    a_new = _issue(number=2, repo="alpha", created="2026-08-29T00:00:00Z")
+    b_new = _issue(number=3, repo="beta", created="2026-08-28T00:00:00Z")
+    assert issue_console.sort_issues([a_old, b_new, a_new], mode="repo") == [
+        a_new,
+        a_old,
+        b_new,
+    ]
+
+
 def test_group_key() -> None:
     issue = _issue(author="bob", repo="alpha")
-    assert issue_console.group_key(issue, grouped=True) == "bob"
-    assert issue_console.group_key(issue, grouped=False) == "alpha"
+    assert issue_console.group_key(issue, mode="author") == "bob"
+    assert issue_console.group_key(issue, mode="repo") == "alpha"
+    assert issue_console.group_key(issue, mode="date") == ""
+
+
+def test_acceptance_char_covers_all_acceptance_values() -> None:
+    assert set(issue_console.ACCEPTANCE_CHAR) == set(issue_console.ACCEPTANCE)
 
 
 def test_internal_default_set() -> None:
@@ -187,8 +203,37 @@ def test_launch_skips_existing_tmux_session(tmp_path: Path, monkeypatch) -> None
 
     monkeypatch.setattr(issue_console.subprocess, "run", fake_run)
     status = issue_console.launch(_issue(repo="alpha", number=7), root, "plan")
-    assert status == "exists: tmux attach -t issue-alpha-7"
+    assert status == "exists: tmux attach -t =issue-alpha-7"
+    has_session_call = next(c for c in calls if c[:2] == ["tmux", "has-session"])
+    assert has_session_call[-1] == "=issue-alpha-7"
     assert not any(c[:2] == ["tmux", "new-session"] for c in calls)
+
+
+def test_launch_uses_exact_tmux_target_not_prefix(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """has-session без точного совпадения не должен молчаливо блокировать
+
+    запуск, даже когда существует сессия с именем-надмножеством (например,
+    issue-alpha-67 при попытке запустить issue-alpha-6).
+    """
+    root = _fleet(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        calls.append(list(cmd))
+        if cmd[:2] == ["tmux", "has-session"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(issue_console.subprocess, "run", fake_run)
+    status = issue_console.launch(_issue(repo="alpha", number=6), root, "plan")
+    assert status == "started issue-alpha-6"
+    has_session_call = next(c for c in calls if c[:2] == ["tmux", "has-session"])
+    assert has_session_call[-1] == "=issue-alpha-6"
+    assert any(c[:2] == ["tmux", "new-session"] for c in calls)
 
 
 def test_launch_passes_output_root(tmp_path: Path, monkeypatch) -> None:
@@ -235,3 +280,45 @@ def test_classify_ai_flag_wires_refine(tmp_path: Path, monkeypatch) -> None:
     data = _json.loads(out.getvalue())
     assert data[0]["kind"] == "research"
     assert called["cache"] == issue_console.OUT_ROOT / "issue-kind-cache.json"
+
+
+def test_json_offline_without_classify_ai_skips_refine(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _fleet(tmp_path)
+    raw = [_raw(labels=("research",))]  # non-inbox: no plan-fields needed
+
+    def fail_refine(*args, **kwargs):
+        raise AssertionError("refine must not run without --classify-ai")
+
+    monkeypatch.setattr(issue_console.issue_classify, "refine", fail_refine)
+    import json as _json
+    fixture = tmp_path / "issues.json"
+    fixture.write_text(_json.dumps(raw))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["issue_console.py", "--root", str(root), "--input", str(fixture),
+         "--json"])
+    import io, contextlib
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert issue_console.main() == 0
+    data = _json.loads(out.getvalue())
+    assert data[0]["repo"] == "alpha"
+    assert data[0]["accepted"] == "n/a"
+
+
+def test_main_returns_2_when_plan_fields_unavailable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _fleet(tmp_path)  # inbox issue by default (see _raw())
+    raw = [_raw()]
+    monkeypatch.setattr(issue_console, "scrape_items", None)
+    import json as _json
+    fixture = tmp_path / "issues.json"
+    fixture.write_text(_json.dumps(raw))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["issue_console.py", "--root", str(root), "--input", str(fixture),
+         "--json"])
+    assert issue_console.main() == 2

@@ -31,6 +31,13 @@ OUT_ROOT = Path(__file__).resolve().parent / "out"
 
 KINDS = ("document", "research", "code", "fix", "unknown")
 ACCEPTANCE = ("accepted", "not-accepted", "unverifiable", "n/a")
+ACCEPTANCE_CHAR = {
+    "accepted": "A",
+    "not-accepted": "N",
+    "unverifiable": "U",
+    "n/a": "-",
+}
+GROUP_MODES = ("date", "repo", "author")
 DEFAULT_INTERNAL = frozenset({"andrei-shtanakov", "ai-prosto"})
 KIND_WORDS = {
     "fix": ("fix", "bug", "broken", "regression", "ошиб", "почин", "дефект"),
@@ -199,16 +206,23 @@ def fetch_issues(owner: str) -> list[dict[str, Any]]:
     return data
 
 
-def sort_issues(issues: list[Issue], grouped: bool) -> list[Issue]:
-    """Дефолт — новые сверху; grouped — по инициатору, внутри новые сверху."""
+def sort_issues(issues: list[Issue], mode: str) -> list[Issue]:
+    """"date" — новые сверху; "repo"/"author" — тем же вторичным ключом
+    внутри группы (стабильная сортировка сохраняет порядок по дате)."""
     by_date = sorted(issues, key=lambda x: x.created_at, reverse=True)
-    if not grouped:
-        return by_date
-    return sorted(by_date, key=lambda x: x.author.lower())
+    if mode == "repo":
+        return sorted(by_date, key=lambda x: x.repo)
+    if mode == "author":
+        return sorted(by_date, key=lambda x: x.author.lower())
+    return by_date
 
 
-def group_key(issue: Issue, grouped: bool) -> str:
-    return issue.author if grouped else issue.repo
+def group_key(issue: Issue, mode: str) -> str:
+    if mode == "repo":
+        return issue.repo
+    if mode == "author":
+        return issue.author
+    return ""
 
 
 def apply_kinds(issues: list[Issue], kinds: dict[str, str]) -> list[Issue]:
@@ -225,11 +239,14 @@ def launch(issue: Issue, root: Path, mode: str) -> str:
     if repo_path is None:
         raise RuntimeError(f"local clone for {issue.repo} not found")
     session = re.sub(r"[^a-zA-Z0-9_-]", "-", f"issue-{issue.repo}-{issue.number}")[:80]
+    # "=" требует точного совпадения имени сессии; без него tmux матчит по
+    # префиксу, и short-номер (issue-devtools-6) ложно "находит" issue-devtools-67.
+    target = f"={session}"
     exists = subprocess.run(
-        ["tmux", "has-session", "-t", session], capture_output=True, text=True
+        ["tmux", "has-session", "-t", target], capture_output=True, text=True
     )
     if exists.returncode == 0:
-        return f"exists: tmux attach -t {session}"
+        return f"exists: tmux attach -t {target}"
     worker = Path(__file__).with_name("issue_worker.py")
     cmd = [
         sys.executable, str(worker),
@@ -252,42 +269,71 @@ def launch(issue: Issue, root: Path, mode: str) -> str:
     return f"started {session}"
 
 
+def _build_rows(
+    ordered: list[Issue], mode_group: str
+) -> list[tuple[str, Issue | str]]:
+    """Строки экрана: группа-заголовки (кроме mode_group == "date") + issues.
+
+    Заголовок занимает отдельную строку экрана; курсор по заголовкам не ходит.
+    """
+    rows: list[tuple[str, Issue | str]] = []
+    last_key: str | None = None
+    for issue in ordered:
+        key = group_key(issue, mode_group)
+        if mode_group != "date" and key != last_key:
+            rows.append(("header", key))
+            last_key = key
+        rows.append(("issue", issue))
+    return rows
+
+
 def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:
     curses.curs_set(0)
     selected: set[str] = set()
     cursor = 0
-    grouped = False
+    mode_group = "date"
     mode = "plan"
     status = "space select · g group · x plan/execute · enter launch · q quit"
     while True:
-        ordered = sort_issues(issues, grouped)
+        ordered = sort_issues(issues, mode_group)
         cursor = min(cursor, max(0, len(ordered) - 1))
+        rows = _build_rows(ordered, mode_group)
+        issue_rows = [i for i, (kind, _) in enumerate(rows) if kind == "issue"]
+        cursor_row = issue_rows[cursor] if issue_rows else 0
         stdscr.erase()
         h, w = stdscr.getmaxyx()
+        group_label = (
+            f"sort: {mode_group}"
+            if mode_group == "date"
+            else f"group: {mode_group}"
+        )
         header = (
             f"Issues: {len(ordered)}  selected: {len(selected)}  mode: {mode}  "
-            f"group: {'author' if grouped else 'repo'}"
+            f"{group_label}"
         )
         stdscr.addnstr(0, 0, header, w - 1, curses.A_BOLD)
         visible = max(1, h - 2)
-        offset = max(0, cursor - visible + 1)
-        for row, issue in enumerate(ordered[offset:offset + visible], start=1):
+        offset = max(0, cursor_row - visible + 1)
+        for screen_row, (kind, payload) in enumerate(
+            rows[offset:offset + visible], start=1
+        ):
+            if kind == "header":
+                stdscr.addnstr(screen_row, 0, f"── {payload} ──", w - 1)
+                continue
+            issue = payload
+            assert isinstance(issue, Issue)
             mark = "[x]" if issue.key in selected else "[ ]"
             inbox = "I" if issue.inbox else "-"
-            acc = {
-                "accepted": "A",
-                "not-accepted": "N",
-                "unverifiable": "U",
-                "n/a": "-",
-            }[issue.accepted]
+            acc = ACCEPTANCE_CHAR[issue.accepted]
+            author = issue.author + ("*" if issue.internal else "")
             line = (
                 f"{mark} {issue.created_at[:10]} {inbox}/{acc} "
-                f"{issue.author:<18.18} {issue.kind:<8} {issue.key:<25.25} "
+                f"{author:<18.18} {issue.kind:<8} {issue.key:<25.25} "
                 f"{issue.title}"
             )
             stdscr.addnstr(
-                row, 0, line, w - 1,
-                curses.A_REVERSE if offset + row - 1 == cursor else 0,
+                screen_row, 0, line, w - 1,
+                curses.A_REVERSE if offset + screen_row - 1 == cursor_row else 0,
             )
         stdscr.addnstr(h - 1, 0, status, w - 1)
         stdscr.refresh()
@@ -299,7 +345,8 @@ def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:
         elif key in (curses.KEY_UP, ord("k")) and cursor > 0:
             cursor -= 1
         elif key == ord("g"):
-            grouped = not grouped
+            next_idx = (GROUP_MODES.index(mode_group) + 1) % len(GROUP_MODES)
+            mode_group = GROUP_MODES[next_idx]
         elif key == ord("x"):
             mode = "execute" if mode == "plan" else "plan"
         elif key == ord(" ") and ordered:

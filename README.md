@@ -54,10 +54,12 @@ publish-фазы будут добавлены после фиксации кр�
 до вызова Codex: внутренний инициатор → accept, внешний → reject; модель может
 только поднять `needs_human`, а не перевернуть политику.
 
-Клавиши: `space` — выбор, `g` — группировка repo/инициатор, `j/k` или стрелки —
-навигация, `enter` — отдельная tmux-сессия на issue (повтор на уже запущенном —
-подсказка attach), `q` — выход. Колонка acceptance в списке: `A`/`N`/`U`/`-` =
-accepted / not-accepted / unverifiable / n/a (n/a — issue без лейбла `inbox`).
+Клавиши: `space` — выбор, `g` — цикл `date → repo → author → date`, `j/k` или
+стрелки — навигация, `enter` — отдельная tmux-сессия на issue (повтор на уже
+запущенном — подсказка attach), `q` — выход. Колонка acceptance в списке:
+`A`/`N`/`U`/`-` = accepted / not-accepted / unverifiable / n/a (n/a — issue без
+лейбла `inbox`). `*` после логина инициатора = internal (влияет на policy-гейт
+worker'а: internal → accept, external → reject).
 Для CI и диагностики есть нетерминальный режим:
 
 ```bash
