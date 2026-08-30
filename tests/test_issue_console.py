@@ -156,3 +156,11 @@ def test_group_key() -> None:
     issue = _issue(author="bob", repo="alpha")
     assert issue_console.group_key(issue, grouped=True) == "bob"
     assert issue_console.group_key(issue, grouped=False) == "alpha"
+
+
+def test_internal_default_set() -> None:
+    assert issue_console.resolve_internal([]) == {"andrei-shtanakov", "ai-prosto"}
+
+
+def test_internal_flag_replaces_default() -> None:
+    assert issue_console.resolve_internal(["Alice", "bob"]) == {"alice", "bob"}

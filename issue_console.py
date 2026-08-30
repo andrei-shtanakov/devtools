@@ -27,12 +27,18 @@ except ImportError:  # pragma: no cover - защита запуска вне uv-
 
 KINDS = ("document", "research", "code", "fix", "unknown")
 ACCEPTANCE = ("accepted", "not-accepted", "unverifiable", "n/a")
+DEFAULT_INTERNAL = frozenset({"andrei-shtanakov", "ai-prosto"})
 KIND_WORDS = {
     "fix": ("fix", "bug", "broken", "regression", "ошиб", "почин", "дефект"),
     "document": ("doc", "readme", "adr", "documentation", "документ", "описан"),
     "research": ("research", "discovery", "investigat", "исслед", "сравн", "explore"),
     "code": ("feature", "implement", "add ", "новый код", "реализ", "поддержк"),
 }
+
+
+def resolve_internal(flags: list[str]) -> set[str]:
+    """--internal ЗАМЕНЯЕТ дефолтный набор целиком (спека), не дополняет."""
+    return {x.lower() for x in flags} if flags else set(DEFAULT_INTERNAL)
 
 
 @dataclass(frozen=True)
@@ -266,12 +272,17 @@ def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--owner", default=os.environ.get("ISSUE_CONSOLE_OWNER", "andrei-shtanakov"))
-    parser.add_argument("--internal", action="append", default=[])
+    parser.add_argument(
+        "--internal",
+        action="append",
+        default=[],
+        help="internal-логин; повтор флага; заменяет дефолтный набор целиком",
+    )
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument("--input", type=Path, help="offline gh JSON fixture")
     parser.add_argument("--json", action="store_true", help="print normalized data, do not start TUI")
     args = parser.parse_args()
-    internal = {args.owner.lower(), *(x.lower() for x in args.internal)}
+    internal = resolve_internal(args.internal)
     try:
         raw = json.loads(args.input.read_text()) if args.input else fetch_issues(args.owner)
         issues = parse_issues(raw, args.root, internal)
