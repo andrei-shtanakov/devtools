@@ -302,6 +302,9 @@ def test_facts_from_fail_closed() -> None:
     )
     assert empty_rollup.checks_rollup == "empty"
     assert empty_rollup.unresolved_threads is True
+    # Круг 11 (codex-major): пустой files — не "все файлы про документацию"
+    # (`all()` вакуумно истинно на пустом) — fail-closed на "code".
+    assert empty_rollup.diff_class == "code"
 
     outside_bundle = runner.facts_from(
         {

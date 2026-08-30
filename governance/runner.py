@@ -353,9 +353,13 @@ def facts_from(
     unresolved_threads = True if threads is None else bool(threads)
 
     prefix = bundle_dir.rstrip("/") + "/"
+    # Пустой `files` — не "все файлы про документацию" (круг 11, codex-major):
+    # `all()` на пустом списке истинно вакуумно, и без явной проверки пустой
+    # PR читался бы как "document" — недоказанный дифф мог пройти в agent-мерж.
+    # Fail-closed: пусто -> "code", decide() отправит человеку.
     diff_class = (
         "document"
-        if all(f.startswith(prefix) or f.startswith("docs/") for f in files)
+        if files and all(f.startswith(prefix) or f.startswith("docs/") for f in files)
         else "code"
     )
     touches_authority_root = any(
