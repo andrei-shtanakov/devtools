@@ -323,3 +323,60 @@ def test_create_issue_command_and_parses_number(monkeypatch):
     assert "-R" in call.argv and REPO_SLUG in call.argv
     label_idx = call.argv.index("--label")
     assert call.argv[label_idx + 1] == "inbox"
+
+
+# --- Кейс 9: find_issue — реконсиляция remediation-issue (круг 3) ---------
+
+
+def test_find_issue_command_shape(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="[]")
+    ops = RealOps()
+
+    ops.find_issue(REPO_SLUG, "slug: beh-remediation-WS-1")
+
+    call = calls[0]
+    assert call.argv[:3] == ["gh", "issue", "list"]
+    assert "-R" in call.argv and REPO_SLUG in call.argv
+    label_idx = call.argv.index("--label")
+    assert call.argv[label_idx + 1] == "inbox"
+    state_idx = call.argv.index("--state")
+    assert call.argv[state_idx + 1] == "open"
+
+
+def test_find_issue_returns_number_when_body_matches_prefix(monkeypatch):
+    payload = [
+        {"number": 10, "body": "unrelated\n"},
+        {"number": 42, "body": "slug: beh-remediation-WS-1\nfrom: x\n"},
+    ]
+    _install_fake_run(monkeypatch, returncode=0, stdout=json.dumps(payload))
+    ops = RealOps()
+
+    result = ops.find_issue(REPO_SLUG, "slug: beh-remediation-WS-1")
+
+    assert result == 42
+
+
+def test_find_issue_returns_none_when_no_match(monkeypatch):
+    payload = [{"number": 10, "body": "unrelated\n"}]
+    _install_fake_run(monkeypatch, returncode=0, stdout=json.dumps(payload))
+    ops = RealOps()
+
+    result = ops.find_issue(REPO_SLUG, "slug: beh-remediation-WS-1")
+
+    assert result is None
+
+
+def test_find_issue_rc_nonzero_raises_runtime_error(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1, stderr="boom")
+    ops = RealOps()
+
+    with pytest.raises(RuntimeError):
+        ops.find_issue(REPO_SLUG, "slug: beh-remediation-WS-1")
+
+
+def test_find_issue_invalid_json_raises_runtime_error(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=0, stdout="not json")
+    ops = RealOps()
+
+    with pytest.raises(RuntimeError):
+        ops.find_issue(REPO_SLUG, "slug: beh-remediation-WS-1")

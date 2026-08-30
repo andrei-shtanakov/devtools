@@ -131,6 +131,13 @@ class FakeOps:
         self.issues.append((repo_slug, title, body))
         return 900 + len(self.issues)
 
+    def find_issue(self, repo_slug: str, body_prefix: str) -> int | None:
+        self.calls.append(("find_issue", body_prefix))
+        for idx, (slug, _title, body) in enumerate(self.issues):
+            if slug == repo_slug and body.startswith(body_prefix):
+                return 900 + idx + 1
+        return None
+
     def commit_all(self, target_dir: str, message: str) -> None:
         self.calls.append(("commit_all",))
         self.committed.append((target_dir, message))
@@ -331,8 +338,11 @@ def test_s8_fail_marks_merged_unverified_and_opens_issue(
     state = runner.start(**_agent_merge_kwargs(tmp_path, run_id, ops))
 
     assert state.status == "merged_unverified"
-    # Op не помечается completed на провале — отличается от "прошёл".
-    assert state.ops["gate-authoritative"]["status"] == "started"
+    # Круг 3 (codex-ревью PR #88): gate-authoritative — аудит-запись, тоже
+    # completed на провале (exit хранит исход); отличает «прошёл» от «нет»
+    # exit, не сам статус op'а — run терминален в обоих случаях.
+    assert state.ops["gate-authoritative"] == {"status": "completed", "exit": 1}
+    assert state.ops["remediation-issue"] == {"status": "completed", "number": 901}
 
     findings_file = rs.run_dir(run_id) / "s8-findings.txt"
     assert findings_file.exists()
@@ -350,6 +360,78 @@ def test_s8_fail_marks_merged_unverified_and_opens_issue(
         runner.resume(run_id, ops)
 
 
+def test_resume_after_death_between_create_issue_and_op_complete_reuses_issue(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Круг 3 (codex-ревью PR #88): `create_issue` не имел собственного
+    write-ahead op'а — гибель между вызовом `create_issue` (эффект
+    состоялся) и фиксацией результата дублировала issue на resume. Op
+    `remediation-issue` + `find_issue`-реконсиляция: issue уже существует
+    (найден по `slug:`-префиксу тела) → берётся его номер, второй не
+    создаётся."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    run_id = "r-s8-issue-died"
+    kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
+
+    # Состояние сразу после дохлого прогона: gate-authoritative уже
+    # зафиксирован неуспехом, findings уже на диске, remediation-issue —
+    # started (write-ahead отработал), а сам issue РЕАЛЬНО создан (эффект
+    # состоялся), но op_complete не успел записаться.
+    state = rs.new_run(
+        subject=kwargs["subject"], repo=kwargs["repo"],
+        repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
+        target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
+        profile=kwargs["profile"], run_id=run_id,
+    )
+    state.branch = "spec/WS-1-behaviour"
+    state.pr = 100
+    state.head = "deadbeef"
+    state.ops = {
+        "branch": {"status": "completed"},
+        "author-charter": {"status": "completed", "skipped": True},
+        "author-requirements": {"status": "completed", "skipped": True},
+        "author-behaviour": {"status": "completed", "skipped": True},
+        "commit": {"status": "completed"},
+        "gate-candidate": {
+            "status": "completed", "error_count": 0, "required_absent": [],
+        },
+        "push": {"status": "completed"},
+        "pr": {"status": "completed", "number": 100},
+        "ready": {"status": "completed"},
+        "review": {"status": "completed", "exit": 0},
+        "verdict": {"status": "completed", "decision": "agent", "reason": "ok"},
+        "merge": {"status": "completed", "merged": True},
+        "gate-authoritative": {"status": "completed", "exit": 1},
+        "remediation-issue": {"status": "started"},
+    }
+    run_dir_path = rs.run_dir(run_id)
+    run_dir_path.mkdir(parents=True, exist_ok=True)
+    body_prefix = f"slug: beh-remediation-{state.ws_id}"
+    findings_text = "gate-check (S8, authoritative) завершился с кодом 1\n\nGC-X\n"
+    (run_dir_path / "s8-findings.txt").write_text(findings_text, encoding="utf-8")
+    rs.save(state)
+    # Issue РЕАЛЬНО создан прошлым (дохлым) вызовом ops.create_issue.
+    ops.issues.append((
+        state.repo_slug,
+        "beh-remediation: тестовый функционал (WS-1)",
+        f"{body_prefix}\nfrom: devtools#{run_id}\n\n{findings_text}",
+    ))
+
+    result = runner.advance(state, ops)
+
+    assert result.status == "merged_unverified"
+    assert len(ops.issues) == 1  # второй не создан
+    assert result.ops["remediation-issue"] == {"status": "completed", "number": 901}
+    assert "create_issue" not in [c[0] for c in ops.calls]
+    assert ("find_issue", body_prefix) in ops.calls
+
+
 def test_verify_child_completes_parent_stays_merged_unverified(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
@@ -364,6 +446,7 @@ def test_verify_child_completes_parent_stays_merged_unverified(
     parent_id = "r-s8-parent"
     parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
     assert parent.status == "merged_unverified"
+    assert len(ops.issues) == 1  # родитель открыл ровно одно remediation-issue
 
     ops.s8_exit = 0  # находки устранены фикс-PR'ом в целевом репо
     child = runner.verify(parent_id, ops, "r-s8-child")
@@ -371,6 +454,8 @@ def test_verify_child_completes_parent_stays_merged_unverified(
     assert child.status == "completed"
     assert child.remediated_by == parent_id
     assert child.ops["gate-authoritative"] == {"status": "completed", "exit": 0}
+    assert "remediation-issue" not in child.ops  # gate прошёл — issue не нужен
+    assert len(ops.issues) == 1  # потомок не плодит второй issue
 
     reloaded_parent = rs.load(parent_id)
     assert reloaded_parent.status == "merged_unverified"

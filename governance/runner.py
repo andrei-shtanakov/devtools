@@ -559,39 +559,74 @@ def _step_merge(state: RunState, ops: Ops) -> bool:
 def _step_s8(state: RunState, ops: Ops) -> bool:
     """S8: authoritative-гейт на дефолтной ветке после мержа (спека §5).
 
-    exit 0 → `completed`. Не-0 → `merged_unverified` НАВСЕГДА: findings в
-    `run_dir/s8-findings.txt`, remediation-issue в целевом репо по
-    inbox-контракту ADR-ECO-006 (тело начинается `slug:`/`from:`). Op
-    `gate-authoritative` завершается (`op_complete`) только при успехе —
-    как и у S4 (`gate-candidate`), провал не маркируется completed, чтобы
-    отличаться от «прошёл».
+    exit 0 → `completed`, run завершается. Не-0 → `merged_unverified`
+    НАВСЕГДА: findings в `run_dir/s8-findings.txt`, remediation-issue в
+    целевом репо по inbox-контракту ADR-ECO-006 (тело начинается
+    `slug:`/`from:`).
+
+    `gate-authoritative` завершается (`op_complete`, аудит-запись с `exit`)
+    сразу после `gate_check_s8` — успех И провал одинаково (круг 3,
+    codex-ревью PR #88): run на любом исходе S8 становится терминальным
+    (либо `completed`, либо `merged_unverified` навсегда — `advance()`/
+    `resume()` отказывают на `merged_unverified` явно), так что
+    `completed` здесь не путается с «прошёл» — прошёл или нет, отличает
+    сохранённый `exit`, не сам статус op'а.
+
+    Создание remediation-issue — отдельный write-ahead op
+    `remediation-issue`: `create_issue` раньше не имел собственного op'а,
+    и гибель между вызовом `create_issue` (эффект состоялся) и фиксацией
+    результата на resume приводила к дубль-issue (`op_start` пишется ДО
+    эффекта; `started` при входе → реконсиляция через `ops.find_issue` по
+    `slug:`-префиксу вместо слепого повторного `create_issue`).
     """
     key = "gate-authoritative"
-    if op_status(state, key) == "completed":
-        return True
-    _ensure_started(state, key)
-    exit_code, output = ops.gate_check_s8(
-        state.target_dir, state.bundle_dir, state.profile
-    )
-    if exit_code == 0:
-        op_complete(state, key, exit=exit_code)
-        state.status = "completed"
-        save(state)
-        return True
+    findings_path = run_dir(state.run_id) / "s8-findings.txt"
+    gate_op = state.ops.get(key)
 
-    findings = (
-        f"gate-check (S8, authoritative) завершился с кодом {exit_code}\n\n{output}"
-    )
-    (run_dir(state.run_id) / "s8-findings.txt").write_text(
-        findings, encoding="utf-8"
-    )
+    if gate_op is not None and gate_op["status"] == "completed":
+        if gate_op.get("exit") == 0:
+            return True
+        findings = findings_path.read_text(encoding="utf-8")
+    else:
+        _ensure_started(state, key)
+        exit_code, output = ops.gate_check_s8(
+            state.target_dir, state.bundle_dir, state.profile
+        )
+        if exit_code == 0:
+            op_complete(state, key, exit=exit_code)
+            state.status = "completed"
+            save(state)
+            return True
+        op_complete(state, key, exit=exit_code)
+        findings = (
+            f"gate-check (S8, authoritative) завершился с кодом {exit_code}"
+            f"\n\n{output}"
+        )
+        findings_path.write_text(findings, encoding="utf-8")
+
     issue_title = f"beh-remediation: {state.subject} ({state.ws_id})"
-    issue_body = (
-        f"slug: beh-remediation-{state.ws_id}\n"
-        f"from: devtools#{state.run_id}\n\n"
-        f"{findings}"
-    )
-    ops.create_issue(state.repo_slug, issue_title, issue_body)
+    body_prefix = f"slug: beh-remediation-{state.ws_id}"
+    issue_body = f"{body_prefix}\nfrom: devtools#{state.run_id}\n\n{findings}"
+
+    issue_key = "remediation-issue"
+    issue_status = op_status(state, issue_key)
+    if issue_status != "completed":
+        if issue_status == "started":
+            try:
+                existing = ops.find_issue(state.repo_slug, body_prefix)
+            except RuntimeError as exc:
+                print(f"_step_s8: реконсиляция find_issue не удалась: {exc}")
+                return False
+            if existing is not None:
+                op_complete(state, issue_key, number=existing)
+            else:
+                number = ops.create_issue(state.repo_slug, issue_title, issue_body)
+                op_complete(state, issue_key, number=number)
+        else:
+            op_start(state, issue_key)
+            number = ops.create_issue(state.repo_slug, issue_title, issue_body)
+            op_complete(state, issue_key, number=number)
+
     state.status = "merged_unverified"
     save(state)
     return False

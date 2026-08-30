@@ -71,6 +71,8 @@ class Ops(Protocol):
 
     def create_issue(self, repo_slug: str, title: str, body: str) -> int: ...
 
+    def find_issue(self, repo_slug: str, body_prefix: str) -> int | None: ...
+
 
 class RealOps:
     """RealOps: точные команды внешних эффектов (спека §5/§8)."""
@@ -277,3 +279,34 @@ class RealOps:
         if not match:
             raise RuntimeError(f"create_issue: no issue URL in {done.stdout!r}")
         return int(match.group(1))
+
+    def find_issue(self, repo_slug: str, body_prefix: str) -> int | None:
+        """Номер открытого inbox-issue, чьё body начинается с body_prefix.
+
+        `None` ТОЛЬКО когда такого issue нет; сбой самого запроса — rc != 0,
+        битый или неожиданный по форме JSON — поднимает `RuntimeError` (как
+        `find_pr`, F-5). Реконсиляция remediation-issue на S8 (круг 3,
+        codex-ревью PR #88): гибель между `create_issue` и фиксацией op'а не
+        должна читаться как «issue нет» и плодить дубликат.
+        """
+        done = subprocess.run(
+            ["gh", "issue", "list", "-R", repo_slug, "--label", "inbox",
+             "--state", "open", "--json", "number,body"],
+            capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            raise RuntimeError(
+                f"find_issue: gh issue list rc={done.returncode}: "
+                f"{done.stderr.strip()}"
+            )
+        try:
+            found = json.loads(done.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"find_issue: invalid JSON: {done.stdout!r}") from exc
+        if not isinstance(found, list):
+            raise RuntimeError(f"find_issue: unexpected JSON shape: {done.stdout!r}")
+        for item in found:
+            body = item.get("body") or ""
+            if body.startswith(body_prefix):
+                return item["number"]
+        return None
