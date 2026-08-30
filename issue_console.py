@@ -209,20 +209,27 @@ def apply_kinds(issues: list[Issue], kinds: dict[str, str]) -> list[Issue]:
 
 
 def launch(issue: Issue, root: Path, mode: str) -> str:
+    """Одна tmux-сессия на issue; повторный запуск — подсказка attach."""
     repo_path = discover_repos(root).get(issue.repo.lower())
     if repo_path is None:
         raise RuntimeError(f"local clone for {issue.repo} not found")
     session = re.sub(r"[^a-zA-Z0-9_-]", "-", f"issue-{issue.repo}-{issue.number}")[:80]
+    exists = subprocess.run(
+        ["tmux", "has-session", "-t", session], capture_output=True, text=True
+    )
+    if exists.returncode == 0:
+        return f"exists: tmux attach -t {session}"
     worker = Path(__file__).with_name("issue_worker.py")
     cmd = [sys.executable, str(worker), "--repo", issue.repo, "--number", str(issue.number),
            "--author", issue.author, "--kind", issue.kind, "--mode", mode, "--url", issue.url,
-           "--internal", "yes" if issue.internal else "no"]
+           "--internal", "yes" if issue.internal else "no",
+           "--output-root", str(OUT_ROOT)]
     shell_cmd = " ".join(shlex.quote(part) for part in cmd) + "; exec ${SHELL:-/bin/sh}"
     done = subprocess.run(["tmux", "new-session", "-d", "-s", session, "-c", str(repo_path), shell_cmd],
                           capture_output=True, text=True)
     if done.returncode:
         raise RuntimeError(done.stderr.strip() or "tmux failed")
-    return session
+    return f"started {session}"
 
 
 def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:

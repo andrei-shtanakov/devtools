@@ -173,6 +173,43 @@ def test_apply_kinds_replaces_only_listed() -> None:
     assert updated[1] is b
 
 
+def test_launch_skips_existing_tmux_session(tmp_path: Path, monkeypatch) -> None:
+    root = _fleet(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        calls.append(list(cmd))
+        if cmd[:2] == ["tmux", "has-session"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"неожиданная команда: {cmd}")
+
+    monkeypatch.setattr(issue_console.subprocess, "run", fake_run)
+    status = issue_console.launch(_issue(repo="alpha", number=7), root, "plan")
+    assert status == "exists: tmux attach -t issue-alpha-7"
+    assert not any(c[:2] == ["tmux", "new-session"] for c in calls)
+
+
+def test_launch_passes_output_root(tmp_path: Path, monkeypatch) -> None:
+    root = _fleet(tmp_path)
+    captured: dict[str, str] = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        if cmd[:2] == ["tmux", "has-session"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        captured["shell"] = cmd[-1]
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(issue_console.subprocess, "run", fake_run)
+    status = issue_console.launch(_issue(repo="alpha", number=7), root, "plan")
+    assert status == "started issue-alpha-7"
+    assert "--output-root" in captured["shell"]
+    assert str(issue_console.OUT_ROOT) in captured["shell"]
+
+
 def test_classify_ai_flag_wires_refine(tmp_path: Path, monkeypatch) -> None:
     root = _fleet(tmp_path)
     raw = [_raw(body="просто текст", labels=("misc",))]
