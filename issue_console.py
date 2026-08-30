@@ -118,6 +118,8 @@ def parse_issues(raw: list[dict[str, Any]], root: Path, internal: set[str]) -> l
         repo_obj = item.get("repository") or {}
         author_obj = item.get("author") or {}
         repo = str(repo_obj.get("name") or repo_obj.get("nameWithOwner") or "?").split("/")[-1]
+        if repo.lower() not in repos:
+            continue  # спека: таблица — только флот с локальным клоном
         author = str(author_obj.get("login") or author_obj.get("name") or "?")
         labels = tuple(str(x.get("name", "")) for x in item.get("labels") or [])
         body = str(item.get("body") or "")
@@ -176,6 +178,18 @@ def fetch_issues(owner: str) -> list[dict[str, Any]]:
     return data
 
 
+def sort_issues(issues: list[Issue], grouped: bool) -> list[Issue]:
+    """Дефолт — новые сверху; grouped — по инициатору, внутри новые сверху."""
+    by_date = sorted(issues, key=lambda x: x.created_at, reverse=True)
+    if not grouped:
+        return by_date
+    return sorted(by_date, key=lambda x: x.author.lower())
+
+
+def group_key(issue: Issue, grouped: bool) -> str:
+    return issue.author if grouped else issue.repo
+
+
 def launch(issue: Issue, root: Path, mode: str) -> str:
     repo_path = discover_repos(root).get(issue.repo.lower())
     if repo_path is None:
@@ -201,8 +215,7 @@ def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:
     mode = "plan"
     status = "space select · g group · x plan/execute · enter launch · q quit"
     while True:
-        ordered = sorted(issues, key=(lambda x: (x.author.lower(), x.repo, x.number)) if grouped
-                         else (lambda x: (x.repo, x.number)))
+        ordered = sort_issues(issues, grouped)
         cursor = min(cursor, max(0, len(ordered) - 1))
         stdscr.erase()
         h, w = stdscr.getmaxyx()
