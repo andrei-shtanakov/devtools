@@ -98,17 +98,3 @@ def test_fetch_uses_gh_search_issues_compatible_flags(monkeypatch) -> None:
     assert captured[:3] == ["gh", "search", "issues"]
     assert "--include-prs" not in captured
     assert "--type" not in captured
-
-
-def test_fetch_uses_gh_search_issues_compatible_flags(monkeypatch) -> None:
-    captured = []
-
-    def fake_run(cmd, **kwargs):
-        captured.extend(cmd)
-        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
-
-    monkeypatch.setattr(issue_console.subprocess, "run", fake_run)
-    assert issue_console.fetch_issues("owner") == []
-    assert captured[:3] == ["gh", "search", "issues"]
-    assert "--include-prs" not in captured
-    assert "--type" not in captured
