@@ -4,12 +4,35 @@
 три публичных символа пинованного steward + локальный stale-адаптер. Никаких
 git-facts — регрессия закреплена тестом. Authoritative-срез (default branch,
 --emit-verdicts) — этап B.
+
+Кроме трёх content-check символов, модуль импортирует ещё два ЧИСТО-YAML'ных
+загрузчика графа — ``steward.graph.load_profile``/``SpecGraph`` и
+``steward.roles.load_roles_catalog``. Они не входят в закрытый список §3
+(там про сами гейты), но остаются безопасными: обе функции — предусловие
+вызова трёх проверок (граф и роли нужны, чтобы вообще было что проверять),
+ни одна не трогает git и не читает ничего вне ``profile_path``/сиблинг
+``roles.yaml`` (собственная конвенция steward,
+``gatecheck/cli.py``: «roles.yaml is a MANDATORY sibling»).
+
+ВАЖНО потребителю: ``error_count == 0`` САМ ПО СЕБЕ не означает «бандл
+зелёный». Это агрегат по findings, а не по составу узлов — он ничего не
+знает о том, каких узлов в бандле вообще нет. Отдельно нужно проверить:
+
+- ``required_absent`` — обязательные (``required``, не-``delegate``) узлы
+  профиля, отсутствующие в бандле. Их отсутствие само по себе не ошибка
+  (выбор узлов текущего этапа — не дело read-модели), но потребитель обязан
+  решить, ожидаются ли они на своём этапе;
+- статусы узлов (``NodeState.status``) — узел может быть ``"blocked"``
+  (гейты по нему физически не могли отработать, потому что ни один его
+  upstream-артефакт не присутствует в бандле) или ``"delegated"`` (узел
+  живёт вне бандла по профилю — не считать ни absent, ни ошибкой).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from steward.gatecheck.behaviour import check_behaviour_spec
 from steward.gatecheck.checks import collect_bundle
@@ -31,7 +54,9 @@ class NodeState:
 class BundleState:
     nodes: tuple[NodeState, ...]
     error_count: int
-    trace_matrix: dict | None
+    trace_matrix: dict[str, Any] | None
+    required_absent: tuple[str, ...]
+    bundle_findings: tuple[str, ...]
 
 
 def candidate_state(profile_path: Path, bundle_dir: Path) -> BundleState:
@@ -58,18 +83,46 @@ def candidate_state(profile_path: Path, bundle_dir: Path) -> BundleState:
         )
 
     present = {a.node_id for a in artifacts if a.node_id is not None}
+    profile_node_ids = set(graph.nodes)
+
     nodes: list[NodeState] = []
+    required_absent: list[str] = []
     for node_id in _profile_node_ids(graph):
-        node_findings = tuple(per_node.get(node_id, ()))
-        if node_id not in present:
+        node = graph.nodes[node_id]
+        if node.delegate is not None:
+            # Живёт вне бандла по построению (per-workstream/per-release) —
+            # ни absent, ни ошибка (находка I-5).
+            status = "delegated"
+        elif node_id not in present:
             status = "absent"
+            if node.required:
+                required_absent.append(node_id)
+        elif node.upstream and not any(u in present for u in node.upstream):
+            # Узел присутствует, но НИ ОДИН его upstream — нет: гейты по нему
+            # физически не могли отработать (`check_behaviour_spec` молча
+            # возвращает `[]` ровно в этом случае). Читать как отказ, не как
+            # "зелено" (спека §8; финальное ревью, находка C-1).
+            missing = ", ".join(u for u in node.upstream if u not in present)
+            per_node.setdefault(node_id, []).append(
+                f"error GC-UPSTREAM-ABSENT(prospective): {node_id} — "
+                f"upstream(ы) {missing} отсутствуют в бандле"
+            )
+            status = "blocked"
         elif node_id in stale_nodes:
             status = "stale"
-        elif any(f.startswith("error") for f in node_findings):
+        elif any(f.startswith("error") for f in per_node.get(node_id, ())):
             status = "draft"
         else:
             status = "candidate_valid"
-        nodes.append(NodeState(node_id, status, node_findings))
+        nodes.append(NodeState(node_id, status, tuple(per_node.get(node_id, ()))))
+
+    # Находки, чей artifact не мапится ни на один узел профиля (GC-META на
+    # незапарсенном файле, GC-DUP на втором претенденте на узел, GC-STAGE на
+    # незнакомом spec_stage) не попадают в состав ни одного NodeState — иначе
+    # они бы молча терялись из per-node вида (финальное ревью, находка I-4).
+    bundle_findings = tuple(
+        f for key, fs in per_node.items() if key not in profile_node_ids for f in fs
+    )
 
     error_count = sum(
         1
@@ -78,10 +131,12 @@ def candidate_state(profile_path: Path, bundle_dir: Path) -> BundleState:
         if f.startswith("error")
     )
     matrix = build_trace_matrix(graph, artifacts)
-    return BundleState(tuple(nodes), error_count, matrix)
+    return BundleState(
+        tuple(nodes), error_count, matrix, tuple(required_absent), bundle_findings
+    )
 
 
-def _node_of(artifacts: list, path: str) -> str:
+def _node_of(artifacts: list[Any], path: str) -> str:
     for a in artifacts:
         if a.path == path and a.node_id is not None:
             return a.node_id

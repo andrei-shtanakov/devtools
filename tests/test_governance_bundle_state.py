@@ -10,6 +10,7 @@ pytest.importorskip("steward")
 
 from governance.bundle_state import BundleState, NodeState, candidate_state
 from tests.governance_fixtures.bundles import (
+    BEHAVIOUR_NO_UPSTREAM_MD,
     REQUIREMENTS_MD,
     make_bundle,
     make_profile,
@@ -22,9 +23,12 @@ def test_good_bundle_is_candidate_valid(tmp_path: Path) -> None:
     state = candidate_state(profile, bundle)
     assert isinstance(state, BundleState)
     assert state.error_count == 0
+    assert state.required_absent == ()
     by_id = {n.node_id: n for n in state.nodes}
     assert by_id["behaviour-spec"].status == "candidate_valid"
     assert by_id["requirements"].status == "candidate_valid"
+    # tasks несёт delegate в профиле — живёт вне бандла, не absent (I-5).
+    assert by_id["tasks"].status == "delegated"
 
 
 def test_bad_bundle_is_draft_with_findings(tmp_path: Path) -> None:
@@ -45,6 +49,7 @@ def test_missing_node_is_absent(tmp_path: Path) -> None:
     state = candidate_state(profile, bundle)
     beh = next(n for n in state.nodes if n.node_id == "behaviour-spec")
     assert beh.status == "absent"
+    assert state.required_absent == ("behaviour-spec",)
 
 
 def test_stale_pin_marks_node_stale(tmp_path: Path) -> None:
@@ -57,6 +62,55 @@ def test_stale_pin_marks_node_stale(tmp_path: Path) -> None:
     beh = next(n for n in state.nodes if n.node_id == "behaviour-spec")
     assert beh.status == "stale"
     assert state.error_count > 0  # stale блокирует (спека §7: GC-STALE — ноль)
+
+
+def test_upstream_absent_marks_blocked(tmp_path: Path) -> None:
+    """behaviour-spec присутствует, но requirements нет и в бандле, и в пине —
+    свежеавторенный на S3 документ (пины штампуются approval'ом steward, не
+    автором). Гейты по behaviour-spec физически не могли отработать: статус
+    обязан читаться как отказ, не как candidate_valid (финальное ревью C-1)."""
+    profile = make_profile(tmp_path)
+    bundle = tmp_path / "spec"
+    bundle.mkdir()
+    (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_NO_UPSTREAM_MD)
+    state = candidate_state(profile, bundle)
+    beh = next(n for n in state.nodes if n.node_id == "behaviour-spec")
+    assert beh.status == "blocked"
+    assert any("GC-UPSTREAM-ABSENT" in f for f in beh.findings)
+    assert state.error_count > 0
+    assert state.required_absent == ("requirements",)
+
+
+def test_empty_bundle_dir_is_not_clean(tmp_path: Path) -> None:
+    """Регрессия: пустой каталог бандла не должен читаться как пройденный
+    контур. Раньше `error_count == 0` на пустом bundle_dir формально
+    удовлетворял «ноль findings уровня error» (спека §7 контур 1) — теперь
+    required_absent делает отсутствие обязательных узлов видимым (C-1)."""
+    profile = make_profile(tmp_path)
+    bundle = tmp_path / "empty-spec"
+    bundle.mkdir()
+    state = candidate_state(profile, bundle)
+    assert state.error_count == 0
+    by_id = {n.node_id: n for n in state.nodes}
+    assert by_id["requirements"].status == "absent"
+    assert by_id["behaviour-spec"].status == "absent"
+    assert by_id["tasks"].status == "delegated"
+    assert state.required_absent == ("requirements", "behaviour-spec")
+
+
+def test_orphan_findings_land_in_bundle_findings(tmp_path: Path) -> None:
+    """Два файла претендуют на один узел (behaviour-spec): второй получает
+    GC-DUP с `node_id=None` и per-node вид его теряет — findings обязаны
+    остаться видимыми через bundle_findings, а не молча исчезнуть (I-4)."""
+    profile = make_profile(tmp_path)
+    bundle = make_bundle(tmp_path, behaviour_ok=True)
+    dup_text = (bundle / "15-behaviour-spec.md").read_text()
+    (bundle / "16-behaviour-spec-dup.md").write_text(dup_text)
+    state = candidate_state(profile, bundle)
+    assert state.error_count > 0
+    by_id = {n.node_id: n for n in state.nodes}
+    assert by_id["behaviour-spec"].status == "candidate_valid"
+    assert any("GC-DUP" in f for f in state.bundle_findings)
 
 
 def test_no_git_facts_are_used(tmp_path: Path, monkeypatch) -> None:

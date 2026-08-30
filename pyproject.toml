@@ -23,9 +23,11 @@ steward = { git = "https://github.com/andrei-shtanakov/steward", rev = "4a1c7c44
 dev = ["pytest>=8"]
 # Только для governance-контура (спека §3/§4): steward — content-check API S4,
 # textual понадобится console.py этапа B. Обычные devtools-команды группу не тянут.
-governance = [
-    "steward @ git+https://github.com/andrei-shtanakov/steward@4a1c7c44a85accf609b40cb14115eccefb26f6c2",
-]
+# Пин — единственно в [tool.uv.sources] (паттерн plan-fields ниже): bump'ить
+# rev тут значило бы держать его в двух местах, а bump — аудируемый механизм
+# включения автономной ветки (§6, §12 п.7), правка одного из двух мест либо
+# уронит резолв, либо тихо выберет одну сторону (финальное ревью M-1).
+governance = ["steward"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

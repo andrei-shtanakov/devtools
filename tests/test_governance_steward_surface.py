@@ -18,7 +18,12 @@ from steward.gatecheck.trace_matrix import build_trace_matrix
 from steward.graph import load_profile
 from steward.roles import load_roles_catalog
 
-from tests.governance_fixtures.bundles import make_bundle, make_profile
+from tests.governance_fixtures.bundles import (
+    BEHAVIOUR_NO_CHECKED_MD,
+    make_bundle,
+    make_bundle_with_behaviour,
+    make_profile,
+)
 
 
 def _graph(tmp_path: Path):
@@ -53,14 +58,29 @@ def test_finding_shape_is_pinned(tmp_path: Path) -> None:
 
 
 def test_behaviour_gate_ids(tmp_path: Path) -> None:
-    """Полный набор gate_id, который выдаёт check_behaviour_spec на плохом бандле."""
+    """Полный набор gate_id, который выдаёт check_behaviour_spec на плохом бандле.
+
+    Положительное равенство (не подмножество, финальное ревью I-1): если
+    bump пина снимет или переименует один из двух gate_id, множество сожмётся
+    и тест обязан упасть, а не остаться зелёным.
+    """
     graph = _graph(tmp_path)
     bundle = make_bundle(tmp_path, behaviour_ok=False)
     artifacts, _ = collect_bundle(graph, bundle)
     ids = {f.rule_id for f in check_behaviour_spec(graph, artifacts)}
-    # Ожидаемое множество — из спеки §7; фактическое зафиксировать здесь же.
-    assert ids <= {"GC-BEH-TRACE", "GC-BEH-COVERAGE", "GC-CHECK-PLANNED"}, ids
-    assert ids, "хотя бы один GC-BEH-* обязан сработать"
+    assert ids == {"GC-BEH-TRACE", "GC-BEH-COVERAGE"}, ids
+
+
+def test_behaviour_gate_ids_check_planned(tmp_path: Path) -> None:
+    """Третий gate_id, GC-CHECK-PLANNED, не триггерится BEHAVIOUR_BAD_MD (его
+    сценарий не трейсит ничего, так что _check_planned его пропускает) —
+    зафиксировать его отдельной фикстурой: сценарий трейсит Must-FR, но без
+    checked_by-биндинга (`behaviour.py:184-198`, финальное ревью I-1)."""
+    graph = _graph(tmp_path)
+    bundle = make_bundle_with_behaviour(tmp_path, BEHAVIOUR_NO_CHECKED_MD)
+    artifacts, _ = collect_bundle(graph, bundle)
+    ids = {f.rule_id for f in check_behaviour_spec(graph, artifacts)}
+    assert ids == {"GC-CHECK-PLANNED"}, ids
 
 
 def test_good_bundle_is_clean(tmp_path: Path) -> None:
@@ -75,23 +95,49 @@ def test_good_bundle_is_clean(tmp_path: Path) -> None:
 
 
 def test_trace_matrix_surface(tmp_path: Path) -> None:
+    """Положительная характеризация структуры матрицы (не tautology
+    ``None or dict`` — финальное ревью I-1): ключи, и полная FR-01-строка с
+    непустым ``checks``, на реально хорошем бандле фикстур."""
     graph = _graph(tmp_path)
     bundle = make_bundle(tmp_path, behaviour_ok=True)
     artifacts, _ = collect_bundle(graph, bundle)
     matrix = build_trace_matrix(graph, artifacts)
-    assert matrix is None or isinstance(matrix, dict)
+    assert matrix is not None
+    assert matrix.keys() == {"profile", "requirements"}
+    assert matrix["profile"] == "mini"
+    assert matrix["requirements"] == [
+        {
+            "id": "FR-01",
+            "priority": "Must",
+            "scenarios": ["BEH-01"],
+            "structural": [],
+            "waived": None,
+            "checks": [
+                {
+                    "scenario": "BEH-01",
+                    "kind": "e2e",
+                    "owner": "qa",
+                    "status": "planned",
+                    "target": "tests/test_x.py",
+                }
+            ],
+        }
+    ]
 
 
 def test_spec_graph_nodes_is_a_dict(tmp_path: Path) -> None:
     """Закрепление для Task 5: ``SpecGraph.nodes`` — ``dict[id, SpecNode]``, не
     список узлов с атрибутом ``.id`` (предположение брифа Task 5 не подтвердилось).
     Порядок узлов профиля берётся через ``graph.topo_order() -> list[str]``.
+    Профиль несёт третий узел, ``tasks`` (``delegate``, без upstream), поэтому
+    он готов к обработке сразу — Kahn-порядок ставит его после requirements,
+    перед зависящим от requirements behaviour-spec.
     """
     graph = _graph(tmp_path)
     assert isinstance(graph.nodes, dict)
-    assert set(graph.nodes) == {"requirements", "behaviour-spec"}
+    assert set(graph.nodes) == {"requirements", "behaviour-spec", "tasks"}
     order = graph.topo_order()
-    assert order == ["requirements", "behaviour-spec"]
+    assert order == ["requirements", "tasks", "behaviour-spec"]
 
 
 def test_upstream_hashes_shape(tmp_path: Path) -> None:

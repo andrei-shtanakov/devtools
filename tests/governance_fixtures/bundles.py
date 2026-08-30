@@ -41,6 +41,11 @@ GC-BEH-COVERAGE, но НЕ GC-CHECK-PLANNED — тот гейт смотрит �
 которые трейсят Must-приоритетный FR/NFR (``_check_planned`` пропускает
 сценарий без единого traces-ref). Множество gate_id в тесте — подмножество,
 поэтому это ожидаемо и покрытие остаётся честным.
+
+Профиль несёт третий узел, ``tasks``, с ``delegate: spec-runner`` — он живёт
+вне бандла по построению (см. ``steward/profiles/team-exp.yaml`` в проде) и
+нужен, чтобы characterization/candidate-тесты видели реальный delegate-узел,
+а не только два обязательных (финальное ревью, находка I-5).
 """
 
 from __future__ import annotations
@@ -56,6 +61,9 @@ artifacts:
     template: behaviour-spec.md
     owner_role: analysts
     upstream: [requirements]
+  - id: tasks
+    owner_role: analysts
+    delegate: spec-runner
 """
 
 ROLES_YAML = """\
@@ -108,6 +116,39 @@ owner_role: analysts
 Сценарий без Trace и без checked_by.
 """
 
+BEHAVIOUR_NO_CHECKED_MD = """\
+---
+spec_stage: behaviour-spec
+status: draft
+owner_role: analysts
+traces_to: [requirements]
+---
+# Behaviour
+
+#### BEH-01: Трейсит Must-FR, но без checked_by
+`traces: [FR-01]`
+
+Сценарий трейсит Must-приоритетный FR-01, но не несёт checked_by-биндинг —
+единственный триггер GC-CHECK-PLANNED (финальное ревью, находка I-1).
+"""
+
+# Без ``upstream_hashes`` и без парного 10-requirements.md в бандле: свежий
+# behaviour-spec на S3, каким его штампует автор до approval-пина steward.
+# Триггерит candidate-срез blocked-статус (финальное ревью, находка C-1).
+BEHAVIOUR_NO_UPSTREAM_MD = """\
+---
+spec_stage: behaviour-spec
+status: draft
+owner_role: analysts
+traces_to: [requirements]
+---
+# Behaviour
+
+#### BEH-01: Просмотр списка
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: e2e` `owner: qa` `target: tests/test_x.py`
+"""
+
 
 def blob_hash(text: str) -> str:
     """git hash-object содержимого — чистым stdlib, git не нужен."""
@@ -124,14 +165,21 @@ def make_profile(tmp_path: Path) -> Path:
     return profile
 
 
-def make_bundle(tmp_path: Path, *, behaviour_ok: bool) -> Path:
+def make_bundle_with_behaviour(tmp_path: Path, behaviour_text: str) -> Path:
+    """Бандл requirements + произвольный текст behaviour-spec (без notes.md)."""
     bundle = tmp_path / "spec"
     bundle.mkdir(exist_ok=True)
     (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
-    if behaviour_ok:
-        text = BEHAVIOUR_OK_MD.format(req_hash=blob_hash(REQUIREMENTS_MD))
-    else:
-        text = BEHAVIOUR_BAD_MD
-    (bundle / "15-behaviour-spec.md").write_text(text)
+    (bundle / "15-behaviour-spec.md").write_text(behaviour_text)
+    return bundle
+
+
+def make_bundle(tmp_path: Path, *, behaviour_ok: bool) -> Path:
+    text = (
+        BEHAVIOUR_OK_MD.format(req_hash=blob_hash(REQUIREMENTS_MD))
+        if behaviour_ok
+        else BEHAVIOUR_BAD_MD
+    )
+    bundle = make_bundle_with_behaviour(tmp_path, text)
     (bundle / "notes.md").write_text("без frontmatter — должен пройти насквозь\n")
     return bundle
