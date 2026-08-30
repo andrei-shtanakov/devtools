@@ -267,10 +267,11 @@ def test_unresolved_threads_true_when_open_thread_present(monkeypatch):
             "repository": {
                 "pullRequest": {
                     "reviewThreads": {
+                        "pageInfo": {"hasNextPage": False},
                         "nodes": [
                             {"isResolved": True},
                             {"isResolved": False},
-                        ]
+                        ],
                     }
                 }
             }
@@ -289,6 +290,7 @@ def test_unresolved_threads_true_when_open_thread_present(monkeypatch):
     query = call.argv[call.argv.index("-f") + 1]
     assert "reviewThreads" in query
     assert "isResolved" in query
+    assert "hasNextPage" in query
 
 
 def test_unresolved_threads_false_when_all_resolved(monkeypatch):
@@ -296,7 +298,10 @@ def test_unresolved_threads_false_when_all_resolved(monkeypatch):
         "data": {
             "repository": {
                 "pullRequest": {
-                    "reviewThreads": {"nodes": [{"isResolved": True}]}
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": False},
+                        "nodes": [{"isResolved": True}],
+                    }
                 }
             }
         }
@@ -311,6 +316,30 @@ def test_unresolved_threads_false_when_all_resolved(monkeypatch):
 
 def test_unresolved_threads_none_on_error_not_false(monkeypatch):
     _install_fake_run(monkeypatch, returncode=1, stderr="boom")
+    ops = RealOps()
+
+    result = ops.unresolved_threads(REPO_SLUG, 42)
+
+    assert result is None
+
+
+def test_unresolved_threads_none_when_more_pages_exist(monkeypatch):
+    """Круг 7 (codex-major): первая страница целиком resolved, но
+    `hasNextPage=true` — сотый+ thread мог быть неразрешён, результат
+    обязан быть `None` (unknown), не оптимистичное `False`."""
+    payload = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": True},
+                        "nodes": [{"isResolved": True}] * 100,
+                    }
+                }
+            }
+        }
+    }
+    _install_fake_run(monkeypatch, returncode=0, stdout=json.dumps(payload))
     ops = RealOps()
 
     result = ops.unresolved_threads(REPO_SLUG, 42)

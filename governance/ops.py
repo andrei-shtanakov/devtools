@@ -225,12 +225,21 @@ class RealOps:
         return [line for line in done.stdout.splitlines() if line]
 
     def unresolved_threads(self, repo_slug: str, pr: int) -> bool | None:
-        """Есть ли непогашенный review thread; None = не смогли узнать."""
+        """Есть ли непогашенный review thread; None = не смогли узнать.
+
+        `first:100` без `pageInfo` был fail-open (финальное ревью, круг 7,
+        codex-major): у PR со 101+ threads сотый и далее были невидимы, и
+        PR мог прочитаться как «чисто» при непогашенном thread за первой
+        страницей. `pageInfo.hasNextPage` запрашивается явно: при `True` за
+        первой страницей может скрываться неразрешённый thread — результат
+        `None` (unknown), не оптимистичное `False`; `facts_from` в runner'е
+        уже трактует `None` как `unresolved_threads=True` (fail-closed).
+        """
         owner, name = repo_slug.split("/", 1)
         query = (
             "query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n)"
             "{pullRequest(number:$p){reviewThreads(first:100)"
-            "{nodes{isResolved}}}}}"
+            "{pageInfo{hasNextPage}nodes{isResolved}}}}}"
         )
         done = subprocess.run(
             ["gh", "api", "graphql", "-f", f"query={query}",
@@ -241,9 +250,13 @@ class RealOps:
             return None
         try:
             data = json.loads(done.stdout)
-            nodes = data["data"]["repository"]["pullRequest"]
-            nodes = nodes["reviewThreads"]["nodes"]
+            review_threads = data["data"]["repository"]["pullRequest"]
+            review_threads = review_threads["reviewThreads"]
+            has_next_page = review_threads["pageInfo"]["hasNextPage"]
+            nodes = review_threads["nodes"]
         except (json.JSONDecodeError, KeyError, TypeError):
+            return None
+        if has_next_page:
             return None
         return any(not node["isResolved"] for node in nodes)
 

@@ -48,19 +48,30 @@ _AUTHOR_STEPS = (
 )
 
 
-def _reject_if_run_exists(run_id: str) -> None:
-    """Отказ, если под `run_id` уже есть леджер (финальное ревью, круг 4).
+def _reserve_run_id(run_id: str) -> None:
+    """Атомарно резервирует `run_id`, отказывая на занятом (круг 4/7).
 
-    `new_run` + `save` пишут `run.json` через `os.replace` — атомарно, но
-    БЕЗ проверки, что там уже есть чужой леджер: занятый `run_id` молча
-    перезаписывался (codex-ревью PR #88, major). Проверка — ДО каких-либо
-    эффектов, у обоих создателей нового `RunState` (`start`, `verify`).
+    Круг 4: занятый `run_id` молча перезаписывался (codex-ревью PR #88,
+    major) — `new_run`+`save` пишут `run.json` через `os.replace`
+    (атомарно), но БЕЗ проверки, что там уже есть чужой леджер. Первая
+    починка (`exists()`-проверка, отдельно от записи) сама была TOCTOU
+    (круг 7, codex-major): между проверкой и `save()` могла проскочить
+    гонка двух параллельных `start()`/`verify()` с одним `run_id`.
+
+    Починка: эксклюзивное создание файла (`Path.touch(exist_ok=False)` —
+    `O_CREAT|O_EXCL` под капотом, атомарно на уровне ОС) резервирует слот
+    за один системный вызов; `save()` дальше по коду штатно перезаписывает
+    этот пустой файл тем же атомарным `os.replace`, что и всегда.
     """
-    if (run_dir(run_id) / "run.json").exists():
+    target = run_dir(run_id)
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        (target / "run.json").touch(exist_ok=False)
+    except FileExistsError as exc:
         raise ValueError(
             f"run {run_id!r} уже существует — используйте resume(...), "
             "не start(...)/verify(...) с тем же run_id"
-        )
+        ) from exc
 
 
 def _blocking_merged_unverified(ws_id: str) -> str | None:
@@ -105,8 +116,13 @@ def start(
     ops: Ops,
     merge_authority: str | None = None,
 ) -> RunState:
-    """S0: новый прогон, затем сразу `advance()` до стопа/завершения."""
-    _reject_if_run_exists(run_id)
+    """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
+
+    WS-lock проверяется ДО резервирования `run_id` (круг 7): у неё нет
+    побочных эффектов, а `_reserve_run_id` создаёт файл — так отказ по
+    WS-lock не оставляет пустой `run.json`-заглушку под несостоявшимся
+    `run_id`.
+    """
     blocker = _blocking_merged_unverified(ws_id)
     if blocker is not None:
         raise ValueError(
@@ -114,6 +130,7 @@ def start(
             f"{blocker!r} без зелёного потомка — создайте verification-run "
             "(verify(...)) прежде чем начинать новый авторинг-прогон"
         )
+    _reserve_run_id(run_id)
     state = new_run(
         subject=subject,
         repo=repo,
@@ -253,7 +270,7 @@ def verify(parent_run_id: str, ops: Ops, run_id: str) -> RunState:
             f"verify: parent-run {parent_run_id!r} не merged_unverified "
             f"(текущий статус {parent.status!r})"
         )
-    _reject_if_run_exists(run_id)
+    _reserve_run_id(run_id)
     child = new_run(
         subject=parent.subject,
         repo=parent.repo,

@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("yaml")
+
 from governance.merge_gate import Authority, Safety
 from governance.policy_sources import (
     build_authority,

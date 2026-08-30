@@ -911,6 +911,25 @@ def test_start_with_existing_run_id_raises_and_does_not_overwrite(
     assert other_ops.calls == []  # отказ ДО каких-либо эффектов
 
 
+def test_reserve_run_id_is_atomic_touch_not_exists_check(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Круг 7 (codex-major): первая починка (F-1/круг 4) была `exists()`
+    отдельно от записи — TOCTOU между двумя параллельными `start()`/
+    `verify()` с одним `run_id`. Атомарное резервирование —
+    `Path.touch(exist_ok=False)` (`O_CREAT|O_EXCL`, один системный вызов):
+    второй вызов отказывает БЕЗ предварительного `load()`, даже когда
+    зарезервированный файл ещё пуст и `load()` прочитать бы его не смог
+    (`json.JSONDecodeError` на пустой строке)."""
+    run_id = "r-reserve-atomic"
+    runner._reserve_run_id(run_id)
+    raw = rs.run_dir(run_id).joinpath("run.json").read_text(encoding="utf-8")
+    assert raw == ""  # только резерв, ещё не настоящий run.json
+
+    with pytest.raises(ValueError):
+        runner._reserve_run_id(run_id)
+
+
 def test_verify_with_existing_run_id_raises(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
@@ -1106,10 +1125,14 @@ def test_start_blocked_by_merged_unverified_without_green_child(
     )
     assert parent.status == "merged_unverified"
 
+    blocked_run_id = "r-lock-blocked-attempt"
     with pytest.raises(ValueError, match="WS-LOCK-1"):
         runner.start(**_start_kwargs(
-            tmp_path, "r-lock-blocked-attempt", FakeOps(), ws_id=blocked_ws,
+            tmp_path, blocked_run_id, FakeOps(), ws_id=blocked_ws,
         ))
+    # WS-lock проверяется до резервирования run_id (круг 7) — отказ не
+    # оставляет пустую run.json-заглушку под несостоявшимся прогоном.
+    assert not (rs.run_dir(blocked_run_id) / "run.json").exists()
 
 
 def test_start_unblocked_after_verify_child_completes(
