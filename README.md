@@ -20,6 +20,7 @@ Workspace-тулинг экосистемы AI-оркестраторов. Жи�
 | `check-graph-registry-drift.py` | граф prograph (derived) ↔ карта интеграций registry (authored); allowlist для файловых/runtime-связей |
 | `check-plan-fields.py` | граф `@blocked_by` между `TODO.md` всех репо + ownership/movement totals и матрица (`make plan-check`). **Тонкая обёртка над пакетом `plan-fields`** — grammar/парсинг/резолюция из пакета; **требует `uv` + Python 3.12** (см. ниже) |
 | `inbox.py` | входящие кросс-репные запросы: открытые issues с лейблом `inbox` + вывод принятия по `TODO.md` целевого репо (ADR-ECO-006); разбор пунктов — общий пакет `plan-fields`, поэтому `uv` + Python 3.12, как у `check-plan-fields.py`; `make inbox` |
+| `issue_console.py` | TUI всех открытых issues: дата, inbox/acceptance, инициатор, тип, группировка и запуск выбранных issues в отдельных `tmux` sessions; `make issues` |
 | `discover_models.py` | discovery моделей провайдеров (ADR-ECO-003a): отчёт + Plane-1 TOML для PR |
 | `gen_agents_toml.py` | генерация секций agents.toml из benchmark_runs (arbiter.db) |
 | `discovery/` | offline-манифесты observed-моделей |
@@ -35,7 +36,31 @@ make drift       # рассинхрон вендоренных контракт�
 make conformance # agent-id каталог ↔ потребители
 make graph-drift # граф prograph ↔ карта интеграций
 make inbox       # кросс-репные запросы: что пришло и что ещё не принято
+make issues      # fleet issue TUI (space — выбрать, g — группировать, enter — запустить)
 ```
+
+### Issue console (первый TUI-срез)
+
+`make issues` требует авторизованный `gh` и `tmux`. По умолчанию выбранные
+issues запускаются в безопасном режиме `plan`: отдельный Codex worker только
+анализирует issue и пишет `.issue-<number>-result.json` по JSON Schema. Клавиша
+`x` переключает режим на `execute`; в нём worker может менять файлы и запускать
+тесты, но намеренно не делает commit, push, PR или merge. Эти publish-фазы
+будут добавлены после фиксации критериев принятия и review для каждого типа.
+
+Клавиши: `space` — выбор, `g` — группировка repo/инициатор, `j/k` или стрелки —
+навигация, `enter` — отдельная tmux-сессия на issue, `q` — выход. Для CI и
+диагностики есть нетерминальный режим:
+
+```bash
+python3 issue_console.py --json
+python3 issue_console.py --input issues.json --json  # полностью offline
+```
+
+Тип сначала определяется без AI по labels/title/body. Неоднозначность остаётся
+`unknown`, а не угадывается; при запуске отдельный `issue_worker.py` возвращает
+структурированный результат (`decision`, `kind`, `todo`, `next_step`,
+`changed_files`), а не свободный текст.
 
 ## `plan-check`: общий парсер, Python 3.12
 

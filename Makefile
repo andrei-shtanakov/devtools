@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest plan-check-fixture inbox morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read
 
 help:
 	@echo "Цели:"
@@ -34,6 +34,7 @@ help:
 	@echo "  make plan-check-selftest — самопроверка политики чекера, без workspace"
 	@echo "  make plan-check-fixture  — вердикт чекера на синтетическом workspace (clean=0, stale=1)"
 	@echo "  make inbox       — входящие кросс-репные запросы (issues с лейблом inbox; uv + Python 3.12)"
+	@echo "  make issues      — TUI всех открытых issues: группировка, выбор, отдельные tmux workers"
 	@echo "  make morning     — fetch + status + inbox (утренний ритуал; uv + Python 3.12)"
 	@echo "  make evening     — вечерний чек: незакоммиченное / фича-ветки / незапушенное"
 	@echo "  make snapshot    — полный JSON состояния флота (github-checker snapshot)"
@@ -59,6 +60,7 @@ plan-check:  ; @uv run --frozen python ./check-plan-fields.py --root $(WORKSPACE
 plan-check-selftest: ; @uv run --frozen python ./check-plan-fields.py --selftest
 plan-check-fixture:  ; @uv run --frozen pytest tests/test_plan_check_fixture.py -q
 inbox:       ; @uv run --frozen python ./inbox.py --root ..
+issues:      ; @python3 ./issue_console.py --root $(WORKSPACE)
 morning:     ; @./repos.sh fetch && echo && ./repos.sh status && echo && uv run --frozen python ./inbox.py --root ..
 evening:     ; @./repos.sh evening
 snapshot:    ; @uv run --project ../github-checker github-checker snapshot --workspace ..
