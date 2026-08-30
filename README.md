@@ -24,6 +24,7 @@ Workspace-тулинг экосистемы AI-оркестраторов. Жи�
 | `discover_models.py` | discovery моделей провайдеров (ADR-ECO-003a): отчёт + Plane-1 TOML для PR |
 | `gen_agents_toml.py` | генерация секций agents.toml из benchmark_runs (arbiter.db) |
 | `discovery/` | offline-манифесты observed-моделей |
+| `governance/` | ядро конвейера behaviour-spec (этап A): пин steward + characterization, merge_gate (оси ADR-ECO-011 × safety steward), prospective stale-адаптер, bundle_state; runner/TUI — этап B. Спека: docs/superpowers/specs/2026-08-30-behaviour-spec-pipeline-design.md. Тесты: `uv run --frozen --group governance pytest tests/test_governance_*.py` |
 | `all-orchestrators.code-workspace` | VSCode workspace |
 
 ## Быстрый старт
