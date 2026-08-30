@@ -17,9 +17,17 @@ package = false
 # workspace-relative path, so the pin is reproducible and does not follow a
 # sibling checkout. Bump deliberately in its own PR.
 plan-fields = { git = "https://github.com/andrei-shtanakov/dispatcher", rev = "65f03ea9e5964e4488bcd254e491fc42abb1bd96", subdirectory = "packages/plan-fields" }
+steward = { git = "https://github.com/andrei-shtanakov/steward", rev = "4a1c7c44a85accf609b40cb14115eccefb26f6c2" }
 
 [dependency-groups]
 dev = ["pytest>=8"]
+# Только для governance-контура (спека §3/§4): steward — content-check API S4,
+# textual понадобится console.py этапа B. Обычные devtools-команды группу не тянут.
+# Пин — единственно в [tool.uv.sources] (паттерн plan-fields ниже): bump'ить
+# rev тут значило бы держать его в двух местах, а bump — аудируемый механизм
+# включения автономной ветки (§6, §12 п.7), правка одного из двух мест либо
+# уронит резолв, либо тихо выберет одну сторону (финальное ревью M-1).
+governance = ["steward"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
