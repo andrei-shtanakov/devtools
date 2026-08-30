@@ -380,7 +380,9 @@ def test_s8_fail_marks_merged_unverified_and_opens_issue(
     assert len(ops.issues) == 1
     repo_slug, _title, body = ops.issues[0]
     assert repo_slug == "owner/alpha"
-    assert body.startswith("slug: beh-remediation-WS-1")
+    # Round 4: slug — от cycle_id (`remediated_by or run_id`), не от
+    # ws_id; для родителя (remediated_by ещё None) cycle_id == его run_id.
+    assert body.startswith(f"slug: beh-remediation-{run_id}")
     assert f"from: devtools#{run_id}" in body
 
     with pytest.raises(ValueError):
@@ -441,7 +443,9 @@ def test_resume_after_death_between_create_issue_and_op_complete_reuses_issue(
     }
     run_dir_path = rs.run_dir(run_id)
     run_dir_path.mkdir(parents=True, exist_ok=True)
-    body_prefix = f"slug: beh-remediation-{state.ws_id}"
+    # Round 4: slug — от cycle_id (`remediated_by or run_id`); у этого
+    # состояния remediated_by ещё None (родитель), cycle_id == run_id.
+    body_prefix = f"slug: beh-remediation-{run_id}"
     findings_text = "gate-check (S8, authoritative) завершился с кодом 1\n\nGC-X\n"
     (run_dir_path / "s8-findings.txt").write_text(findings_text, encoding="utf-8")
     rs.save(state)
@@ -461,18 +465,17 @@ def test_resume_after_death_between_create_issue_and_op_complete_reuses_issue(
     assert ("find_issue", body_prefix) in ops.calls
 
 
-def test_s8_fail_reconciles_via_find_issue_even_on_fresh_new_op(
+def test_s8_fail_does_not_reuse_issue_from_different_cycle(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    """Round 3, codex-major: реконсиляция через `find_issue` раньше
-    выполнялась только когда у ЭТОГО прогона `remediation-issue` уже
-    `started` (сам он умирал между `create_issue` и `op_complete`). Slug
-    `beh-remediation-<ws_id>` одинаков у родителя и у ЛЮБОГО его
-    verify-потомка (тот же `ws_id`) — если issue уже открыт СОСЕДНИМ
-    прогоном (родителем на прошлом провале, или прошлым провальным
-    потомком), а у ТЕКУЩЕГО прогона `remediation-issue` ещё "new" (первый
-    заход в S8 именно этого run'а), старый код звал `create_issue` вслепую
-    на ветке "new" и плодил дубликат вместо переиспользования номера."""
+    """Round 4, codex-major: slug строится от `cycle_id` (`remediated_by or
+    run_id`), не от `ws_id`. Старый открытый issue ДРУГОГО цикла того же
+    `ws_id` (например прошлый цикл, уже зелёно верифицированный и закрытый,
+    или просто параллельный независимый прогон по тому же `ws_id`) НЕ
+    должен реконсилироваться на текущий провал — иначе свежие findings
+    молча терялись бы под чужим issue. `find_issue` всё равно вызывается
+    (реконсиляция остаётся безусловной, round 3), но не находит совпадение
+    по своему префиксу -> `create_issue` создаёт НОВЫЙ, отдельный issue."""
     monkeypatch.setattr(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
@@ -481,23 +484,60 @@ def test_s8_fail_reconciles_via_find_issue_even_on_fresh_new_op(
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
-    run_id = "r-s8-sibling-issue-exists"
-    body_prefix = "slug: beh-remediation-WS-1"
-    # Issue уже открыт ДРУГИМ прогоном (тот же ws_id -> тот же slug). У
-    # ЭТОГО прогона remediation-issue ещё не трогался вообще ("new").
+    run_id = "r-s8-independent-failure"
+    # Issue от ДРУГОГО цикла того же ws_id (другой parent run_id) уже
+    # открыт — например прошлый цикл, уже верифицированный и закрытый.
+    other_cycle_prefix = "slug: beh-remediation-r-earlier-cycle"
     ops.issues.append((
         "owner/alpha",
-        "beh-remediation: ранний провал (WS-1)",
-        f"{body_prefix}\nfrom: devtools#r-other-sibling-run\n\nGC-EARLIER\n",
+        "beh-remediation: прошлый цикл (WS-1)",
+        f"{other_cycle_prefix}\nfrom: devtools#r-earlier-cycle\n\nGC-OLD\n",
     ))
 
     state = runner.start(**_agent_merge_kwargs(tmp_path, run_id, ops))
 
+    own_prefix = f"slug: beh-remediation-{run_id}"
     assert state.status == "merged_unverified"
-    assert len(ops.issues) == 1  # второй не создан
-    assert state.ops["remediation-issue"] == {"status": "completed", "number": 901}
-    assert "create_issue" not in [c[0] for c in ops.calls]
-    assert ("find_issue", body_prefix) in ops.calls
+    assert len(ops.issues) == 2  # чужой issue не переиспользован — создан новый
+    new_repo_slug, _title, new_body = ops.issues[-1]
+    assert new_repo_slug == "owner/alpha"
+    assert new_body.startswith(own_prefix)
+    assert state.ops["remediation-issue"] == {"status": "completed", "number": 902}
+    assert ("find_issue", own_prefix) in ops.calls
+    assert "create_issue" in [c[0] for c in ops.calls]
+
+
+def test_verify_child_reuses_parent_remediation_issue_same_cycle(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 4: `cycle_id = state.remediated_by or state.run_id` — у
+    verify-потомка `remediated_by` указывает на родителя, поэтому
+    `cycle_id` совпадает с собственным `run_id` родителя (у которого
+    `remediated_by` ещё `None`). Потомок с ФРЕШ `remediation-issue`
+    ("new", round 3: реконсиляция безусловна) должен найти и переиспользовать
+    issue родителя, а не открыть второй под тем же циклом."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-cycle-parent"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+    assert len(ops.issues) == 1
+    parent_issue_number = parent.ops["remediation-issue"]["number"]
+
+    child = runner.verify(parent_id, ops, "r-s8-cycle-child")
+
+    assert child.status == "merged_unverified"  # тоже проваливается
+    assert child.remediated_by == parent_id
+    assert len(ops.issues) == 1  # НЕ второй issue — тот же цикл
+    assert child.ops["remediation-issue"] == {
+        "status": "completed", "number": parent_issue_number,
+    }
 
 
 def test_verify_child_completes_parent_stays_merged_unverified(

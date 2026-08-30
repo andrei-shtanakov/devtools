@@ -836,13 +836,21 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
     результата на resume приводила к дубль-issue (`op_start` пишется ДО
     эффекта). Реконсиляция через `ops.find_issue` по `slug:`-префиксу
     выполняется БЕЗУСЛОВНО перед `create_issue` (codex-ревью, round 3), не
-    только когда у ЭТОГО прогона op уже `started`: тело issue несёт
-    `slug: beh-remediation-<ws_id>`, ОДИН И ТОТ ЖЕ у родителя и у ЛЮБОГО
-    его verify-потомка (тот же `ws_id`) — если issue уже открыт СОСЕДНИМ
-    прогоном (родителем на прошлом провале, или прошлым провальным
-    потомком), а у текущего прогона `remediation-issue` ещё "new" (первый
-    заход в S8 этого конкретного run'а), слепой `create_issue` на ветке
-    "new" плодил дубликат с тем же slug вместо переиспользования номера.
+    только когда у ЭТОГО прогона op уже `started`.
+
+    Slug строится от ЦИКЛА (`beh-remediation-<cycle_id>`,
+    `cycle_id = state.remediated_by or state.run_id`), не от `ws_id`
+    (codex-major, round 4): раньше общий `ws_id`-slug означал, что НЕЗАВИСИМЫЙ
+    провал того же `ws_id` (новый родитель, новый цикл — например ПОСЛЕ того,
+    как предыдущий цикл был зелёно верифицирован и его issue закрыт)
+    реконсилировался на СТАРЫЙ issue по общему `ws_id` — свежие findings
+    молча терялись под чужим (обычно уже закрытым) issue. `cycle_id` — это
+    сам `merged_unverified`-родитель: у родителя `remediated_by` ещё `None`
+    (первый провал цикла) → `cycle_id = run_id` собственный; у его
+    verify-потомков `remediated_by` указывает на того же родителя →
+    `cycle_id` совпадает, и родитель с ЛЮБЫМ числом потомков делят ОДИН
+    issue. `run_id` уже несёт `ws_id`-префикс (`<ws_id>-...`) — уникальность
+    и читаемость slug'а сохраняются без явного `ws_id` в нём.
 
     Перед самим `gate_check_s8` — `sync-default` (круг 5, codex-ревью
     PR #88): `target_dir` без явного чекаута мог стоять на feature-ветке
@@ -903,8 +911,11 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
         findings = _s8_findings_text(exit_code, output)
         findings_path.write_text(findings, encoding="utf-8")
 
+    # cycle_id — идентичность remediation-цикла (round 4): сам
+    # merged_unverified-родитель, не ws_id (см. докстринг выше).
+    cycle_id = state.remediated_by or state.run_id
     issue_title = f"beh-remediation: {state.subject} ({state.ws_id})"
-    body_prefix = f"slug: beh-remediation-{state.ws_id}"
+    body_prefix = f"slug: beh-remediation-{cycle_id}"
     issue_body = f"{body_prefix}\nfrom: devtools#{state.run_id}\n\n{findings}"
 
     issue_key = "remediation-issue"
