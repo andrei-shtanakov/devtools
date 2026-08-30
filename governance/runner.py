@@ -377,6 +377,29 @@ def _ensure_started(state: RunState, key: str) -> None:
         op_start(state, key)
 
 
+def _stop_with_comment(state: RunState, ops: Ops, status: str, body: str) -> None:
+    """Фиксирует стоп-статус ДО best-effort комментария (круг 10, codex-major).
+
+    Раньше `ops.comment` звался ПЕРЕД `state.status = ...`/`save()` во всех
+    стоп-с-комментарием путях (S6 exit 1/2/3, S7 human/refuse, merge False):
+    гибель между вызовом комментария и фиксацией статуса оставляла run в
+    `"running"`, и следующий `advance()`/`resume()` переигрывал этот же шаг
+    с нуля — включая повторный `ops.comment`, дублируя комментарий в PR на
+    каждом таком падении. Порядок инвертирован: статус сохраняется ПЕРВЫМ
+    (после него шаг уже не переигрывается — `advance()` останавливается по
+    `state.status != "running"` до следующего явного `resume()` со сбросом
+    op'ов); комментарий — best-effort ПОСЛЕ: его сбой не откатывает уже
+    зафиксированный статус, но и не глотается совсем молча — печатается
+    предупреждение.
+    """
+    state.status = status
+    save(state)
+    try:
+        ops.comment(state.repo_slug, state.pr, body)
+    except Exception as exc:  # noqa: BLE001 — best-effort, не должен ронять шаг
+        print(f"_stop_with_comment: comment ({status!r}) не удался: {exc}")
+
+
 def _step_branch(state: RunState, ops: Ops) -> bool:
     """S1: ветка `spec/<ws_id>-behaviour`; `ensure_branch` идемпотентен.
 
@@ -581,16 +604,13 @@ def _step_review(state: RunState, ops: Ops) -> bool:
         op_complete(state, key, exit=exit_code)
         return True
     if exit_code == 1:
-        ops.comment(
-            state.repo_slug, state.pr, "ревью нашло находки, прогон остановлен"
+        _stop_with_comment(
+            state, ops, "stopped_review",
+            "ревью нашло находки, прогон остановлен",
         )
-        state.status = "stopped_review"
-        save(state)
         return False
     if exit_code in (2, 3):
-        ops.comment(state.repo_slug, state.pr, "прибор не отработал")
-        state.status = "stopped_review"
-        save(state)
+        _stop_with_comment(state, ops, "stopped_review", "прибор не отработал")
         return False
     # exit_code == 4 (или иной неопознанный) — голова PR уехала: в ветку
     # пришло новое содержимое, поэтому контентный гейт S4 (отработавший по
@@ -642,13 +662,12 @@ def _step_verdict(state: RunState, ops: Ops) -> bool:
     if decision == "agent":
         return _step_merge(state, ops)
 
-    ops.comment(state.repo_slug, state.pr, f"merge_gate: {decision} — {reason}")
     # refuse получает свой статус, отдельный от stopped_gate (S4): причины и
     # починки разные, и resume() должен различать их (финальное ревью M-1).
-    state.status = (
+    status = (
         "stopped_merge_refused" if decision == "refuse" else "waiting_human_merge"
     )
-    save(state)
+    _stop_with_comment(state, ops, status, f"merge_gate: {decision} — {reason}")
     return False
 
 
@@ -670,9 +689,9 @@ def _step_merge(state: RunState, ops: Ops) -> bool:
     if merged:
         op_complete(state, key, merged=True)
         return True
-    ops.comment(state.repo_slug, state.pr, "мерж не удался, ждёт человека")
-    state.status = "waiting_human_merge"
-    save(state)
+    _stop_with_comment(
+        state, ops, "waiting_human_merge", "мерж не удался, ждёт человека"
+    )
     return False
 
 

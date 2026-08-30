@@ -1456,3 +1456,61 @@ def test_resume_rebuilds_missing_s8_findings_from_op_output(
     assert result.ops["remediation-issue"]["status"] == "completed"
     assert "checkout_and_pull" not in [c[0] for c in ops.calls]
     assert "gate_check_s8" not in [c[0] for c in ops.calls]
+
+
+# --- Круг 10: статус фиксируется до стоп-комментария -----------------------
+
+
+def test_stop_with_comment_saves_status_before_commenting(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Круг 10 (codex-major): статус сохраняется на диске ДО best-effort
+    комментария во всех стоп-с-комментарием путях (S6 exit 1/2/3, S7
+    human/refuse, merge False) — иначе гибель между `ops.comment` и
+    `save()` оставляла run в `"running"`, и следующий `advance()` переигрывал
+    этот же шаг с нуля, включая повторный (дублирующий) комментарий.
+    Проверка через "шпиона": `ops.comment`, вызванный, читает `run.json` с
+    диска в момент своего вызова — статус там уже обязан быть терминальным."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=1)
+    run_id = "r-comment-order"
+    seen_status_at_comment_time: dict[str, str] = {}
+    original_comment = ops.comment
+
+    def spying_comment(repo_slug: str, pr: int, body: str) -> None:
+        seen_status_at_comment_time["status"] = rs.load(run_id).status
+        return original_comment(repo_slug, pr, body)
+
+    ops.comment = spying_comment  # type: ignore[method-assign]
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+
+    assert state.status == "stopped_review"
+    assert seen_status_at_comment_time["status"] == "stopped_review"
+
+
+def test_resume_from_stopped_review_does_not_repost_comment_when_fixed(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Круг 10: resume из уже сохранённого `stopped_review`, когда причина
+    устранена (review теперь проходит) — второго комментария нет.
+    Комментарий — часть самого стоп-пути (`_stop_with_comment` в
+    `_step_review`), не безусловный побочный эффект `resume()` — он
+    срабатывает, только если review реально проваливается СНОВА."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=1)
+    run_id = "r-comment-no-repost"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_review"
+    assert len(ops.comments) == 1
+
+    ops.review_exit = 0  # находки устранены
+    result = runner.resume(run_id, ops)
+
+    # Пайплайн продолжается дальше и мог легитимно оставить свой комментарий
+    # (например S7 human/refuse без мока безопасности) — важно, что комментарий
+    # ИМЕННО про этот стоп на review не задублирован.
+    assert result.status != "stopped_review"
+    review_stop_comments = [c for c in ops.comments if "ревью нашло находки" in c]
+    assert len(review_stop_comments) == 1
