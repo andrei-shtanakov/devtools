@@ -60,13 +60,30 @@ def test_stale_pin_marks_node_stale(tmp_path: Path) -> None:
 
 
 def test_no_git_facts_are_used(tmp_path: Path, monkeypatch) -> None:
-    """Регрессия спеки §3/§9: candidate-срез не строит GitFacts вовсе."""
-    import steward.gatecheck.git_facts as gf
+    """Регрессия спеки §3/§9: candidate-срез не строит git-facts и не зовёт
+    git-зависимые проверки. Ловушки — на конкретных реализациях и на
+    run_checks (GitFacts — Protocol, его патчить бессмысленно).
+
+    run_checks патчится в двух местах: на модуле steward.gatecheck.checks
+    (где он определён) и на governance.bundle_state (куда его мог бы
+    затянуть будущий `from steward.gatecheck.checks import run_checks`,
+    ``raising=False`` — атрибута там сейчас нет). Прямой импорт создаёт
+    отдельное локальное имя в момент импорта, и патч только первого места
+    его не перехватывает (подтверждено экспериментом — см. отчёт задачи)."""
 
     def boom(*a, **k):  # noqa: ANN002, ANN003
-        raise AssertionError("candidate_state не должен трогать git_facts")
+        raise AssertionError("candidate_state не должен трогать git-facts")
 
-    monkeypatch.setattr(gf, "GitFacts", boom)
+    monkeypatch.setattr(
+        "steward.gatecheck.git_facts.LiveGitFacts.__init__", boom
+    )
+    monkeypatch.setattr(
+        "steward.gatecheck.git_facts.InjectedGitFacts.__init__", boom
+    )
+    monkeypatch.setattr("steward.gatecheck.checks.run_checks", boom)
+    monkeypatch.setattr(
+        "governance.bundle_state.run_checks", boom, raising=False
+    )
     profile = make_profile(tmp_path)
     bundle = make_bundle(tmp_path, behaviour_ok=True)
     assert candidate_state(profile, bundle).error_count == 0
