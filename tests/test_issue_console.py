@@ -164,3 +164,37 @@ def test_internal_default_set() -> None:
 
 def test_internal_flag_replaces_default() -> None:
     assert issue_console.resolve_internal(["Alice", "bob"]) == {"alice", "bob"}
+
+
+def test_apply_kinds_replaces_only_listed() -> None:
+    a, b = _issue(number=1), _issue(number=2)
+    updated = issue_console.apply_kinds([a, b], {"alpha#1": "fix"})
+    assert [x.kind for x in updated] == ["fix", "unknown"]
+    assert updated[1] is b
+
+
+def test_classify_ai_flag_wires_refine(tmp_path: Path, monkeypatch) -> None:
+    root = _fleet(tmp_path)
+    raw = [_raw(body="просто текст", labels=("misc",))]
+    called = {}
+
+    def fake_refine(issues, cache_path, run=None):
+        called["keys"] = [x.key for x in issues]
+        called["cache"] = cache_path
+        return {"alpha#7": "research"}
+
+    monkeypatch.setattr(issue_console.issue_classify, "refine", fake_refine)
+    import json as _json
+    fixture = tmp_path / "issues.json"
+    fixture.write_text(_json.dumps(raw))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["issue_console.py", "--root", str(root), "--input", str(fixture),
+         "--json", "--classify-ai"])
+    import io, contextlib
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert issue_console.main() == 0
+    data = _json.loads(out.getvalue())
+    assert data[0]["kind"] == "research"
+    assert called["cache"] == issue_console.OUT_ROOT / "issue-kind-cache.json"

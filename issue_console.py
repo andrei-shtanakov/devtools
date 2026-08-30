@@ -16,7 +16,7 @@ import re
 import shlex
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,10 @@ try:
     from plan_fields import scrape_items
 except ImportError:  # pragma: no cover - защита запуска вне uv-окружения
     scrape_items = None  # type: ignore[assignment]
+
+import issue_classify
+
+OUT_ROOT = Path(__file__).resolve().parent / "out"
 
 KINDS = ("document", "research", "code", "fix", "unknown")
 ACCEPTANCE = ("accepted", "not-accepted", "unverifiable", "n/a")
@@ -196,6 +200,14 @@ def group_key(issue: Issue, grouped: bool) -> str:
     return issue.author if grouped else issue.repo
 
 
+def apply_kinds(issues: list[Issue], kinds: dict[str, str]) -> list[Issue]:
+    """Заменить kind у issue.key из kinds; остальные issues не трогать."""
+    return [
+        replace(x, kind=kinds[x.key]) if x.key in kinds else x
+        for x in issues
+    ]
+
+
 def launch(issue: Issue, root: Path, mode: str) -> str:
     repo_path = discover_repos(root).get(issue.repo.lower())
     if repo_path is None:
@@ -281,6 +293,11 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument("--input", type=Path, help="offline gh JSON fixture")
     parser.add_argument("--json", action="store_true", help="print normalized data, do not start TUI")
+    parser.add_argument(
+        "--classify-ai",
+        action="store_true",
+        help="доклассифицировать unknown через codex (кэш в out/)",
+    )
     args = parser.parse_args()
     internal = resolve_internal(args.internal)
     try:
@@ -289,6 +306,9 @@ def main() -> int:
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
         print(f"issue-console: {exc}", file=sys.stderr)
         return 2
+    if args.classify_ai:
+        kinds = issue_classify.refine(issues, OUT_ROOT / "issue-kind-cache.json")
+        issues = apply_kinds(issues, kinds)
     if args.json:
         print(json.dumps([asdict(x) for x in issues], ensure_ascii=False, indent=2))
         return 0
