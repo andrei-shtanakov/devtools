@@ -117,6 +117,7 @@ def start(
     run_id: str,
     ops: Ops,
     merge_authority: str | None = None,
+    author_backend: str = "codex",
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
@@ -150,6 +151,7 @@ def start(
         profile=profile,
         run_id=run_id,
         merge_authority=merge_authority,
+        author_backend=author_backend,
     )
     save(state)
     return advance(state, ops)
@@ -312,6 +314,7 @@ def verify(parent_run_id: str, ops: Ops, run_id: str) -> RunState:
         profile=parent.profile,
         run_id=run_id,
         merge_authority=parent.merge_authority,
+        author_backend=parent.author_backend,
     )
     child.remediated_by = parent_run_id
     child.branch = parent.branch
@@ -443,6 +446,21 @@ def _step_branch(state: RunState, ops: Ops) -> bool:
     return True
 
 
+def _disp_behaviour_task(subject: str, bundle_path: str) -> str:
+    """Task-текст для `ops.author_disp` (behaviour-spec узел, B2 Task 2).
+
+    Требует DSL поведенческого узла (иначе `gate-candidate`, S4, не признаёт
+    узел валидным): заголовок `#### BEH-NN`, поле `traces:`, пункт
+    `- **checked_by**:`.
+    """
+    return (
+        f"subject={subject!r} bundle={bundle_path}\n"
+        "Author the behaviour-spec bundle node. Каждый пункт поведения — "
+        "заголовок `#### BEH-NN`, поле `traces:` и пункт "
+        "`- **checked_by**:`."
+    )
+
+
 def _step_authoring(state: RunState, ops: Ops) -> bool:
     """S2/S3: charter/requirements/behaviour-spec — файл есть → пропустить.
 
@@ -451,6 +469,15 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     document` до сходимости, как буквально описывает спека §5 S3/§2. Замена
     осознанная для этапа B1; `disp`-цикл и критерий сходимости — предмет B2
     (OQ-1, `docs/superpowers/specs/2026-08-30-behaviour-spec-pipeline-design.md`).
+
+    B2 Task 2: `state.author_backend == "disp"` переключает ТОЛЬКО
+    behaviour-spec узел на `ops.author_disp` (`disp run --mode develop`) —
+    спека §5 называет `disp --mode document`, такого режима у disp нет
+    (факт 2026-08-30), используем `run --mode develop`; выравнивание со
+    спекой — inbox-issue в disputatio (OQ-1). charter/requirements всегда
+    остаются на `ops.author` (codex) независимо от `author_backend` —
+    disp-цикл осмыслен для полируемого документа, не для одноразовых
+    артефактов.
     """
     for key, kind, filename in _AUTHOR_STEPS:
         if op_status(state, key) == "completed":
@@ -460,9 +487,14 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
             op_complete(state, key, skipped=True)
             continue
         _ensure_started(state, key)
-        exit_code = ops.author(
-            state.target_dir, kind, state.subject, state.bundle_dir
-        )
+        if kind == "behaviour-spec" and state.author_backend == "disp":
+            bundle_path = f"{state.bundle_dir}/{filename}"
+            task = _disp_behaviour_task(state.subject, bundle_path)
+            exit_code = ops.author_disp(state.target_dir, task)
+        else:
+            exit_code = ops.author(
+                state.target_dir, kind, state.subject, state.bundle_dir
+            )
         if exit_code != 0:
             state.status = "stopped_author"
             save(state)
@@ -882,6 +914,9 @@ def main(argv: list[str] | None = None) -> int:
     start_p.add_argument("--profile", default="profiles/team-exp.yaml")
     start_p.add_argument("--merge-authority", default=None, choices=["human"])
     start_p.add_argument(
+        "--author-backend", default="codex", choices=["codex", "disp"],
+    )
+    start_p.add_argument(
         "--run-id", default=None, help="дефолт <ws-id>-<3 случайных байта hex>"
     )
 
@@ -924,6 +959,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=run_id,
             ops=ops,
             merge_authority=args.merge_authority,
+            author_backend=args.author_backend,
         )
     elif args.command == "resume":
         state = resume(args.run_id, ops)

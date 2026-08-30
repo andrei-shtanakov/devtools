@@ -46,6 +46,8 @@ class FakeOps:
     dirty: bool = False
     checkout_and_pull_error: str | None = None
     authored: list[str] = field(default_factory=list)
+    author_disp_calls: list[tuple[str, str]] = field(default_factory=list)
+    author_disp_exit: int = 0
     comments: list[str] = field(default_factory=list)
     merged: list[tuple[int, str]] = field(default_factory=list)
     issues: list[tuple[str, str, str]] = field(default_factory=list)
@@ -132,6 +134,11 @@ class FakeOps:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"# {kind}\n", encoding="utf-8")
         return 0
+
+    def author_disp(self, target_dir: str, task: str) -> int:
+        self.calls.append(("author_disp", task))
+        self.author_disp_calls.append((target_dir, task))
+        return self.author_disp_exit
 
     def gate_check_s8(
         self, target_dir: str, bundle_dir: str, profile: str
@@ -1589,3 +1596,72 @@ def test_stop_review_comment_includes_evidence_hint(
     assert state.status == "stopped_review"
     assert ops.comments
     assert f"git cat-file -e {ops.head}" in ops.comments[-1]
+
+
+# --- B2 Task 2: авторинг-бэкенд codex|disp ----------------------------------
+
+
+def test_default_author_backend_is_codex_author_disp_not_called(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Дефолт `author_backend="codex"` не меняет поведение B1: все три узла
+    идут через `ops.author`, `ops.author_disp` не вызывается вовсе."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+
+    state = runner.start(**_start_kwargs(tmp_path, "r-disp-default", ops))
+
+    assert ops.authored == ["charter", "requirements", "behaviour-spec"]
+    assert ops.author_disp_calls == []
+    assert state.author_backend == "codex"
+
+
+def test_disp_backend_used_only_for_behaviour_node(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """`author_backend="disp"` переключает ТОЛЬКО behaviour-spec узел на
+    `ops.author_disp`; charter/requirements остаются на `ops.author` (codex)
+    — disp-цикл осмыслен только для полируемого документа."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    run_id = "r-disp-behaviour"
+
+    state = runner.start(**_start_kwargs(
+        tmp_path, run_id, ops, author_backend="disp",
+    ))
+
+    assert ops.authored == ["charter", "requirements"]
+    assert len(ops.author_disp_calls) == 1
+    target_dir, task = ops.author_disp_calls[0]
+    assert target_dir == str(tmp_path / f"target-{run_id}")
+    assert "#### BEH-NN" in task
+    assert "traces:" in task
+    assert "checked_by" in task
+    assert state.ops["author-behaviour"]["status"] == "completed"
+    assert state.author_backend == "disp"
+
+
+def test_disp_backend_author_disp_failure_stops_author(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Провал `author_disp` (rc != 0) останавливает прогон так же, как
+    провал `ops.author` — `stopped_author`, статус не подменяется бэкендом."""
+    ops = FakeOps(author_disp_exit=1)
+    run_id = "r-disp-fail"
+
+    state = runner.start(**_start_kwargs(
+        tmp_path, run_id, ops, author_backend="disp",
+    ))
+
+    assert state.status == "stopped_author"
+    assert state.ops["author-behaviour"]["status"] == "started"
+
+
+def test_new_run_rejects_unknown_author_backend() -> None:
+    with pytest.raises(ValueError):
+        rs.new_run(
+            subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+            target_dir="/tmp/x", bundle_dir="spec",
+            profile="profiles/team-exp.yaml", run_id="r-bad-backend",
+            author_backend="claude",
+        )

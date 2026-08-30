@@ -76,6 +76,23 @@ class RunState:
     # дефолтов, дальше в списке этот новее их всех; runner проставляет его
     # явно в `_step_verdict`, не здесь.
     base_ref: str | None = None
+    # Авторинг-бэкенд S2/S3 (B2 Task 2): "codex" (дефолт, `ops.author`) или
+    # "disp" (opt-in, `ops.author_disp`) — только для behaviour-spec узла,
+    # charter/requirements авторятся codex независимо от значения (disp-цикл
+    # осмыслен для полируемого документа, не для одноразовых артефактов).
+    author_backend: str = "codex"
+
+
+_ALLOWED_AUTHOR_BACKENDS = ("codex", "disp")
+
+
+def validate_author_backend(author_backend: str) -> None:
+    """Валидирует `author_backend` прогона (B2 Task 2): только `codex`/`disp`."""
+    if author_backend not in _ALLOWED_AUTHOR_BACKENDS:
+        raise ValueError(
+            f"author_backend {author_backend!r} невалиден: допустимо "
+            f"{_ALLOWED_AUTHOR_BACKENDS!r}"
+        )
 
 
 def validate_merge_authority(merge_authority: str | None) -> None:
@@ -105,9 +122,11 @@ def new_run(
     profile: str,
     run_id: str,
     merge_authority: str | None = None,
+    author_backend: str = "codex",
 ) -> RunState:
     """Новый прогон (S0). `run_id` подаётся снаружи (вызывающая сторона)."""
     validate_merge_authority(merge_authority)
+    validate_author_backend(author_backend)
     return RunState(
         run_id=run_id,
         subject=subject,
@@ -124,6 +143,7 @@ def new_run(
         head=None,
         ops={},
         remediated_by=None,
+        author_backend=author_backend,
     )
 
 

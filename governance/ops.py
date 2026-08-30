@@ -67,6 +67,8 @@ class Ops(Protocol):
         self, target_dir: str, kind: str, subject: str, bundle_dir: str
     ) -> int: ...
 
+    def author_disp(self, target_dir: str, task: str) -> int: ...
+
     def commit_paths(
         self, target_dir: str, paths: list[str], message: str
     ) -> None: ...
@@ -288,6 +290,22 @@ class RealOps:
         done = subprocess.run(
             ["codex", "exec", "--ephemeral", "--sandbox", "workspace-write",
              prompt],
+            cwd=target_dir,
+        )
+        return done.returncode
+
+    def author_disp(self, target_dir: str, task: str) -> int:
+        """disp `run --mode develop` — opt-in авторинг-бэкенд behaviour-spec узла.
+
+        Спека §5 называет `disp --mode document` — такого режима у disp нет
+        (факт 2026-08-30, `disp --help` пинованной копии: только `run --mode
+        {develop,analyze}` и `pipeline`); используется `run --mode develop`.
+        Выравнивание спеки с фактом — inbox-issue в disputatio (OQ-1), не
+        предмет этого модуля.
+        """
+        done = subprocess.run(
+            ["uv", "run", "--project", str(DEVTOOLS_ROOT.parent / "disputatio"),
+             "disp", "run", "--mode", "develop", "--root", target_dir, task],
             cwd=target_dir,
         )
         return done.returncode
