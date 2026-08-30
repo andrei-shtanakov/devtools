@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -322,9 +323,7 @@ def resume(run_id: str, ops: Ops) -> RunState:
 
 def _next_verify_run_id(parent_run_id: str) -> str:
     """Детерминированный `run_id` следующей verify-попытки (round 5,
-    codex-major — TOCTOU): `f"{parent_run_id}-v{attempt}"`, где
-    `attempt = 1 + число уже существующих потомков этого родителя` (ЛЮБОЙ
-    статус — считаются и провальные, и зелёные, из `_load_all_runs()`).
+    codex-major — TOCTOU): `f"{parent_run_id}-v{attempt}"`.
 
     Раньше id потомка был случайным (`os.urandom`), и `_has_green_child`
     сам по себе не сериализовал конкурентные вызовы: два одновременных
@@ -332,16 +331,32 @@ def _next_verify_run_id(parent_run_id: str) -> str:
     потомка» (ни один ещё не сохранён), получали РАЗНЫЕ случайные id и оба
     успевали запустить параллельный S8 в одном `target_dir`. Детерминизм
     чинит это через уже существующий атомарный резерв: конкурентные вызовы
-    без явного `run_id` считают ОДНО И ТО ЖЕ число потомков (до того, как
-    любой из них успел сохранить свой) и потому вычисляют ОДИН И ТОТ ЖЕ
-    id — `_reserve_run_id` (`O_CREAT|O_EXCL`) пропускает ровно одного,
-    остальные получают `ValueError` вместо параллельного запуска.
+    без явного `run_id` вычисляют ОДИН И ТОТ ЖЕ id — `_reserve_run_id`
+    (`O_CREAT|O_EXCL`) пропускает ровно одного, остальные получают
+    `ValueError` вместо параллельного запуска.
+
+    `attempt` считается по ИМЕНАМ каталогов под `RUNS_ROOT`
+    (`all_run_ids()`, `^<parent>-v(\\d+)$`) — `max(N) + 1`, а не по числу
+    успешно ЗАГРУЖЕННЫХ `RunState` (round 6, codex-major): гибель между
+    `_reserve_run_id` и `save(child)` оставляет ПУСТОЙ
+    `<parent>-v<N>/run.json` (сам `_reserve_run_id` уже создал файл через
+    `touch`, `save()` его ещё не заполнил). Пустой файл не парсится
+    `json.loads` — подсчёт по `_load_all_runs()` (которая тихо пропускает
+    нечитаемые леджеры) видел бы то же число потомков навсегда, поэтому
+    каждый следующий `verify()` без `run_id` вычислял бы ТОТ ЖЕ `N`, а
+    `_reserve_run_id` навсегда отвечал бы «уже существует» на уже занятом
+    (хоть и оборванном) каталоге — постоянный deadlock на этом родителе.
+    Валидность JSON тут не важна: сам факт существования каталога с
+    подходящим именем уже занимает номер попытки, следующий `verify()`
+    обязан взять следующий за ним, не спорить с ним же.
     """
-    attempt = 1 + sum(
-        1
-        for s in _load_all_runs().values()
-        if s.remediated_by == parent_run_id
-    )
+    pattern = re.compile(rf"^{re.escape(parent_run_id)}-v(\d+)$")
+    existing_attempts = [
+        int(match.group(1))
+        for run_id in all_run_ids()
+        if (match := pattern.match(run_id))
+    ]
+    attempt = max(existing_attempts, default=0) + 1
     return f"{parent_run_id}-v{attempt}"
 
 

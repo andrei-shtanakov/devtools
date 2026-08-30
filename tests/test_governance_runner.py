@@ -629,17 +629,20 @@ def test_verify_allowed_again_after_failed_child(
     assert second_child.remediated_by == parent_id
 
 
-def test_verify_without_run_id_serializes_concurrent_calls(
+def test_verify_without_run_id_serializes_when_ids_collide(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    """Round 5, codex-major (TOCTOU): без явного `run_id` `verify()` выводит
-    ДЕТЕРМИНИРОВАННЫЙ id (`_next_verify_run_id` — `<parent>-v<N>`, N — 1 +
-    число уже существующих потомков). Два конкурентных вызова ДО того, как
-    любой успел сохранить своего потомка, вычисляют ОДИН И ТОТ ЖЕ id —
-    моделируем гонку явно: слот занят "выигравшим" конкурентом
-    (`_reserve_run_id` напрямую) раньше, чем наш `verify()` успевает его
-    зарезервировать; второй ("проигравший") получает `ValueError` вместо
-    параллельного запуска S8 в одном `target_dir`."""
+    """Round 5 (TOCTOU): сериализация конкурентных `verify()` без `run_id`
+    держится на атомарном `_reserve_run_id` (`O_CREAT|O_EXCL`), а не на
+    конкретном способе счёта `attempt` внутри `_next_verify_run_id` (тот
+    менялся в round 6 — см. `test_next_verify_run_id_skips_dangling_
+    reservation` ниже). Настоящую гонку потоков/процессов синхронный тест
+    воспроизвести не может — форсируем через monkeypatch общий результат
+    вычисления id для "обоих конкурентов" (то, что в реальной гонке дало
+    бы им одно и то же значение из одного стартового снапшота каталогов).
+    Первый вызов резервирует и создаёт потомка, второй с тем же
+    вычисленным id получает `ValueError` вместо параллельного запуска S8
+    в одном `target_dir`."""
     monkeypatch.setattr(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
@@ -652,14 +655,51 @@ def test_verify_without_run_id_serializes_concurrent_calls(
     parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
     assert parent.status == "merged_unverified"
 
-    computed_id = runner._next_verify_run_id(parent_id)
-    same_computed_id = runner._next_verify_run_id(parent_id)
-    assert computed_id == same_computed_id == f"{parent_id}-v1"
+    monkeypatch.setattr(runner, "_next_verify_run_id", lambda pid: f"{pid}-v1")
 
-    runner._reserve_run_id(computed_id)  # "выигравший" конкурент
+    winner = runner.verify(parent_id, ops)
+    assert winner.run_id == f"{parent_id}-v1"
 
     with pytest.raises(ValueError, match="уже существует"):
         runner.verify(parent_id, ops)  # "проигравший" вычисляет тот же id
+
+
+def test_next_verify_run_id_skips_dangling_reservation(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Round 6, codex-major: гибель между `_reserve_run_id` и
+    `save(child)` оставляет ПУСТОЙ `<parent>-v1/run.json` (сам
+    `_reserve_run_id` уже создал файл через `touch`). Счёт `attempt` по
+    успешно ЗАГРУЖЕННЫМ `RunState` (round 5) молча пропускал бы этот
+    каталог — `_next_verify_run_id` вечно вычислял бы `v1` снова, а
+    `_reserve_run_id` вечно отвечал бы «уже существует» на уже занятом
+    (хоть и оборванном) слоте — постоянный deadlock на этом родителе.
+    Счёт по ИМЕНАМ каталогов (`all_run_ids()`) видит `v1` независимо от
+    валидности JSON внутри и корректно берёт следующий номер."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
+    )
+    parent_id = "r-s8-parent-dangling"
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    assert parent.status == "merged_unverified"
+
+    # Оборванная резервация: процесс умер между _reserve_run_id и
+    # save(child) — каталог и пустой run.json есть, RunState — нет.
+    dangling_id = f"{parent_id}-v1"
+    rs.run_dir(dangling_id).mkdir(parents=True, exist_ok=True)
+    (rs.run_dir(dangling_id) / "run.json").touch()
+
+    assert runner._next_verify_run_id(parent_id) == f"{parent_id}-v2"
+
+    ops.s8_exit = 0  # находки устранены фикс-PR'ом
+    child = runner.verify(parent_id, ops)
+    assert child.run_id == f"{parent_id}-v2"
+    assert child.status == "completed"
 
 
 def test_verify_without_run_id_increments_attempt_after_failed_child(
