@@ -82,6 +82,43 @@ class Ops(Protocol):
     def find_issue(self, repo_slug: str, body_prefix: str) -> int | None: ...
 
 
+# Канонические имена файлов бандла (зеркало runner._AUTHOR_STEPS) и DSL-правила
+# гейта для промпта авторинга. Держим в ops: промпт — часть точной команды.
+_AUTHOR_FILENAMES = {
+    "charter": "00-charter.md",
+    "requirements": "10-requirements.md",
+    "behaviour-spec": "15-behaviour-spec.md",
+}
+_AUTHOR_DSL = {
+    "charter": (
+        "YAML frontmatter (required): spec_stage: charter, status: draft, "
+        "owner_role: product."
+    ),
+    "requirements": (
+        "YAML frontmatter (required): spec_stage: requirements, status: "
+        "draft, owner_role: product, traces_to: [charter], upstream_hashes: "
+        "{charter: \"<hash>\"} where <hash> is the output of "
+        "`git hash-object <bundle_dir>/00-charter.md`. Every functional "
+        "requirement MUST be a heading `#### FR-NN: <title>` followed by a "
+        "`**Priority**: Must` (or Should) line. Non-functional requirements "
+        "use `#### NFR-NN: <title>`. Use FR-/NFR- ids consistently "
+        "everywhere, including any traceability matrices."
+    ),
+    "behaviour-spec": (
+        "YAML frontmatter (required): spec_stage: behaviour-spec, status: "
+        "draft, owner_role: product, traces_to: [requirements], "
+        "upstream_hashes: {requirements: \"<hash>\"} where <hash> is the "
+        "output of `git hash-object <bundle_dir>/10-requirements.md`. Every "
+        "scenario MUST be a heading `#### BEH-NN: <title>` and contain a "
+        "line `` `traces: [FR-NN, ...]` `` (ids must exist in requirements) "
+        "and a line `- **checked_by**: `status: planned` `kind: "
+        "<atp|contract|integration|e2e|manual>` `owner: qa` `target: <test "
+        "path>``. Use BEH-/FR- ids consistently everywhere, including any "
+        "traceability matrices."
+    ),
+}
+
+
 class RealOps:
     """RealOps: точные команды внешних эффектов (спека §5/§8)."""
 
@@ -289,9 +326,20 @@ class RealOps:
     def author(
         self, target_dir: str, kind: str, subject: str, bundle_dir: str
     ) -> int:
-        """codex exec --ephemeral --sandbox workspace-write <prompt>."""
+        """codex exec --ephemeral --sandbox workspace-write <prompt>.
+
+        Промпт несёт канонические имена файлов и DSL гейта (боевой прогон
+        kapelle#47: без них codex писал в своём диалекте — имена `01-`/`02-`,
+        заголовки `### BS-*`/`REQ-*` без `traces:`/`checked_by`, и всё это
+        приходилось конвертировать руками до S4).
+        """
+        rules = _AUTHOR_DSL.get(kind, "")
+        target_file = _AUTHOR_FILENAMES.get(kind, "")
         prompt = (
             f"kind={kind} subject={subject!r} bundle_dir={bundle_dir}\n"
+            f"Write EXACTLY one file: {bundle_dir}/{target_file} "
+            "(this exact name; create parent dirs as needed).\n"
+            f"{rules}\n"
             "Author the governance bundle content for this kind/subject."
         )
         done = subprocess.run(

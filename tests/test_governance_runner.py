@@ -137,7 +137,16 @@ class FakeOps:
         }[kind]
         path = Path(target_dir) / bundle_dir / filename
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"# {kind}\n", encoding="utf-8")
+        # Минимально DSL-корректное содержимое (зеркало обогащённого промпта
+        # RealOps.author): гард GC-DSL-EMPTY в S4 читает эти файлы.
+        body = {
+            "charter": "# charter\n",
+            "requirements": "#### FR-01: x\n**Priority**: Must\n",
+            "behaviour-spec": (
+                "#### BEH-01: x\n`traces: [FR-01]`\n- **checked_by**: x\n"
+            ),
+        }[kind]
+        path.write_text(body, encoding="utf-8")
         return 0
 
     def author_disp(self, target_dir: str, task: str) -> int:
@@ -1025,10 +1034,12 @@ def test_resume_from_stopped_gate_recommits_edited_bundle(
     assert state.ops["commit"]["status"] == "completed"
     calls_before_resume = len(ops.calls)
 
-    # Человек правит бандл в worktree, устраняя находку гейта.
+    # Человек правит бандл в worktree, устраняя находку гейта
+    # (DSL-корректно — иначе стоп повторит гард GC-DSL-EMPTY).
     bundle_dir = Path(state.target_dir) / state.bundle_dir
     (bundle_dir / "15-behaviour-spec.md").write_text(
-        "# behaviour (fixed)\n", encoding="utf-8"
+        "#### BEH-01: fixed\n`traces: [FR-01]`\n- **checked_by**: x\n",
+        encoding="utf-8",
     )
 
     result = runner.resume(run_id, ops)
@@ -1092,7 +1103,8 @@ def test_resume_from_stopped_review_recommits_edited_bundle(
     # Человек правит бандл в worktree, отрабатывая находки ревью.
     bundle_dir = Path(state.target_dir) / state.bundle_dir
     (bundle_dir / "15-behaviour-spec.md").write_text(
-        "# behaviour (review fix)\n", encoding="utf-8"
+        "#### BEH-01: review fix\n`traces: [FR-01]`\n- **checked_by**: x\n",
+        encoding="utf-8",
     )
     ops.review_exit = 0
     result = runner.resume(run_id, ops)
@@ -2083,3 +2095,93 @@ def test_new_run_rejects_unknown_author_backend() -> None:
             profile="profiles/team-exp.yaml", run_id="r-bad-backend",
             author_backend="claude",
         )
+
+
+def test_gate_stops_on_dsl_empty_bundle(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Гард GC-DSL-EMPTY (боевой прогон kapelle#47): candidate_valid при нуле
+    распознаваемых DSL-заголовков — стоп, а не вакуумный зелёный."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+
+    class DialectOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "behaviour-spec":
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.write_text("### BS-001 — диалект без DSL\n")
+            return rc
+
+    ops = DialectOps(review_exit=0, facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-dsl-empty", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (runner.run_dir("r-dsl-empty") / "gate-findings.txt").read_text()
+    assert "GC-DSL-EMPTY" in findings and "15-behaviour-spec.md" in findings
+    assert "push" not in state.ops
+
+
+def test_rollup_unstable_is_green_for_merge(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Красный advisory-чек при mergeStateStatus=UNSTABLE не блокирует
+    agent-мерж: обязательные проверки зелёные по семантике GitHub."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    facts = {
+        **GREEN_PR_FACTS,
+        "statusCheckRollup": [
+            {"conclusion": "SUCCESS"}, {"conclusion": "FAILURE"},
+        ],
+        "mergeStateStatus": "UNSTABLE",
+    }
+    ops = FakeOps(
+        review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES, s8_exit=0,
+    )
+    state = runner.start(**_start_kwargs(tmp_path, "r-unstable", ops))
+
+    assert state.ops["merge"]["status"] == "completed"
+    assert state.status == "completed"
+
+
+def test_rollup_red_blocked_still_refuses(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    facts = {
+        **GREEN_PR_FACTS,
+        "statusCheckRollup": [{"conclusion": "FAILURE"}],
+        "mergeStateStatus": "BLOCKED",
+    }
+    ops = FakeOps(review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES)
+    state = runner.start(**_start_kwargs(tmp_path, "r-blocked", ops))
+
+    assert state.status == "stopped_merge_refused"
+    assert ops.merged == []
+
+
+def test_resume_merge_refused_after_human_merge_runs_s8(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Reconciliation refuse→merged (боевой прогон kapelle#51): человек
+    смержил отказанный PR — resume фиксирует мерж и гонит S8."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    facts = {
+        **GREEN_PR_FACTS,
+        "statusCheckRollup": [{"conclusion": "FAILURE"}],
+        "mergeStateStatus": "BLOCKED",
+    }
+    ops = FakeOps(
+        review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES, s8_exit=0,
+    )
+    run_id = "r-refused-merged"
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_merge_refused"
+
+    ops.facts = {**ops.facts, "state": "MERGED"}
+    result = runner.resume(run_id, ops)
+
+    assert result.ops["merge"] == {"status": "completed", "merged": True}
+    assert result.ops["gate-authoritative"]["status"] == "completed"
+    assert result.status == "completed"
