@@ -2123,11 +2123,12 @@ def test_gate_stops_on_dsl_empty_bundle(
     assert "push" not in state.ops
 
 
-def test_rollup_unstable_is_green_for_merge(
+def test_rollup_unstable_failure_still_refuses(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    """Красный advisory-чек при mergeStateStatus=UNSTABLE не блокирует
-    agent-мерж: обязательные проверки зелёные по семантике GitHub."""
+    """Любой FAILURE = red даже при mergeStateStatus=UNSTABLE (приёмка
+    PR #99): в rulesets флота нет required-чеков, UNSTABLE означает «упало
+    что угодно, хоть тесты» — поблажка мержила бы агентом красный test."""
     monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     facts = {
         **GREEN_PR_FACTS,
@@ -2136,13 +2137,11 @@ def test_rollup_unstable_is_green_for_merge(
         ],
         "mergeStateStatus": "UNSTABLE",
     }
-    ops = FakeOps(
-        review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES, s8_exit=0,
-    )
+    ops = FakeOps(review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES)
     state = runner.start(**_start_kwargs(tmp_path, "r-unstable", ops))
 
-    assert state.ops["merge"]["status"] == "completed"
-    assert state.status == "completed"
+    assert state.status == "stopped_merge_refused"
+    assert ops.merged == []
 
 
 def test_rollup_red_blocked_still_refuses(

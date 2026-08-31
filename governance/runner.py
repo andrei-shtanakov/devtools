@@ -534,15 +534,14 @@ def facts_from(
         if all(c in _ROLLUP_GREEN for c in conclusions):
             checks_rollup = "green"
         elif any(c and c not in _ROLLUP_GREEN for c in conclusions):
-            # UNSTABLE у GitHub = «обязательные проверки зелёные, красное
-            # только необязательное» (иначе был бы BLOCKED) — advisory-
-            # краснота agent-мерж не блокирует (боевой прогон kapelle#51:
-            # advisory CI валил вердикт в refuse при зелёных обязательных).
-            checks_rollup = (
-                "green"
-                if pr_facts.get("mergeStateStatus") == "UNSTABLE"
-                else "red"
-            )
+            # Любой FAILURE = red, БЕЗ поблажки на mergeStateStatus=UNSTABLE
+            # (приёмка PR #99, major): в rulesets флота нет required-чеков,
+            # поэтому UNSTABLE у GitHub означает «упало что угодно, хоть
+            # тесты» — читать его как «красное только advisory» значило бы
+            # мержить агентом PR с красным test. Мотивация послабления
+            # умерла со снятием CI-контура codex-review (devtools#98 +
+            # волна): advisory-чеков во флоте больше нет.
+            checks_rollup = "red"
         else:
             checks_rollup = "unknown"
 
