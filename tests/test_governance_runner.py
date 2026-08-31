@@ -2413,3 +2413,31 @@ def test_review_refute_is_single_attempt(
     assert state.status == "stopped_review"
     assert [c[0] for c in ops.calls].count("review_fresh") == 1
     assert state.ops["review-refute"]["status"] == "completed"
+
+
+def test_parser_defect_mentioning_file_missing_literal_is_not_refutable() -> None:
+    """Приёмка PR #102: defect-находка, чей текст лишь УПОМИНАЕТ литерал
+    `file-missing` (без kindline рендера), не классифицируется как
+    file-missing — авто-опровержение неприменимо."""
+    body = (
+        "### [major] дефект обработки `file-missing` — `governance/x.py:10`\n"
+        "- Сценарий: обработчик типа `file-missing` теряет путь\n"
+        "- confidence: high → БЛОКИРУЕТ\n"
+    )
+    assert runner._file_missing_refute_candidates(body) is None
+
+
+def test_review_fresh_instrument_failure_routed_honestly(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Приёмка PR #102, minor: fresh exit 2/3 — «прибор не отработал»,
+    не «сохранившиеся находки»."""
+    ops = FakeOps(
+        review_exit=1, review_fresh_exit=2, review_body=_FM_BODY,
+        existing_files={"governance/foo.py"},
+        facts=GREEN_PR_FACTS,
+    )
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-instr", ops))
+
+    assert state.status == "stopped_review"
+    assert any("прибор не отработал" in c for c in ops.comments)

@@ -939,7 +939,11 @@ def _file_missing_refute_candidates(body: str) -> list[str] | None:
         if "БЛОКИРУЕТ" not in section:
             continue
         blocking_seen = True
-        if "`file-missing`" not in section:
+        # Точная kindline рендера apply-threshold, не подстрока по секции
+        # (приёмка PR #102, major): defect-находка, чей title/сценарий
+        # УПОМИНАЕТ литерал file-missing (например, дефект обработки этого
+        # типа), не имеет права классифицироваться как file-missing.
+        if not re.search(r"(?m)^- Тип: `file-missing`", section):
             return None
         header = re.match(r"\[[^\]]+\]\s+.*?—\s+`([^:`]+):\d+`", section)
         if not header:
@@ -1011,7 +1015,22 @@ def _step_review(state: RunState, ops: Ops) -> bool:
                 if fresh_exit == 0:
                     op_complete(state, key, exit=fresh_exit)
                     return True
-                exit_code = fresh_exit
+                # Коды fresh-прогона маршрутизируются как у первичного
+                # (приёмка PR #102, minor): 2/3 — отказ прибора, не
+                # «сохранившиеся находки»; 4 — голова уехала, тот же
+                # reset-путь, что и внизу функции.
+                if fresh_exit in (2, 3):
+                    _stop_with_comment(
+                        state, ops, "stopped_review", "прибор не отработал"
+                    )
+                    return False
+                if fresh_exit != 1:
+                    state.ops.pop("gate-candidate", None)
+                    state.ops.pop("push", None)
+                    state.ops.pop("ready", None)
+                    state.ops.pop(key, None)
+                    save(state)
+                    return False
         _stop_with_comment(
             state, ops, "stopped_review",
             "ревью нашло находки, прогон остановлен\n\n"
