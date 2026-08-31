@@ -102,9 +102,13 @@ PF-BLOCKER-STALE по этому репо = «ожидание доставле�
   красноту/зависание не перегонять. **Copilot по умолчанию не запрашивать** —
   только по явной просьбе владельца. SSOT: `../prograph-vault/authored/rules/git-workflow.md`.
 - **Мерж — агент по умолчанию** (ADR-ECO-011 «DarkFactory», 2026-08-30): при
-  approve от ревью-контура и зелёных обязательных проверках агент мержит сам —
-  `gh pr merge` **от учётки ai-prosto** (`merged_by` — различитель agent/human) —
-  и выполняет хвост чистки. Request-changes или неприбывшее ревью = `unknown` ⇒
+  approve от ревью-контура и зелёных обязательных проверках агент мержит сам и
+  выполняет хвост чистки. Мерж — **только от профиля ai-prosto**:
+  `GH_CONFIG_DIR=~/.config/review gh pr merge`, и перед ним сверить логин
+  (`GH_CONFIG_DIR=~/.config/review gh api user --jq .login` → `ai-prosto`). Голый
+  `gh pr merge` уйдёт от основного аккаунта и запишет агентский мерж человеческим,
+  обнулив `merged_by` — наблюдаемый различитель agent/human
+  (аудит `gh pr list --json mergedBy`). Request-changes или неприбывшее ревью = `unknown` ⇒
   мерж не выполняется, PR остаётся человеку. Человеческий мерж — opt-in: строка
   `Мерж: человек` в этой секции (здесь НЕ объявлена) либо `merge_policy`
   экосистемного конфига. Объявление прогона (`merge_authority: human`,
