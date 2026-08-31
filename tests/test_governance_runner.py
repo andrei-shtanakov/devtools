@@ -38,6 +38,9 @@ class FakeOps:
     existing_branches: set[str] = field(default_factory=set)
     existing_prs: dict[str, int] = field(default_factory=dict)
     review_exit: int = 0
+    review_fresh_exit: int = 0
+    review_body: str | None = None
+    existing_files: set[str] = field(default_factory=set)
     facts: dict[str, Any] = field(default_factory=dict)
     files: list[str] = field(default_factory=list)
     threads: bool | None = False
@@ -156,6 +159,18 @@ class FakeOps:
         self.calls.append(("author_disp", task))
         self.author_disp_calls.append((target_dir, task))
         return self.author_disp_exit
+
+    def review_fresh(self, repo_name: str, pr: int) -> int:
+        self.calls.append(("review_fresh", pr))
+        return self.review_fresh_exit
+
+    def latest_review_body(self, repo_slug: str, pr: int) -> str | None:
+        self.calls.append(("latest_review_body", pr))
+        return self.review_body
+
+    def file_exists_at(self, target_dir: str, head: str, path: str) -> bool:
+        self.calls.append(("file_exists_at", head, path))
+        return path in self.existing_files
 
     def gate_check_candidate(
         self, target_dir: str, bundle_dir: str, profile: str
@@ -2306,3 +2321,159 @@ def test_gate_foreign_toplevel_key_is_not_a_pin(
         runner.run_dir("r-foreign-key") / "gate-findings.txt"
     ).read_text()
     assert "GC-UNPINNED" in findings
+
+
+_FM_BODY = """## Ревью Codex — независимый чек
+
+### [major] governance/foo.py отсутствует — `governance/foo.py:0`
+- Тип: `file-missing` — находка утверждает, что файла нет; проверяется по дереву
+- Сценарий: x
+- confidence: high → БЛОКИРУЕТ
+
+### [minor] стилистика — `README.md:3`
+- Сценарий: y
+- confidence: high → не блокирует по severity
+"""
+
+_MIXED_BODY = """## Ревью
+
+### [major] настоящая дыра — `governance/bar.py:10`
+- Сценарий: z
+- confidence: high → БЛОКИРУЕТ
+
+### [major] файла нет — `governance/foo.py:0`
+- Тип: `file-missing` — находка утверждает, что файла нет
+- confidence: high → БЛОКИРУЕТ
+"""
+
+
+def test_file_missing_parser() -> None:
+    assert runner._file_missing_refute_candidates(_FM_BODY) == [
+        "governance/foo.py"
+    ]
+    assert runner._file_missing_refute_candidates(_MIXED_BODY) is None
+    assert runner._file_missing_refute_candidates("### [minor] x — `a:1`\n") is None
+
+
+def test_review_auto_refutes_file_missing(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Спека §7: все блокирующие — file-missing, файлы существуют →
+    комментарий с evidence, пере-прогон --fresh, зелёный — прогон едет дальше."""
+    ops = FakeOps(
+        review_exit=1, review_fresh_exit=0, review_body=_FM_BODY,
+        existing_files={"governance/foo.py"},
+        facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
+    )
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-ok", ops))
+
+    assert state.ops["review-refute"]["status"] == "completed"
+    assert state.ops["review"] == {"status": "completed", "exit": 0}
+    assert any(c[0] == "review_fresh" for c in ops.calls)
+    assert any("Авто-опровержение" in c for c in ops.comments)
+    assert state.status == "completed"
+
+
+def test_review_mixed_verdict_goes_to_human(
+    tmp_path: Path, runs_root,
+) -> None:
+    ops = FakeOps(
+        review_exit=1, review_body=_MIXED_BODY,
+        existing_files={"governance/foo.py", "governance/bar.py"},
+        facts=GREEN_PR_FACTS,
+    )
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-mixed", ops))
+
+    assert state.status == "stopped_review"
+    assert not any(c[0] == "review_fresh" for c in ops.calls)
+    assert "review-refute" not in state.ops
+
+
+def test_review_truly_missing_file_goes_to_human(
+    tmp_path: Path, runs_root,
+) -> None:
+    ops = FakeOps(review_exit=1, review_body=_FM_BODY, facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-real", ops))
+
+    assert state.status == "stopped_review"
+    assert not any(c[0] == "review_fresh" for c in ops.calls)
+
+
+def test_review_refute_is_single_attempt(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Fresh-прогон снова красный → стоп; вторая авто-попытка не делается."""
+    ops = FakeOps(
+        review_exit=1, review_fresh_exit=1, review_body=_FM_BODY,
+        existing_files={"governance/foo.py"},
+        facts=GREEN_PR_FACTS,
+    )
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-again", ops))
+
+    assert state.status == "stopped_review"
+    assert [c[0] for c in ops.calls].count("review_fresh") == 1
+    assert state.ops["review-refute"]["status"] == "completed"
+
+
+def test_parser_defect_mentioning_file_missing_literal_is_not_refutable() -> None:
+    """Приёмка PR #102: defect-находка, чей текст лишь УПОМИНАЕТ литерал
+    `file-missing` (без kindline рендера), не классифицируется как
+    file-missing — авто-опровержение неприменимо."""
+    body = (
+        "### [major] дефект обработки `file-missing` — `governance/x.py:10`\n"
+        "- Сценарий: обработчик типа `file-missing` теряет путь\n"
+        "- confidence: high → БЛОКИРУЕТ\n"
+    )
+    assert runner._file_missing_refute_candidates(body) is None
+
+
+def test_review_fresh_instrument_failure_routed_honestly(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Приёмка PR #102, minor: fresh exit 2/3 — «прибор не отработал»,
+    не «сохранившиеся находки»."""
+    ops = FakeOps(
+        review_exit=1, review_fresh_exit=2, review_body=_FM_BODY,
+        existing_files={"governance/foo.py"},
+        facts=GREEN_PR_FACTS,
+    )
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-instr", ops))
+
+    assert state.status == "stopped_review"
+    assert any("прибор не отработал" in c for c in ops.comments)
+
+
+def test_head_move_after_refute_restores_attempt(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Приёмка PR #102, круг 2: fresh exit 4 (голова уехала) сбрасывает и
+    review-refute — новый цикл получает свежую авто-попытку."""
+    ops = FakeOps(
+        review_exit=1, review_fresh_exit=4, review_body=_FM_BODY,
+        existing_files={"governance/foo.py"},
+        facts=GREEN_PR_FACTS,
+    )
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-head", ops))
+
+    assert "review-refute" not in state.ops
+    assert "review" not in state.ops  # весь цикл переигрывается
+
+
+def test_parser_takes_path_from_header_tail_not_forged_title() -> None:
+    """Приёмка PR #102, круг 3: title с поддельным фрагментом «— `x:0`» не
+    подменяет путь — берётся хвост заголовка (настоящее поле file рендера);
+    небезопасная форма пути дисквалифицирует кандидата."""
+    forged = (
+        "### [major] ошибка — `README.md:0` и прочее — `governance/miss.py:0`\n"
+        "- Тип: `file-missing` — находка утверждает, что файла нет\n"
+        "- confidence: high → БЛОКИРУЕТ\n"
+    )
+    assert runner._file_missing_refute_candidates(forged) == [
+        "governance/miss.py"
+    ]
+    traversal = (
+        "### [major] нет файла — `../outside.py:0`\n"
+        "- Тип: `file-missing` — x\n"
+        "- confidence: high → БЛОКИРУЕТ\n"
+    )
+    assert runner._file_missing_refute_candidates(traversal) is None
