@@ -2130,3 +2130,69 @@ def test_resume_merge_refused_after_human_merge_runs_s8(
     assert result.ops["merge"] == {"status": "completed", "merged": True}
     assert result.ops["gate-authoritative"]["status"] == "completed"
     assert result.status == "completed"
+
+
+def test_gate_unpinned_draft_edge_stops_locally(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Гард GC-UNPINNED(prospective) поверх CLI (приёмка PR #101, major):
+    stale-каскад gate-check живёт только на approved — draft-узел с
+    объявленным ребром без пина upstream_hashes обязан стопить S4 локально,
+    даже когда CLI вернул 0."""
+
+    class UnpinnedAuthorOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "behaviour-spec":
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: behaviour-spec\n"
+                    "status: draft\n"
+                    "traces_to:\n  - requirements\n"
+                    "---\n"
+                    "#### BEH-01: x\n`traces: [FR-01]`\n"
+                    "- **checked_by**: x\n"
+                )
+            return rc
+
+    ops = UnpinnedAuthorOps(facts=GREEN_PR_FACTS)  # CLI-гейт (FakeOps) даёт 0
+    state = runner.start(**_start_kwargs(tmp_path, "r-unpinned", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (runner.run_dir("r-unpinned") / "gate-findings.txt").read_text()
+    assert "GC-UNPINNED" in findings and "requirements" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_pinned_draft_edge_passes_local_guard(
+    tmp_path: Path, runs_root,
+) -> None:
+    class PinnedAuthorOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "behaviour-spec":
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: behaviour-spec\n"
+                    "status: draft\n"
+                    "traces_to:\n  - requirements\n"
+                    "upstream_hashes:\n"
+                    '  requirements: "' + "a" * 40 + '"\n'
+                    "---\n"
+                    "#### BEH-01: x\n`traces: [FR-01]`\n"
+                    "- **checked_by**: x\n"
+                )
+            return rc
+
+    ops = PinnedAuthorOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=0,
+    )
+    state = runner.start(**_start_kwargs(tmp_path, "r-pinned", ops))
+    assert state.ops["gate-candidate"]["status"] == "completed"

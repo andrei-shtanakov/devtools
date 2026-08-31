@@ -720,6 +720,12 @@ def _step_commit(state: RunState, ops: Ops) -> bool:
     return True
 
 
+def _frontmatter(text: str) -> str:
+    """YAML-frontmatter между первыми двумя `---`-строками (или пусто)."""
+    match = re.match(r"^---\n(.*?)\n---", text, re.S)
+    return match.group(1) if match else ""
+
+
 def _step_gate(state: RunState, ops: Ops) -> bool:
     """S4: prospective-гейт публичным `gate-check --candidate` (steward#140).
 
@@ -747,12 +753,41 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         state.status = "stopped_gate"
         save(state)
         return False
+    # Гард GC-UNPINNED(prospective) поверх CLI (приёмка PR #101, major):
+    # stale-каскад gate-check исполняется только на status: approved
+    # артефактах, поэтому DRAFT-узел с объявленным ребром, но без пина
+    # upstream_hashes проходит CLI молча. Контракт конвейера — «пин в том же
+    # PR» (bundle_state; первый прогон WS-kapelle-47 встал именно на этом) —
+    # проверяем frontmatter канонических рёбер stdlib-ом: runner остаётся
+    # свободным от импорта steward.
+    local_findings: list[str] = []
+    for fname, upstream in (
+        ("10-requirements.md", "charter"),
+        ("15-behaviour-spec.md", "requirements"),
+    ):
+        path = Path(state.target_dir) / state.bundle_dir / fname
+        if not path.exists():
+            continue
+        front = _frontmatter(path.read_text(encoding="utf-8"))
+        declares = re.search(
+            rf"^\s*-\s+{upstream}\s*$|traces_to:.*\b{upstream}\b",
+            front, re.M,
+        )
+        pinned = "upstream_hashes:" in front and re.search(
+            rf"^\s+{upstream}:\s*\"?[0-9a-f]{{40}}", front, re.M
+        )
+        if declares and not pinned:
+            local_findings.append(
+                f"error GC-UNPINNED(prospective): {fname} — объявленное "
+                f"ребро {upstream} без пина upstream_hashes (пин обязан "
+                "ехать в том же PR)"
+            )
     # Гард вакуумного зелёного (боевой прогон kapelle#47): узел может быть
     # candidate_valid при НУЛЕ распознаваемых DSL-заголовков — гейту steward
     # нечего флагать, когда автор писал в своём диалекте (`### BS-*`/`REQ-*`),
     # и пустая по сути спека уплывала бы в PR зелёной. Файл читается только
     # если существует: отсутствие — территория required_absent выше.
-    dsl_empty: list[str] = []
+    dsl_empty: list[str] = list(local_findings)
     for fname, pattern, label in (
         ("10-requirements.md", r"^#### FR-\d", "FR-требований"),
         ("15-behaviour-spec.md", r"^#### BEH-\d", "BEH-сценариев"),
