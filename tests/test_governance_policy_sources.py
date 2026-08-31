@@ -20,9 +20,10 @@ from governance.policy_sources import (
 def test_safety_from_vendored_copy() -> None:
     s = load_safety("ai-prosto")
     assert isinstance(s, Safety)
-    # факт сегодняшней политики: флаг False, ai-prosto не в списках -> unknown
-    assert s.agent_merge_allowed is False
-    assert s.actor_class == "unknown"
+    # факт политики после пина steward@6a70d15 (steward PR #142): флаг True,
+    # ai-prosto в agent_identities -> agent
+    assert s.agent_merge_allowed is True
+    assert s.actor_class == "agent"
 
 
 def test_safety_integrity_mismatch_is_unknown(tmp_path: Path, monkeypatch) -> None:

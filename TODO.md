@@ -562,21 +562,31 @@
 - [x] Governance-ядро (этап A): пин steward + characterization, merge_gate, stale-адаптер, bundle_state @owner:github:andrei-shtanakov @id:behaviour-governance-core — спека docs/superpowers/specs/2026-08-30-behaviour-spec-pipeline-design.md (v4, GO); PR #87
 - [x] Runner + console (этап B): S0–S8, waiting_human_merge/merged_unverified, textual-TUI @owner:github:andrei-shtanakov @id:behaviour-runner — B1 PR #88, B2 PR #89
 - [x] inbox-issue в disputatio: режим полировки одиночного документа (OQ-1; спека называла --mode document) @owner:github:andrei-shtanakov @id:disp-document-mode-issue — заведён disputatio#52 (slug: single-document-polish-mode), 2026-08-31
-- [ ] Pin-bump вендоренной steward actor-policy (contracts/steward-actor-policy/v1) после появления github:ai-prosto в agent_identities — включает agent-мерж S7 runner'а @owner:github:andrei-shtanakov @id:behaviour-s7-actor-policy-pin-bump @blocked_by:steward#139
+- [x] Pin-bump вендоренной steward actor-policy (contracts/steward-actor-policy/v1) после появления github:ai-prosto в agent_identities — включает agent-мерж S7 runner'а @owner:github:andrei-shtanakov @id:behaviour-s7-actor-policy-pin-bump — PR этой ветки; steward#139 доставлен PR-ом steward#142 (merge 2c71ed7)
       Заведён 2026-08-31 вместе с inbox-issue steward#139 (slug:
-      agent-identities-ai-prosto). Сейчас ai-prosto → actor_class=unknown →
-      fail-closed: S7 всегда waiting_human_merge. Решение по
-      agent_merge_allowed — за владельцем steward; pin-bump подхватывает
-      любое значение осознанным PR-ом.
-- [ ] Мигрировать S4 runner'а с internal content-check API на публичный prospective-режим gate-check @owner:github:andrei-shtanakov @id:behaviour-s4-candidate-mode-migration @blocked_by:steward#140
+      agent-identities-ai-prosto). Steward доставил в тот же день И включил
+      agent_merge_allowed: true; перепин на steward@6a70d15ba58 даёт
+      Safety(agent_merge_allowed=True, actor_class='agent') — S7 мержит
+      document-PR сам; authority-root и fail-closed evidence — по-прежнему
+      человек (ADR-ECO-011).
+- [ ] Мигрировать S4 runner'а с internal content-check API на публичный prospective-режим gate-check @owner:github:andrei-shtanakov @id:behaviour-s4-candidate-mode-migration
       Заведён 2026-08-31 вместе с inbox-issue steward#140 (slug:
-      gate-check-candidate-mode). Обходной путь — три пинованных символа
-      steward (collect_bundle / check_behaviour_spec / build_trace_matrix,
-      спека §3); миграция снимет зависимость от внутренней структуры пакета.
-- [ ] Включить авто-опровержение ложного класса «файлов нет» в S6 runner'а по машинному типу находки кита @owner:github:andrei-shtanakov @id:behaviour-s6-file-missing-auto-refute @blocked_by:steward#141
+      gate-check-candidate-mode). ОЖИДАНИЕ ДОСТАВЛЕНО тем же днём (steward
+      PR #142, merge 2c71ed7): candidate-режим появился (blob_hash_of —
+      SHA-1-формат; arch-policy.yaml в candidate-режиме обязателен) — тег
+      @blocked_by снят, пункт actionable. Обходной путь — три пинованных
+      символа steward (collect_bundle / check_behaviour_spec /
+      build_trace_matrix, спека §3); миграция снимет зависимость от
+      внутренней структуры пакета. Требует бампа ПАКЕТНОГО пина steward
+      (pyproject rev 4a1c7c44) — отдельным осознанным PR-ом с прогоном
+      characterization-сьюта.
+- [ ] Включить авто-опровержение ложного класса «файлов нет» в S6 runner'а по машинному типу находки кита @owner:github:andrei-shtanakov @id:behaviour-s6-file-missing-auto-refute
       Заведён 2026-08-31 вместе с inbox-issue steward#141 (slug:
-      review-kit-file-missing-finding-type). До машинного типа находки
-      runner останавливается на человеке с evidence-подсказкой
+      review-kit-file-missing-finding-type). ОЖИДАНИЕ ДОСТАВЛЕНО тем же
+      днём (steward PR #142: file-missing kind в вердикте, line:0) — тег
+      @blocked_by снят, пункт actionable; включение требует ре-вендора
+      fp-кита review до версии с типом находки. До включения runner
+      останавливается на человеке с evidence-подсказкой
       `git cat-file -e <head>:<путь>` (спека §7) — это штатный режим.
 - [ ] Переключить авторинг behaviour-узла с `disp run --mode develop` на режим полировки одиночного документа @owner:github:andrei-shtanakov @id:behaviour-authoring-document-mode @blocked_by:disputatio#52
       Заведён 2026-08-31 вместе с inbox-issue disputatio#52 (slug:
