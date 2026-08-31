@@ -1029,6 +1029,9 @@ def _step_review(state: RunState, ops: Ops) -> bool:
                     state.ops.pop("push", None)
                     state.ops.pop("ready", None)
                     state.ops.pop(key, None)
+                    # Новая голова = новый ревью-цикл: попытка
+                    # авто-опровержения возвращается (приёмка PR #102, круг 2).
+                    state.ops.pop("review-refute", None)
                     save(state)
                     return False
         _stop_with_comment(
@@ -1051,6 +1054,7 @@ def _step_review(state: RunState, ops: Ops) -> bool:
     state.ops.pop("push", None)
     state.ops.pop("ready", None)
     state.ops.pop(key, None)
+    state.ops.pop("review-refute", None)
     save(state)
     return False
 

@@ -2441,3 +2441,19 @@ def test_review_fresh_instrument_failure_routed_honestly(
 
     assert state.status == "stopped_review"
     assert any("прибор не отработал" in c for c in ops.comments)
+
+
+def test_head_move_after_refute_restores_attempt(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Приёмка PR #102, круг 2: fresh exit 4 (голова уехала) сбрасывает и
+    review-refute — новый цикл получает свежую авто-попытку."""
+    ops = FakeOps(
+        review_exit=1, review_fresh_exit=4, review_body=_FM_BODY,
+        existing_files={"governance/foo.py"},
+        facts=GREEN_PR_FACTS,
+    )
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-head", ops))
+
+    assert "review-refute" not in state.ops
+    assert "review" not in state.ops  # весь цикл переигрывается
