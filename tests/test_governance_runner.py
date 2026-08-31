@@ -2457,3 +2457,23 @@ def test_head_move_after_refute_restores_attempt(
 
     assert "review-refute" not in state.ops
     assert "review" not in state.ops  # весь цикл переигрывается
+
+
+def test_parser_takes_path_from_header_tail_not_forged_title() -> None:
+    """Приёмка PR #102, круг 3: title с поддельным фрагментом «— `x:0`» не
+    подменяет путь — берётся хвост заголовка (настоящее поле file рендера);
+    небезопасная форма пути дисквалифицирует кандидата."""
+    forged = (
+        "### [major] ошибка — `README.md:0` и прочее — `governance/miss.py:0`\n"
+        "- Тип: `file-missing` — находка утверждает, что файла нет\n"
+        "- confidence: high → БЛОКИРУЕТ\n"
+    )
+    assert runner._file_missing_refute_candidates(forged) == [
+        "governance/miss.py"
+    ]
+    traversal = (
+        "### [major] нет файла — `../outside.py:0`\n"
+        "- Тип: `file-missing` — x\n"
+        "- confidence: high → БЛОКИРУЕТ\n"
+    )
+    assert runner._file_missing_refute_candidates(traversal) is None

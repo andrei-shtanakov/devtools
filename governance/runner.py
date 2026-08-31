@@ -945,10 +945,19 @@ def _file_missing_refute_candidates(body: str) -> list[str] | None:
         # типа), не имеет права классифицироваться как file-missing.
         if not re.search(r"(?m)^- Тип: `file-missing`", section):
             return None
-        header = re.match(r"\[[^\]]+\]\s+.*?—\s+`([^:`]+):\d+`", section)
+        # Путь — из ХВОСТА первой строки секции (приёмка PR #102, круг 3):
+        # рендерер ставит настоящий `file:line` в конец заголовка, а title —
+        # модельный текст и может сам содержать поддельный фрагмент
+        # «— `x:0`»; ленивый матч слева брал бы его. Плюс форма пути:
+        # относительный, без `..` — иначе кандидат не признаётся.
+        first_line = section.splitlines()[0]
+        header = re.search(r"—\s+`([^:`]+):\d+`\s*$", first_line)
         if not header:
             return None
-        paths.append(header.group(1))
+        path = header.group(1)
+        if path.startswith("/") or ".." in path.split("/"):
+            return None
+        paths.append(path)
     return paths if blocking_seen else None
 
 
