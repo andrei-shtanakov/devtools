@@ -386,3 +386,101 @@ def test_main_returns_2_when_plan_fields_unavailable(
         ["issue_console.py", "--root", str(root), "--input", str(fixture),
          "--json"])
     assert issue_console.main() == 2
+
+
+def _replace_issue(**overrides) -> issue_console.Issue:
+    from dataclasses import replace
+
+    return replace(_issue(), **overrides)
+
+
+def test_launch_behaviour_builds_runner_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _fleet(tmp_path)
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        calls.append((list(cmd), kwargs))
+        if cmd[:2] == ["tmux", "has-session"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(issue_console.subprocess, "run", fake_run)
+    status = issue_console.launch_behaviour(
+        _issue(repo="alpha", number=7), root
+    )
+    assert status == "started beh-issue-alpha-7"
+    has_session = next(c for c, _ in calls if c[:2] == ["tmux", "has-session"])
+    assert has_session[-1] == "=beh-issue-alpha-7"
+    new_session, _kwargs = next(
+        (c, k) for c, k in calls if c[:2] == ["tmux", "new-session"]
+    )
+    # рабочая директория tmux-сессии — devtools (там uv-проект runner'а)
+    cwd_idx = new_session.index("-c") + 1
+    assert new_session[cwd_idx] == str(issue_console.DEVTOOLS_ROOT)
+    shell_cmd = new_session[-1]
+    assert "governance.runner" in shell_cmd
+    assert "start" in shell_cmd
+    assert "--subject" in shell_cmd
+    assert "alpha#7" in shell_cmd          # subject несёт ссылку на issue
+    assert "--ws-id WS-alpha-7" in shell_cmd
+    assert "--repo-slug owner/alpha" in shell_cmd
+    assert str(root / "alpha") in shell_cmd  # target-dir — локальный клон
+
+
+def test_launch_behaviour_existing_session_hint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _fleet(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        calls.append(list(cmd))
+        if cmd[:2] == ["tmux", "has-session"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"неожиданная команда: {cmd}")
+
+    monkeypatch.setattr(issue_console.subprocess, "run", fake_run)
+    status = issue_console.launch_behaviour(
+        _issue(repo="alpha", number=7), root
+    )
+    assert status == "exists: tmux attach -t =beh-issue-alpha-7"
+    assert not any(c[:2] == ["tmux", "new-session"] for c in calls)
+
+
+def test_launch_behaviour_rejects_external_initiator(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Внешний инициатор — сперва человеческий triage, конвейер не стартует."""
+    root = _fleet(tmp_path)
+
+    def fail_run(cmd, **kwargs):  # tmux/git не должны вызываться вовсе
+        if cmd[0] == "git":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"неожиданная команда: {cmd}")
+
+    monkeypatch.setattr(issue_console.subprocess, "run", fail_run)
+    import pytest
+
+    with pytest.raises(RuntimeError, match="external"):
+        issue_console.launch_behaviour(
+            _replace_issue(internal=False), root
+        )
+
+
+def test_launch_behaviour_missing_clone(tmp_path: Path, monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(issue_console.subprocess, "run", fake_run)
+    import pytest
+
+    with pytest.raises(RuntimeError, match="clone"):
+        issue_console.launch_behaviour(
+            _issue(repo="ghost", number=1), tmp_path
+        )

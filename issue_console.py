@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover - защита запуска вне uv-
 import issue_classify
 
 OUT_ROOT = Path(__file__).resolve().parent / "out"
+DEVTOOLS_ROOT = Path(__file__).resolve().parent
 
 # Потолок GitHub search API (см. inbox.py SEARCH_LIMIT): больше запросить
 # нельзя, достижение = ответ может быть неполным.
@@ -49,6 +50,56 @@ KIND_WORDS = {
     "research": ("research", "discovery", "investigat", "исслед", "сравн", "explore"),
     "code": ("feature", "implement", "add ", "новый код", "реализ", "поддержк"),
 }
+
+
+def launch_behaviour(issue: Issue, root: Path) -> str:
+    """Мост «issue → behaviour-run»: одна tmux-сессия конвейера на issue.
+
+    Запускает governance-runner (S0–S8) с предметом из issue: subject —
+    заголовок + `repo#N`, ws-id — детерминированный `WS-<repo>-<N>`,
+    target — локальный клон репо issue. Только internal-инициатор:
+    конвейер откроет PR в целевом репо, внешняя идея сперва проходит
+    человеческий triage (та же ось политики, что у issue_worker).
+    """
+    if not issue.internal:
+        raise RuntimeError(
+            "external initiator — сперва человеческий triage, "
+            "конвейер не стартует"
+        )
+    repo_path = resolve_clone(discover_repos(root), issue.owner, issue.repo)
+    if repo_path is None:
+        raise RuntimeError(
+            f"local clone for {issue.owner}/{issue.repo} not found"
+        )
+    session = re.sub(
+        r"[^a-zA-Z0-9_-]", "-", f"beh-issue-{issue.repo}-{issue.number}"
+    )[:80]
+    target = f"={session}"
+    exists = subprocess.run(
+        ["tmux", "has-session", "-t", target], capture_output=True, text=True
+    )
+    if exists.returncode == 0:
+        return f"exists: tmux attach -t {target}"
+    cmd = [
+        "uv", "run", "--frozen", "--group", "governance",
+        "python", "-m", "governance.runner", "start",
+        "--subject", f"{issue.title} ({issue.key})",
+        "--repo", issue.repo,
+        "--repo-slug", f"{issue.owner}/{issue.repo}",
+        "--ws-id", f"WS-{issue.repo}-{issue.number}",
+        "--target-dir", str(repo_path),
+    ]
+    shell_cmd = (
+        " ".join(shlex.quote(part) for part in cmd) + "; exec ${SHELL:-/bin/sh}"
+    )
+    done = subprocess.run(
+        ["tmux", "new-session", "-d", "-s", session,
+         "-c", str(DEVTOOLS_ROOT), shell_cmd],
+        capture_output=True, text=True,
+    )
+    if done.returncode:
+        raise RuntimeError(done.stderr.strip() or "tmux failed")
+    return f"started {session}"
 
 
 def resolve_internal(flags: list[str]) -> set[str]:
@@ -322,7 +373,10 @@ def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:
     cursor = 0
     mode_group = "date"
     mode = "plan"
-    status = "space select · g group · x plan/execute · enter launch · q quit"
+    status = (
+        "space select · g group · x plan/execute · enter launch · "
+        "b behaviour-run · q quit"
+    )
     while True:
         ordered = sort_issues(issues, mode_group)
         cursor = min(cursor, max(0, len(ordered) - 1))
@@ -392,6 +446,18 @@ def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:
                     errors.append(f"{issue.key}: {exc}")
             error_suffix = f"; errors: {'; '.join(errors)}" if errors else ""
             status = f"launched: {', '.join(launched) or '-'}" + error_suffix
+            selected.clear()
+        elif key == ord("b") and selected:
+            launched, errors = [], []
+            for issue in ordered:
+                if issue.key not in selected:
+                    continue
+                try:
+                    launched.append(launch_behaviour(issue, root))
+                except Exception as exc:  # UI boundary: show other launches too
+                    errors.append(f"{issue.key}: {exc}")
+            error_suffix = f"; errors: {'; '.join(errors)}" if errors else ""
+            status = f"behaviour: {', '.join(launched) or '-'}" + error_suffix
             selected.clear()
 
 
