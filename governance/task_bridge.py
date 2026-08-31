@@ -212,7 +212,7 @@ def deliver(
         branch,
         f"spec: {ws_id} tasks (draft) — {subject}",
         body,
-        "codex-review",
+        "",
     )
 
 
