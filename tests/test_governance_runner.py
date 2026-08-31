@@ -14,6 +14,7 @@ pytest.importorskip("steward")
 
 from governance import bundle_state, merge_gate, runner
 from governance import run_state as rs
+from governance.stale_adapter import blob_sha1
 from tests.governance_fixtures.bundles import make_bundle, make_profile
 
 GREEN_PR_FACTS: dict[str, Any] = {
@@ -44,6 +45,8 @@ class FakeOps:
     head: str = "deadbeef"
     s8_exit: int = 0
     s8_output: str = ""
+    # Очередь ответов S4 `gate_check_candidate`; пустая/исчерпанная -> (0, "")
+    gate_candidate: list[tuple[int, str]] = field(default_factory=list)
     find_pr_error: str | None = None
     dirty: bool = False
     checkout_and_pull_error: str | None = None
@@ -154,6 +157,14 @@ class FakeOps:
         self.author_disp_calls.append((target_dir, task))
         return self.author_disp_exit
 
+    def gate_check_candidate(
+        self, target_dir: str, bundle_dir: str, profile: str
+    ) -> tuple[int, str]:
+        self.calls.append(("gate_check_candidate", bundle_dir))
+        if self.gate_candidate:
+            return self.gate_candidate.pop(0)
+        return (0, "")
+
     def gate_check_s8(
         self, target_dir: str, bundle_dir: str, profile: str
     ) -> tuple[int, str]:
@@ -211,7 +222,6 @@ def test_happy_path_agent_merge(tmp_path: Path, runs_root, monkeypatch) -> None:
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
     state = runner.start(**_start_kwargs(tmp_path, "r-happy", ops))
@@ -223,7 +233,6 @@ def test_happy_path_agent_merge(tmp_path: Path, runs_root, monkeypatch) -> None:
 def test_today_reality_agent_merges(tmp_path: Path, runs_root, monkeypatch) -> None:
     """Без monkeypatch safety: вендоренная копия @ steward 6a70d15 —
     allowed=True, ai-prosto=agent → зелёный document-PR мержится агентом."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
@@ -239,7 +248,6 @@ def test_merge_authority_human_still_waits(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Run-override merge_authority=human обгоняет разрешающую safety."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
     state = runner.start(
@@ -253,7 +261,6 @@ def test_merge_authority_human_still_waits(
 
 
 def test_review_request_changes_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=1)
 
     state = runner.start(**_start_kwargs(tmp_path, "r-review", ops))
@@ -280,7 +287,7 @@ def test_resume_does_not_duplicate_pr(tmp_path: Path, runs_root) -> None:
         "author-requirements": {"status": "completed", "skipped": True},
         "author-behaviour": {"status": "completed", "skipped": True},
         "gate-candidate": {
-            "status": "completed", "error_count": 0, "required_absent": [],
+            "status": "completed", "exit": 0,
         },
         "push": {"status": "completed"},
         "pr": {"status": "started"},
@@ -297,12 +304,7 @@ def test_resume_does_not_duplicate_pr(tmp_path: Path, runs_root) -> None:
 
 
 def test_gate_red_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
-    red_bundle = bundle_state.BundleState(
-        (bundle_state.NodeState("charter", "draft", ("error GC-X: bad",)),),
-        2, None, (), (),
-    )
-    monkeypatch.setattr(runner, "candidate_state", lambda profile, bundle: red_bundle)
-    ops = FakeOps()
+    ops = FakeOps(gate_candidate=[(1, "error GC-X: bad\n")])
 
     state = runner.start(**_start_kwargs(tmp_path, "r-gate", ops))
 
@@ -325,7 +327,6 @@ def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> 
     (bundle_dir / "15-behaviour-spec.md").write_text(
         "# behaviour\n", encoding="utf-8"
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
 
     state = runner.start(**kwargs)
 
@@ -366,7 +367,6 @@ def test_s8_success_completes(tmp_path: Path, runs_root, monkeypatch) -> None:
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
@@ -385,7 +385,6 @@ def test_s8_fail_marks_merged_unverified_and_opens_issue(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -460,7 +459,7 @@ def test_resume_after_death_between_create_issue_and_op_complete_reuses_issue(
         "author-behaviour": {"status": "completed", "skipped": True},
         "commit": {"status": "completed"},
         "gate-candidate": {
-            "status": "completed", "error_count": 0, "required_absent": [],
+            "status": "completed", "exit": 0,
         },
         "push": {"status": "completed"},
         "pr": {"status": "completed", "number": 100},
@@ -510,7 +509,6 @@ def test_s8_fail_does_not_reuse_issue_from_different_cycle(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -550,7 +548,6 @@ def test_verify_child_reuses_parent_remediation_issue_same_cycle(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -577,7 +574,6 @@ def test_verify_child_completes_parent_stays_merged_unverified(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -613,7 +609,6 @@ def test_verify_refuses_when_parent_already_has_green_child(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -642,7 +637,6 @@ def test_verify_allowed_again_after_failed_child(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -677,7 +671,6 @@ def test_verify_without_run_id_serializes_when_ids_collide(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -716,7 +709,6 @@ def test_next_verify_run_id_skips_dangling_reservation(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -757,7 +749,6 @@ def test_verify_refuses_when_child_is_running(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -793,7 +784,6 @@ def test_verify_refuses_when_dangling_reservation_is_fresh(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -821,7 +811,6 @@ def test_active_verify_child_ignores_merged_unverified_child(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -850,7 +839,6 @@ def test_verify_without_run_id_increments_attempt_after_failed_child(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -873,7 +861,6 @@ def test_resume_waiting_human_merge_open_still_waits(
 ) -> None:
     """merge_authority=human (safety с пина 6a70d15 разрешает агентский
     мерж, ждущее состояние достигается run-override-ом)."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=0, facts=dict(GREEN_PR_FACTS), files=GREEN_BUNDLE_FILES)
     run_id = "r-resume-open"
 
@@ -891,7 +878,6 @@ def test_resume_waiting_human_merge_open_still_waits(
 def test_resume_waiting_human_merge_merged_runs_s8(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=dict(GREEN_PR_FACTS), files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
@@ -981,18 +967,7 @@ def test_resume_from_stopped_gate_reruns_gate_candidate(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """F-1: resume из stopped_gate переигрывает S4, не остаётся no-op'ом."""
-    calls_n = {"n": 0}
-    red_bundle = bundle_state.BundleState(
-        (bundle_state.NodeState("charter", "draft", ("error GC-X: bad",)),),
-        1, None, (), (),
-    )
-
-    def _candidate(profile, bundle):
-        calls_n["n"] += 1
-        return red_bundle if calls_n["n"] == 1 else _green_bundle(profile, bundle)
-
-    monkeypatch.setattr(runner, "candidate_state", _candidate)
-    ops = FakeOps()
+    ops = FakeOps(gate_candidate=[(1, "error GC-X: bad\n"), (0, "")])
     run_id = "r-resume-gate"
 
     state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
@@ -1000,7 +975,8 @@ def test_resume_from_stopped_gate_reruns_gate_candidate(
 
     result = runner.resume(run_id, ops)
 
-    assert calls_n["n"] == 2  # S4 реально переигран, не пропущен
+    gate_calls = [c for c in ops.calls if c[0] == "gate_check_candidate"]
+    assert len(gate_calls) == 2  # S4 реально переигран, не пропущен
     assert result.status != "stopped_gate"
     assert result.ops["gate-candidate"]["status"] == "completed"
 
@@ -1013,18 +989,10 @@ def test_resume_from_stopped_gate_recommits_edited_bundle(
     мог поправить бандл в worktree между стопом и resume, и старый `commit`
     (уже `completed` с первого прохода — конвейер коммитит ДО гейта) не
     должен уехать в PR со СТАРЫМ, докоррекционным деревом."""
-    calls_n = {"n": 0}
-    red_bundle = bundle_state.BundleState(
-        (bundle_state.NodeState("charter", "draft", ("error GC-X: bad",)),),
-        1, None, (), (),
+    ops = FakeOps(
+        gate_candidate=[(1, "error GC-X: bad\n"), (0, "")],
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
     )
-
-    def _candidate(profile, bundle):
-        calls_n["n"] += 1
-        return red_bundle if calls_n["n"] == 1 else _green_bundle(profile, bundle)
-
-    monkeypatch.setattr(runner, "candidate_state", _candidate)
-    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-resume-gate-recommit"
 
     state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
@@ -1048,7 +1016,7 @@ def test_resume_from_stopped_gate_recommits_edited_bundle(
     assert "commit_paths" in new_calls  # новый коммит, не пропущен по кэшу
     assert "push_branch" in new_calls
     assert new_calls.index("commit_paths") < new_calls.index("push_branch")
-    assert calls_n["n"] == 2  # гейт реально переигран на отредактированном бандле
+    assert new_calls.count("gate_check_candidate") == 1  # гейт переигран
     assert result.status != "stopped_gate"
     assert result.ops["gate-candidate"]["status"] == "completed"
     committed_paths = [paths for _t, paths, _m in ops.committed]
@@ -1059,7 +1027,6 @@ def test_resume_from_stopped_review_reruns_ready_and_review(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """F-1: resume из stopped_review переигрывает ready+review."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=1)
     run_id = "r-resume-review"
 
@@ -1084,20 +1051,14 @@ def test_resume_from_stopped_review_recommits_edited_bundle(
     — человек мог отработать находки ревью правкой бандла; старый коммит
     (уже `completed` с первого прохода) не должен уехать дальше со старым
     деревом."""
-    calls_n = {"n": 0}
-
-    def _candidate(profile, bundle):
-        calls_n["n"] += 1
-        return _green_bundle(profile, bundle)
-
-    monkeypatch.setattr(runner, "candidate_state", _candidate)
     ops = FakeOps(review_exit=1)
     run_id = "r-resume-review-recommit"
 
     state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
     assert state.status == "stopped_review"
     assert state.ops["commit"]["status"] == "completed"
-    assert calls_n["n"] == 1  # candidate_state уже прогнан на первом проходе
+    gate_first = [c for c in ops.calls if c[0] == "gate_check_candidate"]
+    assert len(gate_first) == 1  # гейт уже прогнан на первом проходе
     calls_before_resume = len(ops.calls)
 
     # Человек правит бандл в worktree, отрабатывая находки ревью.
@@ -1113,7 +1074,7 @@ def test_resume_from_stopped_review_recommits_edited_bundle(
     assert "commit_paths" in new_calls  # новый коммит, не пропущен по кэшу
     assert "push_branch" in new_calls
     assert new_calls.index("commit_paths") < new_calls.index("push_branch")
-    assert calls_n["n"] == 2  # gate-candidate реально переигран, не кэш
+    assert new_calls.count("gate_check_candidate") == 1  # переигран, не кэш
     assert result.status != "stopped_review"
     assert result.ops["review"]["status"] == "completed"
     assert result.ops["gate-candidate"]["status"] == "completed"
@@ -1123,7 +1084,6 @@ def test_resume_from_stopped_author_reruns_unfinished_author(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """F-1: resume из stopped_author переигрывает незавершённый author-*."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     original_author = ops.author
     fail_once = {"on": True}
@@ -1156,7 +1116,6 @@ def test_verdict_refuse_status_is_distinct_from_stopped_gate(
 ) -> None:
     """M-1: S7 `refuse` получает свой статус, не путается с S4 stopped_gate —
     у них разные причины и разная починка."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0,
         facts={**GREEN_PR_FACTS, "statusCheckRollup": [{"conclusion": "FAILURE"}]},
@@ -1177,7 +1136,6 @@ def test_resume_from_stopped_merge_refused_reverdicts(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0,
         facts={**GREEN_PR_FACTS, "statusCheckRollup": [{"conclusion": "FAILURE"}]},
@@ -1231,7 +1189,7 @@ def test_stale_cached_agent_verdict_does_not_merge_on_fresh_red_facts(
         "author-behaviour": {"status": "completed", "skipped": True},
         "commit": {"status": "completed"},
         "gate-candidate": {
-            "status": "completed", "error_count": 0, "required_absent": [],
+            "status": "completed", "exit": 0,
         },
         "push": {"status": "completed"},
         "pr": {"status": "completed", "number": 100},
@@ -1274,7 +1232,7 @@ def test_pr_reconciliation_find_pr_failure_stops_without_duplicate(
         "author-behaviour": {"status": "completed", "skipped": True},
         "commit": {"status": "completed"},
         "gate-candidate": {
-            "status": "completed", "error_count": 0, "required_absent": [],
+            "status": "completed", "exit": 0,
         },
         "push": {"status": "completed"},
         "pr": {"status": "started"},
@@ -1296,7 +1254,6 @@ def test_commit_paths_called_between_author_and_push(
 ) -> None:
     """F-6: `ops.commit_paths` вызывается между авторингом и push, только с
     `bundle_dir` (круг 5: не `git add -A`, явный список путей)."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
     state = runner.start(**_start_kwargs(tmp_path, "r-commit", ops))
@@ -1318,7 +1275,6 @@ def test_review_exit4_resets_gate_candidate_and_push_too(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """F-7: голова PR уехала (exit 4) — S4 обязан переиграться, не только S6."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=4)
 
     state = runner.start(**_start_kwargs(tmp_path, "r-review-moved", ops))
@@ -1331,19 +1287,31 @@ def test_review_exit4_resets_gate_candidate_and_push_too(
     assert state.ops["pr"]["status"] == "completed"  # PR не переоткрывается
 
 
-# --- F-4: шов runner ↔ bundle_state, без мока candidate_state ---------------
+# --- F-4 → CLI: шов runner ↔ gate-check --candidate, без мока ---------------
 
 
 def test_gate_seam_required_absent_blocks_without_mock(
     tmp_path: Path, runs_root,
 ) -> None:
-    """F-4: интеграционный тест шва — реальный `candidate_state`, не мок.
+    """F-4 после миграции S4: интеграционный тест шва — РЕАЛЬНЫЙ
+    `gate-check --candidate` (публичный CLI steward#140), не мок.
 
-    Хороший бандл (оба обязательных узла присутствуют и валидны) проходит S4
-    зелёным; бандл без единого frontmatter-узла (``required_absent``
-    непустой, ``error_count == 0``) обязан остановить S4, а не пройти
-    насквозь.
+    Хороший бандл проходит S4 зелёным; бандл без единого frontmatter-узла
+    обязан остановить S4 (GC-COMPLETENESS у CLI), а не пройти насквозь.
     """
+    from governance.ops import DEVTOOLS_ROOT, RealOps
+
+    if not (DEVTOOLS_ROOT / ".venv" / "bin" / "gate-check").exists():
+        pytest.skip("gate-check CLI недоступен (uv sync без группы governance)")
+
+    class CliGateOps(FakeOps):
+        def gate_check_candidate(
+            self, target_dir: str, bundle_dir: str, profile: str
+        ) -> tuple[int, str]:
+            self.calls.append(("gate_check_candidate", bundle_dir))
+            return RealOps().gate_check_candidate(
+                target_dir, bundle_dir, profile
+            )
 
     def _run_to_gate(run_id: str, build_bundle) -> rs.RunState:
         target_dir = tmp_path / run_id
@@ -1364,7 +1332,7 @@ def test_gate_seam_required_absent_blocks_without_mock(
             "commit": {"status": "completed"},
         }
         rs.save(state)
-        return runner.advance(state, FakeOps())
+        return runner.advance(state, CliGateOps())
 
     good_result = _run_to_gate(
         "r-gate-good-seam", lambda d: make_bundle(d, behaviour_ok=True),
@@ -1382,7 +1350,7 @@ def test_gate_seam_required_absent_blocks_without_mock(
     assert red_result.status == "stopped_gate"
     findings_file = rs.run_dir("r-gate-empty-seam") / "gate-findings.txt"
     assert findings_file.exists()
-    assert "GC-REQUIRED-ABSENT" in findings_file.read_text(encoding="utf-8")
+    assert "GC-COMPLETENESS" in findings_file.read_text(encoding="utf-8")
 
 
 # --- M-2: s8-findings.txt несёт вывод gate-check, не только код -------------
@@ -1395,7 +1363,6 @@ def test_s8_findings_include_gate_check_output(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=1, s8_output="error GC-BEH-TRACE: BEH-01 не трейсит ничего\n",
@@ -1421,7 +1388,6 @@ def test_start_with_existing_run_id_raises_and_does_not_overwrite(
     перезаписывала `run.json` (`os.replace` — атомарно, но без проверки
     занятости) — уничтожение чужого леджера. Отказ ДО каких-либо эффектов;
     существующий файл не тронут ни байтом."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     run_id = "r-taken"
     kwargs = _start_kwargs(tmp_path, run_id, FakeOps())
     original = runner.start(**kwargs)
@@ -1464,7 +1430,6 @@ def test_verify_with_existing_run_id_raises(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -1505,7 +1470,6 @@ def test_s8_syncs_to_default_branch_before_gate_check(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts={**GREEN_PR_FACTS, "baseRefName": "main"},
         files=GREEN_BUNDLE_FILES, s8_exit=0,
@@ -1528,7 +1492,6 @@ def test_s8_sync_falls_back_to_master_when_base_ref_missing(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts={**GREEN_PR_FACTS, "baseRefName": ""},
         files=GREEN_BUNDLE_FILES, s8_exit=0,
@@ -1552,7 +1515,6 @@ def test_s8_sync_failure_stops_without_touching_status_or_gate(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         checkout_and_pull_error="ff-only diverged",
@@ -1572,7 +1534,6 @@ def test_verify_child_reuses_parent_base_ref(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts={**GREEN_PR_FACTS, "baseRefName": "main"},
         files=GREEN_BUNDLE_FILES, s8_exit=1,
@@ -1615,7 +1576,6 @@ def test_resume_after_cleanup_from_stopped_dirty_proceeds(
 ) -> None:
     """Resume после ручной очистки — `branch` так и не стартовала, проверка
     просто повторяется и на этот раз проходит."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         dirty=True, review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
     )
@@ -1641,7 +1601,6 @@ def test_start_blocked_by_merged_unverified_without_green_child(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -1668,7 +1627,6 @@ def test_start_unblocked_after_verify_child_completes(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -1693,7 +1651,6 @@ def test_start_broken_neighbor_run_json_is_skipped(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Битый (не-JSON) `run.json` среди соседей не мешает обходу WS-lock."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     broken_dir = rs.run_dir("r-broken-neighbor")
     broken_dir.mkdir(parents=True)
     (broken_dir / "run.json").write_text("not json at all", encoding="utf-8")
@@ -1716,7 +1673,7 @@ def _s8_preset_ops(**gate_authoritative: object) -> dict:
         "author-behaviour": {"status": "completed", "skipped": True},
         "commit": {"status": "completed"},
         "gate-candidate": {
-            "status": "completed", "error_count": 0, "required_absent": [],
+            "status": "completed", "exit": 0,
         },
         "push": {"status": "completed"},
         "pr": {"status": "completed", "number": 100},
@@ -1904,7 +1861,6 @@ def test_stop_with_comment_saves_status_before_commenting(
     этот же шаг с нуля, включая повторный (дублирующий) комментарий.
     Проверка через "шпиона": `ops.comment`, вызванный, читает `run.json` с
     диска в момент своего вызова — статус там уже обязан быть терминальным."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=1)
     run_id = "r-comment-order"
     seen_status_at_comment_time: dict[str, str] = {}
@@ -1930,7 +1886,6 @@ def test_resume_from_stopped_review_does_not_repost_comment_when_fixed(
     Комментарий — часть самого стоп-пути (`_stop_with_comment` в
     `_step_review`), не безусловный побочный эффект `resume()` — он
     срабатывает, только если review реально проваливается СНОВА."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=1)
     run_id = "r-comment-no-repost"
 
@@ -1996,7 +1951,6 @@ def test_stop_review_comment_includes_evidence_hint(
     """Спека §7: стоп-комментарий S6 (exit 1) дополняется evidence-подсказкой
     про известный ложный класс находок «файлов нет» — `git cat-file -e
     <head>:<путь>` с реальной подставленной головой."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=1)
     run_id = "r-review-evidence"
 
@@ -2017,7 +1971,6 @@ def test_stop_review_comment_survives_head_sha_failure(
     должна превращаться в необработанное исключение вместо
     comment+`stopped_review` — сбой глотается, в подсказку идёт литерал
     `<head>`."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=1, head_sha_error="fatal: bad revision")
     run_id = "r-review-evidence-head-fails"
 
@@ -2036,7 +1989,6 @@ def test_default_author_backend_is_codex_author_disp_not_called(
 ) -> None:
     """Дефолт `author_backend="codex"` не меняет поведение B1: все три узла
     идут через `ops.author`, `ops.author_disp` не вызывается вовсе."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
     state = runner.start(**_start_kwargs(tmp_path, "r-disp-default", ops))
@@ -2052,7 +2004,6 @@ def test_disp_backend_used_only_for_behaviour_node(
     """`author_backend="disp"` переключает ТОЛЬКО behaviour-spec узел на
     `ops.author_disp`; charter/requirements остаются на `ops.author` (codex)
     — disp-цикл осмыслен только для полируемого документа."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-disp-behaviour"
 
@@ -2102,7 +2053,6 @@ def test_gate_stops_on_dsl_empty_bundle(
 ) -> None:
     """Гард GC-DSL-EMPTY (боевой прогон kapelle#47): candidate_valid при нуле
     распознаваемых DSL-заголовков — стоп, а не вакуумный зелёный."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
 
     class DialectOps(FakeOps):
         def author(
@@ -2129,7 +2079,6 @@ def test_rollup_unstable_failure_still_refuses(
     """Любой FAILURE = red даже при mergeStateStatus=UNSTABLE (приёмка
     PR #99): в rulesets флота нет required-чеков, UNSTABLE означает «упало
     что угодно, хоть тесты» — поблажка мержила бы агентом красный test."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     facts = {
         **GREEN_PR_FACTS,
         "statusCheckRollup": [
@@ -2147,7 +2096,6 @@ def test_rollup_unstable_failure_still_refuses(
 def test_rollup_red_blocked_still_refuses(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     facts = {
         **GREEN_PR_FACTS,
         "statusCheckRollup": [{"conclusion": "FAILURE"}],
@@ -2165,7 +2113,6 @@ def test_resume_merge_refused_after_human_merge_runs_s8(
 ) -> None:
     """Reconciliation refuse→merged (боевой прогон kapelle#51): человек
     смержил отказанный PR — resume фиксирует мерж и гонит S8."""
-    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     facts = {
         **GREEN_PR_FACTS,
         "statusCheckRollup": [{"conclusion": "FAILURE"}],
@@ -2184,3 +2131,178 @@ def test_resume_merge_refused_after_human_merge_runs_s8(
     assert result.ops["merge"] == {"status": "completed", "merged": True}
     assert result.ops["gate-authoritative"]["status"] == "completed"
     assert result.status == "completed"
+
+
+def test_gate_unpinned_draft_edge_stops_locally(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Гард GC-UNPINNED(prospective) поверх CLI (приёмка PR #101, major):
+    stale-каскад gate-check живёт только на approved — draft-узел с
+    объявленным ребром без пина upstream_hashes обязан стопить S4 локально,
+    даже когда CLI вернул 0."""
+
+    class UnpinnedAuthorOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "behaviour-spec":
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: behaviour-spec\n"
+                    "status: draft\n"
+                    "traces_to:\n  - requirements\n"
+                    "---\n"
+                    "#### BEH-01: x\n`traces: [FR-01]`\n"
+                    "- **checked_by**: x\n"
+                )
+            return rc
+
+    ops = UnpinnedAuthorOps(facts=GREEN_PR_FACTS)  # CLI-гейт (FakeOps) даёт 0
+    state = runner.start(**_start_kwargs(tmp_path, "r-unpinned", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (runner.run_dir("r-unpinned") / "gate-findings.txt").read_text()
+    assert "GC-UNPINNED" in findings and "requirements" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_pinned_draft_edge_passes_local_guard(
+    tmp_path: Path, runs_root,
+) -> None:
+    class PinnedAuthorOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "behaviour-spec":
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: behaviour-spec\n"
+                    "status: draft\n"
+                    "traces_to:\n  - requirements\n"
+                    "upstream_hashes:\n"
+                    '  requirements: "'
+                    + blob_sha1("#### FR-01: x\n**Priority**: Must\n")
+                    + '"\n'
+                    "---\n"
+                    "#### BEH-01: x\n`traces: [FR-01]`\n"
+                    "- **checked_by**: x\n"
+                )
+            return rc
+
+    ops = PinnedAuthorOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=0,
+    )
+    state = runner.start(**_start_kwargs(tmp_path, "r-pinned", ops))
+    assert state.ops["gate-candidate"]["status"] == "completed"
+
+
+def test_gate_stale_draft_pin_stops_locally(tmp_path: Path, runs_root) -> None:
+    """GC-STALE(prospective) поверх CLI (приёмка PR #101, круг 2): пин
+    присутствует, но НЕ равен blob-хешу upstream в worktree — стоп, не
+    fail-open по одному лишь наличию 40 hex."""
+
+    class StalePinOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "behaviour-spec":
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: behaviour-spec\n"
+                    "status: draft\n"
+                    "traces_to:\n  - requirements\n"
+                    "upstream_hashes:\n"
+                    '  requirements: "' + "a" * 40 + '"\n'
+                    "---\n"
+                    "#### BEH-01: x\n`traces: [FR-01]`\n"
+                    "- **checked_by**: x\n"
+                )
+            return rc
+
+    ops = StalePinOps(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-stale-pin", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (runner.run_dir("r-stale-pin") / "gate-findings.txt").read_text()
+    assert "GC-STALE" in findings and "не совпадает" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_inline_upstream_hashes_form_passes(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Inline-форма `upstream_hashes: {requirements: "<hash>"}` — ровно та,
+    что предписывает авторский промпт (приёмка PR #101, круг 3) — обязана
+    проходить локальный гард наравне с блочной."""
+
+    class InlinePinOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "behaviour-spec":
+                pin = blob_sha1("#### FR-01: x\n**Priority**: Must\n")
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: behaviour-spec\n"
+                    "status: draft\n"
+                    "traces_to: [requirements]\n"
+                    'upstream_hashes: {requirements: "' + pin + '"}\n'
+                    "---\n"
+                    "#### BEH-01: x\n`traces: [FR-01]`\n"
+                    "- **checked_by**: x\n"
+                )
+            return rc
+
+    ops = InlinePinOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=0,
+    )
+    state = runner.start(**_start_kwargs(tmp_path, "r-inline-pin", ops))
+    assert state.ops["gate-candidate"]["status"] == "completed"
+
+
+def test_gate_foreign_toplevel_key_is_not_a_pin(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Приёмка PR #101, круг 4: пустой `upstream_hashes: {}` + посторонний
+    верхнеуровневый ключ `requirements: <верный hash>` ниже — это НЕ пин;
+    обязан быть GC-UNPINNED, не fail-open."""
+
+    class ForeignKeyOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "behaviour-spec":
+                real = blob_sha1("#### FR-01: x\n**Priority**: Must\n")
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: behaviour-spec\n"
+                    "status: draft\n"
+                    "traces_to: [requirements]\n"
+                    "upstream_hashes: {}\n"
+                    'requirements: "' + real + '"\n'
+                    "---\n"
+                    "#### BEH-01: x\n`traces: [FR-01]`\n"
+                    "- **checked_by**: x\n"
+                )
+            return rc
+
+    ops = ForeignKeyOps(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-foreign-key", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-foreign-key") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings

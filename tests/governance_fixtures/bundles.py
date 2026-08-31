@@ -55,6 +55,7 @@ from pathlib import Path
 
 PROFILE_YAML = """\
 profile: mini
+solo_auto_approve: true
 artifacts:
   - {id: requirements, template: requirements.md, owner_role: analysts}
   - id: behaviour-spec

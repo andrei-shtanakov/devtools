@@ -24,8 +24,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from governance.bundle_state import candidate_state
 from governance.merge_gate import PrFacts, decide
+from governance.stale_adapter import blob_sha1
 from governance.ops import Ops, RealOps
 from governance.policy_sources import build_authority, load_safety
 from governance.run_state import (
@@ -721,50 +721,118 @@ def _step_commit(state: RunState, ops: Ops) -> bool:
     return True
 
 
-def _step_gate(state: RunState, ops: Ops) -> bool:
-    """S4: prospective-гейт; error_count/required_absent/blocked-узлы → stop.
+def _frontmatter(text: str) -> str:
+    """YAML-frontmatter между первыми двумя `---`-строками (или пусто)."""
+    match = re.match(r"^---\n(.*?)\n---", text, re.S)
+    return match.group(1) if match else ""
 
-    ``error_count == 0`` сам по себе не значит «бандл зелёный»
-    (`bundle_state.py` докстринг, финальное ревью F-4): бандл без
-    frontmatter-узлов проходил бы насквозь — обязательные узлы отсутствуют
-    (``required_absent``), но это не порождало ни одной находки. Блокируем
-    явно на непустом ``required_absent`` и на любом узле в статусе
-    ``blocked`` (upstream физически не мог быть прогейтчен), не только на
-    ``error_count``.
+
+def _upstream_pin(front: str, upstream: str) -> str | None:
+    """Пин `upstream_hashes[upstream]` СТРОГО внутри этого YAML-поля.
+
+    Обе формы — inline (`upstream_hashes: {requirements: "<hash>"}`) и
+    блочная; блочная читается только как непрерывный блок отступленных
+    строк сразу за ключом (приёмка PR #101, круг 4: срез «до конца
+    frontmatter» принимал одноимённый ПОСТОРОННИЙ верхнеуровневый ключ за
+    пин — fail-open). Пустой mapping → None → GC-UNPINNED у вызывающего.
+    """
+    match = re.search(r"^upstream_hashes:(.*)$", front, re.M)
+    if not match:
+        return None
+    inline = match.group(1).strip()
+    if inline:
+        pin = re.search(rf"\b{upstream}:\s*[\"']?([0-9a-f]{{40}})", inline)
+        return pin.group(1) if pin else None
+    block: list[str] = []
+    for line in front[match.end():].lstrip("\n").splitlines():
+        if line.startswith((" ", "\t")):
+            block.append(line)
+        else:
+            break
+    pin = re.search(
+        rf"^\s+{upstream}:\s*[\"']?([0-9a-f]{{40}})",
+        "\n".join(block), re.M,
+    )
+    return pin.group(1) if pin else None
+
+
+def _step_gate(state: RunState, ops: Ops) -> bool:
+    """S4: prospective-гейт публичным `gate-check --candidate` (steward#140).
+
+    Миграция с internal content-check API (candidate_state поверх трёх
+    пинованных символов) на CLI-контракт steward @ 2c71ed7
+    (docs/gate-check-candidate.md): коды 0 чисто / 1 error-находки /
+    2 config error; ref-зависимые гейты честно объявляются not_evaluated.
+    Оба ненулевых кода — стоп: config error (2) не тише находок, он значит
+    «гейт не смог судить» и уплыть зелёным не имеет права (fail-closed).
+    candidate_state остаётся у консоли (bundle_summary) — её view-model этот
+    шаг не трогает.
     """
     key = "gate-candidate"
     if op_status(state, key) == "completed":
         return True
     _ensure_started(state, key)
-    bundle = candidate_state(
-        Path(state.target_dir) / state.profile,
-        Path(state.target_dir) / state.bundle_dir,
+    rc, output = ops.gate_check_candidate(
+        state.target_dir, state.bundle_dir, state.profile
     )
-    blocked_nodes = [n.node_id for n in bundle.nodes if n.status == "blocked"]
-    gate_red = bool(bundle.error_count) or bool(bundle.required_absent) or bool(
-        blocked_nodes
-    )
-    if gate_red:
-        findings = [f for node in bundle.nodes for f in node.findings]
-        findings.extend(bundle.bundle_findings)
-        if bundle.required_absent:
-            findings.append(
-                "error GC-REQUIRED-ABSENT(prospective): обязательные узлы "
-                f"отсутствуют в бандле: {', '.join(bundle.required_absent)}"
-            )
-        text = "\n".join(findings) + ("\n" if findings else "")
+    if rc != 0:
         (run_dir(state.run_id) / "gate-findings.txt").write_text(
-            text, encoding="utf-8"
+            output if output.endswith("\n") or not output else output + "\n",
+            encoding="utf-8",
         )
         state.status = "stopped_gate"
         save(state)
         return False
+    # Гарды GC-UNPINNED/GC-STALE(prospective) поверх CLI (приёмка PR #101,
+    # оба круга major): stale-каскад gate-check исполняется только на
+    # status: approved артефактах, поэтому DRAFT-узел с объявленным ребром
+    # проходит CLI молча — и без пина вовсе, и с синтаксически похожим, но
+    # ЛОЖНЫМ пином. Контракт конвейера — «пин в том же PR И пин верен»
+    # (спека §S4: prospective-сравнение upstream_hashes с blob-хешами
+    # worktree; первый прогон WS-kapelle-47 встал именно на GC-UNPINNED).
+    # Всё stdlib-ом (blob_sha1 — свой), runner остаётся без импорта steward.
+    local_findings: list[str] = []
+    for fname, upstream, upstream_fname in (
+        ("10-requirements.md", "charter", "00-charter.md"),
+        ("15-behaviour-spec.md", "requirements", "10-requirements.md"),
+    ):
+        path = Path(state.target_dir) / state.bundle_dir / fname
+        if not path.exists():
+            continue
+        front = _frontmatter(path.read_text(encoding="utf-8"))
+        declares = re.search(
+            rf"^\s*-\s+{upstream}\s*$|traces_to:.*\b{upstream}\b",
+            front, re.M,
+        )
+        if not declares:
+            continue
+        pin = _upstream_pin(front, upstream)
+        if pin is None:
+            local_findings.append(
+                f"error GC-UNPINNED(prospective): {fname} — объявленное "
+                f"ребро {upstream} без пина upstream_hashes (пин обязан "
+                "ехать в том же PR)"
+            )
+            continue
+        upstream_path = Path(state.target_dir) / state.bundle_dir / upstream_fname
+        actual = (
+            blob_sha1(upstream_path.read_text(encoding="utf-8"))
+            if upstream_path.exists()
+            else None
+        )
+        if actual != pin:
+            local_findings.append(
+                f"error GC-STALE(prospective): {fname} — пин {upstream} "
+                f"({pin[:8]}…) не совпадает с blob-хешем "
+                f"{upstream_fname} в worktree "
+                f"({actual[:8] + '…' if actual else 'файла нет'})"
+            )
     # Гард вакуумного зелёного (боевой прогон kapelle#47): узел может быть
     # candidate_valid при НУЛЕ распознаваемых DSL-заголовков — гейту steward
     # нечего флагать, когда автор писал в своём диалекте (`### BS-*`/`REQ-*`),
     # и пустая по сути спека уплывала бы в PR зелёной. Файл читается только
     # если существует: отсутствие — территория required_absent выше.
-    dsl_empty: list[str] = []
+    dsl_empty: list[str] = list(local_findings)
     for fname, pattern, label in (
         ("10-requirements.md", r"^#### FR-\d", "FR-требований"),
         ("15-behaviour-spec.md", r"^#### BEH-\d", "BEH-сценариев"),
@@ -784,12 +852,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         state.status = "stopped_gate"
         save(state)
         return False
-    op_complete(
-        state,
-        key,
-        error_count=bundle.error_count,
-        required_absent=list(bundle.required_absent),
-    )
+    op_complete(state, key, exit=rc)
     return True
 
 

@@ -52,7 +52,7 @@ requires-dist = [{ name = "plan-fields", git = "https://github.com/andrei-shtana
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8" }]
 governance = [
-    { name = "steward", git = "https://github.com/andrei-shtanakov/steward?rev=4a1c7c44a85accf609b40cb14115eccefb26f6c2" },
+    { name = "steward", git = "https://github.com/andrei-shtanakov/steward?rev=2c71ed770015f6baa00dedc708e8c0bbc5a8e41b" },
     { name = "textual", specifier = ">=1" },
 ]
 
@@ -380,7 +380,7 @@ wheels = [
 [[package]]
 name = "steward"
 version = "0.1.0"
-source = { git = "https://github.com/andrei-shtanakov/steward?rev=4a1c7c44a85accf609b40cb14115eccefb26f6c2#4a1c7c44a85accf609b40cb14115eccefb26f6c2" }
+source = { git = "https://github.com/andrei-shtanakov/steward?rev=2c71ed770015f6baa00dedc708e8c0bbc5a8e41b#2c71ed770015f6baa00dedc708e8c0bbc5a8e41b" }
 dependencies = [
     { name = "jsonschema" },
     { name = "pyyaml" },
