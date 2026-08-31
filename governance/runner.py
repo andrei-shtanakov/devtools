@@ -298,7 +298,10 @@ def advance(state: RunState, ops: Ops) -> RunState:
 # дереве не падает (`git diff --cached --quiet`), так что повторный коммит
 # без реальных правок — no-op, не ошибка.
 _BUNDLE_EDIT_RESET_OPS: tuple[str, ...] = (
-    "commit", "gate-candidate", "push", "ready", "review",
+    # review-refute — лимит «одна авто-попытка опровержения file-missing на
+    # ревью-цикл» (спека §7): новый цикл (правка бандла/resume) получает
+    # свежую попытку вместе со свежим review.
+    "commit", "gate-candidate", "push", "ready", "review", "review-refute",
 )
 
 # Статус stopped_* -> op'ы, которые reconciliation обязан сбросить в pending
@@ -918,6 +921,33 @@ def _step_ready(state: RunState, ops: Ops) -> bool:
     return True
 
 
+def _file_missing_refute_candidates(body: str) -> list[str] | None:
+    """Пути «отсутствующих» файлов, если ВСЕ блокирующие находки — file-missing.
+
+    Разбирает markdown-рендер вердикта кита (steward @ 2c71ed7, схема v2):
+    секция находки начинается `### [severity] title — \\`file:line\\``,
+    блокирующая несёт строку «БЛОКИРУЕТ», file-missing — kindline
+    «Тип: `file-missing`». None — авто-опровержение неприменимо (нет
+    блокирующих, либо среди них есть содержательная находка): смешанный
+    вердикт останавливается на человеке целиком, опровергать «половину»
+    машина не имеет права (спека §7).
+    """
+    sections = re.split(r"(?m)^### ", body)[1:]
+    paths: list[str] = []
+    blocking_seen = False
+    for section in sections:
+        if "БЛОКИРУЕТ" not in section:
+            continue
+        blocking_seen = True
+        if "`file-missing`" not in section:
+            return None
+        header = re.match(r"\[[^\]]+\]\s+.*?—\s+`([^:`]+):\d+`", section)
+        if not header:
+            return None
+        paths.append(header.group(1))
+    return paths if blocking_seen else None
+
+
 def _step_review(state: RunState, ops: Ops) -> bool:
     """S6b: review-pr.sh; started → перезапустить (дедуп по fp — дёшево)."""
     key = "review"
@@ -949,13 +979,44 @@ def _step_review(state: RunState, ops: Ops) -> bool:
             head = ops.head_sha(state.target_dir, state.branch)
         except Exception:  # noqa: BLE001 — косметика не должна ронять стоп
             head = "<head>"
+        # Авто-опровержение ложного класса «файлов нет» (спека §7; машинный
+        # тип kind: file-missing доставлен steward#141/#142). Ровно ОДНА
+        # попытка на ревью-цикл (op review-refute): все блокирующие находки
+        # file-missing И каждый названный файл существует на head → комментарий
+        # с evidence + пере-прогон --fresh (обычный прогон унаследовал бы тот
+        # же красный вердикт по fp). Смешанный вердикт — человеку целиком.
+        if op_status(state, "review-refute") == "new" and head != "<head>":
+            body = ops.latest_review_body(state.repo_slug, state.pr)
+            candidates = (
+                _file_missing_refute_candidates(body) if body else None
+            )
+            if candidates and all(
+                ops.file_exists_at(state.target_dir, head, p)
+                for p in candidates
+            ):
+                op_start(state, "review-refute")
+                proofs = "\n".join(
+                    f"- `git cat-file -e {head}:{p}` — файл существует"
+                    for p in candidates
+                )
+                ops.comment(
+                    state.repo_slug, state.pr,
+                    "Авто-опровержение находок класса `file-missing` "
+                    f"(спека §7): все блокирующие находки заявляют "
+                    "отсутствие файлов, опровергнутое по дереву head:\n"
+                    f"{proofs}\n\nПере-прогон ревью с --fresh.",
+                )
+                op_complete(state, "review-refute", files=candidates)
+                fresh_exit = ops.review_fresh(state.repo, state.pr)
+                if fresh_exit == 0:
+                    op_complete(state, key, exit=fresh_exit)
+                    return True
+                exit_code = fresh_exit
         _stop_with_comment(
             state, ops, "stopped_review",
             "ревью нашло находки, прогон остановлен\n\n"
             "Известный ложный класс находок «файлов нет» опровергается "
-            f"прямой проверкой `git cat-file -e {head}:<путь>`; "
-            "авто-перегон появится после машинного типа находки в ките "
-            "steward.",
+            f"прямой проверкой `git cat-file -e {head}:<путь>`.",
         )
         return False
     if exit_code in (2, 3):

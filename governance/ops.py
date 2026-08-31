@@ -53,6 +53,14 @@ class Ops(Protocol):
 
     def review(self, repo_name: str, pr: int) -> int: ...
 
+    def review_fresh(self, repo_name: str, pr: int) -> int: ...
+
+    def latest_review_body(self, repo_slug: str, pr: int) -> str | None: ...
+
+    def file_exists_at(
+        self, target_dir: str, head: str, path: str
+    ) -> bool: ...
+
     def pr_facts(self, repo_slug: str, pr: int) -> dict: ...
 
     def pr_files(self, repo_slug: str, pr: int) -> list[str]: ...
@@ -254,6 +262,46 @@ class RealOps:
             cwd=DEVTOOLS_ROOT,
         )
         return done.returncode
+
+    def review_fresh(self, repo_name: str, pr: int) -> int:
+        """review-pr.sh --fresh — обход fp-наследования (авто-опровержение S6).
+
+        Без --fresh пере-прогон по неизменному входу унаследовал бы тот же
+        красный вердикт по отпечатку; --fresh обходит только поиск
+        наследуемого, отпечаток вычисляется и публикуется как обычно.
+        """
+        done = subprocess.run(
+            ["sh", str(DEVTOOLS_ROOT / "review-pr.sh"), repo_name, str(pr),
+             "--fresh"],
+            cwd=DEVTOOLS_ROOT,
+        )
+        return done.returncode
+
+    def latest_review_body(self, repo_slug: str, pr: int) -> str | None:
+        """Тело НОВЕЙШЕГО ревью ai-prosto на PR; нет/сбой -> None.
+
+        None читается вызывающим как «опровергать нечего» (fail-closed в
+        сторону стопа на человеке), поэтому сбой gh не маскируется пустой
+        строкой и не роняет стоп-путь S6.
+        """
+        done = subprocess.run(
+            ["gh", "api", f"repos/{repo_slug}/pulls/{pr}/reviews",
+             "--jq",
+             '[.[] | select(.user.login == "ai-prosto")] | last | .body'],
+            capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            return None
+        body = done.stdout.strip()
+        return body if body and body != "null" else None
+
+    def file_exists_at(self, target_dir: str, head: str, path: str) -> bool:
+        """`git cat-file -e <head>:<path>` — файл существует в этой ревизии."""
+        done = subprocess.run(
+            ["git", "cat-file", "-e", f"{head}:{path}"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        return done.returncode == 0
 
     def pr_facts(self, repo_slug: str, pr: int) -> dict:
         """Сырой gh-JSON PR — интерпретация полей не входит в ops."""

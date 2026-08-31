@@ -569,7 +569,7 @@
       Safety(agent_merge_allowed=True, actor_class='agent') — S7 мержит
       document-PR сам; authority-root и fail-closed evidence — по-прежнему
       человек (ADR-ECO-011).
-- [ ] Мигрировать S4 runner'а с internal content-check API на публичный prospective-режим gate-check @owner:github:andrei-shtanakov @id:behaviour-s4-candidate-mode-migration
+- [x] Мигрировать S4 runner'а с internal content-check API на публичный prospective-режим gate-check @owner:github:andrei-shtanakov @id:behaviour-s4-candidate-mode-migration — PR #101 (merge 549638a): CLI --candidate + пин steward 2c71ed7; локальные гарды GC-UNPINNED/GC-STALE/GC-DSL-EMPTY поверх (5 кругов приёмки)
       Заведён 2026-08-31 вместе с inbox-issue steward#140 (slug:
       gate-check-candidate-mode). ОЖИДАНИЕ ДОСТАВЛЕНО тем же днём (steward
       PR #142, merge 2c71ed7): candidate-режим появился (blob_hash_of —
@@ -580,7 +580,7 @@
       внутренней структуры пакета. Требует бампа ПАКЕТНОГО пина steward
       (pyproject rev 4a1c7c44) — отдельным осознанным PR-ом с прогоном
       characterization-сьюта.
-- [ ] Включить авто-опровержение ложного класса «файлов нет» в S6 runner'а по машинному типу находки кита @owner:github:andrei-shtanakov @id:behaviour-s6-file-missing-auto-refute
+- [x] Включить авто-опровержение ложного класса «файлов нет» в S6 runner'а по машинному типу находки кита @owner:github:andrei-shtanakov @id:behaviour-s6-file-missing-auto-refute — PR этой ветки: ре-вендор кита @ 2c71ed7 (схема v2, kind), одна авто-попытка на цикл, смешанный вердикт — человеку
       Заведён 2026-08-31 вместе с inbox-issue steward#141 (slug:
       review-kit-file-missing-finding-type). ОЖИДАНИЕ ДОСТАВЛЕНО тем же
       днём (steward PR #142: file-missing kind в вердикте, line:0) — тег
