@@ -2268,3 +2268,41 @@ def test_gate_inline_upstream_hashes_form_passes(
     )
     state = runner.start(**_start_kwargs(tmp_path, "r-inline-pin", ops))
     assert state.ops["gate-candidate"]["status"] == "completed"
+
+
+def test_gate_foreign_toplevel_key_is_not_a_pin(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Приёмка PR #101, круг 4: пустой `upstream_hashes: {}` + посторонний
+    верхнеуровневый ключ `requirements: <верный hash>` ниже — это НЕ пин;
+    обязан быть GC-UNPINNED, не fail-open."""
+
+    class ForeignKeyOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "behaviour-spec":
+                real = blob_sha1("#### FR-01: x\n**Priority**: Must\n")
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: behaviour-spec\n"
+                    "status: draft\n"
+                    "traces_to: [requirements]\n"
+                    "upstream_hashes: {}\n"
+                    'requirements: "' + real + '"\n'
+                    "---\n"
+                    "#### BEH-01: x\n`traces: [FR-01]`\n"
+                    "- **checked_by**: x\n"
+                )
+            return rc
+
+    ops = ForeignKeyOps(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-foreign-key", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-foreign-key") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings

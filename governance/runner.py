@@ -727,6 +727,35 @@ def _frontmatter(text: str) -> str:
     return match.group(1) if match else ""
 
 
+def _upstream_pin(front: str, upstream: str) -> str | None:
+    """Пин `upstream_hashes[upstream]` СТРОГО внутри этого YAML-поля.
+
+    Обе формы — inline (`upstream_hashes: {requirements: "<hash>"}`) и
+    блочная; блочная читается только как непрерывный блок отступленных
+    строк сразу за ключом (приёмка PR #101, круг 4: срез «до конца
+    frontmatter» принимал одноимённый ПОСТОРОННИЙ верхнеуровневый ключ за
+    пин — fail-open). Пустой mapping → None → GC-UNPINNED у вызывающего.
+    """
+    match = re.search(r"^upstream_hashes:(.*)$", front, re.M)
+    if not match:
+        return None
+    inline = match.group(1).strip()
+    if inline:
+        pin = re.search(rf"\b{upstream}:\s*[\"']?([0-9a-f]{{40}})", inline)
+        return pin.group(1) if pin else None
+    block: list[str] = []
+    for line in front[match.end():].lstrip("\n").splitlines():
+        if line.startswith((" ", "\t")):
+            block.append(line)
+        else:
+            break
+    pin = re.search(
+        rf"^\s+{upstream}:\s*[\"']?([0-9a-f]{{40}})",
+        "\n".join(block), re.M,
+    )
+    return pin.group(1) if pin else None
+
+
 def _step_gate(state: RunState, ops: Ops) -> bool:
     """S4: prospective-гейт публичным `gate-check --candidate` (steward#140).
 
@@ -777,20 +806,8 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         )
         if not declares:
             continue
-        # Обе валидные YAML-формы (приёмка PR #101, круг 3): блочная
-        # (`upstream_hashes:\n  requirements: "<hash>"`) и inline из нашего
-        # же авторского промпта (`upstream_hashes: {requirements: "<hash>"}`).
-        # Ищем ключ в срезе frontmatter'а ОТ `upstream_hashes:` — 40-hex под
-        # другим верхнеуровневым ключом сюда не попадёт.
-        uh_idx = front.find("upstream_hashes:")
-        pin_match = (
-            re.search(
-                rf"\b{upstream}:\s*[\"']?([0-9a-f]{{40}})", front[uh_idx:]
-            )
-            if uh_idx != -1
-            else None
-        )
-        if not pin_match:
+        pin = _upstream_pin(front, upstream)
+        if pin is None:
             local_findings.append(
                 f"error GC-UNPINNED(prospective): {fname} — объявленное "
                 f"ребро {upstream} без пина upstream_hashes (пин обязан "
@@ -803,10 +820,10 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
             if upstream_path.exists()
             else None
         )
-        if actual != pin_match.group(1):
+        if actual != pin:
             local_findings.append(
                 f"error GC-STALE(prospective): {fname} — пин {upstream} "
-                f"({pin_match.group(1)[:8]}…) не совпадает с blob-хешем "
+                f"({pin[:8]}…) не совпадает с blob-хешем "
                 f"{upstream_fname} в worktree "
                 f"({actual[:8] + '…' if actual else 'файла нет'})"
             )
