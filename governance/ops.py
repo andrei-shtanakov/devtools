@@ -77,6 +77,10 @@ class Ops(Protocol):
         self, target_dir: str, bundle_dir: str, profile: str
     ) -> tuple[int, str]: ...
 
+    def gate_check_candidate(
+        self, target_dir: str, bundle_dir: str, profile: str
+    ) -> tuple[int, str]: ...
+
     def create_issue(self, repo_slug: str, title: str, body: str) -> int: ...
 
     def find_issue(self, repo_slug: str, body_prefix: str) -> int | None: ...
@@ -406,6 +410,25 @@ class RealOps:
         )
         output = done.stdout + done.stderr
         return done.returncode, output
+
+    def gate_check_candidate(
+        self, target_dir: str, bundle_dir: str, profile: str
+    ) -> tuple[int, str]:
+        """gate-check --candidate <bundle_dir> --profile <profile>.
+
+        Публичный prospective-режим steward#140 (steward @ 2c71ed7,
+        docs/gate-check-candidate.md): проверяет содержимое каталога БЕЗ
+        git-фактов; ref-зависимые гейты объявляются `not_evaluated` на
+        stderr. Коды прежние: 0 чисто, 1 error-находки, 2 ошибка
+        конфигурации. cwd=target_dir — профиль резолвится от репо, как в S8.
+        """
+        exe = DEVTOOLS_ROOT / ".venv" / "bin" / "gate-check"
+        cmd = str(exe) if exe.exists() else "gate-check"
+        done = subprocess.run(
+            [cmd, "--candidate", bundle_dir, "--profile", profile],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        return done.returncode, done.stdout + done.stderr
 
     def create_issue(self, repo_slug: str, title: str, body: str) -> int:
         """gh issue create -R <slug> --label inbox; номер из URL stdout."""

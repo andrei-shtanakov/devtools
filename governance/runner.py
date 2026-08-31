@@ -24,7 +24,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from governance.bundle_state import candidate_state
 from governance.merge_gate import PrFacts, decide
 from governance.ops import Ops, RealOps
 from governance.policy_sources import build_authority, load_safety
@@ -722,39 +721,28 @@ def _step_commit(state: RunState, ops: Ops) -> bool:
 
 
 def _step_gate(state: RunState, ops: Ops) -> bool:
-    """S4: prospective-гейт; error_count/required_absent/blocked-узлы → stop.
+    """S4: prospective-гейт публичным `gate-check --candidate` (steward#140).
 
-    ``error_count == 0`` сам по себе не значит «бандл зелёный»
-    (`bundle_state.py` докстринг, финальное ревью F-4): бандл без
-    frontmatter-узлов проходил бы насквозь — обязательные узлы отсутствуют
-    (``required_absent``), но это не порождало ни одной находки. Блокируем
-    явно на непустом ``required_absent`` и на любом узле в статусе
-    ``blocked`` (upstream физически не мог быть прогейтчен), не только на
-    ``error_count``.
+    Миграция с internal content-check API (candidate_state поверх трёх
+    пинованных символов) на CLI-контракт steward @ 2c71ed7
+    (docs/gate-check-candidate.md): коды 0 чисто / 1 error-находки /
+    2 config error; ref-зависимые гейты честно объявляются not_evaluated.
+    Оба ненулевых кода — стоп: config error (2) не тише находок, он значит
+    «гейт не смог судить» и уплыть зелёным не имеет права (fail-closed).
+    candidate_state остаётся у консоли (bundle_summary) — её view-model этот
+    шаг не трогает.
     """
     key = "gate-candidate"
     if op_status(state, key) == "completed":
         return True
     _ensure_started(state, key)
-    bundle = candidate_state(
-        Path(state.target_dir) / state.profile,
-        Path(state.target_dir) / state.bundle_dir,
+    rc, output = ops.gate_check_candidate(
+        state.target_dir, state.bundle_dir, state.profile
     )
-    blocked_nodes = [n.node_id for n in bundle.nodes if n.status == "blocked"]
-    gate_red = bool(bundle.error_count) or bool(bundle.required_absent) or bool(
-        blocked_nodes
-    )
-    if gate_red:
-        findings = [f for node in bundle.nodes for f in node.findings]
-        findings.extend(bundle.bundle_findings)
-        if bundle.required_absent:
-            findings.append(
-                "error GC-REQUIRED-ABSENT(prospective): обязательные узлы "
-                f"отсутствуют в бандле: {', '.join(bundle.required_absent)}"
-            )
-        text = "\n".join(findings) + ("\n" if findings else "")
+    if rc != 0:
         (run_dir(state.run_id) / "gate-findings.txt").write_text(
-            text, encoding="utf-8"
+            output if output.endswith("\n") or not output else output + "\n",
+            encoding="utf-8",
         )
         state.status = "stopped_gate"
         save(state)
@@ -784,12 +772,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         state.status = "stopped_gate"
         save(state)
         return False
-    op_complete(
-        state,
-        key,
-        error_count=bundle.error_count,
-        required_absent=list(bundle.required_absent),
-    )
+    op_complete(state, key, exit=rc)
     return True
 
 

@@ -17,7 +17,7 @@ package = false
 # workspace-relative path, so the pin is reproducible and does not follow a
 # sibling checkout. Bump deliberately in its own PR.
 plan-fields = { git = "https://github.com/andrei-shtanakov/dispatcher", rev = "65f03ea9e5964e4488bcd254e491fc42abb1bd96", subdirectory = "packages/plan-fields" }
-steward = { git = "https://github.com/andrei-shtanakov/steward", rev = "4a1c7c44a85accf609b40cb14115eccefb26f6c2" }
+steward = { git = "https://github.com/andrei-shtanakov/steward", rev = "2c71ed770015f6baa00dedc708e8c0bbc5a8e41b" }
 
 [dependency-groups]
 dev = ["pytest>=8"]
