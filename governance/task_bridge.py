@@ -82,6 +82,12 @@ def parse_behaviour(text: str) -> list[Scenario]:
         if feat:
             feature = feat.group(1)
             continue
+        if line.startswith("## "):
+            # Любой обычный `##`-заголовок ЗАВЕРШАЕТ Feature-секцию
+            # (приёмка PR #100, minor): иначе сценарий под «## Особые
+            # случаи» унаследовал бы предыдущий Feature и склеился с ним.
+            feature = None
+            continue
         header = _BEH_HEADER.match(line)
         if header:
             flush()
@@ -162,14 +168,19 @@ def render_tasks(
         traces: list[str] = []
         for g in group:
             traces += [t for t in g.traces if t not in traces]
-        targets: list[str] = []
+        # Пары target+kind, не голые targets (приёмка PR #100, major):
+        # checked_by-биндинг несёт ОБЕ части — исполнитель обязан знать вид
+        # проверки (integration/e2e/...), не только файл.
+        bindings: list[str] = []
         for g in group:
-            if g.checked_target and g.checked_target not in targets:
-                targets.append(g.checked_target)
+            if g.checked_target:
+                pair = f"{g.checked_target} (kind: {g.checked_kind})"
+                if pair not in bindings:
+                    bindings.append(pair)
         check = (
-            f"проверка группы: {', '.join(targets)} зелёные на "
+            f"проверка группы: {', '.join(bindings)} зелёные на "
             f"{', '.join(beh_ids)}"
-            if targets
+            if bindings
             else f"проверка группы {', '.join(beh_ids)} определена и зелёная"
         )
         lines += [

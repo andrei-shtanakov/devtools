@@ -80,8 +80,14 @@ def test_render_tasks_structure() -> None:
     )
     assert "**Traces to:** [FR-01, NFR-02]" in text
     # последний чеклист-пункт каждой задачи — проверка, не действие
-    assert "проверка группы: tests/test_x.py зелёные на BEH-01" in text
-    assert "проверка группы: tests/test_y.py зелёные на BEH-02" in text
+    assert (
+        "проверка группы: tests/test_x.py (kind: integration) "
+        "зелёные на BEH-01" in text
+    )
+    assert (
+        "проверка группы: tests/test_y.py (kind: e2e) зелёные на BEH-02"
+        in text
+    )
     # чеклист с колонки 0 (отступ молча игнорируется парсером spec-runner)
     for line in text.splitlines():
         if "[ ]" in line:
@@ -287,3 +293,27 @@ def test_render_groups_by_feature_sections() -> None:
     assert "**Traces to:** [FR-01, FR-02]" in text
     # Source несёт диапазон группы
     assert "#BEH-01 (—BEH-02)" in text
+
+
+def test_plain_heading_closes_feature_section() -> None:
+    """Обычный `##`-заголовок завершает Feature (приёмка PR #100, minor):
+    сценарий под ним — отдельная задача 1:1, не хвост предыдущей группы."""
+    md = FEATURED_MD + """\
+
+## Особые случаи
+
+#### BEH-04: Вне Feature
+`traces: [FR-04]`
+- **checked_by**: `status: planned` `kind: manual` `owner: qa` \
+`target: docs/manual.md`
+"""
+    scenarios = task_bridge.parse_behaviour(md)
+    assert scenarios[-1].feature is None
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/15-behaviour-spec.md",
+        scenarios=scenarios,
+        generated_at="2026-08-31T12:00:00",
+    )
+    assert "### TASK-003: Вне Feature" in text
