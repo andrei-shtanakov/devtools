@@ -259,6 +259,28 @@ def test_author_command_and_prompt_contains_fields(monkeypatch):
     assert call.kwargs["cwd"] == "/tmp/devtools"
 
 
+def test_author_prompt_carries_dsl_and_filenames(monkeypatch):
+    """Промпт несёт канонические имена файлов и DSL гейта (боевой прогон
+    kapelle#47: без них codex писал в своём диалекте)."""
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+
+    ops.author("/t", "requirements", "s", "ws/spec")
+    ops.author("/t", "behaviour-spec", "s", "ws/spec")
+
+    req_prompt = calls[0].argv[5]
+    assert "ws/spec/10-requirements.md" in req_prompt
+    assert "#### FR-NN:" in req_prompt
+    assert "**Priority**: Must" in req_prompt
+    assert "upstream_hashes" in req_prompt and "git hash-object" in req_prompt
+
+    beh_prompt = calls[1].argv[5]
+    assert "ws/spec/15-behaviour-spec.md" in beh_prompt
+    assert "#### BEH-NN:" in beh_prompt
+    assert "traces: [FR-NN" in beh_prompt
+    assert "checked_by" in beh_prompt
+
+
 # --- B2 Task 2: author_disp — opt-in бэкенд disp (спека §5, OQ-1) ----------
 
 

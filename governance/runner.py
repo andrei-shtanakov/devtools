@@ -368,6 +368,20 @@ def resume(run_id: str, ops: Ops) -> RunState:
         save(state)
         _step_s8(state, ops)
         return state
+    if state.status == "stopped_merge_refused" and state.pr is not None:
+        # Reconciliation «человек смержил ПОСЛЕ отказа агента» (боевой
+        # прогон kapelle#51): раньше эта ветка была только у
+        # waiting_human_merge, и влитый вручную PR оставлял run навсегда в
+        # stopped_merge_refused — resume лишь переигрывал verdict по тем же
+        # красным фактам. PR ещё OPEN → падаем в общий сброс verdict ниже.
+        pr_facts_now = ops.pr_facts(state.repo_slug, state.pr)
+        if pr_facts_now.get("state") == "MERGED":
+            if op_status(state, "merge") != "completed":
+                op_complete(state, "merge", merged=True)
+            state.status = "running"
+            save(state)
+            _step_s8(state, ops)
+            return state
     if state.status == "stopped_author":
         _reset_stopped_author(state)
         state.status = "running"
@@ -520,6 +534,13 @@ def facts_from(
         if all(c in _ROLLUP_GREEN for c in conclusions):
             checks_rollup = "green"
         elif any(c and c not in _ROLLUP_GREEN for c in conclusions):
+            # Любой FAILURE = red, БЕЗ поблажки на mergeStateStatus=UNSTABLE
+            # (приёмка PR #99, major): в rulesets флота нет required-чеков,
+            # поэтому UNSTABLE у GitHub означает «упало что угодно, хоть
+            # тесты» — читать его как «красное только advisory» значило бы
+            # мержить агентом PR с красным test. Мотивация послабления
+            # умерла со снятием CI-контура codex-review (devtools#98 +
+            # волна): advisory-чеков во флоте больше нет.
             checks_rollup = "red"
         else:
             checks_rollup = "unknown"
@@ -734,6 +755,31 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         text = "\n".join(findings) + ("\n" if findings else "")
         (run_dir(state.run_id) / "gate-findings.txt").write_text(
             text, encoding="utf-8"
+        )
+        state.status = "stopped_gate"
+        save(state)
+        return False
+    # Гард вакуумного зелёного (боевой прогон kapelle#47): узел может быть
+    # candidate_valid при НУЛЕ распознаваемых DSL-заголовков — гейту steward
+    # нечего флагать, когда автор писал в своём диалекте (`### BS-*`/`REQ-*`),
+    # и пустая по сути спека уплывала бы в PR зелёной. Файл читается только
+    # если существует: отсутствие — территория required_absent выше.
+    dsl_empty: list[str] = []
+    for fname, pattern, label in (
+        ("10-requirements.md", r"^#### FR-\d", "FR-требований"),
+        ("15-behaviour-spec.md", r"^#### BEH-\d", "BEH-сценариев"),
+    ):
+        path = Path(state.target_dir) / state.bundle_dir / fname
+        if path.exists() and not re.search(
+            pattern, path.read_text(encoding="utf-8"), re.M
+        ):
+            dsl_empty.append(
+                f"error GC-DSL-EMPTY(prospective): {fname} — 0 распознаваемых "
+                f"{label} (ожидается DSL `#### FR-NN:` / `#### BEH-NN:`)"
+            )
+    if dsl_empty:
+        (run_dir(state.run_id) / "gate-findings.txt").write_text(
+            "\n".join(dsl_empty) + "\n", encoding="utf-8"
         )
         state.status = "stopped_gate"
         save(state)
