@@ -2233,3 +2233,38 @@ def test_gate_stale_draft_pin_stops_locally(tmp_path: Path, runs_root) -> None:
     findings = (runner.run_dir("r-stale-pin") / "gate-findings.txt").read_text()
     assert "GC-STALE" in findings and "не совпадает" in findings
     assert "push" not in state.ops
+
+
+def test_gate_inline_upstream_hashes_form_passes(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Inline-форма `upstream_hashes: {requirements: "<hash>"}` — ровно та,
+    что предписывает авторский промпт (приёмка PR #101, круг 3) — обязана
+    проходить локальный гард наравне с блочной."""
+
+    class InlinePinOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "behaviour-spec":
+                pin = blob_sha1("#### FR-01: x\n**Priority**: Must\n")
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: behaviour-spec\n"
+                    "status: draft\n"
+                    "traces_to: [requirements]\n"
+                    'upstream_hashes: {requirements: "' + pin + '"}\n'
+                    "---\n"
+                    "#### BEH-01: x\n`traces: [FR-01]`\n"
+                    "- **checked_by**: x\n"
+                )
+            return rc
+
+    ops = InlinePinOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=0,
+    )
+    state = runner.start(**_start_kwargs(tmp_path, "r-inline-pin", ops))
+    assert state.ops["gate-candidate"]["status"] == "completed"

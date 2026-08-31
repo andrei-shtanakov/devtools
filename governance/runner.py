@@ -777,11 +777,17 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         )
         if not declares:
             continue
+        # Обе валидные YAML-формы (приёмка PR #101, круг 3): блочная
+        # (`upstream_hashes:\n  requirements: "<hash>"`) и inline из нашего
+        # же авторского промпта (`upstream_hashes: {requirements: "<hash>"}`).
+        # Ищем ключ в срезе frontmatter'а ОТ `upstream_hashes:` — 40-hex под
+        # другим верхнеуровневым ключом сюда не попадёт.
+        uh_idx = front.find("upstream_hashes:")
         pin_match = (
             re.search(
-                rf"^\s+{upstream}:\s*[\"']?([0-9a-f]{{40}})", front, re.M
+                rf"\b{upstream}:\s*[\"']?([0-9a-f]{{40}})", front[uh_idx:]
             )
-            if "upstream_hashes:" in front
+            if uh_idx != -1
             else None
         )
         if not pin_match:
