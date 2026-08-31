@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from governance.merge_gate import PrFacts, decide
+from governance.stale_adapter import blob_sha1
 from governance.ops import Ops, RealOps
 from governance.policy_sources import build_authority, load_safety
 from governance.run_state import (
@@ -753,17 +754,18 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         state.status = "stopped_gate"
         save(state)
         return False
-    # Гард GC-UNPINNED(prospective) поверх CLI (приёмка PR #101, major):
-    # stale-каскад gate-check исполняется только на status: approved
-    # артефактах, поэтому DRAFT-узел с объявленным ребром, но без пина
-    # upstream_hashes проходит CLI молча. Контракт конвейера — «пин в том же
-    # PR» (bundle_state; первый прогон WS-kapelle-47 встал именно на этом) —
-    # проверяем frontmatter канонических рёбер stdlib-ом: runner остаётся
-    # свободным от импорта steward.
+    # Гарды GC-UNPINNED/GC-STALE(prospective) поверх CLI (приёмка PR #101,
+    # оба круга major): stale-каскад gate-check исполняется только на
+    # status: approved артефактах, поэтому DRAFT-узел с объявленным ребром
+    # проходит CLI молча — и без пина вовсе, и с синтаксически похожим, но
+    # ЛОЖНЫМ пином. Контракт конвейера — «пин в том же PR И пин верен»
+    # (спека §S4: prospective-сравнение upstream_hashes с blob-хешами
+    # worktree; первый прогон WS-kapelle-47 встал именно на GC-UNPINNED).
+    # Всё stdlib-ом (blob_sha1 — свой), runner остаётся без импорта steward.
     local_findings: list[str] = []
-    for fname, upstream in (
-        ("10-requirements.md", "charter"),
-        ("15-behaviour-spec.md", "requirements"),
+    for fname, upstream, upstream_fname in (
+        ("10-requirements.md", "charter", "00-charter.md"),
+        ("15-behaviour-spec.md", "requirements", "10-requirements.md"),
     ):
         path = Path(state.target_dir) / state.bundle_dir / fname
         if not path.exists():
@@ -773,14 +775,34 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
             rf"^\s*-\s+{upstream}\s*$|traces_to:.*\b{upstream}\b",
             front, re.M,
         )
-        pinned = "upstream_hashes:" in front and re.search(
-            rf"^\s+{upstream}:\s*\"?[0-9a-f]{{40}}", front, re.M
+        if not declares:
+            continue
+        pin_match = (
+            re.search(
+                rf"^\s+{upstream}:\s*[\"']?([0-9a-f]{{40}})", front, re.M
+            )
+            if "upstream_hashes:" in front
+            else None
         )
-        if declares and not pinned:
+        if not pin_match:
             local_findings.append(
                 f"error GC-UNPINNED(prospective): {fname} — объявленное "
                 f"ребро {upstream} без пина upstream_hashes (пин обязан "
                 "ехать в том же PR)"
+            )
+            continue
+        upstream_path = Path(state.target_dir) / state.bundle_dir / upstream_fname
+        actual = (
+            blob_sha1(upstream_path.read_text(encoding="utf-8"))
+            if upstream_path.exists()
+            else None
+        )
+        if actual != pin_match.group(1):
+            local_findings.append(
+                f"error GC-STALE(prospective): {fname} — пин {upstream} "
+                f"({pin_match.group(1)[:8]}…) не совпадает с blob-хешем "
+                f"{upstream_fname} в worktree "
+                f"({actual[:8] + '…' if actual else 'файла нет'})"
             )
     # Гард вакуумного зелёного (боевой прогон kapelle#47): узел может быть
     # candidate_valid при НУЛЕ распознаваемых DSL-заголовков — гейту steward

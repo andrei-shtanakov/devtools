@@ -14,6 +14,7 @@ pytest.importorskip("steward")
 
 from governance import bundle_state, merge_gate, runner
 from governance import run_state as rs
+from governance.stale_adapter import blob_sha1
 from tests.governance_fixtures.bundles import make_bundle, make_profile
 
 GREEN_PR_FACTS: dict[str, Any] = {
@@ -2183,7 +2184,9 @@ def test_gate_pinned_draft_edge_passes_local_guard(
                     "status: draft\n"
                     "traces_to:\n  - requirements\n"
                     "upstream_hashes:\n"
-                    '  requirements: "' + "a" * 40 + '"\n'
+                    '  requirements: "'
+                    + blob_sha1("#### FR-01: x\n**Priority**: Must\n")
+                    + '"\n'
                     "---\n"
                     "#### BEH-01: x\n`traces: [FR-01]`\n"
                     "- **checked_by**: x\n"
@@ -2196,3 +2199,37 @@ def test_gate_pinned_draft_edge_passes_local_guard(
     )
     state = runner.start(**_start_kwargs(tmp_path, "r-pinned", ops))
     assert state.ops["gate-candidate"]["status"] == "completed"
+
+
+def test_gate_stale_draft_pin_stops_locally(tmp_path: Path, runs_root) -> None:
+    """GC-STALE(prospective) поверх CLI (приёмка PR #101, круг 2): пин
+    присутствует, но НЕ равен blob-хешу upstream в worktree — стоп, не
+    fail-open по одному лишь наличию 40 hex."""
+
+    class StalePinOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "behaviour-spec":
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: behaviour-spec\n"
+                    "status: draft\n"
+                    "traces_to:\n  - requirements\n"
+                    "upstream_hashes:\n"
+                    '  requirements: "' + "a" * 40 + '"\n'
+                    "---\n"
+                    "#### BEH-01: x\n`traces: [FR-01]`\n"
+                    "- **checked_by**: x\n"
+                )
+            return rc
+
+    ops = StalePinOps(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-stale-pin", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (runner.run_dir("r-stale-pin") / "gate-findings.txt").read_text()
+    assert "GC-STALE" in findings and "не совпадает" in findings
+    assert "push" not in state.ops
