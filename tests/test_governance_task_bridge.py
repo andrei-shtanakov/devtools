@@ -186,3 +186,48 @@ def test_deliver_missing_behaviour_refuses(tmp_path: Path) -> None:
             base_ref="master",
             ops=_StubOps(),
         )
+
+
+def test_deliver_reads_bundle_only_after_base_checkout(tmp_path: Path) -> None:
+    """Существование бандла проверяется ПОСЛЕ checkout_and_pull базы
+    (приёмка PR #96): до чекаута дерево могло стоять на произвольной ветке."""
+    target = tmp_path / "alpha"
+    target.mkdir()
+    bundle = target / "workstreams/WS-alpha-7/spec"
+
+    class _LateOps(_StubOps):
+        def checkout_and_pull(self, target_dir: str, branch: str) -> None:
+            super().checkout_and_pull(target_dir, branch)
+            bundle.mkdir(parents=True)
+            (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
+
+    pr = task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=_LateOps(),
+    )
+    assert pr == 77
+
+
+def test_cli_refuses_not_completed_run(tmp_path: Path, monkeypatch, capsys) -> None:
+    from governance import run_state as rs
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = rs.new_run(
+        subject="s",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        target_dir=str(tmp_path),
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-bridge-wait",
+    )
+    state.status = "waiting_human_merge"
+    rs.save(state)
+    assert task_bridge.main(["--run-id", "r-bridge-wait"]) == 1
+    assert "completed" in capsys.readouterr().out

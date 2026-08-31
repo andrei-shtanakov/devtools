@@ -166,16 +166,20 @@ def deliver(
     ДО создания ветки — спека генерируется из вмерженного бандла, не из
     случайного состояния чекаута.
     """
-    behaviour = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
-    if not behaviour.exists():
-        raise RuntimeError(
-            f"{behaviour} не найден — бандл не вмержен или путь неверен"
-        )
     if ops.is_dirty(target_dir):
         raise RuntimeError(
             f"target_dir {target_dir!r} грязный — доставка спеки не начата"
         )
     ops.checkout_and_pull(target_dir, base_ref)
+    # Существование и чтение бандла — строго ПОСЛЕ чекаута базы (приёмка
+    # PR #96, major): до него чекаут мог стоять на произвольной ветке, и
+    # спека сгенерировалась бы из невмерженной ревизии бандла.
+    behaviour = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+    if not behaviour.exists():
+        raise RuntimeError(
+            f"{behaviour} не найден на {base_ref} — бандл не вмержен "
+            "или путь неверен"
+        )
     scenarios = parse_behaviour(behaviour.read_text(encoding="utf-8"))
     stamp = generated_at or datetime.now().isoformat(timespec="seconds")
     text = render_tasks(
@@ -218,6 +222,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args(argv)
     state = load(args.run_id)
+    # Мост работает только над ВМЕРЖЕННЫМ и верифицированным бандлом
+    # (приёмка PR #96, major): completed — единственный статус, в котором
+    # S8 подтвердил бандл на дефолтной ветке. merged_unverified — мерж без
+    # зелёного гейта, задачи из него генерировать нельзя.
+    if state.status != "completed":
+        print(
+            f"task_bridge: run {state.run_id!r} в статусе "
+            f"{state.status!r}, нужен 'completed' — сперва доведите "
+            "прогон (resume/verify)"
+        )
+        return 1
     pr = deliver(
         target_dir=state.target_dir,
         repo_slug=state.repo_slug,
