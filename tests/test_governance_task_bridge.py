@@ -80,7 +80,14 @@ def test_render_tasks_structure() -> None:
     )
     assert "**Traces to:** [FR-01, NFR-02]" in text
     # последний чеклист-пункт каждой задачи — проверка, не действие
-    assert "tests/test_x.py" in text and "integration" in text
+    assert (
+        "проверка группы: tests/test_x.py (kind: integration) "
+        "зелёные на BEH-01" in text
+    )
+    assert (
+        "проверка группы: tests/test_y.py (kind: e2e) зелёные на BEH-02"
+        in text
+    )
     # чеклист с колонки 0 (отступ молча игнорируется парсером spec-runner)
     for line in text.splitlines():
         if "[ ]" in line:
@@ -231,3 +238,82 @@ def test_cli_refuses_not_completed_run(tmp_path: Path, monkeypatch, capsys) -> N
     rs.save(state)
     assert task_bridge.main(["--run-id", "r-bridge-wait"]) == 1
     assert "completed" in capsys.readouterr().out
+
+
+FEATURED_MD = """\
+---
+spec_stage: behaviour-spec
+status: draft
+owner_role: product
+---
+# Behaviour
+
+## Feature: Каркас
+
+#### BEH-01: Позитив
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: integration` `owner: qa` \
+`target: tests/test_a.py`
+
+#### BEH-02: Пустой корень
+`traces: [FR-01, FR-02]`
+- **checked_by**: `status: planned` `kind: integration` `owner: qa` \
+`target: tests/test_a.py`
+
+## Feature: Безопасность
+
+#### BEH-03: Небезопасный путь
+`traces: [FR-03]`
+- **checked_by**: `status: planned` `kind: e2e` `owner: qa` \
+`target: tests/test_b.py`
+"""
+
+
+def test_render_groups_by_feature_sections() -> None:
+    """Группировка по Feature (решение владельца 2026-08-31): одна задача
+    на секцию, полный перечень BEH внутри, зависимость цепочкой."""
+    scenarios = task_bridge.parse_behaviour(FEATURED_MD)
+    assert [s.feature for s in scenarios] == [
+        "Каркас", "Каркас", "Безопасность",
+    ]
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="workstreams/WS-x-1/spec/15-behaviour-spec.md",
+        scenarios=scenarios,
+        generated_at="2026-08-31T12:00:00",
+    )
+    assert "### TASK-001: Каркас" in text
+    assert "### TASK-002: Безопасность" in text
+    assert "### TASK-003:" not in text
+    assert "- [ ] реализовать BEH-01: Позитив" in text
+    assert "- [ ] реализовать BEH-02: Пустой корень" in text
+    assert "**Depends on:** [TASK-001]" in text
+    # traces группы — объединение без дублей
+    assert "**Traces to:** [FR-01, FR-02]" in text
+    # Source несёт диапазон группы
+    assert "#BEH-01 (—BEH-02)" in text
+
+
+def test_plain_heading_closes_feature_section() -> None:
+    """Обычный `##`-заголовок завершает Feature (приёмка PR #100, minor):
+    сценарий под ним — отдельная задача 1:1, не хвост предыдущей группы."""
+    md = FEATURED_MD + """\
+
+## Особые случаи
+
+#### BEH-04: Вне Feature
+`traces: [FR-04]`
+- **checked_by**: `status: planned` `kind: manual` `owner: qa` \
+`target: docs/manual.md`
+"""
+    scenarios = task_bridge.parse_behaviour(md)
+    assert scenarios[-1].feature is None
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/15-behaviour-spec.md",
+        scenarios=scenarios,
+        generated_at="2026-08-31T12:00:00",
+    )
+    assert "### TASK-003: Вне Feature" in text
