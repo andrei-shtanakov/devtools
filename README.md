@@ -57,7 +57,11 @@ publish-фазы будут добавлены после фиксации кр�
 
 Клавиши: `space` — выбор, `g` — цикл `date → repo → author → date`, `j/k` или
 стрелки — навигация, `enter` — отдельная tmux-сессия на issue (повтор на уже
-запущенном — подсказка attach), `q` — выход. Колонка acceptance в списке:
+запущенном — подсказка attach), `b` — отправить выбранные issues в
+behaviour-конвейер (`governance/runner.py` S0–S8: tmux-сессия
+`beh-issue-<repo>-<n>`, subject из заголовка + `repo#N`, ws-id
+`WS-<repo>-<N>`, target — локальный клон; только internal-инициатор,
+внешний — сперва человеческий triage), `q` — выход. Колонка acceptance в списке:
 `A`/`N`/`U`/`-` = accepted / not-accepted / unverifiable / n/a (n/a — issue без
 лейбла `inbox`). `*` после логина инициатора = internal (влияет на policy-гейт
 worker'а: internal → accept, external → reject).
