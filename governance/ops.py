@@ -183,11 +183,18 @@ class RealOps:
         body: str,
         label: str,
     ) -> int:
-        """gh pr create --draft --label <label> -R <slug>; номер из URL stdout."""
+        """gh pr create --draft [--label <label>] -R <slug>; номер из URL stdout.
+
+        Пустой ``label`` не передаётся вовсе (решение владельца 2026-08-31:
+        лейбл `codex-review` больше не вешается — он триггерил платный
+        CI-контур codex поверх Actions-лимита; терминальное ревью
+        review-pr.sh остаётся дефолтом и от лейбла не зависит).
+        """
+        label_args = ["--label", label] if label else []
         done = subprocess.run(
             ["gh", "pr", "create", "--draft", "-R", repo_slug,
              "--head", branch, "--title", title, "--body", body,
-             "--label", label],
+             *label_args],
             cwd=target_dir, capture_output=True, text=True, check=True,
         )
         match = _PR_URL_RE.search(done.stdout)

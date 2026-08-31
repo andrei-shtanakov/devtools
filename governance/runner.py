@@ -791,7 +791,7 @@ def _step_pr(state: RunState, ops: Ops) -> bool:
         state.branch,
         title,
         body,
-        "codex-review",
+        "",
     )
     state.pr = pr_number
     op_complete(state, key, number=pr_number)

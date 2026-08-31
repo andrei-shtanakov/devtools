@@ -144,7 +144,7 @@ def test_create_draft_pr_command_has_required_label_and_parses_number(
     ops = RealOps()
 
     number = ops.create_draft_pr(
-        "/tmp/devtools", REPO_SLUG, "feat/x", "title", "body", "codex-review",
+        "/tmp/devtools", REPO_SLUG, "feat/x", "title", "body", "",
     )
 
     assert number == 42
@@ -152,8 +152,9 @@ def test_create_draft_pr_command_has_required_label_and_parses_number(
     assert call.argv[:3] == ["gh", "pr", "create"]
     assert "--draft" in call.argv
     assert "-R" in call.argv and REPO_SLUG in call.argv
-    label_idx = call.argv.index("--label")
-    assert call.argv[label_idx + 1] == "codex-review"
+    # пустой label не передаётся вовсе (решение владельца 2026-08-31:
+    # лейбл codex-review снят — не триггерить платный CI-контур)
+    assert "--label" not in call.argv
     assert call.kwargs["cwd"] == "/tmp/devtools"
 
 
