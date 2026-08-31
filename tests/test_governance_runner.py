@@ -211,12 +211,31 @@ def test_happy_path_agent_merge(tmp_path: Path, runs_root, monkeypatch) -> None:
     assert ops.merged == [(state.pr, ops.head)]
 
 
-def test_today_reality_waits_human(tmp_path: Path, runs_root, monkeypatch) -> None:
-    """Без monkeypatch safety: реальная вендоренная копия — allowed=False."""
+def test_today_reality_agent_merges(tmp_path: Path, runs_root, monkeypatch) -> None:
+    """Без monkeypatch safety: вендоренная копия @ steward 6a70d15 —
+    allowed=True, ai-prosto=agent → зелёный document-PR мержится агентом."""
+    monkeypatch.setattr(runner, "candidate_state", _green_bundle)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
+    )
+
+    state = runner.start(**_start_kwargs(tmp_path, "r-human", ops))
+
+    assert state.ops["merge"]["status"] == "completed"
+    assert ops.merged == [(state.pr, ops.head)]
+    assert state.status == "completed"
+
+
+def test_merge_authority_human_still_waits(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Run-override merge_authority=human обгоняет разрешающую safety."""
     monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-human", ops))
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-human-override", ops, merge_authority="human")
+    )
 
     assert "merge" not in state.ops
     assert ops.merged == []
@@ -843,12 +862,15 @@ def test_verify_without_run_id_increments_attempt_after_failed_child(
 def test_resume_waiting_human_merge_open_still_waits(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    """Без monkeypatch safety: реальная вендоренная копия — waiting_human_merge."""
+    """merge_authority=human (safety с пина 6a70d15 разрешает агентский
+    мерж, ждущее состояние достигается run-override-ом)."""
     monkeypatch.setattr(runner, "candidate_state", _green_bundle)
     ops = FakeOps(review_exit=0, facts=dict(GREEN_PR_FACTS), files=GREEN_BUNDLE_FILES)
     run_id = "r-resume-open"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(
+        **_start_kwargs(tmp_path, run_id, ops, merge_authority="human")
+    )
     assert state.status == "waiting_human_merge"
 
     result = runner.resume(run_id, ops)
@@ -866,7 +888,9 @@ def test_resume_waiting_human_merge_merged_runs_s8(
     )
     run_id = "r-resume-merged"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(
+        **_start_kwargs(tmp_path, run_id, ops, merge_authority="human")
+    )
     assert state.status == "waiting_human_merge"
     assert "merge" not in state.ops
 
