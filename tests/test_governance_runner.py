@@ -2495,7 +2495,7 @@ def test_disp_backend_writes_document_config(
 
     call = next(c for c in ops.calls if c[0] == "author_disp")
     _, task, slug, config_path = call
-    assert slug == "beh-ws-1"
+    assert slug == "beh-r-disp-doc"  # slug от run_id — уникален на прогон
     config = Path(config_path).read_text(encoding="utf-8")
     assert 'document_path = "workstreams/WS-1/spec/15-behaviour-spec.md"' in config
     assert 'findings_item = "B4"' in config

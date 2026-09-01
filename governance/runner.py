@@ -734,9 +734,16 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                     "wip(bundle): charter/requirements — пред-коммит для "
                     "disp-контура document",
                 )
+            # Slug — от run_id, не ws_id (приёмка PR #106, круг 2):
+            # disp хранит состояние пайплайна по slug, и второй прогон
+            # того же WS (resume после правок, новый run после verify)
+            # упирался бы в занятый slug. run_id уникален по построению;
+            # грамматика slug — строчная, чужие символы в дефис.
+            slug = "beh-" + re.sub(
+                r"[^a-z0-9-]", "-", state.run_id.lower()
+            )
             exit_code = ops.author_disp(
-                state.target_dir, task,
-                f"beh-{state.ws_id.lower()}", str(config_path),
+                state.target_dir, task, slug, str(config_path),
             )
         else:
             exit_code = ops.author(
