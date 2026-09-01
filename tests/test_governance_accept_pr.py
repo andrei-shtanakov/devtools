@@ -117,9 +117,25 @@ def test_merge_refusal_is_reported(capsys) -> None:
     assert "мерж не прошёл" in capsys.readouterr().out
 
 
-def test_empty_rollup_is_green_second_line_is_github() -> None:
-    """Пустой rollup — green осознанно: required-чеки энфорсит сам GitHub
-    на PUT (вторая линия); репо без чеков не блокируется навсегда."""
+def test_empty_rollup_is_pending_not_green() -> None:
+    """Приёмка PR #109: пустой rollup двусмыслен (чеки могли ещё не
+    создаться на свежем push) — pending, а после потолка опроса — стоп."""
     ops = _Ops(facts_seq=[_facts(statusCheckRollup=[])])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, sleep=_no_sleep, poll_limit=2,
+    )
+    assert rc == 1
+    assert not any(c[0] == "merge" for c in ops.calls)
+
+
+def test_head_moved_after_review_stops(capsys) -> None:
+    """Приёмка PR #109: ревью привязано к head — пуш между ревью и мержем
+    останавливает приёмку, мержится только проревьюенное."""
+    ops = _Ops(facts_seq=[
+        _facts(),                         # head0 до ревью
+        _facts(headRefOid="beef" * 10),   # после чеков — head уехал
+    ])
     rc = accept_pr.accept("kapelle", "o/kapelle", 59, ops, sleep=_no_sleep)
-    assert rc == 0
+    assert rc == 1
+    assert not any(c[0] == "merge" for c in ops.calls)
+    assert "уехал" in capsys.readouterr().out

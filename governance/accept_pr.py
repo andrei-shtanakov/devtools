@@ -42,11 +42,14 @@ _POLL_SECONDS = 30
 def _checks_state(pr_facts: dict) -> str:
     """`green` | `red` | `pending` по statusCheckRollup (fail-closed).
 
-    Пустой rollup — `green` осознанно: у репо может не быть чеков вовсе, а
-    required-чеки, где они настроены, всё равно энфорсит сам GitHub на PUT
-    (вторая линия, не эта).
+    Пустой rollup — `pending`, не green (приёмка PR #109, major): пустота
+    двусмысленна — «чеков нет вовсе» неотличимо от «чеки ещё не создались»
+    на свежем push, и green-чтение мержило бы до старта CI. Репо совсем без
+    чеков упрётся в потолок опроса и уйдёт на человека — fail-closed.
     """
     checks = pr_facts.get("statusCheckRollup") or []
+    if not checks:
+        return "pending"
     states = [
         (c.get("conclusion") or c.get("status") or "").upper() for c in checks
     ]
@@ -70,6 +73,14 @@ def accept(
     Порядок «ревью до ожидания чеков» намеренный: находки дороже минут CI,
     и красное ревью не должно ждать зелёного rollup, чтобы быть увиденным.
     """
+    # Head фиксируется ДО ревью (приёмка PR #109, major): пуш между ревью
+    # и мержем подменил бы содержимое, которого ревью не видело. Совпадение
+    # проверяется после ожидания чеков; мерж идёт с пином именно этого head
+    # (PUT sha= — вторая линия той же гарантии).
+    head0 = ops.pr_facts(repo_slug, pr).get("headRefOid")
+    if not head0:
+        print("accept-pr: не удалось определить head PR — стоп")
+        return 1
     review_exit = ops.review(repo, pr)
     if review_exit != 0:
         print(
@@ -107,10 +118,14 @@ def accept(
         print("accept-pr: PR конфликтует с базой — стоп")
         return 1
 
-    head = facts.get("headRefOid")
-    if not head:
-        print("accept-pr: не удалось определить head PR — стоп")
+    if facts.get("headRefOid") != head0:
+        print(
+            "accept-pr: head PR уехал после ревью "
+            f"({str(facts.get('headRefOid'))[:7]} != {head0[:7]}) — "
+            "повторите приёмку"
+        )
         return 1
+    head = head0
     if not ops.merge(repo_slug, pr, head):
         print("accept-pr: мерж не прошёл (гонка head / правило репо) — стоп")
         return 1
