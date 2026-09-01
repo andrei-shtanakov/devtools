@@ -155,8 +155,10 @@ class FakeOps:
         path.write_text(body, encoding="utf-8")
         return 0
 
-    def author_disp(self, target_dir: str, task: str) -> int:
-        self.calls.append(("author_disp", task))
+    def author_disp(
+        self, target_dir: str, task: str, slug: str, config_path: str
+    ) -> int:
+        self.calls.append(("author_disp", task, slug, config_path))
         self.author_disp_calls.append((target_dir, task))
         return self.author_disp_exit
 
@@ -2477,3 +2479,26 @@ def test_parser_takes_path_from_header_tail_not_forged_title() -> None:
         "- confidence: high → БЛОКИРУЕТ\n"
     )
     assert runner._file_missing_refute_candidates(traversal) is None
+
+
+def test_disp_backend_writes_document_config(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Контур document (disputatio#52 → PR #64): конфиг пишется в каталог
+    прогона (document_path + оператор-чеклист, findings_item), slug — из
+    ws_id, путь конфига уходит в ops.author_disp."""
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+                  s8_exit=0)
+    state = runner.start(**_start_kwargs(
+        tmp_path, "r-disp-doc", ops, author_backend="disp",
+    ))
+
+    call = next(c for c in ops.calls if c[0] == "author_disp")
+    _, task, slug, config_path = call
+    assert slug == "beh-ws-1"
+    config = Path(config_path).read_text(encoding="utf-8")
+    assert 'document_path = "workstreams/WS-1/spec/15-behaviour-spec.md"' in config
+    assert 'findings_item = "B4"' in config
+    assert "#### BEH-NN" in config
+    assert Path(config_path).parent == runner.run_dir("r-disp-doc")
+    assert state.ops["author-behaviour"]["status"] == "completed"

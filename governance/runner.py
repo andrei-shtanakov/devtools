@@ -656,6 +656,33 @@ def _disp_behaviour_task(subject: str, bundle_path: str) -> str:
     )
 
 
+def _disp_doc_config(bundle_path: str) -> str:
+    """TOML-конфиг вида `document` для disp (disputatio#52 → PR #64).
+
+    Форма секции `[pipeline]` и есть объявление вида; чеклист `doc`
+    объявляем целиком мы (вендоренного набора у контура нет), пункты —
+    зеркало DSL-гейта S4 (GC-DSL-EMPTY/GC-BEH-*); `findings_item`
+    обязателен — пункт «нет blocker/major-находок». Граница правок контура —
+    ровно `document_path` (doc-scope), что для авторинга одного узла бандла
+    и требуется.
+    """
+    return (
+        "[pipeline]\n"
+        f'document_path = "{bundle_path}"\n'
+        "\n"
+        "[pipeline.checklists.doc]\n"
+        'findings_item = "B4"\n'
+        "\n"
+        "[pipeline.checklists.doc.items]\n"
+        'B1 = "каждый сценарий — заголовок `#### BEH-NN: <title>`"\n'
+        'B2 = "каждый BEH несёт строку `traces: [FR-NN, ...]` c '
+        'существующими FR из 10-requirements.md"\n'
+        'B3 = "каждый BEH несёт пункт `- **checked_by**:` '
+        '(status/kind/owner/target)"\n'
+        'B4 = "нет blocker/major-находок"\n'
+    )
+
+
 def _step_authoring(state: RunState, ops: Ops) -> bool:
     """S2/S3: charter/requirements/behaviour-spec — файл есть → пропустить.
 
@@ -665,14 +692,13 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     осознанная для этапа B1; `disp`-цикл и критерий сходимости — предмет B2
     (OQ-1, `docs/superpowers/specs/2026-08-30-behaviour-spec-pipeline-design.md`).
 
-    B2 Task 2: `state.author_backend == "disp"` переключает ТОЛЬКО
-    behaviour-spec узел на `ops.author_disp` (`disp run --mode develop`) —
-    спека §5 называет `disp --mode document`, такого режима у disp нет
-    (факт 2026-08-30), используем `run --mode develop`; выравнивание со
-    спекой — inbox-issue в disputatio (OQ-1). charter/requirements всегда
-    остаются на `ops.author` (codex) независимо от `author_backend` —
-    disp-цикл осмыслен для полируемого документа, не для одноразовых
-    артефактов.
+    `state.author_backend == "disp"` переключает ТОЛЬКО behaviour-spec узел
+    на `ops.author_disp` — контур `disp pipeline run` вида `document`
+    (disputatio#52 → PR #64, 2026-09-01: OQ-1 закрыт видом пайплайна, не
+    отдельным --mode; конфиг с оператор-чеклистом пишется в каталог прогона,
+    см. `_disp_doc_config`). charter/requirements всегда остаются на
+    `ops.author` (codex) независимо от `author_backend` — полировочный цикл
+    осмыслен для итерируемого документа, не для одноразовых артефактов.
     """
     for key, kind, filename in _AUTHOR_STEPS:
         if op_status(state, key) == "completed":
@@ -685,7 +711,14 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
         if kind == "behaviour-spec" and state.author_backend == "disp":
             bundle_path = f"{state.bundle_dir}/{filename}"
             task = _disp_behaviour_task(state.subject, bundle_path)
-            exit_code = ops.author_disp(state.target_dir, task)
+            config_path = run_dir(state.run_id) / "disp-doc.toml"
+            config_path.write_text(
+                _disp_doc_config(bundle_path), encoding="utf-8"
+            )
+            exit_code = ops.author_disp(
+                state.target_dir, task,
+                f"beh-{state.ws_id.lower()}", str(config_path),
+            )
         else:
             exit_code = ops.author(
                 state.target_dir, kind, state.subject, state.bundle_dir

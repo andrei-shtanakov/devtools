@@ -75,7 +75,9 @@ class Ops(Protocol):
         self, target_dir: str, kind: str, subject: str, bundle_dir: str
     ) -> int: ...
 
-    def author_disp(self, target_dir: str, task: str) -> int: ...
+    def author_disp(
+        self, target_dir: str, task: str, slug: str, config_path: str
+    ) -> int: ...
 
     def commit_paths(
         self, target_dir: str, paths: list[str], message: str
@@ -278,16 +280,20 @@ class RealOps:
         return done.returncode
 
     def latest_review_body(self, repo_slug: str, pr: int) -> str | None:
-        """Тело НОВЕЙШЕГО ревью ai-prosto на PR; нет/сбой -> None.
+        """Тело НОВЕЙШЕГО ревью $REVIEW_LOGIN на PR; нет/сбой -> None.
 
-        None читается вызывающим как «опровергать нечего» (fail-closed в
-        сторону стопа на человеке), поэтому сбой gh не маскируется пустой
-        строкой и не роняет стоп-путь S6.
+        Личность ревьюера — env `REVIEW_LOGIN` с тем же дефолтом, что у
+        `review-pr.sh:66` (запаркованный minor приёмки PR #102): хардкод
+        расходился бы с конфигурируемым каноном молча — публикация ушла бы
+        под новый логин, а поиск тела остался бы на старом, и
+        авто-опровержение беззвучно умерло бы. None читается вызывающим как
+        «опровергать нечего» (fail-closed в сторону стопа на человеке).
         """
+        login = os.environ.get("REVIEW_LOGIN", "ai-prosto")
         done = subprocess.run(
             ["gh", "api", f"repos/{repo_slug}/pulls/{pr}/reviews",
              "--jq",
-             '[.[] | select(.user.login == "ai-prosto")] | last | .body'],
+             f'[.[] | select(.user.login == "{login}")] | last | .body'],
             capture_output=True, text=True,
         )
         if done.returncode != 0:
@@ -401,20 +407,22 @@ class RealOps:
         )
         return done.returncode
 
-    def author_disp(self, target_dir: str, task: str) -> int:
-        """disp `run --mode develop` — opt-in авторинг-бэкенд behaviour-spec узла.
+    def author_disp(
+        self, target_dir: str, task: str, slug: str, config_path: str
+    ) -> int:
+        """disp `pipeline run` (вид `document`) — opt-in бэкенд behaviour-узла.
 
-        Спека §5 называла `disp --mode document`; такого РЕЖИМА у disp нет и
-        не появилось. OQ-1 закрыт иначе (disputatio#52 → PR #64, 2026-09-01):
-        приехал ВИД пайплайна `document`, выводимый из формы секции
-        `[pipeline]` (`document_path`), команды прежние — `disp pipeline run`.
-        Переключение на него — @id:behaviour-authoring-document-mode в
-        `TODO.md` (нужен конфиг с оператор-чеклистом `doc`), не предмет
-        этого коммита; до него используется `run --mode develop`.
+        OQ-1 закрыт (disputatio#52 → PR #64, 2026-09-01): вид пайплайна
+        `document` выводится из формы секции `[pipeline]` конфига
+        (`document_path` + оператор-чеклист `doc`). Конфиг пишет runner в
+        каталоге прогона (`config_path` — абсолютный путь), граница правок —
+        ровно `document_path` (doc-scope гейт контура). Суррогат
+        `run --mode develop` этим вызовом снят.
         """
         done = subprocess.run(
             ["uv", "run", "--project", str(DEVTOOLS_ROOT.parent / "disputatio"),
-             "disp", "run", "--mode", "develop", "--root", target_dir, task],
+             "disp", "pipeline", "run", "--task", task, "--slug", slug,
+             "--config", config_path, "--root", target_dir],
             cwd=target_dir,
         )
         return done.returncode
