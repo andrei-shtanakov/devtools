@@ -2528,3 +2528,14 @@ def test_disp_backend_precommits_upstream_nodes(
         "workstreams/WS-1/spec/10-requirements.md",
     ]
     assert "пред-коммит" in message
+
+
+def test_disp_slug_is_bounded_and_deterministic() -> None:
+    """Приёмка PR #106, круг 3 (minor): slug ≤64 символов при безразмерном
+    run_id; усечение детерминировано (sha1-суффикс)."""
+    long_id = "WS-" + "x" * 80 + "-a1"
+    slug = runner._disp_slug(long_id)
+    assert len(slug) <= 64
+    assert slug == runner._disp_slug(long_id)  # детерминизм
+    assert slug != runner._disp_slug(long_id + "y")  # различимость
+    assert runner._disp_slug("WS-1-a2b3c4") == "beh-ws-1-a2b3c4"

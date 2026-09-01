@@ -563,3 +563,18 @@ def test_checkout_and_pull_pull_failure_raises_runtime_error(monkeypatch):
     with pytest.raises(RuntimeError):
         ops.checkout_and_pull("/tmp/devtools", "master")
     assert len(calls_seen) == 2  # switch ran, then pull failed
+
+
+def test_author_disp_resumes_when_state_exists(monkeypatch, tmp_path):
+    """Приёмка PR #106, круг 3 (major): состояние .disputatio/<slug> на
+    диске → pipeline resume, не повторный run по занятому slug."""
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+    (tmp_path / ".disputatio" / "beh-r1").mkdir(parents=True)
+
+    ops.author_disp(str(tmp_path), "task", "beh-r1", "/tmp/c.toml")
+    assert calls[0].argv[4:7] == ["disp", "pipeline", "resume"]
+    assert "--task" not in calls[0].argv
+
+    ops.author_disp(str(tmp_path), "task", "beh-other", "/tmp/c.toml")
+    assert calls[1].argv[4:7] == ["disp", "pipeline", "run"]

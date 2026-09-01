@@ -18,6 +18,7 @@ PR человеку (`waiting_human_merge`), S8 не запускается са
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import time
@@ -656,6 +657,21 @@ def _disp_behaviour_task(subject: str, bundle_path: str) -> str:
     )
 
 
+def _disp_slug(run_id: str) -> str:
+    """Slug disp-пайплайна: от run_id (уникален на прогон), ≤64 символов.
+
+    Круг 2 приёмки PR #106: slug от ws_id сталкивался на втором прогоне
+    того же WS. Круг 3 (minor): грамматика disp (§4.1, pipeline_paths)
+    ограничивает slug 64 символами, а run_id у runner безразмерный —
+    длинный хвост детерминированно заменяется sha1-суффиксом.
+    """
+    base = "beh-" + re.sub(r"[^a-z0-9-]", "-", run_id.lower())
+    if len(base) <= 64:
+        return base
+    digest = hashlib.sha1(run_id.encode("utf-8")).hexdigest()[:12]
+    return base[:51] + "-" + digest
+
+
 def _disp_doc_config(bundle_path: str) -> str:
     """TOML-конфиг вида `document` для disp (disputatio#52 → PR #64).
 
@@ -734,14 +750,7 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                     "wip(bundle): charter/requirements — пред-коммит для "
                     "disp-контура document",
                 )
-            # Slug — от run_id, не ws_id (приёмка PR #106, круг 2):
-            # disp хранит состояние пайплайна по slug, и второй прогон
-            # того же WS (resume после правок, новый run после verify)
-            # упирался бы в занятый slug. run_id уникален по построению;
-            # грамматика slug — строчная, чужие символы в дефис.
-            slug = "beh-" + re.sub(
-                r"[^a-z0-9-]", "-", state.run_id.lower()
-            )
+            slug = _disp_slug(state.run_id)
             exit_code = ops.author_disp(
                 state.target_dir, task, slug, str(config_path),
             )

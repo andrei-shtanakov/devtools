@@ -419,12 +419,21 @@ class RealOps:
         ровно `document_path` (doc-scope гейт контура). Суррогат
         `run --mode develop` этим вызовом снят.
         """
-        done = subprocess.run(
-            ["uv", "run", "--project", str(DEVTOOLS_ROOT.parent / "disputatio"),
-             "disp", "pipeline", "run", "--task", task, "--slug", slug,
-             "--config", config_path, "--root", target_dir],
-            cwd=target_dir,
-        )
+        # run vs resume — reconciliation по факту на диске (приёмка PR #106,
+        # круг 3, major): disp хранит состояние пайплайна в
+        # <root>/.disputatio/<slug>; повтор после сбоя обязан продолжать
+        # (`pipeline resume`), а не стартовать заново — `run` по занятому
+        # slug отказывает. Состояния нет (сбой ДО старта disp) — обычный run.
+        state_exists = (Path(target_dir) / ".disputatio" / slug).exists()
+        cmd = ["uv", "run", "--project",
+               str(DEVTOOLS_ROOT.parent / "disputatio"), "disp", "pipeline"]
+        if state_exists:
+            cmd += ["resume", "--slug", slug,
+                    "--config", config_path, "--root", target_dir]
+        else:
+            cmd += ["run", "--task", task, "--slug", slug,
+                    "--config", config_path, "--root", target_dir]
+        done = subprocess.run(cmd, cwd=target_dir)
         return done.returncode
 
     def commit_paths(self, target_dir: str, paths: list[str], message: str) -> None:
