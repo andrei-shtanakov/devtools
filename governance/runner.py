@@ -697,6 +697,24 @@ def _disp_doc_config(bundle_path: str) -> str:
         'B3 = "каждый BEH несёт пункт `- **checked_by**:` '
         '(status/kind/owner/target)"\n'
         'B4 = "нет blocker/major-находок"\n'
+        "\n"
+        # Профиль сессии обязателен (приёмка PR #106, круг 10):
+        # load_session_profile требует [agents.author]/[agents.reviewer] и
+        # все четыре лимита. Значения — документированный канон disp
+        # (docs/document-pipeline.md): claude_code/opus, лимиты примера.
+        "[agents.author]\n"
+        'adapter = "claude_code"\n'
+        'model = "opus"\n'
+        "\n"
+        "[agents.reviewer]\n"
+        'adapter = "claude_code"\n'
+        'model = "opus"\n'
+        "\n"
+        "[limits]\n"
+        "max_rounds = 6\n"
+        "max_total_tokens = 2000000\n"
+        "max_wall_seconds = 7200\n"
+        "schema_retries = 2\n"
     )
 
 

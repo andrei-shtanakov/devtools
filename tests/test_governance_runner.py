@@ -2500,6 +2500,11 @@ def test_disp_backend_writes_document_config(
     assert 'document_path = "workstreams/WS-1/spec/15-behaviour-spec.md"' in config
     assert 'findings_item = "B4"' in config
     assert "#### BEH-NN" in config
+    # профиль сессии обязателен для load_session_profile (круг 10)
+    assert "[agents.author]" in config and "[agents.reviewer]" in config
+    for limit in ("max_rounds", "max_total_tokens", "max_wall_seconds",
+                  "schema_retries"):
+        assert limit in config
     assert Path(config_path).parent == runner.run_dir("r-disp-doc")
     assert state.ops["author-behaviour"]["status"] == "completed"
 
