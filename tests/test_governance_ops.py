@@ -573,11 +573,28 @@ def test_author_disp_resumes_when_state_exists(monkeypatch, tmp_path):
     (tmp_path / ".disputatio" / "pipelines" / "beh-r1").mkdir(parents=True)
 
     ops.author_disp(str(tmp_path), "task", "beh-r1", "/tmp/c.toml")
-    assert calls[0].argv[4:8] == [
-        "disp", "pipeline", "resume", "--adopt-external",
-    ]
+    # чистый resume первым; --adopt-external без внешних правок недопустим
+    assert calls[0].argv[4:7] == ["disp", "pipeline", "resume"]
+    assert "--adopt-external" not in calls[0].argv
     assert "--task" not in calls[0].argv
-    assert "--discard-round" not in calls[0].argv  # ручные правки не теряем
 
     ops.author_disp(str(tmp_path), "task", "beh-other", "/tmp/c.toml")
     assert calls[1].argv[4:7] == ["disp", "pipeline", "run"]
+
+
+def test_author_disp_resume_falls_back_to_adopt_external(
+    monkeypatch, tmp_path
+):
+    """Приёмка PR #106, круги 5–6: отказ чистого resume (внешняя правка) →
+    одна повторная попытка с --adopt-external; --discard-round — никогда."""
+    calls = _install_fake_run(monkeypatch, returncode=3)
+    ops = RealOps()
+    (tmp_path / ".disputatio" / "pipelines" / "beh-r1").mkdir(parents=True)
+
+    rc = ops.author_disp(str(tmp_path), "task", "beh-r1", "/tmp/c.toml")
+
+    assert rc == 3
+    assert calls[0].argv[4:7] == ["disp", "pipeline", "resume"]
+    assert "--adopt-external" not in calls[0].argv
+    assert "--adopt-external" in calls[1].argv
+    assert not any("--discard-round" in c.argv for c in calls)

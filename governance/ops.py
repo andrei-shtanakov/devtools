@@ -430,16 +430,25 @@ class RealOps:
         cmd = ["uv", "run", "--project",
                str(DEVTOOLS_ROOT.parent / "disputatio"), "disp", "pipeline"]
         if state_exists:
-            # --adopt-external (приёмка PR #106, круг 5): между stopped_author
-            # и resume бандл мог править человек — это ШТАТНЫЙ путь конвейера
-            # (тот же контракт, что у S4/S6-resume), и правка принимается как
-            # внешняя ревизия. --discard-round не используется никогда: он
-            # теряет ручные правки.
-            cmd += ["resume", "--adopt-external", "--slug", slug,
-                    "--config", config_path, "--root", target_dir]
-        else:
-            cmd += ["run", "--task", task, "--slug", slug,
-                    "--config", config_path, "--root", target_dir]
+            # Resume в две попытки (приёмка PR #106, круги 5–6): чистый
+            # resume первым (без внешних правок --adopt-external недопустим);
+            # отказал — повтор с --adopt-external: между stopped_author и
+            # resume бандл мог править человек (штатный путь конвейера,
+            # контракт S4/S6-resume), правка принимается как внешняя ревизия.
+            # --discard-round не используется никогда: теряет ручные правки.
+            tail = ["--slug", slug, "--config", config_path,
+                    "--root", target_dir]
+            done = subprocess.run(
+                cmd + ["resume", *tail], cwd=target_dir,
+            )
+            if done.returncode == 0:
+                return 0
+            done = subprocess.run(
+                cmd + ["resume", "--adopt-external", *tail], cwd=target_dir,
+            )
+            return done.returncode
+        cmd += ["run", "--task", task, "--slug", slug,
+                "--config", config_path, "--root", target_dir]
         done = subprocess.run(cmd, cwd=target_dir)
         return done.returncode
 
