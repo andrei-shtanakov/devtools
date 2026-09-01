@@ -424,7 +424,9 @@ class RealOps:
         # <root>/.disputatio/<slug>; повтор после сбоя обязан продолжать
         # (`pipeline resume`), а не стартовать заново — `run` по занятому
         # slug отказывает. Состояния нет (сбой ДО старта disp) — обычный run.
-        state_exists = (Path(target_dir) / ".disputatio" / slug).exists()
+        state_exists = (
+            Path(target_dir) / ".disputatio" / "pipelines" / slug
+        ).exists()  # канон путей disp: pipeline_paths (SPEC-002 §4.1)
         cmd = ["uv", "run", "--project",
                str(DEVTOOLS_ROOT.parent / "disputatio"), "disp", "pipeline"]
         if state_exists:

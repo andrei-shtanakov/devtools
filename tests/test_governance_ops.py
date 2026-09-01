@@ -570,7 +570,7 @@ def test_author_disp_resumes_when_state_exists(monkeypatch, tmp_path):
     диске → pipeline resume, не повторный run по занятому slug."""
     calls = _install_fake_run(monkeypatch, returncode=0)
     ops = RealOps()
-    (tmp_path / ".disputatio" / "beh-r1").mkdir(parents=True)
+    (tmp_path / ".disputatio" / "pipelines" / "beh-r1").mkdir(parents=True)
 
     ops.author_disp(str(tmp_path), "task", "beh-r1", "/tmp/c.toml")
     assert calls[0].argv[4:7] == ["disp", "pipeline", "resume"]
