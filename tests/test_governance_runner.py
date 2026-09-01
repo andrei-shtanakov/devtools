@@ -2502,3 +2502,29 @@ def test_disp_backend_writes_document_config(
     assert "#### BEH-NN" in config
     assert Path(config_path).parent == runner.run_dir("r-disp-doc")
     assert state.ops["author-behaviour"]["status"] == "completed"
+
+
+def test_disp_backend_precommits_upstream_nodes(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Приёмка PR #106, blocker: disp pipeline run требует чистое дерево —
+    charter/requirements коммитятся ДО вызова disp; behaviour-файл
+    закоммитит штатный S3."""
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+                  s8_exit=0)
+    runner.start(**_start_kwargs(
+        tmp_path, "r-disp-precommit", ops, author_backend="disp",
+    ))
+
+    names = [c[0] for c in ops.calls]
+    pre = names.index("commit_paths")
+    disp = names.index("author_disp")
+    assert pre < disp, "пред-коммит должен идти до disp"
+    first_commit = next(c for c in ops.calls if c[0] == "commit_paths")
+    # FakeOps.commit_paths журналирует (target, paths, message) в committed
+    target, paths, message = ops.committed[0]
+    assert sorted(paths) == [
+        "workstreams/WS-1/spec/00-charter.md",
+        "workstreams/WS-1/spec/10-requirements.md",
+    ]
+    assert "пред-коммит" in message

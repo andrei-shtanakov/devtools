@@ -715,6 +715,25 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
             config_path.write_text(
                 _disp_doc_config(bundle_path), encoding="utf-8"
             )
+            # Пред-коммит upstream-узлов (приёмка PR #106, blocker):
+            # `disp pipeline run` безусловно требует чистое дерево
+            # (pipeline_config: tracked-изменения и untracked вне
+            # .disputatio блокируют), а цикл выше только что создал
+            # charter/requirements незакоммиченными. Коммитим ровно их —
+            # ветка прогона наша; behaviour-файл после disp закоммитит
+            # штатный S3.
+            upstream_paths = [
+                f"{state.bundle_dir}/{fn}"
+                for _k, _kind, fn in _AUTHOR_STEPS
+                if fn != filename
+                and (Path(state.target_dir) / state.bundle_dir / fn).exists()
+            ]
+            if upstream_paths:
+                ops.commit_paths(
+                    state.target_dir, upstream_paths,
+                    "wip(bundle): charter/requirements — пред-коммит для "
+                    "disp-контура document",
+                )
             exit_code = ops.author_disp(
                 state.target_dir, task,
                 f"beh-{state.ws_id.lower()}", str(config_path),
