@@ -573,8 +573,11 @@ def test_author_disp_resumes_when_state_exists(monkeypatch, tmp_path):
     (tmp_path / ".disputatio" / "pipelines" / "beh-r1").mkdir(parents=True)
 
     ops.author_disp(str(tmp_path), "task", "beh-r1", "/tmp/c.toml")
-    assert calls[0].argv[4:7] == ["disp", "pipeline", "resume"]
+    assert calls[0].argv[4:8] == [
+        "disp", "pipeline", "resume", "--adopt-external",
+    ]
     assert "--task" not in calls[0].argv
+    assert "--discard-round" not in calls[0].argv  # ручные правки не теряем
 
     ops.author_disp(str(tmp_path), "task", "beh-other", "/tmp/c.toml")
     assert calls[1].argv[4:7] == ["disp", "pipeline", "run"]

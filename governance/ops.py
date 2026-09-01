@@ -430,7 +430,12 @@ class RealOps:
         cmd = ["uv", "run", "--project",
                str(DEVTOOLS_ROOT.parent / "disputatio"), "disp", "pipeline"]
         if state_exists:
-            cmd += ["resume", "--slug", slug,
+            # --adopt-external (приёмка PR #106, круг 5): между stopped_author
+            # и resume бандл мог править человек — это ШТАТНЫЙ путь конвейера
+            # (тот же контракт, что у S4/S6-resume), и правка принимается как
+            # внешняя ревизия. --discard-round не используется никогда: он
+            # теряет ручные правки.
+            cmd += ["resume", "--adopt-external", "--slug", slug,
                     "--config", config_path, "--root", target_dir]
         else:
             cmd += ["run", "--task", task, "--slug", slug,
