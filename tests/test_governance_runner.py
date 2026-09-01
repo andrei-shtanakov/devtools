@@ -2495,7 +2495,7 @@ def test_disp_backend_writes_document_config(
 
     call = next(c for c in ops.calls if c[0] == "author_disp")
     _, task, slug, config_path = call
-    assert slug == "beh-r-disp-doc"  # slug от run_id — уникален на прогон
+    assert slug.startswith("beh-r-disp-doc-")  # slug от run_id + дайджест
     config = Path(config_path).read_text(encoding="utf-8")
     assert 'document_path = "workstreams/WS-1/spec/15-behaviour-spec.md"' in config
     assert 'findings_item = "B4"' in config
@@ -2538,4 +2538,6 @@ def test_disp_slug_is_bounded_and_deterministic() -> None:
     assert len(slug) <= 64
     assert slug == runner._disp_slug(long_id)  # детерминизм
     assert slug != runner._disp_slug(long_id + "y")  # различимость
-    assert runner._disp_slug("WS-1-a2b3c4") == "beh-ws-1-a2b3c4"
+    # санитизация не схлопывает разные run_id в один slug (круг 8)
+    assert runner._disp_slug("ws_1-a") != runner._disp_slug("ws.1-a")
+    assert runner._disp_slug("WS-1-a2b3c4").startswith("beh-ws-1-a2b3c4-")

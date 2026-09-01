@@ -665,11 +665,12 @@ def _disp_slug(run_id: str) -> str:
     ограничивает slug 64 символами, а run_id у runner безразмерный —
     длинный хвост детерминированно заменяется sha1-суффиксом.
     """
-    base = "beh-" + re.sub(r"[^a-z0-9-]", "-", run_id.lower())
-    if len(base) <= 64:
-        return base
+    # Дайджест — ВСЕГДА (приёмка PR #106, круг 8): санитизация схлопывает
+    # разные run_id (`ws_1`/`ws.1` -> `ws-1`) в один slug; sha1 исходного
+    # run_id делает slug инъективным при любой длине. 4+47+1+12 <= 64.
     digest = hashlib.sha1(run_id.encode("utf-8")).hexdigest()[:12]
-    return base[:51] + "-" + digest
+    base = re.sub(r"[^a-z0-9-]", "-", run_id.lower())[:47]
+    return f"beh-{base}-{digest}"
 
 
 def _disp_doc_config(bundle_path: str) -> str:
