@@ -701,7 +701,8 @@ def _disp_doc_config(bundle_path: str) -> str:
 
 
 def _step_authoring(state: RunState, ops: Ops) -> bool:
-    """S2/S3: charter/requirements/behaviour-spec — файл есть → пропустить.
+    """S2/S3: charter/requirements/behaviour-spec (файл есть → пропуск,
+    но только для codex-узлов — см. комментарий в цикле).
 
     B1-рулинг (финальное ревью F-6): все три узла авторятся общим
     `ops.author` (`codex exec --ephemeral`), а не циклом `disp --mode
@@ -720,12 +721,21 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     for key, kind, filename in _AUTHOR_STEPS:
         if op_status(state, key) == "completed":
             continue
+        disp_node = (
+            kind == "behaviour-spec" and state.author_backend == "disp"
+        )
         target = Path(state.target_dir) / state.bundle_dir / filename
-        if target.exists():
+        # Пропуск-по-существованию-файла — ТОЛЬКО codex-ветке (приёмка
+        # PR #106, круг 9): там он защищает от повторного платного вызова
+        # на resume. disp пишет документ ПОСРЕДИ своего пайплайна — файл на
+        # диске не значит «полировка завершена», и пропуск обходил бы
+        # незавершённый чеклист; disp-ветка всегда зовёт author_disp, чья
+        # run/resume-реконсиляция идемпотентна по собственному состоянию.
+        if target.exists() and not disp_node:
             op_complete(state, key, skipped=True)
             continue
         _ensure_started(state, key)
-        if kind == "behaviour-spec" and state.author_backend == "disp":
+        if disp_node:
             bundle_path = f"{state.bundle_dir}/{filename}"
             task = _disp_behaviour_task(state.subject, bundle_path)
             config_path = run_dir(state.run_id) / "disp-doc.toml"

@@ -2541,3 +2541,36 @@ def test_disp_slug_is_bounded_and_deterministic() -> None:
     # санитизация не схлопывает разные run_id в один slug (круг 8)
     assert runner._disp_slug("ws_1-a") != runner._disp_slug("ws.1-a")
     assert runner._disp_slug("WS-1-a2b3c4").startswith("beh-ws-1-a2b3c4-")
+
+
+def test_disp_backend_resumes_even_when_file_exists(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Приёмка PR #106, круг 9: disp пишет документ ПОСРЕДИ пайплайна —
+    существующий файл не значит «полировка завершена»; disp-узел всегда
+    зовёт author_disp (его resume идемпотентен), пропуск — только codex."""
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+                  s8_exit=0)
+    kwargs = _start_kwargs(
+        tmp_path, "r-disp-file-exists", ops, author_backend="disp",
+    )
+    bundle = Path(kwargs["target_dir"]) / kwargs["bundle_dir"]
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "15-behaviour-spec.md").write_text(
+        "#### BEH-01: x\n`traces: [FR-01]`\n- **checked_by**: x\n"
+    )
+    state = runner.start(**kwargs)
+
+    assert any(c[0] == "author_disp" for c in ops.calls)
+    assert state.ops["author-behaviour"].get("skipped") is not True
+    # codex-узлы (charter/requirements) — прежняя семантика пропуска
+    ops2 = FakeOps(review_exit=0, facts=GREEN_PR_FACTS,
+                   files=GREEN_BUNDLE_FILES, s8_exit=0)
+    kwargs2 = _start_kwargs(tmp_path, "r-codex-file-exists", ops2)
+    bundle2 = Path(kwargs2["target_dir"]) / kwargs2["bundle_dir"]
+    bundle2.mkdir(parents=True, exist_ok=True)
+    (bundle2 / "00-charter.md").write_text("# charter\n")
+    runner.start(**kwargs2)
+    charter_authors = [c for c in ops2.calls
+                       if c[0] == "author" and c[1] == "charter"]
+    assert charter_authors == []  # пропуск по файлу сохранён для codex
