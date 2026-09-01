@@ -25,10 +25,12 @@ andrei-shtanakov. Полный цикл «sync + повторный run до rem
 from __future__ import annotations
 
 import argparse
+import re
+import subprocess
 import time
 from collections.abc import Callable
 
-from governance.ops import Ops, RealOps
+from governance.ops import DEVTOOLS_ROOT, Ops, RealOps
 
 _AUTHORITY_PREFIXES = (".github/", "profiles/")
 _PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED", ""}
@@ -148,16 +150,42 @@ def accept(
     return 0
 
 
+def _origin_slug(url: str) -> str | None:
+    """`owner/name` из origin-URL (ssh/https, .git-суффикс опционален)."""
+    match = re.search(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?/?$", url.strip())
+    return f"{match.group(1)}/{match.group(2)}".lower() if match else None
+
+
 def main(argv: list[str] | None = None) -> int:
-    """CLI-обвязка; вся политика — в `accept()` (тестируется стабом Ops)."""
+    """CLI-обвязка; вся политика — в `accept()` (тестируется стабом Ops).
+
+    Гард владельца (приёмка PR #109, круг 3): `review` работает через
+    ЛОКАЛЬНЫЙ чекаут `../<repo>` (так устроен review-pr.sh), а `merge` — по
+    слагу `--owner/--repo`; расхождение означало бы «отревьюили один репо,
+    смержили другой». Origin чекаута обязан совпасть со слагом.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="имя репо (kapelle)")
     parser.add_argument("--pr", required=True, type=int)
     parser.add_argument("--owner", default="andrei-shtanakov")
     args = parser.parse_args(argv)
-    return accept(
-        args.repo, f"{args.owner}/{args.repo}", args.pr, RealOps(),
+    repo_slug = f"{args.owner}/{args.repo}".lower()
+    origin = subprocess.run(
+        ["git", "-C", str(DEVTOOLS_ROOT.parent / args.repo),
+         "remote", "get-url", "origin"],
+        capture_output=True, text=True,
     )
+    checkout_slug = (
+        _origin_slug(origin.stdout) if origin.returncode == 0 else None
+    )
+    if checkout_slug != repo_slug:
+        print(
+            f"accept-pr: origin локального чекаута ../{args.repo} = "
+            f"{checkout_slug!r}, а мерж адресован {repo_slug!r} — стоп "
+            "(ревью и мерж обязаны смотреть в один репозиторий)"
+        )
+        return 2
+    return accept(args.repo, repo_slug, args.pr, RealOps())
 
 
 if __name__ == "__main__":

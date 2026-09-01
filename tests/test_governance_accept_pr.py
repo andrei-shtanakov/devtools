@@ -159,3 +159,28 @@ def test_unknown_then_mergeable_proceeds() -> None:
     rc = accept_pr.accept("kapelle", "o/kapelle", 59, ops, sleep=_no_sleep)
     assert rc == 0
     assert any(c[0] == "merge" for c in ops.calls)
+
+
+def test_origin_slug_parses_ssh_and_https() -> None:
+    """Гард владельца (приёмка PR #109, круг 3): парсер origin-URL."""
+    f = accept_pr._origin_slug
+    assert f("git@github.com:andrei-shtanakov/kapelle.git") == \
+        "andrei-shtanakov/kapelle"
+    assert f("https://github.com/Andrei-Shtanakov/kapelle") == \
+        "andrei-shtanakov/kapelle"
+    assert f("не-url") is None
+
+
+def test_main_refuses_owner_checkout_mismatch(monkeypatch, capsys) -> None:
+    import types
+
+    def fake_run(argv, **kwargs):
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout="git@github.com:someone-else/kapelle.git\n", stderr="",
+        )
+
+    monkeypatch.setattr(accept_pr.subprocess, "run", fake_run)
+    rc = accept_pr.main(["--repo", "kapelle", "--pr", "1"])
+    assert rc == 2
+    assert "один репозиторий" in capsys.readouterr().out
