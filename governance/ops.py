@@ -404,11 +404,13 @@ class RealOps:
     def author_disp(self, target_dir: str, task: str) -> int:
         """disp `run --mode develop` — opt-in авторинг-бэкенд behaviour-spec узла.
 
-        Спека §5 называет `disp --mode document` — такого режима у disp нет
-        (факт 2026-08-30, `disp --help` пинованной копии: только `run --mode
-        {develop,analyze}` и `pipeline`); используется `run --mode develop`.
-        Выравнивание спеки с фактом — inbox-issue в disputatio (OQ-1), не
-        предмет этого модуля.
+        Спека §5 называла `disp --mode document`; такого РЕЖИМА у disp нет и
+        не появилось. OQ-1 закрыт иначе (disputatio#52 → PR #64, 2026-09-01):
+        приехал ВИД пайплайна `document`, выводимый из формы секции
+        `[pipeline]` (`document_path`), команды прежние — `disp pipeline run`.
+        Переключение на него — @id:behaviour-authoring-document-mode в
+        `TODO.md` (нужен конфиг с оператор-чеклистом `doc`), не предмет
+        этого коммита; до него используется `run --mode develop`.
         """
         done = subprocess.run(
             ["uv", "run", "--project", str(DEVTOOLS_ROOT.parent / "disputatio"),
