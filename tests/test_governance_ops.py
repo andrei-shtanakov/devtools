@@ -573,13 +573,15 @@ def test_author_disp_resumes_when_state_exists(monkeypatch, tmp_path):
     (tmp_path / ".disputatio" / "pipelines" / "beh-r1").mkdir(parents=True)
 
     ops.author_disp(str(tmp_path), "task", "beh-r1", "/tmp/c.toml")
-    # чистый resume первым; --adopt-external без внешних правок недопустим
-    assert calls[0].argv[4:7] == ["disp", "pipeline", "resume"]
-    assert "--adopt-external" not in calls[0].argv
-    assert "--task" not in calls[0].argv
+    # сперва status (integrity), затем чистый resume; --adopt-external
+    # без внешних правок недопустим
+    assert calls[0].argv[4:7] == ["disp", "pipeline", "status"]
+    assert calls[1].argv[4:7] == ["disp", "pipeline", "resume"]
+    assert "--adopt-external" not in calls[1].argv
+    assert "--task" not in calls[1].argv
 
     ops.author_disp(str(tmp_path), "task", "beh-other", "/tmp/c.toml")
-    assert calls[1].argv[4:7] == ["disp", "pipeline", "run"]
+    assert calls[2].argv[4:7] == ["disp", "pipeline", "run"]
 
 
 def test_author_disp_resume_falls_back_to_adopt_external(
@@ -587,37 +589,58 @@ def test_author_disp_resume_falls_back_to_adopt_external(
 ):
     """Приёмка PR #106, круги 5–6: отказ чистого resume (внешняя правка) →
     одна повторная попытка с --adopt-external; --discard-round — никогда."""
-    calls = _install_fake_run(monkeypatch, returncode=3)
-    ops = RealOps()
+    import types
+
     (tmp_path / ".disputatio" / "pipelines" / "beh-r1").mkdir(parents=True)
+    script = [(0, "phase: DOC_LOOP\n"), (3, ""), (3, "")]
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+        rc_, out = script.pop(0)
+        return types.SimpleNamespace(returncode=rc_, stdout=out, stderr="")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
 
     rc = ops.author_disp(str(tmp_path), "task", "beh-r1", "/tmp/c.toml")
 
     assert rc == 3
-    assert calls[0].argv[4:7] == ["disp", "pipeline", "resume"]
-    assert "--adopt-external" not in calls[0].argv
-    assert "--adopt-external" in calls[1].argv
-    assert not any("--discard-round" in c.argv for c in calls)
+    assert seen[1][4:7] == ["disp", "pipeline", "resume"]
+    assert "--adopt-external" not in seen[1]
+    assert "--adopt-external" in seen[2]
+    assert not any("--discard-round" in c for c in seen)
 
 
-def test_author_disp_terminal_phase_reconciliation(monkeypatch, tmp_path):
-    """Приёмка PR #106, круг 11: терминальная фаза манифеста — DONE => 0
-    без вызова disp (resume отверг бы терминальный пайплайн); FAILED => 1."""
-    import json as _json
+def test_author_disp_terminal_phase_via_status(monkeypatch, tmp_path):
+    """Приёмка PR #106, круги 11–12: фаза берётся у `disp pipeline status`
+    (он верифицирует integrity anchor — прямое чтение pipeline.json обходило
+    бы защиту от подмены): DONE => 0, FAILED => 1, отказ status — как есть,
+    нетерминальная фаза — resume-поток."""
+    import types
 
-    calls = _install_fake_run(monkeypatch, returncode=0)
+    (tmp_path / ".disputatio" / "pipelines" / "beh-r1").mkdir(parents=True)
+    script: list[tuple[int, str]] = []
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+        rc, out = script.pop(0)
+        return types.SimpleNamespace(returncode=rc, stdout=out, stderr="")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
     ops = RealOps()
-    sd = tmp_path / ".disputatio" / "pipelines" / "beh-r1"
-    sd.mkdir(parents=True)
 
-    sd.joinpath("pipeline.json").write_text(_json.dumps({"phase": "DONE"}))
-    assert ops.author_disp(str(tmp_path), "t", "beh-r1", "/tmp/c.toml") == 0
-    assert calls == []  # disp не вызывался вовсе
+    script[:] = [(0, "kind: document\nphase: DONE\n")]
+    assert ops.author_disp(str(tmp_path), "t", "beh-r1", "/c.toml") == 0
+    assert seen[-1][4:7] == ["disp", "pipeline", "status"]
 
-    sd.joinpath("pipeline.json").write_text(_json.dumps({"phase": "FAILED"}))
-    assert ops.author_disp(str(tmp_path), "t", "beh-r1", "/tmp/c.toml") == 1
-    assert calls == []
+    script[:] = [(0, "phase: FAILED\n")]
+    assert ops.author_disp(str(tmp_path), "t", "beh-r1", "/c.toml") == 1
 
-    sd.joinpath("pipeline.json").write_text(_json.dumps({"phase": "DOC_LOOP"}))
-    ops.author_disp(str(tmp_path), "t", "beh-r1", "/tmp/c.toml")
-    assert calls and calls[0].argv[4:7] == ["disp", "pipeline", "resume"]
+    script[:] = [(4, "")]  # anchor/integrity провал — код как есть
+    assert ops.author_disp(str(tmp_path), "t", "beh-r1", "/c.toml") == 4
+
+    script[:] = [(0, "phase: DOC_LOOP\n"), (0, "")]
+    assert ops.author_disp(str(tmp_path), "t", "beh-r1", "/c.toml") == 0
+    assert seen[-1][4:7] == ["disp", "pipeline", "resume"]

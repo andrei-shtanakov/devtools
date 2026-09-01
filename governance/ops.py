@@ -428,20 +428,27 @@ class RealOps:
         # машинно-читаемый источник фазы (докстринг render_status disp).
         state_dir = Path(target_dir) / ".disputatio" / "pipelines" / slug
         state_exists = state_dir.exists()
-        # Терминальная реконсиляция (приёмка PR #106, круг 11): успешный
-        # run + сбой runner ДО op_complete → на повторе resume отверг бы
-        # терминальную фазу навсегда. DONE = работа сделана, возвращаем 0;
-        # FAILED = пайплайн терминально мёртв, честный ненулевой код
-        # (новый прогон получит новый slug от нового run_id). Нечитаемый
-        # манифест — best effort, падаем в обычный resume-поток.
+        # Терминальная реконсиляция (приёмка PR #106, круги 11–12): успешный
+        # run + сбой runner ДО op_complete → resume отверг бы терминальную
+        # фазу навсегда. Фаза спрашивается у `disp pipeline status` — он
+        # СНАЧАЛА верифицирует integrity anchor (pipeline.json — immutable
+        # control plane disp, прямое чтение обходило бы проверку подмены,
+        # у disp есть тест ровно на {"phase":"DONE"}-подделку). status
+        # отказал (tampered/битое состояние) — честный ненулевой код, не
+        # маскируем resume'ом. DONE → 0; FAILED → 1 (новый прогон получит
+        # новый slug от нового run_id).
         if state_exists:
-            try:
-                manifest = json.loads(
-                    (state_dir / "pipeline.json").read_text(encoding="utf-8")
-                )
-                phase = manifest.get("phase")
-            except (OSError, ValueError):
-                phase = None
+            status = subprocess.run(
+                ["uv", "run", "--project",
+                 str(DEVTOOLS_ROOT.parent / "disputatio"),
+                 "disp", "pipeline", "status", "--slug", slug,
+                 "--config", config_path, "--root", target_dir],
+                cwd=target_dir, capture_output=True, text=True,
+            )
+            if status.returncode != 0:
+                return status.returncode
+            phase_match = re.search(r"(?m)^phase:\s*(\S+)", status.stdout)
+            phase = phase_match.group(1) if phase_match else None
             if phase == "DONE":
                 return 0
             if phase == "FAILED":
