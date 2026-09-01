@@ -91,10 +91,19 @@ def accept(
 
     facts = ops.pr_facts(repo_slug, pr)
     polls = 0
-    while _checks_state(facts) == "pending":
+    # UNKNOWN-mergeability тоже ждём (приёмка PR #109, круг 2): GitHub
+    # вычисляет её асинхронно, и «не CONFLICTING» не значит «можно» —
+    # fail-closed, мерж только на явном MERGEABLE.
+    while (
+        _checks_state(facts) == "pending"
+        or facts.get("mergeable") not in ("MERGEABLE", "CONFLICTING")
+    ):
         polls += 1
         if polls > poll_limit:
-            print("accept-pr: чеки не завершились за отведённое время — стоп")
+            print(
+                "accept-pr: чеки/mergeability не определились за отведённое "
+                "время — стоп"
+            )
             return 1
         sleep(_POLL_SECONDS)
         facts = ops.pr_facts(repo_slug, pr)
@@ -114,8 +123,11 @@ def accept(
             "человеком (ADR-ECO-004 I2)"
         )
         return 1
-    if facts.get("mergeable") == "CONFLICTING":
-        print("accept-pr: PR конфликтует с базой — стоп")
+    if facts.get("mergeable") != "MERGEABLE":
+        print(
+            f"accept-pr: mergeability = {facts.get('mergeable')!r} — стоп "
+            "(мерж только на явном MERGEABLE)"
+        )
         return 1
 
     if facts.get("headRefOid") != head0:

@@ -139,3 +139,23 @@ def test_head_moved_after_review_stops(capsys) -> None:
     assert rc == 1
     assert not any(c[0] == "merge" for c in ops.calls)
     assert "уехал" in capsys.readouterr().out
+
+
+def test_unknown_mergeability_polls_then_stops(capsys) -> None:
+    """Приёмка PR #109, круг 2: UNKNOWN-mergeability — не разрешение;
+    ждём вычисления, на потолке — стоп fail-closed."""
+    unknown = _facts(mergeable="UNKNOWN")
+    ops = _Ops(facts_seq=[unknown])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, sleep=_no_sleep, poll_limit=2,
+    )
+    assert rc == 1
+    assert not any(c[0] == "merge" for c in ops.calls)
+
+
+def test_unknown_then_mergeable_proceeds() -> None:
+    unknown = _facts(mergeable="UNKNOWN")
+    ops = _Ops(facts_seq=[_facts(), unknown, _facts()])
+    rc = accept_pr.accept("kapelle", "o/kapelle", 59, ops, sleep=_no_sleep)
+    assert rc == 0
+    assert any(c[0] == "merge" for c in ops.calls)
