@@ -588,7 +588,7 @@
       fp-кита review до версии с типом находки. До включения runner
       останавливается на человеке с evidence-подсказкой
       `git cat-file -e <head>:<путь>` (спека §7) — это штатный режим.
-- [ ] Переключить авторинг behaviour-узла с `disp run --mode develop` на вид пайплайна `document` (полировка одиночного документа) @owner:github:andrei-shtanakov @id:behaviour-authoring-document-mode
+- [ ] Переключить авторинг behaviour-узла с `disp run --mode develop` на вид пайплайна `document` (полировка одиночного документа) @owner:github:andrei-shtanakov @id:behaviour-authoring-document-mode @blocked_by:disputatio#68
       Заведён 2026-08-31 вместе с inbox-issue disputatio#52 (slug:
       single-document-polish-mode). ОЖИДАНИЕ ДОСТАВЛЕНО 2026-09-01
       (disputatio PR #64, issue закрыт COMPLETED; уведомление — inbox

@@ -310,6 +310,20 @@ def test_author_disp_returncode_passthrough(monkeypatch):
     assert result == 2
 
 
+def test_latest_review_body_honours_review_login_env(monkeypatch):
+    """Личность ревьюера — env REVIEW_LOGIN (запаркованный minor PR #102):
+    дефолт ai-prosto, override подхватывается в jq-фильтре."""
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="review body\n")
+    ops = RealOps()
+
+    assert ops.latest_review_body("o/r", 7) == "review body"
+    assert 'select(.user.login == "ai-prosto")' in calls[0].argv[-1]
+
+    monkeypatch.setenv("REVIEW_LOGIN", "other-bot")
+    ops.latest_review_body("o/r", 7)
+    assert 'select(.user.login == "other-bot")' in calls[1].argv[-1]
+
+
 # --- Кейс 6: unresolved_threads -------------------------------------------
 
 

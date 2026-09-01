@@ -278,16 +278,20 @@ class RealOps:
         return done.returncode
 
     def latest_review_body(self, repo_slug: str, pr: int) -> str | None:
-        """Тело НОВЕЙШЕГО ревью ai-prosto на PR; нет/сбой -> None.
+        """Тело НОВЕЙШЕГО ревью $REVIEW_LOGIN на PR; нет/сбой -> None.
 
-        None читается вызывающим как «опровергать нечего» (fail-closed в
-        сторону стопа на человеке), поэтому сбой gh не маскируется пустой
-        строкой и не роняет стоп-путь S6.
+        Личность ревьюера — env `REVIEW_LOGIN` с дефолтом ai-prosto (канон —
+        `review-pr.sh:66`; запаркованный minor приёмки PR #102): хардкод
+        расходился бы с конфигурируемым каноном молча — публикация ушла бы
+        под новый логин, поиск тела остался бы на старом, и авто-опровержение
+        беззвучно умерло бы. None читается вызывающим как «опровергать
+        нечего» (fail-closed в сторону стопа на человеке).
         """
+        login = os.environ.get("REVIEW_LOGIN", "ai-prosto")
         done = subprocess.run(
             ["gh", "api", f"repos/{repo_slug}/pulls/{pr}/reviews",
              "--jq",
-             '[.[] | select(.user.login == "ai-prosto")] | last | .body'],
+             f'[.[] | select(.user.login == "{login}")] | last | .body'],
             capture_output=True, text=True,
         )
         if done.returncode != 0:
