@@ -588,8 +588,26 @@
       fp-кита review до версии с типом находки. До включения runner
       останавливается на человеке с evidence-подсказкой
       `git cat-file -e <head>:<путь>` (спека §7) — это штатный режим.
-- [ ] Переключить авторинг behaviour-узла с `disp run --mode develop` на режим полировки одиночного документа @owner:github:andrei-shtanakov @id:behaviour-authoring-document-mode @blocked_by:disputatio#52
+- [ ] Переключить авторинг behaviour-узла с `disp run --mode develop` на вид пайплайна `document` (полировка одиночного документа) @owner:github:andrei-shtanakov @id:behaviour-authoring-document-mode
       Заведён 2026-08-31 вместе с inbox-issue disputatio#52 (slug:
-      single-document-polish-mode). Если disputatio закроет not planned —
-      зачеркнуть пункт с пометкой, текущий opt-in `--author-backend disp`
-      остаётся на `run --mode develop`.
+      single-document-polish-mode). ОЖИДАНИЕ ДОСТАВЛЕНО 2026-09-01
+      (disputatio PR #64, issue закрыт COMPLETED; уведомление — inbox
+      devtools#103) — тег @blocked_by снят, пункт actionable.
+      Доставлена форма (а): вид пайплайна выводится из ФОРМЫ секции
+      `[pipeline]` (`document_path` вместо `spec_path`, взаимоисключающе),
+      отдельной подкоманды и `--mode document` не появилось — команды
+      прежние `disp pipeline run` / `resume` / `status` / `export`
+      (SPEC-002 v0.2, сквозной пример — `docs/document-pipeline.md` у
+      соседа). Переключение НЕ однострочное: `author_disp`
+      (`governance/ops.py`) зовёт команду без конфига и с задачей в
+      аргументе, а `pipeline` работает от состояния на диске. Решить
+      перед работой: (1) откуда берётся `disputatio.toml` в целевом репо
+      и как вычисляется `document_path` узла behaviour-spec; (2) кто
+      пишет `[pipeline.checklists.doc]` — вендоренного набора у соседа
+      нет намеренно, «что такое сошедшаяся behaviour-спека» знает
+      владелец DSL, то есть мы (обязателен `findings_item`);
+      (3) `anchor_path` обязан лежать ВНЕ рабочего дерева, иначе отказ
+      старта — в прогоне governance задать явно. Гейт под наш DSL
+      (`#### BEH-NN`, `traces:`, `checked_by`) сосед держит вне объёма
+      (SPEC-002 §11, приедет своим PR): после переключения авторинг
+      идёт по baseline-чеклисту без проверки нашей разметки.
