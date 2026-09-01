@@ -598,3 +598,26 @@ def test_author_disp_resume_falls_back_to_adopt_external(
     assert "--adopt-external" not in calls[0].argv
     assert "--adopt-external" in calls[1].argv
     assert not any("--discard-round" in c.argv for c in calls)
+
+
+def test_author_disp_terminal_phase_reconciliation(monkeypatch, tmp_path):
+    """Приёмка PR #106, круг 11: терминальная фаза манифеста — DONE => 0
+    без вызова disp (resume отверг бы терминальный пайплайн); FAILED => 1."""
+    import json as _json
+
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+    sd = tmp_path / ".disputatio" / "pipelines" / "beh-r1"
+    sd.mkdir(parents=True)
+
+    sd.joinpath("pipeline.json").write_text(_json.dumps({"phase": "DONE"}))
+    assert ops.author_disp(str(tmp_path), "t", "beh-r1", "/tmp/c.toml") == 0
+    assert calls == []  # disp не вызывался вовсе
+
+    sd.joinpath("pipeline.json").write_text(_json.dumps({"phase": "FAILED"}))
+    assert ops.author_disp(str(tmp_path), "t", "beh-r1", "/tmp/c.toml") == 1
+    assert calls == []
+
+    sd.joinpath("pipeline.json").write_text(_json.dumps({"phase": "DOC_LOOP"}))
+    ops.author_disp(str(tmp_path), "t", "beh-r1", "/tmp/c.toml")
+    assert calls and calls[0].argv[4:7] == ["disp", "pipeline", "resume"]

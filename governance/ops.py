@@ -424,9 +424,28 @@ class RealOps:
         # <root>/.disputatio/<slug>; повтор после сбоя обязан продолжать
         # (`pipeline resume`), а не стартовать заново — `run` по занятому
         # slug отказывает. Состояния нет (сбой ДО старта disp) — обычный run.
-        state_exists = (
-            Path(target_dir) / ".disputatio" / "pipelines" / slug
-        ).exists()  # канон путей disp: pipeline_paths (SPEC-002 §4.1)
+        # Канон путей disp: pipeline_paths (SPEC-002 §4.1); манифест —
+        # машинно-читаемый источник фазы (докстринг render_status disp).
+        state_dir = Path(target_dir) / ".disputatio" / "pipelines" / slug
+        state_exists = state_dir.exists()
+        # Терминальная реконсиляция (приёмка PR #106, круг 11): успешный
+        # run + сбой runner ДО op_complete → на повторе resume отверг бы
+        # терминальную фазу навсегда. DONE = работа сделана, возвращаем 0;
+        # FAILED = пайплайн терминально мёртв, честный ненулевой код
+        # (новый прогон получит новый slug от нового run_id). Нечитаемый
+        # манифест — best effort, падаем в обычный resume-поток.
+        if state_exists:
+            try:
+                manifest = json.loads(
+                    (state_dir / "pipeline.json").read_text(encoding="utf-8")
+                )
+                phase = manifest.get("phase")
+            except (OSError, ValueError):
+                phase = None
+            if phase == "DONE":
+                return 0
+            if phase == "FAILED":
+                return 1
         cmd = ["uv", "run", "--project",
                str(DEVTOOLS_ROOT.parent / "disputatio"), "disp", "pipeline"]
         if state_exists:
