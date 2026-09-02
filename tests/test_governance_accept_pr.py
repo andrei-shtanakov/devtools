@@ -349,3 +349,20 @@ def test_main_refuses_owner_checkout_mismatch(monkeypatch, capsys) -> None:
     rc = accept_pr.main(["--repo", "kapelle", "--pr", "1"])
     assert rc == 2
     assert "один репозиторий" in capsys.readouterr().out
+
+
+def test_base_retarget_after_guard_stops(capsys) -> None:
+    """Приёмка PR #113, круг 3: ретаргет base-ветки при том же head меняет
+    фактический дифф — гард путей считался против исходной базы. Пин base
+    симметричен пину head: смена — стоп без мержа."""
+    ops = _Ops(facts_seq=[
+        _facts(),                          # base_branch = master
+        _facts(baseRefName="release"),     # после чеков — base сменилась
+    ])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert not any(c[0] == "merge" for c in ops.calls)
+    assert ("restore", "master") in ops.calls
+    assert "base-ветка" in capsys.readouterr().out

@@ -228,6 +228,17 @@ def _accept_on_head(
             "повторите приёмку"
         )
         return 1
+    # Пин base симметричен пину head (приёмка PR #113, круг 3): ретаргет
+    # PR на другую base-ветку меняет фактический дифф при том же head —
+    # гард путей считался относительно base_branch и к новой базе
+    # неприменим.
+    if facts.get("baseRefName") != base_branch:
+        print(
+            "accept-pr: base-ветка PR сменилась после гарда путей "
+            f"({facts.get('baseRefName')!r} != {base_branch!r}) — "
+            "повторите приёмку"
+        )
+        return 1
     head = head0
     if not ops.merge(repo_slug, pr, head):
         print("accept-pr: мерж не прошёл (гонка head / правило репо) — стоп")
