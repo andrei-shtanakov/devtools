@@ -1228,10 +1228,40 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
             return False
         op_complete(state, sync_key)
         _ensure_started(state, key)
+        # Прибрать verdict-файл ПРЕДЫДУЩЕЙ попытки до запуска гейта
+        # (приёмка PR #114, круг 2): иначе harvested=True после гейта мог
+        # бы означать «нашёлся старый файл», маскируя отсутствие артефакта
+        # текущего вызова. Старый файл сохраняется в run_dir как *.stale.
+        ops.collect_gate_verdicts(
+            state.target_dir,
+            str(run_dir(state.run_id) / "s8-gate-verdicts.stale.jsonl"),
+        )
         exit_code, output = ops.gate_check_s8(
             state.target_dir, state.bundle_dir, state.profile
         )
+        # Ретроспектива 2026-09-02 (@id:runner-s8-verdicts-cleanup):
+        # --emit-verdicts оставляет .steward/gate_verdicts.jsonl в корне
+        # целевого репо — грязный чекаут спотыкает dirty-гард task_bridge
+        # на следующем шаге конвейера. Evidence переезжает в run_dir —
+        # и на успехе, и на провале, до ветвления по exit_code. После
+        # pre-clean выше True доказуемо означает «файл создан ЭТИМ
+        # вызовом гейта».
+        harvested = ops.collect_gate_verdicts(
+            state.target_dir,
+            str(run_dir(state.run_id) / "s8-gate-verdicts.jsonl"),
+        )
         if exit_code == 0:
+            # Verdicts — обязательный артефакт authoritative-фиксации
+            # (спека §5; приёмка PR #114): зелёный exit без файла — не
+            # успех, а неполный результат гейта. Fail-closed стоп до
+            # op_complete — шаг остаётся resumable для разбирательства.
+            if not harvested:
+                print(
+                    "_step_s8: gate-check вернул 0, но "
+                    ".steward/gate_verdicts.jsonl не создан — стоп "
+                    "(verdicts — обязательный артефакт S8)"
+                )
+                return False
             op_complete(state, key, exit=exit_code)
             state.status = "completed"
             save(state)

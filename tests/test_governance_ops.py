@@ -644,3 +644,46 @@ def test_changed_paths_diff_failure_raises(monkeypatch):
     ops = RealOps()
     with pytest.raises(RuntimeError, match="diff"):
         ops.changed_paths("/tmp/kapelle", "master")
+
+
+# --- Кейс 13: collect_gate_verdicts (@id:runner-s8-verdicts-cleanup) --------
+
+
+def test_collect_gate_verdicts_moves_file_and_prunes_empty_dir(tmp_path):
+    target = tmp_path / "target"
+    (target / ".steward").mkdir(parents=True)
+    src = target / ".steward" / "gate_verdicts.jsonl"
+    src.write_text('{"gate": "ok"}\n', encoding="utf-8")
+    dest = tmp_path / "runs" / "r-1" / "s8-gate-verdicts.jsonl"
+    ops = RealOps()
+
+    assert ops.collect_gate_verdicts(str(target), str(dest)) is True
+    assert not src.exists()
+    assert not (target / ".steward").exists()
+    assert dest.read_text(encoding="utf-8") == '{"gate": "ok"}\n'
+
+
+def test_collect_gate_verdicts_keeps_nonempty_steward_dir(tmp_path):
+    target = tmp_path / "target"
+    (target / ".steward").mkdir(parents=True)
+    (target / ".steward" / "gate_verdicts.jsonl").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    (target / ".steward" / "other.txt").write_text("x", encoding="utf-8")
+    dest = tmp_path / "dest.jsonl"
+    ops = RealOps()
+
+    assert ops.collect_gate_verdicts(str(target), str(dest)) is True
+    assert (target / ".steward" / "other.txt").exists()
+
+
+def test_collect_gate_verdicts_absent_returns_false(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    ops = RealOps()
+
+    assert (
+        ops.collect_gate_verdicts(str(target), str(tmp_path / "d.jsonl"))
+        is False
+    )
+    assert not (tmp_path / "d.jsonl").exists()

@@ -10,9 +10,11 @@ subprocess-обёртка над ним: каждый метод строит о
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Protocol
@@ -92,6 +94,8 @@ class Ops(Protocol):
     def gate_check_s8(
         self, target_dir: str, bundle_dir: str, profile: str
     ) -> tuple[int, str]: ...
+
+    def collect_gate_verdicts(self, target_dir: str, dest: str) -> bool: ...
 
     def gate_check_candidate(
         self, target_dir: str, bundle_dir: str, profile: str
@@ -544,6 +548,26 @@ class RealOps:
         )
         output = done.stdout + done.stderr
         return done.returncode, output
+
+    def collect_gate_verdicts(self, target_dir: str, dest: str) -> bool:
+        """Переносит <target>/.steward/gate_verdicts.jsonl в dest.
+
+        Ретроспектива 2026-09-02 (@id:runner-s8-verdicts-cleanup):
+        ``gate-check --emit-verdicts`` пишет verdicts в корень ЦЕЛЕВОГО
+        репо — оставленный там файл делает чекаут грязным и спотыкает
+        dirty-гард task_bridge на следующем шаге конвейера. Evidence
+        переезжает в журнал прогона (dest); пустой ``.steward/``
+        прибирается. Возвращает True, если файл был.
+        """
+        src = Path(target_dir) / ".steward" / "gate_verdicts.jsonl"
+        if not src.exists():
+            return False
+        dest_path = Path(dest)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest_path))
+        with contextlib.suppress(OSError):
+            src.parent.rmdir()
+        return True
 
     def gate_check_candidate(
         self, target_dir: str, bundle_dir: str, profile: str
