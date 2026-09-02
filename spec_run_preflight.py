@@ -86,6 +86,27 @@ def _keys_present(text: str, keys: tuple[str, ...]) -> set[str]:
     }
 
 
+def _scalar_values(text: str, keys: tuple[str, ...]) -> dict[str, str]:
+    """Скалярные значения ключей на той же строке (`key: value`).
+
+    Блочное значение (список/маппинг, после двоеточия пусто) в словарь не
+    попадает — сверка значений применима только к скалярам; кавычки и
+    хвостовой комментарий снимаются.
+    """
+    values: dict[str, str] = {}
+    for key in keys:
+        match = re.search(
+            rf"""^[ \t]*(['"]?){re.escape(key)}\1[ \t]*:[ \t]*([^\n]*)""",
+            text, re.MULTILINE,
+        )
+        if not match:
+            continue
+        raw = match.group(2).split("#", 1)[0].strip().strip("'\"")
+        if raw:
+            values[key] = raw
+    return values
+
+
 def check_config_etalon(target: Path) -> list[Finding]:
     """Урок 4: конфиг — по эталону репо, если эталон существует.
 
@@ -109,21 +130,33 @@ def check_config_etalon(target: Path) -> list[Finding]:
     example = target / _ETALON_MARKERS[0]
     if not example.is_file():
         return []
-    required = _keys_present(
-        example.read_text(encoding="utf-8"), _CRITICAL_KEYS
-    )
-    missing = required - _keys_present(
-        config.read_text(encoding="utf-8"), _CRITICAL_KEYS
-    )
-    if not missing:
+    example_text = example.read_text(encoding="utf-8")
+    config_text = config.read_text(encoding="utf-8")
+    required = _keys_present(example_text, _CRITICAL_KEYS)
+    missing = required - _keys_present(config_text, _CRITICAL_KEYS)
+    # Имя без значения — не соответствие (приёмка PR #115, круг 3):
+    # `execution_mode: direct` при эталонном `tdd` ломает TDD-цепочку так
+    # же, как отсутствие ключа. Скаляры сверяются на равенство; блочные
+    # значения (harness_files-список) — только по имени.
+    etalon_values = _scalar_values(example_text, _CRITICAL_KEYS)
+    config_values = _scalar_values(config_text, _CRITICAL_KEYS)
+    mismatched = [
+        f"{k}={config_values[k]!r} (эталон {v!r})"
+        for k, v in sorted(etalon_values.items())
+        if k in config_values and config_values[k] != v
+    ]
+    if not missing and not mismatched:
         return []
+    parts = []
+    if missing:
+        parts.append(f"нет ключей: {', '.join(sorted(missing))}")
+    if mismatched:
+        parts.append(f"расходятся значения: {'; '.join(mismatched)}")
     return [Finding(
         "config-etalon", "FAIL",
-        f"{_CONFIG_NAME} существует, но не несёт критических ключей "
-        f"эталона: {', '.join(sorted(missing))} — конфиг от голого "
-        "`--preset` без TDD-цепочки валит tdd-evidence "
-        "(урок 4 devtools#110); пересобери от "
-        f"{_ETALON_MARKERS[0]}",
+        f"{_CONFIG_NAME} не соответствует эталону — {'; '.join(parts)} — "
+        "конфиг без TDD-цепочки эталона валит tdd-evidence "
+        f"(урок 4 devtools#110); пересобери от {_ETALON_MARKERS[0]}",
     )]
 
 

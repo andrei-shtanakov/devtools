@@ -238,3 +238,43 @@ def test_git_status_failure_is_fail_not_clean(tmp_path: Path) -> None:
     findings = pf.check_dirty_tree(repo)
     assert _levels(findings, "dirty-tree") == ["FAIL"]
     assert "неопределимо" in findings[0].detail
+
+
+def test_wrong_scalar_value_of_critical_key_fails(tmp_path: Path) -> None:
+    """Приёмка PR #115, круг 3: `execution_mode: direct` при эталонном
+    `tdd` ломает TDD-цепочку так же, как отсутствие ключа."""
+    repo = _git_repo(tmp_path / "r")
+    (repo / "spec-runner.config.example.yaml").write_text(
+        "executor:\n  execution_mode: tdd\n  tdd_runner: pytest\n"
+    )
+    (repo / "spec-runner.config.yaml").write_text(
+        "executor:\n  execution_mode: direct\n  tdd_runner: pytest\n"
+    )
+    findings = pf.check_config_etalon(repo)
+    assert _levels(findings, "config-etalon") == ["FAIL"]
+    assert "execution_mode" in findings[0].detail
+    assert "direct" in findings[0].detail and "tdd" in findings[0].detail
+
+
+def test_block_valued_key_is_checked_by_name_only(tmp_path: Path) -> None:
+    """harness_files-список: значение блочное — сверка только по имени,
+    разный состав списков соответствия не рушит."""
+    repo = _git_repo(tmp_path / "r")
+    (repo / "spec-runner.config.example.yaml").write_text(
+        "harness_files:\n  - a.py\n  - b.py\n"
+    )
+    (repo / "spec-runner.config.yaml").write_text(
+        "harness_files:\n  - c.py\n"
+    )
+    assert pf.check_config_etalon(repo) == []
+
+
+def test_matching_values_with_comment_and_quotes_pass(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path / "r")
+    (repo / "spec-runner.config.example.yaml").write_text(
+        "review_policy: required  # обязательное ревью\n"
+    )
+    (repo / "spec-runner.config.yaml").write_text(
+        'review_policy: "required"\n'
+    )
+    assert pf.check_config_etalon(repo) == []
