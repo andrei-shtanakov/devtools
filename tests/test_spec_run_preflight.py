@@ -218,14 +218,35 @@ def test_quoted_yaml_keys_are_recognized(tmp_path: Path) -> None:
     assert "tdd_runner" in findings[0].detail
 
 
-def test_mismatched_quotes_are_not_a_key(tmp_path: Path) -> None:
-    """`"key':` — не валидное объявление ключа; в required не попадает."""
+def test_unparseable_etalon_is_fail_closed(tmp_path: Path) -> None:
+    """Битый YAML эталона — не «требований нет», а FAIL: сверка
+    невозможна, готовность не заявляется."""
     repo = _git_repo(tmp_path / "r")
     (repo / "spec-runner.config.example.yaml").write_text(
         "\"execution_mode': tdd\n"
     )
     (repo / "spec-runner.config.yaml").write_text("model: sonnet\n")
-    assert pf.check_config_etalon(repo) == []
+    findings = pf.check_config_etalon(repo)
+    assert _levels(findings, "config-etalon") == ["FAIL"]
+    assert "не парсится" in findings[0].detail
+
+
+def test_key_in_foreign_section_does_not_satisfy_etalon(
+    tmp_path: Path,
+) -> None:
+    """Приёмка PR #115, круг 7: spec-runner читает execution_mode в секции
+    executor (config.py) — одноимённый ключ в посторонней секции режим не
+    задаёт и эталон не удовлетворяет."""
+    repo = _git_repo(tmp_path / "r")
+    (repo / "spec-runner.config.example.yaml").write_text(
+        "executor:\n  execution_mode: tdd\n"
+    )
+    (repo / "spec-runner.config.yaml").write_text(
+        "executor:\n  model: sonnet\nmetadata:\n  execution_mode: tdd\n"
+    )
+    findings = pf.check_config_etalon(repo)
+    assert _levels(findings, "config-etalon") == ["FAIL"]
+    assert "executor.execution_mode" in findings[0].detail
 
 
 def test_git_status_failure_is_fail_not_clean(tmp_path: Path) -> None:

@@ -27,21 +27,26 @@
                       раннер коммитит рядом с ними и перемешает историю.
 
 Exit: 0 — чисто либо только WARN; 1 — есть FAIL; 2 — целевой репо не
-найден/не git. Только stdlib; Python 3.11+.
+найден/не git. Зависимость: PyYAML (есть в uv-окружении devtools;
+без него сверка с эталоном отказывает fail-closed); Python 3.11+.
 
 Использование:
-    ./spec_run_preflight.py --repo dispatcher [--workspace ..]
     make preflight ARGS='--repo dispatcher'
+    uv run --frozen python spec_run_preflight.py --repo dispatcher
 """
 
 from __future__ import annotations
 
 import argparse
-import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    import yaml
+except ImportError:  # plain python3 без uv-окружения — fail-closed в чеке
+    yaml = None
 
 _ETALON_MARKERS = (
     "spec-runner.config.example.yaml",
@@ -70,78 +75,37 @@ class Finding:
     detail: str
 
 
-def _keys_present(text: str, keys: tuple[str, ...]) -> set[str]:
-    """Какие из keys встречаются в YAML-тексте как ключи (на любом уровне).
+_MISSING = object()
 
-    Кавычная форма (`"key":` / `'key':`) — валидный YAML и обязана
-    распознаваться (приёмка PR #115, круг 2), иначе кавычный эталон
-    опустошает required и неконформный конфиг проходит молча.
+
+def _critical_paths(
+    node: object, prefix: tuple[str, ...] = ()
+) -> dict[tuple[str, ...], object]:
+    """Пути критических ключей в разобранном YAML → их значения.
+
+    Путь (например ``executor.execution_mode``) — часть требования:
+    spec-runner читает ключи в конкретной секции (config.py выбирает
+    mapping ``executor``), и одноимённый ключ в посторонней секции режим
+    не задаёт (приёмка PR #115, круг 7).
     """
-    return {
-        k for k in keys
-        if re.search(
-            rf"""^[ \t]*(['"]?){re.escape(k)}\1[ \t]*:""",
-            text, re.MULTILINE,
-        )
-    }
+    found: dict[tuple[str, ...], object] = {}
+    if not isinstance(node, dict):
+        return found
+    for key, value in node.items():
+        path = (*prefix, str(key))
+        if key in _CRITICAL_KEYS:
+            found[path] = value
+        found.update(_critical_paths(value, path))
+    return found
 
 
-def _scalar_values(text: str, keys: tuple[str, ...]) -> dict[str, str]:
-    """Скалярные значения ключей на той же строке (`key: value`).
-
-    Блочное значение (список/маппинг, после двоеточия пусто) в словарь не
-    попадает — сверка значений применима только к скалярам; кавычки и
-    хвостовой комментарий снимаются.
-    """
-    values: dict[str, str] = {}
-    for key in keys:
-        match = re.search(
-            rf"""^[ \t]*(['"]?){re.escape(key)}\1[ \t]*:[ \t]*([^\n]*)""",
-            text, re.MULTILINE,
-        )
-        if not match:
-            continue
-        raw = match.group(2).split("#", 1)[0].strip().strip("'\"")
-        if raw:
-            values[key] = raw
-    return values
-
-
-def _list_values(text: str, key: str) -> list[str] | None:
-    """Элементы списка key (block- или inline-форма); None — ключа нет
-    или значение не список.
-
-    harness_files — защитная поверхность spec-runner (приёмка PR #115,
-    круг 5: harness.py строит guard из стандартных кандидатов плюс
-    ФАКТИЧЕСКОГО config.harness_files) — состав обязан сверяться, а не
-    только имя ключа.
-    """
-    match = re.search(
-        rf"""^[ \t]*(['"]?){re.escape(key)}\1[ \t]*:[ \t]*([^\n]*)$""",
-        text, re.MULTILINE,
-    )
-    if not match:
-        return None
-    inline = match.group(2).split("#", 1)[0].strip()
-    if inline.startswith("["):
-        inner = inline.strip("[]")
-        return [
-            i.strip().strip("'\"") for i in inner.split(",") if i.strip()
-        ]
-    if inline:
-        return None  # скаляр, не список
-    items: list[str] = []
-    for line in text[match.end():].splitlines():
-        stripped = line.strip()
-        # Пустые строки и YAML-комментарии внутри block sequence — валидны
-        # и не завершают список (приёмка PR #115, круг 6).
-        if not stripped or stripped.startswith("#"):
-            continue
-        dash = re.match(r"^[ \t]*-[ \t]*(.+)$", line)
-        if not dash:
-            break
-        items.append(dash.group(1).split("#", 1)[0].strip().strip("'\""))
-    return items
+def _dig(node: object, path: tuple[str, ...]) -> object:
+    """Значение по пути в разобранном YAML; _MISSING — пути нет."""
+    for part in path:
+        if not isinstance(node, dict) or part not in node:
+            return _MISSING
+        node = node[part]
+    return node
 
 
 def check_config_etalon(target: Path) -> list[Finding]:
@@ -149,9 +113,14 @@ def check_config_etalon(target: Path) -> list[Finding]:
 
     Наличие файла — не соответствие (приёмка PR #115): конфиг от голого
     `config --preset` существует, но без TDD-цепочки эталона валит
-    tdd-evidence. Критические ключи, объявленные в example.yaml, обязаны
-    присутствовать и в рабочем конфиге; docs/workstream-setup.md — проза,
-    по ней сверка невозможна — там остаётся только presence-чек.
+    tdd-evidence. Сверка — настоящим YAML-парсером (круги 2–7 приёмки
+    показали, что регулярки по тексту — это пере-изобретение парсера:
+    кавычные ключи, пустые скаляры, комментарии в списках, секции):
+    критический ключ эталона обязан присутствовать в конфиге ПО ТОМУ ЖЕ
+    ПУТИ и с тем же скаляром; списки (harness_files — защитная
+    поверхность spec-runner) — надмножеством элементов эталона.
+    docs/workstream-setup.md — проза, по ней возможен только
+    presence-чек самого конфига.
     """
     markers = [m for m in _ETALON_MARKERS if (target / m).is_file()]
     if not markers:
@@ -167,49 +136,52 @@ def check_config_etalon(target: Path) -> list[Finding]:
     example = target / _ETALON_MARKERS[0]
     if not example.is_file():
         return []
-    example_text = example.read_text(encoding="utf-8")
-    config_text = config.read_text(encoding="utf-8")
-    required = _keys_present(example_text, _CRITICAL_KEYS)
-    missing = required - _keys_present(config_text, _CRITICAL_KEYS)
-    # Имя без значения — не соответствие (приёмка PR #115, круг 3):
-    # `execution_mode: direct` при эталонном `tdd` ломает TDD-цепочку так
-    # же, как отсутствие ключа. Скаляры сверяются на равенство; блочные
-    # значения (harness_files-список) — только по имени.
-    etalon_values = _scalar_values(example_text, _CRITICAL_KEYS)
-    config_values = _scalar_values(config_text, _CRITICAL_KEYS)
-    config_keys = _keys_present(config_text, _CRITICAL_KEYS)
-    mismatched = []
-    for k, v in sorted(etalon_values.items()):
-        if k not in config_keys:
-            continue  # ключа нет вовсе — уже учтён в missing
-        got = config_values.get(k)
-        if got is None:
-            # Ключ есть, но скаляра нет (пустое/блочное значение) — для
-            # скалярного в эталоне ключа это не соответствие (приёмка
-            # PR #115, круг 4): `execution_mode:` без значения не задаёт
-            # режим так же, как отсутствие ключа.
-            mismatched.append(f"{k}: пустое/блочное значение (эталон {v!r})")
-        elif got != v:
-            mismatched.append(f"{k}={got!r} (эталон {v!r})")
-    # Списочные ключи эталона: элементы эталона обязаны присутствовать в
-    # конфиге (приёмка PR #115, круг 5) — harness_files это защитная
-    # поверхность spec-runner, и конфиг, выкинувший элементы, ослабляет
-    # guard молча. Дополнительные элементы в конфиге — усиление, не FAIL.
-    for k in _CRITICAL_KEYS:
-        etalon_items = _list_values(example_text, k)
-        if not etalon_items or k not in config_keys:
-            continue
-        config_items = _list_values(config_text, k) or []
-        dropped = [i for i in etalon_items if i not in config_items]
-        if dropped:
+    if yaml is None:
+        return [Finding(
+            "config-etalon", "FAIL",
+            "PyYAML недоступен — сверка с эталоном невозможна; запускай "
+            "через `make preflight` (uv-окружение devtools)",
+        )]
+    try:
+        etalon_data = yaml.safe_load(example.read_text(encoding="utf-8"))
+        config_data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        return [Finding(
+            "config-etalon", "FAIL",
+            f"эталон или {_CONFIG_NAME} не парсится как YAML ({exc}) — "
+            "сверка невозможна, готовность заявить нельзя",
+        )]
+    required = _critical_paths(etalon_data)
+    missing: list[str] = []
+    mismatched: list[str] = []
+    for path, expected in sorted(required.items()):
+        dotted = ".".join(path)
+        actual = _dig(config_data, path)
+        if actual is _MISSING:
+            missing.append(dotted)
+        elif isinstance(expected, list):
+            # harness_files: элементы эталона обязаны присутствовать
+            # (guard строится из фактического списка, круг 5); лишние
+            # элементы — усиление, не FAIL.
+            got_items = actual if isinstance(actual, list) else []
+            dropped = [str(i) for i in expected if i not in got_items]
+            if dropped:
+                mismatched.append(
+                    f"{dotted}: нет элементов эталона: {', '.join(dropped)}"
+                )
+        elif actual is None and expected is not None:
+            # `key:` без значения не задаёт режим так же, как отсутствие
+            # ключа (круг 4).
             mismatched.append(
-                f"{k}: нет элементов эталона: {', '.join(dropped)}"
+                f"{dotted}: пустое/блочное значение (эталон {expected!r})"
             )
+        elif actual != expected:
+            mismatched.append(f"{dotted}={actual!r} (эталон {expected!r})")
     if not missing and not mismatched:
         return []
     parts = []
     if missing:
-        parts.append(f"нет ключей: {', '.join(sorted(missing))}")
+        parts.append(f"нет ключей: {', '.join(missing)}")
     if mismatched:
         parts.append(f"расходятся значения: {'; '.join(mismatched)}")
     return [Finding(

@@ -88,4 +88,4 @@ behaviour-run: ; @uv run --frozen --group governance python -m governance.runner
 behaviour-console: ; @uv run --frozen --group governance python -m governance.console $(ARGS)
 behaviour-tasks: ; @uv run --frozen --group governance python -m governance.task_bridge $(ARGS)
 accept-pr: ; @uv run --frozen python -m governance.accept_pr $(ARGS)
-preflight: ; @python3 ./spec_run_preflight.py $(ARGS)
+preflight: ; @uv run --frozen python ./spec_run_preflight.py $(ARGS)
