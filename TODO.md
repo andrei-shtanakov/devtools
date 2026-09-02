@@ -662,7 +662,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       (4) отсутствие беспрефиксной `spec/.executor-state.db` —
       пустая дефолтная база ломает tdd-evidence (upstream:
       spec-runner#337).
-- [ ] task_bridge: группировка геометрически связанных BEH в одну задачу @owner:github:andrei-shtanakov @id:task-bridge-beh-grouping
+- [x] task_bridge: группировка геометрически связанных BEH в одну задачу @owner:github:andrei-shtanakov @id:task-bridge-beh-grouping — PR этой ветки; симуляция на живом WS-disputatio-57: 4 задачи вместо 15, все 7 red-unverifiable внутри слитой TASK-001
       Урок 8 (devtools#110): нарезка «один BEH — одна задача» дала
       7 red-unverifiable задач из 15 в WS-disputatio-57 — поведение уже
       геометрически покрыто соседней реализацией, red невозможен,

@@ -563,3 +563,114 @@ def test_deliver_conform_rerun_updates_existing_pr(tmp_path: Path) -> None:
         (target / "spec/WS-alpha-7-tasks.md").read_text(encoding="utf-8")
     )
     assert meta["traces_to"] == ["behaviour-spec"]
+
+
+# --- группировка по файлу цели (@id:task-bridge-beh-grouping, урок 8) -------
+
+SAME_FILE_MD = """\
+---
+spec_stage: behaviour-spec
+status: draft
+---
+# Behaviour
+
+#### BEH-01: Открытие ханка
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/core/test_osc.py::test_open`
+
+#### BEH-02: Закрытие ханка
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/core/test_osc.py::test_close`
+
+#### BEH-03: Продолжение разбора
+`traces: [FR-02]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/core/test_osc.py::test_continue`
+
+#### BEH-04: Ошибка декодирования
+`traces: [FR-03]`
+- **checked_by**: `status: planned` `kind: integration` `owner: qa` \
+`target: tests/runtime/test_purity.py::test_decode`
+"""
+
+
+def test_featureless_scenarios_merge_by_target_file() -> None:
+    """Урок 8 (WS-disputatio-57: 7/15 red-unverifiable): смежные
+    бес-Feature сценарии одного файла цели — одна задача; pytest-селектор
+    `::…` при сравнении отброшен."""
+    scenarios = task_bridge.parse_behaviour(SAME_FILE_MD)
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/15-behaviour-spec.md",
+        scenarios=scenarios,
+        generated_at="2026-09-03T12:00:00",
+        behaviour_blob="ab" * 20,
+    )
+    assert "### TASK-001: Открытие ханка (+2 смежных BEH)" in text
+    assert "- [ ] реализовать BEH-01" in text
+    assert "- [ ] реализовать BEH-02" in text
+    assert "- [ ] реализовать BEH-03" in text
+    assert "### TASK-002: Ошибка декодирования" in text
+    assert "### TASK-003:" not in text
+
+
+def test_nonconsecutive_same_file_does_not_merge() -> None:
+    """Мержатся только СМЕЖНЫЕ группы — разрыв другим файлом сохраняет
+    порядок документа и отдельность задач."""
+    md = SAME_FILE_MD + """\
+
+#### BEH-05: Снова про ханки
+`traces: [FR-04]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/core/test_osc.py::test_again`
+"""
+    scenarios = task_bridge.parse_behaviour(md)
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/15-behaviour-spec.md",
+        scenarios=scenarios,
+        generated_at="2026-09-03T12:00:00",
+        behaviour_blob="ab" * 20,
+    )
+    assert "### TASK-003: Снова про ханки" in text
+
+
+def test_featureless_does_not_merge_into_feature_group() -> None:
+    """Feature-группировка владельца приоритетна: бес-Feature сценарий не
+    вливается в Feature-группу даже при общем файле цели."""
+    md = """\
+---
+spec_stage: behaviour-spec
+status: draft
+---
+# Behaviour
+
+## Feature: Каркас
+
+#### BEH-01: Внутри Feature
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_a.py::test_one`
+
+## Особые случаи
+
+#### BEH-02: Вне Feature
+`traces: [FR-02]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_a.py::test_two`
+"""
+    scenarios = task_bridge.parse_behaviour(md)
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/15-behaviour-spec.md",
+        scenarios=scenarios,
+        generated_at="2026-09-03T12:00:00",
+        behaviour_blob="ab" * 20,
+    )
+    assert "### TASK-001: Каркас" in text
+    assert "### TASK-002: Вне Feature" in text

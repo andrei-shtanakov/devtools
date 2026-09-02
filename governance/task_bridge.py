@@ -155,6 +155,52 @@ def parse_behaviour(text: str) -> list[Scenario]:
     return scenarios
 
 
+def _target_files(scenarios: list[Scenario]) -> set[str]:
+    """Файлы checked_by-целей группы (pytest-селектор `::…` отброшен)."""
+    return {
+        sc.checked_target.split("::", 1)[0]
+        for sc in scenarios
+        if sc.checked_target
+    }
+
+
+def _merge_featureless_by_target_file(
+    groups: list[tuple[str, str, list[Scenario]]],
+) -> list[tuple[str, str, list[Scenario]]]:
+    """Смежные группы без Feature с общим файлом цели → одна задача.
+
+    Урок 8 ретроспективы (@id:task-bridge-beh-grouping): нарезка «один
+    BEH — одна задача» на геометрически связанных сценариях (один
+    файл/автомат состояний) даёт red-unverifiable задачи — поведение уже
+    покрыто соседней реализацией, честный красный тест невозможен, и
+    TDD-гейт стопит прогон до waiver-ритуала (WS-disputatio-57: 7 из 15).
+    Детерминированный прокси связанности — файл checked_by-цели: BEH-ы
+    одного автомата бьют в один тестовый файл.
+
+    Feature-группировка владельца (решение 2026-08-31) приоритетна и не
+    трогается: мержатся только СМЕЖНЫЕ группы, у которых ни один сценарий
+    не отнесён к Feature; бес-Feature сценарий в Feature-группу не
+    вливается. Заголовок слитой группы — первый сценарий + счётчик.
+    """
+    merged: list[tuple[str, str, list[Scenario]]] = []
+    for key, title, scs in groups:
+        if merged:
+            _pkey, _ptitle, prev = merged[-1]
+            featureless = all(
+                s.feature is None for s in [*prev, *scs]
+            )
+            if featureless and _target_files(prev) & _target_files(scs):
+                prev.extend(scs)
+                merged[-1] = (
+                    _pkey,
+                    f"{prev[0].title} (+{len(prev) - 1} смежных BEH)",
+                    prev,
+                )
+                continue
+        merged.append((key, title, list(scs)))
+    return merged
+
+
 def render_tasks(
     ws_id: str,
     subject: str,
@@ -211,6 +257,7 @@ def render_tasks(
             groups[-1][2].append(sc)
         else:
             groups.append((key, sc.feature or sc.title, [sc]))
+    groups = _merge_featureless_by_target_file(groups)
     for index, (_key, title, group) in enumerate(groups, start=1):
         beh_ids = [g.beh_id for g in group]
         traces: list[str] = []
