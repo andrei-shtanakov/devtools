@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run behaviour-console behaviour-tasks accept-pr
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run behaviour-console behaviour-tasks accept-pr preflight
 
 help:
 	@echo "Цели:"
@@ -49,6 +49,7 @@ help:
 	@echo "  make behaviour-console ARGS=… — governance console TUI (uv + группа governance)"
 	@echo "  make behaviour-tasks ARGS='--run-id …' — draft tasks.md-спека из бандла PR-ом (approve — человек)"
 	@echo "  make accept-pr ARGS='--repo <r> --pr <n>' — приёмка integration-PR spec-runner: ревью → чеки → DarkFactory-мерж"
+	@echo "  make preflight ARGS='--repo <r>' — преflight перед прогоном spec-runner: конфиг-эталон / insteadOf / state-DB / live-smoke"
 
 status:      ; @./repos.sh status
 fetch:       ; @./repos.sh fetch
@@ -87,3 +88,4 @@ behaviour-run: ; @uv run --frozen --group governance python -m governance.runner
 behaviour-console: ; @uv run --frozen --group governance python -m governance.console $(ARGS)
 behaviour-tasks: ; @uv run --frozen --group governance python -m governance.task_bridge $(ARGS)
 accept-pr: ; @uv run --frozen python -m governance.accept_pr $(ARGS)
+preflight: ; @python3 ./spec_run_preflight.py $(ARGS)
