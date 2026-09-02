@@ -322,3 +322,19 @@ def test_empty_scalar_value_of_critical_key_fails(tmp_path: Path) -> None:
     findings = pf.check_config_etalon(repo)
     assert _levels(findings, "config-etalon") == ["FAIL"]
     assert "пустое/блочное" in findings[0].detail
+
+
+def test_comment_inside_block_list_does_not_end_it(tmp_path: Path) -> None:
+    """Приёмка PR #115, круг 6: комментарий/пустая строка внутри block
+    sequence — валидный YAML и не завершает список эталона."""
+    repo = _git_repo(tmp_path / "r")
+    (repo / "spec-runner.config.example.yaml").write_text(
+        "harness_files:\n"
+        "  # обязательные guard-файлы\n"
+        "\n"
+        "  - a.py\n"
+    )
+    (repo / "spec-runner.config.yaml").write_text("harness_files: []\n")
+    findings = pf.check_config_etalon(repo)
+    assert _levels(findings, "config-etalon") == ["FAIL"]
+    assert "a.py" in findings[0].detail

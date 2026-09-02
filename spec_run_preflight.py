@@ -132,7 +132,10 @@ def _list_values(text: str, key: str) -> list[str] | None:
         return None  # скаляр, не список
     items: list[str] = []
     for line in text[match.end():].splitlines():
-        if not line.strip():
+        stripped = line.strip()
+        # Пустые строки и YAML-комментарии внутри block sequence — валидны
+        # и не завершают список (приёмка PR #115, круг 6).
+        if not stripped or stripped.startswith("#"):
             continue
         dash = re.match(r"^[ \t]*-[ \t]*(.+)$", line)
         if not dash:
