@@ -601,3 +601,39 @@ def test_materialize_pr_head_switch_failure_raises(monkeypatch):
     ops = RealOps()
     with pytest.raises(RuntimeError, match="switch"):
         ops.materialize_pr_head("/tmp/kapelle", 59, "cafe" * 10)
+
+
+def test_changed_paths_fetch_base_then_three_dot_diff(monkeypatch):
+    calls = _install_fake_run(
+        monkeypatch, returncode=0, stdout="lib/a.py\nlib/b.py\n"
+    )
+    ops = RealOps()
+    paths = ops.changed_paths("/tmp/kapelle", "master")
+    assert calls[0].argv == ["git", "fetch", "origin", "master"]
+    assert calls[1].argv == [
+        "git", "diff", "--name-only", "origin/master...HEAD",
+    ]
+    assert all(c.kwargs["cwd"] == "/tmp/kapelle" for c in calls)
+    assert paths == ["lib/a.py", "lib/b.py"]
+
+
+def test_changed_paths_fetch_failure_raises(monkeypatch):
+    def fake_run(argv, **kwargs):
+        rc = 128 if argv[:2] == ["git", "fetch"] else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+    with pytest.raises(RuntimeError, match="fetch"):
+        ops.changed_paths("/tmp/kapelle", "master")
+
+
+def test_changed_paths_diff_failure_raises(monkeypatch):
+    def fake_run(argv, **kwargs):
+        rc = 129 if argv[:2] == ["git", "diff"] else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+    with pytest.raises(RuntimeError, match="diff"):
+        ops.changed_paths("/tmp/kapelle", "master")

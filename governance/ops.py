@@ -37,6 +37,8 @@ class Ops(Protocol):
         self, target_dir: str, pr: int, sha: str
     ) -> None: ...
 
+    def changed_paths(self, target_dir: str, base_branch: str) -> list[str]: ...
+
     def head_sha(self, target_dir: str, branch: str) -> str: ...
 
     def push_branch(self, target_dir: str, branch: str) -> None: ...
@@ -197,6 +199,37 @@ class RealOps:
                 f"materialize_pr_head: git switch --detach {sha[:7]} "
                 f"rc={switch.returncode}: {switch.stderr.strip()}"
             )
+
+    def changed_paths(self, target_dir: str, base_branch: str) -> list[str]:
+        """Пути, изменённые HEAD относительно merge-base с origin/<base>.
+
+        Гард путей accept-pr обязан быть привязан к МАТЕРИАЛИЗОВАННОМУ
+        head0 (приёмка PR #113, круг 2): API-список файлов PR отражает
+        голову ветки на момент запроса — force-push между запросами
+        подменил бы проверяемый список (TOCTOU). Здесь дифф считается
+        локально по уже переключённому дереву; base подтягивается свежим
+        fetch, чтобы merge-base не был протухшим. Сбой — RuntimeError.
+        """
+        fetch = subprocess.run(
+            ["git", "fetch", "origin", base_branch],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if fetch.returncode != 0:
+            raise RuntimeError(
+                f"changed_paths: git fetch origin {base_branch} "
+                f"rc={fetch.returncode}: {fetch.stderr.strip()}"
+            )
+        diff = subprocess.run(
+            ["git", "diff", "--name-only",
+             f"origin/{base_branch}...HEAD"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if diff.returncode != 0:
+            raise RuntimeError(
+                f"changed_paths: git diff origin/{base_branch}...HEAD "
+                f"rc={diff.returncode}: {diff.stderr.strip()}"
+            )
+        return [line for line in diff.stdout.splitlines() if line.strip()]
 
     def head_sha(self, target_dir: str, branch: str) -> str:
         """SHA головы branch в target_dir."""

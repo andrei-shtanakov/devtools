@@ -10,11 +10,12 @@ spec-runner, завершив цикл, открывает integration-PR и о�
    2026-09-02, уроки 7 и «грязное дерево»): review-kit считает локальное
    дерево авторитетным — чекаут на master даёт ложное «реализации нет»,
    грязное дерево — ложную фактуру находок. Перед ревью: гард чистого
-   дерева → гард путей (ревью-harness `scripts/review/` и authority-root —
-   стоп ДО переключения дерева: PR не должен получить исполнение своего
-   `local.sh` у оператора; приёмка PR #113, blocker) → fetch pull/<n>/head
-   → detached switch на пинованный head; исходная ветка возвращается
-   после приёмки на любом исходе;
+   дерева → fetch pull/<n>/head → detached switch на пинованный head →
+   гард путей по ЛОКАЛЬНОМУ диффу материализованного head0 (ревью-harness
+   `scripts/review/` и authority-root — стоп ДО запуска ревью: PR не
+   должен получить исполнение своего `local.sh` у оператора, а API-список
+   файлов не привязан к head0 — TOCTOU; приёмка PR #113, blocker + круг 2);
+   исходная ветка возвращается после приёмки на любом исходе;
 1. терминальное ревью (`review-pr.sh` через `Ops.review`; fp-дедуп кита
    делает повторные вызовы дешёвыми); находки → стоп, отработка — человеком
    или фикс-коммитами на ветку PR, затем повторный вызов;
@@ -45,7 +46,7 @@ _AUTHORITY_PREFIXES = (".github/", "profiles/")
 # Исполняемый ревью-harness целевого репо: review-pr.sh запускает
 # scripts/review/local.sh из локального дерева, которое материализация
 # переключает на head PR (приёмка PR #113, blocker) — PR, правящий эти
-# пути, не материализуется и не ревьюится агентом вовсе.
+# пути, не ревьюится агентом вовсе (гард по локальному диффу head0).
 _HARNESS_PREFIXES = ("scripts/review/",)
 _PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED", ""}
 _GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -110,39 +111,14 @@ def accept(
     # и мержем подменил бы содержимое, которого ревью не видело. Совпадение
     # проверяется после ожидания чеков; мерж идёт с пином именно этого head
     # (PUT sha= — вторая линия той же гарантии).
-    head0 = ops.pr_facts(repo_slug, pr).get("headRefOid")
+    facts0 = ops.pr_facts(repo_slug, pr)
+    head0 = facts0.get("headRefOid")
     if not head0:
         print("accept-pr: не удалось определить head PR — стоп")
         return 1
-    # Гарды путей ДО материализации (приёмка PR #113, blocker): после
-    # switch на head PR review-pr.sh исполнит scripts/review/local.sh из
-    # дерева этого PR — PR, правящий ревью-harness или authority-root,
-    # получил бы исполнение своего кода у оператора до вердикта. Стоп до
-    # любого переключения дерева и запуска ревью. Гонка с параллельным
-    # push закрыта пином: материализуется именно head0, а не текущая
-    # голова ветки PR.
-    files = ops.pr_files(repo_slug, pr)
-    harness = [
-        f for f in files
-        if any(f.startswith(p) for p in _HARNESS_PREFIXES)
-    ]
-    if harness:
-        print(
-            "accept-pr: дифф правит ревью-harness "
-            f"({', '.join(sorted(set(harness))[:5])}…) — материализация и "
-            "ревью только человеком"
-        )
-        return 1
-    authority = [
-        f for f in files
-        if any(f.startswith(p) for p in _AUTHORITY_PREFIXES)
-    ]
-    if authority:
-        print(
-            "accept-pr: дифф трогает authority-root пути "
-            f"({', '.join(sorted(set(authority))[:5])}…) — мерж только "
-            "человеком (ADR-ECO-004 I2)"
-        )
+    base_branch = facts0.get("baseRefName")
+    if not base_branch:
+        print("accept-pr: не удалось определить base-ветку PR — стоп")
         return 1
     # Урок 7 (devtools#110): ревью обязано смотреть на дерево именно этого
     # head — detached switch на пинованный sha, а не на ветку PR, чтобы
@@ -155,8 +131,12 @@ def accept(
         return 1
     try:
         return _accept_on_head(
-            repo, repo_slug, pr, ops, head0, sleep, poll_limit
+            repo, repo_slug, pr, ops, head0,
+            target_dir, base_branch, sleep, poll_limit,
         )
+    except RuntimeError as exc:
+        print(f"accept-pr: {exc} — стоп")
+        return 1
     finally:
         ops.ensure_branch(target_dir, branch0)
 
@@ -167,10 +147,43 @@ def _accept_on_head(
     pr: int,
     ops: Ops,
     head0: str,
+    target_dir: str,
+    base_branch: str,
     sleep: Callable[[float], None],
     poll_limit: int,
 ) -> int:
     """Ревью → чеки → гарды → мерж; чекаут цели уже стоит на head0."""
+    # Гард путей по МАТЕРИАЛИЗОВАННОМУ head0, до исполнения harness
+    # (приёмка PR #113, blocker + круг 2): review-pr.sh исполняет
+    # scripts/review/local.sh из локального дерева — PR, правящий
+    # ревью-harness или authority-root, получил бы исполнение своего кода
+    # у оператора до вердикта. API-список файлов PR отражает голову ветки
+    # на момент запроса и НЕ привязан к head0 (TOCTOU при force-push
+    # между запросами) — изменённые пути считаются локально по
+    # переключённому дереву: git diff origin/<base>...HEAD.
+    changed = ops.changed_paths(target_dir, base_branch)
+    harness = [
+        f for f in changed
+        if any(f.startswith(p) for p in _HARNESS_PREFIXES)
+    ]
+    if harness:
+        print(
+            "accept-pr: дифф правит ревью-harness "
+            f"({', '.join(sorted(set(harness))[:5])}…) — ревью и мерж "
+            "только человеком"
+        )
+        return 1
+    authority = [
+        f for f in changed
+        if any(f.startswith(p) for p in _AUTHORITY_PREFIXES)
+    ]
+    if authority:
+        print(
+            "accept-pr: дифф трогает authority-root пути "
+            f"({', '.join(sorted(set(authority))[:5])}…) — мерж только "
+            "человеком (ADR-ECO-004 I2)"
+        )
+        return 1
     review_exit = ops.review(repo, pr)
     if review_exit != 0:
         print(

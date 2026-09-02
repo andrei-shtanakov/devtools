@@ -35,6 +35,10 @@ class _Ops:
     def ensure_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("restore", branch))
 
+    def changed_paths(self, target_dir: str, base_branch: str) -> list[str]:
+        self.calls.append(("changed_paths", base_branch))
+        return self.files
+
     def review(self, repo: str, pr: int) -> int:
         self.calls.append(("review", repo, pr))
         return self.review_exit
@@ -58,6 +62,7 @@ def _facts(**over: Any) -> dict:
         "statusCheckRollup": [{"conclusion": "SUCCESS"}],
         "mergeable": "MERGEABLE",
         "headRefOid": "cafe" * 10,
+        "baseRefName": "master",
     }
     base.update(over)
     return base
@@ -123,36 +128,72 @@ def test_pending_forever_times_out() -> None:
 
 
 def test_authority_root_paths_go_to_human(capsys) -> None:
-    """Гард переехал ДО материализации (приёмка PR #113, blocker):
-    authority-PR не только не мержится — его дерево не материализуется
-    и ревью не запускается."""
+    """Гард путей до ревью (приёмка PR #113): authority-PR не мержится
+    и ревью на него не запускается; список путей — по локальному диффу
+    материализованного head0, не по API (TOCTOU, круг 2)."""
     ops = _Ops(facts_seq=[_facts()],
                files=["lib/x.ex", ".github/workflows/ci.yml"])
     rc = accept_pr.accept(
         "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
     )
     assert rc == 1
-    assert not any(
-        c[0] in ("merge", "materialize", "review") for c in ops.calls
-    )
+    assert not any(c[0] in ("merge", "review") for c in ops.calls)
+    assert ("changed_paths", "master") in ops.calls
+    assert ("restore", "master") in ops.calls
     assert "authority-root" in capsys.readouterr().out
 
 
-def test_review_harness_paths_stop_before_materialize(capsys) -> None:
-    """Приёмка PR #113 (blocker): после switch на head PR review-pr.sh
-    исполняет scripts/review/local.sh из дерева ЭТОГО PR — PR, правящий
-    ревью-harness, получил бы исполнение своего кода у оператора до
-    вердикта. Стоп до переключения дерева и запуска ревью."""
+def test_review_harness_paths_stop_before_review(capsys) -> None:
+    """Приёмка PR #113 (blocker): review-pr.sh исполняет
+    scripts/review/local.sh из локального дерева, переключённого на head
+    PR — PR, правящий ревью-harness, получил бы исполнение своего кода у
+    оператора до вердикта. Стоп после материализации, но ДО ревью;
+    ветка возвращается."""
     ops = _Ops(facts_seq=[_facts()],
                files=["lib/x.ex", "scripts/review/local.sh"])
     rc = accept_pr.accept(
         "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
     )
     assert rc == 1
-    assert not any(
-        c[0] in ("merge", "materialize", "review") for c in ops.calls
-    )
+    assert not any(c[0] in ("merge", "review") for c in ops.calls)
+    names = [c[0] for c in ops.calls]
+    assert names.index("materialize") < names.index("changed_paths")
+    assert ("restore", "master") in ops.calls
     assert "harness" in capsys.readouterr().out
+
+
+def test_missing_base_branch_stops_before_materialize(capsys) -> None:
+    """Без baseRefName гард путей не к чему привязать — fail-closed стоп."""
+    facts = _facts()
+    del facts["baseRefName"]
+    ops = _Ops(facts_seq=[facts])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert not any(
+        c[0] in ("materialize", "review", "merge") for c in ops.calls
+    )
+    assert "base-ветку" in capsys.readouterr().out
+
+
+def test_changed_paths_failure_stops_and_restores(capsys) -> None:
+    """Сбой локального диффа — RuntimeError → стоп без ревью, с restore."""
+
+    class _FailingDiffOps(_Ops):
+        def changed_paths(
+            self, target_dir: str, base_branch: str
+        ) -> list[str]:
+            raise RuntimeError("diff rc=128")
+
+    ops = _FailingDiffOps(facts_seq=[_facts()])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert not any(c[0] in ("review", "merge") for c in ops.calls)
+    assert ("restore", "master") in ops.calls
+    assert "diff rc=128" in capsys.readouterr().out
 
 
 def test_conflicting_pr_stops() -> None:
