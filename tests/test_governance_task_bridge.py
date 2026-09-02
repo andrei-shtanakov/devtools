@@ -725,3 +725,46 @@ status: draft
     )
     assert "### TASK-001: Каркас" in text
     assert "### TASK-002: Вне Feature" in text
+
+
+def test_bridge_group_unions_two_existing_owners() -> None:
+    """Приёмка PR #119 (minor): группа-«мост» с файлами {A, B} объединяет
+    И уже разных владельцев A и B — у каждого файла ровно один владелец."""
+    md = """\
+---
+spec_stage: behaviour-spec
+status: draft
+---
+# Behaviour
+
+#### BEH-01: Файл A
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_a.py::t1`
+
+#### BEH-02: Файл B
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_b.py::t2`
+
+#### BEH-03: Мост A
+`traces: [FR-02]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_a.py::t3`
+
+#### BEH-03: Мост B
+`traces: [FR-02]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_b.py::t4`
+"""
+    scenarios = task_bridge.parse_behaviour(md)
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/15-behaviour-spec.md",
+        scenarios=scenarios,
+        generated_at="2026-09-03T12:00:00",
+        behaviour_blob="ab" * 20,
+    )
+    assert "### TASK-001: Файл A (+3 смежных BEH)" in text
+    assert "### TASK-002:" not in text

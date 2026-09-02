@@ -191,31 +191,46 @@ def _merge_featureless_by_target_file(
     отнесён к Feature; бес-Feature сценарий в Feature-группу не вливается.
     Заголовок слитой группы — первый сценарий + счётчик.
     """
-    merged: list[tuple[str, str, list[Scenario]]] = []
-    # индекс «файл цели → позиция группы-владельца в merged»
+    # Union-find по индексам групп (приёмка PR #119, minor): группа-«мост»
+    # с файлами {A, B} обязана объединить И уже разных владельцев A и B —
+    # выбор одного из них оставлял бы у файла второго владельца.
+    parent = list(range(len(groups)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
     owner_by_file: dict[str, int] = {}
-    for key, title, scs in groups:
-        featureless = all(s.feature is None for s in scs)
-        files = _target_files(scs)
-        owner = next(
-            (owner_by_file[f] for f in sorted(files) if f in owner_by_file),
-            None,
-        )
-        if featureless and owner is not None:
-            okey, _otitle, oscs = merged[owner]
+    for idx, (_key, _title, scs) in enumerate(groups):
+        if not all(s.feature is None for s in scs):
+            continue  # Feature-группы владельца в union не участвуют
+        for f in sorted(_target_files(scs)):
+            if f in owner_by_file:
+                union(idx, owner_by_file[f])
+            else:
+                owner_by_file[f] = idx
+    merged: list[tuple[str, str, list[Scenario]]] = []
+    root_pos: dict[int, int] = {}
+    for idx, (key, title, scs) in enumerate(groups):
+        root = find(idx)
+        if root in root_pos:
+            okey, _otitle, oscs = merged[root_pos[root]]
             oscs.extend(scs)
-            merged[owner] = (
+            merged[root_pos[root]] = (
                 okey,
                 f"{oscs[0].title} (+{len(oscs) - 1} смежных BEH)",
                 oscs,
             )
-            for f in files:
-                owner_by_file.setdefault(f, owner)
-            continue
-        merged.append((key, title, list(scs)))
-        if featureless:
-            for f in files:
-                owner_by_file.setdefault(f, len(merged) - 1)
+        else:
+            root_pos[root] = len(merged)
+            merged.append((key, title, list(scs)))
     return merged
 
 
