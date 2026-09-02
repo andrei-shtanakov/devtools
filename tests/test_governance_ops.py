@@ -577,7 +577,11 @@ def test_materialize_pr_head_fetch_then_detach(monkeypatch):
     ops = RealOps()
     ops.materialize_pr_head("/tmp/kapelle", 59, "cafe" * 10)
     assert calls[0].argv == ["git", "fetch", "origin", "pull/59/head"]
-    assert calls[1].argv == ["git", "switch", "--detach", "cafe" * 10]
+    # --no-overwrite-ignore (приёмка PR #113, круг 5): голый switch молча
+    # перезаписал бы ignored-файл оператора версией из PR.
+    assert calls[1].argv == [
+        "git", "switch", "--no-overwrite-ignore", "--detach", "cafe" * 10,
+    ]
     assert all(c.kwargs["cwd"] == "/tmp/kapelle" for c in calls)
 
 

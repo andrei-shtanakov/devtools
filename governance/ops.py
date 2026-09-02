@@ -180,6 +180,10 @@ class RealOps:
         локальное дерево авторитетным — перед ревью чекаут цели обязан стоять
         на проверяемом head. Detach на пинованный sha (не на ветку PR): гонка
         с параллельным push либо не влияет, либо валит switch — fail-closed.
+        --no-overwrite-ignore (приёмка PR #113, круг 5): git status
+        --porcelain не видит ignored-файлы, а голый switch молча перезаписал
+        бы локальный ignored-файл оператора версией из PR — конфликт обязан
+        валить switch, не терять данные.
         """
         fetch = subprocess.run(
             ["git", "fetch", "origin", f"pull/{pr}/head"],
@@ -191,7 +195,7 @@ class RealOps:
                 f"rc={fetch.returncode}: {fetch.stderr.strip()}"
             )
         switch = subprocess.run(
-            ["git", "switch", "--detach", sha],
+            ["git", "switch", "--no-overwrite-ignore", "--detach", sha],
             cwd=target_dir, capture_output=True, text=True,
         )
         if switch.returncode != 0:
