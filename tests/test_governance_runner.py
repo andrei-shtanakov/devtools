@@ -48,6 +48,9 @@ class FakeOps:
     head: str = "deadbeef"
     s8_exit: int = 0
     s8_output: str = ""
+    collect_verdicts_ok: bool = True
+    # Очередь ответов collect_gate_verdicts; пустая -> collect_verdicts_ok
+    collect_verdicts_queue: list[bool] = field(default_factory=list)
     # Очередь ответов S4 `gate_check_candidate`; пустая/исчерпанная -> (0, "")
     gate_candidate: list[tuple[int, str]] = field(default_factory=list)
     find_pr_error: str | None = None
@@ -187,6 +190,12 @@ class FakeOps:
     ) -> tuple[int, str]:
         self.calls.append(("gate_check_s8", bundle_dir))
         return self.s8_exit, self.s8_output
+
+    def collect_gate_verdicts(self, target_dir: str, dest: str) -> bool:
+        self.calls.append(("collect_gate_verdicts", target_dir, dest))
+        if self.collect_verdicts_queue:
+            return self.collect_verdicts_queue.pop(0)
+        return self.collect_verdicts_ok
 
     def create_issue(self, repo_slug: str, title: str, body: str) -> int:
         self.calls.append(("create_issue", repo_slug, title))
@@ -393,6 +402,67 @@ def test_s8_success_completes(tmp_path: Path, runs_root, monkeypatch) -> None:
     assert state.status == "completed"
     assert state.ops["gate-authoritative"] == {"status": "completed", "exit": 0}
     assert ops.issues == []
+    # Ретроспектива 2026-09-02 (@id:runner-s8-verdicts-cleanup): verdicts
+    # --emit-verdicts не остаются в чекауте цели — уборка и на успехе;
+    # pre-clean stale-файла предыдущей попытки — ДО запуска гейта
+    # (приёмка PR #114, круг 2).
+    stale = str(rs.run_dir("r-s8-ok") / "s8-gate-verdicts.stale.jsonl")
+    dest = str(rs.run_dir("r-s8-ok") / "s8-gate-verdicts.jsonl")
+    seq = [
+        c for c in ops.calls
+        if c[0] in ("collect_gate_verdicts", "gate_check_s8")
+    ]
+    assert seq == [
+        ("collect_gate_verdicts", state.target_dir, stale),
+        ("gate_check_s8", BUNDLE_DIR),
+        ("collect_gate_verdicts", state.target_dir, dest),
+    ]
+
+
+def test_s8_stale_verdicts_do_not_mask_missing_artifact(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Приёмка PR #114, круг 2: verdict-файл прерванной ПРЕДЫДУЩЕЙ попытки
+    не должен сойти за артефакт текущего вызова гейта. Pre-clean уносит
+    его (True), текущий гейт файла не создал (False) — fail-closed стоп."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=0, collect_verdicts_queue=[True, False],
+    )
+
+    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-stale", ops))
+
+    assert state.status != "completed"
+    gate_op = state.ops.get("gate-authoritative")
+    assert gate_op is not None and gate_op["status"] != "completed"
+
+
+def test_s8_success_without_verdicts_is_not_completed(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Приёмка PR #114: verdicts — обязательный артефакт authoritative-
+    фиксации (спека §5). Зелёный exit gate-check без gate_verdicts.jsonl —
+    неполный результат: fail-closed стоп ДО op_complete, шаг resumable,
+    completed не выставляется."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=0, collect_verdicts_ok=False,
+    )
+
+    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-noverd", ops))
+
+    assert state.status != "completed"
+    gate_op = state.ops.get("gate-authoritative")
+    assert gate_op is not None and gate_op["status"] != "completed"
+    assert ops.issues == []
 
 
 def test_s8_fail_marks_merged_unverified_and_opens_issue(
@@ -418,6 +488,9 @@ def test_s8_fail_marks_merged_unverified_and_opens_issue(
         "status": "completed", "exit": 1, "output": "",
     }
     assert state.ops["remediation-issue"] == {"status": "completed", "number": 901}
+    # Уборка verdicts и на провале — dirty-чекаут не должен пережить S8.
+    dest = str(rs.run_dir(run_id) / "s8-gate-verdicts.jsonl")
+    assert ("collect_gate_verdicts", state.target_dir, dest) in ops.calls
 
     findings_file = rs.run_dir(run_id) / "s8-findings.txt"
     assert findings_file.exists()

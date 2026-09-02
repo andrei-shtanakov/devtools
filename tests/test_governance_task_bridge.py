@@ -43,6 +43,34 @@ traces_to: [requirements]
 """
 
 
+CHARTER_MD = """\
+---
+spec_stage: charter
+status: draft
+version: 1
+owner_role: product
+---
+# Charter
+
+Текст charter.
+"""
+
+REQUIREMENTS_MD = """\
+---
+spec_stage: requirements
+status: draft
+version: 1
+owner_role: product
+traces_to: [charter]
+upstream_hashes:
+  charter: ab00000000000000000000000000000000000000
+---
+# Requirements
+
+Текст requirements.
+"""
+
+
 def test_parse_behaviour_extracts_scenarios() -> None:
     scenarios = task_bridge.parse_behaviour(BEHAVIOUR_MD)
     assert [s.beh_id for s in scenarios] == ["BEH-01", "BEH-02"]
@@ -65,6 +93,7 @@ def test_render_tasks_structure() -> None:
         bundle_path="workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
         scenarios=scenarios,
         generated_at="2026-08-31T12:00:00",
+        behaviour_blob="ab" * 20,
     )
     assert text.startswith("---\n")
     assert "spec_stage: tasks" in text
@@ -137,6 +166,8 @@ def _target(tmp_path: Path) -> Path:
     target = tmp_path / "alpha"
     bundle = target / "workstreams/WS-alpha-7/spec"
     bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text(CHARTER_MD)
+    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
     (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
     return target
 
@@ -152,18 +183,39 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=ops,
+        approved_by="andrei-shtanakov",
+        approved_at="2026-09-02T06:07:39Z",
     )
     assert pr == 77
     spec = target / "spec/WS-alpha-7-tasks.md"
     assert spec.exists()
     assert "### TASK-001:" in spec.read_text()
     names = [c[0] for c in ops.calls]
-    # база освежается до ветки; коммитится только файл спеки
+    # база освежается до ветки
     assert names.index("checkout_and_pull") < names.index("ensure_branch")
+    # один коммит: штамп трёх файлов бандла + файл спеки
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
-    assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
+    assert commit[1] == (
+        "workstreams/WS-alpha-7/spec/00-charter.md",
+        "workstreams/WS-alpha-7/spec/10-requirements.md",
+        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
+        "spec/WS-alpha-7-tasks.md",
+    )
     assert ("push_branch", "spec/WS-alpha-7-tasks") in ops.calls
     assert "draft" in ops.pr_body.lower()
+    assert "штамп статусов" in ops.pr_body
+    # Пин tasks-спеки — blob behaviour-spec ПОСЛЕ штампа (иначе протух бы
+    # в том же PR)
+    from governance.stale_adapter import blob_sha1
+    stamped_blob = blob_sha1(
+        (target / "workstreams/WS-alpha-7/spec/15-behaviour-spec.md")
+        .read_text(encoding="utf-8")
+    )
+    meta, _body = task_bridge.split_frontmatter(
+        spec.read_text(encoding="utf-8")
+    )
+    assert meta["traces_to"] == ["behaviour-spec"]
+    assert meta["upstream_hashes"] == {"behaviour-spec": stamped_blob}
 
 
 def test_deliver_dirty_target_refuses(tmp_path: Path) -> None:
@@ -177,6 +229,7 @@ def test_deliver_dirty_target_refuses(tmp_path: Path) -> None:
             bundle_dir="workstreams/WS-alpha-7/spec",
             base_ref="master",
             ops=_StubOps(dirty=True),
+            approved_by="a", approved_at="t",
         )
 
 
@@ -192,6 +245,7 @@ def test_deliver_missing_behaviour_refuses(tmp_path: Path) -> None:
             bundle_dir="workstreams/WS-alpha-7/spec",
             base_ref="master",
             ops=_StubOps(),
+            approved_by="a", approved_at="t",
         )
 
 
@@ -206,6 +260,8 @@ def test_deliver_reads_bundle_only_after_base_checkout(tmp_path: Path) -> None:
         def checkout_and_pull(self, target_dir: str, branch: str) -> None:
             super().checkout_and_pull(target_dir, branch)
             bundle.mkdir(parents=True)
+            (bundle / "00-charter.md").write_text(CHARTER_MD)
+            (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
             (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
 
     pr = task_bridge.deliver(
@@ -216,6 +272,7 @@ def test_deliver_reads_bundle_only_after_base_checkout(tmp_path: Path) -> None:
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=_LateOps(),
+        approved_by="a", approved_at="t",
     )
     assert pr == 77
 
@@ -282,6 +339,7 @@ def test_render_groups_by_feature_sections() -> None:
         bundle_path="workstreams/WS-x-1/spec/15-behaviour-spec.md",
         scenarios=scenarios,
         generated_at="2026-08-31T12:00:00",
+        behaviour_blob="ab" * 20,
     )
     assert "### TASK-001: Каркас" in text
     assert "### TASK-002: Безопасность" in text
@@ -315,5 +373,304 @@ def test_plain_heading_closes_feature_section() -> None:
         bundle_path="b/15-behaviour-spec.md",
         scenarios=scenarios,
         generated_at="2026-08-31T12:00:00",
+        behaviour_blob="ab" * 20,
     )
     assert "### TASK-003: Вне Feature" in text
+
+
+# --- frontmatter-хелперы и штамп бандла (@id:spec-bridge-approve-conformance)
+
+
+def test_split_join_frontmatter_roundtrip() -> None:
+    meta, body = task_bridge.split_frontmatter(REQUIREMENTS_MD)
+    assert meta["spec_stage"] == "requirements"
+    assert meta["upstream_hashes"] == {
+        "charter": "ab" + "0" * 38
+    }
+    assert body.startswith("# Requirements")
+    rejoined = task_bridge.join_frontmatter(meta, body)
+    meta2, body2 = task_bridge.split_frontmatter(rejoined)
+    assert meta2 == meta and body2 == body
+
+
+def test_split_frontmatter_refuses_plain_file() -> None:
+    with pytest.raises(ValueError, match="frontmatter"):
+        task_bridge.split_frontmatter("# просто markdown\n")
+
+
+def test_stamp_bundle_approves_and_repins_chain(tmp_path: Path) -> None:
+    """Урок 2 ретроспективы: штамп статусов + перепиновка цепочки. Каждый
+    следующий файл пинует blob предыдущего ПОСЛЕ его штампа."""
+    from governance.stale_adapter import blob_sha1
+
+    target = _target(tmp_path)
+    changed = task_bridge.stamp_bundle_approved(
+        str(target), "workstreams/WS-alpha-7/spec",
+        approved_by="ai-prosto", approved_at="2026-09-02T10:00:00Z",
+    )
+    assert changed == [
+        "workstreams/WS-alpha-7/spec/00-charter.md",
+        "workstreams/WS-alpha-7/spec/10-requirements.md",
+        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
+    ]
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    charter_meta, _ = task_bridge.split_frontmatter(
+        (bundle / "00-charter.md").read_text(encoding="utf-8")
+    )
+    assert charter_meta["status"] == "approved"
+    assert charter_meta["approved_by"] == "ai-prosto"
+    assert charter_meta["version"] == 2
+    req_text = (bundle / "10-requirements.md").read_text(encoding="utf-8")
+    req_meta, _ = task_bridge.split_frontmatter(req_text)
+    assert req_meta["upstream_hashes"]["charter"] == blob_sha1(
+        (bundle / "00-charter.md").read_text(encoding="utf-8")
+    )
+    beh_meta, _ = task_bridge.split_frontmatter(
+        (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+    )
+    assert beh_meta["status"] == "approved"
+    assert beh_meta["upstream_hashes"]["requirements"] == blob_sha1(req_text)
+
+
+def test_stamp_bundle_is_idempotent(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    task_bridge.stamp_bundle_approved(
+        str(target), "workstreams/WS-alpha-7/spec",
+        approved_by="x", approved_at="t",
+    )
+    again = task_bridge.stamp_bundle_approved(
+        str(target), "workstreams/WS-alpha-7/spec",
+        approved_by="y", approved_at="t2",
+    )
+    assert again == []
+
+
+def test_conform_normalizes_after_approve(tmp_path: Path) -> None:
+    """Урок 1: `spec approve` дописывает design из lite-профиля —
+    нормализация возвращает форму governance-профиля и свежий пин."""
+    from governance.stale_adapter import blob_sha1
+
+    target = _target(tmp_path)
+    spec_dir = target / "spec"
+    spec_dir.mkdir()
+    (spec_dir / "WS-alpha-7-tasks.md").write_text(
+        "---\n"
+        "spec_stage: tasks\n"
+        "status: approved\n"
+        "version: 2\n"
+        "approved_by: andrei-shtanakov\n"
+        "traces_to:\n- behaviour-spec\n- design\n"
+        "upstream_hashes:\n  behaviour-spec: " + "1" * 40 + "\n"
+        "---\n\n## Milestone 1: s\n",
+        encoding="utf-8",
+    )
+    changed = task_bridge.conform_approved(
+        str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
+    )
+    assert changed is True
+    meta, body = task_bridge.split_frontmatter(
+        (spec_dir / "WS-alpha-7-tasks.md").read_text(encoding="utf-8")
+    )
+    assert meta["traces_to"] == ["behaviour-spec"]
+    assert meta["upstream_hashes"] == {
+        "behaviour-spec": blob_sha1(
+            (target / "workstreams/WS-alpha-7/spec/15-behaviour-spec.md")
+            .read_text(encoding="utf-8")
+        )
+    }
+    # поля approve владельца не тронуты
+    assert meta["status"] == "approved"
+    assert meta["approved_by"] == "andrei-shtanakov"
+    assert "## Milestone 1: s" in body
+    # идемпотентность
+    assert task_bridge.conform_approved(
+        str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
+    ) is False
+
+
+def test_conform_refuses_draft(tmp_path: Path) -> None:
+    """Инвариант №4: нормализация — ПОСЛЕ человеческого approve, не вместо."""
+    target = _target(tmp_path)
+    spec_dir = target / "spec"
+    spec_dir.mkdir()
+    (spec_dir / "WS-alpha-7-tasks.md").write_text(
+        "---\nspec_stage: tasks\nstatus: draft\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="approve"):
+        task_bridge.conform_approved(
+            str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
+        )
+
+
+class _ConformOps(_StubOps):
+    def __init__(self, existing_pr: int | None = None) -> None:
+        super().__init__()
+        self.existing_pr = existing_pr
+
+    def find_pr(self, repo_slug: str, branch: str) -> int | None:
+        self.calls.append(("find_pr", branch))
+        return self.existing_pr
+
+
+def _approved_tasks(target: Path) -> None:
+    spec_dir = target / "spec"
+    spec_dir.mkdir(exist_ok=True)
+    (spec_dir / "WS-alpha-7-tasks.md").write_text(
+        "---\nspec_stage: tasks\nstatus: approved\nversion: 2\n"
+        "traces_to:\n- behaviour-spec\n- design\n"
+        "---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+
+def test_deliver_conform_opens_pr(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    _approved_tasks(target)
+    ops = _ConformOps()
+    pr = task_bridge.deliver_conform(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        ops=ops,
+    )
+    assert pr == 77
+    commit = next(c for c in ops.calls if c[0] == "commit_paths")
+    assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
+    assert ("push_branch", "spec/WS-alpha-7-tasks-approve") in ops.calls
+
+
+def test_deliver_conform_rerun_updates_existing_pr(tmp_path: Path) -> None:
+    """Приёмка PR #117, круги 1–2: при открытом PR ветки второй PR не
+    создаётся, но свежий незакоммиченный approve-штамп ДОСТАВЛЯЕТСЯ —
+    нормализация, коммит и push идут в ту же ветку."""
+    target = _target(tmp_path)
+    _approved_tasks(target)
+    ops = _ConformOps(existing_pr=88)
+    pr = task_bridge.deliver_conform(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        ops=ops,
+    )
+    assert pr == 88
+    names = [c[0] for c in ops.calls]
+    assert names == ["find_pr", "ensure_branch", "commit_paths", "push_branch"]
+    # содержимое действительно нормализовано, не только найден PR
+    meta, _ = task_bridge.split_frontmatter(
+        (target / "spec/WS-alpha-7-tasks.md").read_text(encoding="utf-8")
+    )
+    assert meta["traces_to"] == ["behaviour-spec"]
+
+
+# --- группировка по файлу цели (@id:task-bridge-beh-grouping, урок 8) -------
+
+SAME_FILE_MD = """\
+---
+spec_stage: behaviour-spec
+status: draft
+---
+# Behaviour
+
+#### BEH-01: Открытие ханка
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/core/test_osc.py::test_open`
+
+#### BEH-02: Закрытие ханка
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/core/test_osc.py::test_close`
+
+#### BEH-03: Продолжение разбора
+`traces: [FR-02]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/core/test_osc.py::test_continue`
+
+#### BEH-04: Ошибка декодирования
+`traces: [FR-03]`
+- **checked_by**: `status: planned` `kind: integration` `owner: qa` \
+`target: tests/runtime/test_purity.py::test_decode`
+"""
+
+
+def test_featureless_scenarios_merge_by_target_file() -> None:
+    """Урок 8 (WS-disputatio-57: 7/15 red-unverifiable): смежные
+    бес-Feature сценарии одного файла цели — одна задача; pytest-селектор
+    `::…` при сравнении отброшен."""
+    scenarios = task_bridge.parse_behaviour(SAME_FILE_MD)
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/15-behaviour-spec.md",
+        scenarios=scenarios,
+        generated_at="2026-09-03T12:00:00",
+        behaviour_blob="ab" * 20,
+    )
+    assert "### TASK-001: Открытие ханка (+2 смежных BEH)" in text
+    assert "- [ ] реализовать BEH-01" in text
+    assert "- [ ] реализовать BEH-02" in text
+    assert "- [ ] реализовать BEH-03" in text
+    assert "### TASK-002: Ошибка декодирования" in text
+    assert "### TASK-003:" not in text
+
+
+def test_nonconsecutive_same_file_does_not_merge() -> None:
+    """Мержатся только СМЕЖНЫЕ группы — разрыв другим файлом сохраняет
+    порядок документа и отдельность задач."""
+    md = SAME_FILE_MD + """\
+
+#### BEH-05: Снова про ханки
+`traces: [FR-04]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/core/test_osc.py::test_again`
+"""
+    scenarios = task_bridge.parse_behaviour(md)
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/15-behaviour-spec.md",
+        scenarios=scenarios,
+        generated_at="2026-09-03T12:00:00",
+        behaviour_blob="ab" * 20,
+    )
+    assert "### TASK-003: Снова про ханки" in text
+
+
+def test_featureless_does_not_merge_into_feature_group() -> None:
+    """Feature-группировка владельца приоритетна: бес-Feature сценарий не
+    вливается в Feature-группу даже при общем файле цели."""
+    md = """\
+---
+spec_stage: behaviour-spec
+status: draft
+---
+# Behaviour
+
+## Feature: Каркас
+
+#### BEH-01: Внутри Feature
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_a.py::test_one`
+
+## Особые случаи
+
+#### BEH-02: Вне Feature
+`traces: [FR-02]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_a.py::test_two`
+"""
+    scenarios = task_bridge.parse_behaviour(md)
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/15-behaviour-spec.md",
+        scenarios=scenarios,
+        generated_at="2026-09-03T12:00:00",
+        behaviour_blob="ab" * 20,
+    )
+    assert "### TASK-001: Каркас" in text
+    assert "### TASK-002: Вне Feature" in text

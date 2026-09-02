@@ -43,6 +43,7 @@
 | `fleet_report.py` | snapshot-JSON → markdown-отчёт для vault `derived/fleet/` |
 | `recent_changes.py` | темпоральный сенсор: коммиты + незакоммиченное с момента X (`make today`) |
 | `salvage_scan.py` | salvage-скан флота (`make salvage`): orphan worktrees, ветки без PR, unpushed default, stale locks; пустой результат молчит, осознанные исключения помечает `[waived]` (devtools#67) |
+| `spec_run_preflight.py` | преflight перед прогоном spec-runner в соседе (`make preflight ARGS='--repo <r>'`): конфиг-по-эталону, insteadOf https, беспрефиксная state-DB, live-smoke-среда как в CI (ретроспектива 2026-09-02, уроки 4–5 devtools#110) |
 | `check-contract-drift.sh` | дрейф вендоренных контрактов |
 | `check-agent-id-conformance.py` | инварианты ADR-ECO-003 |
 | `check-catalog-fixtures.py` | owner-QA SSOT-набора conformance-фикстур каталога (`contracts/catalog-conformance-fixtures/v1/`): референс V1–V7 + manifest |

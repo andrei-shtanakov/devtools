@@ -10,9 +10,11 @@ subprocess-обёртка над ним: каждый метод строит о
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Protocol
@@ -30,6 +32,14 @@ class Ops(Protocol):
     def ensure_branch(self, target_dir: str, branch: str) -> None: ...
 
     def is_dirty(self, target_dir: str) -> bool: ...
+
+    def current_branch(self, target_dir: str) -> str | None: ...
+
+    def materialize_pr_head(
+        self, target_dir: str, pr: int, sha: str
+    ) -> None: ...
+
+    def changed_paths(self, target_dir: str, base_branch: str) -> list[str]: ...
 
     def head_sha(self, target_dir: str, branch: str) -> str: ...
 
@@ -86,6 +96,8 @@ class Ops(Protocol):
     def gate_check_s8(
         self, target_dir: str, bundle_dir: str, profile: str
     ) -> tuple[int, str]: ...
+
+    def collect_gate_verdicts(self, target_dir: str, dest: str) -> bool: ...
 
     def gate_check_candidate(
         self, target_dir: str, bundle_dir: str, profile: str
@@ -158,6 +170,78 @@ class RealOps:
             cwd=target_dir, capture_output=True, text=True, check=True,
         )
         return bool(done.stdout.strip())
+
+    def current_branch(self, target_dir: str) -> str | None:
+        """Имя текущей ветки в target_dir; None — detached HEAD."""
+        done = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=target_dir, capture_output=True, text=True, check=True,
+        )
+        return done.stdout.strip() or None
+
+    def materialize_pr_head(self, target_dir: str, pr: int, sha: str) -> None:
+        """fetch pull/<pr>/head + detached switch на пин sha; сбой — RuntimeError.
+
+        Ретроспектива 2026-09-02 (урок 7, devtools#110): review-kit считает
+        локальное дерево авторитетным — перед ревью чекаут цели обязан стоять
+        на проверяемом head. Detach на пинованный sha (не на ветку PR): гонка
+        с параллельным push либо не влияет, либо валит switch — fail-closed.
+        --no-overwrite-ignore (приёмка PR #113, круг 5): git status
+        --porcelain не видит ignored-файлы, а голый switch молча перезаписал
+        бы локальный ignored-файл оператора версией из PR — конфликт обязан
+        валить switch, не терять данные.
+        """
+        fetch = subprocess.run(
+            ["git", "fetch", "origin", f"pull/{pr}/head"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if fetch.returncode != 0:
+            raise RuntimeError(
+                f"materialize_pr_head: git fetch pull/{pr}/head "
+                f"rc={fetch.returncode}: {fetch.stderr.strip()}"
+            )
+        switch = subprocess.run(
+            ["git", "switch", "--no-overwrite-ignore", "--detach", sha],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if switch.returncode != 0:
+            raise RuntimeError(
+                f"materialize_pr_head: git switch --detach {sha[:7]} "
+                f"rc={switch.returncode}: {switch.stderr.strip()}"
+            )
+
+    def changed_paths(self, target_dir: str, base_branch: str) -> list[str]:
+        """Пути, изменённые HEAD относительно merge-base с origin/<base>.
+
+        Гард путей accept-pr обязан быть привязан к МАТЕРИАЛИЗОВАННОМУ
+        head0 (приёмка PR #113, круг 2): API-список файлов PR отражает
+        голову ветки на момент запроса — force-push между запросами
+        подменил бы проверяемый список (TOCTOU). Здесь дифф считается
+        локально по уже переключённому дереву; базой служит FETCH_HEAD
+        только что выполненного fetch (приёмка PR #113, круг 4): fetch без
+        destination-refspec не обязан обновить refs/remotes/origin/<base>,
+        и дифф против протухшего origin/<base> включил бы чужие коммиты
+        базы — ложный authority-стоп. Сбой — RuntimeError.
+        """
+        fetch = subprocess.run(
+            ["git", "fetch", "origin", base_branch],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if fetch.returncode != 0:
+            raise RuntimeError(
+                f"changed_paths: git fetch origin {base_branch} "
+                f"rc={fetch.returncode}: {fetch.stderr.strip()}"
+            )
+        diff = subprocess.run(
+            ["git", "diff", "--name-only", "FETCH_HEAD...HEAD"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if diff.returncode != 0:
+            raise RuntimeError(
+                f"changed_paths: git diff FETCH_HEAD...HEAD "
+                f"rc={diff.returncode}: {diff.stderr.strip()}"
+            )
+        return [line for line in diff.stdout.splitlines() if line.strip()]
 
     def head_sha(self, target_dir: str, branch: str) -> str:
         """SHA головы branch в target_dir."""
@@ -282,12 +366,12 @@ class RealOps:
     def latest_review_body(self, repo_slug: str, pr: int) -> str | None:
         """Тело НОВЕЙШЕГО ревью $REVIEW_LOGIN на PR; нет/сбой -> None.
 
-        Личность ревьюера — env `REVIEW_LOGIN` с тем же дефолтом, что у
-        `review-pr.sh:66` (запаркованный minor приёмки PR #102): хардкод
+        Личность ревьюера — env `REVIEW_LOGIN` с дефолтом ai-prosto (канон —
+        `review-pr.sh:66`; запаркованный minor приёмки PR #102): хардкод
         расходился бы с конфигурируемым каноном молча — публикация ушла бы
-        под новый логин, а поиск тела остался бы на старом, и
-        авто-опровержение беззвучно умерло бы. None читается вызывающим как
-        «опровергать нечего» (fail-closed в сторону стопа на человеке).
+        под новый логин, поиск тела остался бы на старом, и авто-опровержение
+        беззвучно умерло бы. None читается вызывающим как «опровергать
+        нечего» (fail-closed в сторону стопа на человеке).
         """
         login = os.environ.get("REVIEW_LOGIN", "ai-prosto")
         done = subprocess.run(
@@ -314,7 +398,7 @@ class RealOps:
         done = subprocess.run(
             ["gh", "pr", "view", str(pr), "-R", repo_slug, "--json",
              "mergeable,mergeStateStatus,statusCheckRollup,isDraft,"
-             "headRefOid,baseRefName,state,mergedAt"],
+             "headRefOid,baseRefName,state,mergedAt,mergedBy"],
             capture_output=True, text=True, check=True,
         )
         return json.loads(done.stdout)
@@ -519,6 +603,26 @@ class RealOps:
         )
         output = done.stdout + done.stderr
         return done.returncode, output
+
+    def collect_gate_verdicts(self, target_dir: str, dest: str) -> bool:
+        """Переносит <target>/.steward/gate_verdicts.jsonl в dest.
+
+        Ретроспектива 2026-09-02 (@id:runner-s8-verdicts-cleanup):
+        ``gate-check --emit-verdicts`` пишет verdicts в корень ЦЕЛЕВОГО
+        репо — оставленный там файл делает чекаут грязным и спотыкает
+        dirty-гард task_bridge на следующем шаге конвейера. Evidence
+        переезжает в журнал прогона (dest); пустой ``.steward/``
+        прибирается. Возвращает True, если файл был.
+        """
+        src = Path(target_dir) / ".steward" / "gate_verdicts.jsonl"
+        if not src.exists():
+            return False
+        dest_path = Path(dest)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest_path))
+        with contextlib.suppress(OSError):
+            src.parent.rmdir()
+        return True
 
     def gate_check_candidate(
         self, target_dir: str, bundle_dir: str, profile: str

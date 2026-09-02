@@ -321,9 +321,7 @@ def test_author_disp_returncode_passthrough(monkeypatch):
 def test_latest_review_body_honours_review_login_env(monkeypatch):
     """Личность ревьюера — env REVIEW_LOGIN (запаркованный minor PR #102):
     дефолт ai-prosto, override подхватывается в jq-фильтре."""
-    calls = _install_fake_run(
-        monkeypatch, returncode=0, stdout="review body\n"
-    )
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="review body\n")
     ops = RealOps()
 
     assert ops.latest_review_body("o/r", 7) == "review body"
@@ -644,3 +642,137 @@ def test_author_disp_terminal_phase_via_status(monkeypatch, tmp_path):
     script[:] = [(0, "phase: DOC_LOOP\n"), (0, "")]
     assert ops.author_disp(str(tmp_path), "t", "beh-r1", "/c.toml") == 0
     assert seen[-1][4:7] == ["disp", "pipeline", "resume"]
+
+
+# --- Кейс 12: current_branch / materialize_pr_head (ретроспектива 09-02) ----
+
+
+def test_current_branch_returns_name(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="master\n")
+    ops = RealOps()
+    assert ops.current_branch("/tmp/kapelle") == "master"
+    assert calls[0].argv == ["git", "branch", "--show-current"]
+    assert calls[0].kwargs["cwd"] == "/tmp/kapelle"
+
+
+def test_current_branch_detached_returns_none(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=0, stdout="\n")
+    ops = RealOps()
+    assert ops.current_branch("/tmp/kapelle") is None
+
+
+def test_materialize_pr_head_fetch_then_detach(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+    ops.materialize_pr_head("/tmp/kapelle", 59, "cafe" * 10)
+    assert calls[0].argv == ["git", "fetch", "origin", "pull/59/head"]
+    # --no-overwrite-ignore (приёмка PR #113, круг 5): голый switch молча
+    # перезаписал бы ignored-файл оператора версией из PR.
+    assert calls[1].argv == [
+        "git", "switch", "--no-overwrite-ignore", "--detach", "cafe" * 10,
+    ]
+    assert all(c.kwargs["cwd"] == "/tmp/kapelle" for c in calls)
+
+
+def test_materialize_pr_head_fetch_failure_raises(monkeypatch):
+    def fake_run(argv, **kwargs):
+        rc = 128 if argv[:2] == ["git", "fetch"] else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+    with pytest.raises(RuntimeError, match="fetch"):
+        ops.materialize_pr_head("/tmp/kapelle", 59, "cafe" * 10)
+
+
+def test_materialize_pr_head_switch_failure_raises(monkeypatch):
+    def fake_run(argv, **kwargs):
+        rc = 1 if argv[:2] == ["git", "switch"] else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+    with pytest.raises(RuntimeError, match="switch"):
+        ops.materialize_pr_head("/tmp/kapelle", 59, "cafe" * 10)
+
+
+def test_changed_paths_fetch_base_then_three_dot_diff(monkeypatch):
+    calls = _install_fake_run(
+        monkeypatch, returncode=0, stdout="lib/a.py\nlib/b.py\n"
+    )
+    ops = RealOps()
+    paths = ops.changed_paths("/tmp/kapelle", "master")
+    assert calls[0].argv == ["git", "fetch", "origin", "master"]
+    # FETCH_HEAD, не origin/master (приёмка PR #113, круг 4): fetch без
+    # destination-refspec не обязан обновить remote-tracking ref, а
+    # FETCH_HEAD пишется именно этим fetch — база доказуемо свежая.
+    assert calls[1].argv == [
+        "git", "diff", "--name-only", "FETCH_HEAD...HEAD",
+    ]
+    assert all(c.kwargs["cwd"] == "/tmp/kapelle" for c in calls)
+    assert paths == ["lib/a.py", "lib/b.py"]
+
+
+def test_changed_paths_fetch_failure_raises(monkeypatch):
+    def fake_run(argv, **kwargs):
+        rc = 128 if argv[:2] == ["git", "fetch"] else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+    with pytest.raises(RuntimeError, match="fetch"):
+        ops.changed_paths("/tmp/kapelle", "master")
+
+
+def test_changed_paths_diff_failure_raises(monkeypatch):
+    def fake_run(argv, **kwargs):
+        rc = 129 if argv[:2] == ["git", "diff"] else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+    with pytest.raises(RuntimeError, match="diff"):
+        ops.changed_paths("/tmp/kapelle", "master")
+
+
+# --- Кейс 13: collect_gate_verdicts (@id:runner-s8-verdicts-cleanup) --------
+
+
+def test_collect_gate_verdicts_moves_file_and_prunes_empty_dir(tmp_path):
+    target = tmp_path / "target"
+    (target / ".steward").mkdir(parents=True)
+    src = target / ".steward" / "gate_verdicts.jsonl"
+    src.write_text('{"gate": "ok"}\n', encoding="utf-8")
+    dest = tmp_path / "runs" / "r-1" / "s8-gate-verdicts.jsonl"
+    ops = RealOps()
+
+    assert ops.collect_gate_verdicts(str(target), str(dest)) is True
+    assert not src.exists()
+    assert not (target / ".steward").exists()
+    assert dest.read_text(encoding="utf-8") == '{"gate": "ok"}\n'
+
+
+def test_collect_gate_verdicts_keeps_nonempty_steward_dir(tmp_path):
+    target = tmp_path / "target"
+    (target / ".steward").mkdir(parents=True)
+    (target / ".steward" / "gate_verdicts.jsonl").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    (target / ".steward" / "other.txt").write_text("x", encoding="utf-8")
+    dest = tmp_path / "dest.jsonl"
+    ops = RealOps()
+
+    assert ops.collect_gate_verdicts(str(target), str(dest)) is True
+    assert (target / ".steward" / "other.txt").exists()
+
+
+def test_collect_gate_verdicts_absent_returns_false(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    ops = RealOps()
+
+    assert (
+        ops.collect_gate_verdicts(str(target), str(tmp_path / "d.jsonl"))
+        is False
+    )
+    assert not (tmp_path / "d.jsonl").exists()
