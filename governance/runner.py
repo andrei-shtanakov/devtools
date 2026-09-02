@@ -1231,6 +1231,15 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
         exit_code, output = ops.gate_check_s8(
             state.target_dir, state.bundle_dir, state.profile
         )
+        # Ретроспектива 2026-09-02 (@id:runner-s8-verdicts-cleanup):
+        # --emit-verdicts оставляет .steward/gate_verdicts.jsonl в корне
+        # целевого репо — грязный чекаут спотыкает dirty-гард task_bridge
+        # на следующем шаге конвейера. Evidence переезжает в run_dir —
+        # и на успехе, и на провале, до ветвления по exit_code.
+        ops.collect_gate_verdicts(
+            state.target_dir,
+            str(run_dir(state.run_id) / "s8-gate-verdicts.jsonl"),
+        )
         if exit_code == 0:
             op_complete(state, key, exit=exit_code)
             state.status = "completed"

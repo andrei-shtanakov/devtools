@@ -186,6 +186,10 @@ class FakeOps:
         self.calls.append(("gate_check_s8", bundle_dir))
         return self.s8_exit, self.s8_output
 
+    def collect_gate_verdicts(self, target_dir: str, dest: str) -> bool:
+        self.calls.append(("collect_gate_verdicts", target_dir, dest))
+        return True
+
     def create_issue(self, repo_slug: str, title: str, body: str) -> int:
         self.calls.append(("create_issue", repo_slug, title))
         self.issues.append((repo_slug, title, body))
@@ -391,6 +395,10 @@ def test_s8_success_completes(tmp_path: Path, runs_root, monkeypatch) -> None:
     assert state.status == "completed"
     assert state.ops["gate-authoritative"] == {"status": "completed", "exit": 0}
     assert ops.issues == []
+    # Ретроспектива 2026-09-02 (@id:runner-s8-verdicts-cleanup): verdicts
+    # --emit-verdicts не остаются в чекауте цели — уборка и на успехе.
+    dest = str(rs.run_dir("r-s8-ok") / "s8-gate-verdicts.jsonl")
+    assert ("collect_gate_verdicts", state.target_dir, dest) in ops.calls
 
 
 def test_s8_fail_marks_merged_unverified_and_opens_issue(
@@ -416,6 +424,9 @@ def test_s8_fail_marks_merged_unverified_and_opens_issue(
         "status": "completed", "exit": 1, "output": "",
     }
     assert state.ops["remediation-issue"] == {"status": "completed", "number": 901}
+    # Уборка verdicts и на провале — dirty-чекаут не должен пережить S8.
+    dest = str(rs.run_dir(run_id) / "s8-gate-verdicts.jsonl")
+    assert ("collect_gate_verdicts", state.target_dir, dest) in ops.calls
 
     findings_file = rs.run_dir(run_id) / "s8-findings.txt"
     assert findings_file.exists()

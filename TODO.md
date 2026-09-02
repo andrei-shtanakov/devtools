@@ -669,7 +669,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       TDD-гейт стопит прогон до waiver-ритуала. Группировать BEH по
       общему файлу/автомату состояний. Upstream-плечо (операторский
       waive одной командой) — spec-runner#335.
-- [ ] Runner S8: не оставлять .steward/gate_verdicts.jsonl в чекауте цели @owner:github:andrei-shtanakov @id:runner-s8-verdicts-cleanup
+- [x] Runner S8: не оставлять .steward/gate_verdicts.jsonl в чекауте цели @owner:github:andrei-shtanakov @id:runner-s8-verdicts-cleanup — PR этой ветки
       Шероховатость прогонов 2026-09-02 (журнал 07:10): S8 пишет
       gate_verdicts.jsonl в target-репо → dirty-гард task_bridge
       отказывает следующему шагу конвейера. Чистить после верификации
