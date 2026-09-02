@@ -437,14 +437,14 @@ def deliver_conform(
     (`spec approve`) живёт в рабочем дереве незакоммиченным — он и есть
     груз этого PR. commit_paths берёт только tasks-файл.
 
-    Идемпотентность (приёмка PR #117, minor): повторный запуск при уже
-    открытом PR ветки возвращает его номер и не делает повторной работы —
-    `gh pr create` на существующей ветке упал бы исключением.
+    Идемпотентность (приёмка PR #117, круги 1–2): при уже открытом PR
+    ветки повторный запуск НЕ создаёт второй PR (`gh pr create` упал бы),
+    но по-прежнему доставляет текущее содержимое — свежий незакоммиченный
+    approve-штамп владельца коммитится и пушится В ТУ ЖЕ ветку (пустой
+    индекс/актуальный push — no-op у RealOps).
     """
     branch = f"spec/{ws_id}-tasks-approve"
     existing = ops.find_pr(repo_slug, branch)
-    if existing is not None:
-        return existing
     ops.ensure_branch(target_dir, branch)
     changed = conform_approved(target_dir, ws_id, bundle_dir)
     rel = f"spec/{ws_id}-tasks.md"
@@ -455,6 +455,8 @@ def deliver_conform(
         "frontmatter (conform-approve)",
     )
     ops.push_branch(target_dir, branch)
+    if existing is not None:
+        return existing
     return ops.create_draft_pr(
         target_dir,
         repo_slug,

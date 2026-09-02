@@ -541,9 +541,10 @@ def test_deliver_conform_opens_pr(tmp_path: Path) -> None:
     assert ("push_branch", "spec/WS-alpha-7-tasks-approve") in ops.calls
 
 
-def test_deliver_conform_rerun_returns_existing_pr(tmp_path: Path) -> None:
-    """Приёмка PR #117 (minor): повторный запуск при открытом PR ветки —
-    его номер без повторной работы (gh pr create упал бы исключением)."""
+def test_deliver_conform_rerun_updates_existing_pr(tmp_path: Path) -> None:
+    """Приёмка PR #117, круги 1–2: при открытом PR ветки второй PR не
+    создаётся, но свежий незакоммиченный approve-штамп ДОСТАВЛЯЕТСЯ —
+    нормализация, коммит и push идут в ту же ветку."""
     target = _target(tmp_path)
     _approved_tasks(target)
     ops = _ConformOps(existing_pr=88)
@@ -556,4 +557,9 @@ def test_deliver_conform_rerun_returns_existing_pr(tmp_path: Path) -> None:
     )
     assert pr == 88
     names = [c[0] for c in ops.calls]
-    assert names == ["find_pr"]
+    assert names == ["find_pr", "ensure_branch", "commit_paths", "push_branch"]
+    # содержимое действительно нормализовано, не только найден PR
+    meta, _ = task_bridge.split_frontmatter(
+        (target / "spec/WS-alpha-7-tasks.md").read_text(encoding="utf-8")
+    )
+    assert meta["traces_to"] == ["behaviour-spec"]
