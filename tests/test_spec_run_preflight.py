@@ -256,17 +256,47 @@ def test_wrong_scalar_value_of_critical_key_fails(tmp_path: Path) -> None:
     assert "direct" in findings[0].detail and "tdd" in findings[0].detail
 
 
-def test_block_valued_key_is_checked_by_name_only(tmp_path: Path) -> None:
-    """harness_files-список: значение блочное — сверка только по имени,
-    разный состав списков соответствия не рушит."""
+def test_dropped_harness_files_items_fail(tmp_path: Path) -> None:
+    """Приёмка PR #115, круг 5: harness_files — защитная поверхность
+    spec-runner (guard строится из фактического config.harness_files);
+    конфиг, выкинувший элементы эталона, ослабляет guard молча — FAIL
+    с именами выпавших элементов."""
     repo = _git_repo(tmp_path / "r")
     (repo / "spec-runner.config.example.yaml").write_text(
         "harness_files:\n  - a.py\n  - b.py\n"
     )
     (repo / "spec-runner.config.yaml").write_text(
-        "harness_files:\n  - c.py\n"
+        "harness_files:\n  - a.py\n"
+    )
+    findings = pf.check_config_etalon(repo)
+    assert _levels(findings, "config-etalon") == ["FAIL"]
+    assert "b.py" in findings[0].detail
+    assert "a.py" not in findings[0].detail.split("нет элементов")[1]
+
+
+def test_extra_harness_files_items_are_fine(tmp_path: Path) -> None:
+    """Дополнительные элементы в конфиге — усиление guard, не FAIL."""
+    repo = _git_repo(tmp_path / "r")
+    (repo / "spec-runner.config.example.yaml").write_text(
+        "harness_files:\n  - a.py\n"
+    )
+    (repo / "spec-runner.config.yaml").write_text(
+        "harness_files:\n  - a.py\n  - extra.py\n"
     )
     assert pf.check_config_etalon(repo) == []
+
+
+def test_inline_flow_list_form_is_parsed(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path / "r")
+    (repo / "spec-runner.config.example.yaml").write_text(
+        "harness_files: [a.py, b.py]\n"
+    )
+    (repo / "spec-runner.config.yaml").write_text(
+        "harness_files: []\n"
+    )
+    findings = pf.check_config_etalon(repo)
+    assert _levels(findings, "config-etalon") == ["FAIL"]
+    assert "a.py" in findings[0].detail and "b.py" in findings[0].detail
 
 
 def test_matching_values_with_comment_and_quotes_pass(tmp_path: Path) -> None:

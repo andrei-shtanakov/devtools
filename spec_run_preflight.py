@@ -107,6 +107,40 @@ def _scalar_values(text: str, keys: tuple[str, ...]) -> dict[str, str]:
     return values
 
 
+def _list_values(text: str, key: str) -> list[str] | None:
+    """Элементы списка key (block- или inline-форма); None — ключа нет
+    или значение не список.
+
+    harness_files — защитная поверхность spec-runner (приёмка PR #115,
+    круг 5: harness.py строит guard из стандартных кандидатов плюс
+    ФАКТИЧЕСКОГО config.harness_files) — состав обязан сверяться, а не
+    только имя ключа.
+    """
+    match = re.search(
+        rf"""^[ \t]*(['"]?){re.escape(key)}\1[ \t]*:[ \t]*([^\n]*)$""",
+        text, re.MULTILINE,
+    )
+    if not match:
+        return None
+    inline = match.group(2).split("#", 1)[0].strip()
+    if inline.startswith("["):
+        inner = inline.strip("[]")
+        return [
+            i.strip().strip("'\"") for i in inner.split(",") if i.strip()
+        ]
+    if inline:
+        return None  # скаляр, не список
+    items: list[str] = []
+    for line in text[match.end():].splitlines():
+        if not line.strip():
+            continue
+        dash = re.match(r"^[ \t]*-[ \t]*(.+)$", line)
+        if not dash:
+            break
+        items.append(dash.group(1).split("#", 1)[0].strip().strip("'\""))
+    return items
+
+
 def check_config_etalon(target: Path) -> list[Finding]:
     """Урок 4: конфиг — по эталону репо, если эталон существует.
 
@@ -154,6 +188,20 @@ def check_config_etalon(target: Path) -> list[Finding]:
             mismatched.append(f"{k}: пустое/блочное значение (эталон {v!r})")
         elif got != v:
             mismatched.append(f"{k}={got!r} (эталон {v!r})")
+    # Списочные ключи эталона: элементы эталона обязаны присутствовать в
+    # конфиге (приёмка PR #115, круг 5) — harness_files это защитная
+    # поверхность spec-runner, и конфиг, выкинувший элементы, ослабляет
+    # guard молча. Дополнительные элементы в конфиге — усиление, не FAIL.
+    for k in _CRITICAL_KEYS:
+        etalon_items = _list_values(example_text, k)
+        if not etalon_items or k not in config_keys:
+            continue
+        config_items = _list_values(config_text, k) or []
+        dropped = [i for i in etalon_items if i not in config_items]
+        if dropped:
+            mismatched.append(
+                f"{k}: нет элементов эталона: {', '.join(dropped)}"
+            )
     if not missing and not mismatched:
         return []
     parts = []
