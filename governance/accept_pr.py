@@ -47,7 +47,10 @@ _AUTHORITY_PREFIXES = (".github/", "profiles/")
 # scripts/review/local.sh из локального дерева, которое материализация
 # переключает на head PR (приёмка PR #113, blocker) — PR, правящий эти
 # пути, не ревьюится агентом вовсе (гард по локальному диффу head0).
-_HARNESS_PREFIXES = ("scripts/review/",)
+# Корневой review-pr.sh — тоже harness (круг 6): для PR в сам devtools
+# target_dir совпадает с DEVTOOLS_ROOT, и Ops.review исполнил бы версию
+# скрипта из недоверенного PR.
+_HARNESS_PREFIXES = ("scripts/review/", "review-pr.sh")
 _PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED", ""}
 _GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 

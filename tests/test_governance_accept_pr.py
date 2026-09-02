@@ -366,3 +366,17 @@ def test_base_retarget_after_guard_stops(capsys) -> None:
     assert not any(c[0] == "merge" for c in ops.calls)
     assert ("restore", "master") in ops.calls
     assert "base-ветка" in capsys.readouterr().out
+
+
+def test_root_review_pr_sh_is_harness_too(capsys) -> None:
+    """Приёмка PR #113, круг 6: для PR в сам devtools target_dir — это
+    DEVTOOLS_ROOT, и Ops.review исполняет корневой review-pr.sh из
+    материализованного дерева. Его правка — тоже harness-стоп."""
+    ops = _Ops(facts_seq=[_facts()], files=["review-pr.sh"])
+    rc = accept_pr.accept(
+        "devtools", "o/devtools", 113, ops, "/tmp/devtools", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert not any(c[0] in ("merge", "review") for c in ops.calls)
+    assert ("restore", "master") in ops.calls
+    assert "harness" in capsys.readouterr().out
