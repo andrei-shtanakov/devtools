@@ -123,14 +123,36 @@ def test_pending_forever_times_out() -> None:
 
 
 def test_authority_root_paths_go_to_human(capsys) -> None:
+    """Гард переехал ДО материализации (приёмка PR #113, blocker):
+    authority-PR не только не мержится — его дерево не материализуется
+    и ревью не запускается."""
     ops = _Ops(facts_seq=[_facts()],
                files=["lib/x.ex", ".github/workflows/ci.yml"])
     rc = accept_pr.accept(
         "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
     )
     assert rc == 1
-    assert not any(c[0] == "merge" for c in ops.calls)
+    assert not any(
+        c[0] in ("merge", "materialize", "review") for c in ops.calls
+    )
     assert "authority-root" in capsys.readouterr().out
+
+
+def test_review_harness_paths_stop_before_materialize(capsys) -> None:
+    """Приёмка PR #113 (blocker): после switch на head PR review-pr.sh
+    исполняет scripts/review/local.sh из дерева ЭТОГО PR — PR, правящий
+    ревью-harness, получил бы исполнение своего кода у оператора до
+    вердикта. Стоп до переключения дерева и запуска ревью."""
+    ops = _Ops(facts_seq=[_facts()],
+               files=["lib/x.ex", "scripts/review/local.sh"])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert not any(
+        c[0] in ("merge", "materialize", "review") for c in ops.calls
+    )
+    assert "harness" in capsys.readouterr().out
 
 
 def test_conflicting_pr_stops() -> None:

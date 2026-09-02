@@ -10,8 +10,11 @@ spec-runner, завершив цикл, открывает integration-PR и о�
    2026-09-02, уроки 7 и «грязное дерево»): review-kit считает локальное
    дерево авторитетным — чекаут на master даёт ложное «реализации нет»,
    грязное дерево — ложную фактуру находок. Перед ревью: гард чистого
-   дерева → fetch pull/<n>/head → detached switch на пинованный head;
-   исходная ветка возвращается после приёмки на любом исходе;
+   дерева → гард путей (ревью-harness `scripts/review/` и authority-root —
+   стоп ДО переключения дерева: PR не должен получить исполнение своего
+   `local.sh` у оператора; приёмка PR #113, blocker) → fetch pull/<n>/head
+   → detached switch на пинованный head; исходная ветка возвращается
+   после приёмки на любом исходе;
 1. терминальное ревью (`review-pr.sh` через `Ops.review`; fp-дедуп кита
    делает повторные вызовы дешёвыми); находки → стоп, отработка — человеком
    или фикс-коммитами на ветку PR, затем повторный вызов;
@@ -39,6 +42,11 @@ from collections.abc import Callable
 from governance.ops import DEVTOOLS_ROOT, Ops, RealOps
 
 _AUTHORITY_PREFIXES = (".github/", "profiles/")
+# Исполняемый ревью-harness целевого репо: review-pr.sh запускает
+# scripts/review/local.sh из локального дерева, которое материализация
+# переключает на head PR (приёмка PR #113, blocker) — PR, правящий эти
+# пути, не материализуется и не ревьюится агентом вовсе.
+_HARNESS_PREFIXES = ("scripts/review/",)
 _PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED", ""}
 _GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 
@@ -106,6 +114,36 @@ def accept(
     if not head0:
         print("accept-pr: не удалось определить head PR — стоп")
         return 1
+    # Гарды путей ДО материализации (приёмка PR #113, blocker): после
+    # switch на head PR review-pr.sh исполнит scripts/review/local.sh из
+    # дерева этого PR — PR, правящий ревью-harness или authority-root,
+    # получил бы исполнение своего кода у оператора до вердикта. Стоп до
+    # любого переключения дерева и запуска ревью. Гонка с параллельным
+    # push закрыта пином: материализуется именно head0, а не текущая
+    # голова ветки PR.
+    files = ops.pr_files(repo_slug, pr)
+    harness = [
+        f for f in files
+        if any(f.startswith(p) for p in _HARNESS_PREFIXES)
+    ]
+    if harness:
+        print(
+            "accept-pr: дифф правит ревью-harness "
+            f"({', '.join(sorted(set(harness))[:5])}…) — материализация и "
+            "ревью только человеком"
+        )
+        return 1
+    authority = [
+        f for f in files
+        if any(f.startswith(p) for p in _AUTHORITY_PREFIXES)
+    ]
+    if authority:
+        print(
+            "accept-pr: дифф трогает authority-root пути "
+            f"({', '.join(sorted(set(authority))[:5])}…) — мерж только "
+            "человеком (ADR-ECO-004 I2)"
+        )
+        return 1
     # Урок 7 (devtools#110): ревью обязано смотреть на дерево именно этого
     # head — detached switch на пинованный sha, а не на ветку PR, чтобы
     # гонка с параллельным push не подменила проверяемое содержимое.
@@ -163,18 +201,6 @@ def _accept_on_head(
         print("accept-pr: красные чеки — мержа не будет (урок kapelle#57)")
         return 1
 
-    files = ops.pr_files(repo_slug, pr)
-    authority = [
-        f for f in files
-        if any(f.startswith(p) for p in _AUTHORITY_PREFIXES)
-    ]
-    if authority:
-        print(
-            "accept-pr: дифф трогает authority-root пути "
-            f"({', '.join(sorted(set(authority))[:5])}…) — мерж только "
-            "человеком (ADR-ECO-004 I2)"
-        )
-        return 1
     if facts.get("mergeable") != "MERGEABLE":
         print(
             f"accept-pr: mergeability = {facts.get('mergeable')!r} — стоп "
