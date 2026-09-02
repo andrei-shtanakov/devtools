@@ -610,8 +610,11 @@ def test_changed_paths_fetch_base_then_three_dot_diff(monkeypatch):
     ops = RealOps()
     paths = ops.changed_paths("/tmp/kapelle", "master")
     assert calls[0].argv == ["git", "fetch", "origin", "master"]
+    # FETCH_HEAD, не origin/master (приёмка PR #113, круг 4): fetch без
+    # destination-refspec не обязан обновить remote-tracking ref, а
+    # FETCH_HEAD пишется именно этим fetch — база доказуемо свежая.
     assert calls[1].argv == [
-        "git", "diff", "--name-only", "origin/master...HEAD",
+        "git", "diff", "--name-only", "FETCH_HEAD...HEAD",
     ]
     assert all(c.kwargs["cwd"] == "/tmp/kapelle" for c in calls)
     assert paths == ["lib/a.py", "lib/b.py"]

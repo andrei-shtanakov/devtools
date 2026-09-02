@@ -207,8 +207,11 @@ class RealOps:
         head0 (приёмка PR #113, круг 2): API-список файлов PR отражает
         голову ветки на момент запроса — force-push между запросами
         подменил бы проверяемый список (TOCTOU). Здесь дифф считается
-        локально по уже переключённому дереву; base подтягивается свежим
-        fetch, чтобы merge-base не был протухшим. Сбой — RuntimeError.
+        локально по уже переключённому дереву; базой служит FETCH_HEAD
+        только что выполненного fetch (приёмка PR #113, круг 4): fetch без
+        destination-refspec не обязан обновить refs/remotes/origin/<base>,
+        и дифф против протухшего origin/<base> включил бы чужие коммиты
+        базы — ложный authority-стоп. Сбой — RuntimeError.
         """
         fetch = subprocess.run(
             ["git", "fetch", "origin", base_branch],
@@ -220,13 +223,12 @@ class RealOps:
                 f"rc={fetch.returncode}: {fetch.stderr.strip()}"
             )
         diff = subprocess.run(
-            ["git", "diff", "--name-only",
-             f"origin/{base_branch}...HEAD"],
+            ["git", "diff", "--name-only", "FETCH_HEAD...HEAD"],
             cwd=target_dir, capture_output=True, text=True,
         )
         if diff.returncode != 0:
             raise RuntimeError(
-                f"changed_paths: git diff origin/{base_branch}...HEAD "
+                f"changed_paths: git diff FETCH_HEAD...HEAD "
                 f"rc={diff.returncode}: {diff.stderr.strip()}"
             )
         return [line for line in diff.stdout.splitlines() if line.strip()]
