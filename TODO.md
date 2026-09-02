@@ -632,7 +632,7 @@ disputatio#57, dispatcher#229): уроки 1–8 — devtools#110; журнал 
 записи 2026-09-02. Все пункты ниже — код лейна (в) в этом репо; upstream —
 spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 
-- [ ] accept-pr: материализация head PR в чекауте цели перед ревью + гард чистого дерева @owner:github:andrei-shtanakov @id:accept-pr-materialize-head
+- [x] accept-pr: материализация head PR в чекауте цели перед ревью + гард чистого дерева @owner:github:andrei-shtanakov @id:accept-pr-materialize-head — PR этой ветки
       Уроки 7 и «грязное дерево» (devtools#110): review-kit считает
       локальное дерево цели авторитетным — чекаут на master даёт ложное
       «реализации нет» (dispatcher#236 круг 2), грязное дерево — ложную

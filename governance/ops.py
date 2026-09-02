@@ -31,6 +31,14 @@ class Ops(Protocol):
 
     def is_dirty(self, target_dir: str) -> bool: ...
 
+    def current_branch(self, target_dir: str) -> str | None: ...
+
+    def materialize_pr_head(
+        self, target_dir: str, pr: int, sha: str
+    ) -> None: ...
+
+    def changed_paths(self, target_dir: str, base_branch: str) -> list[str]: ...
+
     def head_sha(self, target_dir: str, branch: str) -> str: ...
 
     def push_branch(self, target_dir: str, branch: str) -> None: ...
@@ -156,6 +164,78 @@ class RealOps:
             cwd=target_dir, capture_output=True, text=True, check=True,
         )
         return bool(done.stdout.strip())
+
+    def current_branch(self, target_dir: str) -> str | None:
+        """Имя текущей ветки в target_dir; None — detached HEAD."""
+        done = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=target_dir, capture_output=True, text=True, check=True,
+        )
+        return done.stdout.strip() or None
+
+    def materialize_pr_head(self, target_dir: str, pr: int, sha: str) -> None:
+        """fetch pull/<pr>/head + detached switch на пин sha; сбой — RuntimeError.
+
+        Ретроспектива 2026-09-02 (урок 7, devtools#110): review-kit считает
+        локальное дерево авторитетным — перед ревью чекаут цели обязан стоять
+        на проверяемом head. Detach на пинованный sha (не на ветку PR): гонка
+        с параллельным push либо не влияет, либо валит switch — fail-closed.
+        --no-overwrite-ignore (приёмка PR #113, круг 5): git status
+        --porcelain не видит ignored-файлы, а голый switch молча перезаписал
+        бы локальный ignored-файл оператора версией из PR — конфликт обязан
+        валить switch, не терять данные.
+        """
+        fetch = subprocess.run(
+            ["git", "fetch", "origin", f"pull/{pr}/head"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if fetch.returncode != 0:
+            raise RuntimeError(
+                f"materialize_pr_head: git fetch pull/{pr}/head "
+                f"rc={fetch.returncode}: {fetch.stderr.strip()}"
+            )
+        switch = subprocess.run(
+            ["git", "switch", "--no-overwrite-ignore", "--detach", sha],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if switch.returncode != 0:
+            raise RuntimeError(
+                f"materialize_pr_head: git switch --detach {sha[:7]} "
+                f"rc={switch.returncode}: {switch.stderr.strip()}"
+            )
+
+    def changed_paths(self, target_dir: str, base_branch: str) -> list[str]:
+        """Пути, изменённые HEAD относительно merge-base с origin/<base>.
+
+        Гард путей accept-pr обязан быть привязан к МАТЕРИАЛИЗОВАННОМУ
+        head0 (приёмка PR #113, круг 2): API-список файлов PR отражает
+        голову ветки на момент запроса — force-push между запросами
+        подменил бы проверяемый список (TOCTOU). Здесь дифф считается
+        локально по уже переключённому дереву; базой служит FETCH_HEAD
+        только что выполненного fetch (приёмка PR #113, круг 4): fetch без
+        destination-refspec не обязан обновить refs/remotes/origin/<base>,
+        и дифф против протухшего origin/<base> включил бы чужие коммиты
+        базы — ложный authority-стоп. Сбой — RuntimeError.
+        """
+        fetch = subprocess.run(
+            ["git", "fetch", "origin", base_branch],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if fetch.returncode != 0:
+            raise RuntimeError(
+                f"changed_paths: git fetch origin {base_branch} "
+                f"rc={fetch.returncode}: {fetch.stderr.strip()}"
+            )
+        diff = subprocess.run(
+            ["git", "diff", "--name-only", "FETCH_HEAD...HEAD"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if diff.returncode != 0:
+            raise RuntimeError(
+                f"changed_paths: git diff FETCH_HEAD...HEAD "
+                f"rc={diff.returncode}: {diff.stderr.strip()}"
+            )
+        return [line for line in diff.stdout.splitlines() if line.strip()]
 
     def head_sha(self, target_dir: str, branch: str) -> str:
         """SHA головы branch в target_dir."""
