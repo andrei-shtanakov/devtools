@@ -202,3 +202,39 @@ def test_main_missing_repo_exits_two(tmp_path: Path, capsys) -> None:
     rc = pf.main(["--repo", "ghost", "--workspace", str(tmp_path)])
     assert rc == 2
     assert "не найден" in capsys.readouterr().out
+
+
+def test_quoted_yaml_keys_are_recognized(tmp_path: Path) -> None:
+    """Приёмка PR #115, круг 2: кавычная форма ключа — валидный YAML;
+    кавычный эталон не должен опустошать required."""
+    repo = _git_repo(tmp_path / "r")
+    (repo / "spec-runner.config.example.yaml").write_text(
+        '"execution_mode": tdd\n\'tdd_runner\': pytest\n'
+    )
+    (repo / "spec-runner.config.yaml").write_text("model: sonnet\n")
+    findings = pf.check_config_etalon(repo)
+    assert _levels(findings, "config-etalon") == ["FAIL"]
+    assert "execution_mode" in findings[0].detail
+    assert "tdd_runner" in findings[0].detail
+
+
+def test_mismatched_quotes_are_not_a_key(tmp_path: Path) -> None:
+    """`"key':` — не валидное объявление ключа; в required не попадает."""
+    repo = _git_repo(tmp_path / "r")
+    (repo / "spec-runner.config.example.yaml").write_text(
+        "\"execution_mode': tdd\n"
+    )
+    (repo / "spec-runner.config.yaml").write_text("model: sonnet\n")
+    assert pf.check_config_etalon(repo) == []
+
+
+def test_git_status_failure_is_fail_not_clean(tmp_path: Path) -> None:
+    """Приёмка PR #115, круг 2: сбой git status — не «чисто», а FAIL:
+    состояние дерева неопределимо. Каталог с .git-файлом, указывающим в
+    никуда, валит любой git-вызов."""
+    repo = tmp_path / "broken"
+    repo.mkdir()
+    (repo / ".git").write_text("gitdir: /nonexistent/gitdir\n")
+    findings = pf.check_dirty_tree(repo)
+    assert _levels(findings, "dirty-tree") == ["FAIL"]
+    assert "неопределимо" in findings[0].detail

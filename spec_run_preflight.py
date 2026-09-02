@@ -71,10 +71,18 @@ class Finding:
 
 
 def _keys_present(text: str, keys: tuple[str, ...]) -> set[str]:
-    """Какие из keys встречаются в YAML-тексте как ключи (на любом уровне)."""
+    """Какие из keys встречаются в YAML-тексте как ключи (на любом уровне).
+
+    Кавычная форма (`"key":` / `'key':`) — валидный YAML и обязана
+    распознаваться (приёмка PR #115, круг 2), иначе кавычный эталон
+    опустошает required и неконформный конфиг проходит молча.
+    """
     return {
         k for k in keys
-        if re.search(rf"^[ \t]*{re.escape(k)}[ \t]*:", text, re.MULTILINE)
+        if re.search(
+            rf"""^[ \t]*(['"]?){re.escape(k)}\1[ \t]*:""",
+            text, re.MULTILINE,
+        )
     }
 
 
@@ -175,12 +183,23 @@ def check_live_smoke_env(target: Path) -> list[Finding]:
 
 
 def check_dirty_tree(target: Path) -> list[Finding]:
-    """Незакоммиченное в целевом клоне перемешается с коммитами раннера."""
+    """Незакоммиченное в целевом клоне перемешается с коммитами раннера.
+
+    Сбой самого `git status` — не «чисто» (приёмка PR #115, круг 2):
+    неопределимое состояние дерева закрывает preflight как FAIL.
+    """
     done = subprocess.run(
         ["git", "-C", str(target), "status", "--porcelain"],
         capture_output=True, text=True,
     )
-    if done.returncode != 0 or not done.stdout.strip():
+    if done.returncode != 0:
+        return [Finding(
+            "dirty-tree", "FAIL",
+            f"git status в {target} не удался "
+            f"(rc={done.returncode}: {done.stderr.strip()}) — состояние "
+            "дерева неопределимо, готовность заявить нельзя",
+        )]
+    if not done.stdout.strip():
         return []
     lines = done.stdout.strip().splitlines()
     return [Finding(
