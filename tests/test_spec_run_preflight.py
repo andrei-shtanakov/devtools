@@ -278,3 +278,17 @@ def test_matching_values_with_comment_and_quotes_pass(tmp_path: Path) -> None:
         'review_policy: "required"\n'
     )
     assert pf.check_config_etalon(repo) == []
+
+
+def test_empty_scalar_value_of_critical_key_fails(tmp_path: Path) -> None:
+    """Приёмка PR #115, круг 4: `execution_mode:` без значения не задаёт
+    режим так же, как отсутствие ключа — для скалярного в эталоне ключа
+    это FAIL, а не соответствие."""
+    repo = _git_repo(tmp_path / "r")
+    (repo / "spec-runner.config.example.yaml").write_text(
+        "execution_mode: tdd\n"
+    )
+    (repo / "spec-runner.config.yaml").write_text("execution_mode:\n")
+    findings = pf.check_config_etalon(repo)
+    assert _levels(findings, "config-etalon") == ["FAIL"]
+    assert "пустое/блочное" in findings[0].detail

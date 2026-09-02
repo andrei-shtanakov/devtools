@@ -140,11 +140,20 @@ def check_config_etalon(target: Path) -> list[Finding]:
     # значения (harness_files-список) — только по имени.
     etalon_values = _scalar_values(example_text, _CRITICAL_KEYS)
     config_values = _scalar_values(config_text, _CRITICAL_KEYS)
-    mismatched = [
-        f"{k}={config_values[k]!r} (эталон {v!r})"
-        for k, v in sorted(etalon_values.items())
-        if k in config_values and config_values[k] != v
-    ]
+    config_keys = _keys_present(config_text, _CRITICAL_KEYS)
+    mismatched = []
+    for k, v in sorted(etalon_values.items()):
+        if k not in config_keys:
+            continue  # ключа нет вовсе — уже учтён в missing
+        got = config_values.get(k)
+        if got is None:
+            # Ключ есть, но скаляра нет (пустое/блочное значение) — для
+            # скалярного в эталоне ключа это не соответствие (приёмка
+            # PR #115, круг 4): `execution_mode:` без значения не задаёт
+            # режим так же, как отсутствие ключа.
+            mismatched.append(f"{k}: пустое/блочное значение (эталон {v!r})")
+        elif got != v:
+            mismatched.append(f"{k}={got!r} (эталон {v!r})")
     if not missing and not mismatched:
         return []
     parts = []
