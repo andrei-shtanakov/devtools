@@ -617,9 +617,11 @@ def test_featureless_scenarios_merge_by_target_file() -> None:
     assert "### TASK-003:" not in text
 
 
-def test_nonconsecutive_same_file_does_not_merge() -> None:
-    """Мержатся только СМЕЖНЫЕ группы — разрыв другим файлом сохраняет
-    порядок документа и отдельность задач."""
+def test_nonconsecutive_same_file_merges_into_owner_task() -> None:
+    """Ревью disputatio#86 (контракт workstream-setup: один task-owner на
+    тест-файл): НЕсмежная группа с тем же файлом вливается в задачу
+    первого вхождения — иначе поздняя задача не выполнит RED-фазу из-за
+    byte-lock ранней (класс TASK-014/015 WS-57)."""
     md = SAME_FILE_MD + """\
 
 #### BEH-05: Снова про ханки
@@ -636,7 +638,56 @@ def test_nonconsecutive_same_file_does_not_merge() -> None:
         generated_at="2026-09-03T12:00:00",
         behaviour_blob="ab" * 20,
     )
-    assert "### TASK-003: Снова про ханки" in text
+    assert "### TASK-001: Открытие ханка (+3 смежных BEH)" in text
+    assert "- [ ] реализовать BEH-05" in text
+    assert "### TASK-002: Ошибка декодирования" in text
+    assert "### TASK-003:" not in text
+
+
+def test_transitive_file_chain_shares_single_owner() -> None:
+    """Транзитивность: группа с файлами {A,B} связывает последующих
+    владельцев обоих файлов в одну задачу."""
+    md = """\
+---
+spec_stage: behaviour-spec
+status: draft
+---
+# Behaviour
+
+#### BEH-01: База
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_a.py::t1`
+
+#### BEH-02: Мост
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_b.py::t2`
+
+#### BEH-03: Через мост к базе
+`traces: [FR-02]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_a.py::t3`
+
+#### BEH-04: Хвост второго файла
+`traces: [FR-03]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_b.py::t4`
+"""
+    scenarios = task_bridge.parse_behaviour(md)
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/15-behaviour-spec.md",
+        scenarios=scenarios,
+        generated_at="2026-09-03T12:00:00",
+        behaviour_blob="ab" * 20,
+    )
+    # BEH-01 (A) и BEH-03 (A) — один владелец; BEH-02 (B) — своя задача,
+    # BEH-04 (B) вливается к ней
+    assert "### TASK-001: База (+1 смежных BEH)" in text
+    assert "### TASK-002: Мост (+1 смежных BEH)" in text
+    assert "### TASK-003:" not in text
 
 
 def test_featureless_does_not_merge_into_feature_group() -> None:
@@ -674,3 +725,46 @@ status: draft
     )
     assert "### TASK-001: Каркас" in text
     assert "### TASK-002: Вне Feature" in text
+
+
+def test_bridge_group_unions_two_existing_owners() -> None:
+    """Приёмка PR #119 (minor): группа-«мост» с файлами {A, B} объединяет
+    И уже разных владельцев A и B — у каждого файла ровно один владелец."""
+    md = """\
+---
+spec_stage: behaviour-spec
+status: draft
+---
+# Behaviour
+
+#### BEH-01: Файл A
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_a.py::t1`
+
+#### BEH-02: Файл B
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_b.py::t2`
+
+#### BEH-03: Мост A
+`traces: [FR-02]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_a.py::t3`
+
+#### BEH-03: Мост B
+`traces: [FR-02]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_b.py::t4`
+"""
+    scenarios = task_bridge.parse_behaviour(md)
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/15-behaviour-spec.md",
+        scenarios=scenarios,
+        generated_at="2026-09-03T12:00:00",
+        behaviour_blob="ab" * 20,
+    )
+    assert "### TASK-001: Файл A (+3 смежных BEH)" in text
+    assert "### TASK-002:" not in text
