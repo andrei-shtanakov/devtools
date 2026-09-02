@@ -396,7 +396,7 @@ class RealOps:
         done = subprocess.run(
             ["gh", "pr", "view", str(pr), "-R", repo_slug, "--json",
              "mergeable,mergeStateStatus,statusCheckRollup,isDraft,"
-             "headRefOid,baseRefName,state,mergedAt"],
+             "headRefOid,baseRefName,state,mergedAt,mergedBy"],
             capture_output=True, text=True, check=True,
         )
         return json.loads(done.stdout)
