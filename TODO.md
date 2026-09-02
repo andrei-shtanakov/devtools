@@ -624,3 +624,62 @@
       прогона той же петли, вердикт «стоит/не стоит» с числами в
       docs/. Запускать после закрытия текущих прогонов WS-dispatcher-229
       и WS-disputatio-57 (уроки лейна — devtools#110).
+
+## Ретроспектива 2026-09-02 — скриптовый лейн (в)
+
+Разбор ошибок/находок трёх полных циклов конвейера (kapelle#47,
+disputatio#57, dispatcher#229): уроки 1–8 — devtools#110; журнал KB —
+записи 2026-09-02. Все пункты ниже — код лейна (в) в этом репо; upstream —
+spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
+
+- [ ] accept-pr: материализация head PR в чекауте цели перед ревью + гард чистого дерева @owner:github:andrei-shtanakov @id:accept-pr-materialize-head
+      Уроки 7 и «грязное дерево» (devtools#110): review-kit считает
+      локальное дерево цели авторитетным — чекаут на master даёт ложное
+      «реализации нет» (dispatcher#236 круг 2), грязное дерево — ложную
+      фактуру находок (#235 круг 1). accept-pr перед ревью обязан:
+      отказ при грязном дереве, fetch + switch на head PR
+      (review-ветка), возврат master после приёмки. Сейчас — руками.
+- [ ] Мост bundle→tasks: frontmatter под активный профиль, штамп статусов бандла, перепиновка YAML-парсером @owner:github:andrei-shtanakov @id:spec-bridge-approve-conformance
+      Уроки 1–2 (devtools#110) + инцидент stale-пина (журнал 07:10):
+      (1) `spec approve` пишет traces_to из вшитого lite-профиля — мост
+      должен выдавать форму активного профиля (traces_to:
+      [behaviour-spec] + upstream_hashes на approved-блоб, SpecMeta v2);
+      (2) после мержа бандла charter/requirements/behaviour-spec
+      остаются draft, открытые blocking-вопросы требуют decision-record
+      — согласование статусов как явный шаг; (3) sed по инлайн-YAML
+      форме пина `{requirements: "…"}` молча промахнулся и пустил
+      stale-пин в коммит — перепиновку делать YAML-парсером, не
+      текстовой заменой.
+- [ ] Преflight прогона spec-runner в целевом репо @owner:github:andrei-shtanakov @id:spec-run-preflight
+      Уроки 4–5 (devtools#110) + закрытые классы дня (журнал 22:00):
+      перед запуском раннера проверять/готовить: (1) конфиг — по
+      эталону репо, если он есть (example.yaml / workstream-setup);
+      голый `config --preset` без TDD-режима валит tdd-evidence;
+      (2) среду live-smoke как в CI — те же install-шаги (dispatcher:
+      pinned checker/steward/impresario), иначе попытки горят о чужую
+      красноту (3 попытки, $2.82); (3) insteadOf https против
+      ssh-зависаний пушей (git-receive-pack держал pipe 2 часа);
+      (4) отсутствие беспрефиксной `spec/.executor-state.db` —
+      пустая дефолтная база ломает tdd-evidence (upstream:
+      spec-runner#337).
+- [ ] task_bridge: группировка геометрически связанных BEH в одну задачу @owner:github:andrei-shtanakov @id:task-bridge-beh-grouping
+      Урок 8 (devtools#110): нарезка «один BEH — одна задача» дала
+      7 red-unverifiable задач из 15 в WS-disputatio-57 — поведение уже
+      геометрически покрыто соседней реализацией, red невозможен,
+      TDD-гейт стопит прогон до waiver-ритуала. Группировать BEH по
+      общему файлу/автомату состояний. Upstream-плечо (операторский
+      waive одной командой) — spec-runner#335.
+- [ ] Runner S8: не оставлять .steward/gate_verdicts.jsonl в чекауте цели @owner:github:andrei-shtanakov @id:runner-s8-verdicts-cleanup
+      Шероховатость прогонов 2026-09-02 (журнал 07:10): S8 пишет
+      gate_verdicts.jsonl в target-репо → dirty-гард task_bridge
+      отказывает следующему шагу конвейера. Чистить после верификации
+      или писать вне рабочего дерева цели.
+- [ ] review-context.txt: семантика пер-таскового инкремента для репо конвейера @owner:github:andrei-shtanakov @id:review-context-increment-wave
+      Урок 6 (devtools#110): терминальное ревью меряет пер-тасковый
+      инкремент против ПОЛНОЙ спеки — законные находки «это объём
+      следующей задачи» блокируют мерж (disputatio#72), а слепой фикс
+      ломает TDD-red следующей задачи. Механизм у кита штатный:
+      `.github/codex/review-context.txt` (все прогоны дня печатали
+      «контекст не настроен»). Сделать шаблон в devtools + PR-волна в
+      репо, где живёт конвейер; дополнение в accept-pr — уметь принять
+      обоснованный ответ на находку этого класса.
