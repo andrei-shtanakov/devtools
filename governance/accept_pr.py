@@ -6,6 +6,12 @@ spec-runner, завершив цикл, открывает integration-PR и о�
 следующим прогоном стоял ручной ритуал: терминальное ревью → ожидание чеков
 → DarkFactory-мерж. Эта команда кодирует ритуал:
 
+0. материализация head PR в локальном чекауте цели (ретроспектива
+   2026-09-02, уроки 7 и «грязное дерево»): review-kit считает локальное
+   дерево авторитетным — чекаут на master даёт ложное «реализации нет»,
+   грязное дерево — ложную фактуру находок. Перед ревью: гард чистого
+   дерева → fetch pull/<n>/head → detached switch на пинованный head;
+   исходная ветка возвращается после приёмки на любом исходе;
 1. терминальное ревью (`review-pr.sh` через `Ops.review`; fp-дедуп кита
    делает повторные вызовы дешёвыми); находки → стоп, отработка — человеком
    или фикс-коммитами на ветку PR, затем повторный вызов;
@@ -67,6 +73,7 @@ def accept(
     repo_slug: str,
     pr: int,
     ops: Ops,
+    target_dir: str,
     sleep: Callable[[float], None] = time.sleep,
     poll_limit: int = _POLL_LIMIT,
 ) -> int:
@@ -75,6 +82,22 @@ def accept(
     Порядок «ревью до ожидания чеков» намеренный: находки дороже минут CI,
     и красное ревью не должно ждать зелёного rollup, чтобы быть увиденным.
     """
+    # Гард чистого дерева ДО материализации: review-kit читает локальный
+    # чекаут, и незакоммиченные правки стали бы «фактурой» ревью
+    # (dispatcher#235, круг 1); к тому же switch мог бы их потерять.
+    if ops.is_dirty(target_dir):
+        print(
+            f"accept-pr: рабочее дерево {target_dir} грязное — ревью по "
+            "локальному чекауту дало бы ложную фактуру — стоп"
+        )
+        return 1
+    branch0 = ops.current_branch(target_dir)
+    if branch0 is None:
+        print(
+            f"accept-pr: чекаут {target_dir} в detached HEAD — не определить "
+            "ветку возврата — стоп"
+        )
+        return 1
     # Head фиксируется ДО ревью (приёмка PR #109, major): пуш между ревью
     # и мержем подменил бы содержимое, которого ревью не видело. Совпадение
     # проверяется после ожидания чеков; мерж идёт с пином именно этого head
@@ -83,6 +106,33 @@ def accept(
     if not head0:
         print("accept-pr: не удалось определить head PR — стоп")
         return 1
+    # Урок 7 (devtools#110): ревью обязано смотреть на дерево именно этого
+    # head — detached switch на пинованный sha, а не на ветку PR, чтобы
+    # гонка с параллельным push не подменила проверяемое содержимое.
+    try:
+        ops.materialize_pr_head(target_dir, pr, head0)
+    except RuntimeError as exc:
+        print(f"accept-pr: не удалось материализовать head PR ({exc}) — стоп")
+        ops.ensure_branch(target_dir, branch0)
+        return 1
+    try:
+        return _accept_on_head(
+            repo, repo_slug, pr, ops, head0, sleep, poll_limit
+        )
+    finally:
+        ops.ensure_branch(target_dir, branch0)
+
+
+def _accept_on_head(
+    repo: str,
+    repo_slug: str,
+    pr: int,
+    ops: Ops,
+    head0: str,
+    sleep: Callable[[float], None],
+    poll_limit: int,
+) -> int:
+    """Ревью → чеки → гарды → мерж; чекаут цели уже стоит на head0."""
     review_exit = ops.review(repo, pr)
     if review_exit != 0:
         print(
@@ -145,7 +195,8 @@ def accept(
         return 1
     print(
         f"accept-pr: {repo_slug}#{pr} смержен (head {head[:7]}). "
-        f"Дальше в {repo}: `spec-runner sync`, затем следующий run."
+        f"Дальше в {repo}: `git pull --ff-only`, `spec-runner sync`, "
+        "затем следующий run."
     )
     return 0
 
@@ -170,9 +221,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--owner", default="andrei-shtanakov")
     args = parser.parse_args(argv)
     repo_slug = f"{args.owner}/{args.repo}".lower()
+    target_dir = str(DEVTOOLS_ROOT.parent / args.repo)
     origin = subprocess.run(
-        ["git", "-C", str(DEVTOOLS_ROOT.parent / args.repo),
-         "remote", "get-url", "origin"],
+        ["git", "-C", target_dir, "remote", "get-url", "origin"],
         capture_output=True, text=True,
     )
     checkout_slug = (
@@ -185,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
             "(ревью и мерж обязаны смотреть в один репозиторий)"
         )
         return 2
-    return accept(args.repo, repo_slug, args.pr, RealOps())
+    return accept(args.repo, repo_slug, args.pr, RealOps(), target_dir)
 
 
 if __name__ == "__main__":

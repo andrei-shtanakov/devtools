@@ -14,7 +14,26 @@ class _Ops:
     facts_seq: list[dict] = field(default_factory=list)
     files: list[str] = field(default_factory=lambda: ["lib/x.ex"])
     merge_ok: bool = True
+    dirty: bool = False
+    branch: str | None = "master"
+    materialize_error: str | None = None
     calls: list[tuple] = field(default_factory=list)
+
+    def is_dirty(self, target_dir: str) -> bool:
+        self.calls.append(("is_dirty",))
+        return self.dirty
+
+    def current_branch(self, target_dir: str) -> str | None:
+        self.calls.append(("current_branch",))
+        return self.branch
+
+    def materialize_pr_head(self, target_dir: str, pr: int, sha: str) -> None:
+        self.calls.append(("materialize", pr, sha))
+        if self.materialize_error is not None:
+            raise RuntimeError(self.materialize_error)
+
+    def ensure_branch(self, target_dir: str, branch: str) -> None:
+        self.calls.append(("restore", branch))
 
     def review(self, repo: str, pr: int) -> int:
         self.calls.append(("review", repo, pr))
@@ -50,7 +69,9 @@ def _no_sleep(_: float) -> None:
 
 def test_green_path_merges_and_hints_sync(capsys) -> None:
     ops = _Ops(facts_seq=[_facts()])
-    rc = accept_pr.accept("kapelle", "o/kapelle", 59, ops, sleep=_no_sleep)
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
     assert rc == 0
     assert ("merge", 59, "cafe" * 10) in ops.calls
     out = capsys.readouterr().out
@@ -59,7 +80,9 @@ def test_green_path_merges_and_hints_sync(capsys) -> None:
 
 def test_review_findings_stop_without_merge(capsys) -> None:
     ops = _Ops(review_exit=1, facts_seq=[_facts()])
-    rc = accept_pr.accept("kapelle", "o/kapelle", 59, ops, sleep=_no_sleep)
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
     assert rc == 1
     assert not any(c[0] == "merge" for c in ops.calls)
     assert "ревью" in capsys.readouterr().out
@@ -70,7 +93,9 @@ def test_red_checks_stop_without_merge(capsys) -> None:
         statusCheckRollup=[{"conclusion": "SUCCESS"},
                            {"conclusion": "FAILURE"}],
     )])
-    rc = accept_pr.accept("kapelle", "o/kapelle", 59, ops, sleep=_no_sleep)
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
     assert rc == 1
     assert not any(c[0] == "merge" for c in ops.calls)
     assert "красные чеки" in capsys.readouterr().out
@@ -79,7 +104,9 @@ def test_red_checks_stop_without_merge(capsys) -> None:
 def test_pending_checks_polled_to_completion() -> None:
     pending = _facts(statusCheckRollup=[{"status": "IN_PROGRESS"}])
     ops = _Ops(facts_seq=[pending, pending, _facts()])
-    rc = accept_pr.accept("kapelle", "o/kapelle", 59, ops, sleep=_no_sleep)
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
     assert rc == 0
     assert any(c[0] == "merge" for c in ops.calls)
 
@@ -88,7 +115,8 @@ def test_pending_forever_times_out() -> None:
     pending = _facts(statusCheckRollup=[{"status": "QUEUED"}])
     ops = _Ops(facts_seq=[pending])
     rc = accept_pr.accept(
-        "kapelle", "o/kapelle", 59, ops, sleep=_no_sleep, poll_limit=3,
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle",
+        sleep=_no_sleep, poll_limit=3,
     )
     assert rc == 1
     assert not any(c[0] == "merge" for c in ops.calls)
@@ -97,7 +125,9 @@ def test_pending_forever_times_out() -> None:
 def test_authority_root_paths_go_to_human(capsys) -> None:
     ops = _Ops(facts_seq=[_facts()],
                files=["lib/x.ex", ".github/workflows/ci.yml"])
-    rc = accept_pr.accept("kapelle", "o/kapelle", 59, ops, sleep=_no_sleep)
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
     assert rc == 1
     assert not any(c[0] == "merge" for c in ops.calls)
     assert "authority-root" in capsys.readouterr().out
@@ -105,14 +135,18 @@ def test_authority_root_paths_go_to_human(capsys) -> None:
 
 def test_conflicting_pr_stops() -> None:
     ops = _Ops(facts_seq=[_facts(mergeable="CONFLICTING")])
-    rc = accept_pr.accept("kapelle", "o/kapelle", 59, ops, sleep=_no_sleep)
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
     assert rc == 1
     assert not any(c[0] == "merge" for c in ops.calls)
 
 
 def test_merge_refusal_is_reported(capsys) -> None:
     ops = _Ops(facts_seq=[_facts()], merge_ok=False)
-    rc = accept_pr.accept("kapelle", "o/kapelle", 59, ops, sleep=_no_sleep)
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
     assert rc == 1
     assert "мерж не прошёл" in capsys.readouterr().out
 
@@ -122,7 +156,8 @@ def test_empty_rollup_is_pending_not_green() -> None:
     создаться на свежем push) — pending, а после потолка опроса — стоп."""
     ops = _Ops(facts_seq=[_facts(statusCheckRollup=[])])
     rc = accept_pr.accept(
-        "kapelle", "o/kapelle", 59, ops, sleep=_no_sleep, poll_limit=2,
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle",
+        sleep=_no_sleep, poll_limit=2,
     )
     assert rc == 1
     assert not any(c[0] == "merge" for c in ops.calls)
@@ -135,7 +170,9 @@ def test_head_moved_after_review_stops(capsys) -> None:
         _facts(),                         # head0 до ревью
         _facts(headRefOid="beef" * 10),   # после чеков — head уехал
     ])
-    rc = accept_pr.accept("kapelle", "o/kapelle", 59, ops, sleep=_no_sleep)
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
     assert rc == 1
     assert not any(c[0] == "merge" for c in ops.calls)
     assert "уехал" in capsys.readouterr().out
@@ -147,7 +184,8 @@ def test_unknown_mergeability_polls_then_stops(capsys) -> None:
     unknown = _facts(mergeable="UNKNOWN")
     ops = _Ops(facts_seq=[unknown])
     rc = accept_pr.accept(
-        "kapelle", "o/kapelle", 59, ops, sleep=_no_sleep, poll_limit=2,
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle",
+        sleep=_no_sleep, poll_limit=2,
     )
     assert rc == 1
     assert not any(c[0] == "merge" for c in ops.calls)
@@ -156,9 +194,73 @@ def test_unknown_mergeability_polls_then_stops(capsys) -> None:
 def test_unknown_then_mergeable_proceeds() -> None:
     unknown = _facts(mergeable="UNKNOWN")
     ops = _Ops(facts_seq=[_facts(), unknown, _facts()])
-    rc = accept_pr.accept("kapelle", "o/kapelle", 59, ops, sleep=_no_sleep)
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
     assert rc == 0
     assert any(c[0] == "merge" for c in ops.calls)
+
+
+def test_dirty_tree_stops_before_review(capsys) -> None:
+    """Ретроспектива 2026-09-02 (урок «грязное дерево», dispatcher#235):
+    review-kit читает локальный чекаут — грязное дерево даёт ревью ложную
+    фактуру. Стоп ДО ревью и до материализации."""
+    ops = _Ops(dirty=True, facts_seq=[_facts()])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert not any(c[0] in ("review", "materialize") for c in ops.calls)
+    assert "грязное" in capsys.readouterr().out
+
+
+def test_detached_checkout_stops(capsys) -> None:
+    """Detached HEAD в чекауте — некуда возвращаться после приёмки; стоп."""
+    ops = _Ops(branch=None, facts_seq=[_facts()])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert not any(c[0] in ("review", "materialize") for c in ops.calls)
+    assert "detached" in capsys.readouterr().out
+
+
+def test_materializes_head_before_review_restores_after_merge() -> None:
+    """Урок 7 (devtools#110): review-kit считает локальное дерево
+    авторитетным — head PR материализуется ДО ревью (пинованный head0),
+    исходная ветка возвращается после приёмки."""
+    ops = _Ops(facts_seq=[_facts()])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 0
+    names = [c[0] for c in ops.calls]
+    assert names.index("materialize") < names.index("review")
+    assert ("materialize", 59, "cafe" * 10) in ops.calls
+    assert names.index("merge") < names.index("restore")
+    assert ("restore", "master") in ops.calls
+
+
+def test_restore_happens_on_review_stop() -> None:
+    """Стоп-пути тоже возвращают исходную ветку — чекаут не остаётся
+    в detached HEAD после находок ревью."""
+    ops = _Ops(review_exit=1, facts_seq=[_facts()])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert ("restore", "master") in ops.calls
+
+
+def test_materialize_failure_stops_and_restores(capsys) -> None:
+    ops = _Ops(materialize_error="fetch rc=128", facts_seq=[_facts()])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert not any(c[0] == "review" for c in ops.calls)
+    assert ("restore", "master") in ops.calls
+    assert "материализ" in capsys.readouterr().out
 
 
 def test_origin_slug_parses_ssh_and_https() -> None:

@@ -553,3 +553,51 @@ def test_checkout_and_pull_pull_failure_raises_runtime_error(monkeypatch):
     with pytest.raises(RuntimeError):
         ops.checkout_and_pull("/tmp/devtools", "master")
     assert len(calls_seen) == 2  # switch ran, then pull failed
+
+
+# --- Кейс 12: current_branch / materialize_pr_head (ретроспектива 09-02) ----
+
+
+def test_current_branch_returns_name(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="master\n")
+    ops = RealOps()
+    assert ops.current_branch("/tmp/kapelle") == "master"
+    assert calls[0].argv == ["git", "branch", "--show-current"]
+    assert calls[0].kwargs["cwd"] == "/tmp/kapelle"
+
+
+def test_current_branch_detached_returns_none(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=0, stdout="\n")
+    ops = RealOps()
+    assert ops.current_branch("/tmp/kapelle") is None
+
+
+def test_materialize_pr_head_fetch_then_detach(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+    ops.materialize_pr_head("/tmp/kapelle", 59, "cafe" * 10)
+    assert calls[0].argv == ["git", "fetch", "origin", "pull/59/head"]
+    assert calls[1].argv == ["git", "switch", "--detach", "cafe" * 10]
+    assert all(c.kwargs["cwd"] == "/tmp/kapelle" for c in calls)
+
+
+def test_materialize_pr_head_fetch_failure_raises(monkeypatch):
+    def fake_run(argv, **kwargs):
+        rc = 128 if argv[:2] == ["git", "fetch"] else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+    with pytest.raises(RuntimeError, match="fetch"):
+        ops.materialize_pr_head("/tmp/kapelle", 59, "cafe" * 10)
+
+
+def test_materialize_pr_head_switch_failure_raises(monkeypatch):
+    def fake_run(argv, **kwargs):
+        rc = 1 if argv[:2] == ["git", "switch"] else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+    with pytest.raises(RuntimeError, match="switch"):
+        ops.materialize_pr_head("/tmp/kapelle", 59, "cafe" * 10)

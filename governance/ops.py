@@ -31,6 +31,12 @@ class Ops(Protocol):
 
     def is_dirty(self, target_dir: str) -> bool: ...
 
+    def current_branch(self, target_dir: str) -> str | None: ...
+
+    def materialize_pr_head(
+        self, target_dir: str, pr: int, sha: str
+    ) -> None: ...
+
     def head_sha(self, target_dir: str, branch: str) -> str: ...
 
     def push_branch(self, target_dir: str, branch: str) -> None: ...
@@ -156,6 +162,41 @@ class RealOps:
             cwd=target_dir, capture_output=True, text=True, check=True,
         )
         return bool(done.stdout.strip())
+
+    def current_branch(self, target_dir: str) -> str | None:
+        """Имя текущей ветки в target_dir; None — detached HEAD."""
+        done = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=target_dir, capture_output=True, text=True, check=True,
+        )
+        return done.stdout.strip() or None
+
+    def materialize_pr_head(self, target_dir: str, pr: int, sha: str) -> None:
+        """fetch pull/<pr>/head + detached switch на пин sha; сбой — RuntimeError.
+
+        Ретроспектива 2026-09-02 (урок 7, devtools#110): review-kit считает
+        локальное дерево авторитетным — перед ревью чекаут цели обязан стоять
+        на проверяемом head. Detach на пинованный sha (не на ветку PR): гонка
+        с параллельным push либо не влияет, либо валит switch — fail-closed.
+        """
+        fetch = subprocess.run(
+            ["git", "fetch", "origin", f"pull/{pr}/head"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if fetch.returncode != 0:
+            raise RuntimeError(
+                f"materialize_pr_head: git fetch pull/{pr}/head "
+                f"rc={fetch.returncode}: {fetch.stderr.strip()}"
+            )
+        switch = subprocess.run(
+            ["git", "switch", "--detach", sha],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if switch.returncode != 0:
+            raise RuntimeError(
+                f"materialize_pr_head: git switch --detach {sha[:7]} "
+                f"rc={switch.returncode}: {switch.stderr.strip()}"
+            )
 
     def head_sha(self, target_dir: str, branch: str) -> str:
         """SHA головы branch в target_dir."""
