@@ -41,9 +41,39 @@ def test_etalon_without_config_fails(tmp_path: Path) -> None:
     assert _levels(pf.check_config_etalon(repo), "config-etalon") == ["FAIL"]
 
 
-def test_etalon_with_config_is_clean(tmp_path: Path) -> None:
+def test_etalon_with_conformant_config_is_clean(tmp_path: Path) -> None:
     repo = _git_repo(tmp_path / "r")
-    (repo / "spec-runner.config.example.yaml").write_text("x: 1\n")
+    etalon = "executor:\n  execution_mode: tdd\n  tdd_runner: pytest\n"
+    (repo / "spec-runner.config.example.yaml").write_text(etalon)
+    (repo / "spec-runner.config.yaml").write_text(etalon)
+    assert pf.check_config_etalon(repo) == []
+
+
+def test_config_missing_critical_etalon_keys_fails(tmp_path: Path) -> None:
+    """Приёмка PR #115: наличие файла — не соответствие. Конфиг от голого
+    `--preset` существует, но без TDD-цепочки эталона — урок 4 повторится
+    молча. Отсутствие критических ключей эталона — FAIL с их именами."""
+    repo = _git_repo(tmp_path / "r")
+    (repo / "spec-runner.config.example.yaml").write_text(
+        "executor:\n"
+        "  execution_mode: tdd\n"
+        "  tdd_runner: pytest\n"
+        "review_policy: required\n"
+    )
+    (repo / "spec-runner.config.yaml").write_text("model: sonnet\n")
+    findings = pf.check_config_etalon(repo)
+    assert _levels(findings, "config-etalon") == ["FAIL"]
+    detail = findings[0].detail
+    assert "execution_mode" in detail
+    assert "review_policy" in detail
+
+
+def test_etalon_without_critical_keys_accepts_any_config(
+    tmp_path: Path,
+) -> None:
+    """Эталон без критических ключей ничего не требует от конфига."""
+    repo = _git_repo(tmp_path / "r")
+    (repo / "spec-runner.config.example.yaml").write_text("model: sonnet\n")
     (repo / "spec-runner.config.yaml").write_text("x: 1\n")
     assert pf.check_config_etalon(repo) == []
 

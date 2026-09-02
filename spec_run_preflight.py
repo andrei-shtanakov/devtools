@@ -37,6 +37,7 @@ Exit: 0 — чисто либо только WARN; 1 — есть FAIL; 2 — ц
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -47,6 +48,11 @@ _ETALON_MARKERS = (
     "docs/workstream-setup.md",
 )
 _CONFIG_NAME = "spec-runner.config.yaml"
+# Ключи, чьё объявление в эталоне делает их обязательными в рабочем
+# конфиге: именно их отсутствие валило tdd-evidence в бою (урок 4).
+_CRITICAL_KEYS = (
+    "execution_mode", "tdd_runner", "review_policy", "harness_files",
+)
 # Ключ БЕЗ кавычек: в argv subprocess нет шелла, который бы их снял;
 # кавычки в ключе делают lookup вечно пустым (пойман живым прогоном
 # по dispatcher при написании чека). Кавычная форма — только в hint,
@@ -64,18 +70,52 @@ class Finding:
     detail: str
 
 
+def _keys_present(text: str, keys: tuple[str, ...]) -> set[str]:
+    """Какие из keys встречаются в YAML-тексте как ключи (на любом уровне)."""
+    return {
+        k for k in keys
+        if re.search(rf"^[ \t]*{re.escape(k)}[ \t]*:", text, re.MULTILINE)
+    }
+
+
 def check_config_etalon(target: Path) -> list[Finding]:
-    """Урок 4: конфиг — по эталону репо, если эталон существует."""
+    """Урок 4: конфиг — по эталону репо, если эталон существует.
+
+    Наличие файла — не соответствие (приёмка PR #115): конфиг от голого
+    `config --preset` существует, но без TDD-цепочки эталона валит
+    tdd-evidence. Критические ключи, объявленные в example.yaml, обязаны
+    присутствовать и в рабочем конфиге; docs/workstream-setup.md — проза,
+    по ней сверка невозможна — там остаётся только presence-чек.
+    """
     markers = [m for m in _ETALON_MARKERS if (target / m).is_file()]
     if not markers:
         return []
-    if (target / _CONFIG_NAME).is_file():
+    config = target / _CONFIG_NAME
+    if not config.is_file():
+        return [Finding(
+            "config-etalon", "FAIL",
+            f"у репо есть эталон ({', '.join(markers)}), а {_CONFIG_NAME} "
+            "отсутствует — собери конфиг ОТ ЭТАЛОНА, не голым "
+            "`spec-runner config --preset` (урок 4 devtools#110)",
+        )]
+    example = target / _ETALON_MARKERS[0]
+    if not example.is_file():
+        return []
+    required = _keys_present(
+        example.read_text(encoding="utf-8"), _CRITICAL_KEYS
+    )
+    missing = required - _keys_present(
+        config.read_text(encoding="utf-8"), _CRITICAL_KEYS
+    )
+    if not missing:
         return []
     return [Finding(
         "config-etalon", "FAIL",
-        f"у репо есть эталон ({', '.join(markers)}), а {_CONFIG_NAME} "
-        "отсутствует — собери конфиг ОТ ЭТАЛОНА, не голым "
-        "`spec-runner config --preset` (урок 4 devtools#110)",
+        f"{_CONFIG_NAME} существует, но не несёт критических ключей "
+        f"эталона: {', '.join(sorted(missing))} — конфиг от голого "
+        "`--preset` без TDD-цепочки валит tdd-evidence "
+        "(урок 4 devtools#110); пересобери от "
+        f"{_ETALON_MARKERS[0]}",
     )]
 
 
