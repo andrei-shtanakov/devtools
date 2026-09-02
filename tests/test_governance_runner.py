@@ -48,6 +48,7 @@ class FakeOps:
     head: str = "deadbeef"
     s8_exit: int = 0
     s8_output: str = ""
+    collect_verdicts_ok: bool = True
     # Очередь ответов S4 `gate_check_candidate`; пустая/исчерпанная -> (0, "")
     gate_candidate: list[tuple[int, str]] = field(default_factory=list)
     find_pr_error: str | None = None
@@ -188,7 +189,7 @@ class FakeOps:
 
     def collect_gate_verdicts(self, target_dir: str, dest: str) -> bool:
         self.calls.append(("collect_gate_verdicts", target_dir, dest))
-        return True
+        return self.collect_verdicts_ok
 
     def create_issue(self, repo_slug: str, title: str, body: str) -> int:
         self.calls.append(("create_issue", repo_slug, title))
@@ -399,6 +400,30 @@ def test_s8_success_completes(tmp_path: Path, runs_root, monkeypatch) -> None:
     # --emit-verdicts не остаются в чекауте цели — уборка и на успехе.
     dest = str(rs.run_dir("r-s8-ok") / "s8-gate-verdicts.jsonl")
     assert ("collect_gate_verdicts", state.target_dir, dest) in ops.calls
+
+
+def test_s8_success_without_verdicts_is_not_completed(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Приёмка PR #114: verdicts — обязательный артефакт authoritative-
+    фиксации (спека §5). Зелёный exit gate-check без gate_verdicts.jsonl —
+    неполный результат: fail-closed стоп ДО op_complete, шаг resumable,
+    completed не выставляется."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=0, collect_verdicts_ok=False,
+    )
+
+    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-noverd", ops))
+
+    assert state.status != "completed"
+    gate_op = state.ops.get("gate-authoritative")
+    assert gate_op is not None and gate_op["status"] != "completed"
+    assert ops.issues == []
 
 
 def test_s8_fail_marks_merged_unverified_and_opens_issue(
