@@ -359,3 +359,16 @@ def test_comment_inside_block_list_does_not_end_it(tmp_path: Path) -> None:
     findings = pf.check_config_etalon(repo)
     assert _levels(findings, "config-etalon") == ["FAIL"]
     assert "a.py" in findings[0].detail
+
+
+def test_undecodable_config_is_fail_closed(tmp_path: Path) -> None:
+    """Приёмка PR #115, круг 8 (minor): битый UTF-8 в конфиге — тот же
+    структурированный FAIL, что и битый YAML, а не traceback."""
+    repo = _git_repo(tmp_path / "r")
+    (repo / "spec-runner.config.example.yaml").write_text(
+        "execution_mode: tdd\n"
+    )
+    (repo / "spec-runner.config.yaml").write_bytes(b"\xff\xfe broken")
+    findings = pf.check_config_etalon(repo)
+    assert _levels(findings, "config-etalon") == ["FAIL"]
+    assert "не читается" in findings[0].detail

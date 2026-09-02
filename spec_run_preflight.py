@@ -145,10 +145,13 @@ def check_config_etalon(target: Path) -> list[Finding]:
     try:
         etalon_data = yaml.safe_load(example.read_text(encoding="utf-8"))
         config_data = yaml.safe_load(config.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, OSError, UnicodeDecodeError) as exc:
+        # Нечитаемый файл (битый UTF-8, права) — та же судьба, что битый
+        # YAML: структурированный FAIL, не traceback (приёмка PR #115,
+        # круг 8, minor).
         return [Finding(
             "config-etalon", "FAIL",
-            f"эталон или {_CONFIG_NAME} не парсится как YAML ({exc}) — "
+            f"эталон или {_CONFIG_NAME} не читается/не парсится ({exc}) — "
             "сверка невозможна, готовность заявить нельзя",
         )]
     required = _critical_paths(etalon_data)
