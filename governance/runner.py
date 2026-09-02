@@ -1228,6 +1228,14 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
             return False
         op_complete(state, sync_key)
         _ensure_started(state, key)
+        # Прибрать verdict-файл ПРЕДЫДУЩЕЙ попытки до запуска гейта
+        # (приёмка PR #114, круг 2): иначе harvested=True после гейта мог
+        # бы означать «нашёлся старый файл», маскируя отсутствие артефакта
+        # текущего вызова. Старый файл сохраняется в run_dir как *.stale.
+        ops.collect_gate_verdicts(
+            state.target_dir,
+            str(run_dir(state.run_id) / "s8-gate-verdicts.stale.jsonl"),
+        )
         exit_code, output = ops.gate_check_s8(
             state.target_dir, state.bundle_dir, state.profile
         )
@@ -1235,7 +1243,9 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
         # --emit-verdicts оставляет .steward/gate_verdicts.jsonl в корне
         # целевого репо — грязный чекаут спотыкает dirty-гард task_bridge
         # на следующем шаге конвейера. Evidence переезжает в run_dir —
-        # и на успехе, и на провале, до ветвления по exit_code.
+        # и на успехе, и на провале, до ветвления по exit_code. После
+        # pre-clean выше True доказуемо означает «файл создан ЭТИМ
+        # вызовом гейта».
         harvested = ops.collect_gate_verdicts(
             state.target_dir,
             str(run_dir(state.run_id) / "s8-gate-verdicts.jsonl"),
