@@ -167,7 +167,7 @@ def _target_files(scenarios: list[Scenario]) -> set[str]:
 def _merge_featureless_by_target_file(
     groups: list[tuple[str, str, list[Scenario]]],
 ) -> list[tuple[str, str, list[Scenario]]]:
-    """Смежные группы без Feature с общим файлом цели → одна задача.
+    """Группы без Feature с общим файлом цели → одна задача (single owner).
 
     Урок 8 ретроспективы (@id:task-bridge-beh-grouping): нарезка «один
     BEH — одна задача» на геометрически связанных сценариях (один
@@ -177,27 +177,45 @@ def _merge_featureless_by_target_file(
     Детерминированный прокси связанности — файл checked_by-цели: BEH-ы
     одного автомата бьют в один тестовый файл.
 
+    Владелец файла — ЕДИНСТВЕННЫЙ и по всему документу, не только среди
+    смежных групп (ревью disputatio#86 по контракту
+    docs/workstream-setup.md: у тест-файла один task-owner — невлитая
+    ранняя задача держит byte-lock, и поздняя задача с тем же файлом не
+    может честно выполнить свою RED-фазу; класс прожит на TASK-014/015
+    WS-57). Слияние транзитивное: группы, связанные общими файлами через
+    цепочку, попадают в задачу на месте ПЕРВОЙ из них — порядок документа
+    сохраняется по первым вхождениям.
+
     Feature-группировка владельца (решение 2026-08-31) приоритетна и не
-    трогается: мержатся только СМЕЖНЫЕ группы, у которых ни один сценарий
-    не отнесён к Feature; бес-Feature сценарий в Feature-группу не
-    вливается. Заголовок слитой группы — первый сценарий + счётчик.
+    трогается: мержатся только группы, у которых ни один сценарий не
+    отнесён к Feature; бес-Feature сценарий в Feature-группу не вливается.
+    Заголовок слитой группы — первый сценарий + счётчик.
     """
     merged: list[tuple[str, str, list[Scenario]]] = []
+    # индекс «файл цели → позиция группы-владельца в merged»
+    owner_by_file: dict[str, int] = {}
     for key, title, scs in groups:
-        if merged:
-            _pkey, _ptitle, prev = merged[-1]
-            featureless = all(
-                s.feature is None for s in [*prev, *scs]
+        featureless = all(s.feature is None for s in scs)
+        files = _target_files(scs)
+        owner = next(
+            (owner_by_file[f] for f in sorted(files) if f in owner_by_file),
+            None,
+        )
+        if featureless and owner is not None:
+            okey, _otitle, oscs = merged[owner]
+            oscs.extend(scs)
+            merged[owner] = (
+                okey,
+                f"{oscs[0].title} (+{len(oscs) - 1} смежных BEH)",
+                oscs,
             )
-            if featureless and _target_files(prev) & _target_files(scs):
-                prev.extend(scs)
-                merged[-1] = (
-                    _pkey,
-                    f"{prev[0].title} (+{len(prev) - 1} смежных BEH)",
-                    prev,
-                )
-                continue
+            for f in files:
+                owner_by_file.setdefault(f, owner)
+            continue
         merged.append((key, title, list(scs)))
+        if featureless:
+            for f in files:
+                owner_by_file.setdefault(f, len(merged) - 1)
     return merged
 
 
