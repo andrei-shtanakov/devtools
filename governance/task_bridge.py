@@ -429,14 +429,22 @@ def deliver_conform(
     ws_id: str,
     bundle_dir: str,
     ops: Ops,
-) -> int | None:
-    """Нормализация после approve владельца → PR; None — файл уже конформен.
+) -> int:
+    """Нормализация после approve владельца → номер PR (нового или уже
+    открытого).
 
     Глобального dirty-гарда здесь НЕТ намеренно: approve-штамп владельца
     (`spec approve`) живёт в рабочем дереве незакоммиченным — он и есть
     груз этого PR. commit_paths берёт только tasks-файл.
+
+    Идемпотентность (приёмка PR #117, minor): повторный запуск при уже
+    открытом PR ветки возвращает его номер и не делает повторной работы —
+    `gh pr create` на существующей ветке упал бы исключением.
     """
     branch = f"spec/{ws_id}-tasks-approve"
+    existing = ops.find_pr(repo_slug, branch)
+    if existing is not None:
+        return existing
     ops.ensure_branch(target_dir, branch)
     changed = conform_approved(target_dir, ws_id, bundle_dir)
     rel = f"spec/{ws_id}-tasks.md"

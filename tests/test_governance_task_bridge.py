@@ -501,3 +501,59 @@ def test_conform_refuses_draft(tmp_path: Path) -> None:
         task_bridge.conform_approved(
             str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
         )
+
+
+class _ConformOps(_StubOps):
+    def __init__(self, existing_pr: int | None = None) -> None:
+        super().__init__()
+        self.existing_pr = existing_pr
+
+    def find_pr(self, repo_slug: str, branch: str) -> int | None:
+        self.calls.append(("find_pr", branch))
+        return self.existing_pr
+
+
+def _approved_tasks(target: Path) -> None:
+    spec_dir = target / "spec"
+    spec_dir.mkdir(exist_ok=True)
+    (spec_dir / "WS-alpha-7-tasks.md").write_text(
+        "---\nspec_stage: tasks\nstatus: approved\nversion: 2\n"
+        "traces_to:\n- behaviour-spec\n- design\n"
+        "---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+
+def test_deliver_conform_opens_pr(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    _approved_tasks(target)
+    ops = _ConformOps()
+    pr = task_bridge.deliver_conform(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        ops=ops,
+    )
+    assert pr == 77
+    commit = next(c for c in ops.calls if c[0] == "commit_paths")
+    assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
+    assert ("push_branch", "spec/WS-alpha-7-tasks-approve") in ops.calls
+
+
+def test_deliver_conform_rerun_returns_existing_pr(tmp_path: Path) -> None:
+    """Приёмка PR #117 (minor): повторный запуск при открытом PR ветки —
+    его номер без повторной работы (gh pr create упал бы исключением)."""
+    target = _target(tmp_path)
+    _approved_tasks(target)
+    ops = _ConformOps(existing_pr=88)
+    pr = task_bridge.deliver_conform(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        ops=ops,
+    )
+    assert pr == 88
+    names = [c[0] for c in ops.calls]
+    assert names == ["find_pr"]
