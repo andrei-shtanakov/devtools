@@ -639,7 +639,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       фактуру находок (#235 круг 1). accept-pr перед ревью обязан:
       отказ при грязном дереве, fetch + switch на head PR
       (review-ветка), возврат master после приёмки. Сейчас — руками.
-- [ ] Мост bundle→tasks: frontmatter под активный профиль, штамп статусов бандла, перепиновка YAML-парсером @owner:github:andrei-shtanakov @id:spec-bridge-approve-conformance
+- [x] Мост bundle→tasks: frontmatter под активный профиль, штамп статусов бандла, перепиновка YAML-парсером @owner:github:andrei-shtanakov @id:spec-bridge-approve-conformance — PR этой ветки; upstream-плечо (репо-локальные stage-профили) — spec-runner#338
       Уроки 1–2 (devtools#110) + инцидент stale-пина (журнал 07:10):
       (1) `spec approve` пишет traces_to из вшитого lite-профиля — мост
       должен выдавать форму активного профиля (traces_to:
