@@ -674,7 +674,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       gate_verdicts.jsonl в target-репо → dirty-гард task_bridge
       отказывает следующему шагу конвейера. Чистить после верификации
       или писать вне рабочего дерева цели.
-- [ ] review-context.txt: семантика пер-таскового инкремента для репо конвейера @owner:github:andrei-shtanakov @id:review-context-increment-wave
+- [x] review-context.txt: семантика пер-таскового инкремента для репо конвейера @owner:github:andrei-shtanakov @id:review-context-increment-wave — PR этой ветки (devtools#116) + волна disputatio#84 / dispatcher#252 / kapelle#61; шаблон согласован владельцем 2026-09-03 (правки: later-TASK — не находка; red-тест только атрибутированно), мерж всех четырёх — человеком (.github/ authority-root)
       Урок 6 (devtools#110): терминальное ревью меряет пер-тасковый
       инкремент против ПОЛНОЙ спеки — законные находки «это объём
       следующей задачи» блокируют мерж (disputatio#72), а слепой фикс
