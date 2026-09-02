@@ -650,7 +650,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       форме пина `{requirements: "…"}` молча промахнулся и пустил
       stale-пин в коммит — перепиновку делать YAML-парсером, не
       текстовой заменой.
-- [ ] Преflight прогона spec-runner в целевом репо @owner:github:andrei-shtanakov @id:spec-run-preflight
+- [x] Преflight прогона spec-runner в целевом репо @owner:github:andrei-shtanakov @id:spec-run-preflight — PR этой ветки
       Уроки 4–5 (devtools#110) + закрытые классы дня (журнал 22:00):
       перед запуском раннера проверять/готовить: (1) конфиг — по
       эталону репо, если он есть (example.yaml / workstream-setup);
