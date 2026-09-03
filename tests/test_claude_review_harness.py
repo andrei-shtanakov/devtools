@@ -268,3 +268,38 @@ def test_shim_is_executable() -> None:
     """Кит зовёт `claude-review` голым именем через PATH — файл обязан быть
     исполняемым (боевой смоук devtools#106: Permission denied)."""
     assert os.access(SHIM, os.X_OK)
+
+
+def test_resolution_explicit_codex_ignores_foreign_model(tmp_path: Path) -> None:
+    """Боевое claude-ревью PR #121 (minor 1): `--harness codex` при конфиге
+    claude+claude-opus-5 НЕ наследует чужую модель — иначе собрался бы
+    `codex exec -m claude-opus-5` и умер на неизвестной модели."""
+    cmd = _resolve(
+        tmp_path,
+        argv=["--harness", "codex"],
+        cfg="REVIEW_HARNESS=claude\nREVIEW_MODEL=claude-opus-5\n",
+    )
+    assert cmd == "codex exec"
+
+
+def test_resolution_explicit_flag_beats_external_review_cmd(
+    tmp_path: Path,
+) -> None:
+    """Боевое claude-ревью PR #121 (minor 2): явный `--harness codex`
+    перекрывает и внешний REVIEW_CMD — «флаг побеждает» из usage верен."""
+    cmd = _resolve(
+        tmp_path,
+        argv=["--harness", "codex"],
+        env_extra={"REVIEW_CMD": "claude-review --model claude-opus-5"},
+    )
+    assert cmd == "codex exec"
+
+
+def test_resolution_env_harness_ignores_config_model(tmp_path: Path) -> None:
+    """Харнесс со слоя env не наследует модель слоя конфига."""
+    cmd = _resolve(
+        tmp_path,
+        cfg="REVIEW_HARNESS=claude\nREVIEW_MODEL=claude-opus-5\n",
+        env_extra={"REVIEW_HARNESS": "codex"},
+    )
+    assert cmd == "codex exec"

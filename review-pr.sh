@@ -137,11 +137,27 @@ if [ -f "$harness_env_file" ]; then
     cfg_harness=$(sed -n 's/^REVIEW_HARNESS=//p' "$harness_env_file" | tail -1)
     cfg_model=$(sed -n 's/^REVIEW_MODEL=//p' "$harness_env_file" | tail -1)
 fi
-harness="${opt_harness:-${REVIEW_HARNESS:-${cfg_harness:-codex}}}"
-model="${opt_model:-${REVIEW_MODEL:-${cfg_model:-}}}"
+# Модель привязана к слою, из которого пришёл харнесс (боевое claude-ревью
+# PR #121, minor): харнесс со слоя выше НЕ наследует модель слоя ниже —
+# `--harness codex` при конфиге claude собирал бы `codex exec -m
+# claude-opus-5` и умирал на неизвестной модели. Слои: флаг > env > конфиг.
+if [ -n "$opt_harness" ]; then
+    harness="$opt_harness"
+    model="${opt_model:-}"
+elif [ -n "${REVIEW_HARNESS:-}" ]; then
+    harness="$REVIEW_HARNESS"
+    model="${opt_model:-${REVIEW_MODEL:-}}"
+else
+    harness="${cfg_harness:-codex}"
+    model="${opt_model:-${REVIEW_MODEL:-${cfg_model:-}}}"
+fi
 if [ -n "${REVIEW_CMD:-}" ] && [ -z "$opt_harness" ] && [ -z "$opt_model" ]; then
     : # внешний REVIEW_CMD — осознанный оверрайд целиком, не трогаем
 else
+    # Явный флаг перекрывает и внешний REVIEW_CMD (то же ревью, второй
+    # minor): `--harness codex` без модели обязан дать дефолт кита, а не
+    # оставить унаследованный из окружения claude-переходник.
+    unset REVIEW_CMD || true
     case "$harness" in
         claude)
             PATH="$script_dir/scripts/harness:$PATH"
