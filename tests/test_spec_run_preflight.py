@@ -372,3 +372,28 @@ def test_undecodable_config_is_fail_closed(tmp_path: Path) -> None:
     findings = pf.check_config_etalon(repo)
     assert _levels(findings, "config-etalon") == ["FAIL"]
     assert "не читается" in findings[0].detail
+
+
+def test_two_prefixed_dbs_fail_with_archive_hint(tmp_path: Path) -> None:
+    """Боевой стоп WS-65 (spec-runner#339): две легитимные префиксные базы —
+    blocking-плагин не резолвит активную; совет — архивировать завершённые."""
+    repo = _git_repo(tmp_path / "r")
+    spec = repo / "spec"
+    spec.mkdir()
+    (spec / ".executor-WS-a-1-state.db").write_bytes(b"data")
+    (spec / ".executor-WS-b-2-state.db").write_bytes(b"data")
+    findings = pf.check_prefixless_db(repo)
+    assert _levels(findings, "prefixless-db") == ["FAIL"]
+    assert ".executor-archive" in findings[0].detail
+
+
+def test_archived_db_is_invisible(tmp_path: Path) -> None:
+    """Архивный подкаталог не участвует в резолве — glob не рекурсивен."""
+    repo = _git_repo(tmp_path / "r")
+    spec = repo / "spec"
+    (spec / ".executor-archive").mkdir(parents=True)
+    (spec / ".executor-WS-a-1-state.db").write_bytes(b"data")
+    (spec / ".executor-archive" / ".executor-WS-old-9-state.db").write_bytes(
+        b"data"
+    )
+    assert pf.check_prefixless_db(repo) == []

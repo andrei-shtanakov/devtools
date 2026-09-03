@@ -212,27 +212,43 @@ def check_insteadof(target: Path) -> list[Finding]:
 
 
 def check_prefixless_db(target: Path) -> list[Finding]:
-    """Беспрефиксная state-DB рядом с префиксными — spec-runner#337."""
+    """Неоднозначные state-DB в spec/ — spec-runner#337/#339.
+
+    Два боевых режима отказа tdd-evidence («неоднозначная state db»):
+    (1) пустая беспрефиксная база рядом с префиксной (WS-57, #337);
+    (2) две ЛЕГИТИМНЫЕ префиксные базы — завершённый workstream оставил
+    свою рядом с активной (WS-65 TASK-001: 46-минутная попытка со всеми
+    зелёными фазами упала в post_review; hook-env не передаёт активный
+    префикс — #339). Завершённые архивировать в spec/.executor-archive/ —
+    подкаталог невидим для glob'ов плагина и этого чека.
+    """
     spec = target / "spec"
+    findings: list[Finding] = []
+    all_dbs = sorted(spec.glob(".executor-*state.db"))
     prefixless = spec / ".executor-state.db"
-    if not prefixless.exists():
-        return []
-    prefixed = [
-        p for p in spec.glob(".executor-*state.db") if p != prefixless
-    ]
-    if not prefixed:
-        return []
-    hint = (
-        "пустая — безопасно удалить"
-        if prefixless.stat().st_size == 0
-        else "НЕ пустая — разберись, чья она, прежде чем удалять"
-    )
-    return [Finding(
-        "prefixless-db", "FAIL",
-        f"{prefixless} лежит рядом с префиксными "
-        f"({', '.join(p.name for p in sorted(prefixed))}) — tdd-evidence "
-        f"упадёт на «неоднозначной state db» (spec-runner#337); {hint}",
-    )]
+    prefixed = [p for p in all_dbs if p != prefixless]
+    if prefixless.exists() and prefixed:
+        hint = (
+            "пустая — безопасно удалить"
+            if prefixless.stat().st_size == 0
+            else "НЕ пустая — разберись, чья она, прежде чем удалять"
+        )
+        findings.append(Finding(
+            "prefixless-db", "FAIL",
+            f"{prefixless} лежит рядом с префиксными "
+            f"({', '.join(p.name for p in prefixed)}) — tdd-evidence "
+            f"упадёт на «неоднозначной state db» (spec-runner#337); {hint}",
+        ))
+    if len(prefixed) > 1:
+        findings.append(Finding(
+            "prefixless-db", "FAIL",
+            f"{len(prefixed)} префиксных state-DB "
+            f"({', '.join(p.name for p in prefixed)}) — blocking-плагины "
+            "не могут резолвить активный прогон (боевой стоп WS-65, "
+            "spec-runner#339); заархивируй DB завершённых workstream'ов: "
+            f"mkdir -p {spec}/.executor-archive && mv <завершённые> туда",
+        ))
+    return findings
 
 
 def check_live_smoke_env(target: Path) -> list[Finding]:
