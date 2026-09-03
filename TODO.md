@@ -625,6 +625,23 @@
       docs/. Запускать после закрытия текущих прогонов WS-dispatcher-229
       и WS-disputatio-57 (уроки лейна — devtools#110).
 
+## Харнесс ревьюера (лимиты codex, 2026-09-03)
+
+- [x] Переходник claude для терминального ревьюера ai-prosto + операторский конфиг харнесса @owner:github:andrei-shtanakov @id:review-harness-claude — PR этой ветки
+      Срочный контур (лимиты codex): scripts/harness/claude-review говорит
+      codex-диалектом кита снаружи и claude-диалектом внутри; выбор —
+      флаг > env > ~/.config/ai-prosto/harness.env > вшитый codex; fp
+      машинно-независим (голое имя через PATH). Кит steward не тронут ни
+      байтом (24 вендора). Боевой смоук: полный structured-вердикт claude
+      по devtools#106. Возврат на codex через неделю — правка двух строк
+      конфига, кода не требует.
+- [ ] Удалить переходник claude-review после канонизации харнесс-слоя в ките steward @owner:github:andrei-shtanakov @id:review-harness-shim-removal @blocked_by:steward#147
+      Когда steward доставит REVIEW_HARNESS в самом local.sh (и ре-вендор
+      доедет до devtools), переходник удаляется, review-pr.sh переходит с
+      REVIEW_CMD на REVIEW_HARNESS. Миграция односторонняя, без вилки.
+      До тех пор непокрытыми остаются pre-push хук и ручной запуск
+      local.sh в соседях — они на codex (осознанно: не под лимитом).
+
 ## Ретроспектива 2026-09-02 — скриптовый лейн (в)
 
 Разбор ошибок/находок трёх полных циклов конвейера (kapelle#47,

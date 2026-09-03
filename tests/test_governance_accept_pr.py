@@ -380,3 +380,18 @@ def test_root_review_pr_sh_is_harness_too(capsys) -> None:
     assert not any(c[0] in ("merge", "review") for c in ops.calls)
     assert ("restore", "master") in ops.calls
     assert "harness" in capsys.readouterr().out
+
+
+def test_scripts_harness_paths_are_guarded_too(capsys) -> None:
+    """Первая находка боевого claude-ревью (PR #121, blocker):
+    review-pr.sh препендит scripts/harness/ в PATH сабшелла кита — PR,
+    правящий переходник, исполнился бы у оператора до вердикта. Путь
+    входит в _HARNESS_PREFIXES наравне со scripts/review/."""
+    ops = _Ops(facts_seq=[_facts()],
+               files=["scripts/harness/claude-review"])
+    rc = accept_pr.accept(
+        "devtools", "o/devtools", 121, ops, "/tmp/devtools", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert not any(c[0] in ("merge", "review") for c in ops.calls)
+    assert "harness" in capsys.readouterr().out

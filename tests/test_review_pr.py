@@ -193,6 +193,10 @@ class Fleet:
             LOCAL_SH_LOG=str(self.local_log),
             GIT_TERMINAL_PROMPT="0",
             GIT_SSH_COMMAND="false",
+            # Герметичность от операторского конфига харнесса (devtools#121):
+            # реальный ~/.config/ai-prosto/harness.env не должен влиять на
+            # тесты — резолюция идёт от вшитого дефолта codex.
+            AI_PROSTO_HARNESS_ENV=str(self.tmp / "no-harness.env"),
         )
         env.update(extra)
         return env
