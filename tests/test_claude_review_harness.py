@@ -255,7 +255,11 @@ def test_resolution_unknown_harness_is_config_error(tmp_path: Path) -> None:
     cfg_path = tmp_path / "harness.env"
     cfg_path.write_text("REVIEW_HARNESS=gemini\n", encoding="utf-8")
     env = {**os.environ, "AI_PROSTO_HARNESS_ENV": str(cfg_path)}
+    # Герметичность от оболочки оператора (боевое claude-ревью PR #121,
+    # круг 2): env-слой перекрыл бы конфиг, и die 2 не достигался бы.
     env.pop("REVIEW_CMD", None)
+    env.pop("REVIEW_HARNESS", None)
+    env.pop("REVIEW_MODEL", None)
     res = subprocess.run(
         ["sh", str(REVIEW_PR), "dummy", "1", "--print-review-cmd"],
         capture_output=True, text=True, env=env,
@@ -303,3 +307,14 @@ def test_resolution_env_harness_ignores_config_model(tmp_path: Path) -> None:
         env_extra={"REVIEW_HARNESS": "codex"},
     )
     assert cmd == "codex exec"
+
+
+def test_config_accepts_export_prefix_and_indent(tmp_path: Path) -> None:
+    """Боевое claude-ревью PR #121, круг 2: env-файловая запись
+    `export KEY=value` (и ведущие пробелы) принимается — молчаливый откат
+    на codex сжигал бы лимит без единого предупреждения."""
+    cmd = _resolve(
+        tmp_path,
+        cfg="  export REVIEW_HARNESS=claude\nexport REVIEW_MODEL=claude-opus-5\n",
+    )
+    assert cmd == "claude-review --model claude-opus-5"

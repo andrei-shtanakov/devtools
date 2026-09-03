@@ -134,8 +134,16 @@ harness_env_file="${AI_PROSTO_HARNESS_ENV:-$HOME/.config/ai-prosto/harness.env}"
 cfg_harness=""
 cfg_model=""
 if [ -f "$harness_env_file" ]; then
-    cfg_harness=$(sed -n 's/^REVIEW_HARNESS=//p' "$harness_env_file" | tail -1)
-    cfg_model=$(sed -n 's/^REVIEW_MODEL=//p' "$harness_env_file" | tail -1)
+    # Толерантность к привычной env-файловой записи (боевое claude-ревью
+    # PR #121, круг 2): `export KEY=value` и ведущие пробелы принимаются —
+    # иначе строка молча не матчилась бы и прогон тихо уходил на codex,
+    # сжигая ровно тот лимит, ради которого файл заведён.
+    cfg_harness=$(sed -n \
+        's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}REVIEW_HARNESS=//p' \
+        "$harness_env_file" | tail -1)
+    cfg_model=$(sed -n \
+        's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}REVIEW_MODEL=//p' \
+        "$harness_env_file" | tail -1)
 fi
 # Модель привязана к слою, из которого пришёл харнесс (боевое claude-ревью
 # PR #121, minor): харнесс со слоя выше НЕ наследует модель слоя ниже —
