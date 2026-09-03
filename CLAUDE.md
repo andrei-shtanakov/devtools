@@ -49,7 +49,7 @@
 | `check-catalog-fixtures.py` | owner-QA SSOT-набора conformance-фикстур каталога (`contracts/catalog-conformance-fixtures/v1/`): референс V1–V7 + manifest |
 | `check-plan-fields.py` | кросс-репный граф `@blocked_by` — ловит пункт, ждущий уже отгруженного (режим отказа R-03) |
 | `check-arch-evidence-freshness.py` | drift вендоренных prograph-схем steward + freshness evidence WS-005; `--read` — просрочка ⇒ unknown |
-| `review-pr.sh` | терминальный прогон codex-ревью PR через review-kit целевого репо + публикация вердикта как PR review от ai-prosto (профиль `~/.config/review`); `--dry-run` — показать, не постить; opt-in `--dry-run --write-verdict <file>` → `--use-verdict <file>` переносит тот же проверенный результат без второго вызова codex только при точных `head + fp` |
+| `review-pr.sh` | терминальный прогон ревью PR через review-kit целевого репо + публикация вердикта как PR review от ai-prosto (профиль `~/.config/review`); харнесс ревьюера настраиваем: `--harness claude\|codex` / env / `~/.config/ai-prosto/harness.env` (свойство машины/подписки, вшитый дефолт codex; claude — через `scripts/harness/claude-review`, судьба переходника — steward#147); `--dry-run` — показать, не постить; opt-in `--dry-run --write-verdict <file>` → `--use-verdict <file>` переносит тот же проверенный результат без второго вызова ревьюера только при точных `head + fp`. Литерал маркера `codex-terminal-review` — имя протокола, НЕ бинаря: не переименовывать |
 | `.claude/skills/fleet-check` | скилл периодической проверки флота |
 | `skills/spec-bridge` | скилл: находка/кластер → tasks.md-спека PR-ом в репо-владелец |
 

@@ -46,11 +46,15 @@ set -eu
 
 usage() {
     echo "usage: review-pr.sh <repo> <pr-number> [--dry-run] [--fresh]" \
-        "[--write-verdict <file> | --use-verdict <file>]" >&2
+        "[--write-verdict <file> | --use-verdict <file>]" \
+        "[--harness claude|codex] [--model <M>]" >&2
     echo "  <repo> — имя каталога репо во флоте (например dispatcher)" >&2
     echo "  --fresh — не наследовать вердикт даже при совпавшем отпечатке" >&2
     echo "  --write-verdict — атомарно сохранить результат dry-run для боевого прогона" >&2
     echo "  --use-verdict — использовать сохранённый результат при точных head + fp" >&2
+    echo "  --harness/--model — ревьюер; порядок: флаг > env REVIEW_HARNESS/" >&2
+    echo "    REVIEW_MODEL > ~/.config/ai-prosto/harness.env > codex (историч.)" >&2
+    echo "  внешний REVIEW_CMD побеждает всё, кроме явных флагов" >&2
 }
 
 die() {
@@ -81,6 +85,9 @@ dry_run=0
 fresh=0
 write_verdict=""
 use_verdict=""
+opt_harness=""
+opt_model=""
+print_review_cmd=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) dry_run=1; shift ;;
@@ -91,6 +98,13 @@ while [ $# -gt 0 ]; do
         --use-verdict)
             [ $# -ge 2 ] || die 2 "--use-verdict требует путь"
             use_verdict="$2"; shift 2 ;;
+        --harness)
+            [ $# -ge 2 ] || die 2 "--harness требует значение (claude|codex)"
+            opt_harness="$2"; shift 2 ;;
+        --model)
+            [ $# -ge 2 ] || die 2 "--model требует значение"
+            opt_model="$2"; shift 2 ;;
+        --print-review-cmd) print_review_cmd=1; shift ;;
         -*) usage; exit 2 ;;
         *)
             if [ -z "$repo" ]; then repo="$1"
@@ -103,6 +117,56 @@ done
 if [ -z "$repo" ] || [ -z "$pr" ]; then
     usage
     exit 2
+fi
+
+# --- Выбор харнесса ревьюера (devtools#121) --------------------------------
+# Разрешение: явный флаг > env сессии > операторский конфиг > вшитый codex.
+# Конфиг — свойство машины/подписки (лимиты, тариф), не репозитория: живёт в
+# ~/.config/ai-prosto/harness.env строками KEY=VALUE (parse, НЕ source —
+# файл не исполняется). Уже выставленный снаружи REVIEW_CMD побеждает всё,
+# кроме явных флагов --harness/--model.
+#
+# Для claude отпечаток входа обязан быть машинно-независимым: review_cmd —
+# компонента fp кита, и абсолютный путь к переходнику развёл бы отпечатки
+# между машинами. Поэтому в REVIEW_CMD идёт голое имя `claude-review`, а
+# каталог переходника добавляется в PATH сабшелла кита.
+harness_env_file="${AI_PROSTO_HARNESS_ENV:-$HOME/.config/ai-prosto/harness.env}"
+cfg_harness=""
+cfg_model=""
+if [ -f "$harness_env_file" ]; then
+    cfg_harness=$(sed -n 's/^REVIEW_HARNESS=//p' "$harness_env_file" | tail -1)
+    cfg_model=$(sed -n 's/^REVIEW_MODEL=//p' "$harness_env_file" | tail -1)
+fi
+harness="${opt_harness:-${REVIEW_HARNESS:-${cfg_harness:-codex}}}"
+model="${opt_model:-${REVIEW_MODEL:-${cfg_model:-}}}"
+if [ -n "${REVIEW_CMD:-}" ] && [ -z "$opt_harness" ] && [ -z "$opt_model" ]; then
+    : # внешний REVIEW_CMD — осознанный оверрайд целиком, не трогаем
+else
+    case "$harness" in
+        claude)
+            PATH="$script_dir/scripts/harness:$PATH"
+            export PATH
+            REVIEW_CMD="claude-review --model ${model:-claude-opus-5}"
+            export REVIEW_CMD
+            ;;
+        codex)
+            # Без модели REVIEW_CMD не выставляется вовсе: дефолт кита
+            # (`codex exec`) — исторический, и его строка уже лежит в
+            # отпечатках опубликованных вердиктов; не инвалидируем их зря.
+            if [ -n "$model" ]; then
+                REVIEW_CMD="codex exec -m $model"
+                export REVIEW_CMD
+            fi
+            ;;
+        *) die 2 "неизвестный харнесс: '$harness' (claude|codex)" ;;
+    esac
+fi
+reviewer_label="${REVIEW_CMD:-codex exec}"
+if [ "$print_review_cmd" -eq 1 ]; then
+    # Отладочный зонд для тестов: показать разрешённую команду и выйти,
+    # не трогая ни репо, ни GitHub.
+    echo "$reviewer_label"
+    exit 0
 fi
 case "$pr" in
     *[!0-9]*|"") die 2 "номер PR должен быть числом, получено: '$pr'" ;;
@@ -498,7 +562,7 @@ fi
     echo "## Codex CLI review — терминальный прогон"
     echo
     echo "- PR: ${slug}#${pr}, проревьюирован head \`$head_sha\`"
-    echo "- ревьюер: \`codex exec\` через review-kit репо;" \
+    echo "- ревьюер: \`$reviewer_label\` через review-kit репо;" \
         "публикация: $REVIEW_LOGIN"
     echo
     cat "$work/verdict.md"
