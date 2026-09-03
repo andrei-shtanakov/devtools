@@ -106,6 +106,73 @@ class Ops(Protocol):
     def find_issue(self, repo_slug: str, body_prefix: str) -> int | None: ...
 
 
+# --- Харнесс авторинга (лимиты codex, 2026-09-03; парный слой к харнессу
+# ревьюера в review-pr.sh). Выбор: env AUTHOR_HARNESS/AUTHOR_MODEL >
+# ~/.config/ai-prosto/harness.env > вшитый codex. Модель привязана к слою
+# своего харнесса (урок ревью PR #121): харнесс со слоя выше не наследует
+# модель слоя ниже. Файл ПАРСИТСЯ (KEY=VALUE, export/отступы терпимы),
+# не исполняется.
+_HARNESS_ENV_KEYS = ("AUTHOR_HARNESS", "AUTHOR_MODEL")
+
+
+def _harness_env_values() -> dict[str, str]:
+    """AUTHOR_*-строки операторского harness.env; нет файла — пусто."""
+    path = Path(
+        os.environ.get(
+            "AI_PROSTO_HARNESS_ENV",
+            str(Path.home() / ".config" / "ai-prosto" / "harness.env"),
+        )
+    )
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        for key in _HARNESS_ENV_KEYS:
+            if line.startswith(f"{key}="):
+                values[key] = line[len(key) + 1:]
+    return values
+
+
+def _author_argv(prompt: str) -> list[str]:
+    """argv авторинг-агента по выбранному харнессу; неизвестный — ValueError.
+
+    claude-ветка — паритет с флотским пресетом spec-runner для claude
+    (`--dangerously-skip-permissions`): авторинг пишет файлы бандла и
+    считает `git hash-object` для upstream_hashes, уровень доверия тот же,
+    что у codex `--sandbox workspace-write` (свой промпт конвейера в
+    целевом чекауте). --strict-mcp-config/--no-session-persistence — не
+    тащить MCP оператора и не сорить сессиями в целевом репо.
+    """
+    cfg = _harness_env_values()
+    env_harness = os.environ.get("AUTHOR_HARNESS", "")
+    harness = env_harness or cfg.get("AUTHOR_HARNESS", "") or "codex"
+    if env_harness:
+        model = os.environ.get("AUTHOR_MODEL", "")
+    else:
+        model = os.environ.get("AUTHOR_MODEL", "") or cfg.get(
+            "AUTHOR_MODEL", ""
+        )
+    if harness == "claude":
+        return [
+            "claude", "-p", "--model", model or "claude-opus-5",
+            "--dangerously-skip-permissions",
+            "--no-session-persistence", "--strict-mcp-config",
+            prompt,
+        ]
+    if harness == "codex":
+        argv = ["codex", "exec", "--ephemeral",
+                "--sandbox", "workspace-write"]
+        if model:
+            argv += ["-m", model]
+        return [*argv, prompt]
+    raise ValueError(
+        f"неизвестный AUTHOR_HARNESS: {harness!r} (claude|codex)"
+    )
+
+
 # Канонические имена файлов бандла (зеркало runner._AUTHOR_STEPS) и DSL-правила
 # гейта для промпта авторинга. Держим в ops: промпт — часть точной команды.
 _AUTHOR_FILENAMES = {
@@ -466,12 +533,16 @@ class RealOps:
     def author(
         self, target_dir: str, kind: str, subject: str, bundle_dir: str
     ) -> int:
-        """codex exec --ephemeral --sandbox workspace-write <prompt>.
+        """Авторинг-агент по выбранному харнессу (см. `_author_argv`).
 
+        Исторически: codex exec --ephemeral --sandbox workspace-write.
         Промпт несёт канонические имена файлов и DSL гейта (боевой прогон
         kapelle#47: без них codex писал в своём диалекте — имена `01-`/`02-`,
         заголовки `### BS-*`/`REQ-*` без `traces:`/`checked_by`, и всё это
         приходилось конвертировать руками до S4).
+
+        Ошибка конфигурации харнесса — код 2 с причиной на stdout, не
+        traceback: шаг authoring остаётся resumable после правки конфига.
         """
         rules = _AUTHOR_DSL.get(kind, "")
         target_file = _AUTHOR_FILENAMES.get(kind, "")
@@ -482,11 +553,12 @@ class RealOps:
             f"{rules}\n"
             "Author the governance bundle content for this kind/subject."
         )
-        done = subprocess.run(
-            ["codex", "exec", "--ephemeral", "--sandbox", "workspace-write",
-             prompt],
-            cwd=target_dir,
-        )
+        try:
+            argv = _author_argv(prompt)
+        except ValueError as exc:
+            print(f"author: {exc}")
+            return 2
+        done = subprocess.run(argv, cwd=target_dir)
         return done.returncode
 
     def author_disp(self, target_dir: str, task: str) -> int:

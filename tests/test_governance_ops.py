@@ -242,6 +242,9 @@ def test_commit_paths_empty_index_does_not_commit(monkeypatch):
 
 
 def test_author_command_and_prompt_contains_fields(monkeypatch):
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
+    monkeypatch.delenv("AUTHOR_HARNESS", raising=False)
+    monkeypatch.delenv("AUTHOR_MODEL", raising=False)
     calls = _install_fake_run(monkeypatch, returncode=0)
     ops = RealOps()
 
@@ -260,6 +263,9 @@ def test_author_command_and_prompt_contains_fields(monkeypatch):
 
 
 def test_author_prompt_carries_dsl_and_filenames(monkeypatch):
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
+    monkeypatch.delenv("AUTHOR_HARNESS", raising=False)
+    monkeypatch.delenv("AUTHOR_MODEL", raising=False)
     """Промпт несёт канонические имена файлов и DSL гейта (боевой прогон
     kapelle#47: без них codex писал в своём диалекте)."""
     calls = _install_fake_run(monkeypatch, returncode=0)
@@ -687,3 +693,90 @@ def test_collect_gate_verdicts_absent_returns_false(tmp_path):
         is False
     )
     assert not (tmp_path / "d.jsonl").exists()
+
+
+# --- Кейс 14: харнесс авторинга (лимиты codex, парный к review-pr.sh) -------
+
+
+def _author_hermetic(monkeypatch, tmp_path, cfg: str | None = None):
+    path = tmp_path / "harness.env"
+    if cfg is not None:
+        path.write_text(cfg, encoding="utf-8")
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", str(path))
+    monkeypatch.delenv("AUTHOR_HARNESS", raising=False)
+    monkeypatch.delenv("AUTHOR_MODEL", raising=False)
+
+
+def test_author_config_flips_to_claude(monkeypatch, tmp_path):
+    """Конфиг оператора переключает авторинг на claude: паритет с флотским
+    пресетом spec-runner (skip-permissions — авторинг пишет бандл и считает
+    git hash-object), изоляция от MCP/сессий оператора."""
+    _author_hermetic(
+        monkeypatch, tmp_path,
+        "AUTHOR_HARNESS=claude\nAUTHOR_MODEL=claude-opus-5\n",
+    )
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+
+    assert ops.author("/t", "charter", "s", "ws/spec") == 0
+    argv = calls[0].argv
+    assert argv[:4] == ["claude", "-p", "--model", "claude-opus-5"]
+    for flag in ("--dangerously-skip-permissions",
+                 "--no-session-persistence", "--strict-mcp-config"):
+        assert flag in argv
+    assert "ws/spec/00-charter.md" in argv[-1]  # промпт — последним
+
+
+def test_author_claude_default_model(monkeypatch, tmp_path):
+    _author_hermetic(monkeypatch, tmp_path, "AUTHOR_HARNESS=claude\n")
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    RealOps().author("/t", "charter", "s", "ws/spec")
+    argv = calls[0].argv
+    assert argv[argv.index("--model") + 1] == "claude-opus-5"
+
+
+def test_author_env_harness_ignores_config_model(monkeypatch, tmp_path):
+    """Урок ревью PR #121: харнесс со слоя env не наследует модель слоя
+    конфига — codex не получит claude-модель."""
+    _author_hermetic(
+        monkeypatch, tmp_path,
+        "AUTHOR_HARNESS=claude\nAUTHOR_MODEL=claude-opus-5\n",
+    )
+    monkeypatch.setenv("AUTHOR_HARNESS", "codex")
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    RealOps().author("/t", "charter", "s", "ws/spec")
+    argv = calls[0].argv
+    assert argv[:5] == [
+        "codex", "exec", "--ephemeral", "--sandbox", "workspace-write",
+    ]
+    assert "-m" not in argv
+
+
+def test_author_config_accepts_export_prefix(monkeypatch, tmp_path):
+    _author_hermetic(
+        monkeypatch, tmp_path, "  export AUTHOR_HARNESS=claude\n"
+    )
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    RealOps().author("/t", "charter", "s", "ws/spec")
+    assert calls[0].argv[0] == "claude"
+
+
+def test_author_codex_model_from_config(monkeypatch, tmp_path):
+    _author_hermetic(
+        monkeypatch, tmp_path,
+        "AUTHOR_HARNESS=codex\nAUTHOR_MODEL=gpt-5.5\n",
+    )
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    RealOps().author("/t", "charter", "s", "ws/spec")
+    argv = calls[0].argv
+    assert argv[argv.index("-m") + 1] == "gpt-5.5"
+    assert argv[-1].startswith("kind=charter")
+
+
+def test_author_unknown_harness_is_config_error(monkeypatch, tmp_path, capsys):
+    """Неизвестный харнесс — код 2 с причиной, не traceback: шаг authoring
+    остаётся resumable после правки конфига."""
+    _author_hermetic(monkeypatch, tmp_path, "AUTHOR_HARNESS=gemini\n")
+    _install_fake_run(monkeypatch, returncode=0)
+    assert RealOps().author("/t", "charter", "s", "ws/spec") == 2
+    assert "gemini" in capsys.readouterr().out
