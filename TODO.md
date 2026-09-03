@@ -635,6 +635,15 @@
       байтом (24 вендора). Боевой смоук: полный structured-вердикт claude
       по devtools#106. Возврат на codex через неделю — правка двух строк
       конфига, кода не требует.
+- [x] Ручка харнесса авторинга бандлов (governance/ops.author): AUTHOR_HARNESS/AUTHOR_MODEL из env/конфига оператора @owner:github:andrei-shtanakov @id:author-harness-claude — PR этой ветки
+      Тот же срочный контур: авторинг S1–S3 был прибит к codex exec и
+      умер бы с лимитами вместе с ревьюером. Тот же операторский файл
+      (~/.config/ai-prosto/harness.env, ключи AUTHOR_*), та же слоевая
+      привязка модели к харнессу (урок ревью PR #121). claude-ветка —
+      паритет с флотским пресетом spec-runner (skip-permissions: авторинг
+      пишет бандл и считает git hash-object). issue_classify/issue_worker
+      не в критическом пути — ждут общего agent-runner из архитектурной
+      части.
 - [ ] Удалить переходник claude-review после канонизации харнесс-слоя в ките steward @owner:github:andrei-shtanakov @id:review-harness-shim-removal @blocked_by:steward#147
       Когда steward доставит REVIEW_HARNESS в самом local.sh (и ре-вендор
       доедет до devtools), переходник удаляется, review-pr.sh переходит с
