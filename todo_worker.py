@@ -128,9 +128,11 @@ def require_pack(pack: Any) -> dict[str, Any]:
     if not isinstance(rules, list):
         wrong.append("rules (ожидался список)")
     elif not all(isinstance(rule, dict) for rule in rules):
-        # the list was checked while its elements were not, so a hand-edited
-        # `rules: ["CLAUDE.md"]` reached `render_rules` and raised AttributeError
-        # outside every handler here (Copilot, PR #127)
+        # This does NOT prevent a traceback, and the commit that added it said
+        # otherwise — `tc.render` hits a string rule first and its TypeError is
+        # already turned into a WorkerError below. What it buys is an answer that
+        # NAMES the field, instead of "pack не рендерится, нет поля …" (ревью
+        # PR #128 corrected the justification given in PR #127).
         wrong.append("rules[] (ожидались объекты правил, не строки)")
     if wrong:
         raise WorkerError(f"pack с неверными типами: {', '.join(wrong)}")

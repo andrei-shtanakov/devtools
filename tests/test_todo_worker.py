@@ -463,14 +463,29 @@ def test_main_lets_plan_through_over_a_dirty_tree(tmp_path):
                     "--output-root", str(tmp_path)]) == 0
 
 
-def test_the_dirty_list_says_how_many_it_did_not_show(tmp_path):
-    """Silently cutting at 10 is the very thing `todo_context` stopped doing."""
+def test_the_dirty_list_is_cut_and_says_how_many_it_did_not_show(tmp_path):
+    """Pins BOTH halves. The first version asserted only the wording, so removing
+    the cut left it green on a self-contradictory message: all 14 files listed
+    under a line saying four were hidden (ревью PR #128)."""
     checkout = _dirty_repo(tmp_path / "repo", files=14)
     try:
         tw.require_clean_tree(checkout)
     except tw.WorkerError as exc:
         text = str(exc)
+        listed = [line for line in text.splitlines() if line.startswith("  ")]
+        shown = [line for line in listed if not line.strip().startswith("…")]
+        assert len(shown) == tw._DIRTY_SHOWN, f"список не обрезан: {len(shown)}"
         assert "ещё 4" in text, f"обрезка не названа: {text}"
+        return
+    raise AssertionError("грязное дерево должно быть отказом")
+
+
+def test_a_short_dirty_list_is_shown_whole_without_a_cut_note(tmp_path):
+    checkout = _dirty_repo(tmp_path / "repo", files=3)
+    try:
+        tw.require_clean_tree(checkout)
+    except tw.WorkerError as exc:
+        assert "ещё" not in str(exc), "нечего обрезать — нечего и оговаривать"
         return
     raise AssertionError("грязное дерево должно быть отказом")
 
