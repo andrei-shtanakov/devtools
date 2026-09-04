@@ -868,19 +868,22 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Теперь `legacy_waits` + оговорка в detail; сам слаг здесь НЕ резолвится —
       пара слаг↔пункт правило пакета (`check_legacy_fleet`), приватное было бы
       повторением ошибки круга 5.
-- [ ] Слаг приёмки как токен — в пакете `plan-fields`, а не приватно в devtools @owner:github:andrei-shtanakov @id:inbox-slug-token-match @blocked_by:dispatcher#254
+- [ ] Слаг приёмки как токен — в пакете `plan-fields`, а не приватно в devtools @owner:github:andrei-shtanakov @id:inbox-slug-token-match @blocked_by:todo://dispatcher/slug-token-match
       `inbox.is_accepted` матчит слаг подстрокой и документирует слабость:
       `benchmark-2` совпадает с пунктом про `benchmark-20`. Ужесточение —
       «the package's call» (ADR-ECO-005 D9), приватное правило в скрипте есть
       расхождение, которое ADR убирает; поймано ревью PR #125, круг 5, когда
       такое правило завелось в `todo_context.py` и было снято. Апстрим-плечо
       заведено 2026-09-04: dispatcher#254, слаг `slug-token-match` (владелец
-      `packages/plan-fields`). `@blocked_by` — issue-формой с НОМЕРОМ: запрос
-      ещё не принят, поэтому канонической `todo://dispatcher/<id>` нет, а из
-      двух переходных форм состояние резолвится только числовой —
-      `check_issue_blockers` зовёт `gh` лишь по `#<цифры>` (`_ISSUE_REF_RE`),
-      слаг-форма же не видна ни одному из четырёх резолверов, и закрытие issue
-      не дало бы PF-BLOCKER-STALE никогда (ревью PR #134). Признак «сделано» назван в issue наблюдаемо:
+      `packages/plan-fields`). Запрос ПРИНЯТ 2026-09-04 под тем же слагом —
+      `todo://dispatcher/slug-token-match`, — поэтому ожидание переведено в
+      каноническую форму: она единственная порождает ребро в графе, и с ней
+      доставку ловит PF-BLOCKER-STALE. До принятия стояла issue-форма с
+      НОМЕРОМ (`dispatcher#254`): из двух переходных форм состояние резолвится
+      только числовой — `check_issue_blockers` зовёт `gh` лишь по `#<цифры>`
+      (`_ISSUE_REF_RE`), а слаг-форма не видна ни одному из четырёх резолверов
+      (ревью PR #134). Порядок «issue-номер до принятия → `todo://` после»
+      закреплён в скилле `repo-inbox`. Признак «сделано» назван в issue наблюдаемо:
       `is_accepted("benchmark-2", …)` ложен для пункта только с `benchmark-20`,
       локальные токен-правила у потребителей удаляются, а `make inbox` и
       `todo-context --issues` дают одинаковый ответ о приёмке одной пары.
