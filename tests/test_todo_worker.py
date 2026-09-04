@@ -167,9 +167,13 @@ def test_bad_input_exits_two(tmp_path, capsys):
 
 
 def test_dry_run_shows_the_prompt_without_calling_the_harness(tmp_path, capsys):
+    """dry-run проходит те же гейты, что боевой прогон: превью, которое зеленеет
+    там, где реальный запуск откажет, — враньё."""
     import json as _json
+    import subprocess
     checkout = tmp_path / "devtools"
-    (checkout / ".git").mkdir(parents=True)
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
     pack = tmp_path / "pack.json"
     pack.write_text(_json.dumps(
         {"node_id": "todo://devtools/x", "checkout": str(checkout),
@@ -298,3 +302,107 @@ def test_a_non_object_harness_result_is_an_answer_not_a_traceback(tmp_path,
         assert "не объект" in str(exc)
         return
     raise AssertionError("список вместо объекта — не структурированный ответ")
+
+
+# ─────────── регрессии второго круга ревью PR #126 ───────────
+
+
+def test_prompt_carries_the_repo_rules_it_claims_to_carry():
+    """The prompt named «the repo's own rules» while `render` deliberately keeps
+    their text in `--json` — so an execute run edited a neighbour's tree without
+    ever seeing its scope fence."""
+    rules = [{"path": "CLAUDE.md", "bytes": 400, "truncated": False,
+              "text": "READ-ONLY к соседним репо. Прямые коммиты в master запрещены."}]
+    prompt = tw.build_prompt("# todo://maestro/x", execute=True, rules=rules)
+    assert "READ-ONLY к соседним репо" in prompt
+    assert "CLAUDE.md" in prompt
+
+
+def test_prompt_says_plainly_when_there_are_no_rules_to_carry():
+    prompt = tw.build_prompt("# todo://maestro/x", execute=True, rules=[])
+    assert "the repo's own rules" not in prompt, "не обещать того, чего нет"
+
+
+def test_prompt_marks_a_truncated_fence_as_truncated():
+    rules = [{"path": "CLAUDE.md", "bytes": 34000, "truncated": True,
+              "text": "первые байты"}]
+    prompt = tw.build_prompt("# x", execute=True, rules=rules)
+    assert "обрезан" in prompt, "агент должен знать, что видит не весь fence"
+
+
+def test_require_pack_checks_the_types_of_the_fields_it_uses():
+    """A hand-edited pack can carry the right keys with the wrong types; the
+    guard checked presence only, so the traceback just moved one line down."""
+    for pack in (
+        {"node_id": "n", "item": {"repo": "r", "id": "i"}, "completeness": "rich"},
+        {"node_id": "n", "item": {"repo": "r", "id": "i"}, "completeness": [1],
+         "checkout": "/tmp/x"},
+        {"node_id": "n", "item": {"repo": "r", "id": "i"}, "completeness": {},
+         "checkout": 42},
+    ):
+        try:
+            tw.require_pack(pack)
+        except tw.WorkerError:
+            continue
+        raise AssertionError(f"принят пак с неверными типами: {pack!r}")
+
+
+def test_require_pack_accepts_the_shape_todo_context_produces():
+    pack = {"node_id": "todo://devtools/x", "checkout": "/tmp/devtools",
+            "item": {"repo": "devtools", "id": "x"},
+            "completeness": {"grade": "rich", "execute_allowed": True}}
+    assert tw.require_pack(pack) is pack
+
+
+def test_execute_refuses_a_dirty_target_tree(tmp_path):
+    """The worker's edits and the operator's uncommitted ones become
+    indistinguishable, and `changed_files` stops being checkable — the same
+    lesson `accept-pr` already paid for."""
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "tracked.txt").write_text("a\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    (tmp_path / "tracked.txt").write_text("b\n", encoding="utf-8")
+    try:
+        tw.require_clean_tree(tmp_path)
+    except tw.WorkerError as exc:
+        assert "грязное" in str(exc)
+        assert "tracked.txt" in str(exc), "оператор должен видеть, что именно грязно"
+        return
+    raise AssertionError("грязное дерево должно быть отказом до вызова харнесса")
+
+
+def test_a_clean_tree_passes(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "tracked.txt").write_text("a\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.email=t@e",
+                    "-c", "user.name=t", "commit", "-qm", "x"], check=True)
+    assert tw.require_clean_tree(tmp_path) is None
+
+
+def test_plan_mode_does_not_care_about_a_dirty_tree(tmp_path, capsys):
+    """`plan` runs read-only: a dirty tree cannot be confused with its work."""
+    import json as _json
+    import subprocess
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    (checkout / "dirty.txt").write_text("x\n", encoding="utf-8")
+    pack = tmp_path / "pack.json"
+    pack.write_text(_json.dumps(
+        {"node_id": "todo://devtools/x", "checkout": str(checkout),
+         "item": {"node_id": "todo://devtools/x", "repo": "devtools", "id": "x",
+                  "title": "t", "status": "open", "epic": None, "defect": None,
+                  "owner": None, "trigger": None, "section": None,
+                  "path": "TODO.md", "line": 1, "source_line": None, "tags": {}},
+         "body": {"text": None, "lines": 0}, "epic": None,
+         "graph": {"blocked_by": [], "blocks": [], "unresolved_refs": [],
+                   "diagnostics": [], "unread_repos": [], "legacy_waits": []},
+         "docs": {"named": [], "mentions": []}, "rules": [], "origin_issue": None,
+         "sources": [{"source": "item", "state": "read", "detail": None}],
+         "completeness": {"grade": "rich", "reason": "r", "execute_allowed": True,
+                          "unknown_sources": [], "note": None}}), encoding="utf-8")
+    assert tw.main(["--pack", str(pack), "--dry-run",
+                    "--output-root", str(tmp_path)]) == 0
