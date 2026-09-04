@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run behaviour-console behaviour-tasks accept-pr preflight
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run behaviour-console behaviour-tasks accept-pr preflight
 
 help:
 	@echo "Цели:"
@@ -35,6 +35,7 @@ help:
 	@echo "  make plan-check-fixture  — вердикт чекера на синтетическом workspace (clean=0, stale=1)"
 	@echo "  make inbox       — входящие кросс-репные запросы (issues с лейблом inbox; uv + Python 3.12)"
 	@echo "  make todo-context ARGS='--repo <r> --id <id>' — context-pack по одному пункту TODO (тело, эпик, граф, доки; --json, --issues)"
+	@echo "  make todo-work ARGS='--repo <r> --id <id> [--mode execute]' — прогон одного пункта; execute только при execute_allowed"
 	@echo "  make issues      — TUI всех открытых issues: группировка, выбор, отдельные tmux workers (uv + Python 3.12)"
 	@echo "  make morning     — fetch + status + inbox (утренний ритуал; uv + Python 3.12)"
 	@echo "  make evening     — вечерний чек: незакоммиченное / фича-ветки / незапушенное"
@@ -68,6 +69,7 @@ plan-check-fixture:  ; @uv run --frozen pytest tests/test_plan_check_fixture.py 
 inbox:       ; @uv run --frozen python ./inbox.py --root ..
 issues:      ; @uv run --frozen python ./issue_console.py --root $(WORKSPACE)
 todo-context:; @uv run --frozen python ./todo_context.py --root $(WORKSPACE) --manifest $(MANIFEST) $(ARGS)
+todo-work:  ; @uv run --frozen python ./todo_worker.py --root $(WORKSPACE) --manifest $(MANIFEST) $(ARGS)
 morning:     ; @./repos.sh fetch && echo && ./repos.sh status && echo && uv run --frozen python ./inbox.py --root ..
 evening:     ; @./repos.sh evening
 snapshot:    ; @uv run --project ../github-checker github-checker snapshot --workspace ..
