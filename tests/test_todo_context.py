@@ -968,3 +968,42 @@ def test_waiver_is_read_from_the_item_line_not_its_prose(tmp_path):
     report = tc.deleted_dependency_report(
         _snap(("maestro", "builder"), ("maestro", "remover")), {"maestro": repo})
     assert report["fleet_pair_count"] == 0, "маркер на строке обязан глушить"
+
+
+def test_waiver_accepts_the_house_form_with_a_reason(tmp_path):
+    """Домашняя форма несёт причину — `[waived: …]`, как в `salvage_scan`;
+    голая подстрока `[waived]` её не принимала, то есть задокументированный
+    аварийный выход не сработал бы (ревью PR #140, круг 3)."""
+    repo = tmp_path / "maestro"
+    repo.mkdir()
+    (repo / "TODO.md").write_text(
+        "- [ ] строить на scripts/x.sh @id:builder [waived: сначала обобщить]\n"
+        "- [ ] удалить scripts/x.sh совсем @id:remover\n",
+        encoding="utf-8")
+    report = tc.deleted_dependency_report(
+        _snap(("maestro", "builder"), ("maestro", "remover")), {"maestro": repo})
+    assert report["fleet_pair_count"] == 0
+
+
+def test_negation_is_judged_per_occurrence_not_by_the_first_verb():
+    """Одна строка может нести и отрицание, и утверждение."""
+    entity = tc.re.compile(r"(?<![\w.-])scripts/x\.sh(?![\w-])(?!\.[\w-])")
+    line = "не удаляем scripts/x.sh сейчас, но удалим после мержа"
+    assert tc._states_intent(line, entity, tc._REMOVE_RE)
+
+
+def test_render_survives_a_pack_without_plan_risks():
+    """`plan_risks: null` в правленом паке — ответ, а не AttributeError."""
+    pack = {"node_id": "todo://d/x", "plan_risks": None,
+            "item": {"node_id": "todo://d/x", "title": "t", "repo": "d",
+                     "status": "open", "epic": None, "defect": None,
+                     "owner": None, "trigger": None, "section": None,
+                     "path": "TODO.md", "line": 1, "source_line": None},
+            "body": {"text": None}, "epic": None,
+            "graph": {"blocked_by": [], "blocks": [], "unresolved_refs": [],
+                      "diagnostics": [], "unread_repos": [], "legacy_waits": []},
+            "docs": {"named": [], "mentions": []}, "rules": [],
+            "origin_issue": None, "sources": [],
+            "completeness": {"grade": "bare", "reason": "r",
+                             "execute_allowed": False, "note": None}}
+    assert "## Completeness" in tc.render(pack)

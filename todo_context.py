@@ -127,6 +127,11 @@ _GREP_HARD_CAP = 2000
 _GIT_TIMEOUT = 20
 
 _PATH_RE = re.compile(r"(?<![\w.-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+(?<![.,:;])")
+#: Маркер осознанного исключения. Домашняя форма несёт причину —
+#: `[waived: …]`, как в `salvage_scan`, — поэтому голая подстрока `[waived]`
+#: её не приняла бы, и задокументированный выход не сработал бы
+#: (ревью PR #140, круг 3).
+_WAIVED_RE = re.compile(r"\[waived\b", re.I)
 #: Опора и удаление — намерение, а не просто соседство пути: без глагола любой
 #: пункт, упомянувший файл, стал бы стороной пары.
 _SUPPORT_RE = re.compile(
@@ -665,8 +670,12 @@ def _states_intent(text: str, entity: re.Pattern[str],
     от пути — верный ответ по неверной причине (ревью PR #140, круг 2).
     """
     for line in text.splitlines():
-        hit = verb.search(line)
-        if hit and entity.search(line):
+        if not entity.search(line):
+            continue
+        # Каждое вхождение глагола, а не первое: одна строка может нести и
+        # отрицание, и утверждение («не удаляем сейчас, но удалим после»),
+        # и суд по первому терял второе (ревью PR #140, круг 3).
+        for hit in verb.finditer(line):
             prefix = line[max(0, hit.start() - 12):hit.start()].lower()
             # Граница обязательна: «в плане», «вполне» кончаются на «не».
             if not re.search(r"(?:^|[^\w-])(?:не|без)\s*$", prefix):
@@ -706,7 +715,7 @@ def deleted_dependency_report(snapshot: dict[str, Any],
         # `[waived]` ищется в СТРОКЕ пункта, а не в теле: маркеры живут на
         # строке (как `[x]`), а тело, процитировавшее «[waived]» в прозе,
         # глушило бы находку упоминанием (ревью PR #140).
-        if "[waived]" in support["line"].lower():
+        if _WAIVED_RE.search(support["line"]):
             continue
         # Якорь берётся из СТРОКИ И ТЕЛА: критерий пункта уточнён замером
         # (PR #132, круг 2) — стороны живут в разных местах пункта, и тело
@@ -731,7 +740,7 @@ def deleted_dependency_report(snapshot: dict[str, Any],
                 if remover["node_id"] == support["node_id"]:
                     continue
                 if (not _states_intent(remover["text"], entity, _REMOVE_RE)
-                        or "[waived]" in remover["line"].lower()):
+                        or _WAIVED_RE.search(remover["line"])):
                     continue
                 findings.append({"code": "TODO-DELETED-DEPENDENCY",
                                  "severity": "warning",
@@ -746,7 +755,7 @@ def deleted_dependency_report(snapshot: dict[str, Any],
                if focus_node_id else all_findings)
     return {"fleet_pair_count": len(all_findings), "findings": focused,
             "unread_repos": sorted(unread or []),
-            "waiver": "put [waived] on the item's own checkbox line"}
+            "waiver": "поставьте [waived] или [waived: причина] на строку пункта"}
 
 
 def read_rules(directory: Path | None) -> tuple[list[dict[str, Any]], Source]:
@@ -1015,7 +1024,7 @@ def render(pack: dict[str, Any]) -> str:
     for diag in graph["diagnostics"]:
         add(f"- [{diag['severity']}] {diag['code']}: {diag['message']}")
 
-    risks = pack.get("plan_risks", {"fleet_pair_count": 0, "findings": []})
+    risks = pack.get("plan_risks") or {"fleet_pair_count": 0, "findings": []}
     add("")
     add("## Plan risks")
     unread = risks.get("unread_repos") or []
