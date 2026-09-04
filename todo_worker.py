@@ -74,6 +74,8 @@ _ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _NO_PUBLISH = ("Do not commit, push, open a PR, or merge — none of those phases "
                "exist here.")
 
+_GIT_TIMEOUT = 20
+
 
 class WorkerError(Exception):
     """Bad input or unusable state — exit 2, as in `issue_worker`."""
@@ -112,6 +114,17 @@ def require_pack(pack: Any) -> dict[str, Any]:
         raise WorkerError(
             f"pack неполон, нет полей: {', '.join(missing)} — соберите его "
             f"`todo_context.py --json`, а не вручную")
+    # Presence was not enough: a hand-edited pack can carry the right keys with
+    # the wrong types, and the traceback just moved one line down (ревью #126).
+    wrong = []
+    if not isinstance(pack["completeness"], dict):
+        wrong.append("completeness (ожидался объект)")
+    if pack.get("checkout") is not None and not isinstance(pack["checkout"], str):
+        wrong.append("checkout (ожидалась строка)")
+    if not isinstance(pack.get("rules", []), list):
+        wrong.append("rules (ожидался список)")
+    if wrong:
+        raise WorkerError(f"pack с неверными типами: {', '.join(wrong)}")
     return pack
 
 
@@ -188,7 +201,27 @@ def enforce_mode(result: dict[str, Any], execute: bool) -> dict[str, Any]:
     return result
 
 
-def build_prompt(rendered_pack: str, execute: bool) -> str:
+def render_rules(rules: list[dict[str, Any]]) -> str:
+    """The repo's scope fence, inlined — or nothing, said plainly.
+
+    `todo_context.render` keeps this text in `--json` on purpose: a fence is
+    thousands of bytes and would bury the item in a human report. A prompt is not
+    a report, and an `execute` run edits someone else's tree, so the fence goes
+    in here — the prompt used to CLAIM it was included while it was not
+    (ревью PR #126, круг 2).
+    """
+    if not rules:
+        return ""
+    blocks = []
+    for rule in rules:
+        cut = " (обрезан)" if rule.get("truncated") else ""
+        blocks.append(f"--- {rule.get('path')}{cut} ---\n{rule.get('text') or ''}")
+    return ("\n\nThe rules of the repository you are working in — its scope "
+            "fence, obey it:\n\n" + "\n\n".join(blocks))
+
+
+def build_prompt(rendered_pack: str, execute: bool,
+                 rules: list[dict[str, Any]] | None = None) -> str:
     """The pack as the whole context, plus what this mode may do with it."""
     instructions = (
         f"Implement the item in the current repository. Run the relevant tests. "
@@ -201,11 +234,11 @@ def build_prompt(rendered_pack: str, execute: bool) -> str:
     return f"""You are the worker for one plan item of this fleet.
 
 Everything known about it is below — the item line, its body, the epic's goal,
-the `@blocked_by` graph, design docs, the repo's own rules, and, when it was
-asked for, the originating issue. Sources that were NOT read are named at the
-bottom under Completeness: treat them as unknown, never as empty.
+the `@blocked_by` graph, design docs, and, when it was asked for, the
+originating issue. Sources that were NOT read are named at the bottom under
+Completeness: treat them as unknown, never as empty.
 
-{rendered_pack}
+{rendered_pack}{render_rules(rules or [])}
 
 {instructions}
 Return only the structured result required by the supplied JSON schema.
@@ -232,6 +265,31 @@ def load_pack(args: argparse.Namespace) -> dict[str, Any]:
         Path(args.registry) if args.registry else tc.default_registry(root),
         repo, item_id, owner=args.issues,
     )
+
+
+def require_clean_tree(checkout: Path) -> None:
+    """Refuse to run `execute` over uncommitted work in the target repo.
+
+    The worker's edits and the operator's would become indistinguishable, and
+    `changed_files` — the one signal saying what the run touched — stops being
+    checkable. `accept-pr` paid this lesson already («грязное дерево — ложная
+    фактура находок», ретроспектива 2026-09-02).
+    """
+    try:
+        done = subprocess.run(["git", "-C", str(checkout), "status", "--porcelain"],
+                              capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise WorkerError(f"не удалось проверить дерево {checkout}: {exc}") from exc
+    if done.returncode:
+        raise WorkerError(
+            f"git status в {checkout} не отработал: "
+            f"{(done.stderr.strip().splitlines() or ['?'])[-1]}")
+    dirty = done.stdout.strip()
+    if dirty:
+        listed = "\n".join(f"  {line}" for line in dirty.splitlines()[:10])
+        raise WorkerError(
+            f"дерево {checkout} грязное — правки прогона было бы не отличить от "
+            f"ваших, а `changed_files` стал бы непроверяемым:\n{listed}")
 
 
 def run_harness(prompt: str, execute: bool, cwd: Path) -> dict[str, Any]:
@@ -297,8 +355,10 @@ def main(argv: list[str] | None = None) -> int:
             rendered = tc.render(pack)
         except (KeyError, TypeError) as exc:
             raise WorkerError(f"pack не рендерится, нет поля {exc}") from exc
-        prompt = build_prompt(rendered, execute)
+        prompt = build_prompt(rendered, execute, pack.get("rules"))
         checkout = require_checkout(pack)
+        if execute:
+            require_clean_tree(checkout)
         if args.dry_run:
             print(f"=== dry-run: режим {args.mode}, sandbox "
                   f"{'workspace-write' if execute else 'read-only'}, "

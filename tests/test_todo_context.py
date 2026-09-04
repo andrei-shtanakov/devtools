@@ -784,3 +784,52 @@ def test_graph_reports_a_legacy_wait_to_the_repo_without_resolving_the_slug():
     graph, source = tc.read_graph(snapshot, "todo://devtools/x", [])
     assert graph["legacy_waits"][0]["names_this_item"] is False
     assert source.detail, "неполнота названа, даже когда слаг не про этот пункт"
+
+
+def test_pack_carries_the_checkout_directory(monkeypatch, tmp_path):
+    """`checkout` is a cross-module contract: `todo_worker` runs the harness in
+    that directory, and without it the run would inherit devtools' own cwd."""
+    checkout = tmp_path / "maestro"
+    checkout.mkdir()
+    node = {"node_id": "todo://maestro/x", "id": "x", "repo": "maestro",
+            "title": "t", "declared_status": "open", "raw": {},
+            "provenance": {"path": "TODO.md", "line": 1}}
+    snapshot = {"nodes": [node], "edges": [], "references": [], "diagnostics": []}
+
+    class _Index:
+        canonical_keys = ("maestro",)
+
+        def resolve_ref(self, ref):
+            return "maestro"
+
+    monkeypatch.setattr(tc, "fleet_snapshot",
+                        lambda root, manifest: (snapshot, {"maestro": checkout},
+                                                [], _Index()))
+    monkeypatch.setattr(tc, "read_origin_issue",
+                        lambda item, owner: (None, tc.Source("origin_issue",
+                                                             "not_queried", "x")))
+    pack = tc.build_pack(tmp_path, tmp_path, tmp_path, "maestro", "x")
+    assert pack["checkout"] == str(checkout)
+
+
+def test_pack_says_none_when_the_repo_is_not_checked_out(monkeypatch, tmp_path):
+    """A missing checkout must be `None`, not the caller's directory: the
+    consumer refuses on `None` and would have silently used its own cwd."""
+    node = {"node_id": "todo://maestro/x", "id": "x", "repo": "maestro",
+            "title": "t", "declared_status": "open", "raw": {},
+            "provenance": {"path": "TODO.md", "line": 1}}
+    snapshot = {"nodes": [node], "edges": [], "references": [], "diagnostics": []}
+
+    class _Index:
+        canonical_keys = ("maestro",)
+
+        def resolve_ref(self, ref):
+            return "maestro"
+
+    monkeypatch.setattr(tc, "fleet_snapshot",
+                        lambda root, manifest: (snapshot, {}, [], _Index()))
+    monkeypatch.setattr(tc, "read_origin_issue",
+                        lambda item, owner: (None, tc.Source("origin_issue",
+                                                             "not_queried", "x")))
+    pack = tc.build_pack(tmp_path, tmp_path, tmp_path, "maestro", "x")
+    assert pack["checkout"] is None
