@@ -59,6 +59,65 @@ def test_body_unreadable_repo_is_error_not_absent():
     assert source.state == "error", "an unread source must never look empty-but-read"
 
 
+def _risk_snapshot(lines):
+    nodes = []
+    for line_no, (item_id, title) in enumerate(lines, 1):
+        nodes.append({"node_id": f"todo://devtools/{item_id}", "id": item_id,
+                      "repo": "devtools", "title": title,
+                      "declared_status": "open", "raw": {},
+                      "provenance": {"path": "TODO.md", "line": line_no}})
+    return {"nodes": nodes, "edges": [], "references": [], "diagnostics": []}
+
+
+def test_deleted_dependency_uses_body_path_and_basename_on_both_surfaces(tmp_path):
+    directory = _write(tmp_path, "\n".join([
+        "- [ ] Общий слой @id:build",
+        "      Строить адаптер обобщением scripts/harness/claude-review.",
+        "- [ ] Удалить переходник claude-review @id:remove",
+    ]) + "\n")
+    snapshot = _risk_snapshot([("build", "Общий слой"),
+                               ("remove", "Удалить переходник claude-review")])
+    snapshot["nodes"][1]["provenance"]["line"] = 3
+    report = tc.deleted_dependency_report(snapshot, {"devtools": directory})
+    assert report["fleet_pair_count"] == 1
+    assert report["findings"][0]["entity"] == "scripts/harness/claude-review"
+
+
+def test_deleted_dependency_needs_action_pair_and_ignores_meta_rule(tmp_path):
+    """Мета-пункт глушится МАРКЕРОМ, а не угадыванием по ключевым словам:
+    прежний гард был подогнан под этот тест и настоящий мета-пункт репо не
+    исключал (ревью PR #140, круг 2)."""
+    directory = _write(tmp_path, "\n".join([
+        "- [ ] Документировать scripts/harness/claude-review @id:mention",
+        "      Обычное совместное упоминание пути.",
+        "- [ ] Удалить claude-review @id:remove",
+        "- [ ] Проверка правила: пункт не должен опираться на удаляемый путь "
+        "@id:meta [waived]",
+        "      Мета-пункт описывает, как строить scripts/harness/claude-review "
+        "и удалить его.",
+    ]) + "\n")
+    snapshot = _risk_snapshot([("mention", "Документировать"),
+                               ("remove", "Удалить claude-review"),
+                               ("meta", "Проверка правила")])
+    snapshot["nodes"][1]["provenance"]["line"] = 3
+    snapshot["nodes"][2]["provenance"]["line"] = 4
+    assert tc.deleted_dependency_report(snapshot, {"devtools": directory})[
+        "fleet_pair_count"] == 0
+
+
+def test_deleted_dependency_waiver_suppresses_pair(tmp_path):
+    directory = _write(tmp_path, "\n".join([
+        "- [ ] Общий слой [waived] @id:build",
+        "      Строить на scripts/harness/claude-review.",
+        "- [ ] Удалить claude-review @id:remove",
+    ]) + "\n")
+    snapshot = _risk_snapshot([("build", "Общий слой"),
+                               ("remove", "Удалить claude-review")])
+    snapshot["nodes"][1]["provenance"]["line"] = 3
+    assert tc.deleted_dependency_report(snapshot, {"devtools": directory})[
+        "fleet_pair_count"] == 0
+
+
 def test_named_doc_paths_reads_section_and_line_without_duplicates():
     item = {
         "section": "Waits graph "
@@ -833,3 +892,121 @@ def test_pack_says_none_when_the_repo_is_not_checked_out(monkeypatch, tmp_path):
                                                              "not_queried", "x")))
     pack = tc.build_pack(tmp_path, tmp_path, tmp_path, "maestro", "x")
     assert pack["checkout"] is None
+
+
+# ─────────── регрессии первого круга ревью PR #140 ───────────
+
+
+def _snap(*items):
+    nodes = [{"node_id": f"todo://{r}/{i}", "id": i, "repo": r, "title": "t",
+              "declared_status": "open", "raw": {},
+              "provenance": {"path": "TODO.md", "line": n}}
+             for n, (r, i) in enumerate(items, 1)]
+    return {"nodes": nodes, "edges": [], "references": [], "diagnostics": []}
+
+
+def test_pair_count_names_the_repos_it_could_not_read(tmp_path):
+    """Число «пар во флоте» без списка нечитанных репо — это счёт по
+    ПРОЧИТАННОМУ, поданный как счёт по флоту: собственный режим отказа модуля."""
+    report = tc.deleted_dependency_report(_snap(), {}, None, ["maestro", "arbiter"])
+    assert report["unread_repos"] == ["arbiter", "maestro"]
+    assert report["fleet_pair_count"] == 0
+
+
+def test_negation_guard_needs_a_word_boundary():
+    """«в плане», «вполне» кончаются на «не» и глушили находку.
+
+    Негативная ветка сравнивается с ПОЛОЖИТЕЛЬНОЙ на том же входе без «не»:
+    прошлая версия утверждала только «с "не" — нет», и снятие самого гарда
+    оставляло сьют зелёным (ревью PR #140, круг 2)."""
+    entity = tc.re.compile(r"(?<![\w.-])scripts/x\.sh(?![\w.-])")
+    assert tc._states_intent("вполне удалить scripts/x.sh пора", entity,
+                             tc._REMOVE_RE), "«вполне» — не отрицание"
+    assert tc._states_intent("решено удалять scripts/x.sh", entity,
+                             tc._REMOVE_RE), "контроль: без «не» находка есть"
+    assert not tc._states_intent("решено не удалять scripts/x.sh", entity,
+                                 tc._REMOVE_RE)
+
+
+def test_both_sides_are_judged_by_the_same_locality_rule():
+    """Асимметрия стоила верного ответа по неверной причине: сторона
+    «опирается» проверялась по всему тексту, и живая пара нашлась по
+    «не строится» в полусотне строк от пути (ревью PR #140, круг 2)."""
+    entity = tc.re.compile(r"(?<![\w.-])scripts/x\.sh(?![\w.-])")
+    far = "строится на чём-то другом\n" + "проза\n" * 20 + "трогаем scripts/x.sh"
+    assert not tc._states_intent(far, entity, tc._SUPPORT_RE), "глагол вдалеке"
+    assert tc._states_intent("строится на scripts/x.sh", entity, tc._SUPPORT_RE)
+
+
+def test_removal_verb_covers_the_forms_the_fleet_actually_writes():
+    """`удалён`, `удалим`, `удаляем`, `удаления` — частые формы, которые
+    прежний список пропускал молча."""
+    entity = tc.re.compile(r"(?<![\w.-])scripts/x\.sh(?![\w.-])")
+    for line in ("scripts/x.sh будет удалён", "удалим scripts/x.sh",
+                 "удаляем scripts/x.sh", "после удаления scripts/x.sh"):
+        assert tc._states_intent(line, entity, tc._REMOVE_RE), line
+
+
+def test_waiver_is_read_from_the_item_line_not_its_prose(tmp_path):
+    """Маркер живёт на строке пункта, как `[x]`. Тело, процитировавшее
+    «[waived]» в прозе, глушило бы находку упоминанием."""
+    repo = tmp_path / "maestro"
+    repo.mkdir()
+    (repo / "TODO.md").write_text(
+        "- [ ] строить на scripts/x.sh @id:builder\n"
+        "      про ослабление: маркер [waived] ставится на строке\n"
+        "- [ ] удалить scripts/x.sh совсем @id:remover\n",
+        encoding="utf-8")
+    report = tc.deleted_dependency_report(
+        _snap(("maestro", "builder"), ("maestro", "remover")), {"maestro": repo})
+    assert report["fleet_pair_count"] == 1, "цитата в теле не должна глушить"
+
+    (repo / "TODO.md").write_text(
+        "- [ ] строить на scripts/x.sh @id:builder [waived]\n"
+        "- [ ] удалить scripts/x.sh совсем @id:remover\n",
+        encoding="utf-8")
+    report = tc.deleted_dependency_report(
+        _snap(("maestro", "builder"), ("maestro", "remover")), {"maestro": repo})
+    assert report["fleet_pair_count"] == 0, "маркер на строке обязан глушить"
+
+
+def test_waiver_accepts_the_house_form_with_a_reason(tmp_path):
+    """Домашняя форма несёт причину — `[waived: …]`, как в `salvage_scan`;
+    голая подстрока `[waived]` её не принимала, то есть задокументированный
+    аварийный выход не сработал бы (ревью PR #140, круг 3)."""
+    repo = tmp_path / "maestro"
+    repo.mkdir()
+    (repo / "TODO.md").write_text(
+        "- [ ] строить на scripts/x.sh @id:builder [waived: сначала обобщить]\n"
+        "- [ ] удалить scripts/x.sh совсем @id:remover\n",
+        encoding="utf-8")
+    report = tc.deleted_dependency_report(
+        _snap(("maestro", "builder"), ("maestro", "remover")), {"maestro": repo})
+    assert report["fleet_pair_count"] == 0
+
+
+def test_negation_is_judged_per_occurrence_not_by_the_first_verb():
+    """Одна строка может нести и отрицание, и утверждение."""
+    entity = tc.re.compile(r"(?<![\w.-])scripts/x\.sh(?![\w-])(?!\.[\w-])")
+    line = "не удаляем scripts/x.sh сейчас, но удалим после мержа"
+    assert tc._states_intent(line, entity, tc._REMOVE_RE)
+
+
+def test_render_survives_a_pack_without_plan_risks():
+    """`plan_risks: null` в правленом паке — ответ, а не AttributeError."""
+    pack = {"node_id": "todo://d/x", "plan_risks": None,
+            "item": {"node_id": "todo://d/x", "title": "t", "repo": "d",
+                     "status": "open", "epic": None, "defect": None,
+                     "owner": None, "trigger": None, "section": None,
+                     "path": "TODO.md", "line": 1, "source_line": None},
+            "body": {"text": None}, "epic": None,
+            "graph": {"blocked_by": [], "blocks": [], "unresolved_refs": [],
+                      "diagnostics": [], "unread_repos": [], "legacy_waits": []},
+            "docs": {"named": [], "mentions": []}, "rules": [],
+            "origin_issue": None, "sources": [],
+            "completeness": {"grade": "bare", "reason": "r",
+                             "execute_allowed": False, "note": None}}
+    text = tc.render(pack)
+    assert "## Completeness" in text, "остаток отчёта не должен обрезаться"
+    assert "не измерено" in text, "неизмеренное не должно печататься как 0"
+    assert "пар во флоте: 0" not in text

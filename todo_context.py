@@ -126,6 +126,25 @@ _GREP_CAP = 40  # hits PRINTED from one `git grep`
 _GREP_HARD_CAP = 2000
 _GIT_TIMEOUT = 20
 
+_PATH_RE = re.compile(r"(?<![\w.-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+(?<![.,:;])")
+#: Маркер осознанного исключения. Домашняя форма несёт причину —
+#: `[waived: …]`, как в `salvage_scan`, — поэтому голая подстрока `[waived]`
+#: её не приняла бы, и задокументированный выход не сработал бы
+#: (ревью PR #140, круг 3).
+_WAIVED_RE = re.compile(r"\[waived\b", re.I)
+#: Опора и удаление — намерение, а не просто соседство пути: без глагола любой
+#: пункт, упомянувший файл, стал бы стороной пары.
+_SUPPORT_RE = re.compile(
+    r"\b(?:стро\w*|созда\w*|обобщ\w*|использу\w*|использова\w*|опира\w*"
+    r"|основа\w*|поверх|build\w*|creat\w*|generaliz\w*|use[sd]?|using"
+    r"|depend\w*|based)\b",
+    re.I,
+)
+_REMOVE_RE = re.compile(
+    r"\b(?:удал\w*|снес\w*|убра\w*|remove|delete|drop|retire)\w*\b",
+    re.I,
+)
+
 
 @dataclass(frozen=True)
 class Source:
@@ -568,8 +587,8 @@ def read_docs(directory: Path | None,
     return block, Source("docs", "read" if have else "absent", detail)
 
 
-def read_body(directory: Path | None,
-              item: dict[str, Any]) -> tuple[dict[str, Any], Source]:
+def read_body(directory: Path | None, item: dict[str, Any],
+              cached_lines: list[str] | None = None) -> tuple[dict[str, Any], Source]:
     """The item's indented continuation lines — the body the parser cannot see.
 
     `plan_fields` reads items line by line and stops at the first line: that is a
@@ -587,10 +606,15 @@ def read_body(directory: Path | None,
         return ({"text": None, "lines": 0},
                 Source("body", "error", "repo is not checked out here"))
     todo = directory / "TODO.md"
-    if not todo.is_file():
-        return ({"text": None, "lines": 0},
-                Source("body", "error", "repo keeps no TODO.md"))
-    lines = todo.read_text(encoding="utf-8", errors="ignore").splitlines()
+    if cached_lines is not None:
+        # Строки уже прочитаны вызывающим: обход всех узлов флота читал и
+        # разбирал один и тот же файл на КАЖДЫЙ узел (Copilot и ревью PR #140).
+        lines = cached_lines
+    else:
+        if not todo.is_file():
+            return ({"text": None, "lines": 0},
+                    Source("body", "error", "repo keeps no TODO.md"))
+        lines = todo.read_text(encoding="utf-8", errors="ignore").splitlines()
     start = (item.get("line") or 0) - 1
     if not 0 <= start < len(lines):
         return ({"text": None, "lines": 0},
@@ -615,6 +639,136 @@ def read_body(directory: Path | None,
                 Source("body", "absent", "no continuation lines under the item"))
     return ({"text": text, "lines": len([x for x in collected if x])},
             Source("body", "read"))
+
+
+def _cached_item(snapshot: dict[str, Any], node: dict[str, Any],
+                 checkouts: dict[str, Path],
+                 scraped: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """`read_item` for a whole snapshot, reading each repo's TODO.md once."""
+    repo = node["repo"]
+    if repo not in scraped:
+        directory = checkouts.get(repo)
+        todo = directory / "TODO.md" if directory is not None else None
+        by_id: dict[str, Any] = {}
+        lines: list[str] = []
+        if todo is not None and todo.is_file():
+            text = todo.read_text(encoding="utf-8", errors="ignore")
+            by_id = {it.item_id: it for it in _pf.scrape_items(text)}
+            lines = text.splitlines()
+        scraped[repo] = {"items": by_id, "lines": lines}
+    hit = scraped[repo]["items"].get(node["id"])
+    return {"repo": repo, "id": node["id"],
+            "source_line": hit.raw_text if hit is not None else None,
+            "section": hit.section if hit is not None else None,
+            "line": node.get("provenance", {}).get("line")}
+
+
+def _states_intent(text: str, entity: re.Pattern[str],
+                   verb: re.Pattern[str]) -> bool:
+    """Verb and entity must be ONE local claim, not two unrelated paragraphs.
+
+    Мета-пункт, описывающий САМО правило, глушится не угадыванием по словам, а
+    маркером `[waived]` на его строке: прежний ключевой гард был подогнан под
+    синтетический тест и настоящий мета-пункт репозитория не исключал.
+
+    Обе стороны судятся одним правилом. Асимметрия стоила дорого: сторона
+    «опирается» проверялась по всему тексту пункта без локальности и без
+    гарда отрицания, и живая пара нашлась по «не строится» в полусотне строк
+    от пути — верный ответ по неверной причине (ревью PR #140, круг 2).
+    """
+    for line in text.splitlines():
+        if not entity.search(line):
+            continue
+        # Каждое вхождение глагола, а не первое: одна строка может нести и
+        # отрицание, и утверждение («не удаляем сейчас, но удалим после»),
+        # и суд по первому терял второе (ревью PR #140, круг 3).
+        for hit in verb.finditer(line):
+            prefix = line[max(0, hit.start() - 12):hit.start()].lower()
+            # Граница обязательна: «в плане», «вполне» кончаются на «не».
+            if not re.search(r"(?:^|[^\w-])(?:не|без)\s*$", prefix):
+                return True
+    return False
+
+
+def deleted_dependency_report(snapshot: dict[str, Any],
+                              checkouts: dict[str, Path],
+                              focus_node_id: str | None = None,
+                              unread: list[str] | None = None) -> dict[str, Any]:
+    """Measure open item pairs where one builds on a path another removes.
+
+    `unread` names manifest repos with no checkout here. Their plans were never
+    opened, so a pair count without them is a count over what was READ — and
+    printing it bare would be this module's own failure mode: "we did not look"
+    wearing the face of "there is nothing there" (ревью PR #140).
+    """
+    items: list[dict[str, Any]] = []
+    # `read_item` заново читает и разбирает TODO.md репо на КАЖДЫЙ узел, а узлов
+    # сотни — кэш на репо снимает квадратичность (Copilot, PR #140).
+    scraped: dict[str, dict[str, Any]] = {}
+    for node in snapshot.get("nodes", []):
+        if node.get("declared_status") != "open":
+            continue
+        item = _cached_item(snapshot, node, checkouts, scraped)
+        cached = scraped[node["repo"]]["lines"]
+        body, source = read_body(checkouts.get(item["repo"]), item,
+                                 cached if cached else None)
+        if source.state == "error":
+            continue
+        body_text = body.get("text") or ""
+        text = "\n".join(filter(None, (item.get("source_line"), body_text)))
+        items.append({"node_id": node["node_id"], "body": body_text, "text": text,
+                      "line": item.get("source_line") or ""})
+
+    findings: list[dict[str, Any]] = []
+    for support in items:
+        # `[waived]` ищется в СТРОКЕ пункта, а не в теле: маркеры живут на
+        # строке (как `[x]`), а тело, процитировавшее «[waived]» в прозе,
+        # глушило бы находку упоминанием (ревью PR #140).
+        if _WAIVED_RE.search(support["line"]):
+            continue
+        # Якорь берётся из СТРОКИ И ТЕЛА: критерий пункта уточнён замером
+        # (PR #132, круг 2) — стороны живут в разных местах пункта, и тело
+        # одно прошло бы мимо пункта, назвавшего путь в своей строке.
+        for path in sorted(set(_PATH_RE.findall(support["text"]))):
+            basename = path.rsplit("/", 1)[-1]
+            names = [path]
+            # Very short basenames (`v2`, `ui`) are vocabulary, not entities;
+            # letting them bridge unrelated repos dominated the live measure.
+            if len(basename) >= 4:
+                names.append(basename)
+            alternatives = "|".join(re.escape(name) for name in names)
+            # Хвост как у `_ID_TAIL`: точка — и часть имени, и конец
+            # предложения, поэтому она продолжает сущность только когда за ней
+            # идёт что-то именное. Иначе путь в конце фразы не матчился вовсе
+            # (тест агента был прав, код — нет; ревью PR #140, круг 2).
+            entity = re.compile(
+                rf"(?<![\w.-])(?:{alternatives})(?![\w-])(?!\.[\w-])")
+            if not _states_intent(support["text"], entity, _SUPPORT_RE):
+                continue
+            for remover in items:
+                if remover["node_id"] == support["node_id"]:
+                    continue
+                if (not _states_intent(remover["text"], entity, _REMOVE_RE)
+                        or _WAIVED_RE.search(remover["line"])):
+                    continue
+                findings.append({"code": "TODO-DELETED-DEPENDENCY",
+                                 "severity": "warning",
+                                 "supporting_item": support["node_id"],
+                                 "removing_item": remover["node_id"],
+                                 "entity": path})
+    unique = {(f["supporting_item"], f["removing_item"], f["entity"]): f
+              for f in findings}
+    all_findings = [unique[key] for key in sorted(unique)]
+    focused = ([f for f in all_findings if focus_node_id in
+                (f["supporting_item"], f["removing_item"])]
+               if focus_node_id else all_findings)
+    # Пара — это (опирающийся, удаляющий): один и тот же конфликт, названный
+    # двумя путями, оставался бы одним конфликтом, а счёт ради которого пункт и
+    # заводился — завышался (ревью PR #140, круг 4).
+    pairs = {(f["supporting_item"], f["removing_item"]) for f in all_findings}
+    return {"fleet_pair_count": len(pairs), "findings": focused,
+            "unread_repos": sorted(unread or []),
+            "waiver": "поставьте [waived] или [waived: причина] на строку пункта"}
 
 
 def read_rules(directory: Path | None) -> tuple[list[dict[str, Any]], Source]:
@@ -789,6 +943,7 @@ def build_pack(root: Path, manifest_path: Path, registry_path: Path, repo: str,
     epic, src = read_epic(registry_path, item["epic"]); sources.append(src)
     body, src = read_body(directory, item); sources.append(src)
     graph, src = read_graph(snapshot, node_id, unread); sources.append(src)
+    plan_risks = deleted_dependency_report(snapshot, checkouts, node_id, unread)
     docs, src = read_docs(directory, item); sources.append(src)
     rules, src = read_rules(directory); sources.append(src)
     origin, src = read_origin_issue(item, owner); sources.append(src)
@@ -803,6 +958,7 @@ def build_pack(root: Path, manifest_path: Path, registry_path: Path, repo: str,
         "body": body,
         "epic": epic,
         "graph": graph,
+        "plan_risks": plan_risks,
         "docs": docs,
         "rules": rules,
         "origin_issue": origin,
@@ -880,6 +1036,30 @@ def render(pack: dict[str, Any]) -> str:
         add(f"- нерезолвленная ссылка: `{ref}`")
     for diag in graph["diagnostics"]:
         add(f"- [{diag['severity']}] {diag['code']}: {diag['message']}")
+
+    risks = pack.get("plan_risks")
+    add("")
+    add("## Plan risks")
+    if not isinstance(risks, dict):
+        # НЕ «0»: ноль — это ИЗМЕРЕННЫЙ ноль. Пак без поля не измерялся, и
+        # печатать за него чистую цифру значило бы подать неизвестное как
+        # проверенное — режим отказа, против которого написан весь модуль
+        # (ревью PR #140, круг 4).
+        add("- не измерено: в паке нет поля `plan_risks`")
+    else:
+        unread = risks.get("unread_repos") or []
+        tail = (f" (по прочитанным репо; не склонированы здесь: "
+                f"{', '.join(unread)})" if unread else "")
+        add(f"- потенциальных пар во флоте: {risks['fleet_pair_count']}{tail}")
+        if not risks["findings"]:
+            add("- для этого пункта не найдено")
+        for finding in risks["findings"]:
+            add(f"- [{finding['severity']}] {finding['code']}: "
+                f"`{finding['supporting_item']}` опирается на "
+                f"`{finding['entity']}`, который удаляет "
+                f"`{finding['removing_item']}`")
+        if risks["findings"]:
+            add(f"- осознанное исключение: {risks['waiver']}")
 
     docs = pack["docs"]
     add("")
