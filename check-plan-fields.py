@@ -101,6 +101,11 @@ except ImportError:  # pragma: no cover - exercised by humans, not the suite
 # other canonical finding, and every legacy finding, is a warning.
 _CANONICAL_ERROR = {"PF-BLOCKER-STALE"}
 
+#: Any field tag of the grammar, for locating a tag that slid off the checkbox
+#: line. Matching is deliberately NOT a detector — see `stray_tag_line`.
+_ANY_TAG_RE = re.compile(r"@(?:id|owner|epic|defect|blocked_by|trigger):")
+_ITEM_LINE_RE = re.compile(r"^\s*[-*]\s*\[[ xX]\]\s")
+
 
 @dataclass
 class Report:
@@ -593,6 +598,7 @@ def resolve_graph(
     excluded_by_repo: dict[str, set[str]] = {}
     for srepo, raw in extra_exclude or set():
         excluded_by_repo.setdefault(srepo, set()).add(raw)
+    todo_by_repo = {inp.repo: inp.todo_text for inp in inputs}
     for d in canonical:
         prov = d.get("provenance") or {}
         repo, line = prov.get("repo"), prov.get("line")
@@ -608,7 +614,10 @@ def resolve_graph(
             continue
         if isinstance(repo, str) and isinstance(line, int):
             by_item.setdefault((repo, line), set()).add(d["code"])
-        line = _canonical_line(d)
+        hint = None
+        if d["code"] == "PF-ID-MISSING" and isinstance(line, int):
+            hint = stray_tag_line(todo_by_repo.get(repo), line)
+        line = _canonical_line(d, hint)
         if line is None:
             continue
         bucket = report.errors if d["code"] in _CANONICAL_ERROR else report.warnings
@@ -626,15 +635,46 @@ def resolve_graph(
     return by_item
 
 
-def _canonical_line(diag: dict) -> str | None:
+def stray_tag_line(todo_text: str | None, item_line: int) -> int | None:
+    """Line number of the first continuation line under `item_line` holding a tag.
+
+    The CAUSE behind a `PF-ID-MISSING`: the tag slid onto a continuation line,
+    where no parser reads it (devtools#57). It is used only to enrich a finding
+    that already fired, never to raise one — a continuation legitimately MENTIONS
+    tags all the time, and a fleet measure put that at 48 live lines against 0
+    genuinely stranded ones (prograph-vault, devtools#107).
+    """
+    if not todo_text:
+        return None
+    lines = todo_text.splitlines()
+    for offset, raw in enumerate(lines[item_line:], start=item_line + 1):
+        if not raw.strip():
+            break
+        if _ITEM_LINE_RE.match(raw) or raw.lstrip().startswith("#"):
+            break
+        if not raw.startswith((" ", "\t")):
+            break
+        if _ANY_TAG_RE.search(raw):
+            return offset
+    return None
+
+
+def _canonical_line(diag: dict, hint: int | None = None) -> str | None:
     """A one-line rendering of a canonical diagnostic devtools cares to surface.
 
-    @id-coverage (PF-ID-MISSING) and the @id-only owner findings are handled as
-    operational coverage/divergence notes instead, so they are skipped here.
+    `PF-ID-MISSING` used to be skipped here as an operational coverage note, and
+    the file therefore reported an honest 0/0 while carrying items that cannot be
+    referenced by `todo://`, cannot be a blocker, and whose disappearance the
+    delta counters read as "closed" (prograph-vault, devtools#107). It is a
+    warning now, with the cause named when there is one.
+
+    The @id-only owner findings stay coverage notes: they have their own bucket.
     """
     code = diag["code"]
-    if code == "PF-ID-MISSING" or code.startswith("PF-OWNER-"):
+    if code.startswith("PF-OWNER-"):
         return None
+    if code == "PF-ID-MISSING" and hint is not None:
+        return f"{diag['message']}; тег найден на строке {hint} [{code}]"
     return f"{diag['message']} [{code}]"
 
 
