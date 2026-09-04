@@ -377,7 +377,10 @@ def git_grep(directory: Path,
     cmd = ["git", "-C", str(directory), "grep", "-nI", "--fixed-strings", "--",
            needle, "--", ".", ":(exclude)TODO.md"]
     try:
-        done = subprocess.run(cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+        # errors="replace": a sibling repo holding one non-UTF-8 file must not
+        # crash the pack — `docs: error` is an answer, a traceback is not
+        done = subprocess.run(cmd, capture_output=True, text=True,
+                              errors="replace", timeout=_GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, f"git grep failed: {exc}"
     if done.returncode not in (0, 1):  # 1 = no match, a legitimate answer
@@ -443,10 +446,17 @@ def read_docs(directory: Path | None,
     if error is not None:
         return ({"named": resolved, "mentions": []}, Source("docs", "error", error))
     ref = item_ref_re(item["id"])
+    sized: dict[str, int] = {}
     for hit in hits:
-        hit["doc"] = (is_doc_mention(hit["path"])
-                      and ref.search(hit.pop("full", "")) is not None)
-        hit.pop("full", None)
+        path, full = hit["path"], hit.pop("full", "")
+        in_doc = is_doc_mention(path)
+        if in_doc and path not in sized:
+            file = directory / path
+            sized[path] = file.stat().st_size if file.is_file() else 0
+        # the same floor a NAMED doc answers to: a stub holding one `@id:` line
+        # is a placeholder, not a requirement (ревью PR #125, круг 5)
+        hit["doc"] = (in_doc and sized.get(path, 0) >= _DOC_SUBSTANTIAL
+                      and ref.search(full) is not None)
     # classify first, then cut for display, and keep every reference: the cut is
     # about what is READABLE, never about what was found
     refs = [h for h in hits if h["doc"]]
@@ -555,27 +565,48 @@ def match_origin_issue(issues: list[dict[str, Any]],
     import inbox  # local: only this path needs it, and it shells out to gh
 
     repo = (item.get("repo") or "").lower()
+    found: list[dict[str, Any]] = []
     for issue in issues:
         issue_repo = ((issue.get("repository") or {}).get("name") or "").lower()
         if not repo or issue_repo != repo:
             continue  # another repo's request; see the docstring
         slug = inbox.parse_field(issue.get("body") or "", "slug")
-        if slug and slug_re(slug).search(line):
-            return {
+        if slug and slug in line:  # inbox.is_accepted's rule, not a second one
+            found.append({
                 "repo": (issue.get("repository") or {}).get("name"),
                 "number": issue.get("number"),
                 "title": issue.get("title"),
                 "slug": slug,
                 "body": issue.get("body"),
-            }
-    return None
+                "exact": slug_re(slug).search(line) is not None,
+            })
+    if not found:
+        return None
+    # Several open requests can pair with one line. Which one states the
+    # requirement is then unknown, and picking by the order `gh` happened to
+    # return them is a coin toss printed as a fact (ревью PR #125, круг 5).
+    first = found[0]
+    first["rival_issues"] = [f["number"] for f in found[1:]]
+    return first
 
 
 def slug_re(slug: str) -> re.Pattern[str]:
-    """The slug as a token. `inbox.is_accepted` matches it as a bare substring and
-    documents the weakness (`benchmark-2` also matches `benchmark-20`); there it
-    is a label in a report, here it is the requirement body handed to an executor,
-    so the same slack costs more (ревью PR #125, круг 4)."""
+    """The slug as a token, for GRADING only — never for deciding the pair.
+
+    Acceptance is one derived fact (ADR-ECO-006 D9), and `inbox.is_accepted` owns
+    the test: a substring over the item's raw text, weaker than it reads
+    (`benchmark-2` also matches `benchmark-20`) and deliberately so — its
+    docstring says tightening is the package's call and "a private stricter rule
+    here would be exactly the divergence that ADR removes". Round 4 introduced
+    exactly that rule, so `make inbox` said "принят" where this said "нет issue"
+    about the same pair (ревью PR #125, круг 5).
+
+    So the pair is now found by the shared rule and reported the same way; this
+    pattern only marks whether the match was a whole token. A prefix collision
+    still shows up in the pack as context — it just cannot become the written
+    requirement an executor is handed. Tightening the shared rule belongs in the
+    package: `TODO.md @id:inbox-slug-token-match`.
+    """
     return re.compile(rf"(?<![a-z0-9._-]){re.escape(slug)}{_ID_TAIL}")
 
 
@@ -625,7 +656,10 @@ def grade(sources: list[Source], body: dict[str, Any],
     has_doc = (any((d.get("bytes") or 0) >= _DOC_SUBSTANTIAL
                    for d in docs.get("named", []) if d.get("exists"))
                or any(m.get("doc") for m in docs.get("mentions", [])))
-    has_issue = len((origin or {}).get("body") or "") >= _ISSUE_SUBSTANTIAL
+    origin = origin or {}
+    has_issue = (len(origin.get("body") or "") >= _ISSUE_SUBSTANTIAL
+                 and origin.get("exact", True)
+                 and not origin.get("rival_issues"))
     has_body = len(body.get("text") or "") >= _BODY_SUBSTANTIAL
     unknowns = sorted(s for s, state in states.items()
                       if state in ("not_queried", "error"))
@@ -772,6 +806,15 @@ def render(pack: dict[str, Any]) -> str:
         add("")
         add(f"## Origin issue — {origin['repo']}#{origin['number']} "
             f"(slug: `{origin['slug']}`)")
+        if not origin.get("exact", True):
+            add("")
+            add(f"⚠ слаг совпал подстрокой, не токеном (как в `inbox`), поэтому "
+                f"требованием не считается — контекст")
+        if origin.get("rival_issues"):
+            others = ", ".join(f"#{n}" for n in origin["rival_issues"])
+            add("")
+            add(f"⚠ с этой строкой пары также образуют {others} — какой из них "
+                f"ставит задачу, неизвестно; требованием не считается")
         add("")
         add(origin["title"] or "")
         if origin["body"]:

@@ -350,6 +350,9 @@ def test_docs_marks_only_canonical_references_in_doc_paths(tmp_path, monkeypatch
         {"path": "todo_context.py", "line": "3", "text": "…",
          "full": 'print("@id:my-item")'},
     ]
+    for rel in ("docs/plans/a.md", "docs/plans/b.md"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("требование. " * 30, encoding="utf-8")
     monkeypatch.setattr(tc, "git_grep", lambda directory, needle: (hits, None))
     item = {"id": "my-item", "source_line": "", "section": ""}
     docs, source = tc.read_docs(tmp_path, item)
@@ -561,16 +564,26 @@ def test_unreadable_registry_stays_an_error(tmp_path):
     assert epic is None and source.state == "error"
 
 
-def test_origin_issue_slug_is_a_token_not_a_prefix():
-    """`benchmark-2` also matches `benchmark-20`: in `inbox` that is a label in a
-    report, here it would be the requirement body handed to an executor."""
+def test_origin_issue_pair_follows_inbox_and_marks_a_prefix_collision():
+    """The pair is one derived fact (ADR-ECO-006 D9) and `inbox.is_accepted` owns
+    the test, so this must not answer differently — it may only refuse to call a
+    prefix collision a requirement."""
     issues = [{"repository": {"name": "maestro"}, "number": 7, "title": "t",
-               "body": "slug: benchmark-2\n"}]
+               "body": "slug: benchmark-2\n" + "требование. " * 20}]
     item = {"repo": "maestro",
             "source_line": "- [ ] Прогнать benchmark-20 @id:sweep-20"}
-    assert tc.match_origin_issue(issues, item) is None
+    found = tc.match_origin_issue(issues, item)
+    assert found is not None, "пара — общий факт с inbox, здесь её не переопределяют"
+    assert found["exact"] is False
+    verdict = tc.grade(_sources(item="read", origin_issue="read"),
+                       {"text": None}, found, None, None)
+    assert verdict["execute_allowed"] is False, "коллизия по префиксу — не требование"
+
     item["source_line"] = "- [ ] Прогнать benchmark-2 @id:sweep"
-    assert tc.match_origin_issue(issues, item) is not None
+    exact = tc.match_origin_issue(issues, item)
+    assert exact is not None and exact["exact"] is True
+    assert tc.grade(_sources(item="read", origin_issue="read"),
+                    {"text": None}, exact, None, None)["execute_allowed"] is True
 
 
 def test_docs_keeps_every_reference_when_the_output_is_capped(monkeypatch, tmp_path):
@@ -580,7 +593,11 @@ def test_docs_keeps_every_reference_when_the_output_is_capped(monkeypatch, tmp_p
               "full": "my-item"} for i in range(tc._GREP_CAP + 20)]
     ref = {"path": "docs/plans/late.md", "line": "9", "text": "…",
            "full": "ждёт @id:my-item"}
-    monkeypatch.setattr(tc, "git_grep", lambda directory, needle: (noise + [ref], None))
+    (tmp_path / "docs" / "plans").mkdir(parents=True)
+    (tmp_path / "docs" / "plans" / "late.md").write_text(
+        "требование. " * 30, encoding="utf-8")
+    monkeypatch.setattr(tc, "git_grep",
+                        lambda directory, needle: (noise + [ref], None))
     docs, source = tc.read_docs(tmp_path, {"id": "my-item", "source_line": "",
                                            "section": ""})
     assert len(docs["mentions"]) == tc._GREP_CAP
@@ -589,3 +606,58 @@ def test_docs_keeps_every_reference_when_the_output_is_capped(monkeypatch, tmp_p
     assert source.detail and "не показаны" in source.detail
     verdict = tc.grade([source], {"text": None}, None, docs, None)
     assert verdict["execute_allowed"] is True
+
+
+# ─────────── регрессии пятого круга ревью PR #125 ───────────
+
+
+def test_several_matching_issues_are_not_silently_resolved_by_gh_order():
+    """Which of two open requests states the requirement is unknown; picking by
+    the order `gh` returned them is a coin toss printed as a fact."""
+    body = "требование. " * 20
+    issues = [
+        {"repository": {"name": "maestro"}, "number": 7, "title": "a",
+         "body": "slug: alpha\n" + body},
+        {"repository": {"name": "maestro"}, "number": 9, "title": "b",
+         "body": "slug: beta\n" + body},
+    ]
+    item = {"repo": "maestro", "source_line": "- [ ] alpha и beta @id:x"}
+    found = tc.match_origin_issue(issues, item)
+    assert found["rival_issues"] == [9]
+    verdict = tc.grade(_sources(item="read", origin_issue="read"),
+                       {"text": None}, found, None, None)
+    assert verdict["execute_allowed"] is False
+
+
+def test_a_stub_doc_mentioning_the_item_is_not_a_requirement(tmp_path, monkeypatch):
+    """A doc holding one `@id:` line is a placeholder — the same floor a NAMED
+    doc already answered to."""
+    stub = tmp_path / "docs" / "plans"
+    stub.mkdir(parents=True)
+    (stub / "stub.md").write_text("@id:my-item\n", encoding="utf-8")
+    (stub / "real.md").write_text("@id:my-item\n" + "требование. " * 30,
+                                  encoding="utf-8")
+    hits = [{"path": "docs/plans/stub.md", "line": "1", "text": "…",
+             "full": "@id:my-item"}]
+    monkeypatch.setattr(tc, "git_grep", lambda directory, needle: (hits, None))
+    docs, _ = tc.read_docs(tmp_path, {"id": "my-item", "source_line": "",
+                                      "section": ""})
+    assert docs["mentions"][0]["doc"] is False
+
+    hits[0]["path"] = "docs/plans/real.md"
+    hits[0]["full"] = "@id:my-item"
+    docs, _ = tc.read_docs(tmp_path, {"id": "my-item", "source_line": "",
+                                      "section": ""})
+    assert docs["mentions"][0]["doc"] is True
+
+
+def test_git_grep_survives_non_utf8_in_a_sibling_repo(tmp_path):
+    """One non-UTF-8 file in a neighbour must give `docs: error` at worst, never
+    a UnicodeDecodeError out of the pack."""
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "bad.txt").write_bytes(b"my-item \xff\xfe binary\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    hits, error = tc.git_grep(tmp_path, "my-item")
+    assert error is None, f"грep не должен падать на бинарной строке: {error}"
+    assert isinstance(hits, list)
