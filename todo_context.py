@@ -72,6 +72,12 @@ _DOC_PATH_RE = re.compile(
 #: requirement, and must not be able to raise the grade (ревью PR #125, круг 1).
 _DOC_MENTION_RE = re.compile(r"(?:^|/)(?:docs|spec|specs|plans|workstreams)/")
 
+#: The tail of an id: the grammar is `[a-z0-9][a-z0-9._-]{0,63}` (ADR-ECO-005
+#: PF-2B), so a match followed by one of these chars is a LONGER id, not this one.
+#: A dot is the exception — it is both a legal id char and the end of a sentence,
+#: so it only continues the id when something id-shaped follows it.
+_ID_TAIL = r"(?![a-z0-9_-])(?!\.[a-z0-9])"
+
 #: The start of any checklist item, at any indent — the boundary a continuation
 #: block ends at. Same shape as the package's own item regex; it is used here only
 #: to find where one item's lines STOP, never to decide what an item means.
@@ -128,7 +134,8 @@ def default_registry(root: Path) -> Path:
     return root / "ai-orchestrators-workspace" / "epics.toml"
 
 
-def build_inputs(root: Path, index: Any) -> tuple[list[Any], dict[str, Path]]:
+def build_inputs(root: Path,
+                 index: Any) -> tuple[list[Any], dict[str, Path], list[str]]:
     """One `RepoInput` per manifest repo, frozen from disk.
 
     Deliberately a thin loop over the package's `checkout_map`: locating and
@@ -140,22 +147,25 @@ def build_inputs(root: Path, index: Any) -> tuple[list[Any], dict[str, Path]]:
     on_disk = _pf.checkout_map(root, index)
     inputs: list[Any] = []
     checkouts: dict[str, Path] = {}
+    unread: list[str] = []
     for repo in sorted(set(index.canonical_keys) | set(on_disk)):
         directory = on_disk.get(repo)
         if directory is None:
             inputs.append(_pf.RepoInput(repo, available=False))
+            unread.append(repo)
             continue
         checkouts[repo] = directory
         todo = directory / "TODO.md"
         text = todo.read_text(encoding="utf-8", errors="ignore") \
             if todo.is_file() else None
         inputs.append(_pf.RepoInput(repo, todo_text=text, available=True))
-    return inputs, checkouts
+    return inputs, checkouts, unread
 
 
-def fleet_snapshot(root: Path,
-                   manifest_path: Path) -> tuple[dict[str, Any], dict[str, Path]]:
-    """The canonical cross-repo plan snapshot plus where each repo lives."""
+def fleet_snapshot(
+    root: Path, manifest_path: Path
+) -> tuple[dict[str, Any], dict[str, Path], list[str]]:
+    """The snapshot, where each repo lives, and which repos could not be read."""
     if _pf is None:  # pragma: no cover - environment guard
         raise ContextError(
             "plan_fields is not importable — run through the pinned env:\n"
@@ -163,9 +173,14 @@ def fleet_snapshot(root: Path,
         )
     if not manifest_path.is_file():
         raise ContextError(f"no workspace manifest at {manifest_path}")
-    index = _pf.manifest_index(manifest_path)
-    inputs, checkouts = build_inputs(root, index)
-    return _pf.parse_fleet(inputs, index), checkouts
+    try:
+        index = _pf.manifest_index(manifest_path)
+    except _pf.AmbiguousIdentityError as exc:
+        # Same answer `check-plan-fields.py` gives: a manifest that names one
+        # checkout twice has no correct answer, and a traceback is not one.
+        raise ContextError(f"cannot resolve repo identity: {exc}") from exc
+    inputs, checkouts, unread = build_inputs(root, index)
+    return _pf.parse_fleet(inputs, index), checkouts, unread
 
 
 # ─────────────────────────── the sources ───────────────────────────
@@ -264,11 +279,19 @@ def read_epic(registry_path: Path,
     return block, Source("epic", "read", detail)
 
 
-def read_graph(snapshot: dict[str, Any], node_id: str) -> tuple[dict[str, Any], Source]:
+def read_graph(snapshot: dict[str, Any], node_id: str,
+               unread: list[str] | None = None) -> tuple[dict[str, Any], Source]:
     """What this item waits on, what waits on it, and what is wrong with that.
 
     Edge semantics, staleness and the diagnostics all come from the package
     (`parse_fleet` + `check_fleet`); nothing here re-decides them.
+
+    The REVERSE side of the graph is host-dependent: a repo of the manifest that
+    is not cloned here is skipped whole by `parse_fleet`, so its `@blocked_by` on
+    this item produces neither an edge nor a diagnostic. `unread` names those
+    repos, and the render prints them beside the edges — "nobody waits on this"
+    and "half the fleet was never read" must not look alike (ревью PR #125,
+    круг 2), which is the same rule the module keeps for every other source.
     """
     by_id = {n["node_id"]: n for n in snapshot["nodes"]}
     findings = list(snapshot["diagnostics"]) + _pf.check_fleet(snapshot)
@@ -294,11 +317,15 @@ def read_graph(snapshot: dict[str, Any], node_id: str) -> tuple[dict[str, Any], 
     block = {
         "blocked_by": blocked_by,
         "blocks": blocks,
+        "unread_repos": sorted(unread or []),
         "unresolved_refs": [u for u in unresolved if u],
         "diagnostics": [{"code": d["code"], "severity": d["severity"],
                          "message": d["message"]} for d in mine],
     }
-    return block, Source("graph", "read")
+    detail = None if not unread else (
+        f"{len(unread)} репо флота не склонированы здесь — обратная сторона "
+        f"(кто ждёт этот пункт) неполна: {', '.join(sorted(unread))}")
+    return block, Source("graph", "read", detail)
 
 
 def named_doc_paths(item: dict[str, Any]) -> list[str]:
@@ -331,13 +358,32 @@ def git_grep(directory: Path,
     for raw in done.stdout.splitlines()[:_GREP_CAP]:
         path, _, rest = raw.partition(":")
         line_no, _, text = rest.partition(":")
-        hits.append({"path": path, "line": line_no, "text": text.strip()[:300]})
+        # `full` is classified, `text` is displayed: a canonical reference past
+        # the display cap must still count (ревью PR #125, круг 2)
+        hits.append({"path": path, "line": line_no,
+                     "text": text.strip()[:300], "full": text})
     return hits, None
 
 
 def is_doc_mention(path: str) -> bool:
     """Can this path HOLD a requirement? Markdown under docs/spec/plan dirs."""
     return path.endswith(".md") and _DOC_MENTION_RE.search(path) is not None
+
+
+def item_ref_re(item_id: str) -> re.Pattern[str]:
+    """Matches a line that REFERS to the item, not one that merely contains its id.
+
+    `git grep --fixed-strings` matches a bare substring, so the id of an item
+    also turns up inside a longer id, a component name, a branch name and a file
+    name. A reference is MARKED, in one of the three ways this fleet marks one:
+    the `@id:` tag, the `todo://<repo>/<id>` URI, or a code span holding exactly
+    the id. A bare word in prose is not a reference — that is how a component, a
+    branch and a file name are spelled too — but a code span is: dropping
+    "## P1 — сократить промпт (`review-kit-prompt-diet`)", a real requirement in
+    a roadmap, was this fix overshooting on the first try (ревью PR #125, круг 2).
+    """
+    esc = re.escape(item_id)
+    return re.compile(rf"(?:(?:@id:|todo://[\w.-]+/){esc}{_ID_TAIL}|`{esc}`)")
 
 
 def read_docs(directory: Path | None,
@@ -348,10 +394,17 @@ def read_docs(directory: Path | None,
     `git grep` matches a bare substring, so the id also turns up in branch names,
     CLI output literals and tests. Those are worth PRINTING as context and must
     never count as a written requirement — `grade` reads the mark, not the state.
+
+    `doc` means BOTH: the file can hold a requirement (markdown under a
+    docs/spec/plan directory) AND the line points at this item by one of the two
+    canonical forms. Either half alone was demonstrably not enough.
     """
     named = named_doc_paths(item)
     if directory is None:
-        return ({"named": named, "mentions": []},
+        # `named` keeps the shape of the success path: an error state must
+        # degrade honestly, not blow up grade/render (ревью PR #125, круг 2)
+        unresolved = [{"path": rel, "exists": False, "bytes": None} for rel in named]
+        return ({"named": unresolved, "mentions": []},
                 Source("docs", "error", "repo is not checked out here"))
     resolved = []
     for rel in named:
@@ -361,8 +414,11 @@ def read_docs(directory: Path | None,
     hits, error = git_grep(directory, item["id"])
     if error is not None:
         return ({"named": resolved, "mentions": []}, Source("docs", "error", error))
+    ref = item_ref_re(item["id"])
     for hit in hits:
-        hit["doc"] = is_doc_mention(hit["path"])
+        hit["doc"] = (is_doc_mention(hit["path"])
+                      and ref.search(hit.pop("full", "")) is not None)
+        hit.pop("full", None)
     block = {"named": resolved, "mentions": hits}
     have = any(d["exists"] for d in resolved) or bool(hits)
     return block, Source("docs", "read" if have else "absent",
@@ -540,13 +596,13 @@ def build_pack(root: Path, manifest_path: Path, registry_path: Path, repo: str,
                item_id: str, owner: str | None = None) -> dict[str, Any]:
     """Assemble the whole context pack for one item."""
     node_id = f"todo://{repo}/{item_id}"
-    snapshot, checkouts = fleet_snapshot(root, manifest_path)
+    snapshot, checkouts, unread = fleet_snapshot(root, manifest_path)
     item = read_item(snapshot, node_id, checkouts)
     directory = checkouts.get(item["repo"])
     sources = [Source("item", "read")]
     epic, src = read_epic(registry_path, item["epic"]); sources.append(src)
     body, src = read_body(directory, item); sources.append(src)
-    graph, src = read_graph(snapshot, node_id); sources.append(src)
+    graph, src = read_graph(snapshot, node_id, unread); sources.append(src)
     docs, src = read_docs(directory, item); sources.append(src)
     rules, src = read_rules(directory); sources.append(src)
     origin, src = read_origin_issue(item, owner); sources.append(src)
@@ -618,6 +674,9 @@ def render(pack: dict[str, Any]) -> str:
     if not any((graph["blocked_by"], graph["blocks"],
                 graph["unresolved_refs"], graph["diagnostics"])):
         add("нет рёбер и диагностик")
+    if graph.get("unread_repos"):
+        add(f"- ⚠ не склонированы здесь, их ожидания не видны: "
+            f"{', '.join(graph['unread_repos'])}")
     for edge in graph["blocked_by"]:
         add(f"- ждёт: `{edge['node_id']}` [{edge['status']}] {edge['title'] or ''}")
     for edge in graph["blocks"]:
@@ -634,10 +693,14 @@ def render(pack: dict[str, Any]) -> str:
         mark = "" if doc["exists"] else " — ФАЙЛ НЕ НАЙДЕН"
         add(f"- названо в пункте/секции: `{doc['path']}`{mark}")
     grouped: dict[str, int] = {}
+    refs: set[str] = set()
     for hit in docs["mentions"]:
         grouped[hit["path"]] = grouped.get(hit["path"], 0) + 1
+        if hit.get("doc"):
+            refs.add(hit["path"])
     for path, count in sorted(grouped.items()):
-        kind = "упоминает `@id`" if is_doc_mention(path) else "упоминание вне доков"
+        # the label must be the flag the grade reads, not a second opinion
+        kind = "ссылается на пункт" if path in refs else "упоминание (не ссылка)"
         add(f"- {kind}: `{path}` ({count})")
     if not docs["named"] and not grouped:
         add("ничего не найдено")

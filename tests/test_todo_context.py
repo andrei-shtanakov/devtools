@@ -82,10 +82,12 @@ def _sources(**states) -> list[tc.Source]:
     return [tc.Source(name, state) for name, state in states.items()]
 
 
-def _docs(*paths: str) -> dict:
-    """A docs block as `read_docs` builds it — mentions marked by path."""
+def _docs(*paths: str, ref: bool = True) -> dict:
+    """A docs block as `read_docs` builds it: `doc` means the path can hold a
+    requirement AND the line refers to the item canonically."""
     return {"named": [], "mentions": [{"path": p, "line": "1", "text": "",
-                                       "doc": tc.is_doc_mention(p)} for p in paths]}
+                                       "doc": tc.is_doc_mention(p) and ref}
+                                      for p in paths]}
 
 
 def test_grade_rich_on_substantial_body():
@@ -290,3 +292,96 @@ def test_rules_cap_is_measured_in_bytes(tmp_path):
     assert rules[0]["truncated"] is True
     assert len(rules[0]["text"].encode("utf-8")) <= tc._RULES_CAP
     assert "\ufffd" not in rules[0]["text"], "a split codepoint must not leak"
+
+
+# ─────────── регрессии второго круга ревью PR #125 ───────────
+
+
+def test_item_reference_is_a_reference_not_a_substring():
+    """`git grep --fixed-strings` matches inside a longer id, a component name,
+    a branch name and a file name; only `@id:` and `todo://` point AT an item."""
+    ref = tc.item_ref_re("behaviour-runner")
+    assert ref.search("- [ ] TODO: `@id:behaviour-runner` → `[x]`")
+    assert ref.search("ждёт todo://devtools/behaviour-runner")
+    assert not ref.search("git switch -c feat/behaviour-runner-core"), "branch"
+    assert not ref.search("Charter: Наблюдаемость прогонов behaviour-runner"), \
+        "имя компонента"
+    assert not ref.search("@id:behaviour-runner-core"), "id длиннее — другой пункт"
+    assert not ref.search("docs/plans/2026-08-30-behaviour-runner-core.md"), \
+        "имя файла"
+
+
+def test_item_reference_reads_a_code_span_as_a_reference():
+    """The fleet also points at an item by spelling its id in a code span:
+    `## P1 — сократить промпт (`review-kit-prompt-diet`)` is a requirement, and
+    the first cut of this rule dropped it."""
+    ref = tc.item_ref_re("review-kit-prompt-diet")
+    assert ref.search("## P1 — сократить промпт (`review-kit-prompt-diet`)")
+    assert not ref.search("сократить промпт review-kit-prompt-diet"), "проза"
+    assert not ref.search("`review-kit-prompt-diet-v2`"), "код-спан другого id"
+
+
+def test_item_reference_reads_a_dot_as_punctuation_not_as_the_id():
+    """A dot is legal inside an id AND ends a sentence: it continues the id only
+    when something id-shaped follows."""
+    ref = tc.item_ref_re("rd-007")
+    assert ref.search("см. @id:rd-007."), "точка в конце фразы — не часть id"
+    assert not ref.search("@id:rd-0071")
+    assert not ref.search("@id:rd-007.2"), "точка перед id-символом продолжает id"
+
+
+def test_docs_marks_only_canonical_references_in_doc_paths(tmp_path, monkeypatch):
+    """The whole chain: a doc that merely contains the id must not grade."""
+    hits = [
+        {"path": "docs/plans/a.md", "line": "1", "text": "…",
+         "full": "  ждёт @id:my-item — план"},
+        {"path": "docs/plans/b.md", "line": "9", "text": "…",
+         "full": "git switch -c feat/my-item"},
+        {"path": "todo_context.py", "line": "3", "text": "…",
+         "full": 'print("@id:my-item")'},
+    ]
+    monkeypatch.setattr(tc, "git_grep", lambda directory, needle: (hits, None))
+    item = {"id": "my-item", "source_line": "", "section": ""}
+    docs, source = tc.read_docs(tmp_path, item)
+    assert source.state == "read"
+    marked = {h["path"]: h["doc"] for h in docs["mentions"]}
+    assert marked == {"docs/plans/a.md": True, "docs/plans/b.md": False,
+                      "todo_context.py": False}
+    assert all("full" not in h for h in docs["mentions"]), \
+        "рабочее поле не течёт в pack"
+
+
+def test_docs_error_branch_keeps_the_shape_grade_and_render_expect():
+    """`named` was a list of strings in the error branch — grade raised
+    AttributeError instead of degrading honestly."""
+    item = {"id": "x", "section": "Ops (docs/plans/x.md)", "source_line": ""}
+    docs, source = tc.read_docs(None, item)
+    assert source.state == "error"
+    assert docs["named"] == [
+        {"path": "docs/plans/x.md", "exists": False, "bytes": None}]
+    verdict = tc.grade(_sources(item="read", docs="error"), {"text": None}, None, docs)
+    assert verdict["execute_allowed"] is False
+
+
+def test_graph_says_when_the_reverse_side_could_not_be_read():
+    """A repo that is not cloned here is skipped whole by `parse_fleet`, so its
+    `@blocked_by` on this item is neither an edge nor a diagnostic."""
+    snapshot = {"nodes": [{"node_id": "todo://devtools/x", "id": "x",
+                           "repo": "devtools", "title": "t",
+                           "declared_status": "open"}],
+                "edges": [], "references": [], "diagnostics": []}
+    graph, source = tc.read_graph(snapshot, "todo://devtools/x", ["maestro", "arbiter"])
+    assert graph["unread_repos"] == ["arbiter", "maestro"]
+    assert source.state == "read"
+    assert source.detail and "arbiter, maestro" in source.detail
+    assert "нет рёбер" not in (source.detail or "")
+
+
+def test_graph_stays_silent_when_the_whole_fleet_was_read():
+    snapshot = {"nodes": [{"node_id": "todo://devtools/x", "id": "x",
+                           "repo": "devtools", "title": "t",
+                           "declared_status": "open"}],
+                "edges": [], "references": [], "diagnostics": []}
+    graph, source = tc.read_graph(snapshot, "todo://devtools/x", [])
+    assert graph["unread_repos"] == []
+    assert source.detail is None, "полный флот не нуждается в оговорке"
