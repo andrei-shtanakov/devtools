@@ -252,8 +252,8 @@ def test_grade_executes_on_a_named_doc_that_exists():
                  origin_issue="not_queried"),
         {"text": None},
         None,
-        {"named": [{"path": "docs/plans/x.md", "exists": True, "bytes": 4000}],
-         "mentions": []},
+        {"named": [{"path": "docs/plans/x.md", "exists": True, "bytes": 4000,
+                    "named_in": "line"}], "mentions": []},
     )
     assert verdict["execute_allowed"] is True
 
@@ -371,7 +371,8 @@ def test_docs_error_branch_keeps_the_shape_grade_and_render_expect():
     docs, source = tc.read_docs(None, item)
     assert source.state == "error"
     assert docs["named"] == [
-        {"path": "docs/plans/x.md", "exists": False, "bytes": None}]
+        {"path": "docs/plans/x.md", "exists": False, "bytes": None,
+         "named_in": "section"}]
     verdict = tc.grade(_sources(item="read", docs="error"), {"text": None}, None, docs)
     assert verdict["execute_allowed"] is False
 
@@ -661,3 +662,46 @@ def test_git_grep_survives_non_utf8_in_a_sibling_repo(tmp_path):
     hits, error = tc.git_grep(tmp_path, "my-item")
     assert error is None, f"грep не должен падать на бинарной строке: {error}"
     assert isinstance(hits, list)
+
+
+# ─────────── регрессии шестого круга ревью PR #125 ───────────
+
+
+def test_named_doc_sources_say_where_the_path_was_written():
+    item = {"source_line": "- [ ] сделать по docs/plans/own.md @id:x",
+            "section": "Waits (спека docs/specs/section.md)"}
+    assert tc.named_doc_sources(item) == [("docs/plans/own.md", "line"),
+                                          ("docs/specs/section.md", "section")]
+    assert tc.named_doc_paths(item) == ["docs/plans/own.md",
+                                        "docs/specs/section.md"]
+
+
+def test_a_section_doc_does_not_grant_execute_to_every_item_under_it():
+    """A doc named in the section heading is about the SECTION: it was handing a
+    written requirement to every item below, none of which named it."""
+    section = {"named": [{"path": "docs/specs/s.md", "exists": True,
+                          "bytes": 9000, "named_in": "section"}], "mentions": []}
+    own = {"named": [{"path": "docs/plans/own.md", "exists": True,
+                      "bytes": 9000, "named_in": "line"}], "mentions": []}
+    sources = _sources(item="read", body="absent", epic="read", docs="read",
+                       origin_issue="not_queried")
+    assert tc.grade(sources, {"text": None}, None, section,
+                    _epic())["execute_allowed"] is False
+    assert tc.grade(sources, {"text": None}, None, own,
+                    _epic())["execute_allowed"] is True
+
+
+def test_the_cap_note_does_not_claim_every_reference_is_shown(monkeypatch, tmp_path):
+    """With more references than the display cap, "все ссылки показаны" was false."""
+    (tmp_path / "docs" / "plans").mkdir(parents=True)
+    hits = []
+    for i in range(tc._GREP_CAP + 5):
+        rel = f"docs/plans/d{i}.md"
+        (tmp_path / rel).write_text("требование. " * 30, encoding="utf-8")
+        hits.append({"path": rel, "line": "1", "text": "…", "full": "@id:my-item"})
+    monkeypatch.setattr(tc, "git_grep", lambda directory, needle: (hits, None))
+    docs, source = tc.read_docs(tmp_path, {"id": "my-item", "source_line": "",
+                                           "section": ""})
+    assert docs["hidden_references"] == 5
+    assert "ссылок на пункт" in (source.detail or "")
+    assert "показаны все" not in (source.detail or "")

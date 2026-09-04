@@ -358,12 +358,26 @@ def read_graph(snapshot: dict[str, Any], node_id: str,
 
 def named_doc_paths(item: dict[str, Any]) -> list[str]:
     """Doc paths written into the item line or its section heading."""
-    haystack = " ".join(x for x in (item.get("source_line"), item.get("section")) if x)
-    seen: list[str] = []
-    for match in _DOC_PATH_RE.finditer(haystack):
-        path = match.group(1)
-        if path not in seen:
-            seen.append(path)
+    return [path for path, _ in named_doc_sources(item)]
+
+
+def named_doc_sources(item: dict[str, Any]) -> list[tuple[str, str]]:
+    """Each named doc with WHERE it was named: `line` or `section`.
+
+    A doc named in the item's own line is about this item. A doc named in the
+    section heading is about the section — it was granting every item under that
+    heading a written requirement none of them individually named (ревью PR #125,
+    круг 6). It stays in the pack as context; only the item-level one grades.
+    """
+    seen: list[tuple[str, str]] = []
+    known: set[str] = set()
+    for where, text in (("line", item.get("source_line")),
+                        ("section", item.get("section"))):
+        for match in _DOC_PATH_RE.finditer(text or ""):
+            path = match.group(1)
+            if path not in known:
+                known.add(path)
+                seen.append((path, where))
     return seen
 
 
@@ -430,17 +444,18 @@ def read_docs(directory: Path | None,
     docs/spec/plan directory) AND the line points at this item by one of the two
     canonical forms. Either half alone was demonstrably not enough.
     """
-    named = named_doc_paths(item)
+    named = named_doc_sources(item)
     if directory is None:
         # `named` keeps the shape of the success path: an error state must
         # degrade honestly, not blow up grade/render (ревью PR #125, круг 2)
-        unresolved = [{"path": rel, "exists": False, "bytes": None} for rel in named]
+        unresolved = [{"path": rel, "exists": False, "bytes": None, "named_in": where}
+                      for rel, where in named]
         return ({"named": unresolved, "mentions": []},
                 Source("docs", "error", "repo is not checked out here"))
     resolved = []
-    for rel in named:
+    for rel, where in named:
         path = directory / rel
-        resolved.append({"path": rel, "exists": path.is_file(),
+        resolved.append({"path": rel, "exists": path.is_file(), "named_in": where,
                          "bytes": path.stat().st_size if path.is_file() else None})
     hits, error = git_grep(directory, item["id"])
     if error is not None:
@@ -463,14 +478,18 @@ def read_docs(directory: Path | None,
     rest = [h for h in hits if not h["doc"]]
     shown = (refs + rest)[:_GREP_CAP]
     cut = len(hits) - len(shown)
+    cut_refs = max(0, len(refs) - _GREP_CAP)
     hard = len(hits) >= _GREP_HARD_CAP
     block = {"named": resolved, "mentions": shown, "hidden_mentions": cut,
-             "grep_capped": hard}
+             "hidden_references": cut_refs, "grep_capped": hard}
     have = any(d["exists"] for d in resolved) or bool(hits)
     detail = None if have else f"no file names @id:{item['id']}"
     if hard:
         detail = (f"выдача git grep обрезана на {_GREP_HARD_CAP} строках — "
                   f"часть упоминаний не классифицирована")
+    elif cut_refs:
+        detail = (f"{cut} упоминаний не показаны, среди них {cut_refs} ссылок "
+                  f"на пункт — печать обрезана на {_GREP_CAP}")
     elif cut:
         detail = f"{cut} упоминаний не показаны (ссылки на пункт показаны все)"
     return block, Source("docs", "read" if have else "absent", detail)
@@ -654,7 +673,8 @@ def grade(sources: list[Source], body: dict[str, Any],
     # same presence-is-not-evidence rule, applied before it was reported
     has_epic_goal = bool((epic or {}).get("goal") or (epic or {}).get("notes"))
     has_doc = (any((d.get("bytes") or 0) >= _DOC_SUBSTANTIAL
-                   for d in docs.get("named", []) if d.get("exists"))
+                   for d in docs.get("named", [])
+                   if d.get("exists") and d.get("named_in", "line") == "line")
                or any(m.get("doc") for m in docs.get("mentions", [])))
     origin = origin or {}
     has_issue = (len(origin.get("body") or "") >= _ISSUE_SUBSTANTIAL
@@ -784,7 +804,10 @@ def render(pack: dict[str, Any]) -> str:
     add("## Docs")
     for doc in docs["named"]:
         mark = "" if doc["exists"] else " — ФАЙЛ НЕ НАЙДЕН"
-        add(f"- названо в пункте/секции: `{doc['path']}`{mark}")
+        where = ("названо в строке пункта"
+                 if doc.get("named_in", "line") == "line"
+                 else "названо в заголовке секции (контекст секции, не пункта)")
+        add(f"- {where}: `{doc['path']}`{mark}")
     grouped: dict[str, int] = {}
     refs: set[str] = set()
     for hit in docs["mentions"]:
@@ -798,8 +821,9 @@ def render(pack: dict[str, Any]) -> str:
     if not docs["named"] and not grouped:
         add("ничего не найдено")
     if docs.get("hidden_mentions"):
-        add(f"- ещё {docs['hidden_mentions']} упоминаний не показаны "
-            f"(все ссылки на пункт — выше)")
+        tail = (f", среди них {docs['hidden_references']} ссылок на пункт"
+                if docs.get("hidden_references") else " (все ссылки — выше)")
+        add(f"- ещё {docs['hidden_mentions']} упоминаний не показаны{tail}")
 
     if pack["origin_issue"]:
         origin = pack["origin_issue"]
