@@ -84,11 +84,15 @@ def test_deleted_dependency_uses_body_path_and_basename_on_both_surfaces(tmp_pat
 
 
 def test_deleted_dependency_needs_action_pair_and_ignores_meta_rule(tmp_path):
+    """Мета-пункт глушится МАРКЕРОМ, а не угадыванием по ключевым словам:
+    прежний гард был подогнан под этот тест и настоящий мета-пункт репо не
+    исключал (ревью PR #140, круг 2)."""
     directory = _write(tmp_path, "\n".join([
         "- [ ] Документировать scripts/harness/claude-review @id:mention",
         "      Обычное совместное упоминание пути.",
         "- [ ] Удалить claude-review @id:remove",
-        "- [ ] Проверка правила: пункт не должен опираться на удаляемый путь @id:meta",
+        "- [ ] Проверка правила: пункт не должен опираться на удаляемый путь "
+        "@id:meta [waived]",
         "      Мета-пункт описывает, как строить scripts/harness/claude-review "
         "и удалить его.",
     ]) + "\n")
@@ -910,10 +914,37 @@ def test_pair_count_names_the_repos_it_could_not_read(tmp_path):
 
 
 def test_negation_guard_needs_a_word_boundary():
-    """«в плане», «вполне» кончаются на «не» и глушили находку."""
+    """«в плане», «вполне» кончаются на «не» и глушили находку.
+
+    Негативная ветка сравнивается с ПОЛОЖИТЕЛЬНОЙ на том же входе без «не»:
+    прошлая версия утверждала только «с "не" — нет», и снятие самого гарда
+    оставляло сьют зелёным (ревью PR #140, круг 2)."""
     entity = tc.re.compile(r"(?<![\w.-])scripts/x\.sh(?![\w.-])")
-    assert tc._states_removal("вполне удалить scripts/x.sh пора", entity)
-    assert not tc._states_removal("решено не удалять scripts/x.sh", entity)
+    assert tc._states_intent("вполне удалить scripts/x.sh пора", entity,
+                             tc._REMOVE_RE), "«вполне» — не отрицание"
+    assert tc._states_intent("решено удалять scripts/x.sh", entity,
+                             tc._REMOVE_RE), "контроль: без «не» находка есть"
+    assert not tc._states_intent("решено не удалять scripts/x.sh", entity,
+                                 tc._REMOVE_RE)
+
+
+def test_both_sides_are_judged_by_the_same_locality_rule():
+    """Асимметрия стоила верного ответа по неверной причине: сторона
+    «опирается» проверялась по всему тексту, и живая пара нашлась по
+    «не строится» в полусотне строк от пути (ревью PR #140, круг 2)."""
+    entity = tc.re.compile(r"(?<![\w.-])scripts/x\.sh(?![\w.-])")
+    far = "строится на чём-то другом\n" + "проза\n" * 20 + "трогаем scripts/x.sh"
+    assert not tc._states_intent(far, entity, tc._SUPPORT_RE), "глагол вдалеке"
+    assert tc._states_intent("строится на scripts/x.sh", entity, tc._SUPPORT_RE)
+
+
+def test_removal_verb_covers_the_forms_the_fleet_actually_writes():
+    """`удалён`, `удалим`, `удаляем`, `удаления` — частые формы, которые
+    прежний список пропускал молча."""
+    entity = tc.re.compile(r"(?<![\w.-])scripts/x\.sh(?![\w.-])")
+    for line in ("scripts/x.sh будет удалён", "удалим scripts/x.sh",
+                 "удаляем scripts/x.sh", "после удаления scripts/x.sh"):
+        assert tc._states_intent(line, entity, tc._REMOVE_RE), line
 
 
 def test_waiver_is_read_from_the_item_line_not_its_prose(tmp_path):

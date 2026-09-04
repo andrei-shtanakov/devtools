@@ -130,14 +130,13 @@ _PATH_RE = re.compile(r"(?<![\w.-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+(?<![.,:;
 #: Опора и удаление — намерение, а не просто соседство пути: без глагола любой
 #: пункт, упомянувший файл, стал бы стороной пары.
 _SUPPORT_RE = re.compile(
-    r"\b(?:стро(?:ить|ится)|созда(?:ть|вать)|обобщ(?:ить|ением)"
-    r"|использова(?:ть|нием)|опира(?:ться|ется)|основ(?:ать|ан)"
-    r"|build|create|generaliz(?:e|ing)|use|depend(?:s|ing)?|based)\b",
+    r"\b(?:стро\w*|созда\w*|обобщ\w*|использу\w*|использова\w*|опира\w*"
+    r"|основа\w*|поверх|build\w*|creat\w*|generaliz\w*|use[sd]?|using"
+    r"|depend\w*|based)\b",
     re.I,
 )
 _REMOVE_RE = re.compile(
-    r"\b(?:удал(?:ить|яет|яется|ение)|снес(?:ти|ён)|убра(?:ть|ть)"
-    r"|remove|delete|drop|retire)\w*\b",
+    r"\b(?:удал\w*|снес\w*|убра\w*|remove|delete|drop|retire)\w*\b",
     re.I,
 )
 
@@ -652,20 +651,24 @@ def _cached_item(snapshot: dict[str, Any], node: dict[str, Any],
             "line": node.get("provenance", {}).get("line")}
 
 
-def _meta_rule_text(text: str) -> bool:
-    """Rule-writing examples must not report themselves as plan conflicts."""
-    low = text.lower()
-    return "пункт" in low and any(w in low for w in ("правил", "провер", "критер"))
+def _states_intent(text: str, entity: re.Pattern[str],
+                   verb: re.Pattern[str]) -> bool:
+    """Verb and entity must be ONE local claim, not two unrelated paragraphs.
 
+    Мета-пункт, описывающий САМО правило, глушится не угадыванием по словам, а
+    маркером `[waived]` на его строке: прежний ключевой гард был подогнан под
+    синтетический тест и настоящий мета-пункт репозитория не исключал.
 
-def _states_removal(text: str, entity: re.Pattern[str]) -> bool:
-    """Removal and entity must be one local claim, not two unrelated paragraphs."""
+    Обе стороны судятся одним правилом. Асимметрия стоила дорого: сторона
+    «опирается» проверялась по всему тексту пункта без локальности и без
+    гарда отрицания, и живая пара нашлась по «не строится» в полусотне строк
+    от пути — верный ответ по неверной причине (ревью PR #140, круг 2).
+    """
     for line in text.splitlines():
-        removal = _REMOVE_RE.search(line)
-        if removal and entity.search(line):
-            prefix = line[max(0, removal.start() - 12):removal.start()].lower()
-            # Граница обязательна: «в плане», «вполне» кончаются на «не» и
-            # глушили бы находку (ревью PR #140).
+        hit = verb.search(line)
+        if hit and entity.search(line):
+            prefix = line[max(0, hit.start() - 12):hit.start()].lower()
+            # Граница обязательна: «в плане», «вполне» кончаются на «не».
             if not re.search(r"(?:^|[^\w-])(?:не|без)\s*$", prefix):
                 return True
     return False
@@ -703,9 +706,7 @@ def deleted_dependency_report(snapshot: dict[str, Any],
         # `[waived]` ищется в СТРОКЕ пункта, а не в теле: маркеры живут на
         # строке (как `[x]`), а тело, процитировавшее «[waived]» в прозе,
         # глушило бы находку упоминанием (ревью PR #140).
-        if (not _SUPPORT_RE.search(support["text"])
-                or _meta_rule_text(support["line"])
-                or "[waived]" in support["line"].lower()):
+        if "[waived]" in support["line"].lower():
             continue
         # Якорь берётся из СТРОКИ И ТЕЛА: критерий пункта уточнён замером
         # (PR #132, круг 2) — стороны живут в разных местах пункта, и тело
@@ -718,12 +719,18 @@ def deleted_dependency_report(snapshot: dict[str, Any],
             if len(basename) >= 4:
                 names.append(basename)
             alternatives = "|".join(re.escape(name) for name in names)
-            entity = re.compile(rf"(?<![\w.-])(?:{alternatives})(?![\w.-])")
+            # Хвост как у `_ID_TAIL`: точка — и часть имени, и конец
+            # предложения, поэтому она продолжает сущность только когда за ней
+            # идёт что-то именное. Иначе путь в конце фразы не матчился вовсе
+            # (тест агента был прав, код — нет; ревью PR #140, круг 2).
+            entity = re.compile(
+                rf"(?<![\w.-])(?:{alternatives})(?![\w-])(?!\.[\w-])")
+            if not _states_intent(support["text"], entity, _SUPPORT_RE):
+                continue
             for remover in items:
                 if remover["node_id"] == support["node_id"]:
                     continue
-                if (not _states_removal(remover["text"], entity)
-                        or _meta_rule_text(remover["line"])
+                if (not _states_intent(remover["text"], entity, _REMOVE_RE)
                         or "[waived]" in remover["line"].lower()):
                     continue
                 findings.append({"code": "TODO-DELETED-DEPENDENCY",
@@ -1011,7 +1018,10 @@ def render(pack: dict[str, Any]) -> str:
     risks = pack.get("plan_risks", {"fleet_pair_count": 0, "findings": []})
     add("")
     add("## Plan risks")
-    add(f"- потенциальных пар во флоте: {risks['fleet_pair_count']}")
+    unread = risks.get("unread_repos") or []
+    tail = (f" (по прочитанным репо; не склонированы здесь: "
+            f"{', '.join(unread)})" if unread else "")
+    add(f"- потенциальных пар во флоте: {risks['fleet_pair_count']}{tail}")
     if not risks["findings"]:
         add("- для этого пункта не найдено")
     for finding in risks["findings"]:
