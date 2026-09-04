@@ -319,8 +319,15 @@ def test_prompt_carries_the_repo_rules_it_claims_to_carry():
 
 
 def test_prompt_says_plainly_when_there_are_no_rules_to_carry():
-    prompt = tw.build_prompt("# todo://maestro/x", execute=True, rules=[])
-    assert "the repo's own rules" not in prompt, "не обещать того, чего нет"
+    """Проверяется РАЗЛИЧИТЕЛЬ, а не литерал: прежняя версия ассертила строку,
+    которой в модуле уже не было, и покраснеть не могла ни при какой правке."""
+    fence = "scope fence"
+    with_rules = tw.build_prompt("# x", execute=True, rules=[
+        {"path": "CLAUDE.md", "bytes": 10, "truncated": False, "text": "правило"}])
+    without = tw.build_prompt("# x", execute=True, rules=[])
+    assert fence in with_rules, "тест обязан ловить и наличие тоже"
+    assert fence not in without, "пустой список правил ничего не обещает"
+    assert "CLAUDE.md" not in without
 
 
 def test_prompt_marks_a_truncated_fence_as_truncated():
@@ -406,3 +413,83 @@ def test_plan_mode_does_not_care_about_a_dirty_tree(tmp_path, capsys):
                           "unknown_sources": [], "note": None}}), encoding="utf-8")
     assert tw.main(["--pack", str(pack), "--dry-run",
                     "--output-root", str(tmp_path)]) == 0
+
+
+# ─────────── регрессии круга 1 ревью PR #127 ───────────
+
+
+def _dirty_repo(tmp_path, files: int = 1):
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    for i in range(files):
+        (tmp_path / f"f{i}.txt").write_text("x\n", encoding="utf-8")
+    return tmp_path
+
+
+def _pack_file(tmp_path, checkout):
+    import json as _json
+    pack = tmp_path / "pack.json"
+    pack.write_text(_json.dumps(
+        {"node_id": "todo://devtools/x", "checkout": str(checkout),
+         "item": {"node_id": "todo://devtools/x", "repo": "devtools", "id": "x",
+                  "title": "t", "status": "open", "epic": None, "defect": None,
+                  "owner": None, "trigger": None, "section": None,
+                  "path": "TODO.md", "line": 1, "source_line": None, "tags": {}},
+         "body": {"text": None, "lines": 0}, "epic": None,
+         "graph": {"blocked_by": [], "blocks": [], "unresolved_refs": [],
+                   "diagnostics": [], "unread_repos": [], "legacy_waits": []},
+         "docs": {"named": [], "mentions": []}, "rules": [], "origin_issue": None,
+         "sources": [{"source": "item", "state": "read", "detail": None}],
+         "completeness": {"grade": "rich", "reason": "r", "execute_allowed": True,
+                          "unknown_sources": [], "note": None}}), encoding="utf-8")
+    return pack
+
+
+def test_main_refuses_execute_over_a_dirty_tree(tmp_path, capsys):
+    """The guard was tested as a function, never as a GATE: deleting its call
+    from `main` left the suite green."""
+    checkout = _dirty_repo(tmp_path / "repo")
+    pack = _pack_file(tmp_path, checkout)
+    code = tw.main(["--pack", str(pack), "--mode", "execute", "--dry-run",
+                    "--output-root", str(tmp_path)])
+    assert code == 2
+    assert "грязное" in capsys.readouterr().err
+
+
+def test_main_lets_plan_through_over_a_dirty_tree(tmp_path):
+    checkout = _dirty_repo(tmp_path / "repo")
+    pack = _pack_file(tmp_path, checkout)
+    assert tw.main(["--pack", str(pack), "--dry-run",
+                    "--output-root", str(tmp_path)]) == 0
+
+
+def test_the_dirty_list_says_how_many_it_did_not_show(tmp_path):
+    """Silently cutting at 10 is the very thing `todo_context` stopped doing."""
+    checkout = _dirty_repo(tmp_path / "repo", files=14)
+    try:
+        tw.require_clean_tree(checkout)
+    except tw.WorkerError as exc:
+        text = str(exc)
+        assert "ещё 4" in text, f"обрезка не названа: {text}"
+        return
+    raise AssertionError("грязное дерево должно быть отказом")
+
+
+def test_require_pack_checks_the_elements_of_rules_not_just_the_list():
+    """`rules` was validated as a list while its elements were not: a
+    hand-edited `rules: ["..."]` reached `render_rules` and raised
+    AttributeError outside every handler (Copilot, PR #127)."""
+    pack = {"node_id": "n", "item": {"repo": "r", "id": "i"},
+            "completeness": {}, "rules": ["CLAUDE.md"]}
+    try:
+        tw.require_pack(pack)
+    except tw.WorkerError as exc:
+        assert "rules" in str(exc)
+        return
+    raise AssertionError("строка вместо объекта правила должна быть отказом")
+
+
+def test_require_pack_accepts_well_formed_rules():
+    pack = {"node_id": "n", "item": {"repo": "r", "id": "i"}, "completeness": {},
+            "rules": [{"path": "CLAUDE.md", "text": "x", "truncated": False}]}
+    assert tw.require_pack(pack) is pack

@@ -76,6 +76,9 @@ _NO_PUBLISH = ("Do not commit, push, open a PR, or merge — none of those phase
 
 _GIT_TIMEOUT = 20
 
+#: Dirty paths printed before the list is cut. The cut is always named.
+_DIRTY_SHOWN = 10
+
 
 class WorkerError(Exception):
     """Bad input or unusable state — exit 2, as in `issue_worker`."""
@@ -121,8 +124,14 @@ def require_pack(pack: Any) -> dict[str, Any]:
         wrong.append("completeness (ожидался объект)")
     if pack.get("checkout") is not None and not isinstance(pack["checkout"], str):
         wrong.append("checkout (ожидалась строка)")
-    if not isinstance(pack.get("rules", []), list):
+    rules = pack.get("rules", [])
+    if not isinstance(rules, list):
         wrong.append("rules (ожидался список)")
+    elif not all(isinstance(rule, dict) for rule in rules):
+        # the list was checked while its elements were not, so a hand-edited
+        # `rules: ["CLAUDE.md"]` reached `render_rules` and raised AttributeError
+        # outside every handler here (Copilot, PR #127)
+        wrong.append("rules[] (ожидались объекты правил, не строки)")
     if wrong:
         raise WorkerError(f"pack с неверными типами: {', '.join(wrong)}")
     return pack
@@ -286,10 +295,15 @@ def require_clean_tree(checkout: Path) -> None:
             f"{(done.stderr.strip().splitlines() or ['?'])[-1]}")
     dirty = done.stdout.strip()
     if dirty:
-        listed = "\n".join(f"  {line}" for line in dirty.splitlines()[:10])
+        lines = dirty.splitlines()
+        listed = "\n".join(f"  {line}" for line in lines[:_DIRTY_SHOWN])
+        # naming the cut is the same rule `todo_context` keeps for its own
+        # capped output: a silent cut reads as a complete list (ревью PR #127)
+        rest = (f"\n  … ещё {len(lines) - _DIRTY_SHOWN} файлов"
+                if len(lines) > _DIRTY_SHOWN else "")
         raise WorkerError(
             f"дерево {checkout} грязное — правки прогона было бы не отличить от "
-            f"ваших, а `changed_files` стал бы непроверяемым:\n{listed}")
+            f"ваших, а `changed_files` стал бы непроверяемым:\n{listed}{rest}")
 
 
 def run_harness(prompt: str, execute: bool, cwd: Path) -> dict[str, Any]:
