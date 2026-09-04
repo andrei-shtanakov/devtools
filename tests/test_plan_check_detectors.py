@@ -357,7 +357,20 @@ def test_the_finding_names_the_continuation_line_that_holds_the_tag(plan_check) 
     warnings = _warnings_for(plan_check, _repo("maestro", todo))
     hit = [w for w in warnings if "PF-ID-MISSING" in w]
     assert hit, warnings
-    assert "на строке 2" in hit[0], hit[0]
+    assert "stray tag on continuation line 2" in hit[0], hit[0]
+
+
+def test_a_backticked_tag_is_prose_not_a_stray_tag(plan_check) -> None:
+    """Тег в бэктиках — цитата, а не уехавший тег: тела пунктов цитируют чужие
+    `@id` постоянно, и локатор указал бы на прозу как на причину."""
+    todo = (
+        "- [ ] сделать штуку @owner:o\n"
+        "      см. `@id:another-item` в соседнем плане\n"
+    )
+    hit = [w for w in _warnings_for(plan_check, _repo("maestro", todo))
+           if "PF-ID-MISSING" in w]
+    assert hit, "сам пункт без @id — находка остаётся"
+    assert "stray tag" not in hit[0], hit[0]
 
 
 def test_a_body_mentioning_other_ids_stays_silent(plan_check) -> None:
@@ -378,4 +391,4 @@ def test_an_item_without_a_stray_tag_is_still_surfaced(plan_check) -> None:
         plan_check, _repo("maestro", "- [ ] сделать штуку @owner:o\n      просто проза\n")
     )
     hit = [w for w in warnings if "PF-ID-MISSING" in w]
-    assert hit and "на строке" not in hit[0], hit
+    assert hit and "stray tag" not in hit[0], hit

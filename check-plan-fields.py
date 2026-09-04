@@ -104,6 +104,9 @@ _CANONICAL_ERROR = {"PF-BLOCKER-STALE"}
 #: Any field tag of the grammar, for locating a tag that slid off the checkbox
 #: line. Matching is deliberately NOT a detector — see `stray_tag_line`.
 _ANY_TAG_RE = re.compile(r"@(?:id|owner|epic|defect|blocked_by|trigger):")
+#: A markdown code span. A tag inside one is prose QUOTING a tag, not a tag —
+#: item bodies cite each other's `@id` constantly (48 live lines on the fleet).
+_CODE_SPAN_RE = re.compile(r"`[^`]*`")
 _ITEM_LINE_RE = re.compile(r"^\s*[-*]\s*\[[ xX]\]\s")
 
 
@@ -654,7 +657,7 @@ def stray_tag_line(todo_text: str | None, item_line: int) -> int | None:
             break
         if not raw.startswith((" ", "\t")):
             break
-        if _ANY_TAG_RE.search(raw):
+        if _ANY_TAG_RE.search(_CODE_SPAN_RE.sub("", raw)):
             return offset
     return None
 
@@ -674,7 +677,8 @@ def _canonical_line(diag: dict, hint: int | None = None) -> str | None:
     if code.startswith("PF-OWNER-"):
         return None
     if code == "PF-ID-MISSING" and hint is not None:
-        return f"{diag['message']}; тег найден на строке {hint} [{code}]"
+        return (f"{diag['message']}; stray tag on continuation line {hint} "
+                f"[{code}]")
     return f"{diag['message']} [{code}]"
 
 
