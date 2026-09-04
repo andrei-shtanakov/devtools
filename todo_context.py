@@ -66,6 +66,12 @@ _DOC_PATH_RE = re.compile(
     r"(?:^|[\s(\[`])((?:docs|specs|plans)/[\w./-]+\.(?:md|yaml|yml))"
 )
 
+#: Where a requirement can actually be WRITTEN: a markdown file under a
+#: docs/spec/plan directory. A mention of the `@id` anywhere else — a branch name
+#: in a plan, a literal inside a `print()`, a CI job — is context, never a
+#: requirement, and must not be able to raise the grade (ревью PR #125, круг 1).
+_DOC_MENTION_RE = re.compile(r"(?:^|/)(?:docs|spec|specs|plans|workstreams)/")
+
 #: The start of any checklist item, at any indent — the boundary a continuation
 #: block ends at. Same shape as the package's own item regex; it is used here only
 #: to find where one item's lines STOP, never to decide what an item means.
@@ -76,7 +82,11 @@ _HEADING_START_RE = re.compile(r"^#{1,6}\s")
 _BODY_SUBSTANTIAL = 120
 
 _RULES_FILES = ("CLAUDE.md", "AGENTS.md")
-_RULES_CAP = 8000  # bytes of a rules file inlined before it is marked truncated
+#: Bytes (not characters) of a rules file inlined before it is marked truncated.
+#: These files are mostly Cyrillic, where a character is two bytes: cutting by
+#: character would inline ~1.4x the intended payload and misreport `truncated`
+#: against the `bytes` printed beside it (Copilot, PR #125).
+_RULES_CAP = 8000
 _GREP_CAP = 40  # hits kept from one `git grep`
 _GIT_TIMEOUT = 20
 
@@ -325,9 +335,20 @@ def git_grep(directory: Path,
     return hits, None
 
 
+def is_doc_mention(path: str) -> bool:
+    """Can this path HOLD a requirement? Markdown under docs/spec/plan dirs."""
+    return path.endswith(".md") and _DOC_MENTION_RE.search(path) is not None
+
+
 def read_docs(directory: Path | None,
               item: dict[str, Any]) -> tuple[dict[str, Any], Source]:
-    """Design docs for this item: paths it names, plus every mention of its `@id`."""
+    """Design docs for this item: paths it names, plus every mention of its `@id`.
+
+    Mentions are collected from the whole repo but each one is marked `doc`:
+    `git grep` matches a bare substring, so the id also turns up in branch names,
+    CLI output literals and tests. Those are worth PRINTING as context and must
+    never count as a written requirement — `grade` reads the mark, not the state.
+    """
     named = named_doc_paths(item)
     if directory is None:
         return ({"named": named, "mentions": []},
@@ -340,6 +361,8 @@ def read_docs(directory: Path | None,
     hits, error = git_grep(directory, item["id"])
     if error is not None:
         return ({"named": resolved, "mentions": []}, Source("docs", "error", error))
+    for hit in hits:
+        hit["doc"] = is_doc_mention(hit["path"])
     block = {"named": resolved, "mentions": hits}
     have = any(d["exists"] for d in resolved) or bool(hits)
     return block, Source("docs", "read" if have else "absent",
@@ -404,9 +427,11 @@ def read_rules(directory: Path | None) -> tuple[list[dict[str, Any]], Source]:
         path = directory / name
         if not path.is_file():
             continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        out.append({"path": name, "bytes": len(text.encode("utf-8")),
-                    "truncated": len(text) > _RULES_CAP, "text": text[:_RULES_CAP]})
+        raw = path.read_bytes()
+        # decode AFTER the cut, ignoring a codepoint split by it
+        out.append({"path": name, "bytes": len(raw),
+                    "truncated": len(raw) > _RULES_CAP,
+                    "text": raw[:_RULES_CAP].decode("utf-8", errors="ignore")})
     return out, Source("rules", "read" if out else "absent",
                        None if out else "repo keeps no CLAUDE.md/AGENTS.md")
 
@@ -419,13 +444,24 @@ def match_origin_issue(issues: list[dict[str, Any]],
     checkbox line of the target repo's `TODO.md` IS the acceptance, stored nowhere.
     Read backwards, that same fact names the request this item answers, and the
     request has the body the item lacks.
+
+    The pair is (issue's repo → THAT repo's `TODO.md`), exactly as `inbox.render`
+    derives it, so the issue's repo is checked here too. `search_inbox` returns
+    every open `inbox` issue of the owner, and this fleet also writes OUTGOING
+    requests into an item's own line ("заведён disputatio#52 (slug: …)"); without
+    the check that outgoing wait comes back as this item's own requirement, with
+    the direction reversed (ревью PR #125, круг 1).
     """
     line = item.get("source_line") or ""
     if not line:
         return None
     import inbox  # local: only this path needs it, and it shells out to gh
 
+    repo = (item.get("repo") or "").lower()
     for issue in issues:
+        issue_repo = ((issue.get("repository") or {}).get("name") or "").lower()
+        if not repo or issue_repo != repo:
+            continue  # another repo's request; see the docstring
         slug = inbox.parse_field(issue.get("body") or "", "slug")
         if slug and slug in line:
             return {
@@ -459,7 +495,8 @@ def read_origin_issue(item: dict[str, Any],
 
 
 def grade(sources: list[Source], body: dict[str, Any],
-          origin: dict[str, Any] | None) -> dict[str, Any]:
+          origin: dict[str, Any] | None,
+          docs: dict[str, Any] | None = None) -> dict[str, Any]:
     """How much context was actually assembled, and whether `execute` may run.
 
     The floor for `execute` is a WRITTEN requirement — a design doc or the
@@ -467,9 +504,17 @@ def grade(sources: list[Source], body: dict[str, Any],
     what this item must do, and a run that changes a repo on that basis is
     improvising. `plan` is always allowed: reading and proposing is what a thin
     context is for.
+
+    A source's STATE answers "did we look?" and never "is there a requirement?" —
+    reading the state as the answer let a `git grep` hit on a branch name grade an
+    item as executable (ревью PR #125, круг 1). So the docs evidence is read from
+    the block: an existing named doc, or a mention in a file that can hold a
+    requirement.
     """
     states = {s.source: s.state for s in sources}
-    has_doc = states.get("docs") == "read"
+    docs = docs or {}
+    has_doc = (any(d.get("exists") for d in docs.get("named", []))
+               or any(m.get("doc") for m in docs.get("mentions", [])))
     has_issue = origin is not None
     has_body = len(body.get("text") or "") >= _BODY_SUBSTANTIAL
     unknowns = sorted(s for s, state in states.items()
@@ -516,7 +561,7 @@ def build_pack(root: Path, manifest_path: Path, registry_path: Path, repo: str,
         "rules": rules,
         "origin_issue": origin,
         "sources": [asdict(s) for s in sources],
-        "completeness": grade(sources, body, origin),
+        "completeness": grade(sources, body, origin, docs),
     }
 
 
@@ -592,7 +637,8 @@ def render(pack: dict[str, Any]) -> str:
     for hit in docs["mentions"]:
         grouped[hit["path"]] = grouped.get(hit["path"], 0) + 1
     for path, count in sorted(grouped.items()):
-        add(f"- упоминает `@id`: `{path}` ({count})")
+        kind = "упоминает `@id`" if is_doc_mention(path) else "упоминание вне доков"
+        add(f"- {kind}: `{path}` ({count})")
     if not docs["named"] and not grouped:
         add("ничего не найдено")
 

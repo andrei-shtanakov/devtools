@@ -82,6 +82,12 @@ def _sources(**states) -> list[tc.Source]:
     return [tc.Source(name, state) for name, state in states.items()]
 
 
+def _docs(*paths: str) -> dict:
+    """A docs block as `read_docs` builds it — mentions marked by path."""
+    return {"named": [], "mentions": [{"path": p, "line": "1", "text": "",
+                                       "doc": tc.is_doc_mention(p)} for p in paths]}
+
+
 def test_grade_rich_on_substantial_body():
     verdict = tc.grade(
         _sources(item="read", body="read", epic="read", docs="absent",
@@ -143,6 +149,7 @@ def test_grade_note_absent_when_everything_was_read():
                  origin_issue="read"),
         {"text": "x" * 200},
         {"number": 1},
+        _docs("docs/plans/x.md"),
     )
     assert verdict["unknown_sources"] == []
     assert verdict["note"] is None
@@ -153,7 +160,8 @@ def test_origin_issue_matches_by_slug_on_the_item_line():
         {"repository": {"name": "maestro"}, "number": 7, "title": "t",
          "body": "slug: benchmark-2\nfrom: arbiter#gate\n"},
     ]
-    item = {"source_line": "- [ ] Run the sweep benchmark-2 @owner:o @id:sweep"}
+    item = {"repo": "maestro",
+            "source_line": "- [ ] Run the sweep benchmark-2 @owner:o @id:sweep"}
     found = tc.match_origin_issue(issues, item)
     assert found is not None and found["number"] == 7 and found["slug"] == "benchmark-2"
 
@@ -161,7 +169,8 @@ def test_origin_issue_matches_by_slug_on_the_item_line():
 def test_origin_issue_not_matched_when_slug_is_elsewhere():
     issues = [{"repository": {"name": "maestro"}, "number": 7, "title": "t",
                "body": "slug: benchmark-3\n"}]
-    item = {"source_line": "- [ ] Run the sweep benchmark-2 @id:sweep"}
+    item = {"repo": "maestro",
+            "source_line": "- [ ] Run the sweep benchmark-2 @id:sweep"}
     assert tc.match_origin_issue(issues, item) is None
 
 
@@ -185,3 +194,99 @@ def test_source_refuses_a_state_outside_the_vocabulary():
     except ValueError:
         return
     raise AssertionError("an unknown source state must not be constructible")
+
+
+# ─────────── регрессии первого круга ревью PR #125 ───────────
+
+
+def test_doc_mention_is_only_a_mention_where_a_requirement_can_live():
+    """A `git grep` hit is a bare substring match: the id turns up in branch
+    names, CLI literals and tests as readily as in a design doc."""
+    assert tc.is_doc_mention("docs/superpowers/specs/2026-08-26-waits-design.md")
+    assert tc.is_doc_mention("workstreams/WS-SMOKE-001/spec/10-requirements.md")
+    assert not tc.is_doc_mention("spec_run_preflight.py"), "a print() literal"
+    assert not tc.is_doc_mention("tests/test_todo_context.py")
+    assert not tc.is_doc_mention("README.md"), "outside a docs/spec/plan dir"
+
+
+def test_grade_does_not_execute_on_a_mention_outside_the_docs():
+    """The finding itself: an item with no body, no epic and no named doc used to
+    reach `execute_allowed` because its id appeared in a branch name."""
+    verdict = tc.grade(
+        _sources(item="read", body="absent", epic="absent", docs="read",
+                 origin_issue="not_queried"),
+        {"text": None},
+        None,
+        _docs("todo_context.py", "tests/test_todo_context.py"),
+    )
+    assert verdict["grade"] == "bare", "a code mention graded as a requirement"
+    assert verdict["execute_allowed"] is False
+
+
+def test_grade_executes_on_a_mention_inside_a_design_doc():
+    verdict = tc.grade(
+        _sources(item="read", body="absent", epic="read", docs="read",
+                 origin_issue="not_queried"),
+        {"text": None},
+        None,
+        _docs("docs/superpowers/specs/2026-08-26-waits-design.md"),
+    )
+    assert verdict["grade"] == "rich"
+    assert verdict["execute_allowed"] is True
+
+
+def test_grade_executes_on_a_named_doc_that_exists():
+    verdict = tc.grade(
+        _sources(item="read", body="absent", epic="read", docs="read",
+                 origin_issue="not_queried"),
+        {"text": None},
+        None,
+        {"named": [{"path": "docs/plans/x.md", "exists": True, "bytes": 10}],
+         "mentions": []},
+    )
+    assert verdict["execute_allowed"] is True
+
+
+def test_grade_ignores_a_named_doc_that_is_not_there():
+    verdict = tc.grade(
+        _sources(item="read", body="absent", epic="read", docs="read",
+                 origin_issue="not_queried"),
+        {"text": None},
+        None,
+        {"named": [{"path": "docs/plans/gone.md", "exists": False, "bytes": None}],
+         "mentions": []},
+    )
+    assert verdict["grade"] == "thin", "a dead path is not a written requirement"
+
+
+def test_origin_issue_ignores_an_issue_filed_in_another_repo():
+    """The fleet writes OUTGOING requests into an item's own line ("заведён
+    disputatio#52 (slug: …)"). Matched without the repo check, that outgoing wait
+    came back as this item's own requirement, direction reversed."""
+    issues = [{"repository": {"name": "disputatio"}, "number": 52, "title": "t",
+               "body": "slug: single-document-polish-mode\n"}]
+    item = {"repo": "devtools",
+            "source_line": "- [x] inbox-issue в disputatio … заведён disputatio#52 "
+                           "(slug: single-document-polish-mode) @id:disp-issue"}
+    assert tc.match_origin_issue(issues, item) is None
+
+
+def test_origin_issue_matches_within_the_same_repo():
+    issues = [{"repository": {"name": "Maestro"}, "number": 7, "title": "t",
+               "body": "slug: benchmark-2\n"}]
+    item = {"repo": "maestro",
+            "source_line": "- [ ] Run the sweep benchmark-2 @id:sweep"}
+    found = tc.match_origin_issue(issues, item)
+    assert found is not None and found["number"] == 7, "repo compared case-sensitively"
+
+
+def test_rules_cap_is_measured_in_bytes(tmp_path):
+    """`_RULES_CAP` is documented as bytes; these files are mostly Cyrillic, so
+    cutting by character inlined ~1.4x the cap and misreported `truncated`."""
+    (tmp_path / "CLAUDE.md").write_text("я" * tc._RULES_CAP, encoding="utf-8")
+    rules, source = tc.read_rules(tmp_path)
+    assert source.state == "read"
+    assert rules[0]["bytes"] == tc._RULES_CAP * 2, "two bytes per Cyrillic char"
+    assert rules[0]["truncated"] is True
+    assert len(rules[0]["text"].encode("utf-8")) <= tc._RULES_CAP
+    assert "\ufffd" not in rules[0]["text"], "a split codepoint must not leak"
