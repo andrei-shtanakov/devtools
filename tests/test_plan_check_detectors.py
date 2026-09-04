@@ -325,3 +325,70 @@ def test_message_is_deterministic(plan_check) -> None:
     assert first.errors[0].index("todo://a-repo/b") < first.errors[0].index(
         "todo://z-repo/a"
     )
+
+
+# --- devtools#107: пункт без @id невидим прибору ----------------------------
+
+
+def _warnings_for(plan_check, *repos) -> list[str]:
+    report = plan_check.Report()
+    plan_check.resolve_graph(list(repos), _index(*(r.repo for r in repos)), report)
+    return report.warnings
+
+
+def test_item_without_id_is_surfaced(plan_check) -> None:
+    """`PF-ID-MISSING` глушился `_canonical_line` как coverage-заметка, поэтому
+    файл рапортовал чистоту, имея пункт, на который нельзя сослаться `todo://`,
+    нельзя поставить блокером, и чьё исчезновение дельта-счётчики прочитают как
+    «закрыто» (запрос prograph-vault, devtools#107)."""
+    warnings = _warnings_for(
+        plan_check, _repo("maestro", "- [ ] сделать штуку @owner:o\n")
+    )
+    assert any("PF-ID-MISSING" in w for w in warnings), warnings
+
+
+def test_the_finding_names_the_continuation_line_that_holds_the_tag(plan_check) -> None:
+    """Локатор ПРИЧИНЫ: тег уехал на строку продолжения, и находка обязана
+    сказать, на какую, — иначе читатель ищет его глазами по всему пункту."""
+    todo = (
+        "- [ ] сделать штуку @owner:o\n"
+        "      подробности, а в конце тег @id:strayed-tag\n"
+    )
+    warnings = _warnings_for(plan_check, _repo("maestro", todo))
+    hit = [w for w in warnings if "PF-ID-MISSING" in w]
+    assert hit, warnings
+    assert "stray tag on continuation line 2" in hit[0], hit[0]
+
+
+def test_a_backticked_tag_is_prose_not_a_stray_tag(plan_check) -> None:
+    """Тег в бэктиках — цитата, а не уехавший тег: тела пунктов цитируют чужие
+    `@id` постоянно, и локатор указал бы на прозу как на причину."""
+    todo = (
+        "- [ ] сделать штуку @owner:o\n"
+        "      см. `@id:another-item` в соседнем плане\n"
+    )
+    hit = [w for w in _warnings_for(plan_check, _repo("maestro", todo))
+           if "PF-ID-MISSING" in w]
+    assert hit, "сам пункт без @id — находка остаётся"
+    assert "stray tag" not in hit[0], hit[0]
+
+
+def test_a_body_mentioning_other_ids_stays_silent(plan_check) -> None:
+    """Антирегрессия на 48 живых строк: тела пунктов ссылаются на ЧУЖИЕ `@id`
+    постоянно. Расширение детектора «тег в любой позиции» зажгло бы их все."""
+    todo = (
+        "- [ ] сделать штуку @owner:o @id:own-id\n"
+        "      это про @id:another-item и @blocked_by:maestro#third\n"
+    )
+    assert not [w for w in _warnings_for(plan_check, _repo("maestro", todo))
+                if "PF-ID-MISSING" in w]
+
+
+def test_an_item_without_a_stray_tag_is_still_surfaced(plan_check) -> None:
+    """Находка про отсутствие `@id`, а не про уехавший тег: локатора нет,
+    сообщение остаётся."""
+    warnings = _warnings_for(
+        plan_check, _repo("maestro", "- [ ] сделать штуку @owner:o\n      просто проза\n")
+    )
+    hit = [w for w in warnings if "PF-ID-MISSING" in w]
+    assert hit and "stray tag" not in hit[0], hit
