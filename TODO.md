@@ -868,16 +868,19 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Теперь `legacy_waits` + оговорка в detail; сам слаг здесь НЕ резолвится —
       пара слаг↔пункт правило пакета (`check_legacy_fleet`), приватное было бы
       повторением ошибки круга 5.
-- [ ] Слаг приёмки как токен — в пакете `plan-fields`, а не приватно в devtools @owner:github:andrei-shtanakov @id:inbox-slug-token-match @blocked_by:dispatcher#slug-token-match
+- [ ] Слаг приёмки как токен — в пакете `plan-fields`, а не приватно в devtools @owner:github:andrei-shtanakov @id:inbox-slug-token-match @blocked_by:dispatcher#254
       `inbox.is_accepted` матчит слаг подстрокой и документирует слабость:
       `benchmark-2` совпадает с пунктом про `benchmark-20`. Ужесточение —
       «the package's call» (ADR-ECO-005 D9), приватное правило в скрипте есть
       расхождение, которое ADR убирает; поймано ревью PR #125, круг 5, когда
       такое правило завелось в `todo_context.py` и было снято. Апстрим-плечо
       заведено 2026-09-04: dispatcher#254, слаг `slug-token-match` (владелец
-      `packages/plan-fields`); отсюда `@blocked_by` в переходной форме — пункта
-      `todo://dispatcher/...` ещё нет, запрос не принят, а канонической форме
-      нужен принятый пункт. Признак «сделано» назван в issue наблюдаемо:
+      `packages/plan-fields`). `@blocked_by` — issue-формой с НОМЕРОМ: запрос
+      ещё не принят, поэтому канонической `todo://dispatcher/<id>` нет, а из
+      двух переходных форм состояние резолвится только числовой —
+      `check_issue_blockers` зовёт `gh` лишь по `#<цифры>` (`_ISSUE_REF_RE`),
+      слаг-форма же не видна ни одному из четырёх резолверов, и закрытие issue
+      не дало бы PF-BLOCKER-STALE никогда (ревью PR #134). Признак «сделано» назван в issue наблюдаемо:
       `is_accepted("benchmark-2", …)` ложен для пункта только с `benchmark-20`,
       локальные токен-правила у потребителей удаляются, а `make inbox` и
       `todo-context --issues` дают одинаковый ответ о приёмке одной пары.
@@ -886,6 +889,20 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       этом же пункте: агент отказался писать приватное правило, сославшись на
       ADR-ECO-005 D9 из тела пункта, и сам попытался завести issue — не смог,
       `api.github.com` был недоступен из его песочницы.
+
+- [ ] `todo_context` показывает диагностику, которую канонический чекер для issue-формы подавляет @owner:github:andrei-shtanakov @id:todo-context-issue-ref-diagnostic @epic:eco.plan-fields
+      `check-plan-fields.py` отфильтровывает рефы вида `<repo>#<цифры>` до
+      вызова пакета — в коде прямо сказано, что legacy-граф пакета матчит
+      только слаги и «must not see these refs», потому что такие ожидания
+      живут на GitHub и резолвятся через `gh`. `todo_context.read_graph`
+      зовёт `check_fleet` напрямую и этого фильтра не делает, поэтому печатает
+      `PF-LEGACY-AMBIGUOUS: dispatcher#254 matches no item in repo dispatcher`
+      там, где `make plan-check` честно даёт 0 warnings. Наблюдаемо на
+      `@id:inbox-slug-token-match` сразу после PR #134: два инструмента одного
+      репо говорят разное об одном ожидании — тот же класс расхождения, за
+      который ревью уже брало плату в PR #125 (приватное правило слага).
+      Сделать: применять тот же фильтр перед диагностиками, и закрепить тестом
+      пару «issue-реф → нет PF-LEGACY-AMBIGUOUS, slug-реф → есть».
 
 ## Исполнитель пункта плана (todo-worker)
 
