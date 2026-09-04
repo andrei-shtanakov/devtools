@@ -491,9 +491,13 @@ def test_a_short_dirty_list_is_shown_whole_without_a_cut_note(tmp_path):
 
 
 def test_require_pack_checks_the_elements_of_rules_not_just_the_list():
-    """`rules` was validated as a list while its elements were not: a
-    hand-edited `rules: ["..."]` reached `render_rules` and raised
-    AttributeError outside every handler (Copilot, PR #127)."""
+    """`rules` was validated as a list while its elements were not.
+
+    This does NOT prevent a traceback — `tc.render` meets a string rule first and
+    its TypeError is already handled. What the guard buys is an answer that NAMES
+    the field instead of "pack не рендерится, нет поля …". PR #127 claimed
+    otherwise in two places; #129 fixed the code comment and left this one
+    (Copilot, PR #127; corrected in #130)."""
     pack = {"node_id": "n", "item": {"repo": "r", "id": "i"},
             "completeness": {}, "rules": ["CLAUDE.md"]}
     try:
