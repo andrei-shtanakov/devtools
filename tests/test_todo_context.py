@@ -1006,4 +1006,7 @@ def test_render_survives_a_pack_without_plan_risks():
             "origin_issue": None, "sources": [],
             "completeness": {"grade": "bare", "reason": "r",
                              "execute_allowed": False, "note": None}}
-    assert "## Completeness" in tc.render(pack)
+    text = tc.render(pack)
+    assert "## Completeness" in text, "остаток отчёта не должен обрезаться"
+    assert "не измерено" in text, "неизмеренное не должно печататься как 0"
+    assert "пар во флоте: 0" not in text

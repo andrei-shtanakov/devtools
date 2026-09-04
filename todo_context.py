@@ -587,8 +587,8 @@ def read_docs(directory: Path | None,
     return block, Source("docs", "read" if have else "absent", detail)
 
 
-def read_body(directory: Path | None,
-              item: dict[str, Any]) -> tuple[dict[str, Any], Source]:
+def read_body(directory: Path | None, item: dict[str, Any],
+              cached_lines: list[str] | None = None) -> tuple[dict[str, Any], Source]:
     """The item's indented continuation lines — the body the parser cannot see.
 
     `plan_fields` reads items line by line and stops at the first line: that is a
@@ -606,10 +606,15 @@ def read_body(directory: Path | None,
         return ({"text": None, "lines": 0},
                 Source("body", "error", "repo is not checked out here"))
     todo = directory / "TODO.md"
-    if not todo.is_file():
-        return ({"text": None, "lines": 0},
-                Source("body", "error", "repo keeps no TODO.md"))
-    lines = todo.read_text(encoding="utf-8", errors="ignore").splitlines()
+    if cached_lines is not None:
+        # Строки уже прочитаны вызывающим: обход всех узлов флота читал и
+        # разбирал один и тот же файл на КАЖДЫЙ узел (Copilot и ревью PR #140).
+        lines = cached_lines
+    else:
+        if not todo.is_file():
+            return ({"text": None, "lines": 0},
+                    Source("body", "error", "repo keeps no TODO.md"))
+        lines = todo.read_text(encoding="utf-8", errors="ignore").splitlines()
     start = (item.get("line") or 0) - 1
     if not 0 <= start < len(lines):
         return ({"text": None, "lines": 0},
@@ -645,11 +650,13 @@ def _cached_item(snapshot: dict[str, Any], node: dict[str, Any],
         directory = checkouts.get(repo)
         todo = directory / "TODO.md" if directory is not None else None
         by_id: dict[str, Any] = {}
+        lines: list[str] = []
         if todo is not None and todo.is_file():
             text = todo.read_text(encoding="utf-8", errors="ignore")
             by_id = {it.item_id: it for it in _pf.scrape_items(text)}
-        scraped[repo] = by_id
-    hit = scraped[repo].get(node["id"])
+            lines = text.splitlines()
+        scraped[repo] = {"items": by_id, "lines": lines}
+    hit = scraped[repo]["items"].get(node["id"])
     return {"repo": repo, "id": node["id"],
             "source_line": hit.raw_text if hit is not None else None,
             "section": hit.section if hit is not None else None,
@@ -702,7 +709,9 @@ def deleted_dependency_report(snapshot: dict[str, Any],
         if node.get("declared_status") != "open":
             continue
         item = _cached_item(snapshot, node, checkouts, scraped)
-        body, source = read_body(checkouts.get(item["repo"]), item)
+        cached = scraped[node["repo"]]["lines"]
+        body, source = read_body(checkouts.get(item["repo"]), item,
+                                 cached if cached else None)
         if source.state == "error":
             continue
         body_text = body.get("text") or ""
@@ -753,7 +762,11 @@ def deleted_dependency_report(snapshot: dict[str, Any],
     focused = ([f for f in all_findings if focus_node_id in
                 (f["supporting_item"], f["removing_item"])]
                if focus_node_id else all_findings)
-    return {"fleet_pair_count": len(all_findings), "findings": focused,
+    # Пара — это (опирающийся, удаляющий): один и тот же конфликт, названный
+    # двумя путями, оставался бы одним конфликтом, а счёт ради которого пункт и
+    # заводился — завышался (ревью PR #140, круг 4).
+    pairs = {(f["supporting_item"], f["removing_item"]) for f in all_findings}
+    return {"fleet_pair_count": len(pairs), "findings": focused,
             "unread_repos": sorted(unread or []),
             "waiver": "поставьте [waived] или [waived: причина] на строку пункта"}
 
@@ -1024,21 +1037,29 @@ def render(pack: dict[str, Any]) -> str:
     for diag in graph["diagnostics"]:
         add(f"- [{diag['severity']}] {diag['code']}: {diag['message']}")
 
-    risks = pack.get("plan_risks") or {"fleet_pair_count": 0, "findings": []}
+    risks = pack.get("plan_risks")
     add("")
     add("## Plan risks")
-    unread = risks.get("unread_repos") or []
-    tail = (f" (по прочитанным репо; не склонированы здесь: "
-            f"{', '.join(unread)})" if unread else "")
-    add(f"- потенциальных пар во флоте: {risks['fleet_pair_count']}{tail}")
-    if not risks["findings"]:
-        add("- для этого пункта не найдено")
-    for finding in risks["findings"]:
-        add(f"- [{finding['severity']}] {finding['code']}: "
-            f"`{finding['supporting_item']}` опирается на `{finding['entity']}`, "
-            f"который удаляет `{finding['removing_item']}`")
-    if risks["findings"]:
-        add(f"- осознанное исключение: {risks['waiver']}")
+    if not isinstance(risks, dict):
+        # НЕ «0»: ноль — это ИЗМЕРЕННЫЙ ноль. Пак без поля не измерялся, и
+        # печатать за него чистую цифру значило бы подать неизвестное как
+        # проверенное — режим отказа, против которого написан весь модуль
+        # (ревью PR #140, круг 4).
+        add("- не измерено: в паке нет поля `plan_risks`")
+    else:
+        unread = risks.get("unread_repos") or []
+        tail = (f" (по прочитанным репо; не склонированы здесь: "
+                f"{', '.join(unread)})" if unread else "")
+        add(f"- потенциальных пар во флоте: {risks['fleet_pair_count']}{tail}")
+        if not risks["findings"]:
+            add("- для этого пункта не найдено")
+        for finding in risks["findings"]:
+            add(f"- [{finding['severity']}] {finding['code']}: "
+                f"`{finding['supporting_item']}` опирается на "
+                f"`{finding['entity']}`, который удаляет "
+                f"`{finding['removing_item']}`")
+        if risks["findings"]:
+            add(f"- осознанное исключение: {risks['waiver']}")
 
     docs = pack["docs"]
     add("")
