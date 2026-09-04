@@ -88,7 +88,7 @@ def current_branch(repo: Path) -> str:
     return out
 
 
-def check_component(cid: str, meta: dict, ws: Path) -> list[dict]:
+def check_component(cid: str, meta: dict, ws: Path, section: str = "") -> list[dict]:
     f: list[dict] = []
 
     def add(kind: str, sev: str, detail: str):
@@ -127,7 +127,18 @@ def check_component(cid: str, meta: dict, ws: Path) -> list[dict]:
 
     disk_ver = pyproject_version(pp)
     if disk_ver is None:
-        add("no_pyproject_version", "warn", f"не прочитал version из {meta['pyproject_path']}")
+        # Инструмент, у которого pyproject ОТСУТСТВУЕТ, Python-пакетом не
+        # является (kapelle — Elixir, spec-runner-vscode — TypeScript,
+        # robin-toolkit «без pyproject», ecosystem-kb — хранилище Obsidian; всё
+        # это записано в манифесте). Версии релиза у него нет, расходиться
+        # нечему — факт остаётся видимым как info.
+        # Критерий узкий НАМЕРЕННО: `publish == "none"` сюда не годится, им
+        # помечены все 15 apps — настоящие Python-пакеты, у которых пропавший
+        # pyproject обязан оставаться предупреждением (ревью PR #139).
+        expected_missing = (section == "tools" and publish != "pypi"
+                            and not pp.exists())
+        add("no_pyproject_version", "info" if expected_missing else "warn",
+            f"не прочитал version из {meta['pyproject_path']}")
     tag = latest_matching_tag(git_dir, meta["tag_pattern"])
 
     # 2. manifest_stale: lock_version расходится с pyproject
@@ -189,13 +200,20 @@ def main() -> int:
     comps: dict[str, dict] = {}
     comps.update(manifest.get("cores", {}))
     comps.update(manifest.get("apps", {}))
+    # `[tools.*]` тоже пинуется и тоже обязано быть воспроизводимым: пять
+    # инструментов (devtools, ecosystem-kb, robin-toolkit, spec-runner-vscode,
+    # kapelle) не проверял никто, и это было незаметно, потому что детектор до
+    # секции не доходил — запрос prograph-vault, devtools#105.
+    comps.update(manifest.get("tools", {}))
+    section_of = {cid: sect for sect in ("cores", "apps", "tools")
+                  for cid in manifest.get(sect, {})}
     if not comps:
-        print("FATAL: в манифесте нет [cores.*]/[apps.*]", file=sys.stderr)
+        print("FATAL: в манифесте нет [cores.*]/[apps.*]/[tools.*]", file=sys.stderr)
         return 2
 
     findings: list[dict] = []
     for cid, meta in comps.items():
-        findings.extend(check_component(cid, meta, ws))
+        findings.extend(check_component(cid, meta, ws, section_of.get(cid, "")))
 
     findings.sort(key=lambda x: -SEV_ORDER.get(x["severity"], 0))
     n_err = sum(1 for x in findings if x["severity"] == "error")
