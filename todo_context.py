@@ -126,6 +126,21 @@ _GREP_CAP = 40  # hits PRINTED from one `git grep`
 _GREP_HARD_CAP = 2000
 _GIT_TIMEOUT = 20
 
+_PATH_RE = re.compile(r"(?<![\w.-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+(?<![.,:;])")
+#: Опора и удаление — намерение, а не просто соседство пути: без глагола любой
+#: пункт, упомянувший файл, стал бы стороной пары.
+_SUPPORT_RE = re.compile(
+    r"\b(?:стро(?:ить|ится)|созда(?:ть|вать)|обобщ(?:ить|ением)"
+    r"|использова(?:ть|нием)|опира(?:ться|ется)|основ(?:ать|ан)"
+    r"|build|create|generaliz(?:e|ing)|use|depend(?:s|ing)?|based)\b",
+    re.I,
+)
+_REMOVE_RE = re.compile(
+    r"\b(?:удал(?:ить|яет|яется|ение)|снес(?:ти|ён)|убра(?:ть|ть)"
+    r"|remove|delete|drop|retire)\w*\b",
+    re.I,
+)
+
 
 @dataclass(frozen=True)
 class Source:
@@ -617,6 +632,77 @@ def read_body(directory: Path | None,
             Source("body", "read"))
 
 
+def _meta_rule_text(text: str) -> bool:
+    """Rule-writing examples must not report themselves as plan conflicts."""
+    low = text.lower()
+    return "пункт" in low and any(w in low for w in ("правил", "провер", "критер"))
+
+
+def _states_removal(text: str, entity: re.Pattern[str]) -> bool:
+    """Removal and entity must be one local claim, not two unrelated paragraphs."""
+    for line in text.splitlines():
+        removal = _REMOVE_RE.search(line)
+        if removal and entity.search(line):
+            prefix = line[max(0, removal.start() - 12):removal.start()].lower()
+            if not re.search(r"(?:не|без)\s*$", prefix):
+                return True
+    return False
+
+
+def deleted_dependency_report(snapshot: dict[str, Any],
+                              checkouts: dict[str, Path],
+                              focus_node_id: str | None = None) -> dict[str, Any]:
+    """Measure open item pairs where one builds on a path another removes."""
+    items: list[dict[str, Any]] = []
+    for node in snapshot.get("nodes", []):
+        if node.get("declared_status") != "open":
+            continue
+        item = read_item(snapshot, node["node_id"], checkouts)
+        body, source = read_body(checkouts.get(item["repo"]), item)
+        if source.state == "error":
+            continue
+        body_text = body.get("text") or ""
+        text = "\n".join(filter(None, (item.get("source_line"), body_text)))
+        items.append({"node_id": node["node_id"], "body": body_text, "text": text,
+                      "line": item.get("source_line") or ""})
+
+    findings: list[dict[str, Any]] = []
+    for support in items:
+        if (not _SUPPORT_RE.search(support["text"])
+                or _meta_rule_text(support["line"])
+                or "[waived]" in support["text"].lower()):
+            continue
+        for path in sorted(set(_PATH_RE.findall(support["body"]))):
+            basename = path.rsplit("/", 1)[-1]
+            names = [path]
+            # Very short basenames (`v2`, `ui`) are vocabulary, not entities;
+            # letting them bridge unrelated repos dominated the live measure.
+            if len(basename) >= 4:
+                names.append(basename)
+            alternatives = "|".join(re.escape(name) for name in names)
+            entity = re.compile(rf"(?<![\w.-])(?:{alternatives})(?![\w.-])")
+            for remover in items:
+                if remover["node_id"] == support["node_id"]:
+                    continue
+                if (not _states_removal(remover["text"], entity) or
+                        _meta_rule_text(remover["line"]) or
+                        "[waived]" in remover["text"].lower()):
+                    continue
+                findings.append({"code": "TODO-DELETED-DEPENDENCY",
+                                 "severity": "warning",
+                                 "supporting_item": support["node_id"],
+                                 "removing_item": remover["node_id"],
+                                 "entity": path})
+    unique = {(f["supporting_item"], f["removing_item"], f["entity"]): f
+              for f in findings}
+    all_findings = [unique[key] for key in sorted(unique)]
+    focused = ([f for f in all_findings if focus_node_id in
+                (f["supporting_item"], f["removing_item"])]
+               if focus_node_id else all_findings)
+    return {"fleet_pair_count": len(all_findings), "findings": focused,
+            "waiver": "put [waived] in either item's line or body"}
+
+
 def read_rules(directory: Path | None) -> tuple[list[dict[str, Any]], Source]:
     """The repo's scope fence — `CLAUDE.md` / `AGENTS.md`, inlined and capped."""
     if directory is None:
@@ -789,6 +875,7 @@ def build_pack(root: Path, manifest_path: Path, registry_path: Path, repo: str,
     epic, src = read_epic(registry_path, item["epic"]); sources.append(src)
     body, src = read_body(directory, item); sources.append(src)
     graph, src = read_graph(snapshot, node_id, unread); sources.append(src)
+    plan_risks = deleted_dependency_report(snapshot, checkouts, node_id)
     docs, src = read_docs(directory, item); sources.append(src)
     rules, src = read_rules(directory); sources.append(src)
     origin, src = read_origin_issue(item, owner); sources.append(src)
@@ -803,6 +890,7 @@ def build_pack(root: Path, manifest_path: Path, registry_path: Path, repo: str,
         "body": body,
         "epic": epic,
         "graph": graph,
+        "plan_risks": plan_risks,
         "docs": docs,
         "rules": rules,
         "origin_issue": origin,
@@ -880,6 +968,19 @@ def render(pack: dict[str, Any]) -> str:
         add(f"- нерезолвленная ссылка: `{ref}`")
     for diag in graph["diagnostics"]:
         add(f"- [{diag['severity']}] {diag['code']}: {diag['message']}")
+
+    risks = pack.get("plan_risks", {"fleet_pair_count": 0, "findings": []})
+    add("")
+    add("## Plan risks")
+    add(f"- потенциальных пар во флоте: {risks['fleet_pair_count']}")
+    if not risks["findings"]:
+        add("- для этого пункта не найдено")
+    for finding in risks["findings"]:
+        add(f"- [{finding['severity']}] {finding['code']}: "
+            f"`{finding['supporting_item']}` опирается на `{finding['entity']}`, "
+            f"который удаляет `{finding['removing_item']}`")
+    if risks["findings"]:
+        add(f"- осознанное исключение: {risks['waiver']}")
 
     docs = pack["docs"]
     add("")

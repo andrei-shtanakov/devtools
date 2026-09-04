@@ -59,6 +59,61 @@ def test_body_unreadable_repo_is_error_not_absent():
     assert source.state == "error", "an unread source must never look empty-but-read"
 
 
+def _risk_snapshot(lines):
+    nodes = []
+    for line_no, (item_id, title) in enumerate(lines, 1):
+        nodes.append({"node_id": f"todo://devtools/{item_id}", "id": item_id,
+                      "repo": "devtools", "title": title,
+                      "declared_status": "open", "raw": {},
+                      "provenance": {"path": "TODO.md", "line": line_no}})
+    return {"nodes": nodes, "edges": [], "references": [], "diagnostics": []}
+
+
+def test_deleted_dependency_uses_body_path_and_basename_on_both_surfaces(tmp_path):
+    directory = _write(tmp_path, "\n".join([
+        "- [ ] Общий слой @id:build",
+        "      Строить адаптер обобщением scripts/harness/claude-review.",
+        "- [ ] Удалить переходник claude-review @id:remove",
+    ]) + "\n")
+    snapshot = _risk_snapshot([("build", "Общий слой"),
+                               ("remove", "Удалить переходник claude-review")])
+    snapshot["nodes"][1]["provenance"]["line"] = 3
+    report = tc.deleted_dependency_report(snapshot, {"devtools": directory})
+    assert report["fleet_pair_count"] == 1
+    assert report["findings"][0]["entity"] == "scripts/harness/claude-review"
+
+
+def test_deleted_dependency_needs_action_pair_and_ignores_meta_rule(tmp_path):
+    directory = _write(tmp_path, "\n".join([
+        "- [ ] Документировать scripts/harness/claude-review @id:mention",
+        "      Обычное совместное упоминание пути.",
+        "- [ ] Удалить claude-review @id:remove",
+        "- [ ] Проверка правила: пункт не должен опираться на удаляемый путь @id:meta",
+        "      Мета-пункт описывает, как строить scripts/harness/claude-review "
+        "и удалить его.",
+    ]) + "\n")
+    snapshot = _risk_snapshot([("mention", "Документировать"),
+                               ("remove", "Удалить claude-review"),
+                               ("meta", "Проверка правила")])
+    snapshot["nodes"][1]["provenance"]["line"] = 3
+    snapshot["nodes"][2]["provenance"]["line"] = 4
+    assert tc.deleted_dependency_report(snapshot, {"devtools": directory})[
+        "fleet_pair_count"] == 0
+
+
+def test_deleted_dependency_waiver_suppresses_pair(tmp_path):
+    directory = _write(tmp_path, "\n".join([
+        "- [ ] Общий слой [waived] @id:build",
+        "      Строить на scripts/harness/claude-review.",
+        "- [ ] Удалить claude-review @id:remove",
+    ]) + "\n")
+    snapshot = _risk_snapshot([("build", "Общий слой"),
+                               ("remove", "Удалить claude-review")])
+    snapshot["nodes"][1]["provenance"]["line"] = 3
+    assert tc.deleted_dependency_report(snapshot, {"devtools": directory})[
+        "fleet_pair_count"] == 0
+
+
 def test_named_doc_paths_reads_section_and_line_without_duplicates():
     item = {
         "section": "Waits graph "
