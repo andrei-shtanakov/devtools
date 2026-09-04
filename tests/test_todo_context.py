@@ -82,6 +82,11 @@ def _sources(**states) -> list[tc.Source]:
     return [tc.Source(name, state) for name, state in states.items()]
 
 
+def _epic(goal: str = "зачем существует поток") -> dict:
+    """An epic block as `read_epic` builds it — only `goal` matters to the grade."""
+    return {"id": "eco.x", "goal": goal, "notes": None}
+
+
 def _docs(*paths: str, ref: bool = True) -> dict:
     """A docs block as `read_docs` builds it: `doc` means the path can hold a
     requirement AND the line refers to the item canonically."""
@@ -107,6 +112,8 @@ def test_grade_thin_when_only_the_epic_is_known():
                  origin_issue="not_queried"),
         {"text": None},
         None,
+        None,
+        _epic(),
     )
     assert verdict["grade"] == "thin"
     assert verdict["execute_allowed"] is False, \
@@ -130,6 +137,8 @@ def test_grade_short_body_does_not_count_as_a_requirement():
                  origin_issue="not_queried"),
         {"text": "мелкая ремарка"},
         None,
+        None,
+        _epic(),
     )
     assert verdict["grade"] == "thin"
 
@@ -150,7 +159,7 @@ def test_grade_note_absent_when_everything_was_read():
         _sources(item="read", body="read", epic="read", docs="read",
                  origin_issue="read"),
         {"text": "x" * 200},
-        {"number": 1},
+        {"number": 1, "body": "т" * 200},
         _docs("docs/plans/x.md"),
     )
     assert verdict["unknown_sources"] == []
@@ -257,6 +266,7 @@ def test_grade_ignores_a_named_doc_that_is_not_there():
         None,
         {"named": [{"path": "docs/plans/gone.md", "exists": False, "bytes": None}],
          "mentions": []},
+        _epic(),
     )
     assert verdict["grade"] == "thin", "a dead path is not a written requirement"
 
@@ -401,6 +411,7 @@ def test_grade_ignores_an_empty_named_doc():
         None,
         {"named": [{"path": "docs/plans/stub.md", "exists": True, "bytes": 0}],
          "mentions": []},
+        _epic(),
     )
     assert verdict["grade"] == "thin"
     assert verdict["execute_allowed"] is False
@@ -491,3 +502,90 @@ def test_identity_clash_is_a_message_not_a_traceback(monkeypatch, tmp_path):
         assert "cannot resolve repo identity" in str(exc)
         return
     raise AssertionError("an identity clash must not reach the user as a traceback")
+
+
+# ─────────── регрессии четвёртого круга ревью PR #125 ───────────
+
+
+def test_grade_ignores_an_issue_with_no_requirement_in_it():
+    """`inbox` deliberately does not require a body, so `slug:` + `from:` is a
+    valid request — valid, but not a written requirement."""
+    verdict = tc.grade(
+        _sources(item="read", body="absent", epic="absent", docs="absent",
+                 origin_issue="read"),
+        {"text": None},
+        {"number": 7, "body": "slug: foo-slug\nfrom: arbiter#gate\n"},
+        None,
+    )
+    assert verdict["grade"] == "bare"
+    assert verdict["execute_allowed"] is False
+
+
+def test_grade_accepts_an_issue_that_states_a_requirement():
+    verdict = tc.grade(
+        _sources(item="read", body="absent", epic="absent", docs="absent",
+                 origin_issue="read"),
+        {"text": None},
+        {"number": 7, "body": "slug: foo\n\n" + "требование. " * 20},
+        None,
+    )
+    assert verdict["execute_allowed"] is True
+
+
+def test_grade_needs_the_epic_to_actually_state_a_goal():
+    """`epic: read` is presence; an epic whose goal is empty says nothing about
+    the stream, so it cannot be the difference between thin and bare."""
+    sources = _sources(item="read", body="absent", epic="read", docs="absent",
+                       origin_issue="not_queried")
+    assert tc.grade(sources, {"text": None}, None, None,
+                    {"id": "e", "goal": None, "notes": None})["grade"] == "bare"
+    assert tc.grade(sources, {"text": None}, None, None,
+                    {"id": "e", "goal": "зачем поток"})["grade"] == "thin"
+
+
+def test_unknown_epic_is_absent_not_error(tmp_path):
+    """The registry WAS read: calling this `error` put it in unknown_sources
+    under a note saying it was never read."""
+    registry = tmp_path / "epics.toml"
+    registry.write_text('[epics."eco.real"]\ngoal = "g"\n', encoding="utf-8")
+    epic, source = tc.read_epic(registry, "eco.typo")
+    assert epic is None
+    assert source.state == "absent", "прочитанный реестр — не непрочитанный источник"
+    assert "EP-UNKNOWN" in (source.detail or "")
+    verdict = tc.grade([source], {"text": None}, None, None, None)
+    assert "epic" not in verdict["unknown_sources"]
+
+
+def test_unreadable_registry_stays_an_error(tmp_path):
+    epic, source = tc.read_epic(tmp_path / "gone.toml", "eco.real")
+    assert epic is None and source.state == "error"
+
+
+def test_origin_issue_slug_is_a_token_not_a_prefix():
+    """`benchmark-2` also matches `benchmark-20`: in `inbox` that is a label in a
+    report, here it would be the requirement body handed to an executor."""
+    issues = [{"repository": {"name": "maestro"}, "number": 7, "title": "t",
+               "body": "slug: benchmark-2\n"}]
+    item = {"repo": "maestro",
+            "source_line": "- [ ] Прогнать benchmark-20 @id:sweep-20"}
+    assert tc.match_origin_issue(issues, item) is None
+    item["source_line"] = "- [ ] Прогнать benchmark-2 @id:sweep"
+    assert tc.match_origin_issue(issues, item) is not None
+
+
+def test_docs_keeps_every_reference_when_the_output_is_capped(monkeypatch, tmp_path):
+    """The display cap used to be applied to raw stdout, so a canonical reference
+    past hit 40 was invisible to the grade while docs still reported plain `read`."""
+    noise = [{"path": f"src/f{i}.py", "line": "1", "text": "…",
+              "full": "my-item"} for i in range(tc._GREP_CAP + 20)]
+    ref = {"path": "docs/plans/late.md", "line": "9", "text": "…",
+           "full": "ждёт @id:my-item"}
+    monkeypatch.setattr(tc, "git_grep", lambda directory, needle: (noise + [ref], None))
+    docs, source = tc.read_docs(tmp_path, {"id": "my-item", "source_line": "",
+                                           "section": ""})
+    assert len(docs["mentions"]) == tc._GREP_CAP
+    assert docs["mentions"][0]["path"] == "docs/plans/late.md", "ссылка не выброшена"
+    assert docs["hidden_mentions"] == 21
+    assert source.detail and "не показаны" in source.detail
+    verdict = tc.grade([source], {"text": None}, None, docs, None)
+    assert verdict["execute_allowed"] is True

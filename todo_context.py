@@ -97,13 +97,25 @@ _BODY_SUBSTANTIAL = 120
 #: alone reintroduced "empty looks green" on the docs side (ревью PR #125, круг 3).
 _DOC_SUBSTANTIAL = 120
 
+#: And for the originating issue. `inbox` deliberately does not require a body
+#: (`inbox._well_formed`), so `slug:` + `from:` and nothing else is a valid
+#: request — valid, but not a requirement (ревью PR #125, круг 4). Three sources
+#: can carry the requirement, and all three answer to the same floor.
+_ISSUE_SUBSTANTIAL = 120
+
 _RULES_FILES = ("CLAUDE.md", "AGENTS.md")
 #: Bytes (not characters) of a rules file inlined before it is marked truncated.
 #: These files are mostly Cyrillic, where a character is two bytes: cutting by
 #: character would inline ~1.4x the intended payload and misreport `truncated`
 #: against the `bytes` printed beside it (Copilot, PR #125).
 _RULES_CAP = 8000
-_GREP_CAP = 40  # hits kept from one `git grep`
+_GREP_CAP = 40  # hits PRINTED from one `git grep`
+#: Lines read from one `git grep` before the read itself is capped. The display
+#: cap used to be applied to raw stdout, so a canonical reference sitting past
+#: hit 40 was invisible to the grade while the source still reported a plain
+#: `read` — "we did not look" wearing the face of "there is nothing there"
+#: (ревью PR #125, круг 4).
+_GREP_HARD_CAP = 2000
 _GIT_TIMEOUT = 20
 
 
@@ -267,7 +279,11 @@ def read_epic(registry_path: Path,
 
     entry = epics.get(epic_id)
     if entry is None:
-        return None, Source("epic", "error",
+        # The registry WAS read and the epic is genuinely not in it. Calling that
+        # `error` put a successfully read source into `unknown_sources`, under a
+        # note saying it "was not read" — the module's own rule, inverted
+        # (ревью PR #125, круг 4). `error` stays for "could not read".
+        return None, Source("epic", "absent",
                             f"{epic_id} is not in the registry (EP-UNKNOWN)")
     program_id = epic_id.split(".", 1)[0]
     program = programs.get(program_id, {})
@@ -367,7 +383,7 @@ def git_grep(directory: Path,
     if done.returncode not in (0, 1):  # 1 = no match, a legitimate answer
         return None, (done.stderr.strip().splitlines() or ["git grep failed"])[-1]
     hits: list[dict[str, Any]] = []
-    for raw in done.stdout.splitlines()[:_GREP_CAP]:
+    for raw in done.stdout.splitlines()[:_GREP_HARD_CAP]:
         path, _, rest = raw.partition(":")
         line_no, _, text = rest.partition(":")
         # `full` is classified, `text` is displayed: a canonical reference past
@@ -431,10 +447,23 @@ def read_docs(directory: Path | None,
         hit["doc"] = (is_doc_mention(hit["path"])
                       and ref.search(hit.pop("full", "")) is not None)
         hit.pop("full", None)
-    block = {"named": resolved, "mentions": hits}
+    # classify first, then cut for display, and keep every reference: the cut is
+    # about what is READABLE, never about what was found
+    refs = [h for h in hits if h["doc"]]
+    rest = [h for h in hits if not h["doc"]]
+    shown = (refs + rest)[:_GREP_CAP]
+    cut = len(hits) - len(shown)
+    hard = len(hits) >= _GREP_HARD_CAP
+    block = {"named": resolved, "mentions": shown, "hidden_mentions": cut,
+             "grep_capped": hard}
     have = any(d["exists"] for d in resolved) or bool(hits)
-    return block, Source("docs", "read" if have else "absent",
-                         None if have else f"no file names @id:{item['id']}")
+    detail = None if have else f"no file names @id:{item['id']}"
+    if hard:
+        detail = (f"выдача git grep обрезана на {_GREP_HARD_CAP} строках — "
+                  f"часть упоминаний не классифицирована")
+    elif cut:
+        detail = f"{cut} упоминаний не показаны (ссылки на пункт показаны все)"
+    return block, Source("docs", "read" if have else "absent", detail)
 
 
 def read_body(directory: Path | None,
@@ -531,7 +560,7 @@ def match_origin_issue(issues: list[dict[str, Any]],
         if not repo or issue_repo != repo:
             continue  # another repo's request; see the docstring
         slug = inbox.parse_field(issue.get("body") or "", "slug")
-        if slug and slug in line:
+        if slug and slug_re(slug).search(line):
             return {
                 "repo": (issue.get("repository") or {}).get("name"),
                 "number": issue.get("number"),
@@ -540,6 +569,14 @@ def match_origin_issue(issues: list[dict[str, Any]],
                 "body": issue.get("body"),
             }
     return None
+
+
+def slug_re(slug: str) -> re.Pattern[str]:
+    """The slug as a token. `inbox.is_accepted` matches it as a bare substring and
+    documents the weakness (`benchmark-2` also matches `benchmark-20`); there it
+    is a label in a report, here it is the requirement body handed to an executor,
+    so the same slack costs more (ревью PR #125, круг 4)."""
+    return re.compile(rf"(?<![a-z0-9._-]){re.escape(slug)}{_ID_TAIL}")
 
 
 def read_origin_issue(item: dict[str, Any],
@@ -564,7 +601,8 @@ def read_origin_issue(item: dict[str, Any],
 
 def grade(sources: list[Source], body: dict[str, Any],
           origin: dict[str, Any] | None,
-          docs: dict[str, Any] | None = None) -> dict[str, Any]:
+          docs: dict[str, Any] | None = None,
+          epic: dict[str, Any] | None = None) -> dict[str, Any]:
     """How much context was actually assembled, and whether `execute` may run.
 
     The floor for `execute` is a WRITTEN requirement — a design doc or the
@@ -581,16 +619,19 @@ def grade(sources: list[Source], body: dict[str, Any],
     """
     states = {s.source: s.state for s in sources}
     docs = docs or {}
+    # an epic whose goal is empty is not "the stream's goal is known" either:
+    # same presence-is-not-evidence rule, applied before it was reported
+    has_epic_goal = bool((epic or {}).get("goal") or (epic or {}).get("notes"))
     has_doc = (any((d.get("bytes") or 0) >= _DOC_SUBSTANTIAL
                    for d in docs.get("named", []) if d.get("exists"))
                or any(m.get("doc") for m in docs.get("mentions", [])))
-    has_issue = origin is not None
+    has_issue = len((origin or {}).get("body") or "") >= _ISSUE_SUBSTANTIAL
     has_body = len(body.get("text") or "") >= _BODY_SUBSTANTIAL
     unknowns = sorted(s for s, state in states.items()
                       if state in ("not_queried", "error"))
     if has_doc or has_issue or has_body:
         level, why = "rich", "a written requirement was found"
-    elif states.get("epic") == "read":
+    elif has_epic_goal:
         level, why = "thin", (
             "only the epic's goal — no written requirement for THIS item")
     else:
@@ -635,7 +676,7 @@ def build_pack(root: Path, manifest_path: Path, registry_path: Path, repo: str,
         "rules": rules,
         "origin_issue": origin,
         "sources": [asdict(s) for s in sources],
-        "completeness": grade(sources, body, origin, docs),
+        "completeness": grade(sources, body, origin, docs, epic),
     }
 
 
@@ -722,6 +763,9 @@ def render(pack: dict[str, Any]) -> str:
         add(f"- {kind}: `{path}` ({count})")
     if not docs["named"] and not grouped:
         add("ничего не найдено")
+    if docs.get("hidden_mentions"):
+        add(f"- ещё {docs['hidden_mentions']} упоминаний не показаны "
+            f"(все ссылки на пункт — выше)")
 
     if pack["origin_issue"]:
         origin = pack["origin_issue"]
