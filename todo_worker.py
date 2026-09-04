@@ -83,9 +83,14 @@ class HarnessError(WorkerError):
     """The harness did not run, or did not return a usable result — exit 3."""
 
 
-def require_id(value: str) -> str:
-    """The id (or repo) as a single safe path segment, or refuse."""
-    if _ID_RE.fullmatch(value or "") is None:
+def require_id(value: Any) -> str:
+    """The id (or repo) as a single safe path segment, or refuse.
+
+    The type is checked, not assumed: `--pack` is operator-supplied JSON, so a
+    numeric `item.id` is ordinary input and `fullmatch` would raise `TypeError`
+    past every guard in this file (Copilot, PR #126).
+    """
+    if not isinstance(value, str) or _ID_RE.fullmatch(value) is None:
         raise WorkerError(
             f"недопустимый идентификатор {value!r}: грамматика "
             f"[a-z0-9][a-z0-9._-]{{0,63}} (ADR-ECO-005 PF-2B)")
@@ -108,6 +113,26 @@ def require_pack(pack: Any) -> dict[str, Any]:
             f"pack неполон, нет полей: {', '.join(missing)} — соберите его "
             f"`todo_context.py --json`, а не вручную")
     return pack
+
+
+def require_checkout(pack: dict[str, Any]) -> Path:
+    """The target repo's checkout on this host — where the run must happen.
+
+    `subprocess.run` inherits the caller's cwd, which is devtools: without this
+    an `execute` run for a neighbour's item would edit devtools' own tree under
+    `workspace-write`, and the gate would have authorised changing one repo while
+    another moved. `issue_worker` never had to ask because `issue_console` starts
+    it with `tmux -c <repo_path>`; this one is called directly (ревью PR #126).
+    """
+    raw = pack.get("checkout")
+    if not raw:
+        raise WorkerError(
+            "в паке нет пути к чекауту целевого репо — запускать харнесс негде. "
+            "Пересоберите пак `todo_context.py --json` (поле `checkout`)")
+    directory = Path(raw)
+    if not (directory / ".git").exists():
+        raise WorkerError(f"чекаут {directory} не похож на git-репо — не запускаю")
+    return directory
 
 
 def result_path(output_root: Path, repo: str, item_id: str) -> Path:
@@ -205,12 +230,13 @@ def load_pack(args: argparse.Namespace) -> dict[str, Any]:
         root,
         Path(args.manifest) if args.manifest else tc.default_manifest(root),
         Path(args.registry) if args.registry else tc.default_registry(root),
-        require_id(repo), require_id(item_id), owner=args.issues,
+        repo, item_id, owner=args.issues,
     )
 
 
-def run_harness(prompt: str, execute: bool) -> dict[str, Any]:
-    """One `codex exec` with a schema, in the sandbox the mode earns."""
+def run_harness(prompt: str, execute: bool, cwd: Path) -> dict[str, Any]:
+    """One `codex exec` with a schema, in the sandbox the mode earns — and in the
+    target repo's checkout, never in the caller's."""
     with tempfile.TemporaryDirectory(prefix="todo-worker-") as tmp:
         schema = Path(tmp) / "schema.json"
         raw = Path(tmp) / "raw-result.json"
@@ -219,15 +245,20 @@ def run_harness(prompt: str, execute: bool) -> dict[str, Any]:
                "--output-last-message", str(raw), "--sandbox",
                "workspace-write" if execute else "read-only", prompt]
         try:
-            done = subprocess.run(cmd)
+            done = subprocess.run(cmd, cwd=cwd)
         except (OSError, subprocess.SubprocessError) as exc:
             raise HarnessError(f"не удалось запустить codex: {exc}") from exc
         if done.returncode:
             raise HarnessError(f"codex завершился с кодом {done.returncode}")
         try:
-            return json.loads(raw.read_text())
+            result = json.loads(raw.read_text())
         except (OSError, ValueError) as exc:
             raise HarnessError(f"невалидный результат codex: {exc}") from exc
+        if not isinstance(result, dict):
+            raise HarnessError(
+                f"результат codex не объект, а {type(result).__name__} — "
+                f"структурированный ответ не получен")
+        return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -267,12 +298,14 @@ def main(argv: list[str] | None = None) -> int:
         except (KeyError, TypeError) as exc:
             raise WorkerError(f"pack не рендерится, нет поля {exc}") from exc
         prompt = build_prompt(rendered, execute)
+        checkout = require_checkout(pack)
         if args.dry_run:
             print(f"=== dry-run: режим {args.mode}, sandbox "
-                  f"{'workspace-write' if execute else 'read-only'} ===")
+                  f"{'workspace-write' if execute else 'read-only'}, "
+                  f"cwd {checkout} ===")
             print(prompt)
             return 0
-        result = enforce_mode(run_harness(prompt, execute), execute)
+        result = enforce_mode(run_harness(prompt, execute, checkout), execute)
     except HarnessError as exc:
         print(f"todo-worker: {exc}", file=sys.stderr)
         return 3

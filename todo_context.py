@@ -795,6 +795,10 @@ def build_pack(root: Path, manifest_path: Path, registry_path: Path, repo: str,
     return {
         "node_id": node_id,
         "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        # Where the item's repo actually lives on this host. A consumer that RUNS
+        # anything must run it there; without this it would inherit the caller's
+        # cwd, which is devtools (ревью PR #126).
+        "checkout": str(directory) if directory is not None else None,
         "item": item,
         "body": body,
         "epic": epic,

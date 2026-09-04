@@ -8,6 +8,8 @@ sanitiser that keeps a result inside `out/`.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import todo_worker as tw
 
 
@@ -166,9 +168,11 @@ def test_bad_input_exits_two(tmp_path, capsys):
 
 def test_dry_run_shows_the_prompt_without_calling_the_harness(tmp_path, capsys):
     import json as _json
+    checkout = tmp_path / "devtools"
+    (checkout / ".git").mkdir(parents=True)
     pack = tmp_path / "pack.json"
     pack.write_text(_json.dumps(
-        {"node_id": "todo://devtools/x",
+        {"node_id": "todo://devtools/x", "checkout": str(checkout),
          "item": {"node_id": "todo://devtools/x",
                   "repo": "devtools", "id": "x", "title": "t", "status": "open",
                   "epic": None, "defect": None, "owner": None, "trigger": None,
@@ -186,6 +190,7 @@ def test_dry_run_shows_the_prompt_without_calling_the_harness(tmp_path, capsys):
     out = capsys.readouterr().out
     assert code == 0
     assert "sandbox workspace-write" in out
+    assert str(checkout) in out, "оператор видит, в каком дереве пойдёт правка"
     assert "Do not commit" in out
     assert not (tmp_path / "todo").exists(), "dry-run ничего не пишет"
 
@@ -207,3 +212,89 @@ def test_a_pack_that_is_not_an_object_is_refused(tmp_path, capsys):
     pack.write_text("[1, 2, 3]", encoding="utf-8")
     assert tw.main(["--pack", str(pack), "--output-root", str(tmp_path)]) == 2
     assert "не похож на context-pack" in capsys.readouterr().err
+
+
+def test_id_grammar_refuses_a_value_that_is_not_a_string():
+    """`--pack` is operator-supplied JSON: a numeric `item.id` is ordinary input,
+    and `fullmatch` raised TypeError past every guard in the file."""
+    for bad in (42, None, ["x"], {"id": "x"}):
+        try:
+            tw.require_id(bad)
+        except tw.WorkerError:
+            continue
+        raise AssertionError(f"принят нестроковый id: {bad!r}")
+
+
+def test_a_pack_with_a_numeric_id_exits_two(tmp_path, capsys):
+    import json as _json
+    pack = tmp_path / "pack.json"
+    pack.write_text(_json.dumps(
+        {"node_id": "todo://devtools/1", "item": {"repo": "devtools", "id": 1},
+         "completeness": {"grade": "rich", "reason": "r", "execute_allowed": True,
+                          "unknown_sources": [], "note": None}}), encoding="utf-8")
+    assert tw.main(["--pack", str(pack), "--output-root", str(tmp_path)]) == 2
+    assert "недопустимый идентификатор" in capsys.readouterr().err
+
+
+# ─────────── регрессии первого круга ревью PR #126 ───────────
+
+
+def test_the_run_happens_in_the_target_repo_not_the_callers_cwd(tmp_path):
+    """`subprocess.run` inherits devtools' cwd: without this an `execute` run for
+    a neighbour's item would have edited devtools' own tree."""
+    checkout = tmp_path / "maestro"
+    (checkout / ".git").mkdir(parents=True)
+    assert tw.require_checkout({"checkout": str(checkout)}) == checkout
+
+
+def test_an_unknown_checkout_refuses_instead_of_using_the_caller_cwd():
+    for pack in ({}, {"checkout": None}, {"checkout": ""}):
+        try:
+            tw.require_checkout(pack)
+        except tw.WorkerError as exc:
+            assert "негде" in str(exc)
+            continue
+        raise AssertionError("неизвестный чекаут должен быть отказом")
+
+
+def test_a_checkout_that_is_not_a_repo_is_refused(tmp_path):
+    (tmp_path / "not-a-repo").mkdir()
+    try:
+        tw.require_checkout({"checkout": str(tmp_path / "not-a-repo")})
+    except tw.WorkerError as exc:
+        assert "не похож на git-репо" in str(exc)
+        return
+    raise AssertionError("каталог без .git — не чекаут")
+
+
+def test_repo_spelling_is_normalised_by_the_contract_not_refused_here():
+    """`todo_context` resolves `Maestro` deliberately; refusing it here would
+    undo that and read as "нет такого пункта" for an item that is right there."""
+    import inspect
+    source = inspect.getsource(tw.load_pack)
+    assert "require_id(repo)" not in source, "сырое имя репо не санитайзится"
+
+
+def test_a_non_object_harness_result_is_an_answer_not_a_traceback(tmp_path,
+                                                                  monkeypatch):
+    """The author made `--pack` degrade honestly; the harness envelope is the
+    same kind of untrusted input."""
+    import subprocess as sp
+
+    class _Done:
+        returncode = 0
+
+    def fake_run(cmd, cwd=None):
+        Path(cmd[cmd.index("--output-last-message") + 1]).write_text("[1, 2]")
+        return _Done()
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    monkeypatch.setattr(tw.subprocess, "run", fake_run)
+    checkout = tmp_path / "repo"
+    (checkout / ".git").mkdir(parents=True)
+    try:
+        tw.run_harness("prompt", execute=False, cwd=checkout)
+    except tw.HarnessError as exc:
+        assert "не объект" in str(exc)
+        return
+    raise AssertionError("список вместо объекта — не структурированный ответ")
