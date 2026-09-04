@@ -135,7 +135,8 @@ def check_component(cid: str, meta: dict, ws: Path, section: str = "") -> list[d
         # Критерий узкий НАМЕРЕННО: `publish == "none"` сюда не годится, им
         # помечены все 15 apps — настоящие Python-пакеты, у которых пропавший
         # pyproject обязан оставаться предупреждением (ревью PR #139).
-        expected_missing = section == "tools" and not pp.exists()
+        expected_missing = (section == "tools" and publish != "pypi"
+                            and not pp.exists())
         add("no_pyproject_version", "info" if expected_missing else "warn",
             f"не прочитал version из {meta['pyproject_path']}")
     tag = latest_matching_tag(git_dir, meta["tag_pattern"])

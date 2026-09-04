@@ -119,3 +119,14 @@ def test_a_publishing_component_without_pyproject_still_warns(drift, tmp_path) -
         "core", _tool(publish="pypi", install="pypi"), tmp_path, "cores")
     vers = [x for x in found if x["kind"] == "no_pyproject_version"]
     assert vers and vers[0]["severity"] == "warn", vers
+
+
+def test_a_publishing_tool_keeps_the_warning(drift, tmp_path) -> None:
+    """Понижение — пересечение трёх условий, и `publish` среди них: инструмент,
+    который публикуется, обязан остаться предупреждением, даже будучи в секции
+    tools (ревью PR #139, круг 2)."""
+    _repo(tmp_path, "robin-toolkit")
+    found = drift.check_component(
+        "robin-toolkit", _tool(publish="pypi"), tmp_path, "tools")
+    vers = [x for x in found if x["kind"] == "no_pyproject_version"]
+    assert vers and vers[0]["severity"] == "warn", vers
