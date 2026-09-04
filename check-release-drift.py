@@ -127,7 +127,14 @@ def check_component(cid: str, meta: dict, ws: Path) -> list[dict]:
 
     disk_ver = pyproject_version(pp)
     if disk_ver is None:
-        add("no_pyproject_version", "warn", f"не прочитал version из {meta['pyproject_path']}")
+        # Компонент, который ничего не публикует, не имеет версии релиза, с
+        # которой можно разойтись: три из пяти tools так и помечены в манифесте
+        # («без pyproject» — Elixir, TypeScript), а ecosystem-kb — хранилище
+        # Obsidian. Факт остаётся видимым, но это не дрейф: иначе включение
+        # секции добавило бы четыре предупреждения, ни одно из которых не о пине.
+        sev = "warn" if publish == "pypi" else "info"
+        add("no_pyproject_version", sev,
+            f"не прочитал version из {meta['pyproject_path']}")
     tag = latest_matching_tag(git_dir, meta["tag_pattern"])
 
     # 2. manifest_stale: lock_version расходится с pyproject
@@ -189,8 +196,13 @@ def main() -> int:
     comps: dict[str, dict] = {}
     comps.update(manifest.get("cores", {}))
     comps.update(manifest.get("apps", {}))
+    # `[tools.*]` тоже пинуется и тоже обязано быть воспроизводимым: пять
+    # инструментов (devtools, ecosystem-kb, robin-toolkit, spec-runner-vscode,
+    # kapelle) не проверял никто, и это было незаметно, потому что детектор до
+    # секции не доходил — запрос prograph-vault, devtools#105.
+    comps.update(manifest.get("tools", {}))
     if not comps:
-        print("FATAL: в манифесте нет [cores.*]/[apps.*]", file=sys.stderr)
+        print("FATAL: в манифесте нет [cores.*]/[apps.*]/[tools.*]", file=sys.stderr)
         return 2
 
     findings: list[dict] = []
