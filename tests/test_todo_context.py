@@ -888,3 +888,52 @@ def test_pack_says_none_when_the_repo_is_not_checked_out(monkeypatch, tmp_path):
                                                              "not_queried", "x")))
     pack = tc.build_pack(tmp_path, tmp_path, tmp_path, "maestro", "x")
     assert pack["checkout"] is None
+
+
+# ─────────── регрессии первого круга ревью PR #140 ───────────
+
+
+def _snap(*items):
+    nodes = [{"node_id": f"todo://{r}/{i}", "id": i, "repo": r, "title": "t",
+              "declared_status": "open", "raw": {},
+              "provenance": {"path": "TODO.md", "line": n}}
+             for n, (r, i) in enumerate(items, 1)]
+    return {"nodes": nodes, "edges": [], "references": [], "diagnostics": []}
+
+
+def test_pair_count_names_the_repos_it_could_not_read(tmp_path):
+    """Число «пар во флоте» без списка нечитанных репо — это счёт по
+    ПРОЧИТАННОМУ, поданный как счёт по флоту: собственный режим отказа модуля."""
+    report = tc.deleted_dependency_report(_snap(), {}, None, ["maestro", "arbiter"])
+    assert report["unread_repos"] == ["arbiter", "maestro"]
+    assert report["fleet_pair_count"] == 0
+
+
+def test_negation_guard_needs_a_word_boundary():
+    """«в плане», «вполне» кончаются на «не» и глушили находку."""
+    entity = tc.re.compile(r"(?<![\w.-])scripts/x\.sh(?![\w.-])")
+    assert tc._states_removal("вполне удалить scripts/x.sh пора", entity)
+    assert not tc._states_removal("решено не удалять scripts/x.sh", entity)
+
+
+def test_waiver_is_read_from_the_item_line_not_its_prose(tmp_path):
+    """Маркер живёт на строке пункта, как `[x]`. Тело, процитировавшее
+    «[waived]» в прозе, глушило бы находку упоминанием."""
+    repo = tmp_path / "maestro"
+    repo.mkdir()
+    (repo / "TODO.md").write_text(
+        "- [ ] строить на scripts/x.sh @id:builder\n"
+        "      про ослабление: маркер [waived] ставится на строке\n"
+        "- [ ] удалить scripts/x.sh совсем @id:remover\n",
+        encoding="utf-8")
+    report = tc.deleted_dependency_report(
+        _snap(("maestro", "builder"), ("maestro", "remover")), {"maestro": repo})
+    assert report["fleet_pair_count"] == 1, "цитата в теле не должна глушить"
+
+    (repo / "TODO.md").write_text(
+        "- [ ] строить на scripts/x.sh @id:builder [waived]\n"
+        "- [ ] удалить scripts/x.sh совсем @id:remover\n",
+        encoding="utf-8")
+    report = tc.deleted_dependency_report(
+        _snap(("maestro", "builder"), ("maestro", "remover")), {"maestro": repo})
+    assert report["fleet_pair_count"] == 0, "маркер на строке обязан глушить"

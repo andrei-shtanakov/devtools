@@ -632,6 +632,26 @@ def read_body(directory: Path | None,
             Source("body", "read"))
 
 
+def _cached_item(snapshot: dict[str, Any], node: dict[str, Any],
+                 checkouts: dict[str, Path],
+                 scraped: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """`read_item` for a whole snapshot, reading each repo's TODO.md once."""
+    repo = node["repo"]
+    if repo not in scraped:
+        directory = checkouts.get(repo)
+        todo = directory / "TODO.md" if directory is not None else None
+        by_id: dict[str, Any] = {}
+        if todo is not None and todo.is_file():
+            text = todo.read_text(encoding="utf-8", errors="ignore")
+            by_id = {it.item_id: it for it in _pf.scrape_items(text)}
+        scraped[repo] = by_id
+    hit = scraped[repo].get(node["id"])
+    return {"repo": repo, "id": node["id"],
+            "source_line": hit.raw_text if hit is not None else None,
+            "section": hit.section if hit is not None else None,
+            "line": node.get("provenance", {}).get("line")}
+
+
 def _meta_rule_text(text: str) -> bool:
     """Rule-writing examples must not report themselves as plan conflicts."""
     low = text.lower()
@@ -644,20 +664,32 @@ def _states_removal(text: str, entity: re.Pattern[str]) -> bool:
         removal = _REMOVE_RE.search(line)
         if removal and entity.search(line):
             prefix = line[max(0, removal.start() - 12):removal.start()].lower()
-            if not re.search(r"(?:не|без)\s*$", prefix):
+            # Граница обязательна: «в плане», «вполне» кончаются на «не» и
+            # глушили бы находку (ревью PR #140).
+            if not re.search(r"(?:^|[^\w-])(?:не|без)\s*$", prefix):
                 return True
     return False
 
 
 def deleted_dependency_report(snapshot: dict[str, Any],
                               checkouts: dict[str, Path],
-                              focus_node_id: str | None = None) -> dict[str, Any]:
-    """Measure open item pairs where one builds on a path another removes."""
+                              focus_node_id: str | None = None,
+                              unread: list[str] | None = None) -> dict[str, Any]:
+    """Measure open item pairs where one builds on a path another removes.
+
+    `unread` names manifest repos with no checkout here. Their plans were never
+    opened, so a pair count without them is a count over what was READ — and
+    printing it bare would be this module's own failure mode: "we did not look"
+    wearing the face of "there is nothing there" (ревью PR #140).
+    """
     items: list[dict[str, Any]] = []
+    # `read_item` заново читает и разбирает TODO.md репо на КАЖДЫЙ узел, а узлов
+    # сотни — кэш на репо снимает квадратичность (Copilot, PR #140).
+    scraped: dict[str, dict[str, Any]] = {}
     for node in snapshot.get("nodes", []):
         if node.get("declared_status") != "open":
             continue
-        item = read_item(snapshot, node["node_id"], checkouts)
+        item = _cached_item(snapshot, node, checkouts, scraped)
         body, source = read_body(checkouts.get(item["repo"]), item)
         if source.state == "error":
             continue
@@ -668,11 +700,17 @@ def deleted_dependency_report(snapshot: dict[str, Any],
 
     findings: list[dict[str, Any]] = []
     for support in items:
+        # `[waived]` ищется в СТРОКЕ пункта, а не в теле: маркеры живут на
+        # строке (как `[x]`), а тело, процитировавшее «[waived]» в прозе,
+        # глушило бы находку упоминанием (ревью PR #140).
         if (not _SUPPORT_RE.search(support["text"])
                 or _meta_rule_text(support["line"])
-                or "[waived]" in support["text"].lower()):
+                or "[waived]" in support["line"].lower()):
             continue
-        for path in sorted(set(_PATH_RE.findall(support["body"]))):
+        # Якорь берётся из СТРОКИ И ТЕЛА: критерий пункта уточнён замером
+        # (PR #132, круг 2) — стороны живут в разных местах пункта, и тело
+        # одно прошло бы мимо пункта, назвавшего путь в своей строке.
+        for path in sorted(set(_PATH_RE.findall(support["text"]))):
             basename = path.rsplit("/", 1)[-1]
             names = [path]
             # Very short basenames (`v2`, `ui`) are vocabulary, not entities;
@@ -684,9 +722,9 @@ def deleted_dependency_report(snapshot: dict[str, Any],
             for remover in items:
                 if remover["node_id"] == support["node_id"]:
                     continue
-                if (not _states_removal(remover["text"], entity) or
-                        _meta_rule_text(remover["line"]) or
-                        "[waived]" in remover["text"].lower()):
+                if (not _states_removal(remover["text"], entity)
+                        or _meta_rule_text(remover["line"])
+                        or "[waived]" in remover["line"].lower()):
                     continue
                 findings.append({"code": "TODO-DELETED-DEPENDENCY",
                                  "severity": "warning",
@@ -700,7 +738,8 @@ def deleted_dependency_report(snapshot: dict[str, Any],
                 (f["supporting_item"], f["removing_item"])]
                if focus_node_id else all_findings)
     return {"fleet_pair_count": len(all_findings), "findings": focused,
-            "waiver": "put [waived] in either item's line or body"}
+            "unread_repos": sorted(unread or []),
+            "waiver": "put [waived] on the item's own checkbox line"}
 
 
 def read_rules(directory: Path | None) -> tuple[list[dict[str, Any]], Source]:
@@ -875,7 +914,7 @@ def build_pack(root: Path, manifest_path: Path, registry_path: Path, repo: str,
     epic, src = read_epic(registry_path, item["epic"]); sources.append(src)
     body, src = read_body(directory, item); sources.append(src)
     graph, src = read_graph(snapshot, node_id, unread); sources.append(src)
-    plan_risks = deleted_dependency_report(snapshot, checkouts, node_id)
+    plan_risks = deleted_dependency_report(snapshot, checkouts, node_id, unread)
     docs, src = read_docs(directory, item); sources.append(src)
     rules, src = read_rules(directory); sources.append(src)
     origin, src = read_origin_issue(item, owner); sources.append(src)
