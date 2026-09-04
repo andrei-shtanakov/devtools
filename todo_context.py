@@ -19,9 +19,14 @@ tool collects exactly those and reports what it found.
 NEVER reported as absent. That is the same distinction `epics.py` keeps between
 `unavailable` and `missing`, for the same reason: "we did not look" and "there is
 nothing there" produce identical-looking empty output, and an executor that cannot
-tell them apart will confidently work from a context it never had. The grade at
-the bottom is computed from those states, not from whether the text came out
-non-empty.
+tell them apart will confidently work from a context it never had.
+
+The grade at the bottom is computed from the CONTENT that was found — a written
+requirement, sized — never from a source's state, because a state answers "did we
+look?" and never "is there a requirement?". Reading a state as the answer is
+exactly what let a `git grep` hit on a branch name grade an item executable
+(ревью PR #125). The states are reported alongside, and every unread one is named
+in `unknown_sources`, so a thin verdict can be told from an uninformed one.
 
 Nothing here re-implements plan semantics. Identity, parsing, the cross-repo graph
 and its diagnostics are `plan_fields`' (`checkout_map` / `parse_fleet` /
@@ -86,6 +91,11 @@ _HEADING_START_RE = re.compile(r"^#{1,6}\s")
 #: A continuation block this long (non-blank chars) is treated as a written
 #: requirement. Two short lines of aside are not a spec; a paragraph is.
 _BODY_SUBSTANTIAL = 120
+
+#: The same floor for a named design doc. A path committed ahead of the writing
+#: is a normal habit, and an empty stub is not a requirement — reading `exists`
+#: alone reintroduced "empty looks green" on the docs side (ревью PR #125, круг 3).
+_DOC_SUBSTANTIAL = 120
 
 _RULES_FILES = ("CLAUDE.md", "AGENTS.md")
 #: Bytes (not characters) of a rules file inlined before it is marked truncated.
@@ -164,8 +174,9 @@ def build_inputs(root: Path,
 
 def fleet_snapshot(
     root: Path, manifest_path: Path
-) -> tuple[dict[str, Any], dict[str, Path], list[str]]:
-    """The snapshot, where each repo lives, and which repos could not be read."""
+) -> tuple[dict[str, Any], dict[str, Path], list[str], Any]:
+    """The snapshot, where each repo lives, which repos could not be read, and the
+    manifest index — the one authority on how a repo may be spelled."""
     if _pf is None:  # pragma: no cover - environment guard
         raise ContextError(
             "plan_fields is not importable — run through the pinned env:\n"
@@ -175,12 +186,13 @@ def fleet_snapshot(
         raise ContextError(f"no workspace manifest at {manifest_path}")
     try:
         index = _pf.manifest_index(manifest_path)
+        inputs, checkouts, unread = build_inputs(root, index)
     except _pf.AmbiguousIdentityError as exc:
-        # Same answer `check-plan-fields.py` gives: a manifest that names one
-        # checkout twice has no correct answer, and a traceback is not one.
+        # Same answer `check-plan-fields.py` gives, and in BOTH places it can be
+        # raised: `checkout_map` decides identity too. A workspace holding two
+        # checkouts of one repo has no correct answer — a traceback is not one.
         raise ContextError(f"cannot resolve repo identity: {exc}") from exc
-    inputs, checkouts, unread = build_inputs(root, index)
-    return _pf.parse_fleet(inputs, index), checkouts, unread
+    return _pf.parse_fleet(inputs, index), checkouts, unread, index
 
 
 # ─────────────────────────── the sources ───────────────────────────
@@ -569,7 +581,8 @@ def grade(sources: list[Source], body: dict[str, Any],
     """
     states = {s.source: s.state for s in sources}
     docs = docs or {}
-    has_doc = (any(d.get("exists") for d in docs.get("named", []))
+    has_doc = (any((d.get("bytes") or 0) >= _DOC_SUBSTANTIAL
+                   for d in docs.get("named", []) if d.get("exists"))
                or any(m.get("doc") for m in docs.get("mentions", [])))
     has_issue = origin is not None
     has_body = len(body.get("text") or "") >= _BODY_SUBSTANTIAL
@@ -595,8 +608,13 @@ def grade(sources: list[Source], body: dict[str, Any],
 def build_pack(root: Path, manifest_path: Path, registry_path: Path, repo: str,
                item_id: str, owner: str | None = None) -> dict[str, Any]:
     """Assemble the whole context pack for one item."""
-    node_id = f"todo://{repo}/{item_id}"
-    snapshot, checkouts, unread = fleet_snapshot(root, manifest_path)
+    snapshot, checkouts, unread, index = fleet_snapshot(root, manifest_path)
+    # `parse_fleet` keys nodes by the canonical name, so a legitimate spelling —
+    # `Maestro`, or a git_dir locator the user sees on disk — must be normalised
+    # by the contract, not by the user. Without it the refusal reads "no such
+    # item" for an item that is right there (ревью PR #125, круг 3).
+    resolved = index.resolve_ref(repo) or repo
+    node_id = f"todo://{resolved}/{item_id}"
     item = read_item(snapshot, node_id, checkouts)
     directory = checkouts.get(item["repo"])
     sources = [Source("item", "read")]
@@ -720,8 +738,12 @@ def render(pack: dict[str, Any]) -> str:
         add("")
         add("## Repo rules")
         for rule in pack["rules"]:
-            suffix = " (обрезано)" if rule["truncated"] else ""
-            add(f"- `{rule['path']}` — {rule['bytes']} байт{suffix}")
+            # the text itself is inlined in the pack (--json), not here: a scope
+            # fence is thousands of bytes and would bury the item. Say where it
+            # is, so "(обрезано)" stops describing invisible text (круг 3).
+            cut = f", инлайн обрезан до {_RULES_CAP} байт" if rule["truncated"] else ""
+            add(f"- `{rule['path']}` — {rule['bytes']} байт{cut}; "
+                f"текст — в `--json`")
 
     completeness = pack["completeness"]
     add("")

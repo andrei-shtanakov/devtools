@@ -243,7 +243,7 @@ def test_grade_executes_on_a_named_doc_that_exists():
                  origin_issue="not_queried"),
         {"text": None},
         None,
-        {"named": [{"path": "docs/plans/x.md", "exists": True, "bytes": 10}],
+        {"named": [{"path": "docs/plans/x.md", "exists": True, "bytes": 4000}],
          "mentions": []},
     )
     assert verdict["execute_allowed"] is True
@@ -385,3 +385,109 @@ def test_graph_stays_silent_when_the_whole_fleet_was_read():
     graph, source = tc.read_graph(snapshot, "todo://devtools/x", [])
     assert graph["unread_repos"] == []
     assert source.detail is None, "полный флот не нуждается в оговорке"
+
+
+# ─────────── регрессии третьего круга ревью PR #125 ───────────
+
+
+def test_grade_ignores_an_empty_named_doc():
+    """A path committed ahead of the writing is normal; an empty stub is not a
+    requirement. Reading `exists` alone put "пустое выглядит зелёным" back on
+    the docs side, where `_BODY_SUBSTANTIAL` already guards the body."""
+    verdict = tc.grade(
+        _sources(item="read", body="absent", epic="read", docs="read",
+                 origin_issue="not_queried"),
+        {"text": None},
+        None,
+        {"named": [{"path": "docs/plans/stub.md", "exists": True, "bytes": 0}],
+         "mentions": []},
+    )
+    assert verdict["grade"] == "thin"
+    assert verdict["execute_allowed"] is False
+
+
+def test_grade_accepts_a_named_doc_that_was_actually_written():
+    verdict = tc.grade(
+        _sources(item="read", body="absent", epic="read", docs="read",
+                 origin_issue="not_queried"),
+        {"text": None},
+        None,
+        {"named": [{"path": "docs/plans/x.md", "exists": True,
+                    "bytes": tc._DOC_SUBSTANTIAL}], "mentions": []},
+    )
+    assert verdict["execute_allowed"] is True
+
+
+class _FakeIndex:
+    """Just the one thing `build_pack` asks of a manifest index."""
+
+    canonical_keys = ("maestro",)
+
+    def resolve_ref(self, ref):
+        return "maestro" if ref.lower() in ("maestro", "maestro-wt") else None
+
+
+def _fake_snapshot():
+    node = {"node_id": "todo://maestro/x", "id": "x", "repo": "maestro",
+            "title": "t", "declared_status": "open", "raw": {},
+            "provenance": {"path": "TODO.md", "line": 1}}
+    return ({"nodes": [node], "edges": [], "references": [], "diagnostics": []},
+            {}, [], _FakeIndex())
+
+
+def test_build_pack_normalises_the_repo_spelling(monkeypatch, tmp_path):
+    """`parse_fleet` keys nodes canonically, so `todo://Maestro/x` used to be
+    refused as "no such item" for an item that is right there."""
+    monkeypatch.setattr(tc, "fleet_snapshot", lambda root, manifest: _fake_snapshot())
+    monkeypatch.setattr(tc, "read_origin_issue",
+                        lambda item, owner: (None, tc.Source("origin_issue",
+                                                             "not_queried", "x")))
+    pack = tc.build_pack(tmp_path, tmp_path, tmp_path, "Maestro", "x")
+    assert pack["node_id"] == "todo://maestro/x"
+    assert pack["item"]["repo"] == "maestro"
+
+
+def test_build_pack_keeps_an_unknown_spelling_verbatim(monkeypatch, tmp_path):
+    """An unresolvable name must fail as itself, not as a silently rewritten one."""
+    monkeypatch.setattr(tc, "fleet_snapshot", lambda root, manifest: _fake_snapshot())
+    try:
+        tc.build_pack(tmp_path, tmp_path, tmp_path, "no-such-repo", "x")
+    except tc.ContextError as exc:
+        assert "todo://no-such-repo/x" in str(exc)
+        return
+    raise AssertionError("an unknown repo must not resolve to something else")
+
+
+def test_render_survives_a_pack_with_nothing_in_it(monkeypatch, tmp_path):
+    """`render` was untested, and the docs error branch would have crashed it."""
+    monkeypatch.setattr(tc, "fleet_snapshot", lambda root, manifest: _fake_snapshot())
+    monkeypatch.setattr(tc, "read_origin_issue",
+                        lambda item, owner: (None, tc.Source("origin_issue",
+                                                             "not_queried", "x")))
+    text = tc.render(tc.build_pack(tmp_path, tmp_path, tmp_path, "maestro", "x"))
+    assert "# todo://maestro/x" in text
+    assert "## Completeness" in text
+    assert "execute_allowed: **False**" in text
+
+
+def test_identity_clash_is_a_message_not_a_traceback(monkeypatch, tmp_path):
+    """`checkout_map` decides identity too, so it raises the same error as
+    `manifest_index` — and only the latter was wrapped."""
+    class _Boom(Exception):
+        pass
+
+    class _FakePf:
+        AmbiguousIdentityError = _Boom
+
+        @staticmethod
+        def manifest_index(path):
+            raise _Boom("two checkouts resolve to `maestro`")
+
+    (tmp_path / "manifest.toml").write_text("", encoding="utf-8")
+    monkeypatch.setattr(tc, "_pf", _FakePf)
+    try:
+        tc.fleet_snapshot(tmp_path, tmp_path / "manifest.toml")
+    except tc.ContextError as exc:
+        assert "cannot resolve repo identity" in str(exc)
+        return
+    raise AssertionError("an identity clash must not reach the user as a traceback")
