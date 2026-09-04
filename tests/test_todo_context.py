@@ -592,7 +592,7 @@ def test_docs_keeps_every_reference_when_the_output_is_capped(monkeypatch, tmp_p
     past hit 40 was invisible to the grade while docs still reported plain `read`."""
     noise = [{"path": f"src/f{i}.py", "line": "1", "text": "…",
               "full": "my-item"} for i in range(tc._GREP_CAP + 20)]
-    ref = {"path": "docs/plans/late.md", "line": "9", "text": "…",
+    ref = {"path": "docs/plans/late.md", "line": "1", "text": "…",
            "full": "ждёт @id:my-item"}
     (tmp_path / "docs" / "plans").mkdir(parents=True)
     (tmp_path / "docs" / "plans" / "late.md").write_text(
@@ -705,3 +705,82 @@ def test_the_cap_note_does_not_claim_every_reference_is_shown(monkeypatch, tmp_p
     assert docs["hidden_references"] == 5
     assert "ссылок на пункт" in (source.detail or "")
     assert "показаны все" not in (source.detail or "")
+
+
+# ─────────── регрессии седьмого круга ревью PR #125 ───────────
+
+
+def test_a_checklist_line_quoting_the_id_states_no_requirement():
+    """behaviour-console.md:156-159 — the item's future `TODO.md` line quoted
+    inside the plan of a DIFFERENT item. It says nothing about this item."""
+    lines = [
+        "### Task 5: Обвязка и финал",
+        "",
+        "- [ ] TODO: `@id:behaviour-runner` → `[x]`;",
+        "  подпункт про inbox-issue disputatio — новой",
+        "  строкой `- [ ] inbox-issue в disputatio: режим полировки документа",
+        "  (OQ-1) @owner:github:andrei-shtanakov @id:disp-document-mode-issue`.",
+        "- [ ] Финальные проверки: py_compile всех governance/*.py и прочее.",
+    ]
+    assert tc.mention_states_a_requirement(lines, 6) is False, "продолжение чеклиста"
+    assert tc.mention_states_a_requirement(lines, 3) is False, "сама чеклист-строка"
+
+
+def test_a_section_naming_the_item_states_a_requirement():
+    """The roadmap's "## P1 — сократить промпт (`review-kit-prompt-diet`)" is a
+    requirement: a heading naming the item over a section that says something."""
+    lines = [
+        "## P1 — сократить промпт (`review-kit-prompt-diet`)",
+        "",
+        "Промпт кита разросся до полутора тысяч слов, из-за чего ревьюер теряет",
+        "порядок разделов и путает пороги. Сократить до четырёх разделов и",
+        "вынести пороги в отдельный блок, сверяемый тестом.",
+    ]
+    assert tc.mention_states_a_requirement(lines, 1) is True
+
+
+def test_a_heading_over_an_empty_section_states_nothing():
+    lines = ["## Заглушка (`my-item`)", "", "## Следующая секция", "текст" * 50]
+    assert tc.mention_states_a_requirement(lines, 1) is False
+
+
+def test_graph_names_legacy_waits_that_never_become_edges():
+    """`<repo>#<slug>` never becomes an edge and raises no diagnostic when it
+    matches exactly one item — so the wait is invisible to this slice entirely."""
+    snapshot = {
+        "nodes": [{"node_id": "todo://devtools/x", "id": "x", "repo": "devtools",
+                   "title": "t", "declared_status": "open"}],
+        "edges": [], "diagnostics": [],
+        "references": [
+            {"kind": "blocked_by", "source_node_id": "todo://steward/waits",
+             "raw_ref": "devtools#x", "resolved_target": None,
+             "legacy_blocker_ref": "devtools#x"},
+            {"kind": "blocked_by", "source_node_id": "todo://maestro/other",
+             "raw_ref": "disputatio#68", "resolved_target": None,
+             "legacy_blocker_ref": "disputatio#68"},
+        ],
+    }
+    graph, source = tc.read_graph(snapshot, "todo://devtools/x", [])
+    assert [w["raw_ref"] for w in graph["legacy_waits"]] == ["devtools#x"], \
+        "чужие переходные ожидания сюда не относятся"
+    assert graph["legacy_waits"][0]["names_this_item"] is True
+    assert graph["blocks"] == [], "переходная форма ребром не становится"
+    assert source.detail and "переходные ожидания" in source.detail
+
+
+def test_graph_reports_a_legacy_wait_to_the_repo_without_resolving_the_slug():
+    """Pairing a slug with an item is the package's rule; a private one here
+    would be the round-5 mistake again. So a same-repo legacy ref is reported as
+    a candidate, and only an exact id match is called out as naming this item."""
+    snapshot = {
+        "nodes": [{"node_id": "todo://devtools/x", "id": "x", "repo": "devtools",
+                   "title": "t", "declared_status": "open"}],
+        "edges": [], "diagnostics": [],
+        "references": [{"kind": "blocked_by", "source_node_id": "todo://steward/w",
+                        "raw_ref": "devtools#some-other-slug",
+                        "resolved_target": None,
+                        "legacy_blocker_ref": "devtools#some-other-slug"}],
+    }
+    graph, source = tc.read_graph(snapshot, "todo://devtools/x", [])
+    assert graph["legacy_waits"][0]["names_this_item"] is False
+    assert source.detail, "неполнота названа, даже когда слаг не про этот пункт"

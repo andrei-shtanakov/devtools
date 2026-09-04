@@ -97,6 +97,14 @@ _BODY_SUBSTANTIAL = 120
 #: alone reintroduced "empty looks green" on the docs side (ревью PR #125, круг 3).
 _DOC_SUBSTANTIAL = 120
 
+#: Prose in the reference's own section, once headings, blank lines and checklist
+#: items are dropped. For a NAMED doc the file size is a fair proxy — the item
+#: points AT the doc as its spec. For a mention the direction is reversed: the doc
+#: points at the item, and every real doc clears a byte threshold, so file size
+#: measured nothing about the item. A checklist line quoting `@id:` is a step in
+#: someone else's plan, not a specification of this item (ревью PR #125, круг 7).
+_SECTION_SUBSTANTIAL = 120
+
 #: And for the originating issue. `inbox` deliberately does not require a body
 #: (`inbox._well_formed`), so `slug:` + `from:` and nothing else is a valid
 #: request — valid, but not a requirement (ревью PR #125, круг 4). Three sources
@@ -320,6 +328,16 @@ def read_graph(snapshot: dict[str, Any], node_id: str,
     repos, and the render prints them beside the edges — "nobody waits on this"
     and "half the fleet was never read" must not look alike (ревью PR #125,
     круг 2), which is the same rule the module keeps for every other source.
+
+    It is incomplete a second way, and not because of this host: the transitional
+    `<repo>#<slug>` form never becomes an edge — "no `resolved_target`, no edge,
+    ever" — and when it matches exactly one item it raises no diagnostic either,
+    so such a wait is invisible to this slice entirely. Those references are
+    listed as `legacy_waits` and the count is named in the detail, but they are
+    NOT resolved here: pairing a slug with an item is the package's rule
+    (`check_legacy_fleet`), and a private one would be the round-5 mistake again.
+    An exact slug match is reported as a candidate, nothing narrower or wider
+    (ревью PR #125, круг 7).
     """
     by_id = {n["node_id"]: n for n in snapshot["nodes"]}
     findings = list(snapshot["diagnostics"]) + _pf.check_fleet(snapshot)
@@ -342,17 +360,36 @@ def read_graph(snapshot: dict[str, Any], node_id: str,
                   and not r.get("resolved_target")]
     mine = [d for d in findings
             if node_id in (d.get("subject_uri"), d.get("related_uri"))]
+    repo = node_id.removeprefix("todo://").split("/", 1)[0]
+    item_id = node_id.rsplit("/", 1)[-1]
+    legacy: list[dict[str, Any]] = []
+    for ref in snapshot.get("references", []):
+        raw = ref.get("legacy_blocker_ref")
+        if not raw or "#" not in raw:
+            continue
+        target_repo, _, slug = raw.partition("#")
+        if target_repo.lower() != repo.lower():
+            continue
+        legacy.append({"raw_ref": raw, "from": ref.get("source_node_id"),
+                       "names_this_item": slug == item_id})
     block = {
         "blocked_by": blocked_by,
         "blocks": blocks,
+        "legacy_waits": legacy,
         "unread_repos": sorted(unread or []),
         "unresolved_refs": [u for u in unresolved if u],
         "diagnostics": [{"code": d["code"], "severity": d["severity"],
                          "message": d["message"]} for d in mine],
     }
-    detail = None if not unread else (
-        f"{len(unread)} репо флота не склонированы здесь — обратная сторона "
-        f"(кто ждёт этот пункт) неполна: {', '.join(sorted(unread))}")
+    notes = []
+    if unread:
+        notes.append(f"{len(unread)} репо флота не склонированы здесь: "
+                     f"{', '.join(sorted(unread))}")
+    if legacy:
+        notes.append(f"переходные ожидания к `{repo}` ({len(legacy)}) ребром "
+                     f"не становятся — в срезе рёбер их нет")
+    detail = None if not notes else (
+        "обратная сторона (кто ждёт этот пункт) неполна: " + "; ".join(notes))
     return block, Source("graph", "read", detail)
 
 
@@ -415,6 +452,43 @@ def is_doc_mention(path: str) -> bool:
     return path.endswith(".md") and _DOC_MENTION_RE.search(path) is not None
 
 
+def mention_states_a_requirement(lines: list[str], line_no: int) -> bool:
+    """Does the reference on `line_no` sit in text that SPECIFIES the item?
+
+    Two shapes appear in this fleet, and only one is a requirement. A heading or
+    prose naming the item, followed by a section that says something — the
+    roadmap's "## P1 — сократить промпт (`review-kit-prompt-diet`)" — is one. A
+    checklist line quoting the item's future `TODO.md` text inside the plan of a
+    DIFFERENT item — behaviour-console.md:159 — is the other, and it states
+    nothing about the item at all (ревью PR #125, круг 7).
+    """
+    index = line_no - 1
+    if not 0 <= index < len(lines):
+        return False
+    # climb to the line that OWNS this one: a reference three lines into a
+    # checklist item is still inside that item (behaviour-console.md:156-159)
+    owner = index
+    while owner > 0 and lines[owner - 1].strip() and not _ITEM_START_RE.match(
+            lines[owner]) and not _HEADING_START_RE.match(lines[owner]):
+        owner -= 1
+    if _ITEM_START_RE.match(lines[owner]):
+        return False  # a step in a plan, not a spec of the item
+    start = 0
+    for i in range(index, -1, -1):
+        if _HEADING_START_RE.match(lines[i]):
+            start = i + 1
+            break
+    prose = 0
+    for i in range(start, len(lines)):
+        raw = lines[i]
+        if i > start and _HEADING_START_RE.match(raw):
+            break
+        if not raw.strip() or _ITEM_START_RE.match(raw):
+            continue
+        prose += len(raw.strip())
+    return prose >= _SECTION_SUBSTANTIAL
+
+
 def item_ref_re(item_id: str) -> re.Pattern[str]:
     """Matches a line that REFERS to the item, not one that merely contains its id.
 
@@ -461,17 +535,16 @@ def read_docs(directory: Path | None,
     if error is not None:
         return ({"named": resolved, "mentions": []}, Source("docs", "error", error))
     ref = item_ref_re(item["id"])
-    sized: dict[str, int] = {}
+    read: dict[str, list[str]] = {}
     for hit in hits:
         path, full = hit["path"], hit.pop("full", "")
-        in_doc = is_doc_mention(path)
-        if in_doc and path not in sized:
+        marked = is_doc_mention(path) and ref.search(full) is not None
+        if marked and path not in read:
             file = directory / path
-            sized[path] = file.stat().st_size if file.is_file() else 0
-        # the same floor a NAMED doc answers to: a stub holding one `@id:` line
-        # is a placeholder, not a requirement (ревью PR #125, круг 5)
-        hit["doc"] = (in_doc and sized.get(path, 0) >= _DOC_SUBSTANTIAL
-                      and ref.search(full) is not None)
+            read[path] = (file.read_text(encoding="utf-8", errors="replace")
+                          .splitlines() if file.is_file() else [])
+        hit["doc"] = marked and mention_states_a_requirement(
+            read.get(path, []), int(hit["line"]) if hit["line"].isdigit() else 0)
     # classify first, then cut for display, and keep every reference: the cut is
     # about what is READABLE, never about what was found
     refs = [h for h in hits if h["doc"]]
@@ -790,6 +863,11 @@ def render(pack: dict[str, Any]) -> str:
     if graph.get("unread_repos"):
         add(f"- ⚠ не склонированы здесь, их ожидания не видны: "
             f"{', '.join(graph['unread_repos'])}")
+    for wait in graph.get("legacy_waits", []):
+        mark = (" — слаг совпадает с `@id` этого пункта"
+                if wait["names_this_item"] else "")
+        add(f"- ⚠ переходное ожидание `{wait['raw_ref']}` от `{wait['from']}` "
+            f"ребром не стало{mark}")
     for edge in graph["blocked_by"]:
         add(f"- ждёт: `{edge['node_id']}` [{edge['status']}] {edge['title'] or ''}")
     for edge in graph["blocks"]:
