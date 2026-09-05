@@ -9,7 +9,9 @@
 - requirements: ``- **Q-NN · owner_role: <role> · blocking: true|false.**
   <текст>``;
 - design: ``#### Q-NN · owner_role: architects · resolution:
-  resolved|deferred`` (+ строка ``reason: <…>`` при ``deferred``);
+  resolved|deferred`` (+ строка ``reason: <…>`` при ``deferred``; у
+  ``resolved`` обоснование — первый непустой абзац блока, fallback в тот
+  же слот);
 - пустой входной набор архитектурных вопросов покрыт только явной строкой
   ``Открытых архитектурных вопросов нет (входной набор пуст)`` в design.
 """
