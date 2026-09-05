@@ -4,7 +4,7 @@ status: draft
 owner_role: stream-owner
 version: 1
 generated_by: fleet-agent
-generated_at: <YYYY-MM-DDTHH:MM:SS>
+generated_at: "<YYYY-MM-DDTHH:MM:SS>"
 source_prompt_version: ""
 validation: ""
 approved_by: ""
