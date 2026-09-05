@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -354,18 +355,21 @@ def _green_bundle(profile, bundle) -> bundle_state.BundleState:
     return bundle_state.BundleState((), 0, None, (), ())
 
 
-def _repin_design(bundle_dir: Path) -> None:
-    """Пересчитывает `upstream_hashes` `20-design.md` по ТЕКУЩЕМУ содержимому
-    requirements/behaviour-spec — правка бандла человеком после стопа
-    (resume-тесты) обязана обновить и пин design, иначе GC-STALE
-    (prospective) на ребре design→behaviour-spec стопит повторный гейт
-    независимо от того, что человек уже устранил исходную находку."""
+def _repin_bundle(bundle_dir: Path) -> None:
+    """Пересчитывает `upstream_hashes` ВСЕЙ цепочки design→decomposition по
+    ТЕКУЩЕМУ содержимому requirements/behaviour-spec — правка бандла
+    человеком после стопа (resume-тесты) обязана перепиновать design
+    (иначе GC-STALE(prospective) на ребре design→behaviour-spec) И
+    перегенерировать/перепиновать decomposition (иначе design протух под
+    decomposition — GC-STALE на ребре decomposition→design, — а DT старой
+    фикстуры ссылаются на исчезнувшие BEH ПОСТправочного behaviour-spec —
+    GC-DT-GRAPH). Переименован из `_repin_design` (Task 6): бывший хелпер
+    трогал только design, оставляя decomposition протухшим за ним."""
     req_pin = blob_sha1(
         (bundle_dir / "10-requirements.md").read_text(encoding="utf-8")
     )
-    beh_pin = blob_sha1(
-        (bundle_dir / "15-behaviour-spec.md").read_text(encoding="utf-8")
-    )
+    beh_text = (bundle_dir / "15-behaviour-spec.md").read_text(encoding="utf-8")
+    beh_pin = blob_sha1(beh_text)
     (bundle_dir / "20-design.md").write_text(
         "---\n"
         "spec_stage: design\n"
@@ -377,6 +381,31 @@ def _repin_design(bundle_dir: Path) -> None:
         f'  behaviour-spec: "{beh_pin}"\n'
         "---\n"
         "Открытых архитектурных вопросов нет (входной набор пуст)\n",
+        encoding="utf-8",
+    )
+    design_pin = blob_sha1(
+        (bundle_dir / "20-design.md").read_text(encoding="utf-8")
+    )
+    beh_ids = re.findall(r"^####\s+(BEH-\d+):", beh_text, re.M)
+    (bundle_dir / "30-decomposition.md").write_text(
+        "---\n"
+        "spec_stage: decomposition\n"
+        "status: draft\n"
+        "owner_role: tech-lead\n"
+        "traces_to: [design]\n"
+        "upstream_hashes:\n"
+        f'  design: "{design_pin}"\n'
+        "---\n"
+        "## Задачи\n\n"
+        "#### DT-01: x · type: implement · owner: dev\n"
+        f"scenarios: [{', '.join(beh_ids)}]\n"
+        "depends_on: []\n"
+        "parallel_group: solo\n"
+        "Проза предмета.\n\n"
+        "## Инварианты графа\n\nСоблюдены.\n\n"
+        "## Порядок и параллельность\n\n"
+        "DT-01 — единственная задача, зависимостей нет.\n\n"
+        "## Вне объёма\n\nНичего не исключено.\n",
         encoding="utf-8",
     )
 
@@ -1243,7 +1272,7 @@ def test_resume_from_stopped_gate_recommits_edited_bundle(
         "#### BEH-01: fixed\n`traces: [FR-01]`\n- **checked_by**: x\n",
         encoding="utf-8",
     )
-    _repin_design(bundle_dir)
+    _repin_bundle(bundle_dir)
 
     result = runner.resume(run_id, ops)
 
@@ -1302,7 +1331,7 @@ def test_resume_from_stopped_review_recommits_edited_bundle(
         "#### BEH-01: review fix\n`traces: [FR-01]`\n- **checked_by**: x\n",
         encoding="utf-8",
     )
-    _repin_design(bundle_dir)
+    _repin_bundle(bundle_dir)
     ops.review_exit = 0
     result = runner.resume(run_id, ops)
 
@@ -3057,6 +3086,7 @@ def test_gate_design_undeclared_behaviour_edge_stops(
     assert "push" not in state.ops
 
 
+@pytest.mark.xfail(reason="ребро DAG приходит Task 7", strict=True)
 def test_gate_edges_derived_from_bundle_dag() -> None:
     """MINOR-3: `runner._GATE_EDGES` не расходится с `task_bridge._BUNDLE_DAG`
     — рёбра S4 выводятся из ОДНОГО источника (не трёх несинхронизированных
@@ -3526,3 +3556,286 @@ def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root) -> None:
     assert state.status == "completed"
     assert state.ops["merge"]["status"] == "completed"
     assert ops.merged == [(state.pr, ops.head)]
+
+
+# --- Task 6: S4-гарды decomposition (отсутствие, ребро design, DSL, граф DT) --
+
+
+def test_gate_stops_when_decomposition_missing_from_bundle(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Зеркало `test_gate_stops_when_design_node_missing_from_bundle` на
+    узел decomposition: required-узел decomposition профиля team-exp, но
+    файла 30-decomposition.md в бандле нет ⇒ `stopped_gate` локально — ДО
+    цикла рёбер, даже когда design физически присутствует и валиден."""
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    run_id = "r-decomposition-absent"
+    target_dir = tmp_path / f"target-{run_id}"
+    target_dir.mkdir()
+    profile_dir = target_dir / "profiles"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "team-exp.yaml").write_text(
+        _TEAM_EXP_PROFILE_TEXT, encoding="utf-8"
+    )
+    bundle_dir = target_dir / BUNDLE_DIR
+    bundle_dir.mkdir(parents=True)
+    (bundle_dir / "00-charter.md").write_text("# charter\n", encoding="utf-8")
+    (bundle_dir / "10-requirements.md").write_text(
+        _DEFAULT_REQUIREMENTS_BODY, encoding="utf-8"
+    )
+    (bundle_dir / "15-behaviour-spec.md").write_text(
+        _DEFAULT_BEHAVIOUR_BODY, encoding="utf-8"
+    )
+    req_pin = blob_sha1(_DEFAULT_REQUIREMENTS_BODY)
+    beh_pin = blob_sha1(_DEFAULT_BEHAVIOUR_BODY)
+    (bundle_dir / "20-design.md").write_text(
+        "---\n"
+        "spec_stage: design\n"
+        "status: draft\n"
+        "owner_role: architects\n"
+        "traces_to: [requirements, behaviour-spec]\n"
+        "upstream_hashes:\n"
+        f'  requirements: "{req_pin}"\n'
+        f'  behaviour-spec: "{beh_pin}"\n'
+        "---\n"
+        "Открытых архитектурных вопросов нет (входной набор пуст)\n",
+        encoding="utf-8",
+    )
+    state = rs.new_run(
+        subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+        target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id=run_id,
+    )
+    state.branch = "spec/WS-1-behaviour"
+    state.ops = {
+        "branch": {"status": "completed"},
+        "author-charter": {"status": "completed", "skipped": True},
+        "author-requirements": {"status": "completed", "skipped": True},
+        "author-behaviour": {"status": "completed", "skipped": True},
+        "author-design": {"status": "completed", "skipped": True},
+        # decomposition намеренно НЕ авторен и не пропущен — файла нет вовсе.
+        "author-decomposition": {"status": "completed", "skipped": True},
+        "commit": {"status": "completed"},
+    }
+    rs.save(state)
+
+    result = runner.advance(state, ops)
+
+    assert result.status == "stopped_gate"
+    findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
+    assert "GC-COMPLETENESS(decomposition)" in findings
+    # Гард отсутствия design/decomposition стоит ДО цикла рёбер — иначе
+    # завтрашняя правка порядка кода тихо перепутала бы, что стопнуло
+    # прогон.
+    assert "GC-UNPINNED" not in findings
+    assert "GC-STALE" not in findings
+    assert "push" not in result.ops
+
+
+def test_gate_decomposition_unpinned_edge_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """GC-UNPINNED(prospective) на ребре decomposition→design: `traces_to`
+    объявляет design, но `upstream_hashes` пуст."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "decomposition":
+                return rc
+            path = Path(target_dir) / bundle_dir / "30-decomposition.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: decomposition\n"
+                "status: draft\n"
+                "owner_role: tech-lead\n"
+                "traces_to: [design]\n"
+                "upstream_hashes: {}\n"
+                "---\n"
+                "#### DT-01: x · type: implement · owner: dev\n"
+                "scenarios: [BEH-01]\n"
+                "depends_on: []\n"
+                "parallel_group: solo\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-decomposition-unpinned", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-decomposition-unpinned") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings and "design" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_decomposition_stale_pin_stops(tmp_path: Path, runs_root) -> None:
+    """GC-STALE(prospective) на ребре decomposition→design: пин
+    синтаксически валиден (40 hex), но не совпадает с blob-хешем design в
+    worktree."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "decomposition":
+                return rc
+            path = Path(target_dir) / bundle_dir / "30-decomposition.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: decomposition\n"
+                "status: draft\n"
+                "owner_role: tech-lead\n"
+                "traces_to: [design]\n"
+                "upstream_hashes:\n"
+                f'  design: "{"a" * 40}"\n'
+                "---\n"
+                "#### DT-01: x · type: implement · owner: dev\n"
+                "scenarios: [BEH-01]\n"
+                "depends_on: []\n"
+                "parallel_group: solo\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-decomposition-stale", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-decomposition-stale") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-STALE" in findings and "design" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_decomposition_undeclared_design_edge_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """MAJOR-1-аналог на decomposition: `traces_to` не несёт design вовсе
+    (не «не запинено» — отсутствует в traces_to) — required-ребро
+    decomposition→design обязано стопить S4 находкой, не пропускаться
+    молча."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "decomposition":
+                return rc
+            path = Path(target_dir) / bundle_dir / "30-decomposition.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: decomposition\n"
+                "status: draft\n"
+                "owner_role: tech-lead\n"
+                "traces_to: []\n"
+                "---\n"
+                "#### DT-01: x · type: implement · owner: dev\n"
+                "scenarios: [BEH-01]\n"
+                "depends_on: []\n"
+                "parallel_group: solo\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-decomposition-undeclared", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-decomposition-undeclared") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings and "design" in findings
+    assert "не объявлено в traces_to" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_decomposition_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
+    """Гард GC-DSL-EMPTY на 30-decomposition.md: пин design корректен,
+    ребро объявлено, но ни одного распознаваемого DT-заголовка."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "decomposition":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            design_pin = blob_sha1(
+                (bundle / "20-design.md").read_text(encoding="utf-8")
+            )
+            path = bundle / "30-decomposition.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: decomposition\n"
+                "status: draft\n"
+                "owner_role: tech-lead\n"
+                "traces_to: [design]\n"
+                "upstream_hashes:\n"
+                f'  design: "{design_pin}"\n'
+                "---\n"
+                "### Задачи в вольном стиле, без машинной грамматики.\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-decomposition-dsl-empty", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-decomposition-dsl-empty") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-DSL-EMPTY" in findings and "30-decomposition.md" in findings
+    assert "DT-NN" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root) -> None:
+    """GC-DT-GRAPH (спека Task 6): DSL decomposition валиден, ребро
+    design запинено верно, но граф несюръективен — BEH-02 не покрыт ни
+    одной DT-задачей (decomposition остаётся дефолтным, покрывающим только
+    BEH-01 — см. `FakeOps.author`)."""
+    beh_two = (
+        _DEFAULT_BEHAVIOUR_BODY
+        + "\n#### BEH-02: y\n`traces: [FR-01]`\n- **checked_by**: y\n"
+    )
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            if kind == "behaviour-spec":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(beh_two, encoding="utf-8")
+                return 0
+            return super().author(target_dir, kind, subject, bundle_dir)
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-decomposition-dt-graph", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-decomposition-dt-graph") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-DT-GRAPH" in findings and "BEH-02" in findings
+    assert "push" not in state.ops

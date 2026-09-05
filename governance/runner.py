@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from governance import design_guard
+from governance import decomposition_guard, design_guard
 from governance.merge_gate import PrFacts, decide
 from governance.stale_adapter import blob_sha1
 from governance.ops import Ops, RealOps
@@ -79,6 +79,7 @@ _GATE_EDGES: tuple[tuple[str, str, str, bool], ...] = (
     ("15-behaviour-spec.md", "requirements", "10-requirements.md", False),
     ("20-design.md", "requirements", "10-requirements.md", True),
     ("20-design.md", "behaviour-spec", "15-behaviour-spec.md", True),
+    ("30-decomposition.md", "design", "20-design.md", True),
 )
 
 
@@ -859,31 +860,38 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         state.status = "stopped_gate"
         save(state)
         return False
-    # Гард отсутствия design (спека Task 4): required-узел design —
-    # локальный (не через bundle_state.candidate_state — та остаётся у
-    # консоли, runner без импорта steward). MINOR-1 финального ревью:
-    # посылка «без чтения/парсинга YAML профиля» истекла с Task 8 —
+    # Гард отсутствия design/decomposition (спека Task 4, обобщено Task 6):
+    # required-узел — локальный (не через bundle_state.candidate_state — та
+    # остаётся у консоли, runner без импорта steward). MINOR-1 финального
+    # ревью: посылка «без чтения/парсинга YAML профиля» истекла с Task 8 —
     # `target_profile_declares` уже читает ФАКТИЧЕСКОЕ содержимое
     # target-профиля (тот же источник, что и preflight в `_step_authoring`
     # выше по файлу), не сравнивает имя файла со строкой `profiles/
     # team-exp.yaml`. Прочие профили (например, fixture `mini.yaml` в
-    # интеграционном тесте шва CLI ниже по файлу — design туда сознательно
-    # не входит) не затрагиваются — они просто не декларируют узел design.
-    # Стоит ДО цикла рёбер ниже — иначе отсутствующий design молча читался
-    # бы как «нечего проверять по рёбрам» вместо явной находки.
-    design_required = target_profile_declares(
-        state.target_dir, state.profile, "design"
-    )
-    design_path = Path(state.target_dir) / state.bundle_dir / "20-design.md"
-    if design_required and not design_path.exists():
-        (run_dir(state.run_id) / "gate-findings.txt").write_text(
-            "error GC-COMPLETENESS(design): required-узел design "
-            "отсутствует в бандле (20-design.md)\n",
-            encoding="utf-8",
+    # интеграционном тесте шва CLI ниже по файлу — design/decomposition туда
+    # сознательно не входят) не затрагиваются — они просто не декларируют
+    # эти узлы. Стоит ДО цикла рёбер ниже — иначе отсутствующий узел молча
+    # читался бы как «нечего проверять по рёбрам» вместо явной находки;
+    # design проверяется раньше decomposition — тот же порядок, что и раньше
+    # (единственный required-узел до Task 6), останов на первом отсутствующем.
+    node_paths: dict[str, Path] = {}
+    for node, node_file in (
+        ("design", "20-design.md"),
+        ("decomposition", "30-decomposition.md"),
+    ):
+        node_paths[node] = Path(state.target_dir) / state.bundle_dir / node_file
+        node_required = target_profile_declares(
+            state.target_dir, state.profile, node
         )
-        state.status = "stopped_gate"
-        save(state)
-        return False
+        if node_required and not node_paths[node].exists():
+            (run_dir(state.run_id) / "gate-findings.txt").write_text(
+                f"error GC-COMPLETENESS({node}): required-узел {node} "
+                f"отсутствует в бандле ({node_file})\n",
+                encoding="utf-8",
+            )
+            state.status = "stopped_gate"
+            save(state)
+            return False
     # Гарды GC-UNPINNED/GC-STALE(prospective) поверх CLI (приёмка PR #101,
     # оба круга major): stale-каскад gate-check исполняется только на
     # status: approved артефактах, поэтому DRAFT-узел с объявленным ребром
@@ -963,6 +971,12 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
             "резолюций design",
             "#### Q-NN · owner_role: … · resolution: …",
         ),
+        (
+            "30-decomposition.md",
+            r"^####\s+DT-\d+:",
+            "DT-задач",
+            "#### DT-NN: <название> · type: implement|verify · owner: <роль>",
+        ),
     ):
         path = Path(state.target_dir) / state.bundle_dir / fname
         if path.exists() and not re.search(
@@ -981,11 +995,12 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         return False
     # Гард покрытия Q (спека Task 4): architects-вопросы requirements без
     # резолюции в design — отдельная находка от UNPINNED/STALE/DSL-EMPTY
-    # выше. Оба файла проверяются на существование явно: design_path
+    # выше. Оба файла проверяются на существование явно: node_paths["design"]
     # гарантирован гардом отсутствия только когда профиль несёт узел design
-    # (`design_required` выше) — профиль без него (мимо этого шва) сюда
-    # доходит с design_path отсутствующим, и читать его было бы TOCTOU.
+    # (`node_required` выше, узел `"design"`) — профиль без него (мимо этого
+    # шва) сюда доходит с design отсутствующим, и читать его было бы TOCTOU.
     req_path = Path(state.target_dir) / state.bundle_dir / "10-requirements.md"
+    design_path = node_paths["design"]
     if req_path.exists() and design_path.exists():
         coverage = [
             f"error GC-DESIGN-COVERAGE: {finding}"
@@ -997,6 +1012,30 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         if coverage:
             (run_dir(state.run_id) / "gate-findings.txt").write_text(
                 "\n".join(coverage) + "\n", encoding="utf-8"
+            )
+            state.status = "stopped_gate"
+            save(state)
+            return False
+    # Гард графа DT (спека Task 6): инварианты `decomposition_guard.
+    # graph_findings` (сюръекция BEH, single-owner, verify-контракт,
+    # ацикличность, стоки групп) — отдельная находка от
+    # UNPINNED/STALE/DSL-EMPTY/GC-DESIGN-COVERAGE выше. Оба файла
+    # проверяются на существование явно, тем же паттерном: decomposition
+    # отсутствующий (профиль без узла) сюда доходит без стопа выше только
+    # когда узел не required — читать его было бы TOCTOU.
+    beh_path = Path(state.target_dir) / state.bundle_dir / "15-behaviour-spec.md"
+    decomp_path = node_paths["decomposition"]
+    if beh_path.exists() and decomp_path.exists():
+        graph = [
+            f"error GC-DT-GRAPH: {finding}"
+            for finding in decomposition_guard.graph_findings(
+                beh_path.read_text(encoding="utf-8"),
+                decomp_path.read_text(encoding="utf-8"),
+            )
+        ]
+        if graph:
+            (run_dir(state.run_id) / "gate-findings.txt").write_text(
+                "\n".join(graph) + "\n", encoding="utf-8"
             )
             state.status = "stopped_gate"
             save(state)
