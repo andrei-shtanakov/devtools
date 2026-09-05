@@ -421,6 +421,9 @@ def test_render_groups_by_feature_sections() -> None:
     assert "- [ ] реализовать BEH-01: Позитив" in text
     assert "- [ ] реализовать BEH-02: Пустой корень" in text
     assert "**Depends on:** [TASK-001]" in text
+    # пер-ссылочные скобки и в DT-пути (minor ревью PR #149): откат
+    # второй копии фикса Traces to обязан краснить
+    assert "**Traces to:** [FR-01], [FR-02]" in text
     # traces группы — объединение без дублей
     assert "**Traces to:** [FR-01], [FR-02]" in text
     # Source несёт диапазон группы

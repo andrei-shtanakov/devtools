@@ -538,10 +538,12 @@ def render_tasks_dt(
             f"Source: {bundle_path}#{t.dt_id}",
         ]
         if t.depends_on:
+            # Та же пер-ссылочная форма, что у Traces to: TASK_REF
+            # spec-runner требует ] сразу после id (minor ревью PR #149)
             deps = ", ".join(
-                f"TASK-{number[d]:03d}" for d in t.depends_on if d in number
+                f"[TASK-{number[d]:03d}]" for d in t.depends_on if d in number
             )
-            lines.append(f"**Depends on:** [{deps}]")
+            lines.append(f"**Depends on:** {deps}")
         lines += ["", "**Checklist:**"]
         lines += [f"- [ ] реализовать {g.beh_id}: {g.title}" for g in group]
         traces = []
