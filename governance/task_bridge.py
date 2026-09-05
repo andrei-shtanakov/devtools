@@ -23,17 +23,34 @@ from pathlib import Path
 
 import yaml
 
+from governance import design_guard
 from governance.ops import Ops, RealOps
 from governance.run_state import load
 from governance.stale_adapter import blob_sha1
 
-# Цепочка бандла в порядке штампа: каждый следующий пинует blob ПРЕДЫДУЩЕГО
-# после его штампа (иначе пин протухает в момент записи).
-_BUNDLE_CHAIN = (
-    ("00-charter.md", None),
-    ("10-requirements.md", "charter"),
-    ("15-behaviour-spec.md", "requirements"),
+# DAG бандла в порядке штампа (топологический): каждый узел перечисляет
+# node-id своих upstream'ов; штамп идёт по порядку тюпла, и пин(ы) узла
+# пересчитываются ПОСЛЕ штампа ВСЕХ его upstream-файлов (иначе пин
+# протухает в момент записи). design — единственный узел с ДВУМЯ
+# upstream-пинами (Task 5 плана design-узла).
+_BUNDLE_DAG: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("00-charter.md", ()),
+    ("10-requirements.md", ("charter",)),
+    ("15-behaviour-spec.md", ("requirements",)),
+    ("20-design.md", ("requirements", "behaviour-spec")),
 )
+
+
+def _node_id(filename: str) -> str:
+    """Имя файла бандла → node-id (числовой префикс и `.md` отрезаны)."""
+    return filename.rsplit(".", 1)[0].split("-", 1)[1]
+
+
+# Якорный узел моста — терминальный узел DAG (design). Выводится из
+# _BUNDLE_DAG, а не хардкодится второй раз (Task 6): смена терминального
+# узла бандла — правка одной строки DAG, не поиск по файлу.
+_ANCHOR_FILENAME = _BUNDLE_DAG[-1][0]
+_ANCHOR_NODE_ID = _node_id(_ANCHOR_FILENAME)
 
 
 def split_frontmatter(text: str) -> tuple[dict, str]:
@@ -234,13 +251,40 @@ def _merge_featureless_by_target_file(
     return merged
 
 
+def _render_resolutions_section(design_text: str) -> list[str]:
+    """Секция «Решения открытых вопросов» tasks-спеки из design-DSL.
+
+    Потребляет ``design_guard.parse_design_resolutions`` (Task 4) — не
+    рукописный пересказ, а генерация из фактического 20-design.md.
+    resolved несёт обоснование (строку ``reason:``, если она есть в
+    блоке вопроса — типично короткая justification-строка, не только у
+    deferred); deferred несёт причину явным префиксом. Пустой набор
+    резолюций (design без единого блока ``#### Q-NN``) — секция не
+    рендерится вовсе.
+    """
+    resolutions = design_guard.parse_design_resolutions(design_text)
+    if not resolutions:
+        return []
+    lines = ["## Решения открытых вопросов (уровень design)", ""]
+    for qid, (state, reason) in resolutions.items():
+        if state == "deferred":
+            lines.append(f"- **{qid} (deferred):** reason: {reason}")
+        elif reason:
+            lines.append(f"- **{qid}:** {reason}")
+        else:
+            lines.append(f"- **{qid}:** resolved")
+    lines.append("")
+    return lines
+
+
 def render_tasks(
     ws_id: str,
     subject: str,
     bundle_path: str,
     scenarios: list[Scenario],
     generated_at: str,
-    behaviour_blob: str,
+    design_blob: str,
+    design_text: str = "",
 ) -> str:
     """tasks.md по шаблону templates/tasks-spec-template.md.
 
@@ -253,6 +297,11 @@ def render_tasks(
     ``## Feature:``-секцию behaviour-spec, а не на сценарий — 1:1 в боевом
     прогоне kapelle#47 дало 19 церемониальных задач. Сценарии без Feature
     остаются задачами 1:1; задачи зависят цепочкой (порядок документа).
+
+    Якорь traces_to/upstream_hashes — design (Task 5 плана design-узла):
+    design пинует ОБА upstream (requirements, behaviour-spec), так что
+    один пин design транзитивно покрывает весь бандл — traces_to дальше
+    ведёт на behaviour-spec незачем.
     """
     lines = [
         "---",
@@ -270,9 +319,9 @@ def render_tasks(
         # что рукам после approve остаётся только нормализация
         # `--conform-approve`.
         "traces_to:",
-        "- behaviour-spec",
+        f"- {_ANCHOR_NODE_ID}",
         "upstream_hashes:",
-        f"  behaviour-spec: {behaviour_blob}",
+        f"  {_ANCHOR_NODE_ID}: {design_blob}",
         "---",
         "",
         f"## Milestone 1: {subject}",
@@ -283,6 +332,7 @@ def render_tasks(
         "approve.",
         "",
     ]
+    lines += _render_resolutions_section(design_text)
     groups: list[tuple[str, str, list[Scenario]]] = []  # (key, title, scs)
     for sc in scenarios:
         key = sc.feature or sc.beh_id
@@ -350,14 +400,16 @@ def stamp_bundle_approved(
     Штамп записывает ЭТОТ факт: `approved_by` = mergedBy бандл-PR (честный
     различитель agent/human), `approved_at` = mergedAt.
 
-    Перепиновка идёт по цепочке: штамп меняет байты файла, поэтому каждый
-    следующий пинует blob предыдущего ПОСЛЕ его штампа. Идемпотентно:
-    уже approved файл с верным пином не трогается и в результат не входит.
+    Перепиновка идёт по DAG (Task 5: цепочка стала DAG — design пинует ОБА
+    upstream): штамп меняет байты файла, поэтому пин(ы) каждого узла
+    пересчитываются ПОСЛЕ штампа ВСЕХ его upstream-файлов — порядок
+    обхода `_BUNDLE_DAG` уже топологический. Идемпотентно: уже approved
+    файл с верными пинами не трогается и в результат не входит.
     """
     changed: list[str] = []
-    prev_blob: str | None = None
+    stamped_blobs: dict[str, str] = {}
     base = Path(target_dir) / bundle_dir
-    for name, upstream in _BUNDLE_CHAIN:
+    for name, upstream_ids in _BUNDLE_DAG:
         path = base / name
         meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
         dirty = False
@@ -367,17 +419,22 @@ def stamp_bundle_approved(
             meta["approved_at"] = approved_at
             meta["version"] = int(meta.get("version") or 1) + 1
             dirty = True
-        if upstream is not None and prev_blob is not None:
+        if upstream_ids:
             pins = meta.get("upstream_hashes")
             pins = dict(pins) if isinstance(pins, dict) else {}
-            if pins.get(upstream) != prev_blob:
-                pins[upstream] = prev_blob
+            for upstream_id in upstream_ids:
+                blob = stamped_blobs[upstream_id]
+                if pins.get(upstream_id) != blob:
+                    pins[upstream_id] = blob
+                    dirty = True
+            if dirty:
                 meta["upstream_hashes"] = pins
-                dirty = True
         if dirty:
             path.write_text(join_frontmatter(meta, body), encoding="utf-8")
             changed.append(f"{bundle_dir}/{name}")
-        prev_blob = blob_sha1(path.read_text(encoding="utf-8"))
+        stamped_blobs[_node_id(name)] = blob_sha1(
+            path.read_text(encoding="utf-8")
+        )
     return changed
 
 
@@ -433,9 +490,10 @@ def deliver(
     ДО создания ветки — спека генерируется из вмерженного бандла, не из
     случайного состояния чекаута.
 
-    Порядок «штамп бандла → пин behaviour-spec → рендер tasks» жёсткий:
-    штамп меняет байты 15-behaviour-spec.md, и пин, взятый до штампа,
-    протух бы в том же PR (@id:spec-bridge-approve-conformance).
+    Порядок «штамп бандла → пин design → рендер tasks» жёсткий: штамп
+    меняет байты 20-design.md (терминальный узел `_BUNDLE_DAG`), и пин,
+    взятый до штампа, протух бы в том же PR
+    (@id:spec-bridge-approve-conformance).
     """
     if ops.is_dirty(target_dir):
         raise RuntimeError(
@@ -456,7 +514,12 @@ def deliver(
     stamped = stamp_bundle_approved(
         target_dir, bundle_dir, approved_by, approved_at
     )
-    behaviour_blob = blob_sha1(behaviour.read_text(encoding="utf-8"))
+    # design — терминальный узел _BUNDLE_DAG: читаем ПОСЛЕ штампа, иначе
+    # пин и текст резолюций взяты из уже стухшего blob'а.
+    design_text = (
+        Path(target_dir) / bundle_dir / _ANCHOR_FILENAME
+    ).read_text(encoding="utf-8")
+    design_blob = blob_sha1(design_text)
     scenarios = parse_behaviour(behaviour.read_text(encoding="utf-8"))
     stamp = generated_at or datetime.now().isoformat(timespec="seconds")
     text = render_tasks(
@@ -465,7 +528,8 @@ def deliver(
         bundle_path=f"{bundle_dir}/15-behaviour-spec.md",
         scenarios=scenarios,
         generated_at=stamp,
-        behaviour_blob=behaviour_blob,
+        design_blob=design_blob,
+        design_text=design_text,
     )
     rel = f"spec/{ws_id}-tasks.md"
     out = Path(target_dir) / rel
@@ -483,7 +547,8 @@ def deliver(
         + (
             "Этим же PR — штамп статусов вмерженного бандла "
             f"({len(stamped)} файл(а): approved_by = mergedBy бандл-PR, "
-            "перепиновка цепочки charter→requirements→behaviour-spec).\n\n"
+            "перепиновка DAG charter→requirements→behaviour-spec→design)."
+            "\n\n"
             if stamped
             else ""
         )

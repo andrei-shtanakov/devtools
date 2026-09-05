@@ -70,6 +70,28 @@ upstream_hashes:
 Текст requirements.
 """
 
+DESIGN_MD = """\
+---
+spec_stage: design
+status: draft
+version: 1
+owner_role: architects
+traces_to: [requirements, behaviour-spec]
+upstream_hashes:
+  requirements: cd00000000000000000000000000000000000000
+  behaviour-spec: ef00000000000000000000000000000000000000
+---
+# Design
+
+Текст design.
+
+#### Q-01 · owner_role: architects · resolution: resolved
+reason: Выбран REST — синхронный вызов проще для MVP.
+
+#### Q-03 · owner_role: architects · resolution: deferred
+reason: Нужны замеры нагрузки перед выбором шардирования.
+"""
+
 
 def test_parse_behaviour_extracts_scenarios() -> None:
     scenarios = task_bridge.parse_behaviour(BEHAVIOUR_MD)
@@ -93,7 +115,7 @@ def test_render_tasks_structure() -> None:
         bundle_path="workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
         scenarios=scenarios,
         generated_at="2026-08-31T12:00:00",
-        behaviour_blob="ab" * 20,
+        design_blob="ab" * 20,
     )
     assert text.startswith("---\n")
     assert "spec_stage: tasks" in text
@@ -169,6 +191,7 @@ def _target(tmp_path: Path) -> Path:
     (bundle / "00-charter.md").write_text(CHARTER_MD)
     (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
     (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
+    (bundle / "20-design.md").write_text(DESIGN_MD)
     return target
 
 
@@ -193,29 +216,37 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
     names = [c[0] for c in ops.calls]
     # база освежается до ветки
     assert names.index("checkout_and_pull") < names.index("ensure_branch")
-    # один коммит: штамп трёх файлов бандла + файл спеки
+    # один коммит: штамп четырёх файлов бандла (DAG до design) + файл спеки
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
     assert commit[1] == (
         "workstreams/WS-alpha-7/spec/00-charter.md",
         "workstreams/WS-alpha-7/spec/10-requirements.md",
         "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
+        "workstreams/WS-alpha-7/spec/20-design.md",
         "spec/WS-alpha-7-tasks.md",
     )
     assert ("push_branch", "spec/WS-alpha-7-tasks") in ops.calls
     assert "draft" in ops.pr_body.lower()
     assert "штамп статусов" in ops.pr_body
-    # Пин tasks-спеки — blob behaviour-spec ПОСЛЕ штампа (иначе протух бы
-    # в том же PR)
+    # Пин tasks-спеки — blob design ПОСЛЕ штампа (иначе протух бы в том же
+    # PR): design — терминальный узел _BUNDLE_DAG.
     from governance.stale_adapter import blob_sha1
     stamped_blob = blob_sha1(
-        (target / "workstreams/WS-alpha-7/spec/15-behaviour-spec.md")
+        (target / "workstreams/WS-alpha-7/spec/20-design.md")
         .read_text(encoding="utf-8")
     )
     meta, _body = task_bridge.split_frontmatter(
         spec.read_text(encoding="utf-8")
     )
-    assert meta["traces_to"] == ["behaviour-spec"]
-    assert meta["upstream_hashes"] == {"behaviour-spec": stamped_blob}
+    assert meta["traces_to"] == ["design"]
+    assert meta["upstream_hashes"] == {"design": stamped_blob}
+    # секция резолюций сгенерирована из фикстурного 20-design.md, не
+    # рукописным текстом (Task 5, Step 1в)
+    assert "## Решения открытых вопросов (уровень design)" in spec.read_text()
+    assert (
+        "- **Q-03 (deferred):** reason: Нужны замеры нагрузки перед "
+        "выбором шардирования." in spec.read_text()
+    )
 
 
 def test_deliver_dirty_target_refuses(tmp_path: Path) -> None:
@@ -263,6 +294,7 @@ def test_deliver_reads_bundle_only_after_base_checkout(tmp_path: Path) -> None:
             (bundle / "00-charter.md").write_text(CHARTER_MD)
             (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
             (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
+            (bundle / "20-design.md").write_text(DESIGN_MD)
 
     pr = task_bridge.deliver(
         target_dir=str(target),
@@ -339,7 +371,7 @@ def test_render_groups_by_feature_sections() -> None:
         bundle_path="workstreams/WS-x-1/spec/15-behaviour-spec.md",
         scenarios=scenarios,
         generated_at="2026-08-31T12:00:00",
-        behaviour_blob="ab" * 20,
+        design_blob="ab" * 20,
     )
     assert "### TASK-001: Каркас" in text
     assert "### TASK-002: Безопасность" in text
@@ -373,7 +405,7 @@ def test_plain_heading_closes_feature_section() -> None:
         bundle_path="b/15-behaviour-spec.md",
         scenarios=scenarios,
         generated_at="2026-08-31T12:00:00",
-        behaviour_blob="ab" * 20,
+        design_blob="ab" * 20,
     )
     assert "### TASK-003: Вне Feature" in text
 
@@ -399,8 +431,10 @@ def test_split_frontmatter_refuses_plain_file() -> None:
 
 
 def test_stamp_bundle_approves_and_repins_chain(tmp_path: Path) -> None:
-    """Урок 2 ретроспективы: штамп статусов + перепиновка цепочки. Каждый
-    следующий файл пинует blob предыдущего ПОСЛЕ его штампа."""
+    """Урок 2 ретроспективы: штамп статусов + перепиновка DAG (Task 5:
+    цепочка стала DAG — design пинует ОБА upstream, requirements и
+    behaviour-spec). Каждый следующий файл пинует blob предыдущего(-их)
+    ПОСЛЕ его штампа."""
     from governance.stale_adapter import blob_sha1
 
     target = _target(tmp_path)
@@ -412,6 +446,7 @@ def test_stamp_bundle_approves_and_repins_chain(tmp_path: Path) -> None:
         "workstreams/WS-alpha-7/spec/00-charter.md",
         "workstreams/WS-alpha-7/spec/10-requirements.md",
         "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
+        "workstreams/WS-alpha-7/spec/20-design.md",
     ]
     bundle = target / "workstreams/WS-alpha-7/spec"
     charter_meta, _ = task_bridge.split_frontmatter(
@@ -425,11 +460,20 @@ def test_stamp_bundle_approves_and_repins_chain(tmp_path: Path) -> None:
     assert req_meta["upstream_hashes"]["charter"] == blob_sha1(
         (bundle / "00-charter.md").read_text(encoding="utf-8")
     )
-    beh_meta, _ = task_bridge.split_frontmatter(
-        (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
-    )
+    beh_text = (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+    beh_meta, _ = task_bridge.split_frontmatter(beh_text)
     assert beh_meta["status"] == "approved"
     assert beh_meta["upstream_hashes"]["requirements"] == blob_sha1(req_text)
+    design_meta, _ = task_bridge.split_frontmatter(
+        (bundle / "20-design.md").read_text(encoding="utf-8")
+    )
+    assert design_meta["status"] == "approved"
+    assert design_meta["upstream_hashes"]["requirements"] == blob_sha1(
+        req_text
+    )
+    assert design_meta["upstream_hashes"]["behaviour-spec"] == blob_sha1(
+        beh_text
+    )
 
 
 def test_stamp_bundle_is_idempotent(tmp_path: Path) -> None:
@@ -607,7 +651,7 @@ def test_featureless_scenarios_merge_by_target_file() -> None:
         bundle_path="b/15-behaviour-spec.md",
         scenarios=scenarios,
         generated_at="2026-09-03T12:00:00",
-        behaviour_blob="ab" * 20,
+        design_blob="ab" * 20,
     )
     assert "### TASK-001: Открытие ханка (+2 смежных BEH)" in text
     assert "- [ ] реализовать BEH-01" in text
@@ -636,7 +680,7 @@ def test_nonconsecutive_same_file_merges_into_owner_task() -> None:
         bundle_path="b/15-behaviour-spec.md",
         scenarios=scenarios,
         generated_at="2026-09-03T12:00:00",
-        behaviour_blob="ab" * 20,
+        design_blob="ab" * 20,
     )
     assert "### TASK-001: Открытие ханка (+3 смежных BEH)" in text
     assert "- [ ] реализовать BEH-05" in text
@@ -681,7 +725,7 @@ status: draft
         bundle_path="b/15-behaviour-spec.md",
         scenarios=scenarios,
         generated_at="2026-09-03T12:00:00",
-        behaviour_blob="ab" * 20,
+        design_blob="ab" * 20,
     )
     # BEH-01 (A) и BEH-03 (A) — один владелец; BEH-02 (B) — своя задача,
     # BEH-04 (B) вливается к ней
@@ -721,7 +765,7 @@ status: draft
         bundle_path="b/15-behaviour-spec.md",
         scenarios=scenarios,
         generated_at="2026-09-03T12:00:00",
-        behaviour_blob="ab" * 20,
+        design_blob="ab" * 20,
     )
     assert "### TASK-001: Каркас" in text
     assert "### TASK-002: Вне Feature" in text
@@ -764,7 +808,7 @@ status: draft
         bundle_path="b/15-behaviour-spec.md",
         scenarios=scenarios,
         generated_at="2026-09-03T12:00:00",
-        behaviour_blob="ab" * 20,
+        design_blob="ab" * 20,
     )
     assert "### TASK-001: Файл A (+3 смежных BEH)" in text
     assert "### TASK-002:" not in text
