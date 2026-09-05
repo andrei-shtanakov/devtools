@@ -85,7 +85,9 @@ class Ops(Protocol):
         self, target_dir: str, kind: str, subject: str, bundle_dir: str
     ) -> int: ...
 
-    def author_disp(self, target_dir: str, task: str) -> int: ...
+    def author_disp(
+        self, target_dir: str, task: str, slug: str, config_path: str
+    ) -> int: ...
 
     def commit_paths(
         self, target_dir: str, paths: list[str], message: str
@@ -561,22 +563,75 @@ class RealOps:
         done = subprocess.run(argv, cwd=target_dir)
         return done.returncode
 
-    def author_disp(self, target_dir: str, task: str) -> int:
-        """disp `run --mode develop` — opt-in авторинг-бэкенд behaviour-spec узла.
+    def author_disp(
+        self, target_dir: str, task: str, slug: str, config_path: str
+    ) -> int:
+        """disp `pipeline run` (вид `document`) — opt-in бэкенд behaviour-узла.
 
-        Спека §5 называла `disp --mode document`; такого РЕЖИМА у disp нет и
-        не появилось. OQ-1 закрыт иначе (disputatio#52 → PR #64, 2026-09-01):
-        приехал ВИД пайплайна `document`, выводимый из формы секции
-        `[pipeline]` (`document_path`), команды прежние — `disp pipeline run`.
-        Переключение на него — @id:behaviour-authoring-document-mode в
-        `TODO.md` (нужен конфиг с оператор-чеклистом `doc`), не предмет
-        этого коммита; до него используется `run --mode develop`.
+        OQ-1 закрыт (disputatio#52 → PR #64, 2026-09-01): вид пайплайна
+        `document` выводится из формы секции `[pipeline]` конфига
+        (`document_path` + оператор-чеклист `doc`). Конфиг пишет runner в
+        каталоге прогона (`config_path` — абсолютный путь), граница правок —
+        ровно `document_path` (doc-scope гейт контура). Суррогат
+        `run --mode develop` этим вызовом снят.
         """
-        done = subprocess.run(
-            ["uv", "run", "--project", str(DEVTOOLS_ROOT.parent / "disputatio"),
-             "disp", "run", "--mode", "develop", "--root", target_dir, task],
-            cwd=target_dir,
-        )
+        # run vs resume — reconciliation по факту на диске (приёмка PR #106,
+        # круг 3, major): disp хранит состояние пайплайна в
+        # <root>/.disputatio/<slug>; повтор после сбоя обязан продолжать
+        # (`pipeline resume`), а не стартовать заново — `run` по занятому
+        # slug отказывает. Состояния нет (сбой ДО старта disp) — обычный run.
+        # Канон путей disp: pipeline_paths (SPEC-002 §4.1); манифест —
+        # машинно-читаемый источник фазы (докстринг render_status disp).
+        state_dir = Path(target_dir) / ".disputatio" / "pipelines" / slug
+        state_exists = state_dir.exists()
+        # Терминальная реконсиляция (приёмка PR #106, круги 11–12): успешный
+        # run + сбой runner ДО op_complete → resume отверг бы терминальную
+        # фазу навсегда. Фаза спрашивается у `disp pipeline status` — он
+        # СНАЧАЛА верифицирует integrity anchor (pipeline.json — immutable
+        # control plane disp, прямое чтение обходило бы проверку подмены,
+        # у disp есть тест ровно на {"phase":"DONE"}-подделку). status
+        # отказал (tampered/битое состояние) — честный ненулевой код, не
+        # маскируем resume'ом. DONE → 0; FAILED → 1 (новый прогон получит
+        # новый slug от нового run_id).
+        if state_exists:
+            status = subprocess.run(
+                ["uv", "run", "--project",
+                 str(DEVTOOLS_ROOT.parent / "disputatio"),
+                 "disp", "pipeline", "status", "--slug", slug,
+                 "--config", config_path, "--root", target_dir],
+                cwd=target_dir, capture_output=True, text=True,
+            )
+            if status.returncode != 0:
+                return status.returncode
+            phase_match = re.search(r"(?m)^phase:\s*(\S+)", status.stdout)
+            phase = phase_match.group(1) if phase_match else None
+            if phase == "DONE":
+                return 0
+            if phase == "FAILED":
+                return 1
+        cmd = ["uv", "run", "--project",
+               str(DEVTOOLS_ROOT.parent / "disputatio"), "disp", "pipeline"]
+        if state_exists:
+            # Resume в две попытки (приёмка PR #106, круги 5–6): чистый
+            # resume первым (без внешних правок --adopt-external недопустим);
+            # отказал — повтор с --adopt-external: между stopped_author и
+            # resume бандл мог править человек (штатный путь конвейера,
+            # контракт S4/S6-resume), правка принимается как внешняя ревизия.
+            # --discard-round не используется никогда: теряет ручные правки.
+            tail = ["--slug", slug, "--config", config_path,
+                    "--root", target_dir]
+            done = subprocess.run(
+                cmd + ["resume", *tail], cwd=target_dir,
+            )
+            if done.returncode == 0:
+                return 0
+            done = subprocess.run(
+                cmd + ["resume", "--adopt-external", *tail], cwd=target_dir,
+            )
+            return done.returncode
+        cmd += ["run", "--task", task, "--slug", slug,
+                "--config", config_path, "--root", target_dir]
+        done = subprocess.run(cmd, cwd=target_dir)
         return done.returncode
 
     def commit_paths(self, target_dir: str, paths: list[str], message: str) -> None:

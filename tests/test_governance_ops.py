@@ -290,19 +290,27 @@ def test_author_prompt_carries_dsl_and_filenames(monkeypatch):
 # --- B2 Task 2: author_disp — opt-in бэкенд disp (спека §5, OQ-1) ----------
 
 
-def test_author_disp_command_and_project_path(monkeypatch):
+def test_author_disp_document_pipeline_command(monkeypatch):
+    """Контур вида document (disputatio#52 -> PR #64): disp pipeline run
+    со slug/config/root, не суррогат run --mode develop."""
     calls = _install_fake_run(monkeypatch, returncode=0)
     ops = RealOps()
 
-    result = ops.author_disp("/tmp/devtools", "subject='x' bundle=spec/15.md")
+    result = ops.author_disp(
+        "/tmp/devtools", "subject='x' bundle=spec/15.md",
+        "beh-ws-1", "/runs/r1/disp-doc.toml",
+    )
 
     assert result == 0
     call = calls[0]
     expected_project = str(ops_mod.DEVTOOLS_ROOT.parent / "disputatio")
     assert call.argv == [
         "uv", "run", "--project", expected_project,
-        "disp", "run", "--mode", "develop",
-        "--root", "/tmp/devtools", "subject='x' bundle=spec/15.md",
+        "disp", "pipeline", "run",
+        "--task", "subject='x' bundle=spec/15.md",
+        "--slug", "beh-ws-1",
+        "--config", "/runs/r1/disp-doc.toml",
+        "--root", "/tmp/devtools",
     ]
     assert call.kwargs["cwd"] == "/tmp/devtools"
 
@@ -311,7 +319,7 @@ def test_author_disp_returncode_passthrough(monkeypatch):
     _install_fake_run(monkeypatch, returncode=2)
     ops = RealOps()
 
-    result = ops.author_disp("/tmp/devtools", "task")
+    result = ops.author_disp("/tmp/devtools", "task", "s", "/tmp/c.toml")
 
     assert result == 2
 
@@ -559,6 +567,87 @@ def test_checkout_and_pull_pull_failure_raises_runtime_error(monkeypatch):
     with pytest.raises(RuntimeError):
         ops.checkout_and_pull("/tmp/devtools", "master")
     assert len(calls_seen) == 2  # switch ran, then pull failed
+
+
+def test_author_disp_resumes_when_state_exists(monkeypatch, tmp_path):
+    """Приёмка PR #106, круг 3 (major): состояние .disputatio/<slug> на
+    диске → pipeline resume, не повторный run по занятому slug."""
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+    (tmp_path / ".disputatio" / "pipelines" / "beh-r1").mkdir(parents=True)
+
+    ops.author_disp(str(tmp_path), "task", "beh-r1", "/tmp/c.toml")
+    # сперва status (integrity), затем чистый resume; --adopt-external
+    # без внешних правок недопустим
+    assert calls[0].argv[4:7] == ["disp", "pipeline", "status"]
+    assert calls[1].argv[4:7] == ["disp", "pipeline", "resume"]
+    assert "--adopt-external" not in calls[1].argv
+    assert "--task" not in calls[1].argv
+
+    ops.author_disp(str(tmp_path), "task", "beh-other", "/tmp/c.toml")
+    assert calls[2].argv[4:7] == ["disp", "pipeline", "run"]
+
+
+def test_author_disp_resume_falls_back_to_adopt_external(
+    monkeypatch, tmp_path
+):
+    """Приёмка PR #106, круги 5–6: отказ чистого resume (внешняя правка) →
+    одна повторная попытка с --adopt-external; --discard-round — никогда."""
+    import types
+
+    (tmp_path / ".disputatio" / "pipelines" / "beh-r1").mkdir(parents=True)
+    script = [(0, "phase: DOC_LOOP\n"), (3, ""), (3, "")]
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+        rc_, out = script.pop(0)
+        return types.SimpleNamespace(returncode=rc_, stdout=out, stderr="")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+
+    rc = ops.author_disp(str(tmp_path), "task", "beh-r1", "/tmp/c.toml")
+
+    assert rc == 3
+    assert seen[1][4:7] == ["disp", "pipeline", "resume"]
+    assert "--adopt-external" not in seen[1]
+    assert "--adopt-external" in seen[2]
+    assert not any("--discard-round" in c for c in seen)
+
+
+def test_author_disp_terminal_phase_via_status(monkeypatch, tmp_path):
+    """Приёмка PR #106, круги 11–12: фаза берётся у `disp pipeline status`
+    (он верифицирует integrity anchor — прямое чтение pipeline.json обходило
+    бы защиту от подмены): DONE => 0, FAILED => 1, отказ status — как есть,
+    нетерминальная фаза — resume-поток."""
+    import types
+
+    (tmp_path / ".disputatio" / "pipelines" / "beh-r1").mkdir(parents=True)
+    script: list[tuple[int, str]] = []
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+        rc, out = script.pop(0)
+        return types.SimpleNamespace(returncode=rc, stdout=out, stderr="")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+
+    script[:] = [(0, "kind: document\nphase: DONE\n")]
+    assert ops.author_disp(str(tmp_path), "t", "beh-r1", "/c.toml") == 0
+    assert seen[-1][4:7] == ["disp", "pipeline", "status"]
+
+    script[:] = [(0, "phase: FAILED\n")]
+    assert ops.author_disp(str(tmp_path), "t", "beh-r1", "/c.toml") == 1
+
+    script[:] = [(4, "")]  # anchor/integrity провал — код как есть
+    assert ops.author_disp(str(tmp_path), "t", "beh-r1", "/c.toml") == 4
+
+    script[:] = [(0, "phase: DOC_LOOP\n"), (0, "")]
+    assert ops.author_disp(str(tmp_path), "t", "beh-r1", "/c.toml") == 0
+    assert seen[-1][4:7] == ["disp", "pipeline", "resume"]
 
 
 # --- Кейс 12: current_branch / materialize_pr_head (ретроспектива 09-02) ----

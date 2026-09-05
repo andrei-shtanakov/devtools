@@ -158,8 +158,10 @@ class FakeOps:
         path.write_text(body, encoding="utf-8")
         return 0
 
-    def author_disp(self, target_dir: str, task: str) -> int:
-        self.calls.append(("author_disp", task))
+    def author_disp(
+        self, target_dir: str, task: str, slug: str, config_path: str
+    ) -> int:
+        self.calls.append(("author_disp", task, slug, config_path))
         self.author_disp_calls.append((target_dir, task))
         return self.author_disp_exit
 
@@ -2550,3 +2552,103 @@ def test_parser_takes_path_from_header_tail_not_forged_title() -> None:
         "- confidence: high → БЛОКИРУЕТ\n"
     )
     assert runner._file_missing_refute_candidates(traversal) is None
+
+
+def test_disp_backend_writes_document_config(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Контур document (disputatio#52 → PR #64): конфиг пишется в каталог
+    прогона (document_path + оператор-чеклист, findings_item), slug — из
+    ws_id, путь конфига уходит в ops.author_disp."""
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+                  s8_exit=0)
+    state = runner.start(**_start_kwargs(
+        tmp_path, "r-disp-doc", ops, author_backend="disp",
+    ))
+
+    call = next(c for c in ops.calls if c[0] == "author_disp")
+    _, task, slug, config_path = call
+    assert slug.startswith("beh-r-disp-doc-")  # slug от run_id + дайджест
+    config = Path(config_path).read_text(encoding="utf-8")
+    assert 'document_path = "workstreams/WS-1/spec/15-behaviour-spec.md"' in config
+    assert 'findings_item = "B4"' in config
+    assert "#### BEH-NN" in config
+    # профиль сессии обязателен для load_session_profile (круг 10)
+    assert "[agents.author]" in config and "[agents.reviewer]" in config
+    for limit in ("max_rounds", "max_total_tokens", "max_wall_seconds",
+                  "schema_retries"):
+        assert limit in config
+    assert Path(config_path).parent == runner.run_dir("r-disp-doc")
+    assert state.ops["author-behaviour"]["status"] == "completed"
+
+
+def test_disp_backend_precommits_upstream_nodes(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Приёмка PR #106, blocker: disp pipeline run требует чистое дерево —
+    charter/requirements коммитятся ДО вызова disp; behaviour-файл
+    закоммитит штатный S3."""
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+                  s8_exit=0)
+    runner.start(**_start_kwargs(
+        tmp_path, "r-disp-precommit", ops, author_backend="disp",
+    ))
+
+    names = [c[0] for c in ops.calls]
+    pre = names.index("commit_paths")
+    disp = names.index("author_disp")
+    assert pre < disp, "пред-коммит должен идти до disp"
+    first_commit = next(c for c in ops.calls if c[0] == "commit_paths")
+    # FakeOps.commit_paths журналирует (target, paths, message) в committed
+    target, paths, message = ops.committed[0]
+    assert sorted(paths) == [
+        "workstreams/WS-1/spec/00-charter.md",
+        "workstreams/WS-1/spec/10-requirements.md",
+    ]
+    assert "пред-коммит" in message
+
+
+def test_disp_slug_is_bounded_and_deterministic() -> None:
+    """Приёмка PR #106, круг 3 (minor): slug ≤64 символов при безразмерном
+    run_id; усечение детерминировано (sha1-суффикс)."""
+    long_id = "WS-" + "x" * 80 + "-a1"
+    slug = runner._disp_slug(long_id)
+    assert len(slug) <= 64
+    assert slug == runner._disp_slug(long_id)  # детерминизм
+    assert slug != runner._disp_slug(long_id + "y")  # различимость
+    # санитизация не схлопывает разные run_id в один slug (круг 8)
+    assert runner._disp_slug("ws_1-a") != runner._disp_slug("ws.1-a")
+    assert runner._disp_slug("WS-1-a2b3c4").startswith("beh-ws-1-a2b3c4-")
+
+
+def test_disp_backend_resumes_even_when_file_exists(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Приёмка PR #106, круг 9: disp пишет документ ПОСРЕДИ пайплайна —
+    существующий файл не значит «полировка завершена»; disp-узел всегда
+    зовёт author_disp (его resume идемпотентен), пропуск — только codex."""
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+                  s8_exit=0)
+    kwargs = _start_kwargs(
+        tmp_path, "r-disp-file-exists", ops, author_backend="disp",
+    )
+    bundle = Path(kwargs["target_dir"]) / kwargs["bundle_dir"]
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "15-behaviour-spec.md").write_text(
+        "#### BEH-01: x\n`traces: [FR-01]`\n- **checked_by**: x\n"
+    )
+    state = runner.start(**kwargs)
+
+    assert any(c[0] == "author_disp" for c in ops.calls)
+    assert state.ops["author-behaviour"].get("skipped") is not True
+    # codex-узлы (charter/requirements) — прежняя семантика пропуска
+    ops2 = FakeOps(review_exit=0, facts=GREEN_PR_FACTS,
+                   files=GREEN_BUNDLE_FILES, s8_exit=0)
+    kwargs2 = _start_kwargs(tmp_path, "r-codex-file-exists", ops2)
+    bundle2 = Path(kwargs2["target_dir"]) / kwargs2["bundle_dir"]
+    bundle2.mkdir(parents=True, exist_ok=True)
+    (bundle2 / "00-charter.md").write_text("# charter\n")
+    runner.start(**kwargs2)
+    charter_authors = [c for c in ops2.calls
+                       if c[0] == "author" and c[1] == "charter"]
+    assert charter_authors == []  # пропуск по файлу сохранён для codex

@@ -18,6 +18,7 @@ PR человеку (`waiting_human_merge`), S8 не запускается са
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import time
@@ -656,8 +657,70 @@ def _disp_behaviour_task(subject: str, bundle_path: str) -> str:
     )
 
 
+def _disp_slug(run_id: str) -> str:
+    """Slug disp-пайплайна: от run_id (уникален на прогон), ≤64 символов.
+
+    Круг 2 приёмки PR #106: slug от ws_id сталкивался на втором прогоне
+    того же WS. Круг 3 (minor): грамматика disp (§4.1, pipeline_paths)
+    ограничивает slug 64 символами, а run_id у runner безразмерный —
+    длинный хвост детерминированно заменяется sha1-суффиксом.
+    """
+    # Дайджест — ВСЕГДА (приёмка PR #106, круг 8): санитизация схлопывает
+    # разные run_id (`ws_1`/`ws.1` -> `ws-1`) в один slug; sha1 исходного
+    # run_id делает slug инъективным при любой длине. 4+47+1+12 <= 64.
+    digest = hashlib.sha1(run_id.encode("utf-8")).hexdigest()[:12]
+    base = re.sub(r"[^a-z0-9-]", "-", run_id.lower())[:47]
+    return f"beh-{base}-{digest}"
+
+
+def _disp_doc_config(bundle_path: str) -> str:
+    """TOML-конфиг вида `document` для disp (disputatio#52 → PR #64).
+
+    Форма секции `[pipeline]` и есть объявление вида; чеклист `doc`
+    объявляем целиком мы (вендоренного набора у контура нет), пункты —
+    зеркало DSL-гейта S4 (GC-DSL-EMPTY/GC-BEH-*); `findings_item`
+    обязателен — пункт «нет blocker/major-находок». Граница правок контура —
+    ровно `document_path` (doc-scope), что для авторинга одного узла бандла
+    и требуется.
+    """
+    return (
+        "[pipeline]\n"
+        f'document_path = "{bundle_path}"\n'
+        "\n"
+        "[pipeline.checklists.doc]\n"
+        'findings_item = "B4"\n'
+        "\n"
+        "[pipeline.checklists.doc.items]\n"
+        'B1 = "каждый сценарий — заголовок `#### BEH-NN: <title>`"\n'
+        'B2 = "каждый BEH несёт строку `traces: [FR-NN, ...]` c '
+        'существующими FR из 10-requirements.md"\n'
+        'B3 = "каждый BEH несёт пункт `- **checked_by**:` '
+        '(status/kind/owner/target)"\n'
+        'B4 = "нет blocker/major-находок"\n'
+        "\n"
+        # Профиль сессии обязателен (приёмка PR #106, круг 10):
+        # load_session_profile требует [agents.author]/[agents.reviewer] и
+        # все четыре лимита. Значения — документированный канон disp
+        # (docs/document-pipeline.md): claude_code/opus, лимиты примера.
+        "[agents.author]\n"
+        'adapter = "claude_code"\n'
+        'model = "opus"\n'
+        "\n"
+        "[agents.reviewer]\n"
+        'adapter = "claude_code"\n'
+        'model = "opus"\n'
+        "\n"
+        "[limits]\n"
+        "max_rounds = 6\n"
+        "max_total_tokens = 2000000\n"
+        "max_wall_seconds = 7200\n"
+        "schema_retries = 2\n"
+    )
+
+
 def _step_authoring(state: RunState, ops: Ops) -> bool:
-    """S2/S3: charter/requirements/behaviour-spec — файл есть → пропустить.
+    """S2/S3: charter/requirements/behaviour-spec (файл есть → пропуск,
+    но только для codex-узлов — см. комментарий в цикле).
 
     B1-рулинг (финальное ревью F-6): все три узла авторятся общим
     `ops.author` (`codex exec --ephemeral`), а не циклом `disp --mode
@@ -665,27 +728,61 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     осознанная для этапа B1; `disp`-цикл и критерий сходимости — предмет B2
     (OQ-1, `docs/superpowers/specs/2026-08-30-behaviour-spec-pipeline-design.md`).
 
-    B2 Task 2: `state.author_backend == "disp"` переключает ТОЛЬКО
-    behaviour-spec узел на `ops.author_disp` (`disp run --mode develop`) —
-    спека §5 называет `disp --mode document`, такого режима у disp нет
-    (факт 2026-08-30), используем `run --mode develop`; выравнивание со
-    спекой — inbox-issue в disputatio (OQ-1). charter/requirements всегда
-    остаются на `ops.author` (codex) независимо от `author_backend` —
-    disp-цикл осмыслен для полируемого документа, не для одноразовых
-    артефактов.
+    `state.author_backend == "disp"` переключает ТОЛЬКО behaviour-spec узел
+    на `ops.author_disp` — контур `disp pipeline run` вида `document`
+    (disputatio#52 → PR #64, 2026-09-01: OQ-1 закрыт видом пайплайна, не
+    отдельным --mode; конфиг с оператор-чеклистом пишется в каталог прогона,
+    см. `_disp_doc_config`). charter/requirements всегда остаются на
+    `ops.author` (codex) независимо от `author_backend` — полировочный цикл
+    осмыслен для итерируемого документа, не для одноразовых артефактов.
     """
     for key, kind, filename in _AUTHOR_STEPS:
         if op_status(state, key) == "completed":
             continue
+        disp_node = (
+            kind == "behaviour-spec" and state.author_backend == "disp"
+        )
         target = Path(state.target_dir) / state.bundle_dir / filename
-        if target.exists():
+        # Пропуск-по-существованию-файла — ТОЛЬКО codex-ветке (приёмка
+        # PR #106, круг 9): там он защищает от повторного платного вызова
+        # на resume. disp пишет документ ПОСРЕДИ своего пайплайна — файл на
+        # диске не значит «полировка завершена», и пропуск обходил бы
+        # незавершённый чеклист; disp-ветка всегда зовёт author_disp, чья
+        # run/resume-реконсиляция идемпотентна по собственному состоянию.
+        if target.exists() and not disp_node:
             op_complete(state, key, skipped=True)
             continue
         _ensure_started(state, key)
-        if kind == "behaviour-spec" and state.author_backend == "disp":
+        if disp_node:
             bundle_path = f"{state.bundle_dir}/{filename}"
             task = _disp_behaviour_task(state.subject, bundle_path)
-            exit_code = ops.author_disp(state.target_dir, task)
+            config_path = run_dir(state.run_id) / "disp-doc.toml"
+            config_path.write_text(
+                _disp_doc_config(bundle_path), encoding="utf-8"
+            )
+            # Пред-коммит upstream-узлов (приёмка PR #106, blocker):
+            # `disp pipeline run` безусловно требует чистое дерево
+            # (pipeline_config: tracked-изменения и untracked вне
+            # .disputatio блокируют), а цикл выше только что создал
+            # charter/requirements незакоммиченными. Коммитим ровно их —
+            # ветка прогона наша; behaviour-файл после disp закоммитит
+            # штатный S3.
+            upstream_paths = [
+                f"{state.bundle_dir}/{fn}"
+                for _k, _kind, fn in _AUTHOR_STEPS
+                if fn != filename
+                and (Path(state.target_dir) / state.bundle_dir / fn).exists()
+            ]
+            if upstream_paths:
+                ops.commit_paths(
+                    state.target_dir, upstream_paths,
+                    "wip(bundle): charter/requirements — пред-коммит для "
+                    "disp-контура document",
+                )
+            slug = _disp_slug(state.run_id)
+            exit_code = ops.author_disp(
+                state.target_dir, task, slug, str(config_path),
+            )
         else:
             exit_code = ops.author(
                 state.target_dir, kind, state.subject, state.bundle_dir
