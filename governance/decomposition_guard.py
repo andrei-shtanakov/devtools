@@ -174,7 +174,8 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
         if near.start() not in strict_beh:
             findings.append(
                 f"{near.group(1)}: заголовок behaviour-spec не соответствует "
-                "машинной грамматике BEH (`#### BEH-NN: <название>`)"
+                "машинной грамматике BEH (`#### BEH-NN[a-z]: <название>` — "
+                "суффикс не более одной строчной буквы)"
             )
 
     # ссылки на несуществующее
