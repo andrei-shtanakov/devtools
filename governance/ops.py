@@ -179,6 +179,7 @@ _AUTHOR_FILENAMES = {
     "charter": "00-charter.md",
     "requirements": "10-requirements.md",
     "behaviour-spec": "15-behaviour-spec.md",
+    "design": "20-design.md",
 }
 _AUTHOR_DSL = {
     "charter": (
@@ -193,7 +194,10 @@ _AUTHOR_DSL = {
         "requirement MUST be a heading `#### FR-NN: <title>` followed by a "
         "`**Priority**: Must` (or Should) line. Non-functional requirements "
         "use `#### NFR-NN: <title>`. Use FR-/NFR- ids consistently "
-        "everywhere, including any traceability matrices."
+        "everywhere, including any traceability matrices. Every open "
+        "question MUST be a bullet `- **Q-NN · owner_role: <role> · "
+        "blocking: true|false.** <text>`; architect-level questions use "
+        "owner_role: architects and are the design stage's input set."
     ),
     "behaviour-spec": (
         "YAML frontmatter (required): spec_stage: behaviour-spec, status: "
@@ -206,6 +210,37 @@ _AUTHOR_DSL = {
         "<atp|contract|integration|e2e|manual>` `owner: qa` `target: <test "
         "path>``. Use BEH-/FR- ids consistently everywhere, including any "
         "traceability matrices."
+    ),
+    "design": (
+        "YAML frontmatter (required): spec_stage: design, status: draft, "
+        "owner_role: architects, traces_to: [requirements, behaviour-spec], "
+        "upstream_hashes: {requirements: \"<hash10>\", behaviour-spec: "
+        "\"<hash15>\"} where <hash10> and <hash15> are the outputs of "
+        "`git hash-object <bundle_dir>/10-requirements.md` and "
+        "`git hash-object <bundle_dir>/15-behaviour-spec.md` respectively. "
+        "The document MUST contain these sections: Резолюции открытых "
+        "вопросов, Механика, Рамки red-дизайна, Карта затрагиваемых "
+        "модулей, Вне объёма. Резолюции открытых вопросов: every "
+        "architect-level open question from 10-requirements.md (bullets "
+        "`- **Q-NN · owner_role: architects · blocking: true|false.** "
+        "<text>`) MUST appear exactly once as a heading `#### Q-NN · "
+        "owner_role: architects · resolution: resolved|deferred` followed "
+        "by a justification paragraph bounded by the product decisions "
+        "already made in requirements; resolution: deferred MUST be "
+        "followed by a line `reason: <named reason>`. If the input set is "
+        "empty, the document MUST instead carry the exact line "
+        "`Открытых архитектурных вопросов нет (входной набор пуст)`. "
+        "Механика: точки врезки (модуль/функция), формы инвокаций, формы "
+        "коммитов/эвиденции — what requirements deliberately left "
+        "unspecified. Рамки red-дизайна: for measurement/artifact/boundary "
+        "tasks, what the red test MUST verify live and what it MUST NOT "
+        "assert (file existence etc). Карта затрагиваемых модулей: files/"
+        "subsystems the implementation will touch — input for the future "
+        "decomposition stage. Вне объёма: what design deliberately leaves "
+        "to the implementer. Forbidden: do not reopen product decisions "
+        "already made in requirements; do not write line-by-line code "
+        "(that is the implementer's job under TDD); do not create new "
+        "Q-* without owner_role."
     ),
 }
 

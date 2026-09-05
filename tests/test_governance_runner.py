@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("steward")
 
-from governance import bundle_state, merge_gate, runner
+from governance import bundle_state, merge_gate, runner, task_bridge
 from governance import run_state as rs
 from governance.stale_adapter import blob_sha1
 from tests.governance_fixtures.bundles import make_bundle, make_profile
@@ -29,6 +29,15 @@ GREEN_PR_FACTS: dict[str, Any] = {
 }
 BUNDLE_DIR = "workstreams/WS-1/spec"
 GREEN_BUNDLE_FILES = [f"{BUNDLE_DIR}/15-behaviour-spec.md"]
+
+# Тела по умолчанию `FakeOps.author` для requirements/behaviour-spec —
+# вынесены в константы, потому что design (S4 Task 4) обязан пиновать их
+# blob-хешем в своих upstream_hashes, иначе собственный же гард
+# GC-UNPINNED(prospective) остановит каждый дефолтный S4-прогон.
+_DEFAULT_REQUIREMENTS_BODY = "#### FR-01: x\n**Priority**: Must\n"
+_DEFAULT_BEHAVIOUR_BODY = (
+    "#### BEH-01: x\n`traces: [FR-01]`\n- **checked_by**: x\n"
+)
 
 
 @dataclass
@@ -143,17 +152,52 @@ class FakeOps:
             "charter": "00-charter.md",
             "requirements": "10-requirements.md",
             "behaviour-spec": "15-behaviour-spec.md",
+            "design": "20-design.md",
         }[kind]
         path = Path(target_dir) / bundle_dir / filename
         path.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "design":
+            # design пинует requirements/behaviour-spec по их ФАКТИЧЕСКОМУ
+            # содержимому worktree на момент авторинга (_AUTHOR_STEPS гонит
+            # design последним) — не по статической константе: тесты,
+            # переопределяющие тело behaviour-spec через `super().author()`
+            # + собственную дозапись, обязаны пиновать design верно без
+            # знания об этом override (иначе свой же GC-STALE(prospective)
+            # для ребра design→behaviour-spec стопил бы их несвязанные
+            # сценарии).
+            bundle = Path(target_dir) / bundle_dir
+
+            def _blob_of(upstream_filename: str) -> str:
+                upstream_path = bundle / upstream_filename
+                text = (
+                    upstream_path.read_text(encoding="utf-8")
+                    if upstream_path.exists()
+                    else ""
+                )
+                return blob_sha1(text)
+
+            req_pin = _blob_of("10-requirements.md")
+            beh_pin = _blob_of("15-behaviour-spec.md")
+            path.write_text(
+                "---\n"
+                "spec_stage: design\n"
+                "status: draft\n"
+                "owner_role: architects\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f'  requirements: "{req_pin}"\n'
+                f'  behaviour-spec: "{beh_pin}"\n'
+                "---\n"
+                "Открытых архитектурных вопросов нет (входной набор пуст)\n",
+                encoding="utf-8",
+            )
+            return 0
         # Минимально DSL-корректное содержимое (зеркало обогащённого промпта
         # RealOps.author): гард GC-DSL-EMPTY в S4 читает эти файлы.
         body = {
             "charter": "# charter\n",
-            "requirements": "#### FR-01: x\n**Priority**: Must\n",
-            "behaviour-spec": (
-                "#### BEH-01: x\n`traces: [FR-01]`\n- **checked_by**: x\n"
-            ),
+            "requirements": _DEFAULT_REQUIREMENTS_BODY,
+            "behaviour-spec": _DEFAULT_BEHAVIOUR_BODY,
         }[kind]
         path.write_text(body, encoding="utf-8")
         return 0
@@ -219,6 +263,15 @@ def runs_root(tmp_path: Path, monkeypatch):
     return root
 
 
+# Task 8 (preflight): `_step_authoring` читает РЕАЛЬНЫЙ файл профиля в
+# target_dir перед авторингом узла design — devtools-канонический
+# profiles/team-exp.yaml (4 узла: charter/requirements/behaviour-spec/
+# design), тот же, что реально несёт этот репо в проде.
+_TEAM_EXP_PROFILE_TEXT = (
+    Path(__file__).resolve().parent.parent / "profiles" / "team-exp.yaml"
+).read_text(encoding="utf-8")
+
+
 def _start_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
     target_dir = tmp_path / f"target-{run_id}"
     target_dir.mkdir(exist_ok=True)
@@ -234,11 +287,50 @@ def _start_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
         ops=ops,
     )
     kwargs.update(overrides)
+    # Без материализации файла preflight (Task 8) стопил бы статусом
+    # `stopped_preflight` ВСЕ существующие start()-тесты этого модуля —
+    # раньше `profile` был только строкой в kwargs, ни один реальный файл
+    # под ней не лежал. Пишем ровно тогда, когда итоговый `profile` —
+    # канонический team-exp (иначе, например, `profiles/mini.yaml`-тесты
+    # ниже по файлу сами несут свою фикстуру через `make_profile`).
+    if kwargs["profile"] == "profiles/team-exp.yaml":
+        profile_dir = Path(kwargs["target_dir"]) / "profiles"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_path = profile_dir / "team-exp.yaml"
+        if not profile_path.exists():
+            profile_path.write_text(_TEAM_EXP_PROFILE_TEXT, encoding="utf-8")
     return kwargs
 
 
 def _green_bundle(profile, bundle) -> bundle_state.BundleState:
     return bundle_state.BundleState((), 0, None, (), ())
+
+
+def _repin_design(bundle_dir: Path) -> None:
+    """Пересчитывает `upstream_hashes` `20-design.md` по ТЕКУЩЕМУ содержимому
+    requirements/behaviour-spec — правка бандла человеком после стопа
+    (resume-тесты) обязана обновить и пин design, иначе GC-STALE
+    (prospective) на ребре design→behaviour-spec стопит повторный гейт
+    независимо от того, что человек уже устранил исходную находку."""
+    req_pin = blob_sha1(
+        (bundle_dir / "10-requirements.md").read_text(encoding="utf-8")
+    )
+    beh_pin = blob_sha1(
+        (bundle_dir / "15-behaviour-spec.md").read_text(encoding="utf-8")
+    )
+    (bundle_dir / "20-design.md").write_text(
+        "---\n"
+        "spec_stage: design\n"
+        "status: draft\n"
+        "owner_role: architects\n"
+        "traces_to: [requirements, behaviour-spec]\n"
+        "upstream_hashes:\n"
+        f'  requirements: "{req_pin}"\n'
+        f'  behaviour-spec: "{beh_pin}"\n'
+        "---\n"
+        "Открытых архитектурных вопросов нет (входной набор пуст)\n",
+        encoding="utf-8",
+    )
 
 
 def test_happy_path_agent_merge(tmp_path: Path, runs_root, monkeypatch) -> None:
@@ -351,6 +443,7 @@ def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> 
     (bundle_dir / "15-behaviour-spec.md").write_text(
         "# behaviour\n", encoding="utf-8"
     )
+    (bundle_dir / "20-design.md").write_text("# design\n", encoding="utf-8")
 
     state = runner.start(**kwargs)
 
@@ -358,6 +451,7 @@ def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> 
     assert state.ops["author-charter"]["skipped"] is True
     assert state.ops["author-requirements"]["skipped"] is True
     assert state.ops["author-behaviour"]["skipped"] is True
+    assert state.ops["author-design"]["skipped"] is True
 
 
 def test_facts_from_fail_closed() -> None:
@@ -1097,6 +1191,7 @@ def test_resume_from_stopped_gate_recommits_edited_bundle(
         "#### BEH-01: fixed\n`traces: [FR-01]`\n- **checked_by**: x\n",
         encoding="utf-8",
     )
+    _repin_design(bundle_dir)
 
     result = runner.resume(run_id, ops)
 
@@ -1155,6 +1250,7 @@ def test_resume_from_stopped_review_recommits_edited_bundle(
         "#### BEH-01: review fix\n`traces: [FR-01]`\n- **checked_by**: x\n",
         encoding="utf-8",
     )
+    _repin_design(bundle_dir)
     ops.review_exit = 0
     result = runner.resume(run_id, ops)
 
@@ -1417,6 +1513,20 @@ def test_gate_seam_required_absent_blocks_without_mock(
             "author-charter": {"status": "completed", "skipped": True},
             "author-requirements": {"status": "completed", "skipped": True},
             "author-behaviour": {"status": "completed", "skipped": True},
+            # mini.yaml (fixture-профиль этого теста) не несёт узел design —
+            # шаг обязан быть завершён-пропущенным явно в фикстуре: этот
+            # тест конструирует state вручную и зовёт advance() напрямую
+            # (минуя _step_authoring целиком), а не через start(), поэтому
+            # preflight design-узла (Task 8 + фикс-раунд ревью,
+            # `governance.policy_sources.target_profile_declares`) сюда
+            # вовсе не попадает — вызывать его нечем без реального
+            # profiles/mini.yaml-файла в target_dir. Цель теста — S4
+            # (реальный `gate-check --candidate`), не S2/preflight; когда
+            # бы шаг остался НЕзавершённым, `_step_authoring` либо
+            # авторил бы 20-design.md (до фикс-раунда), либо теперь
+            # стопил бы `stopped_preflight` (после) — оба исхода мимо
+            # сценария этого теста, поэтому шаг пропущен явно.
+            "author-design": {"status": "completed", "skipped": True},
             "commit": {"status": "completed"},
         }
         rs.save(state)
@@ -2081,7 +2191,7 @@ def test_default_author_backend_is_codex_author_disp_not_called(
 
     state = runner.start(**_start_kwargs(tmp_path, "r-disp-default", ops))
 
-    assert ops.authored == ["charter", "requirements", "behaviour-spec"]
+    assert ops.authored == ["charter", "requirements", "behaviour-spec", "design"]
     assert ops.author_disp_calls == []
     assert state.author_backend == "codex"
 
@@ -2099,7 +2209,7 @@ def test_disp_backend_used_only_for_behaviour_node(
         tmp_path, run_id, ops, author_backend="disp",
     ))
 
-    assert ops.authored == ["charter", "requirements"]
+    assert ops.authored == ["charter", "requirements", "design"]
     assert len(ops.author_disp_calls) == 1
     target_dir, task = ops.author_disp_calls[0]
     assert target_dir == str(tmp_path / f"target-{run_id}")
@@ -2159,6 +2269,118 @@ def test_gate_stops_on_dsl_empty_bundle(
     findings = (runner.run_dir("r-dsl-empty") / "gate-findings.txt").read_text()
     assert "GC-DSL-EMPTY" in findings and "15-behaviour-spec.md" in findings
     assert "push" not in state.ops
+
+
+def test_gate_dsl_empty_design_message_names_design_grammar(
+    tmp_path: Path, runs_root,
+) -> None:
+    """MINOR-2: GC-DSL-EMPTY для 20-design.md обязан называть СВОЮ
+    грамматику (`#### Q-NN · owner_role: … · resolution: …`), не чужую
+    `#### FR-NN:` / `#### BEH-NN:` requirements/behaviour-spec."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "design":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            req_pin = blob_sha1(
+                (bundle / "10-requirements.md").read_text(encoding="utf-8")
+            )
+            beh_pin = blob_sha1(
+                (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+            )
+            (bundle / "20-design.md").write_text(
+                "---\n"
+                "spec_stage: design\n"
+                "status: draft\n"
+                "owner_role: architects\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f'  requirements: "{req_pin}"\n'
+                f'  behaviour-spec: "{beh_pin}"\n'
+                "---\n"
+                "# design\nПросто текст без единого DSL-заголовка.\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-design-dsl-empty-msg", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-design-dsl-empty-msg") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-DSL-EMPTY" in findings and "20-design.md" in findings
+    assert "Q-NN" in findings
+    assert "FR-NN" not in findings and "BEH-NN" not in findings
+
+
+def test_gate_accepts_design_heading_with_nonstandard_middot_spacing(
+    tmp_path: Path, runs_root,
+) -> None:
+    """MINOR-2: паттерн GC-DSL-EMPTY для design синхронизирован с
+    `design_guard._DESIGN_Q_RE` (`\\s*·\\s*`) — заголовок, который
+    ПАРСЕР принимает (нестандартные пробелы вокруг «·»), гейт не флагает
+    как пустой; старый паттерн требовал ровно один пробел с каждой
+    стороны и ложно стопил бы такой, реально распознаваемый, заголовок."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            bundle = Path(target_dir) / bundle_dir
+            if kind == "requirements":
+                path = bundle / "10-requirements.md"
+                path.write_text(
+                    _DEFAULT_REQUIREMENTS_BODY
+                    + "- **Q-01 · owner_role: architects · "
+                    "blocking: false.** Какой протокол?\n",
+                    encoding="utf-8",
+                )
+                return rc
+            if kind != "design":
+                return rc
+            req_pin = blob_sha1(
+                (bundle / "10-requirements.md").read_text(encoding="utf-8")
+            )
+            beh_pin = blob_sha1(
+                (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+            )
+            (bundle / "20-design.md").write_text(
+                "---\n"
+                "spec_stage: design\n"
+                "status: draft\n"
+                "owner_role: architects\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f'  requirements: "{req_pin}"\n'
+                f'  behaviour-spec: "{beh_pin}"\n'
+                "---\n"
+                "####  Q-01  ·  owner_role: architects  ·  "
+                "resolution: resolved\n"
+                "Обоснование решения.\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-design-dsl-nonstd-space", ops)
+    )
+
+    findings_file = (
+        runner.run_dir("r-design-dsl-nonstd-space") / "gate-findings.txt"
+    )
+    findings = findings_file.read_text() if findings_file.exists() else ""
+    assert "GC-DSL-EMPTY" not in findings
+    assert state.ops["gate-candidate"]["status"] == "completed"
 
 
 def test_rollup_unstable_failure_still_refuses(
@@ -2550,3 +2772,650 @@ def test_parser_takes_path_from_header_tail_not_forged_title() -> None:
         "- confidence: high → БЛОКИРУЕТ\n"
     )
     assert runner._file_missing_refute_candidates(traversal) is None
+
+
+# --- Task 4: S4-гарды design (отсутствие, UNPINNED/STALE рёбер, покрытие Q) --
+
+
+def test_gate_stops_when_design_node_missing_from_bundle(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Гард отсутствия design (спека Task 4): required-узел design профиля
+    team-exp, но файла 20-design.md в бандле нет ⇒ `stopped_gate` локально
+    — ДО цикла рёбер, даже когда FakeOps `gate_check_candidate` вернула бы
+    0 молча.
+
+    MINOR-1 финального ревью: `design_required` теперь читает ФАКТИЧЕСКИЙ
+    файл target-профиля (`target_profile_declares`), не сравнивает имя
+    профиля со строкой — без материализации `profiles/team-exp.yaml` в
+    `target_dir` гард молча не сработал бы (fail-closed False у
+    `target_profile_declares` на отсутствующем файле)."""
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    run_id = "r-design-absent"
+    target_dir = tmp_path / f"target-{run_id}"
+    target_dir.mkdir()
+    profile_dir = target_dir / "profiles"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "team-exp.yaml").write_text(
+        _TEAM_EXP_PROFILE_TEXT, encoding="utf-8"
+    )
+    bundle_dir = target_dir / BUNDLE_DIR
+    bundle_dir.mkdir(parents=True)
+    (bundle_dir / "00-charter.md").write_text("# charter\n", encoding="utf-8")
+    (bundle_dir / "10-requirements.md").write_text(
+        _DEFAULT_REQUIREMENTS_BODY, encoding="utf-8"
+    )
+    (bundle_dir / "15-behaviour-spec.md").write_text(
+        _DEFAULT_BEHAVIOUR_BODY, encoding="utf-8"
+    )
+    state = rs.new_run(
+        subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+        target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id=run_id,
+    )
+    state.branch = "spec/WS-1-behaviour"
+    state.ops = {
+        "branch": {"status": "completed"},
+        "author-charter": {"status": "completed", "skipped": True},
+        "author-requirements": {"status": "completed", "skipped": True},
+        "author-behaviour": {"status": "completed", "skipped": True},
+        # design намеренно НЕ авторен и не пропущен — файла нет вовсе.
+        "author-design": {"status": "completed", "skipped": True},
+        "commit": {"status": "completed"},
+    }
+    rs.save(state)
+
+    result = runner.advance(state, ops)
+
+    assert result.status == "stopped_gate"
+    findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
+    assert "GC-COMPLETENESS(design)" in findings
+    # Гард отсутствия стоит ДО цикла рёбер: находок по рёбрам design
+    # (UNPINNED/STALE) в том же файле нет — иначе завтрашняя правка
+    # порядка кода тихо перепутала бы, что стопнуло прогон.
+    assert "GC-UNPINNED" not in findings
+    assert "GC-STALE" not in findings
+    assert "push" not in result.ops
+
+
+def _design_pin_ops(bad_edge: str) -> type:
+    """Фабрика Ops-подкласса: design запинован верно ВЕЗДЕ, кроме
+    `bad_edge` (`"requirements"`/`"behaviour-spec"`) — там пин вовсе не
+    записан (GC-UNPINNED-сценарий)."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "design":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            pins = {
+                "requirements": blob_sha1(
+                    (bundle / "10-requirements.md").read_text(encoding="utf-8")
+                ),
+                "behaviour-spec": blob_sha1(
+                    (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+                ),
+            }
+            del pins[bad_edge]
+            hashes_block = "".join(
+                f'  {upstream}: "{pin}"\n' for upstream, pin in pins.items()
+            )
+            path = bundle / "20-design.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: design\n"
+                "status: draft\n"
+                "owner_role: architects\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f"{hashes_block}"
+                "---\n"
+                "Открытых архитектурных вопросов нет (входной набор пуст)\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    return _Ops
+
+
+def test_gate_design_missing_requirements_pin_is_unpinned(
+    tmp_path: Path, runs_root,
+) -> None:
+    """GC-UNPINNED(prospective) на ребре design→requirements: пин
+    behaviour-spec корректен, requirements — не запинен вовсе."""
+    ops = _design_pin_ops("requirements")(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-design-unpinned-req", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-design-unpinned-req") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings and "requirements" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_design_missing_behaviour_pin_is_unpinned(
+    tmp_path: Path, runs_root,
+) -> None:
+    """GC-UNPINNED(prospective) на ребре design→behaviour-spec: пин
+    requirements корректен, behaviour-spec — не запинен вовсе."""
+    ops = _design_pin_ops("behaviour-spec")(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-design-unpinned-beh", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-design-unpinned-beh") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings and "behaviour-spec" in findings
+    assert "push" not in state.ops
+
+
+def _design_undeclared_edge_ops(missing_edge: str) -> type:
+    """Фабрика Ops-подкласса: design объявляет `traces_to` только для
+    ОДНОГО ребра — `missing_edge` ("requirements"/"behaviour-spec") в
+    `traces_to` вовсе нет (MAJOR-1: раньше необъявленное ребро тихо
+    пропускалось `continue` внутри цикла гарда рёбер, вместо стопа S4
+    prospective-находкой)."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "design":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            declared = [
+                e for e in ("requirements", "behaviour-spec")
+                if e != missing_edge
+            ]
+            pins = {
+                "requirements": blob_sha1(
+                    (bundle / "10-requirements.md").read_text(encoding="utf-8")
+                ),
+                "behaviour-spec": blob_sha1(
+                    (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+                ),
+            }
+            hashes_block = "".join(
+                f'  {e}: "{pins[e]}"\n' for e in declared
+            )
+            path = bundle / "20-design.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: design\n"
+                "status: draft\n"
+                "owner_role: architects\n"
+                f"traces_to: [{', '.join(declared)}]\n"
+                "upstream_hashes:\n"
+                f"{hashes_block}"
+                "---\n"
+                "Открытых архитектурных вопросов нет (входной набор пуст)\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    return _Ops
+
+
+def test_gate_design_undeclared_requirements_edge_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """MAJOR-1: design `traces_to` несёт только `behaviour-spec` — ребро
+    requirements не объявлено ВООБЩЕ (не «не запинено», а отсутствует в
+    traces_to) — S4 обязан стопить prospective-находкой, не молча
+    пропускать необъявленное required-ребро."""
+    ops = _design_undeclared_edge_ops("requirements")(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-design-undeclared-req", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-design-undeclared-req") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings and "requirements" in findings
+    assert "не объявлено в traces_to" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_design_undeclared_behaviour_edge_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """MAJOR-1: design `traces_to` несёт только `requirements` — ребро
+    behaviour-spec не объявлено ВООБЩЕ — S4 обязан стопить, не
+    пропускать."""
+    ops = _design_undeclared_edge_ops("behaviour-spec")(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-design-undeclared-beh", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-design-undeclared-beh") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings and "behaviour-spec" in findings
+    assert "не объявлено в traces_to" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_edges_derived_from_bundle_dag() -> None:
+    """MINOR-3: `runner._GATE_EDGES` не расходится с `task_bridge._BUNDLE_DAG`
+    — рёбра S4 выводятся из ОДНОГО источника (не трёх несинхронизированных
+    копий: этот кортеж, `_BUNDLE_DAG`, `profiles/team-exp.yaml`).
+    node-id ↔ имя файла — через `task_bridge._node_id`; required — те
+    рёбра, чей target-узел design (MAJOR-1)."""
+    filename_by_node_id = {
+        task_bridge._node_id(fname): fname
+        for fname, _upstreams in task_bridge._BUNDLE_DAG
+    }
+    expected = tuple(
+        (
+            fname,
+            upstream,
+            filename_by_node_id[upstream],
+            task_bridge._node_id(fname) == "design",
+        )
+        for fname, upstreams in task_bridge._BUNDLE_DAG
+        for upstream in upstreams
+    )
+    assert runner._GATE_EDGES == expected
+
+
+def _design_stale_ops(stale_edge: str) -> type:
+    """Фабрика Ops-подкласса: design запинован верно ВЕЗДЕ, кроме
+    `stale_edge` — там пин синтаксически валиден (40 hex), но неверен
+    (GC-STALE-сценарий)."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "design":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            pins = {
+                "requirements": blob_sha1(
+                    (bundle / "10-requirements.md").read_text(encoding="utf-8")
+                ),
+                "behaviour-spec": blob_sha1(
+                    (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+                ),
+            }
+            pins[stale_edge] = "a" * 40
+            hashes_block = "".join(
+                f'  {upstream}: "{pin}"\n' for upstream, pin in pins.items()
+            )
+            path = bundle / "20-design.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: design\n"
+                "status: draft\n"
+                "owner_role: architects\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f"{hashes_block}"
+                "---\n"
+                "Открытых архитектурных вопросов нет (входной набор пуст)\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    return _Ops
+
+
+def test_gate_design_stale_requirements_pin(tmp_path: Path, runs_root) -> None:
+    """GC-STALE(prospective) на ребре design→requirements: пин
+    синтаксически валиден, но не совпадает с blob-хешем в worktree."""
+    ops = _design_stale_ops("requirements")(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-design-stale-req", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-design-stale-req") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-STALE" in findings and "requirements" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_design_stale_behaviour_pin(tmp_path: Path, runs_root) -> None:
+    """GC-STALE(prospective) на ребре design→behaviour-spec: пин
+    синтаксически валиден, но не совпадает с blob-хешем в worktree."""
+    ops = _design_stale_ops("behaviour-spec")(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-design-stale-beh", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-design-stale-beh") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-STALE" in findings and "behaviour-spec" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_stops_on_uncovered_architect_question(
+    tmp_path: Path, runs_root,
+) -> None:
+    """GC-DESIGN-COVERAGE (спека Task 4): architects-Q из requirements без
+    резолюции в design — стоп, отдельно от DSL-EMPTY/UNPINNED/STALE (оба
+    пина design корректны, design DSL-непуст своим Q-99)."""
+    q03_requirements = (
+        _DEFAULT_REQUIREMENTS_BODY
+        + "- **Q-03 · owner_role: architects · blocking: false.** Как?\n"
+    )
+
+    class UncoveredQOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            self.calls.append(("author", kind))
+            self.authored.append(kind)
+            bundle = Path(target_dir) / bundle_dir
+            bundle.mkdir(parents=True, exist_ok=True)
+            if kind == "requirements":
+                (bundle / "10-requirements.md").write_text(
+                    q03_requirements, encoding="utf-8"
+                )
+                return 0
+            if kind == "design":
+                req_pin = blob_sha1(q03_requirements)
+                beh_pin = blob_sha1(_DEFAULT_BEHAVIOUR_BODY)
+                (bundle / "20-design.md").write_text(
+                    "---\n"
+                    "spec_stage: design\n"
+                    "status: draft\n"
+                    "owner_role: architects\n"
+                    "traces_to: [requirements, behaviour-spec]\n"
+                    "upstream_hashes:\n"
+                    f'  requirements: "{req_pin}"\n'
+                    f'  behaviour-spec: "{beh_pin}"\n'
+                    "---\n"
+                    "#### Q-99 · owner_role: architects · resolution: "
+                    "resolved\nне то\n",
+                    encoding="utf-8",
+                )
+                return 0
+            return super().author(target_dir, kind, subject, bundle_dir)
+
+    ops = UncoveredQOps(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-design-uncovered-q", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-design-uncovered-q") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-DESIGN-COVERAGE" in findings and "Q-03" in findings
+    assert "push" not in state.ops
+
+
+# --- Task 8: preflight профиля target — design-узел обязателен -----------
+
+_STALE_TEAM_EXP_PROFILE = """\
+profile: team-exp
+artifacts:
+  - {id: charter, template: charter.md, owner_role: product}
+  - id: requirements
+    template: requirements.md
+    owner_role: product
+    upstream: [charter]
+  - id: behaviour-spec
+    template: behaviour-spec.md
+    owner_role: product
+    upstream: [requirements]
+  - id: tasks
+    owner_role: stream-owner
+    upstream: [behaviour-spec]
+    delegate: spec-runner
+"""
+
+
+def _write_stale_profile(target_dir: Path) -> Path:
+    """Старая копия profiles/team-exp.yaml (3 узла, БЕЗ design) — как
+    несут соседние репо до раскатки design-узла (мотивация Task 8)."""
+    profile_path = target_dir / "profiles" / "team-exp.yaml"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(_STALE_TEAM_EXP_PROFILE, encoding="utf-8")
+    return profile_path
+
+
+def test_start_stops_preflight_when_target_profile_lacks_design(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Step 1(а): target несёт СТАРУЮ копию profiles/team-exp.yaml без
+    узла design ⇒ `start` останавливается статусом `stopped_preflight`
+    (до фактического авторинга design), сообщение несёт процедуру."""
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    run_id = "r-preflight-missing-design"
+    kwargs = _start_kwargs(tmp_path, run_id, ops)
+    _write_stale_profile(Path(kwargs["target_dir"]))
+
+    state = runner.start(**kwargs)
+
+    assert state.status == "stopped_preflight"
+    # Преflight стоит ДО S2 (план Task 8 Step 2): ни одного оплаченного
+    # вызова авторинга, не только «design не авторился» (minor PR-ревью
+    # #145 — старый ассерт разрешал три вызова до останова).
+    assert ops.authored == []
+    assert "gate-candidate" not in state.ops
+    assert "push" not in state.ops
+
+
+def test_start_preflight_silent_on_four_node_profile(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Step 1(б): target с актуальным 4-узловым профилем (материализован
+    `_start_kwargs`) ⇒ preflight молчит, прогон доходит до мержа как
+    прежде — регрессия отсутствует."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+
+    state = runner.start(**_start_kwargs(tmp_path, "r-preflight-ok", ops))
+
+    assert state.status != "stopped_preflight"
+    assert state.ops["merge"]["status"] == "completed"
+
+
+def test_start_stops_preflight_for_non_team_exp_profile_lacking_design(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Фикс-раунд ревью, major #1: хардкод имени профиля снят —
+    `_step_authoring` решает «авторить ли design» data-driven для ЛЮБОГО
+    профиля. `profiles/mini.yaml` (фикстура `make_profile`, узла design не
+    несёт) через ПОЛНЫЙ `start()` (не ручной bypass state.ops) стопится
+    `stopped_preflight` — не молчаливым `author-design`, не молчаливым
+    skip. Конвейер сейчас не поддерживает профили «сознательно без
+    design»: единственный статус для такого расхождения — останов."""
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    run_id = "r-preflight-mini-full"
+    target_dir = tmp_path / f"target-{run_id}"
+    target_dir.mkdir()
+    make_profile(target_dir)  # profiles/mini.yaml — без узла design
+
+    state = runner.start(
+        subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+        target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
+        profile="profiles/mini.yaml", run_id=run_id, ops=ops,
+    )
+
+    assert state.status == "stopped_preflight"
+    assert "design" not in ops.authored
+    assert "gate-candidate" not in state.ops
+
+
+def test_target_profile_declares_fail_closed_on_broken_yaml(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Фикс-раунд ревью, minor #3: битый YAML в target-профиле ⇒
+    `target_profile_declares` fail-closed False (не traceback), и `start`
+    стопится `stopped_preflight`, а не роняет прогон исключением."""
+    from governance import policy_sources
+
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    run_id = "r-preflight-broken-yaml"
+    kwargs = _start_kwargs(tmp_path, run_id, ops)
+    profile_path = Path(kwargs["target_dir"]) / "profiles" / "team-exp.yaml"
+    profile_path.write_text(
+        "artifacts:\n  - {id: design, template: [unterminated\n",
+        encoding="utf-8",
+    )
+
+    assert policy_sources.target_profile_declares(
+        kwargs["target_dir"], kwargs["profile"], "design"
+    ) is False
+
+    state = runner.start(**kwargs)
+
+    assert state.status == "stopped_preflight"
+
+
+def test_deliver_refuses_when_target_profile_lacks_design(
+    tmp_path: Path,
+) -> None:
+    """Step 1(в): `deliver` с тем же расхождением (профиль target без
+    design) ⇒ RuntimeError с той же процедурой, что у `stopped_preflight`
+    раннера — проверяется ДО ensure_branch/стампа."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "15-behaviour-spec.md").write_text("# behaviour\n", encoding="utf-8")
+    (bundle / "20-design.md").write_text("# design\n", encoding="utf-8")
+    _write_stale_profile(target)
+
+    class _MiniOps:
+        def is_dirty(self, target_dir: str) -> bool:
+            return False
+
+        def checkout_and_pull(self, target_dir: str, branch: str) -> None:
+            pass
+
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=_MiniOps(),
+            approved_by="a", approved_at="t",
+            profile="profiles/team-exp.yaml",
+        )
+    message = str(exc_info.value)
+    assert "design" in message.lower()
+    assert "authority-root" in message
+    assert "мерж человеком" in message
+
+
+def test_resume_after_profile_delivered_continues_run(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Step 1(г): «доставили» обновлённый профиль (дописали design в
+    target-профиль) ⇒ `resume(run_id)` ПРОДОЛЖАЕТ прогон, не тихий no-op —
+    `stopped_preflight` обязан быть в `_STOPPED_RESET_OPS`."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    run_id = "r-preflight-resume"
+    kwargs = _start_kwargs(tmp_path, run_id, ops)
+    profile_path = _write_stale_profile(Path(kwargs["target_dir"]))
+
+    stopped = runner.start(**kwargs)
+    assert stopped.status == "stopped_preflight"
+
+    # «Доставка» обновлённого профиля PR-ом (человеческий мерж authority-root):
+    # дописываем узел design в target-профиль.
+    profile_path.write_text(_TEAM_EXP_PROFILE_TEXT, encoding="utf-8")
+
+    resumed = runner.resume(run_id, ops)
+
+    assert resumed.status != "stopped_preflight"
+    assert resumed.ops["merge"]["status"] == "completed"
+
+
+# --- Task 9: сквозной смоук design-узла -------------------------------------
+
+
+def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root) -> None:
+    """Сквозной смоук S2→S4 design-узла (Task 9), один прогон `start()`.
+
+    Не дублирует то, что уже проверено по частям:
+    - порядок всех четырёх author-шагов —
+      `test_default_author_backend_is_codex_author_disp_not_called`;
+    - зелёный happy path до мержа (без architects-Q в requirements) —
+      `test_happy_path_agent_merge`/`test_today_reality_agent_merges`;
+    - RED-ветка GC-DESIGN-COVERAGE (Q без резолюции) —
+      `test_gate_stops_on_uncovered_architect_question`;
+    - RED-ветки GC-UNPINNED/GC-STALE на рёбрах design —
+      `test_gate_design_missing_*_pin_is_unpinned`/
+      `test_gate_design_stale_*_pin`.
+
+    Недостающий кусок, который собирает этот тест: ОДИН сквозной прогон,
+    где (а) `ops.author` пишет канонический `20-design.md` с валидными
+    пинами upstream И НЕПУСТЫМ, но покрытым (не вакуумно) architects-Q —
+    S2 проходит все четыре author-шага по порядку, `author-design`
+    завершён без skip, файл физически лежит в бандле; (б) тот же прогон
+    идёт дальше и S4-гейт на этом полном 4-узловом бандле — зелёный,
+    прогон доходит до мержа."""
+    q03_requirements = (
+        _DEFAULT_REQUIREMENTS_BODY
+        + "- **Q-03 · owner_role: architects · blocking: false.** Как?\n"
+    )
+
+    class CoveredQOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            if kind not in ("requirements", "design"):
+                return super().author(target_dir, kind, subject, bundle_dir)
+            self.calls.append(("author", kind))
+            self.authored.append(kind)
+            bundle = Path(target_dir) / bundle_dir
+            bundle.mkdir(parents=True, exist_ok=True)
+            if kind == "requirements":
+                (bundle / "10-requirements.md").write_text(
+                    q03_requirements, encoding="utf-8"
+                )
+                return 0
+            req_pin = blob_sha1(q03_requirements)
+            beh_pin = blob_sha1(_DEFAULT_BEHAVIOUR_BODY)
+            (bundle / "20-design.md").write_text(
+                "---\n"
+                "spec_stage: design\n"
+                "status: draft\n"
+                "owner_role: architects\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f'  requirements: "{req_pin}"\n'
+                f'  behaviour-spec: "{beh_pin}"\n'
+                "---\n"
+                "#### Q-03 · owner_role: architects · resolution: "
+                "resolved\nОтвет на вопрос архитектуры.\n",
+                encoding="utf-8",
+            )
+            return 0
+
+    ops = CoveredQOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    run_id = "r-design-e2e-smoke"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+
+    # S2: все четыре author-шага прошли РОВНО в этом порядке.
+    assert ops.authored == ["charter", "requirements", "behaviour-spec", "design"]
+    assert state.ops["author-design"]["status"] == "completed"
+    assert state.ops["author-design"]["skipped"] is False
+    bundle_dir = Path(state.target_dir) / state.bundle_dir
+    assert (bundle_dir / "20-design.md").exists()
+
+    # S4: гейт зелёный на полном 4-узловом бандле (валидные пины + покрытый
+    # architects-Q) — прогон дошёл до мержа, не остановился на gate/review.
+    assert state.status == "completed"
+    assert state.ops["merge"]["status"] == "completed"
+    assert ops.merged == [(state.pr, ops.head)]

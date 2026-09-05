@@ -1,0 +1,157 @@
+"""Чистый парсер грамматики Q requirements/design и покрытие (спека §4/Task 4).
+
+Никакого git/файловой системы — только строки. Отдельный модуль (не
+`bundle_state.py`/`runner.py`): `governance.task_bridge` (Task 5) переиспользует
+эти же три функции, не тянет за собой S4-специфичный код раннера.
+
+Грамматика Q (обе стороны, дословно из спеки/Global Constraints):
+
+- requirements: ``- **Q-NN · owner_role: <role> · blocking: true|false.**
+  <текст>``;
+- design: ``#### Q-NN · owner_role: architects · resolution:
+  resolved|deferred`` (+ строка ``reason: <…>`` при ``deferred``; у
+  ``resolved`` обоснование — первый непустой абзац блока, fallback в тот
+  же слот);
+- пустой входной набор архитектурных вопросов покрыт только явной строкой
+  ``Открытых архитектурных вопросов нет (входной набор пуст)`` в design.
+"""
+
+from __future__ import annotations
+
+import re
+
+_ARCHITECTS_ROLE = "architects"
+_EMPTY_DECLARATION = "Открытых архитектурных вопросов нет (входной набор пуст)"
+
+_REQ_Q_RE = re.compile(
+    r"^-\s+\*\*(Q-\d+)\s*·\s*owner_role:\s*([\w-]+)\s*·\s*"
+    r"blocking:\s*(?:true|false)\.\*\*",
+    re.MULTILINE,
+)
+_DESIGN_Q_RE = re.compile(
+    r"^####\s+(Q-\d+)\s*·\s*owner_role:\s*[\w-]+\s*·\s*"
+    r"resolution:\s*(resolved|deferred)\s*$",
+    re.MULTILINE,
+)
+_REASON_RE = re.compile(r"^reason:\s*(.+)$", re.MULTILINE)
+
+
+def parse_requirements_questions(text: str) -> dict[str, str]:
+    """`Q-NN` → `owner_role`, из requirements-DSL (все роли, не только architects).
+
+    Фильтрация по роли — дело вызывающего (`coverage_findings` ниже): этот
+    парсер — чистый срез текста, ничего не решает про то, кто должен
+    отвечать.
+    """
+    return {m.group(1): m.group(2) for m in _REQ_Q_RE.finditer(text)}
+
+
+def _first_paragraph(block: str) -> str | None:
+    """Первый непустой абзац `block` (текст до пустой строки), `None` —
+    если абзацев нет вовсе (блок пуст/только whitespace)."""
+    for paragraph in re.split(r"\n\s*\n", block.strip()):
+        paragraph = paragraph.strip()
+        if paragraph:
+            return paragraph
+    return None
+
+
+def parse_design_resolutions(text: str) -> dict[str, tuple[str, str | None]]:
+    """`Q-NN` → `(resolution, justification)`, из design-DSL.
+
+    `justification` — приоритет у строки `reason: <…>` внутри блока
+    вопроса (от заголовка `#### Q-NN …` до следующего такого заголовка,
+    следующей секции уровня 1–3 или конца текста); при её отсутствии у
+    `resolved` — первый непустой абзац того же блока (DSL авторинга,
+    `ops.py` `_AUTHOR_DSL["design"]`: `resolved` несёт обоснование
+    абзацем, `reason:` обязателен только у `deferred`). У `deferred` без
+    строки `reason:` — всегда `None`: fallback на абзац дал бы ложную
+    «причину» и погасил находку coverage_findings. `None` — также когда
+    ни `reason:`, ни абзаца нет (типично «голый» заголовок).
+    """
+    matches = list(_DESIGN_Q_RE.finditer(text))
+    result: dict[str, tuple[str, str | None]] = {}
+    for idx, match in enumerate(matches):
+        qid, resolution = match.group(1), match.group(2)
+        block_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        block = text[match.end() : block_end]
+        # Блок Q кончается и на следующей секции документа (заголовок
+        # уровня 1–3), не только на следующем Q: иначе у последнего
+        # вопроса «## Механика» и весь хвост документа читались бы как
+        # его содержимое (major PR-ревью #145).
+        section = re.search(r"^#{1,3}\s", block, re.M)
+        if section is not None:
+            block = block[: section.start()]
+        reason_match = _REASON_RE.search(block)
+        if reason_match is not None:
+            justification: str | None = reason_match.group(1).strip()
+        elif resolution == "resolved":
+            # fallback на абзац — ТОЛЬКО для resolved (DSL: обоснование
+            # абзацем); deferred без строки reason: обязан остаться
+            # None, чтобы coverage_findings дал находку.
+            justification = _first_paragraph(block)
+        else:
+            justification = None
+        result[qid] = (resolution, justification)
+    return result
+
+
+def coverage_findings(req_text: str, design_text: str) -> list[str]:
+    """Непокрытые architects-вопросы requirements в design — список находок.
+
+    Только вопросы с `owner_role: architects` входят во входной набор
+    (product-Q — забота другого узла, не design). Пустой входной набор
+    покрыт единственным способом — явной строкой-декларацией в design;
+    её отсутствие при пустом наборе — тоже находка (иначе тихое
+    «нечего проверять» неотличимо от «автор забыл написать раздел
+    вопросов вовсе»).
+    """
+    questions = parse_requirements_questions(req_text)
+    resolutions = parse_design_resolutions(design_text)
+    architects_qs = [
+        qid for qid, role in questions.items() if role == _ARCHITECTS_ROLE
+    ]
+
+    findings: list[str] = []
+
+    # Закалка по minor'ам PR-ревью #145 — три проверки формы, работающие
+    # НЕЗАВИСИМО от входного набора (иначе дефект гасится пустым/частично
+    # распознанным множеством):
+    # 1. near-miss буллет requirements: похож на Q, но мимо строгой
+    #    грамматики — входное множество недостоверно, молчать нельзя.
+    for miss in re.finditer(r"^-\s+\*\*(Q-\d+)", req_text, re.M):
+        qid = miss.group(1)
+        if qid not in questions:
+            findings.append(
+                f"{qid}: буллет не соответствует машинной грамматике Q — "
+                "входное множество недостоверно"
+            )
+    # 2. дубли #### Q-NN в design: спека §4 — каждый вопрос присутствует
+    #    ровно один раз; «последний побеждает» гасил бы противоречащую пару.
+    seen: dict[str, int] = {}
+    for match in _DESIGN_Q_RE.finditer(design_text):
+        seen[match.group(1)] = seen.get(match.group(1), 0) + 1
+    for qid, count in seen.items():
+        if count > 1:
+            findings.append(f"{qid}: объявлен {count} раза в design (ожидается ровно один)")
+    # 3. deferred без reason: — по ВСЕМ резолюциям design, включая Q вне
+    #    входного набора (иначе рендер получает justification None).
+    for qid, (state, reason) in resolutions.items():
+        if state == "deferred" and not reason:
+            findings.append(f"{qid}: resolution: deferred без строки reason:")
+
+    if not architects_qs:
+        if re.search(rf"^{re.escape(_EMPTY_DECLARATION)}", design_text, re.M) is None:
+            findings.append(
+                "design: входной набор архитектурных вопросов пуст, но "
+                f"строка-декларация «{_EMPTY_DECLARATION}» отсутствует"
+            )
+        return findings
+
+    for qid in architects_qs:
+        if qid not in resolutions:
+            findings.append(
+                f"{qid}: не покрыт резолюцией в design "
+                "(owner_role: architects в requirements)"
+            )
+    return findings

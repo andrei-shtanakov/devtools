@@ -23,17 +23,43 @@ from pathlib import Path
 
 import yaml
 
+from governance import design_guard
 from governance.ops import Ops, RealOps
+from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
 from governance.run_state import load
 from governance.stale_adapter import blob_sha1
 
-# Цепочка бандла в порядке штампа: каждый следующий пинует blob ПРЕДЫДУЩЕГО
-# после его штампа (иначе пин протухает в момент записи).
-_BUNDLE_CHAIN = (
-    ("00-charter.md", None),
-    ("10-requirements.md", "charter"),
-    ("15-behaviour-spec.md", "requirements"),
+# DAG бандла в порядке штампа (топологический): каждый узел перечисляет
+# node-id своих upstream'ов; штамп идёт по порядку тюпла, и пин(ы) узла
+# пересчитываются ПОСЛЕ штампа ВСЕХ его upstream-файлов (иначе пин
+# протухает в момент записи). design — единственный узел с ДВУМЯ
+# upstream-пинами (Task 5 плана design-узла).
+_BUNDLE_DAG: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("00-charter.md", ()),
+    ("10-requirements.md", ("charter",)),
+    ("15-behaviour-spec.md", ("requirements",)),
+    ("20-design.md", ("requirements", "behaviour-spec")),
 )
+
+
+def _node_id(filename: str) -> str:
+    """Имя файла бандла → node-id (числовой префикс и `.md` отрезаны)."""
+    return filename.rsplit(".", 1)[0].split("-", 1)[1]
+
+
+# Якорный узел моста — терминальный узел DAG (design). Выводится из
+# _BUNDLE_DAG, а не хардкодится второй раз (Task 6): смена терминального
+# узла бандла — правка одной строки DAG, не поиск по файлу.
+_ANCHOR_FILENAME = _BUNDLE_DAG[-1][0]
+_ANCHOR_NODE_ID = _node_id(_ANCHOR_FILENAME)
+
+# Легаси-режим (Task 7 плана design-узла): бандлы, авторенные до раскатки
+# design-узла, несут только эти три файла. `--legacy-bundle` усекает DAG до
+# этого префикса — терминальный узел становится behaviour-spec, 20-design.md
+# не читается вовсе (его в бандле нет по построению, не по ошибке).
+_BUNDLE_DAG_LEGACY: tuple[tuple[str, tuple[str, ...]], ...] = _BUNDLE_DAG[:3]
+_LEGACY_ANCHOR_FILENAME = _BUNDLE_DAG_LEGACY[-1][0]
+_LEGACY_ANCHOR_NODE_ID = _node_id(_LEGACY_ANCHOR_FILENAME)
 
 
 def split_frontmatter(text: str) -> tuple[dict, str]:
@@ -234,13 +260,47 @@ def _merge_featureless_by_target_file(
     return merged
 
 
+def _render_resolutions_section(design_text: str) -> list[str]:
+    """Секция «Решения открытых вопросов» tasks-спеки из design-DSL.
+
+    Потребляет ``design_guard.parse_design_resolutions`` (Task 4) — не
+    рукописный пересказ, а генерация из фактического 20-design.md.
+    resolved несёт обоснование (по DSL — первый непустой абзац блока;
+    строка ``reason:`` тоже принимается, если встретится); deferred несёт
+    причину явным префиксом. Пустой набор
+    резолюций (design без единого блока ``#### Q-NN``) — секция не
+    рендерится вовсе.
+    """
+    resolutions = design_guard.parse_design_resolutions(design_text)
+    if not resolutions:
+        return []
+    lines = ["## Решения открытых вопросов (уровень design)", ""]
+    for qid, (state, reason) in resolutions.items():
+        if state == "deferred":
+            # None недостижим через конвейер (S4 ловит deferred без
+            # reason:), но deliver зовут и на легаси/ручных бандлах —
+            # литерал «None» в человеко-читаемом артефакте недопустим.
+            lines.append(
+                f"- **{qid} (deferred):** reason: "
+                f"{reason if reason else 'причина не указана'}"
+            )
+        elif reason:
+            lines.append(f"- **{qid}:** {reason}")
+        else:
+            lines.append(f"- **{qid}:** resolved")
+    lines.append("")
+    return lines
+
+
 def render_tasks(
     ws_id: str,
     subject: str,
     bundle_path: str,
     scenarios: list[Scenario],
     generated_at: str,
-    behaviour_blob: str,
+    design_blob: str,
+    design_text: str = "",
+    anchor_node_id: str = _ANCHOR_NODE_ID,
 ) -> str:
     """tasks.md по шаблону templates/tasks-spec-template.md.
 
@@ -253,6 +313,16 @@ def render_tasks(
     ``## Feature:``-секцию behaviour-spec, а не на сценарий — 1:1 в боевом
     прогоне kapelle#47 дало 19 церемониальных задач. Сценарии без Feature
     остаются задачами 1:1; задачи зависят цепочкой (порядок документа).
+
+    Якорь traces_to/upstream_hashes — design (Task 5 плана design-узла):
+    design пинует ОБА upstream (requirements, behaviour-spec), так что
+    один пин design транзитивно покрывает весь бандл — traces_to дальше
+    ведёт на behaviour-spec незачем.
+
+    `anchor_node_id` — Task 7 (легаси-режим): вызывающий (`deliver`) передаёт
+    `behaviour-spec` вместо дефолтного `design`, когда `legacy_bundle=True`
+    (3-узловой бандл без design) — сам рендер об этом режиме не знает,
+    только про то, ЧТО именно является якорем.
     """
     lines = [
         "---",
@@ -270,9 +340,9 @@ def render_tasks(
         # что рукам после approve остаётся только нормализация
         # `--conform-approve`.
         "traces_to:",
-        "- behaviour-spec",
+        f"- {anchor_node_id}",
         "upstream_hashes:",
-        f"  behaviour-spec: {behaviour_blob}",
+        f"  {anchor_node_id}: {design_blob}",
         "---",
         "",
         f"## Milestone 1: {subject}",
@@ -283,6 +353,7 @@ def render_tasks(
         "approve.",
         "",
     ]
+    lines += _render_resolutions_section(design_text)
     groups: list[tuple[str, str, list[Scenario]]] = []  # (key, title, scs)
     for sc in scenarios:
         key = sc.feature or sc.beh_id
@@ -339,8 +410,16 @@ def stamp_bundle_approved(
     bundle_dir: str,
     approved_by: str,
     approved_at: str,
+    legacy_bundle: bool = False,
 ) -> list[str]:
     """Штамп статусов вмерженного бандла + перепиновка цепочки; → rel-пути.
+
+    `legacy_bundle=True` (Task 7) усекает обход до 3-узлового префикса DAG
+    (`_BUNDLE_DAG_LEGACY`) — бандлы, авторенные до раскатки design-узла, не
+    несут 20-design.md вовсе, и штамп не должен его искать. Без флага на
+    таком бандле — явный RuntimeError (текст называет файл и обе процедуры:
+    доавторить design ЛИБО передать `--legacy-bundle`), а не сырой
+    traceback от `path.read_text()` на отсутствующем файле.
 
     Урок 2 ретроспективы (devtools#110): после мержа бандла charter /
     requirements / behaviour-spec остаются `status: draft` — «никто не
@@ -350,15 +429,28 @@ def stamp_bundle_approved(
     Штамп записывает ЭТОТ факт: `approved_by` = mergedBy бандл-PR (честный
     различитель agent/human), `approved_at` = mergedAt.
 
-    Перепиновка идёт по цепочке: штамп меняет байты файла, поэтому каждый
-    следующий пинует blob предыдущего ПОСЛЕ его штампа. Идемпотентно:
-    уже approved файл с верным пином не трогается и в результат не входит.
+    Перепиновка идёт по DAG (Task 5: цепочка стала DAG — design пинует ОБА
+    upstream): штамп меняет байты файла, поэтому пин(ы) каждого узла
+    пересчитываются ПОСЛЕ штампа ВСЕХ его upstream-файлов — порядок
+    обхода `_BUNDLE_DAG` уже топологический. Идемпотентно: уже approved
+    файл с верными пинами не трогается и в результат не входит.
     """
     changed: list[str] = []
-    prev_blob: str | None = None
+    stamped_blobs: dict[str, str] = {}
     base = Path(target_dir) / bundle_dir
-    for name, upstream in _BUNDLE_CHAIN:
+    dag = _BUNDLE_DAG_LEGACY if legacy_bundle else _BUNDLE_DAG
+    for name, upstream_ids in dag:
         path = base / name
+        if not path.exists():
+            raise RuntimeError(
+                f"{path} не найден — штамп бандла остановлен. Либо "
+                "доавторьте design (узел `design` профиля team-exp, "
+                "`make behaviour-tasks` ждёт вмерженный 20-design.md), "
+                "либо, если бандл легаси (авторен до раскатки design-узла "
+                "и design туда не входит), передайте `--legacy-bundle` — "
+                "штамп пойдёт по 3-узловому префиксу "
+                "charter→requirements→behaviour-spec"
+            )
         meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
         dirty = False
         if meta.get("status") != "approved":
@@ -367,31 +459,51 @@ def stamp_bundle_approved(
             meta["approved_at"] = approved_at
             meta["version"] = int(meta.get("version") or 1) + 1
             dirty = True
-        if upstream is not None and prev_blob is not None:
+        if upstream_ids:
             pins = meta.get("upstream_hashes")
             pins = dict(pins) if isinstance(pins, dict) else {}
-            if pins.get(upstream) != prev_blob:
-                pins[upstream] = prev_blob
+            for upstream_id in upstream_ids:
+                blob = stamped_blobs[upstream_id]
+                if pins.get(upstream_id) != blob:
+                    pins[upstream_id] = blob
+                    dirty = True
+            if dirty:
                 meta["upstream_hashes"] = pins
-                dirty = True
         if dirty:
             path.write_text(join_frontmatter(meta, body), encoding="utf-8")
             changed.append(f"{bundle_dir}/{name}")
-        prev_blob = blob_sha1(path.read_text(encoding="utf-8"))
+        stamped_blobs[_node_id(name)] = blob_sha1(
+            path.read_text(encoding="utf-8")
+        )
     return changed
 
 
-def conform_approved(target_dir: str, ws_id: str, bundle_dir: str) -> bool:
+def conform_approved(
+    target_dir: str,
+    ws_id: str,
+    bundle_dir: str,
+    legacy_bundle: bool = False,
+) -> bool:
     """Нормализация frontmatter tasks-спеки ПОСЛЕ `spec approve` владельца.
 
-    Урок 1 ретроспективы: `spec approve` деривит traces_to из вшитого
-    lite-профиля (tasks ← design; других профилей у spec-runner нет —
-    upstream-плечо заведено отдельно) и дописывает `design` к нашему
-    `behaviour-spec`. Нормализация возвращает форму активного
-    governance-профиля: traces_to ровно [behaviour-spec], пин — на
-    ТЕКУЩИЙ blob вмерженного 15-behaviour-spec.md. Строгий run проверяет
-    только status — правка безопасна. Возвращает, менялся ли файл.
+    Якорь — терминальный узел `_BUNDLE_DAG` (design, Task 6): не
+    хардкодится второй раз, выводится из DAG (`_ANCHOR_NODE_ID` /
+    `_ANCHOR_FILENAME`), так что смена терминального узла бандла правит
+    DAG в одном месте, не эту функцию. Нормализация возвращает форму
+    активного governance-профиля: traces_to ровно [<anchor>], пин — на
+    ТЕКУЩИЙ blob вмерженного файла анкера (independent от того, что туда
+    дописал/недописал `spec approve` — lite-профиль spec-runner не знает
+    про наш DAG). Строгий run проверяет только status — правка
+    безопасна. Возвращает, менялся ли файл.
+
+    `legacy_bundle=True` (Task 7): якорь — терминальный узел УСЕЧЁННОГО
+    DAG (`behaviour-spec`, `_LEGACY_ANCHOR_NODE_ID`/`_LEGACY_ANCHOR_FILENAME`)
+    — 20-design.md не читается вовсе, того файла в легаси-бандле нет.
+    Отсутствие файла-анкера (design без флага на легаси-бандле) — тот же
+    явный RuntimeError, что у `stamp_bundle_approved`, не сырой traceback.
     """
+    anchor_filename = _LEGACY_ANCHOR_FILENAME if legacy_bundle else _ANCHOR_FILENAME
+    anchor_node_id = _LEGACY_ANCHOR_NODE_ID if legacy_bundle else _ANCHOR_NODE_ID
     rel = Path(target_dir) / "spec" / f"{ws_id}-tasks.md"
     meta, body = split_frontmatter(rel.read_text(encoding="utf-8"))
     if meta.get("status") != "approved":
@@ -399,13 +511,20 @@ def conform_approved(target_dir: str, ws_id: str, bundle_dir: str) -> bool:
             f"{rel.name}: status={meta.get('status')!r} — нормализация идёт "
             "ПОСЛЕ человеческого `spec approve` (инвариант №4), сначала он"
         )
-    behaviour = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
-    pin = blob_sha1(behaviour.read_text(encoding="utf-8"))
+    anchor = Path(target_dir) / bundle_dir / anchor_filename
+    if not anchor.exists():
+        raise RuntimeError(
+            f"{anchor} не найден — нормализация остановлена. Либо "
+            "доавторьте design (узел `design` профиля team-exp), либо, "
+            "если бандл легаси (design туда не входит), передайте "
+            "`--legacy-bundle` — якорь станет behaviour-spec"
+        )
+    pin = blob_sha1(anchor.read_text(encoding="utf-8"))
     changed = False
-    if meta.get("traces_to") != ["behaviour-spec"]:
-        meta["traces_to"] = ["behaviour-spec"]
+    if meta.get("traces_to") != [anchor_node_id]:
+        meta["traces_to"] = [anchor_node_id]
         changed = True
-    want = {"behaviour-spec": pin}
+    want = {anchor_node_id: pin}
     if meta.get("upstream_hashes") != want:
         meta["upstream_hashes"] = want
         changed = True
@@ -425,6 +544,8 @@ def deliver(
     approved_by: str,
     approved_at: str,
     generated_at: str | None = None,
+    legacy_bundle: bool = False,
+    profile: str | None = None,
 ) -> int:
     """Штампует бандл + пишет spec/<ws-id>-tasks.md; один draft-PR.
 
@@ -433,9 +554,25 @@ def deliver(
     ДО создания ветки — спека генерируется из вмерженного бандла, не из
     случайного состояния чекаута.
 
-    Порядок «штамп бандла → пин behaviour-spec → рендер tasks» жёсткий:
-    штамп меняет байты 15-behaviour-spec.md, и пин, взятый до штампа,
-    протух бы в том же PR (@id:spec-bridge-approve-conformance).
+    Порядок «штамп бандла → пин design → рендер tasks» жёсткий: штамп
+    меняет байты 20-design.md (терминальный узел `_BUNDLE_DAG`), и пин,
+    взятый до штампа, протух бы в том же PR
+    (@id:spec-bridge-approve-conformance).
+
+    `legacy_bundle=True` (Task 7): бандл без узла design (авторен до
+    раскатки design-узла) — штамп и якорь идут по 3-узловому префиксу DAG
+    (`behaviour-spec`), 20-design.md не читается вовсе.
+
+    `profile` (Task 8, опционально): путь профиля относительно
+    `target_dir` — тот же, что получит `gate_check_candidate` в раннере
+    (`state.profile`), не захардкоженный `profiles/team-exp.yaml`. Когда
+    передан и `legacy_bundle=False`, доставка отказывает, если
+    ФАКТИЧЕСКИЙ профиль target-репо не декларирует узел `design` — та же
+    процедура, что у `stopped_preflight` раннера
+    (`governance.policy_sources.target_profile_declares`): соседний репо
+    может нести старую копию файла того же имени без design. `profile=None`
+    (дефолт) — проверка пропускается; CLI (`main`) всегда передаёт
+    `state.profile`.
     """
     if ops.is_dirty(target_dir):
         raise RuntimeError(
@@ -444,20 +581,58 @@ def deliver(
     ops.checkout_and_pull(target_dir, base_ref)
     # Существование и чтение бандла — строго ПОСЛЕ чекаута базы (приёмка
     # PR #96, major): до него чекаут мог стоять на произвольной ветке, и
-    # спека сгенерировалась бы из невмерженной ревизии бандла.
+    # спека сгенерировалась бы из невмерженной ревизии бандла. Тот же
+    # порядок — для гарда design ниже (инвариант приёмки PR #96, Task 7):
+    # ПОСЛЕ checkout_and_pull, ДО ensure_branch.
     behaviour = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
     if not behaviour.exists():
         raise RuntimeError(
             f"{behaviour} не найден на {base_ref} — бандл не вмержен "
             "или путь неверен"
         )
+    design_path = Path(target_dir) / bundle_dir / _ANCHOR_FILENAME
+    if not legacy_bundle:
+        if not design_path.exists():
+            raise RuntimeError(
+                f"{design_path} не найден на {base_ref} — доставка "
+                "остановлена. Либо доавторьте design (узел `design` "
+                "профиля team-exp) до доставки задач, либо, если бандл "
+                "легаси (design туда не входит), передайте "
+                "`--legacy-bundle`"
+            )
+        # Preflight (Task 8): та же проверка, что стопит раннер
+        # `stopped_preflight`'ом — target-профиль может не декларировать
+        # design вовсе (старая копия того же имени у соседнего репо), и
+        # доставка не имеет права молча анкериться на design, которого
+        # активный профиль этого репо не признаёт.
+        if profile is not None and not target_profile_declares(
+            target_dir, profile, "design"
+        ):
+            raise RuntimeError(
+                f"{Path(target_dir) / profile} не декларирует узел "
+                f"'design' — {PREFLIGHT_PROCEDURE_HINT}"
+            )
     branch = f"spec/{ws_id}-tasks"
     ops.ensure_branch(target_dir, branch)
     stamped = stamp_bundle_approved(
-        target_dir, bundle_dir, approved_by, approved_at
+        target_dir, bundle_dir, approved_by, approved_at,
+        legacy_bundle=legacy_bundle,
     )
-    behaviour_blob = blob_sha1(behaviour.read_text(encoding="utf-8"))
-    scenarios = parse_behaviour(behaviour.read_text(encoding="utf-8"))
+    if legacy_bundle:
+        # Якорь — behaviour-spec (терминальный узел усечённого DAG): design
+        # в легаси-бандле нет вовсе, секция резолюций не рендерится.
+        anchor_node_id = _LEGACY_ANCHOR_NODE_ID
+        behaviour_text = behaviour.read_text(encoding="utf-8")
+        design_text = ""
+        design_blob = blob_sha1(behaviour_text)
+        scenarios = parse_behaviour(behaviour_text)
+    else:
+        anchor_node_id = _ANCHOR_NODE_ID
+        # design — терминальный узел _BUNDLE_DAG: читаем ПОСЛЕ штампа, иначе
+        # пин и текст резолюций взяты из уже стухшего blob'а.
+        design_text = design_path.read_text(encoding="utf-8")
+        design_blob = blob_sha1(design_text)
+        scenarios = parse_behaviour(behaviour.read_text(encoding="utf-8"))
     stamp = generated_at or datetime.now().isoformat(timespec="seconds")
     text = render_tasks(
         ws_id=ws_id,
@@ -465,7 +640,9 @@ def deliver(
         bundle_path=f"{bundle_dir}/15-behaviour-spec.md",
         scenarios=scenarios,
         generated_at=stamp,
-        behaviour_blob=behaviour_blob,
+        design_blob=design_blob,
+        design_text=design_text,
+        anchor_node_id=anchor_node_id,
     )
     rel = f"spec/{ws_id}-tasks.md"
     out = Path(target_dir) / rel
@@ -483,7 +660,15 @@ def deliver(
         + (
             "Этим же PR — штамп статусов вмерженного бандла "
             f"({len(stamped)} файл(а): approved_by = mergedBy бандл-PR, "
-            "перепиновка цепочки charter→requirements→behaviour-spec).\n\n"
+            "перепиновка DAG "
+            + (
+                "charter→requirements→behaviour-spec (легаси-бандл, "
+                "--legacy-bundle)"
+                if legacy_bundle
+                else "charter→requirements→behaviour-spec→design"
+            )
+            + ")."
+            "\n\n"
             if stamped
             else ""
         )
@@ -509,6 +694,7 @@ def deliver_conform(
     ws_id: str,
     bundle_dir: str,
     ops: Ops,
+    legacy_bundle: bool = False,
 ) -> int:
     """Нормализация после approve владельца → номер PR (нового или уже
     открытого).
@@ -523,10 +709,14 @@ def deliver_conform(
     approve-штамп владельца коммитится и пушится В ТУ ЖЕ ветку (пустой
     индекс/актуальный push — no-op у RealOps).
     """
+    anchor_node_id = _LEGACY_ANCHOR_NODE_ID if legacy_bundle else _ANCHOR_NODE_ID
+    anchor_filename = _LEGACY_ANCHOR_FILENAME if legacy_bundle else _ANCHOR_FILENAME
     branch = f"spec/{ws_id}-tasks-approve"
     existing = ops.find_pr(repo_slug, branch)
     ops.ensure_branch(target_dir, branch)
-    changed = conform_approved(target_dir, ws_id, bundle_dir)
+    changed = conform_approved(
+        target_dir, ws_id, bundle_dir, legacy_bundle=legacy_bundle
+    )
     rel = f"spec/{ws_id}-tasks.md"
     ops.commit_paths(
         target_dir,
@@ -545,10 +735,12 @@ def deliver_conform(
         (
             f"Approve-штамп владельца для spec/{ws_id}-tasks.md и "
             "нормализация frontmatter под активный governance-профиль: "
-            "traces_to ровно [behaviour-spec] (lite-профиль spec-runner "
-            "дописывает design — других профилей у него нет, upstream-плечо "
-            "заведено), пин upstream_hashes — на текущий blob вмерженного "
-            f"{bundle_dir}/15-behaviour-spec.md."
+            f"traces_to ровно [{anchor_node_id}] (якорь — терминальный узел "
+            "_BUNDLE_DAG, либо его легаси-префикс при --legacy-bundle; "
+            "lite-профиль spec-runner может дописать/подменить traces — "
+            "других профилей у него нет, upstream-плечо заведено "
+            "отдельно), пин upstream_hashes — на текущий blob вмерженного "
+            f"{bundle_dir}/{anchor_filename}."
             + ("" if changed else " Файл уже был конформен — PR несёт "
                "только approve-штамп.")
         ),
@@ -564,6 +756,13 @@ def main(argv: list[str] | None = None) -> int:
         "--conform-approve", action="store_true",
         help="после `spec approve` владельца: нормализовать frontmatter "
         "tasks-спеки и доставить approve-штамп PR-ом",
+    )
+    parser.add_argument(
+        "--legacy-bundle", action="store_true",
+        help="бандл авторен до раскатки design-узла (без 20-design.md) — "
+        "штамп/якорь идут по 3-узловому префиксу DAG "
+        "charter→requirements→behaviour-spec; применимо в обоих режимах "
+        "(доставка и --conform-approve)",
     )
     args = parser.parse_args(argv)
     state = load(args.run_id)
@@ -586,6 +785,7 @@ def main(argv: list[str] | None = None) -> int:
             ws_id=state.ws_id,
             bundle_dir=state.bundle_dir,
             ops=ops,
+            legacy_bundle=args.legacy_bundle,
         )
         print(
             f"approve-штамп + нормализация доставлены: PR #{pr} "
@@ -617,6 +817,8 @@ def main(argv: list[str] | None = None) -> int:
         ops=ops,
         approved_by=merged_by,
         approved_at=merged_at,
+        legacy_bundle=args.legacy_bundle,
+        profile=state.profile,
     )
     print(f"draft tasks-спека доставлена: PR #{pr} ({state.repo_slug})")
     return 0

@@ -9,6 +9,7 @@ import pytest
 pytest.importorskip("steward")
 
 from governance.bundle_state import BundleState, NodeState, candidate_state
+from governance.stale_adapter import blob_sha1
 from tests.governance_fixtures.bundles import (
     BEHAVIOUR_NO_UPSTREAM_MD,
     REQUIREMENTS_MD,
@@ -16,6 +17,88 @@ from tests.governance_fixtures.bundles import (
     make_bundle_with_behaviour,
     make_profile,
 )
+
+_DESIGN_PROFILE_YAML = """\
+profile: mini-design
+solo_auto_approve: true
+artifacts:
+  - {id: charter, template: charter.md, owner_role: product, upstream: []}
+  - id: requirements
+    template: requirements.md
+    owner_role: product
+    upstream: [charter]
+  - id: behaviour-spec
+    template: behaviour-spec.md
+    owner_role: product
+    upstream: [requirements]
+  - {id: design, template: design.md, owner_role: architects,
+     upstream: [requirements, behaviour-spec]}
+"""
+
+_DESIGN_ROLES_YAML = """\
+version: 1
+slug_pattern: "^[a-z][a-z-]*$"
+roles:
+  - {slug: product, display: Product}
+  - {slug: architects, display: Architects}
+"""
+
+
+def _make_design_profile(tmp_path: Path) -> Path:
+    """4-узловой профиль (charter/requirements/behaviour-spec/design) —
+    отдельный от общей `mini`-фикстуры (та трёхузловая, без design):
+    Task 4 Step 5 нужен профиль, где design — required-узел (default),
+    не влияя на остальные тесты этого файла."""
+    prof_dir = tmp_path / "profiles"
+    prof_dir.mkdir(exist_ok=True)
+    (prof_dir / "roles.yaml").write_text(_DESIGN_ROLES_YAML)
+    profile = prof_dir / "mini-design.yaml"
+    profile.write_text(_DESIGN_PROFILE_YAML)
+    return profile
+
+
+def _make_design_bundle(tmp_path: Path) -> Path:
+    """charter+requirements+behaviour-spec, БЕЗ design (вызывающий дописывает)."""
+    bundle = tmp_path / "spec"
+    bundle.mkdir(exist_ok=True)
+    (bundle / "00-charter.md").write_text(
+        "---\nspec_stage: charter\nstatus: approved\nowner_role: product\n"
+        "---\n# Charter\n"
+    )
+    requirements_text = (
+        "---\nspec_stage: requirements\nstatus: approved\n"
+        "owner_role: product\n---\n"
+        "#### FR-01: Список\n**Priority**: Must\n\nПользователь видит список.\n"
+    )
+    (bundle / "10-requirements.md").write_text(requirements_text)
+    req_pin = blob_sha1(requirements_text)
+    (bundle / "15-behaviour-spec.md").write_text(
+        "---\nspec_stage: behaviour-spec\nstatus: draft\n"
+        "owner_role: product\ntraces_to: [requirements]\n"
+        "upstream_hashes:\n"
+        f'  requirements: "{req_pin}"\n'
+        "---\n#### BEH-01: Просмотр списка\n`traces: [FR-01]`\n"
+        "- **checked_by**: `status: planned` `kind: e2e` `owner: qa` "
+        "`target: tests/test_x.py`\n"
+    )
+    return bundle
+
+
+def _write_design_node(bundle: Path, *, status: str) -> None:
+    req_pin = blob_sha1((bundle / "10-requirements.md").read_text())
+    beh_pin = blob_sha1((bundle / "15-behaviour-spec.md").read_text())
+    (bundle / "20-design.md").write_text(
+        "---\n"
+        "spec_stage: design\n"
+        f"status: {status}\n"
+        "owner_role: architects\n"
+        "traces_to: [requirements, behaviour-spec]\n"
+        "upstream_hashes:\n"
+        f'  requirements: "{req_pin}"\n'
+        f'  behaviour-spec: "{beh_pin}"\n'
+        "---\n"
+        "Открытых архитектурных вопросов нет (входной набор пуст)\n"
+    )
 
 
 def test_good_bundle_is_candidate_valid(tmp_path: Path) -> None:
@@ -169,3 +252,54 @@ def test_no_git_facts_are_used(tmp_path: Path, monkeypatch) -> None:
     profile = make_profile(tmp_path)
     bundle = make_bundle(tmp_path, behaviour_ok=True)
     assert candidate_state(profile, bundle).error_count == 0
+
+
+# --- Task 4 Step 5: design — required-узел, отсутствие/статус в read-model --
+
+
+def test_bundle_state_requires_design(tmp_path: Path) -> None:
+    """4-узловой профиль (charter/requirements/behaviour-spec/design):
+    design — required (профильный default), поэтому его отсутствие в
+    бандле обязано всплывать в `required_absent`; его наличие (в любом
+    approval-статусе frontmatter) — обязано читаться как валидный
+    candidate-узел, не как отсутствующий."""
+    from steward.gatecheck.checks import collect_bundle
+    from steward.graph import load_profile
+    from steward.roles import load_roles_catalog
+
+    profile = _make_design_profile(tmp_path)
+    bundle = _make_design_bundle(tmp_path)
+
+    # 1) design в required (профильный default `required: True`) — без
+    # 20-design.md он обязан всплыть в required_absent.
+    state = candidate_state(profile, bundle)
+    by_id = {n.node_id: n for n in state.nodes}
+    assert by_id["design"].status == "absent"
+    assert "design" in state.required_absent
+
+    # 2) design со `status: draft` — присутствует, читается валидным
+    # candidate-узлом (не absent, без error-находок); raw frontmatter —
+    # не approved.
+    _write_design_node(bundle, status="draft")
+    state = candidate_state(profile, bundle)
+    by_id = {n.node_id: n for n in state.nodes}
+    assert "design" not in state.required_absent
+    assert by_id["design"].status == "candidate_valid"
+
+    roles = load_roles_catalog(profile.parent / "roles.yaml")
+    graph = load_profile(profile, roles)
+    artifacts, _findings = collect_bundle(graph, bundle)
+    design_artifact = next(a for a in artifacts if a.node_id == "design")
+    assert design_artifact.meta.status == "draft"
+
+    # 3) после штампа (status: draft -> approved) — та же картина: design
+    # остаётся валидным candidate-узлом, а raw frontmatter теперь approved.
+    _write_design_node(bundle, status="approved")
+    state = candidate_state(profile, bundle)
+    by_id = {n.node_id: n for n in state.nodes}
+    assert "design" not in state.required_absent
+    assert by_id["design"].status == "candidate_valid"
+
+    artifacts, _findings = collect_bundle(graph, bundle)
+    design_artifact = next(a for a in artifacts if a.node_id == "design")
+    assert design_artifact.meta.status == "approved"

@@ -24,10 +24,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+from governance import design_guard
 from governance.merge_gate import PrFacts, decide
 from governance.stale_adapter import blob_sha1
 from governance.ops import Ops, RealOps
-from governance.policy_sources import build_authority, load_safety
+from governance.policy_sources import (
+    PREFLIGHT_PROCEDURE_HINT,
+    build_authority,
+    load_safety,
+    target_profile_declares,
+)
 from governance.run_state import (
     RunState,
     all_run_ids,
@@ -50,6 +56,28 @@ _AUTHOR_STEPS = (
     ("author-charter", "charter", "00-charter.md"),
     ("author-requirements", "requirements", "10-requirements.md"),
     ("author-behaviour", "behaviour-spec", "15-behaviour-spec.md"),
+    ("author-design", "design", "20-design.md"),
+)
+
+# `target_profile_declares`/`PREFLIGHT_PROCEDURE_HINT` — в
+# `governance.policy_sources` (фикс-раунд ревью, minor #2): общий источник
+# для раннера И `governance.task_bridge`, не приватный кросс-импорт между
+# двумя модулями.
+
+# Рёбра S4 prospective-гарда GC-UNPINNED/GC-STALE (`_step_gate`) — MINOR-3
+# финального ревью: раньше жили ТРЕМЯ несинхронизированными копиями (этот
+# инлайн-кортеж, `task_bridge._BUNDLE_DAG`, `profiles/team-exp.yaml`),
+# вынесены в модульную константу здесь; тест согласованности
+# (`test_gate_edges_derived_from_bundle_dag`) выводит те же рёбра из
+# `task_bridge._BUNDLE_DAG` и ловит расхождение. 4-й элемент — `required`:
+# True для обоих рёбер design (MAJOR-1) — необъявленное ребро стопит S4
+# находкой, а не тихо пропускается; остальные рёбра остаются
+# необязательными (их traces_to не входит в prospective-контракт гарда).
+_GATE_EDGES: tuple[tuple[str, str, str, bool], ...] = (
+    ("10-requirements.md", "charter", "00-charter.md", False),
+    ("15-behaviour-spec.md", "requirements", "10-requirements.md", False),
+    ("20-design.md", "requirements", "10-requirements.md", True),
+    ("20-design.md", "behaviour-spec", "15-behaviour-spec.md", True),
 )
 
 
@@ -316,6 +344,13 @@ _STOPPED_RESET_OPS: dict[str, tuple[str, ...]] = {
     # `_ensure_started`), сбрасывать нечего — только статус обратно в
     # running, чтобы `_step_branch` перепроверил `is_dirty` (круг 5).
     "stopped_dirty": (),
+    # stopped_preflight (Task 8): проверка тоже до `_ensure_started` узла
+    # design — сбрасывать нечего, только статус обратно в `running`, чтобы
+    # `_step_authoring` перепроверил `target_profile_declares` по
+    # ТЕКУЩЕМУ содержимому target-профиля (человек мог доставить
+    # обновлённый профиль PR-ом между стопом и resume). Пустой кортеж —
+    # без него `resume()` был бы тихим no-op (инвариант F-1).
+    "stopped_preflight": (),
 }
 
 
@@ -673,7 +708,39 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     остаются на `ops.author` (codex) независимо от `author_backend` —
     disp-цикл осмыслен для полируемого документа, не для одноразовых
     артефактов.
+
+    Preflight (Task 8; хардкод имени профиля снят фикс-раундом ревью) — ДО
+    фактического авторинга узла `design`: решение «авторить ли design»
+    data-driven для ЛЮБОГО профиля, не только `profiles/team-exp.yaml` —
+    `target_profile_declares(state.target_dir, state.profile, "design")`
+    читает ФАКТИЧЕСКОЕ содержимое target-профиля. True ⇒ авторим как
+    обычно; False ⇒ `stopped_preflight` с той же rollout-процедурой — ни
+    молчаливого авторинга (старая копия team-exp.yaml у соседнего репо, Task
+    8), ни молчаливого скипа (профиль, у которого design нет вовсе).
+    Конвейер СЕЙЧАС не поддерживает профили «сознательно без design» —
+    для него отсутствие узла в target-профиле всегда останов, не тихий
+    skip; такой профиль либо доставляет обновлённый файл (rollout), либо
+    вообще не идёт через этот раннер. Проверка стоит ПЕРЕД циклом (план
+    Task 8 Step 2: «вызов в start (до S2)»; minor PR-ревью #145 —
+    проверка на итерации design оставляла три оплаченных вызова
+    авторинга и три файла в worktree до останова).
+    Преflight охраняет ПРЕДСТОЯЩИЙ авторинг: когда все author-шаги уже
+    завершены (resume после S2, вручную собранный бандл), проверять
+    нечего — несоответствие профиля поймает S4 (`gate-check --candidate`).
     """
+    authoring_pending = any(
+        op_status(state, key) != "completed" for key, _, _ in _AUTHOR_STEPS
+    )
+    if authoring_pending and not target_profile_declares(
+        state.target_dir, state.profile, "design"
+    ):
+        print(
+            f"_step_authoring: {state.target_dir}/{state.profile} не "
+            f"декларирует узел 'design' — {PREFLIGHT_PROCEDURE_HINT}"
+        )
+        state.status = "stopped_preflight"
+        save(state)
+        return False
     for key, kind, filename in _AUTHOR_STEPS:
         if op_status(state, key) == "completed":
             continue
@@ -786,6 +853,31 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         state.status = "stopped_gate"
         save(state)
         return False
+    # Гард отсутствия design (спека Task 4): required-узел design —
+    # локальный (не через bundle_state.candidate_state — та остаётся у
+    # консоли, runner без импорта steward). MINOR-1 финального ревью:
+    # посылка «без чтения/парсинга YAML профиля» истекла с Task 8 —
+    # `target_profile_declares` уже читает ФАКТИЧЕСКОЕ содержимое
+    # target-профиля (тот же источник, что и preflight в `_step_authoring`
+    # выше по файлу), не сравнивает имя файла со строкой `profiles/
+    # team-exp.yaml`. Прочие профили (например, fixture `mini.yaml` в
+    # интеграционном тесте шва CLI ниже по файлу — design туда сознательно
+    # не входит) не затрагиваются — они просто не декларируют узел design.
+    # Стоит ДО цикла рёбер ниже — иначе отсутствующий design молча читался
+    # бы как «нечего проверять по рёбрам» вместо явной находки.
+    design_required = target_profile_declares(
+        state.target_dir, state.profile, "design"
+    )
+    design_path = Path(state.target_dir) / state.bundle_dir / "20-design.md"
+    if design_required and not design_path.exists():
+        (run_dir(state.run_id) / "gate-findings.txt").write_text(
+            "error GC-COMPLETENESS(design): required-узел design "
+            "отсутствует в бандле (20-design.md)\n",
+            encoding="utf-8",
+        )
+        state.status = "stopped_gate"
+        save(state)
+        return False
     # Гарды GC-UNPINNED/GC-STALE(prospective) поверх CLI (приёмка PR #101,
     # оба круга major): stale-каскад gate-check исполняется только на
     # status: approved артефактах, поэтому DRAFT-узел с объявленным ребром
@@ -795,10 +887,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # worktree; первый прогон WS-kapelle-47 встал именно на GC-UNPINNED).
     # Всё stdlib-ом (blob_sha1 — свой), runner остаётся без импорта steward.
     local_findings: list[str] = []
-    for fname, upstream, upstream_fname in (
-        ("10-requirements.md", "charter", "00-charter.md"),
-        ("15-behaviour-spec.md", "requirements", "10-requirements.md"),
-    ):
+    for fname, upstream, upstream_fname, required in _GATE_EDGES:
         path = Path(state.target_dir) / state.bundle_dir / fname
         if not path.exists():
             continue
@@ -808,6 +897,19 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
             front, re.M,
         )
         if not declares:
+            # required=True (оба ребра design — MAJOR-1, финальное ревью):
+            # design c `traces_to: [requirements]` (ребро behaviour-spec не
+            # объявлено) раньше проходило S4 молча — `continue` читал
+            # необъявленное required-ребро как «нечего проверять», хотя
+            # спека требует prospective-проверку ОБОИХ рёбер design.
+            # Необязательные рёбра (requirements→charter,
+            # behaviour-spec→requirements) остаются как раньше: их
+            # traces_to не входит в prospective-контракт этого гарда.
+            if required:
+                local_findings.append(
+                    f"error GC-UNPINNED(prospective): {fname} — ребро "
+                    f"{upstream} не объявлено в traces_to"
+                )
             continue
         pin = _upstream_pin(front, upstream)
         if pin is None:
@@ -835,10 +937,26 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # нечего флагать, когда автор писал в своём диалекте (`### BS-*`/`REQ-*`),
     # и пустая по сути спека уплывала бы в PR зелёной. Файл читается только
     # если существует: отсутствие — территория required_absent выше.
+    # MINOR-2 финального ревью: 4-й элемент — ожидаемая форма ДЛЯ
+    # СООБЩЕНИЯ конкретного файла (design несёт свою грамматику Q, не
+    # чужую FR-NN/BEH-NN requirements/behaviour-spec — сообщение раньше
+    # хардкодило последнюю для всех трёх). Паттерн design синхронизирован
+    # с `design_guard._DESIGN_Q_RE` (`\s*·\s*`, не буквальный один пробел
+    # с каждой стороны «·») — иначе гейт стопил бы заголовок, который
+    # реальный парсер УЖЕ признаёт валидным.
     dsl_empty: list[str] = list(local_findings)
-    for fname, pattern, label in (
-        ("10-requirements.md", r"^#### FR-\d", "FR-требований"),
-        ("15-behaviour-spec.md", r"^#### BEH-\d", "BEH-сценариев"),
+    for fname, pattern, label, expected_form in (
+        ("10-requirements.md", r"^#### FR-\d", "FR-требований", "#### FR-NN:"),
+        (
+            "15-behaviour-spec.md", r"^#### BEH-\d", "BEH-сценариев",
+            "#### BEH-NN:",
+        ),
+        (
+            "20-design.md",
+            r"^####\s+Q-\d+\s*·\s*|^Открытых архитектурных вопросов нет",
+            "резолюций design",
+            "#### Q-NN · owner_role: … · resolution: …",
+        ),
     ):
         path = Path(state.target_dir) / state.bundle_dir / fname
         if path.exists() and not re.search(
@@ -846,7 +964,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         ):
             dsl_empty.append(
                 f"error GC-DSL-EMPTY(prospective): {fname} — 0 распознаваемых "
-                f"{label} (ожидается DSL `#### FR-NN:` / `#### BEH-NN:`)"
+                f"{label} (ожидается DSL `{expected_form}`)"
             )
     if dsl_empty:
         (run_dir(state.run_id) / "gate-findings.txt").write_text(
@@ -855,6 +973,28 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         state.status = "stopped_gate"
         save(state)
         return False
+    # Гард покрытия Q (спека Task 4): architects-вопросы requirements без
+    # резолюции в design — отдельная находка от UNPINNED/STALE/DSL-EMPTY
+    # выше. Оба файла проверяются на существование явно: design_path
+    # гарантирован гардом отсутствия только когда профиль несёт узел design
+    # (`design_required` выше) — профиль без него (мимо этого шва) сюда
+    # доходит с design_path отсутствующим, и читать его было бы TOCTOU.
+    req_path = Path(state.target_dir) / state.bundle_dir / "10-requirements.md"
+    if req_path.exists() and design_path.exists():
+        coverage = [
+            f"error GC-DESIGN-COVERAGE: {finding}"
+            for finding in design_guard.coverage_findings(
+                req_path.read_text(encoding="utf-8"),
+                design_path.read_text(encoding="utf-8"),
+            )
+        ]
+        if coverage:
+            (run_dir(state.run_id) / "gate-findings.txt").write_text(
+                "\n".join(coverage) + "\n", encoding="utf-8"
+            )
+            state.status = "stopped_gate"
+            save(state)
+            return False
     op_complete(state, key, exit=rc)
     return True
 
