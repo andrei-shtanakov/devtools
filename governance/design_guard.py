@@ -60,14 +60,14 @@ def parse_design_resolutions(text: str) -> dict[str, tuple[str, str | None]]:
     """`Q-NN` → `(resolution, justification)`, из design-DSL.
 
     `justification` — приоритет у строки `reason: <…>` внутри блока
-    вопроса (от заголовка `#### Q-NN …` до следующего такого заголовка или
-    конца текста); при её отсутствии — первый непустой абзац того же блока
-    (MAJOR-2 финального ревью: DSL авторинга, `ops.py` `_AUTHOR_DSL
-    ["design"]`, предписывает `reason:` ТОЛЬКО для `deferred` — `resolved`
-    несёт обоснование абзацем ПОСЛЕ заголовка, без `reason:`; раньше
-    отсутствие `reason:` читалось как отсутствие обоснования вовсе, и
-    DSL-конформный `resolved`-текст рендерился без содержания). `None` —
-    если ни `reason:`, ни абзаца нет (типично «голый» заголовок).
+    вопроса (от заголовка `#### Q-NN …` до следующего такого заголовка,
+    следующей секции уровня 1–3 или конца текста); при её отсутствии у
+    `resolved` — первый непустой абзац того же блока (DSL авторинга,
+    `ops.py` `_AUTHOR_DSL["design"]`: `resolved` несёт обоснование
+    абзацем, `reason:` обязателен только у `deferred`). У `deferred` без
+    строки `reason:` — всегда `None`: fallback на абзац дал бы ложную
+    «причину» и погасил находку coverage_findings. `None` — также когда
+    ни `reason:`, ни абзаца нет (типично «голый» заголовок).
     """
     matches = list(_DESIGN_Q_RE.finditer(text))
     result: dict[str, tuple[str, str | None]] = {}
@@ -75,12 +75,23 @@ def parse_design_resolutions(text: str) -> dict[str, tuple[str, str | None]]:
         qid, resolution = match.group(1), match.group(2)
         block_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
         block = text[match.end() : block_end]
+        # Блок Q кончается и на следующей секции документа (заголовок
+        # уровня 1–3), не только на следующем Q: иначе у последнего
+        # вопроса «## Механика» и весь хвост документа читались бы как
+        # его содержимое (major PR-ревью #145).
+        section = re.search(r"^#{1,3}\s", block, re.M)
+        if section is not None:
+            block = block[: section.start()]
         reason_match = _REASON_RE.search(block)
-        justification = (
-            reason_match.group(1).strip()
-            if reason_match
-            else _first_paragraph(block)
-        )
+        if reason_match is not None:
+            justification: str | None = reason_match.group(1).strip()
+        elif resolution == "resolved":
+            # fallback на абзац — ТОЛЬКО для resolved (DSL: обоснование
+            # абзацем); deferred без строки reason: обязан остаться
+            # None, чтобы coverage_findings дал находку.
+            justification = _first_paragraph(block)
+        else:
+            justification = None
         result[qid] = (resolution, justification)
     return result
 

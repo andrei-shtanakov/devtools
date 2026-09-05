@@ -3195,7 +3195,10 @@ def test_start_stops_preflight_when_target_profile_lacks_design(
     state = runner.start(**kwargs)
 
     assert state.status == "stopped_preflight"
-    assert "design" not in ops.authored
+    # Преflight стоит ДО S2 (план Task 8 Step 2): ни одного оплаченного
+    # вызова авторинга, не только «design не авторился» (minor PR-ревью
+    # #145 — старый ассерт разрешал три вызова до останова).
+    assert ops.authored == []
     assert "gate-candidate" not in state.ops
     assert "push" not in state.ops
 

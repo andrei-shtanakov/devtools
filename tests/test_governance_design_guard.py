@@ -80,6 +80,29 @@ def test_deferred_without_reason_is_a_finding() -> None:
     assert any("reason" in f for f in coverage_findings(REQ, bad))
 
 
+def test_deferred_without_reason_with_tail_section_is_still_a_finding() -> None:
+    """PR-ревью #145: fallback на первый абзац НЕ применяется к deferred —
+    иначе заголовок следующей секции («## Механика») сходил бы за причину
+    и S4 красил deferred-без-reason зелёным."""
+    bad = (
+        DSN_DEF.replace("reason: ждём steward#147\n", "")
+        + "\n## Механика\n\nвнутренности узла.\n"
+    )
+    assert parse_design_resolutions(bad)["Q-03"] == ("deferred", None)
+    assert any("reason" in f for f in coverage_findings(REQ, bad))
+
+
+def test_last_resolved_q_does_not_swallow_next_section() -> None:
+    """Блок последнего Q кончается на следующем заголовке уровня 1–3, а не
+    в конце документа: resolved без абзаца-обоснования даёт None, а не
+    текст чужой секции."""
+    text = (
+        "#### Q-03 · owner_role: architects · resolution: resolved\n"
+        "\n## Механика\n\nвнутренности узла.\n"
+    )
+    assert parse_design_resolutions(text)["Q-03"] == ("resolved", None)
+
+
 def test_empty_input_set_needs_the_declaration_line() -> None:
     req = "- **Q-05 · owner_role: product · blocking: false.** Продукт.\n"
     assert coverage_findings(req, "## Механика\n")  # нет декларации — finding
