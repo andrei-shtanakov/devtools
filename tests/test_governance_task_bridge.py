@@ -247,6 +247,12 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
         "- **Q-03 (deferred):** reason: Нужны замеры нагрузки перед "
         "выбором шардирования." in spec.read_text()
     )
+    # Task 7, low review #2: resolved-ветка несёт обоснование (reason),
+    # построчная проверка — не только заголовок секции/deferred-строка.
+    assert (
+        "- **Q-01:** Выбран REST — синхронный вызов проще для MVP."
+        in spec.read_text()
+    )
 
 
 def test_deliver_dirty_target_refuses(tmp_path: Path) -> None:
@@ -487,6 +493,204 @@ def test_stamp_bundle_is_idempotent(tmp_path: Path) -> None:
         approved_by="y", approved_at="t2",
     )
     assert again == []
+
+
+# --- Task 7: переходный режим легаси-бандлов (без узла design) -----------
+
+
+def _target_legacy(tmp_path: Path) -> Path:
+    """Бандл из трёх узлов (charter/requirements/behaviour-spec) — БЕЗ
+    20-design.md, как несли соседние репо до раскатки design-узла."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text(CHARTER_MD)
+    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
+    (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
+    return target
+
+
+def test_stamp_bundle_without_design_refuses_without_legacy_flag(
+    tmp_path: Path,
+) -> None:
+    """Step 1(а): 3-узловой бандл без флага ⇒ RuntimeError, а не сырой
+    traceback от `read_text` — текст называет файл и обе процедуры
+    (доавторить design; --legacy-bundle)."""
+    target = _target_legacy(tmp_path)
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge.stamp_bundle_approved(
+            str(target), "workstreams/WS-alpha-7/spec",
+            approved_by="a", approved_at="t",
+        )
+    message = str(exc_info.value)
+    assert "20-design.md" in message
+    assert "design" in message.lower()
+    assert "--legacy-bundle" in message
+
+
+def test_stamp_bundle_legacy_mode_stamps_three_node_prefix(
+    tmp_path: Path,
+) -> None:
+    """Step 1(б): `legacy_bundle=True` ⇒ штамп только по 3-узловому
+    префиксу DAG, никакого чтения 20-design.md."""
+    target = _target_legacy(tmp_path)
+    changed = task_bridge.stamp_bundle_approved(
+        str(target), "workstreams/WS-alpha-7/spec",
+        approved_by="a", approved_at="t", legacy_bundle=True,
+    )
+    assert changed == [
+        "workstreams/WS-alpha-7/spec/00-charter.md",
+        "workstreams/WS-alpha-7/spec/10-requirements.md",
+        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
+    ]
+    beh_meta, _ = task_bridge.split_frontmatter(
+        (target / "workstreams/WS-alpha-7/spec/15-behaviour-spec.md")
+        .read_text(encoding="utf-8")
+    )
+    assert beh_meta["status"] == "approved"
+
+
+def test_conform_legacy_normalizes_to_behaviour_spec_no_design_read(
+    tmp_path: Path,
+) -> None:
+    """Step 3b: `conform_approved(..., legacy_bundle=True)` якорит на
+    behaviour-spec и не читает 20-design.md (бандл его не несёт вовсе —
+    отсутствие файла не должно всплыть traceback'ом)."""
+    from governance.stale_adapter import blob_sha1
+
+    target = _target_legacy(tmp_path)
+    spec_dir = target / "spec"
+    spec_dir.mkdir()
+    (spec_dir / "WS-alpha-7-tasks.md").write_text(
+        "---\nspec_stage: tasks\nstatus: approved\nversion: 2\n"
+        "traces_to:\n- design\nupstream_hashes:\n  design: " + "2" * 40 + "\n"
+        "---\n\n## Milestone 1: s\n",
+        encoding="utf-8",
+    )
+    changed = task_bridge.conform_approved(
+        str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec",
+        legacy_bundle=True,
+    )
+    assert changed is True
+    meta, _ = task_bridge.split_frontmatter(
+        (spec_dir / "WS-alpha-7-tasks.md").read_text(encoding="utf-8")
+    )
+    assert meta["traces_to"] == ["behaviour-spec"]
+    assert meta["upstream_hashes"] == {
+        "behaviour-spec": blob_sha1(
+            (target / "workstreams/WS-alpha-7/spec/15-behaviour-spec.md")
+            .read_text(encoding="utf-8")
+        )
+    }
+
+
+def test_conform_legacy_bundle_without_flag_refuses(tmp_path: Path) -> None:
+    """Без флага на легаси-бандле (approved tasks-спека, но 20-design.md
+    нет) — тот же RuntimeError с процедурой, не сырой traceback."""
+    target = _target_legacy(tmp_path)
+    spec_dir = target / "spec"
+    spec_dir.mkdir()
+    (spec_dir / "WS-alpha-7-tasks.md").write_text(
+        "---\nspec_stage: tasks\nstatus: approved\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge.conform_approved(
+            str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec",
+        )
+    message = str(exc_info.value)
+    assert "20-design.md" in message
+    assert "--legacy-bundle" in message
+
+
+def test_deliver_missing_design_refuses_before_branch_creation(
+    tmp_path: Path,
+) -> None:
+    """Step 3b: `deliver` на бандле без 20-design.md падает ДО создания
+    ветки — не только не мержится, ветка вовсе не заводится."""
+    target = _target_legacy(tmp_path)
+    ops = _StubOps()
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=ops,
+            approved_by="a", approved_at="t",
+        )
+    message = str(exc_info.value)
+    assert "20-design.md" in message
+    assert "--legacy-bundle" in message
+    assert not any(c[0] == "ensure_branch" for c in ops.calls)
+
+
+def test_deliver_legacy_bundle_writes_spec_anchored_on_behaviour(
+    tmp_path: Path,
+) -> None:
+    """`deliver(legacy_bundle=True)` доставляет спеку без design: анкер —
+    behaviour-spec, штамп — только 3-узловой префикс DAG."""
+    target = _target_legacy(tmp_path)
+    ops = _StubOps()
+    pr = task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a", approved_at="t",
+        legacy_bundle=True,
+    )
+    assert pr == 77
+    spec = target / "spec/WS-alpha-7-tasks.md"
+    meta, _ = task_bridge.split_frontmatter(spec.read_text(encoding="utf-8"))
+    assert meta["traces_to"] == ["behaviour-spec"]
+    assert "design" not in meta["upstream_hashes"]
+    commit = next(c for c in ops.calls if c[0] == "commit_paths")
+    assert commit[1] == (
+        "workstreams/WS-alpha-7/spec/00-charter.md",
+        "workstreams/WS-alpha-7/spec/10-requirements.md",
+        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
+        "spec/WS-alpha-7-tasks.md",
+    )
+    # секция резолюций design не рендерится вовсе — легаси-бандл design
+    # текста не несёт
+    assert "Решения открытых вопросов" not in spec.read_text()
+
+
+def test_deliver_reads_design_only_after_base_checkout(tmp_path: Path) -> None:
+    """Позиция гарда design (Task 7): по образцу
+    `test_deliver_reads_bundle_only_after_base_checkout` — 20-design.md
+    появляется ТОЛЬКО внутри `checkout_and_pull`; гард обязан увидеть его
+    там и НЕ упасть. Пре-чекаутная позиция гарда красит этот тест."""
+    target = tmp_path / "alpha"
+    target.mkdir()
+    bundle = target / "workstreams/WS-alpha-7/spec"
+
+    class _LateOps(_StubOps):
+        def checkout_and_pull(self, target_dir: str, branch: str) -> None:
+            super().checkout_and_pull(target_dir, branch)
+            bundle.mkdir(parents=True)
+            (bundle / "00-charter.md").write_text(CHARTER_MD)
+            (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
+            (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
+            (bundle / "20-design.md").write_text(DESIGN_MD)
+
+    pr = task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=_LateOps(),
+        approved_by="a", approved_at="t",
+    )
+    assert pr == 77
 
 
 def test_conform_normalizes_after_approve(tmp_path: Path) -> None:
