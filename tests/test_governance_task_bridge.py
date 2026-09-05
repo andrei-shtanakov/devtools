@@ -774,6 +774,63 @@ def test_deliver_legacy_bundle_writes_spec_anchored_on_behaviour(
     assert "Решения открытых вопросов" not in spec.read_text()
 
 
+def _target_legacy_4(tmp_path: Path) -> Path:
+    """Бандл из четырёх узлов (charter/requirements/behaviour-spec/design)
+    — БЕЗ 30-decomposition.md, как несли соседние репо до раскатки
+    decomposition-узла (продакшн затронет этот переход первым: design уже
+    раскатан, decomposition — ещё нет)."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text(CHARTER_MD)
+    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
+    (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
+    (bundle / "20-design.md").write_text(DESIGN_MD)
+    return target
+
+
+def test_deliver_legacy_bundle_4_writes_spec_anchored_on_design(
+    tmp_path: Path,
+) -> None:
+    """Находка 1 финального ревью (непокрытые легаси-пути, которые
+    продакшн затронет первыми): зеркало
+    `test_deliver_legacy_bundle_writes_spec_anchored_on_behaviour` для
+    `legacy_bundle=4` — 4-узловой бандл с design, анкер — design (не
+    behaviour-spec), пин — blob фактического (уже проштампованного)
+    20-design.md, секция резолюций присутствует (design несёт Q-*),
+    DT-провенанса нет — легаси-путь идёт через `render_tasks`, не
+    `render_tasks_dt`."""
+    from governance.stale_adapter import blob_sha1
+
+    target = _target_legacy_4(tmp_path)
+    ops = _StubOps()
+    pr = task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a", approved_at="t",
+        legacy_bundle=4,
+    )
+    assert pr == 77
+    spec = target / "spec/WS-alpha-7-tasks.md"
+    meta, _body = task_bridge.split_frontmatter(
+        spec.read_text(encoding="utf-8")
+    )
+    assert meta["traces_to"] == ["design"]
+    stamped_design = (
+        target / "workstreams/WS-alpha-7/spec/20-design.md"
+    ).read_text(encoding="utf-8")
+    assert meta["upstream_hashes"] == {"design": blob_sha1(stamped_design)}
+    text = spec.read_text()
+    assert "## Решения открытых вопросов (уровень design)" in text
+    assert "(DT-" not in text
+    assert "30-decomposition.md" not in text
+
+
 def test_deliver_reads_design_only_after_base_checkout(tmp_path: Path) -> None:
     """Позиция гарда design/composition (Task 7): по образцу
     `test_deliver_reads_bundle_only_after_base_checkout` — весь бандл
@@ -931,6 +988,29 @@ def test_deliver_conform_rerun_updates_existing_pr(tmp_path: Path) -> None:
         (target / "spec/WS-alpha-7-tasks.md").read_text(encoding="utf-8")
     )
     assert meta["traces_to"] == ["decomposition"]
+
+
+def test_deliver_conform_legacy_mismatch_refuses_before_ops(
+    tmp_path: Path,
+) -> None:
+    """Находка 1 финального ревью: `--legacy-bundle` с несовпадающим
+    фактическим составом отказывает RuntimeError'ом по составу И до
+    любых вызовов ops (find_pr/ensure_branch) — `_check_bundle_composition`
+    стоит в начале `deliver_conform`, до side-эффектов."""
+    target = _target(tmp_path)  # полный 5-узловой бандл (с decomposition)
+    _approved_tasks(target)
+    ops = _ConformOps()
+    with pytest.raises(RuntimeError, match="не совпадает"):
+        task_bridge.deliver_conform(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            ops=ops,
+            legacy_bundle=3,
+        )
+    assert not any(c[0] == "find_pr" for c in ops.calls)
+    assert not any(c[0] == "ensure_branch" for c in ops.calls)
 
 
 # --- группировка по файлу цели (@id:task-bridge-beh-grouping, урок 8) -------
