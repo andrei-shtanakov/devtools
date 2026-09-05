@@ -270,7 +270,9 @@ _AUTHOR_DSL = {
         "run concurrently (operator documentation). Вне объёма: what is "
         "deliberately not decomposed. Forbidden: do not invent BEH ids; "
         "do not reopen design decisions; do not write implementation "
-        "code."
+        "code. Until spec-runner#367 (verify-first) is delivered, do NOT "
+        "create tasks with type: verify — the bridge will refuse them "
+        "fail-closed."
     ),
 }
 
