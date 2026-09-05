@@ -930,14 +930,25 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # нечего флагать, когда автор писал в своём диалекте (`### BS-*`/`REQ-*`),
     # и пустая по сути спека уплывала бы в PR зелёной. Файл читается только
     # если существует: отсутствие — территория required_absent выше.
+    # MINOR-2 финального ревью: 4-й элемент — ожидаемая форма ДЛЯ
+    # СООБЩЕНИЯ конкретного файла (design несёт свою грамматику Q, не
+    # чужую FR-NN/BEH-NN requirements/behaviour-spec — сообщение раньше
+    # хардкодило последнюю для всех трёх). Паттерн design синхронизирован
+    # с `design_guard._DESIGN_Q_RE` (`\s*·\s*`, не буквальный один пробел
+    # с каждой стороны «·») — иначе гейт стопил бы заголовок, который
+    # реальный парсер УЖЕ признаёт валидным.
     dsl_empty: list[str] = list(local_findings)
-    for fname, pattern, label in (
-        ("10-requirements.md", r"^#### FR-\d", "FR-требований"),
-        ("15-behaviour-spec.md", r"^#### BEH-\d", "BEH-сценариев"),
+    for fname, pattern, label, expected_form in (
+        ("10-requirements.md", r"^#### FR-\d", "FR-требований", "#### FR-NN:"),
+        (
+            "15-behaviour-spec.md", r"^#### BEH-\d", "BEH-сценариев",
+            "#### BEH-NN:",
+        ),
         (
             "20-design.md",
-            r"^#### Q-\d+ · |^Открытых архитектурных вопросов нет",
+            r"^####\s+Q-\d+\s*·\s*|^Открытых архитектурных вопросов нет",
             "резолюций design",
+            "#### Q-NN · owner_role: … · resolution: …",
         ),
     ):
         path = Path(state.target_dir) / state.bundle_dir / fname
@@ -946,7 +957,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         ):
             dsl_empty.append(
                 f"error GC-DSL-EMPTY(prospective): {fname} — 0 распознаваемых "
-                f"{label} (ожидается DSL `#### FR-NN:` / `#### BEH-NN:`)"
+                f"{label} (ожидается DSL `{expected_form}`)"
             )
     if dsl_empty:
         (run_dir(state.run_id) / "gate-findings.txt").write_text(

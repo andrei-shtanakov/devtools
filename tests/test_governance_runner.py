@@ -2271,6 +2271,118 @@ def test_gate_stops_on_dsl_empty_bundle(
     assert "push" not in state.ops
 
 
+def test_gate_dsl_empty_design_message_names_design_grammar(
+    tmp_path: Path, runs_root,
+) -> None:
+    """MINOR-2: GC-DSL-EMPTY для 20-design.md обязан называть СВОЮ
+    грамматику (`#### Q-NN · owner_role: … · resolution: …`), не чужую
+    `#### FR-NN:` / `#### BEH-NN:` requirements/behaviour-spec."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "design":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            req_pin = blob_sha1(
+                (bundle / "10-requirements.md").read_text(encoding="utf-8")
+            )
+            beh_pin = blob_sha1(
+                (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+            )
+            (bundle / "20-design.md").write_text(
+                "---\n"
+                "spec_stage: design\n"
+                "status: draft\n"
+                "owner_role: architects\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f'  requirements: "{req_pin}"\n'
+                f'  behaviour-spec: "{beh_pin}"\n'
+                "---\n"
+                "# design\nПросто текст без единого DSL-заголовка.\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-design-dsl-empty-msg", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-design-dsl-empty-msg") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-DSL-EMPTY" in findings and "20-design.md" in findings
+    assert "Q-NN" in findings
+    assert "FR-NN" not in findings and "BEH-NN" not in findings
+
+
+def test_gate_accepts_design_heading_with_nonstandard_middot_spacing(
+    tmp_path: Path, runs_root,
+) -> None:
+    """MINOR-2: паттерн GC-DSL-EMPTY для design синхронизирован с
+    `design_guard._DESIGN_Q_RE` (`\\s*·\\s*`) — заголовок, который
+    ПАРСЕР принимает (нестандартные пробелы вокруг «·»), гейт не флагает
+    как пустой; старый паттерн требовал ровно один пробел с каждой
+    стороны и ложно стопил бы такой, реально распознаваемый, заголовок."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            bundle = Path(target_dir) / bundle_dir
+            if kind == "requirements":
+                path = bundle / "10-requirements.md"
+                path.write_text(
+                    _DEFAULT_REQUIREMENTS_BODY
+                    + "- **Q-01 · owner_role: architects · "
+                    "blocking: false.** Какой протокол?\n",
+                    encoding="utf-8",
+                )
+                return rc
+            if kind != "design":
+                return rc
+            req_pin = blob_sha1(
+                (bundle / "10-requirements.md").read_text(encoding="utf-8")
+            )
+            beh_pin = blob_sha1(
+                (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+            )
+            (bundle / "20-design.md").write_text(
+                "---\n"
+                "spec_stage: design\n"
+                "status: draft\n"
+                "owner_role: architects\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f'  requirements: "{req_pin}"\n'
+                f'  behaviour-spec: "{beh_pin}"\n'
+                "---\n"
+                "####  Q-01  ·  owner_role: architects  ·  "
+                "resolution: resolved\n"
+                "Обоснование решения.\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-design-dsl-nonstd-space", ops)
+    )
+
+    findings_file = (
+        runner.run_dir("r-design-dsl-nonstd-space") / "gate-findings.txt"
+    )
+    findings = findings_file.read_text() if findings_file.exists() else ""
+    assert "GC-DSL-EMPTY" not in findings
+    assert state.ops["gate-candidate"]["status"] == "completed"
+
+
 def test_rollup_unstable_failure_still_refuses(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
