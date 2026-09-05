@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from governance import design_guard
+from governance import decomposition_guard, design_guard
 from governance.ops import Ops, RealOps
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
 from governance.run_state import load
@@ -334,6 +334,50 @@ def _render_resolutions_section(design_text: str) -> list[str]:
     return lines
 
 
+def _render_header(
+    ws_id: str,
+    subject: str,
+    generated_at: str,
+    anchor_blob: str,
+    anchor_node_id: str,
+) -> list[str]:
+    """Frontmatter + шапка Milestone — общая часть `render_tasks` и
+    `render_tasks_dt` (Task 8 плана decomposition-node).
+
+    Вынесено из `render_tasks` БЕЗ изменения текста — регрессионные тесты
+    рендера держат байт-в-байт поведение `render_tasks`.
+
+    Форма активного governance-профиля сразу при рождении (урок 1
+    ретроспективы): traces_to/upstream_hashes переживают `spec approve`
+    (он мержит traces и не трогает существующий пин), так что рукам после
+    approve остаётся только нормализация `--conform-approve`.
+    """
+    return [
+        "---",
+        "spec_stage: tasks",
+        "status: draft",
+        "version: 1",
+        "generated_by: fleet-agent",
+        f"generated_at: {generated_at}",
+        'source_prompt_version: ""',
+        'validation: ""',
+        'approved_by: ""',
+        "traces_to:",
+        f"- {anchor_node_id}",
+        "upstream_hashes:",
+        f"  {anchor_node_id}: {anchor_blob}",
+        "---",
+        "",
+        f"## Milestone 1: {subject}",
+        "",
+        f"Сгенерировано task_bridge из behaviour-spec бандла {ws_id} "
+        "(шаг 3 плана развития конвейера; группировка задач — по "
+        "Feature-секциям). Draft: исполнение только после человеческого "
+        "approve.",
+        "",
+    ]
+
+
 def render_tasks(
     ws_id: str,
     subject: str,
@@ -368,35 +412,9 @@ def render_tasks(
     DAG вместо дефолтного `decomposition` — сам рендер об этом режиме не
     знает, только про то, ЧТО именно является якорем.
     """
-    lines = [
-        "---",
-        "spec_stage: tasks",
-        "status: draft",
-        "version: 1",
-        "generated_by: fleet-agent",
-        f"generated_at: {generated_at}",
-        'source_prompt_version: ""',
-        'validation: ""',
-        'approved_by: ""',
-        # Форма активного governance-профиля сразу при рождении (урок 1
-        # ретроспективы): traces_to/upstream_hashes переживают `spec
-        # approve` (он мержит traces и не трогает существующий пин), так
-        # что рукам после approve остаётся только нормализация
-        # `--conform-approve`.
-        "traces_to:",
-        f"- {anchor_node_id}",
-        "upstream_hashes:",
-        f"  {anchor_node_id}: {design_blob}",
-        "---",
-        "",
-        f"## Milestone 1: {subject}",
-        "",
-        f"Сгенерировано task_bridge из behaviour-spec бандла {ws_id} "
-        "(шаг 3 плана развития конвейера; группировка задач — по "
-        "Feature-секциям). Draft: исполнение только после человеческого "
-        "approve.",
-        "",
-    ]
+    lines = _render_header(
+        ws_id, subject, generated_at, design_blob, anchor_node_id
+    )
     lines += _render_resolutions_section(design_text)
     groups: list[tuple[str, str, list[Scenario]]] = []  # (key, title, scs)
     for sc in scenarios:
@@ -440,6 +458,81 @@ def render_tasks(
         lines += [
             f"- [ ] реализовать {g.beh_id}: {g.title}" for g in group
         ]
+        lines += [
+            f"- [ ] {check}",
+            "",
+            f"**Traces to:** [{', '.join(traces)}]" if traces else "",
+            "",
+        ]
+    return "\n".join(line for line in lines if line is not None) + "\n"
+
+
+def render_tasks_dt(
+    ws_id: str,
+    subject: str,
+    bundle_path: str,
+    scenarios: list[Scenario],
+    dt_tasks: list[decomposition_guard.DtTask],
+    generated_at: str,
+    anchor_blob: str,
+    design_text: str = "",
+) -> str:
+    """tasks.md из решённой декомпозиции: 1 DT = 1 задача.
+
+    Мост — ТРАНСЛЯТОР (§1 спеки): состав задач, типы и рёбра решены
+    tech-lead-узлом и проверены гейтом; здесь только джойн BEH →
+    checked_by и перевод depends_on → Depends on. Эвристика
+    _merge_featureless_by_target_file на этом пути НЕ применяется — её
+    инвариант переехал в гейт (single-owner, GC-DT-GRAPH).
+    """
+    verify_dts = [t.dt_id for t in dt_tasks if t.type == "verify"]
+    if verify_dts:
+        raise RuntimeError(
+            f"verify-DT ({', '.join(verify_dts)}) требуют режим "
+            "verify-first spec-runner#367 — он ещё не доставлен "
+            "(@blocked_by:spec-runner#367, чекбокс в TODO.md devtools); "
+            "implement-DT работают полностью"
+        )
+    by_beh = {sc.beh_id: sc for sc in scenarios}
+    number = {t.dt_id: idx for idx, t in enumerate(dt_tasks, start=1)}
+    lines = _render_header(
+        ws_id, subject, generated_at, anchor_blob, anchor_node_id="decomposition"
+    )
+    lines += _render_resolutions_section(design_text)
+    for t in dt_tasks:
+        group = [by_beh[b] for b in t.scenarios if b in by_beh]
+        beh_ids = [g.beh_id for g in group]
+        bindings: list[str] = []
+        for g in group:
+            if g.checked_target:
+                pair = f"{g.checked_target} (kind: {g.checked_kind})"
+                if pair not in bindings:
+                    bindings.append(pair)
+        check = (
+            f"проверка группы: {', '.join(bindings)} зелёные на "
+            f"{', '.join(beh_ids)}"
+            if bindings
+            else f"проверка группы {', '.join(beh_ids)} определена и зелёная"
+        )
+        idx = number[t.dt_id]
+        lines += [
+            f"### TASK-{idx:03d}: {t.title}",
+            "P2 | TODO   Est: 0.5d",
+            "",
+            f"Реализовать сценарии {', '.join(beh_ids)} ({t.dt_id}, "
+            f"группа {t.parallel_group}).",
+            f"Source: {bundle_path}#{t.dt_id}",
+        ]
+        if t.depends_on:
+            deps = ", ".join(
+                f"TASK-{number[d]:03d}" for d in t.depends_on if d in number
+            )
+            lines.append(f"**Depends on:** [{deps}]")
+        lines += ["", "**Checklist:**"]
+        lines += [f"- [ ] реализовать {g.beh_id}: {g.title}" for g in group]
+        traces = []
+        for g in group:
+            traces += [x for x in g.traces if x not in traces]
         lines += [
             f"- [ ] {check}",
             "",
@@ -640,6 +733,37 @@ def deliver(
                     f"{Path(target_dir) / profile} не декларирует узел "
                     f"'{node}' — {PREFLIGHT_PROCEDURE_HINT}"
                 )
+    # Валидация DT-пути (полный DAG, Task 8 плана decomposition-node) —
+    # ЗДЕСЬ, ПОСЛЕ existence/composition-гардов и ДО ensure_branch/
+    # stamp_bundle_approved: отказ на штатном сегодня пути (verify-DT при
+    # OPEN spec-runner#367, невалидный граф DT) не должен оставлять target
+    # на чужой ветке с незакоммиченным штампом — dirty-гард заблокировал бы
+    # повторную доставку. Отказ verify-DT из render_tasks_dt при этом
+    # остаётся (защита прямых вызовов рендера) — дубль намеренный.
+    if legacy_bundle is None:
+        decomposition_pre = (
+            base / "30-decomposition.md"
+        ).read_text(encoding="utf-8")
+        behaviour_pre = behaviour.read_text(encoding="utf-8")
+        graph_errors = decomposition_guard.graph_findings(
+            behaviour_pre, decomposition_pre
+        )
+        if graph_errors:
+            raise RuntimeError(
+                "decomposition: граф DT невалиден:\n"
+                + "\n".join(f"- {e}" for e in graph_errors)
+            )
+        dt_tasks_pre, _form_findings = decomposition_guard.parse_dt_tasks(
+            decomposition_pre
+        )
+        verify_dts = [t.dt_id for t in dt_tasks_pre if t.type == "verify"]
+        if verify_dts:
+            raise RuntimeError(
+                f"verify-DT ({', '.join(verify_dts)}) требуют режим "
+                "verify-first spec-runner#367 — он ещё не доставлен "
+                "(@blocked_by:spec-runner#367, чекбокс в TODO.md devtools); "
+                "implement-DT работают полностью"
+            )
     branch = f"spec/{ws_id}-tasks"
     ops.ensure_branch(target_dir, branch)
     stamped = stamp_bundle_approved(
@@ -661,16 +785,36 @@ def deliver(
     )
     scenarios = parse_behaviour(behaviour.read_text(encoding="utf-8"))
     stamp = generated_at or datetime.now().isoformat(timespec="seconds")
-    text = render_tasks(
-        ws_id=ws_id,
-        subject=subject,
-        bundle_path=f"{bundle_dir}/15-behaviour-spec.md",
-        scenarios=scenarios,
-        generated_at=stamp,
-        design_blob=design_blob,
-        design_text=design_text,
-        anchor_node_id=anchor_node_id,
-    )
+    if legacy_bundle is None:
+        # Полный DAG — DT-путь (Task 8 плана decomposition-node): состав
+        # задач решён tech-lead-узлом и уже проверен graph_findings выше;
+        # здесь только парсинг ПОСЛЕ штампа (тело DT-задач штамп не
+        # трогает, но пин анкера должен идти с уже проштампованного blob'а)
+        # и джойн BEH → checked_by.
+        dt_tasks, _form_findings = decomposition_guard.parse_dt_tasks(
+            anchor_text
+        )
+        text = render_tasks_dt(
+            ws_id=ws_id,
+            subject=subject,
+            bundle_path=f"{bundle_dir}/30-decomposition.md",
+            scenarios=scenarios,
+            dt_tasks=dt_tasks,
+            generated_at=stamp,
+            anchor_blob=design_blob,
+            design_text=design_text,
+        )
+    else:
+        text = render_tasks(
+            ws_id=ws_id,
+            subject=subject,
+            bundle_path=f"{bundle_dir}/15-behaviour-spec.md",
+            scenarios=scenarios,
+            generated_at=stamp,
+            design_blob=design_blob,
+            design_text=design_text,
+            anchor_node_id=anchor_node_id,
+        )
     rel = f"spec/{ws_id}-tasks.md"
     out = Path(target_dir) / rel
     out.parent.mkdir(parents=True, exist_ok=True)

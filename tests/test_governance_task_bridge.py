@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from governance import task_bridge
+from governance import decomposition_guard, task_bridge
 
 BEHAVIOUR_MD = """\
 ---
@@ -1150,3 +1150,294 @@ def test_render_deferred_without_reason_has_no_python_none() -> None:
     joined = "\n".join(lines)
     assert "None" not in joined
     assert "Q-07" in joined and "не указана" in joined
+
+
+# --- Task 8: render_tasks_dt — 1 DT = 1 задача, deliver на DT-пути --------
+
+DT_BEHAVIOUR_MD = """\
+---
+spec_stage: behaviour-spec
+status: draft
+owner_role: product
+---
+# Behaviour
+
+#### BEH-01: Первый
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: integration` `owner: qa` \
+`target: tests/test_a.py`
+
+#### BEH-02: Второй
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: integration` `owner: qa` \
+`target: tests/test_a.py`
+
+#### BEH-03: Третий
+`traces: [FR-02]`
+- **checked_by**: `status: planned` `kind: e2e` `owner: qa` \
+`target: tests/test_c.py`
+"""
+
+DT_TWO_MD = """\
+#### DT-01: Ядро · type: implement · owner: dev
+scenarios: [BEH-01, BEH-02]
+depends_on: []
+parallel_group: core
+
+Реализовать ядро.
+
+#### DT-02: Расширение · type: implement · owner: dev
+scenarios: [BEH-03]
+depends_on: [DT-01]
+parallel_group: core
+"""
+
+
+def test_render_dt_one_task_per_dt_with_bindings_and_edges() -> None:
+    """DT-01 (BEH-01+BEH-02, group core), DT-02 (BEH-03, depends_on
+    [DT-01]) ⇒ ровно TASK-001, TASK-002; TASK-001 несёт оба BEH и биндинг
+    группы; TASK-002 несёт Depends on; DT-01 (без depends_on) — БЕЗ
+    искусственной цепочки."""
+    scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(DT_TWO_MD)
+    assert findings == []
+    text = task_bridge.render_tasks_dt(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="workstreams/WS-x-1/spec/30-decomposition.md",
+        scenarios=scenarios,
+        dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00",
+        anchor_blob="ab" * 20,
+    )
+    assert "### TASK-001: Ядро" in text
+    assert "### TASK-002: Расширение" in text
+    assert "### TASK-003:" not in text
+    assert "- [ ] реализовать BEH-01: Первый" in text
+    assert "- [ ] реализовать BEH-02: Второй" in text
+    assert (
+        "проверка группы: tests/test_a.py (kind: integration) зелёные "
+        "на BEH-01, BEH-02" in text
+    )
+    assert "**Depends on:** [TASK-001]" in text
+    task1_block = text.split("### TASK-001:")[1].split("### TASK-002:")[0]
+    assert "Depends on" not in task1_block
+
+
+def test_render_dt_frontmatter_traces_decomposition_from_birth() -> None:
+    """Рендер (не conform!) сразу пишет traces_to: [decomposition] и
+    upstream_hashes: {decomposition: "<blob 30-decomposition.md>"}."""
+    scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
+    dt_tasks, _ = decomposition_guard.parse_dt_tasks(DT_TWO_MD)
+    text = task_bridge.render_tasks_dt(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="workstreams/WS-x-1/spec/30-decomposition.md",
+        scenarios=scenarios,
+        dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00",
+        anchor_blob="cd" * 20,
+    )
+    meta, _body = task_bridge.split_frontmatter(text)
+    assert meta["traces_to"] == ["decomposition"]
+    assert meta["upstream_hashes"] == {"decomposition": "cd" * 20}
+
+
+VERIFY_DT_MD = """\
+#### DT-01: Проверка · type: verify · owner: qa
+scenarios: [BEH-01]
+depends_on: [DT-02]
+delivered_by: [DT-02]
+parallel_group: core
+
+#### DT-02: Реализация · type: implement · owner: dev
+scenarios: [BEH-02]
+depends_on: []
+parallel_group: core
+"""
+
+
+def test_verify_dt_fails_closed_until_spec_runner_367() -> None:
+    """DT с type: verify ⇒ render_tasks_dt поднимает RuntimeError с
+    "verify-first", "spec-runner#367", "@blocked_by" (fail-closed до
+    доставки шва)."""
+    scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
+    dt_tasks, _ = decomposition_guard.parse_dt_tasks(VERIFY_DT_MD)
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge.render_tasks_dt(
+            ws_id="WS-x-1",
+            subject="s",
+            bundle_path="b/30-decomposition.md",
+            scenarios=scenarios,
+            dt_tasks=dt_tasks,
+            generated_at="2026-09-05T12:00:00",
+            anchor_blob="ab" * 20,
+        )
+    message = str(exc_info.value)
+    assert "verify-first" in message
+    assert "spec-runner#367" in message
+    assert "@blocked_by" in message
+
+
+DECOMPOSITION_SHARED_FILE_MD = """\
+---
+spec_stage: decomposition
+status: draft
+version: 1
+owner_role: tech-lead
+traces_to: [design]
+upstream_hashes:
+  design: """ + "12" * 20 + """
+---
+## Задачи
+
+#### DT-01: Первый · type: implement · owner: dev
+scenarios: [BEH-01]
+depends_on: []
+parallel_group: solo
+
+#### DT-02: Второй · type: implement · owner: dev
+scenarios: [BEH-02]
+depends_on: []
+parallel_group: solo
+"""
+
+SHARED_FILE_BEHAVIOUR_MD = """\
+---
+spec_stage: behaviour-spec
+status: draft
+owner_role: product
+---
+# Behaviour
+
+#### BEH-01: Первый
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_shared.py::t1`
+
+#### BEH-02: Второй
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: atp` `owner: qa` \
+`target: tests/test_shared.py::t2`
+"""
+
+
+def test_dt_path_skips_merge_featureless(tmp_path: Path) -> None:
+    """Два DT с checked_by-целями в одном файле НЕ сливаются мостом
+    (_merge_featureless_by_target_file на DT-пути не применяется) — такой
+    вход обязан быть отвергнут graph_findings ДО рендера: deliver зовёт
+    graph_findings и поднимает RuntimeError со списком."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text(CHARTER_MD)
+    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
+    (bundle / "15-behaviour-spec.md").write_text(SHARED_FILE_BEHAVIOUR_MD)
+    (bundle / "20-design.md").write_text(DESIGN_MD)
+    (bundle / "30-decomposition.md").write_text(
+        DECOMPOSITION_SHARED_FILE_MD
+    )
+    ops = _StubOps()
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=ops,
+            approved_by="a", approved_at="t",
+        )
+    message = str(exc_info.value)
+    assert "single-owner" in message
+    assert "tests/test_shared.py" in message
+    assert not any(c[0] == "ensure_branch" for c in ops.calls)
+    assert (
+        bundle / "30-decomposition.md"
+    ).read_text() == DECOMPOSITION_SHARED_FILE_MD
+
+
+DECOMPOSITION_VERIFY_MD = """\
+---
+spec_stage: decomposition
+status: draft
+version: 1
+owner_role: tech-lead
+traces_to: [design]
+upstream_hashes:
+  design: """ + "12" * 20 + """
+---
+## Задачи
+
+#### DT-01: Реализация · type: implement · owner: dev
+scenarios: [BEH-01]
+depends_on: []
+parallel_group: solo
+
+#### DT-02: Проверка · type: verify · owner: qa
+scenarios: [BEH-02]
+depends_on: [DT-01]
+delivered_by: [DT-01]
+parallel_group: solo
+"""
+
+
+def test_deliver_verify_dt_fails_closed_before_mutation(
+    tmp_path: Path,
+) -> None:
+    """deliver на DT-пути с verify-DT ⇒ RuntimeError И
+    ops.ensure_branch НЕ вызывался, файлы бандла не изменены (verify-first
+    spec-runner#367 ещё не доставлен)."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text(CHARTER_MD)
+    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
+    (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
+    (bundle / "20-design.md").write_text(DESIGN_MD)
+    (bundle / "30-decomposition.md").write_text(DECOMPOSITION_VERIFY_MD)
+    ops = _StubOps()
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=ops,
+            approved_by="a", approved_at="t",
+        )
+    message = str(exc_info.value)
+    assert "verify-first" in message
+    assert "spec-runner#367" in message
+    assert "@blocked_by" in message
+    assert not any(c[0] == "ensure_branch" for c in ops.calls)
+    assert (
+        bundle / "30-decomposition.md"
+    ).read_text() == DECOMPOSITION_VERIFY_MD
+    assert not (target / "spec" / "WS-alpha-7-tasks.md").exists()
+
+
+def test_deliver_full_dag_renders_via_render_tasks_dt(tmp_path: Path) -> None:
+    """Полный DAG идёт через render_tasks_dt (не render_tasks): рендер
+    несёт DT-провенанс (dt_id, parallel_group) в задаче."""
+    target = _target(tmp_path)
+    ops = _StubOps()
+    pr = task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a", approved_at="t",
+    )
+    assert pr == 77
+    text = (target / "spec/WS-alpha-7-tasks.md").read_text()
+    assert "### TASK-001: Реализация" in text
+    assert "(DT-01, группа solo)" in text
+    assert "Source: workstreams/WS-alpha-7/spec/30-decomposition.md#DT-01" \
+        in text
