@@ -55,7 +55,7 @@ decomposition появится спекой 3 и тогда перехватит
 | `profiles/team-exp.yaml` | +узел design (форма §2); `tasks.upstream: [design]`; комментарий-отступление обновить (acceptance/decomposition всё ещё срезаны намеренно) |
 | `governance/runner.py` | `_AUTHOR_STEPS` += `("author-design", "design", "20-design.md")` — после behaviour, до tasks-делегата; resume-семантика прежняя. Плюс НОВАЯ гейт-механика S4 (см. оговорку ниже): prospective-проверка ОБОИХ рёбер design → requirements и design → behaviour-spec; `GC-UNPINNED` и `GC-STALE` для КАЖДОГО из двух пинов; локальный гард содержимого design-узла (грамматика §4: покрытие Q, состояния, named-причины) |
 | `governance/ops.py` | `_AUTHOR_FILENAMES["design"] = "20-design.md"`; `_AUTHOR_DSL["design"]` — контракт содержимого (§4), включая канонический frontmatter (`spec_stage: design`, `owner_role: architects`, `traces_to: [requirements, behaviour-spec]`, `upstream_hashes` обоих апстримов) |
-| `governance/bundle_state.py` | правок не ожидается: required-узлы читаются из профиля; отсутствие 20-design.md в бандле ⇒ `required_absent` на S4 автоматически. Проверить характеризационным тестом |
+| `governance/bundle_state.py` | правок не ожидается: required-узлы читаются из профиля, `required_absent` попадает в `candidate_state`. ЧЕСТНАЯ оговорка: единственный продакшн-читатель `candidate_state` — view-model консоли (`console_model.py`); S4 раннера после миграции на CLI читает только rc `gate_check_candidate` + локальные гарды. Поэтому отсутствие 20-design.md обязано ловиться ЛОКАЛЬНЫМ ГАРДОМ в `_step_gate` (тем же слоем, что GC-UNPINNED/GC-STALE), а не предполагаться «автоматическим» — либо характеризацией доказать, что steward CLI сам красит отсутствующий required-узел, и тогда гард не нужен |
 | `governance/task_bridge.py` | линейная `_BUNDLE_CHAIN` становится DAG-ом upstream'ов: `charter: []`, `requirements: [charter]`, `behaviour-spec: [requirements]`, `design: [requirements, behaviour-spec]`. Порядок штампа обязан быть топологическим: сначала изменяются upstream-файлы, ЗАТЕМ пересчитываются и записываются ОБА пина design — иначе пин design → requirements протухает немедленно после штампа requirements. Tasks-спека получает `traces_to: [design]` + `upstream_hashes.design`; секция «Решения открытых вопросов» **генерируется из 20-design.md**, а не пишется рукой (закрывает бонус devtools#123). ОТДЕЛЬНО: `conform_approved` сегодня принудительно возвращает tasks-спеку к `traces_to: [behaviour-spec]` — после approve она обязана СОХРАНЯТЬ `traces_to: [design]` и пин текущего 20-design.md |
 | `templates/` | не трогаем (шаблон стадии живёт в DSL промпта, как у трёх существующих узлов) |
 
@@ -107,8 +107,10 @@ decomposition появится спекой 3 и тогда перехватит
 
 ## 5. Тесты
 
-- Характеризация S4: бандл без 20-design.md ⇒ `required_absent`
-  (пинованный steward, как существующие S4-тесты).
+- Характеризация S4: бандл без 20-design.md ⇒ прогон останавливается —
+  через характеризацию steward CLI (красит ли он required-узел сам) либо
+  через новый локальный гард `_step_gate`; тест обязан бить в S4 раннера,
+  а НЕ в `candidate_state` консоли (required_absent там — read-model).
 - `bundle_state`: design в required, статусная модель draft→approved.
 - `task_bridge`: цепочка пинов 4 узлов (перепин после штампа), traces_to
   tasks-спеки = [design], генерация секции резолюций из 20-design.md
