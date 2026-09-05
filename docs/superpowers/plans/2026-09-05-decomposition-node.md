@@ -63,11 +63,17 @@ runner, без pydantic), pytest, FakeOps-фикстуры.
   `tests/test_governance_console_model.py`, `tests/test_governance_task_bridge.py`.
 
 Машинная интерпретация инварианта «сводные за хвостами групп» (§3 спеки не
-даёт маркера «сводной» задачи — фиксируем правило, проверяемое механически):
-если DT X зависит хотя бы от одного члена ЧУЖОЙ группы G (`parallel_group`
-G ≠ группы X), то `depends_on` X обязан включать ВСЕ стоки G (DT группы G,
-от которых не зависит никто внутри G). Иначе X стартует до хвоста G —
-ровно класс «сводная задача поверх недоделанной ветви». ВАЖНО (major
+даёт маркера «сводной» задачи — фиксируем ВЫВОДИМОЕ условие, проверяемое
+механически; major круга 4): «сводной» считается задача, зависящая от
+членов ДВУХ И БОЛЕЕ чужих групп — она их сводит. Только для такой задачи
+действует правило: для КАЖДОЙ сведённой группы G её `depends_on` обязан
+включать ВСЕ стоки G (DT группы G, от которых не зависит никто внутри G) —
+иначе свод стартует до хвоста G. Точечное ребро в ОДНУ чужую группу
+(implement→implement «мне нужен только парсер») — легитимно и никаких
+дополнительных рёбер не требует: §3 запрещает ровно искусственную
+сериализацию, и навязывать её гейтом значило бы машинно воспроизводить
+мотивирующий дефект §1 (линейный Depends on сквозь независимые половины,
+ревью spec-runner#343). ВАЖНО (major
 терминального ревью плана): `solo` — НЕ имя общей группы, а признак
 «задача сама по себе»; каждая solo-задача образует СОБСТВЕННУЮ
 одиночную группу (ключ `solo:<dt_id>`), иначе две независимые solo-задачи
@@ -626,6 +632,27 @@ def test_delivered_by_edge_exempt_from_sinks_rule() -> None:
     assert not any("стоков" in f for f in graph_findings(beh4, dt))
 
 
+def test_point_edge_into_single_foreign_group_is_legitimate() -> None:
+    """Major круга 4: ребро в ОДНУ чужую группу с двумя стоками — не
+    находка; требовать все стоки значило бы навязать искусственную
+    сериализацию (мотивирующий дефект §1)."""
+    from governance.decomposition_guard import graph_findings
+    beh4 = BEH + (
+        "\n#### BEH-04: Четыре\n**checked_by** `kind: e2e` "
+        "`target: tests/test_c.py::test_four`\n"
+    )
+    dt = (
+        "#### DT-01: Парсер · type: implement · owner: dev\n"
+        "scenarios: [BEH-01, BEH-02]\ndepends_on: []\n"
+        "parallel_group: core\n\n"
+        "#### DT-02: CLI · type: implement · owner: dev\n"
+        "scenarios: [BEH-03]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-03: API · type: implement · owner: dev\n"
+        "scenarios: [BEH-04]\ndepends_on: [DT-01]\nparallel_group: api\n"
+    )
+    assert not any("стоков" in f for f in graph_findings(beh4, dt))
+
+
 def test_cross_group_dependency_must_cover_all_sinks() -> None:
     """Машинное правило «сводные за хвостами групп» (карта файлов плана):
     ребро в чужую группу обязывает зависеть от ВСЕХ её стоков."""
@@ -657,7 +684,12 @@ def test_cross_group_dependency_must_cover_all_sinks() -> None:
 - [ ] **Step 3: Реализация** (добавить в `decomposition_guard.py`):
 
 ```python
-_BEH_HEAD_RE = re.compile(r"^####\s+(BEH-\d+)\b", re.M)
+# Та же строгая грамматика, что _BEH_HEADER моста (`: <название>`
+# обязательны) — minor круга 4: расхождение (гард видит `#### BEH-02` без
+# двоеточия, мост — нет) давало бы зелёный гейт и пустую задачу в
+# tasks-спеке.
+_BEH_HEAD_RE = re.compile(r"^####\s+(BEH-\d+):\s*\S", re.M)
+_BEH_NEAR_RE = re.compile(r"^####\s+(BEH-\d+)\b", re.M)
 _BEH_CHECKED_RE = re.compile(
     r"\*\*checked_by\*\*.*?`kind:\s*(\S+?)`.*?`target:\s*(\S+?)`"
 )
@@ -716,6 +748,16 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
     bindings = _parse_beh_bindings(behaviour_text)
     ids = {t.dt_id for t in tasks}
     edges = {t.dt_id: t.depends_on for t in tasks}
+
+    # near-miss BEH-заголовки behaviour-spec — тот же стандарт, что для
+    # DT (Global Constraints): битый заголовок — находка, не молчание
+    strict_beh = {m.start() for m in _BEH_HEAD_RE.finditer(behaviour_text)}
+    for near in _BEH_NEAR_RE.finditer(behaviour_text):
+        if near.start() not in strict_beh:
+            findings.append(
+                f"{near.group(1)}: заголовок behaviour-spec не соответствует "
+                "машинной грамматике BEH (`#### BEH-NN: <название>`)"
+            )
 
     # ссылки на несуществующее
     for t in tasks:
@@ -830,6 +872,11 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
             )
             if dep_group != own_key:
                 by_group.setdefault(dep_group, set()).add(dep)
+        if len(by_group) < 2:
+            # точечное ребро в одну чужую группу — не «свод» (major
+            # круга 4): правило стоков действует только на задачу,
+            # сводящую две и более чужих группы
+            continue
         for g, deps in by_group.items():
             sinks = {
                 member for member in groups[g]
@@ -862,6 +909,9 @@ def test_beh_binding_grammar_matches_task_bridge() -> None:
     )
     scenarios = parse_behaviour(double)
     bindings = _parse_beh_bindings(double)
+    # двусторонняя сверка множеств id (minor круга 4: гард не должен
+    # распознавать заголовки, которых не видит мост, и наоборот)
+    assert {sc.beh_id for sc in scenarios} == set(bindings)
     for sc in scenarios:
         target, kind = bindings[sc.beh_id]
         expected = (
@@ -1443,8 +1493,18 @@ def render_tasks_dt(
 `deliver`: на полном DAG (`legacy_bundle is None`) читать
 `30-decomposition.md`, звать `graph_findings(behaviour_text,
 decomposition_text)` — непустой список ⇒ RuntimeError с его текстом (мост
-не рендерит невалидный граф даже в обход S4, deliver зовётся и напрямую);
-затем `parse_dt_tasks` и `render_tasks_dt`. Пин якоря — blob
+не рендерит невалидный граф даже в обход S4, deliver зовётся и напрямую).
+МЕСТО валидаций (minor круга 4): чтение обоих текстов, `graph_findings` И
+проверка «есть ли verify-DT» выполняются сразу ПОСЛЕ
+`checkout_and_pull`/existence-гардов и ДО `ensure_branch`/
+`stamp_bundle_approved` — отказ на штатном сегодня пути (verify-DT при
+OPEN spec-runner#367) не должен оставлять target на чужой ветке с
+незакоммиченным штампом, блокируя повторную доставку dirty-гардом.
+Отказ verify-DT из `render_tasks_dt` при этом остаётся (защита прямых
+вызовов рендера), но в `deliver` он продублирован ранней проверкой ДО
+мутаций; после штампа остаётся только взять пин якоря и отрендерить.
+Тест: verify-DT ⇒ RuntimeError И `ops.ensure_branch` не вызывался,
+файлы бандла не изменены. Затем `parse_dt_tasks` и `render_tasks_dt`. Пин якоря — blob
 30-decomposition.md (якорь — `dag[-1]`, Task 7). ИСТОЧНИК `design_text`
 (minor круга 2): секция «Решения открытых вопросов» рендерится из
 `20-design.md`, который читается ОТДЕЛЬНО от якоря (после смены якоря
