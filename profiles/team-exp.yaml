@@ -2,11 +2,9 @@
 # Источник формы — steward profiles/team-exp.yaml @ 4a1c7c44 (пин конвейера);
 # оставлены только узлы, которые авторит governance/runner.py (S2:
 # charter → requirements → behaviour-spec → design) + delegate-узел tasks.
-# acceptance/decomposition полного team-exp намеренно не включены:
-# required-узлы по умолчанию, их отсутствие в бандле дало бы
-# required_absent на S4 (см. governance/bundle_state.py).
-# tasks.upstream: [design] — временное отступление от полного профиля
-# ([decomposition]); перехват придёт спекой 3 (decomposition-узел).
+# acceptance полного team-exp намеренно не включена: required-узел по
+# умолчанию, его отсутствие в бандле дало бы required_absent на S4 (см.
+# governance/bundle_state.py).
 profile: team-exp
 solo_auto_approve: true
 artifacts:
@@ -21,7 +19,14 @@ artifacts:
     upstream: [requirements]
   - {id: design, template: design.md, owner_role: architects,
      upstream: [requirements, behaviour-spec]}
+  - id: decomposition
+    template: decomposition.md
+    owner_role: tech-lead
+    # steward-форма: upstream: [design, acceptance]; acceptance срезан
+    # (придёт спекой 4). compile: decomposition→maestro/project.yaml НЕ
+    # реализуется (наш лейн Mode-2) — осознанное отступление, §2/§8 спеки.
+    upstream: [design]
   - id: tasks
     owner_role: stream-owner
-    upstream: [design]
+    upstream: [decomposition]
     delegate: spec-runner

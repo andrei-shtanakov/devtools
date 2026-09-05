@@ -13,7 +13,9 @@ def test_team_exp_profile_has_design_node():
     assert d["owner_role"] == "architects"
     assert d["upstream"] == ["requirements", "behaviour-spec"]
     assert d["template"] == "design.md"
-    assert nodes["tasks"]["upstream"] == ["design"]
+    assert nodes["decomposition"]["owner_role"] == "tech-lead"
+    assert nodes["decomposition"]["upstream"] == ["design"]
+    assert nodes["tasks"]["upstream"] == ["decomposition"]
 
 
 def test_team_exp_profile_loads_via_real_steward_and_orders_nodes():
@@ -30,5 +32,6 @@ def test_team_exp_profile_loads_via_real_steward_and_orders_nodes():
     roles = load_roles_catalog(profile.parent / "roles.yaml")
     graph = load_profile(profile, roles)
     assert graph.topo_order() == [
-        "charter", "requirements", "behaviour-spec", "design", "tasks",
+        "charter", "requirements", "behaviour-spec", "design",
+        "decomposition", "tasks",
     ]
