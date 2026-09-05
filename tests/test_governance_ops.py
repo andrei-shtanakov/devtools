@@ -794,5 +794,6 @@ def test_author_dsl_covers_decomposition() -> None:
         "spec_stage: decomposition", "owner_role: tech-lead",
         "traces_to: [design]", "#### DT-NN:", "type: implement|verify",
         "scenarios:", "depends_on:", "delivered_by:", "parallel_group:",
+        "topological declaration order",
     ):
         assert token in dsl
