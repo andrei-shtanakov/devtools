@@ -2790,6 +2790,95 @@ def test_gate_design_missing_behaviour_pin_is_unpinned(
     assert "push" not in state.ops
 
 
+def _design_undeclared_edge_ops(missing_edge: str) -> type:
+    """Фабрика Ops-подкласса: design объявляет `traces_to` только для
+    ОДНОГО ребра — `missing_edge` ("requirements"/"behaviour-spec") в
+    `traces_to` вовсе нет (MAJOR-1: раньше необъявленное ребро тихо
+    пропускалось `continue` внутри цикла гарда рёбер, вместо стопа S4
+    prospective-находкой)."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "design":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            declared = [
+                e for e in ("requirements", "behaviour-spec")
+                if e != missing_edge
+            ]
+            pins = {
+                "requirements": blob_sha1(
+                    (bundle / "10-requirements.md").read_text(encoding="utf-8")
+                ),
+                "behaviour-spec": blob_sha1(
+                    (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+                ),
+            }
+            hashes_block = "".join(
+                f'  {e}: "{pins[e]}"\n' for e in declared
+            )
+            path = bundle / "20-design.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: design\n"
+                "status: draft\n"
+                "owner_role: architects\n"
+                f"traces_to: [{', '.join(declared)}]\n"
+                "upstream_hashes:\n"
+                f"{hashes_block}"
+                "---\n"
+                "Открытых архитектурных вопросов нет (входной набор пуст)\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    return _Ops
+
+
+def test_gate_design_undeclared_requirements_edge_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """MAJOR-1: design `traces_to` несёт только `behaviour-spec` — ребро
+    requirements не объявлено ВООБЩЕ (не «не запинено», а отсутствует в
+    traces_to) — S4 обязан стопить prospective-находкой, не молча
+    пропускать необъявленное required-ребро."""
+    ops = _design_undeclared_edge_ops("requirements")(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-design-undeclared-req", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-design-undeclared-req") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings and "requirements" in findings
+    assert "не объявлено в traces_to" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_design_undeclared_behaviour_edge_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """MAJOR-1: design `traces_to` несёт только `requirements` — ребро
+    behaviour-spec не объявлено ВООБЩЕ — S4 обязан стопить, не
+    пропускать."""
+    ops = _design_undeclared_edge_ops("behaviour-spec")(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-design-undeclared-beh", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-design-undeclared-beh") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings and "behaviour-spec" in findings
+    assert "не объявлено в traces_to" in findings
+    assert "push" not in state.ops
+
+
 def _design_stale_ops(stale_edge: str) -> type:
     """Фабрика Ops-подкласса: design запинован верно ВЕЗДЕ, кроме
     `stale_edge` — там пин синтаксически валиден (40 hex), но неверен

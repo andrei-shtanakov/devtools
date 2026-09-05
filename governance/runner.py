@@ -859,11 +859,11 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # worktree; первый прогон WS-kapelle-47 встал именно на GC-UNPINNED).
     # Всё stdlib-ом (blob_sha1 — свой), runner остаётся без импорта steward.
     local_findings: list[str] = []
-    for fname, upstream, upstream_fname in (
-        ("10-requirements.md", "charter", "00-charter.md"),
-        ("15-behaviour-spec.md", "requirements", "10-requirements.md"),
-        ("20-design.md", "requirements", "10-requirements.md"),
-        ("20-design.md", "behaviour-spec", "15-behaviour-spec.md"),
+    for fname, upstream, upstream_fname, required in (
+        ("10-requirements.md", "charter", "00-charter.md", False),
+        ("15-behaviour-spec.md", "requirements", "10-requirements.md", False),
+        ("20-design.md", "requirements", "10-requirements.md", True),
+        ("20-design.md", "behaviour-spec", "15-behaviour-spec.md", True),
     ):
         path = Path(state.target_dir) / state.bundle_dir / fname
         if not path.exists():
@@ -874,6 +874,19 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
             front, re.M,
         )
         if not declares:
+            # required=True (оба ребра design — MAJOR-1, финальное ревью):
+            # design c `traces_to: [requirements]` (ребро behaviour-spec не
+            # объявлено) раньше проходило S4 молча — `continue` читал
+            # необъявленное required-ребро как «нечего проверять», хотя
+            # спека требует prospective-проверку ОБОИХ рёбер design.
+            # Необязательные рёбра (requirements→charter,
+            # behaviour-spec→requirements) остаются как раньше: их
+            # traces_to не входит в prospective-контракт этого гарда.
+            if required:
+                local_findings.append(
+                    f"error GC-UNPINNED(prospective): {fname} — ребро "
+                    f"{upstream} не объявлено в traces_to"
+                )
             continue
         pin = _upstream_pin(front, upstream)
         if pin is None:
