@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("steward")
 
-from governance import bundle_state, merge_gate, runner
+from governance import bundle_state, merge_gate, runner, task_bridge
 from governance import run_state as rs
 from governance.stale_adapter import blob_sha1
 from tests.governance_fixtures.bundles import make_bundle, make_profile
@@ -263,6 +263,15 @@ def runs_root(tmp_path: Path, monkeypatch):
     return root
 
 
+# Task 8 (preflight): `_step_authoring` читает РЕАЛЬНЫЙ файл профиля в
+# target_dir перед авторингом узла design — devtools-канонический
+# profiles/team-exp.yaml (4 узла: charter/requirements/behaviour-spec/
+# design), тот же, что реально несёт этот репо в проде.
+_TEAM_EXP_PROFILE_TEXT = (
+    Path(__file__).resolve().parent.parent / "profiles" / "team-exp.yaml"
+).read_text(encoding="utf-8")
+
+
 def _start_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
     target_dir = tmp_path / f"target-{run_id}"
     target_dir.mkdir(exist_ok=True)
@@ -278,6 +287,18 @@ def _start_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
         ops=ops,
     )
     kwargs.update(overrides)
+    # Без материализации файла preflight (Task 8) стопил бы статусом
+    # `stopped_preflight` ВСЕ существующие start()-тесты этого модуля —
+    # раньше `profile` был только строкой в kwargs, ни один реальный файл
+    # под ней не лежал. Пишем ровно тогда, когда итоговый `profile` —
+    # канонический team-exp (иначе, например, `profiles/mini.yaml`-тесты
+    # ниже по файлу сами несут свою фикстуру через `make_profile`).
+    if kwargs["profile"] == "profiles/team-exp.yaml":
+        profile_dir = Path(kwargs["target_dir"]) / "profiles"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_path = profile_dir / "team-exp.yaml"
+        if not profile_path.exists():
+            profile_path.write_text(_TEAM_EXP_PROFILE_TEXT, encoding="utf-8")
     return kwargs
 
 
@@ -2885,3 +2906,136 @@ def test_gate_stops_on_uncovered_architect_question(
     ).read_text()
     assert "GC-DESIGN-COVERAGE" in findings and "Q-03" in findings
     assert "push" not in state.ops
+
+
+# --- Task 8: preflight профиля target — design-узел обязателен -----------
+
+_STALE_TEAM_EXP_PROFILE = """\
+profile: team-exp
+artifacts:
+  - {id: charter, template: charter.md, owner_role: product}
+  - id: requirements
+    template: requirements.md
+    owner_role: product
+    upstream: [charter]
+  - id: behaviour-spec
+    template: behaviour-spec.md
+    owner_role: product
+    upstream: [requirements]
+  - id: tasks
+    owner_role: stream-owner
+    upstream: [behaviour-spec]
+    delegate: spec-runner
+"""
+
+
+def _write_stale_profile(target_dir: Path) -> Path:
+    """Старая копия profiles/team-exp.yaml (3 узла, БЕЗ design) — как
+    несут соседние репо до раскатки design-узла (мотивация Task 8)."""
+    profile_path = target_dir / "profiles" / "team-exp.yaml"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(_STALE_TEAM_EXP_PROFILE, encoding="utf-8")
+    return profile_path
+
+
+def test_start_stops_preflight_when_target_profile_lacks_design(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Step 1(а): target несёт СТАРУЮ копию profiles/team-exp.yaml без
+    узла design ⇒ `start` останавливается статусом `stopped_preflight`
+    (до фактического авторинга design), сообщение несёт процедуру."""
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    run_id = "r-preflight-missing-design"
+    kwargs = _start_kwargs(tmp_path, run_id, ops)
+    _write_stale_profile(Path(kwargs["target_dir"]))
+
+    state = runner.start(**kwargs)
+
+    assert state.status == "stopped_preflight"
+    assert "design" not in ops.authored
+    assert "gate-candidate" not in state.ops
+    assert "push" not in state.ops
+
+
+def test_start_preflight_silent_on_four_node_profile(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Step 1(б): target с актуальным 4-узловым профилем (материализован
+    `_start_kwargs`) ⇒ preflight молчит, прогон доходит до мержа как
+    прежде — регрессия отсутствует."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+
+    state = runner.start(**_start_kwargs(tmp_path, "r-preflight-ok", ops))
+
+    assert state.status != "stopped_preflight"
+    assert state.ops["merge"]["status"] == "completed"
+
+
+def test_deliver_refuses_when_target_profile_lacks_design(
+    tmp_path: Path,
+) -> None:
+    """Step 1(в): `deliver` с тем же расхождением (профиль target без
+    design) ⇒ RuntimeError с той же процедурой, что у `stopped_preflight`
+    раннера — проверяется ДО ensure_branch/стампа."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "15-behaviour-spec.md").write_text("# behaviour\n", encoding="utf-8")
+    (bundle / "20-design.md").write_text("# design\n", encoding="utf-8")
+    _write_stale_profile(target)
+
+    class _MiniOps:
+        def is_dirty(self, target_dir: str) -> bool:
+            return False
+
+        def checkout_and_pull(self, target_dir: str, branch: str) -> None:
+            pass
+
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=_MiniOps(),
+            approved_by="a", approved_at="t",
+            profile="profiles/team-exp.yaml",
+        )
+    message = str(exc_info.value)
+    assert "design" in message.lower()
+    assert "authority-root" in message
+    assert "мерж человеком" in message
+
+
+def test_resume_after_profile_delivered_continues_run(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Step 1(г): «доставили» обновлённый профиль (дописали design в
+    target-профиль) ⇒ `resume(run_id)` ПРОДОЛЖАЕТ прогон, не тихий no-op —
+    `stopped_preflight` обязан быть в `_STOPPED_RESET_OPS`."""
+    monkeypatch.setattr(
+        runner, "load_safety",
+        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+    )
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    run_id = "r-preflight-resume"
+    kwargs = _start_kwargs(tmp_path, run_id, ops)
+    profile_path = _write_stale_profile(Path(kwargs["target_dir"]))
+
+    stopped = runner.start(**kwargs)
+    assert stopped.status == "stopped_preflight"
+
+    # «Доставка» обновлённого профиля PR-ом (человеческий мерж authority-root):
+    # дописываем узел design в target-профиль.
+    profile_path.write_text(_TEAM_EXP_PROFILE_TEXT, encoding="utf-8")
+
+    resumed = runner.resume(run_id, ops)
+
+    assert resumed.status != "stopped_preflight"
+    assert resumed.ops["merge"]["status"] == "completed"

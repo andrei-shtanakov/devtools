@@ -26,6 +26,7 @@ import yaml
 from governance import design_guard
 from governance.ops import Ops, RealOps
 from governance.run_state import load
+from governance.runner import _PREFLIGHT_PROCEDURE_HINT, _target_profile_declares
 from governance.stale_adapter import blob_sha1
 
 # DAG бандла в порядке штампа (топологический): каждый узел перечисляет
@@ -538,6 +539,7 @@ def deliver(
     approved_at: str,
     generated_at: str | None = None,
     legacy_bundle: bool = False,
+    profile: str | None = None,
 ) -> int:
     """Штампует бандл + пишет spec/<ws-id>-tasks.md; один draft-PR.
 
@@ -554,6 +556,17 @@ def deliver(
     `legacy_bundle=True` (Task 7): бандл без узла design (авторен до
     раскатки design-узла) — штамп и якорь идут по 3-узловому префиксу DAG
     (`behaviour-spec`), 20-design.md не читается вовсе.
+
+    `profile` (Task 8, опционально): путь профиля относительно
+    `target_dir` — тот же, что получит `gate_check_candidate` в раннере
+    (`state.profile`), не захардкоженный `profiles/team-exp.yaml`. Когда
+    передан и `legacy_bundle=False`, доставка отказывает, если
+    ФАКТИЧЕСКИЙ профиль target-репо не декларирует узел `design` — та же
+    процедура, что у `stopped_preflight` раннера
+    (`governance.runner._target_profile_declares`): соседний репо может
+    нести старую копию файла того же имени без design. `profile=None`
+    (дефолт) — проверка пропускается; CLI (`main`) всегда передаёт
+    `state.profile`.
     """
     if ops.is_dirty(target_dir):
         raise RuntimeError(
@@ -572,14 +585,27 @@ def deliver(
             "или путь неверен"
         )
     design_path = Path(target_dir) / bundle_dir / _ANCHOR_FILENAME
-    if not legacy_bundle and not design_path.exists():
-        raise RuntimeError(
-            f"{design_path} не найден на {base_ref} — доставка "
-            "остановлена. Либо доавторьте design (узел `design` "
-            "профиля team-exp) до доставки задач, либо, если бандл "
-            "легаси (design туда не входит), передайте "
-            "`--legacy-bundle`"
-        )
+    if not legacy_bundle:
+        if not design_path.exists():
+            raise RuntimeError(
+                f"{design_path} не найден на {base_ref} — доставка "
+                "остановлена. Либо доавторьте design (узел `design` "
+                "профиля team-exp) до доставки задач, либо, если бандл "
+                "легаси (design туда не входит), передайте "
+                "`--legacy-bundle`"
+            )
+        # Preflight (Task 8): та же проверка, что стопит раннер
+        # `stopped_preflight`'ом — target-профиль может не декларировать
+        # design вовсе (старая копия того же имени у соседнего репо), и
+        # доставка не имеет права молча анкериться на design, которого
+        # активный профиль этого репо не признаёт.
+        if profile is not None and not _target_profile_declares(
+            target_dir, profile, "design"
+        ):
+            raise RuntimeError(
+                f"{Path(target_dir) / profile} не декларирует узел "
+                f"'design' — {_PREFLIGHT_PROCEDURE_HINT}"
+            )
     branch = f"spec/{ws_id}-tasks"
     ops.ensure_branch(target_dir, branch)
     stamped = stamp_bundle_approved(
@@ -786,6 +812,7 @@ def main(argv: list[str] | None = None) -> int:
         approved_by=merged_by,
         approved_at=merged_at,
         legacy_bundle=args.legacy_bundle,
+        profile=state.profile,
     )
     print(f"draft tasks-спека доставлена: PR #{pr} ({state.repo_slug})")
     return 0
