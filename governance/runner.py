@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from governance import design_guard
 from governance.merge_gate import PrFacts, decide
 from governance.stale_adapter import blob_sha1
 from governance.ops import Ops, RealOps
@@ -787,6 +788,26 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         state.status = "stopped_gate"
         save(state)
         return False
+    # Гард отсутствия design (спека Task 4): required-узел design профиля
+    # team-exp — локальный (не через bundle_state.candidate_state — та
+    # остаётся у консоли, runner без импорта steward и без чтения/парсинга
+    # YAML профиля — совпадение имени файла профиля, тот же уровень
+    # hardcode, что и форма самого узла в Global Constraints спеки). Прочие
+    # профили (например, fixture `mini.yaml` в интеграционном тесте шва CLI
+    # ниже по файлу — design туда сознательно не входит) не затрагиваются.
+    # Стоит ДО цикла рёбер ниже — иначе отсутствующий design молча читался
+    # бы как «нечего проверять по рёбрам» вместо явной находки.
+    design_required = state.profile == "profiles/team-exp.yaml"
+    design_path = Path(state.target_dir) / state.bundle_dir / "20-design.md"
+    if design_required and not design_path.exists():
+        (run_dir(state.run_id) / "gate-findings.txt").write_text(
+            "error GC-COMPLETENESS(design): required-узел design "
+            "отсутствует в бандле (20-design.md)\n",
+            encoding="utf-8",
+        )
+        state.status = "stopped_gate"
+        save(state)
+        return False
     # Гарды GC-UNPINNED/GC-STALE(prospective) поверх CLI (приёмка PR #101,
     # оба круга major): stale-каскад gate-check исполняется только на
     # status: approved артефактах, поэтому DRAFT-узел с объявленным ребром
@@ -799,6 +820,8 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     for fname, upstream, upstream_fname in (
         ("10-requirements.md", "charter", "00-charter.md"),
         ("15-behaviour-spec.md", "requirements", "10-requirements.md"),
+        ("20-design.md", "requirements", "10-requirements.md"),
+        ("20-design.md", "behaviour-spec", "15-behaviour-spec.md"),
     ):
         path = Path(state.target_dir) / state.bundle_dir / fname
         if not path.exists():
@@ -840,6 +863,11 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     for fname, pattern, label in (
         ("10-requirements.md", r"^#### FR-\d", "FR-требований"),
         ("15-behaviour-spec.md", r"^#### BEH-\d", "BEH-сценариев"),
+        (
+            "20-design.md",
+            r"^#### Q-\d+ · |^Открытых архитектурных вопросов нет",
+            "резолюций design",
+        ),
     ):
         path = Path(state.target_dir) / state.bundle_dir / fname
         if path.exists() and not re.search(
@@ -856,6 +884,28 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         state.status = "stopped_gate"
         save(state)
         return False
+    # Гард покрытия Q (спека Task 4): architects-вопросы requirements без
+    # резолюции в design — отдельная находка от UNPINNED/STALE/DSL-EMPTY
+    # выше. Оба файла проверяются на существование явно: design_path
+    # гарантирован гардом отсутствия только когда профиль несёт узел design
+    # (`design_required` выше) — профиль без него (мимо этого шва) сюда
+    # доходит с design_path отсутствующим, и читать его было бы TOCTOU.
+    req_path = Path(state.target_dir) / state.bundle_dir / "10-requirements.md"
+    if req_path.exists() and design_path.exists():
+        coverage = [
+            f"error GC-DESIGN-COVERAGE: {finding}"
+            for finding in design_guard.coverage_findings(
+                req_path.read_text(encoding="utf-8"),
+                design_path.read_text(encoding="utf-8"),
+            )
+        ]
+        if coverage:
+            (run_dir(state.run_id) / "gate-findings.txt").write_text(
+                "\n".join(coverage) + "\n", encoding="utf-8"
+            )
+            state.status = "stopped_gate"
+            save(state)
+            return False
     op_complete(state, key, exit=rc)
     return True
 
