@@ -2879,6 +2879,29 @@ def test_gate_design_undeclared_behaviour_edge_stops(
     assert "push" not in state.ops
 
 
+def test_gate_edges_derived_from_bundle_dag() -> None:
+    """MINOR-3: `runner._GATE_EDGES` не расходится с `task_bridge._BUNDLE_DAG`
+    — рёбра S4 выводятся из ОДНОГО источника (не трёх несинхронизированных
+    копий: этот кортеж, `_BUNDLE_DAG`, `profiles/team-exp.yaml`).
+    node-id ↔ имя файла — через `task_bridge._node_id`; required — те
+    рёбра, чей target-узел design (MAJOR-1)."""
+    filename_by_node_id = {
+        task_bridge._node_id(fname): fname
+        for fname, _upstreams in task_bridge._BUNDLE_DAG
+    }
+    expected = tuple(
+        (
+            fname,
+            upstream,
+            filename_by_node_id[upstream],
+            task_bridge._node_id(fname) == "design",
+        )
+        for fname, upstreams in task_bridge._BUNDLE_DAG
+        for upstream in upstreams
+    )
+    assert runner._GATE_EDGES == expected
+
+
 def _design_stale_ops(stale_edge: str) -> type:
     """Фабрика Ops-подкласса: design запинован верно ВЕЗДЕ, кроме
     `stale_edge` — там пин синтаксически валиден (40 hex), но неверен

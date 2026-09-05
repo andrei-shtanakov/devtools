@@ -64,6 +64,22 @@ _AUTHOR_STEPS = (
 # для раннера И `governance.task_bridge`, не приватный кросс-импорт между
 # двумя модулями.
 
+# Рёбра S4 prospective-гарда GC-UNPINNED/GC-STALE (`_step_gate`) — MINOR-3
+# финального ревью: раньше жили ТРЕМЯ несинхронизированными копиями (этот
+# инлайн-кортеж, `task_bridge._BUNDLE_DAG`, `profiles/team-exp.yaml`),
+# вынесены в модульную константу здесь; тест согласованности
+# (`test_gate_edges_derived_from_bundle_dag`) выводит те же рёбра из
+# `task_bridge._BUNDLE_DAG` и ловит расхождение. 4-й элемент — `required`:
+# True для обоих рёбер design (MAJOR-1) — необъявленное ребро стопит S4
+# находкой, а не тихо пропускается; остальные рёбра остаются
+# необязательными (их traces_to не входит в prospective-контракт гарда).
+_GATE_EDGES: tuple[tuple[str, str, str, bool], ...] = (
+    ("10-requirements.md", "charter", "00-charter.md", False),
+    ("15-behaviour-spec.md", "requirements", "10-requirements.md", False),
+    ("20-design.md", "requirements", "10-requirements.md", True),
+    ("20-design.md", "behaviour-spec", "15-behaviour-spec.md", True),
+)
+
 
 def _reserve_run_id(run_id: str) -> None:
     """Атомарно резервирует `run_id`, отказывая на занятом (круг 4/7).
@@ -859,12 +875,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # worktree; первый прогон WS-kapelle-47 встал именно на GC-UNPINNED).
     # Всё stdlib-ом (blob_sha1 — свой), runner остаётся без импорта steward.
     local_findings: list[str] = []
-    for fname, upstream, upstream_fname, required in (
-        ("10-requirements.md", "charter", "00-charter.md", False),
-        ("15-behaviour-spec.md", "requirements", "10-requirements.md", False),
-        ("20-design.md", "requirements", "10-requirements.md", True),
-        ("20-design.md", "behaviour-spec", "15-behaviour-spec.md", True),
-    ):
+    for fname, upstream, upstream_fname, required in _GATE_EDGES:
         path = Path(state.target_dir) / state.bundle_dir / fname
         if not path.exists():
             continue
