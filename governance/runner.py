@@ -57,6 +57,7 @@ _AUTHOR_STEPS = (
     ("author-requirements", "requirements", "10-requirements.md"),
     ("author-behaviour", "behaviour-spec", "15-behaviour-spec.md"),
     ("author-design", "design", "20-design.md"),
+    ("author-decomposition", "decomposition", "30-decomposition.md"),
 )
 
 # `target_profile_declares`/`PREFLIGHT_PROCEDURE_HINT` — в
@@ -710,20 +711,22 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     артефактов.
 
     Preflight (Task 8; хардкод имени профиля снят фикс-раундом ревью) — ДО
-    фактического авторинга узла `design`: решение «авторить ли design»
+    фактического авторинга узлов `design`/`decomposition` (Task 5 обобщила
+    одиночную проверку на кортеж узлов): решение «авторить ли узел»
     data-driven для ЛЮБОГО профиля, не только `profiles/team-exp.yaml` —
-    `target_profile_declares(state.target_dir, state.profile, "design")`
-    читает ФАКТИЧЕСКОЕ содержимое target-профиля. True ⇒ авторим как
-    обычно; False ⇒ `stopped_preflight` с той же rollout-процедурой — ни
-    молчаливого авторинга (старая копия team-exp.yaml у соседнего репо, Task
-    8), ни молчаливого скипа (профиль, у которого design нет вовсе).
-    Конвейер СЕЙЧАС не поддерживает профили «сознательно без design» —
-    для него отсутствие узла в target-профиле всегда останов, не тихий
-    skip; такой профиль либо доставляет обновлённый файл (rollout), либо
-    вообще не идёт через этот раннер. Проверка стоит ПЕРЕД циклом (план
-    Task 8 Step 2: «вызов в start (до S2)»; minor PR-ревью #145 —
-    проверка на итерации design оставляла три оплаченных вызова
-    авторинга и три файла в worktree до останова).
+    `target_profile_declares(state.target_dir, state.profile, node)`
+    читает ФАКТИЧЕСКОЕ содержимое target-профиля. Декларирует оба узла ⇒
+    авторим как обычно; не декларирует хотя бы один ⇒ `stopped_preflight`
+    с той же rollout-процедурой — ни молчаливого авторинга (старая копия
+    team-exp.yaml у соседнего репо, Task 8), ни молчаливого скипа (профиль,
+    у которого узла нет вовсе). Конвейер СЕЙЧАС не поддерживает профили
+    «сознательно без design/decomposition» — для него отсутствие узла в
+    target-профиле всегда останов, не тихий skip; такой профиль либо
+    доставляет обновлённый файл (rollout), либо вообще не идёт через этот
+    раннер. Проверка стоит ПЕРЕД циклом (план Task 8 Step 2: «вызов в
+    start (до S2)»; minor PR-ревью #145 — проверка на итерации design
+    оставляла три оплаченных вызова авторинга и три файла в worktree до
+    останова).
     Преflight охраняет ПРЕДСТОЯЩИЙ авторинг: когда все author-шаги уже
     завершены (resume после S2, вручную собранный бандл), проверять
     нечего — несоответствие профиля поймает S4 (`gate-check --candidate`).
@@ -731,16 +734,19 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     authoring_pending = any(
         op_status(state, key) != "completed" for key, _, _ in _AUTHOR_STEPS
     )
-    if authoring_pending and not target_profile_declares(
-        state.target_dir, state.profile, "design"
-    ):
-        print(
-            f"_step_authoring: {state.target_dir}/{state.profile} не "
-            f"декларирует узел 'design' — {PREFLIGHT_PROCEDURE_HINT}"
-        )
-        state.status = "stopped_preflight"
-        save(state)
-        return False
+    if authoring_pending:
+        for node in ("design", "decomposition"):
+            if not target_profile_declares(
+                state.target_dir, state.profile, node
+            ):
+                print(
+                    f"_step_authoring: {state.target_dir}/{state.profile} "
+                    f"не декларирует узел {node!r} — "
+                    f"{PREFLIGHT_PROCEDURE_HINT}"
+                )
+                state.status = "stopped_preflight"
+                save(state)
+                return False
     for key, kind, filename in _AUTHOR_STEPS:
         if op_status(state, key) == "completed":
             continue

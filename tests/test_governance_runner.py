@@ -40,6 +40,14 @@ _DEFAULT_BEHAVIOUR_BODY = (
 )
 
 
+def test_author_steps_include_decomposition_after_design() -> None:
+    keys = [k for k, _, _ in runner._AUTHOR_STEPS]
+    assert keys.index("author-design") < keys.index("author-decomposition")
+    assert runner._AUTHOR_STEPS[-1] == (
+        "author-decomposition", "decomposition", "30-decomposition.md",
+    )
+
+
 @dataclass
 class FakeOps:
     """Ops-сценарий для тестов runner'а: журнал вызовов + управляемый исход."""
@@ -153,6 +161,7 @@ class FakeOps:
             "requirements": "10-requirements.md",
             "behaviour-spec": "15-behaviour-spec.md",
             "design": "20-design.md",
+            "decomposition": "30-decomposition.md",
         }[kind]
         path = Path(target_dir) / bundle_dir / filename
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -189,6 +198,44 @@ class FakeOps:
                 f'  behaviour-spec: "{beh_pin}"\n'
                 "---\n"
                 "Открытых архитектурных вопросов нет (входной набор пуст)\n",
+                encoding="utf-8",
+            )
+            return 0
+        if kind == "decomposition":
+            # decomposition пинует design по его ФАКТИЧЕСКОМУ содержимому
+            # worktree на момент авторинга (_AUTHOR_STEPS гонит
+            # decomposition последним, после design) — тот же паттерн,
+            # что design использует для requirements/behaviour-spec выше.
+            # DT-01 покрывает BEH-01 из `_DEFAULT_BEHAVIOUR_BODY` — S4-гарды
+            # decomposition (GC-COMPLETENESS/рёбра/DSL-empty, Task 6) ещё не
+            # заведены в этой задаче, но фикстура готовится валидной наперёд.
+            bundle = Path(target_dir) / bundle_dir
+            design_path = bundle / "20-design.md"
+            design_text = (
+                design_path.read_text(encoding="utf-8")
+                if design_path.exists()
+                else ""
+            )
+            design_pin = blob_sha1(design_text)
+            path.write_text(
+                "---\n"
+                "spec_stage: decomposition\n"
+                "status: draft\n"
+                "owner_role: tech-lead\n"
+                "traces_to: [design]\n"
+                "upstream_hashes:\n"
+                f'  design: "{design_pin}"\n'
+                "---\n"
+                "## Задачи\n\n"
+                "#### DT-01: x · type: implement · owner: dev\n"
+                "scenarios: [BEH-01]\n"
+                "depends_on: []\n"
+                "parallel_group: solo\n"
+                "Проза предмета.\n\n"
+                "## Инварианты графа\n\nСоблюдены.\n\n"
+                "## Порядок и параллельность\n\n"
+                "DT-01 — единственная задача, зависимостей нет.\n\n"
+                "## Вне объёма\n\nНичего не исключено.\n",
                 encoding="utf-8",
             )
             return 0
@@ -264,9 +311,10 @@ def runs_root(tmp_path: Path, monkeypatch):
 
 
 # Task 8 (preflight): `_step_authoring` читает РЕАЛЬНЫЙ файл профиля в
-# target_dir перед авторингом узла design — devtools-канонический
-# profiles/team-exp.yaml (4 узла: charter/requirements/behaviour-spec/
-# design), тот же, что реально несёт этот репо в проде.
+# target_dir перед авторингом узлов design/decomposition — devtools-
+# канонический profiles/team-exp.yaml (5 узлов: charter/requirements/
+# behaviour-spec/design/decomposition, Task 1), тот же, что реально несёт
+# этот репо в проде.
 _TEAM_EXP_PROFILE_TEXT = (
     Path(__file__).resolve().parent.parent / "profiles" / "team-exp.yaml"
 ).read_text(encoding="utf-8")
@@ -444,6 +492,9 @@ def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> 
         "# behaviour\n", encoding="utf-8"
     )
     (bundle_dir / "20-design.md").write_text("# design\n", encoding="utf-8")
+    (bundle_dir / "30-decomposition.md").write_text(
+        "# decomposition\n", encoding="utf-8"
+    )
 
     state = runner.start(**kwargs)
 
@@ -452,6 +503,7 @@ def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> 
     assert state.ops["author-requirements"]["skipped"] is True
     assert state.ops["author-behaviour"]["skipped"] is True
     assert state.ops["author-design"]["skipped"] is True
+    assert state.ops["author-decomposition"]["skipped"] is True
 
 
 def test_facts_from_fail_closed() -> None:
@@ -1513,20 +1565,21 @@ def test_gate_seam_required_absent_blocks_without_mock(
             "author-charter": {"status": "completed", "skipped": True},
             "author-requirements": {"status": "completed", "skipped": True},
             "author-behaviour": {"status": "completed", "skipped": True},
-            # mini.yaml (fixture-профиль этого теста) не несёт узел design —
-            # шаг обязан быть завершён-пропущенным явно в фикстуре: этот
-            # тест конструирует state вручную и зовёт advance() напрямую
-            # (минуя _step_authoring целиком), а не через start(), поэтому
-            # preflight design-узла (Task 8 + фикс-раунд ревью,
-            # `governance.policy_sources.target_profile_declares`) сюда
-            # вовсе не попадает — вызывать его нечем без реального
+            # mini.yaml (fixture-профиль этого теста) не несёт узлы design/
+            # decomposition — оба шага обязаны быть завершены-пропущены явно
+            # в фикстуре: этот тест конструирует state вручную и зовёт
+            # advance() напрямую (минуя _step_authoring целиком), а не через
+            # start(), поэтому preflight design/decomposition-узлов (Task 8
+            # + Task 5, `governance.policy_sources.target_profile_declares`)
+            # сюда вовсе не попадает — вызывать его нечем без реального
             # profiles/mini.yaml-файла в target_dir. Цель теста — S4
-            # (реальный `gate-check --candidate`), не S2/preflight; когда
-            # бы шаг остался НЕзавершённым, `_step_authoring` либо
-            # авторил бы 20-design.md (до фикс-раунда), либо теперь
-            # стопил бы `stopped_preflight` (после) — оба исхода мимо
-            # сценария этого теста, поэтому шаг пропущен явно.
+            # (реальный `gate-check --candidate`), не S2/preflight; когда бы
+            # шаг остался НЕзавершённым, `_step_authoring` либо авторил бы
+            # узел (до фикс-раунда), либо теперь стопил бы
+            # `stopped_preflight` (после) — оба исхода мимо сценария этого
+            # теста, поэтому оба шага пропущены явно.
             "author-design": {"status": "completed", "skipped": True},
+            "author-decomposition": {"status": "completed", "skipped": True},
             "commit": {"status": "completed"},
         }
         rs.save(state)
@@ -2185,13 +2238,15 @@ def test_stop_review_comment_survives_head_sha_failure(
 def test_default_author_backend_is_codex_author_disp_not_called(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    """Дефолт `author_backend="codex"` не меняет поведение B1: все три узла
+    """Дефолт `author_backend="codex"` не меняет поведение B1: все узлы
     идут через `ops.author`, `ops.author_disp` не вызывается вовсе."""
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
     state = runner.start(**_start_kwargs(tmp_path, "r-disp-default", ops))
 
-    assert ops.authored == ["charter", "requirements", "behaviour-spec", "design"]
+    assert ops.authored == [
+        "charter", "requirements", "behaviour-spec", "design", "decomposition",
+    ]
     assert ops.author_disp_calls == []
     assert state.author_backend == "codex"
 
@@ -2209,7 +2264,7 @@ def test_disp_backend_used_only_for_behaviour_node(
         tmp_path, run_id, ops, author_backend="disp",
     ))
 
-    assert ops.authored == ["charter", "requirements", "design"]
+    assert ops.authored == ["charter", "requirements", "design", "decomposition"]
     assert len(ops.author_disp_calls) == 1
     target_dir, task = ops.author_disp_calls[0]
     assert target_dir == str(tmp_path / f"target-{run_id}")
@@ -3181,6 +3236,40 @@ def _write_stale_profile(target_dir: Path) -> Path:
     return profile_path
 
 
+# 4-узловая копия profiles/team-exp.yaml (charter..design), БЕЗ decomposition
+# — как несут соседние репо до раскатки decomposition-узла (Task 5).
+_FOUR_NODE_TEAM_EXP_PROFILE = """\
+profile: team-exp
+solo_auto_approve: true
+artifacts:
+  - {id: charter, template: charter.md, owner_role: product, upstream: []}
+  - id: requirements
+    template: requirements.md
+    owner_role: product
+    upstream: [charter]
+  - id: behaviour-spec
+    template: behaviour-spec.md
+    owner_role: product
+    upstream: [requirements]
+  - {id: design, template: design.md, owner_role: architects,
+     upstream: [requirements, behaviour-spec]}
+  - id: tasks
+    owner_role: stream-owner
+    upstream: [design]
+    delegate: spec-runner
+"""
+
+
+def _write_four_node_profile(target_dir: Path) -> Path:
+    """Копия `_write_stale_profile` с узлом design, но БЕЗ decomposition —
+    состояние соседних репо до раскатки decomposition-узла (Task 5,
+    preflight обязан охранять оба узла)."""
+    profile_path = target_dir / "profiles" / "team-exp.yaml"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(_FOUR_NODE_TEAM_EXP_PROFILE, encoding="utf-8")
+    return profile_path
+
+
 def test_start_stops_preflight_when_target_profile_lacks_design(
     tmp_path: Path, runs_root,
 ) -> None:
@@ -3203,11 +3292,27 @@ def test_start_stops_preflight_when_target_profile_lacks_design(
     assert "push" not in state.ops
 
 
-def test_start_preflight_silent_on_four_node_profile(
+def test_start_stops_preflight_when_target_profile_lacks_decomposition(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    """Step 1(б): target с актуальным 4-узловым профилем (материализован
-    `_start_kwargs`) ⇒ preflight молчит, прогон доходит до мержа как
+    """target с 4-узловым профилем (design есть, decomposition нет) ⇒
+    stopped_preflight ДО единого вызова авторинга."""
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    kwargs = _start_kwargs(tmp_path, "r-preflight-no-decomp", ops)
+    _write_four_node_profile(Path(kwargs["target_dir"]))  # хелпер: профиль
+    # спеки 1 (charter..design) БЕЗ узла decomposition
+
+    state = runner.start(**kwargs)
+
+    assert state.status == "stopped_preflight"
+    assert ops.authored == []
+
+
+def test_start_preflight_silent_on_five_node_profile(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Step 1(б): target с актуальным 5-узловым профилем (материализован
+    `_start_kwargs`, T1) ⇒ preflight молчит, прогон доходит до мержа как
     прежде — регрессия отсутствует."""
     monkeypatch.setattr(
         runner, "load_safety",
@@ -3407,14 +3512,16 @@ def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root) -> None:
 
     state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
 
-    # S2: все четыре author-шага прошли РОВНО в этом порядке.
-    assert ops.authored == ["charter", "requirements", "behaviour-spec", "design"]
+    # S2: все пять author-шагов прошли РОВНО в этом порядке.
+    assert ops.authored == [
+        "charter", "requirements", "behaviour-spec", "design", "decomposition",
+    ]
     assert state.ops["author-design"]["status"] == "completed"
     assert state.ops["author-design"]["skipped"] is False
     bundle_dir = Path(state.target_dir) / state.bundle_dir
     assert (bundle_dir / "20-design.md").exists()
 
-    # S4: гейт зелёный на полном 4-узловом бандле (валидные пины + покрытый
+    # S4: гейт зелёный на полном 5-узловом бандле (валидные пины + покрытый
     # architects-Q) — прогон дошёл до мержа, не остановился на gate/review.
     assert state.status == "completed"
     assert state.ops["merge"]["status"] == "completed"
