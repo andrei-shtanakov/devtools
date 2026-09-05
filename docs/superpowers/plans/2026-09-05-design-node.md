@@ -146,7 +146,12 @@ def test_requirements_dsl_declares_q_grammar():
 **Files:**
 - Modify: `governance/runner.py:49` (`_AUTHOR_STEPS`),
   `governance/console_model.py:19` (`PIPELINE_KEYS`)
-- Test: `tests/test_governance_console_model.py` (+ сверка списков)
+- Test: `tests/test_governance_console_model.py` (+ сверка списков;
+  жёстко выписанный порядок PIPELINE_KEYS в существующем тесте ~:98
+  обновить), `tests/test_governance_runner.py` — ФИКСТУРЫ: закрытые
+  dict'ы `FakeOps.author` (имена и тела файлов) получают ветку
+  `design` с каноническим 20-design.md, иначе все S2-тесты падают
+  KeyError — чинится В ЭТОЙ задаче, не в catch-all
 
 **Interfaces:**
 - Produces: шаг `author-design` между `author-behaviour` и `commit` в
@@ -350,16 +355,25 @@ def test_bundle_state_requires_design():
   `conform_approved` И `deliver_conform` (conform-пути без параметра
   молча нормализовали бы легаси-спеку к design); CLI `--legacy-bundle`
   в argparse `task_bridge.main` прокидывается в оба режима (deliver и
-  --conform-approve). Проверка существования `20-design.md` выполняется
-  ДО `ensure_branch`/любых git-эффектов (первый гард `deliver`, рядом с
-  clean-tree): нет файла и не legacy ⇒ RuntimeError с процедурой —
-  ветка НЕ создаётся; legacy ⇒ DAG усечён до первых трёх узлов, якорь
-  tasks — behaviour-spec (во всех четырёх входах одинаково).
-- [ ] **Step 3b: тесты conform-путей:** `conform_approved(...,
-  legacy_bundle=True)` нормализует к behaviour-spec и не читает
-  20-design.md; без флага на легаси-бандле ⇒ тот же RuntimeError;
-  `deliver` на бандле без 20-design.md падает ДО создания ветки
-  (ассерт: ветка отсутствует в `git branch`).
+  --conform-approve). ПОЗИЦИЯ гарда существования `20-design.md` —
+  ровно там же, где существующий гард 15-behaviour-spec.md: ПОСЛЕ
+  `ops.checkout_and_pull` (инвариант приёмки PR #96: бандл читается
+  только после чекаута базы — до него дерево может стоять на
+  произвольной ветке и гард судил бы невмерженную ревизию), ДО
+  `ops.ensure_branch` — «ветка не создаётся» этим уже удовлетворено.
+  Нет файла и не legacy ⇒ RuntimeError с процедурой; legacy ⇒ DAG
+  усечён до первых трёх узлов, якорь tasks — behaviour-spec (во всех
+  четырёх входах одинаково).
+- [ ] **Step 3b: тесты conform-путей и ПОЗИЦИИ гарда:**
+  `conform_approved(..., legacy_bundle=True)` нормализует к
+  behaviour-spec и не читает 20-design.md; без флага на легаси-бандле ⇒
+  тот же RuntimeError; `deliver` на бандле без 20-design.md падает ДО
+  создания ветки (ассерт: ветка отсутствует в `git branch`).
+  РАЗЛИЧАЮЩИЙ тест позиции (по образцу
+  `test_deliver_reads_bundle_only_after_base_checkout`): фикстура, у
+  которой 20-design.md ПОЯВЛЯЕТСЯ только внутри
+  `checkout_and_pull` ⇒ гард обязан его увидеть и НЕ падать —
+  пре-чекаутная позиция этим тестом краснеет.
 - [ ] **Step 4: PASS; ruff; полный набор тестов devtools; commit**
   `feat(task_bridge): переходный режим --legacy-bundle`
 
@@ -371,19 +385,32 @@ def test_bundle_state_requires_design():
 
 **Files:**
 - Modify: `governance/runner.py` (`start`/`resume`: preflight профиля до
-  S2), `governance/task_bridge.py` (`deliver`: тот же preflight)
-- Test: `tests/test_governance_runner.py`
+  S2; `_STOPPED_RESET_OPS`), `governance/task_bridge.py` (`deliver`)
+- Test: `tests/test_governance_runner.py` — включая ФИКСТУРУ
+  `_start_kwargs`: target_dir получает материализованный 4-узловой
+  `profiles/team-exp.yaml` (+roles.yaml при необходимости), иначе
+  preflight остановит ВСЕ существующие start-тесты — чинится в этой
+  задаче
 
 - [ ] **Step 1: тесты:** (а) target с профилем БЕЗ узла design ⇒
   `start` останавливается ДО авторинга со статусом `stopped_preflight`
-  и сообщением-процедурой («доставьте обновлённый profiles/team-exp.yaml
-  в target PR-ом; profiles/ — authority-root, мерж человеком»);
+  и сообщением-процедурой («доставьте обновлённый профиль в target
+  PR-ом; profiles/ — authority-root, мерж человеком»);
   (б) target с 4-узловым профилем ⇒ preflight молчит; (в) `deliver` с
-  тем же расхождением ⇒ RuntimeError с той же процедурой.
+  тем же расхождением ⇒ RuntimeError с той же процедурой;
+  (г) resume-реконсиляция: после «доставки» профиля (фикстура дописывает
+  узел design в target-профиль) `resume(run_id)` ПРОДОЛЖАЕТ прогон —
+  `stopped_preflight` обязан попасть в `_STOPPED_RESET_OPS` (кортеж
+  пустой, по образцу `stopped_dirty`), иначе resume — тихий no-op
+  (инвариант runner.py: из любого stopped_* — reconciliation).
 - [ ] **Step 2: FAIL; реализация:** функция
-  `_target_profile_declares(target_dir, node_id) -> bool` (yaml-парс
-  профиля target; отсутствие файла/узла ⇒ False, ошибка чтения ⇒
-  fail-closed False с текстом); вызов в `start` (до S2) и в `deliver`.
+  `_target_profile_declares(target_dir, profile, node_id) -> bool` —
+  читает РОВНО тот профиль, который получит `gate_check_candidate`
+  (`state.profile` в runner, `profile`-аргумент в `deliver`), а не
+  захардкоженный team-exp.yaml (CLI разрешает `--profile`); отсутствие
+  файла/узла ⇒ False, ошибка чтения ⇒ fail-closed False с текстом.
+  Вызов в `start` (до S2), в `resume` (реконсиляция stopped_preflight)
+  и в `deliver`. `_STOPPED_RESET_OPS["stopped_preflight"] = ()`.
 - [ ] **Step 3: PASS; commit** `feat(runner): preflight профиля target
   — design-узел обязателен`
 - [ ] **Step 4 (процедура, не код):** rollout-раскатка обновлённого
