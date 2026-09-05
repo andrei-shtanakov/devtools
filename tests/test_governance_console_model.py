@@ -178,6 +178,14 @@ def test_pipeline_keys_cover_every_author_step_in_order() -> None:
         "PIPELINE_KEYS и runner._AUTHOR_STEPS разошлись — консоль покажет "
         "неверный текущий шаг (FR-04)"
     )
+    # LOW-2 финального ревью: односторонняя проверка выше не ловит author-шаг,
+    # ошибочно вставленный ПОСЛЕ `commit` (порядок совпал бы по составу, но
+    # консоль показывала бы «ещё авторится» уже после коммита) — последний
+    # author-шаг обязан идти строго до `commit`.
+    assert (
+        cm.PIPELINE_KEYS.index(author_keys[-1])
+        < cm.PIPELINE_KEYS.index("commit")
+    )
 
 
 def test_step_stopped_author_on_author_design(runs_root) -> None:
