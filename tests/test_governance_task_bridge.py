@@ -1022,3 +1022,17 @@ status: draft
     )
     assert "### TASK-001: Файл A (+3 смежных BEH)" in text
     assert "### TASK-002:" not in text
+
+
+def test_render_deferred_without_reason_has_no_python_none() -> None:
+    """Minor PR-ревью #145: deferred без reason: не рендерит литерал
+    «None» в человеко-читаемую tasks-спеку (легаси/ручные бандлы, где S4
+    не стоял на пути)."""
+    from governance.task_bridge import _render_resolutions_section
+
+    lines = _render_resolutions_section(
+        "#### Q-07 · owner_role: architects · resolution: deferred\n"
+    )
+    joined = "\n".join(lines)
+    assert "None" not in joined
+    assert "Q-07" in joined and "не указана" in joined

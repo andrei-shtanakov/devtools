@@ -116,3 +116,44 @@ def test_product_question_not_in_input_set() -> None:
     ok = "Открытых архитектурных вопросов нет (входной набор пуст)\n"
     assert coverage_findings(req, ok) == []
     assert not any("Q-05" in f for f in coverage_findings(req, "## Механика\n"))
+
+
+# --- закалка по minor'ам PR-ревью #145 -----------------------------------
+
+
+def test_deferred_without_reason_outside_input_set_is_a_finding() -> None:
+    """Q, объявленный только в design (входной набор architects пуст),
+    с deferred без reason: — находка, а не тихий провал в рендер
+    «reason: None»."""
+    req = "- **Q-05 · owner_role: product · blocking: false.** Продукт.\n"
+    design = (
+        "Открытых архитектурных вопросов нет (входной набор пуст)\n\n"
+        "#### Q-07 · owner_role: architects · resolution: deferred\n"
+    )
+    assert any(
+        "Q-07" in f and "reason" in f for f in coverage_findings(req, design)
+    )
+
+
+def test_duplicate_design_q_blocks_are_a_finding() -> None:
+    """Дубль #### Q-NN не схлопывается молча «последний побеждает» —
+    спека §4: каждый вопрос присутствует ровно один раз."""
+    dup = (
+        "#### Q-03 · owner_role: architects · resolution: deferred\n\n"
+        "#### Q-03 · owner_role: architects · resolution: resolved\nтекст\n"
+    )
+    assert any(
+        "Q-03" in f and "раза" in f for f in coverage_findings(REQ, dup)
+    )
+
+
+def test_near_miss_requirements_bullet_is_a_finding() -> None:
+    """Буллет, похожий на Q, но мимо строгой грамматики (нет точки перед
+    закрывающими звёздочками), — находка о недостоверном входном
+    множестве, а не тихое исключение вопроса из набора."""
+    req = (
+        "- **Q-03 · owner_role: architects · blocking: false.** Как?\n"
+        "- **Q-04 · owner_role: architects · blocking: true** Чем шардировать?\n"
+    )
+    findings = coverage_findings(req, DSN_OK)
+    assert any("Q-04" in f and "грамматик" in f for f in findings)

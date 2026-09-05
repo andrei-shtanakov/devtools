@@ -112,24 +112,46 @@ def coverage_findings(req_text: str, design_text: str) -> list[str]:
         qid for qid, role in questions.items() if role == _ARCHITECTS_ROLE
     ]
 
-    if not architects_qs:
-        if re.search(rf"^{re.escape(_EMPTY_DECLARATION)}", design_text, re.M) is not None:
-            return []
-        message = (
-            "design: входной набор архитектурных вопросов пуст, но "
-            f"строка-декларация «{_EMPTY_DECLARATION}» отсутствует"
-        )
-        return [message]
-
     findings: list[str] = []
+
+    # Закалка по minor'ам PR-ревью #145 — три проверки формы, работающие
+    # НЕЗАВИСИМО от входного набора (иначе дефект гасится пустым/частично
+    # распознанным множеством):
+    # 1. near-miss буллет requirements: похож на Q, но мимо строгой
+    #    грамматики — входное множество недостоверно, молчать нельзя.
+    for miss in re.finditer(r"^-\s+\*\*(Q-\d+)", req_text, re.M):
+        qid = miss.group(1)
+        if qid not in questions:
+            findings.append(
+                f"{qid}: буллет не соответствует машинной грамматике Q — "
+                "входное множество недостоверно"
+            )
+    # 2. дубли #### Q-NN в design: спека §4 — каждый вопрос присутствует
+    #    ровно один раз; «последний побеждает» гасил бы противоречащую пару.
+    seen: dict[str, int] = {}
+    for match in _DESIGN_Q_RE.finditer(design_text):
+        seen[match.group(1)] = seen.get(match.group(1), 0) + 1
+    for qid, count in seen.items():
+        if count > 1:
+            findings.append(f"{qid}: объявлен {count} раза в design (ожидается ровно один)")
+    # 3. deferred без reason: — по ВСЕМ резолюциям design, включая Q вне
+    #    входного набора (иначе рендер получает justification None).
+    for qid, (state, reason) in resolutions.items():
+        if state == "deferred" and not reason:
+            findings.append(f"{qid}: resolution: deferred без строки reason:")
+
+    if not architects_qs:
+        if re.search(rf"^{re.escape(_EMPTY_DECLARATION)}", design_text, re.M) is None:
+            findings.append(
+                "design: входной набор архитектурных вопросов пуст, но "
+                f"строка-декларация «{_EMPTY_DECLARATION}» отсутствует"
+            )
+        return findings
+
     for qid in architects_qs:
         if qid not in resolutions:
             findings.append(
                 f"{qid}: не покрыт резолюцией в design "
                 "(owner_role: architects в requirements)"
             )
-            continue
-        state, reason = resolutions[qid]
-        if state == "deferred" and not reason:
-            findings.append(f"{qid}: resolution: deferred без строки reason:")
     return findings

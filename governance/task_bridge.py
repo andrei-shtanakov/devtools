@@ -277,7 +277,13 @@ def _render_resolutions_section(design_text: str) -> list[str]:
     lines = ["## Решения открытых вопросов (уровень design)", ""]
     for qid, (state, reason) in resolutions.items():
         if state == "deferred":
-            lines.append(f"- **{qid} (deferred):** reason: {reason}")
+            # None недостижим через конвейер (S4 ловит deferred без
+            # reason:), но deliver зовут и на легаси/ручных бандлах —
+            # литерал «None» в человеко-читаемом артефакте недопустим.
+            lines.append(
+                f"- **{qid} (deferred):** reason: "
+                f"{reason if reason else 'причина не указана'}"
+            )
         elif reason:
             lines.append(f"- **{qid}:** {reason}")
         else:
