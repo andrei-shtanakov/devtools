@@ -363,7 +363,9 @@ def _render_header(
         "owner_role: stream-owner",
         "version: 1",
         "generated_by: fleet-agent",
-        f"generated_at: {generated_at}",
+        # В кавычках: голый ISO-скаляр YAML резолвит в timestamp, а
+        # схема спеки ждёт строку (minor ревью PR spec-runner#369, круг 3)
+        f'generated_at: "{generated_at}"',
         'source_prompt_version: ""',
         'validation: ""',
         'approved_by: ""',
