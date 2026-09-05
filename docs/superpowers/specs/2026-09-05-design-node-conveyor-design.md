@@ -54,9 +54,10 @@ decomposition появится спекой 3 и тогда перехватит
 |---|---|
 | `profiles/team-exp.yaml` | +узел design (форма §2); `tasks.upstream: [design]`; комментарий-отступление обновить (acceptance/decomposition всё ещё срезаны намеренно) |
 | `governance/runner.py` | `_AUTHOR_STEPS` += `("author-design", "design", "20-design.md")` — после behaviour, до tasks-делегата; resume-семантика прежняя. Плюс НОВАЯ гейт-механика S4 (см. оговорку ниже): prospective-проверка ОБОИХ рёбер design → requirements и design → behaviour-spec; `GC-UNPINNED` и `GC-STALE` для КАЖДОГО из двух пинов; локальный гард содержимого design-узла (грамматика §4: покрытие Q, состояния, named-причины) |
-| `governance/ops.py` | `_AUTHOR_FILENAMES["design"] = "20-design.md"`; `_AUTHOR_DSL["design"]` — контракт содержимого (§4), включая канонический frontmatter (`spec_stage: design`, `owner_role: architects`, `traces_to: [requirements, behaviour-spec]`, `upstream_hashes` обоих апстримов) |
+| `governance/ops.py` | (а) `_AUTHOR_FILENAMES["design"] = "20-design.md"`; `_AUTHOR_DSL["design"]` — контракт содержимого (§4) с каноническим frontmatter (`spec_stage: design`, `owner_role: architects`, `traces_to: [requirements, behaviour-spec]`, оба `upstream_hashes`). (б) `_AUTHOR_DSL["requirements"]` ДОПОЛНЯЕТСЯ машинной грамматикой открытых вопросов — иначе у гарда покрытия §4 нет производителя входного множества и он вакуумно зелёный. Форма — та, которой боевые бандлы уже пишут (WS-spec-runner-341): `- **Q-NN · owner_role: <role> · blocking: true\|false.** <текст>`; входное множество design = все Q-* с `owner_role: architects` из 10-requirements.md, распарсенные этой грамматикой |
 | `governance/bundle_state.py` | правок не ожидается: required-узлы читаются из профиля, `required_absent` попадает в `candidate_state`. ЧЕСТНАЯ оговорка: единственный продакшн-читатель `candidate_state` — view-model консоли (`console_model.py`); S4 раннера после миграции на CLI читает только rc `gate_check_candidate` + локальные гарды. Поэтому отсутствие 20-design.md обязано ловиться ЛОКАЛЬНЫМ ГАРДОМ в `_step_gate` (тем же слоем, что GC-UNPINNED/GC-STALE), а не предполагаться «автоматическим» — либо характеризацией доказать, что steward CLI сам красит отсутствующий required-узел, и тогда гард не нужен |
 | `governance/task_bridge.py` | линейная `_BUNDLE_CHAIN` становится DAG-ом upstream'ов: `charter: []`, `requirements: [charter]`, `behaviour-spec: [requirements]`, `design: [requirements, behaviour-spec]`. Порядок штампа обязан быть топологическим: сначала изменяются upstream-файлы, ЗАТЕМ пересчитываются и записываются ОБА пина design — иначе пин design → requirements протухает немедленно после штампа requirements. Tasks-спека получает `traces_to: [design]` + `upstream_hashes.design`; секция «Решения открытых вопросов» **генерируется из 20-design.md**, а не пишется рукой (закрывает бонус devtools#123). ОТДЕЛЬНО: `conform_approved` сегодня принудительно возвращает tasks-спеку к `traces_to: [behaviour-spec]` — после approve она обязана СОХРАНЯТЬ `traces_to: [design]` и пин текущего 20-design.md |
+| `governance/console_model.py` | `PIPELINE_KEYS` += `author-design` — это ВТОРАЯ, захардкоженная копия порядка шагов, не выводимая из `runner._AUTHOR_STEPS`; без правки консоль покажет `commit` текущим шагом при стопе на авторинге design и не покажет op вовсе (нарушение FR-04 консоли). Плюс тест согласованности двух списков (§5) — чтобы следующие спеки серии не наступили на тот же шов |
 | `templates/` | не трогаем (шаблон стадии живёт в DSL промпта, как у трёх существующих узлов) |
 
 Аппрув — без новой механики (мерж бандл-PR, штамп
@@ -83,8 +84,11 @@ decomposition появится спекой 3 и тогда перехватит
    deferred ⇒ обязательная строка `reason: <named-причина>`
    ```
 
-   Гард сверяет множество Q-* в 20-design.md с множеством Q-*,
-   переданных в design из requirements (`owner_role: architects`):
+   Входное множество производится грамматикой requirements (§3, правка
+   `_AUTHOR_DSL["requirements"]`): гард парсит 10-requirements.md той же
+   формой `Q-NN · owner_role: … · blocking: …` и берёт вопросы с
+   `owner_role: architects`. Гард сверяет множество Q-* в 20-design.md с
+   этим входным множеством:
    каждый входной вопрос обязан присутствовать ровно один раз в
    состоянии `resolved` либо `deferred`+reason. Если архитектурных Q
    нет — design обязан нести явную строку
@@ -104,6 +108,20 @@ decomposition появится спекой 3 и тогда перехватит
 Запреты (в DSL явно): не переоткрывать продуктовые решения requirements;
 не расписывать код построчно (это работа исполнителя под TDD); не
 плодить новые Q-* без owner_role.
+
+### Переходный режим (бандлы и прогоны, рождённые до design-узла)
+
+В репо уже есть вмерженные 3-узловые бандлы (WS-SMOKE-001). Правила:
+
+- `stamp_bundle_approved`/`deliver` при отсутствующем `20-design.md` —
+  внятный fail-closed `RuntimeError` (как существующий для отсутствующего
+  behaviour-spec), называющий процедуру: доавторить design отдельным PR в
+  бандл и повторить, либо явный opt-in `--legacy-bundle` — штамп по
+  унаследованной 3-узловой цепочке (traces_to tasks остаётся
+  behaviour-spec). Никаких тихих пропусков узла.
+- resume прогона, начатого до узла, встающий на S4 по отсутствию design —
+  штатный стоп, лечится тем же доавторингом; миграция старых бандлов не
+  обязательна.
 
 ## 5. Тесты
 
@@ -127,6 +145,15 @@ decomposition появится спекой 3 и тогда перехватит
 - `conform_approved`: tasks-спека после approve сохраняет
   `traces_to: [design]` и актуальный пин 20-design.md (регрессия на
   сегодняшний принудительный откат к behaviour-spec).
+- Грамматика Q в requirements: `_AUTHOR_DSL["requirements"]` требует
+  машинную форму; парсер входного множества читает боевую форму
+  WS-spec-runner-341 (фикстура с Q architects/product — в множество
+  попадают только architects).
+- Согласованность `console_model.PIPELINE_KEYS` ↔ `runner._AUTHOR_STEPS`
+  (общий тест, ловящий и будущие узлы серии).
+- Переходный режим: штамп по бандлу без 20-design.md ⇒ внятный
+  RuntimeError с процедурой (не traceback); `--legacy-bundle` ⇒ штамп по
+  3-узловой цепочке.
 
 ## 6. Карта артефактов по этапам (сквозная, фиксация по требованию владельца)
 
