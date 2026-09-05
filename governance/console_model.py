@@ -22,6 +22,7 @@ PIPELINE_KEYS: tuple[str, ...] = (
     "author-requirements",
     "author-behaviour",
     "author-design",
+    "author-decomposition",
     "commit",
     "gate-candidate",
     "push",

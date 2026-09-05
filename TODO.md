@@ -1236,3 +1236,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       возвращает ли непустой `structured_output`. Если нет — вся половина (1)
       не строится, и вшитый codex у воркеров остаётся правильным ответом, а
       пункт закрывается с этим обоснованием, а не тихо.
+
+## Узел decomposition в профиле governance
+
+- [ ] verify-DT в decomposition-мосте включаются после доставки verify-first @id:decomposition-verify-first-unblock @owner:github:andrei-shtanakov @blocked_by:spec-runner#367

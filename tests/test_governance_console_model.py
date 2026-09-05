@@ -97,9 +97,9 @@ def test_run_detail_with_findings_and_verdict(runs_root) -> None:
     keys = [k for k, _ in detail.ops]
     assert keys == [
         "branch", "author-charter", "author-requirements", "author-behaviour",
-        "author-design", "commit", "gate-candidate", "push", "pr", "ready",
-        "review", "verdict", "merge", "sync-default", "gate-authoritative",
-        "remediation-issue",
+        "author-design", "author-decomposition", "commit", "gate-candidate",
+        "push", "pr", "ready", "review", "verdict", "merge", "sync-default",
+        "gate-authoritative", "remediation-issue",
     ]
     assert "GC-1: bad" in detail.findings
     assert "GC-2: also bad" in detail.findings

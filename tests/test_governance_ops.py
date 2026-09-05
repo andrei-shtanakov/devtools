@@ -780,3 +780,20 @@ def test_author_unknown_harness_is_config_error(monkeypatch, tmp_path, capsys):
     _install_fake_run(monkeypatch, returncode=0)
     assert RealOps().author("/t", "charter", "s", "ws/spec") == 2
     assert "gemini" in capsys.readouterr().out
+
+
+# --- Task 2: DSL авторинга decomposition -----------------------------------
+
+
+def test_author_dsl_covers_decomposition() -> None:
+    from governance.ops import _AUTHOR_DSL, _AUTHOR_FILENAMES
+
+    assert _AUTHOR_FILENAMES["decomposition"] == "30-decomposition.md"
+    dsl = _AUTHOR_DSL["decomposition"]
+    for token in (
+        "spec_stage: decomposition", "owner_role: tech-lead",
+        "traces_to: [design]", "#### DT-NN:", "type: implement|verify",
+        "scenarios:", "depends_on:", "delivered_by:", "parallel_group:",
+        "topological declaration order",
+    ):
+        assert token in dsl

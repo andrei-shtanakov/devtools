@@ -180,6 +180,7 @@ _AUTHOR_FILENAMES = {
     "requirements": "10-requirements.md",
     "behaviour-spec": "15-behaviour-spec.md",
     "design": "20-design.md",
+    "decomposition": "30-decomposition.md",
 }
 _AUTHOR_DSL = {
     "charter": (
@@ -241,6 +242,39 @@ _AUTHOR_DSL = {
         "already made in requirements; do not write line-by-line code "
         "(that is the implementer's job under TDD); do not create new "
         "Q-* without owner_role."
+    ),
+    "decomposition": (
+        "YAML frontmatter (required): spec_stage: decomposition, "
+        "status: draft, owner_role: tech-lead, traces_to: [design], "
+        "upstream_hashes: {design: \"<hash20>\"} where <hash20> is the "
+        "output of `git hash-object <bundle_dir>/20-design.md`. "
+        "The document MUST contain these sections: Задачи, Инварианты "
+        "графа, Порядок и параллельность, Вне объёма. Задачи: every task "
+        "is a heading exactly `#### DT-NN: <title> · type: "
+        "implement|verify · owner: <role>` followed by metadata lines "
+        "`scenarios: [BEH-…]` (>=1, BEH ids from 15-behaviour-spec.md), "
+        "`depends_on: [DT-…]` (may be empty list; these edges are the "
+        "single source of truth for EXECUTION ordering, and every DT "
+        "MUST be declared in the document AFTER all DTs it depends_on — "
+        "topological declaration order), `delivered_by: [DT-…]` "
+        "(REQUIRED for type: verify, FORBIDDEN for type: implement), "
+        "`parallel_group: <name|solo>`, then a prose paragraph (subject, "
+        "boundaries). Every BEH-* of the bundle MUST be covered by "
+        "exactly one DT (no gaps, no duplicates). delivered_by MUST be a "
+        "subset of the transitive closure of depends_on. checked_by "
+        "target files of different DTs MUST NOT intersect (single owner "
+        "per test file). The graph MUST be acyclic; do NOT add an "
+        "artificial linear chain — only real dependencies. Only a task "
+        "that depends on members of TWO OR MORE other parallel_groups "
+        "(it merges them) MUST depend on ALL sink tasks of EACH such "
+        "group; a point edge into a single foreign group is legitimate "
+        "and requires no extra edges. Порядок и параллельность: which groups may "
+        "run concurrently (operator documentation). Вне объёма: what is "
+        "deliberately not decomposed. Forbidden: do not invent BEH ids; "
+        "do not reopen design decisions; do not write implementation "
+        "code. Until spec-runner#367 (verify-first) is delivered, do NOT "
+        "create tasks with type: verify — the bridge will refuse them "
+        "fail-closed."
     ),
 }
 
