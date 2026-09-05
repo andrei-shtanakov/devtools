@@ -153,7 +153,7 @@ def test_render_tasks_structure() -> None:
     assert "spec_stage: tasks" in text
     assert "status: draft" in text
     assert "generated_by: fleet-agent" in text
-    assert "generated_at: 2026-08-31T12:00:00" in text
+    assert 'generated_at: "2026-08-31T12:00:00"' in text
     assert "## Milestone 1: Наблюдаемость (alpha#7)" in text
     assert "### TASK-001: Просмотр списка" in text
     assert "### TASK-002: Пустое состояние" in text
