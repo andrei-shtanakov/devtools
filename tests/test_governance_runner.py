@@ -3890,3 +3890,272 @@ def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root) -> None:
     ).read_text()
     assert "GC-DT-GRAPH" in findings and "BEH-02" in findings
     assert "push" not in state.ops
+
+
+# --- Task 9: сквозной смоук decomposition-узла + deliver ---------------------
+
+
+_DT_SMOKE_BEHAVIOUR_SCENARIOS = (
+    "#### BEH-01: Первый\n"
+    "`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: integration` `owner: qa` "
+    "`target: tests/test_a.py`\n\n"
+    "#### BEH-02: Второй\n"
+    "`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: e2e` `owner: qa` "
+    "`target: tests/test_b.py`\n"
+)
+
+# `FakeOps.author` (общий фикстур) пишет charter/requirements БЕЗ
+# frontmatter — ни один прежний тест этого не замечал, потому что ни один
+# не доходил до `task_bridge.deliver()`/`stamp_bundle_approved` после
+# runner-прогона: тот штампует ВЕСЬ DAG (devtools#110, урок 2 —
+# «после мержа charter/requirements/behaviour-spec остаются status:
+# draft»), а не только design/decomposition, и требует frontmatter на
+# КАЖДОМ узле. Локальный фикстур смоука ниже несёт реалистичное
+# содержимое charter/requirements (та же DSL-форма, что `governance/
+# ops.py::_AUTHOR_DSL["charter"|"requirements"]` требует от реального
+# author-бэкенда) — правка ограничена этим тестовым модулем, общий
+# `FakeOps.author` не тронут (используется ~сотней других тестов, не
+# упирающихся в deliver()).
+_DT_SMOKE_CHARTER_BODY = (
+    "---\n"
+    "spec_stage: charter\n"
+    "status: draft\n"
+    "owner_role: product\n"
+    "---\n"
+    "# Charter\n\nТекст charter.\n"
+)
+
+
+def _dt_smoke_requirements_body(charter_pin: str) -> str:
+    return (
+        "---\n"
+        "spec_stage: requirements\n"
+        "status: draft\n"
+        "owner_role: product\n"
+        "traces_to: [charter]\n"
+        "upstream_hashes:\n"
+        f'  charter: "{charter_pin}"\n'
+        "---\n"
+        "#### FR-01: x\n**Priority**: Must\n"
+    )
+
+
+def _dt_smoke_behaviour_body(requirements_pin: str, extra: str = "") -> str:
+    return (
+        "---\n"
+        "spec_stage: behaviour-spec\n"
+        "status: draft\n"
+        "owner_role: product\n"
+        "traces_to: [requirements]\n"
+        "upstream_hashes:\n"
+        f'  requirements: "{requirements_pin}"\n'
+        "---\n"
+        "# Behaviour\n\n" + _DT_SMOKE_BEHAVIOUR_SCENARIOS + extra
+    )
+
+
+def _dt_smoke_decomposition_body(design_pin: str) -> str:
+    """Два DT (DT-02 зависит от DT-01), сюръективно покрывающие BEH-01/02
+    (общая фикстура позитивного и негативного полукруга смоука ниже)."""
+    return (
+        "---\n"
+        "spec_stage: decomposition\n"
+        "status: draft\n"
+        "owner_role: tech-lead\n"
+        "traces_to: [design]\n"
+        "upstream_hashes:\n"
+        f'  design: "{design_pin}"\n'
+        "---\n"
+        "## Задачи\n\n"
+        "#### DT-01: Ядро · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\n"
+        "depends_on: []\n"
+        "parallel_group: core\n"
+        "Реализовать ядро.\n\n"
+        "#### DT-02: Расширение · type: implement · owner: dev\n"
+        "scenarios: [BEH-02]\n"
+        "depends_on: [DT-01]\n"
+        "parallel_group: core\n"
+        "Реализовать расширение.\n\n"
+        "## Инварианты графа\n\nСоблюдены.\n\n"
+        "## Порядок и параллельность\n\n"
+        "DT-02 зависит от DT-01.\n\n"
+        "## Вне объёма\n\nНичего не исключено.\n"
+    )
+
+
+class _DtSmokeOps(FakeOps):
+    """behaviour-spec с двумя сценариями + decomposition с двумя DT-
+    задачами (DT-02 зависит от DT-01), сюръективно покрывающими BEH-01/02
+    — в отличие от дефолтного `FakeOps.author` (DT-01-solo), несёт ребро
+    Depends on, нужное смоуку ниже для проверки рендера моста."""
+
+    def author(
+        self, target_dir: str, kind: str, subject: str, bundle_dir: str
+    ) -> int:
+        if kind == "charter":
+            self.calls.append(("author", kind))
+            self.authored.append(kind)
+            path = Path(target_dir) / bundle_dir / "00-charter.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(_DT_SMOKE_CHARTER_BODY, encoding="utf-8")
+            return 0
+        if kind == "requirements":
+            self.calls.append(("author", kind))
+            self.authored.append(kind)
+            bundle = Path(target_dir) / bundle_dir
+            charter_pin = blob_sha1(
+                (bundle / "00-charter.md").read_text(encoding="utf-8")
+            )
+            path = bundle / "10-requirements.md"
+            path.write_text(
+                _dt_smoke_requirements_body(charter_pin), encoding="utf-8"
+            )
+            return 0
+        if kind == "behaviour-spec":
+            self.calls.append(("author", kind))
+            self.authored.append(kind)
+            bundle = Path(target_dir) / bundle_dir
+            requirements_pin = blob_sha1(
+                (bundle / "10-requirements.md").read_text(encoding="utf-8")
+            )
+            path = bundle / "15-behaviour-spec.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                _dt_smoke_behaviour_body(requirements_pin), encoding="utf-8"
+            )
+            return 0
+        if kind == "decomposition":
+            self.calls.append(("author", kind))
+            self.authored.append(kind)
+            bundle = Path(target_dir) / bundle_dir
+            design_pin = blob_sha1(
+                (bundle / "20-design.md").read_text(encoding="utf-8")
+            )
+            path = bundle / "30-decomposition.md"
+            path.write_text(
+                _dt_smoke_decomposition_body(design_pin), encoding="utf-8"
+            )
+            return 0
+        return super().author(target_dir, kind, subject, bundle_dir)
+
+
+def test_decomposition_node_end_to_end_smoke_and_deliver(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Сквозной смоук 5-узлового профиля (Task 9): один прогон `start()`
+    до мержа на бандле с валидным графом DT (BEH-01/BEH-02 покрыты
+    DT-01/DT-02, DT-02 зависит от DT-01), затем `task_bridge.deliver()`
+    на том же `target_dir` — tasks-спека несёт `traces_to: [decomposition]`,
+    ровно по задаче на DT и ребро Depends on между ними.
+
+    Не дублирует то, что уже проверено по частям:
+    - happy path пяти author-шагов и мерж на дефолтной (DT-01-solo)
+      decomposition — `test_design_node_end_to_end_smoke`;
+    - render_tasks_dt изолированно (биндинги, Depends on, frontmatter) —
+      `test_render_dt_one_task_per_dt_with_bindings_and_edges`/
+      `test_render_dt_frontmatter_traces_decomposition_from_birth`
+      (tests/test_governance_task_bridge.py);
+    - deliver на DT-пути изолированно, без предшествующего runner-прогона —
+      `test_deliver_full_dag_renders_via_render_tasks_dt`.
+
+    Недостающий кусок: ОДИН сквозной прогон runner → deliver на бандле,
+    физически материализованном самим прогоном (не тестовой фикстурой
+    напрямую), с графом из ≥2 DT-задач и рёбер depends_on. Негативный
+    полукруг на том же графе —
+    `test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate`
+    ниже."""
+    ops = _DtSmokeOps(facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    run_id = "r-decomposition-e2e-smoke"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+
+    # S2: все пять author-шагов прошли РОВНО в этом порядке.
+    assert ops.authored == [
+        "charter", "requirements", "behaviour-spec", "design", "decomposition",
+    ]
+    # S4: гейт зелёный на бандле с валидным графом DT — прогон дошёл до
+    # мержа, не остановился на gate/review.
+    assert state.status == "completed"
+    assert state.ops["merge"]["status"] == "completed"
+    assert ops.merged == [(state.pr, ops.head)]
+
+    pr = task_bridge.deliver(
+        target_dir=state.target_dir,
+        repo_slug=state.repo_slug,
+        ws_id=state.ws_id,
+        subject=state.subject,
+        bundle_dir=state.bundle_dir,
+        base_ref="master",
+        ops=ops,
+        approved_by="fleet-agent",
+        approved_at="2026-09-05T12:00:00",
+        profile=state.profile,
+    )
+    assert isinstance(pr, int)
+    tasks_path = Path(state.target_dir) / f"spec/{state.ws_id}-tasks.md"
+    text = tasks_path.read_text(encoding="utf-8")
+    meta, _body = task_bridge.split_frontmatter(text)
+    assert meta["traces_to"] == ["decomposition"]
+
+    # Ровно по задаче на DT, не на BEH/Feature.
+    assert "### TASK-001: Ядро" in text
+    assert "### TASK-002: Расширение" in text
+    assert "### TASK-003:" not in text
+    assert "- [ ] реализовать BEH-01: Первый" in text
+    assert "- [ ] реализовать BEH-02: Второй" in text
+    # Ребро Depends on переведено из depends_on: [DT-01] задачи DT-02.
+    assert "**Depends on:** [TASK-001]" in text
+    task1_block = text.split("### TASK-001:")[1].split("### TASK-002:")[0]
+    assert "Depends on" not in task1_block
+
+
+def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Негативный полукруг того же смоука: ТОТ ЖЕ валидный 2-DT граф
+    (`_dt_smoke_decomposition_body` — DT-01/DT-02, DT-02 зависит от
+    DT-01), но behaviour-spec несёт ТРЕТИЙ сценарий (BEH-03), которым ни
+    одна DT-задача не покрывает ⇒ гейт стопит `stopped_gate` с
+    `GC-DT-GRAPH`, до deliver дело не доходит."""
+    beh_gap_extra = (
+        "\n#### BEH-03: Третий\n`traces: [FR-01]`\n"
+        "- **checked_by**: `status: planned` `kind: e2e` `owner: qa` "
+        "`target: tests/test_c.py`\n"
+    )
+
+    class _GapOps(_DtSmokeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            if kind == "behaviour-spec":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                requirements_pin = blob_sha1(
+                    (bundle / "10-requirements.md").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                path = bundle / "15-behaviour-spec.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    _dt_smoke_behaviour_body(
+                        requirements_pin, extra=beh_gap_extra
+                    ),
+                    encoding="utf-8",
+                )
+                return 0
+            return super().author(target_dir, kind, subject, bundle_dir)
+
+    ops = _GapOps(facts=GREEN_PR_FACTS)
+    run_id = "r-decomposition-e2e-smoke-gap"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+
+    assert state.status == "stopped_gate"
+    findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
+    assert "GC-DT-GRAPH" in findings and "BEH-03" in findings
+    assert "push" not in state.ops

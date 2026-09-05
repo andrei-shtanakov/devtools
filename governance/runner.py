@@ -71,9 +71,11 @@ _AUTHOR_STEPS = (
 # вынесены в модульную константу здесь; тест согласованности
 # (`test_gate_edges_derived_from_bundle_dag`) выводит те же рёбра из
 # `task_bridge._BUNDLE_DAG` и ловит расхождение. 4-й элемент — `required`:
-# True для обоих рёбер design (MAJOR-1) — необъявленное ребро стопит S4
-# находкой, а не тихо пропускается; остальные рёбра остаются
-# необязательными (их traces_to не входит в prospective-контракт гарда).
+# True для required-рёбер — обоих рёбер design (MAJOR-1) и ребра
+# decomposition→design (Task 6 плана decomposition-node) — необъявленное
+# ребро стопит S4 находкой, а не тихо пропускается; остальные рёбра
+# остаются необязательными (их traces_to не входит в prospective-контракт
+# гарда).
 _GATE_EDGES: tuple[tuple[str, str, str, bool], ...] = (
     ("10-requirements.md", "charter", "00-charter.md", False),
     ("15-behaviour-spec.md", "requirements", "10-requirements.md", False),
