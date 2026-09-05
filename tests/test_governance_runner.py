@@ -3100,3 +3100,84 @@ def test_resume_after_profile_delivered_continues_run(
 
     assert resumed.status != "stopped_preflight"
     assert resumed.ops["merge"]["status"] == "completed"
+
+
+# --- Task 9: сквозной смоук design-узла -------------------------------------
+
+
+def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root) -> None:
+    """Сквозной смоук S2→S4 design-узла (Task 9), один прогон `start()`.
+
+    Не дублирует то, что уже проверено по частям:
+    - порядок всех четырёх author-шагов —
+      `test_default_author_backend_is_codex_author_disp_not_called`;
+    - зелёный happy path до мержа (без architects-Q в requirements) —
+      `test_happy_path_agent_merge`/`test_today_reality_agent_merges`;
+    - RED-ветка GC-DESIGN-COVERAGE (Q без резолюции) —
+      `test_gate_stops_on_uncovered_architect_question`;
+    - RED-ветки GC-UNPINNED/GC-STALE на рёбрах design —
+      `test_gate_design_missing_*_pin_is_unpinned`/
+      `test_gate_design_stale_*_pin`.
+
+    Недостающий кусок, который собирает этот тест: ОДИН сквозной прогон,
+    где (а) `ops.author` пишет канонический `20-design.md` с валидными
+    пинами upstream И НЕПУСТЫМ, но покрытым (не вакуумно) architects-Q —
+    S2 проходит все четыре author-шага по порядку, `author-design`
+    завершён без skip, файл физически лежит в бандле; (б) тот же прогон
+    идёт дальше и S4-гейт на этом полном 4-узловом бандле — зелёный,
+    прогон доходит до мержа."""
+    q03_requirements = (
+        _DEFAULT_REQUIREMENTS_BODY
+        + "- **Q-03 · owner_role: architects · blocking: false.** Как?\n"
+    )
+
+    class CoveredQOps(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            if kind not in ("requirements", "design"):
+                return super().author(target_dir, kind, subject, bundle_dir)
+            self.calls.append(("author", kind))
+            self.authored.append(kind)
+            bundle = Path(target_dir) / bundle_dir
+            bundle.mkdir(parents=True, exist_ok=True)
+            if kind == "requirements":
+                (bundle / "10-requirements.md").write_text(
+                    q03_requirements, encoding="utf-8"
+                )
+                return 0
+            req_pin = blob_sha1(q03_requirements)
+            beh_pin = blob_sha1(_DEFAULT_BEHAVIOUR_BODY)
+            (bundle / "20-design.md").write_text(
+                "---\n"
+                "spec_stage: design\n"
+                "status: draft\n"
+                "owner_role: architects\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f'  requirements: "{req_pin}"\n'
+                f'  behaviour-spec: "{beh_pin}"\n'
+                "---\n"
+                "#### Q-03 · owner_role: architects · resolution: "
+                "resolved\nОтвет на вопрос архитектуры.\n",
+                encoding="utf-8",
+            )
+            return 0
+
+    ops = CoveredQOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    run_id = "r-design-e2e-smoke"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+
+    # S2: все четыре author-шага прошли РОВНО в этом порядке.
+    assert ops.authored == ["charter", "requirements", "behaviour-spec", "design"]
+    assert state.ops["author-design"]["status"] == "completed"
+    assert state.ops["author-design"]["skipped"] is False
+    bundle_dir = Path(state.target_dir) / state.bundle_dir
+    assert (bundle_dir / "20-design.md").exists()
+
+    # S4: гейт зелёный на полном 4-узловом бандле (валидные пины + покрытый
+    # architects-Q) — прогон дошёл до мержа, не остановился на gate/review.
+    assert state.status == "completed"
+    assert state.ops["merge"]["status"] == "completed"
+    assert ops.merged == [(state.pr, ops.head)]
