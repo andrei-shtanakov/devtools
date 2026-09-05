@@ -846,16 +846,21 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         state.status = "stopped_gate"
         save(state)
         return False
-    # Гард отсутствия design (спека Task 4): required-узел design профиля
-    # team-exp — локальный (не через bundle_state.candidate_state — та
-    # остаётся у консоли, runner без импорта steward и без чтения/парсинга
-    # YAML профиля — совпадение имени файла профиля, тот же уровень
-    # hardcode, что и форма самого узла в Global Constraints спеки). Прочие
-    # профили (например, fixture `mini.yaml` в интеграционном тесте шва CLI
-    # ниже по файлу — design туда сознательно не входит) не затрагиваются.
+    # Гард отсутствия design (спека Task 4): required-узел design —
+    # локальный (не через bundle_state.candidate_state — та остаётся у
+    # консоли, runner без импорта steward). MINOR-1 финального ревью:
+    # посылка «без чтения/парсинга YAML профиля» истекла с Task 8 —
+    # `target_profile_declares` уже читает ФАКТИЧЕСКОЕ содержимое
+    # target-профиля (тот же источник, что и preflight в `_step_authoring`
+    # выше по файлу), не сравнивает имя файла со строкой `profiles/
+    # team-exp.yaml`. Прочие профили (например, fixture `mini.yaml` в
+    # интеграционном тесте шва CLI ниже по файлу — design туда сознательно
+    # не входит) не затрагиваются — они просто не декларируют узел design.
     # Стоит ДО цикла рёбер ниже — иначе отсутствующий design молча читался
     # бы как «нечего проверять по рёбрам» вместо явной находки.
-    design_required = state.profile == "profiles/team-exp.yaml"
+    design_required = target_profile_declares(
+        state.target_dir, state.profile, "design"
+    )
     design_path = Path(state.target_dir) / state.bundle_dir / "20-design.md"
     if design_required and not design_path.exists():
         (run_dir(state.run_id) / "gate-findings.txt").write_text(

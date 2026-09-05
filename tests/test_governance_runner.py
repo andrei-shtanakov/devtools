@@ -2671,11 +2671,22 @@ def test_gate_stops_when_design_node_missing_from_bundle(
     """Гард отсутствия design (спека Task 4): required-узел design профиля
     team-exp, но файла 20-design.md в бандле нет ⇒ `stopped_gate` локально
     — ДО цикла рёбер, даже когда FakeOps `gate_check_candidate` вернула бы
-    0 молча."""
+    0 молча.
+
+    MINOR-1 финального ревью: `design_required` теперь читает ФАКТИЧЕСКИЙ
+    файл target-профиля (`target_profile_declares`), не сравнивает имя
+    профиля со строкой — без материализации `profiles/team-exp.yaml` в
+    `target_dir` гард молча не сработал бы (fail-closed False у
+    `target_profile_declares` на отсутствующем файле)."""
     ops = FakeOps(facts=GREEN_PR_FACTS)
     run_id = "r-design-absent"
     target_dir = tmp_path / f"target-{run_id}"
     target_dir.mkdir()
+    profile_dir = target_dir / "profiles"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "team-exp.yaml").write_text(
+        _TEAM_EXP_PROFILE_TEXT, encoding="utf-8"
+    )
     bundle_dir = target_dir / BUNDLE_DIR
     bundle_dir.mkdir(parents=True)
     (bundle_dir / "00-charter.md").write_text("# charter\n", encoding="utf-8")
