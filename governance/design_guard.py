@@ -82,7 +82,7 @@ def coverage_findings(req_text: str, design_text: str) -> list[str]:
     ]
 
     if not architects_qs:
-        if _EMPTY_DECLARATION in design_text:
+        if re.search(rf"^{re.escape(_EMPTY_DECLARATION)}", design_text, re.M) is not None:
             return []
         message = (
             "design: входной набор архитектурных вопросов пуст, но "
