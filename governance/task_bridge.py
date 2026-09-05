@@ -130,7 +130,11 @@ def join_frontmatter(meta: dict, body: str) -> str:
     )
     return f"---\n{dumped}---\n\n{body}"
 
-_BEH_HEADER = re.compile(r"^####\s+(BEH-\d+):\s*(.+?)\s*$")
+# [a-z]?-суффикс: раунды ревью бандлов вставляют сценарии как BEH-18a —
+# без суффикса в грамматике мост молча ронял сценарий (PR spec-runner#369,
+# major: BEH-18a выпал из декомпозиции, а его checked_by приклеился к
+# предыдущему сценарию). Класс devtools#123 «баги генератора».
+_BEH_HEADER = re.compile(r"^####\s+(BEH-\d+[a-z]?):\s*(.+?)\s*$")
 _FEATURE_HEADER = re.compile(r"^##\s+Feature:\s*(.+?)\s*$")
 _TRACES = re.compile(r"`traces:\s*\[([^\]]*)\]`")
 _CHECKED = re.compile(
@@ -356,6 +360,7 @@ def _render_header(
         "---",
         "spec_stage: tasks",
         "status: draft",
+        "owner_role: stream-owner",
         "version: 1",
         "generated_by: fleet-agent",
         f"generated_at: {generated_at}",
