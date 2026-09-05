@@ -152,10 +152,14 @@ Run: `uv run --frozen --group governance python -m pytest tests/test_governance_
   старте реализации):
 
 ```markdown
-- [ ] verify-DT в decomposition-мосте включаются после доставки verify-first
-  slug: decomposition-verify-first-unblock
-  @blocked_by:spec-runner#367
+- [ ] verify-DT в decomposition-мосте включаются после доставки verify-first @id:decomposition-verify-first-unblock @blocked_by:spec-runner#367
 ```
+
+(Major круга 3: теги — ТОЛЬКО инлайн на строке `- [ ]` (правило TODO.md
+«парсер разбирает пункт строго построчно и продолжений не видит»);
+идентификатор — тег `@id:`, не строка `slug:`. Тег на продолжении дал бы
+DT-TAG-ON-CONTINUATION + PF-ID-MISSING, а ссылка на spec-runner#367 не
+попала бы в issue-граф — PF-BLOCKER-STALE никогда бы не сработал.)
 
 - [ ] **Step 6: Commit**
 
@@ -1132,7 +1136,9 @@ git commit -m "feat(runner): S4-гарды decomposition — ребро, пол�
 
 **Files:**
 - Modify: `governance/task_bridge.py`
-- Test: `tests/test_governance_task_bridge.py`
+- Test: `tests/test_governance_task_bridge.py`,
+  `tests/test_governance_runner.py` (снятие xfail + производная required +
+  зеркальный deliver-preflight-тест живут ТАМ — minor круга 3)
 
 **Interfaces:**
 - Consumes: `_BUNDLE_DAG`/`_ANCHOR_*` (выводятся, не хардкодятся);
@@ -1240,13 +1246,17 @@ fail-closed preflight decomposition в start/resume/DELIVER): существую
 активного DAG:
 
 ```python
-    for node in ("design", "decomposition"):
-        if any(fname == _AUTHOR_FILENAMES_BY_NODE[node] for fname, _ in dag) \
-                and not target_profile_declares(target_dir, profile, node):
-            raise RuntimeError(...)  # существующий текст с подстановкой node
+    if profile is not None:  # None-гард существующего кода сохраняется:
+        # target_profile_declares(target_dir, None, …) — TypeError, не
+        # fail-closed False (minor круга 3)
+        for node in ("design", "decomposition"):
+            if any(
+                _node_id(fname) == node for fname, _ in dag
+            ) and not target_profile_declares(target_dir, profile, node):
+                raise RuntimeError(...)  # существующий текст, подстановка node
 ```
 
-(форму сопоставления узел↔файл взять фактическую по коду deliver; суть —
+(сопоставление узел↔файл — существующий `_node_id`; суть —
 проверяются ровно узлы, входящие в выбранный `dag`, поэтому
 `--legacy-bundle=3` не требует design, `=4` требует design но не
 decomposition, полный DAG требует оба). Зеркальный тест
@@ -1285,7 +1295,8 @@ CLI:
 - [ ] **Step 5: Commit**
 
 ```bash
-git add governance/task_bridge.py tests/test_governance_task_bridge.py
+git add governance/task_bridge.py tests/test_governance_task_bridge.py \
+  tests/test_governance_runner.py
 git commit -m "feat(task_bridge): узел decomposition в DAG; --legacy-bundle=3|4 с проверкой точного состава"
 ```
 
@@ -1439,7 +1450,10 @@ decomposition_text)` — непустой список ⇒ RuntimeError с ег�
 `20-design.md`, который читается ОТДЕЛЬНО от якоря (после смены якоря
 `design_path`-выражение через `_ANCHOR_FILENAME` кормило бы
 `parse_design_resolutions` текстом decomposition — секция молча исчезала
-бы). Ожидания существующих deliver-тестов обновляются здесь же:
+бы) — но ТОЛЬКО когда `20-design.md` входит в активный `dag`; при
+`--legacy-bundle=3` файла нет по построению и `design_text = ""` (minor
+круга 3 — эту семантику держала снесённая булева ветка; регрессионный
+тест легаси-доставки требует отсутствия секции резолюций). Ожидания существующих deliver-тестов обновляются здесь же:
 `traces_to == ['decomposition']`, секция резолюций по-прежнему
 присутствует. Legacy-пути (3|4) — прежний `render_tasks`, якорь —
 терминал соответствующего префикса DAG.
