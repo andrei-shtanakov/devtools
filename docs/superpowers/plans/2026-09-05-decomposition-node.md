@@ -73,7 +73,13 @@ runner, без pydantic), pytest, FakeOps-фикстуры.
 дополнительных рёбер не требует: §3 запрещает ровно искусственную
 сериализацию, и навязывать её гейтом значило бы машинно воспроизводить
 мотивирующий дефект §1 (линейный Depends on сквозь независимые половины,
-ревью spec-runner#343). ВАЖНО (major
+ревью spec-runner#343). ИЗВЕСТНАЯ ЦЕНА эвристики (minor круга 5,
+фиксируется намеренно): задача с двумя ТОЧЕЧНЫМИ рёбрами в две разные
+группы порогом «≥2 групп» читается как свод и получает требование всех
+стоков обеих групп — навязанное ребро в этом случае и есть цена
+отсутствия явного маркера сводной задачи в грамматике §3. Снятие цены —
+маркер в грамматике (например, `type: summary`) — расширение спеки,
+решение владельца; вопрос вынесен в описание PR плана. ВАЖНО (major
 терминального ревью плана): `solo` — НЕ имя общей группы, а признак
 «задача сама по себе»; каждая solo-задача образует СОБСТВЕННУЮ
 одиночную группу (ключ `solo:<dt_id>`), иначе две независимые solo-задачи
@@ -158,7 +164,7 @@ Run: `uv run --frozen --group governance python -m pytest tests/test_governance_
   старте реализации):
 
 ```markdown
-- [ ] verify-DT в decomposition-мосте включаются после доставки verify-first @id:decomposition-verify-first-unblock @blocked_by:spec-runner#367
+- [ ] verify-DT в decomposition-мосте включаются после доставки verify-first @id:decomposition-verify-first-unblock @owner:github:andrei-shtanakov @blocked_by:spec-runner#367
 ```
 
 (Major круга 3: теги — ТОЛЬКО инлайн на строке `- [ ]` (правило TODO.md
@@ -231,9 +237,11 @@ def test_author_dsl_covers_decomposition() -> None:
         "subset of the transitive closure of depends_on. checked_by "
         "target files of different DTs MUST NOT intersect (single owner "
         "per test file). The graph MUST be acyclic; do NOT add an "
-        "artificial linear chain — only real dependencies. A task "
-        "depending on another parallel_group MUST depend on ALL sink "
-        "tasks of that group. Порядок и параллельность: which groups may "
+        "artificial linear chain — only real dependencies. Only a task "
+        "that depends on members of TWO OR MORE other parallel_groups "
+        "(it merges them) MUST depend on ALL sink tasks of EACH such "
+        "group; a point edge into a single foreign group is legitimate "
+        "and requires no extra edges. Порядок и параллельность: which groups may "
         "run concurrently (operator documentation). Вне объёма: what is "
         "deliberately not decomposed. Forbidden: do not invent BEH ids; "
         "do not reopen design decisions; do not write implementation "
@@ -1282,10 +1290,14 @@ def _check_bundle_composition(
 МЕСТО вызова `_check_bundle_composition` (major ревью плана — инвариант
 приёмки PR #96 «чтение бандла строго ПОСЛЕ чекаута базы»):
 
-- в `deliver`/`deliver_conform` — ПОСЛЕ `ops.is_dirty` и
-  `ops.checkout_and_pull`, ровно там, где сейчас живут existence-гарды
-  бандла (никакого «первым делом»: до чекаута каталог бандла может не
-  существовать, и состав судился бы по произвольному состоянию чекаута);
+- в `deliver` — ПОСЛЕ `ops.is_dirty` и `ops.checkout_and_pull`, ровно
+  там, где сейчас живут existence-гарды бандла (никакого «первым делом»:
+  до чекаута каталог бандла может не существовать, и состав судился бы по
+  произвольному состоянию чекаута);
+- в `deliver_conform` (minor круга 5: там НЕТ ни dirty-гарда — его
+  отсутствие намеренный инвариант докстринга, — ни checkout, ни
+  existence-гардов) — В НАЧАЛЕ функции, ДО `ops.ensure_branch`: отказ по
+  составу не должен оставлять в target созданную approve-ветку;
 - в `stamp_bundle_approved`/`conform_approved` — в начале функции (их
   зовут уже ПОСЛЕ чекаута — из deliver-обёрток либо тестами по
   материализованному каталогу).
