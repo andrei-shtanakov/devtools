@@ -100,8 +100,9 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
 # обязательны) — minor круга 4: расхождение (гард видит `#### BEH-02` без
 # двоеточия, мост — нет) давало бы зелёный гейт и пустую задачу в
 # tasks-спеке.
-_BEH_HEAD_RE = re.compile(r"^####\s+(BEH-\d+):\s*\S", re.M)
-_BEH_NEAR_RE = re.compile(r"^####\s+(BEH-\d+)\b", re.M)
+# [a-z]?-суффикс — как у _BEH_HEADER моста (BEH-18a из раундов ревью)
+_BEH_HEAD_RE = re.compile(r"^####\s+(BEH-\d+[a-z]?):\s*\S", re.M)
+_BEH_NEAR_RE = re.compile(r"^####\s+(BEH-\d+[a-z]?)\b", re.M)
 _BEH_CHECKED_RE = re.compile(
     r"\*\*checked_by\*\*.*?`kind:\s*(\S+?)`.*?`target:\s*(\S+?)`"
 )

@@ -1521,3 +1521,31 @@ def test_deliver_full_dag_renders_via_render_tasks_dt(tmp_path: Path) -> None:
     assert "(DT-01, группа solo)" in text
     assert "Source: workstreams/WS-alpha-7/spec/30-decomposition.md#DT-01" \
         in text
+
+
+def test_parse_behaviour_reads_letter_suffixed_beh_id() -> None:
+    """PR spec-runner#369 (major): BEH-18a молча выпадал из декомпозиции,
+    а его checked_by приклеивался к предыдущему сценарию."""
+    text = (
+        "#### BEH-18: Обычный\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_x`\n\n"
+        "#### BEH-18a: Вставленный ревью\n**checked_by** `kind: e2e` "
+        "`target: tests/test_b.py::test_y`\n"
+    )
+    scenarios = task_bridge.parse_behaviour(text)
+    assert [s.beh_id for s in scenarios] == ["BEH-18", "BEH-18a"]
+    assert scenarios[0].checked_target == "tests/test_a.py::test_x"
+    assert scenarios[1].checked_target == "tests/test_b.py::test_y"
+
+
+def test_tasks_frontmatter_carries_owner_role() -> None:
+    """Minor PR spec-runner#369: узел tasks профиля объявляет
+    owner_role: stream-owner, approve его не дописывает — рендер обязан
+    нести ключ с рождения (прецедент WS-341)."""
+    from governance.task_bridge import _render_header
+
+    lines = _render_header(
+        "WS-X", "s", "2026-01-01T00:00:00Z", "0" * 40,
+        anchor_node_id="decomposition",
+    )
+    assert "owner_role: stream-owner" in lines
