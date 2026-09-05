@@ -25,8 +25,8 @@ import yaml
 
 from governance import design_guard
 from governance.ops import Ops, RealOps
+from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
 from governance.run_state import load
-from governance.runner import _PREFLIGHT_PROCEDURE_HINT, _target_profile_declares
 from governance.stale_adapter import blob_sha1
 
 # DAG бандла в порядке штампа (топологический): каждый узел перечисляет
@@ -563,8 +563,8 @@ def deliver(
     передан и `legacy_bundle=False`, доставка отказывает, если
     ФАКТИЧЕСКИЙ профиль target-репо не декларирует узел `design` — та же
     процедура, что у `stopped_preflight` раннера
-    (`governance.runner._target_profile_declares`): соседний репо может
-    нести старую копию файла того же имени без design. `profile=None`
+    (`governance.policy_sources.target_profile_declares`): соседний репо
+    может нести старую копию файла того же имени без design. `profile=None`
     (дефолт) — проверка пропускается; CLI (`main`) всегда передаёт
     `state.profile`.
     """
@@ -599,12 +599,12 @@ def deliver(
         # design вовсе (старая копия того же имени у соседнего репо), и
         # доставка не имеет права молча анкериться на design, которого
         # активный профиль этого репо не признаёт.
-        if profile is not None and not _target_profile_declares(
+        if profile is not None and not target_profile_declares(
             target_dir, profile, "design"
         ):
             raise RuntimeError(
                 f"{Path(target_dir) / profile} не декларирует узел "
-                f"'design' — {_PREFLIGHT_PROCEDURE_HINT}"
+                f"'design' — {PREFLIGHT_PROCEDURE_HINT}"
             )
     branch = f"spec/{ws_id}-tasks"
     ops.ensure_branch(target_dir, branch)

@@ -24,13 +24,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from governance import design_guard
 from governance.merge_gate import PrFacts, decide
 from governance.stale_adapter import blob_sha1
 from governance.ops import Ops, RealOps
-from governance.policy_sources import build_authority, load_safety
+from governance.policy_sources import (
+    PREFLIGHT_PROCEDURE_HINT,
+    build_authority,
+    load_safety,
+    target_profile_declares,
+)
 from governance.run_state import (
     RunState,
     all_run_ids,
@@ -56,50 +59,10 @@ _AUTHOR_STEPS = (
     ("author-design", "design", "20-design.md"),
 )
 
-# Профиль, для которого узел `design` — required (тот же селектор, что у
-# `_step_gate.design_required`, тот же уровень hardcode: имя файла, не
-# буквальный путь до devtools-копии).
-_TEAM_EXP_PROFILE_NAME = "profiles/team-exp.yaml"
-
-# Процедура-remediation preflight'а (Task 8): одна и та же строка и у
-# `stopped_preflight` раннера, и у RuntimeError `task_bridge.deliver` —
-# «та же процедура» из брифа буквально означает совпадающий текст.
-_PREFLIGHT_PROCEDURE_HINT = (
-    "доставьте обновлённый профиль в target PR-ом; "
-    "profiles/ — authority-root, мерж человеком"
-)
-
-
-def _target_profile_declares(target_dir: str, profile: str, node_id: str) -> bool:
-    """True, если ``<target_dir>/<profile>`` объявляет узел ``node_id``.
-
-    Preflight (Task 8, design-узел): `gate_check_candidate` (S4) читает
-    профиль ИЗ `target_dir`, не из devtools — соседний репо может нести
-    СТАРУЮ копию файла того же имени (`profiles/team-exp.yaml`) без узла
-    `design`, и `_step_authoring` молча попытался бы авторить узел, о
-    котором target-профиль не просил. Проверка читает РОВНО тот путь, что
-    получит `gate_check_candidate` (`state.profile` в раннере) / `deliver`
-    (`profile`-аргумент), а не захардкоженное имя.
-
-    Отсутствие файла или узла — `False` (тихо, это штатный «профиль
-    вообще не про design» случай — не путать с ошибкой). Ошибка
-    чтения/парсинга — fail-closed `False` с печатью причины: это
-    preflight-проверка без побочных эффектов, не операция, ронять шаг
-    исключением которой не стоит.
-    """
-    path = Path(target_dir) / profile
-    if not path.exists():
-        return False
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        node_ids = {a["id"] for a in (data or {}).get("artifacts", [])}
-    except Exception as exc:  # noqa: BLE001 — fail-closed preflight, не операция
-        print(
-            f"_target_profile_declares: {path} нечитаем/невалиден "
-            f"({exc}) — fail-closed False"
-        )
-        return False
-    return node_id in node_ids
+# `target_profile_declares`/`PREFLIGHT_PROCEDURE_HINT` — в
+# `governance.policy_sources` (фикс-раунд ревью, minor #2): общий источник
+# для раннера И `governance.task_bridge`, не приватный кросс-импорт между
+# двумя модулями.
 
 
 def _reserve_run_id(run_id: str) -> None:
@@ -367,7 +330,7 @@ _STOPPED_RESET_OPS: dict[str, tuple[str, ...]] = {
     "stopped_dirty": (),
     # stopped_preflight (Task 8): проверка тоже до `_ensure_started` узла
     # design — сбрасывать нечего, только статус обратно в `running`, чтобы
-    # `_step_authoring` перепроверил `_target_profile_declares` по
+    # `_step_authoring` перепроверил `target_profile_declares` по
     # ТЕКУЩЕМУ содержимому target-профиля (человек мог доставить
     # обновлённый профиль PR-ом между стопом и resume). Пустой кортеж —
     # без него `resume()` был бы тихим no-op (инвариант F-1).
@@ -730,28 +693,30 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     disp-цикл осмыслен для полируемого документа, не для одноразовых
     артефактов.
 
-    Preflight (Task 8) — ДО фактического авторинга узла `design`: target с
-    профилем `profiles/team-exp.yaml`, ФАКТИЧЕСКИ не декларирующим design
-    (старая копия у соседнего репо), не имеет права молча получить
-    `author-design` — останов `stopped_preflight` вместо тихого
-    несогласованного авторинга. Проверка стоит ВНУТРИ цикла (не перед ним):
-    charter/requirements/behaviour-spec — узлы любого профиля, design —
-    единственный, чьё существование в профиле проверяется реальным
-    содержимым файла, не именем.
+    Preflight (Task 8; хардкод имени профиля снят фикс-раундом ревью) — ДО
+    фактического авторинга узла `design`: решение «авторить ли design»
+    data-driven для ЛЮБОГО профиля, не только `profiles/team-exp.yaml` —
+    `target_profile_declares(state.target_dir, state.profile, "design")`
+    читает ФАКТИЧЕСКОЕ содержимое target-профиля. True ⇒ авторим как
+    обычно; False ⇒ `stopped_preflight` с той же rollout-процедурой — ни
+    молчаливого авторинга (старая копия team-exp.yaml у соседнего репо, Task
+    8), ни молчаливого скипа (профиль, у которого design нет вовсе).
+    Конвейер СЕЙЧАС не поддерживает профили «сознательно без design» —
+    для него отсутствие узла в target-профиле всегда останов, не тихий
+    skip; такой профиль либо доставляет обновлённый файл (rollout), либо
+    вообще не идёт через этот раннер. Проверка стоит ВНУТРИ цикла (не
+    перед ним): charter/requirements/behaviour-spec такому гарду не
+    подчинены, только design.
     """
     for key, kind, filename in _AUTHOR_STEPS:
         if op_status(state, key) == "completed":
             continue
-        if (
-            kind == "design"
-            and state.profile == _TEAM_EXP_PROFILE_NAME
-            and not _target_profile_declares(
-                state.target_dir, state.profile, "design"
-            )
+        if kind == "design" and not target_profile_declares(
+            state.target_dir, state.profile, "design"
         ):
             print(
                 f"_step_authoring: {state.target_dir}/{state.profile} не "
-                f"декларирует узел 'design' — {_PREFLIGHT_PROCEDURE_HINT}"
+                f"декларирует узел 'design' — {PREFLIGHT_PROCEDURE_HINT}"
             )
             state.status = "stopped_preflight"
             save(state)

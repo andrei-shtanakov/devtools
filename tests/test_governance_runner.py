@@ -1514,10 +1514,18 @@ def test_gate_seam_required_absent_blocks_without_mock(
             "author-requirements": {"status": "completed", "skipped": True},
             "author-behaviour": {"status": "completed", "skipped": True},
             # mini.yaml (fixture-профиль этого теста) не несёт узел design —
-            # шаг обязан быть завершён-пропущенным, иначе _step_authoring
-            # запишет 20-design.md незапланированным для профиля файлом, и
-            # реальный `gate-check --candidate` споткнётся о него раньше,
-            # чем тест успеет проверить свой собственный сценарий.
+            # шаг обязан быть завершён-пропущенным явно в фикстуре: этот
+            # тест конструирует state вручную и зовёт advance() напрямую
+            # (минуя _step_authoring целиком), а не через start(), поэтому
+            # preflight design-узла (Task 8 + фикс-раунд ревью,
+            # `governance.policy_sources.target_profile_declares`) сюда
+            # вовсе не попадает — вызывать его нечем без реального
+            # profiles/mini.yaml-файла в target_dir. Цель теста — S4
+            # (реальный `gate-check --candidate`), не S2/preflight; когда
+            # бы шаг остался НЕзавершённым, `_step_authoring` либо
+            # авторил бы 20-design.md (до фикс-раунда), либо теперь
+            # стопил бы `stopped_preflight` (после) — оба исхода мимо
+            # сценария этого теста, поэтому шаг пропущен явно.
             "author-design": {"status": "completed", "skipped": True},
             "commit": {"status": "completed"},
         }
@@ -2973,6 +2981,59 @@ def test_start_preflight_silent_on_four_node_profile(
 
     assert state.status != "stopped_preflight"
     assert state.ops["merge"]["status"] == "completed"
+
+
+def test_start_stops_preflight_for_non_team_exp_profile_lacking_design(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Фикс-раунд ревью, major #1: хардкод имени профиля снят —
+    `_step_authoring` решает «авторить ли design» data-driven для ЛЮБОГО
+    профиля. `profiles/mini.yaml` (фикстура `make_profile`, узла design не
+    несёт) через ПОЛНЫЙ `start()` (не ручной bypass state.ops) стопится
+    `stopped_preflight` — не молчаливым `author-design`, не молчаливым
+    skip. Конвейер сейчас не поддерживает профили «сознательно без
+    design»: единственный статус для такого расхождения — останов."""
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    run_id = "r-preflight-mini-full"
+    target_dir = tmp_path / f"target-{run_id}"
+    target_dir.mkdir()
+    make_profile(target_dir)  # profiles/mini.yaml — без узла design
+
+    state = runner.start(
+        subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+        target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
+        profile="profiles/mini.yaml", run_id=run_id, ops=ops,
+    )
+
+    assert state.status == "stopped_preflight"
+    assert "design" not in ops.authored
+    assert "gate-candidate" not in state.ops
+
+
+def test_target_profile_declares_fail_closed_on_broken_yaml(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Фикс-раунд ревью, minor #3: битый YAML в target-профиле ⇒
+    `target_profile_declares` fail-closed False (не traceback), и `start`
+    стопится `stopped_preflight`, а не роняет прогон исключением."""
+    from governance import policy_sources
+
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    run_id = "r-preflight-broken-yaml"
+    kwargs = _start_kwargs(tmp_path, run_id, ops)
+    profile_path = Path(kwargs["target_dir"]) / "profiles" / "team-exp.yaml"
+    profile_path.write_text(
+        "artifacts:\n  - {id: design, template: [unterminated\n",
+        encoding="utf-8",
+    )
+
+    assert policy_sources.target_profile_declares(
+        kwargs["target_dir"], kwargs["profile"], "design"
+    ) is False
+
+    state = runner.start(**kwargs)
+
+    assert state.status == "stopped_preflight"
 
 
 def test_deliver_refuses_when_target_profile_lacks_design(

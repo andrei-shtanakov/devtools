@@ -81,3 +81,50 @@ def build_authority(target_dir: Path, run_override: str | None) -> Authority:
         repo=repo_authority(target_dir),
         run=run_override,
     )
+
+
+# Процедура-remediation preflight'а узла design (Task 8 + фикс-раунд ревью):
+# одна и та же строка и у `stopped_preflight` раннера (`governance.runner`),
+# и у RuntimeError `governance.task_bridge.deliver` — «та же процедура»
+# буквально означает совпадающий текст, а не два похожих, но разных.
+PREFLIGHT_PROCEDURE_HINT = (
+    "доставьте обновлённый профиль в target PR-ом; "
+    "profiles/ — authority-root, мерж человеком"
+)
+
+
+def target_profile_declares(target_dir: str, profile: str, node_id: str) -> bool:
+    """True, если ``<target_dir>/<profile>`` объявляет узел ``node_id``.
+
+    Preflight (Task 8, design-узел; вынесена из `governance.runner` в
+    фикс-раунде ревью — общий источник для раннера И `task_bridge`, не
+    приватный кросс-импорт): `gate_check_candidate` (S4 раннера) читает
+    профиль ИЗ `target_dir`, не из devtools — соседний репо может нести
+    СТАРУЮ копию файла того же имени (`profiles/team-exp.yaml`) без узла
+    `design`, и `_step_authoring` молча попытался бы авторить узел, о
+    котором target-профиль не просил. Проверка читает РОВНО тот путь, что
+    получит `gate_check_candidate` (`state.profile` в раннере) /
+    `task_bridge.deliver` (`profile`-аргумент), а не захардкоженное имя —
+    решение «авторить ли design» data-driven для ЛЮБОГО профиля, не
+    только `profiles/team-exp.yaml` (фикс-раунд ревью: хардкод имени в
+    `_step_authoring` снят).
+
+    Отсутствие файла или узла — `False` (тихо, это штатный «профиль
+    вообще не про design» случай — не путать с ошибкой). Ошибка
+    чтения/парсинга — fail-closed `False` с печатью причины: это
+    preflight-проверка без побочных эффектов, не операция, ронять шаг
+    исключением которой не стоит.
+    """
+    path = Path(target_dir) / profile
+    if not path.exists():
+        return False
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        node_ids = {a["id"] for a in (data or {}).get("artifacts", [])}
+    except Exception as exc:  # noqa: BLE001 — fail-closed preflight, не операция
+        print(
+            f"target_profile_declares: {path} нечитаем/невалиден "
+            f"({exc}) — fail-closed False"
+        )
+        return False
+    return node_id in node_ids
