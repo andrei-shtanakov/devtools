@@ -490,8 +490,10 @@ def test_stamp_bundle_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_conform_normalizes_after_approve(tmp_path: Path) -> None:
-    """Урок 1: `spec approve` дописывает design из lite-профиля —
-    нормализация возвращает форму governance-профиля и свежий пин."""
+    """Task 6: якорь — design (терминальный узел `_BUNDLE_DAG`), не
+    behaviour-spec. Регрессия: изменённый вручную (или унаследованный от
+    старого поведения) `traces_to: [behaviour-spec]` нормализуется К
+    design, а НЕ откатывается обратно к behaviour-spec."""
     from governance.stale_adapter import blob_sha1
 
     target = _target(tmp_path)
@@ -503,7 +505,7 @@ def test_conform_normalizes_after_approve(tmp_path: Path) -> None:
         "status: approved\n"
         "version: 2\n"
         "approved_by: andrei-shtanakov\n"
-        "traces_to:\n- behaviour-spec\n- design\n"
+        "traces_to:\n- behaviour-spec\n"
         "upstream_hashes:\n  behaviour-spec: " + "1" * 40 + "\n"
         "---\n\n## Milestone 1: s\n",
         encoding="utf-8",
@@ -515,10 +517,10 @@ def test_conform_normalizes_after_approve(tmp_path: Path) -> None:
     meta, body = task_bridge.split_frontmatter(
         (spec_dir / "WS-alpha-7-tasks.md").read_text(encoding="utf-8")
     )
-    assert meta["traces_to"] == ["behaviour-spec"]
+    assert meta["traces_to"] == ["design"]
     assert meta["upstream_hashes"] == {
-        "behaviour-spec": blob_sha1(
-            (target / "workstreams/WS-alpha-7/spec/15-behaviour-spec.md")
+        "design": blob_sha1(
+            (target / "workstreams/WS-alpha-7/spec/20-design.md")
             .read_text(encoding="utf-8")
         )
     }
@@ -526,10 +528,14 @@ def test_conform_normalizes_after_approve(tmp_path: Path) -> None:
     assert meta["status"] == "approved"
     assert meta["approved_by"] == "andrei-shtanakov"
     assert "## Milestone 1: s" in body
-    # идемпотентность
+    # идемпотентность: второй прогон НЕ трогает уже нормализованный design
     assert task_bridge.conform_approved(
         str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
     ) is False
+    meta2, _ = task_bridge.split_frontmatter(
+        (spec_dir / "WS-alpha-7-tasks.md").read_text(encoding="utf-8")
+    )
+    assert meta2["traces_to"] == ["design"]
 
 
 def test_conform_refuses_draft(tmp_path: Path) -> None:
@@ -606,7 +612,7 @@ def test_deliver_conform_rerun_updates_existing_pr(tmp_path: Path) -> None:
     meta, _ = task_bridge.split_frontmatter(
         (target / "spec/WS-alpha-7-tasks.md").read_text(encoding="utf-8")
     )
-    assert meta["traces_to"] == ["behaviour-spec"]
+    assert meta["traces_to"] == ["design"]
 
 
 # --- группировка по файлу цели (@id:task-bridge-beh-grouping, урок 8) -------

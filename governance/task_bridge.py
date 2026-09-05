@@ -441,13 +441,15 @@ def stamp_bundle_approved(
 def conform_approved(target_dir: str, ws_id: str, bundle_dir: str) -> bool:
     """Нормализация frontmatter tasks-спеки ПОСЛЕ `spec approve` владельца.
 
-    Урок 1 ретроспективы: `spec approve` деривит traces_to из вшитого
-    lite-профиля (tasks ← design; других профилей у spec-runner нет —
-    upstream-плечо заведено отдельно) и дописывает `design` к нашему
-    `behaviour-spec`. Нормализация возвращает форму активного
-    governance-профиля: traces_to ровно [behaviour-spec], пин — на
-    ТЕКУЩИЙ blob вмерженного 15-behaviour-spec.md. Строгий run проверяет
-    только status — правка безопасна. Возвращает, менялся ли файл.
+    Якорь — терминальный узел `_BUNDLE_DAG` (design, Task 6): не
+    хардкодится второй раз, выводится из DAG (`_ANCHOR_NODE_ID` /
+    `_ANCHOR_FILENAME`), так что смена терминального узла бандла правит
+    DAG в одном месте, не эту функцию. Нормализация возвращает форму
+    активного governance-профиля: traces_to ровно [<anchor>], пин — на
+    ТЕКУЩИЙ blob вмерженного файла анкера (independent от того, что туда
+    дописал/недописал `spec approve` — lite-профиль spec-runner не знает
+    про наш DAG). Строгий run проверяет только status — правка
+    безопасна. Возвращает, менялся ли файл.
     """
     rel = Path(target_dir) / "spec" / f"{ws_id}-tasks.md"
     meta, body = split_frontmatter(rel.read_text(encoding="utf-8"))
@@ -456,13 +458,13 @@ def conform_approved(target_dir: str, ws_id: str, bundle_dir: str) -> bool:
             f"{rel.name}: status={meta.get('status')!r} — нормализация идёт "
             "ПОСЛЕ человеческого `spec approve` (инвариант №4), сначала он"
         )
-    behaviour = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
-    pin = blob_sha1(behaviour.read_text(encoding="utf-8"))
+    anchor = Path(target_dir) / bundle_dir / _ANCHOR_FILENAME
+    pin = blob_sha1(anchor.read_text(encoding="utf-8"))
     changed = False
-    if meta.get("traces_to") != ["behaviour-spec"]:
-        meta["traces_to"] = ["behaviour-spec"]
+    if meta.get("traces_to") != [_ANCHOR_NODE_ID]:
+        meta["traces_to"] = [_ANCHOR_NODE_ID]
         changed = True
-    want = {"behaviour-spec": pin}
+    want = {_ANCHOR_NODE_ID: pin}
     if meta.get("upstream_hashes") != want:
         meta["upstream_hashes"] = want
         changed = True
@@ -610,10 +612,11 @@ def deliver_conform(
         (
             f"Approve-штамп владельца для spec/{ws_id}-tasks.md и "
             "нормализация frontmatter под активный governance-профиль: "
-            "traces_to ровно [behaviour-spec] (lite-профиль spec-runner "
-            "дописывает design — других профилей у него нет, upstream-плечо "
-            "заведено), пин upstream_hashes — на текущий blob вмерженного "
-            f"{bundle_dir}/15-behaviour-spec.md."
+            f"traces_to ровно [{_ANCHOR_NODE_ID}] (якорь — терминальный узел "
+            "_BUNDLE_DAG; lite-профиль spec-runner может дописать/подменить "
+            "traces — других профилей у него нет, upstream-плечо заведено "
+            "отдельно), пин upstream_hashes — на текущий blob вмерженного "
+            f"{bundle_dir}/{_ANCHOR_FILENAME}."
             + ("" if changed else " Файл уже был конформен — PR несёт "
                "только approve-штамп.")
         ),
