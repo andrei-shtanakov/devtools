@@ -50,6 +50,7 @@ _AUTHOR_STEPS = (
     ("author-charter", "charter", "00-charter.md"),
     ("author-requirements", "requirements", "10-requirements.md"),
     ("author-behaviour", "behaviour-spec", "15-behaviour-spec.md"),
+    ("author-design", "design", "20-design.md"),
 )
 
 

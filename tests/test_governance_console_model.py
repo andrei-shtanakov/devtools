@@ -97,8 +97,8 @@ def test_run_detail_with_findings_and_verdict(runs_root) -> None:
     keys = [k for k, _ in detail.ops]
     assert keys == [
         "branch", "author-charter", "author-requirements", "author-behaviour",
-        "commit", "gate-candidate", "push", "pr", "ready", "review",
-        "verdict", "merge", "sync-default", "gate-authoritative",
+        "author-design", "commit", "gate-candidate", "push", "pr", "ready",
+        "review", "verdict", "merge", "sync-default", "gate-authoritative",
         "remediation-issue",
     ]
     assert "GC-1: bad" in detail.findings
@@ -164,6 +164,39 @@ def test_step_first_incomplete_key(runs_root) -> None:
     rows = cm.list_runs()
     row = next(r for r in rows if r.run_id == "r-0006")
     assert row.step == "author-requirements"
+
+
+def test_pipeline_keys_cover_every_author_step_in_order() -> None:
+    """FR-04: `PIPELINE_KEYS` и `runner._AUTHOR_STEPS` обязаны совпадать по
+    составу и порядку author-шагов — иначе консоль показывает неверный
+    текущий шаг (найдено бы серией author-узлов, добавляемых по одному)."""
+    from governance.runner import _AUTHOR_STEPS
+
+    author_keys = [k for k, _, _ in _AUTHOR_STEPS]
+    in_console = [k for k in cm.PIPELINE_KEYS if k in set(author_keys)]
+    assert in_console == author_keys, (
+        "PIPELINE_KEYS и runner._AUTHOR_STEPS разошлись — консоль покажет "
+        "неверный текущий шаг (FR-04)"
+    )
+
+
+def test_step_stopped_author_on_author_design(runs_root) -> None:
+    """`stopped_author` с завершёнными предыдущими author-шагами ⇒ текущий
+    шаг — `author-design`, op виден в `run_detail`."""
+    s = _mk("r-0009")
+    for key in ("branch", "author-charter", "author-requirements", "author-behaviour"):
+        rs.op_start(s, key)
+        rs.op_complete(s, key)
+    rs.op_start(s, "author-design")
+    s.status = "stopped_author"
+    rs.save(s)
+
+    rows = cm.list_runs()
+    row = next(r for r in rows if r.run_id == "r-0009")
+    assert row.step == "author-design"
+
+    detail = cm.run_detail("r-0009")
+    assert dict(detail.ops)["author-design"] == "started"
 
 
 # --- bundle_summary ----------------------------------------------------

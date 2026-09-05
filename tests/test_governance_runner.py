@@ -143,6 +143,7 @@ class FakeOps:
             "charter": "00-charter.md",
             "requirements": "10-requirements.md",
             "behaviour-spec": "15-behaviour-spec.md",
+            "design": "20-design.md",
         }[kind]
         path = Path(target_dir) / bundle_dir / filename
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -153,6 +154,15 @@ class FakeOps:
             "requirements": "#### FR-01: x\n**Priority**: Must\n",
             "behaviour-spec": (
                 "#### BEH-01: x\n`traces: [FR-01]`\n- **checked_by**: x\n"
+            ),
+            "design": (
+                "---\n"
+                "spec_stage: design\n"
+                "status: draft\n"
+                "owner_role: architects\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "---\n"
+                "Открытых архитектурных вопросов нет (входной набор пуст)\n"
             ),
         }[kind]
         path.write_text(body, encoding="utf-8")
@@ -351,6 +361,7 @@ def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> 
     (bundle_dir / "15-behaviour-spec.md").write_text(
         "# behaviour\n", encoding="utf-8"
     )
+    (bundle_dir / "20-design.md").write_text("# design\n", encoding="utf-8")
 
     state = runner.start(**kwargs)
 
@@ -358,6 +369,7 @@ def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> 
     assert state.ops["author-charter"]["skipped"] is True
     assert state.ops["author-requirements"]["skipped"] is True
     assert state.ops["author-behaviour"]["skipped"] is True
+    assert state.ops["author-design"]["skipped"] is True
 
 
 def test_facts_from_fail_closed() -> None:
@@ -1417,6 +1429,12 @@ def test_gate_seam_required_absent_blocks_without_mock(
             "author-charter": {"status": "completed", "skipped": True},
             "author-requirements": {"status": "completed", "skipped": True},
             "author-behaviour": {"status": "completed", "skipped": True},
+            # mini.yaml (fixture-профиль этого теста) не несёт узел design —
+            # шаг обязан быть завершён-пропущенным, иначе _step_authoring
+            # запишет 20-design.md незапланированным для профиля файлом, и
+            # реальный `gate-check --candidate` споткнётся о него раньше,
+            # чем тест успеет проверить свой собственный сценарий.
+            "author-design": {"status": "completed", "skipped": True},
             "commit": {"status": "completed"},
         }
         rs.save(state)
@@ -2081,7 +2099,7 @@ def test_default_author_backend_is_codex_author_disp_not_called(
 
     state = runner.start(**_start_kwargs(tmp_path, "r-disp-default", ops))
 
-    assert ops.authored == ["charter", "requirements", "behaviour-spec"]
+    assert ops.authored == ["charter", "requirements", "behaviour-spec", "design"]
     assert ops.author_disp_calls == []
     assert state.author_backend == "codex"
 
@@ -2099,7 +2117,7 @@ def test_disp_backend_used_only_for_behaviour_node(
         tmp_path, run_id, ops, author_backend="disp",
     ))
 
-    assert ops.authored == ["charter", "requirements"]
+    assert ops.authored == ["charter", "requirements", "design"]
     assert len(ops.author_disp_calls) == 1
     target_dir, task = ops.author_disp_calls[0]
     assert target_dir == str(tmp_path / f"target-{run_id}")
