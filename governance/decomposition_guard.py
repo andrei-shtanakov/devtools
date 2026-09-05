@@ -182,6 +182,20 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
                     f"{t.dt_id}: сценарий {beh} отсутствует в behaviour-spec"
                 )
 
+    # порядок объявления: depends_on обязан ссылаться только на DT, уже
+    # объявленные ВЫШЕ по документу (Task 9 находка 2 финального ревью) —
+    # мост-транслятор переносит рёбра как есть, и forward-ссылка «уезжает»
+    # в целевой репо как ссылка на задачу, которой там ещё нет
+    order = {t.dt_id: idx for idx, t in enumerate(tasks)}
+    for t in tasks:
+        for ref in t.depends_on:
+            if ref in order and order[ref] > order[t.dt_id]:
+                findings.append(
+                    f"{t.dt_id}: depends_on ссылается на {ref}, "
+                    "объявленный ниже по документу — порядок объявления "
+                    "обязан быть топологическим"
+                )
+
     # сюръекция BEH без дублей
     coverage: dict[str, list[str]] = {}
     for t in tasks:

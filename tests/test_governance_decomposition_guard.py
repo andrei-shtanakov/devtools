@@ -119,6 +119,43 @@ def test_cycle_is_a_finding() -> None:
     assert any("цикл" in f for f in graph_findings(BEH, dt))
 
 
+def test_forward_reference_in_depends_on_is_a_finding() -> None:
+    """Находка 2 финального ревью: depends_on, ссылающийся на DT,
+    объявленный НИЖЕ по документу, — форвард-ссылка «уезжает» в чужой
+    репо (мост — чистый транслятор, порядок обязан быть топологическим
+    уже на входе). DT-02 объявлен нормально (BEH-02, BEH-03 покрыты
+    сюръективно), DT-01 ссылается на него раньше своего объявления."""
+    from governance.decomposition_guard import graph_findings
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-02]\n"
+        "parallel_group: core\n\n"
+        "#### DT-02: B · type: implement · owner: dev\n"
+        "scenarios: [BEH-02, BEH-03]\ndepends_on: []\n"
+        "parallel_group: core\n"
+    )
+    findings = graph_findings(BEH, dt)
+    assert any(
+        "DT-01" in f and "DT-02" in f and "ниже по документу" in f
+        for f in findings
+    )
+
+
+def test_backward_reference_in_depends_on_is_not_a_finding() -> None:
+    """Обратная сторона: DT-02 depends_on DT-01, объявленный ВЫШЕ —
+    штатный топологический порядок, никакой находки про порядок."""
+    from governance.decomposition_guard import graph_findings
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01, BEH-02]\ndepends_on: []\n"
+        "parallel_group: core\n\n"
+        "#### DT-02: B · type: implement · owner: dev\n"
+        "scenarios: [BEH-03]\ndepends_on: [DT-01]\n"
+        "parallel_group: core\n"
+    )
+    assert not any("ниже по документу" in f for f in graph_findings(BEH, dt))
+
+
 def test_verify_requires_delivered_by_and_closure() -> None:
     from governance.decomposition_guard import graph_findings
     # verify без delivered_by
