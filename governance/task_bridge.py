@@ -938,8 +938,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--legacy-bundle", type=int, choices=(3, 4), default=None,
-        help="точный состав легаси-бандла: 3 (до design) или 4 (до "
-        "decomposition); без флага — полный DAG; значение обязательно",
+        help="точный фактический состав легаси-бандла: 3 — "
+        "charter+requirements+behaviour-spec (без design/decomposition); "
+        "4 — + design (без decomposition); без флага — полный DAG "
+        "(+ decomposition); значение обязано совпасть с составом каталога "
+        "РОВНО, лишний либо недостающий узел отказывает",
     )
     args = parser.parse_args(argv)
     state = load(args.run_id)
