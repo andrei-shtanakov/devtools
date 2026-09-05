@@ -1,6 +1,7 @@
 ---
 spec_stage: tasks
 status: draft
+owner_role: stream-owner
 version: 1
 generated_by: fleet-agent
 generated_at: <YYYY-MM-DDTHH:MM:SS>

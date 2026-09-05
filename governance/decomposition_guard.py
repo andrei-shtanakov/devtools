@@ -13,8 +13,9 @@ _DT_HEAD_RE = re.compile(
     r"\s*·\s*owner:\s*(\S+)\s*$",
     re.M,
 )
-# near-miss: начинается как DT-заголовок, но строгую грамматику не прошёл
-_DT_NEAR_RE = re.compile(r"^####\s+(DT-\d+)\b.*$", re.M)
+# near-miss: начинается как DT-заголовок, но строгую грамматику не прошёл;
+# широкая форма id ([^\s:]*) — суффиксный мусор (DT-3a) тоже находка
+_DT_NEAR_RE = re.compile(r"^####\s+(DT-[^\s:]*)", re.M)
 _SECTION_RE = re.compile(r"^#{1,3}\s", re.M)
 
 
@@ -100,9 +101,13 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
 # обязательны) — minor круга 4: расхождение (гард видит `#### BEH-02` без
 # двоеточия, мост — нет) давало бы зелёный гейт и пустую задачу в
 # tasks-спеке.
-# [a-z]?-суффикс — как у _BEH_HEADER моста (BEH-18a из раундов ревью)
+# [a-z]?-суффикс — как у _BEH_HEADER моста (BEH-18a из раундов ревью).
+# NEAR ловит ЛЮБОЙ BEH-подобный заголовок (BEH-18A, BEH-18ab, BEH-18a2):
+# неизвестная форма id — находка формы, не молчание; узкий NEAR с \b
+# был слеп к суффиксам вне [a-z]? — тот же fail-open, что и до фикса
+# (major ревью PR #148).
 _BEH_HEAD_RE = re.compile(r"^####\s+(BEH-\d+[a-z]?):\s*\S", re.M)
-_BEH_NEAR_RE = re.compile(r"^####\s+(BEH-\d+[a-z]?)\b", re.M)
+_BEH_NEAR_RE = re.compile(r"^####\s+(BEH-[^\s:]*)", re.M)
 _BEH_CHECKED_RE = re.compile(
     r"\*\*checked_by\*\*.*?`kind:\s*(\S+?)`.*?`target:\s*(\S+?)`"
 )

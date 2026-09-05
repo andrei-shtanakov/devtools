@@ -336,3 +336,39 @@ def test_beh_binding_grammar_matches_task_bridge() -> None:
         )
         assert target == expected
         assert kind == (sc.checked_kind if sc.checked_target else None)
+
+
+def test_letter_suffixed_beh_is_parsed_and_covered() -> None:
+    """PR #148: BEH-18a — валидный id (вставки раундов ревью); гард
+    видит его во входном наборе, откат [a-z]? в _BEH_HEAD_RE краснит."""
+    from governance.decomposition_guard import graph_findings
+    beh = (
+        "#### BEH-18: Обычный\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_x`\n\n"
+        "#### BEH-18a: Вставленный\n**checked_by** `kind: e2e` "
+        "`target: tests/test_b.py::test_y`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-18, BEH-18a]\ndepends_on: []\n"
+        "parallel_group: solo\n"
+    )
+    assert graph_findings(beh, dt) == []
+
+
+def test_unknown_beh_suffix_form_is_a_form_finding() -> None:
+    """Major ревью PR #148: BEH-18A/BEH-18ab (форма вне [a-z]?) обязаны
+    давать находку формы, а не молча склеиваться с предыдущим блоком."""
+    from governance.decomposition_guard import graph_findings
+    beh = (
+        "#### BEH-18: Обычный\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_x`\n\n"
+        "#### BEH-18A: Заглавный суффикс\n**checked_by** `kind: e2e` "
+        "`target: tests/test_b.py::test_y`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-18]\ndepends_on: []\nparallel_group: solo\n"
+    )
+    findings = graph_findings(beh, dt)
+    assert any("BEH-18A" in f and "грамматик" in f for f in findings)
