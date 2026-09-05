@@ -92,6 +92,38 @@ upstream_hashes:
 reason: Нужны замеры нагрузки перед выбором шардирования.
 """
 
+DECOMPOSITION_MD = """\
+---
+spec_stage: decomposition
+status: draft
+version: 1
+owner_role: tech-lead
+traces_to: [design]
+upstream_hashes:
+  design: 1200000000000000000000000000000000000000
+---
+## Задачи
+
+#### DT-01: Реализация · type: implement · owner: dev
+scenarios: [BEH-01, BEH-02]
+depends_on: []
+parallel_group: solo
+
+Проза предмета.
+
+## Инварианты графа
+
+Соблюдены.
+
+## Порядок и параллельность
+
+DT-01 — единственная задача, зависимостей нет.
+
+## Вне объёма
+
+Ничего не исключено.
+"""
+
 
 def test_parse_behaviour_extracts_scenarios() -> None:
     scenarios = task_bridge.parse_behaviour(BEHAVIOUR_MD)
@@ -192,6 +224,7 @@ def _target(tmp_path: Path) -> Path:
     (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
     (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
     (bundle / "20-design.md").write_text(DESIGN_MD)
+    (bundle / "30-decomposition.md").write_text(DECOMPOSITION_MD)
     return target
 
 
@@ -216,30 +249,32 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
     names = [c[0] for c in ops.calls]
     # база освежается до ветки
     assert names.index("checkout_and_pull") < names.index("ensure_branch")
-    # один коммит: штамп четырёх файлов бандла (DAG до design) + файл спеки
+    # один коммит: штамп пяти файлов бандла (полный DAG до decomposition) +
+    # файл спеки
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
     assert commit[1] == (
         "workstreams/WS-alpha-7/spec/00-charter.md",
         "workstreams/WS-alpha-7/spec/10-requirements.md",
         "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
         "workstreams/WS-alpha-7/spec/20-design.md",
+        "workstreams/WS-alpha-7/spec/30-decomposition.md",
         "spec/WS-alpha-7-tasks.md",
     )
     assert ("push_branch", "spec/WS-alpha-7-tasks") in ops.calls
     assert "draft" in ops.pr_body.lower()
     assert "штамп статусов" in ops.pr_body
-    # Пин tasks-спеки — blob design ПОСЛЕ штампа (иначе протух бы в том же
-    # PR): design — терминальный узел _BUNDLE_DAG.
+    # Пин tasks-спеки — blob decomposition ПОСЛЕ штампа (иначе протух бы в
+    # том же PR): decomposition — терминальный узел _BUNDLE_DAG (Task 7).
     from governance.stale_adapter import blob_sha1
     stamped_blob = blob_sha1(
-        (target / "workstreams/WS-alpha-7/spec/20-design.md")
+        (target / "workstreams/WS-alpha-7/spec/30-decomposition.md")
         .read_text(encoding="utf-8")
     )
     meta, _body = task_bridge.split_frontmatter(
         spec.read_text(encoding="utf-8")
     )
-    assert meta["traces_to"] == ["design"]
-    assert meta["upstream_hashes"] == {"design": stamped_blob}
+    assert meta["traces_to"] == ["decomposition"]
+    assert meta["upstream_hashes"] == {"decomposition": stamped_blob}
     # секция резолюций сгенерирована из фикстурного 20-design.md, не
     # рукописным текстом (Task 5, Step 1в)
     assert "## Решения открытых вопросов (уровень design)" in spec.read_text()
@@ -301,6 +336,7 @@ def test_deliver_reads_bundle_only_after_base_checkout(tmp_path: Path) -> None:
             (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
             (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
             (bundle / "20-design.md").write_text(DESIGN_MD)
+            (bundle / "30-decomposition.md").write_text(DECOMPOSITION_MD)
 
     pr = task_bridge.deliver(
         target_dir=str(target),
@@ -453,6 +489,7 @@ def test_stamp_bundle_approves_and_repins_chain(tmp_path: Path) -> None:
         "workstreams/WS-alpha-7/spec/10-requirements.md",
         "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
         "workstreams/WS-alpha-7/spec/20-design.md",
+        "workstreams/WS-alpha-7/spec/30-decomposition.md",
     ]
     bundle = target / "workstreams/WS-alpha-7/spec"
     charter_meta, _ = task_bridge.split_frontmatter(
@@ -470,15 +507,21 @@ def test_stamp_bundle_approves_and_repins_chain(tmp_path: Path) -> None:
     beh_meta, _ = task_bridge.split_frontmatter(beh_text)
     assert beh_meta["status"] == "approved"
     assert beh_meta["upstream_hashes"]["requirements"] == blob_sha1(req_text)
-    design_meta, _ = task_bridge.split_frontmatter(
-        (bundle / "20-design.md").read_text(encoding="utf-8")
-    )
+    design_text = (bundle / "20-design.md").read_text(encoding="utf-8")
+    design_meta, _ = task_bridge.split_frontmatter(design_text)
     assert design_meta["status"] == "approved"
     assert design_meta["upstream_hashes"]["requirements"] == blob_sha1(
         req_text
     )
     assert design_meta["upstream_hashes"]["behaviour-spec"] == blob_sha1(
         beh_text
+    )
+    decomposition_meta, _ = task_bridge.split_frontmatter(
+        (bundle / "30-decomposition.md").read_text(encoding="utf-8")
+    )
+    assert decomposition_meta["status"] == "approved"
+    assert decomposition_meta["upstream_hashes"]["design"] == blob_sha1(
+        design_text
     )
 
 
@@ -493,6 +536,75 @@ def test_stamp_bundle_is_idempotent(tmp_path: Path) -> None:
         approved_by="y", approved_at="t2",
     )
     assert again == []
+
+
+# --- Task 7 (decomposition-node): узел decomposition в DAG,
+# --legacy-bundle=3|4 --------------------------------------------------
+
+
+def test_bundle_dag_terminates_at_decomposition() -> None:
+    assert task_bridge._BUNDLE_DAG[-1] == ("30-decomposition.md", ("design",))
+    assert task_bridge._ANCHOR_NODE_ID == "decomposition"
+
+
+def test_dag_for_none_is_full_dag() -> None:
+    assert task_bridge._dag_for(None) == task_bridge._BUNDLE_DAG
+
+
+def test_dag_for_legacy_values_are_exact_prefixes() -> None:
+    assert task_bridge._dag_for(3) == task_bridge._BUNDLE_DAG[:3]
+    assert task_bridge._dag_for(4) == task_bridge._BUNDLE_DAG[:4]
+
+
+def test_dag_for_invalid_value_raises() -> None:
+    with pytest.raises(ValueError, match="3 или 4"):
+        task_bridge._dag_for(5)
+
+
+def test_legacy_bundle_exact_composition(tmp_path: Path) -> None:
+    """Каталог с ровно 4 узлами (00/10/15/20, без 30-decomposition.md):
+    legacy_bundle=4 штампует и якорит на design; legacy_bundle=3 и
+    legacy_bundle=None (полный DAG) отказывают — состав не совпал точно
+    (запрет «по самому длинному существующему», спека §4)."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text(CHARTER_MD)
+    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
+    (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
+    (bundle / "20-design.md").write_text(DESIGN_MD)
+
+    changed = task_bridge.stamp_bundle_approved(
+        str(target), "workstreams/WS-alpha-7/spec",
+        approved_by="a", approved_at="t", legacy_bundle=4,
+    )
+    assert changed == [
+        "workstreams/WS-alpha-7/spec/00-charter.md",
+        "workstreams/WS-alpha-7/spec/10-requirements.md",
+        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
+        "workstreams/WS-alpha-7/spec/20-design.md",
+    ]
+
+    with pytest.raises(RuntimeError, match="не совпадает"):
+        task_bridge.stamp_bundle_approved(
+            str(target), "workstreams/WS-alpha-7/spec",
+            approved_by="a", approved_at="t", legacy_bundle=3,
+        )
+    with pytest.raises(RuntimeError, match=r"--legacy-bundle=3\|4"):
+        task_bridge.stamp_bundle_approved(
+            str(target), "workstreams/WS-alpha-7/spec",
+            approved_by="a", approved_at="t",
+        )
+
+
+def test_legacy_flag_requires_value() -> None:
+    with pytest.raises(SystemExit):
+        task_bridge.main(["--run-id", "r-x", "--legacy-bundle"])
+
+
+def test_legacy_flag_rejects_out_of_range_value() -> None:
+    with pytest.raises(SystemExit):
+        task_bridge.main(["--run-id", "r-x", "--legacy-bundle", "5"])
 
 
 # --- Task 7: переходный режим легаси-бандлов (без узла design) -----------
@@ -531,12 +643,12 @@ def test_stamp_bundle_without_design_refuses_without_legacy_flag(
 def test_stamp_bundle_legacy_mode_stamps_three_node_prefix(
     tmp_path: Path,
 ) -> None:
-    """Step 1(б): `legacy_bundle=True` ⇒ штамп только по 3-узловому
+    """Step 1(б): `legacy_bundle=3` ⇒ штамп только по 3-узловому
     префиксу DAG, никакого чтения 20-design.md."""
     target = _target_legacy(tmp_path)
     changed = task_bridge.stamp_bundle_approved(
         str(target), "workstreams/WS-alpha-7/spec",
-        approved_by="a", approved_at="t", legacy_bundle=True,
+        approved_by="a", approved_at="t", legacy_bundle=3,
     )
     assert changed == [
         "workstreams/WS-alpha-7/spec/00-charter.md",
@@ -553,7 +665,7 @@ def test_stamp_bundle_legacy_mode_stamps_three_node_prefix(
 def test_conform_legacy_normalizes_to_behaviour_spec_no_design_read(
     tmp_path: Path,
 ) -> None:
-    """Step 3b: `conform_approved(..., legacy_bundle=True)` якорит на
+    """Step 3b: `conform_approved(..., legacy_bundle=3)` якорит на
     behaviour-spec и не читает 20-design.md (бандл его не несёт вовсе —
     отсутствие файла не должно всплыть traceback'ом)."""
     from governance.stale_adapter import blob_sha1
@@ -569,7 +681,7 @@ def test_conform_legacy_normalizes_to_behaviour_spec_no_design_read(
     )
     changed = task_bridge.conform_approved(
         str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec",
-        legacy_bundle=True,
+        legacy_bundle=3,
     )
     assert changed is True
     meta, _ = task_bridge.split_frontmatter(
@@ -630,7 +742,7 @@ def test_deliver_missing_design_refuses_before_branch_creation(
 def test_deliver_legacy_bundle_writes_spec_anchored_on_behaviour(
     tmp_path: Path,
 ) -> None:
-    """`deliver(legacy_bundle=True)` доставляет спеку без design: анкер —
+    """`deliver(legacy_bundle=3)` доставляет спеку без design: анкер —
     behaviour-spec, штамп — только 3-узловой префикс DAG."""
     target = _target_legacy(tmp_path)
     ops = _StubOps()
@@ -643,7 +755,7 @@ def test_deliver_legacy_bundle_writes_spec_anchored_on_behaviour(
         base_ref="master",
         ops=ops,
         approved_by="a", approved_at="t",
-        legacy_bundle=True,
+        legacy_bundle=3,
     )
     assert pr == 77
     spec = target / "spec/WS-alpha-7-tasks.md"
@@ -663,10 +775,11 @@ def test_deliver_legacy_bundle_writes_spec_anchored_on_behaviour(
 
 
 def test_deliver_reads_design_only_after_base_checkout(tmp_path: Path) -> None:
-    """Позиция гарда design (Task 7): по образцу
-    `test_deliver_reads_bundle_only_after_base_checkout` — 20-design.md
-    появляется ТОЛЬКО внутри `checkout_and_pull`; гард обязан увидеть его
-    там и НЕ упасть. Пре-чекаутная позиция гарда красит этот тест."""
+    """Позиция гарда design/composition (Task 7): по образцу
+    `test_deliver_reads_bundle_only_after_base_checkout` — весь бандл
+    (вкл. 30-decomposition.md) появляется ТОЛЬКО внутри `checkout_and_pull`;
+    гард обязан увидеть его там и НЕ упасть. Пре-чекаутная позиция гарда
+    красит этот тест."""
     target = tmp_path / "alpha"
     target.mkdir()
     bundle = target / "workstreams/WS-alpha-7/spec"
@@ -679,6 +792,7 @@ def test_deliver_reads_design_only_after_base_checkout(tmp_path: Path) -> None:
             (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
             (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
             (bundle / "20-design.md").write_text(DESIGN_MD)
+            (bundle / "30-decomposition.md").write_text(DECOMPOSITION_MD)
 
     pr = task_bridge.deliver(
         target_dir=str(target),
@@ -694,10 +808,10 @@ def test_deliver_reads_design_only_after_base_checkout(tmp_path: Path) -> None:
 
 
 def test_conform_normalizes_after_approve(tmp_path: Path) -> None:
-    """Task 6: якорь — design (терминальный узел `_BUNDLE_DAG`), не
+    """Task 7: якорь — decomposition (терминальный узел `_BUNDLE_DAG`), не
     behaviour-spec. Регрессия: изменённый вручную (или унаследованный от
     старого поведения) `traces_to: [behaviour-spec]` нормализуется К
-    design, а НЕ откатывается обратно к behaviour-spec."""
+    decomposition, а НЕ откатывается обратно к behaviour-spec."""
     from governance.stale_adapter import blob_sha1
 
     target = _target(tmp_path)
@@ -721,10 +835,10 @@ def test_conform_normalizes_after_approve(tmp_path: Path) -> None:
     meta, body = task_bridge.split_frontmatter(
         (spec_dir / "WS-alpha-7-tasks.md").read_text(encoding="utf-8")
     )
-    assert meta["traces_to"] == ["design"]
+    assert meta["traces_to"] == ["decomposition"]
     assert meta["upstream_hashes"] == {
-        "design": blob_sha1(
-            (target / "workstreams/WS-alpha-7/spec/20-design.md")
+        "decomposition": blob_sha1(
+            (target / "workstreams/WS-alpha-7/spec/30-decomposition.md")
             .read_text(encoding="utf-8")
         )
     }
@@ -732,14 +846,14 @@ def test_conform_normalizes_after_approve(tmp_path: Path) -> None:
     assert meta["status"] == "approved"
     assert meta["approved_by"] == "andrei-shtanakov"
     assert "## Milestone 1: s" in body
-    # идемпотентность: второй прогон НЕ трогает уже нормализованный design
+    # идемпотентность: второй прогон НЕ трогает уже нормализованный якорь
     assert task_bridge.conform_approved(
         str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
     ) is False
     meta2, _ = task_bridge.split_frontmatter(
         (spec_dir / "WS-alpha-7-tasks.md").read_text(encoding="utf-8")
     )
-    assert meta2["traces_to"] == ["design"]
+    assert meta2["traces_to"] == ["decomposition"]
 
 
 def test_conform_refuses_draft(tmp_path: Path) -> None:
@@ -816,7 +930,7 @@ def test_deliver_conform_rerun_updates_existing_pr(tmp_path: Path) -> None:
     meta, _ = task_bridge.split_frontmatter(
         (target / "spec/WS-alpha-7-tasks.md").read_text(encoding="utf-8")
     )
-    assert meta["traces_to"] == ["design"]
+    assert meta["traces_to"] == ["decomposition"]
 
 
 # --- группировка по файлу цели (@id:task-bridge-beh-grouping, урок 8) -------

@@ -50,7 +50,7 @@ help:
 	@echo "  make behaviour-run ARGS=… — governance runner CLI: start|resume|verify|status (uv + группа governance)"
 	@echo "  make behaviour-console ARGS=… — governance console TUI (uv + группа governance)"
 	@echo "  make behaviour-tasks ARGS='--run-id …' — draft tasks.md-спека из бандла PR-ом (approve — человек)"
-	@echo "  make behaviour-tasks ARGS='--run-id … --legacy-bundle' — для 3-узловых бандлов без design (WS-SMOKE-001, non-conformant против team-exp)"
+	@echo "  make behaviour-tasks ARGS='--run-id … --legacy-bundle=3' — для 3-узловых бандлов без design (WS-SMOKE-001, non-conformant против team-exp); =4 — бандлы без decomposition"
 	@echo "  make accept-pr ARGS='--repo <r> --pr <n>' — приёмка integration-PR spec-runner: ревью → чеки → DarkFactory-мерж"
 	@echo "  make preflight ARGS='--repo <r>' — преflight перед прогоном spec-runner: конфиг-эталон / insteadOf / state-DB / live-smoke"
 

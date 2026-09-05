@@ -3086,13 +3086,14 @@ def test_gate_design_undeclared_behaviour_edge_stops(
     assert "push" not in state.ops
 
 
-@pytest.mark.xfail(reason="ребро DAG приходит Task 7", strict=True)
 def test_gate_edges_derived_from_bundle_dag() -> None:
     """MINOR-3: `runner._GATE_EDGES` не расходится с `task_bridge._BUNDLE_DAG`
     — рёбра S4 выводятся из ОДНОГО источника (не трёх несинхронизированных
     копий: этот кортеж, `_BUNDLE_DAG`, `profiles/team-exp.yaml`).
     node-id ↔ имя файла — через `task_bridge._node_id`; required — те
-    рёбра, чей target-узел design (MAJOR-1)."""
+    рёбра, чей target-узел design ИЛИ decomposition (MAJOR-1; Task 7 плана
+    decomposition-node — ребро decomposition→design обязательное, понижать
+    флаг нельзя: fail-open на необъявленном ребре)."""
     filename_by_node_id = {
         task_bridge._node_id(fname): fname
         for fname, _upstreams in task_bridge._BUNDLE_DAG
@@ -3102,7 +3103,7 @@ def test_gate_edges_derived_from_bundle_dag() -> None:
             fname,
             upstream,
             filename_by_node_id[upstream],
-            task_bridge._node_id(fname) == "design",
+            task_bridge._node_id(fname) in {"design", "decomposition"},
         )
         for fname, upstreams in task_bridge._BUNDLE_DAG
         for upstream in upstreams
@@ -3414,12 +3415,19 @@ def test_deliver_refuses_when_target_profile_lacks_design(
 ) -> None:
     """Step 1(в): `deliver` с тем же расхождением (профиль target без
     design) ⇒ RuntimeError с той же процедурой, что у `stopped_preflight`
-    раннера — проверяется ДО ensure_branch/стампа."""
+    раннера — проверяется ДО ensure_branch/стампа.
+
+    Бандл дополнен до полного 5-узлового состава (Task 7 плана
+    decomposition-node — `_check_bundle_composition` теперь требует точное
+    совпадение до profile-preflight'а; фикстура была 15/20)."""
     target = tmp_path / "alpha"
     bundle = target / "workstreams/WS-alpha-7/spec"
     bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text("# charter\n", encoding="utf-8")
+    (bundle / "10-requirements.md").write_text("# requirements\n", encoding="utf-8")
     (bundle / "15-behaviour-spec.md").write_text("# behaviour\n", encoding="utf-8")
     (bundle / "20-design.md").write_text("# design\n", encoding="utf-8")
+    (bundle / "30-decomposition.md").write_text("# decomposition\n", encoding="utf-8")
     _write_stale_profile(target)
 
     class _MiniOps:
@@ -3443,6 +3451,49 @@ def test_deliver_refuses_when_target_profile_lacks_design(
         )
     message = str(exc_info.value)
     assert "design" in message.lower()
+    assert "authority-root" in message
+    assert "мерж человеком" in message
+
+
+def test_deliver_refuses_when_target_profile_lacks_decomposition(
+    tmp_path: Path,
+) -> None:
+    """Зеркальный тест design-варианта (Task 7 плана decomposition-node):
+    профиль target несёт design, но НЕ decomposition (4-узловой профиль,
+    `_write_four_node_profile`) ⇒ `deliver` отказывает по preflight
+    decomposition-узла — та же процедура, что у `stopped_preflight`
+    раннера, проверяется ДО ensure_branch/стампа."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text("# charter\n", encoding="utf-8")
+    (bundle / "10-requirements.md").write_text("# requirements\n", encoding="utf-8")
+    (bundle / "15-behaviour-spec.md").write_text("# behaviour\n", encoding="utf-8")
+    (bundle / "20-design.md").write_text("# design\n", encoding="utf-8")
+    (bundle / "30-decomposition.md").write_text("# decomposition\n", encoding="utf-8")
+    _write_four_node_profile(target)
+
+    class _MiniOps:
+        def is_dirty(self, target_dir: str) -> bool:
+            return False
+
+        def checkout_and_pull(self, target_dir: str, branch: str) -> None:
+            pass
+
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=_MiniOps(),
+            approved_by="a", approved_at="t",
+            profile="profiles/team-exp.yaml",
+        )
+    message = str(exc_info.value)
+    assert "decomposition" in message.lower()
     assert "authority-root" in message
     assert "мерж человеком" in message
 

@@ -33,12 +33,14 @@ from governance.stale_adapter import blob_sha1
 # node-id своих upstream'ов; штамп идёт по порядку тюпла, и пин(ы) узла
 # пересчитываются ПОСЛЕ штампа ВСЕХ его upstream-файлов (иначе пин
 # протухает в момент записи). design — единственный узел с ДВУМЯ
-# upstream-пинами (Task 5 плана design-узла).
+# upstream-пинами (Task 5 плана design-узла). decomposition — терминальный
+# узел (Task 7 плана decomposition-node), пинует только design.
 _BUNDLE_DAG: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("00-charter.md", ()),
     ("10-requirements.md", ("charter",)),
     ("15-behaviour-spec.md", ("requirements",)),
     ("20-design.md", ("requirements", "behaviour-spec")),
+    ("30-decomposition.md", ("design",)),
 )
 
 
@@ -47,19 +49,59 @@ def _node_id(filename: str) -> str:
     return filename.rsplit(".", 1)[0].split("-", 1)[1]
 
 
-# Якорный узел моста — терминальный узел DAG (design). Выводится из
+# Якорный узел моста — терминальный узел DAG (decomposition). Выводится из
 # _BUNDLE_DAG, а не хардкодится второй раз (Task 6): смена терминального
 # узла бандла — правка одной строки DAG, не поиск по файлу.
 _ANCHOR_FILENAME = _BUNDLE_DAG[-1][0]
 _ANCHOR_NODE_ID = _node_id(_ANCHOR_FILENAME)
 
-# Легаси-режим (Task 7 плана design-узла): бандлы, авторенные до раскатки
-# design-узла, несут только эти три файла. `--legacy-bundle` усекает DAG до
-# этого префикса — терминальный узел становится behaviour-spec, 20-design.md
-# не читается вовсе (его в бандле нет по построению, не по ошибке).
-_BUNDLE_DAG_LEGACY: tuple[tuple[str, tuple[str, ...]], ...] = _BUNDLE_DAG[:3]
-_LEGACY_ANCHOR_FILENAME = _BUNDLE_DAG_LEGACY[-1][0]
-_LEGACY_ANCHOR_NODE_ID = _node_id(_LEGACY_ANCHOR_FILENAME)
+
+def _dag_for(
+    legacy_bundle: int | None,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Активный DAG по значению `--legacy-bundle` (Task 7 плана
+    decomposition-node): `None` — полный DAG (текущий якорь —
+    decomposition); `3`/`4` — точный префикс `_BUNDLE_DAG` (легаси-бандлы,
+    авторенные до раскатки design/decomposition-узла: три узла —
+    charter→requirements→behaviour-spec, четыре — плюс design). Иное
+    значение — ValueError, argparse (`choices=(3, 4)`) отсекает его на
+    CLI-границе раньше, но функция вызывается и напрямую (тесты,
+    `stamp_bundle_approved`/`conform_approved`/`deliver`/`deliver_conform`).
+    """
+    if legacy_bundle is None:
+        return _BUNDLE_DAG
+    if legacy_bundle in (3, 4):
+        return _BUNDLE_DAG[:legacy_bundle]
+    raise ValueError(
+        f"legacy_bundle: ожидается 3 или 4, получено {legacy_bundle!r}"
+    )
+
+
+def _check_bundle_composition(
+    target_dir: str,
+    bundle_dir: str,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+) -> None:
+    """Заявленный состав бандла (`dag`) обязан совпасть с фактическим РОВНО.
+
+    «По самому длинному существующему» запрещён (спека §4): красил бы
+    недоавторенный бандл зелёным, если в каталоге случайно лежит лишний
+    (или недостаёт) узел DAG. Сравнение — по множеству имён файлов, не по
+    префиксу и не по count — лишний ИЛИ недостающий узел одинаково
+    отказывает.
+    """
+    declared = {fname for fname, _ in dag}
+    known = {fname for fname, _ in _BUNDLE_DAG}
+    actual = {
+        p.name for p in (Path(target_dir) / bundle_dir).glob("*.md")
+        if p.name in known
+    }
+    if actual != declared:
+        raise RuntimeError(
+            f"состав бандла {sorted(actual)} не совпадает с заявленным "
+            f"{sorted(declared)}: доавторьте недостающие узлы либо "
+            "передайте --legacy-bundle=3|4 с ТОЧНЫМ фактическим составом"
+        )
 
 
 def split_frontmatter(text: str) -> tuple[dict, str]:
@@ -314,15 +356,17 @@ def render_tasks(
     прогоне kapelle#47 дало 19 церемониальных задач. Сценарии без Feature
     остаются задачами 1:1; задачи зависят цепочкой (порядок документа).
 
-    Якорь traces_to/upstream_hashes — design (Task 5 плана design-узла):
-    design пинует ОБА upstream (requirements, behaviour-spec), так что
-    один пин design транзитивно покрывает весь бандл — traces_to дальше
-    ведёт на behaviour-spec незачем.
+    Якорь traces_to/upstream_hashes по умолчанию — decomposition
+    (терминальный узел `_BUNDLE_DAG`, Task 7 плана decomposition-node):
+    каждый узел цепочки транзитивно пинует всех своих upstream, так что
+    один пин терминального узла покрывает весь бандл — traces_to дальше по
+    цепочке незачем.
 
-    `anchor_node_id` — Task 7 (легаси-режим): вызывающий (`deliver`) передаёт
-    `behaviour-spec` вместо дефолтного `design`, когда `legacy_bundle=True`
-    (3-узловой бандл без design) — сам рендер об этом режиме не знает,
-    только про то, ЧТО именно является якорем.
+    `anchor_node_id` — легаси-режим (Task 7 плана design-узла, обобщено
+    Task 7 плана decomposition-node на `--legacy-bundle=3|4`): вызывающий
+    (`deliver`) передаёт терминальный узел ФАКТИЧЕСКИ активного (усечённого)
+    DAG вместо дефолтного `decomposition` — сам рендер об этом режиме не
+    знает, только про то, ЧТО именно является якорем.
     """
     lines = [
         "---",
@@ -410,15 +454,17 @@ def stamp_bundle_approved(
     bundle_dir: str,
     approved_by: str,
     approved_at: str,
-    legacy_bundle: bool = False,
+    legacy_bundle: int | None = None,
 ) -> list[str]:
     """Штамп статусов вмерженного бандла + перепиновка цепочки; → rel-пути.
 
-    `legacy_bundle=True` (Task 7) усекает обход до 3-узлового префикса DAG
-    (`_BUNDLE_DAG_LEGACY`) — бандлы, авторенные до раскатки design-узла, не
-    несут 20-design.md вовсе, и штамп не должен его искать. Без флага на
-    таком бандле — явный RuntimeError (текст называет файл и обе процедуры:
-    доавторить design ЛИБО передать `--legacy-bundle`), а не сырой
+    `legacy_bundle` (Task 7 плана decomposition-node) выбирает активный DAG
+    через `_dag_for`: `None` — полный (charter→…→decomposition); `3`/`4` —
+    точный префикс (бандлы, авторенные до раскатки design/decomposition-
+    узла). Состав каталога обязан совпасть с выбранным DAG РОВНО
+    (`_check_bundle_composition`, вызов в начале функции) — явный
+    RuntimeError с процедурой (доавторить недостающие узлы ЛИБО передать
+    `--legacy-bundle=3|4` с точным фактическим составом), а не сырой
     traceback от `path.read_text()` на отсутствующем файле.
 
     Урок 2 ретроспективы (devtools#110): после мержа бандла charter /
@@ -435,22 +481,13 @@ def stamp_bundle_approved(
     обхода `_BUNDLE_DAG` уже топологический. Идемпотентно: уже approved
     файл с верными пинами не трогается и в результат не входит.
     """
+    dag = _dag_for(legacy_bundle)
+    _check_bundle_composition(target_dir, bundle_dir, dag)
     changed: list[str] = []
     stamped_blobs: dict[str, str] = {}
     base = Path(target_dir) / bundle_dir
-    dag = _BUNDLE_DAG_LEGACY if legacy_bundle else _BUNDLE_DAG
     for name, upstream_ids in dag:
         path = base / name
-        if not path.exists():
-            raise RuntimeError(
-                f"{path} не найден — штамп бандла остановлен. Либо "
-                "доавторьте design (узел `design` профиля team-exp, "
-                "`make behaviour-tasks` ждёт вмерженный 20-design.md), "
-                "либо, если бандл легаси (авторен до раскатки design-узла "
-                "и design туда не входит), передайте `--legacy-bundle` — "
-                "штамп пойдёт по 3-узловому префиксу "
-                "charter→requirements→behaviour-spec"
-            )
         meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
         dirty = False
         if meta.get("status") != "approved":
@@ -482,28 +519,29 @@ def conform_approved(
     target_dir: str,
     ws_id: str,
     bundle_dir: str,
-    legacy_bundle: bool = False,
+    legacy_bundle: int | None = None,
 ) -> bool:
     """Нормализация frontmatter tasks-спеки ПОСЛЕ `spec approve` владельца.
 
-    Якорь — терминальный узел `_BUNDLE_DAG` (design, Task 6): не
-    хардкодится второй раз, выводится из DAG (`_ANCHOR_NODE_ID` /
-    `_ANCHOR_FILENAME`), так что смена терминального узла бандла правит
-    DAG в одном месте, не эту функцию. Нормализация возвращает форму
-    активного governance-профиля: traces_to ровно [<anchor>], пин — на
-    ТЕКУЩИЙ blob вмерженного файла анкера (independent от того, что туда
-    дописал/недописал `spec approve` — lite-профиль spec-runner не знает
-    про наш DAG). Строгий run проверяет только status — правка
-    безопасна. Возвращает, менялся ли файл.
+    Якорь — терминальный узел активного DAG (`_dag_for(legacy_bundle)`,
+    Task 7 плана decomposition-node: `None` — decomposition, `3`/`4` —
+    усечённый префикс, behaviour-spec/design соответственно). Не
+    хардкодится второй раз — выводится из DAG, так что смена терминального
+    узла бандла правит DAG в одном месте, не эту функцию. Нормализация
+    возвращает форму активного governance-профиля: traces_to ровно
+    [<anchor>], пин — на ТЕКУЩИЙ blob вмерженного файла анкера (independent
+    от того, что туда дописал/недописал `spec approve` — lite-профиль
+    spec-runner не знает про наш DAG). Строгий run проверяет только
+    status — правка безопасна. Возвращает, менялся ли файл.
 
-    `legacy_bundle=True` (Task 7): якорь — терминальный узел УСЕЧЁННОГО
-    DAG (`behaviour-spec`, `_LEGACY_ANCHOR_NODE_ID`/`_LEGACY_ANCHOR_FILENAME`)
-    — 20-design.md не читается вовсе, того файла в легаси-бандле нет.
-    Отсутствие файла-анкера (design без флага на легаси-бандле) — тот же
-    явный RuntimeError, что у `stamp_bundle_approved`, не сырой traceback.
+    Состав бандла проверяется В НАЧАЛЕ (`_check_bundle_composition`) —
+    отсутствие файла-анкера (напр., design без флага на легаси-бандле)
+    ловится ТАМ явным RuntimeError с процедурой, не сырым traceback.
     """
-    anchor_filename = _LEGACY_ANCHOR_FILENAME if legacy_bundle else _ANCHOR_FILENAME
-    anchor_node_id = _LEGACY_ANCHOR_NODE_ID if legacy_bundle else _ANCHOR_NODE_ID
+    dag = _dag_for(legacy_bundle)
+    _check_bundle_composition(target_dir, bundle_dir, dag)
+    anchor_filename = dag[-1][0]
+    anchor_node_id = _node_id(anchor_filename)
     rel = Path(target_dir) / "spec" / f"{ws_id}-tasks.md"
     meta, body = split_frontmatter(rel.read_text(encoding="utf-8"))
     if meta.get("status") != "approved":
@@ -512,13 +550,6 @@ def conform_approved(
             "ПОСЛЕ человеческого `spec approve` (инвариант №4), сначала он"
         )
     anchor = Path(target_dir) / bundle_dir / anchor_filename
-    if not anchor.exists():
-        raise RuntimeError(
-            f"{anchor} не найден — нормализация остановлена. Либо "
-            "доавторьте design (узел `design` профиля team-exp), либо, "
-            "если бандл легаси (design туда не входит), передайте "
-            "`--legacy-bundle` — якорь станет behaviour-spec"
-        )
     pin = blob_sha1(anchor.read_text(encoding="utf-8"))
     changed = False
     if meta.get("traces_to") != [anchor_node_id]:
@@ -544,7 +575,7 @@ def deliver(
     approved_by: str,
     approved_at: str,
     generated_at: str | None = None,
-    legacy_bundle: bool = False,
+    legacy_bundle: int | None = None,
     profile: str | None = None,
 ) -> int:
     """Штампует бандл + пишет spec/<ws-id>-tasks.md; один draft-PR.
@@ -554,25 +585,25 @@ def deliver(
     ДО создания ветки — спека генерируется из вмерженного бандла, не из
     случайного состояния чекаута.
 
-    Порядок «штамп бандла → пин design → рендер tasks» жёсткий: штамп
-    меняет байты 20-design.md (терминальный узел `_BUNDLE_DAG`), и пин,
-    взятый до штампа, протух бы в том же PR
-    (@id:spec-bridge-approve-conformance).
+    Порядок «штамп бандла → пин анкера → рендер tasks» жёсткий: штамп
+    меняет байты терминального узла активного DAG, и пин, взятый до
+    штампа, протух бы в том же PR (@id:spec-bridge-approve-conformance).
 
-    `legacy_bundle=True` (Task 7): бандл без узла design (авторен до
-    раскатки design-узла) — штамп и якорь идут по 3-узловому префиксу DAG
-    (`behaviour-spec`), 20-design.md не читается вовсе.
+    `legacy_bundle` (Task 7 плана decomposition-node) выбирает активный
+    DAG через `_dag_for`: `None` — полный (якорь decomposition); `3`/`4` —
+    точный префикс (бандл авторен до раскатки design/decomposition-узла) —
+    файлы терминального узла ЗА пределами префикса не читаются вовсе.
 
-    `profile` (Task 8, опционально): путь профиля относительно
-    `target_dir` — тот же, что получит `gate_check_candidate` в раннере
-    (`state.profile`), не захардкоженный `profiles/team-exp.yaml`. Когда
-    передан и `legacy_bundle=False`, доставка отказывает, если
-    ФАКТИЧЕСКИЙ профиль target-репо не декларирует узел `design` — та же
-    процедура, что у `stopped_preflight` раннера
+    `profile` (опционально): путь профиля относительно `target_dir` — тот
+    же, что получит `gate_check_candidate` в раннере (`state.profile`), не
+    захардкоженный `profiles/team-exp.yaml`. Для каждого узла из набора
+    ``("design", "decomposition")``, входящего в АКТИВНЫЙ DAG, доставка
+    отказывает, если ФАКТИЧЕСКИЙ профиль target-репо не декларирует этот
+    узел — та же процедура, что у `stopped_preflight` раннера
     (`governance.policy_sources.target_profile_declares`): соседний репо
-    может нести старую копию файла того же имени без design. `profile=None`
-    (дефолт) — проверка пропускается; CLI (`main`) всегда передаёт
-    `state.profile`.
+    может нести старую копию файла того же имени без design/decomposition.
+    `profile=None` (дефолт) — проверка пропускается; CLI (`main`) всегда
+    передаёт `state.profile`.
     """
     if ops.is_dirty(target_dir):
         raise RuntimeError(
@@ -582,57 +613,53 @@ def deliver(
     # Существование и чтение бандла — строго ПОСЛЕ чекаута базы (приёмка
     # PR #96, major): до него чекаут мог стоять на произвольной ветке, и
     # спека сгенерировалась бы из невмерженной ревизии бандла. Тот же
-    # порядок — для гарда design ниже (инвариант приёмки PR #96, Task 7):
-    # ПОСЛЕ checkout_and_pull, ДО ensure_branch.
-    behaviour = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+    # порядок — для гарда состава и preflight профиля ниже (инвариант
+    # приёмки PR #96, Task 7): ПОСЛЕ checkout_and_pull, ДО ensure_branch.
+    dag = _dag_for(legacy_bundle)
+    base = Path(target_dir) / bundle_dir
+    behaviour = base / "15-behaviour-spec.md"
     if not behaviour.exists():
         raise RuntimeError(
             f"{behaviour} не найден на {base_ref} — бандл не вмержен "
             "или путь неверен"
         )
-    design_path = Path(target_dir) / bundle_dir / _ANCHOR_FILENAME
-    if not legacy_bundle:
-        if not design_path.exists():
-            raise RuntimeError(
-                f"{design_path} не найден на {base_ref} — доставка "
-                "остановлена. Либо доавторьте design (узел `design` "
-                "профиля team-exp) до доставки задач, либо, если бандл "
-                "легаси (design туда не входит), передайте "
-                "`--legacy-bundle`"
-            )
-        # Preflight (Task 8): та же проверка, что стопит раннер
-        # `stopped_preflight`'ом — target-профиль может не декларировать
-        # design вовсе (старая копия того же имени у соседнего репо), и
-        # доставка не имеет права молча анкериться на design, которого
-        # активный профиль этого репо не признаёт.
-        if profile is not None and not target_profile_declares(
-            target_dir, profile, "design"
-        ):
-            raise RuntimeError(
-                f"{Path(target_dir) / profile} не декларирует узел "
-                f"'design' — {PREFLIGHT_PROCEDURE_HINT}"
-            )
+    _check_bundle_composition(target_dir, bundle_dir, dag)
+    # Preflight: та же проверка, что стопит раннер `stopped_preflight`'ом —
+    # target-профиль может не декларировать design/decomposition вовсе
+    # (старая копия того же имени у соседнего репо), и доставка не имеет
+    # права молча анкериться на узле, которого активный профиль этого репо
+    # не признаёт. Проверяются ровно узлы, входящие в АКТИВНЫЙ dag —
+    # `--legacy-bundle=3` не требует design, `=4` требует design, но не
+    # decomposition, полный DAG требует оба.
+    if profile is not None:
+        for node in ("design", "decomposition"):
+            if any(
+                _node_id(fname) == node for fname, _ in dag
+            ) and not target_profile_declares(target_dir, profile, node):
+                raise RuntimeError(
+                    f"{Path(target_dir) / profile} не декларирует узел "
+                    f"'{node}' — {PREFLIGHT_PROCEDURE_HINT}"
+                )
     branch = f"spec/{ws_id}-tasks"
     ops.ensure_branch(target_dir, branch)
     stamped = stamp_bundle_approved(
         target_dir, bundle_dir, approved_by, approved_at,
         legacy_bundle=legacy_bundle,
     )
-    if legacy_bundle:
-        # Якорь — behaviour-spec (терминальный узел усечённого DAG): design
-        # в легаси-бандле нет вовсе, секция резолюций не рендерится.
-        anchor_node_id = _LEGACY_ANCHOR_NODE_ID
-        behaviour_text = behaviour.read_text(encoding="utf-8")
-        design_text = ""
-        design_blob = blob_sha1(behaviour_text)
-        scenarios = parse_behaviour(behaviour_text)
-    else:
-        anchor_node_id = _ANCHOR_NODE_ID
-        # design — терминальный узел _BUNDLE_DAG: читаем ПОСЛЕ штампа, иначе
-        # пин и текст резолюций взяты из уже стухшего blob'а.
-        design_text = design_path.read_text(encoding="utf-8")
-        design_blob = blob_sha1(design_text)
-        scenarios = parse_behaviour(behaviour.read_text(encoding="utf-8"))
+    # Анкер — терминальный узел АКТИВНОГО DAG (не хардкод design/behaviour):
+    # читаем ПОСЛЕ штампа, иначе пин взят из уже стухшего blob'а. design_text
+    # (для секции резолюций) — из 20-design.md, но только когда design
+    # входит в активный DAG; на 3-узловом легаси-бандле design в нём нет
+    # вовсе, секция резолюций не рендерится.
+    anchor_node_id = _node_id(dag[-1][0])
+    anchor_text = (base / dag[-1][0]).read_text(encoding="utf-8")
+    design_blob = blob_sha1(anchor_text)
+    design_text = (
+        (base / "20-design.md").read_text(encoding="utf-8")
+        if any(_node_id(fname) == "design" for fname, _ in dag)
+        else ""
+    )
+    scenarios = parse_behaviour(behaviour.read_text(encoding="utf-8"))
     stamp = generated_at or datetime.now().isoformat(timespec="seconds")
     text = render_tasks(
         ws_id=ws_id,
@@ -661,11 +688,11 @@ def deliver(
             "Этим же PR — штамп статусов вмерженного бандла "
             f"({len(stamped)} файл(а): approved_by = mergedBy бандл-PR, "
             "перепиновка DAG "
+            + "→".join(_node_id(fname) for fname, _ in dag)
             + (
-                "charter→requirements→behaviour-spec (легаси-бандл, "
-                "--legacy-bundle)"
+                f" (легаси-бандл, --legacy-bundle={legacy_bundle})"
                 if legacy_bundle
-                else "charter→requirements→behaviour-spec→design"
+                else ""
             )
             + ")."
             "\n\n"
@@ -694,7 +721,7 @@ def deliver_conform(
     ws_id: str,
     bundle_dir: str,
     ops: Ops,
-    legacy_bundle: bool = False,
+    legacy_bundle: int | None = None,
 ) -> int:
     """Нормализация после approve владельца → номер PR (нового или уже
     открытого).
@@ -703,14 +730,22 @@ def deliver_conform(
     (`spec approve`) живёт в рабочем дереве незакоммиченным — он и есть
     груз этого PR. commit_paths берёт только tasks-файл.
 
+    Состав бандла проверяется В НАЧАЛЕ функции, ДО `ops.ensure_branch`
+    (Task 7 плана decomposition-node): здесь НЕТ ни dirty-гарда, ни
+    checkout, ни existence-гардов (их отсутствие — намеренный инвариант
+    выше) — отказ по составу не должен оставлять в target созданную
+    approve-ветку.
+
     Идемпотентность (приёмка PR #117, круги 1–2): при уже открытом PR
     ветки повторный запуск НЕ создаёт второй PR (`gh pr create` упал бы),
     но по-прежнему доставляет текущее содержимое — свежий незакоммиченный
     approve-штамп владельца коммитится и пушится В ТУ ЖЕ ветку (пустой
     индекс/актуальный push — no-op у RealOps).
     """
-    anchor_node_id = _LEGACY_ANCHOR_NODE_ID if legacy_bundle else _ANCHOR_NODE_ID
-    anchor_filename = _LEGACY_ANCHOR_FILENAME if legacy_bundle else _ANCHOR_FILENAME
+    dag = _dag_for(legacy_bundle)
+    _check_bundle_composition(target_dir, bundle_dir, dag)
+    anchor_node_id = _node_id(dag[-1][0])
+    anchor_filename = dag[-1][0]
     branch = f"spec/{ws_id}-tasks-approve"
     existing = ops.find_pr(repo_slug, branch)
     ops.ensure_branch(target_dir, branch)
@@ -736,7 +771,7 @@ def deliver_conform(
             f"Approve-штамп владельца для spec/{ws_id}-tasks.md и "
             "нормализация frontmatter под активный governance-профиль: "
             f"traces_to ровно [{anchor_node_id}] (якорь — терминальный узел "
-            "_BUNDLE_DAG, либо его легаси-префикс при --legacy-bundle; "
+            "_BUNDLE_DAG, либо его легаси-префикс при --legacy-bundle=3|4; "
             "lite-профиль spec-runner может дописать/подменить traces — "
             "других профилей у него нет, upstream-плечо заведено "
             "отдельно), пин upstream_hashes — на текущий blob вмерженного "
@@ -758,11 +793,9 @@ def main(argv: list[str] | None = None) -> int:
         "tasks-спеки и доставить approve-штамп PR-ом",
     )
     parser.add_argument(
-        "--legacy-bundle", action="store_true",
-        help="бандл авторен до раскатки design-узла (без 20-design.md) — "
-        "штамп/якорь идут по 3-узловому префиксу DAG "
-        "charter→requirements→behaviour-spec; применимо в обоих режимах "
-        "(доставка и --conform-approve)",
+        "--legacy-bundle", type=int, choices=(3, 4), default=None,
+        help="точный состав легаси-бандла: 3 (до design) или 4 (до "
+        "decomposition); без флага — полный DAG; значение обязательно",
     )
     args = parser.parse_args(argv)
     state = load(args.run_id)
