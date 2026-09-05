@@ -5,6 +5,8 @@
 # acceptance/decomposition полного team-exp намеренно не включены:
 # required-узлы по умолчанию, их отсутствие в бандле дало бы
 # required_absent на S4 (см. governance/bundle_state.py).
+# tasks.upstream: [design] — временное отступление от полного профиля
+# ([decomposition]); перехват придёт спекой 3 (decomposition-узел).
 profile: team-exp
 solo_auto_approve: true
 artifacts:
