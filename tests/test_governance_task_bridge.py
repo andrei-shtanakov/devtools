@@ -161,7 +161,7 @@ def test_render_tasks_structure() -> None:
         "Source: workstreams/WS-alpha-7/spec/15-behaviour-spec.md#BEH-01"
         in text
     )
-    assert "**Traces to:** [FR-01, NFR-02]" in text
+    assert "**Traces to:** [FR-01], [NFR-02]" in text
     # последний чеклист-пункт каждой задачи — проверка, не действие
     assert (
         "проверка группы: tests/test_x.py (kind: integration) "
@@ -421,8 +421,11 @@ def test_render_groups_by_feature_sections() -> None:
     assert "- [ ] реализовать BEH-01: Позитив" in text
     assert "- [ ] реализовать BEH-02: Пустой корень" in text
     assert "**Depends on:** [TASK-001]" in text
+    # пер-ссылочные скобки и в DT-пути (minor ревью PR #149): откат
+    # второй копии фикса Traces to обязан краснить
+    assert "**Traces to:** [FR-01], [FR-02]" in text
     # traces группы — объединение без дублей
-    assert "**Traces to:** [FR-01, FR-02]" in text
+    assert "**Traces to:** [FR-01], [FR-02]" in text
     # Source несёт диапазон группы
     assert "#BEH-01 (—BEH-02)" in text
 
@@ -1549,3 +1552,23 @@ def test_tasks_frontmatter_carries_owner_role() -> None:
         anchor_node_id="decomposition",
     )
     assert "owner_role: stream-owner" in lines
+
+
+def test_traces_to_renders_each_ref_in_own_brackets() -> None:
+    """Major ревью PR spec-runner#369 (круг 2): [FR-02, FR-03] одной
+    скобкой — парсер spec-runner (re.findall(r"\\[([A-Z]+-\\d+)\\]"))
+    теряет трассируемость; формат FORMAT.md — [FR-02], [FR-03]."""
+    import re
+
+    scenarios = task_bridge.parse_behaviour(
+        "#### BEH-01: Один\n`traces: [FR-02, FR-03]`\n"
+        "**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_x`\n"
+    )
+    text = task_bridge.render_tasks(
+        "WS-X", "s", "b/15-behaviour-spec.md", scenarios,
+        "2026-01-01T00:00:00Z", "0" * 40,
+    )
+    assert "**Traces to:** [FR-02], [FR-03]" in text
+    refs = re.findall(r"\[([A-Z]+-\d+)\]", text.split("**Traces to:**")[1])
+    assert refs[:2] == ["FR-02", "FR-03"]
