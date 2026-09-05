@@ -86,7 +86,7 @@ upstream_hashes:
 Текст design.
 
 #### Q-01 · owner_role: architects · resolution: resolved
-reason: Выбран REST — синхронный вызов проще для MVP.
+Выбран REST — синхронный вызов проще для MVP.
 
 #### Q-03 · owner_role: architects · resolution: deferred
 reason: Нужны замеры нагрузки перед выбором шардирования.

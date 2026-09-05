@@ -41,7 +41,16 @@ def test_parse_requirements_questions_empty_text() -> None:
 
 
 def test_parse_design_resolutions_resolved() -> None:
-    assert parse_design_resolutions(DSN_OK) == {"Q-03": ("resolved", None)}
+    """DSN_OK несёт абзац-текст ПОСЛЕ заголовка (без `reason:` — DSL для
+    `resolved` требует именно так) — MAJOR-2: он и есть justification."""
+    assert parse_design_resolutions(DSN_OK) == {"Q-03": ("resolved", "текст")}
+
+
+def test_parse_design_resolutions_resolved_bare_heading_has_no_justification() -> None:
+    """MAJOR-2: заголовок без абзаца И без `reason:` — justification `None`
+    (нечего рендерить), не путать с «абзац есть, но пуст»."""
+    bare = "#### Q-03 · owner_role: architects · resolution: resolved\n"
+    assert parse_design_resolutions(bare) == {"Q-03": ("resolved", None)}
 
 
 def test_parse_design_resolutions_deferred_with_reason() -> None:

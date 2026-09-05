@@ -44,14 +44,28 @@ def parse_requirements_questions(text: str) -> dict[str, str]:
     return {m.group(1): m.group(2) for m in _REQ_Q_RE.finditer(text)}
 
 
-def parse_design_resolutions(text: str) -> dict[str, tuple[str, str | None]]:
-    """`Q-NN` → `(resolution, reason)`, из design-DSL.
+def _first_paragraph(block: str) -> str | None:
+    """Первый непустой абзац `block` (текст до пустой строки), `None` —
+    если абзацев нет вовсе (блок пуст/только whitespace)."""
+    for paragraph in re.split(r"\n\s*\n", block.strip()):
+        paragraph = paragraph.strip()
+        if paragraph:
+            return paragraph
+    return None
 
-    `reason` — первая строка `reason: <…>` внутри блока вопроса (от
-    заголовка `#### Q-NN …` до следующего такого заголовка или конца
-    текста); `None`, если её нет (типично для `resolved`, но синтаксически
-    допустимо и для «голого» `deferred` — коллер решает, находка это или
-    нет).
+
+def parse_design_resolutions(text: str) -> dict[str, tuple[str, str | None]]:
+    """`Q-NN` → `(resolution, justification)`, из design-DSL.
+
+    `justification` — приоритет у строки `reason: <…>` внутри блока
+    вопроса (от заголовка `#### Q-NN …` до следующего такого заголовка или
+    конца текста); при её отсутствии — первый непустой абзац того же блока
+    (MAJOR-2 финального ревью: DSL авторинга, `ops.py` `_AUTHOR_DSL
+    ["design"]`, предписывает `reason:` ТОЛЬКО для `deferred` — `resolved`
+    несёт обоснование абзацем ПОСЛЕ заголовка, без `reason:`; раньше
+    отсутствие `reason:` читалось как отсутствие обоснования вовсе, и
+    DSL-конформный `resolved`-текст рендерился без содержания). `None` —
+    если ни `reason:`, ни абзаца нет (типично «голый» заголовок).
     """
     matches = list(_DESIGN_Q_RE.finditer(text))
     result: dict[str, tuple[str, str | None]] = {}
@@ -60,8 +74,12 @@ def parse_design_resolutions(text: str) -> dict[str, tuple[str, str | None]]:
         block_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
         block = text[match.end() : block_end]
         reason_match = _REASON_RE.search(block)
-        reason = reason_match.group(1).strip() if reason_match else None
-        result[qid] = (resolution, reason)
+        justification = (
+            reason_match.group(1).strip()
+            if reason_match
+            else _first_paragraph(block)
+        )
+        result[qid] = (resolution, justification)
     return result
 
 
