@@ -73,7 +73,12 @@ G ≠ группы X), то `depends_on` X обязан включать ВСЕ 
 одиночную группу (ключ `solo:<dt_id>`), иначе две независимые solo-задачи
 читались бы одной ветвью и правило стоков давало бы невыполнимые находки
 (зависимость от чужого solo требовала бы зависимости от ВСЕХ solo — вплоть
-до цикла).
+до цикла). Второе исключение (minor круга 2, §3 спеки называет verify→
+delivered_by самостоятельным легитимным видом межгруппового ребра): рёбра,
+покрытые `delivered_by` той же задачи, из проверки стоков ИСКЛЮЧАЮТСЯ —
+verify точечно следует за проверяемой задачей, требовать от него все стоки
+чужой группы значило бы навязывать искусственную сериализацию, которую §3
+прямо запрещает.
 
 ---
 
@@ -574,18 +579,47 @@ def test_unknown_references_are_findings() -> None:
 
 
 def test_solo_tasks_are_independent_singleton_groups() -> None:
-    """Major ревью плана: два solo-DT — не одна общая группа; ребро в
-    один из них не требует зависимости от другого."""
+    """Major ревью плана (2 круга): два solo-DT — не одна общая группа;
+    ребро в один из них не требует зависимости от другого. Фикстура
+    разносит DT по РАЗНЫМ файлам checked_by (BEH-01+BEH-02 живут в одном
+    tests/test_a.py и потому обязаны быть в ОДНОЙ DT — иначе тест
+    закраснел бы на собственном single-owner-инварианте, круг 2)."""
     from governance.decomposition_guard import graph_findings
+    beh4 = BEH + (
+        "\n#### BEH-04: Четыре\n**checked_by** `kind: e2e` "
+        "`target: tests/test_c.py::test_four`\n"
+    )
     dt = (
         "#### DT-01: S1 · type: implement · owner: dev\n"
-        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
+        "scenarios: [BEH-01, BEH-02]\ndepends_on: []\n"
+        "parallel_group: solo\n\n"
         "#### DT-02: Core · type: implement · owner: dev\n"
-        "scenarios: [BEH-02]\ndepends_on: [DT-01]\nparallel_group: core\n\n"
+        "scenarios: [BEH-03]\ndepends_on: [DT-01]\nparallel_group: core\n\n"
         "#### DT-03: S2 · type: implement · owner: dev\n"
-        "scenarios: [BEH-03]\ndepends_on: [DT-02]\nparallel_group: solo\n"
+        "scenarios: [BEH-04]\ndepends_on: [DT-02]\nparallel_group: solo\n"
     )
-    assert graph_findings(BEH, dt) == []
+    assert graph_findings(beh4, dt) == []
+
+
+def test_delivered_by_edge_exempt_from_sinks_rule() -> None:
+    """Minor круга 2: verify c depends_on=[DT-01] и delivered_by=[DT-01]
+    в чужую группу с двумя стоками — НЕ находка про стоки."""
+    from governance.decomposition_guard import graph_findings
+    beh4 = BEH + (
+        "\n#### BEH-04: Четыре\n**checked_by** `kind: e2e` "
+        "`target: tests/test_c.py::test_four`\n"
+    )
+    dt = (
+        "#### DT-01: A1 · type: implement · owner: dev\n"
+        "scenarios: [BEH-01, BEH-02]\ndepends_on: []\n"
+        "parallel_group: core\n\n"
+        "#### DT-02: A2 · type: implement · owner: dev\n"
+        "scenarios: [BEH-03]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-03: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-04]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: qa\n"
+    )
+    assert not any("стоков" in f for f in graph_findings(beh4, dt))
 
 
 def test_cross_group_dependency_must_cover_all_sinks() -> None:
@@ -628,17 +662,24 @@ _BEH_CHECKED_RE = re.compile(
 def _parse_beh_bindings(text: str) -> dict[str, tuple[str | None, str | None]]:
     """beh_id → (файл checked_by-цели, kind); `::селектор` отброшен.
 
-    Дубликат грамматики task_bridge._CHECKED_RE намеренный и запинован
-    тестом согласованности (test_beh_binding_grammar_matches_task_bridge):
-    гард обязан остаться чистым модулем без импорта task_bridge (канон
-    design_guard), а расхождение грамматик ловится тестом, не ревьюером.
+    Дубликат грамматики task_bridge._CHECKED (фактическое имя константы
+    моста) намеренный и запинован тестом согласованности
+    (test_beh_binding_grammar_matches_task_bridge): гард обязан остаться
+    чистым модулем без импорта task_bridge (канон design_guard), а
+    расхождение грамматик ловится тестом, не ревьюером. Берётся
+    ПОСЛЕДНЕЕ вхождение checked_by в блоке — как у построчного разбора
+    моста, где новая строка перетирает предыдущую (minor круга 2:
+    расхождение «первое против последнего» пропускало бы single-owner
+    по неактуальной цели).
     """
     heads = list(_BEH_HEAD_RE.finditer(text))
     result: dict[str, tuple[str | None, str | None]] = {}
     for idx, m in enumerate(heads):
         end = heads[idx + 1].start() if idx + 1 < len(heads) else len(text)
         block = text[m.start() : end]
-        checked = _BEH_CHECKED_RE.search(block)
+        checked = None
+        for checked in _BEH_CHECKED_RE.finditer(block):
+            pass  # последнее вхождение — как у моста
         if checked is None:
             result[m.group(1)] = (None, None)
         else:
@@ -776,6 +817,9 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
         }
         by_group: dict[str, set[str]] = {}
         own_key = _group_key(t)
+        # рёбра, обоснованные delivered_by, из правила стоков исключены
+        # (verify точечно за проверяемым — §3 спеки, minor круга 2)
+        foreign -= set(t.delivered_by)
         for dep in foreign:
             dep_group = next(
                 g for g, members in groups.items() if dep in members
@@ -801,12 +845,19 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
 ```python
 def test_beh_binding_grammar_matches_task_bridge() -> None:
     """Дубликат checked_by-регекса запинован: обе стороны читают одну
-    фикстуру одинаково."""
+    фикстуру одинаково — включая блок с ДВУМЯ строками checked_by
+    (правка поверх старой: обе стороны обязаны взять последнюю)."""
     from governance.decomposition_guard import _parse_beh_bindings
     from governance.task_bridge import parse_behaviour
 
-    scenarios = parse_behaviour(BEH)
-    bindings = _parse_beh_bindings(BEH)
+    double = BEH + (
+        "\n#### BEH-05: Пять\n**checked_by** `kind: e2e` "
+        "`target: tests/test_old.py::test_five`\n"
+        "**checked_by** `kind: integration` "
+        "`target: tests/test_new.py::test_five`\n"
+    )
+    scenarios = parse_behaviour(double)
+    bindings = _parse_beh_bindings(double)
     for sc in scenarios:
         target, kind = bindings[sc.beh_id]
         expected = (
@@ -1050,7 +1101,16 @@ DSL-EMPTY-кортеж += запись:
 Импорт: `from governance import decomposition_guard` рядом с design_guard.
 
 - [ ] **Step 4: Обновить зелёные фикстуры** (валидный 30-decomposition.md с
-  верным пином design и DT, покрывающими BEH фикстуры) — существующий
+  верным пином design и DT, покрывающими BEH фикстуры). Отдельно (minor
+  круга 2): хелпер `tests/test_governance_runner.py::_repin_design`
+  переписывает 20-design.md по текущим requirements/behaviour — его blob
+  меняется, и пин design внутри 30-decomposition.md протухает (GC-STALE),
+  а DT старой фикстуры ссылаются на исчезнувшие BEH (GC-DT-GRAPH).
+  Расширить хелпер до перепиновки ВСЕЙ цепочки (переименовать в
+  `_repin_bundle`: перепиновать design И перегенерировать/перепиновать
+  30-decomposition.md с DT-покрытием ПОСТправочного behaviour-spec) и
+  перевести оба resume-теста, зовущих его после подмены behaviour-spec,
+  на новый хелпер. Существующий
   тест согласованности `test_gate_edges_derived_from_bundle_dag` закраснеет
   до Task 7 (ребро в `_GATE_EDGES` есть, в `_BUNDLE_DAG` ещё нет): пометить
   xfail строкой `@pytest.mark.xfail(reason="ребро DAG приходит Task 7",
@@ -1173,6 +1233,34 @@ def _check_bundle_composition(
 - в `stamp_bundle_approved`/`conform_approved` — в начале функции (их
   зовут уже ПОСЛЕ чекаута — из deliver-обёрток либо тестами по
   материализованному каталогу).
+
+Preflight профиля в `deliver` (MAJOR круга 2 — §4 спеки требует
+fail-closed preflight decomposition в start/resume/DELIVER): существующая
+проверка захардкожена на узел `design` — расширить на НАБОР узлов
+активного DAG:
+
+```python
+    for node in ("design", "decomposition"):
+        if any(fname == _AUTHOR_FILENAMES_BY_NODE[node] for fname, _ in dag) \
+                and not target_profile_declares(target_dir, profile, node):
+            raise RuntimeError(...)  # существующий текст с подстановкой node
+```
+
+(форму сопоставления узел↔файл взять фактическую по коду deliver; суть —
+проверяются ровно узлы, входящие в выбранный `dag`, поэтому
+`--legacy-bundle=3` не требует design, `=4` требует design но не
+decomposition, полный DAG требует оба). Зеркальный тест
+`test_deliver_refuses_when_target_profile_lacks_decomposition` — рядом с
+существующим design-вариантом; фикстура существующего design-варианта
+(бандл только 15/20) дополняется до состава, проходящего
+`_check_bundle_composition`, В ЭТОМ ЖЕ шаге.
+
+Булевы ветки `deliver` (minor круга 2 — `if legacy_bundle:` истинно и для
+int 4, что уводило бы в behaviour-spec-ветку с ЛОЖНЫМ пином design =
+blob 15-behaviour-spec.md и пустым design_text): переписать ОБЕ ветки на
+данные DAG — `anchor_path = base / dag[-1][0]`; existence-гард и blob —
+от фактического якоря `dag[-1]`; специальные `if legacy_bundle:` /
+`if not legacy_bundle:` уходят целиком.
 
 Существующие НЕ-легаси тесты доставки/конформа материализуют 4-узловые
 бандлы и лягут на проверке состава — их фикстуры дополняются валидным
@@ -1346,8 +1434,15 @@ def render_tasks_dt(
 decomposition_text)` — непустой список ⇒ RuntimeError с его текстом (мост
 не рендерит невалидный граф даже в обход S4, deliver зовётся и напрямую);
 затем `parse_dt_tasks` и `render_tasks_dt`. Пин якоря — blob
-30-decomposition.md (якорные переменные уже терминальные из Task 7).
-Legacy-пути (3|4) — прежний `render_tasks` с прежним якорем.
+30-decomposition.md (якорь — `dag[-1]`, Task 7). ИСТОЧНИК `design_text`
+(minor круга 2): секция «Решения открытых вопросов» рендерится из
+`20-design.md`, который читается ОТДЕЛЬНО от якоря (после смены якоря
+`design_path`-выражение через `_ANCHOR_FILENAME` кормило бы
+`parse_design_resolutions` текстом decomposition — секция молча исчезала
+бы). Ожидания существующих deliver-тестов обновляются здесь же:
+`traces_to == ['decomposition']`, секция резолюций по-прежнему
+присутствует. Legacy-пути (3|4) — прежний `render_tasks`, якорь —
+терминал соответствующего префикса DAG.
 
 - [ ] **Step 4: Прогнать — PASS; полный набор.**
 
