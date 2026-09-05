@@ -53,10 +53,14 @@ ops-DSL → консольный список → мост. Новая меха�
 - [ ] **Step 1: тест — профиль содержит design и новый upstream tasks**
 
 ```python
-def test_team_exp_profile_has_design_node():
-    import yaml
+from pathlib import Path
 
-    prof = yaml.safe_load(Path("profiles/team-exp.yaml").read_text())
+import yaml
+
+
+def test_team_exp_profile_has_design_node():
+
+    prof = yaml.safe_load(Path("profiles/team-exp.yaml").read_text(encoding="utf-8"))
     nodes = {a["id"]: a for a in prof["artifacts"]}
     d = nodes["design"]
     assert d["owner_role"] == "architects"
@@ -78,7 +82,9 @@ def test_team_exp_profile_has_design_node():
 `tasks.upstream: [design]` (в полном — `[decomposition]`, придёт спекой 3).
 
 - [ ] **Step 4: прогнать — PASS**
-- [ ] **Step 5: commit** `feat(profile): узел design в team-exp конвейера`
+- [ ] **Step 5: commit** `feat(profile): узел design в team-exp конвейера`.
+  ВНИМАНИЕ: `profiles/` — authority-root (\_AUTHORITY\_PREFIXES
+  accept-pr): PR реализации, трогающий профиль, мержится ЧЕЛОВЕКОМ.
 
 ### Task 2: ops — DSL design и грамматика Q в requirements
 
@@ -182,8 +188,10 @@ def test_pipeline_keys_cover_every_author_step_in_order():
 - Create: `governance/design_guard.py` — парсер Q requirements/design
   (чистые функции, stdlib re; отдельный модуль — его же переиспользует
   task_bridge в Task 5)
-- Test: `tests/test_governance_runner_gates.py` (дописать к
-  существующим S4-тестам)
+- Test: `tests/test_governance_runner.py` — дописать к СУЩЕСТВУЮЩИМ
+  S4-тестам этого файла (нового файла не заводить);
+  `tests/test_governance_bundle_state.py` (или существующий файл
+  bundle_state-тестов) — обязательный тест read-model
 
 **Interfaces:**
 - Produces: `design_guard.parse_requirements_questions(text) ->
@@ -200,6 +208,8 @@ def test_pipeline_keys_cover_every_author_step_in_order():
   ней ⇒ пусто; product-Q в input не попадают.
 
 ```python
+from governance.design_guard import coverage_findings
+
 REQ = "- **Q-03 · owner_role: architects · blocking: false.** Как?\n" \
       "- **Q-05 · owner_role: product · blocking: false.** Продукт.\n"
 DSN_OK = "#### Q-03 · owner_role: architects · resolution: resolved\nтекст\n"
@@ -232,7 +242,12 @@ def test_empty_input_set_needs_the_declaration_line():
 - [ ] **Step 4: FAIL; правки `_step_gate`:**
   - цикл рёбер — данные дополняются двумя кортежами:
     `("20-design.md", "requirements", "10-requirements.md")`,
-    `("20-design.md", "behaviour-spec", "15-behaviour-spec.md")`;
+    `("20-design.md", "behaviour-spec", "15-behaviour-spec.md")`.
+    Порядок ЖЁСТКИЙ: сначала `path.exists()` / `upstream_path.exists()`,
+    только потом `read_text` (никакого чтения до проверки); `continue`
+    на отсутствующем файле узла ДОПУСТИМ в цикле рёбер только потому,
+    что отсутствие design уже остановлено гардом GC-COMPLETENESS ВЫШЕ
+    по коду — тест закрепляет, что completeness-гард стоит ДО цикла;
   - ПЕРЕД циклом — гард отсутствия: если профиль прогона содержит
     required-узел design (наш team-exp — содержит), а файла нет ⇒
     finding `error GC-COMPLETENESS(design): required-узел design
@@ -243,7 +258,19 @@ def test_empty_input_set_needs_the_declaration_line():
   - после DSL-empty — гард покрытия: `design_guard.coverage_findings(
     req_text, design_text)` → каждый finding с префиксом
     `error GC-DESIGN-COVERAGE: …`.
-- [ ] **Step 5: PASS; ruff; commit**
+- [ ] **Step 5: обязательный тест bundle_state (read-model консоли):**
+
+```python
+def test_bundle_state_requires_design():
+    # candidate_state 4-узлового профиля: design в required;
+    # бандл без 20-design.md ⇒ design в required_absent;
+    # design со status: draft ⇒ не approved; после штампа approved.
+```
+
+  (полная реализация — по образцу существующих bundle_state-тестов;
+  проверяются все три утверждения.)
+- [ ] **Step 6: PASS; `uv run ruff format governance tests && uv run
+  ruff check --fix governance tests`; commit**
   `feat(runner): S4-гарды design — рёбра, отсутствие, покрытие Q`
 
 ### Task 5: task_bridge — DAG пинов, traces_to design, секция резолюций
@@ -319,14 +346,52 @@ def test_empty_input_set_needs_the_declaration_line():
   поведение), никакого чтения 20-design.md.
 - [ ] **Step 2: FAIL**
 - [ ] **Step 3: реализация:** параметр `legacy_bundle: bool = False`
-  сквозь `deliver`/`stamp_bundle_approved`; в начале штампа — проверка
-  существования `20-design.md`: нет и не legacy ⇒ RuntimeError с
-  процедурой; legacy ⇒ DAG усечён до первых трёх узлов и якорь tasks —
-  behaviour-spec. CLI: `--legacy-bundle` в argparse `task_bridge.main`.
+  сквозь ВСЕ четыре входа: `deliver`, `stamp_bundle_approved`,
+  `conform_approved` И `deliver_conform` (conform-пути без параметра
+  молча нормализовали бы легаси-спеку к design); CLI `--legacy-bundle`
+  в argparse `task_bridge.main` прокидывается в оба режима (deliver и
+  --conform-approve). Проверка существования `20-design.md` выполняется
+  ДО `ensure_branch`/любых git-эффектов (первый гард `deliver`, рядом с
+  clean-tree): нет файла и не legacy ⇒ RuntimeError с процедурой —
+  ветка НЕ создаётся; legacy ⇒ DAG усечён до первых трёх узлов, якорь
+  tasks — behaviour-spec (во всех четырёх входах одинаково).
+- [ ] **Step 3b: тесты conform-путей:** `conform_approved(...,
+  legacy_bundle=True)` нормализует к behaviour-spec и не читает
+  20-design.md; без флага на легаси-бандле ⇒ тот же RuntimeError;
+  `deliver` на бандле без 20-design.md падает ДО создания ветки
+  (ассерт: ветка отсутствует в `git branch`).
 - [ ] **Step 4: PASS; ruff; полный набор тестов devtools; commit**
   `feat(task_bridge): переходный режим --legacy-bundle`
 
-### Task 8: смоук S2 + сквозная проверка
+### Task 8: источник профиля — fail-closed preflight и rollout
+
+`gate-check --candidate` читает `profiles/team-exp.yaml` из
+**target_dir**, а соседние репо несут СТАРУЮ копию профиля без design:
+старый профиль не имеет права молча получить глобальный `author-design`.
+
+**Files:**
+- Modify: `governance/runner.py` (`start`/`resume`: preflight профиля до
+  S2), `governance/task_bridge.py` (`deliver`: тот же preflight)
+- Test: `tests/test_governance_runner.py`
+
+- [ ] **Step 1: тесты:** (а) target с профилем БЕЗ узла design ⇒
+  `start` останавливается ДО авторинга со статусом `stopped_preflight`
+  и сообщением-процедурой («доставьте обновлённый profiles/team-exp.yaml
+  в target PR-ом; profiles/ — authority-root, мерж человеком»);
+  (б) target с 4-узловым профилем ⇒ preflight молчит; (в) `deliver` с
+  тем же расхождением ⇒ RuntimeError с той же процедурой.
+- [ ] **Step 2: FAIL; реализация:** функция
+  `_target_profile_declares(target_dir, node_id) -> bool` (yaml-парс
+  профиля target; отсутствие файла/узла ⇒ False, ошибка чтения ⇒
+  fail-closed False с текстом); вызов в `start` (до S2) и в `deliver`.
+- [ ] **Step 3: PASS; commit** `feat(runner): preflight профиля target
+  — design-узел обязателен`
+- [ ] **Step 4 (процедура, не код):** rollout-раскатка обновлённого
+  профиля по target-репо — отдельными PR в каждый целевой репо
+  (authority-root ⇒ человеческий мерж), ДО первого 4-узлового прогона
+  там. Зафиксировать чеклистом в PR-описании реализации.
+
+### Task 9: смоук S2 + сквозная проверка
 
 **Files:**
 - Test: там же, где существующие author-смоуки runner'а
