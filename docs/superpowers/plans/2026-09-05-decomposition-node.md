@@ -67,7 +67,13 @@ runner, без pydantic), pytest, FakeOps-фикстуры.
 если DT X зависит хотя бы от одного члена ЧУЖОЙ группы G (`parallel_group`
 G ≠ группы X), то `depends_on` X обязан включать ВСЕ стоки G (DT группы G,
 от которых не зависит никто внутри G). Иначе X стартует до хвоста G —
-ровно класс «сводная задача поверх недоделанной ветви».
+ровно класс «сводная задача поверх недоделанной ветви». ВАЖНО (major
+терминального ревью плана): `solo` — НЕ имя общей группы, а признак
+«задача сама по себе»; каждая solo-задача образует СОБСТВЕННУЮ
+одиночную группу (ключ `solo:<dt_id>`), иначе две независимые solo-задачи
+читались бы одной ветвью и правило стоков давало бы невыполнимые находки
+(зависимость от чужого solo требовала бы зависимости от ВСЕХ solo — вплоть
+до цикла).
 
 ---
 
@@ -88,19 +94,29 @@ G ≠ группы X), то `depends_on` X обязан включать ВСЕ 
 В `tests/test_governance_profile.py` в существующий real-steward тест
 (`load_profile(Path("profiles/team-exp.yaml"), …)`) добавить/заменить ассерты:
 
+Real-steward тест использует только `graph.topo_order()` (доступа к узлам
+у него нет — minor ревью плана: API узлов в тестах дерева НЕ используется,
+не выдумывать):
+
 ```python
-    assert profile.topo_order() == [
+    assert graph.topo_order() == [
         "charter", "requirements", "behaviour-spec", "design",
         "decomposition", "tasks",
     ]
-    decomposition = profile.node("decomposition")
-    assert decomposition.owner_role == "tech-lead"
-    assert decomposition.upstream == ["design"]
-    assert profile.node("tasks").upstream == ["decomposition"]
 ```
 
-(Точные атрибуты API steward сверить с существующим тестом рядом — форма
-обращения к узлам уже используется там; переиспользовать её, не выдумывать.)
+Атрибуты узла проверяются там же, где сейчас (`yaml.safe_load`-тест
+`test_team_exp_profile_has_design_node` в том же файле) — расширить его:
+
+```python
+    assert nodes["decomposition"]["owner_role"] == "tech-lead"
+    assert nodes["decomposition"]["upstream"] == ["design"]
+    assert nodes["tasks"]["upstream"] == ["decomposition"]
+```
+
+Существующий ассерт `nodes["tasks"]["upstream"] == ["design"]` в этом
+тесте ЗАМЕНЯЕТСЯ на `["decomposition"]` (minor ревью плана — иначе
+незаявленный красный).
 
 - [ ] **Step 2: Прогнать — FAIL** (узла нет в YAML).
 
@@ -557,6 +573,21 @@ def test_unknown_references_are_findings() -> None:
     assert any("DT-77" in f for f in findings)
 
 
+def test_solo_tasks_are_independent_singleton_groups() -> None:
+    """Major ревью плана: два solo-DT — не одна общая группа; ребро в
+    один из них не требует зависимости от другого."""
+    from governance.decomposition_guard import graph_findings
+    dt = (
+        "#### DT-01: S1 · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
+        "#### DT-02: Core · type: implement · owner: dev\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\nparallel_group: core\n\n"
+        "#### DT-03: S2 · type: implement · owner: dev\n"
+        "scenarios: [BEH-03]\ndepends_on: [DT-02]\nparallel_group: solo\n"
+    )
+    assert graph_findings(BEH, dt) == []
+
+
 def test_cross_group_dependency_must_cover_all_sinks() -> None:
     """Машинное правило «сводные за хвостами групп» (карта файлов плана):
     ребро в чужую группу обязывает зависеть от ВСЕХ её стоков."""
@@ -723,8 +754,16 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
 
     # рёбра в чужую группу — от ВСЕХ стоков этой группы
     groups: dict[str, set[str]] = {}
+
+    def _group_key(task: DtTask) -> str:
+        # solo — задача сама по себе: собственная одиночная группа,
+        # не общая ветвь всех solo (major ревью плана)
+        if task.parallel_group == "solo":
+            return f"solo:{task.dt_id}"
+        return task.parallel_group
+
     for t in tasks:
-        groups.setdefault(t.parallel_group, set()).add(t.dt_id)
+        groups.setdefault(_group_key(t), set()).add(t.dt_id)
     dependents: dict[str, set[str]] = {i: set() for i in ids}
     for t in tasks:
         for dep in t.depends_on:
@@ -736,11 +775,12 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
             if dep in ids
         }
         by_group: dict[str, set[str]] = {}
+        own_key = _group_key(t)
         for dep in foreign:
             dep_group = next(
                 g for g, members in groups.items() if dep in members
             )
-            if dep_group != t.parallel_group:
+            if dep_group != own_key:
                 by_group.setdefault(dep_group, set()).add(dep)
         for g, deps in by_group.items():
             sinks = {
@@ -763,9 +803,9 @@ def test_beh_binding_grammar_matches_task_bridge() -> None:
     """Дубликат checked_by-регекса запинован: обе стороны читают одну
     фикстуру одинаково."""
     from governance.decomposition_guard import _parse_beh_bindings
-    from governance.task_bridge import parse_scenarios
+    from governance.task_bridge import parse_behaviour
 
-    scenarios = parse_scenarios(BEH)
+    scenarios = parse_behaviour(BEH)
     bindings = _parse_beh_bindings(BEH)
     for sc in scenarios:
         target, kind = bindings[sc.beh_id]
@@ -777,9 +817,9 @@ def test_beh_binding_grammar_matches_task_bridge() -> None:
         assert kind == (sc.checked_kind if sc.checked_target else None)
 ```
 
-(Имя `parse_scenarios` и атрибуты `checked_target`/`checked_kind` сверить с
-фактической сигнатурой в `governance/task_bridge.py` — тест обязан
-использовать реальный публичный парсер моста, как он назван там.)
+(Публичный парсер моста называется `parse_behaviour` —
+`governance/task_bridge.py:118`; атрибуты `checked_target`/`checked_kind`
+сверить с фактической формой `Scenario` перед написанием ассертов.)
 
 - [ ] **Step 5: Прогнать — PASS; полный набор; ruff по своим файлам.**
 
@@ -879,6 +919,15 @@ Preflight в `_step_authoring` — генерализация одной про�
 `console_model.py`: в `PIPELINE_KEYS` вставить `"author-decomposition"`
 между `"author-design"` и `"commit"`.
 
+Тестовая инфраструктура runner-набора (minor ревью плана — иначе полный
+набор падает KeyError, а не ассертами): `FakeOps.author` в
+`tests/test_governance_runner.py` держит словарь-литерал kind → имя файла
+(четыре ключа) — добавить `"decomposition": "30-decomposition.md"` и
+генерацию файла с валидным frontmatter (пин design — blob-хеш
+`20-design.md` фикстуры, как соседние kind'ы делают со своими
+upstream'ами). Зелёные бандл-фикстуры start()-тестов дополнить валидным
+`30-decomposition.md` (DT, покрывающие BEH фикстуры) — ЗДЕСЬ, не в Task 6.
+
 - [ ] **Step 4: Прогнать — PASS (оба файла тестов + полный набор).**
 
 - [ ] **Step 5: Commit**
@@ -944,17 +993,23 @@ def test_gate_dt_graph_finding_stops(...):
 GC-COMPLETENESS — генерализовать блок design на цикл:
 
 ```python
+    node_paths: dict[str, Path] = {}
     for node, node_file in (
         ("design", "20-design.md"),
         ("decomposition", "30-decomposition.md"),
     ):
+        node_paths[node] = Path(state.target_dir) / state.bundle_dir / node_file
         node_required = target_profile_declares(
             state.target_dir, state.profile, node
         )
-        node_path = Path(state.target_dir) / state.bundle_dir / node_file
-        if node_required and not node_path.exists():
+        if node_required and not node_paths[node].exists():
             ...  # существующий текст находки с подстановкой node/node_file
 ```
+
+Ниже по `_step_gate` гард GC-DESIGN-COVERAGE использует `design_path` —
+перевести его на `node_paths["design"]` (minor ревью плана: снос имени
+без перевода потребителя дал бы NameError на каждом прогоне); гард
+GC-DT-GRAPH (ниже) берёт `node_paths["decomposition"]` оттуда же.
 
 DSL-EMPTY-кортеж += запись:
 
@@ -1059,8 +1114,14 @@ def test_legacy_flag_requires_value() -> None:
 материализуют бандлы во tmp_path; переписать их с bool на 3|4 — эти
 существующие тесты падут на смене сигнатуры, их обновление входит сюда.)
 
-- [ ] **Step 2: Прогнать — FAIL; снять strict-xfail Task 6 — тест
-  согласованности рёбер должен стать зелёным сам.**
+- [ ] **Step 2: Прогнать — FAIL; снять strict-xfail Task 6 И обновить
+  производную `required` в `test_gate_edges_derived_from_bundle_dag`**
+  (major ревью плана: тест выводит 4-й элемент как
+  `task_bridge._node_id(fname) == "design"` — для 30-decomposition.md это
+  даст False против True в `_GATE_EDGES`; заменить вывод на
+  `task_bridge._node_id(fname) in {"design", "decomposition"}` — ребро
+  decomposition ОБЯЗАТЕЛЬНОЕ, понижать флаг нельзя: fail-open на
+  необъявленном ребре).
 
 - [ ] **Step 3: Правки**
 
@@ -1099,11 +1160,27 @@ def _check_bundle_composition(
         )
 ```
 
-Во всех четырёх функциях: параметр `legacy_bundle: int | None = None`;
-первым делом `dag = _dag_for(legacy_bundle)` и
-`_check_bundle_composition(target_dir, bundle_dir, dag)`; якоря —
-`dag[-1][0]` / `_node_id(dag[-1][0])` вместо пары module-констант
-`_LEGACY_*`. CLI:
+Во всех четырёх функциях: параметр `legacy_bundle: int | None = None`
+и `dag = _dag_for(legacy_bundle)`; якоря — `dag[-1][0]` /
+`_node_id(dag[-1][0])` вместо пары module-констант `_LEGACY_*`.
+МЕСТО вызова `_check_bundle_composition` (major ревью плана — инвариант
+приёмки PR #96 «чтение бандла строго ПОСЛЕ чекаута базы»):
+
+- в `deliver`/`deliver_conform` — ПОСЛЕ `ops.is_dirty` и
+  `ops.checkout_and_pull`, ровно там, где сейчас живут existence-гарды
+  бандла (никакого «первым делом»: до чекаута каталог бандла может не
+  существовать, и состав судился бы по произвольному состоянию чекаута);
+- в `stamp_bundle_approved`/`conform_approved` — в начале функции (их
+  зовут уже ПОСЛЕ чекаута — из deliver-обёрток либо тестами по
+  материализованному каталогу).
+
+Существующие НЕ-легаси тесты доставки/конформа материализуют 4-узловые
+бандлы и лягут на проверке состава — их фикстуры дополняются валидным
+30-decomposition.md В ЭТОМ ЖЕ шаге (как минимум:
+`test_deliver_reads_bundle_only_after_base_checkout` — файл добавляется
+внутри его checkout_and_pull-хука, `test_deliver_dirty_target_refuses`,
+`test_conform_refuses_draft`; пройтись grep'ом по фикстурам bundle_dir).
+CLI:
 
 ```python
     parser.add_argument(
