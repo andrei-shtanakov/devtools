@@ -466,7 +466,16 @@ def render_tasks(
         lines += [
             f"- [ ] {check}",
             "",
-            f"**Traces to:** [{', '.join(traces)}]" if traces else "",
+            # Каждая ссылка в СВОИХ скобках (spec/FORMAT.md spec-runner:
+            # `[FR-02], [FR-03]`) — парсер task.py требует `]` сразу после
+            # id, общая скобка молча роняла traces_to у многоссылочных
+            # задач (major ревью PR spec-runner#369, круг 2).
+            (
+                "**Traces to:** "
+                + ", ".join(f"[{ref}]" for ref in traces)
+                if traces
+                else ""
+            ),
             "",
         ]
     return "\n".join(line for line in lines if line is not None) + "\n"
@@ -541,7 +550,16 @@ def render_tasks_dt(
         lines += [
             f"- [ ] {check}",
             "",
-            f"**Traces to:** [{', '.join(traces)}]" if traces else "",
+            # Каждая ссылка в СВОИХ скобках (spec/FORMAT.md spec-runner:
+            # `[FR-02], [FR-03]`) — парсер task.py требует `]` сразу после
+            # id, общая скобка молча роняла traces_to у многоссылочных
+            # задач (major ревью PR spec-runner#369, круг 2).
+            (
+                "**Traces to:** "
+                + ", ".join(f"[{ref}]" for ref in traces)
+                if traces
+                else ""
+            ),
             "",
         ]
     return "\n".join(line for line in lines if line is not None) + "\n"
