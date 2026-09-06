@@ -1359,8 +1359,10 @@ def test_verify_dt_renders_with_verify_first_mode() -> None:
     )
     verify_block = text.split("### TASK-001:")[1].split("### TASK-002:")[0]
     assert "**Mode:** verify_first" in verify_block
-    assert "**Verifies:**" in verify_block
+    assert "**Verifies:** tests/test_a.py" in verify_block
     assert "Проверить сценарии BEH-01" in verify_block
+    assert "- [ ] проверить BEH-01" in verify_block
+    assert "реализовать BEH-01" not in verify_block
     # implement-задача режим не несёт
     implement_block = text.split("### TASK-002:")[1]
     assert "**Mode:**" not in implement_block

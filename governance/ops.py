@@ -272,9 +272,11 @@ _AUTHOR_DSL = {
         "run concurrently (operator documentation). Вне объёма: what is "
         "deliberately not decomposed. Forbidden: do not invent BEH ids; "
         "do not reopen design decisions; do not write implementation "
-        "code. Until spec-runner#367 (verify-first) is delivered, do NOT "
-        "create tasks with type: verify — the bridge will refuse them "
-        "fail-closed."
+        "code. verify-first is DELIVERED (spec-runner#367 closed): tasks "
+        "with type: verify are welcome where behaviour is already "
+        "delivered by their delivered_by dependencies — the bridge "
+        "renders them as verify_first tasks (live run of the declared "
+        "group first; green means no red authoring is bought)."
     ),
 }
 

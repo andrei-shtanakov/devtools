@@ -542,13 +542,20 @@ def render_tasks_dt(
             # verify-first — живой прогон группы до первого платного
             # вызова, green → green-only без покупки красного
             lines.append("**Mode:** verify_first")
-            verifies = ", ".join(
-                by_beh[b].checked_target
-                for b in t.scenarios
-                if b in by_beh and by_beh[b].checked_target
-            )
-            if verifies:
-                lines.append(f"**Verifies:** {verifies}")
+            # Полные селекторы (node id с `::`) НАМЕРЕННО: группа
+            # verify-first прогоняется по-селекторно (FR-06), словарь
+            # судит адаптер spec-runner; дедуп — как у bindings.
+            # Контракт формата — spec-runner task.py (однострочная
+            # `**Verifies:**` c запятыми; TASK-002 WS-367, PR #372).
+            targets: list[str] = []
+            for b in t.scenarios:
+                sc_target = (
+                    by_beh[b].checked_target if b in by_beh else None
+                )
+                if sc_target and sc_target not in targets:
+                    targets.append(sc_target)
+            if targets:
+                lines.append(f"**Verifies:** {', '.join(targets)}")
         if t.depends_on:
             # Та же пер-ссылочная форма, что у Traces to: TASK_REF
             # spec-runner требует ] сразу после id (minor ревью PR #149)
@@ -557,7 +564,10 @@ def render_tasks_dt(
             )
             lines.append(f"**Depends on:** {deps}")
         lines += ["", "**Checklist:**"]
-        lines += [f"- [ ] реализовать {g.beh_id}: {g.title}" for g in group]
+        item_verb = "проверить" if t.type == "verify" else "реализовать"
+        lines += [
+            f"- [ ] {item_verb} {g.beh_id}: {g.title}" for g in group
+        ]
         traces = []
         for g in group:
             traces += [x for x in g.traces if x not in traces]
