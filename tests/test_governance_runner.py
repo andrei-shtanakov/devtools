@@ -4738,7 +4738,9 @@ def test_decomposition_node_end_to_end_smoke_and_deliver(
       `test_render_dt_frontmatter_traces_decomposition_from_birth`
       (tests/test_governance_task_bridge.py);
     - рендер секции критериев приёмки изолированно —
-      `test_render_acceptance_section_*` (tests/test_governance_task_bridge.py);
+      `test_acceptance_section_lists_criteria`/
+      `test_acceptance_section_empty_input_renders_nothing`
+      (tests/test_governance_task_bridge.py);
     - deliver на DT-пути изолированно, без предшествующего runner-прогона —
       `test_deliver_full_dag_renders_via_render_tasks_dt`.
 
@@ -4861,9 +4863,9 @@ def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
     (BEH-01/BEH-02 покрыты DT-01/DT-02 — GC-DT-GRAPH зелен, гейт доходит
     до проверки acceptance), но requirements несёт ВТОРОЕ требование
     FR-02 (Should), а AC-01 acceptance трассирует ТОЛЬКО на него — Must-
-    требование FR-01 остаётся не покрытым ни одним AC ⇒ `stopped_gate` с
-    `GC-AC-COVERAGE`, до author-decomposition (и тем более deliver) дело
-    не доходит."""
+    требование FR-01 остаётся не покрытым ни одним AC ⇒ все шесть author-
+    шагов отрабатывают (S2 не зависит от S4), но гейт S4 стопит
+    `stopped_gate` с `GC-AC-COVERAGE` — до deliver дело не доходит."""
     req_gap_extra = "#### FR-02: y\n**Priority**: Should\n"
 
     class _AcGapOps(_DtSmokeOps):

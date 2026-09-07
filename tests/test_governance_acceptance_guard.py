@@ -141,3 +141,42 @@ def test_empty_must_set_needs_declaration() -> None:
     )
     acc_with = acc_without + "\nMust-требований во входном наборе нет\n"
     assert coverage_findings(req, BEH, acc_with) == []
+
+
+def test_requirement_block_does_not_absorb_priority_past_section() -> None:
+    """Требование без своей строки Priority не должно подхватывать первую
+    строку Priority, найденную дальше в документе — даже в разделе за
+    границей секции (напр., шаблон-приложение). Зеркалит
+    `test_block_ends_at_next_section` для parse_ac_criteria."""
+    from governance.acceptance_guard import coverage_findings
+    req = (
+        "#### FR-01: Покрыто\n**Priority**: Must\nпроза\n\n"
+        "#### NFR-01: Бюджет прогона\nпроза без строки Priority\n\n"
+        "## Приложение: шаблон требования\n\n"
+        "#### <FR-NN>: <название>\n**Priority**: Should\n"
+    )
+    acc = "#### AC-01: x · verification: manual\ntraces: [FR-01]\nпроза\n"
+    findings = coverage_findings(req, BEH, acc)
+    assert any(
+        "NFR-01" in f and "недостоверн" in f for f in findings
+    )
+
+
+def test_empty_must_declaration_prose_mention_is_not_the_declaration() -> None:
+    """Упоминание строки-декларации в прозе (не как отдельная строка) не
+    должно засчитываться как декларация — якорь по началу строки, не
+    substring-проверка."""
+    from governance.acceptance_guard import coverage_findings
+    req = "#### FR-01: Только Should\n**Priority**: Should\nтекст\n"
+    acc_prose = (
+        "#### AC-01: X · verification: manual\ntraces: [FR-01]\n\n"
+        "Неверно утверждать, что Must-требований во входном наборе нет.\n"
+    )
+    findings = coverage_findings(req, BEH, acc_prose)
+    assert any("деклара" in f for f in findings)
+
+    acc_anchored = (
+        "#### AC-01: X · verification: manual\ntraces: [FR-01]\n\n"
+        "Must-требований во входном наборе нет\n"
+    )
+    assert coverage_findings(req, BEH, acc_anchored) == []

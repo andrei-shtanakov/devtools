@@ -120,11 +120,11 @@ def _parse_requirements(req_text: str) -> tuple[dict[str, str], list[str]]:
     heads = list(_REQ_HEAD_RE.finditer(req_text))
     priorities: dict[str, str] = {}
     for idx, m in enumerate(heads):
-        end = (
-            heads[idx + 1].start() if idx + 1 < len(heads)
-            else len(req_text)
-        )
+        end = heads[idx + 1].start() if idx + 1 < len(heads) else len(req_text)
         block = req_text[m.end() : end]
+        section = _SECTION_RE.search(block)
+        if section is not None:
+            block = block[: section.start()]
         pr = _PRIORITY_RE.search(block)
         if pr is None:
             findings.append(
@@ -170,7 +170,10 @@ def coverage_findings(
         covered.update(c.traces)
     must = [rid for rid, pr in priorities.items() if pr == "Must"]
     if not must:
-        if EMPTY_MUST_DECLARATION not in acc_text:
+        declared = re.search(
+            rf"^{re.escape(EMPTY_MUST_DECLARATION)}", acc_text, re.M
+        )
+        if declared is None:
             findings.append(
                 "acceptance: множество Must-требований пусто, но "
                 f"строка-декларация «{EMPTY_MUST_DECLARATION}» отсутствует"
