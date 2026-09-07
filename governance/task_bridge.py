@@ -545,8 +545,14 @@ def render_tasks_dt(
             # Полные селекторы (node id с `::`) НАМЕРЕННО: группа
             # verify-first прогоняется по-селекторно (FR-06), словарь
             # судит адаптер spec-runner; дедуп — как у bindings.
-            # Контракт формата — spec-runner task.py (однострочная
-            # `**Verifies:**` c запятыми; TASK-002 WS-367, PR #372).
+            # Контракт формата ЗАПИНОВАН (minor ревью PR #152) — точные
+            # регексы парсера spec-runner (src/spec_runner/task.py,
+            # TASK-001/002 WS-367, PR #371/#372):
+            #   MODE     = r"\*\*Mode:\*\* (.+)"
+            #   VERIFIES = r"\*\*Verifies:\*\*\s*(.*)$"
+            # — построчный разбор среди прочих **…**-метаданных, позиция
+            # строки в теле задачи свободная; значение `verify_first` —
+            # через подчёркивание (EXECUTION_MODES spec-runner).
             targets: list[str] = []
             for b in t.scenarios:
                 sc_target = (
@@ -554,8 +560,16 @@ def render_tasks_dt(
                 )
                 if sc_target and sc_target not in targets:
                     targets.append(sc_target)
-            if targets:
-                lines.append(f"**Verifies:** {', '.join(targets)}")
+            if not targets:
+                # verify без прогоняемой группы необоснован: суть режима
+                # — живой прогон объявленных целей; молчаливый Mode без
+                # Verifies уехал бы обычным TDD (minor ревью PR #152)
+                raise RuntimeError(
+                    f"{t.dt_id}: type: verify, но ни один сценарий "
+                    f"({', '.join(t.scenarios)}) не несёт checked_by-цели "
+                    "— verify-first нечего прогонять"
+                )
+            lines.append(f"**Verifies:** {', '.join(targets)}")
         if t.depends_on:
             # Та же пер-ссылочная форма, что у Traces to: TASK_REF
             # spec-runner требует ] сразу после id (minor ревью PR #149)

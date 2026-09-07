@@ -1369,6 +1369,31 @@ def test_verify_dt_renders_with_verify_first_mode() -> None:
     assert "Реализовать сценарии BEH-02" in implement_block
 
 
+def test_verify_dt_without_checked_by_targets_refuses() -> None:
+    """Minor ревью PR #152: verify-DT, чьи сценарии не дают ни одной
+    checked_by-цели, — отказ (нечего прогонять), не молчаливый Mode без
+    Verifies."""
+    beh_no_targets = (
+        "---\nspec_stage: behaviour-spec\nstatus: draft\n"
+        "owner_role: product\n---\n# B\n\n"
+        "#### BEH-01: Без биндинга\n`traces: [FR-01]`\n"
+    )
+    dt = (
+        "#### DT-01: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: []\n"
+        "delivered_by: []\nparallel_group: solo\n"
+    )
+    scenarios = task_bridge.parse_behaviour(beh_no_targets)
+    dt_tasks, _ = decomposition_guard.parse_dt_tasks(dt)
+    with pytest.raises(RuntimeError, match="нечего прогонять"):
+        task_bridge.render_tasks_dt(
+            ws_id="WS-x-1", subject="s",
+            bundle_path="b/30-decomposition.md",
+            scenarios=scenarios, dt_tasks=dt_tasks,
+            generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
+        )
+
+
 DECOMPOSITION_SHARED_FILE_MD = """\
 ---
 spec_stage: decomposition
