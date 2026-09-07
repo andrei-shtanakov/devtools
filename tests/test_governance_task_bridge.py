@@ -1851,3 +1851,69 @@ def test_traces_to_renders_each_ref_in_own_brackets() -> None:
     assert "**Traces to:** [FR-02], [FR-03]" in text
     refs = re.findall(r"\[([A-Z]+-\d+)\]", text.split("**Traces to:**")[1])
     assert refs[:2] == ["FR-02", "FR-03"]
+
+
+# --- Task 8 (acceptance-node): _render_acceptance_section, wired into
+# deliver/render_tasks_dt -------------------------------------------------
+
+
+def test_acceptance_section_lists_criteria() -> None:
+    from governance.task_bridge import _render_acceptance_section
+
+    acc = (
+        "#### AC-01: Прогон первым · verification: test\n"
+        "traces: [FR-01]\nscenarios: [BEH-01]\nпроза\n\n"
+        "#### AC-02: Бюджет · verification: metric\n"
+        "traces: [NFR-01]\nпроза\n"
+    )
+    lines = _render_acceptance_section(acc)
+    joined = "\n".join(lines)
+    assert "Критерии приёмки (уровень acceptance)" in joined
+    assert "- **AC-01** (test): Прогон первым" in joined
+    assert "- **AC-02** (metric): Бюджет" in joined
+
+
+def test_acceptance_section_empty_input_renders_nothing() -> None:
+    from governance.task_bridge import _render_acceptance_section
+
+    assert _render_acceptance_section("") == []
+
+
+def test_deliver_full_dag_embeds_acceptance_section(tmp_path: Path) -> None:
+    """Полный DAG (acceptance в активном dag): tasks-спека несёт секцию
+    AC из вмерженного 25-acceptance.md."""
+    target = _target(tmp_path)
+    ops = _StubOps()
+    task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a", approved_at="t",
+    )
+    text = (target / "spec/WS-alpha-7-tasks.md").read_text()
+    assert "## Критерии приёмки (уровень acceptance)" in text
+    assert "- **AC-01** (manual): Список виден" in text
+
+
+def test_deliver_legacy_5_has_no_acceptance_section(tmp_path: Path) -> None:
+    """`--legacy-bundle=5` (acceptance ещё не существовал этой эры) — БЕЗ
+    секции критериев приёмки в tasks-спеке."""
+    target5 = _target_legacy_5(tmp_path, BEHAVIOUR_MD, DECOMPOSITION_MD_LEGACY5)
+    ops5 = _StubOps()
+    task_bridge.deliver(
+        target_dir=str(target5),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops5,
+        approved_by="a", approved_at="t",
+        legacy_bundle=5,
+    )
+    text5 = (target5 / "spec/WS-alpha-7-tasks.md").read_text()
+    assert "Критерии приёмки" not in text5

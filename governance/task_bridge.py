@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from governance import decomposition_guard, design_guard
+from governance import acceptance_guard, decomposition_guard, design_guard
 from governance.ops import Ops, RealOps
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
 from governance.run_state import load
@@ -357,6 +357,24 @@ def _render_resolutions_section(design_text: str) -> list[str]:
     return lines
 
 
+def _render_acceptance_section(acceptance_text: str) -> list[str]:
+    """Справочная секция «Критерии приёмки» tasks-спеки из AC-DSL.
+
+    Только id, verification и название — полный текст критериев живёт в
+    25-acceptance.md бандла (§4 спеки); исполнителю задач достаточно
+    знать, ЧТО будет приниматься. Пустой вход — секции нет.
+    """
+    crits, _findings = acceptance_guard.parse_ac_criteria(acceptance_text)
+    if not crits:
+        return []
+    lines = ["## Критерии приёмки (уровень acceptance)", ""]
+    lines += [
+        f"- **{c.ac_id}** ({c.verification}): {c.title}" for c in crits
+    ]
+    lines.append("")
+    return lines
+
+
 def _render_header(
     ws_id: str,
     subject: str,
@@ -511,6 +529,7 @@ def render_tasks_dt(
     generated_at: str,
     anchor_blob: str,
     design_text: str = "",
+    acceptance_text: str = "",
 ) -> str:
     """tasks.md из решённой декомпозиции: 1 DT = 1 задача.
 
@@ -519,6 +538,11 @@ def render_tasks_dt(
     checked_by и перевод depends_on → Depends on. Эвристика
     _merge_featureless_by_target_file на этом пути НЕ применяется — её
     инвариант переехал в гейт (single-owner, GC-DT-GRAPH).
+
+    ``acceptance_text`` (Task 8 плана acceptance-node) — справочная секция
+    критериев приёмки из 25-acceptance.md, вставляется сразу после секции
+    решений design (`_render_resolutions_section`); пустой вход (legacy-
+    бандл без узла acceptance) — секции нет, как у design_text.
     """
     # verify-first доставлен (spec-runner#367 закрыт 2026-09-07, WS-367
     # PR #371–#387): verify-DT рендерится задачей с `**Mode:**
@@ -531,6 +555,7 @@ def render_tasks_dt(
         ws_id, subject, generated_at, anchor_blob, anchor_node_id="decomposition"
     )
     lines += _render_resolutions_section(design_text)
+    lines += _render_acceptance_section(acceptance_text)
     for t in dt_tasks:
         group = [by_beh[b] for b in t.scenarios if b in by_beh]
         beh_ids = [g.beh_id for g in group]
@@ -866,6 +891,15 @@ def deliver(
         if any(_node_id(fname) == "design" for fname, _ in dag)
         else ""
     )
+    # acceptance_text (Task 8 плана acceptance-node) — тот же канон, что
+    # design_text: только когда узел acceptance входит в активный DAG
+    # (полный DAG; `--legacy-bundle=5` его не несёт — эра до раскатки
+    # acceptance-узла).
+    acceptance_text = (
+        (base / "25-acceptance.md").read_text(encoding="utf-8")
+        if any(_node_id(fname) == "acceptance" for fname, _ in dag)
+        else ""
+    )
     scenarios = parse_behaviour(behaviour.read_text(encoding="utf-8"))
     stamp = generated_at or datetime.now().isoformat(timespec="seconds")
     if any(_node_id(fname) == "decomposition" for fname, _ in dag):
@@ -887,6 +921,7 @@ def deliver(
             generated_at=stamp,
             anchor_blob=design_blob,
             design_text=design_text,
+            acceptance_text=acceptance_text,
         )
     else:
         text = render_tasks(
