@@ -130,6 +130,24 @@ def test_near_miss_requirement_priority_is_a_finding() -> None:
     )
 
 
+def test_out_of_vocabulary_priority_value_is_a_finding() -> None:
+    """Значение **Priority**, не входящее в словарь Must|Should (напр.,
+    строчное `must`), не должно молча выпадать из множества Must —
+    промах грамматики становится находкой «недостоверн», а не тихим
+    зелёным при непокрытом требовании."""
+    from governance.acceptance_guard import coverage_findings
+    req = "#### FR-01: Строчный приоритет\n**Priority**: must\nтекст\n"
+    acc = "#### AC-01: X · verification: manual\ntraces: []\n"
+    findings = coverage_findings(req, BEH, acc)
+    assert any(
+        "FR-01" in f and "недостоверн" in f for f in findings
+    )
+    # Непокрытое FR-01 не должно тихо зеленеть: раз значение вне словаря,
+    # оно не попадает в Must и не даёт "не покрыт" находку — единственная
+    # находка про недостоверность входного множества.
+    assert not any("не покрыт" in f for f in findings)
+
+
 def test_empty_must_set_needs_declaration() -> None:
     from governance.acceptance_guard import coverage_findings
     req = "#### FR-01: Только Should\n**Priority**: Should\nтекст\n"

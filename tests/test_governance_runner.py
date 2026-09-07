@@ -3526,12 +3526,13 @@ def test_start_stops_preflight_when_target_profile_lacks_design(
 def test_start_stops_preflight_when_target_profile_lacks_decomposition(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    """target с 4-узловым профилем (design есть, decomposition нет) ⇒
-    stopped_preflight ДО единого вызова авторинга."""
+    """target с 5-узловым профилем (design И acceptance есть,
+    decomposition нет) ⇒ stopped_preflight ДО единого вызова авторинга —
+    останов должен произойти именно на decomposition (порядок preflight
+    "design", "acceptance", "decomposition"), не раньше на acceptance."""
     ops = FakeOps(facts=GREEN_PR_FACTS)
     kwargs = _start_kwargs(tmp_path, "r-preflight-no-decomp", ops)
-    _write_four_node_profile(Path(kwargs["target_dir"]))  # хелпер: профиль
-    # спеки 1 (charter..design) БЕЗ узла decomposition
+    _write_five_node_with_acceptance_profile(Path(kwargs["target_dir"]))
 
     state = runner.start(**kwargs)
 
@@ -3715,6 +3716,50 @@ def test_deliver_refuses_when_target_profile_lacks_decomposition(
         )
     message = str(exc_info.value)
     assert "decomposition" in message.lower()
+    assert "authority-root" in message
+    assert "мерж человеком" in message
+
+
+def test_deliver_refuses_when_target_profile_lacks_acceptance(
+    tmp_path: Path,
+) -> None:
+    """Зеркальный тест decomposition-варианта (Task 7 плана
+    acceptance-node): профиль target несёт design И decomposition, но НЕ
+    acceptance (5-узловой профиль, `_write_five_node_profile`) ⇒ `deliver`
+    отказывает по preflight acceptance-узла — та же процедура, что у
+    `stopped_preflight` раннера, проверяется ДО ensure_branch/стампа."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text("# charter\n", encoding="utf-8")
+    (bundle / "10-requirements.md").write_text("# requirements\n", encoding="utf-8")
+    (bundle / "15-behaviour-spec.md").write_text("# behaviour\n", encoding="utf-8")
+    (bundle / "20-design.md").write_text("# design\n", encoding="utf-8")
+    (bundle / "25-acceptance.md").write_text("# acceptance\n", encoding="utf-8")
+    (bundle / "30-decomposition.md").write_text("# decomposition\n", encoding="utf-8")
+    _write_five_node_profile(target)
+
+    class _MiniOps:
+        def is_dirty(self, target_dir: str) -> bool:
+            return False
+
+        def checkout_and_pull(self, target_dir: str, branch: str) -> None:
+            pass
+
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=_MiniOps(),
+            approved_by="a", approved_at="t",
+            profile="profiles/team-exp.yaml",
+        )
+    message = str(exc_info.value)
+    assert "acceptance" in message.lower()
     assert "authority-root" in message
     assert "мерж человеком" in message
 
