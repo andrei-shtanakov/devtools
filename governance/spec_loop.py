@@ -142,12 +142,22 @@ def manifest_repo_entry(manifest_text: str, repo: str) -> RepoEntry:
 
 def _origin_url(target_dir: str | Path) -> str:
     """origin целевого чекаута — для сверки с манифестом (fail-closed)."""
-    out = subprocess.run(
-        ["git", "-C", str(target_dir), "remote", "get-url", "origin"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(target_dir), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        # minor терм. ревью #156: манифест — SSOT флота, не локальных
+        # клонов; не склонированный репо — fail-closed сообщение, не
+        # traceback.
+        raise SpecLoopError(
+            f"{target_dir}: не git-чекаут или репо не склонирован "
+            "(git remote get-url origin отказал) — склонируйте репо "
+            "либо задайте --target-dir"
+        ) from exc
     return out.stdout.strip()
 
 
@@ -163,6 +173,14 @@ def find_runs(repo: str, subject: str) -> list[rs.RunState]:
         try:
             state = rs.load(run_id)
         except Exception:
+            raw = (rs.run_dir(run_id) / "run.json").read_text(
+                encoding="utf-8"
+            )
+            if not raw.strip():
+                # Пустой run.json — штатный труп runner'а (падение между
+                # _reserve_run_id и save; см. _next_verify_run_id) — не
+                # повод глушить кнопку (minor терм. ревью #156).
+                continue
             broken.append(run_id)
             continue
         if state.repo == repo and state.subject == subject:
@@ -172,7 +190,8 @@ def find_runs(repo: str, subject: str) -> list[rs.RunState]:
             "нечитаемые леджеры под RUNS_ROOT: "
             + ", ".join(broken)
             + " — почините или уберите их прежде, чем продолжать "
-            "(битый леджер мог быть искомым прогоном)"
+            "(битый леджер мог быть искомым прогоном); обойти можно "
+            "явным --run-id"
         )
     return matches
 

@@ -1007,13 +1007,25 @@ def deliver_for_run(
             f"({state.repo_slug}) — повтор не создаёт PR"
         )
         return op["pr"]
+    # Поиск PR по ветке ВО ВСЕХ состояниях (major терм. ревью #156):
+    # отсутствие ОТКРЫТОГО PR не значит «доставки не было» — спека могла
+    # быть доставлена ранее, вмержена и переведена в approved; повторный
+    # deliver() перегенерировал бы её обратно в draft вторым PR-ом.
     branch = f"spec/{state.ws_id}-tasks"
-    existing = ops.find_pr(state.repo_slug, branch)
+    existing = ops.find_pr(state.repo_slug, branch, any_state=True)
     if existing is not None:
+        pr_state = ops.pr_facts(state.repo_slug, existing).get("state")
+        if pr_state not in ("OPEN", "MERGED"):
+            raise RuntimeError(
+                f"PR #{existing} по ветке {branch} закрыт без мержа "
+                f"(state={pr_state!r}) — реконсиляция fail-closed: "
+                "решите судьбу ветки/PR вручную, повторная доставка "
+                "поверх отклонённой не выполняется"
+            )
         op_complete(state, "tasks-deliver", pr=existing)
         print(
-            f"найден существующий PR #{existing} по ветке {branch} — "
-            "принят как доставка, новый не создаётся"
+            f"найден существующий PR #{existing} по ветке {branch} "
+            f"({pr_state}) — принят как доставка, новый не создаётся"
         )
         return existing
     # approved_by/at — факт мержа бандл-PR (решение владельца devtools#110:

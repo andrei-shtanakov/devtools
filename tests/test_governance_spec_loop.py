@@ -338,3 +338,29 @@ def test_origin_mismatch_fails_closed(
     assert rc == 1
     assert env.calls == []
     assert "origin" in capsys.readouterr().out
+
+
+def test_find_runs_ignores_empty_ledger_stub(runs_root) -> None:
+    """minor терм. ревью #156: пустой run.json — штатный труп runner'а
+    (_reserve_run_id), кнопку глушить не должен."""
+    _mk_run("r1", "Subject A")
+    stub = runs_root / "r-stub"
+    stub.mkdir(parents=True)
+    (stub / "run.json").write_text("", encoding="utf-8")
+    found = spec_loop.find_runs("alpha", "Subject A")
+    assert [s.run_id for s in found] == ["r1"]
+
+
+def test_find_runs_broken_message_hints_run_id(runs_root) -> None:
+    bad = runs_root / "r-broken"
+    bad.mkdir(parents=True)
+    (bad / "run.json").write_text("{не json", encoding="utf-8")
+    with pytest.raises(spec_loop.SpecLoopError, match="--run-id"):
+        spec_loop.find_runs("alpha", "Subject A")
+
+
+def test_origin_url_on_non_git_dir_fails_closed(tmp_path: Path) -> None:
+    """minor терм. ревью #156: не склонированный репо — fail-closed
+    сообщение кнопки, не CalledProcessError-traceback."""
+    with pytest.raises(spec_loop.SpecLoopError, match="чекаут"):
+        spec_loop._origin_url(tmp_path)

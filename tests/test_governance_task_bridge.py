@@ -1106,7 +1106,9 @@ class _ConformOps(_StubOps):
         super().__init__()
         self.existing_pr = existing_pr
 
-    def find_pr(self, repo_slug: str, branch: str) -> int | None:
+    def find_pr(
+        self, repo_slug: str, branch: str, *, any_state: bool = False
+    ) -> int | None:
         self.calls.append(("find_pr", branch))
         return self.existing_pr
 
@@ -1929,7 +1931,9 @@ class _ReconOps(_StubOps):
         super().__init__()
         self.existing_pr = existing_pr
 
-    def find_pr(self, repo_slug: str, branch: str) -> int | None:
+    def find_pr(
+        self, repo_slug: str, branch: str, *, any_state: bool = False
+    ) -> int | None:
         self.calls.append(("find_pr", branch))
         return self.existing_pr
 
@@ -2010,3 +2014,45 @@ def test_deliver_for_run_refuses_non_completed_status(
     state = _recon_state(tmp_path, monkeypatch, status="waiting_human_merge")
     with pytest.raises(RuntimeError, match="completed"):
         task_bridge.deliver_for_run(state, _ReconOps())
+
+
+def test_deliver_for_run_adopts_merged_pr_not_only_open(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """major терм. ревью #156: PR по ветке уже ВМЕРЖЕН (открытых нет) —
+    доставка была; повтор обязан принять её, а не перегенерировать спеку
+    с откатом approve в draft вторым PR-ом."""
+    from governance import run_state as rs
+
+    state = _recon_state(tmp_path, monkeypatch)
+
+    class _MergedOps(_ReconOps):
+        def find_pr(
+            self, repo_slug: str, branch: str, *, any_state: bool = False
+        ) -> int | None:
+            self.calls.append(("find_pr", branch, any_state))
+            return 91 if any_state else None
+
+    ops = _MergedOps()
+    assert task_bridge.deliver_for_run(state, ops) == 91
+    assert ("find_pr", "spec/WS-alpha-7-tasks", True) in ops.calls
+    assert not any(c[0] == "create_draft_pr" for c in ops.calls)
+    assert rs.load("r-recon").ops["tasks-deliver"] == {
+        "status": "completed", "pr": 91,
+    }
+
+
+def test_deliver_for_run_closed_unmerged_pr_fails_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state = _recon_state(tmp_path, monkeypatch)
+
+    class _ClosedOps(_ReconOps):
+        def __init__(self) -> None:
+            super().__init__(existing_pr=91)
+
+        def pr_facts(self, repo_slug: str, pr: int) -> dict:
+            return {"state": "CLOSED", "mergedBy": None, "mergedAt": None}
+
+    with pytest.raises(RuntimeError, match="закрыт"):
+        task_bridge.deliver_for_run(state, _ClosedOps())
