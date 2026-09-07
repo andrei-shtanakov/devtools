@@ -60,7 +60,8 @@ behaviour-spec: "<blob 15-behaviour-spec.md>"}`.
 
    ```
    #### AC-NN: <название> · verification: test|manual|metric
-   traces: [FR-…]                # покрываемые требования, ≥1
+   traces: [FR-…|NFR-…]          # покрываемые требования (оба класса
+                                 # id requirements), ≥1
    scenarios: [BEH-…]            # опорные сценарии; ОБЯЗАТЕЛЕН при
                                  # verification: test, иначе опционален
    <проза: наблюдаемый признак выполнения, границы>
@@ -75,10 +76,20 @@ behaviour-spec: "<blob 15-behaviour-spec.md>"}`.
      (артефакт/константу), а не зашивать число в критерий.
 
 2. **Инварианты покрытия** (проверяются гейтом):
-   - каждый `Must`-FR requirements покрыт хотя бы одним AC (`Should` и
-     ниже — по решению qa, непокрытость — не находка);
-   - каждый AC трассируется только к существующим FR; `scenarios` —
+   - каждое `Must`-требование requirements ОБОИХ классов (FR и NFR)
+     покрыто хотя бы одним AC (`Should` и ниже — по решению qa,
+     непокрытость — не находка); NFR — полноправный объект приёмки:
+     мотивация узла (§1) — ровно расхождение по NFR-01, и
+     `verification: metric` получает легальный upstream (major круга 2);
+   - каждый AC трассируется только к существующим FR/NFR; `scenarios` —
      только к существующим BEH;
+   - достоверность входного набора (major круга 2, канон design_guard):
+     near-miss на стороне requirements — заголовок `#### FR-NN`/
+     `#### NFR-NN` без распознанной строки `**Priority**: …` — находка
+     («входное множество недостоверно»); ПУСТОЕ множество
+     Must-требований — находка, если в 25-acceptance.md нет явной
+     строки-декларации `Must-требований во входном наборе нет` (тихое
+     «нечего проверять» неотличимо от промаха грамматики);
    - AC-id уникальны; near-miss заголовок — находка (уроки PR #145/#148:
      границы блока — следующая секция уровня 1–3; суффикс id — не более
      одной строчной буквы, `[a-z]?`);
@@ -107,12 +118,12 @@ behaviour-spec, как у design), поэтому в порядке автори
 | Файл | Правка |
 |---|---|
 | `profiles/team-exp.yaml` | +узел acceptance (форма §2, ПОЛНЫЕ upstream'ы `[requirements, behaviour-spec]`); `decomposition.upstream: [design, acceptance]`; комментарий-отступление сужается до «compile не реализуется» |
-| `governance/runner.py` | `_AUTHOR_STEPS` += `("author-acceptance", "acceptance", "25-acceptance.md")` МЕЖДУ author-design и author-decomposition; preflight-цикл `("design", "decomposition")` += `"acceptance"`; `_GATE_EDGES` += ТРИ required-ребра: `("25-acceptance.md", "requirements", …, True)`, `("25-acceptance.md", "behaviour-spec", …, True)` И `("30-decomposition.md", "acceptance", "25-acceptance.md", True)` — тест-деривация из `_BUNDLE_DAG` строит ожидание по ВСЕМ парам (файл, upstream), включая новый upstream decomposition (major круга 1 ревью спеки); GC-COMPLETENESS-цикл node_paths += `("acceptance", "25-acceptance.md")`; DSL-EMPTY-кортеж += (`^####\s+AC-\d+`, форма `#### AC-NN: <название> · verification: …`); новый локальный гард `GC-AC-COVERAGE` — инварианты §3 через `acceptance_guard.coverage_findings(requirements_text, behaviour_text, acceptance_text)` |
+| `governance/runner.py` | `_AUTHOR_STEPS` += `("author-acceptance", "acceptance", "25-acceptance.md")` МЕЖДУ author-design и author-decomposition; preflight-цикл `("design", "decomposition")` += `"acceptance"` (И В runner._step_authoring, И ВТОРОЙ кортеж в task_bridge.deliver — minor круга 2: deliver-preflight держит свой список узлов активного DAG); `_GATE_EDGES` += ТРИ required-ребра: `("25-acceptance.md", "requirements", …, True)`, `("25-acceptance.md", "behaviour-spec", …, True)` И `("30-decomposition.md", "acceptance", "25-acceptance.md", True)` — тест-деривация из `_BUNDLE_DAG` строит ожидание по ВСЕМ парам (файл, upstream), включая новый upstream decomposition (major круга 1 ревью спеки); GC-COMPLETENESS-цикл node_paths += `("acceptance", "25-acceptance.md")`; DSL-EMPTY-кортеж += (`^####\s+AC-\d+`, форма `#### AC-NN: <название> · verification: …`); новый локальный гард `GC-AC-COVERAGE` — инварианты §3 через `acceptance_guard.coverage_findings(requirements_text, behaviour_text, acceptance_text)` |
 | `governance/ops.py` | `_AUTHOR_FILENAMES["acceptance"]`, `_AUTHOR_DSL["acceptance"]` — контракт §3 с грамматикой AC (канон записей design/decomposition; языковой стиль промпта — англ.); `_AUTHOR_DSL["decomposition"]` ОБНОВЛЯЕТСЯ под второй upstream: `traces_to: [design, acceptance]`, `upstream_hashes: {design: "<hash20>", acceptance: "<hash25>"}` (канон двухпинового design) — иначе авторенный 30-decomposition.md стопил бы S4 на GC-UNPINNED по новому required-ребру после всех оплаченных вызовов (minor круга 1) |
 | `governance/console_model.py` | `PIPELINE_KEYS` += `author-acceptance` между author-design и commit-цепочкой decomposition; двусторонний тест порядка уже держит вставку |
-| `governance/acceptance_guard.py` (новый) | чистый модуль (канон design_guard/decomposition_guard): `parse_ac_criteria(text) -> tuple[list[AcCriterion], list[str]]` (frozen dataclass: ac_id, title, verification, traces, scenarios) + `coverage_findings(req_text, beh_text, acc_text) -> list[str]`; Must-FR-парсер — по грамматике `#### FR-NN:` + `**Priority**: Must` requirements; near-miss/дубли/границы блока — с первого дня (уроки PR #145/#148) |
+| `governance/acceptance_guard.py` (новый) | чистый модуль (канон design_guard/decomposition_guard): `parse_ac_criteria(text) -> tuple[list[AcCriterion], list[str]]` (frozen dataclass: ac_id, title, verification, traces, scenarios) + `coverage_findings(req_text, beh_text, acc_text) -> list[str]`; Must-парсер — по грамматике `#### FR-NN:`/`#### NFR-NN:` + `**Priority**: Must` requirements, near-miss заголовок без распознанного Priority — находка, пустое множество Must — находка без явной декларации; near-miss/дубли/границы блока AC — с первого дня (уроки PR #145/#148) |
 | `governance/task_bridge.py` | `_BUNDLE_DAG`: += `("25-acceptance.md", ("requirements", "behaviour-spec"))` ПЕРЕД decomposition; узел decomposition — `("30-decomposition.md", ("design", "acceptance"))` (второй пин; штамп-механика двух пинов уже есть у design). `--legacy-bundle` расширяется до `3|4|5` (3 = до design; 4 = +design; 5 = +decomposition БЕЗ acceptance — текущая эра, все существующие 5-узловые бандлы; полный DAG = 6 узлов) — проверка ТОЧНОГО состава та же; ВНИМАНИЕ: legacy=5 — состав `00/10/15/20/30` (без 25), НЕ префикс DAG по порядку файлов — `_dag_for` для 5 обязан вернуть текущий 5-узловой DAG (decomposition c upstream `("design",)`), а не срез нового. ОБА DT-специфичных ветвления `deliver` (валидация `graph_findings` + выбор `render_tasks_dt` vs `render_tasks`) переводятся с литерала `legacy_bundle is None` на признак «узел decomposition входит в активный DAG» (канон уже в файле — так ветвится design_text): legacy=5 несёт решённую декомпозицию и ОБЯЗАН идти DT-путём с валидацией графа — иначе тихая регрессия: невалидный граф доставляется молча, а tasks рендерится BEH-группировкой с _merge_featureless вместо 1 DT = 1 задача и без Mode: verify_first (major круга 1 ревью спеки); справочная секция tasks-спеки: после «Решений открытых вопросов» рендерится «Критерии приёмки (уровень acceptance)» из 25-acceptance.md (id, verification, названия; полный текст живёт в бандле) — на legacy-путях секции нет |
-| переходный режим | бандл без 25-acceptance.md ⇒ тот же fail-closed RuntimeError с процедурой (доавторить либо `--legacy-bundle=5`) |
+| переходный режим | бандл без 25-acceptance.md ⇒ тот же fail-closed RuntimeError с процедурой (доавторить либо `--legacy-bundle=5`); словарь `3|4` зашит в ЧЕТЫРЁХ операторских текстах — обновить все (minor круга 2): текст RuntimeError `_check_bundle_composition`, `ValueError` в `_dag_for`, help `--legacy-bundle` CLI, строка `make help` в Makefile |
 
 Rollout target-профилей — решение Task 8 спеки 1: preflight fail-closed;
 профили соседей обновляются до 6-узловых отдельными PR (authority-root,
@@ -127,8 +138,11 @@ Rollout target-профилей — решение Task 8 спеки 1: prefligh
   [design, acceptance]`; real-steward topo_order из 7 узлов.
 - Грамматика AC: парс всех трёх verification; near-miss/дубль/границы
   блока; test без scenarios ⇒ находка формы.
-- Покрытие: непокрытый Must-FR ⇒ находка; покрытый Should не требуется;
-  ссылка на несуществующий FR/BEH ⇒ находка.
+- Покрытие: непокрытый Must-FR ⇒ находка; непокрытый Must-NFR ⇒
+  находка; AC c `traces: [NFR-…]` легален; покрытый Should не требуется;
+  ссылка на несуществующий FR/NFR/BEH ⇒ находка; near-miss FR/NFR без
+  распознанного Priority ⇒ находка; пустое множество Must без
+  строки-декларации ⇒ находка, с декларацией ⇒ чисто.
 - S4: рёбра acceptance→requirements и →behaviour-spec — UNPINNED/STALE/
   undeclared по отдельности (локальный гард, канон спеки 1); отсутствие
   узла ⇒ GC-COMPLETENESS(acceptance); DSL-EMPTY; GC-AC-COVERAGE
