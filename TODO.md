@@ -1239,4 +1239,4 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 
 ## Узел decomposition в профиле governance
 
-- [ ] verify-DT в decomposition-мосте включаются после доставки verify-first @id:decomposition-verify-first-unblock @owner:github:andrei-shtanakov @blocked_by:spec-runner#367
+- [x] verify-DT в decomposition-мосте включаются после доставки verify-first @id:decomposition-verify-first-unblock @owner:github:andrei-shtanakov @blocked_by:spec-runner#367

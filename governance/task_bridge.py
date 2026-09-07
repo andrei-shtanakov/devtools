@@ -501,14 +501,11 @@ def render_tasks_dt(
     _merge_featureless_by_target_file на этом пути НЕ применяется — её
     инвариант переехал в гейт (single-owner, GC-DT-GRAPH).
     """
-    verify_dts = [t.dt_id for t in dt_tasks if t.type == "verify"]
-    if verify_dts:
-        raise RuntimeError(
-            f"verify-DT ({', '.join(verify_dts)}) требуют режим "
-            "verify-first spec-runner#367 — он ещё не доставлен "
-            "(@blocked_by:spec-runner#367, чекбокс в TODO.md devtools); "
-            "implement-DT работают полностью"
-        )
+    # verify-first доставлен (spec-runner#367 закрыт 2026-09-07, WS-367
+    # PR #371–#387): verify-DT рендерится задачей с `**Mode:**
+    # verify_first` — spec-runner начнёт её живым прогоном объявленной
+    # группы и уйдёт green-only/TDD/стоп по evidence. Fail-closed отказ
+    # эпохи блокера снят (@id:decomposition-verify-first-unblock).
     by_beh = {sc.beh_id: sc for sc in scenarios}
     number = {t.dt_id: idx for idx, t in enumerate(dt_tasks, start=1)}
     lines = _render_header(
@@ -531,14 +528,48 @@ def render_tasks_dt(
             else f"проверка группы {', '.join(beh_ids)} определена и зелёная"
         )
         idx = number[t.dt_id]
+        action = "Проверить" if t.type == "verify" else "Реализовать"
         lines += [
             f"### TASK-{idx:03d}: {t.title}",
             "P2 | TODO   Est: 0.5d",
             "",
-            f"Реализовать сценарии {', '.join(beh_ids)} ({t.dt_id}, "
+            f"{action} сценарии {', '.join(beh_ids)} ({t.dt_id}, "
             f"группа {t.parallel_group}).",
             f"Source: {bundle_path}#{t.dt_id}",
         ]
+        if t.type == "verify":
+            # Задача проверки: spec-runner исполняет её в режиме
+            # verify-first — живой прогон группы до первого платного
+            # вызова, green → green-only без покупки красного
+            lines.append("**Mode:** verify_first")
+            # Полные селекторы (node id с `::`) НАМЕРЕННО: группа
+            # verify-first прогоняется по-селекторно (FR-06), словарь
+            # судит адаптер spec-runner; дедуп — как у bindings.
+            # Контракт формата ЗАПИНОВАН (minor ревью PR #152) — точные
+            # регексы парсера spec-runner (src/spec_runner/task.py,
+            # TASK-001/002 WS-367, PR #371/#372):
+            #   MODE     = r"\*\*Mode:\*\* (.+)"
+            #   VERIFIES = r"\*\*Verifies:\*\*\s*(.*)$"
+            # — построчный разбор среди прочих **…**-метаданных, позиция
+            # строки в теле задачи свободная; значение `verify_first` —
+            # через подчёркивание (EXECUTION_MODES spec-runner).
+            targets: list[str] = []
+            for b in t.scenarios:
+                sc_target = (
+                    by_beh[b].checked_target if b in by_beh else None
+                )
+                if sc_target and sc_target not in targets:
+                    targets.append(sc_target)
+            if not targets:
+                # verify без прогоняемой группы необоснован: суть режима
+                # — живой прогон объявленных целей; молчаливый Mode без
+                # Verifies уехал бы обычным TDD (minor ревью PR #152)
+                raise RuntimeError(
+                    f"{t.dt_id}: type: verify, но ни один сценарий "
+                    f"({', '.join(t.scenarios)}) не несёт checked_by-цели "
+                    "— verify-first нечего прогонять"
+                )
+            lines.append(f"**Verifies:** {', '.join(targets)}")
         if t.depends_on:
             # Та же пер-ссылочная форма, что у Traces to: TASK_REF
             # spec-runner требует ] сразу после id (minor ревью PR #149)
@@ -547,7 +578,10 @@ def render_tasks_dt(
             )
             lines.append(f"**Depends on:** {deps}")
         lines += ["", "**Checklist:**"]
-        lines += [f"- [ ] реализовать {g.beh_id}: {g.title}" for g in group]
+        item_verb = "проверить" if t.type == "verify" else "реализовать"
+        lines += [
+            f"- [ ] {item_verb} {g.beh_id}: {g.title}" for g in group
+        ]
         traces = []
         for g in group:
             traces += [x for x in g.traces if x not in traces]
@@ -762,11 +796,11 @@ def deliver(
                 )
     # Валидация DT-пути (полный DAG, Task 8 плана decomposition-node) —
     # ЗДЕСЬ, ПОСЛЕ existence/composition-гардов и ДО ensure_branch/
-    # stamp_bundle_approved: отказ на штатном сегодня пути (verify-DT при
-    # OPEN spec-runner#367, невалидный граф DT) не должен оставлять target
-    # на чужой ветке с незакоммиченным штампом — dirty-гард заблокировал бы
-    # повторную доставку. Отказ verify-DT из render_tasks_dt при этом
-    # остаётся (защита прямых вызовов рендера) — дубль намеренный.
+    # stamp_bundle_approved: отказ (невалидный граф DT) не должен
+    # оставлять target на чужой ветке с незакоммиченным штампом —
+    # dirty-гард заблокировал бы повторную доставку. verify-DT больше не
+    # отказ: verify-first доставлен (spec-runner#367 закрыт 2026-09-07),
+    # мост рендерит их задачами `**Mode:** verify_first`.
     if legacy_bundle is None:
         decomposition_pre = (
             base / "30-decomposition.md"
@@ -779,17 +813,6 @@ def deliver(
             raise RuntimeError(
                 "decomposition: граф DT невалиден:\n"
                 + "\n".join(f"- {e}" for e in graph_errors)
-            )
-        dt_tasks_pre, _form_findings = decomposition_guard.parse_dt_tasks(
-            decomposition_pre
-        )
-        verify_dts = [t.dt_id for t in dt_tasks_pre if t.type == "verify"]
-        if verify_dts:
-            raise RuntimeError(
-                f"verify-DT ({', '.join(verify_dts)}) требуют режим "
-                "verify-first spec-runner#367 — он ещё не доставлен "
-                "(@blocked_by:spec-runner#367, чекбокс в TODO.md devtools); "
-                "implement-DT работают полностью"
             )
     branch = f"spec/{ws_id}-tasks"
     ops.ensure_branch(target_dir, branch)

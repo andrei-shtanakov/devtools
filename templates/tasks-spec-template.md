@@ -56,3 +56,8 @@ Source: <провенанс>
 - [ ] <шаг>
 
 **Depends on:** [TASK-001]
+
+<!-- verify-first (доставлен WS-spec-runner-367): задача проверки несёт
+     `**Mode:** verify_first` и `**Verifies:** <селектор>[, <селектор>…]`
+     (точные ключи — регексы MODE/VERIFIES в spec-runner task.py;
+     значение через подчёркивание). -->

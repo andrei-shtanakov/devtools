@@ -1340,26 +1340,58 @@ parallel_group: core
 """
 
 
-def test_verify_dt_fails_closed_until_spec_runner_367() -> None:
-    """DT с type: verify ⇒ render_tasks_dt поднимает RuntimeError с
-    "verify-first", "spec-runner#367", "@blocked_by" (fail-closed до
-    доставки шва)."""
+def test_verify_dt_renders_with_verify_first_mode() -> None:
+    """verify-first доставлен (spec-runner#367 закрыт): DT с type: verify
+    рендерится задачей с `**Mode:** verify_first` и `**Verifies:**` из
+    checked_by-целей сценариев — spec-runner начнёт её живым прогоном
+    группы. Fail-closed отказ эпохи блокера снят
+    (@id:decomposition-verify-first-unblock)."""
     scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
     dt_tasks, _ = decomposition_guard.parse_dt_tasks(VERIFY_DT_MD)
-    with pytest.raises(RuntimeError) as exc_info:
+    text = task_bridge.render_tasks_dt(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/30-decomposition.md",
+        scenarios=scenarios,
+        dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00",
+        anchor_blob="ab" * 20,
+    )
+    verify_block = text.split("### TASK-001:")[1].split("### TASK-002:")[0]
+    assert "**Mode:** verify_first" in verify_block
+    assert "**Verifies:** tests/test_a.py" in verify_block
+    assert "Проверить сценарии BEH-01" in verify_block
+    assert "- [ ] проверить BEH-01" in verify_block
+    assert "реализовать BEH-01" not in verify_block
+    # implement-задача режим не несёт
+    implement_block = text.split("### TASK-002:")[1]
+    assert "**Mode:**" not in implement_block
+    assert "Реализовать сценарии BEH-02" in implement_block
+
+
+def test_verify_dt_without_checked_by_targets_refuses() -> None:
+    """Minor ревью PR #152: verify-DT, чьи сценарии не дают ни одной
+    checked_by-цели, — отказ (нечего прогонять), не молчаливый Mode без
+    Verifies."""
+    beh_no_targets = (
+        "---\nspec_stage: behaviour-spec\nstatus: draft\n"
+        "owner_role: product\n---\n# B\n\n"
+        "#### BEH-01: Без биндинга\n`traces: [FR-01]`\n"
+    )
+    dt = (
+        "#### DT-01: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: []\n"
+        "delivered_by: []\nparallel_group: solo\n"
+    )
+    scenarios = task_bridge.parse_behaviour(beh_no_targets)
+    dt_tasks, _ = decomposition_guard.parse_dt_tasks(dt)
+    with pytest.raises(RuntimeError, match="нечего прогонять"):
         task_bridge.render_tasks_dt(
-            ws_id="WS-x-1",
-            subject="s",
+            ws_id="WS-x-1", subject="s",
             bundle_path="b/30-decomposition.md",
-            scenarios=scenarios,
-            dt_tasks=dt_tasks,
-            generated_at="2026-09-05T12:00:00",
-            anchor_blob="ab" * 20,
+            scenarios=scenarios, dt_tasks=dt_tasks,
+            generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
         )
-    message = str(exc_info.value)
-    assert "verify-first" in message
-    assert "spec-runner#367" in message
-    assert "@blocked_by" in message
 
 
 DECOMPOSITION_SHARED_FILE_MD = """\
@@ -1466,12 +1498,11 @@ parallel_group: solo
 """
 
 
-def test_deliver_verify_dt_fails_closed_before_mutation(
+def test_deliver_verify_dt_now_delivers(
     tmp_path: Path,
 ) -> None:
-    """deliver на DT-пути с verify-DT ⇒ RuntimeError И
-    ops.ensure_branch НЕ вызывался, файлы бандла не изменены (verify-first
-    spec-runner#367 ещё не доставлен)."""
+    """verify-first доставлен: deliver на DT-пути с verify-DT больше не
+    отказывает — tasks-спека рождается с verify_first-задачей."""
     target = tmp_path / "alpha"
     bundle = target / "workstreams/WS-alpha-7/spec"
     bundle.mkdir(parents=True)
@@ -1481,26 +1512,20 @@ def test_deliver_verify_dt_fails_closed_before_mutation(
     (bundle / "20-design.md").write_text(DESIGN_MD)
     (bundle / "30-decomposition.md").write_text(DECOMPOSITION_VERIFY_MD)
     ops = _StubOps()
-    with pytest.raises(RuntimeError) as exc_info:
-        task_bridge.deliver(
-            target_dir=str(target),
-            repo_slug="owner/alpha",
-            ws_id="WS-alpha-7",
-            subject="s",
-            bundle_dir="workstreams/WS-alpha-7/spec",
-            base_ref="master",
-            ops=ops,
-            approved_by="a", approved_at="t",
-        )
-    message = str(exc_info.value)
-    assert "verify-first" in message
-    assert "spec-runner#367" in message
-    assert "@blocked_by" in message
-    assert not any(c[0] == "ensure_branch" for c in ops.calls)
-    assert (
-        bundle / "30-decomposition.md"
-    ).read_text() == DECOMPOSITION_VERIFY_MD
-    assert not (target / "spec" / "WS-alpha-7-tasks.md").exists()
+    pr = task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a", approved_at="t",
+    )
+    assert pr is not None
+    spec_text = (target / "spec" / "WS-alpha-7-tasks.md").read_text()
+    assert "**Mode:** verify_first" in spec_text
+    assert any(c[0] == "ensure_branch" for c in ops.calls)
 
 
 def test_deliver_full_dag_renders_via_render_tasks_dt(tmp_path: Path) -> None:
