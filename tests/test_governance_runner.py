@@ -4592,7 +4592,7 @@ _DT_SMOKE_CHARTER_BODY = (
 )
 
 
-def _dt_smoke_requirements_body(charter_pin: str) -> str:
+def _dt_smoke_requirements_body(charter_pin: str, extra: str = "") -> str:
     return (
         "---\n"
         "spec_stage: requirements\n"
@@ -4602,7 +4602,7 @@ def _dt_smoke_requirements_body(charter_pin: str) -> str:
         "upstream_hashes:\n"
         f'  charter: "{charter_pin}"\n'
         "---\n"
-        "#### FR-01: x\n**Priority**: Must\n"
+        "#### FR-01: x\n**Priority**: Must\n" + extra
     )
 
 
@@ -4720,28 +4720,37 @@ class _DtSmokeOps(FakeOps):
 def test_decomposition_node_end_to_end_smoke_and_deliver(
     tmp_path: Path, runs_root,
 ) -> None:
-    """Сквозной смоук 5-узлового профиля (Task 9): один прогон `start()`
-    до мержа на бандле с валидным графом DT (BEH-01/BEH-02 покрыты
-    DT-01/DT-02, DT-02 зависит от DT-01), затем `task_bridge.deliver()`
-    на том же `target_dir` — tasks-спека несёт `traces_to: [decomposition]`,
-    ровно по задаче на DT и ребро Depends on между ними.
+    """Сквозной смоук 6-узлового профиля (Task 9 плана acceptance-node,
+    прежде — Task 9 плана decomposition-node на 5 узлах; профиль вырос
+    на узел acceptance в Task 1/5 того же плана, `_DtSmokeOps.author`
+    авторит его через общий `FakeOps.author`, см. класс ниже): один
+    прогон `start()` до мержа на бандле с валидным графом DT (BEH-01/
+    BEH-02 покрыты DT-01/DT-02, DT-02 зависит от DT-01), затем
+    `task_bridge.deliver()` на том же `target_dir` — tasks-спека несёт
+    `traces_to: [decomposition]`, ровно по задаче на DT, ребро Depends on
+    между ними и справочную секцию критериев приёмки уровня acceptance.
 
     Не дублирует то, что уже проверено по частям:
-    - happy path пяти author-шагов и мерж на дефолтной (DT-01-solo)
+    - happy path шести author-шагов и мерж на дефолтной (DT-01-solo)
       decomposition — `test_design_node_end_to_end_smoke`;
     - render_tasks_dt изолированно (биндинги, Depends on, frontmatter) —
       `test_render_dt_one_task_per_dt_with_bindings_and_edges`/
       `test_render_dt_frontmatter_traces_decomposition_from_birth`
       (tests/test_governance_task_bridge.py);
+    - рендер секции критериев приёмки изолированно —
+      `test_render_acceptance_section_*` (tests/test_governance_task_bridge.py);
     - deliver на DT-пути изолированно, без предшествующего runner-прогона —
       `test_deliver_full_dag_renders_via_render_tasks_dt`.
 
     Недостающий кусок: ОДИН сквозной прогон runner → deliver на бандле,
     физически материализованном самим прогоном (не тестовой фикстурой
-    напрямую), с графом из ≥2 DT-задач и рёбер depends_on. Негативный
-    полукруг на том же графе —
+    напрямую), с графом из ≥2 DT-задач и рёбер depends_on, где секция AC
+    материализуется из РЕАЛЬНОГО 25-acceptance.md того же прогона.
+    Негативный полукруг на графе DT —
     `test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate`
-    ниже."""
+    ниже; негативный полукруг на покрытии Must-требований acceptance —
+    `test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate`
+    ещё ниже."""
     ops = _DtSmokeOps(facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-decomposition-e2e-smoke"
 
@@ -4786,6 +4795,13 @@ def test_decomposition_node_end_to_end_smoke_and_deliver(
     assert "**Depends on:** [TASK-001]" in text
     task1_block = text.split("### TASK-001:")[1].split("### TASK-002:")[0]
     assert "Depends on" not in task1_block
+
+    # Секция AC (Task 8 плана acceptance-node) материализована из
+    # РЕАЛЬНОГО 25-acceptance.md, авторенного этим же прогоном (общий
+    # `FakeOps.author` пишет `#### AC-01: x · verification: manual`,
+    # `traces: [FR-01]`, покрывая единственное Must-требование фикстуры).
+    assert "## Критерии приёмки (уровень acceptance)" in text
+    assert "- **AC-01** (manual): x" in text
 
 
 def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
@@ -4834,4 +4850,93 @@ def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
     assert state.status == "stopped_gate"
     findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
     assert "GC-DT-GRAPH" in findings and "BEH-03" in findings
+    assert "push" not in state.ops
+
+
+def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Второй негативный полукруг того же 6-узлового смоука (Task 9 плана
+    acceptance-node): граф DT валиден РОВНО как у позитивного смоука
+    (BEH-01/BEH-02 покрыты DT-01/DT-02 — GC-DT-GRAPH зелен, гейт доходит
+    до проверки acceptance), но requirements несёт ВТОРОЕ требование
+    FR-02 (Should), а AC-01 acceptance трассирует ТОЛЬКО на него — Must-
+    требование FR-01 остаётся не покрытым ни одним AC ⇒ `stopped_gate` с
+    `GC-AC-COVERAGE`, до author-decomposition (и тем более deliver) дело
+    не доходит."""
+    req_gap_extra = "#### FR-02: y\n**Priority**: Should\n"
+
+    class _AcGapOps(_DtSmokeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            if kind == "requirements":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                charter_pin = blob_sha1(
+                    (bundle / "00-charter.md").read_text(encoding="utf-8")
+                )
+                path = bundle / "10-requirements.md"
+                path.write_text(
+                    _dt_smoke_requirements_body(
+                        charter_pin, extra=req_gap_extra
+                    ),
+                    encoding="utf-8",
+                )
+                return 0
+            if kind == "acceptance":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                req_pin = blob_sha1(
+                    (bundle / "10-requirements.md").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                beh_pin = blob_sha1(
+                    (bundle / "15-behaviour-spec.md").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                path = bundle / "25-acceptance.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: acceptance\n"
+                    "status: draft\n"
+                    "owner_role: qa\n"
+                    "traces_to: [requirements, behaviour-spec]\n"
+                    "upstream_hashes:\n"
+                    f'  requirements: "{req_pin}"\n'
+                    f'  behaviour-spec: "{beh_pin}"\n'
+                    "---\n"
+                    "## Критерии приёмки\n\n"
+                    "#### AC-01: y · verification: manual\n"
+                    "traces: [FR-02]\n"
+                    "Наблюдаемый признак: человек видит y.\n\n"
+                    "## Инварианты покрытия\n\n"
+                    "Must-требования покрыты хотя бы одним AC.\n\n"
+                    "## Порог приёмки\n\nAC-01 обязателен к выполнению.\n\n"
+                    "## Вне объёма\n\nНичего не исключено.\n",
+                    encoding="utf-8",
+                )
+                return 0
+            return super().author(target_dir, kind, subject, bundle_dir)
+
+    ops = _AcGapOps(facts=GREEN_PR_FACTS)
+    run_id = "r-acceptance-e2e-smoke-gap"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+
+    assert state.status == "stopped_gate"
+    findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
+    assert "GC-AC-COVERAGE" in findings and "FR-01" in findings
+    # S2 отрабатывает ВСЕ шесть author-шагов безусловно (гейт S4 идёт
+    # только после — `_step_authoring` в governance/runner.py); граф DT
+    # валиден, поэтому GC-DT-GRAPH пропускает, и стоп приходит только на
+    # GC-AC-COVERAGE.
+    assert ops.authored == [
+        "charter", "requirements", "behaviour-spec", "design", "acceptance",
+        "decomposition",
+    ]
     assert "push" not in state.ops
