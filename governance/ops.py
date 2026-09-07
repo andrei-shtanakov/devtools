@@ -180,6 +180,7 @@ _AUTHOR_FILENAMES = {
     "requirements": "10-requirements.md",
     "behaviour-spec": "15-behaviour-spec.md",
     "design": "20-design.md",
+    "acceptance": "25-acceptance.md",
     "decomposition": "30-decomposition.md",
 }
 _AUTHOR_DSL = {
@@ -194,7 +195,8 @@ _AUTHOR_DSL = {
         "`git hash-object <bundle_dir>/00-charter.md`. Every functional "
         "requirement MUST be a heading `#### FR-NN: <title>` followed by a "
         "`**Priority**: Must` (or Should) line. Non-functional requirements "
-        "use `#### NFR-NN: <title>`. Use FR-/NFR- ids consistently "
+        "use `#### NFR-NN: <title>` followed by the same `**Priority**: "
+        "Must (or Should) line. Use FR-/NFR- ids consistently "
         "everywhere, including any traceability matrices. Every open "
         "question MUST be a bullet `- **Q-NN · owner_role: <role> · "
         "blocking: true|false.** <text>`; architect-level questions use "
@@ -243,11 +245,46 @@ _AUTHOR_DSL = {
         "(that is the implementer's job under TDD); do not create new "
         "Q-* without owner_role."
     ),
+    "acceptance": (
+        "YAML frontmatter (required): spec_stage: acceptance, "
+        "status: draft, owner_role: qa, traces_to: [requirements, "
+        "behaviour-spec], upstream_hashes: {requirements: \"<hash10>\", "
+        "behaviour-spec: \"<hash15>\"} where <hash10> and <hash15> are "
+        "the outputs of `git hash-object <bundle_dir>/10-requirements.md` "
+        "and `git hash-object <bundle_dir>/15-behaviour-spec.md`. "
+        "The document MUST contain these sections: Критерии приёмки, "
+        "Инварианты покрытия, Порог приёмки, Вне объёма. Критерии "
+        "приёмки: every criterion is a heading exactly `#### AC-NN: "
+        "<title> · verification: test|manual|metric` followed by "
+        "metadata lines `traces: [FR-…|NFR-…]` (>=1, ids from "
+        "10-requirements.md, both classes are legal) and `scenarios: "
+        "[BEH-…]` (REQUIRED for verification: test — the criterion is "
+        "proven by those green scenarios; optional otherwise), then a "
+        "prose paragraph naming the observable sign of fulfilment. "
+        "verification: manual — the prose MUST name what a human "
+        "observes; verification: metric — the prose MUST name the "
+        "SOURCE of the number (artifact or named constant), never "
+        "hard-code the number in the criterion. Every Must-priority "
+        "requirement (FR and NFR alike) MUST be covered by at least one "
+        "AC; Should and below are at qa's discretion. If the input set "
+        "of Must requirements is empty, the document MUST instead carry "
+        "the exact line `Must-требований во входном наборе нет`. "
+        "Порог приёмки: which ACs must hold before the workstream is "
+        "declared delivered (default: all with verification: test; "
+        "manual/metric — by enumeration). Вне объёма: what is "
+        "deliberately not an acceptance criterion. Forbidden: do not "
+        "migrate the charter's AC numbering (this node is the single "
+        "source of acceptance, authored fresh from requirements/"
+        "behaviour); do not invent FR/NFR/BEH ids; do not restate "
+        "requirements as criteria without an observable sign."
+    ),
     "decomposition": (
         "YAML frontmatter (required): spec_stage: decomposition, "
-        "status: draft, owner_role: tech-lead, traces_to: [design], "
-        "upstream_hashes: {design: \"<hash20>\"} where <hash20> is the "
-        "output of `git hash-object <bundle_dir>/20-design.md`. "
+        "status: draft, owner_role: tech-lead, traces_to: [design, acceptance], "
+        "upstream_hashes: {design: \"<hash20>\", acceptance: \"<hash25>\"} where "
+        "<hash20> and <hash25> are the outputs of `git hash-object "
+        "<bundle_dir>/20-design.md` and `git hash-object "
+        "<bundle_dir>/25-acceptance.md`. "
         "The document MUST contain these sections: Задачи, Инварианты "
         "графа, Порядок и параллельность, Вне объёма. Задачи: every task "
         "is a heading exactly `#### DT-NN: <title> · type: "

@@ -792,8 +792,40 @@ def test_author_dsl_covers_decomposition() -> None:
     dsl = _AUTHOR_DSL["decomposition"]
     for token in (
         "spec_stage: decomposition", "owner_role: tech-lead",
-        "traces_to: [design]", "#### DT-NN:", "type: implement|verify",
+        "traces_to: [design, acceptance]", "#### DT-NN:", "type: implement|verify",
         "scenarios:", "depends_on:", "delivered_by:", "parallel_group:",
         "topological declaration order",
     ):
         assert token in dsl
+
+
+def test_author_dsl_covers_acceptance() -> None:
+    from governance.ops import _AUTHOR_DSL, _AUTHOR_FILENAMES
+
+    assert _AUTHOR_FILENAMES["acceptance"] == "25-acceptance.md"
+    dsl = _AUTHOR_DSL["acceptance"]
+    for token in (
+        "spec_stage: acceptance", "owner_role: qa",
+        "traces_to: [requirements, behaviour-spec]",
+        "#### AC-NN:", "verification: test|manual|metric",
+        "traces:", "scenarios:",
+        "Must-требований во входном наборе нет",
+    ):
+        assert token in dsl
+
+
+def test_decomposition_dsl_carries_acceptance_pin() -> None:
+    from governance.ops import _AUTHOR_DSL
+
+    dsl = _AUTHOR_DSL["decomposition"]
+    assert "traces_to: [design, acceptance]" in dsl
+    assert "<hash25>" in dsl
+    assert "25-acceptance.md" in dsl
+
+
+def test_requirements_dsl_mandates_priority_for_nfr() -> None:
+    from governance.ops import _AUTHOR_DSL
+
+    dsl = _AUTHOR_DSL["requirements"]
+    nfr_part = dsl.split("NFR-NN")[1]
+    assert "**Priority**" in nfr_part
