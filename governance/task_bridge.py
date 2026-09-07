@@ -26,7 +26,7 @@ import yaml
 from governance import acceptance_guard, decomposition_guard, design_guard
 from governance.ops import Ops, RealOps
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
-from governance.run_state import load
+from governance.run_state import RunState, load, op_complete, op_start
 from governance.stale_adapter import blob_sha1
 
 # DAG бандла в порядке штампа (топологический): каждый узел перечисляет
@@ -978,6 +978,77 @@ def deliver(
     )
 
 
+def deliver_for_run(
+    state: RunState,
+    ops: Ops,
+    legacy_bundle: int | None = None,
+) -> int:
+    """Идемпотентная доставка tasks-спеки для прогона (кнопка spec-loop).
+
+    Durable reconciliation поверх неидемпотентного `deliver()` (дизайн-
+    решение владельца 2026-09-07): op ``tasks-deliver`` в `run.json`
+    ведётся write-ahead (`started` ДО эффектов), а перед любой доставкой
+    ищется уже созданный PR по ветке ``spec/<ws-id>-tasks`` — повтор
+    НИКОГДА не создаёт PR заново, в каком бы состоянии op ни застал
+    прогон (new/started/completed).
+
+    Возвращает номер PR; любое препятствие — RuntimeError (fail-closed,
+    вызывающая сторона печатает и выходит ненулевым RC).
+    """
+    if state.status != "completed":
+        raise RuntimeError(
+            f"run {state.run_id!r} в статусе {state.status!r}, нужен "
+            "'completed' — сперва доведите прогон (resume/verify)"
+        )
+    op = state.ops.get("tasks-deliver") or {}
+    if op.get("status") == "completed":
+        print(
+            f"tasks-спека уже доставлена: PR #{op['pr']} "
+            f"({state.repo_slug}) — повтор не создаёт PR"
+        )
+        return op["pr"]
+    branch = f"spec/{state.ws_id}-tasks"
+    existing = ops.find_pr(state.repo_slug, branch)
+    if existing is not None:
+        op_complete(state, "tasks-deliver", pr=existing)
+        print(
+            f"найден существующий PR #{existing} по ветке {branch} — "
+            "принят как доставка, новый не создаётся"
+        )
+        return existing
+    # approved_by/at — факт мержа бандл-PR (решение владельца devtools#110:
+    # инициированный мерж = approve; mergedBy — различитель agent/human,
+    # ADR-ECO-011). Отсутствие факта — стоп, не выдуманное значение.
+    if state.pr is None:
+        raise RuntimeError(
+            "в леджере нет номера бандл-PR — штамп невозможен"
+        )
+    facts = ops.pr_facts(state.repo_slug, state.pr)
+    merged_by = (facts.get("mergedBy") or {}).get("login")
+    merged_at = facts.get("mergedAt")
+    if not merged_by or not merged_at:
+        raise RuntimeError(
+            f"у PR #{state.pr} нет mergedBy/mergedAt — бандл не вмержен "
+            "или API не отдал факт мержа; стоп"
+        )
+    op_start(state, "tasks-deliver")
+    pr = deliver(
+        target_dir=state.target_dir,
+        repo_slug=state.repo_slug,
+        ws_id=state.ws_id,
+        subject=state.subject,
+        bundle_dir=state.bundle_dir,
+        base_ref=state.base_ref or "master",
+        ops=ops,
+        approved_by=merged_by,
+        approved_at=merged_at,
+        legacy_bundle=legacy_bundle,
+        profile=state.profile,
+    )
+    op_complete(state, "tasks-deliver", pr=pr)
+    return pr
+
+
 def deliver_conform(
     target_dir: str,
     repo_slug: str,
@@ -1096,34 +1167,14 @@ def main(argv: list[str] | None = None) -> int:
             f"({state.repo_slug})"
         )
         return 0
-    # approved_by/at — факт мержа бандл-PR (решение владельца devtools#110:
-    # инициированный мерж = approve; mergedBy — различитель agent/human,
-    # ADR-ECO-011). Отсутствие факта — стоп, не выдуманное значение.
-    if state.pr is None:
-        print("task_bridge: в леджере нет номера бандл-PR — штамп невозможен")
+    # Доставка — только через deliver_for_run (durable reconciliation,
+    # кнопка spec-loop): write-ahead op tasks-deliver + поиск уже
+    # созданного PR по ветке; повтор не создаёт PR заново.
+    try:
+        pr = deliver_for_run(state, ops, legacy_bundle=args.legacy_bundle)
+    except RuntimeError as exc:
+        print(f"task_bridge: {exc}")
         return 1
-    facts = ops.pr_facts(state.repo_slug, state.pr)
-    merged_by = (facts.get("mergedBy") or {}).get("login")
-    merged_at = facts.get("mergedAt")
-    if not merged_by or not merged_at:
-        print(
-            f"task_bridge: у PR #{state.pr} нет mergedBy/mergedAt — "
-            "бандл не вмержен или API не отдал факт мержа; стоп"
-        )
-        return 1
-    pr = deliver(
-        target_dir=state.target_dir,
-        repo_slug=state.repo_slug,
-        ws_id=state.ws_id,
-        subject=state.subject,
-        bundle_dir=state.bundle_dir,
-        base_ref=state.base_ref or "master",
-        ops=ops,
-        approved_by=merged_by,
-        approved_at=merged_at,
-        legacy_bundle=args.legacy_bundle,
-        profile=state.profile,
-    )
     print(f"draft tasks-спека доставлена: PR #{pr} ({state.repo_slug})")
     return 0
 
