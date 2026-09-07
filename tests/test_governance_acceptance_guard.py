@@ -77,3 +77,67 @@ def test_block_ends_at_next_section() -> None:
     crits, findings = parse_ac_criteria(text)
     assert findings == []
     assert crits[0].scenarios == ()
+
+
+REQ = (
+    "#### FR-01: Первое\n**Priority**: Must\nтекст\n\n"
+    "#### FR-02: Второе\n**Priority**: Should\nтекст\n\n"
+    "#### NFR-01: Бюджет\n**Priority**: Must\nтекст\n"
+)
+BEH = "#### BEH-01: Один\nтекст\n\n#### BEH-02: Два\nтекст\n"
+
+
+def test_clean_coverage() -> None:
+    from governance.acceptance_guard import coverage_findings
+    acc = (
+        "#### AC-01: Функция · verification: test\n"
+        "traces: [FR-01]\nscenarios: [BEH-01]\nпроза\n\n"
+        "#### AC-02: Бюджет · verification: metric\n"
+        "traces: [NFR-01]\nисточник числа — артефакт замера\n"
+    )
+    assert coverage_findings(REQ, BEH, acc) == []
+
+
+def test_uncovered_must_fr_and_nfr_are_findings() -> None:
+    from governance.acceptance_guard import coverage_findings
+    acc = (
+        "#### AC-01: Только FR · verification: test\n"
+        "traces: [FR-01]\nscenarios: [BEH-01]\n"
+    )
+    findings = coverage_findings(REQ, BEH, acc)
+    assert any("NFR-01" in f and "не покрыт" in f for f in findings)
+    assert not any("FR-02" in f for f in findings)  # Should — не находка
+
+
+def test_unknown_references_are_findings() -> None:
+    from governance.acceptance_guard import coverage_findings
+    acc = (
+        "#### AC-01: Битые ссылки · verification: test\n"
+        "traces: [FR-01, FR-99]\nscenarios: [BEH-01, BEH-99]\n"
+    )
+    findings = coverage_findings(REQ, BEH, acc)
+    assert any("FR-99" in f for f in findings)
+    assert any("BEH-99" in f for f in findings)
+
+
+def test_near_miss_requirement_priority_is_a_finding() -> None:
+    from governance.acceptance_guard import coverage_findings
+    req = "#### FR-01: Без приоритета\nпроза без строки Priority\n"
+    acc = "#### AC-01: X · verification: manual\ntraces: [FR-01]\n"
+    findings = coverage_findings(req, BEH, acc)
+    assert any(
+        "FR-01" in f and "недостоверн" in f for f in findings
+    )
+
+
+def test_empty_must_set_needs_declaration() -> None:
+    from governance.acceptance_guard import coverage_findings
+    req = "#### FR-01: Только Should\n**Priority**: Should\nтекст\n"
+    acc_without = (
+        "#### AC-01: X · verification: manual\ntraces: [FR-01]\n"
+    )
+    assert any(
+        "деклара" in f for f in coverage_findings(req, BEH, acc_without)
+    )
+    acc_with = acc_without + "\nMust-требований во входном наборе нет\n"
+    assert coverage_findings(req, BEH, acc_with) == []

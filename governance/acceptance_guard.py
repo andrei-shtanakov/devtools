@@ -93,3 +93,92 @@ def parse_ac_criteria(text: str) -> tuple[list[AcCriterion], list[str]]:
                 f"{ac_id}: объявлен {count} раза (ожидается ровно один)"
             )
     return crits, findings
+
+
+_REQ_HEAD_RE = re.compile(r"^####\s+((?:FR|NFR)-\d+[a-z]?):", re.M)
+_REQ_NEAR_RE = re.compile(r"^####\s+((?:FR|NFR)-[^\s:]*)", re.M)
+_PRIORITY_RE = re.compile(r"^\*\*Priority\*\*:\s*(\S+)", re.M)
+_BEH_ID_RE = re.compile(r"^####\s+(BEH-\d+[a-z]?):", re.M)
+
+
+def _parse_requirements(req_text: str) -> tuple[dict[str, str], list[str]]:
+    """id → priority по строгой грамматике; findings достоверности.
+
+    Near-miss заголовок FR/NFR и заголовок без распознанной строки
+    `**Priority**: …` — находки «входное множество недостоверно» (канон
+    design_guard, major круга 2 ревью спеки): промах грамматики не
+    должен молча сжимать множество Must.
+    """
+    findings: list[str] = []
+    strict = {m.start() for m in _REQ_HEAD_RE.finditer(req_text)}
+    for near in _REQ_NEAR_RE.finditer(req_text):
+        if near.start() not in strict:
+            findings.append(
+                f"{near.group(1)}: заголовок requirements не соответствует "
+                "машинной грамматике — входное множество недостоверно"
+            )
+    heads = list(_REQ_HEAD_RE.finditer(req_text))
+    priorities: dict[str, str] = {}
+    for idx, m in enumerate(heads):
+        end = (
+            heads[idx + 1].start() if idx + 1 < len(heads)
+            else len(req_text)
+        )
+        block = req_text[m.end() : end]
+        pr = _PRIORITY_RE.search(block)
+        if pr is None:
+            findings.append(
+                f"{m.group(1)}: строка **Priority**: не распознана — "
+                "входное множество недостоверно"
+            )
+            continue
+        priorities[m.group(1)] = pr.group(1)
+    return priorities, findings
+
+
+def _parse_beh_ids(beh_text: str) -> set[str]:
+    return {m.group(1) for m in _BEH_ID_RE.finditer(beh_text)}
+
+
+def coverage_findings(
+    req_text: str, beh_text: str, acc_text: str
+) -> list[str]:
+    """Инварианты §3 спеки: Must-покрытие FR/NFR + ссылочная целостность.
+
+    Findings накапливаются (гейт показывает всё сразу); пустой список —
+    покрытие валидно.
+    """
+    crits, findings = parse_ac_criteria(acc_text)
+    priorities, req_findings = _parse_requirements(req_text)
+    findings += req_findings
+    beh_ids = _parse_beh_ids(beh_text)
+
+    for c in crits:
+        for ref in c.traces:
+            if ref not in priorities:
+                findings.append(
+                    f"{c.ac_id}: ссылка на несуществующее требование {ref}"
+                )
+        for beh in c.scenarios:
+            if beh not in beh_ids:
+                findings.append(
+                    f"{c.ac_id}: сценарий {beh} отсутствует в behaviour-spec"
+                )
+
+    covered: set[str] = set()
+    for c in crits:
+        covered.update(c.traces)
+    must = [rid for rid, pr in priorities.items() if pr == "Must"]
+    if not must:
+        if EMPTY_MUST_DECLARATION not in acc_text:
+            findings.append(
+                "acceptance: множество Must-требований пусто, но "
+                f"строка-декларация «{EMPTY_MUST_DECLARATION}» отсутствует"
+            )
+        return findings
+    for rid in must:
+        if rid not in covered:
+            findings.append(
+                f"{rid}: Must-требование не покрыто ни одним AC"
+            )
+    return findings
