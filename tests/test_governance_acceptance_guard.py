@@ -198,3 +198,31 @@ def test_empty_must_declaration_prose_mention_is_not_the_declaration() -> None:
         "Must-требований во входном наборе нет\n"
     )
     assert coverage_findings(req, BEH, acc_anchored) == []
+
+
+def test_duplicate_requirement_id_is_a_finding() -> None:
+    """Дубль FR/NFR-id не должен молча выпадать из Must («последний
+    выигрывает») — зеркалит дубль-находку AC-id (parse_ac_criteria)."""
+    from governance.acceptance_guard import coverage_findings
+    req = (
+        "#### FR-05: Первое\n**Priority**: Must\nтекст\n\n"
+        "#### FR-05: Дубль\n**Priority**: Should\nтекст\n"
+    )
+    acc = "#### AC-01: X · verification: manual\ntraces: []\n"
+    findings = coverage_findings(req, BEH, acc)
+    assert any(
+        "FR-05" in f and "объявлен 2 раза" in f for f in findings
+    )
+
+
+def test_requirement_near_miss_at_other_heading_level_is_a_finding() -> None:
+    """Заголовок FR/NFR на другом уровне (не ####) невидим для строгой
+    грамматики и молча сжимает Must — но должен быть виден NEAR-регексу
+    как находка недостоверности, а не тихим зелёным."""
+    from governance.acceptance_guard import coverage_findings
+    req = "### NFR-02: Бюджет\n**Priority**: Must\nтекст\n"
+    acc = "#### AC-01: X · verification: manual\ntraces: []\n"
+    findings = coverage_findings(req, BEH, acc)
+    assert any(
+        "NFR-02" in f and "недостоверн" in f for f in findings
+    )

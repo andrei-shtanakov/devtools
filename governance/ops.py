@@ -266,7 +266,7 @@ _AUTHOR_DSL = {
         "SOURCE of the number (artifact or named constant), never "
         "hard-code the number in the criterion. Every Must-priority "
         "requirement (FR and NFR alike) MUST be covered by at least one "
-        "AC; Should and below are at qa's discretion. If the input set "
+        "AC; Should is at qa's discretion. If the input set "
         "of Must requirements is empty, the document MUST instead carry "
         "the exact line `Must-требований во входном наборе нет`. "
         "Порог приёмки: which ACs must hold before the workstream is "

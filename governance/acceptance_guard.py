@@ -96,7 +96,7 @@ def parse_ac_criteria(text: str) -> tuple[list[AcCriterion], list[str]]:
 
 
 _REQ_HEAD_RE = re.compile(r"^####\s+((?:FR|NFR)-\d+[a-z]?):", re.M)
-_REQ_NEAR_RE = re.compile(r"^####\s+((?:FR|NFR)-[^\s:]*)", re.M)
+_REQ_NEAR_RE = re.compile(r"^#{2,6}\s+((?:FR|NFR)-[^\s:]*)", re.M)
 _PRIORITY_RE = re.compile(r"^\*\*Priority\*\*:\s*(\S+)", re.M)
 _BEH_ID_RE = re.compile(r"^####\s+(BEH-\d+[a-z]?):", re.M)
 
@@ -119,7 +119,10 @@ def _parse_requirements(req_text: str) -> tuple[dict[str, str], list[str]]:
             )
     heads = list(_REQ_HEAD_RE.finditer(req_text))
     priorities: dict[str, str] = {}
+    seen: dict[str, int] = {}
     for idx, m in enumerate(heads):
+        rid = m.group(1)
+        seen[rid] = seen.get(rid, 0) + 1
         end = heads[idx + 1].start() if idx + 1 < len(heads) else len(req_text)
         block = req_text[m.end() : end]
         section = _SECTION_RE.search(block)
@@ -128,17 +131,22 @@ def _parse_requirements(req_text: str) -> tuple[dict[str, str], list[str]]:
         pr = _PRIORITY_RE.search(block)
         if pr is None:
             findings.append(
-                f"{m.group(1)}: строка **Priority**: не распознана — "
+                f"{rid}: строка **Priority**: не распознана — "
                 "входное множество недостоверно"
             )
             continue
         if pr.group(1) not in ("Must", "Should"):
             findings.append(
-                f"{m.group(1)}: значение **Priority**: {pr.group(1)} вне "
+                f"{rid}: значение **Priority**: {pr.group(1)} вне "
                 "словаря Must|Should — входное множество недостоверно"
             )
             continue
-        priorities[m.group(1)] = pr.group(1)
+        priorities[rid] = pr.group(1)
+    for rid, count in seen.items():
+        if count > 1:
+            findings.append(
+                f"{rid}: объявлен {count} раза (ожидается ровно один)"
+            )
     return priorities, findings
 
 
