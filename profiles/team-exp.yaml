@@ -1,10 +1,8 @@
-# Урезанный team-exp для behaviour-конвейера devtools (смоук WS-SMOKE-001).
-# Источник формы — steward profiles/team-exp.yaml @ 4a1c7c44 (пин конвейера);
-# оставлены только узлы, которые авторит governance/runner.py (S2:
-# charter → requirements → behaviour-spec → design) + delegate-узел tasks.
-# acceptance полного team-exp намеренно не включена: required-узел по
-# умолчанию, его отсутствие в бандле дало бы required_absent на S4 (см.
-# governance/bundle_state.py).
+# team-exp для behaviour-конвейера devtools (смоук WS-SMOKE-001).
+# Источник формы — steward profiles/team-exp.yaml @ 4a1c7c44 (пин конвейера).
+# Узлы: charter → requirements → behaviour-spec → design → acceptance →
+# decomposition → tasks. acceptance (qa, из спеки Task 1) добавлена как
+# second upstream к decomposition.
 profile: team-exp
 solo_auto_approve: true
 artifacts:
@@ -19,13 +17,16 @@ artifacts:
     upstream: [requirements]
   - {id: design, template: design.md, owner_role: architects,
      upstream: [requirements, behaviour-spec]}
+  - id: acceptance
+    template: acceptance.md
+    owner_role: qa
+    upstream: [requirements, behaviour-spec]
   - id: decomposition
     template: decomposition.md
     owner_role: tech-lead
-    # steward-форма: upstream: [design, acceptance]; acceptance срезан
-    # (придёт спекой 4). compile: decomposition→maestro/project.yaml НЕ
-    # реализуется (наш лейн Mode-2) — осознанное отступление, §2/§8 спеки.
-    upstream: [design]
+    # compile: decomposition→maestro/project.yaml НЕ реализуется (наш лейн
+    # Mode-2) — осознанное отступление, §2/§8 спеки.
+    upstream: [design, acceptance]
   - id: tasks
     owner_role: stream-owner
     upstream: [decomposition]
