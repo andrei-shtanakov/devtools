@@ -57,6 +57,7 @@ _AUTHOR_STEPS = (
     ("author-requirements", "requirements", "10-requirements.md"),
     ("author-behaviour", "behaviour-spec", "15-behaviour-spec.md"),
     ("author-design", "design", "20-design.md"),
+    ("author-acceptance", "acceptance", "25-acceptance.md"),
     ("author-decomposition", "decomposition", "30-decomposition.md"),
 )
 
@@ -738,7 +739,7 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
         op_status(state, key) != "completed" for key, _, _ in _AUTHOR_STEPS
     )
     if authoring_pending:
-        for node in ("design", "decomposition"):
+        for node in ("design", "acceptance", "decomposition"):
             if not target_profile_declares(
                 state.target_dir, state.profile, node
             ):
