@@ -47,7 +47,9 @@ class Ops(Protocol):
 
     def checkout_and_pull(self, target_dir: str, branch: str) -> None: ...
 
-    def find_pr(self, repo_slug: str, branch: str) -> int | None: ...
+    def find_pr(
+        self, repo_slug: str, branch: str, *, any_state: bool = False
+    ) -> int | None: ...
 
     def create_draft_pr(
         self,
@@ -457,17 +459,23 @@ class RealOps:
                 f"{pull.stderr.strip()}"
             )
 
-    def find_pr(self, repo_slug: str, branch: str) -> int | None:
-        """Номер открытого PR для branch; None ТОЛЬКО когда открытых PR нет.
+    def find_pr(
+        self, repo_slug: str, branch: str, *, any_state: bool = False
+    ) -> int | None:
+        """Номер PR для branch; None ТОЛЬКО когда таких PR нет.
 
-        Сбой самого запроса — rc != 0, битый или неожиданный по форме JSON —
-        не то же самое, что «PR нет» (финальное ревью F-5, круг 2): поднимает
-        `RuntimeError`, чтобы reconciliation в runner'е не читала транзиентный
-        сбой `gh` как отсутствие PR и не открывала второй PR на ту же ветку.
+        Дефолт — только открытые. `any_state=True` (реконсиляция доставки
+        tasks-спеки, major терм. ревью #156) видит и вмерженные/закрытые:
+        отсутствие ОТКРЫТОГО PR не значит «доставки не было» — спека могла
+        быть доставлена и вмержена раньше. Сбой самого запроса — rc != 0,
+        битый или неожиданный по форме JSON — не то же самое, что «PR нет»
+        (финальное ревью F-5, круг 2): поднимает `RuntimeError`, чтобы
+        reconciliation не читала транзиентный сбой `gh` как отсутствие PR
+        и не открывала второй PR на ту же ветку.
         """
         done = subprocess.run(
             ["gh", "pr", "list", "-R", repo_slug, "--head", branch,
-             "--state", "open", "--json", "number"],
+             "--state", "all" if any_state else "open", "--json", "number"],
             capture_output=True, text=True,
         )
         if done.returncode != 0:

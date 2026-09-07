@@ -1106,7 +1106,9 @@ class _ConformOps(_StubOps):
         super().__init__()
         self.existing_pr = existing_pr
 
-    def find_pr(self, repo_slug: str, branch: str) -> int | None:
+    def find_pr(
+        self, repo_slug: str, branch: str, *, any_state: bool = False
+    ) -> int | None:
         self.calls.append(("find_pr", branch))
         return self.existing_pr
 
@@ -1917,3 +1919,140 @@ def test_deliver_legacy_5_has_no_acceptance_section(tmp_path: Path) -> None:
     )
     text5 = (target5 / "spec/WS-alpha-7-tasks.md").read_text()
     assert "Критерии приёмки" not in text5
+
+
+# --- deliver_for_run: durable reconciliation (кнопка spec-loop) -------------
+
+
+class _ReconOps(_StubOps):
+    """Стаб с PR-поверхностью: find_pr/pr_facts поверх deliver-стаба."""
+
+    def __init__(self, existing_pr: int | None = None) -> None:
+        super().__init__()
+        self.existing_pr = existing_pr
+
+    def find_pr(
+        self, repo_slug: str, branch: str, *, any_state: bool = False
+    ) -> int | None:
+        self.calls.append(("find_pr", branch))
+        return self.existing_pr
+
+    def pr_facts(self, repo_slug: str, pr: int) -> dict:
+        self.calls.append(("pr_facts", pr))
+        return {
+            "state": "MERGED",
+            "mergedBy": {"login": "ai-prosto"},
+            "mergedAt": "2026-09-07T00:00:00Z",
+        }
+
+
+def _recon_state(tmp_path: Path, monkeypatch, **kw):
+    from governance import run_state as rs
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    target = _target(tmp_path)
+    state = rs.new_run(
+        subject="s",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        target_dir=str(target),
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        profile=None,
+        run_id="r-recon",
+    )
+    state.status = kw.get("status", "completed")
+    state.pr = kw.get("pr", 5)
+    state.base_ref = "master"
+    if "op" in kw:
+        state.ops["tasks-deliver"] = kw["op"]
+    rs.save(state)
+    return state
+
+
+def test_deliver_for_run_write_ahead_op_and_completion(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Свежий прогон: op tasks-deliver пишется started ДО create_draft_pr,
+    completed с номером PR — после; повторный вызов не создаёт PR снова."""
+    from governance import run_state as rs
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ReconOps()
+    pr = task_bridge.deliver_for_run(state, ops)
+    assert pr == 77
+    saved = rs.load("r-recon")
+    assert saved.ops["tasks-deliver"] == {"status": "completed", "pr": 77}
+    # повтор: op completed → ни одного нового эффекта
+    ops2 = _ReconOps()
+    assert task_bridge.deliver_for_run(rs.load("r-recon"), ops2) == 77
+    assert ops2.calls == []
+
+
+def test_deliver_for_run_adopts_existing_pr_by_branch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """PR по ветке spec/<ws-id>-tasks уже есть (op потерян/started) —
+    принимается как доставка, новый PR не создаётся."""
+    from governance import run_state as rs
+
+    state = _recon_state(
+        tmp_path, monkeypatch, op={"status": "started"}
+    )
+    ops = _ReconOps(existing_pr=91)
+    assert task_bridge.deliver_for_run(state, ops) == 91
+    assert ("find_pr", "spec/WS-alpha-7-tasks") in ops.calls
+    assert not any(c[0] == "create_draft_pr" for c in ops.calls)
+    assert rs.load("r-recon").ops["tasks-deliver"] == {
+        "status": "completed", "pr": 91,
+    }
+
+
+def test_deliver_for_run_refuses_non_completed_status(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state = _recon_state(tmp_path, monkeypatch, status="waiting_human_merge")
+    with pytest.raises(RuntimeError, match="completed"):
+        task_bridge.deliver_for_run(state, _ReconOps())
+
+
+def test_deliver_for_run_adopts_merged_pr_not_only_open(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """major терм. ревью #156: PR по ветке уже ВМЕРЖЕН (открытых нет) —
+    доставка была; повтор обязан принять её, а не перегенерировать спеку
+    с откатом approve в draft вторым PR-ом."""
+    from governance import run_state as rs
+
+    state = _recon_state(tmp_path, monkeypatch)
+
+    class _MergedOps(_ReconOps):
+        def find_pr(
+            self, repo_slug: str, branch: str, *, any_state: bool = False
+        ) -> int | None:
+            self.calls.append(("find_pr", branch, any_state))
+            return 91 if any_state else None
+
+    ops = _MergedOps()
+    assert task_bridge.deliver_for_run(state, ops) == 91
+    assert ("find_pr", "spec/WS-alpha-7-tasks", True) in ops.calls
+    assert not any(c[0] == "create_draft_pr" for c in ops.calls)
+    assert rs.load("r-recon").ops["tasks-deliver"] == {
+        "status": "completed", "pr": 91,
+    }
+
+
+def test_deliver_for_run_closed_unmerged_pr_fails_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state = _recon_state(tmp_path, monkeypatch)
+
+    class _ClosedOps(_ReconOps):
+        def __init__(self) -> None:
+            super().__init__(existing_pr=91)
+
+        def pr_facts(self, repo_slug: str, pr: int) -> dict:
+            return {"state": "CLOSED", "mergedBy": None, "mergedAt": None}
+
+    with pytest.raises(RuntimeError, match="закрыт"):
+        task_bridge.deliver_for_run(state, _ClosedOps())

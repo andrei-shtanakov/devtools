@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run behaviour-console behaviour-tasks accept-pr preflight
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks accept-pr preflight
 
 help:
 	@echo "Цели:"
@@ -48,6 +48,7 @@ help:
 	@echo "  make arch-freshness       — локальная диагностика drift/freshness арх-evidence (вахта — CI steward)"
 	@echo "  make arch-freshness-read  — читатель локального статуса: просрочка ⇒ unknown (exit 2)"
 	@echo "  make behaviour-run ARGS=… — governance runner CLI: start|resume|verify|status (uv + группа governance)"
+	@echo "  make spec-loop SUBJECT='…' REPO=… — операторская кнопка: start → мерж бандла (человек) → повтор той же команды → deliver tasks-спеки → approve (человек); merge-authority жёстко human, неоднозначности — fail-closed (--run-id/--ws-id через ARGS)"
 	@echo "  make behaviour-console ARGS=… — governance console TUI (uv + группа governance)"
 	@echo "  make behaviour-tasks ARGS='--run-id …' — draft tasks.md-спека из бандла PR-ом (approve — человек)"
 	@echo "  make behaviour-tasks ARGS='--run-id … --legacy-bundle=3' — точный состав charter+requirements+behaviour-spec, без design/acceptance/decomposition (WS-SMOKE-001, non-conformant против team-exp); =4 — + design, без acceptance/decomposition; =5 — + decomposition, без acceptance (бандл до раскатки acceptance-узла, decomposition пинует только design); без флага — полный DAG (+ acceptance, decomposition пинует design и acceptance); состав каталога обязан совпасть РОВНО"
@@ -90,6 +91,7 @@ arch-freshness:      ; @python3 ./check-arch-evidence-freshness.py --workspace .
 arch-freshness-read: ; @python3 ./check-arch-evidence-freshness.py --read
 
 behaviour-run: ; @uv run --frozen --group governance python -m governance.runner $(ARGS)
+spec-loop: ; @uv run --frozen --group governance python -m governance.spec_loop --subject "$(SUBJECT)" --repo "$(REPO)" $(ARGS)
 behaviour-console: ; @uv run --frozen --group governance python -m governance.console $(ARGS)
 behaviour-tasks: ; @uv run --frozen --group governance python -m governance.task_bridge $(ARGS)
 accept-pr: ; @uv run --frozen python -m governance.accept_pr $(ARGS)
