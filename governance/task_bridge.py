@@ -1002,11 +1002,18 @@ def deliver_for_run(
         )
     op = state.ops.get("tasks-deliver") or {}
     if op.get("status") == "completed":
+        pr_done = op.get("pr")
+        if pr_done is None:
+            raise RuntimeError(
+                "op tasks-deliver completed, но без номера PR — леджер "
+                f"{state.run_id!r} повреждён или правлен вручную; "
+                "почините op прежде, чем продолжать"
+            )
         print(
-            f"tasks-спека уже доставлена: PR #{op['pr']} "
+            f"tasks-спека уже доставлена: PR #{pr_done} "
             f"({state.repo_slug}) — повтор не создаёт PR"
         )
-        return op["pr"]
+        return pr_done
     # Поиск PR по ветке ВО ВСЕХ состояниях (major терм. ревью #156):
     # отсутствие ОТКРЫТОГО PR не значит «доставки не было» — спека могла
     # быть доставлена ранее, вмержена и переведена в approved; повторный

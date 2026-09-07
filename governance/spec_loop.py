@@ -114,7 +114,12 @@ def manifest_repo_entry(manifest_text: str, repo: str) -> RepoEntry:
     это один репо, если repo_url у них совпадает; разные repo_url под
     одним git_dir — fail-closed.
     """
-    data = tomllib.loads(manifest_text)
+    try:
+        data = tomllib.loads(manifest_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise SpecLoopError(
+            f"манифест {MANIFEST_PATH} не парсится как TOML: {exc}"
+        ) from exc
     urls: set[str] = set()
 
     def walk(node: object) -> None:
@@ -332,15 +337,20 @@ def main(argv: list[str] | None = None) -> int:
         else:
             ws_id = args.ws_id or ws_id_for(args.subject, date.today())
             rs.validate_id_component(ws_id, label="ws_id")
-            collisions = [
-                rid
-                for rid in rs.all_run_ids()
-                if rs.load(rid).ws_id == ws_id
-            ]
+            collisions = []
+            for rid in rs.all_run_ids():
+                try:
+                    if rs.load(rid).ws_id == ws_id:
+                        collisions.append(rid)
+                except Exception:
+                    # Нечитаемые леджеры уже отвергнуты/пропущены
+                    # find_runs выше (пустые трупы runner'а — штатны).
+                    continue
             if collisions:
                 raise SpecLoopError(
                     f"ws-id {ws_id!r} уже занят прогонами "
-                    f"{collisions!r} с другим subject — задайте --ws-id"
+                    f"{collisions!r} с другой парой (repo, subject) — "
+                    "задайте --ws-id"
                 )
             target_dir = args.target_dir or str(WORKSPACE_ROOT / entry.repo)
             self_check_slug = entry.repo_slug
