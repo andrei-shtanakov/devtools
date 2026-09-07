@@ -175,6 +175,10 @@ def test_decomposition_dsl_carries_acceptance_pin() -> None:
     assert "25-acceptance.md" in dsl
 ```
 
+Существующий `test_author_dsl_covers_decomposition` (минор круга 2 плана:
+токен-подстрока `"traces_to: [design]"` в его списке перестанет
+совпадать) — обновить токен на `"traces_to: [design, acceptance]"`.
+
 - [ ] **Step 2: Прогнать — FAIL.**
 
 - [ ] **Step 3: Записи**
@@ -722,6 +726,10 @@ decomposition; preflight-кортеж `("design", "decomposition")` (строк�
 - kind `"decomposition"` в FakeOps — ОБНОВИТЬ: frontmatter теперь
   `traces_to: [design, acceptance]` с двумя пинами (design + acceptance
   по фактическим файлам фикстуры).
+- `_dt_smoke_decomposition_body`/`_DtSmokeOps` (фикстуры сквозных
+  decomposition-смоуков, минор круга 2 плана: свой kind decomposition,
+  общий FakeOps их не покрывает) — тот же двухпиновый frontmatter, плюс
+  kind `"acceptance"` в `_DtSmokeOps` с валидным 25-acceptance.md.
 - `_repin_bundle` — расширить: перепиновать design, ЗАТЕМ acceptance
   (requirements+behaviour), ЗАТЕМ decomposition (design+acceptance) —
   топологический порядок.
@@ -917,7 +925,13 @@ def test_legacy_5_goes_dt_path_with_graph_validation(...)
   Step 1 этого Task его дублирует — объединить);
 - `test_dag_for_invalid_value_raises` и
   `test_legacy_flag_rejects_out_of_range_value` — значение вне НОВОГО
-  диапазона (6 вместо 5), покрытие отказа сохраняется;
+  диапазона (6 вместо 5), покрытие отказа сохраняется; в первом также
+  `match="3 или 4"` → под новый текст ValueError (словарь 3|4|5);
+- два deliver-теста с ИНЛАЙНОВЫМ бандлом внутри `_LateOps.checkout_and_pull`
+  (`test_deliver_reads_bundle_only_after_base_checkout` и
+  `test_deliver_reads_design_only_after_base_checkout`) — дописать
+  25-acceptance.md в их инлайн-состав (минор круга 2 плана: _target их
+  не покрывает);
 - покрытие полного DAG остаётся на полном пути — существующим тестам
   НЕ дописывать `legacy_bundle=5` (это молча увело бы живую проверку
   двухпинового decomposition/штампа acceptance на легаси-путь).)
