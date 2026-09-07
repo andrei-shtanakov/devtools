@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from governance import decomposition_guard, design_guard
+from governance import acceptance_guard, decomposition_guard, design_guard
 from governance.merge_gate import PrFacts, decide
 from governance.stale_adapter import blob_sha1
 from governance.ops import Ops, RealOps
@@ -72,17 +72,26 @@ _AUTHOR_STEPS = (
 # вынесены в модульную константу здесь; тест согласованности
 # (`test_gate_edges_derived_from_bundle_dag`) выводит те же рёбра из
 # `task_bridge._BUNDLE_DAG` и ловит расхождение. 4-й элемент — `required`:
-# True для required-рёбер — обоих рёбер design (MAJOR-1) и ребра
-# decomposition→design (Task 6 плана decomposition-node) — необъявленное
-# ребро стопит S4 находкой, а не тихо пропускается; остальные рёбра
-# остаются необязательными (их traces_to не входит в prospective-контракт
-# гарда).
+# True — все шесть рёбер design/acceptance/decomposition (MAJOR-1 плюс
+# Task 6 плана decomposition-node — ребро decomposition→design; Task 6
+# плана acceptance-node — оба ребра acceptance и ребро
+# decomposition→acceptance) — необъявленное ребро стопит S4 находкой, а не
+# тихо пропускается; остальные рёбра остаются необязательными (их
+# traces_to не входит в prospective-контракт гарда). Порядок — обход
+# `_BUNDLE_DAG`: два ребра acceptance ПОСЛЕ рёбер design (design авторится
+# раньше acceptance) и ПЕРЕД decomposition→design; ребро
+# decomposition→acceptance — сразу за decomposition→design (тест
+# согласованности сравнивает кортежи на равенство, не на множество —
+# `test_gate_edges_derived_from_bundle_dag`, xfail до Task 7).
 _GATE_EDGES: tuple[tuple[str, str, str, bool], ...] = (
     ("10-requirements.md", "charter", "00-charter.md", False),
     ("15-behaviour-spec.md", "requirements", "10-requirements.md", False),
     ("20-design.md", "requirements", "10-requirements.md", True),
     ("20-design.md", "behaviour-spec", "15-behaviour-spec.md", True),
+    ("25-acceptance.md", "requirements", "10-requirements.md", True),
+    ("25-acceptance.md", "behaviour-spec", "15-behaviour-spec.md", True),
     ("30-decomposition.md", "design", "20-design.md", True),
+    ("30-decomposition.md", "acceptance", "25-acceptance.md", True),
 )
 
 
@@ -880,6 +889,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     node_paths: dict[str, Path] = {}
     for node, node_file in (
         ("design", "20-design.md"),
+        ("acceptance", "25-acceptance.md"),
         ("decomposition", "30-decomposition.md"),
     ):
         node_paths[node] = Path(state.target_dir) / state.bundle_dir / node_file
@@ -975,6 +985,12 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
             "#### Q-NN · owner_role: … · resolution: …",
         ),
         (
+            "25-acceptance.md",
+            r"^####\s+AC-\d+[a-z]?:|^Must-требований во входном наборе нет",
+            "критериев приёмки",
+            "#### AC-NN: <название> · verification: test|manual|metric",
+        ),
+        (
             "30-decomposition.md",
             r"^####\s+DT-\d+:",
             "DT-задач",
@@ -1039,6 +1055,32 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         if graph:
             (run_dir(state.run_id) / "gate-findings.txt").write_text(
                 "\n".join(graph) + "\n", encoding="utf-8"
+            )
+            state.status = "stopped_gate"
+            save(state)
+            return False
+    # Гард Must-покрытия acceptance (Task 6 плана acceptance-node):
+    # инварианты `acceptance_guard.coverage_findings` (Must-FR/NFR без
+    # покрывающего AC, ссылочная целостность AC на requirements/
+    # behaviour-spec, достоверность декларации пустого Must-множества) —
+    # отдельная находка от UNPINNED/STALE/DSL-EMPTY/GC-DESIGN-COVERAGE/
+    # GC-DT-GRAPH выше. Оба входа и acceptance проверяются на существование
+    # явно, тем же паттерном, что и GC-DT-GRAPH: acceptance отсутствующий
+    # (профиль без узла) сюда доходит без стопа выше только когда узел не
+    # required — читать его было бы TOCTOU.
+    acc_path = node_paths["acceptance"]
+    if req_path.exists() and beh_path.exists() and acc_path.exists():
+        ac_cov = [
+            f"error GC-AC-COVERAGE: {finding}"
+            for finding in acceptance_guard.coverage_findings(
+                req_path.read_text(encoding="utf-8"),
+                beh_path.read_text(encoding="utf-8"),
+                acc_path.read_text(encoding="utf-8"),
+            )
+        ]
+        if ac_cov:
+            (run_dir(state.run_id) / "gate-findings.txt").write_text(
+                "\n".join(ac_cov) + "\n", encoding="utf-8"
             )
             state.status = "stopped_gate"
             save(state)

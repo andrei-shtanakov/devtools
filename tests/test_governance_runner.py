@@ -3199,6 +3199,7 @@ def test_gate_design_undeclared_behaviour_edge_stops(
     assert "push" not in state.ops
 
 
+@pytest.mark.xfail(reason="рёбра DAG приходят Task 7", strict=True)
 def test_gate_edges_derived_from_bundle_dag() -> None:
     """MINOR-3: `runner._GATE_EDGES` не расходится с `task_bridge._BUNDLE_DAG`
     — рёбра S4 выводятся из ОДНОГО источника (не трёх несинхронизированных
@@ -3206,7 +3207,11 @@ def test_gate_edges_derived_from_bundle_dag() -> None:
     node-id ↔ имя файла — через `task_bridge._node_id`; required — те
     рёбра, чей target-узел design ИЛИ decomposition (MAJOR-1; Task 7 плана
     decomposition-node — ребро decomposition→design обязательное, понижать
-    флаг нельзя: fail-open на необъявленном ребре)."""
+    флаг нельзя: fail-open на необъявленном ребре).
+
+    Task 6 плана acceptance-node: `runner._GATE_EDGES` уже несёт три новых
+    рёбра acceptance (Step 3 этой задачи), `task_bridge._BUNDLE_DAG` — ещё
+    нет (Task 7 того же плана довозит их туда и снимает эту отметку)."""
     filename_by_node_id = {
         task_bridge._node_id(fname): fname
         for fname, _upstreams in task_bridge._BUNDLE_DAG
@@ -4059,6 +4064,448 @@ def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root) -> None:
         runner.run_dir("r-decomposition-dt-graph") / "gate-findings.txt"
     ).read_text()
     assert "GC-DT-GRAPH" in findings and "BEH-02" in findings
+    assert "push" not in state.ops
+
+
+# --- Task 6 (план acceptance-node): S4-гарды acceptance (отсутствие, два
+# ребра acceptance, ребро decomposition→acceptance, DSL, Must-покрытие) ----
+
+
+def test_gate_stops_when_acceptance_missing_from_bundle(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Зеркало `test_gate_stops_when_decomposition_missing_from_bundle` на
+    узел acceptance: required-узел acceptance профиля team-exp, но файла
+    25-acceptance.md в бандле нет ⇒ `stopped_gate` локально — ДО цикла
+    рёбер и ДО проверки decomposition, даже когда design физически
+    присутствует и валиден."""
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    run_id = "r-acceptance-absent"
+    target_dir = tmp_path / f"target-{run_id}"
+    target_dir.mkdir()
+    profile_dir = target_dir / "profiles"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "team-exp.yaml").write_text(
+        _TEAM_EXP_PROFILE_TEXT, encoding="utf-8"
+    )
+    bundle_dir = target_dir / BUNDLE_DIR
+    bundle_dir.mkdir(parents=True)
+    (bundle_dir / "00-charter.md").write_text("# charter\n", encoding="utf-8")
+    (bundle_dir / "10-requirements.md").write_text(
+        _DEFAULT_REQUIREMENTS_BODY, encoding="utf-8"
+    )
+    (bundle_dir / "15-behaviour-spec.md").write_text(
+        _DEFAULT_BEHAVIOUR_BODY, encoding="utf-8"
+    )
+    req_pin = blob_sha1(_DEFAULT_REQUIREMENTS_BODY)
+    beh_pin = blob_sha1(_DEFAULT_BEHAVIOUR_BODY)
+    (bundle_dir / "20-design.md").write_text(
+        "---\n"
+        "spec_stage: design\n"
+        "status: draft\n"
+        "owner_role: architects\n"
+        "traces_to: [requirements, behaviour-spec]\n"
+        "upstream_hashes:\n"
+        f'  requirements: "{req_pin}"\n'
+        f'  behaviour-spec: "{beh_pin}"\n'
+        "---\n"
+        "Открытых архитектурных вопросов нет (входной набор пуст)\n",
+        encoding="utf-8",
+    )
+    state = rs.new_run(
+        subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+        target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id=run_id,
+    )
+    state.branch = "spec/WS-1-behaviour"
+    state.ops = {
+        "branch": {"status": "completed"},
+        "author-charter": {"status": "completed", "skipped": True},
+        "author-requirements": {"status": "completed", "skipped": True},
+        "author-behaviour": {"status": "completed", "skipped": True},
+        "author-design": {"status": "completed", "skipped": True},
+        # acceptance намеренно НЕ авторен и не пропущен — файла нет вовсе.
+        "author-acceptance": {"status": "completed", "skipped": True},
+        "author-decomposition": {"status": "completed", "skipped": True},
+        "commit": {"status": "completed"},
+    }
+    rs.save(state)
+
+    result = runner.advance(state, ops)
+
+    assert result.status == "stopped_gate"
+    findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
+    assert "GC-COMPLETENESS(acceptance)" in findings
+    # Гард отсутствия проверяет узлы по порядку design → acceptance →
+    # decomposition — останов на acceptance, до decomposition вообще.
+    assert "GC-COMPLETENESS(decomposition)" not in findings
+    assert "GC-UNPINNED" not in findings
+    assert "GC-STALE" not in findings
+    assert "push" not in result.ops
+
+
+def test_gate_acceptance_unpinned_requirements_edge_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """GC-UNPINNED(prospective) на ребре acceptance→requirements:
+    `traces_to` объявляет requirements, но `upstream_hashes` не несёт его
+    пин (только behaviour-spec)."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "acceptance":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            beh_pin = blob_sha1(
+                (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+            )
+            path = bundle / "25-acceptance.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: acceptance\n"
+                "status: draft\n"
+                "owner_role: qa\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f'  behaviour-spec: "{beh_pin}"\n'
+                "---\n"
+                "#### AC-01: x · verification: manual\n"
+                "traces: [FR-01]\n"
+                "Наблюдаемый признак: человек видит x.\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-acceptance-unpinned", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-acceptance-unpinned") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings and "requirements" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_acceptance_stale_behaviour_pin_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """GC-STALE(prospective) на ребре acceptance→behaviour-spec: пин
+    синтаксически валиден (40 hex), но не совпадает с blob-хешем
+    behaviour-spec в worktree."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "acceptance":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            req_pin = blob_sha1(
+                (bundle / "10-requirements.md").read_text(encoding="utf-8")
+            )
+            path = bundle / "25-acceptance.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: acceptance\n"
+                "status: draft\n"
+                "owner_role: qa\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f'  requirements: "{req_pin}"\n'
+                f'  behaviour-spec: "{"a" * 40}"\n'
+                "---\n"
+                "#### AC-01: x · verification: manual\n"
+                "traces: [FR-01]\n"
+                "Наблюдаемый признак: человек видит x.\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-acceptance-stale", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-acceptance-stale") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-STALE" in findings and "behaviour-spec" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_acceptance_undeclared_edge_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """MAJOR-1-аналог на acceptance: `traces_to` не несёт ни requirements,
+    ни behaviour-spec — оба required-ребра acceptance обязаны стопить S4
+    находкой, не пропускаться молча."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "acceptance":
+                return rc
+            path = Path(target_dir) / bundle_dir / "25-acceptance.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: acceptance\n"
+                "status: draft\n"
+                "owner_role: qa\n"
+                "traces_to: []\n"
+                "---\n"
+                "#### AC-01: x · verification: manual\n"
+                "traces: [FR-01]\n"
+                "Наблюдаемый признак: человек видит x.\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-acceptance-undeclared", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-acceptance-undeclared") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings
+    assert "не объявлено в traces_to" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_decomposition_acceptance_edge_unpinned_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """GC-UNPINNED(prospective) на ребре decomposition→acceptance:
+    `traces_to` объявляет acceptance, но `upstream_hashes` не несёт его
+    пин (design запинован верно)."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "decomposition":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            design_pin = blob_sha1(
+                (bundle / "20-design.md").read_text(encoding="utf-8")
+            )
+            path = bundle / "30-decomposition.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: decomposition\n"
+                "status: draft\n"
+                "owner_role: tech-lead\n"
+                "traces_to: [design, acceptance]\n"
+                "upstream_hashes:\n"
+                f'  design: "{design_pin}"\n'
+                "---\n"
+                "#### DT-01: x · type: implement · owner: dev\n"
+                "scenarios: [BEH-01]\n"
+                "depends_on: []\n"
+                "parallel_group: solo\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-decomposition-acceptance-unpinned", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-decomposition-acceptance-unpinned")
+        / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings and "acceptance" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_acceptance_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
+    """Гард GC-DSL-EMPTY на 25-acceptance.md: пины requirements/
+    behaviour-spec корректны, оба ребра объявлены, но ни одного
+    распознаваемого AC-заголовка и без строки-декларации пустого
+    Must-множества."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "acceptance":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            req_pin = blob_sha1(
+                (bundle / "10-requirements.md").read_text(encoding="utf-8")
+            )
+            beh_pin = blob_sha1(
+                (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+            )
+            path = bundle / "25-acceptance.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: acceptance\n"
+                "status: draft\n"
+                "owner_role: qa\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f'  requirements: "{req_pin}"\n'
+                f'  behaviour-spec: "{beh_pin}"\n'
+                "---\n"
+                "### Критерии в вольном стиле, без машинной грамматики.\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-acceptance-dsl-empty", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-acceptance-dsl-empty") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-DSL-EMPTY" in findings and "25-acceptance.md" in findings
+    assert "AC-NN" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Минор круга 3 ревью спеки: файл ТОЛЬКО со строкой-декларацией
+    (Must-множество требований пусто, `#### AC-` не нужен) НЕ стопится
+    GC-DSL-EMPTY — requirements намеренно без единого Must-требования, так
+    что декларация правдива и GC-AC-COVERAGE тоже не стопит; прогон
+    доходит до `push` (доезжает до `completed`, тот же паттерн зелёного
+    прогона, что `test_today_reality_agent_merges`)."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            if kind == "requirements":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                path = Path(target_dir) / bundle_dir / "10-requirements.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    "#### FR-01: x\n**Priority**: Should\n", encoding="utf-8"
+                )
+                return 0
+            if kind == "acceptance":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                req_pin = blob_sha1(
+                    (bundle / "10-requirements.md").read_text(encoding="utf-8")
+                )
+                beh_pin = blob_sha1(
+                    (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+                )
+                path = bundle / "25-acceptance.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: acceptance\n"
+                    "status: draft\n"
+                    "owner_role: qa\n"
+                    "traces_to: [requirements, behaviour-spec]\n"
+                    "upstream_hashes:\n"
+                    f'  requirements: "{req_pin}"\n'
+                    f'  behaviour-spec: "{beh_pin}"\n'
+                    "---\n"
+                    "Must-требований во входном наборе нет\n",
+                    encoding="utf-8",
+                )
+                return 0
+            return super().author(target_dir, kind, subject, bundle_dir)
+
+    ops = _Ops(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-acceptance-declaration-only", ops)
+    )
+
+    findings_path = (
+        runner.run_dir("r-acceptance-declaration-only") / "gate-findings.txt"
+    )
+    assert not findings_path.exists()
+    assert "push" in state.ops
+    assert state.status == "completed"
+
+
+def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root) -> None:
+    """GC-AC-COVERAGE (Task 6 плана acceptance-node,
+    `governance/acceptance_guard.coverage_findings`): валидный DSL, оба
+    ребра корректно запинованы, но Must-FR остаётся непокрытым ни одним
+    AC — отдельная находка от UNPINNED/STALE/DSL-EMPTY выше (зеркало
+    GC-DESIGN-COVERAGE/GC-DT-GRAPH)."""
+    req_two = (
+        "#### FR-01: x\n**Priority**: Must\n"
+        "#### NFR-01: y\n**Priority**: Should\n"
+    )
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            if kind == "requirements":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                path = Path(target_dir) / bundle_dir / "10-requirements.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(req_two, encoding="utf-8")
+                return 0
+            if kind == "acceptance":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                req_pin = blob_sha1(
+                    (bundle / "10-requirements.md").read_text(encoding="utf-8")
+                )
+                beh_pin = blob_sha1(
+                    (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+                )
+                path = bundle / "25-acceptance.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: acceptance\n"
+                    "status: draft\n"
+                    "owner_role: qa\n"
+                    "traces_to: [requirements, behaviour-spec]\n"
+                    "upstream_hashes:\n"
+                    f'  requirements: "{req_pin}"\n'
+                    f'  behaviour-spec: "{beh_pin}"\n'
+                    "---\n"
+                    "#### AC-01: x · verification: manual\n"
+                    "traces: [NFR-01]\n"
+                    "Наблюдаемый признак: человек видит x.\n",
+                    encoding="utf-8",
+                )
+                return 0
+            return super().author(target_dir, kind, subject, bundle_dir)
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-acceptance-ac-coverage", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-acceptance-ac-coverage") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-AC-COVERAGE" in findings and "FR-01" in findings
     assert "push" not in state.ops
 
 
