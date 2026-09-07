@@ -82,7 +82,8 @@ _AUTHOR_STEPS = (
 # раньше acceptance) и ПЕРЕД decomposition→design; ребро
 # decomposition→acceptance — сразу за decomposition→design (тест
 # согласованности сравнивает кортежи на равенство, не на множество —
-# `test_gate_edges_derived_from_bundle_dag`, xfail до Task 7).
+# `test_gate_edges_derived_from_bundle_dag`; узел acceptance довезён в
+# `task_bridge._BUNDLE_DAG` Task 7 плана acceptance-node).
 _GATE_EDGES: tuple[tuple[str, str, str, bool], ...] = (
     ("10-requirements.md", "charter", "00-charter.md", False),
     ("15-behaviour-spec.md", "requirements", "10-requirements.md", False),

@@ -3199,19 +3199,19 @@ def test_gate_design_undeclared_behaviour_edge_stops(
     assert "push" not in state.ops
 
 
-@pytest.mark.xfail(reason="рёбра DAG приходят Task 7", strict=True)
 def test_gate_edges_derived_from_bundle_dag() -> None:
     """MINOR-3: `runner._GATE_EDGES` не расходится с `task_bridge._BUNDLE_DAG`
     — рёбра S4 выводятся из ОДНОГО источника (не трёх несинхронизированных
     копий: этот кортеж, `_BUNDLE_DAG`, `profiles/team-exp.yaml`).
     node-id ↔ имя файла — через `task_bridge._node_id`; required — те
-    рёбра, чей target-узел design ИЛИ decomposition (MAJOR-1; Task 7 плана
-    decomposition-node — ребро decomposition→design обязательное, понижать
-    флаг нельзя: fail-open на необъявленном ребре).
+    рёбра, чей target-узел design, acceptance ИЛИ decomposition (MAJOR-1;
+    Task 6/7 плана acceptance-node — рёбра acceptance и
+    decomposition→acceptance обязательные, понижать флаг нельзя: fail-open
+    на необъявленном ребре).
 
-    Task 6 плана acceptance-node: `runner._GATE_EDGES` уже несёт три новых
-    рёбра acceptance (Step 3 этой задачи), `task_bridge._BUNDLE_DAG` — ещё
-    нет (Task 7 того же плана довозит их туда и снимает эту отметку)."""
+    Task 7 плана acceptance-node довозит узел acceptance в
+    `task_bridge._BUNDLE_DAG` (Step 3 этой задачи) и снимает xfail-отметку
+    Task 6."""
     filename_by_node_id = {
         task_bridge._node_id(fname): fname
         for fname, _upstreams in task_bridge._BUNDLE_DAG
@@ -3221,7 +3221,8 @@ def test_gate_edges_derived_from_bundle_dag() -> None:
             fname,
             upstream,
             filename_by_node_id[upstream],
-            task_bridge._node_id(fname) in {"design", "decomposition"},
+            task_bridge._node_id(fname)
+            in {"design", "decomposition", "acceptance"},
         )
         for fname, upstreams in task_bridge._BUNDLE_DAG
         for upstream in upstreams
@@ -3458,6 +3459,48 @@ def _write_five_node_profile(target_dir: Path) -> Path:
     return profile_path
 
 
+# 5-узловая копия profiles/team-exp.yaml (charter..design + acceptance,
+# upstream: [requirements, behaviour-spec]), БЕЗ decomposition — зеркало
+# `_FIVE_NODE_TEAM_EXP_PROFILE`: та несёт decomposition и не несёт
+# acceptance, эта — наоборот (Task 7 плана acceptance-node: preflight-
+# порядок design→acceptance→decomposition обязан ловить недостающий
+# decomposition именно на decomposition, не на более раннем acceptance).
+_FIVE_NODE_WITH_ACCEPTANCE_PROFILE = """\
+profile: team-exp
+solo_auto_approve: true
+artifacts:
+  - {id: charter, template: charter.md, owner_role: product, upstream: []}
+  - id: requirements
+    template: requirements.md
+    owner_role: product
+    upstream: [charter]
+  - id: behaviour-spec
+    template: behaviour-spec.md
+    owner_role: product
+    upstream: [requirements]
+  - {id: design, template: design.md, owner_role: architects,
+     upstream: [requirements, behaviour-spec]}
+  - {id: acceptance, template: acceptance.md, owner_role: qa,
+     upstream: [requirements, behaviour-spec]}
+  - id: tasks
+    owner_role: stream-owner
+    upstream: [design, acceptance]
+    delegate: spec-runner
+"""
+
+
+def _write_five_node_with_acceptance_profile(target_dir: Path) -> Path:
+    """`_write_four_node_profile` + узел acceptance, БЕЗ decomposition —
+    состояние соседних репо между раскаткой acceptance- и
+    decomposition-узла (Task 7 плана acceptance-node)."""
+    profile_path = target_dir / "profiles" / "team-exp.yaml"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(
+        _FIVE_NODE_WITH_ACCEPTANCE_PROFILE, encoding="utf-8"
+    )
+    return profile_path
+
+
 def test_start_stops_preflight_when_target_profile_lacks_design(
     tmp_path: Path, runs_root,
 ) -> None:
@@ -3591,9 +3634,10 @@ def test_deliver_refuses_when_target_profile_lacks_design(
     design) ⇒ RuntimeError с той же процедурой, что у `stopped_preflight`
     раннера — проверяется ДО ensure_branch/стампа.
 
-    Бандл дополнен до полного 5-узлового состава (Task 7 плана
-    decomposition-node — `_check_bundle_composition` теперь требует точное
-    совпадение до profile-preflight'а; фикстура была 15/20)."""
+    Бандл дополнен до полного 6-узлового состава (Task 7 плана
+    acceptance-node — `_check_bundle_composition` теперь требует точное
+    совпадение до profile-preflight'а; узел acceptance довезён в
+    `_BUNDLE_DAG`)."""
     target = tmp_path / "alpha"
     bundle = target / "workstreams/WS-alpha-7/spec"
     bundle.mkdir(parents=True)
@@ -3601,6 +3645,7 @@ def test_deliver_refuses_when_target_profile_lacks_design(
     (bundle / "10-requirements.md").write_text("# requirements\n", encoding="utf-8")
     (bundle / "15-behaviour-spec.md").write_text("# behaviour\n", encoding="utf-8")
     (bundle / "20-design.md").write_text("# design\n", encoding="utf-8")
+    (bundle / "25-acceptance.md").write_text("# acceptance\n", encoding="utf-8")
     (bundle / "30-decomposition.md").write_text("# decomposition\n", encoding="utf-8")
     _write_stale_profile(target)
 
@@ -3632,11 +3677,12 @@ def test_deliver_refuses_when_target_profile_lacks_design(
 def test_deliver_refuses_when_target_profile_lacks_decomposition(
     tmp_path: Path,
 ) -> None:
-    """Зеркальный тест design-варианта (Task 7 плана decomposition-node):
-    профиль target несёт design, но НЕ decomposition (4-узловой профиль,
-    `_write_four_node_profile`) ⇒ `deliver` отказывает по preflight
-    decomposition-узла — та же процедура, что у `stopped_preflight`
-    раннера, проверяется ДО ensure_branch/стампа."""
+    """Зеркальный тест design-варианта (Task 7 плана acceptance-node):
+    профиль target несёт design И acceptance, но НЕ decomposition
+    (5-узловой профиль, `_write_five_node_with_acceptance_profile`) ⇒
+    `deliver` отказывает по preflight decomposition-узла (не более
+    раннего acceptance в порядке проверки) — та же процедура, что у
+    `stopped_preflight` раннера, проверяется ДО ensure_branch/стампа."""
     target = tmp_path / "alpha"
     bundle = target / "workstreams/WS-alpha-7/spec"
     bundle.mkdir(parents=True)
@@ -3644,8 +3690,9 @@ def test_deliver_refuses_when_target_profile_lacks_decomposition(
     (bundle / "10-requirements.md").write_text("# requirements\n", encoding="utf-8")
     (bundle / "15-behaviour-spec.md").write_text("# behaviour\n", encoding="utf-8")
     (bundle / "20-design.md").write_text("# design\n", encoding="utf-8")
+    (bundle / "25-acceptance.md").write_text("# acceptance\n", encoding="utf-8")
     (bundle / "30-decomposition.md").write_text("# decomposition\n", encoding="utf-8")
-    _write_four_node_profile(target)
+    _write_five_node_with_acceptance_profile(target)
 
     class _MiniOps:
         def is_dirty(self, target_dir: str) -> bool:
