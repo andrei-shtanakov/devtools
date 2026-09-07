@@ -120,7 +120,10 @@ Run: `uv run --frozen --group governance python -m pytest tests/test_governance_
 В узле decomposition: `upstream: [design, acceptance]`; комментарий-
 отступление сузить до «compile (decomposition→maestro, tasks→spec-runner
 у steward) не реализуется — лейн Mode-2» (§2/§8 спеки, acceptance больше
-не срезан).
+не срезан). ШАПОЧНЫЙ комментарий профиля (верх файла) тоже обновить —
+после правки он не должен утверждать урезанный состав, противоречащий
+фактическому (minor круга 1: перечитай шапку и приведи к 6-узловой
+реальности).
 
 - [ ] **Step 4: Прогнать — PASS; полный набор** (PIPELINE_KEYS-сверка не
   краснеет — профиль конвейерными списками не читается).
@@ -213,6 +216,23 @@ def test_decomposition_dsl_carries_acceptance_pin() -> None:
         "behaviour); do not invent FR/NFR/BEH ids; do not restate "
         "requirements as criteria without an observable sign."
     ),
+```
+
+`_AUTHOR_DSL["requirements"]` — ДОПОЛНИТЕЛЬНАЯ правка (major круга 1
+ревью плана: действующий контракт требует `**Priority**` только у FR —
+гейт Must-покрытия стопил бы конформный бандл после шести оплаченных
+вызовов): фрагмент про NFR дополнить обязательной строкой приоритета —
+`Non-functional requirements use `#### NFR-NN: <title>` followed by the
+same `**Priority**: Must` (or Should) line` (точную старую формулировку
+взять из ops.py:~196 и заменить цельным фрагментом). Тест:
+
+```python
+def test_requirements_dsl_mandates_priority_for_nfr() -> None:
+    from governance.ops import _AUTHOR_DSL
+
+    dsl = _AUTHOR_DSL["requirements"]
+    nfr_part = dsl.split("NFR-NN")[1]
+    assert "**Priority**" in nfr_part
 ```
 
 `_AUTHOR_DSL["decomposition"]` — правка существующей записи: фрагмент
@@ -767,11 +787,17 @@ Task 7 снимает.)
 
 - [ ] **Step 3: Правки**
 
-`_GATE_EDGES` += три ребра:
+`_GATE_EDGES` — три новых ребра ВСТАВКОЙ в порядке обхода
+`_BUNDLE_DAG` (тест согласованности сравнивает кортежи НА РАВЕНСТВО —
+append в конец оставил бы его красным, minor круга 1): два ребра
+acceptance — ПОСЛЕ рёбер design и ПЕРЕД `("30-decomposition.md",
+"design", …)`; ребро decomposition→acceptance — сразу ЗА
+decomposition→design:
 
 ```python
     ("25-acceptance.md", "requirements", "10-requirements.md", True),
     ("25-acceptance.md", "behaviour-spec", "15-behaviour-spec.md", True),
+    # (существующее ребро decomposition→design остаётся между ними)
     ("30-decomposition.md", "acceptance", "25-acceptance.md", True),
 ```
 
@@ -781,7 +807,7 @@ GC-COMPLETENESS-цикл node_paths += `("acceptance", "25-acceptance.md")`
 ```python
         (
             "25-acceptance.md",
-            r"^####\s+AC-\d+:|^Must-требований во входном наборе нет",
+            r"^####\s+AC-\d+[a-z]?:|^Must-требований во входном наборе нет",
             "критериев приёмки",
             "#### AC-NN: <название> · verification: test|manual|metric",
         ),
@@ -878,7 +904,23 @@ def test_legacy_5_goes_dt_path_with_graph_validation(...)
 ```
 
 (Полные тела composition/DT-тестов — по образцу существующих legacy-
-тестов; конверсия им не нужна — 3|4 остаются как есть.)
+тестов; 3|4-тесты сами не меняются, НО миграция существующего набора
+ОБЯЗАТЕЛЬНА и входит в этот шаг — major круга 1 ревью плана:
+
+- константа `ACCEPTANCE_MD` (валидный 25-acceptance.md: два верных пина,
+  AC-01 c traces на Must-требование фикстуры либо строка-декларация) и
+  её укладка в `_target(tmp_path)` — иначе ВСЕ full-DAG тесты deliver/
+  stamp/conform падают на `_check_bundle_composition`;
+- ассерты committed-путей deliver-тестов += `25-acceptance.md`;
+- `test_bundle_dag_terminates_at_decomposition` — ассерт формы
+  терминального узла на `("design", "acceptance")` (замена, тест из
+  Step 1 этого Task его дублирует — объединить);
+- `test_dag_for_invalid_value_raises` и
+  `test_legacy_flag_rejects_out_of_range_value` — значение вне НОВОГО
+  диапазона (6 вместо 5), покрытие отказа сохраняется;
+- покрытие полного DAG остаётся на полном пути — существующим тестам
+  НЕ дописывать `legacy_bundle=5` (это молча увело бы живую проверку
+  двухпинового decomposition/штампа acceptance на легаси-путь).)
 
 - [ ] **Step 2: Прогнать — FAIL; снять strict-xfail Task 6 и обновить
   производную required в test_gate_edges_derived_from_bundle_dag:**
