@@ -40,6 +40,55 @@ _DEFAULT_BEHAVIOUR_BODY = (
     "#### BEH-01: x\n`traces: [FR-01]`\n- **checked_by**: x\n"
 )
 
+_FR_ID_RE = re.compile(r"^####\s+((?:FR|NFR)-\d+[a-z]?):", re.M)
+_PRIORITY_RE = re.compile(r"^\*\*Priority\*\*:\s*(\S+)", re.M)
+
+
+def _acceptance_body(req_text: str, req_pin: str, beh_pin: str) -> str:
+    """25-acceptance.md валидный наперёд для S4-гардов acceptance (Task 6,
+    `governance/acceptance_guard.py`): два пина upstream по ФАКТИЧЕСКОМУ
+    содержимому requirements/behaviour-spec (паттерн design), один
+    `#### AC-01: … · verification: manual` с `traces:` на реальный Must-FR
+    фикстуры; если Must-требований нет — traces на любой существующий
+    FR/NFR + строка-декларация `Must-требований во входном наборе нет`
+    (§3 спеки); все 4 обязательные секции DSL
+    (`governance/ops.py::_AUTHOR_DSL["acceptance"]`)."""
+    heads = list(_FR_ID_RE.finditer(req_text))
+    must_id: str | None = None
+    any_id: str | None = None
+    for idx, m in enumerate(heads):
+        end = heads[idx + 1].start() if idx + 1 < len(heads) else len(req_text)
+        block = req_text[m.end():end]
+        if any_id is None:
+            any_id = m.group(1)
+        pr = _PRIORITY_RE.search(block)
+        if must_id is None and pr is not None and pr.group(1) == "Must":
+            must_id = m.group(1)
+    trace_id = must_id or any_id or "FR-01"
+    declaration = (
+        "" if must_id is not None
+        else "Must-требований во входном наборе нет\n\n"
+    )
+    return (
+        "---\n"
+        "spec_stage: acceptance\n"
+        "status: draft\n"
+        "owner_role: qa\n"
+        "traces_to: [requirements, behaviour-spec]\n"
+        "upstream_hashes:\n"
+        f'  requirements: "{req_pin}"\n'
+        f'  behaviour-spec: "{beh_pin}"\n'
+        "---\n"
+        "## Критерии приёмки\n\n"
+        f"{declaration}"
+        "#### AC-01: x · verification: manual\n"
+        f"traces: [{trace_id}]\n"
+        "Наблюдаемый признак: человек видит x.\n\n"
+        "## Инварианты покрытия\n\nMust-требования покрыты хотя бы одним AC.\n\n"
+        "## Порог приёмки\n\nAC-01 обязателен к выполнению.\n\n"
+        "## Вне объёма\n\nНичего не исключено.\n"
+    )
+
 
 def test_author_steps_include_decomposition_after_design() -> None:
     keys = [k for k, _, _ in runner._AUTHOR_STEPS]
@@ -47,6 +96,12 @@ def test_author_steps_include_decomposition_after_design() -> None:
     assert runner._AUTHOR_STEPS[-1] == (
         "author-decomposition", "decomposition", "30-decomposition.md",
     )
+
+
+def test_author_steps_include_acceptance_between_design_and_decomposition() -> None:
+    keys = [k for k, _, _ in runner._AUTHOR_STEPS]
+    assert keys.index("author-design") < keys.index("author-acceptance")
+    assert keys.index("author-acceptance") < keys.index("author-decomposition")
 
 
 @dataclass
@@ -162,6 +217,7 @@ class FakeOps:
             "requirements": "10-requirements.md",
             "behaviour-spec": "15-behaviour-spec.md",
             "design": "20-design.md",
+            "acceptance": "25-acceptance.md",
             "decomposition": "30-decomposition.md",
         }[kind]
         path = Path(target_dir) / bundle_dir / filename
@@ -202,11 +258,42 @@ class FakeOps:
                 encoding="utf-8",
             )
             return 0
+        if kind == "acceptance":
+            # acceptance пинует requirements/behaviour-spec по их
+            # ФАКТИЧЕСКОМУ содержимому worktree на момент авторинга
+            # (_AUTHOR_STEPS гонит acceptance после design, до
+            # decomposition) — тот же паттерн, что design использует для
+            # своих upstream'ов. S4-гарды acceptance (Task 6,
+            # `governance/acceptance_guard.py`) ещё не заведены в этой
+            # задаче, но фикстура готовится валидной наперёд.
+            bundle = Path(target_dir) / bundle_dir
+
+            def _blob_of_acc(upstream_filename: str) -> str:
+                upstream_path = bundle / upstream_filename
+                text = (
+                    upstream_path.read_text(encoding="utf-8")
+                    if upstream_path.exists()
+                    else ""
+                )
+                return blob_sha1(text)
+
+            req_text = (
+                (bundle / "10-requirements.md").read_text(encoding="utf-8")
+                if (bundle / "10-requirements.md").exists()
+                else ""
+            )
+            req_pin = _blob_of_acc("10-requirements.md")
+            beh_pin = _blob_of_acc("15-behaviour-spec.md")
+            path.write_text(
+                _acceptance_body(req_text, req_pin, beh_pin),
+                encoding="utf-8",
+            )
+            return 0
         if kind == "decomposition":
-            # decomposition пинует design по его ФАКТИЧЕСКОМУ содержимому
-            # worktree на момент авторинга (_AUTHOR_STEPS гонит
-            # decomposition последним, после design) — тот же паттерн,
-            # что design использует для requirements/behaviour-spec выше.
+            # decomposition пинует design И acceptance по их ФАКТИЧЕСКОМУ
+            # содержимому worktree на момент авторинга (_AUTHOR_STEPS гонит
+            # decomposition последним) — тот же паттерн, что design
+            # использует для requirements/behaviour-spec выше.
             # DT-01 покрывает BEH-01 из `_DEFAULT_BEHAVIOUR_BODY` — S4-гарды
             # decomposition (GC-COMPLETENESS/рёбра/DSL-empty, Task 6) ещё не
             # заведены в этой задаче, но фикстура готовится валидной наперёд.
@@ -218,14 +305,22 @@ class FakeOps:
                 else ""
             )
             design_pin = blob_sha1(design_text)
+            acceptance_path = bundle / "25-acceptance.md"
+            acceptance_text = (
+                acceptance_path.read_text(encoding="utf-8")
+                if acceptance_path.exists()
+                else ""
+            )
+            acceptance_pin = blob_sha1(acceptance_text)
             path.write_text(
                 "---\n"
                 "spec_stage: decomposition\n"
                 "status: draft\n"
                 "owner_role: tech-lead\n"
-                "traces_to: [design]\n"
+                "traces_to: [design, acceptance]\n"
                 "upstream_hashes:\n"
                 f'  design: "{design_pin}"\n'
+                f'  acceptance: "{acceptance_pin}"\n'
                 "---\n"
                 "## Задачи\n\n"
                 "#### DT-01: x · type: implement · owner: dev\n"
@@ -312,10 +407,10 @@ def runs_root(tmp_path: Path, monkeypatch):
 
 
 # Task 8 (preflight): `_step_authoring` читает РЕАЛЬНЫЙ файл профиля в
-# target_dir перед авторингом узлов design/decomposition — devtools-
-# канонический profiles/team-exp.yaml (5 узлов: charter/requirements/
-# behaviour-spec/design/decomposition, Task 1), тот же, что реально несёт
-# этот репо в проде.
+# target_dir перед авторингом узлов design/acceptance/decomposition —
+# devtools-канонический profiles/team-exp.yaml (6 авторимых узлов:
+# charter/requirements/behaviour-spec/design/acceptance/decomposition,
+# Task 1/Task 5), тот же, что реально несёт этот репо в проде.
 _TEAM_EXP_PROFILE_TEXT = (
     Path(__file__).resolve().parent.parent / "profiles" / "team-exp.yaml"
 ).read_text(encoding="utf-8")
@@ -356,18 +451,20 @@ def _green_bundle(profile, bundle) -> bundle_state.BundleState:
 
 
 def _repin_bundle(bundle_dir: Path) -> None:
-    """Пересчитывает `upstream_hashes` ВСЕЙ цепочки design→decomposition по
-    ТЕКУЩЕМУ содержимому requirements/behaviour-spec — правка бандла
-    человеком после стопа (resume-тесты) обязана перепиновать design
-    (иначе GC-STALE(prospective) на ребре design→behaviour-spec) И
-    перегенерировать/перепиновать decomposition (иначе design протух под
-    decomposition — GC-STALE на ребре decomposition→design, — а DT старой
-    фикстуры ссылаются на исчезнувшие BEH ПОСТправочного behaviour-spec —
+    """Пересчитывает `upstream_hashes` ВСЕЙ цепочки design→acceptance→
+    decomposition по ТЕКУЩЕМУ содержимому requirements/behaviour-spec, в
+    топологическом порядке — правка бандла человеком после стопа
+    (resume-тесты) обязана перепиновать design (иначе GC-STALE(prospective)
+    на ребре design→behaviour-spec), ЗАТЕМ acceptance (иначе GC-STALE на
+    рёбрах acceptance→requirements/behaviour-spec), ЗАТЕМ decomposition
+    (иначе design/acceptance протухли под decomposition — GC-STALE на
+    рёбрах decomposition→design/acceptance, — а DT старой фикстуры
+    ссылаются на исчезнувшие BEH ПОСТправочного behaviour-spec —
     GC-DT-GRAPH). Переименован из `_repin_design` (Task 6): бывший хелпер
-    трогал только design, оставляя decomposition протухшим за ним."""
-    req_pin = blob_sha1(
-        (bundle_dir / "10-requirements.md").read_text(encoding="utf-8")
-    )
+    трогал только design, оставляя decomposition протухшим за ним;
+    расширен acceptance-пином (Task 5 плана acceptance-node)."""
+    req_text = (bundle_dir / "10-requirements.md").read_text(encoding="utf-8")
+    req_pin = blob_sha1(req_text)
     beh_text = (bundle_dir / "15-behaviour-spec.md").read_text(encoding="utf-8")
     beh_pin = blob_sha1(beh_text)
     (bundle_dir / "20-design.md").write_text(
@@ -386,15 +483,22 @@ def _repin_bundle(bundle_dir: Path) -> None:
     design_pin = blob_sha1(
         (bundle_dir / "20-design.md").read_text(encoding="utf-8")
     )
+    (bundle_dir / "25-acceptance.md").write_text(
+        _acceptance_body(req_text, req_pin, beh_pin), encoding="utf-8",
+    )
+    acceptance_pin = blob_sha1(
+        (bundle_dir / "25-acceptance.md").read_text(encoding="utf-8")
+    )
     beh_ids = re.findall(r"^####\s+(BEH-\d+):", beh_text, re.M)
     (bundle_dir / "30-decomposition.md").write_text(
         "---\n"
         "spec_stage: decomposition\n"
         "status: draft\n"
         "owner_role: tech-lead\n"
-        "traces_to: [design]\n"
+        "traces_to: [design, acceptance]\n"
         "upstream_hashes:\n"
         f'  design: "{design_pin}"\n'
+        f'  acceptance: "{acceptance_pin}"\n'
         "---\n"
         "## Задачи\n\n"
         "#### DT-01: x · type: implement · owner: dev\n"
@@ -521,6 +625,9 @@ def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> 
         "# behaviour\n", encoding="utf-8"
     )
     (bundle_dir / "20-design.md").write_text("# design\n", encoding="utf-8")
+    (bundle_dir / "25-acceptance.md").write_text(
+        "# acceptance\n", encoding="utf-8"
+    )
     (bundle_dir / "30-decomposition.md").write_text(
         "# decomposition\n", encoding="utf-8"
     )
@@ -532,6 +639,7 @@ def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> 
     assert state.ops["author-requirements"]["skipped"] is True
     assert state.ops["author-behaviour"]["skipped"] is True
     assert state.ops["author-design"]["skipped"] is True
+    assert state.ops["author-acceptance"]["skipped"] is True
     assert state.ops["author-decomposition"]["skipped"] is True
 
 
@@ -1595,19 +1703,21 @@ def test_gate_seam_required_absent_blocks_without_mock(
             "author-requirements": {"status": "completed", "skipped": True},
             "author-behaviour": {"status": "completed", "skipped": True},
             # mini.yaml (fixture-профиль этого теста) не несёт узлы design/
-            # decomposition — оба шага обязаны быть завершены-пропущены явно
-            # в фикстуре: этот тест конструирует state вручную и зовёт
-            # advance() напрямую (минуя _step_authoring целиком), а не через
-            # start(), поэтому preflight design/decomposition-узлов (Task 8
-            # + Task 5, `governance.policy_sources.target_profile_declares`)
+            # acceptance/decomposition — все три шага обязаны быть
+            # завершены-пропущены явно в фикстуре: этот тест конструирует
+            # state вручную и зовёт advance() напрямую (минуя
+            # _step_authoring целиком), а не через start(), поэтому
+            # preflight design/acceptance/decomposition-узлов (Task 8 +
+            # Task 5, `governance.policy_sources.target_profile_declares`)
             # сюда вовсе не попадает — вызывать его нечем без реального
             # profiles/mini.yaml-файла в target_dir. Цель теста — S4
             # (реальный `gate-check --candidate`), не S2/preflight; когда бы
             # шаг остался НЕзавершённым, `_step_authoring` либо авторил бы
             # узел (до фикс-раунда), либо теперь стопил бы
             # `stopped_preflight` (после) — оба исхода мимо сценария этого
-            # теста, поэтому оба шага пропущены явно.
+            # теста, поэтому все три шага пропущены явно.
             "author-design": {"status": "completed", "skipped": True},
+            "author-acceptance": {"status": "completed", "skipped": True},
             "author-decomposition": {"status": "completed", "skipped": True},
             "commit": {"status": "completed"},
         }
@@ -2274,7 +2384,8 @@ def test_default_author_backend_is_codex_author_disp_not_called(
     state = runner.start(**_start_kwargs(tmp_path, "r-disp-default", ops))
 
     assert ops.authored == [
-        "charter", "requirements", "behaviour-spec", "design", "decomposition",
+        "charter", "requirements", "behaviour-spec", "design", "acceptance",
+        "decomposition",
     ]
     assert ops.author_disp_calls == []
     assert state.author_backend == "codex"
@@ -2293,7 +2404,9 @@ def test_disp_backend_used_only_for_behaviour_node(
         tmp_path, run_id, ops, author_backend="disp",
     ))
 
-    assert ops.authored == ["charter", "requirements", "design", "decomposition"]
+    assert ops.authored == [
+        "charter", "requirements", "design", "acceptance", "decomposition",
+    ]
     assert len(ops.author_disp_calls) == 1
     target_dir, task = ops.author_disp_calls[0]
     assert target_dir == str(tmp_path / f"target-{run_id}")
@@ -3091,9 +3204,14 @@ def test_gate_edges_derived_from_bundle_dag() -> None:
     — рёбра S4 выводятся из ОДНОГО источника (не трёх несинхронизированных
     копий: этот кортеж, `_BUNDLE_DAG`, `profiles/team-exp.yaml`).
     node-id ↔ имя файла — через `task_bridge._node_id`; required — те
-    рёбра, чей target-узел design ИЛИ decomposition (MAJOR-1; Task 7 плана
-    decomposition-node — ребро decomposition→design обязательное, понижать
-    флаг нельзя: fail-open на необъявленном ребре)."""
+    рёбра, чей target-узел design, acceptance ИЛИ decomposition (MAJOR-1;
+    Task 6/7 плана acceptance-node — рёбра acceptance и
+    decomposition→acceptance обязательные, понижать флаг нельзя: fail-open
+    на необъявленном ребре).
+
+    Task 7 плана acceptance-node довозит узел acceptance в
+    `task_bridge._BUNDLE_DAG` (Step 3 этой задачи) и снимает xfail-отметку
+    Task 6."""
     filename_by_node_id = {
         task_bridge._node_id(fname): fname
         for fname, _upstreams in task_bridge._BUNDLE_DAG
@@ -3103,7 +3221,8 @@ def test_gate_edges_derived_from_bundle_dag() -> None:
             fname,
             upstream,
             filename_by_node_id[upstream],
-            task_bridge._node_id(fname) in {"design", "decomposition"},
+            task_bridge._node_id(fname)
+            in {"design", "decomposition", "acceptance"},
         )
         for fname, upstreams in task_bridge._BUNDLE_DAG
         for upstream in upstreams
@@ -3301,6 +3420,87 @@ def _write_four_node_profile(target_dir: Path) -> Path:
     return profile_path
 
 
+# 5-узловая копия profiles/team-exp.yaml (charter..design + decomposition,
+# upstream: [design]), БЕЗ acceptance — как несут соседние репо до раскатки
+# acceptance-узла (Task 5 плана acceptance-node).
+_FIVE_NODE_TEAM_EXP_PROFILE = """\
+profile: team-exp
+solo_auto_approve: true
+artifacts:
+  - {id: charter, template: charter.md, owner_role: product, upstream: []}
+  - id: requirements
+    template: requirements.md
+    owner_role: product
+    upstream: [charter]
+  - id: behaviour-spec
+    template: behaviour-spec.md
+    owner_role: product
+    upstream: [requirements]
+  - {id: design, template: design.md, owner_role: architects,
+     upstream: [requirements, behaviour-spec]}
+  - id: decomposition
+    template: decomposition.md
+    owner_role: tech-lead
+    upstream: [design]
+  - id: tasks
+    owner_role: stream-owner
+    upstream: [decomposition]
+    delegate: spec-runner
+"""
+
+
+def _write_five_node_profile(target_dir: Path) -> Path:
+    """Копия `_write_four_node_profile` + узел decomposition (upstream
+    [design]), БЕЗ acceptance — состояние соседних репо до раскатки
+    acceptance-узла (Task 5, preflight обязан охранять все три узла)."""
+    profile_path = target_dir / "profiles" / "team-exp.yaml"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(_FIVE_NODE_TEAM_EXP_PROFILE, encoding="utf-8")
+    return profile_path
+
+
+# 5-узловая копия profiles/team-exp.yaml (charter..design + acceptance,
+# upstream: [requirements, behaviour-spec]), БЕЗ decomposition — зеркало
+# `_FIVE_NODE_TEAM_EXP_PROFILE`: та несёт decomposition и не несёт
+# acceptance, эта — наоборот (Task 7 плана acceptance-node: preflight-
+# порядок design→acceptance→decomposition обязан ловить недостающий
+# decomposition именно на decomposition, не на более раннем acceptance).
+_FIVE_NODE_WITH_ACCEPTANCE_PROFILE = """\
+profile: team-exp
+solo_auto_approve: true
+artifacts:
+  - {id: charter, template: charter.md, owner_role: product, upstream: []}
+  - id: requirements
+    template: requirements.md
+    owner_role: product
+    upstream: [charter]
+  - id: behaviour-spec
+    template: behaviour-spec.md
+    owner_role: product
+    upstream: [requirements]
+  - {id: design, template: design.md, owner_role: architects,
+     upstream: [requirements, behaviour-spec]}
+  - {id: acceptance, template: acceptance.md, owner_role: qa,
+     upstream: [requirements, behaviour-spec]}
+  - id: tasks
+    owner_role: stream-owner
+    upstream: [design, acceptance]
+    delegate: spec-runner
+"""
+
+
+def _write_five_node_with_acceptance_profile(target_dir: Path) -> Path:
+    """`_write_four_node_profile` + узел acceptance, БЕЗ decomposition —
+    состояние соседних репо между раскаткой acceptance- и
+    decomposition-узла (Task 7 плана acceptance-node)."""
+    profile_path = target_dir / "profiles" / "team-exp.yaml"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(
+        _FIVE_NODE_WITH_ACCEPTANCE_PROFILE, encoding="utf-8"
+    )
+    return profile_path
+
+
 def test_start_stops_preflight_when_target_profile_lacks_design(
     tmp_path: Path, runs_root,
 ) -> None:
@@ -3326,12 +3526,13 @@ def test_start_stops_preflight_when_target_profile_lacks_design(
 def test_start_stops_preflight_when_target_profile_lacks_decomposition(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    """target с 4-узловым профилем (design есть, decomposition нет) ⇒
-    stopped_preflight ДО единого вызова авторинга."""
+    """target с 5-узловым профилем (design И acceptance есть,
+    decomposition нет) ⇒ stopped_preflight ДО единого вызова авторинга —
+    останов должен произойти именно на decomposition (порядок preflight
+    "design", "acceptance", "decomposition"), не раньше на acceptance."""
     ops = FakeOps(facts=GREEN_PR_FACTS)
     kwargs = _start_kwargs(tmp_path, "r-preflight-no-decomp", ops)
-    _write_four_node_profile(Path(kwargs["target_dir"]))  # хелпер: профиль
-    # спеки 1 (charter..design) БЕЗ узла decomposition
+    _write_five_node_with_acceptance_profile(Path(kwargs["target_dir"]))
 
     state = runner.start(**kwargs)
 
@@ -3339,12 +3540,29 @@ def test_start_stops_preflight_when_target_profile_lacks_decomposition(
     assert ops.authored == []
 
 
-def test_start_preflight_silent_on_five_node_profile(
+def test_start_stops_preflight_when_target_profile_lacks_acceptance(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    """Step 1(б): target с актуальным 5-узловым профилем (материализован
-    `_start_kwargs`, T1) ⇒ preflight молчит, прогон доходит до мержа как
-    прежде — регрессия отсутствует."""
+    """target с 5-узловым профилем (design+decomposition есть, acceptance
+    нет) ⇒ stopped_preflight ДО единого вызова авторинга (Task 5 плана
+    acceptance-node, канон плана decomposition)."""
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    kwargs = _start_kwargs(tmp_path, "r-preflight-no-acc", ops)
+    _write_five_node_profile(Path(kwargs["target_dir"]))
+
+    state = runner.start(**kwargs)
+
+    assert state.status == "stopped_preflight"
+    assert ops.authored == []
+
+
+def test_start_preflight_silent_on_six_node_profile(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Step 1(б): target с актуальным 6-узловым профилем (материализован
+    `_start_kwargs`, T1; acceptance добавлен Task 1 плана acceptance-node)
+    ⇒ preflight молчит, прогон доходит до мержа как прежде — регрессия
+    отсутствует."""
     monkeypatch.setattr(
         runner, "load_safety",
         lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
@@ -3417,9 +3635,10 @@ def test_deliver_refuses_when_target_profile_lacks_design(
     design) ⇒ RuntimeError с той же процедурой, что у `stopped_preflight`
     раннера — проверяется ДО ensure_branch/стампа.
 
-    Бандл дополнен до полного 5-узлового состава (Task 7 плана
-    decomposition-node — `_check_bundle_composition` теперь требует точное
-    совпадение до profile-preflight'а; фикстура была 15/20)."""
+    Бандл дополнен до полного 6-узлового состава (Task 7 плана
+    acceptance-node — `_check_bundle_composition` теперь требует точное
+    совпадение до profile-preflight'а; узел acceptance довезён в
+    `_BUNDLE_DAG`)."""
     target = tmp_path / "alpha"
     bundle = target / "workstreams/WS-alpha-7/spec"
     bundle.mkdir(parents=True)
@@ -3427,6 +3646,7 @@ def test_deliver_refuses_when_target_profile_lacks_design(
     (bundle / "10-requirements.md").write_text("# requirements\n", encoding="utf-8")
     (bundle / "15-behaviour-spec.md").write_text("# behaviour\n", encoding="utf-8")
     (bundle / "20-design.md").write_text("# design\n", encoding="utf-8")
+    (bundle / "25-acceptance.md").write_text("# acceptance\n", encoding="utf-8")
     (bundle / "30-decomposition.md").write_text("# decomposition\n", encoding="utf-8")
     _write_stale_profile(target)
 
@@ -3458,11 +3678,12 @@ def test_deliver_refuses_when_target_profile_lacks_design(
 def test_deliver_refuses_when_target_profile_lacks_decomposition(
     tmp_path: Path,
 ) -> None:
-    """Зеркальный тест design-варианта (Task 7 плана decomposition-node):
-    профиль target несёт design, но НЕ decomposition (4-узловой профиль,
-    `_write_four_node_profile`) ⇒ `deliver` отказывает по preflight
-    decomposition-узла — та же процедура, что у `stopped_preflight`
-    раннера, проверяется ДО ensure_branch/стампа."""
+    """Зеркальный тест design-варианта (Task 7 плана acceptance-node):
+    профиль target несёт design И acceptance, но НЕ decomposition
+    (5-узловой профиль, `_write_five_node_with_acceptance_profile`) ⇒
+    `deliver` отказывает по preflight decomposition-узла (не более
+    раннего acceptance в порядке проверки) — та же процедура, что у
+    `stopped_preflight` раннера, проверяется ДО ensure_branch/стампа."""
     target = tmp_path / "alpha"
     bundle = target / "workstreams/WS-alpha-7/spec"
     bundle.mkdir(parents=True)
@@ -3470,8 +3691,9 @@ def test_deliver_refuses_when_target_profile_lacks_decomposition(
     (bundle / "10-requirements.md").write_text("# requirements\n", encoding="utf-8")
     (bundle / "15-behaviour-spec.md").write_text("# behaviour\n", encoding="utf-8")
     (bundle / "20-design.md").write_text("# design\n", encoding="utf-8")
+    (bundle / "25-acceptance.md").write_text("# acceptance\n", encoding="utf-8")
     (bundle / "30-decomposition.md").write_text("# decomposition\n", encoding="utf-8")
-    _write_four_node_profile(target)
+    _write_five_node_with_acceptance_profile(target)
 
     class _MiniOps:
         def is_dirty(self, target_dir: str) -> bool:
@@ -3494,6 +3716,50 @@ def test_deliver_refuses_when_target_profile_lacks_decomposition(
         )
     message = str(exc_info.value)
     assert "decomposition" in message.lower()
+    assert "authority-root" in message
+    assert "мерж человеком" in message
+
+
+def test_deliver_refuses_when_target_profile_lacks_acceptance(
+    tmp_path: Path,
+) -> None:
+    """Зеркальный тест decomposition-варианта (Task 7 плана
+    acceptance-node): профиль target несёт design И decomposition, но НЕ
+    acceptance (5-узловой профиль, `_write_five_node_profile`) ⇒ `deliver`
+    отказывает по preflight acceptance-узла — та же процедура, что у
+    `stopped_preflight` раннера, проверяется ДО ensure_branch/стампа."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text("# charter\n", encoding="utf-8")
+    (bundle / "10-requirements.md").write_text("# requirements\n", encoding="utf-8")
+    (bundle / "15-behaviour-spec.md").write_text("# behaviour\n", encoding="utf-8")
+    (bundle / "20-design.md").write_text("# design\n", encoding="utf-8")
+    (bundle / "25-acceptance.md").write_text("# acceptance\n", encoding="utf-8")
+    (bundle / "30-decomposition.md").write_text("# decomposition\n", encoding="utf-8")
+    _write_five_node_profile(target)
+
+    class _MiniOps:
+        def is_dirty(self, target_dir: str) -> bool:
+            return False
+
+        def checkout_and_pull(self, target_dir: str, branch: str) -> None:
+            pass
+
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=_MiniOps(),
+            approved_by="a", approved_at="t",
+            profile="profiles/team-exp.yaml",
+        )
+    message = str(exc_info.value)
+    assert "acceptance" in message.lower()
     assert "authority-root" in message
     assert "мерж человеком" in message
 
@@ -3593,16 +3859,17 @@ def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root) -> None:
 
     state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
 
-    # S2: все пять author-шагов прошли РОВНО в этом порядке.
+    # S2: все шесть author-шагов прошли РОВНО в этом порядке.
     assert ops.authored == [
-        "charter", "requirements", "behaviour-spec", "design", "decomposition",
+        "charter", "requirements", "behaviour-spec", "design", "acceptance",
+        "decomposition",
     ]
     assert state.ops["author-design"]["status"] == "completed"
     assert state.ops["author-design"]["skipped"] is False
     bundle_dir = Path(state.target_dir) / state.bundle_dir
     assert (bundle_dir / "20-design.md").exists()
 
-    # S4: гейт зелёный на полном 5-узловом бандле (валидные пины + покрытый
+    # S4: гейт зелёный на полном 6-узловом бандле (валидные пины + покрытый
     # architects-Q) — прогон дошёл до мержа, не остановился на gate/review.
     assert state.status == "completed"
     assert state.ops["merge"]["status"] == "completed"
@@ -3892,6 +4159,448 @@ def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root) -> None:
     assert "push" not in state.ops
 
 
+# --- Task 6 (план acceptance-node): S4-гарды acceptance (отсутствие, два
+# ребра acceptance, ребро decomposition→acceptance, DSL, Must-покрытие) ----
+
+
+def test_gate_stops_when_acceptance_missing_from_bundle(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Зеркало `test_gate_stops_when_decomposition_missing_from_bundle` на
+    узел acceptance: required-узел acceptance профиля team-exp, но файла
+    25-acceptance.md в бандле нет ⇒ `stopped_gate` локально — ДО цикла
+    рёбер и ДО проверки decomposition, даже когда design физически
+    присутствует и валиден."""
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    run_id = "r-acceptance-absent"
+    target_dir = tmp_path / f"target-{run_id}"
+    target_dir.mkdir()
+    profile_dir = target_dir / "profiles"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "team-exp.yaml").write_text(
+        _TEAM_EXP_PROFILE_TEXT, encoding="utf-8"
+    )
+    bundle_dir = target_dir / BUNDLE_DIR
+    bundle_dir.mkdir(parents=True)
+    (bundle_dir / "00-charter.md").write_text("# charter\n", encoding="utf-8")
+    (bundle_dir / "10-requirements.md").write_text(
+        _DEFAULT_REQUIREMENTS_BODY, encoding="utf-8"
+    )
+    (bundle_dir / "15-behaviour-spec.md").write_text(
+        _DEFAULT_BEHAVIOUR_BODY, encoding="utf-8"
+    )
+    req_pin = blob_sha1(_DEFAULT_REQUIREMENTS_BODY)
+    beh_pin = blob_sha1(_DEFAULT_BEHAVIOUR_BODY)
+    (bundle_dir / "20-design.md").write_text(
+        "---\n"
+        "spec_stage: design\n"
+        "status: draft\n"
+        "owner_role: architects\n"
+        "traces_to: [requirements, behaviour-spec]\n"
+        "upstream_hashes:\n"
+        f'  requirements: "{req_pin}"\n'
+        f'  behaviour-spec: "{beh_pin}"\n'
+        "---\n"
+        "Открытых архитектурных вопросов нет (входной набор пуст)\n",
+        encoding="utf-8",
+    )
+    state = rs.new_run(
+        subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+        target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id=run_id,
+    )
+    state.branch = "spec/WS-1-behaviour"
+    state.ops = {
+        "branch": {"status": "completed"},
+        "author-charter": {"status": "completed", "skipped": True},
+        "author-requirements": {"status": "completed", "skipped": True},
+        "author-behaviour": {"status": "completed", "skipped": True},
+        "author-design": {"status": "completed", "skipped": True},
+        # acceptance намеренно НЕ авторен и не пропущен — файла нет вовсе.
+        "author-acceptance": {"status": "completed", "skipped": True},
+        "author-decomposition": {"status": "completed", "skipped": True},
+        "commit": {"status": "completed"},
+    }
+    rs.save(state)
+
+    result = runner.advance(state, ops)
+
+    assert result.status == "stopped_gate"
+    findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
+    assert "GC-COMPLETENESS(acceptance)" in findings
+    # Гард отсутствия проверяет узлы по порядку design → acceptance →
+    # decomposition — останов на acceptance, до decomposition вообще.
+    assert "GC-COMPLETENESS(decomposition)" not in findings
+    assert "GC-UNPINNED" not in findings
+    assert "GC-STALE" not in findings
+    assert "push" not in result.ops
+
+
+def test_gate_acceptance_unpinned_requirements_edge_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """GC-UNPINNED(prospective) на ребре acceptance→requirements:
+    `traces_to` объявляет requirements, но `upstream_hashes` не несёт его
+    пин (только behaviour-spec)."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "acceptance":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            beh_pin = blob_sha1(
+                (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+            )
+            path = bundle / "25-acceptance.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: acceptance\n"
+                "status: draft\n"
+                "owner_role: qa\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f'  behaviour-spec: "{beh_pin}"\n'
+                "---\n"
+                "#### AC-01: x · verification: manual\n"
+                "traces: [FR-01]\n"
+                "Наблюдаемый признак: человек видит x.\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-acceptance-unpinned", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-acceptance-unpinned") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings and "requirements" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_acceptance_stale_behaviour_pin_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """GC-STALE(prospective) на ребре acceptance→behaviour-spec: пин
+    синтаксически валиден (40 hex), но не совпадает с blob-хешем
+    behaviour-spec в worktree."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "acceptance":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            req_pin = blob_sha1(
+                (bundle / "10-requirements.md").read_text(encoding="utf-8")
+            )
+            path = bundle / "25-acceptance.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: acceptance\n"
+                "status: draft\n"
+                "owner_role: qa\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f'  requirements: "{req_pin}"\n'
+                f'  behaviour-spec: "{"a" * 40}"\n'
+                "---\n"
+                "#### AC-01: x · verification: manual\n"
+                "traces: [FR-01]\n"
+                "Наблюдаемый признак: человек видит x.\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-acceptance-stale", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-acceptance-stale") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-STALE" in findings and "behaviour-spec" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_acceptance_undeclared_edge_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """MAJOR-1-аналог на acceptance: `traces_to` не несёт ни requirements,
+    ни behaviour-spec — оба required-ребра acceptance обязаны стопить S4
+    находкой, не пропускаться молча."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "acceptance":
+                return rc
+            path = Path(target_dir) / bundle_dir / "25-acceptance.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: acceptance\n"
+                "status: draft\n"
+                "owner_role: qa\n"
+                "traces_to: []\n"
+                "---\n"
+                "#### AC-01: x · verification: manual\n"
+                "traces: [FR-01]\n"
+                "Наблюдаемый признак: человек видит x.\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-acceptance-undeclared", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-acceptance-undeclared") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings
+    assert "не объявлено в traces_to" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_decomposition_acceptance_edge_unpinned_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """GC-UNPINNED(prospective) на ребре decomposition→acceptance:
+    `traces_to` объявляет acceptance, но `upstream_hashes` не несёт его
+    пин (design запинован верно)."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "decomposition":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            design_pin = blob_sha1(
+                (bundle / "20-design.md").read_text(encoding="utf-8")
+            )
+            path = bundle / "30-decomposition.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: decomposition\n"
+                "status: draft\n"
+                "owner_role: tech-lead\n"
+                "traces_to: [design, acceptance]\n"
+                "upstream_hashes:\n"
+                f'  design: "{design_pin}"\n'
+                "---\n"
+                "#### DT-01: x · type: implement · owner: dev\n"
+                "scenarios: [BEH-01]\n"
+                "depends_on: []\n"
+                "parallel_group: solo\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-decomposition-acceptance-unpinned", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-decomposition-acceptance-unpinned")
+        / "gate-findings.txt"
+    ).read_text()
+    assert "GC-UNPINNED" in findings and "acceptance" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_acceptance_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
+    """Гард GC-DSL-EMPTY на 25-acceptance.md: пины requirements/
+    behaviour-spec корректны, оба ребра объявлены, но ни одного
+    распознаваемого AC-заголовка и без строки-декларации пустого
+    Must-множества."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "acceptance":
+                return rc
+            bundle = Path(target_dir) / bundle_dir
+            req_pin = blob_sha1(
+                (bundle / "10-requirements.md").read_text(encoding="utf-8")
+            )
+            beh_pin = blob_sha1(
+                (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+            )
+            path = bundle / "25-acceptance.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: acceptance\n"
+                "status: draft\n"
+                "owner_role: qa\n"
+                "traces_to: [requirements, behaviour-spec]\n"
+                "upstream_hashes:\n"
+                f'  requirements: "{req_pin}"\n'
+                f'  behaviour-spec: "{beh_pin}"\n'
+                "---\n"
+                "### Критерии в вольном стиле, без машинной грамматики.\n",
+                encoding="utf-8",
+            )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-acceptance-dsl-empty", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-acceptance-dsl-empty") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-DSL-EMPTY" in findings and "25-acceptance.md" in findings
+    assert "AC-NN" in findings
+    assert "push" not in state.ops
+
+
+def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Минор круга 3 ревью спеки: файл ТОЛЬКО со строкой-декларацией
+    (Must-множество требований пусто, `#### AC-` не нужен) НЕ стопится
+    GC-DSL-EMPTY — requirements намеренно без единого Must-требования, так
+    что декларация правдива и GC-AC-COVERAGE тоже не стопит; прогон
+    доходит до `push` (доезжает до `completed`, тот же паттерн зелёного
+    прогона, что `test_today_reality_agent_merges`)."""
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            if kind == "requirements":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                path = Path(target_dir) / bundle_dir / "10-requirements.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    "#### FR-01: x\n**Priority**: Should\n", encoding="utf-8"
+                )
+                return 0
+            if kind == "acceptance":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                req_pin = blob_sha1(
+                    (bundle / "10-requirements.md").read_text(encoding="utf-8")
+                )
+                beh_pin = blob_sha1(
+                    (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+                )
+                path = bundle / "25-acceptance.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: acceptance\n"
+                    "status: draft\n"
+                    "owner_role: qa\n"
+                    "traces_to: [requirements, behaviour-spec]\n"
+                    "upstream_hashes:\n"
+                    f'  requirements: "{req_pin}"\n'
+                    f'  behaviour-spec: "{beh_pin}"\n'
+                    "---\n"
+                    "Must-требований во входном наборе нет\n",
+                    encoding="utf-8",
+                )
+                return 0
+            return super().author(target_dir, kind, subject, bundle_dir)
+
+    ops = _Ops(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-acceptance-declaration-only", ops)
+    )
+
+    findings_path = (
+        runner.run_dir("r-acceptance-declaration-only") / "gate-findings.txt"
+    )
+    assert not findings_path.exists()
+    assert "push" in state.ops
+    assert state.status == "completed"
+
+
+def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root) -> None:
+    """GC-AC-COVERAGE (Task 6 плана acceptance-node,
+    `governance/acceptance_guard.coverage_findings`): валидный DSL, оба
+    ребра корректно запинованы, но Must-FR остаётся непокрытым ни одним
+    AC — отдельная находка от UNPINNED/STALE/DSL-EMPTY выше (зеркало
+    GC-DESIGN-COVERAGE/GC-DT-GRAPH)."""
+    req_two = (
+        "#### FR-01: x\n**Priority**: Must\n"
+        "#### NFR-01: y\n**Priority**: Should\n"
+    )
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            if kind == "requirements":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                path = Path(target_dir) / bundle_dir / "10-requirements.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(req_two, encoding="utf-8")
+                return 0
+            if kind == "acceptance":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                req_pin = blob_sha1(
+                    (bundle / "10-requirements.md").read_text(encoding="utf-8")
+                )
+                beh_pin = blob_sha1(
+                    (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+                )
+                path = bundle / "25-acceptance.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: acceptance\n"
+                    "status: draft\n"
+                    "owner_role: qa\n"
+                    "traces_to: [requirements, behaviour-spec]\n"
+                    "upstream_hashes:\n"
+                    f'  requirements: "{req_pin}"\n'
+                    f'  behaviour-spec: "{beh_pin}"\n'
+                    "---\n"
+                    "#### AC-01: x · verification: manual\n"
+                    "traces: [NFR-01]\n"
+                    "Наблюдаемый признак: человек видит x.\n",
+                    encoding="utf-8",
+                )
+                return 0
+            return super().author(target_dir, kind, subject, bundle_dir)
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-acceptance-ac-coverage", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-acceptance-ac-coverage") / "gate-findings.txt"
+    ).read_text()
+    assert "GC-AC-COVERAGE" in findings and "FR-01" in findings
+    assert "push" not in state.ops
+
+
 # --- Task 9: сквозной смоук decomposition-узла + deliver ---------------------
 
 
@@ -3928,7 +4637,7 @@ _DT_SMOKE_CHARTER_BODY = (
 )
 
 
-def _dt_smoke_requirements_body(charter_pin: str) -> str:
+def _dt_smoke_requirements_body(charter_pin: str, extra: str = "") -> str:
     return (
         "---\n"
         "spec_stage: requirements\n"
@@ -3938,7 +4647,7 @@ def _dt_smoke_requirements_body(charter_pin: str) -> str:
         "upstream_hashes:\n"
         f'  charter: "{charter_pin}"\n'
         "---\n"
-        "#### FR-01: x\n**Priority**: Must\n"
+        "#### FR-01: x\n**Priority**: Must\n" + extra
     )
 
 
@@ -3956,17 +4665,20 @@ def _dt_smoke_behaviour_body(requirements_pin: str, extra: str = "") -> str:
     )
 
 
-def _dt_smoke_decomposition_body(design_pin: str) -> str:
+def _dt_smoke_decomposition_body(design_pin: str, acceptance_pin: str) -> str:
     """Два DT (DT-02 зависит от DT-01), сюръективно покрывающие BEH-01/02
-    (общая фикстура позитивного и негативного полукруга смоука ниже)."""
+    (общая фикстура позитивного и негативного полукруга смоука ниже).
+    Двухпиновый frontmatter (design+acceptance, Task 5 плана
+    acceptance-node) — тот же паттерн, что и общий `FakeOps.author`."""
     return (
         "---\n"
         "spec_stage: decomposition\n"
         "status: draft\n"
         "owner_role: tech-lead\n"
-        "traces_to: [design]\n"
+        "traces_to: [design, acceptance]\n"
         "upstream_hashes:\n"
         f'  design: "{design_pin}"\n'
+        f'  acceptance: "{acceptance_pin}"\n'
         "---\n"
         "## Задачи\n\n"
         "#### DT-01: Ядро · type: implement · owner: dev\n"
@@ -4034,47 +4746,67 @@ class _DtSmokeOps(FakeOps):
             design_pin = blob_sha1(
                 (bundle / "20-design.md").read_text(encoding="utf-8")
             )
+            acceptance_pin = blob_sha1(
+                (bundle / "25-acceptance.md").read_text(encoding="utf-8")
+            )
             path = bundle / "30-decomposition.md"
             path.write_text(
-                _dt_smoke_decomposition_body(design_pin), encoding="utf-8"
+                _dt_smoke_decomposition_body(design_pin, acceptance_pin),
+                encoding="utf-8",
             )
             return 0
+        # kind == "acceptance" (и design) идут через общий `FakeOps.author`
+        # (super): пишет валидный 25-acceptance.md по ФАКТИЧЕСКОМУ
+        # requirements/behaviour-spec этого фикстура (FR-01 Must из
+        # `_dt_smoke_requirements_body`) — Task 5 плана acceptance-node.
         return super().author(target_dir, kind, subject, bundle_dir)
 
 
 def test_decomposition_node_end_to_end_smoke_and_deliver(
     tmp_path: Path, runs_root,
 ) -> None:
-    """Сквозной смоук 5-узлового профиля (Task 9): один прогон `start()`
-    до мержа на бандле с валидным графом DT (BEH-01/BEH-02 покрыты
-    DT-01/DT-02, DT-02 зависит от DT-01), затем `task_bridge.deliver()`
-    на том же `target_dir` — tasks-спека несёт `traces_to: [decomposition]`,
-    ровно по задаче на DT и ребро Depends on между ними.
+    """Сквозной смоук 6-узлового профиля (Task 9 плана acceptance-node,
+    прежде — Task 9 плана decomposition-node на 5 узлах; профиль вырос
+    на узел acceptance в Task 1/5 того же плана, `_DtSmokeOps.author`
+    авторит его через общий `FakeOps.author`, см. класс ниже): один
+    прогон `start()` до мержа на бандле с валидным графом DT (BEH-01/
+    BEH-02 покрыты DT-01/DT-02, DT-02 зависит от DT-01), затем
+    `task_bridge.deliver()` на том же `target_dir` — tasks-спека несёт
+    `traces_to: [decomposition]`, ровно по задаче на DT, ребро Depends on
+    между ними и справочную секцию критериев приёмки уровня acceptance.
 
     Не дублирует то, что уже проверено по частям:
-    - happy path пяти author-шагов и мерж на дефолтной (DT-01-solo)
+    - happy path шести author-шагов и мерж на дефолтной (DT-01-solo)
       decomposition — `test_design_node_end_to_end_smoke`;
     - render_tasks_dt изолированно (биндинги, Depends on, frontmatter) —
       `test_render_dt_one_task_per_dt_with_bindings_and_edges`/
       `test_render_dt_frontmatter_traces_decomposition_from_birth`
+      (tests/test_governance_task_bridge.py);
+    - рендер секции критериев приёмки изолированно —
+      `test_acceptance_section_lists_criteria`/
+      `test_acceptance_section_empty_input_renders_nothing`
       (tests/test_governance_task_bridge.py);
     - deliver на DT-пути изолированно, без предшествующего runner-прогона —
       `test_deliver_full_dag_renders_via_render_tasks_dt`.
 
     Недостающий кусок: ОДИН сквозной прогон runner → deliver на бандле,
     физически материализованном самим прогоном (не тестовой фикстурой
-    напрямую), с графом из ≥2 DT-задач и рёбер depends_on. Негативный
-    полукруг на том же графе —
+    напрямую), с графом из ≥2 DT-задач и рёбер depends_on, где секция AC
+    материализуется из РЕАЛЬНОГО 25-acceptance.md того же прогона.
+    Негативный полукруг на графе DT —
     `test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate`
-    ниже."""
+    ниже; негативный полукруг на покрытии Must-требований acceptance —
+    `test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate`
+    ещё ниже."""
     ops = _DtSmokeOps(facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-decomposition-e2e-smoke"
 
     state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
 
-    # S2: все пять author-шагов прошли РОВНО в этом порядке.
+    # S2: все шесть author-шагов прошли РОВНО в этом порядке.
     assert ops.authored == [
-        "charter", "requirements", "behaviour-spec", "design", "decomposition",
+        "charter", "requirements", "behaviour-spec", "design", "acceptance",
+        "decomposition",
     ]
     # S4: гейт зелёный на бандле с валидным графом DT — прогон дошёл до
     # мержа, не остановился на gate/review.
@@ -4110,6 +4842,13 @@ def test_decomposition_node_end_to_end_smoke_and_deliver(
     assert "**Depends on:** [TASK-001]" in text
     task1_block = text.split("### TASK-001:")[1].split("### TASK-002:")[0]
     assert "Depends on" not in task1_block
+
+    # Секция AC (Task 8 плана acceptance-node) материализована из
+    # РЕАЛЬНОГО 25-acceptance.md, авторенного этим же прогоном (общий
+    # `FakeOps.author` пишет `#### AC-01: x · verification: manual`,
+    # `traces: [FR-01]`, покрывая единственное Must-требование фикстуры).
+    assert "## Критерии приёмки (уровень acceptance)" in text
+    assert "- **AC-01** (manual): x" in text
 
 
 def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
@@ -4158,4 +4897,93 @@ def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
     assert state.status == "stopped_gate"
     findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
     assert "GC-DT-GRAPH" in findings and "BEH-03" in findings
+    assert "push" not in state.ops
+
+
+def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Второй негативный полукруг того же 6-узлового смоука (Task 9 плана
+    acceptance-node): граф DT валиден РОВНО как у позитивного смоука
+    (BEH-01/BEH-02 покрыты DT-01/DT-02 — GC-DT-GRAPH зелен, гейт доходит
+    до проверки acceptance), но requirements несёт ВТОРОЕ требование
+    FR-02 (Should), а AC-01 acceptance трассирует ТОЛЬКО на него — Must-
+    требование FR-01 остаётся не покрытым ни одним AC ⇒ все шесть author-
+    шагов отрабатывают (S2 не зависит от S4), но гейт S4 стопит
+    `stopped_gate` с `GC-AC-COVERAGE` — до deliver дело не доходит."""
+    req_gap_extra = "#### FR-02: y\n**Priority**: Should\n"
+
+    class _AcGapOps(_DtSmokeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            if kind == "requirements":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                charter_pin = blob_sha1(
+                    (bundle / "00-charter.md").read_text(encoding="utf-8")
+                )
+                path = bundle / "10-requirements.md"
+                path.write_text(
+                    _dt_smoke_requirements_body(
+                        charter_pin, extra=req_gap_extra
+                    ),
+                    encoding="utf-8",
+                )
+                return 0
+            if kind == "acceptance":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                req_pin = blob_sha1(
+                    (bundle / "10-requirements.md").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                beh_pin = blob_sha1(
+                    (bundle / "15-behaviour-spec.md").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                path = bundle / "25-acceptance.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: acceptance\n"
+                    "status: draft\n"
+                    "owner_role: qa\n"
+                    "traces_to: [requirements, behaviour-spec]\n"
+                    "upstream_hashes:\n"
+                    f'  requirements: "{req_pin}"\n'
+                    f'  behaviour-spec: "{beh_pin}"\n'
+                    "---\n"
+                    "## Критерии приёмки\n\n"
+                    "#### AC-01: y · verification: manual\n"
+                    "traces: [FR-02]\n"
+                    "Наблюдаемый признак: человек видит y.\n\n"
+                    "## Инварианты покрытия\n\n"
+                    "Must-требования покрыты хотя бы одним AC.\n\n"
+                    "## Порог приёмки\n\nAC-01 обязателен к выполнению.\n\n"
+                    "## Вне объёма\n\nНичего не исключено.\n",
+                    encoding="utf-8",
+                )
+                return 0
+            return super().author(target_dir, kind, subject, bundle_dir)
+
+    ops = _AcGapOps(facts=GREEN_PR_FACTS)
+    run_id = "r-acceptance-e2e-smoke-gap"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+
+    assert state.status == "stopped_gate"
+    findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
+    assert "GC-AC-COVERAGE" in findings and "FR-01" in findings
+    # S2 отрабатывает ВСЕ шесть author-шагов безусловно (гейт S4 идёт
+    # только после — `_step_authoring` в governance/runner.py); граф DT
+    # валиден, поэтому GC-DT-GRAPH пропускает, и стоп приходит только на
+    # GC-AC-COVERAGE.
+    assert ops.authored == [
+        "charter", "requirements", "behaviour-spec", "design", "acceptance",
+        "decomposition",
+    ]
     assert "push" not in state.ops
