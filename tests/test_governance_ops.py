@@ -795,8 +795,25 @@ def test_author_dsl_covers_decomposition() -> None:
         "traces_to: [design, acceptance]", "#### DT-NN:", "type: implement|verify",
         "scenarios:", "depends_on:", "delivered_by:", "parallel_group:",
         "topological declaration order",
+        # Major ревью PR #161, finding 1: `verifies:` — обязательное
+        # структурное поле type: verify (owner ruling DT-14 multi-file
+        # group) — промпт авторинга обязан его знать, иначе агент авторит
+        # verify-DT без него и S4-гейт стопит КАЖДЫЙ такой бандл.
+        "verifies:",
     ):
         assert token in dsl
+
+
+def test_author_dsl_decomposition_explains_verifies_field() -> None:
+    """Major ревью PR #161, finding 1: промпт учит и ФОРМЕ (список файлов,
+    блочная YAML), и обязательности/запрету по type, и что это НАБЛЮДЕНИЕ
+    (checked_by остаётся владением) — не только упоминает токен."""
+    from governance.ops import _AUTHOR_DSL
+
+    dsl = _AUTHOR_DSL["decomposition"]
+    assert "REQUIRED for type: verify" in dsl
+    assert "FORBIDDEN for type: implement" in dsl
+    assert "checked_by" in dsl.split("verifies:")[1][:400]
 
 
 def test_author_dsl_covers_acceptance() -> None:

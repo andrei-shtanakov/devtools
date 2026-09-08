@@ -268,15 +268,22 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
                 f"{beh}: покрыт дважды и более ({', '.join(owners)})"
             )
 
-    # single-owner тест-файла — файлы под наблюдением (verifies, owner
-    # ruling DT-14) исключены: наблюдение не владение, single-owner их не
-    # касается, даже если они же checked_by-цель чужих scenarios.
-    verified_files = {f for t in tasks for f in t.verifies}
+    # single-owner тест-файла — исключение УЗКОЕ (major ревью PR #161,
+    # finding 4: глобальный `verified_files`-набор по ВСЕМ задачам молча
+    # снимал инвариант между ДВУМЯ implement-задачами, если файл был
+    # упомянут в verifies какой-то ТРЕТЬЕЙ задачи вообще без связи с ними —
+    # байт-лок тест-файла оказывался невыразим как находка). Пропуск
+    # применяется ТОЛЬКО к собственному verifies задачи t: её же сценарий,
+    # чей checked_by-таргет совпал с ЕЁ ЖЕ verifies, — это наблюдение своего
+    # объявленного объекта, не заявка на владение. Конфликт между ДРУГИМИ
+    # задачами за тот же файл (implement vs implement, или verify без
+    # verifies-декларации этого файла) по-прежнему регистрируется и
+    # ловится ниже как раньше.
     file_owner: dict[str, str] = {}
     for t in tasks:
         for beh in t.scenarios:
             target, _kind = bindings.get(beh, (None, None))
-            if target is None or target in verified_files:
+            if target is None or target in t.verifies:
                 continue
             prior = file_owner.get(target)
             if prior is not None and prior != t.dt_id:

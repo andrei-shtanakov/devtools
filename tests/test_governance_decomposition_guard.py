@@ -414,12 +414,40 @@ def test_verifies_on_implement_is_a_finding() -> None:
     )
 
 
-def test_single_owner_ignores_files_listed_in_verifies() -> None:
-    """DT-14 наблюдает tests/test_a.py — файл, за который отвечают (через
-    checked_by) DT-01 И DT-02 порознь; без verifies это был бы classический
-    single-owner конфликт (см. test_single_owner_of_test_file). Owner:
-    verifies — группа наблюдения, не владения — гард обязан её игнорировать
-    при проверке single-owner."""
+def test_single_owner_exemption_is_scoped_to_the_observing_verify_dt() -> None:
+    """Major ревью PR #161, finding 4: исключение single-owner ДЛЯ verifies
+    обязано быть УЗКИМ — освобождает от конфликта только ТУ задачу, что
+    сама наблюдает файл (её собственный scenario-таргет совпал с её же
+    verifies), не любую задачу в документе. DT-01 (implement) владеет
+    tests/test_a.py через BEH-01; DT-14 (verify) несёт СВОЙ сценарий
+    BEH-02, чей checked_by-таргет — ТОТ ЖЕ файл, и объявляет его в СВОЁМ
+    verifies — наблюдение, не владение, конфликта с DT-01 нет."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_one`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_two`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n  - tests/test_a.py\n"
+    )
+    assert graph_findings(beh, dt) == []
+
+
+def test_single_owner_still_conflicts_between_implement_dts_despite_unrelated_verifies() -> None:
+    """Major ревью PR #161, finding 4 (регресс на баг из ORIGINAL FIX 1):
+    verifies какой-то ДРУГОЙ (verify) задачи, перечисляющий файл, НЕ
+    отменяет single-owner между ДВУМЯ implement-задачами, реально
+    претендующими на владение тем же файлом — байт-лок тест-файла остаётся
+    в силе; наблюдение стороннего verify-DT не даёт implement-DT-ам молча
+    делить файл."""
     from governance.decomposition_guard import graph_findings
 
     beh = (
@@ -440,7 +468,10 @@ def test_single_owner_ignores_files_listed_in_verifies() -> None:
         "delivered_by: [DT-01, DT-02]\nparallel_group: side\n"
         "verifies:\n  - tests/test_a.py\n"
     )
-    assert graph_findings(beh, dt) == []
+    findings = graph_findings(beh, dt)
+    assert any(
+        "tests/test_a.py" in f and "single-owner" in f for f in findings
+    )
 
 
 def test_unknown_beh_suffix_form_is_a_form_finding() -> None:

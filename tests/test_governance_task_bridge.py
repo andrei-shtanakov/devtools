@@ -1924,6 +1924,56 @@ def test_deliver_full_dag_renders_via_render_tasks_dt(tmp_path: Path) -> None:
         in text
 
 
+# --- ревью #161, finding 2: ensure_branch ПОСЛЕ чтения бандла/анкера ------
+
+
+def test_deliver_reads_bundle_before_switching_to_stale_delivery_branch(
+    tmp_path: Path,
+) -> None:
+    """Major ревью PR #161: `git switch` на УЖЕ СУЩЕСТВУЮЩУЮ ветку доставки
+    (супersede-редоставка поверх прежней попытки) переключает рабочее
+    дерево на ЕЁ содержимое — если бы deliver() читал бандл/анкер ПОСЛЕ
+    ensure_branch (как было до фикса), редоставка рендерилась бы из
+    устаревшей ветки, а не из только что зачекаученного base. Стаб
+    симулирует именно этот эффект: при вызове ensure_branch подменяет
+    30-decomposition.md на «устаревшее» содержимое — фикс обязан УЖЕ
+    держать нужные данные в памяти к этому моменту."""
+    target = _target(tmp_path)
+
+    class _StaleBranchOps(_StubOps):
+        def __init__(self, stale_decomposition: str) -> None:
+            super().__init__()
+            self.stale_decomposition = stale_decomposition
+            self.switched = False
+
+        def ensure_branch(self, target_dir: str, branch: str) -> None:
+            super().ensure_branch(target_dir, branch)
+            self.switched = True
+            (
+                Path(target_dir) / "workstreams/WS-alpha-7/spec"
+                / "30-decomposition.md"
+            ).write_text(self.stale_decomposition)
+
+    stale = DECOMPOSITION_MD.replace(
+        "DT-01: Реализация", "DT-01: УСТАРЕВШЕЕ"
+    )
+    ops = _StaleBranchOps(stale)
+    task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a", approved_at="t",
+    )
+    assert ops.switched
+    text = (target / "spec/WS-alpha-7-tasks.md").read_text()
+    assert "УСТАРЕВШЕЕ" not in text
+    assert "### TASK-001: Реализация" in text
+
+
 def test_parse_behaviour_reads_letter_suffixed_beh_id() -> None:
     """PR spec-runner#369 (major): BEH-18a молча выпадал из декомпозиции,
     а его checked_by приклеивался к предыдущему сценарию."""
@@ -2110,6 +2160,40 @@ def test_deliver_for_run_write_ahead_op_and_completion(
     assert ops2.calls == []
 
 
+def test_deliver_for_run_records_pre_stamp_anchor_not_post_stamp(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Ревью PR #161, finding 3: anchor, записанный op_complete, обязан
+    быть ДО-штамповым снимком decomposition.md на base (тем же, что и у
+    supersede-гейта), НЕ пост-штамповым содержимым (`stamp_bundle_approved`
+    внутри deliver() меняет status/version/upstream_hashes) — иначе
+    следующее сравнение «анкер не изменился» никогда бы не совпадало."""
+    from governance.stale_adapter import blob_sha1
+
+    state = _recon_state(tmp_path, monkeypatch)
+    pre_stamp_anchor = blob_sha1(
+        (
+            Path(state.target_dir)
+            / "workstreams/WS-alpha-7/spec/30-decomposition.md"
+        ).read_text()
+    )
+    ops = _ReconOps()
+    task_bridge.deliver_for_run(state, ops)
+    recorded = state.ops["tasks-deliver"]["anchor"]
+    assert recorded == pre_stamp_anchor
+    # ...и НЕ равен пост-штамповому содержимому, которое deliver() оставил
+    # на диске (status теперь approved — доказывает, что anchor не был
+    # пересчитан ПОСЛЕ deliver()).
+    post_stamp_anchor = blob_sha1(
+        (
+            Path(state.target_dir)
+            / "workstreams/WS-alpha-7/spec/30-decomposition.md"
+        ).read_text()
+    )
+    assert post_stamp_anchor != pre_stamp_anchor
+    assert recorded != post_stamp_anchor
+
+
 def test_deliver_for_run_adopts_existing_pr_by_branch(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2177,6 +2261,40 @@ def test_deliver_for_run_closed_unmerged_pr_fails_closed(
 
     with pytest.raises(RuntimeError, match="закрыт"):
         task_bridge.deliver_for_run(state, _ClosedOps())
+
+
+def test_current_anchor_blob_missing_file_fails_closed_with_runtime_error(
+    tmp_path: Path,
+) -> None:
+    """Minor ревью PR #161: отсутствие терминального узла активного DAG на
+    диске (легаси-бандл без --legacy-bundle, переехавший путь и т.п.)
+    обязано дать RuntimeError с путём и процедурой — не сырой
+    FileNotFoundError, который main() не ловит (перехватывает только
+    RuntimeError) и валит traceback на оператора."""
+    target = tmp_path / "alpha"
+    (target / "workstreams/WS-alpha-7/spec").mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="30-decomposition.md"):
+        task_bridge._current_anchor_blob(
+            str(target), "workstreams/WS-alpha-7/spec", None,
+        )
+
+
+def test_deliver_for_run_supersede_missing_anchor_file_is_runtime_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """То же самое, но через полный путь deliver_for_run(supersede=True) —
+    main() ловит только RuntimeError (не FileNotFoundError), так что этот
+    путь обязан оставаться RuntimeError и на уровне гейта."""
+    state = _recon_state(
+        tmp_path, monkeypatch,
+        op={"status": "completed", "pr": 55, "anchor": "irrelevant"},
+    )
+    (
+        Path(state.target_dir) / "workstreams/WS-alpha-7/spec"
+        / "30-decomposition.md"
+    ).unlink()
+    with pytest.raises(RuntimeError, match="30-decomposition.md"):
+        task_bridge.deliver_for_run(state, _ReconOps(), supersede=True)
 
 
 # --- FIX 2 (owner ruling): санкционированный supersede/redelivery ---------

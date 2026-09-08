@@ -833,6 +833,14 @@ def deliver(
     меняет байты терминального узла активного DAG, и пин, взятый до
     штампа, протух бы в том же PR (@id:spec-bridge-approve-conformance).
 
+    `ops.ensure_branch` (переключение/создание ветки доставки) идёт СТРОГО
+    ПОСЛЕ ВСЕХ чтений бандла (behaviour/сценарии, decomposition/anchor_text,
+    design/acceptance, версия предыдущей спеки) — ревью PR #161, finding 2:
+    `git switch` на УЖЕ СУЩЕСТВУЮЩУЮ ветку доставки (супersede-редоставка
+    поверх прежней попытки) переключает рабочее дерево на ЕЁ содержимое;
+    если бы ensure_branch стоял раньше чтений (как было до фикса), редоставка
+    рендерилась бы из старой ветки, а не из только что зачекаученного base.
+
     `legacy_bundle` (Task 7 плана acceptance-node) выбирает активный DAG
     через `_dag_for`: `None` — полный (якорь decomposition, два upstream-
     пина: design и acceptance); `3`/`4` — точный префикс (бандл авторен до
@@ -914,8 +922,6 @@ def deliver(
                 "decomposition: граф DT невалиден:\n"
                 + "\n".join(f"- {e}" for e in graph_errors)
             )
-    branch = f"spec/{ws_id}-tasks"
-    ops.ensure_branch(target_dir, branch)
     stamped = stamp_bundle_approved(
         target_dir, bundle_dir, approved_by, approved_at,
         legacy_bundle=legacy_bundle,
@@ -962,6 +968,17 @@ def deliver(
             prior_spec_path.read_text(encoding="utf-8")
         )
         version = max(int(prior_meta.get("version") or 1), 1) + 1
+    # ensure_branch — ЗДЕСЬ, ПОСЛЕ всех чтений бандла/анкера/version (ревью
+    # PR #161, finding 2: `git switch` на УЖЕ СУЩЕСТВУЮЩУЮ ветку доставки
+    # переключает рабочее дерево на её содержимое — если бы ensure_branch
+    # стоял раньше чтений, редоставка (`--supersede`) рендерилась бы из
+    # СТАРОЙ ветки прошлой попытки, а не из только что зачекаученного base.
+    # К этой строке все нужные для рендера данные (behaviour/сценарии,
+    # anchor_text/dt_tasks, design/acceptance текст, version) уже читаны
+    # из base — переключение ветки дальше их не затрагивает, только
+    # определяет, КУДА идёт коммит/пуш/PR.
+    branch = f"spec/{ws_id}-tasks"
+    ops.ensure_branch(target_dir, branch)
     if any(_node_id(fname) == "decomposition" for fname, _ in dag):
         # DT-путь (Task 8 плана decomposition-node, обобщено Task 7 плана
         # acceptance-node на `--legacy-bundle=5`): состав задач решён
@@ -1053,6 +1070,19 @@ def _current_anchor_blob(
     """
     dag = _dag_for(legacy_bundle)
     anchor_path = Path(target_dir) / bundle_dir / dag[-1][0]
+    if not anchor_path.exists():
+        # Fail-closed (minor ревью PR #161): сырой FileNotFoundError не
+        # ловится main()'ом (перехватывает только RuntimeError, строка с
+        # `except RuntimeError` в CLI) — оператор получил бы traceback
+        # вместо принятой в модуле формулировки с процедурой, как у
+        # `_check_bundle_composition`.
+        raise RuntimeError(
+            f"{anchor_path} не найден — терминальный узел активного DAG "
+            "отсутствует на диске (легаси-бандл без --legacy-bundle, "
+            "бандл ещё не вмержен, либо bundle_dir указывает неверный "
+            "путь); доавторьте недостающий узел либо передайте "
+            "--legacy-bundle=3|4|5 с точным фактическим составом"
+        )
     return blob_sha1(anchor_path.read_text(encoding="utf-8"))
 
 
@@ -1063,10 +1093,20 @@ def _deliver_fresh_for_run(
     обычной (первой) доставки и supersede-редоставки.
 
     Обе обязаны идти через write-ahead op_start/op_complete (ручная правка
-    ledger недопустима, owner ruling) и записывать anchor свежедоставленного
-    decomposition — читаем его ПОСЛЕ `deliver()`, когда бандл уже
-    проштампован и на диске лежит именно то содержимое, что `deliver()`
-    запинил в саму tasks-спеку.
+    ledger недопустима, owner ruling).
+
+    Момент записи anchor (ревью PR #161, finding 3): считаем его ОДИН РАЗ,
+    СРАЗУ после `checkout_and_pull(base)`, ДО того как `deliver()` штампует
+    бандл (status→approved, перепиновка) — это тот же самый, ДО-штамповый
+    момент, что уже использует supersede-гейт в `deliver_for_run` (тоже
+    сразу после своего `checkout_and_pull`, до какой-либо мутации). Если бы
+    anchor читался ПОСЛЕ `deliver()` (как было раньше), он нёс бы
+    ПОСТ-штамповое содержимое, которое до мержа PR доставки на base ещё не
+    существует, — следующее сравнение «анкер не изменился» сравнивало бы
+    несопоставимые величины и никогда бы не совпадало (гейт красил бы
+    неизвестное зелёным, см. ревью). Записывая и сравнивая ОДИН И ТОТ ЖЕ
+    «чистый апстрим на base» момент, гейт корректно ловит just no-op
+    редоставки.
     """
     # approved_by/at — факт мержа бандл-PR (решение владельца devtools#110:
     # инициированный мерж = approve; mergedBy — различитель agent/human,
@@ -1083,6 +1123,10 @@ def _deliver_fresh_for_run(
             f"у PR #{state.pr} нет mergedBy/mergedAt — бандл не вмержен "
             "или API не отдал факт мержа; стоп"
         )
+    ops.checkout_and_pull(state.target_dir, state.base_ref or "master")
+    anchor = _current_anchor_blob(
+        state.target_dir, state.bundle_dir, legacy_bundle
+    )
     op_start(state, "tasks-deliver")
     pr = deliver(
         target_dir=state.target_dir,
@@ -1097,9 +1141,9 @@ def _deliver_fresh_for_run(
         legacy_bundle=legacy_bundle,
         profile=state.profile,
     )
-    anchor = _current_anchor_blob(
-        state.target_dir, state.bundle_dir, legacy_bundle
-    )
+    # anchor — тот же, ДО-штамповый снимок, посчитанный ВЫШЕ (до op_start и
+    # deliver()), не пересчитывается заново: перечитать файл здесь означало
+    # бы взять его УЖЕ проштампованным deliver()'ом (см. docstring).
     op_complete(state, "tasks-deliver", pr=pr, anchor=anchor)
     return pr
 
