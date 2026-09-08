@@ -807,13 +807,25 @@ def test_author_dsl_covers_decomposition() -> None:
 def test_author_dsl_decomposition_explains_verifies_field() -> None:
     """Major ревью PR #161, finding 1: промпт учит и ФОРМЕ (список файлов,
     блочная YAML), и обязательности/запрету по type, и что это НАБЛЮДЕНИЕ
-    (checked_by остаётся владением) — не только упоминает токен."""
+    (checked_by остаётся владением) — не только упоминает токен.
+
+    Round 5 ревью PR #161, finding 3 (контракт владельца): промпт больше
+    НЕ обещает "REQUIRED for type: verify" (verifies опционален — находка
+    формы, не fatal-инвариант) и точно описывает УЗКОЕ правило single-owner
+    исключения (владение всегда важнее наблюдения), а не «exempt for THIS
+    task only» без уточнения про собственный checked_by."""
     from governance.ops import _AUTHOR_DSL
 
     dsl = _AUTHOR_DSL["decomposition"]
-    assert "REQUIRED for type: verify" in dsl
-    assert "FORBIDDEN for type: implement" in dsl
-    assert "checked_by" in dsl.split("verifies:")[1][:400]
+    verifies_tail = dsl.split("`verifies:")[1]
+    assert "RECOMMENDED for type: verify" in verifies_tail[:200]
+    assert "REQUIRED for type: verify" not in verifies_tail[:400]
+    assert "FORBIDDEN for type: implement" in verifies_tail[:400]
+    assert "checked_by" in verifies_tail[:400]
+    assert "ownership always beats observation" in verifies_tail[:1200]
+    assert "NOT also this same task's own checked_by target" in (
+        verifies_tail[:1200]
+    )
 
 
 def test_author_dsl_covers_acceptance() -> None:

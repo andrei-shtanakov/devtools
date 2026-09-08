@@ -8,6 +8,24 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+# Маркер-подстрока находки «verify без verifies» (round 5 ревью PR #161,
+# контракт владельца) — единственная точка истины формы этой строки:
+# используется при генерации находки НИЖЕ и в `is_non_fatal_form_finding`
+# (потребитель — governance.task_bridge.deliver, фильтрует fatal-набор).
+_VERIFY_WITHOUT_VERIFIES_MARKER = "без структурного поля verifies"
+
+
+def is_non_fatal_form_finding(finding: str) -> bool:
+    """True для находок формы, НЕ обязанных блокировать deliver() (round 5
+    ревью PR #161): единственный такой класс — ``type: verify`` без
+    ``verifies`` (легаси-совместимость: checked_by-fallback
+    ``render_tasks_dt`` остаётся достижим). Прочие находки (near-miss
+    заголовок, дубль id, ``verifies`` на ``implement``, graph-инварианты
+    ``graph_findings``) — fatal как раньше.
+    """
+    return _VERIFY_WITHOUT_VERIFIES_MARKER in finding
+
+
 _DT_HEAD_RE = re.compile(
     r"^####\s+(DT-\d+):\s*(.+?)\s*·\s*type:\s*(implement|verify)"
     r"\s*·\s*owner:\s*(\S+)\s*$",
@@ -126,17 +144,23 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
         if group_m is None:
             findings.append(f"{dt_id}: строка parallel_group отсутствует")
         # verifies — структурное поле группы НАБЛЮДЕНИЯ (owner ruling,
-        # DT-14): опционально у type: verify (объявляется, когда нужна
+        # DT-14): рекомендовано у type: verify (объявляется, когда нужна
         # multi-file группа наблюдения отдельно от checked_by-владения) и
         # ЗАПРЕЩЕНО у type: implement (checked_by через scenarios —
-        # единственный канал ВЛАДЕНИЯ implement-задач). НЕ обязательно
-        # (round 3 ревью PR #161, finding 4, контракт владельца): раньше
-        # verify без verifies был fatal-находкой формы — легаси-бандлы
-        # (авторенные до раскатки поля) отказывали на S4-гейте и в
-        # deliver(), а объявленный checked_by-fallback в render_tasks_dt
-        # был недостижим (graph_findings всегда рубил их раньше рендера).
-        # verifies остался чисто опциональным, аддитивным механизмом.
-        if dt_type == "implement" and verifies:
+        # единственный канал ВЛАДЕНИЯ implement-задач). Находка «verify без
+        # verifies» — ФОРМЫ, не graph-инвариант, и НЕ fatal для deliver()
+        # (round 5 ревью PR #161, контракт владельца): легаси-бандлы,
+        # авторенные до раскатки поля, обязаны продолжать доставляться
+        # через checked_by-fallback render_tasks_dt — deliver() отфильтровывает
+        # эту конкретную находку из fatal-набора (`is_non_fatal_form_finding`
+        # выше, потребитель — governance.task_bridge.deliver).
+        if dt_type == "verify" and not verifies:
+            findings.append(
+                f"{dt_id}: type: verify {_VERIFY_WITHOUT_VERIFIES_MARKER} "
+                "— группа наблюдения не объявлена (рекомендация формы, "
+                "не блокирует доставку)"
+            )
+        elif dt_type == "implement" and verifies:
             findings.append(f"{dt_id}: verifies запрещён при type: implement")
         tasks.append(DtTask(
             dt_id=dt_id, title=m.group(2), type=dt_type,
@@ -217,8 +241,19 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
 
     Порядок проверок фиксирован, findings накапливаются (гейт показывает
     всё сразу, не по одной). Пустой список — граф валиден.
+
+    Находки формы, отмеченные `is_non_fatal_form_finding` (round 5 ревью
+    PR #161, контракт владельца — сейчас единственный класс: verify без
+    verifies), в результат НЕ попадают: и S4-гейт (runner), и
+    `task_bridge.deliver()` трактуют ЛЮБУЮ находку этого возврата как
+    fatal, единой точки «не блокировать, но показать» у них нет — фильтр
+    здесь, а не у потребителей, значит легаси-бандл без verifies проходит
+    ОБА пути сразу, одним изменением. `parse_dt_tasks`, вызванный напрямую
+    (не через graph_findings), эту находку по-прежнему возвращает — она
+    предназначена для прямых потребителей форму, не для gate-агрегата.
     """
     tasks, findings = parse_dt_tasks(decomposition_text)
+    findings = [f for f in findings if not is_non_fatal_form_finding(f)]
     bindings = _parse_beh_bindings(behaviour_text)
     ids = {t.dt_id for t in tasks}
     edges = {t.dt_id: t.depends_on for t in tasks}

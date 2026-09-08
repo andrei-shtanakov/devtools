@@ -389,20 +389,53 @@ def test_verifies_inline_form_is_also_accepted() -> None:
     assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
 
 
-def test_verify_without_verifies_is_legacy_compatible_not_a_finding() -> None:
-    """Round 3 ревью PR #161, finding 4 (контракт владельца): verifies
-    опционален у type: verify, а не обязателен — легаси-бандлы, авторенные
-    до раскатки поля, не превращаются задним числом в невалидные (S4-гейт
-    и deliver() шли по graph_findings, и fatal-находка формы блокировала
-    ИХ ОБОИХ на каждом старом бандле с verify-DT без verifies)."""
+def test_verify_without_verifies_is_a_finding() -> None:
+    """Round 5 ревью PR #161 (контракт владельца): verify-DT без verifies
+    — находка ФОРМЫ (parse_dt_tasks её видит и отдаёт), но не fatal-
+    инвариант — фильтруется на уровне graph_findings (см.
+    test_graph_findings_filters_out_verify_without_verifies_as_non_fatal),
+    так что S4-гейт и deliver() легаси-бандл без verifies по-прежнему
+    пропускают."""
     dt = (
         "#### DT-14: Наблюдение · type: verify · owner: qa\n"
         "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
         "delivered_by: [DT-01]\nparallel_group: core\n"
     )
     tasks, findings = parse_dt_tasks(dt)
-    assert findings == []
+    assert any(
+        "DT-14" in f and "verifies" in f and "не объявлена" in f
+        for f in findings
+    )
     assert tasks[0].verifies == ()
+
+
+def test_graph_findings_filters_out_verify_without_verifies_as_non_fatal() -> None:
+    """Round 5 ревью PR #161, finding 2 (контракт владельца): «verify без
+    verifies» — единственный класс находки формы, который graph_findings
+    (потребляемый ОБОИМИ fatal-путями: S4-гейт runner и
+    task_bridge.deliver()) не пропускает в свой результат — легаси-бандлы,
+    авторенные до раскатки поля, обязаны продолжать доставляться."""
+    from governance.decomposition_guard import (
+        graph_findings,
+        is_non_fatal_form_finding,
+    )
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_one`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::test_two`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: solo\n"
+    )
+    tasks, form_findings = parse_dt_tasks(dt)
+    assert any(is_non_fatal_form_finding(f) for f in form_findings)
+    assert graph_findings(beh, dt) == []
 
 
 def test_verifies_on_implement_is_a_finding() -> None:

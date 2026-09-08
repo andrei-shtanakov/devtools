@@ -1852,10 +1852,11 @@ parallel_group: solo
 def test_deliver_legacy_verify_dt_without_verifies_still_delivers(
     tmp_path: Path,
 ) -> None:
-    """Round 3 ревью PR #161, finding 4 (контракт владельца): legacy
-    decomposition с type: verify DT, авторенным ДО раскатки verifies (поле
-    отсутствует вовсе), обязан по-прежнему доставляться — graph_findings
-    не fatal-ит на этом, и render_tasks_dt рендерит **Verifies:** из
+    """Round 3/5 ревью PR #161 (контракт владельца): legacy decomposition
+    с type: verify DT, авторенным ДО раскатки verifies (поле отсутствует
+    вовсе), обязан по-прежнему доставляться — form-находка «без verifies»
+    (round 5: восстановлена, см. test_verify_without_verifies_is_a_finding)
+    не fatal-ит deliver(), и render_tasks_dt рендерит **Verifies:** из
     checked_by-цели сценария (fallback), не из structural verifies."""
     target = tmp_path / "alpha"
     bundle = target / "workstreams/WS-alpha-7/spec"
@@ -1990,57 +1991,6 @@ def test_deliver_full_dag_renders_via_render_tasks_dt(tmp_path: Path) -> None:
     assert "(DT-01, группа solo)" in text
     assert "Source: workstreams/WS-alpha-7/spec/30-decomposition.md#DT-01" \
         in text
-
-
-# --- round 2, ревью #161, finding 3 (контракт владельца C): ensure_branch
-# ДО stamp_bundle_approved (восстановленный исходный порядок) ---------------
-
-
-def test_deliver_ensure_branch_runs_before_bundle_stamp_write(
-    tmp_path: Path,
-) -> None:
-    """Round 2 ревью PR #161 (контракт C): `git switch` на уже
-    существующую ветку доставки по ГРЯЗНОМУ (уже проштампованному) дереву
-    аварийно завершается (`CalledProcessError` мимо `main`, который ловит
-    только `RuntimeError`) — ensure_branch обязан идти ПО ЧИСТОМУ дереву,
-    т.е. строго ДО stamp_bundle_approved. Стаб снимает содержимое бандла В
-    МОМЕНТ вызова ensure_branch: оно обязано быть ещё НЕ проштампованным."""
-    target = _target(tmp_path)
-
-    class _SnapshotOps(_StubOps):
-        def __init__(self) -> None:
-            super().__init__()
-            self.decomposition_at_switch: str | None = None
-
-        def ensure_branch(self, target_dir: str, branch: str) -> None:
-            super().ensure_branch(target_dir, branch)
-            self.decomposition_at_switch = (
-                Path(target_dir) / "workstreams/WS-alpha-7/spec"
-                / "30-decomposition.md"
-            ).read_text()
-
-    ops = _SnapshotOps()
-    task_bridge.deliver(
-        target_dir=str(target),
-        repo_slug="owner/alpha",
-        ws_id="WS-alpha-7",
-        subject="s",
-        bundle_dir="workstreams/WS-alpha-7/spec",
-        base_ref="master",
-        ops=ops,
-        approved_by="a", approved_at="t",
-    )
-    assert ops.decomposition_at_switch is not None
-    assert "status: draft" in ops.decomposition_at_switch
-    assert "status: approved" not in ops.decomposition_at_switch
-    # ensure_branch — раньше первого ops-вызова после штампа+рендера
-    # (commit_paths); тот же порядок снимок выше доказывает напрямую по
-    # содержимому файла на момент переключения.
-    ensure_idx = ops.calls.index(("ensure_branch", "spec/WS-alpha-7-tasks"))
-    commit_idx = next(
-        i for i, c in enumerate(ops.calls) if c[0] == "commit_paths"
-    )
-    assert ensure_idx < commit_idx
 
 
 def test_parse_behaviour_reads_letter_suffixed_beh_id() -> None:
@@ -2218,50 +2168,11 @@ def test_deliver_for_run_write_ahead_op_and_completion(
     pr = task_bridge.deliver_for_run(state, ops)
     assert pr == 77
     saved = rs.load("r-recon")
-    # FIX 2 (owner ruling, supersede): op_complete теперь несёт anchor —
-    # blob терминального узла активного DAG, записанный при доставке.
-    op = saved.ops["tasks-deliver"]
-    assert op["status"] == "completed" and op["pr"] == 77
-    assert op["anchor"]
+    assert saved.ops["tasks-deliver"] == {"status": "completed", "pr": 77}
     # повтор: op completed → ни одного нового эффекта
     ops2 = _ReconOps()
     assert task_bridge.deliver_for_run(rs.load("r-recon"), ops2) == 77
     assert ops2.calls == []
-
-
-def test_deliver_for_run_records_post_stamp_anchor_not_pre_stamp(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Round 2 ревью PR #161, finding 1 (контракт владельца A): anchor,
-    записанный op_complete, обязан быть ПОСЛЕ-штамповым снимком
-    decomposition.md — теми же байтами, что `deliver()` закоммитил в PR
-    доставки и что окажутся на base ПОСЛЕ его мержа (то, с чем свежий
-    checkout_and_pull сравнит на следующем supersede). ДО-штамповая запись
-    (round 1) делала равенство недостижимым: после мержа PR доставки base
-    уже несёт другие (проштампованные) байты."""
-    from governance.stale_adapter import blob_sha1
-
-    state = _recon_state(tmp_path, monkeypatch)
-    pre_stamp_anchor = blob_sha1(
-        (
-            Path(state.target_dir)
-            / "workstreams/WS-alpha-7/spec/30-decomposition.md"
-        ).read_text()
-    )
-    ops = _ReconOps()
-    task_bridge.deliver_for_run(state, ops)
-    recorded = state.ops["tasks-deliver"]["anchor"]
-    # ...и НЕ равен до-штамповому содержимому, зафиксированному ДО вызова —
-    # доказывает, что stamp_bundle_approved реально изменил байты.
-    assert recorded != pre_stamp_anchor
-    post_stamp_anchor = blob_sha1(
-        (
-            Path(state.target_dir)
-            / "workstreams/WS-alpha-7/spec/30-decomposition.md"
-        ).read_text()
-    )
-    assert post_stamp_anchor != pre_stamp_anchor
-    assert recorded == post_stamp_anchor
 
 
 def test_deliver_for_run_adopts_existing_pr_by_branch(
@@ -2278,40 +2189,9 @@ def test_deliver_for_run_adopts_existing_pr_by_branch(
     assert task_bridge.deliver_for_run(state, ops) == 91
     assert ("find_pr", "spec/WS-alpha-7-tasks") in ops.calls
     assert not any(c[0] == "create_draft_pr" for c in ops.calls)
-    adopted = rs.load("r-recon").ops["tasks-deliver"]
-    assert adopted["status"] == "completed" and adopted["pr"] == 91
-    assert adopted["anchor"]
-
-
-def test_deliver_for_run_adopts_open_pr_records_unknown_anchor(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Round 4 ревью PR #161, finding 1: adoption ОТКРЫТОГО (ещё не
-    вмерженного) PR обязана записать anchor=None, а не хэш base — ПОСЛЕ-
-    штамповые байты этого PR живут ТОЛЬКО в нём, на base их ещё нет,
-    значит хэш base НИКОГДА не совпал бы с тем, что появится там после
-    мержа (fail-open supersede-гейта)."""
-    from governance import run_state as rs
-
-    state = _recon_state(
-        tmp_path, monkeypatch, op={"status": "started"}
-    )
-
-    class _OpenAdoptOps(_ReconOps):
-        def __init__(self) -> None:
-            super().__init__(existing_pr=91)
-
-        def pr_facts(self, repo_slug: str, pr: int) -> dict:
-            self.calls.append(("pr_facts", pr))
-            return {"state": "OPEN", "mergedBy": None, "mergedAt": None}
-
-    ops = _OpenAdoptOps()
-    assert task_bridge.deliver_for_run(state, ops) == 91
-    # anchor=None ⇒ никакого чтения/хэширования base под OPEN-PR не было.
-    assert not any(c[0] == "checkout_and_pull" for c in ops.calls)
-    adopted = rs.load("r-recon").ops["tasks-deliver"]
-    assert adopted["status"] == "completed" and adopted["pr"] == 91
-    assert adopted["anchor"] is None
+    assert rs.load("r-recon").ops["tasks-deliver"] == {
+        "status": "completed", "pr": 91,
+    }
 
 
 def test_deliver_for_run_refuses_non_completed_status(
@@ -2343,9 +2223,9 @@ def test_deliver_for_run_adopts_merged_pr_not_only_open(
     assert task_bridge.deliver_for_run(state, ops) == 91
     assert ("find_pr", "spec/WS-alpha-7-tasks", True) in ops.calls
     assert not any(c[0] == "create_draft_pr" for c in ops.calls)
-    adopted = rs.load("r-recon").ops["tasks-deliver"]
-    assert adopted["status"] == "completed" and adopted["pr"] == 91
-    assert adopted["anchor"]
+    assert rs.load("r-recon").ops["tasks-deliver"] == {
+        "status": "completed", "pr": 91,
+    }
 
 
 def test_deliver_for_run_closed_unmerged_pr_fails_closed(
@@ -2362,360 +2242,3 @@ def test_deliver_for_run_closed_unmerged_pr_fails_closed(
 
     with pytest.raises(RuntimeError, match="закрыт"):
         task_bridge.deliver_for_run(state, _ClosedOps())
-
-
-def test_current_anchor_blob_missing_file_fails_closed_with_runtime_error(
-    tmp_path: Path,
-) -> None:
-    """Minor ревью PR #161: отсутствие терминального узла активного DAG на
-    диске (легаси-бандл без --legacy-bundle, переехавший путь и т.п.)
-    обязано дать RuntimeError с путём и процедурой — не сырой
-    FileNotFoundError, который main() не ловит (перехватывает только
-    RuntimeError) и валит traceback на оператора."""
-    target = tmp_path / "alpha"
-    (target / "workstreams/WS-alpha-7/spec").mkdir(parents=True)
-    with pytest.raises(RuntimeError, match="30-decomposition.md"):
-        task_bridge._current_anchor_blob(
-            str(target), "workstreams/WS-alpha-7/spec", None,
-        )
-
-
-def test_deliver_for_run_supersede_missing_anchor_file_is_runtime_error(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """То же самое, но через полный путь deliver_for_run(supersede=True) —
-    main() ловит только RuntimeError (не FileNotFoundError), так что этот
-    путь обязан оставаться RuntimeError и на уровне гейта."""
-    state = _recon_state(
-        tmp_path, monkeypatch,
-        op={"status": "completed", "pr": 55, "anchor": "irrelevant"},
-    )
-    (
-        Path(state.target_dir) / "workstreams/WS-alpha-7/spec"
-        / "30-decomposition.md"
-    ).unlink()
-    with pytest.raises(RuntimeError, match="30-decomposition.md"):
-        task_bridge.deliver_for_run(state, _ReconOps(), supersede=True)
-
-
-# --- FIX 2 (owner ruling): санкционированный supersede/redelivery ---------
-
-
-def test_deliver_for_run_supersede_refused_on_equal_anchor(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Owner: supersede разрешён ТОЛЬКО когда анкер decomposition
-    отличается от записанного в завершённом op — равный анкер (upstream
-    ничего не поправил) обязан отказать явно. Round 2 ревью PR #161,
-    finding 2 (контракт владельца B): отказ обязан идти ДО op_start — op
-    tasks-deliver остаётся БАЙТ В БАЙТ тем же, что и до вызова (pr+anchor
-    не тронуты)."""
-    from governance.stale_adapter import blob_sha1
-
-    state = _recon_state(tmp_path, monkeypatch)
-    anchor = blob_sha1(
-        (
-            Path(state.target_dir)
-            / "workstreams/WS-alpha-7/spec/30-decomposition.md"
-        ).read_text()
-    )
-    op_before = {"status": "completed", "pr": 55, "anchor": anchor}
-    state.ops["tasks-deliver"] = dict(op_before)
-    with pytest.raises(RuntimeError, match="не изменился"):
-        task_bridge.deliver_for_run(state, _ReconOps(), supersede=True)
-    assert state.ops["tasks-deliver"] == op_before
-
-
-def test_deliver_for_run_supersede_round_trip_post_stamp_anchor(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Round 2 ревью PR #161 (контракт владельца A), полный цикл: 1)
-    обычная доставка записывает ПОСЛЕ-штамповый anchor; 2) supersede СРАЗУ
-    после, БЕЗ единой апстрим-правки, — отказ (гейт сравнивает те же
-    ПОСЛЕ-штамповые байты, что реально окажутся на base после мержа PR
-    доставки — а стаб-checkout не меняет файлы, эмулируя «PR уже
-    смержен»), op остаётся нетронутым; 3) апстрим правит decomposition —
-    supersede теперь проходит и записывает НОВЫЙ anchor."""
-    from governance import run_state as rs
-
-    state = _recon_state(tmp_path, monkeypatch)
-    ops1 = _ReconOps()
-    pr1 = task_bridge.deliver_for_run(state, ops1)
-    assert pr1 == 77
-    # Обычная (не supersede) доставка — классическая ветка, не тронута.
-    assert ("ensure_branch", "spec/WS-alpha-7-tasks") in ops1.calls
-    op_after_first = dict(rs.load("r-recon").ops["tasks-deliver"])
-    assert op_after_first["anchor"]
-
-    # 2) supersede БЕЗ правок — отказ, op НЕ тронут байт в байт.
-    with pytest.raises(RuntimeError, match="не изменился"):
-        task_bridge.deliver_for_run(
-            rs.load("r-recon"), _ReconOps(), supersede=True,
-        )
-    assert rs.load("r-recon").ops["tasks-deliver"] == op_after_first
-
-    # 3) апстрим правит decomposition.md — supersede проходит, новый anchor.
-    decomp_path = (
-        Path(state.target_dir)
-        / "workstreams/WS-alpha-7/spec/30-decomposition.md"
-    )
-    decomp_path.write_text(
-        decomp_path.read_text().replace(
-            "DT-01: Реализация", "DT-01: Исправлено апстримом"
-        )
-    )
-    ops3 = _ReconOps()
-    pr3 = task_bridge.deliver_for_run(
-        rs.load("r-recon"), ops3, supersede=True,
-    )
-    assert pr3 == 77
-    op_after_second = rs.load("r-recon").ops["tasks-deliver"]
-    assert op_after_second["anchor"] != op_after_first["anchor"]
-    # Round 3 контракт владельца, точка 1: редоставка идёт в СВЕЖУЮ ветку
-    # -v2 (первый supersede), не в классическую spec/<ws-id>-tasks.
-    assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops3.calls
-    assert not any(
-        c == ("ensure_branch", "spec/WS-alpha-7-tasks") for c in ops3.calls
-    )
-
-
-def test_deliver_for_run_supersede_refused_when_previous_pr_unmerged(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Round 3 контракт владельца, точка 2b: supersede отказывает, если
-    предыдущая доставка (op['pr']) ещё НЕ вмержена — пока её PR открыт,
-    пост-штамповые байты живут только в нём, и на base сравнивать анкер
-    ещё не с чем (round-2 fail-open). Отказ называет PR, op остаётся
-    нетронутым, и до сравнения анкера/checkout_and_pull дело не доходит."""
-    anchor = "irrelevant-since-gate-refuses-before-comparing"
-    op_before = {"status": "completed", "pr": 55, "anchor": anchor}
-    state = _recon_state(tmp_path, monkeypatch, op=dict(op_before))
-
-    class _UnmergedPrevOps(_ReconOps):
-        def pr_facts(self, repo_slug: str, pr: int) -> dict:
-            self.calls.append(("pr_facts", pr))
-            if pr == 55:
-                return {"state": "OPEN", "mergedBy": None, "mergedAt": None}
-            return super().pr_facts(repo_slug, pr)
-
-    ops = _UnmergedPrevOps()
-    with pytest.raises(RuntimeError, match=r"PR #55.*не вмержена"):
-        task_bridge.deliver_for_run(state, ops, supersede=True)
-    assert state.ops["tasks-deliver"] == op_before
-    assert not any(c[0] == "checkout_and_pull" for c in ops.calls)
-
-
-def test_deliver_for_run_supersede_allowed_when_previous_pr_closed_unmerged(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    """Round 4 ревью PR #161, finding 4 (минор): предыдущая доставка
-    закрыта БЕЗ мержа (не OPEN, не MERGED) — раньше это давало тот же
-    отказ «закройте/дождитесь мержа», невыполнимый навсегда (PR уже
-    закрыт, MERGED не станет). Правильный ответ: разрешить supersede без
-    сравнения анкера — закрытая-без-мержа доставка никогда не попала на
-    base, сравнивать нечего."""
-    op_before = {
-        "status": "completed", "pr": 120, "anchor": "irrelevant" * 3,
-    }
-    state = _recon_state(tmp_path, monkeypatch, op=dict(op_before))
-
-    class _ClosedUnmergedOps(_ReconOps):
-        def pr_facts(self, repo_slug: str, pr: int) -> dict:
-            self.calls.append(("pr_facts", pr))
-            if pr == 120:
-                return {
-                    "state": "CLOSED", "mergedBy": None, "mergedAt": None,
-                }
-            return super().pr_facts(repo_slug, pr)
-
-    ops = _ClosedUnmergedOps()
-    pr = task_bridge.deliver_for_run(state, ops, supersede=True)
-    assert pr == 77
-    out = capsys.readouterr().out
-    assert "закрыта БЕЗ мержа" in out
-    saved = state.ops["tasks-deliver"]
-    assert saved["status"] == "completed"
-    assert saved["pr"] == 77
-
-
-def test_deliver_for_run_supersede_redelivers_on_changed_anchor(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Owner: анкер decomposition изменился с последней доставки ⇒ свежая
-    доставка САНКЦИОНИРОВАНА — старый PR (find_pr any_state) НЕ
-    принимается, op переcовершается заново с новым pr+anchor."""
-    from governance import run_state as rs
-
-    state = _recon_state(
-        tmp_path, monkeypatch,
-        op={"status": "completed", "pr": 55, "anchor": "stale" * 8},
-    )
-    ops = _ReconOps()
-    pr = task_bridge.deliver_for_run(state, ops, supersede=True)
-    assert pr == 77
-    assert any(c[0] == "create_draft_pr" for c in ops.calls)
-    # найденный по ветке PR (any_state) НЕ адаптируется как готовая
-    # доставка под supersede — свежая генерация идёт мимо find_pr
-    assert not any(c[0] == "find_pr" for c in ops.calls)
-    saved = rs.load("r-recon").ops["tasks-deliver"]
-    assert saved["status"] == "completed"
-    assert saved["pr"] == 77
-    assert saved["anchor"] and saved["anchor"] != "stale" * 8
-
-
-def test_op_start_under_supersede_preserves_previous_pr_and_anchor_on_failure(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Round 4 ревью PR #161, finding 2: op_start (write-ahead) обязан
-    сохранить pr/anchor завершённой ранее доставки в prev_pr/prev_anchor —
-    если следующий deliver() упадёт (например, апстрим сам внёс невалидный
-    граф DT), эти факты остаются на диске и обнаружимы, а не теряются
-    безвозвратно вместе со старым completed-состоянием op (иначе следующий
-    supersede навсегда лишается точки отсчёта, а fallback молча усыновляет
-    старый PR как будто он доставил новое содержимое)."""
-    from governance import run_state as rs
-
-    state = _recon_state(
-        tmp_path, monkeypatch,
-        op={"status": "completed", "pr": 91, "anchor": "A" * 40},
-    )
-    # Ломаем decomposition.md так, чтобы graph_findings его отверг —
-    # deliver() упадёт ПОСЛЕ op_start, симулируя сбой доставки апстримом
-    # внесённым дефектом (BEH-02 остаётся непокрытым).
-    decomp_path = (
-        Path(state.target_dir)
-        / "workstreams/WS-alpha-7/spec/30-decomposition.md"
-    )
-    decomp_path.write_text(
-        decomp_path.read_text().replace(
-            "scenarios: [BEH-01, BEH-02]", "scenarios: [BEH-01]"
-        )
-    )
-    ops = _ReconOps()
-    with pytest.raises(RuntimeError, match="граф DT невалиден"):
-        task_bridge.deliver_for_run(state, ops, supersede=True)
-    saved = rs.load("r-recon").ops["tasks-deliver"]
-    assert saved["status"] == "started"
-    assert saved["prev_pr"] == 91
-    assert saved["prev_anchor"] == "A" * 40
-
-
-def test_deliver_for_run_supersede_allows_unknown_legacy_anchor(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    """Owner: op леджера эры до anchor (ключа нет вовсе) — анкер
-    расценивается как неизвестный, supersede разрешён по явному флагу, но
-    с предупреждением (без сравнения хэша)."""
-    state = _recon_state(
-        tmp_path, monkeypatch, op={"status": "completed", "pr": 55},
-    )
-    ops = _ReconOps()
-    pr = task_bridge.deliver_for_run(state, ops, supersede=True)
-    assert pr == 77
-    out = capsys.readouterr().out
-    assert "анкер неизвестен" in out
-
-
-def test_deliver_for_run_without_supersede_ignores_completed_anchor(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """supersede=False (дефолт) — старое поведение НЕ трогается: op уже
-    completed ⇒ немедленный возврат сохранённого PR, ноль эффектов, анкер
-    не проверяется вовсе."""
-    state = _recon_state(
-        tmp_path, monkeypatch,
-        op={"status": "completed", "pr": 55, "anchor": "irrelevant"},
-    )
-    ops = _ReconOps()
-    assert task_bridge.deliver_for_run(state, ops) == 55
-    assert ops.calls == []
-
-
-def test_deliver_redelivery_carries_version_forward(
-    tmp_path: Path,
-) -> None:
-    """Owner: version НЕ сбрасывается в 1 при повторной доставке — растёт
-    от версии уже вмерженной в target_dir tasks-спеки
-    (max(previous, 1) + 1), а не хардкода `_render_header`."""
-    target = _target(tmp_path)
-    ops = _StubOps()
-    task_bridge.deliver(
-        target_dir=str(target),
-        repo_slug="owner/alpha",
-        ws_id="WS-alpha-7",
-        subject="s",
-        bundle_dir="workstreams/WS-alpha-7/spec",
-        base_ref="master",
-        ops=ops,
-        approved_by="a", approved_at="t",
-    )
-    spec_path = target / "spec/WS-alpha-7-tasks.md"
-    meta, body = task_bridge.split_frontmatter(spec_path.read_text())
-    assert meta["version"] == 1
-    # Симулируем, что первая доставка уже вмержена в base (обычный ход
-    # supersede-цикла) с version, продвинутым по своему циклу жизни.
-    meta["version"] = 4
-    spec_path.write_text(task_bridge.join_frontmatter(meta, body))
-    ops2 = _StubOps()
-    task_bridge.deliver(
-        target_dir=str(target),
-        repo_slug="owner/alpha",
-        ws_id="WS-alpha-7",
-        subject="s",
-        bundle_dir="workstreams/WS-alpha-7/spec",
-        base_ref="master",
-        ops=ops2,
-        approved_by="a", approved_at="t",
-    )
-    meta2, _body2 = task_bridge.split_frontmatter(spec_path.read_text())
-    assert meta2["version"] == 5
-
-
-def test_deliver_first_delivery_version_is_one_when_no_prior_spec(
-    tmp_path: Path,
-) -> None:
-    """Нет предыдущей спеки в target_dir ⇒ version: 1, как раньше —
-    monotonic-логика не трогает первую доставку."""
-    target = _target(tmp_path)
-    ops = _StubOps()
-    task_bridge.deliver(
-        target_dir=str(target),
-        repo_slug="owner/alpha",
-        ws_id="WS-alpha-7",
-        subject="s",
-        bundle_dir="workstreams/WS-alpha-7/spec",
-        base_ref="master",
-        ops=ops,
-        approved_by="a", approved_at="t",
-    )
-    meta, _body = task_bridge.split_frontmatter(
-        (target / "spec/WS-alpha-7-tasks.md").read_text()
-    )
-    assert meta["version"] == 1
-
-
-def test_deliver_corrupted_prior_spec_version_fails_closed_with_runtime_error(
-    tmp_path: Path,
-) -> None:
-    """Round 4 ревью PR #161, finding 5 (минор): чужой/повреждённый
-    spec/<ws-id>-tasks.md (frontmatter потерян) обязан дать RuntimeError с
-    путём и процедурой — не сырой ValueError, который main() не ловит
-    (перехватывает только RuntimeError)."""
-    target = _target(tmp_path)
-    spec_dir = target / "spec"
-    spec_dir.mkdir(parents=True, exist_ok=True)
-    (spec_dir / "WS-alpha-7-tasks.md").write_text(
-        "не frontmatter вовсе, файл правлен руками\n"
-    )
-    ops = _StubOps()
-    with pytest.raises(RuntimeError, match="WS-alpha-7-tasks.md"):
-        task_bridge.deliver(
-            target_dir=str(target),
-            repo_slug="owner/alpha",
-            ws_id="WS-alpha-7",
-            subject="s",
-            bundle_dir="workstreams/WS-alpha-7/spec",
-            base_ref="master",
-            ops=ops,
-            approved_by="a", approved_at="t",
-        )
