@@ -2099,7 +2099,11 @@ def test_deliver_for_run_write_ahead_op_and_completion(
     pr = task_bridge.deliver_for_run(state, ops)
     assert pr == 77
     saved = rs.load("r-recon")
-    assert saved.ops["tasks-deliver"] == {"status": "completed", "pr": 77}
+    # FIX 2 (owner ruling, supersede): op_complete теперь несёт anchor —
+    # blob терминального узла активного DAG, записанный при доставке.
+    op = saved.ops["tasks-deliver"]
+    assert op["status"] == "completed" and op["pr"] == 77
+    assert op["anchor"]
     # повтор: op completed → ни одного нового эффекта
     ops2 = _ReconOps()
     assert task_bridge.deliver_for_run(rs.load("r-recon"), ops2) == 77
@@ -2120,9 +2124,9 @@ def test_deliver_for_run_adopts_existing_pr_by_branch(
     assert task_bridge.deliver_for_run(state, ops) == 91
     assert ("find_pr", "spec/WS-alpha-7-tasks") in ops.calls
     assert not any(c[0] == "create_draft_pr" for c in ops.calls)
-    assert rs.load("r-recon").ops["tasks-deliver"] == {
-        "status": "completed", "pr": 91,
-    }
+    adopted = rs.load("r-recon").ops["tasks-deliver"]
+    assert adopted["status"] == "completed" and adopted["pr"] == 91
+    assert adopted["anchor"]
 
 
 def test_deliver_for_run_refuses_non_completed_status(
@@ -2154,9 +2158,9 @@ def test_deliver_for_run_adopts_merged_pr_not_only_open(
     assert task_bridge.deliver_for_run(state, ops) == 91
     assert ("find_pr", "spec/WS-alpha-7-tasks", True) in ops.calls
     assert not any(c[0] == "create_draft_pr" for c in ops.calls)
-    assert rs.load("r-recon").ops["tasks-deliver"] == {
-        "status": "completed", "pr": 91,
-    }
+    adopted = rs.load("r-recon").ops["tasks-deliver"]
+    assert adopted["status"] == "completed" and adopted["pr"] == 91
+    assert adopted["anchor"]
 
 
 def test_deliver_for_run_closed_unmerged_pr_fails_closed(
@@ -2173,3 +2177,147 @@ def test_deliver_for_run_closed_unmerged_pr_fails_closed(
 
     with pytest.raises(RuntimeError, match="закрыт"):
         task_bridge.deliver_for_run(state, _ClosedOps())
+
+
+# --- FIX 2 (owner ruling): санкционированный supersede/redelivery ---------
+
+
+def test_deliver_for_run_supersede_refused_on_equal_anchor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Owner: supersede разрешён ТОЛЬКО когда анкер decomposition
+    отличается от записанного в завершённом op — равный анкер (upstream
+    ничего не поправил) обязан отказать явно."""
+    from governance.stale_adapter import blob_sha1
+
+    state = _recon_state(tmp_path, monkeypatch)
+    anchor = blob_sha1(
+        (
+            Path(state.target_dir)
+            / "workstreams/WS-alpha-7/spec/30-decomposition.md"
+        ).read_text()
+    )
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 55, "anchor": anchor,
+    }
+    with pytest.raises(RuntimeError, match="не изменился"):
+        task_bridge.deliver_for_run(state, _ReconOps(), supersede=True)
+
+
+def test_deliver_for_run_supersede_redelivers_on_changed_anchor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Owner: анкер decomposition изменился с последней доставки ⇒ свежая
+    доставка САНКЦИОНИРОВАНА — старый PR (find_pr any_state) НЕ
+    принимается, op переcовершается заново с новым pr+anchor."""
+    from governance import run_state as rs
+
+    state = _recon_state(
+        tmp_path, monkeypatch,
+        op={"status": "completed", "pr": 55, "anchor": "stale" * 8},
+    )
+    ops = _ReconOps()
+    pr = task_bridge.deliver_for_run(state, ops, supersede=True)
+    assert pr == 77
+    assert any(c[0] == "create_draft_pr" for c in ops.calls)
+    # найденный по ветке PR (any_state) НЕ адаптируется как готовая
+    # доставка под supersede — свежая генерация идёт мимо find_pr
+    assert not any(c[0] == "find_pr" for c in ops.calls)
+    saved = rs.load("r-recon").ops["tasks-deliver"]
+    assert saved["status"] == "completed"
+    assert saved["pr"] == 77
+    assert saved["anchor"] and saved["anchor"] != "stale" * 8
+
+
+def test_deliver_for_run_supersede_allows_unknown_legacy_anchor(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Owner: op леджера эры до anchor (ключа нет вовсе) — анкер
+    расценивается как неизвестный, supersede разрешён по явному флагу, но
+    с предупреждением (без сравнения хэша)."""
+    state = _recon_state(
+        tmp_path, monkeypatch, op={"status": "completed", "pr": 55},
+    )
+    ops = _ReconOps()
+    pr = task_bridge.deliver_for_run(state, ops, supersede=True)
+    assert pr == 77
+    out = capsys.readouterr().out
+    assert "анкер неизвестен" in out
+
+
+def test_deliver_for_run_without_supersede_ignores_completed_anchor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """supersede=False (дефолт) — старое поведение НЕ трогается: op уже
+    completed ⇒ немедленный возврат сохранённого PR, ноль эффектов, анкер
+    не проверяется вовсе."""
+    state = _recon_state(
+        tmp_path, monkeypatch,
+        op={"status": "completed", "pr": 55, "anchor": "irrelevant"},
+    )
+    ops = _ReconOps()
+    assert task_bridge.deliver_for_run(state, ops) == 55
+    assert ops.calls == []
+
+
+def test_deliver_redelivery_carries_version_forward(
+    tmp_path: Path,
+) -> None:
+    """Owner: version НЕ сбрасывается в 1 при повторной доставке — растёт
+    от версии уже вмерженной в target_dir tasks-спеки
+    (max(previous, 1) + 1), а не хардкода `_render_header`."""
+    target = _target(tmp_path)
+    ops = _StubOps()
+    task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a", approved_at="t",
+    )
+    spec_path = target / "spec/WS-alpha-7-tasks.md"
+    meta, body = task_bridge.split_frontmatter(spec_path.read_text())
+    assert meta["version"] == 1
+    # Симулируем, что первая доставка уже вмержена в base (обычный ход
+    # supersede-цикла) с version, продвинутым по своему циклу жизни.
+    meta["version"] = 4
+    spec_path.write_text(task_bridge.join_frontmatter(meta, body))
+    ops2 = _StubOps()
+    task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops2,
+        approved_by="a", approved_at="t",
+    )
+    meta2, _body2 = task_bridge.split_frontmatter(spec_path.read_text())
+    assert meta2["version"] == 5
+
+
+def test_deliver_first_delivery_version_is_one_when_no_prior_spec(
+    tmp_path: Path,
+) -> None:
+    """Нет предыдущей спеки в target_dir ⇒ version: 1, как раньше —
+    monotonic-логика не трогает первую доставку."""
+    target = _target(tmp_path)
+    ops = _StubOps()
+    task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a", approved_at="t",
+    )
+    meta, _body = task_bridge.split_frontmatter(
+        (target / "spec/WS-alpha-7-tasks.md").read_text()
+    )
+    assert meta["version"] == 1

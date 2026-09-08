@@ -400,6 +400,7 @@ def _render_header(
     generated_at: str,
     anchor_blob: str,
     anchor_node_id: str,
+    version: int = 1,
 ) -> list[str]:
     """Frontmatter + шапка Milestone — общая часть `render_tasks` и
     `render_tasks_dt` (Task 8 плана decomposition-node).
@@ -411,13 +412,18 @@ def _render_header(
     ретроспективы): traces_to/upstream_hashes переживают `spec approve`
     (он мержит traces и не трогает существующий пин), так что рукам после
     approve остаётся только нормализация `--conform-approve`.
+
+    `version` (FIX 2, owner ruling supersede/redelivery): по умолчанию 1
+    (первая доставка); `deliver()` передаёт `max(предыдущий, 1) + 1`, когда
+    в target_dir уже лежит вмерженная `spec/<ws-id>-tasks.md` — редоставка
+    обязана нести монотонный version, не откатывать его хардкодом в 1.
     """
     return [
         "---",
         "spec_stage: tasks",
         "status: draft",
         "owner_role: stream-owner",
-        "version: 1",
+        f"version: {version}",
         "generated_by: fleet-agent",
         # В кавычках: голый ISO-скаляр YAML резолвит в timestamp, а
         # схема спеки ждёт строку (minor ревью PR spec-runner#369, круг 3)
@@ -450,6 +456,7 @@ def render_tasks(
     design_blob: str,
     design_text: str = "",
     anchor_node_id: str = _ANCHOR_NODE_ID,
+    version: int = 1,
 ) -> str:
     """tasks.md по шаблону templates/tasks-spec-template.md.
 
@@ -476,7 +483,8 @@ def render_tasks(
     знает, только про то, ЧТО именно является якорем.
     """
     lines = _render_header(
-        ws_id, subject, generated_at, design_blob, anchor_node_id
+        ws_id, subject, generated_at, design_blob, anchor_node_id,
+        version=version,
     )
     lines += _render_resolutions_section(design_text)
     groups: list[tuple[str, str, list[Scenario]]] = []  # (key, title, scs)
@@ -549,6 +557,7 @@ def render_tasks_dt(
     anchor_blob: str,
     design_text: str = "",
     acceptance_text: str = "",
+    version: int = 1,
 ) -> str:
     """tasks.md из решённой декомпозиции: 1 DT = 1 задача.
 
@@ -571,7 +580,8 @@ def render_tasks_dt(
     by_beh = {sc.beh_id: sc for sc in scenarios}
     number = {t.dt_id: idx for idx, t in enumerate(dt_tasks, start=1)}
     lines = _render_header(
-        ws_id, subject, generated_at, anchor_blob, anchor_node_id="decomposition"
+        ws_id, subject, generated_at, anchor_blob,
+        anchor_node_id="decomposition", version=version,
     )
     lines += _render_resolutions_section(design_text)
     lines += _render_acceptance_section(acceptance_text)
@@ -940,6 +950,18 @@ def deliver(
     stamp = generated_at or datetime.now().astimezone().isoformat(
         timespec="seconds"
     )
+    # version монотонный (FIX 2, owner ruling supersede/redelivery):
+    # редоставка НЕ обязана откатывать version в 1 хардкодом рендера —
+    # если в target_dir уже лежит доставленная (вмерженная) tasks-спека,
+    # версия продолжает её цикл. Пустой target — обычная первая доставка,
+    # version: 1 как раньше.
+    prior_spec_path = Path(target_dir) / f"spec/{ws_id}-tasks.md"
+    version = 1
+    if prior_spec_path.exists():
+        prior_meta, _prior_body = split_frontmatter(
+            prior_spec_path.read_text(encoding="utf-8")
+        )
+        version = max(int(prior_meta.get("version") or 1), 1) + 1
     if any(_node_id(fname) == "decomposition" for fname, _ in dag):
         # DT-путь (Task 8 плана decomposition-node, обобщено Task 7 плана
         # acceptance-node на `--legacy-bundle=5`): состав задач решён
@@ -960,6 +982,7 @@ def deliver(
             anchor_blob=design_blob,
             design_text=design_text,
             acceptance_text=acceptance_text,
+            version=version,
         )
     else:
         text = render_tasks(
@@ -971,6 +994,7 @@ def deliver(
             design_blob=design_blob,
             design_text=design_text,
             anchor_node_id=anchor_node_id,
+            version=version,
         )
     rel = f"spec/{ws_id}-tasks.md"
     out = Path(target_dir) / rel
@@ -1016,63 +1040,34 @@ def deliver(
     )
 
 
-def deliver_for_run(
-    state: RunState,
-    ops: Ops,
-    legacy_bundle: int | None = None,
-) -> int:
-    """Идемпотентная доставка tasks-спеки для прогона (кнопка spec-loop).
+def _current_anchor_blob(
+    target_dir: str, bundle_dir: str, legacy_bundle: int | None
+) -> str:
+    """Blob-хэш терминального узла АКТИВНОГО DAG — текущее (уже
+    зачекаученное) содержимое `target_dir/bundle_dir` на диске.
 
-    Durable reconciliation поверх неидемпотентного `deliver()` (дизайн-
-    решение владельца 2026-09-07): op ``tasks-deliver`` в `run.json`
-    ведётся write-ahead (`started` ДО эффектов), а перед любой доставкой
-    ищется уже созданный PR по ветке ``spec/<ws-id>-tasks`` — повтор
-    НИКОГДА не создаёт PR заново, в каком бы состоянии op ни застал
-    прогон (new/started/completed).
-
-    Возвращает номер PR; любое препятствие — RuntimeError (fail-closed,
-    вызывающая сторона печатает и выходит ненулевым RC).
+    Общая точка сравнения для supersede-гейта (FIX 2, owner ruling): анкер,
+    записанный в завершённом op ``tasks-deliver``, сравнивается с этим же
+    хэшем, посчитанным заново, — равенство значит «апстрим ничего не
+    поправил с последней доставки».
     """
-    if state.status != "completed":
-        raise RuntimeError(
-            f"run {state.run_id!r} в статусе {state.status!r}, нужен "
-            "'completed' — сперва доведите прогон (resume/verify)"
-        )
-    op = state.ops.get("tasks-deliver") or {}
-    if op.get("status") == "completed":
-        pr_done = op.get("pr")
-        if pr_done is None:
-            raise RuntimeError(
-                "op tasks-deliver completed, но без номера PR — леджер "
-                f"{state.run_id!r} повреждён или правлен вручную; "
-                "почините op прежде, чем продолжать"
-            )
-        print(
-            f"tasks-спека уже доставлена: PR #{pr_done} "
-            f"({state.repo_slug}) — повтор не создаёт PR"
-        )
-        return pr_done
-    # Поиск PR по ветке ВО ВСЕХ состояниях (major терм. ревью #156):
-    # отсутствие ОТКРЫТОГО PR не значит «доставки не было» — спека могла
-    # быть доставлена ранее, вмержена и переведена в approved; повторный
-    # deliver() перегенерировал бы её обратно в draft вторым PR-ом.
-    branch = f"spec/{state.ws_id}-tasks"
-    existing = ops.find_pr(state.repo_slug, branch, any_state=True)
-    if existing is not None:
-        pr_state = ops.pr_facts(state.repo_slug, existing).get("state")
-        if pr_state not in ("OPEN", "MERGED"):
-            raise RuntimeError(
-                f"PR #{existing} по ветке {branch} закрыт без мержа "
-                f"(state={pr_state!r}) — реконсиляция fail-closed: "
-                "решите судьбу ветки/PR вручную, повторная доставка "
-                "поверх отклонённой не выполняется"
-            )
-        op_complete(state, "tasks-deliver", pr=existing)
-        print(
-            f"найден существующий PR #{existing} по ветке {branch} "
-            f"({pr_state}) — принят как доставка, новый не создаётся"
-        )
-        return existing
+    dag = _dag_for(legacy_bundle)
+    anchor_path = Path(target_dir) / bundle_dir / dag[-1][0]
+    return blob_sha1(anchor_path.read_text(encoding="utf-8"))
+
+
+def _deliver_fresh_for_run(
+    state: RunState, ops: Ops, legacy_bundle: int | None
+) -> int:
+    """op_start → `deliver()` → op_complete(pr, anchor) — общий хвост
+    обычной (первой) доставки и supersede-редоставки.
+
+    Обе обязаны идти через write-ahead op_start/op_complete (ручная правка
+    ledger недопустима, owner ruling) и записывать anchor свежедоставленного
+    decomposition — читаем его ПОСЛЕ `deliver()`, когда бандл уже
+    проштампован и на диске лежит именно то содержимое, что `deliver()`
+    запинил в саму tasks-спеку.
+    """
     # approved_by/at — факт мержа бандл-PR (решение владельца devtools#110:
     # инициированный мерж = approve; mergedBy — различитель agent/human,
     # ADR-ECO-011). Отсутствие факта — стоп, не выдуманное значение.
@@ -1102,8 +1097,113 @@ def deliver_for_run(
         legacy_bundle=legacy_bundle,
         profile=state.profile,
     )
-    op_complete(state, "tasks-deliver", pr=pr)
+    anchor = _current_anchor_blob(
+        state.target_dir, state.bundle_dir, legacy_bundle
+    )
+    op_complete(state, "tasks-deliver", pr=pr, anchor=anchor)
     return pr
+
+
+def deliver_for_run(
+    state: RunState,
+    ops: Ops,
+    legacy_bundle: int | None = None,
+    supersede: bool = False,
+) -> int:
+    """Идемпотентная доставка tasks-спеки для прогона (кнопка spec-loop).
+
+    Durable reconciliation поверх неидемпотентного `deliver()` (дизайн-
+    решение владельца 2026-09-07): op ``tasks-deliver`` в `run.json`
+    ведётся write-ahead (`started` ДО эффектов), а перед любой доставкой
+    ищется уже созданный PR по ветке ``spec/<ws-id>-tasks`` — повтор
+    НИКОГДА не создаёт PR заново, в каком бы состоянии op ни застал
+    прогон (new/started/completed).
+
+    `supersede` (FIX 2, owner ruling): опт-ин редоставка после апстрим-
+    правки decomposition — обычный повторный прогон моста НЕ регенерирует
+    (ledger уже несёт завершённый tasks-deliver, а `find_pr(any_state)`
+    принял бы прежний PR как состоявшуюся доставку). Санкционирована
+    ТОЛЬКО когда анкер (blob терминального узла активного DAG) ОТЛИЧАЕТСЯ
+    от записанного в завершённом op (`anchor=`, пишет `op_complete` с этой
+    правки) — равный анкер отказывает явно (upstream ничего не поправил).
+    Op, записанный ДО появления поля anchor (леджер старой эры), — анкер
+    расценивается как неизвестный: supersede разрешён по явному флагу, но с
+    предупреждением, без сравнения. Под supersede найденный по ветке PR
+    (`find_pr any_state`) НЕ принимается как готовая доставка — идёт
+    свежая генерация, op пере-совершается с новым pr+anchor. Ручная правка
+    ledger по-прежнему недопустима: путь всегда идёт через
+    op_start/op_complete, как и обычная доставка.
+
+    Возвращает номер PR; любое препятствие — RuntimeError (fail-closed,
+    вызывающая сторона печатает и выходит ненулевым RC).
+    """
+    if state.status != "completed":
+        raise RuntimeError(
+            f"run {state.run_id!r} в статусе {state.status!r}, нужен "
+            "'completed' — сперва доведите прогон (resume/verify)"
+        )
+    op = state.ops.get("tasks-deliver") or {}
+    if op.get("status") == "completed":
+        pr_done = op.get("pr")
+        if pr_done is None:
+            raise RuntimeError(
+                "op tasks-deliver completed, но без номера PR — леджер "
+                f"{state.run_id!r} повреждён или правлен вручную; "
+                "почините op прежде, чем продолжать"
+            )
+        if not supersede:
+            print(
+                f"tasks-спека уже доставлена: PR #{pr_done} "
+                f"({state.repo_slug}) — повтор не создаёт PR"
+            )
+            return pr_done
+        ops.checkout_and_pull(state.target_dir, state.base_ref or "master")
+        recorded_anchor = op.get("anchor")
+        if recorded_anchor is None:
+            print(
+                f"op tasks-deliver (PR #{pr_done}) завершён до появления "
+                "поля anchor — анкер неизвестен, supersede выполняется по "
+                "явному флагу без сравнения хэша"
+            )
+        else:
+            current_anchor = _current_anchor_blob(
+                state.target_dir, state.bundle_dir, legacy_bundle
+            )
+            if current_anchor == recorded_anchor:
+                raise RuntimeError(
+                    "supersede отклонён: анкер decomposition не изменился "
+                    f"с последней доставки (PR #{pr_done}) — upstream "
+                    "ничего не поправил, повторная доставка не нужна"
+                )
+        # Свежая доставка МИМО adoption чужого PR (owner ruling): найденный
+        # find_pr(any_state) PR НЕ принимается как состоявшаяся доставка.
+        return _deliver_fresh_for_run(state, ops, legacy_bundle)
+    # Поиск PR по ветке ВО ВСЕХ состояниях (major терм. ревью #156):
+    # отсутствие ОТКРЫТОГО PR не значит «доставки не было» — спека могла
+    # быть доставлена ранее, вмержена и переведена в approved; повторный
+    # deliver() перегенерировал бы её обратно в draft вторым PR-ом.
+    branch = f"spec/{state.ws_id}-tasks"
+    existing = ops.find_pr(state.repo_slug, branch, any_state=True)
+    if existing is not None:
+        pr_state = ops.pr_facts(state.repo_slug, existing).get("state")
+        if pr_state not in ("OPEN", "MERGED"):
+            raise RuntimeError(
+                f"PR #{existing} по ветке {branch} закрыт без мержа "
+                f"(state={pr_state!r}) — реконсиляция fail-closed: "
+                "решите судьбу ветки/PR вручную, повторная доставка "
+                "поверх отклонённой не выполняется"
+            )
+        ops.checkout_and_pull(state.target_dir, state.base_ref or "master")
+        anchor = _current_anchor_blob(
+            state.target_dir, state.bundle_dir, legacy_bundle
+        )
+        op_complete(state, "tasks-deliver", pr=existing, anchor=anchor)
+        print(
+            f"найден существующий PR #{existing} по ветке {branch} "
+            f"({pr_state}) — принят как доставка, новый не создаётся"
+        )
+        return existing
+    return _deliver_fresh_for_run(state, ops, legacy_bundle)
 
 
 def deliver_conform(
@@ -1196,6 +1296,15 @@ def main(argv: list[str] | None = None) -> int:
         "acceptance); значение обязано совпасть с составом каталога РОВНО, "
         "лишний либо недостающий узел отказывает",
     )
+    parser.add_argument(
+        "--supersede", action="store_true",
+        help="санкционированная редоставка (FIX 2, owner ruling) поверх "
+        "уже завершённого tasks-deliver: разрешено ТОЛЬКО если анкер "
+        "decomposition (blob терминального узла активного DAG) изменился "
+        "с прошлой доставки — равный анкер отказывает явно; прежний PR "
+        "(find_pr any_state) НЕ принимается как состоявшаяся доставка, "
+        "идёт свежая генерация с новым pr+anchor",
+    )
     args = parser.parse_args(argv)
     state = load(args.run_id)
     # Мост работает только над ВМЕРЖЕННЫМ и верифицированным бандлом
@@ -1228,7 +1337,10 @@ def main(argv: list[str] | None = None) -> int:
     # кнопка spec-loop): write-ahead op tasks-deliver + поиск уже
     # созданного PR по ветке; повтор не создаёт PR заново.
     try:
-        pr = deliver_for_run(state, ops, legacy_bundle=args.legacy_bundle)
+        pr = deliver_for_run(
+            state, ops, legacy_bundle=args.legacy_bundle,
+            supersede=args.supersede,
+        )
     except RuntimeError as exc:
         print(f"task_bridge: {exc}")
         return 1
