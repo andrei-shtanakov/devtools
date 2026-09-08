@@ -26,7 +26,7 @@ import yaml
 from governance import acceptance_guard, decomposition_guard, design_guard
 from governance.ops import Ops, RealOps
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
-from governance.run_state import RunState, load, op_complete, op_start
+from governance.run_state import RunState, load, op_complete, op_start, save
 from governance.stale_adapter import blob_sha1
 
 # DAG бандла в порядке штампа (топологический): каждый узел перечисляет
@@ -946,10 +946,24 @@ def deliver(
     prior_spec_path = Path(target_dir) / f"spec/{ws_id}-tasks.md"
     version = 1
     if prior_spec_path.exists():
-        prior_meta, _prior_body = split_frontmatter(
-            prior_spec_path.read_text(encoding="utf-8")
-        )
-        version = max(int(prior_meta.get("version") or 1), 1) + 1
+        # Fail-closed (round 4 ревью PR #161, finding 5, минор): чужой/
+        # повреждённый файл на этом пути (frontmatter потерян/усечён,
+        # version — нечисловой скаляр) поднимал бы ValueError мимо
+        # `except RuntimeError` в main() — тот же класс, что уже закрыт у
+        # `_current_anchor_blob`/`_check_bundle_composition`.
+        try:
+            prior_meta, _prior_body = split_frontmatter(
+                prior_spec_path.read_text(encoding="utf-8")
+            )
+            version = max(int(prior_meta.get("version") or 1), 1) + 1
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError(
+                f"{prior_spec_path}: не удалось прочитать version для "
+                f"монотонности редоставки ({exc}) — файл повреждён или "
+                "правлен вручную мимо frontmatter-контракта; почините "
+                "frontmatter (валидный YAML, version: <целое>) прежде, "
+                "чем продолжать"
+            ) from exc
     # ensure_branch — ЗДЕСЬ, ДО stamp_bundle_approved (round 2 ревью
     # PR #161, finding 3, контракт владельца C): штамп мутирует файлы
     # бандла НА ДИСКЕ; `git switch` на уже существующую ветку доставки по
@@ -1152,7 +1166,23 @@ def _deliver_fresh_for_run(
             f"у PR #{state.pr} нет mergedBy/mergedAt — бандл не вмержен "
             "или API не отдал факт мержа; стоп"
         )
+    # Сохранение фактов предыдущей доставки (round 4 ревью PR #161,
+    # finding 2): `op_start` ПЕРЕЗАПИСЫВАЕТ op целиком на
+    # `{"status": "started"}` (run_state.op_start) — если `deliver()` ниже
+    # упадёт (например, апстрим сам внёс невалидный граф DT), pr/anchor
+    # завершённой ранее доставки терялись бы безвозвратно: следующий
+    # supersede не смог бы ни увидеть, что было доставлено раньше, ни
+    # адаптировать/сравнить с этим — тупик (докстринг выше запрещает
+    # ручную правку ledger). Переносим их в prev_pr/prev_anchor СРАЗУ
+    # после write-ahead записи — сбой доставки теперь восстановим.
+    prev_op = state.ops.get("tasks-deliver") or {}
+    prev_pr = prev_op.get("pr")
+    prev_anchor = prev_op.get("anchor")
     op_start(state, "tasks-deliver")
+    if prev_pr is not None or prev_anchor is not None:
+        state.ops["tasks-deliver"]["prev_pr"] = prev_pr
+        state.ops["tasks-deliver"]["prev_anchor"] = prev_anchor
+        save(state)
     pr = deliver(
         target_dir=state.target_dir,
         repo_slug=state.repo_slug,
@@ -1239,43 +1269,67 @@ def deliver_for_run(
         # отказ (RuntimeError ниже) поднимается раньше любого касания op —
         # завершённый tasks-deliver остаётся нетронутым при отказе.
         #
-        # (b) СНАЧАЛА факт: предыдущая доставка ОБЯЗАНА быть вмержена.
-        # Пока PR #pr_done открыт, его пост-штамповое содержимое живёт
-        # ТОЛЬКО в этом PR — на base всё ещё лежит до-штамповый бандл, и
-        # сравнение анкеров ниже было бы несопоставимым (round 2 fail-open:
-        # «анкер изменился» срабатывало бы даже когда апстрим НИЧЕГО не
-        # трогал). Отказ явно называет PR — читаемая процедура для
-        # оператора, а не немая тишина.
+        # (b) СНАЧАЛА факт: судьба предыдущей доставки. Пока PR #pr_done
+        # ОТКРЫТ, его пост-штамповое содержимое живёт ТОЛЬКО в этом PR —
+        # на base всё ещё лежит до-штамповый бандл, и сравнение анкеров
+        # ниже было бы несопоставимым (round 2 fail-open: «анкер
+        # изменился» срабатывало бы даже когда апстрим НИЧЕГО не трогал).
+        # Отказ явно называет PR — читаемая процедура для оператора.
         pr_facts = ops.pr_facts(state.repo_slug, pr_done)
-        if pr_facts.get("state") != "MERGED":
+        pr_state = pr_facts.get("state")
+        if pr_state == "OPEN":
             raise RuntimeError(
                 f"supersede отклонён: предыдущая доставка PR #{pr_done} "
-                f"не вмержена (state={pr_facts.get('state')!r}) — "
-                "закройте её или дождитесь мержа, затем переиздавайте "
-                "supersede"
+                "не вмержена (state='OPEN') — закройте её или дождитесь "
+                "мержа, затем переиздавайте supersede"
             )
-        # (c) предыдущая доставка вмержена ⇒ base теперь несёт ТЕ ЖЕ
-        # ПОСЛЕ-штамповые байты, что записаны в recorded_anchor (deliver()
-        # коммитит проштампованный бандл В ТОТ ЖЕ PR доставки) — сравнение
-        # байт-в-байт сопоставимо, никакого fail-open окна.
-        ops.checkout_and_pull(state.target_dir, state.base_ref or "master")
-        recorded_anchor = op.get("anchor")
-        if recorded_anchor is None:
+        if pr_state not in ("MERGED", "CLOSED"):
+            raise RuntimeError(
+                f"supersede отклонён: предыдущая доставка PR #{pr_done} "
+                f"в неожиданном состоянии (state={pr_state!r}) — решите "
+                "судьбу PR/ветки вручную, затем переиздавайте supersede"
+            )
+        if pr_state == "CLOSED":
+            # Round 4 ревью PR #161, finding 4 (минор): CLOSED-без-мержа —
+            # тупик для безусловного «закройте/дождитесь мержа» (PR УЖЕ
+            # закрыт и MERGED не станет никогда). Но это и не проблема:
+            # закрытая БЕЗ мержа доставка никогда не попала на base — её
+            # пост-штамповые байты нигде не приземлились, значит сравнивать
+            # recorded_anchor не с чем и незачем (base по-прежнему несёт
+            # ДО-той-доставки содержимое). Разрешаем supersede безусловно,
+            # минуя сравнение анкера, а не запираем прогон навсегда.
             print(
-                f"op tasks-deliver (PR #{pr_done}) завершён до появления "
-                "поля anchor — анкер неизвестен, supersede выполняется по "
-                "явному флагу без сравнения хэша"
+                f"предыдущая доставка PR #{pr_done} закрыта БЕЗ мержа — "
+                "её содержимое никогда не попало на base; supersede "
+                "выполняется без сравнения анкера"
             )
         else:
-            current_anchor = _current_anchor_blob(
-                state.target_dir, state.bundle_dir, legacy_bundle
+            # (c) предыдущая доставка вмержена ⇒ base теперь несёт ТЕ ЖЕ
+            # ПОСЛЕ-штамповые байты, что записаны в recorded_anchor
+            # (deliver() коммитит проштампованный бандл В ТОТ ЖЕ PR
+            # доставки) — сравнение байт-в-байт сопоставимо, никакого
+            # fail-open окна.
+            ops.checkout_and_pull(
+                state.target_dir, state.base_ref or "master"
             )
-            if current_anchor == recorded_anchor:
-                raise RuntimeError(
-                    "supersede отклонён: анкер decomposition не изменился "
-                    f"с последней доставки (PR #{pr_done}) — upstream "
-                    "ничего не поправил, повторная доставка не нужна"
+            recorded_anchor = op.get("anchor")
+            if recorded_anchor is None:
+                print(
+                    f"op tasks-deliver (PR #{pr_done}) завершён до "
+                    "появления поля anchor — анкер неизвестен, supersede "
+                    "выполняется по явному флагу без сравнения хэша"
                 )
+            else:
+                current_anchor = _current_anchor_blob(
+                    state.target_dir, state.bundle_dir, legacy_bundle
+                )
+                if current_anchor == recorded_anchor:
+                    raise RuntimeError(
+                        "supersede отклонён: анкер decomposition не "
+                        f"изменился с последней доставки (PR #{pr_done}) "
+                        "— upstream ничего не поправил, повторная "
+                        "доставка не нужна"
+                    )
         # (d) свежая доставка В НОВУЮ ветку (контракт владельца, точка 1):
         # старый гард find_pr(any_state)/adoption снят намеренно — новая
         # ветка `spec/<ws-id>-tasks-v<N>` никогда не существовала раньше,
@@ -1298,10 +1352,26 @@ def deliver_for_run(
                 "решите судьбу ветки/PR вручную, повторная доставка "
                 "поверх отклонённой не выполняется"
             )
-        ops.checkout_and_pull(state.target_dir, state.base_ref or "master")
-        anchor = _current_anchor_blob(
-            state.target_dir, state.bundle_dir, legacy_bundle
-        )
+        if pr_state == "MERGED":
+            # PR уже смержен — base несёт ТЕ ЖЕ ПОСЛЕ-штамповые байты, что
+            # закоммичены в него (тот же контракт, что у обычной доставки:
+            # `_deliver_fresh_for_run` читает anchor ПОСЛЕ deliver()).
+            ops.checkout_and_pull(
+                state.target_dir, state.base_ref or "master"
+            )
+            anchor = _current_anchor_blob(
+                state.target_dir, state.bundle_dir, legacy_bundle
+            )
+        else:
+            # PR ещё OPEN (round 4 ревью PR #161, finding 1): его
+            # ПОСЛЕ-штамповые байты живут ТОЛЬКО в самом PR — на base ещё
+            # лежит ДО-штамповое содержимое. Записать хэш base здесь
+            # означало бы записать значение, которое НИКОГДА не совпадёт с
+            # тем, что base будет нести после мержа (fail-open supersede-
+            # гейта — находка round 4). anchor=None — тот же контракт
+            # «анкер неизвестен», что уже несёт supersede-гейт для леджера
+            # до появления поля anchor.
+            anchor = None
         op_complete(state, "tasks-deliver", pr=existing, anchor=anchor)
         print(
             f"найден существующий PR #{existing} по ветке {branch} "

@@ -64,8 +64,12 @@ class DtTask:
     ``verifies`` — структурное поле группы наблюдения (owner ruling,
     multi-file DT-14): список файлов, за которыми присматривает
     ``type: verify`` DT, СТРУКТУРНО отдельный от ``checked_by``-владения
-    (которое несут ``scenarios``). Наблюдение — не владение: файлы из
-    ``verifies`` исключены из single-owner инварианта (``graph_findings``).
+    (которое несут ``scenarios``) и НЕ участвующий в single-owner
+    инварианте ``graph_findings`` вовсе (round 4 ревью PR #161, finding 3:
+    исключение по verifies снято — тот же файл, дошедший до проверки через
+    ``scenarios``/``checked_by``, ВСЕГДА заявка на редактирующее владение,
+    независимо от того, что ещё перечислено в ``verifies``; владение
+    всегда старше наблюдения).
     """
 
     dt_id: str
@@ -269,22 +273,23 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
                 f"{beh}: покрыт дважды и более ({', '.join(owners)})"
             )
 
-    # single-owner тест-файла — исключение УЗКОЕ (major ревью PR #161,
-    # finding 4: глобальный `verified_files`-набор по ВСЕМ задачам молча
-    # снимал инвариант между ДВУМЯ implement-задачами, если файл был
-    # упомянут в verifies какой-то ТРЕТЬЕЙ задачи вообще без связи с ними —
-    # байт-лок тест-файла оказывался невыразим как находка). Пропуск
-    # применяется ТОЛЬКО к собственному verifies задачи t: её же сценарий,
-    # чей checked_by-таргет совпал с ЕЁ ЖЕ verifies, — это наблюдение своего
-    # объявленного объекта, не заявка на владение. Конфликт между ДРУГИМИ
-    # задачами за тот же файл (implement vs implement, или verify без
-    # verifies-декларации этого файла) по-прежнему регистрируется и
-    # ловится ниже как раньше.
+    # single-owner тест-файла — БЕЗ исключения для verifies (round 4 ревью
+    # PR #161, finding 3: узкое per-task исключение round 2/3, `target in
+    # t.verifies`, срабатывало РОВНО там, где задача t сама владеет
+    # файлом — target здесь ВСЕГДА выведен из checked_by-цели t
+    # (bindings по её же scenarios), т.е. это ВСЕГДА заявка t на
+    # редактирующее владение, независимо от того, что ещё перечислено в
+    # t.verifies. Владение (scenarios/checked_by) всегда старше
+    # наблюдения (verifies, owner ruling DSL: «checked_by remains the
+    # single source of EDITING ownership») — этот цикл смотрит только на
+    # scenarios/checked_by и НИКОГДА на verifies, так что вопрос
+    # исключения здесь просто не встаёт: single-owner проверяется как для
+    # любых двух задач.
     file_owner: dict[str, str] = {}
     for t in tasks:
         for beh in t.scenarios:
             target, _kind = bindings.get(beh, (None, None))
-            if target is None or target in t.verifies:
+            if target is None:
                 continue
             prior = file_owner.get(target)
             if prior is not None and prior != t.dt_id:

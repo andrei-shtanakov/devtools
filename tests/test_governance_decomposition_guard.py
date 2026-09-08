@@ -417,14 +417,15 @@ def test_verifies_on_implement_is_a_finding() -> None:
     )
 
 
-def test_single_owner_exemption_is_scoped_to_the_observing_verify_dt() -> None:
-    """Major ревью PR #161, finding 4: исключение single-owner ДЛЯ verifies
-    обязано быть УЗКИМ — освобождает от конфликта только ТУ задачу, что
-    сама наблюдает файл (её собственный scenario-таргет совпал с её же
-    verifies), не любую задачу в документе. DT-01 (implement) владеет
-    tests/test_a.py через BEH-01; DT-14 (verify) несёт СВОЙ сценарий
-    BEH-02, чей checked_by-таргет — ТОТ ЖЕ файл, и объявляет его в СВОЁМ
-    verifies — наблюдение, не владение, конфликта с DT-01 нет."""
+def test_single_owner_fires_even_when_own_checked_by_target_is_in_own_verifies() -> None:
+    """Major ревью PR #161, round 4 finding 3 (корректирует round-2/3
+    решение — прежний тест ошибочно ожидал здесь отсутствие находки):
+    DT-01 (implement) владеет tests/test_a.py через BEH-01; DT-14 (verify)
+    несёт СВОЙ сценарий BEH-02, чей checked_by-таргет — ТОТ ЖЕ файл, и ТАКЖЕ
+    объявляет его в СВОЁМ verifies. Это НЕ observation — DT-14 сам
+    редактирует файл через собственный checked_by (BEH-02), значит
+    реально владеет им наравне с DT-01: single-owner обязан сработать.
+    Владение (scenarios/checked_by) всегда старше наблюдения (verifies)."""
     from governance.decomposition_guard import graph_findings
 
     beh = (
@@ -441,7 +442,10 @@ def test_single_owner_exemption_is_scoped_to_the_observing_verify_dt() -> None:
         "delivered_by: [DT-01]\nparallel_group: core\n"
         "verifies:\n  - tests/test_a.py\n"
     )
-    assert graph_findings(beh, dt) == []
+    findings = graph_findings(beh, dt)
+    assert any(
+        "tests/test_a.py" in f and "single-owner" in f for f in findings
+    )
 
 
 def test_single_owner_still_conflicts_between_implement_dts_despite_unrelated_verifies() -> None:

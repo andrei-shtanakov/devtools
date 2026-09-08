@@ -2283,6 +2283,37 @@ def test_deliver_for_run_adopts_existing_pr_by_branch(
     assert adopted["anchor"]
 
 
+def test_deliver_for_run_adopts_open_pr_records_unknown_anchor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round 4 ревью PR #161, finding 1: adoption ОТКРЫТОГО (ещё не
+    вмерженного) PR обязана записать anchor=None, а не хэш base — ПОСЛЕ-
+    штамповые байты этого PR живут ТОЛЬКО в нём, на base их ещё нет,
+    значит хэш base НИКОГДА не совпал бы с тем, что появится там после
+    мержа (fail-open supersede-гейта)."""
+    from governance import run_state as rs
+
+    state = _recon_state(
+        tmp_path, monkeypatch, op={"status": "started"}
+    )
+
+    class _OpenAdoptOps(_ReconOps):
+        def __init__(self) -> None:
+            super().__init__(existing_pr=91)
+
+        def pr_facts(self, repo_slug: str, pr: int) -> dict:
+            self.calls.append(("pr_facts", pr))
+            return {"state": "OPEN", "mergedBy": None, "mergedAt": None}
+
+    ops = _OpenAdoptOps()
+    assert task_bridge.deliver_for_run(state, ops) == 91
+    # anchor=None ⇒ никакого чтения/хэширования base под OPEN-PR не было.
+    assert not any(c[0] == "checkout_and_pull" for c in ops.calls)
+    adopted = rs.load("r-recon").ops["tasks-deliver"]
+    assert adopted["status"] == "completed" and adopted["pr"] == 91
+    assert adopted["anchor"] is None
+
+
 def test_deliver_for_run_refuses_non_completed_status(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2474,6 +2505,39 @@ def test_deliver_for_run_supersede_refused_when_previous_pr_unmerged(
     assert not any(c[0] == "checkout_and_pull" for c in ops.calls)
 
 
+def test_deliver_for_run_supersede_allowed_when_previous_pr_closed_unmerged(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Round 4 ревью PR #161, finding 4 (минор): предыдущая доставка
+    закрыта БЕЗ мержа (не OPEN, не MERGED) — раньше это давало тот же
+    отказ «закройте/дождитесь мержа», невыполнимый навсегда (PR уже
+    закрыт, MERGED не станет). Правильный ответ: разрешить supersede без
+    сравнения анкера — закрытая-без-мержа доставка никогда не попала на
+    base, сравнивать нечего."""
+    op_before = {
+        "status": "completed", "pr": 120, "anchor": "irrelevant" * 3,
+    }
+    state = _recon_state(tmp_path, monkeypatch, op=dict(op_before))
+
+    class _ClosedUnmergedOps(_ReconOps):
+        def pr_facts(self, repo_slug: str, pr: int) -> dict:
+            self.calls.append(("pr_facts", pr))
+            if pr == 120:
+                return {
+                    "state": "CLOSED", "mergedBy": None, "mergedAt": None,
+                }
+            return super().pr_facts(repo_slug, pr)
+
+    ops = _ClosedUnmergedOps()
+    pr = task_bridge.deliver_for_run(state, ops, supersede=True)
+    assert pr == 77
+    out = capsys.readouterr().out
+    assert "закрыта БЕЗ мержа" in out
+    saved = state.ops["tasks-deliver"]
+    assert saved["status"] == "completed"
+    assert saved["pr"] == 77
+
+
 def test_deliver_for_run_supersede_redelivers_on_changed_anchor(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2497,6 +2561,43 @@ def test_deliver_for_run_supersede_redelivers_on_changed_anchor(
     assert saved["status"] == "completed"
     assert saved["pr"] == 77
     assert saved["anchor"] and saved["anchor"] != "stale" * 8
+
+
+def test_op_start_under_supersede_preserves_previous_pr_and_anchor_on_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round 4 ревью PR #161, finding 2: op_start (write-ahead) обязан
+    сохранить pr/anchor завершённой ранее доставки в prev_pr/prev_anchor —
+    если следующий deliver() упадёт (например, апстрим сам внёс невалидный
+    граф DT), эти факты остаются на диске и обнаружимы, а не теряются
+    безвозвратно вместе со старым completed-состоянием op (иначе следующий
+    supersede навсегда лишается точки отсчёта, а fallback молча усыновляет
+    старый PR как будто он доставил новое содержимое)."""
+    from governance import run_state as rs
+
+    state = _recon_state(
+        tmp_path, monkeypatch,
+        op={"status": "completed", "pr": 91, "anchor": "A" * 40},
+    )
+    # Ломаем decomposition.md так, чтобы graph_findings его отверг —
+    # deliver() упадёт ПОСЛЕ op_start, симулируя сбой доставки апстримом
+    # внесённым дефектом (BEH-02 остаётся непокрытым).
+    decomp_path = (
+        Path(state.target_dir)
+        / "workstreams/WS-alpha-7/spec/30-decomposition.md"
+    )
+    decomp_path.write_text(
+        decomp_path.read_text().replace(
+            "scenarios: [BEH-01, BEH-02]", "scenarios: [BEH-01]"
+        )
+    )
+    ops = _ReconOps()
+    with pytest.raises(RuntimeError, match="граф DT невалиден"):
+        task_bridge.deliver_for_run(state, ops, supersede=True)
+    saved = rs.load("r-recon").ops["tasks-deliver"]
+    assert saved["status"] == "started"
+    assert saved["prev_pr"] == 91
+    assert saved["prev_anchor"] == "A" * 40
 
 
 def test_deliver_for_run_supersede_allows_unknown_legacy_anchor(
@@ -2591,3 +2692,30 @@ def test_deliver_first_delivery_version_is_one_when_no_prior_spec(
         (target / "spec/WS-alpha-7-tasks.md").read_text()
     )
     assert meta["version"] == 1
+
+
+def test_deliver_corrupted_prior_spec_version_fails_closed_with_runtime_error(
+    tmp_path: Path,
+) -> None:
+    """Round 4 ревью PR #161, finding 5 (минор): чужой/повреждённый
+    spec/<ws-id>-tasks.md (frontmatter потерян) обязан дать RuntimeError с
+    путём и процедурой — не сырой ValueError, который main() не ловит
+    (перехватывает только RuntimeError)."""
+    target = _target(tmp_path)
+    spec_dir = target / "spec"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    (spec_dir / "WS-alpha-7-tasks.md").write_text(
+        "не frontmatter вовсе, файл правлен руками\n"
+    )
+    ops = _StubOps()
+    with pytest.raises(RuntimeError, match="WS-alpha-7-tasks.md"):
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=ops,
+            approved_by="a", approved_at="t",
+        )
