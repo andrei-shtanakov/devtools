@@ -1924,40 +1924,34 @@ def test_deliver_full_dag_renders_via_render_tasks_dt(tmp_path: Path) -> None:
         in text
 
 
-# --- ревью #161, finding 2: ensure_branch ПОСЛЕ чтения бандла/анкера ------
+# --- round 2, ревью #161, finding 3 (контракт владельца C): ensure_branch
+# ДО stamp_bundle_approved (восстановленный исходный порядок) ---------------
 
 
-def test_deliver_reads_bundle_before_switching_to_stale_delivery_branch(
+def test_deliver_ensure_branch_runs_before_bundle_stamp_write(
     tmp_path: Path,
 ) -> None:
-    """Major ревью PR #161: `git switch` на УЖЕ СУЩЕСТВУЮЩУЮ ветку доставки
-    (супersede-редоставка поверх прежней попытки) переключает рабочее
-    дерево на ЕЁ содержимое — если бы deliver() читал бандл/анкер ПОСЛЕ
-    ensure_branch (как было до фикса), редоставка рендерилась бы из
-    устаревшей ветки, а не из только что зачекаученного base. Стаб
-    симулирует именно этот эффект: при вызове ensure_branch подменяет
-    30-decomposition.md на «устаревшее» содержимое — фикс обязан УЖЕ
-    держать нужные данные в памяти к этому моменту."""
+    """Round 2 ревью PR #161 (контракт C): `git switch` на уже
+    существующую ветку доставки по ГРЯЗНОМУ (уже проштампованному) дереву
+    аварийно завершается (`CalledProcessError` мимо `main`, который ловит
+    только `RuntimeError`) — ensure_branch обязан идти ПО ЧИСТОМУ дереву,
+    т.е. строго ДО stamp_bundle_approved. Стаб снимает содержимое бандла В
+    МОМЕНТ вызова ensure_branch: оно обязано быть ещё НЕ проштампованным."""
     target = _target(tmp_path)
 
-    class _StaleBranchOps(_StubOps):
-        def __init__(self, stale_decomposition: str) -> None:
+    class _SnapshotOps(_StubOps):
+        def __init__(self) -> None:
             super().__init__()
-            self.stale_decomposition = stale_decomposition
-            self.switched = False
+            self.decomposition_at_switch: str | None = None
 
         def ensure_branch(self, target_dir: str, branch: str) -> None:
             super().ensure_branch(target_dir, branch)
-            self.switched = True
-            (
+            self.decomposition_at_switch = (
                 Path(target_dir) / "workstreams/WS-alpha-7/spec"
                 / "30-decomposition.md"
-            ).write_text(self.stale_decomposition)
+            ).read_text()
 
-    stale = DECOMPOSITION_MD.replace(
-        "DT-01: Реализация", "DT-01: УСТАРЕВШЕЕ"
-    )
-    ops = _StaleBranchOps(stale)
+    ops = _SnapshotOps()
     task_bridge.deliver(
         target_dir=str(target),
         repo_slug="owner/alpha",
@@ -1968,10 +1962,17 @@ def test_deliver_reads_bundle_before_switching_to_stale_delivery_branch(
         ops=ops,
         approved_by="a", approved_at="t",
     )
-    assert ops.switched
-    text = (target / "spec/WS-alpha-7-tasks.md").read_text()
-    assert "УСТАРЕВШЕЕ" not in text
-    assert "### TASK-001: Реализация" in text
+    assert ops.decomposition_at_switch is not None
+    assert "status: draft" in ops.decomposition_at_switch
+    assert "status: approved" not in ops.decomposition_at_switch
+    # ensure_branch — раньше первого ops-вызова после штампа+рендера
+    # (commit_paths); тот же порядок снимок выше доказывает напрямую по
+    # содержимому файла на момент переключения.
+    ensure_idx = ops.calls.index(("ensure_branch", "spec/WS-alpha-7-tasks"))
+    commit_idx = next(
+        i for i, c in enumerate(ops.calls) if c[0] == "commit_paths"
+    )
+    assert ensure_idx < commit_idx
 
 
 def test_parse_behaviour_reads_letter_suffixed_beh_id() -> None:
@@ -2160,14 +2161,16 @@ def test_deliver_for_run_write_ahead_op_and_completion(
     assert ops2.calls == []
 
 
-def test_deliver_for_run_records_pre_stamp_anchor_not_post_stamp(
+def test_deliver_for_run_records_post_stamp_anchor_not_pre_stamp(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Ревью PR #161, finding 3: anchor, записанный op_complete, обязан
-    быть ДО-штамповым снимком decomposition.md на base (тем же, что и у
-    supersede-гейта), НЕ пост-штамповым содержимым (`stamp_bundle_approved`
-    внутри deliver() меняет status/version/upstream_hashes) — иначе
-    следующее сравнение «анкер не изменился» никогда бы не совпадало."""
+    """Round 2 ревью PR #161, finding 1 (контракт владельца A): anchor,
+    записанный op_complete, обязан быть ПОСЛЕ-штамповым снимком
+    decomposition.md — теми же байтами, что `deliver()` закоммитил в PR
+    доставки и что окажутся на base ПОСЛЕ его мержа (то, с чем свежий
+    checkout_and_pull сравнит на следующем supersede). ДО-штамповая запись
+    (round 1) делала равенство недостижимым: после мержа PR доставки base
+    уже несёт другие (проштампованные) байты."""
     from governance.stale_adapter import blob_sha1
 
     state = _recon_state(tmp_path, monkeypatch)
@@ -2180,10 +2183,9 @@ def test_deliver_for_run_records_pre_stamp_anchor_not_post_stamp(
     ops = _ReconOps()
     task_bridge.deliver_for_run(state, ops)
     recorded = state.ops["tasks-deliver"]["anchor"]
-    assert recorded == pre_stamp_anchor
-    # ...и НЕ равен пост-штамповому содержимому, которое deliver() оставил
-    # на диске (status теперь approved — доказывает, что anchor не был
-    # пересчитан ПОСЛЕ deliver()).
+    # ...и НЕ равен до-штамповому содержимому, зафиксированному ДО вызова —
+    # доказывает, что stamp_bundle_approved реально изменил байты.
+    assert recorded != pre_stamp_anchor
     post_stamp_anchor = blob_sha1(
         (
             Path(state.target_dir)
@@ -2191,7 +2193,7 @@ def test_deliver_for_run_records_pre_stamp_anchor_not_post_stamp(
         ).read_text()
     )
     assert post_stamp_anchor != pre_stamp_anchor
-    assert recorded != post_stamp_anchor
+    assert recorded == post_stamp_anchor
 
 
 def test_deliver_for_run_adopts_existing_pr_by_branch(
@@ -2305,7 +2307,10 @@ def test_deliver_for_run_supersede_refused_on_equal_anchor(
 ) -> None:
     """Owner: supersede разрешён ТОЛЬКО когда анкер decomposition
     отличается от записанного в завершённом op — равный анкер (upstream
-    ничего не поправил) обязан отказать явно."""
+    ничего не поправил) обязан отказать явно. Round 2 ревью PR #161,
+    finding 2 (контракт владельца B): отказ обязан идти ДО op_start — op
+    tasks-deliver остаётся БАЙТ В БАЙТ тем же, что и до вызова (pr+anchor
+    не тронуты)."""
     from governance.stale_adapter import blob_sha1
 
     state = _recon_state(tmp_path, monkeypatch)
@@ -2315,11 +2320,54 @@ def test_deliver_for_run_supersede_refused_on_equal_anchor(
             / "workstreams/WS-alpha-7/spec/30-decomposition.md"
         ).read_text()
     )
-    state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 55, "anchor": anchor,
-    }
+    op_before = {"status": "completed", "pr": 55, "anchor": anchor}
+    state.ops["tasks-deliver"] = dict(op_before)
     with pytest.raises(RuntimeError, match="не изменился"):
         task_bridge.deliver_for_run(state, _ReconOps(), supersede=True)
+    assert state.ops["tasks-deliver"] == op_before
+
+
+def test_deliver_for_run_supersede_round_trip_post_stamp_anchor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round 2 ревью PR #161 (контракт владельца A), полный цикл: 1)
+    обычная доставка записывает ПОСЛЕ-штамповый anchor; 2) supersede СРАЗУ
+    после, БЕЗ единой апстрим-правки, — отказ (гейт сравнивает те же
+    ПОСЛЕ-штамповые байты, что реально окажутся на base после мержа PR
+    доставки — а стаб-checkout не меняет файлы, эмулируя «PR уже
+    смержен»), op остаётся нетронутым; 3) апстрим правит decomposition —
+    supersede теперь проходит и записывает НОВЫЙ anchor."""
+    from governance import run_state as rs
+
+    state = _recon_state(tmp_path, monkeypatch)
+    pr1 = task_bridge.deliver_for_run(state, _ReconOps())
+    assert pr1 == 77
+    op_after_first = dict(rs.load("r-recon").ops["tasks-deliver"])
+    assert op_after_first["anchor"]
+
+    # 2) supersede БЕЗ правок — отказ, op НЕ тронут байт в байт.
+    with pytest.raises(RuntimeError, match="не изменился"):
+        task_bridge.deliver_for_run(
+            rs.load("r-recon"), _ReconOps(), supersede=True,
+        )
+    assert rs.load("r-recon").ops["tasks-deliver"] == op_after_first
+
+    # 3) апстрим правит decomposition.md — supersede проходит, новый anchor.
+    decomp_path = (
+        Path(state.target_dir)
+        / "workstreams/WS-alpha-7/spec/30-decomposition.md"
+    )
+    decomp_path.write_text(
+        decomp_path.read_text().replace(
+            "DT-01: Реализация", "DT-01: Исправлено апстримом"
+        )
+    )
+    pr3 = task_bridge.deliver_for_run(
+        rs.load("r-recon"), _ReconOps(), supersede=True,
+    )
+    assert pr3 == 77
+    op_after_second = rs.load("r-recon").ops["tasks-deliver"]
+    assert op_after_second["anchor"] != op_after_first["anchor"]
 
 
 def test_deliver_for_run_supersede_redelivers_on_changed_anchor(
