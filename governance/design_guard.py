@@ -96,6 +96,38 @@ def parse_design_resolutions(text: str) -> dict[str, tuple[str, str | None]]:
     return result
 
 
+def parse_design_resolution_bodies(text: str) -> dict[str, str]:
+    """`Q-NN` → полное тело блока (без заголовка), из design-DSL.
+
+    Те же границы блока, что у `parse_design_resolutions` (от конца
+    заголовка `#### Q-NN …` до следующего такого заголовка, следующей
+    секции уровня 1–3 или конца текста) — но, в отличие от неё, здесь не
+    `reason:`/первый абзац, а ВЕСЬ блок дословно: списки, таблицы и прочая
+    внутренняя структура после интро-абзаца сохраняются (`_render_resolutions_section`
+    в task_bridge рендерит его целиком — иначе секция резолюций теряет
+    контент после первого абзаца, как в живом случае kapelle: Q-05 несла
+    классификационную таблицу, которая не доходила до tasks-спеки).
+    Обрезаются только пустые строки по краям блока — внутренняя структура
+    не трогается.
+    """
+    matches = list(_DESIGN_Q_RE.finditer(text))
+    result: dict[str, str] = {}
+    for idx, match in enumerate(matches):
+        qid = match.group(1)
+        block_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        block = text[match.end() : block_end]
+        section = re.search(r"^#{1,3}\s", block, re.M)
+        if section is not None:
+            block = block[: section.start()]
+        lines = block.splitlines()
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        result[qid] = "\n".join(lines)
+    return result
+
+
 def coverage_findings(req_text: str, design_text: str) -> list[str]:
     """Непокрытые architects-вопросы requirements в design — список находок.
 

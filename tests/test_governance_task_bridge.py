@@ -89,6 +89,13 @@ upstream_hashes:
 #### Q-01 · owner_role: architects · resolution: resolved
 Выбран REST — синхронный вызов проще для MVP.
 
+| Вариант | Задержка |
+| --- | --- |
+| REST | низкая |
+| GraphQL | средняя |
+
+- ограничение: без batching на старте
+
 #### Q-03 · owner_role: architects · resolution: deferred
 reason: Нужны замеры нагрузки перед выбором шардирования.
 """
@@ -252,6 +259,36 @@ def test_render_tasks_structure() -> None:
             assert line.startswith("- [ ]")
 
 
+# --- _render_resolutions_section (devtools#158) --------------------------
+
+
+def test_render_resolutions_section_carries_table_verbatim() -> None:
+    """Секция резолюций несёт тело Q-блока целиком, не первый абзац —
+    строка таблицы обязана дойти дословно (живая находка kapelle: Q-05
+    несла классификационную таблицу, которая терялась в bullet-рендере)."""
+    design_text = (
+        "#### Q-01 · owner_role: architects · resolution: resolved\n"
+        "Интро-абзац.\n"
+        "\n"
+        "| Вариант | Задержка |\n"
+        "| --- | --- |\n"
+        "| REST | низкая |\n"
+    )
+    lines = task_bridge._render_resolutions_section(design_text)
+    text = "\n".join(lines)
+    assert "## Решения открытых вопросов (уровень design)" in text
+    assert "**Q-01 — resolved:**" in text
+    assert "| REST | низкая |" in text
+
+
+def test_render_resolutions_section_bare_heading_falls_back_to_one_liner() -> None:
+    """Пустое тело (голый заголовок, без абзаца/reason:) — старое
+    однострочное поведение (`- **Q-NN:** resolved`), не голая шапка."""
+    design_text = "#### Q-01 · owner_role: architects · resolution: resolved\n"
+    lines = task_bridge._render_resolutions_section(design_text)
+    assert "- **Q-01:** resolved" in lines
+
+
 class _StubOps:
     """Минимальный стаб Ops-поверхности, которую использует deliver()."""
 
@@ -354,17 +391,22 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
     assert meta["upstream_hashes"] == {"decomposition": stamped_blob}
     # секция резолюций сгенерирована из фикстурного 20-design.md, не
     # рукописным текстом (Task 5, Step 1в)
-    assert "## Решения открытых вопросов (уровень design)" in spec.read_text()
+    spec_text = spec.read_text()
+    assert "## Решения открытых вопросов (уровень design)" in spec_text
     assert (
-        "- **Q-03 (deferred):** reason: Нужны замеры нагрузки перед "
-        "выбором шардирования." in spec.read_text()
+        "**Q-03 — deferred:** reason: Нужны замеры нагрузки перед "
+        "выбором шардирования." in spec_text
     )
     # Task 7, low review #2: resolved-ветка несёт обоснование (reason),
     # построчная проверка — не только заголовок секции/deferred-строка.
-    assert (
-        "- **Q-01:** Выбран REST — синхронный вызов проще для MVP."
-        in spec.read_text()
-    )
+    assert "**Q-01 — resolved:**" in spec_text
+    assert "Выбран REST — синхронный вызов проще для MVP." in spec_text
+    # devtools#158: тело Q-блока — целиком, не первый абзац. Таблица и
+    # список фикстурного Q-01 (после интро-абзаца) обязаны дойти до
+    # доставленной спеки дословно (живая находка kapelle: Q-05 несла
+    # классификационную таблицу, которая не доходила до executors).
+    assert "| GraphQL | средняя |" in spec_text
+    assert "- ограничение: без batching на старте" in spec_text
 
 
 def test_deliver_default_generated_at_has_utc_offset(tmp_path: Path) -> None:

@@ -328,27 +328,42 @@ def _merge_featureless_by_target_file(
 def _render_resolutions_section(design_text: str) -> list[str]:
     """Секция «Решения открытых вопросов» tasks-спеки из design-DSL.
 
-    Потребляет ``design_guard.parse_design_resolutions`` (Task 4) — не
-    рукописный пересказ, а генерация из фактического 20-design.md.
-    resolved несёт обоснование (по DSL — первый непустой абзац блока;
-    строка ``reason:`` тоже принимается, если встретится); deferred несёт
-    причину явным префиксом. Пустой набор
-    резолюций (design без единого блока ``#### Q-NN``) — секция не
-    рендерится вовсе.
+    Потребляет ``design_guard.parse_design_resolutions`` (Task 4, голова
+    записи — state/reason) и ``parse_design_resolution_bodies`` (devtools#158,
+    тело записи целиком) — не рукописный пересказ, а генерация из
+    фактического 20-design.md. Раньше секция несла только первый абзац/
+    ``reason:`` блока — списки и таблицы после него молча терялись (живая
+    находка kapelle: классификационная таблица Q-05 не доходила до
+    executors). Теперь каждая запись — голова (``**Q-NN — resolved:**`` /
+    ``**Q-NN — deferred:** reason: …``) + пустая строка + ВЕСЬ текст блока
+    дословно (списки/таблицы с колонки 0 остаются валидным markdown).
+    Пустое тело (голый заголовок без абзаца/reason:) — fallback на старое
+    однострочное поведение. Пустой набор резолюций (design без единого
+    блока ``#### Q-NN``) — секция не рендерится вовсе.
     """
     resolutions = design_guard.parse_design_resolutions(design_text)
     if not resolutions:
         return []
+    bodies = design_guard.parse_design_resolution_bodies(design_text)
     lines = ["## Решения открытых вопросов (уровень design)", ""]
     for qid, (state, reason) in resolutions.items():
+        body = bodies.get(qid, "")
         if state == "deferred":
             # None недостижим через конвейер (S4 ловит deferred без
             # reason:), но deliver зовут и на легаси/ручных бандлах —
             # литерал «None» в человеко-читаемом артефакте недопустим.
             lines.append(
-                f"- **{qid} (deferred):** reason: "
+                f"**{qid} — deferred:** reason: "
                 f"{reason if reason else 'причина не указана'}"
             )
+            if body:
+                # Тело несёт строку reason: внутри себя же — дедуп с
+                # головой намеренно НЕ делаем (devtools#158): усложнение
+                # ради косметики, содержимое не теряется ни там, ни там.
+                lines += ["", body]
+            lines.append("")
+        elif body:
+            lines += [f"**{qid} — resolved:**", "", body, ""]
         elif reason:
             lines.append(f"- **{qid}:** {reason}")
         else:
