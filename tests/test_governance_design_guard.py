@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from governance.design_guard import (
     coverage_findings,
+    parse_design_resolution_bodies,
     parse_design_resolutions,
     parse_requirements_questions,
 )
@@ -62,6 +63,66 @@ def test_parse_design_resolutions_deferred_with_reason() -> None:
 def test_parse_design_resolutions_deferred_without_reason() -> None:
     bad = DSN_DEF.replace("reason: ждём steward#147\n", "")
     assert parse_design_resolutions(bad) == {"Q-03": ("deferred", None)}
+
+
+# --- parse_design_resolution_bodies (devtools#158) -----------------------
+
+
+def test_parse_design_resolution_bodies_carries_table_and_list() -> None:
+    """Тело блока — ВЕСЬ текст между заголовком Q и следующей границей,
+    не первый абзац: таблица и список после интро-абзаца должны дойти до
+    вызывающего целиком (live-находка kapelle: Q-05 несла классификационную
+    таблицу, которая терялась при рендере bullet-ом с первым абзацем)."""
+    text = (
+        "#### Q-03 · owner_role: architects · resolution: resolved\n"
+        "\n"
+        "Интро-абзац.\n"
+        "\n"
+        "| a | b |\n"
+        "| - | - |\n"
+        "| 1 | 2 |\n"
+        "\n"
+        "- пункт списка\n"
+        "\n"
+        "#### Q-05 · owner_role: architects · resolution: resolved\n"
+        "текст следующего блока\n"
+    )
+    bodies = parse_design_resolution_bodies(text)
+    assert "Интро-абзац." in bodies["Q-03"]
+    assert "| a | b |" in bodies["Q-03"]
+    assert "| 1 | 2 |" in bodies["Q-03"]
+    assert "- пункт списка" in bodies["Q-03"]
+    assert "следующего блока" not in bodies["Q-03"]
+    assert bodies["Q-05"].strip() == "текст следующего блока"
+
+
+def test_parse_design_resolution_bodies_stops_at_section_boundary() -> None:
+    """Та же граница уровня 1–3, что у `parse_design_resolutions`
+    (PR-ревью #145) — тело последнего Q не проглатывает хвост документа."""
+    text = (
+        "#### Q-03 · owner_role: architects · resolution: resolved\n"
+        "\n"
+        "Текст.\n"
+        "\n"
+        "## Механика\n\nвнутренности узла.\n"
+    )
+    bodies = parse_design_resolution_bodies(text)
+    assert bodies["Q-03"] == "Текст."
+
+
+def test_parse_design_resolution_bodies_strips_leading_trailing_blanks() -> None:
+    """Внутренняя структура блока — дословно, обрезаны только пустые
+    строки по краям (docstring контракта функции)."""
+    text = (
+        "#### Q-03 · owner_role: architects · resolution: resolved\n"
+        "\n\n"
+        "Первая строка.\n"
+        "Вторая строка.\n"
+        "\n\n"
+    )
+    assert parse_design_resolution_bodies(text)["Q-03"] == (
+        "Первая строка.\nВторая строка."
+    )
 
 
 # --- coverage_findings ---------------------------------------------------

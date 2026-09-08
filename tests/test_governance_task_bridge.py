@@ -8,6 +8,7 @@ behaviour-spec бандла и генерирует managed-спеку `spec/<ws
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,13 @@ upstream_hashes:
 
 #### Q-01 · owner_role: architects · resolution: resolved
 Выбран REST — синхронный вызов проще для MVP.
+
+| Вариант | Задержка |
+| --- | --- |
+| REST | низкая |
+| GraphQL | средняя |
+
+- ограничение: без batching на старте
 
 #### Q-03 · owner_role: architects · resolution: deferred
 reason: Нужны замеры нагрузки перед выбором шардирования.
@@ -251,6 +259,52 @@ def test_render_tasks_structure() -> None:
             assert line.startswith("- [ ]")
 
 
+# --- _render_resolutions_section (devtools#158) --------------------------
+
+
+def test_render_resolutions_section_carries_table_verbatim() -> None:
+    """Секция резолюций несёт тело Q-блока целиком, не первый абзац —
+    строка таблицы обязана дойти дословно (живая находка kapelle: Q-05
+    несла классификационную таблицу, которая терялась в bullet-рендере)."""
+    design_text = (
+        "#### Q-01 · owner_role: architects · resolution: resolved\n"
+        "Интро-абзац.\n"
+        "\n"
+        "| Вариант | Задержка |\n"
+        "| --- | --- |\n"
+        "| REST | низкая |\n"
+    )
+    lines = task_bridge._render_resolutions_section(design_text)
+    text = "\n".join(lines)
+    assert "## Решения открытых вопросов (уровень design)" in text
+    assert "**Q-01 — resolved:**" in text
+    assert "| REST | низкая |" in text
+
+
+def test_render_resolutions_section_bare_heading_falls_back_to_one_liner() -> None:
+    """Пустое тело (голый заголовок, без абзаца/reason:) — старое
+    однострочное поведение (`- **Q-NN:** resolved`), не голая шапка."""
+    design_text = "#### Q-01 · owner_role: architects · resolution: resolved\n"
+    lines = task_bridge._render_resolutions_section(design_text)
+    assert "- **Q-01:** resolved" in lines
+
+
+def test_render_resolutions_section_fallback_bullet_has_blank_line_before_next_entry() -> None:
+    """Минор ревью PR #160: fallback-буллет (голый заголовок Q-01, без
+    завершающей пустой строки) склеивал шапку следующей записи (Q-02) в
+    свой markdown-абзац — ленивое продолжение списка CommonMark/GitHub."""
+    design_text = (
+        "#### Q-01 · owner_role: architects · resolution: resolved\n"
+        "\n"
+        "#### Q-02 · owner_role: architects · resolution: resolved\n"
+        "Тело Q-02.\n"
+    )
+    lines = task_bridge._render_resolutions_section(design_text)
+    idx = lines.index("- **Q-01:** resolved")
+    assert lines[idx + 1] == ""
+    assert lines[idx + 2] == "**Q-02 — resolved:**"
+
+
 class _StubOps:
     """Минимальный стаб Ops-поверхности, которую использует deliver()."""
 
@@ -353,17 +407,47 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
     assert meta["upstream_hashes"] == {"decomposition": stamped_blob}
     # секция резолюций сгенерирована из фикстурного 20-design.md, не
     # рукописным текстом (Task 5, Step 1в)
-    assert "## Решения открытых вопросов (уровень design)" in spec.read_text()
+    spec_text = spec.read_text()
+    assert "## Решения открытых вопросов (уровень design)" in spec_text
     assert (
-        "- **Q-03 (deferred):** reason: Нужны замеры нагрузки перед "
-        "выбором шардирования." in spec.read_text()
+        "**Q-03 — deferred:** reason: Нужны замеры нагрузки перед "
+        "выбором шардирования." in spec_text
     )
     # Task 7, low review #2: resolved-ветка несёт обоснование (reason),
     # построчная проверка — не только заголовок секции/deferred-строка.
-    assert (
-        "- **Q-01:** Выбран REST — синхронный вызов проще для MVP."
-        in spec.read_text()
+    assert "**Q-01 — resolved:**" in spec_text
+    assert "Выбран REST — синхронный вызов проще для MVP." in spec_text
+    # devtools#158: тело Q-блока — целиком, не первый абзац. Таблица и
+    # список фикстурного Q-01 (после интро-абзаца) обязаны дойти до
+    # доставленной спеки дословно (живая находка kapelle: Q-05 несла
+    # классификационную таблицу, которая не доходила до executors).
+    assert "| GraphQL | средняя |" in spec_text
+    assert "- ограничение: без batching на старте" in spec_text
+
+
+def test_deliver_default_generated_at_has_utc_offset(tmp_path: Path) -> None:
+    """devtools#157: штамп `generated_at` по умолчанию (без явного
+    параметра) обязан нести смещение UTC — spec-runner approve пишет
+    tz-aware `approved_at`, а naive-локальный `datetime.now().isoformat()`
+    делает сравнение двух штампов неопределённым (живая аномалия «approve
+    раньше генерации» в kapelle). Явный `generated_at` — не в скоупе этой
+    находки, у него своя граница обратной совместимости."""
+    target = _target(tmp_path)
+    ops = _StubOps()
+    task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a",
+        approved_at="t",
     )
+    spec = target / "spec/WS-alpha-7-tasks.md"
+    meta, _body = task_bridge.split_frontmatter(spec.read_text(encoding="utf-8"))
+    assert re.search(r"(Z|[+-]\d{2}:\d{2})$", meta["generated_at"])
 
 
 def test_deliver_dirty_target_refuses(tmp_path: Path) -> None:

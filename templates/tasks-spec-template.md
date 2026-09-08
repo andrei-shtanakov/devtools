@@ -4,7 +4,7 @@ status: draft
 owner_role: stream-owner
 version: 1
 generated_by: fleet-agent
-generated_at: "<YYYY-MM-DDTHH:MM:SS>"
+generated_at: "<YYYY-MM-DDTHH:MM:SS±HH:MM>"
 source_prompt_version: ""
 validation: ""
 approved_by: ""
@@ -25,6 +25,9 @@ approved_by: ""
     (prograph-vault derived/fleet/...) или записи gaps.jsonl.
   - Чеклист-пункты с колонки 0 (отступ = пункт молча игнорируется парсером!).
   - ID задач уникальны в пределах файла; зависимости без циклов.
+  - `generated_at` — с офсетом (`±HH:MM`/`Z`), не naive: сравнивается со
+    tz-aware `approved_at` spec-runner'а (devtools#157) — naive-штамп даёт
+    неопределённое сравнение.
 -->
 
 ## Milestone 1: <краткое имя цели>
