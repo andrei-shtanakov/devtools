@@ -821,6 +821,7 @@ def deliver(
     generated_at: str | None = None,
     legacy_bundle: int | None = None,
     profile: str | None = None,
+    supersede: bool = False,
 ) -> int:
     """Штампует бандл + пишет spec/<ws-id>-tasks.md; один draft-PR.
 
@@ -862,6 +863,17 @@ def deliver(
     design/acceptance/decomposition.
     `profile=None` (дефолт) — проверка пропускается; CLI (`main`) всегда
     передаёт `state.profile`.
+
+    `supersede` (round 3 ревью PR #161, контракт владельца, замена round-2
+    модели): под supersede доставка идёт в СВЕЖУЮ ветку
+    `spec/<ws-id>-tasks-v<N>` (N — уже вычисленный монотонный `version`,
+    т.е. v2 у первой редоставки, v3 у второй…), НЕ в классическую
+    `spec/<ws-id>-tasks`. Ветка всегда новая (её имя ещё не существовало)
+    — `ensure_branch` создаёт её `-c` от только что зачекаученного base,
+    откатить дерево на чужой коммит НЕЧЕМ, и `create_draft_pr` не может
+    столкнуться с уже открытым PR той же ветки (обе беды round-2/round-3
+    ревью). Обычная (не supersede) доставка ветку не меняет — классическое
+    имя, как раньше.
     """
     if ops.is_dirty(target_dir):
         raise RuntimeError(
@@ -923,14 +935,35 @@ def deliver(
                 "decomposition: граф DT невалиден:\n"
                 + "\n".join(f"- {e}" for e in graph_errors)
             )
+    # version монотонный (FIX 2, owner ruling supersede/redelivery) —
+    # ЗДЕСЬ, ДО branch/ensure_branch (round 3: имя ветки под supersede
+    # зависит от version, см. supersede в докстринге): читаем ЕЩЁ по
+    # свежему base (до ensure_branch/stamp — этот файл не входит в
+    # bundle_dir, checkout_and_pull его уже принёс). Редоставка НЕ обязана
+    # откатывать version в 1 хардкодом рендера — если в target_dir уже
+    # лежит доставленная (вмерженная) tasks-спека, версия продолжает её
+    # цикл. Пустой target — обычная первая доставка, version: 1 как раньше.
+    prior_spec_path = Path(target_dir) / f"spec/{ws_id}-tasks.md"
+    version = 1
+    if prior_spec_path.exists():
+        prior_meta, _prior_body = split_frontmatter(
+            prior_spec_path.read_text(encoding="utf-8")
+        )
+        version = max(int(prior_meta.get("version") or 1), 1) + 1
     # ensure_branch — ЗДЕСЬ, ДО stamp_bundle_approved (round 2 ревью
     # PR #161, finding 3, контракт владельца C): штамп мутирует файлы
     # бандла НА ДИСКЕ; `git switch` на уже существующую ветку доставки по
     # ГРЯЗНОМУ (постштампованному) дереву аварийно завершается
     # (CalledProcessError мимо main, который ловит только RuntimeError).
     # Переключение обязано идти по чистому дереву сразу после
-    # checkout_and_pull — восстановленный исходный порядок.
-    branch = f"spec/{ws_id}-tasks"
+    # checkout_and_pull — восстановленный исходный порядок. Имя ветки —
+    # round 3: под supersede СВЕЖАЯ `-v{version}` (см. докстринг), иначе
+    # классическое `spec/<ws-id>-tasks`.
+    branch = (
+        f"spec/{ws_id}-tasks-v{version}"
+        if supersede
+        else f"spec/{ws_id}-tasks"
+    )
     ops.ensure_branch(target_dir, branch)
     stamped = stamp_bundle_approved(
         target_dir, bundle_dir, approved_by, approved_at,
@@ -966,18 +999,6 @@ def deliver(
     stamp = generated_at or datetime.now().astimezone().isoformat(
         timespec="seconds"
     )
-    # version монотонный (FIX 2, owner ruling supersede/redelivery):
-    # редоставка НЕ обязана откатывать version в 1 хардкодом рендера —
-    # если в target_dir уже лежит доставленная (вмерженная) tasks-спека,
-    # версия продолжает её цикл. Пустой target — обычная первая доставка,
-    # version: 1 как раньше.
-    prior_spec_path = Path(target_dir) / f"spec/{ws_id}-tasks.md"
-    version = 1
-    if prior_spec_path.exists():
-        prior_meta, _prior_body = split_frontmatter(
-            prior_spec_path.read_text(encoding="utf-8")
-        )
-        version = max(int(prior_meta.get("version") or 1), 1) + 1
     if any(_node_id(fname) == "decomposition" for fname, _ in dag):
         # DT-путь (Task 8 плана decomposition-node, обобщено Task 7 плана
         # acceptance-node на `--legacy-bundle=5`): состав задач решён
@@ -1086,7 +1107,10 @@ def _current_anchor_blob(
 
 
 def _deliver_fresh_for_run(
-    state: RunState, ops: Ops, legacy_bundle: int | None
+    state: RunState,
+    ops: Ops,
+    legacy_bundle: int | None,
+    supersede: bool = False,
 ) -> int:
     """op_start → `deliver()` → op_complete(pr, anchor) — общий хвост
     обычной (первой) доставки и supersede-редоставки.
@@ -1094,17 +1118,24 @@ def _deliver_fresh_for_run(
     Обе обязаны идти через write-ahead op_start/op_complete (ручная правка
     ledger недопустима, owner ruling); `op_start` вызывается ТОЛЬКО здесь,
     ПОСЛЕ того как supersede-гейт в `deliver_for_run` уже пропустил
-    (round 2 ревью PR #161, finding 2/B) — отказ гейта (равный анкер)
-    поднимает RuntimeError РАНЬШЕ, чем управление вообще попадает сюда, так
-    что завершённый op не трогается ни при отказе, ни при неизвестном
-    анкере до захода в доставку.
+    (round 2 ревью PR #161, finding 2/B, сохранено в round 3) — отказ
+    гейта поднимает RuntimeError РАНЬШЕ, чем управление вообще попадает
+    сюда, так что завершённый op не трогается ни при отказе, ни при
+    неизвестном анкере до захода в доставку.
 
-    Момент anchor (round 2 ревью PR #161, finding 1/A, контракт владельца):
-    ПОСЛЕ-штамповые байты — anchor читается ПОСЛЕ `deliver()`, когда
-    терминальный узел уже проштампован (`stamp_bundle_approved`) и именно
-    ЭТИ байты уехали в PR доставки и окажутся на base после его мержа;
-    supersede-гейт в `deliver_for_run` сравнивает со свежим base ИМЕННО
-    этот же (пост-штамповый) снимок.
+    `supersede` пробрасывается в `deliver()` как есть (round 3, контракт
+    владельца, точка 1): под supersede доставка идёт в СВЕЖУЮ ветку
+    `spec/<ws-id>-tasks-v<N>`, никогда не сталкивается с уже открытым PR
+    той же ветки — гейт `deliver_for_run` УЖЕ убедился, что предыдущая
+    доставка вмержена, прежде чем звать эту функцию.
+
+    Момент anchor (контракт владельца, точка 2d): ПОСЛЕ-штамповые байты —
+    anchor читается ПОСЛЕ `deliver()`, когда терминальный узел уже
+    проштампован (`stamp_bundle_approved`) и именно ЭТИ байты уехали в PR
+    доставки и окажутся на base после его мержа; supersede-гейт в
+    `deliver_for_run` сравнивает со свежим base ИМЕННО этот же снимок —
+    он читается ТОЛЬКО когда предыдущая доставка уже вмержена, так что
+    сравнение всегда байт-в-байт сопоставимо.
     """
     # approved_by/at — факт мержа бандл-PR (решение владельца devtools#110:
     # инициированный мерж = approve; mergedBy — различитель agent/human,
@@ -1134,10 +1165,11 @@ def _deliver_fresh_for_run(
         approved_at=merged_at,
         legacy_bundle=legacy_bundle,
         profile=state.profile,
+        supersede=supersede,
     )
     # anchor — ПОСЛЕ deliver(): target_dir стоит на ветке доставки с уже
     # проштампованным (закоммиченным в PR) содержимым терминального узла —
-    # ровно те байты, что окажутся на base после мержа (see docstring, A).
+    # ровно те байты, что окажутся на base после мержа (см. докстринг).
     anchor = _current_anchor_blob(
         state.target_dir, state.bundle_dir, legacy_bundle
     )
@@ -1160,19 +1192,24 @@ def deliver_for_run(
     НИКОГДА не создаёт PR заново, в каком бы состоянии op ни застал
     прогон (new/started/completed).
 
-    `supersede` (FIX 2, owner ruling): опт-ин редоставка после апстрим-
-    правки decomposition — обычный повторный прогон моста НЕ регенерирует
-    (ledger уже несёт завершённый tasks-deliver, а `find_pr(any_state)`
-    принял бы прежний PR как состоявшуюся доставку). Санкционирована
-    ТОЛЬКО когда анкер (blob терминального узла активного DAG) ОТЛИЧАЕТСЯ
-    от записанного в завершённом op (`anchor=`, пишет `op_complete` с этой
-    правки) — равный анкер отказывает явно (upstream ничего не поправил).
-    Op, записанный ДО появления поля anchor (леджер старой эры), — анкер
-    расценивается как неизвестный: supersede разрешён по явному флагу, но с
-    предупреждением, без сравнения. Под supersede найденный по ветке PR
-    (`find_pr any_state`) НЕ принимается как готовая доставка — идёт
-    свежая генерация, op пере-совершается с новым pr+anchor. Ручная правка
-    ledger по-прежнему недопустима: путь всегда идёт через
+    `supersede` (owner ruling; модель round 3 — замена round-1/round-2,
+    ссылка на ревью в PR #161): опт-ин редоставка после апстрим-правки
+    decomposition — обычный повторный прогон моста НЕ регенерирует (ledger
+    уже несёт завершённый tasks-deliver). Гейт fail-closed ПО ФАКТУ, не по
+    анкеру-в-PR: (1) предыдущая доставка (`op["pr"]`) ОБЯЗАНА быть
+    вмержена — иначе отказ явно называет PR («закройте/дождитесь мержа»);
+    пока PR открыт, его пост-штамповые байты живут только в нём, и
+    сравнение анкеров ниже было бы несопоставимым (round-2 fail-open);
+    (2) только когда вмержена — свежий `checkout_and_pull(base)` и
+    сравнение анкера (blob терминального узла активного DAG) с записанным
+    в op; равный — отказ («upstream ничего не поправил»), разный —
+    разрешено. Op без anchor (леджер до его появления) — анкер
+    расценивается как неизвестный: supersede разрешён по флагу, но с
+    предупреждением, без сравнения. Доставка идёт в СВЕЖУЮ ветку
+    `spec/<ws-id>-tasks-v<N>` (`deliver(..., supersede=True)`), НЕ в
+    классическую — старый гард `find_pr(any_state)`/adoption снят: новая
+    ветка никогда не существовала раньше, конфликтовать не с чем. Ручная
+    правка ledger по-прежнему недопустима: путь всегда идёт через
     op_start/op_complete, как и обычная доставка.
 
     Возвращает номер PR; любое препятствие — RuntimeError (fail-closed,
@@ -1198,9 +1235,29 @@ def deliver_for_run(
                 f"({state.repo_slug}) — повтор не создаёт PR"
             )
             return pr_done
-        # Гейт — ЗДЕСЬ, ДО op_start (round 2 ревью PR #161, finding 2/B):
+        # Гейт — ЗДЕСЬ, ДО op_start (контракт владельца, round 3, точка 2):
         # отказ (RuntimeError ниже) поднимается раньше любого касания op —
         # завершённый tasks-deliver остаётся нетронутым при отказе.
+        #
+        # (b) СНАЧАЛА факт: предыдущая доставка ОБЯЗАНА быть вмержена.
+        # Пока PR #pr_done открыт, его пост-штамповое содержимое живёт
+        # ТОЛЬКО в этом PR — на base всё ещё лежит до-штамповый бандл, и
+        # сравнение анкеров ниже было бы несопоставимым (round 2 fail-open:
+        # «анкер изменился» срабатывало бы даже когда апстрим НИЧЕГО не
+        # трогал). Отказ явно называет PR — читаемая процедура для
+        # оператора, а не немая тишина.
+        pr_facts = ops.pr_facts(state.repo_slug, pr_done)
+        if pr_facts.get("state") != "MERGED":
+            raise RuntimeError(
+                f"supersede отклонён: предыдущая доставка PR #{pr_done} "
+                f"не вмержена (state={pr_facts.get('state')!r}) — "
+                "закройте её или дождитесь мержа, затем переиздавайте "
+                "supersede"
+            )
+        # (c) предыдущая доставка вмержена ⇒ base теперь несёт ТЕ ЖЕ
+        # ПОСЛЕ-штамповые байты, что записаны в recorded_anchor (deliver()
+        # коммитит проштампованный бандл В ТОТ ЖЕ PR доставки) — сравнение
+        # байт-в-байт сопоставимо, никакого fail-open окна.
         ops.checkout_and_pull(state.target_dir, state.base_ref or "master")
         recorded_anchor = op.get("anchor")
         if recorded_anchor is None:
@@ -1210,10 +1267,6 @@ def deliver_for_run(
                 "явному флагу без сравнения хэша"
             )
         else:
-            # current_anchor — те же ПОСЛЕ-штамповые байты, что recorded_
-            # anchor (A): свежий base уже несёт содержимое, вмерженное из
-            # PR предыдущей доставки (пост-штамповое), так что сравнение
-            # сопоставимо и корректно ловит «апстрим не менялся».
             current_anchor = _current_anchor_blob(
                 state.target_dir, state.bundle_dir, legacy_bundle
             )
@@ -1223,9 +1276,13 @@ def deliver_for_run(
                     f"с последней доставки (PR #{pr_done}) — upstream "
                     "ничего не поправил, повторная доставка не нужна"
                 )
-        # Свежая доставка МИМО adoption чужого PR (owner ruling): найденный
-        # find_pr(any_state) PR НЕ принимается как состоявшаяся доставка.
-        return _deliver_fresh_for_run(state, ops, legacy_bundle)
+        # (d) свежая доставка В НОВУЮ ветку (контракт владельца, точка 1):
+        # старый гард find_pr(any_state)/adoption снят намеренно — новая
+        # ветка `spec/<ws-id>-tasks-v<N>` никогда не существовала раньше,
+        # ей нечего адаптировать и не с чем сталкиваться в create_draft_pr.
+        return _deliver_fresh_for_run(
+            state, ops, legacy_bundle, supersede=True,
+        )
     # Поиск PR по ветке ВО ВСЕХ состояниях (major терм. ревью #156):
     # отсутствие ОТКРЫТОГО PR не значит «доставки не было» — спека могла
     # быть доставлена ранее, вмержена и переведена в approved; повторный
@@ -1346,12 +1403,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--supersede", action="store_true",
-        help="санкционированная редоставка (FIX 2, owner ruling) поверх "
-        "уже завершённого tasks-deliver: разрешено ТОЛЬКО если анкер "
-        "decomposition (blob терминального узла активного DAG) изменился "
-        "с прошлой доставки — равный анкер отказывает явно; прежний PR "
-        "(find_pr any_state) НЕ принимается как состоявшаяся доставка, "
-        "идёт свежая генерация с новым pr+anchor",
+        help="санкционированная редоставка (owner ruling, round 3 модель "
+        "PR #161) поверх уже завершённого tasks-deliver: предыдущая "
+        "доставка обязана быть ВМЕРЖЕНА (иначе явный отказ с номером PR) "
+        "и её анкер decomposition обязан ОТЛИЧАТЬСЯ от текущего base "
+        "(равный — отказ, upstream ничего не поправил); доставка идёт в "
+        "свежую ветку spec/<ws-id>-tasks-v<N>, никогда не сталкивается с "
+        "уже открытым PR",
     )
     args = parser.parse_args(argv)
     state = load(args.run_id)

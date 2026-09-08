@@ -389,17 +389,20 @@ def test_verifies_inline_form_is_also_accepted() -> None:
     assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
 
 
-def test_verify_without_verifies_is_a_finding() -> None:
+def test_verify_without_verifies_is_legacy_compatible_not_a_finding() -> None:
+    """Round 3 ревью PR #161, finding 4 (контракт владельца): verifies
+    опционален у type: verify, а не обязателен — легаси-бандлы, авторенные
+    до раскатки поля, не превращаются задним числом в невалидные (S4-гейт
+    и deliver() шли по graph_findings, и fatal-находка формы блокировала
+    ИХ ОБОИХ на каждом старом бандле с verify-DT без verifies)."""
     dt = (
         "#### DT-14: Наблюдение · type: verify · owner: qa\n"
         "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
         "delivered_by: [DT-01]\nparallel_group: core\n"
     )
-    _tasks, findings = parse_dt_tasks(dt)
-    assert any(
-        "DT-14" in f and "verifies" in f and "не объявлена" in f
-        for f in findings
-    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ()
 
 
 def test_verifies_on_implement_is_a_finding() -> None:

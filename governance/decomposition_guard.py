@@ -122,16 +122,17 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
         if group_m is None:
             findings.append(f"{dt_id}: строка parallel_group отсутствует")
         # verifies — структурное поле группы НАБЛЮДЕНИЯ (owner ruling,
-        # DT-14): обязательно и непусто у type: verify, запрещено у
-        # type: implement (checked_by через scenarios — единственный канал
-        # ВЛАДЕНИЯ implement-задач).
-        if dt_type == "verify":
-            if not verifies:
-                findings.append(
-                    f"{dt_id}: type: verify без структурного поля verifies "
-                    "— группа наблюдения не объявлена"
-                )
-        elif verifies:
+        # DT-14): опционально у type: verify (объявляется, когда нужна
+        # multi-file группа наблюдения отдельно от checked_by-владения) и
+        # ЗАПРЕЩЕНО у type: implement (checked_by через scenarios —
+        # единственный канал ВЛАДЕНИЯ implement-задач). НЕ обязательно
+        # (round 3 ревью PR #161, finding 4, контракт владельца): раньше
+        # verify без verifies был fatal-находкой формы — легаси-бандлы
+        # (авторенные до раскатки поля) отказывали на S4-гейте и в
+        # deliver(), а объявленный checked_by-fallback в render_tasks_dt
+        # был недостижим (graph_findings всегда рубил их раньше рендера).
+        # verifies остался чисто опциональным, аддитивным механизмом.
+        if dt_type == "implement" and verifies:
             findings.append(f"{dt_id}: verifies запрещён при type: implement")
         tasks.append(DtTask(
             dt_id=dt_id, title=m.group(2), type=dt_type,

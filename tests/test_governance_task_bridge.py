@@ -1819,6 +1819,74 @@ def test_deliver_verify_dt_now_delivers(
     assert any(c[0] == "ensure_branch" for c in ops.calls)
 
 
+# decomposition авторенный ДО раскатки поля verifies (round 3 ревью
+# PR #161, finding 4): DT-02 (type: verify) БЕЗ verifies вовсе — ровно тот
+# легаси-вход, что fatal-находка формы (round 1) отказывала бы на
+# graph_findings ДО рендера, делая заявленный checked_by-fallback
+# render_tasks_dt недостижимым.
+DECOMPOSITION_VERIFY_LEGACY_MD = """\
+---
+spec_stage: decomposition
+status: draft
+version: 1
+owner_role: tech-lead
+traces_to: [design]
+upstream_hashes:
+  design: """ + "12" * 20 + """
+---
+## Задачи
+
+#### DT-01: Реализация · type: implement · owner: dev
+scenarios: [BEH-01]
+depends_on: []
+parallel_group: solo
+
+#### DT-02: Проверка · type: verify · owner: qa
+scenarios: [BEH-02]
+depends_on: [DT-01]
+delivered_by: [DT-01]
+parallel_group: solo
+"""
+
+
+def test_deliver_legacy_verify_dt_without_verifies_still_delivers(
+    tmp_path: Path,
+) -> None:
+    """Round 3 ревью PR #161, finding 4 (контракт владельца): legacy
+    decomposition с type: verify DT, авторенным ДО раскатки verifies (поле
+    отсутствует вовсе), обязан по-прежнему доставляться — graph_findings
+    не fatal-ит на этом, и render_tasks_dt рендерит **Verifies:** из
+    checked_by-цели сценария (fallback), не из structural verifies."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text(CHARTER_MD)
+    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
+    (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
+    (bundle / "20-design.md").write_text(DESIGN_MD)
+    (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
+    (bundle / "30-decomposition.md").write_text(
+        DECOMPOSITION_VERIFY_LEGACY_MD
+    )
+    ops = _StubOps()
+    pr = task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a", approved_at="t",
+    )
+    assert pr is not None
+    spec_text = (target / "spec" / "WS-alpha-7-tasks.md").read_text()
+    assert "**Mode:** verify_first" in spec_text
+    # BEH-02 (BEHAVIOUR_MD) checked_by target — tests/test_y.py: fallback
+    # взял его из сценария, раз структурного verifies на DT-02 нет.
+    assert "**Verifies:** tests/test_y.py" in spec_text
+
+
 def _target_legacy_5(
     tmp_path: Path, behaviour_md: str, decomposition_md: str
 ) -> Path:
@@ -2340,8 +2408,11 @@ def test_deliver_for_run_supersede_round_trip_post_stamp_anchor(
     from governance import run_state as rs
 
     state = _recon_state(tmp_path, monkeypatch)
-    pr1 = task_bridge.deliver_for_run(state, _ReconOps())
+    ops1 = _ReconOps()
+    pr1 = task_bridge.deliver_for_run(state, ops1)
     assert pr1 == 77
+    # Обычная (не supersede) доставка — классическая ветка, не тронута.
+    assert ("ensure_branch", "spec/WS-alpha-7-tasks") in ops1.calls
     op_after_first = dict(rs.load("r-recon").ops["tasks-deliver"])
     assert op_after_first["anchor"]
 
@@ -2362,12 +2433,45 @@ def test_deliver_for_run_supersede_round_trip_post_stamp_anchor(
             "DT-01: Реализация", "DT-01: Исправлено апстримом"
         )
     )
+    ops3 = _ReconOps()
     pr3 = task_bridge.deliver_for_run(
-        rs.load("r-recon"), _ReconOps(), supersede=True,
+        rs.load("r-recon"), ops3, supersede=True,
     )
     assert pr3 == 77
     op_after_second = rs.load("r-recon").ops["tasks-deliver"]
     assert op_after_second["anchor"] != op_after_first["anchor"]
+    # Round 3 контракт владельца, точка 1: редоставка идёт в СВЕЖУЮ ветку
+    # -v2 (первый supersede), не в классическую spec/<ws-id>-tasks.
+    assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops3.calls
+    assert not any(
+        c == ("ensure_branch", "spec/WS-alpha-7-tasks") for c in ops3.calls
+    )
+
+
+def test_deliver_for_run_supersede_refused_when_previous_pr_unmerged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round 3 контракт владельца, точка 2b: supersede отказывает, если
+    предыдущая доставка (op['pr']) ещё НЕ вмержена — пока её PR открыт,
+    пост-штамповые байты живут только в нём, и на base сравнивать анкер
+    ещё не с чем (round-2 fail-open). Отказ называет PR, op остаётся
+    нетронутым, и до сравнения анкера/checkout_and_pull дело не доходит."""
+    anchor = "irrelevant-since-gate-refuses-before-comparing"
+    op_before = {"status": "completed", "pr": 55, "anchor": anchor}
+    state = _recon_state(tmp_path, monkeypatch, op=dict(op_before))
+
+    class _UnmergedPrevOps(_ReconOps):
+        def pr_facts(self, repo_slug: str, pr: int) -> dict:
+            self.calls.append(("pr_facts", pr))
+            if pr == 55:
+                return {"state": "OPEN", "mergedBy": None, "mergedAt": None}
+            return super().pr_facts(repo_slug, pr)
+
+    ops = _UnmergedPrevOps()
+    with pytest.raises(RuntimeError, match=r"PR #55.*не вмержена"):
+        task_bridge.deliver_for_run(state, ops, supersede=True)
+    assert state.ops["tasks-deliver"] == op_before
+    assert not any(c[0] == "checkout_and_pull" for c in ops.calls)
 
 
 def test_deliver_for_run_supersede_redelivers_on_changed_anchor(
