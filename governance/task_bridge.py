@@ -364,10 +364,14 @@ def _render_resolutions_section(design_text: str) -> list[str]:
             lines.append("")
         elif body:
             lines += [f"**{qid} — resolved:**", "", body, ""]
-        elif reason:
-            lines.append(f"- **{qid}:** {reason}")
         else:
-            lines.append(f"- **{qid}:** resolved")
+            # `reason` не может быть непустым здесь: у resolved
+            # justification выводится из ТОГО ЖЕ блока (design_guard.
+            # parse_design_resolutions — reason:/первый абзац), а пустой
+            # body означает блок без единой непробельной строки — значит и
+            # reason: None. Отдельная `elif reason:`-ветка была бы мёртвым
+            # кодом (nit ревью PR #160) — убрана, не оговорена комментарием.
+            lines += [f"- **{qid}:** resolved", ""]
     lines.append("")
     return lines
 

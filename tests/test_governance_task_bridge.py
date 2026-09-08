@@ -289,6 +289,22 @@ def test_render_resolutions_section_bare_heading_falls_back_to_one_liner() -> No
     assert "- **Q-01:** resolved" in lines
 
 
+def test_render_resolutions_section_fallback_bullet_has_blank_line_before_next_entry() -> None:
+    """Минор ревью PR #160: fallback-буллет (голый заголовок Q-01, без
+    завершающей пустой строки) склеивал шапку следующей записи (Q-02) в
+    свой markdown-абзац — ленивое продолжение списка CommonMark/GitHub."""
+    design_text = (
+        "#### Q-01 · owner_role: architects · resolution: resolved\n"
+        "\n"
+        "#### Q-02 · owner_role: architects · resolution: resolved\n"
+        "Тело Q-02.\n"
+    )
+    lines = task_bridge._render_resolutions_section(design_text)
+    idx = lines.index("- **Q-01:** resolved")
+    assert lines[idx + 1] == ""
+    assert lines[idx + 2] == "**Q-02 — resolved:**"
+
+
 class _StubOps:
     """Минимальный стаб Ops-поверхности, которую использует deliver()."""
 
