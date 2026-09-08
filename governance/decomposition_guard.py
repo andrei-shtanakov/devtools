@@ -29,9 +29,44 @@ def _list_field(block: str, name: str) -> tuple[str, ...] | None:
     return tuple(part.strip() for part in inner.split(","))
 
 
+_LIST_ITEM_RE = re.compile(r"^\s*-\s*(.+?)\s*$")
+
+
+def _block_list_field(block: str, name: str) -> tuple[str, ...] | None:
+    """`name:` в блочной YAML-форме (`- элемент` построчно, без `[...]`)."""
+    m = re.search(rf"^{name}:\s*$", block, re.M)
+    if m is None:
+        return None
+    items: list[str] = []
+    # m.end() стоит ПЕРЕД '\n' ($ в re.M его не поглощает) — первый элемент
+    # splitlines() всегда пустая строка-остаток заголовка, отбрасываем её.
+    for line in block[m.end():].splitlines()[1:]:
+        item = _LIST_ITEM_RE.match(line)
+        if item is None:
+            break
+        items.append(item.group(1))
+    return tuple(items)
+
+
+def _verifies_field(block: str) -> tuple[str, ...] | None:
+    """`verifies:` — инлайн (`[a, b]`) ИЛИ блочная (`- a`) форма, обе
+    принимаются (спека владельца по DT-14, FIX 1)."""
+    inline = _list_field(block, "verifies")
+    if inline is not None:
+        return inline
+    return _block_list_field(block, "verifies")
+
+
 @dataclass(frozen=True)
 class DtTask:
-    """Одна задача decomposition-узла (заголовок #### DT-NN)."""
+    """Одна задача decomposition-узла (заголовок #### DT-NN).
+
+    ``verifies`` — структурное поле группы наблюдения (owner ruling,
+    multi-file DT-14): список файлов, за которыми присматривает
+    ``type: verify`` DT, СТРУКТУРНО отдельный от ``checked_by``-владения
+    (которое несут ``scenarios``). Наблюдение — не владение: файлы из
+    ``verifies`` исключены из single-owner инварианта (``graph_findings``).
+    """
 
     dt_id: str
     title: str
@@ -41,6 +76,7 @@ class DtTask:
     depends_on: tuple[str, ...]
     delivered_by: tuple[str, ...]
     parallel_group: str
+    verifies: tuple[str, ...] = ()
 
 
 def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
@@ -76,6 +112,8 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
         scenarios = _list_field(block, "scenarios")
         depends_on = _list_field(block, "depends_on")
         delivered_by = _list_field(block, "delivered_by") or ()
+        verifies = _verifies_field(block) or ()
+        dt_type = m.group(3)
         group_m = re.search(r"^parallel_group:\s*(\S+)\s*$", block, re.M)
         if scenarios is None or not scenarios:
             findings.append(f"{dt_id}: строка scenarios отсутствует или пуста")
@@ -83,11 +121,24 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
             findings.append(f"{dt_id}: строка depends_on отсутствует")
         if group_m is None:
             findings.append(f"{dt_id}: строка parallel_group отсутствует")
+        # verifies — структурное поле группы НАБЛЮДЕНИЯ (owner ruling,
+        # DT-14): обязательно и непусто у type: verify, запрещено у
+        # type: implement (checked_by через scenarios — единственный канал
+        # ВЛАДЕНИЯ implement-задач).
+        if dt_type == "verify":
+            if not verifies:
+                findings.append(
+                    f"{dt_id}: type: verify без структурного поля verifies "
+                    "— группа наблюдения не объявлена"
+                )
+        elif verifies:
+            findings.append(f"{dt_id}: verifies запрещён при type: implement")
         tasks.append(DtTask(
-            dt_id=dt_id, title=m.group(2), type=m.group(3),
+            dt_id=dt_id, title=m.group(2), type=dt_type,
             owner=m.group(4), scenarios=scenarios or (),
             depends_on=depends_on or (), delivered_by=delivered_by,
             parallel_group=group_m.group(1) if group_m else "",
+            verifies=verifies,
         ))
     for dt_id, count in seen.items():
         if count > 1:
@@ -217,12 +268,15 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
                 f"{beh}: покрыт дважды и более ({', '.join(owners)})"
             )
 
-    # single-owner тест-файла
+    # single-owner тест-файла — файлы под наблюдением (verifies, owner
+    # ruling DT-14) исключены: наблюдение не владение, single-owner их не
+    # касается, даже если они же checked_by-цель чужих scenarios.
+    verified_files = {f for t in tasks for f in t.verifies}
     file_owner: dict[str, str] = {}
     for t in tasks:
         for beh in t.scenarios:
             target, _kind = bindings.get(beh, (None, None))
-            if target is None:
+            if target is None or target in verified_files:
                 continue
             prior = file_owner.get(target)
             if prior is not None and prior != t.dt_id:

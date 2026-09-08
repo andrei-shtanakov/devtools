@@ -17,6 +17,7 @@ DT_OK = (
     "depends_on: [DT-01]\n"
     "delivered_by: [DT-01]\n"
     "parallel_group: core\n"
+    "verifies: [tests/test_a.py]\n"
     "Проза.\n"
 )
 
@@ -31,6 +32,7 @@ def test_parse_two_tasks() -> None:
         delivered_by=(), parallel_group="core",
     )
     assert tasks[1].delivered_by == ("DT-01",)
+    assert tasks[1].verifies == ("tests/test_a.py",)
 
 
 def test_near_miss_heading_is_a_finding() -> None:
@@ -352,6 +354,91 @@ def test_letter_suffixed_beh_is_parsed_and_covered() -> None:
         "#### DT-01: A · type: implement · owner: dev\n"
         "scenarios: [BEH-18, BEH-18a]\ndepends_on: []\n"
         "parallel_group: solo\n"
+    )
+    assert graph_findings(beh, dt) == []
+
+
+# --- FIX 1 (owner ruling, DT-14 multi-file group): структурное поле
+# `verifies:` для type: verify — checked_by остаётся владением, verifies —
+# группой наблюдения; single-owner эти файлы не касается. ------------------
+
+
+def test_verifies_block_form_is_parsed() -> None:
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "  - tests/test_a.py\n"
+        "  - tests/test_b.py\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
+
+
+def test_verifies_inline_form_is_also_accepted() -> None:
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies: [tests/test_a.py, tests/test_b.py]\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
+
+
+def test_verify_without_verifies_is_a_finding() -> None:
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+    )
+    _tasks, findings = parse_dt_tasks(dt)
+    assert any(
+        "DT-14" in f and "verifies" in f and "не объявлена" in f
+        for f in findings
+    )
+
+
+def test_verifies_on_implement_is_a_finding() -> None:
+    dt = (
+        "#### DT-01: Реализация · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n"
+        "verifies:\n  - tests/test_a.py\n"
+    )
+    _tasks, findings = parse_dt_tasks(dt)
+    assert any(
+        "DT-01" in f and "verifies" in f and "запрещ" in f for f in findings
+    )
+
+
+def test_single_owner_ignores_files_listed_in_verifies() -> None:
+    """DT-14 наблюдает tests/test_a.py — файл, за который отвечают (через
+    checked_by) DT-01 И DT-02 порознь; без verifies это был бы classический
+    single-owner конфликт (см. test_single_owner_of_test_file). Owner:
+    verifies — группа наблюдения, не владения — гард обязан её игнорировать
+    при проверке single-owner."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_one`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_two`\n\n"
+        "#### BEH-03: Три\n**checked_by** `kind: e2e` "
+        "`target: tests/test_c.py::test_three`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-02: B · type: implement · owner: dev\n"
+        "scenarios: [BEH-02]\ndepends_on: []\nparallel_group: side\n\n"
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-03]\ndepends_on: [DT-01, DT-02]\n"
+        "delivered_by: [DT-01, DT-02]\nparallel_group: side\n"
+        "verifies:\n  - tests/test_a.py\n"
     )
     assert graph_findings(beh, dt) == []
 

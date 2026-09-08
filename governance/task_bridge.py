@@ -616,13 +616,26 @@ def render_tasks_dt(
             # — построчный разбор среди прочих **…**-метаданных, позиция
             # строки в теле задачи свободная; значение `verify_first` —
             # через подчёркивание (EXECUTION_MODES spec-runner).
+            #
+            # Источник targets (FIX 1, owner ruling DT-14 multi-file group):
+            # структурное поле `t.verifies` — ЕСЛИ оно объявлено, verbatim
+            # порядок + дедуп, БЕЗ обращения к checked_by сценариев вовсе
+            # (verifies — группа наблюдения, отдельная от checked_by-
+            # владения через scenarios). Fallback на старый checked_by-
+            # вывод — только для легаси-бандлов без verifies (DtTask.verifies
+            # по умолчанию пуст).
             targets: list[str] = []
-            for b in t.scenarios:
-                sc_target = (
-                    by_beh[b].checked_target if b in by_beh else None
-                )
-                if sc_target and sc_target not in targets:
-                    targets.append(sc_target)
+            if t.verifies:
+                for f in t.verifies:
+                    if f not in targets:
+                        targets.append(f)
+            else:
+                for b in t.scenarios:
+                    sc_target = (
+                        by_beh[b].checked_target if b in by_beh else None
+                    )
+                    if sc_target and sc_target not in targets:
+                        targets.append(sc_target)
             if not targets:
                 # verify без прогоняемой группы необоснован: суть режима
                 # — живой прогон объявленных целей; молчаливый Mode без

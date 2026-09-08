@@ -1625,6 +1625,38 @@ def test_verify_dt_renders_with_verify_first_mode() -> None:
     assert "Реализовать сценарии BEH-02" in implement_block
 
 
+def test_verify_dt_renders_verifies_from_field_when_present() -> None:
+    """FIX 1 (owner ruling, DT-14 multi-file group): когда DT несёт
+    структурное поле verifies, **Verifies:** рендерится из него verbatim
+    (порядок, дедуп) — НЕ из checked_by-целей сценариев (fallback только
+    для легаси-бандлов без verifies, см.
+    test_verify_dt_renders_with_verify_first_mode)."""
+    scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
+    dt = (
+        "#### DT-01: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: []\n"
+        "delivered_by: []\nparallel_group: solo\n"
+        "verifies:\n"
+        "  - tests/test_z.py\n"
+        "  - tests/test_y.py\n"
+        "  - tests/test_z.py\n"
+    )
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(dt)
+    assert findings == []
+    text = task_bridge.render_tasks_dt(
+        ws_id="WS-x-1", subject="s", bundle_path="b/30-decomposition.md",
+        scenarios=scenarios, dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
+    )
+    assert "**Verifies:** tests/test_z.py, tests/test_y.py" in text
+    # НЕ fallback на checked_by-цель BEH-01 (tests/test_a.py) — verifies
+    # объявлен структурно и берётся verbatim, а не выводится из сценария.
+    verifies_line = next(
+        line for line in text.splitlines() if line.startswith("**Verifies:")
+    )
+    assert "tests/test_a.py" not in verifies_line
+
+
 def test_verify_dt_without_checked_by_targets_refuses() -> None:
     """Minor ревью PR #152: verify-DT, чьи сценарии не дают ни одной
     checked_by-цели, — отказ (нечего прогонять), не молчаливый Mode без
@@ -1752,6 +1784,7 @@ scenarios: [BEH-02]
 depends_on: [DT-01]
 delivered_by: [DT-01]
 parallel_group: solo
+verifies: [tests/test_y.py]
 """
 
 
