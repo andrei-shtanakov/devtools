@@ -8,27 +8,41 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# Маркер-подстрока находки «verify без verifies» (round 5 ревью PR #161,
-# контракт владельца) — единственная точка истины формы этой строки:
-# используется при генерации находки НИЖЕ и в `is_non_fatal_form_finding`
-# (потребитель — S4-гейт `governance.runner._step_gate`, пишет её как
-# `warning GC-DT-GRAPH:` в gate-findings.txt, round 6 ревью PR #161, минор
-# — ДО этого находка нигде не была видна оператору, несмотря на
-# комментарий, обещавший потребителя в task_bridge.deliver, которого не
-# было; сам `task_bridge.deliver` fatal-набор не фильтрует НАПРЯМУЮ —
-# фильтр внутри `graph_findings`, общей точки для обоих потребителей).
-_VERIFY_WITHOUT_VERIFIES_MARKER = "без структурного поля verifies"
+# Маркеры-подстроки находок формы (не graph-инвариантов), НЕ обязанных
+# блокировать доставку — единственные точки истины их текста, используются
+# при генерации находок в `graph_findings` НИЖЕ и в
+# `is_non_fatal_form_finding` (потребитель — S4-гейт
+# `governance.runner._step_gate`, пишет их как `warning GC-DT-GRAPH:` в
+# gate-findings.txt, round 6 ревью PR #161, минор — ДО этого находки
+# нигде не были видны оператору; сам `task_bridge.deliver` fatal-набор не
+# фильтрует НАПРЯМУЮ — фильтр внутри `graph_findings`, общей точки для
+# обоих потребителей).
+#
+# «Группа наблюдения не выводится вовсе» (round 7 ревью PR #161, минор,
+# контракт владельца): verify-DT без ни единой checked_by-цели в scenarios
+# И без verifies — прогонять действительно нечего (render_tasks_dt упал бы
+# RuntimeError на рендере). Легаси-форма (checked_by-цель ЕСТЬ, verifies
+# нет) — НЕ находка: замена round-5 безусловного «verify без verifies».
+_VERIFY_GROUP_UNDERIVABLE_MARKER = "группа наблюдения не выводится"
+# «Осиротевший/опечатанный путь в verifies» (round 7 ревью PR #161, минор):
+# элемент verifies, не являющийся checked_by-целью НИ ОДНОЙ задачи бандла.
+_ORPHAN_VERIFIES_TARGET_MARKER = "опечатка либо осиротевший путь"
 
 
 def is_non_fatal_form_finding(finding: str) -> bool:
-    """True для находок формы, НЕ обязанных блокировать доставку (round 5
-    ревью PR #161): единственный такой класс — ``type: verify`` без
-    ``verifies`` (легаси-совместимость: checked_by-fallback
-    ``render_tasks_dt`` остаётся достижим). Прочие находки (near-miss
-    заголовок, дубль id, ``verifies`` на ``implement``, graph-инварианты
-    ``graph_findings``) — fatal как раньше.
+    """True для находок формы, НЕ обязанных блокировать доставку: verify-
+    DT, чья группа наблюдения не выводится ни из checked_by (scenarios),
+    ни из verifies (round 7, замена round-5 безусловного «verify без
+    verifies» — легаси-форма с checked_by-целью, но без verifies, больше
+    не находка), и элемент verifies, не принадлежащий НИ ОДНОЙ checked_by-
+    цели бандла (round 7 — опечатка/осиротевший путь). Прочие находки
+    (near-miss заголовок, дубль id, ``verifies`` на ``implement``, graph-
+    инварианты ``graph_findings``) — fatal как раньше.
     """
-    return _VERIFY_WITHOUT_VERIFIES_MARKER in finding
+    return (
+        _VERIFY_GROUP_UNDERIVABLE_MARKER in finding
+        or _ORPHAN_VERIFIES_TARGET_MARKER in finding
+    )
 
 
 _DT_HEAD_RE = re.compile(
@@ -152,22 +166,17 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
         # DT-14): рекомендовано у type: verify (объявляется, когда нужна
         # multi-file группа наблюдения отдельно от checked_by-владения) и
         # ЗАПРЕЩЕНО у type: implement (checked_by через scenarios —
-        # единственный канал ВЛАДЕНИЯ implement-задач). Находка «verify без
-        # verifies» — ФОРМЫ, не graph-инвариант, и НЕ fatal (round 5 ревью
-        # PR #161, контракт владельца): легаси-бандлы, авторенные до
-        # раскатки поля, обязаны продолжать доставляться через checked_by-
-        # union render_tasks_dt — `graph_findings` отфильтровывает эту
-        # находку из своего результата (`is_non_fatal_form_finding` выше),
-        # а S4-гейт показывает её отдельно как warning (round 6 ревью
-        # PR #161, минор — см. docstring `graph_findings` и
-        # `governance.runner._step_gate`).
-        if dt_type == "verify" and not verifies:
-            findings.append(
-                f"{dt_id}: type: verify {_VERIFY_WITHOUT_VERIFIES_MARKER} "
-                "— группа наблюдения не объявлена (рекомендация формы, "
-                "не блокирует доставку)"
-            )
-        elif dt_type == "implement" and verifies:
+        # единственный канал ВЛАДЕНИЯ implement-задач). «Группа наблюдения
+        # не выводится вовсе» (verify без verifies И без checked_by-целей
+        # в scenarios) — тоже находка, но она требует bindings behaviour-
+        # spec (какой BEH какой checked_by-таргет несёт), которых
+        # `parse_dt_tasks` не видит (только decomposition_text) — эта
+        # проверка живёт в `graph_findings` (round 7 ревью PR #161, минор,
+        # контракт владельца: условие обязано учитывать легаси-форму —
+        # verify-DT с checked_by-целями через scenarios И БЕЗ verifies не
+        # находка, находка только когда группу вывести решительно не из
+        # чего).
+        if dt_type == "implement" and verifies:
             findings.append(f"{dt_id}: verifies запрещён при type: implement")
         tasks.append(DtTask(
             dt_id=dt_id, title=m.group(2), type=dt_type,
@@ -243,27 +252,83 @@ def _transitive_deps(
     return seen
 
 
+def _verify_group_and_orphan_findings(
+    tasks: list[DtTask],
+    bindings: dict[str, tuple[str | None, str | None]],
+) -> list[str]:
+    """Обе non-fatal находки verifies (round 7 ревью PR #161, минор,
+    контракт владельца), общая точка для `graph_findings` (исключает их из
+    fatal-результата) и `non_fatal_findings` (публичная точка входа для
+    S4-гейта):
+
+    1. Группа наблюдения verify-DT не выводится ВООБЩЕ — ни из checked_by
+       (собственные scenarios без единой цели), ни из verifies. Легаси-
+       форма (checked_by-цель ЕСТЬ, verifies нет) — НЕ находка: замена
+       round-5 безусловного «verify без verifies», срабатывавшего даже на
+       бандлах, честно авторенных по промпту (single-file verify-DT).
+    2. Элемент verifies, не являющийся checked_by-целью НИ ОДНОЙ задачи
+       бандла — опечатка либо осиротевший путь; уезжал бы в tasks-спеку
+       как селектор прогона, которого ни одна задача не создаёт.
+    """
+    findings: list[str] = []
+    owned_files = {
+        target for target, _kind in bindings.values() if target is not None
+    }
+    for t in tasks:
+        if t.type == "verify":
+            has_own_target = any(
+                bindings.get(beh, (None, None))[0] is not None
+                for beh in t.scenarios
+            )
+            if not has_own_target and not t.verifies:
+                findings.append(
+                    f"{t.dt_id}: type: verify — "
+                    f"{_VERIFY_GROUP_UNDERIVABLE_MARKER} (нет ни "
+                    "checked_by-целей в scenarios, ни verifies) — "
+                    "рекомендация формы, не блокирует доставку"
+                )
+        for f in t.verifies:
+            if f not in owned_files:
+                findings.append(
+                    f"{t.dt_id}: verifies {f}: наблюдаемая цель не "
+                    "принадлежит ни одной задаче — "
+                    f"{_ORPHAN_VERIFIES_TARGET_MARKER}"
+                )
+    return findings
+
+
+def non_fatal_findings(
+    behaviour_text: str, decomposition_text: str
+) -> list[str]:
+    """Non-fatal находки формы про `verifies` (round 7 ревью PR #161,
+    минор, контракт владельца) — публичная точка входа для
+    `governance.runner._step_gate`: показывает их оператору как
+    `warning GC-DT-GRAPH:` в gate-findings.txt, НЕ останавливая прогон.
+    `graph_findings` вычисляет те же находки и ИСКЛЮЧАЕТ их из своего
+    (fatal) результата — общий источник (`_verify_group_and_orphan_findings`),
+    не дублирование логики; `is_non_fatal_form_finding` остаётся
+    классификатором для тех, кто уже держит смешанный список строк.
+    """
+    tasks, _form_findings = parse_dt_tasks(decomposition_text)
+    bindings = _parse_beh_bindings(behaviour_text)
+    return _verify_group_and_orphan_findings(tasks, bindings)
+
+
 def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
     """Инварианты графа DT (§3 спеки) + findings формы парсера.
 
     Порядок проверок фиксирован, findings накапливаются (гейт показывает
     всё сразу, не по одной). Пустой список — граф валиден.
 
-    Находки формы, отмеченные `is_non_fatal_form_finding` (round 5 ревью
-    PR #161, контракт владельца — сейчас единственный класс: verify без
-    verifies), в результат НЕ попадают: и S4-гейт (`runner._step_gate`), и
-    `task_bridge.deliver()` трактуют ЛЮБУЮ находку этого возврата как
-    fatal, единой точки «не блокировать, но показать» у них нет — фильтр
-    здесь, а не у потребителей, значит легаси-бандл без verifies проходит
-    ОБА пути сразу, одним изменением. `parse_dt_tasks`, вызванный напрямую
-    (не через graph_findings), эту находку по-прежнему возвращает — этим
-    пользуется `runner._step_gate` (round 6 ревью PR #161, минор): читает
-    `parse_dt_tasks` НАПРЯМУЮ рядом с вызовом `graph_findings`, чтобы
-    показать отфильтрованную находку оператору как `warning GC-DT-GRAPH:`
-    в gate-findings.txt, не останавливая прогон.
+    Non-fatal находки про `verifies` (`_verify_group_and_orphan_findings`,
+    round 7 ревью PR #161, минор) в результат НЕ попадают вовсе — они
+    вычисляются ОТДЕЛЬНО, публичной `non_fatal_findings` (потребитель —
+    `runner._step_gate`, показывает их как warning, не останавливая
+    прогон); эта функция про них просто не знает, значит легаси-бандл без
+    verifies (но с checked_by-целью) и без единой опечатки в verifies
+    проходит fatal-гейт как раньше.
     """
     tasks, findings = parse_dt_tasks(decomposition_text)
-    findings = [f for f in findings if not is_non_fatal_form_finding(f)]
     bindings = _parse_beh_bindings(behaviour_text)
     ids = {t.dt_id for t in tasks}
     edges = {t.dt_id: t.depends_on for t in tasks}

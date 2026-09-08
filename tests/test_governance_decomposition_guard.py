@@ -389,36 +389,15 @@ def test_verifies_inline_form_is_also_accepted() -> None:
     assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
 
 
-def test_verify_without_verifies_is_a_finding() -> None:
-    """Round 5 ревью PR #161 (контракт владельца): verify-DT без verifies
-    — находка ФОРМЫ (parse_dt_tasks её видит и отдаёт), но не fatal-
-    инвариант — фильтруется на уровне graph_findings (см.
-    test_graph_findings_filters_out_verify_without_verifies_as_non_fatal),
-    так что S4-гейт и deliver() легаси-бандл без verifies по-прежнему
-    пропускают."""
-    dt = (
-        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
-        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
-        "delivered_by: [DT-01]\nparallel_group: core\n"
-    )
-    tasks, findings = parse_dt_tasks(dt)
-    assert any(
-        "DT-14" in f and "verifies" in f and "не объявлена" in f
-        for f in findings
-    )
-    assert tasks[0].verifies == ()
-
-
-def test_graph_findings_filters_out_verify_without_verifies_as_non_fatal() -> None:
-    """Round 5 ревью PR #161, finding 2 (контракт владельца): «verify без
-    verifies» — единственный класс находки формы, который graph_findings
-    (потребляемый ОБОИМИ fatal-путями: S4-гейт runner и
-    task_bridge.deliver()) не пропускает в свой результат — легаси-бандлы,
-    авторенные до раскатки поля, обязаны продолжать доставляться."""
-    from governance.decomposition_guard import (
-        graph_findings,
-        is_non_fatal_form_finding,
-    )
+def test_verify_with_checked_by_target_but_without_verifies_is_legacy_ok() -> None:
+    """Round 7 ревью PR #161, минор (контракт владельца, замена round-5
+    безусловного «verify без verifies»): verify-DT с checked_by-целью в
+    scenarios (легаси-форма single-file verify) — НЕ находка, даже без
+    verifies, ни на уровне graph_findings, ни на уровне non_fatal_findings
+    — промпт авторинга рекомендует verifies только когда группа наблюдения
+    выходит за собственные checked_by-цели, и гард обязан это отражать
+    (иначе конформный по промпту бандл шумит на зелёном гейте)."""
+    from governance.decomposition_guard import graph_findings, non_fatal_findings
 
     beh = (
         "#### BEH-01: Один\n**checked_by** `kind: integration` "
@@ -433,8 +412,66 @@ def test_graph_findings_filters_out_verify_without_verifies_as_non_fatal() -> No
         "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
         "delivered_by: [DT-01]\nparallel_group: solo\n"
     )
-    tasks, form_findings = parse_dt_tasks(dt)
-    assert any(is_non_fatal_form_finding(f) for f in form_findings)
+    assert graph_findings(beh, dt) == []
+    assert non_fatal_findings(beh, dt) == []
+
+
+def test_verify_group_underivable_is_non_fatal_finding() -> None:
+    """Round 7 ревью PR #161, минор (контракт владельца): находка только
+    когда группа наблюдения не выводится ВООБЩЕ — ни из checked_by
+    (собственные scenarios без единой цели), ни из verifies.
+    `non_fatal_findings` её показывает; `graph_findings` (fatal-агрегат
+    S4-гейта и deliver()) — нет, легаси/неполный бандл продолжает
+    доставляться."""
+    from governance.decomposition_guard import graph_findings, non_fatal_findings
+
+    beh = (
+        "#### BEH-01: Один\n- **checked_by**: без бэктиков, не биндится\n\n"
+        "#### BEH-02: Два\n- **checked_by**: тоже без бэктиков\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: solo\n"
+    )
+    warnings = non_fatal_findings(beh, dt)
+    assert any(
+        "DT-14" in f and "группа наблюдения не выводится" in f
+        for f in warnings
+    )
+    assert graph_findings(beh, dt) == []
+
+
+def test_orphan_verifies_target_is_non_fatal_finding() -> None:
+    """Round 7 ревью PR #161, минор (контракт владельца): элемент
+    verifies, не совпавший ни с одной checked_by-целью бандла, — опечатка
+    либо осиротевший путь, находка формы (не fatal), но обязана быть
+    видна оператору через non_fatal_findings — иначе уезжает в
+    tasks-спеку как селектор прогона, которого ни одна задача не
+    создаёт."""
+    from governance.decomposition_guard import graph_findings, non_fatal_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_one`\n\n"
+        "#### BEH-02: Два\n- **checked_by**: без бэктиков, не биндится\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: solo\n"
+        "verifies:\n  - tests/test_typo.py\n"
+    )
+    warnings = non_fatal_findings(beh, dt)
+    assert any(
+        "DT-14" in f and "tests/test_typo.py" in f
+        and "опечатка либо осиротевший путь" in f
+        for f in warnings
+    )
     assert graph_findings(beh, dt) == []
 
 
