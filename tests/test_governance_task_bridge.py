@@ -8,6 +8,7 @@ behaviour-spec бандла и генерирует managed-спеку `spec/<ws
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -364,6 +365,31 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
         "- **Q-01:** Выбран REST — синхронный вызов проще для MVP."
         in spec.read_text()
     )
+
+
+def test_deliver_default_generated_at_has_utc_offset(tmp_path: Path) -> None:
+    """devtools#157: штамп `generated_at` по умолчанию (без явного
+    параметра) обязан нести смещение UTC — spec-runner approve пишет
+    tz-aware `approved_at`, а naive-локальный `datetime.now().isoformat()`
+    делает сравнение двух штампов неопределённым (живая аномалия «approve
+    раньше генерации» в kapelle). Явный `generated_at` — не в скоупе этой
+    находки, у него своя граница обратной совместимости."""
+    target = _target(tmp_path)
+    ops = _StubOps()
+    task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a",
+        approved_at="t",
+    )
+    spec = target / "spec/WS-alpha-7-tasks.md"
+    meta, _body = task_bridge.split_frontmatter(spec.read_text(encoding="utf-8"))
+    assert re.search(r"(Z|[+-]\d{2}:\d{2})$", meta["generated_at"])
 
 
 def test_deliver_dirty_target_refuses(tmp_path: Path) -> None:

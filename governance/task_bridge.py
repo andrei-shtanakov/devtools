@@ -901,7 +901,13 @@ def deliver(
         else ""
     )
     scenarios = parse_behaviour(behaviour.read_text(encoding="utf-8"))
-    stamp = generated_at or datetime.now().isoformat(timespec="seconds")
+    # Локальное время С офсетом (не naive `datetime.now()`): spec-runner
+    # пишет tz-aware `approved_at` на approve, и сравнение naive/aware
+    # штампов неопределено (devtools#157 — живая аномалия «approve раньше
+    # генерации» в kapelle).
+    stamp = generated_at or datetime.now().astimezone().isoformat(
+        timespec="seconds"
+    )
     if any(_node_id(fname) == "decomposition" for fname, _ in dag):
         # DT-путь (Task 8 плана decomposition-node, обобщено Task 7 плана
         # acceptance-node на `--legacy-bundle=5`): состав задач решён
