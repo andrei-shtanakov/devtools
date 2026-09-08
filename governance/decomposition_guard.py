@@ -11,12 +11,17 @@ from dataclasses import dataclass
 # Маркер-подстрока находки «verify без verifies» (round 5 ревью PR #161,
 # контракт владельца) — единственная точка истины формы этой строки:
 # используется при генерации находки НИЖЕ и в `is_non_fatal_form_finding`
-# (потребитель — governance.task_bridge.deliver, фильтрует fatal-набор).
+# (потребитель — S4-гейт `governance.runner._step_gate`, пишет её как
+# `warning GC-DT-GRAPH:` в gate-findings.txt, round 6 ревью PR #161, минор
+# — ДО этого находка нигде не была видна оператору, несмотря на
+# комментарий, обещавший потребителя в task_bridge.deliver, которого не
+# было; сам `task_bridge.deliver` fatal-набор не фильтрует НАПРЯМУЮ —
+# фильтр внутри `graph_findings`, общей точки для обоих потребителей).
 _VERIFY_WITHOUT_VERIFIES_MARKER = "без структурного поля verifies"
 
 
 def is_non_fatal_form_finding(finding: str) -> bool:
-    """True для находок формы, НЕ обязанных блокировать deliver() (round 5
+    """True для находок формы, НЕ обязанных блокировать доставку (round 5
     ревью PR #161): единственный такой класс — ``type: verify`` без
     ``verifies`` (легаси-совместимость: checked_by-fallback
     ``render_tasks_dt`` остаётся достижим). Прочие находки (near-miss
@@ -148,12 +153,14 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
         # multi-file группа наблюдения отдельно от checked_by-владения) и
         # ЗАПРЕЩЕНО у type: implement (checked_by через scenarios —
         # единственный канал ВЛАДЕНИЯ implement-задач). Находка «verify без
-        # verifies» — ФОРМЫ, не graph-инвариант, и НЕ fatal для deliver()
-        # (round 5 ревью PR #161, контракт владельца): легаси-бандлы,
-        # авторенные до раскатки поля, обязаны продолжать доставляться
-        # через checked_by-fallback render_tasks_dt — deliver() отфильтровывает
-        # эту конкретную находку из fatal-набора (`is_non_fatal_form_finding`
-        # выше, потребитель — governance.task_bridge.deliver).
+        # verifies» — ФОРМЫ, не graph-инвариант, и НЕ fatal (round 5 ревью
+        # PR #161, контракт владельца): легаси-бандлы, авторенные до
+        # раскатки поля, обязаны продолжать доставляться через checked_by-
+        # union render_tasks_dt — `graph_findings` отфильтровывает эту
+        # находку из своего результата (`is_non_fatal_form_finding` выше),
+        # а S4-гейт показывает её отдельно как warning (round 6 ревью
+        # PR #161, минор — см. docstring `graph_findings` и
+        # `governance.runner._step_gate`).
         if dt_type == "verify" and not verifies:
             findings.append(
                 f"{dt_id}: type: verify {_VERIFY_WITHOUT_VERIFIES_MARKER} "
@@ -244,13 +251,16 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
 
     Находки формы, отмеченные `is_non_fatal_form_finding` (round 5 ревью
     PR #161, контракт владельца — сейчас единственный класс: verify без
-    verifies), в результат НЕ попадают: и S4-гейт (runner), и
+    verifies), в результат НЕ попадают: и S4-гейт (`runner._step_gate`), и
     `task_bridge.deliver()` трактуют ЛЮБУЮ находку этого возврата как
     fatal, единой точки «не блокировать, но показать» у них нет — фильтр
     здесь, а не у потребителей, значит легаси-бандл без verifies проходит
     ОБА пути сразу, одним изменением. `parse_dt_tasks`, вызванный напрямую
-    (не через graph_findings), эту находку по-прежнему возвращает — она
-    предназначена для прямых потребителей форму, не для gate-агрегата.
+    (не через graph_findings), эту находку по-прежнему возвращает — этим
+    пользуется `runner._step_gate` (round 6 ревью PR #161, минор): читает
+    `parse_dt_tasks` НАПРЯМУЮ рядом с вызовом `graph_findings`, чтобы
+    показать отфильтрованную находку оператору как `warning GC-DT-GRAPH:`
+    в gate-findings.txt, не останавливая прогон.
     """
     tasks, findings = parse_dt_tasks(decomposition_text)
     findings = [f for f in findings if not is_non_fatal_form_finding(f)]

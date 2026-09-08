@@ -1625,12 +1625,14 @@ def test_verify_dt_renders_with_verify_first_mode() -> None:
     assert "Реализовать сценарии BEH-02" in implement_block
 
 
-def test_verify_dt_renders_verifies_from_field_when_present() -> None:
-    """FIX 1 (owner ruling, DT-14 multi-file group): когда DT несёт
-    структурное поле verifies, **Verifies:** рендерится из него verbatim
-    (порядок, дедуп) — НЕ из checked_by-целей сценариев (fallback только
-    для легаси-бандлов без verifies, см.
-    test_verify_dt_renders_with_verify_first_mode)."""
+def test_verify_dt_renders_union_of_checked_by_and_verifies() -> None:
+    """Major ревью PR #161, round 6 (контракт владельца): verify-DT
+    ВЛАДЕЕТ своими checked_by-целями (scenarios) И НАБЛЮДАЕТ файлы из
+    verifies — **Verifies:** обязана нести ОБЕ группы (объединение,
+    дедуп), иначе собственный тест-файл DT молча выпадает из verify_first-
+    прогона, хотя чек-лист той же задачи требует его зелёным. Порядок
+    детерминирован: СНАЧАЛА собственные checked_by-цели (порядок
+    scenarios), ПОТОМ verifies (порядок объявления)."""
     scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
     dt = (
         "#### DT-01: Наблюдение · type: verify · owner: qa\n"
@@ -1648,13 +1650,13 @@ def test_verify_dt_renders_verifies_from_field_when_present() -> None:
         scenarios=scenarios, dt_tasks=dt_tasks,
         generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
     )
-    assert "**Verifies:** tests/test_z.py, tests/test_y.py" in text
-    # НЕ fallback на checked_by-цель BEH-01 (tests/test_a.py) — verifies
-    # объявлен структурно и берётся verbatim, а не выводится из сценария.
-    verifies_line = next(
-        line for line in text.splitlines() if line.startswith("**Verifies:")
+    # tests/test_a.py — собственная checked_by-цель BEH-01 (DT_BEHAVIOUR_MD)
+    # — ОБЯЗАНА присутствовать, идёт ПЕРВОЙ; verifies — следом, в порядке
+    # объявления, с дедупом повторного tests/test_z.py.
+    assert (
+        "**Verifies:** tests/test_a.py, tests/test_z.py, tests/test_y.py"
+        in text
     )
-    assert "tests/test_a.py" not in verifies_line
 
 
 def test_verify_dt_without_checked_by_targets_refuses() -> None:

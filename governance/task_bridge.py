@@ -617,25 +617,27 @@ def render_tasks_dt(
             # строки в теле задачи свободная; значение `verify_first` —
             # через подчёркивание (EXECUTION_MODES spec-runner).
             #
-            # Источник targets (FIX 1, owner ruling DT-14 multi-file group):
-            # структурное поле `t.verifies` — ЕСЛИ оно объявлено, verbatim
-            # порядок + дедуп, БЕЗ обращения к checked_by сценариев вовсе
-            # (verifies — группа наблюдения, отдельная от checked_by-
-            # владения через scenarios). Fallback на старый checked_by-
-            # вывод — только для легаси-бандлов без verifies (DtTask.verifies
-            # по умолчанию пуст).
+            # Источник targets (FIX 1, owner ruling DT-14 multi-file group;
+            # major ревью PR #161, round 6: UNION, не замещение): verify-DT
+            # ВЛАДЕЕТ своими checked_by-целями (через scenarios) И
+            # НАБЛЮДАЕТ файлы из verifies — обе группы обязаны прогоняться
+            # verify_first, иначе собственный тест-файл DT молча выпадает
+            # из прогона, хотя чек-лист той же задачи требует его зелёным.
+            # Порядок ДЕТЕРМИНИРОВАН и задокументирован: СНАЧАЛА
+            # собственные checked_by-цели сценариев (порядок scenarios),
+            # ПОТОМ verifies (порядок объявления) — дедуп по вхождению.
+            # Легаси-путь (verifies не объявлен вовсе) — ничем не отличим
+            # от чисто checked_by-вывода, как раньше.
             targets: list[str] = []
-            if t.verifies:
-                for f in t.verifies:
-                    if f not in targets:
-                        targets.append(f)
-            else:
-                for b in t.scenarios:
-                    sc_target = (
-                        by_beh[b].checked_target if b in by_beh else None
-                    )
-                    if sc_target and sc_target not in targets:
-                        targets.append(sc_target)
+            for b in t.scenarios:
+                sc_target = (
+                    by_beh[b].checked_target if b in by_beh else None
+                )
+                if sc_target and sc_target not in targets:
+                    targets.append(sc_target)
+            for f in t.verifies:
+                if f not in targets:
+                    targets.append(f)
             if not targets:
                 # verify без прогоняемой группы необоснован: суть режима
                 # — живой прогон объявленных целей; молчаливый Mode без
