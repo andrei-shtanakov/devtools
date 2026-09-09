@@ -628,35 +628,30 @@ def render_tasks_dt(
             # полный pytest-селектор с `::`), ПОТОМ verifies (порядок
             # объявления, голые пути по канону гарда — decomposition_guard
             # сравнивает verifies с checked_by-целями ПОСЛЕ среза `::`).
-            # Дедуп — ПО ФАЙЛУ (`_target_files`-канон, split("::", 1)[0]),
-            # НЕ по голой строке (minor ревью PR #161, round 8): голый путь
-            # в verifies и полный `file::test`-селектор из того же файла —
-            # одна и та же цель, а сравнение целых строк пропускало бы её
-            # дважды в **Verifies:**, молча расширяя verify_first с
-            # по-селекторного прогона (FR-06) до всего файла. Первое
-            # вхождение файла ПОБЕЖДАЕТ — verifies не заменяет уже
-            # объявленный сценарием селектор. Легаси-путь (verifies не
-            # объявлен вовсе) — ничем не отличим от чисто checked_by-
-            # вывода, как раньше.
+            # Дедуп — ПО ПОЛНОЙ СТРОКЕ селектора (round 11 ревью PR #161,
+            # major — откат round-8/9 «дедупа по файлу»: тот дедуп молча
+            # ронял ВТОРОЙ checked_by-селектор СОБСТВЕННЫХ сценариев DT,
+            # когда два сценария single-owner-задачи бьют в один файл
+            # разными селекторами (`tests/x.py::t1` + `tests/x.py::t2`,
+            # форма SHARED_FILE_BEHAVIOUR_MD) — чек-лист задачи требует
+            # обе цели зелёными, а **Verifies:** нёс бы только первую.
+            # Голый путь в verifies и полный `file::test`-селектор из
+            # checked_by того же файла — РАЗНЫЕ строки, ОБЕ остаются
+            # (spec-runner резолвит пересечение сам); срез `::` для
+            # сверки владения/принадлежности — дело ТОЛЬКО гарда
+            # (`decomposition_guard`, ownership/closure-проверки), не
+            # рендера. Легаси-путь (verifies не объявлен вовсе) — ничем
+            # не отличим от чисто checked_by-вывода, как раньше.
             targets: list[str] = []
-            seen_paths: set[str] = set()
             for b in t.scenarios:
                 sc_target = (
                     by_beh[b].checked_target if b in by_beh else None
                 )
-                if sc_target is None:
-                    continue
-                path = sc_target.split("::", 1)[0]
-                if path in seen_paths:
-                    continue
-                targets.append(sc_target)
-                seen_paths.add(path)
+                if sc_target and sc_target not in targets:
+                    targets.append(sc_target)
             for f in t.verifies:
-                path = f.split("::", 1)[0]
-                if path in seen_paths:
-                    continue
-                targets.append(f)
-                seen_paths.add(path)
+                if f not in targets:
+                    targets.append(f)
             if not targets:
                 # verify без прогоняемой группы необоснован: суть режима
                 # — живой прогон объявленных целей; молчаливый Mode без
@@ -932,9 +927,19 @@ def deliver(
         # tasks-спеки — своей задачей в исполнении, а не до неё; проверка
         # существования на момент deliver() ломала бы доставку ЛЮБОГО
         # бандла, где verify-DT наблюдает файл более поздней задачи).
-        # Владение файлом гарантирует graph closure-инвариант выше
-        # (graph_findings); существование файла В МОМЕНТ ПРОГОНА — забота
-        # spec-runner (spec-runner#402), не гейта доставки.
+        # Существование файла В МОМЕНТ ПРОГОНА — забота spec-runner
+        # (spec-runner#402), не гейта доставки.
+        #
+        # ЧЕСТНАЯ формулировка того, что graph_findings реально
+        # гарантирует про verifies (round 11 ревью PR #161, минор —
+        # предыдущая версия этого комментария заявляла более сильную
+        # гарантию, которой нет): FATAL — ЕСЛИ у пути есть владелец
+        # (checked_by), он обязан быть в транзитивном замыкании depends_on
+        # наблюдающей задачи (round 9). Путь БЕЗ ВЛАДЕЛЬЦА ВООБЩЕ (опечатка
+        # либо осиротевший путь) — НЕ fatal здесь: это отдельная non-fatal
+        # находка формы (`non_fatal_findings`, потребитель — только
+        # S4-гейт `runner._step_gate`, не `deliver()`) — такой бандл
+        # доставляется, а осиротевший путь молча уезжает в **Verifies:**.
     branch = f"spec/{ws_id}-tasks"
     ops.ensure_branch(target_dir, branch)
     stamped = stamp_bundle_approved(

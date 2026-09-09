@@ -820,7 +820,14 @@ def test_author_dsl_decomposition_explains_verifies_field() -> None:
     файла из verifies обязан быть в транзитивном замыкании depends_on
     наблюдающей задачи, тот же контракт, что уже описан для delivered_by
     — иначе конформный по промпту бандл стопит S4-гейт (третий раз этот
-    класс кусает)."""
+    класс кусает).
+
+    Round 11 ревью PR #161, минор (контракт владельца, выбран вариант
+    «честная формулировка», не promotion в fatal): промпт больше НЕ
+    обещает, что ЛЮБОЙ verifies-путь без владельца стопит доставку —
+    это ДВУХУРОВНЕВАЯ гарантия (FATAL — только когда владелец есть и вне
+    замыкания; путь БЕЗ владельца вовсе — non-fatal warning на гейте, не
+    факт остановки deliver())."""
     from governance.ops import _AUTHOR_DSL
 
     dsl = _AUTHOR_DSL["decomposition"]
@@ -838,6 +845,8 @@ def test_author_dsl_decomposition_explains_verifies_field() -> None:
         "transitive closure of THIS task's OWN depends_on"
         in verifies_tail[:1900]
     )
+    assert "NON-fatal form recommendation" in verifies_tail[:2200]
+    assert "does NOT stop delivery on its own" in verifies_tail[:2400]
 
 
 def test_author_dsl_covers_acceptance() -> None:

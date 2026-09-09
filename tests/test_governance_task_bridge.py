@@ -1659,14 +1659,14 @@ def test_verify_dt_renders_union_of_checked_by_and_verifies() -> None:
     )
 
 
-def test_verify_dt_union_dedups_selector_against_bare_path_in_verifies() -> None:
-    """Minor ревью PR #161, round 8: дедуп union'а — ПО ФАЙЛУ (срез
-    `::`-селектора), не по голой строке. checked_by-цель сценария несёт
+def test_verify_dt_union_dedups_by_full_selector_not_by_file() -> None:
+    """Major ревью PR #161, round 11 — откат round-8/9 «дедупа по файлу»
+    (major-регресс, признан ошибкой владельца): дедуп union'а обязан
+    идти ПО ПОЛНОЙ СТРОКЕ селектора. checked_by-цель сценария несёт
     полный pytest-селектор (tests/test_a.py::test_five); verifies
-    объявляет тот же файл голым путём (канон гарда: decomposition_guard
-    сравнивает verifies с checked_by-целями ПОСЛЕ среза `::`) — обязана
-    схлопнуться в ОДНУ запись (полный селектор — сценарии идут первыми),
-    не задвоиться и не расширить прогон до всего файла."""
+    объявляет тот же файл ГОЛЫМ путём — это РАЗНАЯ строка, ОБЕ остаются
+    в **Verifies:** (spec-runner резолвит пересечение сам); срез `::`
+    для сверки владения — дело только гарда, не рендера."""
     scenarios = task_bridge.parse_behaviour(
         "#### BEH-05: Пять\n`traces: [FR-01]`\n"
         "**checked_by** `kind: integration` "
@@ -1689,12 +1689,43 @@ def test_verify_dt_union_dedups_selector_against_bare_path_in_verifies() -> None
         generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
     )
     assert (
-        "**Verifies:** tests/test_a.py::test_five, tests/test_b.py" in text
+        "**Verifies:** tests/test_a.py::test_five, tests/test_a.py, "
+        "tests/test_b.py" in text
     )
-    verifies_line = next(
-        line for line in text.splitlines() if line.startswith("**Verifies:")
+
+
+def test_verify_dt_union_keeps_both_selectors_of_own_scenarios_sharing_a_file() -> None:
+    """Major ревью PR #161, round 11 (регресс, введённый round-8/9
+    «дедупом по файлу»): single-owner (decomposition_guard) требует, чтобы
+    ДВА сценария в ОДНОМ файле с РАЗНЫМИ селекторами принадлежали ОДНОЙ
+    задаче (форма SHARED_FILE_BEHAVIOUR_MD — уже прожита в
+    test_dt_path_skips_merge_featureless). Для verify-DT с такими двумя
+    сценариями чек-лист требует ОБА селектора зелёными — **Verifies:**
+    обязана нести оба, дедуп по файлу молча ронял бы второй."""
+    scenarios = task_bridge.parse_behaviour(
+        "#### BEH-01: Один\n`traces: [FR-01]`\n"
+        "**checked_by** `kind: atp` `target: tests/test_shared.py::t1`\n\n"
+        "#### BEH-02: Два\n`traces: [FR-01]`\n"
+        "**checked_by** `kind: atp` `target: tests/test_shared.py::t2`\n"
     )
-    assert verifies_line.count("tests/test_a.py") == 1
+    dt_verify = (
+        "#### DT-02: A · type: verify · owner: qa\n"
+        "scenarios: [BEH-01, BEH-02]\ndepends_on: []\n"
+        "delivered_by: []\nparallel_group: solo\n"
+    )
+    dt_tasks_verify, findings_verify = decomposition_guard.parse_dt_tasks(
+        dt_verify
+    )
+    assert findings_verify == []
+    text = task_bridge.render_tasks_dt(
+        ws_id="WS-x-1", subject="s", bundle_path="b/30-decomposition.md",
+        scenarios=scenarios, dt_tasks=dt_tasks_verify,
+        generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
+    )
+    assert (
+        "**Verifies:** tests/test_shared.py::t1, tests/test_shared.py::t2"
+        in text
+    )
 
 
 def test_verify_dt_without_checked_by_targets_refuses() -> None:
