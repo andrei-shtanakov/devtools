@@ -1209,6 +1209,72 @@ def _abandon_revision(state: RunState, n: int, reason: str) -> None:
     save(state)
 
 
+def _resolve_correction_pr(
+    state: RunState,
+    ops: Ops,
+    anchor_rel: str,
+    base_ref: str,
+    approval_pr: int | None,
+) -> tuple[int, str, str]:
+    """PR, доставивший correction → (номер, approved_by, approved_at).
+
+    §I7 спеки: подпись штампа берётся у correction-PR, а не у исходного
+    бандл-PR — иначе штамп утверждает, что текущие байты одобрил человек,
+    одобрявший другую версию. Ноль или больше одного кандидатов — отказ:
+    гадать нельзя. `--approval-pr` заменяет ПОИСК (шаги 1–3), но не
+    ПРОВЕРКУ (шаг 4).
+    """
+    if approval_pr is None:
+        sha = ops.last_commit_touching(state.target_dir, anchor_rel)
+        if sha is None:
+            raise RuntimeError(
+                f"{anchor_rel} не менялся в истории {base_ref} — "
+                "correction не найден, подписи взять неоткуда"
+            )
+        candidates = [
+            p for p in ops.prs_containing_commit(state.repo_slug, sha)
+            if p.get("state") == "MERGED" and p.get("baseRefName") == base_ref
+        ]
+        if len(candidates) != 1:
+            raise RuntimeError(
+                f"коммит {sha[:7]} связан с {len(candidates)} вмерженными "
+                f"PR в {base_ref} — подписи взять неоткуда; назовите PR "
+                "явно: --approval-pr <n>"
+            )
+        number = candidates[0]["number"]
+        # Подпись — отдельным запросом: эндпоинт commits/<sha>/pulls отдаёт
+        # merged_by: null даже у вмерженного PR (ревью #164).
+        facts = ops.pr_facts(state.repo_slug, number)
+        if facts.get("state") != "MERGED":
+            raise RuntimeError(
+                f"PR #{number} найден по коммиту, но его состояние "
+                f"{facts.get('state')!r} — подписи взять неоткуда"
+            )
+        merged_by = (facts.get("mergedBy") or {}).get("login")
+        merged_at = facts.get("mergedAt")
+    else:
+        number = approval_pr
+        facts = ops.pr_facts(state.repo_slug, number)
+        if facts.get("state") != "MERGED":
+            raise RuntimeError(
+                f"--approval-pr {number}: PR не вмержен "
+                f"(state={facts.get('state')!r}) — проверка та же, что у "
+                "автоматического поиска"
+            )
+        if facts.get("baseRefName") != base_ref:
+            raise RuntimeError(
+                f"--approval-pr {number}: нацелен в "
+                f"{facts.get('baseRefName')!r}, а не в {base_ref!r}"
+            )
+        merged_by = (facts.get("mergedBy") or {}).get("login")
+        merged_at = facts.get("mergedAt")
+    if not merged_by or not merged_at:
+        raise RuntimeError(
+            f"PR #{number}: нет mergedBy/mergedAt — подпись штампа неполна"
+        )
+    return number, merged_by, merged_at
+
+
 def deliver_conform(
     target_dir: str,
     repo_slug: str,

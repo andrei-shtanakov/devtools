@@ -2439,3 +2439,93 @@ def test_completed_v1_op_is_never_rewritten(tmp_path, monkeypatch):
     before = dict(state.ops["tasks-deliver"])
     tb._complete_revision(state, 2, pr=10, anchor="a")
     assert rs.load("r-recon").ops["tasks-deliver"] == before
+
+
+# --- _resolve_correction_pr (§I7: подпись штампа берётся у correction-PR) --
+
+
+class _ProvOps(_StubOps):
+    def __init__(self, commit="c1", prs=None):
+        super().__init__()
+        self.commit, self.prs = commit, (prs if prs is not None else [])
+
+    def last_commit_touching(self, target_dir, rel_path):
+        return self.commit
+
+    def prs_containing_commit(self, repo_slug, sha):
+        return self.prs
+
+    def pr_facts(self, repo_slug, pr):
+        # Подпись живёт ЗДЕСЬ, а не в списке PR-ов по коммиту (ревью #164).
+        return {
+            "state": "MERGED", "baseRefName": "master",
+            "mergedAt": "2026-09-09T05:00:00Z",
+            "mergedBy": {"login": "andrei-shtanakov"},
+        }
+
+
+_MERGED_PR = {
+    "number": 403, "state": "MERGED", "baseRefName": "master",
+    "mergedAt": "2026-09-09T05:00:00Z", "mergedBy": "andrei-shtanakov",
+    "mergeCommit": "c1",
+}
+
+
+def test_provenance_single_merged_candidate(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    pr, by, at = tb._resolve_correction_pr(
+        state, _ProvOps(prs=[_MERGED_PR]),
+        "workstreams/WS-alpha-7/spec/30-decomposition.md", "master", None,
+    )
+    assert (pr, by) == (403, "andrei-shtanakov")
+    assert at.startswith("2026-09-09")
+
+
+def test_provenance_zero_candidates_refuses(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    with pytest.raises(RuntimeError, match="подписи взять неоткуда"):
+        tb._resolve_correction_pr(
+            state, _ProvOps(prs=[]), "a/b.md", "master", None
+        )
+
+
+def test_provenance_two_candidates_refuses(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    other = {**_MERGED_PR, "number": 999}
+    with pytest.raises(RuntimeError, match="подписи взять неоткуда"):
+        tb._resolve_correction_pr(
+            state, _ProvOps(prs=[_MERGED_PR, other]), "a/b.md", "master", None
+        )
+
+
+def test_provenance_no_commit_touching_anchor_refuses(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    with pytest.raises(RuntimeError, match="не менялся"):
+        tb._resolve_correction_pr(
+            state, _ProvOps(commit=None), "a/b.md", "master", None
+        )
+
+
+def test_provenance_explicit_flag_is_verified_not_trusted(
+    tmp_path, monkeypatch
+):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+
+    class _Explicit(_ProvOps):
+        def pr_facts(self, repo_slug, pr):
+            return {"state": "OPEN", "baseRefName": "master"}
+
+    with pytest.raises(RuntimeError, match="не вмержен"):
+        tb._resolve_correction_pr(
+            state, _Explicit(), "a/b.md", "master", 500
+        )
