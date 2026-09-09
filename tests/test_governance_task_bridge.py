@@ -4839,6 +4839,67 @@ def test_supersede_fail_closed_leaves_no_branch_commit_or_ledger_entry(
     assert "tasks-deliver-v2" not in rs.load("r-recon").ops
 
 
+def test_canonical_stamp_is_neutral_to_node_policy(tmp_path: Path) -> None:
+    """Канонический штамп §I5 клетки политики §I7 НЕ применяет.
+
+    `_content_anchor` и `_prospective_anchor` делят примитив
+    `_shadow_stamped`, но зовут его по-разному: канонический идёт с
+    подписью-заглушкой и БЕЗ `signed_nodes` — на его шаге состав
+    подписываемых узлов ещё не вычислен и вычислен быть не может
+    (провенанс §I7 резолвится ПОЗЖЕ и только если содержание менялось).
+
+    Сработай fail-closed здесь — он срабатывал бы на ЛЮБОМ бандле с
+    draft-узлом, то есть раньше, чем выяснено, менялся ли апстрим вообще.
+    Вход тут предельный: узел `draft` и БЕЗ подписи вовсе — тот самый,
+    на котором политика отказывает громче всего."""
+    target = _base_after_v1(tmp_path)
+    _set_node(
+        target, "00-charter.md",
+        status="draft", approved_by=None, approved_at=None,
+    )
+    # Не «не упало», а «посчиталось и отвечает на свой вопрос»: правка
+    # тела величину двигает, значит она не вырождена.
+    before = task_bridge._content_anchor(target, _BUNDLE, None)
+    _set_node(target, "00-charter.md", version=42)
+    assert task_bridge._content_anchor(target, _BUNDLE, None) != before
+
+
+def test_supersede_noop_reachable_with_draft_node_outside_signed_nodes(
+    tmp_path, monkeypatch
+) -> None:
+    """§I5 стоит ВЫШЕ §I7: неизменный апстрим — бесследный no-op, не отказ.
+
+    Клетка спеки «узлы вне `signed_nodes` лежат `draft`, но апстрим не
+    менялся → 0». Проверки статусов §I7 на этом пути недостижимы по
+    построению: сверка §I5 идёт по каноническому штампу, который
+    `signed_nodes` не знает, и провенанс не резолвится вовсе.
+
+    Парный случай — `..._fail_closed_leaves_no_branch...`: там содержание
+    ИЗМЕНИЛОСЬ, и тот же `draft`-узел даёт fail-closed. Вдвоём эти два
+    теста и держат порядок: сначала §I5, только потом §I7."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    # Узел, которого correction (#403) не касался, лежит `draft` — на
+    # проспективном штампе он дал бы fail-closed.
+    _set_node(state.target_dir, "00-charter.md", status="draft")
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "БЛОБ-ДОСТАВКИ-v1",
+        "content_anchor": tb._content_anchor(
+            state.target_dir, state.bundle_dir, None
+        ),
+    }
+    rs.save(state)
+    before = (rs.run_dir("r-recon") / "run.json").read_bytes()
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("noop")
+    assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
+    # Провенанс не разрешался — иначе §I5 стоял бы не выше §I7.
+    assert ops.touched == []
+    assert ("pr_facts", 403) not in ops.calls
+
+
 #: SHA коммита correction-PR (#403) и штамп-коммита нашей доставки v1 (#5).
 _CORRECTION_SHA = "c-correction"
 _V1_STAMP_SHA = "c-v1-stamp"
