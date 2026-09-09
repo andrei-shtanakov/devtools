@@ -2354,3 +2354,88 @@ def test_deliver_for_run_closed_unmerged_pr_fails_closed(
 
     with pytest.raises(RuntimeError, match="закрыт"):
         task_bridge.deliver_for_run(state, _ClosedOps())
+
+
+# --- ревизии в леджере: нумерация, чтение, запись намерения (Task 2) -----
+
+
+def test_revision_numbering_starts_at_two_and_grows(tmp_path, monkeypatch):
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _recon_state(tmp_path, monkeypatch)
+    assert tb._next_revision(state) == 2
+    tb._complete_revision(state, 2, pr=10, anchor="a")
+    assert tb._next_revision(state) == 3
+
+
+def test_last_delivery_prefers_highest_revision(tmp_path, monkeypatch):
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    # v1 явно засеян через "op" (тот же конвенция, что у соседних
+    # deliver_for_run тестов) — дефолт _recon_state оставляет ops пустым,
+    # и трогать этот дефолт нельзя: три соседних deliver_for_run теста
+    # полагаются на «свежий», ещё не completed op.
+    state = _recon_state(
+        tmp_path, monkeypatch, op={"status": "completed", "pr": 5}
+    )
+    n, op = tb._last_delivery(state)
+    assert (n, op["pr"]) == (1, 5)
+    tb._complete_revision(state, 2, pr=10, anchor="a")
+    n2, op2 = tb._last_delivery(state)
+    assert (n2, op2["pr"]) == (2, 10)
+
+
+def test_start_revision_records_full_intent(tmp_path, monkeypatch):
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _recon_state(tmp_path, monkeypatch)
+    tb._start_revision(state, 2, {
+        "branch": "spec/WS-alpha-7-tasks-v2",
+        "base_sha": "deadbeef",
+        "prospective_anchor": "anchor2",
+        "approval_pr": 77,
+        "tasks_version": 3,
+        "dag": ["00-charter.md"],
+        "dag_source": "previous_delivery",
+        "supersedes": 1,
+        "expected_generated_at": "2026-09-09T10:00:00+03:00",
+        "tasks_blob": "blob2",
+    })
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["status"] == "started"
+    assert saved["revision"] == 2
+    assert saved["head_sha"] is None
+    assert saved["supersedes"] == 1
+    assert saved["base_sha"] == "deadbeef"
+
+
+def test_abandon_revision_is_terminal_and_keeps_reason(tmp_path, monkeypatch):
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _recon_state(tmp_path, monkeypatch)
+    tb._start_revision(state, 2, {"branch": "b", "base_sha": "s"})
+    tb._abandon_revision(state, 2, "оператор закрыл PR #99")
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["status"] == "abandoned"
+    assert "PR #99" in saved["reason"]
+
+
+def test_completed_v1_op_is_never_rewritten(tmp_path, monkeypatch):
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _recon_state(
+        tmp_path, monkeypatch, op={"status": "completed", "pr": 5}
+    )
+    before = dict(state.ops["tasks-deliver"])
+    tb._complete_revision(state, 2, pr=10, anchor="a")
+    assert rs.load("r-recon").ops["tasks-deliver"] == before

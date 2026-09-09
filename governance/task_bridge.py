@@ -26,7 +26,7 @@ import yaml
 from governance import acceptance_guard, decomposition_guard, design_guard
 from governance.ops import Ops, RealOps
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
-from governance.run_state import RunState, load, op_complete, op_start
+from governance.run_state import RunState, load, op_complete, op_start, save
 from governance.stale_adapter import blob_sha1
 
 # DAG бандла в порядке штампа (топологический): каждый узел перечисляет
@@ -1140,6 +1140,73 @@ def deliver_for_run(
     )
     op_complete(state, "tasks-deliver", pr=pr)
     return pr
+
+
+#: Ключ ревизии переиздания. v1 живёт под историческим `tasks-deliver`
+#: (§I4 спеки): переименовать её значило бы переписать журнал.
+_REVISION_PREFIX = "tasks-deliver-v"
+_V1_KEY = "tasks-deliver"
+
+
+def _revisions(state: RunState) -> list[tuple[int, dict]]:
+    """(N, op) всех ревизий переиздания по возрастанию N."""
+    found: list[tuple[int, dict]] = []
+    for key, op in state.ops.items():
+        if not key.startswith(_REVISION_PREFIX):
+            continue
+        suffix = key[len(_REVISION_PREFIX):]
+        if suffix.isdigit():
+            found.append((int(suffix), op))
+    return sorted(found)
+
+
+def _last_delivery(state: RunState) -> tuple[int, dict] | None:
+    """Последняя запись доставки: старшая ревизия либо v1; None — доставок нет.
+
+    Ревизии в статусе `abandoned` пропускаются: они не доставили ничего,
+    и сравнивать anchor с ними нельзя.
+    """
+    for n, op in reversed(_revisions(state)):
+        if op.get("status") != "abandoned":
+            return n, op
+    v1 = state.ops.get(_V1_KEY)
+    return (1, v1) if v1 else None
+
+
+def _next_revision(state: RunState) -> int:
+    """Следующий N: максимум из леджера + 1, минимум 2 (v1 — историческая)."""
+    revs = _revisions(state)
+    return (revs[-1][0] + 1) if revs else 2
+
+
+def _start_revision(state: RunState, n: int, intent: dict) -> None:
+    """Write-ahead намерения ревизии (§I4): пишется ДО единого эффекта."""
+    state.ops[f"{_REVISION_PREFIX}{n}"] = {
+        "status": "started", "revision": n, "head_sha": None, **intent,
+    }
+    save(state)
+
+
+def _complete_revision(state: RunState, n: int, **result: object) -> None:
+    state.ops[f"{_REVISION_PREFIX}{n}"] = {
+        **state.ops.get(f"{_REVISION_PREFIX}{n}", {"revision": n}),
+        "status": "completed", **result,
+    }
+    save(state)
+
+
+def _abandon_revision(state: RunState, n: int, reason: str) -> None:
+    """Терминальный `abandoned` с причиной — причина хранится навсегда."""
+    key = f"{_REVISION_PREFIX}{n}"
+    if key not in state.ops:
+        raise RuntimeError(f"ревизии {n} нет в леджере — нечего абандонить")
+    if state.ops[key].get("status") == "completed":
+        raise RuntimeError(
+            f"ревизия {n} завершена (PR #{state.ops[key].get('pr')}) — "
+            "завершённая запись не мутируется"
+        )
+    state.ops[key] = {**state.ops[key], "status": "abandoned", "reason": reason}
+    save(state)
 
 
 def deliver_conform(
