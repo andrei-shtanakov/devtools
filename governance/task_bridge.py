@@ -789,8 +789,17 @@ def _prospective_anchor(
     лягут в base, но штамп — эффект. Поэтому бандл копируется во временный
     каталог, штампуется ТАМ, и хеш берётся оттуда; рабочее дерево не
     трогается вовсе (проверяется тестом `..._writes_nothing`).
+
+    Состав бандла проверяется по ФАКТИЧЕСКОМУ каталогу в `target_dir` и
+    ДО копирования: в теневом каталоге лежит ровно заявленное подмножество,
+    и вызов `_check_bundle_composition` внутри `stamp_bundle_approved`
+    там вырождается в тождество. Без этой проверки легаси-бандл без
+    `25-acceptance.md` с забытым `--legacy-bundle=5` ронял сырой
+    `FileNotFoundError` из `src.read_text()` мимо диагностики
+    `stamp_bundle_approved` (`main` ловит только RuntimeError).
     """
     dag = _dag_for(legacy_bundle)
+    _check_bundle_composition(target_dir, bundle_dir, dag)
     with tempfile.TemporaryDirectory(prefix="prospective-stamp-") as tmp:
         shadow = Path(tmp) / "target"
         (shadow / bundle_dir).mkdir(parents=True)

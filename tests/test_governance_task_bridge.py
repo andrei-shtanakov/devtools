@@ -776,6 +776,27 @@ def test_prospective_anchor_writes_nothing(tmp_path: Path) -> None:
     assert before == after
 
 
+def test_prospective_anchor_refuses_incomplete_bundle(tmp_path: Path) -> None:
+    """Легаси-бандл + забытый `--legacy-bundle=5` ⇒ RuntimeError с процедурой.
+
+    Проспективный штамп копирует в теневой каталог файлы ЗАЯВЛЕННОГО DAG:
+    без проверки фактического состава в `target_dir` недостающий узел
+    ронял сырой `FileNotFoundError` из `read_text`, а `main` ловит только
+    RuntimeError — оператор получал трейсбек вместо диагностики. Перенести
+    проверку внутрь теневого каталога бесполезно: там лежит ровно
+    заявленное подмножество, и она вырождается в тождество.
+    """
+    target = _target_legacy_5(tmp_path, BEHAVIOUR_MD, DECOMPOSITION_MD_LEGACY5)
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge._prospective_anchor(
+            str(target), "workstreams/WS-alpha-7/spec", "ai-prosto",
+            "2026-09-09T05:00:00Z", None,
+        )
+    message = str(exc_info.value)
+    assert "25-acceptance.md" in message
+    assert "--legacy-bundle=3|4|5" in message
+
+
 # --- Task 7 (acceptance-node): узел acceptance в DAG,
 # --legacy-bundle=3|4|5 --------------------------------------------------
 
