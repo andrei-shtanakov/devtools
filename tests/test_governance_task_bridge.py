@@ -2647,14 +2647,26 @@ def test_completed_v1_op_is_never_rewritten(tmp_path, monkeypatch):
 _ANCHOR_REL = "workstreams/WS-alpha-7/spec/30-decomposition.md"
 
 
+_FULL_FACTS = {
+    "state": "MERGED", "baseRefName": "master",
+    "mergedAt": "2026-09-09T05:00:00Z",
+    "mergedBy": {"login": "andrei-shtanakov"},
+}
+
+
 class _ProvOps(_StubOps):
-    def __init__(self, commit="c1", prs=None, files=None):
+    def __init__(self, commit="c1", prs=None, files=None, facts=None):
         super().__init__()
         self.commit, self.prs = commit, (prs if prs is not None else [])
         # Состав файлов PR (§I7, шаг 4): по умолчанию названный PR ТРОГАЛ
         # анкер — иначе явный `--approval-pr` отказывает (C-5), а на пути
         # возобновления он передаётся из намерения ревизии.
         self.files = [_ANCHOR_REL] if files is None else files
+        # Ответ `pr_facts` настраиваемый (F-04 финального ревью): пока он
+        # был ОДНИМ значением «вмержен, подпись полна», обе проверки шага 4
+        # §I7 снимались мутацией незаметно — ветвление по этим полям
+        # физически не могло сработать ни в одном тесте.
+        self.facts = _FULL_FACTS if facts is None else facts
 
     def last_commit_touching(self, target_dir, rel_path):
         return self.commit
@@ -2667,11 +2679,7 @@ class _ProvOps(_StubOps):
 
     def pr_facts(self, repo_slug, pr):
         # Подпись живёт ЗДЕСЬ, а не в списке PR-ов по коммиту (ревью #164).
-        return {
-            "state": "MERGED", "baseRefName": "master",
-            "mergedAt": "2026-09-09T05:00:00Z",
-            "mergedBy": {"login": "andrei-shtanakov"},
-        }
+        return dict(self.facts)
 
 
 _MERGED_PR = {
@@ -2712,6 +2720,106 @@ def test_provenance_two_candidates_refuses(tmp_path, monkeypatch):
         tb._resolve_correction_pr(
             state, _ProvOps(prs=[_MERGED_PR, other]), "a/b.md", "master", None
         )
+
+
+def test_provenance_filter_ignores_open_pr_on_same_commit(
+    tmp_path, monkeypatch
+):
+    """Половина фильтра кандидатов «state == MERGED» — своим случаем.
+
+    Тот же коммит анкера обычно попадает и в открытые PR (ветка, куда его
+    взяли черри-пиком, или ревью-ветка сверху). Пока все тесты подавали
+    ТОЛЬКО вмерженные PR, «отобрали правильных» и «отобрали всех подряд»
+    были неразличимы: удаление этой половины фильтра проходило незаметно
+    (F-05, мутация M30). На мутанте этот вход даёт двух кандидатов и
+    отказ — то есть он и различает."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    open_pr = {**_MERGED_PR, "number": 999, "state": "OPEN"}
+    pr, by, _at = tb._resolve_correction_pr(
+        state, _ProvOps(prs=[_MERGED_PR, open_pr]), _ANCHOR_REL, "master",
+        None,
+    )
+    assert (pr, by) == (403, "andrei-shtanakov")
+
+
+def test_provenance_filter_ignores_pr_merged_into_other_base(
+    tmp_path, monkeypatch
+):
+    """Вторая половина фильтра — «baseRefName == base_ref».
+
+    Коммит анкера живёт и в PR, вмерженных в релизную ветку; их подпись к
+    штампу на `master` отношения не имеет. Без своего входа эту половину
+    тоже можно было удалить незаметно (F-05, мутация M31)."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    other_base = {**_MERGED_PR, "number": 999, "baseRefName": "release"}
+    pr, by, _at = tb._resolve_correction_pr(
+        state, _ProvOps(prs=[_MERGED_PR, other_base]), _ANCHOR_REL, "master",
+        None,
+    )
+    assert (pr, by) == (403, "andrei-shtanakov")
+
+
+def test_provenance_found_pr_not_merged_refuses(tmp_path, monkeypatch):
+    """§I7 шаг 4 на пути ПОИСКА: найденный PR обязан быть вмерженным.
+
+    Список по коммиту (`prs_containing_commit`) и факты PR (`pr_facts`) —
+    два разных запроса, и второй может застать PR уже не вмерженным
+    (список из кэша, PR откатили). Пока `pr_facts` был одноответным
+    стабом, проверка снималась мутацией незаметно (F-04, M33)."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ProvOps(
+        prs=[_MERGED_PR], facts={"state": "OPEN", "baseRefName": "master"},
+    )
+    with pytest.raises(RuntimeError, match="найден по коммиту"):
+        tb._resolve_correction_pr(state, ops, _ANCHOR_REL, "master", None)
+
+
+@pytest.mark.parametrize(
+    "approval_pr", [None, 500], ids=["поиск", "явный-approval-pr"],
+)
+def test_provenance_incomplete_signature_refuses(
+    approval_pr, tmp_path, monkeypatch
+):
+    """§I7: пустые mergedBy/mergedAt — отказ, а не штамп с `None`.
+
+    Гвард стоит против НАБЛЮДЁННОГО поведения API, а не гипотетического:
+    `governance/ops.py:prs_containing_commit` в докстринге фиксирует, что
+    эндпоинт `commits/<sha>/pulls` отдаёт `merged_by: null` даже у
+    вмерженного PR. Без этого теста подпись `approved_by=None` уходила бы
+    в штамп бандла (F-04, мутация M35). Ветка проверки общая для поиска и
+    явного `--approval-pr` — обе формы входа."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ProvOps(prs=[_MERGED_PR], facts={
+        "state": "MERGED", "baseRefName": "master",
+        "mergedBy": None, "mergedAt": None,
+    })
+    with pytest.raises(RuntimeError, match="подпись штампа неполна"):
+        tb._resolve_correction_pr(
+            state, ops, _ANCHOR_REL, "master", approval_pr
+        )
+
+
+def test_provenance_explicit_flag_refuses_other_base(tmp_path, monkeypatch):
+    """§I7 шаг 4 у явного `--approval-pr`: PR обязан целить в `base_ref`.
+
+    Соседний тест проверяет только вмерженность, поэтому PR, вмерженный в
+    ЧУЖУЮ ветку, тестом не подавался, и проверку base можно было удалить
+    незаметно (F-06, мутация M34). Оператор называет такой PR по ошибке
+    легко: тот же анкер, тот же автор, другой релизный поток."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ProvOps(facts={**_FULL_FACTS, "baseRefName": "release"})
+    with pytest.raises(RuntimeError, match="нацелен в"):
+        tb._resolve_correction_pr(state, ops, _ANCHOR_REL, "master", 500)
 
 
 def test_provenance_no_commit_touching_anchor_refuses(tmp_path, monkeypatch):
@@ -3140,6 +3248,39 @@ def test_recover_commit_refuses_foreign_commit(tmp_path, monkeypatch):
 
         def blob_in_commit(self, target_dir, sha, rel_path):
             return "blob1"
+
+    with pytest.raises(RuntimeError, match="чужой коммит"):
+        tb._recover_commit(state, _Ops(), op)
+
+
+def test_recover_commit_refuses_right_parent_wrong_blob(
+    tmp_path, monkeypatch
+):
+    """Вторая половина сверки идентичности §I3.1: родитель ТОТ, блоб чужой.
+
+    Соседний тест ломает только родителя, и пока это был единственный
+    случай, условие по `tasks_blob` можно было удалить из реализации
+    незаметно (F-02 финального ревью, мутация M09 — зелёная). А ведь
+    ровно ради этой половины `tasks_blob` пишется отдельным хуком
+    `before_commit`: коммит с правильным родителем, но с ЧУЖИМ
+    содержимым `spec/<ws-id>-tasks.md` (кто-то коммитнул поверх base в
+    ту же ветку) иначе принимается за собственный коммит ревизии, и
+    возобновление доставки достраивает PR поверх чужой работы."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"head_sha": None, "base_sha": "base1", "tasks_blob": "blob1",
+          "branch": "spec/WS-alpha-7-tasks-v2"}
+
+    class _Ops(_ReconOps):
+        def rev_parse(self, target_dir, ref):
+            return "commitX" if "tasks-v2" in ref else None
+
+        def commit_parent(self, target_dir, sha):
+            return "base1"          # родитель СОВПАЛ с намерением
+
+        def blob_in_commit(self, target_dir, sha, rel_path):
+            return "blobX"          # а содержимое спеки — чужое
 
     with pytest.raises(RuntimeError, match="чужой коммит"):
         tb._recover_commit(state, _Ops(), op)
