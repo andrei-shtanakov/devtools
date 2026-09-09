@@ -16,6 +16,7 @@ CLI: ``python -m governance.task_bridge --run-id <id>`` (make behaviour-tasks).
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import tempfile
 from collections.abc import Callable, Iterator
@@ -28,7 +29,7 @@ from typing import Literal, NamedTuple
 import yaml
 
 from governance import acceptance_guard, decomposition_guard, design_guard
-from governance.ops import Ops, RealOps, review_login
+from governance.ops import Ops, RealOps
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
 from governance.run_state import RunState, load, op_complete, op_start, save
 from governance.stale_adapter import blob_sha1
@@ -1828,6 +1829,32 @@ def _abandon_revision(state: RunState, n: int, reason: str) -> None:
     save(state)
 
 
+#: Единственная точка настройки allowlist'а ревьюеров, чьё submitted
+#: review не блокирует автоматический отзыв предложения (§I10). Дефолт —
+#: ПУСТО, и получить непустой случайно нельзя: имя переменной уникально,
+#: значение перечисляется поимённо, а пустые элементы отбрасываются.
+_REVIEW_ALLOWLIST_ENV = "REPLACEMENT_REVIEW_ALLOWLIST"
+
+
+def _review_allowlist() -> frozenset[str]:
+    """Логины, чьё review не считается вмешательством; по умолчанию — НЕТ.
+
+    Решение владельца 2026-09-09: review — уже созданный аудитный
+    артефакт, и агентская учётная запись не делает его находки
+    одноразовыми. Привилегий по логину в коде нет ВООБЩЕ — в частности,
+    учётка ревью-контура (`ops.review_login()`) здесь не участвует: та
+    отвечает на вопрос «чьим именем мы действуем» (закрытие PR, удаление
+    веток идут от неё), а не «чьё ревью можно не заметить». Одна учётка,
+    две разные роли; путать их нельзя.
+
+    Отсюда и форма: не константа в коде, которую правят коммитом, а
+    внешняя конфигурация с пустым дефолтом. Пока её не выставили явно,
+    блокирует ЛЮБОЕ submitted review.
+    """
+    raw = os.environ.get(_REVIEW_ALLOWLIST_ENV, "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
 class Replacement(NamedTuple):
     """Явный replace-переход: какую ревизию заменяем и почему.
 
@@ -1854,14 +1881,28 @@ def _check_replacement_target(
     - head PR разошёлся с записанным `head_sha` намерения (или его не
       узнать) — под тем же именем ветки чужая работа, закрывать её мы не
       вправе;
-    - ЛЮБОЕ ревью не от ревью-контура (`review_login()`) — человек уже
-      высказался о предложении;
+    - ЛЮБОЕ submitted review, независимо от автора, — оно уже созданный
+      аудитный артефакт, и агентская учётка не делает его находки
+      одноразовыми (решение владельца). Исключения — только через
+      `_review_allowlist()`, пустой по умолчанию;
     - непогашенный review thread любого автора — разговор, который ждёт
       ответа; `None` («узнать не удалось») читается как непогашенный.
 
-    Проверки и комментарии ботов закрытию НЕ мешают и здесь не
-    спрашиваются вовсе: `statusCheckRollup` — не мнение о предложении, а
-    обычный комментарий не удерживает предложение на столе.
+    Граница «блокирует / не блокирует» проведена по СУЩНОСТЯМ форджи, а
+    не по автору:
+
+    - `ops.pr_reviews` спрашивает `pulls/<n>/reviews` — эндпоинт отдаёт
+      только review, поэтому check runs и обычные issue-комментарии сюда
+      структурно не попадают; `statusCheckRollup` не спрашивается вовсе;
+    - `ops.unresolved_threads` спрашивает `reviewThreads` — inline-треды
+      ревью, а не комментарии PR: бот, оставивший отчёт через
+      `gh pr comment`, замену не удерживает;
+    - `state == "PENDING"` — черновик, ещё НЕ отправленный автором:
+      вердикта в нём нет, и владельческое «submitted review» его не
+      покрывает.
+
+    Бот, публикующий отчёт как REVIEW (а не комментарием), замену
+    удержит — и это ровно правило владельца, а не его обход.
 
     Уже закрытый (не вмерженный) PR проверок не проходит и не требует:
     предложение снято, а именно это замена и делает. Это же — ручной
@@ -1899,20 +1940,25 @@ def _check_replacement_target(
             f"замена PR #{pr}: список ревью не получен — «вмешательства "
             "нет» утверждать не из чего, fail-closed"
         )
-    bot = review_login()
-    humans = sorted(
-        {str(r.get("login")) for r in reviews if r.get("login") != bot}
-    )
-    if humans:
+    allowed = _review_allowlist()
+    blocking = sorted({
+        str(r.get("login")) for r in reviews
+        if r.get("state") != "PENDING" and r.get("login") not in allowed
+    })
+    if blocking:
         raise RuntimeError(
-            f"замена PR #{pr}: на нём есть ревью не от {bot} "
-            f"({', '.join(humans)}) — человек уже высказался; закройте PR "
-            "сами, с объяснением, и повторите замену"
+            f"замена PR #{pr}: на нём есть submitted review "
+            f"({', '.join(blocking)}) — это аудитный артефакт, и закрыть "
+            "PR вместе с разбором механика не вправе. Закройте PR "
+            "вручную, с объяснением ревьюеру, и повторите замену тем же "
+            "--replace-revision"
         )
     if ops.unresolved_threads(state.repo_slug, pr) is not False:
         raise RuntimeError(
             f"замена PR #{pr}: есть непогашенные review threads (либо их "
-            "состояние не узнать) — разговор ждёт ответа, закрывать нельзя"
+            "состояние не узнать) — разговор ждёт ответа. Погасите треды "
+            "либо закройте PR вручную, с объяснением, и повторите замену "
+            "тем же --replace-revision"
         )
 
 

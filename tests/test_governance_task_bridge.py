@@ -6383,14 +6383,17 @@ def test_replace_refuses_on_human_review(tmp_path, monkeypatch):
     assert ops.closed == []
 
 
-def test_replace_ignores_review_of_the_review_contour(tmp_path, monkeypatch):
-    """Ревью ai-prosto замену НЕ блокирует — иначе она недостижима.
+def test_replace_refuses_on_review_from_the_review_contour_too(
+    tmp_path, monkeypatch
+):
+    """Ревью ai-prosto блокирует замену наравне с человеческим.
 
-    Терминальный прогон ревью от ai-prosto — дефолт флота: он приезжает на
-    КАЖДЫЙ delivery-PR. Считай его человеческим — и переход, заведённый
-    ровно для отзыва отревьюенного дефектного предложения, не сработал бы
-    ни разу. Человека защищает вторая половина того же правила: любой
-    другой логин блокирует."""
+    Решение владельца 2026-09-09: review — уже созданный аудитный
+    артефакт, и агентская учётка не делает его находки одноразовыми.
+    Закрыть PR автоматически вместе с разбором опаснее, чем один раз
+    потребовать явного закрытия от оператора. Привилегий по логину нет
+    ВООБЩЕ: `REVIEW_LOGIN` отвечает на другой вопрос — чьим именем мы
+    действуем (закрытие PR, удаление веток), а не чьё ревью не замечаем."""
     from governance import task_bridge as tb
 
     state = _replace_state(tmp_path, monkeypatch)
@@ -6399,18 +6402,21 @@ def test_replace_ignores_review_of_the_review_contour(tmp_path, monkeypatch):
         reviews=[{"login": "ai-prosto", "state": "CHANGES_REQUESTED"}],
     )
 
-    assert tb.deliver_superseded(
-        state, ops, replace=_replace()
-    ).kind == "delivered"
-    assert [pr for pr, _ in ops.closed] == [_REPLACED_PR]
+    with pytest.raises(RuntimeError, match="ai-prosto"):
+        tb.deliver_superseded(state, ops, replace=_replace())
+
+    assert ops.closed == []
 
 
-def test_replace_review_contour_login_follows_env(tmp_path, monkeypatch):
-    """«Кто наш бот» — одно определение на слой (`REVIEW_LOGIN`).
+def test_replace_review_block_ignores_review_login_env(
+    tmp_path, monkeypatch
+):
+    """`REVIEW_LOGIN` на блокировку не влияет — две роли одной учётки.
 
-    Хардкод `ai-prosto` в интерпретации разъехался бы с `ops.review_login`
-    молча: смена учётки ревью-контура превратила бы его собственные ревью
-    в человеческие и заперла бы замену."""
+    Пока привилегия читалась из него, смена учётки ревью-контура молча
+    меняла бы, чьё ревью разрешено закрыть механикой. Теперь этот вопрос
+    решает только allowlist, а `REVIEW_LOGIN` остаётся про действующее
+    лицо."""
     from governance import task_bridge as tb
 
     monkeypatch.setenv("REVIEW_LOGIN", "other-bot")
@@ -6420,9 +6426,103 @@ def test_replace_review_contour_login_follows_env(tmp_path, monkeypatch):
         reviews=[{"login": "other-bot", "state": "APPROVED"}],
     )
 
+    with pytest.raises(RuntimeError, match="other-bot"):
+        tb.deliver_superseded(state, ops, replace=_replace())
+
+
+def test_review_allowlist_is_empty_by_default(monkeypatch):
+    """Пустой дефолт залочен отдельно: расширить его незаметно нельзя.
+
+    Это единственное место, где привилегия вообще может появиться, и
+    появляться она обязана только явной внешней настройкой — не
+    константой в коде и не побочным эффектом другой переменной."""
+    from governance import task_bridge as tb
+
+    monkeypatch.delenv(tb._REVIEW_ALLOWLIST_ENV, raising=False)
+    assert tb._review_allowlist() == frozenset()
+    # Соседние переменные слоя allowlist НЕ наполняют.
+    monkeypatch.setenv("REVIEW_LOGIN", "ai-prosto")
+    assert tb._review_allowlist() == frozenset()
+    # Пустые и пробельные элементы отбрасываются: `",, "` — тоже пусто.
+    monkeypatch.setenv(tb._REVIEW_ALLOWLIST_ENV, ",,  ,")
+    assert tb._review_allowlist() == frozenset()
+
+
+def test_explicit_allowlist_unblocks_only_the_named_login(
+    tmp_path, monkeypatch
+):
+    """Явная настройка — рабочая точка, а не заглушка на будущее."""
+    from governance import task_bridge as tb
+
+    monkeypatch.setenv(tb._REVIEW_ALLOWLIST_ENV, "ai-prosto, other-bot")
+    state = _replace_state(tmp_path, monkeypatch)
+
+    assert tb.deliver_superseded(
+        state,
+        _ReplaceOps(
+            prs=[_MERGED_PR],
+            reviews=[{"login": "ai-prosto", "state": "APPROVED"},
+                     {"login": "other-bot", "state": "COMMENTED"}],
+        ),
+        replace=_replace(),
+    ).kind == "delivered"
+
+
+def test_pending_review_is_a_draft_not_a_verdict(tmp_path, monkeypatch):
+    """`PENDING` — черновик, автором ещё НЕ отправленный.
+
+    Владелец говорит про SUBMITTED review; неотправленный черновик
+    вердикта не несёт и удерживать предложение не может."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(
+        prs=[_MERGED_PR],
+        reviews=[{"login": "andrei-shtanakov", "state": "PENDING"}],
+    )
+
     assert tb.deliver_superseded(
         state, ops, replace=_replace()
     ).kind == "delivered"
+
+
+def test_red_checks_and_plain_comments_do_not_block_replacement(
+    tmp_path, monkeypatch
+):
+    """Красный CI и обычные комментарии замену НЕ удерживают.
+
+    Граница проведена по сущностям форджи, а не по автору: блокирующие
+    сигналы спрашиваются РОВНО два — `pr_reviews` (эндпоинт
+    `pulls/<n>/reviews`, только review) и `unresolved_threads`
+    (`reviewThreads`, inline-треды). `statusCheckRollup` не
+    спрашивается вовсе, а примитива чтения issue-комментариев в слое нет —
+    структурно попасть в решение им нечем."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(
+        prs=[_MERGED_PR], reviews=[], threads=False,
+        facts_by_pr={_REPLACED_PR: {
+            "state": "OPEN", "headRefOid": _REPLACED_HEAD,
+            "statusCheckRollup": [{"conclusion": "FAILURE"}],
+            "mergeStateStatus": "DIRTY",
+        }},
+    )
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ).kind == "delivered"
+    # Сигналов вмешательства спрошено РОВНО два вида (каждый дважды:
+    # валидация и повторная сверка перед закрытием — окно между ними
+    # реально). Ни `statusCheckRollup`, ни комментарии в их числе нет.
+    asked = {c[0] for c in ops.calls}
+    assert asked & {"pr_reviews", "unresolved_threads"} == {
+        "pr_reviews", "unresolved_threads",
+    }
+    # Красный `statusCheckRollup` лежал в фактах и на исход не повлиял;
+    # комментариев PR слой не читает вовсе — единственный примитив с
+    # ними (`comment`) пишущий, и он не звался.
+    assert not any(c[0] == "comment" for c in ops.calls)
 
 
 @pytest.mark.parametrize(
