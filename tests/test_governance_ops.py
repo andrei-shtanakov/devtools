@@ -9,6 +9,7 @@ stdout/stderr/returncode. Живых `git`/`gh`/`codex`/`gate-check` вызов�
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -98,7 +99,7 @@ def test_find_pr_rc_nonzero_raises_runtime_error(monkeypatch):
     _install_fake_run(monkeypatch, returncode=1, stderr="rate limited")
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="gh pr list rc=1: rate limited"):
         ops.find_pr(REPO_SLUG, "feat/x")
 
 
@@ -106,7 +107,7 @@ def test_find_pr_invalid_json_raises_runtime_error(monkeypatch):
     _install_fake_run(monkeypatch, returncode=0, stdout="not json")
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="invalid JSON: 'not json'"):
         ops.find_pr(REPO_SLUG, "feat/x")
 
 
@@ -485,7 +486,7 @@ def test_find_issue_rc_nonzero_raises_runtime_error(monkeypatch):
     _install_fake_run(monkeypatch, returncode=1, stderr="boom")
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="gh issue list rc=1: boom"):
         ops.find_issue(REPO_SLUG, "slug: beh-remediation-WS-1")
 
 
@@ -493,7 +494,7 @@ def test_find_issue_invalid_json_raises_runtime_error(monkeypatch):
     _install_fake_run(monkeypatch, returncode=0, stdout="not json")
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="invalid JSON: 'not json'"):
         ops.find_issue(REPO_SLUG, "slug: beh-remediation-WS-1")
 
 
@@ -541,7 +542,9 @@ def test_checkout_and_pull_switch_failure_raises_runtime_error(monkeypatch):
     _install_fake_run(monkeypatch, returncode=1, stderr="unknown branch")
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(
+        RuntimeError, match="git switch master rc=1: unknown branch"
+    ):
         ops.checkout_and_pull("/tmp/devtools", "master")
 
 
@@ -556,7 +559,9 @@ def test_checkout_and_pull_pull_failure_raises_runtime_error(monkeypatch):
     monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(
+        RuntimeError, match="git pull --ff-only rc=1: diverged"
+    ):
         ops.checkout_and_pull("/tmp/devtools", "master")
     assert len(calls_seen) == 2  # switch ran, then pull failed
 
@@ -953,6 +958,42 @@ def test_last_commit_touching_log_failure_raises_runtime_error(monkeypatch):
         ops.last_commit_touching("/tmp/devtools", "x.md")
 
 
+# Нормализующее jq-выражение держится тестом ЦЕЛИКОМ: правка выражения
+# обязана быть осознанной правкой теста. Подстрочные вхождения этого не
+# удерживали — правка `.base.ref` → `.head.ref` проходила зелёной (F-13).
+_PRS_CONTAINING_COMMIT_JQ = (
+    "[.[] | {number, "
+    'state: (if .merged_at then "MERGED" '
+    "else (.state | ascii_upcase) end), "
+    "baseRefName: .base.ref, mergedAt: .merged_at, "
+    "mergeCommit: .merge_commit_sha}]"
+)
+
+# Форма живого ответа `repos/:slug/commits/:sha/pulls` (REST): snake_case,
+# `state: open|closed`, `merged_by: null` даже у вмерженного PR. Ветки base и
+# head различны намеренно — иначе подмена одной другой была бы незаметна.
+_REST_COMMIT_PULLS_PAYLOAD = [
+    {
+        "number": 42,
+        "state": "closed",
+        "merged_at": "2026-09-01T00:00:00Z",
+        "merge_commit_sha": "deadbeef",
+        "base": {"ref": "master"},
+        "head": {"ref": "feat/supersede-code"},
+        "merged_by": None,
+    },
+    {
+        "number": 43,
+        "state": "open",
+        "merged_at": None,
+        "merge_commit_sha": None,
+        "base": {"ref": "master"},
+        "head": {"ref": "fix/other"},
+        "merged_by": None,
+    },
+]
+
+
 def test_prs_containing_commit_command_and_normalization(monkeypatch):
     payload = [
         {"number": 42, "state": "MERGED", "baseRefName": "master",
@@ -966,19 +1007,54 @@ def test_prs_containing_commit_command_and_normalization(monkeypatch):
     result = ops.prs_containing_commit(REPO_SLUG, "deadbeef")
 
     assert result == payload
-    call = calls[0]
-    assert call.argv[:3] == ["gh", "api", f"repos/{REPO_SLUG}/commits/"
-                              "deadbeef/pulls"]
-    assert "--jq" in call.argv
-    jq = call.argv[call.argv.index("--jq") + 1]
-    assert "MERGED" in jq and "merged_at" in jq and "merge_commit_sha" in jq
+    assert calls[0].argv == [
+        "gh", "api", f"repos/{REPO_SLUG}/commits/deadbeef/pulls",
+        "--jq", _PRS_CONTAINING_COMMIT_JQ,
+    ]
+
+
+def test_prs_containing_commit_jq_really_normalizes_rest_payload(
+    monkeypatch,
+) -> None:
+    """Настоящий `jq` прогоняется по REST-фикстуре — проверяется поведение.
+
+    Фейковый subprocess отдаёт уже нормализованный ответ, поэтому само
+    выражение в его тестах не исполняется. Здесь оно берётся из построенного
+    argv и применяется живым `jq`: удерживаются и `MERGED` по `merged_at`,
+    и `baseRefName` из `.base.ref` — поле, по которому `_resolve_correction_pr`
+    отбирает correction-PR (§I7).
+    """
+    jq_bin = shutil.which("jq")
+    if jq_bin is None:
+        pytest.skip("jq не установлен — нормализацию не на чем прогнать")
+
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="[]")
+    RealOps().prs_containing_commit(REPO_SLUG, "deadbeef")
+    argv = calls[0].argv
+    jq_expr = argv[argv.index("--jq") + 1]
+    # Фейк подменяет subprocess.run глобально — снимаем перед живым вызовом.
+    monkeypatch.undo()
+
+    done = subprocess.run(
+        [jq_bin, "-c", jq_expr],
+        input=json.dumps(_REST_COMMIT_PULLS_PAYLOAD),
+        capture_output=True, text=True,
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == [
+        {"number": 42, "state": "MERGED", "baseRefName": "master",
+         "mergedAt": "2026-09-01T00:00:00Z", "mergeCommit": "deadbeef"},
+        {"number": 43, "state": "OPEN", "baseRefName": "master",
+         "mergedAt": None, "mergeCommit": None},
+    ]
 
 
 def test_prs_containing_commit_rc_nonzero_raises_runtime_error(monkeypatch):
     _install_fake_run(monkeypatch, returncode=1, stderr="rate limited")
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="gh api rc=1: rate limited"):
         ops.prs_containing_commit(REPO_SLUG, "deadbeef")
 
 
@@ -986,7 +1062,7 @@ def test_prs_containing_commit_invalid_json_raises_runtime_error(monkeypatch):
     _install_fake_run(monkeypatch, returncode=0, stdout="not json")
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="invalid JSON: 'not json'"):
         ops.prs_containing_commit(REPO_SLUG, "deadbeef")
 
 
