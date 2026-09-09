@@ -2011,7 +2011,9 @@ def main(argv: list[str] | None = None) -> int:
             "--supersede и --abandon-revision — разные действия: "
             "сначала абандоньте ревизию, затем запускайте переиздание"
         )
-    if args.conform_approve and (args.supersede or args.abandon_revision):
+    if args.conform_approve and (
+        args.supersede or args.abandon_revision is not None
+    ):
         # Та же мотивировка, доведённая до конца (minor C-6): диспетчер
         # ниже проверяет --abandon-revision, затем --supersede, затем
         # --conform-approve, и первый сработавший молча съедал остальные.
