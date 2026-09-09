@@ -347,7 +347,11 @@ class _StubOps:
         # Дефолт для стабов, у которых живого git нет (Task 7 supersede):
         # переопределяющие подклассы (_recover_commit-тесты) уже несут
         # собственный rev_parse, этот — только чтобы не падать AttributeError.
-        return None
+        # "HEAD" отвечает синтетическим SHA (Task 7b): base_sha теперь
+        # fail-closed при None (§I2), и «живого git нет» для HEAD означало
+        # бы отказ ещё до предмета теста; прочие ref'ы (ветка ревизии) —
+        # по-прежнему None, то есть «коммита ещё нет».
+        return "base-sha-1" if ref == "HEAD" else None
 
     def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
         # Тот же смысл: _previous_dag дёргает show_file на пути «легаси-v1
@@ -2966,10 +2970,11 @@ class _SupersedeOps(_ProvOps):
     """Стаб на базе `_ProvOps` для `deliver_superseded`: живого git нет,
     примитивы восстановления коммита/идентичности возвращают None —
     ветвление на "коммита ещё нет" (`_recover_commit`) и "PR не найден"
-    (`_reconcile_revision`), не на чужую работу под тем же именем."""
+    (`_reconcile_revision`), не на чужую работу под тем же именем.
 
-    def rev_parse(self, target_dir, ref):
-        return None
+    `rev_parse` наследуется от `_StubOps` (Task 7b): "HEAD" → синтетический
+    `base-sha-1` (иначе fail-closed гард §I2 останавливает переиздание до
+    предмета теста), ветка ревизии → None, то есть коммита ещё нет."""
 
     def commit_parent(self, target_dir, sha):
         return None
@@ -2979,6 +2984,12 @@ class _SupersedeOps(_ProvOps):
 
     def find_pr(self, repo_slug, branch, *, any_state=False):
         return None
+
+    def show_file(self, target_dir, ref, path):
+        # Спека v1 в base доставлена (фикстура объявляет v1 доставленной),
+        # её якорь — decomposition: `_previous_dag` выводит состав по
+        # каталогу И этому якорю (dag_source = derived_from_spec).
+        return _spec_text("decomposition")
 
 
 def test_supersede_equal_anchor_is_traceless_noop(tmp_path, monkeypatch):
@@ -3010,6 +3021,7 @@ def test_supersede_changed_anchor_opens_new_branch_and_pr(
 ):
     from governance import run_state as rs
     from governance import task_bridge as tb
+    from governance.stale_adapter import blob_sha1
 
     state = _recon_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
@@ -3023,6 +3035,16 @@ def test_supersede_changed_anchor_opens_new_branch_and_pr(
     assert saved["status"] == "completed"
     assert saved["supersedes"] == 1
     assert saved["approval_pr"] == 403
+    # Поля записи, а не только PR и ветка (minor ревью Task 7, B10):
+    # незаполненные head_sha/tasks_blob раньше не ловились ничем.
+    delivered = (
+        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
+    ).read_text(encoding="utf-8")
+    assert saved["head_sha"] == "base-sha-1"
+    assert saved["tasks_blob"] == blob_sha1(delivered)
+    assert saved["tasks_version"] == 2
+    assert saved["prospective_anchor"] == saved["anchor"]
+    assert saved["dag_source"] == "derived_from_spec"
     assert rs.load("r-recon").ops["tasks-deliver"]["pr"] == 5   # v1 цела
 
 
@@ -3068,6 +3090,144 @@ def test_supersede_legacy_without_anchor_records_unavailable(
     tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["comparison"] == "unavailable"
+
+
+def test_supersede_records_commit_facts_before_push(tmp_path, monkeypatch):
+    """§I3: head_sha/tasks_blob durable-записаны МЕЖДУ коммитом и push.
+
+    Стаб `push_branch` читает run.json С ДИСКА в момент вызова: падение
+    между коммитом и push обязано оставить ревизию опознаваемой."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+    from governance.stale_adapter import blob_sha1
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    rs.save(state)
+
+    class _WatchPush(_SupersedeOps):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            # Снимок на КАЖДЫЙ push: утверждается ПЕРВЫЙ — иначе поздний
+            # push замаскировал бы запись фактов, сделанную после него.
+            self.at_push: list[dict | None] = []
+
+        def push_branch(self, target_dir, branch):
+            self.at_push.append(rs.load("r-recon").ops.get("tasks-deliver-v2"))
+            super().push_branch(target_dir, branch)
+
+    ops = _WatchPush(prs=[_MERGED_PR])
+    tb.deliver_superseded(state, ops)
+    delivered = (
+        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
+    ).read_text(encoding="utf-8")
+    assert ops.at_push and ops.at_push[0] is not None
+    assert ops.at_push[0]["head_sha"] == "base-sha-1"
+    assert ops.at_push[0]["tasks_blob"] == blob_sha1(delivered)
+
+
+def test_supersede_fails_when_actual_anchor_differs(tmp_path, monkeypatch):
+    """§I2: фактический штамп разошёлся с проспективным — фатально.
+
+    Ревизия остаётся `started` (её разберёт реконсиляция), push не идёт."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    rs.save(state)
+    monkeypatch.setattr(
+        tb, "_prospective_anchor",
+        lambda *a, **kw: "0000000ложный-проспективный-штамп",
+    )
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    with pytest.raises(RuntimeError, match="разошёлся с проспективным"):
+        tb.deliver_superseded(state, ops)
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["status"] == "started"
+    assert not any(c[0] == "push_branch" for c in ops.calls)
+
+
+def test_supersede_write_ahead_survives_delivery_failure(tmp_path, monkeypatch):
+    """§I4: падение внутри deliver() оставляет ревизию `started` с намерением."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    rs.save(state)
+
+    class _FailingPr(_SupersedeOps):
+        def create_draft_pr(self, *a, **kw):
+            raise RuntimeError("gh pr create упал")
+
+    with pytest.raises(RuntimeError, match="gh pr create упал"):
+        tb.deliver_superseded(state, _FailingPr(prs=[_MERGED_PR]))
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["status"] == "started"
+    assert saved["branch"] == "spec/WS-alpha-7-tasks-v2"
+    assert saved["base_sha"] == "base-sha-1"
+    assert saved["approval_pr"] == 403
+    assert saved["supersedes"] == 1
+    assert saved["expected_generated_at"]
+    # Коммит уже был — факты опознания записаны хуком ДО падения на PR.
+    assert saved["head_sha"] == "base-sha-1"
+    assert saved["tasks_blob"]
+
+
+def test_supersede_base_sha_unknown_fails_closed(tmp_path, monkeypatch):
+    """rev_parse('HEAD') → None: «база та же» выродилась бы в тождество."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    rs.save(state)
+
+    class _NoHead(_SupersedeOps):
+        def rev_parse(self, target_dir, ref):
+            return None
+
+    with pytest.raises(RuntimeError, match="HEAD"):
+        tb.deliver_superseded(state, _NoHead(prs=[_MERGED_PR]))
+
+
+def test_previous_tasks_version_missing_spec_refuses(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").unlink()
+    with pytest.raises(RuntimeError, match="не найден на базе"):
+        tb._previous_tasks_version(state)
+
+
+def test_previous_tasks_version_unparsable_frontmatter_refuses(
+    tmp_path, monkeypatch
+):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").write_text(
+        "нет frontmatter вовсе\n", encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="frontmatter не разобрать"):
+        tb._previous_tasks_version(state)
+
+
+def test_previous_tasks_version_non_integer_refuses(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").write_text(
+        '---\nspec_stage: tasks\nversion: "две"\n---\n\nbody\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="не целое число"):
+        tb._previous_tasks_version(state)
 
 
 def test_supersede_not_completed_run_refuses(tmp_path, monkeypatch):

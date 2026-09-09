@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import re
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -871,6 +872,7 @@ def deliver(
     profile: str | None = None,
     branch: str | None = None,
     version: int = 1,
+    after_commit: Callable[[dict], None] | None = None,
 ) -> int:
     """Штампует бандл + пишет spec/<ws-id>-tasks.md; один draft-PR.
 
@@ -909,6 +911,16 @@ def deliver(
     возросшим `version:` во frontmatter — обычная доставка (`deliver_for_run`)
     не передаёт ни того, ни другого, и получает прежние дефолты
     (`spec/<ws-id>-tasks`, `version: 1`).
+
+    `after_commit` (Task 7b плана supersede) — хук, вызываемый РОВНО между
+    `commit_paths` и `push_branch` с фактами свершившегося коммита
+    (`head_sha`, `tasks_blob`, `anchor_blob` — фактический штамп
+    терминального узла, тот же, что ушёл в пин спеки). §I3 контракта
+    переиздания требует durable-записи `head_sha` до push: падение между
+    коммитом и push иначе оставляет ревизию без единственного факта, по
+    которому её опознают в ветке. Отказ внутри хука прерывает доставку ДО
+    push — это корректное состояние, его разбирает реконсиляция. `None`
+    (дефолт) — поведение обычной доставки байт-в-байт прежнее.
     """
     if ops.is_dirty(target_dir):
         raise RuntimeError(
@@ -1069,6 +1081,15 @@ def deliver(
         [*stamped, rel],
         f"spec: {ws_id} tasks (draft) + штамп статусов бандла (fleet-agent)",
     )
+    if after_commit is not None:
+        # Между коммитом и push (§I3): падение здесь оставляет коммит
+        # опознаваемым. `anchor_blob` — ФАКТИЧЕСКИЙ штамп терминального
+        # узла, тот же, что ушёл в пин спеки.
+        after_commit({
+            "head_sha": ops.rev_parse(target_dir, "HEAD"),
+            "tasks_blob": blob_sha1(text),
+            "anchor_blob": design_blob,
+        })
     ops.push_branch(target_dir, branch)
     body = (
         f"Draft tasks.md-спека из behaviour-spec бандла {ws_id} "
@@ -1478,6 +1499,33 @@ def _previous_tasks_version(state: RunState) -> int:
     return version
 
 
+def _commit_facts_cb(
+    state: RunState, ops: Ops, n: int, prospective: str
+) -> Callable[[dict], None]:
+    """Durable-запись фактов коммита + сверка §I2 между commit и push.
+
+    Отказ внутри колбэка оставляет коммит без push и ревизию в `started` —
+    корректное состояние: его разбирает реконсиляция при следующем запуске.
+    """
+
+    def _cb(facts: dict) -> None:
+        if facts["anchor_blob"] != prospective:
+            raise RuntimeError(
+                "фактический штамп анкера "
+                f"{facts['anchor_blob'][:7]} разошёлся с проспективным "
+                f"{prospective[:7]} — апстрим двигали во время доставки"
+            )
+        key = f"{_REVISION_PREFIX}{n}"
+        state.ops[key] = {
+            **state.ops[key],
+            "head_sha": facts["head_sha"],
+            "tasks_blob": facts["tasks_blob"],
+        }
+        save(state)
+
+    return _cb
+
+
 def deliver_superseded(
     state: RunState,
     ops: Ops,
@@ -1506,6 +1554,14 @@ def deliver_superseded(
     base_ref = state.base_ref or "master"
     ops.checkout_and_pull(state.target_dir, base_ref)
     base_sha = ops.rev_parse(state.target_dir, "HEAD")
+    if base_sha is None:
+        # Fail-closed (минор ревью Task 7, B7): при None сверка «база та
+        # же» (`_reconcile_revision`) вырождается в тождество, а сообщение
+        # abandon падает TypeError на `None[:7]`.
+        raise RuntimeError(
+            f"rev_parse HEAD в {state.target_dir!r} не дал SHA — база "
+            "неизвестна, переиздание не начато"
+        )
 
     prev = _last_delivery(state)
     if prev is None:
@@ -1566,7 +1622,9 @@ def deliver_superseded(
         "dag_source": dag_source,
         "supersedes": prev_n,
         "expected_generated_at": generated_at,
-        "tasks_blob": None,      # заполняется после рендера, до коммита
+        # Заполняется хуком `after_commit` доставки (`_commit_facts_cb`):
+        # между коммитом и push, вместе с head_sha (§I3).
+        "tasks_blob": None,
     }
     if recorded_anchor is None:
         # §6 спеки: сверка была невозможна — фиксируем это В ЖУРНАЛЕ.
@@ -1591,11 +1649,11 @@ def deliver_superseded(
         profile=state.profile,
         branch=branch,
         version=version,
+        after_commit=_commit_facts_cb(state, ops, n, prospective),
     )
-    _complete_revision(
-        state, n, pr=pr, anchor=prospective,
-        head_sha=ops.rev_parse(state.target_dir, branch),
-    )
+    # head_sha здесь НЕ пишется: он уже записан колбэком durable — между
+    # коммитом и push (§I3), а не после создания PR.
+    _complete_revision(state, n, pr=pr, anchor=prospective)
     return pr
 
 
