@@ -1140,6 +1140,40 @@ def deliver(
     )
 
 
+def _delivered_anchor(
+    state: RunState,
+    ops: Ops,
+    facts: dict,
+    legacy_bundle: int | None,
+) -> str | None:
+    """Anchor уже доставленного PR — blob анкера в его head-коммите (§I2).
+
+    Реконсиляция принимает доставку, которую этот вызов НЕ делал: штамп
+    терминального узла уже состоялся и лежит в коммите PR-а, а те же
+    байты после мержа лягут в base. Значит anchor не надо пересчитывать —
+    его надо ПРОЧИТАТЬ там, где он существует.
+
+    Пересчитать проспективный штамп здесь было бы и невозможно (на этом
+    пути нет `approved_by`/`approved_at`, а поднимать их вычисление выше
+    значит добавить отказ «у PR нет mergedBy/mergedAt» туда, где сегодня
+    доставка успешно реконсилируется), и НЕВЕРНО: считался бы ТЕКУЩИЙ
+    апстрим, который у более ранней доставки мог уже уехать вперёд
+    доставленного, — и §I5 объявил бы «апстрим не менялся» ложно, то есть
+    стал бы fail-open ровно в том гейте, ради которого anchor вводится.
+
+    `None` — факт недоступен (PR без `headRefOid`; объект не подтянут в
+    локальный клон): доставка НЕ падает, переиздание уйдёт §6-путём
+    (`comparison: unavailable`) — как и до появления записи anchor'а.
+    """
+    head = facts.get("headRefOid")
+    if not head:
+        return None
+    dag = _dag_for(legacy_bundle)
+    return ops.blob_in_commit(
+        state.target_dir, head, f"{state.bundle_dir}/{dag[-1][0]}"
+    )
+
+
 def deliver_for_run(
     state: RunState,
     ops: Ops,
@@ -1153,6 +1187,16 @@ def deliver_for_run(
     ищется уже созданный PR по ветке ``spec/<ws-id>-tasks`` — повтор
     НИКОГДА не создаёт PR заново, в каком бы состоянии op ни застал
     прогон (new/started/completed).
+
+    Оба завершения op пишут `anchor` — blob терминального узла активного
+    DAG после штампа (§I2). Без него `prev_op.get("anchor")` у v1 всегда
+    `None`, и ПЕРВОЕ переиздание любого воркстрима уходит в
+    compatibility-случай §6 вместо сверки §I5: `--supersede` сразу после
+    обычной доставки завёл бы v2 с новой веткой и PR-ом вместо
+    бесследного no-op. Источник значения у двух завершений разный —
+    новая доставка знает фактический штамп изнутри (`after_commit`),
+    реконсиляция читает доставленные байты из head-коммита PR-а
+    (`_delivered_anchor`).
 
     Возвращает номер PR; любое препятствие — RuntimeError (fail-closed,
     вызывающая сторона печатает и выходит ненулевым RC).
@@ -1183,7 +1227,11 @@ def deliver_for_run(
     branch = f"spec/{state.ws_id}-tasks"
     existing = ops.find_pr(state.repo_slug, branch, any_state=True)
     if existing is not None:
-        pr_state = ops.pr_facts(state.repo_slug, existing).get("state")
+        # Факты PR берутся ЦЕЛИКОМ (один и тот же запрос, что и раньше):
+        # кроме `state` из них нужен `headRefOid` — по нему читается
+        # доставленный anchor (`_delivered_anchor`).
+        existing_facts = ops.pr_facts(state.repo_slug, existing)
+        pr_state = existing_facts.get("state")
         if pr_state not in ("OPEN", "MERGED"):
             raise RuntimeError(
                 f"PR #{existing} по ветке {branch} закрыт без мержа "
@@ -1191,7 +1239,12 @@ def deliver_for_run(
                 "решите судьбу ветки/PR вручную, повторная доставка "
                 "поверх отклонённой не выполняется"
             )
-        op_complete(state, "tasks-deliver", pr=existing)
+        op_complete(
+            state, "tasks-deliver", pr=existing,
+            anchor=_delivered_anchor(
+                state, ops, existing_facts, legacy_bundle
+            ),
+        )
         print(
             f"найден существующий PR #{existing} по ветке {branch} "
             f"({pr_state}) — принят как доставка, новый не создаётся"
@@ -1212,6 +1265,20 @@ def deliver_for_run(
             f"у PR #{state.pr} нет mergedBy/mergedAt — бандл не вмержен "
             "или API не отдал факт мержа; стоп"
         )
+    stamped: dict[str, str] = {}
+
+    def _capture_anchor(commit_facts: dict) -> None:
+        """§I2: фактический штамп анкера — те байты, что ушли в PR.
+
+        Хук — единственный момент, когда значение верно: до `deliver()`
+        рабочее дерево ещё не синхронизировано с `base_ref`
+        (`checkout_and_pull` живёт ВНУТРИ доставки), а после неё дерево
+        уже проштамповано, и `_prospective_anchor` считал бы штамп
+        поверх штампа. Колбэк ничего не пишет на диск и не может
+        отказать — новых путей отказа обычная доставка не получает.
+        """
+        stamped["anchor"] = commit_facts["anchor_blob"]
+
     op_start(state, "tasks-deliver")
     pr = deliver(
         target_dir=state.target_dir,
@@ -1225,8 +1292,9 @@ def deliver_for_run(
         approved_at=merged_at,
         legacy_bundle=legacy_bundle,
         profile=state.profile,
+        after_commit=_capture_anchor,
     )
-    op_complete(state, "tasks-deliver", pr=pr)
+    op_complete(state, "tasks-deliver", pr=pr, anchor=stamped.get("anchor"))
     return pr
 
 
