@@ -4273,6 +4273,59 @@ def test_content_anchor_changes_with_node_body(tmp_path, monkeypatch) -> None:
     ) != before
 
 
+def test_content_anchor_is_taken_from_post_stamp_state(tmp_path: Path) -> None:
+    """Представление берётся с ПРОСПЕКТИВНО проштампованного состояния.
+
+    Закрытие развилки спеки (§I2, «открытый пункт»): альтернатива —
+    канонизировать сырые байты свежего base. В большинстве кругов две
+    величины совпадают: к моменту переиздания base уже проштампован
+    предыдущей доставкой, а её штамп канонизация и так вырезает.
+    Расходятся они там, где предстоящий штамп НЕ сводится к подписи, —
+    correction вернул узел в `draft`. Тогда:
+
+    - «с сырого base» записало бы величину ДОштампового состояния,
+      которой в base не будет НИКОГДА: следующий круг увидит уже
+      проштампованное дерево и объявит апстрим изменившимся — лишняя
+      ревизия после каждого correction'а, трогающего `status`;
+    - «с проспективного штампа» записывает ровно то, что доставка и
+      положит в base, — и следующий круг сходится.
+
+    Отсюда же ответ про `status`/`version`: специально нормализовать их
+    не нужно. Обе стороны сверки пост-штамповые, а перештамп подписи
+    `version` не инкрементит (это правило и держит сходимость второго
+    круга) — поля совпадают сами.
+    """
+    target = str(_target(tmp_path))
+    bundle = "workstreams/WS-alpha-7/spec"
+    dag = task_bridge._BUNDLE_DAG
+    # v1 доставлена и вмержена: бандл в base проштампован.
+    task_bridge.stamp_bundle_approved(target, bundle, "merger-5", "t5")
+    # Correction вернул узел на доавторинг и правит тело.
+    node = Path(target) / bundle / "10-requirements.md"
+    meta, body = task_bridge.split_frontmatter(
+        node.read_text(encoding="utf-8")
+    )
+    meta["status"] = "draft"
+    node.write_text(
+        task_bridge.join_frontmatter(meta, body + "\nПравка.\n"),
+        encoding="utf-8",
+    )
+    recorded = task_bridge._content_anchor(target, bundle, None)
+    raw = task_bridge._canonical_dag_hash(target, bundle, dag)
+    # Развилка настоящая: на этом входе варианты дают РАЗНОЕ.
+    assert raw != recorded
+    # Доставка v2 делает ровно тот штамп, который был спроектирован.
+    task_bridge.stamp_bundle_approved(
+        target, bundle, "merger-403", "t403",
+        restamp_nodes=frozenset({"requirements", "decomposition"}),
+    )
+    # Следующий круг сверяется с записанным — и сходится.
+    assert task_bridge._content_anchor(target, bundle, None) == recorded
+    # А «сырой» вариант записал бы то, чего в base не появится: после
+    # доставки сырая величина стала другой, и §I5 объявил бы изменение.
+    assert task_bridge._canonical_dag_hash(target, bundle, dag) != raw
+
+
 def _supersede_with_correction_touching_requirements(tmp_path, monkeypatch):
     """v1 доставлена и вмержена; correction-PR правит requirements + анкер."""
     from governance import run_state as rs
