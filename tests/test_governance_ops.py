@@ -1209,3 +1209,143 @@ def test_commit_parent_root_commit_returns_none(monkeypatch):
     ops = RealOps()
 
     assert ops.commit_parent("/tmp/devtools", "deadbeef") is None
+
+
+# --- Кейс: примитивы replace-перехода (закрытие PR, ревью, ветка) --------
+
+
+def test_pr_reviews_projects_login_and_state_line_by_line(monkeypatch):
+    """Построчный jq + `--paginate`: страницы склеиваются сами.
+
+    Обёртка в массив (`[.[] | ...]`) дала бы по массиву на страницу — тот
+    же ручной разбор нескольких JSON-документов, что в
+    `prs_containing_commit`; поток объектов его не требует.
+    """
+    calls = _install_fake_run(
+        monkeypatch, returncode=0,
+        stdout='{"login":"ai-prosto","state":"APPROVED"}\n'
+               '{"login":"andrei-shtanakov","state":"COMMENTED"}\n',
+    )
+    ops = RealOps()
+
+    found = ops.pr_reviews(REPO_SLUG, 408)
+
+    assert found == [
+        {"login": "ai-prosto", "state": "APPROVED"},
+        {"login": "andrei-shtanakov", "state": "COMMENTED"},
+    ]
+    assert calls[0].argv == [
+        "gh", "api", f"repos/{REPO_SLUG}/pulls/408/reviews", "--paginate",
+        "--jq", ".[] | {login: .user.login, state: .state}",
+    ]
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [{"returncode": 1, "stderr": "rate limited"},
+     {"returncode": 0, "stdout": "not json\n"}],
+    ids=["request-failed", "broken-json"],
+)
+def test_pr_reviews_unknown_is_none_not_empty(kw, monkeypatch):
+    """Сбой — None, а не пустой список.
+
+    Пустой список читается вызывающим как «ревью нет, вмешательства не
+    было» и разрешает закрыть чужой PR; `None` он обязан прочитать
+    fail-closed."""
+    _install_fake_run(monkeypatch, **kw)
+
+    assert RealOps().pr_reviews(REPO_SLUG, 408) is None
+
+
+def test_close_pr_runs_under_review_profile_with_comment(monkeypatch):
+    """Закрытие — от учётки агента и всегда с объяснением.
+
+    Профиль тот же, что у `merge` (ADR-ECO-011 D3): уйдя от основного
+    аккаунта, снятие предложения выглядело бы в истории решением
+    человека."""
+    calls = _install_fake_run(monkeypatch, returncode=0)
+
+    assert RealOps().close_pr(REPO_SLUG, 408, "причина") is True
+    assert calls[0].argv == [
+        "gh", "pr", "close", "408", "-R", REPO_SLUG, "--comment", "причина",
+    ]
+    assert calls[0].kwargs["env"]["GH_CONFIG_DIR"] == str(
+        Path.home() / ".config" / "review"
+    )
+
+
+def test_close_pr_rc_nonzero_returns_false_not_exception(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1)
+
+    assert RealOps().close_pr(REPO_SLUG, 408, "причина") is False
+
+
+def test_delete_remote_branch_targets_refs_heads(monkeypatch):
+    """Удаляется ССЫЛКА на origin, не история: коммиты и PR остаются."""
+    calls = _install_fake_run(monkeypatch, returncode=0)
+
+    assert RealOps().delete_remote_branch(REPO_SLUG, "spec/x-tasks-v3") is True
+    assert calls[0].argv == [
+        "gh", "api", "-X", "DELETE",
+        f"repos/{REPO_SLUG}/git/refs/heads/spec/x-tasks-v3",
+    ]
+    assert calls[0].kwargs["env"]["GH_CONFIG_DIR"] == str(
+        Path.home() / ".config" / "review"
+    )
+
+
+def test_delete_remote_branch_missing_branch_is_false_not_raise(monkeypatch):
+    """«Ветки уже нет» и «не вышло» неразличимы — обе False, без броска.
+
+    Шаг удаления идемпотентен по смыслу и стоит ПОСЛЕ доставки: отказ
+    здесь сказал бы оператору неправду об уже созданном PR."""
+    _install_fake_run(monkeypatch, returncode=1, stderr="Reference not found")
+
+    assert RealOps().delete_remote_branch(REPO_SLUG, "spec/x") is False
+
+
+def test_review_login_follows_env_with_ai_prosto_default(monkeypatch):
+    """Одно определение «кто наш бот» на весь слой."""
+    monkeypatch.delenv("REVIEW_LOGIN", raising=False)
+    assert ops_mod.review_login() == "ai-prosto"
+    monkeypatch.setenv("REVIEW_LOGIN", "other-bot")
+    assert ops_mod.review_login() == "other-bot"
+
+
+def test_delete_local_branch_force_deletes_in_the_clone(monkeypatch):
+    """Именно `-D`: отзываемая ветка не вмержена, `-d` отказал бы всегда."""
+    calls = _install_fake_run(monkeypatch, returncode=0)
+
+    assert RealOps().delete_local_branch("/tmp/clone", "spec/x-v3") is True
+    assert calls[0].argv == [
+        "git", "-C", "/tmp/clone", "branch", "-D", "spec/x-v3",
+    ]
+
+
+def test_delete_local_branch_missing_is_false_not_raise(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1, stderr="not found")
+
+    assert RealOps().delete_local_branch("/tmp/clone", "spec/x-v3") is False
+
+
+def test_remote_branch_head_reads_the_ref_not_the_pr(monkeypatch):
+    """Спрашивается СВОЙ ref: после закрытия PR в ветку могли дописать."""
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="deadbeef\n")
+
+    assert RealOps().remote_branch_head(REPO_SLUG, "spec/x-v3") == "deadbeef"
+    assert calls[0].argv == [
+        "gh", "api", f"repos/{REPO_SLUG}/git/ref/heads/spec/x-v3",
+        "--jq", ".object.sha",
+    ]
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [{"returncode": 1, "stderr": "Not Found"}, {"returncode": 0, "stdout": ""}],
+    ids=["no-such-ref", "empty-answer"],
+)
+def test_remote_branch_head_absent_is_none(kw, monkeypatch):
+    """Нет ветки — None; вызывающий читает это как «шаг уже состоялся»."""
+    _install_fake_run(monkeypatch, **kw)
+
+    assert RealOps().remote_branch_head(REPO_SLUG, "spec/x-v3") is None

@@ -2382,6 +2382,20 @@ def _recon_state(tmp_path: Path, monkeypatch, **kw):
     return state
 
 
+def _supersede_state(tmp_path: Path, monkeypatch, **kw):
+    """`_recon_state` + бандл в base, ПРОШТАМПОВАННЫЙ доставкой v1.
+
+    Боевое состояние входа переиздания: tasks-PR доставки v1 вмержен,
+    значит узлы бандла в base уже `approved` с подписью ЕЁ мержера.
+    `_recon_state` кладёт бандл в `draft` — вход, которого у переиздания
+    не бывает: поузловой §I7 (devtools#172) на нём fail-closed'ит узел
+    вне `signed_nodes`, потому что сохранять там нечего.
+    """
+    state = _recon_state(tmp_path, monkeypatch, **kw)
+    _stamp_base_as_previous_delivery(state)
+    return state
+
+
 def test_deliver_for_run_write_ahead_op_and_completion(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -3887,7 +3901,7 @@ def test_supersede_changed_anchor_opens_new_branch_and_pr(
     from governance import task_bridge as tb
     from governance.stale_adapter import blob_sha1
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ-ДРУГОЙ"}
     rs.save(state)
@@ -4174,6 +4188,9 @@ def test_supersede_legacy_bundle_uses_its_own_dag(tmp_path, monkeypatch):
     (bundle / "30-decomposition.md").write_text(
         DECOMPOSITION_MD_LEGACY5, encoding="utf-8"
     )
+    # Штамп v1 — ПОСЛЕ правки состава каталога и по легаси-DAG: базу
+    # переиздания оставляет вмерженный tasks-PR доставки v1.
+    _stamp_base_as_previous_delivery(state, legacy_bundle=5)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
@@ -4211,7 +4228,7 @@ def test_supersede_refreshes_base_before_reading_facts(
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
@@ -4238,7 +4255,7 @@ def test_supersede_refreshes_base_before_reading_facts(
 def test_supersede_version_is_monotonic(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     (Path(state.target_dir) / "spec").mkdir(exist_ok=True)
     (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").write_text(
         "---\nspec_stage: tasks\nversion: 4\n---\n", encoding="utf-8"
@@ -4271,7 +4288,7 @@ def test_supersede_legacy_without_content_anchor_records_unavailable(
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     # без content_anchor
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5}
     rs.save(state)
@@ -4316,7 +4333,7 @@ def test_supersede_unavailable_without_content_anchor(
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     extra = (
         {"anchor": _v1_anchor_of_current_tree(state)}
         if isinstance(v1_extra, str) else v1_extra
@@ -4525,6 +4542,415 @@ def test_content_anchor_is_taken_from_post_stamp_state(tmp_path: Path) -> None:
     # А «сырой» вариант записал бы то, чего в base не появится: после
     # доставки сырая величина стала другой, и §I5 объявил бы изменение.
     assert task_bridge._canonical_dag_hash(target, bundle, dag) != raw
+
+
+# --- §I7 на ПЕРЕХОДЕ статуса (devtools#172) -------------------------------
+#
+# `draft`/`stale` у узла — штатный след correction'а, а не экзотика:
+# коррекция бандла приводит узлы ровно в эти статусы. До правки первая
+# ветка штампа `restamp_nodes` не смотрела вовсе, и поузловой §I7 на этом
+# — основном — пути не работал.
+
+_BUNDLE = "workstreams/WS-alpha-7/spec"
+_PREV_BY, _PREV_AT = "prev-merger", "2026-09-01T00:00:00Z"
+_CORR_BY, _CORR_AT = "corr-merger", "2026-09-09T17:29:10Z"
+
+
+def _set_node(target: str, fname: str, **over) -> None:
+    """Точечная правка frontmatter узла бандла (статус, подпись)."""
+    path = Path(target) / _BUNDLE / fname
+    meta, body = task_bridge.split_frontmatter(path.read_text(encoding="utf-8"))
+    for key, value in over.items():
+        if value is None:
+            meta.pop(key, None)
+        else:
+            meta[key] = value
+    path.write_text(
+        task_bridge.join_frontmatter(meta, body), encoding="utf-8"
+    )
+
+
+def _meta(target: str, fname: str) -> dict:
+    """Frontmatter узла бандла."""
+    return task_bridge.split_frontmatter(
+        (Path(target) / _BUNDLE / fname).read_text(encoding="utf-8")
+    )[0]
+
+
+def _base_after_v1(tmp_path: Path) -> str:
+    """Бандл в base переиздания: проштампован вмерженной доставкой v1."""
+    target = str(_target(tmp_path))
+    task_bridge.stamp_bundle_approved(target, _BUNDLE, _PREV_BY, _PREV_AT)
+    return target
+
+
+def test_restamp_signs_node_in_signed_nodes_on_transition(
+    tmp_path: Path,
+) -> None:
+    """Правило 1: узел В `signed_nodes` — approved + подпись correction'а.
+
+    Переход и подпись здесь совпадают по направлению, поэтому правило
+    держалось и до правки; тест закрепляет его как часть политики, чтобы
+    fail-closed соседних правил не съел заодно и этот путь."""
+    target = _base_after_v1(tmp_path)
+    _set_node(target, "10-requirements.md", status="draft")
+    task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, _CORR_BY, _CORR_AT,
+        restamp_nodes=frozenset({"requirements"}),
+    )
+    meta = _meta(target, "10-requirements.md")
+    assert meta["status"] == "approved"
+    assert (meta["approved_by"], meta["approved_at"]) == (_CORR_BY, _CORR_AT)
+    # Переход совершён — поколение документа выросло.
+    assert meta["version"] == 3
+
+
+def test_restamp_keeps_signature_of_stale_node_outside_signed_nodes(
+    tmp_path: Path,
+) -> None:
+    """Правило 2: `stale` вне `signed_nodes` — approved, подпись ПРЕЖНЯЯ.
+
+    Побайтовая сверка ОБОИХ полей: подмена одного из них (например,
+    `approved_at` фактами correction'а) — ровно та ложь о провенансе, из-за
+    которой issue и заведён, и «примерное» сравнение её бы пропустило.
+
+    `stale` означает, что изменился upstream, а не содержимое узла:
+    прежний подписант одобрял ровно эти байты тела, и его подпись
+    остаётся истинной. Перепиновка при этом проходит — она механическая."""
+    target = _base_after_v1(tmp_path)
+    before_pins = _meta(target, "20-design.md")["upstream_hashes"]
+    # Correction правит upstream: узел ниже протухает.
+    _set_node(target, "10-requirements.md", status="draft")
+    _set_node(target, "20-design.md", status="stale")
+    task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, _CORR_BY, _CORR_AT,
+        restamp_nodes=frozenset({"requirements"}),
+    )
+    meta = _meta(target, "20-design.md")
+    assert meta["status"] == "approved"
+    assert meta["approved_by"] == _PREV_BY
+    assert meta["approved_at"] == _PREV_AT
+    # Перепиновка downstream состоялась — сохранение подписи ей не мешает.
+    assert meta["upstream_hashes"] != before_pins
+    assert meta["version"] == 3
+
+
+def test_restamp_refuses_draft_node_outside_signed_nodes(
+    tmp_path: Path,
+) -> None:
+    """Правило 3: `draft` вне `signed_nodes` — fail-closed, с процедурой.
+
+    Сохранить прежнюю подпись здесь недоказуемо: содержание узла мог
+    изменить ДРУГОЙ correction-PR. Отказ обязан назвать УЗЕЛ и что делать
+    оператору — отказ без процедуры бесполезен."""
+    target = _base_after_v1(tmp_path)
+    _set_node(target, "00-charter.md", status="draft")
+    with pytest.raises(RuntimeError) as excinfo:
+        task_bridge.stamp_bundle_approved(
+            target, _BUNDLE, _CORR_BY, _CORR_AT,
+            restamp_nodes=frozenset({"requirements"}),
+        )
+    message = str(excinfo.value)
+    assert "00-charter.md" in message
+    assert "--approval-pr" in message
+    assert "отдельным PR" in message
+    # Отказ до записи: узел остался в том состоянии, в каком был.
+    assert _meta(target, "00-charter.md")["status"] == "draft"
+
+
+def test_restamp_refuses_node_without_previous_signature(
+    tmp_path: Path,
+) -> None:
+    """Правило 4: вне `signed_nodes` и без прежней подписи — fail-closed.
+
+    Отличается от правила 3 ПРИЧИНОЙ: статус сохраняющий (`stale`), но
+    сохранять нечего. Без отдельной ветки узел уехал бы в `approved` с
+    пустой подписью — провенанс, которого не существует."""
+    target = _base_after_v1(tmp_path)
+    _set_node(
+        target, "00-charter.md",
+        status="stale", approved_by=None, approved_at=None,
+    )
+    with pytest.raises(RuntimeError, match="прежней подписи нет"):
+        task_bridge.stamp_bundle_approved(
+            target, _BUNDLE, _CORR_BY, _CORR_AT,
+            restamp_nodes=frozenset({"requirements"}),
+        )
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [{"approved_by": None, "approved_at": None},
+     {"approved_by": "", "approved_at": ""}],
+    ids=["keys-absent", "empty-strings"],
+)
+def test_restamp_refuses_approved_node_without_signature(
+    signature, tmp_path: Path
+) -> None:
+    """Правило 4 распространяется и на УЖЕ `approved` узел вне подписи.
+
+    Клетка спеки «любой | нет в signed_nodes, и прежней подписи нет →
+    fail-closed» не была ограничена статусом, а кодом не проверялась
+    вовсе: первая ветка политики входит только при `status != approved`,
+    вторая требует членства в `signed_nodes`. Узел `status: approved` с
+    пустым `approved_by` не смотрел никто, и переиздание доставляло его с
+    RC 0 — «одобрено» без одобрившего.
+
+    Поймать это ниже по ходу нечем: `_content_anchor` подпись вырезает по
+    построению (§I2), поэтому ни сверка §I2, ни гвард `_commit_facts_cb`
+    расхождения не дают. Форма «не подписано» проверяется в обеих: и
+    ключей нет, и `approved_by: ""`, как его заводит шаблон бандла."""
+    target = _base_after_v1(tmp_path)
+    _set_node(target, "00-charter.md", status="approved", **signature)
+
+    with pytest.raises(RuntimeError, match="прежней подписи нет"):
+        task_bridge.stamp_bundle_approved(
+            target, _BUNDLE, _CORR_BY, _CORR_AT,
+            restamp_nodes=frozenset({"requirements"}),
+        )
+
+
+def test_approved_node_with_signature_outside_signed_nodes_is_untouched(
+    tmp_path: Path,
+) -> None:
+    """Непустая прежняя подпись у approved-узла вне подписи — не трогаем.
+
+    Парный позитив к отказу выше: правило требует, чтобы подпись БЫЛА, а
+    не чтобы она была нашей. Без этой пары отказ мог бы оказаться
+    «падаем на любом approved-узле вне signed_nodes» — то есть сломать
+    штатный путь переиздания, где такие узлы и лежат."""
+    target = _base_after_v1(tmp_path)
+    before = _meta(target, "00-charter.md")
+    assert before["status"] == "approved" and before["approved_by"]
+
+    task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, _CORR_BY, _CORR_AT,
+        restamp_nodes=frozenset({"requirements"}),
+    )
+
+    assert _meta(target, "00-charter.md") == before
+
+
+def test_plain_delivery_signs_draft_nodes_without_signed_nodes(
+    tmp_path: Path,
+) -> None:
+    """Обычная доставка (`restamp_nodes=None`) — прежнее поведение.
+
+    На первой доставке весь бандл `draft`, и все узлы законно получают
+    подпись бандл-PR. Понятия `signed_nodes` на этом пути нет вовсе,
+    поэтому ни один fail-closed §I7 здесь недостижим — иначе правка
+    сломала бы основной путь моста ради краевого."""
+    target = str(_target(tmp_path))
+    changed = task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, "bundle-merger", "t-bundle"
+    )
+    assert len(changed) == len(task_bridge._BUNDLE_DAG)
+    for fname, _ in task_bridge._BUNDLE_DAG:
+        meta = _meta(target, fname)
+        assert meta["status"] == "approved"
+        assert meta["approved_by"] == "bundle-merger"
+        assert meta["approved_at"] == "t-bundle"
+
+
+def test_prospective_stamp_matches_actual_on_mixed_statuses(
+    tmp_path: Path,
+) -> None:
+    """§I2: проспективный и фактический штамп совпадают на смешанных
+    статусах.
+
+    Гвард `_commit_facts_cb` рвёт доставку, разойдись эти двое. Правила
+    политики живут ЦЕЛИКОМ внутри `stamp_bundle_approved`, и обе стороны
+    зовут её одну — но продублируй кто-нибудь ветку перехода в
+    `_shadow_stamped`, расхождение вылезло бы ровно здесь."""
+    from governance.stale_adapter import blob_sha1
+
+    target = _base_after_v1(tmp_path)
+    _set_node(target, "10-requirements.md", status="draft")
+    _set_node(target, "20-design.md", status="stale")
+    _set_node(target, "30-decomposition.md", status="draft")
+    signed = frozenset({"requirements", "decomposition"})
+    prospective = task_bridge._prospective_anchor(
+        target, _BUNDLE, _CORR_BY, _CORR_AT, None, restamp_nodes=signed
+    )
+    task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, _CORR_BY, _CORR_AT, restamp_nodes=signed
+    )
+    actual = blob_sha1(
+        (Path(target) / _BUNDLE / "30-decomposition.md").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert prospective == actual
+
+
+def test_stale_node_outside_signed_nodes_converges_on_second_round(
+    tmp_path: Path,
+) -> None:
+    """Развилка `version` у `stale` вне `signed_nodes`: инкремент.
+
+    Выбор вынужден §I5, а не эстетикой. `_content_anchor` считает ОБЕ
+    стороны сверки по проспективно проштампованному дереву и всегда с
+    `restamp_nodes=None` — то есть любой не-approved узел там идёт веткой
+    перехода и получает `version + 1`. Канонизация вырезает подпись, но
+    НЕ `status` и НЕ `version`.
+
+    Оставь фактический штамп `version` прежним — записанный круг 1
+    `content_anchor` разошёлся бы с тем, что доставка кладёт в base, и
+    круг 2 объявил бы апстрим изменившимся на ровном месте: no-op §I5
+    стал бы недостижим, каждый запуск заводил бы ревизию.
+
+    Проверка идёт на ВТОРОМ круге, а не на первом: на первом обе величины
+    считаются по одному дереву и сходятся при любом решении."""
+    target = _base_after_v1(tmp_path)
+    _set_node(target, "10-requirements.md", status="draft")
+    _set_node(target, "20-design.md", status="stale")
+    # Круг 1: величина записывается ДО доставки, по проспективному штампу.
+    recorded = task_bridge._content_anchor(target, _BUNDLE, None)
+    task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, _CORR_BY, _CORR_AT,
+        restamp_nodes=frozenset({"requirements"}),
+    )
+    # Круг 2: тот же вопрос к base, который оставила доставка, — апстрим
+    # не менялся, значит величина обязана совпасть (§I5 → no-op).
+    assert task_bridge._content_anchor(target, _BUNDLE, None) == recorded
+
+
+def test_supersede_stamp_keeps_provenance_of_untouched_stale_nodes(
+    tmp_path: Path,
+) -> None:
+    """Регрессия живого случая (issue devtools#172).
+
+    Переиздание воркстрима `verify-first-file-scope-group-targets-20260908`
+    (доставка spec-runner#408, `approval_pr: 407`,
+    `signed_nodes: [behaviour-spec, decomposition]`): `design` и
+    `acceptance` были `stale` и в состав correction-PR #407 не входили —
+    их байты приехали из #403. До правки штамп приписывал им подпись
+    мержера #407, то есть человека, который этих узлов не касался.
+
+    Ожидаемая таблица: подпись #407 получают РОВНО два узла из
+    `signed_nodes`; charter/requirements (уже approved) и
+    design/acceptance (`stale`, вне состава) сохраняют исходную."""
+    target = _base_after_v1(tmp_path)
+    _set_node(target, "15-behaviour-spec.md", status="draft")
+    _set_node(target, "20-design.md", status="stale")
+    _set_node(target, "25-acceptance.md", status="stale")
+    _set_node(target, "30-decomposition.md", status="draft")
+    task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, _CORR_BY, _CORR_AT,
+        restamp_nodes=frozenset({"behaviour-spec", "decomposition"}),
+    )
+    signed_by = {
+        fname: (
+            _meta(target, fname)["approved_by"],
+            _meta(target, fname)["approved_at"],
+        )
+        for fname, _ in task_bridge._BUNDLE_DAG
+    }
+    assert signed_by == {
+        "00-charter.md": (_PREV_BY, _PREV_AT),
+        "10-requirements.md": (_PREV_BY, _PREV_AT),
+        "15-behaviour-spec.md": (_CORR_BY, _CORR_AT),
+        "20-design.md": (_PREV_BY, _PREV_AT),
+        "25-acceptance.md": (_PREV_BY, _PREV_AT),
+        "30-decomposition.md": (_CORR_BY, _CORR_AT),
+    }
+    # Статус выровнен у всех — переиздание доставляет approved-бандл.
+    assert all(
+        _meta(target, fname)["status"] == "approved"
+        for fname, _ in task_bridge._BUNDLE_DAG
+    )
+
+
+def test_supersede_fail_closed_leaves_no_branch_commit_or_ledger_entry(
+    tmp_path, monkeypatch
+) -> None:
+    """Отказ §I7 наступает на ПРОСПЕКТИВНОМ штампе — следов не остаётся.
+
+    Порядок §I2 ставит проспективный штамп ДО `_start_revision`, поэтому
+    `draft` вне `signed_nodes` роняет переиздание раньше ветки, коммита,
+    PR и записи в леджере. Съедь отказ внутрь `deliver()` — оператор
+    получил бы ту же диагностику, но с оставленной веткой и started-
+    ревизией, которую пришлось бы разбирать реконсиляцией."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    # Correction (#403) трогал только анкер; charter он не касался, а тот
+    # лежит `draft` — сохранять там нечего.
+    _set_node(state.target_dir, "00-charter.md", status="draft")
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    rs.save(state)
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    with pytest.raises(RuntimeError, match="00-charter.md"):
+        tb.deliver_superseded(state, ops)
+    assert not any(
+        call[0] in ("ensure_branch", "commit_paths", "push_branch",
+                    "create_draft_pr")
+        for call in ops.calls
+    )
+    assert "tasks-deliver-v2" not in rs.load("r-recon").ops
+
+
+def test_canonical_stamp_is_neutral_to_node_policy(tmp_path: Path) -> None:
+    """Канонический штамп §I5 клетки политики §I7 НЕ применяет.
+
+    `_content_anchor` и `_prospective_anchor` делят примитив
+    `_shadow_stamped`, но зовут его по-разному: канонический идёт с
+    подписью-заглушкой и БЕЗ `signed_nodes` — на его шаге состав
+    подписываемых узлов ещё не вычислен и вычислен быть не может
+    (провенанс §I7 резолвится ПОЗЖЕ и только если содержание менялось).
+
+    Сработай fail-closed здесь — он срабатывал бы на ЛЮБОМ бандле с
+    draft-узлом, то есть раньше, чем выяснено, менялся ли апстрим вообще.
+    Вход тут предельный: узел `draft` и БЕЗ подписи вовсе — тот самый,
+    на котором политика отказывает громче всего."""
+    target = _base_after_v1(tmp_path)
+    _set_node(
+        target, "00-charter.md",
+        status="draft", approved_by=None, approved_at=None,
+    )
+    # Не «не упало», а «посчиталось и отвечает на свой вопрос»: правка
+    # тела величину двигает, значит она не вырождена.
+    before = task_bridge._content_anchor(target, _BUNDLE, None)
+    _set_node(target, "00-charter.md", version=42)
+    assert task_bridge._content_anchor(target, _BUNDLE, None) != before
+
+
+def test_supersede_noop_reachable_with_draft_node_outside_signed_nodes(
+    tmp_path, monkeypatch
+) -> None:
+    """§I5 стоит ВЫШЕ §I7: неизменный апстрим — бесследный no-op, не отказ.
+
+    Клетка спеки «узлы вне `signed_nodes` лежат `draft`, но апстрим не
+    менялся → 0». Проверки статусов §I7 на этом пути недостижимы по
+    построению: сверка §I5 идёт по каноническому штампу, который
+    `signed_nodes` не знает, и провенанс не резолвится вовсе.
+
+    Парный случай — `..._fail_closed_leaves_no_branch...`: там содержание
+    ИЗМЕНИЛОСЬ, и тот же `draft`-узел даёт fail-closed. Вдвоём эти два
+    теста и держат порядок: сначала §I5, только потом §I7."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    # Узел, которого correction (#403) не касался, лежит `draft` — на
+    # проспективном штампе он дал бы fail-closed.
+    _set_node(state.target_dir, "00-charter.md", status="draft")
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "БЛОБ-ДОСТАВКИ-v1",
+        "content_anchor": tb._content_anchor(
+            state.target_dir, state.bundle_dir, None
+        ),
+    }
+    rs.save(state)
+    before = (rs.run_dir("r-recon") / "run.json").read_bytes()
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("noop")
+    assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
+    # Провенанс не разрешался — иначе §I5 стоял бы не выше §I7.
+    assert ops.touched == []
+    assert ("pr_facts", 403) not in ops.calls
 
 
 #: SHA коммита correction-PR (#403) и штамп-коммита нашей доставки v1 (#5).
@@ -4767,6 +5193,9 @@ def _seed_revision(state, monkeypatch, **over):
     from governance import run_state as rs
     from governance import task_bridge as tb
 
+    # База переиздания — бандл, проштампованный вмерженной доставкой v1
+    # (идемпотентно, если вызывающий уже привёл её в это состояние).
+    _stamp_base_as_previous_delivery(state)
     by, at = _pr_signature(403)
     prospective = tb._prospective_anchor(
         state.target_dir, state.bundle_dir, by, at, None,
@@ -5259,7 +5688,7 @@ def test_supersede_records_commit_facts_before_push(tmp_path, monkeypatch):
     from governance import task_bridge as tb
     from governance.stale_adapter import blob_sha1
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
@@ -5296,7 +5725,7 @@ def test_supersede_records_tasks_blob_before_commit(tmp_path, monkeypatch):
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
@@ -5343,7 +5772,7 @@ def test_supersede_fails_when_actual_anchor_differs(tmp_path, monkeypatch):
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
@@ -5364,7 +5793,7 @@ def test_supersede_write_ahead_survives_delivery_failure(tmp_path, monkeypatch):
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
@@ -5499,14 +5928,14 @@ def test_cli_supersede_calls_deliver_superseded(tmp_path, monkeypatch, capsys):
     _recon_state(tmp_path, monkeypatch)
     called = {}
 
-    def _fake(s, o, legacy_bundle=None, approval_pr=None):
-        called["args"] = (s.run_id, legacy_bundle, approval_pr)
+    def _fake(s, o, legacy_bundle=None, approval_pr=None, replace=None):
+        called["args"] = (s.run_id, legacy_bundle, approval_pr, replace)
         return tb.SupersedeResult("delivered", 77)
 
     monkeypatch.setattr(tb, "deliver_superseded", _fake)
     monkeypatch.setattr(tb, "RealOps", lambda: object())
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
-    assert called["args"] == ("r-recon", None, None)
+    assert called["args"] == ("r-recon", None, None, None)
     assert "переизданная tasks-спека доставлена: PR #77" in (
         capsys.readouterr().out
     )
@@ -5529,8 +5958,8 @@ def test_cli_supersede_passes_flags_through(tmp_path, monkeypatch, capsys):
     _recon_state(tmp_path, monkeypatch)
     called = {}
 
-    def _fake(s, o, legacy_bundle=None, approval_pr=None):
-        called["args"] = (s.run_id, legacy_bundle, approval_pr)
+    def _fake(s, o, legacy_bundle=None, approval_pr=None, replace=None):
+        called["args"] = (s.run_id, legacy_bundle, approval_pr, replace)
         return tb.SupersedeResult("delivered", 77)
 
     monkeypatch.setattr(tb, "deliver_superseded", _fake)
@@ -5539,7 +5968,7 @@ def test_cli_supersede_passes_flags_through(tmp_path, monkeypatch, capsys):
         "--run-id", "r-recon", "--supersede",
         "--approval-pr", "500", "--legacy-bundle", "5",
     ]) == 0
-    assert called["args"] == ("r-recon", 5, 500)
+    assert called["args"] == ("r-recon", 5, 500, None)
 
 
 def test_cli_supersede_noop_is_success(tmp_path, monkeypatch, capsys):
@@ -5550,7 +5979,7 @@ def test_cli_supersede_noop_is_success(tmp_path, monkeypatch, capsys):
     _recon_state(tmp_path, monkeypatch)
     monkeypatch.setattr(
         tb, "deliver_superseded",
-        lambda s, o, legacy_bundle=None, approval_pr=None:
+        lambda s, o, legacy_bundle=None, approval_pr=None, replace=None:
             tb.SupersedeResult("noop"),
     )
     monkeypatch.setattr(tb, "RealOps", lambda: object())
@@ -5602,7 +6031,7 @@ def test_cli_supersede_delivery_is_announced(tmp_path, monkeypatch, capsys):
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ-ДРУГОЙ"}
     rs.save(state)
@@ -5757,3 +6186,1273 @@ def test_cli_abandon_revision_requires_reason(tmp_path, monkeypatch, capsys):
 
     with pytest.raises(SystemExit):
         tb.main(["--run-id", "r", "--abandon-revision", "2"])
+
+
+# --- replace-переход: замена незамерженного предложения (§I10) -----------
+#
+# Живой случай: PR spec-runner#408 доставлен ревизией v3 с дефектными
+# подписями (devtools#172). PR не вмержен и приниматься не должен, а
+# выхода из контракта до этого перехода не было ни одного: закрыть — §I3
+# fail-closed навсегда, абандонить — §I4 запрещает на терминальном
+# статусе, оставить — §I3 возвращает тот же дефектный PR на каждом заходе.
+
+_REPLACED_PR = 408
+_REPLACED_BRANCH = "spec/WS-alpha-7-tasks-v3"
+_REPLACED_HEAD = "head-of-v3"
+
+
+class _ReplaceOps(_SupersedeOps):
+    """`_SupersedeOps` + поверхность замены: факты, ревью, закрытие, ветка.
+
+    Заменяемый PR отвечает СВОИМИ фактами (`state`/`headRefOid`), а не
+    общим шаблоном `_ProvOps`: correction-PR обязан оставаться вмерженным
+    в тех же тестах, где заменяемый открыт, — иначе провенанс §I7 падал
+    бы раньше предмета теста и «замена отказала» было бы неотличимо от
+    «подписи не нашлось».
+    """
+
+    def __init__(
+        self,
+        *,
+        replaced_state="OPEN",
+        replaced_head=_REPLACED_HEAD,
+        reviews=(),
+        threads=False,
+        close_ok=True,
+        facts_by_pr=None,
+        remote_head=_REPLACED_HEAD,
+        local_head=_REPLACED_HEAD,
+        **kw,
+    ):
+        # Ветка заменяемой ревизии РЕЗОЛВИТСЯ в её PR — так на живом
+        # входе и есть, пока ветка жива. Пустая карта веток описывала бы
+        # состояние «ветки v3 нет», на котором цикл §I3 упирается в
+        # `pr is None` и проходит мимо заменяемой ревизии сам — предмет
+        # проверки исчезал бы вместе с фикстурой.
+        kw["branch_prs"] = {
+            _REPLACED_BRANCH: _REPLACED_PR, **(kw.get("branch_prs") or {}),
+        }
+        super().__init__(**kw)
+        # Факты ПОНОМЕРНО: заменяемый PR по умолчанию открыт, факты PR
+        # новой ревизии задаются тестами окна C. Общий шаблон `_ProvOps`
+        # (вмержен, подпись полна) остаётся дефолтом для остальных —
+        # correction-PR обязан быть вмерженным в тех же тестах.
+        self.facts_by_pr = {
+            _REPLACED_PR: {
+                "state": replaced_state, "headRefOid": replaced_head,
+            },
+            **(facts_by_pr or {}),
+        }
+        self.replaced_head = replaced_head
+        # None остаётся None: им тесты проверяют «список ревью не получен».
+        self.reviews = None if reviews is None else list(reviews)
+        self.threads = threads
+        self.close_ok = close_ok
+        self.closed: list[tuple[int, str]] = []
+        self.deleted: list[str] = []
+        self.deleted_local: list[str] = []
+        # Ветка отозванной ревизии ЖИВА и стоит на записанном head — так
+        # на живом входе и есть до шага удаления. `None` моделирует
+        # «ссылки уже нет», другой SHA — «под тем же именем чужая работа».
+        self.remote_head = remote_head
+        self.local_head = local_head
+
+    def pr_facts(self, repo_slug, pr):
+        if pr not in self.facts_by_pr:
+            return super().pr_facts(repo_slug, pr)
+        self.calls.append(("pr_facts", pr))
+        return dict(self.facts_by_pr[pr])
+
+    def pr_reviews(self, repo_slug, pr):
+        self.calls.append(("pr_reviews", pr))
+        return None if self.reviews is None else list(self.reviews)
+
+    def unresolved_threads(self, repo_slug, pr):
+        self.calls.append(("unresolved_threads", pr))
+        return self.threads
+
+    def close_pr(self, repo_slug, pr, comment):
+        self.calls.append(("close_pr", pr))
+        if self.close_ok:
+            self.closed.append((pr, comment))
+        return self.close_ok
+
+    def remote_branch_head(self, repo_slug, branch):
+        self.calls.append(("remote_branch_head", branch))
+        return self.remote_head if branch == _REPLACED_BRANCH else None
+
+    def rev_parse(self, target_dir, ref):
+        if ref == _REPLACED_BRANCH:
+            self.calls.append(("rev_parse", ref))
+            return self.local_head
+        return super().rev_parse(target_dir, ref)
+
+    def delete_remote_branch(self, repo_slug, branch):
+        self.calls.append(("delete_remote_branch", branch))
+        self.deleted.append(branch)
+        return True
+
+    def delete_local_branch(self, target_dir, branch):
+        self.calls.append(("delete_local_branch", branch))
+        self.deleted_local.append(branch)
+        return True
+
+
+def _replace_state(tmp_path, monkeypatch, **rev3):
+    """Прогон перед заменой: v1 вмержена, v3 доставила дефектный PR #408.
+
+    `content_anchor` обеих записей РАВЕН текущему — это боевой вход
+    живого случая: дефект был в ПОДПИСИ штампа, а `content_anchor`
+    подписи не видит (§I2), значит апстрим «не менялся». На таком входе
+    §I5 сработал бы первым и сделал замену недостижимой.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    content = tb._content_anchor(state.target_dir, state.bundle_dir, None)
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "АНКЕР-v1",
+        "content_anchor": content,
+    }
+    state.ops["tasks-deliver-v3"] = {
+        "status": "completed", "revision": 3, "pr": _REPLACED_PR,
+        "branch": _REPLACED_BRANCH, "base_sha": "base-sha-1",
+        "head_sha": _REPLACED_HEAD, "anchor": "АНКЕР-v3",
+        "prospective_anchor": "АНКЕР-v3", "content_anchor": content,
+        "tasks_version": 2, "approval_pr": 403,
+        "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
+        "supersedes": 1,
+        **rev3,
+    }
+    rs.save(state)
+    return state
+
+
+def _replace(revision=3, reason="дефектные подписи штампа (devtools#172)"):
+    from governance import task_bridge as tb
+
+    return tb.Replacement(revision, reason)
+
+
+def test_replace_delivers_v4_closes_pr_and_drops_branch(
+    tmp_path, monkeypatch
+):
+    """Успешная замена целиком: три поля, закрытый #408, удалённая ветка.
+
+    `supersedes: 1`, а не 3 — заменяемая ревизия НЕ доставленная
+    спецификация: её PR закрывается без мержа. Две связи независимы
+    (требование владельца): `supersedes` — что переиздаём, `replaces_*` —
+    какое предложение снимаем со стола.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR])
+
+    result = tb.deliver_superseded(state, ops, replace=_replace())
+
+    assert result == tb.SupersedeResult("delivered", 77)
+    saved = rs.load("r-recon").ops["tasks-deliver-v4"]
+    assert saved["status"] == "completed"
+    assert saved["replaces_revision"] == 3
+    assert saved["replaces_pr"] == _REPLACED_PR
+    assert saved["replacement_reason"] == (
+        "дефектные подписи штампа (devtools#172)"
+    )
+    assert saved["supersedes"] == 1
+    assert [pr for pr, _ in ops.closed] == [_REPLACED_PR]
+    # Ссылка снимается в ОБЕИХ половинах — origin и клон.
+    assert ops.deleted == [_REPLACED_BRANCH]
+    assert ops.deleted_local == [_REPLACED_BRANCH]
+    # Ревизия 3 неприкосновенна (§I4): связь направлена вперёд.
+    assert rs.load("r-recon").ops["tasks-deliver-v3"] == state.ops[
+        "tasks-deliver-v3"
+    ]
+
+
+def test_replace_closes_pr_before_creating_the_new_one(tmp_path, monkeypatch):
+    """Порядок владельца: намерение → закрытие #408 → доставка → ветка.
+
+    Обратный порядок оставил бы на одну спеку два открытых PR, а удаление
+    ветки раньше создания нового PR — ошибочный артефакт без ветки при
+    недоведённой замене."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR])
+
+    tb.deliver_superseded(state, ops, replace=_replace())
+
+    names = [c[0] for c in ops.calls]
+    assert names.index("close_pr") < names.index("create_draft_pr")
+    assert names.index("create_draft_pr") < names.index(
+        "delete_remote_branch"
+    )
+
+
+def test_replace_is_the_only_exit_from_the_defective_pr(
+    tmp_path, monkeypatch
+):
+    """Оба тупика контракта на одном входе — и выход из обоих.
+
+    Тупик §I3 («оставить»): голый `--supersede` возвращает ТОТ ЖЕ #408 на
+    каждом заходе. Тупик §I5: не дойди дело до §I3 (ветка v3 удалена,
+    PR по ней не резолвится) — бесследный no-op, потому что апстрим не
+    менялся: дефект был в ПОДПИСИ, а `content_anchor` подписи не видит
+    (§I2). Явная замена проходит оба — на том же самом входе."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    assert tb.deliver_superseded(
+        state, _ReplaceOps(prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("returned", _REPLACED_PR)
+
+    assert tb.deliver_superseded(
+        state, _ReplaceOps(prs=[_MERGED_PR], branch_prs={
+            _REPLACED_BRANCH: None,
+        })
+    ) == tb.SupersedeResult("noop")
+
+    assert tb.deliver_superseded(
+        state, _ReplaceOps(prs=[_MERGED_PR]), replace=_replace()
+    ).kind == "delivered"
+
+
+def test_replace_refuses_when_head_diverged(tmp_path, monkeypatch):
+    """head #408 разошёлся с намерением — под именем ветки чужая работа."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_head="ЧУЖОЙ-HEAD")
+    before = (rs.run_dir("r-recon") / "run.json").read_bytes()
+
+    with pytest.raises(RuntimeError, match="вмешались снаружи"):
+        tb.deliver_superseded(state, ops, replace=_replace())
+
+    assert ops.closed == []
+    # Валидация стоит ДО единого эффекта: леджер не тронут.
+    assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
+
+
+def test_replace_refuses_on_human_review(tmp_path, monkeypatch):
+    """Ревью не от ревью-контура — человек высказался, закрывать нельзя."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(
+        prs=[_MERGED_PR],
+        reviews=[{"login": "andrei-shtanakov", "state": "COMMENTED"}],
+    )
+
+    with pytest.raises(RuntimeError, match="andrei-shtanakov"):
+        tb.deliver_superseded(state, ops, replace=_replace())
+
+    assert ops.closed == []
+
+
+def test_replace_refuses_on_review_from_the_review_contour_too(
+    tmp_path, monkeypatch
+):
+    """Ревью ai-prosto блокирует замену наравне с человеческим.
+
+    Решение владельца 2026-09-09: review — уже созданный аудитный
+    артефакт, и агентская учётка не делает его находки одноразовыми.
+    Закрыть PR автоматически вместе с разбором опаснее, чем один раз
+    потребовать явного закрытия от оператора. Привилегий по логину нет
+    ВООБЩЕ: `REVIEW_LOGIN` отвечает на другой вопрос — чьим именем мы
+    действуем (закрытие PR, удаление веток), а не чьё ревью не замечаем."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(
+        prs=[_MERGED_PR],
+        reviews=[{"login": "ai-prosto", "state": "CHANGES_REQUESTED"}],
+    )
+
+    with pytest.raises(RuntimeError, match="ai-prosto"):
+        tb.deliver_superseded(state, ops, replace=_replace())
+
+    assert ops.closed == []
+
+
+def test_replace_review_block_ignores_review_login_env(
+    tmp_path, monkeypatch
+):
+    """`REVIEW_LOGIN` на блокировку не влияет — две роли одной учётки.
+
+    Пока привилегия читалась из него, смена учётки ревью-контура молча
+    меняла бы, чьё ревью разрешено закрыть механикой. Теперь этот вопрос
+    решает только allowlist, а `REVIEW_LOGIN` остаётся про действующее
+    лицо."""
+    from governance import task_bridge as tb
+
+    monkeypatch.setenv("REVIEW_LOGIN", "other-bot")
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(
+        prs=[_MERGED_PR],
+        reviews=[{"login": "other-bot", "state": "APPROVED"}],
+    )
+
+    with pytest.raises(RuntimeError, match="other-bot"):
+        tb.deliver_superseded(state, ops, replace=_replace())
+
+
+def test_review_allowlist_is_empty_by_default(monkeypatch):
+    """Пустой дефолт залочен отдельно: расширить его незаметно нельзя.
+
+    Это единственное место, где привилегия вообще может появиться, и
+    появляться она обязана только явной внешней настройкой — не
+    константой в коде и не побочным эффектом другой переменной."""
+    from governance import task_bridge as tb
+
+    monkeypatch.delenv(tb._REVIEW_ALLOWLIST_ENV, raising=False)
+    assert tb._review_allowlist() == frozenset()
+    # Соседние переменные слоя allowlist НЕ наполняют.
+    monkeypatch.setenv("REVIEW_LOGIN", "ai-prosto")
+    assert tb._review_allowlist() == frozenset()
+    # Пустые и пробельные элементы отбрасываются: `",, "` — тоже пусто.
+    monkeypatch.setenv(tb._REVIEW_ALLOWLIST_ENV, ",,  ,")
+    assert tb._review_allowlist() == frozenset()
+
+
+def test_explicit_allowlist_unblocks_only_the_named_login(
+    tmp_path, monkeypatch
+):
+    """Явная настройка — рабочая точка, а не заглушка на будущее."""
+    from governance import task_bridge as tb
+
+    monkeypatch.setenv(tb._REVIEW_ALLOWLIST_ENV, "ai-prosto, other-bot")
+    state = _replace_state(tmp_path, monkeypatch)
+
+    assert tb.deliver_superseded(
+        state,
+        _ReplaceOps(
+            prs=[_MERGED_PR],
+            reviews=[{"login": "ai-prosto", "state": "APPROVED"},
+                     {"login": "other-bot", "state": "COMMENTED"}],
+        ),
+        replace=_replace(),
+    ).kind == "delivered"
+
+
+def test_pending_review_is_a_draft_not_a_verdict(tmp_path, monkeypatch):
+    """`PENDING` — черновик, автором ещё НЕ отправленный.
+
+    Владелец говорит про SUBMITTED review; неотправленный черновик
+    вердикта не несёт и удерживать предложение не может."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(
+        prs=[_MERGED_PR],
+        reviews=[{"login": "andrei-shtanakov", "state": "PENDING"}],
+    )
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ).kind == "delivered"
+
+
+def test_red_checks_and_plain_comments_do_not_block_replacement(
+    tmp_path, monkeypatch
+):
+    """Красный CI и обычные комментарии замену НЕ удерживают.
+
+    Граница проведена по сущностям форджи, а не по автору: блокирующие
+    сигналы спрашиваются РОВНО два — `pr_reviews` (эндпоинт
+    `pulls/<n>/reviews`, только review) и `unresolved_threads`
+    (`reviewThreads`, inline-треды). `statusCheckRollup` не
+    спрашивается вовсе, а примитива чтения issue-комментариев в слое нет —
+    структурно попасть в решение им нечем."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(
+        prs=[_MERGED_PR], reviews=[], threads=False,
+        facts_by_pr={_REPLACED_PR: {
+            "state": "OPEN", "headRefOid": _REPLACED_HEAD,
+            "statusCheckRollup": [{"conclusion": "FAILURE"}],
+            "mergeStateStatus": "DIRTY",
+        }},
+    )
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ).kind == "delivered"
+    # Сигналов вмешательства спрошено РОВНО два вида (каждый дважды:
+    # валидация и повторная сверка перед закрытием — окно между ними
+    # реально). Ни `statusCheckRollup`, ни комментарии в их числе нет.
+    asked = {c[0] for c in ops.calls}
+    assert asked & {"pr_reviews", "unresolved_threads"} == {
+        "pr_reviews", "unresolved_threads",
+    }
+    # Позитивный двойник к `("pr_reviews", _REPLACED_PR) not in ops.calls`
+    # соседнего теста: он утверждает ОТСУТСТВИЕ кортежа, и без пары
+    # «а бывает ли такой вообще» был бы вакуумным (урок ревью PR #174 —
+    # сравнение с кортежем, которого не бывает, всегда истинно).
+    assert ("pr_reviews", _REPLACED_PR) in ops.calls
+    # Красный `statusCheckRollup` лежал в фактах и на исход не повлиял;
+    # комментариев PR слой не читает вовсе — единственный примитив с
+    # ними (`comment`) пишущий, и он не звался.
+    assert not any(c[0] == "comment" for c in ops.calls)
+
+
+@pytest.mark.parametrize(
+    "kw, match",
+    [
+        ({"threads": True}, "непогашенные review threads"),
+        ({"threads": None}, "непогашенные review threads"),
+        ({"reviews": None}, "список ревью не получен"),
+    ],
+    ids=["open-thread", "threads-unknown", "reviews-unknown"],
+)
+def test_replace_fails_closed_on_threads_and_unknowns(
+    kw, match, tmp_path, monkeypatch
+):
+    """Непогашенный тред и любое «узнать не удалось» — fail-closed.
+
+    `None` от `unresolved_threads`/`pr_reviews` значит «сигнал не
+    получен»; прочитать его как «вмешательства нет» значило бы закрывать
+    чужое предложение на неизвестном состоянии."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+
+    with pytest.raises(RuntimeError, match=match):
+        tb.deliver_superseded(state, ops, replace=_replace())
+
+    assert ops.closed == []
+
+
+def test_replace_refuses_merged_pr_unconditionally(tmp_path, monkeypatch):
+    """MERGED заменять запрещено безусловно — оно уже часть base.
+
+    Ни ревью, ни треды при этом не спрашиваются: отказ не зависит ни от
+    чего, что могло бы его снять."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="MERGED")
+
+    with pytest.raises(RuntimeError, match="вмержен"):
+        tb.deliver_superseded(state, ops, replace=_replace())
+
+    assert ops.closed == []
+    assert ("pr_reviews", _REPLACED_PR) not in ops.calls
+
+
+def test_replace_accepts_pr_closed_by_operator(tmp_path, monkeypatch):
+    """Уже закрытый #408 — ручной выход оператора из отказа, не тупик.
+
+    Владелец назвал его прямо: при внешнем вмешательстве оператор
+    закрывает PR сам, с объяснением, и повторяет явный переход. Тогда шаг
+    закрытия — no-op, а не отказ."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="CLOSED")
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ).kind == "delivered"
+    assert ops.closed == []
+    assert ops.deleted == [_REPLACED_BRANCH]
+    # Раньше тест утверждал только это удаление — и оно было БЕЗУСЛОВНЫМ.
+    # На этом пути (`pr_state != "OPEN"`) сверка идентичности не
+    # выполнялась ни разу за прогон: `_check_replacement_target` выходит
+    # до неё. Значит шаг 5 обязан сверить head сам.
+    assert ("remote_branch_head", _REPLACED_BRANCH) in ops.calls
+    assert ("rev_parse", _REPLACED_BRANCH) in ops.calls
+
+
+def test_replace_refuses_v1_and_unfinished_and_missing(
+    tmp_path, monkeypatch
+):
+    """Что заменять НЕЛЬЗЯ: v1, незавершённую ревизию, отсутствующую."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver-v2"] = {"status": "started", "revision": 2}
+    rs.save(state)
+    ops = _ReplaceOps(prs=[_MERGED_PR])
+
+    with pytest.raises(RuntimeError, match="N ≥ 2"):
+        tb.deliver_superseded(state, ops, replace=_replace(revision=1))
+    with pytest.raises(RuntimeError, match="--abandon-revision 2"):
+        tb.deliver_superseded(state, ops, replace=_replace(revision=2))
+    with pytest.raises(RuntimeError, match="нет в леджере"):
+        tb.deliver_superseded(state, ops, replace=_replace(revision=9))
+
+    state.ops["tasks-deliver-v2"] = {
+        "status": "abandoned", "revision": 2, "reason": "base сдвинулся",
+    }
+    rs.save(state)
+    with pytest.raises(RuntimeError, match="брошена"):
+        tb.deliver_superseded(state, ops, replace=_replace(revision=2))
+
+
+def test_replace_refuses_when_close_fails(tmp_path, monkeypatch):
+    """Закрытие не удалось — доставки нет: иначе второй открытый PR."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], close_ok=False)
+
+    with pytest.raises(RuntimeError, match="не удалось закрыть"):
+        tb.deliver_superseded(state, ops, replace=_replace())
+
+    assert not any(c[0] == "create_draft_pr" for c in ops.calls)
+    # Намерение уже durable (write-ahead §I4) — повтор продолжит ЕГО.
+    assert rs.load("r-recon").ops["tasks-deliver-v4"]["status"] == "started"
+
+
+def _abandoned_replacement(replaces_pr=_REPLACED_PR) -> dict:
+    """Ревизия-замена, брошенная после закрытия #408.
+
+    Так ловушка §I3 и достижима: цикл реконсиляции проходит МИМО
+    ревизии только когда она `abandoned` (или заменена), поэтому до v3
+    заход доходит именно через брошенную замену — а завершённая замена
+    заслоняет её сама. Сценарий не выдуманный: окно B (PR закрыт,
+    доставка не дошла) плюс сдвинувшийся base дают ровно `abandoned`.
+    """
+    return {
+        "status": "abandoned", "revision": 4,
+        "reason": "base сдвинулся, открытого PR нет",
+        "replaces_revision": 3, "replaces_pr": replaces_pr,
+        "replaces_branch": _REPLACED_BRANCH,
+        "replaces_head_sha": _REPLACED_HEAD,
+        "replacement_reason": "дефектные подписи",
+    }
+
+
+def test_i3_does_not_fail_closed_on_replaced_revision(tmp_path, monkeypatch):
+    """§I3 после закрытия #408: forward-ссылка, а не мутация записи v3.
+
+    Без §I10 этот заход ловил бы v3 проверкой «закрыт без мержа → ветка
+    отклонена человеком» и отказывал НАВСЕГДА: замена была бы
+    одноразовой — закрыв #408 своей же механикой, переиздание запирало бы
+    воркстрим."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    # v1 доставила ДРУГОЕ содержание: иначе вызов кончился бы бесследным
+    # no-op §I5 и о §I3 не сказал бы ничего.
+    state.ops["tasks-deliver"] = {
+        **state.ops["tasks-deliver"], "content_anchor": "СОДЕРЖАНИЕ-ДО",
+    }
+    state.ops["tasks-deliver-v4"] = _abandoned_replacement()
+    rs.save(state)
+    ops = _ReplaceOps(
+        prs=[_MERGED_PR], replaced_state="CLOSED",
+        branch_prs={_REPLACED_BRANCH: _REPLACED_PR},
+    )
+
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+    saved = rs.load("r-recon").ops
+    # v3 заменена ⇒ доставкой не считается: переиздаём v1.
+    assert saved["tasks-deliver-v5"]["supersedes"] == 1
+    # Запись v3 не тронута: связь живёт ВПЕРЁД, в записи замены.
+    assert saved["tasks-deliver-v3"] == state.ops["tasks-deliver-v3"]
+
+
+def test_i3_still_fails_closed_on_closed_pr_without_forward_link(
+    tmp_path, monkeypatch
+):
+    """Тот же закрытый PR БЕЗ forward-ссылки — по-прежнему fail-closed.
+
+    Исключение §I10 узкое: ожидаемым закрытие объявляет только запись,
+    назвавшая ЭТУ ревизию и ЭТОТ номер PR. Иначе оно снимало бы правило
+    «ветка отклонена человеком» со всего контракта."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(
+        prs=[_MERGED_PR], replaced_state="CLOSED",
+        branch_prs={_REPLACED_BRANCH: _REPLACED_PR},
+    )
+
+    with pytest.raises(RuntimeError, match="закрыт без мержа"):
+        tb.deliver_superseded(state, ops)
+
+
+def test_i3_forward_link_requires_matching_pr_number(tmp_path, monkeypatch):
+    """Forward-ссылка сверяет ПАРУ (ревизия, номер PR), не одну ревизию.
+
+    Под именем ветки заменённой ревизии мог позже завестись ДРУГОЙ PR —
+    его закрытие ожидаемым не объявлял никто."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver-v4"] = _abandoned_replacement(replaces_pr=999)
+    rs.save(state)
+    ops = _ReplaceOps(
+        prs=[_MERGED_PR], replaced_state="CLOSED",
+        branch_prs={_REPLACED_BRANCH: _REPLACED_PR},
+    )
+
+    with pytest.raises(RuntimeError, match="закрыт без мержа"):
+        tb.deliver_superseded(state, ops)
+
+
+def test_supersedes_skips_replaced_revision_on_later_reissue(
+    tmp_path, monkeypatch
+):
+    """Заменённая ревизия не считается доставкой и в СЛЕДУЮЩИХ заходах.
+
+    Иначе `supersedes`/§I5/§I8 сверялись бы с содержанием, которого в base
+    нет: её PR закрыт без мержа."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver-v4"] = {
+        "status": "completed", "revision": 4, "pr": 77,
+        "replaces_revision": 3, "replaces_pr": _REPLACED_PR,
+    }
+    rs.save(state)
+
+    assert tb._last_delivery(rs.load("r-recon")) == (
+        4, rs.load("r-recon").ops["tasks-deliver-v4"]
+    )
+    del state.ops["tasks-deliver-v4"]
+    state.ops["tasks-deliver-v4"] = {
+        "status": "abandoned", "revision": 4, "reason": "р",
+        "replaces_revision": 3, "replaces_pr": _REPLACED_PR,
+    }
+    rs.save(state)
+    # v4 брошена, v3 заменена — предыдущая доставка это v1, а не v3.
+    assert tb._last_delivery(rs.load("r-recon"))[0] == 1
+
+
+def test_forward_link_is_status_agnostic(tmp_path, monkeypatch):
+    """Для снятия ловушки достаточно САМОЙ ссылки — статус отзыва неважен.
+
+    Записанное намерение объясняет закрытие независимо от того, дошла ли
+    отзывающая ревизия до конца. Смотри проверка только на `completed`,
+    окно «отзыв ещё `started`» осталось бы дырой — а это ровно то окно,
+    где PR уже закрыт, а новая ревизия ещё не доставлена."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    for status in ("started", "completed", "abandoned"):
+        state.ops["tasks-deliver-v4"] = {
+            **_abandoned_replacement(), "status": status,
+        }
+        rs.save(state)
+        loaded = rs.load("r-recon")
+        assert tb._replaced_by(loaded, 3, _REPLACED_PR) == 4
+        # Отозванная ревизия не считается доставкой ни при каком статусе
+        # отзыва: её байтов в base нет.
+        assert tb._last_delivery(loaded)[0] != 3
+        assert tb._reconcile_revision(
+            3, loaded.ops["tasks-deliver-v3"], "base-sha-1", _REPLACED_PR,
+            {"state": "CLOSED"}, replaced=True,
+        ) == "replaced"
+
+
+def test_replacement_may_repeat_version_and_content_of_the_revoked(
+    tmp_path, monkeypatch
+):
+    """Ни версия, ни содержание отличаться от отозванного НЕ обязаны.
+
+    §I6 считает версию от base, а отозванных байтов в base нет: в него
+    попадёт ровно одно из двух предложений, и монотонность не нарушится.
+    §I5 при замене неприменим, поэтому равный `content_anchor` доставку
+    не останавливает — причина замены может лежать вовсе вне байтов
+    (дефект инструмента, ложная подпись), и называет её оператор."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    revoked = dict(state.ops["tasks-deliver-v3"])
+    ops = _ReplaceOps(prs=[_MERGED_PR])
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ).kind == "delivered"
+
+    saved = rs.load("r-recon").ops["tasks-deliver-v4"]
+    assert saved["tasks_version"] == revoked["tasks_version"] == 2
+    assert saved["content_anchor"] == revoked["content_anchor"]
+
+
+# --- Крэш-окна замены: повтор продолжает ТУ ЖЕ ревизию --------------------
+
+
+def _v4_intent(state, **kw) -> dict:
+    """Намерение ревизии 4 в статусе `started` — общий вход трёх окон.
+
+    `prospective_anchor` считается ПО-НАСТОЯЩЕМУ (подписью correction-PR
+    403, теми же узлами): гвард §I2 сверяет фактический штамп повтора
+    именно с ним, и синтетическая строка отказывала бы раньше предмета
+    теста.
+    """
+    from governance import task_bridge as tb
+
+    by, at = _pr_signature(403)
+    return {
+        "status": "started", "revision": 4,
+        "branch": "spec/WS-alpha-7-tasks-v4", "base_sha": "base-sha-1",
+        "head_sha": None, "tasks_blob": None,
+        "prospective_anchor": tb._prospective_anchor(
+            state.target_dir, state.bundle_dir, by, at, None,
+            restamp_nodes=frozenset({"decomposition"}),
+        ),
+        "content_anchor": tb._content_anchor(
+            state.target_dir, state.bundle_dir, None
+        ),
+        "approval_pr": 403, "signed_nodes": ["decomposition"],
+        "tasks_version": 2,
+        "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
+        "dag_source": "derived_from_spec", "supersedes": 1,
+        "expected_generated_at": "2026-09-09T10:00:00+00:00",
+        "replaces_revision": 3, "replaces_pr": _REPLACED_PR,
+        "replaces_branch": _REPLACED_BRANCH,
+        "replaces_head_sha": _REPLACED_HEAD,
+        "replacement_reason": "дефектные подписи",
+        **kw,
+    }
+
+
+def _window_state(tmp_path, monkeypatch, **intent):
+    from governance import run_state as rs
+
+    state = _replace_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver-v4"] = _v4_intent(state, **intent)
+    rs.save(state)
+    return state
+
+
+def test_window_a_intent_written_pr_still_open(tmp_path, monkeypatch):
+    """Окно A: намерение v4 durable, #408 ещё открыт.
+
+    Повтор обязан довести ШАГ ЗАКРЫТИЯ из намерения — он читается из
+    леджера, а не из аргументов, поэтому доводит его и голый
+    `--supersede`."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _window_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR])
+
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
+    assert [pr for pr, _ in ops.closed] == [_REPLACED_PR]
+    assert ops.deleted == [_REPLACED_BRANCH]
+    saved = rs.load("r-recon").ops
+    assert saved["tasks-deliver-v4"]["status"] == "completed"
+    assert "tasks-deliver-v5" not in saved
+
+
+def test_window_b_pr_closed_no_pr_anywhere(tmp_path, monkeypatch):
+    """Окно B: #408 закрыт, PR v4 ещё нет — открытых PR в воркстриме НОЛЬ.
+
+    Реконсиляция обязана узнать это состояние и продолжить ТУ ЖЕ v4:
+    заменённая ревизия из разбора выбывает по forward-ссылке, а не
+    отказывает fail-closed'ом."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _window_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="CLOSED")
+
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+    assert ops.closed == []          # шаг состоялся раньше — no-op
+    assert ops.deleted == [_REPLACED_BRANCH]
+    saved = rs.load("r-recon").ops
+    assert saved["tasks-deliver-v4"]["pr"] == 77
+    assert "tasks-deliver-v5" not in saved
+
+
+def test_window_c_pr_created_branch_alive(tmp_path, monkeypatch):
+    """Окно C: PR v4 создан, ветка v3 жива — повтор доводит только хвост.
+
+    Доставка не переигрывается (PR уже есть), но шаг удаления ветки
+    обязан довестись: иначе он не довёлся бы никогда — этот исход
+    терминален для вызова."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _window_state(tmp_path, monkeypatch, head_sha="commit-sha-1")
+    ops = _ReplaceOps(
+        prs=[_MERGED_PR], replaced_state="CLOSED",
+        branch_prs={"spec/WS-alpha-7-tasks-v4": 77},
+        facts_by_pr={77: {"state": "OPEN", "headRefOid": "commit-sha-1"}},
+    )
+
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "returned", 77
+    )
+    assert ops.deleted == [_REPLACED_BRANCH]
+    # ГЛАВНОЕ утверждение окна C: доставка не переигрывается. Сравнение с
+    # кортежем было вакуумным — `deliver` передаёт label "", четвёртого
+    # элемента "spec" не бывает ни при каком поведении, и `not in` был
+    # истинным всегда.
+    assert not any(c[0] == "create_draft_pr" for c in ops.calls)
+    saved = rs.load("r-recon").ops
+    assert saved["tasks-deliver-v4"]["status"] == "completed"
+    assert "tasks-deliver-v5" not in saved
+
+
+def test_window_c_completed_revision_still_drops_branch(
+    tmp_path, monkeypatch
+):
+    """То же окно, но ревизия уже `completed`: хвост доводится и тогда.
+
+    Падение между `_complete_revision` и удалением ветки оставляет
+    исход §I3 «completed | OPEN → вернуть существующий PR» — и хвост
+    замены обязан доводиться на НЁМ тоже."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _window_state(
+        tmp_path, monkeypatch, status="completed", pr=77,
+        head_sha="commit-sha-1",
+    )
+    ops = _ReplaceOps(
+        prs=[_MERGED_PR], replaced_state="CLOSED",
+        branch_prs={"spec/WS-alpha-7-tasks-v4": 77},
+        facts_by_pr={77: {"state": "OPEN", "headRefOid": "commit-sha-1"}},
+    )
+
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "returned", 77
+    )
+    assert ops.deleted == [_REPLACED_BRANCH]
+    assert "tasks-deliver-v5" not in rs.load("r-recon").ops
+
+
+def test_replace_refuses_when_a_later_revision_is_not_this_replacement(
+    tmp_path, monkeypatch
+):
+    """Просят заменить 3, а поверх неё лежит ревизия, замену не ведущая.
+
+    Замена середины истории породила бы ДВЕ конкурирующие цепочки
+    forward-ссылок, и §I3 перестал бы однозначно отвечать, чьё закрытие
+    ожидаемо. Повтор той же замены при этом проходит: ревизии, ведущие
+    ЭТУ замену, исключением и являются."""
+    from governance import task_bridge as tb
+
+    state = _window_state(tmp_path, monkeypatch, replaces_revision=None)
+    ops = _ReplaceOps(prs=[_MERGED_PR])
+
+    with pytest.raises(RuntimeError, match="не последняя в леджере"):
+        tb.deliver_superseded(state, ops, replace=_replace())
+
+
+def test_repeat_with_the_flag_continues_the_same_revision(
+    tmp_path, monkeypatch
+):
+    """Повтор с тем же флагом продолжает ревизию замены, а не заводит v5.
+
+    Гвард «замена только последней ревизии» не смеет ловить собственный
+    повтор: ревизии, ведущие ЭТУ замену, из него исключены."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _window_state(tmp_path, monkeypatch)
+
+    assert tb.deliver_superseded(
+        state, _ReplaceOps(prs=[_MERGED_PR]), replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+    saved = rs.load("r-recon").ops
+    assert saved["tasks-deliver-v4"]["status"] == "completed"
+    assert "tasks-deliver-v5" not in saved
+
+
+def test_replace_close_revalidates_between_windows(tmp_path, monkeypatch):
+    """Между намерением и закрытием человек успевает вмешаться.
+
+    Шаг закрытия сверяет идентичность и ревью САМ, а не полагается на
+    валидацию первого захода: между ними стоят сетевые шаги §I7/§I8, и
+    окно реально."""
+    from governance import task_bridge as tb
+
+    state = _window_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(
+        prs=[_MERGED_PR],
+        reviews=[{"login": "andrei-shtanakov", "state": "APPROVED"}],
+    )
+
+    with pytest.raises(RuntimeError, match="andrei-shtanakov"):
+        tb.deliver_superseded(state, ops)
+
+    assert ops.closed == []
+
+
+def test_abandoned_replacement_hands_its_obligation_to_the_next_revision(
+    tmp_path, monkeypatch
+):
+    """Брошенная ревизия-замена передаёт обязательство следующей.
+
+    Замена не выполнена: PR отозван (или ещё ждёт отзыва), ветка v3 жива.
+    Потеряй следующая ревизия `replaces_*` — forward-ссылка осталась бы
+    только в брошенной записи, а хвост замены не довёлся бы никогда:
+    ловушка §I3 вернулась бы вместе с живой веткой отозванных байтов."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {
+        **state.ops["tasks-deliver"], "content_anchor": "СОДЕРЖАНИЕ-ДО",
+    }
+    state.ops["tasks-deliver-v4"] = _abandoned_replacement()
+    rs.save(state)
+    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="CLOSED")
+
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+
+    saved = rs.load("r-recon").ops["tasks-deliver-v5"]
+    assert saved["replaces_revision"] == 3
+    assert saved["replaces_pr"] == _REPLACED_PR
+    assert saved["replacement_reason"] == "дефектные подписи"
+    assert ops.deleted == [_REPLACED_BRANCH]
+
+
+def test_obligation_survives_abandon_inside_the_same_call(
+    tmp_path, monkeypatch
+):
+    """Ревизия-замена брошена ПРЯМО В ЭТОМ вызове — обязательство живо.
+
+    Соседний тест про перенос пред-засевает `abandoned` и потому этот
+    путь не исполняет ни разу. А цикл реконсиляции сам переводит
+    ревизию-замену в `abandoned` (`abandon_and_next` на сдвинувшемся
+    base), и до цикла её статус ещё `started`. Посчитай перенос раньше
+    цикла — новая ревизия ушла бы без `replaces_*`, закрывать было бы
+    нечего, и отозванный #408 остался бы ОТКРЫТЫМ вторым на ту же спеку.
+
+    Хуже того, на живом входе (дефект в подписи, апстрим не менялся) до
+    новой ревизии не дошло бы вовсе: §I5 вернул бы бесследный no-op с
+    RC 0, и обязательство замены испарилось бы молча."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    # base ревизии-замены сдвинулся ⇒ цикл её бросит: `started`, PR по её
+    # ветке нет, base не тот.
+    state = _window_state(tmp_path, monkeypatch, base_sha="base-sha-0")
+    ops = _ReplaceOps(prs=[_MERGED_PR])
+
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+
+    saved = rs.load("r-recon").ops
+    assert saved["tasks-deliver-v4"]["status"] == "abandoned"
+    assert saved["tasks-deliver-v5"]["replaces_revision"] == 3
+    assert saved["tasks-deliver-v5"]["replaces_pr"] == _REPLACED_PR
+    assert saved["tasks-deliver-v5"]["replacement_reason"] == (
+        "дефектные подписи"
+    )
+    # Обязательство не просто записано — оно ИСПОЛНЕНО.
+    assert [pr for pr, _ in ops.closed] == [_REPLACED_PR]
+    assert ops.deleted == [_REPLACED_BRANCH]
+
+
+def test_revoked_revision_with_open_pr_is_never_returned(
+    tmp_path, monkeypatch
+):
+    """Отозванная ревизия при OPEN выбывает из разбора, а не возвращается.
+
+    Иначе механика печатает «ревизия 3 уже доставлена — PR #408» при
+    RC 0 и вручает оператору то самое незамерженное дефектное
+    предложение, которое леджер объявил снятым: читая последнюю строку,
+    он идёт мержить ложные подписи — ровно то, ради запрета чего переход
+    и заведён."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {
+        **state.ops["tasks-deliver"], "content_anchor": "СОДЕРЖАНИЕ-ДО",
+    }
+    state.ops["tasks-deliver-v4"] = _abandoned_replacement()
+    rs.save(state)
+    # #408 ещё ОТКРЫТ: шаг закрытия не успел выполниться до броска.
+    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="OPEN")
+
+    result = tb.deliver_superseded(state, ops)
+
+    assert result != tb.SupersedeResult("returned", _REPLACED_PR)
+    assert result.kind == "delivered"
+    # Обязательство доведено: PR закрыт этим же вызовом, ветка снята.
+    assert [pr for pr, _ in ops.closed] == [_REPLACED_PR]
+    assert ops.deleted == [_REPLACED_BRANCH]
+
+
+def test_reconcile_replaced_covers_open_but_not_merged(tmp_path, monkeypatch):
+    """Таблица §I3 при `replaced`: OPEN и CLOSED выбывают, MERGED — нет.
+
+    MERGED значит, что отозванное предложение всё-таки вмержено, то есть
+    отзыв противоречит факту. Пропустить его молча было бы хуже, чем
+    разобрать обычной таблицей: дальше по ходу отказ приходит
+    безусловным «вмерженное не заменяется»."""
+    from governance import task_bridge as tb
+
+    op = {"status": "completed", "branch": _REPLACED_BRANCH,
+          "base_sha": "base-sha-1", "head_sha": _REPLACED_HEAD,
+          "pr": _REPLACED_PR}
+
+    for state_name in ("OPEN", "CLOSED"):
+        assert tb._reconcile_revision(
+            3, op, "base-sha-1", _REPLACED_PR,
+            {"state": state_name, "headRefOid": _REPLACED_HEAD},
+            replaced=True,
+        ) == "replaced"
+    assert tb._reconcile_revision(
+        3, op, "base-sha-1", _REPLACED_PR,
+        {"state": "MERGED", "headRefOid": _REPLACED_HEAD}, replaced=True,
+    ) == "return_pr"
+
+
+def test_obligation_is_discharged_when_revoked_pr_gets_merged(
+    tmp_path, monkeypatch
+):
+    """Перенятое обязательство + ВМЕРЖЕННЫЙ отозванный PR = разрядка.
+
+    Сочетание, которого не строил ни один тест: MERGED и перенос были
+    покрыты порознь, поэтому тупик зеленел. А тупик полный: человек
+    мержит #408, пока замена не доведена; `_replacement_close` упирается
+    в безусловный запрет «вмерженное не отзывается» и падает RC 1;
+    `--abandon-revision` обязательство не снимает, а переносит на
+    следующую ревизию — та падает так же. Каждый запуск тратит ревизию
+    леджера и падает; бесследный no-op §I5 выключен непустым
+    `replace_fields`. Воркстрим не переиздать больше ничем.
+
+    Разрядка: отзыв адресован ПРЕДЛОЖЕНИЮ, а вмерженных предложений не
+    бывает — байты в base. Дальше идёт обычное переиздание, и
+    `supersedes` указывает на эту самую ревизию: её доставка
+    состоялась."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    # v3 доставила ДРУГОЕ содержание: иначе §I5 закончил бы вызов
+    # бесследным no-op и о разрядке тест не сказал бы ничего.
+    state.ops["tasks-deliver-v3"] = {
+        **state.ops["tasks-deliver-v3"], "content_anchor": "СОДЕРЖАНИЕ-v3",
+    }
+    state.ops["tasks-deliver-v4"] = _abandoned_replacement()
+    rs.save(state)
+    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="MERGED")
+
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+
+    saved = rs.load("r-recon").ops["tasks-deliver-v5"]
+    # Обязательство снято: полей отзыва нет, закрывать никто не пробовал.
+    assert "replaces_revision" not in saved
+    assert "replaces_pr" not in saved
+    assert ops.closed == []
+    assert ops.deleted == []
+    # Вмерженная ревизия снова считается доставкой — переиздаём ЕЁ.
+    assert saved["supersedes"] == 3
+
+
+def test_merged_revoked_pr_mid_flight_names_the_way_out(
+    tmp_path, monkeypatch
+):
+    """Мерж отозванного PR в полёте — отказ ОДИН раз и с процедурой.
+
+    Намерение ревизии уже durable, её anchor'ы и версия посчитаны на
+    base без байтов отозванной доставки — продолжать её нельзя.
+    Поэтому здесь fail-closed уместен, но обязан назвать выход: свернуть
+    повисшую ревизию и переиздать обычным `--supersede`. Без этого
+    оператор упирался бы в запрет, не понимая, чем его разомкнуть."""
+    from governance import task_bridge as tb
+
+    state = _window_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="MERGED")
+
+    with pytest.raises(RuntimeError, match="--abandon-revision 4"):
+        tb.deliver_superseded(state, ops)
+
+    assert ops.closed == []
+
+
+def test_discharge_costs_nothing_without_revocations_in_the_ledger(
+    tmp_path, monkeypatch
+):
+    """Нет отзывов в леджере — нет и сетевого запроса о них.
+
+    Разрядка читает состояние отозванного PR, то есть ходит в сеть там,
+    где раньше читался только леджер. Платить за это обычное переиздание
+    (и бесследный no-op §I5) не должно."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR])
+
+    assert tb._discharged_replacements(state, ops) == frozenset()
+    assert not any(c[0] == "pr_facts" for c in ops.calls)
+
+    # А при отзыве в леджере — ровно один запрос на отозванный PR.
+    state.ops["tasks-deliver-v4"] = _abandoned_replacement()
+    assert tb._discharged_replacements(state, ops) == frozenset()
+    assert [c for c in ops.calls if c[0] == "pr_facts"] == [
+        ("pr_facts", _REPLACED_PR)
+    ]
+
+
+@pytest.mark.parametrize(
+    "kw, deleted, deleted_local",
+    [
+        ({"remote_head": "ЧУЖОЙ-SHA"}, [], [_REPLACED_BRANCH]),
+        ({"local_head": "ЧУЖОЙ-SHA"}, [_REPLACED_BRANCH], []),
+        ({"remote_head": "ЧУЖОЙ", "local_head": "ЧУЖОЙ"}, [], []),
+        ({"remote_head": None, "local_head": None}, [], []),
+    ],
+    ids=["origin-diverged", "clone-diverged", "both-diverged", "absent"],
+)
+def test_branch_is_dropped_only_where_head_matches_the_revoked_revision(
+    kw, deleted, deleted_local, tmp_path, monkeypatch
+):
+    """Шаг 5 сносит ссылку ТОЛЬКО там, где head совпал с отозванным.
+
+    Удаление необратимо, идёт `git branch -D` (force) и в СОСЕДНЕМ репо:
+    под тем же именем могли оказаться дописанные после закрытия PR байты
+    либо одноимённая ветка оператора в его клоне — они стали бы
+    недостижимы. Половины судятся порознь: расхождение в одной не
+    отменяет удаления в другой. Отсутствие ссылки — выполненный шаг, а не
+    сбой.
+
+    Расхождение — НЕ отказ: доставка к этому моменту состоялась, и RC 1
+    сказал бы о ней неправду."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ).kind == "delivered"
+
+    assert ops.deleted == deleted
+    assert ops.deleted_local == deleted_local
+
+
+def test_branch_is_kept_when_intent_carries_no_head_of_the_revoked(
+    tmp_path, monkeypatch, capsys
+):
+    """Нет `replaces_head_sha` — сверять нечем, значит не удаляем.
+
+    Запись старого образца (либо перенятое обязательство без поля) не
+    даёт ответить, та ли это ветка. Молчаливое удаление «на всякий
+    случай» здесь стоит дороже оставленной ветки.
+
+    Утверждается ИМЕННО диагностика, а не только «не удалили»: сравнение
+    `actual != head` при пустом `head` и так не совпало бы, поэтому
+    ветка уцелела бы и без гварда — его продукт в том, что оператору
+    названа настоящая причина, а не выдуманное расхождение SHA."""
+    from governance import task_bridge as tb
+
+    state = _window_state(
+        tmp_path, monkeypatch, replaces_head_sha=None,
+    )
+    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="CLOSED")
+
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+
+    assert ops.deleted == []
+    assert ops.deleted_local == []
+    assert "нет replaces_head_sha" in capsys.readouterr().out
+
+
+# --- CLI replace-перехода -------------------------------------------------
+
+
+def test_cli_replace_requires_reason_and_supersede(capsys):
+    """Причина обязательна, а сам флаг осмыслен только с --supersede.
+
+    Причина уходит и в леджер (`replacement_reason`), и в комментарий
+    закрываемого PR — это единственное место, где потом читается, почему
+    предложение отозвали."""
+    from governance import task_bridge as tb
+
+    with pytest.raises(SystemExit) as exc:
+        tb.main(["--run-id", "r", "--supersede", "--replace-revision", "3"])
+    assert exc.value.code == 2
+    assert "--reason" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit):
+        tb.main(["--run-id", "r", "--replace-revision", "3",
+                 "--reason", "р"])
+    assert "--replace-revision" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv, needle",
+    [
+        (["--replace-revision", "3", "--abandon-revision", "2",
+          "--reason", "р"],
+         "--replace-revision и --abandon-revision"),
+        (["--supersede", "--reason", "р"], "--reason осмыслен только"),
+    ],
+    ids=["with-abandon", "reason-without-transition"],
+)
+def test_cli_replace_flag_combinations_refuse(argv, needle, capsys):
+    """Взаимоисключения — `parser.error`, а не молчаливая победа флага.
+
+    Общий `--reason` на два перехода однозначен ИМЕННО этим гвардом:
+    сосуществовать переходы не могут, толковать нечего. Убери его — и
+    одна строка легла бы то в `reason`, то в `replacement_reason` по
+    порядку проверок диспетчера."""
+    from governance import task_bridge as tb
+
+    with pytest.raises(SystemExit) as exc:
+        tb.main(["--run-id", "r", *argv])
+    assert exc.value.code == 2
+    assert needle in capsys.readouterr().err
+
+
+def test_cli_shared_reason_lands_in_the_field_of_its_transition(
+    tmp_path, monkeypatch, capsys
+):
+    """Один флаг — два перехода, но поля леджера разные и не путаются."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver-v2"] = {"status": "started", "revision": 2}
+    rs.save(state)
+    monkeypatch.setattr(tb, "RealOps", lambda: object())
+
+    assert tb.main([
+        "--run-id", "r-recon", "--abandon-revision", "2",
+        "--reason", "причина абандона",
+    ]) == 0
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["reason"] == "причина абандона"
+    assert "replacement_reason" not in saved
+
+
+def test_cli_replace_reaches_implementation(tmp_path, monkeypatch, capsys):
+    """Флаги замены доходят до реализации НЕДЕФОЛТНЫМИ значениями.
+
+    Обрыв в диспетчере читался бы как обычное переиздание — с бесследным
+    no-op §I5 на живом входе, то есть молчаливым «ничего не делаю»."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    _recon_state(tmp_path, monkeypatch)
+    called = {}
+
+    def _fake(s, o, legacy_bundle=None, approval_pr=None, replace=None):
+        called["replace"] = replace
+        return tb.SupersedeResult("delivered", 77)
+
+    monkeypatch.setattr(tb, "deliver_superseded", _fake)
+    monkeypatch.setattr(tb, "RealOps", lambda: object())
+    assert tb.main([
+        "--run-id", "r-recon", "--supersede",
+        "--replace-revision", "3", "--reason", "дефект подписи",
+    ]) == 0
+    assert called["replace"] == tb.Replacement(3, "дефект подписи")
