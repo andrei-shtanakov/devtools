@@ -1842,11 +1842,6 @@ def test_deliver_verify_dt_now_delivers(
     (bundle / "20-design.md").write_text(DESIGN_MD)
     (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
     (bundle / "30-decomposition.md").write_text(DECOMPOSITION_VERIFY_MD)
-    # DECOMPOSITION_VERIFY_MD объявляет verifies: [tests/test_y.py] — round
-    # 10 ревью PR #161 (минор): deliver() отказывает fail-closed, если путь
-    # не существует в target_dir на момент доставки.
-    (target / "tests").mkdir(parents=True, exist_ok=True)
-    (target / "tests" / "test_y.py").write_text("# stub\n")
     ops = _StubOps()
     pr = task_bridge.deliver(
         target_dir=str(target),
@@ -1864,15 +1859,18 @@ def test_deliver_verify_dt_now_delivers(
     assert any(c[0] == "ensure_branch" for c in ops.calls)
 
 
-def test_deliver_refuses_on_nonexistent_verifies_path(
+def test_deliver_does_not_check_verifies_path_existence_on_disk(
     tmp_path: Path,
 ) -> None:
-    """Round 10 ревью PR #161, минор (контракт владельца): опечатка/
-    осиротевший путь в verifies обязан фейлить deliver() fail-closed, а
-    не молча уезжать в **Verifies:** доставленной tasks-спеки как
-    селектор прогона, которого никто не создаст — graph_findings ловит
-    это ТОЛЬКО как non-fatal находку формы (non_fatal_findings), которую
-    deliver() не зовёт вовсе."""
+    """Round 11 ревью PR #161 — откат ошибочного round-10 решения:
+    deliver() НЕ проверяет, существует ли путь из verifies на диске
+    target_dir. По конструкции closure-инварианта (graph_findings)
+    владелец файла из verifies создаёт его СВОЕЙ задачей ПОСЛЕ доставки
+    tasks-спеки, не до неё — проверка существования на момент deliver()
+    ломала бы доставку ЛЮБОГО бандла, где verify-DT наблюдает файл более
+    поздней задачи. Владение гарантирует graph closure-инвариант;
+    существование в МОМЕНТ ПРОГОНА — забота spec-runner (spec-runner#402),
+    не гейта доставки."""
     target = tmp_path / "alpha"
     bundle = target / "workstreams/WS-alpha-7/spec"
     bundle.mkdir(parents=True)
@@ -1882,22 +1880,22 @@ def test_deliver_refuses_on_nonexistent_verifies_path(
     (bundle / "20-design.md").write_text(DESIGN_MD)
     (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
     (bundle / "30-decomposition.md").write_text(DECOMPOSITION_VERIFY_MD)
-    # НЕ создаём tests/test_y.py — путь из verifies остаётся опечаткой/
-    # осиротевшим.
+    # НЕ создаём tests/test_y.py — verifies указывает на файл, которого
+    # ещё нет на диске (его создаст владелец DT позже, при исполнении).
     ops = _StubOps()
-    with pytest.raises(RuntimeError, match="tests/test_y.py"):
-        task_bridge.deliver(
-            target_dir=str(target),
-            repo_slug="owner/alpha",
-            ws_id="WS-alpha-7",
-            subject="s",
-            bundle_dir="workstreams/WS-alpha-7/spec",
-            base_ref="master",
-            ops=ops,
-            approved_by="a", approved_at="t",
-        )
-    assert not any(c[0] == "ensure_branch" for c in ops.calls)
-    assert not (target / "spec" / "WS-alpha-7-tasks.md").exists()
+    pr = task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a", approved_at="t",
+    )
+    assert pr is not None
+    spec_text = (target / "spec" / "WS-alpha-7-tasks.md").read_text()
+    assert "tests/test_y.py" in spec_text
 
 
 # decomposition авторенный ДО раскатки поля verifies (round 3 ревью
@@ -2019,11 +2017,6 @@ def test_legacy_5_goes_dt_path_with_graph_validation(tmp_path: Path) -> None:
     verify-DT (по образцу `test_deliver_verify_dt_now_delivers`), якорь —
     decomposition как на полном DAG."""
     target = _target_legacy_5(tmp_path, BEHAVIOUR_MD, DECOMPOSITION_VERIFY_MD)
-    # DECOMPOSITION_VERIFY_MD объявляет verifies: [tests/test_y.py] — round
-    # 10 ревью PR #161 (минор): deliver() отказывает fail-closed, если путь
-    # не существует в target_dir на момент доставки.
-    (target / "tests").mkdir(parents=True, exist_ok=True)
-    (target / "tests" / "test_y.py").write_text("# stub\n")
     ops = _StubOps()
     pr = task_bridge.deliver(
         target_dir=str(target),

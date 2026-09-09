@@ -925,29 +925,16 @@ def deliver(
                 "decomposition: граф DT невалиден:\n"
                 + "\n".join(f"- {e}" for e in graph_errors)
             )
-        # verifies обязан указывать на РЕАЛЬНО существующий в target_dir
-        # путь (round 10 ревью PR #161, минор, контракт владельца):
-        # graph_findings ловит опечатку/осиротевший путь ТОЛЬКО как non-
-        # fatal находку формы (`non_fatal_findings`, потребитель —
-        # S4-гейт) — deliver() её не зовёт вовсе, и опечатанный путь
-        # молча уезжал бы в **Verifies:** доставленной tasks-спеки как
-        # селектор прогона, которого никто не создаст. Здесь — fail-closed
-        # физическая проверка: путь (без `::`-селектора, тот же канон, что
-        # и рендер) обязан существовать НА ДИСКЕ target_dir на момент
-        # доставки.
-        dt_tasks_pre, _form_findings_pre = decomposition_guard.parse_dt_tasks(
-            decomposition_pre
-        )
-        for dt_task in dt_tasks_pre:
-            for verifies_entry in dt_task.verifies:
-                verifies_path = verifies_entry.split("::", 1)[0]
-                if not (Path(target_dir) / verifies_path).exists():
-                    raise RuntimeError(
-                        f"{dt_task.dt_id}: verifies {verifies_entry} — "
-                        f"путь {verifies_path!r} не существует в "
-                        "target_dir (опечатка либо ещё не созданный "
-                        "файл) — доставка отказывает fail-closed"
-                    )
+        # verifies: существование пути на диске НЕ проверяется здесь
+        # (round 11 ревью PR #161 — откат ошибочного round-10 решения:
+        # владелец файла из verifies, по конструкции этого инварианта
+        # (graph_findings, closure-проверка), создаёт файл ПОСЛЕ доставки
+        # tasks-спеки — своей задачей в исполнении, а не до неё; проверка
+        # существования на момент deliver() ломала бы доставку ЛЮБОГО
+        # бандла, где verify-DT наблюдает файл более поздней задачи).
+        # Владение файлом гарантирует graph closure-инвариант выше
+        # (graph_findings); существование файла В МОМЕНТ ПРОГОНА — забота
+        # spec-runner (spec-runner#402), не гейта доставки.
     branch = f"spec/{ws_id}-tasks"
     ops.ensure_branch(target_dir, branch)
     stamped = stamp_bundle_approved(
