@@ -1763,8 +1763,13 @@ def deliver_superseded(
         "dag_source": dag_source,
         "supersedes": prev_n,
         "expected_generated_at": generated_at,
-        # Заполняется хуком `after_commit` доставки (`_commit_facts_cb`):
-        # между коммитом и push, вместе с head_sha (§I3).
+        # Заполняется хуком `before_commit` доставки (`_tasks_blob_cb`) —
+        # ДО коммита, отдельно от head_sha. Порознь они не для красоты:
+        # пока оба писались одним действием после коммита, состояние
+        # «коммит есть, head_sha ещё нет» приходило и с пустым tasks_blob,
+        # и строка §I3.1 «null + подходящий коммит → принять его» была
+        # недостижима — восстановление объявляло собственный коммит
+        # ревизии чужим.
         "tasks_blob": None,
     }
     if recorded_anchor is None:
