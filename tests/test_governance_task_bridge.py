@@ -2606,3 +2606,138 @@ def test_previous_dag_unavailable_when_composition_matches_nothing(
         state, {"pr": 5}, state.target_dir, state.bundle_dir
     )
     assert (dag, source) == (None, "unavailable")
+
+
+# --- _reconcile_revision / _recover_commit (§I3, §I3.1) -------------------
+
+
+def test_reconcile_completed_open_pr_returns_it(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"status": "completed", "pr": 42, "base_sha": "s"}
+    ops = _ReconOps(existing_pr=42)
+    assert tb._reconcile_revision(state, ops, 2, op, "s") == "return_pr"
+
+
+def test_reconcile_started_open_pr_same_base_continues(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"status": "started", "base_sha": "s", "head_sha": "h",
+          "tasks_blob": "b", "branch": "spec/WS-alpha-7-tasks-v2"}
+
+    class _Ops(_ReconOps):
+        def __init__(self):
+            super().__init__(existing_pr=7)
+
+        def pr_facts(self, repo_slug, pr):
+            return {"state": "OPEN", "headRefOid": "h"}
+
+    assert tb._reconcile_revision(state, _Ops(), 2, op, "s") == "continue"
+
+
+def test_reconcile_started_open_pr_shifted_base_fails_closed(
+    tmp_path, monkeypatch
+):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"status": "started", "base_sha": "old", "head_sha": "h",
+          "branch": "b"}
+
+    class _Ops(_ReconOps):
+        def __init__(self):
+            super().__init__(existing_pr=7)
+
+        def pr_facts(self, repo_slug, pr):
+            return {"state": "OPEN", "headRefOid": "h"}
+
+    with pytest.raises(RuntimeError, match="--abandon-revision"):
+        tb._reconcile_revision(state, _Ops(), 2, op, "new")
+
+
+def test_reconcile_closed_unmerged_fails_closed(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"status": "started", "base_sha": "s", "branch": "b"}
+
+    class _Ops(_ReconOps):
+        def __init__(self):
+            super().__init__(existing_pr=7)
+
+        def pr_facts(self, repo_slug, pr):
+            return {"state": "CLOSED"}
+
+    with pytest.raises(RuntimeError, match="отклонена"):
+        tb._reconcile_revision(state, _Ops(), 2, op, "s")
+
+
+def test_reconcile_identity_mismatch_fails_closed(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"status": "started", "base_sha": "s", "head_sha": "mine",
+          "branch": "b"}
+
+    class _Ops(_ReconOps):
+        def __init__(self):
+            super().__init__(existing_pr=7)
+
+        def pr_facts(self, repo_slug, pr):
+            return {"state": "OPEN", "headRefOid": "someone-else"}
+
+    with pytest.raises(RuntimeError, match="идентичность"):
+        tb._reconcile_revision(state, _Ops(), 2, op, "s")
+
+
+def test_reconcile_started_no_pr_shifted_base_abandons(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"status": "started", "base_sha": "old", "branch": "b"}
+    ops = _ReconOps(existing_pr=None)
+    assert tb._reconcile_revision(state, ops, 2, op, "new") == "abandon_and_next"
+
+
+def test_recover_commit_accepts_matching_local_commit(tmp_path, monkeypatch):
+    """head_sha: null, но подходящий коммит есть — принимается, не пересоздаётся."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"head_sha": None, "base_sha": "base1", "tasks_blob": "blob1",
+          "branch": "spec/WS-alpha-7-tasks-v2"}
+
+    class _Ops(_ReconOps):
+        def rev_parse(self, target_dir, ref):
+            return "commit1" if "tasks-v2" in ref else None
+
+        def commit_parent(self, target_dir, sha):
+            return "base1"
+
+        def blob_in_commit(self, target_dir, sha, rel_path):
+            return "blob1"
+
+    assert tb._recover_commit(state, _Ops(), op) == "commit1"
+
+
+def test_recover_commit_refuses_foreign_commit(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"head_sha": None, "base_sha": "base1", "tasks_blob": "blob1",
+          "branch": "spec/WS-alpha-7-tasks-v2"}
+
+    class _Ops(_ReconOps):
+        def rev_parse(self, target_dir, ref):
+            return "commitX" if "tasks-v2" in ref else None
+
+        def commit_parent(self, target_dir, sha):
+            return "OTHER-BASE"
+
+        def blob_in_commit(self, target_dir, sha, rel_path):
+            return "blob1"
+
+    with pytest.raises(RuntimeError, match="чужой коммит"):
+        tb._recover_commit(state, _Ops(), op)

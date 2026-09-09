@@ -1336,6 +1336,76 @@ def _previous_dag(
     return None, "unavailable"
 
 
+def _reconcile_revision(
+    state: RunState, ops: Ops, n: int, op: dict, base_sha: str
+) -> str:
+    """Решение по таблице §I3 спеки. Возврат — имя перехода, не действие.
+
+    Имя ветки НЕ доказывает принадлежность: под ним может лежать чужая
+    работа, поэтому у каждого живого PR сверяется `headRefOid` с
+    записанным `head_sha` намерения.
+    """
+    branch = op.get("branch")
+    pr = ops.find_pr(state.repo_slug, branch, any_state=True) if branch else None
+    pr_state = ops.pr_facts(state.repo_slug, pr).get("state") if pr else None
+    if pr is not None and pr_state not in ("OPEN", "MERGED"):
+        raise RuntimeError(
+            f"PR #{pr} по ветке {branch} закрыт без мержа — ветка отклонена "
+            "человеком; переиздание fail-closed"
+        )
+    if pr is not None and op.get("head_sha"):
+        actual_head = ops.pr_facts(state.repo_slug, pr).get("headRefOid")
+        if actual_head and actual_head != op["head_sha"]:
+            raise RuntimeError(
+                f"идентичность не сошлась: PR #{pr} стоит на "
+                f"{actual_head[:7]}, намерение ревизии {n} — "
+                f"{op['head_sha'][:7]}; под тем же именем ветки чужая работа"
+            )
+    if op.get("status") == "completed":
+        return "return_pr"
+    same_base = op.get("base_sha") == base_sha
+    if pr is not None and pr_state == "MERGED":
+        return "complete"
+    if pr is not None and pr_state == "OPEN":
+        if same_base:
+            return "continue"
+        raise RuntimeError(
+            f"ревизия {n} начата с другого base, а её PR #{pr} открыт: "
+            f"продолжать нельзя (PR выведен из {op.get('base_sha', '?')[:7]}), "
+            "и второй открытый PR заводить нельзя. Закройте его явно: "
+            f"--abandon-revision {n}"
+        )
+    return "continue" if same_base else "abandon_and_next"
+
+
+def _recover_commit(state: RunState, ops: Ops, op: dict) -> str | None:
+    """Таблица §I3.1: коммит и запись head_sha не атомарны.
+
+    Возврат: SHA коммита, который надо пушить (уже созданный или
+    принятый), либо None — коммита ещё нет, доставка создаёт его сама.
+    """
+    branch, head = op.get("branch"), op.get("head_sha")
+    local = ops.rev_parse(state.target_dir, branch) if branch else None
+    if head:
+        if local and local != head:
+            raise RuntimeError(
+                f"remote/локальный head ветки {branch} = {local[:7]}, "
+                f"намерение — {head[:7]}: ветку двигали снаружи"
+            )
+        return head
+    if local is None:
+        return None
+    rel = f"spec/{state.ws_id}-tasks.md"
+    parent = ops.commit_parent(state.target_dir, local)
+    blob = ops.blob_in_commit(state.target_dir, local, rel)
+    if parent == op.get("base_sha") and blob == op.get("tasks_blob"):
+        return local
+    raise RuntimeError(
+        f"чужой коммит в ветке {branch}: родитель {parent!r} / блоб "
+        f"{blob!r} не отвечают намерению ревизии"
+    )
+
+
 def deliver_conform(
     target_dir: str,
     repo_slug: str,
