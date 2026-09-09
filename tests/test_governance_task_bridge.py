@@ -2563,3 +2563,46 @@ def test_provenance_explicit_flag_is_verified_not_trusted(
         tb._resolve_correction_pr(
             state, _Explicit(), "a/b.md", "master", 500
         )
+
+
+# --- _previous_dag (§I8: сверка активного DAG предыдущей доставки) --------
+
+
+def test_previous_dag_from_revision_record(tmp_path, monkeypatch) -> None:
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    prev = {"dag": [list(x) for x in tb._BUNDLE_DAG]}
+    dag, source = tb._previous_dag(
+        state, prev, state.target_dir, state.bundle_dir
+    )
+    assert source == "previous_delivery"
+    assert dag == tb._BUNDLE_DAG
+
+
+def test_previous_dag_derived_from_bundle_composition(
+    tmp_path, monkeypatch
+) -> None:
+    """Легаси-v1 без записи dag: состав каталога совпадает ровно с одним
+    вариантом _dag_for."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    dag, source = tb._previous_dag(
+        state, {"pr": 5}, state.target_dir, state.bundle_dir
+    )
+    assert source == "derived_from_spec"
+    assert dag == tb._BUNDLE_DAG
+
+
+def test_previous_dag_unavailable_when_composition_matches_nothing(
+    tmp_path, monkeypatch
+) -> None:
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    (Path(state.target_dir) / state.bundle_dir / "99-alien.md").write_text("x")
+    dag, source = tb._previous_dag(
+        state, {"pr": 5}, state.target_dir, state.bundle_dir
+    )
+    assert (dag, source) == (None, "unavailable")

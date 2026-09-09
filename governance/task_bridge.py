@@ -1307,6 +1307,35 @@ def _resolve_correction_pr(
     return number, merged_by, merged_at
 
 
+def _previous_dag(
+    state: RunState,
+    prev_op: dict,
+    target_dir: str,
+    bundle_dir: str,
+) -> tuple[tuple[tuple[str, tuple[str, ...]], ...] | None, str]:
+    """DAG предыдущей доставки + откуда он взят (§I8 спеки).
+
+    Запись `dag` в ревизии фиксирует ВЫБОР, не доказательство; для
+    легаси-v1 состав выводится из каталога бандла и обязан совпасть
+    ТОЧНО с одним из `_dag_for(None|3|4|5)` — `--legacy-bundle=5` это
+    отдельный вариант, а не префикс полного DAG.
+    """
+    recorded = prev_op.get("dag")
+    if recorded:
+        return tuple((f, tuple(u)) for f, u in recorded), "previous_delivery"
+    present = {
+        p.name for p in (Path(target_dir) / bundle_dir).iterdir()
+        if p.is_file() and p.suffix == ".md"
+    }
+    matches = [
+        _dag_for(v) for v in (None, 3, 4, 5)
+        if {f for f, _ in _dag_for(v)} == present
+    ]
+    if len(matches) == 1:
+        return matches[0], "derived_from_spec"
+    return None, "unavailable"
+
+
 def deliver_conform(
     target_dir: str,
     repo_slug: str,
