@@ -9,6 +9,7 @@ behaviour-spec бандла и генерирует managed-спеку `spec/<ws
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -3075,6 +3076,34 @@ def test_previous_dag_unavailable_when_composition_matches_nothing(
     assert (dag, source) == (None, "unavailable")
 
 
+def test_previous_dag_refuses_when_bundle_dir_missing(
+    tmp_path, monkeypatch
+) -> None:
+    """Каталога бандла нет — отказ с путём, а не сырой FileNotFoundError.
+
+    Ветка вывода состава исполняется для ЛЮБОЙ сегодняшней v1
+    (`deliver_for_run` поле `dag` не пишет), и `_previous_dag` — первый
+    код переиздания, который вообще трогает каталог бандла (он раньше и
+    `_resolve_correction_pr`, и `_prospective_anchor` с его
+    `_check_bundle_composition`). `iterdir()` на несуществующем каталоге
+    бросал `FileNotFoundError` мимо `except RuntimeError` в `main`.
+    «unavailable» здесь тоже неверен: §I8 зовёт неудачей вывода
+    несошедшиеся ИСТОЧНИКИ, а не отсутствие предмета переиздания."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    shutil.rmtree(Path(state.target_dir) / state.bundle_dir)
+    ops = _ShowFileOps(_spec_text("decomposition"))
+    with pytest.raises(RuntimeError, match="каталога бандла") as exc:
+        tb._previous_dag(
+            state, ops, {"pr": 5}, state.target_dir, state.bundle_dir,
+            _BASE_SHA,
+        )
+    assert state.bundle_dir in str(exc.value)
+    assert "run.json" in str(exc.value)          # процедура, не только факт
+    assert ops.calls == []                       # до чтения спеки не дошло
+
+
 def test_previous_dag_legacy_requires_delivered_spec(
     tmp_path, monkeypatch
 ) -> None:
@@ -4505,6 +4534,29 @@ def test_cli_supersede_noop_is_success(tmp_path, monkeypatch, capsys):
     )
     monkeypatch.setattr(tb, "RealOps", lambda: object())
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
+
+
+def test_cli_supersede_missing_bundle_dir_is_diagnosed(
+    tmp_path, monkeypatch, capsys
+):
+    """Тот же отказ СКВОЗЬ `main`: RC 1 и диагностика, не трейсбек.
+
+    Проверяется граница, на которой находка и видна оператору: `main`
+    ловит только `RuntimeError`, поэтому классификация исключения в
+    `_previous_dag` решает, увидит он процедуру или стек PyYAML-подобным
+    образом — сырой `FileNotFoundError` пролетел бы мимо `except`."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    rs.save(state)
+    shutil.rmtree(Path(state.target_dir) / state.bundle_dir)
+    ops = _RevisionPrOps(pr=5, pr_state="MERGED", prs=[_MERGED_PR])
+    monkeypatch.setattr(tb, "RealOps", lambda: ops)
+    assert tb.main(["--run-id", "r-recon", "--supersede"]) == 1
+    assert "каталога бандла" in capsys.readouterr().out
 
 
 def test_cli_abandon_revision_marks_and_returns_zero(tmp_path, monkeypatch):

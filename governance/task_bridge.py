@@ -1505,12 +1505,31 @@ def _previous_dag(
     после доставки; якорь спеки не различает 5 от 6, но отсекает 3 и 4.
     Спеки нет / frontmatter не разобрать / якорь не совпал — вывод НЕ
     удался (§I8 дословно), а не «совпало»: compatibility-случай §6.
+
+    Отсутствие САМОГО каталога бандла — не «вывод не удался», а отказ:
+    §I8 зовёт неудачей вывода состояние, где источники есть, но не
+    сходятся, а здесь нет предмета переиздания. «unavailable» отменил бы
+    сверку §I8 и повёл дальше — через сетевой §I7 к
+    `_prospective_anchor`, где отказ пришёл бы про СОСТАВ бандла
+    («доавторьте узлы либо передайте --legacy-bundle»), уводя оператора
+    мимо причины. Функция трогает каталог первой в переиздании, поэтому
+    диагностика (та же, что `_check_bundle_composition` даёт ниже по
+    ходу) стоит здесь, а не сырой `FileNotFoundError` из `iterdir()`
+    мимо `except RuntimeError` в `main`.
     """
     recorded = prev_op.get("dag")
     if recorded:
         return tuple((f, tuple(u)) for f, u in recorded), "previous_delivery"
+    bundle_path = Path(target_dir) / bundle_dir
+    if not bundle_path.is_dir():
+        raise RuntimeError(
+            f"каталога бандла {bundle_dir!r} нет в {target_dir!r} на base "
+            f"{base_sha[:7]} — состав DAG предыдущей доставки выводить не "
+            "из чего; проверьте bundle_dir в run.json и что бандл вмержен "
+            "в base_ref"
+        )
     present = {
-        p.name for p in (Path(target_dir) / bundle_dir).iterdir()
+        p.name for p in bundle_path.iterdir()
         if p.is_file() and p.suffix == ".md"
     }
     matches = [
