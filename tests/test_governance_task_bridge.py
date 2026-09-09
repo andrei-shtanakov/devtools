@@ -343,6 +343,17 @@ class _StubOps:
         self.pr_body = body
         return 77
 
+    def rev_parse(self, target_dir: str, ref: str) -> str | None:
+        # Дефолт для стабов, у которых живого git нет (Task 7 supersede):
+        # переопределяющие подклассы (_recover_commit-тесты) уже несут
+        # собственный rev_parse, этот — только чтобы не падать AttributeError.
+        return None
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        # Тот же смысл: _previous_dag дёргает show_file на пути «легаси-v1
+        # без записи dag» — без живого git ответ «спеки в base нет».
+        return None
+
 
 def _target(tmp_path: Path) -> Path:
     target = tmp_path / "alpha"
@@ -2293,6 +2304,17 @@ def _recon_state(tmp_path: Path, monkeypatch, **kw):
 
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     target = _target(tmp_path)
+    # Базовая доставленная tasks-спека v1 (Task 7 supersede): по конструкции
+    # фикстуры v1 уже "доставлена" (`state.pr = 5`), значит на base уже лежит
+    # spec/<ws-id>-tasks.md — без него _previous_tasks_version не из чего
+    # читать монотонность версии. Тесты, которым нужна другая версия
+    # (например, test_supersede_version_is_monotonic), перезаписывают файл
+    # сами.
+    (target / "spec").mkdir(parents=True, exist_ok=True)
+    (target / "spec/WS-alpha-7-tasks.md").write_text(
+        "---\nspec_stage: tasks\nstatus: draft\nversion: 1\n---\n\nbody\n",
+        encoding="utf-8",
+    )
     state = rs.new_run(
         subject="s",
         repo="alpha",
@@ -2917,3 +2939,148 @@ def test_recover_commit_refuses_foreign_commit(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="чужой коммит"):
         tb._recover_commit(state, _Ops(), op)
+
+
+# --- deliver_superseded: сборка переиздания (Task 7) ----------------------
+
+
+class _SupersedeOps(_ProvOps):
+    """Стаб на базе `_ProvOps` для `deliver_superseded`: живого git нет,
+    примитивы восстановления коммита/идентичности возвращают None —
+    ветвление на "коммита ещё нет" (`_recover_commit`) и "PR не найден"
+    (`_reconcile_revision`), не на чужую работу под тем же именем."""
+
+    def rev_parse(self, target_dir, ref):
+        return None
+
+    def commit_parent(self, target_dir, sha):
+        return None
+
+    def blob_in_commit(self, target_dir, sha, rel_path):
+        return None
+
+    def find_pr(self, repo_slug, branch, *, any_state=False):
+        return None
+
+
+def test_supersede_equal_anchor_is_traceless_noop(tmp_path, monkeypatch):
+    """Равный anchor: RC-успех, run.json побайтово прежний."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    # approved_by/at здесь обязаны совпасть с тем, что вернёт _ProvOps.pr_facts
+    # (mergedBy = andrei-shtanakov, mergedAt = 2026-09-09T05:00:00Z) — иначе
+    # anchor этой строки и anchor, который deliver_superseded посчитает
+    # изнутри через _resolve_correction_pr, разойдутся по байтам штампа.
+    anchor = tb._prospective_anchor(
+        state.target_dir, state.bundle_dir, "andrei-shtanakov",
+        "2026-09-09T05:00:00Z", None,
+    )
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": anchor}
+    rs.save(state)
+    before = (rs.run_dir("r-recon") / "run.json").read_bytes()
+    result = tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR]))
+    after = (rs.run_dir("r-recon") / "run.json").read_bytes()
+    assert result is None
+    assert before == after
+
+
+def test_supersede_changed_anchor_opens_new_branch_and_pr(
+    tmp_path, monkeypatch
+):
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
+    rs.save(state)
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    pr = tb.deliver_superseded(state, ops)
+    assert pr == 77
+    assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops.calls
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["status"] == "completed"
+    assert saved["supersedes"] == 1
+    assert saved["approval_pr"] == 403
+    assert rs.load("r-recon").ops["tasks-deliver"]["pr"] == 5   # v1 цела
+
+
+def test_supersede_version_is_monotonic(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    (Path(state.target_dir) / "spec").mkdir(exist_ok=True)
+    (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").write_text(
+        "---\nspec_stage: tasks\nversion: 4\n---\n", encoding="utf-8"
+    )
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    tb.deliver_superseded(state, ops)
+    text = (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").read_text()
+    assert "version: 5" in text
+
+
+def test_supersede_dag_mismatch_fails_closed(tmp_path, monkeypatch):
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ",
+        "dag": [["00-charter.md", []], ["10-requirements.md", ["charter"]]],
+    }
+    rs.save(state)
+    with pytest.raises(RuntimeError, match="другая доставка"):
+        tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
+
+
+def test_supersede_legacy_without_anchor_records_unavailable(
+    tmp_path, monkeypatch
+):
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5}  # без anchor
+    rs.save(state)
+    tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["comparison"] == "unavailable"
+
+
+def test_supersede_not_completed_run_refuses(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch, status="waiting_human_merge")
+    with pytest.raises(RuntimeError, match="completed"):
+        tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
+
+
+def test_supersede_dirty_target_refuses(tmp_path, monkeypatch):
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+
+    class _DirtyOps(_SupersedeOps):
+        def is_dirty(self, target_dir):
+            return True
+
+    with pytest.raises(RuntimeError, match="грязный"):
+        tb.deliver_superseded(state, _DirtyOps(prs=[_MERGED_PR]))
+
+
+def test_supersede_no_prior_delivery_refuses(tmp_path, monkeypatch):
+    """Свежий прогон без единой доставки — переиздавать нечего."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    # _recon_state кладёт state.pr = 5 по умолчанию, но op tasks-deliver не
+    # заводит — прогон формально не доставлял ничего.
+    with pytest.raises(RuntimeError, match="переиздавать нечего"):
+        tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))

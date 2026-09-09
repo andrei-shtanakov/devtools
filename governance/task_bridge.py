@@ -401,6 +401,7 @@ def _render_header(
     generated_at: str,
     anchor_blob: str,
     anchor_node_id: str,
+    version: int = 1,
 ) -> list[str]:
     """Frontmatter + шапка Milestone — общая часть `render_tasks` и
     `render_tasks_dt` (Task 8 плана decomposition-node).
@@ -412,13 +413,18 @@ def _render_header(
     ретроспективы): traces_to/upstream_hashes переживают `spec approve`
     (он мержит traces и не трогает существующий пин), так что рукам после
     approve остаётся только нормализация `--conform-approve`.
+
+    `version` (Task 7 плана supersede): номер ревизии tasks-спеки —
+    `1` у первой доставки, `_previous_tasks_version(state) + 1` у
+    переиздания (`deliver_superseded`). Дефолт `1` сохраняет прежний
+    захардкоженный текст для всех вызовов без явного значения.
     """
     return [
         "---",
         "spec_stage: tasks",
         "status: draft",
         "owner_role: stream-owner",
-        "version: 1",
+        f"version: {version}",
         "generated_by: fleet-agent",
         # В кавычках: голый ISO-скаляр YAML резолвит в timestamp, а
         # схема спеки ждёт строку (minor ревью PR spec-runner#369, круг 3)
@@ -451,6 +457,7 @@ def render_tasks(
     design_blob: str,
     design_text: str = "",
     anchor_node_id: str = _ANCHOR_NODE_ID,
+    version: int = 1,
 ) -> str:
     """tasks.md по шаблону templates/tasks-spec-template.md.
 
@@ -477,7 +484,8 @@ def render_tasks(
     знает, только про то, ЧТО именно является якорем.
     """
     lines = _render_header(
-        ws_id, subject, generated_at, design_blob, anchor_node_id
+        ws_id, subject, generated_at, design_blob, anchor_node_id,
+        version=version,
     )
     lines += _render_resolutions_section(design_text)
     groups: list[tuple[str, str, list[Scenario]]] = []  # (key, title, scs)
@@ -550,6 +558,7 @@ def render_tasks_dt(
     anchor_blob: str,
     design_text: str = "",
     acceptance_text: str = "",
+    version: int = 1,
 ) -> str:
     """tasks.md из решённой декомпозиции: 1 DT = 1 задача.
 
@@ -572,7 +581,8 @@ def render_tasks_dt(
     by_beh = {sc.beh_id: sc for sc in scenarios}
     number = {t.dt_id: idx for idx, t in enumerate(dt_tasks, start=1)}
     lines = _render_header(
-        ws_id, subject, generated_at, anchor_blob, anchor_node_id="decomposition"
+        ws_id, subject, generated_at, anchor_blob, anchor_node_id="decomposition",
+        version=version,
     )
     lines += _render_resolutions_section(design_text)
     lines += _render_acceptance_section(acceptance_text)
@@ -859,6 +869,8 @@ def deliver(
     generated_at: str | None = None,
     legacy_bundle: int | None = None,
     profile: str | None = None,
+    branch: str | None = None,
+    version: int = 1,
 ) -> int:
     """Штампует бандл + пишет spec/<ws-id>-tasks.md; один draft-PR.
 
@@ -891,6 +903,12 @@ def deliver(
     design/acceptance/decomposition.
     `profile=None` (дефолт) — проверка пропускается; CLI (`main`) всегда
     передаёт `state.profile`.
+
+    `branch`/`version` (Task 7 плана supersede): `deliver_superseded`
+    доставляет переиздание в СВОЮ ветку `spec/<ws-id>-tasks-v<N>` с
+    возросшим `version:` во frontmatter — обычная доставка (`deliver_for_run`)
+    не передаёт ни того, ни другого, и получает прежние дефолты
+    (`spec/<ws-id>-tasks`, `version: 1`).
     """
     if ops.is_dirty(target_dir):
         raise RuntimeError(
@@ -972,7 +990,7 @@ def deliver(
         # находка формы (`non_fatal_findings`, потребитель — только
         # S4-гейт `runner._step_gate`, не `deliver()`) — такой бандл
         # доставляется, а осиротевший путь молча уезжает в **Verifies:**.
-    branch = f"spec/{ws_id}-tasks"
+    branch = branch or f"spec/{ws_id}-tasks"
     ops.ensure_branch(target_dir, branch)
     stamped = stamp_bundle_approved(
         target_dir, bundle_dir, approved_by, approved_at,
@@ -1028,6 +1046,7 @@ def deliver(
             anchor_blob=design_blob,
             design_text=design_text,
             acceptance_text=acceptance_text,
+            version=version,
         )
     else:
         text = render_tasks(
@@ -1039,6 +1058,7 @@ def deliver(
             design_blob=design_blob,
             design_text=design_text,
             anchor_node_id=anchor_node_id,
+            version=version,
         )
     rel = f"spec/{ws_id}-tasks.md"
     out = Path(target_dir) / rel
@@ -1422,6 +1442,157 @@ def _recover_commit(state: RunState, ops: Ops, op: dict) -> str | None:
         f"чужой коммит в ветке {branch}: родитель {parent!r} / блоб "
         f"{blob!r} не отвечают намерению ревизии"
     )
+
+
+def _previous_tasks_version(state: RunState) -> int:
+    """`version:` доставленной tasks-спеки в свежем base (§I6 спеки).
+
+    Читает рабочее дерево `target_dir` НАПРЯМУЮ (не `ops.show_file`) —
+    вызывающая сторона (`deliver_superseded`) уже освежила его до
+    `base_ref` до вызова. Файла нет либо frontmatter/поле не разобрать —
+    fail-closed: монотонность версии гадать нельзя (минор ревью #161).
+    """
+    rel = Path(state.target_dir) / "spec" / f"{state.ws_id}-tasks.md"
+    if not rel.exists():
+        raise RuntimeError(
+            f"{rel} не найден на базе — версию предыдущей доставки взять "
+            "неоткуда"
+        )
+    try:
+        meta, _ = split_frontmatter(rel.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{rel}: frontmatter не разобрать ({exc}) — версию предыдущей "
+            "доставки взять неоткуда"
+        ) from exc
+    version = meta.get("version")
+    if not isinstance(version, int):
+        raise RuntimeError(
+            f"{rel}: version={version!r} — не целое число, версию "
+            "предыдущей доставки взять неоткуда"
+        )
+    return version
+
+
+def deliver_superseded(
+    state: RunState,
+    ops: Ops,
+    legacy_bundle: int | None = None,
+    approval_pr: int | None = None,
+) -> int | None:
+    """Санкционированное переиздание tasks-спеки (спека 2026-09-09).
+
+    Порядок: синхронизация base → реконсиляция незавершённой ревизии
+    (§I3) → вывод/сверка активного DAG предыдущей доставки (§I8) →
+    provenance correction-PR (§I7) → проспективный anchor (§I2) →
+    сверка с записанным anchor'ом предыдущей доставки → намерение (§I4,
+    write-ahead) → доставка в НОВУЮ ветку `spec/<ws-id>-tasks-v<N>`.
+    Возврат `None` — бесследный no-op (§I5): апстрим не менялся с
+    прошлой доставки, run.json не трогается.
+    """
+    if state.status != "completed":
+        raise RuntimeError(
+            f"run {state.run_id!r} в статусе {state.status!r}, нужен "
+            "'completed'"
+        )
+    if ops.is_dirty(state.target_dir):
+        raise RuntimeError(
+            f"target_dir {state.target_dir!r} грязный — переиздание не начато"
+        )
+    base_ref = state.base_ref or "master"
+    ops.checkout_and_pull(state.target_dir, base_ref)
+    base_sha = ops.rev_parse(state.target_dir, "HEAD")
+
+    prev = _last_delivery(state)
+    if prev is None:
+        raise RuntimeError(
+            "доставок ещё не было — переиздавать нечего; обычная доставка "
+            "идёт без --supersede"
+        )
+    prev_n, prev_op = prev
+
+    # Незавершённая ревизия реконсилируется ДО любых новых эффектов.
+    for n, op in reversed(_revisions(state)):
+        if op.get("status") == "started":
+            decision = _reconcile_revision(state, ops, n, op, base_sha)
+            if decision == "abandon_and_next":
+                _abandon_revision(
+                    state, n,
+                    f"base сдвинулся ({op.get('base_sha', '?')[:7]} → "
+                    f"{base_sha[:7]}), открытого PR нет",
+                )
+            break
+
+    dag, dag_source = _previous_dag(
+        state, ops, prev_op, state.target_dir, state.bundle_dir, base_sha,
+    )
+    active = _dag_for(legacy_bundle)
+    if dag is not None and dag != active:
+        raise RuntimeError(
+            "состав активного DAG отличается от предыдущей доставки — "
+            "это не переиздание, а другая доставка"
+        )
+    anchor_rel = f"{state.bundle_dir}/{active[-1][0]}"
+    approval, approved_by, approved_at = _resolve_correction_pr(
+        state, ops, anchor_rel, base_ref, approval_pr
+    )
+    prospective = _prospective_anchor(
+        state.target_dir, state.bundle_dir, approved_by, approved_at,
+        legacy_bundle,
+    )
+    recorded_anchor = prev_op.get("anchor")
+    if recorded_anchor is not None and recorded_anchor == prospective:
+        print(
+            "апстрим не менялся — переиздание не требуется "
+            f"(anchor {prospective[:7]})"
+        )
+        return None
+
+    n = _next_revision(state)
+    generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    version = _previous_tasks_version(state) + 1
+    branch = f"spec/{state.ws_id}-tasks-v{n}"
+    intent = {
+        "branch": branch,
+        "base_sha": base_sha,
+        "prospective_anchor": prospective,
+        "approval_pr": approval,
+        "tasks_version": version,
+        "dag": [[f, list(u)] for f, u in active],
+        "dag_source": dag_source,
+        "supersedes": prev_n,
+        "expected_generated_at": generated_at,
+        "tasks_blob": None,      # заполняется после рендера, до коммита
+    }
+    if recorded_anchor is None:
+        # §6 спеки: сверка была невозможна — фиксируем это В ЖУРНАЛЕ.
+        intent["comparison"] = "unavailable"
+        print(
+            "предыдущая доставка не записала anchor — сверка не "
+            "производилась (comparison: unavailable)"
+        )
+    _start_revision(state, n, intent)
+    pr = deliver(
+        target_dir=state.target_dir,
+        repo_slug=state.repo_slug,
+        ws_id=state.ws_id,
+        subject=state.subject,
+        bundle_dir=state.bundle_dir,
+        base_ref=base_ref,
+        ops=ops,
+        approved_by=approved_by,
+        approved_at=approved_at,
+        generated_at=generated_at,
+        legacy_bundle=legacy_bundle,
+        profile=state.profile,
+        branch=branch,
+        version=version,
+    )
+    _complete_revision(
+        state, n, pr=pr, anchor=prospective,
+        head_sha=ops.rev_parse(state.target_dir, branch),
+    )
+    return pr
 
 
 def deliver_conform(
