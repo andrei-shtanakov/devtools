@@ -389,6 +389,101 @@ def test_verifies_inline_form_is_also_accepted() -> None:
     assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
 
 
+def test_verifies_block_form_preserves_selector_entries() -> None:
+    """Round 13 ревью PR #161: элементы блочной формы с `::`-селекторами
+    сохраняются verbatim (срез `::` — дело только гарда/ownership-
+    проверок, не парсера)."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "  - tests/test_a.py::test_one\n"
+        "  - tests/test_b.py::test_two\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == (
+        "tests/test_a.py::test_one", "tests/test_b.py::test_two",
+    )
+
+
+def test_verifies_unparsed_scalar_form_is_a_finding() -> None:
+    """Major ревью PR #161, round 13 (контракт владельца): скалярное
+    значение (`verifies: <путь>` без `[...]` и без блочного списка) не
+    матчит ни инлайн-, ни блочную форму — раньше это молча деградировало
+    до «поля нет вовсе» (пустой кортеж, никакой находки, closure-проверка
+    и рендер про файл не знают). Теперь ключ verifies, присутствующий в
+    блоке, но не разобранный НИ ОДНОЙ формой, — находка формы."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies: tests/test_ops.py\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert any(
+        "DT-14" in f and "verifies" in f and "не разобран" in f
+        for f in findings
+    )
+    assert tasks[0].verifies == ()
+
+
+def test_verifies_empty_block_form_is_a_finding() -> None:
+    """Round 13: `verifies:` объявлен блочно, но за ним НЕТ ни одной
+    валидной строки `- <путь>` (сразу пустая строка/проза) — тоже находка,
+    не тихое «поля нет»."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "\n"
+        "Проза без единого элемента списка.\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert any(
+        "DT-14" in f and "verifies" in f and "не разобран" in f
+        for f in findings
+    )
+    assert tasks[0].verifies == ()
+
+
+def test_verifies_block_form_stops_at_unindented_prose_bullet() -> None:
+    """Минор ревью PR #161, round 13: блочный список обязан
+    останавливаться на первой строке, не являющейся отступленным `- '
+    элементом, — прозаический маркированный буллет БЕЗ отступа (обычное
+    начало абзаца-прозы после DT, `- Предмет: …`) не должен утекать в
+    t.verifies как путь."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "  - tests/test_a.py\n"
+        "- Предмет: наблюдение, границы: без правок.\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py",)
+
+
+def test_verifies_block_form_stops_at_blank_line() -> None:
+    """Пустая строка тоже заканчивает блочный список (round 13)."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "  - tests/test_a.py\n"
+        "\n"
+        "Проза предмета после пустой строки.\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py",)
+
+
 def test_verify_with_checked_by_target_but_without_verifies_is_legacy_ok() -> None:
     """Round 7 ревью PR #161, минор (контракт владельца, замена round-5
     безусловного «verify без verifies»): verify-DT с checked_by-целью в
@@ -416,13 +511,14 @@ def test_verify_with_checked_by_target_but_without_verifies_is_legacy_ok() -> No
     assert non_fatal_findings(beh, dt) == []
 
 
-def test_verify_group_underivable_is_non_fatal_finding() -> None:
-    """Round 7 ревью PR #161, минор (контракт владельца): находка только
-    когда группа наблюдения не выводится ВООБЩЕ — ни из checked_by
-    (собственные scenarios без единой цели), ни из verifies.
-    `non_fatal_findings` её показывает; `graph_findings` (fatal-агрегат
-    S4-гейта и deliver()) — нет, легаси/неполный бандл продолжает
-    доставляться."""
+def test_verify_group_underivable_is_a_fatal_finding() -> None:
+    """Round 13 ревью PR #161, минор (контракт владельца — промотировано
+    из non-fatal, round 7): условие «группа наблюдения не выводится
+    ВООБЩЕ» (ни из checked_by, ни из verifies) ТОЖДЕСТВЕННО тому, при
+    котором render_tasks_dt детерминированно поднимает RuntimeError —
+    «не блокирует доставку» было ложью для этого входа. Теперь это FATAL
+    находка `graph_findings` (S4-гейт и deliver() её видят и отказывают),
+    а не non-fatal warning."""
     from governance.decomposition_guard import graph_findings, non_fatal_findings
 
     beh = (
@@ -436,12 +532,16 @@ def test_verify_group_underivable_is_non_fatal_finding() -> None:
         "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
         "delivered_by: [DT-01]\nparallel_group: solo\n"
     )
-    warnings = non_fatal_findings(beh, dt)
+    findings = graph_findings(beh, dt)
     assert any(
         "DT-14" in f and "группа наблюдения не выводится" in f
-        for f in warnings
+        for f in findings
     )
-    assert graph_findings(beh, dt) == []
+    # Больше НЕ дублируется в non-fatal канале — единственный вывод, fatal.
+    assert not any(
+        "группа наблюдения не выводится" in f
+        for f in non_fatal_findings(beh, dt)
+    )
 
 
 def test_orphan_verifies_target_is_non_fatal_finding() -> None:
