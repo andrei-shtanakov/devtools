@@ -1326,3 +1326,26 @@ def test_delete_local_branch_missing_is_false_not_raise(monkeypatch):
     _install_fake_run(monkeypatch, returncode=1, stderr="not found")
 
     assert RealOps().delete_local_branch("/tmp/clone", "spec/x-v3") is False
+
+
+def test_remote_branch_head_reads_the_ref_not_the_pr(monkeypatch):
+    """Спрашивается СВОЙ ref: после закрытия PR в ветку могли дописать."""
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="deadbeef\n")
+
+    assert RealOps().remote_branch_head(REPO_SLUG, "spec/x-v3") == "deadbeef"
+    assert calls[0].argv == [
+        "gh", "api", f"repos/{REPO_SLUG}/git/ref/heads/spec/x-v3",
+        "--jq", ".object.sha",
+    ]
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [{"returncode": 1, "stderr": "Not Found"}, {"returncode": 0, "stdout": ""}],
+    ids=["no-such-ref", "empty-answer"],
+)
+def test_remote_branch_head_absent_is_none(kw, monkeypatch):
+    """Нет ветки — None; вызывающий читает это как «шаг уже состоялся»."""
+    _install_fake_run(monkeypatch, **kw)
+
+    assert RealOps().remote_branch_head(REPO_SLUG, "spec/x-v3") is None

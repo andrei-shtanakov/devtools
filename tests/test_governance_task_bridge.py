@@ -4678,6 +4678,59 @@ def test_restamp_refuses_node_without_previous_signature(
         )
 
 
+@pytest.mark.parametrize(
+    "signature",
+    [{"approved_by": None, "approved_at": None},
+     {"approved_by": "", "approved_at": ""}],
+    ids=["keys-absent", "empty-strings"],
+)
+def test_restamp_refuses_approved_node_without_signature(
+    signature, tmp_path: Path
+) -> None:
+    """Правило 4 распространяется и на УЖЕ `approved` узел вне подписи.
+
+    Клетка спеки «любой | нет в signed_nodes, и прежней подписи нет →
+    fail-closed» не была ограничена статусом, а кодом не проверялась
+    вовсе: первая ветка политики входит только при `status != approved`,
+    вторая требует членства в `signed_nodes`. Узел `status: approved` с
+    пустым `approved_by` не смотрел никто, и переиздание доставляло его с
+    RC 0 — «одобрено» без одобрившего.
+
+    Поймать это ниже по ходу нечем: `_content_anchor` подпись вырезает по
+    построению (§I2), поэтому ни сверка §I2, ни гвард `_commit_facts_cb`
+    расхождения не дают. Форма «не подписано» проверяется в обеих: и
+    ключей нет, и `approved_by: ""`, как его заводит шаблон бандла."""
+    target = _base_after_v1(tmp_path)
+    _set_node(target, "00-charter.md", status="approved", **signature)
+
+    with pytest.raises(RuntimeError, match="прежней подписи нет"):
+        task_bridge.stamp_bundle_approved(
+            target, _BUNDLE, _CORR_BY, _CORR_AT,
+            restamp_nodes=frozenset({"requirements"}),
+        )
+
+
+def test_approved_node_with_signature_outside_signed_nodes_is_untouched(
+    tmp_path: Path,
+) -> None:
+    """Непустая прежняя подпись у approved-узла вне подписи — не трогаем.
+
+    Парный позитив к отказу выше: правило требует, чтобы подпись БЫЛА, а
+    не чтобы она была нашей. Без этой пары отказ мог бы оказаться
+    «падаем на любом approved-узле вне signed_nodes» — то есть сломать
+    штатный путь переиздания, где такие узлы и лежат."""
+    target = _base_after_v1(tmp_path)
+    before = _meta(target, "00-charter.md")
+    assert before["status"] == "approved" and before["approved_by"]
+
+    task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, _CORR_BY, _CORR_AT,
+        restamp_nodes=frozenset({"requirements"}),
+    )
+
+    assert _meta(target, "00-charter.md") == before
+
+
 def test_plain_delivery_signs_draft_nodes_without_signed_nodes(
     tmp_path: Path,
 ) -> None:
@@ -6167,6 +6220,8 @@ class _ReplaceOps(_SupersedeOps):
         threads=False,
         close_ok=True,
         facts_by_pr=None,
+        remote_head=_REPLACED_HEAD,
+        local_head=_REPLACED_HEAD,
         **kw,
     ):
         # Ветка заменяемой ревизии РЕЗОЛВИТСЯ в её PR — так на живом
@@ -6196,6 +6251,11 @@ class _ReplaceOps(_SupersedeOps):
         self.closed: list[tuple[int, str]] = []
         self.deleted: list[str] = []
         self.deleted_local: list[str] = []
+        # Ветка отозванной ревизии ЖИВА и стоит на записанном head — так
+        # на живом входе и есть до шага удаления. `None` моделирует
+        # «ссылки уже нет», другой SHA — «под тем же именем чужая работа».
+        self.remote_head = remote_head
+        self.local_head = local_head
 
     def pr_facts(self, repo_slug, pr):
         if pr not in self.facts_by_pr:
@@ -6216,6 +6276,16 @@ class _ReplaceOps(_SupersedeOps):
         if self.close_ok:
             self.closed.append((pr, comment))
         return self.close_ok
+
+    def remote_branch_head(self, repo_slug, branch):
+        self.calls.append(("remote_branch_head", branch))
+        return self.remote_head if branch == _REPLACED_BRANCH else None
+
+    def rev_parse(self, target_dir, ref):
+        if ref == _REPLACED_BRANCH:
+            self.calls.append(("rev_parse", ref))
+            return self.local_head
+        return super().rev_parse(target_dir, ref)
 
     def delete_remote_branch(self, repo_slug, branch):
         self.calls.append(("delete_remote_branch", branch))
@@ -6591,6 +6661,12 @@ def test_replace_accepts_pr_closed_by_operator(tmp_path, monkeypatch):
     ).kind == "delivered"
     assert ops.closed == []
     assert ops.deleted == [_REPLACED_BRANCH]
+    # Раньше тест утверждал только это удаление — и оно было БЕЗУСЛОВНЫМ.
+    # На этом пути (`pr_state != "OPEN"`) сверка идентичности не
+    # выполнялась ни разу за прогон: `_check_replacement_target` выходит
+    # до неё. Значит шаг 5 обязан сверить head сам.
+    assert ("remote_branch_head", _REPLACED_BRANCH) in ops.calls
+    assert ("rev_parse", _REPLACED_BRANCH) in ops.calls
 
 
 def test_replace_refuses_v1_and_unfinished_and_missing(
@@ -7222,6 +7298,70 @@ def test_discharge_costs_nothing_without_revocations_in_the_ledger(
     assert [c for c in ops.calls if c[0] == "pr_facts"] == [
         ("pr_facts", _REPLACED_PR)
     ]
+
+
+@pytest.mark.parametrize(
+    "kw, deleted, deleted_local",
+    [
+        ({"remote_head": "ЧУЖОЙ-SHA"}, [], [_REPLACED_BRANCH]),
+        ({"local_head": "ЧУЖОЙ-SHA"}, [_REPLACED_BRANCH], []),
+        ({"remote_head": "ЧУЖОЙ", "local_head": "ЧУЖОЙ"}, [], []),
+        ({"remote_head": None, "local_head": None}, [], []),
+    ],
+    ids=["origin-diverged", "clone-diverged", "both-diverged", "absent"],
+)
+def test_branch_is_dropped_only_where_head_matches_the_revoked_revision(
+    kw, deleted, deleted_local, tmp_path, monkeypatch
+):
+    """Шаг 5 сносит ссылку ТОЛЬКО там, где head совпал с отозванным.
+
+    Удаление необратимо, идёт `git branch -D` (force) и в СОСЕДНЕМ репо:
+    под тем же именем могли оказаться дописанные после закрытия PR байты
+    либо одноимённая ветка оператора в его клоне — они стали бы
+    недостижимы. Половины судятся порознь: расхождение в одной не
+    отменяет удаления в другой. Отсутствие ссылки — выполненный шаг, а не
+    сбой.
+
+    Расхождение — НЕ отказ: доставка к этому моменту состоялась, и RC 1
+    сказал бы о ней неправду."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ).kind == "delivered"
+
+    assert ops.deleted == deleted
+    assert ops.deleted_local == deleted_local
+
+
+def test_branch_is_kept_when_intent_carries_no_head_of_the_revoked(
+    tmp_path, monkeypatch, capsys
+):
+    """Нет `replaces_head_sha` — сверять нечем, значит не удаляем.
+
+    Запись старого образца (либо перенятое обязательство без поля) не
+    даёт ответить, та ли это ветка. Молчаливое удаление «на всякий
+    случай» здесь стоит дороже оставленной ветки.
+
+    Утверждается ИМЕННО диагностика, а не только «не удалили»: сравнение
+    `actual != head` при пустом `head` и так не совпало бы, поэтому
+    ветка уцелела бы и без гварда — его продукт в том, что оператору
+    названа настоящая причина, а не выдуманное расхождение SHA."""
+    from governance import task_bridge as tb
+
+    state = _window_state(
+        tmp_path, monkeypatch, replaces_head_sha=None,
+    )
+    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="CLOSED")
+
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+
+    assert ops.deleted == []
+    assert ops.deleted_local == []
+    assert "нет replaces_head_sha" in capsys.readouterr().out
 
 
 # --- CLI replace-перехода -------------------------------------------------

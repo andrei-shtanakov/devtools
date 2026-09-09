@@ -98,6 +98,10 @@ class Ops(Protocol):
 
     def close_pr(self, repo_slug: str, pr: int, comment: str) -> bool: ...
 
+    def remote_branch_head(
+        self, repo_slug: str, branch: str
+    ) -> str | None: ...
+
     def delete_remote_branch(self, repo_slug: str, branch: str) -> bool: ...
 
     def delete_local_branch(self, target_dir: str, branch: str) -> bool: ...
@@ -763,6 +767,23 @@ class RealOps:
             env=env, capture_output=True, text=True,
         )
         return done.returncode == 0
+
+    def remote_branch_head(self, repo_slug: str, branch: str) -> str | None:
+        """SHA ветки на origin; None — ветки нет либо узнать не удалось.
+
+        Спрашивается СВОЙ ref, а не `headRefOid` PR: после закрытия PR в
+        ветку могли дописать, и вопрос «что удаляем прямо сейчас»
+        задаётся именно ссылке. Сырой ответ форджи — интерпретация
+        (совпал ли SHA с записанным) не входит в ops.
+        """
+        done = subprocess.run(
+            ["gh", "api", f"repos/{repo_slug}/git/ref/heads/{branch}",
+             "--jq", ".object.sha"],
+            capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            return None
+        return done.stdout.strip() or None
 
     def delete_remote_branch(self, repo_slug: str, branch: str) -> bool:
         """DELETE refs/heads/<branch> на origin; rc0->True.

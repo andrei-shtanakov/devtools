@@ -845,6 +845,12 @@ def stamp_bundle_approved(
             meta["approved_by"] = approved_by
             meta["approved_at"] = approved_at
             dirty = True
+        elif restamp_nodes is not None and not signed:
+            # Клетка §I7 «узел уже approved, вне signed_nodes»: подпись
+            # мы не ставим — но и пустой она быть не вправе. Перехода
+            # здесь нет, файл не трогается; проверяется только то, что
+            # `approved` не стоит без подписавшего.
+            _require_preserved_signature(bundle_dir, name, status, meta)
         if upstream_ids:
             pins = meta.get("upstream_hashes")
             pins = dict(pins) if isinstance(pins, dict) else {}
@@ -870,6 +876,12 @@ def stamp_bundle_approved(
 #: одобрил его прежний подписант (§I7, решение владельца 2026-09-09).
 _PRESERVING_STATUS = "stale"
 
+#: Статусы, на которых узел ВНЕ `signed_nodes` проходит проверку, если
+#: прежняя подпись непуста: `stale` входит в `approved`, сохранив её,
+#: а `approved` остаётся как есть. Разница между клетками только в
+#: переходе; требование к подписи у них общее — она обязана БЫТЬ.
+_SIGNATURE_BEARING_STATUSES = (_PRESERVING_STATUS, "approved")
+
 #: Процедура оператору при fail-closed поузлового §I7 — отказ без
 #: процедуры бесполезен.
 _UNSIGNED_NODE_PROCEDURE = (
@@ -884,12 +896,28 @@ def _require_preserved_signature(
     status: object,
     meta: dict,
 ) -> None:
-    """Узел вне `signed_nodes` входит в `approved`: подпись сохранима?
+    """Узел вне `signed_nodes`: прежняя подпись есть и сохранима?
 
-    Переход разрешён ровно из `stale` и ровно при непустой прежней
-    подписи; иначе — RuntimeError с именем узла и процедурой. `meta` не
-    мутируется: сохранение подписи и есть «ничего не трогать», проверить
-    остаётся только право на это.
+    Зовётся на ДВУХ клетках политики §I7, и обе про одно — «подпись мы
+    не ставим, значит она обязана уже быть»:
+
+    - `stale → approved`: переход разрешён ровно из `stale` и ровно при
+      непустой прежней подписи;
+    - узел УЖЕ `approved`: перехода нет вовсе, но подпись всё равно
+      обязана быть непустой.
+
+    `meta` не мутируется: сохранение подписи и есть «ничего не трогать»,
+    проверить остаётся только право на это.
+
+    Вторая клетка была объявлена спекой и не реализована (major ревью
+    3c07bb0): первая ветка политики входит только при
+    `status != "approved"`, вторая требует членства в `signed_nodes` —
+    и узел `approved` с пустым `approved_by` не проверял никто.
+    Переиздание доставляло его с RC 0: «одобрено» без одобрившего, молча.
+    Поймать это потом нечем — `_content_anchor` подпись вырезает по
+    построению (§I2), поэтому ни сверка проспективного anchor'а, ни
+    гвард `_commit_facts_cb` расхождения не видят, а аудит по леджеру не
+    отличает пустую подпись от потерянной.
 
     Почему `stale` — да. Статус выставлен потому, что сменился upstream,
     а не содержание узла: те же байты тела одобрял тот же человек, и
@@ -903,10 +931,11 @@ def _require_preserved_signature(
     только у `stale`.
 
     Почему отсутствующая подпись — нет. Сохранять нечего: узел никогда не
-    был одобрен, а выдумать провенанс неоткуда.
+    был одобрен, а выдумать провенанс неоткуда. Форма «не подписано» —
+    та, которую заводит шаблон бандла: `approved_by: ""`.
     """
     if (
-        status == _PRESERVING_STATUS
+        status in _SIGNATURE_BEARING_STATUSES
         and meta.get("approved_by")
         and meta.get("approved_at")
     ):
@@ -914,7 +943,7 @@ def _require_preserved_signature(
     reason = (
         "прежней подписи нет (approved_by/approved_at пусты) — сохранять "
         "нечего"
-        if status == _PRESERVING_STATUS
+        if status in _SIGNATURE_BEARING_STATUSES
         else (
             f"status={status!r} — сохранять прежнюю подпись недоказуемо "
             "(содержание узла мог изменить другой correction-PR), а "
@@ -2200,21 +2229,65 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
     durable, заменяемый PR закрыт и новый PR создан. Поэтому зовётся
     исключительно там, где PR новой ревизии уже существует.
 
-    Результат `delete_remote_branch` не проверяется: «ветки нет» и «не
-    вышло» неразличимы, а шаг идемпотентен по смыслу — повтор просто
-    попробует ещё раз. Отказывать здесь было бы хуже: доставка уже
-    состоялась, и RC 1 сказал бы оператору неправду о ней.
+    Удаляется ТОЛЬКО ссылка, чей head совпал с записанным
+    `replaces_head_sha` — и в каждой половине отдельно. Иначе шаг
+    необратимо сносит чужие коммиты: под тем же именем ветки могли
+    оказаться дописанные после закрытия PR байты либо одноимённая ветка
+    оператора в его клоне, а удаление идёт `git branch -D` (force —
+    отозванная ветка не вмержена по построению, `-d` отказал бы всегда) и
+    в СОСЕДНЕМ репо. Мотивировка та же, что у head-сверки при закрытии:
+    мы не трогаем то, содержимое чего не то, что записывали. Единственный
+    путь, на котором сверки к этому моменту не было ни разу, — «оператор
+    закрыл PR сам»: там `_check_replacement_target` выходит на
+    `pr_state != "OPEN"` до сверки идентичности (major ревью 3c07bb0).
+
+    Расхождение — не отказ: доставка уже состоялась, и RC 1 сказал бы
+    оператору неправду о ней. Ветка остаётся жить, диагностика называет
+    оба SHA. То же на пустом `replaces_head_sha` (запись старого
+    образца): сверять нечем — значит не удаляем.
+
+    Отсутствие ссылки — выполненный шаг, а не сбой: `None` от
+    `remote_branch_head` и от `rev_parse` молчат.
     """
     branch = op.get("replaces_branch")
     if not branch:
         return
-    gone = ops.delete_remote_branch(state.repo_slug, branch)
-    # Локальная половина — тем же шагом: ссылка на отозванные байты
-    # удаляется в ОБЕИХ, иначе в клоне остаётся живая ветка артефакта,
-    # который контракт объявил снятым.
-    gone = ops.delete_local_branch(state.target_dir, branch) or gone
-    if gone:
-        print(f"ветка заменённой ревизии удалена: {branch}")
+    head = op.get("replaces_head_sha")
+    if not head:
+        print(
+            f"ветка {branch} оставлена: в намерении нет replaces_head_sha, "
+            "идентичность не проверить"
+        )
+        return
+    removed: list[str] = []
+    for where, actual, drop in (
+        (
+            "origin",
+            ops.remote_branch_head(state.repo_slug, branch),
+            lambda: ops.delete_remote_branch(state.repo_slug, branch),
+        ),
+        (
+            "локально",
+            ops.rev_parse(state.target_dir, branch),
+            lambda: ops.delete_local_branch(state.target_dir, branch),
+        ),
+    ):
+        if actual is None:
+            continue          # ссылки нет — шаг по этой половине состоялся
+        if actual != head:
+            print(
+                f"ветка {branch} ({where}) оставлена: она стоит на "
+                f"{actual[:7]}, а отозванная ревизия — на {head[:7]}; под "
+                "тем же именем чужая работа"
+            )
+            continue
+        if drop():
+            removed.append(where)
+    if removed:
+        print(
+            f"ветка заменённой ревизии удалена ({', '.join(removed)}): "
+            f"{branch}"
+        )
 
 
 class Correction(NamedTuple):
