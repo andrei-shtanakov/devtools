@@ -3084,3 +3084,56 @@ def test_supersede_no_prior_delivery_refuses(tmp_path, monkeypatch):
     # заводит — прогон формально не доставлял ничего.
     with pytest.raises(RuntimeError, match="переиздавать нечего"):
         tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
+
+
+def test_cli_supersede_calls_deliver_superseded(tmp_path, monkeypatch, capsys):
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _recon_state(tmp_path, monkeypatch)
+    called = {}
+    monkeypatch.setattr(
+        tb, "deliver_superseded",
+        lambda s, o, legacy_bundle=None, approval_pr=None: called.setdefault(
+            "args", (s.run_id, approval_pr)
+        ) or 77,
+    )
+    monkeypatch.setattr(tb, "RealOps", lambda: object())
+    assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
+    assert called["args"] == ("r-recon", None)
+
+
+def test_cli_supersede_noop_is_success(tmp_path, monkeypatch, capsys):
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    _recon_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        tb, "deliver_superseded",
+        lambda s, o, legacy_bundle=None, approval_pr=None: None,
+    )
+    monkeypatch.setattr(tb, "RealOps", lambda: object())
+    assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
+
+
+def test_cli_abandon_revision_marks_and_returns_zero(tmp_path, monkeypatch):
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _recon_state(tmp_path, monkeypatch)
+    tb._start_revision(state, 2, {"branch": "b", "base_sha": "s"})
+    assert tb.main([
+        "--run-id", "r-recon", "--abandon-revision", "2",
+        "--reason", "PR закрыт вручную",
+    ]) == 0
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "abandoned"
+
+
+def test_cli_abandon_revision_requires_reason(tmp_path, monkeypatch, capsys):
+    from governance import task_bridge as tb
+
+    with pytest.raises(SystemExit):
+        tb.main(["--run-id", "r", "--abandon-revision", "2"])

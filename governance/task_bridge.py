@@ -1685,7 +1685,28 @@ def main(argv: list[str] | None = None) -> int:
         "acceptance); значение обязано совпасть с составом каталога РОВНО, "
         "лишний либо недостающий узел отказывает",
     )
+    parser.add_argument(
+        "--supersede", action="store_true",
+        help="переиздать tasks-спеку после correction'а апстрима: новая "
+             "ветка spec/<ws-id>-tasks-v<N>, новый PR, отдельная ревизия в "
+             "леджере; равный anchor — успешный no-op без изменений",
+    )
+    parser.add_argument(
+        "--approval-pr", type=int, default=None,
+        help="явный correction-PR для подписи штампа, когда автоматика даёт "
+             "ноль или несколько кандидатов; проверяется так же",
+    )
+    parser.add_argument(
+        "--abandon-revision", type=int, default=None,
+        help="перевести незавершённую ревизию переиздания в терминальный "
+             "abandoned (требует --reason)",
+    )
+    parser.add_argument(
+        "--reason", default=None, help="причина для --abandon-revision"
+    )
     args = parser.parse_args(argv)
+    if args.abandon_revision is not None and not args.reason:
+        parser.error("--abandon-revision требует --reason")
     state = load(args.run_id)
     # Мост работает только над ВМЕРЖЕННЫМ и верифицированным бандлом
     # (приёмка PR #96, major): completed — единственный статус, в котором
@@ -1699,6 +1720,23 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     ops = RealOps()
+    if args.abandon_revision is not None:
+        _abandon_revision(state, args.abandon_revision, args.reason)
+        print(f"ревизия {args.abandon_revision} помечена abandoned")
+        return 0
+    if args.supersede:
+        try:
+            pr = deliver_superseded(
+                state, ops, legacy_bundle=args.legacy_bundle,
+                approval_pr=args.approval_pr,
+            )
+        except RuntimeError as exc:
+            print(f"task_bridge: {exc}")
+            return 1
+        if pr is None:
+            return 0
+        print(f"переизданная tasks-спека доставлена: PR #{pr}")
+        return 0
     if args.conform_approve:
         pr = deliver_conform(
             target_dir=state.target_dir,
