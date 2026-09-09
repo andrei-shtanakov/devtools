@@ -2669,6 +2669,30 @@ def test_abandon_revision_is_terminal_and_keeps_reason(tmp_path, monkeypatch):
     assert "PR #99" in saved["reason"]
 
 
+def test_abandon_revision_refuses_on_already_abandoned(tmp_path, monkeypatch):
+    """§I3: терминальны `completed` И `abandoned` — гвард сверяется с обоими.
+
+    Повторный `--abandon-revision` по брошенной ревизии — ровно мутация
+    журнала, запрещённая §I4: `save` пишет run.json целиком, и первая
+    причина исчезает безвозвратно, а она — ЕДИНСТВЕННЫЙ след того, почему
+    ревизия брошена.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _recon_state(tmp_path, monkeypatch)
+    tb._start_revision(state, 2, {"branch": "b", "base_sha": "s"})
+    tb._abandon_revision(state, 2, "оператор закрыл PR #99")
+    with pytest.raises(RuntimeError, match="терминальная запись"):
+        tb._abandon_revision(state, 2, "передумал")
+    # Запись цела: и в памяти прогона, и на диске — отказ не тронул её.
+    assert state.ops["tasks-deliver-v2"]["reason"] == "оператор закрыл PR #99"
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["status"] == "abandoned"
+    assert saved["reason"] == "оператор закрыл PR #99"
+
+
 def test_completed_v1_op_is_never_rewritten(tmp_path, monkeypatch):
     from governance import run_state as rs
     from governance import task_bridge as tb

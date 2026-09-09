@@ -1358,17 +1358,36 @@ def _complete_revision(state: RunState, n: int, **result: object) -> None:
     save(state)
 
 
+#: Терминальные статусы ревизии — и только они (§I3 спеки). Гвард
+#: `_abandon_revision` сверяется со ВСЕМ набором: отсекать один
+#: `completed` значило бы разрешить повторный `--abandon-revision` по уже
+#: брошенной ревизии, а он перезаписал бы её `reason` — единственный след
+#: того, почему она брошена (`save` пишет run.json целиком).
+_TERMINAL_REVISION_STATUSES = ("completed", "abandoned")
+
+
 def _abandon_revision(state: RunState, n: int, reason: str) -> None:
-    """Терминальный `abandoned` с причиной — причина хранится навсегда."""
+    """Терминальный `abandoned` с причиной — причина хранится навсегда.
+
+    §I3/§I4: перевод уже терминальной записи в другое состояние — мутация
+    журнала, поэтому отказ идёт на ЛЮБОМ терминальном статусе, не только
+    на `completed`.
+    """
     key = f"{_REVISION_PREFIX}{n}"
     if key not in state.ops:
         raise RuntimeError(f"ревизии {n} нет в леджере — нечего абандонить")
-    if state.ops[key].get("status") == "completed":
-        raise RuntimeError(
-            f"ревизия {n} завершена (PR #{state.ops[key].get('pr')}) — "
-            "завершённая запись не мутируется"
+    op = state.ops[key]
+    status = op.get("status")
+    if status in _TERMINAL_REVISION_STATUSES:
+        detail = (
+            f"завершена (PR #{op.get('pr')})"
+            if status == "completed"
+            else f"уже брошена (причина: {op.get('reason')!r})"
         )
-    state.ops[key] = {**state.ops[key], "status": "abandoned", "reason": reason}
+        raise RuntimeError(
+            f"ревизия {n} {detail} — терминальная запись не мутируется"
+        )
+    state.ops[key] = {**op, "status": "abandoned", "reason": reason}
     save(state)
 
 
