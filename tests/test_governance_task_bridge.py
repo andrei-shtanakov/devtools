@@ -2690,6 +2690,29 @@ def test_previous_dag_legacy_unparsable_frontmatter(
     assert (dag, source) == (None, "unavailable")
 
 
+def test_previous_dag_legacy_rejects_malformed_traces_to(
+    tmp_path, monkeypatch
+) -> None:
+    """traces_to не список (строка вместо списка) и traces_to — пустой
+    список: обе формы дают (None, "unavailable"), а не «совпало» — состав
+    каталога один совпадает ровно с одним вариантом (_target — полный
+    6-узловой бандл), поэтому отказ здесь ТОЛЬКО из-за формы traces_to."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    not_a_list = (
+        "---\nspec_stage: tasks\ntraces_to: decomposition\n---\n\nbody\n"
+    )
+    empty_list = "---\nspec_stage: tasks\ntraces_to: []\n---\n\nbody\n"
+    for text in (not_a_list, empty_list):
+        ops = _ShowFileOps(text)
+        dag, source = tb._previous_dag(
+            state, ops, {"pr": 5}, state.target_dir, state.bundle_dir,
+            "base-sha",
+        )
+        assert (dag, source) == (None, "unavailable")
+
+
 # --- _reconcile_revision / _recover_commit (§I3, §I3.1) -------------------
 
 
