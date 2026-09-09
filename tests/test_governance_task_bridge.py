@@ -660,6 +660,19 @@ def test_split_frontmatter_refuses_plain_file() -> None:
         task_bridge.split_frontmatter("# просто markdown\n")
 
 
+def test_split_frontmatter_normalizes_yaml_error_to_value_error() -> None:
+    """Битый YAML ВНУТРИ корректных разделителей — тоже `ValueError`.
+
+    `yaml.YAMLError` не подкласс `ValueError`, поэтому вызывающие,
+    ловящие «frontmatter не разобрать» (§I6 `_previous_tasks_version`,
+    §I8 `_previous_dag`), мимо него проваливались сырым трейсбеком
+    PyYAML — мимо `except RuntimeError` в `main`. Разделители здесь
+    целые: ветка «нет frontmatter вовсе» тут ни при чём."""
+    broken = "---\nspec_stage: tasks\nversion: [1, 2\n---\n\nbody\n"
+    with pytest.raises(ValueError, match="невалидный YAML"):
+        task_bridge.split_frontmatter(broken)
+
+
 def test_stamp_bundle_approves_and_repins_chain(tmp_path: Path) -> None:
     """Урок 2 ретроспективы: штамп статусов + перепиновка DAG (Task 5:
     цепочка стала DAG — design пинует ОБА upstream, requirements и
@@ -3106,6 +3119,24 @@ def test_previous_dag_legacy_unparsable_frontmatter(
     assert (dag, source) == (None, "unavailable")
 
 
+def test_previous_dag_legacy_broken_yaml_is_unavailable(
+    tmp_path, monkeypatch
+) -> None:
+    """Разделители целы, YAML битый → §6-путь `(None, "unavailable")`.
+
+    Соседний тест подаёт текст БЕЗ frontmatter (ValueError-ветка); сбой
+    парсера летел `yaml.YAMLError` мимо `except ValueError` здесь и
+    ронял переиздание трейсбеком вместо объявленного fail-closed."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ShowFileOps("---\nspec_stage: tasks\ntraces_to: [a, b\n---\n\nx\n")
+    dag, source = tb._previous_dag(
+        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
+    )
+    assert (dag, source) == (None, "unavailable")
+
+
 def test_previous_dag_legacy_rejects_malformed_traces_to(
     tmp_path, monkeypatch
 ) -> None:
@@ -4345,6 +4376,24 @@ def test_previous_tasks_version_unparsable_frontmatter_refuses(
     state = _recon_state(tmp_path, monkeypatch)
     (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").write_text(
         "нет frontmatter вовсе\n", encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="frontmatter не разобрать"):
+        tb._previous_tasks_version(state)
+
+
+def test_previous_tasks_version_broken_yaml_refuses(tmp_path, monkeypatch):
+    """Разделители целы, а YAML между ними битый — тот же fail-closed.
+
+    Соседний тест подаёт «нет frontmatter вовсе» — это ValueError-ветка
+    `split_frontmatter`. Сбой самого парсера шёл `yaml.YAMLError`, мимо
+    `except ValueError` здесь и мимо `except RuntimeError` в `main`:
+    вместо «версию гадать нельзя» оператор получал трейсбек PyYAML."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").write_text(
+        "---\nspec_stage: tasks\nversion: [1, 2\n---\n\nbody\n",
+        encoding="utf-8",
     )
     with pytest.raises(RuntimeError, match="frontmatter не разобрать"):
         tb._previous_tasks_version(state)
