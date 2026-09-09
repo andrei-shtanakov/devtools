@@ -3848,10 +3848,10 @@ def test_supersede_restamp_is_idempotent(tmp_path, monkeypatch):
 def test_restamp_flag_off_keeps_approved_node_untouched(
     tmp_path: Path,
 ) -> None:
-    """Обычная доставка не перештамповывает: флаг выключен по умолчанию.
+    """Обычная доставка не перештамповывает: узлов к подписи нет вовсе.
 
     Дубль `test_stamp_bundle_is_idempotent` по смыслу, но с явным
-    `restamp_signature=False`: он держит границу «новый режим — только у
+    `restamp_nodes=None`: он держит границу «новый режим — только у
     переиздания», а не общий инвариант идемпотентности."""
     target = _target(tmp_path)
     task_bridge.stamp_bundle_approved(
