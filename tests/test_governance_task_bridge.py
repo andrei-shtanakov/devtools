@@ -2359,7 +2359,10 @@ def test_deliver_for_run_write_ahead_op_and_completion(
     pr = task_bridge.deliver_for_run(state, ops)
     assert pr == 77
     saved = rs.load("r-recon")
-    assert saved.ops["tasks-deliver"] == {"status": "completed", "pr": 77}
+    # Предмет теста — write-ahead и номер PR; полная форма записи (включая
+    # anchor, §I2) утверждается отдельно — `..._records_anchor_of_stamp`.
+    op = saved.ops["tasks-deliver"]
+    assert (op["status"], op["pr"]) == ("completed", 77)
     # повтор: op completed → ни одного нового эффекта
     ops2 = _ReconOps()
     assert task_bridge.deliver_for_run(rs.load("r-recon"), ops2) == 77
@@ -2380,9 +2383,10 @@ def test_deliver_for_run_adopts_existing_pr_by_branch(
     assert task_bridge.deliver_for_run(state, ops) == 91
     assert ("find_pr", "spec/WS-alpha-7-tasks") in ops.calls
     assert not any(c[0] == "create_draft_pr" for c in ops.calls)
-    assert rs.load("r-recon").ops["tasks-deliver"] == {
-        "status": "completed", "pr": 91,
-    }
+    # Предмет — принятие существующего PR как доставки; anchor принятого PR
+    # утверждается отдельно (`..._reconciled_pr_records_anchor_from_head`).
+    op = rs.load("r-recon").ops["tasks-deliver"]
+    assert (op["status"], op["pr"]) == ("completed", 91)
 
 
 def test_deliver_for_run_refuses_non_completed_status(
@@ -2414,9 +2418,8 @@ def test_deliver_for_run_adopts_merged_pr_not_only_open(
     assert task_bridge.deliver_for_run(state, ops) == 91
     assert ("find_pr", "spec/WS-alpha-7-tasks", True) in ops.calls
     assert not any(c[0] == "create_draft_pr" for c in ops.calls)
-    assert rs.load("r-recon").ops["tasks-deliver"] == {
-        "status": "completed", "pr": 91,
-    }
+    op = rs.load("r-recon").ops["tasks-deliver"]
+    assert (op["status"], op["pr"]) == ("completed", 91)
 
 
 def test_deliver_for_run_closed_unmerged_pr_fails_closed(
@@ -2433,6 +2436,90 @@ def test_deliver_for_run_closed_unmerged_pr_fails_closed(
 
     with pytest.raises(RuntimeError, match="закрыт"):
         task_bridge.deliver_for_run(state, _ClosedOps())
+
+
+def test_deliver_for_run_records_anchor_of_stamp(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Новая v1 сохраняет и `pr`, и `anchor` — blob анкера ПОСЛЕ штампа (§I2).
+
+    Без anchor'а `prev_op.get("anchor")` у v1 всегда None, и ПЕРВОЕ
+    переиздание любого воркстрима уходит compatibility-путём §6 вместо
+    сверки §I5: `--supersede` сразу после обычной доставки завёл бы v2 без
+    единого изменения апстрима.
+    """
+    from governance import run_state as rs
+
+    state = _recon_state(tmp_path, monkeypatch)
+    # Ожидание считается ДО доставки, на НЕпроштампованном дереве и тем же
+    # способом, каким его посчитает переиздание (§I2). Подпись — та, что
+    # `_ReconOps.pr_facts` отдаёт для бандл-PR: другой штамп дал бы другие
+    # байты анкера, и совпадение ничего бы не значило.
+    expected = task_bridge._prospective_anchor(
+        state.target_dir, state.bundle_dir, "ai-prosto",
+        "2026-09-07T00:00:00Z", None,
+    )
+    assert task_bridge.deliver_for_run(state, _ReconOps()) == 77
+    assert rs.load("r-recon").ops["tasks-deliver"] == {
+        "status": "completed", "pr": 77, "anchor": expected,
+    }
+
+
+def test_deliver_for_run_reconciled_pr_records_anchor_from_head(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Восстановленная v1 (принят существующий PR) тоже получает anchor.
+
+    Пересчитывать штамп на этом пути нечем (`approved_by`/`approved_at` не
+    вычислены) и незачем: байты, ушедшие в PR, уже лежат в его
+    head-коммите — anchor читается ОТТУДА, с пути анкера активного DAG.
+    """
+    from governance import run_state as rs
+
+    state = _recon_state(tmp_path, monkeypatch, op={"status": "started"})
+
+    class _HeadOps(_ReconOps):
+        def __init__(self) -> None:
+            super().__init__(existing_pr=91)
+            self.asked: list[tuple[str, str]] = []
+
+        def pr_facts(self, repo_slug: str, pr: int) -> dict:
+            facts = super().pr_facts(repo_slug, pr)
+            return {**facts, "headRefOid": "head-91"}
+
+        def blob_in_commit(
+            self, target_dir: str, sha: str, rel_path: str
+        ) -> str | None:
+            self.asked.append((sha, rel_path))
+            return "блоб-анкера-из-PR"
+
+    ops = _HeadOps()
+    assert task_bridge.deliver_for_run(state, ops) == 91
+    assert ops.asked == [
+        ("head-91", "workstreams/WS-alpha-7/spec/30-decomposition.md")
+    ]
+    assert rs.load("r-recon").ops["tasks-deliver"] == {
+        "status": "completed", "pr": 91, "anchor": "блоб-анкера-из-PR",
+    }
+
+
+def test_deliver_for_run_reconciled_pr_without_head_stays_open(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Байты PR-а недоступны (`headRefOid` не отдан) → `anchor: None`.
+
+    Fail-open намеренно: переиздание уйдёт §6-путём, как и до записи
+    anchor'а, а сегодня успешно реконсилируемая доставка не получает
+    нового отказа.
+    """
+    from governance import run_state as rs
+
+    state = _recon_state(tmp_path, monkeypatch, op={"status": "started"})
+    op = task_bridge.deliver_for_run(state, _ReconOps(existing_pr=91))
+    assert op == 91
+    assert rs.load("r-recon").ops["tasks-deliver"] == {
+        "status": "completed", "pr": 91, "anchor": None,
+    }
 
 
 # --- ревизии в леджере: нумерация, чтение, запись намерения (Task 2) -----
@@ -3185,6 +3272,52 @@ def test_supersede_legacy_without_anchor_records_unavailable(
     tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["comparison"] == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "v1_anchor", [{}, {"anchor": None}], ids=["ключа-нет", "anchor-null"]
+)
+def test_supersede_unavailable_for_missing_and_null_anchor(
+    v1_anchor, tmp_path, monkeypatch
+):
+    """§6 не сломан: «ключа нет» и `anchor: null` — одинаково «сверять не с чем».
+
+    Легаси-леджер ключа не несёт вовсе; новая реконсиляция может честно
+    записать `anchor: None` (байты PR-а прочитать не удалось). Оба обязаны
+    идти compatibility-путём §6, а не выдавать сверку за состоявшуюся.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, **v1_anchor}
+    rs.save(state)
+    assert tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["comparison"] == "unavailable"
+
+
+def test_supersede_right_after_delivery_is_traceless_noop(
+    tmp_path, monkeypatch
+):
+    """Первый `--supersede` сразу после обычной доставки — бесследный no-op.
+
+    Сквозной случай §I5, ради которого v1 и обязана писать anchor: апстрим
+    не менялся между доставкой и переизданием, значит ни ветки, ни PR, ни
+    записи в леджере быть не должно — `run.json` побайтово прежний.
+    Пока v1 anchor не записывала, ЭТОТ вызов заводил v2.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    assert tb.deliver_for_run(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
+    before = (rs.run_dir("r-recon") / "run.json").read_bytes()
+    result = tb.deliver_superseded(
+        rs.load("r-recon"), _SupersedeOps(prs=[_MERGED_PR])
+    )
+    assert result is None
+    assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
 
 
 class _RevisionPrOps(_SupersedeOps):
