@@ -3175,21 +3175,20 @@ def main(argv: list[str] | None = None) -> int:
              "abandoned (требует --reason)",
     )
     parser.add_argument(
-        "--reason", default=None, help="причина для --abandon-revision"
+        "--reason", default=None,
+        help="причина решения для --abandon-revision либо "
+             "--replace-revision; флаг ОДИН на оба перехода, потому что "
+             "они взаимоисключающи (гвард ниже) — двусмысленности нет, а "
+             "в леджер причина ложится своим полем каждого перехода "
+             "(reason / replacement_reason)",
     )
     parser.add_argument(
         "--replace-revision", type=int, default=None,
-        help="явный replace-переход (только с --supersede): снять со "
-             "стола незамерженное предложение названной ревизии — новая "
+        help="явный replace-переход (только с --supersede): отозвать "
+             "незамерженное предложение названной ревизии — новая "
              "ревизия несёт replaces_revision/replaces_pr, PR "
-             "заменяемой закрывается механикой, её ветка удаляется; "
-             "требует --replacement-reason",
-    )
-    parser.add_argument(
-        "--replacement-reason", default=None,
-        help="причина замены для --replace-revision; отдельный флаг от "
-             "--reason нарочно: тот принадлежит --abandon-revision, и "
-             "одно поле на два разных перехода путало бы леджер",
+             "отозванной закрывается механикой, её ветка удаляется; "
+             "требует --reason",
     )
     args = parser.parse_args(argv)
     if args.abandon_revision is not None and args.supersede:
@@ -3219,19 +3218,23 @@ def main(argv: list[str] | None = None) -> int:
             "--approval-pr осмыслен только с --supersede: подпись штампа "
             "берётся при переиздании"
         )
-    if args.abandon_revision is not None and not args.reason:
-        parser.error("--abandon-revision требует --reason")
     if (
         args.replace_revision is not None
         and args.abandon_revision is not None
     ):
         # Та же мотивировка, что у пар выше: абандон и замена — разные
         # переходы над разными ревизиями, и молчаливая победа одного
-        # решала бы за оператора, что он имел в виду.
+        # решала бы за оператора, что он имел в виду. Гвард стоит ВЫШЕ
+        # проверок `--reason`: без него сообщение об одном флаге
+        # заслоняло бы то, что оператор попросил ДВА разных перехода —
+        # и заодно он тот самый, который делает общий `--reason`
+        # однозначным (переходы не сосуществуют, толковать нечего).
         parser.error(
             "--replace-revision и --abandon-revision — разные переходы: "
             "запускайте их отдельными прогонами"
         )
+    if args.abandon_revision is not None and not args.reason:
+        parser.error("--abandon-revision требует --reason")
     if args.replace_revision is not None and not args.supersede:
         # Замена — часть переиздания (порядок владельца: закрыть
         # предложение и доставить новое одним переходом), сама по себе
@@ -3241,14 +3244,22 @@ def main(argv: list[str] | None = None) -> int:
             "--replace-revision осмыслен только с --supersede: замена "
             "снимает старое предложение и доставляет новое одним переходом"
         )
-    if args.replace_revision is not None and not args.replacement_reason:
+    if args.replace_revision is not None and not args.reason:
         # Причина обязательна (требование владельца): она уходит в
-        # леджер и в комментарий закрываемого PR — единственное место,
-        # где потом читается, почему предложение сняли со стола.
-        parser.error("--replace-revision требует --replacement-reason")
-    if args.replacement_reason and args.replace_revision is None:
+        # леджер полем `replacement_reason` и в комментарий закрываемого
+        # PR — единственное место, где потом читается, почему
+        # предложение отозвали.
+        parser.error("--replace-revision требует --reason")
+    if args.reason and (
+        args.abandon_revision is None and args.replace_revision is None
+    ):
+        # Причина без перехода никуда не записывается. Молча съесть её
+        # значило бы выполнить ОБЫЧНУЮ доставку под видом решения,
+        # которое оператор обосновывал (та же мотивировка, что у
+        # `--approval-pr` без `--supersede`).
         parser.error(
-            "--replacement-reason осмыслен только с --replace-revision"
+            "--reason осмыслен только с --abandon-revision либо "
+            "--replace-revision: без перехода причину некуда записать"
         )
     state = load(args.run_id)
     # Мост работает только над ВМЕРЖЕННЫМ и верифицированным бандлом
@@ -3281,9 +3292,7 @@ def main(argv: list[str] | None = None) -> int:
                 state, ops, legacy_bundle=args.legacy_bundle,
                 approval_pr=args.approval_pr,
                 replace=(
-                    Replacement(
-                        args.replace_revision, args.replacement_reason
-                    )
+                    Replacement(args.replace_revision, args.reason)
                     if args.replace_revision is not None else None
                 ),
             )

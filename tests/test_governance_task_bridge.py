@@ -6652,6 +6652,59 @@ def test_supersedes_skips_replaced_revision_on_later_reissue(
     assert tb._last_delivery(rs.load("r-recon"))[0] == 1
 
 
+def test_forward_link_is_status_agnostic(tmp_path, monkeypatch):
+    """Для снятия ловушки достаточно САМОЙ ссылки — статус отзыва неважен.
+
+    Записанное намерение объясняет закрытие независимо от того, дошла ли
+    отзывающая ревизия до конца. Смотри проверка только на `completed`,
+    окно «отзыв ещё `started`» осталось бы дырой — а это ровно то окно,
+    где PR уже закрыт, а новая ревизия ещё не доставлена."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    for status in ("started", "completed", "abandoned"):
+        state.ops["tasks-deliver-v4"] = {
+            **_abandoned_replacement(), "status": status,
+        }
+        rs.save(state)
+        loaded = rs.load("r-recon")
+        assert tb._replaced_by(loaded, 3, _REPLACED_PR) == 4
+        # Отозванная ревизия не считается доставкой ни при каком статусе
+        # отзыва: её байтов в base нет.
+        assert tb._last_delivery(loaded)[0] != 3
+        assert tb._reconcile_revision(
+            3, loaded.ops["tasks-deliver-v3"], "base-sha-1", _REPLACED_PR,
+            {"state": "CLOSED"}, replaced=True,
+        ) == "replaced"
+
+
+def test_replacement_may_repeat_version_and_content_of_the_revoked(
+    tmp_path, monkeypatch
+):
+    """Ни версия, ни содержание отличаться от отозванного НЕ обязаны.
+
+    §I6 считает версию от base, а отозванных байтов в base нет: в него
+    попадёт ровно одно из двух предложений, и монотонность не нарушится.
+    §I5 при замене неприменим, поэтому равный `content_anchor` доставку
+    не останавливает — причина замены может лежать вовсе вне байтов
+    (дефект инструмента, ложная подпись), и называет её оператор."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    revoked = dict(state.ops["tasks-deliver-v3"])
+    ops = _ReplaceOps(prs=[_MERGED_PR])
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ).kind == "delivered"
+
+    saved = rs.load("r-recon").ops["tasks-deliver-v4"]
+    assert saved["tasks_version"] == revoked["tasks_version"] == 2
+    assert saved["content_anchor"] == revoked["content_anchor"]
+
+
 # --- Крэш-окна замены: повтор продолжает ТУ ЖЕ ревизию --------------------
 
 
@@ -6887,42 +6940,69 @@ def test_abandoned_replacement_hands_its_obligation_to_the_next_revision(
 
 
 def test_cli_replace_requires_reason_and_supersede(capsys):
-    """`replacement_reason` обязателен, а сам флаг осмыслен с --supersede.
+    """Причина обязательна, а сам флаг осмыслен только с --supersede.
 
-    Причина уходит и в леджер, и в комментарий закрываемого PR — это
-    единственное место, где потом читается, почему предложение сняли."""
+    Причина уходит и в леджер (`replacement_reason`), и в комментарий
+    закрываемого PR — это единственное место, где потом читается, почему
+    предложение отозвали."""
     from governance import task_bridge as tb
 
     with pytest.raises(SystemExit) as exc:
         tb.main(["--run-id", "r", "--supersede", "--replace-revision", "3"])
     assert exc.value.code == 2
-    assert "--replacement-reason" in capsys.readouterr().err
+    assert "--reason" in capsys.readouterr().err
 
     with pytest.raises(SystemExit):
         tb.main(["--run-id", "r", "--replace-revision", "3",
-                 "--replacement-reason", "р"])
+                 "--reason", "р"])
     assert "--replace-revision" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
     "argv, needle",
     [
-        (["--replace-revision", "3", "--replacement-reason", "р",
-          "--abandon-revision", "2", "--reason", "р"],
-         "--replace-revision"),
-        (["--supersede", "--replacement-reason", "р"],
-         "--replacement-reason"),
+        (["--replace-revision", "3", "--abandon-revision", "2",
+          "--reason", "р"],
+         "--replace-revision и --abandon-revision"),
+        (["--supersede", "--reason", "р"], "--reason осмыслен только"),
     ],
-    ids=["with-abandon", "reason-without-flag"],
+    ids=["with-abandon", "reason-without-transition"],
 )
 def test_cli_replace_flag_combinations_refuse(argv, needle, capsys):
-    """Взаимоисключения — `parser.error`, а не молчаливая победа флага."""
+    """Взаимоисключения — `parser.error`, а не молчаливая победа флага.
+
+    Общий `--reason` на два перехода однозначен ИМЕННО этим гвардом:
+    сосуществовать переходы не могут, толковать нечего. Убери его — и
+    одна строка легла бы то в `reason`, то в `replacement_reason` по
+    порядку проверок диспетчера."""
     from governance import task_bridge as tb
 
     with pytest.raises(SystemExit) as exc:
         tb.main(["--run-id", "r", *argv])
     assert exc.value.code == 2
     assert needle in capsys.readouterr().err
+
+
+def test_cli_shared_reason_lands_in_the_field_of_its_transition(
+    tmp_path, monkeypatch, capsys
+):
+    """Один флаг — два перехода, но поля леджера разные и не путаются."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver-v2"] = {"status": "started", "revision": 2}
+    rs.save(state)
+    monkeypatch.setattr(tb, "RealOps", lambda: object())
+
+    assert tb.main([
+        "--run-id", "r-recon", "--abandon-revision", "2",
+        "--reason", "причина абандона",
+    ]) == 0
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["reason"] == "причина абандона"
+    assert "replacement_reason" not in saved
 
 
 def test_cli_replace_reaches_implementation(tmp_path, monkeypatch, capsys):
@@ -6945,6 +7025,6 @@ def test_cli_replace_reaches_implementation(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(tb, "RealOps", lambda: object())
     assert tb.main([
         "--run-id", "r-recon", "--supersede",
-        "--replace-revision", "3", "--replacement-reason", "дефект подписи",
+        "--replace-revision", "3", "--reason", "дефект подписи",
     ]) == 0
     assert called["replace"] == tb.Replacement(3, "дефект подписи")
