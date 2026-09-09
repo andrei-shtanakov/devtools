@@ -2534,6 +2534,16 @@ def test_revision_numbering_starts_at_two_and_grows(tmp_path, monkeypatch):
     assert tb._next_revision(state) == 2
     tb._complete_revision(state, 2, pr=10, anchor="a")
     assert tb._next_revision(state) == 3
+    # ТРЕТЬЯ запись обязательна (F-07): пока в леджере одна ревизия,
+    # `revs[-1]` и `revs[0]` совпадают, и «нумеруем от старшей» не
+    # проверено — следующий номер повторял бы уже занятый.
+    tb._complete_revision(state, 3, pr=11, anchor="b")
+    assert tb._next_revision(state) == 4
+    # abandoned тоже занимает номер: заводить v3 поверх брошенной v3
+    # значит переписать терминальную запись (§I4).
+    tb._start_revision(state, 4, {"branch": "b4", "base_sha": "s"})
+    tb._abandon_revision(state, 4, "оператор закрыл PR")
+    assert tb._next_revision(state) == 5
 
 
 def test_last_delivery_prefers_highest_revision(tmp_path, monkeypatch):
@@ -2553,6 +2563,37 @@ def test_last_delivery_prefers_highest_revision(tmp_path, monkeypatch):
     tb._complete_revision(state, 2, pr=10, anchor="a")
     n2, op2 = tb._last_delivery(state)
     assert (n2, op2["pr"]) == (2, 10)
+    # ТРЕТЬЯ запись (F-07): при ОДНОЙ ревизии в леджере обход по
+    # возрастанию и по убыванию неразличимы, и «предпочитает старшую» не
+    # было проверено ничем. Регрессия здесь направила бы `supersedes` и
+    # сверку §I5 на устаревшую ревизию, начиная с третьего переиздания.
+    tb._complete_revision(state, 3, pr=11, anchor="b")
+    n3, op3 = tb._last_delivery(state)
+    assert (n3, op3["pr"]) == (3, 11)
+
+
+def test_last_delivery_prefers_highest_completed_over_abandoned(
+    tmp_path, monkeypatch
+):
+    """Старшая ЗАВЕРШЁННАЯ, а не старшая вообще: v4 брошена, доставка — v3.
+
+    Штатный след операторского выхода `--abandon-revision N`: над
+    завершённой v3 висит терминальная v4. Взять её за предыдущую доставку
+    значит уйти в §I5 без `anchor` (fail-open) и записать `supersedes` на
+    недоставку."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _recon_state(
+        tmp_path, monkeypatch, op={"status": "completed", "pr": 5}
+    )
+    tb._complete_revision(state, 2, pr=10, anchor="a")
+    tb._complete_revision(state, 3, pr=11, anchor="b")
+    tb._start_revision(state, 4, {"branch": "b4", "base_sha": "s"})
+    tb._abandon_revision(state, 4, "оператор закрыл PR вручную")
+    n, op = tb._last_delivery(state)
+    assert (n, op["pr"]) == (3, 11)
 
 
 def test_last_delivery_skips_started(tmp_path, monkeypatch):
@@ -2883,18 +2924,33 @@ def test_provenance_explicit_flag_accepts_pr_touching_anchor(
 # --- _previous_dag (§I8: сверка активного DAG предыдущей доставки) --------
 
 
+_BASE_SHA = "base-sha-фикстуры"
+_SPEC_REL = "spec/WS-alpha-7-tasks.md"
+
+
 class _ShowFileOps:
     """Минимальный фейк ops для _previous_dag: только show_file.
 
     Настоящий git здесь не подключаем — Task 5 его тоже не подключала для
     этих тестов, а `show_file` тестируется отдельно (Ops-тесты, реальный
     временный репо).
+
+    Аргументы НЕ игнорируются (F-12 финального ревью): текст отдаётся
+    только за спеку В BASE, всё прочее — `None`, как настоящий
+    `git show`. Пока стаб отвечал одно и то же на любые ref/path,
+    подмена и ref'а, и пути проходила незаметно, а в проде она даёт
+    `None` ⇒ `"unavailable"` ⇒ сверка §I8 не производится вовсе —
+    fail-OPEN на инварианте, заявленном fail-closed.
     """
 
     def __init__(self, text: str | None) -> None:
         self._text = text
+        self.calls: list[tuple] = []
 
     def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        self.calls.append(("show_file", ref, path))
+        if (ref, path) != (_BASE_SHA, _SPEC_REL):
+            return None
         return self._text
 
 
@@ -2914,7 +2970,7 @@ def test_previous_dag_from_revision_record(tmp_path, monkeypatch) -> None:
     prev = {"dag": [list(x) for x in tb._BUNDLE_DAG]}
     dag, source = tb._previous_dag(
         state, _ShowFileOps(None), prev, state.target_dir, state.bundle_dir,
-        "base-sha",
+        _BASE_SHA,
     )
     assert source == "previous_delivery"
     assert dag == tb._BUNDLE_DAG
@@ -2931,10 +2987,15 @@ def test_previous_dag_derived_from_bundle_composition(
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps(_spec_text("decomposition"))
     dag, source = tb._previous_dag(
-        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, "base-sha",
+        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
     )
     assert source == "derived_from_spec"
     assert dag == tb._BUNDLE_DAG
+    # Спрошено ИМЕННО то место (F-12): спека в base, а не в HEAD и не по
+    # соседнему пути. Неверный ref/путь в проде даёт None ⇒ "unavailable"
+    # ⇒ сверка §I8 не производится вовсе — fail-OPEN на инварианте,
+    # который заявлен fail-closed.
+    assert ops.calls == [("show_file", _BASE_SHA, _SPEC_REL)]
 
 
 def test_previous_dag_unavailable_when_composition_matches_nothing(
@@ -2946,7 +3007,7 @@ def test_previous_dag_unavailable_when_composition_matches_nothing(
     (Path(state.target_dir) / state.bundle_dir / "99-alien.md").write_text("x")
     ops = _ShowFileOps(_spec_text("decomposition"))
     dag, source = tb._previous_dag(
-        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, "base-sha",
+        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
 
@@ -2961,7 +3022,7 @@ def test_previous_dag_legacy_requires_delivered_spec(
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps(None)
     dag, source = tb._previous_dag(
-        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, "base-sha",
+        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
 
@@ -2976,7 +3037,7 @@ def test_previous_dag_legacy_rejects_anchor_mismatch(
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps(_spec_text("behaviour-spec"))
     dag, source = tb._previous_dag(
-        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, "base-sha",
+        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
 
@@ -2990,7 +3051,7 @@ def test_previous_dag_legacy_unparsable_frontmatter(
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps("no frontmatter here\n")
     dag, source = tb._previous_dag(
-        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, "base-sha",
+        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
 
@@ -3013,7 +3074,7 @@ def test_previous_dag_legacy_rejects_malformed_traces_to(
         ops = _ShowFileOps(text)
         dag, source = tb._previous_dag(
             state, ops, {"pr": 5}, state.target_dir, state.bundle_dir,
-            "base-sha",
+            _BASE_SHA,
         )
         assert (dag, source) == (None, "unavailable")
 
@@ -3312,6 +3373,14 @@ class _SupersedeOps(_ProvOps):
         # Спека v1 в base доставлена (фикстура объявляет v1 доставленной),
         # её якорь — decomposition: `_previous_dag` выводит состав по
         # каталогу И этому якорю (dag_source = derived_from_spec).
+        #
+        # Аргументы сверяются, а не игнорируются (F-12): «в base» —
+        # `base-sha-1`, тот же SHA, что `rev_parse("HEAD")` отдаёт ДО
+        # коммита. Спросив не то место, прод получил бы None и молча
+        # ушёл в "unavailable", отменив сверку §I8.
+        self.calls.append(("show_file", ref, path))
+        if (ref, path) != ("base-sha-1", _SPEC_REL):
+            return None
         return _spec_text("decomposition")
 
 
@@ -3369,6 +3438,46 @@ def test_supersede_changed_anchor_opens_new_branch_and_pr(
     assert saved["prospective_anchor"] == saved["anchor"]
     assert saved["dag_source"] == "derived_from_spec"
     assert rs.load("r-recon").ops["tasks-deliver"]["pr"] == 5   # v1 цела
+
+
+def test_supersede_refreshes_base_before_reading_facts(
+    tmp_path, monkeypatch
+):
+    """Первый шаг порядка — синхронизация base, и её видно по фактам.
+
+    `_previous_tasks_version` читает рабочее дерево НАПРЯМУЮ ровно потому,
+    что вызывающая сторона уже освежила его до `base_ref` (её докстринг).
+    То же и у `_previous_dag`/`_prospective_anchor`. Собственный
+    `checkout_and_pull` внутри `deliver()` подстраховкой не является: он
+    случается ПОСЛЕ того, как все эти факты посчитаны, — поэтому удаление
+    первого вызова тестами не ловилось (F-09, мутация M55).
+
+    Здесь стаб ведёт себя как настоящий `git pull`: приводит спеку в
+    дереве к тому, что лежит в base (version 7). Без освежения версия
+    читалась бы из устаревшего чекаута (1) и переиздание уехало бы в 2."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    rs.save(state)
+
+    class _RefreshingOps(_SupersedeOps):
+        def checkout_and_pull(self, target_dir, branch):
+            super().checkout_and_pull(target_dir, branch)
+            (Path(target_dir) / "spec/WS-alpha-7-tasks.md").write_text(
+                "---\nspec_stage: tasks\nversion: 7\n---\n\nbody\n",
+                encoding="utf-8",
+            )
+
+    ops = _RefreshingOps(prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == 77
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_version"] == 8
+    text = (
+        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
+    ).read_text(encoding="utf-8")
+    assert "version: 8" in text
 
 
 def test_supersede_version_is_monotonic(tmp_path, monkeypatch):
@@ -3803,6 +3912,68 @@ def test_supersede_resumes_when_branch_stands_on_base(tmp_path, monkeypatch):
     assert len(tb._revisions(saved)) == 1          # v3 не заведена
     assert saved.ops["tasks-deliver-v2"]["status"] == "completed"
     assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops.calls
+
+
+def test_supersede_abandons_shifted_revision_and_starts_next(
+    tmp_path, monkeypatch
+):
+    """§I3 «started | нет PR | base сдвинулся» — СКВОЗЬ `deliver_superseded`.
+
+    Соседний `test_reconcile_started_no_pr_shifted_base_abandons` проверяет
+    только ИМЯ перехода, а что с этим именем делает переиздание, не
+    проверял никто: ветка `abandon_and_next` не исполнялась ни одним
+    тестом — канарейка `raise` в её начале проходила незамеченной (F-08,
+    мутации M49/M50). А это ровно тот контур, который сообщения об отказах
+    объявляют ЕДИНСТВЕННЫМ выходом оператора.
+
+    Ожидание: v2 становится терминальной `abandoned` с непустой причиной,
+    заводится v3 и возвращается её PR."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    # base намерения — позапрошлый: апстрим уехал, пока ревизия лежала.
+    _seed_revision(state, monkeypatch, base_sha="БАЗА-ПОЗАПРОШЛАЯ")
+    ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == 77
+    saved = rs.load("r-recon")
+    v2 = saved.ops["tasks-deliver-v2"]
+    assert v2["status"] == "abandoned"
+    assert "base сдвинулся" in v2["reason"]
+    assert [n for n, _ in tb._revisions(saved)] == [2, 3]
+    # Предыдущая ДОСТАВКА — по-прежнему v1: брошенная v2 ничего не
+    # доставила, и `supersedes` обязан указывать мимо неё.
+    assert saved.ops["tasks-deliver-v3"]["supersedes"] == 1
+    assert ("ensure_branch", "spec/WS-alpha-7-tasks-v3") in ops.calls
+
+
+def test_supersede_skips_abandoned_revision(tmp_path, monkeypatch):
+    """Вторая половина того же контура: `abandoned` не реконсилируется.
+
+    Ревизию только что абандонил оператор (`--abandon-revision 2`), и её
+    брошенная ветка может нести открытый PR — закрыть его оператор был не
+    обязан. Пропуск в цикле реконсиляции тестами не исполнялся вовсе
+    (F-08, канарейка M51): без него переиздание уткнулось бы в этот PR и
+    отказало «решите судьбу PR явно» — по кругу, в уже решённой ревизии.
+
+    Различитель здесь наблюдаемый: PR #999 подан, и если бы запись
+    разбиралась, `find_pr` его нашёл бы и отказ состоялся."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(
+        state, monkeypatch, status="abandoned", reason="оператор закрыл PR",
+    )
+    ops = _RevisionPrOps(pr=999, pr_state="OPEN", prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == 77
+    saved = rs.load("r-recon")
+    assert [n for n, _ in tb._revisions(saved)] == [2, 3]
+    assert saved.ops["tasks-deliver-v2"]["status"] == "abandoned"
+    assert saved.ops["tasks-deliver-v2"]["reason"] == "оператор закрыл PR"
+    assert saved.ops["tasks-deliver-v3"]["supersedes"] == 1
+    # Терминальную запись не спрашивают у GitHub вовсе.
+    assert ("find_pr", "spec/WS-alpha-7-tasks-v2") not in ops.calls
 
 
 def test_supersede_refuses_resume_with_different_dag(tmp_path, monkeypatch):

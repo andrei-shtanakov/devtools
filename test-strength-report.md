@@ -18,12 +18,12 @@
 | F-04 | **закрыта** |
 | F-05 | **закрыта** |
 | F-06 | **закрыта** |
-| F-07 | — |
-| F-08 | — |
-| F-09 | — |
+| F-07 | **закрыта** |
+| F-08 | **закрыта** |
+| F-09 | **закрыта** |
 | F-10 | — |
 | F-11 | — |
-| F-12 | — |
+| F-12 | **закрыта** |
 
 ## Журнал
 
@@ -77,3 +77,61 @@
 Прогон группы: `1014 passed`. `git diff governance/` пуст.
 Линт: два E501/F841 — **предсуществующие** (строки 292 и 4048), проверено
 прогоном ruff по HEAD без моих правок; новых нарушений нет.
+
+### F-07 (major) — закрыта
+
+Общий корень находки: ни в одном тесте в леджере не было ДВУХ ревизий сразу.
+
+- **M22** (`reversed(_revisions(state))` → прямой порядок) и **M23**
+  (`revs[-1][0] + 1` → `revs[0][0] + 1`) на HEAD — обе зелёные.
+- В `test_last_delivery_prefers_highest_revision` добавлена третья запись
+  (v3, PR 11) — теперь `[-1]` и `[0]` различимы. Добавлен
+  `test_last_delivery_prefers_highest_completed_over_abandoned`
+  (v2/v3 completed + v4 abandoned ⇒ ожидается v3): попутно закрывает
+  половину принятого ограничения (г).
+- В `test_revision_numbering_starts_at_two_and_grows` — v2, v3 ⇒ 4, и
+  abandoned v4 ⇒ 5 (терминальная запись тоже занимает номер).
+- M22 роняет оба `_last_delivery`-теста, M23 — тест нумерации.
+
+### F-08 (blocker) — закрыта
+
+Операторский контур `--abandon-revision N` → `--supersede` теперь исполняется.
+
+- Канарейки на HEAD: **M50** (`raise` в начале ветки `abandon_and_next`),
+  **M49** (`_abandon_revision` → `_complete_revision`), **M51** (`raise` вместо
+  пропуска abandoned-ревизии в цикле) — все три зелёные, ветки мертвы.
+- `test_supersede_abandons_shifted_revision_and_starts_next`: started-ревизия v2
+  с позапрошлым `base_sha` и без PR ⇒ v2 становится `abandoned` с причиной
+  «base сдвинулся», заводится v3 (`supersedes: 1`, `ensure_branch` её ветки),
+  возвращается её PR. Роняет M49 и M50.
+- `test_supersede_skips_abandoned_revision`: v2 уже `abandoned`, а на её ветке
+  подан открытый PR #999. Пропуск наблюдаем: разбирайся запись — `find_pr`
+  нашёл бы PR и переиздание отказало бы «решите судьбу PR явно». Утверждается
+  и то, что `find_pr` по ветке v2 не звался вовсе. Роняет M51.
+
+### F-09 (major) — закрыта
+
+- **M55** (удалён `ops.checkout_and_pull` — первый шаг `deliver_superseded`) на
+  HEAD — зелёная.
+- Предложенное ревьюером `ops.calls[0] == ("checkout_and_pull", "master")` —
+  ЛОВУШКА: `deliver()` делает свой `checkout_and_pull` с теми же аргументами,
+  и на мутанте он просто становится нулевым. Тест бы прошёл.
+- Сделано иначе, по наблюдаемому факту: `test_supersede_refreshes_base_before_
+  reading_facts` даёт стаб, чей `checkout_and_pull` ПРИВОДИТ спеку в дереве к
+  base (`version: 7`) — как настоящий `git pull`. С освежением
+  `_previous_tasks_version` читает 7 и доставка идёт версией 8; без него — 1 и 2.
+  M55 роняет ровно этот тест.
+
+### F-12 (major) — закрыта
+
+- **M54** (подменены и ref, и путь у `show_file`) и контрольная **M54b**
+  (подменён ТОЛЬКО ref) на HEAD — обе зелёные: оба стаба игнорировали аргументы.
+- `_ShowFileOps` и `_SupersedeOps.show_file` перестали быть одноответными:
+  пишут вызов в `calls` и отдают текст ТОЛЬКО за спеку в base
+  (`(base_sha, "spec/WS-alpha-7-tasks.md")`), иначе `None` — как `git show`.
+- В `test_previous_dag_derived_from_bundle_composition` добавлено
+  `assert ops.calls == [("show_file", _BASE_SHA, _SPEC_REL)]`.
+- M54 и M54b роняют по два теста каждая (юнит `_previous_dag` + сквозной
+  `test_supersede_changed_anchor_opens_new_branch_and_pr`).
+
+Прогон группы: `1018 passed`. `git diff governance/` пуст.
