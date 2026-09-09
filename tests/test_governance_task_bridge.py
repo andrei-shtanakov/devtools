@@ -2257,11 +2257,21 @@ def test_deliver_legacy_5_has_no_acceptance_section(tmp_path: Path) -> None:
 
 
 class _ReconOps(_StubOps):
-    """Стаб с PR-поверхностью: find_pr/pr_facts поверх deliver-стаба."""
+    """Стаб с PR-поверхностью: find_pr/pr_facts поверх deliver-стаба.
 
-    def __init__(self, existing_pr: int | None = None) -> None:
+    `pr_state` — настраиваемое состояние PR, которое отдаёт `pr_facts`
+    (дефолт "MERGED" сохраняет прежнее поведение старых вызовов без
+    аргумента); фикс-круг 1 ревью Task 6, находка minor #2 — раньше было
+    захардкожено, и тест на completed+OPEN не мог отличить срабатывание
+    шортката `status == "completed"` от реального опроса PR.
+    """
+
+    def __init__(
+        self, existing_pr: int | None = None, pr_state: str = "MERGED"
+    ) -> None:
         super().__init__()
         self.existing_pr = existing_pr
+        self.pr_state = pr_state
 
     def find_pr(
         self, repo_slug: str, branch: str, *, any_state: bool = False
@@ -2272,7 +2282,7 @@ class _ReconOps(_StubOps):
     def pr_facts(self, repo_slug: str, pr: int) -> dict:
         self.calls.append(("pr_facts", pr))
         return {
-            "state": "MERGED",
+            "state": self.pr_state,
             "mergedBy": {"login": "ai-prosto"},
             "mergedAt": "2026-09-07T00:00:00Z",
         }
@@ -2684,12 +2694,83 @@ def test_previous_dag_legacy_unparsable_frontmatter(
 
 
 def test_reconcile_completed_open_pr_returns_it(tmp_path, monkeypatch):
+    """completed + её PR реально OPEN → вернуть его.
+
+    find_pr/pr_facts дёргаются по-настоящему (фикс-круг 1, minor #2 —
+    раньше PR был захардкожен MERGED в стабе, и тест не отличал этот путь
+    от простого срабатывания шортката `status == "completed"`)."""
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    op = {"status": "completed", "pr": 42, "base_sha": "s"}
-    ops = _ReconOps(existing_pr=42)
+    op = {"status": "completed", "pr": 42, "base_sha": "s",
+          "branch": "spec/WS-alpha-7-tasks-v2"}
+    ops = _ReconOps(existing_pr=42, pr_state="OPEN")
     assert tb._reconcile_revision(state, ops, 2, op, "s") == "return_pr"
+    assert ("find_pr", "spec/WS-alpha-7-tasks-v2") in ops.calls
+    assert ("pr_facts", 42) in ops.calls
+
+
+def test_reconcile_started_merged_pr_completes(tmp_path, monkeypatch):
+    """started + её PR смержен, идентичность (headRefOid) сошлась → "complete".
+
+    Строка §I3, до фикс-круга 1 не покрытая ни одним тестом (major #1)."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"status": "started", "base_sha": "s", "head_sha": "h",
+          "branch": "spec/WS-alpha-7-tasks-v2"}
+
+    class _Ops(_ReconOps):
+        def __init__(self):
+            super().__init__(existing_pr=7, pr_state="MERGED")
+
+        def pr_facts(self, repo_slug, pr):
+            self.calls.append(("pr_facts", pr))
+            return {"state": "MERGED", "headRefOid": "h"}
+
+    assert tb._reconcile_revision(state, _Ops(), 2, op, "s") == "complete"
+
+
+def test_reconcile_completed_closed_unmerged_fails_closed(
+    tmp_path, monkeypatch
+):
+    """"любое" состояние ревизии в таблице §I3 включает completed.
+
+    PR закрыт без мержа отказывает и после успешной доставки, не только
+    для started (фикс-круг 1, добавление #3)."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"status": "completed", "pr": 42, "base_sha": "s",
+          "branch": "spec/WS-alpha-7-tasks-v2"}
+    ops = _ReconOps(existing_pr=42, pr_state="CLOSED")
+    with pytest.raises(RuntimeError, match="отклонена"):
+        tb._reconcile_revision(state, ops, 2, op, "s")
+
+
+def test_reconcile_completed_identity_mismatch_fails_closed(
+    tmp_path, monkeypatch
+):
+    """Идентичность сверяется и для completed, не только для started.
+
+    Тот же общий шаг таблицы §I3 (фикс-круг 1, добавление #3, вторая
+    половина)."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"status": "completed", "pr": 42, "base_sha": "s",
+          "head_sha": "mine", "branch": "spec/WS-alpha-7-tasks-v2"}
+
+    class _Ops(_ReconOps):
+        def __init__(self):
+            super().__init__(existing_pr=42, pr_state="OPEN")
+
+        def pr_facts(self, repo_slug, pr):
+            self.calls.append(("pr_facts", pr))
+            return {"state": "OPEN", "headRefOid": "someone-else"}
+
+    with pytest.raises(RuntimeError, match="идентичность"):
+        tb._reconcile_revision(state, _Ops(), 2, op, "s")
 
 
 def test_reconcile_started_open_pr_same_base_continues(tmp_path, monkeypatch):
