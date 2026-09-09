@@ -1659,6 +1659,44 @@ def test_verify_dt_renders_union_of_checked_by_and_verifies() -> None:
     )
 
 
+def test_verify_dt_union_dedups_selector_against_bare_path_in_verifies() -> None:
+    """Minor ревью PR #161, round 8: дедуп union'а — ПО ФАЙЛУ (срез
+    `::`-селектора), не по голой строке. checked_by-цель сценария несёт
+    полный pytest-селектор (tests/test_a.py::test_five); verifies
+    объявляет тот же файл голым путём (канон гарда: decomposition_guard
+    сравнивает verifies с checked_by-целями ПОСЛЕ среза `::`) — обязана
+    схлопнуться в ОДНУ запись (полный селектор — сценарии идут первыми),
+    не задвоиться и не расширить прогон до всего файла."""
+    scenarios = task_bridge.parse_behaviour(
+        "#### BEH-05: Пять\n`traces: [FR-01]`\n"
+        "**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_five`\n\n"
+        "#### BEH-06: Шесть\n`traces: [FR-01]`\n"
+        "**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::test_six`\n"
+    )
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-05]\ndepends_on: []\n"
+        "delivered_by: []\nparallel_group: solo\n"
+        "verifies:\n  - tests/test_a.py\n  - tests/test_b.py\n"
+    )
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(dt)
+    assert findings == []
+    text = task_bridge.render_tasks_dt(
+        ws_id="WS-x-1", subject="s", bundle_path="b/30-decomposition.md",
+        scenarios=scenarios, dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
+    )
+    assert (
+        "**Verifies:** tests/test_a.py::test_five, tests/test_b.py" in text
+    )
+    verifies_line = next(
+        line for line in text.splitlines() if line.startswith("**Verifies:")
+    )
+    assert verifies_line.count("tests/test_a.py") == 1
+
+
 def test_verify_dt_without_checked_by_targets_refuses() -> None:
     """Minor ревью PR #152: verify-DT, чьи сценарии не дают ни одной
     checked_by-цели, — отказ (нечего прогонять), не молчаливый Mode без

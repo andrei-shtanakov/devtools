@@ -8,15 +8,15 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# Маркеры-подстроки находок формы (не graph-инвариантов), НЕ обязанных
-# блокировать доставку — единственные точки истины их текста, используются
-# при генерации находок в `graph_findings` НИЖЕ и в
-# `is_non_fatal_form_finding` (потребитель — S4-гейт
-# `governance.runner._step_gate`, пишет их как `warning GC-DT-GRAPH:` в
-# gate-findings.txt, round 6 ревью PR #161, минор — ДО этого находки
-# нигде не были видны оператору; сам `task_bridge.deliver` fatal-набор не
-# фильтрует НАПРЯМУЮ — фильтр внутри `graph_findings`, общей точки для
-# обоих потребителей).
+# Маркеры-подстроки non-fatal находок формы про `verifies` (не graph-
+# инвариантов) — единственные точки истины их текста, используются в
+# `_verify_group_and_orphan_findings` НИЖЕ (единственный продьюсер обеих
+# строк). Эти находки НИКОГДА не попадают в `graph_findings` (её fatal-
+# результат про них просто не знает — она их не вычисляет и не
+# фильтрует) — публичная точка входа `non_fatal_findings` вычисляет их
+# ОТДЕЛЬНО; единственный потребитель — S4-гейт `governance.runner.
+# _step_gate` (round 6/7/8 ревью PR #161), пишет их как
+# `warning GC-DT-GRAPH:` в gate-findings.txt, не останавливая прогон.
 #
 # «Группа наблюдения не выводится вовсе» (round 7 ревью PR #161, минор,
 # контракт владельца): verify-DT без ни единой checked_by-цели в scenarios
@@ -27,22 +27,6 @@ _VERIFY_GROUP_UNDERIVABLE_MARKER = "группа наблюдения не вы�
 # «Осиротевший/опечатанный путь в verifies» (round 7 ревью PR #161, минор):
 # элемент verifies, не являющийся checked_by-целью НИ ОДНОЙ задачи бандла.
 _ORPHAN_VERIFIES_TARGET_MARKER = "опечатка либо осиротевший путь"
-
-
-def is_non_fatal_form_finding(finding: str) -> bool:
-    """True для находок формы, НЕ обязанных блокировать доставку: verify-
-    DT, чья группа наблюдения не выводится ни из checked_by (scenarios),
-    ни из verifies (round 7, замена round-5 безусловного «verify без
-    verifies» — легаси-форма с checked_by-целью, но без verifies, больше
-    не находка), и элемент verifies, не принадлежащий НИ ОДНОЙ checked_by-
-    цели бандла (round 7 — опечатка/осиротевший путь). Прочие находки
-    (near-miss заголовок, дубль id, ``verifies`` на ``implement``, graph-
-    инварианты ``graph_findings``) — fatal как раньше.
-    """
-    return (
-        _VERIFY_GROUP_UNDERIVABLE_MARKER in finding
-        or _ORPHAN_VERIFIES_TARGET_MARKER in finding
-    )
 
 
 _DT_HEAD_RE = re.compile(
@@ -301,13 +285,14 @@ def non_fatal_findings(
     behaviour_text: str, decomposition_text: str
 ) -> list[str]:
     """Non-fatal находки формы про `verifies` (round 7 ревью PR #161,
-    минор, контракт владельца) — публичная точка входа для
-    `governance.runner._step_gate`: показывает их оператору как
-    `warning GC-DT-GRAPH:` в gate-findings.txt, НЕ останавливая прогон.
-    `graph_findings` вычисляет те же находки и ИСКЛЮЧАЕТ их из своего
-    (fatal) результата — общий источник (`_verify_group_and_orphan_findings`),
-    не дублирование логики; `is_non_fatal_form_finding` остаётся
-    классификатором для тех, кто уже держит смешанный список строк.
+    минор, контракт владельца) — единственная точка их вычисления, и
+    единственный потребитель — `governance.runner._step_gate`: показывает
+    их оператору как `warning GC-DT-GRAPH:` в gate-findings.txt, НЕ
+    останавливая прогон. `graph_findings` (fatal-агрегат S4-гейта и
+    `task_bridge.deliver`) про эти находки НЕ ЗНАЕТ ВООБЩЕ — она их не
+    вычисляет и не фильтрует (round 8 ревью PR #161, минор: исправлен
+    комментарий модуля, ранее ошибочно обещавший обратное); общий с этой
+    функцией источник — только `_verify_group_and_orphan_findings`.
     """
     tasks, _form_findings = parse_dt_tasks(decomposition_text)
     bindings = _parse_beh_bindings(behaviour_text)
@@ -327,6 +312,13 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
     прогон); эта функция про них просто не знает, значит легаси-бандл без
     verifies (но с checked_by-целью) и без единой опечатки в verifies
     проходит fatal-гейт как раньше.
+
+    Fatal-инвариант verifies (round 8 ревью PR #161, major, контракт
+    владельца): элемент verifies обязан ссылаться на файл, чей владелец
+    (checked_by) — в ТРАНЗИТИВНОМ ЗАМЫКАНИИ depends_on наблюдающей
+    задачи — тот же контракт, что уже есть у delivered_by; иначе
+    verify_first-прогон законно стартовал бы раньше, чем владелец
+    наблюдаемого файла его вообще создаст.
     """
     tasks, findings = parse_dt_tasks(decomposition_text)
     bindings = _parse_beh_bindings(behaviour_text)
@@ -429,6 +421,29 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
             findings.append(
                 f"{t.dt_id}: delivered_by запрещён при type: implement"
             )
+
+    # verifies обязан ссылаться на файлы, чей владелец (checked_by, тот же
+    # file_owner, что и single-owner выше) — в ТРАНЗИТИВНОМ ЗАМЫКАНИИ
+    # depends_on наблюдающей задачи (round 8 ревью PR #161, major, контракт
+    # владельца) — тот же инвариант, что уже есть у delivered_by: verify_
+    # first-прогон не имеет права начаться раньше, чем владелец
+    # наблюдаемого файла его реально создаст (промпт авторинга рекомендует
+    # класть в verifies именно файлы ДРУГИХ DT — ops.py, «owned by other
+    # DTs» — но не требует ребра к ним, гард обязан требовать сам).
+    # Файлы, не являющиеся чьей-либо checked_by-целью вовсе (опечатка/
+    # осиротевший путь), здесь не смотрим — non-fatal-версия этой проверки
+    # уже сделана отдельно в `non_fatal_findings`.
+    for t in tasks:
+        for f in t.verifies:
+            owner = file_owner.get(f)
+            if owner is None or owner == t.dt_id:
+                continue
+            closure = _transitive_deps(t.dt_id, edges)
+            if owner not in closure:
+                findings.append(
+                    f"{t.dt_id}: verifies {f} — владелец {owner} вне "
+                    f"транзитивного замыкания depends_on {t.dt_id}"
+                )
 
     # ацикличность (DFS с цветами)
     WHITE, GRAY, BLACK = 0, 1, 2

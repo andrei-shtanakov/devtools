@@ -475,6 +475,88 @@ def test_orphan_verifies_target_is_non_fatal_finding() -> None:
     assert graph_findings(beh, dt) == []
 
 
+def test_verifies_target_owner_outside_depends_on_closure_is_a_finding() -> None:
+    """Round 8 ревью PR #161, major (контракт владельца): verifies обязан
+    ссылаться на файлы, чей владелец (checked_by) — в ТРАНЗИТИВНОМ
+    ЗАМЫКАНИИ depends_on наблюдающей задачи, тот же инвариант, что уже
+    есть у delivered_by. DT-03 наблюдает tests/test_a.py (владелец —
+    DT-01), но depends_on=[DT-02] — DT-01 вне замыкания, verify_first-
+    прогон законно стартовал бы раньше, чем DT-01 вообще создаст файл."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::t1`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::t2`\n\n"
+        "#### BEH-03: Три\n**checked_by** `kind: e2e` "
+        "`target: tests/test_c.py::t3`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-02: B · type: implement · owner: dev\n"
+        "scenarios: [BEH-02]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-03: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-03]\ndepends_on: [DT-02]\n"
+        "delivered_by: [DT-02]\nparallel_group: core\n"
+        "verifies:\n  - tests/test_a.py\n"
+    )
+    findings = graph_findings(beh, dt)
+    assert any(
+        "DT-03" in f and "tests/test_a.py" in f and "DT-01" in f
+        and "замыкания" in f
+        for f in findings
+    )
+
+
+def test_verifies_target_owner_directly_in_depends_on_is_clean() -> None:
+    """Owner DT-01 напрямую в depends_on наблюдающей задачи — чисто."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::t1`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::t2`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-02: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n  - tests/test_a.py\n"
+    )
+    assert graph_findings(beh, dt) == []
+
+
+def test_verifies_target_owner_transitively_in_depends_on_is_clean() -> None:
+    """Owner DT-01 — не прямая, а ТРАНЗИТИВНАЯ зависимость (через DT-02) —
+    тоже чисто: замыкание depends_on, а не только прямые рёбра."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::t1`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::t2`\n\n"
+        "#### BEH-03: Три\n**checked_by** `kind: e2e` "
+        "`target: tests/test_c.py::t3`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-02: B · type: implement · owner: dev\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\nparallel_group: core\n\n"
+        "#### DT-03: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-03]\ndepends_on: [DT-02]\n"
+        "delivered_by: [DT-02]\nparallel_group: core\n"
+        "verifies:\n  - tests/test_a.py\n"
+    )
+    assert graph_findings(beh, dt) == []
+
+
 def test_verifies_on_implement_is_a_finding() -> None:
     dt = (
         "#### DT-01: Реализация · type: implement · owner: dev\n"

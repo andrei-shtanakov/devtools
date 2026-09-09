@@ -624,20 +624,39 @@ def render_tasks_dt(
             # verify_first, иначе собственный тест-файл DT молча выпадает
             # из прогона, хотя чек-лист той же задачи требует его зелёным.
             # Порядок ДЕТЕРМИНИРОВАН и задокументирован: СНАЧАЛА
-            # собственные checked_by-цели сценариев (порядок scenarios),
-            # ПОТОМ verifies (порядок объявления) — дедуп по вхождению.
-            # Легаси-путь (verifies не объявлен вовсе) — ничем не отличим
-            # от чисто checked_by-вывода, как раньше.
+            # собственные checked_by-цели сценариев (порядок scenarios,
+            # полный pytest-селектор с `::`), ПОТОМ verifies (порядок
+            # объявления, голые пути по канону гарда — decomposition_guard
+            # сравнивает verifies с checked_by-целями ПОСЛЕ среза `::`).
+            # Дедуп — ПО ФАЙЛУ (`_target_files`-канон, split("::", 1)[0]),
+            # НЕ по голой строке (minor ревью PR #161, round 8): голый путь
+            # в verifies и полный `file::test`-селектор из того же файла —
+            # одна и та же цель, а сравнение целых строк пропускало бы её
+            # дважды в **Verifies:**, молча расширяя verify_first с
+            # по-селекторного прогона (FR-06) до всего файла. Первое
+            # вхождение файла ПОБЕЖДАЕТ — verifies не заменяет уже
+            # объявленный сценарием селектор. Легаси-путь (verifies не
+            # объявлен вовсе) — ничем не отличим от чисто checked_by-
+            # вывода, как раньше.
             targets: list[str] = []
+            seen_paths: set[str] = set()
             for b in t.scenarios:
                 sc_target = (
                     by_beh[b].checked_target if b in by_beh else None
                 )
-                if sc_target and sc_target not in targets:
-                    targets.append(sc_target)
+                if sc_target is None:
+                    continue
+                path = sc_target.split("::", 1)[0]
+                if path in seen_paths:
+                    continue
+                targets.append(sc_target)
+                seen_paths.add(path)
             for f in t.verifies:
-                if f not in targets:
-                    targets.append(f)
+                path = f.split("::", 1)[0]
+                if path in seen_paths:
+                    continue
+                targets.append(f)
+                seen_paths.add(path)
             if not targets:
                 # verify без прогоняемой группы необоснован: суть режима
                 # — живой прогон объявленных целей; молчаливый Mode без
