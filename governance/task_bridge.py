@@ -872,6 +872,7 @@ def deliver(
     profile: str | None = None,
     branch: str | None = None,
     version: int = 1,
+    before_commit: Callable[[dict], None] | None = None,
     after_commit: Callable[[dict], None] | None = None,
 ) -> int:
     """Штампует бандл + пишет spec/<ws-id>-tasks.md; один draft-PR.
@@ -912,14 +913,24 @@ def deliver(
     не передаёт ни того, ни другого, и получает прежние дефолты
     (`spec/<ws-id>-tasks`, `version: 1`).
 
-    `after_commit` (Task 7b плана supersede) — хук, вызываемый РОВНО между
-    `commit_paths` и `push_branch` с фактами свершившегося коммита
-    (`head_sha`, `tasks_blob`, `anchor_blob` — фактический штамп
-    терминального узла, тот же, что ушёл в пин спеки). §I3 контракта
-    переиздания требует durable-записи `head_sha` до push: падение между
-    коммитом и push иначе оставляет ревизию без единственного факта, по
-    которому её опознают в ветке. Отказ внутри хука прерывает доставку ДО
-    push — это корректное состояние, его разбирает реконсиляция. `None`
+    `before_commit`/`after_commit` (Task 7b плана supersede) — два хука
+    переиздания, намеренно РАЗДЕЛЁННЫЕ коммитом:
+
+    - `before_commit` вызывается сразу после записи файла спеки и ДО
+      `commit_paths` с `tasks_blob` — ожидаемым блобом спеки. Записать
+      его вместе с `head_sha` (после коммита) нельзя: тогда состояние
+      «коммит есть, `head_sha: null`» всегда приходит и с
+      `tasks_blob: null`, и строка §I3.1 «`null` + подходящий коммит →
+      ПРИНЯТЬ его» недостижима — восстановлению не с чем сравнивать блоб.
+    - `after_commit` вызывается РОВНО между `commit_paths` и
+      `push_branch` с `head_sha` и `anchor_blob` (фактический штамп
+      терминального узла, тот же, что ушёл в пин спеки). §I3 требует
+      durable-записи `head_sha` до push: падение между коммитом и push
+      иначе оставляет ревизию без единственного факта, по которому её
+      опознают в ветке.
+
+    Отказ внутри любого из хуков прерывает доставку ДО push — это
+    корректное состояние, его разбирает реконсиляция. `None` у обоих
     (дефолт) — поведение обычной доставки байт-в-байт прежнее.
     """
     if ops.is_dirty(target_dir):
@@ -1076,6 +1087,11 @@ def deliver(
     out = Path(target_dir) / rel
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
+    if before_commit is not None:
+        # ДО коммита (§I3.1): ожидаемый блоб спеки обязан быть в намерении
+        # раньше, чем появится коммит, — иначе падение между коммитом и
+        # записью head_sha оставляет ревизию неопознаваемой.
+        before_commit({"tasks_blob": blob_sha1(text)})
     ops.commit_paths(
         target_dir,
         [*stamped, rel],
@@ -1087,7 +1103,6 @@ def deliver(
         # узла, тот же, что ушёл в пин спеки.
         after_commit({
             "head_sha": ops.rev_parse(target_dir, "HEAD"),
-            "tasks_blob": blob_sha1(text),
             "anchor_blob": design_blob,
         })
     ops.push_branch(target_dir, branch)
@@ -1502,10 +1517,27 @@ def _previous_tasks_version(state: RunState) -> int:
     return version
 
 
+def _tasks_blob_cb(state: RunState, n: int) -> Callable[[dict], None]:
+    """Durable-запись ожидаемого блоба спеки ДО коммита (§I3.1).
+
+    Отдельным действием от `_commit_facts_cb` намеренно: у окна «коммит
+    создан, `head_sha` ещё не записан» опознание держится ровно на
+    `tasks_blob` — записанный ПОСЛЕ коммита, он в этом окне всегда `null`,
+    и `_recover_commit` объявил бы собственный коммит ревизии чужим.
+    """
+
+    def _cb(facts: dict) -> None:
+        key = f"{_REVISION_PREFIX}{n}"
+        state.ops[key] = {**state.ops[key], "tasks_blob": facts["tasks_blob"]}
+        save(state)
+
+    return _cb
+
+
 def _commit_facts_cb(
     state: RunState, ops: Ops, n: int, prospective: str
 ) -> Callable[[dict], None]:
-    """Durable-запись фактов коммита + сверка §I2 между commit и push.
+    """Durable-запись `head_sha` + сверка §I2 между commit и push.
 
     Отказ внутри колбэка оставляет коммит без push и ревизию в `started` —
     корректное состояние: его разбирает реконсиляция при следующем запуске.
@@ -1519,11 +1551,7 @@ def _commit_facts_cb(
                 f"{prospective[:7]} — апстрим двигали во время доставки"
             )
         key = f"{_REVISION_PREFIX}{n}"
-        state.ops[key] = {
-            **state.ops[key],
-            "head_sha": facts["head_sha"],
-            "tasks_blob": facts["tasks_blob"],
-        }
+        state.ops[key] = {**state.ops[key], "head_sha": facts["head_sha"]}
         save(state)
 
     return _cb
@@ -1602,6 +1630,21 @@ def deliver_superseded(
             # CLOSED-unmerged → fail-closed) разбирает _reconcile_revision.
             break
         decision = _reconcile_revision(state, ops, n, op, base_sha)
+        if (
+            decision in ("complete", "continue")
+            and pr is not None
+            and not op.get("head_sha")
+        ):
+            # Идентичность PR сверяется по `head_sha` намерения, а при
+            # пустом `head_sha` сверка пропускается — чужой PR под именем
+            # нашей ветки завершил бы ревизию. Наш коммит пишет `head_sha`
+            # ДО push (§I3), значит «PR есть, head_sha пуст» = PR завёл
+            # не этот прогон. Присваивать его нельзя.
+            raise RuntimeError(
+                f"ревизия {n}: PR #{pr} существует, а head_sha в её "
+                "намерении пуст — доставка этого прогона его не создавала; "
+                f"решите судьбу PR явно: --abandon-revision {n}"
+            )
         if decision == "abandon_and_next":
             _abandon_revision(
                 state, n,
@@ -1618,8 +1661,7 @@ def deliver_superseded(
         if decision == "complete":
             _complete_revision(
                 state, n, pr=pr, anchor=op["prospective_anchor"],
-                head_sha=op.get("head_sha")
-                or ops.rev_parse(state.target_dir, op["branch"]),
+                head_sha=op["head_sha"],   # непуст по гварду выше
             )
             # Доставка состоялась; нужно ли ещё одно переиздание — решает
             # следующий запуск по §I5.
@@ -1637,8 +1679,7 @@ def deliver_superseded(
         if pr is not None:
             _complete_revision(
                 state, n, pr=pr, anchor=op["prospective_anchor"],
-                head_sha=op.get("head_sha")
-                or ops.rev_parse(state.target_dir, op["branch"]),
+                head_sha=op["head_sha"],   # непуст по гварду выше
             )
             print(f"ревизия {n} доставлена ранее — PR #{pr}")
             return pr
@@ -1664,6 +1705,7 @@ def deliver_superseded(
             profile=state.profile,
             branch=op["branch"],
             version=op["tasks_version"],
+            before_commit=_tasks_blob_cb(state, n),
             after_commit=_commit_facts_cb(
                 state, ops, n, op["prospective_anchor"]
             ),
@@ -1748,6 +1790,7 @@ def deliver_superseded(
         profile=state.profile,
         branch=branch,
         version=version,
+        before_commit=_tasks_blob_cb(state, n),
         after_commit=_commit_facts_cb(state, ops, n, prospective),
     )
     # head_sha здесь НЕ пишется: он уже записан колбэком durable — между

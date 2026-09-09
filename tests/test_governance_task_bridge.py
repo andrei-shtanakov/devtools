@@ -311,6 +311,10 @@ class _StubOps:
     def __init__(self, dirty: bool = False) -> None:
         self.dirty = dirty
         self.calls: list[tuple] = []
+        # Коммит двигает HEAD — до и после `commit_paths` `rev_parse`
+        # обязан отвечать РАЗНОЕ, иначе тест на записанный `head_sha`
+        # не отличает «взяли SHA свежего коммита» от «взяли базу».
+        self.committed = False
 
     def is_dirty(self, target_dir: str) -> bool:
         return self.dirty
@@ -325,6 +329,7 @@ class _StubOps:
         self, target_dir: str, paths: list[str], message: str
     ) -> None:
         self.calls.append(("commit_paths", tuple(paths)))
+        self.committed = True
 
     def push_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("push_branch", branch))
@@ -350,8 +355,12 @@ class _StubOps:
         # "HEAD" отвечает синтетическим SHA (Task 7b): base_sha теперь
         # fail-closed при None (§I2), и «живого git нет» для HEAD означало
         # бы отказ ещё до предмета теста; прочие ref'ы (ветка ревизии) —
-        # по-прежнему None, то есть «коммита ещё нет».
-        return "base-sha-1" if ref == "HEAD" else None
+        # по-прежнему None, то есть «коммита ещё нет». ПОСЛЕ коммита SHA
+        # другой (фикс-круг 2): иначе «head_sha = SHA коммита» и
+        # «head_sha = база» неотличимы.
+        if ref != "HEAD":
+            return None
+        return "commit-sha-1" if self.committed else "base-sha-1"
 
     def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
         # Тот же смысл: _previous_dag дёргает show_file на пути «легаси-v1
@@ -3056,7 +3065,7 @@ def test_supersede_changed_anchor_opens_new_branch_and_pr(
     delivered = (
         Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
     ).read_text(encoding="utf-8")
-    assert saved["head_sha"] == "base-sha-1"
+    assert saved["head_sha"] == "commit-sha-1"   # SHA коммита, не базы
     assert saved["tasks_blob"] == blob_sha1(delivered)
     assert saved["tasks_version"] == 2
     assert saved["prospective_anchor"] == saved["anchor"]
@@ -3289,6 +3298,42 @@ def test_supersede_resumes_started_revision_without_pr(tmp_path, monkeypatch):
     assert "version: 3" in text
 
 
+def test_supersede_refuses_merged_pr_without_recorded_head_sha(
+    tmp_path, monkeypatch
+):
+    """`head_sha` пуст, а PR ВМЕРЖЕН — присвоить его нельзя.
+
+    `_reconcile_revision` при пустом `head_sha` сверку `headRefOid`
+    пропускает, поэтому чужой PR под именем нашей ветки завершил бы
+    ревизию. Наш коммит всегда пишет `head_sha` ДО push, значит такой PR
+    завёл не этот прогон — fail-closed до операторского решения."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(state, monkeypatch, head_sha=None)
+    ops = _RevisionPrOps(pr=7, pr_state="MERGED", prs=[_MERGED_PR])
+    with pytest.raises(RuntimeError, match="--abandon-revision 2"):
+        tb.deliver_superseded(state, ops)
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "started"
+
+
+def test_supersede_refuses_open_pr_without_recorded_head_sha(
+    tmp_path, monkeypatch
+):
+    """То же для возобновления: PR открыт, `head_sha` пуст — не наш PR."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(state, monkeypatch, head_sha=None)
+    ops = _RevisionPrOps(pr=7, pr_state="OPEN", prs=[_MERGED_PR])
+    with pytest.raises(RuntimeError, match="--abandon-revision 2"):
+        tb.deliver_superseded(state, ops)
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "started"
+    assert not any(c[0] == "create_draft_pr" for c in ops.calls)
+
+
 def test_supersede_resume_refuses_foreign_commit(tmp_path, monkeypatch):
     """§I3.1 подключена к проду: в ветке ревизии лежит чужой коммит
     (родитель не `base_sha`) — возобновление fail-closed, не доставка."""
@@ -3345,8 +3390,56 @@ def test_supersede_records_commit_facts_before_push(tmp_path, monkeypatch):
         Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
     ).read_text(encoding="utf-8")
     assert ops.at_push and ops.at_push[0] is not None
-    assert ops.at_push[0]["head_sha"] == "base-sha-1"
+    assert ops.at_push[0]["head_sha"] == "commit-sha-1"
     assert ops.at_push[0]["tasks_blob"] == blob_sha1(delivered)
+
+
+def test_supersede_records_tasks_blob_before_commit(tmp_path, monkeypatch):
+    """§I3.1: падение сразу ПОСЛЕ коммита оставляет ревизию с `head_sha:
+    null`, но с записанным `tasks_blob` — и такой коммит следующий заход
+    ПРИНИМАЕТ, а не объявляет чужим.
+
+    Если оба факта писать одним действием, состояние «коммит есть,
+    head_sha null» всегда приходит и с `tasks_blob: null`, и строка
+    §I3.1 «null + подходящий коммит → принять» недостижима."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    rs.save(state)
+
+    class _DieAfterCommit(_SupersedeOps):
+        """Коммит СОСТОЯЛСЯ, процесс умер до записи head_sha."""
+
+        def commit_paths(self, target_dir, paths, message):
+            super().commit_paths(target_dir, paths, message)
+            raise RuntimeError("процесс убит сразу после коммита")
+
+    with pytest.raises(RuntimeError, match="убит сразу после коммита"):
+        tb.deliver_superseded(state, _DieAfterCommit(prs=[_MERGED_PR]))
+    saved = rs.load("r-recon")
+    op = saved.ops["tasks-deliver-v2"]
+    assert op["status"] == "started"
+    assert op["head_sha"] is None
+    assert op["tasks_blob"]
+
+    class _WithOrphanCommit(_SupersedeOps):
+        """В ветке ревизии лежит НАШ коммит: родитель и блоб — из намерения."""
+
+        def rev_parse(self, target_dir, ref):
+            if ref == "HEAD":
+                return super().rev_parse(target_dir, ref)
+            return "commit-1"
+
+        def commit_parent(self, target_dir, sha):
+            return op["base_sha"]
+
+        def blob_in_commit(self, target_dir, sha, rel_path):
+            return op["tasks_blob"]
+
+    assert tb._recover_commit(saved, _WithOrphanCommit(), op) == "commit-1"
 
 
 def test_supersede_fails_when_actual_anchor_differs(tmp_path, monkeypatch):
@@ -3395,8 +3488,8 @@ def test_supersede_write_ahead_survives_delivery_failure(tmp_path, monkeypatch):
     assert saved["approval_pr"] == 403
     assert saved["supersedes"] == 1
     assert saved["expected_generated_at"]
-    # Коммит уже был — факты опознания записаны хуком ДО падения на PR.
-    assert saved["head_sha"] == "base-sha-1"
+    # Коммит уже был — факты опознания записаны хуками ДО падения на PR.
+    assert saved["head_sha"] == "commit-sha-1"
     assert saved["tasks_blob"]
 
 
