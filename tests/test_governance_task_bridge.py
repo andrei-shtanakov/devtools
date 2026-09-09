@@ -2476,12 +2476,13 @@ def test_deliver_for_run_closed_unmerged_pr_fails_closed(
 def test_deliver_for_run_records_anchor_of_stamp(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Новая v1 сохраняет и `pr`, и `anchor` — blob анкера ПОСЛЕ штампа (§I2).
+    """Новая v1 сохраняет `pr`, `anchor` (§I2) и `content_anchor` (§I5).
 
-    Без anchor'а `prev_op.get("anchor")` у v1 всегда None, и ПЕРВОЕ
-    переиздание любого воркстрима уходит compatibility-путём §6 вместо
-    сверки §I5: `--supersede` сразу после обычной доставки завёл бы v2 без
-    единого изменения апстрима.
+    Без `content_anchor` сверка §I5 у первого переиздания невозможна, и
+    любой воркстрим уходит compatibility-путём §6: `--supersede` сразу
+    после обычной доставки завёл бы v2 без единого изменения апстрима.
+    Два поля здесь именно ДВА: `anchor` — точные доставленные байты,
+    `content_anchor` — содержание без провенанса.
     """
     from governance import run_state as rs
 
@@ -2494,20 +2495,31 @@ def test_deliver_for_run_records_anchor_of_stamp(
         state.target_dir, state.bundle_dir, "ai-prosto",
         "2026-09-07T00:00:00Z", None,
     )
+    # А вот `content_anchor` от подписи не зависит вовсе — считается без неё.
+    expected_content = task_bridge._content_anchor(
+        state.target_dir, state.bundle_dir, None
+    )
     assert task_bridge.deliver_for_run(state, _ReconOps()) == 77
     assert rs.load("r-recon").ops["tasks-deliver"] == {
         "status": "completed", "pr": 77, "anchor": expected,
+        "content_anchor": expected_content,
     }
 
 
 def test_deliver_for_run_reconciled_pr_records_anchor_from_head(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Восстановленная v1 (принят существующий PR) тоже получает anchor.
+    """Восстановленная v1 (принят существующий PR) тоже получает оба якоря.
 
     Пересчитывать штамп на этом пути нечем (`approved_by`/`approved_at` не
     вычислены) и незачем: байты, ушедшие в PR, уже лежат в его
-    head-коммите — anchor читается ОТТУДА, с пути анкера активного DAG.
+    head-коммите — `anchor` читается ОТТУДА, с пути анкера активного DAG.
+    `content_anchor` — оттуда же, но по СОДЕРЖИМОМУ всех узлов DAG
+    (`show_file`): канонизации нужен текст frontmatter, blob-хеша ей мало.
+
+    Значение обязано совпасть с тем, которое записала бы новая доставка
+    того же дерева, — иначе первое же переиздание после реконсиляции
+    объявило бы содержание изменившимся на пустом месте.
     """
     from governance import run_state as rs
 
@@ -2517,6 +2529,7 @@ def test_deliver_for_run_reconciled_pr_records_anchor_from_head(
         def __init__(self) -> None:
             super().__init__(existing_pr=91)
             self.asked: list[tuple[str, str]] = []
+            self.shown: list[tuple[str, str]] = []
 
         def pr_facts(self, repo_slug: str, pr: int) -> dict:
             facts = super().pr_facts(repo_slug, pr)
@@ -2528,23 +2541,42 @@ def test_deliver_for_run_reconciled_pr_records_anchor_from_head(
             self.asked.append((sha, rel_path))
             return "блоб-анкера-из-PR"
 
+        def show_file(
+            self, target_dir: str, ref: str, path: str
+        ) -> str | None:
+            # head-коммит PR-а несёт то же дерево бандла, что и рабочее:
+            # состав узлов реалистичен, а аргументы сверяются — спросив
+            # не тот ref, прод получил бы None и молча ушёл в §6.
+            self.shown.append((ref, path))
+            if ref != "head-91":
+                return None
+            return (Path(target_dir) / path).read_text(encoding="utf-8")
+
     ops = _HeadOps()
+    expected_content = task_bridge._content_anchor(
+        state.target_dir, state.bundle_dir, None
+    )
     assert task_bridge.deliver_for_run(state, ops) == 91
     assert ops.asked == [
         ("head-91", "workstreams/WS-alpha-7/spec/30-decomposition.md")
     ]
+    assert ops.shown == [
+        ("head-91", f"workstreams/WS-alpha-7/spec/{fname}")
+        for fname, _ in task_bridge._BUNDLE_DAG
+    ]
     assert rs.load("r-recon").ops["tasks-deliver"] == {
         "status": "completed", "pr": 91, "anchor": "блоб-анкера-из-PR",
+        "content_anchor": expected_content,
     }
 
 
 def test_deliver_for_run_reconciled_pr_without_head_stays_open(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Байты PR-а недоступны (`headRefOid` не отдан) → `anchor: None`.
+    """Байты PR-а недоступны (`headRefOid` не отдан) → оба якоря `None`.
 
     Fail-open намеренно: переиздание уйдёт §6-путём, как и до записи
-    anchor'а, а сегодня успешно реконсилируемая доставка не получает
+    якорей, а сегодня успешно реконсилируемая доставка не получает
     нового отказа.
     """
     from governance import run_state as rs
@@ -2554,6 +2586,7 @@ def test_deliver_for_run_reconciled_pr_without_head_stays_open(
     assert op == 91
     assert rs.load("r-recon").ops["tasks-deliver"] == {
         "status": "completed", "pr": 91, "anchor": None,
+        "content_anchor": None,
     }
 
 
@@ -2745,12 +2778,32 @@ def test_completed_v1_op_is_never_rewritten(tmp_path, monkeypatch):
 
 
 _ANCHOR_REL = "workstreams/WS-alpha-7/spec/30-decomposition.md"
+#: Активный DAG фикстуры — аргумент `_resolve_correction_pr`: анкер и
+#: состав подписываемых узлов выводятся ИЗ НЕГО, а не подаются отдельно.
+_DAG = task_bridge._BUNDLE_DAG
+#: node-id узлов, которые тронул correction-PR по умолчанию фикстуры
+#: (`_ProvOps.files` = только анкер) — §I7 поузловой.
+_ANCHOR_NODES = frozenset({"decomposition"})
+
+
+def _pr_signature(pr: int) -> tuple[str, str]:
+    """Подпись мержа, РАЗЛИЧАЮЩАЯ номера PR: (mergedBy.login, mergedAt).
+
+    Пока стаб отдавал одну подпись на любой номер, бандл-PR и correction-PR
+    были в тестах НЕРАЗЛИЧИМЫ, и регрессия §I5 «переиздание сразу после
+    доставки — бесследный no-op» зеленела тавтологически: сравнивались
+    байты, в которые входила одна и та же подпись. В жизни эти PR-ы
+    мержат разные люди в разное время, и именно на этом различии дефект
+    §I5×§I7 и стоял — стаб обязан его отражать.
+    """
+    return f"merger-{pr}", f"2026-09-09T05:{pr // 60 % 60:02d}:{pr % 60:02d}Z"
 
 
 _FULL_FACTS = {
     "state": "MERGED", "baseRefName": "master",
-    "mergedAt": "2026-09-09T05:00:00Z",
-    "mergedBy": {"login": "andrei-shtanakov"},
+    # Значения — только маркер «поле есть»: конкретную подпись
+    # `_ProvOps.pr_facts` подставляет по НОМЕРУ PR (`_pr_signature`).
+    "mergedAt": "-", "mergedBy": {"login": "-"},
 }
 
 
@@ -2777,14 +2830,27 @@ class _ProvOps(_StubOps):
         return self.commit
 
     def prs_containing_commit(self, repo_slug, sha):
+        self.calls.append(("prs_containing_commit", sha))
         return self.prs
 
     def pr_files(self, repo_slug, pr):
+        self.calls.append(("pr_files", pr))
         return list(self.files)
 
     def pr_facts(self, repo_slug, pr):
-        # Подпись живёт ЗДЕСЬ, а не в списке PR-ов по коммиту (ревью #164).
-        return dict(self.facts)
+        # Подпись живёт ЗДЕСЬ, а не в списке PR-ов по коммиту (ревью #164),
+        # и ЗАВИСИТ ОТ НОМЕРА PR (`_pr_signature`): одинаковый ответ на
+        # любой номер делал бандл-PR и correction-PR
+        # неразличимыми. `None` в шаблоне `facts` сохраняется — им тесты
+        # проверяют «подпись неполна».
+        self.calls.append(("pr_facts", pr))
+        facts = dict(self.facts)
+        by, at = _pr_signature(pr)
+        if facts.get("mergedBy") is not None:
+            facts["mergedBy"] = {"login": by}
+        if facts.get("mergedAt") is not None:
+            facts["mergedAt"] = at
+        return facts
 
 
 _MERGED_PR = {
@@ -2798,12 +2864,11 @@ def test_provenance_single_merged_candidate(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    pr, by, at = tb._resolve_correction_pr(
-        state, _ProvOps(prs=[_MERGED_PR]),
-        "workstreams/WS-alpha-7/spec/30-decomposition.md", "master", None,
+    corr = tb._resolve_correction_pr(
+        state, _ProvOps(prs=[_MERGED_PR]), _DAG, "master", None,
     )
-    assert (pr, by) == (403, "andrei-shtanakov")
-    assert at.startswith("2026-09-09")
+    assert (corr.pr, corr.approved_by) == (403, _pr_signature(403)[0])
+    assert corr.approved_at == _pr_signature(403)[1]
 
 
 def test_provenance_zero_candidates_refuses(tmp_path, monkeypatch):
@@ -2842,11 +2907,11 @@ def test_provenance_filter_ignores_open_pr_on_same_commit(
 
     state = _recon_state(tmp_path, monkeypatch)
     open_pr = {**_MERGED_PR, "number": 999, "state": "OPEN"}
-    pr, by, _at = tb._resolve_correction_pr(
-        state, _ProvOps(prs=[_MERGED_PR, open_pr]), _ANCHOR_REL, "master",
+    corr = tb._resolve_correction_pr(
+        state, _ProvOps(prs=[_MERGED_PR, open_pr]), _DAG, "master",
         None,
     )
-    assert (pr, by) == (403, "andrei-shtanakov")
+    assert (corr.pr, corr.approved_by) == (403, _pr_signature(403)[0])
 
 
 def test_provenance_filter_ignores_pr_merged_into_other_base(
@@ -2861,11 +2926,11 @@ def test_provenance_filter_ignores_pr_merged_into_other_base(
 
     state = _recon_state(tmp_path, monkeypatch)
     other_base = {**_MERGED_PR, "number": 999, "baseRefName": "release"}
-    pr, by, _at = tb._resolve_correction_pr(
-        state, _ProvOps(prs=[_MERGED_PR, other_base]), _ANCHOR_REL, "master",
+    corr = tb._resolve_correction_pr(
+        state, _ProvOps(prs=[_MERGED_PR, other_base]), _DAG, "master",
         None,
     )
-    assert (pr, by) == (403, "andrei-shtanakov")
+    assert (corr.pr, corr.approved_by) == (403, _pr_signature(403)[0])
 
 
 def test_provenance_found_pr_not_merged_refuses(tmp_path, monkeypatch):
@@ -2882,7 +2947,7 @@ def test_provenance_found_pr_not_merged_refuses(tmp_path, monkeypatch):
         prs=[_MERGED_PR], facts={"state": "OPEN", "baseRefName": "master"},
     )
     with pytest.raises(RuntimeError, match="найден по коммиту"):
-        tb._resolve_correction_pr(state, ops, _ANCHOR_REL, "master", None)
+        tb._resolve_correction_pr(state, ops, _DAG, "master", None)
 
 
 @pytest.mark.parametrize(
@@ -2908,7 +2973,7 @@ def test_provenance_incomplete_signature_refuses(
     })
     with pytest.raises(RuntimeError, match="подпись штампа неполна"):
         tb._resolve_correction_pr(
-            state, ops, _ANCHOR_REL, "master", approval_pr
+            state, ops, _DAG, "master", approval_pr
         )
 
 
@@ -2924,7 +2989,7 @@ def test_provenance_explicit_flag_refuses_other_base(tmp_path, monkeypatch):
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ProvOps(facts={**_FULL_FACTS, "baseRefName": "release"})
     with pytest.raises(RuntimeError, match="нацелен в"):
-        tb._resolve_correction_pr(state, ops, _ANCHOR_REL, "master", 500)
+        tb._resolve_correction_pr(state, ops, _DAG, "master", 500)
 
 
 def test_provenance_no_commit_touching_anchor_refuses(tmp_path, monkeypatch):
@@ -2968,21 +3033,24 @@ def test_provenance_explicit_flag_requires_anchor_change(
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ProvOps(files=["docs/README.md"])
     with pytest.raises(RuntimeError, match="не менял"):
-        tb._resolve_correction_pr(state, ops, _ANCHOR_REL, "master", 500)
+        tb._resolve_correction_pr(state, ops, _DAG, "master", 500)
 
 
 def test_provenance_explicit_flag_accepts_pr_touching_anchor(
     tmp_path, monkeypatch
 ):
-    """Обратная сторона: PR, реально менявший анкер, принимается."""
+    """Обратная сторона: PR, реально менявший анкер, принимается.
+
+    Заодно — состав `signed_nodes` (§I7 поузловой): в него входят ТОЛЬКО
+    узлы активного DAG, и файл вне бандла (`docs/README.md`) в подписи не
+    участвует."""
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ProvOps(files=["docs/README.md", _ANCHOR_REL])
-    pr, by, _at = tb._resolve_correction_pr(
-        state, ops, _ANCHOR_REL, "master", 500
-    )
-    assert (pr, by) == (500, "andrei-shtanakov")
+    corr = tb._resolve_correction_pr(state, ops, _DAG, "master", 500)
+    assert (corr.pr, corr.approved_by) == (500, _pr_signature(500)[0])
+    assert corr.signed_nodes == frozenset({"decomposition"})
 
 
 # --- _previous_dag (§I8: сверка активного DAG предыдущей доставки) --------
@@ -3576,28 +3644,43 @@ def test_supersede_result_refuses_inconsistent_kind() -> None:
         tb.SupersedeResult("noop", 5)
 
 
-def test_supersede_equal_anchor_is_traceless_noop(tmp_path, monkeypatch):
-    """Равный anchor: RC-успех, run.json побайтово прежний."""
+def test_supersede_equal_content_anchor_is_traceless_noop(
+    tmp_path, monkeypatch
+):
+    """Равный `content_anchor`: RC-успех, run.json побайтово прежний.
+
+    Сверка §I5 идёт по `content_anchor` — signature-free хэшу DAG, а не по
+    пост-штамповому `anchor`: подпись в него не входит, поэтому равенство
+    достижимо БЕЗ единой правки апстрима. `anchor` в записи стоит нарочно
+    ДРУГОЙ: он отвечает на вопрос §I2 («те ли байты доставлены») и на §I5
+    влиять не должен ни в какую сторону."""
     from governance import run_state as rs
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    # approved_by/at здесь обязаны совпасть с тем, что вернёт _ProvOps.pr_facts
-    # (mergedBy = andrei-shtanakov, mergedAt = 2026-09-09T05:00:00Z) — иначе
-    # anchor этой строки и anchor, который deliver_superseded посчитает
-    # изнутри через _resolve_correction_pr, разойдутся по байтам штампа.
-    anchor = tb._prospective_anchor(
-        state.target_dir, state.bundle_dir, "andrei-shtanakov",
-        "2026-09-09T05:00:00Z", None,
-    )
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": anchor}
+    content = tb._content_anchor(state.target_dir, state.bundle_dir, None)
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "БЛОБ-ДОСТАВКИ-v1",
+        "content_anchor": content,
+    }
     rs.save(state)
     before = (rs.run_dir("r-recon") / "run.json").read_bytes()
-    result = tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR]))
+    ops = _ProvOps(prs=[_MERGED_PR])
+    result = tb.deliver_superseded(state, ops)
     after = (rs.run_dir("r-recon") / "run.json").read_bytes()
     assert result == tb.SupersedeResult("noop")
     assert before == after
+    # §I5 стоит ВЫШЕ §I7: провенанс не разрешался вовсе. Утверждение
+    # именно о вызовах, а не только об исходе: пока сверка шла ПОСЛЕ
+    # поиска correction-PR, «последним, кто трогал анкер» оказывался
+    # штамп-коммит нашего же tasks-PR — на нём дефект и стоял.
+    assert ops.touched == []
+    assert not [c for c in ops.calls if c[0] in (
+        "prs_containing_commit", "pr_files"
+    )]
+    # `pr_facts` по PR первой доставки (#5) — это §I3, не §I7; предмет
+    # утверждения — что фактов correction-PR (#403) никто не спрашивал.
+    assert ("pr_facts", 403) not in ops.calls
 
 
 def test_supersede_changed_anchor_opens_new_branch_and_pr(
@@ -3719,9 +3802,7 @@ def test_supersede_restamps_signature_on_approved_base(
         "delivered", 77
     )
     meta = _anchor_meta(state)
-    assert (meta["approved_by"], meta["approved_at"]) == (
-        "andrei-shtanakov", "2026-09-09T05:00:00Z"
-    )
+    assert (meta["approved_by"], meta["approved_at"]) == _pr_signature(403)
     committed = next(
         call[1] for call in ops.calls if call[0] == "commit_paths"
     )
@@ -3755,11 +3836,11 @@ def test_supersede_restamp_is_idempotent(tmp_path, monkeypatch):
         Path(state.target_dir) / state.bundle_dir / "30-decomposition.md"
     )
     after_first = anchor_path.read_bytes()
+    by, at = _pr_signature(403)
     assert tb.stamp_bundle_approved(
         state.target_dir, state.bundle_dir,
-        approved_by="andrei-shtanakov",
-        approved_at="2026-09-09T05:00:00Z",
-        restamp_signature=True,
+        approved_by=by, approved_at=at,
+        restamp_nodes=_ANCHOR_NODES,
     ) == []
     assert anchor_path.read_bytes() == after_first
 
@@ -3780,7 +3861,7 @@ def test_restamp_flag_off_keeps_approved_node_untouched(
     assert task_bridge.stamp_bundle_approved(
         str(target), "workstreams/WS-alpha-7/spec",
         approved_by="y", approved_at="t2",
-        restamp_signature=False,
+        restamp_nodes=None,
     ) == []
     meta, _ = task_bridge.split_frontmatter(
         (
@@ -3806,11 +3887,11 @@ def test_prospective_anchor_matches_restamp(tmp_path: Path) -> None:
     )
     prospective = task_bridge._prospective_anchor(
         str(target), bundle_dir, "andrei-shtanakov",
-        "2026-09-09T05:00:00Z", None, restamp_signature=True,
+        "2026-09-09T05:00:00Z", None, restamp_nodes=_ANCHOR_NODES,
     )
     task_bridge.stamp_bundle_approved(
         str(target), bundle_dir, "andrei-shtanakov",
-        "2026-09-09T05:00:00Z", restamp_signature=True,
+        "2026-09-09T05:00:00Z", restamp_nodes=_ANCHOR_NODES,
     )
     assert prospective == blob_sha1(
         (Path(target) / bundle_dir / "30-decomposition.md").read_text(
@@ -3845,9 +3926,10 @@ def test_supersede_resume_restamps_too(tmp_path, monkeypatch):
     state = _recon_state(tmp_path, monkeypatch)
     _stamp_base_as_previous_delivery(state)
     _apply_correction_to_anchor(state)
+    by, at = _pr_signature(403)
     prospective = tb._prospective_anchor(
-        state.target_dir, state.bundle_dir, "andrei-shtanakov",
-        "2026-09-09T05:00:00Z", None, restamp_signature=True,
+        state.target_dir, state.bundle_dir, by, at, None,
+        restamp_nodes=_ANCHOR_NODES,
     )
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ-ДРУГОЙ"}
@@ -3857,6 +3939,7 @@ def test_supersede_resume_restamps_too(tmp_path, monkeypatch):
         "base_sha": "base-sha-1",
         "prospective_anchor": prospective,
         "approval_pr": 403,
+        "signed_nodes": sorted(_ANCHOR_NODES),
         "tasks_version": 2,
         "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
         "dag_source": "previous_delivery",
@@ -3870,7 +3953,7 @@ def test_supersede_resume_restamps_too(tmp_path, monkeypatch):
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "delivered", 77
     )
-    assert _anchor_meta(state)["approved_by"] == "andrei-shtanakov"
+    assert _anchor_meta(state)["approved_by"] == _pr_signature(403)[0]
 
 
 def test_supersede_legacy_bundle_uses_its_own_dag(tmp_path, monkeypatch):
@@ -3981,37 +4064,63 @@ def test_supersede_dag_mismatch_fails_closed(tmp_path, monkeypatch):
         tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
 
 
-def test_supersede_legacy_without_anchor_records_unavailable(
+def test_supersede_legacy_without_content_anchor_records_unavailable(
     tmp_path, monkeypatch
 ):
     from governance import run_state as rs
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5}  # без anchor
+    # без content_anchor
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5}
     rs.save(state)
     tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["comparison"] == "unavailable"
 
 
+def _v1_anchor_of_current_tree(state):
+    """`anchor` §I2 записи v1, посчитанный по ТЕКУЩЕМУ дереву.
+
+    Нужен ровно одному случаю: запись старого образца, где `anchor` есть
+    и он «сошёлся бы», а `content_anchor` нет.
+    """
+    from governance import task_bridge as tb
+
+    return tb._prospective_anchor(
+        state.target_dir, state.bundle_dir, *_pr_signature(403), None,
+        restamp_nodes=_ANCHOR_NODES,
+    )
+
+
 @pytest.mark.parametrize(
-    "v1_anchor", [{}, {"anchor": None}], ids=["ключа-нет", "anchor-null"]
+    "v1_extra",
+    [{}, {"content_anchor": None}, "anchor-без-content"],
+    ids=["ключа-нет", "content-anchor-null", "старый-anchor-не-в-счёт"],
 )
-def test_supersede_unavailable_for_missing_and_null_anchor(
-    v1_anchor, tmp_path, monkeypatch
+def test_supersede_unavailable_without_content_anchor(
+    v1_extra, tmp_path, monkeypatch
 ):
-    """§6 не сломан: «ключа нет» и `anchor: null` — одинаково «сверять не с чем».
+    """§6: сверять не с чем — «ключа нет», `null` и запись СТАРОГО образца.
 
     Легаси-леджер ключа не несёт вовсе; новая реконсиляция может честно
-    записать `anchor: None` (байты PR-а прочитать не удалось). Оба обязаны
-    идти compatibility-путём §6, а не выдавать сверку за состоявшуюся.
+    записать `content_anchor: None` (байты PR-а прочитать не удалось).
+    Третий случай — ядро правила «поле `anchor` задним числом не
+    переосмысливается»: в записи лежит `anchor`, который на этом дереве
+    СОШЁЛСЯ БЫ, но он отвечал на вопрос §I2 («те ли байты доставлены»), а
+    не на вопрос §I5. Принять его за содержание значило бы объявить
+    сверку там, где её не было, — и притом объявить бесследный no-op,
+    оставив воркстрим неремонтируемым.
     """
     from governance import run_state as rs
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, **v1_anchor}
+    extra = (
+        {"anchor": _v1_anchor_of_current_tree(state)}
+        if isinstance(v1_extra, str) else v1_extra
+    )
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, **extra}
     rs.save(state)
     assert tb.deliver_superseded(
         state, _SupersedeOps(prs=[_MERGED_PR])
@@ -4025,10 +4134,17 @@ def test_supersede_right_after_delivery_is_traceless_noop(
 ):
     """Первый `--supersede` сразу после обычной доставки — бесследный no-op.
 
-    Сквозной случай §I5, ради которого v1 и обязана писать anchor: апстрим
-    не менялся между доставкой и переизданием, значит ни ветки, ни PR, ни
-    записи в леджере быть не должно — `run.json` побайтово прежний.
-    Пока v1 anchor не записывала, ЭТОТ вызов заводил v2.
+    Сквозной случай §I5, ради которого v1 и обязана писать
+    `content_anchor`: апстрим не менялся между доставкой и переизданием,
+    значит ни ветки, ни PR, ни записи в леджере быть не должно —
+    `run.json` побайтово прежний.
+
+    ДВЕ доставки здесь подписаны РАЗНЫМИ PR-ами: v1 штампует подписью
+    бандл-PR #5, а переиздание взяло бы подпись correction-PR #403
+    (`_pr_signature` их различает). Пока §I5 сравнивал пост-штамповый
+    `anchor`, подпись входила в сравниваемые байты, равенство не
+    достигалось никогда, и ЭТОТ вызов заводил v2 — сколько бы раз его ни
+    повторяли.
     """
     from governance import run_state as rs
     from governance import task_bridge as tb
@@ -4036,11 +4152,232 @@ def test_supersede_right_after_delivery_is_traceless_noop(
     state = _recon_state(tmp_path, monkeypatch)
     assert tb.deliver_for_run(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
     before = (rs.run_dir("r-recon") / "run.json").read_bytes()
-    result = tb.deliver_superseded(
-        rs.load("r-recon"), _SupersedeOps(prs=[_MERGED_PR])
-    )
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    result = tb.deliver_superseded(rs.load("r-recon"), ops)
     assert result == tb.SupersedeResult("noop")
     assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
+    # Провенанс §I7 не разрешался ВООБЩЕ: сверка §I5 стоит выше него.
+    # Утверждение о вызовах, а не только об исходе, — «последним, кто
+    # трогал анкер» после доставки становится штамп-коммит нашего же
+    # tasks-PR, и порядок обязан не давать принять его за correction.
+    assert ops.touched == []
+    assert not [c for c in ops.calls if c[0] in (
+        "prs_containing_commit", "pr_files"
+    )]
+    assert ("pr_facts", 403) not in ops.calls
+
+
+# --- content_anchor: канонизация (§I5) и поузловой §I7 -------------------
+
+
+_ALL_NODES = frozenset(
+    task_bridge._node_id(fname) for fname, _ in task_bridge._BUNDLE_DAG
+)
+_REQUIREMENTS_REL = "workstreams/WS-alpha-7/spec/10-requirements.md"
+
+
+def _apply_correction_to_node(state, node: str) -> None:
+    """Correction-PR правит ТЕЛО произвольного узла, frontmatter не трогает.
+
+    Тот же смысл, что у `_apply_correction_to_anchor`, но не для анкера:
+    поузловому §I7 нужен узел ВЫШЕ анкера — им проверяется, что
+    механическая перепиновка подпись не двигает."""
+    path = Path(state.target_dir) / state.bundle_dir / node
+    text = path.read_text(encoding="utf-8")
+    assert text.endswith("\n")
+    path.write_text(text + "\nПравка correction'а.\n", encoding="utf-8")
+
+
+def _node_bytes(state) -> dict[str, bytes]:
+    """Байты всех узлов бандла — для побайтовой сверки «узел не тронут»."""
+    base = Path(state.target_dir) / state.bundle_dir
+    return {
+        fname: (base / fname).read_bytes()
+        for fname, _ in task_bridge._BUNDLE_DAG
+    }
+
+
+def test_pr_facts_stub_differs_per_pr(tmp_path, monkeypatch) -> None:
+    """Гвард самого стаба: подпись зависит от НОМЕРА PR.
+
+    Пока `_ProvOps.pr_facts` отдавал одно и то же на любой номер,
+    бандл-PR и correction-PR были в тестах неразличимы, и регрессия §I5
+    зеленела тавтологически. Тест держит стаб честным: сломав его
+    обратно, ловим ЗДЕСЬ, а не через полдюжины ложно-зелёных тестов."""
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ProvOps()
+    bundle = ops.pr_facts("owner/alpha", 5)
+    correction = ops.pr_facts("owner/alpha", 403)
+    assert bundle["mergedBy"] != correction["mergedBy"]
+    assert bundle["mergedAt"] != correction["mergedAt"]
+    assert state.pr == 5      # фикстура: бандл-PR — именно #5
+
+
+def test_content_anchor_is_signature_free(tmp_path: Path) -> None:
+    """Определение канонизации: подпись approve в `content_anchor` не входит.
+
+    Не тавтология: байты анкера при перештампе МЕНЯЮТСЯ (утверждается
+    рядом), и пост-штамповый `anchor` §I2 меняется вместе с ними —
+    неизменным остаётся ровно канонический хэш."""
+    target = str(_target(tmp_path))
+    bundle = "workstreams/WS-alpha-7/spec"
+    task_bridge.stamp_bundle_approved(target, bundle, "первый", "t1")
+    before_hash = task_bridge._content_anchor(target, bundle, None)
+    before_bytes = (
+        Path(target) / bundle / "30-decomposition.md"
+    ).read_bytes()
+    task_bridge.stamp_bundle_approved(
+        target, bundle, "второй", "t2", restamp_nodes=_ALL_NODES
+    )
+    assert (
+        Path(target) / bundle / "30-decomposition.md"
+    ).read_bytes() != before_bytes
+    assert task_bridge._content_anchor(target, bundle, None) == before_hash
+
+
+def test_content_anchor_does_not_leak_signature_through_pins(
+    tmp_path: Path,
+) -> None:
+    """Подпись ВЕРХНЕГО узла не протекает в хэш каскадом через пины.
+
+    Реальный пин считается с байтов upstream-файла ВМЕСТЕ с подписью:
+    сменив подпись одному charter'у, мы двигаем пин requirements, оттуда
+    — behaviour-spec, и так до анкера. Канонизация обязана пересчитывать
+    пины из signature-free представлений; вырезав подпись только у самого
+    узла, §I5 всё равно расходился бы — тот же дефект другим путём."""
+    target = str(_target(tmp_path))
+    bundle = "workstreams/WS-alpha-7/spec"
+    task_bridge.stamp_bundle_approved(target, bundle, "первый", "t1")
+    before_hash = task_bridge._content_anchor(target, bundle, None)
+    design = Path(target) / bundle / "20-design.md"
+    before_design = design.read_bytes()
+    changed = task_bridge.stamp_bundle_approved(
+        target, bundle, "второй", "t2", restamp_nodes=frozenset({"charter"})
+    )
+    # Перепиновка действительно доехала донизу — иначе сверять нечего.
+    assert f"{bundle}/30-decomposition.md" in changed
+    assert design.read_bytes() != before_design
+    assert task_bridge._content_anchor(target, bundle, None) == before_hash
+
+
+def test_content_anchor_changes_with_node_body(tmp_path, monkeypatch) -> None:
+    """Обратная сторона: правка ТЕЛА любого узла хэш меняет."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _stamp_base_as_previous_delivery(state)
+    before = tb._content_anchor(state.target_dir, state.bundle_dir, None)
+    _apply_correction_to_node(state, "10-requirements.md")
+    assert tb._content_anchor(
+        state.target_dir, state.bundle_dir, None
+    ) != before
+
+
+def _supersede_with_correction_touching_requirements(tmp_path, monkeypatch):
+    """v1 доставлена и вмержена; correction-PR правит requirements + анкер."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _stamp_base_as_previous_delivery(state)
+    v1_content = tb._content_anchor(state.target_dir, state.bundle_dir, None)
+    _apply_correction_to_node(state, "10-requirements.md")
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "БЛОБ-ДОСТАВКИ-v1",
+        "content_anchor": v1_content,
+    }
+    rs.save(state)
+    ops = _SupersedeOps(
+        prs=[_MERGED_PR], files=[_REQUIREMENTS_REL, _ANCHOR_REL]
+    )
+    return state, ops
+
+
+def test_supersede_signs_only_nodes_touched_by_correction(
+    tmp_path, monkeypatch
+):
+    """§I7 поузловой: подпись correction-PR — только затронутым узлам.
+
+    Correction-PR тронул requirements и анкер; charter, behaviour-spec,
+    design и acceptance он не видел. Приписав им подпись #403, штамп
+    стёр бы факт, что эти байты одобрил другой человек в другой момент —
+    ту же ложь, против которой §I7 и вводился, только с другой стороны.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state, ops = _supersede_with_correction_touching_requirements(
+        tmp_path, monkeypatch
+    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
+    by403, at403 = _pr_signature(403)
+    touched = {"10-requirements.md", "30-decomposition.md"}
+    for fname, _ in tb._BUNDLE_DAG:
+        meta = _anchor_meta(state, fname)
+        want = (
+            (by403, at403) if fname in touched
+            else (_PREV_MERGER, _PREV_MERGED_AT)
+        )
+        assert (meta["approved_by"], meta["approved_at"]) == want, fname
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["signed_nodes"] == ["decomposition", "requirements"]
+
+
+def test_supersede_mechanical_repin_does_not_change_signature(
+    tmp_path, monkeypatch
+):
+    """Перепиновка downstream-узла — не событие approve.
+
+    behaviour-spec correction-PR не менял, но его пин на requirements
+    сдвинулся (у requirements сменилась подпись ⇒ сменились байты).
+    Байты узла обязаны измениться, подпись — нет: иначе поузловое правило
+    вырождается обратно в bundle-wide, только через каскад пинов."""
+    from governance import task_bridge as tb
+
+    state, ops = _supersede_with_correction_touching_requirements(
+        tmp_path, monkeypatch
+    )
+    before = _node_bytes(state)
+    tb.deliver_superseded(state, ops)
+    after = _node_bytes(state)
+    beh = _anchor_meta(state, "15-behaviour-spec.md")
+    assert after["15-behaviour-spec.md"] != before["15-behaviour-spec.md"]
+    assert beh["upstream_hashes"]["requirements"] != task_bridge.blob_sha1(
+        before["10-requirements.md"].decode("utf-8")
+    )
+    assert (beh["approved_by"], beh["approved_at"]) == (
+        _PREV_MERGER, _PREV_MERGED_AT
+    )
+    # Узел, у которого не менялся ни он сам, ни его апстрим, — побайтово
+    # прежний: перештамп не расползается по бандлу вовсе.
+    assert after["00-charter.md"] == before["00-charter.md"]
+
+
+def test_supersede_after_merged_revision_is_noop_again(tmp_path, monkeypatch):
+    """Повтор сразу после мержа v2 — снова бесследный no-op.
+
+    Последний, кто трогал анкер, теперь tasks-PR самой ревизии v2 (#77):
+    ищи переиздание провенанс до сверки, оно приняло бы СВОЙ ЖЕ PR за
+    correction, взяло бы его подпись и завело v3 — и так до бесконечности.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state, ops = _supersede_with_correction_touching_requirements(
+        tmp_path, monkeypatch
+    )
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+    # Рабочее дерево = то, что доставила и вмержила v2 (её штамп в base).
+    state = rs.load("r-recon")
+    before = (rs.run_dir("r-recon") / "run.json").read_bytes()
+    tasks_pr_v2 = {**_MERGED_PR, "number": 77}
+    again = _SupersedeOps(commit="c-v2", prs=[tasks_pr_v2])
+    assert tb.deliver_superseded(state, again) == tb.SupersedeResult("noop")
+    assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
+    assert again.touched == []
+    assert ("pr_facts", 77) not in again.calls
 
 
 class _RevisionPrOps(_SupersedeOps):
@@ -4083,6 +4420,7 @@ def _revision_intent(state, prospective, **over):
         "base_sha": "base-sha-1",
         "prospective_anchor": prospective,
         "approval_pr": 403,
+        "signed_nodes": sorted(_ANCHOR_NODES),
         "tasks_version": 3,
         "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
         "dag_source": "previous_delivery",
@@ -4100,9 +4438,10 @@ def _seed_revision(state, monkeypatch, **over):
     from governance import run_state as rs
     from governance import task_bridge as tb
 
+    by, at = _pr_signature(403)
     prospective = tb._prospective_anchor(
-        state.target_dir, state.bundle_dir, "andrei-shtanakov",
-        "2026-09-09T05:00:00Z", None,
+        state.target_dir, state.bundle_dir, by, at, None,
+        restamp_nodes=_ANCHOR_NODES,
     )
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
@@ -4330,6 +4669,37 @@ def test_supersede_resumes_started_revision_without_pr(tmp_path, monkeypatch):
     ).read_text(encoding="utf-8")
     assert 'generated_at: "2026-09-09T10:00:00+03:00"' in text
     assert "version: 3" in text
+
+
+def test_supersede_resume_takes_signed_nodes_from_intent(
+    tmp_path, monkeypatch
+):
+    """§I7 на возобновлении: состав подписываемых узлов — ИЗ НАМЕРЕНИЯ.
+
+    `prospective_anchor` намерения посчитан с тем составом, что записан
+    рядом с ним. Пересчитай возобновление состав заново — и ответ
+    `ops.pr_files` (сегодня он шире: correction-PR якобы трогал ещё и
+    charter) дал бы ДРУГИЕ байты штампа, а гард §I2 порвал бы доставку
+    между коммитом и push. Durable-запись состава и есть то, что этого
+    не допускает."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    # База УЖЕ проштампована доставкой v1 — иначе поузловое правило вообще
+    # не при делах: на draft-узле штамп идёт переходом, а не перештампом.
+    _stamp_base_as_previous_delivery(state)
+    _seed_revision(state, monkeypatch)
+    ops = _RevisionPrOps(
+        pr=None, prs=[_MERGED_PR],
+        files=["workstreams/WS-alpha-7/spec/00-charter.md", _ANCHOR_REL],
+    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
+    # charter в намерении не значился — подпись correction-PR он не получил.
+    assert _anchor_meta(state, "00-charter.md")["approved_by"] != (
+        _pr_signature(403)[0]
+    )
 
 
 def test_supersede_refuses_resume_when_branch_missing_locally(
