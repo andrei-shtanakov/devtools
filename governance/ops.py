@@ -895,9 +895,20 @@ class RealOps:
         Поэтому здесь только нормализация состава: snake_case → ожидаемые
         ключи, `state` → OPEN|CLOSED|MERGED по факту `merged_at`. Подпись
         (`mergedBy`) берётся отдельным запросом `pr_facts` — см. Task 3.
+
+        Запрос идёт `--paginate`: эндпоинт REST-пагинируемый (30 на
+        страницу по умолчанию), а `_resolve_correction_pr` (§I7) на
+        списке кандидатов держит гвард «ровно один» — усечение по первой
+        странице выродило бы его в молчаливый выбор первого. `--slurp`
+        для этого непригоден (`gh` 2.98: «the --slurp option is not
+        supported with --jq»), поэтому jq-выражение остаётся прежним, а
+        `--paginate` печатает ПО МАССИВУ НА СТРАНИЦУ подряд — отсюда
+        разбор stdout как последовательности JSON-документов, а не
+        одного (проверено живым `gh` на трёхстраничной выдаче).
         """
         done = subprocess.run(
             ["gh", "api", f"repos/{repo_slug}/commits/{sha}/pulls",
+             "--paginate",
              "--jq", "[.[] | {number, "
                      "state: (if .merged_at then \"MERGED\" "
                      "else (.state | ascii_upcase) end), "
@@ -910,13 +921,26 @@ class RealOps:
                 f"prs_containing_commit: gh api rc={done.returncode}: "
                 f"{done.stderr.strip()}"
             )
-        try:
-            found = json.loads(done.stdout or "[]")
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"prs_containing_commit: invalid JSON: {done.stdout!r}"
-            ) from exc
-        return found
+        found: list[dict] = []
+        decoder = json.JSONDecoder()
+        text, pos = done.stdout, 0
+        while True:
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+            if pos >= len(text):
+                return found
+            try:
+                page, pos = decoder.raw_decode(text, pos)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"prs_containing_commit: invalid JSON: {done.stdout!r}"
+                ) from exc
+            if not isinstance(page, list):
+                raise RuntimeError(
+                    f"prs_containing_commit: unexpected JSON shape: "
+                    f"{done.stdout!r}"
+                )
+            found.extend(page)
 
     def rev_parse(self, target_dir: str, ref: str) -> str | None:
         """SHA ссылки; None — ссылки нет (нормальный случай, не сбой)."""

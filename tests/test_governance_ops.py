@@ -1009,7 +1009,32 @@ def test_prs_containing_commit_command_and_normalization(monkeypatch):
     assert result == payload
     assert calls[0].argv == [
         "gh", "api", f"repos/{REPO_SLUG}/commits/deadbeef/pulls",
-        "--jq", _PRS_CONTAINING_COMMIT_JQ,
+        "--paginate", "--jq", _PRS_CONTAINING_COMMIT_JQ,
+    ]
+
+
+def test_prs_containing_commit_collects_every_page(monkeypatch):
+    """Кандидаты §I7 собираются со ВСЕХ страниц, а не с первой.
+
+    Эндпоинт REST-пагинируемый (30 на страницу), а `_resolve_correction_pr`
+    держит на списке гвард «ровно один кандидат» — усечение по первой
+    странице выродило бы его в молчаливый выбор первого. `--slurp` для
+    этого непригоден (`gh` 2.98: «not supported with --jq»), поэтому
+    `--paginate` печатает по массиву на страницу подряд, и разбирать
+    stdout нужно как ПОСЛЕДОВАТЕЛЬНОСТЬ JSON-документов: `json.loads`
+    целиком на такой выдаче падал бы «invalid JSON».
+    """
+    page1 = [{"number": 42, "state": "MERGED", "baseRefName": "master",
+              "mergedAt": "2026-09-01T00:00:00Z", "mergeCommit": "aaa"}]
+    page2 = [{"number": 43, "state": "MERGED", "baseRefName": "master",
+              "mergedAt": "2026-09-02T00:00:00Z", "mergeCommit": "bbb"}]
+    _install_fake_run(
+        monkeypatch, returncode=0,
+        stdout=f"{json.dumps(page1)}\n{json.dumps(page2)}\n[]\n",
+    )
+
+    assert RealOps().prs_containing_commit(REPO_SLUG, "deadbeef") == [
+        *page1, *page2,
     ]
 
 
