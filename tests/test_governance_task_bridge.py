@@ -2808,12 +2808,34 @@ _FULL_FACTS = {
 
 
 class _ProvOps(_StubOps):
-    def __init__(self, commit="c1", prs=None, files=None, facts=None):
+    """Стаб провенанса §I7: коммиты по файлам DAG, PR-ы по коммитам, факты.
+
+    Коммит и список PR настраиваются ПОФАЙЛОВО (`commits`) и ПОКОММИТНО
+    (`prs_by_sha`), а состав файлов — ПОНОМЕРНО (`files_by_pr`). Пока
+    ответы были одним значением на любой аргумент, фикстура описывала
+    вход, которого в бою не бывает: correction всегда трогал анкер, и
+    поузловой §I7 проверялся входом, на котором он неотличим от
+    bundle-wide. Скаляры (`commit`/`prs`/`files`) остались дефолтом
+    «одинаково на всё» — их достаточно там, где предмет теста не в
+    различении.
+    """
+
+    def __init__(self, commit="c1", prs=None, files=None, facts=None,
+                 commits=None, prs_by_sha=None, files_by_pr=None,
+                 branch_prs=None):
         super().__init__()
         self.commit, self.prs = commit, (prs if prs is not None else [])
-        # Состав файлов PR (§I7, шаг 4): по умолчанию названный PR ТРОГАЛ
-        # анкер — иначе явный `--approval-pr` отказывает (C-5), а на пути
-        # возобновления он передаётся из намерения ревизии.
+        # Точечные переопределения скаляров: путь → SHA, SHA → список PR,
+        # номер PR → состав файлов.
+        self.commits = dict(commits or {})
+        self.prs_by_sha = dict(prs_by_sha or {})
+        self.files_by_pr = dict(files_by_pr or {})
+        # Ветка → номер PR для `find_pr`: вторая линия опознания
+        # собственных доставок (§I7 шаг 3) резолвит ИМЕННО так.
+        self.branch_prs = dict(branch_prs or {})
+        # Состав файлов PR (§I7, шаг 5): по умолчанию названный PR ТРОГАЛ
+        # анкер — на пути возобновления состав приезжает из намерения
+        # ревизии, и этот дефолт ему соответствует.
         self.files = [_ANCHOR_REL] if files is None else files
         # Ответ `pr_facts` настраиваемый (F-04 финального ревью): пока он
         # был ОДНИМ значением «вмержен, подпись полна», обе проверки шага 4
@@ -2827,15 +2849,19 @@ class _ProvOps(_StubOps):
 
     def last_commit_touching(self, target_dir, rel_path):
         self.touched.append(rel_path)
-        return self.commit
+        return self.commits.get(rel_path, self.commit)
 
     def prs_containing_commit(self, repo_slug, sha):
         self.calls.append(("prs_containing_commit", sha))
-        return self.prs
+        return list(self.prs_by_sha.get(sha, self.prs))
 
     def pr_files(self, repo_slug, pr):
         self.calls.append(("pr_files", pr))
-        return list(self.files)
+        return list(self.files_by_pr.get(pr, self.files))
+
+    def find_pr(self, repo_slug, branch, *, any_state=False):
+        self.calls.append(("find_pr", branch))
+        return self.branch_prs.get(branch)
 
     def pr_facts(self, repo_slug, pr):
         # Подпись живёт ЗДЕСЬ, а не в списке PR-ов по коммиту (ревью #164),
@@ -2877,7 +2903,7 @@ def test_provenance_zero_candidates_refuses(tmp_path, monkeypatch):
     state = _recon_state(tmp_path, monkeypatch)
     with pytest.raises(RuntimeError, match="подписи взять неоткуда"):
         tb._resolve_correction_pr(
-            state, _ProvOps(prs=[]), "a/b.md", "master", None
+            state, _ProvOps(prs=[]), _DAG, "master", None
         )
 
 
@@ -2888,7 +2914,7 @@ def test_provenance_two_candidates_refuses(tmp_path, monkeypatch):
     other = {**_MERGED_PR, "number": 999}
     with pytest.raises(RuntimeError, match="подписи взять неоткуда"):
         tb._resolve_correction_pr(
-            state, _ProvOps(prs=[_MERGED_PR, other]), "a/b.md", "master", None
+            state, _ProvOps(prs=[_MERGED_PR, other]), _DAG, "master", None
         )
 
 
@@ -2946,7 +2972,7 @@ def test_provenance_found_pr_not_merged_refuses(tmp_path, monkeypatch):
     ops = _ProvOps(
         prs=[_MERGED_PR], facts={"state": "OPEN", "baseRefName": "master"},
     )
-    with pytest.raises(RuntimeError, match="найден по коммиту"):
+    with pytest.raises(RuntimeError, match="найденный по коммитам"):
         tb._resolve_correction_pr(state, ops, _DAG, "master", None)
 
 
@@ -2977,28 +3003,48 @@ def test_provenance_incomplete_signature_refuses(
         )
 
 
-def test_provenance_explicit_flag_refuses_other_base(tmp_path, monkeypatch):
-    """§I7 шаг 4 у явного `--approval-pr`: PR обязан целить в `base_ref`.
+@pytest.mark.parametrize(
+    "approval_pr", [None, 500], ids=["поиск", "явный-approval-pr"],
+)
+def test_provenance_refuses_pr_merged_into_other_base(
+    approval_pr, tmp_path, monkeypatch
+):
+    """§I7 шаг 5: PR обязан целить в `base_ref` — на ОБОИХ путях.
 
     Соседний тест проверяет только вмерженность, поэтому PR, вмерженный в
     ЧУЖУЮ ветку, тестом не подавался, и проверку base можно было удалить
     незаметно (F-06, мутация M34). Оператор называет такой PR по ошибке
-    легко: тот же анкер, тот же автор, другой релизный поток."""
+    легко: тот же узел, тот же автор, другой релизный поток.
+
+    На автоматическом пути условие держалось фильтром кандидатов, но
+    список (`prs_containing_commit`) и факты (`pr_facts`) — два разных
+    запроса, и расходятся они ровно так же, как по `state`: список из
+    кэша, PR перенацелен. Контракт требует проверки на обоих путях
+    именно поэтому — «по построению» не факт, а рассуждение."""
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    ops = _ProvOps(facts={**_FULL_FACTS, "baseRefName": "release"})
+    ops = _ProvOps(
+        prs=[_MERGED_PR], facts={**_FULL_FACTS, "baseRefName": "release"},
+    )
     with pytest.raises(RuntimeError, match="нацелен в"):
-        tb._resolve_correction_pr(state, ops, _DAG, "master", 500)
+        tb._resolve_correction_pr(state, ops, _DAG, "master", approval_pr)
 
 
-def test_provenance_no_commit_touching_anchor_refuses(tmp_path, monkeypatch):
+def test_provenance_no_commit_touching_any_dag_file_refuses(
+    tmp_path, monkeypatch
+):
+    """Шаг 1 §I7: ни одного коммита НИ ПО ОДНОМУ файлу DAG — отказ.
+
+    Отказ переехал с файла терминального узла на весь состав: пока он
+    стоял на анкере, бандл, чей анкер не менялся, а upstream менялся,
+    отказывал вместо поиска."""
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    with pytest.raises(RuntimeError, match="не менялся"):
+    with pytest.raises(RuntimeError, match="ни один файл"):
         tb._resolve_correction_pr(
-            state, _ProvOps(commit=None), "a/b.md", "master", None
+            state, _ProvOps(commit=None), _DAG, "master", None
         )
 
 
@@ -3015,42 +3061,215 @@ def test_provenance_explicit_flag_is_verified_not_trusted(
 
     with pytest.raises(RuntimeError, match="не вмержен"):
         tb._resolve_correction_pr(
-            state, _Explicit(), "a/b.md", "master", 500
+            state, _Explicit(), _DAG, "master", 500
         )
 
 
-def test_provenance_explicit_flag_requires_anchor_change(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "approval_pr", [None, 500], ids=["поиск", "явный-approval-pr"],
+)
+def test_provenance_refuses_pr_without_active_dag_files(
+    approval_pr, tmp_path, monkeypatch
 ):
-    """§I7 шаг 4, третье условие: явный PR обязан МЕНЯТЬ файл анкера.
+    """§I7 шаг 5, третье условие: пустой `signed_nodes` — отказ.
 
-    Без него флаг из «заменяет поиск» становился «отключает проверку»:
-    оператор называл любой вмерженный в base_ref PR, и его mergedBy/
-    mergedAt уходили в штамп бандла — штамп утверждал бы, что байты
-    анкера одобрил человек, который их не видел (C-5)."""
+    Место снятого требования «PR менял файл терминального узла». Без
+    какой-либо проверки состава флаг из «заменяет поиск» становился бы
+    «отключает проверку»: оператор называет любой вмерженный в base_ref
+    PR, и его mergedBy/mergedAt уходят в штамп бандла — штамп
+    утверждает, что байты одобрил человек, который их не видел (C-5).
+    На автоматическом пути тот же вход даёт внешний PR, попавший в
+    кандидаты по коммиту, который бандла не касался.
+
+    Проверка общая для обоих путей — этим она и отличается от снятой:
+    та стояла на терминальном файле и на автоматическом пути
+    самоподтверждалась штампом нашей же доставки."""
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    ops = _ProvOps(files=["docs/README.md"])
-    with pytest.raises(RuntimeError, match="не менял"):
-        tb._resolve_correction_pr(state, ops, _DAG, "master", 500)
+    ops = _ProvOps(prs=[_MERGED_PR], files=["docs/README.md"])
+    with pytest.raises(RuntimeError, match="ни одного файла активного DAG"):
+        tb._resolve_correction_pr(state, ops, _DAG, "master", approval_pr)
 
 
-def test_provenance_explicit_flag_accepts_pr_touching_anchor(
+def test_provenance_accepts_pr_touching_upstream_node_only(
     tmp_path, monkeypatch
 ):
-    """Обратная сторона: PR, реально менявший анкер, принимается.
+    """Обратная сторона: PR, тронувший ТОЛЬКО upstream-узел, принимается.
 
-    Заодно — состав `signed_nodes` (§I7 поузловой): в него входят ТОЛЬКО
-    узлы активного DAG, и файл вне бандла (`docs/README.md`) в подписи не
-    участвует."""
+    Ровно тот вход, который старое требование «менял анкер» отвергало:
+    correction правит requirements, терминального узла не касается.
+    Заодно — состав `signed_nodes` (§I7 поузловой): в него входят
+    ТОЛЬКО узлы активного DAG, и файл вне бандла (`docs/README.md`) в
+    подписи не участвует."""
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    ops = _ProvOps(files=["docs/README.md", _ANCHOR_REL])
+    ops = _ProvOps(files=["docs/README.md", _REQUIREMENTS_REL])
     corr = tb._resolve_correction_pr(state, ops, _DAG, "master", 500)
     assert (corr.pr, corr.approved_by) == (500, _pr_signature(500)[0])
-    assert corr.signed_nodes == frozenset({"decomposition"})
+    assert corr.signed_nodes == frozenset({"requirements"})
+
+
+def test_provenance_two_real_candidates_names_the_flag(
+    tmp_path, monkeypatch
+):
+    """Шаг 4: два НАСТОЯЩИХ correction-кандидата — fail-closed с подсказкой.
+
+    Ни один из них не собственная доставка (леджер прогона пуст), то есть
+    исключить нечего и выбрать нельзя. Оператору нужен выход, а не
+    констатация: сообщение обязано назвать `--approval-pr <n>` и
+    перечислить кандидатов — иначе он узнаёт, что система отказалась, но
+    не что делать дальше."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    other = {**_MERGED_PR, "number": 555}
+    ops = _ProvOps(
+        commits={_REQUIREMENTS_REL: "c-corr"},
+        prs_by_sha={"c-corr": [_MERGED_PR], "c1": [other]},
+    )
+    with pytest.raises(RuntimeError) as err:
+        tb._resolve_correction_pr(state, ops, _DAG, "master", None)
+    assert "--approval-pr" in str(err.value)
+    assert "#403" in str(err.value) and "#555" in str(err.value)
+
+
+def test_provenance_search_dedupes_commits_and_prs(tmp_path, monkeypatch):
+    """Стоимость шага 1–2: один коммит на весь бандл — один запрос в сеть.
+
+    Узлы бандла приезжают в base ОДНИМ коммитом (штамп доставки трогает
+    их разом). Без дедупликации SHA `prs_containing_commit` звался бы по
+    разу на файл, а один и тот же PR попадал бы в кандидаты шесть раз и
+    сам по себе давал бы «больше одного» — то есть отсутствие дедупа
+    ломает не только цену, но и шаг 4."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ProvOps(prs=[_MERGED_PR], files=[_REQUIREMENTS_REL])
+    corr = tb._resolve_correction_pr(state, ops, _DAG, "master", None)
+    assert corr.pr == 403
+    # Спрошены ВСЕ файлы DAG, а сеть — один раз.
+    assert ops.touched == [
+        f"{state.bundle_dir}/{fname}" for fname, _ in tb._BUNDLE_DAG
+    ]
+    assert [c for c in ops.calls if c[0] == "prs_containing_commit"] == [
+        ("prs_containing_commit", "c1")
+    ]
+
+
+def _ledger_with_delivery(state, **op) -> None:
+    """Леджер прогона с завершённой доставкой v1 (номер PR — в записи)."""
+    from governance import run_state as rs
+
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, **op}
+    rs.save(state)
+
+
+def test_provenance_excludes_own_delivery_by_ledger_number(
+    tmp_path, monkeypatch
+):
+    """Шаг 3, первая линия: свой delivery-PR снят по номеру из леджера.
+
+    Вход боевой: correction тронул только requirements, поэтому по
+    остальным пяти файлам последним коммитом стоит штамп НАШЕГО tasks-PR
+    #5 — вмерженного в `master` и по всем формальным признакам
+    неотличимого от correction'а. Без исключения кандидатов двое и поиск
+    отказывает; хуже того, останься он один (correction без PR) — подпись
+    человека, мержившего нашу же доставку, ушла бы в штамп как подпись
+    correction'а."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _ledger_with_delivery(state)
+    ops = _ProvOps(
+        commit=_V1_STAMP_SHA,
+        commits={_REQUIREMENTS_REL: _CORRECTION_SHA},
+        prs_by_sha={
+            _CORRECTION_SHA: [_MERGED_PR], _V1_STAMP_SHA: [_V1_TASKS_PR],
+        },
+        files=[_REQUIREMENTS_REL],
+    )
+    corr = tb._resolve_correction_pr(state, ops, _DAG, "master", None)
+    # Свой PR в кандидатах БЫЛ — его коммит спрошен, — и снят.
+    assert ("prs_containing_commit", _V1_STAMP_SHA) in ops.calls
+    assert (corr.pr, corr.approved_by) == (403, _pr_signature(403)[0])
+    assert corr.signed_nodes == frozenset({"requirements"})
+
+
+def test_provenance_search_asks_no_branch_when_numbers_known(
+    tmp_path, monkeypatch
+):
+    """Цена второй линии: у доставки с номером ветка не спрашивается.
+
+    Вторая линия — сетевой `find_pr`. Штатный вход (все доставки
+    `completed`, номера в леджере) обязан не платить за неё вовсе, иначе
+    подорожавший поиск дорожает ещё на запрос за факт, который уже
+    записан у нас самих."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _ledger_with_delivery(state)
+    ops = _ProvOps(prs=[_MERGED_PR], files=[_REQUIREMENTS_REL])
+    tb._resolve_correction_pr(state, ops, _DAG, "master", None)
+    assert not [c for c in ops.calls if c[0] == "find_pr"]
+
+
+def test_provenance_excludes_started_delivery_by_branch(
+    tmp_path, monkeypatch
+):
+    """Шаг 3, вторая линия: у `started` ревизии номера ещё нет.
+
+    Намерение пишется write-ahead (§I4) — ДО создания PR, — поэтому
+    доставка, упавшая между push и `create_draft_pr`, в леджере номера не
+    несёт. Её PR при этом мог быть создан и вмержен человеком, и тогда
+    первая линия свою же доставку не опознаёт. Вторая линия резолвит
+    номер по СВОЕЙ ветке из намерения."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _ledger_with_delivery(state)
+    state.ops["tasks-deliver-v2"] = {
+        "status": "started", "revision": 2,
+        "branch": "spec/WS-alpha-7-tasks-v2",
+    }
+    rs.save(state)
+    v2_pr = {**_MERGED_PR, "number": 77, "mergeCommit": "c-v2-stamp"}
+    ops = _ProvOps(
+        commit="c-v2-stamp",
+        commits={_REQUIREMENTS_REL: _CORRECTION_SHA},
+        prs_by_sha={
+            _CORRECTION_SHA: [_MERGED_PR], "c-v2-stamp": [v2_pr],
+        },
+        files=[_REQUIREMENTS_REL],
+        branch_prs={"spec/WS-alpha-7-tasks-v2": 77},
+    )
+    corr = tb._resolve_correction_pr(state, ops, _DAG, "master", None)
+    assert ("find_pr", "spec/WS-alpha-7-tasks-v2") in ops.calls
+    assert corr.pr == 403
+
+
+def test_provenance_explicit_flag_refuses_own_delivery(
+    tmp_path, monkeypatch
+):
+    """Явный путь: назвать свой delivery-PR нельзя.
+
+    Контракт владельца ставит исключение собственных доставок в ПОИСК
+    (шаг 3), а флаг поиск заменяет. Но остаться единственной дверью, через
+    которую подпись мержа нашего же tasks-PR уходит в штамп как подпись
+    correction'а, флаг не должен: проверка состава его не спасает — наш
+    tasks-PR трогает узлы DAG (он их и штампует), то есть `signed_nodes`
+    у него непуст. Отказ идёт по номерам леджера, БЕЗ сетевого резолва
+    веток — на явном пути оператор называет номер, который видел."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _ledger_with_delivery(state)
+    ops = _ProvOps(files=[_REQUIREMENTS_REL])
+    with pytest.raises(RuntimeError, match="собственный delivery-PR"):
+        tb._resolve_correction_pr(state, ops, _DAG, "master", 5)
+    assert not [c for c in ops.calls if c[0] == "find_pr"]
 
 
 # --- _previous_dag (§I8: сверка активного DAG предыдущей доставки) --------
@@ -3601,6 +3820,8 @@ class _SupersedeOps(_ProvOps):
     примитивы восстановления коммита/идентичности возвращают None —
     ветвление на "коммита ещё нет" (`_recover_commit`) и "PR не найден"
     (`_reconcile_revision`), не на чужую работу под тем же именем.
+    `find_pr` наследуется от `_ProvOps`: по умолчанию карта веток пуста,
+    то есть PR-а по ветке нет.
 
     `rev_parse` наследуется от `_StubOps` (Task 7b): "HEAD" → синтетический
     `base-sha-1` (иначе fail-closed гард §I2 останавливает переиздание до
@@ -3610,9 +3831,6 @@ class _SupersedeOps(_ProvOps):
         return None
 
     def blob_in_commit(self, target_dir, sha, rel_path):
-        return None
-
-    def find_pr(self, repo_slug, branch, *, any_state=False):
         return None
 
     def show_file(self, target_dir, ref, path):
@@ -3987,9 +4205,13 @@ def test_supersede_legacy_bundle_uses_its_own_dag(tmp_path, monkeypatch):
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["dag"] == [[f, list(u)] for f, u in tb._BUNDLE_DAG_LEGACY5]
     assert saved["dag_source"] == "derived_from_spec"
-    # Анкер §I7 берётся у ТЕРМИНАЛЬНОГО узла активного DAG, а не у
-    # хардкода: провенанс спрошен по 30-decomposition.md этого бандла.
-    assert ops.touched == [f"{state.bundle_dir}/30-decomposition.md"]
+    # Поиск провенанса §I7 идёт по файлам АКТИВНОГО DAG, а не по хардкоду
+    # и не по каталогу: спрошены ровно пять узлов легаси-эры, и
+    # 25-acceptance.md среди них нет — узла этой эры не существовало.
+    assert ops.touched == [
+        f"{state.bundle_dir}/{fname}"
+        for fname, _ in tb._BUNDLE_DAG_LEGACY5
+    ]
 
 
 def test_supersede_refreshes_base_before_reading_facts(
@@ -4326,8 +4548,28 @@ def test_content_anchor_is_taken_from_post_stamp_state(tmp_path: Path) -> None:
     assert task_bridge._canonical_dag_hash(target, bundle, dag) != raw
 
 
-def _supersede_with_correction_touching_requirements(tmp_path, monkeypatch):
-    """v1 доставлена и вмержена; correction-PR правит requirements + анкер."""
+#: SHA коммита correction-PR (#403) и штамп-коммита нашей доставки v1 (#5).
+_CORRECTION_SHA = "c-correction"
+_V1_STAMP_SHA = "c-v1-stamp"
+#: PR доставки v1 в форме кандидата `prs_containing_commit`: вмержен в
+#: master, содержит штамп-коммит — то есть по всем формальным признакам
+#: correction, и отличает его от настоящего ТОЛЬКО леджер прогона.
+_V1_TASKS_PR = {**_MERGED_PR, "number": 5, "mergeCommit": _V1_STAMP_SHA}
+
+
+def _supersede_with_correction_touching_requirements(
+    tmp_path, monkeypatch, **ops_kw
+):
+    """v1 доставлена и вмержена; correction-PR правит ТОЛЬКО requirements.
+
+    Боевая форма входа, которой у фикстуры не было: correction анкера НЕ
+    касается (перепиновка downstream — механическая и выполняется штампом
+    переиздания), поэтому последним, кто трогал анкер, остаётся
+    штамп-коммит нашего же tasks-PR доставки v1. На старой фикстуре
+    (`files=[requirements, анкер]`) поузловой §I7 проверялся входом, где
+    он неотличим от bundle-wide, а поиск провенанса — входом, где своя
+    доставка и correction неразличимы.
+    """
     from governance import run_state as rs
     from governance import task_bridge as tb
 
@@ -4340,21 +4582,41 @@ def _supersede_with_correction_touching_requirements(tmp_path, monkeypatch):
         "content_anchor": v1_content,
     }
     rs.save(state)
-    ops = _SupersedeOps(
-        prs=[_MERGED_PR], files=[_REQUIREMENTS_REL, _ANCHOR_REL]
-    )
-    return state, ops
+    kw = {
+        # requirements приехал correction-PR'ом, остальные узлы — штампом
+        # доставки v1; ровно это и делает шаг 1 §I7 поузловым.
+        "commit": _V1_STAMP_SHA,
+        "commits": {_REQUIREMENTS_REL: _CORRECTION_SHA},
+        "prs_by_sha": {
+            _CORRECTION_SHA: [_MERGED_PR], _V1_STAMP_SHA: [_V1_TASKS_PR],
+        },
+        "files": [_REQUIREMENTS_REL],
+        "files_by_pr": {5: [f"{state.bundle_dir}/{f}" for f, _ in tb._BUNDLE_DAG]},
+        **ops_kw,
+    }
+    return state, _SupersedeOps(**kw)
 
 
+@pytest.mark.parametrize(
+    "approval_pr", [None, 403], ids=["поиск", "явный-approval-pr"],
+)
 def test_supersede_signs_only_nodes_touched_by_correction(
-    tmp_path, monkeypatch
+    approval_pr, tmp_path, monkeypatch
 ):
-    """§I7 поузловой: подпись correction-PR — только затронутым узлам.
+    """§I7 поузловой на БОЕВОМ входе: correction тронул только requirements.
 
-    Correction-PR тронул requirements и анкер; charter, behaviour-spec,
-    design и acceptance он не видел. Приписав им подпись #403, штамп
-    стёр бы факт, что эти байты одобрил другой человек в другой момент —
-    ту же ложь, против которой §I7 и вводился, только с другой стороны.
+    Анкера correction не касался вовсе — и это ровно тот вход, на котором
+    прежняя реализация ломалась в обе стороны: автоматический путь брал
+    за correction штамп-коммит нашего же tasks-PR (и подписывал весь
+    DAG подписью человека, мержившего ПРОШЛУЮ доставку), а явный
+    `--approval-pr` отвергал настоящий correction за то, что он не менял
+    терминальный узел. Оба пути обязаны дать один и тот же ответ:
+    подпись #403 получает ОДИН узел.
+
+    charter, behaviour-spec, design, acceptance и decomposition
+    correction-PR не видел. Приписав им подпись #403, штамп стёр бы факт,
+    что эти байты одобрил другой человек в другой момент — ту же ложь,
+    против которой §I7 и вводился, только с другой стороны.
     """
     from governance import run_state as rs
     from governance import task_bridge as tb
@@ -4362,20 +4624,46 @@ def test_supersede_signs_only_nodes_touched_by_correction(
     state, ops = _supersede_with_correction_touching_requirements(
         tmp_path, monkeypatch
     )
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert tb.deliver_superseded(
+        state, ops, approval_pr=approval_pr
+    ) == tb.SupersedeResult("delivered", 77)
     by403, at403 = _pr_signature(403)
-    touched = {"10-requirements.md", "30-decomposition.md"}
     for fname, _ in tb._BUNDLE_DAG:
         meta = _anchor_meta(state, fname)
         want = (
-            (by403, at403) if fname in touched
+            (by403, at403) if fname == "10-requirements.md"
             else (_PREV_MERGER, _PREV_MERGED_AT)
         )
         assert (meta["approved_by"], meta["approved_at"]) == want, fname
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
-    assert saved["signed_nodes"] == ["decomposition", "requirements"]
+    assert saved["signed_nodes"] == ["requirements"]
+    assert saved["approval_pr"] == 403
+
+
+def test_supersede_excludes_own_delivery_pr_from_search(
+    tmp_path, monkeypatch
+):
+    """Полный цикл: штамп прошлой доставки correction'ом не считается.
+
+    Пять из шести узлов последним тронул штамп-коммит нашего tasks-PR #5,
+    вмерженного в `master`, — формально безупречный кандидат. Пока поиск
+    его не исключал, он оказывался ЕДИНСТВЕННЫМ (поиск стартовал с
+    анкера), проходил все проверки и отдавал `signed_nodes` = весь DAG:
+    поузловое правило схлопывалось в bundle-wide без единого отказа и
+    предупреждения. Здесь он в кандидатах есть — и снят леджером."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state, ops = _supersede_with_correction_touching_requirements(
+        tmp_path, monkeypatch
+    )
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+    # Кандидат-двойник реально предъявлялся: его коммит спрошен.
+    assert ("prs_containing_commit", _V1_STAMP_SHA) in ops.calls
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["approval_pr"] == 403                   # не 5
+    assert saved["signed_nodes"] == ["requirements"]     # не весь DAG
+    assert _anchor_meta(state)["approved_by"] == _PREV_MERGER
 
 
 def test_supersede_mechanical_repin_does_not_change_signature(
@@ -4401,6 +4689,15 @@ def test_supersede_mechanical_repin_does_not_change_signature(
         before["10-requirements.md"].decode("utf-8")
     )
     assert (beh["approved_by"], beh["approved_at"]) == (
+        _PREV_MERGER, _PREV_MERGED_AT
+    )
+    # То же и у ТЕРМИНАЛЬНОГО узла — а он и есть предмет: correction его
+    # не касался, перепиновка каскадом до него дошла (байты другие), но
+    # подпись осталась прежней. Пока §I7 требовал от correction-PR
+    # менять анкер, этого состояния просто не существовало.
+    anchor = _anchor_meta(state)
+    assert after["30-decomposition.md"] != before["30-decomposition.md"]
+    assert (anchor["approved_by"], anchor["approved_at"]) == (
         _PREV_MERGER, _PREV_MERGED_AT
     )
     # Узел, у которого не менялся ни он сам, ни его апстрим, — побайтово

@@ -1686,6 +1686,123 @@ class Correction(NamedTuple):
     signed_nodes: frozenset[str]
 
 
+def _ledger_delivery_prs(state: RunState) -> tuple[set[int], list[str]]:
+    """Собственные доставки прогона: (номера PR, ветки доставок без номера).
+
+    Первая линия опознания §I7 шага 3 — номера ИЗ ЛЕДЖЕРА: `pr` записей
+    `tasks-deliver` (историческая v1) и `tasks-deliver-v<N>`. Номер
+    записан НАМИ САМИМИ в момент доставки, поэтому он опознаёт её и после
+    переименования ветки, и после её удаления, и независимо от того, кто
+    её мержил.
+
+    Вторая половина ответа — ветки тех доставок, чей номер в леджер ещё
+    не попал: намерение ревизии пишется write-ahead (§I4), ДО создания
+    PR, поэтому `started` номера не несёт. Отсюда же и условие: ветка
+    возвращается только у `started`. Терминальные записи (`completed`,
+    `abandoned`) без номера ветку не отдают — у `completed` номер есть по
+    построению, а брошенная ревизия у GitHub не спрашивается вовсе (её
+    PR оператор закрыл, и переиздание это уже решило).
+
+    Резолвить ветку в номер здесь НЕ входит — это сетевой запрос, и
+    вызывающая сторона решает, нужен ли он ей (на явном пути
+    `--approval-pr` не нужен).
+    """
+    numbers: set[int] = set()
+    branches: list[str] = []
+    records: list[tuple[str | None, dict]] = [
+        (f"spec/{state.ws_id}-tasks", state.ops.get(_V1_KEY) or {})
+    ]
+    records += [(op.get("branch"), op) for _, op in _revisions(state)]
+    for branch, op in records:
+        if not op:
+            continue
+        pr = op.get("pr")
+        if isinstance(pr, int):
+            numbers.add(pr)
+        elif branch and op.get("status") == "started":
+            branches.append(branch)
+    return numbers, branches
+
+
+def _own_delivery_prs(state: RunState, ops: Ops) -> frozenset[int]:
+    """Номера собственных delivery-PR прогона — обе линии опознания (§I7.3).
+
+    Ветка спрашивается ТОЛЬКО у доставок без номера в леджере: на штатном
+    входе (все доставки `completed`) сетевых запросов не добавляется
+    вовсе, а «слишком слабая идентичность» имени ветки остаётся ровно
+    второй линией — она не решает за номер, а закрывает его отсутствие.
+
+    Ветки берутся СВОИ (`branch` намерения ревизии либо `spec/<ws-id>-
+    tasks` для v1) и резолвятся в номер `find_pr`, а не сверяются с
+    `headRefName` кандидата: ops-примитив `prs_containing_commit` этого
+    поля не отдаёт (jq-проекция в `governance/ops.py`), и проверка по
+    нему была бы мёртвой. Обратная сторона выбора — delivery-PR ЧУЖОГО
+    прогона того же воркстрима здесь не опознаётся: он остаётся вторым
+    кандидатом и уводит поиск в fail-closed шага 4 (отказ с подсказкой
+    `--approval-pr`), а не в подпись мимо человека.
+    """
+    numbers, branches = _ledger_delivery_prs(state)
+    for branch in branches:
+        found = ops.find_pr(state.repo_slug, branch, any_state=True)
+        if found is not None:
+            numbers.add(found)
+    return frozenset(numbers)
+
+
+def _search_correction_pr(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    base_ref: str,
+) -> int:
+    """Шаги 1–3 §I7: коммиты файлов активного DAG → номер correction-PR.
+
+    Поиск идёт по КАЖДОМУ файлу DAG, а не от файла терминального узла:
+    штатный correction правит upstream-узел и терминального может не
+    касаться вовсе (перепиновку downstream §I7 объявил механической и
+    отложил до штампа переиздания). Пока стартовали с анкера, последним
+    его тронувшим оказывался штамп-коммит НАШЕГО ЖЕ прошлого tasks-PR —
+    единственный кандидат, и поузловое правило схлопывалось в
+    bundle-wide молча.
+
+    Дедупликация — на обоих уровнях, и она не украшение: узлы бандла
+    приезжают в base ОДНИМ коммитом (штамп доставки трогает их разом),
+    так что без неё один и тот же SHA уходил бы в сеть по разу на файл,
+    а один и тот же PR считался бы кандидатом по разу на коммит и сам по
+    себе давал бы «больше одного».
+    """
+    shas: list[str] = []
+    for fname, _ in dag:
+        sha = ops.last_commit_touching(
+            state.target_dir, f"{state.bundle_dir}/{fname}"
+        )
+        if sha is not None and sha not in shas:
+            shas.append(sha)
+    if not shas:
+        raise RuntimeError(
+            f"ни один файл {state.bundle_dir}/ не менялся в истории "
+            f"{base_ref} — correction не найден, подписи взять неоткуда"
+        )
+    candidates: set[int] = set()
+    for sha in shas:
+        candidates.update(
+            p["number"] for p in ops.prs_containing_commit(state.repo_slug, sha)
+            if p.get("state") == "MERGED" and p.get("baseRefName") == base_ref
+        )
+    own = _own_delivery_prs(state, ops)
+    found = sorted(candidates - own)
+    if len(found) == 1:
+        return found[0]
+    listed = ", ".join(f"#{n}" for n in found) or "нет"
+    excluded = ", ".join(f"#{n}" for n in sorted(candidates & own)) or "нет"
+    raise RuntimeError(
+        f"correction-PR не определён однозначно: кандидатов {len(found)} "
+        f"({listed}); собственные доставки прогона исключены ({excluded}), "
+        f"просмотрено коммитов: {len(shas)} — подписи взять неоткуда, "
+        "гадать нельзя. Назовите PR явно: --approval-pr <n>"
+    )
+
+
 def _resolve_correction_pr(
     state: RunState,
     ops: Ops,
@@ -1697,91 +1814,67 @@ def _resolve_correction_pr(
 
     §I7 спеки: подпись штампа берётся у correction-PR, а не у исходного
     бандл-PR — иначе штамп утверждает, что текущие байты одобрил человек,
-    одобрявший другую версию. Ноль или больше одного кандидатов — отказ:
-    гадать нельзя. `--approval-pr` заменяет ПОИСК (шаги 1–3), но не
-    ПРОВЕРКУ (шаг 4).
+    одобрявший другую версию. `--approval-pr` заменяет ПОИСК (шаги 1–3),
+    но не ПРОВЕРКУ (шаг 5), и проверка ниже — общая для обоих путей: PR
+    вмержен в `base_ref`, подпись полна, `signed_nodes` (состав файлов PR
+    ∩ активный DAG) непуст. Требования «PR менял файл терминального
+    узла» в контракте больше НЕТ — оно и схлопывало поузловое правило
+    обратно в bundle-wide, самоподтверждаясь штампом нашей же доставки.
 
-    Состав файлов PR (`ops.pr_files`) запрашивается на ОБОИХ путях, и
-    из него выводится `signed_nodes`. На явном пути он же держит третье
-    условие шага 4 (PR обязан менять анкер); на автоматическом это
-    условие держалось по построению — PR искали среди содержащих коммит
-    самого анкера, — но проверка всё равно общая: «по построению» не
-    факт, а рассуждение, и обещание §I7 не должно зависеть от того, каким
-    путём пришёл номер.
+    Собственная доставка отвергается и на явном пути — по номерам
+    леджера (без сетевого резолва веток: на явном пути его цена не
+    окупается, а оператор называет номер, который видел). Иначе флаг
+    оставался бы единственной дверью, через которую подпись человека,
+    мержившего наш tasks-PR, уходит в штамп как подпись correction'а.
     """
-    anchor_rel = f"{state.bundle_dir}/{dag[-1][0]}"
-    sha: str | None = None
     if approval_pr is None:
-        sha = ops.last_commit_touching(state.target_dir, anchor_rel)
-        if sha is None:
-            raise RuntimeError(
-                f"{anchor_rel} не менялся в истории {base_ref} — "
-                "correction не найден, подписи взять неоткуда"
-            )
-        candidates = [
-            p for p in ops.prs_containing_commit(state.repo_slug, sha)
-            if p.get("state") == "MERGED" and p.get("baseRefName") == base_ref
-        ]
-        if len(candidates) != 1:
-            raise RuntimeError(
-                f"коммит {sha[:7]} связан с {len(candidates)} вмерженными "
-                f"PR в {base_ref} — подписи взять неоткуда; назовите PR "
-                "явно: --approval-pr <n>"
-            )
-        number = candidates[0]["number"]
-        # Подпись — отдельным запросом: эндпоинт commits/<sha>/pulls отдаёт
-        # merged_by: null даже у вмерженного PR (ревью #164).
-        facts = ops.pr_facts(state.repo_slug, number)
-        if facts.get("state") != "MERGED":
-            raise RuntimeError(
-                f"PR #{number} найден по коммиту, но его состояние "
-                f"{facts.get('state')!r} — подписи взять неоткуда"
-            )
-        merged_by = (facts.get("mergedBy") or {}).get("login")
-        merged_at = facts.get("mergedAt")
+        number = _search_correction_pr(state, ops, dag, base_ref)
+        where = f"PR #{number}, найденный по коммитам бандла"
     else:
         number = approval_pr
-        facts = ops.pr_facts(state.repo_slug, number)
-        if facts.get("state") != "MERGED":
+        where = f"--approval-pr {number}"
+        if number in _ledger_delivery_prs(state)[0]:
             raise RuntimeError(
-                f"--approval-pr {number}: PR не вмержен "
-                f"(state={facts.get('state')!r}) — проверка та же, что у "
-                "автоматического поиска"
+                f"{where}: это собственный delivery-PR прогона, а не "
+                "correction — его подпись принадлежит мержу нашей же "
+                "доставки; назовите PR, доставивший правку бандла"
             )
-        if facts.get("baseRefName") != base_ref:
-            raise RuntimeError(
-                f"--approval-pr {number}: нацелен в "
-                f"{facts.get('baseRefName')!r}, а не в {base_ref!r}"
-            )
-        merged_by = (facts.get("mergedBy") or {}).get("login")
-        merged_at = facts.get("mergedAt")
+    # Подпись — отдельным запросом: эндпоинт commits/<sha>/pulls отдаёт
+    # merged_by: null даже у вмерженного PR (ревью #164).
+    facts = ops.pr_facts(state.repo_slug, number)
+    if facts.get("state") != "MERGED":
+        raise RuntimeError(
+            f"{where}: PR не вмержен (state={facts.get('state')!r}) — "
+            "подписи взять неоткуда"
+        )
+    if facts.get("baseRefName") != base_ref:
+        raise RuntimeError(
+            f"{where}: нацелен в {facts.get('baseRefName')!r}, а не в "
+            f"{base_ref!r} — подписи взять неоткуда"
+        )
+    merged_by = (facts.get("mergedBy") or {}).get("login")
+    merged_at = facts.get("mergedAt")
     if not merged_by or not merged_at:
         raise RuntimeError(
             f"PR #{number}: нет mergedBy/mergedAt — подпись штампа неполна"
         )
     files = set(ops.pr_files(state.repo_slug, number))
-    if anchor_rel not in files:
-        # Третье условие шага 4 §I7, без которого флаг из «заменяет
-        # поиск» превращался бы в «отключает проверку»: подпись
-        # ЛЮБОГО вмерженного в base_ref PR уходила бы в штамп, и штамп
-        # утверждал бы, что байты анкера одобрил человек, который их
-        # не видел (major C-5 финального ревью).
-        why = (
-            f"--approval-pr {number}: PR не менял {anchor_rel} — "
-            "подписи взять неоткуда; флаг заменяет поиск (шаги 1–3), "
-            "но не проверку"
-            if approval_pr is not None
-            else f"PR #{number} найден по коммиту {(sha or '')[:7]}, но "
-            f"{anchor_rel} в его составе нет — подписи взять неоткуда"
-        )
-        raise RuntimeError(why)
-    return Correction(
-        number, merged_by, merged_at,
-        frozenset(
-            _node_id(fname) for fname, _ in dag
-            if f"{state.bundle_dir}/{fname}" in files
-        ),
+    signed = frozenset(
+        _node_id(fname) for fname, _ in dag
+        if f"{state.bundle_dir}/{fname}" in files
     )
+    if not signed:
+        # Место снятого требования про терминальный узел: PR, не
+        # тронувший НИ ОДНОГО узла активного DAG, correction'ом этого DAG
+        # не является. Без этой проверки флаг из «заменяет поиск»
+        # превращался бы в «отключает проверку» — подпись любого
+        # вмерженного в base_ref PR уходила бы в штамп бандла.
+        raise RuntimeError(
+            f"{where}: в его составе нет ни одного файла активного DAG "
+            f"({state.bundle_dir}/) — подписывать нечего; назовите PR, "
+            "доставивший правку бандла: --approval-pr <n>"
+        )
+    return Correction(number, merged_by, merged_at, signed)
 
 
 def _previous_dag(
