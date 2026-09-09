@@ -2568,13 +2568,38 @@ def test_provenance_explicit_flag_is_verified_not_trusted(
 # --- _previous_dag (§I8: сверка активного DAG предыдущей доставки) --------
 
 
+class _ShowFileOps:
+    """Минимальный фейк ops для _previous_dag: только show_file.
+
+    Настоящий git здесь не подключаем — Task 5 его тоже не подключала для
+    этих тестов, а `show_file` тестируется отдельно (Ops-тесты, реальный
+    временный репо).
+    """
+
+    def __init__(self, text: str | None) -> None:
+        self._text = text
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        return self._text
+
+
+def _spec_text(traces_to: str) -> str:
+    return (
+        "---\n"
+        "spec_stage: tasks\n"
+        f"traces_to:\n- {traces_to}\n"
+        "---\n\nbody\n"
+    )
+
+
 def test_previous_dag_from_revision_record(tmp_path, monkeypatch) -> None:
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
     prev = {"dag": [list(x) for x in tb._BUNDLE_DAG]}
     dag, source = tb._previous_dag(
-        state, prev, state.target_dir, state.bundle_dir
+        state, _ShowFileOps(None), prev, state.target_dir, state.bundle_dir,
+        "base-sha",
     )
     assert source == "previous_delivery"
     assert dag == tb._BUNDLE_DAG
@@ -2584,12 +2609,14 @@ def test_previous_dag_derived_from_bundle_composition(
     tmp_path, monkeypatch
 ) -> None:
     """Легаси-v1 без записи dag: состав каталога совпадает ровно с одним
-    вариантом _dag_for."""
+    вариантом _dag_for, И traces_to доставленной спеки указывает на его
+    якорь."""
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
+    ops = _ShowFileOps(_spec_text("decomposition"))
     dag, source = tb._previous_dag(
-        state, {"pr": 5}, state.target_dir, state.bundle_dir
+        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, "base-sha",
     )
     assert source == "derived_from_spec"
     assert dag == tb._BUNDLE_DAG
@@ -2602,8 +2629,53 @@ def test_previous_dag_unavailable_when_composition_matches_nothing(
 
     state = _recon_state(tmp_path, monkeypatch)
     (Path(state.target_dir) / state.bundle_dir / "99-alien.md").write_text("x")
+    ops = _ShowFileOps(_spec_text("decomposition"))
     dag, source = tb._previous_dag(
-        state, {"pr": 5}, state.target_dir, state.bundle_dir
+        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, "base-sha",
+    )
+    assert (dag, source) == (None, "unavailable")
+
+
+def test_previous_dag_legacy_requires_delivered_spec(
+    tmp_path, monkeypatch
+) -> None:
+    """Спеки в base нет (show_file -> None) → (None, "unavailable"),
+    хотя состав каталога совпал ровно с одним вариантом."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ShowFileOps(None)
+    dag, source = tb._previous_dag(
+        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, "base-sha",
+    )
+    assert (dag, source) == (None, "unavailable")
+
+
+def test_previous_dag_legacy_rejects_anchor_mismatch(
+    tmp_path, monkeypatch
+) -> None:
+    """Состав каталога дал 6-узловой вариант (якорь decomposition), а
+    traces_to доставленной спеки — behaviour-spec → (None, "unavailable")."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ShowFileOps(_spec_text("behaviour-spec"))
+    dag, source = tb._previous_dag(
+        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, "base-sha",
+    )
+    assert (dag, source) == (None, "unavailable")
+
+
+def test_previous_dag_legacy_unparsable_frontmatter(
+    tmp_path, monkeypatch
+) -> None:
+    """show_file вернул текст без frontmatter → (None, "unavailable")."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ShowFileOps("no frontmatter here\n")
+    dag, source = tb._previous_dag(
+        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, "base-sha",
     )
     assert (dag, source) == (None, "unavailable")
 

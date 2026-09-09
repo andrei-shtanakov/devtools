@@ -123,6 +123,8 @@ class Ops(Protocol):
 
     def commit_parent(self, target_dir: str, sha: str) -> str | None: ...
 
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None: ...
+
 
 # --- Харнесс авторинга (лимиты codex, 2026-09-03; парный слой к харнессу
 # ревьюера в review-pr.sh). Выбор: env AUTHOR_HARNESS/AUTHOR_MODEL >
@@ -942,3 +944,15 @@ class RealOps:
             capture_output=True, text=True,
         )
         return done.stdout.strip() or None
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        """`git show <ref>:<path>` — содержимое файла в ревизии, или None.
+
+        None — и когда ревизии нет, и когда файла в ней нет: у вызывающего
+        оба случая означают одно (вывод не удался, §I8), различать нечего.
+        """
+        done = subprocess.run(
+            ["git", "show", f"{ref}:{path}"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        return done.stdout if done.returncode == 0 else None

@@ -1036,6 +1036,31 @@ def test_blob_in_commit_absent_returns_none(monkeypatch):
     assert ops.blob_in_commit("/tmp/devtools", "deadbeef", "nope.md") is None
 
 
+def test_show_file_returns_content_at_ref(tmp_path) -> None:
+    import subprocess as real_subprocess
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    spec_dir = tmp_path / "spec"
+    spec_dir.mkdir()
+    (spec_dir / "x.md").write_text("hello\n")
+    real_subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    real_subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c",
+         "user.name=t", "commit", "-q", "-m", "c"],
+        check=True,
+    )
+
+    assert RealOps().show_file(str(tmp_path), "HEAD", "spec/x.md") == "hello\n"
+
+
+def test_show_file_none_for_missing_path(tmp_path) -> None:
+    import subprocess as real_subprocess
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    assert RealOps().show_file(str(tmp_path), "HEAD", "spec/nope.md") is None
+
+
 def test_commit_parent_returns_sha(monkeypatch):
     calls = _install_fake_run(monkeypatch, returncode=0, stdout="parentsha\n")
     ops = RealOps()

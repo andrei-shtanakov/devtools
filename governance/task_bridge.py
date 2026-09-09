@@ -1309,16 +1309,22 @@ def _resolve_correction_pr(
 
 def _previous_dag(
     state: RunState,
+    ops: Ops,
     prev_op: dict,
     target_dir: str,
     bundle_dir: str,
+    base_sha: str,
 ) -> tuple[tuple[tuple[str, tuple[str, ...]], ...] | None, str]:
     """DAG предыдущей доставки + откуда он взят (§I8 спеки).
 
     Запись `dag` в ревизии фиксирует ВЫБОР, не доказательство; для
-    легаси-v1 состав выводится из каталога бандла и обязан совпасть
-    ТОЧНО с одним из `_dag_for(None|3|4|5)` — `--legacy-bundle=5` это
-    отдельный вариант, а не префикс полного DAG.
+    легаси-v1 состав выводится ИЗ ДВУХ источников — состава каталога
+    бандла и якоря `traces_to` доставленной спеки в base — и обязан
+    совпасть ТОЧНО с одним из `_dag_for(None|3|4|5)`. Каталог один не
+    различает 5-узловой вариант от 6-узлового, если бандл переавторили
+    после доставки; якорь спеки не различает 5 от 6, но отсекает 3 и 4.
+    Спеки нет / frontmatter не разобрать / якорь не совпал — вывод НЕ
+    удался (§I8 дословно), а не «совпало»: compatibility-случай §6.
     """
     recorded = prev_op.get("dag")
     if recorded:
@@ -1331,9 +1337,21 @@ def _previous_dag(
         _dag_for(v) for v in (None, 3, 4, 5)
         if {f for f, _ in _dag_for(v)} == present
     ]
-    if len(matches) == 1:
-        return matches[0], "derived_from_spec"
-    return None, "unavailable"
+    if len(matches) != 1:
+        return None, "unavailable"
+    text = ops.show_file(target_dir, base_sha, f"spec/{state.ws_id}-tasks.md")
+    if text is None:
+        return None, "unavailable"
+    try:
+        meta, _ = split_frontmatter(text)
+    except ValueError:
+        return None, "unavailable"
+    traces = meta.get("traces_to")
+    if not isinstance(traces, list) or not traces:
+        return None, "unavailable"
+    if traces[0] != _node_id(matches[0][-1][0]):
+        return None, "unavailable"
+    return matches[0], "derived_from_spec"
 
 
 def _reconcile_revision(
