@@ -2708,8 +2708,13 @@ class _ProvOps(_StubOps):
         # §I7 снимались мутацией незаметно — ветвление по этим полям
         # физически не могло сработать ни в одном тесте.
         self.facts = _FULL_FACTS if facts is None else facts
+        # Пути, по которым спрашивали провенанс: `anchor_rel` выводится из
+        # ТЕРМИНАЛЬНОГО узла активного DAG, и без записи аргумента этот
+        # вывод ничем не удерживался.
+        self.touched: list[str] = []
 
     def last_commit_touching(self, target_dir, rel_path):
+        self.touched.append(rel_path)
         return self.commit
 
     def prs_containing_commit(self, repo_slug, sha):
@@ -3438,6 +3443,40 @@ def test_supersede_changed_anchor_opens_new_branch_and_pr(
     assert saved["prospective_anchor"] == saved["anchor"]
     assert saved["dag_source"] == "derived_from_spec"
     assert rs.load("r-recon").ops["tasks-deliver"]["pr"] == 5   # v1 цела
+
+
+def test_supersede_legacy_bundle_uses_its_own_dag(tmp_path, monkeypatch):
+    """Переиздание ЛЕГАСИ-бандла: `--legacy-bundle=5` определяет активный DAG.
+
+    Весь легаси-путь переиздания был непроверенным кодом — ни один тест не
+    звал `deliver_superseded` с `legacy_bundle != None` (F-11, мутация
+    M60). Вместе с F-10 это значило: и флаг не доказан доходящим, и путь
+    за флагом не доказан работающим.
+
+    Бандл здесь — эры до раскатки acceptance (00/10/15/20/30), и §I8
+    выводит его состав из каталога и якоря доставленной спеки. На мутанте
+    активным становится полный шестиузловой DAG, он с выведенным не
+    сходится, и переиздание отказывает «другая доставка»."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    bundle = Path(state.target_dir) / state.bundle_dir
+    (bundle / "25-acceptance.md").unlink()
+    (bundle / "30-decomposition.md").write_text(
+        DECOMPOSITION_MD_LEGACY5, encoding="utf-8"
+    )
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    rs.save(state)
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops, legacy_bundle=5) == 77
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["dag"] == [[f, list(u)] for f, u in tb._BUNDLE_DAG_LEGACY5]
+    assert saved["dag_source"] == "derived_from_spec"
+    # Анкер §I7 берётся у ТЕРМИНАЛЬНОГО узла активного DAG, а не у
+    # хардкода: провенанс спрошен по 30-decomposition.md этого бандла.
+    assert ops.touched == [f"{state.bundle_dir}/30-decomposition.md"]
 
 
 def test_supersede_refreshes_base_before_reading_facts(
@@ -4216,17 +4255,47 @@ def test_cli_supersede_calls_deliver_superseded(tmp_path, monkeypatch, capsys):
     from governance import task_bridge as tb
 
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
-    state = _recon_state(tmp_path, monkeypatch)
+    _recon_state(tmp_path, monkeypatch)
     called = {}
-    monkeypatch.setattr(
-        tb, "deliver_superseded",
-        lambda s, o, legacy_bundle=None, approval_pr=None: called.setdefault(
-            "args", (s.run_id, approval_pr)
-        ) or 77,
-    )
+
+    def _fake(s, o, legacy_bundle=None, approval_pr=None):
+        called["args"] = (s.run_id, legacy_bundle, approval_pr)
+        return 77
+
+    monkeypatch.setattr(tb, "deliver_superseded", _fake)
     monkeypatch.setattr(tb, "RealOps", lambda: object())
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
-    assert called["args"] == ("r-recon", None)
+    assert called["args"] == ("r-recon", None, None)
+
+
+def test_cli_supersede_passes_flags_through(tmp_path, monkeypatch, capsys):
+    """Флаги переиздания доходят до реализации НЕДЕФОЛТНЫМИ значениями.
+
+    Соседний тест запускает голый `--supersede` и ожидает `None`, а `None`
+    совпадает и с «флаг проброшен», и с «флаг выброшен» — учебная
+    тавтология на стабе: обрыв `--approval-pr` и `--legacy-bundle` в
+    диспетчере проходил незаметно (F-10, мутации M63/M64). Цена обрыва
+    высока: `--approval-pr` — единственный операторский выход из отказа
+    «ноль или несколько кандидатов» (§I7), `--legacy-bundle` —
+    единственный способ переиздать легаси-бандл."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    _recon_state(tmp_path, monkeypatch)
+    called = {}
+
+    def _fake(s, o, legacy_bundle=None, approval_pr=None):
+        called["args"] = (s.run_id, legacy_bundle, approval_pr)
+        return 77
+
+    monkeypatch.setattr(tb, "deliver_superseded", _fake)
+    monkeypatch.setattr(tb, "RealOps", lambda: object())
+    assert tb.main([
+        "--run-id", "r-recon", "--supersede",
+        "--approval-pr", "500", "--legacy-bundle", "5",
+    ]) == 0
+    assert called["args"] == ("r-recon", 5, 500)
 
 
 def test_cli_supersede_noop_is_success(tmp_path, monkeypatch, capsys):
@@ -4254,7 +4323,13 @@ def test_cli_abandon_revision_marks_and_returns_zero(tmp_path, monkeypatch):
         "--run-id", "r-recon", "--abandon-revision", "2",
         "--reason", "PR закрыт вручную",
     ]) == 0
-    assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "abandoned"
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["status"] == "abandoned"
+    # Причина оператора доходит ДО леджера (F-10, мутация M65): она
+    # хранится навсегда и есть единственное объяснение, почему ревизия
+    # брошена; утверждать один `status` значит не отличить её от
+    # подставленного литерала.
+    assert saved["reason"] == "PR закрыт вручную"
 
 
 def test_cli_abandon_revision_unknown_number_fails_gracefully(

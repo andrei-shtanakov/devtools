@@ -21,8 +21,8 @@
 | F-07 | **закрыта** |
 | F-08 | **закрыта** |
 | F-09 | **закрыта** |
-| F-10 | — |
-| F-11 | — |
+| F-10 | **закрыта** |
+| F-11 | **закрыта** |
 | F-12 | **закрыта** |
 
 ## Журнал
@@ -135,3 +135,35 @@
   `test_supersede_changed_anchor_opens_new_branch_and_pr`).
 
 Прогон группы: `1018 passed`. `git diff governance/` пуст.
+
+### F-10 (major) — закрыта
+
+- **M63** (`legacy_bundle=args.legacy_bundle` → `None`), **M64**
+  (`approval_pr=args.approval_pr` → `None`), **M65** (`args.reason` → литерал)
+  на HEAD — все зелёные.
+- `test_cli_supersede_calls_deliver_superseded` теперь записывает ВСЕ три
+  аргумента (`("r-recon", None, None)`) — голая форма по-прежнему покрыта.
+- Новый `test_cli_supersede_passes_flags_through`: `--approval-pr 500
+  --legacy-bundle 5` ⇒ `("r-recon", 5, 500)`. Роняет M63 и M64.
+- В `test_cli_abandon_revision_marks_and_returns_zero` добавлено
+  `saved["reason"] == "PR закрыт вручную"`. Роняет M65.
+- Побочно снят предсуществующий F841 (неиспользуемая `state` в CLI-тесте) —
+  строка всё равно переписывалась.
+
+### F-11 (major) — закрыта
+
+- **M60** (`active = _dag_for(legacy_bundle)` → `_dag_for(None)`) на HEAD —
+  зелёная: `deliver_superseded` ни разу не звался с `legacy_bundle != None`.
+- `test_supersede_legacy_bundle_uses_its_own_dag`: бандл эры до acceptance
+  (00/10/15/20/30, `DECOMPOSITION_MD_LEGACY5`), вызов с `legacy_bundle=5` ⇒
+  в намерении лежит `_BUNDLE_DAG_LEGACY5`, `dag_source: derived_from_spec`,
+  провенанс спрошен по `30-decomposition.md` этого бандла. На мутанте активным
+  становится полный DAG, §I8 не сходится и переиздание отказывает.
+- Попутно `_ProvOps.last_commit_touching` перестал игнорировать аргумент
+  (список `touched`) — это удерживает и вывод `anchor_rel` из терминального
+  узла активного DAG: контрольная мутация `anchor_rel` → `00-charter.md`
+  краснеет (раньше — нет).
+
+Прогон группы: `1020 passed`. `git diff governance/` пуст.
+Линт: остался ОДИН предсуществующий E501 (строка 292, чужой тест);
+предсуществующий F841 снят попутно.
