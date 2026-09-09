@@ -79,6 +79,7 @@ def test_ops_protocol_declares_provenance_primitives() -> None:
 def test_real_ops_last_commit_touching_returns_none_without_history(
     tmp_path,
 ) -> None:
+    """Пустой репо: `git log` даёт rc != 0, но ответ честно «истории нет»."""
     import subprocess
     from governance.ops import RealOps
 
@@ -98,7 +99,14 @@ Run: `uv run --frozen --group governance python -m pytest tests/test_governance_
 
 ```python
     def last_commit_touching(self, target_dir: str, rel_path: str) -> str | None:
-        """SHA последнего коммита, изменившего rel_path; None — не менялся."""
+        """SHA последнего коммита, изменившего rel_path; None — не менялся.
+
+        HEAD проверяется ПЕРВЫМ: в репозитории без коммитов `git log`
+        выходит с rc != 0, и трактовать это как сбой значило бы отказывать
+        там, где ответ честно «истории нет» (замечание ревью PR #164).
+        """
+        if self.rev_parse(target_dir, "HEAD") is None:
+            return None
         done = subprocess.run(
             ["git", "-C", target_dir, "log", "-1", "--format=%H", "--", rel_path],
             capture_output=True, text=True,
@@ -112,11 +120,21 @@ Run: `uv run --frozen --group governance python -m pytest tests/test_governance_
         return sha or None
 
     def prs_containing_commit(self, repo_slug: str, sha: str) -> list[dict]:
-        """PR-ы, содержащие коммит (gh API). Сбой запроса — RuntimeError."""
+        """PR-ы, содержащие коммит (gh API). Сбой запроса — RuntimeError.
+
+        Эндпоинт отдаёт REST-форму: `state: open|closed`, `merged_at`,
+        `merge_commit_sha`, и `merged_by` в нём приходит **null** даже у
+        вмерженного PR (проверено на живом ответе, замечание ревью #164).
+        Поэтому здесь только нормализация состава: snake_case → ожидаемые
+        ключи, `state` → OPEN|CLOSED|MERGED по факту `merged_at`. Подпись
+        (`mergedBy`) берётся отдельным запросом `pr_facts` — см. Task 3.
+        """
         done = subprocess.run(
             ["gh", "api", f"repos/{repo_slug}/commits/{sha}/pulls",
-             "--jq", "[.[] | {number, state, baseRefName: .base.ref, "
-                     "mergedAt, mergedBy: .merged_by.login, "
+             "--jq", "[.[] | {number, "
+                     "state: (if .merged_at then \"MERGED\" "
+                     "else (.state | ascii_upcase) end), "
+                     "baseRefName: .base.ref, mergedAt: .merged_at, "
                      "mergeCommit: .merge_commit_sha}]"],
             capture_output=True, text=True,
         )
@@ -377,6 +395,14 @@ class _ProvOps(_StubOps):
     def prs_containing_commit(self, repo_slug, sha):
         return self.prs
 
+    def pr_facts(self, repo_slug, pr):
+        # Подпись живёт ЗДЕСЬ, а не в списке PR-ов по коммиту (ревью #164).
+        return {
+            "state": "MERGED", "baseRefName": "master",
+            "mergedAt": "2026-09-09T05:00:00Z",
+            "mergedBy": {"login": "andrei-shtanakov"},
+        }
+
 
 _MERGED_PR = {
     "number": 403, "state": "MERGED", "baseRefName": "master",
@@ -482,10 +508,17 @@ def _resolve_correction_pr(
                 f"PR в {base_ref} — подписи взять неоткуда; назовите PR "
                 "явно: --approval-pr <n>"
             )
-        cand = candidates[0]
-        number = cand["number"]
-        merged_by = cand.get("mergedBy")
-        merged_at = cand.get("mergedAt")
+        number = candidates[0]["number"]
+        # Подпись — отдельным запросом: эндпоинт commits/<sha>/pulls отдаёт
+        # merged_by: null даже у вмерженного PR (ревью #164).
+        facts = ops.pr_facts(state.repo_slug, number)
+        if facts.get("state") != "MERGED":
+            raise RuntimeError(
+                f"PR #{number} найден по коммиту, но его состояние "
+                f"{facts.get('state')!r} — подписи взять неоткуда"
+            )
+        merged_by = (facts.get("mergedBy") or {}).get("login")
+        merged_at = facts.get("mergedAt")
     else:
         number = approval_pr
         facts = ops.pr_facts(state.repo_slug, number)
