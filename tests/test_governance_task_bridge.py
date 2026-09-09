@@ -2826,165 +2826,113 @@ def test_previous_dag_legacy_rejects_malformed_traces_to(
 # --- _reconcile_revision / _recover_commit (§I3, §I3.1) -------------------
 
 
-def test_reconcile_completed_open_pr_returns_it(tmp_path, monkeypatch):
+def test_reconcile_completed_open_pr_returns_it():
     """completed + её PR реально OPEN → вернуть его.
 
-    find_pr/pr_facts дёргаются по-настоящему (фикс-круг 1, minor #2 —
-    раньше PR был захардкожен MERGED в стабе, и тест не отличал этот путь
-    от простого срабатывания шортката `status == "completed"`)."""
+    Факты PR приходят аргументом (C-8): решение по §I3 — чистая функция,
+    её ветвление проверяется без стабов ops, а то, что факты реально
+    запрашиваются, держит интеграционный
+    `test_supersede_returns_existing_pr_when_revision_completed`."""
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
     op = {"status": "completed", "pr": 42, "base_sha": "s",
           "branch": "spec/WS-alpha-7-tasks-v2"}
-    ops = _ReconOps(existing_pr=42, pr_state="OPEN")
-    assert tb._reconcile_revision(state, ops, 2, op, "s") == "return_pr"
-    assert ("find_pr", "spec/WS-alpha-7-tasks-v2") in ops.calls
-    assert ("pr_facts", 42) in ops.calls
+    facts = {"state": "OPEN", "headRefOid": "h"}
+    assert tb._reconcile_revision(2, op, "s", 42, facts) == "return_pr"
 
 
-def test_reconcile_started_merged_pr_completes(tmp_path, monkeypatch):
+def test_reconcile_started_merged_pr_completes():
     """started + её PR смержен, идентичность (headRefOid) сошлась → "complete".
 
     Строка §I3, до фикс-круга 1 не покрытая ни одним тестом (major #1)."""
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
     op = {"status": "started", "base_sha": "s", "head_sha": "h",
           "branch": "spec/WS-alpha-7-tasks-v2"}
-
-    class _Ops(_ReconOps):
-        def __init__(self):
-            super().__init__(existing_pr=7, pr_state="MERGED")
-
-        def pr_facts(self, repo_slug, pr):
-            self.calls.append(("pr_facts", pr))
-            return {"state": "MERGED", "headRefOid": "h"}
-
-    assert tb._reconcile_revision(state, _Ops(), 2, op, "s") == "complete"
+    facts = {"state": "MERGED", "headRefOid": "h"}
+    assert tb._reconcile_revision(2, op, "s", 7, facts) == "complete"
 
 
-def test_reconcile_completed_closed_unmerged_fails_closed(
-    tmp_path, monkeypatch
-):
+def test_reconcile_completed_closed_unmerged_fails_closed():
     """"любое" состояние ревизии в таблице §I3 включает completed.
 
     PR закрыт без мержа отказывает и после успешной доставки, не только
     для started (фикс-круг 1, добавление #3)."""
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
     op = {"status": "completed", "pr": 42, "base_sha": "s",
           "branch": "spec/WS-alpha-7-tasks-v2"}
-    ops = _ReconOps(existing_pr=42, pr_state="CLOSED")
     with pytest.raises(RuntimeError, match="отклонена"):
-        tb._reconcile_revision(state, ops, 2, op, "s")
+        tb._reconcile_revision(2, op, "s", 42, {"state": "CLOSED"})
 
 
-def test_reconcile_completed_identity_mismatch_fails_closed(
-    tmp_path, monkeypatch
-):
+def test_reconcile_completed_identity_mismatch_fails_closed():
     """Идентичность сверяется и для completed, не только для started.
 
     Тот же общий шаг таблицы §I3 (фикс-круг 1, добавление #3, вторая
     половина)."""
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
     op = {"status": "completed", "pr": 42, "base_sha": "s",
           "head_sha": "mine", "branch": "spec/WS-alpha-7-tasks-v2"}
-
-    class _Ops(_ReconOps):
-        def __init__(self):
-            super().__init__(existing_pr=42, pr_state="OPEN")
-
-        def pr_facts(self, repo_slug, pr):
-            self.calls.append(("pr_facts", pr))
-            return {"state": "OPEN", "headRefOid": "someone-else"}
-
+    facts = {"state": "OPEN", "headRefOid": "someone-else"}
     with pytest.raises(RuntimeError, match="идентичность"):
-        tb._reconcile_revision(state, _Ops(), 2, op, "s")
+        tb._reconcile_revision(2, op, "s", 42, facts)
 
 
-def test_reconcile_started_open_pr_same_base_continues(tmp_path, monkeypatch):
+def test_reconcile_started_open_pr_same_base_continues():
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
     op = {"status": "started", "base_sha": "s", "head_sha": "h",
           "tasks_blob": "b", "branch": "spec/WS-alpha-7-tasks-v2"}
-
-    class _Ops(_ReconOps):
-        def __init__(self):
-            super().__init__(existing_pr=7)
-
-        def pr_facts(self, repo_slug, pr):
-            return {"state": "OPEN", "headRefOid": "h"}
-
-    assert tb._reconcile_revision(state, _Ops(), 2, op, "s") == "continue"
+    facts = {"state": "OPEN", "headRefOid": "h"}
+    assert tb._reconcile_revision(2, op, "s", 7, facts) == "continue"
 
 
-def test_reconcile_started_open_pr_shifted_base_fails_closed(
-    tmp_path, monkeypatch
-):
+def test_reconcile_started_open_pr_shifted_base_fails_closed():
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
     op = {"status": "started", "base_sha": "old", "head_sha": "h",
           "branch": "b"}
-
-    class _Ops(_ReconOps):
-        def __init__(self):
-            super().__init__(existing_pr=7)
-
-        def pr_facts(self, repo_slug, pr):
-            return {"state": "OPEN", "headRefOid": "h"}
-
+    facts = {"state": "OPEN", "headRefOid": "h"}
     with pytest.raises(RuntimeError, match="--abandon-revision"):
-        tb._reconcile_revision(state, _Ops(), 2, op, "new")
+        tb._reconcile_revision(2, op, "new", 7, facts)
 
 
-def test_reconcile_closed_unmerged_fails_closed(tmp_path, monkeypatch):
+def test_reconcile_closed_unmerged_fails_closed():
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
     op = {"status": "started", "base_sha": "s", "branch": "b"}
-
-    class _Ops(_ReconOps):
-        def __init__(self):
-            super().__init__(existing_pr=7)
-
-        def pr_facts(self, repo_slug, pr):
-            return {"state": "CLOSED"}
-
     with pytest.raises(RuntimeError, match="отклонена"):
-        tb._reconcile_revision(state, _Ops(), 2, op, "s")
+        tb._reconcile_revision(2, op, "s", 7, {"state": "CLOSED"})
 
 
-def test_reconcile_identity_mismatch_fails_closed(tmp_path, monkeypatch):
+def test_reconcile_identity_mismatch_fails_closed():
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
     op = {"status": "started", "base_sha": "s", "head_sha": "mine",
           "branch": "b"}
-
-    class _Ops(_ReconOps):
-        def __init__(self):
-            super().__init__(existing_pr=7)
-
-        def pr_facts(self, repo_slug, pr):
-            return {"state": "OPEN", "headRefOid": "someone-else"}
-
+    facts = {"state": "OPEN", "headRefOid": "someone-else"}
     with pytest.raises(RuntimeError, match="идентичность"):
-        tb._reconcile_revision(state, _Ops(), 2, op, "s")
+        tb._reconcile_revision(2, op, "s", 7, facts)
 
 
-def test_reconcile_started_no_pr_shifted_base_abandons(tmp_path, monkeypatch):
+def test_reconcile_started_no_pr_shifted_base_abandons():
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
     op = {"status": "started", "base_sha": "old", "branch": "b"}
-    ops = _ReconOps(existing_pr=None)
-    assert tb._reconcile_revision(state, ops, 2, op, "new") == "abandon_and_next"
+    assert tb._reconcile_revision(2, op, "new", None, {}) == "abandon_and_next"
+
+
+def test_reconcile_started_no_pr_same_base_continues():
+    """§I3 «started | нет PR | base совпал» → восстановление по §I3.1.
+
+    Обратная сторона предыдущего теста: без неё «сдвинулся» и «не
+    сдвинулся» неразличимы."""
+    from governance import task_bridge as tb
+
+    op = {"status": "started", "base_sha": "s", "branch": "b"}
+    assert tb._reconcile_revision(2, op, "s", None, {}) == "continue"
 
 
 def test_recover_commit_accepts_matching_local_commit(tmp_path, monkeypatch):
@@ -3262,6 +3210,7 @@ class _RevisionPrOps(_SupersedeOps):
         return self.pr
 
     def pr_facts(self, repo_slug, pr):
+        self.calls.append(("pr_facts", pr))
         if pr == self.pr:
             return {"state": self.pr_state, "headRefOid": self.head}
         return super().pr_facts(repo_slug, pr)
@@ -3328,6 +3277,9 @@ def test_supersede_returns_existing_pr_when_revision_completed(
     # §I4: завершённая запись не перезаписывается — ни один байт.
     assert saved.ops["tasks-deliver-v2"] == before
     assert not any(c[0] == "ensure_branch" for c in ops.calls)
+    # Факты PR ревизии реально запрашиваются (C-8: их берёт цикл и
+    # передаёт в решение аргументом, а не запрашивает трижды).
+    assert ("find_pr", "spec/WS-alpha-7-tasks-v2") in ops.calls
 
 
 def test_supersede_after_merged_revision_starts_next_one(
@@ -3353,6 +3305,25 @@ def test_supersede_after_merged_revision_starts_next_one(
     assert saved.ops["tasks-deliver-v3"]["supersedes"] == 2
     assert ("ensure_branch", "spec/WS-alpha-7-tasks-v3") in ops.calls
     assert saved.ops["tasks-deliver-v2"]["pr"] == 9          # v2 цела
+
+
+def test_supersede_asks_github_once_per_revision(tmp_path, monkeypatch):
+    """Реконсиляция ревизии — один `find_pr` и один `pr_facts` (C-8).
+
+    Было четыре запроса на ревизию: цикл спрашивал `find_pr`+`pr_facts`, и
+    `_reconcile_revision` повторяла `find_pr` и звала `pr_facts` дважды.
+    Функционально безвредно, но на живом `gh` это лишний источник флака."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(
+        state, monkeypatch, status="completed", pr=9, head_sha="h",
+        anchor="ANCHOR-V2",
+    )
+    ops = _RevisionPrOps(pr=9, pr_state="OPEN", prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == 9
+    assert ops.calls.count(("find_pr", "spec/WS-alpha-7-tasks-v2")) == 1
+    assert ops.calls.count(("pr_facts", 9)) == 1
 
 
 def test_supersede_returns_open_pr_of_first_delivery(tmp_path, monkeypatch):
@@ -3896,6 +3867,43 @@ def test_cli_supersede_with_abandon_revision_refuses(
         ])
     assert exc.value.code == 2
     assert "разные действия" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [["--supersede"], ["--abandon-revision", "2", "--reason", "р"]],
+    ids=["supersede", "abandon"],
+)
+def test_cli_conform_approve_with_other_action_refuses(
+    extra, tmp_path, monkeypatch, capsys
+):
+    """`--conform-approve` — третье действие, и оно тоже не молчит (C-6).
+
+    Диспетчер проверяет флаги по очереди, поэтому без гварда первый
+    сработавший молча съедал бы `--conform-approve` — та же «победа
+    второго флага», ради которой отбито `--supersede`+`--abandon-revision`.
+    """
+    from governance import task_bridge as tb
+
+    with pytest.raises(SystemExit) as exc:
+        tb.main(["--run-id", "r", "--conform-approve", *extra])
+    assert exc.value.code == 2
+    assert "--conform-approve" in capsys.readouterr().err
+
+
+def test_cli_approval_pr_without_supersede_refuses(
+    tmp_path, monkeypatch, capsys
+):
+    """`--approval-pr` без `--supersede` не доходит никуда (C-7).
+
+    Без гварда команда молча выполняла бы ОБЫЧНУЮ доставку — не то, о чём
+    просил оператор."""
+    from governance import task_bridge as tb
+
+    with pytest.raises(SystemExit) as exc:
+        tb.main(["--run-id", "r", "--approval-pr", "403"])
+    assert exc.value.code == 2
+    assert "--approval-pr" in capsys.readouterr().err
 
 
 def test_cli_abandon_revision_requires_reason(tmp_path, monkeypatch, capsys):

@@ -1431,24 +1431,29 @@ def _previous_dag(
 
 
 def _reconcile_revision(
-    state: RunState, ops: Ops, n: int, op: dict, base_sha: str
+    n: int, op: dict, base_sha: str, pr: int | None, facts: dict
 ) -> str:
     """Решение по таблице §I3 спеки. Возврат — имя перехода, не действие.
 
     Имя ветки НЕ доказывает принадлежность: под ним может лежать чужая
     работа, поэтому у каждого живого PR сверяется `headRefOid` с
     записанным `head_sha` намерения.
+
+    Факты PR принимаются АРГУМЕНТОМ, а не запрашиваются: вызывающий цикл
+    и так их получил, а функция запрашивала `find_pr` второй раз и
+    `pr_facts` — дважды (минор C-8: четыре сетевых запроса к `gh` на
+    ревизию вместо одного, лишний источник флака). Побочно решение по
+    §I3 стало чистым — таблица проверяема без стабов ops.
     """
     branch = op.get("branch")
-    pr = ops.find_pr(state.repo_slug, branch, any_state=True) if branch else None
-    pr_state = ops.pr_facts(state.repo_slug, pr).get("state") if pr else None
+    pr_state = facts.get("state") if pr is not None else None
     if pr is not None and pr_state not in ("OPEN", "MERGED"):
         raise RuntimeError(
             f"PR #{pr} по ветке {branch} закрыт без мержа — ветка отклонена "
             "человеком; переиздание fail-closed"
         )
     if pr is not None and op.get("head_sha"):
-        actual_head = ops.pr_facts(state.repo_slug, pr).get("headRefOid")
+        actual_head = facts.get("headRefOid")
         if actual_head and actual_head != op["head_sha"]:
             raise RuntimeError(
                 f"идентичность не сошлась: PR #{pr} стоит на "
@@ -1682,22 +1687,23 @@ def deliver_superseded(
         status = op.get("status")
         if status not in ("started", "completed"):
             continue          # abandoned — терминальна, смотрим предыдущую
-        # Номер PR `_reconcile_revision` не возвращает (только имя
-        # перехода), поэтому достаём его сами — тем же запросом.
+        # PR ревизии и его факты запрашиваются ЗДЕСЬ, по одному разу, и
+        # передаются в `_reconcile_revision` аргументом (минор C-8): она
+        # имя перехода возвращает, а номер PR нужен и вызывающему.
         pr = (
             ops.find_pr(state.repo_slug, op["branch"], any_state=True)
             if op.get("branch") else None
         )
+        facts = ops.pr_facts(state.repo_slug, pr) if pr is not None else {}
         if status == "completed" and (
-            pr is None
-            or ops.pr_facts(state.repo_slug, pr).get("state") == "MERGED"
+            pr is None or facts.get("state") == "MERGED"
         ):
             # §I3 «completed | MERGED»: доставка состоялась, переиздание
             # решается ТОЛЬКО по §I5 — реконсилировать нечего. Остальные
             # состояния PR завершённой ревизии (OPEN → вернуть его;
             # CLOSED-unmerged → fail-closed) разбирает _reconcile_revision.
             break
-        decision = _reconcile_revision(state, ops, n, op, base_sha)
+        decision = _reconcile_revision(n, op, base_sha, pr, facts)
         if (
             decision in ("complete", "continue")
             and pr is not None
@@ -2003,6 +2009,23 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             "--supersede и --abandon-revision — разные действия: "
             "сначала абандоньте ревизию, затем запускайте переиздание"
+        )
+    if args.conform_approve and (args.supersede or args.abandon_revision):
+        # Та же мотивировка, доведённая до конца (minor C-6): диспетчер
+        # ниже проверяет --abandon-revision, затем --supersede, затем
+        # --conform-approve, и первый сработавший молча съедал остальные.
+        parser.error(
+            "--conform-approve — третье отдельное действие: запускайте "
+            "его отдельным прогоном, не вместе с --supersede/"
+            "--abandon-revision"
+        )
+    if args.approval_pr is not None and not args.supersede:
+        # Флаг осмыслен только внутри переиздания (§I7): без --supersede
+        # он никуда не доходит, и выполнялась бы ОБЫЧНАЯ доставка — не
+        # то, что просил оператор, и молча (minor C-7).
+        parser.error(
+            "--approval-pr осмыслен только с --supersede: подпись штампа "
+            "берётся при переиздании"
         )
     if args.abandon_revision is not None and not args.reason:
         parser.error("--abandon-revision требует --reason")
