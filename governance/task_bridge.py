@@ -1621,7 +1621,9 @@ def _reconcile_v1(state: RunState, ops: Ops, op: dict) -> int | None:
     return pr
 
 
-def _recover_commit(state: RunState, ops: Ops, op: dict) -> None:
+def _recover_commit(
+    state: RunState, ops: Ops, n: int, op: dict, pr: int | None
+) -> None:
     """Гвард таблицы §I3.1: коммит и запись head_sha не атомарны.
 
     Возврата НЕТ намеренно (минор F-03 финального ревью): все строки
@@ -1634,12 +1636,34 @@ def _recover_commit(state: RunState, ops: Ops, op: dict) -> None:
     SHA — не наш примитив (`push_branch` пушит ветку), и прод возврат не
     читал, отчего тесты утверждали значение, которого нет в поведении.
 
-    Бросает только на несоответствии факта намерению: под именем ветки
-    ревизии лежит чужая работа.
+    Бросает на несоответствии факта намерению (под именем ветки ревизии
+    лежит чужая работа) и на «`head_sha` записан, ветки в клоне нет» —
+    см. ниже.
+
+    `pr` — номер PR ревизии (или None) — нужен ровно одному различению:
+    при `head_sha` без локальной ветки коммит опознаваем ЛИБО локально,
+    ЛИБО по `headRefOid` живого PR (его `_reconcile_revision` уже сверил).
+    Нет ни того, ни другого — продолжения нет: вызывающий пошёл бы
+    переиздавать детерминированно, `ensure_branch` создала бы ветку
+    ЗАНОВО от base, `commit_paths` сделал бы НОВЫЙ коммит (тот же tree,
+    другой committer date ⇒ другой SHA), а `after_commit` затёр бы
+    `head_sha` намерения — §I3 называет его единственным фактом, по
+    которому ревизию опознают в удалённой ветке. Это потеря записи
+    журнала, а не плохая диагностика, поэтому здесь fail-closed.
     """
     branch, head = op.get("branch"), op.get("head_sha")
     local = ops.rev_parse(state.target_dir, branch) if branch else None
     if head:
+        if local is None and pr is None:
+            raise RuntimeError(
+                f"ревизия {n}: head_sha {head[:7]} записан, а ветки "
+                f"{branch} в этом клоне нет — коммит уже создан (и, "
+                "возможно, запушен), пересоздавать его нельзя: новый "
+                "коммит затрёт единственный факт опознания ревизии в "
+                f"удалённой ветке. Верните ветку (git fetch origin "
+                f"{branch} && git switch {branch}) и повторите запуск "
+                f"либо решите судьбу ревизии явно: --abandon-revision {n}"
+            )
         if local and local != head:
             # Сверяется ЛОКАЛЬНЫЙ head (`ops.rev_parse` резолвит
             # refs/heads/), не remote: разошедшийся remote отклоняет push
@@ -1861,7 +1885,9 @@ def deliver_superseded(
                 f"ревизия {n} начата с другим составом DAG — повторите "
                 "запуск с тем же --legacy-bundle, что и в её намерении"
             )
-        _recover_commit(state, ops, op)   # бросает на чужом коммите/ветке
+        # Бросает на чужом коммите/ветке и на «head_sha записан, ветки в
+        # клоне нет» (там опознавать нечем, а переиздание затёрло бы SHA).
+        _recover_commit(state, ops, n, op, pr)
         if pr is not None:
             _complete_revision(
                 state, n, pr=pr, anchor=op["prospective_anchor"],
