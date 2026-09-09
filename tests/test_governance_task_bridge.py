@@ -3092,6 +3092,212 @@ def test_supersede_legacy_without_anchor_records_unavailable(
     assert saved["comparison"] == "unavailable"
 
 
+class _RevisionPrOps(_SupersedeOps):
+    """У ревизии есть свой PR: `find_pr` отдаёт его, `pr_facts` различает
+    correction-PR (провенанс, номер из `_MERGED_PR`) и PR ревизии
+    (идентичность — state + headRefOid)."""
+
+    def __init__(self, pr=None, pr_state="OPEN", head="h", local_head=None,
+                 **kw):
+        super().__init__(**kw)
+        self.pr, self.pr_state, self.head = pr, pr_state, head
+        # Локальный head ВЕТКИ ревизии (не HEAD базы): им управляет
+        # `_recover_commit` (§I3.1) — None означает «коммита ещё нет».
+        self.local_head = local_head
+
+    def rev_parse(self, target_dir, ref):
+        if ref == "HEAD":
+            return super().rev_parse(target_dir, ref)
+        return self.local_head
+
+    def find_pr(self, repo_slug, branch, *, any_state=False):
+        self.calls.append(("find_pr", branch))
+        return self.pr
+
+    def pr_facts(self, repo_slug, pr):
+        if pr == self.pr:
+            return {"state": self.pr_state, "headRefOid": self.head}
+        return super().pr_facts(repo_slug, pr)
+
+
+def _revision_intent(state, prospective, **over):
+    """Намерение ревизии v2 в форме §I4 (та же, что пишет _start_revision)."""
+    from governance import task_bridge as tb
+
+    intent = {
+        "status": "started",
+        "revision": 2,
+        "branch": "spec/WS-alpha-7-tasks-v2",
+        "base_sha": "base-sha-1",
+        "prospective_anchor": prospective,
+        "approval_pr": 403,
+        "tasks_version": 3,
+        "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
+        "dag_source": "previous_delivery",
+        "supersedes": 1,
+        "expected_generated_at": "2026-09-09T10:00:00+03:00",
+        "tasks_blob": None,
+        "head_sha": None,
+    }
+    intent.update(over)
+    return intent
+
+
+def _seed_revision(state, monkeypatch, **over):
+    """v1 доставлена + незавершённая (по умолчанию) ревизия v2 в леджере."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    prospective = tb._prospective_anchor(
+        state.target_dir, state.bundle_dir, "andrei-shtanakov",
+        "2026-09-09T05:00:00Z", None,
+    )
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver-v2"] = _revision_intent(
+        state, prospective, **over
+    )
+    rs.save(state)
+    return prospective
+
+
+def test_supersede_returns_existing_pr_when_revision_completed(
+    tmp_path, monkeypatch
+):
+    """§I3 «completed | OPEN»: вернуть PR ревизии, v<N+1> НЕ создаётся."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(
+        state, monkeypatch, status="completed", pr=9, head_sha="h",
+        anchor="ANCHOR-V2",
+    )
+    before = dict(rs.load("r-recon").ops["tasks-deliver-v2"])
+    ops = _RevisionPrOps(pr=9, pr_state="OPEN", prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == 9
+    saved = rs.load("r-recon")
+    assert len(tb._revisions(saved)) == 1          # v3 не заведена
+    # §I4: завершённая запись не перезаписывается — ни один байт.
+    assert saved.ops["tasks-deliver-v2"] == before
+    assert not any(c[0] == "ensure_branch" for c in ops.calls)
+
+
+def test_supersede_after_merged_revision_starts_next_one(
+    tmp_path, monkeypatch
+):
+    """§I3 «completed | MERGED»: реконсилировать нечего, дальше решает §I5.
+
+    Обратная сторона предыдущего теста: если бы завершённую ревизию с
+    ВМЕРЖЕННЫМ PR тоже возвращали, переиздание после неё стало бы
+    невозможным навсегда."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(
+        state, monkeypatch, status="completed", pr=9, head_sha="h",
+        anchor="СТАРЫЙ-V2",
+    )
+    ops = _RevisionPrOps(pr=9, pr_state="MERGED", prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == 77
+    saved = rs.load("r-recon")
+    assert [n for n, _ in tb._revisions(saved)] == [2, 3]
+    assert saved.ops["tasks-deliver-v3"]["supersedes"] == 2
+    assert ("ensure_branch", "spec/WS-alpha-7-tasks-v3") in ops.calls
+    assert saved.ops["tasks-deliver-v2"]["pr"] == 9          # v2 цела
+
+
+def test_supersede_completes_started_revision_with_merged_pr(
+    tmp_path, monkeypatch
+):
+    """§I3 «started | MERGED»: op завершается этим PR, новой ревизии нет.
+
+    Идентичность здесь сверяется по `headRefOid` PR (это делает
+    `_reconcile_revision`), а не по локальной ветке: `local_head` нарочно
+    уехал — восстановление коммита (§I3.1) на этой строке не при делах."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    prospective = _seed_revision(state, monkeypatch, head_sha="h")
+    ops = _RevisionPrOps(pr=7, pr_state="MERGED", prs=[_MERGED_PR],
+                         local_head="ДВИНУЛИ-СНАРУЖИ")
+    assert tb.deliver_superseded(state, ops) == 7
+    saved = rs.load("r-recon")
+    assert len(tb._revisions(saved)) == 1
+    rev = saved.ops["tasks-deliver-v2"]
+    assert rev["status"] == "completed"
+    assert (rev["pr"], rev["anchor"], rev["head_sha"]) == (7, prospective, "h")
+    assert not any(c[0] == "create_draft_pr" for c in ops.calls)
+
+
+def test_supersede_resumes_started_revision_with_open_pr(
+    tmp_path, monkeypatch
+):
+    """§I3 «started | OPEN, base совпал»: ревизия завершается ЭТИМ PR,
+    второй PR не создаётся."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(state, monkeypatch, head_sha="h")
+    ops = _RevisionPrOps(pr=7, pr_state="OPEN", prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == 7
+    saved = rs.load("r-recon")
+    assert len(tb._revisions(saved)) == 1
+    assert saved.ops["tasks-deliver-v2"]["status"] == "completed"
+    assert saved.ops["tasks-deliver-v2"]["pr"] == 7
+    assert not any(c[0] == "create_draft_pr" for c in ops.calls)
+
+
+def test_supersede_resumes_started_revision_without_pr(tmp_path, monkeypatch):
+    """§I3.1 «started, PR-а нет, base совпал»: доставка доводится в ТОЙ ЖЕ
+    ветке, детерминированно из намерения — один PR, новой ревизии нет."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(state, monkeypatch)
+    ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == 77
+    saved = rs.load("r-recon")
+    assert len(tb._revisions(saved)) == 1          # v3 не заведена
+    assert saved.ops["tasks-deliver-v2"]["status"] == "completed"
+    assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops.calls
+    # Байты — из намерения, не из текущего времени и не из свежего счётчика.
+    text = (
+        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
+    ).read_text(encoding="utf-8")
+    assert 'generated_at: "2026-09-09T10:00:00+03:00"' in text
+    assert "version: 3" in text
+
+
+def test_supersede_resume_refuses_foreign_commit(tmp_path, monkeypatch):
+    """§I3.1 подключена к проду: в ветке ревизии лежит чужой коммит
+    (родитель не `base_sha`) — возобновление fail-closed, не доставка."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(state, monkeypatch)
+    ops = _RevisionPrOps(pr=None, local_head="commitX", prs=[_MERGED_PR])
+    with pytest.raises(RuntimeError, match="чужой коммит"):
+        tb.deliver_superseded(state, ops)
+    assert not any(c[0] == "create_draft_pr" for c in ops.calls)
+
+
+def test_supersede_refuses_resume_with_different_dag(tmp_path, monkeypatch):
+    """Возобновление с другим --legacy-bundle дало бы другие байты."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(state, monkeypatch, dag=[
+        ["00-charter.md", []], ["10-requirements.md", ["charter"]],
+    ])
+    with pytest.raises(RuntimeError, match="другим составом DAG"):
+        tb.deliver_superseded(state, _RevisionPrOps(pr=None, prs=[_MERGED_PR]))
+
+
 def test_supersede_records_commit_facts_before_push(tmp_path, monkeypatch):
     """§I3: head_sha/tasks_blob durable-записаны МЕЖДУ коммитом и push.
 

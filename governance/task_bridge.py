@@ -1563,6 +1563,109 @@ def deliver_superseded(
             "неизвестна, переиздание не начато"
         )
 
+    active = _dag_for(legacy_bundle)
+    anchor_rel = f"{state.bundle_dir}/{active[-1][0]}"
+
+    # Незавершённая ревизия реконсилируется ДО любых новых эффектов, и её
+    # решение исполняется ЦЕЛИКОМ: игнорировать "continue"/"complete"/
+    # "return_pr" значит завести ВТОРОЙ открытый PR, что §I3 запрещает
+    # явным разбором конфликта I3×I4 — а состояние ещё и
+    # самовоспроизводится (каждый следующий запуск плодит ревизию и PR).
+    # Терминальны для вызова все исходы, кроме `abandon_and_next`.
+    for n, op in reversed(_revisions(state)):
+        status = op.get("status")
+        if status not in ("started", "completed"):
+            continue          # abandoned — терминальна, смотрим предыдущую
+        # Номер PR `_reconcile_revision` не возвращает (только имя
+        # перехода), поэтому достаём его сами — тем же запросом.
+        pr = (
+            ops.find_pr(state.repo_slug, op["branch"], any_state=True)
+            if op.get("branch") else None
+        )
+        if status == "completed" and (
+            pr is None
+            or ops.pr_facts(state.repo_slug, pr).get("state") == "MERGED"
+        ):
+            # §I3 «completed | MERGED»: доставка состоялась, переиздание
+            # решается ТОЛЬКО по §I5 — реконсилировать нечего. Остальные
+            # состояния PR завершённой ревизии (OPEN → вернуть его;
+            # CLOSED-unmerged → fail-closed) разбирает _reconcile_revision.
+            break
+        decision = _reconcile_revision(state, ops, n, op, base_sha)
+        if decision == "abandon_and_next":
+            _abandon_revision(
+                state, n,
+                f"base сдвинулся ({op.get('base_sha', '?')[:7]} → "
+                f"{base_sha[:7]}), открытого PR нет",
+            )
+            break
+        if decision == "return_pr":
+            print(
+                f"ревизия {n} уже доставлена — PR #{pr}; новая ревизия не "
+                "заводится"
+            )
+            return pr
+        if decision == "complete":
+            _complete_revision(
+                state, n, pr=pr, anchor=op["prospective_anchor"],
+                head_sha=op.get("head_sha")
+                or ops.rev_parse(state.target_dir, op["branch"]),
+            )
+            # Доставка состоялась; нужно ли ещё одно переиздание — решает
+            # следующий запуск по §I5.
+            print(f"ревизия {n} доставлена ранее — PR #{pr} вмержен")
+            return pr
+        # "continue": возобновляем ревизию n в ЕЁ ветке, а не заводим новую.
+        if _dag_for(legacy_bundle) != tuple(
+            (f, tuple(u)) for f, u in op.get("dag", [])
+        ):
+            raise RuntimeError(
+                f"ревизия {n} начата с другим составом DAG — повторите "
+                "запуск с тем же --legacy-bundle, что и в её намерении"
+            )
+        _recover_commit(state, ops, op)   # бросает на чужом коммите/ветке
+        if pr is not None:
+            _complete_revision(
+                state, n, pr=pr, anchor=op["prospective_anchor"],
+                head_sha=op.get("head_sha")
+                or ops.rev_parse(state.target_dir, op["branch"]),
+            )
+            print(f"ревизия {n} доставлена ранее — PR #{pr}")
+            return pr
+        # PR-а нет: доставка не дошла до последнего шага. Повторяем её
+        # ДЕТЕРМИНИРОВАННО из намерения — байты те же, потому что
+        # generated_at/version/branch зафиксированы в намерении, а
+        # commit_paths на пустом индексе не создаёт второй коммит.
+        _approval, approved_by, approved_at = _resolve_correction_pr(
+            state, ops, anchor_rel, base_ref, op["approval_pr"]
+        )
+        pr = deliver(
+            target_dir=state.target_dir,
+            repo_slug=state.repo_slug,
+            ws_id=state.ws_id,
+            subject=state.subject,
+            bundle_dir=state.bundle_dir,
+            base_ref=base_ref,
+            ops=ops,
+            approved_by=approved_by,
+            approved_at=approved_at,
+            generated_at=op["expected_generated_at"],
+            legacy_bundle=legacy_bundle,
+            profile=state.profile,
+            branch=op["branch"],
+            version=op["tasks_version"],
+            after_commit=_commit_facts_cb(
+                state, ops, n, op["prospective_anchor"]
+            ),
+        )
+        # head_sha уже записан колбэком durable — между коммитом и push.
+        _complete_revision(
+            state, n, pr=pr, anchor=op["prospective_anchor"],
+        )
+        return pr
+
+    # ПОСЛЕ реконсиляции (дефект 3 ревью Task 7): она может перевести
+    # `started` → `completed`, и тогда предыдущая доставка — именно та.
     prev = _last_delivery(state)
     if prev is None:
         raise RuntimeError(
@@ -1571,28 +1674,14 @@ def deliver_superseded(
         )
     prev_n, prev_op = prev
 
-    # Незавершённая ревизия реконсилируется ДО любых новых эффектов.
-    for n, op in reversed(_revisions(state)):
-        if op.get("status") == "started":
-            decision = _reconcile_revision(state, ops, n, op, base_sha)
-            if decision == "abandon_and_next":
-                _abandon_revision(
-                    state, n,
-                    f"base сдвинулся ({op.get('base_sha', '?')[:7]} → "
-                    f"{base_sha[:7]}), открытого PR нет",
-                )
-            break
-
     dag, dag_source = _previous_dag(
         state, ops, prev_op, state.target_dir, state.bundle_dir, base_sha,
     )
-    active = _dag_for(legacy_bundle)
     if dag is not None and dag != active:
         raise RuntimeError(
             "состав активного DAG отличается от предыдущей доставки — "
             "это не переиздание, а другая доставка"
         )
-    anchor_rel = f"{state.bundle_dir}/{active[-1][0]}"
     approval, approved_by, approved_at = _resolve_correction_pr(
         state, ops, anchor_rel, base_ref, approval_pr
     )
