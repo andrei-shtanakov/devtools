@@ -22,6 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 import yaml
 
@@ -1792,12 +1793,48 @@ def _commit_facts_cb(
     return _cb
 
 
+@dataclass(frozen=True)
+class SupersedeResult:
+    """Исход переиздания: номер PR и то, ЧЕМ этот номер является.
+
+    Голый `int` этого не различал, а оператору различие критично:
+    реконсиляция §I3 в терминальных исходах возвращает номер уже
+    СУЩЕСТВУЮЩЕГО PR (первой доставки либо предыдущей ревизии), и CLI
+    печатал поверх её правдивой строки «переизданная tasks-спека
+    доставлена: PR #N» — читая последнюю строку при RC 0, оператор шёл
+    мержить чужой PR как переиздание, хотя ни ветки
+    `spec/<ws-id>-tasks-v<N>`, ни нового PR не создавалось.
+
+    Различие СТРУКТУРНОЕ, а не эвристика на печатающей стороне: «а не
+    печатали ли мы уже» — угадывание, которое разъезжается с кодом при
+    первом же новом исходе.
+
+    `kind`:
+
+    - `delivered` — доставка выполнена ЭТИМ вызовом (новая ревизия либо
+      достройка прерванной), `pr` — её номер;
+    - `returned` — вернули существующий PR (§I3), ничего не создано;
+    - `noop` — бесследный no-op §I5: апстрим не менялся, `run.json` не
+      тронут, PR нет.
+    """
+
+    kind: Literal["delivered", "returned", "noop"]
+    pr: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.pr is None) != (self.kind == "noop"):
+            raise ValueError(
+                f"SupersedeResult: kind={self.kind!r} несовместим с "
+                f"pr={self.pr!r} — номер PR есть у всех исходов, кроме noop"
+            )
+
+
 def deliver_superseded(
     state: RunState,
     ops: Ops,
     legacy_bundle: int | None = None,
     approval_pr: int | None = None,
-) -> int | None:
+) -> SupersedeResult:
     """Санкционированное переиздание tasks-спеки (спека 2026-09-09).
 
     Порядок: синхронизация base → реконсиляция незакрытой ревизии (§I3) →
@@ -1813,8 +1850,11 @@ def deliver_superseded(
     реконсиляции код доходит только тогда, когда незакрытых ревизий нет —
     второй открытый PR не заводится ни при каком состоянии леджера (§I3).
 
-    Возврат `None` — бесследный no-op (§I5): апстрим не менялся с
-    прошлой доставки, run.json не трогается.
+    Возврат — `SupersedeResult`: `kind="delivered"` (доставка выполнена
+    этим вызовом), `kind="returned"` (вернули существующий PR — исходы
+    реконсиляции §I3, включая PR первой доставки) либо `kind="noop"` —
+    бесследный no-op §I5: апстрим не менялся с прошлой доставки,
+    run.json не трогается.
     """
     if state.status != "completed":
         raise RuntimeError(
@@ -1894,7 +1934,7 @@ def deliver_superseded(
                 f"ревизия {n} уже доставлена — PR #{pr}; новая ревизия не "
                 "заводится"
             )
-            return pr
+            return SupersedeResult("returned", pr)
         if decision == "complete":
             _complete_revision(
                 state, n, pr=pr, anchor=op["prospective_anchor"],
@@ -1903,7 +1943,7 @@ def deliver_superseded(
             # Доставка состоялась; нужно ли ещё одно переиздание — решает
             # следующий запуск по §I5.
             print(f"ревизия {n} доставлена ранее — PR #{pr} вмержен")
-            return pr
+            return SupersedeResult("returned", pr)
         # "continue": возобновляем ревизию n в ЕЁ ветке, а не заводим новую.
         if _dag_for(legacy_bundle) != tuple(
             (f, tuple(u)) for f, u in op.get("dag", [])
@@ -1921,7 +1961,7 @@ def deliver_superseded(
                 head_sha=op["head_sha"],   # непуст по гварду выше
             )
             print(f"ревизия {n} доставлена ранее — PR #{pr}")
-            return pr
+            return SupersedeResult("returned", pr)
         # PR-а нет: доставка не дошла до последнего шага. Повторяем её
         # ДЕТЕРМИНИРОВАННО из намерения — байты те же, потому что
         # generated_at/version/branch зафиксированы в намерении, а
@@ -1953,7 +1993,7 @@ def deliver_superseded(
         _complete_revision(
             state, n, pr=pr, anchor=op["prospective_anchor"],
         )
-        return pr
+        return SupersedeResult("delivered", pr)
 
     # ПОСЛЕ реконсиляции (дефект 3 ревью Task 7): она может перевести
     # `started` → `completed`, и тогда предыдущая доставка — именно та.
@@ -1977,7 +2017,7 @@ def deliver_superseded(
                 f"первая доставка уже открыта PR #{v1_pr} — переиздавать "
                 "нечего, пока он не вмержен; новая ревизия не заводится"
             )
-            return v1_pr
+            return SupersedeResult("returned", v1_pr)
 
     dag, dag_source = _previous_dag(
         state, ops, prev_op, state.target_dir, state.bundle_dir, base_sha,
@@ -2000,7 +2040,7 @@ def deliver_superseded(
             "апстрим не менялся — переиздание не требуется "
             f"(anchor {prospective[:7]})"
         )
-        return None
+        return SupersedeResult("noop")
 
     n = _next_revision(state)
     generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -2054,7 +2094,7 @@ def deliver_superseded(
     # head_sha здесь НЕ пишется: он уже записан колбэком durable — между
     # коммитом и push (§I3), а не после создания PR.
     _complete_revision(state, n, pr=pr, anchor=prospective)
-    return pr
+    return SupersedeResult("delivered", pr)
 
 
 def deliver_conform(
@@ -2223,16 +2263,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.supersede:
         try:
-            pr = deliver_superseded(
+            result = deliver_superseded(
                 state, ops, legacy_bundle=args.legacy_bundle,
                 approval_pr=args.approval_pr,
             )
         except RuntimeError as exc:
             print(f"task_bridge: {exc}")
             return 1
-        if pr is None:
-            return 0
-        print(f"переизданная tasks-спека доставлена: PR #{pr}")
+        # Печатаем ТОЛЬКО состоявшуюся доставку. `returned` и `noop` уже
+        # сказали о себе точнее (какой PR и почему новой ревизии нет), а
+        # строка «переизданная доставлена» поверх них противоречила бы им
+        # и читалась бы последней — оператор шёл мержить чужой PR.
+        if result.kind == "delivered":
+            print(f"переизданная tasks-спека доставлена: PR #{result.pr}")
         return 0
     if args.conform_approve:
         pr = deliver_conform(

@@ -3562,6 +3562,20 @@ class _SupersedeOps(_ProvOps):
         return _spec_text("decomposition")
 
 
+def test_supersede_result_refuses_inconsistent_kind() -> None:
+    """Тип исхода не даёт собрать невозможное сочетание.
+
+    `SupersedeResult("delivered", None)` напечатался бы у оператора как
+    «PR #None», а `("noop", 5)` объявил бы бесследный no-op с номером
+    PR — оба состояния не существуют в §I3/§I5."""
+    from governance import task_bridge as tb
+
+    with pytest.raises(ValueError, match="несовместим"):
+        tb.SupersedeResult("delivered", None)
+    with pytest.raises(ValueError, match="несовместим"):
+        tb.SupersedeResult("noop", 5)
+
+
 def test_supersede_equal_anchor_is_traceless_noop(tmp_path, monkeypatch):
     """Равный anchor: RC-успех, run.json побайтово прежний."""
     from governance import run_state as rs
@@ -3582,7 +3596,7 @@ def test_supersede_equal_anchor_is_traceless_noop(tmp_path, monkeypatch):
     before = (rs.run_dir("r-recon") / "run.json").read_bytes()
     result = tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR]))
     after = (rs.run_dir("r-recon") / "run.json").read_bytes()
-    assert result is None
+    assert result == tb.SupersedeResult("noop")
     assert before == after
 
 
@@ -3598,8 +3612,9 @@ def test_supersede_changed_anchor_opens_new_branch_and_pr(
                                   "anchor": "СТАРЫЙ-ДРУГОЙ"}
     rs.save(state)
     ops = _SupersedeOps(prs=[_MERGED_PR])
-    pr = tb.deliver_superseded(state, ops)
-    assert pr == 77
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
     assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops.calls
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["status"] == "completed"
@@ -3643,7 +3658,9 @@ def test_supersede_legacy_bundle_uses_its_own_dag(tmp_path, monkeypatch):
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
     ops = _SupersedeOps(prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops, legacy_bundle=5) == 77
+    assert tb.deliver_superseded(
+        state, ops, legacy_bundle=5
+    ) == tb.SupersedeResult("delivered", 77)
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["dag"] == [[f, list(u)] for f, u in tb._BUNDLE_DAG_LEGACY5]
     assert saved["dag_source"] == "derived_from_spec"
@@ -3684,7 +3701,9 @@ def test_supersede_refreshes_base_before_reading_facts(
             )
 
     ops = _RefreshingOps(prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == 77
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
     assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_version"] == 8
     text = (
         Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
@@ -3754,7 +3773,9 @@ def test_supersede_unavailable_for_missing_and_null_anchor(
     state = _recon_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, **v1_anchor}
     rs.save(state)
-    assert tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
+    assert tb.deliver_superseded(
+        state, _SupersedeOps(prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("delivered", 77)
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["comparison"] == "unavailable"
 
@@ -3778,7 +3799,7 @@ def test_supersede_right_after_delivery_is_traceless_noop(
     result = tb.deliver_superseded(
         rs.load("r-recon"), _SupersedeOps(prs=[_MERGED_PR])
     )
-    assert result is None
+    assert result == tb.SupersedeResult("noop")
     assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
 
 
@@ -3866,7 +3887,9 @@ def test_supersede_returns_existing_pr_when_revision_completed(
     )
     before = dict(rs.load("r-recon").ops["tasks-deliver-v2"])
     ops = _RevisionPrOps(pr=9, pr_state="OPEN", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == 9
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "returned", 9
+    )
     saved = rs.load("r-recon")
     assert len(tb._revisions(saved)) == 1          # v3 не заведена
     # §I4: завершённая запись не перезаписывается — ни один байт.
@@ -3894,7 +3917,9 @@ def test_supersede_after_merged_revision_starts_next_one(
         anchor="СТАРЫЙ-V2",
     )
     ops = _RevisionPrOps(pr=9, pr_state="MERGED", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == 77
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
     saved = rs.load("r-recon")
     assert [n for n, _ in tb._revisions(saved)] == [2, 3]
     assert saved.ops["tasks-deliver-v3"]["supersedes"] == 2
@@ -3916,7 +3941,9 @@ def test_supersede_asks_github_once_per_revision(tmp_path, monkeypatch):
         anchor="ANCHOR-V2",
     )
     ops = _RevisionPrOps(pr=9, pr_state="OPEN", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == 9
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "returned", 9
+    )
     assert ops.calls.count(("find_pr", "spec/WS-alpha-7-tasks-v2")) == 1
     assert ops.calls.count(("pr_facts", 9)) == 1
 
@@ -3938,7 +3965,9 @@ def test_supersede_returns_open_pr_of_first_delivery(tmp_path, monkeypatch):
     rs.save(state)
     before = (rs.run_dir("r-recon") / "run.json").read_bytes()
     ops = _RevisionPrOps(pr=5, pr_state="OPEN", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == 5
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "returned", 5
+    )
     saved = rs.load("r-recon")
     assert tb._revisions(saved) == []              # v2 не заведена
     assert not any(c[0] == "ensure_branch" for c in ops.calls)
@@ -3986,7 +4015,9 @@ def test_supersede_ignores_first_delivery_pr_when_revision_is_last(
             return super().pr_facts(repo_slug, pr)
 
     ops = _Ops(pr=9, pr_state="MERGED", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == 77
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
     assert [n for n, _ in tb._revisions(rs.load("r-recon"))] == [2, 3]
 
 
@@ -4005,7 +4036,9 @@ def test_supersede_completes_started_revision_with_merged_pr(
     prospective = _seed_revision(state, monkeypatch, head_sha="h")
     ops = _RevisionPrOps(pr=7, pr_state="MERGED", prs=[_MERGED_PR],
                          local_head="ДВИНУЛИ-СНАРУЖИ")
-    assert tb.deliver_superseded(state, ops) == 7
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "returned", 7
+    )
     saved = rs.load("r-recon")
     assert len(tb._revisions(saved)) == 1
     rev = saved.ops["tasks-deliver-v2"]
@@ -4025,7 +4058,9 @@ def test_supersede_resumes_started_revision_with_open_pr(
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(state, monkeypatch, head_sha="h")
     ops = _RevisionPrOps(pr=7, pr_state="OPEN", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == 7
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "returned", 7
+    )
     saved = rs.load("r-recon")
     assert len(tb._revisions(saved)) == 1
     assert saved.ops["tasks-deliver-v2"]["status"] == "completed"
@@ -4042,7 +4077,9 @@ def test_supersede_resumes_started_revision_without_pr(tmp_path, monkeypatch):
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(state, monkeypatch)
     ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == 77
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
     saved = rs.load("r-recon")
     assert len(tb._revisions(saved)) == 1          # v3 не заведена
     assert saved.ops["tasks-deliver-v2"]["status"] == "completed"
@@ -4152,7 +4189,9 @@ def test_supersede_resumes_when_branch_stands_on_base(tmp_path, monkeypatch):
     # local_head == base_sha намерения: ровно то, что оставляет
     # `ensure_branch`, создающая ветку от текущего HEAD.
     ops = _RevisionPrOps(pr=None, local_head="base-sha-1", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == 77
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
     saved = rs.load("r-recon")
     assert len(tb._revisions(saved)) == 1          # v3 не заведена
     assert saved.ops["tasks-deliver-v2"]["status"] == "completed"
@@ -4180,7 +4219,9 @@ def test_supersede_abandons_shifted_revision_and_starts_next(
     # base намерения — позапрошлый: апстрим уехал, пока ревизия лежала.
     _seed_revision(state, monkeypatch, base_sha="БАЗА-ПОЗАПРОШЛАЯ")
     ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == 77
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
     saved = rs.load("r-recon")
     v2 = saved.ops["tasks-deliver-v2"]
     assert v2["status"] == "abandoned"
@@ -4211,7 +4252,9 @@ def test_supersede_skips_abandoned_revision(tmp_path, monkeypatch):
         state, monkeypatch, status="abandoned", reason="оператор закрыл PR",
     )
     ops = _RevisionPrOps(pr=999, pr_state="OPEN", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == 77
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
     saved = rs.load("r-recon")
     assert [n for n, _ in tb._revisions(saved)] == [2, 3]
     assert saved.ops["tasks-deliver-v2"]["status"] == "abandoned"
@@ -4484,12 +4527,15 @@ def test_cli_supersede_calls_deliver_superseded(tmp_path, monkeypatch, capsys):
 
     def _fake(s, o, legacy_bundle=None, approval_pr=None):
         called["args"] = (s.run_id, legacy_bundle, approval_pr)
-        return 77
+        return tb.SupersedeResult("delivered", 77)
 
     monkeypatch.setattr(tb, "deliver_superseded", _fake)
     monkeypatch.setattr(tb, "RealOps", lambda: object())
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
     assert called["args"] == ("r-recon", None, None)
+    assert "переизданная tasks-спека доставлена: PR #77" in (
+        capsys.readouterr().out
+    )
 
 
 def test_cli_supersede_passes_flags_through(tmp_path, monkeypatch, capsys):
@@ -4511,7 +4557,7 @@ def test_cli_supersede_passes_flags_through(tmp_path, monkeypatch, capsys):
 
     def _fake(s, o, legacy_bundle=None, approval_pr=None):
         called["args"] = (s.run_id, legacy_bundle, approval_pr)
-        return 77
+        return tb.SupersedeResult("delivered", 77)
 
     monkeypatch.setattr(tb, "deliver_superseded", _fake)
     monkeypatch.setattr(tb, "RealOps", lambda: object())
@@ -4530,10 +4576,69 @@ def test_cli_supersede_noop_is_success(tmp_path, monkeypatch, capsys):
     _recon_state(tmp_path, monkeypatch)
     monkeypatch.setattr(
         tb, "deliver_superseded",
-        lambda s, o, legacy_bundle=None, approval_pr=None: None,
+        lambda s, o, legacy_bundle=None, approval_pr=None:
+            tb.SupersedeResult("noop"),
     )
     monkeypatch.setattr(tb, "RealOps", lambda: object())
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
+    # No-op о себе уже сказал сам («апстрим не менялся»); строки о
+    # доставке быть не должно — доставки не было.
+    assert "доставлена" not in capsys.readouterr().out
+
+
+def test_cli_supersede_returned_pr_is_not_announced_as_delivered(
+    tmp_path, monkeypatch, capsys
+):
+    """Возврат существующего PR СКВОЗЬ `main`: строки о доставке НЕТ.
+
+    Реконсиляция §I3 в терминальных исходах отдаёт номер уже открытого PR
+    (здесь — первой доставки) и сама говорит о нём правду. Пока `main`
+    различал только `pr is None`, поверх правдивой строки печаталось
+    «переизданная tasks-спека доставлена: PR #5»: две строки подряд,
+    противоречащие друг другу, при RC 0 — оператор читает последнюю и
+    идёт мержить ЧУЖОЙ PR как переиздание, хотя ни ветки
+    `spec/<ws-id>-tasks-v<N>`, ни нового PR не создавалось.
+
+    Интеграционные тесты возврата PR идут мимо `main`, а CLI-тесты
+    подменяют `deliver_superseded` заглушкой — противоречие не ловилось
+    ничем, поэтому здесь через `main` идёт НАСТОЯЩАЯ реализация."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    rs.save(state)
+    ops = _RevisionPrOps(pr=5, pr_state="OPEN", prs=[_MERGED_PR])
+    monkeypatch.setattr(tb, "RealOps", lambda: ops)
+    assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
+    out = capsys.readouterr().out
+    assert "первая доставка уже открыта PR #5" in out
+    assert "переизданная tasks-спека доставлена" not in out
+    # И вывод не расходится с фактами: ветки/PR не создавалось.
+    assert not any(c[0] == "ensure_branch" for c in ops.calls)
+    assert tb._revisions(rs.load("r-recon")) == []
+
+
+def test_cli_supersede_delivery_is_announced(tmp_path, monkeypatch, capsys):
+    """Обратная сторона: состоявшаяся доставка объявляется.
+
+    Без этого теста «не печатать на возврате» удовлетворяется и полным
+    удалением строки — оператор терял бы номер PR своего переиздания."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
+    rs.save(state)
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    monkeypatch.setattr(tb, "RealOps", lambda: ops)
+    assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
+    assert "переизданная tasks-спека доставлена: PR #77" in (
+        capsys.readouterr().out
+    )
+    assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops.calls
 
 
 def test_cli_supersede_missing_bundle_dir_is_diagnosed(
