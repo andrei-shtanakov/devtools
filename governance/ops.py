@@ -107,6 +107,24 @@ class Ops(Protocol):
 
     def find_issue(self, repo_slug: str, body_prefix: str) -> int | None: ...
 
+    def last_commit_touching(
+        self, target_dir: str, rel_path: str
+    ) -> str | None: ...
+
+    def prs_containing_commit(
+        self, repo_slug: str, sha: str
+    ) -> list[dict]: ...
+
+    def rev_parse(self, target_dir: str, ref: str) -> str | None: ...
+
+    def blob_in_commit(
+        self, target_dir: str, sha: str, rel_path: str
+    ) -> str | None: ...
+
+    def commit_parent(self, target_dir: str, sha: str) -> str | None: ...
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None: ...
+
 
 # --- Харнесс авторинга (лимиты codex, 2026-09-03; парный слой к харнессу
 # ревьюера в review-pr.sh). Выбор: env AUTHOR_HARNESS/AUTHOR_MODEL >
@@ -455,10 +473,24 @@ class RealOps:
         return done.stdout.strip()
 
     def push_branch(self, target_dir: str, branch: str) -> None:
-        """git push -u origin branch из target_dir."""
-        subprocess.run(
-            ["git", "push", "-u", "origin", branch], cwd=target_dir, check=True,
+        """`git push -u origin <branch>`; сбой — RuntimeError со stderr.
+
+        Не `check=True`: наружу летел `CalledProcessError`, а `main`
+        ловит только `RuntimeError` — оператор получал сырой трейсбек
+        вместо сообщения. Ходовой случай — отвергнутый non-ff push
+        (ветка на remote ушла вперёд локальной), и текст git'а из stderr
+        для него и есть диагностика. Нормализация та же, что у
+        `checkout_and_pull`.
+        """
+        done = subprocess.run(
+            ["git", "push", "-u", "origin", branch],
+            cwd=target_dir, capture_output=True, text=True,
         )
+        if done.returncode != 0:
+            raise RuntimeError(
+                f"push_branch: git push -u origin {branch} "
+                f"rc={done.returncode}: {done.stderr.strip()}"
+            )
 
     def checkout_and_pull(self, target_dir: str, branch: str) -> None:
         """`git switch <branch>` + `git pull --ff-only`; сбой — RuntimeError.
@@ -846,3 +878,119 @@ class RealOps:
             if body.startswith(body_prefix):
                 return item["number"]
         return None
+
+    def last_commit_touching(self, target_dir: str, rel_path: str) -> str | None:
+        """SHA последнего коммита, изменившего rel_path; None — не менялся.
+
+        HEAD проверяется ПЕРВЫМ: в репозитории без коммитов `git log`
+        выходит с rc != 0, и трактовать это как сбой значило бы отказывать
+        там, где ответ честно «истории нет» (замечание ревью PR #164).
+        """
+        if self.rev_parse(target_dir, "HEAD") is None:
+            return None
+        done = subprocess.run(
+            ["git", "-C", target_dir, "log", "-1", "--format=%H", "--", rel_path],
+            capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            raise RuntimeError(
+                f"last_commit_touching: git log rc={done.returncode}: "
+                f"{done.stderr.strip()}"
+            )
+        sha = done.stdout.strip()
+        return sha or None
+
+    def prs_containing_commit(self, repo_slug: str, sha: str) -> list[dict]:
+        """PR-ы, содержащие коммит (gh API). Сбой запроса — RuntimeError.
+
+        Эндпоинт отдаёт REST-форму: `state: open|closed`, `merged_at`,
+        `merge_commit_sha`, и `merged_by` в нём приходит **null** даже у
+        вмерженного PR (проверено на живом ответе, замечание ревью #164).
+        Поэтому здесь только нормализация состава: snake_case → ожидаемые
+        ключи, `state` → OPEN|CLOSED|MERGED по факту `merged_at`. Подпись
+        (`mergedBy`) берётся отдельным запросом `pr_facts` — см. Task 3.
+
+        Запрос идёт `--paginate`: эндпоинт REST-пагинируемый (30 на
+        страницу по умолчанию), а `_resolve_correction_pr` (§I7) на
+        списке кандидатов держит гвард «ровно один» — усечение по первой
+        странице выродило бы его в молчаливый выбор первого. `--slurp`
+        для этого непригоден (`gh` 2.98: «the --slurp option is not
+        supported with --jq»), поэтому jq-выражение остаётся прежним, а
+        `--paginate` печатает ПО МАССИВУ НА СТРАНИЦУ подряд — отсюда
+        разбор stdout как последовательности JSON-документов, а не
+        одного (проверено живым `gh` на трёхстраничной выдаче).
+        """
+        done = subprocess.run(
+            ["gh", "api", f"repos/{repo_slug}/commits/{sha}/pulls",
+             "--paginate",
+             "--jq", "[.[] | {number, "
+                     "state: (if .merged_at then \"MERGED\" "
+                     "else (.state | ascii_upcase) end), "
+                     "baseRefName: .base.ref, mergedAt: .merged_at, "
+                     "mergeCommit: .merge_commit_sha}]"],
+            capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            raise RuntimeError(
+                f"prs_containing_commit: gh api rc={done.returncode}: "
+                f"{done.stderr.strip()}"
+            )
+        found: list[dict] = []
+        decoder = json.JSONDecoder()
+        text, pos = done.stdout, 0
+        while True:
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+            if pos >= len(text):
+                return found
+            try:
+                page, pos = decoder.raw_decode(text, pos)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"prs_containing_commit: invalid JSON: {done.stdout!r}"
+                ) from exc
+            if not isinstance(page, list):
+                raise RuntimeError(
+                    f"prs_containing_commit: unexpected JSON shape: "
+                    f"{done.stdout!r}"
+                )
+            found.extend(page)
+
+    def rev_parse(self, target_dir: str, ref: str) -> str | None:
+        """SHA ссылки; None — ссылки нет (нормальный случай, не сбой)."""
+        done = subprocess.run(
+            ["git", "-C", target_dir, "rev-parse", "--verify", "--quiet", ref],
+            capture_output=True, text=True,
+        )
+        return done.stdout.strip() or None
+
+    def blob_in_commit(
+        self, target_dir: str, sha: str, rel_path: str
+    ) -> str | None:
+        """blob-хеш файла в коммите; None — файла в нём нет."""
+        done = subprocess.run(
+            ["git", "-C", target_dir, "rev-parse", f"{sha}:{rel_path}"],
+            capture_output=True, text=True,
+        )
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    def commit_parent(self, target_dir: str, sha: str) -> str | None:
+        """SHA первого родителя; None — корневой коммит либо нет коммита."""
+        done = subprocess.run(
+            ["git", "-C", target_dir, "rev-parse", "--verify", "--quiet",
+             f"{sha}^1"],
+            capture_output=True, text=True,
+        )
+        return done.stdout.strip() or None
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        """`git show <ref>:<path>` — содержимое файла в ревизии, или None.
+
+        None — и когда ревизии нет, и когда файла в ней нет: у вызывающего
+        оба случая означают одно (вывод не удался, §I8), различать нечего.
+        """
+        done = subprocess.run(
+            ["git", "show", f"{ref}:{path}"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        return done.stdout if done.returncode == 0 else None

@@ -9,6 +9,7 @@ stdout/stderr/returncode. Живых `git`/`gh`/`codex`/`gate-check` вызов�
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -98,7 +99,7 @@ def test_find_pr_rc_nonzero_raises_runtime_error(monkeypatch):
     _install_fake_run(monkeypatch, returncode=1, stderr="rate limited")
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="gh pr list rc=1: rate limited"):
         ops.find_pr(REPO_SLUG, "feat/x")
 
 
@@ -106,7 +107,7 @@ def test_find_pr_invalid_json_raises_runtime_error(monkeypatch):
     _install_fake_run(monkeypatch, returncode=0, stdout="not json")
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="invalid JSON: 'not json'"):
         ops.find_pr(REPO_SLUG, "feat/x")
 
 
@@ -485,7 +486,7 @@ def test_find_issue_rc_nonzero_raises_runtime_error(monkeypatch):
     _install_fake_run(monkeypatch, returncode=1, stderr="boom")
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="gh issue list rc=1: boom"):
         ops.find_issue(REPO_SLUG, "slug: beh-remediation-WS-1")
 
 
@@ -493,7 +494,7 @@ def test_find_issue_invalid_json_raises_runtime_error(monkeypatch):
     _install_fake_run(monkeypatch, returncode=0, stdout="not json")
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="invalid JSON: 'not json'"):
         ops.find_issue(REPO_SLUG, "slug: beh-remediation-WS-1")
 
 
@@ -541,7 +542,9 @@ def test_checkout_and_pull_switch_failure_raises_runtime_error(monkeypatch):
     _install_fake_run(monkeypatch, returncode=1, stderr="unknown branch")
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(
+        RuntimeError, match="git switch master rc=1: unknown branch"
+    ):
         ops.checkout_and_pull("/tmp/devtools", "master")
 
 
@@ -556,9 +559,40 @@ def test_checkout_and_pull_pull_failure_raises_runtime_error(monkeypatch):
     monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
     ops = RealOps()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(
+        RuntimeError, match="git pull --ff-only rc=1: diverged"
+    ):
         ops.checkout_and_pull("/tmp/devtools", "master")
     assert len(calls_seen) == 2  # switch ran, then pull failed
+
+
+# --- Кейс 11b: push_branch — сбой пуша сообщением, не трейсбеком -----------
+
+
+def test_push_branch_command(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0)
+
+    RealOps().push_branch("/tmp/devtools", "spec/WS-alpha-7-tasks-v2")
+
+    assert [c.argv for c in calls] == [
+        ["git", "push", "-u", "origin", "spec/WS-alpha-7-tasks-v2"],
+    ]
+    assert calls[0].kwargs["cwd"] == "/tmp/devtools"
+
+
+def test_push_branch_failure_raises_runtime_error(monkeypatch):
+    """Отвергнутый push — RuntimeError со stderr git'а, не CalledProcessError.
+
+    `main` ловит только `RuntimeError`; с `check=True` ходовой non-ff
+    («ветка на remote ушла вперёд локальной») уходил оператору сырым
+    трейсбеком, и текст git'а — единственная диагностика — терялся."""
+    _install_fake_run(
+        monkeypatch, returncode=1, stderr="! [rejected] (non-fast-forward)",
+    )
+
+    with pytest.raises(RuntimeError, match="non-fast-forward") as exc:
+        RealOps().push_branch("/tmp/devtools", "spec/WS-alpha-7-tasks-v2")
+    assert "rc=1" in str(exc.value)
 
 
 # --- Кейс 12: current_branch / materialize_pr_head (ретроспектива 09-02) ----
@@ -886,3 +920,292 @@ def test_requirements_dsl_mandates_priority_for_nfr() -> None:
     dsl = _AUTHOR_DSL["requirements"]
     nfr_part = dsl.split("NFR-NN")[1]
     assert "**Priority**" in nfr_part
+
+
+# --- Task 1: провенанс и восстановление коммита -----------------------------
+
+
+def test_ops_protocol_declares_provenance_primitives() -> None:
+    from governance.ops import Ops
+
+    for name in (
+        "last_commit_touching", "prs_containing_commit",
+        "rev_parse", "blob_in_commit", "commit_parent",
+    ):
+        assert hasattr(Ops, name), name
+
+
+def test_real_ops_last_commit_touching_returns_none_without_history(
+    tmp_path,
+) -> None:
+    """Пустой репо: `git log` даёт rc != 0, но ответ честно «истории нет»."""
+    import subprocess as real_subprocess
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    assert RealOps().last_commit_touching(str(tmp_path), "nope.md") is None
+
+
+def test_last_commit_touching_returns_sha_when_history_exists(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="abc123\n")
+    ops = RealOps()
+
+    result = ops.last_commit_touching("/tmp/devtools", "spec/x.md")
+
+    assert result == "abc123"
+    assert calls[0].argv == ["git", "-C", "/tmp/devtools", "rev-parse",
+                              "--verify", "--quiet", "HEAD"]
+    assert calls[1].argv == [
+        "git", "-C", "/tmp/devtools", "log", "-1", "--format=%H",
+        "--", "spec/x.md",
+    ]
+
+
+def test_last_commit_touching_never_touched_returns_none(monkeypatch):
+    def fake_run(argv, **kwargs):
+        if "rev-parse" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="head\n",
+                                                 stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+
+    assert ops.last_commit_touching("/tmp/devtools", "never.md") is None
+
+
+def test_last_commit_touching_log_failure_raises_runtime_error(monkeypatch):
+    def fake_run(argv, **kwargs):
+        if "rev-parse" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="head\n",
+                                                 stderr="")
+        return subprocess.CompletedProcess(argv, 128, stdout="", stderr="boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+
+    with pytest.raises(RuntimeError, match="git log"):
+        ops.last_commit_touching("/tmp/devtools", "x.md")
+
+
+# Нормализующее jq-выражение держится тестом ЦЕЛИКОМ: правка выражения
+# обязана быть осознанной правкой теста. Подстрочные вхождения этого не
+# удерживали — правка `.base.ref` → `.head.ref` проходила зелёной (F-13).
+_PRS_CONTAINING_COMMIT_JQ = (
+    "[.[] | {number, "
+    'state: (if .merged_at then "MERGED" '
+    "else (.state | ascii_upcase) end), "
+    "baseRefName: .base.ref, mergedAt: .merged_at, "
+    "mergeCommit: .merge_commit_sha}]"
+)
+
+# Форма живого ответа `repos/:slug/commits/:sha/pulls` (REST): snake_case,
+# `state: open|closed`, `merged_by: null` даже у вмерженного PR. Ветки base и
+# head различны намеренно — иначе подмена одной другой была бы незаметна.
+_REST_COMMIT_PULLS_PAYLOAD = [
+    {
+        "number": 42,
+        "state": "closed",
+        "merged_at": "2026-09-01T00:00:00Z",
+        "merge_commit_sha": "deadbeef",
+        "base": {"ref": "master"},
+        "head": {"ref": "feat/supersede-code"},
+        "merged_by": None,
+    },
+    {
+        "number": 43,
+        "state": "open",
+        "merged_at": None,
+        "merge_commit_sha": None,
+        "base": {"ref": "master"},
+        "head": {"ref": "fix/other"},
+        "merged_by": None,
+    },
+]
+
+
+def test_prs_containing_commit_command_and_normalization(monkeypatch):
+    payload = [
+        {"number": 42, "state": "MERGED", "baseRefName": "master",
+         "mergedAt": "2026-09-01T00:00:00Z", "mergeCommit": "deadbeef"},
+    ]
+    calls = _install_fake_run(
+        monkeypatch, returncode=0, stdout=json.dumps(payload),
+    )
+    ops = RealOps()
+
+    result = ops.prs_containing_commit(REPO_SLUG, "deadbeef")
+
+    assert result == payload
+    assert calls[0].argv == [
+        "gh", "api", f"repos/{REPO_SLUG}/commits/deadbeef/pulls",
+        "--paginate", "--jq", _PRS_CONTAINING_COMMIT_JQ,
+    ]
+
+
+def test_prs_containing_commit_collects_every_page(monkeypatch):
+    """Кандидаты §I7 собираются со ВСЕХ страниц, а не с первой.
+
+    Эндпоинт REST-пагинируемый (30 на страницу), а `_resolve_correction_pr`
+    держит на списке гвард «ровно один кандидат» — усечение по первой
+    странице выродило бы его в молчаливый выбор первого. `--slurp` для
+    этого непригоден (`gh` 2.98: «not supported with --jq»), поэтому
+    `--paginate` печатает по массиву на страницу подряд, и разбирать
+    stdout нужно как ПОСЛЕДОВАТЕЛЬНОСТЬ JSON-документов: `json.loads`
+    целиком на такой выдаче падал бы «invalid JSON».
+    """
+    page1 = [{"number": 42, "state": "MERGED", "baseRefName": "master",
+              "mergedAt": "2026-09-01T00:00:00Z", "mergeCommit": "aaa"}]
+    page2 = [{"number": 43, "state": "MERGED", "baseRefName": "master",
+              "mergedAt": "2026-09-02T00:00:00Z", "mergeCommit": "bbb"}]
+    _install_fake_run(
+        monkeypatch, returncode=0,
+        stdout=f"{json.dumps(page1)}\n{json.dumps(page2)}\n[]\n",
+    )
+
+    assert RealOps().prs_containing_commit(REPO_SLUG, "deadbeef") == [
+        *page1, *page2,
+    ]
+
+
+def test_prs_containing_commit_jq_really_normalizes_rest_payload(
+    monkeypatch,
+) -> None:
+    """Настоящий `jq` прогоняется по REST-фикстуре — проверяется поведение.
+
+    Фейковый subprocess отдаёт уже нормализованный ответ, поэтому само
+    выражение в его тестах не исполняется. Здесь оно берётся из построенного
+    argv и применяется живым `jq`: удерживаются и `MERGED` по `merged_at`,
+    и `baseRefName` из `.base.ref` — поле, по которому `_resolve_correction_pr`
+    отбирает correction-PR (§I7).
+    """
+    jq_bin = shutil.which("jq")
+    if jq_bin is None:
+        pytest.skip("jq не установлен — нормализацию не на чем прогнать")
+
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="[]")
+    RealOps().prs_containing_commit(REPO_SLUG, "deadbeef")
+    argv = calls[0].argv
+    jq_expr = argv[argv.index("--jq") + 1]
+    # Фейк подменяет subprocess.run глобально — снимаем перед живым вызовом.
+    monkeypatch.undo()
+
+    done = subprocess.run(
+        [jq_bin, "-c", jq_expr],
+        input=json.dumps(_REST_COMMIT_PULLS_PAYLOAD),
+        capture_output=True, text=True,
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == [
+        {"number": 42, "state": "MERGED", "baseRefName": "master",
+         "mergedAt": "2026-09-01T00:00:00Z", "mergeCommit": "deadbeef"},
+        {"number": 43, "state": "OPEN", "baseRefName": "master",
+         "mergedAt": None, "mergeCommit": None},
+    ]
+
+
+def test_prs_containing_commit_rc_nonzero_raises_runtime_error(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1, stderr="rate limited")
+    ops = RealOps()
+
+    with pytest.raises(RuntimeError, match="gh api rc=1: rate limited"):
+        ops.prs_containing_commit(REPO_SLUG, "deadbeef")
+
+
+def test_prs_containing_commit_invalid_json_raises_runtime_error(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=0, stdout="not json")
+    ops = RealOps()
+
+    with pytest.raises(RuntimeError, match="invalid JSON: 'not json'"):
+        ops.prs_containing_commit(REPO_SLUG, "deadbeef")
+
+
+def test_prs_containing_commit_empty_returns_empty_list(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=0, stdout="")
+    ops = RealOps()
+
+    assert ops.prs_containing_commit(REPO_SLUG, "deadbeef") == []
+
+
+def test_rev_parse_returns_sha(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="cafe1234\n")
+    ops = RealOps()
+
+    result = ops.rev_parse("/tmp/devtools", "HEAD")
+
+    assert result == "cafe1234"
+    assert calls[0].argv == [
+        "git", "-C", "/tmp/devtools", "rev-parse", "--verify", "--quiet",
+        "HEAD",
+    ]
+
+
+def test_rev_parse_missing_ref_returns_none(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1, stdout="", stderr="bad ref")
+    ops = RealOps()
+
+    assert ops.rev_parse("/tmp/devtools", "nope") is None
+
+
+def test_blob_in_commit_returns_hash(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="blobsha\n")
+    ops = RealOps()
+
+    result = ops.blob_in_commit("/tmp/devtools", "deadbeef", "spec/x.md")
+
+    assert result == "blobsha"
+    assert calls[0].argv == [
+        "git", "-C", "/tmp/devtools", "rev-parse", "deadbeef:spec/x.md",
+    ]
+
+
+def test_blob_in_commit_absent_returns_none(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=128, stdout="", stderr="bad")
+    ops = RealOps()
+
+    assert ops.blob_in_commit("/tmp/devtools", "deadbeef", "nope.md") is None
+
+
+def test_show_file_returns_content_at_ref(tmp_path) -> None:
+    import subprocess as real_subprocess
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    spec_dir = tmp_path / "spec"
+    spec_dir.mkdir()
+    (spec_dir / "x.md").write_text("hello\n")
+    real_subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    real_subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c",
+         "user.name=t", "commit", "-q", "-m", "c"],
+        check=True,
+    )
+
+    assert RealOps().show_file(str(tmp_path), "HEAD", "spec/x.md") == "hello\n"
+
+
+def test_show_file_none_for_missing_path(tmp_path) -> None:
+    import subprocess as real_subprocess
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    assert RealOps().show_file(str(tmp_path), "HEAD", "spec/nope.md") is None
+
+
+def test_commit_parent_returns_sha(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="parentsha\n")
+    ops = RealOps()
+
+    result = ops.commit_parent("/tmp/devtools", "deadbeef")
+
+    assert result == "parentsha"
+    assert calls[0].argv == [
+        "git", "-C", "/tmp/devtools", "rev-parse", "--verify", "--quiet",
+        "deadbeef^1",
+    ]
+
+
+def test_commit_parent_root_commit_returns_none(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1, stdout="", stderr="no parent")
+    ops = RealOps()
+
+    assert ops.commit_parent("/tmp/devtools", "deadbeef") is None
