@@ -4808,6 +4808,37 @@ def test_supersede_stamp_keeps_provenance_of_untouched_stale_nodes(
     )
 
 
+def test_supersede_fail_closed_leaves_no_branch_commit_or_ledger_entry(
+    tmp_path, monkeypatch
+) -> None:
+    """Отказ §I7 наступает на ПРОСПЕКТИВНОМ штампе — следов не остаётся.
+
+    Порядок §I2 ставит проспективный штамп ДО `_start_revision`, поэтому
+    `draft` вне `signed_nodes` роняет переиздание раньше ветки, коммита,
+    PR и записи в леджере. Съедь отказ внутрь `deliver()` — оператор
+    получил бы ту же диагностику, но с оставленной веткой и started-
+    ревизией, которую пришлось бы разбирать реконсиляцией."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    # Correction (#403) трогал только анкер; charter он не касался, а тот
+    # лежит `draft` — сохранять там нечего.
+    _set_node(state.target_dir, "00-charter.md", status="draft")
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    rs.save(state)
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    with pytest.raises(RuntimeError, match="00-charter.md"):
+        tb.deliver_superseded(state, ops)
+    assert not any(
+        call[0] in ("ensure_branch", "commit_paths", "push_branch",
+                    "create_draft_pr")
+        for call in ops.calls
+    )
+    assert "tasks-deliver-v2" not in rs.load("r-recon").ops
+
+
 #: SHA коммита correction-PR (#403) и штамп-коммита нашей доставки v1 (#5).
 _CORRECTION_SHA = "c-correction"
 _V1_STAMP_SHA = "c-v1-stamp"
