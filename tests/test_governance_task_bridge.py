@@ -2382,6 +2382,20 @@ def _recon_state(tmp_path: Path, monkeypatch, **kw):
     return state
 
 
+def _supersede_state(tmp_path: Path, monkeypatch, **kw):
+    """`_recon_state` + бандл в base, ПРОШТАМПОВАННЫЙ доставкой v1.
+
+    Боевое состояние входа переиздания: tasks-PR доставки v1 вмержен,
+    значит узлы бандла в base уже `approved` с подписью ЕЁ мержера.
+    `_recon_state` кладёт бандл в `draft` — вход, которого у переиздания
+    не бывает: поузловой §I7 (devtools#172) на нём fail-closed'ит узел
+    вне `signed_nodes`, потому что сохранять там нечего.
+    """
+    state = _recon_state(tmp_path, monkeypatch, **kw)
+    _stamp_base_as_previous_delivery(state)
+    return state
+
+
 def test_deliver_for_run_write_ahead_op_and_completion(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -3887,7 +3901,7 @@ def test_supersede_changed_anchor_opens_new_branch_and_pr(
     from governance import task_bridge as tb
     from governance.stale_adapter import blob_sha1
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ-ДРУГОЙ"}
     rs.save(state)
@@ -4174,6 +4188,9 @@ def test_supersede_legacy_bundle_uses_its_own_dag(tmp_path, monkeypatch):
     (bundle / "30-decomposition.md").write_text(
         DECOMPOSITION_MD_LEGACY5, encoding="utf-8"
     )
+    # Штамп v1 — ПОСЛЕ правки состава каталога и по легаси-DAG: базу
+    # переиздания оставляет вмерженный tasks-PR доставки v1.
+    _stamp_base_as_previous_delivery(state, legacy_bundle=5)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
@@ -4211,7 +4228,7 @@ def test_supersede_refreshes_base_before_reading_facts(
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
@@ -4238,7 +4255,7 @@ def test_supersede_refreshes_base_before_reading_facts(
 def test_supersede_version_is_monotonic(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     (Path(state.target_dir) / "spec").mkdir(exist_ok=True)
     (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").write_text(
         "---\nspec_stage: tasks\nversion: 4\n---\n", encoding="utf-8"
@@ -4271,7 +4288,7 @@ def test_supersede_legacy_without_content_anchor_records_unavailable(
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     # без content_anchor
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5}
     rs.save(state)
@@ -4316,7 +4333,7 @@ def test_supersede_unavailable_without_content_anchor(
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     extra = (
         {"anchor": _v1_anchor_of_current_tree(state)}
         if isinstance(v1_extra, str) else v1_extra
@@ -4767,6 +4784,9 @@ def _seed_revision(state, monkeypatch, **over):
     from governance import run_state as rs
     from governance import task_bridge as tb
 
+    # База переиздания — бандл, проштампованный вмерженной доставкой v1
+    # (идемпотентно, если вызывающий уже привёл её в это состояние).
+    _stamp_base_as_previous_delivery(state)
     by, at = _pr_signature(403)
     prospective = tb._prospective_anchor(
         state.target_dir, state.bundle_dir, by, at, None,
@@ -5259,7 +5279,7 @@ def test_supersede_records_commit_facts_before_push(tmp_path, monkeypatch):
     from governance import task_bridge as tb
     from governance.stale_adapter import blob_sha1
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
@@ -5296,7 +5316,7 @@ def test_supersede_records_tasks_blob_before_commit(tmp_path, monkeypatch):
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
@@ -5343,7 +5363,7 @@ def test_supersede_fails_when_actual_anchor_differs(tmp_path, monkeypatch):
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
@@ -5364,7 +5384,7 @@ def test_supersede_write_ahead_survives_delivery_failure(tmp_path, monkeypatch):
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
@@ -5602,7 +5622,7 @@ def test_cli_supersede_delivery_is_announced(tmp_path, monkeypatch, capsys):
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state = _recon_state(tmp_path, monkeypatch)
+    state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ-ДРУГОЙ"}
     rs.save(state)

@@ -768,7 +768,10 @@ def stamp_bundle_approved(
     перезаписывается ТОЛЬКО на них:
 
     - `None` (дефолт, обычная доставка `deliver_for_run`) — поведение
-      байт-в-байт прежнее: чужая подпись на approved-узле не трогается;
+      байт-в-байт прежнее: чужая подпись на approved-узле не трогается,
+      а узел в любом другом статусе законно идёт `draft → approved` с
+      подписью бандл-PR. Понятия `signed_nodes` на этом пути нет вовсе,
+      и ни один отказ ниже на нём не достижим;
     - узел, которого correction-PR не касался, сохраняет ИСХОДНЫЙ
       провенанс: приписать ему подпись correction-PR значит стереть
       факт, что эти байты одобрил другой человек и в другой момент.
@@ -779,10 +782,32 @@ def stamp_bundle_approved(
       повторный заход переиздания с тем же correction-PR не меняет ничего
       и в `changed` не входит; на этом детерминизме стоит §I3.1;
     - `version` НЕ инкрементится: инкремент привязан к ПЕРЕХОДУ
-      draft → approved (он внутри той же ветки), а не к «файл тронули».
+      в `approved` (он внутри той же ветки), а не к «файл тронули».
       Перештамп перехода не совершает — он исправляет провенанс тех же
       байтов, которые доставил correction-PR, и приписывать им новое
       поколение документа нечем.
+
+    §I7 ДЕЙСТВУЕТ И НА ПЕРЕХОДЕ (правка по решению владельца 2026-09-09,
+    devtools#172). `draft`/`stale` — не экзотика, а штатный след
+    correction'а: коррекция бандла приводит узлы ровно в эти статусы.
+    Пока `restamp_nodes` смотрела только ветка уже approved-узла,
+    поузловое правило на этом — основном — пути не работало вовсе:
+    переходящий узел получал подпись correction-PR независимо от состава
+    его файлов. Живой случай (переиздание
+    `verify-first-file-scope-group-targets-20260908`, `approval_pr: 407`):
+    `design`/`acceptance` были `stale` и вне `signed_nodes`, а после
+    штампа утверждали, что их одобрил человек, мерживший #407 — PR, их
+    не касавшийся. Ровно та ложь о провенансе, ради запрета которой §I7 и
+    писался. Поэтому у перехода вне `signed_nodes` подпись берётся
+    `_require_preserved_signature` — сохраняется прежняя либо fail-closed.
+
+    `version` у сохранившего подпись `stale`-узла всё же РАСТЁТ: он
+    совершает переход, а §I5 требует, чтобы фактический штамп совпал с
+    проспективным (`_content_anchor` считает его с `restamp_nodes=None`,
+    то есть всегда первой веткой). Канонизация вырезает подпись, но НЕ
+    `status`/`version` — оставь мы `version` прежним, записанный
+    `content_anchor` разошёлся бы с тем, что доставка кладёт в base, и
+    no-op второго круга стал бы недостижим.
     """
     dag = _dag_for(legacy_bundle)
     _check_bundle_composition(target_dir, bundle_dir, dag)
@@ -793,15 +818,21 @@ def stamp_bundle_approved(
         path = base / name
         meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
         dirty = False
-        if meta.get("status") != "approved":
+        signed = restamp_nodes is not None and _node_id(name) in restamp_nodes
+        status = meta.get("status")
+        if status != "approved":
+            if restamp_nodes is None or signed:
+                meta["approved_by"] = approved_by
+                meta["approved_at"] = approved_at
+            else:
+                # Подпись не меняется — либо сохраняется прежняя, либо
+                # отказ; `version`/`status` идут общим путём перехода.
+                _require_preserved_signature(bundle_dir, name, status, meta)
             meta["status"] = "approved"
-            meta["approved_by"] = approved_by
-            meta["approved_at"] = approved_at
             meta["version"] = int(meta.get("version") or 1) + 1
             dirty = True
         elif (
-            restamp_nodes is not None
-            and _node_id(name) in restamp_nodes
+            signed
             and (
                 meta.get("approved_by") != approved_by
                 or meta.get("approved_at") != approved_at
@@ -830,6 +861,70 @@ def stamp_bundle_approved(
             path.read_text(encoding="utf-8")
         )
     return changed
+
+
+#: Единственный статус, с которого узел ВНЕ `signed_nodes` вправе войти в
+#: `approved`, сохранив прежнюю подпись: `stale` означает «изменился
+#: upstream», то есть собственное содержание узла осталось тем же, что
+#: одобрил его прежний подписант (§I7, решение владельца 2026-09-09).
+_PRESERVING_STATUS = "stale"
+
+#: Процедура оператору при fail-closed поузлового §I7 — отказ без
+#: процедуры бесполезен.
+_UNSIGNED_NODE_PROCEDURE = (
+    "назовите correction, покрывающий этот узел (--approval-pr <n>), "
+    "либо доставьте его правку отдельным PR"
+)
+
+
+def _require_preserved_signature(
+    bundle_dir: str,
+    name: str,
+    status: object,
+    meta: dict,
+) -> None:
+    """Узел вне `signed_nodes` входит в `approved`: подпись сохранима?
+
+    Переход разрешён ровно из `stale` и ровно при непустой прежней
+    подписи; иначе — RuntimeError с именем узла и процедурой. `meta` не
+    мутируется: сохранение подписи и есть «ничего не трогать», проверить
+    остаётся только право на это.
+
+    Почему `stale` — да. Статус выставлен потому, что сменился upstream,
+    а не содержание узла: те же байты тела одобрял тот же человек, и
+    прежняя подпись остаётся истинной.
+
+    Почему `draft` — нет. Здесь содержание могло измениться, и изменить
+    его мог ДРУГОЙ correction-PR, которого мы не разрешали. Сохранённая
+    подпись утверждала бы, что прежний подписант одобрил байты, которых
+    не видел, — недоказуемо, значит fail-closed. По той же причине
+    fail-closed и любой иной не-approved статус: доказательство есть
+    только у `stale`.
+
+    Почему отсутствующая подпись — нет. Сохранять нечего: узел никогда не
+    был одобрен, а выдумать провенанс неоткуда.
+    """
+    if (
+        status == _PRESERVING_STATUS
+        and meta.get("approved_by")
+        and meta.get("approved_at")
+    ):
+        return
+    reason = (
+        "прежней подписи нет (approved_by/approved_at пусты) — сохранять "
+        "нечего"
+        if status == _PRESERVING_STATUS
+        else (
+            f"status={status!r} — сохранять прежнюю подпись недоказуемо "
+            "(содержание узла мог изменить другой correction-PR), а "
+            "приписать подпись correction-PR, который узла не касался, "
+            "значит солгать о провенансе"
+        )
+    )
+    raise RuntimeError(
+        f"{bundle_dir}/{name}: узел вне signed_nodes переиздания, "
+        f"{reason}. Процедура: {_UNSIGNED_NODE_PROCEDURE}"
+    )
 
 
 @contextmanager
