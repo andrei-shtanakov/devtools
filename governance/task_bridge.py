@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -762,6 +763,37 @@ def stamp_bundle_approved(
             path.read_text(encoding="utf-8")
         )
     return changed
+
+
+def _prospective_anchor(
+    target_dir: str,
+    bundle_dir: str,
+    approved_by: str,
+    approved_at: str,
+    legacy_bundle: int | None = None,
+) -> str:
+    """blob терминального узла ПОСЛЕ штампа, без записи в рабочее дерево.
+
+    §I2 спеки: сравнивать надо те байты, что уйдут в PR и после мержа
+    лягут в base, но штамп — эффект. Поэтому бандл копируется во временный
+    каталог, штампуется ТАМ, и хеш берётся оттуда; рабочее дерево не
+    трогается вовсе (проверяется тестом `..._writes_nothing`).
+    """
+    dag = _dag_for(legacy_bundle)
+    with tempfile.TemporaryDirectory(prefix="prospective-stamp-") as tmp:
+        shadow = Path(tmp) / "target"
+        (shadow / bundle_dir).mkdir(parents=True)
+        for fname, _ in dag:
+            src = Path(target_dir) / bundle_dir / fname
+            (shadow / bundle_dir / fname).write_text(
+                src.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        stamp_bundle_approved(
+            str(shadow), bundle_dir, approved_by, approved_at,
+            legacy_bundle=legacy_bundle,
+        )
+        anchor_file = shadow / bundle_dir / dag[-1][0]
+        return blob_sha1(anchor_file.read_text(encoding="utf-8"))
 
 
 def conform_approved(

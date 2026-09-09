@@ -718,6 +718,40 @@ def test_stamp_bundle_is_idempotent(tmp_path: Path) -> None:
     assert again == []
 
 
+def test_prospective_anchor_matches_real_stamp(tmp_path: Path) -> None:
+    """Проспективный anchor равен тому, что даст фактический штамп."""
+    from governance.stale_adapter import blob_sha1
+
+    target = _target(tmp_path)
+    prospective = task_bridge._prospective_anchor(
+        str(target), "workstreams/WS-alpha-7/spec", "ai-prosto",
+        "2026-09-09T05:00:00Z", None,
+    )
+    task_bridge.stamp_bundle_approved(
+        str(target), "workstreams/WS-alpha-7/spec", "ai-prosto",
+        "2026-09-09T05:00:00Z",
+    )
+    actual = blob_sha1(
+        (target / "workstreams/WS-alpha-7/spec/30-decomposition.md")
+        .read_text(encoding="utf-8")
+    )
+    assert prospective == actual
+
+
+def test_prospective_anchor_writes_nothing(tmp_path: Path) -> None:
+    from governance.stale_adapter import blob_sha1
+
+    target = _target(tmp_path)
+    anchor_file = target / "workstreams/WS-alpha-7/spec/30-decomposition.md"
+    before = blob_sha1(anchor_file.read_text(encoding="utf-8"))
+    task_bridge._prospective_anchor(
+        str(target), "workstreams/WS-alpha-7/spec", "ai-prosto",
+        "2026-09-09T05:00:00Z", None,
+    )
+    after = blob_sha1(anchor_file.read_text(encoding="utf-8"))
+    assert before == after
+
+
 # --- Task 7 (acceptance-node): узел acceptance в DAG,
 # --legacy-bundle=3|4|5 --------------------------------------------------
 
