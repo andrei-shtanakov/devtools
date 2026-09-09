@@ -2455,6 +2455,24 @@ def test_last_delivery_prefers_highest_revision(tmp_path, monkeypatch):
     assert (n2, op2["pr"]) == (2, 10)
 
 
+def test_last_delivery_skips_started(tmp_path, monkeypatch):
+    """`started`-ревизия ничего не доставила — предыдущей ДОСТАВКОЙ не является.
+
+    Иначе §I5 становится fail-open (у `started` нет `anchor`, сверка не
+    срабатывает), в журнал уходит ложный `comparison: unavailable`, а
+    `supersedes` указывает на недоставку."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _recon_state(
+        tmp_path, monkeypatch, op={"status": "completed", "pr": 5}
+    )
+    tb._start_revision(state, 2, {"branch": "b", "base_sha": "s"})
+    n, op = tb._last_delivery(state)
+    assert (n, op["pr"]) == (1, 5)
+
+
 def test_start_revision_records_full_intent(tmp_path, monkeypatch):
     from governance import run_state as rs
     from governance import task_bridge as tb

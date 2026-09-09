@@ -1213,13 +1213,17 @@ def _revisions(state: RunState) -> list[tuple[int, dict]]:
 
 
 def _last_delivery(state: RunState) -> tuple[int, dict] | None:
-    """Последняя запись доставки: старшая ревизия либо v1; None — доставок нет.
+    """Последняя ЗАВЕРШЁННАЯ доставка: старшая ревизия либо v1; None — их нет.
 
-    Ревизии в статусе `abandoned` пропускаются: они не доставили ничего,
-    и сравнивать anchor с ними нельзя.
+    Ревизии в статусе `abandoned` и `started` пропускаются: ни та, ни
+    другая ничего не доставили. `started` — штатный след падения (§I4,
+    write-ahead), и принять её за доставку значит сделать §I5 fail-open
+    (у `started` нет `anchor`, сверка не срабатывает и переиздание идёт
+    даже при неизменившемся апстриме), записать в журнал ложный
+    `comparison: unavailable` и направить `supersedes` на недоставку.
     """
     for n, op in reversed(_revisions(state)):
-        if op.get("status") != "abandoned":
+        if op.get("status") == "completed":
             return n, op
     v1 = state.ops.get(_V1_KEY)
     return (1, v1) if v1 else None
