@@ -1701,18 +1701,58 @@ def _revisions(state: RunState) -> list[tuple[int, dict]]:
     return sorted(found)
 
 
-def _replaced_revisions(state: RunState) -> set[int]:
-    """Ревизии, которые более поздняя запись объявила заменёнными (§I3.2).
+def _discharged_replacements(state: RunState, ops: Ops) -> frozenset[int]:
+    """Номера отозванных PR, чей отзыв потерял силу: они оказались MERGED.
+
+    Отзыв адресован ПРЕДЛОЖЕНИЮ. Стоит человеку смержить отозванный PR,
+    пока замена не доведена, — отзывать становится нечего: байты в base,
+    и снимать со стола нечего. Обязательство при этом обязано
+    РАЗРЯЖАТЬСЯ, а не переноситься дальше: иначе каждая следующая ревизия
+    перенимает невыполнимое требование, упирается в безусловный запрет
+    «вмерженное не заменяется» и падает RC 1 — воркстрим не переиздать
+    больше ничем (major ревью d8f83f0).
+
+    Лекарь для этого исхода спека называет сама (§I10): вмерженная
+    дефектная доставка чинится обычным переизданием, которое ничего не
+    отзывает, а добавляет.
+
+    Цена ограничена ровно теми прогонами, где отзыв в леджере ЕСТЬ: нет
+    записей с `replaces_pr` — сети не касаемся вовсе. Обычное
+    переиздание и бесследный no-op §I5 не платят ничего, а §I5 остаётся
+    бесследным и подавно: это чтение, `run.json` оно не трогает.
+    """
+    revoked = {
+        op["replaces_pr"] for _, op in _revisions(state)
+        if isinstance(op.get("replaces_pr"), int)
+    }
+    if not revoked:
+        return frozenset()
+    return frozenset(
+        pr for pr in sorted(revoked)
+        if ops.pr_facts(state.repo_slug, pr).get("state") == "MERGED"
+    )
+
+
+def _replaced_revisions(
+    state: RunState, discharged: frozenset[int] = frozenset()
+) -> set[int]:
+    """Ревизии, которые более поздняя запись объявила отозванными (§I10).
 
     Связь направлена ВПЕРЁД, как и `supersedes`: запись N не мутируется
     (§I4), о снятии её предложения говорит запись M > N полем
-    `replaces_revision: N`. Читать состояние заменённой ревизии из неё
+    `replaces_revision: N`. Читать состояние отозванной ревизии из неё
     самой было бы мутацией журнала.
+
+    `discharged` — номера PR, чей отзыв потерял силу
+    (`_discharged_replacements`). Ревизия с таким PR отозванной НЕ
+    считается: её байты вмержены, значит доставка состоялась, и
+    `supersedes` следующего переиздания обязан указывать именно на неё.
     """
     return {
         op["replaces_revision"] for m, op in _revisions(state)
         if isinstance(op.get("replaces_revision"), int)
         and op["replaces_revision"] < m
+        and op.get("replaces_pr") not in discharged
     }
 
 
@@ -1737,7 +1777,9 @@ def _replaced_by(state: RunState, n: int, pr: int | None) -> int | None:
 
 
 def _last_delivery(
-    state: RunState, skip: int | None = None
+    state: RunState,
+    skip: int | None = None,
+    discharged: frozenset[int] = frozenset(),
 ) -> tuple[int, dict] | None:
     """Последняя ЗАВЕРШЁННАЯ доставка: старшая ревизия либо v1; None — их нет.
 
@@ -1752,15 +1794,17 @@ def _last_delivery(
     тоже ведёт свой op write-ahead (`op_start` ДО эффектов), так что
     упавшая ПЕРВАЯ доставка оставляет `tasks-deliver` в `started`.
 
-    ЗАМЕНЁННЫЕ ревизии (§I3.2) пропускаются наравне с ними, хотя статус у
+    ЗАМЕНЁННЫЕ ревизии (§I10) пропускаются наравне с ними, хотя статус у
     них `completed`: замена закрывает их PR без мержа, то есть
     спецификация не доставлена. Взять такую за предыдущую доставку значит
     указать `supersedes` на предложение, снятое со стола, и сверять §I5/
     §I8 с содержанием, которого в base нет. `skip` — ревизия, замена
     которой начинается ПРЯМО СЕЙЧАС: forward-ссылки на неё ещё нет, её
-    пишет намерение, которое вызывающий только собирает.
+    пишет намерение, которое вызывающий только собирает. `discharged` —
+    отзывы, потерявшие силу (`_discharged_replacements`): вмерженный PR
+    делает ревизию полноценной доставкой, и пропускать её нельзя.
     """
-    excluded = _replaced_revisions(state)
+    excluded = _replaced_revisions(state, discharged)
     if skip is not None:
         excluded.add(skip)
     for n, op in reversed(_revisions(state)):
@@ -1858,7 +1902,7 @@ def _review_allowlist() -> frozenset[str]:
 class Replacement(NamedTuple):
     """Явный replace-переход: какую ревизию заменяем и почему.
 
-    Собирается из CLI (`--replace-revision` + `--replacement-reason`) и
+    Собирается из CLI (`--replace-revision` + общий `--reason`) и
     существует ТОЛЬКО на первом заходе: дальше связь живёт в намерении
     новой ревизии (`replaces_*`), и любой повтор — включая голый
     `--supersede` — доводит шаги оттуда.
@@ -1869,9 +1913,14 @@ class Replacement(NamedTuple):
 
 
 def _check_replacement_target(
-    state: RunState, ops: Ops, pr: int, head_sha: str | None, facts: dict
+    state: RunState,
+    ops: Ops,
+    pr: int,
+    head_sha: str | None,
+    facts: dict,
+    pending_revision: int | None = None,
 ) -> None:
-    """Внешнее вмешательство в заменяемый PR → fail-closed (§I3.2).
+    """Внешнее вмешательство в заменяемый PR → fail-closed (§I10).
 
     Порядок владельца: замена валидна, пока предложение никем, кроме нас,
     не тронуто. Что считается вмешательством:
@@ -1904,6 +1953,13 @@ def _check_replacement_target(
     Бот, публикующий отчёт как REVIEW (а не комментарием), замену
     удержит — и это ровно правило владельца, а не его обход.
 
+    `pending_revision` — номер ревизии, чьё намерение УЖЕ записано (шаг
+    закрытия на повторе). От него зависит только выход, который называет
+    диагностика `MERGED`: до записи намерения оператору нечего сворачивать
+    и нужен просто `--supersede`, а с записанным намерением сначала надо
+    закрыть повисшую ревизию (`--abandon-revision`) — иначе её
+    обязательство будет ходить по кругу.
+
     Уже закрытый (не вмерженный) PR проверок не проходит и не требует:
     предложение снято, а именно это замена и делает. Это же — ручной
     выход оператора из отказа: закрыть #N руками с объяснением и
@@ -1911,9 +1967,17 @@ def _check_replacement_target(
     """
     pr_state = facts.get("state")
     if pr_state == "MERGED":
+        exit_hint = (
+            f"сверните ревизию {pending_revision} "
+            f"(--abandon-revision {pending_revision} --reason ...), затем "
+            "переиздайте обычным --supersede"
+            if pending_revision is not None
+            else "дефектная вмерженная доставка чинится обычным "
+            "--supersede: он ничего не отзывает, а добавляет"
+        )
         raise RuntimeError(
-            f"PR #{pr} вмержен — вмерженное предложение не заменяется: "
-            "оно уже часть base, и снимать со стола нечего"
+            f"PR #{pr} вмержен — вмерженное предложение не отзывается: "
+            f"оно уже часть base, и снимать со стола нечего. {exit_hint}"
         )
     if pr_state != "OPEN":
         return
@@ -2040,7 +2104,9 @@ def _validate_replacement(
     }
 
 
-def _pending_replacement(state: RunState) -> dict:
+def _pending_replacement(
+    state: RunState, discharged: frozenset[int] = frozenset()
+) -> dict:
     """Незавершённое обязательство замены, которое обязана перенять новая
     ревизия; пустой словарь — переносить нечего.
 
@@ -2053,11 +2119,27 @@ def _pending_replacement(state: RunState) -> dict:
     Смотрится ТОЛЬКО новейшая запись с `replaces_*`: если она не брошена,
     обязательство ведёт она сама (и цикл реконсиляции до этого места не
     дошёл бы).
+
+    Обязательство с ВМЕРЖЕННЫМ отозванным PR (`discharged`) не
+    переносится: отзывать нечего, байты уже в base. Перенося его, мы
+    вручали бы каждой следующей ревизии невыполнимое требование —
+    `_replacement_close` упирался бы в безусловный запрет «вмерженное не
+    заменяется», прогон падал бы RC 1, а `--abandon-revision` только
+    сдвигал бы обязательство на ревизию вперёд. Воркстрим оказывался бы
+    заперт навсегда — ровно тот тупик, ради снятия которого §I10 и
+    заводился (major ревью d8f83f0).
     """
     for _, op in reversed(_revisions(state)):
         if not isinstance(op.get("replaces_revision"), int):
             continue
         if op.get("status") != "abandoned":
+            return {}
+        if op.get("replaces_pr") in discharged:
+            print(
+                f"отзыв PR #{op['replaces_pr']} потерял силу: он вмержен — "
+                "обязательство замены снято, дальше идёт обычное "
+                "переиздание"
+            )
             return {}
         return {
             key: op[key] for key in (
@@ -2086,7 +2168,8 @@ def _replacement_close(state: RunState, ops: Ops, op: dict) -> None:
         return
     facts = ops.pr_facts(state.repo_slug, pr)
     _check_replacement_target(
-        state, ops, pr, op.get("replaces_head_sha"), facts
+        state, ops, pr, op.get("replaces_head_sha"), facts,
+        pending_revision=op.get("revision"),
     )
     if facts.get("state") != "OPEN":
         return          # уже закрыт: шаг состоялся раньше (или оператором)
@@ -2429,7 +2512,7 @@ def _reconcile_revision(
     §I3 стало чистым — таблица проверяема без стабов ops.
 
     `replaced` — факт из леджера, а не из сети: более поздняя ревизия
-    объявила предложение этой снятым (§I3.2). Тогда ревизия выбывает из
+    объявила предложение этой снятым (§I10). Тогда ревизия выбывает из
     разбора переходом `"replaced"` (вызывающий смотрит предыдущую, как на
     `abandoned`) — и при `CLOSED-unmerged` (иначе fail-closed отравил бы
     воркстрим навсегда), и при OPEN.
@@ -2453,7 +2536,7 @@ def _reconcile_revision(
     branch = op.get("branch")
     pr_state = facts.get("state") if pr is not None else None
     if replaced and pr_state != "MERGED":
-        # §I3.2: и закрытие, и живой OPEN у отозванной ревизии —
+        # §I10: и закрытие, и живой OPEN у отозванной ревизии —
         # ожидаемые состояния, если более поздняя запись объявила это
         # предложение снятым (`replaces_revision`/`replaces_pr` = эта
         # ревизия и этот PR). Приём тот же, которым §I3 развязал
@@ -2759,7 +2842,7 @@ def deliver_superseded(
     бесследный no-op §I5: апстрим не менялся с прошлой доставки,
     run.json не трогается.
 
-    `replace` — явный replace-переход (§I3.2): незамерженное предложение
+    `replace` — явный replace-переход (§I10): незамерженное предложение
     названной ревизии снимается со стола и заменяется новым. Порядок
     внутри вызова — владельческий: валидация заменяемой ревизии → durable
     намерение новой с `replaces_*` → закрытие заменяемого PR → доставка →
@@ -2847,7 +2930,7 @@ def deliver_superseded(
             replaced=_replaced_by(state, n, pr) is not None,
         )
         if decision == "replaced":
-            # §I3.2: закрытие этого PR — ожидаемое состояние, о нём
+            # §I10: закрытие этого PR — ожидаемое состояние, о нём
             # говорит более поздняя запись. Ревизия из разбора выбывает
             # так же, как `abandoned`.
             continue
@@ -2984,13 +3067,18 @@ def deliver_superseded(
     # «переносить нечего». Новая ревизия уходила бы без `replaces_*`,
     # закрывать было бы нечего, и отозванный PR остался бы ОТКРЫТЫМ
     # вторым на ту же спеку.
+    # Разрядка отзывов считается ОДИН раз на вызов и питает обе
+    # производные: перенос обязательства и выбор предыдущей доставки.
+    # Сетевого запроса нет вовсе, если в леджере нет ни одного отзыва.
+    discharged = _discharged_replacements(state, ops)
     if not replace_fields:
-        replace_fields = _pending_replacement(state)
+        replace_fields = _pending_replacement(state, discharged)
 
     # ПОСЛЕ реконсиляции (дефект 3 ревью Task 7): она может перевести
     # `started` → `completed`, и тогда предыдущая доставка — именно та.
     prev = _last_delivery(
-        state, skip=replace_fields.get("replaces_revision")
+        state, skip=replace_fields.get("replaces_revision"),
+        discharged=discharged,
     )
     if prev is None:
         raise RuntimeError(
@@ -3084,7 +3172,7 @@ def deliver_superseded(
         # недостижима — восстановление объявляло собственный коммит
         # ревизии чужим.
         "tasks_blob": None,
-        # Замена (§I3.2): ДВЕ независимые связи. `supersedes` выше —
+        # Замена (§I10): ДВЕ независимые связи. `supersedes` выше —
         # какую последнюю УСПЕШНО ДОСТАВЛЕННУЮ спецификацию переиздаём;
         # `replaces_*` — какое незамерженное ошибочное ПРЕДЛОЖЕНИЕ
         # снимаем со стола. Пустой словарь на обычном переиздании: полей

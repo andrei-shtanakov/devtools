@@ -6135,7 +6135,7 @@ def test_cli_abandon_revision_requires_reason(tmp_path, monkeypatch, capsys):
         tb.main(["--run-id", "r", "--abandon-revision", "2"])
 
 
-# --- replace-переход: замена незамерженного предложения (§I3.2) -----------
+# --- replace-переход: замена незамерженного предложения (§I10) -----------
 #
 # Живой случай: PR spec-runner#408 доставлен ревизией v3 с дефектными
 # подписями (devtools#172). PR не вмержен и приниматься не должен, а
@@ -6658,7 +6658,7 @@ def _abandoned_replacement(replaces_pr=_REPLACED_PR) -> dict:
 def test_i3_does_not_fail_closed_on_replaced_revision(tmp_path, monkeypatch):
     """§I3 после закрытия #408: forward-ссылка, а не мутация записи v3.
 
-    Без §I3.2 этот заход ловил бы v3 проверкой «закрыт без мержа → ветка
+    Без §I10 этот заход ловил бы v3 проверкой «закрыт без мержа → ветка
     отклонена человеком» и отказывал НАВСЕГДА: замена была бы
     одноразовой — закрыв #408 своей же механикой, переиздание запирало бы
     воркстрим."""
@@ -6691,7 +6691,7 @@ def test_i3_still_fails_closed_on_closed_pr_without_forward_link(
 ):
     """Тот же закрытый PR БЕЗ forward-ссылки — по-прежнему fail-closed.
 
-    Исключение §I3.2 узкое: ожидаемым закрытие объявляет только запись,
+    Исключение §I10 узкое: ожидаемым закрытие объявляет только запись,
     назвавшая ЭТУ ревизию и ЭТОТ номер PR. Иначе оно снимало бы правило
     «ветка отклонена человеком» со всего контракта."""
     from governance import task_bridge as tb
@@ -7134,6 +7134,94 @@ def test_reconcile_replaced_covers_open_but_not_merged(tmp_path, monkeypatch):
         3, op, "base-sha-1", _REPLACED_PR,
         {"state": "MERGED", "headRefOid": _REPLACED_HEAD}, replaced=True,
     ) == "return_pr"
+
+
+def test_obligation_is_discharged_when_revoked_pr_gets_merged(
+    tmp_path, monkeypatch
+):
+    """Перенятое обязательство + ВМЕРЖЕННЫЙ отозванный PR = разрядка.
+
+    Сочетание, которого не строил ни один тест: MERGED и перенос были
+    покрыты порознь, поэтому тупик зеленел. А тупик полный: человек
+    мержит #408, пока замена не доведена; `_replacement_close` упирается
+    в безусловный запрет «вмерженное не отзывается» и падает RC 1;
+    `--abandon-revision` обязательство не снимает, а переносит на
+    следующую ревизию — та падает так же. Каждый запуск тратит ревизию
+    леджера и падает; бесследный no-op §I5 выключен непустым
+    `replace_fields`. Воркстрим не переиздать больше ничем.
+
+    Разрядка: отзыв адресован ПРЕДЛОЖЕНИЮ, а вмерженных предложений не
+    бывает — байты в base. Дальше идёт обычное переиздание, и
+    `supersedes` указывает на эту самую ревизию: её доставка
+    состоялась."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    # v3 доставила ДРУГОЕ содержание: иначе §I5 закончил бы вызов
+    # бесследным no-op и о разрядке тест не сказал бы ничего.
+    state.ops["tasks-deliver-v3"] = {
+        **state.ops["tasks-deliver-v3"], "content_anchor": "СОДЕРЖАНИЕ-v3",
+    }
+    state.ops["tasks-deliver-v4"] = _abandoned_replacement()
+    rs.save(state)
+    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="MERGED")
+
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+
+    saved = rs.load("r-recon").ops["tasks-deliver-v5"]
+    # Обязательство снято: полей отзыва нет, закрывать никто не пробовал.
+    assert "replaces_revision" not in saved
+    assert "replaces_pr" not in saved
+    assert ops.closed == []
+    assert ops.deleted == []
+    # Вмерженная ревизия снова считается доставкой — переиздаём ЕЁ.
+    assert saved["supersedes"] == 3
+
+
+def test_merged_revoked_pr_mid_flight_names_the_way_out(
+    tmp_path, monkeypatch
+):
+    """Мерж отозванного PR в полёте — отказ ОДИН раз и с процедурой.
+
+    Намерение ревизии уже durable, её anchor'ы и версия посчитаны на
+    base без байтов отозванной доставки — продолжать её нельзя.
+    Поэтому здесь fail-closed уместен, но обязан назвать выход: свернуть
+    повисшую ревизию и переиздать обычным `--supersede`. Без этого
+    оператор упирался бы в запрет, не понимая, чем его разомкнуть."""
+    from governance import task_bridge as tb
+
+    state = _window_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="MERGED")
+
+    with pytest.raises(RuntimeError, match="--abandon-revision 4"):
+        tb.deliver_superseded(state, ops)
+
+    assert ops.closed == []
+
+
+def test_discharge_costs_nothing_without_revocations_in_the_ledger(
+    tmp_path, monkeypatch
+):
+    """Нет отзывов в леджере — нет и сетевого запроса о них.
+
+    Разрядка читает состояние отозванного PR, то есть ходит в сеть там,
+    где раньше читался только леджер. Платить за это обычное переиздание
+    (и бесследный no-op §I5) не должно."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR])
+
+    assert tb._discharged_replacements(state, ops) == frozenset()
+    assert not any(c[0] == "pr_facts" for c in ops.calls)
+
+    # А при отзыве в леджере — ровно один запрос на отозванный PR.
+    state.ops["tasks-deliver-v4"] = _abandoned_replacement()
+    assert tb._discharged_replacements(state, ops) == frozenset()
+    assert [c for c in ops.calls if c[0] == "pr_facts"] == [
+        ("pr_facts", _REPLACED_PR)
+    ]
 
 
 # --- CLI replace-перехода -------------------------------------------------
