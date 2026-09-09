@@ -84,6 +84,14 @@ def _block_list_field(block: str, name: str) -> tuple[str, ...] | None:
     for line in block[m.end():].splitlines()[1:]:
         item = _LIST_ITEM_RE.match(line)
         if item is None:
+            # Пустая строка список НЕ обрывает (round 14 ревью PR #161,
+            # major): в YAML блочный список продолжается через пустые
+            # строки, и обрыв на первой из них молча терял всё, что за
+            # ней — без находки формы, без closure-проверки и без строки
+            # в `**Verifies:**`. Список кончается на первой НЕПУСТОЙ
+            # строке, не являющейся `- <элемент>`.
+            if not line.strip():
+                continue
             break
         items.append(item.group(1))
     return tuple(items) if items else None

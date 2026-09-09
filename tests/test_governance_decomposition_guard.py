@@ -377,6 +377,27 @@ def test_verifies_block_form_is_parsed() -> None:
     assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
 
 
+def test_verifies_block_form_survives_blank_lines() -> None:
+    """Пустая строка внутри блочного списка его НЕ обрывает (round 14
+    ревью PR #161): в YAML список продолжается через пустые строки, а
+    обрыв молча терял всё, что за ней."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "  - tests/test_a.py\n"
+        "\n"
+        "  - tests/test_b.py\n"
+        "\n"
+        "Проза после списка его завершает.\n"
+        "  - tests/test_never.py\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
+
+
 def test_verifies_inline_form_is_also_accepted() -> None:
     dt = (
         "#### DT-14: Наблюдение · type: verify · owner: qa\n"
