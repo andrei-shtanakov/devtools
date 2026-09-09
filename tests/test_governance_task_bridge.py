@@ -6519,6 +6519,11 @@ def test_red_checks_and_plain_comments_do_not_block_replacement(
     assert asked & {"pr_reviews", "unresolved_threads"} == {
         "pr_reviews", "unresolved_threads",
     }
+    # Позитивный двойник к `("pr_reviews", _REPLACED_PR) not in ops.calls`
+    # соседнего теста: он утверждает ОТСУТСТВИЕ кортежа, и без пары
+    # «а бывает ли такой вообще» был бы вакуумным (урок ревью PR #174 —
+    # сравнение с кортежем, которого не бывает, всегда истинно).
+    assert ("pr_reviews", _REPLACED_PR) in ops.calls
     # Красный `statusCheckRollup` лежал в фактах и на исход не повлиял;
     # комментариев PR слой не читает вовсе — единственный примитив с
     # ними (`comment`) пишущий, и он не звался.
@@ -6626,8 +6631,7 @@ def test_replace_refuses_when_close_fails(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="не удалось закрыть"):
         tb.deliver_superseded(state, ops, replace=_replace())
 
-    assert ("create_draft_pr", "owner/alpha", "spec/WS-alpha-7-tasks-v4",
-            "spec") not in ops.calls
+    assert not any(c[0] == "create_draft_pr" for c in ops.calls)
     # Намерение уже durable (write-ahead §I4) — повтор продолжит ЕГО.
     assert rs.load("r-recon").ops["tasks-deliver-v4"]["status"] == "started"
 
@@ -6914,8 +6918,11 @@ def test_window_c_pr_created_branch_alive(tmp_path, monkeypatch):
         "returned", 77
     )
     assert ops.deleted == [_REPLACED_BRANCH]
-    assert ("create_draft_pr", "owner/alpha", "spec/WS-alpha-7-tasks-v4",
-            "spec") not in ops.calls
+    # ГЛАВНОЕ утверждение окна C: доставка не переигрывается. Сравнение с
+    # кортежем было вакуумным — `deliver` передаёт label "", четвёртого
+    # элемента "spec" не бывает ни при каком поведении, и `not in` был
+    # истинным всегда.
+    assert not any(c[0] == "create_draft_pr" for c in ops.calls)
     saved = rs.load("r-recon").ops
     assert saved["tasks-deliver-v4"]["status"] == "completed"
     assert "tasks-deliver-v5" not in saved
@@ -7034,6 +7041,99 @@ def test_abandoned_replacement_hands_its_obligation_to_the_next_revision(
     assert saved["replaces_pr"] == _REPLACED_PR
     assert saved["replacement_reason"] == "дефектные подписи"
     assert ops.deleted == [_REPLACED_BRANCH]
+
+
+def test_obligation_survives_abandon_inside_the_same_call(
+    tmp_path, monkeypatch
+):
+    """Ревизия-замена брошена ПРЯМО В ЭТОМ вызове — обязательство живо.
+
+    Соседний тест про перенос пред-засевает `abandoned` и потому этот
+    путь не исполняет ни разу. А цикл реконсиляции сам переводит
+    ревизию-замену в `abandoned` (`abandon_and_next` на сдвинувшемся
+    base), и до цикла её статус ещё `started`. Посчитай перенос раньше
+    цикла — новая ревизия ушла бы без `replaces_*`, закрывать было бы
+    нечего, и отозванный #408 остался бы ОТКРЫТЫМ вторым на ту же спеку.
+
+    Хуже того, на живом входе (дефект в подписи, апстрим не менялся) до
+    новой ревизии не дошло бы вовсе: §I5 вернул бы бесследный no-op с
+    RC 0, и обязательство замены испарилось бы молча."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    # base ревизии-замены сдвинулся ⇒ цикл её бросит: `started`, PR по её
+    # ветке нет, base не тот.
+    state = _window_state(tmp_path, monkeypatch, base_sha="base-sha-0")
+    ops = _ReplaceOps(prs=[_MERGED_PR])
+
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+
+    saved = rs.load("r-recon").ops
+    assert saved["tasks-deliver-v4"]["status"] == "abandoned"
+    assert saved["tasks-deliver-v5"]["replaces_revision"] == 3
+    assert saved["tasks-deliver-v5"]["replaces_pr"] == _REPLACED_PR
+    assert saved["tasks-deliver-v5"]["replacement_reason"] == (
+        "дефектные подписи"
+    )
+    # Обязательство не просто записано — оно ИСПОЛНЕНО.
+    assert [pr for pr, _ in ops.closed] == [_REPLACED_PR]
+    assert ops.deleted == [_REPLACED_BRANCH]
+
+
+def test_revoked_revision_with_open_pr_is_never_returned(
+    tmp_path, monkeypatch
+):
+    """Отозванная ревизия при OPEN выбывает из разбора, а не возвращается.
+
+    Иначе механика печатает «ревизия 3 уже доставлена — PR #408» при
+    RC 0 и вручает оператору то самое незамерженное дефектное
+    предложение, которое леджер объявил снятым: читая последнюю строку,
+    он идёт мержить ложные подписи — ровно то, ради запрета чего переход
+    и заведён."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {
+        **state.ops["tasks-deliver"], "content_anchor": "СОДЕРЖАНИЕ-ДО",
+    }
+    state.ops["tasks-deliver-v4"] = _abandoned_replacement()
+    rs.save(state)
+    # #408 ещё ОТКРЫТ: шаг закрытия не успел выполниться до броска.
+    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="OPEN")
+
+    result = tb.deliver_superseded(state, ops)
+
+    assert result != tb.SupersedeResult("returned", _REPLACED_PR)
+    assert result.kind == "delivered"
+    # Обязательство доведено: PR закрыт этим же вызовом, ветка снята.
+    assert [pr for pr, _ in ops.closed] == [_REPLACED_PR]
+    assert ops.deleted == [_REPLACED_BRANCH]
+
+
+def test_reconcile_replaced_covers_open_but_not_merged(tmp_path, monkeypatch):
+    """Таблица §I3 при `replaced`: OPEN и CLOSED выбывают, MERGED — нет.
+
+    MERGED значит, что отозванное предложение всё-таки вмержено, то есть
+    отзыв противоречит факту. Пропустить его молча было бы хуже, чем
+    разобрать обычной таблицей: дальше по ходу отказ приходит
+    безусловным «вмерженное не заменяется»."""
+    from governance import task_bridge as tb
+
+    op = {"status": "completed", "branch": _REPLACED_BRANCH,
+          "base_sha": "base-sha-1", "head_sha": _REPLACED_HEAD,
+          "pr": _REPLACED_PR}
+
+    for state_name in ("OPEN", "CLOSED"):
+        assert tb._reconcile_revision(
+            3, op, "base-sha-1", _REPLACED_PR,
+            {"state": state_name, "headRefOid": _REPLACED_HEAD},
+            replaced=True,
+        ) == "replaced"
+    assert tb._reconcile_revision(
+        3, op, "base-sha-1", _REPLACED_PR,
+        {"state": "MERGED", "headRefOid": _REPLACED_HEAD}, replaced=True,
+    ) == "return_pr"
 
 
 # --- CLI replace-перехода -------------------------------------------------
