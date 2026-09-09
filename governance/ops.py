@@ -25,6 +25,19 @@ REVIEW_GH_CONFIG_DIR = Path.home() / ".config" / "review"
 _PR_URL_RE = re.compile(r"/pull/(\d+)")
 _ISSUE_URL_RE = re.compile(r"/issues/(\d+)")
 
+#: Логин ревью-контура по умолчанию — канон `review-pr.sh:66`.
+REVIEW_LOGIN_DEFAULT = "ai-prosto"
+
+
+def review_login() -> str:
+    """Учётка, от которой публикуется ревью флота (env `REVIEW_LOGIN`).
+
+    Одно определение на весь слой: логин нужен и `latest_review_body`
+    (чьё ревью искать), и вызывающему — чтобы отличить ревью
+    ревью-контура от человеческого. Два хардкода разъехались бы молча.
+    """
+    return os.environ.get("REVIEW_LOGIN", REVIEW_LOGIN_DEFAULT)
+
 
 class Ops(Protocol):
     """Протокол внешних эффектов (спека §5/§8) — сигнатуры дословны."""
@@ -79,7 +92,15 @@ class Ops(Protocol):
 
     def unresolved_threads(self, repo_slug: str, pr: int) -> bool | None: ...
 
+    def pr_reviews(self, repo_slug: str, pr: int) -> list[dict] | None: ...
+
     def merge(self, repo_slug: str, pr: int, sha: str) -> bool: ...
+
+    def close_pr(self, repo_slug: str, pr: int, comment: str) -> bool: ...
+
+    def delete_remote_branch(self, repo_slug: str, branch: str) -> bool: ...
+
+    def delete_local_branch(self, target_dir: str, branch: str) -> bool: ...
 
     def comment(self, repo_slug: str, pr: int, body: str) -> None: ...
 
@@ -614,7 +635,7 @@ class RealOps:
         беззвучно умерло бы. None читается вызывающим как «опровергать
         нечего» (fail-closed в сторону стопа на человеке).
         """
-        login = os.environ.get("REVIEW_LOGIN", "ai-prosto")
+        login = review_login()
         done = subprocess.run(
             ["gh", "api", f"repos/{repo_slug}/pulls/{pr}/reviews",
              "--jq",
@@ -688,6 +709,90 @@ class RealOps:
         if has_next_page:
             return None
         return any(not node["isResolved"] for node in nodes)
+
+    def pr_reviews(self, repo_slug: str, pr: int) -> list[dict] | None:
+        """Ревью PR как `[{"login": ..., "state": ...}, ...]`; None — сбой.
+
+        Проекция полей, не интерпретация: кто из ревьюеров человек и что
+        значит его `state`, решает вызывающий — ops о ревью-контуре
+        ничего не знает.
+
+        `--paginate` с ПОСТРОЧНЫМ jq (`.[] | {...}`, без обёртки в
+        массив): постраничные массивы пришлось бы склеивать вручную, как
+        в `prs_containing_commit`, а поток объектов склеивается сам.
+
+        None вместо исключения — та же форма, что у
+        `unresolved_threads`: оба сигнала «в PR уже вмешались» вызывающий
+        обязан читать fail-closed, и различать «сбой» от «сбой» ему
+        нечем.
+        """
+        done = subprocess.run(
+            ["gh", "api", f"repos/{repo_slug}/pulls/{pr}/reviews",
+             "--paginate", "--jq",
+             ".[] | {login: .user.login, state: .state}"],
+            capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            return None
+        found: list[dict] = []
+        for line in done.stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                found.append(json.loads(line))
+            except json.JSONDecodeError:
+                return None
+        return found
+
+    def close_pr(self, repo_slug: str, pr: int, comment: str) -> bool:
+        """`gh pr close --comment` под профилем ai-prosto; rc0->True.
+
+        Профиль тот же, что у `merge`, и по той же причине (ADR-ECO-011
+        D3): закрытие PR — действие агента, и оно обязано быть записано
+        агентской учёткой. Уйдя от основного аккаунта, механика замены
+        выглядела бы в истории решением человека.
+
+        Комментарий обязателен аргументом, а не опционален: закрытие
+        чужого предложения без объяснения — то же вмешательство, от
+        которого замена защищается сама.
+        """
+        env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
+        done = subprocess.run(
+            ["gh", "pr", "close", str(pr), "-R", repo_slug,
+             "--comment", comment],
+            env=env, capture_output=True, text=True,
+        )
+        return done.returncode == 0
+
+    def delete_remote_branch(self, repo_slug: str, branch: str) -> bool:
+        """DELETE refs/heads/<branch> на origin; rc0->True.
+
+        False — и «нет прав», и «ветки уже нет»: различать нечем, а
+        вызывающему разница не нужна — шаг удаления идемпотентен по
+        смыслу (ветки нет ⇒ шаг состоялся). Коммиты и сам PR остаются:
+        удаляется живая ветка, не история.
+        """
+        env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
+        done = subprocess.run(
+            ["gh", "api", "-X", "DELETE",
+             f"repos/{repo_slug}/git/refs/heads/{branch}"],
+            env=env, capture_output=True, text=True,
+        )
+        return done.returncode == 0
+
+    def delete_local_branch(self, target_dir: str, branch: str) -> bool:
+        """`git branch -D` в клоне; rc0->True (нет ветки -> False).
+
+        Именно `-D`: отзываемая ветка по построению не вмержена, и `-d`
+        отказал бы на каждой. Парный шаг к `delete_remote_branch` —
+        удаляется ссылка в обеих половинах, коммиты остаются достижимы
+        через закрытый PR.
+        """
+        done = subprocess.run(
+            ["git", "-C", target_dir, "branch", "-D", branch],
+            capture_output=True, text=True,
+        )
+        return done.returncode == 0
 
     def merge(self, repo_slug: str, pr: int, sha: str) -> bool:
         """PUT merge под профилем ai-prosto (ADR-ECO-011 D3); rc0->True."""
