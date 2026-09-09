@@ -2557,16 +2557,26 @@ def test_completed_v1_op_is_never_rewritten(tmp_path, monkeypatch):
 # --- _resolve_correction_pr (§I7: подпись штампа берётся у correction-PR) --
 
 
+_ANCHOR_REL = "workstreams/WS-alpha-7/spec/30-decomposition.md"
+
+
 class _ProvOps(_StubOps):
-    def __init__(self, commit="c1", prs=None):
+    def __init__(self, commit="c1", prs=None, files=None):
         super().__init__()
         self.commit, self.prs = commit, (prs if prs is not None else [])
+        # Состав файлов PR (§I7, шаг 4): по умолчанию названный PR ТРОГАЛ
+        # анкер — иначе явный `--approval-pr` отказывает (C-5), а на пути
+        # возобновления он передаётся из намерения ревизии.
+        self.files = [_ANCHOR_REL] if files is None else files
 
     def last_commit_touching(self, target_dir, rel_path):
         return self.commit
 
     def prs_containing_commit(self, repo_slug, sha):
         return self.prs
+
+    def pr_files(self, repo_slug, pr):
+        return list(self.files)
 
     def pr_facts(self, repo_slug, pr):
         # Подпись живёт ЗДЕСЬ, а не в списке PR-ов по коммиту (ревью #164).
@@ -2642,6 +2652,37 @@ def test_provenance_explicit_flag_is_verified_not_trusted(
         tb._resolve_correction_pr(
             state, _Explicit(), "a/b.md", "master", 500
         )
+
+
+def test_provenance_explicit_flag_requires_anchor_change(
+    tmp_path, monkeypatch
+):
+    """§I7 шаг 4, третье условие: явный PR обязан МЕНЯТЬ файл анкера.
+
+    Без него флаг из «заменяет поиск» становился «отключает проверку»:
+    оператор называл любой вмерженный в base_ref PR, и его mergedBy/
+    mergedAt уходили в штамп бандла — штамп утверждал бы, что байты
+    анкера одобрил человек, который их не видел (C-5)."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ProvOps(files=["docs/README.md"])
+    with pytest.raises(RuntimeError, match="не менял"):
+        tb._resolve_correction_pr(state, ops, _ANCHOR_REL, "master", 500)
+
+
+def test_provenance_explicit_flag_accepts_pr_touching_anchor(
+    tmp_path, monkeypatch
+):
+    """Обратная сторона: PR, реально менявший анкер, принимается."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _ProvOps(files=["docs/README.md", _ANCHOR_REL])
+    pr, by, _at = tb._resolve_correction_pr(
+        state, ops, _ANCHOR_REL, "master", 500
+    )
+    assert (pr, by) == (500, "andrei-shtanakov")
 
 
 # --- _previous_dag (§I8: сверка активного DAG предыдущей доставки) --------
@@ -3312,6 +3353,75 @@ def test_supersede_after_merged_revision_starts_next_one(
     assert saved.ops["tasks-deliver-v3"]["supersedes"] == 2
     assert ("ensure_branch", "spec/WS-alpha-7-tasks-v3") in ops.calls
     assert saved.ops["tasks-deliver-v2"]["pr"] == 9          # v2 цела
+
+
+def test_supersede_returns_open_pr_of_first_delivery(tmp_path, monkeypatch):
+    """§I3 строка 1 для исторической v1: её PR OPEN → вернуть его.
+
+    Цикл реконсиляции v1 не видит (`_revisions` собирает только
+    `tasks-deliver-v<N>`), и до фикса (major C-1) это состояние уходило в
+    `_previous_tasks_version` — RC 1 с сообщением про версию вместо
+    контрактных RC 0 + возврат PR, либо (если спека в base есть) второй
+    открытый PR на ту же спеку."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    rs.save(state)
+    before = (rs.run_dir("r-recon") / "run.json").read_bytes()
+    ops = _RevisionPrOps(pr=5, pr_state="OPEN", prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == 5
+    saved = rs.load("r-recon")
+    assert tb._revisions(saved) == []              # v2 не заведена
+    assert not any(c[0] == "ensure_branch" for c in ops.calls)
+    # Как и no-op §I5: решение принято, леджер не тронут.
+    assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
+
+
+def test_supersede_refuses_when_first_delivery_pr_closed_unmerged(
+    tmp_path, monkeypatch
+):
+    """§I3 «любое | CLOSED-unmerged» — включая v1: fail-closed."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    rs.save(state)
+    ops = _RevisionPrOps(pr=5, pr_state="CLOSED", prs=[_MERGED_PR])
+    with pytest.raises(RuntimeError, match="закрыт без мержа"):
+        tb.deliver_superseded(state, ops)
+    assert tb._revisions(rs.load("r-recon")) == []
+
+
+def test_supersede_ignores_first_delivery_pr_when_revision_is_last(
+    tmp_path, monkeypatch
+):
+    """PR v1 разбирается ТОЛЬКО когда v1 и есть последняя доставка.
+
+    После ревизии v2 предыдущая доставка — она; висящий PR v1 (например,
+    закрытый вручную после мержа ревизии) переиздание не блокирует."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(
+        state, monkeypatch, status="completed", pr=9, head_sha="h",
+        anchor="СТАРЫЙ-V2",
+    )
+    # PR ревизии (9) вмержен, PR v1 (5) — закрыт без мержа.
+    class _Ops(_RevisionPrOps):
+        def pr_facts(self, repo_slug, pr):
+            if pr == 5:
+                return {"state": "CLOSED"}
+            return super().pr_facts(repo_slug, pr)
+
+    ops = _Ops(pr=9, pr_state="MERGED", prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == 77
+    assert [n for n, _ in tb._revisions(rs.load("r-recon"))] == [2, 3]
 
 
 def test_supersede_completes_started_revision_with_merged_pr(

@@ -6,11 +6,8 @@
 Формат записи: находка → что сделал → как проверил (в т.ч. что тест краснел на
 неисправленном коде).
 
-## C-2 (blocker) + C-3 (minor) + F-03 (minor) — `_recover_commit`
+## `_recover_commit` (§I3.1)
 
-(в работе)
-</content>
-</invoke>
 ### C-2 (blocker) — `_recover_commit` объявлял чужой собственную ветку ревизии
 
 **Сделал.** В `_recover_commit` (`governance/task_bridge.py`) ветка «коммита ещё
@@ -54,3 +51,50 @@ remote тут не сверяется (non-ff push, осознанное огр�
 `is None` (`test_recover_commit_accepts_matching_local_commit`, хвост
 `test_supersede_records_tasks_blob_before_commit`) — мутация M11
 (`return "phantom"`) с этими утверждениями краснеет.
+
+## §I7 / §I3 — провенанс и первая доставка
+
+### C-5 (major) — `--approval-pr` не проверял, что PR менял файл анкера
+
+**Сделал.** В ветке явного флага `_resolve_correction_pr` добавлена третья
+проверка шага 4 §I7: `if anchor_rel not in ops.pr_files(state.repo_slug, number)`
+→ отказ. Рецепт ревьюера принят как есть (примитив `pr_files` уже был в `Ops`);
+текст отказа дописан до формулировки контракта «флаг заменяет поиск, но не
+проверку».
+
+**Тесты.** `test_provenance_explicit_flag_requires_anchor_change` (PR трогал
+только `docs/README.md` → отказ) + обратная сторона
+`test_provenance_explicit_flag_accepts_pr_touching_anchor` (иначе проверку можно
+было бы «закрыть» отказом на всём подряд). Стаб `_ProvOps` получил честный
+`pr_files` с настраиваемым составом.
+
+**Краснел на старом коде:** да — `DID NOT RAISE RuntimeError`.
+
+### C-1 (major) — §I3 «`completed` | OPEN → вернуть PR» была недостижима для v1
+
+**Сделал.** Руллинг владельца прогона исполнен: чиню по контракту. Новая
+функция `_reconcile_v1(state, ops, op)` разбирает легаси-запись по её
+ЗАПИСАННОМУ номеру PR (`op["pr"]`, его пишет `op_complete(state,
+"tasks-deliver", pr=pr)`): OPEN → вернуть номер (RC 0, ревизия не заводится,
+леджер не тронут), CLOSED-unmerged → fail-closed строкой §I3 «любое |
+CLOSED-unmerged», MERGED → как раньше. Номера PR в записи нет (древняя
+запись) → как раньше. Вызов — в `deliver_superseded` сразу после
+`prev = _last_delivery(state)` и ТОЛЬКО при `prev_n == 1`, то есть до
+`_previous_dag`, `_resolve_correction_pr` и `_previous_tasks_version`.
+
+Через `_reconcile_revision` легаси-запись не гоняется (у неё нет `branch` /
+`base_sha` / `head_sha`) — как и предписал владелец прогона.
+
+**Отступление от рецепта:** гейт именно `prev_n == 1`, а не «разобрать v1
+всегда». Если последняя доставка — ревизия v≥2, висящий PR v1 к переизданию
+отношения не имеет и блокировать его не должен; на это есть контрольный тест
+`test_supersede_ignores_first_delivery_pr_when_revision_is_last` (он зелёный и
+до, и после фикса — он ловит не находку, а моё возможное превышение).
+
+**Тесты.** `test_supersede_returns_open_pr_of_first_delivery` (RC-PR 5, v2 не
+заведена, `run.json` побайтово прежний) и
+`test_supersede_refuses_when_first_delivery_pr_closed_unmerged`.
+
+**Краснели на старом коде:** да, оба — старый код доходил до доставки и
+возвращал 77 (в фикстуре спека в base есть, поэтому отказ про версию не
+срабатывал, и дефект проявлялся ВТОРЫМ открытым PR на ту же спеку).

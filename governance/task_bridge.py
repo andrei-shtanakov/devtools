@@ -1361,6 +1361,19 @@ def _resolve_correction_pr(
                 f"--approval-pr {number}: нацелен в "
                 f"{facts.get('baseRefName')!r}, а не в {base_ref!r}"
             )
+        if anchor_rel not in ops.pr_files(state.repo_slug, number):
+            # Третье условие шага 4 §I7, без которого флаг из «заменяет
+            # поиск» превращался бы в «отключает проверку»: подпись
+            # ЛЮБОГО вмерженного в base_ref PR уходила бы в штамп, и штамп
+            # утверждал бы, что байты анкера одобрил человек, который их
+            # не видел (major C-5 финального ревью). В автоматической
+            # ветке это условие держится по построению: PR ищется среди
+            # содержащих коммит самого анкера.
+            raise RuntimeError(
+                f"--approval-pr {number}: PR не менял {anchor_rel} — "
+                "подписи взять неоткуда; флаг заменяет поиск (шаги 1–3), "
+                "но не проверку"
+            )
         merged_by = (facts.get("mergedBy") or {}).get("login")
         merged_at = facts.get("mergedAt")
     if not merged_by or not merged_at:
@@ -1457,6 +1470,39 @@ def _reconcile_revision(
             f"--abandon-revision {n}"
         )
     return "continue" if same_base else "abandon_and_next"
+
+
+def _reconcile_v1(state: RunState, ops: Ops, op: dict) -> int | None:
+    """§I3 для исторической v1 (`tasks-deliver`) — её PR ещё открыт?
+
+    v1 участвует в переиздании как ПОЛНОЦЕННАЯ доставка (`_last_delivery`
+    её учитывает, §I5/§I8 сверяются с ней), значит и первая строка
+    таблицы §I3 «`completed` | OPEN → вернуть существующий PR» на неё
+    распространяется. Иначе на одну спеку оказывались бы два открытых PR,
+    а закрытие старого потом попадало бы под вечный `CLOSED-unmerged` →
+    fail-closed — ровно конфликт I3×I4, разобранный в §I3.
+
+    Через `_reconcile_revision` легаси-запись не гоняется: у неё нет ни
+    `branch`, ни `base_sha`, ни `head_sha` — сверять идентичность нечем.
+    Разбирается ровно то, что в записи есть: номер её PR.
+
+    Возврат: номер PR, если он ещё OPEN (переиздавать нечего); `None` —
+    доставка закрыта мержем либо номера PR в записи нет (древняя запись:
+    поведение как до supersede).
+    """
+    pr = op.get("pr")
+    if not isinstance(pr, int):
+        return None
+    pr_state = ops.pr_facts(state.repo_slug, pr).get("state")
+    if pr_state == "MERGED":
+        return None
+    if pr_state != "OPEN":
+        raise RuntimeError(
+            f"PR #{pr} первой доставки закрыт без мержа "
+            f"(state={pr_state!r}) — ветка отклонена человеком; "
+            "переиздание fail-closed"
+        )
+    return pr
 
 
 def _recover_commit(state: RunState, ops: Ops, op: dict) -> None:
@@ -1747,6 +1793,20 @@ def deliver_superseded(
             "идёт без --supersede"
         )
     prev_n, prev_op = prev
+    if prev_n == 1:
+        # §I3 строка 1 для исторической v1: цикл выше её не видит
+        # (`_revisions` собирает только `tasks-deliver-v<N>`), и без этой
+        # ветки состояние «первая доставка ещё висит открытым PR»
+        # проваливалось в `_previous_tasks_version` и отказывало
+        # сообщением про версию — RC 1 вместо контрактных RC 0 + возврат
+        # PR, и диагностика уводила оператора не туда (major C-1).
+        v1_pr = _reconcile_v1(state, ops, prev_op)
+        if v1_pr is not None:
+            print(
+                f"первая доставка уже открыта PR #{v1_pr} — переиздавать "
+                "нечего, пока он не вмержен; новая ревизия не заводится"
+            )
+            return v1_pr
 
     dag, dag_source = _previous_dag(
         state, ops, prev_op, state.target_dir, state.bundle_dir, base_sha,
