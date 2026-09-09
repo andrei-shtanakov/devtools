@@ -473,10 +473,24 @@ class RealOps:
         return done.stdout.strip()
 
     def push_branch(self, target_dir: str, branch: str) -> None:
-        """git push -u origin branch из target_dir."""
-        subprocess.run(
-            ["git", "push", "-u", "origin", branch], cwd=target_dir, check=True,
+        """`git push -u origin <branch>`; сбой — RuntimeError со stderr.
+
+        Не `check=True`: наружу летел `CalledProcessError`, а `main`
+        ловит только `RuntimeError` — оператор получал сырой трейсбек
+        вместо сообщения. Ходовой случай — отвергнутый non-ff push
+        (ветка на remote ушла вперёд локальной), и текст git'а из stderr
+        для него и есть диагностика. Нормализация та же, что у
+        `checkout_and_pull`.
+        """
+        done = subprocess.run(
+            ["git", "push", "-u", "origin", branch],
+            cwd=target_dir, capture_output=True, text=True,
         )
+        if done.returncode != 0:
+            raise RuntimeError(
+                f"push_branch: git push -u origin {branch} "
+                f"rc={done.returncode}: {done.stderr.strip()}"
+            )
 
     def checkout_and_pull(self, target_dir: str, branch: str) -> None:
         """`git switch <branch>` + `git pull --ff-only`; сбой — RuntimeError.

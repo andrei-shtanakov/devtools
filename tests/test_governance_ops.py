@@ -566,6 +566,35 @@ def test_checkout_and_pull_pull_failure_raises_runtime_error(monkeypatch):
     assert len(calls_seen) == 2  # switch ran, then pull failed
 
 
+# --- Кейс 11b: push_branch — сбой пуша сообщением, не трейсбеком -----------
+
+
+def test_push_branch_command(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0)
+
+    RealOps().push_branch("/tmp/devtools", "spec/WS-alpha-7-tasks-v2")
+
+    assert [c.argv for c in calls] == [
+        ["git", "push", "-u", "origin", "spec/WS-alpha-7-tasks-v2"],
+    ]
+    assert calls[0].kwargs["cwd"] == "/tmp/devtools"
+
+
+def test_push_branch_failure_raises_runtime_error(monkeypatch):
+    """Отвергнутый push — RuntimeError со stderr git'а, не CalledProcessError.
+
+    `main` ловит только `RuntimeError`; с `check=True` ходовой non-ff
+    («ветка на remote ушла вперёд локальной») уходил оператору сырым
+    трейсбеком, и текст git'а — единственная диагностика — терялся."""
+    _install_fake_run(
+        monkeypatch, returncode=1, stderr="! [rejected] (non-fast-forward)",
+    )
+
+    with pytest.raises(RuntimeError, match="non-fast-forward") as exc:
+        RealOps().push_branch("/tmp/devtools", "spec/WS-alpha-7-tasks-v2")
+    assert "rc=1" in str(exc.value)
+
+
 # --- Кейс 12: current_branch / materialize_pr_head (ретроспектива 09-02) ----
 
 
