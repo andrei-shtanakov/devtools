@@ -1236,18 +1236,21 @@ def _revisions(state: RunState) -> list[tuple[int, dict]]:
 def _last_delivery(state: RunState) -> tuple[int, dict] | None:
     """Последняя ЗАВЕРШЁННАЯ доставка: старшая ревизия либо v1; None — их нет.
 
-    Ревизии в статусе `abandoned` и `started` пропускаются: ни та, ни
+    Записи в статусе `abandoned` и `started` пропускаются: ни та, ни
     другая ничего не доставили. `started` — штатный след падения (§I4,
     write-ahead), и принять её за доставку значит сделать §I5 fail-open
     (у `started` нет `anchor`, сверка не срабатывает и переиздание идёт
     даже при неизменившемся апстриме), записать в журнал ложный
     `comparison: unavailable` и направить `supersedes` на недоставку.
+    Счёт одинаков для ревизий и исторического ключа v1: `deliver_for_run`
+    тоже ведёт свой op write-ahead (`op_start` ДО эффектов), так что
+    упавшая ПЕРВАЯ доставка оставляет `tasks-deliver` в `started`.
     """
     for n, op in reversed(_revisions(state)):
         if op.get("status") == "completed":
             return n, op
     v1 = state.ops.get(_V1_KEY)
-    return (1, v1) if v1 else None
+    return (1, v1) if v1 and v1.get("status") == "completed" else None
 
 
 def _next_revision(state: RunState) -> int:
@@ -1863,6 +1866,14 @@ def main(argv: list[str] | None = None) -> int:
         "--reason", default=None, help="причина для --abandon-revision"
     )
     args = parser.parse_args(argv)
+    if args.abandon_revision is not None and args.supersede:
+        # Спека этого сочетания не описывает, а прогон делает ОДНО
+        # действие: молчаливая победа второго флага решала бы за
+        # оператора, что он имел в виду (minor ревью Task 8).
+        parser.error(
+            "--supersede и --abandon-revision — разные действия: "
+            "сначала абандоньте ревизию, затем запускайте переиздание"
+        )
     if args.abandon_revision is not None and not args.reason:
         parser.error("--abandon-revision требует --reason")
     state = load(args.run_id)
@@ -1879,7 +1890,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     ops = RealOps()
     if args.abandon_revision is not None:
-        _abandon_revision(state, args.abandon_revision, args.reason)
+        # Тот же fail-closed-контур, что у --supersede ниже: у оператора
+        # бывает опечатка в номере и бывает уже завершённая ревизия (§I4:
+        # не мутируется) — оба случая обязаны дать сообщение и ненулевой
+        # RC, а не трейсбек (major ревью Task 8).
+        try:
+            _abandon_revision(state, args.abandon_revision, args.reason)
+        except RuntimeError as exc:
+            print(f"task_bridge: {exc}")
+            return 1
         print(f"ревизия {args.abandon_revision} помечена abandoned")
         return 0
     if args.supersede:

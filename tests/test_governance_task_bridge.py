@@ -2477,6 +2477,22 @@ def test_last_delivery_skips_started(tmp_path, monkeypatch):
     assert (n, op["pr"]) == (1, 5)
 
 
+def test_last_delivery_skips_started_v1(tmp_path, monkeypatch):
+    """Тот же счёт и историческому ключу `tasks-deliver` (фикс-круг 1).
+
+    `deliver_for_run` ведёт op write-ahead (`op_start` ДО эффектов), так
+    что упавшая ПЕРВАЯ доставка оставляет v1 в `started` — принять её за
+    доставку значит тот же fail-open §I5, только на легаси-ключе."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _recon_state(tmp_path, monkeypatch, op={"status": "started"})
+    assert tb._last_delivery(state) is None
+    with pytest.raises(RuntimeError, match="переиздавать нечего"):
+        tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
+
+
 def test_start_revision_records_full_intent(tmp_path, monkeypatch):
     from governance import run_state as rs
     from governance import task_bridge as tb
@@ -3514,6 +3530,63 @@ def test_cli_abandon_revision_marks_and_returns_zero(tmp_path, monkeypatch):
         "--reason", "PR закрыт вручную",
     ]) == 0
     assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "abandoned"
+
+
+def test_cli_abandon_revision_unknown_number_fails_gracefully(
+    tmp_path, monkeypatch, capsys
+):
+    """Опечатка в номере ревизии — сообщение и RC 1, не трейсбек."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    _recon_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(tb, "RealOps", lambda: object())
+    rc = tb.main([
+        "--run-id", "r-recon", "--abandon-revision", "9",
+        "--reason", "промах пальцем",
+    ])
+    assert rc == 1
+    assert "нечего абандонить" in capsys.readouterr().out
+
+
+def test_cli_abandon_revision_completed_fails_gracefully(
+    tmp_path, monkeypatch, capsys
+):
+    """§I4: завершённая запись не мутируется — отказ, а не трейсбек."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _recon_state(tmp_path, monkeypatch)
+    tb._complete_revision(state, 2, pr=10, anchor="a")
+    monkeypatch.setattr(tb, "RealOps", lambda: object())
+    rc = tb.main([
+        "--run-id", "r-recon", "--abandon-revision", "2",
+        "--reason", "передумал",
+    ])
+    assert rc == 1
+    assert "завершена" in capsys.readouterr().out
+    # Запись цела: отказ не тронул её ни на байт.
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "completed"
+
+
+def test_cli_supersede_with_abandon_revision_refuses(
+    tmp_path, monkeypatch, capsys
+):
+    """Два действия в одном прогоне — fail-closed, а не выбор за оператора.
+
+    `--reason` передан: отказ обязан быть ИМЕННО про сочетание флагов, а
+    не про недостающую причину."""
+    from governance import task_bridge as tb
+
+    with pytest.raises(SystemExit) as exc:
+        tb.main([
+            "--run-id", "r", "--supersede",
+            "--abandon-revision", "2", "--reason", "почему бы и нет",
+        ])
+    assert exc.value.code == 2
+    assert "разные действия" in capsys.readouterr().err
 
 
 def test_cli_abandon_revision_requires_reason(tmp_path, monkeypatch, capsys):
