@@ -3627,7 +3627,7 @@ def test_recover_commit_accepts_matching_local_commit(tmp_path, monkeypatch):
 
     # Возврата нет (F-03): прод его не читал, а тесты утверждали значение,
     # которого нет в поведении — мутация `return "phantom"` была зелёной.
-    assert tb._recover_commit(state, _Ops(), 2, op, None) is None
+    assert tb._recover_commit(state, _Ops(), 2, op) is None
 
 
 def test_recover_commit_branch_at_base_means_no_commit_yet(
@@ -3657,7 +3657,7 @@ def test_recover_commit_branch_at_base_means_no_commit_yet(
         def blob_in_commit(self, target_dir, sha, rel_path):
             return "блоб-v1-спеки"
 
-    assert tb._recover_commit(state, _Ops(), 2, op, None) is None
+    assert tb._recover_commit(state, _Ops(), 2, op) is None
 
 
 def test_recover_commit_branch_at_base_after_blob_written(
@@ -3684,7 +3684,7 @@ def test_recover_commit_branch_at_base_after_blob_written(
         def blob_in_commit(self, target_dir, sha, rel_path):
             return "блоб-v1-спеки"
 
-    assert tb._recover_commit(state, _Ops(), 2, op, None) is None
+    assert tb._recover_commit(state, _Ops(), 2, op) is None
 
 
 def test_recover_commit_moved_branch_message_claims_only_local_head(
@@ -3705,15 +3705,17 @@ def test_recover_commit_moved_branch_message_claims_only_local_head(
             return "чужой-коммит" if "tasks-v2" in ref else None
 
     with pytest.raises(RuntimeError, match="двигали снаружи") as exc:
-        tb._recover_commit(state, _Ops(), 2, op, None)
+        tb._recover_commit(state, _Ops(), 2, op)
     assert "remote" not in str(exc.value)
 
 
 def test_recover_commit_refuses_recorded_head_without_local_branch(
     tmp_path, monkeypatch
 ):
-    """§I3.1 «записан | ветки в клоне нет, PR-а нет» — fail-closed.
+    """§I3.1 «записан | ветки в клоне нет» — fail-closed.
 
+    Гвард зовётся только на пути переиздания (PR ревизии не найден),
+    поэтому опознать коммит здесь нечем: живого PR с `headRefOid` нет.
     Доставка дошла до `push_branch` (ветка на remote, `head_sha` durable)
     и упала на `create_draft_pr`; оператор возобновляет из клона, где
     ЛОКАЛЬНОЙ ветки нет. Молчаливый пропуск вёл к пересозданию ветки от
@@ -3731,31 +3733,8 @@ def test_recover_commit_refuses_recorded_head_without_local_branch(
             return None          # ветки ревизии в этом клоне нет
 
     with pytest.raises(RuntimeError, match="в этом клоне нет") as exc:
-        tb._recover_commit(state, _Ops(), 2, op, None)
+        tb._recover_commit(state, _Ops(), 2, op)
     assert "--abandon-revision 2" in str(exc.value)
-
-
-def test_recover_commit_accepts_missing_branch_when_pr_identifies_commit(
-    tmp_path, monkeypatch
-):
-    """Та же пара фактов, но PR ревизии есть — отказа НЕТ.
-
-    `_reconcile_revision` уже сверил `headRefOid` живого PR с `head_sha`,
-    то есть коммит опознан; вызывающий на этом пути только помечает
-    ревизию completed и ветку не трогает. Отказ здесь был бы регрессией:
-    полностью состоявшаяся доставка становилась бы неремонтируемой в
-    клоне без ветки."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    op = {"head_sha": "запушенный-коммит", "base_sha": "base1",
-          "branch": "spec/WS-alpha-7-tasks-v2"}
-
-    class _Ops(_ReconOps):
-        def rev_parse(self, target_dir, ref):
-            return None
-
-    assert tb._recover_commit(state, _Ops(), 2, op, 7) is None
 
 
 def test_recover_commit_refuses_foreign_commit(tmp_path, monkeypatch):
@@ -3776,7 +3755,7 @@ def test_recover_commit_refuses_foreign_commit(tmp_path, monkeypatch):
             return "blob1"
 
     with pytest.raises(RuntimeError, match="чужой коммит"):
-        tb._recover_commit(state, _Ops(), 2, op, None)
+        tb._recover_commit(state, _Ops(), 2, op)
 
 
 def test_recover_commit_refuses_right_parent_wrong_blob(
@@ -3809,7 +3788,7 @@ def test_recover_commit_refuses_right_parent_wrong_blob(
             return "blobX"          # а содержимое спеки — чужое
 
     with pytest.raises(RuntimeError, match="чужой коммит"):
-        tb._recover_commit(state, _Ops(), 2, op, None)
+        tb._recover_commit(state, _Ops(), 2, op)
 
 
 # --- deliver_superseded: сборка переиздания (Task 7) ----------------------
@@ -4997,6 +4976,41 @@ def test_supersede_resumes_started_revision_with_open_pr(
     assert not any(c[0] == "create_draft_pr" for c in ops.calls)
 
 
+def test_supersede_resumes_started_revision_with_open_pr_moved_branch(
+    tmp_path, monkeypatch
+):
+    """Та же строка §I3, но ЛОКАЛЬНАЯ ветка уехала — RC 0, не отказ.
+
+    Доставка ревизии дошла до конца (коммит `h`, push, PR #7 OPEN на
+    `headRefOid == h`), а процесс умер до `_complete_revision`; оператор
+    тем временем подвинул локальную `spec/<ws-id>-tasks-v2` на чужой SHA.
+    Гвард §I3.1 сверяет ЛОКАЛЬНЫЙ head, и зовись он на этом исходе —
+    возобновление падало бы «ветку двигали снаружи» там, где делать
+    нечего: идентичность доказана `headRefOid`, доставка не
+    переигрывается, ветка не трогается."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(state, monkeypatch, head_sha="h")
+    ops = _RevisionPrOps(
+        pr=7, pr_state="OPEN", head="h", local_head="чужой-коммит",
+        prs=[_MERGED_PR],
+    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "returned", 7
+    )
+    saved = rs.load("r-recon")
+    assert len(tb._revisions(saved)) == 1          # v3 не заведена
+    assert saved.ops["tasks-deliver-v2"]["status"] == "completed"
+    assert saved.ops["tasks-deliver-v2"]["pr"] == 7
+    assert not any(
+        c[0] in ("ensure_branch", "commit_paths", "push_branch",
+                 "create_draft_pr")
+        for c in ops.calls
+    )
+
+
 def test_supersede_resumes_started_revision_without_pr(tmp_path, monkeypatch):
     """§I3.1 «started, PR-а нет, base совпал»: доставка доводится в ТОЙ ЖЕ
     ветке, детерминированно из намерения — один PR, новой ревизии нет."""
@@ -5319,7 +5333,7 @@ def test_supersede_records_tasks_blob_before_commit(tmp_path, monkeypatch):
     # Гвард молчит: коммит опознан своим. Возврата у него нет (F-03) —
     # «принять его» исполняет сама доставка, её after_commit пишет
     # head_sha этого же коммита.
-    assert tb._recover_commit(saved, _WithOrphanCommit(), 2, op, None) is None
+    assert tb._recover_commit(saved, _WithOrphanCommit(), 2, op) is None
 
 
 def test_supersede_fails_when_actual_anchor_differs(tmp_path, monkeypatch):

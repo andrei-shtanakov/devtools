@@ -2038,9 +2038,7 @@ def _reconcile_v1(state: RunState, ops: Ops, op: dict) -> int | None:
     return pr
 
 
-def _recover_commit(
-    state: RunState, ops: Ops, n: int, op: dict, pr: int | None
-) -> None:
+def _recover_commit(state: RunState, ops: Ops, n: int, op: dict) -> None:
     """Гвард таблицы §I3.1: коммит и запись head_sha не атомарны.
 
     Возврата НЕТ намеренно (минор F-03 финального ревью): все строки
@@ -2057,21 +2055,24 @@ def _recover_commit(
     лежит чужая работа) и на «`head_sha` записан, ветки в клоне нет» —
     см. ниже.
 
-    `pr` — номер PR ревизии (или None) — нужен ровно одному различению:
-    при `head_sha` без локальной ветки коммит опознаваем ЛИБО локально,
-    ЛИБО по `headRefOid` живого PR (его `_reconcile_revision` уже сверил).
-    Нет ни того, ни другого — продолжения нет: вызывающий пошёл бы
-    переиздавать детерминированно, `ensure_branch` создала бы ветку
-    ЗАНОВО от base, `commit_paths` сделал бы НОВЫЙ коммит (тот же tree,
-    другой committer date ⇒ другой SHA), а `after_commit` затёр бы
-    `head_sha` намерения — §I3 называет его единственным фактом, по
-    которому ревизию опознают в удалённой ветке. Это потеря записи
-    журнала, а не плохая диагностика, поэтому здесь fail-closed.
+    Зовётся ТОЛЬКО на пути переиздания («PR ревизии не найден»): при
+    живом PR идентичность коммита уже доказана `_reconcile_revision` по
+    `headRefOid`, доставка не переигрывается и локальный head в исходе не
+    участвует — сверять его там значило бы ломать строку §I3 «started |
+    PR OPEN | идентичность сошлась» на локально сдвинутой ветке.
+
+    Отсюда и fail-closed на «`head_sha` записан, ветки в клоне нет»:
+    опознать коммит нечем, а вызывающий пошёл бы переиздавать
+    детерминированно — `ensure_branch` создала бы ветку ЗАНОВО от base,
+    `commit_paths` сделал бы НОВЫЙ коммит (тот же tree, другой committer
+    date ⇒ другой SHA), а `after_commit` затёр бы `head_sha` намерения —
+    §I3 называет его единственным фактом, по которому ревизию опознают в
+    удалённой ветке. Это потеря записи журнала, а не плохая диагностика.
     """
     branch, head = op.get("branch"), op.get("head_sha")
     local = ops.rev_parse(state.target_dir, branch) if branch else None
     if head:
-        if local is None and pr is None:
+        if local is None:
             raise RuntimeError(
                 f"ревизия {n}: head_sha {head[:7]} записан, а ветки "
                 f"{branch} в этом клоне нет — коммит уже создан (и, "
@@ -2352,10 +2353,14 @@ def deliver_superseded(
                 f"ревизия {n} начата с другим составом DAG — повторите "
                 "запуск с тем же --legacy-bundle, что и в её намерении"
             )
-        # Бросает на чужом коммите/ветке и на «head_sha записан, ветки в
-        # клоне нет» (там опознавать нечем, а переиздание затёрло бы SHA).
-        _recover_commit(state, ops, n, op, pr)
         if pr is not None:
+            # Доставка дошла до конца: идентичность коммита доказана
+            # `_reconcile_revision` (`headRefOid` == `head_sha`), а ветку
+            # этот исход не трогает — доставка не переигрывается. Поэтому
+            # гвард §I3.1 (`_recover_commit`) здесь НЕ зовётся: он сверяет
+            # ЛОКАЛЬНЫЙ head, и уехавшая локальная ветка ломала бы строку
+            # §I3 «started | PR OPEN | идентичность сошлась», которая
+            # обещает возврат существующего PR.
             _complete_revision(
                 state, n, pr=pr, anchor=op["prospective_anchor"],
                 content_anchor=op.get("content_anchor"),
@@ -2367,6 +2372,9 @@ def deliver_superseded(
         # ДЕТЕРМИНИРОВАННО из намерения — байты те же, потому что
         # generated_at/version/branch зафиксированы в намерении, а
         # commit_paths на пустом индексе не создаёт второй коммит.
+        # Бросает на чужом коммите/ветке и на «head_sha записан, ветки в
+        # клоне нет» (там опознавать нечем, а переиздание затёрло бы SHA).
+        _recover_commit(state, ops, n, op)
         correction = _resolve_correction_pr(
             state, ops, active, base_ref, op["approval_pr"]
         )
