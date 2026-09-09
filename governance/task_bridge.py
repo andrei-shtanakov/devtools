@@ -28,7 +28,7 @@ from typing import Literal, NamedTuple
 import yaml
 
 from governance import acceptance_guard, decomposition_guard, design_guard
-from governance.ops import Ops, RealOps
+from governance.ops import Ops, RealOps, review_login
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
 from governance.run_state import RunState, load, op_complete, op_start, save
 from governance.stale_adapter import blob_sha1
@@ -1700,7 +1700,44 @@ def _revisions(state: RunState) -> list[tuple[int, dict]]:
     return sorted(found)
 
 
-def _last_delivery(state: RunState) -> tuple[int, dict] | None:
+def _replaced_revisions(state: RunState) -> set[int]:
+    """Ревизии, которые более поздняя запись объявила заменёнными (§I3.2).
+
+    Связь направлена ВПЕРЁД, как и `supersedes`: запись N не мутируется
+    (§I4), о снятии её предложения говорит запись M > N полем
+    `replaces_revision: N`. Читать состояние заменённой ревизии из неё
+    самой было бы мутацией журнала.
+    """
+    return {
+        op["replaces_revision"] for m, op in _revisions(state)
+        if isinstance(op.get("replaces_revision"), int)
+        and op["replaces_revision"] < m
+    }
+
+
+def _replaced_by(state: RunState, n: int, pr: int | None) -> int | None:
+    """Ревизия, объявившая замену ревизии `n` ВМЕСТЕ с её PR; None — нет.
+
+    Сверяется ПАРА (ревизия, номер PR): forward-ссылка объявляет
+    ожидаемым закрытие именно того предложения, которое заменяли. Под
+    именем ветки ревизии мог позже завестись другой PR — его закрытие
+    ожидаемым не объявлял никто, и §I3 обязан остаться fail-closed.
+    """
+    if pr is None:
+        return None
+    for m, op in _revisions(state):
+        if (
+            m > n
+            and op.get("replaces_revision") == n
+            and op.get("replaces_pr") == pr
+        ):
+            return m
+    return None
+
+
+def _last_delivery(
+    state: RunState, skip: int | None = None
+) -> tuple[int, dict] | None:
     """Последняя ЗАВЕРШЁННАЯ доставка: старшая ревизия либо v1; None — их нет.
 
     Записи в статусе `abandoned` и `started` пропускаются: ни та, ни
@@ -1713,11 +1750,26 @@ def _last_delivery(state: RunState) -> tuple[int, dict] | None:
     Счёт одинаков для ревизий и исторического ключа v1: `deliver_for_run`
     тоже ведёт свой op write-ahead (`op_start` ДО эффектов), так что
     упавшая ПЕРВАЯ доставка оставляет `tasks-deliver` в `started`.
+
+    ЗАМЕНЁННЫЕ ревизии (§I3.2) пропускаются наравне с ними, хотя статус у
+    них `completed`: замена закрывает их PR без мержа, то есть
+    спецификация не доставлена. Взять такую за предыдущую доставку значит
+    указать `supersedes` на предложение, снятое со стола, и сверять §I5/
+    §I8 с содержанием, которого в base нет. `skip` — ревизия, замена
+    которой начинается ПРЯМО СЕЙЧАС: forward-ссылки на неё ещё нет, её
+    пишет намерение, которое вызывающий только собирает.
     """
+    excluded = _replaced_revisions(state)
+    if skip is not None:
+        excluded.add(skip)
     for n, op in reversed(_revisions(state)):
+        if n in excluded:
+            continue
         if op.get("status") == "completed":
             return n, op
     v1 = state.ops.get(_V1_KEY)
+    if 1 in excluded:
+        return None
     return (1, v1) if v1 and v1.get("status") == "completed" else None
 
 
@@ -1774,6 +1826,266 @@ def _abandon_revision(state: RunState, n: int, reason: str) -> None:
         )
     state.ops[key] = {**op, "status": "abandoned", "reason": reason}
     save(state)
+
+
+class Replacement(NamedTuple):
+    """Явный replace-переход: какую ревизию заменяем и почему.
+
+    Собирается из CLI (`--replace-revision` + `--replacement-reason`) и
+    существует ТОЛЬКО на первом заходе: дальше связь живёт в намерении
+    новой ревизии (`replaces_*`), и любой повтор — включая голый
+    `--supersede` — доводит шаги оттуда.
+    """
+
+    revision: int
+    reason: str
+
+
+def _check_replacement_target(
+    state: RunState, ops: Ops, pr: int, head_sha: str | None, facts: dict
+) -> None:
+    """Внешнее вмешательство в заменяемый PR → fail-closed (§I3.2).
+
+    Порядок владельца: замена валидна, пока предложение никем, кроме нас,
+    не тронуто. Что считается вмешательством:
+
+    - `MERGED` — безусловный отказ: вмерженное предложение заменять
+      нельзя ни при каких условиях, оно уже часть базы;
+    - head PR разошёлся с записанным `head_sha` намерения (или его не
+      узнать) — под тем же именем ветки чужая работа, закрывать её мы не
+      вправе;
+    - ЛЮБОЕ ревью не от ревью-контура (`review_login()`) — человек уже
+      высказался о предложении;
+    - непогашенный review thread любого автора — разговор, который ждёт
+      ответа; `None` («узнать не удалось») читается как непогашенный.
+
+    Проверки и комментарии ботов закрытию НЕ мешают и здесь не
+    спрашиваются вовсе: `statusCheckRollup` — не мнение о предложении, а
+    обычный комментарий не удерживает предложение на столе.
+
+    Уже закрытый (не вмерженный) PR проверок не проходит и не требует:
+    предложение снято, а именно это замена и делает. Это же — ручной
+    выход оператора из отказа: закрыть #N руками с объяснением и
+    повторить переход.
+    """
+    pr_state = facts.get("state")
+    if pr_state == "MERGED":
+        raise RuntimeError(
+            f"PR #{pr} вмержен — вмерженное предложение не заменяется: "
+            "оно уже часть base, и снимать со стола нечего"
+        )
+    if pr_state != "OPEN":
+        return
+    if not head_sha:
+        raise RuntimeError(
+            f"замена PR #{pr}: в записи ревизии нет head_sha — "
+            "идентичность предложения не проверить, закрывать нельзя"
+        )
+    actual_head = facts.get("headRefOid")
+    if not actual_head:
+        raise RuntimeError(
+            f"замена PR #{pr}: у него нет headRefOid, а намерение ревизии "
+            f"стоит на {head_sha[:7]} — идентичность не проверить"
+        )
+    if actual_head != head_sha:
+        raise RuntimeError(
+            f"замена PR #{pr}: он стоит на {actual_head[:7]}, а намерение "
+            f"ревизии — на {head_sha[:7]}; в PR вмешались снаружи — "
+            "закройте его сами, с объяснением, и повторите замену"
+        )
+    reviews = ops.pr_reviews(state.repo_slug, pr)
+    if reviews is None:
+        raise RuntimeError(
+            f"замена PR #{pr}: список ревью не получен — «вмешательства "
+            "нет» утверждать не из чего, fail-closed"
+        )
+    bot = review_login()
+    humans = sorted(
+        {str(r.get("login")) for r in reviews if r.get("login") != bot}
+    )
+    if humans:
+        raise RuntimeError(
+            f"замена PR #{pr}: на нём есть ревью не от {bot} "
+            f"({', '.join(humans)}) — человек уже высказался; закройте PR "
+            "сами, с объяснением, и повторите замену"
+        )
+    if ops.unresolved_threads(state.repo_slug, pr) is not False:
+        raise RuntimeError(
+            f"замена PR #{pr}: есть непогашенные review threads (либо их "
+            "состояние не узнать) — разговор ждёт ответа, закрывать нельзя"
+        )
+
+
+def _validate_replacement(
+    state: RunState, ops: Ops, replace: Replacement
+) -> dict:
+    """Проверки заменяемой ревизии ДО единого эффекта → поля намерения.
+
+    Порядок владельца начинается именно этим: «validate v3/#408 →
+    записать started-v4». Возврат — `replaces_*`-часть намерения новой
+    ревизии; связь направлена вперёд, запись заменяемой ревизии не
+    трогается (§I4).
+
+    Историческая v1 (`tasks-deliver`) заменяться НЕ может, и это не
+    экономия: у её записи нет ни `branch`, ни `head_sha` — ни
+    идентичность предложения проверить, ни ветку удалить. Если её PR
+    дефектен, воркстрим не доставил ещё ничего, и разбирается это
+    обычной доставкой, а не переизданием.
+    """
+    n = replace.revision
+    if n < 2:
+        raise RuntimeError(
+            "заменять можно только ревизию переиздания (N ≥ 2): у первой "
+            "доставки нет ни ветки, ни head_sha — идентичность её "
+            "предложения не проверить"
+        )
+    op = state.ops.get(f"{_REVISION_PREFIX}{n}")
+    if op is None:
+        raise RuntimeError(f"ревизии {n} нет в леджере — заменять нечего")
+    status = op.get("status")
+    if status == "abandoned":
+        raise RuntimeError(
+            f"ревизия {n} брошена (причина: {op.get('reason')!r}) — "
+            "отзывать нечего: предложения она не сделала"
+        )
+    if status != "completed":
+        raise RuntimeError(
+            f"ревизия {n} в статусе {status!r} — заменяется только "
+            "завершённая доставка: замена адресована ПРЕДЛОЖЕНИЮ, а "
+            "незавершённая ревизия его ещё не сделала. Её выход — "
+            f"--abandon-revision {n}"
+        )
+    later = [
+        m for m, later_op in _revisions(state)
+        if m > n and later_op.get("replaces_revision") != n
+    ]
+    if later:
+        # Замена середины истории породила бы ДВЕ конкурирующие цепочки
+        # forward-ссылок: у §I3 не осталось бы однозначного ответа, чьё
+        # закрытие ожидаемо. Исключение — ревизии, которые эту же замену
+        # уже ведут: с ними повтор `--replace-revision N` продолжает
+        # начатое, а не начинает вторую цепочку.
+        raise RuntimeError(
+            f"ревизия {n} не последняя в леджере (после неё: "
+            f"{', '.join(str(m) for m in later)}) — заменять середину "
+            "истории нельзя; адресуйте замену последней ревизии"
+        )
+    pr, branch = op.get("pr"), op.get("branch")
+    if not isinstance(pr, int) or not branch:
+        raise RuntimeError(
+            f"ревизия {n}: в записи нет pr/branch (pr={pr!r}, "
+            f"branch={branch!r}) — заменять нечего"
+        )
+    _check_replacement_target(
+        state, ops, pr, op.get("head_sha"),
+        ops.pr_facts(state.repo_slug, pr),
+    )
+    return {
+        "replaces_revision": n,
+        "replaces_pr": pr,
+        "replaces_branch": branch,
+        # Идентичность заменяемого предложения — durable в НАМЕРЕНИИ, а не
+        # вычитываемая из записи ревизии N на каждом шаге: повтор
+        # (`_replacement_close`) обязан сверять её тем же значением, каким
+        # её утвердила валидация, иначе «в PR вмешались» и «мы читаем
+        # другую запись» стали бы неразличимы.
+        "replaces_head_sha": op.get("head_sha"),
+        "replacement_reason": replace.reason,
+    }
+
+
+def _pending_replacement(state: RunState) -> dict:
+    """Незавершённое обязательство замены, которое обязана перенять новая
+    ревизия; пустой словарь — переносить нечего.
+
+    Ревизия-замена может сама оказаться `abandoned` (сдвинулся base,
+    открытого PR нет). Обязательство при этом остаётся: PR отозванной
+    ревизии либо ещё открыт, либо уже закрыт, а её ветка жива — и без
+    переноса полей forward-ссылка на неё осталась бы только в брошенной
+    записи, а хвост замены не довёлся бы никогда.
+
+    Смотрится ТОЛЬКО новейшая запись с `replaces_*`: если она не брошена,
+    обязательство ведёт она сама (и цикл реконсиляции до этого места не
+    дошёл бы).
+    """
+    for _, op in reversed(_revisions(state)):
+        if not isinstance(op.get("replaces_revision"), int):
+            continue
+        if op.get("status") != "abandoned":
+            return {}
+        return {
+            key: op[key] for key in (
+                "replaces_revision", "replaces_pr", "replaces_branch",
+                "replaces_head_sha", "replacement_reason",
+            ) if key in op
+        }
+    return {}
+
+
+def _replacement_close(state: RunState, ops: Ops, op: dict) -> None:
+    """Шаг «закрыть заменяемый PR» — идемпотентный, ИЗ НАМЕРЕНИЯ ревизии.
+
+    Читается запись леджера, а не аргументы CLI: любой повтор (в том
+    числе голый `--supersede`) обязан продолжать ту же ревизию и довести
+    её шаги. Иначе окно «намерение записано, PR ещё открыт» разрешалось
+    бы доставкой второго открытого PR на ту же спеку — ровно то, что §I3
+    запрещает.
+
+    Факты PR перезапрашиваются, хотя `_validate_replacement` их уже
+    смотрел: между валидацией и закрытием стоят сетевые шаги §I7/§I8, и
+    человек успевает оставить ревью именно в этом окне.
+    """
+    pr = op.get("replaces_pr")
+    if not isinstance(pr, int):
+        return
+    facts = ops.pr_facts(state.repo_slug, pr)
+    _check_replacement_target(
+        state, ops, pr, op.get("replaces_head_sha"), facts
+    )
+    if facts.get("state") != "OPEN":
+        return          # уже закрыт: шаг состоялся раньше (или оператором)
+    reason = op.get("replacement_reason", "")
+    body = (
+        f"Закрыт механикой replace-перехода `task_bridge` прогона "
+        f"`{state.run_id}`: предложение ревизии "
+        f"{op['replaces_revision']} заменяется ревизией "
+        f"{op.get('revision', '?')}.\n\n"
+        f"Причина: {reason}\n\n"
+        "Ревизия-предшественник в леджере не мутируется: этот PR и его "
+        "коммиты остаются аудитным следом, удаляется только живая ветка "
+        f"`{op.get('replaces_branch')}`."
+    )
+    if not ops.close_pr(state.repo_slug, pr, body):
+        raise RuntimeError(
+            f"не удалось закрыть заменяемый PR #{pr} — замена не "
+            "продолжается: новый PR завёлся бы вторым открытым на ту же "
+            "спеку"
+        )
+    print(f"заменяемый PR #{pr} закрыт")
+
+
+def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
+    """Шаг «удалить ветку заменённой ревизии» — последний, идемпотентный.
+
+    Порядок владельца: ветка удаляется ТОЛЬКО после того, как намерение
+    durable, заменяемый PR закрыт и новый PR создан. Поэтому зовётся
+    исключительно там, где PR новой ревизии уже существует.
+
+    Результат `delete_remote_branch` не проверяется: «ветки нет» и «не
+    вышло» неразличимы, а шаг идемпотентен по смыслу — повтор просто
+    попробует ещё раз. Отказывать здесь было бы хуже: доставка уже
+    состоялась, и RC 1 сказал бы оператору неправду о ней.
+    """
+    branch = op.get("replaces_branch")
+    if not branch:
+        return
+    gone = ops.delete_remote_branch(state.repo_slug, branch)
+    # Локальная половина — тем же шагом: ссылка на отозванные байты
+    # удаляется в ОБЕИХ, иначе в клоне остаётся живая ветка артефакта,
+    # который контракт объявил снятым.
+    gone = ops.delete_local_branch(state.target_dir, branch) or gone
+    if gone:
+        print(f"ветка заменённой ревизии удалена: {branch}")
 
 
 class Correction(NamedTuple):
@@ -2050,7 +2362,12 @@ def _previous_dag(
 
 
 def _reconcile_revision(
-    n: int, op: dict, base_sha: str, pr: int | None, facts: dict
+    n: int,
+    op: dict,
+    base_sha: str,
+    pr: int | None,
+    facts: dict,
+    replaced: bool = False,
 ) -> str:
     """Решение по таблице §I3 спеки. Возврат — имя перехода, не действие.
 
@@ -2064,10 +2381,26 @@ def _reconcile_revision(
     `pr_facts` — дважды (минор C-8: четыре сетевых запроса к `gh` на
     ревизию вместо одного, лишний источник флака). Побочно решение по
     §I3 стало чистым — таблица проверяема без стабов ops.
+
+    `replaced` — факт из леджера, а не из сети: более поздняя ревизия
+    объявила предложение этой снятым (§I3.2). Тогда `CLOSED-unmerged`
+    даёт переход `"replaced"` (вызывающий смотрит предыдущую ревизию, как
+    на `abandoned`), а не fail-closed. Считается ТОЛЬКО закрытие: при
+    живом OPEN замена ещё не доведена, и таблица §I3 действует как
+    прежде — иначе на одну спеку осталось бы два открытых PR.
     """
     branch = op.get("branch")
     pr_state = facts.get("state") if pr is not None else None
     if pr is not None and pr_state not in ("OPEN", "MERGED"):
+        if replaced:
+            # §I3.2: закрытый без мержа PR ревизии — ОЖИДАЕМОЕ состояние,
+            # если более поздняя запись объявила его заменённым
+            # (`replaces_revision`/`replaces_pr` = эта ревизия и этот PR).
+            # Приём тот же, которым §I3 развязал `abandoned`: смотрим
+            # вперёд, запись N не трогаем. Без него замена была бы
+            # одноразовой — закрыв #408 своей же механикой, переиздание
+            # отказывало бы навсегда на каждом следующем заходе.
+            return "replaced"
         raise RuntimeError(
             f"PR #{pr} по ветке {branch} закрыт без мержа — ветка отклонена "
             "человеком; переиздание fail-closed"
@@ -2330,6 +2663,7 @@ def deliver_superseded(
     ops: Ops,
     legacy_bundle: int | None = None,
     approval_pr: int | None = None,
+    replace: Replacement | None = None,
 ) -> SupersedeResult:
     """Санкционированное переиздание tasks-спеки (спека 2026-09-09).
 
@@ -2362,6 +2696,20 @@ def deliver_superseded(
     реконсиляции §I3, включая PR первой доставки) либо `kind="noop"` —
     бесследный no-op §I5: апстрим не менялся с прошлой доставки,
     run.json не трогается.
+
+    `replace` — явный replace-переход (§I3.2): незамерженное предложение
+    названной ревизии снимается со стола и заменяется новым. Порядок
+    внутри вызова — владельческий: валидация заменяемой ревизии → durable
+    намерение новой с `replaces_*` → закрытие заменяемого PR → доставка →
+    удаление ветки заменённой ревизии.
+
+    Замена стоит ВЫШЕ бесследного no-op §I5, и это не оптимизация:
+    §I5 спрашивает про АПСТРИМ («менялось ли содержание»), а замена — про
+    ПРЕДЛОЖЕНИЕ («лежит ли на столе дефектный PR»). Живой случай
+    (devtools#172) — дефект в ПОДПИСИ штампа при неизменном апстриме, а
+    `content_anchor` подписи не видит по построению (§I2). Сработай §I5
+    первым, замена стала бы недостижима ровно в том классе случаев, ради
+    которого заведена.
     """
     if state.status != "completed":
         raise RuntimeError(
@@ -2385,6 +2733,19 @@ def deliver_superseded(
         )
 
     active = _dag_for(legacy_bundle)
+    # Валидация заменяемой ревизии — ПЕРВЫМ шагом порядка владельца и до
+    # единого эффекта: она read-only и отказывает раньше, чем леджер
+    # тронут. На повторе (намерение уже durable) её результат не нужен —
+    # шаги замены читаются из намерения, — но проверка всё равно уместна:
+    # вмешаться в заменяемый PR могли и между заходами.
+    replace_fields = (
+        _validate_replacement(state, ops, replace) if replace
+        # Обязательство брошенной ревизии-замены переходит на следующую:
+        # PR отозван (или ещё ждёт отзыва), ветка жива, а forward-ссылка
+        # обязана продолжать существовать — иначе §I3 снова поймает
+        # закрытый PR как «отклонён человеком».
+        else _pending_replacement(state)
+    )
 
     # Незавершённая ревизия реконсилируется ДО любых новых эффектов, и её
     # решение исполняется ЦЕЛИКОМ: игнорировать "continue"/"complete"/
@@ -2396,6 +2757,13 @@ def deliver_superseded(
         status = op.get("status")
         if status not in ("started", "completed"):
             continue          # abandoned — терминальна, смотрим предыдущую
+        if replace is not None and n == replace.revision:
+            # Заменяемая ревизия не реконсилируется: её предложение
+            # снимается со стола этим же вызовом. Без пропуска §I3 вернул
+            # бы её PR («completed | OPEN → вернуть существующий»), и
+            # замена была бы недостижима — та самая ловушка, ради снятия
+            # которой переход и заведён.
+            continue
         # PR ревизии и его факты запрашиваются ЗДЕСЬ, по одному разу, и
         # передаются в `_reconcile_revision` аргументом (минор C-8): она
         # имя перехода возвращает, а номер PR нужен и вызывающему.
@@ -2411,8 +2779,21 @@ def deliver_superseded(
             # решается ТОЛЬКО по §I5 — реконсилировать нечего. Остальные
             # состояния PR завершённой ревизии (OPEN → вернуть его;
             # CLOSED-unmerged → fail-closed) разбирает _reconcile_revision.
+            if pr is not None:
+                # PR ревизии существует ⇒ шаг удаления ветки заменённой
+                # ревизии разрешён (порядок владельца). Ниже по ходу
+                # вызова этот `op` уже не встретится — цикл прерывается.
+                _replacement_cleanup(state, ops, op)
             break
-        decision = _reconcile_revision(n, op, base_sha, pr, facts)
+        decision = _reconcile_revision(
+            n, op, base_sha, pr, facts,
+            replaced=_replaced_by(state, n, pr) is not None,
+        )
+        if decision == "replaced":
+            # §I3.2: закрытие этого PR — ожидаемое состояние, о нём
+            # говорит более поздняя запись. Ревизия из разбора выбывает
+            # так же, как `abandoned`.
+            continue
         if (
             decision in ("complete", "continue")
             and pr is not None
@@ -2436,6 +2817,10 @@ def deliver_superseded(
             )
             break
         if decision == "return_pr":
+            # Окно «PR новой ревизии создан, ветка заменённой ещё жива»:
+            # хвост замены доводится и на возврате существующего PR, иначе
+            # он не доводился бы никогда — этот исход терминален.
+            _replacement_cleanup(state, ops, op)
             print(
                 f"ревизия {n} уже доставлена — PR #{pr}; новая ревизия не "
                 "заводится"
@@ -2447,6 +2832,7 @@ def deliver_superseded(
                 content_anchor=op.get("content_anchor"),
                 head_sha=op["head_sha"],   # непуст по гварду выше
             )
+            _replacement_cleanup(state, ops, op)
             # Доставка состоялась; нужно ли ещё одно переиздание — решает
             # следующий запуск по §I5.
             print(f"ревизия {n} доставлена ранее — PR #{pr} вмержен")
@@ -2472,6 +2858,7 @@ def deliver_superseded(
                 content_anchor=op.get("content_anchor"),
                 head_sha=op["head_sha"],   # непуст по гварду выше
             )
+            _replacement_cleanup(state, ops, op)
             print(f"ревизия {n} доставлена ранее — PR #{pr}")
             return SupersedeResult("returned", pr)
         # PR-а нет: доставка не дошла до последнего шага. Повторяем её
@@ -2494,6 +2881,11 @@ def deliver_superseded(
             frozenset(signed) if signed is not None
             else correction.signed_nodes
         )
+        # Окна A и B замены: намерение durable, а заменяемый PR ещё
+        # открыт (A) либо уже закрыт (B). Шаг идемпотентен и читается ИЗ
+        # НАМЕРЕНИЯ — повтор доводит его, даже когда запущен без
+        # `--replace-revision`.
+        _replacement_close(state, ops, op)
         pr = deliver(
             target_dir=state.target_dir,
             repo_slug=state.repo_slug,
@@ -2520,11 +2912,14 @@ def deliver_superseded(
             state, n, pr=pr, anchor=op["prospective_anchor"],
             content_anchor=op.get("content_anchor"),
         )
+        _replacement_cleanup(state, ops, op)
         return SupersedeResult("delivered", pr)
 
     # ПОСЛЕ реконсиляции (дефект 3 ревью Task 7): она может перевести
     # `started` → `completed`, и тогда предыдущая доставка — именно та.
-    prev = _last_delivery(state)
+    prev = _last_delivery(
+        state, skip=replace.revision if replace else None
+    )
     if prev is None:
         raise RuntimeError(
             "доставок ещё не было — переиздавать нечего; обычная доставка "
@@ -2560,7 +2955,16 @@ def deliver_superseded(
         state.target_dir, state.bundle_dir, legacy_bundle
     )
     recorded_content = prev_op.get("content_anchor")
-    if recorded_content is not None and recorded_content == content:
+    if (
+        # Явная замена снимает бесследный no-op §I5: он отвечает про
+        # АПСТРИМ, а замена — про ПРЕДЛОЖЕНИЕ. Живой случай (дефект
+        # подписи при неизменном апстриме) даёт равные `content_anchor`
+        # по построению — §I5 сработал бы первым и сделал замену
+        # недостижимой ровно там, где она и нужна.
+        replace is None
+        and recorded_content is not None
+        and recorded_content == content
+    ):
         print(
             "апстрим не менялся — переиздание не требуется "
             f"(content_anchor {content[:7]})"
@@ -2602,6 +3006,13 @@ def deliver_superseded(
         # недостижима — восстановление объявляло собственный коммит
         # ревизии чужим.
         "tasks_blob": None,
+        # Замена (§I3.2): ДВЕ независимые связи. `supersedes` выше —
+        # какую последнюю УСПЕШНО ДОСТАВЛЕННУЮ спецификацию переиздаём;
+        # `replaces_*` — какое незамерженное ошибочное ПРЕДЛОЖЕНИЕ
+        # снимаем со стола. Пустой словарь на обычном переиздании: полей
+        # нет вовсе, а не `None` — «замены не было» и «замена чего-то
+        # неизвестного» не одно и то же.
+        **replace_fields,
     }
     if recorded_content is None:
         # §6 спеки: сверка была невозможна — фиксируем это В ЖУРНАЛЕ.
@@ -2615,6 +3026,11 @@ def deliver_superseded(
             "производилась (comparison: unavailable)"
         )
     _start_revision(state, n, intent)
+    # Порядок владельца: намерение durable → ЗАКРЫТЬ заменяемый PR →
+    # доставить. Наоборот нельзя: доставка завела бы второй открытый PR
+    # на ту же спеку, а падение между ними не оставило бы следа, по
+    # которому повтор понял бы, что закрывать.
+    _replacement_close(state, ops, state.ops[f"{_REVISION_PREFIX}{n}"])
     pr = deliver(
         target_dir=state.target_dir,
         repo_slug=state.repo_slug,
@@ -2643,6 +3059,11 @@ def deliver_superseded(
     _complete_revision(
         state, n, pr=pr, anchor=prospective, content_anchor=content
     )
+    # Последний шаг порядка владельца: ветка заменённой ревизии удаляется
+    # только теперь — намерение durable, заменяемый PR закрыт, новый PR
+    # создан. Всё, что раньше, оставило бы ошибочный артефакт без ветки
+    # при недоведённой замене.
+    _replacement_cleanup(state, ops, state.ops[f"{_REVISION_PREFIX}{n}"])
     return SupersedeResult("delivered", pr)
 
 
@@ -2756,6 +3177,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--reason", default=None, help="причина для --abandon-revision"
     )
+    parser.add_argument(
+        "--replace-revision", type=int, default=None,
+        help="явный replace-переход (только с --supersede): снять со "
+             "стола незамерженное предложение названной ревизии — новая "
+             "ревизия несёт replaces_revision/replaces_pr, PR "
+             "заменяемой закрывается механикой, её ветка удаляется; "
+             "требует --replacement-reason",
+    )
+    parser.add_argument(
+        "--replacement-reason", default=None,
+        help="причина замены для --replace-revision; отдельный флаг от "
+             "--reason нарочно: тот принадлежит --abandon-revision, и "
+             "одно поле на два разных перехода путало бы леджер",
+    )
     args = parser.parse_args(argv)
     if args.abandon_revision is not None and args.supersede:
         # Спека этого сочетания не описывает, а прогон делает ОДНО
@@ -2786,6 +3221,35 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.abandon_revision is not None and not args.reason:
         parser.error("--abandon-revision требует --reason")
+    if (
+        args.replace_revision is not None
+        and args.abandon_revision is not None
+    ):
+        # Та же мотивировка, что у пар выше: абандон и замена — разные
+        # переходы над разными ревизиями, и молчаливая победа одного
+        # решала бы за оператора, что он имел в виду.
+        parser.error(
+            "--replace-revision и --abandon-revision — разные переходы: "
+            "запускайте их отдельными прогонами"
+        )
+    if args.replace_revision is not None and not args.supersede:
+        # Замена — часть переиздания (порядок владельца: закрыть
+        # предложение и доставить новое одним переходом), сама по себе
+        # она ничего не доставляет. Без --supersede прогон выполнил бы
+        # ОБЫЧНУЮ доставку и молча — не то, что просил оператор.
+        parser.error(
+            "--replace-revision осмыслен только с --supersede: замена "
+            "снимает старое предложение и доставляет новое одним переходом"
+        )
+    if args.replace_revision is not None and not args.replacement_reason:
+        # Причина обязательна (требование владельца): она уходит в
+        # леджер и в комментарий закрываемого PR — единственное место,
+        # где потом читается, почему предложение сняли со стола.
+        parser.error("--replace-revision требует --replacement-reason")
+    if args.replacement_reason and args.replace_revision is None:
+        parser.error(
+            "--replacement-reason осмыслен только с --replace-revision"
+        )
     state = load(args.run_id)
     # Мост работает только над ВМЕРЖЕННЫМ и верифицированным бандлом
     # (приёмка PR #96, major): completed — единственный статус, в котором
@@ -2816,6 +3280,12 @@ def main(argv: list[str] | None = None) -> int:
             result = deliver_superseded(
                 state, ops, legacy_bundle=args.legacy_bundle,
                 approval_pr=args.approval_pr,
+                replace=(
+                    Replacement(
+                        args.replace_revision, args.replacement_reason
+                    )
+                    if args.replace_revision is not None else None
+                ),
             )
         except RuntimeError as exc:
             print(f"task_bridge: {exc}")
