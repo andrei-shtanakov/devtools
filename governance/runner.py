@@ -1058,12 +1058,16 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     if beh_path.exists() and decomp_path.exists():
         decomp_text = decomp_path.read_text(encoding="utf-8")
         beh_text = beh_path.read_text(encoding="utf-8")
-        # Non-fatal находки про verifies (round 7 ревью PR #161, минор):
-        # `decomposition_guard.non_fatal_findings` — общий источник с
-        # фильтром внутри `graph_findings` (обе читают одну и ту же
-        # `_verify_group_and_orphan_findings`), не дублирование логики и
-        # не парсинг decomposition дважды вручную. НЕ fatal (легаси-бандл
-        # с checked_by-целью, но без verifies, обязан пройти гейт), но
+        # Non-fatal находки про verifies (round 7 ревью PR #161, минор;
+        # комментарий исправлен round 10 — прежняя версия обещала фильтр
+        # внутри `graph_findings`, которого там нет): `graph_findings`
+        # (ниже) про эти находки НЕ ЗНАЕТ ВООБЩЕ — она их не вычисляет и
+        # не фильтрует, каждый вызов парсит decomposition сам по себе
+        # (`non_fatal_findings` и `graph_findings` — два независимых
+        # прохода `parse_dt_tasks`, decomposition читается дважды за этот
+        # гейт; общий у них только сам модуль-источник,
+        # `_verify_group_and_orphan_findings`). НЕ fatal (легаси-бандл с
+        # checked_by-целью, но без verifies, обязан пройти гейт), но
         # обязаны быть видимы оператору. Пишутся В ТОТ ЖЕ gate-findings.txt
         # как `warning GC-DT-GRAPH:` (не `error`) и НЕ останавливают
         # прогон: `console_model` просто конкатенирует файл как показ

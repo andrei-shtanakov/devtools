@@ -1842,6 +1842,11 @@ def test_deliver_verify_dt_now_delivers(
     (bundle / "20-design.md").write_text(DESIGN_MD)
     (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
     (bundle / "30-decomposition.md").write_text(DECOMPOSITION_VERIFY_MD)
+    # DECOMPOSITION_VERIFY_MD объявляет verifies: [tests/test_y.py] — round
+    # 10 ревью PR #161 (минор): deliver() отказывает fail-closed, если путь
+    # не существует в target_dir на момент доставки.
+    (target / "tests").mkdir(parents=True, exist_ok=True)
+    (target / "tests" / "test_y.py").write_text("# stub\n")
     ops = _StubOps()
     pr = task_bridge.deliver(
         target_dir=str(target),
@@ -1857,6 +1862,42 @@ def test_deliver_verify_dt_now_delivers(
     spec_text = (target / "spec" / "WS-alpha-7-tasks.md").read_text()
     assert "**Mode:** verify_first" in spec_text
     assert any(c[0] == "ensure_branch" for c in ops.calls)
+
+
+def test_deliver_refuses_on_nonexistent_verifies_path(
+    tmp_path: Path,
+) -> None:
+    """Round 10 ревью PR #161, минор (контракт владельца): опечатка/
+    осиротевший путь в verifies обязан фейлить deliver() fail-closed, а
+    не молча уезжать в **Verifies:** доставленной tasks-спеки как
+    селектор прогона, которого никто не создаст — graph_findings ловит
+    это ТОЛЬКО как non-fatal находку формы (non_fatal_findings), которую
+    deliver() не зовёт вовсе."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text(CHARTER_MD)
+    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
+    (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
+    (bundle / "20-design.md").write_text(DESIGN_MD)
+    (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
+    (bundle / "30-decomposition.md").write_text(DECOMPOSITION_VERIFY_MD)
+    # НЕ создаём tests/test_y.py — путь из verifies остаётся опечаткой/
+    # осиротевшим.
+    ops = _StubOps()
+    with pytest.raises(RuntimeError, match="tests/test_y.py"):
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=ops,
+            approved_by="a", approved_at="t",
+        )
+    assert not any(c[0] == "ensure_branch" for c in ops.calls)
+    assert not (target / "spec" / "WS-alpha-7-tasks.md").exists()
 
 
 # decomposition авторенный ДО раскатки поля verifies (round 3 ревью
@@ -1978,6 +2019,11 @@ def test_legacy_5_goes_dt_path_with_graph_validation(tmp_path: Path) -> None:
     verify-DT (по образцу `test_deliver_verify_dt_now_delivers`), якорь —
     decomposition как на полном DAG."""
     target = _target_legacy_5(tmp_path, BEHAVIOUR_MD, DECOMPOSITION_VERIFY_MD)
+    # DECOMPOSITION_VERIFY_MD объявляет verifies: [tests/test_y.py] — round
+    # 10 ревью PR #161 (минор): deliver() отказывает fail-closed, если путь
+    # не существует в target_dir на момент доставки.
+    (target / "tests").mkdir(parents=True, exist_ok=True)
+    (target / "tests" / "test_y.py").write_text("# stub\n")
     ops = _StubOps()
     pr = task_bridge.deliver(
         target_dir=str(target),

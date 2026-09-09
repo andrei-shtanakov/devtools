@@ -272,7 +272,15 @@ def _verify_group_and_orphan_findings(
                     "рекомендация формы, не блокирует доставку"
                 )
         for f in t.verifies:
-            if f not in owned_files:
+            # Срез `::`-селектора ПЕРЕД сверкой (round 10 ревью PR #161,
+            # минор): bindings/owned_files несут ГОЛЫЕ пути
+            # (`_parse_beh_bindings` уже режет `::` для checked_by-целей)
+            # — тот же канон, что уже применён в render_tasks_dt (union-
+            # дедуп, round 9) и в closure-инварианте graph_findings ниже.
+            # Без среза `file.py::test`-форма в verifies никогда не
+            # совпадала бы с owned_files, даже когда файл реально в
+            # бандле, — ложная находка «опечатка».
+            if f.split("::", 1)[0] not in owned_files:
                 findings.append(
                     f"{t.dt_id}: verifies {f}: наблюдаемая цель не "
                     "принадлежит ни одной задаче — "
@@ -432,10 +440,15 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
     # DTs» — но не требует ребра к ним, гард обязан требовать сам).
     # Файлы, не являющиеся чьей-либо checked_by-целью вовсе (опечатка/
     # осиротевший путь), здесь не смотрим — non-fatal-версия этой проверки
-    # уже сделана отдельно в `non_fatal_findings`.
+    # уже сделана отдельно в `non_fatal_findings`. Срез `::`-селектора
+    # ПЕРЕД сверкой с file_owner (round 10 ревью PR #161, минор) — тот же
+    # канон, что уже применён выше в orphan-проверке и в render_tasks_dt:
+    # без него `file.py::test`-форма в verifies никогда не находила бы
+    # своего владельца (file_owner несёт голые пути), и closure-инвариант
+    # молча пропускался бы ДАЖЕ когда владелец реально вне замыкания.
     for t in tasks:
         for f in t.verifies:
-            owner = file_owner.get(f)
+            owner = file_owner.get(f.split("::", 1)[0])
             if owner is None or owner == t.dt_id:
                 continue
             closure = _transitive_deps(t.dt_id, edges)

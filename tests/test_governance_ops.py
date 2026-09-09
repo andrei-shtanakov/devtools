@@ -813,7 +813,14 @@ def test_author_dsl_decomposition_explains_verifies_field() -> None:
     НЕ обещает "REQUIRED for type: verify" (verifies опционален — находка
     формы, не fatal-инвариант) и точно описывает УЗКОЕ правило single-owner
     исключения (владение всегда важнее наблюдения), а не «exempt for THIS
-    task only» без уточнения про собственный checked_by."""
+    task only» без уточнения про собственный checked_by.
+
+    Round 10 ревью PR #161, major (контракт владельца): промпт обязан
+    учить FATAL graph-инварианту замыкания (round 9) — владелец каждого
+    файла из verifies обязан быть в транзитивном замыкании depends_on
+    наблюдающей задачи, тот же контракт, что уже описан для delivered_by
+    — иначе конформный по промпту бандл стопит S4-гейт (третий раз этот
+    класс кусает)."""
     from governance.ops import _AUTHOR_DSL
 
     dsl = _AUTHOR_DSL["decomposition"]
@@ -825,6 +832,11 @@ def test_author_dsl_decomposition_explains_verifies_field() -> None:
     assert "ownership always beats observation" in verifies_tail[:1200]
     assert "NOT also this same task's own checked_by target" in (
         verifies_tail[:1200]
+    )
+    assert "FATAL graph invariant" in verifies_tail[:1600]
+    assert (
+        "transitive closure of THIS task's OWN depends_on"
+        in verifies_tail[:1900]
     )
 
 

@@ -510,6 +510,50 @@ def test_verifies_target_owner_outside_depends_on_closure_is_a_finding() -> None
     )
 
 
+def test_verifies_selector_form_does_not_bypass_closure_invariant() -> None:
+    """Round 10 ревью PR #161, минор (контракт владельца): verifies в
+    форме `file.py::test` (тот же полный pytest-селектор, в котором
+    checked_by-цели реально приходят) обязана нормализоваться срезом
+    `::` ПЕРЕД сверкой с владельцем — иначе `file_owner.get(f)` не
+    находит запись (bindings несут ГОЛЫЕ пути), closure-инвариант молча
+    пропускается, а orphan-проверка ложно маркирует РЕАЛЬНЫЙ файл как
+    «опечатка». Зеркало
+    test_verifies_target_owner_outside_depends_on_closure_is_a_finding,
+    но verifies — с `::test1` вместо голого пути."""
+    from governance.decomposition_guard import graph_findings, non_fatal_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::t1`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::t2`\n\n"
+        "#### BEH-03: Три\n**checked_by** `kind: e2e` "
+        "`target: tests/test_c.py::t3`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-02: B · type: implement · owner: dev\n"
+        "scenarios: [BEH-02]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-03: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-03]\ndepends_on: [DT-02]\n"
+        "delivered_by: [DT-02]\nparallel_group: core\n"
+        "verifies:\n  - tests/test_a.py::test_one\n"
+    )
+    findings = graph_findings(beh, dt)
+    # closure-инвариант ловит владельца ВНЕ замыкания — как для голого пути.
+    assert any(
+        "DT-03" in f and "tests/test_a.py::test_one" in f and "DT-01" in f
+        and "замыкания" in f
+        for f in findings
+    )
+    # НЕ ложная находка «опечатка» — путь реально принадлежит DT-01.
+    assert not any(
+        "опечатка либо осиротевший путь" in f
+        for f in non_fatal_findings(beh, dt)
+    )
+
+
 def test_verifies_target_owner_directly_in_depends_on_is_clean() -> None:
     """Owner DT-01 напрямую в depends_on наблюдающей задачи — чисто."""
     from governance.decomposition_guard import graph_findings
