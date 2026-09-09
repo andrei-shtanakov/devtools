@@ -107,6 +107,22 @@ class Ops(Protocol):
 
     def find_issue(self, repo_slug: str, body_prefix: str) -> int | None: ...
 
+    def last_commit_touching(
+        self, target_dir: str, rel_path: str
+    ) -> str | None: ...
+
+    def prs_containing_commit(
+        self, repo_slug: str, sha: str
+    ) -> list[dict]: ...
+
+    def rev_parse(self, target_dir: str, ref: str) -> str | None: ...
+
+    def blob_in_commit(
+        self, target_dir: str, sha: str, rel_path: str
+    ) -> str | None: ...
+
+    def commit_parent(self, target_dir: str, sha: str) -> str | None: ...
+
 
 # --- Харнесс авторинга (лимиты codex, 2026-09-03; парный слой к харнессу
 # ревьюера в review-pr.sh). Выбор: env AUTHOR_HARNESS/AUTHOR_MODEL >
@@ -846,3 +862,83 @@ class RealOps:
             if body.startswith(body_prefix):
                 return item["number"]
         return None
+
+    def last_commit_touching(self, target_dir: str, rel_path: str) -> str | None:
+        """SHA последнего коммита, изменившего rel_path; None — не менялся.
+
+        HEAD проверяется ПЕРВЫМ: в репозитории без коммитов `git log`
+        выходит с rc != 0, и трактовать это как сбой значило бы отказывать
+        там, где ответ честно «истории нет» (замечание ревью PR #164).
+        """
+        if self.rev_parse(target_dir, "HEAD") is None:
+            return None
+        done = subprocess.run(
+            ["git", "-C", target_dir, "log", "-1", "--format=%H", "--", rel_path],
+            capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            raise RuntimeError(
+                f"last_commit_touching: git log rc={done.returncode}: "
+                f"{done.stderr.strip()}"
+            )
+        sha = done.stdout.strip()
+        return sha or None
+
+    def prs_containing_commit(self, repo_slug: str, sha: str) -> list[dict]:
+        """PR-ы, содержащие коммит (gh API). Сбой запроса — RuntimeError.
+
+        Эндпоинт отдаёт REST-форму: `state: open|closed`, `merged_at`,
+        `merge_commit_sha`, и `merged_by` в нём приходит **null** даже у
+        вмерженного PR (проверено на живом ответе, замечание ревью #164).
+        Поэтому здесь только нормализация состава: snake_case → ожидаемые
+        ключи, `state` → OPEN|CLOSED|MERGED по факту `merged_at`. Подпись
+        (`mergedBy`) берётся отдельным запросом `pr_facts` — см. Task 3.
+        """
+        done = subprocess.run(
+            ["gh", "api", f"repos/{repo_slug}/commits/{sha}/pulls",
+             "--jq", "[.[] | {number, "
+                     "state: (if .merged_at then \"MERGED\" "
+                     "else (.state | ascii_upcase) end), "
+                     "baseRefName: .base.ref, mergedAt: .merged_at, "
+                     "mergeCommit: .merge_commit_sha}]"],
+            capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            raise RuntimeError(
+                f"prs_containing_commit: gh api rc={done.returncode}: "
+                f"{done.stderr.strip()}"
+            )
+        try:
+            found = json.loads(done.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"prs_containing_commit: invalid JSON: {done.stdout!r}"
+            ) from exc
+        return found
+
+    def rev_parse(self, target_dir: str, ref: str) -> str | None:
+        """SHA ссылки; None — ссылки нет (нормальный случай, не сбой)."""
+        done = subprocess.run(
+            ["git", "-C", target_dir, "rev-parse", "--verify", "--quiet", ref],
+            capture_output=True, text=True,
+        )
+        return done.stdout.strip() or None
+
+    def blob_in_commit(
+        self, target_dir: str, sha: str, rel_path: str
+    ) -> str | None:
+        """blob-хеш файла в коммите; None — файла в нём нет."""
+        done = subprocess.run(
+            ["git", "-C", target_dir, "rev-parse", f"{sha}:{rel_path}"],
+            capture_output=True, text=True,
+        )
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    def commit_parent(self, target_dir: str, sha: str) -> str | None:
+        """SHA первого родителя; None — корневой коммит либо нет коммита."""
+        done = subprocess.run(
+            ["git", "-C", target_dir, "rev-parse", "--verify", "--quiet",
+             f"{sha}^1"],
+            capture_output=True, text=True,
+        )
+        return done.stdout.strip() or None

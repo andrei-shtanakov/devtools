@@ -886,3 +886,171 @@ def test_requirements_dsl_mandates_priority_for_nfr() -> None:
     dsl = _AUTHOR_DSL["requirements"]
     nfr_part = dsl.split("NFR-NN")[1]
     assert "**Priority**" in nfr_part
+
+
+# --- Task 1: провенанс и восстановление коммита -----------------------------
+
+
+def test_ops_protocol_declares_provenance_primitives() -> None:
+    from governance.ops import Ops
+
+    for name in (
+        "last_commit_touching", "prs_containing_commit",
+        "rev_parse", "blob_in_commit", "commit_parent",
+    ):
+        assert hasattr(Ops, name), name
+
+
+def test_real_ops_last_commit_touching_returns_none_without_history(
+    tmp_path,
+) -> None:
+    """Пустой репо: `git log` даёт rc != 0, но ответ честно «истории нет»."""
+    import subprocess as real_subprocess
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    assert RealOps().last_commit_touching(str(tmp_path), "nope.md") is None
+
+
+def test_last_commit_touching_returns_sha_when_history_exists(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="abc123\n")
+    ops = RealOps()
+
+    result = ops.last_commit_touching("/tmp/devtools", "spec/x.md")
+
+    assert result == "abc123"
+    assert calls[0].argv == ["git", "-C", "/tmp/devtools", "rev-parse",
+                              "--verify", "--quiet", "HEAD"]
+    assert calls[1].argv == [
+        "git", "-C", "/tmp/devtools", "log", "-1", "--format=%H",
+        "--", "spec/x.md",
+    ]
+
+
+def test_last_commit_touching_never_touched_returns_none(monkeypatch):
+    def fake_run(argv, **kwargs):
+        if "rev-parse" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="head\n",
+                                                 stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+
+    assert ops.last_commit_touching("/tmp/devtools", "never.md") is None
+
+
+def test_last_commit_touching_log_failure_raises_runtime_error(monkeypatch):
+    def fake_run(argv, **kwargs):
+        if "rev-parse" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="head\n",
+                                                 stderr="")
+        return subprocess.CompletedProcess(argv, 128, stdout="", stderr="boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    ops = RealOps()
+
+    with pytest.raises(RuntimeError, match="git log"):
+        ops.last_commit_touching("/tmp/devtools", "x.md")
+
+
+def test_prs_containing_commit_command_and_normalization(monkeypatch):
+    payload = [
+        {"number": 42, "state": "MERGED", "baseRefName": "master",
+         "mergedAt": "2026-09-01T00:00:00Z", "mergeCommit": "deadbeef"},
+    ]
+    calls = _install_fake_run(
+        monkeypatch, returncode=0, stdout=json.dumps(payload),
+    )
+    ops = RealOps()
+
+    result = ops.prs_containing_commit(REPO_SLUG, "deadbeef")
+
+    assert result == payload
+    call = calls[0]
+    assert call.argv[:3] == ["gh", "api", f"repos/{REPO_SLUG}/commits/"
+                              "deadbeef/pulls"]
+    assert "--jq" in call.argv
+    jq = call.argv[call.argv.index("--jq") + 1]
+    assert "MERGED" in jq and "merged_at" in jq and "merge_commit_sha" in jq
+
+
+def test_prs_containing_commit_rc_nonzero_raises_runtime_error(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1, stderr="rate limited")
+    ops = RealOps()
+
+    with pytest.raises(RuntimeError):
+        ops.prs_containing_commit(REPO_SLUG, "deadbeef")
+
+
+def test_prs_containing_commit_invalid_json_raises_runtime_error(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=0, stdout="not json")
+    ops = RealOps()
+
+    with pytest.raises(RuntimeError):
+        ops.prs_containing_commit(REPO_SLUG, "deadbeef")
+
+
+def test_prs_containing_commit_empty_returns_empty_list(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=0, stdout="")
+    ops = RealOps()
+
+    assert ops.prs_containing_commit(REPO_SLUG, "deadbeef") == []
+
+
+def test_rev_parse_returns_sha(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="cafe1234\n")
+    ops = RealOps()
+
+    result = ops.rev_parse("/tmp/devtools", "HEAD")
+
+    assert result == "cafe1234"
+    assert calls[0].argv == [
+        "git", "-C", "/tmp/devtools", "rev-parse", "--verify", "--quiet",
+        "HEAD",
+    ]
+
+
+def test_rev_parse_missing_ref_returns_none(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1, stdout="", stderr="bad ref")
+    ops = RealOps()
+
+    assert ops.rev_parse("/tmp/devtools", "nope") is None
+
+
+def test_blob_in_commit_returns_hash(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="blobsha\n")
+    ops = RealOps()
+
+    result = ops.blob_in_commit("/tmp/devtools", "deadbeef", "spec/x.md")
+
+    assert result == "blobsha"
+    assert calls[0].argv == [
+        "git", "-C", "/tmp/devtools", "rev-parse", "deadbeef:spec/x.md",
+    ]
+
+
+def test_blob_in_commit_absent_returns_none(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=128, stdout="", stderr="bad")
+    ops = RealOps()
+
+    assert ops.blob_in_commit("/tmp/devtools", "deadbeef", "nope.md") is None
+
+
+def test_commit_parent_returns_sha(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="parentsha\n")
+    ops = RealOps()
+
+    result = ops.commit_parent("/tmp/devtools", "deadbeef")
+
+    assert result == "parentsha"
+    assert calls[0].argv == [
+        "git", "-C", "/tmp/devtools", "rev-parse", "--verify", "--quiet",
+        "deadbeef^1",
+    ]
+
+
+def test_commit_parent_root_commit_returns_none(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1, stdout="", stderr="no parent")
+    ops = RealOps()
+
+    assert ops.commit_parent("/tmp/devtools", "deadbeef") is None
