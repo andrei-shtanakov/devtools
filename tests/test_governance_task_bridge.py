@@ -4544,6 +4544,270 @@ def test_content_anchor_is_taken_from_post_stamp_state(tmp_path: Path) -> None:
     assert task_bridge._canonical_dag_hash(target, bundle, dag) != raw
 
 
+# --- §I7 на ПЕРЕХОДЕ статуса (devtools#172) -------------------------------
+#
+# `draft`/`stale` у узла — штатный след correction'а, а не экзотика:
+# коррекция бандла приводит узлы ровно в эти статусы. До правки первая
+# ветка штампа `restamp_nodes` не смотрела вовсе, и поузловой §I7 на этом
+# — основном — пути не работал.
+
+_BUNDLE = "workstreams/WS-alpha-7/spec"
+_PREV_BY, _PREV_AT = "prev-merger", "2026-09-01T00:00:00Z"
+_CORR_BY, _CORR_AT = "corr-merger", "2026-09-09T17:29:10Z"
+
+
+def _set_node(target: str, fname: str, **over) -> None:
+    """Точечная правка frontmatter узла бандла (статус, подпись)."""
+    path = Path(target) / _BUNDLE / fname
+    meta, body = task_bridge.split_frontmatter(path.read_text(encoding="utf-8"))
+    for key, value in over.items():
+        if value is None:
+            meta.pop(key, None)
+        else:
+            meta[key] = value
+    path.write_text(
+        task_bridge.join_frontmatter(meta, body), encoding="utf-8"
+    )
+
+
+def _meta(target: str, fname: str) -> dict:
+    """Frontmatter узла бандла."""
+    return task_bridge.split_frontmatter(
+        (Path(target) / _BUNDLE / fname).read_text(encoding="utf-8")
+    )[0]
+
+
+def _base_after_v1(tmp_path: Path) -> str:
+    """Бандл в base переиздания: проштампован вмерженной доставкой v1."""
+    target = str(_target(tmp_path))
+    task_bridge.stamp_bundle_approved(target, _BUNDLE, _PREV_BY, _PREV_AT)
+    return target
+
+
+def test_restamp_signs_node_in_signed_nodes_on_transition(
+    tmp_path: Path,
+) -> None:
+    """Правило 1: узел В `signed_nodes` — approved + подпись correction'а.
+
+    Переход и подпись здесь совпадают по направлению, поэтому правило
+    держалось и до правки; тест закрепляет его как часть политики, чтобы
+    fail-closed соседних правил не съел заодно и этот путь."""
+    target = _base_after_v1(tmp_path)
+    _set_node(target, "10-requirements.md", status="draft")
+    task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, _CORR_BY, _CORR_AT,
+        restamp_nodes=frozenset({"requirements"}),
+    )
+    meta = _meta(target, "10-requirements.md")
+    assert meta["status"] == "approved"
+    assert (meta["approved_by"], meta["approved_at"]) == (_CORR_BY, _CORR_AT)
+    # Переход совершён — поколение документа выросло.
+    assert meta["version"] == 3
+
+
+def test_restamp_keeps_signature_of_stale_node_outside_signed_nodes(
+    tmp_path: Path,
+) -> None:
+    """Правило 2: `stale` вне `signed_nodes` — approved, подпись ПРЕЖНЯЯ.
+
+    Побайтовая сверка ОБОИХ полей: подмена одного из них (например,
+    `approved_at` фактами correction'а) — ровно та ложь о провенансе, из-за
+    которой issue и заведён, и «примерное» сравнение её бы пропустило.
+
+    `stale` означает, что изменился upstream, а не содержимое узла:
+    прежний подписант одобрял ровно эти байты тела, и его подпись
+    остаётся истинной. Перепиновка при этом проходит — она механическая."""
+    target = _base_after_v1(tmp_path)
+    before_pins = _meta(target, "20-design.md")["upstream_hashes"]
+    # Correction правит upstream: узел ниже протухает.
+    _set_node(target, "10-requirements.md", status="draft")
+    _set_node(target, "20-design.md", status="stale")
+    task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, _CORR_BY, _CORR_AT,
+        restamp_nodes=frozenset({"requirements"}),
+    )
+    meta = _meta(target, "20-design.md")
+    assert meta["status"] == "approved"
+    assert meta["approved_by"] == _PREV_BY
+    assert meta["approved_at"] == _PREV_AT
+    # Перепиновка downstream состоялась — сохранение подписи ей не мешает.
+    assert meta["upstream_hashes"] != before_pins
+    assert meta["version"] == 3
+
+
+def test_restamp_refuses_draft_node_outside_signed_nodes(
+    tmp_path: Path,
+) -> None:
+    """Правило 3: `draft` вне `signed_nodes` — fail-closed, с процедурой.
+
+    Сохранить прежнюю подпись здесь недоказуемо: содержание узла мог
+    изменить ДРУГОЙ correction-PR. Отказ обязан назвать УЗЕЛ и что делать
+    оператору — отказ без процедуры бесполезен."""
+    target = _base_after_v1(tmp_path)
+    _set_node(target, "00-charter.md", status="draft")
+    with pytest.raises(RuntimeError) as excinfo:
+        task_bridge.stamp_bundle_approved(
+            target, _BUNDLE, _CORR_BY, _CORR_AT,
+            restamp_nodes=frozenset({"requirements"}),
+        )
+    message = str(excinfo.value)
+    assert "00-charter.md" in message
+    assert "--approval-pr" in message
+    assert "отдельным PR" in message
+    # Отказ до записи: узел остался в том состоянии, в каком был.
+    assert _meta(target, "00-charter.md")["status"] == "draft"
+
+
+def test_restamp_refuses_node_without_previous_signature(
+    tmp_path: Path,
+) -> None:
+    """Правило 4: вне `signed_nodes` и без прежней подписи — fail-closed.
+
+    Отличается от правила 3 ПРИЧИНОЙ: статус сохраняющий (`stale`), но
+    сохранять нечего. Без отдельной ветки узел уехал бы в `approved` с
+    пустой подписью — провенанс, которого не существует."""
+    target = _base_after_v1(tmp_path)
+    _set_node(
+        target, "00-charter.md",
+        status="stale", approved_by=None, approved_at=None,
+    )
+    with pytest.raises(RuntimeError, match="прежней подписи нет"):
+        task_bridge.stamp_bundle_approved(
+            target, _BUNDLE, _CORR_BY, _CORR_AT,
+            restamp_nodes=frozenset({"requirements"}),
+        )
+
+
+def test_plain_delivery_signs_draft_nodes_without_signed_nodes(
+    tmp_path: Path,
+) -> None:
+    """Обычная доставка (`restamp_nodes=None`) — прежнее поведение.
+
+    На первой доставке весь бандл `draft`, и все узлы законно получают
+    подпись бандл-PR. Понятия `signed_nodes` на этом пути нет вовсе,
+    поэтому ни один fail-closed §I7 здесь недостижим — иначе правка
+    сломала бы основной путь моста ради краевого."""
+    target = str(_target(tmp_path))
+    changed = task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, "bundle-merger", "t-bundle"
+    )
+    assert len(changed) == len(task_bridge._BUNDLE_DAG)
+    for fname, _ in task_bridge._BUNDLE_DAG:
+        meta = _meta(target, fname)
+        assert meta["status"] == "approved"
+        assert meta["approved_by"] == "bundle-merger"
+        assert meta["approved_at"] == "t-bundle"
+
+
+def test_prospective_stamp_matches_actual_on_mixed_statuses(
+    tmp_path: Path,
+) -> None:
+    """§I2: проспективный и фактический штамп совпадают на смешанных
+    статусах.
+
+    Гвард `_commit_facts_cb` рвёт доставку, разойдись эти двое. Правила
+    политики живут ЦЕЛИКОМ внутри `stamp_bundle_approved`, и обе стороны
+    зовут её одну — но продублируй кто-нибудь ветку перехода в
+    `_shadow_stamped`, расхождение вылезло бы ровно здесь."""
+    from governance.stale_adapter import blob_sha1
+
+    target = _base_after_v1(tmp_path)
+    _set_node(target, "10-requirements.md", status="draft")
+    _set_node(target, "20-design.md", status="stale")
+    _set_node(target, "30-decomposition.md", status="draft")
+    signed = frozenset({"requirements", "decomposition"})
+    prospective = task_bridge._prospective_anchor(
+        target, _BUNDLE, _CORR_BY, _CORR_AT, None, restamp_nodes=signed
+    )
+    task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, _CORR_BY, _CORR_AT, restamp_nodes=signed
+    )
+    actual = blob_sha1(
+        (Path(target) / _BUNDLE / "30-decomposition.md").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert prospective == actual
+
+
+def test_stale_node_outside_signed_nodes_converges_on_second_round(
+    tmp_path: Path,
+) -> None:
+    """Развилка `version` у `stale` вне `signed_nodes`: инкремент.
+
+    Выбор вынужден §I5, а не эстетикой. `_content_anchor` считает ОБЕ
+    стороны сверки по проспективно проштампованному дереву и всегда с
+    `restamp_nodes=None` — то есть любой не-approved узел там идёт веткой
+    перехода и получает `version + 1`. Канонизация вырезает подпись, но
+    НЕ `status` и НЕ `version`.
+
+    Оставь фактический штамп `version` прежним — записанный круг 1
+    `content_anchor` разошёлся бы с тем, что доставка кладёт в base, и
+    круг 2 объявил бы апстрим изменившимся на ровном месте: no-op §I5
+    стал бы недостижим, каждый запуск заводил бы ревизию.
+
+    Проверка идёт на ВТОРОМ круге, а не на первом: на первом обе величины
+    считаются по одному дереву и сходятся при любом решении."""
+    target = _base_after_v1(tmp_path)
+    _set_node(target, "10-requirements.md", status="draft")
+    _set_node(target, "20-design.md", status="stale")
+    # Круг 1: величина записывается ДО доставки, по проспективному штампу.
+    recorded = task_bridge._content_anchor(target, _BUNDLE, None)
+    task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, _CORR_BY, _CORR_AT,
+        restamp_nodes=frozenset({"requirements"}),
+    )
+    # Круг 2: тот же вопрос к base, который оставила доставка, — апстрим
+    # не менялся, значит величина обязана совпасть (§I5 → no-op).
+    assert task_bridge._content_anchor(target, _BUNDLE, None) == recorded
+
+
+def test_supersede_stamp_keeps_provenance_of_untouched_stale_nodes(
+    tmp_path: Path,
+) -> None:
+    """Регрессия живого случая (issue devtools#172).
+
+    Переиздание воркстрима `verify-first-file-scope-group-targets-20260908`
+    (доставка spec-runner#408, `approval_pr: 407`,
+    `signed_nodes: [behaviour-spec, decomposition]`): `design` и
+    `acceptance` были `stale` и в состав correction-PR #407 не входили —
+    их байты приехали из #403. До правки штамп приписывал им подпись
+    мержера #407, то есть человека, который этих узлов не касался.
+
+    Ожидаемая таблица: подпись #407 получают РОВНО два узла из
+    `signed_nodes`; charter/requirements (уже approved) и
+    design/acceptance (`stale`, вне состава) сохраняют исходную."""
+    target = _base_after_v1(tmp_path)
+    _set_node(target, "15-behaviour-spec.md", status="draft")
+    _set_node(target, "20-design.md", status="stale")
+    _set_node(target, "25-acceptance.md", status="stale")
+    _set_node(target, "30-decomposition.md", status="draft")
+    task_bridge.stamp_bundle_approved(
+        target, _BUNDLE, _CORR_BY, _CORR_AT,
+        restamp_nodes=frozenset({"behaviour-spec", "decomposition"}),
+    )
+    signed_by = {
+        fname: (
+            _meta(target, fname)["approved_by"],
+            _meta(target, fname)["approved_at"],
+        )
+        for fname, _ in task_bridge._BUNDLE_DAG
+    }
+    assert signed_by == {
+        "00-charter.md": (_PREV_BY, _PREV_AT),
+        "10-requirements.md": (_PREV_BY, _PREV_AT),
+        "15-behaviour-spec.md": (_CORR_BY, _CORR_AT),
+        "20-design.md": (_PREV_BY, _PREV_AT),
+        "25-acceptance.md": (_PREV_BY, _PREV_AT),
+        "30-decomposition.md": (_CORR_BY, _CORR_AT),
+    }
+    # Статус выровнен у всех — переиздание доставляет approved-бандл.
+    assert all(
+        _meta(target, fname)["status"] == "approved"
+        for fname, _ in task_bridge._BUNDLE_DAG
+    )
+
+
 #: SHA коммита correction-PR (#403) и штамп-коммита нашей доставки v1 (#5).
 _CORRECTION_SHA = "c-correction"
 _V1_STAMP_SHA = "c-v1-stamp"
