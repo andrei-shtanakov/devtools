@@ -3223,6 +3223,25 @@ def test_reconcile_identity_mismatch_fails_closed():
         tb._reconcile_revision(2, op, "s", 7, facts)
 
 
+def test_reconcile_missing_head_ref_oid_fails_closed():
+    """Пустой `headRefOid` при записанном `head_sha` — отказ, не «сошлось».
+
+    §I3 объявляет зелёной сошедшуюся сверку, а не «сверить не удалось»:
+    иначе ревизия завершается ЧУЖИМ PR, которому приписывается anchor
+    нашего намерения, и гейт §I5 «апстрим не менялся» опирается на
+    доставку, которой не было. Слой `ops` присутствия поля не гарантирует
+    (`pr_facts` отдаёт сырой gh-JSON). Соседний fail-open в
+    `_delivered_anchor` сознателен и сюда не переносится: там факт лишь
+    записывается неизвестным.
+    """
+    from governance import task_bridge as tb
+
+    op = {"status": "started", "base_sha": "s", "head_sha": "mine",
+          "branch": "b"}
+    with pytest.raises(RuntimeError, match="идентичность не проверить"):
+        tb._reconcile_revision(2, op, "s", 7, {"state": "MERGED"})
+
+
 def test_reconcile_started_no_pr_shifted_base_abandons():
     from governance import task_bridge as tb
 
