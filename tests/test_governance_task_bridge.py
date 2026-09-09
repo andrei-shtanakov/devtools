@@ -2964,7 +2964,88 @@ def test_recover_commit_accepts_matching_local_commit(tmp_path, monkeypatch):
         def blob_in_commit(self, target_dir, sha, rel_path):
             return "blob1"
 
-    assert tb._recover_commit(state, _Ops(), op) == "commit1"
+    # Возврата нет (F-03): прод его не читал, а тесты утверждали значение,
+    # которого нет в поведении — мутация `return "phantom"` была зелёной.
+    assert tb._recover_commit(state, _Ops(), op) is None
+
+
+def test_recover_commit_branch_at_base_means_no_commit_yet(
+    tmp_path, monkeypatch
+):
+    """§I3.1 «null | подходящего коммита нет»: ветка стоит на base.
+
+    `deliver` создаёт ветку (`ensure_branch` от HEAD = base) ЗАДОЛГО до
+    коммита, и падение в этом окне оставляет ветку ровно на `base_sha`.
+    До фикса (blocker C-2) сверка брала родителя базы, он `base_sha` не
+    равен никогда, и собственная ветка ревизии объявлялась чужой —
+    ревизия становилась неремонтируемой штатным путём."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"head_sha": None, "base_sha": "base1", "tasks_blob": None,
+          "branch": "spec/WS-alpha-7-tasks-v2"}
+
+    class _Ops(_ReconOps):
+        def rev_parse(self, target_dir, ref):
+            # ensure_branch создал ветку от base — она на base и стоит.
+            return "base1" if "tasks-v2" in ref else None
+
+        def commit_parent(self, target_dir, sha):
+            return "родитель-базы"
+
+        def blob_in_commit(self, target_dir, sha, rel_path):
+            return "блоб-v1-спеки"
+
+    assert tb._recover_commit(state, _Ops(), op) is None
+
+
+def test_recover_commit_branch_at_base_after_blob_written(
+    tmp_path, monkeypatch
+):
+    """То же окно, но `tasks_blob` уже записан хуком `before_commit`.
+
+    Различитель «коммита ещё нет» — ветка на `base_sha`, а не пустой
+    `tasks_blob`: между `before_commit` и `commit_paths` блоб в намерении
+    есть, а коммита ещё нет."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"head_sha": None, "base_sha": "base1", "tasks_blob": "blob1",
+          "branch": "spec/WS-alpha-7-tasks-v2"}
+
+    class _Ops(_ReconOps):
+        def rev_parse(self, target_dir, ref):
+            return "base1" if "tasks-v2" in ref else None
+
+        def commit_parent(self, target_dir, sha):
+            return "родитель-базы"
+
+        def blob_in_commit(self, target_dir, sha, rel_path):
+            return "блоб-v1-спеки"
+
+    assert tb._recover_commit(state, _Ops(), op) is None
+
+
+def test_recover_commit_moved_branch_message_claims_only_local_head(
+    tmp_path, monkeypatch
+):
+    """§I3.1 «записан | head отличается»: сверяется ЛОКАЛЬНЫЙ head.
+
+    Remote-голова не запрашивается нигде (`ops.rev_parse` резолвит
+    refs/heads/), поэтому обещать её в диагностике нельзя — минор C-3."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    op = {"head_sha": "наш-коммит", "base_sha": "base1",
+          "branch": "spec/WS-alpha-7-tasks-v2"}
+
+    class _Ops(_ReconOps):
+        def rev_parse(self, target_dir, ref):
+            return "чужой-коммит" if "tasks-v2" in ref else None
+
+    with pytest.raises(RuntimeError, match="двигали снаружи") as exc:
+        tb._recover_commit(state, _Ops(), op)
+    assert "remote" not in str(exc.value)
 
 
 def test_recover_commit_refuses_foreign_commit(tmp_path, monkeypatch):
@@ -3347,6 +3428,28 @@ def test_supersede_resume_refuses_foreign_commit(tmp_path, monkeypatch):
     assert not any(c[0] == "create_draft_pr" for c in ops.calls)
 
 
+def test_supersede_resumes_when_branch_stands_on_base(tmp_path, monkeypatch):
+    """Падение между `ensure_branch` и `commit_paths` — ремонтируемо.
+
+    Прод-путь blocker'а C-2: ветка ревизии существует и стоит на её
+    `base_sha`, коммита доставки нет. До фикса возобновление объявляло
+    собственную ветку чужой («чужой коммит») и ревизия чинилась только
+    `--abandon-revision`, хотя контракт обещал доведение доставки."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(state, monkeypatch)
+    # local_head == base_sha намерения: ровно то, что оставляет
+    # `ensure_branch`, создающая ветку от текущего HEAD.
+    ops = _RevisionPrOps(pr=None, local_head="base-sha-1", prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == 77
+    saved = rs.load("r-recon")
+    assert len(tb._revisions(saved)) == 1          # v3 не заведена
+    assert saved.ops["tasks-deliver-v2"]["status"] == "completed"
+    assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops.calls
+
+
 def test_supersede_refuses_resume_with_different_dag(tmp_path, monkeypatch):
     """Возобновление с другим --legacy-bundle дало бы другие байты."""
     from governance import task_bridge as tb
@@ -3439,7 +3542,10 @@ def test_supersede_records_tasks_blob_before_commit(tmp_path, monkeypatch):
         def blob_in_commit(self, target_dir, sha, rel_path):
             return op["tasks_blob"]
 
-    assert tb._recover_commit(saved, _WithOrphanCommit(), op) == "commit-1"
+    # Гвард молчит: коммит опознан своим. Возврата у него нет (F-03) —
+    # «принять его» исполняет сама доставка, её after_commit пишет
+    # head_sha этого же коммита.
+    assert tb._recover_commit(saved, _WithOrphanCommit(), op) is None
 
 
 def test_supersede_fails_when_actual_anchor_differs(tmp_path, monkeypatch):

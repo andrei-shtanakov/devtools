@@ -1459,28 +1459,50 @@ def _reconcile_revision(
     return "continue" if same_base else "abandon_and_next"
 
 
-def _recover_commit(state: RunState, ops: Ops, op: dict) -> str | None:
-    """Таблица §I3.1: коммит и запись head_sha не атомарны.
+def _recover_commit(state: RunState, ops: Ops, op: dict) -> None:
+    """Гвард таблицы §I3.1: коммит и запись head_sha не атомарны.
 
-    Возврат: SHA коммита, который надо пушить (уже созданный или
-    принятый), либо None — коммита ещё нет, доставка создаёт его сама.
+    Возврата НЕТ намеренно (минор F-03 финального ревью): все строки
+    §I3.1, кроме fail-closed, ведут к одному и тому же продолжению —
+    детерминированной доставке из намерения. Она сама доводит нужное:
+    коммита нет → `commit_paths` создаёт его; коммит уже есть и опознан
+    своим → `commit_paths` на неизменившемся файле не создаёт второй, а
+    `after_commit` durable пишет head_sha ИМЕННО этого коммита («принять
+    его» из §I3.1). Возвращённый SHA было некуда деть: push именно этого
+    SHA — не наш примитив (`push_branch` пушит ветку), и прод возврат не
+    читал, отчего тесты утверждали значение, которого нет в поведении.
+
+    Бросает только на несоответствии факта намерению: под именем ветки
+    ревизии лежит чужая работа.
     """
     branch, head = op.get("branch"), op.get("head_sha")
     local = ops.rev_parse(state.target_dir, branch) if branch else None
     if head:
         if local and local != head:
+            # Сверяется ЛОКАЛЬНЫЙ head (`ops.rev_parse` резолвит
+            # refs/heads/), не remote: разошедшийся remote отклоняет push
+            # как non-ff — сообщение обещать remote-сверку не должно
+            # (минор C-3 финального ревью).
             raise RuntimeError(
-                f"remote/локальный head ветки {branch} = {local[:7]}, "
+                f"локальный head ветки {branch} = {local[:7]}, "
                 f"намерение — {head[:7]}: ветку двигали снаружи"
             )
-        return head
-    if local is None:
-        return None
+        return
+    if local is None or local == op.get("base_sha"):
+        # Строка §I3.1 «null | подходящего коммита нет». Ветка на base —
+        # это именно она, а не чужой коммит: `deliver` создаёт ветку
+        # (`ensure_branch` от текущего HEAD, то есть от base) ЗАДОЛГО до
+        # `commit_paths`, и падение/Ctrl+C в этом окне оставляет ветку
+        # стоящей ровно на `base_sha` без коммита доставки. Без этой
+        # ветки сверка ниже брала бы родителя базы, он `base_sha` не
+        # равен никогда, и ревизия объявлялась бы неремонтируемой
+        # (blocker C-2 финального ревью).
+        return
     rel = f"spec/{state.ws_id}-tasks.md"
     parent = ops.commit_parent(state.target_dir, local)
     blob = ops.blob_in_commit(state.target_dir, local, rel)
     if parent == op.get("base_sha") and blob == op.get("tasks_blob"):
-        return local
+        return
     raise RuntimeError(
         f"чужой коммит в ветке {branch}: родитель {parent!r} / блоб "
         f"{blob!r} не отвечают намерению ревизии"
