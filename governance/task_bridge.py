@@ -722,6 +722,7 @@ def stamp_bundle_approved(
     approved_by: str,
     approved_at: str,
     legacy_bundle: int | None = None,
+    restamp_signature: bool = False,
 ) -> list[str]:
     """Штамп статусов вмерженного бандла + перепиновка цепочки; → rel-пути.
 
@@ -750,6 +751,27 @@ def stamp_bundle_approved(
     пересчитываются ПОСЛЕ штампа ВСЕХ его upstream-файлов — порядок
     обхода `_BUNDLE_DAG` уже топологический. Идемпотентно: уже approved
     файл с верными пинами не трогается и в результат не входит.
+
+    `restamp_signature` (§I7, фикс-круг PR #165) — режим ПЕРЕИЗДАНИЯ, и
+    только его. К моменту supersede бандл в base уже проштампован
+    предыдущей доставкой (её tasks-PR вмержен), а correction-PR правит
+    тело узла, не frontmatter — статус остаётся `approved`, и ветка выше
+    не исполняется вовсе. Тогда подпись, разрешённая по §I7 у
+    correction-PR, отбрасывалась бы, и переизданный анкер утверждал бы,
+    что текущие байты одобрил человек, мерживший ИСХОДНЫЙ бандл-PR —
+    дословно то, что §I7 объявляет недопустимым. Флаг разрешает
+    перезапись подписи на уже approved-узле:
+
+    - `False` (дефолт, обычная доставка `deliver_for_run`) — поведение
+      байт-в-байт прежнее: чужая подпись на approved-узле не трогается;
+    - перезапись УСЛОВНАЯ (только если подпись отличается от требуемой) —
+      повторный заход переиздания с тем же correction-PR не меняет ничего
+      и в `changed` не входит; на этом детерминизме стоит §I3.1;
+    - `version` НЕ инкрементится: инкремент привязан к ПЕРЕХОДУ
+      draft → approved (он внутри той же ветки), а не к «файл тронули».
+      Перештамп перехода не совершает — он исправляет провенанс тех же
+      байтов, которые доставил correction-PR, и приписывать им новое
+      поколение документа нечем.
     """
     dag = _dag_for(legacy_bundle)
     _check_bundle_composition(target_dir, bundle_dir, dag)
@@ -765,6 +787,16 @@ def stamp_bundle_approved(
             meta["approved_by"] = approved_by
             meta["approved_at"] = approved_at
             meta["version"] = int(meta.get("version") or 1) + 1
+            dirty = True
+        elif restamp_signature and (
+            meta.get("approved_by") != approved_by
+            or meta.get("approved_at") != approved_at
+        ):
+            # §I7 на реальном состоянии base переиздания: узел approved,
+            # но подпись — от предыдущей доставки. `version` здесь не
+            # растёт (см. докстринг), статус уже верен.
+            meta["approved_by"] = approved_by
+            meta["approved_at"] = approved_at
             dirty = True
         if upstream_ids:
             pins = meta.get("upstream_hashes")
@@ -791,6 +823,7 @@ def _prospective_anchor(
     approved_by: str,
     approved_at: str,
     legacy_bundle: int | None = None,
+    restamp_signature: bool = False,
 ) -> str:
     """blob терминального узла ПОСЛЕ штампа, без записи в рабочее дерево.
 
@@ -806,6 +839,11 @@ def _prospective_anchor(
     `25-acceptance.md` с забытым `--legacy-bundle=5` ронял сырой
     `FileNotFoundError` из `src.read_text()` мимо диагностики
     `stamp_bundle_approved` (`main` ловит только RuntimeError).
+
+    `restamp_signature` пробрасывается в штамп БЕЗ изменений: §I2 требует
+    «те же преобразования», и проспективный anchor обязан совпасть с
+    фактическим. Флаг, забытый на одной из двух сторон, разводит их — и
+    гард `_commit_facts_cb` рвёт доставку между коммитом и push.
     """
     dag = _dag_for(legacy_bundle)
     _check_bundle_composition(target_dir, bundle_dir, dag)
@@ -820,6 +858,7 @@ def _prospective_anchor(
         stamp_bundle_approved(
             str(shadow), bundle_dir, approved_by, approved_at,
             legacy_bundle=legacy_bundle,
+            restamp_signature=restamp_signature,
         )
         anchor_file = shadow / bundle_dir / dag[-1][0]
         return blob_sha1(anchor_file.read_text(encoding="utf-8"))
@@ -890,6 +929,7 @@ def deliver(
     profile: str | None = None,
     branch: str | None = None,
     version: int = 1,
+    restamp_signature: bool = False,
     before_commit: Callable[[dict], None] | None = None,
     after_commit: Callable[[dict], None] | None = None,
 ) -> int:
@@ -930,6 +970,12 @@ def deliver(
     возросшим `version:` во frontmatter — обычная доставка (`deliver_for_run`)
     не передаёт ни того, ни другого, и получает прежние дефолты
     (`spec/<ws-id>-tasks`, `version: 1`).
+
+    `restamp_signature` (§I7, фикс-круг PR #165) — тоже только у
+    переиздания: на уже approved-узле подпись перезаписывается фактами
+    correction-PR (полное обоснование — докстринг
+    `stamp_bundle_approved`). `deliver_for_run` флага не передаёт, и весь
+    обычный путь — файлы, ветка, PR, содержимое штампа — прежний.
 
     `before_commit`/`after_commit` (Task 7b плана supersede) — два хука
     переиздания, намеренно РАЗДЕЛЁННЫЕ коммитом:
@@ -1036,6 +1082,7 @@ def deliver(
     stamped = stamp_bundle_approved(
         target_dir, bundle_dir, approved_by, approved_at,
         legacy_bundle=legacy_bundle,
+        restamp_signature=restamp_signature,
     )
     # Анкер — терминальный узел АКТИВНОГО DAG (не хардкод design/behaviour):
     # читаем ПОСЛЕ штампа, иначе пин взят из уже стухшего blob'а. design_text
@@ -1129,7 +1176,13 @@ def deliver(
         f"({bundle_dir}/15-behaviour-spec.md), сгенерирована task_bridge.\n\n"
         + (
             "Этим же PR — штамп статусов вмерженного бандла "
-            f"({len(stamped)} файл(а): approved_by = mergedBy бандл-PR, "
+            f"({len(stamped)} файл(а): approved_by = mergedBy "
+            # Источник подписи разный (§I7): у обычной доставки — бандл-PR,
+            # у переиздания — correction-PR. Одна формулировка на оба пути
+            # называла бы оператору не тот PR ровно там, где провенанс и
+            # есть предмет.
+            + ("correction-PR" if restamp_signature else "бандл-PR")
+            + ", "
             "перепиновка DAG "
             + "→".join(_node_id(fname) for fname, _ in dag)
             + (
@@ -1984,6 +2037,10 @@ def deliver_superseded(
             profile=state.profile,
             branch=op["branch"],
             version=op["tasks_version"],
+            # §I7: тот же режим штампа, что был у проспективного anchor'а
+            # в намерении ревизии, — иначе возобновление посчитает другие
+            # байты и упрётся в гард §I2 на собственном повторе.
+            restamp_signature=True,
             before_commit=_tasks_blob_cb(state, n),
             after_commit=_commit_facts_cb(
                 state, ops, n, op["prospective_anchor"]
@@ -2032,7 +2089,7 @@ def deliver_superseded(
     )
     prospective = _prospective_anchor(
         state.target_dir, state.bundle_dir, approved_by, approved_at,
-        legacy_bundle,
+        legacy_bundle, restamp_signature=True,
     )
     recorded_anchor = prev_op.get("anchor")
     if recorded_anchor is not None and recorded_anchor == prospective:
@@ -2088,6 +2145,9 @@ def deliver_superseded(
         profile=state.profile,
         branch=branch,
         version=version,
+        # §I7: подпись штампа — от correction-PR, а узел бандла в base уже
+        # approved после доставки v1; без флага она молча отбрасывалась бы.
+        restamp_signature=True,
         before_commit=_tasks_blob_cb(state, n),
         after_commit=_commit_facts_cb(state, ops, n, prospective),
     )

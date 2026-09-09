@@ -3633,6 +3633,246 @@ def test_supersede_changed_anchor_opens_new_branch_and_pr(
     assert rs.load("r-recon").ops["tasks-deliver"]["pr"] == 5   # v1 цела
 
 
+# --- §I7 на РЕАЛЬНОМ состоянии base: бандл уже проштампован ---------------
+#
+# Все supersede-тесты выше стартуют с бандла в `status: draft` (так его
+# кладёт `_target`), и штамп в них срабатывает обычной веткой. Боевого
+# входа это не описывает: доставка v1 штампует узлы и коммитит их в свой
+# же tasks-PR, человек его мержит — значит на момент переиздания в base
+# лежит бандл со `status: approved` и подписью ПРЕДЫДУЩЕЙ доставки.
+# Хелперы ниже приводят фикстуру ровно в это состояние.
+
+_PREV_MERGER = "prev-bundle-merger"
+_PREV_MERGED_AT = "2026-09-01T00:00:00Z"
+
+
+def _stamp_base_as_previous_delivery(
+    state, legacy_bundle: int | None = None
+) -> None:
+    """Бандл в base после мержа tasks-PR доставки v1: узлы approved."""
+    from governance import task_bridge as tb
+
+    tb.stamp_bundle_approved(
+        state.target_dir,
+        state.bundle_dir,
+        approved_by=_PREV_MERGER,
+        approved_at=_PREV_MERGED_AT,
+        legacy_bundle=legacy_bundle,
+    )
+
+
+def _apply_correction_to_anchor(
+    state, anchor: str = "30-decomposition.md"
+) -> None:
+    """Correction-PR: правит ТЕЛО анкера, frontmatter не трогает.
+
+    Сброса `status` в draft тут нет намеренно — этот репо его нигде не
+    требует и не выполняет, и именно поэтому §I7 упирается в узел,
+    который уже approved."""
+    path = Path(state.target_dir) / state.bundle_dir / anchor
+    text = path.read_text(encoding="utf-8")
+    assert "Проза предмета." in text
+    path.write_text(
+        text.replace("Проза предмета.", "Проза предмета (correction)."),
+        encoding="utf-8",
+    )
+
+
+def _anchor_meta(state, anchor: str = "30-decomposition.md") -> dict:
+    from governance import task_bridge as tb
+
+    meta, _ = tb.split_frontmatter(
+        (Path(state.target_dir) / state.bundle_dir / anchor).read_text(
+            encoding="utf-8"
+        )
+    )
+    return meta
+
+
+def _supersede_over_stamped_base(tmp_path, monkeypatch):
+    """state + ops для переиздания поверх уже проштампованного бандла."""
+    from governance import run_state as rs
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _stamp_base_as_previous_delivery(state)
+    _apply_correction_to_anchor(state)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
+    rs.save(state)
+    return state, _SupersedeOps(prs=[_MERGED_PR])
+
+
+def test_supersede_restamps_signature_on_approved_base(
+    tmp_path, monkeypatch
+):
+    """§I7: подпись переизданного анкера — от correction-PR, не от v1.
+
+    Без перештампа `stamp_bundle_approved` молча пропускает узел
+    (`status` уже approved), и в переизданный PR уходит анкер, чей
+    `approved_by` называет человека, мержившего ИСХОДНЫЙ бандл-PR, —
+    дословно то, что §I7 объявляет недопустимым. Наблюдаемо это и в
+    коммите: штамп обязан в него попасть, а не исчезнуть."""
+    from governance import task_bridge as tb
+
+    state, ops = _supersede_over_stamped_base(tmp_path, monkeypatch)
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
+    meta = _anchor_meta(state)
+    assert (meta["approved_by"], meta["approved_at"]) == (
+        "andrei-shtanakov", "2026-09-09T05:00:00Z"
+    )
+    committed = next(
+        call[1] for call in ops.calls if call[0] == "commit_paths"
+    )
+    assert _ANCHOR_REL in committed
+
+
+def test_supersede_restamp_keeps_node_version(tmp_path, monkeypatch):
+    """Перештамп подписи не растит `version` узла.
+
+    Инкремент в обычном пути привязан к ПЕРЕХОДУ draft → approved, а не к
+    «файл тронули»: перештамп исправляет провенанс тех же байтов, которые
+    доставил correction-PR, нового поколения документа не заводит."""
+    from governance import task_bridge as tb
+
+    state, ops = _supersede_over_stamped_base(tmp_path, monkeypatch)
+    before = _anchor_meta(state)["version"]
+    tb.deliver_superseded(state, ops)
+    assert _anchor_meta(state)["version"] == before
+
+
+def test_supersede_restamp_is_idempotent(tmp_path, monkeypatch):
+    """Повтор перештампа с той же подписью не меняет байт.
+
+    На этом стоит §I3.1: возобновление ревизии обязано пересчитать тот же
+    anchor, иначе гард §I2 объявит расхождение на собственном повторе."""
+    from governance import task_bridge as tb
+
+    state, ops = _supersede_over_stamped_base(tmp_path, monkeypatch)
+    tb.deliver_superseded(state, ops)
+    anchor_path = (
+        Path(state.target_dir) / state.bundle_dir / "30-decomposition.md"
+    )
+    after_first = anchor_path.read_bytes()
+    assert tb.stamp_bundle_approved(
+        state.target_dir, state.bundle_dir,
+        approved_by="andrei-shtanakov",
+        approved_at="2026-09-09T05:00:00Z",
+        restamp_signature=True,
+    ) == []
+    assert anchor_path.read_bytes() == after_first
+
+
+def test_restamp_flag_off_keeps_approved_node_untouched(
+    tmp_path: Path,
+) -> None:
+    """Обычная доставка не перештамповывает: флаг выключен по умолчанию.
+
+    Дубль `test_stamp_bundle_is_idempotent` по смыслу, но с явным
+    `restamp_signature=False`: он держит границу «новый режим — только у
+    переиздания», а не общий инвариант идемпотентности."""
+    target = _target(tmp_path)
+    task_bridge.stamp_bundle_approved(
+        str(target), "workstreams/WS-alpha-7/spec",
+        approved_by="x", approved_at="t",
+    )
+    assert task_bridge.stamp_bundle_approved(
+        str(target), "workstreams/WS-alpha-7/spec",
+        approved_by="y", approved_at="t2",
+        restamp_signature=False,
+    ) == []
+    meta, _ = task_bridge.split_frontmatter(
+        (
+            target / "workstreams/WS-alpha-7/spec/00-charter.md"
+        ).read_text(encoding="utf-8")
+    )
+    assert meta["approved_by"] == "x"
+
+
+def test_prospective_anchor_matches_restamp(tmp_path: Path) -> None:
+    """§I2 на режиме переиздания: проспективный штамп = фактический.
+
+    Флаг обязан доходить до ОБОИХ вычислений одинаково; забытый в одном
+    из них, он разводит anchor'ы, и гард `_commit_facts_cb` рвёт доставку
+    между коммитом и push."""
+    from governance.stale_adapter import blob_sha1
+
+    target = _target(tmp_path)
+    bundle_dir = "workstreams/WS-alpha-7/spec"
+    task_bridge.stamp_bundle_approved(
+        str(target), bundle_dir, approved_by=_PREV_MERGER,
+        approved_at=_PREV_MERGED_AT,
+    )
+    prospective = task_bridge._prospective_anchor(
+        str(target), bundle_dir, "andrei-shtanakov",
+        "2026-09-09T05:00:00Z", None, restamp_signature=True,
+    )
+    task_bridge.stamp_bundle_approved(
+        str(target), bundle_dir, "andrei-shtanakov",
+        "2026-09-09T05:00:00Z", restamp_signature=True,
+    )
+    assert prospective == blob_sha1(
+        (Path(target) / bundle_dir / "30-decomposition.md").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
+def test_supersede_pr_body_names_correction_pr(tmp_path, monkeypatch):
+    """Тело переизданного PR называет источником подписи correction-PR.
+
+    Формулировка обычной доставки («mergedBy бандл-PR») на переиздании
+    ложна ровно так же, как была ложна сама подпись."""
+    from governance import task_bridge as tb
+
+    state, ops = _supersede_over_stamped_base(tmp_path, monkeypatch)
+    tb.deliver_superseded(state, ops)
+    assert "mergedBy correction-PR" in ops.pr_body
+    assert "mergedBy бандл-PR" not in ops.pr_body
+
+
+def test_supersede_resume_restamps_too(tmp_path, monkeypatch):
+    """Путь возобновления (§I3 «started | нет PR») тоже перештамповывает.
+
+    Намерение ревизии несёт `prospective_anchor`, посчитанный С
+    перештампом; доставка возобновления, забывшая флаг, дала бы другой
+    анкер и упёрлась бы в гард §I2 — но проверяем прямо подпись, чтобы
+    тест краснел по причине, а не по сообщению гарда."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _stamp_base_as_previous_delivery(state)
+    _apply_correction_to_anchor(state)
+    prospective = tb._prospective_anchor(
+        state.target_dir, state.bundle_dir, "andrei-shtanakov",
+        "2026-09-09T05:00:00Z", None, restamp_signature=True,
+    )
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
+    state.ops["tasks-deliver-v2"] = {
+        "status": "started",
+        "branch": "spec/WS-alpha-7-tasks-v2",
+        "base_sha": "base-sha-1",
+        "prospective_anchor": prospective,
+        "approval_pr": 403,
+        "tasks_version": 2,
+        "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
+        "dag_source": "previous_delivery",
+        "supersedes": 1,
+        "expected_generated_at": "2026-09-09T06:00:00+03:00",
+        "tasks_blob": None,
+        "head_sha": None,
+    }
+    rs.save(state)
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
+    assert _anchor_meta(state)["approved_by"] == "andrei-shtanakov"
+
+
 def test_supersede_legacy_bundle_uses_its_own_dag(tmp_path, monkeypatch):
     """Переиздание ЛЕГАСИ-бандла: `--legacy-bundle=5` определяет активный DAG.
 
