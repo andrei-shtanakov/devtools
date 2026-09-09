@@ -795,8 +795,65 @@ def test_author_dsl_covers_decomposition() -> None:
         "traces_to: [design, acceptance]", "#### DT-NN:", "type: implement|verify",
         "scenarios:", "depends_on:", "delivered_by:", "parallel_group:",
         "topological declaration order",
+        # Major ревью PR #161, finding 1: `verifies:` — обязательное
+        # структурное поле type: verify (owner ruling DT-14 multi-file
+        # group) — промпт авторинга обязан его знать, иначе агент авторит
+        # verify-DT без него и S4-гейт стопит КАЖДЫЙ такой бандл.
+        "verifies:",
     ):
         assert token in dsl
+
+
+def test_author_dsl_decomposition_explains_verifies_field() -> None:
+    """Major ревью PR #161, finding 1: промпт учит и ФОРМЕ (список файлов,
+    блочная YAML), и обязательности/запрету по type, и что это НАБЛЮДЕНИЕ
+    (checked_by остаётся владением) — не только упоминает токен.
+
+    Round 5 ревью PR #161, finding 3 (контракт владельца): промпт больше
+    НЕ обещает "REQUIRED for type: verify" (verifies опционален — находка
+    формы, не fatal-инвариант) и точно описывает УЗКОЕ правило single-owner
+    исключения (владение всегда важнее наблюдения), а не «exempt for THIS
+    task only» без уточнения про собственный checked_by.
+
+    Round 10 ревью PR #161, major (контракт владельца): промпт обязан
+    учить FATAL graph-инварианту замыкания (round 9) — владелец каждого
+    файла из verifies обязан быть в транзитивном замыкании depends_on
+    наблюдающей задачи, тот же контракт, что уже описан для delivered_by
+    — иначе конформный по промпту бандл стопит S4-гейт (третий раз этот
+    класс кусает).
+
+    Round 11 ревью PR #161, минор (контракт владельца, выбран вариант
+    «честная формулировка», не promotion в fatal): промпт больше НЕ
+    обещает, что ЛЮБОЙ verifies-путь без владельца стопит доставку —
+    это ДВУХУРОВНЕВАЯ гарантия (FATAL — только когда владелец есть и вне
+    замыкания; путь БЕЗ владельца вовсе — non-fatal warning на гейте, не
+    факт остановки deliver()).
+
+    Round 14 ревью PR #161, минор (контракт владельца): промпт обещал
+    single-owner ИСКЛЮЧЕНИЕ через verifies, которого в коде нет вовсе
+    (round 4 сняло его целиком — single-owner решается ИСКЛЮЧИТЕЛЬНО
+    checked_by, verifies цикл вообще не читает). Текст исправлен: verifies
+    НЕ даёт никакого исключения ни в какой форме."""
+    from governance.ops import _AUTHOR_DSL
+
+    dsl = _AUTHOR_DSL["decomposition"]
+    verifies_tail = dsl.split("`verifies:")[1]
+    assert "RECOMMENDED for type: verify" in verifies_tail[:200]
+    assert "REQUIRED for type: verify" not in verifies_tail[:400]
+    assert "FORBIDDEN for type: implement" in verifies_tail[:400]
+    assert "checked_by" in verifies_tail[:400]
+    assert "ownership always beats observation" in verifies_tail[:1200]
+    assert "NO exemption from the single-owner invariant" in (
+        verifies_tail[:1200]
+    )
+    assert "NOT also this same task's own checked_by target" not in dsl
+    assert "FATAL graph invariant" in verifies_tail[:1600]
+    assert (
+        "transitive closure of THIS task's OWN depends_on"
+        in verifies_tail[:1900]
+    )
+    assert "NON-fatal form recommendation" in verifies_tail[:2200]
+    assert "does NOT stop delivery on its own" in verifies_tail[:2400]
 
 
 def test_author_dsl_covers_acceptance() -> None:

@@ -1043,19 +1043,54 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # проверяются на существование явно, тем же паттерном: decomposition
     # отсутствующий (профиль без узла) сюда доходит без стопа выше только
     # когда узел не required — читать его было бы TOCTOU.
+    # warnings — накапливается через ВЕСЬ остаток _step_gate (round 7
+    # ревью PR #161, минор: давний баг рядом с этим кодом — каждая
+    # находка ниже писала gate-findings.txt через write_text, ЗАТИРАЯ
+    # предыдущую запись целиком; для fatal-веток это было безопасно (стоп
+    # сразу же), но non-fatal warning, введённый round 6, — единственная
+    # НЕ останавливающая запись в этой функции, и более поздний fatal-стоп
+    # (например, GC-AC-COVERAGE) стирал её молча). Каждая ветка write_text
+    # НИЖЕ обязана включать `warnings` в свою запись, а не только
+    # собственные находки.
+    warnings: list[str] = []
     beh_path = Path(state.target_dir) / state.bundle_dir / "15-behaviour-spec.md"
     decomp_path = node_paths["decomposition"]
     if beh_path.exists() and decomp_path.exists():
+        decomp_text = decomp_path.read_text(encoding="utf-8")
+        beh_text = beh_path.read_text(encoding="utf-8")
+        # Non-fatal находки про verifies (round 7 ревью PR #161, минор;
+        # комментарий исправлен round 10 — прежняя версия обещала фильтр
+        # внутри `graph_findings`, которого там нет): `graph_findings`
+        # (ниже) про эти находки НЕ ЗНАЕТ ВООБЩЕ — она их не вычисляет и
+        # не фильтрует, каждый вызов парсит decomposition сам по себе
+        # (`non_fatal_findings` и `graph_findings` — два независимых
+        # прохода `parse_dt_tasks`, decomposition читается дважды за этот
+        # гейт; общий у них только сам модуль-источник,
+        # `_orphan_verifies_findings`, round 13 переименован из
+        # `_verify_group_and_orphan_findings` — единственная non-fatal
+        # находка теперь одна: опечатка/осиротевший путь). НЕ fatal
+        # (легаси-бандл с checked_by-целью, но без verifies, обязан пройти
+        # гейт), но обязаны быть видимы оператору. Пишутся В ТОТ ЖЕ
+        # gate-findings.txt
+        # как `warning GC-DT-GRAPH:` (не `error`) и НЕ останавливают
+        # прогон: `console_model` просто конкатенирует файл как показ
+        # оператору, не как управляющий сигнал (state.status — единственный
+        # авторитетный источник «гейт стоп/прошёл»).
+        warnings = [
+            f"warning GC-DT-GRAPH: {f}"
+            for f in decomposition_guard.non_fatal_findings(
+                beh_text, decomp_text
+            )
+        ]
         graph = [
             f"error GC-DT-GRAPH: {finding}"
             for finding in decomposition_guard.graph_findings(
-                beh_path.read_text(encoding="utf-8"),
-                decomp_path.read_text(encoding="utf-8"),
+                beh_text, decomp_text
             )
         ]
         if graph:
             (run_dir(state.run_id) / "gate-findings.txt").write_text(
-                "\n".join(graph) + "\n", encoding="utf-8"
+                "\n".join(warnings + graph) + "\n", encoding="utf-8"
             )
             state.status = "stopped_gate"
             save(state)
@@ -1081,11 +1116,19 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         ]
         if ac_cov:
             (run_dir(state.run_id) / "gate-findings.txt").write_text(
-                "\n".join(ac_cov) + "\n", encoding="utf-8"
+                "\n".join(warnings + ac_cov) + "\n", encoding="utf-8"
             )
             state.status = "stopped_gate"
             save(state)
             return False
+    # Гейт целиком прошёл (ни одна fatal-ветка не остановила) — накопленные
+    # warning'и (если есть) пишутся ЗДЕСЬ, одной записью, а не сразу после
+    # GC-DT-GRAPH: та ранняя запись стиралась бы любым fatal-стопом ниже
+    # (см. комментарий про `warnings` выше).
+    if warnings:
+        (run_dir(state.run_id) / "gate-findings.txt").write_text(
+            "\n".join(warnings) + "\n", encoding="utf-8"
+        )
     op_complete(state, key, exit=rc)
     return True
 

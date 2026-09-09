@@ -17,6 +17,7 @@ DT_OK = (
     "depends_on: [DT-01]\n"
     "delivered_by: [DT-01]\n"
     "parallel_group: core\n"
+    "verifies: [tests/test_a.py]\n"
     "Проза.\n"
 )
 
@@ -31,6 +32,7 @@ def test_parse_two_tasks() -> None:
         delivered_by=(), parallel_group="core",
     )
     assert tasks[1].delivered_by == ("DT-01",)
+    assert tasks[1].verifies == ("tests/test_a.py",)
 
 
 def test_near_miss_heading_is_a_finding() -> None:
@@ -354,6 +356,481 @@ def test_letter_suffixed_beh_is_parsed_and_covered() -> None:
         "parallel_group: solo\n"
     )
     assert graph_findings(beh, dt) == []
+
+
+# --- FIX 1 (owner ruling, DT-14 multi-file group): структурное поле
+# `verifies:` для type: verify — checked_by остаётся владением, verifies —
+# группой наблюдения; single-owner эти файлы не касается. ------------------
+
+
+def test_verifies_block_form_is_parsed() -> None:
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "  - tests/test_a.py\n"
+        "  - tests/test_b.py\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
+
+
+def test_verifies_block_form_survives_blank_lines() -> None:
+    """Пустая строка внутри блочного списка его НЕ обрывает (round 14
+    ревью PR #161): в YAML список продолжается через пустые строки, а
+    обрыв молча терял всё, что за ней."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "  - tests/test_a.py\n"
+        "\n"
+        "  - tests/test_b.py\n"
+        "\n"
+        "Проза после списка его завершает.\n"
+        "  - tests/test_never.py\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
+
+
+def test_verifies_inline_form_is_also_accepted() -> None:
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies: [tests/test_a.py, tests/test_b.py]\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
+
+
+def test_verifies_block_form_preserves_selector_entries() -> None:
+    """Round 13 ревью PR #161: элементы блочной формы с `::`-селекторами
+    сохраняются verbatim (срез `::` — дело только гарда/ownership-
+    проверок, не парсера)."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "  - tests/test_a.py::test_one\n"
+        "  - tests/test_b.py::test_two\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == (
+        "tests/test_a.py::test_one", "tests/test_b.py::test_two",
+    )
+
+
+def test_verifies_unparsed_scalar_form_is_a_finding() -> None:
+    """Major ревью PR #161, round 13 (контракт владельца): скалярное
+    значение (`verifies: <путь>` без `[...]` и без блочного списка) не
+    матчит ни инлайн-, ни блочную форму — раньше это молча деградировало
+    до «поля нет вовсе» (пустой кортеж, никакой находки, closure-проверка
+    и рендер про файл не знают). Теперь ключ verifies, присутствующий в
+    блоке, но не разобранный НИ ОДНОЙ формой, — находка формы."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies: tests/test_ops.py\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert any(
+        "DT-14" in f and "verifies" in f and "не разобран" in f
+        for f in findings
+    )
+    assert tasks[0].verifies == ()
+
+
+def test_verifies_empty_block_form_is_a_finding() -> None:
+    """Round 13: `verifies:` объявлен блочно, но за ним НЕТ ни одной
+    валидной строки `- <путь>` (сразу пустая строка/проза) — тоже находка,
+    не тихое «поля нет»."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "\n"
+        "Проза без единого элемента списка.\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert any(
+        "DT-14" in f and "verifies" in f and "не разобран" in f
+        for f in findings
+    )
+    assert tasks[0].verifies == ()
+
+
+def test_verifies_block_form_accepts_unindented_entries() -> None:
+    """Round 14 ревью PR #161, major (контракт владельца — откат
+    чрезмерной строгости round 13): блочная форма verifies БЕЗ отступа
+    (`- <путь>` прямо под ключом, столбец 0) — валидный YAML, разрешённый
+    промптом авторинга (`_AUTHOR_DSL["decomposition"]` никогда не требовал
+    отступа, только «one `- <file>` per line») — обязана парситься, не
+    давать fatal-находку формы."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "- tests/test_a.py\n"
+        "- tests/test_b.py\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
+
+
+def test_verifies_block_form_indented_entries_still_accepted() -> None:
+    """Round 14: отступленная форма (`  - <путь>`) остаётся валидной —
+    отступ теперь ОПЦИОНАЛЕН, а не запрещён."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "  - tests/test_a.py\n"
+        "  - tests/test_b.py\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
+
+
+def test_verifies_block_form_stops_at_first_non_dash_non_blank_line() -> None:
+    """Round 14 (контракт владельца): список останавливается на первой
+    строке, которая НЕ является ни `- ` элементом (в любой форме — с
+    отступом или без), ни пустой строкой — проза БЕЗ ведущего дефиса
+    корректно завершает список."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "  - tests/test_a.py\n"
+        "Проза предмета без ведущего дефиса.\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py",)
+
+
+def test_verifies_block_form_stops_at_blank_line() -> None:
+    """Пустая строка тоже заканчивает блочный список (round 13)."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "  - tests/test_a.py\n"
+        "\n"
+        "Проза предмета после пустой строки.\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py",)
+
+
+def test_verify_with_checked_by_target_but_without_verifies_is_legacy_ok() -> None:
+    """Round 7 ревью PR #161, минор (контракт владельца, замена round-5
+    безусловного «verify без verifies»): verify-DT с checked_by-целью в
+    scenarios (легаси-форма single-file verify) — НЕ находка, даже без
+    verifies, ни на уровне graph_findings, ни на уровне non_fatal_findings
+    — промпт авторинга рекомендует verifies только когда группа наблюдения
+    выходит за собственные checked_by-цели, и гард обязан это отражать
+    (иначе конформный по промпту бандл шумит на зелёном гейте)."""
+    from governance.decomposition_guard import graph_findings, non_fatal_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_one`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::test_two`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: solo\n"
+    )
+    assert graph_findings(beh, dt) == []
+    assert non_fatal_findings(beh, dt) == []
+
+
+def test_verify_group_underivable_is_a_fatal_finding() -> None:
+    """Round 13 ревью PR #161, минор (контракт владельца — промотировано
+    из non-fatal, round 7): условие «группа наблюдения не выводится
+    ВООБЩЕ» (ни из checked_by, ни из verifies) ТОЖДЕСТВЕННО тому, при
+    котором render_tasks_dt детерминированно поднимает RuntimeError —
+    «не блокирует доставку» было ложью для этого входа. Теперь это FATAL
+    находка `graph_findings` (S4-гейт и deliver() её видят и отказывают),
+    а не non-fatal warning."""
+    from governance.decomposition_guard import graph_findings, non_fatal_findings
+
+    beh = (
+        "#### BEH-01: Один\n- **checked_by**: без бэктиков, не биндится\n\n"
+        "#### BEH-02: Два\n- **checked_by**: тоже без бэктиков\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: solo\n"
+    )
+    findings = graph_findings(beh, dt)
+    assert any(
+        "DT-14" in f and "группа наблюдения не выводится" in f
+        for f in findings
+    )
+    # Больше НЕ дублируется в non-fatal канале — единственный вывод, fatal.
+    assert not any(
+        "группа наблюдения не выводится" in f
+        for f in non_fatal_findings(beh, dt)
+    )
+
+
+def test_orphan_verifies_target_is_non_fatal_finding() -> None:
+    """Round 7 ревью PR #161, минор (контракт владельца): элемент
+    verifies, не совпавший ни с одной checked_by-целью бандла, — опечатка
+    либо осиротевший путь, находка формы (не fatal), но обязана быть
+    видна оператору через non_fatal_findings — иначе уезжает в
+    tasks-спеку как селектор прогона, которого ни одна задача не
+    создаёт."""
+    from governance.decomposition_guard import graph_findings, non_fatal_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_one`\n\n"
+        "#### BEH-02: Два\n- **checked_by**: без бэктиков, не биндится\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: solo\n"
+        "verifies:\n  - tests/test_typo.py\n"
+    )
+    warnings = non_fatal_findings(beh, dt)
+    assert any(
+        "DT-14" in f and "tests/test_typo.py" in f
+        and "опечатка либо осиротевший путь" in f
+        for f in warnings
+    )
+    assert graph_findings(beh, dt) == []
+
+
+def test_verifies_target_owner_outside_depends_on_closure_is_a_finding() -> None:
+    """Round 8 ревью PR #161, major (контракт владельца): verifies обязан
+    ссылаться на файлы, чей владелец (checked_by) — в ТРАНЗИТИВНОМ
+    ЗАМЫКАНИИ depends_on наблюдающей задачи, тот же инвариант, что уже
+    есть у delivered_by. DT-03 наблюдает tests/test_a.py (владелец —
+    DT-01), но depends_on=[DT-02] — DT-01 вне замыкания, verify_first-
+    прогон законно стартовал бы раньше, чем DT-01 вообще создаст файл."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::t1`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::t2`\n\n"
+        "#### BEH-03: Три\n**checked_by** `kind: e2e` "
+        "`target: tests/test_c.py::t3`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-02: B · type: implement · owner: dev\n"
+        "scenarios: [BEH-02]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-03: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-03]\ndepends_on: [DT-02]\n"
+        "delivered_by: [DT-02]\nparallel_group: core\n"
+        "verifies:\n  - tests/test_a.py\n"
+    )
+    findings = graph_findings(beh, dt)
+    assert any(
+        "DT-03" in f and "tests/test_a.py" in f and "DT-01" in f
+        and "замыкания" in f
+        for f in findings
+    )
+
+
+def test_verifies_selector_form_does_not_bypass_closure_invariant() -> None:
+    """Round 10 ревью PR #161, минор (контракт владельца): verifies в
+    форме `file.py::test` (тот же полный pytest-селектор, в котором
+    checked_by-цели реально приходят) обязана нормализоваться срезом
+    `::` ПЕРЕД сверкой с владельцем — иначе `file_owner.get(f)` не
+    находит запись (bindings несут ГОЛЫЕ пути), closure-инвариант молча
+    пропускается, а orphan-проверка ложно маркирует РЕАЛЬНЫЙ файл как
+    «опечатка». Зеркало
+    test_verifies_target_owner_outside_depends_on_closure_is_a_finding,
+    но verifies — с `::test1` вместо голого пути."""
+    from governance.decomposition_guard import graph_findings, non_fatal_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::t1`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::t2`\n\n"
+        "#### BEH-03: Три\n**checked_by** `kind: e2e` "
+        "`target: tests/test_c.py::t3`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-02: B · type: implement · owner: dev\n"
+        "scenarios: [BEH-02]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-03: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-03]\ndepends_on: [DT-02]\n"
+        "delivered_by: [DT-02]\nparallel_group: core\n"
+        "verifies:\n  - tests/test_a.py::test_one\n"
+    )
+    findings = graph_findings(beh, dt)
+    # closure-инвариант ловит владельца ВНЕ замыкания — как для голого пути.
+    assert any(
+        "DT-03" in f and "tests/test_a.py::test_one" in f and "DT-01" in f
+        and "замыкания" in f
+        for f in findings
+    )
+    # НЕ ложная находка «опечатка» — путь реально принадлежит DT-01.
+    assert not any(
+        "опечатка либо осиротевший путь" in f
+        for f in non_fatal_findings(beh, dt)
+    )
+
+
+def test_verifies_target_owner_directly_in_depends_on_is_clean() -> None:
+    """Owner DT-01 напрямую в depends_on наблюдающей задачи — чисто."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::t1`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::t2`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-02: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n  - tests/test_a.py\n"
+    )
+    assert graph_findings(beh, dt) == []
+
+
+def test_verifies_target_owner_transitively_in_depends_on_is_clean() -> None:
+    """Owner DT-01 — не прямая, а ТРАНЗИТИВНАЯ зависимость (через DT-02) —
+    тоже чисто: замыкание depends_on, а не только прямые рёбра."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::t1`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::t2`\n\n"
+        "#### BEH-03: Три\n**checked_by** `kind: e2e` "
+        "`target: tests/test_c.py::t3`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-02: B · type: implement · owner: dev\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\nparallel_group: core\n\n"
+        "#### DT-03: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-03]\ndepends_on: [DT-02]\n"
+        "delivered_by: [DT-02]\nparallel_group: core\n"
+        "verifies:\n  - tests/test_a.py\n"
+    )
+    assert graph_findings(beh, dt) == []
+
+
+def test_verifies_on_implement_is_a_finding() -> None:
+    dt = (
+        "#### DT-01: Реализация · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n"
+        "verifies:\n  - tests/test_a.py\n"
+    )
+    _tasks, findings = parse_dt_tasks(dt)
+    assert any(
+        "DT-01" in f and "verifies" in f and "запрещ" in f for f in findings
+    )
+
+
+def test_single_owner_fires_even_when_own_checked_by_target_is_in_own_verifies() -> None:
+    """Major ревью PR #161, round 4 finding 3 (корректирует round-2/3
+    решение — прежний тест ошибочно ожидал здесь отсутствие находки):
+    DT-01 (implement) владеет tests/test_a.py через BEH-01; DT-14 (verify)
+    несёт СВОЙ сценарий BEH-02, чей checked_by-таргет — ТОТ ЖЕ файл, и ТАКЖЕ
+    объявляет его в СВОЁМ verifies. Это НЕ observation — DT-14 сам
+    редактирует файл через собственный checked_by (BEH-02), значит
+    реально владеет им наравне с DT-01: single-owner обязан сработать.
+    Владение (scenarios/checked_by) всегда старше наблюдения (verifies)."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_one`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_two`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n  - tests/test_a.py\n"
+    )
+    findings = graph_findings(beh, dt)
+    assert any(
+        "tests/test_a.py" in f and "single-owner" in f for f in findings
+    )
+
+
+def test_single_owner_still_conflicts_between_implement_dts_despite_unrelated_verifies() -> None:
+    """Major ревью PR #161, finding 4 (регресс на баг из ORIGINAL FIX 1):
+    verifies какой-то ДРУГОЙ (verify) задачи, перечисляющий файл, НЕ
+    отменяет single-owner между ДВУМЯ implement-задачами, реально
+    претендующими на владение тем же файлом — байт-лок тест-файла остаётся
+    в силе; наблюдение стороннего verify-DT не даёт implement-DT-ам молча
+    делить файл."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_one`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_two`\n\n"
+        "#### BEH-03: Три\n**checked_by** `kind: e2e` "
+        "`target: tests/test_c.py::test_three`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: core\n\n"
+        "#### DT-02: B · type: implement · owner: dev\n"
+        "scenarios: [BEH-02]\ndepends_on: []\nparallel_group: side\n\n"
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-03]\ndepends_on: [DT-01, DT-02]\n"
+        "delivered_by: [DT-01, DT-02]\nparallel_group: side\n"
+        "verifies:\n  - tests/test_a.py\n"
+    )
+    findings = graph_findings(beh, dt)
+    assert any(
+        "tests/test_a.py" in f and "single-owner" in f for f in findings
+    )
 
 
 def test_unknown_beh_suffix_form_is_a_form_finding() -> None:

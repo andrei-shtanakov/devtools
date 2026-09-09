@@ -8,6 +8,26 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+# Маркер-подстрока non-fatal находки формы «осиротевший/опечатанный путь
+# в verifies» (round 7 ревью PR #161, минор) — единственная точка истины
+# её текста, используется в `_orphan_verifies_findings` НИЖЕ (единственный
+# продьюсер). Эта находка НИКОГДА не попадает в `graph_findings` (её
+# fatal-результат про неё не знает — она её не вычисляет и не
+# фильтрует) — публичная точка входа `non_fatal_findings` вычисляет её
+# ОТДЕЛЬНО; единственный потребитель — S4-гейт `governance.runner.
+# _step_gate` (round 6/7/8 ревью PR #161), пишет её как
+# `warning GC-DT-GRAPH:` в gate-findings.txt, не останавливая прогон:
+# элемент verifies, не являющийся checked_by-целью НИ ОДНОЙ задачи бандла.
+_ORPHAN_VERIFIES_TARGET_MARKER = "опечатка либо осиротевший путь"
+# Маркер-подстрока находки «группа наблюдения не выводится вовсе» — теперь
+# FATAL (round 13 ревью PR #161, минор — до этого была non-fatal
+# `_VERIFY_GROUP_UNDERIVABLE_MARKER`-находка формы; промотирована в
+# `graph_findings`, см. её докстринг: условие тождественно тому, при
+# котором `render_tasks_dt` детерминированно поднимает RuntimeError —
+# «не блокирует доставку» было ложью именно для этого входа).
+_VERIFY_GROUP_UNDERIVABLE_MARKER = "группа наблюдения не выводится"
+
+
 _DT_HEAD_RE = re.compile(
     r"^####\s+(DT-\d+):\s*(.+?)\s*·\s*type:\s*(implement|verify)"
     r"\s*·\s*owner:\s*(\S+)\s*$",
@@ -29,9 +49,87 @@ def _list_field(block: str, name: str) -> tuple[str, ...] | None:
     return tuple(part.strip() for part in inner.split(","))
 
 
+# Форма блочного элемента (round 14 ревью PR #161, major, контракт
+# владельца — откат чрезмерной строгости round 13): отступ ОПЦИОНАЛЕН —
+# ОБЕ формы валидны и обязаны парситься: элементы под `verifies:` С
+# отступом (`  - <путь>`) И элементы БЕЗ отступа, столбец 0 (`- <путь>`
+# прямо под ключом) — обе формы валидный YAML, и промпт авторинга
+# (`_AUTHOR_DSL["decomposition"]`) никогда не требовал отступа, только
+# «one `- <file>` per line». Строгая (round 13, обязательный отступ) версия
+# делала конформный по промпту бандл фатальной находкой формы — стопила
+# S4-гейт и deliver() на честно авторенном входе. ОБЯЗАТЕЛЕН пробел после
+# `-` и непустое содержимое сразу после него; список завершается на первой
+# строке, которая НЕ является ни `- ` элементом (в любой форме), ни
+# пустой строкой (round 13 minor, сохранено).
+_LIST_ITEM_RE = re.compile(r"^[ \t]*-[ \t]+(\S.*?)\s*$")
+
+
+def _block_list_field(block: str, name: str) -> tuple[str, ...] | None:
+    """`name:` в блочной YAML-форме (`- элемент` построчно, без `[...]`).
+
+    None — ключ `name:` НЕ найден в блоке вовсе (форма отсутствует).
+    Пустой кортеж `()` НЕ возвращается: если ключ найден, но за ним нет ни
+    одной валидной `- <элемент>` строки (round 13 ревью PR #161, major) —
+    тоже None, чтобы вызывающая сторона (`_verifies_field`/`parse_dt_tasks`)
+    могла отличить «поля нет вовсе» (легаси, не находка) от «поле есть, но
+    не разобрано» (находка формы) — раньше оба случая молча сливались в
+    один пустой кортеж.
+    """
+    m = re.search(rf"^{name}:\s*$", block, re.M)
+    if m is None:
+        return None
+    items: list[str] = []
+    # m.end() стоит ПЕРЕД '\n' ($ в re.M его не поглощает) — первый элемент
+    # splitlines() всегда пустая строка-остаток заголовка, отбрасываем её.
+    for line in block[m.end():].splitlines()[1:]:
+        item = _LIST_ITEM_RE.match(line)
+        if item is None:
+            # Пустая строка список НЕ обрывает (round 14 ревью PR #161,
+            # major): в YAML блочный список продолжается через пустые
+            # строки, и обрыв на первой из них молча терял всё, что за
+            # ней — без находки формы, без closure-проверки и без строки
+            # в `**Verifies:**`. Список кончается на первой НЕПУСТОЙ
+            # строке, не являющейся `- <элемент>`.
+            if not line.strip():
+                continue
+            break
+        items.append(item.group(1))
+    return tuple(items) if items else None
+
+
+# Ключ `verifies:` присутствует в блоке В ЛЮБОЙ форме (скаляр, блочный
+# список, инлайн-список, что угодно) — используется ТОЛЬКО чтобы отличить
+# «поля нет вовсе» (легаси, молчание — не находка) от «поле объявлено, но
+# не разобрано ни одной принятой формой» (round 13, major — находка формы).
+_VERIFIES_KEY_RE = re.compile(r"^verifies:", re.M)
+
+
+def _verifies_field(block: str) -> tuple[str, ...] | None:
+    """`verifies:` — инлайн (`[a, b]`) ИЛИ блочная (`- a`) форма, обе
+    принимаются (спека владельца по DT-14, FIX 1). None — НИ ОДНА форма не
+    дала ни одного элемента (ключ либо отсутствует вовсе, либо присутствует
+    в нераспознанном виде — вызывающая сторона разбирается через
+    `_VERIFIES_KEY_RE`, эта функция два случая не различает)."""
+    inline = _list_field(block, "verifies")
+    if inline is not None:
+        return inline
+    return _block_list_field(block, "verifies")
+
+
 @dataclass(frozen=True)
 class DtTask:
-    """Одна задача decomposition-узла (заголовок #### DT-NN)."""
+    """Одна задача decomposition-узла (заголовок #### DT-NN).
+
+    ``verifies`` — структурное поле группы наблюдения (owner ruling,
+    multi-file DT-14): список файлов, за которыми присматривает
+    ``type: verify`` DT, СТРУКТУРНО отдельный от ``checked_by``-владения
+    (которое несут ``scenarios``) и НЕ участвующий в single-owner
+    инварианте ``graph_findings`` вовсе (round 4 ревью PR #161, finding 3:
+    исключение по verifies снято — тот же файл, дошедший до проверки через
+    ``scenarios``/``checked_by``, ВСЕГДА заявка на редактирующее владение,
+    независимо от того, что ещё перечислено в ``verifies``; владение
+    всегда старше наблюдения).
+    """
 
     dt_id: str
     title: str
@@ -41,6 +139,7 @@ class DtTask:
     depends_on: tuple[str, ...]
     delivered_by: tuple[str, ...]
     parallel_group: str
+    verifies: tuple[str, ...] = ()
 
 
 def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
@@ -76,6 +175,23 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
         scenarios = _list_field(block, "scenarios")
         depends_on = _list_field(block, "depends_on")
         delivered_by = _list_field(block, "delivered_by") or ()
+        verifies_parsed = _verifies_field(block)
+        # Неразобранное поле — находка формы, не тихое «поля нет» (round
+        # 13 ревью PR #161, major, контракт владельца): ключ `verifies:`
+        # присутствует в блоке в КАКОЙ-ТО форме (скаляр, пустой блочный
+        # список без элементов, что угодно нераспознанное), но ни инлайн-,
+        # ни блочная форма не дала ни одного элемента. Раньше это молча
+        # деградировало до пустого кортежа — неотличимо от «поля нет
+        # вовсе» (легаси-бандл), и файл ни разу не проверялся closure-
+        # инвариантом и не попадал в доставленную tasks-спеку.
+        if verifies_parsed is None and _VERIFIES_KEY_RE.search(block):
+            findings.append(
+                f"{dt_id}: поле verifies объявлено, но не разобрано — "
+                "ожидается блочный список `  - <путь>` (с отступом) либо "
+                "инлайн `verifies: [<путь>, …]`"
+            )
+        verifies = verifies_parsed or ()
+        dt_type = m.group(3)
         group_m = re.search(r"^parallel_group:\s*(\S+)\s*$", block, re.M)
         if scenarios is None or not scenarios:
             findings.append(f"{dt_id}: строка scenarios отсутствует или пуста")
@@ -83,11 +199,28 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
             findings.append(f"{dt_id}: строка depends_on отсутствует")
         if group_m is None:
             findings.append(f"{dt_id}: строка parallel_group отсутствует")
+        # verifies — структурное поле группы НАБЛЮДЕНИЯ (owner ruling,
+        # DT-14): рекомендовано у type: verify (объявляется, когда нужна
+        # multi-file группа наблюдения отдельно от checked_by-владения) и
+        # ЗАПРЕЩЕНО у type: implement (checked_by через scenarios —
+        # единственный канал ВЛАДЕНИЯ implement-задач). «Группа наблюдения
+        # не выводится вовсе» (verify без verifies И без checked_by-целей
+        # в scenarios) — тоже находка, но она требует bindings behaviour-
+        # spec (какой BEH какой checked_by-таргет несёт), которых
+        # `parse_dt_tasks` не видит (только decomposition_text) — эта
+        # проверка живёт в `graph_findings` (round 7 ревью PR #161, минор,
+        # контракт владельца: условие обязано учитывать легаси-форму —
+        # verify-DT с checked_by-целями через scenarios И БЕЗ verifies не
+        # находка, находка только когда группу вывести решительно не из
+        # чего).
+        if dt_type == "implement" and verifies:
+            findings.append(f"{dt_id}: verifies запрещён при type: implement")
         tasks.append(DtTask(
-            dt_id=dt_id, title=m.group(2), type=m.group(3),
+            dt_id=dt_id, title=m.group(2), type=dt_type,
             owner=m.group(4), scenarios=scenarios or (),
             depends_on=depends_on or (), delivered_by=delivered_by,
             parallel_group=group_m.group(1) if group_m else "",
+            verifies=verifies,
         ))
     for dt_id, count in seen.items():
         if count > 1:
@@ -156,11 +289,86 @@ def _transitive_deps(
     return seen
 
 
+def _orphan_verifies_findings(
+    tasks: list[DtTask],
+    bindings: dict[str, tuple[str | None, str | None]],
+) -> list[str]:
+    """Единственная ОСТАВШАЯСЯ non-fatal находка verifies (round 7 ревью
+    PR #161, минор, контракт владельца; «группа наблюдения не выводится»
+    промотирована в fatal round 13, см. `graph_findings`) — общая точка
+    для `non_fatal_findings` (публичная точка входа для S4-гейта):
+    элемент verifies, не являющийся checked_by-целью НИ ОДНОЙ задачи
+    бандла — опечатка либо осиротевший путь; уезжал бы в tasks-спеку как
+    селектор прогона, которого ни одна задача не создаёт.
+    """
+    findings: list[str] = []
+    owned_files = {
+        target for target, _kind in bindings.values() if target is not None
+    }
+    for t in tasks:
+        for f in t.verifies:
+            # Срез `::`-селектора ПЕРЕД сверкой (round 10 ревью PR #161,
+            # минор): bindings/owned_files несут ГОЛЫЕ пути
+            # (`_parse_beh_bindings` уже режет `::` для checked_by-целей)
+            # — тот же канон, что уже применён в render_tasks_dt (union-
+            # дедуп, round 9) и в closure-инварианте graph_findings ниже.
+            # Без среза `file.py::test`-форма в verifies никогда не
+            # совпадала бы с owned_files, даже когда файл реально в
+            # бандле, — ложная находка «опечатка».
+            if f.split("::", 1)[0] not in owned_files:
+                findings.append(
+                    f"{t.dt_id}: verifies {f}: наблюдаемая цель не "
+                    "принадлежит ни одной задаче — "
+                    f"{_ORPHAN_VERIFIES_TARGET_MARKER}"
+                )
+    return findings
+
+
+def non_fatal_findings(
+    behaviour_text: str, decomposition_text: str
+) -> list[str]:
+    """Non-fatal находки формы про `verifies` (round 7 ревью PR #161,
+    минор, контракт владельца) — единственная точка их вычисления, и
+    единственный потребитель — `governance.runner._step_gate`: показывает
+    их оператору как `warning GC-DT-GRAPH:` в gate-findings.txt, НЕ
+    останавливая прогон. `graph_findings` (fatal-агрегат S4-гейта и
+    `task_bridge.deliver`) про эту находку НЕ ЗНАЕТ ВООБЩЕ — она её не
+    вычисляет и не фильтрует (round 8 ревью PR #161, минор: исправлен
+    комментарий модуля, ранее ошибочно обещавший обратное); общий с этой
+    функцией источник — только `_orphan_verifies_findings`.
+    """
+    tasks, _form_findings = parse_dt_tasks(decomposition_text)
+    bindings = _parse_beh_bindings(behaviour_text)
+    return _orphan_verifies_findings(tasks, bindings)
+
+
 def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
     """Инварианты графа DT (§3 спеки) + findings формы парсера.
 
     Порядок проверок фиксирован, findings накапливаются (гейт показывает
     всё сразу, не по одной). Пустой список — граф валиден.
+
+    Единственная ОСТАВШАЯСЯ non-fatal находка про `verifies`
+    (`_orphan_verifies_findings`, round 7 ревью PR #161, минор — опечатка/
+    осиротевший путь) в результат НЕ попадает вовсе — вычисляется
+    ОТДЕЛЬНО, публичной `non_fatal_findings` (потребитель —
+    `runner._step_gate`, показывает её как warning, не останавливая
+    прогон); эта функция про неё просто не знает.
+
+    Fatal-инвариант verifies-замыкания (round 8 ревью PR #161, major,
+    контракт владельца): элемент verifies обязан ссылаться на файл, чей
+    владелец (checked_by) — в ТРАНЗИТИВНОМ ЗАМЫКАНИИ depends_on
+    наблюдающей задачи — тот же контракт, что уже есть у delivered_by;
+    иначе verify_first-прогон законно стартовал бы раньше, чем владелец
+    наблюдаемого файла его вообще создаст.
+
+    «Группа наблюдения не выводится вовсе» — тоже FATAL (round 13 ревью
+    PR #161, минор — промотирована из non-fatal: условие `verify-DT без
+    checked_by-цели в scenarios И без verifies` ТОЖДЕСТВЕННО тому, при
+    котором `task_bridge.render_tasks_dt` детерминированно поднимает
+    RuntimeError «нечего прогонять» — «рекомендация формы, не блокирует
+    доставку» была ложью именно для этого входа; легаси-форма,
+    checked_by-цель ЕСТЬ и verifies нет, — по-прежнему НЕ находка).
     """
     tasks, findings = parse_dt_tasks(decomposition_text)
     bindings = _parse_beh_bindings(behaviour_text)
@@ -217,7 +425,18 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
                 f"{beh}: покрыт дважды и более ({', '.join(owners)})"
             )
 
-    # single-owner тест-файла
+    # single-owner тест-файла — БЕЗ исключения для verifies (round 4 ревью
+    # PR #161, finding 3: узкое per-task исключение round 2/3, `target in
+    # t.verifies`, срабатывало РОВНО там, где задача t сама владеет
+    # файлом — target здесь ВСЕГДА выведен из checked_by-цели t
+    # (bindings по её же scenarios), т.е. это ВСЕГДА заявка t на
+    # редактирующее владение, независимо от того, что ещё перечислено в
+    # t.verifies. Владение (scenarios/checked_by) всегда старше
+    # наблюдения (verifies, owner ruling DSL: «checked_by remains the
+    # single source of EDITING ownership») — этот цикл смотрит только на
+    # scenarios/checked_by и НИКОГДА на verifies, так что вопрос
+    # исключения здесь просто не встаёт: single-owner проверяется как для
+    # любых двух задач.
     file_owner: dict[str, str] = {}
     for t in tasks:
         for beh in t.scenarios:
@@ -231,6 +450,27 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
                     f"{prior} и {t.dt_id}"
                 )
             file_owner.setdefault(target, t.dt_id)
+
+    # Группа наблюдения verify-DT не выводится ВООБЩЕ — FATAL (round 13
+    # ревью PR #161, минор, промотирована из non-fatal, см. докстринг
+    # выше): ни одной checked_by-цели через scenarios И verifies пуст —
+    # прогонять нечего, render_tasks_dt детерминированно упал бы
+    # RuntimeError. Легаси-форма (checked_by-цель ЕСТЬ, verifies нет) —
+    # НЕ находка.
+    for t in tasks:
+        if t.type != "verify":
+            continue
+        has_own_target = any(
+            bindings.get(beh, (None, None))[0] is not None
+            for beh in t.scenarios
+        )
+        if not has_own_target and not t.verifies:
+            findings.append(
+                f"{t.dt_id}: type: verify — "
+                f"{_VERIFY_GROUP_UNDERIVABLE_MARKER} (нет ни "
+                "checked_by-целей в scenarios, ни verifies) — группу "
+                "наблюдения прогонять нечем, доставка этого DT невозможна"
+            )
 
     # verify/implement-контракт delivered_by + транзитивное замыкание
     for t in tasks:
@@ -252,6 +492,34 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
             findings.append(
                 f"{t.dt_id}: delivered_by запрещён при type: implement"
             )
+
+    # verifies обязан ссылаться на файлы, чей владелец (checked_by, тот же
+    # file_owner, что и single-owner выше) — в ТРАНЗИТИВНОМ ЗАМЫКАНИИ
+    # depends_on наблюдающей задачи (round 8 ревью PR #161, major, контракт
+    # владельца) — тот же инвариант, что уже есть у delivered_by: verify_
+    # first-прогон не имеет права начаться раньше, чем владелец
+    # наблюдаемого файла его реально создаст (промпт авторинга рекомендует
+    # класть в verifies именно файлы ДРУГИХ DT — ops.py, «owned by other
+    # DTs» — но не требует ребра к ним, гард обязан требовать сам).
+    # Файлы, не являющиеся чьей-либо checked_by-целью вовсе (опечатка/
+    # осиротевший путь), здесь не смотрим — non-fatal-версия этой проверки
+    # уже сделана отдельно в `non_fatal_findings`. Срез `::`-селектора
+    # ПЕРЕД сверкой с file_owner (round 10 ревью PR #161, минор) — тот же
+    # канон, что уже применён выше в orphan-проверке и в render_tasks_dt:
+    # без него `file.py::test`-форма в verifies никогда не находила бы
+    # своего владельца (file_owner несёт голые пути), и closure-инвариант
+    # молча пропускался бы ДАЖЕ когда владелец реально вне замыкания.
+    for t in tasks:
+        for f in t.verifies:
+            owner = file_owner.get(f.split("::", 1)[0])
+            if owner is None or owner == t.dt_id:
+                continue
+            closure = _transitive_deps(t.dt_id, edges)
+            if owner not in closure:
+                findings.append(
+                    f"{t.dt_id}: verifies {f} — владелец {owner} вне "
+                    f"транзитивного замыкания depends_on {t.dt_id}"
+                )
 
     # ацикличность (DFS с цветами)
     WHITE, GRAY, BLACK = 0, 1, 2

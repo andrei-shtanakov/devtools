@@ -4159,6 +4159,170 @@ def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root) -> None:
     assert "push" not in state.ops
 
 
+def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Round 7 ревью PR #161 (минор, контракт владельца), фикстура
+    обновлена в round 13 (major того же раунда промотировал «группа
+    наблюдения не выводится» в fatal — прежняя фикстура теперь стопит
+    гейт, см. test_gate_dt_graph_finding_stops_on_underivable_group):
+    осиротевший/опечатанный путь в verifies — единственный ОСТАВШИЙСЯ
+    non-fatal класс. DT-02 несёт СОБСТВЕННУЮ checked_by-цель (BEH-02
+    биндится), значит группа выводится и рендер не падает; verifies
+    указывает на путь, которого нет ни у одной checked_by-цели бандла.
+    Граф иначе валиден — гейт ПРОХОДИТ, но gate-findings.txt несёт
+    `warning GC-DT-GRAPH:` строку с опечаткой."""
+    beh_two = (
+        _DEFAULT_BEHAVIOUR_BODY
+        + "\n#### BEH-02: y\n`traces: [FR-01]`\n- **checked_by**: "
+        "`kind: integration` `target: tests/test_y.py`\n"
+    )
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            if kind == "behaviour-spec":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(beh_two, encoding="utf-8")
+                return 0
+            if kind == "decomposition":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                design_pin = blob_sha1(
+                    (bundle / "20-design.md").read_text(encoding="utf-8")
+                )
+                acceptance_pin = blob_sha1(
+                    (bundle / "25-acceptance.md").read_text(encoding="utf-8")
+                )
+                path = bundle / "30-decomposition.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: decomposition\n"
+                    "status: draft\n"
+                    "owner_role: tech-lead\n"
+                    "traces_to: [design, acceptance]\n"
+                    "upstream_hashes:\n"
+                    f'  design: "{design_pin}"\n'
+                    f'  acceptance: "{acceptance_pin}"\n'
+                    "---\n"
+                    "## Задачи\n\n"
+                    "#### DT-01: x · type: implement · owner: dev\n"
+                    "scenarios: [BEH-01]\n"
+                    "depends_on: []\n"
+                    "parallel_group: solo\n\n"
+                    "#### DT-02: y · type: verify · owner: qa\n"
+                    "scenarios: [BEH-02]\n"
+                    "depends_on: [DT-01]\n"
+                    "delivered_by: [DT-01]\n"
+                    "parallel_group: solo\n"
+                    "verifies:\n  - tests/test_typo.py\n\n"
+                    "## Инварианты графа\n\nСоблюдены.\n\n"
+                    "## Порядок и параллельность\n\nПоследовательно.\n\n"
+                    "## Вне объёма\n\nНичего не исключено.\n",
+                    encoding="utf-8",
+                )
+                return 0
+            return super().author(target_dir, kind, subject, bundle_dir)
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-dt-graph-warning", ops)
+    )
+
+    assert state.status != "stopped_gate"
+    findings_path = (
+        runner.run_dir("r-dt-graph-warning") / "gate-findings.txt"
+    )
+    assert findings_path.exists()
+    findings = findings_path.read_text()
+    assert "warning GC-DT-GRAPH" in findings
+    assert "tests/test_typo.py" in findings
+    assert "опечатка либо осиротевший путь" in findings
+
+
+def test_gate_dt_graph_finding_stops_on_underivable_group(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Round 13 ревью PR #161, минор (контракт владельца): «группа
+    наблюдения не выводится вовсе» промотирована в FATAL — гейт теперь
+    останавливается на этом входе, не молча пропускает его как warning.
+    Условие тождественно тому, при котором render_tasks_dt/deliver()
+    детерминированно падают RuntimeError."""
+    beh_two = (
+        _DEFAULT_BEHAVIOUR_BODY
+        + "\n#### BEH-02: y\n`traces: [FR-01]`\n"
+        "- **checked_by**: без бэктиков, не биндится\n"
+    )
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            if kind == "behaviour-spec":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(beh_two, encoding="utf-8")
+                return 0
+            if kind == "decomposition":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                design_pin = blob_sha1(
+                    (bundle / "20-design.md").read_text(encoding="utf-8")
+                )
+                acceptance_pin = blob_sha1(
+                    (bundle / "25-acceptance.md").read_text(encoding="utf-8")
+                )
+                path = bundle / "30-decomposition.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: decomposition\n"
+                    "status: draft\n"
+                    "owner_role: tech-lead\n"
+                    "traces_to: [design, acceptance]\n"
+                    "upstream_hashes:\n"
+                    f'  design: "{design_pin}"\n'
+                    f'  acceptance: "{acceptance_pin}"\n'
+                    "---\n"
+                    "## Задачи\n\n"
+                    "#### DT-01: x · type: implement · owner: dev\n"
+                    "scenarios: [BEH-01]\n"
+                    "depends_on: []\n"
+                    "parallel_group: solo\n\n"
+                    "#### DT-02: y · type: verify · owner: qa\n"
+                    "scenarios: [BEH-02]\n"
+                    "depends_on: [DT-01]\n"
+                    "delivered_by: [DT-01]\n"
+                    "parallel_group: solo\n\n"
+                    "## Инварианты графа\n\nСоблюдены.\n\n"
+                    "## Порядок и параллельность\n\nПоследовательно.\n\n"
+                    "## Вне объёма\n\nНичего не исключено.\n",
+                    encoding="utf-8",
+                )
+                return 0
+            return super().author(target_dir, kind, subject, bundle_dir)
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-dt-graph-underivable-stop", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-dt-graph-underivable-stop") / "gate-findings.txt"
+    ).read_text()
+    assert "error GC-DT-GRAPH" in findings
+    assert "группа наблюдения не выводится" in findings
+    assert "DT-02" in findings and "verifies" in findings
+
+
 # --- Task 6 (план acceptance-node): S4-гарды acceptance (отсутствие, два
 # ребра acceptance, ребро decomposition→acceptance, DSL, Must-покрытие) ----
 
@@ -4599,6 +4763,131 @@ def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root) -> None:
     ).read_text()
     assert "GC-AC-COVERAGE" in findings and "FR-01" in findings
     assert "push" not in state.ops
+
+
+def test_gate_dt_graph_warning_survives_later_ac_coverage_stop(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Round 7 ревью PR #161, минор (контракт владельца, точка 3): давний
+    баг рядом с нашим кодом — каждая находка в `_step_gate` писала
+    gate-findings.txt через `write_text`, ЗАТИРАЯ любую предыдущую запись
+    целиком. Non-fatal GC-DT-GRAPH warning (round 6) — первая НЕ
+    останавливающая запись в этой функции, и более поздний fatal-стоп
+    (GC-AC-COVERAGE) стирал её молча. Теперь находки НАКАПЛИВАЮТСЯ: warning
+    остаётся в файле рядом с error, даже когда прогон в итоге стопится
+    позже по другой причине.
+
+    Фикстура обновлена в round 13 (осиротевший путь в verifies — теперь
+    единственный non-fatal класс; «группа наблюдения не выводится» стала
+    fatal и сама стопила бы гейт раньше, чем дело дошло бы до
+    GC-AC-COVERAGE)."""
+    beh_two = (
+        _DEFAULT_BEHAVIOUR_BODY
+        + "\n#### BEH-02: y\n`traces: [FR-01]`\n- **checked_by**: "
+        "`kind: integration` `target: tests/test_y.py`\n"
+    )
+    req_two = (
+        "#### FR-01: x\n**Priority**: Must\n"
+        "#### NFR-01: y\n**Priority**: Should\n"
+    )
+
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            if kind == "behaviour-spec":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(beh_two, encoding="utf-8")
+                return 0
+            if kind == "requirements":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                path = Path(target_dir) / bundle_dir / "10-requirements.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(req_two, encoding="utf-8")
+                return 0
+            if kind == "decomposition":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                design_pin = blob_sha1(
+                    (bundle / "20-design.md").read_text(encoding="utf-8")
+                )
+                acceptance_pin = blob_sha1(
+                    (bundle / "25-acceptance.md").read_text(encoding="utf-8")
+                )
+                path = bundle / "30-decomposition.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: decomposition\n"
+                    "status: draft\n"
+                    "owner_role: tech-lead\n"
+                    "traces_to: [design, acceptance]\n"
+                    "upstream_hashes:\n"
+                    f'  design: "{design_pin}"\n'
+                    f'  acceptance: "{acceptance_pin}"\n'
+                    "---\n"
+                    "## Задачи\n\n"
+                    "#### DT-01: x · type: implement · owner: dev\n"
+                    "scenarios: [BEH-01]\n"
+                    "depends_on: []\n"
+                    "parallel_group: solo\n\n"
+                    "#### DT-02: y · type: verify · owner: qa\n"
+                    "scenarios: [BEH-02]\n"
+                    "depends_on: [DT-01]\n"
+                    "delivered_by: [DT-01]\n"
+                    "parallel_group: solo\n"
+                    "verifies:\n  - tests/test_typo.py\n\n"
+                    "## Инварианты графа\n\nСоблюдены.\n\n"
+                    "## Порядок и параллельность\n\nПоследовательно.\n\n"
+                    "## Вне объёма\n\nНичего не исключено.\n",
+                    encoding="utf-8",
+                )
+                return 0
+            if kind == "acceptance":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                req_pin = blob_sha1(
+                    (bundle / "10-requirements.md").read_text(encoding="utf-8")
+                )
+                beh_pin = blob_sha1(
+                    (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+                )
+                path = bundle / "25-acceptance.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: acceptance\n"
+                    "status: draft\n"
+                    "owner_role: qa\n"
+                    "traces_to: [requirements, behaviour-spec]\n"
+                    "upstream_hashes:\n"
+                    f'  requirements: "{req_pin}"\n'
+                    f'  behaviour-spec: "{beh_pin}"\n'
+                    "---\n"
+                    "#### AC-01: x · verification: manual\n"
+                    "traces: [NFR-01]\n"
+                    "Наблюдаемый признак: человек видит x.\n",
+                    encoding="utf-8",
+                )
+                return 0
+            return super().author(target_dir, kind, subject, bundle_dir)
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-dt-graph-warning-then-ac-stop", ops)
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-dt-graph-warning-then-ac-stop")
+        / "gate-findings.txt"
+    ).read_text()
+    assert "GC-AC-COVERAGE" in findings and "FR-01" in findings
+    assert "warning GC-DT-GRAPH" in findings and "DT-02" in findings
 
 
 # --- Task 9: сквозной смоук decomposition-узла + deliver ---------------------

@@ -1625,6 +1625,109 @@ def test_verify_dt_renders_with_verify_first_mode() -> None:
     assert "Реализовать сценарии BEH-02" in implement_block
 
 
+def test_verify_dt_renders_union_of_checked_by_and_verifies() -> None:
+    """Major ревью PR #161, round 6 (контракт владельца): verify-DT
+    ВЛАДЕЕТ своими checked_by-целями (scenarios) И НАБЛЮДАЕТ файлы из
+    verifies — **Verifies:** обязана нести ОБЕ группы (объединение,
+    дедуп), иначе собственный тест-файл DT молча выпадает из verify_first-
+    прогона, хотя чек-лист той же задачи требует его зелёным. Порядок
+    детерминирован: СНАЧАЛА собственные checked_by-цели (порядок
+    scenarios), ПОТОМ verifies (порядок объявления)."""
+    scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
+    dt = (
+        "#### DT-01: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: []\n"
+        "delivered_by: []\nparallel_group: solo\n"
+        "verifies:\n"
+        "  - tests/test_z.py\n"
+        "  - tests/test_y.py\n"
+        "  - tests/test_z.py\n"
+    )
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(dt)
+    assert findings == []
+    text = task_bridge.render_tasks_dt(
+        ws_id="WS-x-1", subject="s", bundle_path="b/30-decomposition.md",
+        scenarios=scenarios, dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
+    )
+    # tests/test_a.py — собственная checked_by-цель BEH-01 (DT_BEHAVIOUR_MD)
+    # — ОБЯЗАНА присутствовать, идёт ПЕРВОЙ; verifies — следом, в порядке
+    # объявления, с дедупом повторного tests/test_z.py.
+    assert (
+        "**Verifies:** tests/test_a.py, tests/test_z.py, tests/test_y.py"
+        in text
+    )
+
+
+def test_verify_dt_union_dedups_by_full_selector_not_by_file() -> None:
+    """Major ревью PR #161, round 11 — откат round-8/9 «дедупа по файлу»
+    (major-регресс, признан ошибкой владельца): дедуп union'а обязан
+    идти ПО ПОЛНОЙ СТРОКЕ селектора. checked_by-цель сценария несёт
+    полный pytest-селектор (tests/test_a.py::test_five); verifies
+    объявляет тот же файл ГОЛЫМ путём — это РАЗНАЯ строка, ОБЕ остаются
+    в **Verifies:** (spec-runner резолвит пересечение сам); срез `::`
+    для сверки владения — дело только гарда, не рендера."""
+    scenarios = task_bridge.parse_behaviour(
+        "#### BEH-05: Пять\n`traces: [FR-01]`\n"
+        "**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_five`\n\n"
+        "#### BEH-06: Шесть\n`traces: [FR-01]`\n"
+        "**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::test_six`\n"
+    )
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-05]\ndepends_on: []\n"
+        "delivered_by: []\nparallel_group: solo\n"
+        "verifies:\n  - tests/test_a.py\n  - tests/test_b.py\n"
+    )
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(dt)
+    assert findings == []
+    text = task_bridge.render_tasks_dt(
+        ws_id="WS-x-1", subject="s", bundle_path="b/30-decomposition.md",
+        scenarios=scenarios, dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
+    )
+    assert (
+        "**Verifies:** tests/test_a.py::test_five, tests/test_a.py, "
+        "tests/test_b.py" in text
+    )
+
+
+def test_verify_dt_union_keeps_both_selectors_of_own_scenarios_sharing_a_file() -> None:
+    """Major ревью PR #161, round 11 (регресс, введённый round-8/9
+    «дедупом по файлу»): single-owner (decomposition_guard) требует, чтобы
+    ДВА сценария в ОДНОМ файле с РАЗНЫМИ селекторами принадлежали ОДНОЙ
+    задаче (форма SHARED_FILE_BEHAVIOUR_MD — уже прожита в
+    test_dt_path_skips_merge_featureless). Для verify-DT с такими двумя
+    сценариями чек-лист требует ОБА селектора зелёными — **Verifies:**
+    обязана нести оба, дедуп по файлу молча ронял бы второй."""
+    scenarios = task_bridge.parse_behaviour(
+        "#### BEH-01: Один\n`traces: [FR-01]`\n"
+        "**checked_by** `kind: atp` `target: tests/test_shared.py::t1`\n\n"
+        "#### BEH-02: Два\n`traces: [FR-01]`\n"
+        "**checked_by** `kind: atp` `target: tests/test_shared.py::t2`\n"
+    )
+    dt_verify = (
+        "#### DT-02: A · type: verify · owner: qa\n"
+        "scenarios: [BEH-01, BEH-02]\ndepends_on: []\n"
+        "delivered_by: []\nparallel_group: solo\n"
+    )
+    dt_tasks_verify, findings_verify = decomposition_guard.parse_dt_tasks(
+        dt_verify
+    )
+    assert findings_verify == []
+    text = task_bridge.render_tasks_dt(
+        ws_id="WS-x-1", subject="s", bundle_path="b/30-decomposition.md",
+        scenarios=scenarios, dt_tasks=dt_tasks_verify,
+        generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
+    )
+    assert (
+        "**Verifies:** tests/test_shared.py::t1, tests/test_shared.py::t2"
+        in text
+    )
+
+
 def test_verify_dt_without_checked_by_targets_refuses() -> None:
     """Minor ревью PR #152: verify-DT, чьи сценарии не дают ни одной
     checked_by-цели, — отказ (нечего прогонять), не молчаливый Mode без
@@ -1752,6 +1855,7 @@ scenarios: [BEH-02]
 depends_on: [DT-01]
 delivered_by: [DT-01]
 parallel_group: solo
+verifies: [tests/test_y.py]
 """
 
 
@@ -1784,6 +1888,116 @@ def test_deliver_verify_dt_now_delivers(
     spec_text = (target / "spec" / "WS-alpha-7-tasks.md").read_text()
     assert "**Mode:** verify_first" in spec_text
     assert any(c[0] == "ensure_branch" for c in ops.calls)
+
+
+def test_deliver_does_not_check_verifies_path_existence_on_disk(
+    tmp_path: Path,
+) -> None:
+    """Round 11 ревью PR #161 — откат ошибочного round-10 решения:
+    deliver() НЕ проверяет, существует ли путь из verifies на диске
+    target_dir. По конструкции closure-инварианта (graph_findings)
+    владелец файла из verifies создаёт его СВОЕЙ задачей ПОСЛЕ доставки
+    tasks-спеки, не до неё — проверка существования на момент deliver()
+    ломала бы доставку ЛЮБОГО бандла, где verify-DT наблюдает файл более
+    поздней задачи. Владение гарантирует graph closure-инвариант;
+    существование в МОМЕНТ ПРОГОНА — забота spec-runner (spec-runner#402),
+    не гейта доставки."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text(CHARTER_MD)
+    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
+    (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
+    (bundle / "20-design.md").write_text(DESIGN_MD)
+    (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
+    (bundle / "30-decomposition.md").write_text(DECOMPOSITION_VERIFY_MD)
+    # НЕ создаём tests/test_y.py — verifies указывает на файл, которого
+    # ещё нет на диске (его создаст владелец DT позже, при исполнении).
+    ops = _StubOps()
+    pr = task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a", approved_at="t",
+    )
+    assert pr is not None
+    spec_text = (target / "spec" / "WS-alpha-7-tasks.md").read_text()
+    assert "tests/test_y.py" in spec_text
+
+
+# decomposition авторенный ДО раскатки поля verifies (round 3 ревью
+# PR #161, finding 4): DT-02 (type: verify) БЕЗ verifies вовсе — ровно тот
+# легаси-вход, что fatal-находка формы (round 1) отказывала бы на
+# graph_findings ДО рендера, делая заявленный checked_by-fallback
+# render_tasks_dt недостижимым.
+DECOMPOSITION_VERIFY_LEGACY_MD = """\
+---
+spec_stage: decomposition
+status: draft
+version: 1
+owner_role: tech-lead
+traces_to: [design]
+upstream_hashes:
+  design: """ + "12" * 20 + """
+---
+## Задачи
+
+#### DT-01: Реализация · type: implement · owner: dev
+scenarios: [BEH-01]
+depends_on: []
+parallel_group: solo
+
+#### DT-02: Проверка · type: verify · owner: qa
+scenarios: [BEH-02]
+depends_on: [DT-01]
+delivered_by: [DT-01]
+parallel_group: solo
+"""
+
+
+def test_deliver_legacy_verify_dt_without_verifies_still_delivers(
+    tmp_path: Path,
+) -> None:
+    """Round 3/7 ревью PR #161 (контракт владельца): legacy decomposition
+    с type: verify DT, авторенным ДО раскатки verifies (поле отсутствует
+    вовсе, но собственная checked_by-цель ЕСТЬ — легаси-форма, см.
+    test_verify_with_checked_by_target_but_without_verifies_is_legacy_ok
+    в tests/test_governance_decomposition_guard.py), обязан по-прежнему
+    доставляться — не fatal-ит deliver(), и render_tasks_dt рендерит
+    **Verifies:** из checked_by-цели сценария (fallback), не из
+    structural verifies."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text(CHARTER_MD)
+    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
+    (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
+    (bundle / "20-design.md").write_text(DESIGN_MD)
+    (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
+    (bundle / "30-decomposition.md").write_text(
+        DECOMPOSITION_VERIFY_LEGACY_MD
+    )
+    ops = _StubOps()
+    pr = task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        approved_by="a", approved_at="t",
+    )
+    assert pr is not None
+    spec_text = (target / "spec" / "WS-alpha-7-tasks.md").read_text()
+    assert "**Mode:** verify_first" in spec_text
+    # BEH-02 (BEHAVIOUR_MD) checked_by target — tests/test_y.py: fallback
+    # взял его из сценария, раз структурного verifies на DT-02 нет.
+    assert "**Verifies:** tests/test_y.py" in spec_text
 
 
 def _target_legacy_5(
