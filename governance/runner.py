@@ -1066,9 +1066,12 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         # (`non_fatal_findings` и `graph_findings` — два независимых
         # прохода `parse_dt_tasks`, decomposition читается дважды за этот
         # гейт; общий у них только сам модуль-источник,
-        # `_verify_group_and_orphan_findings`). НЕ fatal (легаси-бандл с
-        # checked_by-целью, но без verifies, обязан пройти гейт), но
-        # обязаны быть видимы оператору. Пишутся В ТОТ ЖЕ gate-findings.txt
+        # `_orphan_verifies_findings`, round 13 переименован из
+        # `_verify_group_and_orphan_findings` — единственная non-fatal
+        # находка теперь одна: опечатка/осиротевший путь). НЕ fatal
+        # (легаси-бандл с checked_by-целью, но без verifies, обязан пройти
+        # гейт), но обязаны быть видимы оператору. Пишутся В ТОТ ЖЕ
+        # gate-findings.txt
         # как `warning GC-DT-GRAPH:` (не `error`) и НЕ останавливают
         # прогон: `console_model` просто конкатенирует файл как показ
         # оператору, не как управляющий сигнал (state.status — единственный

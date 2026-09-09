@@ -827,7 +827,13 @@ def test_author_dsl_decomposition_explains_verifies_field() -> None:
     обещает, что ЛЮБОЙ verifies-путь без владельца стопит доставку —
     это ДВУХУРОВНЕВАЯ гарантия (FATAL — только когда владелец есть и вне
     замыкания; путь БЕЗ владельца вовсе — non-fatal warning на гейте, не
-    факт остановки deliver())."""
+    факт остановки deliver()).
+
+    Round 14 ревью PR #161, минор (контракт владельца): промпт обещал
+    single-owner ИСКЛЮЧЕНИЕ через verifies, которого в коде нет вовсе
+    (round 4 сняло его целиком — single-owner решается ИСКЛЮЧИТЕЛЬНО
+    checked_by, verifies цикл вообще не читает). Текст исправлен: verifies
+    НЕ даёт никакого исключения ни в какой форме."""
     from governance.ops import _AUTHOR_DSL
 
     dsl = _AUTHOR_DSL["decomposition"]
@@ -837,9 +843,10 @@ def test_author_dsl_decomposition_explains_verifies_field() -> None:
     assert "FORBIDDEN for type: implement" in verifies_tail[:400]
     assert "checked_by" in verifies_tail[:400]
     assert "ownership always beats observation" in verifies_tail[:1200]
-    assert "NOT also this same task's own checked_by target" in (
+    assert "NO exemption from the single-owner invariant" in (
         verifies_tail[:1200]
     )
+    assert "NOT also this same task's own checked_by target" not in dsl
     assert "FATAL graph invariant" in verifies_tail[:1600]
     assert (
         "transitive closure of THIS task's OWN depends_on"

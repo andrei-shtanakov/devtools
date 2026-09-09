@@ -1962,12 +1962,14 @@ parallel_group: solo
 def test_deliver_legacy_verify_dt_without_verifies_still_delivers(
     tmp_path: Path,
 ) -> None:
-    """Round 3/5 ревью PR #161 (контракт владельца): legacy decomposition
+    """Round 3/7 ревью PR #161 (контракт владельца): legacy decomposition
     с type: verify DT, авторенным ДО раскатки verifies (поле отсутствует
-    вовсе), обязан по-прежнему доставляться — form-находка «без verifies»
-    (round 5: восстановлена, см. test_verify_without_verifies_is_a_finding)
-    не fatal-ит deliver(), и render_tasks_dt рендерит **Verifies:** из
-    checked_by-цели сценария (fallback), не из structural verifies."""
+    вовсе, но собственная checked_by-цель ЕСТЬ — легаси-форма, см.
+    test_verify_with_checked_by_target_but_without_verifies_is_legacy_ok
+    в tests/test_governance_decomposition_guard.py), обязан по-прежнему
+    доставляться — не fatal-ит deliver(), и render_tasks_dt рендерит
+    **Verifies:** из checked_by-цели сценария (fallback), не из
+    structural verifies."""
     target = tmp_path / "alpha"
     bundle = target / "workstreams/WS-alpha-7/spec"
     bundle.mkdir(parents=True)

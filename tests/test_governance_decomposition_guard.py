@@ -449,19 +449,54 @@ def test_verifies_empty_block_form_is_a_finding() -> None:
     assert tasks[0].verifies == ()
 
 
-def test_verifies_block_form_stops_at_unindented_prose_bullet() -> None:
-    """Минор ревью PR #161, round 13: блочный список обязан
-    останавливаться на первой строке, не являющейся отступленным `- '
-    элементом, — прозаический маркированный буллет БЕЗ отступа (обычное
-    начало абзаца-прозы после DT, `- Предмет: …`) не должен утекать в
-    t.verifies как путь."""
+def test_verifies_block_form_accepts_unindented_entries() -> None:
+    """Round 14 ревью PR #161, major (контракт владельца — откат
+    чрезмерной строгости round 13): блочная форма verifies БЕЗ отступа
+    (`- <путь>` прямо под ключом, столбец 0) — валидный YAML, разрешённый
+    промптом авторинга (`_AUTHOR_DSL["decomposition"]` никогда не требовал
+    отступа, только «one `- <file>` per line») — обязана парситься, не
+    давать fatal-находку формы."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "- tests/test_a.py\n"
+        "- tests/test_b.py\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
+
+
+def test_verifies_block_form_indented_entries_still_accepted() -> None:
+    """Round 14: отступленная форма (`  - <путь>`) остаётся валидной —
+    отступ теперь ОПЦИОНАЛЕН, а не запрещён."""
     dt = (
         "#### DT-14: Наблюдение · type: verify · owner: qa\n"
         "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
         "delivered_by: [DT-01]\nparallel_group: core\n"
         "verifies:\n"
         "  - tests/test_a.py\n"
-        "- Предмет: наблюдение, границы: без правок.\n"
+        "  - tests/test_b.py\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py", "tests/test_b.py")
+
+
+def test_verifies_block_form_stops_at_first_non_dash_non_blank_line() -> None:
+    """Round 14 (контракт владельца): список останавливается на первой
+    строке, которая НЕ является ни `- ` элементом (в любой форме — с
+    отступом или без), ни пустой строкой — проза БЕЗ ведущего дефиса
+    корректно завершает список."""
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        "  - tests/test_a.py\n"
+        "Проза предмета без ведущего дефиса.\n"
     )
     tasks, findings = parse_dt_tasks(dt)
     assert findings == []
