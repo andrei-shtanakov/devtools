@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from governance import approval_branches
+from governance import approval_branches, authority_root
 
 SCRIPT = Path(__file__).resolve().parent.parent / "merge-pr.sh"
 
@@ -72,6 +72,26 @@ case "$*" in
       done
     fi
     echo '{"merged":true}' ;;
+  *"/compare/"*)
+    if [ -n "${GH_STUB_COMPARE_FAIL:-}" ]; then
+      echo "gh: Not Found (HTTP 404)" >&2
+      exit 1
+    fi
+    # Тело ответа — настоящий JSON, и переданный --jq применяется НАСТОЯЩИМ
+    # jq: иначе `.files[]` и `.files[]?` неотличимы, и fail-closed на
+    # ответе без ключа `files` нечем проверить.
+    if [ -n "${GH_STUB_COMPARE_NO_FILES:-}" ]; then
+      body='{"status":"ahead"}'
+    else
+      body=$(printf '%s\\n' "${GH_STUB_FILES-lib/x.ex}" \
+             | jq -R '{filename:.}' | jq -s '{files:.}')
+    fi
+    filter=""; prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--jq" ]; then filter="$a"; fi
+      prev="$a"
+    done
+    printf '%s' "$body" | jq -r "$filter" ;;
   *"/git/refs/heads/"*)
     if [ -n "${GH_STUB_DELETE_FAIL:-}" ]; then
       echo "Reference does not exist" >&2
@@ -496,19 +516,44 @@ def test_unpinned_base_is_stated_not_implied(fleet: Fleet) -> None:
 def test_forge_reported_stale_base_does_not_merge(
     fleet: Fleet, state: str
 ) -> None:
+    """Мнение форджи про базу называется в отказе поимённо."""
     res = fleet.run(GH_STUB_HEADREF="feat/ordinary", GH_STUB_MERGESTATE=state)
     assert res.returncode == 3, res.stdout
     assert state in res.stderr
     assert fleet.merge_calls() == []
 
 
-def test_clean_merge_state_merges(fleet: Fleet) -> None:
-    """Гвард узкий по построению: он не изобретает мнений о прочих статусах."""
-    for state in ("CLEAN", "UNSTABLE", "BLOCKED", "UNKNOWN"):
-        res = fleet.run(
-            GH_STUB_HEADREF="feat/ordinary", GH_STUB_MERGESTATE=state
-        )
-        assert res.returncode == 0, f"{state}: {res.stderr}"
+@pytest.mark.parametrize("state", ["CLEAN", "HAS_HOOKS", "UNSTABLE", "BLOCKED"])
+def test_allowlisted_merge_state_merges(fleet: Fleet, state: str) -> None:
+    """Разрешают мерж ровно четыре значения — и BLOCKED среди них намеренно.
+
+    Ровно из-за BLOCKED дизайн (2026-08-30 §8) отказался от `gh pr merge`:
+    тот отказывает сам, ни разу не проверив bypass актора. Решать про bypass —
+    дело форджи, а не обвязки.
+    """
+    res = fleet.run(GH_STUB_HEADREF="feat/ordinary", GH_STUB_MERGESTATE=state)
+    assert res.returncode == 0, f"{state}: {res.stderr}"
+
+
+@pytest.mark.parametrize(
+    "state",
+    # BEHIND/DIRTY — запрещающие; DRAFT — мержить нечего; UNKNOWN — «форджа
+    # ещё не посчитала»; пусто/null/мусор — факт не разобран; NEW_ENUM_VALUE —
+    # значение, которого GitHub ещё не придумал.
+    ["BEHIND", "DIRTY", "DRAFT", "UNKNOWN", "", "null", "NEW_ENUM_VALUE"],
+)
+def test_non_allowlisted_merge_state_does_not_merge(
+    fleet: Fleet, state: str
+) -> None:
+    """Неустановленный факт двери не открывает — включая ЭТОТ факт.
+
+    Регрессия на находку ревью #183 (круг 4): проверка была denylist'ом, и
+    `mergeStateStatus` оставался единственным фактом PR, чьё пустое или
+    неизвестное значение читалось В ПОЛЬЗУ мержа.
+    """
+    res = fleet.run(GH_STUB_HEADREF="feat/ordinary", GH_STUB_MERGESTATE=state)
+    assert res.returncode == 3, res.stdout
+    assert fleet.merge_calls() == []
 
 
 def test_missing_base_oid_does_not_merge(fleet: Fleet) -> None:
@@ -517,6 +562,117 @@ def test_missing_base_oid_does_not_merge(fleet: Fleet) -> None:
     assert res.returncode == 2, res.stdout
     assert "baseRefOid" in res.stderr
     assert fleet.merge_calls() == []
+
+
+# --- гвард 4: authority-root пути -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/workflows/ci.yml",
+        "profiles/steward.yaml",
+        # Перечень защищённых путей и сам защищён: иначе агент вынес бы путь
+        # из-под защиты и следом смержил правку в нём.
+        "contracts/authority-root/v1/paths.env",
+    ],
+)
+def test_authority_root_paths_block_merge(fleet: Fleet, path: str) -> None:
+    """CLAUDE.md: authority-root — всегда человеку. Обвязка обязана держать
+    этот инвариант, раз объявлена единственным путём агентского мержа."""
+    res = fleet.run(
+        GH_STUB_HEADREF="feat/ordinary",
+        GH_STUB_FILES=f"lib/x.ex\n{path}",
+    )
+    assert res.returncode == 3, res.stdout
+    assert "authority-root" in res.stderr
+    assert path in res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_authority_prefix_match_is_literal(fleet: Fleet) -> None:
+    """`.github/` — литеральный префикс, а не regexp: `xgithub/` не он."""
+    res = fleet.run(
+        GH_STUB_HEADREF="feat/ordinary", GH_STUB_FILES="xgithub/ci.yml"
+    )
+    assert res.returncode == 0, res.stderr
+    assert len(fleet.merge_calls()) == 1
+
+
+def test_diff_is_taken_between_two_pinned_shas(fleet: Fleet) -> None:
+    """Состав диффа считается между базой и ПРОВЕРЕННОЙ головой.
+
+    Список файлов PR отражал бы голову на момент запроса и с пином не был бы
+    связан — force-push между запросами подменил бы проверяемый список,
+    оставив мерж на прежнем sha. Сравнение двух sha этой щели не имеет.
+    """
+    fleet.run(GH_STUB_HEADREF="feat/ordinary")
+    compare = [ln for ln in fleet.gh_calls().splitlines() if "/compare/" in ln]
+    assert len(compare) == 1
+    assert f"compare/{BASE_SHA}...{HEAD_SHA}" in compare[0]
+    assert "/files" not in fleet.gh_calls()
+
+
+def test_compare_failure_does_not_merge(fleet: Fleet) -> None:
+    """Состав диффа неизвестен — мерж не выполняется."""
+    res = fleet.run(GH_STUB_HEADREF="feat/ordinary", GH_STUB_COMPARE_FAIL="1")
+    assert res.returncode == 2, res.stdout
+    assert "состав диффа неизвестен" in res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_compare_response_without_files_does_not_merge(fleet: Fleet) -> None:
+    """Ответ без ключа `files` — «состав диффа неизвестен», а не «диффа нет».
+
+    Поэтому фильтр — `.files[]`, без `?`: с `?` jq молча отдал бы пусто, и
+    неизвестность снова открыла бы дверь.
+    """
+    res = fleet.run(
+        GH_STUB_HEADREF="feat/ordinary", GH_STUB_COMPARE_NO_FILES="1"
+    )
+    assert res.returncode == 2, res.stdout
+    assert "состав диффа неизвестен" in res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_missing_authority_ssot_does_not_merge(fleet: Fleet) -> None:
+    """Перечень защищённых путей недоступен — отказ, а не пустой перечень."""
+    res = fleet.run(
+        GH_STUB_HEADREF="feat/ordinary",
+        AUTHORITY_PATHS=str(fleet.tmp / "nope.env"),
+    )
+    assert res.returncode == 2, res.stdout
+    assert "authority-root" in res.stderr
+    assert fleet.merge_calls() == []
+
+
+# --- пустые пины ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flag", ["--expect-head", "--expect-base"])
+def test_empty_pin_is_an_error_not_absence(fleet: Fleet, flag: str) -> None:
+    """Пустая строка — не «пина нет», а «вызывающий пинить собирался и не смог».
+
+    Ревью #183 (круг 4): пустой `--expect-head` молчал, тогда как для базы
+    правило «отсутствие проверки отличимо от пройденной» уже действовало.
+    """
+    res = fleet.run(flag, "", GH_STUB_HEADREF="feat/ordinary")
+    assert res.returncode == 2, res.stdout
+    assert "передан пустым" in res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_unpinned_head_is_stated_too(fleet: Fleet) -> None:
+    """Симметрия с базой: непинованная голова названа вслух."""
+    res = fleet.run(GH_STUB_HEADREF="feat/ordinary")
+    assert res.returncode == 0, res.stderr
+    assert "голова вызывающим НЕ пинована" in res.stdout
+
+
+def test_pinned_head_is_stated(fleet: Fleet) -> None:
+    res = fleet.run("--expect-head", HEAD_SHA, GH_STUB_HEADREF="feat/ordinary")
+    assert res.returncode == 0, res.stderr
+    assert "голова пинована вызывающим" in res.stdout
 
 
 # --- PR из форка -----------------------------------------------------------
@@ -630,6 +786,45 @@ def test_ssot_template_matches_the_contract_scheme() -> None:
         approval_branches.candidate_template()
         + approval_branches.finalize_suffix()
     ) == _skeleton(_scheme_from_contract(_FINALIZE_ANCHOR))
+
+
+def test_authority_root_has_one_definition() -> None:
+    """Перечень authority-root путей определён ровно в одном месте.
+
+    До круга 4 их было два — кортеж в `accept_pr` и литерал внутри выражения
+    в `runner` — и разойтись они могли молча; третье определение в shell
+    закрепило бы расхождение. Тест падает, когда список снова собирают
+    литералом мимо `authority_root`.
+    """
+    package = Path(authority_root.__file__).resolve().parent
+    offenders: list[str] = []
+    for path in sorted(package.glob("*.py")):
+        if path.name == "authority_root.py":
+            continue
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if '".github/"' in stripped or '"profiles/"' in stripped:
+                offenders.append(f"{path.name}:{lineno}: {stripped}")
+    assert not offenders, (
+        "authority-root путь записан литералом мимо authority_root:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_shell_reads_authority_ssot_and_hardcodes_nothing() -> None:
+    """Shell-половина берёт перечень из файла, а не носит свой список."""
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert "contracts/authority-root/v1/paths.env" in text
+    # Ни один защищённый путь не записан в скрипте литералом — иначе это
+    # снова второе определение, теперь через язык.
+    for prefix in authority_root.prefixes():
+        if prefix == "contracts/authority-root/":
+            continue  # путь САМОГО SSOT-файла в скрипте, разумеется, есть
+        assert prefix not in text, f"литерал {prefix!r} в merge-pr.sh"
 
 
 def test_glob_is_not_bound_to_current_arity() -> None:
