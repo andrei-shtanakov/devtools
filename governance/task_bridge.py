@@ -27,105 +27,26 @@ from pathlib import Path
 from typing import Literal, NamedTuple
 
 from governance import acceptance_guard, decomposition_guard, design_guard
+# Состав DAG живёт в `bundle_dag` (переезд ради §I12: механика одобрения
+# спрашивает его, а импортировать мост нельзя — часть 3 сделает мост
+# потребителем гейта). Алиасы сохраняют прежние имена, поэтому ни один
+# вызов ниже и ни один тест не знают о переезде.
+from governance.bundle_dag import (
+    ANCHOR_NODE_ID as _ANCHOR_NODE_ID,
+    # Оба кортежа переэкспортируются намеренно: код моста ходит через
+    # `dag_for`, но состав DAG под прежними именами читают его тесты —
+    # снять их значило бы спрятать переезд ценой характеризации.
+    BUNDLE_DAG as _BUNDLE_DAG,  # noqa: F401
+    BUNDLE_DAG_LEGACY5 as _BUNDLE_DAG_LEGACY5,  # noqa: F401
+    check_bundle_composition as _check_bundle_composition,
+    dag_for as _dag_for,
+    node_id as _node_id,
+)
 from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.ops import Ops, RealOps
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
 from governance.run_state import RunState, load, op_complete, op_start, save
 from governance.stale_adapter import blob_sha1
-
-# DAG бандла в порядке штампа (топологический): каждый узел перечисляет
-# node-id своих upstream'ов; штамп идёт по порядку тюпла, и пин(ы) узла
-# пересчитываются ПОСЛЕ штампа ВСЕХ его upstream-файлов (иначе пин
-# протухает в момент записи). design и acceptance — узлы с ДВУМЯ
-# upstream-пинами (design — Task 5 плана design-узла; acceptance — Task 7
-# плана acceptance-node). decomposition — терминальный узел, пинует ОБА
-# upstream (design, acceptance — Task 7 плана acceptance-node).
-_BUNDLE_DAG: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("00-charter.md", ()),
-    ("10-requirements.md", ("charter",)),
-    ("15-behaviour-spec.md", ("requirements",)),
-    ("20-design.md", ("requirements", "behaviour-spec")),
-    ("25-acceptance.md", ("requirements", "behaviour-spec")),
-    ("30-decomposition.md", ("design", "acceptance")),
-)
-
-# Вариант ДО раскатки acceptance-узла (Task 7 плана acceptance-node,
-# `--legacy-bundle=5`) — ЛИТЕРАЛЬНЫЙ отдельный кортеж, не срез нового
-# `_BUNDLE_DAG`: decomposition этой эры пинует только design (acceptance
-# ещё не существовал), состав каталога — ровно 00/10/15/20/30.
-_BUNDLE_DAG_LEGACY5: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("00-charter.md", ()),
-    ("10-requirements.md", ("charter",)),
-    ("15-behaviour-spec.md", ("requirements",)),
-    ("20-design.md", ("requirements", "behaviour-spec")),
-    ("30-decomposition.md", ("design",)),
-)
-
-
-def _node_id(filename: str) -> str:
-    """Имя файла бандла → node-id (числовой префикс и `.md` отрезаны)."""
-    return filename.rsplit(".", 1)[0].split("-", 1)[1]
-
-
-# Якорный узел моста — терминальный узел DAG (decomposition). Выводится из
-# _BUNDLE_DAG, а не хардкодится второй раз (Task 6): смена терминального
-# узла бандла — правка одной строки DAG, не поиск по файлу.
-_ANCHOR_FILENAME = _BUNDLE_DAG[-1][0]
-_ANCHOR_NODE_ID = _node_id(_ANCHOR_FILENAME)
-
-
-def _dag_for(
-    legacy_bundle: int | None,
-) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """Активный DAG по значению `--legacy-bundle` (Task 7 плана
-    acceptance-node): `None` — полный DAG (текущий якорь — decomposition,
-    два upstream-пина: design и acceptance); `3`/`4` — точный префикс
-    `_BUNDLE_DAG` (легаси-бандлы, авторенные до раскатки
-    design/decomposition-узла: три узла — charter→requirements→
-    behaviour-spec, четыре — плюс design); `5` — `_BUNDLE_DAG_LEGACY5`
-    (отдельный литеральный кортеж, НЕ срез: бандлы, авторенные до раскатки
-    acceptance-узла — decomposition этой эры пинует только design). Иное
-    значение — ValueError, argparse (`choices=(3, 4, 5)`) отсекает его на
-    CLI-границе раньше, но функция вызывается и напрямую (тесты,
-    `stamp_bundle_approved`/`conform_approved`/`deliver`/`deliver_conform`).
-    """
-    if legacy_bundle is None:
-        return _BUNDLE_DAG
-    if legacy_bundle == 5:
-        return _BUNDLE_DAG_LEGACY5
-    if legacy_bundle in (3, 4):
-        return _BUNDLE_DAG[:legacy_bundle]
-    raise ValueError(
-        f"legacy_bundle: ожидается 3, 4 или 5, получено {legacy_bundle!r}"
-    )
-
-
-def _check_bundle_composition(
-    target_dir: str,
-    bundle_dir: str,
-    dag: tuple[tuple[str, tuple[str, ...]], ...],
-) -> None:
-    """Заявленный состав бандла (`dag`) обязан совпасть с фактическим РОВНО.
-
-    «По самому длинному существующему» запрещён (спека §4): красил бы
-    недоавторенный бандл зелёным, если в каталоге случайно лежит лишний
-    (или недостаёт) узел DAG. Сравнение — по множеству имён файлов, не по
-    префиксу и не по count — лишний ИЛИ недостающий узел одинаково
-    отказывает.
-    """
-    declared = {fname for fname, _ in dag}
-    known = {fname for fname, _ in _BUNDLE_DAG}
-    actual = {
-        p.name for p in (Path(target_dir) / bundle_dir).glob("*.md")
-        if p.name in known
-    }
-    if actual != declared:
-        raise RuntimeError(
-            f"состав бандла {sorted(actual)} не совпадает с заявленным "
-            f"{sorted(declared)}: доавторьте недостающие узлы либо "
-            "передайте --legacy-bundle=3|4|5 с ТОЧНЫМ фактическим составом"
-        )
-
 
 # [a-z]?-суффикс: раунды ревью бандлов вставляют сценарии как BEH-18a —
 # без суффикса в грамматике мост молча ронял сценарий (PR spec-runner#369,
