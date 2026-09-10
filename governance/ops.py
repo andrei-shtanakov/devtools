@@ -62,9 +62,31 @@ class Ops(Protocol):
 
     def checkout_and_pull(self, target_dir: str, branch: str) -> None: ...
 
+    def fetch_branch(self, target_dir: str, branch: str) -> bool: ...
+
+    def switch_to(
+        self, target_dir: str, branch: str, start_point: str
+    ) -> None: ...
+
+    def is_ancestor(
+        self, target_dir: str, sha: str, ref: str
+    ) -> bool | None: ...
+
     def find_pr(
         self, repo_slug: str, branch: str, *, any_state: bool = False
     ) -> int | None: ...
+
+    def create_pr(
+        self,
+        target_dir: str,
+        repo_slug: str,
+        branch: str,
+        title: str,
+        body: str,
+        label: str,
+        *,
+        draft: bool = False,
+    ) -> int: ...
 
     def create_draft_pr(
         self,
@@ -570,6 +592,72 @@ class RealOps:
                 f"{pull.stderr.strip()}"
             )
 
+    def fetch_branch(self, target_dir: str, branch: str) -> bool:
+        """`git fetch origin <branch>`; False — такой ветки на origin нет.
+
+        Волна одобрения (§I12) идёт НАКАПЛИВАЮЩЕЙ веткой, и вызов, который
+        к ней присоединяется, обязан читать её ГОЛОВУ: всё, что сделали
+        предыдущие вызовы шага, лежит в ветке — мержа ещё не было. Поэтому
+        ветка сперва подтягивается (объекты нужны локально), и только потом
+        на неё переключаются `switch_to`.
+
+        False, а не исключение: «ветки на origin нет» — штатный ответ
+        (первый вызов шага), и `git fetch` несуществующего ref'а есть
+        единственный способ спросить. Различать этот False от сетевого
+        сбоя вызывающему НЕ нужно и нельзя: на обоих исходах он не
+        публикует ничего, а `switch_to` дальше называет стартовую точку
+        явно и падает, если её нет.
+        """
+        done = subprocess.run(
+            ["git", "fetch", "origin", branch],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        return done.returncode == 0
+
+    def switch_to(self, target_dir: str, branch: str, start_point: str) -> None:
+        """`git switch -C <branch> <start_point>`; сбой — RuntimeError.
+
+        Именно `-C` (force-create), а не `ensure_branch`: та переключается
+        на СУЩЕСТВУЮЩУЮ локальную ветку как есть, и протухший локальный
+        остаток прошлой волны (её PR вмержен, ветка на origin удалена) увёл
+        бы дерево в состояние, которого в base давно нет — тот же дефект,
+        ради которого §I1 требует новой ветки от свежего base.
+
+        Стартовая точка называется ВЫЗЫВАЮЩИМ и всегда явно: голова
+        origin-ветки, когда шаг уже идёт; синхронизированный base, когда он
+        начинается; записанный `head_sha` заявки, когда возобновляется её
+        собственный коммит. Идентичность даёт запись, `-C` лишь ставит
+        ссылку туда, куда сказали.
+        """
+        done = subprocess.run(
+            ["git", "switch", "-C", branch, start_point],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            raise RuntimeError(
+                f"switch_to: git switch -C {branch} {start_point} "
+                f"rc={done.returncode}: {done.stderr.strip()}"
+            )
+
+    def is_ancestor(self, target_dir: str, sha: str, ref: str) -> bool | None:
+        """Коммит `sha` есть в истории `ref`; None — установить не удалось.
+
+        `git merge-base --is-ancestor` — один из немногих примитивов, чей
+        ответ РАЗЛИЧИМ по построению: rc 0 — да, rc 1 — нет, любой иной код
+        (неизвестный объект, битый репозиторий) — не ответ вовсе. Поэтому
+        здесь три значения, а не bool: свернув «нет» и «не знаю» в False,
+        сверка фазы 3 (§I12) хоронила бы заявку по невыкачанному объекту.
+        """
+        done = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", sha, ref],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if done.returncode == 0:
+            return True
+        if done.returncode == 1:
+            return False
+        return None
+
     def find_pr(
         self, repo_slug: str, branch: str, *, any_state: bool = False
     ) -> int | None:
@@ -601,6 +689,49 @@ class RealOps:
             raise RuntimeError(f"find_pr: unexpected JSON shape: {done.stdout!r}")
         return found[0]["number"] if found else None
 
+    def create_pr(
+        self,
+        target_dir: str,
+        repo_slug: str,
+        branch: str,
+        title: str,
+        body: str,
+        label: str,
+        *,
+        draft: bool = False,
+    ) -> int:
+        """gh pr create [--draft] [--label <label>] -R <slug>; номер из URL.
+
+        Пустой ``label`` не передаётся вовсе (решение владельца 2026-08-31:
+        лейбл `codex-review` больше не вешается — он триггерил платный
+        CI-контур codex поверх Actions-лимита; терминальное ревью
+        review-pr.sh остаётся дефолтом и от лейбла не зависит).
+
+        `draft` — АРГУМЕНТ одного примитива, а не второй примитив: разница
+        между двумя формами ровно во флаге, и второй метод завёл бы второй
+        разбор URL рядом с первым. Approval-контур (§I12) создаёт PR
+        **обычным**: мерж candidate-PR и ЕСТЬ акт одобрения, а draft мержем
+        не завершается — оставь его draft'ом, и человек не сможет сделать
+        то единственное, ради чего PR создан, тогда как реконсиляция будет
+        честно докладывать «ждём человека».
+
+        Метка ставится ЭТИМ ЖЕ вызовом. Отдельный шаг после создания
+        означал бы PR без метки в окне между ними, а гвард агентского
+        мержа сверяется в том числе с ней.
+        """
+        draft_args = ["--draft"] if draft else []
+        label_args = ["--label", label] if label else []
+        done = subprocess.run(
+            ["gh", "pr", "create", *draft_args, "-R", repo_slug,
+             "--head", branch, "--title", title, "--body", body,
+             *label_args],
+            cwd=target_dir, capture_output=True, text=True, check=True,
+        )
+        match = _PR_URL_RE.search(done.stdout)
+        if not match:
+            raise RuntimeError(f"create_pr: no PR URL in {done.stdout!r}")
+        return int(match.group(1))
+
     def create_draft_pr(
         self,
         target_dir: str,
@@ -610,24 +741,16 @@ class RealOps:
         body: str,
         label: str,
     ) -> int:
-        """gh pr create --draft [--label <label>] -R <slug>; номер из URL stdout.
+        """`create_pr` с `draft=True` — форма, которой пользуется раннер.
 
-        Пустой ``label`` не передаётся вовсе (решение владельца 2026-08-31:
-        лейбл `codex-review` больше не вешается — он триггерил платный
-        CI-контур codex поверх Actions-лимита; терминальное ревью
-        review-pr.sh остаётся дефолтом и от лейбла не зависит).
+        Имя остаётся, потому что оно называет ДРУГОЙ процесс, а не другую
+        реализацию: draft-PR раннера ждёт ревью и снимается с draft'а
+        `mark_ready`, approval-PR §I12 создаётся сразу обычным. Тело у обоих
+        одно.
         """
-        label_args = ["--label", label] if label else []
-        done = subprocess.run(
-            ["gh", "pr", "create", "--draft", "-R", repo_slug,
-             "--head", branch, "--title", title, "--body", body,
-             *label_args],
-            cwd=target_dir, capture_output=True, text=True, check=True,
+        return self.create_pr(
+            target_dir, repo_slug, branch, title, body, label, draft=True
         )
-        match = _PR_URL_RE.search(done.stdout)
-        if not match:
-            raise RuntimeError(f"create_draft_pr: no PR URL in {done.stdout!r}")
-        return int(match.group(1))
 
     def mark_ready(self, repo_slug: str, pr: int) -> None:
         """gh pr ready — снять draft-статус."""

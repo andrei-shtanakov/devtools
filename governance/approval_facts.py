@@ -31,6 +31,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from dataclasses import dataclass
@@ -264,22 +265,83 @@ def approver_allowlist() -> frozenset[str]:
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
-def authorized_signature(event: MergeEvent) -> Fact[MergeEvent]:
+#: Версия схемы отпечатка политики. Отпечаток обязан меняться, когда
+#: меняется СПОСОБ его вычисления, а не только состав списка, — иначе две
+#: разные политики однажды дадут одинаковую строку и запись перестанет
+#: отвечать на свой вопрос.
+POLICY_SCHEME = "v1"
+
+
+def policy_fingerprint() -> str:
+    """Отпечаток политики авторизации на момент решения.
+
+    Решение об авторизации мержа принимается ОДИН раз (§I12, решение
+    владельца 2026-09-10) и записывается вместе с тем, ПО КАКОЙ политике
+    оно принято. Без этого «мы авторизовали по такой-то политике»
+    остаётся умолчанием: перечитать список задним числом значит
+    переавторизовать прошлое новой конфигурацией, а не проверить старое
+    решение.
+
+    Отпечаток, а не сам список: он отвечает на вопрос «та же ли это
+    политика», и только на него; хранить перечень учёток в журнале
+    прогона незачем.
+    """
+    payload = ",".join(sorted(approver_allowlist())).encode("utf-8")
+    return f"{POLICY_SCHEME}:{hashlib.sha1(payload).hexdigest()}"
+
+
+@dataclass(frozen=True)
+class Authorization:
+    """Записанное решение об авторизации мержа: кого, по какой политике.
+
+    `login` — учётка, о которой решение принято; `policy` — отпечаток
+    политики на тот момент; `source` — где эта политика настраивается.
+    Втроём они делают решение проверяемым фактом: фаза 3 сверяет его
+    ЦЕЛОСТНОСТЬ (то ли это решение и о том ли мерже), а не применяет
+    allowlist заново.
+    """
+
+    login: str
+    policy: str
+    source: str
+
+    def as_record(self) -> dict[str, str]:
+        """Форма для леджера — плоская, потому что `run.json` это JSON."""
+        return {
+            "login": self.login,
+            "policy": self.policy,
+            "source": self.source,
+        }
+
+
+def authorized_signature(event: MergeEvent) -> Fact[Authorization]:
     """Создаёт ли этот мерж подпись: `FOUND` либо `FORBIDDEN`.
+
+    `FOUND` несёт РЕШЕНИЕ, а не просто «да»: учётка плюс отпечаток
+    политики, по которой она признана авторизованной. Записывается оно
+    один раз и при возобновлении не пересматривается — последующая правка
+    списка влияет только на ещё не классифицированные мержи.
 
     `FORBIDDEN` — положительно установленный факт: учётка прочитана, её
     нет в `authorized_approver_accounts`, и агентский мерж подписи не
     создаёт. Это законная дорога в `invalidated` — заявка терминальна с
-    причиной, восстановление идёт новым candidate (§I12).
+    причиной, восстановление идёт новым candidate (§I12). Значения у него
+    нет: решения об авторизации не состоялось, и записывать нечего.
 
     `UNAVAILABLE` здесь не бывает: пустой allowlist — не «не удалось
     прочитать конфигурацию», а прочитанное «подписать не может никто».
     """
     if event.login in approver_allowlist():
-        return Fact(Outcome.FOUND, event, f"{event.login} авторизован")
+        return Fact(
+            Outcome.FOUND,
+            Authorization(
+                event.login, policy_fingerprint(), APPROVER_ALLOWLIST_ENV
+            ),
+            f"{event.login} авторизован политикой {policy_fingerprint()}",
+        )
     return Fact(
         Outcome.FORBIDDEN,
-        event,
+        None,
         f"мерж от {event.login}: учётки нет в "
         f"{APPROVER_ALLOWLIST_ENV} — подписи этот мерж не создаёт",
     )
