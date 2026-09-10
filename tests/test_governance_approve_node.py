@@ -678,10 +678,10 @@ def test_pr_finished_off_our_commit_invalidates_instead_of_waiting(
         approve(world, "acceptance")
     world.forge.prs[op["candidate_pr"]]["state"] = "CLOSED"
 
-    with pytest.raises(RuntimeError, match="не на коммите заявки"):
+    with pytest.raises(RuntimeError, match="не на предложении заявки"):
         approve(world, "acceptance")
     assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
-    assert "не публиковалось" in world.state.ops[key]["reason"]
+    assert "лежат не все узлы снимка" in world.state.ops[key]["reason"]
 
 
 def test_completed_needs_the_envelope_in_base_not_a_merged_pr(
@@ -702,6 +702,157 @@ def test_completed_needs_the_envelope_in_base_not_a_merged_pr(
     with pytest.raises(RuntimeError, match="конверта там нет"):
         approve(world, "charter")
     assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
+
+
+def test_join_to_a_request_without_a_commit_carries_both_nodes(
+    world: World,
+) -> None:
+    """Присоединение к заявке БЕЗ коммита выносит весь снимок, не дельту.
+
+    Прежде публикация дописывала только новый узел, и ранее вынесенный в
+    PR не попадал вовсе: мерж подписывал половину предложения, а вторая
+    половина хоронила заявку на следующем заходе.
+
+    Стенд — заявка, у которой намерение записано, а эффектов не было
+    (падение сразу после `start_request`).
+    """
+    _level_three(world)
+    approve(world, "design")
+    key, op = _request_over(world, "design")
+    world.state.ops[key].update(head_sha=None, candidate_pr=None)
+    rs.save(world.state)
+    world.forge.prs.clear()
+    _git(world.target, "push", "-q", "origin", "--delete", op["branch"])
+    world.sync()
+
+    approve(world, "acceptance")
+
+    joined = world.state.ops[key]
+    assert joined["nodes"] == ["design", "acceptance"]
+    published = _git(
+        world.target, "show", "--name-only", "--format=", joined["head_sha"]
+    )
+    for fname in ("20-design.md", "25-acceptance.md"):
+        assert fname in published, f"{fname} не вынесен"
+    merge_pr(world, joined["candidate_pr"])
+    approve(world, "design")
+    merge_pr(world, world.state.ops[key]["finalize_pr"])
+    approve(world, "design")
+    world.sync()
+    upstreams = {
+        "requirements": _blob(world, "10-requirements.md"),
+        "behaviour-spec": _blob(world, "15-behaviour-spec.md"),
+    }
+    for node, fname in (
+        ("design", "20-design.md"), ("acceptance", "25-acceptance.md")
+    ):
+        assert na.node_debt(node, world.base_text(fname), upstreams) is None
+
+
+def test_node_that_never_reached_a_commit_is_still_published(
+    world: World,
+) -> None:
+    """Признак «опубликовано» спрашивает СОСТАВ, а не голову.
+
+    Узел, дошедший до снимка и не дошедший до коммита, оставляет голову PR
+    прежней — нашей же. Сверка по `head_sha` объявляла бы предложение
+    опубликованным, и узел не попал бы в PR НИКОГДА: ни одного вызова,
+    который бы это заметил, не оставалось.
+    """
+    _level_three(world)
+    approve(world, "design")
+    key, op = _request_over(world, "design")
+    head_before = op["head_sha"]
+    real_commit = world.ops.commit_paths
+    attempts = {"n": 0}
+
+    def flaky(target_dir: str, paths: list[str], message: str) -> None:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("commit_paths: диск кончился")
+        real_commit(target_dir, paths, message)
+
+    world.ops.commit_paths = flaky  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="commit_paths"):
+        approve(world, "acceptance")
+    # Упавший заход оставил правки незакоммиченными; оператор снимает их
+    # по процедуре из dirty-гарда — заявка приведёт ветку к снимку заново.
+    _git(world.target, "checkout", "--", ".")
+
+    joined = world.state.ops[key]
+    assert joined["nodes"] == ["design", "acceptance"], "снимок расширен"
+    assert joined["head_sha"] == head_before, "коммита не было"
+    assert world.forge.head_of(joined["branch"]) == head_before, (
+        "голова PR совпадает с записанной — по ней расхождения не видно"
+    )
+
+    outcome = approve(world, "acceptance")
+    assert "допубликовано" in outcome.message
+    published = _git(
+        world.target,
+        "show",
+        "--name-only",
+        "--format=",
+        world.state.ops[key]["head_sha"],
+    )
+    assert "25-acceptance.md" in published
+    assert len(world.forge.prs) == 7, "второго PR не заведено"
+
+
+def test_publishing_twice_changes_nothing(world: World) -> None:
+    """Приведение ветки к снимку идемпотентно: второй заход не коммитит.
+
+    Стенд — ПОВТОРНАЯ публикация (крэш-окно «PR создан, номер не
+    записан»), а не повтор над открытым candidate: только там приведение
+    выполняется дважды. Без этой пары «доводит до снимка» не отличалось бы
+    от «дописывает каждый раз», а лишний коммит менял бы блоб узла и плодил
+    бы долг у downstream на ровном месте.
+
+    Отсюда же видно, зачем выносимые байты считаются от BASE: считай их от
+    ветки, второй заход поднял бы `version` ещё раз и получил бы другие
+    байты на том же снимке.
+    """
+    _level_three(world)
+    approve(world, "design")
+    key, op = _request_over(world, "design")
+    head_before = op["head_sha"]
+    existing = op["candidate_pr"]
+    world.state.ops[key]["candidate_pr"] = None
+    rs.save(world.state)
+
+    approve(world, "design")
+    assert world.state.ops[key]["head_sha"] == head_before, "нового коммита нет"
+    assert world.state.ops[key]["candidate_pr"] == existing
+    assert len(world.forge.prs) == 7
+
+
+def test_pending_upstream_diagnostics_names_the_merge_not_approve(
+    world: World,
+) -> None:
+    """Отказ называет ДЕЙСТВИЕ, которого система ждёт.
+
+    Узел-upstream лежит `approval_pending`, и система ждёт мержа его
+    открытого candidate-PR. Отправь диагностика оператора на повторный
+    `--approve-node` — он вторым кругом получил бы «PR открыт, ждём
+    мержа», то есть тот же ответ через лишний заход.
+    """
+    drive_to_approved(world, "charter")
+    approve(world, "requirements")
+    _, op = _request_over(world, "requirements")
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "requirements")  # конверт вынесен, в base ещё pending
+
+    live_key, live_op = _request_over(world, "requirements")
+    expected = world.state.ops[live_key]["candidate_pr"]
+    with pytest.raises(RuntimeError) as failure:
+        approve(world, "behaviour-spec")
+    message = str(failure.value)
+    assert f"#{expected}" in message, "назван не тот PR"
+    assert "authorized_approver_accounts" in message
+    assert "--approve-node" not in message, (
+        "оператора не отправляют за тем, чего система не ждёт"
+    )
+    assert live_op["candidate_pr"] == expected
 
 
 # --- Крэш-окна ----------------------------------------------------------
@@ -944,7 +1095,7 @@ def test_phase1_refuses_bytes_other_than_the_request_carried(
         head_sha=None, candidate_pr=None, content_hashes={"charter": "beef" * 10}
     )
     rs.save(world.state)
-    with pytest.raises(RuntimeError, match="не те, что она вынесла"):
+    with pytest.raises(RuntimeError, match="не те, что вынесла заявка"):
         approve(world, "charter")
 
 

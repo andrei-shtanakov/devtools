@@ -202,7 +202,11 @@ def approve_node(
     dag = bundle_dag.dag_for(legacy_bundle)
     if ops.is_dirty(state.target_dir):
         raise RuntimeError(
-            f"target_dir {state.target_dir!r} грязный — одобрение не начато"
+            f"target_dir {state.target_dir!r} грязный — одобрение не "
+            "начато. Процедура: разберитесь с незакоммиченными правками "
+            "(они могли остаться от упавшего захода — тогда их безопасно "
+            "снять: заявка приводит ветку к своему снимку заново) и "
+            "повторите вызов"
         )
     ops.checkout_and_pull(state.target_dir, _base_ref(state))
     bundle_dag.check_bundle_composition(state.target_dir, state.bundle_dir, dag)
@@ -277,8 +281,7 @@ def _propose(
             {node_id: self_hash},
             {node_id: upstream_blobs},
         )
-    changed = _commit_phase1(state, ops, dag, [node_id], key)
-    return _publish_candidate(state, ops, dag, key, changed, debt)
+    return _publish_candidate(state, ops, dag, key, debt)
 
 
 @dataclass(frozen=True)
@@ -356,7 +359,12 @@ def read_dag_state(
     for fname, ups in dag:
         node = bundle_dag.node_id(fname)
         blobs = {up: blob_sha1(texts[up]) for up in ups}
-        debt = na.node_debt(node, texts[node], blobs)
+        debt = na.node_debt(
+            node,
+            texts[node],
+            blobs,
+            live_candidate_pr=_live_candidate_pr(state, node),
+        )
         if debt is not None:
             debts.append(debt)
     if debts:
@@ -524,6 +532,18 @@ def _still_accumulating(state: RunState, ops: Ops, op: dict) -> bool:
     return _disposition(_pr_facts(state, ops, pr), pr) is Disposition.OPEN
 
 
+def _live_candidate_pr(state: RunState, node: str) -> int | None:
+    """Номер открытого candidate-PR живой заявки над узлом; `None` — нет.
+
+    Нужен диагностике: статус узла не отличает «заявка жива, ждём мержа»
+    от «заявка терминальна, нужен новый candidate», и отказ, назвавший не
+    то действие, отправляет оператора вторым кругом за тем же ответом.
+    Величину знает только леджер, поэтому она приходит оттуда.
+    """
+    found = al.live_request_over(state, node)
+    return found[1].get("candidate_pr") if found is not None else None
+
+
 def _require_upstream_ready(
     state: RunState,
     ops: Ops,
@@ -546,7 +566,12 @@ def _require_upstream_ready(
     """
     for up in _upstreams(dag, node_id):
         text = _base_text(ops, state, _filename(dag, up))
-        debt = na.node_debt(up, text, _base_upstream_blobs(ops, state, dag, up))
+        debt = na.node_debt(
+            up,
+            text,
+            _base_upstream_blobs(ops, state, dag, up),
+            live_candidate_pr=_live_candidate_pr(state, up),
+        )
         if debt is None:
             continue
         raise RuntimeError(
@@ -705,36 +730,96 @@ def _switch_to_request_branch(
     ops.switch_to(state.target_dir, branch, head_sha)
 
 
-def _commit_phase1(
+def _carried_text(
     state: RunState,
     ops: Ops,
     dag: tuple[tuple[str, tuple[str, ...]], ...],
-    nodes: list[str],
+    op: dict,
+    node: str,
+) -> str:
+    """Байты узла, которые заявка ВЫНОСИТ: фаза 1 поверх байтов в base.
+
+    ОДНО определение того, что несёт заявка, и оно же — мера для всех
+    сверок: приведения ветки к снимку и признака «опубликовано». Пока
+    таких определений было два (снимок в леджере и фактическое содержимое
+    ветки), они расходились, и расхождения закрывались по одному:
+    вмерженный candidate, узел без push, узел без коммита, дельта вместо
+    снимка. Пятый способ разойтись нашёлся бы тем же чередом.
+
+    Считается от BASE, а не от текущей ветки, и это существенно: узел
+    заявки не может быть тронут каскадом соседа по шагу — у независимых
+    узлов одного уровня рёбер между собой нет, — поэтому base и есть та
+    точка, от которой фаза 1 определена. Заодно результат перестаёт
+    зависеть от того, сколько заходов уже было.
+
+    Пишутся ровно четыре величины: `status`, пины из снимка,
+    `approved_content_hash` из снимка и `version + 1`. Подпись НЕ
+    пишется — акта ещё не было; прежняя, если узел шёл из `approved`,
+    остаётся нетронутой.
+    """
+    text = _base_text(ops, state, _filename(dag, node))
+    recorded = op["content_hashes"][node]
+    actual = na.self_hash(text)
+    if actual != recorded:
+        raise RuntimeError(
+            f"{node}: собственные байты в base не те, что вынесла заявка "
+            f"(записано {recorded}, в base {actual}) — предложение не "
+            "публикуется"
+        )
+    meta, body = split_frontmatter(text)
+    meta["status"] = na.STATUS_APPROVAL_PENDING
+    meta["version"] = int(meta.get("version") or 1) + 1
+    pins = op["upstream_pins"][node]
+    if pins:
+        meta["upstream_hashes"] = dict(pins)
+    meta[na.SELF_HASH_KEY] = recorded
+    return join_frontmatter(meta, body)
+
+
+def _sync_branch_to_snapshot(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
     key: str,
 ) -> tuple[str, ...]:
-    """Фаза 1 на ветке заявки: правки, каскад, коммит, durable `head_sha`.
+    """Привести ветку заявки к её снимку ЦЕЛИКОМ и идемпотентно.
 
-    Коммитом уходят ВСЕ изменённые вызовом файлы — вынесенный узел и весь
-    рекурсивный след `stale`. Частичный коммит оставил бы в ветке
-    `approved`-узел с ложным пином, то есть ровно то, что каскад обязан не
-    допускать.
+    Не «дописать новый узел», а «сделать так, чтобы в ветке лежало ровно
+    то, что в снимке» — независимо от того, сколько узлов там уже есть и
+    на каком шаге упал прошлый заход. Отсюда перестают быть разными
+    случаями «узел не дошёл до коммита», «не дошёл до push» и
+    «присоединился к заявке без коммита»: любой заход доводит ветку до
+    снимка.
 
-    `head_sha` пишется между коммитом и push, и это не порядок ради
-    порядка: падение здесь иначе оставляет заявку без единственного факта,
-    по которому её работу опознают в удалённой ветке.
+    Идемпотентность держится на сравнении БАЙТОВ с теми, что заявка
+    выносит, а не на признаке «мы уже писали»: признак был бы третьим
+    состоянием рядом со снимком и веткой, и разойтись ему было бы где.
+
+    Коммитом уходят все изменённые файлы разом — узлы и весь рекурсивный
+    след `stale`: частичный коммит оставил бы в ветке `approved`-узел с
+    ложным пином. `head_sha` пишется между коммитом и push, иначе падение
+    здесь оставляет заявку без единственного факта, по которому её работу
+    опознают в удалённой ветке.
     """
     op = state.ops[key]
-    _switch_to_request_branch(
-        state, ops, op["branch"], op.get("head_sha")
-    )
+    _switch_to_request_branch(state, ops, op["branch"], op.get("head_sha"))
     changed: list[str] = []
-    for node in nodes:
-        changed += _phase1_write(state, ops, dag, node, key)
+    for node in op["nodes"]:
+        carried = _carried_text(state, ops, dag, op, node)
+        rel = _rel(state, _filename(dag, node))
+        path = Path(state.target_dir) / rel
+        if path.read_text(encoding="utf-8") == carried:
+            continue
+        path.write_text(carried, encoding="utf-8")
+        changed.append(rel)
+        changed += _cascade_stale(state, dag, node)
+    if not changed:
+        return ()
     ops.commit_paths(
         state.target_dir,
         changed,
-        f"spec: {state.ws_id} — узел(ы) {', '.join(nodes)} вынесены на "
-        f"одобрение (approval_pending), каскад stale (fleet-agent)",
+        f"spec: {state.ws_id} — узел(ы) {', '.join(op['nodes'])} вынесены "
+        f"на одобрение (approval_pending), каскад stale (fleet-agent)",
     )
     head = ops.rev_parse(state.target_dir, "HEAD")
     if head is None:
@@ -746,45 +831,68 @@ def _commit_phase1(
     return tuple(changed)
 
 
-def _phase1_write(
+def _carries_snapshot_shape(text: str, op: dict, node: str) -> bool:
+    """Несёт ли этот текст узла то, что заявка вынесла на одобрение.
+
+    Предикат намеренно БАЗОНЕЗАВИСИМ — в отличие от `_carried_text`,
+    который считает байты фазы 1 поверх base. Спрашивают его в том числе
+    ПОСЛЕ мержа candidate, когда base уже содержит результат этого мержа:
+    сверка точных байтов там объявила бы неопубликованным ровно то, что
+    только что вмержено, и хоронила бы заявку на ровном месте.
+
+    Сверяются три величины снимка — статус, пины и `approved_content_hash`.
+    Их достаточно: узел, не дошедший до коммита, лежит в опубликованной
+    голове своими прежними байтами, а прежний статус — не
+    `approval_pending` (иначе одобрять было бы нечего).
+
+    Принятый остаток: `version` в предикат не входит, потому что он
+    относителен к base, а base между заходами уезжает. Узел, который в
+    base УЖЕ лежит ровно в форме этой заявки (след её же предыдущей,
+    похороненной попытки), пройдёт сверку и без нашего коммита — и
+    получит конверт без инкремента поколения. Ни одна другая проверка от
+    этого не страдает: фаза 3 сверяет self-hash и пины, а не `version`.
+    """
+    meta, _ = split_frontmatter(text)
+    pins = meta.get("upstream_hashes")
+    pins = dict(pins) if isinstance(pins, dict) else {}
+    return (
+        meta.get("status") == na.STATUS_APPROVAL_PENDING
+        and meta.get(na.SELF_HASH_KEY) == op["content_hashes"][node]
+        and pins == dict(op["upstream_pins"][node])
+    )
+
+
+def _snapshot_is_published(
     state: RunState,
     ops: Ops,
     dag: tuple[tuple[str, tuple[str, ...]], ...],
-    node: str,
-    key: str,
-) -> list[str]:
-    """Узел → `approval_pending` плюс рекурсивный каскад; → rel-пути.
+    op: dict,
+    head: object,
+) -> bool | None:
+    """Всё ли из снимка лежит в опубликованной голове; `None` — не узнать.
 
-    Пишутся ровно четыре величины: `status`, пересчитанные с фактических
-    байтов upstream в base пины, `approved_content_hash` с собственных
-    байтов и `version + 1` — новое поколение одобрения предлагается именно
-    этим вызовом.
+    Спрашивается СОСТАВ, а не голова. `head_sha` отвечает на вопрос «наш
+    ли это коммит», а не «всё ли вынесено» — две разные величины, и
+    выводить вторую из первой значит объявить опубликованным узел, который
+    в снимок попал, а до коммита не дошёл: голова-то совпадает.
 
-    Подпись НЕ пишется: её неоткуда взять, акт ещё не совершён. Прежняя,
-    если узел шёл из `approved`, остаётся в файле нетронутой — фаза 1
-    перечисляет, что она пишет, и стирание в этот перечень не входит; для
-    предиката она всё равно невидима, потому что условие (1) не выполнено.
+    `None` — факт не установлен (голова не названа, объект недоступен):
+    заявку это не хоронит, вызывающий отказывает и предлагает повторить.
     """
-    fname = _filename(dag, node)
-    path = Path(state.target_dir) / _rel(state, fname)
-    text = path.read_text(encoding="utf-8")
-    recorded = state.ops[key]["content_hashes"][node]
-    actual = na.self_hash(text)
-    if actual != recorded:
-        raise RuntimeError(
-            f"{node}: собственные байты на ветке заявки не те, что она "
-            f"вынесла (записано {recorded}, на ветке {actual}) — "
-            "предложение не публикуется"
+    if not isinstance(head, str) or not head:
+        return None
+    ops.fetch_branch(state.target_dir, op["branch"])
+    if ops.rev_parse(state.target_dir, head) is None:
+        return None
+    for node in op["nodes"]:
+        fact = af.read_blob_text(
+            ops, state.target_dir, head, _rel(state, _filename(dag, node))
         )
-    meta, body = split_frontmatter(text)
-    meta["status"] = na.STATUS_APPROVAL_PENDING
-    meta["version"] = int(meta.get("version") or 1) + 1
-    pins = state.ops[key]["upstream_pins"][node]
-    if pins:
-        meta["upstream_hashes"] = dict(pins)
-    meta[na.SELF_HASH_KEY] = actual
-    path.write_text(join_frontmatter(meta, body), encoding="utf-8")
-    return [_rel(state, fname), *_cascade_stale(state, dag, node)]
+        if fact.outcome is not Outcome.FOUND or fact.value is None:
+            return None
+        if not _carries_snapshot_shape(fact.value, op, node):
+            return False
+    return True
 
 
 def _cascade_stale(
@@ -833,10 +941,14 @@ def _publish_candidate(
     ops: Ops,
     dag: tuple[tuple[str, tuple[str, ...]], ...],
     key: str,
-    changed: tuple[str, ...],
     debt: na.NodeDebt | None = None,
 ) -> ApprovalOutcome:
-    """Инвалидация ниже, push ветки заявки, создание/усыновление PR.
+    """Опубликовать заявку: ветка приводится к снимку, пушится, PR есть.
+
+    «Опубликовать» здесь значит одно: в ветке лежит ровно то, что в
+    снимке, и это видно снаружи. Приведение идёт ЦЕЛИКОМ и идемпотентно,
+    поэтому вызов одинаково годится и для первого захода, и для любого
+    возобновления — падение на любом шаге доигрывается тем же кодом.
 
     Инвалидация живых заявок downstream стоит ЗДЕСЬ, а не в вызывающем, и
     это существенно: она обязана предшествовать КАЖДОЙ публикации, включая
@@ -848,6 +960,8 @@ def _publish_candidate(
     op = state.ops[key]
     for node in op["nodes"]:
         _invalidate_downstream(state, ops, dag, node, key)
+    changed = _sync_branch_to_snapshot(state, ops, dag, key)
+    op = state.ops[key]
     ops.push_branch(state.target_dir, op["branch"])
     pr = op.get("candidate_pr")
     if pr is None:
@@ -953,13 +1067,9 @@ def _advance(
     """
     step = al.next_step(op)
     if step is al.Step.CREATE_CANDIDATE:
-        changed: tuple[str, ...] = ()
-        if op.get("head_sha") is None:
-            # Падение ДО коммита: работы нет, узлы в base остались в долге,
-            # фаза 1 выполняется заново и даёт тот же результат — она
-            # детерминирована по base.
-            changed = _commit_phase1(state, ops, dag, list(op["nodes"]), key)
-        return _publish_candidate(state, ops, dag, key, changed)
+        # Ни одного «если упали до коммита» здесь больше нет: публикация
+        # приводит ветку к снимку целиком и сама решает, что дописать.
+        return _publish_candidate(state, ops, dag, key)
     if step is al.Step.AWAIT_CANDIDATE_MERGE:
         return _reconcile_candidate(state, ops, dag, op, key)
     if step is al.Step.FINALIZE:
@@ -988,7 +1098,18 @@ def _reconcile_candidate(
     """
     pr = op["candidate_pr"]
     facts = _pr_facts(state, ops, pr)
-    published = facts.get("headRefOid") == op["head_sha"]
+    # Спрашивается СОСТАВ, а не голова: совпавший `head_sha` означает
+    # «коммит наш», а не «всё вынесенное опубликовано», и узел, дошедший
+    # до снимка, но не до коммита, при сверке по голове остался бы вне PR
+    # навсегда.
+    published = _snapshot_is_published(
+        state, ops, dag, op, facts.get("headRefOid")
+    )
+    if published is None:
+        raise _unresolved(
+            f"состав предложения в голове PR #{pr} — объект недоступен "
+            "либо голова не названа"
+        )
     if _disposition(facts, pr) is Disposition.OPEN:
         if not published:
             # Работа заявки записана, но в голову PR не попала: между
@@ -997,11 +1118,11 @@ def _reconcile_candidate(
             # мержа» здесь было бы тупиком: человек видит в PR не все
             # узлы снимка, а после мержа заявка хоронится целиком.
             # Доигрываем НЕВЫПОЛНЕННЫЙ шаг — ровно как на пути создания.
-            _publish_candidate(state, ops, dag, key, ())
+            _publish_candidate(state, ops, dag, key)
             return ApprovalOutcome(
                 f"предложение заявки {key} допубликовано в PR #{pr}: "
-                f"коммит {op['head_sha'][:8]} не был в его голове. "
-                "Дальше — мерж учёткой из "
+                f"узлы снимка ({', '.join(op['nodes'])}) не все были в его "
+                f"голове. Дальше — мерж учёткой из "
                 f"{af.APPROVER_ALLOWLIST_ENV}",
                 request=key,
             )
@@ -1020,13 +1141,14 @@ def _reconcile_candidate(
         al.invalidate_request(
             state,
             key,
-            f"голова PR #{pr} ({facts.get('headRefOid')}) не совпадает с "
-            f"коммитом заявки ({op['head_sha']}): предложение заявки не "
-            "публиковалось, а PR уже закрыт либо вмержен",
+            f"в голове PR #{pr} ({facts.get('headRefOid')}) лежат не все "
+            f"узлы снимка заявки ({', '.join(op['nodes'])}), а PR уже "
+            "закрыт либо вмержен: предъявлено человеку было не то, что "
+            "заявка выносит",
         )
         raise RuntimeError(
-            f"PR #{pr} завершён не на коммите заявки {key} — узлы её "
-            "снимка человеку не предъявлялись. Заявка invalidated; "
+            f"PR #{pr} завершён не на предложении заявки {key} — часть её "
+            "узлов человеку не предъявлялась. Заявка invalidated; "
             "восстановление: новый candidate над теми же узлами"
         )
     event = af.merge_event(facts)
