@@ -9,10 +9,14 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from governance import approval_facts as af
+from governance import ops as ops_mod
 from governance.approval_facts import Disposition, MergeEvent, Outcome
+from governance.ops import RealOps
 
 
 class _StubOps:
@@ -273,3 +277,57 @@ def test_unconfirmed_close_is_unavailable_but_confirmed_is_a_fact() -> None:
     )
     assert unconfirmed.outcome is Outcome.UNAVAILABLE
     assert "#177" in unconfirmed.detail
+
+
+# --- Граница `find_pr`: characterization против НАСТОЯЩЕГО примитива -----
+#
+# Владелец 2026-09-10: `None → ABSENT` здесь допустим, потому что это
+# ПУБЛИЧНОЕ ПОСТУСЛОВИЕ `find_pr`, а не догадка вызывающего кода. Догадкой
+# было бы читать так `show_file` или `close_pr`, у которых постусловие
+# свёрнуто. Тесты ниже лочат саму границу: где примитив классифицирует
+# исход сам, а где перестаёт.
+
+
+def _fake_gh(monkeypatch, *, returncode: int, stdout: str) -> None:
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, returncode, stdout, "boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+
+
+def test_empty_parsed_list_is_the_only_road_to_absent(monkeypatch) -> None:
+    """Пустой РАЗОБРАННЫЙ список — единственный источник `ABSENT`.
+
+    Пара обязательна: непустой список даёт `FOUND` с номером, то есть
+    примитив различает исходы, а не отвечает одно и то же.
+    """
+    _fake_gh(monkeypatch, returncode=0, stdout="[]")
+    absent = af.search_pr(RealOps(), "owner/repo", "spec/ws-approve-1-1-1")
+    assert absent.outcome is Outcome.ABSENT and absent.established
+
+    _fake_gh(monkeypatch, returncode=0, stdout='[{"number": 407}]')
+    found = af.search_pr(RealOps(), "owner/repo", "spec/ws-approve-1-1-1")
+    assert (found.outcome, found.value) == (Outcome.FOUND, 407)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "why"),
+    [
+        (1, "", "ненулевой код"),
+        (0, "не JSON", "битый JSON"),
+        (0, '{"number": 1}', "неожиданная форма (объект вместо списка)"),
+    ],
+)
+def test_every_failure_shape_stays_unavailable(
+    monkeypatch, returncode: int, stdout: str, why: str
+) -> None:
+    """Все три формы сбоя примитив поднимает исключением, а не отдаёт `None`.
+
+    Ровно это и делает `ABSENT` выше законным: дорога к `None` одна, и она
+    означает «таких PR нет». Сломайся это различие — `search_pr` начал бы
+    выдавать установленное отсутствие по сетевой ошибке.
+    """
+    _fake_gh(monkeypatch, returncode=returncode, stdout=stdout)
+    fact = af.search_pr(RealOps(), "owner/repo", "spec/ws-approve-1-1-1")
+    assert fact.outcome is Outcome.UNAVAILABLE, why
+    assert not fact.established

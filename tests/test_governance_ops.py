@@ -685,6 +685,48 @@ def test_pr_facts_requests_base_ref_oid(monkeypatch):
         assert required in fields, f"{required} не запрошен: {fields}"
 
 
+def test_create_pr_is_ready_by_default_and_draft_on_demand(monkeypatch):
+    """Один примитив, два режима: `--draft` появляется только по просьбе.
+
+    Approval-PR (§I12) обязан быть обычным — мерж и есть акт одобрения, а
+    draft мержем не завершается. Метка при этом уходит ТЕМ ЖЕ вызовом:
+    PR без метки означал бы, что создание не завершилось, а гвард
+    агентского мержа сверяется в том числе с ней.
+    """
+    calls = _install_fake_run(
+        monkeypatch, returncode=0, stdout="https://github.com/o/r/pull/77\n"
+    )
+    ops = RealOps()
+    assert ops.create_pr(
+        "/tmp/x", REPO_SLUG, "spec/b", "t", "b", "human-merge-required"
+    ) == 77
+    ready = calls[0].argv
+    assert "--draft" not in ready
+    assert ready[ready.index("--label") + 1] == "human-merge-required"
+
+    ops.create_draft_pr("/tmp/x", REPO_SLUG, "spec/b", "t", "b", "")
+    draft = calls[1].argv
+    assert "--draft" in draft, "форма раннера осталась draft'овой"
+    assert "--label" not in draft
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected"), [(0, True), (1, False), (128, None)]
+)
+def test_is_ancestor_keeps_no_from_do_not_know_apart(
+    monkeypatch, returncode, expected
+):
+    """`merge-base --is-ancestor`: «нет» и «не знаю» — РАЗНЫЕ ответы.
+
+    Свернув их в `False`, сверка фазы 3 (§I12) хоронила бы заявку по
+    невыкачанному объекту — то есть по факту, которого не устанавливала.
+    """
+    calls = _install_fake_run(monkeypatch, returncode=returncode, stdout="")
+    assert RealOps().is_ancestor("/tmp/x", "cafe" * 10, "master") is expected
+    assert calls[0].argv[:3] == ["git", "merge-base", "--is-ancestor"]
+    assert calls[0].kwargs["cwd"] == "/tmp/x"
+
+
 def test_pr_facts_requests_the_whole_merge_event(monkeypatch):
     """Учётка, время и КОММИТ мержа спрашиваются одним запросом (§I12).
 
