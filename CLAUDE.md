@@ -49,6 +49,7 @@
 | `check-catalog-fixtures.py` | owner-QA SSOT-набора conformance-фикстур каталога (`contracts/catalog-conformance-fixtures/v1/`): референс V1–V7 + manifest |
 | `check-plan-fields.py` | кросс-репный граф `@blocked_by` — ловит пункт, ждущий уже отгруженного (режим отказа R-03) |
 | `check-arch-evidence-freshness.py` | drift вендоренных prograph-схем steward + freshness evidence WS-005; `--read` — просрочка ⇒ unknown |
+| `merge-pr.sh` | единственный разрешённый путь агентского мержа (ADR-ECO-011): сверяет профиль `ai-prosto`, отказывает на candidate/finalize-ветках шага одобрения §I12 и на лейбле `human-merge-required`, мержит с `--match-head-commit` проверенной головы; стратегии — закрытый allowlist `--squash\|--merge\|--rebase` (+`--delete-branch`), свободного passthrough в `gh` нет. Формы веток одобрения читаются из `contracts/approval-branches/v1/patterns.env` — того же файла, из которого их строит `governance/approval_branches.py` |
 | `review-pr.sh` | терминальный прогон ревью PR через review-kit целевого репо + публикация вердикта как PR review от ai-prosto (профиль `~/.config/review`); харнесс ревьюера настраиваем: `--harness claude\|codex` / env / `~/.config/ai-prosto/harness.env` (свойство машины/подписки, вшитый дефолт codex; claude — через `scripts/harness/claude-review`, судьба переходника — steward#147); `--dry-run` — показать, не постить; opt-in `--dry-run --write-verdict <file>` → `--use-verdict <file>` переносит тот же проверенный результат без второго вызова ревьюера только при точных `head + fp`. Литерал маркера `codex-terminal-review` — имя протокола, НЕ бинаря: не переименовывать |
 | `.claude/skills/fleet-check` | скилл периодической проверки флота |
 | `skills/spec-bridge` | скилл: находка/кластер → tasks.md-спека PR-ом в репо-владелец |
@@ -105,12 +106,15 @@ PF-BLOCKER-STALE по этому репо = «ожидание доставле�
   только по явной просьбе владельца. SSOT: `../prograph-vault/authored/rules/git-workflow.md`.
 - **Мерж — агент по умолчанию** (ADR-ECO-011 «DarkFactory», 2026-08-30): при
   approve от ревью-контура и зелёных обязательных проверках агент мержит сам и
-  выполняет хвост чистки. Мерж — **только от профиля ai-prosto**:
-  `GH_CONFIG_DIR=~/.config/review gh pr merge`, и перед ним сверить логин
-  (`GH_CONFIG_DIR=~/.config/review gh api user --jq .login` → `ai-prosto`). Голый
-  `gh pr merge` уйдёт от основного аккаунта и запишет агентский мерж человеческим,
-  обнулив `merged_by` — наблюдаемый различитель agent/human
-  (аудит `gh pr list --json mergedBy`). Request-changes или неприбывшее ревью = `unknown` ⇒
+  выполняет хвост чистки. Агентский мерж выполняется **только через
+  `sh merge-pr.sh <repo> <pr>`**; прямой `gh pr merge` для агента запрещён.
+  Обвязка сама сверяет логин профиля (`~/.config/review` → `ai-prosto`), сама
+  отказывает на PR, которые обязан мержить человек (candidate/finalize-ветки
+  §I12, лейбл `human-merge-required`), и мержит с `--match-head-commit`
+  проверенной головы. Голый `gh pr merge` уйдёт от основного аккаунта и запишет
+  агентский мерж человеческим, обнулив `merged_by` — наблюдаемый различитель
+  agent/human (аудит `gh pr list --json mergedBy`), а гварды обойдёт целиком.
+  Request-changes или неприбывшее ревью = `unknown` ⇒
   мерж не выполняется, PR остаётся человеку. Человеческий мерж — opt-in: строка
   `Мерж: человек` в этой секции (здесь НЕ объявлена) либо `merge_policy`
   экосистемного конфига. Объявление прогона (`merge_authority: human`,
