@@ -3666,7 +3666,6 @@ def test_deliver_refuses_when_target_profile_lacks_design(
             bundle_dir="workstreams/WS-alpha-7/spec",
             base_ref="master",
             ops=_MiniOps(),
-            approved_by="a", approved_at="t",
             profile="profiles/team-exp.yaml",
         )
     message = str(exc_info.value)
@@ -3711,7 +3710,6 @@ def test_deliver_refuses_when_target_profile_lacks_decomposition(
             bundle_dir="workstreams/WS-alpha-7/spec",
             base_ref="master",
             ops=_MiniOps(),
-            approved_by="a", approved_at="t",
             profile="profiles/team-exp.yaml",
         )
     message = str(exc_info.value)
@@ -3755,7 +3753,6 @@ def test_deliver_refuses_when_target_profile_lacks_acceptance(
             bundle_dir="workstreams/WS-alpha-7/spec",
             base_ref="master",
             ops=_MiniOps(),
-            approved_by="a", approved_at="t",
             profile="profiles/team-exp.yaml",
         )
     message = str(exc_info.value)
@@ -5103,6 +5100,16 @@ def test_decomposition_node_end_to_end_smoke_and_deliver(
     assert state.ops["merge"]["status"] == "completed"
     assert ops.merged == [(state.pr, ops.head)]
 
+    # Новый порядок работы (§I12): сгенерировать DAG → одобрить узлы
+    # ТОПОЛОГИЧЕСКИ → доставить. Штамповать бандл доставке больше не
+    # поручено, и без этой волны она штатно отказывает.
+    for fname, _ in task_bridge._BUNDLE_DAG:
+        task_bridge.approve_node(
+            state.target_dir, state.bundle_dir,
+            task_bridge._node_id(fname),
+            "andrei-shtanakov", "2026-09-05T11:00:00+03:00",
+        )
+
     pr = task_bridge.deliver(
         target_dir=state.target_dir,
         repo_slug=state.repo_slug,
@@ -5111,8 +5118,6 @@ def test_decomposition_node_end_to_end_smoke_and_deliver(
         bundle_dir=state.bundle_dir,
         base_ref="master",
         ops=ops,
-        approved_by="fleet-agent",
-        approved_at="2026-09-05T12:00:00",
         profile=state.profile,
     )
     assert isinstance(pr, int)

@@ -19,8 +19,7 @@ import argparse
 import os
 import re
 import tempfile
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -93,7 +92,7 @@ def _dag_for(
     acceptance-узла — decomposition этой эры пинует только design). Иное
     значение — ValueError, argparse (`choices=(3, 4, 5)`) отсекает его на
     CLI-границе раньше, но функция вызывается и напрямую (тесты,
-    `stamp_bundle_approved`/`conform_approved`/`deliver`/`deliver_conform`).
+    `approve_node`/`conform_approved`/`deliver`/`deliver_conform`).
     """
     if legacy_bundle is None:
         return _BUNDLE_DAG
@@ -723,295 +722,9 @@ def render_tasks_dt(
     return "\n".join(line for line in lines if line is not None) + "\n"
 
 
-def stamp_bundle_approved(
-    target_dir: str,
-    bundle_dir: str,
-    approved_by: str,
-    approved_at: str,
-    legacy_bundle: int | None = None,
-    restamp_nodes: frozenset[str] | None = None,
-) -> list[str]:
-    """Штамп статусов вмерженного бандла + перепиновка цепочки; → rel-пути.
-
-    `legacy_bundle` (Task 7 плана acceptance-node) выбирает активный DAG
-    через `_dag_for`: `None` — полный (charter→…→decomposition, два
-    upstream-пина у decomposition — design и acceptance); `3`/`4` — точный
-    префикс (бандлы, авторенные до раскатки design/decomposition-узла);
-    `5` — `_BUNDLE_DAG_LEGACY5` (бандл авторен до раскатки acceptance-узла,
-    decomposition пинует только design). Состав каталога обязан совпасть с
-    выбранным DAG РОВНО (`_check_bundle_composition`, вызов в начале
-    функции) — явный RuntimeError с процедурой (доавторить недостающие
-    узлы ЛИБО передать `--legacy-bundle=3|4|5` с точным фактическим
-    составом), а не сырой traceback от `path.read_text()` на отсутствующем
-    файле.
-
-    Урок 2 ретроспективы (devtools#110): после мержа бандла charter /
-    requirements / behaviour-spec остаются `status: draft` — «никто не
-    проштамповал». Approve-событие уже состоялось: по решению владельца
-    (devtools#110, 2026-09-02) инициированный им мерж = человеческий
-    approve, а агентский мерж легитимен по DarkFactory (ADR-ECO-011).
-    Штамп записывает ЭТОТ факт: `approved_by` = mergedBy бандл-PR (честный
-    различитель agent/human), `approved_at` = mergedAt.
-
-    Перепиновка идёт по DAG (Task 5: цепочка стала DAG — design пинует ОБА
-    upstream): штамп меняет байты файла, поэтому пин(ы) каждого узла
-    пересчитываются ПОСЛЕ штампа ВСЕХ его upstream-файлов — порядок
-    обхода `_BUNDLE_DAG` уже топологический. Идемпотентно: уже approved
-    файл с верными пинами не трогается и в результат не входит.
-
-    `restamp_nodes` (§I7, фикс-круг PR #165 + правка по решению владельца
-    2026-09-09) — режим ПЕРЕИЗДАНИЯ, и только его. К моменту supersede
-    бандл в base уже проштампован предыдущей доставкой (её tasks-PR
-    вмержен), а correction-PR правит тело узла, не frontmatter — статус
-    остаётся `approved`, и ветка выше не исполняется вовсе. Тогда
-    подпись, разрешённая по §I7 у correction-PR, отбрасывалась бы, и
-    переизданный анкер утверждал бы, что текущие байты одобрил человек,
-    мерживший ИСХОДНЫЙ бандл-PR — дословно то, что §I7 объявляет
-    недопустимым.
-
-    §I7 ПОУЗЛОВОЙ: аргумент — множество node-id, которые correction-PR
-    действительно менял (состав его файлов, `ops.pr_files`), и подпись
-    перезаписывается ТОЛЬКО на них:
-
-    - `None` (дефолт, обычная доставка `deliver_for_run`) — поведение
-      байт-в-байт прежнее: чужая подпись на approved-узле не трогается,
-      а узел в любом другом статусе законно идёт `draft → approved` с
-      подписью бандл-PR. Понятия `signed_nodes` на этом пути нет вовсе,
-      и ни один отказ ниже на нём не достижим;
-    - узел, которого correction-PR не касался, сохраняет ИСХОДНЫЙ
-      провенанс: приписать ему подпись correction-PR значит стереть
-      факт, что эти байты одобрил другой человек и в другой момент.
-      Механическая перепиновка downstream-узла (его upstream сменил
-      подпись ⇒ сменился и пин) байты узла меняет, а подпись — нет:
-      перепиновка не событие approve;
-    - перезапись УСЛОВНАЯ (только если подпись отличается от требуемой) —
-      повторный заход переиздания с тем же correction-PR не меняет ничего
-      и в `changed` не входит; на этом детерминизме стоит §I3.1;
-    - `version` НЕ инкрементится: инкремент привязан к ПЕРЕХОДУ
-      в `approved` (он внутри той же ветки), а не к «файл тронули».
-      Перештамп перехода не совершает — он исправляет провенанс тех же
-      байтов, которые доставил correction-PR, и приписывать им новое
-      поколение документа нечем.
-
-    §I7 ДЕЙСТВУЕТ И НА ПЕРЕХОДЕ (правка по решению владельца 2026-09-09,
-    devtools#172). `draft`/`stale` — не экзотика, а штатный след
-    correction'а: коррекция бандла приводит узлы ровно в эти статусы.
-    Пока `restamp_nodes` смотрела только ветка уже approved-узла,
-    поузловое правило на этом — основном — пути не работало вовсе:
-    переходящий узел получал подпись correction-PR независимо от состава
-    его файлов. Живой случай (переиздание
-    `verify-first-file-scope-group-targets-20260908`, `approval_pr: 407`):
-    `design`/`acceptance` были `stale` и вне `signed_nodes`, а после
-    штампа утверждали, что их одобрил человек, мерживший #407 — PR, их
-    не касавшийся. Ровно та ложь о провенансе, ради запрета которой §I7 и
-    писался. Поэтому у перехода вне `signed_nodes` подпись берётся
-    `_require_preserved_signature` — сохраняется прежняя либо fail-closed.
-
-    `version` у сохранившего подпись `stale`-узла всё же РАСТЁТ: он
-    совершает переход, а §I5 требует, чтобы фактический штамп совпал с
-    проспективным (`_content_anchor` считает его с `restamp_nodes=None`,
-    то есть всегда первой веткой). Канонизация вырезает подпись, но НЕ
-    `status`/`version` — оставь мы `version` прежним, записанный
-    `content_anchor` разошёлся бы с тем, что доставка кладёт в base, и
-    no-op второго круга стал бы недостижим.
-    """
-    dag = _dag_for(legacy_bundle)
-    _check_bundle_composition(target_dir, bundle_dir, dag)
-    changed: list[str] = []
-    stamped_blobs: dict[str, str] = {}
-    base = Path(target_dir) / bundle_dir
-    for name, upstream_ids in dag:
-        path = base / name
-        meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
-        dirty = False
-        signed = restamp_nodes is not None and _node_id(name) in restamp_nodes
-        status = meta.get("status")
-        if status != "approved":
-            if restamp_nodes is None or signed:
-                meta["approved_by"] = approved_by
-                meta["approved_at"] = approved_at
-            else:
-                # Подпись не меняется — либо сохраняется прежняя, либо
-                # отказ; `version`/`status` идут общим путём перехода.
-                _require_preserved_signature(bundle_dir, name, status, meta)
-            meta["status"] = "approved"
-            meta["version"] = int(meta.get("version") or 1) + 1
-            dirty = True
-        elif (
-            signed
-            and (
-                meta.get("approved_by") != approved_by
-                or meta.get("approved_at") != approved_at
-            )
-        ):
-            # §I7 на реальном состоянии base переиздания: узел approved,
-            # но подпись — от предыдущей доставки. `version` здесь не
-            # растёт (см. докстринг), статус уже верен.
-            meta["approved_by"] = approved_by
-            meta["approved_at"] = approved_at
-            dirty = True
-        elif restamp_nodes is not None and not signed:
-            # Клетка §I7 «узел уже approved, вне signed_nodes»: подпись
-            # мы не ставим — но и пустой она быть не вправе. Перехода
-            # здесь нет, файл не трогается; проверяется только то, что
-            # `approved` не стоит без подписавшего.
-            _require_preserved_signature(bundle_dir, name, status, meta)
-        if upstream_ids:
-            pins = meta.get("upstream_hashes")
-            pins = dict(pins) if isinstance(pins, dict) else {}
-            for upstream_id in upstream_ids:
-                blob = stamped_blobs[upstream_id]
-                if pins.get(upstream_id) != blob:
-                    pins[upstream_id] = blob
-                    dirty = True
-            if dirty:
-                meta["upstream_hashes"] = pins
-        if dirty:
-            path.write_text(join_frontmatter(meta, body), encoding="utf-8")
-            changed.append(f"{bundle_dir}/{name}")
-        stamped_blobs[_node_id(name)] = blob_sha1(
-            path.read_text(encoding="utf-8")
-        )
-    return changed
-
-
-#: Единственный статус, с которого узел ВНЕ `signed_nodes` вправе войти в
-#: `approved`, сохранив прежнюю подпись: `stale` означает «изменился
-#: upstream», то есть собственное содержание узла осталось тем же, что
-#: одобрил его прежний подписант (§I7, решение владельца 2026-09-09).
-_PRESERVING_STATUS = "stale"
-
-#: Статусы, на которых узел ВНЕ `signed_nodes` проходит проверку, если
-#: прежняя подпись непуста: `stale` входит в `approved`, сохранив её,
-#: а `approved` остаётся как есть. Разница между клетками только в
-#: переходе; требование к подписи у них общее — она обязана БЫТЬ.
-_SIGNATURE_BEARING_STATUSES = (_PRESERVING_STATUS, "approved")
-
-#: Процедура оператору при fail-closed поузлового §I7 — отказ без
-#: процедуры бесполезен.
-_UNSIGNED_NODE_PROCEDURE = (
-    "назовите correction, покрывающий этот узел (--approval-pr <n>), "
-    "либо доставьте его правку отдельным PR"
-)
-
-
-def _require_preserved_signature(
-    bundle_dir: str,
-    name: str,
-    status: object,
-    meta: dict,
-) -> None:
-    """Узел вне `signed_nodes`: прежняя подпись есть и сохранима?
-
-    Зовётся на ДВУХ клетках политики §I7, и обе про одно — «подпись мы
-    не ставим, значит она обязана уже быть»:
-
-    - `stale → approved`: переход разрешён ровно из `stale` и ровно при
-      непустой прежней подписи;
-    - узел УЖЕ `approved`: перехода нет вовсе, но подпись всё равно
-      обязана быть непустой.
-
-    `meta` не мутируется: сохранение подписи и есть «ничего не трогать»,
-    проверить остаётся только право на это.
-
-    Вторая клетка была объявлена спекой и не реализована (major ревью
-    3c07bb0): первая ветка политики входит только при
-    `status != "approved"`, вторая требует членства в `signed_nodes` —
-    и узел `approved` с пустым `approved_by` не проверял никто.
-    Переиздание доставляло его с RC 0: «одобрено» без одобрившего, молча.
-    Поймать это потом нечем — `_content_anchor` подпись вырезает по
-    построению (§I2), поэтому ни сверка проспективного anchor'а, ни
-    гвард `_commit_facts_cb` расхождения не видят, а аудит по леджеру не
-    отличает пустую подпись от потерянной.
-
-    Почему `stale` — да. Статус выставлен потому, что сменился upstream,
-    а не содержание узла: те же байты тела одобрял тот же человек, и
-    прежняя подпись остаётся истинной.
-
-    Почему `draft` — нет. Здесь содержание могло измениться, и изменить
-    его мог ДРУГОЙ correction-PR, которого мы не разрешали. Сохранённая
-    подпись утверждала бы, что прежний подписант одобрил байты, которых
-    не видел, — недоказуемо, значит fail-closed. По той же причине
-    fail-closed и любой иной не-approved статус: доказательство есть
-    только у `stale`.
-
-    Почему отсутствующая подпись — нет. Сохранять нечего: узел никогда не
-    был одобрен, а выдумать провенанс неоткуда. Форма «не подписано» —
-    та, которую заводит шаблон бандла: `approved_by: ""`.
-    """
-    if (
-        status in _SIGNATURE_BEARING_STATUSES
-        and meta.get("approved_by")
-        and meta.get("approved_at")
-    ):
-        return
-    reason = (
-        "прежней подписи нет (approved_by/approved_at пусты) — сохранять "
-        "нечего"
-        if status in _SIGNATURE_BEARING_STATUSES
-        else (
-            f"status={status!r} — сохранять прежнюю подпись недоказуемо "
-            "(содержание узла мог изменить другой correction-PR), а "
-            "приписать подпись correction-PR, который узла не касался, "
-            "значит солгать о провенансе"
-        )
-    )
-    raise RuntimeError(
-        f"{bundle_dir}/{name}: узел вне signed_nodes переиздания, "
-        f"{reason}. Процедура: {_UNSIGNED_NODE_PROCEDURE}"
-    )
-
-
-@contextmanager
-def _shadow_stamped(
-    target_dir: str,
-    bundle_dir: str,
-    approved_by: str,
-    approved_at: str,
-    legacy_bundle: int | None,
-    restamp_nodes: frozenset[str] | None,
-) -> Iterator[Path]:
-    """Копия бандла, проштампованная во временном каталоге; → её target-корень.
-
-    Общий примитив обоих проспективных вычислений (`_prospective_anchor`
-    §I2 и `_content_anchor` §I5): штамп — эффект, а сравнивать надо те
-    байты, что уйдут в PR. Рабочее дерево не трогается вовсе
-    (утверждается тестом `..._writes_nothing`).
-
-    Состав бандла проверяется по ФАКТИЧЕСКОМУ каталогу в `target_dir` и
-    ДО копирования: в теневом каталоге лежит ровно заявленное подмножество,
-    и вызов `_check_bundle_composition` внутри `stamp_bundle_approved`
-    там вырождается в тождество. Без этой проверки легаси-бандл без
-    `25-acceptance.md` с забытым `--legacy-bundle=5` ронял сырой
-    `FileNotFoundError` из `src.read_text()` мимо диагностики
-    `stamp_bundle_approved` (`main` ловит только RuntimeError).
-    """
-    dag = _dag_for(legacy_bundle)
-    _check_bundle_composition(target_dir, bundle_dir, dag)
-    with tempfile.TemporaryDirectory(prefix="prospective-stamp-") as tmp:
-        shadow = Path(tmp) / "target"
-        (shadow / bundle_dir).mkdir(parents=True)
-        for fname, _ in dag:
-            src = Path(target_dir) / bundle_dir / fname
-            (shadow / bundle_dir / fname).write_text(
-                src.read_text(encoding="utf-8"), encoding="utf-8"
-            )
-        stamp_bundle_approved(
-            str(shadow), bundle_dir, approved_by, approved_at,
-            legacy_bundle=legacy_bundle,
-            restamp_nodes=restamp_nodes,
-        )
-        yield shadow
-
-
 #: Ключи frontmatter, которые КАНОНИЧЕСКОЕ представление узла вырезает:
 #: провенанс approve, а не содержание (§I5).
 _SIGNATURE_KEYS = ("approved_by", "approved_at")
-
-#: Подпись-заглушка проспективного штампа при вычислении `content_anchor`.
-#: Канонизация подпись вырезает, поэтому результат от значения не зависит —
-#: и ровно это позволяет §I5 стоять ДО сетевого разрешения §I7.
-_CANON_SIGNATURE = ("-", "-")
 
 
 def _canonical_dag_hash(
@@ -1042,10 +755,13 @@ def _canonical_dag_hash(
     замыкание, и узел вне него в хэш бы не вошёл — «хэш активного DAG»
     обязан покрывать активный DAG целиком.
 
-    Что НЕ вырезается: `status` и `version`. Их меняет только переход
-    draft → approved, а обе стороны сверки §I5 считаются по
-    ПРОШТАМПОВАННОМУ дереву (`_content_anchor`), где переход уже
-    совершён, — значит они совпадают и содержание не размывают.
+    Что НЕ вырезается: `status` и `version`. Их меняет только переход в
+    `approved`, а обе стороны сверки §I5 описывают одни и те же байты
+    бандла в base, — значит совпадают они сами собой, когда перехода
+    между сверками не было. Нормализовать их не просто лишнее, а
+    вредно: хэш стал бы слеп и к откату узла в `draft`, и к волне
+    повторного одобрения (§I12), после которой переизданная спека обязана
+    пинуть новые блобы анкера (§I5).
     """
     canon: dict[str, str] = {}
     lines: list[str] = []
@@ -1069,78 +785,66 @@ def _content_anchor(
     bundle_dir: str,
     legacy_bundle: int | None = None,
 ) -> str:
-    """`content_anchor` §I5: канонический хэш ПРОШТАМПОВАННОГО DAG.
+    """`content_anchor` §I5: канонический signature-free хэш активного DAG.
 
-    Отвечает на вопрос «менялось ли содержание апстрима», и только на
-    него. Пост-штамповый `anchor` (§I2) на него ответить не может: он —
-    точный blob терминального узла ПОСЛЕ штампа, а штамп несёт подпись
-    correction-PR, то есть провенанс лежит ВНУТРИ сравниваемых байтов.
-    Бандл-PR и tasks-PR вмержены разными людьми в разное время, поэтому
-    равенство §I5 по `anchor` не достигалось никогда — каждый
-    `--supersede` заводил бы очередную ревизию.
+    Отвечает на вопрос «менялось ли СОДЕРЖАНИЕ апстрима», и только на
+    него. Артефактный `anchor` (§I2) на него ответить не может по двум
+    независимым причинам: подпись лежит ВНУТРИ сравниваемых байтов, а сам
+    он — блоб ОДНОГО узла, тогда как §I5 спрашивает про весь активный DAG
+    (правка узла вне транзитивного замыкания терминального в его блоб не
+    попала бы вовсе). Вторая причина к подписи отношения не имеет и не
+    исчезает ни при каком изменении правил подписи.
 
-    Штамп применяется ПРОСПЕКТИВНО (теневой каталог): те же
-    преобразования, что уйдут в PR, — `status: approved`, инкремент
-    `version` на переходе, перепиновка. Иначе доставка v1, чей base ещё
-    `draft`, записала бы хэш ДОштамповых байтов, а следующее переиздание
-    считало бы его по уже проштампованному base — §I5 расходился бы на
-    пустом месте.
+    Величина ЧИТАЕТСЯ с синхронизированного base как он есть. Ни теневой
+    копии, ни проспективного штампа, ни подписи-заглушки: все трое
+    существовали затем, чтобы посчитать хэш по байтам, которых на диске
+    ещё нет. Одобрять доставка не вправе (§I12), поэтому пост-штамповых
+    байтов не бывает — байты бандла к моменту доставки окончательны.
 
-    Подпись штампа здесь — ЗАГЛУШКА (`_CANON_SIGNATURE`), а не факты
-    correction-PR: канонизация подпись вырезает, поэтому результат от неё
-    не зависит. Ровно это и позволяет §I5 стоять ДО сетевого разрешения
-    провенанса (§I7) — то есть до того, как переиздание могло бы принять
-    СВОЙ ЖЕ tasks-PR за correction.
-
-    По той же причине `restamp_nodes` здесь `None`, и это НЕ забывчивость,
-    а контракт: канонический штамп — нейтральная процедура, клеток
-    поузловой политики §I7 он не применяет. На его шаге состав
-    подписываемых узлов ещё не вычислен и вычислен быть НЕ МОЖЕТ —
-    провенанс резолвится позже и только если содержание изменилось.
-    Передай сюда любое множество (хоть пустое) — fail-closed политики
-    сработал бы на ЛЮБОМ бандле с `draft`-узлом, то есть раньше, чем
-    выяснено, менялся ли апстрим: бесследный no-op §I5 стал бы
-    недостижим. Утверждается тестами `..._canonical_stamp_is_neutral...`
-    и `..._noop_reachable_with_draft_node_outside_signed_nodes`.
+    Требование §I2 «сравнивать той же процедурой, которой писали»
+    выполнено ЧЕРЕЗ BASE: обе стороны сверки описывают одни и те же байты
+    бандла в base — записанная считала их до мержа своего PR,
+    сравнивающая читает после. Отсюда же совместимость записей эпохи
+    штампа: их `content_anchor` считался по проспективно
+    проштампованному дереву, а проштампованные байты в base и легли —
+    пересчёт по base даёт то же значение.
     """
     dag = _dag_for(legacy_bundle)
-    with _shadow_stamped(
-        target_dir, bundle_dir, *_CANON_SIGNATURE, legacy_bundle, None
-    ) as shadow:
-        return _canonical_dag_hash(str(shadow), bundle_dir, dag)
+    _check_bundle_composition(target_dir, bundle_dir, dag)
+    return _canonical_dag_hash(target_dir, bundle_dir, dag)
 
 
 def _prospective_anchor(
     target_dir: str,
     bundle_dir: str,
-    approved_by: str,
-    approved_at: str,
     legacy_bundle: int | None = None,
-    restamp_nodes: frozenset[str] | None = None,
 ) -> str:
-    """blob терминального узла ПОСЛЕ штампа, без записи в рабочее дерево.
+    """Артефактный anchor §I2 — блоб терминального узла активного DAG в base.
 
-    §I2 спеки: сравнивать надо те байты, что уйдут в PR и после мержа
-    лягут в base, но штамп — эффект. Поэтому бандл копируется во временный
-    каталог, штампуется ТАМ (`_shadow_stamped`), и хеш берётся оттуда;
-    рабочее дерево не трогается вовсе (тест `..._writes_nothing`).
+    ЧТЕНИЕ, а не вычисление: бандл доставка не меняет (§I7), значит байты
+    анкера, с которыми она работает, — ровно те, что уже лежат в
+    синхронизированном base, и ровно они уходят в пин доставленной спеки.
+    Проспективным anchor больше не является, и теневой копии под ним нет:
+    она существовала ровно потому, что штамп был эффектом и сравнивать
+    надо было ПОСТ-штамповые байты, которых на диске ещё нет.
 
-    В отличие от `content_anchor` (§I5) здесь берутся ТОЧНЫЕ байты со
-    всей подписью: §I2 — идентичность доставки, и ей провенанс не помеха,
-    а часть предмета. Разделение ролей и есть фикс дефекта §I5×§I7.
+    Имя durable-поля `prospective_anchor` в леджере — историческое, и
+    менять его нельзя: величина осталась той же (ожидаемый блоб анкера, с
+    которым сверяется фактический), а переименование сломало бы
+    возобновление ранее записанных намерений.
 
-    `restamp_nodes` пробрасывается в штамп БЕЗ изменений: §I2 требует
-    «те же преобразования», и проспективный anchor обязан совпасть с
-    фактическим. Состав, забытый на одной из двух сторон, разводит их — и
-    гард `_commit_facts_cb` рвёт доставку между коммитом и push.
+    От требования «вычислен ДО эффектов» остаётся не бесследность (беречь
+    её тут не от чего — чтение файла эффектом не было никогда), а
+    ПРИШПИЛИВАНИЕ: величина обязана лечь в намерение раньше ветки,
+    коммита, push и PR, потому что на неё опираются реконсиляция §I3 и
+    сверка «фактический блоб анкера равен записанному». Отсюда же
+    неснимаемое требование к шагу 1 порядка: base обязан быть
+    синхронизирован ДО чтения.
     """
     dag = _dag_for(legacy_bundle)
-    with _shadow_stamped(
-        target_dir, bundle_dir, approved_by, approved_at,
-        legacy_bundle, restamp_nodes,
-    ) as shadow:
-        anchor_file = shadow / bundle_dir / dag[-1][0]
-        return blob_sha1(anchor_file.read_text(encoding="utf-8"))
+    _check_bundle_composition(target_dir, bundle_dir, dag)
+    anchor_file = Path(target_dir) / bundle_dir / dag[-1][0]
+    return blob_sha1(anchor_file.read_text(encoding="utf-8"))
 
 
 # --- §I12: одобрение узла бандла — человеческий акт ----------------------
@@ -1903,28 +1607,37 @@ def deliver(
     bundle_dir: str,
     base_ref: str,
     ops: Ops,
-    approved_by: str,
-    approved_at: str,
     generated_at: str | None = None,
     legacy_bundle: int | None = None,
     profile: str | None = None,
     branch: str | None = None,
     version: int = 1,
-    restamp_nodes: frozenset[str] | None = None,
     carry_from: str | None = None,
     before_commit: Callable[[dict], None] | None = None,
     after_commit: Callable[[dict], None] | None = None,
 ) -> int:
-    """Штампует бандл + пишет spec/<ws-id>-tasks.md; один draft-PR.
+    """Проверяет одобренность DAG + пишет spec/<ws-id>-tasks.md; draft-PR.
 
     Fail-closed по образцу S1 runner'а: грязный target — отказ (иначе
     commit_paths закоммитил бы рядом с чужими правками). База освежается
     ДО создания ветки — спека генерируется из вмерженного бандла, не из
     случайного состояния чекаута.
 
-    Порядок «штамп бандла → пин анкера → рендер tasks» жёсткий: штамп
-    меняет байты терминального узла активного DAG, и пин, взятый до
-    штампа, протух бы в том же PR (@id:spec-bridge-approve-conformance).
+    **Доставка не подписывает ничего** (§I7). Ни первая, ни переиздание,
+    ни замена не записывают `approved_by`/`approved_at` ни в один узел
+    бандла, не меняют ни одного `status`, не пересчитывают ни одного
+    пина. Всё, что доставка делает с бандлом, — ЧИТАЕТ его: проходит гейт
+    одобренности (§I12, `_require_approved_dag` ниже) и берёт блоб анкера
+    для пина спеки. Наблюдаемое следствие, по которому это видно
+    снаружи: коммит несёт РОВНО `spec/<ws-id>-tasks.md`, файлов бандла в
+    его diff нет вовсе.
+
+    Гейт стоит ПОСЛЕ `checkout_and_pull` (иначе читалось бы случайное
+    состояние чекаута) и ДО `ensure_branch`: отказ обязан не оставить ни
+    ветки, ни коммита, ни PR. Он общий для всех трёх путей доставки —
+    первой, `--supersede` и `--replace-revision`; переиздание и замена
+    зовут его ЕЩЁ И выше по течению, потому что там он обязан отказать
+    раньше записи в леджер, а сюда управление приходит уже после неё.
 
     `legacy_bundle` (Task 7 плана acceptance-node) выбирает активный DAG
     через `_dag_for`: `None` — полный (якорь decomposition, два upstream-
@@ -1952,13 +1665,6 @@ def deliver(
     возросшим `version:` во frontmatter — обычная доставка (`deliver_for_run`)
     не передаёт ни того, ни другого, и получает прежние дефолты
     (`spec/<ws-id>-tasks`, `version: 1`).
-
-    `restamp_nodes` (§I7) — тоже только у переиздания: множество node-id,
-    которые менял correction-PR; на уже approved-узле ИЗ ЭТОГО МНОЖЕСТВА
-    подпись перезаписывается его фактами, остальные узлы сохраняют
-    исходный провенанс (полное обоснование — докстринг
-    `stamp_bundle_approved`). `deliver_for_run` аргумента не передаёт, и
-    весь обычный путь — файлы, ветка, PR, содержимое штампа — прежний.
 
     `carry_from` — байты УЖЕ ДОСТАВЛЕННОЙ tasks-спеки (из base по
     `base_sha` намерения), из которых переиздание переносит состояние
@@ -2071,18 +1777,22 @@ def deliver(
         # находка формы (`non_fatal_findings`, потребитель — только
         # S4-гейт `runner._step_gate`, не `deliver()`) — такой бандл
         # доставляется, а осиротевший путь молча уезжает в **Verifies:**.
+    # Гейт §I12 — ПОСЛЕДНЯЯ read-only проверка перед первым эффектом:
+    # каждый узел активного DAG обязан быть честно одобрен человеком.
+    # Стоит после гардов формы (состав, профиль, граф DT) намеренно: те
+    # отвечают на вопрос «тот ли это бандл вообще», и отказ по форме
+    # полезнее услышать раньше, чем предложение одобрять узлы бандла,
+    # который активный профиль репо не признаёт.
+    _require_approved_dag(target_dir, bundle_dir, dag)
     branch = branch or f"spec/{ws_id}-tasks"
     ops.ensure_branch(target_dir, branch)
-    stamped = stamp_bundle_approved(
-        target_dir, bundle_dir, approved_by, approved_at,
-        legacy_bundle=legacy_bundle,
-        restamp_nodes=restamp_nodes,
-    )
-    # Анкер — терминальный узел АКТИВНОГО DAG (не хардкод design/behaviour):
-    # читаем ПОСЛЕ штампа, иначе пин взят из уже стухшего blob'а. design_text
-    # (для секции резолюций) — из 20-design.md, но только когда design
-    # входит в активный DAG; на 3-узловом легаси-бандле design в нём нет
-    # вовсе, секция резолюций не рендерится.
+    # Анкер — терминальный узел АКТИВНОГО DAG (не хардкод design/behaviour).
+    # Читается ПРОСТО ИЗ BASE: бандл доставка не меняет (§I7), значит
+    # стухнуть пину не от чего — прежний порядок «штамп → пин» защищал от
+    # эффекта, которого больше нет. design_text (для секции резолюций) —
+    # из 20-design.md, но только когда design входит в активный DAG; на
+    # 3-узловом легаси-бандле design в нём нет вовсе, секция резолюций не
+    # рендерится.
     anchor_node_id = _node_id(dag[-1][0])
     anchor_text = (base / dag[-1][0]).read_text(encoding="utf-8")
     design_blob = blob_sha1(anchor_text)
@@ -2156,10 +1866,11 @@ def deliver(
         # раньше, чем появится коммит, — иначе падение между коммитом и
         # записью head_sha оставляет ревизию неопознаваемой.
         before_commit({"tasks_blob": blob_sha1(text)})
+    # Коммит несёт РОВНО tasks-спеку: файлов бандла в нём нет вовсе (§I7).
     ops.commit_paths(
         target_dir,
-        [*stamped, rel],
-        f"spec: {ws_id} tasks (draft) + штамп статусов бандла (fleet-agent)",
+        [rel],
+        f"spec: {ws_id} tasks (draft) (fleet-agent)",
     )
     if after_commit is not None:
         # Между коммитом и push (§I3): падение здесь оставляет коммит
@@ -2173,27 +1884,18 @@ def deliver(
     body = (
         f"Draft tasks.md-спека из behaviour-spec бандла {ws_id} "
         f"({bundle_dir}/15-behaviour-spec.md), сгенерирована task_bridge.\n\n"
+        # Строк про штамп статусов бандла здесь больше нет: они описывали
+        # эффект, которого нет (§I7). Бандл доставка только ЧИТАЕТ —
+        # проходит гейт одобренности и берёт блоб анкера в пин спеки.
+        "Файлы бандла в этот PR не входят: доставка их не трогает, а "
+        "проверяет, что активный DAG "
+        + "→".join(_node_id(fname) for fname, _ in dag)
         + (
-            "Этим же PR — штамп статусов вмерженного бандла "
-            f"({len(stamped)} файл(а): approved_by = mergedBy "
-            # Источник подписи разный (§I7): у обычной доставки — бандл-PR,
-            # у переиздания — correction-PR. Одна формулировка на оба пути
-            # называла бы оператору не тот PR ровно там, где провенанс и
-            # есть предмет.
-            + ("correction-PR" if restamp_nodes is not None else "бандл-PR")
-            + ", "
-            "перепиновка DAG "
-            + "→".join(_node_id(fname) for fname, _ in dag)
-            + (
-                f" (легаси-бандл, --legacy-bundle={legacy_bundle})"
-                if legacy_bundle
-                else ""
-            )
-            + ")."
-            "\n\n"
-            if stamped
+            f" (легаси-бандл, --legacy-bundle={legacy_bundle})"
+            if legacy_bundle
             else ""
         )
+        + " честно одобрен человеком (§I12).\n\n"
         + "Спека managed: `status: draft` НЕ исполняется при "
         "strict-governance — approve (перевод в approved) делает человек, "
         f"затем `spec-runner run --strict --spec-prefix={ws_id}-` в "
@@ -2218,18 +1920,12 @@ def _delivered_anchor(
 ) -> str | None:
     """Anchor уже доставленного PR — blob анкера в его head-коммите (§I2).
 
-    Реконсиляция принимает доставку, которую этот вызов НЕ делал: штамп
-    терминального узла уже состоялся и лежит в коммите PR-а, а те же
-    байты после мержа лягут в base. Значит anchor не надо пересчитывать —
-    его надо ПРОЧИТАТЬ там, где он существует.
-
-    Пересчитать проспективный штамп здесь было бы и невозможно (на этом
-    пути нет `approved_by`/`approved_at`, а поднимать их вычисление выше
-    значит добавить отказ «у PR нет mergedBy/mergedAt» туда, где сегодня
-    доставка успешно реконсилируется), и НЕВЕРНО: считался бы ТЕКУЩИЙ
-    апстрим, который у более ранней доставки мог уже уехать вперёд
-    доставленного, — и §I5 объявил бы «апстрим не менялся» ложно, то есть
-    стал бы fail-open ровно в том гейте, ради которого anchor вводится.
+    Реконсиляция принимает доставку, которую этот вызов НЕ делал, и
+    величина читается там, где она существует, а не пересчитывается по
+    ТЕКУЩЕМУ base: у более ранней доставки апстрим мог уже уехать вперёд
+    доставленного, и пересчёт объявил бы «апстрим не менялся» ложно — то
+    есть стал бы fail-open ровно в том гейте, ради которого anchor
+    вводится.
 
     `None` — факт недоступен (PR без `headRefOid`; объект не подтянут в
     локальный клон): доставка НЕ падает, переиздание уйдёт §6-путём
@@ -2254,16 +1950,13 @@ def _delivered_content_anchor(
 
     Тот же довод, что у `_delivered_anchor`: реконсиляция принимает
     доставку, которую этот вызов не делал, поэтому содержание читается
-    там, где оно существует. Текущий base сюда не годится: в нём лежат
-    ДОштамповые байты (`status: draft`, прежний `version`), а
-    `content_anchor` считается по проштампованному дереву — сверка §I5
-    разошлась бы с первым же переизданием.
+    там, где оно существует, а не пересчитывается по текущему base —
+    апстрим мог уехать вперёд доставленного.
 
     Читается СОДЕРЖИМОЕ (`ops.show_file`), а не blob-хеши: канонизация
-    работает с текстом frontmatter, хеша ей мало. Повторный проспективный
-    штамп поверх уже проштампованных байтов ничего не меняет (статус
-    approved, `version` не растёт, подпись канонизация вырезает) —
-    значение то же, что записала бы сама доставка.
+    работает с текстом frontmatter, хеша ей мало. Штампа в head-коммите
+    доставки больше нет (§I7: её коммит несёт ровно tasks-спеку), поэтому
+    байты бандла там — те же, что в base на момент той доставки.
 
     `None` — факт недоступен (нет `headRefOid`, объект не подтянут в
     клон, frontmatter не разобрать): переиздание уйдёт §6-путём
@@ -2308,10 +2001,16 @@ def deliver_for_run(
     НИКОГДА не создаёт PR заново, в каком бы состоянии op ни застал
     прогон (new/started/completed).
 
+    Гейт §I12 (внутри `deliver()`) у первой доставки — первая проверка
+    контракта, способная отказать, и её отказ ШТАТЕН: свежесгенерированный
+    бандл лежит в base целиком `draft`, потому что штамповать его больше
+    некому. Это и есть новый порядок работы («сгенерировать DAG → одобрить
+    узлы топологически → `deliver_for_run`»), а не регресс.
+
     Оба завершения op пишут ДВА поля, отвечающих на разные вопросы:
 
-    - `anchor` — точный blob терминального узла после штампа (§I2):
-      идентичность доставленных байтов;
+    - `anchor` — точный blob терминального узла активного DAG в base
+      (§I2): идентичность доставленных байтов;
     - `content_anchor` — канонический signature-free хэш DAG (§I5):
       менялось ли СОДЕРЖАНИЕ апстрима. Без него `prev_op` у v1 всегда без
       сверки, и ПЕРВОЕ переиздание любого воркстрима уходит в
@@ -2378,22 +2077,13 @@ def deliver_for_run(
             f"({pr_state}) — принят как доставка, новый не создаётся"
         )
         return existing
-    # approved_by/at — факт мержа бандл-PR (решение владельца devtools#110:
-    # инициированный мерж = approve; mergedBy — различитель agent/human,
-    # ADR-ECO-011). Отсутствие факта — стоп, не выдуманное значение.
-    if state.pr is None:
-        raise RuntimeError(
-            "в леджере нет номера бандл-PR — штамп невозможен"
-        )
-    facts = ops.pr_facts(state.repo_slug, state.pr)
-    merged_by = (facts.get("mergedBy") or {}).get("login")
-    merged_at = facts.get("mergedAt")
-    if not merged_by or not merged_at:
-        raise RuntimeError(
-            f"у PR #{state.pr} нет mergedBy/mergedAt — бандл не вмержен "
-            "или API не отдал факт мержа; стоп"
-        )
-    stamped: dict[str, str] = {}
+    # Провенанс бандл-PR (`mergedBy`/`mergedAt`) не запрашивается вовсе:
+    # решение devtools#110 приравнивало инициированный мерж к approve, и на
+    # этом стоял штамп первой доставки — в этой части оно пересмотрено
+    # (§I7). Мерж бандл-PR вносит байты бандла в base и только; отказ «у
+    # PR #N нет mergedBy/mergedAt» ушёл вместе со штампом, которому служил.
+    # Одобрен ли DAG, решает гейт §I12 внутри `deliver()` — по base.
+    identities: dict[str, str] = {}
 
     def _capture_anchor(commit_facts: dict) -> None:
         """§I2 + §I5: идентичность и содержание тех байтов, что ушли в PR.
@@ -2406,11 +2096,11 @@ def deliver_for_run(
 
         `content_anchor` (§I5) считается здесь же, а не после `deliver()`:
         отказ на этом шаге останавливает доставку ДО push, то есть без PR,
-        который потом нечем было бы объяснить. На диск колбэк по-прежнему
-        ничего не пишет (`_content_anchor` работает в теневом каталоге).
+        который потом нечем было бы объяснить. На диск колбэк ничего не
+        пишет — обе величины ЧИТАЮТСЯ с дерева (§I2).
         """
-        stamped["anchor"] = commit_facts["anchor_blob"]
-        stamped["content_anchor"] = _content_anchor(
+        identities["anchor"] = commit_facts["anchor_blob"]
+        identities["content_anchor"] = _content_anchor(
             state.target_dir, state.bundle_dir, legacy_bundle
         )
 
@@ -2423,15 +2113,13 @@ def deliver_for_run(
         bundle_dir=state.bundle_dir,
         base_ref=state.base_ref or "master",
         ops=ops,
-        approved_by=merged_by,
-        approved_at=merged_at,
         legacy_bundle=legacy_bundle,
         profile=state.profile,
         after_commit=_capture_anchor,
     )
     op_complete(
-        state, "tasks-deliver", pr=pr, anchor=stamped.get("anchor"),
-        content_anchor=stamped.get("content_anchor"),
+        state, "tasks-deliver", pr=pr, anchor=identities.get("anchor"),
+        content_anchor=identities.get("content_anchor"),
     )
     return pr
 
@@ -3014,213 +2702,6 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
         )
 
 
-class Correction(NamedTuple):
-    """Разрешённый correction-PR: провенанс + состав затронутых узлов.
-
-    `signed_nodes` — node-id узлов активного DAG, которые этот PR
-    действительно менял. §I7 поузловой: подпись получают только они, и
-    множество обязано ехать вместе с подписью — иначе вызывающая сторона
-    решала бы «кому подписывать» отдельно от «чья подпись», а это два
-    ответа на один вопрос.
-    """
-
-    pr: int
-    approved_by: str
-    approved_at: str
-    signed_nodes: frozenset[str]
-
-
-def _ledger_delivery_prs(state: RunState) -> tuple[set[int], list[str]]:
-    """Собственные доставки прогона: (номера PR, ветки доставок без номера).
-
-    Первая линия опознания §I7 шага 3 — номера ИЗ ЛЕДЖЕРА: `pr` записей
-    `tasks-deliver` (историческая v1) и `tasks-deliver-v<N>`. Номер
-    записан НАМИ САМИМИ в момент доставки, поэтому он опознаёт её и после
-    переименования ветки, и после её удаления, и независимо от того, кто
-    её мержил.
-
-    Вторая половина ответа — ветки тех доставок, чей номер в леджер ещё
-    не попал: намерение ревизии пишется write-ahead (§I4), ДО создания
-    PR, поэтому `started` номера не несёт. Отсюда же и условие: ветка
-    возвращается только у `started`. Терминальные записи (`completed`,
-    `abandoned`) без номера ветку не отдают — у `completed` номер есть по
-    построению, а брошенная ревизия у GitHub не спрашивается вовсе (её
-    PR оператор закрыл, и переиздание это уже решило).
-
-    Резолвить ветку в номер здесь НЕ входит — это сетевой запрос, и
-    вызывающая сторона решает, нужен ли он ей (на явном пути
-    `--approval-pr` не нужен).
-    """
-    numbers: set[int] = set()
-    branches: list[str] = []
-    records: list[tuple[str | None, dict]] = [
-        (f"spec/{state.ws_id}-tasks", state.ops.get(_V1_KEY) or {})
-    ]
-    records += [(op.get("branch"), op) for _, op in _revisions(state)]
-    for branch, op in records:
-        if not op:
-            continue
-        pr = op.get("pr")
-        if isinstance(pr, int):
-            numbers.add(pr)
-        elif branch and op.get("status") == "started":
-            branches.append(branch)
-    return numbers, branches
-
-
-def _own_delivery_prs(state: RunState, ops: Ops) -> frozenset[int]:
-    """Номера собственных delivery-PR прогона — обе линии опознания (§I7.3).
-
-    Ветка спрашивается ТОЛЬКО у доставок без номера в леджере: на штатном
-    входе (все доставки `completed`) сетевых запросов не добавляется
-    вовсе, а «слишком слабая идентичность» имени ветки остаётся ровно
-    второй линией — она не решает за номер, а закрывает его отсутствие.
-
-    Ветки берутся СВОИ (`branch` намерения ревизии либо `spec/<ws-id>-
-    tasks` для v1) и резолвятся в номер `find_pr`, а не сверяются с
-    `headRefName` кандидата: ops-примитив `prs_containing_commit` этого
-    поля не отдаёт (jq-проекция в `governance/ops.py`), и проверка по
-    нему была бы мёртвой. Обратная сторона выбора — delivery-PR ЧУЖОГО
-    прогона того же воркстрима здесь не опознаётся: он остаётся вторым
-    кандидатом и уводит поиск в fail-closed шага 4 (отказ с подсказкой
-    `--approval-pr`), а не в подпись мимо человека.
-    """
-    numbers, branches = _ledger_delivery_prs(state)
-    for branch in branches:
-        found = ops.find_pr(state.repo_slug, branch, any_state=True)
-        if found is not None:
-            numbers.add(found)
-    return frozenset(numbers)
-
-
-def _search_correction_pr(
-    state: RunState,
-    ops: Ops,
-    dag: tuple[tuple[str, tuple[str, ...]], ...],
-    base_ref: str,
-) -> int:
-    """Шаги 1–3 §I7: коммиты файлов активного DAG → номер correction-PR.
-
-    Поиск идёт по КАЖДОМУ файлу DAG, а не от файла терминального узла:
-    штатный correction правит upstream-узел и терминального может не
-    касаться вовсе (перепиновку downstream §I7 объявил механической и
-    отложил до штампа переиздания). Пока стартовали с анкера, последним
-    его тронувшим оказывался штамп-коммит НАШЕГО ЖЕ прошлого tasks-PR —
-    единственный кандидат, и поузловое правило схлопывалось в
-    bundle-wide молча.
-
-    Дедупликация — на обоих уровнях, и она не украшение: узлы бандла
-    приезжают в base ОДНИМ коммитом (штамп доставки трогает их разом),
-    так что без неё один и тот же SHA уходил бы в сеть по разу на файл,
-    а один и тот же PR считался бы кандидатом по разу на коммит и сам по
-    себе давал бы «больше одного».
-    """
-    shas: list[str] = []
-    for fname, _ in dag:
-        sha = ops.last_commit_touching(
-            state.target_dir, f"{state.bundle_dir}/{fname}"
-        )
-        if sha is not None and sha not in shas:
-            shas.append(sha)
-    if not shas:
-        raise RuntimeError(
-            f"ни один файл {state.bundle_dir}/ не менялся в истории "
-            f"{base_ref} — correction не найден, подписи взять неоткуда"
-        )
-    candidates: set[int] = set()
-    for sha in shas:
-        candidates.update(
-            p["number"] for p in ops.prs_containing_commit(state.repo_slug, sha)
-            if p.get("state") == "MERGED" and p.get("baseRefName") == base_ref
-        )
-    own = _own_delivery_prs(state, ops)
-    found = sorted(candidates - own)
-    if len(found) == 1:
-        return found[0]
-    listed = ", ".join(f"#{n}" for n in found) or "нет"
-    excluded = ", ".join(f"#{n}" for n in sorted(candidates & own)) or "нет"
-    raise RuntimeError(
-        f"correction-PR не определён однозначно: кандидатов {len(found)} "
-        f"({listed}); собственные доставки прогона исключены ({excluded}), "
-        f"просмотрено коммитов: {len(shas)} — подписи взять неоткуда, "
-        "гадать нельзя. Назовите PR явно: --approval-pr <n>"
-    )
-
-
-def _resolve_correction_pr(
-    state: RunState,
-    ops: Ops,
-    dag: tuple[tuple[str, tuple[str, ...]], ...],
-    base_ref: str,
-    approval_pr: int | None,
-) -> Correction:
-    """PR, доставивший correction → провенанс + затронутые узлы DAG.
-
-    §I7 спеки: подпись штампа берётся у correction-PR, а не у исходного
-    бандл-PR — иначе штамп утверждает, что текущие байты одобрил человек,
-    одобрявший другую версию. `--approval-pr` заменяет ПОИСК (шаги 1–3),
-    но не ПРОВЕРКУ (шаг 5), и проверка ниже — общая для обоих путей: PR
-    вмержен в `base_ref`, подпись полна, `signed_nodes` (состав файлов PR
-    ∩ активный DAG) непуст. Требования «PR менял файл терминального
-    узла» в контракте больше НЕТ — оно и схлопывало поузловое правило
-    обратно в bundle-wide, самоподтверждаясь штампом нашей же доставки.
-
-    Собственная доставка отвергается и на явном пути — по номерам
-    леджера (без сетевого резолва веток: на явном пути его цена не
-    окупается, а оператор называет номер, который видел). Иначе флаг
-    оставался бы единственной дверью, через которую подпись человека,
-    мержившего наш tasks-PR, уходит в штамп как подпись correction'а.
-    """
-    if approval_pr is None:
-        number = _search_correction_pr(state, ops, dag, base_ref)
-        where = f"PR #{number}, найденный по коммитам бандла"
-    else:
-        number = approval_pr
-        where = f"--approval-pr {number}"
-        if number in _ledger_delivery_prs(state)[0]:
-            raise RuntimeError(
-                f"{where}: это собственный delivery-PR прогона, а не "
-                "correction — его подпись принадлежит мержу нашей же "
-                "доставки; назовите PR, доставивший правку бандла"
-            )
-    # Подпись — отдельным запросом: эндпоинт commits/<sha>/pulls отдаёт
-    # merged_by: null даже у вмерженного PR (ревью #164).
-    facts = ops.pr_facts(state.repo_slug, number)
-    if facts.get("state") != "MERGED":
-        raise RuntimeError(
-            f"{where}: PR не вмержен (state={facts.get('state')!r}) — "
-            "подписи взять неоткуда"
-        )
-    if facts.get("baseRefName") != base_ref:
-        raise RuntimeError(
-            f"{where}: нацелен в {facts.get('baseRefName')!r}, а не в "
-            f"{base_ref!r} — подписи взять неоткуда"
-        )
-    merged_by = (facts.get("mergedBy") or {}).get("login")
-    merged_at = facts.get("mergedAt")
-    if not merged_by or not merged_at:
-        raise RuntimeError(
-            f"PR #{number}: нет mergedBy/mergedAt — подпись штампа неполна"
-        )
-    files = set(ops.pr_files(state.repo_slug, number))
-    signed = frozenset(
-        _node_id(fname) for fname, _ in dag
-        if f"{state.bundle_dir}/{fname}" in files
-    )
-    if not signed:
-        # Место снятого требования про терминальный узел: PR, не
-        # тронувший НИ ОДНОГО узла активного DAG, correction'ом этого DAG
-        # не является. Без этой проверки флаг из «заменяет поиск»
-        # превращался бы в «отключает проверку» — подпись любого
-        # вмерженного в base_ref PR уходила бы в штамп бандла.
-        raise RuntimeError(
-            f"{where}: в его составе нет ни одного файла активного DAG "
-            f"({state.bundle_dir}/) — подписывать нечего; назовите PR, "
-            "доставивший правку бандла: --approval-pr <n>"
-        )
-    return Correction(number, merged_by, merged_at, signed)
-
-
 def _previous_dag(
     state: RunState,
     ops: Ops,
@@ -3285,6 +2766,39 @@ def _previous_dag(
     if traces[0] != _node_id(matches[0][-1][0]):
         return None, "unavailable"
     return matches[0], "derived_from_spec"
+
+
+#: Поля намерения, которых у ревизии эпохи штампа не бывает пустыми, а у
+#: новой не бывает вовсе: провенанс correction-PR и состав подписываемых
+#: узлов (§I4, удалены решением владельца 2026-09-10).
+_STAMP_ERA_INTENT_KEYS = ("approval_pr", "signed_nodes")
+
+
+def _require_stampless_intent(n: int, op: dict) -> None:
+    """§I4: ревизия эпохи штампа не возобновляется — отказ с процедурой.
+
+    Ревизия в статусе `started`, несущая `signed_nodes`/`approval_pr`,
+    посчитала свой `prospective_anchor` по ПРОШТАМПОВАННОМУ дереву.
+    Продолжить её значит доставить штамп, которого контракт больше не
+    разрешает; не продолжить — разойтись с записанным anchor'ом. Ни один
+    из двух исходов не годится, поэтому такая ревизия — fail-closed.
+
+    Проверка адресована МЕХАНИЗМУ, а не журналу: завершённые записи той
+    эпохи неприкосновенны и читаются как раньше (§I4, §I7). Поля
+    `approval_pr`/`signed_nodes` остаются в них навсегда — это запись о
+    том, как работала доставка той эпохи, а не нарушение нового правила;
+    вычищать их задним числом было бы мутацией журнала.
+    """
+    era = [key for key in _STAMP_ERA_INTENT_KEYS if key in op]
+    if not era:
+        return
+    raise RuntimeError(
+        f"ревизия {n}: намерение эпохи штампа (несёт {', '.join(era)}) — "
+        "возобновлять нельзя: её prospective_anchor посчитан по "
+        "проштампованному дереву, а доставка больше не подписывает (§I7). "
+        f"Процедура: --abandon-revision {n} --reason \"намерение эпохи "
+        "штампа\", затем обычный --supersede"
+    )
 
 
 def _reconcile_revision(
@@ -3604,7 +3118,6 @@ def deliver_superseded(
     state: RunState,
     ops: Ops,
     legacy_bundle: int | None = None,
-    approval_pr: int | None = None,
     replace: Replacement | None = None,
 ) -> SupersedeResult:
     """Санкционированное переиздание tasks-спеки (спека 2026-09-09).
@@ -3613,19 +3126,24 @@ def deliver_superseded(
     разбор PR первой доставки, если последняя доставка — она (§I3 для
     легаси-v1) → вывод/сверка активного DAG предыдущей доставки (§I8) →
     `content_anchor` (§I5) → сверка с записанным `content_anchor`
-    предыдущей доставки → ТОЛЬКО при расхождении: provenance
-    correction-PR (§I7) → проспективный anchor (§I2) → намерение (§I4,
+    предыдущей доставки → ТОЛЬКО при расхождении: гейт одобренности
+    активного DAG (§I12) → артефактный anchor (§I2) → намерение (§I4,
     write-ahead) → доставка в НОВУЮ ветку `spec/<ws-id>-tasks-v<N>`.
 
-    Сверка §I5 стоит ВЫШЕ разрешения провенанса намеренно (решение
-    владельца 2026-09-09). Провенанс ищет ПОСЛЕДНИЙ коммит, менявший
-    анкер; после доставки это штамп-коммит нашего же tasks-PR, а его
-    подпись — не подпись бандл-PR. Пока §I5 сравнивал пост-штамповый
-    anchor, подпись лежала ВНУТРИ сравниваемых байтов, равенство не
-    достигалось никогда, и каждый `--supersede` заводил очередную
-    ревизию. `content_anchor` подписи не видит и провенанса не требует —
-    бесследный no-op происходит ДО того, как переиздание могло бы
-    принять СВОЙ ЖЕ tasks-PR за correction.
+    **Гейт §I12 стоит ПОСЛЕ §I5, и это осознанный порядок.** Воркстрим, в
+    чьём активном DAG лежит `draft`- или `stale`-узел, но апстрим с
+    прошлой доставки не менялся, завершается бесследным no-op'ом, а не
+    отказом: гейт защищает ДОСТАВКУ, а там, где доставки не будет,
+    защищать нечего. Fail-open здесь не возникает по построению — ни
+    ветки, ни PR, ни записи; обязанность у no-op'а всё же есть, и она
+    исполняется — сообщение НАЗЫВАЕТ долговые узлы, чтобы оператор узнал
+    про долг тогда же, когда спрашивает про переиздание, а не на
+    следующем запуске.
+
+    У ЗАМЕНЫ порядок другой, и тоже по существу: §I5 при ней пропущен
+    (§I10), поэтому гейт — первая проверка, способная отказать, и стоит
+    он на шаге 1 замены — до записи намерения и до закрытия заменяемого
+    PR.
 
     Реконсиляция ТЕРМИНАЛЬНА для вызова во всех исходах, кроме
     `abandon_and_next`: `return_pr`/`complete` возвращают PR ревизии, а
@@ -3648,10 +3166,10 @@ def deliver_superseded(
     Замена стоит ВЫШЕ бесследного no-op §I5, и это не оптимизация:
     §I5 спрашивает про АПСТРИМ («менялось ли содержание»), а замена — про
     ПРЕДЛОЖЕНИЕ («лежит ли на столе дефектный PR»). Живой случай
-    (devtools#172) — дефект в ПОДПИСИ штампа при неизменном апстриме, а
-    `content_anchor` подписи не видит по построению (§I2). Сработай §I5
-    первым, замена стала бы недостижима ровно в том классе случаев, ради
-    которого заведена.
+    (devtools#172) — дефект в ПОДПИСИ доставленного артефакта при
+    неизменном апстриме, а `content_anchor` подписи не видит по
+    построению (§I2). Сработай §I5 первым, замена стала бы недостижима
+    ровно в том классе случаев, ради которого заведена.
     """
     if state.status != "completed":
         raise RuntimeError(
@@ -3675,11 +3193,11 @@ def deliver_superseded(
         )
 
     active = _dag_for(legacy_bundle)
-    # Валидация заменяемой ревизии — ПЕРВЫМ шагом порядка владельца и до
-    # единого эффекта: она read-only и отказывает раньше, чем леджер
-    # тронут. На повторе (намерение уже durable) её результат не нужен —
-    # шаги замены читаются из намерения, — но проверка всё равно уместна:
-    # вмешаться в заменяемый PR могли и между заходами.
+    # Валидация заменяемой ревизии — шаг 1 порядка владельца: она
+    # read-only и отказывает раньше, чем леджер тронут. На повторе
+    # (намерение уже durable) её результат не нужен — шаги замены читаются
+    # из намерения, — но проверка всё равно уместна: вмешаться в
+    # заменяемый PR могли и между заходами.
     replace_fields = (
         _validate_replacement(state, ops, replace) if replace else {}
     )
@@ -3804,20 +3322,11 @@ def deliver_superseded(
         # commit_paths на пустом индексе не создаёт второй коммит.
         # Бросает на чужом коммите/ветке и на «head_sha записан, ветки в
         # клоне нет» (там опознавать нечем, а переиздание затёрло бы SHA).
+        # §I4: намерение эпохи штампа не возобновляется. Проверка стоит
+        # ДО `_recover_commit` — тот трогает git, а отказ обязан прийти
+        # раньше единого эффекта.
+        _require_stampless_intent(n, op)
         _recover_commit(state, ops, n, op)
-        correction = _resolve_correction_pr(
-            state, ops, active, base_ref, op["approval_pr"]
-        )
-        # §I7: состав подписываемых узлов берётся ИЗ НАМЕРЕНИЯ, а не
-        # пересчитывается. Проспективный anchor ревизии посчитан с ним же,
-        # и разойдись они — доставка упёрлась бы в гард §I2 на собственном
-        # повторе. Намерения, записанные до поузлового §I7, состава не
-        # несут: для них — фактический состав correction-PR.
-        signed = op.get("signed_nodes")
-        restamp = (
-            frozenset(signed) if signed is not None
-            else correction.signed_nodes
-        )
         # Окна A и B замены: намерение durable, а заменяемый PR ещё
         # открыт (A) либо уже закрыт (B). Шаг идемпотентен и читается ИЗ
         # НАМЕРЕНИЯ — повтор доводит его, даже когда запущен без
@@ -3831,14 +3340,11 @@ def deliver_superseded(
             bundle_dir=state.bundle_dir,
             base_ref=base_ref,
             ops=ops,
-            approved_by=correction.approved_by,
-            approved_at=correction.approved_at,
             generated_at=op["expected_generated_at"],
             legacy_bundle=legacy_bundle,
             profile=state.profile,
             branch=op["branch"],
             version=op["tasks_version"],
-            restamp_nodes=restamp,
             # Состояние исполнения — из base ЭТОЙ ревизии, взятого из
             # намерения, а не из текущего `base_sha`: детерминизм повтора
             # не должен зависеть от того, куда с тех пор уехал апстрим.
@@ -3916,8 +3422,8 @@ def deliver_superseded(
             "состав активного DAG отличается от предыдущей доставки — "
             "это не переиздание, а другая доставка"
         )
-    # §I5 — ДО провенанса и ДО любого сетевого вызова: `content_anchor`
-    # считается локально по проштампованному дереву и подписи не видит.
+    # §I5 — ДО гейта §I12 и ДО любого сетевого вызова: `content_anchor`
+    # считается локально по base и подписи не видит.
     content = _content_anchor(
         state.target_dir, state.bundle_dir, legacy_bundle
     )
@@ -3942,15 +3448,37 @@ def deliver_superseded(
             "апстрим не менялся — переиздание не требуется "
             f"(content_anchor {content[:7]})"
         )
+        # Обязанность no-op'а: если долговые узлы в DAG есть, НАЗВАТЬ их.
+        # Оператор узнаёт про долг одобрения тогда же, когда спрашивает
+        # про переиздание, а не на следующем запуске. Печать бесследности
+        # не нарушает — `run.json` она не трогает.
+        debts = _approval_findings(
+            state.target_dir, state.bundle_dir, active
+        )
+        if debts:
+            print(
+                "в активном DAG есть неодобренные узлы — доставка их не "
+                "пропустит (§I12), но переиздавать всё равно нечего:\n"
+                + "\n".join(f"- {finding}" for finding in debts)
+                + f"\nПроцедура: {_APPROVE_PROCEDURE}"
+            )
         return SupersedeResult("noop")
 
-    correction = _resolve_correction_pr(
-        state, ops, active, base_ref, approval_pr
-    )
+    # Гейт §I12 — ПОСЛЕ §I5 (см. докстринг) и до единого эффекта: ни
+    # ветки, ни коммита, ни записи в леджер. Внутри `deliver()` он
+    # выполнится ещё раз — но туда управление приходит уже после
+    # `_start_revision`, а отказ обязан не оставить и намерения.
+    #
+    # Эта же строка обслуживает ЗАМЕНУ, и отдельного вызова ей не нужно:
+    # §I5 при замене пропущен (`replace_fields` непусты), поэтому гейт —
+    # первая проверка порядка §I2, способная отказать, и стоит он выше
+    # записи намерения и выше закрытия заменяемого PR (§I10, шаг 1).
+    # Второй вызов рядом с `_validate_replacement` был бы неразличим по
+    # наблюдаемому поведению и только задавал бы контракту порядок
+    # диагностик, которого тот не фиксирует.
+    _require_approved_dag(state.target_dir, state.bundle_dir, active)
     prospective = _prospective_anchor(
-        state.target_dir, state.bundle_dir, correction.approved_by,
-        correction.approved_at, legacy_bundle,
-        restamp_nodes=correction.signed_nodes,
+        state.target_dir, state.bundle_dir, legacy_bundle
     )
     n = _next_revision(state)
     generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -3961,11 +3489,14 @@ def deliver_superseded(
         "base_sha": base_sha,
         "prospective_anchor": prospective,
         "content_anchor": content,
-        "approval_pr": correction.pr,
-        # §I7 поузловой: состав подписываемых узлов durable, а не
-        # пересчитываемый. Возобновление берёт его отсюда — иначе
-        # штамп повтора разошёлся бы с `prospective_anchor` намерения.
-        "signed_nodes": sorted(correction.signed_nodes),
+        # Полей `approval_pr`/`signed_nodes` в намерении БОЛЬШЕ НЕТ: они
+        # несли провенанс штампа, а штампа не осталось (§I7). Заодно исчез
+        # класс расхождений, ради которого `signed_nodes` писался durable:
+        # изменившийся ответ форджи (PR дополнили коммитом, состав файлов
+        # поехал) больше не влияет на байты доставки никак — она бандла не
+        # касается. Статусы узлов ревизия отдельным полем не несёт и нести
+        # не должна: они целиком определены содержимым base, а base
+        # зафиксирован как `base_sha` и сверяется при возобновлении.
         "tasks_version": version,
         "dag": [[f, list(u)] for f, u in active],
         "dag_source": dag_source,
@@ -4012,18 +3543,11 @@ def deliver_superseded(
         bundle_dir=state.bundle_dir,
         base_ref=base_ref,
         ops=ops,
-        approved_by=correction.approved_by,
-        approved_at=correction.approved_at,
         generated_at=generated_at,
         legacy_bundle=legacy_bundle,
         profile=state.profile,
         branch=branch,
         version=version,
-        # §I7: подпись штампа — от correction-PR, а узлы бандла в base уже
-        # approved после доставки v1; без этого множества она молча
-        # отбрасывалась бы. Подписываются ТОЛЬКО узлы, которые
-        # correction-PR действительно менял.
-        restamp_nodes=correction.signed_nodes,
         # Переиздают ровно те воркстримы, что уже в работе: состояние
         # исполнения переносится из ДОСТАВЛЕННОЙ спеки в base (тот же
         # источник, что у `_previous_dag`), не из рабочего дерева и не из
@@ -4145,11 +3669,6 @@ def main(argv: list[str] | None = None) -> int:
              "(content_anchor) — успешный no-op без изменений",
     )
     parser.add_argument(
-        "--approval-pr", type=int, default=None,
-        help="явный correction-PR для подписи штампа, когда автоматика даёт "
-             "ноль или несколько кандидатов; проверяется так же",
-    )
-    parser.add_argument(
         "--approve-node", default=None, metavar="NODE_ID",
         help="одобрить узел активного DAG (§I12): ЕДИНСТВЕННЫЙ переход "
              "draft|stale → approved. Подпись — активный GitHub-логин "
@@ -4228,14 +3747,6 @@ def main(argv: list[str] | None = None) -> int:
             "--conform-approve — третье отдельное действие: запускайте "
             "его отдельным прогоном, не вместе с --supersede/"
             "--abandon-revision"
-        )
-    if args.approval_pr is not None and not args.supersede:
-        # Флаг осмыслен только внутри переиздания (§I7): без --supersede
-        # он никуда не доходит, и выполнялась бы ОБЫЧНАЯ доставка — не
-        # то, что просил оператор, и молча (minor C-7).
-        parser.error(
-            "--approval-pr осмыслен только с --supersede: подпись штампа "
-            "берётся при переиздании"
         )
     if (
         args.replace_revision is not None
@@ -4319,7 +3830,6 @@ def main(argv: list[str] | None = None) -> int:
         try:
             result = deliver_superseded(
                 state, ops, legacy_bundle=args.legacy_bundle,
-                approval_pr=args.approval_pr,
                 replace=(
                     Replacement(args.replace_revision, args.reason)
                     if args.replace_revision is not None else None
