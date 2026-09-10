@@ -595,6 +595,70 @@ def test_push_branch_failure_raises_runtime_error(monkeypatch):
     assert "rc=1" in str(exc.value)
 
 
+# --- Кейс 11c: fetch_branch / switch_to / gh_login (§I12, --approve-node) --
+
+
+def test_fetch_branch_command_and_true_on_rc0(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0)
+
+    found = RealOps().fetch_branch("/tmp/kapelle", "spec/WS-a-bundle-approve")
+
+    assert found is True
+    assert calls[0].argv == [
+        "git", "fetch", "origin", "spec/WS-a-bundle-approve",
+    ]
+    assert calls[0].kwargs["cwd"] == "/tmp/kapelle"
+
+
+def test_fetch_branch_false_when_no_such_remote_branch(monkeypatch):
+    """Первый вызов волны — штатный случай, не сбой: False, не исключение."""
+    _install_fake_run(
+        monkeypatch, returncode=128,
+        stderr="couldn't find remote ref spec/WS-a-bundle-approve",
+    )
+
+    assert RealOps().fetch_branch("/tmp/kapelle", "spec/WS-a-bundle-approve") is False
+
+
+def test_switch_to_forces_branch_onto_named_start_point(monkeypatch):
+    """`-C`, а не `switch`: протухший локальный остаток волны сбрасывается."""
+    calls = _install_fake_run(monkeypatch, returncode=0)
+
+    RealOps().switch_to("/tmp/kapelle", "spec/WS-a-bundle-approve", "FETCH_HEAD")
+
+    assert calls[0].argv == [
+        "git", "switch", "-C", "spec/WS-a-bundle-approve", "FETCH_HEAD",
+    ]
+    assert calls[0].kwargs["cwd"] == "/tmp/kapelle"
+
+
+def test_switch_to_failure_raises_runtime_error(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1, stderr="local changes")
+
+    with pytest.raises(RuntimeError, match="local changes"):
+        RealOps().switch_to("/tmp/kapelle", "spec/WS-a-bundle-approve", "abc123")
+
+
+def test_gh_login_asks_the_ambient_profile(monkeypatch):
+    """Профиль НЕ подменяется: ревью-контурный логин надо УВИДЕТЬ, чтобы
+    отказать (§I12), а не обойти подстановкой GH_CONFIG_DIR."""
+    calls = _install_fake_run(
+        monkeypatch, returncode=0, stdout="andrei-shtanakov\n",
+    )
+
+    assert RealOps().gh_login() == "andrei-shtanakov"
+    assert calls[0].argv == ["gh", "api", "user", "--jq", ".login"]
+    assert "env" not in calls[0].kwargs
+
+
+def test_gh_login_none_on_failure_and_on_empty_answer(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1, stderr="gh: not logged in")
+    assert RealOps().gh_login() is None
+
+    _install_fake_run(monkeypatch, returncode=0, stdout="\n")
+    assert RealOps().gh_login() is None
+
+
 # --- Кейс 12: current_branch / materialize_pr_head (ретроспектива 09-02) ----
 
 

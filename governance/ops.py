@@ -60,6 +60,14 @@ class Ops(Protocol):
 
     def checkout_and_pull(self, target_dir: str, branch: str) -> None: ...
 
+    def fetch_branch(self, target_dir: str, branch: str) -> bool: ...
+
+    def switch_to(
+        self, target_dir: str, branch: str, start_point: str
+    ) -> None: ...
+
+    def gh_login(self) -> str | None: ...
+
     def find_pr(
         self, repo_slug: str, branch: str, *, any_state: bool = False
     ) -> int | None: ...
@@ -543,6 +551,68 @@ class RealOps:
                 f"checkout_and_pull: git pull --ff-only rc={pull.returncode}: "
                 f"{pull.stderr.strip()}"
             )
+
+    def fetch_branch(self, target_dir: str, branch: str) -> bool:
+        """`git fetch origin <branch>`; False — такой ветки на origin нет.
+
+        Волна одобрения (§I12) идёт НАКАПЛИВАЮЩЕЙ веткой, и каждый вызов
+        обязан читать её ГОЛОВУ, а не base: всё, что сделали предыдущие
+        вызовы, лежит в ветке — мержа ещё не было. Поэтому ветка сначала
+        подтягивается (объекты нужны локально), и только потом на неё
+        переключаются `switch_to`.
+
+        False, а не исключение: «ветки на origin нет» — штатный ответ
+        (первый вызов волны), и вызывающий отличает его от сбоя не
+        обязан — `git fetch` несуществующего ref'а и есть единственный
+        способ спросить.
+        """
+        done = subprocess.run(
+            ["git", "fetch", "origin", branch],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        return done.returncode == 0
+
+    def switch_to(self, target_dir: str, branch: str, start_point: str) -> None:
+        """`git switch -C <branch> <start_point>`; сбой — RuntimeError.
+
+        Именно `-C` (force-create), а не `ensure_branch`: та переключается
+        на СУЩЕСТВУЮЩУЮ локальную ветку как есть, и протухший локальный
+        остаток прошлой волны (её PR вмержен, ветка на origin удалена)
+        увёл бы дерево в состояние, которого в base давно нет — тот же
+        дефект, ради которого §I1 требует новой ветки от свежего base.
+        Здесь стартовая точка называется явно: голова origin-ветки, когда
+        волна уже идёт, либо синхронизированный base, когда она начинается.
+        """
+        done = subprocess.run(
+            ["git", "switch", "-C", branch, start_point],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            raise RuntimeError(
+                f"switch_to: git switch -C {branch} {start_point} "
+                f"rc={done.returncode}: {done.stderr.strip()}"
+            )
+
+    def gh_login(self) -> str | None:
+        """Логин АКТИВНОГО gh-профиля (`gh api user`); None — не разрешён.
+
+        Факт, установленный форджей о том, кто вызвал команду, — в отличие
+        от свободного аргумента, который был бы утверждением вызывающего о
+        себе (§I12). Профиль берётся из окружения КАК ЕСТЬ (`GH_CONFIG_DIR`
+        не подставляется): подпись узла обязана принадлежать человеку, а
+        ревью-контурный профиль здесь как раз и надо УВИДЕТЬ, чтобы
+        отказать, — интерпретация ответа не входит в ops.
+
+        None — и «нет авторизации», и «сеть», и пустой ответ: подписывать
+        нечем во всех трёх случаях одинаково.
+        """
+        done = subprocess.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            return None
+        return done.stdout.strip() or None
 
     def find_pr(
         self, repo_slug: str, branch: str, *, any_state: bool = False

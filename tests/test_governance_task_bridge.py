@@ -369,7 +369,132 @@ class _StubOps:
         return None
 
 
-def _target(tmp_path: Path) -> Path:
+_BUNDLE = "workstreams/WS-alpha-7/spec"
+_HUMAN, _HUMAN_AT = "andrei-shtanakov", "2026-09-10T12:00:00+03:00"
+_CHARTER = "00-charter.md"
+_REQUIREMENTS = "10-requirements.md"
+_BEHAVIOUR = "15-behaviour-spec.md"
+_DESIGN = "20-design.md"
+_ACCEPTANCE = "25-acceptance.md"
+_DECOMPOSITION = "30-decomposition.md"
+
+
+def _set_node(target: str, fname: str, **over) -> None:
+    """Точечная правка frontmatter узла бандла (статус, подпись, пины)."""
+    path = Path(target) / _BUNDLE / fname
+    meta, body = task_bridge.split_frontmatter(path.read_text(encoding="utf-8"))
+    for key, value in over.items():
+        if value is None:
+            meta.pop(key, None)
+        else:
+            meta[key] = value
+    path.write_text(
+        task_bridge.join_frontmatter(meta, body), encoding="utf-8"
+    )
+
+
+def _meta(target: str, fname: str) -> dict:
+    """Frontmatter узла бандла."""
+    return task_bridge.split_frontmatter(
+        (Path(target) / _BUNDLE / fname).read_text(encoding="utf-8")
+    )[0]
+
+
+def _node_bytes_of(target: str) -> dict[str, bytes]:
+    """Байты всех узлов бандла — для побайтовой сверки «узел не тронут»."""
+    base = Path(target) / _BUNDLE
+    return {
+        fname: (base / fname).read_bytes()
+        for fname, _ in task_bridge._BUNDLE_DAG
+    }
+
+
+def _repin_all(target: str, bundle_dir: str = _BUNDLE) -> None:
+    """Пересчитать пины всего DAG по факту, не трогая подписи и статусы.
+
+    Механическая перепиновка — НЕ событие approve (§I12), и здесь она
+    нужна ровно затем, чтобы показать: подпись верхнего узла доезжает до
+    пинов всех, кто его пинует, а канонизация обязана этого не видеть."""
+    dag = task_bridge._BUNDLE_DAG
+    files = {task_bridge._node_id(f): f for f, _ in dag}
+    base = Path(target) / bundle_dir
+    for fname, upstream_ids in dag:
+        if not upstream_ids:
+            continue
+        path = base / fname
+        meta, body = task_bridge.split_frontmatter(
+            path.read_text(encoding="utf-8")
+        )
+        meta["upstream_hashes"] = {
+            u: task_bridge.blob_sha1(
+                (base / files[u]).read_text(encoding="utf-8")
+            )
+            for u in upstream_ids
+        }
+        path.write_text(
+            task_bridge.join_frontmatter(meta, body), encoding="utf-8"
+        )
+
+
+def _approve_all(
+    target: str,
+    by: str = _HUMAN,
+    at: str = _HUMAN_AT,
+    dag=None,
+    bundle_dir: str = _BUNDLE,
+) -> None:
+    """Честно одобренный бандл: статус, подпись и пины по факту.
+
+    Независимый от `approve_node` оракул: тесты гейта не должны зеленеть
+    оттого, что кривая запись согласована с кривым предикатом. Обход
+    топологический (порядок DAG), поэтому пин каждого узла считается уже
+    по финальным байтам его upstream.
+
+    Это и есть РЕАЛЬНЫЙ base доставки под новым контрактом: бандл, по
+    которому человек прошёл `--approve-node` и чей approve-PR вмержен.
+    Бандл целиком `draft` — состояние ДО этого шага конвейера, и
+    доставочная фикстура им быть больше не вправе (§I12).
+
+    `approved_content_hash` (условие 4) считается ЗДЕСЬ по определению
+    контракта, а не заимствуется у `_self_content_hash`: проекция —
+    часть предмета проверки, и общая реализация свела бы условие (4) к
+    тавтологии «мы посчитали так же, как посчитали»."""
+    contour = (
+        "status", "version", "approved_by", "approved_at",
+        "upstream_hashes", "approved_content_hash",
+    )
+    dag = dag or task_bridge._BUNDLE_DAG
+    files = {task_bridge._node_id(f): f for f, _ in dag}
+    base = Path(target) / bundle_dir
+    for fname, upstream_ids in dag:
+        path = base / fname
+        meta, body = task_bridge.split_frontmatter(
+            path.read_text(encoding="utf-8")
+        )
+        meta["status"] = "approved"
+        meta["approved_by"] = by
+        meta["approved_at"] = at
+        if upstream_ids:
+            meta["upstream_hashes"] = {
+                u: task_bridge.blob_sha1(
+                    (base / files[u]).read_text(encoding="utf-8")
+                )
+                for u in upstream_ids
+            }
+        meta["approved_content_hash"] = task_bridge.blob_sha1(
+            task_bridge.join_frontmatter(
+                {k: v for k, v in meta.items() if k not in contour}, body,
+            )
+        )
+        path.write_text(
+            task_bridge.join_frontmatter(meta, body), encoding="utf-8"
+        )
+
+
+def _target(tmp_path: Path, approved: bool = True) -> Path:
+    """Клон-фикстура с бандлом. `approved=True` (дефолт) — РЕАЛЬНЫЙ base
+    доставки: DAG честно одобрен человеком. `approved=False` — бандл, как
+    его сгенерировал авторинг: целиком `draft`, доставке не годится."""
     target = tmp_path / "alpha"
     bundle = target / "workstreams/WS-alpha-7/spec"
     bundle.mkdir(parents=True)
@@ -379,6 +504,8 @@ def _target(tmp_path: Path) -> Path:
     (bundle / "20-design.md").write_text(DESIGN_MD)
     (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
     (bundle / "30-decomposition.md").write_text(DECOMPOSITION_MD)
+    if approved:
+        _approve_all(str(target))
     return target
 
 
@@ -393,8 +520,6 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=ops,
-        approved_by="andrei-shtanakov",
-        approved_at="2026-09-02T06:07:39Z",
     )
     assert pr == 77
     spec = target / "spec/WS-alpha-7-tasks.md"
@@ -403,23 +528,16 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
     names = [c[0] for c in ops.calls]
     # база освежается до ветки
     assert names.index("checkout_and_pull") < names.index("ensure_branch")
-    # один коммит: штамп шести файлов бандла (полный DAG до decomposition) +
-    # файл спеки
+    # один коммит, и в нём РОВНО спека: файлов бандла доставка не несёт
+    # (§I7 — наблюдаемое следствие того, что она их не трогает).
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
-    assert commit[1] == (
-        "workstreams/WS-alpha-7/spec/00-charter.md",
-        "workstreams/WS-alpha-7/spec/10-requirements.md",
-        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
-        "workstreams/WS-alpha-7/spec/20-design.md",
-        "workstreams/WS-alpha-7/spec/25-acceptance.md",
-        "workstreams/WS-alpha-7/spec/30-decomposition.md",
-        "spec/WS-alpha-7-tasks.md",
-    )
+    assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
     assert ("push_branch", "spec/WS-alpha-7-tasks") in ops.calls
     assert "draft" in ops.pr_body.lower()
-    assert "штамп статусов" in ops.pr_body
-    # Пин tasks-спеки — blob decomposition ПОСЛЕ штампа (иначе протух бы в
-    # том же PR): decomposition — терминальный узел _BUNDLE_DAG (Task 7).
+    assert "честно одобрен" in ops.pr_body
+    # Пин tasks-спеки — blob терминального узла активного DAG в base
+    # (decomposition, Task 7): доставка бандла не меняет, значит стухнуть
+    # пину не от чего.
     from governance.stale_adapter import blob_sha1
     stamped_blob = blob_sha1(
         (target / "workstreams/WS-alpha-7/spec/30-decomposition.md")
@@ -467,8 +585,6 @@ def test_deliver_default_generated_at_has_utc_offset(tmp_path: Path) -> None:
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=ops,
-        approved_by="a",
-        approved_at="t",
     )
     spec = target / "spec/WS-alpha-7-tasks.md"
     meta, _body = task_bridge.split_frontmatter(spec.read_text(encoding="utf-8"))
@@ -486,7 +602,6 @@ def test_deliver_dirty_target_refuses(tmp_path: Path) -> None:
             bundle_dir="workstreams/WS-alpha-7/spec",
             base_ref="master",
             ops=_StubOps(dirty=True),
-            approved_by="a", approved_at="t",
         )
 
 
@@ -502,7 +617,6 @@ def test_deliver_missing_behaviour_refuses(tmp_path: Path) -> None:
             bundle_dir="workstreams/WS-alpha-7/spec",
             base_ref="master",
             ops=_StubOps(),
-            approved_by="a", approved_at="t",
         )
 
 
@@ -523,6 +637,9 @@ def test_deliver_reads_bundle_only_after_base_checkout(tmp_path: Path) -> None:
             (bundle / "20-design.md").write_text(DESIGN_MD)
             (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
             (bundle / "30-decomposition.md").write_text(DECOMPOSITION_MD)
+            # Бандл в base уже одобрен человеком — иначе гейт §I12
+            # отказал бы, и тест проверял бы не тот порядок.
+            _approve_all(str(target))
 
     pr = task_bridge.deliver(
         target_dir=str(target),
@@ -532,7 +649,6 @@ def test_deliver_reads_bundle_only_after_base_checkout(tmp_path: Path) -> None:
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=_LateOps(),
-        approved_by="a", approved_at="t",
     )
     assert pr == 77
 
@@ -672,124 +788,6 @@ def test_split_frontmatter_normalizes_yaml_error_to_value_error() -> None:
     broken = "---\nspec_stage: tasks\nversion: [1, 2\n---\n\nbody\n"
     with pytest.raises(ValueError, match="невалидный YAML"):
         task_bridge.split_frontmatter(broken)
-
-
-def test_stamp_bundle_approves_and_repins_chain(tmp_path: Path) -> None:
-    """Урок 2 ретроспективы: штамп статусов + перепиновка DAG (Task 5:
-    цепочка стала DAG — design пинует ОБА upstream, requirements и
-    behaviour-spec; Task 7 плана acceptance-node: acceptance — тоже оба
-    upstream, decomposition пинует ОБА upstream — design и acceptance).
-    Каждый следующий файл пинует blob предыдущего(-их) ПОСЛЕ его штампа."""
-    from governance.stale_adapter import blob_sha1
-
-    target = _target(tmp_path)
-    changed = task_bridge.stamp_bundle_approved(
-        str(target), "workstreams/WS-alpha-7/spec",
-        approved_by="ai-prosto", approved_at="2026-09-02T10:00:00Z",
-    )
-    assert changed == [
-        "workstreams/WS-alpha-7/spec/00-charter.md",
-        "workstreams/WS-alpha-7/spec/10-requirements.md",
-        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
-        "workstreams/WS-alpha-7/spec/20-design.md",
-        "workstreams/WS-alpha-7/spec/25-acceptance.md",
-        "workstreams/WS-alpha-7/spec/30-decomposition.md",
-    ]
-    bundle = target / "workstreams/WS-alpha-7/spec"
-    charter_meta, _ = task_bridge.split_frontmatter(
-        (bundle / "00-charter.md").read_text(encoding="utf-8")
-    )
-    assert charter_meta["status"] == "approved"
-    assert charter_meta["approved_by"] == "ai-prosto"
-    assert charter_meta["version"] == 2
-    req_text = (bundle / "10-requirements.md").read_text(encoding="utf-8")
-    req_meta, _ = task_bridge.split_frontmatter(req_text)
-    assert req_meta["upstream_hashes"]["charter"] == blob_sha1(
-        (bundle / "00-charter.md").read_text(encoding="utf-8")
-    )
-    beh_text = (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
-    beh_meta, _ = task_bridge.split_frontmatter(beh_text)
-    assert beh_meta["status"] == "approved"
-    assert beh_meta["upstream_hashes"]["requirements"] == blob_sha1(req_text)
-    design_text = (bundle / "20-design.md").read_text(encoding="utf-8")
-    design_meta, _ = task_bridge.split_frontmatter(design_text)
-    assert design_meta["status"] == "approved"
-    assert design_meta["upstream_hashes"]["requirements"] == blob_sha1(
-        req_text
-    )
-    assert design_meta["upstream_hashes"]["behaviour-spec"] == blob_sha1(
-        beh_text
-    )
-    acceptance_text = (bundle / "25-acceptance.md").read_text(
-        encoding="utf-8"
-    )
-    acceptance_meta, _ = task_bridge.split_frontmatter(acceptance_text)
-    assert acceptance_meta["status"] == "approved"
-    assert acceptance_meta["upstream_hashes"]["requirements"] == blob_sha1(
-        req_text
-    )
-    assert acceptance_meta["upstream_hashes"]["behaviour-spec"] == blob_sha1(
-        beh_text
-    )
-    decomposition_meta, _ = task_bridge.split_frontmatter(
-        (bundle / "30-decomposition.md").read_text(encoding="utf-8")
-    )
-    assert decomposition_meta["status"] == "approved"
-    assert decomposition_meta["upstream_hashes"]["design"] == blob_sha1(
-        design_text
-    )
-    assert decomposition_meta["upstream_hashes"]["acceptance"] == blob_sha1(
-        acceptance_text
-    )
-
-
-def test_stamp_bundle_is_idempotent(tmp_path: Path) -> None:
-    target = _target(tmp_path)
-    task_bridge.stamp_bundle_approved(
-        str(target), "workstreams/WS-alpha-7/spec",
-        approved_by="x", approved_at="t",
-    )
-    again = task_bridge.stamp_bundle_approved(
-        str(target), "workstreams/WS-alpha-7/spec",
-        approved_by="y", approved_at="t2",
-    )
-    assert again == []
-
-
-def test_prospective_anchor_matches_real_stamp(tmp_path: Path) -> None:
-    """Проспективный anchor равен тому, что даст фактический штамп."""
-    from governance.stale_adapter import blob_sha1
-
-    target = _target(tmp_path)
-    prospective = task_bridge._prospective_anchor(
-        str(target), "workstreams/WS-alpha-7/spec", "ai-prosto",
-        "2026-09-09T05:00:00Z", None,
-    )
-    task_bridge.stamp_bundle_approved(
-        str(target), "workstreams/WS-alpha-7/spec", "ai-prosto",
-        "2026-09-09T05:00:00Z",
-    )
-    actual = blob_sha1(
-        (target / "workstreams/WS-alpha-7/spec/30-decomposition.md")
-        .read_text(encoding="utf-8")
-    )
-    assert prospective == actual
-
-
-def test_prospective_anchor_writes_nothing(tmp_path: Path) -> None:
-    from governance.stale_adapter import blob_sha1
-
-    target = _target(tmp_path)
-    anchor_file = target / "workstreams/WS-alpha-7/spec/30-decomposition.md"
-    before = blob_sha1(anchor_file.read_text(encoding="utf-8"))
-    task_bridge._prospective_anchor(
-        str(target), "workstreams/WS-alpha-7/spec", "ai-prosto",
-        "2026-09-09T05:00:00Z", None,
-    )
-    after = blob_sha1(anchor_file.read_text(encoding="utf-8"))
-    assert before == after
-
-
 def test_prospective_anchor_refuses_incomplete_bundle(tmp_path: Path) -> None:
     """Легаси-бандл + забытый `--legacy-bundle=5` ⇒ RuntimeError с процедурой.
 
@@ -803,8 +801,7 @@ def test_prospective_anchor_refuses_incomplete_bundle(tmp_path: Path) -> None:
     target = _target_legacy_5(tmp_path, BEHAVIOUR_MD, DECOMPOSITION_MD_LEGACY5)
     with pytest.raises(RuntimeError) as exc_info:
         task_bridge._prospective_anchor(
-            str(target), "workstreams/WS-alpha-7/spec", "ai-prosto",
-            "2026-09-09T05:00:00Z", None,
+            str(target), "workstreams/WS-alpha-7/spec", None,
         )
     message = str(exc_info.value)
     assert "25-acceptance.md" in message
@@ -860,7 +857,7 @@ def test_dag_for_invalid_value_raises() -> None:
 
 def test_legacy_5_exact_composition(tmp_path: Path) -> None:
     """Каталог с ровно 5 узлами (00/10/15/20/30, эра ДО раскатки
-    acceptance-узла): `legacy_bundle=5` штампует по
+    acceptance-узла): `legacy_bundle=5` принимается по
     `_BUNDLE_DAG_LEGACY5`; `legacy_bundle=4` отказывает (лишний
     30-decomposition.md в каталоге); `legacy_bundle=None` (полный DAG)
     отказывает — недостаёт 25-acceptance.md, текст называет и файл, и
@@ -876,27 +873,19 @@ def test_legacy_5_exact_composition(tmp_path: Path) -> None:
     (bundle / "20-design.md").write_text(DESIGN_MD)
     (bundle / "30-decomposition.md").write_text(DECOMPOSITION_MD_LEGACY5)
 
-    changed = task_bridge.stamp_bundle_approved(
-        str(target), "workstreams/WS-alpha-7/spec",
-        approved_by="a", approved_at="t", legacy_bundle=5,
+    # Носитель гарда — `_content_anchor` (её зовёт и доставка, и
+    # переиздание): состав читается ДО любой работы с узлами.
+    assert task_bridge._content_anchor(
+        str(target), "workstreams/WS-alpha-7/spec", 5,
     )
-    assert changed == [
-        "workstreams/WS-alpha-7/spec/00-charter.md",
-        "workstreams/WS-alpha-7/spec/10-requirements.md",
-        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
-        "workstreams/WS-alpha-7/spec/20-design.md",
-        "workstreams/WS-alpha-7/spec/30-decomposition.md",
-    ]
 
     with pytest.raises(RuntimeError, match="не совпадает"):
-        task_bridge.stamp_bundle_approved(
-            str(target), "workstreams/WS-alpha-7/spec",
-            approved_by="a", approved_at="t", legacy_bundle=4,
+        task_bridge._content_anchor(
+            str(target), "workstreams/WS-alpha-7/spec", 4,
         )
     with pytest.raises(RuntimeError) as exc_info:
-        task_bridge.stamp_bundle_approved(
-            str(target), "workstreams/WS-alpha-7/spec",
-            approved_by="a", approved_at="t",
+        task_bridge._content_anchor(
+            str(target), "workstreams/WS-alpha-7/spec", None,
         )
     message = str(exc_info.value)
     assert "25-acceptance.md" in message
@@ -904,15 +893,14 @@ def test_legacy_5_exact_composition(tmp_path: Path) -> None:
 
     (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
     with pytest.raises(RuntimeError, match="не совпадает"):
-        task_bridge.stamp_bundle_approved(
-            str(target), "workstreams/WS-alpha-7/spec",
-            approved_by="a", approved_at="t", legacy_bundle=5,
+        task_bridge._content_anchor(
+            str(target), "workstreams/WS-alpha-7/spec", 5,
         )
 
 
 def test_legacy_bundle_exact_composition(tmp_path: Path) -> None:
     """Каталог с ровно 4 узлами (00/10/15/20, без 30-decomposition.md):
-    legacy_bundle=4 штампует и якорит на design; legacy_bundle=3 и
+    legacy_bundle=4 принимается; legacy_bundle=3 и
     legacy_bundle=None (полный DAG) отказывают — состав не совпал точно
     (запрет «по самому длинному существующему», спека §4)."""
     target = tmp_path / "alpha"
@@ -923,26 +911,17 @@ def test_legacy_bundle_exact_composition(tmp_path: Path) -> None:
     (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
     (bundle / "20-design.md").write_text(DESIGN_MD)
 
-    changed = task_bridge.stamp_bundle_approved(
-        str(target), "workstreams/WS-alpha-7/spec",
-        approved_by="a", approved_at="t", legacy_bundle=4,
+    assert task_bridge._content_anchor(
+        str(target), "workstreams/WS-alpha-7/spec", 4,
     )
-    assert changed == [
-        "workstreams/WS-alpha-7/spec/00-charter.md",
-        "workstreams/WS-alpha-7/spec/10-requirements.md",
-        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
-        "workstreams/WS-alpha-7/spec/20-design.md",
-    ]
 
     with pytest.raises(RuntimeError, match="не совпадает"):
-        task_bridge.stamp_bundle_approved(
-            str(target), "workstreams/WS-alpha-7/spec",
-            approved_by="a", approved_at="t", legacy_bundle=3,
+        task_bridge._content_anchor(
+            str(target), "workstreams/WS-alpha-7/spec", 3,
         )
     with pytest.raises(RuntimeError, match=r"--legacy-bundle=3\|4"):
-        task_bridge.stamp_bundle_approved(
-            str(target), "workstreams/WS-alpha-7/spec",
-            approved_by="a", approved_at="t",
+        task_bridge._content_anchor(
+            str(target), "workstreams/WS-alpha-7/spec", None,
         )
 
 
@@ -959,7 +938,7 @@ def test_legacy_flag_rejects_out_of_range_value() -> None:
 # --- Task 7: переходный режим легаси-бандлов (без узла design) -----------
 
 
-def _target_legacy(tmp_path: Path) -> Path:
+def _target_legacy(tmp_path: Path, approved: bool = True) -> Path:
     """Бандл из трёх узлов (charter/requirements/behaviour-spec) — БЕЗ
     20-design.md, как несли соседние репо до раскатки design-узла."""
     target = tmp_path / "alpha"
@@ -968,47 +947,9 @@ def _target_legacy(tmp_path: Path) -> Path:
     (bundle / "00-charter.md").write_text(CHARTER_MD)
     (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
     (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
+    if approved:
+        _approve_all(str(target), dag=task_bridge._dag_for(3))
     return target
-
-
-def test_stamp_bundle_without_design_refuses_without_legacy_flag(
-    tmp_path: Path,
-) -> None:
-    """Step 1(а): 3-узловой бандл без флага ⇒ RuntimeError, а не сырой
-    traceback от `read_text` — текст называет файл и обе процедуры
-    (доавторить design; --legacy-bundle)."""
-    target = _target_legacy(tmp_path)
-    with pytest.raises(RuntimeError) as exc_info:
-        task_bridge.stamp_bundle_approved(
-            str(target), "workstreams/WS-alpha-7/spec",
-            approved_by="a", approved_at="t",
-        )
-    message = str(exc_info.value)
-    assert "20-design.md" in message
-    assert "design" in message.lower()
-    assert "--legacy-bundle" in message
-
-
-def test_stamp_bundle_legacy_mode_stamps_three_node_prefix(
-    tmp_path: Path,
-) -> None:
-    """Step 1(б): `legacy_bundle=3` ⇒ штамп только по 3-узловому
-    префиксу DAG, никакого чтения 20-design.md."""
-    target = _target_legacy(tmp_path)
-    changed = task_bridge.stamp_bundle_approved(
-        str(target), "workstreams/WS-alpha-7/spec",
-        approved_by="a", approved_at="t", legacy_bundle=3,
-    )
-    assert changed == [
-        "workstreams/WS-alpha-7/spec/00-charter.md",
-        "workstreams/WS-alpha-7/spec/10-requirements.md",
-        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
-    ]
-    beh_meta, _ = task_bridge.split_frontmatter(
-        (target / "workstreams/WS-alpha-7/spec/15-behaviour-spec.md")
-        .read_text(encoding="utf-8")
-    )
-    assert beh_meta["status"] == "approved"
 
 
 def test_conform_legacy_normalizes_to_behaviour_spec_no_design_read(
@@ -1080,7 +1021,6 @@ def test_deliver_missing_design_refuses_before_branch_creation(
             bundle_dir="workstreams/WS-alpha-7/spec",
             base_ref="master",
             ops=ops,
-            approved_by="a", approved_at="t",
         )
     message = str(exc_info.value)
     assert "20-design.md" in message
@@ -1103,7 +1043,6 @@ def test_deliver_legacy_bundle_writes_spec_anchored_on_behaviour(
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=ops,
-        approved_by="a", approved_at="t",
         legacy_bundle=3,
     )
     assert pr == 77
@@ -1112,18 +1051,13 @@ def test_deliver_legacy_bundle_writes_spec_anchored_on_behaviour(
     assert meta["traces_to"] == ["behaviour-spec"]
     assert "design" not in meta["upstream_hashes"]
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
-    assert commit[1] == (
-        "workstreams/WS-alpha-7/spec/00-charter.md",
-        "workstreams/WS-alpha-7/spec/10-requirements.md",
-        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
-        "spec/WS-alpha-7-tasks.md",
-    )
+    assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
     # секция резолюций design не рендерится вовсе — легаси-бандл design
     # текста не несёт
     assert "Решения открытых вопросов" not in spec.read_text()
 
 
-def _target_legacy_4(tmp_path: Path) -> Path:
+def _target_legacy_4(tmp_path: Path, approved: bool = True) -> Path:
     """Бандл из четырёх узлов (charter/requirements/behaviour-spec/design)
     — БЕЗ 30-decomposition.md, как несли соседние репо до раскатки
     decomposition-узла (продакшн затронет этот переход первым: design уже
@@ -1135,6 +1069,8 @@ def _target_legacy_4(tmp_path: Path) -> Path:
     (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
     (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
     (bundle / "20-design.md").write_text(DESIGN_MD)
+    if approved:
+        _approve_all(str(target), dag=task_bridge._dag_for(4))
     return target
 
 
@@ -1161,7 +1097,6 @@ def test_deliver_legacy_bundle_4_writes_spec_anchored_on_design(
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=ops,
-        approved_by="a", approved_at="t",
         legacy_bundle=4,
     )
     assert pr == 77
@@ -1200,6 +1135,7 @@ def test_deliver_reads_design_only_after_base_checkout(tmp_path: Path) -> None:
             (bundle / "20-design.md").write_text(DESIGN_MD)
             (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
             (bundle / "30-decomposition.md").write_text(DECOMPOSITION_MD)
+            _approve_all(str(target))
 
     pr = task_bridge.deliver(
         target_dir=str(target),
@@ -1209,7 +1145,6 @@ def test_deliver_reads_design_only_after_base_checkout(tmp_path: Path) -> None:
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=_LateOps(),
-        approved_by="a", approved_at="t",
     )
     assert pr == 77
 
@@ -1915,7 +1850,6 @@ def test_dt_path_skips_merge_featureless(tmp_path: Path) -> None:
             bundle_dir="workstreams/WS-alpha-7/spec",
             base_ref="master",
             ops=ops,
-            approved_by="a", approved_at="t",
         )
     message = str(exc_info.value)
     assert "single-owner" in message
@@ -1966,6 +1900,7 @@ def test_deliver_verify_dt_now_delivers(
     (bundle / "20-design.md").write_text(DESIGN_MD)
     (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
     (bundle / "30-decomposition.md").write_text(DECOMPOSITION_VERIFY_MD)
+    _approve_all(str(target))
     ops = _StubOps()
     pr = task_bridge.deliver(
         target_dir=str(target),
@@ -1975,7 +1910,6 @@ def test_deliver_verify_dt_now_delivers(
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=ops,
-        approved_by="a", approved_at="t",
     )
     assert pr is not None
     spec_text = (target / "spec" / "WS-alpha-7-tasks.md").read_text()
@@ -2004,6 +1938,7 @@ def test_deliver_does_not_check_verifies_path_existence_on_disk(
     (bundle / "20-design.md").write_text(DESIGN_MD)
     (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
     (bundle / "30-decomposition.md").write_text(DECOMPOSITION_VERIFY_MD)
+    _approve_all(str(target))
     # НЕ создаём tests/test_y.py — verifies указывает на файл, которого
     # ещё нет на диске (его создаст владелец DT позже, при исполнении).
     ops = _StubOps()
@@ -2015,7 +1950,6 @@ def test_deliver_does_not_check_verifies_path_existence_on_disk(
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=ops,
-        approved_by="a", approved_at="t",
     )
     assert pr is not None
     spec_text = (target / "spec" / "WS-alpha-7-tasks.md").read_text()
@@ -2074,6 +2008,7 @@ def test_deliver_legacy_verify_dt_without_verifies_still_delivers(
     (bundle / "30-decomposition.md").write_text(
         DECOMPOSITION_VERIFY_LEGACY_MD
     )
+    _approve_all(str(target))
     ops = _StubOps()
     pr = task_bridge.deliver(
         target_dir=str(target),
@@ -2083,7 +2018,6 @@ def test_deliver_legacy_verify_dt_without_verifies_still_delivers(
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=ops,
-        approved_by="a", approved_at="t",
     )
     assert pr is not None
     spec_text = (target / "spec" / "WS-alpha-7-tasks.md").read_text()
@@ -2094,7 +2028,8 @@ def test_deliver_legacy_verify_dt_without_verifies_still_delivers(
 
 
 def _target_legacy_5(
-    tmp_path: Path, behaviour_md: str, decomposition_md: str
+    tmp_path: Path, behaviour_md: str, decomposition_md: str,
+    approved: bool = True,
 ) -> Path:
     """Бандл из пяти узлов (00/10/15/20/30) — эра ДО раскатки
     acceptance-узла: соседний репо уже несёт design и decomposition, но
@@ -2107,6 +2042,8 @@ def _target_legacy_5(
     (bundle / "15-behaviour-spec.md").write_text(behaviour_md)
     (bundle / "20-design.md").write_text(DESIGN_MD)
     (bundle / "30-decomposition.md").write_text(decomposition_md)
+    if approved:
+        _approve_all(str(target), dag=task_bridge._dag_for(5))
     return target
 
 
@@ -2129,7 +2066,6 @@ def test_legacy_5_invalid_dt_graph_refuses(tmp_path: Path) -> None:
             bundle_dir="workstreams/WS-alpha-7/spec",
             base_ref="master",
             ops=ops,
-            approved_by="a", approved_at="t",
             legacy_bundle=5,
         )
     message = str(exc_info.value)
@@ -2152,7 +2088,6 @@ def test_legacy_5_goes_dt_path_with_graph_validation(tmp_path: Path) -> None:
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=ops,
-        approved_by="a", approved_at="t",
         legacy_bundle=5,
     )
     assert pr == 77
@@ -2162,17 +2097,9 @@ def test_legacy_5_goes_dt_path_with_graph_validation(tmp_path: Path) -> None:
     assert "(DT-" in spec_text
     meta, _body = task_bridge.split_frontmatter(spec_text)
     assert meta["traces_to"] == ["decomposition"]
-    # 5-узловой легаси-состав: 25-acceptance.md НЕ входит в штамп/коммит —
-    # этой эры узел ещё не существовал.
+    # Коммит доставки несёт ровно спеку (§I7) на любом составе DAG.
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
-    assert commit[1] == (
-        "workstreams/WS-alpha-7/spec/00-charter.md",
-        "workstreams/WS-alpha-7/spec/10-requirements.md",
-        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
-        "workstreams/WS-alpha-7/spec/20-design.md",
-        "workstreams/WS-alpha-7/spec/30-decomposition.md",
-        "spec/WS-alpha-7-tasks.md",
-    )
+    assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
 
 
 def test_deliver_full_dag_renders_via_render_tasks_dt(tmp_path: Path) -> None:
@@ -2188,7 +2115,6 @@ def test_deliver_full_dag_renders_via_render_tasks_dt(tmp_path: Path) -> None:
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=ops,
-        approved_by="a", approved_at="t",
     )
     assert pr == 77
     text = (target / "spec/WS-alpha-7-tasks.md").read_text()
@@ -2285,7 +2211,6 @@ def test_deliver_full_dag_embeds_acceptance_section(tmp_path: Path) -> None:
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=ops,
-        approved_by="a", approved_at="t",
     )
     text = (target / "spec/WS-alpha-7-tasks.md").read_text()
     assert "## Критерии приёмки (уровень acceptance)" in text
@@ -2305,7 +2230,6 @@ def test_deliver_legacy_5_has_no_acceptance_section(tmp_path: Path) -> None:
         bundle_dir="workstreams/WS-alpha-7/spec",
         base_ref="master",
         ops=ops5,
-        approved_by="a", approved_at="t",
         legacy_bundle=5,
     )
     text5 = (target5 / "spec/WS-alpha-7-tasks.md").read_text()
@@ -2501,15 +2425,13 @@ def test_deliver_for_run_records_anchor_of_stamp(
     from governance import run_state as rs
 
     state = _recon_state(tmp_path, monkeypatch)
-    # Ожидание считается ДО доставки, на НЕпроштампованном дереве и тем же
-    # способом, каким его посчитает переиздание (§I2). Подпись — та, что
-    # `_ReconOps.pr_facts` отдаёт для бандл-PR: другой штамп дал бы другие
-    # байты анкера, и совпадение ничего бы не значило.
+    # Ожидание считается ДО доставки и тем же способом, каким его
+    # посчитает переиздание (§I2): доставка бандла не меняет, значит
+    # байты анкера до и после неё — одни и те же.
     expected = task_bridge._prospective_anchor(
-        state.target_dir, state.bundle_dir, "ai-prosto",
-        "2026-09-07T00:00:00Z", None,
+        state.target_dir, state.bundle_dir, None,
     )
-    # А вот `content_anchor` от подписи не зависит вовсе — считается без неё.
+    # `content_anchor` от подписи не зависит вовсе — считается без неё.
     expected_content = task_bridge._content_anchor(
         state.target_dir, state.bundle_dir, None
     )
@@ -2709,7 +2631,7 @@ def test_last_delivery_skips_started_v1(tmp_path, monkeypatch):
     state = _recon_state(tmp_path, monkeypatch, op={"status": "started"})
     assert tb._last_delivery(state) is None
     with pytest.raises(RuntimeError, match="переиздавать нечего"):
-        tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
+        tb.deliver_superseded(state, _SupersedeOps())
 
 
 def test_start_revision_records_full_intent(tmp_path, monkeypatch):
@@ -2791,106 +2713,39 @@ def test_completed_v1_op_is_never_rewritten(tmp_path, monkeypatch):
 # --- _resolve_correction_pr (§I7: подпись штампа берётся у correction-PR) --
 
 
-_ANCHOR_REL = "workstreams/WS-alpha-7/spec/30-decomposition.md"
-#: Активный DAG фикстуры — аргумент `_resolve_correction_pr`: анкер и
-#: состав подписываемых узлов выводятся ИЗ НЕГО, а не подаются отдельно.
-_DAG = task_bridge._BUNDLE_DAG
-#: node-id узлов, которые тронул correction-PR по умолчанию фикстуры
-#: (`_ProvOps.files` = только анкер) — §I7 поузловой.
-_ANCHOR_NODES = frozenset({"decomposition"})
-
-
-def _pr_signature(pr: int) -> tuple[str, str]:
-    """Подпись мержа, РАЗЛИЧАЮЩАЯ номера PR: (mergedBy.login, mergedAt).
-
-    Пока стаб отдавал одну подпись на любой номер, бандл-PR и correction-PR
-    были в тестах НЕРАЗЛИЧИМЫ, и регрессия §I5 «переиздание сразу после
-    доставки — бесследный no-op» зеленела тавтологически: сравнивались
-    байты, в которые входила одна и та же подпись. В жизни эти PR-ы
-    мержат разные люди в разное время, и именно на этом различии дефект
-    §I5×§I7 и стоял — стаб обязан его отражать.
-    """
-    return f"merger-{pr}", f"2026-09-09T05:{pr // 60 % 60:02d}:{pr % 60:02d}Z"
-
-
 _FULL_FACTS = {
     "state": "MERGED", "baseRefName": "master",
-    # Значения — только маркер «поле есть»: конкретную подпись
-    # `_ProvOps.pr_facts` подставляет по НОМЕРУ PR (`_pr_signature`).
-    "mergedAt": "-", "mergedBy": {"login": "-"},
+    "mergedAt": "2026-09-09T05:00:00Z", "mergedBy": {"login": "merger"},
 }
 
 
-class _ProvOps(_StubOps):
-    """Стаб провенанса §I7: коммиты по файлам DAG, PR-ы по коммитам, факты.
+class _ForgeOps(_StubOps):
+    """Стаб форджи для реконсиляции: PR по ветке + факты PR.
 
-    Коммит и список PR настраиваются ПОФАЙЛОВО (`commits`) и ПОКОММИТНО
-    (`prs_by_sha`), а состав файлов — ПОНОМЕРНО (`files_by_pr`). Пока
-    ответы были одним значением на любой аргумент, фикстура описывала
-    вход, которого в бою не бывает: correction всегда трогал анкер, и
-    поузловой §I7 проверялся входом, на котором он неотличим от
-    bundle-wide. Скаляры (`commit`/`prs`/`files`) остались дефолтом
-    «одинаково на всё» — их достаточно там, где предмет теста не в
-    различении.
+    Провенанс correction-PR (`last_commit_touching`/
+    `prs_containing_commit`/`pr_files`) из контракта ушёл вместе со
+    штампом (§I7): подпись доставка не берёт ни у одного PR, потому что
+    не подписывает. Осталось ровно то, что читает реконсиляция §I3, —
+    номер PR по имени ветки и его состояние.
     """
 
-    def __init__(self, commit="c1", prs=None, files=None, facts=None,
-                 commits=None, prs_by_sha=None, files_by_pr=None,
-                 branch_prs=None):
+    def __init__(self, facts=None, branch_prs=None):
         super().__init__()
-        self.commit, self.prs = commit, (prs if prs is not None else [])
-        # Точечные переопределения скаляров: путь → SHA, SHA → список PR,
-        # номер PR → состав файлов.
-        self.commits = dict(commits or {})
-        self.prs_by_sha = dict(prs_by_sha or {})
-        self.files_by_pr = dict(files_by_pr or {})
-        # Ветка → номер PR для `find_pr`: вторая линия опознания
-        # собственных доставок (§I7 шаг 3) резолвит ИМЕННО так.
+        # Ветка → номер PR для `find_pr`: реконсиляция ревизии опознаёт
+        # свой PR именно так, а идентичность сверяет по `head_sha`.
         self.branch_prs = dict(branch_prs or {})
-        # Состав файлов PR (§I7, шаг 5): по умолчанию названный PR ТРОГАЛ
-        # анкер — на пути возобновления состав приезжает из намерения
-        # ревизии, и этот дефолт ему соответствует.
-        self.files = [_ANCHOR_REL] if files is None else files
-        # Ответ `pr_facts` настраиваемый (F-04 финального ревью): пока он
-        # был ОДНИМ значением «вмержен, подпись полна», обе проверки шага 4
-        # §I7 снимались мутацией незаметно — ветвление по этим полям
-        # физически не могло сработать ни в одном тесте.
+        # Ответ `pr_facts` настраиваемый: состояние PR — вход таблицы §I3,
+        # и один ответ на любой номер снимал бы её ветвление мутацией
+        # незаметно.
         self.facts = _FULL_FACTS if facts is None else facts
-        # Пути, по которым спрашивали провенанс: `anchor_rel` выводится из
-        # ТЕРМИНАЛЬНОГО узла активного DAG, и без записи аргумента этот
-        # вывод ничем не удерживался.
-        self.touched: list[str] = []
-
-    def last_commit_touching(self, target_dir, rel_path):
-        self.touched.append(rel_path)
-        return self.commits.get(rel_path, self.commit)
-
-    def prs_containing_commit(self, repo_slug, sha):
-        self.calls.append(("prs_containing_commit", sha))
-        return list(self.prs_by_sha.get(sha, self.prs))
-
-    def pr_files(self, repo_slug, pr):
-        self.calls.append(("pr_files", pr))
-        return list(self.files_by_pr.get(pr, self.files))
 
     def find_pr(self, repo_slug, branch, *, any_state=False):
         self.calls.append(("find_pr", branch))
         return self.branch_prs.get(branch)
 
     def pr_facts(self, repo_slug, pr):
-        # Подпись живёт ЗДЕСЬ, а не в списке PR-ов по коммиту (ревью #164),
-        # и ЗАВИСИТ ОТ НОМЕРА PR (`_pr_signature`): одинаковый ответ на
-        # любой номер делал бандл-PR и correction-PR
-        # неразличимыми. `None` в шаблоне `facts` сохраняется — им тесты
-        # проверяют «подпись неполна».
         self.calls.append(("pr_facts", pr))
-        facts = dict(self.facts)
-        by, at = _pr_signature(pr)
-        if facts.get("mergedBy") is not None:
-            facts["mergedBy"] = {"login": by}
-        if facts.get("mergedAt") is not None:
-            facts["mergedAt"] = at
-        return facts
+        return dict(self.facts)
 
 
 _MERGED_PR = {
@@ -2898,394 +2753,12 @@ _MERGED_PR = {
     "mergedAt": "2026-09-09T05:00:00Z", "mergedBy": "andrei-shtanakov",
     "mergeCommit": "c1",
 }
-
-
-def test_provenance_single_merged_candidate(tmp_path, monkeypatch):
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    corr = tb._resolve_correction_pr(
-        state, _ProvOps(prs=[_MERGED_PR]), _DAG, "master", None,
-    )
-    assert (corr.pr, corr.approved_by) == (403, _pr_signature(403)[0])
-    assert corr.approved_at == _pr_signature(403)[1]
-
-
-def test_provenance_zero_candidates_refuses(tmp_path, monkeypatch):
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    with pytest.raises(RuntimeError, match="подписи взять неоткуда"):
-        tb._resolve_correction_pr(
-            state, _ProvOps(prs=[]), _DAG, "master", None
-        )
-
-
-def test_provenance_two_candidates_refuses(tmp_path, monkeypatch):
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    other = {**_MERGED_PR, "number": 999}
-    with pytest.raises(RuntimeError, match="подписи взять неоткуда"):
-        tb._resolve_correction_pr(
-            state, _ProvOps(prs=[_MERGED_PR, other]), _DAG, "master", None
-        )
-
-
-def test_provenance_filter_ignores_open_pr_on_same_commit(
-    tmp_path, monkeypatch
-):
-    """Половина фильтра кандидатов «state == MERGED» — своим случаем.
-
-    Тот же коммит анкера обычно попадает и в открытые PR (ветка, куда его
-    взяли черри-пиком, или ревью-ветка сверху). Пока все тесты подавали
-    ТОЛЬКО вмерженные PR, «отобрали правильных» и «отобрали всех подряд»
-    были неразличимы: удаление этой половины фильтра проходило незаметно
-    (F-05, мутация M30). На мутанте этот вход даёт двух кандидатов и
-    отказ — то есть он и различает."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    open_pr = {**_MERGED_PR, "number": 999, "state": "OPEN"}
-    corr = tb._resolve_correction_pr(
-        state, _ProvOps(prs=[_MERGED_PR, open_pr]), _DAG, "master",
-        None,
-    )
-    assert (corr.pr, corr.approved_by) == (403, _pr_signature(403)[0])
-
-
-def test_provenance_filter_ignores_pr_merged_into_other_base(
-    tmp_path, monkeypatch
-):
-    """Вторая половина фильтра — «baseRefName == base_ref».
-
-    Коммит анкера живёт и в PR, вмерженных в релизную ветку; их подпись к
-    штампу на `master` отношения не имеет. Без своего входа эту половину
-    тоже можно было удалить незаметно (F-05, мутация M31)."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    other_base = {**_MERGED_PR, "number": 999, "baseRefName": "release"}
-    corr = tb._resolve_correction_pr(
-        state, _ProvOps(prs=[_MERGED_PR, other_base]), _DAG, "master",
-        None,
-    )
-    assert (corr.pr, corr.approved_by) == (403, _pr_signature(403)[0])
-
-
-def test_provenance_found_pr_not_merged_refuses(tmp_path, monkeypatch):
-    """§I7 шаг 4 на пути ПОИСКА: найденный PR обязан быть вмерженным.
-
-    Список по коммиту (`prs_containing_commit`) и факты PR (`pr_facts`) —
-    два разных запроса, и второй может застать PR уже не вмерженным
-    (список из кэша, PR откатили). Пока `pr_facts` был одноответным
-    стабом, проверка снималась мутацией незаметно (F-04, M33)."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    ops = _ProvOps(
-        prs=[_MERGED_PR], facts={"state": "OPEN", "baseRefName": "master"},
-    )
-    with pytest.raises(RuntimeError, match="найденный по коммитам"):
-        tb._resolve_correction_pr(state, ops, _DAG, "master", None)
-
-
-@pytest.mark.parametrize(
-    "approval_pr", [None, 500], ids=["поиск", "явный-approval-pr"],
-)
-def test_provenance_incomplete_signature_refuses(
-    approval_pr, tmp_path, monkeypatch
-):
-    """§I7: пустые mergedBy/mergedAt — отказ, а не штамп с `None`.
-
-    Гвард стоит против НАБЛЮДЁННОГО поведения API, а не гипотетического:
-    `governance/ops.py:prs_containing_commit` в докстринге фиксирует, что
-    эндпоинт `commits/<sha>/pulls` отдаёт `merged_by: null` даже у
-    вмерженного PR. Без этого теста подпись `approved_by=None` уходила бы
-    в штамп бандла (F-04, мутация M35). Ветка проверки общая для поиска и
-    явного `--approval-pr` — обе формы входа."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    ops = _ProvOps(prs=[_MERGED_PR], facts={
-        "state": "MERGED", "baseRefName": "master",
-        "mergedBy": None, "mergedAt": None,
-    })
-    with pytest.raises(RuntimeError, match="подпись штампа неполна"):
-        tb._resolve_correction_pr(
-            state, ops, _DAG, "master", approval_pr
-        )
-
-
-@pytest.mark.parametrize(
-    "approval_pr", [None, 500], ids=["поиск", "явный-approval-pr"],
-)
-def test_provenance_refuses_pr_merged_into_other_base(
-    approval_pr, tmp_path, monkeypatch
-):
-    """§I7 шаг 5: PR обязан целить в `base_ref` — на ОБОИХ путях.
-
-    Соседний тест проверяет только вмерженность, поэтому PR, вмерженный в
-    ЧУЖУЮ ветку, тестом не подавался, и проверку base можно было удалить
-    незаметно (F-06, мутация M34). Оператор называет такой PR по ошибке
-    легко: тот же узел, тот же автор, другой релизный поток.
-
-    На автоматическом пути условие держалось фильтром кандидатов, но
-    список (`prs_containing_commit`) и факты (`pr_facts`) — два разных
-    запроса, и расходятся они ровно так же, как по `state`: список из
-    кэша, PR перенацелен. Контракт требует проверки на обоих путях
-    именно поэтому — «по построению» не факт, а рассуждение."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    ops = _ProvOps(
-        prs=[_MERGED_PR], facts={**_FULL_FACTS, "baseRefName": "release"},
-    )
-    with pytest.raises(RuntimeError, match="нацелен в"):
-        tb._resolve_correction_pr(state, ops, _DAG, "master", approval_pr)
-
-
-def test_provenance_no_commit_touching_any_dag_file_refuses(
-    tmp_path, monkeypatch
-):
-    """Шаг 1 §I7: ни одного коммита НИ ПО ОДНОМУ файлу DAG — отказ.
-
-    Отказ переехал с файла терминального узла на весь состав: пока он
-    стоял на анкере, бандл, чей анкер не менялся, а upstream менялся,
-    отказывал вместо поиска."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    with pytest.raises(RuntimeError, match="ни один файл"):
-        tb._resolve_correction_pr(
-            state, _ProvOps(commit=None), _DAG, "master", None
-        )
-
-
-def test_provenance_explicit_flag_is_verified_not_trusted(
-    tmp_path, monkeypatch
-):
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-
-    class _Explicit(_ProvOps):
-        def pr_facts(self, repo_slug, pr):
-            return {"state": "OPEN", "baseRefName": "master"}
-
-    with pytest.raises(RuntimeError, match="не вмержен"):
-        tb._resolve_correction_pr(
-            state, _Explicit(), _DAG, "master", 500
-        )
-
-
-@pytest.mark.parametrize(
-    "approval_pr", [None, 500], ids=["поиск", "явный-approval-pr"],
-)
-def test_provenance_refuses_pr_without_active_dag_files(
-    approval_pr, tmp_path, monkeypatch
-):
-    """§I7 шаг 5, третье условие: пустой `signed_nodes` — отказ.
-
-    Место снятого требования «PR менял файл терминального узла». Без
-    какой-либо проверки состава флаг из «заменяет поиск» становился бы
-    «отключает проверку»: оператор называет любой вмерженный в base_ref
-    PR, и его mergedBy/mergedAt уходят в штамп бандла — штамп
-    утверждает, что байты одобрил человек, который их не видел (C-5).
-    На автоматическом пути тот же вход даёт внешний PR, попавший в
-    кандидаты по коммиту, который бандла не касался.
-
-    Проверка общая для обоих путей — этим она и отличается от снятой:
-    та стояла на терминальном файле и на автоматическом пути
-    самоподтверждалась штампом нашей же доставки."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    ops = _ProvOps(prs=[_MERGED_PR], files=["docs/README.md"])
-    with pytest.raises(RuntimeError, match="ни одного файла активного DAG"):
-        tb._resolve_correction_pr(state, ops, _DAG, "master", approval_pr)
-
-
-def test_provenance_accepts_pr_touching_upstream_node_only(
-    tmp_path, monkeypatch
-):
-    """Обратная сторона: PR, тронувший ТОЛЬКО upstream-узел, принимается.
-
-    Ровно тот вход, который старое требование «менял анкер» отвергало:
-    correction правит requirements, терминального узла не касается.
-    Заодно — состав `signed_nodes` (§I7 поузловой): в него входят
-    ТОЛЬКО узлы активного DAG, и файл вне бандла (`docs/README.md`) в
-    подписи не участвует."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    ops = _ProvOps(files=["docs/README.md", _REQUIREMENTS_REL])
-    corr = tb._resolve_correction_pr(state, ops, _DAG, "master", 500)
-    assert (corr.pr, corr.approved_by) == (500, _pr_signature(500)[0])
-    assert corr.signed_nodes == frozenset({"requirements"})
-
-
-def test_provenance_two_real_candidates_names_the_flag(
-    tmp_path, monkeypatch
-):
-    """Шаг 4: два НАСТОЯЩИХ correction-кандидата — fail-closed с подсказкой.
-
-    Ни один из них не собственная доставка (леджер прогона пуст), то есть
-    исключить нечего и выбрать нельзя. Оператору нужен выход, а не
-    констатация: сообщение обязано назвать `--approval-pr <n>` и
-    перечислить кандидатов — иначе он узнаёт, что система отказалась, но
-    не что делать дальше."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    other = {**_MERGED_PR, "number": 555}
-    ops = _ProvOps(
-        commits={_REQUIREMENTS_REL: "c-corr"},
-        prs_by_sha={"c-corr": [_MERGED_PR], "c1": [other]},
-    )
-    with pytest.raises(RuntimeError) as err:
-        tb._resolve_correction_pr(state, ops, _DAG, "master", None)
-    assert "--approval-pr" in str(err.value)
-    assert "#403" in str(err.value) and "#555" in str(err.value)
-
-
-def test_provenance_search_dedupes_commits_and_prs(tmp_path, monkeypatch):
-    """Стоимость шага 1–2: один коммит на весь бандл — один запрос в сеть.
-
-    Узлы бандла приезжают в base ОДНИМ коммитом (штамп доставки трогает
-    их разом). Без дедупликации SHA `prs_containing_commit` звался бы по
-    разу на файл, а один и тот же PR попадал бы в кандидаты шесть раз и
-    сам по себе давал бы «больше одного» — то есть отсутствие дедупа
-    ломает не только цену, но и шаг 4."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    ops = _ProvOps(prs=[_MERGED_PR], files=[_REQUIREMENTS_REL])
-    corr = tb._resolve_correction_pr(state, ops, _DAG, "master", None)
-    assert corr.pr == 403
-    # Спрошены ВСЕ файлы DAG, а сеть — один раз.
-    assert ops.touched == [
-        f"{state.bundle_dir}/{fname}" for fname, _ in tb._BUNDLE_DAG
-    ]
-    assert [c for c in ops.calls if c[0] == "prs_containing_commit"] == [
-        ("prs_containing_commit", "c1")
-    ]
-
-
 def _ledger_with_delivery(state, **op) -> None:
     """Леджер прогона с завершённой доставкой v1 (номер PR — в записи)."""
     from governance import run_state as rs
 
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, **op}
     rs.save(state)
-
-
-def test_provenance_excludes_own_delivery_by_ledger_number(
-    tmp_path, monkeypatch
-):
-    """Шаг 3, первая линия: свой delivery-PR снят по номеру из леджера.
-
-    Вход боевой: correction тронул только requirements, поэтому по
-    остальным пяти файлам последним коммитом стоит штамп НАШЕГО tasks-PR
-    #5 — вмерженного в `master` и по всем формальным признакам
-    неотличимого от correction'а. Без исключения кандидатов двое и поиск
-    отказывает; хуже того, останься он один (correction без PR) — подпись
-    человека, мержившего нашу же доставку, ушла бы в штамп как подпись
-    correction'а."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    _ledger_with_delivery(state)
-    ops = _ProvOps(
-        commit=_V1_STAMP_SHA,
-        commits={_REQUIREMENTS_REL: _CORRECTION_SHA},
-        prs_by_sha={
-            _CORRECTION_SHA: [_MERGED_PR], _V1_STAMP_SHA: [_V1_TASKS_PR],
-        },
-        files=[_REQUIREMENTS_REL],
-    )
-    corr = tb._resolve_correction_pr(state, ops, _DAG, "master", None)
-    # Свой PR в кандидатах БЫЛ — его коммит спрошен, — и снят.
-    assert ("prs_containing_commit", _V1_STAMP_SHA) in ops.calls
-    assert (corr.pr, corr.approved_by) == (403, _pr_signature(403)[0])
-    assert corr.signed_nodes == frozenset({"requirements"})
-
-
-def test_provenance_search_asks_no_branch_when_numbers_known(
-    tmp_path, monkeypatch
-):
-    """Цена второй линии: у доставки с номером ветка не спрашивается.
-
-    Вторая линия — сетевой `find_pr`. Штатный вход (все доставки
-    `completed`, номера в леджере) обязан не платить за неё вовсе, иначе
-    подорожавший поиск дорожает ещё на запрос за факт, который уже
-    записан у нас самих."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    _ledger_with_delivery(state)
-    ops = _ProvOps(prs=[_MERGED_PR], files=[_REQUIREMENTS_REL])
-    tb._resolve_correction_pr(state, ops, _DAG, "master", None)
-    assert not [c for c in ops.calls if c[0] == "find_pr"]
-
-
-def test_provenance_excludes_started_delivery_by_branch(
-    tmp_path, monkeypatch
-):
-    """Шаг 3, вторая линия: у `started` ревизии номера ещё нет.
-
-    Намерение пишется write-ahead (§I4) — ДО создания PR, — поэтому
-    доставка, упавшая между push и `create_draft_pr`, в леджере номера не
-    несёт. Её PR при этом мог быть создан и вмержен человеком, и тогда
-    первая линия свою же доставку не опознаёт. Вторая линия резолвит
-    номер по СВОЕЙ ветке из намерения."""
-    from governance import run_state as rs
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    _ledger_with_delivery(state)
-    state.ops["tasks-deliver-v2"] = {
-        "status": "started", "revision": 2,
-        "branch": "spec/WS-alpha-7-tasks-v2",
-    }
-    rs.save(state)
-    v2_pr = {**_MERGED_PR, "number": 77, "mergeCommit": "c-v2-stamp"}
-    ops = _ProvOps(
-        commit="c-v2-stamp",
-        commits={_REQUIREMENTS_REL: _CORRECTION_SHA},
-        prs_by_sha={
-            _CORRECTION_SHA: [_MERGED_PR], "c-v2-stamp": [v2_pr],
-        },
-        files=[_REQUIREMENTS_REL],
-        branch_prs={"spec/WS-alpha-7-tasks-v2": 77},
-    )
-    corr = tb._resolve_correction_pr(state, ops, _DAG, "master", None)
-    assert ("find_pr", "spec/WS-alpha-7-tasks-v2") in ops.calls
-    assert corr.pr == 403
-
-
-def test_provenance_explicit_flag_refuses_own_delivery(
-    tmp_path, monkeypatch
-):
-    """Явный путь: назвать свой delivery-PR нельзя.
-
-    Контракт владельца ставит исключение собственных доставок в ПОИСК
-    (шаг 3), а флаг поиск заменяет. Но остаться единственной дверью, через
-    которую подпись мержа нашего же tasks-PR уходит в штамп как подпись
-    correction'а, флаг не должен: проверка состава его не спасает — наш
-    tasks-PR трогает узлы DAG (он их и штампует), то есть `signed_nodes`
-    у него непуст. Отказ идёт по номерам леджера, БЕЗ сетевого резолва
-    веток — на явном пути оператор называет номер, который видел."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    _ledger_with_delivery(state)
-    ops = _ProvOps(files=[_REQUIREMENTS_REL])
-    with pytest.raises(RuntimeError, match="собственный delivery-PR"):
-        tb._resolve_correction_pr(state, ops, _DAG, "master", 5)
-    assert not [c for c in ops.calls if c[0] == "find_pr"]
-
-
 # --- _previous_dag (§I8: сверка активного DAG предыдущей доставки) --------
 
 
@@ -3808,12 +3281,12 @@ def test_recover_commit_refuses_right_parent_wrong_blob(
 # --- deliver_superseded: сборка переиздания (Task 7) ----------------------
 
 
-class _SupersedeOps(_ProvOps):
-    """Стаб на базе `_ProvOps` для `deliver_superseded`: живого git нет,
+class _SupersedeOps(_ForgeOps):
+    """Стаб на базе `_ForgeOps` для `deliver_superseded`: живого git нет,
     примитивы восстановления коммита/идентичности возвращают None —
     ветвление на "коммита ещё нет" (`_recover_commit`) и "PR не найден"
     (`_reconcile_revision`), не на чужую работу под тем же именем.
-    `find_pr` наследуется от `_ProvOps`: по умолчанию карта веток пуста,
+    `find_pr` наследуется от `_ForgeOps`: по умолчанию карта веток пуста,
     то есть PR-а по ветке нет.
 
     `rev_parse` наследуется от `_StubOps` (Task 7b): "HEAD" → синтетический
@@ -3876,22 +3349,18 @@ def test_supersede_equal_content_anchor_is_traceless_noop(
     }
     rs.save(state)
     before = (rs.run_dir("r-recon") / "run.json").read_bytes()
-    ops = _ProvOps(prs=[_MERGED_PR])
+    ops = _ForgeOps()
     result = tb.deliver_superseded(state, ops)
     after = (rs.run_dir("r-recon") / "run.json").read_bytes()
     assert result == tb.SupersedeResult("noop")
     assert before == after
-    # §I5 стоит ВЫШЕ §I7: провенанс не разрешался вовсе. Утверждение
-    # именно о вызовах, а не только об исходе: пока сверка шла ПОСЛЕ
-    # поиска correction-PR, «последним, кто трогал анкер» оказывался
-    # штамп-коммит нашего же tasks-PR — на нём дефект и стоял.
-    assert ops.touched == []
+    # Ни ветки, ни PR, и ни одного сетевого вызова СВЕРХ реконсиляции
+    # §I3 (шаг 2 порядка): сверка §I5 считается локально по base, а гейт
+    # §I12 до неё не доходит.
+    assert [c for c in ops.calls if c[0] == "pr_facts"] == [("pr_facts", 5)]
     assert not [c for c in ops.calls if c[0] in (
-        "prs_containing_commit", "pr_files"
+        "ensure_branch", "create_draft_pr"
     )]
-    # `pr_facts` по PR первой доставки (#5) — это §I3, не §I7; предмет
-    # утверждения — что фактов correction-PR (#403) никто не спрашивал.
-    assert ("pr_facts", 403) not in ops.calls
 
 
 def test_supersede_changed_anchor_opens_new_branch_and_pr(
@@ -3905,7 +3374,7 @@ def test_supersede_changed_anchor_opens_new_branch_and_pr(
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ-ДРУГОЙ"}
     rs.save(state)
-    ops = _SupersedeOps(prs=[_MERGED_PR])
+    ops = _SupersedeOps()
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "delivered", 77
     )
@@ -3913,7 +3382,9 @@ def test_supersede_changed_anchor_opens_new_branch_and_pr(
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["status"] == "completed"
     assert saved["supersedes"] == 1
-    assert saved["approval_pr"] == 403
+    # Провенанс correction-PR из механизма ушёл (§I7): полей нет вовсе,
+    # а не «есть со значением None» — величины больше не существует.
+    assert "approval_pr" not in saved and "signed_nodes" not in saved
     # Поля записи, а не только PR и ветка (minor ревью Task 7, B10):
     # незаполненные head_sha/tasks_blob раньше не ловились ничем.
     delivered = (
@@ -3927,14 +3398,13 @@ def test_supersede_changed_anchor_opens_new_branch_and_pr(
     assert rs.load("r-recon").ops["tasks-deliver"]["pr"] == 5   # v1 цела
 
 
-# --- §I7 на РЕАЛЬНОМ состоянии base: бандл уже проштампован ---------------
+# --- РЕАЛЬНОЕ состояние base переиздания ---------------------------------
 #
-# Все supersede-тесты выше стартуют с бандла в `status: draft` (так его
-# кладёт `_target`), и штамп в них срабатывает обычной веткой. Боевого
-# входа это не описывает: доставка v1 штампует узлы и коммитит их в свой
-# же tasks-PR, человек его мержит — значит на момент переиздания в base
-# лежит бандл со `status: approved` и подписью ПРЕДЫДУЩЕЙ доставки.
-# Хелперы ниже приводят фикстуру ровно в это состояние.
+# Фикстура обязана описывать состояние ПОСЛЕ предыдущего шага конвейера,
+# а не начальное. Бандл, целиком лежащий `draft`, — это вход авторинга;
+# вход переиздания другой: человек прошёл по DAG `--approve-node`,
+# approve-PR вмержен, и в base лежит честно одобренный бандл. Хелперы
+# ниже приводят фикстуру ровно в это состояние.
 
 _PREV_MERGER = "prev-bundle-merger"
 _PREV_MERGED_AT = "2026-09-01T00:00:00Z"
@@ -3943,15 +3413,18 @@ _PREV_MERGED_AT = "2026-09-01T00:00:00Z"
 def _stamp_base_as_previous_delivery(
     state, legacy_bundle: int | None = None
 ) -> None:
-    """Бандл в base после мержа tasks-PR доставки v1: узлы approved."""
+    """Бандл в base переиздания: DAG честно одобрен человеком.
+
+    Раньше это состояние создавал штамп доставки v1 (её tasks-PR нёс
+    файлы бандла и был вмержен). Теперь доставка бандла не касается
+    (§I7), и в base лежит результат человеческой волны `--approve-node`,
+    чей approve-PR вмержен, — та же честно одобренная фикстура, только
+    происхождение подписи другое."""
     from governance import task_bridge as tb
 
-    tb.stamp_bundle_approved(
-        state.target_dir,
-        state.bundle_dir,
-        approved_by=_PREV_MERGER,
-        approved_at=_PREV_MERGED_AT,
-        legacy_bundle=legacy_bundle,
+    _approve_all(
+        state.target_dir, by=_PREV_MERGER, at=_PREV_MERGED_AT,
+        dag=tb._dag_for(legacy_bundle), bundle_dir=state.bundle_dir,
     )
 
 
@@ -3993,180 +3466,7 @@ def _supersede_over_stamped_base(tmp_path, monkeypatch):
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ-ДРУГОЙ"}
     rs.save(state)
-    return state, _SupersedeOps(prs=[_MERGED_PR])
-
-
-def test_supersede_restamps_signature_on_approved_base(
-    tmp_path, monkeypatch
-):
-    """§I7: подпись переизданного анкера — от correction-PR, не от v1.
-
-    Без перештампа `stamp_bundle_approved` молча пропускает узел
-    (`status` уже approved), и в переизданный PR уходит анкер, чей
-    `approved_by` называет человека, мержившего ИСХОДНЫЙ бандл-PR, —
-    дословно то, что §I7 объявляет недопустимым. Наблюдаемо это и в
-    коммите: штамп обязан в него попасть, а не исчезнуть."""
-    from governance import task_bridge as tb
-
-    state, ops = _supersede_over_stamped_base(tmp_path, monkeypatch)
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
-    meta = _anchor_meta(state)
-    assert (meta["approved_by"], meta["approved_at"]) == _pr_signature(403)
-    committed = next(
-        call[1] for call in ops.calls if call[0] == "commit_paths"
-    )
-    assert _ANCHOR_REL in committed
-
-
-def test_supersede_restamp_keeps_node_version(tmp_path, monkeypatch):
-    """Перештамп подписи не растит `version` узла.
-
-    Инкремент в обычном пути привязан к ПЕРЕХОДУ draft → approved, а не к
-    «файл тронули»: перештамп исправляет провенанс тех же байтов, которые
-    доставил correction-PR, нового поколения документа не заводит."""
-    from governance import task_bridge as tb
-
-    state, ops = _supersede_over_stamped_base(tmp_path, monkeypatch)
-    before = _anchor_meta(state)["version"]
-    tb.deliver_superseded(state, ops)
-    assert _anchor_meta(state)["version"] == before
-
-
-def test_supersede_restamp_is_idempotent(tmp_path, monkeypatch):
-    """Повтор перештампа с той же подписью не меняет байт.
-
-    На этом стоит §I3.1: возобновление ревизии обязано пересчитать тот же
-    anchor, иначе гард §I2 объявит расхождение на собственном повторе."""
-    from governance import task_bridge as tb
-
-    state, ops = _supersede_over_stamped_base(tmp_path, monkeypatch)
-    tb.deliver_superseded(state, ops)
-    anchor_path = (
-        Path(state.target_dir) / state.bundle_dir / "30-decomposition.md"
-    )
-    after_first = anchor_path.read_bytes()
-    by, at = _pr_signature(403)
-    assert tb.stamp_bundle_approved(
-        state.target_dir, state.bundle_dir,
-        approved_by=by, approved_at=at,
-        restamp_nodes=_ANCHOR_NODES,
-    ) == []
-    assert anchor_path.read_bytes() == after_first
-
-
-def test_restamp_flag_off_keeps_approved_node_untouched(
-    tmp_path: Path,
-) -> None:
-    """Обычная доставка не перештамповывает: узлов к подписи нет вовсе.
-
-    Дубль `test_stamp_bundle_is_idempotent` по смыслу, но с явным
-    `restamp_nodes=None`: он держит границу «новый режим — только у
-    переиздания», а не общий инвариант идемпотентности."""
-    target = _target(tmp_path)
-    task_bridge.stamp_bundle_approved(
-        str(target), "workstreams/WS-alpha-7/spec",
-        approved_by="x", approved_at="t",
-    )
-    assert task_bridge.stamp_bundle_approved(
-        str(target), "workstreams/WS-alpha-7/spec",
-        approved_by="y", approved_at="t2",
-        restamp_nodes=None,
-    ) == []
-    meta, _ = task_bridge.split_frontmatter(
-        (
-            target / "workstreams/WS-alpha-7/spec/00-charter.md"
-        ).read_text(encoding="utf-8")
-    )
-    assert meta["approved_by"] == "x"
-
-
-def test_prospective_anchor_matches_restamp(tmp_path: Path) -> None:
-    """§I2 на режиме переиздания: проспективный штамп = фактический.
-
-    Флаг обязан доходить до ОБОИХ вычислений одинаково; забытый в одном
-    из них, он разводит anchor'ы, и гард `_commit_facts_cb` рвёт доставку
-    между коммитом и push."""
-    from governance.stale_adapter import blob_sha1
-
-    target = _target(tmp_path)
-    bundle_dir = "workstreams/WS-alpha-7/spec"
-    task_bridge.stamp_bundle_approved(
-        str(target), bundle_dir, approved_by=_PREV_MERGER,
-        approved_at=_PREV_MERGED_AT,
-    )
-    prospective = task_bridge._prospective_anchor(
-        str(target), bundle_dir, "andrei-shtanakov",
-        "2026-09-09T05:00:00Z", None, restamp_nodes=_ANCHOR_NODES,
-    )
-    task_bridge.stamp_bundle_approved(
-        str(target), bundle_dir, "andrei-shtanakov",
-        "2026-09-09T05:00:00Z", restamp_nodes=_ANCHOR_NODES,
-    )
-    assert prospective == blob_sha1(
-        (Path(target) / bundle_dir / "30-decomposition.md").read_text(
-            encoding="utf-8"
-        )
-    )
-
-
-def test_supersede_pr_body_names_correction_pr(tmp_path, monkeypatch):
-    """Тело переизданного PR называет источником подписи correction-PR.
-
-    Формулировка обычной доставки («mergedBy бандл-PR») на переиздании
-    ложна ровно так же, как была ложна сама подпись."""
-    from governance import task_bridge as tb
-
-    state, ops = _supersede_over_stamped_base(tmp_path, monkeypatch)
-    tb.deliver_superseded(state, ops)
-    assert "mergedBy correction-PR" in ops.pr_body
-    assert "mergedBy бандл-PR" not in ops.pr_body
-
-
-def test_supersede_resume_restamps_too(tmp_path, monkeypatch):
-    """Путь возобновления (§I3 «started | нет PR») тоже перештамповывает.
-
-    Намерение ревизии несёт `prospective_anchor`, посчитанный С
-    перештампом; доставка возобновления, забывшая флаг, дала бы другой
-    анкер и упёрлась бы в гард §I2 — но проверяем прямо подпись, чтобы
-    тест краснел по причине, а не по сообщению гарда."""
-    from governance import run_state as rs
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    _stamp_base_as_previous_delivery(state)
-    _apply_correction_to_anchor(state)
-    by, at = _pr_signature(403)
-    prospective = tb._prospective_anchor(
-        state.target_dir, state.bundle_dir, by, at, None,
-        restamp_nodes=_ANCHOR_NODES,
-    )
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
-    state.ops["tasks-deliver-v2"] = {
-        "status": "started",
-        "branch": "spec/WS-alpha-7-tasks-v2",
-        "base_sha": "base-sha-1",
-        "prospective_anchor": prospective,
-        "approval_pr": 403,
-        "signed_nodes": sorted(_ANCHOR_NODES),
-        "tasks_version": 2,
-        "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
-        "dag_source": "previous_delivery",
-        "supersedes": 1,
-        "expected_generated_at": "2026-09-09T06:00:00+03:00",
-        "tasks_blob": None,
-        "head_sha": None,
-    }
-    rs.save(state)
-    ops = _SupersedeOps(prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
-    assert _anchor_meta(state)["approved_by"] == _pr_signature(403)[0]
-
-
+    return state, _SupersedeOps()
 def test_supersede_legacy_bundle_uses_its_own_dag(tmp_path, monkeypatch):
     """Переиздание ЛЕГАСИ-бандла: `--legacy-bundle=5` определяет активный DAG.
 
@@ -4194,20 +3494,18 @@ def test_supersede_legacy_bundle_uses_its_own_dag(tmp_path, monkeypatch):
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
-    ops = _SupersedeOps(prs=[_MERGED_PR])
+    ops = _SupersedeOps()
     assert tb.deliver_superseded(
         state, ops, legacy_bundle=5
     ) == tb.SupersedeResult("delivered", 77)
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["dag"] == [[f, list(u)] for f, u in tb._BUNDLE_DAG_LEGACY5]
     assert saved["dag_source"] == "derived_from_spec"
-    # Поиск провенанса §I7 идёт по файлам АКТИВНОГО DAG, а не по хардкоду
-    # и не по каталогу: спрошены ровно пять узлов легаси-эры, и
-    # 25-acceptance.md среди них нет — узла этой эры не существовало.
-    assert ops.touched == [
-        f"{state.bundle_dir}/{fname}"
-        for fname, _ in tb._BUNDLE_DAG_LEGACY5
-    ]
+    # Активный DAG легаси-эры: 25-acceptance.md в него не входит вовсе,
+    # и ни гейт §I12, ни anchor его не читают.
+    assert not (
+        Path(state.target_dir) / state.bundle_dir / _ACCEPTANCE
+    ).exists()
 
 
 def test_supersede_refreshes_base_before_reading_facts(
@@ -4241,7 +3539,7 @@ def test_supersede_refreshes_base_before_reading_facts(
                 encoding="utf-8",
             )
 
-    ops = _RefreshingOps(prs=[_MERGED_PR])
+    ops = _RefreshingOps()
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "delivered", 77
     )
@@ -4262,7 +3560,7 @@ def test_supersede_version_is_monotonic(tmp_path, monkeypatch):
     )
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
-    ops = _SupersedeOps(prs=[_MERGED_PR])
+    ops = _SupersedeOps()
     tb.deliver_superseded(state, ops)
     text = (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").read_text()
     assert "version: 5" in text
@@ -4279,7 +3577,7 @@ def test_supersede_dag_mismatch_fails_closed(tmp_path, monkeypatch):
     }
     rs.save(state)
     with pytest.raises(RuntimeError, match="другая доставка"):
-        tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
+        tb.deliver_superseded(state, _SupersedeOps())
 
 
 def test_supersede_legacy_without_content_anchor_records_unavailable(
@@ -4292,7 +3590,7 @@ def test_supersede_legacy_without_content_anchor_records_unavailable(
     # без content_anchor
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5}
     rs.save(state)
-    tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
+    tb.deliver_superseded(state, _SupersedeOps())
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["comparison"] == "unavailable"
 
@@ -4306,8 +3604,7 @@ def _v1_anchor_of_current_tree(state):
     from governance import task_bridge as tb
 
     return tb._prospective_anchor(
-        state.target_dir, state.bundle_dir, *_pr_signature(403), None,
-        restamp_nodes=_ANCHOR_NODES,
+        state.target_dir, state.bundle_dir, None,
     )
 
 
@@ -4341,7 +3638,7 @@ def test_supersede_unavailable_without_content_anchor(
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, **extra}
     rs.save(state)
     assert tb.deliver_superseded(
-        state, _SupersedeOps(prs=[_MERGED_PR])
+        state, _SupersedeOps()
     ) == tb.SupersedeResult("delivered", 77)
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["comparison"] == "unavailable"
@@ -4368,38 +3665,31 @@ def test_supersede_right_after_delivery_is_traceless_noop(
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    assert tb.deliver_for_run(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
+    assert tb.deliver_for_run(state, _SupersedeOps()) == 77
     before = (rs.run_dir("r-recon") / "run.json").read_bytes()
-    ops = _SupersedeOps(prs=[_MERGED_PR])
+    ops = _SupersedeOps()
     result = tb.deliver_superseded(rs.load("r-recon"), ops)
     assert result == tb.SupersedeResult("noop")
     assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
-    # Провенанс §I7 не разрешался ВООБЩЕ: сверка §I5 стоит выше него.
-    # Утверждение о вызовах, а не только об исходе, — «последним, кто
-    # трогал анкер» после доставки становится штамп-коммит нашего же
-    # tasks-PR, и порядок обязан не давать принять его за correction.
-    assert ops.touched == []
-    assert not [c for c in ops.calls if c[0] in (
-        "prs_containing_commit", "pr_files"
-    )]
-    assert ("pr_facts", 403) not in ops.calls
+    # Равенство `content_anchor` достижимо потому, что обе стороны
+    # сверки описывают одни и те же байты бандла в base: доставка их не
+    # трогала. Сверх реконсиляции §I3 сетевых вызовов нет.
+    assert [c for c in ops.calls if c[0] == "pr_facts"] == [("pr_facts", 77)]
+    assert not [c for c in ops.calls if c[0] == "create_draft_pr"]
 
 
-# --- content_anchor: канонизация (§I5) и поузловой §I7 -------------------
+# --- content_anchor: канонизация (§I2/§I5) -------------------------------
 
 
-_ALL_NODES = frozenset(
-    task_bridge._node_id(fname) for fname, _ in task_bridge._BUNDLE_DAG
-)
 _REQUIREMENTS_REL = "workstreams/WS-alpha-7/spec/10-requirements.md"
 
 
 def _apply_correction_to_node(state, node: str) -> None:
-    """Correction-PR правит ТЕЛО произвольного узла, frontmatter не трогает.
+    """Correction правит ТЕЛО произвольного узла, frontmatter не трогает.
 
     Тот же смысл, что у `_apply_correction_to_anchor`, но не для анкера:
-    поузловому §I7 нужен узел ВЫШЕ анкера — им проверяется, что
-    механическая перепиновка подпись не двигает."""
+    узел ВЫШЕ анкера показывает, что `content_anchor` — манифест по
+    ВСЕМУ DAG, а не блоб терминального узла."""
     path = Path(state.target_dir) / state.bundle_dir / node
     text = path.read_text(encoding="utf-8")
     assert text.endswith("\n")
@@ -4408,48 +3698,30 @@ def _apply_correction_to_node(state, node: str) -> None:
 
 def _node_bytes(state) -> dict[str, bytes]:
     """Байты всех узлов бандла — для побайтовой сверки «узел не тронут»."""
-    base = Path(state.target_dir) / state.bundle_dir
-    return {
-        fname: (base / fname).read_bytes()
-        for fname, _ in task_bridge._BUNDLE_DAG
-    }
-
-
-def test_pr_facts_stub_differs_per_pr(tmp_path, monkeypatch) -> None:
-    """Гвард самого стаба: подпись зависит от НОМЕРА PR.
-
-    Пока `_ProvOps.pr_facts` отдавал одно и то же на любой номер,
-    бандл-PR и correction-PR были в тестах неразличимы, и регрессия §I5
-    зеленела тавтологически. Тест держит стаб честным: сломав его
-    обратно, ловим ЗДЕСЬ, а не через полдюжины ложно-зелёных тестов."""
-    state = _recon_state(tmp_path, monkeypatch)
-    ops = _ProvOps()
-    bundle = ops.pr_facts("owner/alpha", 5)
-    correction = ops.pr_facts("owner/alpha", 403)
-    assert bundle["mergedBy"] != correction["mergedBy"]
-    assert bundle["mergedAt"] != correction["mergedAt"]
-    assert state.pr == 5      # фикстура: бандл-PR — именно #5
+    return _node_bytes_of(state.target_dir)
 
 
 def test_content_anchor_is_signature_free(tmp_path: Path) -> None:
     """Определение канонизации: подпись approve в `content_anchor` не входит.
 
-    Не тавтология: байты анкера при перештампе МЕНЯЮТСЯ (утверждается
-    рядом), и пост-штамповый `anchor` §I2 меняется вместе с ними —
-    неизменным остаётся ровно канонический хэш."""
+    Не тавтология: байты анкера при повторном одобрении МЕНЯЮТСЯ
+    (утверждается рядом), и артефактный `anchor` §I2 меняется вместе с
+    ними — неизменным остаётся ровно канонический хэш.
+
+    Довод остаётся в силе и после отмены штампа: §I5 спрашивает про
+    СОДЕРЖАНИЕ апстрима, а «кто подписал» — другой вопрос. Живой
+    контрпример даёт граница миграции: бандл, одобренный прежним
+    штампом, несёт синтетическую подпись при неизменном содержании."""
     target = str(_target(tmp_path))
-    bundle = "workstreams/WS-alpha-7/spec"
-    task_bridge.stamp_bundle_approved(target, bundle, "первый", "t1")
+    bundle = _BUNDLE
     before_hash = task_bridge._content_anchor(target, bundle, None)
-    before_bytes = (
-        Path(target) / bundle / "30-decomposition.md"
-    ).read_bytes()
-    task_bridge.stamp_bundle_approved(
-        target, bundle, "второй", "t2", restamp_nodes=_ALL_NODES
+    before_bytes = (Path(target) / bundle / _DECOMPOSITION).read_bytes()
+
+    _approve_all(target, by="второй", at="t2")
+
+    assert (Path(target) / bundle / _DECOMPOSITION).read_bytes() != (
+        before_bytes
     )
-    assert (
-        Path(target) / bundle / "30-decomposition.md"
-    ).read_bytes() != before_bytes
     assert task_bridge._content_anchor(target, bundle, None) == before_hash
 
 
@@ -4464,16 +3736,16 @@ def test_content_anchor_does_not_leak_signature_through_pins(
     пины из signature-free представлений; вырезав подпись только у самого
     узла, §I5 всё равно расходился бы — тот же дефект другим путём."""
     target = str(_target(tmp_path))
-    bundle = "workstreams/WS-alpha-7/spec"
-    task_bridge.stamp_bundle_approved(target, bundle, "первый", "t1")
+    bundle = _BUNDLE
     before_hash = task_bridge._content_anchor(target, bundle, None)
-    design = Path(target) / bundle / "20-design.md"
+    design = Path(target) / bundle / _DESIGN
     before_design = design.read_bytes()
-    changed = task_bridge.stamp_bundle_approved(
-        target, bundle, "второй", "t2", restamp_nodes=frozenset({"charter"})
-    )
-    # Перепиновка действительно доехала донизу — иначе сверять нечего.
-    assert f"{bundle}/30-decomposition.md" in changed
+
+    # Подпись меняется у ОДНОГО charter'а; пины пересчитываются по факту,
+    # то есть каскадом доезжают донизу.
+    _set_node(target, _CHARTER, approved_by="второй", approved_at="t2")
+    _repin_all(target)
+
     assert design.read_bytes() != before_design
     assert task_bridge._content_anchor(target, bundle, None) == before_hash
 
@@ -4491,191 +3763,73 @@ def test_content_anchor_changes_with_node_body(tmp_path, monkeypatch) -> None:
     ) != before
 
 
-def test_content_anchor_is_taken_from_post_stamp_state(tmp_path: Path) -> None:
-    """Представление берётся с ПРОСПЕКТИВНО проштампованного состояния.
-
-    Закрытие развилки спеки (§I2, «открытый пункт»): альтернатива —
-    канонизировать сырые байты свежего base. В большинстве кругов две
-    величины совпадают: к моменту переиздания base уже проштампован
-    предыдущей доставкой, а её штамп канонизация и так вырезает.
-    Расходятся они там, где предстоящий штамп НЕ сводится к подписи, —
-    correction вернул узел в `draft`. Тогда:
-
-    - «с сырого base» записало бы величину ДОштампового состояния,
-      которой в base не будет НИКОГДА: следующий круг увидит уже
-      проштампованное дерево и объявит апстрим изменившимся — лишняя
-      ревизия после каждого correction'а, трогающего `status`;
-    - «с проспективного штампа» записывает ровно то, что доставка и
-      положит в base, — и следующий круг сходится.
-
-    Отсюда же ответ про `status`/`version`: специально нормализовать их
-    не нужно. Обе стороны сверки пост-штамповые, а перештамп подписи
-    `version` не инкрементит (это правило и держит сходимость второго
-    круга) — поля совпадают сами.
-    """
-    target = str(_target(tmp_path))
-    bundle = "workstreams/WS-alpha-7/spec"
-    dag = task_bridge._BUNDLE_DAG
-    # v1 доставлена и вмержена: бандл в base проштампован.
-    task_bridge.stamp_bundle_approved(target, bundle, "merger-5", "t5")
-    # Correction вернул узел на доавторинг и правит тело.
-    node = Path(target) / bundle / "10-requirements.md"
-    meta, body = task_bridge.split_frontmatter(
-        node.read_text(encoding="utf-8")
-    )
-    meta["status"] = "draft"
-    node.write_text(
-        task_bridge.join_frontmatter(meta, body + "\nПравка.\n"),
-        encoding="utf-8",
-    )
-    recorded = task_bridge._content_anchor(target, bundle, None)
-    raw = task_bridge._canonical_dag_hash(target, bundle, dag)
-    # Развилка настоящая: на этом входе варианты дают РАЗНОЕ.
-    assert raw != recorded
-    # Доставка v2 делает ровно тот штамп, который был спроектирован.
-    task_bridge.stamp_bundle_approved(
-        target, bundle, "merger-403", "t403",
-        restamp_nodes=frozenset({"requirements", "decomposition"}),
-    )
-    # Следующий круг сверяется с записанным — и сходится.
-    assert task_bridge._content_anchor(target, bundle, None) == recorded
-    # А «сырой» вариант записал бы то, чего в base не появится: после
-    # доставки сырая величина стала другой, и §I5 объявил бы изменение.
-    assert task_bridge._canonical_dag_hash(target, bundle, dag) != raw
-
-
-# --- §I7 на ПЕРЕХОДЕ статуса (devtools#172) -------------------------------
+# --- Гейт §I12: доставка ТРЕБУЕТ одобренности, а не создаёт её ------------
 #
 # `draft`/`stale` у узла — штатный след correction'а, а не экзотика:
-# коррекция бандла приводит узлы ровно в эти статусы. До правки первая
-# ветка штампа `restamp_nodes` не смотрела вовсе, и поузловой §I7 на этом
-# — основном — пути не работал.
+# коррекция бандла приводит узлы ровно в эти статусы, значит доставка
+# встречает их каждый раз. Там, где `stamp_bundle_approved` СОЗДАВАЛ
+# approved-состояние (и потому не мог отличить «уже одобрено» от
+# «одобрено нами только что»), гейт его ТРЕБУЕТ — операция сменила знак,
+# а fail-open стал fail-closed.
 
-_BUNDLE = "workstreams/WS-alpha-7/spec"
 _PREV_BY, _PREV_AT = "prev-merger", "2026-09-01T00:00:00Z"
-_CORR_BY, _CORR_AT = "corr-merger", "2026-09-09T17:29:10Z"
 
 
-def _set_node(target: str, fname: str, **over) -> None:
-    """Точечная правка frontmatter узла бандла (статус, подпись)."""
-    path = Path(target) / _BUNDLE / fname
-    meta, body = task_bridge.split_frontmatter(path.read_text(encoding="utf-8"))
-    for key, value in over.items():
-        if value is None:
-            meta.pop(key, None)
-        else:
-            meta[key] = value
-    path.write_text(
-        task_bridge.join_frontmatter(meta, body), encoding="utf-8"
+def _deliver(target: str, ops, **kw) -> int:
+    return task_bridge.deliver(
+        target_dir=target,
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir=_BUNDLE,
+        base_ref="master",
+        ops=ops,
+        **kw,
     )
 
 
-def _meta(target: str, fname: str) -> dict:
-    """Frontmatter узла бандла."""
-    return task_bridge.split_frontmatter(
-        (Path(target) / _BUNDLE / fname).read_text(encoding="utf-8")
-    )[0]
-
-
-def _base_after_v1(tmp_path: Path) -> str:
-    """Бандл в base переиздания: проштампован вмерженной доставкой v1."""
+@pytest.mark.parametrize("status", ["draft", "stale"])
+def test_gate_refuses_a_debtor_node_naming_it_and_the_procedure(
+    tmp_path: Path, status,
+) -> None:
+    """Механика долг не гасит. Диагностика называет узел, его статус и
+    процедуру — отказ без процедуры бесполезен."""
     target = str(_target(tmp_path))
-    task_bridge.stamp_bundle_approved(target, _BUNDLE, _PREV_BY, _PREV_AT)
-    return target
+    _set_node(target, _DESIGN, status=status)
+    ops = _StubOps()
+
+    with pytest.raises(RuntimeError, match="одобрен не целиком") as exc:
+        _deliver(target, ops)
+
+    message = str(exc.value)
+    assert f"{_BUNDLE}/{_DESIGN}" in message
+    assert status in message
+    assert "--approve-node design" in message
+    assert "топологическом порядке" in message
+    assert ops.calls == [("checkout_and_pull", "master")]
 
 
-def test_restamp_signs_node_in_signed_nodes_on_transition(
+def test_gate_refuses_approved_node_with_drifted_pins_naming_both_values(
     tmp_path: Path,
 ) -> None:
-    """Правило 1: узел В `signed_nodes` — approved + подпись correction'а.
+    """Подпись стоит под байтами, которых в дереве нет (spec-runner#410).
 
-    Переход и подпись здесь совпадают по направлению, поэтому правило
-    держалось и до правки; тест закрепляет его как часть политики, чтобы
-    fail-closed соседних правил не съел заодно и этот путь."""
-    target = _base_after_v1(tmp_path)
-    _set_node(target, "10-requirements.md", status="draft")
-    task_bridge.stamp_bundle_approved(
-        target, _BUNDLE, _CORR_BY, _CORR_AT,
-        restamp_nodes=frozenset({"requirements"}),
+    Молчаливой перепиновки не происходит: она и была дефектом."""
+    target = str(_target(tmp_path))
+    fake = "ab" + "0" * 38
+    _set_node(target, _DESIGN, upstream_hashes={
+        "requirements": fake, "behaviour-spec": fake,
+    })
+
+    with pytest.raises(RuntimeError, match="одобрен не целиком") as exc:
+        _deliver(target, _StubOps())
+
+    message = str(exc.value)
+    assert fake in message
+    actual = task_bridge.blob_sha1(
+        (Path(target) / _BUNDLE / _REQUIREMENTS).read_text(encoding="utf-8")
     )
-    meta = _meta(target, "10-requirements.md")
-    assert meta["status"] == "approved"
-    assert (meta["approved_by"], meta["approved_at"]) == (_CORR_BY, _CORR_AT)
-    # Переход совершён — поколение документа выросло.
-    assert meta["version"] == 3
-
-
-def test_restamp_keeps_signature_of_stale_node_outside_signed_nodes(
-    tmp_path: Path,
-) -> None:
-    """Правило 2: `stale` вне `signed_nodes` — approved, подпись ПРЕЖНЯЯ.
-
-    Побайтовая сверка ОБОИХ полей: подмена одного из них (например,
-    `approved_at` фактами correction'а) — ровно та ложь о провенансе, из-за
-    которой issue и заведён, и «примерное» сравнение её бы пропустило.
-
-    `stale` означает, что изменился upstream, а не содержимое узла:
-    прежний подписант одобрял ровно эти байты тела, и его подпись
-    остаётся истинной. Перепиновка при этом проходит — она механическая."""
-    target = _base_after_v1(tmp_path)
-    before_pins = _meta(target, "20-design.md")["upstream_hashes"]
-    # Correction правит upstream: узел ниже протухает.
-    _set_node(target, "10-requirements.md", status="draft")
-    _set_node(target, "20-design.md", status="stale")
-    task_bridge.stamp_bundle_approved(
-        target, _BUNDLE, _CORR_BY, _CORR_AT,
-        restamp_nodes=frozenset({"requirements"}),
-    )
-    meta = _meta(target, "20-design.md")
-    assert meta["status"] == "approved"
-    assert meta["approved_by"] == _PREV_BY
-    assert meta["approved_at"] == _PREV_AT
-    # Перепиновка downstream состоялась — сохранение подписи ей не мешает.
-    assert meta["upstream_hashes"] != before_pins
-    assert meta["version"] == 3
-
-
-def test_restamp_refuses_draft_node_outside_signed_nodes(
-    tmp_path: Path,
-) -> None:
-    """Правило 3: `draft` вне `signed_nodes` — fail-closed, с процедурой.
-
-    Сохранить прежнюю подпись здесь недоказуемо: содержание узла мог
-    изменить ДРУГОЙ correction-PR. Отказ обязан назвать УЗЕЛ и что делать
-    оператору — отказ без процедуры бесполезен."""
-    target = _base_after_v1(tmp_path)
-    _set_node(target, "00-charter.md", status="draft")
-    with pytest.raises(RuntimeError) as excinfo:
-        task_bridge.stamp_bundle_approved(
-            target, _BUNDLE, _CORR_BY, _CORR_AT,
-            restamp_nodes=frozenset({"requirements"}),
-        )
-    message = str(excinfo.value)
-    assert "00-charter.md" in message
-    assert "--approval-pr" in message
-    assert "отдельным PR" in message
-    # Отказ до записи: узел остался в том состоянии, в каком был.
-    assert _meta(target, "00-charter.md")["status"] == "draft"
-
-
-def test_restamp_refuses_node_without_previous_signature(
-    tmp_path: Path,
-) -> None:
-    """Правило 4: вне `signed_nodes` и без прежней подписи — fail-closed.
-
-    Отличается от правила 3 ПРИЧИНОЙ: статус сохраняющий (`stale`), но
-    сохранять нечего. Без отдельной ветки узел уехал бы в `approved` с
-    пустой подписью — провенанс, которого не существует."""
-    target = _base_after_v1(tmp_path)
-    _set_node(
-        target, "00-charter.md",
-        status="stale", approved_by=None, approved_at=None,
-    )
-    with pytest.raises(RuntimeError, match="прежней подписи нет"):
-        task_bridge.stamp_bundle_approved(
-            target, _BUNDLE, _CORR_BY, _CORR_AT,
-            restamp_nodes=frozenset({"requirements"}),
-        )
+    assert actual in message
 
 
 @pytest.mark.parametrize(
@@ -4684,206 +3838,125 @@ def test_restamp_refuses_node_without_previous_signature(
      {"approved_by": "", "approved_at": ""}],
     ids=["keys-absent", "empty-strings"],
 )
-def test_restamp_refuses_approved_node_without_signature(
-    signature, tmp_path: Path
+def test_gate_refuses_approved_without_the_approver(
+    tmp_path: Path, signature,
 ) -> None:
-    """Правило 4 распространяется и на УЖЕ `approved` узел вне подписи.
-
-    Клетка спеки «любой | нет в signed_nodes, и прежней подписи нет →
-    fail-closed» не была ограничена статусом, а кодом не проверялась
-    вовсе: первая ветка политики входит только при `status != approved`,
-    вторая требует членства в `signed_nodes`. Узел `status: approved` с
-    пустым `approved_by` не смотрел никто, и переиздание доставляло его с
-    RC 0 — «одобрено» без одобрившего.
-
-    Поймать это ниже по ходу нечем: `_content_anchor` подпись вырезает по
-    построению (§I2), поэтому ни сверка §I2, ни гвард `_commit_facts_cb`
-    расхождения не дают. Форма «не подписано» проверяется в обеих: и
-    ключей нет, и `approved_by: ""`, как его заводит шаблон бандла."""
-    target = _base_after_v1(tmp_path)
-    _set_node(target, "00-charter.md", status="approved", **signature)
-
-    with pytest.raises(RuntimeError, match="прежней подписи нет"):
-        task_bridge.stamp_bundle_approved(
-            target, _BUNDLE, _CORR_BY, _CORR_AT,
-            restamp_nodes=frozenset({"requirements"}),
-        )
-
-
-def test_approved_node_with_signature_outside_signed_nodes_is_untouched(
-    tmp_path: Path,
-) -> None:
-    """Непустая прежняя подпись у approved-узла вне подписи — не трогаем.
-
-    Парный позитив к отказу выше: правило требует, чтобы подпись БЫЛА, а
-    не чтобы она была нашей. Без этой пары отказ мог бы оказаться
-    «падаем на любом approved-узле вне signed_nodes» — то есть сломать
-    штатный путь переиздания, где такие узлы и лежат."""
-    target = _base_after_v1(tmp_path)
-    before = _meta(target, "00-charter.md")
-    assert before["status"] == "approved" and before["approved_by"]
-
-    task_bridge.stamp_bundle_approved(
-        target, _BUNDLE, _CORR_BY, _CORR_AT,
-        restamp_nodes=frozenset({"requirements"}),
-    )
-
-    assert _meta(target, "00-charter.md") == before
-
-
-def test_plain_delivery_signs_draft_nodes_without_signed_nodes(
-    tmp_path: Path,
-) -> None:
-    """Обычная доставка (`restamp_nodes=None`) — прежнее поведение.
-
-    На первой доставке весь бандл `draft`, и все узлы законно получают
-    подпись бандл-PR. Понятия `signed_nodes` на этом пути нет вовсе,
-    поэтому ни один fail-closed §I7 здесь недостижим — иначе правка
-    сломала бы основной путь моста ради краевого."""
+    """«Одобрено» без одобрившего контракт не пропускает: шаблон бандла
+    заводит `approved_by: ""`, и пустая строка есть «не подписано»."""
     target = str(_target(tmp_path))
-    changed = task_bridge.stamp_bundle_approved(
-        target, _BUNDLE, "bundle-merger", "t-bundle"
-    )
-    assert len(changed) == len(task_bridge._BUNDLE_DAG)
+    _set_node(target, _CHARTER, **signature)
+
+    with pytest.raises(RuntimeError, match="approved_by/approved_at пусты"):
+        _deliver(target, _StubOps())
+
+
+def test_gate_refuses_a_bundle_approved_by_the_former_stamp(
+    tmp_path: Path,
+) -> None:
+    """Граница миграции ОТМЕНЕНА находкой ревью §I12.
+
+    Прежнее правило принимало старые `approved` как есть. Но без
+    `approved_content_hash` собственные байты одобренного узла
+    принципиально непроверяемы — не «плохо проверяемы», а никак:
+    одобрение, которое нечем предъявить, гейту предъявить нечего. Такой
+    узел несёт РАЗОВЫЙ миграционный долг, и гасится он обычным
+    переодобрением, без особого режима и отдельного флага."""
+    target = str(_target(tmp_path, approved=False))
+    _approve_all(target, by="prev-bundle-merger", at="2026-09-01T00:00:00Z")
+    for fname, _ in task_bridge._BUNDLE_DAG:
+        _set_node(target, fname, approved_content_hash=None)
+
+    with pytest.raises(RuntimeError, match="одобрен не целиком") as exc:
+        _deliver(target, _StubOps())
+
+    message = str(exc.value)
+    assert "approved_content_hash не записан" in message
+    assert "миграционный долг" in message
+    assert "--approve-node charter" in message
+
+
+def test_migration_debt_is_discharged_by_ordinary_reapproval(
+    tmp_path: Path,
+) -> None:
+    """Долг гасится один раз топологическим переодобрением активного DAG —
+    теми же вызовами `--approve-node`, что и всякий другой."""
+    target = str(_target(tmp_path, approved=False))
+    _approve_all(target, by="штамп", at="2026-09-01T00:00:00Z")
+    for fname, _ in task_bridge._BUNDLE_DAG:
+        _set_node(target, fname, approved_content_hash=None)
+
+    for fname, _ in task_bridge._BUNDLE_DAG:
+        _approve(target, task_bridge._node_id(fname))
+
+    assert task_bridge._approval_findings(
+        target, _BUNDLE, task_bridge._BUNDLE_DAG
+    ) == []
+    assert _deliver(target, _StubOps()) == 77
+
+
+def test_delivery_commit_carries_only_the_tasks_spec(tmp_path: Path) -> None:
+    """Наблюдаемое следствие §I7, по которому проверку видно снаружи:
+    файлов бандла в diff доставки нет вовсе."""
+    target = str(_target(tmp_path))
+    before = _node_bytes_of(target)
+    ops = _StubOps()
+
+    _deliver(target, ops)
+
+    commit = next(c for c in ops.calls if c[0] == "commit_paths")
+    assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
+    assert _node_bytes_of(target) == before
+    assert "штамп" not in ops.pr_body
+
+
+def test_delivery_leaves_statuses_and_signatures_verbatim(
+    tmp_path: Path,
+) -> None:
+    """Подписи и статусы узлов после доставки дословно прежние: доставка
+    не одобряет, не перештамповывает и не перепиновывает."""
+    target = str(_target(tmp_path))
+    _deliver(target, _StubOps())
+
     for fname, _ in task_bridge._BUNDLE_DAG:
         meta = _meta(target, fname)
+        assert meta["approved_by"] == _HUMAN
+        assert meta["approved_at"] == _HUMAN_AT
         assert meta["status"] == "approved"
-        assert meta["approved_by"] == "bundle-merger"
-        assert meta["approved_at"] == "t-bundle"
-
-
-def test_prospective_stamp_matches_actual_on_mixed_statuses(
-    tmp_path: Path,
-) -> None:
-    """§I2: проспективный и фактический штамп совпадают на смешанных
-    статусах.
-
-    Гвард `_commit_facts_cb` рвёт доставку, разойдись эти двое. Правила
-    политики живут ЦЕЛИКОМ внутри `stamp_bundle_approved`, и обе стороны
-    зовут её одну — но продублируй кто-нибудь ветку перехода в
-    `_shadow_stamped`, расхождение вылезло бы ровно здесь."""
-    from governance.stale_adapter import blob_sha1
-
-    target = _base_after_v1(tmp_path)
-    _set_node(target, "10-requirements.md", status="draft")
-    _set_node(target, "20-design.md", status="stale")
-    _set_node(target, "30-decomposition.md", status="draft")
-    signed = frozenset({"requirements", "decomposition"})
-    prospective = task_bridge._prospective_anchor(
-        target, _BUNDLE, _CORR_BY, _CORR_AT, None, restamp_nodes=signed
-    )
-    task_bridge.stamp_bundle_approved(
-        target, _BUNDLE, _CORR_BY, _CORR_AT, restamp_nodes=signed
-    )
-    actual = blob_sha1(
-        (Path(target) / _BUNDLE / "30-decomposition.md").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert prospective == actual
-
-
-def test_stale_node_outside_signed_nodes_converges_on_second_round(
-    tmp_path: Path,
-) -> None:
-    """Развилка `version` у `stale` вне `signed_nodes`: инкремент.
-
-    Выбор вынужден §I5, а не эстетикой. `_content_anchor` считает ОБЕ
-    стороны сверки по проспективно проштампованному дереву и всегда с
-    `restamp_nodes=None` — то есть любой не-approved узел там идёт веткой
-    перехода и получает `version + 1`. Канонизация вырезает подпись, но
-    НЕ `status` и НЕ `version`.
-
-    Оставь фактический штамп `version` прежним — записанный круг 1
-    `content_anchor` разошёлся бы с тем, что доставка кладёт в base, и
-    круг 2 объявил бы апстрим изменившимся на ровном месте: no-op §I5
-    стал бы недостижим, каждый запуск заводил бы ревизию.
-
-    Проверка идёт на ВТОРОМ круге, а не на первом: на первом обе величины
-    считаются по одному дереву и сходятся при любом решении."""
-    target = _base_after_v1(tmp_path)
-    _set_node(target, "10-requirements.md", status="draft")
-    _set_node(target, "20-design.md", status="stale")
-    # Круг 1: величина записывается ДО доставки, по проспективному штампу.
-    recorded = task_bridge._content_anchor(target, _BUNDLE, None)
-    task_bridge.stamp_bundle_approved(
-        target, _BUNDLE, _CORR_BY, _CORR_AT,
-        restamp_nodes=frozenset({"requirements"}),
-    )
-    # Круг 2: тот же вопрос к base, который оставила доставка, — апстрим
-    # не менялся, значит величина обязана совпасть (§I5 → no-op).
-    assert task_bridge._content_anchor(target, _BUNDLE, None) == recorded
-
-
-def test_supersede_stamp_keeps_provenance_of_untouched_stale_nodes(
-    tmp_path: Path,
-) -> None:
-    """Регрессия живого случая (issue devtools#172).
-
-    Переиздание воркстрима `verify-first-file-scope-group-targets-20260908`
-    (доставка spec-runner#408, `approval_pr: 407`,
-    `signed_nodes: [behaviour-spec, decomposition]`): `design` и
-    `acceptance` были `stale` и в состав correction-PR #407 не входили —
-    их байты приехали из #403. До правки штамп приписывал им подпись
-    мержера #407, то есть человека, который этих узлов не касался.
-
-    Ожидаемая таблица: подпись #407 получают РОВНО два узла из
-    `signed_nodes`; charter/requirements (уже approved) и
-    design/acceptance (`stale`, вне состава) сохраняют исходную."""
-    target = _base_after_v1(tmp_path)
-    _set_node(target, "15-behaviour-spec.md", status="draft")
-    _set_node(target, "20-design.md", status="stale")
-    _set_node(target, "25-acceptance.md", status="stale")
-    _set_node(target, "30-decomposition.md", status="draft")
-    task_bridge.stamp_bundle_approved(
-        target, _BUNDLE, _CORR_BY, _CORR_AT,
-        restamp_nodes=frozenset({"behaviour-spec", "decomposition"}),
-    )
-    signed_by = {
-        fname: (
-            _meta(target, fname)["approved_by"],
-            _meta(target, fname)["approved_at"],
-        )
-        for fname, _ in task_bridge._BUNDLE_DAG
-    }
-    assert signed_by == {
-        "00-charter.md": (_PREV_BY, _PREV_AT),
-        "10-requirements.md": (_PREV_BY, _PREV_AT),
-        "15-behaviour-spec.md": (_CORR_BY, _CORR_AT),
-        "20-design.md": (_PREV_BY, _PREV_AT),
-        "25-acceptance.md": (_PREV_BY, _PREV_AT),
-        "30-decomposition.md": (_CORR_BY, _CORR_AT),
-    }
-    # Статус выровнен у всех — переиздание доставляет approved-бандл.
-    assert all(
-        _meta(target, fname)["status"] == "approved"
-        for fname, _ in task_bridge._BUNDLE_DAG
-    )
 
 
 def test_supersede_fail_closed_leaves_no_branch_commit_or_ledger_entry(
     tmp_path, monkeypatch
 ) -> None:
-    """Отказ §I7 наступает на ПРОСПЕКТИВНОМ штампе — следов не остаётся.
+    """Гейт §I12 отказывает ДО `_start_revision` — следов не остаётся.
 
-    Порядок §I2 ставит проспективный штамп ДО `_start_revision`, поэтому
-    `draft` вне `signed_nodes` роняет переиздание раньше ветки, коммита,
-    PR и записи в леджере. Съедь отказ внутрь `deliver()` — оператор
-    получил бы ту же диагностику, но с оставленной веткой и started-
-    ревизией, которую пришлось бы разбирать реконсиляцией."""
+    Порядок §I2 ставит гейт между сверкой §I5 и намерением, поэтому
+    долговой узел роняет переиздание раньше ветки, коммита, PR и записи в
+    леджере. Съедь отказ внутрь `deliver()` (там гейт тоже стоит, и это
+    правильно) — оператор получил бы ту же диагностику, но с
+    оставленной started-ревизией, которую пришлось бы разбирать
+    реконсиляцией.
+
+    Парный случай — `..._noop_with_debtor_nodes...`: там тот же
+    `draft`-узел даёт бесследный no-op, потому что апстрим не менялся.
+    Вдвоём они и держат порядок: сначала §I5, только потом §I12."""
     from governance import run_state as rs
     from governance import task_bridge as tb
 
     state = _supersede_state(tmp_path, monkeypatch)
-    # Correction (#403) трогал только анкер; charter он не касался, а тот
-    # лежит `draft` — сохранять там нечего.
-    _set_node(state.target_dir, "00-charter.md", status="draft")
+    # Апстрим изменился (записанный content_anchor заведомо другой), а
+    # charter лежит `draft` — доставка обязана отказать.
+    _set_node(state.target_dir, _CHARTER, status="draft")
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+                                  "anchor": "СТАРЫЙ",
+                                  "content_anchor": "ДРУГОЙ"}
     rs.save(state)
-    ops = _SupersedeOps(prs=[_MERGED_PR])
-    with pytest.raises(RuntimeError, match="00-charter.md"):
+    ops = _SupersedeOps()
+
+    with pytest.raises(RuntimeError, match="одобрен не целиком") as exc:
         tb.deliver_superseded(state, ops)
+
+    assert f"{_BUNDLE}/{_CHARTER}" in str(exc.value)
+    assert "--approve-node charter" in str(exc.value)
     assert not any(
         call[0] in ("ensure_branch", "commit_paths", "push_branch",
                     "create_draft_pr")
@@ -4892,51 +3965,26 @@ def test_supersede_fail_closed_leaves_no_branch_commit_or_ledger_entry(
     assert "tasks-deliver-v2" not in rs.load("r-recon").ops
 
 
-def test_canonical_stamp_is_neutral_to_node_policy(tmp_path: Path) -> None:
-    """Канонический штамп §I5 клетки политики §I7 НЕ применяет.
-
-    `_content_anchor` и `_prospective_anchor` делят примитив
-    `_shadow_stamped`, но зовут его по-разному: канонический идёт с
-    подписью-заглушкой и БЕЗ `signed_nodes` — на его шаге состав
-    подписываемых узлов ещё не вычислен и вычислен быть не может
-    (провенанс §I7 резолвится ПОЗЖЕ и только если содержание менялось).
-
-    Сработай fail-closed здесь — он срабатывал бы на ЛЮБОМ бандле с
-    draft-узлом, то есть раньше, чем выяснено, менялся ли апстрим вообще.
-    Вход тут предельный: узел `draft` и БЕЗ подписи вовсе — тот самый,
-    на котором политика отказывает громче всего."""
-    target = _base_after_v1(tmp_path)
-    _set_node(
-        target, "00-charter.md",
-        status="draft", approved_by=None, approved_at=None,
-    )
-    # Не «не упало», а «посчиталось и отвечает на свой вопрос»: правка
-    # тела величину двигает, значит она не вырождена.
-    before = task_bridge._content_anchor(target, _BUNDLE, None)
-    _set_node(target, "00-charter.md", version=42)
-    assert task_bridge._content_anchor(target, _BUNDLE, None) != before
-
-
-def test_supersede_noop_reachable_with_draft_node_outside_signed_nodes(
-    tmp_path, monkeypatch
+def test_supersede_noop_with_debtor_nodes_names_them_instead_of_refusing(
+    tmp_path, monkeypatch, capsys,
 ) -> None:
-    """§I5 стоит ВЫШЕ §I7: неизменный апстрим — бесследный no-op, не отказ.
+    """§I5 стоит ВЫШЕ гейта §I12 — и это осознанный порядок.
 
-    Клетка спеки «узлы вне `signed_nodes` лежат `draft`, но апстрим не
-    менялся → 0». Проверки статусов §I7 на этом пути недостижимы по
-    построению: сверка §I5 идёт по каноническому штампу, который
-    `signed_nodes` не знает, и провенанс не резолвится вовсе.
+    Воркстрим, в чьём активном DAG лежит `draft`-узел, но апстрим с
+    прошлой доставки не менялся, завершается бесследным no-op'ом, а не
+    отказом: гейт защищает ДОСТАВКУ, а там, где доставки не будет,
+    защищать нечего. Fail-open не возникает по построению — ни ветки, ни
+    PR, ни записи. Обязанность у no-op'а всё же есть: назвать долговые
+    узлы, чтобы оператор узнал про долг тогда же, когда спрашивает про
+    переиздание, а не на следующем запуске.
 
     Парный случай — `..._fail_closed_leaves_no_branch...`: там содержание
     ИЗМЕНИЛОСЬ, и тот же `draft`-узел даёт fail-closed. Вдвоём эти два
-    теста и держат порядок: сначала §I5, только потом §I7."""
+    теста и держат порядок: сначала §I5, только потом §I12."""
     from governance import run_state as rs
     from governance import task_bridge as tb
 
     state = _supersede_state(tmp_path, monkeypatch)
-    # Узел, которого correction (#403) не касался, лежит `draft` — на
-    # проспективном штампе он дал бы fail-closed.
-    _set_node(state.target_dir, "00-charter.md", status="draft")
     state.ops["tasks-deliver"] = {
         "status": "completed", "pr": 5, "anchor": "БЛОБ-ДОСТАВКИ-v1",
         "content_anchor": tb._content_anchor(
@@ -4944,36 +3992,40 @@ def test_supersede_noop_reachable_with_draft_node_outside_signed_nodes(
         ),
     }
     rs.save(state)
+    # Долг ставится ПОСЛЕ снятия `content_anchor`: смена статуса — правка
+    # файла, и записанный хэш обязан описывать те же байты, что читает
+    # сверка, иначе тест проверял бы не порядок, а расхождение.
+    _set_node(state.target_dir, _CHARTER, status="draft")
+    state.ops["tasks-deliver"]["content_anchor"] = tb._content_anchor(
+        state.target_dir, state.bundle_dir, None
+    )
+    rs.save(state)
     before = (rs.run_dir("r-recon") / "run.json").read_bytes()
-    ops = _SupersedeOps(prs=[_MERGED_PR])
+    ops = _SupersedeOps()
+
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("noop")
+
     assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
-    # Провенанс не разрешался — иначе §I5 стоял бы не выше §I7.
-    assert ops.touched == []
-    assert ("pr_facts", 403) not in ops.calls
-
-
-#: SHA коммита correction-PR (#403) и штамп-коммита нашей доставки v1 (#5).
-_CORRECTION_SHA = "c-correction"
-_V1_STAMP_SHA = "c-v1-stamp"
-#: PR доставки v1 в форме кандидата `prs_containing_commit`: вмержен в
-#: master, содержит штамп-коммит — то есть по всем формальным признакам
-#: correction, и отличает его от настоящего ТОЛЬКО леджер прогона.
-_V1_TASKS_PR = {**_MERGED_PR, "number": 5, "mergeCommit": _V1_STAMP_SHA}
+    assert not [c for c in ops.calls if c[0] in (
+        "ensure_branch", "create_draft_pr"
+    )]
+    out = capsys.readouterr().out
+    assert "апстрим не менялся" in out
+    assert f"{_BUNDLE}/{_CHARTER}" in out
+    assert "--approve-node charter" in out
 
 
 def _supersede_with_correction_touching_requirements(
     tmp_path, monkeypatch, **ops_kw
 ):
-    """v1 доставлена и вмержена; correction-PR правит ТОЛЬКО requirements.
+    """v1 доставлена и вмержена; correction правит requirements, и волна
+    одобрения по DAG уже прошла — то есть РЕАЛЬНЫЙ base переиздания.
 
-    Боевая форма входа, которой у фикстуры не было: correction анкера НЕ
-    касается (перепиновка downstream — механическая и выполняется штампом
-    переиздания), поэтому последним, кто трогал анкер, остаётся
-    штамп-коммит нашего же tasks-PR доставки v1. На старой фикстуре
-    (`files=[requirements, анкер]`) поузловой §I7 проверялся входом, где
-    он неотличим от bundle-wide, а поиск провенанса — входом, где своя
-    доставка и correction неразличимы.
+    Фикстура описывает состояние ПОСЛЕ предыдущего шага конвейера, а не
+    начальное: correction меняет тело узла и оставляет долг, человек
+    гасит его `--approve-node` сверху вниз, approve-PR вмержен. Опиши она
+    один только correction — гейт §I12 отказал бы, и «переиздание не
+    работает» читалось бы как дефект кода вместо дефекта фикстуры.
     """
     from governance import run_state as rs
     from governance import task_bridge as tb
@@ -4982,141 +4034,22 @@ def _supersede_with_correction_touching_requirements(
     _stamp_base_as_previous_delivery(state)
     v1_content = tb._content_anchor(state.target_dir, state.bundle_dir, None)
     _apply_correction_to_node(state, "10-requirements.md")
+    # Волна одобрения после correction'а: новая подпись, новые пины.
+    _approve_all(state.target_dir, by="человек", at="2026-09-10T09:00:00Z")
     state.ops["tasks-deliver"] = {
         "status": "completed", "pr": 5, "anchor": "БЛОБ-ДОСТАВКИ-v1",
         "content_anchor": v1_content,
     }
     rs.save(state)
-    kw = {
-        # requirements приехал correction-PR'ом, остальные узлы — штампом
-        # доставки v1; ровно это и делает шаг 1 §I7 поузловым.
-        "commit": _V1_STAMP_SHA,
-        "commits": {_REQUIREMENTS_REL: _CORRECTION_SHA},
-        "prs_by_sha": {
-            _CORRECTION_SHA: [_MERGED_PR], _V1_STAMP_SHA: [_V1_TASKS_PR],
-        },
-        "files": [_REQUIREMENTS_REL],
-        "files_by_pr": {5: [f"{state.bundle_dir}/{f}" for f, _ in tb._BUNDLE_DAG]},
-        **ops_kw,
-    }
-    return state, _SupersedeOps(**kw)
-
-
-@pytest.mark.parametrize(
-    "approval_pr", [None, 403], ids=["поиск", "явный-approval-pr"],
-)
-def test_supersede_signs_only_nodes_touched_by_correction(
-    approval_pr, tmp_path, monkeypatch
-):
-    """§I7 поузловой на БОЕВОМ входе: correction тронул только requirements.
-
-    Анкера correction не касался вовсе — и это ровно тот вход, на котором
-    прежняя реализация ломалась в обе стороны: автоматический путь брал
-    за correction штамп-коммит нашего же tasks-PR (и подписывал весь
-    DAG подписью человека, мержившего ПРОШЛУЮ доставку), а явный
-    `--approval-pr` отвергал настоящий correction за то, что он не менял
-    терминальный узел. Оба пути обязаны дать один и тот же ответ:
-    подпись #403 получает ОДИН узел.
-
-    charter, behaviour-spec, design, acceptance и decomposition
-    correction-PR не видел. Приписав им подпись #403, штамп стёр бы факт,
-    что эти байты одобрил другой человек в другой момент — ту же ложь,
-    против которой §I7 и вводился, только с другой стороны.
-    """
-    from governance import run_state as rs
-    from governance import task_bridge as tb
-
-    state, ops = _supersede_with_correction_touching_requirements(
-        tmp_path, monkeypatch
-    )
-    assert tb.deliver_superseded(
-        state, ops, approval_pr=approval_pr
-    ) == tb.SupersedeResult("delivered", 77)
-    by403, at403 = _pr_signature(403)
-    for fname, _ in tb._BUNDLE_DAG:
-        meta = _anchor_meta(state, fname)
-        want = (
-            (by403, at403) if fname == "10-requirements.md"
-            else (_PREV_MERGER, _PREV_MERGED_AT)
-        )
-        assert (meta["approved_by"], meta["approved_at"]) == want, fname
-    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
-    assert saved["signed_nodes"] == ["requirements"]
-    assert saved["approval_pr"] == 403
-
-
-def test_supersede_excludes_own_delivery_pr_from_search(
-    tmp_path, monkeypatch
-):
-    """Полный цикл: штамп прошлой доставки correction'ом не считается.
-
-    Пять из шести узлов последним тронул штамп-коммит нашего tasks-PR #5,
-    вмерженного в `master`, — формально безупречный кандидат. Пока поиск
-    его не исключал, он оказывался ЕДИНСТВЕННЫМ (поиск стартовал с
-    анкера), проходил все проверки и отдавал `signed_nodes` = весь DAG:
-    поузловое правило схлопывалось в bundle-wide без единого отказа и
-    предупреждения. Здесь он в кандидатах есть — и снят леджером."""
-    from governance import run_state as rs
-    from governance import task_bridge as tb
-
-    state, ops = _supersede_with_correction_touching_requirements(
-        tmp_path, monkeypatch
-    )
-    assert tb.deliver_superseded(state, ops).kind == "delivered"
-    # Кандидат-двойник реально предъявлялся: его коммит спрошен.
-    assert ("prs_containing_commit", _V1_STAMP_SHA) in ops.calls
-    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
-    assert saved["approval_pr"] == 403                   # не 5
-    assert saved["signed_nodes"] == ["requirements"]     # не весь DAG
-    assert _anchor_meta(state)["approved_by"] == _PREV_MERGER
-
-
-def test_supersede_mechanical_repin_does_not_change_signature(
-    tmp_path, monkeypatch
-):
-    """Перепиновка downstream-узла — не событие approve.
-
-    behaviour-spec correction-PR не менял, но его пин на requirements
-    сдвинулся (у requirements сменилась подпись ⇒ сменились байты).
-    Байты узла обязаны измениться, подпись — нет: иначе поузловое правило
-    вырождается обратно в bundle-wide, только через каскад пинов."""
-    from governance import task_bridge as tb
-
-    state, ops = _supersede_with_correction_touching_requirements(
-        tmp_path, monkeypatch
-    )
-    before = _node_bytes(state)
-    tb.deliver_superseded(state, ops)
-    after = _node_bytes(state)
-    beh = _anchor_meta(state, "15-behaviour-spec.md")
-    assert after["15-behaviour-spec.md"] != before["15-behaviour-spec.md"]
-    assert beh["upstream_hashes"]["requirements"] != task_bridge.blob_sha1(
-        before["10-requirements.md"].decode("utf-8")
-    )
-    assert (beh["approved_by"], beh["approved_at"]) == (
-        _PREV_MERGER, _PREV_MERGED_AT
-    )
-    # То же и у ТЕРМИНАЛЬНОГО узла — а он и есть предмет: correction его
-    # не касался, перепиновка каскадом до него дошла (байты другие), но
-    # подпись осталась прежней. Пока §I7 требовал от correction-PR
-    # менять анкер, этого состояния просто не существовало.
-    anchor = _anchor_meta(state)
-    assert after["30-decomposition.md"] != before["30-decomposition.md"]
-    assert (anchor["approved_by"], anchor["approved_at"]) == (
-        _PREV_MERGER, _PREV_MERGED_AT
-    )
-    # Узел, у которого не менялся ни он сам, ни его апстрим, — побайтово
-    # прежний: перештамп не расползается по бандлу вовсе.
-    assert after["00-charter.md"] == before["00-charter.md"]
+    return state, _SupersedeOps(**ops_kw)
 
 
 def test_supersede_after_merged_revision_is_noop_again(tmp_path, monkeypatch):
     """Повтор сразу после мержа v2 — снова бесследный no-op.
 
-    Последний, кто трогал анкер, теперь tasks-PR самой ревизии v2 (#77):
-    ищи переиздание провенанс до сверки, оно приняло бы СВОЙ ЖЕ PR за
-    correction, взяло бы его подпись и завело v3 — и так до бесконечности.
-    """
+    `content_anchor`, записанный ревизией v2, посчитан по тем же байтам
+    бандла, что лежат в base после мержа её PR: доставка бандла не
+    касается, значит и расходиться нечему."""
     from governance import run_state as rs
     from governance import task_bridge as tb
 
@@ -5127,18 +4060,15 @@ def test_supersede_after_merged_revision_is_noop_again(tmp_path, monkeypatch):
     # Рабочее дерево = то, что доставила и вмержила v2 (её штамп в base).
     state = rs.load("r-recon")
     before = (rs.run_dir("r-recon") / "run.json").read_bytes()
-    tasks_pr_v2 = {**_MERGED_PR, "number": 77}
-    again = _SupersedeOps(commit="c-v2", prs=[tasks_pr_v2])
+    again = _SupersedeOps()
     assert tb.deliver_superseded(state, again) == tb.SupersedeResult("noop")
     assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
-    assert again.touched == []
-    assert ("pr_facts", 77) not in again.calls
+    assert [c for c in again.calls if c[0] == "pr_facts"] == []
 
 
 class _RevisionPrOps(_SupersedeOps):
-    """У ревизии есть свой PR: `find_pr` отдаёт его, `pr_facts` различает
-    correction-PR (провенанс, номер из `_MERGED_PR`) и PR ревизии
-    (идентичность — state + headRefOid)."""
+    """У ревизии есть свой PR: `find_pr` отдаёт его, а `pr_facts` — его
+    состояние и `headRefOid` (вход таблицы §I3)."""
 
     def __init__(self, pr=None, pr_state="OPEN", head="h", local_head=None,
                  **kw):
@@ -5174,8 +4104,6 @@ def _revision_intent(state, prospective, **over):
         "branch": "spec/WS-alpha-7-tasks-v2",
         "base_sha": "base-sha-1",
         "prospective_anchor": prospective,
-        "approval_pr": 403,
-        "signed_nodes": sorted(_ANCHOR_NODES),
         "tasks_version": 3,
         "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
         "dag_source": "previous_delivery",
@@ -5196,10 +4124,8 @@ def _seed_revision(state, monkeypatch, **over):
     # База переиздания — бандл, проштампованный вмерженной доставкой v1
     # (идемпотентно, если вызывающий уже привёл её в это состояние).
     _stamp_base_as_previous_delivery(state)
-    by, at = _pr_signature(403)
     prospective = tb._prospective_anchor(
-        state.target_dir, state.bundle_dir, by, at, None,
-        restamp_nodes=_ANCHOR_NODES,
+        state.target_dir, state.bundle_dir, None,
     )
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
@@ -5223,7 +4149,7 @@ def test_supersede_returns_existing_pr_when_revision_completed(
         anchor="ANCHOR-V2",
     )
     before = dict(rs.load("r-recon").ops["tasks-deliver-v2"])
-    ops = _RevisionPrOps(pr=9, pr_state="OPEN", prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=9, pr_state="OPEN")
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "returned", 9
     )
@@ -5253,7 +4179,7 @@ def test_supersede_after_merged_revision_starts_next_one(
         state, monkeypatch, status="completed", pr=9, head_sha="h",
         anchor="СТАРЫЙ-V2",
     )
-    ops = _RevisionPrOps(pr=9, pr_state="MERGED", prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=9, pr_state="MERGED")
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "delivered", 77
     )
@@ -5277,7 +4203,7 @@ def test_supersede_asks_github_once_per_revision(tmp_path, monkeypatch):
         state, monkeypatch, status="completed", pr=9, head_sha="h",
         anchor="ANCHOR-V2",
     )
-    ops = _RevisionPrOps(pr=9, pr_state="OPEN", prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=9, pr_state="OPEN")
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "returned", 9
     )
@@ -5301,7 +4227,7 @@ def test_supersede_returns_open_pr_of_first_delivery(tmp_path, monkeypatch):
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
     before = (rs.run_dir("r-recon") / "run.json").read_bytes()
-    ops = _RevisionPrOps(pr=5, pr_state="OPEN", prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=5, pr_state="OPEN")
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "returned", 5
     )
@@ -5323,7 +4249,7 @@ def test_supersede_refuses_when_first_delivery_pr_closed_unmerged(
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
-    ops = _RevisionPrOps(pr=5, pr_state="CLOSED", prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=5, pr_state="CLOSED")
     with pytest.raises(RuntimeError, match="закрыт без мержа"):
         tb.deliver_superseded(state, ops)
     assert tb._revisions(rs.load("r-recon")) == []
@@ -5351,7 +4277,7 @@ def test_supersede_ignores_first_delivery_pr_when_revision_is_last(
                 return {"state": "CLOSED"}
             return super().pr_facts(repo_slug, pr)
 
-    ops = _Ops(pr=9, pr_state="MERGED", prs=[_MERGED_PR])
+    ops = _Ops(pr=9, pr_state="MERGED")
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "delivered", 77
     )
@@ -5371,7 +4297,7 @@ def test_supersede_completes_started_revision_with_merged_pr(
 
     state = _recon_state(tmp_path, monkeypatch)
     prospective = _seed_revision(state, monkeypatch, head_sha="h")
-    ops = _RevisionPrOps(pr=7, pr_state="MERGED", prs=[_MERGED_PR],
+    ops = _RevisionPrOps(pr=7, pr_state="MERGED",
                          local_head="ДВИНУЛИ-СНАРУЖИ")
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "returned", 7
@@ -5394,7 +4320,7 @@ def test_supersede_resumes_started_revision_with_open_pr(
 
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(state, monkeypatch, head_sha="h")
-    ops = _RevisionPrOps(pr=7, pr_state="OPEN", prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=7, pr_state="OPEN")
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "returned", 7
     )
@@ -5424,7 +4350,6 @@ def test_supersede_resumes_started_revision_with_open_pr_moved_branch(
     _seed_revision(state, monkeypatch, head_sha="h")
     ops = _RevisionPrOps(
         pr=7, pr_state="OPEN", head="h", local_head="чужой-коммит",
-        prs=[_MERGED_PR],
     )
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "returned", 7
@@ -5448,7 +4373,7 @@ def test_supersede_resumes_started_revision_without_pr(tmp_path, monkeypatch):
 
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(state, monkeypatch)
-    ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=None)
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "delivered", 77
     )
@@ -5462,39 +4387,6 @@ def test_supersede_resumes_started_revision_without_pr(tmp_path, monkeypatch):
     ).read_text(encoding="utf-8")
     assert 'generated_at: "2026-09-09T10:00:00+03:00"' in text
     assert "version: 3" in text
-
-
-def test_supersede_resume_takes_signed_nodes_from_intent(
-    tmp_path, monkeypatch
-):
-    """§I7 на возобновлении: состав подписываемых узлов — ИЗ НАМЕРЕНИЯ.
-
-    `prospective_anchor` намерения посчитан с тем составом, что записан
-    рядом с ним. Пересчитай возобновление состав заново — и ответ
-    `ops.pr_files` (сегодня он шире: correction-PR якобы трогал ещё и
-    charter) дал бы ДРУГИЕ байты штампа, а гард §I2 порвал бы доставку
-    между коммитом и push. Durable-запись состава и есть то, что этого
-    не допускает."""
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    # База УЖЕ проштампована доставкой v1 — иначе поузловое правило вообще
-    # не при делах: на draft-узле штамп идёт переходом, а не перештампом.
-    _stamp_base_as_previous_delivery(state)
-    _seed_revision(state, monkeypatch)
-    ops = _RevisionPrOps(
-        pr=None, prs=[_MERGED_PR],
-        files=["workstreams/WS-alpha-7/spec/00-charter.md", _ANCHOR_REL],
-    )
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
-    # charter в намерении не значился — подпись correction-PR он не получил.
-    assert _anchor_meta(state, "00-charter.md")["approved_by"] != (
-        _pr_signature(403)[0]
-    )
-
-
 def test_supersede_refuses_resume_when_branch_missing_locally(
     tmp_path, monkeypatch
 ):
@@ -5515,7 +4407,7 @@ def test_supersede_refuses_resume_when_branch_missing_locally(
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(state, monkeypatch, head_sha="запушенный-коммит")
     # local_head=None — ветки ревизии в этом клоне нет; PR-а тоже нет.
-    ops = _RevisionPrOps(pr=None, local_head=None, prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=None, local_head=None)
     with pytest.raises(RuntimeError, match="--abandon-revision 2"):
         tb.deliver_superseded(state, ops)
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
@@ -5542,7 +4434,7 @@ def test_supersede_refuses_merged_pr_without_recorded_head_sha(
 
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(state, monkeypatch, head_sha=None)
-    ops = _RevisionPrOps(pr=7, pr_state="MERGED", prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=7, pr_state="MERGED")
     with pytest.raises(RuntimeError, match="--abandon-revision 2"):
         tb.deliver_superseded(state, ops)
     assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "started"
@@ -5557,7 +4449,7 @@ def test_supersede_refuses_open_pr_without_recorded_head_sha(
 
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(state, monkeypatch, head_sha=None)
-    ops = _RevisionPrOps(pr=7, pr_state="OPEN", prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=7, pr_state="OPEN")
     with pytest.raises(RuntimeError, match="--abandon-revision 2"):
         tb.deliver_superseded(state, ops)
     assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "started"
@@ -5571,7 +4463,7 @@ def test_supersede_resume_refuses_foreign_commit(tmp_path, monkeypatch):
 
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(state, monkeypatch)
-    ops = _RevisionPrOps(pr=None, local_head="commitX", prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=None, local_head="commitX")
     with pytest.raises(RuntimeError, match="чужой коммит"):
         tb.deliver_superseded(state, ops)
     assert not any(c[0] == "create_draft_pr" for c in ops.calls)
@@ -5591,7 +4483,7 @@ def test_supersede_resumes_when_branch_stands_on_base(tmp_path, monkeypatch):
     _seed_revision(state, monkeypatch)
     # local_head == base_sha намерения: ровно то, что оставляет
     # `ensure_branch`, создающая ветку от текущего HEAD.
-    ops = _RevisionPrOps(pr=None, local_head="base-sha-1", prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=None, local_head="base-sha-1")
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "delivered", 77
     )
@@ -5621,7 +4513,7 @@ def test_supersede_abandons_shifted_revision_and_starts_next(
     state = _recon_state(tmp_path, monkeypatch)
     # base намерения — позапрошлый: апстрим уехал, пока ревизия лежала.
     _seed_revision(state, monkeypatch, base_sha="БАЗА-ПОЗАПРОШЛАЯ")
-    ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=None)
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "delivered", 77
     )
@@ -5654,7 +4546,7 @@ def test_supersede_skips_abandoned_revision(tmp_path, monkeypatch):
     _seed_revision(
         state, monkeypatch, status="abandoned", reason="оператор закрыл PR",
     )
-    ops = _RevisionPrOps(pr=999, pr_state="OPEN", prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=999, pr_state="OPEN")
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "delivered", 77
     )
@@ -5676,7 +4568,7 @@ def test_supersede_refuses_resume_with_different_dag(tmp_path, monkeypatch):
         ["00-charter.md", []], ["10-requirements.md", ["charter"]],
     ])
     with pytest.raises(RuntimeError, match="другим составом DAG"):
-        tb.deliver_superseded(state, _RevisionPrOps(pr=None, prs=[_MERGED_PR]))
+        tb.deliver_superseded(state, _RevisionPrOps(pr=None))
 
 
 def test_supersede_records_commit_facts_before_push(tmp_path, monkeypatch):
@@ -5704,7 +4596,7 @@ def test_supersede_records_commit_facts_before_push(tmp_path, monkeypatch):
             self.at_push.append(rs.load("r-recon").ops.get("tasks-deliver-v2"))
             super().push_branch(target_dir, branch)
 
-    ops = _WatchPush(prs=[_MERGED_PR])
+    ops = _WatchPush()
     tb.deliver_superseded(state, ops)
     delivered = (
         Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
@@ -5738,7 +4630,7 @@ def test_supersede_records_tasks_blob_before_commit(tmp_path, monkeypatch):
             raise RuntimeError("процесс убит сразу после коммита")
 
     with pytest.raises(RuntimeError, match="убит сразу после коммита"):
-        tb.deliver_superseded(state, _DieAfterCommit(prs=[_MERGED_PR]))
+        tb.deliver_superseded(state, _DieAfterCommit())
     saved = rs.load("r-recon")
     op = saved.ops["tasks-deliver-v2"]
     assert op["status"] == "started"
@@ -5766,9 +4658,13 @@ def test_supersede_records_tasks_blob_before_commit(tmp_path, monkeypatch):
 
 
 def test_supersede_fails_when_actual_anchor_differs(tmp_path, monkeypatch):
-    """§I2: фактический штамп разошёлся с проспективным — фатально.
+    """§I2: фактический блоб анкера разошёлся с записанным — фатально.
 
-    Ревизия остаётся `started` (её разберёт реконсиляция), push не идёт."""
+    Расходиться этим величинам не от чего: переиздание бандла не
+    касается. Значит расхождение означает, что вход изменился между
+    проверкой и эффектом — base сдвинули, дерево загрязнили, узел
+    одобрили заново параллельным прогоном. Ревизия остаётся `started`
+    (её разберёт реконсиляция), push не идёт."""
     from governance import run_state as rs
     from governance import task_bridge as tb
 
@@ -5778,10 +4674,10 @@ def test_supersede_fails_when_actual_anchor_differs(tmp_path, monkeypatch):
     rs.save(state)
     monkeypatch.setattr(
         tb, "_prospective_anchor",
-        lambda *a, **kw: "0000000ложный-проспективный-штамп",
+        lambda *a, **kw: "0000000ложный-анкер-намерения",
     )
-    ops = _SupersedeOps(prs=[_MERGED_PR])
-    with pytest.raises(RuntimeError, match="разошёлся с проспективным"):
+    ops = _SupersedeOps()
+    with pytest.raises(RuntimeError, match="разошёлся с записанным"):
         tb.deliver_superseded(state, ops)
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["status"] == "started"
@@ -5803,12 +4699,11 @@ def test_supersede_write_ahead_survives_delivery_failure(tmp_path, monkeypatch):
             raise RuntimeError("gh pr create упал")
 
     with pytest.raises(RuntimeError, match="gh pr create упал"):
-        tb.deliver_superseded(state, _FailingPr(prs=[_MERGED_PR]))
+        tb.deliver_superseded(state, _FailingPr())
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["status"] == "started"
     assert saved["branch"] == "spec/WS-alpha-7-tasks-v2"
     assert saved["base_sha"] == "base-sha-1"
-    assert saved["approval_pr"] == 403
     assert saved["supersedes"] == 1
     assert saved["expected_generated_at"]
     # Коммит уже был — факты опознания записаны хуками ДО падения на PR.
@@ -5831,7 +4726,7 @@ def test_supersede_base_sha_unknown_fails_closed(tmp_path, monkeypatch):
             return None
 
     with pytest.raises(RuntimeError, match="HEAD"):
-        tb.deliver_superseded(state, _NoHead(prs=[_MERGED_PR]))
+        tb.deliver_superseded(state, _NoHead())
 
 
 def test_previous_tasks_version_missing_spec_refuses(tmp_path, monkeypatch):
@@ -5891,7 +4786,7 @@ def test_supersede_not_completed_run_refuses(tmp_path, monkeypatch):
 
     state = _recon_state(tmp_path, monkeypatch, status="waiting_human_merge")
     with pytest.raises(RuntimeError, match="completed"):
-        tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
+        tb.deliver_superseded(state, _SupersedeOps())
 
 
 def test_supersede_dirty_target_refuses(tmp_path, monkeypatch):
@@ -5906,7 +4801,7 @@ def test_supersede_dirty_target_refuses(tmp_path, monkeypatch):
             return True
 
     with pytest.raises(RuntimeError, match="грязный"):
-        tb.deliver_superseded(state, _DirtyOps(prs=[_MERGED_PR]))
+        tb.deliver_superseded(state, _DirtyOps())
 
 
 def test_supersede_no_prior_delivery_refuses(tmp_path, monkeypatch):
@@ -5917,7 +4812,7 @@ def test_supersede_no_prior_delivery_refuses(tmp_path, monkeypatch):
     # _recon_state кладёт state.pr = 5 по умолчанию, но op tasks-deliver не
     # заводит — прогон формально не доставлял ничего.
     with pytest.raises(RuntimeError, match="переиздавать нечего"):
-        tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
+        tb.deliver_superseded(state, _SupersedeOps())
 
 
 def test_cli_supersede_calls_deliver_superseded(tmp_path, monkeypatch, capsys):
@@ -5928,14 +4823,14 @@ def test_cli_supersede_calls_deliver_superseded(tmp_path, monkeypatch, capsys):
     _recon_state(tmp_path, monkeypatch)
     called = {}
 
-    def _fake(s, o, legacy_bundle=None, approval_pr=None, replace=None):
-        called["args"] = (s.run_id, legacy_bundle, approval_pr, replace)
+    def _fake(s, o, legacy_bundle=None, replace=None):
+        called["args"] = (s.run_id, legacy_bundle, replace)
         return tb.SupersedeResult("delivered", 77)
 
     monkeypatch.setattr(tb, "deliver_superseded", _fake)
     monkeypatch.setattr(tb, "RealOps", lambda: object())
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
-    assert called["args"] == ("r-recon", None, None, None)
+    assert called["args"] == ("r-recon", None, None)
     assert "переизданная tasks-спека доставлена: PR #77" in (
         capsys.readouterr().out
     )
@@ -5946,11 +4841,9 @@ def test_cli_supersede_passes_flags_through(tmp_path, monkeypatch, capsys):
 
     Соседний тест запускает голый `--supersede` и ожидает `None`, а `None`
     совпадает и с «флаг проброшен», и с «флаг выброшен» — учебная
-    тавтология на стабе: обрыв `--approval-pr` и `--legacy-bundle` в
-    диспетчере проходил незаметно (F-10, мутации M63/M64). Цена обрыва
-    высока: `--approval-pr` — единственный операторский выход из отказа
-    «ноль или несколько кандидатов» (§I7), `--legacy-bundle` —
-    единственный способ переиздать легаси-бандл."""
+    тавтология на стабе: обрыв `--legacy-bundle` в диспетчере проходил
+    незаметно (F-10, мутация M64). Цена обрыва высока: это единственный
+    способ переиздать легаси-бандл."""
     from governance import run_state as rs
     from governance import task_bridge as tb
 
@@ -5958,17 +4851,16 @@ def test_cli_supersede_passes_flags_through(tmp_path, monkeypatch, capsys):
     _recon_state(tmp_path, monkeypatch)
     called = {}
 
-    def _fake(s, o, legacy_bundle=None, approval_pr=None, replace=None):
-        called["args"] = (s.run_id, legacy_bundle, approval_pr, replace)
+    def _fake(s, o, legacy_bundle=None, replace=None):
+        called["args"] = (s.run_id, legacy_bundle, replace)
         return tb.SupersedeResult("delivered", 77)
 
     monkeypatch.setattr(tb, "deliver_superseded", _fake)
     monkeypatch.setattr(tb, "RealOps", lambda: object())
     assert tb.main([
-        "--run-id", "r-recon", "--supersede",
-        "--approval-pr", "500", "--legacy-bundle", "5",
+        "--run-id", "r-recon", "--supersede", "--legacy-bundle", "5",
     ]) == 0
-    assert called["args"] == ("r-recon", 5, 500, None)
+    assert called["args"] == ("r-recon", 5, None)
 
 
 def test_cli_supersede_noop_is_success(tmp_path, monkeypatch, capsys):
@@ -5979,7 +4871,7 @@ def test_cli_supersede_noop_is_success(tmp_path, monkeypatch, capsys):
     _recon_state(tmp_path, monkeypatch)
     monkeypatch.setattr(
         tb, "deliver_superseded",
-        lambda s, o, legacy_bundle=None, approval_pr=None, replace=None:
+        lambda s, o, legacy_bundle=None, replace=None:
             tb.SupersedeResult("noop"),
     )
     monkeypatch.setattr(tb, "RealOps", lambda: object())
@@ -6012,7 +4904,7 @@ def test_cli_supersede_returned_pr_is_not_announced_as_delivered(
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
-    ops = _RevisionPrOps(pr=5, pr_state="OPEN", prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=5, pr_state="OPEN")
     monkeypatch.setattr(tb, "RealOps", lambda: ops)
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
     out = capsys.readouterr().out
@@ -6035,7 +4927,7 @@ def test_cli_supersede_delivery_is_announced(tmp_path, monkeypatch, capsys):
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ-ДРУГОЙ"}
     rs.save(state)
-    ops = _SupersedeOps(prs=[_MERGED_PR])
+    ops = _SupersedeOps()
     monkeypatch.setattr(tb, "RealOps", lambda: ops)
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
     assert "переизданная tasks-спека доставлена: PR #77" in (
@@ -6061,7 +4953,7 @@ def test_cli_supersede_missing_bundle_dir_is_diagnosed(
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
     shutil.rmtree(Path(state.target_dir) / state.bundle_dir)
-    ops = _RevisionPrOps(pr=5, pr_state="MERGED", prs=[_MERGED_PR])
+    ops = _RevisionPrOps(pr=5, pr_state="MERGED")
     monkeypatch.setattr(tb, "RealOps", lambda: ops)
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 1
     assert "каталога бандла" in capsys.readouterr().out
@@ -6166,19 +5058,15 @@ def test_cli_conform_approve_with_other_action_refuses(
     assert "--conform-approve" in capsys.readouterr().err
 
 
-def test_cli_approval_pr_without_supersede_refuses(
-    tmp_path, monkeypatch, capsys
-):
-    """`--approval-pr` без `--supersede` не доходит никуда (C-7).
-
-    Без гварда команда молча выполняла бы ОБЫЧНУЮ доставку — не то, о чём
-    просил оператор."""
+def test_cli_has_no_approval_pr_flag_anymore(capsys) -> None:
+    """Флаг ушёл вместе с провенансом штампа (§I7): подпись доставка не
+    берёт ни у одного PR, потому что не подписывает."""
     from governance import task_bridge as tb
 
     with pytest.raises(SystemExit) as exc:
-        tb.main(["--run-id", "r", "--approval-pr", "403"])
+        tb.main(["--run-id", "r", "--supersede", "--approval-pr", "403"])
     assert exc.value.code == 2
-    assert "--approval-pr" in capsys.readouterr().err
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_cli_abandon_revision_requires_reason(tmp_path, monkeypatch, capsys):
@@ -6205,7 +5093,7 @@ class _ReplaceOps(_SupersedeOps):
     """`_SupersedeOps` + поверхность замены: факты, ревью, закрытие, ветка.
 
     Заменяемый PR отвечает СВОИМИ фактами (`state`/`headRefOid`), а не
-    общим шаблоном `_ProvOps`: correction-PR обязан оставаться вмерженным
+    общим шаблоном `_ForgeOps`: correction-PR обязан оставаться вмерженным
     в тех же тестах, где заменяемый открыт, — иначе провенанс §I7 падал
     бы раньше предмета теста и «замена отказала» было бы неотличимо от
     «подписи не нашлось».
@@ -6234,7 +5122,7 @@ class _ReplaceOps(_SupersedeOps):
         }
         super().__init__(**kw)
         # Факты ПОНОМЕРНО: заменяемый PR по умолчанию открыт, факты PR
-        # новой ревизии задаются тестами окна C. Общий шаблон `_ProvOps`
+        # новой ревизии задаются тестами окна C. Общий шаблон `_ForgeOps`
         # (вмержен, подпись полна) остаётся дефолтом для остальных —
         # correction-PR обязан быть вмерженным в тех же тестах.
         self.facts_by_pr = {
@@ -6320,7 +5208,7 @@ def _replace_state(tmp_path, monkeypatch, **rev3):
         "branch": _REPLACED_BRANCH, "base_sha": "base-sha-1",
         "head_sha": _REPLACED_HEAD, "anchor": "АНКЕР-v3",
         "prospective_anchor": "АНКЕР-v3", "content_anchor": content,
-        "tasks_version": 2, "approval_pr": 403,
+        "tasks_version": 2,
         "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
         "supersedes": 1,
         **rev3,
@@ -6349,7 +5237,7 @@ def test_replace_delivers_v4_closes_pr_and_drops_branch(
     from governance import task_bridge as tb
 
     state = _replace_state(tmp_path, monkeypatch)
-    ops = _ReplaceOps(prs=[_MERGED_PR])
+    ops = _ReplaceOps()
 
     result = tb.deliver_superseded(state, ops, replace=_replace())
 
@@ -6381,7 +5269,7 @@ def test_replace_closes_pr_before_creating_the_new_one(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _replace_state(tmp_path, monkeypatch)
-    ops = _ReplaceOps(prs=[_MERGED_PR])
+    ops = _ReplaceOps()
 
     tb.deliver_superseded(state, ops, replace=_replace())
 
@@ -6406,17 +5294,17 @@ def test_replace_is_the_only_exit_from_the_defective_pr(
 
     state = _replace_state(tmp_path, monkeypatch)
     assert tb.deliver_superseded(
-        state, _ReplaceOps(prs=[_MERGED_PR])
+        state, _ReplaceOps()
     ) == tb.SupersedeResult("returned", _REPLACED_PR)
 
     assert tb.deliver_superseded(
-        state, _ReplaceOps(prs=[_MERGED_PR], branch_prs={
+        state, _ReplaceOps(branch_prs={
             _REPLACED_BRANCH: None,
         })
     ) == tb.SupersedeResult("noop")
 
     assert tb.deliver_superseded(
-        state, _ReplaceOps(prs=[_MERGED_PR]), replace=_replace()
+        state, _ReplaceOps(), replace=_replace()
     ).kind == "delivered"
 
 
@@ -6426,7 +5314,7 @@ def test_replace_refuses_when_head_diverged(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _replace_state(tmp_path, monkeypatch)
-    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_head="ЧУЖОЙ-HEAD")
+    ops = _ReplaceOps(replaced_head="ЧУЖОЙ-HEAD")
     before = (rs.run_dir("r-recon") / "run.json").read_bytes()
 
     with pytest.raises(RuntimeError, match="вмешались снаружи"):
@@ -6443,7 +5331,6 @@ def test_replace_refuses_on_human_review(tmp_path, monkeypatch):
 
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(
-        prs=[_MERGED_PR],
         reviews=[{"login": "andrei-shtanakov", "state": "COMMENTED"}],
     )
 
@@ -6468,7 +5355,6 @@ def test_replace_refuses_on_review_from_the_review_contour_too(
 
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(
-        prs=[_MERGED_PR],
         reviews=[{"login": "ai-prosto", "state": "CHANGES_REQUESTED"}],
     )
 
@@ -6492,7 +5378,6 @@ def test_replace_review_block_ignores_review_login_env(
     monkeypatch.setenv("REVIEW_LOGIN", "other-bot")
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(
-        prs=[_MERGED_PR],
         reviews=[{"login": "other-bot", "state": "APPROVED"}],
     )
 
@@ -6530,7 +5415,6 @@ def test_explicit_allowlist_unblocks_only_the_named_login(
     assert tb.deliver_superseded(
         state,
         _ReplaceOps(
-            prs=[_MERGED_PR],
             reviews=[{"login": "ai-prosto", "state": "APPROVED"},
                      {"login": "other-bot", "state": "COMMENTED"}],
         ),
@@ -6547,7 +5431,6 @@ def test_pending_review_is_a_draft_not_a_verdict(tmp_path, monkeypatch):
 
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(
-        prs=[_MERGED_PR],
         reviews=[{"login": "andrei-shtanakov", "state": "PENDING"}],
     )
 
@@ -6571,7 +5454,7 @@ def test_red_checks_and_plain_comments_do_not_block_replacement(
 
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(
-        prs=[_MERGED_PR], reviews=[], threads=False,
+        reviews=[], threads=False,
         facts_by_pr={_REPLACED_PR: {
             "state": "OPEN", "headRefOid": _REPLACED_HEAD,
             "statusCheckRollup": [{"conclusion": "FAILURE"}],
@@ -6620,7 +5503,7 @@ def test_replace_fails_closed_on_threads_and_unknowns(
     from governance import task_bridge as tb
 
     state = _replace_state(tmp_path, monkeypatch)
-    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+    ops = _ReplaceOps(**kw)
 
     with pytest.raises(RuntimeError, match=match):
         tb.deliver_superseded(state, ops, replace=_replace())
@@ -6636,7 +5519,7 @@ def test_replace_refuses_merged_pr_unconditionally(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _replace_state(tmp_path, monkeypatch)
-    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="MERGED")
+    ops = _ReplaceOps(replaced_state="MERGED")
 
     with pytest.raises(RuntimeError, match="вмержен"):
         tb.deliver_superseded(state, ops, replace=_replace())
@@ -6654,7 +5537,7 @@ def test_replace_accepts_pr_closed_by_operator(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _replace_state(tmp_path, monkeypatch)
-    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="CLOSED")
+    ops = _ReplaceOps(replaced_state="CLOSED")
 
     assert tb.deliver_superseded(
         state, ops, replace=_replace()
@@ -6679,7 +5562,7 @@ def test_replace_refuses_v1_and_unfinished_and_missing(
     state = _replace_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver-v2"] = {"status": "started", "revision": 2}
     rs.save(state)
-    ops = _ReplaceOps(prs=[_MERGED_PR])
+    ops = _ReplaceOps()
 
     with pytest.raises(RuntimeError, match="N ≥ 2"):
         tb.deliver_superseded(state, ops, replace=_replace(revision=1))
@@ -6702,7 +5585,7 @@ def test_replace_refuses_when_close_fails(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _replace_state(tmp_path, monkeypatch)
-    ops = _ReplaceOps(prs=[_MERGED_PR], close_ok=False)
+    ops = _ReplaceOps(close_ok=False)
 
     with pytest.raises(RuntimeError, match="не удалось закрыть"):
         tb.deliver_superseded(state, ops, replace=_replace())
@@ -6750,7 +5633,7 @@ def test_i3_does_not_fail_closed_on_replaced_revision(tmp_path, monkeypatch):
     state.ops["tasks-deliver-v4"] = _abandoned_replacement()
     rs.save(state)
     ops = _ReplaceOps(
-        prs=[_MERGED_PR], replaced_state="CLOSED",
+        replaced_state="CLOSED",
         branch_prs={_REPLACED_BRANCH: _REPLACED_PR},
     )
 
@@ -6774,7 +5657,7 @@ def test_i3_still_fails_closed_on_closed_pr_without_forward_link(
 
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(
-        prs=[_MERGED_PR], replaced_state="CLOSED",
+        replaced_state="CLOSED",
         branch_prs={_REPLACED_BRANCH: _REPLACED_PR},
     )
 
@@ -6794,7 +5677,7 @@ def test_i3_forward_link_requires_matching_pr_number(tmp_path, monkeypatch):
     state.ops["tasks-deliver-v4"] = _abandoned_replacement(replaces_pr=999)
     rs.save(state)
     ops = _ReplaceOps(
-        prs=[_MERGED_PR], replaced_state="CLOSED",
+        replaced_state="CLOSED",
         branch_prs={_REPLACED_BRANCH: _REPLACED_PR},
     )
 
@@ -6874,7 +5757,7 @@ def test_replacement_may_repeat_version_and_content_of_the_revoked(
 
     state = _replace_state(tmp_path, monkeypatch)
     revoked = dict(state.ops["tasks-deliver-v3"])
-    ops = _ReplaceOps(prs=[_MERGED_PR])
+    ops = _ReplaceOps()
 
     assert tb.deliver_superseded(
         state, ops, replace=_replace()
@@ -6898,19 +5781,16 @@ def _v4_intent(state, **kw) -> dict:
     """
     from governance import task_bridge as tb
 
-    by, at = _pr_signature(403)
     return {
         "status": "started", "revision": 4,
         "branch": "spec/WS-alpha-7-tasks-v4", "base_sha": "base-sha-1",
         "head_sha": None, "tasks_blob": None,
         "prospective_anchor": tb._prospective_anchor(
-            state.target_dir, state.bundle_dir, by, at, None,
-            restamp_nodes=frozenset({"decomposition"}),
+            state.target_dir, state.bundle_dir, None,
         ),
         "content_anchor": tb._content_anchor(
             state.target_dir, state.bundle_dir, None
         ),
-        "approval_pr": 403, "signed_nodes": ["decomposition"],
         "tasks_version": 2,
         "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
         "dag_source": "derived_from_spec", "supersedes": 1,
@@ -6942,7 +5822,7 @@ def test_window_a_intent_written_pr_still_open(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _window_state(tmp_path, monkeypatch)
-    ops = _ReplaceOps(prs=[_MERGED_PR])
+    ops = _ReplaceOps()
 
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "delivered", 77
@@ -6964,7 +5844,7 @@ def test_window_b_pr_closed_no_pr_anywhere(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _window_state(tmp_path, monkeypatch)
-    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="CLOSED")
+    ops = _ReplaceOps(replaced_state="CLOSED")
 
     assert tb.deliver_superseded(state, ops).kind == "delivered"
     assert ops.closed == []          # шаг состоялся раньше — no-op
@@ -6985,7 +5865,7 @@ def test_window_c_pr_created_branch_alive(tmp_path, monkeypatch):
 
     state = _window_state(tmp_path, monkeypatch, head_sha="commit-sha-1")
     ops = _ReplaceOps(
-        prs=[_MERGED_PR], replaced_state="CLOSED",
+        replaced_state="CLOSED",
         branch_prs={"spec/WS-alpha-7-tasks-v4": 77},
         facts_by_pr={77: {"state": "OPEN", "headRefOid": "commit-sha-1"}},
     )
@@ -7020,7 +5900,7 @@ def test_window_c_completed_revision_still_drops_branch(
         head_sha="commit-sha-1",
     )
     ops = _ReplaceOps(
-        prs=[_MERGED_PR], replaced_state="CLOSED",
+        replaced_state="CLOSED",
         branch_prs={"spec/WS-alpha-7-tasks-v4": 77},
         facts_by_pr={77: {"state": "OPEN", "headRefOid": "commit-sha-1"}},
     )
@@ -7044,7 +5924,7 @@ def test_replace_refuses_when_a_later_revision_is_not_this_replacement(
     from governance import task_bridge as tb
 
     state = _window_state(tmp_path, monkeypatch, replaces_revision=None)
-    ops = _ReplaceOps(prs=[_MERGED_PR])
+    ops = _ReplaceOps()
 
     with pytest.raises(RuntimeError, match="не последняя в леджере"):
         tb.deliver_superseded(state, ops, replace=_replace())
@@ -7063,7 +5943,7 @@ def test_repeat_with_the_flag_continues_the_same_revision(
     state = _window_state(tmp_path, monkeypatch)
 
     assert tb.deliver_superseded(
-        state, _ReplaceOps(prs=[_MERGED_PR]), replace=_replace()
+        state, _ReplaceOps(), replace=_replace()
     ) == tb.SupersedeResult("delivered", 77)
     saved = rs.load("r-recon").ops
     assert saved["tasks-deliver-v4"]["status"] == "completed"
@@ -7080,7 +5960,6 @@ def test_replace_close_revalidates_between_windows(tmp_path, monkeypatch):
 
     state = _window_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(
-        prs=[_MERGED_PR],
         reviews=[{"login": "andrei-shtanakov", "state": "APPROVED"}],
     )
 
@@ -7108,7 +5987,7 @@ def test_abandoned_replacement_hands_its_obligation_to_the_next_revision(
     }
     state.ops["tasks-deliver-v4"] = _abandoned_replacement()
     rs.save(state)
-    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="CLOSED")
+    ops = _ReplaceOps(replaced_state="CLOSED")
 
     assert tb.deliver_superseded(state, ops).kind == "delivered"
 
@@ -7140,7 +6019,7 @@ def test_obligation_survives_abandon_inside_the_same_call(
     # base ревизии-замены сдвинулся ⇒ цикл её бросит: `started`, PR по её
     # ветке нет, base не тот.
     state = _window_state(tmp_path, monkeypatch, base_sha="base-sha-0")
-    ops = _ReplaceOps(prs=[_MERGED_PR])
+    ops = _ReplaceOps()
 
     assert tb.deliver_superseded(state, ops).kind == "delivered"
 
@@ -7176,7 +6055,7 @@ def test_revoked_revision_with_open_pr_is_never_returned(
     state.ops["tasks-deliver-v4"] = _abandoned_replacement()
     rs.save(state)
     # #408 ещё ОТКРЫТ: шаг закрытия не успел выполниться до броска.
-    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="OPEN")
+    ops = _ReplaceOps(replaced_state="OPEN")
 
     result = tb.deliver_superseded(state, ops)
 
@@ -7241,7 +6120,7 @@ def test_obligation_is_discharged_when_revoked_pr_gets_merged(
     }
     state.ops["tasks-deliver-v4"] = _abandoned_replacement()
     rs.save(state)
-    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="MERGED")
+    ops = _ReplaceOps(replaced_state="MERGED")
 
     assert tb.deliver_superseded(state, ops).kind == "delivered"
 
@@ -7268,7 +6147,7 @@ def test_merged_revoked_pr_mid_flight_names_the_way_out(
     from governance import task_bridge as tb
 
     state = _window_state(tmp_path, monkeypatch)
-    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="MERGED")
+    ops = _ReplaceOps(replaced_state="MERGED")
 
     with pytest.raises(RuntimeError, match="--abandon-revision 4"):
         tb.deliver_superseded(state, ops)
@@ -7287,7 +6166,7 @@ def test_discharge_costs_nothing_without_revocations_in_the_ledger(
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    ops = _ReplaceOps(prs=[_MERGED_PR])
+    ops = _ReplaceOps()
 
     assert tb._discharged_replacements(state, ops) == frozenset()
     assert not any(c[0] == "pr_facts" for c in ops.calls)
@@ -7327,7 +6206,7 @@ def test_branch_is_dropped_only_where_head_matches_the_revoked_revision(
     from governance import task_bridge as tb
 
     state = _replace_state(tmp_path, monkeypatch)
-    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+    ops = _ReplaceOps(**kw)
 
     assert tb.deliver_superseded(
         state, ops, replace=_replace()
@@ -7355,7 +6234,7 @@ def test_branch_is_kept_when_intent_carries_no_head_of_the_revoked(
     state = _window_state(
         tmp_path, monkeypatch, replaces_head_sha=None,
     )
-    ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="CLOSED")
+    ops = _ReplaceOps(replaced_state="CLOSED")
 
     assert tb.deliver_superseded(state, ops).kind == "delivered"
 
@@ -7445,7 +6324,7 @@ def test_cli_replace_reaches_implementation(tmp_path, monkeypatch, capsys):
     _recon_state(tmp_path, monkeypatch)
     called = {}
 
-    def _fake(s, o, legacy_bundle=None, approval_pr=None, replace=None):
+    def _fake(s, o, legacy_bundle=None, replace=None):
         called["replace"] = replace
         return tb.SupersedeResult("delivered", 77)
 
@@ -7820,7 +6699,7 @@ def test_supersede_preserves_execution_state_of_unchanged_tasks(
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ-ДРУГОЙ"}
     rs.save(state)
-    ops = _CarryOps(prs=[_MERGED_PR], delivered=_delivered_v1(state))
+    ops = _CarryOps(delivered=_delivered_v1(state))
     assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
         "delivered", 77
     )
@@ -7863,7 +6742,7 @@ def test_supersede_carry_source_is_base_not_worktree(tmp_path, monkeypatch):
         "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
     }
     rs.save(state)
-    ops = _CarryOps(prs=[_MERGED_PR], delivered="")
+    ops = _CarryOps(delivered="")
     assert tb.deliver_superseded(state, ops).kind == "delivered"
     text = (
         Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
@@ -7925,7 +6804,7 @@ def test_supersede_resume_reproduces_the_same_bytes(tmp_path, monkeypatch):
                                   "anchor": "СТАРЫЙ-ДРУГОЙ"}
     rs.save(state)
     delivered = _delivered_v1(state)
-    first = _CarryOps(prs=[_MERGED_PR], delivered=delivered)
+    first = _CarryOps(delivered=delivered)
     assert tb.deliver_superseded(state, first).kind == "delivered"
     spec = Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
     bytes_first = spec.read_bytes()
@@ -7938,10 +6817,944 @@ def test_supersede_resume_reproduces_the_same_bytes(tmp_path, monkeypatch):
     )
     rs.save(saved)
     spec.write_text("затёрто\n", encoding="utf-8")
-    again = _CarryOps(prs=[_MERGED_PR], delivered=delivered)
+    again = _CarryOps(delivered=delivered)
     assert tb.deliver_superseded(saved, again).kind == "delivered"
     assert spec.read_bytes() == bytes_first
     assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_blob"] == (
         blob_first
     )
     assert ("show_file", "base-sha-1", _SPEC_REL) in again.calls
+
+
+# --- §I12: `--approve-node` — одобрение узла есть человеческий акт ---------
+#
+# Единственный переход `draft|stale → approved` во всём мосту. Доставка
+# права одобрять не имеет ни на одном пути (§I7), поэтому предикат
+# «честно одобрен» и команда, которая его выполняет, — предмет отдельного
+# блока.
+
+def _approve(target: str, node_id: str, **kw) -> list[str]:
+    return task_bridge.approve_node(
+        target, _BUNDLE, node_id, kw.pop("by", _HUMAN),
+        kw.pop("at", _HUMAN_AT), **kw,
+    )
+
+
+def test_approve_node_transitions_draft_and_records_the_human_act(
+    tmp_path: Path,
+) -> None:
+    """Пункт 3 контракта команды: переход, `version + 1`, пины, подпись."""
+    target = str(_target(tmp_path, approved=False))
+    before = _meta(target, _CHARTER)["version"]
+
+    changed = _approve(target, "charter")
+
+    assert changed == [f"{_BUNDLE}/{_CHARTER}"]
+    meta = _meta(target, _CHARTER)
+    assert meta["status"] == "approved"
+    assert meta["version"] == before + 1
+    assert meta["approved_by"] == _HUMAN
+    assert meta["approved_at"] == _HUMAN_AT
+
+
+def test_approve_node_pins_actual_upstream_blobs(tmp_path: Path) -> None:
+    """Пины пересчитываются с ФАКТИЧЕСКИХ байтов upstream, не с записанных."""
+    target = str(_target(tmp_path, approved=False))
+    _approve(target, "charter")
+
+    _approve(target, "requirements")
+
+    charter_blob = task_bridge.blob_sha1(
+        (Path(target) / _BUNDLE / _CHARTER).read_text(encoding="utf-8")
+    )
+    assert _meta(target, _REQUIREMENTS)["upstream_hashes"] == {
+        "charter": charter_blob
+    }
+
+
+def test_approve_node_refuses_when_direct_upstream_is_not_approved(
+    tmp_path: Path,
+) -> None:
+    """Пункт 2: топологическая готовность прямых upstream — условие входа."""
+    target = str(_target(tmp_path, approved=False))
+    untouched = (Path(target) / _BUNDLE / _REQUIREMENTS).read_bytes()
+
+    with pytest.raises(RuntimeError, match="топологическая готовность"):
+        _approve(target, "requirements")
+
+    assert (Path(target) / _BUNDLE / _REQUIREMENTS).read_bytes() == untouched
+    assert _meta(target, _CHARTER)["status"] == "draft"
+
+
+def test_approve_node_upstream_check_is_the_same_predicate(
+    tmp_path: Path,
+) -> None:
+    """Upstream `approved`, но с разошедшимися пинами — тоже не готовность.
+
+    Предикат ОДИН на все проверки: сведи готовность к `status == approved`,
+    и узел, чей upstream был одобрен помимо этой команды и уехал вперёд,
+    прошёл бы молча. Индукция «прямые, а не транзитивные» держится ровно
+    на этом условии."""
+    target = str(_target(tmp_path))
+    _set_node(target, _BEHAVIOUR, status="stale")
+    # requirements формально approved, но charter с тех пор уехал: его пин
+    # больше не сходится, значит для behaviour-spec upstream не готов.
+    _set_node(target, _CHARTER, version=99)
+
+    with pytest.raises(RuntimeError, match="топологическая готовность") as exc:
+        _approve(target, "behaviour-spec")
+    assert "10-requirements.md" in str(exc.value)
+
+
+def test_approve_node_repeat_over_honest_node_is_a_noop(
+    tmp_path: Path,
+) -> None:
+    """Пункт 4: ни записи, ни новой подписи, ни инкремента `version`.
+
+    Требование, а не вежливость: подпишись повтор заново, сменились бы
+    байты узла, downstream уехал бы в `stale`, и каждый лишний вызов
+    плодил бы долг на ровном месте."""
+    target = str(_target(tmp_path))
+    before = _node_bytes_of(target)
+
+    assert _approve(target, "requirements", by="другой", at="2030-01-01") == []
+
+    assert _node_bytes_of(target) == before
+
+
+def test_approve_node_refuses_approved_node_with_drifted_pins(
+    tmp_path: Path,
+) -> None:
+    """Пункт 6: fail-closed, а не молчаливая перепиновка (spec-runner#410).
+
+    Отказ называет узел, обе величины разошедшегося пина и процедуру —
+    снизу вверх ПО ПРИЧИНЕ: сперва одобрить изменившийся upstream, чей
+    каскад объявит долг этому узлу."""
+    target = str(_target(tmp_path))
+    _set_node(
+        target, _REQUIREMENTS,
+        upstream_hashes={"charter": "de" + "0" * 38},
+    )
+    before = _node_bytes_of(target)
+
+    with pytest.raises(RuntimeError, match="перепиновать") as exc:
+        _approve(target, "requirements")
+
+    message = str(exc.value)
+    assert "de" + "0" * 38 in message
+    actual = task_bridge.blob_sha1(
+        (Path(target) / _BUNDLE / _CHARTER).read_text(encoding="utf-8")
+    )
+    assert actual in message
+    assert "сперва одобрите изменившийся upstream" in message
+    assert "charter" in message
+    assert _node_bytes_of(target) == before
+
+
+def test_approve_node_reapproves_node_whose_signature_is_empty(
+    tmp_path: Path,
+) -> None:
+    """«Одобрено» без одобрившего — незаконное состояние, и единственный
+    выход из него тот же, что у разошедшегося self-hash: переодобрение.
+
+    Пины верны, ждать нечего; fail-closed здесь запер бы воркстрим
+    навсегда — гейт такой узел не пропускает, а починить его больше
+    нечем. Развилка спекой прямо не закрыта (п.5 назван через self-hash),
+    решена по правилу «пробел, из которого нет штатного выхода, — не
+    принятый остаток, а тупик» (§7)."""
+    target = str(_target(tmp_path))
+    _set_node(target, _CHARTER, approved_by="")
+
+    assert _approve(target, "charter", by="человек", at="t") != []
+
+    meta = _meta(target, _CHARTER)
+    assert meta["approved_by"] == "человек"
+    assert task_bridge._approval_findings(
+        target, _BUNDLE, task_bridge._BUNDLE_DAG, nodes=("charter",)
+    ) == []
+
+
+def test_approve_node_refuses_id_outside_the_active_dag(
+    tmp_path: Path,
+) -> None:
+    """Approve есть акт о ПОЗИЦИИ В ГРАФЕ, а не о файле на диске."""
+    target = str(_target(tmp_path, approved=False))
+
+    with pytest.raises(RuntimeError, match="не входит в активный DAG") as exc:
+        _approve(target, "workstreams/WS-alpha-7/spec/00-charter.md")
+    assert "charter" in str(exc.value)
+
+
+# --- каскад `stale`: рекурсивный, меняет ровно статус ----------------------
+
+
+def test_cascade_is_recursive_not_single_level(tmp_path: Path) -> None:
+    """Approve requirements → behaviour-spec/design/acceptance в `stale`, и
+    decomposition, который requirements НЕ пинует, — тоже.
+
+    Смена статуса есть правка файла, а файл узла входит в пин его
+    собственных downstream: одноуровневый каскад оставил бы decomposition
+    `approved` с пином на байты design/acceptance, которых уже нет, — то
+    самое незаконное состояние, ради запрета которого он вводился."""
+    target = str(_target(tmp_path))
+    _set_node(target, _REQUIREMENTS, status="stale")
+
+    changed = _approve(target, "requirements")
+
+    assert set(changed) == {
+        f"{_BUNDLE}/{name}" for name in (
+            _REQUIREMENTS, _BEHAVIOUR, _DESIGN, _ACCEPTANCE, _DECOMPOSITION,
+        )
+    }
+    for name in (_BEHAVIOUR, _DESIGN, _ACCEPTANCE, _DECOMPOSITION):
+        assert _meta(target, name)["status"] == "stale", name
+
+
+def test_cascade_stops_on_a_node_that_already_carries_the_debt(
+    tmp_path: Path,
+) -> None:
+    """Долг у него объявлен, помечать нечем — рекурсия конечна без счётчика."""
+    target = str(_target(tmp_path))
+    _set_node(target, _REQUIREMENTS, status="stale")
+    _set_node(target, _BEHAVIOUR, status="draft")
+    _set_node(target, _DESIGN, status="stale")
+    frozen = {
+        name: (Path(target) / _BUNDLE / name).read_bytes()
+        for name in (_BEHAVIOUR, _DESIGN)
+    }
+
+    changed = _approve(target, "requirements")
+
+    assert f"{_BUNDLE}/{_BEHAVIOUR}" not in changed
+    assert f"{_BUNDLE}/{_DESIGN}" not in changed
+    for name, before in frozen.items():
+        assert (Path(target) / _BUNDLE / name).read_bytes() == before
+    # acceptance пинует requirements напрямую — его каскад достаёт.
+    assert _meta(target, _ACCEPTANCE)["status"] == "stale"
+
+
+def test_cascade_changes_status_and_nothing_else(tmp_path: Path) -> None:
+    """Подпись, `version` и прежние пины `stale`-узла сохраняются.
+
+    Пины обязаны продолжать указывать на одобренные байты — это запись
+    «что именно покрывала подпись», а не устаревший мусор; операция
+    СОЗДАЁТ долг, а не гасит его."""
+    target = str(_target(tmp_path))
+    _set_node(target, _REQUIREMENTS, status="stale")
+    _set_node(target, _BEHAVIOUR, version=7)
+    before = _meta(target, _BEHAVIOUR)
+    assert before["version"] == 7 and before["approved_by"] == _HUMAN
+
+    _approve(target, "requirements")
+
+    # Весь frontmatter дословно прежний, кроме одного ключа: `version`,
+    # подпись и пины `stale`-узла — записи о ПРОШЛОМ одобрении.
+    assert _meta(target, _BEHAVIOUR) == {**before, "status": "stale"}
+
+
+def test_after_any_approve_no_approved_node_carries_a_false_pin(
+    tmp_path: Path,
+) -> None:
+    """Инвариант каскада, сформулированный через результат, а не обход:
+    это ровно предикат, который потом проверяет гейт §I12 у доставки."""
+    target = str(_target(tmp_path))
+    _set_node(target, _DESIGN, status="stale")
+
+    _approve(target, "design")
+
+    stale_free = [
+        finding for finding in task_bridge._approval_findings(
+            target, _BUNDLE, task_bridge._BUNDLE_DAG
+        )
+        if "пин" in finding
+    ]
+    assert stale_free == []
+
+
+# --- волна одобрения: накапливающая ветка, её head, draft-PR ---------------
+#
+# Ветка — предмет проверки, а не декорация вокруг неё, поэтому здесь
+# ЖИВОЙ git: bare origin + клон. Стаб подтвердил бы только то, что мы его
+# так написали; «второй вызов видит результат первого» — свойство ветки,
+# и проверять его надо на ветке.
+
+
+def _git(*args: str, cwd) -> str:
+    import subprocess
+
+    done = subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True,
+        check=True,
+    )
+    return done.stdout
+
+
+class _WaveOps(task_bridge.RealOps):
+    """RealOps с живым git и заглушённой форджей (gh наружу не ходит)."""
+
+    def __init__(self, login: str = _HUMAN) -> None:
+        self.login = login
+        self.created: list[tuple[str, str]] = []
+        self.pr_by_branch: dict[str, int] = {}
+
+    def gh_login(self) -> str | None:
+        return self.login
+
+    def find_pr(self, repo_slug, branch, *, any_state=False):
+        return self.pr_by_branch.get(branch)
+
+    def create_draft_pr(
+        self, target_dir, repo_slug, branch, title, body, label
+    ) -> int:
+        self.created.append((branch, title))
+        self.pr_by_branch[branch] = 900 + len(self.created)
+        return self.pr_by_branch[branch]
+
+
+_WAVE_BRANCH = "spec/WS-alpha-7-bundle-approve"
+
+
+def _wave_state(tmp_path: Path, monkeypatch, approved: bool = False):
+    """Клон с бандлом на master + прогон над ним; → (state, origin)."""
+    import subprocess
+
+    from governance import run_state as rs
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    origin = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-q", "-b", "master", str(origin)],
+        check=True,
+    )
+    target = _target(tmp_path, approved=approved)
+    _git("init", "-q", "-b", "master", cwd=target)
+    _git("config", "user.email", "t@example.com", cwd=target)
+    _git("config", "user.name", "t", cwd=target)
+    _git("config", "commit.gpgsign", "false", cwd=target)
+    _git("add", "-A", cwd=target)
+    _git("commit", "-qm", "бандл", cwd=target)
+    _git("remote", "add", "origin", str(origin), cwd=target)
+    _git("push", "-q", "-u", "origin", "master", cwd=target)
+    state = rs.new_run(
+        subject="s",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        target_dir=str(target),
+        bundle_dir=_BUNDLE,
+        profile=None,
+        run_id="r-wave",
+    )
+    state.status = "completed"
+    state.base_ref = "master"
+    rs.save(state)
+    return state, origin
+
+
+def _origin_has(origin: Path, branch: str) -> bool:
+    return bool(_git("branch", "--list", branch, cwd=origin).strip())
+
+
+def test_wave_second_call_reads_the_head_of_the_accumulating_branch(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Условие сходимости волны, а не удобство.
+
+    Волна идёт по DAG сверху вниз несколькими вызовами, и всё, что сделал
+    предыдущий, лежит в ВЕТКЕ: мержа ещё не было. Читай второй вызов один
+    base — топологическая готовность не была бы предъявлена ни для одного
+    узла ниже первого, и он одобрял бы поверх устаревшего дерева."""
+    state, origin = _wave_state(tmp_path, monkeypatch)
+    ops = _WaveOps()
+
+    first = task_bridge.approve_node_for_run(state, ops, "charter")
+    second = task_bridge.approve_node_for_run(state, ops, "requirements")
+
+    assert first == second, "второй PR не создаётся никогда"
+    assert len(ops.created) == 1
+    assert ops.created[0][0] == _WAVE_BRANCH
+    # Пин requirements указывает на charter ИЗ ВЕТКИ (уже одобренный), а
+    # не на его версию в base.
+    head_charter = _git(
+        "show", f"origin/{_WAVE_BRANCH}:{_BUNDLE}/{_CHARTER}",
+        cwd=state.target_dir,
+    )
+    assert task_bridge.split_frontmatter(head_charter)[0]["status"] == (
+        "approved"
+    )
+    meta = _meta(state.target_dir, _REQUIREMENTS)
+    assert meta["status"] == "approved"
+    assert meta["upstream_hashes"]["charter"] == task_bridge.blob_sha1(
+        head_charter
+    )
+    # base не тронут: devtools пишет в соседние репо только PR-ом.
+    base_charter = _git(
+        "show", f"origin/master:{_BUNDLE}/{_CHARTER}", cwd=state.target_dir
+    )
+    assert task_bridge.split_frontmatter(base_charter)[0]["status"] == "draft"
+
+
+def test_wave_commit_carries_the_node_and_the_whole_cascade(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Частичный коммит оставил бы в ветке `approved`-узел с ложным пином —
+    состояние, которое каскад и обязан не допускать."""
+    state, origin = _wave_state(tmp_path, monkeypatch, approved=True)
+    _set_node(state.target_dir, _REQUIREMENTS, status="stale")
+    _git("commit", "-qam", "correction: requirements в долг",
+         cwd=state.target_dir)
+    _git("push", "-q", "origin", "master", cwd=state.target_dir)
+
+    task_bridge.approve_node_for_run(state, _WaveOps(), "requirements")
+
+    files = _git(
+        "show", "--name-only", "--format=", f"origin/{_WAVE_BRANCH}",
+        cwd=state.target_dir,
+    ).split()
+    assert set(files) == {
+        f"{_BUNDLE}/{name}" for name in (
+            _REQUIREMENTS, _BEHAVIOUR, _DESIGN, _ACCEPTANCE, _DECOMPOSITION,
+        )
+    }
+
+
+def test_wave_noop_over_honest_node_starts_no_branch(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """Повтор — no-op: ни ветки, ни PR, ни коммита."""
+    state, origin = _wave_state(tmp_path, monkeypatch, approved=True)
+    ops = _WaveOps()
+
+    assert task_bridge.approve_node_for_run(state, ops, "charter") is None
+
+    assert ops.created == []
+    assert not _origin_has(origin, _WAVE_BRANCH)
+    assert "no-op" in capsys.readouterr().out
+
+
+def test_wave_announces_readiness_only_when_the_dag_converges(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """Пока DAG одобрен не целиком, PR остаётся draft и готовность не
+    объявляется; последним вызовом механика СООБЩАЕТ готовность — перевод
+    в ready и мерж человеческие (§I9)."""
+    state, origin = _wave_state(tmp_path, monkeypatch)
+    ops = _WaveOps()
+
+    for node in ("charter", "requirements", "behaviour-spec", "design"):
+        task_bridge.approve_node_for_run(state, ops, node)
+        assert "волна не завершена" in capsys.readouterr().out
+    task_bridge.approve_node_for_run(state, ops, "acceptance")
+    assert "волна не завершена" in capsys.readouterr().out
+
+    task_bridge.approve_node_for_run(state, ops, "decomposition")
+
+    out = capsys.readouterr().out
+    assert "одобрен целиком" in out
+    assert "ready" in out and "человеческ" in out
+    assert task_bridge._approval_findings(
+        state.target_dir, _BUNDLE, task_bridge._BUNDLE_DAG
+    ) == []
+
+
+@pytest.mark.parametrize("login", ["ai-prosto", None])
+def test_wave_refuses_agent_and_unresolved_login_without_a_write(
+    tmp_path: Path, monkeypatch, login,
+) -> None:
+    """Профильный guard: подпись узла от агентской учётки неотличима в
+    артефакте от человеческой; пустой логин — подписывать нечем."""
+    state, origin = _wave_state(tmp_path, monkeypatch)
+    ops = _WaveOps(login=login)
+
+    with pytest.raises(RuntimeError, match="approve|подписывать нечем"):
+        task_bridge.approve_node_for_run(state, ops, "charter")
+
+    assert ops.created == []
+    assert not _origin_has(origin, _WAVE_BRANCH)
+    assert _meta(state.target_dir, _CHARTER)["status"] == "draft"
+
+
+def test_wave_refuses_under_the_review_gh_config_dir(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Вторая половина того же факта: профиль опознаётся и по каталогу.
+
+    Переопределённый `REVIEW_LOGIN` рассогласовал бы проверку, стой она
+    на одном лишь имени учётки."""
+    state, origin = _wave_state(tmp_path, monkeypatch)
+    monkeypatch.setenv(
+        "GH_CONFIG_DIR", str(task_bridge.REVIEW_GH_CONFIG_DIR)
+    )
+    ops = _WaveOps(login="andrei-shtanakov")
+
+    with pytest.raises(RuntimeError, match="ревью-контурный"):
+        task_bridge.approve_node_for_run(state, ops, "charter")
+
+    assert ops.created == []
+    assert not _origin_has(origin, _WAVE_BRANCH)
+
+
+def test_wave_refusal_leaves_no_branch(tmp_path: Path, monkeypatch) -> None:
+    """§I12 п.6: отказ не пишет ни файла узла, ни статусов downstream, ни
+    ветки — валидация стоит ДО создания накапливающей."""
+    state, origin = _wave_state(tmp_path, monkeypatch)
+    ops = _WaveOps()
+
+    with pytest.raises(RuntimeError, match="топологическая готовность"):
+        task_bridge.approve_node_for_run(state, ops, "requirements")
+
+    assert not _origin_has(origin, _WAVE_BRANCH)
+    assert ops.created == []
+    assert _meta(state.target_dir, _REQUIREMENTS)["status"] == "draft"
+    # «Ни ветки» — и локальной тоже: отказ обязан оставить клон там же,
+    # где взял. Ветка создаётся ПОСЛЕ валидации, а не до неё.
+    assert _git("branch", "--list", _WAVE_BRANCH,
+                cwd=state.target_dir).strip() == ""
+    assert _git("branch", "--show-current",
+                cwd=state.target_dir).strip() == "master"
+
+
+def test_wave_dirty_target_refuses(tmp_path: Path, monkeypatch) -> None:
+    state, origin = _wave_state(tmp_path, monkeypatch)
+    (Path(state.target_dir) / "чужое.txt").write_text("х", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="грязный"):
+        task_bridge.approve_node_for_run(state, _WaveOps(), "charter")
+
+
+# --- CLI `--approve-node` -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--supersede"],
+        ["--conform-approve"],
+        ["--abandon-revision", "2", "--reason", "x"],
+        ["--replace-revision", "2", "--reason", "x", "--supersede"],
+    ],
+)
+def test_cli_approve_node_is_the_only_action_of_the_run(extra, capsys) -> None:
+    with pytest.raises(SystemExit):
+        task_bridge.main(
+            ["--run-id", "r", "--approve-node", "charter", *extra]
+        )
+    assert "отдельное действие" in capsys.readouterr().err
+
+
+def test_cli_approve_node_refuses_a_path_instead_of_a_node_id(capsys) -> None:
+    """Промах ловится на разборе аргументов — не пишется вовсе ничего."""
+    with pytest.raises(SystemExit):
+        task_bridge.main(
+            ["--run-id", "r", "--approve-node",
+             "workstreams/WS-alpha-7/spec/00-charter.md"]
+        )
+    err = capsys.readouterr().err
+    assert "не node-id активного DAG" in err
+    assert "decomposition" in err
+
+
+def test_cli_approve_node_allowed_ids_follow_the_legacy_flag(capsys) -> None:
+    """Состав допустимых id — активный DAG, а не полный список всегда."""
+    with pytest.raises(SystemExit):
+        task_bridge.main(
+            ["--run-id", "r", "--approve-node", "acceptance",
+             "--legacy-bundle", "5"]
+        )
+    err = capsys.readouterr().err
+    assert "acceptance" in err and "decomposition" in err
+
+
+def test_cli_approve_node_reaches_implementation(
+    tmp_path, monkeypatch, capsys,
+) -> None:
+    state, _origin = _wave_state(tmp_path, monkeypatch)
+    seen: dict = {}
+
+    def _fake(s, o, node_id, legacy_bundle=None):
+        seen.update(run=s.run_id, node=node_id, legacy=legacy_bundle)
+        return 901
+
+    monkeypatch.setattr(task_bridge, "approve_node_for_run", _fake)
+    monkeypatch.setattr(task_bridge, "RealOps", lambda: object())
+
+    assert task_bridge.main(["--run-id", "r-wave", "--approve-node",
+                             "charter"]) == 0
+    assert seen == {"run": "r-wave", "node": "charter", "legacy": None}
+
+
+def test_cli_approve_node_failure_is_a_message_not_a_traceback(
+    tmp_path, monkeypatch, capsys,
+) -> None:
+    state, _origin = _wave_state(tmp_path, monkeypatch)
+
+    def _boom(s, o, node_id, legacy_bundle=None):
+        raise RuntimeError("топологическая готовность не предъявлена")
+
+    monkeypatch.setattr(task_bridge, "approve_node_for_run", _boom)
+    monkeypatch.setattr(task_bridge, "RealOps", lambda: object())
+
+    assert task_bridge.main(["--run-id", "r-wave", "--approve-node",
+                             "requirements"]) == 1
+    assert "топологическая готовность" in capsys.readouterr().out
+
+
+# --- Граница эпохи штампа и гейт на остальных путях доставки --------------
+
+
+def test_stamp_era_intent_is_not_resumed_and_names_the_way_out(
+    tmp_path, monkeypatch,
+) -> None:
+    """§I4: ревизия эпохи штампа не возобновляется — fail-closed с процедурой.
+
+    Её `prospective_anchor` посчитан по ПРОШТАМПОВАННОМУ дереву:
+    продолжить значит доставить штамп, которого контракт больше не
+    разрешает, а не продолжить — разойтись с записанным anchor'ом. Ни
+    один из двух исходов не годится, поэтому выход — свернуть ревизию и
+    переиздать обычным `--supersede`."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    _seed_revision(state, monkeypatch)
+    saved = rs.load("r-recon")
+    saved.ops["tasks-deliver-v2"].update(
+        approval_pr=403, signed_nodes=["decomposition"],
+    )
+    rs.save(saved)
+    ops = _RevisionPrOps(pr=None, local_head=None)
+
+    with pytest.raises(RuntimeError, match="эпохи штампа") as exc:
+        tb.deliver_superseded(saved, ops)
+
+    message = str(exc.value)
+    assert "--abandon-revision 2" in message
+    assert "--supersede" in message
+    assert not [c for c in ops.calls if c[0] in (
+        "commit_paths", "push_branch", "create_draft_pr"
+    )]
+
+
+def test_completed_stamp_era_records_are_read_as_before(
+    tmp_path, monkeypatch,
+) -> None:
+    """Удаление адресовано МЕХАНИЗМУ, а не журналу: завершённая ревизия,
+    несущая `approval_pr`/`signed_nodes`, — законное историческое
+    состояние, и код обязан её пережить, не спотыкаясь. Вычищать поля
+    задним числом было бы мутацией журнала, которую §I4 запрещает."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    content = tb._content_anchor(state.target_dir, state.bundle_dir, None)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "АНКЕР-v1"}
+    state.ops["tasks-deliver-v2"] = {
+        "status": "completed", "revision": 2, "pr": 700,
+        "branch": "spec/WS-alpha-7-tasks-v2", "base_sha": "base-sha-1",
+        "head_sha": "h2", "anchor": "АНКЕР-v2", "prospective_anchor": "АНКЕР-v2",
+        "content_anchor": content, "tasks_version": 2,
+        # Запись эпохи штампа — дословно как её сделали тогда.
+        "approval_pr": 407, "signed_nodes": ["design", "acceptance"],
+        "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG], "supersedes": 1,
+    }
+    rs.save(state)
+    ops = _RevisionPrOps(pr=700, pr_state="MERGED", head="h2")
+
+    # Апстрим с тех пор не менялся → бесследный no-op по её же записи.
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("noop")
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["approval_pr"] == 407
+
+
+def test_replacement_gate_refuses_before_the_intent_and_the_close(
+    tmp_path, monkeypatch,
+) -> None:
+    """§I10 шаг 1: §I5 при замене пропущен, поэтому гейт §I12 — первая
+    проверка, способная отказать. PR не закрывается, намерение не
+    пишется, ветка и коммит не создаются."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    _set_node(state.target_dir, _DESIGN, status="stale")
+
+    ops = _ReplaceOps()
+    with pytest.raises(RuntimeError, match="одобрен не целиком") as exc:
+        tb.deliver_superseded(state, ops, replace=_replace())
+
+    assert f"{_BUNDLE}/{_DESIGN}" in str(exc.value)
+    assert ops.closed == []
+    assert "tasks-deliver-v4" not in rs.load("r-recon").ops
+    assert not [c for c in ops.calls if c[0] in (
+        "ensure_branch", "create_draft_pr"
+    )]
+
+
+def test_first_delivery_refuses_a_freshly_generated_bundle(
+    tmp_path, monkeypatch, capsys,
+) -> None:
+    """Отказ первой доставки на свежем бандле ШТАТЕН, а не регресс.
+
+    Бандл лежит в base целиком `draft`, потому что штамповать его больше
+    некому: это и есть новый порядок работы («сгенерировать DAG →
+    одобрить узлы топологически → deliver_for_run»)."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    for fname, _ in tb._BUNDLE_DAG:
+        _set_node(state.target_dir, fname, status="draft")
+    ops = _ReconOps()
+
+    with pytest.raises(RuntimeError, match="одобрен не целиком") as exc:
+        tb.deliver_for_run(state, ops)
+
+    message = str(exc.value)
+    for fname, _ in tb._BUNDLE_DAG:
+        assert f"{_BUNDLE}/{fname}" in message
+    assert "--approve-node charter" in message
+    assert "топологическом порядке" in message
+    assert not [c for c in ops.calls if c[0] in (
+        "ensure_branch", "commit_paths", "create_draft_pr"
+    )]
+    # Реконсиляция op'а уже записала `started` — это write-ahead, а не
+    # эффект доставки; PR и ветки нет.
+    assert rs.load("r-recon").ops["tasks-deliver"]["status"] == "started"
+
+
+def test_first_delivery_never_asks_the_bundle_pr_for_a_signature(
+    tmp_path, monkeypatch,
+) -> None:
+    """`mergedBy`/`mergedAt` бандл-PR больше не вход доставки (§I7).
+
+    Решение devtools#110 приравнивало инициированный мерж к approve, и на
+    этом стоял штамп первой доставки; в этой части оно пересмотрено. Мерж
+    бандл-PR вносит байты бандла в base — и только."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+
+    class _NoMergeFacts(_ReconOps):
+        def pr_facts(self, repo_slug, pr):
+            self.calls.append(("pr_facts", pr))
+            return {"state": "MERGED", "headRefOid": "h"}
+
+    ops = _NoMergeFacts()
+    assert tb.deliver_for_run(state, ops) == 77
+    # Факты бандл-PR (#5) не спрашивались вовсе: спрашивать нечего.
+    assert ("pr_facts", 5) not in ops.calls
+
+
+# --- Условие (4): узел помнит СВОИ одобренные байты ------------------------
+#
+# Пины помнят чужие байты, на которые узел опирался; `approved_content_hash`
+# — свои, которые человек читал, когда одобрял. Без второй половины подпись
+# непроверяема в принципе, а воркстрим запирается: см. тупик ниже.
+
+
+def _self_hash_of(target: str, fname: str) -> str:
+    """Оракул условия (4), написанный по определению контракта."""
+    contour = (
+        "status", "version", "approved_by", "approved_at",
+        "upstream_hashes", "approved_content_hash",
+    )
+    meta, body = task_bridge.split_frontmatter(
+        (Path(target) / _BUNDLE / fname).read_text(encoding="utf-8")
+    )
+    return task_bridge.blob_sha1(
+        task_bridge.join_frontmatter(
+            {k: v for k, v in meta.items() if k not in contour}, body,
+        )
+    )
+
+
+def _correct_body(target: str, fname: str) -> None:
+    """Correction правит ТЕЛО узла, frontmatter не трогая."""
+    path = Path(target) / _BUNDLE / fname
+    path.write_text(
+        path.read_text(encoding="utf-8") + "\nПравка correction'а.\n",
+        encoding="utf-8",
+    )
+
+
+def test_approve_node_records_the_hash_of_its_own_approved_bytes(
+    tmp_path: Path,
+) -> None:
+    """Переход пишет self-hash по КАНОНИЧЕСКОЙ собственной части узла."""
+    target = str(_target(tmp_path, approved=False))
+
+    _approve(target, "charter")
+
+    meta = _meta(target, _CHARTER)
+    assert meta["approved_content_hash"] == _self_hash_of(target, _CHARTER)
+
+
+def test_self_hash_does_not_hash_itself_nor_the_approval_contour(
+    tmp_path: Path,
+) -> None:
+    """Проекция вырезает весь approval-контур И само поле.
+
+    Само поле — по механической причине: оно лежит в том же frontmatter и
+    иначе хешировало бы себя. Контур — по существу: вопрос (4) про ТО,
+    ЧТО ОДОБРЯЛИ, а не про то, как одобрение записано."""
+    target = str(_target(tmp_path))
+    before = _meta(target, _CHARTER)["approved_content_hash"]
+
+    _set_node(
+        target, _CHARTER, version=99, status="stale",
+        approved_by="кто-то", approved_at="когда-то",
+    )
+
+    assert _self_hash_of(target, _CHARTER) == before
+
+
+def test_reapproval_converges_because_the_field_does_not_hash_itself(
+    tmp_path: Path,
+) -> None:
+    """Поле обязано вырезать САМО СЕБЯ, и это проверяется сходимостью.
+
+    Не вырезай оно себя — каждый approve считал бы хеш по байтам с
+    ПРЕДЫДУЩИМ значением поля, записывал бы новое и тем делал записанное
+    неверным: узел не стал бы честно одобренным никогда, а повторный
+    вызов не был бы no-op'ом. Первый approve этого не показывает (поля
+    ещё нет вовсе) — показывает второй."""
+    target = str(_target(tmp_path))
+    honest = ("charter",)
+
+    _correct_body(target, _CHARTER)
+    assert _approve(target, "charter") != []
+    assert task_bridge._approval_findings(
+        target, _BUNDLE, task_bridge._BUNDLE_DAG, nodes=honest
+    ) == []
+
+    _correct_body(target, _CHARTER)
+    assert _approve(target, "charter") != []
+    assert task_bridge._approval_findings(
+        target, _BUNDLE, task_bridge._BUNDLE_DAG, nodes=honest
+    ) == []
+    # И повтор поверх сошедшегося — no-op.
+    assert _approve(target, "charter") == []
+
+
+def test_stale_keeps_its_self_hash_valid(tmp_path: Path) -> None:
+    """Пометка долга не вправе делать неверной запись о том, что покрывала
+    подпись: каскад меняет ровно `status`, а `status` проекция режет."""
+    target = str(_target(tmp_path))
+    _set_node(target, _REQUIREMENTS, status="stale")
+
+    _approve(target, "requirements")
+
+    meta = _meta(target, _BEHAVIOUR)
+    assert meta["status"] == "stale"
+    assert meta["approved_content_hash"] == _self_hash_of(target, _BEHAVIOUR)
+
+
+def test_body_edit_of_an_approved_node_is_caught_by_the_fourth_condition(
+    tmp_path: Path,
+) -> None:
+    """Подпись покрывает байты, которых человек не видел, — и предикат это
+    ловит. Трёхусловный не ловил по построению: он помнил чужие байты и
+    не помнил своих."""
+    target = str(_target(tmp_path))
+    _correct_body(target, _REQUIREMENTS)
+
+    findings = task_bridge._approval_findings(
+        target, _BUNDLE, task_bridge._BUNDLE_DAG, nodes=("requirements",)
+    )
+
+    assert len(findings) == 1
+    assert "approved_content_hash" in findings[0]
+    assert "не видел" in findings[0]
+
+
+def test_body_edit_of_the_terminal_node_is_caught_too(
+    tmp_path: Path,
+) -> None:
+    """Терминальный узел покрыт наравне со всеми: своя запись есть у
+    каждого. Через downstream его не поймать — downstream у него нет."""
+    target = str(_target(tmp_path))
+    _correct_body(target, _DECOMPOSITION)
+
+    with pytest.raises(RuntimeError, match="одобрен не целиком") as exc:
+        _deliver(target, _StubOps())
+    assert f"{_BUNDLE}/{_DECOMPOSITION}" in str(exc.value)
+
+
+def test_fourth_condition_unlocks_the_dead_end(tmp_path: Path) -> None:
+    """Тупик, ради которого условие (4) и заведено.
+
+    Correction правит тело `approved`-узла, не трогая frontmatter. По
+    трёхусловному предикату он честно одобрен ⇒ `--approve-node` даёт
+    no-op ⇒ каскад не запускается ⇒ downstream остаются `approved` с
+    пинами на старый блоб ⇒ fail-closed, и перевести их в `stale`
+    некому. Воркстрим заперт: единственный узел, чей approve сдвинул бы
+    дело с места, считается уже одобренным.
+
+    С условием (4) тот же вызов — ПЕРЕОДОБРЕНИЕ: новая подпись, новый
+    self-hash, `version + 1` и рекурсивный каскад, который объявляет долг
+    downstream. Дальше волна идёт обычным порядком."""
+    target = str(_target(tmp_path))
+    _correct_body(target, _REQUIREMENTS)
+    before_version = _meta(target, _REQUIREMENTS)["version"]
+
+    changed = _approve(target, "requirements", by="человек", at="t-новое")
+
+    assert changed != [], "no-op здесь и есть тупик"
+    meta = _meta(target, _REQUIREMENTS)
+    assert meta["version"] == before_version + 1
+    assert meta["approved_by"] == "человек"
+    assert meta["approved_content_hash"] == _self_hash_of(
+        target, _REQUIREMENTS
+    )
+    # Каскад объявил долг downstream — тем, кто в тупике был fail-closed.
+    for name in (_BEHAVIOUR, _DESIGN, _ACCEPTANCE, _DECOMPOSITION):
+        assert _meta(target, name)["status"] == "stale", name
+    # И после волны DAG проходит гейт целиком.
+    for fname, _ in task_bridge._BUNDLE_DAG:
+        _approve(target, task_bridge._node_id(fname), by="человек", at="t")
+    assert task_bridge._approval_findings(
+        target, _BUNDLE, task_bridge._BUNDLE_DAG
+    ) == []
+
+
+def test_reapproval_still_requires_topological_readiness(
+    tmp_path: Path,
+) -> None:
+    """Пункт 2 адресован команде целиком, и сходящиеся пины его не
+    заменяют: совпавший пин доказывает лишь, что байты upstream не
+    менялись с момента подписи, — а миграционный долг байтов не меняет
+    вовсе, и такой upstream проходил бы молча."""
+    target = str(_target(tmp_path))
+    # Легаси-дерево: у charter'а нет self-hash, но пины downstream указывают
+    # на его ФАКТИЧЕСКИЕ байты — миграционный долг байтов не меняет, и
+    # сходящийся пин про него ничего не говорит.
+    _set_node(target, _CHARTER, approved_content_hash=None)
+    _repin_all(target)
+    _correct_body(target, _REQUIREMENTS)
+    assert task_bridge._pin_drift(
+        Path(target) / _BUNDLE,
+        {task_bridge._node_id(f): f for f, _ in task_bridge._BUNDLE_DAG},
+        ("charter",),
+        _meta(target, _REQUIREMENTS),
+    ) == [], "пины requirements обязаны сходиться — иначе тест о другом"
+    before = _node_bytes_of(target)
+
+    with pytest.raises(RuntimeError, match="топологическая готовность") as exc:
+        _approve(target, "requirements")
+
+    assert f"{_BUNDLE}/{_CHARTER}" in str(exc.value)
+    assert "миграционный долг" in str(exc.value)
+    assert _node_bytes_of(target) == before
+
+
+def test_reapproval_is_not_triggered_when_the_self_hash_still_matches(
+    tmp_path: Path,
+) -> None:
+    """Обратная сторона: совпал self-hash — байты те же, что человек
+    читал, и повтор обязан остаться no-op'ом (п.4)."""
+    target = str(_target(tmp_path))
+    before = _node_bytes_of(target)
+
+    assert _approve(target, "decomposition", by="другой", at="t2") == []
+
+    assert _node_bytes_of(target) == before
