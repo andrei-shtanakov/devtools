@@ -53,6 +53,7 @@ case "$*" in
     printf '%s\\n' "${GH_STUB_STATE:-OPEN}"
     printf '%s\\n' "${GH_STUB_BASEOID-$GH_STUB_DEFAULT_BASE}"
     printf '%s\\n' "${GH_STUB_MERGESTATE-CLEAN}"
+    printf '%s\\n' "${GH_STUB_CROSSREPO-false}"
     if [ -n "${GH_STUB_LABELS:-}" ]; then
       printf '%s\\n' "$GH_STUB_LABELS"
     fi ;;
@@ -515,6 +516,44 @@ def test_missing_base_oid_does_not_merge(fleet: Fleet) -> None:
     res = fleet.run(GH_STUB_BASEOID="null", GH_STUB_HEADREF="feat/ordinary")
     assert res.returncode == 2, res.stdout
     assert "baseRefOid" in res.stderr
+    assert fleet.merge_calls() == []
+
+
+# --- PR из форка -----------------------------------------------------------
+
+
+def test_fork_pr_refuses_delete_branch_before_merging(fleet: Fleet) -> None:
+    """Ветка форка живёт в чужом репо — удаление по имени в базовом снесло бы
+    одноимённую ветку базового репо (PR из форка с `master` — сам master).
+
+    Отказ ДО мержа, а не пропуск после: попросили то, чего сделать нельзя.
+    """
+    res = fleet.run(
+        "--delete-branch",
+        GH_STUB_HEADREF="master",
+        GH_STUB_CROSSREPO="true",
+    )
+    assert res.returncode == 2, res.stdout
+    assert "из форка" in res.stderr
+    assert fleet.merge_calls() == []
+    assert fleet.delete_calls() == []
+
+
+def test_fork_pr_without_delete_flag_merges(fleet: Fleet) -> None:
+    """Мерж PR из форка законен — запрещено только удаление его ветки."""
+    res = fleet.run(GH_STUB_HEADREF="feat/x", GH_STUB_CROSSREPO="true")
+    assert res.returncode == 0, res.stderr
+    assert len(fleet.merge_calls()) == 1
+    assert fleet.delete_calls() == []
+
+
+@pytest.mark.parametrize("value", ["", "null", "yes", "1"])
+def test_non_boolean_cross_repository_does_not_merge(
+    fleet: Fleet, value: str
+) -> None:
+    """Булев факт обязан быть булевым — иначе он не разобран."""
+    res = fleet.run(GH_STUB_CROSSREPO=value, GH_STUB_HEADREF="feat/x")
+    assert res.returncode == 2, res.stdout
     assert fleet.merge_calls() == []
 
 

@@ -54,6 +54,23 @@
 # --expect-base не является: BEHIND сообщается лишь там, где защита ветки
 # требует up-to-date.
 #
+# ЧТО ЗДЕСЬ МОЖЕТ ПРИЙТИ ИЗ ДЕРЕВА ПРОВЕРЯЕМОГО PR — главный вопрос для
+# инструмента, стоящего на пути мержа (ревью #183, круг 3). `accept-pr`
+# материализует head PR в рабочий чекаут цели, и для PR В САМ devtools этот
+# чекаут — корень, из которого запускается этот скрипт. Значит из PR могут
+# прийти:
+#   * сам merge-pr.sh (`Ops.merge` зовёт `DEVTOOLS_ROOT/merge-pr.sh`);
+#   * contracts/approval-branches/v1/patterns.env — шаблон имён отсюда,
+#     подменённый шаблон меняет глоб, не исполнив ни строчки чужого кода;
+#   * scripts/harness/ — каталог, который review-pr.sh препендит в PATH.
+# Все три перечислены в `_HARNESS_PREFIXES` (governance/accept_pr.py): PR,
+# который их трогает, до мержа не доходит вовсе — ни ревью, ни мерж
+# агентом. НЕ приходят из дерева: `.git/config` (origin-URL, откуда
+# выводится slug — не часть worktree), бинарь `gh` (PATH оператора),
+# профиль `~/.config/review`, python-модули governance (импортированы до
+# материализации). Добавляя сюда чтение или исполнение чего-либо из
+# `$script_dir`, проверьте, что путь накрыт `_HARNESS_PREFIXES`.
+#
 # Fail-closed везде: любой факт, который не удалось получить или разобрать,
 # трактуется против действия. Неполученный факт никогда не читается в
 # пользу мержа.
@@ -243,9 +260,10 @@ fi
 # перевода строки не содержит, а пробелы содержать может — поэтому строки,
 # а не одно поле).
 if ! pr_facts=$(gh_a pr view "$pr" --repo "$slug" \
-    --json headRefName,headRefOid,baseRefOid,mergeStateStatus,labels,state \
+    --json headRefName,headRefOid,baseRefOid,mergeStateStatus,\
+isCrossRepository,labels,state \
     --jq '.headRefName, .headRefOid, .state, .baseRefOid,
-          .mergeStateStatus, (.labels[]?.name)' 2>&1); then
+          .mergeStateStatus, .isCrossRepository, (.labels[]?.name)' 2>&1); then
     die 2 "не удалось прочитать факты PR ${slug}#${pr}: $pr_facts"
 fi
 head_ref=$(printf '%s\n' "$pr_facts" | sed -n '1p')
@@ -253,12 +271,13 @@ head_oid=$(printf '%s\n' "$pr_facts" | sed -n '2p')
 state=$(printf '%s\n' "$pr_facts" | sed -n '3p')
 base_oid=$(printf '%s\n' "$pr_facts" | sed -n '4p')
 merge_state=$(printf '%s\n' "$pr_facts" | sed -n '5p')
-labels=$(printf '%s\n' "$pr_facts" | sed -n '6,$p')
+cross_repo=$(printf '%s\n' "$pr_facts" | sed -n '6p')
+labels=$(printf '%s\n' "$pr_facts" | sed -n '7,$p')
 
 # Fail-closed на КАЖДОМ факте: пусто и `null` (jq отдаёт его на
 # отсутствующем поле) — это «факт не получен», а не «факта нет».
 for _pair in "headRefName:$head_ref" "headRefOid:$head_oid" "state:$state" \
-    "baseRefOid:$base_oid"; do
+    "baseRefOid:$base_oid" "isCrossRepository:$cross_repo"; do
     _name="${_pair%%:*}"
     _value="${_pair#*:}"
     [ -n "$_value" ] && [ "$_value" != "null" ] \
@@ -274,6 +293,24 @@ esac
 [ "${#head_oid}" -ge 7 ] || die 2 "headRefOid '$head_oid' короче sha — \
 факты не разобраны, мерж не выполняется"
 [ "$state" = "OPEN" ] || die 2 "PR ${slug}#${pr} не открыт (state=$state)"
+# Булев факт обязан быть булевым: любое третье значение — «не разобрали».
+case "$cross_repo" in
+    true|false) : ;;
+    *) die 2 "isCrossRepository='$cross_repo' — не булево, факты не \
+разобраны, мерж не выполняется" ;;
+esac
+# Ветка PR из форка живёт в ЧУЖОМ репозитории, а удаление идёт по
+# `headRefName` в базовом. В лучшем случае это 404, в худшем — снос
+# одноимённой ветки базового репо (PR из форка с ветки `master` попросил бы
+# удалить `master`). Отказ ДО мержа, а не пропуск после: попросили то, чего
+# сделать нельзя, и узнать об этом надо прежде, чем мерж состоялся.
+# Во флоте PR из форков сегодня нет (проверено по истории devtools /
+# dispatcher / steward — ноль), но гвард стоит на ФАКТЕ, а не на этом.
+if [ "$delete_branch" -eq 1 ] && [ "$cross_repo" = "true" ]; then
+    die 2 "PR ${slug}#${pr} из форка — ветка '$head_ref' живёт не в \
+${slug}, и --delete-branch снёс бы одноимённую ветку базового репо. \
+Повторите без --delete-branch."
+fi
 
 # --- Гварды ----------------------------------------------------------------
 # Порядок — от частного к общему: финализирующая ветка удовлетворяет и форме
