@@ -3332,6 +3332,16 @@ def deliver_superseded(
             branch=op["branch"],
             version=op["tasks_version"],
             restamp_nodes=restamp,
+            # Состояние исполнения — из base ЭТОЙ ревизии, взятого из
+            # намерения, а не из текущего `base_sha`: детерминизм повтора
+            # не должен зависеть от того, куда с тех пор уехал апстрим.
+            # (Исход "continue" достижим только при `same_base`, так что
+            # значения совпадают, — но источник назван явно.)
+            carry_from=ops.show_file(
+                state.target_dir,
+                op["base_sha"],
+                f"spec/{state.ws_id}-tasks.md",
+            ),
             before_commit=_tasks_blob_cb(state, n),
             after_commit=_commit_facts_cb(
                 state, ops, n, op["prospective_anchor"]
@@ -3507,6 +3517,13 @@ def deliver_superseded(
         # отбрасывалась бы. Подписываются ТОЛЬКО узлы, которые
         # correction-PR действительно менял.
         restamp_nodes=correction.signed_nodes,
+        # Переиздают ровно те воркстримы, что уже в работе: состояние
+        # исполнения переносится из ДОСТАВЛЕННОЙ спеки в base (тот же
+        # источник, что у `_previous_dag`), не из рабочего дерева и не из
+        # HEAD — base зафиксирован `base_sha` намерения.
+        carry_from=ops.show_file(
+            state.target_dir, base_sha, f"spec/{state.ws_id}-tasks.md"
+        ),
         before_commit=_tasks_blob_cb(state, n),
         after_commit=_commit_facts_cb(state, ops, n, prospective),
     )

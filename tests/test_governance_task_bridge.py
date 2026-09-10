@@ -7695,3 +7695,192 @@ def test_carry_reads_status_from_meta_line_with_bullet_prefix() -> None:
     assert "P2 | ✅ DONE   Est: 0.5d" in body
     assert "- P2 |" not in body
 
+
+# --- Перенос состояния: сквозные пути доставки -----------------------------
+
+
+def _delivered_v1(state, executed: str = "TASK-001") -> str:
+    """Спека v1 фикстуры, отрендеренная тем же кодом и «исполненная».
+
+    Именно она лежит в base на момент переиздания — тела задач те же, что
+    даст свежий рендер (`generated_at`/`version` живут во frontmatter)."""
+    from governance import decomposition_guard as dg
+    from governance import task_bridge as tb
+
+    base = Path(state.target_dir) / state.bundle_dir
+    dt_tasks, _ = dg.parse_dt_tasks(
+        (base / "30-decomposition.md").read_text(encoding="utf-8")
+    )
+    return _executed(
+        tb.render_tasks_dt(
+            ws_id=state.ws_id, subject=state.subject,
+            bundle_path=f"{state.bundle_dir}/30-decomposition.md",
+            scenarios=tb.parse_behaviour(
+                (base / "15-behaviour-spec.md").read_text(encoding="utf-8")
+            ),
+            dt_tasks=dt_tasks,
+            generated_at="2026-09-01T00:00:00+03:00",
+            anchor_blob="b" * 40, version=1,
+        ),
+        executed,
+    )
+
+
+class _CarryOps(_SupersedeOps):
+    """`_SupersedeOps`, но спека В BASE — реально доставленная и исполненная.
+
+    Аргументы `show_file` сверяются, как у родителя: перенос обязан
+    читать base по `base_sha`, а не HEAD и не рабочее дерево."""
+
+    def __init__(self, *args, delivered: str = "", **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.delivered = delivered
+
+    def show_file(self, target_dir, ref, path):
+        self.calls.append(("show_file", ref, path))
+        if (ref, path) != ("base-sha-1", _SPEC_REL):
+            return None
+        return self.delivered
+
+
+def test_supersede_preserves_execution_state_of_unchanged_tasks(
+    tmp_path, monkeypatch
+):
+    """Живой дефект spec-runner#409: переиздание сохраняет `DONE` и `[x]`.
+
+    До фикса `deliver()` рендерил спеку детерминированно из бандла и о
+    предыдущей доставке не знал ничего — переиздание воркстрима, где
+    TASK-001 уже выполнена, возвращало её в `TODO` с пустыми чекбоксами,
+    и следующий прогон вставал на `state_spec_mismatch`."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
+    rs.save(state)
+    ops = _CarryOps(prs=[_MERGED_PR], delivered=_delivered_v1(state))
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
+    text = (
+        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
+    ).read_text(encoding="utf-8")
+    assert "P2 | ✅ DONE   Est: 0.5d" in text
+    assert "- [x] реализовать BEH-01: Просмотр списка" in text
+    assert "- [x] реализовать BEH-02: Пустое состояние" in text
+    assert "- [ ]" not in text
+    # Переиздание всё же состоялось: version вырос, а не «файл прежний»
+    assert "version: 2" in text
+    # `tasks_blob` §I3.1 посчитан по ФАКТИЧЕСКИМ байтам файла — иначе
+    # возобновление не опознало бы собственный коммит
+    from governance.stale_adapter import blob_sha1
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_blob"] == (
+        blob_sha1(text)
+    )
+
+
+def test_supersede_carry_source_is_base_not_worktree(tmp_path, monkeypatch):
+    """Перенос читает base по `base_sha`, а не рабочее дерево.
+
+    В рабочем дереве лежит ИСПОЛНЕННАЯ спека (после `checkout_and_pull`
+    стаба файл остаётся на месте), а base отвечает `None` — переносить
+    нечего, и ни один маркер состояния в переиздание не попадает. Иначе
+    байты спеки зависели бы от случайного состояния чекаута, а §I3.1
+    требует их воспроизводимости."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").write_text(
+        _delivered_v1(state), encoding="utf-8"
+    )
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ-ДРУГОЙ",
+        # dag из записи: `_previous_dag` не пойдёт в show_file, и
+        # единственный его вызов останется тот, что делает перенос
+        "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
+    }
+    rs.save(state)
+    ops = _CarryOps(prs=[_MERGED_PR], delivered="")
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+    text = (
+        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
+    ).read_text(encoding="utf-8")
+    assert "✅" not in text and "- [x]" not in text
+    assert ("show_file", "base-sha-1", _SPEC_REL) in ops.calls
+
+
+class _LoudReconOps(_ReconOps):
+    """`_ReconOps`, у которого `show_file` ГРОМКИЙ: он и пишется в calls, и
+    отдаёт исполненную спеку.
+
+    Молчаливый `None` родителя делал бы утверждение «обычная доставка в
+    base не ходит» невыполнимым в обе стороны: вызов не виден, а его
+    результат пуст, — и лишний поход остался бы незамеченным."""
+
+    def __init__(self, delivered: str) -> None:
+        super().__init__()
+        self.delivered = delivered
+
+    def show_file(self, target_dir, ref, path):
+        self.calls.append(("show_file", ref, path))
+        return self.delivered
+
+
+def test_deliver_for_run_carries_nothing(tmp_path, monkeypatch):
+    """Обычная доставка состояния не переносит и в base за ним не ходит.
+
+    Спеки в base ещё нет — переносить нечего; новых путей отказа на
+    штатном пути появиться не должно."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _LoudReconOps(_delivered_v1(state))
+    # Исполненная спека лежит и в рабочем дереве, и «в base» (show_file):
+    # ни один из двух источников не имеет права дотянуться до доставки v1
+    (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").write_text(
+        ops.delivered, encoding="utf-8"
+    )
+    assert tb.deliver_for_run(state, ops) == 77
+    text = (
+        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
+    ).read_text(encoding="utf-8")
+    assert "✅" not in text and "- [x]" not in text
+    assert not [c for c in ops.calls if c[0] == "show_file"]
+
+
+def test_supersede_resume_reproduces_the_same_bytes(tmp_path, monkeypatch):
+    """Повторный заход по тому же намерению даёт те же байты спеки.
+
+    Возобновление (§I3 «started | PR-а нет») берёт состояние из base
+    ЭТОЙ ревизии (`op["base_sha"]`), а не из того, куда уехал апстрим, —
+    иначе `tasks_blob` намерения разошёлся бы с фактическим блобом."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
+    rs.save(state)
+    delivered = _delivered_v1(state)
+    first = _CarryOps(prs=[_MERGED_PR], delivered=delivered)
+    assert tb.deliver_superseded(state, first).kind == "delivered"
+    spec = Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
+    bytes_first = spec.read_bytes()
+    saved = rs.load("r-recon")
+    blob_first = saved.ops["tasks-deliver-v2"]["tasks_blob"]
+
+    # Возврат в состояние «намерение durable, PR ещё не создан»
+    saved.ops["tasks-deliver-v2"].update(
+        status="started", pr=None, head_sha=None, tasks_blob=None,
+    )
+    rs.save(saved)
+    spec.write_text("затёрто\n", encoding="utf-8")
+    again = _CarryOps(prs=[_MERGED_PR], delivered=delivered)
+    assert tb.deliver_superseded(saved, again).kind == "delivered"
+    assert spec.read_bytes() == bytes_first
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_blob"] == (
+        blob_first
+    )
+    assert ("show_file", "base-sha-1", _SPEC_REL) in again.calls
