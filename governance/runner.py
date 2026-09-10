@@ -1401,7 +1401,10 @@ def _step_merge(state: RunState, ops: Ops) -> bool:
         if pr_facts_now.get("state") == "MERGED":
             op_complete(state, key, merged=True)
             return True
-    merged = ops.merge(state.repo_slug, state.pr, state.head)
+    # Имя КАТАЛОГА репо, не slug: мерж идёт через `merge-pr.sh` (единственный
+    # путь агентского мержа), а обвязка адресуется каталогом во флоте и
+    # выводит slug из его сырого origin — так же, как `ops.review` выше.
+    merged = ops.merge(state.repo, state.pr, state.head)
     if merged:
         op_complete(state, key, merged=True)
         return True

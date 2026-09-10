@@ -135,6 +135,9 @@ class FakeOps:
     author_disp_exit: int = 0
     comments: list[str] = field(default_factory=list)
     merged: list[tuple[int, str]] = field(default_factory=list)
+    #: Чем адресован мерж: обвязка `merge-pr.sh` берёт имя КАТАЛОГА репо
+    #: во флоте, а не slug — иначе она не найдёт чекаут и не выведет slug.
+    merge_targets: list[str] = field(default_factory=list)
     issues: list[tuple[str, str, str]] = field(default_factory=list)
     committed: list[tuple[str, list[str], str]] = field(default_factory=list)
     checked_out: list[tuple[str, str]] = field(default_factory=list)
@@ -197,8 +200,11 @@ class FakeOps:
         self.calls.append(("unresolved_threads", pr))
         return self.threads
 
-    def merge(self, repo_slug: str, pr: int, sha: str) -> bool:
+    def merge(
+        self, repo_name: str, pr: int, sha: str, base: str | None = None
+    ) -> bool:
         self.calls.append(("merge", pr, sha))
+        self.merge_targets.append(repo_name)
         if self.merge_ok:
             self.merged.append((pr, sha))
         return self.merge_ok
@@ -525,6 +531,11 @@ def test_happy_path_agent_merge(tmp_path: Path, runs_root, monkeypatch) -> None:
 
     assert state.ops["merge"]["status"] == "completed"
     assert ops.merged == [(state.pr, ops.head)]
+    # Мерж адресован каталогом репо, а не слагом: S7 ходит через
+    # `merge-pr.sh` — единственный путь агентского мержа, — и обвязка
+    # выводит slug из сырого origin этого чекаута сама.
+    assert ops.merge_targets == [state.repo]
+    assert "/" not in ops.merge_targets[0]
 
 
 def test_today_reality_agent_merges(tmp_path: Path, runs_root, monkeypatch) -> None:

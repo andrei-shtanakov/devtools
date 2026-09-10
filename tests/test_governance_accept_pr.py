@@ -17,7 +17,15 @@ class _Ops:
     dirty: bool = False
     branch: str | None = "master"
     materialize_error: str | None = None
+    #: OID базы, от которой посчитан гард путей и вынесен вердикт;
+    #: None — «не смогли определить» (мерж тогда обязан стоять).
+    base_oid: str | None = "base000"
     calls: list[tuple] = field(default_factory=list)
+    merge_args: tuple | None = None
+
+    def rev_parse(self, target_dir: str, ref: str) -> str | None:
+        self.calls.append(("rev_parse", ref))
+        return self.base_oid
 
     def is_dirty(self, target_dir: str) -> bool:
         self.calls.append(("is_dirty",))
@@ -52,8 +60,11 @@ class _Ops:
         self.calls.append(("pr_files",))
         return self.files
 
-    def merge(self, repo_slug: str, pr: int, sha: str) -> bool:
+    def merge(
+        self, repo_name: str, pr: int, sha: str, base: str | None = None
+    ) -> bool:
         self.calls.append(("merge", pr, sha))
+        self.merge_args = (repo_name, pr, sha, base)
         return self.merge_ok
 
 
@@ -81,6 +92,36 @@ def test_green_path_merges_and_hints_sync(capsys) -> None:
     assert ("merge", 59, "cafe" * 10) in ops.calls
     out = capsys.readouterr().out
     assert "spec-runner sync" in out
+
+
+def test_merge_is_pinned_to_the_base_the_verdict_came_from() -> None:
+    """Мерж пинуется базой ВЕРДИКТА, а не только именем base-ветки.
+
+    `baseRefName` ловит ретаргет, но не движение самой базы: `origin/master`
+    остаётся собой, уехав вперёд, и агент влил бы код в базу, которой
+    ревьюер не видел. Пин — OID, снятый там же, где считался гард путей.
+    """
+    ops = _Ops(facts_seq=[_facts()], base_oid="base777")
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 0
+    assert ops.merge_args == ("kapelle", 59, "cafe" * 10, "base777")
+    # Мерж адресован каталогом репо во флоте, а не слагом: обвязка
+    # `merge-pr.sh` ищет чекаут и выводит slug из его сырого origin сама.
+    assert ops.merge_args[0] == "kapelle"
+    assert ("rev_parse", "origin/master") in ops.calls
+
+
+def test_unknown_base_oid_stops_without_merge(capsys) -> None:
+    """База вердикта не определилась — fail-closed, мержа нет."""
+    ops = _Ops(facts_seq=[_facts()], base_oid=None)
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert not any(c[0] == "merge" for c in ops.calls)
+    assert "OID базы" in capsys.readouterr().out
 
 
 def test_review_findings_stop_without_merge(capsys) -> None:

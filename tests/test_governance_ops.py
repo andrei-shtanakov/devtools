@@ -46,31 +46,43 @@ def _install_fake_run(monkeypatch, *, returncode=0, stdout="", stderr=""):
 # --- Кейс 1: merge -----------------------------------------------------
 
 
-def test_merge_command_and_env_rc0_true(monkeypatch):
+def test_merge_goes_through_the_wrapper_not_gh(monkeypatch):
+    """Единственный путь агентского мержа — merge-pr.sh, а не голый gh.
+
+    Прямой `gh api -X PUT …/merge` ходил бы мимо гвардов обвязки, и
+    утверждение CLAUDE.md было бы ложным на два живых вызова (accept-pr и
+    S7 раннера).
+    """
     calls = _install_fake_run(monkeypatch, returncode=0)
     ops = RealOps()
 
-    result = ops.merge(REPO_SLUG, 42, "deadbeef")
+    result = ops.merge("devtools", 42, "deadbeef")
 
     assert result is True
     assert len(calls) == 1
     call = calls[0]
     assert call.argv == [
-        "gh", "api", "-X", "PUT",
-        f"repos/{REPO_SLUG}/pulls/42/merge",
-        "-f", "merge_method=merge",
-        "-f", "sha=deadbeef",
+        "sh", str(ops_mod.DEVTOOLS_ROOT / "merge-pr.sh"), "devtools", "42",
+        "--merge", "--expect-head", "deadbeef",
     ]
-    assert call.kwargs["env"]["GH_CONFIG_DIR"] == str(
-        Path.home() / ".config" / "review"
-    )
+    assert call.kwargs["cwd"] == ops_mod.DEVTOOLS_ROOT
+    assert "gh" not in call.argv
+
+
+def test_merge_passes_base_pin_when_caller_knows_it(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+
+    ops.merge("devtools", 42, "deadbeef", "cafebabe")
+
+    assert calls[0].argv[-2:] == ["--expect-base", "cafebabe"]
 
 
 def test_merge_rc_nonzero_returns_false_not_exception(monkeypatch):
     _install_fake_run(monkeypatch, returncode=1)
     ops = RealOps()
 
-    result = ops.merge(REPO_SLUG, 42, "deadbeef")
+    result = ops.merge("devtools", 42, "deadbeef")
 
     assert result is False
 

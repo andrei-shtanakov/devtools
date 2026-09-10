@@ -168,6 +168,18 @@ def _accept_on_head(
     # между запросами) — изменённые пути считаются локально по
     # переключённому дереву: git diff origin/<base>...HEAD.
     changed = ops.changed_paths(target_dir, base_branch)
+    # База вердикта фиксируется ЗДЕСЬ, вместе с гардом путей: `changed`
+    # посчитан относительно `origin/<base_branch>`, и ревью ниже смотрит на
+    # тот же диапазон. Этот OID — и есть «база, от которой вынесен вердикт»;
+    # он уходит в пин мержа. Имя базы стерегут отдельно (ретаргет), но имя —
+    # адрес, а не идентичность: `origin/master` остаётся собой, уехав вперёд.
+    base0 = ops.rev_parse(target_dir, f"origin/{base_branch}")
+    if not base0:
+        print(
+            f"accept-pr: не удалось определить OID базы origin/{base_branch}"
+            " — мерж пинуется базой вердикта, без неё стоп"
+        )
+        return 1
     harness = [
         f for f in changed
         if any(f.startswith(p) for p in _HARNESS_PREFIXES)
@@ -246,8 +258,14 @@ def _accept_on_head(
         )
         return 1
     head = head0
-    if not ops.merge(repo_slug, pr, head):
-        print("accept-pr: мерж не прошёл (гонка head / правило репо) — стоп")
+    # Пин базы по OID, а не по имени (ревью PR #183, major): сверка
+    # `baseRefName` выше ловит РЕТАРГЕТ, но не движение самой базы —
+    # `origin/master` мог уехать вперёд между вердиктом и мержем, и агент
+    # влил бы код в базу, которой ревьюер не видел. `base0` снят там же,
+    # где считался гард путей (`git diff origin/<base>...HEAD`), то есть это
+    # ровно та база, от которой вынесен вердикт.
+    if not ops.merge(repo, pr, head, base0):
+        print("accept-pr: мерж не прошёл (гонка head/base / правило репо) — стоп")
         return 1
     print(
         f"accept-pr: {repo_slug}#{pr} смержен (head {head[:7]}). "

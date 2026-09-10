@@ -94,7 +94,9 @@ class Ops(Protocol):
 
     def pr_reviews(self, repo_slug: str, pr: int) -> list[dict] | None: ...
 
-    def merge(self, repo_slug: str, pr: int, sha: str) -> bool: ...
+    def merge(
+        self, repo_name: str, pr: int, sha: str, base: str | None = None
+    ) -> bool: ...
 
     def close_pr(self, repo_slug: str, pr: int, comment: str) -> bool: ...
 
@@ -815,14 +817,34 @@ class RealOps:
         )
         return done.returncode == 0
 
-    def merge(self, repo_slug: str, pr: int, sha: str) -> bool:
-        """PUT merge под профилем ai-prosto (ADR-ECO-011 D3); rc0->True."""
-        env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
-        done = subprocess.run(
-            ["gh", "api", "-X", "PUT", f"repos/{repo_slug}/pulls/{pr}/merge",
-             "-f", "merge_method=merge", "-f", f"sha={sha}"],
-            env=env, capture_output=True, text=True,
-        )
+    def merge(
+        self, repo_name: str, pr: int, sha: str, base: str | None = None
+    ) -> bool:
+        """Мерж через `merge-pr.sh` — единственный путь агентского мержа.
+
+        Раньше здесь стоял прямой `gh api -X PUT …/merge` от профиля
+        ai-prosto. Он ходил мимо гвардов обвязки, и утверждение CLAUDE.md
+        «агентский мерж только через merge-pr.sh» было ложным ровно на два
+        живых пути — `accept-pr` и S7 раннера (оба вызывают этот метод).
+        Дублировать гварды в питоне значило бы завести второе место одного
+        правила; вместо этого метод стал вызовом обвязки.
+
+        Аргумент — имя КАТАЛОГА репо во флоте, как у `review` (обвязка сама
+        выводит slug из сырого origin этого чекаута). `--merge` сохраняет
+        прежнюю стратегию (`merge_method=merge`), `--expect-head` — прежний
+        пин головы (`sha=`), `--expect-base` — новый пин базы, если
+        вызывающий знает, от чего вынесен вердикт.
+
+        Профиль обвязка выставляет и сверяет сама, поэтому GH_CONFIG_DIR
+        здесь больше не собирается: сверка логина живёт в одном месте.
+        """
+        argv = [
+            "sh", str(DEVTOOLS_ROOT / "merge-pr.sh"), repo_name, str(pr),
+            "--merge", "--expect-head", sha,
+        ]
+        if base:
+            argv += ["--expect-base", base]
+        done = subprocess.run(argv, cwd=DEVTOOLS_ROOT)
         return done.returncode == 0
 
     def comment(self, repo_slug: str, pr: int, body: str) -> None:
