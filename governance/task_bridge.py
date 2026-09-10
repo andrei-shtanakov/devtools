@@ -865,6 +865,46 @@ def _dag_files(
     return {_node_id(fname): fname for fname, _ in dag}
 
 
+#: Поле узла, отвечающее на вторую половину вопроса «что покрывает эта
+#: подпись»: пины (условие 3) помнят ЧУЖИЕ байты, на которые узел
+#: опирался, self-hash (условие 4) — СВОИ, которые человек читал, когда
+#: одобрял. Без второй половины подпись непроверяема в принципе.
+_SELF_HASH_KEY = "approved_content_hash"
+
+#: Approval-контур узла — поля, которые проекция условия (4) ВЫРЕЗАЕТ.
+#: `approved_content_hash` вырезает сам себя по механической причине: он
+#: лежит в том же frontmatter и иначе хешировал бы себя — записать
+#: значение значило бы изменить байты, по которым оно посчитано. Остальные
+#: исключения не техника, а предмет: `status`, `version`, подпись и пины —
+#: это и есть контур одобрения, а вопрос (4) про ТО, ЧТО ОДОБРЯЛИ, а не
+#: про то, как одобрение записано. Отсюда свойство, на котором стоит
+#: каскад: перевод узла в `stale` меняет только `status`, значит self-hash
+#: остаётся верным.
+_APPROVAL_CONTOUR_KEYS = (
+    "status", "version", "approved_by", "approved_at", "upstream_hashes",
+    _SELF_HASH_KEY,
+)
+
+
+def _self_content_hash(meta: dict, body: str) -> str:
+    """Хеш канонической СОБСТВЕННОЙ части узла (§I12, условие 4).
+
+    Это НЕ канонизация §I2, и путать их нельзя — проекции разные, потому
+    что вопросы разные. §I2 спрашивает «менялось ли содержание апстрима»
+    по всему DAG и `status`/`version` ОСТАВЛЯЕТ (иначе хеш слеп к откату
+    узла в `draft` и к волне переодобрения); §I12 спрашивает «те ли
+    собственные байты, что одобрял человек» по одному узлу и весь
+    approval-контур РЕЖЕТ (иначе одобрение собственных байтов не отличить
+    от перезаписи контура). Одна процедура на два вопроса дала бы неверный
+    ответ хотя бы на один (§7).
+    """
+    projected = {
+        key: value for key, value in meta.items()
+        if key not in _APPROVAL_CONTOUR_KEYS
+    }
+    return blob_sha1(join_frontmatter(projected, body))
+
+
 def _pin_drift(
     base: Path,
     files: dict[str, str],
@@ -918,7 +958,9 @@ def _approval_findings(
         node = _node_id(fname)
         if nodes is not None and node not in nodes:
             continue
-        meta, _ = split_frontmatter((base / fname).read_text(encoding="utf-8"))
+        meta, body = split_frontmatter(
+            (base / fname).read_text(encoding="utf-8")
+        )
         status = meta.get("status")
         if status != "approved":
             findings.append(
@@ -937,7 +979,25 @@ def _approval_findings(
             findings.append(
                 f"{bundle_dir}/{fname}: пин {upstream_id} записан "
                 f"{recorded!r}, фактический блоб {actual!r} — подпись стоит "
-                "под байтами, которых в этом дереве нет"
+                "под байтами upstream, которых в этом дереве нет"
+            )
+        recorded_self = meta.get(_SELF_HASH_KEY)
+        actual_self = _self_content_hash(meta, body)
+        if not recorded_self:
+            findings.append(
+                f"{bundle_dir}/{fname}: {_SELF_HASH_KEY} не записан — "
+                "миграционный долг: одобрение, поставленное до "
+                "2026-09-10, не записало, КАКИЕ байты одобряло, и "
+                "предъявить гейту нечего. Гасится обычным переодобрением: "
+                f"--approve-node {node}"
+            )
+        elif recorded_self != actual_self:
+            findings.append(
+                f"{bundle_dir}/{fname}: {_SELF_HASH_KEY} записан "
+                f"{recorded_self!r}, фактический {actual_self!r} — "
+                "собственные байты узла изменились с момента подписи, и "
+                "подпись покрывает байты, которых человек не видел. "
+                f"Переодобрить: --approve-node {node}"
             )
     return findings
 
@@ -987,9 +1047,22 @@ def _approvable(
     """Узел готов к approve (True) либо уже честно одобрен (False); иначе
     отказ.
 
+    Четыре исхода на четырёхусловном предикате:
+
+    - все четыре условия выполнены — no-op (`False`, §I12 п.4);
+    - `draft`/`stale` при готовых upstream — переход (`True`, п.3);
+    - `approved`, пины ВЕРНЫ, а self-hash разошёлся либо отсутствует —
+      явное ПЕРЕОДОБРЕНИЕ (`True`, п.5): собственные байты узла
+      изменились с момента подписи (либо неизвестно, какие были, —
+      легаси-узел без поля), а upstream на месте, значит ждать нечего.
+      Это и есть выход из тупика: без условия (4) такой узел считался бы
+      одобренным, каскад не срабатывал, а его downstream оставались бы
+      fail-closed навсегда;
+    - `approved` с НЕВЕРНЫМИ пинами — fail-closed (п.6).
+
     ЧИСТОЕ ЧТЕНИЕ — ни одна ветка ниже ничего не пишет, и это свойство
     несущее: `approve_node_for_run` зовёт функцию ДО создания
-    накапливающей ветки, потому что §I12 п.6 требует, чтобы отказ не
+    накапливающей ветки, потому что §I12 п.7 требует, чтобы отказ не
     оставил ни файла узла, ни статусов downstream, ни ветки. Второй раз
     её же зовёт `approve_node` — гвард для прямых вызовов; читать дерево
     дважды дешевле, чем разводить валидацию и запись по двум правилам.
@@ -1011,26 +1084,40 @@ def _approvable(
         (base / files[node_id]).read_text(encoding="utf-8")
     )
     status = meta.get("status")
-    if status == "approved":
-        # §I12 п.5: молчаливая перепиновка (или дописывание подписи) под
-        # сохранённым провенансом — ровно дефект spec-runner#410,
-        # вызванный человеком по другому поводу. Узел обязан сначала
-        # ПРИЗНАТЬ долг и уже из `stale` быть одобрен заново.
+    upstream_ids = next(u for f, u in dag if _node_id(f) == node_id)
+    drift = _pin_drift(base, files, upstream_ids, meta)
+    if status == "approved" and drift:
+        # §I12 п.6: молчаливая перепиновка под сохранённой подписью —
+        # ровно дефект spec-runner#410, вызванный человеком по другому
+        # поводу. Порядок работы — снизу вверх ПО ПРИЧИНЕ: сперва одобрить
+        # изменившийся upstream, чей каскад объявит долг этому узлу, и уже
+        # из объявленного долга одобрять его.
         raise RuntimeError(
-            f"{bundle_dir}/{files[node_id]}: узел approved, но состояние "
-            "незаконно — перепиновать его под сохранённой подписью механика "
+            f"{bundle_dir}/{files[node_id]}: узел approved, а его пины "
+            "разошлись — перепиновать его под сохранённой подписью механика "
             "не вправе:\n"
-            + "\n".join(f"- {f}" for f in node_findings)
-            + "\nПроцедура: вернуть узел в `stale` коррекцией в "
-            "репо-владельце (апстрим действительно сдвинулся) и одобрить "
-            f"заново: --approve-node {node_id}"
+            + "\n".join(
+                f"- пин {upstream_id}: записан {recorded!r}, фактический "
+                f"{actual!r}"
+                for upstream_id, recorded, actual in drift
+            )
+            + "\nПроцедура: сперва одобрите изменившийся upstream "
+            f"({', '.join(u for u, _, _ in drift)}) — его каскад объявит "
+            "долг этому узлу, и уже из долга одобрите его. Если upstream "
+            "честно одобрен, а пин всё равно не сходится, frontmatter "
+            "правили в обход контракта: разбирается человеком"
         )
+    if status == "approved":
+        # П.5: пины верны, значит расходится собственная запись узла —
+        # self-hash (или его нет вовсе у легаси). Это переодобрение, а не
+        # отказ: человек читает новые байты и одобряет их полным
+        # переходом п.3.
+        return True
     if status not in _APPROVABLE_STATUSES:
         raise RuntimeError(
             f"{bundle_dir}/{files[node_id]}: status={status!r} — в approved "
             f"входят только {' и '.join(_APPROVABLE_STATUSES)}"
         )
-    upstream_ids = next(u for f, u in dag if _node_id(f) == node_id)
     upstream_findings = _approval_findings(
         target_dir, bundle_dir, dag, nodes=upstream_ids
     )
@@ -1105,6 +1192,14 @@ def approve_node(
 ) -> list[str]:
     """Человеческий approve узла + рекурсивный каскад `stale`; → rel-пути.
 
+    Один и тот же полный переход обслуживает ТРИ входа (§I12 п.3 и п.5):
+    `draft`, `stale` и `approved` с разошедшимся либо отсутствующим
+    `approved_content_hash` при верных пинах. Последний — переодобрение:
+    собственные байты узла изменились с момента подписи, и человек
+    одобряет новые. Из какого бы статуса переход ни шёл, результат один:
+    `version + 1`, новая подпись, пересчитанные пины, новый self-hash и
+    рекурсивный каскад долга по downstream.
+
     Единственный переход `draft|stale → approved` во всём мосту (§I12):
     доставка права одобрять не имеет ни на одном пути (§I7). Человек
     РЕШАЕТ — выбирает узел; механика СЧИТАЕТ — валидирует узел, проверяет
@@ -1149,6 +1244,12 @@ def approve_node(
                 (base / files[upstream_id]).read_text(encoding="utf-8")
             )
         meta["upstream_hashes"] = pins
+    # Вторая половина того же утверждения (§I12, условие 4): пины
+    # записывают, на какие ЧУЖИЕ байты узел опирался, self-hash — какие
+    # СВОИ читал человек. Проекция вырезает весь approval-контур, поэтому
+    # значение не зависит от только что записанных статуса, версии,
+    # подписи и пинов — и от самого себя.
+    meta[_SELF_HASH_KEY] = _self_content_hash(meta, body)
     path.write_text(join_frontmatter(meta, body), encoding="utf-8")
     return [
         f"{bundle_dir}/{files[node_id]}",

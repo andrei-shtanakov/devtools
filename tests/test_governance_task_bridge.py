@@ -453,7 +453,16 @@ def _approve_all(
     Это и есть РЕАЛЬНЫЙ base доставки под новым контрактом: бандл, по
     которому человек прошёл `--approve-node` и чей approve-PR вмержен.
     Бандл целиком `draft` — состояние ДО этого шага конвейера, и
-    доставочная фикстура им быть больше не вправе (§I12)."""
+    доставочная фикстура им быть больше не вправе (§I12).
+
+    `approved_content_hash` (условие 4) считается ЗДЕСЬ по определению
+    контракта, а не заимствуется у `_self_content_hash`: проекция —
+    часть предмета проверки, и общая реализация свела бы условие (4) к
+    тавтологии «мы посчитали так же, как посчитали»."""
+    contour = (
+        "status", "version", "approved_by", "approved_at",
+        "upstream_hashes", "approved_content_hash",
+    )
     dag = dag or task_bridge._BUNDLE_DAG
     files = {task_bridge._node_id(f): f for f, _ in dag}
     base = Path(target) / bundle_dir
@@ -472,6 +481,11 @@ def _approve_all(
                 )
                 for u in upstream_ids
             }
+        meta["approved_content_hash"] = task_bridge.blob_sha1(
+            task_bridge.join_frontmatter(
+                {k: v for k, v in meta.items() if k not in contour}, body,
+            )
+        )
         path.write_text(
             task_bridge.join_frontmatter(meta, body), encoding="utf-8"
         )
@@ -3836,18 +3850,47 @@ def test_gate_refuses_approved_without_the_approver(
         _deliver(target, _StubOps())
 
 
-def test_gate_passes_a_bundle_approved_by_the_former_stamp(
+def test_gate_refuses_a_bundle_approved_by_the_former_stamp(
     tmp_path: Path,
 ) -> None:
-    """Граница миграции: переодобрять уже одобренные бандлы не нужно.
+    """Граница миграции ОТМЕНЕНА находкой ревью §I12.
 
-    Предикат проверяет СОГЛАСОВАННОСТЬ статуса, подписи и пинов, а не
-    происхождение подписи. Требовать обратного значило бы объявить долг
-    там, где ни один байт не изменился, — то есть ровно то, что §I12
-    запрещает механике делать со `stale`."""
+    Прежнее правило принимало старые `approved` как есть. Но без
+    `approved_content_hash` собственные байты одобренного узла
+    принципиально непроверяемы — не «плохо проверяемы», а никак:
+    одобрение, которое нечем предъявить, гейту предъявить нечего. Такой
+    узел несёт РАЗОВЫЙ миграционный долг, и гасится он обычным
+    переодобрением, без особого режима и отдельного флага."""
     target = str(_target(tmp_path, approved=False))
     _approve_all(target, by="prev-bundle-merger", at="2026-09-01T00:00:00Z")
+    for fname, _ in task_bridge._BUNDLE_DAG:
+        _set_node(target, fname, approved_content_hash=None)
 
+    with pytest.raises(RuntimeError, match="одобрен не целиком") as exc:
+        _deliver(target, _StubOps())
+
+    message = str(exc.value)
+    assert "approved_content_hash не записан" in message
+    assert "миграционный долг" in message
+    assert "--approve-node charter" in message
+
+
+def test_migration_debt_is_discharged_by_ordinary_reapproval(
+    tmp_path: Path,
+) -> None:
+    """Долг гасится один раз топологическим переодобрением активного DAG —
+    теми же вызовами `--approve-node`, что и всякий другой."""
+    target = str(_target(tmp_path, approved=False))
+    _approve_all(target, by="штамп", at="2026-09-01T00:00:00Z")
+    for fname, _ in task_bridge._BUNDLE_DAG:
+        _set_node(target, fname, approved_content_hash=None)
+
+    for fname, _ in task_bridge._BUNDLE_DAG:
+        _approve(target, task_bridge._node_id(fname))
+
+    assert task_bridge._approval_findings(
+        target, _BUNDLE, task_bridge._BUNDLE_DAG
+    ) == []
     assert _deliver(target, _StubOps()) == 77
 
 
@@ -6882,10 +6925,11 @@ def test_approve_node_repeat_over_honest_node_is_a_noop(
 def test_approve_node_refuses_approved_node_with_drifted_pins(
     tmp_path: Path,
 ) -> None:
-    """Пункт 5: fail-closed, а не молчаливая перепиновка (spec-runner#410).
+    """Пункт 6: fail-closed, а не молчаливая перепиновка (spec-runner#410).
 
-    Отказ называет узел, ожидаемый и фактический блоб разошедшегося пина
-    и процедуру — вернуть узел в `stale` коррекцией и одобрить заново."""
+    Отказ называет узел, обе величины разошедшегося пина и процедуру —
+    снизу вверх ПО ПРИЧИНЕ: сперва одобрить изменившийся upstream, чей
+    каскад объявит долг этому узлу."""
     target = str(_target(tmp_path))
     _set_node(
         target, _REQUIREMENTS,
@@ -6902,22 +6946,32 @@ def test_approve_node_refuses_approved_node_with_drifted_pins(
         (Path(target) / _BUNDLE / _CHARTER).read_text(encoding="utf-8")
     )
     assert actual in message
-    assert "stale" in message
+    assert "сперва одобрите изменившийся upstream" in message
+    assert "charter" in message
     assert _node_bytes_of(target) == before
 
 
-def test_approve_node_refuses_approved_node_without_signature(
+def test_approve_node_reapproves_node_whose_signature_is_empty(
     tmp_path: Path,
 ) -> None:
-    """«Одобрено» без одобрившего — незаконное состояние, не предмет approve.
+    """«Одобрено» без одобрившего — незаконное состояние, и единственный
+    выход из него тот же, что у разошедшегося self-hash: переодобрение.
 
-    Шаблон бандла заводит `approved_by: ""`: пустая строка есть «не
-    подписано», а не подпись."""
+    Пины верны, ждать нечего; fail-closed здесь запер бы воркстрим
+    навсегда — гейт такой узел не пропускает, а починить его больше
+    нечем. Развилка спекой прямо не закрыта (п.5 назван через self-hash),
+    решена по правилу «пробел, из которого нет штатного выхода, — не
+    принятый остаток, а тупик» (§7)."""
     target = str(_target(tmp_path))
     _set_node(target, _CHARTER, approved_by="")
 
-    with pytest.raises(RuntimeError, match="approved_by/approved_at пусты"):
-        _approve(target, "charter")
+    assert _approve(target, "charter", by="человек", at="t") != []
+
+    meta = _meta(target, _CHARTER)
+    assert meta["approved_by"] == "человек"
+    assert task_bridge._approval_findings(
+        target, _BUNDLE, task_bridge._BUNDLE_DAG, nodes=("charter",)
+    ) == []
 
 
 def test_approve_node_refuses_id_outside_the_active_dag(
@@ -7489,3 +7543,188 @@ def test_first_delivery_never_asks_the_bundle_pr_for_a_signature(
     assert tb.deliver_for_run(state, ops) == 77
     # Факты бандл-PR (#5) не спрашивались вовсе: спрашивать нечего.
     assert ("pr_facts", 5) not in ops.calls
+
+
+# --- Условие (4): узел помнит СВОИ одобренные байты ------------------------
+#
+# Пины помнят чужие байты, на которые узел опирался; `approved_content_hash`
+# — свои, которые человек читал, когда одобрял. Без второй половины подпись
+# непроверяема в принципе, а воркстрим запирается: см. тупик ниже.
+
+
+def _self_hash_of(target: str, fname: str) -> str:
+    """Оракул условия (4), написанный по определению контракта."""
+    contour = (
+        "status", "version", "approved_by", "approved_at",
+        "upstream_hashes", "approved_content_hash",
+    )
+    meta, body = task_bridge.split_frontmatter(
+        (Path(target) / _BUNDLE / fname).read_text(encoding="utf-8")
+    )
+    return task_bridge.blob_sha1(
+        task_bridge.join_frontmatter(
+            {k: v for k, v in meta.items() if k not in contour}, body,
+        )
+    )
+
+
+def _correct_body(target: str, fname: str) -> None:
+    """Correction правит ТЕЛО узла, frontmatter не трогая."""
+    path = Path(target) / _BUNDLE / fname
+    path.write_text(
+        path.read_text(encoding="utf-8") + "\nПравка correction'а.\n",
+        encoding="utf-8",
+    )
+
+
+def test_approve_node_records_the_hash_of_its_own_approved_bytes(
+    tmp_path: Path,
+) -> None:
+    """Переход пишет self-hash по КАНОНИЧЕСКОЙ собственной части узла."""
+    target = str(_target(tmp_path, approved=False))
+
+    _approve(target, "charter")
+
+    meta = _meta(target, _CHARTER)
+    assert meta["approved_content_hash"] == _self_hash_of(target, _CHARTER)
+
+
+def test_self_hash_does_not_hash_itself_nor_the_approval_contour(
+    tmp_path: Path,
+) -> None:
+    """Проекция вырезает весь approval-контур И само поле.
+
+    Само поле — по механической причине: оно лежит в том же frontmatter и
+    иначе хешировало бы себя. Контур — по существу: вопрос (4) про ТО,
+    ЧТО ОДОБРЯЛИ, а не про то, как одобрение записано."""
+    target = str(_target(tmp_path))
+    before = _meta(target, _CHARTER)["approved_content_hash"]
+
+    _set_node(
+        target, _CHARTER, version=99, status="stale",
+        approved_by="кто-то", approved_at="когда-то",
+    )
+
+    assert _self_hash_of(target, _CHARTER) == before
+
+
+def test_reapproval_converges_because_the_field_does_not_hash_itself(
+    tmp_path: Path,
+) -> None:
+    """Поле обязано вырезать САМО СЕБЯ, и это проверяется сходимостью.
+
+    Не вырезай оно себя — каждый approve считал бы хеш по байтам с
+    ПРЕДЫДУЩИМ значением поля, записывал бы новое и тем делал записанное
+    неверным: узел не стал бы честно одобренным никогда, а повторный
+    вызов не был бы no-op'ом. Первый approve этого не показывает (поля
+    ещё нет вовсе) — показывает второй."""
+    target = str(_target(tmp_path))
+    honest = ("charter",)
+
+    _correct_body(target, _CHARTER)
+    assert _approve(target, "charter") != []
+    assert task_bridge._approval_findings(
+        target, _BUNDLE, task_bridge._BUNDLE_DAG, nodes=honest
+    ) == []
+
+    _correct_body(target, _CHARTER)
+    assert _approve(target, "charter") != []
+    assert task_bridge._approval_findings(
+        target, _BUNDLE, task_bridge._BUNDLE_DAG, nodes=honest
+    ) == []
+    # И повтор поверх сошедшегося — no-op.
+    assert _approve(target, "charter") == []
+
+
+def test_stale_keeps_its_self_hash_valid(tmp_path: Path) -> None:
+    """Пометка долга не вправе делать неверной запись о том, что покрывала
+    подпись: каскад меняет ровно `status`, а `status` проекция режет."""
+    target = str(_target(tmp_path))
+    _set_node(target, _REQUIREMENTS, status="stale")
+
+    _approve(target, "requirements")
+
+    meta = _meta(target, _BEHAVIOUR)
+    assert meta["status"] == "stale"
+    assert meta["approved_content_hash"] == _self_hash_of(target, _BEHAVIOUR)
+
+
+def test_body_edit_of_an_approved_node_is_caught_by_the_fourth_condition(
+    tmp_path: Path,
+) -> None:
+    """Подпись покрывает байты, которых человек не видел, — и предикат это
+    ловит. Трёхусловный не ловил по построению: он помнил чужие байты и
+    не помнил своих."""
+    target = str(_target(tmp_path))
+    _correct_body(target, _REQUIREMENTS)
+
+    findings = task_bridge._approval_findings(
+        target, _BUNDLE, task_bridge._BUNDLE_DAG, nodes=("requirements",)
+    )
+
+    assert len(findings) == 1
+    assert "approved_content_hash" in findings[0]
+    assert "не видел" in findings[0]
+
+
+def test_body_edit_of_the_terminal_node_is_caught_too(
+    tmp_path: Path,
+) -> None:
+    """Терминальный узел покрыт наравне со всеми: своя запись есть у
+    каждого. Через downstream его не поймать — downstream у него нет."""
+    target = str(_target(tmp_path))
+    _correct_body(target, _DECOMPOSITION)
+
+    with pytest.raises(RuntimeError, match="одобрен не целиком") as exc:
+        _deliver(target, _StubOps())
+    assert f"{_BUNDLE}/{_DECOMPOSITION}" in str(exc.value)
+
+
+def test_fourth_condition_unlocks_the_dead_end(tmp_path: Path) -> None:
+    """Тупик, ради которого условие (4) и заведено.
+
+    Correction правит тело `approved`-узла, не трогая frontmatter. По
+    трёхусловному предикату он честно одобрен ⇒ `--approve-node` даёт
+    no-op ⇒ каскад не запускается ⇒ downstream остаются `approved` с
+    пинами на старый блоб ⇒ fail-closed, и перевести их в `stale`
+    некому. Воркстрим заперт: единственный узел, чей approve сдвинул бы
+    дело с места, считается уже одобренным.
+
+    С условием (4) тот же вызов — ПЕРЕОДОБРЕНИЕ: новая подпись, новый
+    self-hash, `version + 1` и рекурсивный каскад, который объявляет долг
+    downstream. Дальше волна идёт обычным порядком."""
+    target = str(_target(tmp_path))
+    _correct_body(target, _REQUIREMENTS)
+    before_version = _meta(target, _REQUIREMENTS)["version"]
+
+    changed = _approve(target, "requirements", by="человек", at="t-новое")
+
+    assert changed != [], "no-op здесь и есть тупик"
+    meta = _meta(target, _REQUIREMENTS)
+    assert meta["version"] == before_version + 1
+    assert meta["approved_by"] == "человек"
+    assert meta["approved_content_hash"] == _self_hash_of(
+        target, _REQUIREMENTS
+    )
+    # Каскад объявил долг downstream — тем, кто в тупике был fail-closed.
+    for name in (_BEHAVIOUR, _DESIGN, _ACCEPTANCE, _DECOMPOSITION):
+        assert _meta(target, name)["status"] == "stale", name
+    # И после волны DAG проходит гейт целиком.
+    for fname, _ in task_bridge._BUNDLE_DAG:
+        _approve(target, task_bridge._node_id(fname), by="человек", at="t")
+    assert task_bridge._approval_findings(
+        target, _BUNDLE, task_bridge._BUNDLE_DAG
+    ) == []
+
+
+def test_reapproval_is_not_triggered_when_the_self_hash_still_matches(
+    tmp_path: Path,
+) -> None:
+    """Обратная сторона: совпал self-hash — байты те же, что человек
+    читал, и повтор обязан остаться no-op'ом (п.4)."""
+    target = str(_target(tmp_path))
+    before = _node_bytes_of(target)
+
+    assert _approve(target, "decomposition", by="другой", at="t2") == []
+
+    assert _node_bytes_of(target) == before
