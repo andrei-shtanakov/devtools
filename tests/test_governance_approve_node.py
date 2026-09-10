@@ -24,6 +24,7 @@ import pytest
 from governance import approval_facts as af
 from governance import approval_ledger as al
 from governance import approve_node as an
+from governance import bundle_dag
 from governance import node_approval as na
 from governance import run_state as rs
 from governance.frontmatter import join_frontmatter, split_frontmatter
@@ -259,8 +260,12 @@ def merge_pr(
     return sha
 
 
-def approve(world: World, node: str) -> an.ApprovalOutcome:
-    return an.approve_node(world.state, world.ops, node)
+def approve(
+    world: World, node: str, *, legacy_bundle: int | None = None
+) -> an.ApprovalOutcome:
+    return an.approve_node(
+        world.state, world.ops, node, legacy_bundle=legacy_bundle
+    )
 
 
 def drive_to_approved(world: World, node: str, *, login: str = HUMAN) -> None:
@@ -958,52 +963,165 @@ def test_broken_authorization_record_is_not_accepted(
 # --- Волна: один проход по DAG ------------------------------------------
 
 
-def test_wave_closes_only_when_the_whole_dag_is_approved(
-    world: World,
-) -> None:
-    """Проход закрыт, когда честно одобрен ВЕСЬ активный DAG.
-
-    Завершения заявки терминального уровня мало: узел вне её пути мог
-    успеть обзавестись долгом. Пара половин одного стенда — с долгом и
-    без, — потому что «волна не закрылась» само по себе не отличает
-    строгую проверку от сломанной.
-    """
-    for node in ("charter", "requirements", "behaviour-spec", "design",
-                 "acceptance"):
-        drive_to_approved(world, node)
-    approve(world, "decomposition")
-    key, op = _request_over(world, "decomposition")
-    merge_pr(world, op["candidate_pr"])
-    approve(world, "decomposition")
-    # Долг появляется ДО мержа конверта терминального узла и лежит вне его
-    # пути: сам конверт от этого не страдает.
-    _push_edit(world, "00-charter.md", body="Чартер правят параллельно.")
-    merge_pr(world, world.state.ops[key]["finalize_pr"])
-    approve(world, "decomposition")
-
-    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
-    assert al.closed_waves(world.state) == set(), (
-        "узел вне пути терминального несёт долг — проход не завершён"
-    )
+def test_wave_is_opened_with_its_intent(world: World) -> None:
+    """Проход открывается ЗАПИСЬЮ с составом DAG, а не по пустому месту."""
     approve(world, "charter")
-    _, revived = _request_over(world, "charter")
-    assert revived["wave"] == 1, "тот же проход продолжается"
-    assert revived["attempt"] == 2, "номер попытки того же (W, K) растёт"
+    record = rs.load("r-approve").ops["approve-wave-1"]
+    nodes = bundle_dag.composition(bundle_dag.dag_for(None))
+    assert record["status"] == al.WAVE_OPEN
+    assert record["intent"]["dag"] == list(nodes)
+    assert record["intent"]["fingerprint"] == (
+        bundle_dag.composition_fingerprint(nodes)
+    )
+    assert _request_over(world, "charter")[1]["wave"] == 1
 
 
-def test_wave_closes_when_nothing_is_left_in_debt(world: World) -> None:
-    """Вторая половина пары: без долга проход закрывается, и следующий —
-    новая волна."""
+def test_wave_outlives_the_gap_between_levels(world: World) -> None:
+    """Между вмерженным уровнем и заведённым следующим живой заявки нет —
+    и волна обязана это пережить.
+
+    Это штатная середина прохода, через неё идёт каждый уровень DAG.
+    Закройся волна здесь, `K` не рос бы никогда, а `A` не рос бы вовсе.
+    """
+    drive_to_approved(world, "charter")
+    assert al.live_requests(world.state) == [], "живых заявок нет"
+    assert al.open_wave(world.state) == 1, "волна жива: проход не завершён"
+
+    approve(world, "requirements")
+    _, second = _request_over(world, "requirements")
+    assert second["wave"] == 1, "тот же проход"
+    assert second["step"] == 1, "K вырос по уровню"
+
+
+def test_approve_node_never_writes_completed(world: World) -> None:
+    """`--approve-node` волну не завершает — даже когда DAG стал одобрен.
+
+    Последнего вызова в предписанном цикле не существует: после мержа
+    финализирующего PR последнего уровня оператор уходит в доставку.
+    Поэтому `completed` пишет реконсиляция после сошедшегося гейта, а не
+    этот путь.
+    """
     for node in ("charter", "requirements", "behaviour-spec", "design",
                  "acceptance", "decomposition"):
         drive_to_approved(world, node)
-    assert al.closed_waves(world.state) == {1}
+    record = rs.load("r-approve").ops["approve-wave-1"]
+    assert record["status"] == al.WAVE_OPEN, (
+        "весь DAG одобрен, но закрывать волну этому вызову не поручено"
+    )
+
+
+def test_reconciliation_completes_the_wave_by_the_full_predicate(
+    world: World,
+) -> None:
+    """`completed` пишется ПОЛНЫМ предикатом записанного состава.
+
+    Пара половин одного стенда: с долгом хоть у одного узла — не пишется
+    ничего, без долга — пишется `completed`. «Волна не закрылась» само по
+    себе не отличило бы строгую проверку от сломанной.
+    """
+    for node in ("charter", "requirements", "behaviour-spec", "design",
+                 "acceptance", "decomposition"):
+        drive_to_approved(world, node)
+    # Долг ставится на ТЕРМИНАЛЬНЫЙ узел намеренно: переодобрение корня
+    # каскадом увело бы в `stale` весь DAG, и «предикат не сошёлся»
+    # говорило бы уже про каскад, а не про долг, который мы завели.
+    _push_edit(world, "30-decomposition.md", body="Долг у терминального узла.")
+    assert an.reconcile_wave_after_gate(
+        world.state, world.ops, bundle_dag.dag_for(None)
+    ) is None
+    assert al.open_wave(world.state) == 1, "предикат не сошёлся — волна жива"
+
+    drive_to_approved(world, "decomposition")   # долг погашен обычным путём
+    assert an.reconcile_wave_after_gate(
+        world.state, world.ops, bundle_dag.dag_for(None)
+    ) == al.WAVE_COMPLETED
+    assert al.open_wave(world.state) is None
+
+
+def test_wave_fate_is_durable_and_written_once(world: World) -> None:
+    """Закрытие — ЗАПИСЬ, а не вычисление, и второй заход её не трогает.
+
+    Durable здесь несёт вес: после `completed` активный DAG снова
+    обзаводится долгом, и вычисляемое закрытие «раскрылось» бы обратно —
+    новый проход унаследовал бы номер прежнего.
+    """
+    for node in ("charter", "requirements", "behaviour-spec", "design",
+                 "acceptance", "decomposition"):
+        drive_to_approved(world, node)
+    assert an.reconcile_wave_after_gate(
+        world.state, world.ops, bundle_dag.dag_for(None)
+    ) == al.WAVE_COMPLETED
+    on_disk = rs.load("r-approve").ops["approve-wave-1"]
+    assert on_disk["status"] == al.WAVE_COMPLETED
+
+    # Идемпотентность: повтор доставки после падения не пишет ничего.
+    assert an.reconcile_wave_after_gate(
+        world.state, world.ops, bundle_dag.dag_for(None)
+    ) is None
+    assert rs.load("r-approve").ops["approve-wave-1"] == on_disk
 
     _push_edit(world, "00-charter.md", body="Поздняя коррекция.")
     approve(world, "charter")
     _, fresh = _request_over(world, "charter")
     assert fresh["wave"] == 2, "новый проход — новая волна"
-    assert fresh["attempt"] == 1
+    assert al.wave_records(world.state)[1]["status"] == al.WAVE_COMPLETED
+
+
+def test_changed_composition_closes_the_wave_as_obsolete(
+    world: World,
+) -> None:
+    """Проход по составу, которого больше нет, нечем завершить.
+
+    `--approve-node` закрывает прежнюю волну `obsolete` и ТЕМ ЖЕ вызовом
+    заводит новую: оба действия следуют из одного прочитанного состава.
+    Вызов при этом успешен — `obsolete` описывает судьбу прежнего прохода,
+    а не исход этого вызова.
+    """
+    drive_to_approved(world, "charter")
+    first = rs.load("r-approve").ops["approve-wave-1"]
+    _drop_node(world, "25-acceptance.md")
+
+    # Через ПРЕДЛОЖЕНИЕ, а не через продвижение живой заявки: состав
+    # сверяет тот путь, которому волна нужна.
+    approve(world, "requirements", legacy_bundle=5)
+    closed = rs.load("r-approve").ops["approve-wave-1"]
+    assert closed["status"] == al.WAVE_OBSOLETE
+    assert closed["intent"] == first["intent"], "intent не переписан"
+    assert "acceptance" in closed["intent"]["dag"]
+    assert "acceptance" not in closed["actual"]["dag"]
+    assert closed["actual"]["fingerprint"] != first["intent"]["fingerprint"]
+
+    fresh = rs.load("r-approve").ops["approve-wave-2"]
+    assert fresh["status"] == al.WAVE_OPEN
+    assert fresh["intent"]["dag"] == closed["actual"]["dag"]
+    assert _request_over(world, "requirements")[1]["wave"] == 2
+
+
+def test_reconciliation_writes_obsolete_before_judging_the_predicate(
+    world: World,
+) -> None:
+    """Сперва состав, потом предикат — порядок фиксирован.
+
+    Обратный объявил бы `completed` проходу, который шёл по устаревшему
+    составу и мог бы «доодобрить» его целиком, ничего не зная про
+    изменение.
+    """
+    approve(world, "charter")
+    _drop_node(world, "25-acceptance.md")
+    assert an.reconcile_wave_after_gate(
+        world.state, world.ops, bundle_dag.dag_for(5)
+    ) == al.WAVE_OBSOLETE
+    assert al.open_wave(world.state) is None
+
+
+def test_reconciliation_without_an_open_wave_writes_nothing(
+    world: World,
+) -> None:
+    """Отсутствие волны допуску не мешает: статус волны его не решает."""
+    assert an.reconcile_wave_after_gate(
+        world.state, world.ops, bundle_dag.dag_for(None)
+    ) is None
+    assert al.wave_records(world.state) == {}
 
 
 # --- Инвалидация живых заявок ниже --------------------------------------
@@ -1221,6 +1339,17 @@ def _push_foreign_commit(world: World, branch: str) -> None:
     _git(world.human, "push", "-q", "-f", "origin", f"foreign:{branch}")
 
 
+def _drop_node(world: World, fname: str) -> None:
+    """Узел уходит из бандла — состав активного DAG меняется по-настоящему."""
+    _git(world.human, "fetch", "-q", "origin")
+    _git(world.human, "switch", "-q", "master")
+    _git(world.human, "reset", "-q", "--hard", "origin/master")
+    _git(world.human, "rm", "-q", f"{BUNDLE}/{fname}")
+    _git(world.human, "commit", "-qm", f"drop: {fname}")
+    _git(world.human, "push", "-q", "origin", "master")
+    world.sync()
+
+
 def _stray_commit(world: World) -> str:
     """Коммит вне истории master, но ДОСТУПНЫЙ клону target.
 
@@ -1234,3 +1363,66 @@ def _stray_commit(world: World) -> str:
     _git(world.human, "push", "-q", "origin", "stray")
     _git(world.target, "fetch", "-q", "origin", "stray")
     return _git(world.human, "rev-parse", "HEAD")
+
+
+# --- Структурный лок: волна ничего не разрешает -------------------------
+
+#: API записи волны. Читать его вправе ровно два модуля: сам леджер и
+#: механика одобрения (выбор номера прохода и реконсиляция после гейта).
+_WAVE_API = (
+    "wave_records",
+    "open_wave_record",
+    "open_wave",
+    "complete_wave",
+    "obsolete_wave",
+    "WAVE_PREFIX",
+    "WAVE_OPEN",
+    "WAVE_COMPLETED",
+    "WAVE_OBSOLETE",
+)
+
+#: Модули, которым читать статус волны разрешено.
+_WAVE_READERS = {"approval_ledger.py", "approve_node.py"}
+
+
+def test_wave_status_is_not_readable_by_delivery() -> None:
+    """Статус волны в решении о допуске не участвует — и не сможет.
+
+    Контракт запрещает читать волну как основание допустить доставку:
+    это и был бы возврат ей права одобрять, отменённого §I7. Обещание
+    «мы так не делаем» держится на слове ровно до первого, кто захочет
+    «дешёвую» проверку, — поэтому оно вынесено в механику.
+
+    Часть 3 подключит к доставке ОДНУ точку — `reconcile_wave_after_gate`,
+    — и она живёт в `approve_node`. Тест поймает попытку дотянуться до
+    записи волны напрямую: доставка вправе позвать реконсиляцию, но не
+    вправе спросить у волны, можно ли ей идти.
+    """
+    package = Path(an.__file__).resolve().parent
+    offenders: list[str] = []
+    for path in sorted(package.glob("*.py")):
+        if path.name in _WAVE_READERS:
+            continue
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            for name in _WAVE_API:
+                if name in stripped:
+                    offenders.append(f"{path.name}:{lineno}: {stripped}")
+    assert not offenders, (
+        "запись волны читается вне разрешённых модулей:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_the_wave_api_names_exist(monkeypatch) -> None:
+    """Пара к предыдущему: перечень имён не разъехался с леджером.
+
+    Опечатка в `_WAVE_API` сделала бы прошлый тест вакуумным — он искал бы
+    строки, которых в коде нет вовсе, и молчал бы на любом нарушении.
+    """
+    for name in _WAVE_API:
+        assert hasattr(al, name), name

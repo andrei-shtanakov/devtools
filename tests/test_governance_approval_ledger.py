@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from governance import approval_branches, approval_ledger as al
+from governance import bundle_dag as bd
 from governance import run_state as rs
 from governance.approval_facts import Authorization, MergeEvent
 
@@ -243,34 +244,98 @@ def test_attempts_are_counted_per_step(state: rs.RunState) -> None:
     assert al.next_attempt(state, 1, 3) == 1
 
 
-def test_wave_is_taken_from_the_ledger_not_from_branches(
+def _open_wave(state: rs.RunState, wave: int, *nodes: str) -> None:
+    al.open_wave_record(
+        state, wave, nodes, bd.composition_fingerprint(nodes)
+    )
+
+
+def test_wave_outlives_the_death_of_all_its_requests(
     state: rs.RunState,
 ) -> None:
-    """Номер волны — максимальный ЗАПИСАННЫЙ плюс один; старые не вернутся.
+    """Открытость волны — её ЗАПИСЬ, а не состояние заявок (§I12).
 
-    Ветка могла быть удалена после мержа, а могла остаться от захода,
-    который умер, — поэтому источником номера остаётся леджер.
+    Между вмерженным уровнем и заведённым следующим живой заявки нет ни
+    одной, и волна обязана это пережить: закройся она там, `K` не рос бы
+    никогда, а `A` не рос бы вовсе. Здесь тот же промежуток доведён до
+    предела — заявок нет ни одной живой, — и волна всё равно открыта.
     """
-    assert al.next_wave(state) == 1 and al.open_wave(state) is None
-
+    _open_wave(state, 1, "charter", "requirements")
     key = _start(state, 1, 1, 1)
-    assert al.open_wave(state) == 1, "волна жива, пока по ней есть шаг"
-    assert al.next_wave(state) == 2
-
     al.record_candidate_pr(state, key, 407)
     _merge(state, key)
     al.record_finalize_pr(state, key, 408)
     al.complete_request(state, key)
+
+    assert al.live_requests(state) == [], "живых заявок не осталось"
+    assert al.open_wave(state) == 1, "волна жива: проход не завершён"
+    assert al.next_attempt(state, 1, 1) == 2, "восстановление внутри той же W"
+
+
+def test_wave_numbers_come_from_wave_records(state: rs.RunState) -> None:
+    """«Максимальный записанный плюс один» читается по записям волн.
+
+    Без durable-записи читать нечего, а вывод из заявок закрывал бы волну
+    ровно в промежутке между уровнями.
+    """
+    assert al.next_wave(state) == 1 and al.open_wave(state) is None
+    _open_wave(state, 1, "charter")
+    assert al.next_wave(state) == 2
+
+    al.complete_wave(state, 1)
     assert al.open_wave(state) is None
     assert al.next_wave(state) == 2, "номер закрытой волны не переиспользуется"
+    with pytest.raises(RuntimeError, match="не переиспользуются"):
+        _open_wave(state, 1, "charter")
 
 
-def test_two_live_waves_are_a_refusal_not_a_choice(state: rs.RunState) -> None:
+def test_two_open_waves_are_a_refusal_not_a_choice(state: rs.RunState) -> None:
     """Молчаливый выбор старшей оставил бы вторую висеть незамеченной."""
-    _start(state, 1, 1, 1)
-    _start(state, 2, 1, 1)
-    with pytest.raises(RuntimeError, match="живых волн больше одной"):
+    _open_wave(state, 1, "charter")
+    _open_wave(state, 2, "charter")
+    with pytest.raises(RuntimeError, match="открытых волн больше одной"):
         al.open_wave(state)
+
+
+@pytest.mark.parametrize(
+    "close",
+    [
+        lambda st: al.complete_wave(st, 1),
+        lambda st: al.obsolete_wave(st, 1, ("x",), "v1:x", "состав другой"),
+    ],
+)
+def test_closed_wave_is_not_mutated(state: rs.RunState, close) -> None:
+    """§I4: запись волны после записи неприкосновенна — обоими исходами.
+
+    На этом же держится идемпотентность реконсиляции: второй заход в
+    записанную судьбу не пишет ничего.
+    """
+    _open_wave(state, 1, "charter")
+    close(state)
+    before = dict(al.wave_records(state)[1])
+    for again in (
+        lambda st: al.complete_wave(st, 1),
+        lambda st: al.obsolete_wave(st, 1, ("y",), "v1:y", "ещё раз"),
+    ):
+        with pytest.raises(RuntimeError, match="уже закрыта"):
+            again(state)
+    assert al.wave_records(rs.load("r-approve"))[1] == before
+
+
+def test_obsolete_keeps_both_compositions(state: rs.RunState) -> None:
+    """Оба состава и причина — иначе запись говорит «стало иначе», не
+    говоря, чем было и чем стало."""
+    _open_wave(state, 1, "charter", "requirements")
+    actual = ("charter", "requirements", "design")
+    al.obsolete_wave(
+        state, 1, actual, bd.composition_fingerprint(actual), "появился узел"
+    )
+    record = rs.load("r-approve").ops["approve-wave-1"]
+    assert record["status"] == al.WAVE_OBSOLETE
+    assert record["intent"]["dag"] == ["charter", "requirements"]
+    assert record["actual"]["dag"] == list(actual)
+    assert record["actual"]["fingerprint"] != record["intent"]["fingerprint"]
+    assert record["reason"] == "появился узел"
 
 
 def test_foreign_op_keys_are_not_read_as_requests(state: rs.RunState) -> None:
@@ -301,28 +366,18 @@ def test_terminal_request_over_a_node_does_not_block_a_new_one(
     assert al.live_request_over(state, "design") is None
 
 
-def test_wave_closes_only_by_an_explicit_record(state: rs.RunState) -> None:
-    """Закрытие волны — записанный факт, а не вывод из текущего состояния.
-
-    Вывести его из дерева нельзя: к следующему вызову активный DAG успевает
-    снова перестать быть честно одобренным, и закрывшаяся месяц назад волна
-    выглядела бы никогда не закрывавшейся.
-    """
-    key = _start(state, 1, 1, 1)
-    al.record_candidate_pr(state, key, 407)
-    _merge(state, key)
-    al.record_finalize_pr(state, key, 408)
-    al.complete_request(state, key)
-    assert al.closed_waves(state) == set(), "сама по себе волна не закрылась"
-
-    al.close_wave(state, 1)
-    assert al.closed_waves(rs.load("r-approve")) == {1}
-    al.close_wave(state, 1)  # идемпотентно: величина та же
-    assert al.closed_waves(state) == {1}
+def test_fingerprint_ignores_order_but_not_membership() -> None:
+    """Состав — МНОЖЕСТВО узлов: перестановка не смена состава, а узел — да."""
+    assert bd.composition_fingerprint(("a", "b")) == bd.composition_fingerprint(
+        ("b", "a")
+    )
+    assert bd.composition_fingerprint(("a", "b")) != bd.composition_fingerprint(
+        ("a", "b", "c")
+    )
 
 
 def test_wave_record_is_not_read_as_a_request(state: rs.RunState) -> None:
     """Запись о волне не имеет формы заявки и заявкой не считается."""
-    al.close_wave(state, 3)
+    _open_wave(state, 3, "charter")
     _start(state, 3, 0, 1)
     assert [nums for nums, _ in al.requests(state)] == [(3, 0, 1)]
