@@ -49,6 +49,7 @@
 | `check-catalog-fixtures.py` | owner-QA SSOT-набора conformance-фикстур каталога (`contracts/catalog-conformance-fixtures/v1/`): референс V1–V7 + manifest |
 | `check-plan-fields.py` | кросс-репный граф `@blocked_by` — ловит пункт, ждущий уже отгруженного (режим отказа R-03) |
 | `check-arch-evidence-freshness.py` | drift вендоренных prograph-схем steward + freshness evidence WS-005; `--read` — просрочка ⇒ unknown |
+| `merge-pr.sh` | единственный разрешённый путь агентского мержа (ADR-ECO-011), в т.ч. для `accept-pr` и S7 раннера через `Ops.merge`; сам скрипт и его SSOT `contracts/approval-branches/` — харнесс-пути (`_HARNESS_PREFIXES`): PR, который их трогает, агентом не ревьюится и не мержится, иначе контур исполнил бы гвард из проверяемого дерева. PR из форка с `--delete-branch` — отказ до мержа (ветка форка живёт в чужом репо); четвёртый категорический отказ — дифф, трогающий authority-root пути (перечень — SSOT `contracts/authority-root/v1/paths.env`, его же читают `accept_pr` и раннер): сверяет профиль `ai-prosto`, отказывает на candidate/finalize-ветках заявки одобрения §I12 и на лейбле `human-merge-required`, мержит прямым `PUT /pulls/{n}/merge` с пином головы `sha=` (не `gh pr merge` — решение дизайна 2026-08-30 §8: тот при `BLOCKED` отказывает сам, не проверив bypass актора); `--expect-head`/`--expect-base` — пины вызывающего, база без `--expect-base` НЕ проверяется и об этом говорится вслух; стратегии — закрытый allowlist `--squash\|--merge\|--rebase` (+`--delete-branch`), свободного passthrough нет. Формы веток одобрения читаются из `contracts/approval-branches/v1/patterns.env` — того же файла, из которого их строит `governance/approval_branches.py` |
 | `review-pr.sh` | терминальный прогон ревью PR через review-kit целевого репо + публикация вердикта как PR review от ai-prosto (профиль `~/.config/review`); харнесс ревьюера настраиваем: `--harness claude\|codex` / env / `~/.config/ai-prosto/harness.env` (свойство машины/подписки, вшитый дефолт codex; claude — через `scripts/harness/claude-review`, судьба переходника — steward#147); `--dry-run` — показать, не постить; opt-in `--dry-run --write-verdict <file>` → `--use-verdict <file>` переносит тот же проверенный результат без второго вызова ревьюера только при точных `head + fp`. Литерал маркера `codex-terminal-review` — имя протокола, НЕ бинаря: не переименовывать |
 | `.claude/skills/fleet-check` | скилл периодической проверки флота |
 | `skills/spec-bridge` | скилл: находка/кластер → tasks.md-спека PR-ом в репо-владелец |
@@ -105,12 +106,18 @@ PF-BLOCKER-STALE по этому репо = «ожидание доставле�
   только по явной просьбе владельца. SSOT: `../prograph-vault/authored/rules/git-workflow.md`.
 - **Мерж — агент по умолчанию** (ADR-ECO-011 «DarkFactory», 2026-08-30): при
   approve от ревью-контура и зелёных обязательных проверках агент мержит сам и
-  выполняет хвост чистки. Мерж — **только от профиля ai-prosto**:
-  `GH_CONFIG_DIR=~/.config/review gh pr merge`, и перед ним сверить логин
-  (`GH_CONFIG_DIR=~/.config/review gh api user --jq .login` → `ai-prosto`). Голый
-  `gh pr merge` уйдёт от основного аккаунта и запишет агентский мерж человеческим,
-  обнулив `merged_by` — наблюдаемый различитель agent/human
-  (аудит `gh pr list --json mergedBy`). Request-changes или неприбывшее ревью = `unknown` ⇒
+  выполняет хвост чистки. Агентский мерж выполняется **только через
+  `sh merge-pr.sh <repo> <pr>`**; любой прямой вызов мержа (`gh pr merge`,
+  `gh api -X PUT …/merge`) для агента запрещён. Живых путей ровно три, и все
+  три ведут сюда: руки оператора, `make accept-pr` и S7 раннера — последние
+  два через `Ops.merge`, который вызывает эту же обвязку. Она сверяет логин
+  профиля (`~/.config/review` → `ai-prosto`), отказывает на PR, которые обязан
+  мержить человек (candidate/finalize-ветки §I12, лейбл `human-merge-required`),
+  мержит с пином проверенной головы (`sha=`) и, если вызывающий передал
+  `--expect-base`, с пином базы вердикта. Мерж от основного аккаунта записал бы
+  агентский мерж человеческим, обнулив `merged_by` — наблюдаемый различитель
+  agent/human (аудит `gh pr list --json mergedBy`), а гварды обошёл бы целиком.
+  Request-changes или неприбывшее ревью = `unknown` ⇒
   мерж не выполняется, PR остаётся человеку. Человеческий мерж — opt-in: строка
   `Мерж: человек` в этой секции (здесь НЕ объявлена) либо `merge_policy`
   экосистемного конфига. Объявление прогона (`merge_authority: human`,

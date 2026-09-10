@@ -46,33 +46,55 @@ def _install_fake_run(monkeypatch, *, returncode=0, stdout="", stderr=""):
 # --- Кейс 1: merge -----------------------------------------------------
 
 
-def test_merge_command_and_env_rc0_true(monkeypatch):
+def test_merge_goes_through_the_wrapper_not_gh(monkeypatch):
+    """Единственный путь агентского мержа — merge-pr.sh, а не голый gh.
+
+    Прямой `gh api -X PUT …/merge` ходил бы мимо гвардов обвязки, и
+    утверждение CLAUDE.md было бы ложным на два живых вызова (accept-pr и
+    S7 раннера).
+    """
     calls = _install_fake_run(monkeypatch, returncode=0)
     ops = RealOps()
 
-    result = ops.merge(REPO_SLUG, 42, "deadbeef")
+    result = ops.merge("devtools", 42, "deadbeef")
 
-    assert result is True
+    # Успех — код 0. Возврат стал КОДОМ (ревью #183, круг 7): `accept-pr`
+    # обязан отличать отказ гварда (3) от отказа форджи (4), а bool это
+    # различие схлопывал.
+    assert result == 0
     assert len(calls) == 1
     call = calls[0]
     assert call.argv == [
-        "gh", "api", "-X", "PUT",
-        f"repos/{REPO_SLUG}/pulls/42/merge",
-        "-f", "merge_method=merge",
-        "-f", "sha=deadbeef",
+        "sh", str(ops_mod.DEVTOOLS_ROOT / "merge-pr.sh"), "devtools", "42",
+        "--merge", "--expect-head", "deadbeef",
     ]
-    assert call.kwargs["env"]["GH_CONFIG_DIR"] == str(
-        Path.home() / ".config" / "review"
-    )
+    assert call.kwargs["cwd"] == ops_mod.DEVTOOLS_ROOT
+    assert "gh" not in call.argv
 
 
-def test_merge_rc_nonzero_returns_false_not_exception(monkeypatch):
-    _install_fake_run(monkeypatch, returncode=1)
+def test_merge_passes_base_pin_when_caller_knows_it(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0)
     ops = RealOps()
 
-    result = ops.merge(REPO_SLUG, 42, "deadbeef")
+    ops.merge("devtools", 42, "deadbeef", "cafebabe")
 
-    assert result is False
+    assert calls[0].argv[-2:] == ["--expect-base", "cafebabe"]
+
+
+@pytest.mark.parametrize("rc", [2, 3, 4])
+def test_merge_returns_the_code_and_never_raises(monkeypatch, rc):
+    """Отказ возвращается ЗНАЧЕНИЕМ, и значение — код, а не bool.
+
+    Не бросать — свойство прежнее. Новое — что код доходит до вызывающего:
+    3 («гвард: PR остаётся человеку») и 4 («форджа отклонила») требуют от
+    `accept-pr` разной диагностики, а bool делал их неразличимыми.
+    """
+    _install_fake_run(monkeypatch, returncode=rc)
+    ops = RealOps()
+
+    result = ops.merge("devtools", 42, "deadbeef")
+
+    assert result == rc
 
 
 # --- Кейс 2: review ------------------------------------------------------
@@ -647,21 +669,77 @@ def test_materialize_pr_head_switch_failure_raises(monkeypatch):
         ops.materialize_pr_head("/tmp/kapelle", 59, "cafe" * 10)
 
 
+def test_pr_facts_requests_base_ref_oid(monkeypatch):
+    """`baseRefOid` в запросе обязателен: без него движение базы не увидеть.
+
+    На нём стоит диагностика отказа приёмки — «база уехала с X на Y»
+    (ревью #183, круг 5). Поле спрашивается в ЭТОМ запросе, потому что
+    второй запрос ради одного поля был бы вторым источником того же факта.
+    """
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="{}")
+    RealOps().pr_facts(REPO_SLUG, 42)
+    argv = calls[0].argv
+    assert argv[:6] == ["gh", "pr", "view", "42", "-R", REPO_SLUG]
+    fields = argv[argv.index("--json") + 1].split(",")
+    for required in ("headRefOid", "baseRefOid", "baseRefName", "state"):
+        assert required in fields, f"{required} не запрошен: {fields}"
+
+
 def test_changed_paths_fetch_base_then_three_dot_diff(monkeypatch):
     calls = _install_fake_run(
         monkeypatch, returncode=0, stdout="lib/a.py\nlib/b.py\n"
     )
     ops = RealOps()
-    paths = ops.changed_paths("/tmp/kapelle", "master")
+    base, paths = ops.changed_paths("/tmp/kapelle", "master")
     assert calls[0].argv == ["git", "fetch", "origin", "master"]
     # FETCH_HEAD, не origin/master (приёмка PR #113, круг 4): fetch без
     # destination-refspec не обязан обновить remote-tracking ref, а
     # FETCH_HEAD пишется именно этим fetch — база доказуемо свежая.
-    assert calls[1].argv == [
+    # ТОТ ЖЕ ref отдаётся как OID базы (ревью #183, круг 3): пин мержа
+    # обязан назвать базу, от которой посчитан гард путей.
+    assert calls[1].argv == ["git", "rev-parse", "FETCH_HEAD"]
+    assert calls[2].argv == [
         "git", "diff", "--name-only", "FETCH_HEAD...HEAD",
     ]
     assert all(c.kwargs["cwd"] == "/tmp/kapelle" for c in calls)
     assert paths == ["lib/a.py", "lib/b.py"]
+    assert base == "lib/a.py\nlib/b.py"  # тот же стаб-stdout, обрезанный
+
+
+def test_changed_paths_base_oid_comes_from_the_diffed_ref(monkeypatch):
+    """OID базы и дифф читают ОДИН ref, а не два разных."""
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+        out = "base777\n" if argv[:2] == ["git", "rev-parse"] else "x.py\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    base, paths = RealOps().changed_paths("/tmp/kapelle", "master")
+    assert base == "base777"
+    assert paths == ["x.py"]
+    # origin/<base> не читается вовсе — это ровно тот протухающий ref.
+    assert not any("origin/master" in " ".join(a) for a in seen)
+
+
+def test_changed_paths_missing_fetch_head_raises(monkeypatch):
+    """Нет FETCH_HEAD — внятный отказ, а не молчаливая пустая база."""
+
+    def fake_run(argv, **kwargs):
+        rc = 128 if argv[:2] == ["git", "rev-parse"] else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="rev-parse FETCH_HEAD"):
+        RealOps().changed_paths("/tmp/kapelle", "master")
+
+
+def test_changed_paths_empty_fetch_head_raises(monkeypatch):
+    """Пустой stdout rev-parse при rc0 — тоже «базы нет»."""
+    _install_fake_run(monkeypatch, returncode=0, stdout="")
+    with pytest.raises(RuntimeError, match="rev-parse FETCH_HEAD"):
+        RealOps().changed_paths("/tmp/kapelle", "master")
 
 
 def test_changed_paths_fetch_failure_raises(monkeypatch):
@@ -678,7 +756,9 @@ def test_changed_paths_fetch_failure_raises(monkeypatch):
 def test_changed_paths_diff_failure_raises(monkeypatch):
     def fake_run(argv, **kwargs):
         rc = 129 if argv[:2] == ["git", "diff"] else 0
-        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+        # rev-parse обязан отдать базу, иначе упадёт он, а предмет здесь — диф.
+        out = "base777\n" if argv[:2] == ["git", "rev-parse"] else ""
+        return subprocess.CompletedProcess(argv, rc, stdout=out, stderr="boom")
 
     monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
     ops = RealOps()

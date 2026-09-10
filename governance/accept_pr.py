@@ -40,9 +40,8 @@ import subprocess
 import time
 from collections.abc import Callable
 
+from governance import authority_root
 from governance.ops import DEVTOOLS_ROOT, Ops, RealOps
-
-_AUTHORITY_PREFIXES = (".github/", "profiles/")
 # Исполняемый ревью-harness целевого репо: review-pr.sh запускает
 # scripts/review/local.sh из локального дерева, которое материализация
 # переключает на head PR (приёмка PR #113, blocker) — PR, правящий эти
@@ -53,7 +52,32 @@ _AUTHORITY_PREFIXES = (".github/", "profiles/")
 # (первая находка боевого claude-ревью, PR #121): review-pr.sh препендит
 # этот каталог в PATH сабшелла кита, и голое имя `claude-review`
 # резолвится в файл из материализованного дерева.
-_HARNESS_PREFIXES = ("scripts/review/", "scripts/harness/", "review-pr.sh")
+#
+# merge-pr.sh — ровно тот же случай и тем же путём (ревью #183, круг 3):
+# `Ops.merge` исполняет `DEVTOOLS_ROOT/merge-pr.sh`, а дерево к этому
+# моменту стоит на head PR (восстановление ветки — в `finally` ПОСЛЕ
+# мержа). PR, правящий гвард агентского мержа, заставил бы контур
+# исполнить собственную правку — гварды обходились бы содержимым
+# проверяемого патча. Инструмент безопасности обязан стоять под той же
+# защитой, что остальной харнесс.
+#
+# contracts/approval-branches/ — не исполняемое, но ЧИТАЕМОЕ обвязкой из
+# того же дерева: merge-pr.sh берёт шаблон имён из
+# `$script_dir/contracts/approval-branches/v1/patterns.env`. Подменённый
+# шаблон меняет глоб, и гвард перестаёт ловить нужные ветки, не исполнив
+# ни строчки чужого кода. Для гварда «прочитано из PR» опаснее, чем
+# «исполнено»: тише.
+_HARNESS_PREFIXES = (
+    "scripts/review/",
+    "scripts/harness/",
+    "review-pr.sh",
+    "merge-pr.sh",
+    "contracts/approval-branches/",
+    # Перечень authority-root путей обвязка тоже читает из дерева.
+    # Он и сам authority-root (см. SSOT-файл), но защиты разные по стадии:
+    # здесь PR не доходит даже до ревью, там — до мержа.
+    "contracts/authority-root/",
+)
 _PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED", ""}
 _GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 
@@ -167,7 +191,13 @@ def _accept_on_head(
     # на момент запроса и НЕ привязан к head0 (TOCTOU при force-push
     # между запросами) — изменённые пути считаются локально по
     # переключённому дереву: git diff origin/<base>...HEAD.
-    changed = ops.changed_paths(target_dir, base_branch)
+    # База вердикта приходит ОТТУДА ЖЕ, откуда список путей: тот же fetch,
+    # тот же FETCH_HEAD (ревью #183, круг 3). Прежняя редакция брала её
+    # отдельным `rev-parse origin/<base>` — а это другой ref, ровно тот
+    # протухающий, из-за которого гард путей и перешёл на FETCH_HEAD
+    # (приёмка PR #113, круг 4). Пин мержа обязан называть ту базу, от
+    # которой посчитан гард, иначе «пин базы вердикта» — фикция.
+    base0, changed = ops.changed_paths(target_dir, base_branch)
     harness = [
         f for f in changed
         if any(f.startswith(p) for p in _HARNESS_PREFIXES)
@@ -179,10 +209,10 @@ def _accept_on_head(
             "только человеком"
         )
         return 1
-    authority = [
-        f for f in changed
-        if any(f.startswith(p) for p in _AUTHORITY_PREFIXES)
-    ]
+    # Перечень — из SSOT `contracts/authority-root/v1/paths.env`, того же
+    # файла, что читают runner и merge-pr.sh (ревью #183, круг 4): свой
+    # кортеж здесь был одним из ДВУХ питоновских списков, живших порознь.
+    authority = authority_root.touched(changed)
     if authority:
         print(
             "accept-pr: дифф трогает authority-root пути "
@@ -246,8 +276,54 @@ def _accept_on_head(
         )
         return 1
     head = head0
-    if not ops.merge(repo_slug, pr, head):
-        print("accept-pr: мерж не прошёл (гонка head / правило репо) — стоп")
+    # Пин базы по OID, а не по имени (ревью PR #183, major): сверка
+    # `baseRefName` выше ловит РЕТАРГЕТ, но не движение самой базы —
+    # `origin/master` мог уехать вперёд между вердиктом и мержем, и агент
+    # влил бы код в базу, которой ревьюер не видел. `base0` снят там же,
+    # где считался гард путей (`git diff origin/<base>...HEAD`), то есть это
+    # ровно та база, от которой вынесен вердикт.
+    merge_code = ops.merge(repo, pr, head, base0)
+    if merge_code != 0:
+        # Причину уже назвал merge-pr.sh — его stderr идёт оператору
+        # напрямую. Здесь добавляется то, чего обвязка знать не может:
+        # ПРОЦЕДУРА и её цена (ревью #183, круг 5). Прежняя строка «гонка
+        # head/base / правило репо» была догадкой сразу обо всём и не
+        # говорила, что делать.
+        #
+        # Единственный лишний запрос — на пути отказа: сверить, уехала ли
+        # база. Гонки в нём нет, потому что по нему ничего не решается —
+        # только объясняется уже случившийся отказ.
+        # Диагноз про базу — ТОЛЬКО на коде 5 («пин разошёлся»). У гварда
+        # (3) повтор упрётся в тот же запрет, у форджи (4) причина своя:
+        # объявлять там «база уехала» значит увести оператора чинить не то.
+        after = ops.pr_facts(repo_slug, pr) if merge_code == 5 else {}
+        base_now = after.get("baseRefOid")
+        head_now = after.get("headRefOid")
+        if head_now and head_now != head:
+            # Код 5 общий для обоих пинов, а процедуры разные: у головы
+            # заново нужны и чеки. Сказать здесь «голова не менялась» (текст
+            # ветки базы) значило бы соврать ровно о том, что разошлось.
+            print(
+                "accept-pr: голова уехала за время приёмки — вердикт вынесен "
+                f"по {head[:7]}, сейчас {head_now[:7]}. Повторите "
+                f"`make accept-pr ARGS='--repo {repo} --pr {pr}'`: ревью и "
+                "чеки пройдут заново — проверять надо новый код."
+            )
+        elif base_now and base_now != base0:
+            print(
+                "accept-pr: база уехала за время приёмки — вердикт вынесен "
+                f"от {base0[:7]}, сейчас {base_now[:7]}. Повторите "
+                f"`make accept-pr ARGS='--repo {repo} --pr {pr}'`: ревью "
+                "пройдёт заново по НОВОЙ базе (диапазон изменился — вердикт "
+                "обязан относиться к нему), а чеки заново не ждутся — "
+                "голова не менялась."
+            )
+        else:
+            print(
+                "accept-pr: мерж не выполнен — причина названа merge-pr.sh "
+                "выше (гвард обвязки либо правило репо); база при этом не "
+                "двигалась. Стоп."
+            )
         return 1
     print(
         f"accept-pr: {repo_slug}#{pr} смержен (head {head[:7]}). "

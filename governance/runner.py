@@ -24,7 +24,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from governance import acceptance_guard, decomposition_guard, design_guard
+from governance import (
+    acceptance_guard,
+    authority_root,
+    decomposition_guard,
+    design_guard,
+)
 from governance.merge_gate import PrFacts, decide
 from governance.stale_adapter import blob_sha1
 from governance.ops import Ops, RealOps
@@ -619,9 +624,10 @@ def facts_from(
         if files and all(f.startswith(prefix) or f.startswith("docs/") for f in files)
         else "code"
     )
-    touches_authority_root = any(
-        f.startswith(".github/") or f.startswith("profiles/") for f in files
-    )
+    # Перечень — из SSOT `contracts/authority-root/v1/paths.env` (ревью
+    # #183, круг 4): литерал здесь был вторым определением того же списка,
+    # и разойтись с accept_pr он мог молча.
+    touches_authority_root = bool(authority_root.touched(files))
     return PrFacts(
         checks_rollup=checks_rollup,
         mergeable=mergeable,
@@ -1401,7 +1407,10 @@ def _step_merge(state: RunState, ops: Ops) -> bool:
         if pr_facts_now.get("state") == "MERGED":
             op_complete(state, key, merged=True)
             return True
-    merged = ops.merge(state.repo_slug, state.pr, state.head)
+    # Имя КАТАЛОГА репо, не slug: мерж идёт через `merge-pr.sh` (единственный
+    # путь агентского мержа), а обвязка адресуется каталогом во флоте и
+    # выводит slug из его сырого origin — так же, как `ops.review` выше.
+    merged = ops.merge(state.repo, state.pr, state.head) == 0
     if merged:
         op_complete(state, key, merged=True)
         return True

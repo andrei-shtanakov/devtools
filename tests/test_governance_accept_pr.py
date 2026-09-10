@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 from governance import accept_pr
 
 
@@ -14,10 +16,16 @@ class _Ops:
     facts_seq: list[dict] = field(default_factory=list)
     files: list[str] = field(default_factory=lambda: ["lib/x.ex"])
     merge_ok: bool = True
+    # Код отказа обвязки: 3 — гвард, 4 — форджа, 5 — пин разошёлся.
+    merge_code: int = 5
     dirty: bool = False
     branch: str | None = "master"
     materialize_error: str | None = None
+    #: OID базы вердикта — приходит ИЗ `changed_paths`, тем же fetch'ем,
+    #: что и список путей (ревью #183, круг 3).
+    base_oid: str = "base000"
     calls: list[tuple] = field(default_factory=list)
+    merge_args: tuple | None = None
 
     def is_dirty(self, target_dir: str) -> bool:
         self.calls.append(("is_dirty",))
@@ -35,9 +43,11 @@ class _Ops:
     def ensure_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("restore", branch))
 
-    def changed_paths(self, target_dir: str, base_branch: str) -> list[str]:
+    def changed_paths(
+        self, target_dir: str, base_branch: str
+    ) -> tuple[str, list[str]]:
         self.calls.append(("changed_paths", base_branch))
-        return self.files
+        return (self.base_oid, self.files)
 
     def review(self, repo: str, pr: int) -> int:
         self.calls.append(("review", repo, pr))
@@ -52,9 +62,12 @@ class _Ops:
         self.calls.append(("pr_files",))
         return self.files
 
-    def merge(self, repo_slug: str, pr: int, sha: str) -> bool:
+    def merge(
+        self, repo_name: str, pr: int, sha: str, base: str | None = None
+    ) -> int:
         self.calls.append(("merge", pr, sha))
-        return self.merge_ok
+        self.merge_args = (repo_name, pr, sha, base)
+        return 0 if self.merge_ok else self.merge_code
 
 
 def _facts(**over: Any) -> dict:
@@ -63,6 +76,8 @@ def _facts(**over: Any) -> dict:
         "mergeable": "MERGEABLE",
         "headRefOid": "cafe" * 10,
         "baseRefName": "master",
+        # Та же база, что отдаёт `changed_paths` фейка: «не двигалась».
+        "baseRefOid": "base000",
     }
     base.update(over)
     return base
@@ -81,6 +96,118 @@ def test_green_path_merges_and_hints_sync(capsys) -> None:
     assert ("merge", 59, "cafe" * 10) in ops.calls
     out = capsys.readouterr().out
     assert "spec-runner sync" in out
+
+
+def test_merge_is_pinned_to_the_base_the_verdict_came_from() -> None:
+    """Мерж пинуется базой ВЕРДИКТА, а не только именем base-ветки.
+
+    `baseRefName` ловит ретаргет, но не движение самой базы: `origin/master`
+    остаётся собой, уехав вперёд, и агент влил бы код в базу, которой
+    ревьюер не видел. Пин — OID, снятый там же, где считался гард путей.
+    """
+    ops = _Ops(facts_seq=[_facts()], base_oid="base777")
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 0
+    assert ops.merge_args == ("kapelle", 59, "cafe" * 10, "base777")
+    # Мерж адресован каталогом репо во флоте, а не слагом: обвязка
+    # `merge-pr.sh` ищет чекаут и выводит slug из его сырого origin сама.
+    assert ops.merge_args[0] == "kapelle"
+    # База взята из `changed_paths`, а не отдельным чтением ref'а: второго
+    # источника базы в контуре нет вовсе.
+    assert not any(c[0] == "rev_parse" for c in ops.calls)
+
+
+def test_unknown_base_oid_stops_without_merge(capsys) -> None:
+    """База вердикта не определилась — fail-closed, мержа нет.
+
+    Теперь это ответственность `changed_paths`: нет FETCH_HEAD — RuntimeError,
+    и контур встаёт до ревью и до мержа, а не мержит с пустым пином.
+    """
+
+    class _NoBaseOps(_Ops):
+        def changed_paths(
+            self, target_dir: str, base_branch: str
+        ) -> tuple[str, list[str]]:
+            raise RuntimeError("rev-parse FETCH_HEAD rc=128")
+
+    ops = _NoBaseOps(facts_seq=[_facts()])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert not any(c[0] == "merge" for c in ops.calls)
+    assert "FETCH_HEAD" in capsys.readouterr().out
+
+
+def test_moved_base_names_both_shas_and_the_procedure(capsys) -> None:
+    """Отказ обязан говорить, ЧТО случилось и ЧТО делать (ревью #183, круг 5).
+
+    Прежняя строка «гонка head/base / правило репо» была догадкой сразу обо
+    всём: оператор видел её и не знал, повторять ли, и во что это встанет.
+    """
+    moved = _facts(baseRefOid="base999")
+    ops = _Ops(
+        facts_seq=[moved], merge_ok=False, merge_code=5, base_oid="base000",
+    )
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "база уехала" in out
+    # Названы обе базы — от какой вынесен вердикт и какая сейчас.
+    assert "base000"[:7] in out and "base999"[:7] in out
+    # Названа процедура и её цена.
+    assert "make accept-pr" in out
+    assert "ревью пройдёт заново" in out
+    assert "чеки заново не ждутся" in out
+
+
+def test_guard_refusal_is_not_reported_as_a_moved_base(capsys) -> None:
+    """Отказ ГВАРДА (код 3) не объявляется движением базы (ревью #183, круг 7).
+
+    База могла уехать за время приёмки — и при отказе гварда это правда, но
+    не причина: повтор упрётся в тот же гвард, и так каждый раз, пока
+    оператор не заметит настоящий stderr обвязки выше. Различить нечем было
+    потому, что `Ops.merge` схлопывал коды 2/3/4 в bool; теперь возвращается
+    код, и диагноз про базу выбирается ТОЛЬКО на отказе форджи (4).
+    """
+    moved = _facts(baseRefOid="base999")
+    ops = _Ops(
+        facts_seq=[moved], merge_ok=False, merge_code=3, base_oid="base000",
+    )
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "база уехала" not in out
+    # И лишнего запроса за фактами ПОСЛЕ мержа тоже нет: решать по ним
+    # нечего, а гонку они бы только расширили. (В начале приёмки
+    # `pr_facts` зовётся законно — проверяется хвост, а не весь журнал.)
+    tail = ops.calls[next(
+        i for i, c in enumerate(ops.calls) if c[0] == "merge"
+    ):]
+    assert not [c for c in tail if c[0] == "pr_facts"], tail
+
+
+def test_merge_failure_without_base_move_does_not_blame_the_base(
+    capsys,
+) -> None:
+    """Не догадываться: база не двигалась — так и сказать, причина выше."""
+    ops = _Ops(
+        facts_seq=[_facts()], merge_ok=False, merge_code=5,
+        base_oid="base000",
+    )
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "база уехала" not in out
+    assert "причина названа merge-pr.sh" in out
 
 
 def test_review_findings_stop_without_merge(capsys) -> None:
@@ -162,6 +289,34 @@ def test_review_harness_paths_stop_before_review(capsys) -> None:
     assert "harness" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        # Сам гвард агентского мержа: `Ops.merge` исполняет
+        # DEVTOOLS_ROOT/merge-pr.sh, а дерево к тому моменту стоит на head
+        # PR (restore — в `finally`, ПОСЛЕ мержа). PR, правящий гвард,
+        # заставил бы контур исполнить собственную правку.
+        "merge-pr.sh",
+        # Не исполняемое, но читаемое обвязкой из того же дерева: шаблон
+        # имён approval-веток. Подменённый шаблон меняет глоб, и гвард
+        # перестаёт ловить нужные ветки, не исполнив ни строчки чужого кода.
+        "contracts/approval-branches/v1/patterns.env",
+    ],
+)
+def test_merge_harness_paths_stop_before_review(capsys, path: str) -> None:
+    """Ревью #183 (блокер, круг 3): инструмент безопасности обязан стоять
+    под той же защитой, что остальной харнесс — версия из дерева PR не
+    исполняется и не читается, потому что до неё дело не доходит."""
+    ops = _Ops(facts_seq=[_facts()], files=["lib/x.ex", path])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert not any(c[0] in ("merge", "review") for c in ops.calls)
+    assert ("restore", "master") in ops.calls
+    assert "harness" in capsys.readouterr().out
+
+
 def test_missing_base_branch_stops_before_materialize(capsys) -> None:
     """Без baseRefName гард путей не к чему привязать — fail-closed стоп."""
     facts = _facts()
@@ -183,7 +338,7 @@ def test_changed_paths_failure_stops_and_restores(capsys) -> None:
     class _FailingDiffOps(_Ops):
         def changed_paths(
             self, target_dir: str, base_branch: str
-        ) -> list[str]:
+        ) -> tuple[str, list[str]]:
             raise RuntimeError("diff rc=128")
 
     ops = _FailingDiffOps(facts_seq=[_facts()])
@@ -206,12 +361,14 @@ def test_conflicting_pr_stops() -> None:
 
 
 def test_merge_refusal_is_reported(capsys) -> None:
+    """Отказ мержа доходит до оператора и валит приёмку — какой бы ни была
+    причина; конкретика по причинам — в двух тестах выше."""
     ops = _Ops(facts_seq=[_facts()], merge_ok=False)
     rc = accept_pr.accept(
         "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
     )
     assert rc == 1
-    assert "мерж не прошёл" in capsys.readouterr().out
+    assert "мерж не выполнен" in capsys.readouterr().out
 
 
 def test_empty_rollup_is_pending_not_green() -> None:
