@@ -298,7 +298,18 @@ def _accept_on_head(
         # объявлять там «база уехала» значит увести оператора чинить не то.
         after = ops.pr_facts(repo_slug, pr) if merge_code == 5 else {}
         base_now = after.get("baseRefOid")
-        if base_now and base_now != base0:
+        head_now = after.get("headRefOid")
+        if head_now and head_now != head:
+            # Код 5 общий для обоих пинов, а процедуры разные: у головы
+            # заново нужны и чеки. Сказать здесь «голова не менялась» (текст
+            # ветки базы) значило бы соврать ровно о том, что разошлось.
+            print(
+                "accept-pr: голова уехала за время приёмки — вердикт вынесен "
+                f"по {head[:7]}, сейчас {head_now[:7]}. Повторите "
+                f"`make accept-pr ARGS='--repo {repo} --pr {pr}'`: ревью и "
+                "чеки пройдут заново — проверять надо новый код."
+            )
+        elif base_now and base_now != base0:
             print(
                 "accept-pr: база уехала за время приёмки — вердикт вынесен "
                 f"от {base0[:7]}, сейчас {base_now[:7]}. Повторите "

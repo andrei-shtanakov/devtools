@@ -859,9 +859,20 @@ def test_shell_reads_authority_ssot_and_hardcodes_nothing() -> None:
     assert "contracts/authority-root/v1/paths.env" in text
     # Ни один защищённый путь не записан в скрипте литералом — иначе это
     # снова второе определение, теперь через язык.
-    for prefix in authority_root.prefixes():
-        if prefix == "contracts/authority-root/":
-            continue  # путь САМОГО SSOT-файла в скрипте, разумеется, есть
+    # Законно упоминаются только собственные входы обвязки: два SSOT,
+    # которые она читает, и её собственное имя. Всё остальное в тексте
+    # означало бы второе определение перечня — теперь ещё и через язык.
+    own = {
+        "contracts/authority-root/",   # SSOT, который скрипт читает
+        "contracts/approval-branches/",  # SSOT имён, который он читает
+        "merge-pr.sh",                 # он сам: usage, шапка, диагностика
+    }
+    checked = [p for p in authority_root.prefixes() if p not in own]
+    assert checked, (
+        "все защищённые пути попали в исключения — тест перестал "
+        "проверять что-либо; проверьте перечень"
+    )
+    for prefix in checked:
         assert prefix not in text, f"литерал {prefix!r} в merge-pr.sh"
 
 
@@ -971,3 +982,21 @@ def test_labels_are_read_without_the_optional_operator(
     assert (done.returncode == 0) is expect_rc_zero, (
         f"{why}: rc={done.returncode}, stderr={done.stderr.strip()}"
     )
+
+
+def test_guard_inputs_are_authority_root() -> None:
+    """Входы гвардов мержит человек — иначе агент их сам и снимет.
+
+    Гварды 1–2 решают по имени ветки, а имя выводится из шаблона
+    `contracts/approval-branches/`; сам отбой живёт в `merge-pr.sh`. PR,
+    меняющий любой из двух, обезоруживает обвязку — и, пройди он агентским
+    мержем, следующий агентский мерж прошёл бы уже без гварда.
+
+    `_HARNESS_PREFIXES` это НЕ закрывает: он велит исполнять доверенную
+    версию при приёмке, а не отдавать человеку PR, который её меняет.
+    """
+    prefixes = set(authority_root.prefixes())
+    assert "merge-pr.sh" in prefixes
+    assert "contracts/approval-branches/" in prefixes
+    # И сам перечень — тоже: иначе агент вынес бы путь из-под защиты.
+    assert "contracts/authority-root/" in prefixes
