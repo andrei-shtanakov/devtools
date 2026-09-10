@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 from governance import accept_pr
 
 
@@ -17,15 +19,11 @@ class _Ops:
     dirty: bool = False
     branch: str | None = "master"
     materialize_error: str | None = None
-    #: OID базы, от которой посчитан гард путей и вынесен вердикт;
-    #: None — «не смогли определить» (мерж тогда обязан стоять).
-    base_oid: str | None = "base000"
+    #: OID базы вердикта — приходит ИЗ `changed_paths`, тем же fetch'ем,
+    #: что и список путей (ревью #183, круг 3).
+    base_oid: str = "base000"
     calls: list[tuple] = field(default_factory=list)
     merge_args: tuple | None = None
-
-    def rev_parse(self, target_dir: str, ref: str) -> str | None:
-        self.calls.append(("rev_parse", ref))
-        return self.base_oid
 
     def is_dirty(self, target_dir: str) -> bool:
         self.calls.append(("is_dirty",))
@@ -43,9 +41,11 @@ class _Ops:
     def ensure_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("restore", branch))
 
-    def changed_paths(self, target_dir: str, base_branch: str) -> list[str]:
+    def changed_paths(
+        self, target_dir: str, base_branch: str
+    ) -> tuple[str, list[str]]:
         self.calls.append(("changed_paths", base_branch))
-        return self.files
+        return (self.base_oid, self.files)
 
     def review(self, repo: str, pr: int) -> int:
         self.calls.append(("review", repo, pr))
@@ -110,18 +110,31 @@ def test_merge_is_pinned_to_the_base_the_verdict_came_from() -> None:
     # Мерж адресован каталогом репо во флоте, а не слагом: обвязка
     # `merge-pr.sh` ищет чекаут и выводит slug из его сырого origin сама.
     assert ops.merge_args[0] == "kapelle"
-    assert ("rev_parse", "origin/master") in ops.calls
+    # База взята из `changed_paths`, а не отдельным чтением ref'а: второго
+    # источника базы в контуре нет вовсе.
+    assert not any(c[0] == "rev_parse" for c in ops.calls)
 
 
 def test_unknown_base_oid_stops_without_merge(capsys) -> None:
-    """База вердикта не определилась — fail-closed, мержа нет."""
-    ops = _Ops(facts_seq=[_facts()], base_oid=None)
+    """База вердикта не определилась — fail-closed, мержа нет.
+
+    Теперь это ответственность `changed_paths`: нет FETCH_HEAD — RuntimeError,
+    и контур встаёт до ревью и до мержа, а не мержит с пустым пином.
+    """
+
+    class _NoBaseOps(_Ops):
+        def changed_paths(
+            self, target_dir: str, base_branch: str
+        ) -> tuple[str, list[str]]:
+            raise RuntimeError("rev-parse FETCH_HEAD rc=128")
+
+    ops = _NoBaseOps(facts_seq=[_facts()])
     rc = accept_pr.accept(
         "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
     )
     assert rc == 1
     assert not any(c[0] == "merge" for c in ops.calls)
-    assert "OID базы" in capsys.readouterr().out
+    assert "FETCH_HEAD" in capsys.readouterr().out
 
 
 def test_review_findings_stop_without_merge(capsys) -> None:
@@ -203,6 +216,34 @@ def test_review_harness_paths_stop_before_review(capsys) -> None:
     assert "harness" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        # Сам гвард агентского мержа: `Ops.merge` исполняет
+        # DEVTOOLS_ROOT/merge-pr.sh, а дерево к тому моменту стоит на head
+        # PR (restore — в `finally`, ПОСЛЕ мержа). PR, правящий гвард,
+        # заставил бы контур исполнить собственную правку.
+        "merge-pr.sh",
+        # Не исполняемое, но читаемое обвязкой из того же дерева: шаблон
+        # имён approval-веток. Подменённый шаблон меняет глоб, и гвард
+        # перестаёт ловить нужные ветки, не исполнив ни строчки чужого кода.
+        "contracts/approval-branches/v1/patterns.env",
+    ],
+)
+def test_merge_harness_paths_stop_before_review(capsys, path: str) -> None:
+    """Ревью #183 (блокер, круг 3): инструмент безопасности обязан стоять
+    под той же защитой, что остальной харнесс — версия из дерева PR не
+    исполняется и не читается, потому что до неё дело не доходит."""
+    ops = _Ops(facts_seq=[_facts()], files=["lib/x.ex", path])
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    assert not any(c[0] in ("merge", "review") for c in ops.calls)
+    assert ("restore", "master") in ops.calls
+    assert "harness" in capsys.readouterr().out
+
+
 def test_missing_base_branch_stops_before_materialize(capsys) -> None:
     """Без baseRefName гард путей не к чему привязать — fail-closed стоп."""
     facts = _facts()
@@ -224,7 +265,7 @@ def test_changed_paths_failure_stops_and_restores(capsys) -> None:
     class _FailingDiffOps(_Ops):
         def changed_paths(
             self, target_dir: str, base_branch: str
-        ) -> list[str]:
+        ) -> tuple[str, list[str]]:
             raise RuntimeError("diff rc=128")
 
     ops = _FailingDiffOps(facts_seq=[_facts()])

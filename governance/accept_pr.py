@@ -53,7 +53,28 @@ _AUTHORITY_PREFIXES = (".github/", "profiles/")
 # (первая находка боевого claude-ревью, PR #121): review-pr.sh препендит
 # этот каталог в PATH сабшелла кита, и голое имя `claude-review`
 # резолвится в файл из материализованного дерева.
-_HARNESS_PREFIXES = ("scripts/review/", "scripts/harness/", "review-pr.sh")
+#
+# merge-pr.sh — ровно тот же случай и тем же путём (ревью #183, круг 3):
+# `Ops.merge` исполняет `DEVTOOLS_ROOT/merge-pr.sh`, а дерево к этому
+# моменту стоит на head PR (восстановление ветки — в `finally` ПОСЛЕ
+# мержа). PR, правящий гвард агентского мержа, заставил бы контур
+# исполнить собственную правку — гварды обходились бы содержимым
+# проверяемого патча. Инструмент безопасности обязан стоять под той же
+# защитой, что остальной харнесс.
+#
+# contracts/approval-branches/ — не исполняемое, но ЧИТАЕМОЕ обвязкой из
+# того же дерева: merge-pr.sh берёт шаблон имён из
+# `$script_dir/contracts/approval-branches/v1/patterns.env`. Подменённый
+# шаблон меняет глоб, и гвард перестаёт ловить нужные ветки, не исполнив
+# ни строчки чужого кода. Для гварда «прочитано из PR» опаснее, чем
+# «исполнено»: тише.
+_HARNESS_PREFIXES = (
+    "scripts/review/",
+    "scripts/harness/",
+    "review-pr.sh",
+    "merge-pr.sh",
+    "contracts/approval-branches/",
+)
 _PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED", ""}
 _GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 
@@ -167,19 +188,13 @@ def _accept_on_head(
     # на момент запроса и НЕ привязан к head0 (TOCTOU при force-push
     # между запросами) — изменённые пути считаются локально по
     # переключённому дереву: git diff origin/<base>...HEAD.
-    changed = ops.changed_paths(target_dir, base_branch)
-    # База вердикта фиксируется ЗДЕСЬ, вместе с гардом путей: `changed`
-    # посчитан относительно `origin/<base_branch>`, и ревью ниже смотрит на
-    # тот же диапазон. Этот OID — и есть «база, от которой вынесен вердикт»;
-    # он уходит в пин мержа. Имя базы стерегут отдельно (ретаргет), но имя —
-    # адрес, а не идентичность: `origin/master` остаётся собой, уехав вперёд.
-    base0 = ops.rev_parse(target_dir, f"origin/{base_branch}")
-    if not base0:
-        print(
-            f"accept-pr: не удалось определить OID базы origin/{base_branch}"
-            " — мерж пинуется базой вердикта, без неё стоп"
-        )
-        return 1
+    # База вердикта приходит ОТТУДА ЖЕ, откуда список путей: тот же fetch,
+    # тот же FETCH_HEAD (ревью #183, круг 3). Прежняя редакция брала её
+    # отдельным `rev-parse origin/<base>` — а это другой ref, ровно тот
+    # протухающий, из-за которого гард путей и перешёл на FETCH_HEAD
+    # (приёмка PR #113, круг 4). Пин мержа обязан называть ту базу, от
+    # которой посчитан гард, иначе «пин базы вердикта» — фикция.
+    base0, changed = ops.changed_paths(target_dir, base_branch)
     harness = [
         f for f in changed
         if any(f.startswith(p) for p in _HARNESS_PREFIXES)
