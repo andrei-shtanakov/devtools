@@ -259,6 +259,8 @@ def _propose(
     wave = _wave_for(state, nodes, fingerprint)
 
     joined = al.live_request_for_step(state, wave, step)
+    if joined is not None and not _still_accumulating(state, ops, joined[1]):
+        joined = None
     if joined is not None:
         nums, op = joined
         key = al.request_key(*nums)
@@ -488,6 +490,38 @@ def _wave_for(
     fresh = al.next_wave(state)
     al.open_wave_record(state, fresh, nodes, fingerprint)
     return fresh
+
+
+def _still_accumulating(state: RunState, ops: Ops, op: dict) -> bool:
+    """Можно ли ДОПИСАТЬ узел в эту заявку — по факту форджи, не по леджеру.
+
+    Леджер отвечает «шаг ещё не сделан», а вопрос здесь другой: открыт ли
+    candidate-PR ПРЯМО СЕЙЧАС. Величины расходятся штатно — человек мержит
+    PR, а фактов мержа в записи ещё нет, — и на этом расхождении
+    присоединение стоило человеческого акта: коммит уходил в ветку уже
+    вмерженного PR, второго PR не создавалось (номер записан), в base узел
+    не попадал никогда, а следующий вызов хоронил ВСЮ заявку с причиной
+    «тело узла правили после мержа» — правки, которой не было.
+
+    Поэтому:
+
+    - `candidate_pr` пуст — публикации ещё не было, ветка наша, дописывать
+      можно;
+    - PR ОТКРЫТ — можно: ровно это и есть накопление вызовов шага в одной
+      ветке;
+    - PR ВМЕРЖЕН либо ЗАКРЫТ — нельзя: ветка отдана человеку, и вызов
+      обязан завести новую заявку того же шага со следующим `A`
+      (докстринг `live_request_for_step` говорил это с самого начала, а
+      код не делал);
+    - состояние не установлено — отказ БЕЗ записей. Присоединиться вслепую
+      значит рискнуть человеческим актом, а завести новую заявку вслепую —
+      опубликовать второе mergeable предложение рядом с неизвестным
+      первым. Обе цены выше цены повтора.
+    """
+    pr = op.get("candidate_pr")
+    if pr is None:
+        return True
+    return _disposition(_pr_facts(state, ops, pr), pr) is Disposition.OPEN
 
 
 def _require_upstream_ready(
@@ -954,12 +988,46 @@ def _reconcile_candidate(
     """
     pr = op["candidate_pr"]
     facts = _pr_facts(state, ops, pr)
+    published = facts.get("headRefOid") == op["head_sha"]
     if _disposition(facts, pr) is Disposition.OPEN:
+        if not published:
+            # Работа заявки записана, но в голову PR не попала: между
+            # коммитом и успешным push вызов отказал (штатно —
+            # например, закрытие чужого PR не подтвердилось). «Ждём
+            # мержа» здесь было бы тупиком: человек видит в PR не все
+            # узлы снимка, а после мержа заявка хоронится целиком.
+            # Доигрываем НЕВЫПОЛНЕННЫЙ шаг — ровно как на пути создания.
+            _publish_candidate(state, ops, dag, key, ())
+            return ApprovalOutcome(
+                f"предложение заявки {key} допубликовано в PR #{pr}: "
+                f"коммит {op['head_sha'][:8]} не был в его голове. "
+                "Дальше — мерж учёткой из "
+                f"{af.APPROVER_ALLOWLIST_ENV}",
+                request=key,
+            )
         return ApprovalOutcome(
             f"candidate-PR #{pr} открыт — ждём мержа учёткой из "
             f"{af.APPROVER_ALLOWLIST_ENV}. Заявка {key} жива, ничего не "
             "изменено",
             request=key,
+        )
+    if not published:
+        # PR закрыт либо вмержен, а наш коммит в его голову не попал:
+        # предложение, которое заявка ВЫНЕСЛА, человеку не показывали.
+        # Факт положительно установлен (обе величины прочитаны), и он
+        # противоречит заявке — значит терминальный статус, а не отказ с
+        # сохранением. Восстановление обычное: новый candidate.
+        al.invalidate_request(
+            state,
+            key,
+            f"голова PR #{pr} ({facts.get('headRefOid')}) не совпадает с "
+            f"коммитом заявки ({op['head_sha']}): предложение заявки не "
+            "публиковалось, а PR уже закрыт либо вмержен",
+        )
+        raise RuntimeError(
+            f"PR #{pr} завершён не на коммите заявки {key} — узлы её "
+            "снимка человеку не предъявлялись. Заявка invalidated; "
+            "восстановление: новый candidate над теми же узлами"
         )
     event = af.merge_event(facts)
     if event.outcome is Outcome.ABSENT:
@@ -1007,6 +1075,21 @@ def _reconcile_finalize(
             request=key,
         )
     if where is Disposition.MERGED:
+        # Состояние PR — не конверт. Вмерженный финализирующий PR почти
+        # всегда означает конверт в base, но «почти всегда» и есть тот
+        # зазор, из-за которого контракт требует сверять БАЙТЫ, а не
+        # ответ форджи: PR мог быть вмержен в другую базу, а мог нести не
+        # тот конверт. Проверяются те же величины, что и в фазе 3, и
+        # несошедшаяся хоронит заявку по установленному факту.
+        ops.checkout_and_pull(state.target_dir, _base_ref(state))
+        pending = _verify_nodes_in_base(state, ops, dag, op, key)
+        _require(
+            state,
+            key,
+            not pending,
+            f"финализирующий PR #{pr} вмержен, но узлы {', '.join(pending)} "
+            "в base по-прежнему approval_pending — конверта там нет",
+        )
         al.complete_request(state, key)
         return ApprovalOutcome(
             f"конверт подписи в base (PR #{pr}): узлы "

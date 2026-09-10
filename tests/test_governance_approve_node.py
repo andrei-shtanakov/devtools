@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import ast
 import inspect
 import subprocess
 from dataclasses import dataclass, field
@@ -506,6 +507,201 @@ def test_two_nodes_of_one_level_share_one_candidate(world: World) -> None:
 def test_unknown_node_id_lists_the_allowed_ones(world: World) -> None:
     with pytest.raises(RuntimeError, match="не входит в активный DAG"):
         approve(world, "spec/20-design.md")
+
+
+# --- Накопление узлов: два блокера ревью #188 ---------------------------
+
+
+def _level_three(world: World) -> None:
+    """Довести стенд до уровня, где design и acceptance независимы."""
+    for node in ("charter", "requirements", "behaviour-spec"):
+        drive_to_approved(world, node)
+
+
+def test_merged_candidate_is_not_joined_but_starts_a_new_attempt(
+    world: World,
+) -> None:
+    """Присоединяться можно, пока candidate ФАКТИЧЕСКИ открыт.
+
+    Леджер отвечает «шаг ещё не сделан», пока фактов мержа нет в записи, —
+    и на этом расхождении присоединение стоило человеческого акта: коммит
+    уходил в ветку уже вмерженного PR, второго PR не создавалось, в base
+    узел не попадал никогда, а следующий вызов хоронил ВСЮ заявку с
+    причиной «тело узла правили после мержа» — правки, которой не было.
+
+    Стенд построен именно на этом состоянии: живая заявка с созданным и
+    УЖЕ ВМЕРЖЕННЫМ PR, финализация не запускалась.
+    """
+    _level_three(world)
+    approve(world, "design")
+    design_key, design_op = _request_over(world, "design")
+    merge_pr(world, design_op["candidate_pr"])
+    prs_before = set(world.forge.prs)
+
+    approve(world, "acceptance")
+
+    assert world.state.ops[design_key]["nodes"] == ["design"], (
+        "снимок вмерженной заявки не дописан"
+    )
+    acceptance_key, acceptance_op = _request_over(world, "acceptance")
+    assert acceptance_key != design_key
+    assert acceptance_op["attempt"] == design_op["attempt"] + 1
+    assert acceptance_op["step"] == design_op["step"], "тот же уровень"
+    assert acceptance_op["branch"] != design_op["branch"]
+    assert set(world.forge.prs) - prs_before, "заведён свой PR"
+    assert acceptance_op["candidate_pr"] != design_op["candidate_pr"]
+
+    # И обе доводятся до конца: акт над design не сгорел.
+    approve(world, "design")
+    merge_pr(world, world.state.ops[design_key]["finalize_pr"])
+    approve(world, "design")
+    merge_pr(world, acceptance_op["candidate_pr"])
+    approve(world, "acceptance")
+    merge_pr(world, world.state.ops[acceptance_key]["finalize_pr"])
+    approve(world, "acceptance")
+    world.sync()
+    upstreams = {
+        "requirements": _blob(world, "10-requirements.md"),
+        "behaviour-spec": _blob(world, "15-behaviour-spec.md"),
+    }
+    for node, fname in (
+        ("design", "20-design.md"), ("acceptance", "25-acceptance.md")
+    ):
+        assert na.node_debt(node, world.base_text(fname), upstreams) is None
+
+
+def test_unavailable_candidate_state_blocks_joining_without_writes(
+    world: World,
+) -> None:
+    """Состояние не установлено — отказ БЕЗ записей.
+
+    Присоединиться вслепую значит рискнуть человеческим актом, а завести
+    новую заявку вслепую — опубликовать второе mergeable предложение рядом
+    с неизвестным первым.
+    """
+    _level_three(world)
+    approve(world, "design")
+    before = dict(world.state.ops)
+    world.forge.mute.add("pr_facts")
+
+    with pytest.raises(RuntimeError, match="факт не установлен"):
+        approve(world, "acceptance")
+    assert dict(rs.load("r-approve").ops) == before
+
+
+def test_resume_republishes_a_joined_node_that_never_reached_the_pr(
+    world: World,
+) -> None:
+    """Возобновление доигрывает НЕВЫПОЛНЕННЫЙ шаг, а не отвечает «ждём».
+
+    Отказ между коммитом и успешным push штатен и возобновляем, но узел
+    остаётся в снимке заявки и не попадает в PR. «Ждём мержа» здесь —
+    тупик: человек видит один узел из двух, а после мержа заявка хоронится
+    целиком, и автоматического выхода нет.
+
+    Стенд — присоединение к ЖИВОЙ заявке с уже созданным PR, а не свежая
+    заявка: на свежей возобновление идёт через создание candidate и
+    публикует само.
+    """
+    _level_three(world)
+    approve(world, "design")
+    key, op = _request_over(world, "design")
+    pr = op["candidate_pr"]
+    real_push = world.ops.push_branch
+    attempts = {"n": 0}
+
+    def flaky(target_dir: str, branch: str) -> None:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("push_branch: rc=1: сеть отвалилась")
+        real_push(target_dir, branch)
+
+    world.ops.push_branch = flaky  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="push_branch"):
+        approve(world, "acceptance")
+
+    joined = world.state.ops[key]
+    assert joined["nodes"] == ["design", "acceptance"], "снимок расширен"
+    assert world.forge.head_of(joined["branch"]) != joined["head_sha"], (
+        "коммит в опубликованную голову не попал"
+    )
+
+    outcome = approve(world, "acceptance")
+    assert "допубликовано" in outcome.message
+    assert world.forge.head_of(joined["branch"]) == joined["head_sha"]
+    assert len(world.forge.prs) == 7, "второго PR не заведено"
+    branch_files = _git(
+        world.target, "show", "--name-only", "--format=", joined["head_sha"]
+    )
+    assert "25-acceptance.md" in branch_files
+
+    # Выход есть и он обычный: заявка доводится до конца обоими узлами.
+    merge_pr(world, pr)
+    approve(world, "design")
+    merge_pr(world, world.state.ops[key]["finalize_pr"])
+    approve(world, "design")
+    world.sync()
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+    upstreams = {
+        "requirements": _blob(world, "10-requirements.md"),
+        "behaviour-spec": _blob(world, "15-behaviour-spec.md"),
+    }
+    for node, fname in (
+        ("design", "20-design.md"), ("acceptance", "25-acceptance.md")
+    ):
+        assert na.node_debt(node, world.base_text(fname), upstreams) is None
+
+
+def test_pr_finished_off_our_commit_invalidates_instead_of_waiting(
+    world: World,
+) -> None:
+    """Пара к предыдущему: тот же разрыв, но PR уже закрыт.
+
+    Доигрывать нечего — предложение заявки человеку не предъявлялось, а
+    факт установлен обеими прочитанными величинами. Значит терминальный
+    статус с причиной и обычное восстановление, а не вечное «ждём».
+    """
+    _level_three(world)
+    approve(world, "design")
+    key, op = _request_over(world, "design")
+    real_push = world.ops.push_branch
+    attempts = {"n": 0}
+
+    def flaky(target_dir: str, branch: str) -> None:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("push_branch: rc=1: сеть отвалилась")
+        real_push(target_dir, branch)
+
+    world.ops.push_branch = flaky  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="push_branch"):
+        approve(world, "acceptance")
+    world.forge.prs[op["candidate_pr"]]["state"] = "CLOSED"
+
+    with pytest.raises(RuntimeError, match="не на коммите заявки"):
+        approve(world, "acceptance")
+    assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
+    assert "не публиковалось" in world.state.ops[key]["reason"]
+
+
+def test_completed_needs_the_envelope_in_base_not_a_merged_pr(
+    world: World,
+) -> None:
+    """Состояние PR — не конверт: `completed` пишется по БАЙТАМ в base."""
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+    finalize = world.state.ops[key]["finalize_pr"]
+    # Форджа говорит «вмержен», а конверта в base нет.
+    world.forge.prs[finalize].update(
+        state="MERGED", mergedBy={"login": HUMAN}, mergedAt=MERGED_AT,
+        mergeCommit={"oid": _stray_commit(world)},
+    )
+
+    with pytest.raises(RuntimeError, match="конверта там нет"):
+        approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
 
 
 # --- Крэш-окна ----------------------------------------------------------
@@ -1549,3 +1745,77 @@ def test_the_wave_api_names_exist(monkeypatch) -> None:
     """
     for name in _WAVE_API:
         assert hasattr(al, name), name
+
+
+# --- Структурный лок: продвижение заявки не читает состав DAG -----------
+
+#: Имена резолвера АКТИВНОГО СОСТАВА. `node_id` сюда не входит намеренно:
+#: он отображает имя файла в node-id и о составе графа не отвечает.
+_RESOLVER = {"composition", "composition_fingerprint", "dag_for", "read_dag_state"}
+
+
+def _calls_reachable_from(entry: str) -> set[str]:
+    """Имена, вызываемые из `entry` транзитивно внутри `approve_node`.
+
+    Обход по AST модуля: у каждой функции собираются имена вызовов
+    (`f()` и `mod.f()`), затем обход идёт по тем из них, которые в этом же
+    модуле определены. Так «не вызывает» становится свойством КОДА, а не
+    того, что автор туда не написал вызов.
+    """
+    tree = ast.parse(Path(an.__file__).read_text(encoding="utf-8"))
+    bodies = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+    seen: set[str] = set()
+    reached: set[str] = set()
+    frontier = [entry]
+    while frontier:
+        current = frontier.pop()
+        if current in seen or current not in bodies:
+            continue
+        seen.add(current)
+        for node in ast.walk(bodies[current]):
+            if not isinstance(node, ast.Call):
+                continue
+            target = node.func
+            name = (
+                target.attr
+                if isinstance(target, ast.Attribute)
+                else target.id
+                if isinstance(target, ast.Name)
+                else None
+            )
+            if name is None:
+                continue
+            reached.add(name)
+            frontier.append(name)
+    return reached
+
+
+def test_advance_never_resolves_the_active_dag() -> None:
+    """Продвижение живой заявки состав активного DAG не читает.
+
+    Заявка реконсилируется по ЗАПИСАННОМУ: candidate-байты, PR, мерж,
+    авторизация, фаза финализации. Даже если текущий DAG уже изменился,
+    корректное завершение старой заявки лишь фиксирует состоявшийся акт
+    над прежним intent — доставку оно не разрешает. Прочитай `_advance`
+    состав, и между двумя чтениями появилось бы решение, основанное на
+    разных снимках.
+    """
+    touched = _calls_reachable_from("_advance") & _RESOLVER
+    assert not touched, f"_advance дотянулся до резолвера состава: {touched}"
+
+
+def test_the_proposal_path_does_resolve_it() -> None:
+    """Пара к предыдущему: резолвер вообще вызывается там, где должен.
+
+    Без этой половины первый тест вакуумен — «не вызывает» не отличало бы
+    разделение путей от мёртвого резолвера, который не зовут нигде.
+    """
+    assert _calls_reachable_from("_propose") & _RESOLVER
+    assert _RESOLVER <= (
+        _calls_reachable_from("_propose") | _calls_reachable_from("approve_node")
+        | {"read_dag_state"}
+    )
