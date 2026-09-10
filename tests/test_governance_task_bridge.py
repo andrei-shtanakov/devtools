@@ -7456,3 +7456,492 @@ def test_cli_replace_reaches_implementation(tmp_path, monkeypatch, capsys):
         "--replace-revision", "3", "--reason", "дефект подписи",
     ]) == 0
     assert called["replace"] == tb.Replacement(3, "дефект подписи")
+
+
+# --- Перенос состояния исполнения при переиздании (spec-runner#409) --------
+#
+# Рендер детерминирован по бандлу: без переноса переиздание воркстрима, где
+# часть задач уже выполнена, возвращает `✅ DONE` в `TODO`, а `- [x]` — в
+# `- [ ]`. Артефакт становится непригоден: state DB помнит успешные задачи,
+# файл больше нет, следующий прогон встаёт на `state_spec_mismatch`.
+#
+# Тексты «доставленных» спек ниже строятся НЕ руками, а тем же
+# `render_tasks_dt`, что и настоящая доставка, плюс те же мутации, что
+# делает spec-runner (`update_task_status` вставляет эмодзи, `- [ ]` → `- [x]`).
+
+
+def _sc(beh_id: str, title: str, target: str = "tests/test_x.py"):
+    from governance.task_bridge import Scenario
+
+    return Scenario(
+        beh_id=beh_id, title=title, traces=("FR-01",),
+        checked_kind="integration", checked_target=target,
+    )
+
+
+def _dt(dt_id: str, title: str, scenarios: tuple[str, ...], depends=()):
+    from governance.decomposition_guard import DtTask
+
+    return DtTask(
+        dt_id=dt_id, title=title, type="implement", owner="dev",
+        scenarios=scenarios, depends_on=tuple(depends), delivered_by=(),
+        parallel_group="solo",
+    )
+
+
+def _render(dt_tasks, scenarios, version: int = 1) -> str:
+    from governance import task_bridge as tb
+
+    return tb.render_tasks_dt(
+        ws_id="WS-alpha-7", subject="s",
+        bundle_path="workstreams/WS-alpha-7/spec/30-decomposition.md",
+        scenarios=scenarios, dt_tasks=dt_tasks,
+        generated_at="2026-09-02T06:07:39+03:00",
+        anchor_blob="a" * 40, version=version,
+    )
+
+
+def _executed(text: str, task_id: str) -> str:
+    """Спека после успешного прогона `task_id` — мутации spec-runner.
+
+    Ровно то, что пишет `update_task_status` (`| ✅ DONE` вместо `| TODO`,
+    эмодзи ВСТАВЛЯЕТСЯ) и `mark_all_checklist_done` (`- [ ]` → `- [x]`) в
+    границах одной задачи."""
+    out, inside = [], False
+    for line in text.split("\n"):
+        if line.startswith("### TASK-"):
+            inside = line.startswith(f"### {task_id}:")
+        elif inside:
+            line = line.replace("| TODO", "| ✅ DONE")
+            line = line.replace("- [ ] ", "- [x] ")
+        out.append(line)
+    return "\n".join(out)
+
+
+_CARRY_SCENARIOS = [
+    _sc("BEH-01", "Просмотр списка"),
+    _sc("BEH-02", "Пустое состояние"),
+    _sc("BEH-03", "Ошибка сети", target="tests/test_y.py"),
+]
+_CARRY_DT = [
+    _dt("DT-01", "Реализация", ("BEH-01", "BEH-02")),
+    _dt("DT-02", "Обработка ошибок", ("BEH-03",), depends=("DT-01",)),
+]
+
+
+def _task_body(text: str, task_id: str) -> str:
+    start = text.index(f"### {task_id}:")
+    tail = text.find("### TASK-", start + 1)
+    return text[start:] if tail < 0 else text[start:tail]
+
+
+def test_carry_preserves_status_and_marks_of_unchanged_task() -> None:
+    """Неизменённая задача переиздания несёт `✅ DONE` и свои `- [x]`."""
+    from governance import task_bridge as tb
+
+    delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001")
+    fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
+    assert "| ✅ DONE" not in fresh          # рендер состояния не знает
+    carried = tb._carry_execution_state(fresh, delivered)
+
+    done = _task_body(carried, "TASK-001")
+    assert "P2 | ✅ DONE   Est: 0.5d" in done
+    assert "- [x] реализовать BEH-01: Просмотр списка" in done
+    assert "- [x] реализовать BEH-02: Пустое состояние" in done
+    assert "- [ ]" not in done
+    # Незапущенная задача остаётся чистой — перенос не красит всё подряд
+    todo = _task_body(carried, "TASK-002")
+    assert "P2 | TODO   Est: 0.5d" in todo
+    assert "- [x]" not in todo
+    # Кроме маркеров состояния байты рендера не тронуты
+    assert carried.replace("✅ DONE", "TODO").replace(
+        "- [x]", "- [ ]"
+    ) == fresh
+
+
+def test_carry_skips_task_whose_body_changed() -> None:
+    """Изменённая задача приходит чистой: `DONE` утверждал ТО тело.
+
+    Меняется заголовок DT (титул задачи) — тело расходится, статус не
+    переносится. Неизменённые пункты чеклиста галочки при этом сохраняют:
+    правила статуса и пунктов независимы."""
+    from governance import task_bridge as tb
+
+    delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001")
+    changed = [
+        _dt("DT-01", "Реализация (переписана)", ("BEH-01", "BEH-02")),
+        _CARRY_DT[1],
+    ]
+    fresh = _render(changed, _CARRY_SCENARIOS, version=2)
+    body = _task_body(tb._carry_execution_state(fresh, delivered), "TASK-001")
+    assert "P2 | TODO   Est: 0.5d" in body
+    assert "| ✅ DONE" not in body
+    assert "- [x] реализовать BEH-01: Просмотр списка" in body
+
+
+def test_carry_skips_checklist_item_whose_text_changed() -> None:
+    """Переформулированный пункт начинается заново.
+
+    Титул BEH-02 переписан ⇒ текст его пункта другой ⇒ галочки нет;
+    соседний пункт той же задачи её сохраняет."""
+    from governance import task_bridge as tb
+
+    delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001")
+    scenarios = [
+        _CARRY_SCENARIOS[0],
+        _sc("BEH-02", "Пустое состояние (уточнено)"),
+        _CARRY_SCENARIOS[2],
+    ]
+    fresh = _render(_CARRY_DT, scenarios, version=2)
+    body = _task_body(tb._carry_execution_state(fresh, delivered), "TASK-001")
+    assert "- [ ] реализовать BEH-02: Пустое состояние (уточнено)" in body
+    assert "- [x] реализовать BEH-01: Просмотр списка" in body
+
+
+def test_carry_leaves_new_task_clean() -> None:
+    """Задача, появившаяся впервые, состояния не наследует.
+
+    Новая задача поставлена ПЕРВОЙ — она занимает номер `TASK-001`,
+    который в доставленной спеке принадлежал выполненной DT-01.
+    Сопоставление по номеру объявило бы её выполненной, не начав."""
+    from governance import task_bridge as tb
+
+    delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001")
+    scenarios = [_sc("BEH-00", "Новый сценарий"), *_CARRY_SCENARIOS]
+    grown = [_dt("DT-00", "Новая задача", ("BEH-00",)), *_CARRY_DT]
+    body = _task_body(
+        tb._carry_execution_state(_render(grown, scenarios, version=2),
+                                  delivered),
+        "TASK-001",
+    )
+    assert "#DT-00" in body
+    assert "P2 | TODO   Est: 0.5d" in body
+    assert "| ✅ DONE" not in body
+    assert "- [x]" not in body
+
+
+def test_carry_renumbering_does_not_move_status_to_a_foreign_task() -> None:
+    """Сдвиг нумерации не переносит состояние на ЧУЖУЮ задачу.
+
+    Задача вставлена в середину: бывшая TASK-002 (DT-02) стала TASK-003.
+    Сопоставление по номеру отдало бы состояние выполненной DT-02 задаче
+    DT-99, которая не исполнялась ни секунды. Сопоставление §I11 идёт по
+    БАЙТАМ, и номер в них входит, поэтому вставленная задача чистая, а
+    сдвинутая теряет статус — «принятый остаток» §I11."""
+    from governance import task_bridge as tb
+
+    delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-002")
+    scenarios = [
+        _CARRY_SCENARIOS[0], _CARRY_SCENARIOS[1],
+        _sc("BEH-99", "Вставленная в середину"), _CARRY_SCENARIOS[2],
+    ]
+    shifted = [
+        _CARRY_DT[0],
+        _dt("DT-99", "Вставленная", ("BEH-99",), depends=("DT-01",)),
+        _dt("DT-02", "Обработка ошибок", ("BEH-03",), depends=("DT-99",)),
+    ]
+    fresh = _render(shifted, scenarios, version=2)
+    carried = tb._carry_execution_state(fresh, delivered)
+
+    inserted = _task_body(carried, "TASK-002")
+    assert "#DT-99" in inserted            # именно вставленная задача
+    assert "| ✅ DONE" not in inserted
+    assert "- [x]" not in inserted
+    # У DT-02 сдвинулись номер в заголовке и в `Depends on` — блок не
+    # совпал, статус не переносится. Пункт с ПРЕЖНИМ текстом галочку всё
+    # же сохраняет: §I11 сверяет пункты отдельно от объемлющей задачи и
+    # по всей спеке, так что переезд пункта в другой блок ему не помеха.
+    moved = _task_body(carried, "TASK-003")
+    assert "#DT-02" in moved
+    assert "| ✅ DONE" not in moved
+    assert "- [x] реализовать BEH-03: Ошибка сети" in moved
+
+
+def test_carry_from_spec_without_tasks_changes_nothing() -> None:
+    """Доставленной спеки нет / она без задач — переносить нечего."""
+    from governance import task_bridge as tb
+
+    fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
+    assert tb._carry_execution_state(fresh, "---\nx: 1\n---\n\nbody\n") == fresh
+
+
+def test_carry_ignores_duplicate_block_in_delivered_spec() -> None:
+    """Повторившийся блок — неоднозначность ⇒ задача приходит чистой.
+
+    §I11 объявляет единственность кандидата УСЛОВИЕМ переноса, а не
+    свойством сегодняшних данных: сегодня номера задач различны, значит
+    двух одинаковых блоков не бывает, — но опираться на это контракт не
+    вправе, и код обязан отвечать чистым результатом, а не догадкой."""
+    from governance import task_bridge as tb
+
+    delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001")
+    # Копия ВСТАВЛЯЕТСЯ на место оригинала, а не дописывается в хвост:
+    # у хвостового блока другие завершающие строки, и байты разошлись бы
+    block = _task_body(delivered, "TASK-001")
+    doubled = delivered.replace(block, block + block, 1)
+    fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
+    body = _task_body(
+        tb._carry_execution_state(fresh, doubled), "TASK-001"
+    )
+    assert "| ✅ DONE" not in body
+    assert "- [x]" not in body
+
+
+def test_carry_normalizes_meta_line_instead_of_dropping_it() -> None:
+    """Сверка блока видит приоритет и оценку, а не только статус (§I11).
+
+    Мета-строка НОРМАЛИЗУЕТСЯ, а не вырезается: выбросить её целиком
+    значило бы ослепить сравнение к смене `P2`/`Est`, живущих в той же
+    строке, — задача с переставленным приоритетом сохраняла бы `DONE`."""
+    from governance import task_bridge as tb
+
+    delivered = _executed(
+        _render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001"
+    ).replace("P2 | ✅ DONE   Est: 0.5d", "P0 | ✅ DONE   Est: 3d")
+    fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
+    body = _task_body(tb._carry_execution_state(fresh, delivered), "TASK-001")
+    assert "| ✅ DONE" not in body
+    # Пункты чеклиста живут по своему правилу и приоритетом не задеты
+    assert "- [x] реализовать BEH-01: Просмотр списка" in body
+
+
+def _twin_item(text: str) -> str:
+    """Пункт BEH-03 переименован в пункт BEH-01 — дубль текста в спеке."""
+    return text.replace(
+        "реализовать BEH-03: Ошибка сети",
+        "реализовать BEH-01: Просмотр списка",
+    )
+
+
+_DUP_ITEM = "- [x] реализовать BEH-01: Просмотр списка"
+
+
+def test_carry_skips_checklist_text_repeated_in_delivered_spec() -> None:
+    """Текст пункта, встречающийся в базовой спеке дважды, не переносит.
+
+    Единственность текста — УСЛОВИЕ переноса на уровне пункта: гарантии
+    различия, какую номера задач дают блокам, у чеклистов нет. Дубль
+    заведён ОДИНАКОВО в обеих спеках, поэтому блоки совпадают и статусы
+    переносятся своим правилом — предмет теста ровно в пунктах."""
+    from governance import task_bridge as tb
+
+    delivered = _twin_item(
+        _executed(_executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001"),
+                  "TASK-002")
+    )
+    fresh = _twin_item(_render(_CARRY_DT, _CARRY_SCENARIOS, version=2))
+    carried = tb._carry_execution_state(fresh, delivered)
+    assert _DUP_ITEM not in carried
+    assert carried.count("| ✅ DONE") == 2
+    # Однозначные пункты тех же задач галочки сохраняют
+    assert "- [x] реализовать BEH-02: Пустое состояние" in carried
+    assert carried.count("- [x] проверка группы") == 2
+
+
+def test_carry_skips_checklist_text_repeated_in_fresh_render() -> None:
+    """Единственность требуется И В НОВОМ рендере, не только в базовой спеке.
+
+    Дубль заведён только в новом рендере: в базовой спеке текст один и
+    отмечен, но перенести его некуда однозначно — обе копии претендуют."""
+    from governance import task_bridge as tb
+
+    delivered = _executed(
+        _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001"), "TASK-002"
+    )
+    fresh = _twin_item(_render(_CARRY_DT, _CARRY_SCENARIOS, version=2))
+    carried = tb._carry_execution_state(fresh, delivered)
+    assert _DUP_ITEM not in carried
+    # TASK-001 переименование не задело — её блок совпал, статус перенесён;
+    # TASK-002 изменена, поэтому чистая
+    assert _task_body(carried, "TASK-001").count("| ✅ DONE") == 1
+    assert "| ✅ DONE" not in _task_body(carried, "TASK-002")
+
+
+# --- Перенос состояния: сквозные пути доставки -----------------------------
+
+
+def _delivered_v1(state, executed: str = "TASK-001") -> str:
+    """Спека v1 фикстуры, отрендеренная тем же кодом и «исполненная».
+
+    Именно она лежит в base на момент переиздания — тела задач те же, что
+    даст свежий рендер (`generated_at`/`version` живут во frontmatter)."""
+    from governance import decomposition_guard as dg
+    from governance import task_bridge as tb
+
+    base = Path(state.target_dir) / state.bundle_dir
+    dt_tasks, _ = dg.parse_dt_tasks(
+        (base / "30-decomposition.md").read_text(encoding="utf-8")
+    )
+    return _executed(
+        tb.render_tasks_dt(
+            ws_id=state.ws_id, subject=state.subject,
+            bundle_path=f"{state.bundle_dir}/30-decomposition.md",
+            scenarios=tb.parse_behaviour(
+                (base / "15-behaviour-spec.md").read_text(encoding="utf-8")
+            ),
+            dt_tasks=dt_tasks,
+            generated_at="2026-09-01T00:00:00+03:00",
+            anchor_blob="b" * 40, version=1,
+        ),
+        executed,
+    )
+
+
+class _CarryOps(_SupersedeOps):
+    """`_SupersedeOps`, но спека В BASE — реально доставленная и исполненная.
+
+    Аргументы `show_file` сверяются, как у родителя: перенос обязан
+    читать base по `base_sha`, а не HEAD и не рабочее дерево."""
+
+    def __init__(self, *args, delivered: str = "", **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.delivered = delivered
+
+    def show_file(self, target_dir, ref, path):
+        self.calls.append(("show_file", ref, path))
+        if (ref, path) != ("base-sha-1", _SPEC_REL):
+            return None
+        return self.delivered
+
+
+def test_supersede_preserves_execution_state_of_unchanged_tasks(
+    tmp_path, monkeypatch
+):
+    """Живой дефект spec-runner#409: переиздание сохраняет `DONE` и `[x]`.
+
+    До фикса `deliver()` рендерил спеку детерминированно из бандла и о
+    предыдущей доставке не знал ничего — переиздание воркстрима, где
+    TASK-001 уже выполнена, возвращало её в `TODO` с пустыми чекбоксами,
+    и следующий прогон вставал на `state_spec_mismatch`."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
+    rs.save(state)
+    ops = _CarryOps(prs=[_MERGED_PR], delivered=_delivered_v1(state))
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
+    text = (
+        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
+    ).read_text(encoding="utf-8")
+    assert "P2 | ✅ DONE   Est: 0.5d" in text
+    assert "- [x] реализовать BEH-01: Просмотр списка" in text
+    assert "- [x] реализовать BEH-02: Пустое состояние" in text
+    assert "- [ ]" not in text
+    # Переиздание всё же состоялось: version вырос, а не «файл прежний»
+    assert "version: 2" in text
+    # `tasks_blob` §I3.1 посчитан по ФАКТИЧЕСКИМ байтам файла — иначе
+    # возобновление не опознало бы собственный коммит
+    from governance.stale_adapter import blob_sha1
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_blob"] == (
+        blob_sha1(text)
+    )
+
+
+def test_supersede_carry_source_is_base_not_worktree(tmp_path, monkeypatch):
+    """Перенос читает base по `base_sha`, а не рабочее дерево.
+
+    В рабочем дереве лежит ИСПОЛНЕННАЯ спека (после `checkout_and_pull`
+    стаба файл остаётся на месте), а base отвечает `None` — переносить
+    нечего, и ни один маркер состояния в переиздание не попадает. Иначе
+    байты спеки зависели бы от случайного состояния чекаута, а §I3.1
+    требует их воспроизводимости."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").write_text(
+        _delivered_v1(state), encoding="utf-8"
+    )
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ-ДРУГОЙ",
+        # dag из записи: `_previous_dag` не пойдёт в show_file, и
+        # единственный его вызов останется тот, что делает перенос
+        "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
+    }
+    rs.save(state)
+    ops = _CarryOps(prs=[_MERGED_PR], delivered="")
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+    text = (
+        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
+    ).read_text(encoding="utf-8")
+    assert "✅" not in text and "- [x]" not in text
+    assert ("show_file", "base-sha-1", _SPEC_REL) in ops.calls
+
+
+class _LoudReconOps(_ReconOps):
+    """`_ReconOps`, у которого `show_file` ГРОМКИЙ: он и пишется в calls, и
+    отдаёт исполненную спеку.
+
+    Молчаливый `None` родителя делал бы утверждение «обычная доставка в
+    base не ходит» невыполнимым в обе стороны: вызов не виден, а его
+    результат пуст, — и лишний поход остался бы незамеченным."""
+
+    def __init__(self, delivered: str) -> None:
+        super().__init__()
+        self.delivered = delivered
+
+    def show_file(self, target_dir, ref, path):
+        self.calls.append(("show_file", ref, path))
+        return self.delivered
+
+
+def test_deliver_for_run_carries_nothing(tmp_path, monkeypatch):
+    """Обычная доставка состояния не переносит и в base за ним не ходит.
+
+    Спеки в base ещё нет — переносить нечего; новых путей отказа на
+    штатном пути появиться не должно."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    ops = _LoudReconOps(_delivered_v1(state))
+    # Исполненная спека лежит и в рабочем дереве, и «в base» (show_file):
+    # ни один из двух источников не имеет права дотянуться до доставки v1
+    (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").write_text(
+        ops.delivered, encoding="utf-8"
+    )
+    assert tb.deliver_for_run(state, ops) == 77
+    text = (
+        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
+    ).read_text(encoding="utf-8")
+    assert "✅" not in text and "- [x]" not in text
+    assert not [c for c in ops.calls if c[0] == "show_file"]
+
+
+def test_supersede_resume_reproduces_the_same_bytes(tmp_path, monkeypatch):
+    """Повторный заход по тому же намерению даёт те же байты спеки.
+
+    Возобновление (§I3 «started | PR-а нет») берёт состояние из base
+    ЭТОЙ ревизии (`op["base_sha"]`), а не из того, куда уехал апстрим, —
+    иначе `tasks_blob` намерения разошёлся бы с фактическим блобом."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
+    rs.save(state)
+    delivered = _delivered_v1(state)
+    first = _CarryOps(prs=[_MERGED_PR], delivered=delivered)
+    assert tb.deliver_superseded(state, first).kind == "delivered"
+    spec = Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
+    bytes_first = spec.read_bytes()
+    saved = rs.load("r-recon")
+    blob_first = saved.ops["tasks-deliver-v2"]["tasks_blob"]
+
+    # Возврат в состояние «намерение durable, PR ещё не создан»
+    saved.ops["tasks-deliver-v2"].update(
+        status="started", pr=None, head_sha=None, tasks_blob=None,
+    )
+    rs.save(saved)
+    spec.write_text("затёрто\n", encoding="utf-8")
+    again = _CarryOps(prs=[_MERGED_PR], delivered=delivered)
+    assert tb.deliver_superseded(saved, again).kind == "delivered"
+    assert spec.read_bytes() == bytes_first
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_blob"] == (
+        blob_first
+    )
+    assert ("show_file", "base-sha-1", _SPEC_REL) in again.calls
