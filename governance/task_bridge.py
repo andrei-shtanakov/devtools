@@ -1107,17 +1107,16 @@ def _approvable(
             "честно одобрен, а пин всё равно не сходится, frontmatter "
             "правили в обход контракта: разбирается человеком"
         )
-    if status == "approved":
-        # П.5: пины верны, значит расходится собственная запись узла —
-        # self-hash (или его нет вовсе у легаси). Это переодобрение, а не
-        # отказ: человек читает новые байты и одобряет их полным
-        # переходом п.3.
-        return True
-    if status not in _APPROVABLE_STATUSES:
+    if status != "approved" and status not in _APPROVABLE_STATUSES:
         raise RuntimeError(
             f"{bundle_dir}/{files[node_id]}: status={status!r} — в approved "
             f"входят только {' и '.join(_APPROVABLE_STATUSES)}"
         )
+    # Топологическая готовность (п.2) спрашивается и у ПЕРЕОДОБРЕНИЯ, а не
+    # только у перехода из `draft`/`stale`: п.2 адресован команде целиком,
+    # и сходящиеся пины его не заменяют. Совпавший пин доказывает лишь,
+    # что байты upstream не менялись с момента подписи, — а миграционный
+    # долг байтов не меняет вовсе, и такой upstream проходил бы молча.
     upstream_findings = _approval_findings(
         target_dir, bundle_dir, dag, nodes=upstream_ids
     )

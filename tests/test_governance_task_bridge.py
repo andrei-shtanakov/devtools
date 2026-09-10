@@ -7717,6 +7717,36 @@ def test_fourth_condition_unlocks_the_dead_end(tmp_path: Path) -> None:
     ) == []
 
 
+def test_reapproval_still_requires_topological_readiness(
+    tmp_path: Path,
+) -> None:
+    """Пункт 2 адресован команде целиком, и сходящиеся пины его не
+    заменяют: совпавший пин доказывает лишь, что байты upstream не
+    менялись с момента подписи, — а миграционный долг байтов не меняет
+    вовсе, и такой upstream проходил бы молча."""
+    target = str(_target(tmp_path))
+    # Легаси-дерево: у charter'а нет self-hash, но пины downstream указывают
+    # на его ФАКТИЧЕСКИЕ байты — миграционный долг байтов не меняет, и
+    # сходящийся пин про него ничего не говорит.
+    _set_node(target, _CHARTER, approved_content_hash=None)
+    _repin_all(target)
+    _correct_body(target, _REQUIREMENTS)
+    assert task_bridge._pin_drift(
+        Path(target) / _BUNDLE,
+        {task_bridge._node_id(f): f for f, _ in task_bridge._BUNDLE_DAG},
+        ("charter",),
+        _meta(target, _REQUIREMENTS),
+    ) == [], "пины requirements обязаны сходиться — иначе тест о другом"
+    before = _node_bytes_of(target)
+
+    with pytest.raises(RuntimeError, match="топологическая готовность") as exc:
+        _approve(target, "requirements")
+
+    assert f"{_BUNDLE}/{_CHARTER}" in str(exc.value)
+    assert "миграционный долг" in str(exc.value)
+    assert _node_bytes_of(target) == before
+
+
 def test_reapproval_is_not_triggered_when_the_self_hash_still_matches(
     tmp_path: Path,
 ) -> None:
