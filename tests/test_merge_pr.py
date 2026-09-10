@@ -490,10 +490,16 @@ def test_expect_head_match_merges(fleet: Fleet) -> None:
 
 
 def test_expect_base_mismatch_does_not_merge(fleet: Fleet) -> None:
-    """База уехала после вердикта — мерж внёс бы код в невиданную базу."""
+    """База уехала после вердикта — мерж внёс бы код в невиданную базу.
+
+    Отказ называет ОБЕ базы — от какой вынесен вердикт и какая сейчас: без
+    этого оператор видит «что-то не так», но не видит, что именно уехало.
+    """
     res = fleet.run("--expect-base", "a" * 40, GH_STUB_HEADREF="feat/ordinary")
     assert res.returncode == 3, res.stdout
-    assert "ревью не видело" in res.stderr
+    assert "база уехала" in res.stderr
+    assert "a" * 40 in res.stderr and BASE_SHA in res.stderr
+    assert "перегоните вердикт на новой базе" in res.stderr
     assert fleet.merge_calls() == []
 
 

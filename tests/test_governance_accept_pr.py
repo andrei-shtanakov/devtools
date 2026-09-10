@@ -74,6 +74,8 @@ def _facts(**over: Any) -> dict:
         "mergeable": "MERGEABLE",
         "headRefOid": "cafe" * 10,
         "baseRefName": "master",
+        # Та же база, что отдаёт `changed_paths` фейка: «не двигалась».
+        "baseRefOid": "base000",
     }
     base.update(over)
     return base
@@ -135,6 +137,42 @@ def test_unknown_base_oid_stops_without_merge(capsys) -> None:
     assert rc == 1
     assert not any(c[0] == "merge" for c in ops.calls)
     assert "FETCH_HEAD" in capsys.readouterr().out
+
+
+def test_moved_base_names_both_shas_and_the_procedure(capsys) -> None:
+    """Отказ обязан говорить, ЧТО случилось и ЧТО делать (ревью #183, круг 5).
+
+    Прежняя строка «гонка head/base / правило репо» была догадкой сразу обо
+    всём: оператор видел её и не знал, повторять ли, и во что это встанет.
+    """
+    moved = _facts(baseRefOid="base999")
+    ops = _Ops(facts_seq=[moved], merge_ok=False, base_oid="base000")
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "база уехала" in out
+    # Названы обе базы — от какой вынесен вердикт и какая сейчас.
+    assert "base000"[:7] in out and "base999"[:7] in out
+    # Названа процедура и её цена.
+    assert "make accept-pr" in out
+    assert "ревью пройдёт заново" in out
+    assert "чеки заново не ждутся" in out
+
+
+def test_merge_failure_without_base_move_does_not_blame_the_base(
+    capsys,
+) -> None:
+    """Не догадываться: база не двигалась — так и сказать, причина выше."""
+    ops = _Ops(facts_seq=[_facts()], merge_ok=False, base_oid="base000")
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "база уехала" not in out
+    assert "причина названа merge-pr.sh" in out
 
 
 def test_review_findings_stop_without_merge(capsys) -> None:
@@ -288,12 +326,14 @@ def test_conflicting_pr_stops() -> None:
 
 
 def test_merge_refusal_is_reported(capsys) -> None:
+    """Отказ мержа доходит до оператора и валит приёмку — какой бы ни была
+    причина; конкретика по причинам — в двух тестах выше."""
     ops = _Ops(facts_seq=[_facts()], merge_ok=False)
     rc = accept_pr.accept(
         "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
     )
     assert rc == 1
-    assert "мерж не прошёл" in capsys.readouterr().out
+    assert "мерж не выполнен" in capsys.readouterr().out
 
 
 def test_empty_rollup_is_pending_not_green() -> None:

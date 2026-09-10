@@ -659,6 +659,22 @@ def test_materialize_pr_head_switch_failure_raises(monkeypatch):
         ops.materialize_pr_head("/tmp/kapelle", 59, "cafe" * 10)
 
 
+def test_pr_facts_requests_base_ref_oid(monkeypatch):
+    """`baseRefOid` в запросе обязателен: без него движение базы не увидеть.
+
+    На нём стоит диагностика отказа приёмки — «база уехала с X на Y»
+    (ревью #183, круг 5). Поле спрашивается в ЭТОМ запросе, потому что
+    второй запрос ради одного поля был бы вторым источником того же факта.
+    """
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="{}")
+    RealOps().pr_facts(REPO_SLUG, 42)
+    argv = calls[0].argv
+    assert argv[:6] == ["gh", "pr", "view", "42", "-R", REPO_SLUG]
+    fields = argv[argv.index("--json") + 1].split(",")
+    for required in ("headRefOid", "baseRefOid", "baseRefName", "state"):
+        assert required in fields, f"{required} не запрошен: {fields}"
+
+
 def test_changed_paths_fetch_base_then_three_dot_diff(monkeypatch):
     calls = _install_fake_run(
         monkeypatch, returncode=0, stdout="lib/a.py\nlib/b.py\n"
