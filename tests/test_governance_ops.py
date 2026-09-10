@@ -664,16 +664,56 @@ def test_changed_paths_fetch_base_then_three_dot_diff(monkeypatch):
         monkeypatch, returncode=0, stdout="lib/a.py\nlib/b.py\n"
     )
     ops = RealOps()
-    paths = ops.changed_paths("/tmp/kapelle", "master")
+    base, paths = ops.changed_paths("/tmp/kapelle", "master")
     assert calls[0].argv == ["git", "fetch", "origin", "master"]
     # FETCH_HEAD, не origin/master (приёмка PR #113, круг 4): fetch без
     # destination-refspec не обязан обновить remote-tracking ref, а
     # FETCH_HEAD пишется именно этим fetch — база доказуемо свежая.
-    assert calls[1].argv == [
+    # ТОТ ЖЕ ref отдаётся как OID базы (ревью #183, круг 3): пин мержа
+    # обязан назвать базу, от которой посчитан гард путей.
+    assert calls[1].argv == ["git", "rev-parse", "FETCH_HEAD"]
+    assert calls[2].argv == [
         "git", "diff", "--name-only", "FETCH_HEAD...HEAD",
     ]
     assert all(c.kwargs["cwd"] == "/tmp/kapelle" for c in calls)
     assert paths == ["lib/a.py", "lib/b.py"]
+    assert base == "lib/a.py\nlib/b.py"  # тот же стаб-stdout, обрезанный
+
+
+def test_changed_paths_base_oid_comes_from_the_diffed_ref(monkeypatch):
+    """OID базы и дифф читают ОДИН ref, а не два разных."""
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+        out = "base777\n" if argv[:2] == ["git", "rev-parse"] else "x.py\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    base, paths = RealOps().changed_paths("/tmp/kapelle", "master")
+    assert base == "base777"
+    assert paths == ["x.py"]
+    # origin/<base> не читается вовсе — это ровно тот протухающий ref.
+    assert not any("origin/master" in " ".join(a) for a in seen)
+
+
+def test_changed_paths_missing_fetch_head_raises(monkeypatch):
+    """Нет FETCH_HEAD — внятный отказ, а не молчаливая пустая база."""
+
+    def fake_run(argv, **kwargs):
+        rc = 128 if argv[:2] == ["git", "rev-parse"] else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="rev-parse FETCH_HEAD"):
+        RealOps().changed_paths("/tmp/kapelle", "master")
+
+
+def test_changed_paths_empty_fetch_head_raises(monkeypatch):
+    """Пустой stdout rev-parse при rc0 — тоже «базы нет»."""
+    _install_fake_run(monkeypatch, returncode=0, stdout="")
+    with pytest.raises(RuntimeError, match="rev-parse FETCH_HEAD"):
+        RealOps().changed_paths("/tmp/kapelle", "master")
 
 
 def test_changed_paths_fetch_failure_raises(monkeypatch):
@@ -690,7 +730,9 @@ def test_changed_paths_fetch_failure_raises(monkeypatch):
 def test_changed_paths_diff_failure_raises(monkeypatch):
     def fake_run(argv, **kwargs):
         rc = 129 if argv[:2] == ["git", "diff"] else 0
-        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+        # rev-parse обязан отдать базу, иначе упадёт он, а предмет здесь — диф.
+        out = "base777\n" if argv[:2] == ["git", "rev-parse"] else ""
+        return subprocess.CompletedProcess(argv, rc, stdout=out, stderr="boom")
 
     monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
     ops = RealOps()

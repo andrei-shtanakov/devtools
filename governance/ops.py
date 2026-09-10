@@ -52,7 +52,9 @@ class Ops(Protocol):
         self, target_dir: str, pr: int, sha: str
     ) -> None: ...
 
-    def changed_paths(self, target_dir: str, base_branch: str) -> list[str]: ...
+    def changed_paths(
+        self, target_dir: str, base_branch: str
+    ) -> tuple[str, list[str]]: ...
 
     def head_sha(self, target_dir: str, branch: str) -> str: ...
 
@@ -458,8 +460,10 @@ class RealOps:
                 f"rc={switch.returncode}: {switch.stderr.strip()}"
             )
 
-    def changed_paths(self, target_dir: str, base_branch: str) -> list[str]:
-        """Пути, изменённые HEAD относительно merge-base с origin/<base>.
+    def changed_paths(
+        self, target_dir: str, base_branch: str
+    ) -> tuple[str, list[str]]:
+        """База вердикта и пути, изменённые HEAD относительно неё.
 
         Гард путей accept-pr обязан быть привязан к МАТЕРИАЛИЗОВАННОМУ
         head0 (приёмка PR #113, круг 2): API-список файлов PR отражает
@@ -470,6 +474,14 @@ class RealOps:
         destination-refspec не обязан обновить refs/remotes/origin/<base>,
         и дифф против протухшего origin/<base> включил бы чужие коммиты
         базы — ложный authority-стоп. Сбой — RuntimeError.
+
+        OID базы возвращается ЗДЕСЬ, а не добывается вызывающим отдельно
+        (ревью #183, круг 3): пин мержа обязан назвать ту же базу, от
+        которой посчитан гард путей, а `refs/remotes/origin/<base>` — уже
+        другой ref, ровно тот протухающий, из-за которого круг 4 и перешёл
+        на FETCH_HEAD. Один fetch — одна база — один ответ; читать
+        FETCH_HEAD вторым вызовом снаружи значило бы снова развести
+        источники, стоило бы кому-то вставить между ними ещё один fetch.
         """
         fetch = subprocess.run(
             ["git", "fetch", "origin", base_branch],
@@ -480,6 +492,15 @@ class RealOps:
                 f"changed_paths: git fetch origin {base_branch} "
                 f"rc={fetch.returncode}: {fetch.stderr.strip()}"
             )
+        base = subprocess.run(
+            ["git", "rev-parse", "FETCH_HEAD"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if base.returncode != 0 or not base.stdout.strip():
+            raise RuntimeError(
+                f"changed_paths: git rev-parse FETCH_HEAD "
+                f"rc={base.returncode}: {base.stderr.strip()}"
+            )
         diff = subprocess.run(
             ["git", "diff", "--name-only", "FETCH_HEAD...HEAD"],
             cwd=target_dir, capture_output=True, text=True,
@@ -489,7 +510,10 @@ class RealOps:
                 f"changed_paths: git diff FETCH_HEAD...HEAD "
                 f"rc={diff.returncode}: {diff.stderr.strip()}"
             )
-        return [line for line in diff.stdout.splitlines() if line.strip()]
+        return (
+            base.stdout.strip(),
+            [line for line in diff.stdout.splitlines() if line.strip()],
+        )
 
     def head_sha(self, target_dir: str, branch: str) -> str:
         """SHA головы branch в target_dir."""
