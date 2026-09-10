@@ -7945,3 +7945,633 @@ def test_supersede_resume_reproduces_the_same_bytes(tmp_path, monkeypatch):
         blob_first
     )
     assert ("show_file", "base-sha-1", _SPEC_REL) in again.calls
+
+
+# --- §I12: `--approve-node` — одобрение узла есть человеческий акт ---------
+#
+# Единственный переход `draft|stale → approved` во всём мосту. Доставка
+# права одобрять не имеет ни на одном пути (§I7), поэтому предикат
+# «честно одобрен» и команда, которая его выполняет, — предмет отдельного
+# блока.
+
+_HUMAN, _HUMAN_AT = "andrei-shtanakov", "2026-09-10T12:00:00+03:00"
+_CHARTER = "00-charter.md"
+_REQUIREMENTS = "10-requirements.md"
+_BEHAVIOUR = "15-behaviour-spec.md"
+_DESIGN = "20-design.md"
+_ACCEPTANCE = "25-acceptance.md"
+_DECOMPOSITION = "30-decomposition.md"
+
+
+def _approve_all(
+    target: str,
+    by: str = _HUMAN,
+    at: str = _HUMAN_AT,
+    dag=None,
+    bundle_dir: str = _BUNDLE,
+) -> None:
+    """Честно одобренный бандл: статус, подпись и пины по факту.
+
+    Независимый от `approve_node` оракул: тесты гейта не должны зеленеть
+    оттого, что кривая запись согласована с кривым предикатом. Обход
+    топологический (порядок DAG), поэтому пин каждого узла считается уже
+    по финальным байтам его upstream.
+
+    Это и есть РЕАЛЬНЫЙ base доставки под новым контрактом: бандл, по
+    которому человек прошёл `--approve-node` и чей approve-PR вмержен.
+    Бандл целиком `draft` — состояние ДО этого шага конвейера, и
+    доставочная фикстура им быть больше не вправе."""
+    dag = dag or task_bridge._BUNDLE_DAG
+    files = {task_bridge._node_id(f): f for f, _ in dag}
+    base = Path(target) / bundle_dir
+    for fname, upstream_ids in dag:
+        path = base / fname
+        meta, body = task_bridge.split_frontmatter(
+            path.read_text(encoding="utf-8")
+        )
+        meta["status"] = "approved"
+        meta["approved_by"] = by
+        meta["approved_at"] = at
+        if upstream_ids:
+            meta["upstream_hashes"] = {
+                u: task_bridge.blob_sha1(
+                    (base / files[u]).read_text(encoding="utf-8")
+                )
+                for u in upstream_ids
+            }
+        path.write_text(
+            task_bridge.join_frontmatter(meta, body), encoding="utf-8"
+        )
+
+
+def _approve(target: str, node_id: str, **kw) -> list[str]:
+    return task_bridge.approve_node(
+        target, _BUNDLE, node_id, kw.pop("by", _HUMAN),
+        kw.pop("at", _HUMAN_AT), **kw,
+    )
+
+
+def test_approve_node_transitions_draft_and_records_the_human_act(
+    tmp_path: Path,
+) -> None:
+    """Пункт 3 контракта команды: переход, `version + 1`, пины, подпись."""
+    target = str(_target(tmp_path))
+    before = _meta(target, _CHARTER)["version"]
+
+    changed = _approve(target, "charter")
+
+    assert changed == [f"{_BUNDLE}/{_CHARTER}"]
+    meta = _meta(target, _CHARTER)
+    assert meta["status"] == "approved"
+    assert meta["version"] == before + 1
+    assert meta["approved_by"] == _HUMAN
+    assert meta["approved_at"] == _HUMAN_AT
+
+
+def test_approve_node_pins_actual_upstream_blobs(tmp_path: Path) -> None:
+    """Пины пересчитываются с ФАКТИЧЕСКИХ байтов upstream, не с записанных."""
+    target = str(_target(tmp_path))
+    _approve(target, "charter")
+
+    _approve(target, "requirements")
+
+    charter_blob = task_bridge.blob_sha1(
+        (Path(target) / _BUNDLE / _CHARTER).read_text(encoding="utf-8")
+    )
+    assert _meta(target, _REQUIREMENTS)["upstream_hashes"] == {
+        "charter": charter_blob
+    }
+
+
+def test_approve_node_refuses_when_direct_upstream_is_not_approved(
+    tmp_path: Path,
+) -> None:
+    """Пункт 2: топологическая готовность прямых upstream — условие входа."""
+    target = str(_target(tmp_path))
+    untouched = (Path(target) / _BUNDLE / _REQUIREMENTS).read_bytes()
+
+    with pytest.raises(RuntimeError, match="топологическая готовность"):
+        _approve(target, "requirements")
+
+    assert (Path(target) / _BUNDLE / _REQUIREMENTS).read_bytes() == untouched
+    assert _meta(target, _CHARTER)["status"] == "draft"
+
+
+def test_approve_node_upstream_check_is_the_same_predicate(
+    tmp_path: Path,
+) -> None:
+    """Upstream `approved`, но с разошедшимися пинами — тоже не готовность.
+
+    Предикат ОДИН на все проверки: сведи готовность к `status == approved`,
+    и узел, чей upstream был одобрен помимо этой команды и уехал вперёд,
+    прошёл бы молча. Индукция «прямые, а не транзитивные» держится ровно
+    на этом условии."""
+    target = str(_target(tmp_path))
+    _approve_all(target)
+    _set_node(target, _BEHAVIOUR, status="stale")
+    # requirements формально approved, но charter с тех пор уехал: его пин
+    # больше не сходится, значит для behaviour-spec upstream не готов.
+    _set_node(target, _CHARTER, version=99)
+
+    with pytest.raises(RuntimeError, match="топологическая готовность") as exc:
+        _approve(target, "behaviour-spec")
+    assert "10-requirements.md" in str(exc.value)
+
+
+def test_approve_node_repeat_over_honest_node_is_a_noop(
+    tmp_path: Path,
+) -> None:
+    """Пункт 4: ни записи, ни новой подписи, ни инкремента `version`.
+
+    Требование, а не вежливость: подпишись повтор заново, сменились бы
+    байты узла, downstream уехал бы в `stale`, и каждый лишний вызов
+    плодил бы долг на ровном месте."""
+    target = str(_target(tmp_path))
+    _approve_all(target)
+    before = _node_bytes_of(target)
+
+    assert _approve(target, "requirements", by="другой", at="2030-01-01") == []
+
+    assert _node_bytes_of(target) == before
+
+
+def test_approve_node_refuses_approved_node_with_drifted_pins(
+    tmp_path: Path,
+) -> None:
+    """Пункт 5: fail-closed, а не молчаливая перепиновка (spec-runner#410).
+
+    Отказ называет узел, ожидаемый и фактический блоб разошедшегося пина
+    и процедуру — вернуть узел в `stale` коррекцией и одобрить заново."""
+    target = str(_target(tmp_path))
+    _approve_all(target)
+    _set_node(
+        target, _REQUIREMENTS,
+        upstream_hashes={"charter": "de" + "0" * 38},
+    )
+    before = _node_bytes_of(target)
+
+    with pytest.raises(RuntimeError, match="перепиновать") as exc:
+        _approve(target, "requirements")
+
+    message = str(exc.value)
+    assert "de" + "0" * 38 in message
+    actual = task_bridge.blob_sha1(
+        (Path(target) / _BUNDLE / _CHARTER).read_text(encoding="utf-8")
+    )
+    assert actual in message
+    assert "stale" in message
+    assert _node_bytes_of(target) == before
+
+
+def test_approve_node_refuses_approved_node_without_signature(
+    tmp_path: Path,
+) -> None:
+    """«Одобрено» без одобрившего — незаконное состояние, не предмет approve.
+
+    Шаблон бандла заводит `approved_by: ""`: пустая строка есть «не
+    подписано», а не подпись."""
+    target = str(_target(tmp_path))
+    _approve_all(target)
+    _set_node(target, _CHARTER, approved_by="")
+
+    with pytest.raises(RuntimeError, match="approved_by/approved_at пусты"):
+        _approve(target, "charter")
+
+
+def test_approve_node_refuses_id_outside_the_active_dag(
+    tmp_path: Path,
+) -> None:
+    """Approve есть акт о ПОЗИЦИИ В ГРАФЕ, а не о файле на диске."""
+    target = str(_target(tmp_path))
+
+    with pytest.raises(RuntimeError, match="не входит в активный DAG") as exc:
+        _approve(target, "workstreams/WS-alpha-7/spec/00-charter.md")
+    assert "charter" in str(exc.value)
+
+
+def _node_bytes_of(target: str) -> dict[str, bytes]:
+    base = Path(target) / _BUNDLE
+    return {
+        fname: (base / fname).read_bytes()
+        for fname, _ in task_bridge._BUNDLE_DAG
+    }
+
+
+# --- каскад `stale`: рекурсивный, меняет ровно статус ----------------------
+
+
+def test_cascade_is_recursive_not_single_level(tmp_path: Path) -> None:
+    """Approve requirements → behaviour-spec/design/acceptance в `stale`, и
+    decomposition, который requirements НЕ пинует, — тоже.
+
+    Смена статуса есть правка файла, а файл узла входит в пин его
+    собственных downstream: одноуровневый каскад оставил бы decomposition
+    `approved` с пином на байты design/acceptance, которых уже нет, — то
+    самое незаконное состояние, ради запрета которого он вводился."""
+    target = str(_target(tmp_path))
+    _approve_all(target)
+    _set_node(target, _REQUIREMENTS, status="stale")
+
+    changed = _approve(target, "requirements")
+
+    assert set(changed) == {
+        f"{_BUNDLE}/{name}" for name in (
+            _REQUIREMENTS, _BEHAVIOUR, _DESIGN, _ACCEPTANCE, _DECOMPOSITION,
+        )
+    }
+    for name in (_BEHAVIOUR, _DESIGN, _ACCEPTANCE, _DECOMPOSITION):
+        assert _meta(target, name)["status"] == "stale", name
+
+
+def test_cascade_stops_on_a_node_that_already_carries_the_debt(
+    tmp_path: Path,
+) -> None:
+    """Долг у него объявлен, помечать нечем — рекурсия конечна без счётчика."""
+    target = str(_target(tmp_path))
+    _approve_all(target)
+    _set_node(target, _REQUIREMENTS, status="stale")
+    _set_node(target, _BEHAVIOUR, status="draft")
+    _set_node(target, _DESIGN, status="stale")
+    frozen = {
+        name: (Path(target) / _BUNDLE / name).read_bytes()
+        for name in (_BEHAVIOUR, _DESIGN)
+    }
+
+    changed = _approve(target, "requirements")
+
+    assert f"{_BUNDLE}/{_BEHAVIOUR}" not in changed
+    assert f"{_BUNDLE}/{_DESIGN}" not in changed
+    for name, before in frozen.items():
+        assert (Path(target) / _BUNDLE / name).read_bytes() == before
+    # acceptance пинует requirements напрямую — его каскад достаёт.
+    assert _meta(target, _ACCEPTANCE)["status"] == "stale"
+
+
+def test_cascade_changes_status_and_nothing_else(tmp_path: Path) -> None:
+    """Подпись, `version` и прежние пины `stale`-узла сохраняются.
+
+    Пины обязаны продолжать указывать на одобренные байты — это запись
+    «что именно покрывала подпись», а не устаревший мусор; операция
+    СОЗДАЁТ долг, а не гасит его."""
+    target = str(_target(tmp_path))
+    _approve_all(target)
+    _set_node(target, _REQUIREMENTS, status="stale")
+    _set_node(target, _BEHAVIOUR, version=7)
+    before = _meta(target, _BEHAVIOUR)
+    assert before["version"] == 7 and before["approved_by"] == _HUMAN
+
+    _approve(target, "requirements")
+
+    # Весь frontmatter дословно прежний, кроме одного ключа: `version`,
+    # подпись и пины `stale`-узла — записи о ПРОШЛОМ одобрении.
+    assert _meta(target, _BEHAVIOUR) == {**before, "status": "stale"}
+
+
+def test_after_any_approve_no_approved_node_carries_a_false_pin(
+    tmp_path: Path,
+) -> None:
+    """Инвариант каскада, сформулированный через результат, а не обход:
+    это ровно предикат, который потом проверяет гейт §I12 у доставки."""
+    target = str(_target(tmp_path))
+    _approve_all(target)
+    _set_node(target, _DESIGN, status="stale")
+
+    _approve(target, "design")
+
+    stale_free = [
+        finding for finding in task_bridge._approval_findings(
+            target, _BUNDLE, task_bridge._BUNDLE_DAG
+        )
+        if "пин" in finding
+    ]
+    assert stale_free == []
+
+
+# --- волна одобрения: накапливающая ветка, её head, draft-PR ---------------
+#
+# Ветка — предмет проверки, а не декорация вокруг неё, поэтому здесь
+# ЖИВОЙ git: bare origin + клон. Стаб подтвердил бы только то, что мы его
+# так написали; «второй вызов видит результат первого» — свойство ветки,
+# и проверять его надо на ветке.
+
+
+def _git(*args: str, cwd) -> str:
+    import subprocess
+
+    done = subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True,
+        check=True,
+    )
+    return done.stdout
+
+
+class _WaveOps(task_bridge.RealOps):
+    """RealOps с живым git и заглушённой форджей (gh наружу не ходит)."""
+
+    def __init__(self, login: str = _HUMAN) -> None:
+        self.login = login
+        self.created: list[tuple[str, str]] = []
+        self.pr_by_branch: dict[str, int] = {}
+
+    def gh_login(self) -> str | None:
+        return self.login
+
+    def find_pr(self, repo_slug, branch, *, any_state=False):
+        return self.pr_by_branch.get(branch)
+
+    def create_draft_pr(
+        self, target_dir, repo_slug, branch, title, body, label
+    ) -> int:
+        self.created.append((branch, title))
+        self.pr_by_branch[branch] = 900 + len(self.created)
+        return self.pr_by_branch[branch]
+
+
+_WAVE_BRANCH = "spec/WS-alpha-7-bundle-approve"
+
+
+def _wave_state(tmp_path: Path, monkeypatch, approved: bool = False):
+    """Клон с бандлом на master + прогон над ним; → (state, origin)."""
+    import subprocess
+
+    from governance import run_state as rs
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    origin = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-q", "-b", "master", str(origin)],
+        check=True,
+    )
+    target = _target(tmp_path)
+    if approved:
+        _approve_all(str(target))
+    _git("init", "-q", "-b", "master", cwd=target)
+    _git("config", "user.email", "t@example.com", cwd=target)
+    _git("config", "user.name", "t", cwd=target)
+    _git("config", "commit.gpgsign", "false", cwd=target)
+    _git("add", "-A", cwd=target)
+    _git("commit", "-qm", "бандл", cwd=target)
+    _git("remote", "add", "origin", str(origin), cwd=target)
+    _git("push", "-q", "-u", "origin", "master", cwd=target)
+    state = rs.new_run(
+        subject="s",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        target_dir=str(target),
+        bundle_dir=_BUNDLE,
+        profile=None,
+        run_id="r-wave",
+    )
+    state.status = "completed"
+    state.base_ref = "master"
+    rs.save(state)
+    return state, origin
+
+
+def _origin_has(origin: Path, branch: str) -> bool:
+    return bool(_git("branch", "--list", branch, cwd=origin).strip())
+
+
+def test_wave_second_call_reads_the_head_of_the_accumulating_branch(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Условие сходимости волны, а не удобство.
+
+    Волна идёт по DAG сверху вниз несколькими вызовами, и всё, что сделал
+    предыдущий, лежит в ВЕТКЕ: мержа ещё не было. Читай второй вызов один
+    base — топологическая готовность не была бы предъявлена ни для одного
+    узла ниже первого, и он одобрял бы поверх устаревшего дерева."""
+    state, origin = _wave_state(tmp_path, monkeypatch)
+    ops = _WaveOps()
+
+    first = task_bridge.approve_node_for_run(state, ops, "charter")
+    second = task_bridge.approve_node_for_run(state, ops, "requirements")
+
+    assert first == second, "второй PR не создаётся никогда"
+    assert len(ops.created) == 1
+    assert ops.created[0][0] == _WAVE_BRANCH
+    # Пин requirements указывает на charter ИЗ ВЕТКИ (уже одобренный), а
+    # не на его версию в base.
+    head_charter = _git(
+        "show", f"origin/{_WAVE_BRANCH}:{_BUNDLE}/{_CHARTER}",
+        cwd=state.target_dir,
+    )
+    assert task_bridge.split_frontmatter(head_charter)[0]["status"] == (
+        "approved"
+    )
+    meta = _meta(state.target_dir, _REQUIREMENTS)
+    assert meta["status"] == "approved"
+    assert meta["upstream_hashes"]["charter"] == task_bridge.blob_sha1(
+        head_charter
+    )
+    # base не тронут: devtools пишет в соседние репо только PR-ом.
+    base_charter = _git(
+        "show", f"origin/master:{_BUNDLE}/{_CHARTER}", cwd=state.target_dir
+    )
+    assert task_bridge.split_frontmatter(base_charter)[0]["status"] == "draft"
+
+
+def test_wave_commit_carries_the_node_and_the_whole_cascade(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Частичный коммит оставил бы в ветке `approved`-узел с ложным пином —
+    состояние, которое каскад и обязан не допускать."""
+    state, origin = _wave_state(tmp_path, monkeypatch, approved=True)
+    _set_node(state.target_dir, _REQUIREMENTS, status="stale")
+    _git("commit", "-qam", "correction: requirements в долг",
+         cwd=state.target_dir)
+    _git("push", "-q", "origin", "master", cwd=state.target_dir)
+
+    task_bridge.approve_node_for_run(state, _WaveOps(), "requirements")
+
+    files = _git(
+        "show", "--name-only", "--format=", f"origin/{_WAVE_BRANCH}",
+        cwd=state.target_dir,
+    ).split()
+    assert set(files) == {
+        f"{_BUNDLE}/{name}" for name in (
+            _REQUIREMENTS, _BEHAVIOUR, _DESIGN, _ACCEPTANCE, _DECOMPOSITION,
+        )
+    }
+
+
+def test_wave_noop_over_honest_node_starts_no_branch(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """Повтор — no-op: ни ветки, ни PR, ни коммита."""
+    state, origin = _wave_state(tmp_path, monkeypatch, approved=True)
+    ops = _WaveOps()
+
+    assert task_bridge.approve_node_for_run(state, ops, "charter") is None
+
+    assert ops.created == []
+    assert not _origin_has(origin, _WAVE_BRANCH)
+    assert "no-op" in capsys.readouterr().out
+
+
+def test_wave_announces_readiness_only_when_the_dag_converges(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """Пока DAG одобрен не целиком, PR остаётся draft и готовность не
+    объявляется; последним вызовом механика СООБЩАЕТ готовность — перевод
+    в ready и мерж человеческие (§I9)."""
+    state, origin = _wave_state(tmp_path, monkeypatch)
+    ops = _WaveOps()
+
+    for node in ("charter", "requirements", "behaviour-spec", "design"):
+        task_bridge.approve_node_for_run(state, ops, node)
+        assert "волна не завершена" in capsys.readouterr().out
+    task_bridge.approve_node_for_run(state, ops, "acceptance")
+    assert "волна не завершена" in capsys.readouterr().out
+
+    task_bridge.approve_node_for_run(state, ops, "decomposition")
+
+    out = capsys.readouterr().out
+    assert "одобрен целиком" in out
+    assert "ready" in out and "человеческ" in out
+    assert task_bridge._approval_findings(
+        state.target_dir, _BUNDLE, task_bridge._BUNDLE_DAG
+    ) == []
+
+
+@pytest.mark.parametrize("login", ["ai-prosto", None])
+def test_wave_refuses_agent_and_unresolved_login_without_a_write(
+    tmp_path: Path, monkeypatch, login,
+) -> None:
+    """Профильный guard: подпись узла от агентской учётки неотличима в
+    артефакте от человеческой; пустой логин — подписывать нечем."""
+    state, origin = _wave_state(tmp_path, monkeypatch)
+    ops = _WaveOps(login=login)
+
+    with pytest.raises(RuntimeError, match="approve|подписывать нечем"):
+        task_bridge.approve_node_for_run(state, ops, "charter")
+
+    assert ops.created == []
+    assert not _origin_has(origin, _WAVE_BRANCH)
+    assert _meta(state.target_dir, _CHARTER)["status"] == "draft"
+
+
+def test_wave_refuses_under_the_review_gh_config_dir(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Вторая половина того же факта: профиль опознаётся и по каталогу.
+
+    Переопределённый `REVIEW_LOGIN` рассогласовал бы проверку, стой она
+    на одном лишь имени учётки."""
+    state, origin = _wave_state(tmp_path, monkeypatch)
+    monkeypatch.setenv(
+        "GH_CONFIG_DIR", str(task_bridge.REVIEW_GH_CONFIG_DIR)
+    )
+    ops = _WaveOps(login="andrei-shtanakov")
+
+    with pytest.raises(RuntimeError, match="ревью-контурный"):
+        task_bridge.approve_node_for_run(state, ops, "charter")
+
+    assert ops.created == []
+    assert not _origin_has(origin, _WAVE_BRANCH)
+
+
+def test_wave_refusal_leaves_no_branch(tmp_path: Path, monkeypatch) -> None:
+    """§I12 п.6: отказ не пишет ни файла узла, ни статусов downstream, ни
+    ветки — валидация стоит ДО создания накапливающей."""
+    state, origin = _wave_state(tmp_path, monkeypatch)
+    ops = _WaveOps()
+
+    with pytest.raises(RuntimeError, match="топологическая готовность"):
+        task_bridge.approve_node_for_run(state, ops, "requirements")
+
+    assert not _origin_has(origin, _WAVE_BRANCH)
+    assert ops.created == []
+    assert _meta(state.target_dir, _REQUIREMENTS)["status"] == "draft"
+    # «Ни ветки» — и локальной тоже: отказ обязан оставить клон там же,
+    # где взял. Ветка создаётся ПОСЛЕ валидации, а не до неё.
+    assert _git("branch", "--list", _WAVE_BRANCH,
+                cwd=state.target_dir).strip() == ""
+    assert _git("branch", "--show-current",
+                cwd=state.target_dir).strip() == "master"
+
+
+def test_wave_dirty_target_refuses(tmp_path: Path, monkeypatch) -> None:
+    state, origin = _wave_state(tmp_path, monkeypatch)
+    (Path(state.target_dir) / "чужое.txt").write_text("х", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="грязный"):
+        task_bridge.approve_node_for_run(state, _WaveOps(), "charter")
+
+
+# --- CLI `--approve-node` -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--supersede"],
+        ["--conform-approve"],
+        ["--abandon-revision", "2", "--reason", "x"],
+        ["--replace-revision", "2", "--reason", "x", "--supersede"],
+    ],
+)
+def test_cli_approve_node_is_the_only_action_of_the_run(extra, capsys) -> None:
+    with pytest.raises(SystemExit):
+        task_bridge.main(
+            ["--run-id", "r", "--approve-node", "charter", *extra]
+        )
+    assert "отдельное действие" in capsys.readouterr().err
+
+
+def test_cli_approve_node_refuses_a_path_instead_of_a_node_id(capsys) -> None:
+    """Промах ловится на разборе аргументов — не пишется вовсе ничего."""
+    with pytest.raises(SystemExit):
+        task_bridge.main(
+            ["--run-id", "r", "--approve-node",
+             "workstreams/WS-alpha-7/spec/00-charter.md"]
+        )
+    err = capsys.readouterr().err
+    assert "не node-id активного DAG" in err
+    assert "decomposition" in err
+
+
+def test_cli_approve_node_allowed_ids_follow_the_legacy_flag(capsys) -> None:
+    """Состав допустимых id — активный DAG, а не полный список всегда."""
+    with pytest.raises(SystemExit):
+        task_bridge.main(
+            ["--run-id", "r", "--approve-node", "acceptance",
+             "--legacy-bundle", "5"]
+        )
+    err = capsys.readouterr().err
+    assert "acceptance" in err and "decomposition" in err
+
+
+def test_cli_approve_node_reaches_implementation(
+    tmp_path, monkeypatch, capsys,
+) -> None:
+    state, _origin = _wave_state(tmp_path, monkeypatch)
+    seen: dict = {}
+
+    def _fake(s, o, node_id, legacy_bundle=None):
+        seen.update(run=s.run_id, node=node_id, legacy=legacy_bundle)
+        return 901
+
+    monkeypatch.setattr(task_bridge, "approve_node_for_run", _fake)
+    monkeypatch.setattr(task_bridge, "RealOps", lambda: object())
+
+    assert task_bridge.main(["--run-id", "r-wave", "--approve-node",
+                             "charter"]) == 0
+    assert seen == {"run": "r-wave", "node": "charter", "legacy": None}
+
+
+def test_cli_approve_node_failure_is_a_message_not_a_traceback(
+    tmp_path, monkeypatch, capsys,
+) -> None:
+    state, _origin = _wave_state(tmp_path, monkeypatch)
+
+    def _boom(s, o, node_id, legacy_bundle=None):
+        raise RuntimeError("топологическая готовность не предъявлена")
+
+    monkeypatch.setattr(task_bridge, "approve_node_for_run", _boom)
+    monkeypatch.setattr(task_bridge, "RealOps", lambda: object())
+
+    assert task_bridge.main(["--run-id", "r-wave", "--approve-node",
+                             "requirements"]) == 1
+    assert "топологическая готовность" in capsys.readouterr().out

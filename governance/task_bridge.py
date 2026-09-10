@@ -29,7 +29,12 @@ from typing import Literal, NamedTuple
 import yaml
 
 from governance import acceptance_guard, decomposition_guard, design_guard
-from governance.ops import Ops, RealOps
+from governance.ops import (
+    REVIEW_GH_CONFIG_DIR,
+    Ops,
+    RealOps,
+    review_login,
+)
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
 from governance.run_state import RunState, load, op_complete, op_start, save
 from governance.stale_adapter import blob_sha1
@@ -1136,6 +1141,521 @@ def _prospective_anchor(
     ) as shadow:
         anchor_file = shadow / bundle_dir / dag[-1][0]
         return blob_sha1(anchor_file.read_text(encoding="utf-8"))
+
+
+# --- §I12: одобрение узла бандла — человеческий акт ----------------------
+#
+# Одна величина, один вопрос: узел активного DAG ЧЕСТНО ОДОБРЕН, когда
+# выполнены все три условия сразу — `status: approved`, непустая подпись
+# (`approved_by`/`approved_at`; шаблон бандла заводит `approved_by: ""`, и
+# пустая строка есть «не подписано», а не подпись) и сходимость КАЖДОГО
+# пина с фактическим блобом upstream-файла В ТОМ ЖЕ ДЕРЕВЕ. Предикат один
+# на все проверки: гейт доставки, топологическая готовность upstream у
+# `--approve-node` и отчёт о готовности волны спрашивают ровно его.
+
+
+def _dag_files(
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+) -> dict[str, str]:
+    """node-id → имя файла активного DAG."""
+    return {_node_id(fname): fname for fname, _ in dag}
+
+
+def _pin_drift(
+    base: Path,
+    files: dict[str, str],
+    upstream_ids: tuple[str, ...],
+    meta: dict,
+) -> list[tuple[str, object, str]]:
+    """Разошедшиеся пины узла: `(upstream-id, записанный, фактический)`.
+
+    Сравнение идёт с блобом upstream-файла В ТОМ ЖЕ ДЕРЕВЕ — предикат
+    относителен дереву, потому что и подпись относительна ему: она
+    утверждает одобрение конкретных байтов, а байты живут в дереве.
+    """
+    pins = meta.get("upstream_hashes")
+    pins = pins if isinstance(pins, dict) else {}
+    drift: list[tuple[str, object, str]] = []
+    for upstream_id in upstream_ids:
+        actual = blob_sha1(
+            (base / files[upstream_id]).read_text(encoding="utf-8")
+        )
+        if pins.get(upstream_id) != actual:
+            drift.append((upstream_id, pins.get(upstream_id), actual))
+    return drift
+
+
+def _approval_findings(
+    target_dir: str,
+    bundle_dir: str,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    nodes: tuple[str, ...] | None = None,
+) -> list[str]:
+    """Узлы, не проходящие предикат честной одобренности — по строке.
+
+    Пустой список — «все спрошенные узлы честно одобрены». `nodes`
+    сужает вопрос до перечисленных node-id (топологическая готовность
+    прямых upstream — тот же предикат на подмножестве, а не второе
+    правило рядом с первым).
+
+    Сходимость пинов спрашивается ТОЛЬКО у `approved`-узла, и это не
+    послабление: `stale` с разошедшимися пинами — нормальное состояние
+    честного долга («что именно покрывала подпись»), а `approved` с
+    разошедшимися — состояние, которое контракт объявляет незаконным.
+    Разница не в байтах, а в том, что утверждает статус.
+
+    У корневого узла (без upstream) условие сходимости выполнено пусто —
+    это не поблажка, а отсутствие предмета.
+    """
+    base = Path(target_dir) / bundle_dir
+    files = _dag_files(dag)
+    findings: list[str] = []
+    for fname, upstream_ids in dag:
+        node = _node_id(fname)
+        if nodes is not None and node not in nodes:
+            continue
+        meta, _ = split_frontmatter((base / fname).read_text(encoding="utf-8"))
+        status = meta.get("status")
+        if status != "approved":
+            findings.append(
+                f"{bundle_dir}/{fname}: status={status!r} — узел не одобрен "
+                f"(долг человеческого approve: --approve-node {node})"
+            )
+            continue
+        if not (meta.get("approved_by") and meta.get("approved_at")):
+            findings.append(
+                f"{bundle_dir}/{fname}: status=approved, но approved_by/"
+                "approved_at пусты — «одобрено» без одобрившего"
+            )
+        for upstream_id, recorded, actual in _pin_drift(
+            base, files, upstream_ids, meta
+        ):
+            findings.append(
+                f"{bundle_dir}/{fname}: пин {upstream_id} записан "
+                f"{recorded!r}, фактический блоб {actual!r} — подпись стоит "
+                "под байтами, которых в этом дереве нет"
+            )
+    return findings
+
+
+#: Процедура оператору при отказе гейта §I12. Отказ без процедуры
+#: бесполезен — то же требование, что у §I10.
+_APPROVE_PROCEDURE = (
+    "одобрите перечисленные узлы в топологическом порядке "
+    "(`--approve-node <node-id>` по каждому), затем approve-PR ветки "
+    "`spec/<ws-id>-bundle-approve`, человеческий мерж — и повторите доставку"
+)
+
+
+def _require_approved_dag(
+    target_dir: str,
+    bundle_dir: str,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+) -> None:
+    """Гейт §I12 — общий для ЛЮБОЙ доставки, и он только ПРОВЕРЯЕТ.
+
+    Там, где `stamp_bundle_approved` СОЗДАВАЛ approved-состояние, доставка
+    теперь его ТРЕБУЕТ. Штамп, встретив неодобренный узел, доводил
+    доставку до конца и оставлял ложь в артефакте; проверка на том же
+    узле останавливает доставку до ветки, коммита и PR. Fail-open стал
+    fail-closed без единого нового понятия — операция сменила знак.
+    """
+    findings = _approval_findings(target_dir, bundle_dir, dag)
+    if findings:
+        raise RuntimeError(
+            "активный DAG одобрен не целиком (§I12) — доставка не начата:\n"
+            + "\n".join(f"- {f}" for f in findings)
+            + f"\nПроцедура: {_APPROVE_PROCEDURE}"
+        )
+
+
+#: Статусы, из которых узел входит в `approved` (§I12 п.3). Никакой
+#: другой в `approved` не входит: он либо уже там, либо контракту неизвестен.
+_APPROVABLE_STATUSES = ("draft", "stale")
+
+
+def _approvable(
+    target_dir: str,
+    bundle_dir: str,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    node_id: str,
+) -> bool:
+    """Узел готов к approve (True) либо уже честно одобрен (False); иначе
+    отказ.
+
+    ЧИСТОЕ ЧТЕНИЕ — ни одна ветка ниже ничего не пишет, и это свойство
+    несущее: `approve_node_for_run` зовёт функцию ДО создания
+    накапливающей ветки, потому что §I12 п.6 требует, чтобы отказ не
+    оставил ни файла узла, ни статусов downstream, ни ветки. Второй раз
+    её же зовёт `approve_node` — гвард для прямых вызовов; читать дерево
+    дважды дешевле, чем разводить валидацию и запись по двум правилам.
+    """
+    files = _dag_files(dag)
+    if node_id not in files:
+        raise RuntimeError(
+            f"узел {node_id!r} не входит в активный DAG — approve есть акт о "
+            "ПОЗИЦИИ В ГРАФЕ, а не о файле на диске; допустимые node-id: "
+            + ", ".join(files)
+        )
+    node_findings = _approval_findings(
+        target_dir, bundle_dir, dag, nodes=(node_id,)
+    )
+    if not node_findings:
+        return False
+    base = Path(target_dir) / bundle_dir
+    meta, _ = split_frontmatter(
+        (base / files[node_id]).read_text(encoding="utf-8")
+    )
+    status = meta.get("status")
+    if status == "approved":
+        # §I12 п.5: молчаливая перепиновка (или дописывание подписи) под
+        # сохранённым провенансом — ровно дефект spec-runner#410,
+        # вызванный человеком по другому поводу. Узел обязан сначала
+        # ПРИЗНАТЬ долг и уже из `stale` быть одобрен заново.
+        raise RuntimeError(
+            f"{bundle_dir}/{files[node_id]}: узел approved, но состояние "
+            "незаконно — перепиновать его под сохранённой подписью механика "
+            "не вправе:\n"
+            + "\n".join(f"- {f}" for f in node_findings)
+            + "\nПроцедура: вернуть узел в `stale` коррекцией в "
+            "репо-владельце (апстрим действительно сдвинулся) и одобрить "
+            f"заново: --approve-node {node_id}"
+        )
+    if status not in _APPROVABLE_STATUSES:
+        raise RuntimeError(
+            f"{bundle_dir}/{files[node_id]}: status={status!r} — в approved "
+            f"входят только {' и '.join(_APPROVABLE_STATUSES)}"
+        )
+    upstream_ids = next(u for f, u in dag if _node_id(f) == node_id)
+    upstream_findings = _approval_findings(
+        target_dir, bundle_dir, dag, nodes=upstream_ids
+    )
+    if upstream_findings:
+        # Прямые, а не транзитивные: каждый approve сам требовал того же
+        # от своих upstream, значит индукция покрывает всё замыкание
+        # предков. Индукция здесь не допущение — условие сходимости пинов
+        # ловит замыкание, собранное НЕ этой командой.
+        raise RuntimeError(
+            f"{bundle_dir}/{files[node_id]}: топологическая готовность не "
+            "предъявлена — прямые upstream не одобрены:\n"
+            + "\n".join(f"- {f}" for f in upstream_findings)
+            + "\nПорядок обхода — топологический, сверху вниз: "
+            + " → ".join(_dag_files(dag))
+        )
+    return True
+
+
+def _cascade_stale(
+    base: Path,
+    bundle_dir: str,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    changed_node: str,
+) -> list[str]:
+    """Рекурсивный каскад долга вниз по DAG; → rel-пути помеченных файлов.
+
+    Approve узла X меняет байты X, значит пины его downstream перестают
+    сходиться. Оставить их `approved` значило бы своими руками создать
+    незаконное состояние, а следующая команда упёрлась бы в тупик:
+    одобрить `approved`-узел с неверными пинами нельзя, а перевести его в
+    `stale` некому.
+
+    Каскад РЕКУРСИВНЫЙ, а не одноуровневый: смена статуса есть правка
+    файла, а файл узла входит в пин его собственных downstream —
+    одноуровневый каскад создавал бы то же незаконное состояние уровнем
+    ниже. Ветка обрывается на узле, уже лежащем `draft`/`stale`: долг у
+    него объявлен, помечать нечем. Рекурсия конечна без счётчика —
+    помеченный узел сам становится долговым.
+
+    Меняется РОВНО `status`: подпись остаётся записью о прошлом
+    одобрении, `version` не растёт (нового поколения одобрения не
+    случилось), пины продолжают указывать на одобренные байты — этого
+    прямо требует условие (3) предиката для `stale`.
+    """
+    downstream: dict[str, list[str]] = {}
+    for fname, upstream_ids in dag:
+        for upstream_id in upstream_ids:
+            downstream.setdefault(upstream_id, []).append(fname)
+    marked: list[str] = []
+    queue = [changed_node]
+    while queue:
+        node = queue.pop(0)
+        for fname in downstream.get(node, []):
+            path = base / fname
+            meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+            if meta.get("status") != "approved":
+                continue
+            meta["status"] = "stale"
+            path.write_text(join_frontmatter(meta, body), encoding="utf-8")
+            marked.append(f"{bundle_dir}/{fname}")
+            queue.append(_node_id(fname))
+    return marked
+
+
+def approve_node(
+    target_dir: str,
+    bundle_dir: str,
+    node_id: str,
+    approved_by: str,
+    approved_at: str,
+    legacy_bundle: int | None = None,
+) -> list[str]:
+    """Человеческий approve узла + рекурсивный каскад `stale`; → rel-пути.
+
+    Единственный переход `draft|stale → approved` во всём мосту (§I12):
+    доставка права одобрять не имеет ни на одном пути (§I7). Человек
+    РЕШАЕТ — выбирает узел; механика СЧИТАЕТ — валидирует узел, проверяет
+    одобренность прямых upstream, вычисляет их реальные blob-хеши,
+    обновляет пины и `version`, записывает подпись. Решения об одобрении
+    механика не принимает, она его РЕГИСТРИРУЕТ; всё, что она умеет
+    добавить от себя, — это отказ.
+
+    Пустой список — no-op (§I12 п.4): узел уже честно одобрен, файл не
+    переписывается, `version` не растёт, новая подпись не ставится,
+    downstream не трогается. Это требование, а не вежливость: подпишись
+    повтор заново, сменились бы байты узла, его downstream уехал бы в
+    `stale`, и каждый лишний вызов плодил бы долг на ровном месте.
+
+    `approved_by`/`approved_at` приходят аргументами, но НЕ произвольные:
+    вызывающий (`approve_node_for_run`) берёт логин у форджи и время —
+    в момент вызова (§I12). Здесь они — данные акта, который уже
+    совершён.
+    """
+    dag = _dag_for(legacy_bundle)
+    _check_bundle_composition(target_dir, bundle_dir, dag)
+    if not _approvable(target_dir, bundle_dir, dag, node_id):
+        return []
+    files = _dag_files(dag)
+    base = Path(target_dir) / bundle_dir
+    path = base / files[node_id]
+    meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+    upstream_ids = next(u for f, u in dag if _node_id(f) == node_id)
+    meta["status"] = "approved"
+    # Переход в `approved` и есть новое поколение одобрения документа —
+    # отсюда инкремент. Открытый вопрос отменённой редакции §I7 («растёт
+    # ли version на переходе вне signed_nodes») закрыт исчезновением
+    # клетки: такого перехода механика не совершает вовсе.
+    meta["version"] = int(meta.get("version") or 1) + 1
+    meta["approved_by"] = approved_by
+    meta["approved_at"] = approved_at
+    if upstream_ids:
+        pins = meta.get("upstream_hashes")
+        pins = dict(pins) if isinstance(pins, dict) else {}
+        for upstream_id in upstream_ids:
+            pins[upstream_id] = blob_sha1(
+                (base / files[upstream_id]).read_text(encoding="utf-8")
+            )
+        meta["upstream_hashes"] = pins
+    path.write_text(join_frontmatter(meta, body), encoding="utf-8")
+    return [
+        f"{bundle_dir}/{files[node_id]}",
+        *_cascade_stale(base, bundle_dir, dag, node_id),
+    ]
+
+
+def _human_login(ops: Ops) -> str:
+    """Логин человека, совершающего approve; иначе — отказ (§I12).
+
+    Свободный аргумент позволил бы подписать чужим именем, и ложь была бы
+    неотличима от правды: в артефакте осталась бы валидная строка, а
+    проверить её потом нечем. Логин — факт, установленный форджей о том,
+    КТО вызвал команду.
+
+    Профильный guard отказывает в двух случаях, и оба — «подписывать
+    нечем либо нечестно»:
+
+    - логин не разрешается или пуст (нет авторизации, сеть, пустой
+      ответ) — выдумать подпись неоткуда;
+    - активный профиль ревью-контурный. Опознаётся по ДВУМ фактам одной
+      и той же учётки — `GH_CONFIG_DIR`, указывающему на её профиль, и
+      самому логину: спека называет оба (`~/.config/review`, логин
+      `REVIEW_LOGIN`), и достаточно любого, потому что переопределённый
+      `REVIEW_LOGIN` рассогласовал бы проверку по одному лишь имени. Эта
+      учётка существует, чтобы публиковать АГЕНТСКИЕ вердикты; подпись
+      узла от её имени была бы в артефакте неотличима от человеческой и
+      уничтожила бы различитель agent/human (ADR-ECO-011) ровно так же,
+      как голый `gh pr merge` обнуляет `merged_by`. Правило — зеркало
+      того, что действует на мерже: там агентский профиль обязателен,
+      здесь запрещён.
+
+    Принятый остаток (§I12, та же незакрытая развилка, что в §I10):
+    прочие агентские учётки командой не опознаются — список агентских
+    логинов есть явная конфигурация прогона, по умолчанию в нём только
+    ревью-контурный.
+    """
+    config_dir = os.environ.get("GH_CONFIG_DIR")
+    if config_dir and Path(config_dir).expanduser() == REVIEW_GH_CONFIG_DIR:
+        raise RuntimeError(
+            f"активный профиль gh — ревью-контурный ({config_dir}): approve "
+            "узла есть ЧЕЛОВЕЧЕСКИЙ акт, а подпись от агентской учётки "
+            "неотличима в артефакте от человеческой. Запустите команду от "
+            "своего профиля (без GH_CONFIG_DIR)"
+        )
+    login = ops.gh_login()
+    if not login:
+        raise RuntimeError(
+            "активный GitHub-логин не разрешается (нет авторизации, сеть "
+            "либо пустой ответ) — подписывать нечем, а выдумать подпись "
+            "неоткуда; проверьте `gh auth status`"
+        )
+    if login == review_login():
+        raise RuntimeError(
+            f"активный GitHub-логин — {login!r}, учётка ревью-контура: "
+            "approve узла есть ЧЕЛОВЕЧЕСКИЙ акт, и подпись от неё "
+            "уничтожила бы различитель agent/human. Запустите команду от "
+            "своего профиля"
+        )
+    return login
+
+
+def _approve_branch(ws_id: str) -> str:
+    """Накапливающая ветка волны одобрения — ОДНА на весь активный DAG.
+
+    Не путать с `spec/<ws-id>-tasks-approve` (`--conform-approve`): тот
+    нормализует frontmatter TASKS-СПЕКИ после `spec approve` владельца,
+    здесь предмет другой — узлы бандла.
+    """
+    return f"spec/{ws_id}-bundle-approve"
+
+
+def _wave_pr(state: RunState, ops: Ops, branch: str) -> int:
+    """Draft-PR волны: первый вызов создаёт, следующие возвращают тот же.
+
+    Второй PR не создаётся никогда — поиск идёт по ОТКРЫТЫМ PR ветки
+    (`any_state` не годится: вмерженный PR прошлой волны означает, что та
+    волна доехала в base, и новая волна той же ветки обязана получить
+    свой PR).
+
+    PR остаётся draft, пока активный DAG одобрен не целиком; перевод в
+    ready и мерж — человеческие (§I9), и довод там сильнее обычного: PR
+    несёт зафиксированный человеческий акт одобрения, и мержить его от
+    агентской учётки значило бы дописать к решению человека агентский шаг
+    ровно там, где различитель agent/human и живёт.
+    """
+    existing = ops.find_pr(state.repo_slug, branch)
+    if existing is not None:
+        return existing
+    return ops.create_draft_pr(
+        state.target_dir,
+        state.repo_slug,
+        branch,
+        f"spec: {state.ws_id} bundle — одобрение узлов (approve)",
+        (
+            f"Человеческое одобрение узлов бандла {state.ws_id} "
+            f"({state.bundle_dir}/), накапливающая ветка `{branch}`.\n\n"
+            "Каждый вызов `--approve-node <node-id>` добавляет сюда коммит: "
+            "одобренный узел (`status: approved`, подпись = логин "
+            "вызвавшего, `approved_at` = время вызова, пины пересчитаны с "
+            "фактических блобов upstream) и весь рекурсивный след `stale` "
+            "по downstream.\n\n"
+            "PR остаётся **draft**, пока активный DAG одобрен не целиком. "
+            "Перевод в ready и мерж — человеческие (§I9): PR несёт "
+            "зафиксированный акт одобрения, и мерж от агентской учётки "
+            "дописал бы к решению человека агентский шаг.\n\n"
+            "После мержа доставка (`deliver_for_run` либо `--supersede`) "
+            "ТОЛЬКО проверяет одобренность DAG и несёт в своём коммите "
+            "ровно tasks-спеку — файлов бандла в нём нет (§I7)."
+        ),
+        "",
+    )
+
+
+def approve_node_for_run(
+    state: RunState,
+    ops: Ops,
+    node_id: str,
+    legacy_bundle: int | None = None,
+) -> int | None:
+    """`--approve-node` для прогона: акт человека + доставка его веткой.
+
+    Гейт §I12 читает BASE, значит approve обязан там оказаться, а devtools
+    пишет в соседние репо только PR-ом. Поэтому доставку одобрения
+    выполняет сама команда: одна накапливающая ветка на волну, draft-PR,
+    коммит на каждый вызов.
+
+    **Каждый вызов читает ГОЛОВУ накапливающей ветки, а не base**, и это
+    не удобство, а условие сходимости волны. Волна идёт по DAG сверху вниз
+    несколькими вызовами, и всё, что сделал предыдущий вызов, — свежая
+    подпись upstream и долг, объявленный каскадом, — лежит в ветке: мержа
+    ещё не было. Читай второй вызов один base, топологическая готовность
+    не была бы предъявлена ни для одного узла ниже первого, а одобрял бы
+    он поверх устаревшего дерева. Волна не сошлась бы никогда, причём
+    молча — каждый вызов в отдельности выглядел бы законным.
+
+    Возврат — номер draft-PR волны либо `None`, когда писать было нечего
+    (узел уже честно одобрен и волны нет).
+    """
+    dag = _dag_for(legacy_bundle)
+    if ops.is_dirty(state.target_dir):
+        raise RuntimeError(
+            f"target_dir {state.target_dir!r} грязный — approve не начат"
+        )
+    # Профильный guard — ДО первой записи и до синхронизации дерева:
+    # подписывать нечем, значит и начинать нечего (§I12 п.6).
+    approved_by = _human_login(ops)
+    approved_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    base_ref = state.base_ref or "master"
+    ops.checkout_and_pull(state.target_dir, base_ref)
+    base_sha = ops.rev_parse(state.target_dir, "HEAD")
+    if base_sha is None:
+        raise RuntimeError(
+            f"rev_parse HEAD в {state.target_dir!r} не дал SHA — база "
+            "неизвестна, approve не начат"
+        )
+    branch = _approve_branch(state.ws_id)
+    wave = ops.fetch_branch(state.target_dir, branch)
+    if wave:
+        ops.switch_to(state.target_dir, branch, "FETCH_HEAD")
+    _check_bundle_composition(state.target_dir, state.bundle_dir, dag)
+    # Валидация — ДО создания ветки: отказ не оставляет ни файла узла, ни
+    # статусов downstream, ни ветки (§I12 п.6).
+    if not _approvable(state.target_dir, state.bundle_dir, dag, node_id):
+        print(
+            f"узел {node_id} уже честно одобрен — no-op: файл не "
+            "переписан, version не вырос, новая подпись не поставлена"
+        )
+        # Волна уже идёт (крэш между push и созданием PR) — довести хвост
+        # надо и здесь, иначе PR не появится никогда.
+        return _wave_pr(state, ops, branch) if wave else None
+    if not wave:
+        ops.switch_to(state.target_dir, branch, base_sha)
+    changed = approve_node(
+        state.target_dir, state.bundle_dir, node_id,
+        approved_by, approved_at, legacy_bundle=legacy_bundle,
+    )
+    # Коммитом уходят ВСЕ файлы, которые вызов изменил: одобренный узел и
+    # весь рекурсивный след каскада. Частичный коммит оставил бы в ветке
+    # `approved`-узел с ложным пином — состояние, которое каскад и обязан
+    # не допускать.
+    ops.commit_paths(
+        state.target_dir,
+        changed,
+        f"spec: {state.ws_id} bundle — approve узла {node_id} "
+        f"({approved_by}) + каскад stale",
+    )
+    ops.push_branch(state.target_dir, branch)
+    pr = _wave_pr(state, ops, branch)
+    cascaded = changed[1:]
+    print(
+        f"узел {node_id} одобрен ({approved_by}); "
+        + (
+            f"каскад stale: {', '.join(cascaded)}"
+            if cascaded else "downstream трогать не пришлось"
+        )
+        + f"; PR волны #{pr} ({branch})"
+    )
+    remaining = _approval_findings(state.target_dir, state.bundle_dir, dag)
+    if remaining:
+        print(
+            "волна не завершена — активный DAG одобрен не целиком, PR "
+            "остаётся draft:\n"
+            + "\n".join(f"- {finding}" for finding in remaining)
+        )
+    else:
+        print(
+            f"активный DAG одобрен целиком — PR #{pr} готов; перевод в "
+            "ready и мерж человеческие (§I9), после мержа — доставка"
+        )
+    return pr
 
 
 def conform_approved(
@@ -3630,6 +4150,15 @@ def main(argv: list[str] | None = None) -> int:
              "ноль или несколько кандидатов; проверяется так же",
     )
     parser.add_argument(
+        "--approve-node", default=None, metavar="NODE_ID",
+        help="одобрить узел активного DAG (§I12): ЕДИНСТВЕННЫЙ переход "
+             "draft|stale → approved. Подпись — активный GitHub-логин "
+             "(человек), время — момент вызова; downstream уходят в stale "
+             "рекурсивно. Доставляется накапливающей веткой "
+             "spec/<ws-id>-bundle-approve одним draft-PR на всю волну; "
+             "мерж — человеческий",
+    )
+    parser.add_argument(
         "--abandon-revision", type=int, default=None,
         help="перевести незавершённую ревизию переиздания в терминальный "
              "abandoned (требует --reason)",
@@ -3651,6 +4180,36 @@ def main(argv: list[str] | None = None) -> int:
              "требует --reason",
     )
     args = parser.parse_args(argv)
+    if args.approve_node is not None:
+        # Действие в прогоне ОДНО — тот же гвард и по той же причине, что
+        # уже разводит остальные флаги между собой: молчаливая победа
+        # одного решала бы за оператора, что он имел в виду.
+        conflicting = [
+            name for name, given in (
+                ("--supersede", args.supersede),
+                ("--conform-approve", args.conform_approve),
+                ("--abandon-revision", args.abandon_revision is not None),
+                ("--replace-revision", args.replace_revision is not None),
+            ) if given
+        ]
+        if conflicting:
+            parser.error(
+                "--approve-node — отдельное действие, несовместимое с "
+                + ", ".join(conflicting)
+                + ": одобрение узла совершает человек, доставка его только "
+                "проверяет — запускайте их отдельными прогонами"
+            )
+        # Вход — только node-id активного DAG, не путь: произвольный путь
+        # позволил бы одобрить файл вне DAG, копию файла, файл чужого
+        # бандла — то есть подписать то, чего активный граф не содержит.
+        # Промах ловится на РАЗБОРЕ АРГУМЕНТОВ: ничего не пишется вовсе.
+        allowed = _dag_files(_dag_for(args.legacy_bundle))
+        if args.approve_node not in allowed:
+            parser.error(
+                f"--approve-node {args.approve_node!r}: не node-id активного "
+                "DAG (approve есть акт о позиции в графе, а не о файле на "
+                "диске); допустимые: " + ", ".join(allowed)
+            )
     if args.abandon_revision is not None and args.supersede:
         # Спека этого сочетания не описывает, а прогон делает ОДНО
         # действие: молчаливая победа второго флага решала бы за
@@ -3734,6 +4293,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     ops = RealOps()
+    if args.approve_node is not None:
+        try:
+            approve_node_for_run(
+                state, ops, args.approve_node,
+                legacy_bundle=args.legacy_bundle,
+            )
+        except RuntimeError as exc:
+            print(f"task_bridge: {exc}")
+            return 1
+        return 0
     if args.abandon_revision is not None:
         # Тот же fail-closed-контур, что у --supersede ниже: у оператора
         # бывает опечатка в номере и бывает уже завершённая ревизия (§I4:
