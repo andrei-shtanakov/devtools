@@ -126,6 +126,34 @@ gh_a() {
     GH_CONFIG_DIR="$MERGE_GH_CONFIG_DIR" gh "$@"
 }
 
+# Разбор SSOT-файлов формата KEY=VALUE — ОДНА функция на все такие файлы.
+# Правила формата и поведение на битом входе описаны в governance/ssot_env.py
+# и обязаны совпадать с ним дословно: формат читают две половины, и разойдясь
+# на битом входе они разойдутся молча (ревью #183, круг 6 — python брал первое
+# вхождение ключа, shell последнее). Коротко:
+#   * строка обрезается по краям; пустая и начинающаяся с `#` игнорируются;
+#   * определение — строка ровно с `KEY=` после ведущих пробелов; `KEY =…`,
+#     `export KEY=…`, `key=…` определениями НЕ считаются;
+#   * значение — остаток, обрезанный по краям (пробелы ВНУТРИ сохраняются);
+#   * дубль ключа, отсутствие ключа, пустое значение — отказ.
+#
+# Вызывать ТОЛЬКО как `v=$(ssot_key …) || exit $?`: `die` внутри подстановки
+# убивает подшелл, а не скрипт, и без проверки статуса пустое значение поехало
+# бы дальше — fail-open ровно в разборе правил.
+ssot_key() {
+    _file="$1"; _key="$2"; _what="$3"
+    [ -f "$_file" ] && [ -r "$_file" ] \
+        || die 2 "$_what недоступен: $_file"
+    _count=$(grep -c "^[[:space:]]*$_key=" "$_file" || true)
+    [ "$_count" -le 1 ] || die 2 "в $_file ключ $_key определён $_count раз \
+— файл битый; какое значение настоящее, решает человек, не разбор"
+    [ "$_count" -eq 1 ] || die 2 "в $_file нет $_key"
+    _value=$(sed -n "s/^[[:space:]]*$_key=//p" "$_file" \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -n "$_value" ] || die 2 "в $_file нет непустого $_key"
+    printf '%s\n' "$_value"
+}
+
 script_dir=$(cd "$(dirname "$0")" && pwd)
 FLEET_ROOT="${FLEET_ROOT:-$(dirname "$script_dir")}"
 APPROVAL_PATTERNS="${APPROVAL_PATTERNS:-\
@@ -189,18 +217,11 @@ fi
 # review-pr.sh). Отсутствие файла или ключа — отказ, а не вшитый дефолт:
 # молчаливый дефолт и был бы тем вторым определением имён, которое
 # разъезжается.
-[ -f "$APPROVAL_PATTERNS" ] \
-    || die 2 "нет SSOT имён веток одобрения: $APPROVAL_PATTERNS"
-candidate_template=$(sed -n \
-    's/^[[:space:]]*APPROVAL_CANDIDATE_TEMPLATE=//p' "$APPROVAL_PATTERNS" \
-    | tail -1)
-finalize_suffix=$(sed -n \
-    's/^[[:space:]]*APPROVAL_FINALIZE_SUFFIX=//p' "$APPROVAL_PATTERNS" \
-    | tail -1)
-[ -n "$candidate_template" ] \
-    || die 2 "в $APPROVAL_PATTERNS нет APPROVAL_CANDIDATE_TEMPLATE"
-[ -n "$finalize_suffix" ] \
-    || die 2 "в $APPROVAL_PATTERNS нет APPROVAL_FINALIZE_SUFFIX"
+_ssot_what="SSOT имён веток одобрения"
+candidate_template=$(ssot_key "$APPROVAL_PATTERNS" \
+    APPROVAL_CANDIDATE_TEMPLATE "$_ssot_what") || exit $?
+finalize_suffix=$(ssot_key "$APPROVAL_PATTERNS" \
+    APPROVAL_FINALIZE_SUFFIX "$_ssot_what") || exit $?
 # Глоб ФОРМЫ имени — два шага, дословно те же, что в
 # approval_branches._template_glob:
 #   1. каждый плейсхолдер → `*`;
@@ -224,12 +245,8 @@ finalize_glob="$candidate_glob$finalize_suffix"
 # --- Authority-root пути: тот же SSOT, что у accept_pr и раннера -----------
 AUTHORITY_PATHS="${AUTHORITY_PATHS:-\
 $script_dir/contracts/authority-root/v1/paths.env}"
-[ -f "$AUTHORITY_PATHS" ] \
-    || die 2 "нет SSOT authority-root путей: $AUTHORITY_PATHS"
-authority_prefixes=$(sed -n \
-    's/^[[:space:]]*AUTHORITY_ROOT_PREFIXES=//p' "$AUTHORITY_PATHS" | tail -1)
-[ -n "$authority_prefixes" ] \
-    || die 2 "в $AUTHORITY_PATHS нет AUTHORITY_ROOT_PREFIXES"
+authority_prefixes=$(ssot_key "$AUTHORITY_PATHS" \
+    AUTHORITY_ROOT_PREFIXES "SSOT authority-root путей") || exit $?
 
 if [ "$print_globs" -eq 1 ]; then
     # Отладочный зонд для тестов (приём --print-review-cmd из review-pr.sh):
@@ -383,11 +400,29 @@ IFS="$_saved_ifs"
 # `.files[]` БЕЗ `?` намеренно: ответ без ключа `files` обязан уронить jq и
 # увести в отказ. С `?` пустой результат означал бы и «диффа нет», и
 # «ответ не тот» — то есть неизвестность снова открывала бы дверь.
-if ! compare_files=$(gh_a api --paginate \
+#
+# Без `--paginate` намеренно: постраничная выдача compare листает КОММИТЫ, а
+# `files` каждая страница несёт целиком — со `--paginate` файлы повторялись бы
+# по числу страниц, и счётчик ниже перестал бы что-либо значить.
+if ! compare_files=$(gh_a api \
     "repos/$slug/compare/$base_oid...$head_oid" \
     --jq '.files[].filename' 2>&1); then
     die 2 "не удалось получить дифф ${base_oid}...${head_oid} для \
 ${slug}#${pr}: $compare_files — состав диффа неизвестен, мерж не выполняется"
+fi
+# Форджа обрезает список файлов (у GitHub — 300) и признака усечения в ответе
+# НЕ даёт: ни поля `truncated`, ни счётчика всех файлов. Значит подтвердить
+# полноту списка нечем, и на пороге действует общее правило — неустановленный
+# факт двери не открывает (ревью #183, круг 6). Отказ честно называет причину:
+# не «есть authority-root путь», а «состав диффа не подтверждён полностью».
+# Дифф на 300+ файлов человеку и так стоит посмотреть глазами.
+COMPARE_FILE_CAP=300
+compare_count=$(printf '%s' "$compare_files" | grep -c '' || true)
+if [ "$compare_count" -ge "$COMPARE_FILE_CAP" ]; then
+    die 3 "PR ${slug}#${pr}: в диффе $compare_count файлов — форджа режет \
+список на $COMPARE_FILE_CAP и не сообщает об усечении, поэтому состав диффа \
+НЕ ПОДТВЕРЖДЁН ПОЛНОСТЬЮ. Гвард authority-root на неполном списке молча не \
+сработал бы. Мерж не выполняется — такой дифф мержит человек."
 fi
 # Файлы — в позиционные параметры (их всё равно перезаписывает сборка
 # команды мержа ниже): так перебор идёт без жонглирования IFS внутри тела.
