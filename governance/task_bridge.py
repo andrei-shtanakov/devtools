@@ -1188,77 +1188,54 @@ def conform_approved(
     return changed
 
 
-# --- Перенос состояния исполнения в переиздание ---------------------------
+# --- Перенос состояния исполнения в переиздание (§I11) --------------------
 #
 # Формат состояния ЗАПИНОВАН по парсеру spec-runner
 # (`src/spec_runner/task.py`) — не по нашему рендеру: писать эти байты
 # будет он, а не мы.
 #   TASK_HEADER: `^### (<ID>): (.+)$`, где ID — `[A-Z][A-Z0-9]*-\d+`.
-#   TASK_META: bullet-префикс? + `(🔴|🟠|🟡|🟢)? (P\d) \| (⬜|🔄|🔍|✅|⏸️)?
-#     <STATUS>` — ПЕРВАЯ подходящая строка после заголовка (сканирование
-#     до следующего заголовка). Наш рендер пишет плоское `P2 | TODO   Est:
-#     0.5d`, а `update_task_status` на нём делает
-#     `re.sub(r"\|\s*(TODO|…)", "| ✅ DONE", …)` — то есть ВСТАВЛЯЕТ эмодзи.
-#     Значит переносить надо весь сегмент «эмодзи? + слово», а не слово.
-#     Bullet-префикс не наш (мы его не рендерим), но ЧИТАТЬ доставленную
-#     спеку надо его допуская: агенты правят tasks.md по ходу прогона и
-#     заводят буллет (spec-runner#123), а не увидев мета-строку, перенос
-#     молча потерял бы настоящий `DONE`.
+#   TASK_META: `(🔴|🟠|🟡|🟢)? (P\d) \| (⬜|🔄|🔍|✅|⏸️)? <STATUS>` — ПЕРВАЯ
+#     подходящая строка после заголовка (сканирование до следующего
+#     заголовка). Наш рендер пишет плоское `P2 | TODO   Est: 0.5d`, а
+#     `update_task_status` на нём делает `re.sub(r"\|\s*(TODO|…)",
+#     "| ✅ DONE", …)` — то есть ВСТАВЛЯЕТ эмодзи. Значит нормализовать и
+#     переносить надо весь сегмент «эмодзи? + слово», а не одно слово.
 #   CHECKLIST_ITEM: `^- \[([ x])\] (.+)$` — ровно колонка 0 и строчная
 #     `x`; шире брать нельзя, иначе перенос отметил бы то, что spec-runner
 #     за пункт чеклиста не считает вовсе.
 _TASK_HEAD_RE = re.compile(r"^### [A-Z][A-Z0-9]*-\d+: ")
 _TASK_META_RE = re.compile(
-    r"^(?:[ \t]*[-*]\s+)?(?:(?:🔴|🟠|🟡|🟢)\s+)?P\d\s*\|\s*"
+    r"^(?:(?:🔴|🟠|🟡|🟢)\s+)?P\d\s*\|\s*"
     r"(?P<status>(?:(?:⬜|🔄|🔍|✅|⏸️)\s+)?"
     r"(?:TODO|IN_PROGRESS|REVIEW|DONE|BLOCKED))\b",
     re.IGNORECASE,
 )
 _CHECKLIST_RE = re.compile(r"^(- \[)(?P<mark>[ x])(\] )(?P<text>.+)$")
-# Значение сегмента статуса в СВЕЖЕМ рендере: сюда он нормализуется на
-# время побайтовой сверки тел.
+# Вид, который даёт рендер: к нему нормализуются оба маркера состояния на
+# время побайтовой сверки блоков.
 _CANON_STATUS = "TODO"
 
 
-class _TaskState(NamedTuple):
-    """Состояние исполнения одной задачи ДОСТАВЛЕННОЙ tasks-спеки.
+class _DeliveredState(NamedTuple):
+    """Состояние исполнения ДОСТАВЛЕННОЙ tasks-спеки (§I11).
 
-    `status` — сегмент статуса мета-строки целиком (`✅ DONE`), `checked` —
-    тексты отмеченных пунктов чеклиста, `shape` — тело задачи с
-    вырезанными маркерами состояния (предмет побайтовой сверки).
+    `status_by_block` — state-free блок задачи → сегмент статуса
+    мета-строки целиком (`✅ DONE`); `checked` — тексты отмеченных пунктов
+    чеклиста. В обоих словарях остаётся только ОДНОЗНАЧНОЕ: блок или
+    текст, встретившийся больше одного раза, не переносит ничего.
     """
 
-    status: str
+    status_by_block: dict[str, str]
     checked: frozenset[str]
-    shape: str
 
 
 def _task_bounds(lines: list[str]) -> list[tuple[int, int]]:
-    """Границы тел задач: от `### TASK-NNN:` до следующего заголовка."""
+    """Границы блоков задач: от `### TASK-NNN:` до следующего заголовка."""
     heads = [i for i, ln in enumerate(lines) if _TASK_HEAD_RE.match(ln)]
     return [
         (start, heads[k + 1] if k + 1 < len(heads) else len(lines))
         for k, start in enumerate(heads)
     ]
-
-
-def _task_anchor(body: list[str]) -> str | None:
-    """Идентификатор задачи — якорь строки `Source: …#<id>`.
-
-    Сопоставление задач между ревизиями идёт по НЕМУ, а не по номеру
-    `TASK-NNN`: номер — производная позиции в документе, и вставка задачи
-    в середину сдвигает всю нумерацию ниже. Перенос по номеру уехал бы на
-    ЧУЖУЮ задачу. Якорь приходит из бандла (`DT-07` на DT-пути, первый
-    `BEH-NN` группы на легаси-пути) и позиции не знает.
-    """
-    for line in body:
-        if line.startswith("Source: "):
-            _, sep, tail = line.partition("#")
-            if not sep:
-                return None
-            head = tail.split(maxsplit=1)
-            return head[0] if head else None
-    return None
 
 
 def _task_meta(body: list[str]) -> tuple[int, re.Match[str]] | None:
@@ -1275,21 +1252,24 @@ def _task_meta(body: list[str]) -> tuple[int, re.Match[str]] | None:
     return None
 
 
-def _strip_state_markers(body: list[str]) -> str:
-    """Тело задачи без маркеров состояния — предмет побайтовой сверки.
+def _state_free(body: list[str]) -> str:
+    """State-free представление блока задачи — предмет сверки §I11.
 
-    Мета-строка вырезается ЦЕЛИКОМ, а не только сегмент статуса: всё
-    остальное в ней (`P2`, `Est: 0.5d`) — константы рендера, скрыть за
-    ними изменение содержания нельзя, а различия в ОФОРМЛЕНИИ строки
-    состояния бывают — spec-runner вставляет эмодзи, правящий по ходу
-    прогона агент добавляет bullet-префикс (spec-runner#123). Сравнивай
-    мы строку по частям, любая такая правка читалась бы как «задача
-    изменилась» и роняла настоящий `DONE`.
+    Оба маркера состояния НОРМАЛИЗУЮТСЯ к виду рендера (`TODO`, `- [ ]`),
+    а не вырезаются: выбросить мета-строку целиком значило бы ослепить
+    сравнение к смене приоритета и оценки, живущих в той же строке.
+    Заголовок `### TASK-NNN: <title>` в представление ВХОДИТ — из этого и
+    следует единственность кандидата (номера задач в спеке различны).
     """
     out = list(body)
     found = _task_meta(out)
     if found is not None:
-        out[found[0]] = _CANON_STATUS
+        i, m = found
+        out[i] = (
+            out[i][: m.start("status")]
+            + _CANON_STATUS
+            + out[i][m.end("status"):]
+        )
     for i, line in enumerate(out):
         c = _CHECKLIST_RE.match(line)
         if c:
@@ -1297,94 +1277,101 @@ def _strip_state_markers(body: list[str]) -> str:
     return "\n".join(out)
 
 
-def _delivered_task_states(delivered: str) -> dict[str, _TaskState]:
-    """Состояние исполнения доставленной спеки, по якорям задач.
+def _checklist_texts(lines: list[str]) -> list[str]:
+    """Тексты пунктов чеклиста спеки — только ВНУТРИ блоков задач.
 
-    Повторившийся якорь выбрасывается ЦЕЛИКОМ: сопоставить такую задачу
-    однозначно нечем, а угадывать значит рискнуть отметить чужую работу
-    выполненной. Неоднозначность ⇒ задача приходит чистой.
+    Та же граница, что у spec-runner (`update_checklist_item` считает
+    пункты, лишь находясь внутри задачи): `- [ ]` в секции решений design
+    пунктом чеклиста не является и в перенос не участвует.
+    """
+    return [
+        c.group("text")
+        for start, stop in _task_bounds(lines)
+        for c in (_CHECKLIST_RE.match(ln) for ln in lines[start:stop])
+        if c is not None
+    ]
+
+
+def _unique(values: list[str]) -> set[str]:
+    """Значения, встретившиеся РОВНО один раз."""
+    seen: dict[str, int] = {}
+    for v in values:
+        seen[v] = seen.get(v, 0) + 1
+    return {v for v, n in seen.items() if n == 1}
+
+
+def _delivered_state(delivered: str) -> _DeliveredState:
+    """Состояние исполнения доставленной спеки (§I11).
+
+    Единственность — УСЛОВИЕ переноса, а не свойство сегодняшних данных:
+    и блок, и текст пункта, встретившиеся дважды, выбрасываются целиком.
+    Двусмысленность разрешается чистым результатом, а не догадкой — иначе
+    перенос рискнул бы объявить выполненной чужую работу.
     """
     lines = delivered.split("\n")
-    states: dict[str, _TaskState] = {}
-    seen: set[str] = set()
-    for start, stop in _task_bounds(lines):
-        body = lines[start:stop]
-        anchor = _task_anchor(body)
-        if anchor is None:
+    bodies = [lines[start:stop] for start, stop in _task_bounds(lines)]
+    blocks = [_state_free(b) for b in bodies]
+    single = _unique(blocks)
+    status_by_block = {}
+    for block, body in zip(blocks, bodies):
+        if block not in single:
             continue
-        if anchor in seen:
-            states.pop(anchor, None)
-            continue
-        seen.add(anchor)
         found = _task_meta(body)
-        states[anchor] = _TaskState(
-            status=found[1].group("status") if found else _CANON_STATUS,
-            checked=frozenset(
-                c.group("text")
-                for c in (_CHECKLIST_RE.match(ln) for ln in body)
-                if c is not None and c.group("mark") != " "
-            ),
-            shape=_strip_state_markers(body),
+        status_by_block[block] = (
+            found[1].group("status") if found else _CANON_STATUS
         )
-    return states
-
-
-def _apply_task_state(body: list[str], was: _TaskState) -> list[str]:
-    """Тело свежей задачи с перенесённым состоянием исполнения.
-
-    Два правила НЕЗАВИСИМЫ (формулировка владельца 2026-09-10):
-
-    - статус переносится, если тело без маркеров состояния совпало
-      побайтово — галочка статуса утверждала выполнение ТОГО тела;
-    - отметка пункта переносится, если совпал ТЕКСТ пункта, —
-      переформулированный пункт начинается заново.
-
-    Поэтому у задачи, чьё тело изменилось (например, в чеклист добавился
-    пункт), `DONE` НЕ переносится, а неизменённые пункты галочки
-    сохраняют: содержание пункта не менялось, содержание задачи — да.
-    """
-    out = list(body)
-    if _strip_state_markers(body) == was.shape:
-        found = _task_meta(out)
-        if found is not None:
-            i, m = found
-            out[i] = (
-                out[i][: m.start("status")]
-                + was.status
-                + out[i][m.end("status"):]
-            )
-    for i, line in enumerate(out):
-        c = _CHECKLIST_RE.match(line)
-        if c is not None and c.group("text") in was.checked:
-            out[i] = f"{c.group(1)}x{c.group(3)}{c.group('text')}"
-    return out
+    marked = {
+        c.group("text")
+        for start, stop in _task_bounds(lines)
+        for c in (_CHECKLIST_RE.match(ln) for ln in lines[start:stop])
+        if c is not None and c.group("mark") != " "
+    }
+    return _DeliveredState(
+        status_by_block, frozenset(marked & _unique(_checklist_texts(lines)))
+    )
 
 
 def _carry_execution_state(text: str, delivered: str) -> str:
     """Свежий рендер спеки + состояние исполнения из доставленной спеки.
 
-    Правило (владелец, 2026-09-10): **состояние переносится там, где
-    содержание не изменилось**. Задачи сопоставляются по якорю
-    `Source: …#<id>` (`_task_anchor`), состояние — по `_apply_task_state`.
-    Задача без соответствия в доставленной спеке (новая) и задача,
-    исчезнувшая из бандла, состояния не наследуют.
+    Правило §I11: **состояние переносится там, где содержание не
+    изменилось**. Кандидат в базовой спеке ищется как блок с тем же
+    state-free содержимым — сопоставление идёт ПО БАЙТАМ, а не по
+    отдельному ключу. Стабильный ключ в теле есть (`Source: …#<DT-id>`),
+    но взять его значило бы завести ВТОРУЮ идентичность задачи рядом с
+    байтами, и расходились бы они ровно там, где перенумеровался
+    `**Depends on:**`, — вместо одного правила стало бы два, дающих разные
+    ответы на один вопрос.
 
-    Перенос ЧИСТЫЙ: результат — функция двух текстов, порядок обхода —
-    порядок строк рендера, длина тела не меняется. Значит повторный заход
-    по тому же намерению (тот же base, тот же рендер) даёт те же байты, и
-    `tasks_blob` §I3.1 воспроизводится.
+    Отметка пункта переносится независимо от статуса объемлющей задачи:
+    задача, у которой переформулирован один пункт, не теряет отметок
+    остальных. Условие — единственность текста пункта И в базовой спеке,
+    И в новом рендере.
+
+    Перенос ЧИСТЫЙ: результат — функция двух текстов, длина блоков не
+    меняется. Значит повторный заход по тому же намерению (тот же base,
+    тот же рендер) даёт те же байты, и `tasks_blob` §I3 воспроизводится.
     """
-    prev = _delivered_task_states(delivered)
-    if not prev:
+    prev = _delivered_state(delivered)
+    if not prev.status_by_block and not prev.checked:
         return text
     lines = text.split("\n")
+    carryable = prev.checked & _unique(_checklist_texts(lines))
     out = list(lines)
     for start, stop in _task_bounds(lines):
-        body = lines[start:stop]
-        anchor = _task_anchor(body)
-        was = prev.get(anchor) if anchor is not None else None
-        if was is not None:
-            out[start:stop] = _apply_task_state(body, was)
+        body = list(lines[start:stop])
+        was = prev.status_by_block.get(_state_free(body))
+        found = _task_meta(body)
+        if was is not None and found is not None:
+            i, m = found
+            body[i] = (
+                body[i][: m.start("status")] + was + body[i][m.end("status"):]
+            )
+        for i, line in enumerate(body):
+            c = _CHECKLIST_RE.match(line)
+            if c is not None and c.group("text") in carryable:
+                body[i] = f"{c.group(1)}x{c.group(3)}{c.group('text')}"
+        out[start:stop] = body
     return "\n".join(out)
 
 

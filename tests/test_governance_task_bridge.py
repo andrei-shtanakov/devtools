@@ -7620,12 +7620,14 @@ def test_carry_leaves_new_task_clean() -> None:
     assert "- [x]" not in body
 
 
-def test_carry_matches_tasks_by_source_anchor_not_by_number() -> None:
+def test_carry_renumbering_does_not_move_status_to_a_foreign_task() -> None:
     """Сдвиг нумерации не переносит состояние на ЧУЖУЮ задачу.
 
     Задача вставлена в середину: бывшая TASK-002 (DT-02) стала TASK-003.
     Сопоставление по номеру отдало бы состояние выполненной DT-02 задаче
-    DT-99, которая не исполнялась ни секунды."""
+    DT-99, которая не исполнялась ни секунды. Сопоставление §I11 идёт по
+    БАЙТАМ, и номер в них входит, поэтому вставленная задача чистая, а
+    сдвинутая теряет статус — «принятый остаток» §I11."""
     from governance import task_bridge as tb
 
     delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-002")
@@ -7645,9 +7647,10 @@ def test_carry_matches_tasks_by_source_anchor_not_by_number() -> None:
     assert "#DT-99" in inserted            # именно вставленная задача
     assert "| ✅ DONE" not in inserted
     assert "- [x]" not in inserted
-    # DT-02 опознана по якорю, но её тело сдвинулось (номер в заголовке и
-    # в `Depends on`) — статус не переносится, а пункт с прежним текстом
-    # галочку сохраняет: сопоставление сработало, побайтовая сверка — нет.
+    # У DT-02 сдвинулись номер в заголовке и в `Depends on` — блок не
+    # совпал, статус не переносится. Пункт с ПРЕЖНИМ текстом галочку всё
+    # же сохраняет: §I11 сверяет пункты отдельно от объемлющей задачи и
+    # по всей спеке, так что переезд пункта в другой блок ему не помеха.
     moved = _task_body(carried, "TASK-003")
     assert "#DT-02" in moved
     assert "| ✅ DONE" not in moved
@@ -7662,12 +7665,20 @@ def test_carry_from_spec_without_tasks_changes_nothing() -> None:
     assert tb._carry_execution_state(fresh, "---\nx: 1\n---\n\nbody\n") == fresh
 
 
-def test_carry_ignores_duplicate_anchor_in_delivered_spec() -> None:
-    """Повторившийся якорь — неоднозначность ⇒ задача приходит чистой."""
+def test_carry_ignores_duplicate_block_in_delivered_spec() -> None:
+    """Повторившийся блок — неоднозначность ⇒ задача приходит чистой.
+
+    §I11 объявляет единственность кандидата УСЛОВИЕМ переноса, а не
+    свойством сегодняшних данных: сегодня номера задач различны, значит
+    двух одинаковых блоков не бывает, — но опираться на это контракт не
+    вправе, и код обязан отвечать чистым результатом, а не догадкой."""
     from governance import task_bridge as tb
 
     delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001")
-    doubled = delivered + _task_body(delivered, "TASK-001")
+    # Копия ВСТАВЛЯЕТСЯ на место оригинала, а не дописывается в хвост:
+    # у хвостового блока другие завершающие строки, и байты разошлись бы
+    block = _task_body(delivered, "TASK-001")
+    doubled = delivered.replace(block, block + block, 1)
     fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
     body = _task_body(
         tb._carry_execution_state(fresh, doubled), "TASK-001"
@@ -7676,24 +7687,74 @@ def test_carry_ignores_duplicate_anchor_in_delivered_spec() -> None:
     assert "- [x]" not in body
 
 
-def test_carry_reads_status_from_meta_line_with_bullet_prefix() -> None:
-    """Мета-строка с bullet-префиксом читается (spec-runner#123).
+def test_carry_normalizes_meta_line_instead_of_dropping_it() -> None:
+    """Сверка блока видит приоритет и оценку, а не только статус (§I11).
 
-    Агент, правящий tasks.md по ходу прогона, заводит `- ` перед
-    мета-строкой; `TASK_META` spec-runner такую строку принимает, и
-    перенос обязан принимать тоже — иначе настоящий `DONE` молча теряется
-    ровно на тех воркстримах, что и переиздают."""
+    Мета-строка НОРМАЛИЗУЕТСЯ, а не вырезается: выбросить её целиком
+    значило бы ослепить сравнение к смене `P2`/`Est`, живущих в той же
+    строке, — задача с переставленным приоритетом сохраняла бы `DONE`."""
     from governance import task_bridge as tb
 
     delivered = _executed(
         _render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001"
-    ).replace("P2 | ✅ DONE", "- P2 | ✅ DONE")
+    ).replace("P2 | ✅ DONE   Est: 0.5d", "P0 | ✅ DONE   Est: 3d")
     fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
     body = _task_body(tb._carry_execution_state(fresh, delivered), "TASK-001")
-    # Префикс — свойство ЧУЖОЙ правки, в наш рендер он не переезжает:
-    # переносится сегмент статуса, а не строка целиком
-    assert "P2 | ✅ DONE   Est: 0.5d" in body
-    assert "- P2 |" not in body
+    assert "| ✅ DONE" not in body
+    # Пункты чеклиста живут по своему правилу и приоритетом не задеты
+    assert "- [x] реализовать BEH-01: Просмотр списка" in body
+
+
+def _twin_item(text: str) -> str:
+    """Пункт BEH-03 переименован в пункт BEH-01 — дубль текста в спеке."""
+    return text.replace(
+        "реализовать BEH-03: Ошибка сети",
+        "реализовать BEH-01: Просмотр списка",
+    )
+
+
+_DUP_ITEM = "- [x] реализовать BEH-01: Просмотр списка"
+
+
+def test_carry_skips_checklist_text_repeated_in_delivered_spec() -> None:
+    """Текст пункта, встречающийся в базовой спеке дважды, не переносит.
+
+    Единственность текста — УСЛОВИЕ переноса на уровне пункта: гарантии
+    различия, какую номера задач дают блокам, у чеклистов нет. Дубль
+    заведён ОДИНАКОВО в обеих спеках, поэтому блоки совпадают и статусы
+    переносятся своим правилом — предмет теста ровно в пунктах."""
+    from governance import task_bridge as tb
+
+    delivered = _twin_item(
+        _executed(_executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001"),
+                  "TASK-002")
+    )
+    fresh = _twin_item(_render(_CARRY_DT, _CARRY_SCENARIOS, version=2))
+    carried = tb._carry_execution_state(fresh, delivered)
+    assert _DUP_ITEM not in carried
+    assert carried.count("| ✅ DONE") == 2
+    # Однозначные пункты тех же задач галочки сохраняют
+    assert "- [x] реализовать BEH-02: Пустое состояние" in carried
+    assert carried.count("- [x] проверка группы") == 2
+
+
+def test_carry_skips_checklist_text_repeated_in_fresh_render() -> None:
+    """Единственность требуется И В НОВОМ рендере, не только в базовой спеке.
+
+    Дубль заведён только в новом рендере: в базовой спеке текст один и
+    отмечен, но перенести его некуда однозначно — обе копии претендуют."""
+    from governance import task_bridge as tb
+
+    delivered = _executed(
+        _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001"), "TASK-002"
+    )
+    fresh = _twin_item(_render(_CARRY_DT, _CARRY_SCENARIOS, version=2))
+    carried = tb._carry_execution_state(fresh, delivered)
+    assert _DUP_ITEM not in carried
+    # TASK-001 переименование не задело — её блок совпал, статус перенесён;
+    # TASK-002 изменена, поэтому чистая
+    assert _task_body(carried, "TASK-001").count("| ✅ DONE") == 1
+    assert "| ✅ DONE" not in _task_body(carried, "TASK-002")
 
 
 # --- Перенос состояния: сквозные пути доставки -----------------------------
