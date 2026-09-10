@@ -13,7 +13,7 @@ import pytest
 
 from governance import approval_branches, approval_ledger as al
 from governance import run_state as rs
-from governance.approval_facts import MergeEvent
+from governance.approval_facts import Authorization, MergeEvent
 
 WS_ID = "WS-T1"
 
@@ -50,7 +50,10 @@ def _start(state: rs.RunState, wave: int, step: int, attempt: int) -> str:
 
 def _merge(state: rs.RunState, key: str, login: str = "andrei-shtanakov") -> None:
     al.record_merge(
-        state, key, MergeEvent(login, "2026-09-10T08:00:00Z", "commit-1")
+        state,
+        key,
+        MergeEvent(login, "2026-09-10T08:00:00Z", "commit-1"),
+        Authorization(login, "v1:deadbeef", "AUTHORIZED_APPROVER_ACCOUNTS"),
     )
 
 
@@ -148,6 +151,11 @@ def test_merge_facts_come_from_the_forge_event(state: rs.RunState) -> None:
     assert on_disk["merged_by"] == "andrei-shtanakov"
     assert on_disk["merged_at"] == "2026-09-10T08:00:00Z"
     assert on_disk["merge_commit"] == "commit-1"
+    assert on_disk["authorization"] == {
+        "login": "andrei-shtanakov",
+        "policy": "v1:deadbeef",
+        "source": "AUTHORIZED_APPROVER_ACCOUNTS",
+    }, "решение об авторизации записано ТЕМ ЖЕ write'ом, что факты мержа"
 
 
 # --- Терминальность -----------------------------------------------------
@@ -291,3 +299,30 @@ def test_terminal_request_over_a_node_does_not_block_a_new_one(
 
     al.invalidate_request(state, first, "self-hash разошёлся")
     assert al.live_request_over(state, "design") is None
+
+
+def test_wave_closes_only_by_an_explicit_record(state: rs.RunState) -> None:
+    """Закрытие волны — записанный факт, а не вывод из текущего состояния.
+
+    Вывести его из дерева нельзя: к следующему вызову активный DAG успевает
+    снова перестать быть честно одобренным, и закрывшаяся месяц назад волна
+    выглядела бы никогда не закрывавшейся.
+    """
+    key = _start(state, 1, 1, 1)
+    al.record_candidate_pr(state, key, 407)
+    _merge(state, key)
+    al.record_finalize_pr(state, key, 408)
+    al.complete_request(state, key)
+    assert al.closed_waves(state) == set(), "сама по себе волна не закрылась"
+
+    al.close_wave(state, 1)
+    assert al.closed_waves(rs.load("r-approve")) == {1}
+    al.close_wave(state, 1)  # идемпотентно: величина та же
+    assert al.closed_waves(state) == {1}
+
+
+def test_wave_record_is_not_read_as_a_request(state: rs.RunState) -> None:
+    """Запись о волне не имеет формы заявки и заявкой не считается."""
+    al.close_wave(state, 3)
+    _start(state, 3, 0, 1)
+    assert [nums for nums, _ in al.requests(state)] == [(3, 0, 1)]

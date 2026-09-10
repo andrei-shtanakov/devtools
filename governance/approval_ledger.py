@@ -42,7 +42,7 @@ from __future__ import annotations
 from enum import Enum
 
 from governance import approval_branches
-from governance.approval_facts import MergeEvent
+from governance.approval_facts import Authorization, MergeEvent
 from governance.run_state import RunState, save
 
 #: Префикс ключа заявки в `state.ops`. Форма ключа — `approve-<W>-<K>-<A>`,
@@ -182,6 +182,41 @@ def live_request_for_step(
     return max(joinable, key=lambda item: item[0]) if joinable else None
 
 
+#: Ключ записи о закрытой волне. Форма намеренно НЕ похожа на ключ
+#: заявки (`approve-<W>-<K>-<A>`): разбор заявок строгий и требует ровно
+#: три числа, поэтому эта запись в них не попадает и попасть не может.
+WAVE_PREFIX = "approve-wave-"
+
+
+def close_wave(state: RunState, wave: int) -> None:
+    """Долговечно записать, что проход по DAG этой волной завершён (§I12).
+
+    Durable, а не выводимо — по тому же основанию, по которому durable
+    статус заявки. Вывести «волна закрыта» из текущего состояния дерева
+    нельзя: к моменту следующего вызова активный DAG успевает снова
+    перестать быть честно одобренным (correction правит узел), и волна,
+    закрывшаяся месяц назад, выглядела бы никогда не закрывавшейся —
+    новый проход продолжал бы её номер.
+
+    Идемпотентно: повторная запись говорит то же самое, и мутацией
+    журнала не является — величина одна и та же.
+    """
+    state.ops[f"{WAVE_PREFIX}{wave}"] = {"status": "closed", "wave": wave}
+    save(state)
+
+
+def closed_waves(state: RunState) -> set[int]:
+    """Номера волн, чей проход по DAG записан завершённым."""
+    found: set[int] = set()
+    for key, op in state.ops.items():
+        if not key.startswith(WAVE_PREFIX):
+            continue
+        suffix = key[len(WAVE_PREFIX):]
+        if suffix.isdigit() and op.get("status") == "closed":
+            found.add(int(suffix))
+    return found
+
+
 def open_wave(state: RunState) -> int | None:
     """Номер идущей волны; `None` — живой волны нет.
 
@@ -277,6 +312,11 @@ def start_request(
         "merged_by": None,
         "merged_at": None,
         "merge_commit": None,
+        # Решение об авторизации мержа: чья учётка и по какой политике
+        # признана авторизованной. Пишется ВМЕСТЕ с фактами мержа и
+        # больше не пересматривается — фаза 3 сверяет целостность этой
+        # записи, а не применяет allowlist заново.
+        "authorization": None,
         # Второй коммит заявки — конверт подписи — опознаётся своим
         # head'ом: одно поле не может назвать два разных коммита, а
         # усыновление PR крэш-окна сверяется именно с записанным head'ом
@@ -369,13 +409,26 @@ def extend_request(
     )
 
 
-def record_merge(state: RunState, key: str, event: MergeEvent) -> None:
-    """Факты мержа candidate-PR — источник подписи узла (§I12).
+def record_merge(
+    state: RunState,
+    key: str,
+    event: MergeEvent,
+    authorization: Authorization,
+) -> None:
+    """Факты мержа candidate-PR и решение об их авторизации (§I12).
 
     Записывается СОБЫТИЕ форджи, а не самоописание процесса: логин,
     который команда сообщает о себе сама, не проверяем никем, а мерж —
     запись в фордже, которую видят все и которую нельзя переписать задним
     числом.
+
+    `authorization` идёт ТЕМ ЖЕ write'ом и обязательным аргументом:
+    решение о merger-учётке принимается ровно один раз, при установлении
+    факта мержа, и с этого момента живёт как записанный факт. Разъедься
+    оно с фактами мержа хоть на один шаг — и появилось бы состояние
+    «мерж записан, а по какой политике он признан авторизованным,
+    неизвестно», из которого честного выхода нет: перечитать список
+    задним числом значит переавторизовать прошлое новой конфигурацией.
     """
     _update(
         state,
@@ -383,6 +436,7 @@ def record_merge(state: RunState, key: str, event: MergeEvent) -> None:
         merged_by=event.login,
         merged_at=event.merged_at,
         merge_commit=event.commit,
+        authorization=authorization.as_record(),
     )
 
 

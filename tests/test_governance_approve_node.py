@@ -874,6 +874,138 @@ def test_unresolved_fact_never_buries_the_request(
     assert world.state.ops[key]["status"] == al.STATUS_STARTED
 
 
+# --- Решение об авторизации: один раз, с отпечатком политики ------------
+
+
+def test_authorization_decision_is_recorded_with_the_policy(
+    world: World,
+) -> None:
+    """Вместе с фактами мержа пишется, ПО КАКОЙ политике он авторизован."""
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+    auth = rs.load("r-approve").ops[key]["authorization"]
+    assert auth["login"] == HUMAN
+    assert auth["policy"] == af.policy_fingerprint()
+    assert auth["source"] == af.APPROVER_ALLOWLIST_ENV
+
+
+def test_policy_change_does_not_reauthorize_the_past(
+    world: World, monkeypatch
+) -> None:
+    """Фаза 3 сверяет ЦЕЛОСТНОСТЬ решения, а не применяет allowlist заново.
+
+    Список сужается до пустого между записью решения и финализацией — то
+    есть настолько, что подписать не может никто. Заявка, честно
+    классифицированная раньше, обязана дойти: иначе правка конфигурации
+    убивала бы прошлое, а ровно от этого §I12 сделал решение записанным.
+    """
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")                    # решение записано
+    world.state.ops[key]["finalize_pr"] = None   # крэш-окно до записи номера
+    rs.save(world.state)
+    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "")
+    assert af.approver_allowlist() == frozenset()
+
+    approve(world, "charter")                    # возобновление
+    assert world.state.ops[key]["finalize_pr"] is not None
+    assert al.is_live(world.state.ops[key])
+    merge_pr(world, world.state.ops[key]["finalize_pr"])
+    approve(world, "charter")
+    world.sync()
+    assert na.node_debt("charter", world.base_text("00-charter.md"), {}) is None
+
+
+@pytest.mark.parametrize(
+    ("broken", "why"),
+    [
+        (None, "решения нет вовсе"),
+        (
+            {"login": "someone-else", "policy": "v1:0", "source": "X"},
+            "решение про другой мерж",
+        ),
+        (
+            {"login": HUMAN, "policy": "", "source": "X"},
+            "решение без политики — непроверяемо",
+        ),
+    ],
+)
+def test_broken_authorization_record_is_not_accepted(
+    world: World, broken: dict | None, why: str
+) -> None:
+    """Целостность: записанное решение обязано быть про ЭТОТ мерж и полным.
+
+    Пара к предыдущему тесту. Не перепроверять allowlist можно ровно
+    потому, что решение записано и ПРОВЕРЯЕМО; каждая из трёх поломок
+    делает его непроверяемым по-своему, и ни одна не должна проходить.
+    """
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+    world.state.ops[key]["finalize_pr"] = None
+    world.state.ops[key]["authorization"] = broken
+    rs.save(world.state)
+
+    with pytest.raises(RuntimeError, match="целого решения об авторизации"):
+        approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED, why
+
+
+# --- Волна: один проход по DAG ------------------------------------------
+
+
+def test_wave_closes_only_when_the_whole_dag_is_approved(
+    world: World,
+) -> None:
+    """Проход закрыт, когда честно одобрен ВЕСЬ активный DAG.
+
+    Завершения заявки терминального уровня мало: узел вне её пути мог
+    успеть обзавестись долгом. Пара половин одного стенда — с долгом и
+    без, — потому что «волна не закрылась» само по себе не отличает
+    строгую проверку от сломанной.
+    """
+    for node in ("charter", "requirements", "behaviour-spec", "design",
+                 "acceptance"):
+        drive_to_approved(world, node)
+    approve(world, "decomposition")
+    key, op = _request_over(world, "decomposition")
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "decomposition")
+    # Долг появляется ДО мержа конверта терминального узла и лежит вне его
+    # пути: сам конверт от этого не страдает.
+    _push_edit(world, "00-charter.md", body="Чартер правят параллельно.")
+    merge_pr(world, world.state.ops[key]["finalize_pr"])
+    approve(world, "decomposition")
+
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+    assert al.closed_waves(world.state) == set(), (
+        "узел вне пути терминального несёт долг — проход не завершён"
+    )
+    approve(world, "charter")
+    _, revived = _request_over(world, "charter")
+    assert revived["wave"] == 1, "тот же проход продолжается"
+    assert revived["attempt"] == 2, "номер попытки того же (W, K) растёт"
+
+
+def test_wave_closes_when_nothing_is_left_in_debt(world: World) -> None:
+    """Вторая половина пары: без долга проход закрывается, и следующий —
+    новая волна."""
+    for node in ("charter", "requirements", "behaviour-spec", "design",
+                 "acceptance", "decomposition"):
+        drive_to_approved(world, node)
+    assert al.closed_waves(world.state) == {1}
+
+    _push_edit(world, "00-charter.md", body="Поздняя коррекция.")
+    approve(world, "charter")
+    _, fresh = _request_over(world, "charter")
+    assert fresh["wave"] == 2, "новый проход — новая волна"
+    assert fresh["attempt"] == 1
+
+
 # --- Инвалидация живых заявок ниже --------------------------------------
 
 

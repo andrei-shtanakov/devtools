@@ -286,20 +286,24 @@ def _wave_for(
     леджера. Отсюда три случая:
 
     - есть живая заявка — её волна и есть идущая;
-    - живой нет, но старшая записанная волна прохода не завершила (в ней
-      нет `completed`-заявки терминального уровня) — проход продолжается в
-      ней. Именно этот случай делает восстановление тем, чем его описывает
-      контракт: заявка, умершая в `invalidated`, восстанавливается новой
-      **в той же волне и на том же уровне**, а различает их номер попытки
-      `A`. Открой мы здесь новую волну — `A` не рос бы никогда, и вся
-      механика уникальности имён держалась бы на другом числе, чем сказано;
-    - проход завершён — новая волна, номер `max + 1` из леджера. Старые
-      волны в выборе номера не участвуют и переиспользованию не подлежат.
+    - живой нет, но старшая записанная волна не закрыта — проход
+      продолжается в ней. Между завершением уровня `K` и созданием `K+1`
+      живой заявки нет вовсе, и волна обязана это переживать; тот же
+      случай делает восстановление тем, чем его описывает контракт:
+      заявка, умершая в `invalidated`, восстанавливается новой **в той же
+      волне и на том же уровне**, а различает их номер попытки `A`. Открой
+      мы здесь новую волну — `A` не рос бы никогда, и механика
+      уникальности имён держалась бы на другом числе, чем сказано;
+    - волна закрыта — новая, номер `max + 1` из леджера. Старые волны в
+      выборе номера не участвуют и переиспользованию не подлежат.
 
-    Терминальный уровень берётся из графа, а не из леджера: «проход
-    завершён» есть утверждение о DAG, и мерить его номерами шагов, которые
-    оператор успел завести, значило бы объявлять проход законченным на
-    полпути.
+    Закрытие волны — ЗАПИСАННЫЙ факт (`al.closed_waves`), а не вывод из
+    текущего состояния дерева, и записывается он тем вызовом, который
+    довёл активный DAG до честной одобренности ЦЕЛИКОМ
+    (`_close_wave_if_dag_approved`). Завершения заявки терминального
+    уровня для этого мало: терминальный узел мог быть одобрен, а узел вне
+    его транзитивного замыкания — нет. Это то же различие, из-за которого
+    §I5 считает манифест по всем узлам DAG, а не блоб терминального.
     """
     live = al.open_wave(state)
     if live is not None:
@@ -308,14 +312,7 @@ def _wave_for(
     if not recorded:
         return al.next_wave(state)
     current = max(nums[0] for nums, _ in recorded)
-    terminal_level = max(_levels(dag).values())
-    finished = any(
-        nums[0] == current
-        and nums[1] == terminal_level
-        and op.get("status") == al.STATUS_COMPLETED
-        for nums, op in recorded
-    )
-    return al.next_wave(state) if finished else current
+    return al.next_wave(state) if current in al.closed_waves(state) else current
 
 
 def _require_upstream_ready(
@@ -758,7 +755,65 @@ def _advance(
         return _reconcile_candidate(state, ops, dag, op, key)
     if step is al.Step.FINALIZE:
         return _finalize(state, ops, dag, state.ops[key], key)
-    return _reconcile_finalize(state, ops, state.ops[key], key)
+    return _reconcile_finalize(state, ops, dag, state.ops[key], key)
+
+
+def _close_wave_if_dag_approved(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    wave: int,
+) -> None:
+    """Волна закрывается, когда честно одобрен ВЕСЬ активный DAG (§I12).
+
+    Не когда завершилась заявка терминального уровня: терминальный узел
+    мог быть одобрен, а узел вне его транзитивного замыкания — нет.
+    Проверка идёт по всем узлам, как §I5 считает манифест по всему DAG.
+
+    Вызывается там, где заявка стала `completed`, и только там: это
+    единственный момент, когда состояние могло измениться в сторону
+    закрытия. Base перед проверкой пересинхронизируется — мерж
+    финализирующего PR мы узнали ПОСЛЕ того, как синхронизировали его в
+    начале вызова.
+
+    Неустановленный факт волну НЕ закрывает и вызов НЕ роняет: заявка уже
+    завершена, ронять после успеха нечего, а незакрытая волна безвредна —
+    имена остаются уникальными, а следующий вызов проверит заново. Это
+    та же асимметрия, что у правила «не хоронить»: ошибка в сторону
+    «ещё открыта» стоит номера, ошибка в другую сторону переиспользует
+    волну.
+    """
+    ops.checkout_and_pull(state.target_dir, _base_ref(state))
+    if _dag_fully_approved(state, ops, dag):
+        al.close_wave(state, wave)
+
+
+def _dag_fully_approved(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+) -> bool:
+    """Каждый узел активного DAG честно одобрен в base; факт не установлен
+    — `False`.
+
+    Читает не поднимая: этот вопрос задаётся ПОСЛЕ успешного завершения
+    заявки, и превращать неполный ответ в отказ вызова значило бы
+    отчитываться неудачей об удавшемся шаге.
+    """
+    texts: dict[str, str] = {}
+    for fname, _ in dag:
+        fact = af.read_blob_text(
+            ops, state.target_dir, _base_ref(state), _rel(state, fname)
+        )
+        if fact.outcome is not Outcome.FOUND or fact.value is None:
+            return False
+        texts[bundle_dag.node_id(fname)] = fact.value
+    for fname, ups in dag:
+        node = bundle_dag.node_id(fname)
+        blobs = {up: blob_sha1(texts[up]) for up in ups}
+        if na.node_debt(node, texts[node], blobs) is not None:
+            return False
+    return True
 
 
 def _reconcile_candidate(
@@ -812,12 +867,18 @@ def _reconcile_candidate(
             "восстановление: новый candidate над теми же узлами, мерж "
             "учёткой из allowlist даст верную подпись"
         )
-    al.record_merge(state, key, merged)
+    authorization = signature.value
+    assert authorization is not None
+    al.record_merge(state, key, merged, authorization)
     return _finalize(state, ops, dag, state.ops[key], key, facts)
 
 
 def _reconcile_finalize(
-    state: RunState, ops: Ops, op: dict, key: str
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    op: dict,
+    key: str,
 ) -> ApprovalOutcome:
     """Судьба финализирующего PR: ждём, завершаем либо инвалидируем."""
     pr = op["finalize_pr"]
@@ -830,6 +891,7 @@ def _reconcile_finalize(
         )
     if where is Disposition.MERGED:
         al.complete_request(state, key)
+        _close_wave_if_dag_approved(state, ops, dag, op["wave"])
         return ApprovalOutcome(
             f"конверт подписи в base (PR #{pr}): узлы "
             f"{', '.join(op['nodes'])} честно одобрены, заявка {key} "
@@ -868,10 +930,14 @@ def _finalize(
     этом терминализуется в `invalidated` ТОЛЬКО по положительно
     установленному факту, а неустановленный оставляет её живой.
 
-    Пятая сверка — про личность — выполнена там, где факт устанавливается:
-    в `_reconcile_candidate`, до записи фактов мержа. Записанный мерж по
-    построению авторизован, и перепроверять его здесь значило бы сверять
-    поле с конфигурацией, а не с фактом.
+    Пятая сверка — про личность — выполнена там, где факт
+    устанавливается: в `_reconcile_candidate`, до записи фактов мержа.
+    Здесь проверяется ЦЕЛОСТНОСТЬ записанного решения — то ли это решение
+    и о том ли мерже, — но allowlist не применяется заново. Иначе правка
+    конфигурации задним числом переавторизовывала бы прошлое: заявка,
+    честно классифицированная вчера, умирала бы сегодня оттого, что
+    список сузили, — и это ровно тот класс, ради которого §I12 сделал
+    терминальный статус durable, а не выводимым.
 
     `facts` передаются, когда PR уже прочитан этим же вызовом (сквозной
     проход «мерж увидели — тут же финализируем»). На нём сверка
@@ -905,6 +971,23 @@ def _finalize(
             f"факты мержа PR #{pr} не совпали с записанными — заявка {key} "
             "invalidated; восстановление: новый candidate"
         )
+    auth = op.get("authorization")
+    if (
+        not isinstance(auth, dict)
+        or auth.get("login") != op["merged_by"]
+        or not auth.get("policy")
+    ):
+        al.invalidate_request(
+            state,
+            key,
+            "решение об авторизации мержа не записано либо относится к "
+            f"другому мержу: в заявке {auth!r} при merged_by "
+            f"{op['merged_by']!r}",
+        )
+        raise RuntimeError(
+            f"заявка {key} не несёт целого решения об авторизации своего "
+            "мержа — invalidated; восстановление: новый candidate"
+        )
     in_base = ops.is_ancestor(
         state.target_dir, op["merge_commit"], _base_ref(state)
     )
@@ -927,6 +1010,7 @@ def _finalize(
     pending = _verify_nodes_in_base(state, ops, dag, op, key)
     if not pending:
         al.complete_request(state, key)
+        _close_wave_if_dag_approved(state, ops, dag, op["wave"])
         return ApprovalOutcome(
             f"конверт узлов {', '.join(op['nodes'])} уже в base — заявка "
             f"{key} завершена",
