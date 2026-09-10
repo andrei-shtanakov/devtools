@@ -619,6 +619,37 @@ def test_diff_is_taken_between_two_pinned_shas(fleet: Fleet) -> None:
     assert "/files" not in fleet.gh_calls()
 
 
+def test_truncated_file_list_does_not_merge(fleet: Fleet) -> None:
+    """Полнота списка не подтверждена — гвард не может ручаться, значит отказ.
+
+    Форджа режет список файлов на 300 и признака усечения не даёт: ни поля
+    `truncated`, ни счётчика всех файлов. На неполном списке категорический
+    гвард authority-root молча не сработал бы — тот же fail-open, что был у
+    `mergeStateStatus` кругом раньше.
+    """
+    files = "\n".join(f"lib/f{i}.ex" for i in range(300))
+    res = fleet.run(GH_STUB_HEADREF="feat/ordinary", GH_STUB_FILES=files)
+    assert res.returncode == 3, res.stdout
+    assert "НЕ ПОДТВЕРЖДЁН ПОЛНОСТЬЮ" in res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_file_list_just_under_the_cap_merges(fleet: Fleet) -> None:
+    """Порог не должен отбивать нормальные диффы: 299 файлов проходят."""
+    files = "\n".join(f"lib/f{i}.ex" for i in range(299))
+    res = fleet.run(GH_STUB_HEADREF="feat/ordinary", GH_STUB_FILES=files)
+    assert res.returncode == 0, res.stderr
+    assert len(fleet.merge_calls()) == 1
+
+
+def test_compare_is_requested_without_paginate(fleet: Fleet) -> None:
+    """`--paginate` листает КОММИТЫ, а `files` несёт каждая страница целиком —
+    с ним файлы повторялись бы и счётчик усечения потерял бы смысл."""
+    fleet.run(GH_STUB_HEADREF="feat/ordinary")
+    compare = [ln for ln in fleet.gh_calls().splitlines() if "/compare/" in ln]
+    assert compare and "--paginate" not in compare[0]
+
+
 def test_compare_failure_does_not_merge(fleet: Fleet) -> None:
     """Состав диффа неизвестен — мерж не выполняется."""
     res = fleet.run(GH_STUB_HEADREF="feat/ordinary", GH_STUB_COMPARE_FAIL="1")

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from governance import ssot_env
+
 #: SSOT-файл; путь относительно корня репо (родитель пакета `governance`).
 PATHS_FILE = (
     Path(__file__).resolve().parent.parent
@@ -28,22 +30,15 @@ _KEY = "AUTHORITY_ROOT_PREFIXES"
 
 
 def prefixes() -> tuple[str, ...]:
-    """Префиксы authority-root путей из SSOT-файла."""
-    try:
-        text = PATHS_FILE.read_text(encoding="utf-8")
-    except OSError as exc:  # noqa: TRY003 — путь важнее классификации
-        raise RuntimeError(
-            f"SSOT authority-root путей недоступен: {PATHS_FILE} ({exc})"
-        ) from exc
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#") or not stripped.startswith(f"{_KEY}="):
-            continue
-        found = tuple(stripped[len(_KEY) + 1:].split())
-        if found:
-            return found
-        break
-    raise RuntimeError(f"в {PATHS_FILE} нет непустого {_KEY}")
+    """Префиксы authority-root путей из SSOT-файла.
+
+    Разбор — общий (`ssot_env`, там же правила формата и поведение на битом
+    входе). Отдельный разбор здесь брал ПЕРВОЕ вхождение ключа, тогда как
+    shell-половина брала последнее: половины расходились на дубле — ровно на
+    том, ради чего SSOT и заводился (ревью #183, круг 6).
+    """
+    value = ssot_env.read_key(PATHS_FILE, _KEY, "SSOT authority-root путей")
+    return tuple(value.split())
 
 
 def touched(files: list[str]) -> list[str]:

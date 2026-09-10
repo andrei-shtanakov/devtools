@@ -26,6 +26,8 @@ import re
 from fnmatch import fnmatchcase
 from pathlib import Path
 
+from governance import ssot_env
+
 #: SSOT-файл; путь относительно корня репо (родитель пакета `governance`).
 PATTERNS_PATH = (
     Path(__file__).resolve().parent.parent
@@ -44,29 +46,17 @@ _FINALIZE_KEY = "APPROVAL_FINALIZE_SUFFIX"
 
 
 def _read_patterns() -> dict[str, str]:
-    """Разобрать SSOT-файл в KEY=VALUE (файл парсится, не исполняется).
+    """Оба ключа SSOT-файла; разбор — общий (`ssot_env`, там же правила).
 
-    Fail-closed: отсутствие файла или любого из двух ключей — исключение, а не
-    вшитый дефолт. Молчаливый дефолт означал бы, что имена веток снова живут в
-    двух местах, причём второе — невидимое.
+    Fail-closed: недоступный файл, отсутствующий ключ, дубль ключа, пустое
+    значение — исключение, а не вшитый дефолт. Молчаливый дефолт означал бы,
+    что имена веток снова живут в двух местах, причём второе — невидимое.
     """
-    try:
-        text = PATTERNS_PATH.read_text(encoding="utf-8")
-    except OSError as exc:  # noqa: TRY003 — путь важнее классификации
-        raise RuntimeError(
-            f"SSOT имён веток одобрения недоступен: {PATTERNS_PATH} ({exc})"
-        ) from exc
-    values: dict[str, str] = {}
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, _, value = stripped.partition("=")
-        values[key.strip()] = value.strip()
-    for key in (_CANDIDATE_KEY, _FINALIZE_KEY):
-        if not values.get(key):
-            raise RuntimeError(f"в {PATTERNS_PATH} нет непустого {key}")
-    return values
+    what = "SSOT имён веток одобрения"
+    return {
+        key: ssot_env.read_key(PATTERNS_PATH, key, what)
+        for key in (_CANDIDATE_KEY, _FINALIZE_KEY)
+    }
 
 
 def candidate_template() -> str:

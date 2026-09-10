@@ -63,6 +63,25 @@ def test_authority_root_prefixes_empty_raises(
         authority_root.prefixes()
 
 
+def test_authority_root_rejects_duplicate_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Дубль ключа — отказ, а не выбор одного из двух значений за человека.
+
+    Разбор общий (`ssot_env`), и это существенно: собственный разбор здесь
+    брал ПЕРВОЕ вхождение, тогда как shell-половина брала последнее —
+    половины расходились на дубле (ревью #183, круг 6).
+    """
+    broken = tmp_path / "paths.env"
+    broken.write_text(
+        "AUTHORITY_ROOT_PREFIXES=.github/\n"
+        "AUTHORITY_ROOT_PREFIXES=profiles/\n"
+    )
+    monkeypatch.setattr(authority_root, "PATHS_FILE", broken)
+    with pytest.raises(RuntimeError, match="определён 2 раз"):
+        authority_root.prefixes()
+
+
 def test_missing_key_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
