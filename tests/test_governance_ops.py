@@ -685,6 +685,22 @@ def test_pr_facts_requests_base_ref_oid(monkeypatch):
         assert required in fields, f"{required} не запрошен: {fields}"
 
 
+def test_pr_facts_requests_the_whole_merge_event(monkeypatch):
+    """Учётка, время и КОММИТ мержа спрашиваются одним запросом (§I12).
+
+    Все три — обстоятельства одного forge-события: сверка фазы 3 требует их
+    вместе, а подпись узла берётся из первых двух. Не спроси мы
+    `mergeCommit` здесь, `approval_facts.merge_event` на любом реальном PR
+    отдавал бы `UNAVAILABLE` — заявка не двигалась бы никогда, и снаружи
+    это выглядело бы как «форджа не отвечает».
+    """
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="{}")
+    RealOps().pr_facts(REPO_SLUG, 42)
+    fields = calls[0].argv[calls[0].argv.index("--json") + 1].split(",")
+    for required in ("mergedBy", "mergedAt", "mergeCommit"):
+        assert required in fields, f"{required} не запрошен: {fields}"
+
+
 def test_changed_paths_fetch_base_then_three_dot_diff(monkeypatch):
     calls = _install_fake_run(
         monkeypatch, returncode=0, stdout="lib/a.py\nlib/b.py\n"

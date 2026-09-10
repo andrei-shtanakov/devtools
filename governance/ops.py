@@ -686,12 +686,18 @@ class RealOps:
         return done.returncode == 0
 
     def pr_facts(self, repo_slug: str, pr: int) -> dict:
-        """Сырой gh-JSON PR — интерпретация полей не входит в ops."""
+        """Сырой gh-JSON PR — интерпретация полей не входит в ops.
+
+        `mergeCommit` спрашивается в ЭТОМ запросе, а не отдельным: сверка
+        фазы 3 (§I12) требует все обстоятельства мержа сразу — учётку,
+        время и коммит, — а второй запрос ради одного поля был бы вторым
+        источником того же факта и мог бы разойтись с первым по времени.
+        """
         done = subprocess.run(
             ["gh", "pr", "view", str(pr), "-R", repo_slug, "--json",
              "mergeable,mergeStateStatus,statusCheckRollup,isDraft,"
              "headRefOid,baseRefOid,baseRefName,state,mergedAt,"
-             "mergedBy"],
+             "mergedBy,mergeCommit"],
             capture_output=True, text=True, check=True,
         )
         return json.loads(done.stdout)
