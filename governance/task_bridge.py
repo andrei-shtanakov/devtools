@@ -26,9 +26,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, NamedTuple
 
-import yaml
-
 from governance import acceptance_guard, decomposition_guard, design_guard
+from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.ops import Ops, RealOps
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
 from governance.run_state import RunState, load, op_complete, op_start, save
@@ -127,40 +126,6 @@ def _check_bundle_composition(
             "передайте --legacy-bundle=3|4|5 с ТОЧНЫМ фактическим составом"
         )
 
-
-def split_frontmatter(text: str) -> tuple[dict, str]:
-    """YAML-frontmatter → (meta, body); файл без frontmatter — ValueError.
-
-    Перепиновка и штампы делаются ПАРСЕРОМ, не текстовой заменой
-    (ретроспектива 2026-09-02, @id:spec-bridge-approve-conformance):
-    sed по инлайн-форме `{requirements: "…"}` молча промахнулся и пустил
-    stale-пин в коммит — «0 замен» у текстовых замен выглядит как успех.
-
-    ЛЮБОЙ отказ разбора приходит одним типом `ValueError`, включая сбой
-    самого YAML-парсера: `yaml.YAMLError` — не подкласс `ValueError`, и
-    вызывающие, которые ловят «frontmatter не разобрать» (§I6/§I8), мимо
-    него проваливались сырым трейсбеком вместо своего fail-closed.
-    """
-    if not text.startswith("---\n"):
-        raise ValueError("нет YAML-frontmatter (файл не начинается с '---')")
-    head, sep, body = text[4:].partition("\n---\n")
-    if not sep:
-        raise ValueError("frontmatter не закрыт разделителем '---'")
-    try:
-        meta = yaml.safe_load(head)
-    except yaml.YAMLError as exc:
-        raise ValueError(f"frontmatter — невалидный YAML: {exc}") from exc
-    if not isinstance(meta, dict):
-        raise ValueError("frontmatter — не YAML-маппинг")
-    return meta, body.lstrip("\n")
-
-
-def join_frontmatter(meta: dict, body: str) -> str:
-    """(meta, body) → текст файла; ключи в порядке вставки, без сортировки."""
-    dumped = yaml.safe_dump(
-        meta, sort_keys=False, allow_unicode=True, default_flow_style=False
-    )
-    return f"---\n{dumped}---\n\n{body}"
 
 # [a-z]?-суффикс: раунды ревью бандлов вставляют сценарии как BEH-18a —
 # без суффикса в грамматике мост молча ронял сценарий (PR spec-runner#369,
