@@ -118,6 +118,8 @@ class FakeOps:
     files: list[str] = field(default_factory=list)
     threads: bool | None = False
     merge_ok: bool = True
+    # Код отказа обвязки: 4 — форджа отклонила, 3 — гвард.
+    merge_code: int = 4
     head: str = "deadbeef"
     s8_exit: int = 0
     s8_output: str = ""
@@ -202,12 +204,12 @@ class FakeOps:
 
     def merge(
         self, repo_name: str, pr: int, sha: str, base: str | None = None
-    ) -> bool:
+    ) -> int:
         self.calls.append(("merge", pr, sha))
         self.merge_targets.append(repo_name)
         if self.merge_ok:
             self.merged.append((pr, sha))
-        return self.merge_ok
+        return 0 if self.merge_ok else self.merge_code
 
     def comment(self, repo_slug: str, pr: int, body: str) -> None:
         self.calls.append(("comment", pr, body))

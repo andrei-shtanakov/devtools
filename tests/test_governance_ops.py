@@ -58,7 +58,10 @@ def test_merge_goes_through_the_wrapper_not_gh(monkeypatch):
 
     result = ops.merge("devtools", 42, "deadbeef")
 
-    assert result is True
+    # Успех — код 0. Возврат стал КОДОМ (ревью #183, круг 7): `accept-pr`
+    # обязан отличать отказ гварда (3) от отказа форджи (4), а bool это
+    # различие схлопывал.
+    assert result == 0
     assert len(calls) == 1
     call = calls[0]
     assert call.argv == [
@@ -78,13 +81,20 @@ def test_merge_passes_base_pin_when_caller_knows_it(monkeypatch):
     assert calls[0].argv[-2:] == ["--expect-base", "cafebabe"]
 
 
-def test_merge_rc_nonzero_returns_false_not_exception(monkeypatch):
-    _install_fake_run(monkeypatch, returncode=1)
+@pytest.mark.parametrize("rc", [2, 3, 4])
+def test_merge_returns_the_code_and_never_raises(monkeypatch, rc):
+    """Отказ возвращается ЗНАЧЕНИЕМ, и значение — код, а не bool.
+
+    Не бросать — свойство прежнее. Новое — что код доходит до вызывающего:
+    3 («гвард: PR остаётся человеку») и 4 («форджа отклонила») требуют от
+    `accept-pr` разной диагностики, а bool делал их неразличимыми.
+    """
+    _install_fake_run(monkeypatch, returncode=rc)
     ops = RealOps()
 
     result = ops.merge("devtools", 42, "deadbeef")
 
-    assert result is False
+    assert result == rc
 
 
 # --- Кейс 2: review ------------------------------------------------------

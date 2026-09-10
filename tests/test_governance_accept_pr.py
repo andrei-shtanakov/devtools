@@ -16,6 +16,8 @@ class _Ops:
     facts_seq: list[dict] = field(default_factory=list)
     files: list[str] = field(default_factory=lambda: ["lib/x.ex"])
     merge_ok: bool = True
+    # Код отказа обвязки: 4 — форджа отклонила, 3 — гвард.
+    merge_code: int = 4
     dirty: bool = False
     branch: str | None = "master"
     materialize_error: str | None = None
@@ -62,10 +64,10 @@ class _Ops:
 
     def merge(
         self, repo_name: str, pr: int, sha: str, base: str | None = None
-    ) -> bool:
+    ) -> int:
         self.calls.append(("merge", pr, sha))
         self.merge_args = (repo_name, pr, sha, base)
-        return self.merge_ok
+        return 0 if self.merge_ok else self.merge_code
 
 
 def _facts(**over: Any) -> dict:
@@ -159,6 +161,30 @@ def test_moved_base_names_both_shas_and_the_procedure(capsys) -> None:
     assert "make accept-pr" in out
     assert "ревью пройдёт заново" in out
     assert "чеки заново не ждутся" in out
+
+
+def test_guard_refusal_is_not_reported_as_a_moved_base(capsys) -> None:
+    """Отказ ГВАРДА (код 3) не объявляется движением базы (ревью #183, круг 7).
+
+    База могла уехать за время приёмки — и при отказе гварда это правда, но
+    не причина: повтор упрётся в тот же гвард, и так каждый раз, пока
+    оператор не заметит настоящий stderr обвязки выше. Различить нечем было
+    потому, что `Ops.merge` схлопывал коды 2/3/4 в bool; теперь возвращается
+    код, и диагноз про базу выбирается ТОЛЬКО на отказе форджи (4).
+    """
+    moved = _facts(baseRefOid="base999")
+    ops = _Ops(
+        facts_seq=[moved], merge_ok=False, merge_code=3, base_oid="base000",
+    )
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "база уехала" not in out
+    # И лишнего запроса за фактами на этом пути тоже нет: решать по ним
+    # нечего, а гонку они бы только расширили.
+    assert ("pr_facts", 59) not in ops.calls
 
 
 def test_merge_failure_without_base_move_does_not_blame_the_base(

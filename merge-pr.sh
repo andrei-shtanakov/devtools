@@ -301,7 +301,7 @@ if ! pr_facts=$(gh_a pr view "$pr" --repo "$slug" \
     --json headRefName,headRefOid,baseRefOid,mergeStateStatus,\
 isCrossRepository,labels,state \
     --jq '.headRefName, .headRefOid, .state, .baseRefOid,
-          .mergeStateStatus, .isCrossRepository, (.labels[]?.name)' 2>&1); then
+          .mergeStateStatus, .isCrossRepository, (.labels[].name)' 2>&1); then
     die 2 "не удалось прочитать факты PR ${slug}#${pr}: $pr_facts"
 fi
 head_ref=$(printf '%s\n' "$pr_facts" | sed -n '1p')

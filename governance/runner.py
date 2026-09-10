@@ -1410,7 +1410,7 @@ def _step_merge(state: RunState, ops: Ops) -> bool:
     # Имя КАТАЛОГА репо, не slug: мерж идёт через `merge-pr.sh` (единственный
     # путь агентского мержа), а обвязка адресуется каталогом во флоте и
     # выводит slug из его сырого origin — так же, как `ops.review` выше.
-    merged = ops.merge(state.repo, state.pr, state.head)
+    merged = ops.merge(state.repo, state.pr, state.head) == 0
     if merged:
         op_complete(state, key, merged=True)
         return True

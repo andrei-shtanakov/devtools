@@ -98,7 +98,7 @@ class Ops(Protocol):
 
     def merge(
         self, repo_name: str, pr: int, sha: str, base: str | None = None
-    ) -> bool: ...
+    ) -> int: ...
 
     def close_pr(self, repo_slug: str, pr: int, comment: str) -> bool: ...
 
@@ -870,7 +870,12 @@ class RealOps:
         if base:
             argv += ["--expect-base", base]
         done = subprocess.run(argv, cwd=DEVTOOLS_ROOT)
-        return done.returncode == 0
+        # КОД, а не bool: у обвязки коды разведены по смыслу (3 — гвард,
+        # PR остаётся человеку; 4 — форджа отклонила), и вызывающий обязан
+        # их различать. Схлопнув в bool, `accept-pr` объявлял «база уехала»
+        # поверх отказа гварда и предлагал повтор, который упирался в тот же
+        # гвард (ревью #183, круг 7).
+        return done.returncode
 
     def comment(self, repo_slug: str, pr: int, body: str) -> None:
         """gh pr comment."""

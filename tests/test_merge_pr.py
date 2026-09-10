@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -922,4 +923,51 @@ def test_no_second_definition_of_approval_branch_names() -> None:
         "(стройте через approval_branches.candidate_branch/finalize_branch "
         "либо пополните _ALLOWED_APPROVE_BRANCH_LITERALS осознанно):\n"
         + "\n".join(offenders)
+    )
+
+
+def _labels_jq_expression() -> str:
+    """jq-выражение фактов PR — из САМОГО скрипта, а не копией.
+
+    Копия в тесте была бы вторым определением: она осталась бы верной
+    при любой правке скрипта, то есть проверяла бы себя.
+    """
+    text = SCRIPT.read_text(encoding="utf-8")
+    match = re.search(r"--jq '([^']+)'", text)
+    assert match, "в merge-pr.sh не найдено --jq '…' с фактами PR"
+    return match.group(1)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expect_rc_zero", "why"),
+    [
+        ('{"labels": []}', True, "PR без меток — законный вход"),
+        ('{"labels": [{"name": "x"}]}', True, "PR с меткой"),
+        ('{"labels": null}', False, "labels не разобраны — факт не получен"),
+        ("{}", False, "ключа labels нет вовсе — форджа сменила форму"),
+    ],
+)
+def test_labels_are_read_without_the_optional_operator(
+    payload: str, expect_rc_zero: bool, why: str
+) -> None:
+    """`?` у `.labels[]` — fail-open: гвард метки прошёл бы молча.
+
+    §I12 держит approval-PR ДВУМЯ независимыми признаками: имя ветки и
+    метка. У PR с переименованной веткой метка остаётся единственным, и
+    неразобранный ответ форджи обязан ронять jq, а не читаться как
+    «меток нет». Соседний гвард состава диффа (`.files[]` без `?`) уже
+    решён так же — это одно правило, а не два решения.
+
+    Выражение берётся из скрипта и гоняется НАСТОЯЩИМ jq: стаб `gh` в
+    остальных тестах печатает уже отфильтрованный вывод и про `?` знать
+    не может.
+    """
+    if shutil.which("jq") is None:
+        pytest.skip("jq не установлен")
+    done = subprocess.run(
+        ["jq", "-r", _labels_jq_expression()],
+        input=payload, capture_output=True, text=True,
+    )
+    assert (done.returncode == 0) is expect_rc_zero, (
+        f"{why}: rc={done.returncode}, stderr={done.stderr.strip()}"
     )
