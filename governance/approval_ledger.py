@@ -157,6 +157,31 @@ def live_request_over(
     return None
 
 
+def live_request_for_step(
+    state: RunState, wave: int, step: int
+) -> tuple[tuple[int, int, int], dict] | None:
+    """Живая заявка этого шага, к которой присоединяется новый вызов.
+
+    Несколько вызовов одного шага накапливаются в ОДНОЙ ветке и одном PR
+    (§I12): каждый читает её голову, добавляет свой узел и свой каскадный
+    след. Присоединяться можно, только пока candidate не вмержен, — после
+    мержа ветка уже отдана человеку и вносить в неё узлы нечего; такой
+    вызов заводит новую заявку того же шага со следующим номером попытки
+    (независимые узлы одного уровня объединять МОЖНО, но не обязано).
+
+    Старшая по номеру попытки, если их почему-то несколько: присоединяться
+    к более ранней значило бы дописывать в ветку, которую уже сменили.
+    """
+    joinable = [
+        (nums, op)
+        for nums, op in live_requests(state)
+        if nums[:2] == (wave, step)
+        and next_step(op)
+        in (Step.CREATE_CANDIDATE, Step.AWAIT_CANDIDATE_MERGE)
+    ]
+    return max(joinable, key=lambda item: item[0]) if joinable else None
+
+
 def open_wave(state: RunState) -> int | None:
     """Номер идущей волны; `None` — живой волны нет.
 
@@ -252,6 +277,11 @@ def start_request(
         "merged_by": None,
         "merged_at": None,
         "merge_commit": None,
+        # Второй коммит заявки — конверт подписи — опознаётся своим
+        # head'ом: одно поле не может назвать два разных коммита, а
+        # усыновление PR крэш-окна сверяется именно с записанным head'ом
+        # той ветки, на которую смотрит.
+        "finalize_head_sha": None,
         "finalize_pr": None,
         "reason": None,
         "invalidated_by": None,
@@ -294,9 +324,49 @@ def record_head_sha(state: RunState, key: str, head_sha: str) -> None:
     _update(state, key, head_sha=head_sha)
 
 
+def record_finalize_head_sha(state: RunState, key: str, head_sha: str) -> None:
+    """`head_sha` коммита конверта — durable до push финализирующей ветки."""
+    _update(state, key, finalize_head_sha=head_sha)
+
+
 def record_candidate_pr(state: RunState, key: str, pr: int) -> None:
     """Номер candidate-PR заявки."""
     _update(state, key, candidate_pr=pr)
+
+
+def extend_request(
+    state: RunState,
+    key: str,
+    node_id: str,
+    content_hash: str,
+    upstream_pins: dict[str, str],
+) -> None:
+    """Добавить узел к заявке того же шага (накопление в одной ветке, §I12).
+
+    Пишется ДО правки файлов — по той же причине, по которой пишется
+    намерение: снимок того, что заявка выносит на одобрение, обязан
+    существовать раньше, чем появятся байты, которые он описывает.
+
+    Повторное добавление того же узла — отказ, а не молчаливая
+    перезапись: перезапись снимка означала бы, что сверка фазы 3 сравнит
+    пересчёт с величиной, посчитанной по ДРУГИМ байтам, чем те, что
+    человек видел в PR.
+    """
+    op = state.ops.get(key)
+    if op is None:
+        raise RuntimeError(f"заявки {key} нет в леджере")
+    if node_id in (op.get("nodes") or ()):
+        raise RuntimeError(
+            f"узел {node_id} уже вынесен заявкой {key} — снимок заявки не "
+            "перезаписывается"
+        )
+    _update(
+        state,
+        key,
+        nodes=[*op["nodes"], node_id],
+        content_hashes={**op["content_hashes"], node_id: content_hash},
+        upstream_pins={**op["upstream_pins"], node_id: dict(upstream_pins)},
+    )
 
 
 def record_merge(state: RunState, key: str, event: MergeEvent) -> None:

@@ -126,6 +126,18 @@ def cascade_stops_at(status: object) -> bool:
     return status in CASCADE_STOP_STATUSES
 
 
+#: Виды долга — по КАКОМУ условию предиката узел не прошёл. Механика
+#: одобрения ветвится по ним (§I12 различает исходы: пункт 6 — fail-closed,
+#: пункт 5 — переодобрение), и ветвиться она обязана по величине, а не по
+#: подстроке в тексте отказа: текст пишется человеку и меняется свободно.
+DEBT_UNKNOWN_STATUS = "unknown_status"
+DEBT_STATUS = "debt_status"
+DEBT_UNSIGNED = "unsigned"
+DEBT_PINS = "pins"
+DEBT_MIGRATION = "migration"
+DEBT_SELF_HASH = "self_hash"
+
+
 @dataclass(frozen=True)
 class NodeDebt:
     """Почему узел не проходит предикат и что с этим делать оператору.
@@ -137,6 +149,7 @@ class NodeDebt:
 
     node_id: str
     status: object
+    kind: str
     reason: str
     procedure: str
 
@@ -221,6 +234,7 @@ def node_debt(
         return NodeDebt(
             node_id,
             status,
+            DEBT_UNKNOWN_STATUS,
             "статус не известен контракту "
             f"(допустимы {', '.join(KNOWN_STATUSES)})",
             APPROVE_PROCEDURE,
@@ -229,6 +243,7 @@ def node_debt(
         return NodeDebt(
             node_id,
             status,
+            DEBT_STATUS,
             _DEBT_MEANING[status],
             debt_procedure(status, live_candidate_pr=live_candidate_pr),
         )
@@ -236,6 +251,7 @@ def node_debt(
         return NodeDebt(
             node_id,
             status,
+            DEBT_UNSIGNED,
             "approved без подписи (approved_by/approved_at пусты)",
             APPROVE_PROCEDURE,
         )
@@ -251,6 +267,7 @@ def node_debt(
         return NodeDebt(
             node_id,
             status,
+            DEBT_PINS,
             "approved с разошедшимися пинами — " + "; ".join(diverged),
             "сперва одобрите изменившийся upstream — его каскад объявит "
             f"долг этому узлу; затем {APPROVE_PROCEDURE}",
@@ -260,6 +277,7 @@ def node_debt(
         return NodeDebt(
             node_id,
             status,
+            DEBT_MIGRATION,
             f"нет {SELF_HASH_KEY}: собственные одобренные байты узла "
             "непроверяемы — миграционный долг",
             MIGRATION_PROCEDURE,
@@ -269,6 +287,7 @@ def node_debt(
         return NodeDebt(
             node_id,
             status,
+            DEBT_SELF_HASH,
             f"{SELF_HASH_KEY} разошёлся: подписано {recorded}, фактически "
             f"{actual} — собственные байты узла изменились с момента подписи",
             f"{APPROVE_PROCEDURE} — это явное ПЕРЕОДОБРЕНИЕ",
