@@ -253,7 +253,10 @@ def _propose(
 
     self_hash = na.self_hash(text)
     step = _levels(dag)[node_id]
-    wave = _wave_for(state, dag)
+    nodes = bundle_dag.composition(dag)
+    fingerprint = bundle_dag.composition_fingerprint(nodes)
+    _close_obsolete_wave(state, nodes, fingerprint)
+    wave = _wave_for(state, nodes, fingerprint)
 
     joined = al.live_request_for_step(state, wave, step)
     if joined is not None:
@@ -276,123 +279,215 @@ def _propose(
     return _publish_candidate(state, ops, dag, key, changed, debt)
 
 
-def _wave_for(
-    state: RunState, dag: tuple[tuple[str, tuple[str, ...]], ...]
-) -> int:
-    """Номер идущего прохода; при разошедшемся составе — новый проход.
+@dataclass(frozen=True)
+class ApprovedDag:
+    """СВИДЕТЕЛЬСТВО успешного общего гейта: установленный состав и отпечаток.
 
-    Волна — ОДИН незавершённый проход одобрения активного DAG, а не время
-    жизни заявки. Между вмерженным уровнем `K` и заведённым `K+1` живой
-    заявки нет ни одной, и волна обязана этот промежуток пережить: иначе
-    `K` не рос бы никогда, `A` не рос бы вовсе, и оба компонента имени
-    перестали бы различать что-либо. Поэтому открытость читается по
-    ЗАПИСИ волны (`al.open_wave`), а не по состоянию заявок.
+    Тип существует не для удобства передачи, а как структурная защита от
+    второго определения одобренности. Функция, получившая свидетельство,
+    физически не может ни сходить в сеть, ни применить предикат заново, ни
+    вывести одобренность по-своему: у неё на входе уже установленный факт,
+    а не повод его пересчитать. За прогон мы трижды платили за вторые
+    определения — два списка `authority-root`, три разбора одного SSOT,
+    предикат одобренности рядом с самим собой; здесь это закрыто типом, а
+    не договорённостью.
 
-    Сравнение составов идёт ПЕРЕД тем, как вызов присоединится к волне:
-    проход по составу, которого больше нет, нечем завершить — остаток
-    волны не «заброшен», а обессмыслен. Отличие положительно установлено
-    (обе величины записаны) — прежняя волна durable закрывается в
-    `obsolete`, и ТЕМ ЖЕ вызовом заводится новая: оба действия следуют из
-    одного и того же прочитанного состава, а разделив их, мы прочитали бы
-    состав дважды и дали бы ему право разойтись между чтениями.
-
-    Судьбу `completed` здесь не пишет никто: её пишет реконсиляция после
-    сошедшегося гейта доставки (`reconcile_wave_after_gate`), потому что
-    последнего `--approve-node` в предписанном порядке работы не
-    существует — после мержа финализирующего PR последнего уровня
-    оператор уходит в доставку.
-
-    Зовётся только с пути ПРЕДЛОЖЕНИЯ — там, где волна вызову нужна.
-    Продвижение уже живой заявки (`_advance`) состав не сверяет и волну не
-    трогает вовсе: заявка идёт по байтам, которые сама и вынесла, а её
-    сверки — фазы 3 — про эти байты, а не про состав графа. Ничего при
-    этом не теряется: отличие состава установит следующий вызов, которому
-    волна понадобится, либо реконсиляция после гейта — оба сравнивают.
+    Отсюда же и правило про `UNAVAILABLE`: неустановленный состав в
+    реконсиляцию **не передаётся вовсе**, потому что свидетельства из него
+    не получается — гейт при неустановленном DAG успешно завершиться не
+    мог. Это выражено сигнатурой, а не проверкой внутри.
     """
-    nodes = bundle_dag.composition(dag)
-    fingerprint = bundle_dag.composition_fingerprint(nodes)
-    current = al.open_wave(state)
-    if current is not None:
-        intent = al.wave_records(state)[current]["intent"]
-        if intent["fingerprint"] == fingerprint:
-            return current
-        al.obsolete_wave(
-            state,
-            current,
-            nodes,
-            fingerprint,
-            f"состав активного DAG изменился: волна шла по "
-            f"{intent['dag']} ({intent['fingerprint']}), сейчас "
-            f"{list(nodes)} ({fingerprint})",
-        )
-    fresh = al.next_wave(state)
-    al.open_wave_record(state, fresh, nodes, fingerprint)
-    return fresh
+
+    nodes: tuple[str, ...]
+    fingerprint: str
 
 
-def reconcile_wave_after_gate(
+@dataclass(frozen=True)
+class DagState:
+    """Результат применения общего предиката ко ВСЕМУ активному DAG.
+
+    `evidence` непусто ТОГДА И ТОЛЬКО ТОГДА, когда предикат сошёлся на
+    каждом узле и состав установлен; иначе непусты `debts` (узлы с долгом,
+    для диагностики отказа) либо `unresolved` (факт не установлен).
+
+    Три величины вместе, а не три вызова: гейту доставки нужны и решение,
+    и перечень непрошедших узлов с процедурами, и различие «в долгу» от
+    «не установлено», — а собери он их отдельными обходами, обходы
+    разошлись бы.
+    """
+
+    evidence: ApprovedDag | None
+    debts: tuple[na.NodeDebt, ...] = ()
+    unresolved: str = ""
+
+
+def read_dag_state(
     state: RunState,
     ops: Ops,
     dag: tuple[tuple[str, tuple[str, ...]], ...],
+) -> DagState:
+    """Общий предикат по всему активному DAG в base — ОДНО определение.
+
+    Единственное место, где «честно одобрен весь DAG» вычисляется. Гейт
+    доставки (часть 3) зовёт его же: у предиката появляется второе место
+    применения, а не вторая редакция — понадобится изменить, что считается
+    честной одобренностью, менять надо здесь, и оба потребителя прочитают
+    новое значение без единой правки у себя.
+
+    Предикат применяется к КАЖДОМУ узлу, а не к терминальному уровню:
+    активный DAG не цепочка, у него могут быть узлы вне транзитивного
+    замыкания терминального, и их одобрение последней заявки не касается
+    вовсе.
+
+    Неустановленный факт не превращается ни в долг, ни в одобренность:
+    `unresolved` — третий исход, и он не даёт свидетельства.
+    """
+    texts: dict[str, str] = {}
+    for fname, _ in dag:
+        fact = af.read_blob_text(
+            ops, state.target_dir, _base_ref(state), _rel(state, fname)
+        )
+        if fact.outcome is not Outcome.FOUND or fact.value is None:
+            return DagState(None, unresolved=fact.detail)
+        texts[bundle_dag.node_id(fname)] = fact.value
+    debts: list[na.NodeDebt] = []
+    for fname, ups in dag:
+        node = bundle_dag.node_id(fname)
+        blobs = {up: blob_sha1(texts[up]) for up in ups}
+        debt = na.node_debt(node, texts[node], blobs)
+        if debt is not None:
+            debts.append(debt)
+    if debts:
+        return DagState(None, debts=tuple(debts))
+    nodes = bundle_dag.composition(dag)
+    return DagState(
+        ApprovedDag(nodes, bundle_dag.composition_fingerprint(nodes))
+    )
+
+
+def _intent_of(record: dict, wave: int) -> tuple[list[str], str]:
+    """Intent волны либо fail-closed БЕЗ терминализации.
+
+    Повреждённая или неполная запись intent'а не даёт ни `completed`, ни
+    `obsolete`: закрыть проход можно только сравнением двух ЗАПИСАННЫХ
+    величин, а здесь одной из них нет. Терминализовать по отсутствию
+    величины значило бы завести ту же эвристику, которую §I12 запрещает
+    для заявки.
+
+    Выход из состояния есть, и он человеческий: запись волны после записи
+    неприкосновенна (§I4), поэтому починить её механикой нельзя —
+    поправьте `run.json` прогона руками либо начните новый прогон
+    (`--run-id`), у которого леджер свой. Отказ называет оба пути.
+    """
+    intent = record.get("intent")
+    nodes = intent.get("dag") if isinstance(intent, dict) else None
+    fingerprint = intent.get("fingerprint") if isinstance(intent, dict) else None
+    if not isinstance(nodes, list) or not fingerprint:
+        raise RuntimeError(
+            f"intent волны {wave} повреждён либо неполон ({intent!r}): "
+            "сравнивать не с чем, волна НЕ закрывается и записи не "
+            "меняются. Процедура: поправьте запись волны в run.json "
+            "прогона либо начните новый прогон (--run-id) — запись волны "
+            "механикой не чинится, она неприкосновенна после записи"
+        )
+    return nodes, str(fingerprint)
+
+
+def reconcile_wave_after_approved_dag(
+    state: RunState, approved: ApprovedDag
 ) -> str | None:
-    """Шаг 3 нормативного порядка §I2: судьба открытой волны; → её исход.
+    """Судьба открытой волны по свидетельству гейта; → исход либо `None`.
 
-    Зовётся ТОЛЬКО после того, как гейт доставки СОШЁЛСЯ, и только оттуда
-    (часть 3 подключит её к доставке; здесь поверхности нет по границам
-    карантина). Возвращает записанный исход либо `None`, если писать
-    нечего.
+    Шаг 3 нормативного порядка §I2, и **только** он: гейт уже сошёлся,
+    сеть и предикат эта функция не повторяет — у неё их нет на входе.
+    Часть 3 зовёт её после успешного гейта и **до любых delivery-эффектов**
+    на всех трёх путях доставки.
 
-    Это **бухгалтерская реконсиляция уже пройденного гейта, а не его
-    часть**: гейт судит о DAG — одобрены ли узлы, — реконсиляция судит о
-    ЗАПИСИ прежнего прохода — чем он кончился. Разные предметы, разные
-    величины, разное время; статус волны в решении о допуске не участвует
-    вовсе, и доставка над воркстримом без единой записи волны проходит
-    ровно так же, как над воркстримом с ними.
+    Это бухгалтерская реконсиляция уже пройденного гейта, а не его часть:
+    гейт судит о DAG — одобрены ли узлы, — реконсиляция судит о ЗАПИСИ
+    прежнего прохода — чем он кончился. Статус волны в решении о допуске
+    не участвует вовсе.
 
     Три исхода, из которых нельзя выпасть:
 
-    - intent совпал с текущим составом и записанный DAG целиком честно
-      одобрен → `completed`;
-    - intent положительно разошёлся → `obsolete` с обоими составами;
-    - открытой волны нет либо её судьба уже записана → ничего.
+    - состав свидетельства совпал с `wave.intent` → `completed`;
+    - положительно разошёлся → `obsolete` с обоими составами и причиной;
+    - открытой волны нет либо её судьба уже записана → `None`,
+      идемпотентный no-op. На нём держится право вызывающего повторить
+      доставку после падения.
 
-    Порядок двух проверок фиксирован — сперва состав, потом предикат.
-    Обратный объявил бы `completed` проходу, который шёл по устаревшему
-    составу и мог бы «доодобрить» его целиком, ничего не зная про
-    появившийся узел.
-
-    Идемпотентна: повторный заход в записанную судьбу не пишет ничего —
-    запись волны после записи неприкосновенна (§I4), и на этом держится
-    право вызывающего повторить доставку после падения.
-
-    `completed` пишется по ПОЛНОМУ предикату записанного состава, а не по
-    завершению заявки терминального уровня: активный DAG не цепочка, у
-    него могут быть узлы вне транзитивного замыкания терминального, и их
-    одобрение последней заявки не касается вовсе. Предикат тот же самый,
-    что у гейта, — второе место применения, а не вторая редакция.
+    **Новую волну эта функция не создаёт никогда** — заводить проход
+    работа `--approve-node`, а у реконсиляции право ровно одно: закрыть
+    прежний.
     """
     current = al.open_wave(state)
     if current is None:
         return None
-    record = al.wave_records(state)[current]
-    nodes = bundle_dag.composition(dag)
-    fingerprint = bundle_dag.composition_fingerprint(nodes)
-    if record["intent"]["fingerprint"] != fingerprint:
-        al.obsolete_wave(
-            state,
-            current,
-            nodes,
-            fingerprint,
-            f"состав активного DAG изменился: волна шла по "
-            f"{record['intent']['dag']} "
-            f"({record['intent']['fingerprint']}), сейчас {list(nodes)} "
-            f"({fingerprint})",
-        )
-        return al.WAVE_OBSOLETE
-    if not _dag_fully_approved(state, ops, dag):
-        return None
-    al.complete_wave(state, current)
-    return al.WAVE_COMPLETED
+    nodes, fingerprint = _intent_of(al.wave_records(state)[current], current)
+    if fingerprint == approved.fingerprint:
+        al.complete_wave(state, current)
+        return al.WAVE_COMPLETED
+    al.obsolete_wave(
+        state,
+        current,
+        approved.nodes,
+        approved.fingerprint,
+        f"состав активного DAG изменился: волна шла по {nodes} "
+        f"({fingerprint}), гейт сошёлся на {list(approved.nodes)} "
+        f"({approved.fingerprint})",
+    )
+    return al.WAVE_OBSOLETE
+
+
+def _close_obsolete_wave(
+    state: RunState, nodes: tuple[str, ...], fingerprint: str
+) -> None:
+    """Открытая волна с разошедшимся составом — `obsolete` (§I12).
+
+    Отдельный ИМЕНОВАННЫЙ переход, а не побочный эффект выбора номера:
+    смешав их, мы получили бы функцию, которая по имени выбирает волну, а
+    по делу хоронит проход. Зовётся с пути предложения — контракт прямо
+    разрешает `--approve-node` закрыть устаревшую волну и тем же вызовом
+    завести новую: оба действия следуют из одного прочитанного состава, а
+    разделив их, мы дали бы составу право разойтись между чтениями.
+
+    Отличие обязано быть ПОЛОЖИТЕЛЬНО установленным — состав здесь уже
+    прочитан вызывающим (гвард состава отработал до первой записи), и
+    неустановленного исхода на этом пути не существует.
+    """
+    current = al.open_wave(state)
+    if current is None:
+        return
+    _, recorded = _intent_of(al.wave_records(state)[current], current)
+    if recorded == fingerprint:
+        return
+    al.obsolete_wave(
+        state,
+        current,
+        nodes,
+        fingerprint,
+        f"состав активного DAG изменился: волна шла по отпечатку "
+        f"{recorded}, сейчас {fingerprint}",
+    )
+
+
+def _wave_for(
+    state: RunState, nodes: tuple[str, ...], fingerprint: str
+) -> int:
+    """Волна для этого вызова: продолжить открытую либо начать проход.
+
+    Ничего не закрывает — только выбирает. Открытость читается по ЗАПИСИ
+    волны, а не по живым заявкам: между вмерженным уровнем `K` и
+    заведённым `K+1` живой заявки нет ни одной, и волна обязана этот
+    промежуток пережить — иначе `K` не рос бы никогда, а `A` не рос бы
+    вовсе.
+    """
+    current = al.open_wave(state)
+    if current is not None:
+        return current
+    fresh = al.next_wave(state)
+    al.open_wave_record(state, fresh, nodes, fingerprint)
+    return fresh
 
 
 def _require_upstream_ready(
@@ -836,41 +931,6 @@ def _advance(
     if step is al.Step.FINALIZE:
         return _finalize(state, ops, dag, state.ops[key], key)
     return _reconcile_finalize(state, ops, dag, state.ops[key], key)
-
-
-def _dag_fully_approved(
-    state: RunState,
-    ops: Ops,
-    dag: tuple[tuple[str, tuple[str, ...]], ...],
-) -> bool:
-    """Каждый узел активного DAG честно одобрен в base; факт не установлен
-    — `False`.
-
-    Предикат ТОТ ЖЕ, что у гейта доставки, — второе место его применения,
-    а не вторая редакция: понадобится изменить, что считается честной
-    одобренностью, — менять надо одно место, и оба потребителя обязаны
-    читать новое значение без единой правки у себя.
-
-    Читает не поднимая: вопрос задаётся ПОСЛЕ того, как гейт сошёлся, и
-    превращать неполный ответ в отказ значило бы отчитываться неудачей о
-    шаге, который состоялся. Неустановленный состав волну не закрывает —
-    `False` здесь означает «`completed` не пишем», а не «проход
-    обессмыслен».
-    """
-    texts: dict[str, str] = {}
-    for fname, _ in dag:
-        fact = af.read_blob_text(
-            ops, state.target_dir, _base_ref(state), _rel(state, fname)
-        )
-        if fact.outcome is not Outcome.FOUND or fact.value is None:
-            return False
-        texts[bundle_dag.node_id(fname)] = fact.value
-    for fname, ups in dag:
-        node = bundle_dag.node_id(fname)
-        blobs = {up: blob_sha1(texts[up]) for up in ups}
-        if na.node_debt(node, texts[node], blobs) is not None:
-            return False
-    return True
 
 
 def _reconcile_candidate(

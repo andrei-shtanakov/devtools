@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -268,21 +269,27 @@ def approve(
     )
 
 
-def drive_to_approved(world: World, node: str, *, login: str = HUMAN) -> None:
+def drive_to_approved(
+    world: World,
+    node: str,
+    *,
+    login: str = HUMAN,
+    legacy_bundle: int | None = None,
+) -> None:
     """Провести узел через обе фазы целиком — как это делает оператор.
 
     Именно вызовами механики, а не подстановкой «уже одобренного» файла:
     следующий шаг обязан работать поверх состояния, которое произвёл
     предыдущий.
     """
-    first = approve(world, node)
+    first = approve(world, node, legacy_bundle=legacy_bundle)
     assert first.request is not None
     candidate = world.state.ops[first.request]["candidate_pr"]
     merge_pr(world, candidate, login=login)
-    approve(world, node)
+    approve(world, node, legacy_bundle=legacy_bundle)
     finalize = world.state.ops[first.request]["finalize_pr"]
     merge_pr(world, finalize, login=login)
-    approve(world, node)
+    approve(world, node, legacy_bundle=legacy_bundle)
 
 
 def only_request(world: World) -> tuple[str, dict]:
@@ -1010,118 +1017,234 @@ def test_approve_node_never_writes_completed(world: World) -> None:
     )
 
 
-def test_reconciliation_completes_the_wave_by_the_full_predicate(
+def _dag_state(world: World, legacy: int | None = None) -> an.DagState:
+    return an.read_dag_state(
+        world.state, world.ops, bundle_dag.dag_for(legacy)
+    )
+
+
+def _reconcile(world: World, legacy: int | None = None) -> str | None:
+    """Путь части 3 целиком: гейт даёт свидетельство, оно идёт в переход.
+
+    Свидетельство получается ТОЛЬКО из сошедшегося предиката — обойти это
+    в тесте так же нельзя, как в доставке.
+    """
+    verdict = _dag_state(world, legacy)
+    assert verdict.evidence is not None, (
+        f"гейт не сошёлся: debts={[d.node_id for d in verdict.debts]}, "
+        f"unresolved={verdict.unresolved!r}"
+    )
+    return an.reconcile_wave_after_approved_dag(world.state, verdict.evidence)
+
+
+def test_reconciliation_needs_evidence_not_a_reason_to_recompute() -> None:
+    """`UNAVAILABLE` в переход не передаётся — это выражено СИГНАТУРОЙ.
+
+    У функции нет ни `ops`, ни `dag`: она физически не может сходить в
+    сеть, применить предикат заново или вывести одобренность по-своему.
+    Проверка внутри была бы слабее — её можно обойти, забыв позвать.
+    """
+    params = inspect.signature(
+        an.reconcile_wave_after_approved_dag
+    ).parameters
+    assert list(params) == ["state", "approved"]
+    assert params["approved"].annotation in ("ApprovedDag", an.ApprovedDag)
+
+
+def test_gate_predicate_yields_evidence_only_when_it_converges(
     world: World,
 ) -> None:
-    """`completed` пишется ПОЛНЫМ предикатом записанного состава.
+    """Свидетельство даёт ТОЛЬКО сошедшийся предикат по всему DAG.
 
-    Пара половин одного стенда: с долгом хоть у одного узла — не пишется
-    ничего, без долга — пишется `completed`. «Волна не закрылась» само по
-    себе не отличило бы строгую проверку от сломанной.
+    Три исхода на одном стенде, иначе «нет свидетельства» не отличает
+    строгий предикат от сломанного: долг у узла → долги названы,
+    неустановленный факт → третий исход, всё одобрено → свидетельство.
     """
     for node in ("charter", "requirements", "behaviour-spec", "design",
                  "acceptance", "decomposition"):
         drive_to_approved(world, node)
-    # Долг ставится на ТЕРМИНАЛЬНЫЙ узел намеренно: переодобрение корня
-    # каскадом увело бы в `stale` весь DAG, и «предикат не сошёлся»
-    # говорило бы уже про каскад, а не про долг, который мы завели.
     _push_edit(world, "30-decomposition.md", body="Долг у терминального узла.")
-    assert an.reconcile_wave_after_gate(
-        world.state, world.ops, bundle_dag.dag_for(None)
-    ) is None
-    assert al.open_wave(world.state) == 1, "предикат не сошёлся — волна жива"
+    in_debt = _dag_state(world)
+    assert in_debt.evidence is None
+    assert [d.node_id for d in in_debt.debts] == ["decomposition"]
+    assert not in_debt.unresolved
 
-    drive_to_approved(world, "decomposition")   # долг погашен обычным путём
-    assert an.reconcile_wave_after_gate(
-        world.state, world.ops, bundle_dag.dag_for(None)
-    ) == al.WAVE_COMPLETED
-    assert al.open_wave(world.state) is None
+    world.ops.show_file = lambda *a, **k: None  # type: ignore[method-assign]
+    unknown = _dag_state(world)
+    assert unknown.evidence is None and unknown.debts == ()
+    assert "#177" in unknown.unresolved
+    del world.ops.show_file
+
+    drive_to_approved(world, "decomposition")
+    green = _dag_state(world)
+    assert green.evidence is not None
+    assert green.debts == () and not green.unresolved
+    assert green.evidence.nodes == bundle_dag.composition(
+        bundle_dag.dag_for(None)
+    )
 
 
-def test_wave_fate_is_durable_and_written_once(world: World) -> None:
-    """Закрытие — ЗАПИСЬ, а не вычисление, и второй заход её не трогает.
+def test_predicate_sees_nodes_outside_the_terminal_closure(
+    world: World,
+) -> None:
+    """Предикат идёт по КАЖДОМУ узлу состава, а не по терминальному уровню.
 
-    Durable здесь несёт вес: после `completed` активный DAG снова
-    обзаводится долгом, и вычисляемое закрытие «раскрылось» бы обратно —
-    новый проход унаследовал бы номер прежнего.
+    На боевом бандле разница не видна: там все шесть узлов — предки
+    decomposition, и долг любого из них ломает пины терминального. Но
+    активный DAG не цепочка, и контракт требует свойство именно про узел
+    ВНЕ транзитивного замыкания терминального — иначе проход объявлялся бы
+    состоявшимся, оставив в DAG узел, до которого очередь не дошла.
+
+    Форма графа здесь и есть предмет теста, поэтому состав объявляется
+    другой: `acceptance` — корень, не лежащий ни на одном пути к
+    терминальному `requirements`. Байты при этом настоящие и произведены
+    конвейером, а не выложены руками.
+    """
+    for node in ("charter", "requirements", "behaviour-spec", "acceptance"):
+        drive_to_approved(world, node)
+    off_path = (
+        ("00-charter.md", ()),
+        ("25-acceptance.md", ()),
+        ("10-requirements.md", ("charter",)),
+    )
+    green = an.read_dag_state(world.state, world.ops, off_path)
+    assert green.evidence is not None, "стенд начинает с одобренного состава"
+
+    _push_edit(world, "25-acceptance.md", body="Долг вне пути к терминальному.")
+    verdict = an.read_dag_state(world.state, world.ops, off_path)
+    assert verdict.evidence is None, (
+        "узел вне замыкания терминального обязан быть увиден"
+    )
+    assert [d.node_id for d in verdict.debts] == ["acceptance"]
+
+
+def test_matching_intent_completes_the_wave(world: World) -> None:
+    """Совпадение состава свидетельства с intent → `completed`."""
+    for node in ("charter", "requirements", "behaviour-spec", "design",
+                 "acceptance", "decomposition"):
+        drive_to_approved(world, node)
+    assert _reconcile(world) == al.WAVE_COMPLETED
+    assert rs.load("r-approve").ops["approve-wave-1"]["status"] == (
+        al.WAVE_COMPLETED
+    )
+
+
+def test_diverged_intent_makes_the_wave_obsolete(world: World) -> None:
+    """Положительное расхождение → `obsolete` с ОБОИМИ составами.
+
+    Проход по составу, которого больше нет, нечем завершить: остаток
+    волны не «заброшен», а обессмыслен.
     """
     for node in ("charter", "requirements", "behaviour-spec", "design",
                  "acceptance", "decomposition"):
         drive_to_approved(world, node)
-    assert an.reconcile_wave_after_gate(
-        world.state, world.ops, bundle_dag.dag_for(None)
-    ) == al.WAVE_COMPLETED
-    on_disk = rs.load("r-approve").ops["approve-wave-1"]
-    assert on_disk["status"] == al.WAVE_COMPLETED
+    intent = rs.load("r-approve").ops["approve-wave-1"]["intent"]
 
-    # Идемпотентность: повтор доставки после падения не пишет ничего.
-    assert an.reconcile_wave_after_gate(
-        world.state, world.ops, bundle_dag.dag_for(None)
-    ) is None
-    assert rs.load("r-approve").ops["approve-wave-1"] == on_disk
-
-    _push_edit(world, "00-charter.md", body="Поздняя коррекция.")
-    approve(world, "charter")
-    _, fresh = _request_over(world, "charter")
-    assert fresh["wave"] == 2, "новый проход — новая волна"
-    assert al.wave_records(world.state)[1]["status"] == al.WAVE_COMPLETED
-
-
-def test_changed_composition_closes_the_wave_as_obsolete(
-    world: World,
-) -> None:
-    """Проход по составу, которого больше нет, нечем завершить.
-
-    `--approve-node` закрывает прежнюю волну `obsolete` и ТЕМ ЖЕ вызовом
-    заводит новую: оба действия следуют из одного прочитанного состава.
-    Вызов при этом успешен — `obsolete` описывает судьбу прежнего прохода,
-    а не исход этого вызова.
-    """
-    drive_to_approved(world, "charter")
-    first = rs.load("r-approve").ops["approve-wave-1"]
-    _drop_node(world, "25-acceptance.md")
-
-    # Через ПРЕДЛОЖЕНИЕ, а не через продвижение живой заявки: состав
-    # сверяет тот путь, которому волна нужна.
-    approve(world, "requirements", legacy_bundle=5)
+    # Гейт сошёлся на ДРУГОМ активном DAG — так выглядит доставка,
+    # которой назвали иной `--legacy-bundle`, чем тот, по которому шёл
+    # проход. Узлы одобрены, а проход шёл по другому составу.
+    assert _reconcile(world, 3) == al.WAVE_OBSOLETE
     closed = rs.load("r-approve").ops["approve-wave-1"]
     assert closed["status"] == al.WAVE_OBSOLETE
-    assert closed["intent"] == first["intent"], "intent не переписан"
-    assert "acceptance" in closed["intent"]["dag"]
-    assert "acceptance" not in closed["actual"]["dag"]
-    assert closed["actual"]["fingerprint"] != first["intent"]["fingerprint"]
-
-    fresh = rs.load("r-approve").ops["approve-wave-2"]
-    assert fresh["status"] == al.WAVE_OPEN
-    assert fresh["intent"]["dag"] == closed["actual"]["dag"]
-    assert _request_over(world, "requirements")[1]["wave"] == 2
+    assert closed["intent"] == intent, "intent не переписан"
+    assert "decomposition" in closed["intent"]["dag"]
+    assert "decomposition" not in closed["actual"]["dag"]
+    assert closed["reason"]
 
 
-def test_reconciliation_writes_obsolete_before_judging_the_predicate(
-    world: World,
+@pytest.mark.parametrize("outcome", [al.WAVE_COMPLETED, al.WAVE_OBSOLETE])
+def test_repeat_after_either_outcome_is_a_noop(
+    world: World, outcome: str
 ) -> None:
-    """Сперва состав, потом предикат — порядок фиксирован.
+    """Повтор после ОБОИХ исходов не пишет ничего — на этом стоит
+    право вызывающего повторить доставку после падения."""
+    for node in ("charter", "requirements", "behaviour-spec", "design",
+                 "acceptance", "decomposition"):
+        drive_to_approved(world, node)
+    if outcome == al.WAVE_OBSOLETE:
+        assert _reconcile(world, 3) == al.WAVE_OBSOLETE
+    else:
+        assert _reconcile(world) == al.WAVE_COMPLETED
+    before = dict(rs.load("r-approve").ops["approve-wave-1"])
 
-    Обратный объявил бы `completed` проходу, который шёл по устаревшему
-    составу и мог бы «доодобрить» его целиком, ничего не зная про
-    изменение.
-    """
-    approve(world, "charter")
-    _drop_node(world, "25-acceptance.md")
-    assert an.reconcile_wave_after_gate(
-        world.state, world.ops, bundle_dag.dag_for(5)
-    ) == al.WAVE_OBSOLETE
-    assert al.open_wave(world.state) is None
+    assert _reconcile(world) is None, "судьба уже записана"
+    assert rs.load("r-approve").ops["approve-wave-1"] == before
 
 
 def test_reconciliation_without_an_open_wave_writes_nothing(
     world: World,
 ) -> None:
     """Отсутствие волны допуску не мешает: статус волны его не решает."""
-    assert an.reconcile_wave_after_gate(
-        world.state, world.ops, bundle_dag.dag_for(None)
-    ) is None
+    evidence = an.ApprovedDag(("charter",), "v1:любой")
+    assert an.reconcile_wave_after_approved_dag(world.state, evidence) is None
     assert al.wave_records(world.state) == {}
+
+
+def test_broken_intent_is_fail_closed_without_terminalizing(
+    world: World,
+) -> None:
+    """Повреждённый intent не закрывает волну НИ В ОДИН исход.
+
+    Сравнивать не с чем: закрыть проход можно только сравнением двух
+    записанных величин. Терминализовать по отсутствию величины значило бы
+    завести ту же эвристику, которую §I12 запрещает для заявки. Выход
+    человеческий — запись волны неприкосновенна (§I4), и отказ его
+    называет.
+    """
+    approve(world, "charter")
+    world.state.ops["approve-wave-1"]["intent"] = {"dag": None}
+    rs.save(world.state)
+    before = dict(rs.load("r-approve").ops["approve-wave-1"])
+    evidence = an.ApprovedDag(("charter",), "v1:любой")
+
+    with pytest.raises(RuntimeError, match="повреждён либо неполон"):
+        an.reconcile_wave_after_approved_dag(world.state, evidence)
+    after = rs.load("r-approve").ops["approve-wave-1"]
+    assert after == before, "леджер не изменился"
+    assert after["status"] == al.WAVE_OPEN
+    with pytest.raises(RuntimeError, match="run.json"):
+        an.reconcile_wave_after_approved_dag(world.state, evidence)
+
+
+def test_wave_fate_is_durable_and_not_recomputed(world: World) -> None:
+    """Закрытие — ЗАПИСЬ, а не вычисление.
+
+    После `completed` активный DAG снова обзаводится долгом; вычисляемое
+    закрытие «раскрылось» бы обратно, и новый проход унаследовал бы номер
+    прежнего.
+    """
+    for node in ("charter", "requirements", "behaviour-spec", "design",
+                 "acceptance", "decomposition"):
+        drive_to_approved(world, node)
+    assert _reconcile(world) == al.WAVE_COMPLETED
+
+    _push_edit(world, "00-charter.md", body="Поздняя коррекция.")
+    assert rs.load("r-approve").ops["approve-wave-1"]["status"] == (
+        al.WAVE_COMPLETED
+    ), "запись не пересчитывается по сегодняшнему состоянию"
+    approve(world, "charter")
+    _, fresh = _request_over(world, "charter")
+    assert fresh["wave"] == 2, "новый проход — новая волна"
+
+
+def test_approve_node_closes_the_obsolete_wave_and_opens_the_next(
+    world: World,
+) -> None:
+    """`--approve-node` закрывает устаревший проход и тем же вызовом
+    заводит следующий — оба действия из одного прочитанного состава."""
+    drive_to_approved(world, "charter")
+    first = rs.load("r-approve").ops["approve-wave-1"]
+    _drop_node(world, "25-acceptance.md")
+
+    approve(world, "requirements", legacy_bundle=5)
+    closed = rs.load("r-approve").ops["approve-wave-1"]
+    assert closed["status"] == al.WAVE_OBSOLETE
+    assert closed["intent"] == first["intent"]
+    assert "acceptance" not in closed["actual"]["dag"]
+    fresh = rs.load("r-approve").ops["approve-wave-2"]
+    assert fresh["status"] == al.WAVE_OPEN
+    assert fresh["intent"]["dag"] == closed["actual"]["dag"]
+    assert _request_over(world, "requirements")[1]["wave"] == 2
 
 
 # --- Инвалидация живых заявок ниже --------------------------------------
@@ -1393,7 +1516,7 @@ def test_wave_status_is_not_readable_by_delivery() -> None:
     «мы так не делаем» держится на слове ровно до первого, кто захочет
     «дешёвую» проверку, — поэтому оно вынесено в механику.
 
-    Часть 3 подключит к доставке ОДНУ точку — `reconcile_wave_after_gate`,
+    Часть 3 подключит к доставке ОДНУ точку — `reconcile_wave_after_approved_dag`,
     — и она живёт в `approve_node`. Тест поймает попытку дотянуться до
     записи волны напрямую: доставка вправе позвать реконсиляцию, но не
     вправе спросить у волны, можно ли ей идти.
