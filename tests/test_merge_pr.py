@@ -479,7 +479,7 @@ def test_dry_run_shows_command_without_merging(fleet: Fleet) -> None:
 def test_expect_head_mismatch_does_not_merge(fleet: Fleet) -> None:
     """Вызывающий проверял другую голову — вердикт не про этот код."""
     res = fleet.run("--expect-head", "f" * 40, GH_STUB_HEADREF="feat/ordinary")
-    assert res.returncode == 3, res.stdout
+    assert res.returncode == 5, res.stdout
     assert "вызывающий проверял" in res.stderr
     assert fleet.merge_calls() == []
 
@@ -497,7 +497,7 @@ def test_expect_base_mismatch_does_not_merge(fleet: Fleet) -> None:
     этого оператор видит «что-то не так», но не видит, что именно уехало.
     """
     res = fleet.run("--expect-base", "a" * 40, GH_STUB_HEADREF="feat/ordinary")
-    assert res.returncode == 3, res.stdout
+    assert res.returncode == 5, res.stdout
     assert "база уехала" in res.stderr
     assert "a" * 40 in res.stderr and BASE_SHA in res.stderr
     assert "перегоните вердикт на новой базе" in res.stderr

@@ -844,7 +844,7 @@ class RealOps:
 
     def merge(
         self, repo_name: str, pr: int, sha: str, base: str | None = None
-    ) -> bool:
+    ) -> int:
         """Мерж через `merge-pr.sh` — единственный путь агентского мержа.
 
         Раньше здесь стоял прямой `gh api -X PUT …/merge` от профиля
