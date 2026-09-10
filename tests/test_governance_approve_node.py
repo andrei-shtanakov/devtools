@@ -837,21 +837,22 @@ def test_closed_finalize_pr_invalidates(world: World) -> None:
 
 
 @pytest.mark.parametrize(
-    ("what", "match"),
-    [
-        ("pr_facts", "факты PR"),
-        ("show_file", "байты"),
-        ("is_ancestor", "merge-коммит"),
-    ],
+    "what",
+    ["pr_facts", "show_file", "is_ancestor", "merge_event"],
 )
 def test_unresolved_fact_never_buries_the_request(
-    world: World, what: str, match: str
+    world: World, what: str
 ) -> None:
     """Неустановленный факт — отказ с сохранением ЖИВОЙ заявки.
 
-    Три сверки фазы 3, у каждой свой источник неизвестности; ни одна не
-    вправе похоронить заявку. Пара к этому тесту — соседние: те же сверки
-    на УСТАНОВЛЕННОМ факте дают `invalidated`, то есть стенд умеет хоронить.
+    По источнику неизвестности на каждую сверку фазы 3: факты PR (номер и
+    состояние), байты узла в base (self-hash и пины считаются по ним),
+    принадлежность merge-коммита истории base, полнота самого события
+    мержа (из него берётся личность). Ни один не вправе похоронить заявку.
+
+    Пара к этому тесту — соседние: те же сверки на УСТАНОВЛЕННОМ факте
+    дают `invalidated`, то есть стенд умеет хоронить, и молчание здесь
+    означает осторожность, а не бессилие.
     """
     approve(world, "charter")
     key, op = only_request(world)
@@ -860,6 +861,10 @@ def test_unresolved_fact_never_buries_the_request(
         world.ops.is_ancestor = lambda *a, **k: None  # type: ignore[method-assign]
     elif what == "show_file":
         world.ops.show_file = lambda *a, **k: None  # type: ignore[method-assign]
+    elif what == "merge_event":
+        # PR вмержен, но личности в ответе нет: событие неполно, значит
+        # ни подписать узел, ни быть сверенным оно не может.
+        world.forge.prs[op["candidate_pr"]]["mergedBy"] = None
     else:
         world.forge.mute.add(what)
     with pytest.raises(RuntimeError, match="факт не установлен"):
