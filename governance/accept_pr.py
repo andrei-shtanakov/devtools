@@ -40,9 +40,8 @@ import subprocess
 import time
 from collections.abc import Callable
 
+from governance import authority_root
 from governance.ops import DEVTOOLS_ROOT, Ops, RealOps
-
-_AUTHORITY_PREFIXES = (".github/", "profiles/")
 # Исполняемый ревью-harness целевого репо: review-pr.sh запускает
 # scripts/review/local.sh из локального дерева, которое материализация
 # переключает на head PR (приёмка PR #113, blocker) — PR, правящий эти
@@ -74,6 +73,10 @@ _HARNESS_PREFIXES = (
     "review-pr.sh",
     "merge-pr.sh",
     "contracts/approval-branches/",
+    # Перечень authority-root путей обвязка тоже читает из дерева.
+    # Он и сам authority-root (см. SSOT-файл), но защиты разные по стадии:
+    # здесь PR не доходит даже до ревью, там — до мержа.
+    "contracts/authority-root/",
 )
 _PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED", ""}
 _GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -206,10 +209,10 @@ def _accept_on_head(
             "только человеком"
         )
         return 1
-    authority = [
-        f for f in changed
-        if any(f.startswith(p) for p in _AUTHORITY_PREFIXES)
-    ]
+    # Перечень — из SSOT `contracts/authority-root/v1/paths.env`, того же
+    # файла, что читают runner и merge-pr.sh (ревью #183, круг 4): свой
+    # кортеж здесь был одним из ДВУХ питоновских списков, живших порознь.
+    authority = authority_root.touched(changed)
     if authority:
         print(
             "accept-pr: дифф трогает authority-root пути "
