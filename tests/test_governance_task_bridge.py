@@ -4615,9 +4615,13 @@ def test_supersede_records_tasks_blob_before_commit(tmp_path, monkeypatch):
 
 
 def test_supersede_fails_when_actual_anchor_differs(tmp_path, monkeypatch):
-    """§I2: фактический штамп разошёлся с проспективным — фатально.
+    """§I2: фактический блоб анкера разошёлся с записанным — фатально.
 
-    Ревизия остаётся `started` (её разберёт реконсиляция), push не идёт."""
+    Расходиться этим величинам не от чего: переиздание бандла не
+    касается. Значит расхождение означает, что вход изменился между
+    проверкой и эффектом — base сдвинули, дерево загрязнили, узел
+    одобрили заново параллельным прогоном. Ревизия остаётся `started`
+    (её разберёт реконсиляция), push не идёт."""
     from governance import run_state as rs
     from governance import task_bridge as tb
 
@@ -4627,10 +4631,10 @@ def test_supersede_fails_when_actual_anchor_differs(tmp_path, monkeypatch):
     rs.save(state)
     monkeypatch.setattr(
         tb, "_prospective_anchor",
-        lambda *a, **kw: "0000000ложный-проспективный-штамп",
+        lambda *a, **kw: "0000000ложный-анкер-намерения",
     )
     ops = _SupersedeOps()
-    with pytest.raises(RuntimeError, match="разошёлся с проспективным"):
+    with pytest.raises(RuntimeError, match="разошёлся с записанным"):
         tb.deliver_superseded(state, ops)
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["status"] == "started"

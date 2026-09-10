@@ -38,10 +38,10 @@ from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_d
 from governance.run_state import RunState, load, op_complete, op_start, save
 from governance.stale_adapter import blob_sha1
 
-# DAG бандла в порядке штампа (топологический): каждый узел перечисляет
-# node-id своих upstream'ов; штамп идёт по порядку тюпла, и пин(ы) узла
-# пересчитываются ПОСЛЕ штампа ВСЕХ его upstream-файлов (иначе пин
-# протухает в момент записи). design и acceptance — узлы с ДВУМЯ
+# DAG бандла в ТОПОЛОГИЧЕСКОМ порядке: каждый узел перечисляет node-id
+# своих upstream'ов; обход идёт по порядку тюпла, и пин(ы) узла считаются
+# ПОСЛЕ того, как готовы ВСЕ его upstream-файлы (иначе пин протухает в
+# момент записи). design и acceptance — узлы с ДВУМЯ
 # upstream-пинами (design — Task 5 плана design-узла; acceptance — Task 7
 # плана acceptance-node). decomposition — терминальный узел, пинует ОБА
 # upstream (design, acceptance — Task 7 плана acceptance-node).
@@ -1734,10 +1734,10 @@ def deliver(
                     f"'{node}' — {PREFLIGHT_PROCEDURE_HINT}"
                 )
     # Валидация DT-пути (полный DAG, Task 8 плана decomposition-node) —
-    # ЗДЕСЬ, ПОСЛЕ existence/composition-гардов и ДО ensure_branch/
-    # stamp_bundle_approved: отказ (невалидный граф DT) не должен
-    # оставлять target на чужой ветке с незакоммиченным штампом —
-    # dirty-гард заблокировал бы повторную доставку. verify-DT больше не
+    # ЗДЕСЬ, ПОСЛЕ existence/composition-гардов и ДО гейта §I12 и
+    # ensure_branch: отказ (невалидный граф DT) не должен оставлять
+    # target на чужой ветке — dirty-гард заблокировал бы повторную
+    # доставку. verify-DT больше не
     # отказ: verify-first доставлен (spec-runner#367 закрыт 2026-09-07),
     # мост рендерит их задачами `**Mode:** verify_first`. Ветвление — по
     # составу АКТИВНОГО DAG (Task 7 плана acceptance-node), не по
@@ -1821,10 +1821,9 @@ def deliver(
     if any(_node_id(fname) == "decomposition" for fname, _ in dag):
         # DT-путь (Task 8 плана decomposition-node, обобщено Task 7 плана
         # acceptance-node на `--legacy-bundle=5`): состав задач решён
-        # tech-lead-узлом и уже проверен graph_findings выше; здесь только
-        # парсинг ПОСЛЕ штампа (тело DT-задач штамп не трогает, но пин
-        # анкера должен идти с уже проштампованного blob'а) и джойн BEH →
-        # checked_by.
+        # tech-lead-узлом и уже проверен graph_findings выше; здесь
+        # только парсинг байтов анкера как они лежат в base и джойн
+        # BEH → checked_by.
         dt_tasks, _form_findings = decomposition_guard.parse_dt_tasks(
             anchor_text
         )
@@ -1874,7 +1873,7 @@ def deliver(
     )
     if after_commit is not None:
         # Между коммитом и push (§I3): падение здесь оставляет коммит
-        # опознаваемым. `anchor_blob` — ФАКТИЧЕСКИЙ штамп терминального
+        # опознаваемым. `anchor_blob` — ФАКТИЧЕСКИЙ блоб терминального
         # узла, тот же, что ушёл в пин спеки.
         after_commit({
             "head_sha": ops.rev_parse(target_dir, "HEAD"),
@@ -2601,8 +2600,9 @@ def _replacement_close(state: RunState, ops: Ops, op: dict) -> None:
     запрещает.
 
     Факты PR перезапрашиваются, хотя `_validate_replacement` их уже
-    смотрел: между валидацией и закрытием стоят сетевые шаги §I7/§I8, и
-    человек успевает оставить ревью именно в этом окне.
+    смотрел: между валидацией и закрытием стоят сверка §I8, гейт §I12 и
+    запись намерения, и человек успевает оставить ревью именно в этом
+    окне.
     """
     pr = op.get("replaces_pr")
     if not isinstance(pr, int):
@@ -2724,8 +2724,8 @@ def _previous_dag(
     Отсутствие САМОГО каталога бандла — не «вывод не удался», а отказ:
     §I8 зовёт неудачей вывода состояние, где источники есть, но не
     сходятся, а здесь нет предмета переиздания. «unavailable» отменил бы
-    сверку §I8 и повёл дальше — через сетевой §I7 к
-    `_prospective_anchor`, где отказ пришёл бы про СОСТАВ бандла
+    сверку §I8 и повёл дальше — к `_content_anchor`/`_prospective_anchor`,
+    где отказ пришёл бы про СОСТАВ бандла
     («доавторьте узлы либо передайте --legacy-bundle»), уводя оператора
     мимо причины. Функция трогает каталог первой в переиздании, поэтому
     диагностика (та же, что `_check_bundle_composition` даёт ниже по
@@ -3067,9 +3067,11 @@ def _commit_facts_cb(
     def _cb(facts: dict) -> None:
         if facts["anchor_blob"] != prospective:
             raise RuntimeError(
-                "фактический штамп анкера "
-                f"{facts['anchor_blob'][:7]} разошёлся с проспективным "
-                f"{prospective[:7]} — апстрим двигали во время доставки"
+                "фактический блоб анкера "
+                f"{facts['anchor_blob'][:7]} разошёлся с записанным в "
+                f"намерении {prospective[:7]} — вход изменился между "
+                "проверкой и эффектом (base сдвинули, дерево загрязнили, "
+                "узел одобрили заново параллельным прогоном)"
             )
         key = f"{_REVISION_PREFIX}{n}"
         state.ops[key] = {**state.ops[key], "head_sha": facts["head_sha"]}
