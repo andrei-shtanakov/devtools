@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from governance.decomposition_guard import DtTask, parse_dt_tasks
 
 DT_OK = (
@@ -33,6 +35,222 @@ def test_parse_two_tasks() -> None:
     )
     assert tasks[1].delivered_by == ("DT-01",)
     assert tasks[1].verifies == ("tests/test_a.py",)
+
+
+# --- TDD-waiver: ТРИ ВЕТКИ ОТКАЗА -----------------------------------------
+#
+# Ветки отказа написаны ПЕРВЫМИ и стоят выше зелёной дороги намеренно.
+# Гвард, у которого проверен только проход, свидетельствует о себе ровно
+# столько же, сколько зелёный гвард, не смотревший половину цели: «не
+# отказал» неотличимо от «не проверял». Каждый отказ называет DT и
+# причину — иначе оператору некуда идти.
+
+
+def _waived(
+    line: str = "tdd_waiver: characterisation · sanction: batch-approve-2026-09-09",
+    dt_type: str = "implement",
+    depends: str = "[DT-01]",
+) -> str:
+    """DT-02 с объявлением waiver'а; DT-01 — доставляющая зависимость."""
+    return (
+        "#### DT-01: Поведение · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\n"
+        "depends_on: []\n"
+        "parallel_group: core\n"
+        "Проза.\n"
+        "\n"
+        f"#### DT-02: Характеризация · type: {dt_type} · owner: qa\n"
+        "scenarios: [BEH-02]\n"
+        f"depends_on: {depends}\n"
+        + ("delivered_by: [DT-01]\n" if dt_type == "verify" else "")
+        + "parallel_group: regression\n"
+        f"{line}\n"
+        "Проза.\n"
+    )
+
+
+def test_waiver_of_unknown_class_is_refused() -> None:
+    """Класс — ЗАКРЫТЫЙ словарь; неизвестный отвергается.
+
+    Это и есть замена эвристике по слову «waiver» в прозе: открытый
+    словарь означал бы, что санкцией становится любое слово, которое
+    автор счёл подходящим, — то есть догадка вместо санкции.
+    """
+    _, findings = parse_dt_tasks(
+        _waived("tdd_waiver: потому-что-так-быстрее · sanction: я-решил")
+    )
+    assert any(
+        "DT-02" in f and "класс" in f for f in findings
+    ), f"класс не назван причиной отказа: {findings}"
+
+
+def test_waiver_without_dependencies_is_refused() -> None:
+    """Условие 1 класса: поведение доставлено ЗАВИСИМОСТЯМИ задачи.
+
+    У DT без единой зависимости доставлять поведение нечем — объявление
+    противоречит собственному классу, и принять его значило бы принять
+    waiver там, где честный RED как раз возможен.
+    """
+    _, findings = parse_dt_tasks(_waived(depends="[]"))
+    assert any(
+        "DT-02" in f and "зависим" in f for f in findings
+    ), f"отсутствие зависимостей не названо: {findings}"
+
+
+def test_waiver_on_verify_task_is_refused() -> None:
+    """У verify свой режим (`verify_first`) — снимать RED ему нечем.
+
+    Waiver здесь не «избыточен», а противоречив: он назначил бы задаче
+    второй режим исполнения, и какой из двух попадёт в `**Mode:**`,
+    решал бы порядок строк в рендере.
+    """
+    _, findings = parse_dt_tasks(_waived(dt_type="verify"))
+    assert any(
+        "DT-02" in f and "verify" in f for f in findings
+    ), f"waiver у verify-задачи принят: {findings}"
+
+
+def test_malformed_waiver_key_is_a_finding_not_silence() -> None:
+    """Ключ есть, форма не разобрана — находка, а не «поля нет».
+
+    Тот же урок, что у `verifies` (round 13 ревью PR #161): молчаливая
+    деградация до «объявления не было» неотличима от легаси-DT, и
+    задача уехала бы в проектный `tdd` с непройденным RED — ровно тот
+    останов, ради которого проекция заводится.
+    """
+    _, findings = parse_dt_tasks(_waived("tdd_waiver: characterisation"))
+    assert any(
+        "DT-02" in f and "tdd_waiver" in f for f in findings
+    ), f"битая форма проглочена молча: {findings}"
+
+
+def test_waiver_declared_twice_is_a_finding() -> None:
+    """По одному объявлению на DT — как и один DT-id на документ."""
+    line = (
+        "tdd_waiver: characterisation · sanction: batch-approve-2026-09-09\n"
+        "tdd_waiver: characterisation · sanction: batch-approve-2026-09-09"
+    )
+    _, findings = parse_dt_tasks(_waived(line))
+    assert any(
+        "DT-02" in f and "tdd_waiver" in f for f in findings
+    ), f"второе объявление принято: {findings}"
+
+
+@pytest.mark.parametrize(
+    "sanction",
+    [
+        "потому-что-можно",
+        "batch-approve",
+        "batch-approve-2026-13-45",
+        "batch-approve-2026-9-9",
+        "spec-runner#",
+        "#425",
+        "spec-runner#abc",
+    ],
+    ids=[
+        "свободный-текст", "без-даты", "несуществующая-дата",
+        "не-ISO", "без-номера", "без-репо", "номер-не-число",
+    ],
+)
+def test_sanction_outside_the_closed_grammar_is_refused(sanction: str) -> None:
+    """`sanction:` — закрытая грамматика, иначе поле есть украшение.
+
+    Свободный текст пропускал бы `sanction: потому что можно` наравне с
+    настоящим решением, и машиночитаемость объявления кончалась бы на
+    классе. Календарность даты проверяется тоже: `2026-13-45` — строка
+    нужного ВИДА, но не дата, и принять её значило бы проверить форму
+    формы, а не форму.
+    """
+    _, findings = parse_dt_tasks(
+        _waived(f"tdd_waiver: characterisation · sanction: {sanction}")
+    )
+    assert any(
+        "DT-02" in f and "sanction" in f for f in findings
+    ), f"санкция {sanction!r} принята: {findings}"
+
+
+@pytest.mark.parametrize(
+    "sanction",
+    ["batch-approve-2026-09-09", "spec-runner#425", "devtools#1"],
+    ids=["датированное-решение", "ссылка-на-PR", "однозначный-номер"],
+)
+def test_sanction_inside_the_closed_grammar_is_accepted(sanction: str) -> None:
+    """Обе допустимые формы принимаются — и это вторая половина проверки.
+
+    Без неё грамматика, отвергающая ВСЁ, выглядела бы исправной: «не
+    принял мусор» и «не принимает ничего» на одних отказных тестах
+    неразличимы.
+    """
+    tasks, findings = parse_dt_tasks(
+        _waived(f"tdd_waiver: characterisation · sanction: {sanction}")
+    )
+    assert findings == []
+    assert tasks[1].waiver is not None
+    assert tasks[1].waiver.sanction == sanction
+
+
+def test_broken_waiver_line_next_to_a_valid_one_is_a_finding() -> None:
+    """Битая строка рядом с валидной не проглатывается (минор ревью #197).
+
+    `findall` считает только РАЗОБРАННЫЕ строки, поэтому ветка «ключ есть,
+    форма не разобрана» была достижима лишь когда валидных нет ни одной.
+    Смешанный случай — `tdd_waiver: characterisation` без санкции над
+    валидной строкой — уходил молча, и какое из двух объявлений
+    подействует, решала позиция. Причём проглатывалось ровно то
+    состояние, которое §3a объявляет недостижимым: «класс без санкции».
+
+    Сверяется поэтому ЧИСЛО КЛЮЧЕЙ с числом разобранных, а не наличие
+    разобранных: первое видит потерю, второе — нет.
+    """
+    line = (
+        "tdd_waiver: characterisation\n"
+        "tdd_waiver: characterisation · sanction: batch-approve-2026-09-09"
+    )
+    tasks, findings = parse_dt_tasks(_waived(line))
+    assert any(
+        "DT-02" in f and "tdd_waiver" in f for f in findings
+    ), f"битая строка рядом с валидной проглочена: {findings}"
+    assert tasks[1].waiver is None, "объявление с потерей не действует"
+
+
+def test_all_waiver_findings_are_reported_at_once() -> None:
+    """Причины не прячутся одна за другой: гейт показывает всё сразу.
+
+    Объявление нарушает четыре условия разом — неизвестный класс, кривая
+    санкция, `type: verify` и отсутствие зависимостей. Ранний возврат
+    после первой находки заставил бы оператора чинить объявление
+    кругами, по одной за заход, и каждый круг выглядел бы как новый
+    дефект.
+    """
+    _, findings = parse_dt_tasks(
+        _waived(
+            "tdd_waiver: выдуманный · sanction: потому-что-можно",
+            dt_type="verify",
+            depends="[]",
+        )
+    )
+    mine = [f for f in findings if "DT-02" in f]
+    assert len(mine) == 4, f"названы не все причины: {findings}"
+    joined = "\n".join(mine)
+    for expected in ("класс", "sanction", "verify", "зависим"):
+        assert expected in joined, f"причина {expected!r} не названа"
+
+
+def test_declared_waiver_is_parsed_into_the_task() -> None:
+    """Зелёная дорога — ПОСЛЕ веток отказа.
+
+    Разобранное объявление доступно структурно (класс и санкция
+    отдельными величинами), а не строкой: мост обязан печатать условия
+    КЛАССА, и выводить класс из строки повторным разбором значило бы
+    завести второго вычислителя одного факта.
+    """
+    tasks, findings = parse_dt_tasks(_waived())
+    assert findings == []
+    waiver = tasks[1].waiver
+    assert waiver is not None
+    assert waiver.node_class == "characterisation"
+    assert waiver.sanction == "batch-approve-2026-09-09"
+    assert tasks[0].waiver is None, "объявление адресно, а не на документ"
 
 
 def test_near_miss_heading_is_a_finding() -> None:
@@ -310,6 +528,51 @@ def test_cross_group_dependency_must_cover_all_sinks() -> None:
     assert any(
         "DT-04" in f and "DT-02" in f for f in graph_findings(beh4, dt)
     )
+
+
+def test_waiver_conditions_match_the_contract() -> None:
+    """Условия класса живут в ОДНОЙ редакции: спека и константа сверены.
+
+    Прецедент — `test_beh_binding_grammar_matches_task_bridge`: дубликат
+    запиновывается тестом, читающим обе стороны. Здесь предмет тот же и
+    цена выше: из `WAIVER_CONDITIONS` мост печатает пункт чек-листа, а
+    из прозы §3a владелец решает, давать ли санкцию, — разойдись они, и
+    человек санкционирует одно, а исполнитель подтверждает другое.
+
+    Расхождение уже случилось («обязан иметь» против «имеет») и было
+    невидимо: прозу никто не исполняет. Второе место, где условия живут,
+    — не дубликат для читателя, а второй вычислитель одного факта.
+    """
+    import re
+    from pathlib import Path
+
+    from governance.decomposition_guard import WAIVER_CONDITIONS
+
+    spec = (
+        Path(__file__).resolve().parents[1]
+        / "docs/superpowers/specs"
+        / "2026-09-05-decomposition-node-conveyor-design.md"
+    ).read_text(encoding="utf-8")
+    block = spec.split("**Условия класса `characterisation`**", 1)
+    assert len(block) == 2, "раздел условий в спеке не найден"
+    # Берётся ИМЕННО абзац-перечень, а не всё до следующего заголовка:
+    # хвостовая проза за списком иначе прилипает к последнему пункту
+    # через `\Z`, и тест краснеет на собственном разборе, а не на
+    # расхождении. Абзац опознаётся по началу с «1. ».
+    body = block[1].split("**Что делает мост.**", 1)[0]
+    listing = next(
+        para for para in body.split("\n\n") if para.lstrip().startswith("1. ")
+    )
+    items = [
+        " ".join(m.group(1).split())
+        for m in re.finditer(r"^\d+\. (.+?)(?=^\d+\. |\Z)", listing,
+                             re.M | re.S)
+    ]
+    assert len(items) == 5, f"перечень условий разобран не целиком: {items}"
+    normalized = [i.rstrip(";.").strip() for i in items]
+    assert normalized == [
+        " ".join(c.split()) for c in WAIVER_CONDITIONS["characterisation"]
+    ]
 
 
 def test_beh_binding_grammar_matches_task_bridge() -> None:

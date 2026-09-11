@@ -1518,6 +1518,163 @@ def test_render_dt_one_task_per_dt_with_bindings_and_edges() -> None:
     assert "Depends on" not in task1_block
 
 
+DT_WAIVED_MD = """\
+#### DT-01: Ядро · type: implement · owner: dev
+scenarios: [BEH-01, BEH-02]
+depends_on: []
+parallel_group: core
+
+Реализовать ядро.
+
+#### DT-02: Характеризация · type: implement · owner: qa
+scenarios: [BEH-03]
+depends_on: [DT-01]
+parallel_group: regression
+tdd_waiver: characterisation · sanction: batch-approve-2026-09-09
+
+Проза DT, которая до исполнителя НЕ доезжает.
+"""
+
+
+def _render_waived() -> str:
+    scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(DT_WAIVED_MD)
+    assert findings == []
+    return task_bridge.render_tasks_dt(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="workstreams/WS-x-1/spec/30-decomposition.md",
+        scenarios=scenarios,
+        dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00",
+        anchor_blob="ab" * 20,
+    )
+
+
+def test_waived_dt_renders_standard_mode_and_carries_all_conditions() -> None:
+    """Проекция waiver'а: режим и пункт с ПОЛНЫМ составом условий.
+
+    Состав утверждается РАВЕНСТВОМ множества условий, а не вхождением
+    подстрок: вхождение — утверждение о минимуме, оно не проваливается
+    от потерянного условия, если проверять по одному, и не проваливается
+    от лишнего никогда. Waiver принимается целиком либо не принимается,
+    поэтому проверять его состав минимумом нельзя.
+
+    Условия сверяются с ЕДИНСТВЕННЫМ их местом (`WAIVER_CONDITIONS`), а
+    не с копией, выписанной в тесте: копия разошлась бы с бандлом молча —
+    тест зеленел бы, печатая устаревшее.
+    """
+    text = _render_waived()
+    waived = text.split("### TASK-002:")[1]
+    plain = text.split("### TASK-001:")[1].split("### TASK-002:")[0]
+
+    assert "**Mode:** standard" in waived
+    assert "**Mode:**" not in plain, "санкция адресна, а не на воркстрим"
+
+    item = next(
+        line for line in waived.splitlines()
+        if line.startswith("- [ ] TDD-waiver")
+    )
+    assert "класс characterisation" in item
+    assert "санкция batch-approve-2026-09-09" in item
+    printed = {
+        part.strip() for part in
+        item.split("условия класса:", 1)[1].split(";")
+    }
+    assert printed == set(
+        decomposition_guard.WAIVER_CONDITIONS["characterisation"]
+    )
+    assert len([
+        line for line in waived.splitlines()
+        if line.startswith("- [ ] TDD-waiver")
+    ]) == 1, "waiver принимается целиком — пункт один, а не пять"
+
+
+DT_TWO_WAIVED_MD = """\
+#### DT-01: Ядро · type: implement · owner: dev
+scenarios: [BEH-01]
+depends_on: []
+parallel_group: core
+
+Реализовать ядро.
+
+#### DT-02: Характеризация раз · type: implement · owner: qa
+scenarios: [BEH-02]
+depends_on: [DT-01]
+parallel_group: regression
+tdd_waiver: characterisation · sanction: batch-approve-2026-09-09
+
+Проза.
+
+#### DT-03: Характеризация два · type: implement · owner: qa
+scenarios: [BEH-03]
+depends_on: [DT-01]
+parallel_group: regression
+tdd_waiver: characterisation · sanction: batch-approve-2026-09-09
+
+Проза.
+"""
+
+
+def test_waiver_items_of_one_batch_sanction_survive_supersede() -> None:
+    """Пункт waiver'а уникален по построению — иначе `[x]` теряется.
+
+    Batch-санкция ПО ЗАМЫСЛУ покрывает несколько DT, поэтому класс и
+    санкция у них совпадают: совпадение штатно, а не краевой случай.
+    Без `dt_id` пункты выходили бы побайтово одинаковыми, перенос
+    состояния §I11 выбросил бы их как неуникальные с обеих сторон
+    (`marked & _unique(...)`), и при переиздании отметка терялась бы у
+    ВСЕХ — притом что `DONE` самой задачи переносится. Получалась бы
+    DONE-задача с неотмеченным waiver-пунктом, то есть потерянный
+    единственный durable-след условия про negative control: гейта на
+    него в spec-runner нет вовсе.
+
+    Фикстура с ОДНИМ waived DT этого не видит по построению — та же
+    слепота формы, что уже стоила нам круга.
+    """
+    scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(DT_TWO_WAIVED_MD)
+    assert findings == []
+    rendered = task_bridge.render_tasks_dt(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="workstreams/WS-x-1/spec/30-decomposition.md",
+        scenarios=scenarios,
+        dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00",
+        anchor_blob="ab" * 20,
+    )
+    items = [
+        line for line in rendered.splitlines()
+        if line.startswith("- [ ] TDD-waiver")
+    ]
+    assert len(items) == 2
+    assert len(set(items)) == 2, "пункты двух DT побайтово совпали"
+
+    # Оператор отметил оба пункта и довёл обе задачи; переиздание обязано
+    # перенести ОБЕ отметки, а не выбросить их как неуникальные.
+    delivered = rendered.replace("- [ ] TDD-waiver", "- [x] TDD-waiver")
+    carried = task_bridge._carry_execution_state(rendered, delivered)
+    assert carried.count("- [x] TDD-waiver") == 2, (
+        "отметка waiver-пункта потеряна при переиздании"
+    )
+
+
+def test_waived_task_points_its_source_at_the_declaration() -> None:
+    """`Source:` ведёт на DT — то есть на само объявление.
+
+    Без этого санкция перестаёт быть адресуемой: исполнитель видит
+    снятый RED и не может дойти до того, кто и на каком основании его
+    снял. Проверяется вместе с режимом намеренно — порознь «режим есть»
+    и «источник есть» зеленели бы по отдельности при разорванной связи.
+    """
+    waived = _render_waived().split("### TASK-002:")[1]
+    assert (
+        "Source: workstreams/WS-x-1/spec/30-decomposition.md#DT-02" in waived
+    )
+    assert "**Mode:** standard" in waived
+
+
 def test_render_dt_frontmatter_traces_decomposition_from_birth() -> None:
     """Рендер (не conform!) сразу пишет traces_to: [decomposition] и
     upstream_hashes: {decomposition: "<blob 30-decomposition.md>"}."""
