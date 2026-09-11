@@ -50,6 +50,15 @@ from governance.stale_adapter import blob_sha1
 #: форму имени ветки — признаки независимы намеренно.
 HUMAN_MERGE_LABEL = "human-merge-required"
 
+#: Имя в `invalidated_by` у заявок, похороненных за выпадение их узлов из
+#: активного DAG. Имя, а не ключ заявки: эта похоронная операция
+#: принадлежит ВЫЗОВУ, а не другой заявке, — снявшей её заявки не
+#: существует. По этому маркеру обход находит свои похороненные записи
+#: снова и доводит закрытие их PR, если оно не подтвердилось (major
+#: третьего круга ревью #191). Значение не совпадает с формой ключа
+#: заявки (`approve-request-W-K-A`) и спутать их нельзя.
+_OUTSIDE_DAG = "outside-active-dag"
+
 
 @dataclass(frozen=True)
 class ApprovalOutcome:
@@ -210,6 +219,7 @@ def approve_node(
         )
     ops.checkout_and_pull(state.target_dir, _base_ref(state))
     bundle_dag.check_bundle_composition(state.target_dir, state.bundle_dir, dag)
+    _settle_requests_outside_dag(state, ops, dag)
     known = [bundle_dag.node_id(fname) for fname, _ in dag]
     if node_id not in known:
         raise RuntimeError(
@@ -217,6 +227,13 @@ def approve_node(
             f"{', '.join(known)}. Процедура: назовите node-id из этого "
             "перечня либо укажите --legacy-bundle с точным составом бандла"
         )
+    # Сверка состава — по ВСЕМ живым заявкам и ДО ветвления, а не внутри
+    # ветки продвижения. Заявка, у которой выпали ВСЕ узлы, иначе
+    # недостижима ни одним вызовом: по её узлам приходит отказ «нет в
+    # активном DAG», по соседним вызов уходит в предложение и о ней не
+    # вспоминает. Она оставалась бы живой навсегда — а её candidate-PR
+    # открытым и мержаемым, и человеческий мерж вернул бы удалённый файл
+    # в base (issue #190, вторая половина).
     live = al.live_request_over(state, node_id)
     if live is not None:
         nums, op = live
@@ -363,7 +380,7 @@ def read_dag_state(
             node,
             texts[node],
             blobs,
-            live_candidate_pr=_live_candidate_pr(state, node),
+            awaiting_merge_pr=_pr_awaiting_merge(state, node),
         )
         if debt is not None:
             debts.append(debt)
@@ -532,16 +549,37 @@ def _still_accumulating(state: RunState, ops: Ops, op: dict) -> bool:
     return _disposition(_pr_facts(state, ops, pr), pr) is Disposition.OPEN
 
 
-def _live_candidate_pr(state: RunState, node: str) -> int | None:
-    """Номер открытого candidate-PR живой заявки над узлом; `None` — нет.
+def _pr_awaiting_merge(state: RunState, node: str) -> int | None:
+    """PR живой заявки над узлом, который ЖДЁТ человеческого мержа.
 
-    Нужен диагностике: статус узла не отличает «заявка жива, ждём мержа»
-    от «заявка терминальна, нужен новый candidate», и отказ, назвавший не
-    то действие, отправляет оператора вторым кругом за тем же ответом.
-    Величину знает только леджер, поэтому она приходит оттуда.
+    Нужен диагностике, и весь его смысл — назвать оператору то действие,
+    которого система действительно ждёт. Статус узла на этот вопрос не
+    отвечает: `approval_pending` одинаково выглядит и когда открыт
+    candidate, и когда candidate уже вмержен, а ждут мержа конверта.
+    Величину знает только леджер — через ШАГ заявки, а не через номер
+    первого попавшегося её PR.
+
+    У заявки два PR, и ждать может каждый из них:
+
+    - шаг `AWAIT_CANDIDATE_MERGE` — ждём candidate: его мерж и есть акт
+      одобрения;
+    - шаг `AWAIT_FINALIZE_MERGE` — candidate уже вмержен, ждём конверта.
+      Назови здесь candidate — оператор уйдёт на вмерженный PR и вернётся
+      ни с чем, то есть получит ровно тот лишний круг, ради устранения
+      которого эта функция и заведена (issue #189);
+    - шаги `CREATE_CANDIDATE` и `FINALIZE` — не ждёт ни один PR: работа за
+      механикой, и оператору называют повторный вызов.
     """
     found = al.live_request_over(state, node)
-    return found[1].get("candidate_pr") if found is not None else None
+    if found is None:
+        return None
+    op = found[1]
+    step = al.next_step(op)
+    if step is al.Step.AWAIT_CANDIDATE_MERGE:
+        return op.get("candidate_pr")
+    if step is al.Step.AWAIT_FINALIZE_MERGE:
+        return op.get("finalize_pr")
+    return None
 
 
 def _require_upstream_ready(
@@ -570,7 +608,7 @@ def _require_upstream_ready(
             up,
             text,
             _base_upstream_blobs(ops, state, dag, up),
-            live_candidate_pr=_live_candidate_pr(state, up),
+            awaiting_merge_pr=_pr_awaiting_merge(state, up),
         )
         if debt is None:
             continue
@@ -664,9 +702,7 @@ def _invalidate_downstream(
                 "каскада не станет",
                 by=by_key,
             )
-        for pr in (op.get("candidate_pr"), op.get("finalize_pr")):
-            if pr is not None:
-                _close_if_open(state, ops, pr, by_key)
+        _close_buried_proposals(state, ops, op, by_key)
         for branch in (op.get("branch"), op.get("finalize_branch")):
             if branch:
                 # Не блокирует: оставшаяся ветка — неубранный мусор, а не
@@ -1075,6 +1111,135 @@ def _advance(
     if step is al.Step.FINALIZE:
         return _finalize(state, ops, dag, state.ops[key], key)
     return _reconcile_finalize(state, ops, dag, state.ops[key], key)
+
+
+def _settle_requests_outside_dag(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+) -> None:
+    """Все заявки, чьи узлы выпали из активного DAG, — терминально.
+
+    Обходятся ВСЕ заявки, а не заявка над запрошенным узлом: иначе
+    заявка, у которой выпали все узлы до единого, не встречается ни одному
+    вызову (по её узлам — отказ «нет в активном DAG», по соседним — уход в
+    предложение), остаётся живой навсегда и держит открытым мержаемый
+    candidate-PR. Мерж такого PR вернул бы удалённый файл в base — из
+    пяти хвостов этот единственный оставлял на столе артефакт.
+
+    **Обход идёт по `al.requests`, а не по `al.live_requests`** (major
+    третьего круга ревью #191), и это исправление КЛАССА, а не случая.
+    Инвариант, который здесь держится:
+
+        у каждой терминализованной записи, чей сетевой эффект мог не
+        состояться, обязан быть путь довести эффект на повторе — и путь
+        этот не вправе зависеть от того, по какому узлу пришёл вызов.
+
+    Порядок «durable-запись раньше сетевого эффекта» (§I10) сам по себе
+    оставляет окно: между записью и закрытием PR вызов может упасть. После
+    записи заявка терминальна, `is_live` False, и обход по живым её уже не
+    видит; `_update` терминальную запись не мутирует, так что и руками
+    довести нечем. Открытый candidate при этом остаётся мержаемым —
+    ровно тот исход, который эта функция объявляет закрытым.
+
+    Выход — маркер `invalidated_by`, по которому свои похороненные записи
+    находятся снова (`already_ours`). Приём взят дословно у соседа,
+    `_invalidate_downstream`: там он заведён по тому же поводу и тем же
+    доводом. Разница только в том, ЧЬЁ имя стоит в маркере: у соседа —
+    ключ заявки, снявшей чужую, здесь — `_OUTSIDE_DAG`, потому что эта
+    похоронная операция принадлежит не заявке, а вызову.
+
+    Цена названа честно: множество помеченных `_OUTSIDE_DAG` растёт
+    монотонно, и каждый следующий вызов спрашивает состояние их PR заново
+    (по одному `read_pr` на записанный номер). Растёт оно только там, где
+    correction удалил узел из бандла, — событие редкое; а альтернатива
+    («спросить один раз») и есть тот самый дефект, ради которого маркер
+    заведён.
+
+    Состав сверяется ПОСЛЕ гварда состава бандла, поэтому «узла нет в
+    DAG» означает «файла нет в бандле», а не «оператор назвал другой
+    `--legacy-bundle`»: несовпадение заявленного состава с фактическим
+    каталогом отказывает раньше.
+    """
+    known = {bundle_dag.node_id(fname) for fname, _ in dag}
+    for nums, op in al.requests(state):
+        key = al.request_key(*nums)
+        missing = [
+            node for node in (op.get("nodes") or ()) if node not in known
+        ]
+        doomed_now = al.is_live(op) and bool(missing)
+        already_ours = op.get("invalidated_by") == _OUTSIDE_DAG
+        if not doomed_now and not already_ours:
+            continue
+        if doomed_now:
+            _terminalize_request_outside_dag(state, op, key, known, missing)
+        _close_buried_proposals(state, ops, op, key)
+
+
+def _terminalize_request_outside_dag(
+    state: RunState,
+    op: dict,
+    key: str,
+    known: set[str],
+    missing: list[str],
+) -> None:
+    """Узел заявки выпал из активного DAG — заявка неисполнима (issue #190).
+
+    Живая заявка несёт узлы прежнего состава; correction мог удалить файл
+    узла из бандла, и тогда продолжать её нечем: приведение ветки к
+    снимку, признак «опубликовано» и сверки фазы 3 обходят `nodes` и ищут
+    для каждого файл в активном DAG. Раньше здесь вылетал голый `KeyError`
+    из `_filename` — трассировка без диагноза и без выхода.
+
+    Факт установлен положительно, а не выведен из аргумента: состав
+    активного DAG сверен с ФАКТИЧЕСКИМ каталогом бандла в base
+    (`check_bundle_composition` отрабатывает раньше), значит файла в
+    бандле действительно нет. Это тот же класс, что «заявка посчитана
+    против байтов, которых больше не станет», и ответ тот же —
+    терминальный `invalidated` с причиной, из которого выход обычный:
+    новый candidate по актуальному составу.
+
+    Терминализация — журнальный факт, а НЕ отказ вызова: оператор мог
+    спросить про соседний узел, и хоронить его вызов за чужую мёртвую
+    заявку не за что. Отказ, если он нужен, приходит своим порядком —
+    вызов по самому выпавшему узлу упирается в проверку состава DAG,
+    которая называет допустимые id.
+
+    Цена названа честно: если candidate этой заявки уже вмержен,
+    человеческий акт над её выжившими узлами сгорает — они остаются
+    `approval_pending` и пойдут новым candidate. Дешевле замершего
+    воркстрима, но не бесплатно.
+
+    Функция пишет ТОЛЬКО запись. Закрытие открытых PR делает
+    `_close_buried_proposals` отдельным шагом у вызывающей стороны —
+    порядок «durable-запись раньше сетевого эффекта» (§I10) сохранён, но
+    шаги разведены намеренно: повтор обязан уметь довести закрытие БЕЗ
+    повторной записи, которую терминальная запись всё равно не примет.
+    """
+    al.invalidate_request(
+        state,
+        key,
+        f"узлы {', '.join(missing)} выпали из состава активного DAG "
+        f"({', '.join(sorted(known))}) — предложение заявки неисполнимо",
+        by=_OUTSIDE_DAG,
+    )
+
+
+def _close_buried_proposals(
+    state: RunState, ops: Ops, op: dict, key: str
+) -> None:
+    """Закрыть открытые PR похороненной заявки — идемпотентно.
+
+    Предложение похороненной заявки остаётся мержаемым, а его мерж создал
+    бы подпись под тем, что снято со стола. `_close_if_open` спрашивает
+    состояние первым, поэтому повтор по уже закрытому PR — чтение и
+    ничего больше; неподтверждённое закрытие отказывает вызову и
+    возвращается сюда на следующем заходе.
+    """
+    for pr in (op.get("candidate_pr"), op.get("finalize_pr")):
+        if pr is not None:
+            _close_if_open(state, ops, pr, key)
+
 
 
 def _reconcile_candidate(

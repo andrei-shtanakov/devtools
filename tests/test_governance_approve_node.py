@@ -826,24 +826,36 @@ def test_publishing_twice_changes_nothing(world: World) -> None:
     assert len(world.forge.prs) == 7
 
 
-def test_pending_upstream_diagnostics_names_the_merge_not_approve(
-    world: World,
+@pytest.mark.parametrize("stage", ["candidate", "finalize"])
+def test_pending_upstream_diagnostics_names_the_awaited_pr(
+    world: World, stage: str
 ) -> None:
-    """Отказ называет ДЕЙСТВИЕ, которого система ждёт.
+    """Отказ называет ДЕЙСТВИЕ, которого система ждёт — на обоих шагах.
 
-    Узел-upstream лежит `approval_pending`, и система ждёт мержа его
-    открытого candidate-PR. Отправь диагностика оператора на повторный
-    `--approve-node` — он вторым кругом получил бы «PR открыт, ждём
-    мержа», то есть тот же ответ через лишний заход.
+    У заявки два PR, и ждут они по очереди: пока candidate открыт, ждут
+    его мержа; после мержа candidate ждут мержа КОНВЕРТА. Назови
+    диагностика candidate на втором шаге — оператор уйдёт на вмерженный PR
+    и вернётся ни с чем, то есть получит ровно тот лишний круг, ради
+    устранения которого номер PR в процедуру и попал (issue #189).
+
+    Прежняя редакция теста фиксировала как раз неверную процедуру: стенд
+    мержил candidate, а ожидание сверялось с его же номером — и докстринг
+    утверждал про открытый PR то, чего в стенде уже не было.
     """
     drive_to_approved(world, "charter")
     approve(world, "requirements")
-    _, op = _request_over(world, "requirements")
-    merge_pr(world, op["candidate_pr"])
-    approve(world, "requirements")  # конверт вынесен, в base ещё pending
+    key, op = _request_over(world, "requirements")
+    if stage == "candidate":
+        expected = op["candidate_pr"]
+    else:
+        merge_pr(world, op["candidate_pr"])
+        approve(world, "requirements")   # конверт вынесен, в base ещё pending
+        expected = world.state.ops[key]["finalize_pr"]
+        assert expected != op["candidate_pr"]
+    assert (
+        world.forge.prs[expected]["state"] == "OPEN"
+    ), "ждут именно этого PR"
 
-    live_key, live_op = _request_over(world, "requirements")
-    expected = world.state.ops[live_key]["candidate_pr"]
     with pytest.raises(RuntimeError) as failure:
         approve(world, "behaviour-spec")
     message = str(failure.value)
@@ -852,7 +864,180 @@ def test_pending_upstream_diagnostics_names_the_merge_not_approve(
     assert "--approve-node" not in message, (
         "оператора не отправляют за тем, чего система не ждёт"
     )
-    assert live_op["candidate_pr"] == expected
+
+
+def test_dropped_node_makes_the_request_unexecutable_with_a_way_out(
+    world: World,
+) -> None:
+    """Узел заявки выпал из активного DAG — заявка хоронится, выход есть.
+
+    Correction удалил файл узла из бандла; продолжать заявку нечем. Раньше
+    здесь вылетал голый `KeyError` из `_filename` — трассировка без
+    диагноза и без выхода (issue #190).
+
+    Терминализация журнальная: вызов по самому выпавшему узлу получает
+    свой отказ — состав DAG его не содержит, и перечень допустимых id
+    назван. Выход — обычный новый candidate по актуальному составу, и он
+    тут же проверяется.
+    """
+    _level_three(world)
+    approve(world, "design")
+    approve(world, "acceptance")
+    key, op = _request_over(world, "design")
+    assert op["nodes"] == ["design", "acceptance"]
+    _drop_node(world, "25-acceptance.md")
+
+    with pytest.raises(RuntimeError, match="не входит в активный DAG"):
+        approve(world, "acceptance", legacy_bundle=5)
+    assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
+    assert "выпали из состава" in world.state.ops[key]["reason"]
+
+    # Выход исполним: следующий вызов заводит проход по новому составу.
+    approve(world, "design", legacy_bundle=5)
+    assert al.wave_records(world.state)[1]["status"] == al.WAVE_OBSOLETE
+    fresh_key, fresh = _request_over(world, "design")
+    assert fresh_key != key and fresh["wave"] == 2
+    assert fresh["nodes"] == ["design"]
+    assert fresh["candidate_pr"] is not None
+
+
+def test_dropped_node_terminalizes_on_composition_not_on_the_close(
+    world: World,
+) -> None:
+    """Хоронит СОСТАВ, а не результат закрытия — это разные величины.
+
+    Состав установлен положительно: он сверен с фактическим каталогом
+    бандла в base. Исход `close_pr` свёрнут (#177: `False` и при
+    отсутствии прав, и когда уже закрыт) и права терминализовать не имеет
+    — и не имеет его здесь ни в какую сторону: заявка уже похоронена
+    установленным фактом, а неподтверждённое закрытие лишь не даёт вызову
+    доложить об успехе.
+
+    Порядок «запись durable раньше сетевого эффекта» — тот же, что у
+    инвалидации заявок ниже по течению (§I12): только запись объясняет
+    закрытие.
+
+    Тупика нет, и ЭТА половина теста — про то, почему (major третьего
+    круга ревью #191). Раньше повтор обходил только живых, похороненная
+    запись из обхода выпадала, и закрытие доводить было нечем: вызов по
+    её узлам отказывал на составе, `_update` терминальную запись не
+    мутирует, а мержаемый PR оставался открытым молча. Теперь обход
+    находит свою похороненную запись по маркеру `invalidated_by` и
+    доводит закрытие САМ — без руки оператора и независимо от того, по
+    какому узлу пришёл вызов.
+    """
+    _level_three(world)
+    approve(world, "design")
+    approve(world, "acceptance")
+    key, op = _request_over(world, "design")
+    _drop_node(world, "25-acceptance.md")
+    world.forge.close_confirms = False
+
+    with pytest.raises(RuntimeError, match="закрытие PR"):
+        approve(world, "design", legacy_bundle=5)
+    assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
+    assert "выпали из состава" in world.state.ops[key]["reason"]
+    assert world.forge.prs[op["candidate_pr"]]["state"] == "OPEN"
+
+    # Повтор, пока закрытие по-прежнему не подтверждается: вызов снова
+    # берётся ЗА ТО ЖЕ закрытие и снова отказывает честно. Проверяется
+    # именно это — что путь к недоведённому эффекту существует, а не что
+    # оператору называют чужую процедуру.
+    with pytest.raises(RuntimeError, match="закрытие PR") as retry:
+        approve(world, "design", legacy_bundle=5)
+    assert str(op["candidate_pr"]) in str(retry.value)
+    assert world.forge.prs[op["candidate_pr"]]["state"] == "OPEN"
+
+    # Закрытие подтвердилось — обход доводит эффект САМ. Руками состояние
+    # PR здесь не правится намеренно: правка руками спрятала бы ровно ту
+    # работу, ради которой major и заведён.
+    world.forge.close_confirms = True
+    approve(world, "design", legacy_bundle=5)
+    assert world.forge.prs[op["candidate_pr"]]["state"] == "CLOSED"
+    assert _request_over(world, "design")[1]["wave"] == 2
+
+
+def test_request_with_all_nodes_dropped_is_reachable_and_settled(
+    world: World,
+) -> None:
+    """Заявка, у которой выпали ВСЕ узлы, достижима и хоронится.
+
+    Вторая половина #190, и из пяти хвостов она была опаснее прочих:
+    такая заявка не встречалась ни одному вызову — по её узлам приходил
+    отказ «нет в активном DAG», по соседним вызов уходил в предложение, —
+    и оставалась живой навсегда, держа открытым МЕРЖАЕМЫЙ candidate-PR.
+    Человеческий мерж вернул бы удалённый файл в base.
+
+    Стенд: заявка ровно над выпавшим узлом, вызов — по СОСЕДНЕМУ узлу,
+    который в составе есть. Прежняя проверка внутри продвижения на этот
+    вызов не смотрела вовсе.
+    """
+    _level_three(world)
+    approve(world, "acceptance")
+    doomed_key, doomed = _request_over(world, "acceptance")
+    assert doomed["nodes"] == ["acceptance"], "все узлы заявки — выпадут"
+    pr = doomed["candidate_pr"]
+    _drop_node(world, "25-acceptance.md")
+
+    # Вызов по ДРУГОМУ узлу: прежде он уходил в предложение и о заявке не
+    # вспоминал.
+    approve(world, "design", legacy_bundle=5)
+
+    settled = world.state.ops[doomed_key]
+    assert settled["status"] == al.STATUS_INVALIDATED
+    assert "выпали из состава" in settled["reason"]
+    assert world.forge.prs[pr]["state"] == "CLOSED", (
+        "мержаемое предложение снято со стола"
+    )
+
+
+def test_buried_request_with_all_nodes_dropped_gets_its_close_finished(
+    world: World,
+) -> None:
+    """Третий заход на ту же болезнь — теперь класс, а не случай.
+
+    Худшая комбинация двух прежних хвостов: у заявки выпали ВСЕ узлы
+    (значит вызова по её узлам не будет никогда — он отказывает на
+    составе) И закрытие её PR не подтвердилось (значит запись уже
+    терминальна, `is_live` False, а `_update` её не мутирует). Раньше
+    сходились три отказа сразу, и мержаемый candidate оставался открытым
+    навсегда, без единого пути его закрыть и без единого слова об этом.
+
+    Инвариант, который тест держит: у терминализованной записи, чей
+    сетевой эффект мог не состояться, есть путь довести эффект на
+    повторе — и путь не зависит от того, по какому узлу пришёл вызов.
+    Здесь оба вызова приходят по ЧУЖОМУ узлу, и этого достаточно.
+    """
+    _level_three(world)
+    approve(world, "acceptance")
+    doomed_key, doomed = _request_over(world, "acceptance")
+    assert doomed["nodes"] == ["acceptance"], "все узлы заявки — выпадут"
+    pr = doomed["candidate_pr"]
+    _drop_node(world, "25-acceptance.md")
+    world.forge.close_confirms = False
+
+    # Заход 1: запись хоронится, закрытие не подтверждается, вызов честно
+    # отказывает. Предложение остаётся на столе — и это ещё не дефект.
+    with pytest.raises(RuntimeError, match="закрытие PR"):
+        approve(world, "design", legacy_bundle=5)
+    buried = world.state.ops[doomed_key]
+    assert buried["status"] == al.STATUS_INVALIDATED
+    assert buried["invalidated_by"] == an._OUTSIDE_DAG, (
+        "своя похоронная операция помечена — по этому маркеру её и найдут"
+    )
+    assert not al.is_live(buried), "запись терминальна, обход живых её не даст"
+    assert world.forge.prs[pr]["state"] == "OPEN"
+
+    # Заход 2 — дефект был ЗДЕСЬ: обход по живым эту запись не отдавал,
+    # и закрытие доводить было нечем. Теперь отдаёт, и оно доводится.
+    world.forge.close_confirms = True
+    approve(world, "design", legacy_bundle=5)
+    assert world.forge.prs[pr]["state"] == "CLOSED", (
+        "мержаемое предложение снято со стола на повторе"
+    )
+    assert world.state.ops[doomed_key]["status"] == al.STATUS_INVALIDATED, (
+        "запись не переписана — доводился эффект, а не решение"
+    )
 
 
 # --- Крэш-окна ----------------------------------------------------------

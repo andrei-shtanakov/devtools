@@ -245,6 +245,45 @@ def test_resume_completed_delivers_and_stops_at_approve(
     assert "approve" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    "message, expects_hint",
+    [
+        (
+            "активный DAG не одобрен целиком — доставка не начата (§I12)",
+            True,
+        ),
+        (
+            "target_dir 'x' грязный — доставка не начата",
+            False,
+        ),
+    ],
+)
+def test_gate_refusal_routes_operator_to_approve_node(
+    runs_root, tmp_path, monkeypatch, capsys, message, expects_hint
+) -> None:
+    """Подсказка про `--approve-node` приходит на отказе гейта §I12 и ТОЛЬКО
+    на нём (минор ревью #191, круг 2).
+
+    Отказов у доставки много, и общая подсказка уводила бы оператора
+    одобрять узлы там, где мешает грязное дерево. Обе половины проверяются
+    одним тестом: без второй строки параметров «печатать всегда» прошло бы
+    тоже.
+    """
+    _mk_run("r-g", "S", status="completed", target_dir=str(tmp_path / "alpha"))
+    env = _LoopEnv(monkeypatch, tmp_path)
+
+    def _refuse(state, ops, legacy_bundle=None):
+        env.calls.append(("deliver", state.run_id))
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(spec_loop.task_bridge, "deliver_for_run", _refuse)
+    rc = spec_loop.main(["--subject", "S", "--repo", "alpha"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert message in out
+    assert ("--approve-node" in out) is expects_hint
+
+
 def test_completed_run_goes_straight_to_deliver(
     runs_root, tmp_path, monkeypatch
 ) -> None:

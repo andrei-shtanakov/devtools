@@ -98,13 +98,16 @@ def self_hash(text: str) -> str:
     frontmatter которого удалён весь approval-контур
     (`APPROVAL_ENVELOPE_KEYS`); остальной frontmatter и тело входят целиком.
 
-    Это НЕ канонизация §I2, и путать их нельзя: та отвечает на вопрос
-    «менялось ли содержание апстрима» по всему DAG и `status`/`version`
-    ОСТАВЛЯЕТ (иначе слепа к откату узла в `draft`), эта — «те ли
-    собственные байты, что одобрял человек» по одному узлу и `status`/
-    `version` РЕЖЕТ (иначе одобрение собственных байтов не отличить от
-    перезаписи конверта). Одна процедура на два вопроса дала бы неверный
-    ответ хотя бы на один (§7).
+    Это НЕ канонизация §I2, и путать их нельзя. Та отвечает на вопрос
+    «менялось ли содержание апстрима» по всему DAG: `status` она
+    ОСТАВЛЯЕТ (иначе бесследный no-op §I5 скрыл бы откат узла в долг —
+    он стоит перед гейтом), `version` вырезает (правка 2026-09-11:
+    поколение акта содержанием не является). Эта отвечает «те ли
+    собственные байты, что одобрял человек» по одному узлу и режет ВЕСЬ
+    конверт, включая `status`: иначе одобрение собственных байтов не
+    отличить от перезаписи конверта. Совпадение по `version` у двух
+    проекций случайно — они режут его по разным причинам, и сливать их в
+    одну процедуру всё так же нельзя (§7).
 
     Ровно эта проекция и развязывает курицу с яйцом двухфазной схемы: хеш,
     посчитанный фазой 1 до подписи, остаётся верным после того, как фаза 3
@@ -176,19 +179,24 @@ MIGRATION_PROCEDURE = (
 
 
 def debt_procedure(
-    status: object, *, live_candidate_pr: int | None = None
+    status: object, *, awaiting_merge_pr: int | None = None
 ) -> str:
     """Что делать оператору с узлом в долговом статусе.
 
-    `live_candidate_pr` обязателен по смыслу для `approval_pending` и
-    приходит ИЗ ЛЕДЖЕРА, а не из файла узла: статус узла не отличает
-    «заявка жива, ждём мержа» от «заявка терминальна, нужен новый
-    candidate», и выдумать этот ответ по файлу нельзя. `None` здесь значит
-    «живой заявки нет» — тогда процедура та же, что у `draft`.
+    `awaiting_merge_pr` приходит ИЗ ЛЕДЖЕРА и перебивает статус, а не
+    уточняет его. Статус — про файл в base, а вопрос здесь про то, чего
+    система ЖДЁТ, и эти два расходятся штатно: узел лежит `draft`, пока
+    его candidate открыт, — и правильное действие всё равно мерж, а не
+    повторный `--approve-node`, который ответит «PR открыт, ждём мержа».
+    Тем более статус не отличает «ждём candidate» от «candidate вмержен,
+    ждём конверта»: PR в этих двух случаях разные.
+
+    `None` — ни один PR не ждёт (живой заявки нет либо работа за
+    механикой): процедура та же, что у `draft`.
     """
-    if status == STATUS_APPROVAL_PENDING and live_candidate_pr is not None:
+    if awaiting_merge_pr is not None:
         return (
-            f"мерж candidate-PR #{live_candidate_pr} учёткой из "
+            f"мерж PR #{awaiting_merge_pr} учёткой из "
             "authorized_approver_accounts"
         )
     return APPROVE_PROCEDURE
@@ -199,7 +207,7 @@ def node_debt(
     text: str,
     upstream_blobs: dict[str, str],
     *,
-    live_candidate_pr: int | None = None,
+    awaiting_merge_pr: int | None = None,
 ) -> NodeDebt | None:
     """Долг узла по предикату честной одобренности; `None` — долга нет.
 
@@ -245,7 +253,7 @@ def node_debt(
             status,
             DEBT_STATUS,
             _DEBT_MEANING[status],
-            debt_procedure(status, live_candidate_pr=live_candidate_pr),
+            debt_procedure(status, awaiting_merge_pr=awaiting_merge_pr),
         )
     if not meta.get("approved_by") or not meta.get("approved_at"):
         return NodeDebt(

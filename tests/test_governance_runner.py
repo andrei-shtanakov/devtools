@@ -3679,7 +3679,6 @@ def test_deliver_refuses_when_target_profile_lacks_design(
             bundle_dir="workstreams/WS-alpha-7/spec",
             base_ref="master",
             ops=_MiniOps(),
-            approved_by="a", approved_at="t",
             profile="profiles/team-exp.yaml",
         )
     message = str(exc_info.value)
@@ -3724,7 +3723,6 @@ def test_deliver_refuses_when_target_profile_lacks_decomposition(
             bundle_dir="workstreams/WS-alpha-7/spec",
             base_ref="master",
             ops=_MiniOps(),
-            approved_by="a", approved_at="t",
             profile="profiles/team-exp.yaml",
         )
     message = str(exc_info.value)
@@ -3768,7 +3766,6 @@ def test_deliver_refuses_when_target_profile_lacks_acceptance(
             bundle_dir="workstreams/WS-alpha-7/spec",
             base_ref="master",
             ops=_MiniOps(),
-            approved_by="a", approved_at="t",
             profile="profiles/team-exp.yaml",
         )
     message = str(exc_info.value)
@@ -5124,8 +5121,6 @@ def test_decomposition_node_end_to_end_smoke_and_deliver(
         bundle_dir=state.bundle_dir,
         base_ref="master",
         ops=ops,
-        approved_by="fleet-agent",
-        approved_at="2026-09-05T12:00:00",
         profile=state.profile,
     )
     assert isinstance(pr, int)
