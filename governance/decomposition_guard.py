@@ -267,18 +267,27 @@ def _waiver_field(
     """
     findings: list[str] = []
     matches = _WAIVER_RE.findall(block)
-    if len(matches) > 1:
+    # Сверяется ЧИСЛО КЛЮЧЕЙ с числом разобранных, а не наличие
+    # разобранных (минор ревью #197). `findall` видит только удавшийся
+    # разбор, поэтому «ключ есть, форма не разобрана» было достижимо лишь
+    # когда валидных строк нет ни одной: битая строка РЯДОМ с валидной
+    # уходила молча, и какое объявление подействует, решала позиция.
+    # Проглатывалось при этом ровно то состояние, которое контракт
+    # объявляет недостижимым, — «класс без санкции».
+    keys = len(_WAIVER_KEY_RE.findall(block))
+    if keys > 1:
         findings.append(
-            f"{dt_id}: tdd_waiver объявлен {len(matches)} раза "
+            f"{dt_id}: tdd_waiver объявлен {keys} раза "
             "(ожидается ровно один)"
         )
         return None, findings
+    if keys != len(matches):
+        findings.append(
+            f"{dt_id}: поле tdd_waiver объявлено, но не разобрано — "
+            "ожидается `tdd_waiver: <класс> · sanction: <id>`"
+        )
+        return None, findings
     if not matches:
-        if _WAIVER_KEY_RE.search(block):
-            findings.append(
-                f"{dt_id}: поле tdd_waiver объявлено, но не разобрано — "
-                "ожидается `tdd_waiver: <класс> · sanction: <id>`"
-            )
         return None, findings
     node_class, sanction = matches[0]
     # Четыре условия проверяются ВСЕ, а не до первого отказа: у гейта

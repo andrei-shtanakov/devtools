@@ -189,6 +189,30 @@ def test_sanction_inside_the_closed_grammar_is_accepted(sanction: str) -> None:
     assert tasks[1].waiver.sanction == sanction
 
 
+def test_broken_waiver_line_next_to_a_valid_one_is_a_finding() -> None:
+    """Битая строка рядом с валидной не проглатывается (минор ревью #197).
+
+    `findall` считает только РАЗОБРАННЫЕ строки, поэтому ветка «ключ есть,
+    форма не разобрана» была достижима лишь когда валидных нет ни одной.
+    Смешанный случай — `tdd_waiver: characterisation` без санкции над
+    валидной строкой — уходил молча, и какое из двух объявлений
+    подействует, решала позиция. Причём проглатывалось ровно то
+    состояние, которое §3a объявляет недостижимым: «класс без санкции».
+
+    Сверяется поэтому ЧИСЛО КЛЮЧЕЙ с числом разобранных, а не наличие
+    разобранных: первое видит потерю, второе — нет.
+    """
+    line = (
+        "tdd_waiver: characterisation\n"
+        "tdd_waiver: characterisation · sanction: batch-approve-2026-09-09"
+    )
+    tasks, findings = parse_dt_tasks(_waived(line))
+    assert any(
+        "DT-02" in f and "tdd_waiver" in f for f in findings
+    ), f"битая строка рядом с валидной проглочена: {findings}"
+    assert tasks[1].waiver is None, "объявление с потерей не действует"
+
+
 def test_all_waiver_findings_are_reported_at_once() -> None:
     """Причины не прячутся одна за другой: гейт показывает всё сразу.
 
