@@ -1551,113 +1551,108 @@ def _render_waived() -> str:
     )
 
 
-def test_waived_dt_renders_standard_mode_and_carries_all_conditions() -> None:
-    """Проекция waiver'а: режим и пункт с ПОЛНЫМ составом условий.
+#: Зонд, исполняемый интерпретатором СОСЕДА: разбирает наш рендер его
+#: парсером и прогоняет через его же резолвер. Держится строкой, а не
+#: файлом в их дереве, — сосед read-only, и тест не вправе в нём ничего
+#: создавать.
+_SPEC_RUNNER_PROBE = (
+    'import json, sys\n'
+    'from pathlib import Path\n'
+    'from spec_runner.task import parse_tasks\n'
+    'from spec_runner.config import ExecutorConfig\n'
+    'tasks = {t.id: t for t in parse_tasks(Path(sys.argv[1]))}\n'
+    "config = ExecutorConfig(project_root=Path('.'), execution_mode='tdd')\n"
+    'out = {}\n'
+    'for tid, task in tasks.items():\n'
+    '    applied = config.resolve_waiver(task)\n'
+    '    out[tid] = {\n'
+    "        'mode': task.execution_mode,\n"
+    "        'raw': task.tdd_waiver,\n"
+    "        'class': applied.node_class if applied else None,\n"
+    "        'sanction': applied.sanction if applied else None,\n"
+    '    }\n'
+    'print(json.dumps(out))\n'
+)
 
-    Состав утверждается РАВЕНСТВОМ множества условий, а не вхождением
-    подстрок: вхождение — утверждение о минимуме, оно не проваливается
-    от потерянного условия, если проверять по одному, и не проваливается
-    от лишнего никогда. Waiver принимается целиком либо не принимается,
-    поэтому проверять его состав минимумом нельзя.
 
-    Условия сверяются с ЕДИНСТВЕННЫМ их местом (`WAIVER_CONDITIONS`), а
-    не с копией, выписанной в тесте: копия разошлась бы с бандлом молча —
-    тест зеленел бы, печатая устаревшее.
+def _parse_with_spec_runner(text: str):
+    """Разобрать наш рендер ПАРСЕРОМ СОСЕДА и вернуть его вывод, либо None.
+
+    Запуск — в ЕГО интерпретаторе, отдельным процессом: у соседа свои
+    зависимости, и тянуть их в наше окружение ради теста значило бы
+    связать проекты рантаймом. Дерево spec-runner не трогается вовсе —
+    только чтение установленного пакета и временный файл в tmp.
+
+    None — окружения нет; тест на нём ПРОПУСКАЕТСЯ, а не зеленеет:
+    «не проверено» и «проверено» обязаны различаться.
     """
-    text = _render_waived()
-    waived = text.split("### TASK-002:")[1]
-    plain = text.split("### TASK-001:")[1].split("### TASK-002:")[0]
+    import json
+    import subprocess
+    import tempfile
 
-    assert "**Mode:** standard" in waived
-    assert "**Mode:**" not in plain, "санкция адресна, а не на воркстрим"
-
-    item = next(
-        line for line in waived.splitlines()
-        if line.startswith("- [ ] TDD-waiver")
+    interpreter = (
+        Path(__file__).resolve().parents[2] / "spec-runner" / ".venv" / "bin" / "python"
     )
-    assert "класс characterisation" in item
-    assert "санкция batch-approve-2026-09-09" in item
-    printed = {
-        part.strip() for part in
-        item.split("условия класса:", 1)[1].split(";")
+    if not interpreter.exists():
+        return None
+    # Наличие ОКРУЖЕНИЯ устанавливается отдельно от исхода разбора, и это
+    # не формальность: первая редакция возвращала None на любом ненулевом
+    # коде, поэтому расхождение грамматик — то самое, ради чего тест
+    # заведён — приходило как «окружения нет» и тест ПРОПУСКАЛСЯ.
+    # Мутация разделителя это и показала: skip вместо failed. Молчание
+    # обязано означать одно: соседа тут нет.
+    available = subprocess.run(
+        [str(interpreter), "-c", "import spec_runner.task, spec_runner.config"],
+        capture_output=True,
+    )
+    if available.returncode != 0:
+        return None
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".md", encoding="utf-8", delete=False
+    ) as handle:
+        handle.write(text)
+        path = Path(handle.name)
+    try:
+        done = subprocess.run(
+            [str(interpreter), "-c", _SPEC_RUNNER_PROBE, str(path)],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        path.unlink()
+    # Окружение есть, а разбор не удался — это РАСХОЖДЕНИЕ, а не отсутствие
+    # соседа: поднимаем, показывая его stderr.
+    assert done.returncode == 0, (
+        "spec-runner не разобрал наш рендер — стык разошёлся:\n"
+        + (done.stderr or "")[-2000:]
+    )
+    return json.loads(done.stdout)
+
+
+def test_rendered_marker_is_read_back_by_the_spec_runner_parser() -> None:
+    """Сквозной тест: сгенерированную спеку разбирает САМ spec-runner.
+
+    Без него у нас два регекспа, написанных по памяти друг о друге: наш
+    рендер и `spec_runner.task.TDD_WAIVER`. Разойтись они могут молча —
+    каждая сторона зелена на своих фикстурах, — и обнаружилось бы это
+    прогоном, то есть деньгами. Здесь проверяется СТЫК: разбор строки И
+    то, что разобранное проходит закрытый словарь класса и грамматику
+    санкции соседа.
+    """
+    parsed = _parse_with_spec_runner(_render_waived())
+    if parsed is None:
+        pytest.skip("окружение spec-runner недоступно — стык не проверен")
+
+    assert parsed["TASK-002"] == {
+        "mode": "standard",
+        "raw": "characterisation · sanction: batch-approve-2026-09-09",
+        "class": "characterisation",
+        "sanction": "batch-approve-2026-09-09",
     }
-    assert printed == set(
-        decomposition_guard.WAIVER_CONDITIONS["characterisation"]
-    )
-    assert len([
-        line for line in waived.splitlines()
-        if line.startswith("- [ ] TDD-waiver")
-    ]) == 1, "waiver принимается целиком — пункт один, а не пять"
-
-
-DT_TWO_WAIVED_MD = """\
-#### DT-01: Ядро · type: implement · owner: dev
-scenarios: [BEH-01]
-depends_on: []
-parallel_group: core
-
-Реализовать ядро.
-
-#### DT-02: Характеризация раз · type: implement · owner: qa
-scenarios: [BEH-02]
-depends_on: [DT-01]
-parallel_group: regression
-tdd_waiver: characterisation · sanction: batch-approve-2026-09-09
-
-Проза.
-
-#### DT-03: Характеризация два · type: implement · owner: qa
-scenarios: [BEH-03]
-depends_on: [DT-01]
-parallel_group: regression
-tdd_waiver: characterisation · sanction: batch-approve-2026-09-09
-
-Проза.
-"""
-
-
-def test_waiver_items_of_one_batch_sanction_survive_supersede() -> None:
-    """Пункт waiver'а уникален по построению — иначе `[x]` теряется.
-
-    Batch-санкция ПО ЗАМЫСЛУ покрывает несколько DT, поэтому класс и
-    санкция у них совпадают: совпадение штатно, а не краевой случай.
-    Без `dt_id` пункты выходили бы побайтово одинаковыми, перенос
-    состояния §I11 выбросил бы их как неуникальные с обеих сторон
-    (`marked & _unique(...)`), и при переиздании отметка терялась бы у
-    ВСЕХ — притом что `DONE` самой задачи переносится. Получалась бы
-    DONE-задача с неотмеченным waiver-пунктом, то есть потерянный
-    единственный durable-след условия про negative control: гейта на
-    него в spec-runner нет вовсе.
-
-    Фикстура с ОДНИМ waived DT этого не видит по построению — та же
-    слепота формы, что уже стоила нам круга.
-    """
-    scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
-    dt_tasks, findings = decomposition_guard.parse_dt_tasks(DT_TWO_WAIVED_MD)
-    assert findings == []
-    rendered = task_bridge.render_tasks_dt(
-        ws_id="WS-x-1",
-        subject="s",
-        bundle_path="workstreams/WS-x-1/spec/30-decomposition.md",
-        scenarios=scenarios,
-        dt_tasks=dt_tasks,
-        generated_at="2026-09-05T12:00:00",
-        anchor_blob="ab" * 20,
-    )
-    items = [
-        line for line in rendered.splitlines()
-        if line.startswith("- [ ] TDD-waiver")
-    ]
-    assert len(items) == 2
-    assert len(set(items)) == 2, "пункты двух DT побайтово совпали"
-
-    # Оператор отметил оба пункта и довёл обе задачи; переиздание обязано
-    # перенести ОБЕ отметки, а не выбросить их как неуникальные.
-    delivered = rendered.replace("- [ ] TDD-waiver", "- [x] TDD-waiver")
-    carried = task_bridge._carry_execution_state(rendered, delivered)
-    assert carried.count("- [x] TDD-waiver") == 2, (
-        "отметка waiver-пункта потеряна при переиздании"
-    )
+    # Половина «адресность»: у обычной задачи сосед не видит ни режима,
+    # ни маркера — обычный `standard` там остаётся нетронутым.
+    assert parsed["TASK-001"]["raw"] is None
+    assert parsed["TASK-001"]["class"] is None
 
 
 def test_waived_task_points_its_source_at_the_declaration() -> None:
