@@ -675,6 +675,24 @@ def _canonical_dag_hash(
     return f"{_CANON_VERSION}:{blob_sha1(chr(10).join(lines) + chr(10))}"
 
 
+def _canon_epoch(value: str) -> str:
+    """Эпоха канонизации величины — ЯВНО, а не побочным эффектом `split`.
+
+    У v2 префикс есть, у v1 его нет вовсе, и `split(":", 1)[0]` на v1
+    отдаёт весь хэш целиком. Сравнение таких «префиксов» отвечает не на
+    вопрос об эпохе: две РАЗНЫЕ записи одной и той же v1 оно объявляло бы
+    несопоставимыми, то есть подменяло «содержание изменилось» на «сверить
+    не удалось». Сегодня обе ветки ведут к переизданию, и поведение от
+    подмены не менялось, — врала диагностика, а расхождение между делом и
+    рассказом о нём мы за этот прогон оплачивали дважды.
+
+    Отсутствие префикса есть v1, и это то же fail-closed, что в самой
+    отметке: «не помечено» читается как старейшая эпоха, а не как «наверное
+    текущая».
+    """
+    return value.split(":", 1)[0] if ":" in value else "v1"
+
+
 def _comparable_anchors(recorded: object, current: str) -> bool:
     """Сопоставимы ли записанный и текущий `content_anchor` (§I2, v1/v2).
 
@@ -698,7 +716,7 @@ def _comparable_anchors(recorded: object, current: str) -> bool:
     """
     if not isinstance(recorded, str) or not recorded:
         return False
-    return recorded.split(":", 1)[0] == current.split(":", 1)[0]
+    return _canon_epoch(recorded) == _canon_epoch(current)
 
 
 def _content_anchor(
@@ -2888,14 +2906,18 @@ def deliver_superseded(
         # сторону. `anchor` записи старого образца задним числом тоже не
         # переосмысливается — он отвечал на другой вопрос (§I2).
         intent["comparison"] = "unavailable"
-        print(
-            "сверка §I5 не производилась (comparison: unavailable): "
-            + (
-                "предыдущая доставка не записала content_anchor"
-                if recorded_content is None
-                else "её content_anchor посчитан канонизацией другой эпохи"
+        # Причина выводится ТЕМ ЖЕ правилом, что и сопоставимость: иначе
+        # рядом с верным решением поселится неверное объяснение. Эпохи
+        # называются обе — как обе величины у разошедшегося пина.
+        if not isinstance(recorded_content, str) or not recorded_content:
+            why = "предыдущая доставка не записала content_anchor"
+        else:
+            why = (
+                "её content_anchor посчитан канонизацией эпохи "
+                f"{_canon_epoch(recorded_content)}, текущая — "
+                f"{_canon_epoch(content)}"
             )
-        )
+        print(f"сверка §I5 не производилась (comparison: unavailable): {why}")
     _start_revision(state, n, intent)
     # Порядок владельца: намерение durable → ЗАКРЫТЬ заменяемый PR →
     # доставить. Наоборот нельзя: доставка завела бы второй открытый PR

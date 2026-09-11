@@ -4061,6 +4061,19 @@ def test_anchor_carries_its_canonization_epoch(tmp_path: Path) -> None:
     assert not task_bridge._comparable_anchors(legacy, current)
     assert not task_bridge._comparable_anchors(None, current)
 
+    # Пара РАЗНЫХ v1 сопоставима: эпоха одна, различается содержание.
+    # Именно эта пара и различает предикат эпохи от сравнения строк —
+    # на паре РАВНЫХ v1 сравнение строк проходит случайно и мутанта не
+    # ловит.
+    other_legacy = "0" * 40
+    assert legacy != other_legacy
+    assert task_bridge._comparable_anchors(legacy, other_legacy), (
+        "две записи одной эпохи обязаны сравниваться по содержанию, а не "
+        "объявляться несопоставимыми"
+    )
+    assert task_bridge._canon_epoch(legacy) == "v1"
+    assert task_bridge._canon_epoch(current) == "v2"
+
 
 def test_content_anchor_changes_with_node_body(tmp_path, monkeypatch) -> None:
     """Обратная сторона: правка ТЕЛА любого узла хэш меняет."""
