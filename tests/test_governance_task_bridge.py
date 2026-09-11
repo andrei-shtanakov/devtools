@@ -3918,6 +3918,13 @@ def test_pr_facts_stub_differs_per_pr(tmp_path, monkeypatch) -> None:
     assert state.pr == 5      # фикстура: бандл-PR — именно #5
 
 
+def _unapprove_file(path: Path) -> None:
+    """Откатить узел в долг — так это выглядит после correction'а."""
+    meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+    meta["status"] = "stale"
+    path.write_text(join_frontmatter(meta, body), encoding="utf-8")
+
+
 def _resign(target: str, fname: str, by: str, at: str) -> None:
     """Переписать подпись узла — так это делает финализация §I12.
 
@@ -3996,6 +4003,63 @@ def test_content_anchor_does_not_leak_signature_through_pins(
     )
     assert anchor_meta["upstream_hashes"]["design"] == blobs["design"]
     assert task_bridge._content_anchor(target, bundle, None) == before_hash
+
+
+def test_reapproval_without_content_change_keeps_the_anchor(
+    tmp_path: Path,
+) -> None:
+    """Переодобрение тех же тел `content_anchor` НЕ двигает (правка §I2).
+
+    `version` растёт на каждом проходе фазы 1, и пока он входил в канон,
+    §I5 переставал давать бесследный no-op при неизменном содержании. Это
+    не гипотеза: миграционный долг есть у КАЖДОГО воркстрима, одобренного
+    до 2026-09-10, и гасится ровно таким переодобрением.
+
+    Пара к соседнему `..._changes_with_node_body`: без неё «величина не
+    двигается» не отличалось бы от «величина не двигается никогда».
+    """
+    target = str(_target(tmp_path))
+    bundle = "workstreams/WS-alpha-7/spec"
+    before = task_bridge._content_anchor(target, bundle, None)
+
+    path = Path(target) / bundle / "00-charter.md"
+    meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+    meta["version"] = int(meta.get("version") or 1) + 1
+    path.write_text(join_frontmatter(meta, body), encoding="utf-8")
+
+    assert task_bridge._content_anchor(target, bundle, None) == before
+
+
+def test_debt_status_moves_the_anchor(tmp_path: Path) -> None:
+    """А `status` двигает — и это работа, которую он в каноне несёт.
+
+    §I5 стоит ПЕРЕД гейтом: вырежи мы `status`, откат узла в долг дал бы
+    бесследный no-op, то есть успех вместо отказа непройденного гейта.
+    """
+    target = str(_target(tmp_path))
+    bundle = "workstreams/WS-alpha-7/spec"
+    before = task_bridge._content_anchor(target, bundle, None)
+    _unapprove_file(Path(target) / bundle / "00-charter.md")
+    assert task_bridge._content_anchor(target, bundle, None) != before
+
+
+def test_anchor_carries_its_canonization_epoch(tmp_path: Path) -> None:
+    """Отметка эпохи — часть величины, и запись без неё есть v1 ВСЕГДА.
+
+    Соседнее поле можно забыть записать, и его отсутствие стало бы
+    неотличимо от отсутствия правила; префикс забыть нельзя — он часть
+    того, что сравнивают. Сравнение эпох не даёт ни равенства, ни
+    содержательного различия: обоих утверждений никто не устанавливал.
+    """
+    target = str(_target(tmp_path))
+    bundle = "workstreams/WS-alpha-7/spec"
+    current = task_bridge._content_anchor(target, bundle, None)
+    assert current.startswith("v2:")
+
+    assert task_bridge._comparable_anchors(current, current)
+    legacy = current.split(":", 1)[1]          # запись эпохи без отметки
+    assert not task_bridge._comparable_anchors(legacy, current)
+    assert not task_bridge._comparable_anchors(None, current)
 
 
 def test_content_anchor_changes_with_node_body(tmp_path, monkeypatch) -> None:

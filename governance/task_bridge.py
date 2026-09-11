@@ -609,8 +609,21 @@ def render_tasks_dt(
 
 
 #: Ключи frontmatter, которые КАНОНИЧЕСКОЕ представление узла вырезает:
-#: провенанс approve, а не содержание (§I5).
-_SIGNATURE_KEYS = ("approved_by", "approved_at")
+#: то, что описывает approval-ПРОЦЕСС, а не содержание (§I2, §I5).
+#: `approved_by`/`approved_at` — кто и когда совершил акт; `version` —
+#: какое это поколение акта (правка 2026-09-11). `status` НЕ вырезается и
+#: не по недосмотру: он влияет на допуск доставки, §I5 стоит перед гейтом,
+#: и откат узла в долг обязан двигать величину — иначе бесследный no-op
+#: скрыл бы непройденный гейт.
+_CANON_CUT_KEYS = ("approved_by", "approved_at", "version")
+
+#: Отметка версии канонизации в самой величине. Часть значения, а не
+#: соседнее поле: поле можно забыть записать, и тогда его отсутствие стало
+#: бы неотличимо от отсутствия правила. Всё, что префикса не несёт, есть
+#: v1 по построению — fail-closed, потому что любое иное чтение объявляет
+#: несопоставимое сопоставимым.
+_CANON_VERSION = "v2"
+
 
 def _canonical_dag_hash(
     target_dir: str,
@@ -652,14 +665,40 @@ def _canonical_dag_hash(
         meta, body = split_frontmatter(
             (base / fname).read_text(encoding="utf-8")
         )
-        for key in _SIGNATURE_KEYS:
+        for key in _CANON_CUT_KEYS:
             meta.pop(key, None)
         if upstream_ids:
             meta["upstream_hashes"] = {u: canon[u] for u in upstream_ids}
         node_id = _node_id(fname)
         canon[node_id] = blob_sha1(join_frontmatter(meta, body))
         lines.append(f"{node_id} {canon[node_id]}")
-    return blob_sha1("\n".join(lines) + "\n")
+    return f"{_CANON_VERSION}:{blob_sha1(chr(10).join(lines) + chr(10))}"
+
+
+def _comparable_anchors(recorded: object, current: str) -> bool:
+    """Сопоставимы ли записанный и текущий `content_anchor` (§I2, v1/v2).
+
+    Правка канонизации 2026-09-11 (`version` ушёл в вырезаемые) сделала
+    величины двух эпох НЕСОПОСТАВИМЫМИ — а это не то же самое, что
+    «содержание различается». Объявить их равными нельзя, объявить
+    содержательно разными — тоже: ни одно из двух утверждений не
+    установлено, и притворяться, будто сверка состоялась, запрещено тем же
+    правилом, которым свёрнутый исход не открывает дверь.
+
+    Отметка эпохи живёт В САМОЙ ВЕЛИЧИНЕ (`v2:<хеш>`), поэтому запись без
+    префикса есть v1 ВСЕГДА. Соседнее поле можно забыть записать, и его
+    отсутствие стало бы неотличимо от отсутствия правила; префикс забыть
+    нельзя — он часть того, что сравнивают.
+
+    Исход одноразовый ПО ЗАПИСИ, а не по прогону: переиздание, прошедшее
+    через `unavailable`, кладёт свой anchor уже v2, и следующая сверка
+    обычная. Повтор упавшей доставки вечным `unavailable` это не делает —
+    прежняя запись остаётся v1 ровно до тех пор, пока доставка не дошла до
+    записи новой.
+    """
+    if not isinstance(recorded, str) or not recorded:
+        return False
+    return recorded.split(":", 1)[0] == current.split(":", 1)[0]
 
 
 def _content_anchor(
@@ -2779,6 +2818,7 @@ def deliver_superseded(
         state.target_dir, state.bundle_dir, legacy_bundle
     )
     recorded_content = prev_op.get("content_anchor")
+    comparable = _comparable_anchors(recorded_content, content)
     if (
         # Незакрытое обязательство замены снимает бесследный no-op §I5:
         # он отвечает про АПСТРИМ, а замена — про ПРЕДЛОЖЕНИЕ. Живой
@@ -2792,7 +2832,7 @@ def deliver_superseded(
         # no-op молча испарил бы обязательство при RC 0, оставив
         # отозванный PR открытым, а его ветку живой.
         not replace_fields
-        and recorded_content is not None
+        and comparable
         and recorded_content == content
     ):
         print(
@@ -2840,16 +2880,21 @@ def deliver_superseded(
         # неизвестного» не одно и то же.
         **replace_fields,
     }
-    if recorded_content is None:
+    if not comparable:
         # §6 спеки: сверка была невозможна — фиксируем это В ЖУРНАЛЕ.
-        # Считается ровно отсутствие `content_anchor`: `anchor` записи
-        # старого образца задним числом не переосмысливается — он отвечал
-        # на другой вопрос (§I2), и принять его за содержание значило бы
-        # объявить сверку там, где её не было.
+        # Случая два, и оба дают ОДИН исход: величины нет вовсе либо она
+        # посчитана канонизацией другой эпохи. Ни в одном из двух сверки
+        # не было, и притворяться, будто она состоялась, нельзя ни в одну
+        # сторону. `anchor` записи старого образца задним числом тоже не
+        # переосмысливается — он отвечал на другой вопрос (§I2).
         intent["comparison"] = "unavailable"
         print(
-            "предыдущая доставка не записала content_anchor — сверка не "
-            "производилась (comparison: unavailable)"
+            "сверка §I5 не производилась (comparison: unavailable): "
+            + (
+                "предыдущая доставка не записала content_anchor"
+                if recorded_content is None
+                else "её content_anchor посчитан канонизацией другой эпохи"
+            )
         )
     _start_revision(state, n, intent)
     # Порядок владельца: намерение durable → ЗАКРЫТЬ заменяемый PR →
