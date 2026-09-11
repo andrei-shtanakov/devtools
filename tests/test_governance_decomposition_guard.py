@@ -35,6 +35,122 @@ def test_parse_two_tasks() -> None:
     assert tasks[1].verifies == ("tests/test_a.py",)
 
 
+# --- TDD-waiver: ТРИ ВЕТКИ ОТКАЗА -----------------------------------------
+#
+# Ветки отказа написаны ПЕРВЫМИ и стоят выше зелёной дороги намеренно.
+# Гвард, у которого проверен только проход, свидетельствует о себе ровно
+# столько же, сколько зелёный гвард, не смотревший половину цели: «не
+# отказал» неотличимо от «не проверял». Каждый отказ называет DT и
+# причину — иначе оператору некуда идти.
+
+
+def _waived(
+    line: str = "tdd_waiver: characterisation · sanction: batch-approve-2026-09-09",
+    dt_type: str = "implement",
+    depends: str = "[DT-01]",
+) -> str:
+    """DT-02 с объявлением waiver'а; DT-01 — доставляющая зависимость."""
+    return (
+        "#### DT-01: Поведение · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\n"
+        "depends_on: []\n"
+        "parallel_group: core\n"
+        "Проза.\n"
+        "\n"
+        f"#### DT-02: Характеризация · type: {dt_type} · owner: qa\n"
+        "scenarios: [BEH-02]\n"
+        f"depends_on: {depends}\n"
+        + ("delivered_by: [DT-01]\n" if dt_type == "verify" else "")
+        + "parallel_group: regression\n"
+        f"{line}\n"
+        "Проза.\n"
+    )
+
+
+def test_waiver_of_unknown_class_is_refused() -> None:
+    """Класс — ЗАКРЫТЫЙ словарь; неизвестный отвергается.
+
+    Это и есть замена эвристике по слову «waiver» в прозе: открытый
+    словарь означал бы, что санкцией становится любое слово, которое
+    автор счёл подходящим, — то есть догадка вместо санкции.
+    """
+    _, findings = parse_dt_tasks(
+        _waived("tdd_waiver: потому-что-так-быстрее · sanction: я-решил")
+    )
+    assert any(
+        "DT-02" in f and "класс" in f for f in findings
+    ), f"класс не назван причиной отказа: {findings}"
+
+
+def test_waiver_without_dependencies_is_refused() -> None:
+    """Условие 1 класса: поведение доставлено ЗАВИСИМОСТЯМИ задачи.
+
+    У DT без единой зависимости доставлять поведение нечем — объявление
+    противоречит собственному классу, и принять его значило бы принять
+    waiver там, где честный RED как раз возможен.
+    """
+    _, findings = parse_dt_tasks(_waived(depends="[]"))
+    assert any(
+        "DT-02" in f and "зависим" in f for f in findings
+    ), f"отсутствие зависимостей не названо: {findings}"
+
+
+def test_waiver_on_verify_task_is_refused() -> None:
+    """У verify свой режим (`verify_first`) — снимать RED ему нечем.
+
+    Waiver здесь не «избыточен», а противоречив: он назначил бы задаче
+    второй режим исполнения, и какой из двух попадёт в `**Mode:**`,
+    решал бы порядок строк в рендере.
+    """
+    _, findings = parse_dt_tasks(_waived(dt_type="verify"))
+    assert any(
+        "DT-02" in f and "verify" in f for f in findings
+    ), f"waiver у verify-задачи принят: {findings}"
+
+
+def test_malformed_waiver_key_is_a_finding_not_silence() -> None:
+    """Ключ есть, форма не разобрана — находка, а не «поля нет».
+
+    Тот же урок, что у `verifies` (round 13 ревью PR #161): молчаливая
+    деградация до «объявления не было» неотличима от легаси-DT, и
+    задача уехала бы в проектный `tdd` с непройденным RED — ровно тот
+    останов, ради которого проекция заводится.
+    """
+    _, findings = parse_dt_tasks(_waived("tdd_waiver: characterisation"))
+    assert any(
+        "DT-02" in f and "tdd_waiver" in f for f in findings
+    ), f"битая форма проглочена молча: {findings}"
+
+
+def test_waiver_declared_twice_is_a_finding() -> None:
+    """По одному объявлению на DT — как и один DT-id на документ."""
+    line = (
+        "tdd_waiver: characterisation · sanction: batch-approve-2026-09-09\n"
+        "tdd_waiver: characterisation · sanction: batch-approve-2026-09-09"
+    )
+    _, findings = parse_dt_tasks(_waived(line))
+    assert any(
+        "DT-02" in f and "tdd_waiver" in f for f in findings
+    ), f"второе объявление принято: {findings}"
+
+
+def test_declared_waiver_is_parsed_into_the_task() -> None:
+    """Зелёная дорога — ПОСЛЕ веток отказа.
+
+    Разобранное объявление доступно структурно (класс и санкция
+    отдельными величинами), а не строкой: мост обязан печатать условия
+    КЛАССА, и выводить класс из строки повторным разбором значило бы
+    завести второго вычислителя одного факта.
+    """
+    tasks, findings = parse_dt_tasks(_waived())
+    assert findings == []
+    waiver = tasks[1].waiver
+    assert waiver is not None
+    assert waiver.node_class == "characterisation"
+    assert waiver.sanction == "batch-approve-2026-09-09"
+    assert tasks[0].waiver is None, "объявление адресно, а не на документ"
+
+
 def test_near_miss_heading_is_a_finding() -> None:
     """Урок minor'ов PR #145: похожий на DT заголовок мимо строгой
     грамматики — находка, не молчаливое исключение."""
