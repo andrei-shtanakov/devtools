@@ -479,7 +479,9 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
     assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
     assert ("push_branch", "spec/WS-alpha-7-tasks") in ops.calls
     assert "draft" in ops.pr_body.lower()
-    assert "штамп статусов" in ops.pr_body
+    # Тело PR обещает ровно то, что PR делает: файлы бандла он не трогает.
+    assert "Файлы бандла этот PR не трогает" in ops.pr_body
+    assert "штамп" not in ops.pr_body
     # Пин tasks-спеки — blob decomposition ПОСЛЕ штампа (иначе протух бы в
     # том же PR): decomposition — терминальный узел _BUNDLE_DAG (Task 7).
     from governance.stale_adapter import blob_sha1
@@ -744,26 +746,6 @@ def test_prospective_anchor_writes_nothing(tmp_path: Path) -> None:
     assert before == after
 
 
-def test_prospective_anchor_refuses_incomplete_bundle(tmp_path: Path) -> None:
-    """Легаси-бандл + забытый `--legacy-bundle=5` ⇒ RuntimeError с процедурой.
-
-    Проспективный штамп копирует в теневой каталог файлы ЗАЯВЛЕННОГО DAG:
-    без проверки фактического состава в `target_dir` недостающий узел
-    ронял сырой `FileNotFoundError` из `read_text`, а `main` ловит только
-    RuntimeError — оператор получал трейсбек вместо диагностики. Перенести
-    проверку внутрь теневого каталога бесполезно: там лежит ровно
-    заявленное подмножество, и она вырождается в тождество.
-    """
-    target = _target_legacy_5(tmp_path, BEHAVIOUR_MD, DECOMPOSITION_MD_LEGACY5)
-    with pytest.raises(RuntimeError) as exc_info:
-        task_bridge._prospective_anchor(
-            str(target), "workstreams/WS-alpha-7/spec", None
-        )
-    message = str(exc_info.value)
-    assert "25-acceptance.md" in message
-    assert "--legacy-bundle=3|4|5" in message
-
-
 # --- Task 7 (acceptance-node): узел acceptance в DAG,
 # --legacy-bundle=3|4|5 --------------------------------------------------
 
@@ -811,87 +793,6 @@ def test_dag_for_invalid_value_raises() -> None:
         task_bridge._dag_for(6)
 
 
-def test_legacy_5_exact_composition(tmp_path: Path) -> None:
-    """Каталог с ровно 5 узлами (00/10/15/20/30, эра ДО раскатки
-    acceptance-узла): `legacy_bundle=5` штампует по
-    `_BUNDLE_DAG_LEGACY5`; `legacy_bundle=4` отказывает (лишний
-    30-decomposition.md в каталоге); `legacy_bundle=None` (полный DAG)
-    отказывает — недостаёт 25-acceptance.md, текст называет и файл, и
-    процедуру `--legacy-bundle`; тот же 5-узловой каталог + добавленный
-    25-acceptance.md (6 узлов) с `legacy_bundle=5` тоже отказывает —
-    лишний узел (запрет «по самому длинному существующему», спека §4)."""
-    target = tmp_path / "alpha"
-    bundle = target / "workstreams/WS-alpha-7/spec"
-    bundle.mkdir(parents=True)
-    (bundle / "00-charter.md").write_text(CHARTER_MD)
-    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
-    (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
-    (bundle / "20-design.md").write_text(DESIGN_MD)
-    (bundle / "30-decomposition.md").write_text(DECOMPOSITION_MD_LEGACY5)
-
-    changed = task_bridge.stamp_bundle_approved(
-        str(target), "workstreams/WS-alpha-7/spec",
-    )
-    assert changed == [
-        "workstreams/WS-alpha-7/spec/00-charter.md",
-        "workstreams/WS-alpha-7/spec/10-requirements.md",
-        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
-        "workstreams/WS-alpha-7/spec/20-design.md",
-        "workstreams/WS-alpha-7/spec/30-decomposition.md",
-    ]
-
-    with pytest.raises(RuntimeError, match="не совпадает"):
-        task_bridge.stamp_bundle_approved(
-            str(target), "workstreams/WS-alpha-7/spec",
-        )
-    with pytest.raises(RuntimeError) as exc_info:
-        task_bridge.stamp_bundle_approved(
-            str(target), "workstreams/WS-alpha-7/spec",
-        )
-    message = str(exc_info.value)
-    assert "25-acceptance.md" in message
-    assert "--legacy-bundle=3|4|5" in message
-
-    (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
-    with pytest.raises(RuntimeError, match="не совпадает"):
-        task_bridge.stamp_bundle_approved(
-            str(target), "workstreams/WS-alpha-7/spec",
-        )
-
-
-def test_legacy_bundle_exact_composition(tmp_path: Path) -> None:
-    """Каталог с ровно 4 узлами (00/10/15/20, без 30-decomposition.md):
-    legacy_bundle=4 штампует и якорит на design; legacy_bundle=3 и
-    legacy_bundle=None (полный DAG) отказывают — состав не совпал точно
-    (запрет «по самому длинному существующему», спека §4)."""
-    target = tmp_path / "alpha"
-    bundle = target / "workstreams/WS-alpha-7/spec"
-    bundle.mkdir(parents=True)
-    (bundle / "00-charter.md").write_text(CHARTER_MD)
-    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
-    (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
-    (bundle / "20-design.md").write_text(DESIGN_MD)
-
-    changed = task_bridge.stamp_bundle_approved(
-        str(target), "workstreams/WS-alpha-7/spec",
-    )
-    assert changed == [
-        "workstreams/WS-alpha-7/spec/00-charter.md",
-        "workstreams/WS-alpha-7/spec/10-requirements.md",
-        "workstreams/WS-alpha-7/spec/15-behaviour-spec.md",
-        "workstreams/WS-alpha-7/spec/20-design.md",
-    ]
-
-    with pytest.raises(RuntimeError, match="не совпадает"):
-        task_bridge.stamp_bundle_approved(
-            str(target), "workstreams/WS-alpha-7/spec",
-        )
-    with pytest.raises(RuntimeError, match=r"--legacy-bundle=3\|4"):
-        task_bridge.stamp_bundle_approved(
-            str(target), "workstreams/WS-alpha-7/spec",
-        )
-
-
 def test_legacy_flag_requires_value() -> None:
     with pytest.raises(SystemExit):
         task_bridge.main(["--run-id", "r-x", "--legacy-bundle"])
@@ -916,23 +817,6 @@ def _target_legacy(tmp_path: Path) -> Path:
     (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
     _approve_bundle(target, 3)
     return target
-
-
-def test_stamp_bundle_without_design_refuses_without_legacy_flag(
-    tmp_path: Path,
-) -> None:
-    """Step 1(а): 3-узловой бандл без флага ⇒ RuntimeError, а не сырой
-    traceback от `read_text` — текст называет файл и обе процедуры
-    (доавторить design; --legacy-bundle)."""
-    target = _target_legacy(tmp_path)
-    with pytest.raises(RuntimeError) as exc_info:
-        task_bridge.stamp_bundle_approved(
-            str(target), "workstreams/WS-alpha-7/spec",
-        )
-    message = str(exc_info.value)
-    assert "20-design.md" in message
-    assert "design" in message.lower()
-    assert "--legacy-bundle" in message
 
 
 def test_conform_legacy_normalizes_to_behaviour_spec_no_design_read(
@@ -1197,6 +1081,27 @@ def test_conform_refuses_draft(tmp_path: Path) -> None:
         )
 
 
+def _conform_state(target: Path, monkeypatch):
+    """Леджер прогона для `--conform-approve`.
+
+    Путь нормализации тоже доставка, и гейт §I12 стоит на нём тоже —
+    значит ему нужен леджер прогона: судьба волны пишется туда.
+    """
+    from governance import run_state as rs
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", target.parent / "runs")
+    state = rs.new_run(
+        subject="s", repo="alpha", repo_slug="owner/alpha",
+        ws_id="WS-alpha-7", target_dir=str(target),
+        bundle_dir="workstreams/WS-alpha-7/spec", profile=None,
+        run_id="r-conform",
+    )
+    state.status = "completed"
+    state.base_ref = "master"
+    rs.save(state)
+    return state
+
+
 class _ConformOps(_StubOps):
     def __init__(self, existing_pr: int | None = None) -> None:
         super().__init__()
@@ -1220,16 +1125,13 @@ def _approved_tasks(target: Path) -> None:
     )
 
 
-def test_deliver_conform_opens_pr(tmp_path: Path) -> None:
+def test_deliver_conform_opens_pr(tmp_path: Path, monkeypatch) -> None:
     target = _target(tmp_path)
     _approved_tasks(target)
     ops = _ConformOps()
     pr = task_bridge.deliver_conform(
-        target_dir=str(target),
-        repo_slug="owner/alpha",
-        ws_id="WS-alpha-7",
-        bundle_dir="workstreams/WS-alpha-7/spec",
-        ops=ops,
+        _conform_state(target, monkeypatch),
+        ops,
     )
     assert pr == 77
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
@@ -1237,7 +1139,9 @@ def test_deliver_conform_opens_pr(tmp_path: Path) -> None:
     assert ("push_branch", "spec/WS-alpha-7-tasks-approve") in ops.calls
 
 
-def test_deliver_conform_rerun_updates_existing_pr(tmp_path: Path) -> None:
+def test_deliver_conform_rerun_updates_existing_pr(
+    tmp_path: Path, monkeypatch
+) -> None:
     """Приёмка PR #117, круги 1–2: при открытом PR ветки второй PR не
     создаётся, но свежий незакоммиченный approve-штамп ДОСТАВЛЯЕТСЯ —
     нормализация, коммит и push идут в ту же ветку."""
@@ -1245,11 +1149,8 @@ def test_deliver_conform_rerun_updates_existing_pr(tmp_path: Path) -> None:
     _approved_tasks(target)
     ops = _ConformOps(existing_pr=88)
     pr = task_bridge.deliver_conform(
-        target_dir=str(target),
-        repo_slug="owner/alpha",
-        ws_id="WS-alpha-7",
-        bundle_dir="workstreams/WS-alpha-7/spec",
-        ops=ops,
+        _conform_state(target, monkeypatch),
+        ops,
     )
     assert pr == 88
     names = [c[0] for c in ops.calls]
@@ -1262,7 +1163,7 @@ def test_deliver_conform_rerun_updates_existing_pr(tmp_path: Path) -> None:
 
 
 def test_deliver_conform_legacy_mismatch_refuses_before_ops(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
     """Находка 1 финального ревью: `--legacy-bundle` с несовпадающим
     фактическим составом отказывает RuntimeError'ом по составу И до
@@ -1273,11 +1174,8 @@ def test_deliver_conform_legacy_mismatch_refuses_before_ops(
     ops = _ConformOps()
     with pytest.raises(RuntimeError, match="не совпадает"):
         task_bridge.deliver_conform(
-            target_dir=str(target),
-            repo_slug="owner/alpha",
-            ws_id="WS-alpha-7",
-            bundle_dir="workstreams/WS-alpha-7/spec",
-            ops=ops,
+            _conform_state(target, monkeypatch),
+            ops,
             legacy_bundle=3,
         )
     assert not any(c[0] == "find_pr" for c in ops.calls)
@@ -2355,6 +2253,8 @@ def test_gate_refusal_on_unresolved_is_not_a_debt(
     before = _ledger_bytes()
 
     class _Blind(_ReconOps):
+        """Base не читается вовсе — ровно этого исхода и требует тест."""
+
         def show_file(self, target_dir: str, ref: str, path: str):
             return None
 
@@ -2578,7 +2478,9 @@ def test_deliver_for_run_reconciled_pr_records_anchor_from_head(
             # не тот ref, прод получил бы None и молча ушёл в §6.
             self.shown.append((ref, path))
             if ref != "head-91":
-                return None
+                # Гейт §I12 читает узлы в base, и его поход обязателен;
+                # сверка ref'а остаётся предметом теста для head-коммита.
+                return _bundle_from_tree(target_dir, path)
             return (Path(target_dir) / path).read_text(encoding="utf-8")
 
     ops = _HeadOps()
@@ -2589,10 +2491,14 @@ def test_deliver_for_run_reconciled_pr_records_anchor_from_head(
     assert ops.asked == [
         ("head-91", "workstreams/WS-alpha-7/spec/30-decomposition.md")
     ]
-    assert ops.shown == [
+    # Реконсиляция читает бандл в ГОЛОВЕ PR — там лежит доставленное
+    # содержание. Походы гейта в base идут тем же примитивом и в этот
+    # перечень не входят: у них другой ref, и спрашивают они другое.
+    assert [pair for pair in ops.shown if pair[0] == "head-91"] == [
         ("head-91", f"workstreams/WS-alpha-7/spec/{fname}")
         for fname, _ in task_bridge._BUNDLE_DAG
     ]
+    assert any(ref == "master" for ref, _ in ops.shown), "гейт читал base"
     assert rs.load("r-recon").ops["tasks-deliver"] == {
         "status": "completed", "pr": 91, "anchor": "блоб-анкера-из-PR",
         "content_anchor": expected_content,
@@ -3590,11 +3496,18 @@ def _stamp_base_as_previous_delivery(
 def _apply_correction_to_anchor(
     state, anchor: str = "30-decomposition.md"
 ) -> None:
-    """Correction-PR: правит ТЕЛО анкера, frontmatter не трогает.
+    """Correction правит ТЕЛО анкера, затем человек узел ПЕРЕОДОБРЯЕТ.
 
-    Сброса `status` в draft тут нет намеренно — этот репо его нигде не
-    требует и не выполняет, и именно поэтому §I7 упирается в узел,
-    который уже approved."""
+    Второй шаг обязателен, и это следствие катовера: правка тела
+    `approved`-узла разводит его `approved_content_hash`, гейт §I12 такой
+    DAG не пропускает, и до переиздания дело не доходит вовсе. Пока
+    доставка сама штамповала, шаг был не нужен — она же и легализовала
+    правку задним числом; теперь одобряет человек.
+
+    Фикстура кладёт РЕЗУЛЬТАТ этого пути: те же байты, что оставил бы
+    `--approve-node` с мержем candidate-PR (сам путь проверяется в
+    `test_governance_approve_node.py`).
+    """
     path = Path(state.target_dir) / state.bundle_dir / anchor
     text = path.read_text(encoding="utf-8")
     assert "Проза предмета." in text
@@ -3602,6 +3515,7 @@ def _apply_correction_to_anchor(
         text.replace("Проза предмета.", "Проза предмета (correction)."),
         encoding="utf-8",
     )
+    _approve_bundle(Path(state.target_dir))
 
 
 def _anchor_meta(state, anchor: str = "30-decomposition.md") -> dict:
@@ -3640,62 +3554,6 @@ def test_supersede_restamp_keeps_node_version(tmp_path, monkeypatch):
     before = _anchor_meta(state)["version"]
     tb.deliver_superseded(state, ops)
     assert _anchor_meta(state)["version"] == before
-
-
-def test_supersede_pr_body_names_correction_pr(tmp_path, monkeypatch):
-    """Тело переизданного PR называет источником подписи correction-PR.
-
-    Формулировка обычной доставки («mergedBy бандл-PR») на переиздании
-    ложна ровно так же, как была ложна сама подпись."""
-    from governance import task_bridge as tb
-
-    state, ops = _supersede_over_stamped_base(tmp_path, monkeypatch)
-    tb.deliver_superseded(state, ops)
-    assert "mergedBy correction-PR" in ops.pr_body
-    assert "mergedBy бандл-PR" not in ops.pr_body
-
-
-def test_supersede_legacy_bundle_uses_its_own_dag(tmp_path, monkeypatch):
-    """Переиздание ЛЕГАСИ-бандла: `--legacy-bundle=5` определяет активный DAG.
-
-    Весь легаси-путь переиздания был непроверенным кодом — ни один тест не
-    звал `deliver_superseded` с `legacy_bundle != None` (F-11, мутация
-    M60). Вместе с F-10 это значило: и флаг не доказан доходящим, и путь
-    за флагом не доказан работающим.
-
-    Бандл здесь — эры до раскатки acceptance (00/10/15/20/30), и §I8
-    выводит его состав из каталога и якоря доставленной спеки. На мутанте
-    активным становится полный шестиузловой DAG, он с выведенным не
-    сходится, и переиздание отказывает «другая доставка»."""
-    from governance import run_state as rs
-    from governance import task_bridge as tb
-
-    state = _recon_state(tmp_path, monkeypatch)
-    bundle = Path(state.target_dir) / state.bundle_dir
-    (bundle / "25-acceptance.md").unlink()
-    (bundle / "30-decomposition.md").write_text(
-        DECOMPOSITION_MD_LEGACY5, encoding="utf-8"
-    )
-    # Штамп v1 — ПОСЛЕ правки состава каталога и по легаси-DAG: базу
-    # переиздания оставляет вмерженный tasks-PR доставки v1.
-    _stamp_base_as_previous_delivery(state, legacy_bundle=5)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
-    rs.save(state)
-    ops = _SupersedeOps(prs=[_MERGED_PR])
-    assert tb.deliver_superseded(
-        state, ops, legacy_bundle=5
-    ) == tb.SupersedeResult("delivered", 77)
-    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
-    assert saved["dag"] == [[f, list(u)] for f, u in tb._BUNDLE_DAG_LEGACY5]
-    assert saved["dag_source"] == "derived_from_spec"
-    # Поиск провенанса §I7 идёт по файлам АКТИВНОГО DAG, а не по хардкоду
-    # и не по каталогу: спрошены ровно пять узлов легаси-эры, и
-    # 25-acceptance.md среди них нет — узла этой эры не существовало.
-    assert ops.touched == [
-        f"{state.bundle_dir}/{fname}"
-        for fname, _ in tb._BUNDLE_DAG_LEGACY5
-    ]
 
 
 def test_supersede_refreshes_base_before_reading_facts(
@@ -3884,13 +3742,14 @@ _REQUIREMENTS_REL = "workstreams/WS-alpha-7/spec/10-requirements.md"
 def _apply_correction_to_node(state, node: str) -> None:
     """Correction-PR правит ТЕЛО произвольного узла, frontmatter не трогает.
 
-    Тот же смысл, что у `_apply_correction_to_anchor`, но не для анкера:
-    поузловому §I7 нужен узел ВЫШЕ анкера — им проверяется, что
-    механическая перепиновка подпись не двигает."""
+    Тот же смысл, что у `_apply_correction_to_anchor`, включая обязательное
+    переодобрение после правки: гейт §I12 не пропускает DAG, в котором
+    собственные байты узла разошлись с подписанными."""
     path = Path(state.target_dir) / state.bundle_dir / node
     text = path.read_text(encoding="utf-8")
     assert text.endswith("\n")
     path.write_text(text + "\nПравка correction'а.\n", encoding="utf-8")
+    _approve_bundle(Path(state.target_dir))
 
 
 def _node_bytes(state) -> dict[str, bytes]:
@@ -4129,31 +3988,46 @@ def _base_after_v1(tmp_path: Path) -> str:
 def test_supersede_fail_closed_leaves_no_branch_commit_or_ledger_entry(
     tmp_path, monkeypatch
 ) -> None:
-    """Отказ §I7 наступает на ПРОСПЕКТИВНОМ штампе — следов не остаётся.
+    """Отказ гейта на пути ПЕРЕИЗДАНИЯ — без ветки, коммита, PR и записи.
 
-    Порядок §I2 ставит проспективный штамп ДО `_start_revision`, поэтому
-    `draft` вне `signed_nodes` роняет переиздание раньше ветки, коммита,
-    PR и записи в леджере. Съедь отказ внутрь `deliver()` — оператор
-    получил бы ту же диагностику, но с оставленной веткой и started-
-    ревизией, которую пришлось бы разбирать реконсиляцией."""
+    Прежде здесь отказывал проспективный штамп (§I7): он стоял до
+    `_start_revision`, и `draft`-узел вне `signed_nodes` ронял переиздание
+    раньше эффектов. Штампа нет, но требование к порядку осталось тем же и
+    теперь его держит гейт §I12 — он стоит после §I5 и до записи ревизии.
+
+    Съедь отказ внутрь `deliver()` — оператор получил бы ту же диагностику,
+    но с оставленной веткой и `started`-ревизией, которую пришлось бы
+    разбирать реконсиляцией.
+
+    Пара к `..._noop_reachable_...`: там апстрим НЕ менялся, и тот же
+    долговой узел даёт бесследный no-op, потому что §I5 стоит выше гейта.
+    Вдвоём они и держат порядок двух проверок.
+    """
     from governance import run_state as rs
     from governance import task_bridge as tb
 
     state = _supersede_state(tmp_path, monkeypatch)
-    # Correction (#403) трогал только анкер; charter он не касался, а тот
-    # лежит `draft` — сохранять там нечего.
+    # Содержание апстрима изменилось (иначе сработал бы §I5), а один узел
+    # остался в долгу — переодобрить его человек не успел.
+    _apply_correction_to_anchor(state)
     _set_node(state.target_dir, "00-charter.md", status="draft")
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
                                   "anchor": "СТАРЫЙ"}
     rs.save(state)
+    before = _ledger_bytes()
     ops = _SupersedeOps(prs=[_MERGED_PR])
-    with pytest.raises(RuntimeError, match="00-charter.md"):
+
+    with pytest.raises(RuntimeError, match="не одобрен целиком") as failure:
         tb.deliver_superseded(state, ops)
+    assert "00-charter.md" in str(failure.value) or "charter" in str(
+        failure.value
+    )
     assert not any(
         call[0] in ("ensure_branch", "commit_paths", "push_branch",
                     "create_draft_pr")
         for call in ops.calls
     )
+    assert _ledger_bytes() == before, "леджер побайтово прежний"
     assert "tasks-deliver-v2" not in rs.load("r-recon").ops
 
 
@@ -4240,45 +4114,6 @@ def _supersede_with_correction_touching_requirements(
         **ops_kw,
     }
     return state, _SupersedeOps(**kw)
-
-
-def test_supersede_mechanical_repin_does_not_change_signature(
-    tmp_path, monkeypatch
-):
-    """Перепиновка downstream-узла — не событие approve.
-
-    behaviour-spec correction-PR не менял, но его пин на requirements
-    сдвинулся (у requirements сменилась подпись ⇒ сменились байты).
-    Байты узла обязаны измениться, подпись — нет: иначе поузловое правило
-    вырождается обратно в bundle-wide, только через каскад пинов."""
-    from governance import task_bridge as tb
-
-    state, ops = _supersede_with_correction_touching_requirements(
-        tmp_path, monkeypatch
-    )
-    before = _node_bytes(state)
-    tb.deliver_superseded(state, ops)
-    after = _node_bytes(state)
-    beh = _anchor_meta(state, "15-behaviour-spec.md")
-    assert after["15-behaviour-spec.md"] != before["15-behaviour-spec.md"]
-    assert beh["upstream_hashes"]["requirements"] != task_bridge.blob_sha1(
-        before["10-requirements.md"].decode("utf-8")
-    )
-    assert (beh["approved_by"], beh["approved_at"]) == (
-        _PREV_MERGER, _PREV_MERGED_AT
-    )
-    # То же и у ТЕРМИНАЛЬНОГО узла — а он и есть предмет: correction его
-    # не касался, перепиновка каскадом до него дошла (байты другие), но
-    # подпись осталась прежней. Пока §I7 требовал от correction-PR
-    # менять анкер, этого состояния просто не существовало.
-    anchor = _anchor_meta(state)
-    assert after["30-decomposition.md"] != before["30-decomposition.md"]
-    assert (anchor["approved_by"], anchor["approved_at"]) == (
-        _PREV_MERGER, _PREV_MERGED_AT
-    )
-    # Узел, у которого не менялся ни он сам, ни его апстрим, — побайтово
-    # прежний: перештамп не расползается по бандлу вовсе.
-    assert after["00-charter.md"] == before["00-charter.md"]
 
 
 def test_supersede_after_merged_revision_is_noop_again(tmp_path, monkeypatch):
@@ -5071,7 +4906,7 @@ def test_cli_supersede_calls_deliver_superseded(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(tb, "deliver_superseded", _fake)
     monkeypatch.setattr(tb, "RealOps", lambda: object())
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
-    assert called["args"] == ("r-recon", None, None, None)
+    assert called["args"] == ("r-recon", None, None)
     assert "переизданная tasks-спека доставлена: PR #77" in (
         capsys.readouterr().out
     )
@@ -5104,7 +4939,7 @@ def test_cli_supersede_passes_flags_through(tmp_path, monkeypatch, capsys):
         "--run-id", "r-recon", "--supersede",
         "--legacy-bundle", "5",
     ]) == 0
-    assert called["args"] == ("r-recon", 5, 500, None)
+    assert called["args"] == ("r-recon", 5, None)
 
 
 def test_cli_supersede_noop_is_success(tmp_path, monkeypatch, capsys):
@@ -6919,7 +6754,10 @@ class _CarryOps(_SupersedeOps):
     def show_file(self, target_dir, ref, path):
         self.calls.append(("show_file", ref, path))
         if (ref, path) != ("base-sha-1", _SPEC_REL):
-            return None
+            # Узлы бандла отдаются из дерева: их читает гейт §I12, и его
+            # поход в base обязателен. Сверка ref'а остаётся для СПЕКИ —
+            # именно она отвечает на вопрос теста.
+            return _bundle_from_tree(target_dir, path)
         return self.delivered
 
 
@@ -6995,7 +6833,7 @@ class _LoudReconOps(_ReconOps):
     """`_ReconOps`, у которого `show_file` ГРОМКИЙ: он и пишется в calls, и
     отдаёт исполненную спеку.
 
-    Молчаливый `None` родителя делал бы утверждение «обычная доставка в
+    Молчаливый `None` родителя делал бы утверждение «за спекой доставка в
     base не ходит» невыполнимым в обе стороны: вызов не виден, а его
     результат пуст, — и лишний поход остался бы незамеченным."""
 
@@ -7005,7 +6843,11 @@ class _LoudReconOps(_ReconOps):
 
     def show_file(self, target_dir, ref, path):
         self.calls.append(("show_file", ref, path))
-        return self.delivered
+        # Узлы бандла отдаются как есть: их читает ГЕЙТ, и его поход в base
+        # обязателен. Громким остаётся только спрос на саму спеку — именно
+        # он и означал бы перенос состояния.
+        from_tree = _bundle_from_tree(target_dir, path)
+        return from_tree if from_tree is not None else self.delivered
 
 
 def test_deliver_for_run_carries_nothing(tmp_path, monkeypatch):
@@ -7027,7 +6869,12 @@ def test_deliver_for_run_carries_nothing(tmp_path, monkeypatch):
         Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
     ).read_text(encoding="utf-8")
     assert "✅" not in text and "- [x]" not in text
-    assert not [c for c in ops.calls if c[0] == "show_file"]
+    # За СПЕКОЙ в base доставка не ходит — переносить нечего. Узлы бандла
+    # она читает, и это другой поход: его делает гейт §I12, проверяя
+    # одобренность, а не состояние исполнения.
+    asked = [c[2] for c in ops.calls if c[0] == "show_file"]
+    assert "spec/WS-alpha-7-tasks.md" not in asked
+    assert asked, "гейт в base всё-таки ходил"
 
 
 def test_supersede_resume_reproduces_the_same_bytes(tmp_path, monkeypatch):
@@ -7064,3 +6911,103 @@ def test_supersede_resume_reproduces_the_same_bytes(tmp_path, monkeypatch):
         blob_first
     )
     assert ("show_file", "base-sha-1", _SPEC_REL) in again.calls
+
+
+# --- Гвард состава активного DAG ----------------------------------------
+#
+# Прежде эти свойства проверялись через штамп, который звал гвард первым
+# делом. Штампа нет, гвард остался — его зовут `deliver` и
+# `conform_approved`; сменилась точка входа, не свойство. Четвёртый тест
+# той же группы (`_prospective_anchor` на неполном бандле) удалён: его
+# предметом была теневая копия заявленного подмножества, а копии больше
+# нет — anchor читает один файл, который либо есть, либо нет.
+
+
+def _composition_bundle(tmp_path: Path, *names: str) -> str:
+    """Каталог бандла РОВНО из названных узлов."""
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    bodies = {
+        "00-charter.md": CHARTER_MD,
+        "10-requirements.md": REQUIREMENTS_MD,
+        "15-behaviour-spec.md": BEHAVIOUR_MD,
+        "20-design.md": DESIGN_MD,
+        "25-acceptance.md": ACCEPTANCE_MD,
+        "30-decomposition.md": DECOMPOSITION_MD,
+    }
+    for name in names:
+        (bundle / name).write_text(bodies[name])
+    return str(target)
+
+
+def _composition(target: str, legacy_bundle: int | None) -> None:
+    task_bridge._check_bundle_composition(
+        target, "workstreams/WS-alpha-7/spec",
+        task_bridge._dag_for(legacy_bundle),
+    )
+
+
+def test_legacy_5_exact_composition(tmp_path: Path) -> None:
+    """Каталог из 5 узлов (эра ДО раскатки acceptance): точно `=5`.
+
+    Гвард сверяет МНОЖЕСТВО имён, а не префикс и не счёт: `=4` отказывает
+    из-за лишнего `30-decomposition.md`, полный DAG — из-за недостающего
+    `25-acceptance.md`, и тот же каталог с ДОбавленным acceptance
+    отказывает уже на `=5` (запрет «по самому длинному существующему», §4).
+    """
+    target = _composition_bundle(
+        tmp_path, "00-charter.md", "10-requirements.md",
+        "15-behaviour-spec.md", "20-design.md", "30-decomposition.md",
+    )
+    _composition(target, 5)
+
+    with pytest.raises(RuntimeError, match="не совпадает"):
+        _composition(target, 4)
+    with pytest.raises(RuntimeError) as failure:
+        _composition(target, None)
+    message = str(failure.value)
+    assert "25-acceptance.md" in message
+    assert "--legacy-bundle=3|4|5" in message
+
+    (Path(target) / "workstreams/WS-alpha-7/spec/25-acceptance.md").write_text(
+        ACCEPTANCE_MD
+    )
+    with pytest.raises(RuntimeError, match="не совпадает"):
+        _composition(target, 5)
+
+
+def test_legacy_bundle_exact_composition(tmp_path: Path) -> None:
+    """Каталог из 4 узлов: точно `=4`, а `=3` и полный DAG отказывают."""
+    target = _composition_bundle(
+        tmp_path, "00-charter.md", "10-requirements.md",
+        "15-behaviour-spec.md", "20-design.md",
+    )
+    _composition(target, 4)
+
+    with pytest.raises(RuntimeError, match="не совпадает"):
+        _composition(target, 3)
+    with pytest.raises(RuntimeError, match=r"--legacy-bundle=3\|4"):
+        _composition(target, None)
+
+
+def test_composition_without_design_refuses_without_legacy_flag(
+    tmp_path: Path,
+) -> None:
+    """Трёхузловой бандл без `--legacy-bundle` — отказ с процедурой.
+
+    Забытый флаг обязан давать диагностику, а не сырой `FileNotFoundError`
+    у первого же `read_text`: `main` ловит только `RuntimeError`, и без
+    гварда оператор получал бы трейсбек.
+    """
+    target = _composition_bundle(
+        tmp_path, "00-charter.md", "10-requirements.md",
+        "15-behaviour-spec.md",
+    )
+    _composition(target, 3)
+
+    with pytest.raises(RuntimeError) as failure:
+        _composition(target, None)
+    message = str(failure.value)
+    assert "20-design.md" in message
+    assert "--legacy-bundle=3|4|5" in message
