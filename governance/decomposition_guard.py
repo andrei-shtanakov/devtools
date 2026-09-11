@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 
 # Маркер-подстрока non-fatal находки формы «осиротевший/опечатанный путь
 # в verifies» (round 7 ревью PR #161, минор) — единственная точка истины
@@ -136,6 +137,42 @@ _WAIVER_RE = re.compile(
 )
 _WAIVER_KEY_RE = re.compile(r"^tdd_waiver:", re.M)
 
+#: Санкция — ЗАКРЫТАЯ грамматика, а не свободный текст: иначе поле есть
+#: украшение, и `sanction: потому-что-можно` прошло бы наравне с
+#: настоящим решением. Две формы, обе машиночитаемы: датированное решение
+#: владельца и ссылка на PR/issue репозитория.
+_SANCTION_BATCH_RE = re.compile(r"^batch-approve-(\d{4}-\d{2}-\d{2})$")
+_SANCTION_REF_RE = re.compile(r"^[A-Za-z0-9][\w.-]*#\d+$")
+SANCTION_FORMS = "batch-approve-<YYYY-MM-DD> либо <repo>#<номер>"
+
+
+def _sanction_is_valid(sanction: str) -> bool:
+    """Санкция соответствует закрытой грамматике (спека §3a).
+
+    Дата проверяется КАЛЕНДАРНО, а не только по виду: `2026-13-45` —
+    строка нужной формы, но не дата, и принять её значило бы проверить
+    форму формы. `date.fromisoformat` отвергает и несуществующий месяц, и
+    неполные `2026-9-9`.
+
+    Существование того, на что ссылка указывает, НЕ проверяется, и это
+    осознанный отказ: модуль — чистые функции над строками, его зовут и
+    гейт, и мост, а сеть внутри сделала бы отказ гейта зависящим от
+    доступности форджа — свёрнутый исход начал бы закрывать дверь. Форма
+    отсекает опечатку и произвол; за то, что названное решение принято,
+    отвечает владелец, и подпись под санкцией адресна.
+
+    Дата в будущем тоже не отвергается: «сегодня» внутри чистой функции
+    сделало бы результат гварда зависящим от момента запуска.
+    """
+    batch = _SANCTION_BATCH_RE.match(sanction)
+    if batch is not None:
+        try:
+            date.fromisoformat(batch.group(1))
+        except ValueError:
+            return False
+        return True
+    return _SANCTION_REF_RE.match(sanction) is not None
+
 
 @dataclass(frozen=True)
 class DtWaiver:
@@ -244,24 +281,33 @@ def _waiver_field(
             )
         return None, findings
     node_class, sanction = matches[0]
+    # Четыре условия проверяются ВСЕ, а не до первого отказа: у гейта
+    # правило «показывает всё сразу, не по одной», и ранний возврат
+    # прятал бы вторую причину за первой — оператор чинил бы объявление
+    # кругами, по одной находке за заход. Порядок в перечне ни на что не
+    # влияет ровно потому, что до конца доходят все.
     if node_class not in WAIVER_CLASSES:
         findings.append(
             f"{dt_id}: класс waiver'а {node_class!r} не известен контракту "
             f"(допустимы {', '.join(WAIVER_CLASSES)})"
         )
-        return None, findings
+    if not _sanction_is_valid(sanction):
+        findings.append(
+            f"{dt_id}: sanction {sanction!r} не соответствует форме — "
+            f"допустимы {SANCTION_FORMS}"
+        )
     if dt_type == "verify":
         findings.append(
             f"{dt_id}: tdd_waiver запрещён при type: verify — у задачи "
             "проверки свой режим исполнения (verify_first)"
         )
-        return None, findings
     if not depends_on:
         findings.append(
             f"{dt_id}: tdd_waiver объявлен у задачи без зависимостей — "
             "класс требует, чтобы поведение было доставлено зависимостями, "
             "а доставлять его нечем"
         )
+    if findings:
         return None, findings
     return DtWaiver(node_class=node_class, sanction=sanction), findings
 

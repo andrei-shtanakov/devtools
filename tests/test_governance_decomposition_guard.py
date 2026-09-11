@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from governance.decomposition_guard import DtTask, parse_dt_tasks
 
 DT_OK = (
@@ -132,6 +134,82 @@ def test_waiver_declared_twice_is_a_finding() -> None:
     assert any(
         "DT-02" in f and "tdd_waiver" in f for f in findings
     ), f"второе объявление принято: {findings}"
+
+
+@pytest.mark.parametrize(
+    "sanction",
+    [
+        "потому-что-можно",
+        "batch-approve",
+        "batch-approve-2026-13-45",
+        "batch-approve-2026-9-9",
+        "spec-runner#",
+        "#425",
+        "spec-runner#abc",
+    ],
+    ids=[
+        "свободный-текст", "без-даты", "несуществующая-дата",
+        "не-ISO", "без-номера", "без-репо", "номер-не-число",
+    ],
+)
+def test_sanction_outside_the_closed_grammar_is_refused(sanction: str) -> None:
+    """`sanction:` — закрытая грамматика, иначе поле есть украшение.
+
+    Свободный текст пропускал бы `sanction: потому что можно` наравне с
+    настоящим решением, и машиночитаемость объявления кончалась бы на
+    классе. Календарность даты проверяется тоже: `2026-13-45` — строка
+    нужного ВИДА, но не дата, и принять её значило бы проверить форму
+    формы, а не форму.
+    """
+    _, findings = parse_dt_tasks(
+        _waived(f"tdd_waiver: characterisation · sanction: {sanction}")
+    )
+    assert any(
+        "DT-02" in f and "sanction" in f for f in findings
+    ), f"санкция {sanction!r} принята: {findings}"
+
+
+@pytest.mark.parametrize(
+    "sanction",
+    ["batch-approve-2026-09-09", "spec-runner#425", "devtools#1"],
+    ids=["датированное-решение", "ссылка-на-PR", "однозначный-номер"],
+)
+def test_sanction_inside_the_closed_grammar_is_accepted(sanction: str) -> None:
+    """Обе допустимые формы принимаются — и это вторая половина проверки.
+
+    Без неё грамматика, отвергающая ВСЁ, выглядела бы исправной: «не
+    принял мусор» и «не принимает ничего» на одних отказных тестах
+    неразличимы.
+    """
+    tasks, findings = parse_dt_tasks(
+        _waived(f"tdd_waiver: characterisation · sanction: {sanction}")
+    )
+    assert findings == []
+    assert tasks[1].waiver is not None
+    assert tasks[1].waiver.sanction == sanction
+
+
+def test_all_waiver_findings_are_reported_at_once() -> None:
+    """Причины не прячутся одна за другой: гейт показывает всё сразу.
+
+    Объявление нарушает четыре условия разом — неизвестный класс, кривая
+    санкция, `type: verify` и отсутствие зависимостей. Ранний возврат
+    после первой находки заставил бы оператора чинить объявление
+    кругами, по одной за заход, и каждый круг выглядел бы как новый
+    дефект.
+    """
+    _, findings = parse_dt_tasks(
+        _waived(
+            "tdd_waiver: выдуманный · sanction: потому-что-можно",
+            dt_type="verify",
+            depends="[]",
+        )
+    )
+    mine = [f for f in findings if "DT-02" in f]
+    assert len(mine) == 4, f"названы не все причины: {findings}"
+    joined = "\n".join(mine)
+    for expected in ("класс", "sanction", "verify", "зависим"):
+        assert expected in joined, f"причина {expected!r} не названа"
 
 
 def test_declared_waiver_is_parsed_into_the_task() -> None:
