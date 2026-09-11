@@ -3755,6 +3755,114 @@ def test_supersede_unavailable_without_content_anchor(
     assert saved["comparison"] == "unavailable"
 
 
+def _migration_debt(state) -> None:
+    """Снять `approved_content_hash` со всех узлов — миграционный долг.
+
+    Ровно то состояние, в котором лежит КАЖДЫЙ воркстрим, одобренный до
+    2026-09-10: узлы `approved`, подпись на месте, пины сходятся, а
+    собственные байты непроверяемы — поля, которое их утверждает, ещё не
+    существовало.
+    """
+    from governance import task_bridge as tb
+
+    base = Path(state.target_dir) / state.bundle_dir
+    for fname, _ in tb._dag_for(None):
+        path = base / fname
+        meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+        meta.pop(node_approval.SELF_HASH_KEY, None)
+        path.write_text(join_frontmatter(meta, body), encoding="utf-8")
+
+
+def _bundle_bytes(state) -> dict:
+    from governance import task_bridge as tb
+
+    base = Path(state.target_dir) / state.bundle_dir
+    return {
+        fname: (base / fname).read_bytes() for fname, _ in tb._dag_for(None)
+    }
+
+
+def test_legacy_v1_with_migration_debt_refuses_at_the_gate(
+    tmp_path, monkeypatch, capsys
+):
+    """Маршрут легаси после катовера, первый шаг: RC ≠ 0, а не no-op.
+
+    Решение владельца 2026-09-11 сняло обещание RC 0 для легаси, и сняло
+    не произволом: записанный `content_anchor` такого воркстрима — v1,
+    сравнить его с v2 нечем, §I5 промолчал, и гейт §I12 оказался первой
+    проверкой, способной ответить. Прежняя строка контракта обещала здесь
+    бесследный no-op и была НЕДОСТИЖИМА — попасть в неё можно было только
+    сравнением, которого не бывает.
+
+    Три утверждения, и каждое про свой класс ошибки:
+
+    1. отказ пришёл от гейта, без ветки, ревизии и PR;
+    2. байты бандла дословно прежние — автодопись
+       `approved_content_hash` запрещена как ретроспективная легализация
+       байтов без approval-события, и «починить» долг молча механика не
+       вправе;
+    3. текст не говорит «апстрим изменился» и не говорит «не менялся».
+       Ни того, ни другого никто не устанавливал; сказано ровно то, что
+       есть, — сверки не было и почему.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    _migration_debt(state)
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5,
+        # величина эпохи v1: голый хэш, без префикса
+        "content_anchor": "0" * 40,
+    }
+    rs.save(state)
+    before_ledger, before_bundle = _ledger_bytes(), _bundle_bytes(state)
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+
+    with pytest.raises(RuntimeError, match="не одобрен целиком") as failure:
+        tb.deliver_superseded(state, ops)
+
+    assert "§I12" in str(failure.value)
+    assert not _effects(ops), "ни ветки, ни ревизии, ни PR"
+    assert _ledger_bytes() == before_ledger, "леджер не тронут"
+    assert _bundle_bytes(state) == before_bundle, "байты бандла не тронуты"
+    out = capsys.readouterr().out
+    assert "сверка §I5 не производилась" in out
+    assert "эпохи v1" in out and "текущая — v2" in out
+    assert "изменил" not in out, "несопоставимость — не изменение"
+    assert "не менялся" not in out, "и не равенство"
+
+
+def test_legacy_v1_after_full_approval_delivers_once_and_writes_v2(
+    tmp_path, monkeypatch
+):
+    """Тот же воркстрим, последний шаг маршрута: одноразовая доставка.
+
+    Долг погашен одобрением DAG (фикстура несёт пост-состояние §I12),
+    и теперь гейт проходит. Сверки по-прежнему не было — запись всё ещё
+    v1, — поэтому ревизия несёт `comparison: unavailable`, но кладёт
+    baseline УЖЕ v2. Именно это и делает исход одноразовым ПО ЗАПИСИ:
+    следующий холостой запуск сравнит v2 с v2 и ответит доказуемым
+    бесследным no-op'ом, а не вечным `unavailable`.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "content_anchor": "0" * 40,
+    }
+    rs.save(state)
+
+    assert tb.deliver_superseded(
+        state, _SupersedeOps(prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("delivered", 77)
+
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["comparison"] == "unavailable"
+    assert saved["content_anchor"].startswith("v2:"), "baseline записан v2"
+
+
 def test_supersede_right_after_delivery_is_traceless_noop(
     tmp_path, monkeypatch
 ):
