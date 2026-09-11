@@ -778,10 +778,18 @@ def _content_anchor(
     Воркстрим такой эпохи переиздаётся один раз обычным путём и дальше
     живёт по общему правилу; отсутствие записи по-прежнему даёт
     `comparison: unavailable` (§6), а не выдуманное равенство.
+
+    **Состав раньше суждения о составе** (минор третьего круга ревью
+    #191). `_canonical_dag_hash` читает файлы DAG напрямую, и на
+    забытом `--legacy-bundle` упирался в отсутствующий `25-acceptance.md`
+    голым `FileNotFoundError` — мимо `except RuntimeError` в `main`, то
+    есть трассировкой вместо процедуры. Гвард состава называет и файл, и
+    что делать; он же стоит первым у `--approve-node` и у
+    `--conform-approve`, и расходиться этим путям незачем.
     """
-    return _canonical_dag_hash(
-        target_dir, bundle_dir, _dag_for(legacy_bundle)
-    )
+    dag = _dag_for(legacy_bundle)
+    _check_bundle_composition(target_dir, bundle_dir, dag)
+    return _canonical_dag_hash(target_dir, bundle_dir, dag)
 
 
 def _prospective_anchor(
@@ -1488,8 +1496,19 @@ def _approved_dag_or_refuse(
     ровно в тот момент, когда о состоянии базы ничего не известно
     (fail-open, минор ревью #191, круг 2). Поэтому возврат — `str`, и
     отсутствие SHA терминально здесь.
+
+    **Состав раньше суждения о составе** (минор третьего круга ревью
+    #191) — тот же порядок, что у `--approve-node`. Гейт читает узлы
+    активного DAG в base, и на забытом `--legacy-bundle` файла просто
+    нет: `read_dag_state` честно отвечает «факт не установлен», а
+    диагностика зовёт ПОВТОРИТЬ вызов — повтор же не поможет никогда,
+    состав каталога от повторов не меняется. Гвард состава отвечает на
+    это первым и называет файл и процедуру; без него он оказывался
+    недостижим.
     """
-    verdict = read_dag_state(state, ops, _dag_for(legacy_bundle))
+    dag = _dag_for(legacy_bundle)
+    _check_bundle_composition(state.target_dir, state.bundle_dir, dag)
+    verdict = read_dag_state(state, ops, dag)
     if verdict.evidence is None:
         if verdict.unresolved:
             raise RuntimeError(

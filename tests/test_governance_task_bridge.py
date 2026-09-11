@@ -3863,6 +3863,129 @@ def test_legacy_v1_after_full_approval_delivers_once_and_writes_v2(
     assert saved["content_anchor"].startswith("v2:"), "baseline записан v2"
 
 
+def _legacy5_catalog(state) -> None:
+    """Каталог бандла эры до раскатки acceptance — без 25-acceptance.md."""
+    bundle = Path(state.target_dir) / state.bundle_dir
+    (bundle / "25-acceptance.md").unlink()
+    (bundle / "30-decomposition.md").write_text(
+        DECOMPOSITION_MD_LEGACY5, encoding="utf-8"
+    )
+
+
+def test_forgotten_legacy_flag_refuses_by_composition_not_by_the_gate(
+    tmp_path, monkeypatch
+):
+    """Состав раньше суждения о составе — на обоих путях доставки.
+
+    Минор третьего круга ревью #191. Гейт §I12 встал выше гварда состава,
+    и забытый `--legacy-bundle` начал выдаваться за «состояние не
+    установлено — повторите вызов»: узла нет в base, `read_dag_state`
+    честно отвечает «факт не установлен», а диагностика зовёт повторить.
+    Повтор не поможет НИКОГДА — состав каталога от повторов не меняется, —
+    и гвард, называвший файл и процедуру, стал недостижим.
+
+    У `--supersede` та же болезнь приходила ещё раньше и грубее:
+    `_content_anchor` читает файлы DAG напрямую и бросал голый
+    `FileNotFoundError` мимо `except RuntimeError` в `main`, то есть
+    трассировку вместо процедуры.
+
+    Оба пути проверяются одним тестом: разойдись они, «на одном починил» и
+    «починил» стали бы неразличимы.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _legacy5_catalog(state)
+    _stamp_base_as_previous_delivery(state, legacy_bundle=5)
+    # Предыдущая доставка записала ПОЛНЫЙ состав, поэтому сверка §I8
+    # проходит и вызов доходит до `_content_anchor` — того места, где
+    # раньше вылетал сырой FileNotFoundError.
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ",
+        "dag": [[f, list(u)] for f, u in tb._dag_for(None)],
+    }
+    rs.save(state)
+    before = _ledger_bytes()
+
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    with pytest.raises(RuntimeError, match="не совпадает с заявленным") as one:
+        tb.deliver_superseded(state, ops)  # --legacy-bundle забыт
+    assert "--legacy-bundle" in str(one.value), "названа процедура"
+    assert "повторите вызов" not in str(one.value), "повтор не поможет"
+    assert not _effects(ops)
+
+    # Путь первой доставки: раньше сюда прилетало «повторите вызов».
+    assert _ledger_bytes() == before, "переиздание не тронуло леджер"
+
+    del state.ops["tasks-deliver"]
+    rs.save(state)
+    before = _ledger_bytes()
+    plain = _ReconOps()
+    with pytest.raises(RuntimeError, match="не совпадает с заявленным") as two:
+        tb.deliver_for_run(state, plain)
+    assert "--legacy-bundle" in str(two.value)
+    assert "повторите вызов" not in str(two.value)
+    assert not _effects(plain)
+    assert _ledger_bytes() == before, "первая доставка не тронула леджер"
+
+
+def test_supersede_legacy_bundle_drives_the_whole_path(tmp_path, monkeypatch):
+    """Переиздание ЛЕГАСИ-бандла: `--legacy-bundle=5` определяет активный DAG.
+
+    Восстановление покрытия, утраченного при снятии штампа (major третьего
+    круга ревью #191). Прежний тест этой семьи нёс ДВА утверждения:
+    живое — «легаси-DAG определяет весь путь переиздания» — и мёртвое —
+    «поиск провенанса §I7 спрашивает ровно файлы этой эры». Провенанс ушёл
+    вместе со штампом, тест удалился целиком, и живое утверждение уехало с
+    мёртвым. Свойство при этом не только не исчезло, оно обросло НОВЫМ
+    потребителем: `legacy_bundle` идёт в `_dag_for`, `_content_anchor`,
+    гейт §I12, `_prospective_anchor`, `intent["dag"]` и `deliver()`.
+
+    Бандл здесь — эры до раскатки acceptance (00/10/15/20/30), и §I8
+    выводит его состав из каталога и якоря доставленной спеки.
+
+    Утверждений тоже два, и оба про ЖИВОЕ. Первое: записанный состав —
+    легаси-пятёрка. Второе заменяет мёртвую половину равноценной —
+    гейт §I12 читал в base РОВНО файлы легаси-эры: `25-acceptance.md`
+    среди них нет, потому что узла этой эры не существовало. На мутанте
+    `legacy_bundle → None` активным становится полный шестиузловой DAG,
+    и обе половины краснеют.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    bundle = Path(state.target_dir) / state.bundle_dir
+    (bundle / "25-acceptance.md").unlink()
+    (bundle / "30-decomposition.md").write_text(
+        DECOMPOSITION_MD_LEGACY5, encoding="utf-8"
+    )
+    # Одобрение — ПОСЛЕ правки состава каталога и по легаси-DAG: базу
+    # переиздания оставляет вмерженный tasks-PR доставки v1.
+    _stamp_base_as_previous_delivery(state, legacy_bundle=5)
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ",
+    }
+    rs.save(state)
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+
+    assert tb.deliver_superseded(
+        state, ops, legacy_bundle=5
+    ) == tb.SupersedeResult("delivered", 77)
+
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["dag"] == [[f, list(u)] for f, u in tb._BUNDLE_DAG_LEGACY5]
+    assert saved["dag_source"] == "derived_from_spec"
+    asked = [
+        c[2] for c in ops.calls
+        if c[0] == "show_file" and c[2].startswith(f"{state.bundle_dir}/")
+    ]
+    assert asked == [
+        f"{state.bundle_dir}/{fname}" for fname, _ in tb._BUNDLE_DAG_LEGACY5
+    ], "гейт §I12 читал ровно узлы легаси-эры"
+
+
 def test_supersede_right_after_delivery_is_traceless_noop(
     tmp_path, monkeypatch
 ):
