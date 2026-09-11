@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Literal, NamedTuple
 
 from governance import acceptance_guard, decomposition_guard, design_guard
+from governance.approve_node import approve_node
 # Состав DAG живёт в `bundle_dag` (переезд ради §I12: механика одобрения
 # спрашивает его, а импортировать мост нельзя — часть 3 сделает мост
 # потребителем гейта). Алиасы сохраняют прежние имена, поэтому ни один
@@ -3504,6 +3505,16 @@ def main(argv: list[str] | None = None) -> int:
         "лишний либо недостающий узел отказывает",
     )
     parser.add_argument(
+        "--approve-node", default=None, metavar="NODE-ID",
+        help="одобрение узла бандла — человеческий акт (§I12): вынести "
+             "узел активного DAG на одобрение candidate-PR-ом, а после "
+             "мержа этого PR человеком записать подпись финализирующим "
+             "PR-ом. Принимается ТОЛЬКО node-id активного DAG (не путь): "
+             "approve есть акт о позиции в графе, а не о файле на диске. "
+             "Повтор над честно одобренным узлом — бесследный no-op; "
+             "approved-узел с разошедшимися пинами — отказ",
+    )
+    parser.add_argument(
         "--supersede", action="store_true",
         help="переиздать tasks-спеку после correction'а апстрима: новая "
              "ветка spec/<ws-id>-tasks-v<N>, новый PR, отдельная ревизия в "
@@ -3537,6 +3548,23 @@ def main(argv: list[str] | None = None) -> int:
              "требует --reason",
     )
     args = parser.parse_args(argv)
+    others = {
+        "--supersede": args.supersede,
+        "--conform-approve": args.conform_approve,
+        "--abandon-revision": args.abandon_revision is not None,
+        "--replace-revision": args.replace_revision is not None,
+    }
+    if args.approve_node is not None and any(others.values()):
+        # Действие в прогоне ОДНО, и гвард тот же, что уже разводит между
+        # собой остальные флаги, — по той же причине: молчаливая победа
+        # одного решала бы за оператора, что он имел в виду. Одобрение
+        # узла к тому же ничего не доставляет, и съесть его доставкой
+        # значило бы выполнить не ту работу молча.
+        parser.error(
+            "--approve-node — отдельное действие: запускайте его "
+            "отдельным прогоном, не вместе с "
+            + ", ".join(name for name, used in others.items() if used)
+        )
     if args.abandon_revision is not None and args.supersede:
         # Спека этого сочетания не описывает, а прогон делает ОДНО
         # действие: молчаливая победа второго флага решала бы за
@@ -3620,6 +3648,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     ops = RealOps()
+    if args.approve_node is not None:
+        # Механика целиком в `approve_node`; здесь обвязка и диагностика.
+        # Подпись узла берётся из фактов мержа candidate-PR, а не из
+        # активного логина и не из аргумента: логин, который команда
+        # сообщает о себе сама, не проверяем никем (§I12).
+        try:
+            outcome = approve_node(
+                state, ops, args.approve_node,
+                legacy_bundle=args.legacy_bundle,
+            )
+        except RuntimeError as exc:
+            print(f"task_bridge: {exc}")
+            return 1
+        print(outcome.message)
+        return 0
     if args.abandon_revision is not None:
         # Тот же fail-closed-контур, что у --supersede ниже: у оператора
         # бывает опечатка в номере и бывает уже завершённая ревизия (§I4:
