@@ -1590,6 +1590,76 @@ def test_waived_dt_renders_standard_mode_and_carries_all_conditions() -> None:
     ]) == 1, "waiver принимается целиком — пункт один, а не пять"
 
 
+DT_TWO_WAIVED_MD = """\
+#### DT-01: Ядро · type: implement · owner: dev
+scenarios: [BEH-01]
+depends_on: []
+parallel_group: core
+
+Реализовать ядро.
+
+#### DT-02: Характеризация раз · type: implement · owner: qa
+scenarios: [BEH-02]
+depends_on: [DT-01]
+parallel_group: regression
+tdd_waiver: characterisation · sanction: batch-approve-2026-09-09
+
+Проза.
+
+#### DT-03: Характеризация два · type: implement · owner: qa
+scenarios: [BEH-03]
+depends_on: [DT-01]
+parallel_group: regression
+tdd_waiver: characterisation · sanction: batch-approve-2026-09-09
+
+Проза.
+"""
+
+
+def test_waiver_items_of_one_batch_sanction_survive_supersede() -> None:
+    """Пункт waiver'а уникален по построению — иначе `[x]` теряется.
+
+    Batch-санкция ПО ЗАМЫСЛУ покрывает несколько DT, поэтому класс и
+    санкция у них совпадают: совпадение штатно, а не краевой случай.
+    Без `dt_id` пункты выходили бы побайтово одинаковыми, перенос
+    состояния §I11 выбросил бы их как неуникальные с обеих сторон
+    (`marked & _unique(...)`), и при переиздании отметка терялась бы у
+    ВСЕХ — притом что `DONE` самой задачи переносится. Получалась бы
+    DONE-задача с неотмеченным waiver-пунктом, то есть потерянный
+    единственный durable-след условия про negative control: гейта на
+    него в spec-runner нет вовсе.
+
+    Фикстура с ОДНИМ waived DT этого не видит по построению — та же
+    слепота формы, что уже стоила нам круга.
+    """
+    scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(DT_TWO_WAIVED_MD)
+    assert findings == []
+    rendered = task_bridge.render_tasks_dt(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="workstreams/WS-x-1/spec/30-decomposition.md",
+        scenarios=scenarios,
+        dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00",
+        anchor_blob="ab" * 20,
+    )
+    items = [
+        line for line in rendered.splitlines()
+        if line.startswith("- [ ] TDD-waiver")
+    ]
+    assert len(items) == 2
+    assert len(set(items)) == 2, "пункты двух DT побайтово совпали"
+
+    # Оператор отметил оба пункта и довёл обе задачи; переиздание обязано
+    # перенести ОБЕ отметки, а не выбросить их как неуникальные.
+    delivered = rendered.replace("- [ ] TDD-waiver", "- [x] TDD-waiver")
+    carried = task_bridge._carry_execution_state(rendered, delivered)
+    assert carried.count("- [x] TDD-waiver") == 2, (
+        "отметка waiver-пункта потеряна при переиздании"
+    )
+
+
 def test_waived_task_points_its_source_at_the_declaration() -> None:
     """`Source:` ведёт на DT — то есть на само объявление.
 

@@ -530,6 +530,51 @@ def test_cross_group_dependency_must_cover_all_sinks() -> None:
     )
 
 
+def test_waiver_conditions_match_the_contract() -> None:
+    """Условия класса живут в ОДНОЙ редакции: спека и константа сверены.
+
+    Прецедент — `test_beh_binding_grammar_matches_task_bridge`: дубликат
+    запиновывается тестом, читающим обе стороны. Здесь предмет тот же и
+    цена выше: из `WAIVER_CONDITIONS` мост печатает пункт чек-листа, а
+    из прозы §3a владелец решает, давать ли санкцию, — разойдись они, и
+    человек санкционирует одно, а исполнитель подтверждает другое.
+
+    Расхождение уже случилось («обязан иметь» против «имеет») и было
+    невидимо: прозу никто не исполняет. Второе место, где условия живут,
+    — не дубликат для читателя, а второй вычислитель одного факта.
+    """
+    import re
+    from pathlib import Path
+
+    from governance.decomposition_guard import WAIVER_CONDITIONS
+
+    spec = (
+        Path(__file__).resolve().parents[1]
+        / "docs/superpowers/specs"
+        / "2026-09-05-decomposition-node-conveyor-design.md"
+    ).read_text(encoding="utf-8")
+    block = spec.split("**Условия класса `characterisation`**", 1)
+    assert len(block) == 2, "раздел условий в спеке не найден"
+    # Берётся ИМЕННО абзац-перечень, а не всё до следующего заголовка:
+    # хвостовая проза за списком иначе прилипает к последнему пункту
+    # через `\Z`, и тест краснеет на собственном разборе, а не на
+    # расхождении. Абзац опознаётся по началу с «1. ».
+    body = block[1].split("**Что делает мост.**", 1)[0]
+    listing = next(
+        para for para in body.split("\n\n") if para.lstrip().startswith("1. ")
+    )
+    items = [
+        " ".join(m.group(1).split())
+        for m in re.finditer(r"^\d+\. (.+?)(?=^\d+\. |\Z)", listing,
+                             re.M | re.S)
+    ]
+    assert len(items) == 5, f"перечень условий разобран не целиком: {items}"
+    normalized = [i.rstrip(";.").strip() for i in items]
+    assert normalized == [
+        " ".join(c.split()) for c in WAIVER_CONDITIONS["characterisation"]
+    ]
+
+
 def test_beh_binding_grammar_matches_task_bridge() -> None:
     """Дубликат checked_by-регекса запинован: обе стороны читают одну
     фикстуру одинаково — включая блок с ДВУМЯ строками checked_by
