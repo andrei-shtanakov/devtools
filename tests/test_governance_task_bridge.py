@@ -1740,8 +1740,22 @@ def _parse_with_spec_runner(text: str):
     # заведён — приходило как «окружения нет» и тест ПРОПУСКАЛСЯ.
     # Мутация разделителя это и показала: skip вместо failed. Молчание
     # обязано означать одно: соседа тут нет.
+    # Детект по ВЫЗЫВАЕМЫМ СИМВОЛАМ, а не по импорту модулей: сосед
+    # старше spec-runner#430 импортируется прекрасно, а `resolve_waiver`
+    # у него нет — зонд упал бы с AttributeError, и «стык разошёлся»
+    # объявлялось бы там, где на деле перекос версий. На машине флота с
+    # необновлённым соседом это красило бы devtools-прогон, и правкой
+    # devtools не чинилось бы.
+    #
+    # Красное — только за разбор; версия соседа — причина пропуска.
     available = subprocess.run(
-        [str(interpreter), "-c", "import spec_runner.task, spec_runner.config"],
+        [
+            str(interpreter),
+            "-c",
+            "from spec_runner.task import parse_tasks\n"
+            "from spec_runner.config import ExecutorConfig\n"
+            "assert hasattr(ExecutorConfig, 'resolve_waiver')\n",
+        ],
         capture_output=True,
     )
     if available.returncode != 0:
@@ -1780,7 +1794,10 @@ def test_rendered_marker_is_read_back_by_the_spec_runner_parser() -> None:
     """
     parsed = _parse_with_spec_runner(_render_waived())
     if parsed is None:
-        pytest.skip("окружение spec-runner недоступно — стык не проверен")
+        pytest.skip(
+            "spec-runner недоступен либо старше #430 (нет resolve_waiver) — "
+            "стык не проверен"
+        )
 
     assert parsed["TASK-002"] == {
         "mode": "standard",
