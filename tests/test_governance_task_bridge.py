@@ -4024,6 +4024,339 @@ def test_supersede_right_after_delivery_is_traceless_noop(
     assert ("pr_facts", 403) not in ops.calls
 
 
+def _debt_nodes(out: str) -> set[str]:
+    """Узлы, НАЗВАННЫЕ в перечне долгов, — как множество.
+
+    Разбор именно перечня, а не всего вывода: имя узла встречается в
+    печати и по другим поводам, и `in out` объявило бы названным то, о
+    чём сообщение молчит.
+    """
+    lines = out.splitlines()
+    head = next(i for i, s in enumerate(lines) if s.startswith("в активном DAG"))
+    return {
+        s.removeprefix("- ").split(":", 1)[0]
+        for s in lines[head + 1:] if s.startswith("- ")
+    }
+
+
+def _erase_signature(state, fname: str = "00-charter.md") -> str:
+    """Стереть подпись у `approved`-узла — вход в слепые зоны §I5.
+
+    Класс 1 (вырезанное) — у самого узла; класс 2 (подменённое) — у
+    каждого, кто его пинует, потому что стирание подписи меняет СЫРОЙ
+    блоб узла. Определение классов — в контракте (§I5), здесь только
+    ссылка: пересказ дрейфует, а имя класса при расхождении видно сразу.
+
+    Возвращается поэтому не один узел, а ожидаемое МНОЖЕСТВО долговых:
+    сам узел и его прямые downstream'ы. Состав считается из DAG, а не
+    выписан константой, — иначе правка состава бандла разошлась бы с
+    ожиданием теста молча.
+    """
+    path = Path(state.target_dir) / state.bundle_dir / fname
+    meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+    meta["approved_by"] = ""
+    meta["approved_at"] = ""
+    path.write_text(join_frontmatter(meta, body), encoding="utf-8")
+    node = task_bridge._node_id(fname)
+    return {node} | {
+        task_bridge._node_id(f)
+        for f, ups in task_bridge._dag_for(None) if node in ups
+    }
+
+
+def test_traceless_noop_names_the_debt_nodes(tmp_path, monkeypatch, capsys):
+    """No-op §I5 обязан НАЗВАТЬ долговые узлы (#192, п.2).
+
+    Требование контракта не исполнялось: печаталась одна строка «апстрим
+    не менялся», и про «одобрено без одобрившего» оператор не узнавал
+    нигде — до того дня, когда переиздание понадобится срочно.
+
+    Вход достижим и попадает в **слепые зоны §I5** — их состав, имена
+    классов и сцепление определены в контракте (§I5, «какие долги §I5
+    вообще способен спрятать») и здесь не пересказываются. Прежняя
+    редакция пересказывала, разошлась с собственным телом теста и
+    осталась зелёной: докстринг не исполняется (ревью #194). Что тело
+    требует на самом деле — сказано утверждениями ниже, а не здесь.
+
+    Проверяется и вторая половина, без которой первая ничего не стоит:
+    исход по-прежнему бесследный no-op — RC 0, `run.json` побайтово
+    прежний, ни одного delivery-эффекта. Диагностика не имеет права
+    превращать «ничего не делаю» в отказ.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    assert tb.deliver_for_run(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
+    expected = _erase_signature(state)
+    assert expected == {"charter", "requirements"}, (
+        "вход порождает ОБА невидимых для §I5 класса: стёртая подпись у "
+        "charter и разъехавшийся пин у того, кто его пинует"
+    )
+    before = _ledger_bytes()
+
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    assert tb.deliver_superseded(
+        rs.load("r-recon"), ops
+    ) == tb.SupersedeResult("noop")
+
+    out = capsys.readouterr().out
+    assert "апстрим не менялся" in out
+    # СОСТАВ, а не вхождение: проверка подстрокой пропустила первую
+    # редакцию вывода «класс ровно один», хотя опровержение лежало прямо
+    # в этом входе (ревью #194). Множество ловит и недосказанное, и
+    # лишнее.
+    assert _debt_nodes(out) == expected
+    assert "без подписи" in out, "назван класс 1 — вырезанное"
+    assert "разошедшимися пинами" in out, "назван класс 2 — подменённое"
+    assert _ledger_bytes() == before, "no-op остался бесследным"
+    assert not _effects(ops), "диагностика не завела эффектов"
+
+
+def test_noop_over_honest_dag_says_nothing_extra(tmp_path, monkeypatch, capsys):
+    """Долга нет — и перечня нет: пустое множество не печатается.
+
+    Половина, без которой предыдущий тест проходил бы и у болтливой
+    реализации, печатающей шапку всегда.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    assert tb.deliver_for_run(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
+    capsys.readouterr()
+
+    assert tb.deliver_superseded(
+        rs.load("r-recon"), _SupersedeOps(prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+
+    out = capsys.readouterr().out
+    assert "апстрим не менялся" in out
+    assert "долговые узлы" not in out
+    assert "установить не удалось" not in out
+
+
+def test_noop_survives_unreadable_base_without_becoming_a_refusal(
+    tmp_path, monkeypatch, capsys
+):
+    """Неустановленный долг не превращает бесследный no-op в отказ.
+
+    Диагностика читает base, а чтение может не удаться. Позволь мы ей
+    отказать — §I5 перестал бы быть бесследным ровно там, где контракт
+    обещает RC 0, и гейтом стала бы сама диагностика. Поэтому исход
+    прежний, а факт называется неустановленным, а не отсутствующим.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    assert tb.deliver_for_run(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
+    before = _ledger_bytes()
+
+    class _BlindBase(_SupersedeOps):
+        """Узлы бандла в base не читаются; спека — читается.
+
+        Слепота адресная: ослепни `show_file` целиком, §I8 ушёл бы в
+        "unavailable" и до §I5 дело бы не дошло — тест проверял бы не то.
+        """
+
+        def show_file(self, target_dir, ref, path):
+            if path.startswith(f"{state.bundle_dir}/"):
+                self.calls.append(("show_file", ref, path))
+                return None
+            return super().show_file(target_dir, ref, path)
+
+    ops = _BlindBase(prs=[_MERGED_PR])
+    assert tb.deliver_superseded(
+        rs.load("r-recon"), ops
+    ) == tb.SupersedeResult("noop")
+
+    out = capsys.readouterr().out
+    assert "апстрим не менялся" in out
+    assert "установить не удалось" in out
+    assert "долговые узлы" not in out, "неустановленное не выдаётся за долг"
+    assert _ledger_bytes() == before
+    assert not _effects(ops)
+
+
+#: Блок контракта, который ОДИН определяет состав слепых зон §I5. Маркер
+#: опознаётся ТОЛЬКО как начало строки (`startswith`), а не вхождением:
+#: вхождением он срабатывал на определении этой же константы, и всё,
+#: что ниже по файлу, уходило в пропуск — гвард объявлял зелёной
+#: половину собственной цели (major ревью #194, третий круг).
+_BLIND_ZONES_BLOCK = (
+    "**Какие долги §I5 вообще способен спрятать — ЕДИНСТВЕННОЕ МЕСТО.**"
+)
+
+#: Числительное, квантифицирующее классы/зоны/долги, — по ОСНОВАМ, а не
+#: по перечню форм. Перечень форм пропускал «трёх», «четырьмя», «одному»,
+#: «двумя», и первым же нарушителем оказался текст собственного патча.
+#: Направление отказа выбрано в сторону ПЕРЕБОРА сознательно: лишнее
+#: срабатывание видно и чинится, недосчёт невидим.
+#:
+#: `\b` в начале каждой основы обязателен и стоит отдельного слова: без
+#: него основа ловит середину слова — «тр» внутри «воркстрим», — и гвард
+#: краснеет на текстах, где счёта нет вовсе. Это тот же дефект, что у
+#: перечня форм, только с другой стороны: там граница отсутствовала в
+#: конце и «двух» находилось в «двухфазным».
+_COUNT = (
+    r"(?:\bединствен\w*|\bодн\w*|\bдв\w*|\bтр[ёеи]\w*|\bчетыр\w*"
+    r"|\bоб[ое]\w*)"
+)
+
+#: Слова, которые основа ловит, а счётом они не являются. Список ЯВНЫЙ,
+#: чтобы исключение было видно, а не растворялось в неполноте регекспа:
+#: неполный регексп молча недосчитывает, явный список — предъявляет, что
+#: именно прощено, и приглашает спорить.
+_NOT_A_COUNT = (
+    "двухфазн", "двига", "двиг", "движ", "одобр", "должн", "долгове",
+)
+
+#: Числительное для негативной самопроверки — ОТДЕЛЬНОЙ константой, а не
+#: внутри фразы: записанная целиком, фраза была бы нарушением в этом же
+#: файле, а гвард смотрит и его тоже. Слепой зоны под собственный тест не
+#: заводим — она и есть чинимый дефект.
+_COUNT_SAMPLE = "единственный"
+
+_ZONE_NOUN = r"(?:\bкласс\w*|\bзон\w*|\bдолг\w*)"
+
+
+def _blind_zone_targets() -> list[Path]:
+    root = Path(__file__).resolve().parents[1]
+    return [
+        root / "docs/superpowers/specs"
+        / "2026-09-09-tasks-supersede-contract-design.md",
+        root / "governance/task_bridge.py",
+        Path(__file__).resolve(),
+    ]
+
+
+def _blind_zone_offenders(text: str, name: str) -> list[str]:
+    """Места, пересказывающие СОСТАВ слепых зон §I5, вне блока §I5.
+
+    Блок открывается только строкой, КОТОРАЯ МАРКЕРОМ НАЧИНАЕТСЯ, и
+    закрывается следующим абзацем `**`. В `.md` так размечен сам блок; в
+    `.py` строки, начинающейся с `**`, не бывает, поэтому блок там не
+    открывается вовсе — и это правильно: единственное место живёт в
+    контракте, у кода исключений нет.
+    """
+    import re
+
+    pattern = re.compile(
+        rf"(?:{_COUNT}\W+(?:\w+\W+){{0,2}}{_ZONE_NOUN}"
+        rf"|{_ZONE_NOUN}\W+(?:\w+\W+){{0,2}}{_COUNT})",
+        re.IGNORECASE,
+    )
+    subject = re.compile(r"§I5|no-op|слеп", re.IGNORECASE)
+    lines = text.split("\n")
+    offenders, inside = [], False
+    for i, line in enumerate(lines, 1):
+        if line.startswith(_BLIND_ZONES_BLOCK):
+            inside = True
+            continue
+        if inside:
+            if line.startswith("**"):
+                inside = False
+            else:
+                continue
+        window = "\n".join(lines[max(0, i - 2):i + 1])
+        near = "\n".join(lines[max(0, i - 3):i + 2])
+        hit = pattern.search(window)
+        if not hit or not subject.search(near):
+            continue
+        if any(stem in hit.group(0).lower() for stem in _NOT_A_COUNT):
+            continue
+        offenders.append(f"{name}:{i}: {line.strip()[:120]}")
+    return offenders
+
+
+def test_blind_zones_composition_is_stated_in_exactly_one_place() -> None:
+    """Состав слепых зон §I5 не пересказывается нигде, кроме §I5.
+
+    Четыре неполные зачистки подряд (ревью #191–#194) вышли не из
+    невнимательности, а из способа, которым утверждение жило в тексте:
+    вывод был ПЕРЕСКАЗАН в каждом месте своими словами. Пересказ
+    дрейфует ровно так же, как разошлись бы два вычислителя одного
+    предиката, — а именно этот довод свёл предикат одобренности в
+    `read_dag_state`. Правило то же, применённое к нормативному тексту: у
+    вывода одно место, везде остальное — ссылка и ИМЯ класса.
+
+    Имя вместо числа выбрано намеренно: несуществующий «класс 3» виден
+    сразу, а «единственный класс» выглядит осмысленным при любом их
+    числе.
+
+    Критерий исполняется, а не вычитывается: «я прошёл и посмотрел»
+    пропустило четыре захода подряд, причём дважды — места, правленные
+    тем же патчем. Правильность самого критерия подтверждает соседний
+    негативный тест, и без него это утверждение не стоило бы ничего.
+    """
+    offenders = [
+        line
+        for path in _blind_zone_targets()
+        for line in _blind_zone_offenders(
+            path.read_text(encoding="utf-8"), path.name
+        )
+    ]
+    assert not offenders, (
+        "состав слепых зон §I5 пересказан вне единственного места — "
+        "замените пересказ ссылкой и именем класса:\n"
+        + "\n".join(offenders)
+    )
+
+
+@pytest.mark.parametrize(
+    "form",
+    ["единственный", "одному", "двумя", "трёх", "четырьмя", "обе"],
+    ids=["единствен", "одн", "дв", "тр", "четыр", "об"],
+)
+def test_blind_zones_guard_catches_every_grammatical_form(form: str) -> None:
+    """Основа, а не форма: гвард ловит падежи, которых нет в перечне.
+
+    Первая редакция перечисляла ФОРМЫ («один, два, три, оба») и пропускала
+    «трёх», «четырьмя», «одному», «двумя» — первым же нарушителем по этому
+    правилу оказался текст собственного патча. Перечень форм ошибается
+    молча: непойманная форма выглядит как чистый файл.
+
+    Каждая основа проверяется своей формой, и ни одна из них в перечне
+    прежней редакции не стояла (кроме контрольной «единственный»).
+    """
+    spiked = "По §I5 слепых зон {}.".format(form)
+    assert _blind_zone_offenders(spiked, "синтетика"), (
+        f"форма {form!r} не поймана — основа покрывает не весь класс слов"
+    )
+
+
+def test_blind_zones_guard_actually_looks_at_every_target() -> None:
+    """Гвард обязан краснеть на нарушителе в КОНЦЕ каждой цели.
+
+    Без этой проверки правильность гварда ничем не подтверждена — и это
+    не гипотеза: первая его редакция была зелёной ровно потому, что
+    половину файла не смотрела. Маркер блока опознавался вхождением,
+    срабатывал на определении собственной константы, а закрыть блок в
+    `.py` было нечем — всё ниже уходило в пропуск, включая те самые
+    утверждения про §I5, ради которых гвард заводился.
+
+    Механизм, который заявляет про класс, а проверяет срез, и при этом
+    зелёный, — буквально тот же дефект, что был у ложного вывода этажом
+    выше. Гвард без негативной проверки есть утверждение о себе, которое
+    никто не проверял.
+
+    Нарушитель сажается именно в КОНЕЦ: пропуск, если он вернётся,
+    съедает хвост файла, а не голову.
+    """
+    violator = "До no-op'а §I5 доходит {} класс долга.".format(_COUNT_SAMPLE)
+    for path in _blind_zone_targets():
+        text = path.read_text(encoding="utf-8")
+        assert not _blind_zone_offenders(text, path.name), (
+            f"{path.name}: цель обязана быть чистой до подсадки"
+        )
+        spiked = text + "\n" + violator + "\n"
+        assert _blind_zone_offenders(spiked, path.name), (
+            f"{path.name}: гвард не увидел нарушителя в конце файла — "
+            "значит эту цель он не смотрит"
+        )
+
+
 # --- content_anchor: канонизация (§I5) и поузловой §I7 -------------------
 
 

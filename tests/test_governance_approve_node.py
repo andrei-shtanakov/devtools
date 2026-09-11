@@ -989,6 +989,15 @@ def test_request_with_all_nodes_dropped_is_reachable_and_settled(
     assert world.forge.prs[pr]["state"] == "CLOSED", (
         "мержаемое предложение снято со стола"
     )
+    # Текст закрытия называет ТУ причину, что записана в журнале
+    # (issue #193). Прежний был зашит под другое погребение и утверждал,
+    # будто upstream выносится на одобрение заново, а заявку сняла она
+    # сама: здесь upstream никто не выносит и байты не «прежние» — узла
+    # в бандле нет вовсе.
+    comment = world.forge.prs[pr]["closed_with"]
+    assert settled["reason"] in comment
+    assert "выпали из состава" in comment
+    assert "upstream выносится на одобрение заново" not in comment
 
 
 def test_buried_request_with_all_nodes_dropped_gets_its_close_finished(
@@ -1785,7 +1794,14 @@ def test_approve_node_closes_the_obsolete_wave_and_opens_the_next(
 def test_new_request_over_upstream_kills_live_downstream(
     world: World,
 ) -> None:
-    """Заявка ниже снимается ДО публикации нашего candidate, её PR закрыт."""
+    """Заявка ниже снимается ДО публикации нашего candidate, её PR закрыт.
+
+    Текст закрытия проверяется ДОСЛОВНО против журнала (issue #193): он
+    обязан нести ту же причину, что записана в леджере, а не вторую
+    формулировку рядом с первой. Разойдись они, человек, открывший
+    закрытый PR, и человек, читающий `run.json`, получили бы разные
+    объяснения одного события — и краснеть бы это не начало.
+    """
     drive_to_approved(world, "charter")
     approve(world, "requirements")
     doomed_key, doomed = _request_over(world, "requirements")
@@ -1798,7 +1814,9 @@ def test_new_request_over_upstream_kills_live_downstream(
     assert killed["status"] == al.STATUS_INVALIDATED
     assert killed["invalidated_by"] == _request_over(world, "charter")[0]
     assert world.forge.prs[doomed_pr]["state"] == "CLOSED"
-    assert "снято заявкой" in world.forge.prs[doomed_pr]["closed_with"]
+    comment = world.forge.prs[doomed_pr]["closed_with"]
+    assert killed["reason"] in comment, "причина — дословно из журнала"
+    assert doomed_key in comment, "названа снятая заявка, а не чужая"
 
 
 def test_unconfirmed_close_blocks_publication_and_resumes(
