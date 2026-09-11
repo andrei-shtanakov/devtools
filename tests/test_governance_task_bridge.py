@@ -4024,19 +4024,49 @@ def test_supersede_right_after_delivery_is_traceless_noop(
     assert ("pr_facts", 403) not in ops.calls
 
 
+def _debt_nodes(out: str) -> set[str]:
+    """Узлы, НАЗВАННЫЕ в перечне долгов, — как множество.
+
+    Разбор именно перечня, а не всего вывода: имя узла встречается в
+    печати и по другим поводам, и `in out` объявило бы названным то, о
+    чём сообщение молчит.
+    """
+    lines = out.splitlines()
+    head = next(i for i, s in enumerate(lines) if s.startswith("в активном DAG"))
+    return {
+        s.removeprefix("- ").split(":", 1)[0]
+        for s in lines[head + 1:] if s.startswith("- ")
+    }
+
+
 def _erase_signature(state, fname: str = "00-charter.md") -> str:
-    """Стереть подпись у `approved`-узла — единственный долг, что прячет §I5.
+    """Стереть подпись у `approved`-узла — первый из двух долгов, что
+    прячет §I5.
 
     `approved_by`/`approved_at` канонизация вырезает, поэтому
     `content_anchor` не двигается: §I5 срабатывает раньше гейта, и без
     явного перечисления оператор о долге не узнаёт ниоткуда.
+
+    Правка по ревью #194: у входа есть ВТОРОЕ следствие, и прежняя
+    редакция этого хелпера его не называла. Стирание подписи меняет
+    СЫРОЙ блоб узла, а пины downstream'ов сверяются с сырым блобом —
+    значит у каждого, кто пинует `fname`, разъезжается `upstream_hashes`.
+    Этот второй долг §I5 тоже не видит: канонизация пины не хеширует, а
+    ПОДМЕНЯЕТ каноническими блобами upstream'ов.
+
+    Возвращается поэтому не один узел, а ожидаемое МНОЖЕСТВО долговых:
+    сам узел и его прямые downstream'ы.
     """
     path = Path(state.target_dir) / state.bundle_dir / fname
     meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
     meta["approved_by"] = ""
     meta["approved_at"] = ""
     path.write_text(join_frontmatter(meta, body), encoding="utf-8")
-    return task_bridge._node_id(fname)
+    node = task_bridge._node_id(fname)
+    return {node} | {
+        task_bridge._node_id(f)
+        for f, ups in task_bridge._dag_for(None) if node in ups
+    }
 
 
 def test_traceless_noop_names_the_debt_nodes(tmp_path, monkeypatch, capsys):
@@ -4061,7 +4091,11 @@ def test_traceless_noop_names_the_debt_nodes(tmp_path, monkeypatch, capsys):
 
     state = _recon_state(tmp_path, monkeypatch)
     assert tb.deliver_for_run(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
-    node = _erase_signature(state)
+    expected = _erase_signature(state)
+    assert expected == {"charter", "requirements"}, (
+        "вход порождает ОБА невидимых для §I5 класса: стёртая подпись у "
+        "charter и разъехавшийся пин у того, кто его пинует"
+    )
     before = _ledger_bytes()
 
     ops = _SupersedeOps(prs=[_MERGED_PR])
@@ -4071,8 +4105,13 @@ def test_traceless_noop_names_the_debt_nodes(tmp_path, monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "апстрим не менялся" in out
-    assert node in out, "долговой узел назван"
-    assert "долговые узлы" in out
+    # СОСТАВ, а не вхождение: проверка подстрокой пропустила первую
+    # редакцию вывода «класс ровно один», хотя опровержение лежало прямо
+    # в этом входе (ревью #194). Множество ловит и недосказанное, и
+    # лишнее.
+    assert _debt_nodes(out) == expected
+    assert "без подписи" in out, "назван класс 1 — вырезанное"
+    assert "разошедшимися пинами" in out, "назван класс 2 — подменённое"
     assert _ledger_bytes() == before, "no-op остался бесследным"
     assert not _effects(ops), "диагностика не завела эффектов"
 
