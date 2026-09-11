@@ -4024,6 +4024,125 @@ def test_supersede_right_after_delivery_is_traceless_noop(
     assert ("pr_facts", 403) not in ops.calls
 
 
+def _erase_signature(state, fname: str = "00-charter.md") -> str:
+    """Стереть подпись у `approved`-узла — единственный долг, что прячет §I5.
+
+    `approved_by`/`approved_at` канонизация вырезает, поэтому
+    `content_anchor` не двигается: §I5 срабатывает раньше гейта, и без
+    явного перечисления оператор о долге не узнаёт ниоткуда.
+    """
+    path = Path(state.target_dir) / state.bundle_dir / fname
+    meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+    meta["approved_by"] = ""
+    meta["approved_at"] = ""
+    path.write_text(join_frontmatter(meta, body), encoding="utf-8")
+    return task_bridge._node_id(fname)
+
+
+def test_traceless_noop_names_the_debt_nodes(tmp_path, monkeypatch, capsys):
+    """No-op §I5 обязан НАЗВАТЬ долговые узлы (#192, п.2).
+
+    Требование контракта не исполнялось: печаталась одна строка «апстрим
+    не менялся», и про «одобрено без одобрившего» оператор не узнавал
+    нигде — до того дня, когда переиздание понадобится срочно.
+
+    Вход достижим и единственен в своём роде: стёртая подпись —
+    единственный долг, который канонизация режет, а значит единственный,
+    что доживает до no-op'а. Прочие двигают `content_anchor` и уходят к
+    гейту.
+
+    Проверяется и вторая половина, без которой первая ничего не стоит:
+    исход по-прежнему бесследный no-op — RC 0, `run.json` побайтово
+    прежний, ни одного delivery-эффекта. Диагностика не имеет права
+    превращать «ничего не делаю» в отказ.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    assert tb.deliver_for_run(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
+    node = _erase_signature(state)
+    before = _ledger_bytes()
+
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    assert tb.deliver_superseded(
+        rs.load("r-recon"), ops
+    ) == tb.SupersedeResult("noop")
+
+    out = capsys.readouterr().out
+    assert "апстрим не менялся" in out
+    assert node in out, "долговой узел назван"
+    assert "долговые узлы" in out
+    assert _ledger_bytes() == before, "no-op остался бесследным"
+    assert not _effects(ops), "диагностика не завела эффектов"
+
+
+def test_noop_over_honest_dag_says_nothing_extra(tmp_path, monkeypatch, capsys):
+    """Долга нет — и перечня нет: пустое множество не печатается.
+
+    Половина, без которой предыдущий тест проходил бы и у болтливой
+    реализации, печатающей шапку всегда.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    assert tb.deliver_for_run(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
+    capsys.readouterr()
+
+    assert tb.deliver_superseded(
+        rs.load("r-recon"), _SupersedeOps(prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+
+    out = capsys.readouterr().out
+    assert "апстрим не менялся" in out
+    assert "долговые узлы" not in out
+    assert "установить не удалось" not in out
+
+
+def test_noop_survives_unreadable_base_without_becoming_a_refusal(
+    tmp_path, monkeypatch, capsys
+):
+    """Неустановленный долг не превращает бесследный no-op в отказ.
+
+    Диагностика читает base, а чтение может не удаться. Позволь мы ей
+    отказать — §I5 перестал бы быть бесследным ровно там, где контракт
+    обещает RC 0, и гейтом стала бы сама диагностика. Поэтому исход
+    прежний, а факт называется неустановленным, а не отсутствующим.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    assert tb.deliver_for_run(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
+    before = _ledger_bytes()
+
+    class _BlindBase(_SupersedeOps):
+        """Узлы бандла в base не читаются; спека — читается.
+
+        Слепота адресная: ослепни `show_file` целиком, §I8 ушёл бы в
+        "unavailable" и до §I5 дело бы не дошло — тест проверял бы не то.
+        """
+
+        def show_file(self, target_dir, ref, path):
+            if path.startswith(f"{state.bundle_dir}/"):
+                self.calls.append(("show_file", ref, path))
+                return None
+            return super().show_file(target_dir, ref, path)
+
+    ops = _BlindBase(prs=[_MERGED_PR])
+    assert tb.deliver_superseded(
+        rs.load("r-recon"), ops
+    ) == tb.SupersedeResult("noop")
+
+    out = capsys.readouterr().out
+    assert "апстрим не менялся" in out
+    assert "установить не удалось" in out
+    assert "долговые узлы" not in out, "неустановленное не выдаётся за долг"
+    assert _ledger_bytes() == before
+    assert not _effects(ops)
+
+
 # --- content_anchor: канонизация (§I5) и поузловой §I7 -------------------
 
 
