@@ -1660,6 +1660,157 @@ def test_waiver_items_of_one_batch_sanction_survive_supersede() -> None:
     )
 
 
+def test_waived_task_carries_the_machine_readable_marker() -> None:
+    """Форма маркера — БЕЗУСЛОВНО, в нашем дереве.
+
+    Зонд к соседу (ниже) проверяет стык честнее, но в обязательном CI он
+    пропускается: раннер чекаутит только devtools, окружения spec-runner
+    там нет и не будет. Значит зонд молчит — а молчание в обязательном
+    прогоне и есть то, от чего он сам же и защищает. Оставь его
+    единственным покрытием, и сломанный разделитель, потерянный пробел
+    или удалённый `lines.append` уехали бы в master зелёными, а на той
+    стороне задача получила бы `standard` без durable-записи санкции.
+
+    Поэтому форма утверждается здесь, точным текстом и без соседа; зонд —
+    СВЕРХ этого, как локальное усиление.
+    """
+    waived = _render_waived().split("### TASK-002:")[1]
+    plain = _render_waived().split("### TASK-001:")[1].split("### TASK-002:")[0]
+
+    assert (
+        "**TDD-waiver:** characterisation · sanction: batch-approve-2026-09-09"
+        in waived
+    )
+    # Ровно одна строка маркера, и ни одной у задачи без санкции: маркер
+    # адресен так же, как режим.
+    assert len([
+        line for line in waived.splitlines()
+        if line.startswith("**TDD-waiver:**")
+    ]) == 1
+    assert "**TDD-waiver:**" not in plain
+
+
+#: Зонд, исполняемый интерпретатором СОСЕДА: разбирает наш рендер его
+#: парсером и прогоняет через его же резолвер. Держится строкой, а не
+#: файлом в их дереве, — сосед read-only, и тест не вправе в нём ничего
+#: создавать.
+_SPEC_RUNNER_PROBE = (
+    'import json, sys\n'
+    'from pathlib import Path\n'
+    'from spec_runner.task import parse_tasks\n'
+    'from spec_runner.config import ExecutorConfig\n'
+    'tasks = {t.id: t for t in parse_tasks(Path(sys.argv[1]))}\n'
+    "config = ExecutorConfig(project_root=Path('.'), execution_mode='tdd')\n"
+    'out = {}\n'
+    'for tid, task in tasks.items():\n'
+    '    applied = config.resolve_waiver(task)\n'
+    '    out[tid] = {\n'
+    "        'mode': task.execution_mode,\n"
+    "        'raw': task.tdd_waiver,\n"
+    "        'class': applied.node_class if applied else None,\n"
+    "        'sanction': applied.sanction if applied else None,\n"
+    '    }\n'
+    'print(json.dumps(out))\n'
+)
+
+
+def _parse_with_spec_runner(text: str):
+    """Разобрать наш рендер ПАРСЕРОМ СОСЕДА и вернуть его вывод, либо None.
+
+    Запуск — в ЕГО интерпретаторе, отдельным процессом: у соседа свои
+    зависимости, и тянуть их в наше окружение ради теста значило бы
+    связать проекты рантаймом. Дерево spec-runner не трогается вовсе —
+    только чтение установленного пакета и временный файл в tmp.
+
+    None — окружения нет; тест на нём ПРОПУСКАЕТСЯ, а не зеленеет:
+    «не проверено» и «проверено» обязаны различаться.
+    """
+    import json
+    import subprocess
+    import tempfile
+
+    interpreter = (
+        Path(__file__).resolve().parents[2] / "spec-runner" / ".venv" / "bin" / "python"
+    )
+    if not interpreter.exists():
+        return None
+    # Наличие ОКРУЖЕНИЯ устанавливается отдельно от исхода разбора, и это
+    # не формальность: первая редакция возвращала None на любом ненулевом
+    # коде, поэтому расхождение грамматик — то самое, ради чего тест
+    # заведён — приходило как «окружения нет» и тест ПРОПУСКАЛСЯ.
+    # Мутация разделителя это и показала: skip вместо failed. Молчание
+    # обязано означать одно: соседа тут нет.
+    # Детект по ВЫЗЫВАЕМЫМ СИМВОЛАМ, а не по импорту модулей: сосед
+    # старше spec-runner#430 импортируется прекрасно, а `resolve_waiver`
+    # у него нет — зонд упал бы с AttributeError, и «стык разошёлся»
+    # объявлялось бы там, где на деле перекос версий. На машине флота с
+    # необновлённым соседом это красило бы devtools-прогон, и правкой
+    # devtools не чинилось бы.
+    #
+    # Красное — только за разбор; версия соседа — причина пропуска.
+    available = subprocess.run(
+        [
+            str(interpreter),
+            "-c",
+            "from spec_runner.task import parse_tasks\n"
+            "from spec_runner.config import ExecutorConfig\n"
+            "assert hasattr(ExecutorConfig, 'resolve_waiver')\n",
+        ],
+        capture_output=True,
+    )
+    if available.returncode != 0:
+        return None
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".md", encoding="utf-8", delete=False
+    ) as handle:
+        handle.write(text)
+        path = Path(handle.name)
+    try:
+        done = subprocess.run(
+            [str(interpreter), "-c", _SPEC_RUNNER_PROBE, str(path)],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        path.unlink()
+    # Окружение есть, а разбор не удался — это РАСХОЖДЕНИЕ, а не отсутствие
+    # соседа: поднимаем, показывая его stderr.
+    assert done.returncode == 0, (
+        "spec-runner не разобрал наш рендер — стык разошёлся:\n"
+        + (done.stderr or "")[-2000:]
+    )
+    return json.loads(done.stdout)
+
+
+def test_rendered_marker_is_read_back_by_the_spec_runner_parser() -> None:
+    """Сквозной тест: сгенерированную спеку разбирает САМ spec-runner.
+
+    Без него у нас два регекспа, написанных по памяти друг о друге: наш
+    рендер и `spec_runner.task.TDD_WAIVER`. Разойтись они могут молча —
+    каждая сторона зелена на своих фикстурах, — и обнаружилось бы это
+    прогоном, то есть деньгами. Здесь проверяется СТЫК: разбор строки И
+    то, что разобранное проходит закрытый словарь класса и грамматику
+    санкции соседа.
+    """
+    parsed = _parse_with_spec_runner(_render_waived())
+    if parsed is None:
+        pytest.skip(
+            "spec-runner недоступен либо старше #430 (нет resolve_waiver) — "
+            "стык не проверен"
+        )
+
+    assert parsed["TASK-002"] == {
+        "mode": "standard",
+        "raw": "characterisation · sanction: batch-approve-2026-09-09",
+        "class": "characterisation",
+        "sanction": "batch-approve-2026-09-09",
+    }
+    # Половина «адресность»: у обычной задачи сосед не видит ни режима,
+    # ни маркера — обычный `standard` там остаётся нетронутым.
+    assert parsed["TASK-001"]["raw"] is None
+    assert parsed["TASK-001"]["class"] is None
+
+
 def test_waived_task_points_its_source_at_the_declaration() -> None:
     """`Source:` ведёт на DT — то есть на само объявление.
 
