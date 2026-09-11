@@ -49,7 +49,16 @@ run-id: `verify-first-file-scope-group-targets-20260908-6d07d5`
    НЕ через `merge-pr.sh` — он такие ветки отвергает намеренно.
 3. Ту же команду шага 1 повторяешь → записывает подпись, заводит финализирующий PR.
 4. **Мержишь финализирующий PR** той же учёткой.
-5. Следующий уровень.
+5. **Ту же команду третий раз** — и этот вызов пропускать нельзя. Мерж
+   финализирующего PR заявку не закрывает: она остаётся живой на шаге
+   `AWAIT_FINALIZE_MERGE`, а до `completed` её доводит только третий вызов.
+   Он же — единственное место, где сверяется, что в base лёг конверт **именно
+   этой** заявки: `approved_by`/`approved_at` против записанных фактов мержа и
+   пины против снимка заявки. Предикат гейта такого не проверяет, он смотрит
+   лишь на непустоту подписи. Пропустишь — сверка не выполнится ни разу, а
+   заявки останутся `started` навсегда и при следующем проходе по тому же
+   прогону дадут лишний непонятный круг.
+6. Следующий уровень.
 
 ## Последовательность целиком
 
@@ -59,23 +68,28 @@ run-id: `verify-first-file-scope-group-targets-20260908-6d07d5`
     # уровень 1
     make behaviour-tasks ARGS="--run-id $R --approve-node charter"        # → candidate-PR, мержишь
     make behaviour-tasks ARGS="--run-id $R --approve-node charter"        # → finalize-PR, мержишь
+    make behaviour-tasks ARGS="--run-id $R --approve-node charter"        # → заявка completed + сверка конверта
 
     # уровень 2
     make behaviour-tasks ARGS="--run-id $R --approve-node requirements"   # → candidate-PR, мержишь
     make behaviour-tasks ARGS="--run-id $R --approve-node requirements"   # → finalize-PR, мержишь
+    make behaviour-tasks ARGS="--run-id $R --approve-node requirements"   # → заявка completed + сверка конверта
 
     # уровень 3
     make behaviour-tasks ARGS="--run-id $R --approve-node behaviour-spec" # → candidate-PR, мержишь
     make behaviour-tasks ARGS="--run-id $R --approve-node behaviour-spec" # → finalize-PR, мержишь
+    make behaviour-tasks ARGS="--run-id $R --approve-node behaviour-spec" # → заявка completed + сверка конверта
 
     # уровень 4 — два узла, ОДНА заявка
     make behaviour-tasks ARGS="--run-id $R --approve-node design"         # → candidate-PR
     make behaviour-tasks ARGS="--run-id $R --approve-node acceptance"     # → дописывает в ТОТ ЖЕ PR; мержишь
     make behaviour-tasks ARGS="--run-id $R --approve-node design"         # → finalize-PR, мержишь
+    make behaviour-tasks ARGS="--run-id $R --approve-node design"         # → заявка completed + сверка конверта
 
     # уровень 5
     make behaviour-tasks ARGS="--run-id $R --approve-node decomposition"  # → candidate-PR, мержишь
     make behaviour-tasks ARGS="--run-id $R --approve-node decomposition"  # → finalize-PR, мержишь
+    make behaviour-tasks ARGS="--run-id $R --approve-node decomposition"  # → заявка completed + сверка конверта
 
 ## Замена #410 — после того, как одобрены все шесть
 
@@ -89,7 +103,15 @@ run-id: `verify-first-file-scope-group-targets-20260908-6d07d5`
 ## Если что-то пошло не так
 
 - отказ называет долговые узлы и процедуру — читай его, он полный;
-- «состояние не установлено, повторите вызов» — сетевой сбой, повтор безопасен;
+- «факт не установлен, повторите вызов» — **причину не достраивай**: механика её
+  намеренно не называет, потому что названная наугад уводит чинить то, что не
+  сломано. Повтор безопасен всегда (записей нет), но сойдётся не всегда: если
+  повтор даёт то же сообщение, причина не в сети — смотри факты PR (например,
+  мерж без `mergedBy.login` через интеграцию) и заводи новый candidate;
 - заявка ушла в `invalidated` — это терминально, выход один: повторить `--approve-node`
   по тому же узлу, заведётся новый candidate;
-- ничего не удаляй и не правь в `run.json` руками — записи неприкосновенны после записи.
+- ничего не удаляй и не правь в `run.json` руками — записи неприкосновенны после
+  записи. **Единственное исключение** механика называет сама: повреждённый или
+  неполный `intent` волны. Её отказ печатает ровно две процедуры — поправить
+  запись волны в `run.json` либо начать новый прогон с другим `--run-id`;
+  никакой третьей нет, механикой запись волны не чинится.
