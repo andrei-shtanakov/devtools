@@ -904,6 +904,46 @@ def test_dropped_node_makes_the_request_unexecutable_with_a_way_out(
     assert fresh["candidate_pr"] is not None
 
 
+def test_dropped_node_terminalizes_on_composition_not_on_the_close(
+    world: World,
+) -> None:
+    """Хоронит СОСТАВ, а не результат закрытия — это разные величины.
+
+    Состав установлен положительно: он сверен с фактическим каталогом
+    бандла в base. Исход `close_pr` свёрнут (#177: `False` и при
+    отсутствии прав, и когда уже закрыт) и права терминализовать не имеет
+    — и не имеет его здесь ни в какую сторону: заявка уже похоронена
+    установленным фактом, а неподтверждённое закрытие лишь не даёт вызову
+    доложить об успехе.
+
+    Порядок «запись durable раньше сетевого эффекта» — тот же, что у
+    инвалидации заявок ниже по течению (§I12): только запись объясняет
+    закрытие. Поэтому тупика нет: открытый PR похороненной заявки ловит
+    следующий вызов и называет процедуру.
+    """
+    _level_three(world)
+    approve(world, "design")
+    approve(world, "acceptance")
+    key, op = _request_over(world, "design")
+    _drop_node(world, "25-acceptance.md")
+    world.forge.close_confirms = False
+
+    with pytest.raises(RuntimeError, match="закрытие PR"):
+        approve(world, "design", legacy_bundle=5)
+    assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
+    assert "выпали из состава" in world.state.ops[key]["reason"]
+    assert world.forge.prs[op["candidate_pr"]]["state"] == "OPEN"
+
+    # Не тупик: следующий вызов называет открытый PR похороненной заявки
+    # и процедуру, а после закрытия воркстрим идёт дальше.
+    with pytest.raises(RuntimeError, match="переоткрыт"):
+        approve(world, "design", legacy_bundle=5)
+    world.forge.close_confirms = True
+    world.forge.prs[op["candidate_pr"]]["state"] = "CLOSED"
+    approve(world, "design", legacy_bundle=5)
+    assert _request_over(world, "design")[1]["wave"] == 2
+
+
 # --- Крэш-окна ----------------------------------------------------------
 
 
