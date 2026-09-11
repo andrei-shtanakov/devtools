@@ -417,6 +417,14 @@ class _StubOps:
         # по-прежнему None, то есть «коммита ещё нет». ПОСЛЕ коммита SHA
         # другой (фикс-круг 2): иначе «head_sha = SHA коммита» и
         # «head_sha = база» неотличимы.
+        # "master" (база) отвечает ТОЙ ЖЕ синтетической базой и НЕ двигается
+        # с коммитом: коммит доставки ложится на ветку ревизии, а не на
+        # базу. Раньше здесь был None, и это молча снимало пин базы — гейт
+        # возвращал None, `deliver()` пропускал сверку, и вся семья тестов
+        # доставки шла мимо защиты, которую якобы покрывала (минор ревью
+        # #191, круг 2: None у `rev_parse` был fail-open).
+        if ref == "master":
+            return "base-sha-1"
         if ref != "HEAD":
             return None
         return "commit-sha-1" if self.committed else "base-sha-1"
@@ -1084,8 +1092,10 @@ def test_conform_refuses_draft(tmp_path: Path) -> None:
 def _conform_state(target: Path, monkeypatch):
     """Леджер прогона для `--conform-approve`.
 
-    Путь нормализации тоже доставка, и гейт §I12 стоит на нём тоже —
-    значит ему нужен леджер прогона: судьба волны пишется туда.
+    Гейта §I12 на этом пути НЕТ (контракт перечисляет гейтируемые пути
+    поимённо и `--conform-approve` в них не входит), но леджер прогона
+    нужен всё равно: `deliver_conform` берёт из него target, слаг и
+    bundle_dir.
     """
     from governance import run_state as rs
 
@@ -1160,6 +1170,41 @@ def test_deliver_conform_rerun_updates_existing_pr(
         (target / "spec/WS-alpha-7-tasks.md").read_text(encoding="utf-8")
     )
     assert meta["traces_to"] == ["decomposition"]
+
+
+def test_deliver_conform_runs_over_unapproved_dag(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Гейт §I12 на `--conform-approve` НЕ стоит (минор ревью #191, круг 2).
+
+    Контракт перечисляет гейтируемые пути поимённо — первая доставка,
+    `--supersede`, `--replace-revision` — и отдельно предупреждает не
+    путать с `--conform-approve`: тот нормализует frontmatter TASKS-спеки
+    по штампу владельца и узлов бандла не читает вовсе.
+
+    Фикстура доводится до состояния, на котором гейт отказал бы
+    ГАРАНТИРОВАННО: каждый узел DAG возвращён в `draft` со снятой
+    подписью. Останься гейт на пути — тест падал бы RuntimeError'ом
+    §I12; проходит он ровно потому, что предмета у гейта здесь нет.
+    """
+    target = _target(tmp_path)
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    for fname, _ in task_bridge._dag_for(None):
+        path = bundle / fname
+        meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+        meta["status"] = "draft"
+        for key in ("approved_by", "approved_at",
+                    node_approval.SELF_HASH_KEY):
+            meta.pop(key, None)
+        path.write_text(join_frontmatter(meta, body), encoding="utf-8")
+    _approved_tasks(target)
+    ops = _ConformOps()
+    pr = task_bridge.deliver_conform(
+        _conform_state(target, monkeypatch),
+        ops,
+    )
+    assert pr == 77
+    assert ("push_branch", "spec/WS-alpha-7-tasks-approve") in ops.calls
 
 
 def test_deliver_conform_legacy_mismatch_refuses_before_ops(
@@ -4173,7 +4218,10 @@ class _RevisionPrOps(_SupersedeOps):
         self.local_head = local_head
 
     def rev_parse(self, target_dir, ref):
-        if ref == "HEAD":
+        # `local_head` подменяет ТОЛЬКО head ветки ревизии. База ("master")
+        # уходит к базовому стабу вместе с HEAD: иначе она отвечала бы
+        # головой чужой ветки — и гейт пинул бы доставку не тем SHA.
+        if ref in ("HEAD", "master"):
             return super().rev_parse(target_dir, ref)
         return self.local_head
 

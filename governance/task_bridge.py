@@ -1418,8 +1418,15 @@ def _delivered_content_anchor(
 
 def _approved_dag_or_refuse(
     state: RunState, ops: Ops, legacy_bundle: int | None
-) -> str | None:
-    """Гейт §I12 и реконсиляция волны — общее начало всех трёх доставок.
+) -> str:
+    """Гейт §I12 и реконсиляция волны — общее начало трёх доставок.
+
+    Доставок ровно три, и контракт называет их поимённо: первая
+    (`deliver_for_run`), `--supersede` и `--replace-revision` (обе
+    последние входят через `deliver_superseded`). `--conform-approve`
+    сюда НЕ входит — он нормализует frontmatter tasks-спеки и узлов
+    бандла не читает.
+
 
     Нормативный порядок §I2 целиком, и границу между шагами 2 и 3 стирать
     нельзя:
@@ -1450,6 +1457,12 @@ def _approved_dag_or_refuse(
     читает узлы в base (`git show <base>:<путь>`), а доставка читает
     рабочее дерево после своего `checkout_and_pull`; пока между ними может
     проехать pull, гейт судит не то, что доставляют.
+
+    Неизвестная база — отказ, а не пустой пин: `deliver()` пропускает
+    сверку при `None`, то есть молчащий `rev_parse` СНИМАЛ бы защиту
+    ровно в тот момент, когда о состоянии базы ничего не известно
+    (fail-open, минор ревью #191, круг 2). Поэтому возврат — `str`, и
+    отсутствие SHA терминально здесь.
     """
     verdict = read_dag_state(state, ops, _dag_for(legacy_bundle))
     if verdict.evidence is None:
@@ -1468,7 +1481,15 @@ def _approved_dag_or_refuse(
     reconcile_wave_after_approved_dag(state, verdict.evidence)
     # SHA базы, которую гейт СУДИЛ: доставка пинуется им и отказывает, если
     # между двумя чтениями база проехала.
-    return ops.rev_parse(state.target_dir, state.base_ref or "master")
+    base_ref = state.base_ref or "master"
+    judged = ops.rev_parse(state.target_dir, base_ref)
+    if judged is None:
+        raise RuntimeError(
+            f"rev_parse {base_ref} в {state.target_dir!r} не дал SHA — "
+            "база, которую судил гейт §I12, неизвестна, и запинить "
+            "доставку нечем; доставка не начата"
+        )
+    return judged
 
 
 def deliver_for_run(
@@ -1507,6 +1528,17 @@ def deliver_for_run(
         raise RuntimeError(
             f"run {state.run_id!r} в статусе {state.status!r}, нужен "
             "'completed' — сперва доведите прогон (resume/verify)"
+        )
+    # Гард грязного дерева стоит ПЕРЕД pull'ом, а не после (минор ревью
+    # #191, круг 2): `checkout_and_pull` по грязному target_dir — сам по
+    # себе эффект, и он либо упирается в конфликт посреди чекаута, либо
+    # уносит чужую незакоммиченную работу. Тот же порядок у переиздания
+    # (`deliver_superseded`), и расходиться им незачем: гард внутри
+    # `deliver()` ниже стоит позади СВОЕГО pull'а и этот, первый, не
+    # прикрывает.
+    if ops.is_dirty(state.target_dir):
+        raise RuntimeError(
+            f"target_dir {state.target_dir!r} грязный — доставка не начата"
         )
     # База освежается ПЕРЕД гейтом: он читает узлы в base
     # (`git show <base>:<путь>`), и на протухшем клоне судил бы состояние,
@@ -3081,12 +3113,14 @@ def deliver_conform(
     bundle_dir = state.bundle_dir
     dag = _dag_for(legacy_bundle)
     _check_bundle_composition(target_dir, bundle_dir, dag)
-    # Гейт §I12 — до ветки, коммита и PR: путь нормализации тоже доставка,
-    # и права одобрять у него нет ровно так же. Аргументы берутся из
-    # `state`, а не по отдельности, именно ради него: гейту нужен леджер
-    # прогона (судьба волны пишется туда), и передать половину значило бы
-    # оставить дорогу, на которой гейта нет.
-    _approved_dag_or_refuse(state, ops, legacy_bundle)
+    # Гейта §I12 здесь НЕТ, и это не упущение. Контракт перечисляет
+    # гейтируемые пути поимённо — «первая доставка, `--supersede`,
+    # `--replace-revision`» (§I12, таблица) — и отдельно предупреждает не
+    # путать с `--conform-approve`: тот нормализует frontmatter
+    # TASKS-СПЕКИ по штампу владельца и узлов бандла не читает вовсе.
+    # Гейт судит об одобренности узлов DAG; нормализация спеки к этому
+    # предмета не имеет, а поставленный сюда он запирал бы приведение
+    # спеки в порядок долгом совсем другого артефакта.
     anchor_node_id = _node_id(dag[-1][0])
     anchor_filename = dag[-1][0]
     branch = f"spec/{ws_id}-tasks-approve"
