@@ -2211,6 +2211,21 @@ def _unapprove(state, fname: str = "00-charter.md") -> None:
     path.write_text(join_frontmatter(meta, body), encoding="utf-8")
 
 
+#: Вызовы, которые контракт считает delivery-ЭФФЕКТАМИ. Чтения (pull,
+#: поиск PR, `show_file`) в перечень не входят и входить не должны:
+#: бесследность §I5 и «отказ не создаёт эффектов» §I12 относятся к
+#: `run.json` и к тому, что появляется в форджe, а git-чекаут контракт
+#: прямо называет не-эффектом.
+_EFFECT_CALLS = (
+    "ensure_branch", "commit_paths", "push_branch", "create_draft_pr",
+    "create_pr", "merge", "close_pr",
+)
+
+
+def _effects(ops) -> list:
+    return [c for c in ops.calls if c[0] in _EFFECT_CALLS]
+
+
 def _ledger_bytes(run_id: str = "r-recon") -> bytes:
     from governance import run_state as rs
 
@@ -2236,7 +2251,7 @@ def test_gate_refusal_on_debt_leaves_the_ledger_byte_identical(
     assert "charter" in str(failure.value)
     assert "не одобрялось" in str(failure.value), "назван статус узла"
     assert _ledger_bytes() == before, "леджер не тронут"
-    assert ops.calls == [], "ни одного внешнего эффекта"
+    assert not _effects(ops), "ни одного delivery-эффекта"
 
 
 def test_gate_refusal_on_unresolved_is_not_a_debt(
@@ -2265,7 +2280,7 @@ def test_gate_refusal_on_unresolved_is_not_a_debt(
     assert "повторите вызов" in message
     assert "не одобрен целиком" not in message, "не выдаёт себя за долг"
     assert _ledger_bytes() == before
-    assert ops.calls == []
+    assert not _effects(ops)
 
 
 def test_wave_fate_is_recorded_before_any_delivery_effect(
@@ -2328,10 +2343,13 @@ def test_deliver_for_run_write_ahead_op_and_completion(
     # anchor, §I2) утверждается отдельно — `..._records_anchor_of_stamp`.
     op = saved.ops["tasks-deliver"]
     assert (op["status"], op["pr"]) == ("completed", 77)
-    # повтор: op completed → ни одного нового эффекта
+    # Повтор: op completed → ни одного нового ЭФФЕКТА. База при этом
+    # освежается — шорткат стоит после pull'а, и это не эффект: без
+    # свежего клона повтор судил бы протухшее состояние.
     ops2 = _ReconOps()
     assert task_bridge.deliver_for_run(rs.load("r-recon"), ops2) == 77
-    assert ops2.calls == []
+    assert not _effects(ops2)
+    assert ops2.calls == [("checkout_and_pull", "master")]
 
 
 def test_deliver_for_run_adopts_existing_pr_by_branch(
@@ -2492,13 +2510,13 @@ def test_deliver_for_run_reconciled_pr_records_anchor_from_head(
         ("head-91", "workstreams/WS-alpha-7/spec/30-decomposition.md")
     ]
     # Реконсиляция читает бандл в ГОЛОВЕ PR — там лежит доставленное
-    # содержание. Походы гейта в base идут тем же примитивом и в этот
-    # перечень не входят: у них другой ref, и спрашивают они другое.
-    assert [pair for pair in ops.shown if pair[0] == "head-91"] == [
+    # содержание. Гейт на этом пути не работает вовсе: доставки не будет,
+    # защищать нечего, а отказ по сегодняшнему состоянию отменил бы
+    # запись о доставке, которая давно состоялась.
+    assert ops.shown == [
         ("head-91", f"workstreams/WS-alpha-7/spec/{fname}")
         for fname, _ in task_bridge._BUNDLE_DAG
     ]
-    assert any(ref == "master" for ref, _ in ops.shown), "гейт читал base"
     assert rs.load("r-recon").ops["tasks-deliver"] == {
         "status": "completed", "pr": 91, "anchor": "блоб-анкера-из-PR",
         "content_anchor": expected_content,
@@ -7011,3 +7029,169 @@ def test_composition_without_design_refuses_without_legacy_flag(
     message = str(failure.value)
     assert "20-design.md" in message
     assert "--legacy-bundle=3|4|5" in message
+
+
+# --- Гейт судит base, а не рабочее дерево -------------------------------
+#
+# Стенд, которого не хватало: у `_StubOps` база и дерево совпадают всегда
+# (`show_file` отдаёт файл из дерева), и потому «гейт читает не то»
+# проверить было нечем — major #191 прошёл мимо сбора целиком. Здесь
+# источники РАЗВЕДЕНЫ: дерево одно, base другой.
+
+
+class _SplitOps(_ReconOps):
+    """Стаб, у которого base и рабочее дерево — РАЗНЫЕ состояния.
+
+    `base_tree` — содержимое узлов «в base»; рабочее дерево остаётся
+    таким, каким его положила фикстура. Расхождение здесь предмет теста,
+    а не забывчивость: пакетная правка, вернувшая бы `show_file` к чтению
+    дерева, снимет проверку целиком.
+
+    `on_pull` — состояние, в которое base приезжает после
+    `checkout_and_pull`: так моделируется протухший клон, который
+    освежается уже внутри вызова.
+    """
+
+    def __init__(self, base_tree: dict, on_pull: dict | None = None) -> None:
+        super().__init__()
+        self.base_tree = base_tree
+        self.on_pull = on_pull
+
+    def checkout_and_pull(self, target_dir: str, branch: str) -> None:
+        super().checkout_and_pull(target_dir, branch)
+        if self.on_pull is not None:
+            self.base_tree = self.on_pull
+            self.on_pull = None
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        return self.base_tree.get(Path(path).name)
+
+
+def _base_snapshot(target: Path, **overrides: str) -> dict:
+    """Снимок узлов бандла «в base» с точечными подменами."""
+    base = target / "workstreams/WS-alpha-7/spec"
+    snapshot = {
+        fname: (base / fname).read_text(encoding="utf-8")
+        for fname, _ in task_bridge._BUNDLE_DAG
+    }
+    for fname, text in overrides.items():
+        snapshot[fname] = text
+    return snapshot
+
+
+def test_gate_judges_base_not_the_worktree(tmp_path: Path, monkeypatch) -> None:
+    """Долг ВИДЕН В BASE, даже когда рабочее дерево выглядит одобренным.
+
+    Прямое следствие major #191: пока обе величины брались из одного
+    места, «гейт читает base» было непроверяемым утверждением.
+    """
+    state = _recon_state(tmp_path, monkeypatch)
+    drafted = _base_snapshot(Path(state.target_dir))
+    meta, body = split_frontmatter(drafted["00-charter.md"])
+    meta["status"] = "draft"
+    drafted["00-charter.md"] = join_frontmatter(meta, body)
+
+    ops = _SplitOps(drafted)
+    with pytest.raises(RuntimeError, match="не одобрен целиком") as failure:
+        task_bridge.deliver_for_run(state, ops)
+    assert "charter" in str(failure.value)
+    assert not _effects(ops)
+
+
+def test_stale_clone_is_refreshed_before_the_gate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Протухший клон освежается ДО суда, а не после него.
+
+    Сценарий major'а: подпись финализации уже в удалённом base, а в клоне
+    её ещё нет. Отказал бы гейт здесь — он послал бы оператора мержить PR,
+    который тот уже смержил, и сам себя вызов не вылечил бы: до
+    единственного pull'а внутри доставки он не доходит.
+    """
+    state = _recon_state(tmp_path, monkeypatch)
+    fresh = _base_snapshot(Path(state.target_dir))
+    stale = dict(fresh)
+    meta, body = split_frontmatter(stale["00-charter.md"])
+    meta["status"] = "draft"          # клон отстал: одобрения ещё не видно
+    stale["00-charter.md"] = join_frontmatter(meta, body)
+
+    ops = _SplitOps(stale, on_pull=fresh)
+    assert task_bridge.deliver_for_run(state, ops) == 77
+    names = [c[0] for c in ops.calls]
+    assert names[0] == "checkout_and_pull", "pull первым действием"
+
+
+def test_base_moved_between_the_gate_and_delivery_refuses(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """База уехала после суда — отказ ДО эффектов, а не доставка вслепую.
+
+    Вторая половина major'а, и она хуже первой: гейт пропустил бы DAG,
+    который к моменту доставки уже откатился в долг, и `content_anchor`
+    записался бы с состояния, которого гейт не видел.
+    """
+    state = _recon_state(tmp_path, monkeypatch)
+
+    class _Moving(_ReconOps):
+        """База двигается ровно между гейтом и чтением доставки."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen = 0
+
+        def show_file(self, target_dir: str, ref: str, path: str):
+            return _bundle_from_tree(target_dir, path)
+
+        def rev_parse(self, target_dir: str, ref: str):
+            if ref == "master":
+                self.seen += 1
+                return f"base-sha-{self.seen}"
+            return super().rev_parse(target_dir, ref)
+
+    ops = _Moving()
+    with pytest.raises(RuntimeError, match="уехала между гейтом и доставкой"):
+        task_bridge.deliver_for_run(state, ops)
+    assert not _effects(ops)
+    assert "tasks-deliver" in state.ops, "write-ahead записан"
+    assert state.ops["tasks-deliver"]["status"] == "started"
+
+
+def test_stamp_epoch_intent_refuses_before_any_effect(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Намерение эпохи штампа не возобновляется — отказ ДО коммита.
+
+    `prospective_anchor` сменил смысл вместе со снятием штампа (был блоб
+    проштампованного узла, стал блоб узла в base), поэтому такая ревизия
+    даёт ГАРАНТИРОВАННОЕ расхождение. До гварда оно объяснялось неверно —
+    «апстрим двигали во время доставки» — и приходило уже ПОСЛЕ
+    `commit_paths`, без процедуры.
+
+    Эпоха распознаётся положительно: поля `approval_pr`/`signed_nodes`
+    есть только у намерений прежней эпохи. Процедуру называет §I4.
+    """
+    from governance import run_state as rs
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
+                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver-v2"] = {
+        "status": "started", "revision": 2,
+        "branch": "spec/WS-alpha-7-tasks-v2",
+        "base_sha": "base-sha-1",
+        "prospective_anchor": "блоб-эпохи-штампа",
+        "approval_pr": 403,                  # ← признак прежней эпохи
+        "signed_nodes": ["decomposition"],
+        "tasks_version": 2, "head_sha": None,
+    }
+    rs.save(state)
+    before = _ledger_bytes()
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+
+    with pytest.raises(RuntimeError, match="эпохой штампа") as failure:
+        task_bridge.deliver_superseded(state, ops)
+    message = str(failure.value)
+    assert "--abandon-revision 2" in message, "процедура названа"
+    assert "approval_pr" in message, "признак эпохи назван"
+    assert not _effects(ops), "ни одного эффекта — отказ до коммита"
+    assert _ledger_bytes() == before

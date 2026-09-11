@@ -210,6 +210,7 @@ def approve_node(
         )
     ops.checkout_and_pull(state.target_dir, _base_ref(state))
     bundle_dag.check_bundle_composition(state.target_dir, state.bundle_dir, dag)
+    _settle_requests_outside_dag(state, ops, dag)
     known = [bundle_dag.node_id(fname) for fname, _ in dag]
     if node_id not in known:
         raise RuntimeError(
@@ -217,6 +218,13 @@ def approve_node(
             f"{', '.join(known)}. Процедура: назовите node-id из этого "
             "перечня либо укажите --legacy-bundle с точным составом бандла"
         )
+    # Сверка состава — по ВСЕМ живым заявкам и ДО ветвления, а не внутри
+    # ветки продвижения. Заявка, у которой выпали ВСЕ узлы, иначе
+    # недостижима ни одним вызовом: по её узлам приходит отказ «нет в
+    # активном DAG», по соседним вызов уходит в предложение и о ней не
+    # вспоминает. Она оставалась бы живой навсегда — а её candidate-PR
+    # открытым и мержаемым, и человеческий мерж вернул бы удалённый файл
+    # в base (issue #190, вторая половина).
     live = al.live_request_over(state, node_id)
     if live is not None:
         nums, op = live
@@ -1086,7 +1094,6 @@ def _advance(
     факты форджи говорят, что есть сейчас, а запись — что эта заявка уже
     сделала, и после падения второе восстанавливается только из леджера.
     """
-    _require_request_nodes_in_dag(state, ops, dag, op, key)
     step = al.next_step(op)
     if step is al.Step.CREATE_CANDIDATE:
         # Ни одного «если упали до коммита» здесь больше нет: публикация
@@ -1099,12 +1106,40 @@ def _advance(
     return _reconcile_finalize(state, ops, dag, state.ops[key], key)
 
 
-def _require_request_nodes_in_dag(
+def _settle_requests_outside_dag(
     state: RunState,
     ops: Ops,
     dag: tuple[tuple[str, tuple[str, ...]], ...],
+) -> None:
+    """Все живые заявки, чьи узлы выпали из активного DAG, — терминально.
+
+    Обходятся ВСЕ живые заявки, а не заявка над запрошенным узлом: иначе
+    заявка, у которой выпали все узлы до единого, не встречается ни одному
+    вызову (по её узлам — отказ «нет в активном DAG», по соседним — уход в
+    предложение), остаётся живой навсегда и держит открытым мержаемый
+    candidate-PR. Мерж такого PR вернул бы удалённый файл в base — из
+    пяти хвостов этот единственный оставлял на столе артефакт.
+
+    Состав сверяется ПОСЛЕ гварда состава бандла, поэтому «узла нет в
+    DAG» означает «файла нет в бандле», а не «оператор назвал другой
+    `--legacy-bundle`»: несовпадение заявленного состава с фактическим
+    каталогом отказывает раньше.
+    """
+    known = {bundle_dag.node_id(fname) for fname, _ in dag}
+    for nums, op in al.live_requests(state):
+        if all(node in known for node in op["nodes"]):
+            continue
+        _terminalize_request_outside_dag(
+            state, ops, op, al.request_key(*nums), known
+        )
+
+
+def _terminalize_request_outside_dag(
+    state: RunState,
+    ops: Ops,
     op: dict,
     key: str,
+    known: set[str],
 ) -> None:
     """Узел заявки выпал из активного DAG — заявка неисполнима (issue #190).
 
@@ -1122,11 +1157,11 @@ def _require_request_nodes_in_dag(
     терминальный `invalidated` с причиной, из которого выход обычный:
     новый candidate по актуальному составу.
 
-    Отказом без терминализации обойтись нельзя, и это стоит сказать
-    прямо: заявка над выпавшим узлом блокирует ВСЕ вызовы по своим узлам
-    (`_advance` выбирается раньше предложения), а через них — и весь
-    downstream, которому эти узлы upstream. Воркстрим замирал бы целиком
-    до ручного возврата файла.
+    Терминализация — журнальный факт, а НЕ отказ вызова: оператор мог
+    спросить про соседний узел, и хоронить его вызов за чужую мёртвую
+    заявку не за что. Отказ, если он нужен, приходит своим порядком —
+    вызов по самому выпавшему узлу упирается в проверку состава DAG,
+    которая называет допустимые id.
 
     Цена названа честно: если candidate этой заявки уже вмержен,
     человеческий акт над её выжившими узлами сгорает — они остаются
@@ -1138,10 +1173,7 @@ def _require_request_nodes_in_dag(
     стола. Порядок тот же, что при инвалидации заявки над upstream —
     durable-запись раньше сетевого эффекта.
     """
-    known = {bundle_dag.node_id(fname) for fname, _ in dag}
     missing = [node for node in op["nodes"] if node not in known]
-    if not missing:
-        return
     al.invalidate_request(
         state,
         key,
@@ -1155,14 +1187,7 @@ def _require_request_nodes_in_dag(
     for pr in (op.get("candidate_pr"), op.get("finalize_pr")):
         if pr is not None:
             _close_if_open(state, ops, pr, key)
-    raise RuntimeError(
-        f"заявка {key} вынесла узлы {', '.join(missing)}, которых нет в "
-        "активном DAG: продолжать её нечем, заявка invalidated. "
-        "Процедура: новый candidate по актуальному составу "
-        "(`--approve-node` по узлу, который в нём есть) — прежний проход "
-        "закроется obsolete и заведётся следующий; либо верните файл(ы) "
-        "узла в бандл, если он удалён по ошибке"
-    )
+
 
 
 def _reconcile_candidate(

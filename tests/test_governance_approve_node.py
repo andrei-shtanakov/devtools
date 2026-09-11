@@ -869,16 +869,16 @@ def test_pending_upstream_diagnostics_names_the_awaited_pr(
 def test_dropped_node_makes_the_request_unexecutable_with_a_way_out(
     world: World,
 ) -> None:
-    """Узел заявки выпал из активного DAG — терминально, но с выходом.
+    """Узел заявки выпал из активного DAG — заявка хоронится, выход есть.
 
-    Correction удалил файл узла из бандла; заявка несёт его в снимке, и
-    продолжать её нечем. Раньше здесь вылетал голый `KeyError` из
-    `_filename` — трассировка без диагноза и без выхода (issue #190).
+    Correction удалил файл узла из бандла; продолжать заявку нечем. Раньше
+    здесь вылетал голый `KeyError` из `_filename` — трассировка без
+    диагноза и без выхода (issue #190).
 
-    Отказ без терминализации был бы тупиком: заявка блокирует все вызовы
-    по своим узлам (`_advance` выбирается раньше предложения), а через них
-    и весь downstream. Поэтому заявка `invalidated`, а выход — обычный
-    новый candidate по актуальному составу, и он тут же проверяется.
+    Терминализация журнальная: вызов по самому выпавшему узлу получает
+    свой отказ — состав DAG его не содержит, и перечень допустимых id
+    назван. Выход — обычный новый candidate по актуальному составу, и он
+    тут же проверяется.
     """
     _level_three(world)
     approve(world, "design")
@@ -887,11 +887,8 @@ def test_dropped_node_makes_the_request_unexecutable_with_a_way_out(
     assert op["nodes"] == ["design", "acceptance"]
     _drop_node(world, "25-acceptance.md")
 
-    with pytest.raises(RuntimeError) as failure:
-        approve(world, "design", legacy_bundle=5)
-    message = str(failure.value)
-    assert "acceptance" in message and key in message
-    assert "новый candidate по актуальному составу" in message
+    with pytest.raises(RuntimeError, match="не входит в активный DAG"):
+        approve(world, "acceptance", legacy_bundle=5)
     assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
     assert "выпали из состава" in world.state.ops[key]["reason"]
 
@@ -942,6 +939,40 @@ def test_dropped_node_terminalizes_on_composition_not_on_the_close(
     world.forge.prs[op["candidate_pr"]]["state"] = "CLOSED"
     approve(world, "design", legacy_bundle=5)
     assert _request_over(world, "design")[1]["wave"] == 2
+
+
+def test_request_with_all_nodes_dropped_is_reachable_and_settled(
+    world: World,
+) -> None:
+    """Заявка, у которой выпали ВСЕ узлы, достижима и хоронится.
+
+    Вторая половина #190, и из пяти хвостов она была опаснее прочих:
+    такая заявка не встречалась ни одному вызову — по её узлам приходил
+    отказ «нет в активном DAG», по соседним вызов уходил в предложение, —
+    и оставалась живой навсегда, держа открытым МЕРЖАЕМЫЙ candidate-PR.
+    Человеческий мерж вернул бы удалённый файл в base.
+
+    Стенд: заявка ровно над выпавшим узлом, вызов — по СОСЕДНЕМУ узлу,
+    который в составе есть. Прежняя проверка внутри продвижения на этот
+    вызов не смотрела вовсе.
+    """
+    _level_three(world)
+    approve(world, "acceptance")
+    doomed_key, doomed = _request_over(world, "acceptance")
+    assert doomed["nodes"] == ["acceptance"], "все узлы заявки — выпадут"
+    pr = doomed["candidate_pr"]
+    _drop_node(world, "25-acceptance.md")
+
+    # Вызов по ДРУГОМУ узлу: прежде он уходил в предложение и о заявке не
+    # вспоминал.
+    approve(world, "design", legacy_bundle=5)
+
+    settled = world.state.ops[doomed_key]
+    assert settled["status"] == al.STATUS_INVALIDATED
+    assert "выпали из состава" in settled["reason"]
+    assert world.forge.prs[pr]["state"] == "CLOSED", (
+        "мержаемое предложение снято со стола"
+    )
 
 
 # --- Крэш-окна ----------------------------------------------------------
