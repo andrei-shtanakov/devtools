@@ -826,24 +826,36 @@ def test_publishing_twice_changes_nothing(world: World) -> None:
     assert len(world.forge.prs) == 7
 
 
-def test_pending_upstream_diagnostics_names_the_merge_not_approve(
-    world: World,
+@pytest.mark.parametrize("stage", ["candidate", "finalize"])
+def test_pending_upstream_diagnostics_names_the_awaited_pr(
+    world: World, stage: str
 ) -> None:
-    """Отказ называет ДЕЙСТВИЕ, которого система ждёт.
+    """Отказ называет ДЕЙСТВИЕ, которого система ждёт — на обоих шагах.
 
-    Узел-upstream лежит `approval_pending`, и система ждёт мержа его
-    открытого candidate-PR. Отправь диагностика оператора на повторный
-    `--approve-node` — он вторым кругом получил бы «PR открыт, ждём
-    мержа», то есть тот же ответ через лишний заход.
+    У заявки два PR, и ждут они по очереди: пока candidate открыт, ждут
+    его мержа; после мержа candidate ждут мержа КОНВЕРТА. Назови
+    диагностика candidate на втором шаге — оператор уйдёт на вмерженный PR
+    и вернётся ни с чем, то есть получит ровно тот лишний круг, ради
+    устранения которого номер PR в процедуру и попал (issue #189).
+
+    Прежняя редакция теста фиксировала как раз неверную процедуру: стенд
+    мержил candidate, а ожидание сверялось с его же номером — и докстринг
+    утверждал про открытый PR то, чего в стенде уже не было.
     """
     drive_to_approved(world, "charter")
     approve(world, "requirements")
-    _, op = _request_over(world, "requirements")
-    merge_pr(world, op["candidate_pr"])
-    approve(world, "requirements")  # конверт вынесен, в base ещё pending
+    key, op = _request_over(world, "requirements")
+    if stage == "candidate":
+        expected = op["candidate_pr"]
+    else:
+        merge_pr(world, op["candidate_pr"])
+        approve(world, "requirements")   # конверт вынесен, в base ещё pending
+        expected = world.state.ops[key]["finalize_pr"]
+        assert expected != op["candidate_pr"]
+    assert (
+        world.forge.prs[expected]["state"] == "OPEN"
+    ), "ждут именно этого PR"
 
-    live_key, live_op = _request_over(world, "requirements")
-    expected = world.state.ops[live_key]["candidate_pr"]
     with pytest.raises(RuntimeError) as failure:
         approve(world, "behaviour-spec")
     message = str(failure.value)
@@ -852,7 +864,44 @@ def test_pending_upstream_diagnostics_names_the_merge_not_approve(
     assert "--approve-node" not in message, (
         "оператора не отправляют за тем, чего система не ждёт"
     )
-    assert live_op["candidate_pr"] == expected
+
+
+def test_dropped_node_makes_the_request_unexecutable_with_a_way_out(
+    world: World,
+) -> None:
+    """Узел заявки выпал из активного DAG — терминально, но с выходом.
+
+    Correction удалил файл узла из бандла; заявка несёт его в снимке, и
+    продолжать её нечем. Раньше здесь вылетал голый `KeyError` из
+    `_filename` — трассировка без диагноза и без выхода (issue #190).
+
+    Отказ без терминализации был бы тупиком: заявка блокирует все вызовы
+    по своим узлам (`_advance` выбирается раньше предложения), а через них
+    и весь downstream. Поэтому заявка `invalidated`, а выход — обычный
+    новый candidate по актуальному составу, и он тут же проверяется.
+    """
+    _level_three(world)
+    approve(world, "design")
+    approve(world, "acceptance")
+    key, op = _request_over(world, "design")
+    assert op["nodes"] == ["design", "acceptance"]
+    _drop_node(world, "25-acceptance.md")
+
+    with pytest.raises(RuntimeError) as failure:
+        approve(world, "design", legacy_bundle=5)
+    message = str(failure.value)
+    assert "acceptance" in message and key in message
+    assert "новый candidate по актуальному составу" in message
+    assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
+    assert "выпали из состава" in world.state.ops[key]["reason"]
+
+    # Выход исполним: следующий вызов заводит проход по новому составу.
+    approve(world, "design", legacy_bundle=5)
+    assert al.wave_records(world.state)[1]["status"] == al.WAVE_OBSOLETE
+    fresh_key, fresh = _request_over(world, "design")
+    assert fresh_key != key and fresh["wave"] == 2
+    assert fresh["nodes"] == ["design"]
+    assert fresh["candidate_pr"] is not None
 
 
 # --- Крэш-окна ----------------------------------------------------------

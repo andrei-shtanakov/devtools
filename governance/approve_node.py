@@ -363,7 +363,7 @@ def read_dag_state(
             node,
             texts[node],
             blobs,
-            live_candidate_pr=_live_candidate_pr(state, node),
+            awaiting_merge_pr=_pr_awaiting_merge(state, node),
         )
         if debt is not None:
             debts.append(debt)
@@ -532,16 +532,37 @@ def _still_accumulating(state: RunState, ops: Ops, op: dict) -> bool:
     return _disposition(_pr_facts(state, ops, pr), pr) is Disposition.OPEN
 
 
-def _live_candidate_pr(state: RunState, node: str) -> int | None:
-    """Номер открытого candidate-PR живой заявки над узлом; `None` — нет.
+def _pr_awaiting_merge(state: RunState, node: str) -> int | None:
+    """PR живой заявки над узлом, который ЖДЁТ человеческого мержа.
 
-    Нужен диагностике: статус узла не отличает «заявка жива, ждём мержа»
-    от «заявка терминальна, нужен новый candidate», и отказ, назвавший не
-    то действие, отправляет оператора вторым кругом за тем же ответом.
-    Величину знает только леджер, поэтому она приходит оттуда.
+    Нужен диагностике, и весь его смысл — назвать оператору то действие,
+    которого система действительно ждёт. Статус узла на этот вопрос не
+    отвечает: `approval_pending` одинаково выглядит и когда открыт
+    candidate, и когда candidate уже вмержен, а ждут мержа конверта.
+    Величину знает только леджер — через ШАГ заявки, а не через номер
+    первого попавшегося её PR.
+
+    У заявки два PR, и ждать может каждый из них:
+
+    - шаг `AWAIT_CANDIDATE_MERGE` — ждём candidate: его мерж и есть акт
+      одобрения;
+    - шаг `AWAIT_FINALIZE_MERGE` — candidate уже вмержен, ждём конверта.
+      Назови здесь candidate — оператор уйдёт на вмерженный PR и вернётся
+      ни с чем, то есть получит ровно тот лишний круг, ради устранения
+      которого эта функция и заведена (issue #189);
+    - шаги `CREATE_CANDIDATE` и `FINALIZE` — не ждёт ни один PR: работа за
+      механикой, и оператору называют повторный вызов.
     """
     found = al.live_request_over(state, node)
-    return found[1].get("candidate_pr") if found is not None else None
+    if found is None:
+        return None
+    op = found[1]
+    step = al.next_step(op)
+    if step is al.Step.AWAIT_CANDIDATE_MERGE:
+        return op.get("candidate_pr")
+    if step is al.Step.AWAIT_FINALIZE_MERGE:
+        return op.get("finalize_pr")
+    return None
 
 
 def _require_upstream_ready(
@@ -570,7 +591,7 @@ def _require_upstream_ready(
             up,
             text,
             _base_upstream_blobs(ops, state, dag, up),
-            live_candidate_pr=_live_candidate_pr(state, up),
+            awaiting_merge_pr=_pr_awaiting_merge(state, up),
         )
         if debt is None:
             continue
@@ -1065,6 +1086,7 @@ def _advance(
     факты форджи говорят, что есть сейчас, а запись — что эта заявка уже
     сделала, и после падения второе восстанавливается только из леджера.
     """
+    _require_request_nodes_in_dag(state, ops, dag, op, key)
     step = al.next_step(op)
     if step is al.Step.CREATE_CANDIDATE:
         # Ни одного «если упали до коммита» здесь больше нет: публикация
@@ -1075,6 +1097,72 @@ def _advance(
     if step is al.Step.FINALIZE:
         return _finalize(state, ops, dag, state.ops[key], key)
     return _reconcile_finalize(state, ops, dag, state.ops[key], key)
+
+
+def _require_request_nodes_in_dag(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    op: dict,
+    key: str,
+) -> None:
+    """Узел заявки выпал из активного DAG — заявка неисполнима (issue #190).
+
+    Живая заявка несёт узлы прежнего состава; correction мог удалить файл
+    узла из бандла, и тогда продолжать её нечем: приведение ветки к
+    снимку, признак «опубликовано» и сверки фазы 3 обходят `nodes` и ищут
+    для каждого файл в активном DAG. Раньше здесь вылетал голый `KeyError`
+    из `_filename` — трассировка без диагноза и без выхода.
+
+    Факт установлен положительно, а не выведен из аргумента: состав
+    активного DAG сверен с ФАКТИЧЕСКИМ каталогом бандла в base
+    (`check_bundle_composition` отрабатывает раньше), значит файла в
+    бандле действительно нет. Это тот же класс, что «заявка посчитана
+    против байтов, которых больше не станет», и ответ тот же —
+    терминальный `invalidated` с причиной, из которого выход обычный:
+    новый candidate по актуальному составу.
+
+    Отказом без терминализации обойтись нельзя, и это стоит сказать
+    прямо: заявка над выпавшим узлом блокирует ВСЕ вызовы по своим узлам
+    (`_advance` выбирается раньше предложения), а через них — и весь
+    downstream, которому эти узлы upstream. Воркстрим замирал бы целиком
+    до ручного возврата файла.
+
+    Цена названа честно: если candidate этой заявки уже вмержен,
+    человеческий акт над её выжившими узлами сгорает — они остаются
+    `approval_pending` и пойдут новым candidate. Дешевле замершего
+    воркстрима, но не бесплатно.
+
+    Открытые PR похороненной заявки закрываются здесь же: её предложение
+    осталось бы мержаемым, а мерж создал бы подпись под тем, что снято со
+    стола. Порядок тот же, что при инвалидации заявки над upstream —
+    durable-запись раньше сетевого эффекта.
+    """
+    known = {bundle_dag.node_id(fname) for fname, _ in dag}
+    missing = [node for node in op["nodes"] if node not in known]
+    if not missing:
+        return
+    al.invalidate_request(
+        state,
+        key,
+        f"узлы {', '.join(missing)} выпали из состава активного DAG "
+        f"({', '.join(sorted(known))}) — предложение заявки неисполнимо",
+    )
+    # Открытое предложение похороненной заявки остаётся мержаемым, а его
+    # мерж создал бы подпись под тем, что снято со стола, — тот же довод и
+    # тот же порядок, что при инвалидации заявки над upstream: запись
+    # раньше сетевого эффекта, закрытие блокирует.
+    for pr in (op.get("candidate_pr"), op.get("finalize_pr")):
+        if pr is not None:
+            _close_if_open(state, ops, pr, key)
+    raise RuntimeError(
+        f"заявка {key} вынесла узлы {', '.join(missing)}, которых нет в "
+        "активном DAG: продолжать её нечем, заявка invalidated. "
+        "Процедура: новый candidate по актуальному составу "
+        "(`--approve-node` по узлу, который в нём есть) — прежний проход "
+        "закроется obsolete и заведётся следующий; либо верните файл(ы) "
+        "узла в бандл, если он удалён по ошибке"
+    )
 
 
 def _reconcile_candidate(

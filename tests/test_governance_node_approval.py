@@ -293,15 +293,17 @@ def test_unknown_status_is_fail_closed() -> None:
 def test_pending_procedure_depends_on_the_ledger_not_on_the_node() -> None:
     """Один и тот же статус узла — две разные процедуры.
 
-    «Заявка жива, ждём мержа» и «заявка терминальна, нужен новый
-    candidate» — разные ответы, и различает их только леджер. Выдумать его
-    по файлу узла нельзя, поэтому ответ приходит аргументом.
+    «Ждём мержа вот этого PR» и «заявка терминальна, нужен новый
+    candidate» — разные ответы, и различает их только леджер. Какой
+    именно PR ждёт — тоже его знание: у заявки их два, и на разных шагах
+    ждут разные. Выдумать это по файлу узла нельзя, поэтому ответ
+    приходит аргументом.
     """
     node = _sign_own_bytes(
         _node(status=na.STATUS_APPROVAL_PENDING, pins=_honest_pins())
     )
     waiting = na.node_debt(
-        "design", node, _honest_pins(), live_candidate_pr=407
+        "design", node, _honest_pins(), awaiting_merge_pr=407
     )
     orphaned = na.node_debt("design", node, _honest_pins())
     assert waiting is not None and orphaned is not None
