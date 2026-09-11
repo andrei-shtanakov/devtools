@@ -3918,25 +3918,41 @@ def test_pr_facts_stub_differs_per_pr(tmp_path, monkeypatch) -> None:
     assert state.pr == 5      # фикстура: бандл-PR — именно #5
 
 
+def _resign(target: str, fname: str, by: str, at: str) -> None:
+    """Переписать подпись узла — так это делает финализация §I12.
+
+    Подпись в байтах бандла ЕСТЬ и после снятия штампа: её пишет
+    `--approve-node` фактами мержа candidate-PR. Сменился писатель, не
+    величина, — и канонизация §I2 обязана её не видеть ровно как прежде.
+    Более того, под §I12 смена подписи стала ЧАСТЫМ событием: переодобрение
+    после `invalidated`, другой мержер, просто другой `mergedAt`.
+    """
+    path = Path(target) / "workstreams/WS-alpha-7/spec" / fname
+    meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+    meta["approved_by"] = by
+    meta["approved_at"] = at
+    path.write_text(join_frontmatter(meta, body), encoding="utf-8")
+
+
 def test_content_anchor_is_signature_free(tmp_path: Path) -> None:
     """Определение канонизации: подпись approve в `content_anchor` не входит.
 
-    Не тавтология: байты анкера при перештампе МЕНЯЮТСЯ (утверждается
-    рядом), и пост-штамповый `anchor` §I2 меняется вместе с ними —
-    неизменным остаётся ровно канонический хэш."""
+    Не тавтология: байты узла от смены подписи МЕНЯЮТСЯ (утверждается
+    рядом), и артефактный `anchor` §I2 меняется вместе с ними —
+    неизменным остаётся ровно канонический хэш.
+    """
     target = str(_target(tmp_path))
     bundle = "workstreams/WS-alpha-7/spec"
-    task_bridge.stamp_bundle_approved(target, bundle, "первый", "t1")
     before_hash = task_bridge._content_anchor(target, bundle, None)
-    before_bytes = (
-        Path(target) / bundle / "30-decomposition.md"
-    ).read_bytes()
-    task_bridge.stamp_bundle_approved(
-        target, bundle, "второй", "t2", restamp_nodes=_ALL_NODES
-    )
-    assert (
-        Path(target) / bundle / "30-decomposition.md"
-    ).read_bytes() != before_bytes
+    anchor_file = Path(target) / bundle / "30-decomposition.md"
+    before_bytes = anchor_file.read_bytes()
+
+    _resign(target, "30-decomposition.md", "второй-человек", "t2")
+
+    assert anchor_file.read_bytes() != before_bytes, "байты изменились"
+    assert task_bridge._prospective_anchor(target, bundle) != blob_sha1(
+        before_bytes.decode("utf-8")
+    ), "артефактный anchor подпись видит"
     assert task_bridge._content_anchor(target, bundle, None) == before_hash
 
 
@@ -3946,22 +3962,39 @@ def test_content_anchor_does_not_leak_signature_through_pins(
     """Подпись ВЕРХНЕГО узла не протекает в хэш каскадом через пины.
 
     Реальный пин считается с байтов upstream-файла ВМЕСТЕ с подписью:
-    сменив подпись одному charter'у, мы двигаем пин requirements, оттуда
-    — behaviour-spec, и так до анкера. Канонизация обязана пересчитывать
-    пины из signature-free представлений; вырезав подпись только у самого
-    узла, §I5 всё равно расходился бы — тот же дефект другим путём."""
+    сменив подпись одному charter'у, мы двигаем его блоб, а значит и пин
+    requirements, оттуда — behaviour-spec, и так до анкера. Канонизация
+    обязана пересчитывать пины из signature-free представлений; вырежи она
+    подпись только у самого узла, §I5 всё равно расходился бы — тот же
+    дефект другим путём.
+
+    Канал утечки со снятием штампа не закрылся, а стал горячее: под §I12
+    подпись меняется при каждом переодобрении узла.
+    """
     target = str(_target(tmp_path))
     bundle = "workstreams/WS-alpha-7/spec"
-    task_bridge.stamp_bundle_approved(target, bundle, "первый", "t1")
     before_hash = task_bridge._content_anchor(target, bundle, None)
-    design = Path(target) / bundle / "20-design.md"
-    before_design = design.read_bytes()
-    changed = task_bridge.stamp_bundle_approved(
-        target, bundle, "второй", "t2", restamp_nodes=frozenset({"charter"})
-    )
+
+    # Меняем подпись ВЕРХНЕГО узла и перепиновываем цепочку так, как это
+    # сделал бы каскад одобрения: пин считается по фактическим байтам.
+    _resign(target, "00-charter.md", "второй-человек", "t2")
+    base = Path(target) / bundle
+    blobs: dict[str, str] = {}
+    for fname, upstreams in task_bridge._BUNDLE_DAG:
+        path = base / fname
+        meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+        if upstreams:
+            meta["upstream_hashes"] = {u: blobs[u] for u in upstreams}
+            path.write_text(join_frontmatter(meta, body), encoding="utf-8")
+        blobs[task_bridge._node_id(fname)] = blob_sha1(
+            path.read_text(encoding="utf-8")
+        )
+
     # Перепиновка действительно доехала донизу — иначе сверять нечего.
-    assert f"{bundle}/30-decomposition.md" in changed
-    assert design.read_bytes() != before_design
+    anchor_meta, _ = split_frontmatter(
+        (base / "30-decomposition.md").read_text(encoding="utf-8")
+    )
+    assert anchor_meta["upstream_hashes"]["design"] == blobs["design"]
     assert task_bridge._content_anchor(target, bundle, None) == before_hash
 
 
