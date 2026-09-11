@@ -915,8 +915,16 @@ def test_dropped_node_terminalizes_on_composition_not_on_the_close(
 
     Порядок «запись durable раньше сетевого эффекта» — тот же, что у
     инвалидации заявок ниже по течению (§I12): только запись объясняет
-    закрытие. Поэтому тупика нет: открытый PR похороненной заявки ловит
-    следующий вызов и называет процедуру.
+    закрытие.
+
+    Тупика нет, и ЭТА половина теста — про то, почему (major третьего
+    круга ревью #191). Раньше повтор обходил только живых, похороненная
+    запись из обхода выпадала, и закрытие доводить было нечем: вызов по
+    её узлам отказывал на составе, `_update` терминальную запись не
+    мутирует, а мержаемый PR оставался открытым молча. Теперь обход
+    находит свою похороненную запись по маркеру `invalidated_by` и
+    доводит закрытие САМ — без руки оператора и независимо от того, по
+    какому узлу пришёл вызов.
     """
     _level_three(world)
     approve(world, "design")
@@ -931,13 +939,21 @@ def test_dropped_node_terminalizes_on_composition_not_on_the_close(
     assert "выпали из состава" in world.state.ops[key]["reason"]
     assert world.forge.prs[op["candidate_pr"]]["state"] == "OPEN"
 
-    # Не тупик: следующий вызов называет открытый PR похороненной заявки
-    # и процедуру, а после закрытия воркстрим идёт дальше.
-    with pytest.raises(RuntimeError, match="переоткрыт"):
+    # Повтор, пока закрытие по-прежнему не подтверждается: вызов снова
+    # берётся ЗА ТО ЖЕ закрытие и снова отказывает честно. Проверяется
+    # именно это — что путь к недоведённому эффекту существует, а не что
+    # оператору называют чужую процедуру.
+    with pytest.raises(RuntimeError, match="закрытие PR") as retry:
         approve(world, "design", legacy_bundle=5)
+    assert str(op["candidate_pr"]) in str(retry.value)
+    assert world.forge.prs[op["candidate_pr"]]["state"] == "OPEN"
+
+    # Закрытие подтвердилось — обход доводит эффект САМ. Руками состояние
+    # PR здесь не правится намеренно: правка руками спрятала бы ровно ту
+    # работу, ради которой major и заведён.
     world.forge.close_confirms = True
-    world.forge.prs[op["candidate_pr"]]["state"] = "CLOSED"
     approve(world, "design", legacy_bundle=5)
+    assert world.forge.prs[op["candidate_pr"]]["state"] == "CLOSED"
     assert _request_over(world, "design")[1]["wave"] == 2
 
 
@@ -972,6 +988,55 @@ def test_request_with_all_nodes_dropped_is_reachable_and_settled(
     assert "выпали из состава" in settled["reason"]
     assert world.forge.prs[pr]["state"] == "CLOSED", (
         "мержаемое предложение снято со стола"
+    )
+
+
+def test_buried_request_with_all_nodes_dropped_gets_its_close_finished(
+    world: World,
+) -> None:
+    """Третий заход на ту же болезнь — теперь класс, а не случай.
+
+    Худшая комбинация двух прежних хвостов: у заявки выпали ВСЕ узлы
+    (значит вызова по её узлам не будет никогда — он отказывает на
+    составе) И закрытие её PR не подтвердилось (значит запись уже
+    терминальна, `is_live` False, а `_update` её не мутирует). Раньше
+    сходились три отказа сразу, и мержаемый candidate оставался открытым
+    навсегда, без единого пути его закрыть и без единого слова об этом.
+
+    Инвариант, который тест держит: у терминализованной записи, чей
+    сетевой эффект мог не состояться, есть путь довести эффект на
+    повторе — и путь не зависит от того, по какому узлу пришёл вызов.
+    Здесь оба вызова приходят по ЧУЖОМУ узлу, и этого достаточно.
+    """
+    _level_three(world)
+    approve(world, "acceptance")
+    doomed_key, doomed = _request_over(world, "acceptance")
+    assert doomed["nodes"] == ["acceptance"], "все узлы заявки — выпадут"
+    pr = doomed["candidate_pr"]
+    _drop_node(world, "25-acceptance.md")
+    world.forge.close_confirms = False
+
+    # Заход 1: запись хоронится, закрытие не подтверждается, вызов честно
+    # отказывает. Предложение остаётся на столе — и это ещё не дефект.
+    with pytest.raises(RuntimeError, match="закрытие PR"):
+        approve(world, "design", legacy_bundle=5)
+    buried = world.state.ops[doomed_key]
+    assert buried["status"] == al.STATUS_INVALIDATED
+    assert buried["invalidated_by"] == an._OUTSIDE_DAG, (
+        "своя похоронная операция помечена — по этому маркеру её и найдут"
+    )
+    assert not al.is_live(buried), "запись терминальна, обход живых её не даст"
+    assert world.forge.prs[pr]["state"] == "OPEN"
+
+    # Заход 2 — дефект был ЗДЕСЬ: обход по живым эту запись не отдавал,
+    # и закрытие доводить было нечем. Теперь отдаёт, и оно доводится.
+    world.forge.close_confirms = True
+    approve(world, "design", legacy_bundle=5)
+    assert world.forge.prs[pr]["state"] == "CLOSED", (
+        "мержаемое предложение снято со стола на повторе"
+    )
+    assert world.state.ops[doomed_key]["status"] == al.STATUS_INVALIDATED, (
+        "запись не переписана — доводился эффект, а не решение"
     )
 
 
