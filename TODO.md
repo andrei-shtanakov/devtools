@@ -1240,3 +1240,5 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 ## Узел decomposition в профиле governance
 
 - [x] verify-DT в decomposition-мосте включаются после доставки verify-first @id:decomposition-verify-first-unblock @owner:github:andrei-shtanakov @blocked_by:spec-runner#367
+- [ ] Принять контракт файловой цели verify-first (inbox devtools#201, spec-runner TASK-015): голый `checked_by target: tests/x.py` без `::` — легитимный элемент `**Verifies:**` (состав по репортёру адаптера, правило учтённости + «хотя бы один исполнен», асимметрия с node id), поэтому в `task_bridge` снять «полные селекторы НАМЕРЕННО» из контракта рендера verify-DT, цели `kind: manual` (документы) в группу не рендерить, зонд к соседу — на форму словаря (подмножество: только тестовый файл под адаптером с `supports_file_targets`; директории/glob/не-тестовые файлы — отказ `validate`) @id:accept-file-target-contract @owner:github:andrei-shtanakov
+  Источник: `docs/architecture.md` spec-runner (после #457), devtools#201 (`slug: verify-first-file-target-contract-accepted`).
