@@ -266,6 +266,24 @@ def test_recover_refuses_closed_unmerged_bundle_pr(
         )
 
 
+def test_recover_refuses_open_pr_because_review_verdict_is_unknown(
+    runs_root, tmp_path
+) -> None:
+    with pytest.raises(spec_loop.SpecLoopError, match="S6 review и S7 verdict"):
+        spec_loop.recover_run_from_github(
+            subject="Fleet Inbox",
+            repo="alpha",
+            repo_slug="owner/alpha",
+            target_dir=str(tmp_path / "alpha"),
+            profile="profiles/team-exp.yaml",
+            author_backend="codex",
+            requested_ws_id=None,
+            requested_bundle_dir=None,
+            ops=_RecoveryOps([_bundle_pr()], state="OPEN"),
+        )
+    assert rs.all_run_ids() == []
+
+
 # --- CLI: жёсткий merge_authority ------------------------------------------
 
 

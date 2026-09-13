@@ -28,9 +28,10 @@
   дата участвует только в генерации нового ws-id — запуск на следующий
   день продолжает существующий workstream, а не открывает новый;
 - если локальных леджеров нет, повтор восстанавливает минимальный леджер
-  из durable-фактов GitHub: bundle-PR по head-ветке, run-id из его тела,
-  bundle-dir из списка файлов; S8 безопасно переисполняется, а tasks-PR
-  реконсилируется существующим мостом по своей ветке;
+  из durable-фактов GitHub: MERGED bundle-PR по head-ветке, run-id из его
+  тела, bundle-dir из списка файлов; S8 безопасно переисполняется, а
+  tasks-PR реконсилируется существующим мостом по своей ветке; OPEN не
+  доказывает прохождение review/verdict и потому отказывает;
 - любая неоднозначность (несколько кандидатов, битый леджер, ws-id-
   коллизия с чужим subject, расхождение манифеста и origin) — fail-closed
   с перечислением кандидатов и подсказкой `--run-id`/`--ws-id`.
@@ -292,10 +293,12 @@ def recover_run_from_github(
 
     Внутренние op-записи S1–S7 из GitHub доказать нельзя и мы их не
     выдумываем. Восстановленный run ставится ровно на человеческую границу
-    ``waiting_human_merge``: ``runner.resume`` сверит живой факт мержа и,
-    если PR уже MERGED, идемпотентно повторит authoritative S8. Дальнейший
-    мост сам читает статусы узлов из frontmatter base и реконсилирует
-    tasks-PR по ``spec/<ws-id>-tasks``.
+    ``waiting_human_merge`` только при доказанном MERGED:
+    ``runner.resume`` повторно сверит этот факт и идемпотентно выполнит
+    authoritative S8. Дальнейший мост сам читает статусы узлов из
+    frontmatter base и реконсилирует tasks-PR по
+    ``spec/<ws-id>-tasks``. OPEN отказывает: по нему не восстановить,
+    прошли ли S6 review и S7 verdict.
     """
     prefix, pattern = _remote_branch_pattern(subject, requested_ws_id)
     try:
@@ -369,7 +372,14 @@ def recover_run_from_github(
             f"факты bundle-PR #{number} недоступны: {exc}"
         ) from exc
     pr_state = facts.get("state")
-    if pr_state not in ("OPEN", "MERGED"):
+    if pr_state == "OPEN":
+        raise SpecLoopError(
+            f"bundle-PR #{number} по ветке {branch!r} ещё OPEN, а GitHub "
+            "не доказывает, были ли пройдены S6 review и S7 verdict; "
+            "восстановите исходный run.json либо вручную решите судьбу PR. "
+            "Автоматически объявлять его waiting_human_merge запрещено"
+        )
+    if pr_state != "MERGED":
         raise SpecLoopError(
             f"bundle-PR #{number} по ветке {branch!r} закрыт без мержа "
             f"(state={pr_state!r}); судьба workstream не выводится, новый "
@@ -423,6 +433,9 @@ def recover_run_from_github(
         merge_authority="human",
         author_backend=author_backend,
     )
+    # Только MERGED — достаточный durable-факт для этой границы. OPEN мог
+    # быть создан как draft до S6 либо остановлен красным review/verdict;
+    # считать его waiting_human_merge означало бы навсегда пропустить S6/S7.
     state.status = "waiting_human_merge"
     state.branch = branch
     state.pr = number
