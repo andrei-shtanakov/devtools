@@ -1866,6 +1866,120 @@ def test_rendered_marker_is_read_back_by_the_spec_runner_parser() -> None:
     assert parsed["TASK-001"]["class"] is None
 
 
+_SPEC_RUNNER_SELECTOR_PROBE = (
+    "import json, sys\n"
+    "from pathlib import Path\n"
+    "from spec_runner.tdd_runners import (\n"
+    "  ADAPTERS, SelectorRefusal, parse_group_element,\n"
+    ")\n"
+    "root = Path(sys.argv[1])\n"
+    "forms = {\n"
+    "  'test_file': 'tests/test_a.py',\n"
+    "  'directory': 'tests',\n"
+    "  'glob': 'tests/test_*.py',\n"
+    "  'non_test': 'docs/manual.md',\n"
+    "}\n"
+    "out = {}\n"
+    "for name, adapter in ADAPTERS.items():\n"
+    "  results = {}\n"
+    "  for label, raw in forms.items():\n"
+    "    result = parse_group_element(adapter, raw, root)\n"
+    "    results[label] = {\n"
+    "      'accepted': not isinstance(result, SelectorRefusal),\n"
+    "      'code': result.code if isinstance(result, SelectorRefusal) else None,\n"
+    "      'locator': type(result.locator).__name__\n"
+    "        if not isinstance(result, SelectorRefusal) else None,\n"
+    "    }\n"
+    "  out[name] = {\n"
+    "    'supports_file_targets': adapter.supports_file_targets,\n"
+    "    'forms': results,\n"
+    "  }\n"
+    "print(json.dumps(out))\n"
+)
+
+
+def _probe_spec_runner_selector_dictionary():
+    """Read the neighbour's real adapter dictionary, or return None."""
+
+    import json
+    import subprocess
+    import tempfile
+
+    interpreter = (
+        Path(__file__).resolve().parents[2]
+        / "spec-runner"
+        / ".venv"
+        / "bin"
+        / "python"
+    )
+    if not interpreter.exists():
+        return None
+    available = subprocess.run(
+        [
+            str(interpreter),
+            "-c",
+            "from spec_runner.tdd_runners import ADAPTERS, parse_group_element\n"
+            "assert all(hasattr(a, 'supports_file_targets') "
+            "for a in ADAPTERS.values())\n",
+        ],
+        capture_output=True,
+    )
+    if available.returncode != 0:
+        return None
+    with tempfile.TemporaryDirectory() as raw_root:
+        root = Path(raw_root)
+        (root / "tests").mkdir()
+        (root / "tests/test_a.py").write_text(
+            "def test_a():\n    pass\n", encoding="utf-8"
+        )
+        (root / "docs").mkdir()
+        (root / "docs/manual.md").write_text("manual\n", encoding="utf-8")
+        done = subprocess.run(
+            [str(interpreter), "-c", _SPEC_RUNNER_SELECTOR_PROBE, str(root)],
+            capture_output=True,
+            text=True,
+        )
+    assert done.returncode == 0, (
+        "spec-runner selector dictionary probe failed:\n"
+        + (done.stderr or "")[-2000:]
+    )
+    return json.loads(done.stdout)
+
+
+def test_vendored_selector_policy_matches_spec_runner_dictionary() -> None:
+    """Read-only cross-repo probe for the accepted devtools#201 boundary."""
+
+    from governance.spec_runner_contract import SELECTOR_POLICIES
+
+    observed = _probe_spec_runner_selector_dictionary()
+    if observed is None:
+        pytest.skip(
+            "spec-runner with file-target dictionary is unavailable — "
+            "cross-repo boundary not checked"
+        )
+
+    assert set(SELECTOR_POLICIES) == set(observed)
+    for name, policy in SELECTOR_POLICIES.items():
+        assert observed[name]["supports_file_targets"] is (
+            policy.supports_file_targets
+        )
+    assert observed["pytest"]["forms"] == {
+        "test_file": {"accepted": True, "code": None, "locator": "FileTarget"},
+        "directory": {"accepted": False, "code": "directory", "locator": None},
+        "glob": {"accepted": False, "code": "glob_pattern", "locator": None},
+        "non_test": {
+            "accepted": False,
+            "code": "not_discoverable",
+            "locator": None,
+        },
+    }
+    assert observed["exunit"]["forms"]["test_file"] == {
+        "accepted": False,
+        "code": "file_target_unsupported",
+        "locator": None,
+    }
+
+
 def test_waived_task_points_its_source_at_the_declaration() -> None:
     """`Source:` ведёт на DT — то есть на само объявление.
 
@@ -2044,6 +2158,41 @@ def test_verify_dt_union_keeps_both_selectors_of_own_scenarios_sharing_a_file() 
         "**Verifies:** tests/test_shared.py::t1, tests/test_shared.py::t2"
         in text
     )
+
+
+def test_verify_dt_excludes_manual_checked_by_targets_from_declared_group() -> None:
+    """A manual document stays in the checklist, never in Verifies."""
+
+    scenarios = task_bridge.parse_behaviour(
+        "#### BEH-01: Документ\n`traces: [FR-01]`\n"
+        "**checked_by** `kind: manual` `target: docs/manual.md`\n\n"
+        "#### BEH-02: Автотест\n`traces: [FR-01]`\n"
+        "**checked_by** `kind: integration` `target: tests/test_auto.py`\n"
+    )
+    dt = (
+        "#### DT-01: Проверка · type: verify · owner: qa\n"
+        "scenarios: [BEH-01, BEH-02]\ndepends_on: []\n"
+        "delivered_by: []\nparallel_group: solo\n"
+        "verifies: [docs/manual.md, tests/test_auto.py]\n"
+    )
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(dt)
+    assert findings == []
+
+    text = task_bridge.render_tasks_dt(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/30-decomposition.md",
+        scenarios=scenarios,
+        dt_tasks=dt_tasks,
+        generated_at="2026-09-13T12:00:00",
+        anchor_blob="ab" * 20,
+    )
+
+    verifies = next(
+        line for line in text.splitlines() if line.startswith("**Verifies:**")
+    )
+    assert verifies == "**Verifies:** tests/test_auto.py"
+    assert "docs/manual.md (kind: manual)" in text
 
 
 def test_verify_dt_without_checked_by_targets_refuses() -> None:
@@ -2386,6 +2535,36 @@ def test_legacy_5_goes_dt_path_with_graph_validation(tmp_path: Path) -> None:
     # снаружи видно, что одобренность доставка проверяет, а не создаёт.
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
     assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
+
+
+def test_deliver_refuses_bare_file_target_for_exunit_before_branch(
+    tmp_path: Path,
+) -> None:
+    """devtools#159: an unsupported class fails at delivery, not execution."""
+
+    target = _target_legacy_5(tmp_path, BEHAVIOUR_MD, DECOMPOSITION_VERIFY_MD)
+    (target / "spec-runner.config.yaml").write_text(
+        "tdd_runner: exunit\ncommands:\n  test: mix test\n",
+        encoding="utf-8",
+    )
+    ops = _StubOps()
+
+    with pytest.raises(RuntimeError) as failure:
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=ops,
+            legacy_bundle=5,
+        )
+
+    message = str(failure.value)
+    assert "exunit" in message
+    assert "path:line" in message
+    assert not any(call[0] == "ensure_branch" for call in ops.calls)
 
 
 def test_deliver_full_dag_renders_via_render_tasks_dt(tmp_path: Path) -> None:

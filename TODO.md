@@ -1240,11 +1240,15 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 ## Узел decomposition в профиле governance
 
 - [x] verify-DT в decomposition-мосте включаются после доставки verify-first @id:decomposition-verify-first-unblock @owner:github:andrei-shtanakov @blocked_by:spec-runner#367
-- [ ] Принять контракт файловой цели verify-first (inbox devtools#201, slug: verify-first-file-target-contract-accepted; spec-runner TASK-015): голый `checked_by target: tests/x.py` без `::` — легитимный элемент `**Verifies:**` (состав по репортёру адаптера, правило учтённости + «хотя бы один исполнен», асимметрия с node id), поэтому в `task_bridge` снять «полные селекторы НАМЕРЕННО» из контракта рендера verify-DT, цели `kind: manual` (документы) в группу не рендерить, зонд к соседу — на форму словаря (подмножество: только тестовый файл под адаптером с `supports_file_targets`; директории/glob/не-тестовые файлы — отказ `validate`) @id:accept-file-target-contract @owner:github:andrei-shtanakov
+- [x] Принять контракт файловой цели verify-first (inbox devtools#201, slug: verify-first-file-target-contract-accepted; spec-runner TASK-015): голый `checked_by target: tests/x.py` без `::` — легитимный элемент `**Verifies:**` (состав по репортёру адаптера, правило учтённости + «хотя бы один исполнен», асимметрия с node id), поэтому в `task_bridge` снять «полные селекторы НАМЕРЕННО» из контракта рендера verify-DT, цели `kind: manual` (документы) в группу не рендерить, зонд к соседу — на форму словаря (подмножество: только тестовый файл под адаптером с `supports_file_targets`; директории/glob/не-тестовые файлы — отказ `validate`) @id:accept-file-target-contract @owner:github:andrei-shtanakov — PR этой ветки
   Источник: `docs/architecture.md` spec-runner (после #457), devtools#201.
   Реализация этого пункта должна также закрыть исходный несовместимый контракт
   devtools#159: отдельной задачи на преобразование file→node-id больше не
   требуется.
+  Evidence: `task_bridge` передаёт file target как объявлен, исключает
+  `kind: manual`; S4 и deliver читают вендоренную capability-границу
+  адаптера и до создания ветки требуют `path:line` у ExUnit. Live-probe
+  сверяет pytest/ExUnit и refusal-коды с реальным словарём spec-runner.
 
 ## Триаж открытого governance-долга — 2026-09-13
 
@@ -1297,7 +1301,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   батч, но #195 обязан сохранить negative self-check: одной правки прозы для
   него недостаточно.
 
-- [ ] Остаточный долг decomposition/task_bridge: legacy-граф, verifies-парсер и waiver-контракт привести к одной исполнимой форме после file-target cutover @owner:github:andrei-shtanakov @id:task-bridge-residual-debt-wave @blocked_by:todo://devtools/accept-file-target-contract
+- [ ] Остаточный долг decomposition/task_bridge: legacy-граф, verifies-парсер и waiver-контракт привести к одной исполнимой форме после file-target cutover @owner:github:andrei-shtanakov @id:task-bridge-residual-debt-wave
   Источники: devtools#123 (оставшаяся линейность legacy-графа; уже закрытые
   Traces/owner_role повторно не делать), #162 (три локальных остатка verifies),
   #198 (три остатка waiver-проекции) и #200 (ложные комментарии +
@@ -1328,12 +1332,12 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       S8 завершился `exit=0`, существующий tasks-PR kapelle#77 найден
       реконсиляцией; внешние мутации smoke-харнессом запрещены и не
       предпринимались.
-- [ ] E0.6b S8-вердикт едет внутри tasks-PR того же цикла: `deliver` кладёт `out/governance-runs/<run-id>/s8-gate-verdicts.jsonl` (gate-verdicts/v1; исходное место записи гейта `.steward/gate_verdicts.jsonl` в корне репо-цели прибирается после S8) в `workstreams/<ws-id>/evidence/` тем же коммитом, что tasks-спека; отдельный evidence-PR не создаётся, у tasks-PR собственного S8 нет (терминально) @owner:github:andrei-shtanakov @id:s8-verdict-in-tasks-pr @blocked_by:todo://devtools/accept-file-target-contract
+- [ ] E0.6b S8-вердикт едет внутри tasks-PR того же цикла: `deliver` кладёт `out/governance-runs/<run-id>/s8-gate-verdicts.jsonl` (gate-verdicts/v1; исходное место записи гейта `.steward/gate_verdicts.jsonl` в корне репо-цели прибирается после S8) в `workstreams/<ws-id>/evidence/` тем же коммитом, что tasks-спека; отдельный evidence-PR не создаётся, у tasks-PR собственного S8 нет (терминально) @owner:github:andrei-shtanakov @id:s8-verdict-in-tasks-pr
       Порядок в коде: `resume` → `completed` (S8 внутри) → `deliver`
       (`governance/spec_loop.py`). Правит `task_bridge` — поэтому после
       #201, как и остальные bridge-правки (триаж 2026-09-13). Альтернатива
       без записи в репо — check run на sha мержа бандла — не выбрана.
-- [ ] E1 Вход конвейера из discovery-brief: `spec-loop --brief <path>` — бриф обязан пройти вендоренный gate_check (pass, иначе fail-closed), хэш брифа входит в `upstream_hashes` charter, бриф лежит нулевым узлом в `workstreams/<ws-id>/spec/` и едет бандл-PR-ом; промпты charter/requirements получают бриф как источник (G-NN/FR-NN переносятся с трассировкой), гвард «каждый Must-FR брифа встречается в requirements»; приёмка — живой прогон engineer-фрейм → бриф → spec-loop → approved tasks-спека → исполнение spec-runner @owner:github:andrei-shtanakov @id:spec-loop-brief-input @blocked_by:todo://devtools/accept-file-target-contract
+- [ ] E1 Вход конвейера из discovery-brief: `spec-loop --brief <path>` — бриф обязан пройти вендоренный gate_check (pass, иначе fail-closed), хэш брифа входит в `upstream_hashes` charter, бриф лежит нулевым узлом в `workstreams/<ws-id>/spec/` и едет бандл-PR-ом; промпты charter/requirements получают бриф как источник (G-NN/FR-NN переносятся с трассировкой), гвард «каждый Must-FR брифа встречается в requirements»; приёмка — живой прогон engineer-фрейм → бриф → spec-loop → approved tasks-спека → исполнение spec-runner @owner:github:andrei-shtanakov @id:spec-loop-brief-input
       Граница author ≠ execute discovery сохраняется: PR открывает конвейер,
       не discovery. gate_check вендорится КОДОМ пиненой копией по образцу
       discovery (`discovery/src/discovery/contract/`: copy-integrity против

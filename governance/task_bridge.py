@@ -51,6 +51,7 @@ from governance.facts import Outcome
 from governance.ops import Ops, RealOps
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
 from governance.run_state import RunState, load, op_complete, op_start, save
+from governance.spec_runner_contract import target_selector_policy
 from governance.stale_adapter import blob_sha1
 
 # [a-z]?-суффикс: раунды ревью бандлов вставляют сценарии как BEH-18a —
@@ -157,6 +158,22 @@ def _target_files(scenarios: list[Scenario]) -> set[str]:
         for sc in scenarios
         if sc.checked_target
     }
+
+
+def _manual_only_target_files(scenarios: list[Scenario]) -> set[str]:
+    """Files whose checked_by bindings are deliberately non-executable."""
+
+    manual: set[str] = set()
+    automated: set[str] = set()
+    for scenario in scenarios:
+        if not scenario.checked_target:
+            continue
+        target = scenario.checked_target.split("::", 1)[0]
+        if scenario.checked_kind == "manual":
+            manual.add(target)
+        else:
+            automated.add(target)
+    return manual - automated
 
 
 def _merge_featureless_by_target_file(
@@ -489,6 +506,7 @@ def render_tasks_dt(
     )
     lines += _render_resolutions_section(design_text)
     lines += _render_acceptance_section(acceptance_text)
+    manual_only_targets = _manual_only_target_files(scenarios)
     for t in dt_tasks:
         group = [by_beh[b] for b in t.scenarios if b in by_beh]
         beh_ids = [g.beh_id for g in group]
@@ -519,9 +537,9 @@ def render_tasks_dt(
             # verify-first — живой прогон группы до первого платного
             # вызова, green → green-only без покупки красного
             lines.append("**Mode:** verify_first")
-            # Полные селекторы (node id с `::`) НАМЕРЕННО: группа
-            # verify-first прогоняется по-селекторно (FR-06), словарь
-            # судит адаптер spec-runner; дедуп — как у bindings.
+            # Элементы группы передаются КАК ОБЪЯВЛЕНЫ: node id либо bare
+            # file target. Словарь и состав file target судит разрешённый
+            # адаптер spec-runner; мост не угадывает тесты по файлу.
             # Контракт формата ЗАПИНОВАН (minor ревью PR #152) — точные
             # регексы парсера spec-runner (src/spec_runner/task.py,
             # TASK-001/002 WS-367, PR #371/#372):
@@ -538,10 +556,10 @@ def render_tasks_dt(
             # verify_first, иначе собственный тест-файл DT молча выпадает
             # из прогона, хотя чек-лист той же задачи требует его зелёным.
             # Порядок ДЕТЕРМИНИРОВАН и задокументирован: СНАЧАЛА
-            # собственные checked_by-цели сценариев (порядок scenarios,
-            # полный pytest-селектор с `::`), ПОТОМ verifies (порядок
-            # объявления, голые пути по канону гарда — decomposition_guard
-            # сравнивает verifies с checked_by-целями ПОСЛЕ среза `::`).
+            # собственные ИСПОЛНЯЕМЫЕ checked_by-цели сценариев (порядок
+            # scenarios), ПОТОМ verifies (порядок объявления). `kind:
+            # manual` — человеческая проверка документа, не элемент
+            # selector dictionary, поэтому в исполняемую группу не входит.
             # Дедуп — ПО ПОЛНОЙ СТРОКЕ селектора (round 11 ревью PR #161,
             # major — откат round-8/9 «дедупа по файлу»: тот дедуп молча
             # ронял ВТОРОЙ checked_by-селектор СОБСТВЕННЫХ сценариев DT,
@@ -558,12 +576,15 @@ def render_tasks_dt(
             # не отличим от чисто checked_by-вывода, как раньше.
             targets: list[str] = []
             for b in t.scenarios:
-                sc_target = (
-                    by_beh[b].checked_target if b in by_beh else None
-                )
+                scenario = by_beh.get(b)
+                sc_target = scenario.checked_target if scenario else None
+                if scenario and scenario.checked_kind == "manual":
+                    continue
                 if sc_target and sc_target not in targets:
                     targets.append(sc_target)
             for f in t.verifies:
+                if f.split("::", 1)[0] in manual_only_targets:
+                    continue
                 if f not in targets:
                     targets.append(f)
             if not targets:
@@ -1364,9 +1385,16 @@ def deliver(
             base / "30-decomposition.md"
         ).read_text(encoding="utf-8")
         behaviour_pre = behaviour.read_text(encoding="utf-8")
-        graph_errors = decomposition_guard.graph_findings(
-            behaviour_pre, decomposition_pre
-        )
+        try:
+            selector_policy = target_selector_policy(target_dir)
+        except ValueError as exc:
+            graph_errors = [f"selector dictionary: {exc}"]
+        else:
+            graph_errors = decomposition_guard.graph_findings(
+                behaviour_pre,
+                decomposition_pre,
+                selector_policy=selector_policy,
+            )
         if graph_errors:
             raise RuntimeError(
                 "decomposition: граф DT невалиден:\n"

@@ -9,6 +9,11 @@ import re
 from dataclasses import dataclass
 from datetime import date
 
+from governance.spec_runner_contract import (
+    SelectorPolicy,
+    is_file_target_form,
+)
+
 # Маркер-подстрока non-fatal находки формы «осиротевший/опечатанный путь
 # в verifies» (round 7 ревью PR #161, минор) — единственная точка истины
 # её текста, используется в `_orphan_verifies_findings` НИЖЕ (единственный
@@ -205,7 +210,7 @@ class DtTask:
     """Одна задача decomposition-узла (заголовок #### DT-NN).
 
     ``verifies`` — структурное поле группы наблюдения (owner ruling,
-    multi-file DT-14): список файлов, за которыми присматривает
+    multi-file DT-14): список объявленных селекторов, за которыми присматривает
     ``type: verify`` DT, СТРУКТУРНО отдельный от ``checked_by``-владения
     (которое несут ``scenarios``) и НЕ участвующий в single-owner
     инварианте ``graph_findings`` вовсе (round 4 ревью PR #161, finding 3:
@@ -428,6 +433,31 @@ _BEH_CHECKED_RE = re.compile(
 )
 
 
+def _parse_beh_binding_records(
+    text: str,
+) -> dict[str, tuple[str | None, str | None, str | None]]:
+    """beh_id → (file, kind, declared target), taking the last binding."""
+
+    heads = list(_BEH_HEAD_RE.finditer(text))
+    result: dict[str, tuple[str | None, str | None, str | None]] = {}
+    for idx, match in enumerate(heads):
+        end = heads[idx + 1].start() if idx + 1 < len(heads) else len(text)
+        block = text[match.start() : end]
+        checked = None
+        for checked in _BEH_CHECKED_RE.finditer(block):
+            pass
+        if checked is None:
+            result[match.group(1)] = (None, None, None)
+        else:
+            declared = checked.group(2)
+            result[match.group(1)] = (
+                declared.split("::", 1)[0],
+                checked.group(1),
+                declared,
+            )
+    return result
+
+
 def _parse_beh_bindings(text: str) -> dict[str, tuple[str | None, str | None]]:
     """beh_id → (файл checked_by-цели, kind); `::селектор` отброшен.
 
@@ -441,20 +471,12 @@ def _parse_beh_bindings(text: str) -> dict[str, tuple[str | None, str | None]]:
     расхождение «первое против последнего» пропускало бы single-owner
     по неактуальной цели).
     """
-    heads = list(_BEH_HEAD_RE.finditer(text))
-    result: dict[str, tuple[str | None, str | None]] = {}
-    for idx, m in enumerate(heads):
-        end = heads[idx + 1].start() if idx + 1 < len(heads) else len(text)
-        block = text[m.start() : end]
-        checked = None
-        for checked in _BEH_CHECKED_RE.finditer(block):
-            pass  # последнее вхождение — как у моста
-        if checked is None:
-            result[m.group(1)] = (None, None)
-        else:
-            target = checked.group(2).split("::", 1)[0]
-            result[m.group(1)] = (target, checked.group(1))
-    return result
+    return {
+        beh_id: (target, kind)
+        for beh_id, (target, kind, _declared) in _parse_beh_binding_records(
+            text
+        ).items()
+    }
 
 
 def _transitive_deps(
@@ -524,7 +546,12 @@ def non_fatal_findings(
     return _orphan_verifies_findings(tasks, bindings)
 
 
-def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
+def graph_findings(
+    behaviour_text: str,
+    decomposition_text: str,
+    *,
+    selector_policy: SelectorPolicy | None = None,
+) -> list[str]:
     """Инварианты графа DT (§3 спеки) + findings формы парсера.
 
     Порядок проверок фиксирован, findings накапливаются (гейт показывает
@@ -545,15 +572,20 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
     наблюдаемого файла его вообще создаст.
 
     «Группа наблюдения не выводится вовсе» — тоже FATAL (round 13 ревью
-    PR #161, минор — промотирована из non-fatal: условие `verify-DT без
-    checked_by-цели в scenarios И без verifies` ТОЖДЕСТВЕННО тому, при
-    котором `task_bridge.render_tasks_dt` детерминированно поднимает
+    PR #161, минор — промотирована из non-fatal): учитываются только
+    исполняемые checked_by-цели и verifies; `kind: manual` не превращает
+    документ в селектор. Это ТОЖДЕСТВЕННО условию, при котором
+    `task_bridge.render_tasks_dt` детерминированно поднимает
     RuntimeError «нечего прогонять» — «рекомендация формы, не блокирует
     доставку» была ложью именно для этого входа; легаси-форма,
     checked_by-цель ЕСТЬ и verifies нет, — по-прежнему НЕ находка).
     """
     tasks, findings = parse_dt_tasks(decomposition_text)
-    bindings = _parse_beh_bindings(behaviour_text)
+    records = _parse_beh_binding_records(behaviour_text)
+    bindings = {
+        beh_id: (target, kind)
+        for beh_id, (target, kind, _declared) in records.items()
+    }
     ids = {t.dt_id for t in tasks}
     edges = {t.dt_id: t.depends_on for t in tasks}
 
@@ -635,24 +667,51 @@ def graph_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
 
     # Группа наблюдения verify-DT не выводится ВООБЩЕ — FATAL (round 13
     # ревью PR #161, минор, промотирована из non-fatal, см. докстринг
-    # выше): ни одной checked_by-цели через scenarios И verifies пуст —
-    # прогонять нечего, render_tasks_dt детерминированно упал бы
-    # RuntimeError. Легаси-форма (checked_by-цель ЕСТЬ, verifies нет) —
-    # НЕ находка.
+    # выше): ни одной исполняемой checked_by-цели через scenarios и ни
+    # одного verifies после исключения manual-only путей — прогонять
+    # нечего, render_tasks_dt детерминированно упал бы RuntimeError.
+    kinds_by_file: dict[str, set[str | None]] = {}
+    for target, kind in bindings.values():
+        if target is not None:
+            kinds_by_file.setdefault(target, set()).add(kind)
+    manual_only = {
+        target for target, kinds in kinds_by_file.items()
+        if kinds == {"manual"}
+    }
     for t in tasks:
         if t.type != "verify":
             continue
-        has_own_target = any(
-            bindings.get(beh, (None, None))[0] is not None
-            for beh in t.scenarios
-        )
-        if not has_own_target and not t.verifies:
+        runnable_targets: list[str] = []
+        for beh in t.scenarios:
+            _target, kind, declared = records.get(beh, (None, None, None))
+            if (
+                declared
+                and kind != "manual"
+                and declared not in runnable_targets
+            ):
+                runnable_targets.append(declared)
+        for declared in t.verifies:
+            if declared.split("::", 1)[0] in manual_only:
+                continue
+            if declared not in runnable_targets:
+                runnable_targets.append(declared)
+        if not runnable_targets:
             findings.append(
                 f"{t.dt_id}: type: verify — "
                 f"{_VERIFY_GROUP_UNDERIVABLE_MARKER} (нет ни "
-                "checked_by-целей в scenarios, ни verifies) — группу "
+                "исполняемых checked_by-целей, ни verifies; kind: manual "
+                "не является селектором) — группу "
                 "наблюдения прогонять нечем, доставка этого DT невозможна"
             )
+        if selector_policy and not selector_policy.supports_file_targets:
+            for declared in runnable_targets:
+                if is_file_target_form(declared):
+                    findings.append(
+                        f"{t.dt_id}: {declared} — адаптер "
+                        f"{selector_policy.name} не поддерживает file target; "
+                        "объявите исполняемый селектор "
+                        f"{selector_policy.node_id_hint}"
+                    )
 
     # verify/implement-контракт delivered_by + транзитивное замыкание
     for t in tasks:
