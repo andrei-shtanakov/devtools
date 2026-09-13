@@ -368,6 +368,40 @@ def _render_header(
     ]
 
 
+def _legacy_group_dependencies(
+    groups: list[tuple[str, str, list[Scenario]]],
+) -> list[tuple[int, ...]]:
+    """Return one-based dependencies for legacy Feature/task groups.
+
+    Feature groups form independent lanes above the latest featureless task.
+    A repeated Feature continues only its own lane.  The next featureless
+    group joins every active Feature tail and becomes the new serial trunk;
+    further featureless groups continue that trunk.  Thus one failed Feature
+    cannot skip an unrelated one, while aggregate regression/documentation
+    work still waits for the complete preceding wave (#123).
+    """
+
+    dependencies: list[tuple[int, ...]] = []
+    serial_tail: int | None = None
+    feature_tails: dict[str, int] = {}
+    for index, (_key, _title, scenarios) in enumerate(groups, start=1):
+        feature = scenarios[0].feature if scenarios else None
+        if feature is not None:
+            previous = feature_tails.get(feature, serial_tail)
+            dependencies.append((previous,) if previous is not None else ())
+            feature_tails[feature] = index
+            continue
+        if feature_tails:
+            dependencies.append(tuple(feature_tails.values()))
+            feature_tails.clear()
+        else:
+            dependencies.append(
+                (serial_tail,) if serial_tail is not None else ()
+            )
+        serial_tail = index
+    return dependencies
+
+
 def render_tasks(
     ws_id: str,
     subject: str,
@@ -389,7 +423,8 @@ def render_tasks(
     Группировка (решение владельца 2026-08-31): одна задача на
     ``## Feature:``-секцию behaviour-spec, а не на сценарий — 1:1 в боевом
     прогоне kapelle#47 дало 19 церемониальных задач. Сценарии без Feature
-    остаются задачами 1:1; задачи зависят цепочкой (порядок документа).
+    остаются задачами 1:1. Feature-секции образуют независимые ветки над
+    featureless-стволом; следующая featureless-задача соединяет их хвосты.
 
     Якорь traces_to/upstream_hashes по умолчанию — decomposition
     (терминальный узел `_BUNDLE_DAG`, Task 7 плана decomposition-node):
@@ -416,6 +451,7 @@ def render_tasks(
         else:
             groups.append((key, sc.feature or sc.title, [sc]))
     groups = _merge_featureless_by_target_file(groups)
+    group_dependencies = _legacy_group_dependencies(groups)
     for index, (_key, title, group) in enumerate(groups, start=1):
         beh_ids = [g.beh_id for g in group]
         traces: list[str] = []
@@ -444,8 +480,10 @@ def render_tasks(
             f"Source: {bundle_path}#{beh_ids[0]}"
             + (f" (—{beh_ids[-1]})" if len(beh_ids) > 1 else ""),
         ]
-        if index > 1:
-            lines.append(f"**Depends on:** [TASK-{index - 1:03d}]")
+        dependencies = group_dependencies[index - 1]
+        if dependencies:
+            refs = ", ".join(f"[TASK-{dep:03d}]" for dep in dependencies)
+            lines.append(f"**Depends on:** {refs}")
         lines += ["", "**Checklist:**"]
         lines += [
             f"- [ ] реализовать {g.beh_id}: {g.title}" for g in group

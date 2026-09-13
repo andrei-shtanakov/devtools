@@ -4329,8 +4329,8 @@ def test_gate_dt_graph_finding_stops_on_underivable_group(
     """Round 13 ревью PR #161, минор (контракт владельца): «группа
     наблюдения не выводится вовсе» промотирована в FATAL — гейт теперь
     останавливается на этом входе, не молча пропускает его как warning.
-    Условие тождественно тому, при котором render_tasks_dt/deliver()
-    детерминированно падают RuntimeError."""
+    #162: orphan verifies объясняет причину warning-строкой, но не отменяет
+    fatal underivable — именно error управляет исходом гейта."""
     beh_two = (
         _DEFAULT_BEHAVIOUR_BODY
         + "\n#### BEH-02: y\n`traces: [FR-01]`\n"
@@ -4378,7 +4378,8 @@ def test_gate_dt_graph_finding_stops_on_underivable_group(
                     "scenarios: [BEH-02]\n"
                     "depends_on: [DT-01]\n"
                     "delivered_by: [DT-01]\n"
-                    "parallel_group: solo\n\n"
+                    "parallel_group: solo\n"
+                    "verifies:\n  - tests/test_typo.py\n\n"
                     "## Инварианты графа\n\nСоблюдены.\n\n"
                     "## Порядок и параллельность\n\nПоследовательно.\n\n"
                     "## Вне объёма\n\nНичего не исключено.\n",
@@ -4397,6 +4398,8 @@ def test_gate_dt_graph_finding_stops_on_underivable_group(
         runner.run_dir("r-dt-graph-underivable-stop") / "gate-findings.txt"
     ).read_text()
     assert "error GC-DT-GRAPH" in findings
+    assert "warning GC-DT-GRAPH" in findings
+    assert "опечатка либо осиротевший путь" in findings
     assert "группа наблюдения не выводится" in findings
     assert "DT-02" in findings and "verifies" in findings
 

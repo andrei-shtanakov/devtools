@@ -684,7 +684,7 @@ owner_role: product
 
 def test_render_groups_by_feature_sections() -> None:
     """Группировка по Feature (решение владельца 2026-08-31): одна задача
-    на секцию, полный перечень BEH внутри, зависимость цепочкой."""
+    на секцию, полный перечень BEH внутри, секции независимы."""
     scenarios = task_bridge.parse_behaviour(FEATURED_MD)
     assert [s.feature for s in scenarios] == [
         "Каркас", "Каркас", "Безопасность",
@@ -702,7 +702,8 @@ def test_render_groups_by_feature_sections() -> None:
     assert "### TASK-003:" not in text
     assert "- [ ] реализовать BEH-01: Позитив" in text
     assert "- [ ] реализовать BEH-02: Пустой корень" in text
-    assert "**Depends on:** [TASK-001]" in text
+    task2 = text.split("### TASK-002:", 1)[1]
+    assert "**Depends on:**" not in task2
     # пер-ссылочные скобки и в DT-пути (minor ревью PR #149): откат
     # второй копии фикса Traces to обязан краснить
     assert "**Traces to:** [FR-01], [FR-02]" in text
@@ -710,6 +711,90 @@ def test_render_groups_by_feature_sections() -> None:
     assert "**Traces to:** [FR-01], [FR-02]" in text
     # Source несёт диапазон группы
     assert "#BEH-01 (—BEH-02)" in text
+
+
+def test_featureless_summary_joins_feature_tails_then_stays_serial() -> None:
+    """#123: aggregate work joins independent Feature lanes.
+
+    A failure in one Feature must not prevent the other from starting.  The
+    first featureless task after that wave waits for both tails; subsequent
+    featureless work stays on the joined serial trunk.
+    """
+
+    md = """\
+## Feature: API
+
+#### BEH-01: API path
+`traces: [FR-01]`
+**checked_by** `kind: integration` `target: tests/test_api.py`
+
+## Feature: CLI
+
+#### BEH-02: CLI path
+`traces: [FR-02]`
+**checked_by** `kind: integration` `target: tests/test_cli.py`
+
+## Сводная проверка
+
+#### BEH-03: Регрессии
+`traces: [FR-03]`
+**checked_by** `kind: integration` `target: tests/test_regression.py`
+
+#### BEH-04: Документация
+`traces: [FR-04]`
+**checked_by** `kind: manual` `target: docs/usage.md`
+"""
+    scenarios = task_bridge.parse_behaviour(md)
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/15-behaviour-spec.md",
+        scenarios=scenarios,
+        generated_at="2026-09-13T12:00:00",
+        design_blob="ab" * 20,
+    )
+
+    task1 = text.split("### TASK-001:", 1)[1].split("### TASK-002:", 1)[0]
+    task2 = text.split("### TASK-002:", 1)[1].split("### TASK-003:", 1)[0]
+    task3 = text.split("### TASK-003:", 1)[1].split("### TASK-004:", 1)[0]
+    task4 = text.split("### TASK-004:", 1)[1]
+    assert "**Depends on:**" not in task1
+    assert "**Depends on:**" not in task2
+    assert "**Depends on:** [TASK-001], [TASK-002]" in task3
+    assert "**Depends on:** [TASK-003]" in task4
+
+
+def test_feature_wave_fans_out_from_shared_featureless_prefix() -> None:
+    """The serial prefix is shared; Feature lanes do not depend on peers."""
+
+    scenarios = [
+        task_bridge.Scenario("BEH-01", "Основа", (), "unit", "tests/base.py"),
+        task_bridge.Scenario(
+            "BEH-02", "API", (), "unit", "tests/api.py", feature="API"
+        ),
+        task_bridge.Scenario(
+            "BEH-03", "CLI", (), "unit", "tests/cli.py", feature="CLI"
+        ),
+        task_bridge.Scenario(
+            "BEH-04", "Итог", (), "unit", "tests/all.py"
+        ),
+    ]
+    text = task_bridge.render_tasks(
+        "WS-x-1",
+        "s",
+        "b/15-behaviour-spec.md",
+        scenarios,
+        "2026-09-13T12:00:00",
+        "ab" * 20,
+    )
+
+    task2 = text.split("### TASK-002:", 1)[1].split("### TASK-003:", 1)[0]
+    task3 = text.split("### TASK-003:", 1)[1].split("### TASK-004:", 1)[0]
+    task4 = text.split("### TASK-004:", 1)[1]
+    assert "**Depends on:** [TASK-001]" in task2
+    assert "**Depends on:** [TASK-001]" in task3
+    assert "[TASK-002]" not in task3
+    assert "**Depends on:** [TASK-002], [TASK-003]" in task4
 
 
 def test_plain_heading_closes_feature_section() -> None:
