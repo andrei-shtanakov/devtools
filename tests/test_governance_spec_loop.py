@@ -251,7 +251,7 @@ class _RecoveryOps:
     def checkout_and_pull(self, target_dir, branch):
         self.checkouts.append((target_dir, branch))
 
-    def show_file_bytes(self, target_dir, ref, path):
+    def show_repo_file_bytes(self, repo_slug, ref, path):
         return self.head_files.get(path)
 
 
@@ -368,6 +368,28 @@ def test_recover_refuses_source_changed_after_bundle_pr(
                 [_bundle_pr()], files=files,
                 head_files={source_path: original},
             ),
+        )
+
+
+def test_recover_missing_head_source_is_contractual_refusal(
+    runs_root, tmp_path
+) -> None:
+    bundle = "workstreams/fleet-inbox-20260901/spec"
+    target = tmp_path / "alpha"
+    primary = target / bundle / brief_input.PRIMARY_REL
+    primary.parent.mkdir(parents=True)
+    primary.write_text(_customer_brief(), encoding="utf-8")
+    source_path = f"{bundle}/{brief_input.PRIMARY_REL}"
+    files = [f"{bundle}/{name}" for name in spec_loop._BUNDLE_FILENAMES]
+    files.append(source_path)
+
+    with pytest.raises(spec_loop.SpecLoopError, match="immutable head"):
+        spec_loop.recover_run_from_github(
+            subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
+            target_dir=str(target), profile="profiles/team-exp.yaml",
+            author_backend="codex", requested_ws_id=None,
+            requested_bundle_dir=None,
+            ops=_RecoveryOps([_bundle_pr()], files=files),
         )
 
 

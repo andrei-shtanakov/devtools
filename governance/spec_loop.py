@@ -421,9 +421,11 @@ def recover_run_from_github(
             with tempfile.TemporaryDirectory(prefix="brief-recovery-") as tmp:
                 snapshot = Path(tmp)
                 for source_path in sorted(source_files):
-                    data = ops.show_file_bytes(target_dir, head, source_path)
+                    data = ops.show_repo_file_bytes(
+                        repo_slug, head, source_path
+                    )
                     if data is None:
-                        raise BriefInputError(
+                        raise brief_input.BriefInputError(
                             f"{head}:{source_path} не читается из head bundle-PR"
                         )
                     destination = snapshot / source_path

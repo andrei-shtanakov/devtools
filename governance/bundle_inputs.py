@@ -136,6 +136,14 @@ def direct_blobs(
                 bytes_fact.outcome is not Outcome.FOUND
                 or bytes_fact.value is None
             ):
+                if known_texts is not None:
+                    return Fact(
+                        Outcome.FORBIDDEN,
+                        None,
+                        f"{name}: "
+                        f"immutable source {bundle_path} отсутствует в "
+                        f"установленной ревизии {ref}",
+                    )
                 return Fact(bytes_fact.outcome, None, bytes_fact.detail)
             actual[name] = blob_sha1_bytes(bytes_fact.value)
             continue

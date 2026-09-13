@@ -174,6 +174,27 @@ def test_missing_source_is_unavailable(tmp_path: Path) -> None:
     assert fact.outcome is Outcome.UNAVAILABLE
 
 
+def test_missing_source_in_established_ref_is_forbidden(tmp_path: Path) -> None:
+    descriptor = {
+        "frame": "customer",
+        "primary": brief_input.PRIMARY_REL,
+        "requirements_source": brief_input.PRIMARY_REL,
+        "source_paths": [brief_input.PRIMARY_REL],
+        "source_blobs": {"discovery-brief": "a" * 40},
+    }
+    fact = bundle_inputs.direct_blobs(
+        _state(tmp_path, brief=descriptor),
+        ShowOps({}),
+        bundle_dag.BUNDLE_DAG,
+        "charter",
+        "base",
+        known_texts={"00-charter.md": "establishes base"},
+    )
+
+    assert fact.outcome is Outcome.FORBIDDEN
+    assert "отсутствует" in fact.detail
+
+
 def test_corrupt_descriptor_cannot_escape_bundle(tmp_path: Path) -> None:
     descriptor = {
         "frame": "customer",

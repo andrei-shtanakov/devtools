@@ -1494,6 +1494,20 @@ def test_show_file_bytes_preserves_crlf_at_ref(tmp_path) -> None:
     ) == data
 
 
+def test_show_repo_file_bytes_uses_forge_raw_endpoint(monkeypatch) -> None:
+    calls = _install_fake_run(monkeypatch, stdout=b"exact\nbytes\n")
+
+    assert RealOps().show_repo_file_bytes(
+        "owner/repo", "a" * 40, "workstreams/ws/spec/brief.md"
+    ) == b"exact\nbytes\n"
+    assert calls[0].argv == [
+        "gh", "api",
+        "repos/owner/repo/contents/workstreams/ws/spec/brief.md?ref="
+        + "a" * 40,
+        "-H", "Accept: application/vnd.github.raw+json",
+    ]
+
+
 def test_show_file_none_for_missing_path(tmp_path) -> None:
     import subprocess as real_subprocess
 

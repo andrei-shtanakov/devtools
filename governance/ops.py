@@ -19,6 +19,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import quote
 
 from governance.facts import Fact, Outcome, unavailable
 
@@ -201,6 +202,10 @@ class Ops(Protocol):
 
     def show_file_bytes(
         self, target_dir: str, ref: str, path: str
+    ) -> bytes | None: ...
+
+    def show_repo_file_bytes(
+        self, repo_slug: str, ref: str, path: str
     ) -> bytes | None: ...
 
     def show_file_for_carry(
@@ -1589,6 +1594,21 @@ class RealOps:
         done = subprocess.run(
             ["git", "show", f"{ref}:{path}"],
             cwd=target_dir,
+            capture_output=True,
+        )
+        return done.stdout if done.returncode == 0 else None
+
+    def show_repo_file_bytes(
+        self, repo_slug: str, ref: str, path: str
+    ) -> bytes | None:
+        """Read exact repository bytes through the durable forge API."""
+        done = subprocess.run(
+            [
+                "gh", "api",
+                f"repos/{repo_slug}/contents/{quote(path, safe='/')}"
+                f"?ref={quote(ref, safe='')}",
+                "-H", "Accept: application/vnd.github.raw+json",
+            ],
             capture_output=True,
         )
         return done.stdout if done.returncode == 0 else None
