@@ -329,9 +329,10 @@ def recover_run_from_github(
             f"#{item.get('number')} ({item['head']['ref']})"
             for item, _ws_id in candidates
         )
+        distinct_ws_ids = {candidate_ws for _item, candidate_ws in candidates}
         hint = (
             "задайте --ws-id"
-            if requested_ws_id is None
+            if requested_ws_id is None and len(distinct_ws_ids) > 1
             else "одна head-ветка соответствует нескольким PR; "
                  "восстановите ledger вручную"
         )
@@ -441,10 +442,28 @@ def recover_run_from_github(
     state.pr = number
     state.head = facts.get("headRefOid")
     state.base_ref = base_ref
+    state.ops["ledger-recovery"] = {
+        "status": "completed",
+        "source": "github",
+        "bundle_pr": number,
+        # Исторический profile PR не хранит. Это конфигурация ТЕКУЩЕГО
+        # authoritative S8, взятая из текущего CLI/default, а не выданная
+        # за восстановленный факт. После MERGED author_backend не
+        # исполняется вовсе, но его источник фиксируется симметрично.
+        "profile": profile,
+        "profile_source": "current-invocation-not-github",
+        "author_backend": author_backend,
+        "author_backend_effective": False,
+    }
     rs.save(state)
     print(
         f"spec-loop: локальный ledger отсутствовал; восстановлен из "
         f"bundle-PR #{number} ({branch}), run-id={run_id}"
+    )
+    print(
+        f"spec-loop: profile={profile!r} взят из текущего вызова "
+        "(GitHub исторический profile не хранит); author_backend после "
+        "MERGED не исполняется"
     )
     return state
 

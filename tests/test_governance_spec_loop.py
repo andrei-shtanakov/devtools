@@ -197,7 +197,17 @@ def test_recover_run_from_github_rebuilds_minimal_merge_boundary(
     assert state.branch == "spec/fleet-inbox-20260901-behaviour"
     assert state.pr == 41
     assert state.base_ref == "master"
-    assert state.ops == {}
+    assert state.ops == {
+        "ledger-recovery": {
+            "status": "completed",
+            "source": "github",
+            "bundle_pr": 41,
+            "profile": "profiles/team-exp.yaml",
+            "profile_source": "current-invocation-not-github",
+            "author_backend": "codex",
+            "author_backend_effective": False,
+        }
+    }
     assert rs.load(state.run_id) == state
     assert ops.prefixes == ["spec/fleet-inbox-"]
 
@@ -229,6 +239,32 @@ def test_recover_multiple_candidates_requires_ws_id(
             ops=ops,
         )
     assert rs.all_run_ids() == []
+
+
+def test_recover_duplicate_prs_on_same_branch_does_not_suggest_ws_id(
+    runs_root, tmp_path
+) -> None:
+    ops = _RecoveryOps(
+        [
+            _bundle_pr(41),
+            _bundle_pr(42, run_id="fleet-inbox-20260901-d4e5f6"),
+        ]
+    )
+
+    with pytest.raises(spec_loop.SpecLoopError) as caught:
+        spec_loop.recover_run_from_github(
+            subject="Fleet Inbox",
+            repo="alpha",
+            repo_slug="owner/alpha",
+            target_dir=str(tmp_path / "alpha"),
+            profile="profiles/team-exp.yaml",
+            author_backend="codex",
+            requested_ws_id=None,
+            requested_bundle_dir=None,
+            ops=ops,
+        )
+    assert "одна head-ветка соответствует нескольким PR" in str(caught.value)
+    assert "задайте --ws-id" not in str(caught.value)
 
 
 def test_recover_refuses_missing_run_id_fact(runs_root, tmp_path) -> None:
@@ -410,6 +446,7 @@ def test_missing_ledger_recovers_then_resumes_s8_and_reconciles_tasks_pr(
     ]
     out = capsys.readouterr().out
     assert "ledger отсутствовал; восстановлен" in out
+    assert "GitHub исторический profile не хранит" in out
     assert "tasks-спека доставлена: PR #77" in out
 
 
