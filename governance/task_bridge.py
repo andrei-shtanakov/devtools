@@ -810,7 +810,15 @@ def _canonical_dag_hash(
         canon[node_id] = blob_sha1(join_frontmatter(meta, body))
         lines.append(f"{node_id} {canon[node_id]}")
     for relative in source_paths:
-        data = (base / relative).read_bytes()
+        source_path = base / relative
+        try:
+            data = source_path.read_bytes()
+        except OSError as exc:
+            raise RuntimeError(
+                f"immutable discovery source {relative!r} не читается: "
+                f"{exc}. Восстановите исходные source bytes либо создайте "
+                "новый workstream/run с другим ws-id"
+            ) from exc
         source_blob = blob_sha1_bytes(data)
         lines.append(f"source {relative} {source_blob}")
     return f"{_CANON_VERSION}:{blob_sha1(chr(10).join(lines) + chr(10))}"

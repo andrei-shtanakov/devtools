@@ -5260,6 +5260,17 @@ def test_content_anchor_includes_exact_discovery_source_bytes(
     assert task_bridge._content_anchor(target, bundle, None, brief) != before
 
 
+def test_content_anchor_names_missing_discovery_source(tmp_path: Path) -> None:
+    target = str(_target(tmp_path))
+    bundle = "workstreams/WS-alpha-7/spec"
+    brief = {"source_paths": ["00-discovery/brief.md"]}
+
+    with pytest.raises(RuntimeError, match="immutable discovery source") as error:
+        task_bridge._content_anchor(target, bundle, None, brief)
+
+    assert "новый workstream/run" in str(error.value)
+
+
 def test_delivered_content_anchor_requires_source_from_pr_head(
     tmp_path: Path, monkeypatch,
 ) -> None:

@@ -140,6 +140,20 @@ def _resolve_like_gate(ref: str, base_dir: Path) -> Path | None:
     return None
 
 
+def _reject_customer_path_traces(meta: dict[str, object]) -> None:
+    traces = meta.get("traces_to") or []
+    if isinstance(traces, list) and any(
+        isinstance(ref, str)
+        and ref.endswith(".md")
+        and not ref.startswith("[[")
+        for ref in traces
+    ):
+        raise BriefInputError(
+            "customer brief с путевыми traces_to не поддерживается: "
+            "source layer переносит только сам brief"
+        )
+
+
 def inspect_brief(path: Path) -> BriefSource:
     """Validate an input brief and resolve its effective requirements source."""
     path = path.resolve()
@@ -150,17 +164,7 @@ def inspect_brief(path: Path) -> BriefSource:
     frame = interview.get("frame") if isinstance(interview, dict) else None
     primary_blob = blob_sha1_bytes(primary_data)
     if frame == "customer":
-        traces = primary.meta.get("traces_to") or []
-        if isinstance(traces, list) and any(
-            isinstance(ref, str)
-            and ref.endswith(".md")
-            and not ref.startswith("[[")
-            for ref in traces
-        ):
-            raise BriefInputError(
-                "customer brief с путевыми traces_to не поддерживается: "
-                "source layer переносит только сам brief"
-            )
+        _reject_customer_path_traces(primary.meta)
         return BriefSource(
             frame="customer",
             primary_input=path,
@@ -191,6 +195,7 @@ def inspect_brief(path: Path) -> BriefSource:
             f"engineer upstream {ref!r} имеет frame={customer_frame!r}, "
             "ожидался customer"
         )
+    _reject_customer_path_traces(customer.meta)
     if customer.meta.get("status") != "approved":
         raise BriefInputError(
             f"engineer upstream {ref!r} не approved: "

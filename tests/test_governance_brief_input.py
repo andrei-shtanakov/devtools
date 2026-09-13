@@ -212,6 +212,22 @@ def test_engineer_rejects_draft_or_non_customer_upstream(tmp_path: Path) -> None
         brief_input.inspect_brief(path)
 
 
+def test_engineer_rejects_customer_upstream_with_path_traces(
+    tmp_path: Path,
+) -> None:
+    notes = tmp_path / "notes/context.md"
+    notes.parent.mkdir()
+    notes.write_text("context\n", encoding="utf-8")
+    customer = customer_brief(status="approved").replace(
+        "traces_to: []", "traces_to: [notes/context.md]"
+    )
+    _write(tmp_path / "customer.md", customer)
+    path = _write(tmp_path / "engineer.md", engineer_brief())
+
+    with pytest.raises(brief_input.BriefInputError, match="путевыми"):
+        brief_input.inspect_brief(path)
+
+
 def test_engineer_rejects_multiple_path_refs(tmp_path: Path) -> None:
     _write(tmp_path / "customer.md", customer_brief(status="approved"))
     _write(tmp_path / "other.md", customer_brief(status="approved"))
