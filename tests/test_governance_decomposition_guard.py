@@ -714,10 +714,9 @@ def test_verifies_unparsed_scalar_form_is_a_finding() -> None:
         "verifies: tests/test_ops.py\n"
     )
     tasks, findings = parse_dt_tasks(dt)
-    assert any(
-        "DT-14" in f and "verifies" in f and "не разобран" in f
-        for f in findings
-    )
+    finding = next(f for f in findings if "DT-14" in f and "verifies" in f)
+    assert "не разобран" in finding
+    assert "отступ необязателен" in finding
     assert tasks[0].verifies == ()
 
 
@@ -795,8 +794,8 @@ def test_verifies_block_form_stops_at_first_non_dash_non_blank_line() -> None:
     assert tasks[0].verifies == ("tests/test_a.py",)
 
 
-def test_verifies_block_form_stops_at_blank_line() -> None:
-    """Пустая строка тоже заканчивает блочный список (round 13)."""
+def test_verifies_block_stops_before_prose_after_blank_line() -> None:
+    """Blank lines are allowed, while the following prose ends the list."""
     dt = (
         "#### DT-14: Наблюдение · type: verify · owner: qa\n"
         "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
@@ -805,6 +804,26 @@ def test_verifies_block_form_stops_at_blank_line() -> None:
         "  - tests/test_a.py\n"
         "\n"
         "Проза предмета после пустой строки.\n"
+    )
+    tasks, findings = parse_dt_tasks(dt)
+    assert findings == []
+    assert tasks[0].verifies == ("tests/test_a.py",)
+
+
+@pytest.mark.parametrize("indent", ["", "  "])
+def test_verifies_block_does_not_consume_prose_bullet_after_blank(
+    indent: str,
+) -> None:
+    """#162: a Markdown bullet after a blank line is DT prose, not a target."""
+
+    dt = (
+        "#### DT-14: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-01]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: core\n"
+        "verifies:\n"
+        f"{indent}- tests/test_a.py\n"
+        "\n"
+        f"{indent}- Эта маркированная строка объясняет границу задачи\n"
     )
     tasks, findings = parse_dt_tasks(dt)
     assert findings == []
@@ -967,7 +986,12 @@ def test_orphan_verifies_target_is_non_fatal_finding() -> None:
         and "опечатка либо осиротевший путь" in f
         for f in warnings
     )
-    assert graph_findings(beh, dt) == []
+    fatal = graph_findings(beh, dt)
+    assert any(
+        "DT-14" in finding
+        and "группа наблюдения не выводится" in finding
+        for finding in fatal
+    )
 
 
 def test_verifies_target_owner_outside_depends_on_closure_is_a_finding() -> None:

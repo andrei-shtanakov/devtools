@@ -64,10 +64,12 @@ def _list_field(block: str, name: str) -> tuple[str, ...] | None:
 # «one `- <file>` per line». Строгая (round 13, обязательный отступ) версия
 # делала конформный по промпту бандл фатальной находкой формы — стопила
 # S4-гейт и deliver() на честно авторенном входе. ОБЯЗАТЕЛЕН пробел после
-# `-` и непустое содержимое сразу после него; список завершается на первой
-# строке, которая НЕ является ни `- ` элементом (в любой форме), ни
-# пустой строкой (round 13 minor, сохранено).
-_LIST_ITEM_RE = re.compile(r"^[ \t]*-[ \t]+(\S.*?)\s*$")
+# `-` и ровно один непустой DSL-токен после него; список завершается на
+# первой строке, которая НЕ является ни `- ` элементом (в любой форме),
+# ни пустой строкой (round 13 minor, сохранено).
+# Selector — один DSL-токен, как ``checked_by target``; пробельная проза
+# после ``-`` принадлежит Markdown-телу DT, а не группе наблюдения (#162).
+_LIST_ITEM_RE = re.compile(r"^([ \t]*)-[ \t]+(\S+)[ \t]*$")
 
 
 def _block_list_field(block: str, name: str) -> tuple[str, ...] | None:
@@ -87,6 +89,8 @@ def _block_list_field(block: str, name: str) -> tuple[str, ...] | None:
     items: list[str] = []
     # m.end() стоит ПЕРЕД '\n' ($ в re.M его не поглощает) — первый элемент
     # splitlines() всегда пустая строка-остаток заголовка, отбрасываем её.
+    item_indent: str | None = None
+    after_blank = False
     for line in block[m.end():].splitlines()[1:]:
         item = _LIST_ITEM_RE.match(line)
         if item is None:
@@ -97,9 +101,20 @@ def _block_list_field(block: str, name: str) -> tuple[str, ...] | None:
             # в `**Verifies:**`. Список кончается на первой НЕПУСТОЙ
             # строке, не являющейся `- <элемент>`.
             if not line.strip():
+                after_blank = bool(items)
                 continue
             break
-        items.append(item.group(1))
+        indent = item.group(1)
+        # Пустая строка допустима ВНУТРИ YAML-списка, но только пока
+        # продолжается тот же уровень отступа. Смена уровня после пустой
+        # строки — соседний Markdown-список прозы, не selector entry
+        # (#162); без этой границы его пункты уезжали в **Verifies:**.
+        if items and after_blank and indent != item_indent:
+            break
+        if item_indent is None:
+            item_indent = indent
+        items.append(item.group(2))
+        after_blank = False
     return tuple(items) if items else None
 
 
@@ -371,7 +386,8 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
         if verifies_parsed is None and _VERIFIES_KEY_RE.search(block):
             findings.append(
                 f"{dt_id}: поле verifies объявлено, но не разобрано — "
-                "ожидается блочный список `  - <путь>` (с отступом) либо "
+                "ожидается блочный список `- <путь>` (отступ необязателен) "
+                "либо "
                 "инлайн `verifies: [<путь>, …]`"
             )
         verifies = verifies_parsed or ()
@@ -579,6 +595,9 @@ def graph_findings(
     RuntimeError «нечего прогонять» — «рекомендация формы, не блокирует
     доставку» была ложью именно для этого входа; легаси-форма,
     checked_by-цель ЕСТЬ и verifies нет, — по-прежнему НЕ находка).
+    Orphan verifies остаётся отдельным warning о причине, но не считается
+    исполняемой целью: если других целей нет, underivable-finding управляет
+    исходом и останавливает гейт (#162).
     """
     tasks, findings = parse_dt_tasks(decomposition_text)
     records = _parse_beh_binding_records(behaviour_text)
@@ -678,6 +697,7 @@ def graph_findings(
         target for target, kinds in kinds_by_file.items()
         if kinds == {"manual"}
     }
+    owned_files = set(kinds_by_file)
     for t in tasks:
         if t.type != "verify":
             continue
@@ -691,7 +711,8 @@ def graph_findings(
             ):
                 runnable_targets.append(declared)
         for declared in t.verifies:
-            if declared.split("::", 1)[0] in manual_only:
+            target = declared.split("::", 1)[0]
+            if target in manual_only or target not in owned_files:
                 continue
             if declared not in runnable_targets:
                 runnable_targets.append(declared)
