@@ -188,12 +188,8 @@ def _base_upstream_blobs(
     node: str,
 ) -> dict[str, str]:
     """Фактические блобы всех direct inputs узла в `base`."""
-    known_texts = None
-    if node == "charter" and state.brief is not None:
-        fname = _filename(dag, node)
-        known_texts = {fname: _base_text(ops, state, fname)}
     fact = bundle_inputs.direct_blobs(
-        state, ops, dag, node, _base_ref(state), known_texts=known_texts
+        state, ops, dag, node, _base_ref(state)
     )
     if fact.outcome is Outcome.FORBIDDEN:
         raise RuntimeError(

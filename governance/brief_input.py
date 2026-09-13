@@ -141,7 +141,8 @@ def _resolve_like_gate(ref: str, base_dir: Path) -> Path | None:
 
 
 def _reject_customer_path_traces(meta: dict[str, object]) -> None:
-    traces = meta.get("traces_to") or []
+    raw_traces = meta.get("traces_to") or []
+    traces = [raw_traces] if isinstance(raw_traces, str) else raw_traces
     if isinstance(traces, list) and any(
         isinstance(ref, str)
         and ref.endswith(".md")

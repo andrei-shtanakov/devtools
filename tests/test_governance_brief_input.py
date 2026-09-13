@@ -141,6 +141,23 @@ def test_customer_path_trace_is_rejected_before_materialization(
         brief_input.inspect_brief(path)
 
 
+def test_customer_scalar_path_trace_is_rejected_before_materialization(
+    tmp_path: Path,
+) -> None:
+    notes = tmp_path / "notes/context.md"
+    notes.parent.mkdir()
+    notes.write_text("context\n", encoding="utf-8")
+    path = _write(
+        tmp_path / "brief.md",
+        customer_brief().replace(
+            "traces_to: []", "traces_to: notes/context.md"
+        ),
+    )
+
+    with pytest.raises(brief_input.BriefInputError, match="путевыми"):
+        brief_input.inspect_brief(path)
+
+
 def test_invalid_customer_is_rejected_with_gate_id(tmp_path: Path) -> None:
     path = _write(tmp_path / "brief.md", customer_brief(validation="pending"))
 
