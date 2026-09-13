@@ -1145,17 +1145,42 @@ def _carry_execution_state(text: str, delivered: str) -> str:
     меняется. Значит повторный заход по тому же намерению (тот же base,
     тот же рендер) даёт те же байты, и `tasks_blob` §I3 воспроизводится.
     """
+    return _carry_execution_state_with_report(text, delivered).text
+
+
+@dataclass(frozen=True)
+class _CarryResult:
+    text: str
+    matched_tasks: int
+    total_tasks: int
+    carried_checked_items: int
+    total_checked_items: int
+
+
+def _carry_execution_state_with_report(
+    text: str, delivered: str
+) -> _CarryResult:
+    """То же правило §I11 плюс счётчик сопоставленных блоков."""
     prev = _delivered_state(delivered)
-    if not prev.status_by_block and not prev.checked:
-        return text
+    delivered_lines = delivered.split("\n")
+    total_checked = sum(
+        1
+        for start, stop in _task_bounds(delivered_lines)
+        for line in delivered_lines[start:stop]
+        if (item := _CHECKLIST_RE.match(line)) is not None
+        and item.group("mark") != " "
+    )
     lines = text.split("\n")
+    bounds = _task_bounds(lines)
     carryable = prev.checked & _unique(_checklist_texts(lines))
     out = list(lines)
-    for start, stop in _task_bounds(lines):
+    matched = 0
+    for start, stop in bounds:
         body = list(lines[start:stop])
         was = prev.status_by_block.get(_state_free(body))
         found = _task_meta(body)
         if was is not None and found is not None:
+            matched += 1
             i, m = found
             body[i] = (
                 body[i][: m.start("status")] + was + body[i][m.end("status"):]
@@ -1165,7 +1190,9 @@ def _carry_execution_state(text: str, delivered: str) -> str:
             if c is not None and c.group("text") in carryable:
                 body[i] = f"{c.group(1)}x{c.group(3)}{c.group('text')}"
         out[start:stop] = body
-    return "\n".join(out)
+    return _CarryResult(
+        "\n".join(out), matched, len(bounds), len(carryable), total_checked
+    )
 
 
 def deliver(
@@ -1183,6 +1210,7 @@ def deliver(
     version: int = 1,
     expected_base_sha: str | None = None,
     carry_from: str | None = None,
+    report_carry: bool = False,
     before_commit: Callable[[dict], None] | None = None,
     after_commit: Callable[[dict], None] | None = None,
 ) -> int:
@@ -1246,6 +1274,10 @@ def deliver(
     следующий прогон встаёт на `state_spec_mismatch`. `deliver_for_run`
     аргумента не передаёт (спеки в base ещё нет — переносить нечего), и
     обычная доставка байт-в-байт прежняя.
+
+    `report_carry` отличает supersede с подтверждённо отсутствующей
+    базовой спекой от обычной v1-доставки: первый случай пишет
+    durable-отчёт `0/N`, второй вообще не включает механику §I11.
 
     `before_commit`/`after_commit` (Task 7b плана supersede) — два хука
     переиздания, намеренно РАЗДЕЛЁННЫЕ коммитом:
@@ -1430,11 +1462,19 @@ def deliver(
             anchor_node_id=anchor_node_id,
             version=version,
         )
-    if carry_from is not None:
+    carry_report: dict[str, int] | None = None
+    if carry_from is not None or report_carry:
         # Состояние исполнения переносится ПОСЛЕ рендера и ДО записи:
         # `tasks_blob` (§I3.1) обязан считаться по ФАКТИЧЕСКИМ байтам
         # файла, иначе возобновление не опознало бы собственный коммит.
-        text = _carry_execution_state(text, carry_from)
+        carried = _carry_execution_state_with_report(text, carry_from or "")
+        text = carried.text
+        carry_report = {
+            "matched_tasks": carried.matched_tasks,
+            "total_tasks": carried.total_tasks,
+            "carried_checked_items": carried.carried_checked_items,
+            "total_checked_items": carried.total_checked_items,
+        }
     rel = f"spec/{ws_id}-tasks.md"
     out = Path(target_dir) / rel
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1443,7 +1483,10 @@ def deliver(
         # ДО коммита (§I3.1): ожидаемый блоб спеки обязан быть в намерении
         # раньше, чем появится коммит, — иначе падение между коммитом и
         # записью head_sha оставляет ревизию неопознаваемой.
-        before_commit({"tasks_blob": blob_sha1(text)})
+        facts: dict[str, object] = {"tasks_blob": blob_sha1(text)}
+        if carry_report is not None:
+            facts["carry"] = carry_report
+        before_commit(facts)
     # Коммитом уходит РОВНО tasks-спека: файлы бандла в diff доставки не
     # входят вовсе (§I7). Это и есть наблюдаемое следствие, по которому
     # снаружи видно, что доставка проверяет одобренность, а не создаёт её.
@@ -2744,10 +2787,24 @@ def _tasks_blob_cb(state: RunState, n: int) -> Callable[[dict], None]:
 
     def _cb(facts: dict) -> None:
         key = f"{_REVISION_PREFIX}{n}"
-        state.ops[key] = {**state.ops[key], "tasks_blob": facts["tasks_blob"]}
+        recorded = {"tasks_blob": facts["tasks_blob"]}
+        if "carry" in facts:
+            recorded["carry"] = facts["carry"]
+        state.ops[key] = {**state.ops[key], **recorded}
         save(state)
 
     return _cb
+
+
+def _print_carry_report(state: RunState, n: int) -> None:
+    """Печать только на CLI-пути; `deliver` остаётся библиотечной."""
+    carry = state.ops[f"{_REVISION_PREFIX}{n}"]["carry"]
+    print(
+        f"state carried for {carry['matched_tasks']} of "
+        f"{carry['total_tasks']} task blocks; "
+        f"{carry['carried_checked_items']} of "
+        f"{carry['total_checked_items']} checked items"
+    )
 
 
 def _commit_facts_cb(
@@ -3043,16 +3100,18 @@ def deliver_superseded(
             # не должен зависеть от того, куда с тех пор уехал апстрим.
             # (Исход "continue" достижим только при `same_base`, так что
             # значения совпадают, — но источник назван явно.)
-            carry_from=ops.show_file(
+            carry_from=ops.show_file_for_carry(
                 state.target_dir,
                 op["base_sha"],
                 f"spec/{state.ws_id}-tasks.md",
             ),
+            report_carry=True,
             before_commit=_tasks_blob_cb(state, n),
             after_commit=_commit_facts_cb(
                 state, ops, n, op["prospective_anchor"]
             ),
         )
+        _print_carry_report(state, n)
         # head_sha уже записан колбэком durable — между коммитом и push.
         _complete_revision(
             state, n, pr=pr, anchor=op["prospective_anchor"],
@@ -3241,12 +3300,14 @@ def deliver_superseded(
         # исполнения переносится из ДОСТАВЛЕННОЙ спеки в base (тот же
         # источник, что у `_previous_dag`), не из рабочего дерева и не из
         # HEAD — base зафиксирован `base_sha` намерения.
-        carry_from=ops.show_file(
+        carry_from=ops.show_file_for_carry(
             state.target_dir, base_sha, f"spec/{state.ws_id}-tasks.md"
         ),
+        report_carry=True,
         before_commit=_tasks_blob_cb(state, n),
         after_commit=_commit_facts_cb(state, ops, n, prospective),
     )
+    _print_carry_report(state, n)
     # head_sha здесь НЕ пишется: он уже записан колбэком durable — между
     # коммитом и push (§I3), а не после создания PR.
     _complete_revision(

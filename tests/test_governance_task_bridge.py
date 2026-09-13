@@ -3753,6 +3753,10 @@ class _SupersedeOps(_ProvOps):
             return _bundle_from_tree(target_dir, path)
         return _spec_text("decomposition")
 
+    def show_file_for_carry(self, target_dir, ref, path):
+        self.calls.append(("show_file_for_carry", ref, path))
+        return self.show_file(target_dir, ref, path)
+
 
 def test_supersede_result_refuses_inconsistent_kind() -> None:
     """Тип исхода не даёт собрать невозможное сочетание.
@@ -7434,7 +7438,8 @@ def test_carry_preserves_status_and_marks_of_unchanged_task() -> None:
     delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001")
     fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
     assert "| ✅ DONE" not in fresh          # рендер состояния не знает
-    carried = tb._carry_execution_state(fresh, delivered)
+    report = tb._carry_execution_state_with_report(fresh, delivered)
+    carried = report.text
 
     done = _task_body(carried, "TASK-001")
     assert "P2 | ✅ DONE   Est: 0.5d" in done
@@ -7622,12 +7627,15 @@ def test_carry_skips_checklist_text_repeated_in_delivered_spec() -> None:
                   "TASK-002")
     )
     fresh = _twin_item(_render(_CARRY_DT, _CARRY_SCENARIOS, version=2))
-    carried = tb._carry_execution_state(fresh, delivered)
+    report = tb._carry_execution_state_with_report(fresh, delivered)
+    carried = report.text
     assert _DUP_ITEM not in carried
     assert carried.count("| ✅ DONE") == 2
     # Однозначные пункты тех же задач галочки сохраняют
     assert "- [x] реализовать BEH-02: Пустое состояние" in carried
     assert carried.count("- [x] проверка группы") == 2
+    assert report.matched_tasks == report.total_tasks == 2
+    assert report.carried_checked_items < report.total_checked_items
 
 
 def test_carry_skips_checklist_text_repeated_in_fresh_render() -> None:
@@ -7647,6 +7655,22 @@ def test_carry_skips_checklist_text_repeated_in_fresh_render() -> None:
     # TASK-002 изменена, поэтому чистая
     assert _task_body(carried, "TASK-001").count("| ✅ DONE") == 1
     assert "| ✅ DONE" not in _task_body(carried, "TASK-002")
+
+
+def test_carry_report_ignores_checked_lines_outside_task_blocks() -> None:
+    """Секция design-resolutions не входит в execution-state §I11."""
+    from governance import task_bridge as tb
+
+    fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
+    delivered = _executed(
+        _render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001"
+    )
+    outside = "- [x] решение из design, не execution-checklist\n"
+    report = tb._carry_execution_state_with_report(
+        outside + fresh, outside + delivered
+    )
+
+    assert report.carried_checked_items == report.total_checked_items == 3
 
 
 # --- Перенос состояния: сквозные пути доставки -----------------------------
@@ -7685,7 +7709,7 @@ class _CarryOps(_SupersedeOps):
     Аргументы `show_file` сверяются, как у родителя: перенос обязан
     читать base по `base_sha`, а не HEAD и не рабочее дерево."""
 
-    def __init__(self, *args, delivered: str = "", **kwargs) -> None:
+    def __init__(self, *args, delivered: str | None = "", **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.delivered = delivered
 
@@ -7700,7 +7724,7 @@ class _CarryOps(_SupersedeOps):
 
 
 def test_supersede_preserves_execution_state_of_unchanged_tasks(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, capsys
 ):
     """Живой дефект spec-runner#409: переиздание сохраняет `DONE` и `[x]`.
 
@@ -7733,6 +7757,75 @@ def test_supersede_preserves_execution_state_of_unchanged_tasks(
     from governance.stale_adapter import blob_sha1
     assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_blob"] == (
         blob_sha1(text)
+    )
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["carry"] == {
+        "matched_tasks": 1,
+        "total_tasks": 1,
+        "carried_checked_items": 3,
+        "total_checked_items": 3,
+    }
+    assert (
+        "state carried for 1 of 1 task blocks; 3 of 3 checked items"
+        in capsys.readouterr().out
+    )
+    assert ("show_file_for_carry", "base-sha-1", _SPEC_REL) in ops.calls
+
+
+def test_supersede_reports_zero_when_base_tasks_file_is_absent(
+    tmp_path, monkeypatch, capsys
+):
+    """Подтверждённое отсутствие спеки — штатный 0/N, не сбой."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ-ДРУГОЙ",
+        "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
+    }
+    rs.save(state)
+    ops = _CarryOps(prs=[_MERGED_PR], delivered=None)
+
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["carry"] == {
+        "matched_tasks": 0,
+        "total_tasks": 1,
+        "carried_checked_items": 0,
+        "total_checked_items": 0,
+    }
+    assert (
+        "state carried for 0 of 1 task blocks; 0 of 0 checked items"
+        in capsys.readouterr().out
+    )
+
+
+def test_supersede_refuses_when_base_tasks_file_cannot_be_read(
+    tmp_path, monkeypatch
+):
+    """Сбой Git не превращается в чистую спеку с TODO."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    class _UnreadableCarryOps(_CarryOps):
+        def show_file_for_carry(self, target_dir, ref, path):
+            if (ref, path) == ("base-sha-1", _SPEC_REL):
+                raise RuntimeError("git show failed")
+            return super().show_file_for_carry(target_dir, ref, path)
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ-ДРУГОЙ",
+        "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
+    }
+    rs.save(state)
+    ops = _UnreadableCarryOps(prs=[_MERGED_PR])
+
+    with pytest.raises(RuntimeError, match="git show failed"):
+        tb.deliver_superseded(state, ops)
+    assert not any(
+        call[0] in {"commit_paths", "create_draft_pr"} for call in ops.calls
     )
 
 
@@ -7849,6 +7942,7 @@ def test_supersede_resume_reproduces_the_same_bytes(tmp_path, monkeypatch):
         blob_first
     )
     assert ("show_file", "base-sha-1", _SPEC_REL) in again.calls
+    assert ("show_file_for_carry", "base-sha-1", _SPEC_REL) in again.calls
 
 
 # --- Гвард состава активного DAG ----------------------------------------
