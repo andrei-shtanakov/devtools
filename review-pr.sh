@@ -270,9 +270,21 @@ if [ "$head_sha" != "$head_oid" ]; then
 fi
 
 source_repo_dir="$repo_dir"
-trusted_kit_dir="${REVIEW_KIT_DIR:-$source_repo_dir/scripts/review}"
-trusted_schema="${REVIEW_SCHEMA:-$source_repo_dir/.github/codex/review-schema.json}"
-trusted_prompt="${REVIEW_PROMPT:-$source_repo_dir/.github/codex/review-prompt.md}"
+# До ephemeral worktree относительные override-пути разрешались от корня
+# исходного чекаута. Сохраняем эту семантику явно: после `cd` они не должны
+# внезапно указывать внутрь проверяемого PR-head.
+resolve_from_source() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s/%s\n' "$source_repo_dir" "$1" ;;
+    esac
+}
+trusted_kit_dir=$(resolve_from_source \
+    "${REVIEW_KIT_DIR:-scripts/review}")
+trusted_schema=$(resolve_from_source \
+    "${REVIEW_SCHEMA:-.github/codex/review-schema.json}")
+trusted_prompt=$(resolve_from_source \
+    "${REVIEW_PROMPT:-.github/codex/review-prompt.md}")
 work=$(mktemp -d)
 review_tree="$work/review-tree"
 review_tree_added=0
@@ -589,10 +601,11 @@ if [ -n "$inh_state" ]; then
 fi
 
 # --- Полный прогон -------------------------------------------------------
-# Кит запускается из корня целевого репо его же копией local.sh — промпт,
-# схема, пороги и контекст берутся оттуда. Свежесть базы: при fp-ките база
-# уже освежена явным fetch выше (и отпечаток обязан видеть то же состояние),
-# у старого кита --fetch остаётся его собственной заботой.
+# Доверенный кит запускается с cwd в exact-head worktree: код, промпт и схема
+# приходят из исходного чекаута, а контекст файлов — из проверяемого дерева.
+# Свежесть базы: при fp-ките база уже освежена явным fetch выше (и отпечаток
+# обязан видеть то же состояние), у старого кита --fetch остаётся его
+# собственной заботой.
 set -- --base "origin/$base_ref" --head "$review_ref" --format markdown
 [ "$fp_supported" -eq 1 ] || set -- "$@" --fetch
 set +e
