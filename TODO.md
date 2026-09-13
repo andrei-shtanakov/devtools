@@ -1250,17 +1250,16 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 > Решение владельца: внутренние issues принимаются не построчным зеркалом
 > GitHub, а замкнутыми workstream-пунктами. Каждый дочерний issue остаётся
 > открытым до merged evidence именно по своему требованию. Порядок запуска:
-> сначала fidelity ревью и document-runner, затем file-target #201 и
-> supersede; остаточные bridge/waiver-миноры — после #201, чтобы не править
-> одну поверхность параллельно.
+> сначала fidelity ревью и активный fail-honest supersede, затем file-target
+> #201; document-runner — до следующего behaviour-авторинга; остаточные
+> bridge/waiver-миноры — после #201, чтобы не править одну поверхность
+> параллельно. Legacy-v1 долг имеет явный триггер и до него не исполняется.
 
-- [ ] Fidelity терминального ревью и accept/merge-диагностики: дерево ревьюера совпадает с head дифа, локально материализованный head проверяется до платного вызова, а тексты не обещают непроверенную базу или несуществующую security boundary @owner:github:andrei-shtanakov @id:review-evidence-fidelity-wave
+- [ ] Fidelity терминального ревью: дерево ревьюера совпадает с head дифа, а локально материализованный head проверяется по SHA до платного вызова @owner:github:andrei-shtanakov @id:review-evidence-fidelity-wave
   Источники и обязательная приёмка: devtools#136 (freshness materialized
-  HEAD), #166 (review-pr видит head-дерево, а не base), #184
-  (`merge-pr.sh` честно документирован как policy + defense-in-depth) и #185
-  (диагностика не утверждает, что база не двигалась, если её не проверяли).
-  Один workstream, но декомпозиция обязана сохранить отдельный тест/evidence
-  на каждый из четырёх классов; устранение одного не закрывает остальные.
+  HEAD) и #166 (review-pr видит head-дерево, а не base). Один workstream на
+  общую причину «доверие чекауту вместо SHA», но отдельный регрессионный тест
+  на каждый entry point; устранение одного не закрывает второй.
 
 - [ ] Остатки document-pipeline авторинга behaviour-узла: согласовать doc-чеклист с DSL-гейтом, определить self-target anchor и сделать повторный запуск идемпотентным @owner:github:andrei-shtanakov @id:behaviour-document-runner-residuals
   Источник: devtools#204 после merged PR #203. До реализации проверить по
@@ -1268,16 +1267,25 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   путь retry/resume; живой платный прогон не подменять стаб-тестом в описи
   evidence.
 
-- [ ] Fail-honest и контрактная целостность переиздания tasks: убрать молчаливые/traceback-исходы, согласовать no-op и anchor-гарантии, вернуть структурированный результат вызывающему @owner:github:andrei-shtanakov @id:tasks-supersede-debt-wave
-  Источники: devtools#168 (нет каталога), #169 (stdout внутри библиотеки),
-  #170 (v1 completed без PR), #171 (reconcile→abandoned перед no-op), #173
-  (лишний `.md` отключает legacy-сверку), #175 (неподтверждённое удаление
-  ветки), #177 (неразличимые факты ops), #181 (утраченный composition guard),
-  #182 (граница blob-anchor) и #195 (две дыры guard слепых зон).
-  Декомпозиция может разбить workstream на несколько PR, но DONE ставится
-  только после закрытия всех десяти дочерних требований и регрессии всех
-  затронутых entry points (`deliver`, `deliver_conform`, `conform_approved`,
-  `--supersede`, `--approve-node`).
+- [ ] Fail-honest переиздания tasks: перенос состояния, состав бандла и удаление заменённой ветки дают различимые подтверждённые исходы без молчания и traceback @owner:github:andrei-shtanakov @id:tasks-supersede-fail-honest-wave
+  Источники: devtools#177 (сначала различить факты ops и недоступную base),
+  #168 + #181 (единый composition guard для отсутствующего каталога и всех
+  entry points), затем #175 (не скрывать неподтверждённое удаление ветки;
+  использовать различимый результат #177). DONE — только с отдельным
+  regression/evidence на каждый из четырёх классов.
+
+- [ ] Legacy-v1 хвосты переиздания: fail-closed для completed без PR, честный след reconcile→abandoned перед no-op и обязательная §I8-сверка при постороннем `.md` @owner:github:andrei-shtanakov @trigger:"перед следующим переизданием legacy-v1 воркстрима" @id:tasks-supersede-legacy-debt
+  Источники: devtools#170, #171 и #173. Это редкие аварийные входы, а не
+  текущий v2-путь с `content_anchor`; до триггера пункт остаётся waiting, но
+  не теряется в россыпи GitHub. devtools#169 сюда намеренно не входит:
+  дефекта поведения нет, необязательный API-рефакторинг закрыт not planned.
+
+- [ ] Формулировки и защитные проверки governance-контракта привести к фактическим гарантиям без расширения runtime-механики @owner:github:andrei-shtanakov @id:governance-contract-truth-batch
+  Источники: devtools#182 (граница blob-anchor), #184 (`merge-pr.sh` — policy
+  и defense-in-depth, не security boundary), #185 (движение базы не
+  проверялось) и #195 (две известные дыры guard слепых зон). Это один малый
+  батч, но #195 обязан сохранить negative self-check: одной правки прозы для
+  него недостаточно.
 
 - [ ] Остаточный долг decomposition/task_bridge: legacy-граф, verifies-парсер и waiver-контракт привести к одной исполнимой форме после file-target cutover @owner:github:andrei-shtanakov @id:task-bridge-residual-debt-wave @blocked_by:todo://devtools/accept-file-target-contract
   Источники: devtools#123 (оставшаяся линейность legacy-графа; уже закрытые
