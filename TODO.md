@@ -1271,7 +1271,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   путь retry/resume; живой платный прогон не подменять стаб-тестом в описи
   evidence.
 
-- [ ] Fail-honest переиздания tasks: перенос состояния, состав бандла и удаление заменённой ветки дают различимые подтверждённые исходы без молчания и traceback @owner:github:andrei-shtanakov @id:tasks-supersede-fail-honest-wave
+- [x] Fail-honest переиздания tasks: перенос состояния, состав бандла и удаление заменённой ветки дают различимые подтверждённые исходы без молчания и traceback @owner:github:andrei-shtanakov @id:tasks-supersede-fail-honest-wave — devtools#177: PR #207; #168/#181: PR #208; #175: этот PR
   Источники: devtools#177 (сначала различить факты ops и недоступную base),
   #168 + #181 (единый composition guard для отсутствующего каталога и всех
   entry points), затем #175 (не скрывать неподтверждённое удаление ветки;

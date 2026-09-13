@@ -2427,6 +2427,14 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
             continue
         if drop():
             removed.append(where)
+            continue
+        print(
+            f"ветка {branch} ({where}) не удалена после замены ревизии "
+            f"v{op.get('replaces_revision', '?')} "
+            f"(PR #{op.get('replaces_pr', '?')}): ссылка уже исчезла "
+            "после проверки либо операция отказала; проверьте ссылку и, "
+            f"если она всё ещё стоит на {head[:7]}, удалите вручную"
+        )
     if removed:
         print(
             f"ветка заменённой ревизии удалена ({', '.join(removed)}): "

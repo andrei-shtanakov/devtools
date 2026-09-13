@@ -6174,6 +6174,8 @@ class _ReplaceOps(_SupersedeOps):
         facts_by_pr=None,
         remote_head=_REPLACED_HEAD,
         local_head=_REPLACED_HEAD,
+        remote_delete_ok=True,
+        local_delete_ok=True,
         **kw,
     ):
         # Ветка заменяемой ревизии РЕЗОЛВИТСЯ в её PR — так на живом
@@ -6208,6 +6210,8 @@ class _ReplaceOps(_SupersedeOps):
         # «ссылки уже нет», другой SHA — «под тем же именем чужая работа».
         self.remote_head = remote_head
         self.local_head = local_head
+        self.remote_delete_ok = remote_delete_ok
+        self.local_delete_ok = local_delete_ok
 
     def pr_facts(self, repo_slug, pr):
         if pr not in self.facts_by_pr:
@@ -6241,13 +6245,15 @@ class _ReplaceOps(_SupersedeOps):
 
     def delete_remote_branch(self, repo_slug, branch):
         self.calls.append(("delete_remote_branch", branch))
-        self.deleted.append(branch)
-        return True
+        if self.remote_delete_ok:
+            self.deleted.append(branch)
+        return self.remote_delete_ok
 
     def delete_local_branch(self, target_dir, branch):
         self.calls.append(("delete_local_branch", branch))
-        self.deleted_local.append(branch)
-        return True
+        if self.local_delete_ok:
+            self.deleted_local.append(branch)
+        return self.local_delete_ok
 
 
 def _replace_state(tmp_path, monkeypatch, **rev3):
@@ -7248,6 +7254,52 @@ def test_discharge_costs_nothing_without_revocations_in_the_ledger(
     assert [c for c in ops.calls if c[0] == "pr_facts"] == [
         ("pr_facts", _REPLACED_PR)
     ]
+
+
+@pytest.mark.parametrize(
+    "kw, where, deleted, deleted_local",
+    [
+        (
+            {"remote_delete_ok": False},
+            "origin",
+            [],
+            [_REPLACED_BRANCH],
+        ),
+        (
+            {"local_delete_ok": False},
+            "локально",
+            [_REPLACED_BRANCH],
+            [],
+        ),
+    ],
+    ids=["origin-delete-failed", "local-delete-failed"],
+)
+def test_branch_delete_failure_is_visible_but_does_not_undo_delivery(
+    kw, where, deleted, deleted_local, tmp_path, monkeypatch, capsys
+):
+    """Неподтверждённое удаление видно, но состоявшаяся доставка успешна.
+
+    `delete_*_branch -> False` не различает отказ операции и ссылку,
+    исчезнувшую между head-сверкой и удалением. Поэтому сообщение честно
+    называет обе возможности, половину и ручную процедуру; исключение или
+    ненулевой RC сказали бы неправду об уже созданном PR новой ревизии.
+    """
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+
+    assert ops.deleted == deleted
+    assert ops.deleted_local == deleted_local
+    out = capsys.readouterr().out
+    assert f"ветка {_REPLACED_BRANCH} ({where}) не удалена" in out
+    assert "ревизии v3 (PR #408)" in out
+    assert "ссылка уже исчезла после проверки либо операция отказала" in out
+    assert "проверьте ссылку" in out
 
 
 @pytest.mark.parametrize(
