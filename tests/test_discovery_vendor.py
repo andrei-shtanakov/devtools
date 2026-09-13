@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import json
 import sys
 from pathlib import Path
 
@@ -75,3 +77,28 @@ def test_drift_equal_moved_and_unavailable() -> None:
     assert vendor.drift(fetch=lambda *_: b"b" * 40).status == "failed"
     assert vendor.drift(fetch=lambda *_: None).status == "unknown"
 
+
+def test_default_drift_fetch_resolves_explicit_default_branch(monkeypatch) -> None:
+    urls: list[str] = []
+
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+    def urlopen(request, timeout):
+        assert timeout == 20
+        urls.append(request.full_url)
+        payload = (
+            {"default_branch": "trunk"}
+            if request.full_url == vendor.REPO_API
+            else {"sha": "c" * 40}
+        )
+        return Response(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(vendor.urllib.request, "urlopen", urlopen)
+
+    assert vendor.github_head_fetch("HEAD", "HEAD") == b"c" * 40
+    assert urls == [vendor.REPO_API, vendor.COMMITS_API.format(ref="trunk")]

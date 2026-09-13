@@ -27,7 +27,8 @@ from typing import Literal
 
 REPO = "andrei-shtanakov/discovery-toolkit"
 CONTENTS_API = f"https://api.github.com/repos/{REPO}/contents/{{rel}}?ref={{commit}}"
-HEAD_API = f"https://api.github.com/repos/{REPO}/commits/HEAD"
+REPO_API = f"https://api.github.com/repos/{REPO}"
+COMMITS_API = f"https://api.github.com/repos/{REPO}/commits/{{ref}}"
 
 Fetcher = Callable[[str, str], bytes | None]
 
@@ -103,14 +104,23 @@ def github_fetch(commit: str, rel: str) -> bytes | None:
 def github_head_fetch(commit: str, rel: str) -> bytes | None:
     """Default fetcher for drift(): resolve upstream's default-branch HEAD sha.
 
-    Unlike github_fetch, which reads file blobs via the Contents API, this
-    hits the Commits API — there is no file literally named "HEAD" to read,
-    so reusing github_fetch's endpoint here would 404 on every real run.
+    Resolve the repository's declared default branch first, then address the
+    commits endpoint by that explicit branch name. A literal ``HEAD`` is not a
+    stable GitHub REST ref contract and would turn a healthy scheduled watch
+    into ``unknown`` on a 404.
     """
     del commit, rel
-    request = urllib.request.Request(HEAD_API, headers=_auth_headers())
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        repo_request = urllib.request.Request(REPO_API, headers=_auth_headers())
+        with urllib.request.urlopen(repo_request, timeout=20) as response:
+            branch = json.load(response)["default_branch"]
+        if not isinstance(branch, str) or not branch:
+            return None
+        commit_url = COMMITS_API.format(ref=urllib.parse.quote(branch))
+        commit_request = urllib.request.Request(
+            commit_url, headers=_auth_headers()
+        )
+        with urllib.request.urlopen(commit_request, timeout=20) as response:
             return json.load(response)["sha"].encode("utf-8")
     except (urllib.error.URLError, TimeoutError, KeyError, ValueError, TypeError):
         return None
@@ -183,7 +193,7 @@ def drift(fetch: Fetcher | None = None) -> Verdict:
 
 
 def main() -> int:
-    """CLI entry point: `check_vendor.py {consistency|provenance|drift}`."""
+    """CLI: `check_discovery_vendor.py {consistency|provenance|drift}`."""
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["consistency", "provenance", "drift"])
     args = parser.parse_args()
