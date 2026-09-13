@@ -33,6 +33,37 @@ def test_roundtrip(runs_root) -> None:
     assert loaded.status == "running" and loaded.ops == {}
 
 
+def test_roundtrip_brief_descriptor_without_machine_paths(runs_root) -> None:
+    descriptor = {
+        "frame": "customer",
+        "primary": "00-discovery/brief.md",
+        "requirements_source": "00-discovery/brief.md",
+        "source_paths": ["00-discovery/brief.md"],
+        "source_blobs": {"discovery-brief": "a" * 40},
+    }
+    state = rs.new_run(
+        subject="brief input", repo="alpha", repo_slug="owner/alpha",
+        ws_id="WS-BRIEF", target_dir="/tmp/alpha",
+        bundle_dir="workstreams/WS-BRIEF/spec", profile="profiles/team-exp.yaml",
+        run_id="r-brief", brief=descriptor,
+    )
+    rs.save(state)
+
+    assert rs.load("r-brief").brief == descriptor
+    raw = (rs.run_dir("r-brief") / "run.json").read_text(encoding="utf-8")
+    assert "/tmp/source-machine" not in raw
+
+
+def test_old_ledger_without_brief_field_loads(runs_root) -> None:
+    state = _mk(runs_root)
+    path = rs.run_dir(state.run_id) / "run.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("brief")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert rs.load(state.run_id).brief is None
+
+
 def test_write_ahead_persists_started(runs_root) -> None:
     s = _mk(runs_root)
     rs.op_start(s, "branch")

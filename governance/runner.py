@@ -27,6 +27,7 @@ from typing import Any
 from governance import (
     acceptance_guard,
     authority_root,
+    brief_input,
     decomposition_guard,
     design_guard,
 )
@@ -255,6 +256,7 @@ def start(
     ops: Ops,
     merge_authority: str | None = None,
     author_backend: str = "codex",
+    brief_source: brief_input.BriefSource | None = None,
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
@@ -283,6 +285,19 @@ def start(
             "(verify(...)) прежде чем начинать новый авторинг-прогон"
         )
     _reserve_run_id(run_id)
+    brief_descriptor = None
+    if brief_source is not None:
+        # Durable local intake copy: run.json remains portable, while a crash
+        # before the target materialization step cannot make resume depend on
+        # the caller machine's original path still existing.
+        intake_root = run_dir(run_id) / "brief-input"
+        brief_input.materialize(brief_source, intake_root, ".")
+        staged = brief_input.inspect_materialized(intake_root, ".")
+        brief_descriptor = staged.as_state()
+        if brief_descriptor != brief_source.as_state():
+            raise brief_input.BriefInputError(
+                "discovery source descriptor изменился при durable intake"
+            )
     state = new_run(
         subject=subject,
         repo=repo,
@@ -294,6 +309,7 @@ def start(
         run_id=run_id,
         merge_authority=merge_authority,
         author_backend=author_backend,
+        brief=brief_descriptor,
     )
     save(state)
     return advance(state, ops)
