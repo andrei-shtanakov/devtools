@@ -133,7 +133,7 @@ class FakeOps:
     checkout_and_pull_error: str | None = None
     head_sha_error: str | None = None
     authored: list[str] = field(default_factory=list)
-    author_disp_calls: list[tuple[str, str]] = field(default_factory=list)
+    author_disp_calls: list[tuple[str, str, str, str]] = field(default_factory=list)
     author_disp_exit: int = 0
     comments: list[str] = field(default_factory=list)
     merged: list[tuple[int, str]] = field(default_factory=list)
@@ -353,9 +353,11 @@ class FakeOps:
         path.write_text(body, encoding="utf-8")
         return 0
 
-    def author_disp(self, target_dir: str, task: str) -> int:
+    def author_disp(
+        self, target_dir: str, task: str, config_path: str, slug: str
+    ) -> int:
         self.calls.append(("author_disp", task))
-        self.author_disp_calls.append((target_dir, task))
+        self.author_disp_calls.append((target_dir, task, config_path, slug))
         return self.author_disp_exit
 
     def review_fresh(self, repo_name: str, pr: int) -> int:
@@ -2421,13 +2423,30 @@ def test_disp_backend_used_only_for_behaviour_node(
         "charter", "requirements", "design", "acceptance", "decomposition",
     ]
     assert len(ops.author_disp_calls) == 1
-    target_dir, task = ops.author_disp_calls[0]
+    target_dir, task, config_path, slug = ops.author_disp_calls[0]
     assert target_dir == str(tmp_path / f"target-{run_id}")
     assert "#### BEH-NN" in task
     assert "traces:" in task
     assert "checked_by" in task
     assert state.ops["author-behaviour"]["status"] == "completed"
     assert state.author_backend == "disp"
+
+    # Конфиг вида `document`: форма секции `[pipeline]` и есть объявление
+    # вида (disputatio SPEC-002 §3.2), поэтому проверяется форма, а не факт
+    # существования файла.
+    assert slug == f"beh-{state.ws_id}"
+    assert config_path == str(rs.run_dir(run_id) / "disp-doc.toml")
+    config = Path(config_path).read_text(encoding="utf-8")
+    assert f'document_path = "{BUNDLE_DIR}/15-behaviour-spec.md"' in config
+    assert "[pipeline.checklists.doc]" in config
+    assert 'findings_item = "B3"' in config
+    assert "[pipeline.checklists.doc.items]" in config
+    assert "B3 = " in config
+    # Взаимоисключающая форма: ключи вида `pair` здесь — `ConfigError` у
+    # disputatio ещё до любой мутации, поэтому их отсутствие — часть контракта.
+    assert "spec_path" not in config
+    assert "plan_path" not in config
+    assert "max_architectural_returns" not in config
 
 
 def test_disp_backend_author_disp_failure_stops_author(
