@@ -96,18 +96,32 @@ def check_bundle_composition(
     (или недостаёт) узел DAG. Сравнение — по множеству имён файлов, не по
     префиксу и не по count — лишний ИЛИ недостающий узел одинаково
     отказывает.
+
+    Полностью отсутствующий каталог — отдельный конфигурационный исход, не
+    «пустой состав»: оператору нужно исправить `bundle_dir`/доставку в base,
+    а не подбирать legacy-режим (devtools#168).
     """
+    bundle = Path(target_dir) / bundle_dir
+    if not bundle.is_dir():
+        raise RuntimeError(
+            f"каталога бандла {bundle_dir!r} нет в {target_dir!r}: "
+            "проверьте bundle_dir в run.json и что бандл вмержен "
+            "в base; подбор --legacy-bundle отсутствующий "
+            "каталог не исправит"
+        )
     declared = {fname for fname, _ in dag}
     known = {fname for fname, _ in BUNDLE_DAG}
     actual = {
-        p.name for p in (Path(target_dir) / bundle_dir).glob("*.md")
+        p.name for p in bundle.glob("*.md")
         if p.name in known
     }
     if actual != declared:
         raise RuntimeError(
             f"состав бандла {sorted(actual)} не совпадает с заявленным "
-            f"{sorted(declared)}: доавторьте недостающие узлы либо "
-            "передайте --legacy-bundle=3|4|5 с ТОЧНЫМ фактическим составом"
+            f"{sorted(declared)}: проверьте bundle_dir и что весь бандл "
+            "вмержен в base; если путь верен, доавторьте "
+            "недостающие узлы либо передайте "
+            "--legacy-bundle=3|4|5 с ТОЧНЫМ фактическим составом"
         )
 
 

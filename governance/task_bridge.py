@@ -47,6 +47,7 @@ from governance.bundle_dag import (
     node_id as _node_id,
 )
 from governance.frontmatter import join_frontmatter, split_frontmatter
+from governance.facts import Outcome
 from governance.ops import Ops, RealOps
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
 from governance.run_state import RunState, load, op_complete, op_start, save
@@ -927,6 +928,7 @@ def _prospective_anchor(
     форме значения (`_require_resumable_epoch`).
     """
     dag = _dag_for(legacy_bundle)
+    _check_bundle_composition(target_dir, bundle_dir, dag)
     path = Path(target_dir) / bundle_dir / dag[-1][0]
     return blob_sha1(path.read_text(encoding="utf-8"))
 
@@ -1145,17 +1147,42 @@ def _carry_execution_state(text: str, delivered: str) -> str:
     меняется. Значит повторный заход по тому же намерению (тот же base,
     тот же рендер) даёт те же байты, и `tasks_blob` §I3 воспроизводится.
     """
+    return _carry_execution_state_with_report(text, delivered).text
+
+
+@dataclass(frozen=True)
+class _CarryResult:
+    text: str
+    matched_tasks: int
+    total_tasks: int
+    carried_checked_items: int
+    total_checked_items: int
+
+
+def _carry_execution_state_with_report(
+    text: str, delivered: str
+) -> _CarryResult:
+    """То же правило §I11 плюс счётчик сопоставленных блоков."""
     prev = _delivered_state(delivered)
-    if not prev.status_by_block and not prev.checked:
-        return text
+    delivered_lines = delivered.split("\n")
+    total_checked = sum(
+        1
+        for start, stop in _task_bounds(delivered_lines)
+        for line in delivered_lines[start:stop]
+        if (item := _CHECKLIST_RE.match(line)) is not None
+        and item.group("mark") != " "
+    )
     lines = text.split("\n")
+    bounds = _task_bounds(lines)
     carryable = prev.checked & _unique(_checklist_texts(lines))
     out = list(lines)
-    for start, stop in _task_bounds(lines):
+    matched = 0
+    for start, stop in bounds:
         body = list(lines[start:stop])
         was = prev.status_by_block.get(_state_free(body))
         found = _task_meta(body)
         if was is not None and found is not None:
+            matched += 1
             i, m = found
             body[i] = (
                 body[i][: m.start("status")] + was + body[i][m.end("status"):]
@@ -1165,7 +1192,9 @@ def _carry_execution_state(text: str, delivered: str) -> str:
             if c is not None and c.group("text") in carryable:
                 body[i] = f"{c.group(1)}x{c.group(3)}{c.group('text')}"
         out[start:stop] = body
-    return "\n".join(out)
+    return _CarryResult(
+        "\n".join(out), matched, len(bounds), len(carryable), total_checked
+    )
 
 
 def deliver(
@@ -1183,6 +1212,7 @@ def deliver(
     version: int = 1,
     expected_base_sha: str | None = None,
     carry_from: str | None = None,
+    report_carry: bool = False,
     before_commit: Callable[[dict], None] | None = None,
     after_commit: Callable[[dict], None] | None = None,
 ) -> int:
@@ -1247,6 +1277,10 @@ def deliver(
     аргумента не передаёт (спеки в base ещё нет — переносить нечего), и
     обычная доставка байт-в-байт прежняя.
 
+    `report_carry` отличает supersede с подтверждённо отсутствующей
+    базовой спекой от обычной v1-доставки: первый случай пишет
+    durable-отчёт `0/N`, второй вообще не включает механику §I11.
+
     `before_commit`/`after_commit` (Task 7b плана supersede) — два хука
     переиздания, намеренно РАЗДЕЛЁННЫЕ коммитом:
 
@@ -1295,13 +1329,8 @@ def deliver(
     # приёмки PR #96, Task 7): ПОСЛЕ checkout_and_pull, ДО ensure_branch.
     dag = _dag_for(legacy_bundle)
     base = Path(target_dir) / bundle_dir
-    behaviour = base / "15-behaviour-spec.md"
-    if not behaviour.exists():
-        raise RuntimeError(
-            f"{behaviour} не найден на {base_ref} — бандл не вмержен "
-            "или путь неверен"
-        )
     _check_bundle_composition(target_dir, bundle_dir, dag)
+    behaviour = base / "15-behaviour-spec.md"
     # Preflight: та же проверка, что стопит раннер `stopped_preflight`'ом —
     # target-профиль может не декларировать design/acceptance/decomposition
     # вовсе (старая копия того же имени у соседнего репо), и доставка не
@@ -1430,11 +1459,19 @@ def deliver(
             anchor_node_id=anchor_node_id,
             version=version,
         )
-    if carry_from is not None:
+    carry_report: dict[str, int] | None = None
+    if carry_from is not None or report_carry:
         # Состояние исполнения переносится ПОСЛЕ рендера и ДО записи:
         # `tasks_blob` (§I3.1) обязан считаться по ФАКТИЧЕСКИМ байтам
         # файла, иначе возобновление не опознало бы собственный коммит.
-        text = _carry_execution_state(text, carry_from)
+        carried = _carry_execution_state_with_report(text, carry_from or "")
+        text = carried.text
+        carry_report = {
+            "matched_tasks": carried.matched_tasks,
+            "total_tasks": carried.total_tasks,
+            "carried_checked_items": carried.carried_checked_items,
+            "total_checked_items": carried.total_checked_items,
+        }
     rel = f"spec/{ws_id}-tasks.md"
     out = Path(target_dir) / rel
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1443,7 +1480,10 @@ def deliver(
         # ДО коммита (§I3.1): ожидаемый блоб спеки обязан быть в намерении
         # раньше, чем появится коммит, — иначе падение между коммитом и
         # записью head_sha оставляет ревизию неопознаваемой.
-        before_commit({"tasks_blob": blob_sha1(text)})
+        facts: dict[str, object] = {"tasks_blob": blob_sha1(text)}
+        if carry_report is not None:
+            facts["carry"] = carry_report
+        before_commit(facts)
     # Коммитом уходит РОВНО tasks-спека: файлы бандла в diff доставки не
     # входят вовсе (§I7). Это и есть наблюдаемое следствие, по которому
     # снаружи видно, что доставка проверяет одобренность, а не создаёт её.
@@ -2351,8 +2391,13 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
     оба SHA. То же на пустом `replaces_head_sha` (запись старого
     образца): сверять нечем — значит не удаляем.
 
-    Отсутствие ссылки — выполненный шаг, а не сбой: `None` от
-    `remote_branch_head` и от `rev_parse` молчат.
+    Отсутствие ссылки — выполненный шаг, а не сбой. Оно читается только из
+    типизированного `ABSENT`: `UNAVAILABLE` не выдаётся за отсутствие и
+    печатает неподтверждённый исход. `False` от удаления перепроверяется тем
+    же lookup: ссылка могла исчезнуть между сверкой и удалением. Если она
+    осталась на прежнем SHA, отказ печатается с ручной процедурой; если под
+    тем же именем появился другой SHA, чужая работа остаётся нетронутой и
+    диагностика называет расхождение.
     """
     branch = op.get("replaces_branch")
     if not branch:
@@ -2365,20 +2410,37 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
         )
         return
     removed: list[str] = []
-    for where, actual, drop in (
+    for where, locate, drop in (
         (
             "origin",
-            ops.remote_branch_head(state.repo_slug, branch),
+            lambda: ops.remote_branch_head_fact(state.repo_slug, branch),
             lambda: ops.delete_remote_branch(state.repo_slug, branch),
         ),
         (
             "локально",
-            ops.rev_parse(state.target_dir, branch),
+            lambda: ops.local_branch_head_fact(state.target_dir, branch),
             lambda: ops.delete_local_branch(state.target_dir, branch),
         ),
     ):
-        if actual is None:
+        before = locate()
+        if before.outcome is Outcome.UNAVAILABLE:
+            print(
+                f"ветка {branch} ({where}) не проверена после замены "
+                f"ревизии v{op.get('replaces_revision', '?')} "
+                f"(PR #{op.get('replaces_pr', '?')}): состояние ссылки "
+                f"установить не удалось ({before.detail}); удаление не "
+                "выполнялось — проверьте ссылку вручную"
+            )
+            continue
+        if before.outcome is Outcome.ABSENT:
             continue          # ссылки нет — шаг по этой половине состоялся
+        actual = before.value
+        if before.outcome is not Outcome.FOUND or not isinstance(actual, str):
+            print(
+                f"ветка {branch} ({where}) не проверена: неожиданный "
+                f"исход чтения {before.outcome.value}; удаление не выполнялось"
+            )
+            continue
         if actual != head:
             print(
                 f"ветка {branch} ({where}) оставлена: она стоит на "
@@ -2388,6 +2450,41 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
             continue
         if drop():
             removed.append(where)
+            continue
+        after = locate()
+        if after.outcome is Outcome.ABSENT:
+            continue
+        if after.outcome is Outcome.UNAVAILABLE:
+            print(
+                f"ветка {branch} ({where}) не удалена после замены ревизии "
+                f"v{op.get('replaces_revision', '?')} "
+                f"(PR #{op.get('replaces_pr', '?')}): удаление не "
+                "подтверждено — состояние ссылки после операции установить "
+                f"не удалось ({after.detail}); проверьте ссылку вручную"
+            )
+            continue
+        after_sha = after.value
+        if after.outcome is not Outcome.FOUND or not isinstance(after_sha, str):
+            print(
+                f"ветка {branch} ({where}) не удалена: неожиданный исход "
+                f"повторного чтения {after.outcome.value}; проверьте ссылку "
+                "вручную"
+            )
+            continue
+        if after_sha != head:
+            print(
+                f"ветка {branch} ({where}) оставлена после неудачного "
+                f"удаления: теперь она стоит на {after_sha[:7]}, а отозванная "
+                f"ревизия — на {head[:7]}; под тем же именем чужая работа"
+            )
+            continue
+        print(
+            f"ветка {branch} ({where}) не удалена после замены ревизии "
+            f"v{op.get('replaces_revision', '?')} "
+            f"(PR #{op.get('replaces_pr', '?')}): операция удаления "
+            f"отказала, а ссылка по-прежнему стоит на {head[:7]}; "
+            "удалите её вручную"
+        )
     if removed:
         print(
             f"ветка заменённой ревизии удалена ({', '.join(removed)}): "
@@ -2744,10 +2841,24 @@ def _tasks_blob_cb(state: RunState, n: int) -> Callable[[dict], None]:
 
     def _cb(facts: dict) -> None:
         key = f"{_REVISION_PREFIX}{n}"
-        state.ops[key] = {**state.ops[key], "tasks_blob": facts["tasks_blob"]}
+        recorded = {"tasks_blob": facts["tasks_blob"]}
+        if "carry" in facts:
+            recorded["carry"] = facts["carry"]
+        state.ops[key] = {**state.ops[key], **recorded}
         save(state)
 
     return _cb
+
+
+def _print_carry_report(state: RunState, n: int) -> None:
+    """Печать только на CLI-пути; `deliver` остаётся библиотечной."""
+    carry = state.ops[f"{_REVISION_PREFIX}{n}"]["carry"]
+    print(
+        f"state carried for {carry['matched_tasks']} of "
+        f"{carry['total_tasks']} task blocks; "
+        f"{carry['carried_checked_items']} of "
+        f"{carry['total_checked_items']} checked items"
+    )
 
 
 def _commit_facts_cb(
@@ -3043,16 +3154,18 @@ def deliver_superseded(
             # не должен зависеть от того, куда с тех пор уехал апстрим.
             # (Исход "continue" достижим только при `same_base`, так что
             # значения совпадают, — но источник назван явно.)
-            carry_from=ops.show_file(
+            carry_from=ops.show_file_for_carry(
                 state.target_dir,
                 op["base_sha"],
                 f"spec/{state.ws_id}-tasks.md",
             ),
+            report_carry=True,
             before_commit=_tasks_blob_cb(state, n),
             after_commit=_commit_facts_cb(
                 state, ops, n, op["prospective_anchor"]
             ),
         )
+        _print_carry_report(state, n)
         # head_sha уже записан колбэком durable — между коммитом и push.
         _complete_revision(
             state, n, pr=pr, anchor=op["prospective_anchor"],
@@ -3241,12 +3354,14 @@ def deliver_superseded(
         # исполнения переносится из ДОСТАВЛЕННОЙ спеки в base (тот же
         # источник, что у `_previous_dag`), не из рабочего дерева и не из
         # HEAD — base зафиксирован `base_sha` намерения.
-        carry_from=ops.show_file(
+        carry_from=ops.show_file_for_carry(
             state.target_dir, base_sha, f"spec/{state.ws_id}-tasks.md"
         ),
+        report_carry=True,
         before_commit=_tasks_blob_cb(state, n),
         after_commit=_commit_facts_cb(state, ops, n, prospective),
     )
+    _print_carry_report(state, n)
     # head_sha здесь НЕ пишется: он уже записан колбэком durable — между
     # коммитом и push (§I3), а не после создания PR.
     _complete_revision(

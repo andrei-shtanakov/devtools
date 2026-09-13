@@ -16,9 +16,15 @@ from pathlib import Path
 import pytest
 
 import governance.ops as ops_mod
+from governance.facts import Outcome
 from governance.ops import RealOps
 
 REPO_SLUG = "andrei-shtanakov/devtools"
+_EXPECTED_REMOTE_BRANCH_HEAD_QUERY = (
+    "query($o:String!,$n:String!,$q:String!){"
+    "repository(owner:$o,name:$n){"
+    "ref(qualifiedName:$q){target{oid}}}}"
+)
 
 
 class RecordedCall:
@@ -151,6 +157,54 @@ def test_find_pr_valid_list_returns_number(monkeypatch):
     result = ops.find_pr(REPO_SLUG, "feat/x")
 
     assert result == 42
+
+
+def test_prs_by_head_prefix_paginates_all_states_and_filters(monkeypatch):
+    payload = [
+        {"data": {"repository": {"pullRequests": {"nodes": [
+            {
+                "number": 41,
+                "title": "new",
+                "body": "body",
+                "headRefName": "spec/fleet-20260901-behaviour",
+            },
+            {
+                "number": 40,
+                "title": "other",
+                "body": "body",
+                "headRefName": "unrelated",
+            },
+        ]}}}},
+        {"data": {"repository": {"pullRequests": {"nodes": [
+            {
+                "number": 12,
+                "title": "old",
+                "body": "body",
+                "headRefName": "spec/fleet-20260801-behaviour",
+            },
+        ]}}}},
+    ]
+    calls = _install_fake_run(
+        monkeypatch, returncode=0, stdout=json.dumps(payload)
+    )
+    ops = RealOps()
+
+    result = ops.prs_by_head_prefix(REPO_SLUG, "spec/fleet-")
+
+    assert [item["number"] for item in result] == [41, 12]
+    argv = calls[0].argv
+    assert argv[:5] == ["gh", "api", "graphql", "--paginate", "--slurp"]
+    assert "-f" in argv
+    assert f"owner={REPO_SLUG.split('/')[0]}" in argv
+    assert f"name={REPO_SLUG.split('/')[1]}" in argv
+
+
+@pytest.mark.parametrize("stdout", ["not json", "{}", '[{"number": 1}]'])
+def test_prs_by_head_prefix_rejects_unknown_response(monkeypatch, stdout):
+    _install_fake_run(monkeypatch, returncode=0, stdout=stdout)
+
+    with pytest.raises(RuntimeError, match="prs_by_head_prefix"):
+        RealOps().prs_by_head_prefix(REPO_SLUG, "spec/fleet-")
 
 
 # --- Кейс 3: create_draft_pr ---------------------------------------------
@@ -1369,6 +1423,9 @@ def test_show_file_returns_content_at_ref(tmp_path) -> None:
     )
 
     assert RealOps().show_file(str(tmp_path), "HEAD", "spec/x.md") == "hello\n"
+    assert RealOps().show_file_for_carry(
+        str(tmp_path), "HEAD", "spec/x.md"
+    ) == "hello\n"
 
 
 def test_show_file_none_for_missing_path(tmp_path) -> None:
@@ -1377,6 +1434,32 @@ def test_show_file_none_for_missing_path(tmp_path) -> None:
     real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
 
     assert RealOps().show_file(str(tmp_path), "HEAD", "spec/nope.md") is None
+
+
+def test_show_file_for_carry_distinguishes_absent_path(tmp_path) -> None:
+    import subprocess as real_subprocess
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    real_subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c",
+         "user.name=t", "commit", "--allow-empty", "-q", "-m", "c"],
+        check=True,
+    )
+
+    assert RealOps().show_file_for_carry(
+        str(tmp_path), "HEAD", "spec/nope.md"
+    ) is None
+
+
+def test_show_file_for_carry_raises_when_revision_is_unavailable(tmp_path) -> None:
+    import subprocess as real_subprocess
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    with pytest.raises(RuntimeError, match="missing-ref"):
+        RealOps().show_file_for_carry(
+            str(tmp_path), "missing-ref", "spec/x.md"
+        )
 
 
 def test_commit_parent_returns_sha(monkeypatch):
@@ -1516,24 +1599,79 @@ def test_delete_local_branch_missing_is_false_not_raise(monkeypatch):
     assert RealOps().delete_local_branch("/tmp/clone", "spec/x-v3") is False
 
 
-def test_remote_branch_head_reads_the_ref_not_the_pr(monkeypatch):
-    """Спрашивается СВОЙ ref: после закрытия PR в ветку могли дописать."""
-    calls = _install_fake_run(monkeypatch, returncode=0, stdout="deadbeef\n")
+def test_remote_branch_head_fact_distinguishes_found_and_absent(monkeypatch):
+    found = json.dumps({
+        "data": {"repository": {"ref": {"target": {"oid": "deadbeef"}}}}
+    })
+    calls = _install_fake_run(monkeypatch, stdout=found)
 
-    assert RealOps().remote_branch_head(REPO_SLUG, "spec/x-v3") == "deadbeef"
-    assert calls[0].argv == [
-        "gh", "api", f"repos/{REPO_SLUG}/git/ref/heads/spec/x-v3",
-        "--jq", ".object.sha",
-    ]
+    fact = RealOps().remote_branch_head_fact(REPO_SLUG, "spec/x-v3")
+
+    assert fact.outcome is Outcome.FOUND
+    assert fact.value == "deadbeef"
+    assert calls[0].argv[:3] == ["gh", "api", "graphql"]
+    assert f"query={_EXPECTED_REMOTE_BRANCH_HEAD_QUERY}" in calls[0].argv
+    assert "o=andrei-shtanakov" in calls[0].argv
+    assert "n=devtools" in calls[0].argv
+    assert "q=refs/heads/spec/x-v3" in calls[0].argv
+
+    absent = json.dumps({"data": {"repository": {"ref": None}}})
+    _install_fake_run(monkeypatch, stdout=absent)
+    fact = RealOps().remote_branch_head_fact(REPO_SLUG, "spec/x-v3")
+    assert fact.outcome is Outcome.ABSENT
+    assert fact.value is None
 
 
 @pytest.mark.parametrize(
     "kw",
-    [{"returncode": 1, "stderr": "Not Found"}, {"returncode": 0, "stdout": ""}],
-    ids=["no-such-ref", "empty-answer"],
+    [
+        {"returncode": 1, "stderr": "rate limited"},
+        {"stdout": "not json"},
+        {"stdout": '{"data":{"repository":null}}'},
+        {"stdout": '{"data":{"repository":{}}}'},
+        {"stdout": '{"data":{"repository":{"ref":{"target":{}}}}}'},
+    ],
+    ids=[
+        "request-failed",
+        "invalid-json",
+        "repo-unavailable",
+        "missing-ref",
+        "bad-ref",
+    ],
 )
-def test_remote_branch_head_absent_is_none(kw, monkeypatch):
-    """Нет ветки — None; вызывающий читает это как «шаг уже состоялся»."""
+def test_remote_branch_head_fact_keeps_unknown_unavailable(kw, monkeypatch):
     _install_fake_run(monkeypatch, **kw)
 
-    assert RealOps().remote_branch_head(REPO_SLUG, "spec/x-v3") is None
+    fact = RealOps().remote_branch_head_fact(REPO_SLUG, "spec/x-v3")
+
+    assert fact.outcome is Outcome.UNAVAILABLE
+    assert fact.value is None
+
+
+@pytest.mark.parametrize(
+    "kw, outcome, value",
+    [
+        ({"returncode": 0, "stdout": "deadbeef\n"}, Outcome.FOUND, "deadbeef"),
+        ({"returncode": 1}, Outcome.ABSENT, None),
+        (
+            {"returncode": 128, "stderr": "not a git repository"},
+            Outcome.UNAVAILABLE,
+            None,
+        ),
+        ({"returncode": 0, "stdout": ""}, Outcome.UNAVAILABLE, None),
+    ],
+    ids=["found", "absent", "git-failed", "empty-success"],
+)
+def test_local_branch_head_fact_distinguishes_all_outcomes(
+    kw, outcome, value, monkeypatch
+):
+    calls = _install_fake_run(monkeypatch, **kw)
+
+    fact = RealOps().local_branch_head_fact("/tmp/clone", "spec/x-v3")
+
+    assert fact.outcome is outcome
+    assert fact.value == value
+    assert calls[0].argv == [
+        "git", "-C", "/tmp/clone", "rev-parse", "--verify", "--quiet",
+        "refs/heads/spec/x-v3",
+    ]

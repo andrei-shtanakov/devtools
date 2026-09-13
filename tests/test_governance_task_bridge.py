@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from governance import bundle_dag, decomposition_guard, node_approval, task_bridge
+from governance.facts import Fact, Outcome, unavailable
 from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.stale_adapter import blob_sha1
 
@@ -559,10 +560,12 @@ def test_deliver_dirty_target_refuses(tmp_path: Path) -> None:
         )
 
 
-def test_deliver_missing_behaviour_refuses(tmp_path: Path) -> None:
+def test_deliver_missing_bundle_dir_names_configuration_error(
+    tmp_path: Path,
+) -> None:
     target = tmp_path / "alpha"
     target.mkdir()
-    with pytest.raises(RuntimeError, match="15-behaviour-spec"):
+    with pytest.raises(RuntimeError, match="каталога бандла") as failure:
         task_bridge.deliver(
             target_dir=str(target),
             repo_slug="owner/alpha",
@@ -572,6 +575,32 @@ def test_deliver_missing_behaviour_refuses(tmp_path: Path) -> None:
             base_ref="master",
             ops=_StubOps(),
         )
+    message = str(failure.value)
+    assert "bundle_dir в run.json" in message
+    assert "вмержен в base" in message
+    assert "--legacy-bundle" in message
+
+
+def test_deliver_existing_wrong_bundle_dir_names_path_and_base(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text(CHARTER_MD)
+    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
+
+    with pytest.raises(RuntimeError, match="состав бандла") as failure:
+        task_bridge.deliver(
+            target_dir=str(target), repo_slug="owner/alpha",
+            ws_id="WS-alpha-7", subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master", ops=_StubOps(),
+        )
+    message = str(failure.value)
+    assert "bundle_dir" in message
+    assert "весь бандл вмержен в base" in message
+    assert "15-behaviour-spec.md" in message
 
 
 def test_deliver_reads_bundle_only_after_base_checkout(tmp_path: Path) -> None:
@@ -1225,6 +1254,32 @@ def test_deliver_conform_legacy_mismatch_refuses_before_ops(
         )
     assert not any(c[0] == "find_pr" for c in ops.calls)
     assert not any(c[0] == "ensure_branch" for c in ops.calls)
+
+
+def test_conform_approved_missing_bundle_dir_names_configuration(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "alpha"
+    target.mkdir()
+
+    with pytest.raises(RuntimeError, match="каталога бандла") as failure:
+        task_bridge.conform_approved(
+            str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
+        )
+    assert "bundle_dir в run.json" in str(failure.value)
+
+
+def test_deliver_conform_missing_bundle_dir_refuses_before_ops(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target = tmp_path / "alpha"
+    target.mkdir()
+    ops = _ConformOps()
+
+    with pytest.raises(RuntimeError, match="каталога бандла") as failure:
+        task_bridge.deliver_conform(_conform_state(target, monkeypatch), ops)
+    assert "bundle_dir в run.json" in str(failure.value)
+    assert not ops.calls
 
 
 # --- группировка по файлу цели (@id:task-bridge-beh-grouping, урок 8) -------
@@ -3753,6 +3808,10 @@ class _SupersedeOps(_ProvOps):
             return _bundle_from_tree(target_dir, path)
         return _spec_text("decomposition")
 
+    def show_file_for_carry(self, target_dir, ref, path):
+        self.calls.append(("show_file_for_carry", ref, path))
+        return self.show_file(target_dir, ref, path)
+
 
 def test_supersede_result_refuses_inconsistent_kind() -> None:
     """Тип исхода не даёт собрать невозможное сочетание.
@@ -6116,6 +6175,8 @@ class _ReplaceOps(_SupersedeOps):
         facts_by_pr=None,
         remote_head=_REPLACED_HEAD,
         local_head=_REPLACED_HEAD,
+        remote_delete_ok=True,
+        local_delete_ok=True,
         **kw,
     ):
         # Ветка заменяемой ревизии РЕЗОЛВИТСЯ в её PR — так на живом
@@ -6150,6 +6211,8 @@ class _ReplaceOps(_SupersedeOps):
         # «ссылки уже нет», другой SHA — «под тем же именем чужая работа».
         self.remote_head = remote_head
         self.local_head = local_head
+        self.remote_delete_ok = remote_delete_ok
+        self.local_delete_ok = local_delete_ok
 
     def pr_facts(self, repo_slug, pr):
         if pr not in self.facts_by_pr:
@@ -6171,9 +6234,12 @@ class _ReplaceOps(_SupersedeOps):
             self.closed.append((pr, comment))
         return self.close_ok
 
-    def remote_branch_head(self, repo_slug, branch):
-        self.calls.append(("remote_branch_head", branch))
-        return self.remote_head if branch == _REPLACED_BRANCH else None
+    def remote_branch_head_fact(self, repo_slug, branch):
+        self.calls.append(("remote_branch_head_fact", branch))
+        actual = self.remote_head if branch == _REPLACED_BRANCH else None
+        if actual is None:
+            return Fact(Outcome.ABSENT, None, "ветки на origin нет")
+        return Fact(Outcome.FOUND, actual, "ветка на origin прочитана")
 
     def rev_parse(self, target_dir, ref):
         if ref == _REPLACED_BRANCH:
@@ -6181,15 +6247,23 @@ class _ReplaceOps(_SupersedeOps):
             return self.local_head
         return super().rev_parse(target_dir, ref)
 
+    def local_branch_head_fact(self, target_dir, branch):
+        actual = self.rev_parse(target_dir, branch)
+        if actual is None:
+            return Fact(Outcome.ABSENT, None, "локальной ветки нет")
+        return Fact(Outcome.FOUND, actual, "локальная ветка прочитана")
+
     def delete_remote_branch(self, repo_slug, branch):
         self.calls.append(("delete_remote_branch", branch))
-        self.deleted.append(branch)
-        return True
+        if self.remote_delete_ok:
+            self.deleted.append(branch)
+        return self.remote_delete_ok
 
     def delete_local_branch(self, target_dir, branch):
         self.calls.append(("delete_local_branch", branch))
-        self.deleted_local.append(branch)
-        return True
+        if self.local_delete_ok:
+            self.deleted_local.append(branch)
+        return self.local_delete_ok
 
 
 def _replace_state(tmp_path, monkeypatch, **rev3):
@@ -6559,7 +6633,7 @@ def test_replace_accepts_pr_closed_by_operator(tmp_path, monkeypatch):
     # На этом пути (`pr_state != "OPEN"`) сверка идентичности не
     # выполнялась ни разу за прогон: `_check_replacement_target` выходит
     # до неё. Значит шаг 5 обязан сверить head сам.
-    assert ("remote_branch_head", _REPLACED_BRANCH) in ops.calls
+    assert ("remote_branch_head_fact", _REPLACED_BRANCH) in ops.calls
     assert ("rev_parse", _REPLACED_BRANCH) in ops.calls
 
 
@@ -7193,6 +7267,199 @@ def test_discharge_costs_nothing_without_revocations_in_the_ledger(
 
 
 @pytest.mark.parametrize(
+    "kw, where, deleted, deleted_local",
+    [
+        (
+            {"remote_delete_ok": False},
+            "origin",
+            [],
+            [_REPLACED_BRANCH],
+        ),
+        (
+            {"local_delete_ok": False},
+            "локально",
+            [_REPLACED_BRANCH],
+            [],
+        ),
+    ],
+    ids=["origin-delete-failed", "local-delete-failed"],
+)
+def test_branch_delete_failure_is_visible_but_does_not_undo_delivery(
+    kw, where, deleted, deleted_local, tmp_path, monkeypatch, capsys
+):
+    """Неподтверждённое удаление видно, но состоявшаяся доставка успешна.
+
+    После `delete_*_branch -> False` повторный lookup подтверждает, что
+    ссылка осталась на прежнем SHA. Поэтому сообщение называет половину и
+    ручную процедуру; исключение или ненулевой RC сказали бы неправду об уже
+    созданном PR новой ревизии.
+    """
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+
+    assert ops.deleted == deleted
+    assert ops.deleted_local == deleted_local
+    out = capsys.readouterr().out
+    assert f"ветка {_REPLACED_BRANCH} ({where}) не удалена" in out
+    assert "ревизии v3 (PR #408)" in out
+    assert "операция удаления отказала" in out
+    assert f"ссылка по-прежнему стоит на {_REPLACED_HEAD[:7]}" in out
+    assert "удалите её вручную" in out
+
+
+@pytest.mark.parametrize(
+    "kw, lookup_name, removed_where",
+    [
+        (
+            {"remote_delete_ok": False},
+            "remote_branch_head_fact",
+            "локально",
+        ),
+        (
+            {"local_delete_ok": False},
+            "local_branch_head_fact",
+            "origin",
+        ),
+    ],
+    ids=["origin-disappeared", "local-disappeared"],
+)
+def test_branch_disappearing_during_delete_is_a_completed_cleanup(
+    kw, lookup_name, removed_where, tmp_path, monkeypatch, capsys
+):
+    """False от удаления не тревожит, если повторный lookup видит отсутствие.
+
+    Это реальное окно гонки: обе половины раньше резолвились заранее, а между
+    сверкой и удалением ссылку мог снять оператор. По §I10 отсутствие — уже
+    выполненный шаг, поэтому ручная процедура здесь была бы ложной тревогой.
+    """
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+    answers = iter([
+        Fact(Outcome.FOUND, _REPLACED_HEAD, "ветка найдена"),
+        Fact(Outcome.ABSENT, None, "ветка исчезла"),
+    ])
+    setattr(ops, lookup_name, lambda first, second: next(answers))
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+
+    out = capsys.readouterr().out
+    assert _REPLACED_BRANCH in out
+    assert f"удалена ({removed_where})" in out
+    assert "удалена (origin, локально)" not in out
+    assert "не удалена" not in out
+    assert "оставлена после неудачного удаления" not in out
+
+
+@pytest.mark.parametrize(
+    "kw, lookup_name, where",
+    [
+        ({"remote_delete_ok": False}, "remote_branch_head_fact", "origin"),
+        ({"local_delete_ok": False}, "local_branch_head_fact", "локально"),
+    ],
+    ids=["origin-replaced", "local-replaced"],
+)
+def test_branch_replaced_during_failed_delete_is_not_touched(
+    kw, lookup_name, where, tmp_path, monkeypatch, capsys
+):
+    """Новый SHA после отказа удаления — чужая работа, а не cleanup target."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+    answers = iter([
+        Fact(Outcome.FOUND, _REPLACED_HEAD, "ветка найдена"),
+        Fact(Outcome.FOUND, "ЧУЖОЙ-SHA", "ветка переиспользована"),
+    ])
+    setattr(ops, lookup_name, lambda first, second: next(answers))
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+
+    out = capsys.readouterr().out
+    assert f"({where}) оставлена после неудачного удаления" in out
+    assert "теперь она стоит на ЧУЖОЙ-" in out
+    assert "под тем же именем чужая работа" in out
+    assert "удалите её вручную" not in out
+
+
+@pytest.mark.parametrize(
+    "kw, lookup_name, where",
+    [
+        ({"remote_delete_ok": False}, "remote_branch_head_fact", "origin"),
+        ({"local_delete_ok": False}, "local_branch_head_fact", "локально"),
+    ],
+    ids=["origin-unavailable", "local-unavailable"],
+)
+def test_branch_state_unavailable_after_failed_delete_is_not_success(
+    kw, lookup_name, where, tmp_path, monkeypatch, capsys
+):
+    """Unknown после False не превращается в ложное «ветка удалена»."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+    answers = iter([
+        Fact(Outcome.FOUND, _REPLACED_HEAD, "ветка найдена"),
+        unavailable("состояние недоступно"),
+    ])
+    setattr(ops, lookup_name, lambda first, second: next(answers))
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+
+    out = capsys.readouterr().out
+    assert f"ветка {_REPLACED_BRANCH} ({where}) не удалена" in out
+    assert "удаление не подтверждено" in out
+    assert "состояние ссылки после операции установить не удалось" in out
+    assert f"удалена ({where})" not in out
+
+
+@pytest.mark.parametrize(
+    "lookup_name, delete_call, where",
+    [
+        ("remote_branch_head_fact", "delete_remote_branch", "origin"),
+        ("local_branch_head_fact", "delete_local_branch", "локально"),
+    ],
+    ids=["origin-unavailable", "local-unavailable"],
+)
+def test_branch_state_unavailable_before_delete_skips_the_effect(
+    lookup_name, delete_call, where, tmp_path, monkeypatch, capsys
+):
+    """Unknown до удаления не разрешает необратимый эффект по имени ветки."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR])
+    setattr(
+        ops,
+        lookup_name,
+        lambda first, second: unavailable("состояние недоступно"),
+    )
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+
+    assert not any(call[0] == delete_call for call in ops.calls)
+    out = capsys.readouterr().out
+    assert f"ветка {_REPLACED_BRANCH} ({where}) не проверена" in out
+    assert "состояние ссылки установить не удалось" in out
+    assert "удаление не выполнялось" in out
+
+
+@pytest.mark.parametrize(
     "kw, deleted, deleted_local",
     [
         ({"remote_head": "ЧУЖОЙ-SHA"}, [], [_REPLACED_BRANCH]),
@@ -7434,7 +7701,8 @@ def test_carry_preserves_status_and_marks_of_unchanged_task() -> None:
     delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001")
     fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
     assert "| ✅ DONE" not in fresh          # рендер состояния не знает
-    carried = tb._carry_execution_state(fresh, delivered)
+    report = tb._carry_execution_state_with_report(fresh, delivered)
+    carried = report.text
 
     done = _task_body(carried, "TASK-001")
     assert "P2 | ✅ DONE   Est: 0.5d" in done
@@ -7622,12 +7890,15 @@ def test_carry_skips_checklist_text_repeated_in_delivered_spec() -> None:
                   "TASK-002")
     )
     fresh = _twin_item(_render(_CARRY_DT, _CARRY_SCENARIOS, version=2))
-    carried = tb._carry_execution_state(fresh, delivered)
+    report = tb._carry_execution_state_with_report(fresh, delivered)
+    carried = report.text
     assert _DUP_ITEM not in carried
     assert carried.count("| ✅ DONE") == 2
     # Однозначные пункты тех же задач галочки сохраняют
     assert "- [x] реализовать BEH-02: Пустое состояние" in carried
     assert carried.count("- [x] проверка группы") == 2
+    assert report.matched_tasks == report.total_tasks == 2
+    assert report.carried_checked_items < report.total_checked_items
 
 
 def test_carry_skips_checklist_text_repeated_in_fresh_render() -> None:
@@ -7647,6 +7918,22 @@ def test_carry_skips_checklist_text_repeated_in_fresh_render() -> None:
     # TASK-002 изменена, поэтому чистая
     assert _task_body(carried, "TASK-001").count("| ✅ DONE") == 1
     assert "| ✅ DONE" not in _task_body(carried, "TASK-002")
+
+
+def test_carry_report_ignores_checked_lines_outside_task_blocks() -> None:
+    """Секция design-resolutions не входит в execution-state §I11."""
+    from governance import task_bridge as tb
+
+    fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
+    delivered = _executed(
+        _render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001"
+    )
+    outside = "- [x] решение из design, не execution-checklist\n"
+    report = tb._carry_execution_state_with_report(
+        outside + fresh, outside + delivered
+    )
+
+    assert report.carried_checked_items == report.total_checked_items == 3
 
 
 # --- Перенос состояния: сквозные пути доставки -----------------------------
@@ -7685,7 +7972,7 @@ class _CarryOps(_SupersedeOps):
     Аргументы `show_file` сверяются, как у родителя: перенос обязан
     читать base по `base_sha`, а не HEAD и не рабочее дерево."""
 
-    def __init__(self, *args, delivered: str = "", **kwargs) -> None:
+    def __init__(self, *args, delivered: str | None = "", **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.delivered = delivered
 
@@ -7700,7 +7987,7 @@ class _CarryOps(_SupersedeOps):
 
 
 def test_supersede_preserves_execution_state_of_unchanged_tasks(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, capsys
 ):
     """Живой дефект spec-runner#409: переиздание сохраняет `DONE` и `[x]`.
 
@@ -7733,6 +8020,75 @@ def test_supersede_preserves_execution_state_of_unchanged_tasks(
     from governance.stale_adapter import blob_sha1
     assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_blob"] == (
         blob_sha1(text)
+    )
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["carry"] == {
+        "matched_tasks": 1,
+        "total_tasks": 1,
+        "carried_checked_items": 3,
+        "total_checked_items": 3,
+    }
+    assert (
+        "state carried for 1 of 1 task blocks; 3 of 3 checked items"
+        in capsys.readouterr().out
+    )
+    assert ("show_file_for_carry", "base-sha-1", _SPEC_REL) in ops.calls
+
+
+def test_supersede_reports_zero_when_base_tasks_file_is_absent(
+    tmp_path, monkeypatch, capsys
+):
+    """Подтверждённое отсутствие спеки — штатный 0/N, не сбой."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ-ДРУГОЙ",
+        "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
+    }
+    rs.save(state)
+    ops = _CarryOps(prs=[_MERGED_PR], delivered=None)
+
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["carry"] == {
+        "matched_tasks": 0,
+        "total_tasks": 1,
+        "carried_checked_items": 0,
+        "total_checked_items": 0,
+    }
+    assert (
+        "state carried for 0 of 1 task blocks; 0 of 0 checked items"
+        in capsys.readouterr().out
+    )
+
+
+def test_supersede_refuses_when_base_tasks_file_cannot_be_read(
+    tmp_path, monkeypatch
+):
+    """Сбой Git не превращается в чистую спеку с TODO."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    class _UnreadableCarryOps(_CarryOps):
+        def show_file_for_carry(self, target_dir, ref, path):
+            if (ref, path) == ("base-sha-1", _SPEC_REL):
+                raise RuntimeError("git show failed")
+            return super().show_file_for_carry(target_dir, ref, path)
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ-ДРУГОЙ",
+        "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
+    }
+    rs.save(state)
+    ops = _UnreadableCarryOps(prs=[_MERGED_PR])
+
+    with pytest.raises(RuntimeError, match="git show failed"):
+        tb.deliver_superseded(state, ops)
+    assert not any(
+        call[0] in {"commit_paths", "create_draft_pr"} for call in ops.calls
     )
 
 
@@ -7849,6 +8205,7 @@ def test_supersede_resume_reproduces_the_same_bytes(tmp_path, monkeypatch):
         blob_first
     )
     assert ("show_file", "base-sha-1", _SPEC_REL) in again.calls
+    assert ("show_file_for_carry", "base-sha-1", _SPEC_REL) in again.calls
 
 
 # --- Гвард состава активного DAG ----------------------------------------
@@ -7946,6 +8303,36 @@ def test_composition_without_design_refuses_without_legacy_flag(
 
     with pytest.raises(RuntimeError) as failure:
         _composition(target, None)
+    message = str(failure.value)
+    assert "20-design.md" in message
+    assert "--legacy-bundle=3|4|5" in message
+
+
+def test_composition_missing_directory_is_not_an_empty_bundle(
+    tmp_path: Path,
+) -> None:
+    """#168: нет каталога ≠ есть каталог без узлов."""
+    target = tmp_path / "alpha"
+    target.mkdir()
+
+    with pytest.raises(RuntimeError, match="каталога бандла") as failure:
+        _composition(str(target), None)
+    message = str(failure.value)
+    assert "состав бандла []" not in message
+    assert "bundle_dir в run.json" in message
+
+
+def test_prospective_anchor_guards_composition_itself(tmp_path: Path) -> None:
+    """#181: якорь не полагается на порядок внешнего caller'а."""
+    target = _composition_bundle(
+        tmp_path, "00-charter.md", "10-requirements.md",
+        "15-behaviour-spec.md",
+    )
+
+    with pytest.raises(RuntimeError) as failure:
+        task_bridge._prospective_anchor(
+            target, "workstreams/WS-alpha-7/spec"
+        )
     message = str(failure.value)
     assert "20-design.md" in message
     assert "--legacy-bundle=3|4|5" in message
