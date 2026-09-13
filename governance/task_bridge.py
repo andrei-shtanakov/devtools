@@ -50,7 +50,14 @@ from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.facts import Outcome
 from governance.ops import Ops, RealOps
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
-from governance.run_state import RunState, load, op_complete, op_start, save
+from governance.run_state import (
+    RunState,
+    load,
+    op_complete,
+    op_start,
+    run_dir,
+    save,
+)
 from governance.spec_runner_contract import target_selector_policy
 from governance.stale_adapter import blob_sha1
 
@@ -1274,8 +1281,9 @@ def deliver(
     report_carry: bool = False,
     before_commit: Callable[[dict], None] | None = None,
     after_commit: Callable[[dict], None] | None = None,
+    s8_verdicts: bytes | None = None,
 ) -> int:
-    """Пишет spec/<ws-id>-tasks.md и открывает один draft-PR.
+    """Пишет tasks-спеку с S8 evidence и открывает один draft-PR.
 
     Fail-closed по образцу S1 runner'а: грязный target — отказ (иначе
     commit_paths закоммитил бы рядом с чужими правками). База освежается
@@ -1359,6 +1367,13 @@ def deliver(
     Отказ внутри любого из хуков прерывает доставку ДО push — это
     корректное состояние, его разбирает реконсиляция. `None` у обоих
     (дефолт) — поведение обычной доставки байт-в-байт прежнее.
+
+    `s8_verdicts` — точные байты ``gate-verdicts/v1``, собранные S8 этого
+    же прогона. Когда аргумент передан, evidence пишется в
+    ``workstreams/<ws-id>/evidence/s8-gate-verdicts.jsonl`` и входит в
+    ТОТ ЖЕ ``commit_paths``, что tasks-спека: отдельного evidence-коммита
+    и отдельного PR нет. Прямой/legacy-вызов ``deliver`` может не передать
+    аргумент; штатный ``deliver_for_run`` передаёт его обязательно.
     """
     if ops.is_dirty(target_dir):
         raise RuntimeError(
@@ -1542,6 +1557,18 @@ def deliver(
     out = Path(target_dir) / rel
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
+    commit_paths = [rel]
+    if s8_verdicts is not None:
+        evidence_rel = (
+            Path("workstreams")
+            / ws_id
+            / "evidence"
+            / "s8-gate-verdicts.jsonl"
+        ).as_posix()
+        evidence_out = Path(target_dir) / evidence_rel
+        evidence_out.parent.mkdir(parents=True, exist_ok=True)
+        evidence_out.write_bytes(s8_verdicts)
+        commit_paths.append(evidence_rel)
     if before_commit is not None:
         # ДО коммита (§I3.1): ожидаемый блоб спеки обязан быть в намерении
         # раньше, чем появится коммит, — иначе падение между коммитом и
@@ -1550,12 +1577,12 @@ def deliver(
         if carry_report is not None:
             facts["carry"] = carry_report
         before_commit(facts)
-    # Коммитом уходит РОВНО tasks-спека: файлы бандла в diff доставки не
-    # входят вовсе (§I7). Это и есть наблюдаемое следствие, по которому
-    # снаружи видно, что доставка проверяет одобренность, а не создаёт её.
+    # Коммитом уходит tasks-спека и, на штатном spec-loop пути, S8 evidence
+    # того же цикла. Файлы БАНДЛА в diff доставки не входят вовсе (§I7):
+    # доставка проверяет одобренность, а не создаёт её.
     ops.commit_paths(
         target_dir,
-        [rel],
+        commit_paths,
         f"spec: {ws_id} tasks (draft) (fleet-agent)",
     )
     if after_commit is not None:
@@ -1567,12 +1594,19 @@ def deliver(
             "anchor_blob": design_blob,
         })
     ops.push_branch(target_dir, branch)
+    evidence_note = (
+        "S8 verdicts этого же цикла приложены в evidence тем же коммитом; "
+        "отдельного evidence-PR нет.\n\n"
+        if s8_verdicts is not None
+        else ""
+    )
     body = (
         f"Draft tasks.md-спека из behaviour-spec бандла {ws_id} "
         f"({bundle_dir}/15-behaviour-spec.md), сгенерирована task_bridge.\n\n"
         "Файлы бандла этот PR не трогает: одобренность узлов доставка "
         "только ПРОВЕРЯЕТ (§I7, §I12), а одобряет их человек мержем "
         "candidate-PR.\n\n"
+        + evidence_note
         + "Спека managed: `status: draft` НЕ исполняется при "
         "strict-governance — approve (перевод в approved) делает человек, "
         f"затем `spec-runner run --strict --spec-prefix={ws_id}-` в "
@@ -1902,6 +1936,18 @@ def deliver_for_run(
     # работы («сгенерировать DAG → одобрить узлы топологически →
     # deliver_for_run»), а не регресс.
     judged_base = _approved_dag_or_refuse(state, ops, legacy_bundle)
+    # S8 завершился раньше доставки и перенёс обязательный verdict-файл
+    # из transient `.steward/` в durable ledger прогона. Читаем его ДО
+    # write-ahead op и любых delivery-эффектов: потерянный локальный
+    # артефакт не должен породить tasks-PR без обещанного evidence.
+    verdicts_path = run_dir(state.run_id) / "s8-gate-verdicts.jsonl"
+    try:
+        s8_verdicts = verdicts_path.read_bytes()
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"S8 verdicts прогона недоступны: {verdicts_path} — "
+            "доставка не начата"
+        ) from exc
     op_start(state, "tasks-deliver")
     pr = deliver(
         target_dir=state.target_dir,
@@ -1915,6 +1961,7 @@ def deliver_for_run(
         profile=state.profile,
         expected_base_sha=judged_base,
         after_commit=_capture_anchor,
+        s8_verdicts=s8_verdicts,
     )
     op_complete(
         state, "tasks-deliver", pr=pr, anchor=stamped.get("anchor"),
