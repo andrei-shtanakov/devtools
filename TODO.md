@@ -1339,11 +1339,15 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       S8 завершился `exit=0`, существующий tasks-PR kapelle#77 найден
       реконсиляцией; внешние мутации smoke-харнессом запрещены и не
       предпринимались.
-- [ ] E0.6b S8-вердикт едет внутри tasks-PR того же цикла: `deliver` кладёт `out/governance-runs/<run-id>/s8-gate-verdicts.jsonl` (gate-verdicts/v1; исходное место записи гейта `.steward/gate_verdicts.jsonl` в корне репо-цели прибирается после S8) в `workstreams/<ws-id>/evidence/` тем же коммитом, что tasks-спека; отдельный evidence-PR не создаётся, у tasks-PR собственного S8 нет (терминально) @owner:github:andrei-shtanakov @id:s8-verdict-in-tasks-pr
+- [x] E0.6b S8-вердикт едет внутри tasks-PR того же цикла: `deliver` кладёт `out/governance-runs/<run-id>/s8-gate-verdicts.jsonl` (gate-verdicts/v1; исходное место записи гейта `.steward/gate_verdicts.jsonl` в корне репо-цели прибирается после S8) в `workstreams/<ws-id>/evidence/` тем же коммитом, что tasks-спека; отдельный evidence-PR не создаётся, у tasks-PR собственного S8 нет (терминально) @owner:github:andrei-shtanakov @id:s8-verdict-in-tasks-pr
       Порядок в коде: `resume` → `completed` (S8 внутри) → `deliver`
       (`governance/spec_loop.py`). Правит `task_bridge` — поэтому после
       #201, как и остальные bridge-правки (триаж 2026-09-13). Альтернатива
       без записи в репо — check run на sha мержа бандла — не выбрана.
+      Доставлено PR этой ветки: штатный `deliver_for_run` fail-closed читает
+      verdicts из ledger до write-ahead доставки, а `deliver` переносит
+      точные байты в один `commit_paths` вместе с tasks; прямой legacy-вызов
+      без run-контекста сохраняет прежний контракт.
 - [ ] E1 Вход конвейера из discovery-brief: `spec-loop --brief <path>` — бриф обязан пройти вендоренный gate_check (pass, иначе fail-closed), хэш брифа входит в `upstream_hashes` charter, бриф лежит нулевым узлом в `workstreams/<ws-id>/spec/` и едет бандл-PR-ом; промпты charter/requirements получают бриф как источник (G-NN/FR-NN переносятся с трассировкой), гвард «каждый Must-FR брифа встречается в requirements»; приёмка — живой прогон engineer-фрейм → бриф → spec-loop → approved tasks-спека → исполнение spec-runner @owner:github:andrei-shtanakov @id:spec-loop-brief-input
       Граница author ≠ execute discovery сохраняется: PR открывает конвейер,
       не discovery. gate_check вендорится КОДОМ пиненой копией по образцу

@@ -525,6 +525,40 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
     assert "- ограничение: без batching на старте" in spec_text
 
 
+def test_deliver_commits_s8_evidence_with_tasks(tmp_path: Path) -> None:
+    """E0.6b: S8 evidence и tasks — один commit, одна ветка, один PR."""
+    target = _target(tmp_path)
+    ops = _StubOps()
+    verdicts = b'{"schema":"gate-verdicts/v1","result":"pass"}\n'
+
+    assert task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="Наблюдаемость (alpha#7)",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+        s8_verdicts=verdicts,
+    ) == 77
+
+    evidence = (
+        target
+        / "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl"
+    )
+    assert evidence.read_bytes() == verdicts
+    commits = [call for call in ops.calls if call[0] == "commit_paths"]
+    assert commits == [(
+        "commit_paths",
+        (
+            "spec/WS-alpha-7-tasks.md",
+            "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl",
+        ),
+    )]
+    assert sum(call[0] == "create_draft_pr" for call in ops.calls) == 1
+    assert "отдельного evidence-PR нет" in ops.pr_body
+
+
 def test_deliver_default_generated_at_has_utc_offset(tmp_path: Path) -> None:
     """devtools#157: штамп `generated_at` по умолчанию (без явного
     параметра) обязан нести смещение UTC — spec-runner approve пишет
@@ -2900,6 +2934,12 @@ def _recon_state(tmp_path: Path, monkeypatch, **kw):
     state.status = kw.get("status", "completed")
     state.pr = kw.get("pr", 5)
     state.base_ref = "master"
+    verdicts = rs.run_dir(state.run_id) / "s8-gate-verdicts.jsonl"
+    verdicts.parent.mkdir(parents=True, exist_ok=True)
+    verdicts.write_text(
+        '{"schema":"gate-verdicts/v1","result":"pass"}\n',
+        encoding="utf-8",
+    )
     if "op" in kw:
         state.ops["tasks-deliver"] = kw["op"]
     rs.save(state)
@@ -3065,6 +3105,16 @@ def test_deliver_for_run_write_ahead_op_and_completion(
     # anchor, §I2) утверждается отдельно — `..._records_anchor_of_stamp`.
     op = saved.ops["tasks-deliver"]
     assert (op["status"], op["pr"]) == ("completed", 77)
+    assert (
+        Path(state.target_dir)
+        / "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl"
+    ).read_text(encoding="utf-8") == (
+        '{"schema":"gate-verdicts/v1","result":"pass"}\n'
+    )
+    assert ("commit_paths", (
+        "spec/WS-alpha-7-tasks.md",
+        "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl",
+    )) in ops.calls
     # Повтор: op completed → ни одного нового ЭФФЕКТА. База при этом
     # освежается — шорткат стоит после pull'а, и это не эффект: без
     # свежего клона повтор судил бы протухшее состояние.
@@ -3072,6 +3122,25 @@ def test_deliver_for_run_write_ahead_op_and_completion(
     assert task_bridge.deliver_for_run(rs.load("r-recon"), ops2) == 77
     assert not _effects(ops2)
     assert ops2.calls == [("checkout_and_pull", "master")]
+
+
+def test_deliver_for_run_refuses_missing_s8_evidence_before_write_ahead(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """E0.6b: completed без durable S8-файла не рождает tasks-only PR."""
+    from governance import run_state as rs
+
+    state = _recon_state(tmp_path, monkeypatch)
+    (rs.run_dir(state.run_id) / "s8-gate-verdicts.jsonl").unlink()
+    before = _ledger_bytes()
+    ops = _ReconOps()
+
+    with pytest.raises(RuntimeError, match="S8 verdicts.*недоступны"):
+        task_bridge.deliver_for_run(state, ops)
+
+    assert _ledger_bytes() == before
+    assert "tasks-deliver" not in rs.load(state.run_id).ops
+    assert not _effects(ops)
 
 
 def test_deliver_for_run_adopts_existing_pr_by_branch(
