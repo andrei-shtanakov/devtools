@@ -396,7 +396,7 @@ _AUTHOR_DSL = {
         "already delivered), and the sanction MUST name a real owner "
         "decision in one of exactly two machine-checkable forms: "
         "`batch-approve-<YYYY-MM-DD>` (a dated owner decision; the "
-        "date must be a REAL calendar date) or `<repo>#<number>` "
+        "date must be a REAL calendar date) or `<repo>#<номер>` "
         "(a PR or issue reference, e.g. `spec-runner#425`). Free "
         "text is rejected: a sanction that accepts any wording is "
         "decoration. Declare it AT MOST ONCE per DT, only on type: "

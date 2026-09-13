@@ -1301,18 +1301,20 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   батч, но #195 обязан сохранить negative self-check: одной правки прозы для
   него недостаточно.
 
-- [ ] Остаточный долг decomposition/task_bridge: legacy-граф, verifies-парсер и waiver-контракт привести к одной исполнимой форме после file-target cutover @owner:github:andrei-shtanakov @id:task-bridge-residual-debt-wave
+- [x] Остаточный долг decomposition/task_bridge: legacy-граф, verifies-парсер и waiver-контракт привести к одной исполнимой форме после file-target cutover @owner:github:andrei-shtanakov @id:task-bridge-residual-debt-wave — runtime PR #214 + contract/test-only PR этой ветки
   Источники: devtools#123 (оставшаяся линейность legacy-графа; уже закрытые
   Traces/owner_role повторно не делать), #162 (три локальных остатка verifies),
   #198 (три остатка waiver-проекции) и #200 (ложные комментарии +
   негерметичный зонд). Приёмка обязана различать runtime-фиксы, уточнения
   контракта и test-only изменения; доступ к соседнему spec-runner в обычном
   pytest не становится неявной обязательной зависимостью.
-  Runtime-подволна #123+#162 — PR этой ветки: legacy Feature-секции
+  Runtime-подволна #123+#162 — PR #214: legacy Feature-секции
   расходятся независимыми ветками и соединяются featureless-задачей;
   verifies-парсер не считает orphan-путь или Markdown-прозу исполняемой
-  группой и сообщает обе допустимые формы отступа. Общий пункт остаётся
-  открытым до отдельной contract/test-only подволны #198+#200.
+  группой и сообщает обе допустимые формы отступа. Contract/test-only
+  подволна #198+#200 — PR этой ветки: фактические носители waiver описаны
+  без снятых утверждений, author-промпт запинован на словари класса и
+  санкции, оба соседских зонда требуют явного opt-in и имеют hard timeout.
 
 ## План развития пайплайна «интервью → реализация» — принят 2026-09-13
 

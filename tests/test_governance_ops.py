@@ -1062,6 +1062,7 @@ def test_author_unknown_harness_is_config_error(monkeypatch, tmp_path, capsys):
 
 
 def test_author_dsl_covers_decomposition() -> None:
+    from governance.decomposition_guard import SANCTION_FORMS, WAIVER_CLASSES
     from governance.ops import _AUTHOR_DSL, _AUTHOR_FILENAMES
 
     assert _AUTHOR_FILENAMES["decomposition"] == "30-decomposition.md"
@@ -1070,7 +1071,9 @@ def test_author_dsl_covers_decomposition() -> None:
         "spec_stage: decomposition", "owner_role: tech-lead",
         "traces_to: [design, acceptance]", "#### DT-NN:", "type: implement|verify",
         "scenarios:", "depends_on:", "delivered_by:", "parallel_group:",
-        "topological declaration order",
+        "topological declaration order", "tdd_waiver:",
+        "AT MOST ONCE per DT", "only on type: implement",
+        "only on a DT that HAS depends_on",
         # Major ревью PR #161, finding 1: `verifies:` — обязательное
         # структурное поле type: verify (owner ruling DT-14 multi-file
         # group) — промпт авторинга обязан его знать, иначе агент авторит
@@ -1078,6 +1081,10 @@ def test_author_dsl_covers_decomposition() -> None:
         "verifies:",
     ):
         assert token in dsl
+    for node_class in WAIVER_CLASSES:
+        assert f"`{node_class}`" in dsl
+    for sanction_form in SANCTION_FORMS.split(" либо "):
+        assert f"`{sanction_form}`" in dsl
 
 
 def test_author_dsl_decomposition_explains_verifies_field() -> None:
