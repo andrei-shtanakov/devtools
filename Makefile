@@ -48,7 +48,7 @@ help:
 	@echo "  make arch-freshness       — локальная диагностика drift/freshness арх-evidence (вахта — CI steward)"
 	@echo "  make arch-freshness-read  — читатель локального статуса: просрочка ⇒ unknown (exit 2)"
 	@echo "  make behaviour-run ARGS=… — governance runner CLI: start|resume|verify|status (uv + группа governance)"
-	@echo "  make spec-loop SUBJECT='…' REPO=… ARGS='[--brief <path>]' — операторская кнопка: optional gate-passed discovery source → start → мерж бандла (человек) → одобрение узлов (человек, --approve-node) → повтор → deliver tasks-спеки → approve (человек); E1 принимает готовый brief, но не запускает interview; merge-authority жёстко human"
+	@echo "  make spec-loop SUBJECT='…' REPO=… — операторская кнопка: start → мерж бандла (человек) → одобрение узлов (человек, --approve-node) → повтор той же команды → deliver tasks-спеки → approve (человек); merge-authority жёстко human, неоднозначности — fail-closed (--run-id/--ws-id через ARGS)"
 	@echo "  make behaviour-console ARGS=… — governance console TUI (uv + группа governance)"
 	@echo "  make behaviour-tasks ARGS='--run-id …' — draft tasks.md-спека из бандла PR-ом (approve — человек)"
 	@echo "  make behaviour-tasks ARGS='--run-id … --approve-node <node-id>' — одобрение узла бандла: candidate-PR → мерж ЧЕЛОВЕКОМ (это и есть акт) → повтор той же команды дописывает подпись финализирующим PR-ом. Единственная дорога узла в approved (§I12); порядок — топологический, доставка одобренность только проверяет"
