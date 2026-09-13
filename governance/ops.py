@@ -151,7 +151,12 @@ class Ops(Protocol):
     def comment(self, repo_slug: str, pr: int, body: str) -> None: ...
 
     def author(
-        self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        self,
+        target_dir: str,
+        kind: str,
+        subject: str,
+        bundle_dir: str,
+        brief_context: dict[str, object] | None = None,
     ) -> int: ...
 
     def author_disp(
@@ -1231,7 +1236,12 @@ class RealOps:
         )
 
     def author(
-        self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        self,
+        target_dir: str,
+        kind: str,
+        subject: str,
+        bundle_dir: str,
+        brief_context: dict[str, object] | None = None,
     ) -> int:
         """Авторинг-агент по выбранному харнессу (см. `_author_argv`).
 
@@ -1246,12 +1256,34 @@ class RealOps:
         """
         rules = _AUTHOR_DSL.get(kind, "")
         target_file = _AUTHOR_FILENAMES.get(kind, "")
+        source_guidance = ""
+        if brief_context is not None and kind in ("charter", "requirements"):
+            paths = brief_context.get("source_paths", [])
+            blobs = brief_context.get("source_blobs", {})
+            requirements_source = brief_context.get("requirements_source")
+            repo_paths = [f"{bundle_dir}/{path}" for path in paths]
+            source_guidance = (
+                "\nDiscovery source layer is already materialized in this "
+                f"repository: frame={brief_context.get('frame')!r}, "
+                f"paths={repo_paths!r}, git_blob_pins={blobs!r}. Read these "
+                "files from the repository; do not rely on conversational "
+                "memory. Source IDs are immutable: preserve every FR-NN and "
+                "NFR-NN exactly. "
+                f"The requirements source is {bundle_dir}/{requirements_source}."
+            )
+            if kind == "charter":
+                source_guidance += (
+                    " Declare every discovery source as a direct traces_to "
+                    "edge and pin it in upstream_hashes using the supplied "
+                    "git blob pins."
+                )
         prompt = (
             f"kind={kind} subject={subject!r} bundle_dir={bundle_dir}\n"
             f"Write EXACTLY one file: {bundle_dir}/{target_file} "
             "(this exact name; create parent dirs as needed).\n"
             f"{rules}\n"
             "Author the governance bundle content for this kind/subject."
+            f"{source_guidance}"
         )
         try:
             argv = _author_argv(prompt)

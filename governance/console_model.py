@@ -18,6 +18,7 @@ from governance.bundle_state import candidate_state
 # `RunDetail.ops`.
 PIPELINE_KEYS: tuple[str, ...] = (
     "branch",
+    "materialize-brief",
     "author-charter",
     "author-requirements",
     "author-behaviour",
@@ -40,7 +41,9 @@ PIPELINE_KEYS: tuple[str, ...] = (
 # Findings-файлы, которые может нести каталог прогона — читаем оба, если
 # есть (спека Task 3): gate-candidate пишет `gate-findings.txt`,
 # authoritative-гейт S8 — `s8-findings.txt`.
-_FINDINGS_FILES: tuple[str, ...] = ("gate-findings.txt", "s8-findings.txt")
+_FINDINGS_FILES: tuple[str, ...] = (
+    "brief-findings.txt", "gate-findings.txt", "s8-findings.txt",
+)
 
 # Ключи, которые наступают при обычном продвижении прогона до его конца.
 # `remediation-issue` из `PIPELINE_KEYS` исключён (финальное ревью I-5):
@@ -98,6 +101,8 @@ def _current_step(state: rs.RunState) -> str:
     if state.status in _TERMINAL_STATUSES:
         return "—"
     for key in _REQUIRED_STEP_KEYS:
+        if key == "materialize-brief" and state.brief is None:
+            continue
         if _op_status_of(state.ops, key) != "completed":
             return key
     return "—"
@@ -149,7 +154,11 @@ def _read_findings(run_id: str) -> str:
 def run_detail(run_id: str) -> RunDetail:
     """Детальная карточка прогона: ops в порядке пайплайна, findings, verdict."""
     state = rs.load(run_id)
-    ops = tuple((key, _op_status_of(state.ops, key)) for key in PIPELINE_KEYS)
+    visible_keys = tuple(
+        key for key in PIPELINE_KEYS
+        if key != "materialize-brief" or state.brief is not None
+    )
+    ops = tuple((key, _op_status_of(state.ops, key)) for key in visible_keys)
     verdict_op = state.ops.get("verdict")
     verdict_reason = None if verdict_op is None else verdict_op.get("reason")
     return RunDetail(

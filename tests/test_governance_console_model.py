@@ -75,6 +75,14 @@ def test_list_runs_empty_when_no_runs_root(runs_root) -> None:
     assert cm.list_runs() == ()
 
 
+def test_brief_run_shows_conditional_materialization_step(runs_root) -> None:
+    state = _mk("r-brief", brief={"frame": "customer"})
+    rs.op_start(state, "branch")
+    rs.op_complete(state, "branch")
+
+    assert cm.list_runs()[0].step == "materialize-brief"
+
+
 # --- run_detail ----------------------------------------------------------
 
 
@@ -113,6 +121,15 @@ def test_run_detail_without_findings_or_verdict(runs_root) -> None:
     assert detail.findings == ""
     assert detail.verdict_reason is None
     assert dict(detail.ops)["branch"] == "new"
+
+
+def test_brief_run_detail_includes_materialization_op(runs_root) -> None:
+    _mk("r-brief-detail", brief={"frame": "customer"})
+
+    keys = [key for key, _status in cm.run_detail("r-brief-detail").ops]
+
+    assert keys.index("branch") < keys.index("materialize-brief")
+    assert keys.index("materialize-brief") < keys.index("author-charter")
 
 
 # --- step computation ------------------------------------------------------

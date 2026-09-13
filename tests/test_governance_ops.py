@@ -364,6 +364,42 @@ def test_author_prompt_carries_dsl_and_filenames(monkeypatch):
     assert "checked_by" in beh_prompt
 
 
+def test_author_prompt_adds_brief_context_only_to_charter_and_requirements(
+    monkeypatch,
+):
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
+    monkeypatch.delenv("AUTHOR_HARNESS", raising=False)
+    monkeypatch.delenv("AUTHOR_MODEL", raising=False)
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+    context = {
+        "frame": "engineer",
+        "primary": "00-discovery/brief.md",
+        "requirements_source": "00-discovery/customer.md",
+        "source_paths": [
+            "00-discovery/brief.md", "00-discovery/customer.md",
+        ],
+        "source_blobs": {
+            "discovery-brief": "a" * 40,
+            "discovery-customer": "b" * 40,
+        },
+    }
+
+    ops.author("/t", "charter", "s", "ws/spec", brief_context=context)
+    ops.author("/t", "requirements", "s", "ws/spec", brief_context=context)
+    ops.author("/t", "behaviour-spec", "s", "ws/spec")
+
+    charter, requirements, behaviour = [call.argv[5] for call in calls]
+    for prompt in (charter, requirements):
+        assert "ws/spec/00-discovery/brief.md" in prompt
+        assert "ws/spec/00-discovery/customer.md" in prompt
+        assert "'discovery-brief': 'aaaaaaaa" in prompt
+        assert "Source IDs are immutable" in prompt
+    assert "direct traces_to edge" in charter
+    assert "direct traces_to edge" not in requirements
+    assert "Discovery source layer" not in behaviour
+
+
 # --- B2 Task 2: author_disp — opt-in бэкенд disp (спека §5, OQ-1) ----------
 
 

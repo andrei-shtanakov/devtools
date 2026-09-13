@@ -334,6 +334,7 @@ def advance(state: RunState, ops: Ops) -> RunState:
         )
     steps = (
         _step_branch,
+        _step_materialize_brief,
         _step_authoring,
         _step_commit,
         _step_gate,
@@ -714,6 +715,71 @@ def _step_branch(state: RunState, ops: Ops) -> bool:
     return True
 
 
+def _brief_stop(state: RunState, message: str) -> bool:
+    """Persist a named, resumable source failure before paid authoring."""
+    (run_dir(state.run_id) / "brief-findings.txt").write_text(
+        f"error GC-BRIEF-SOURCE: {message}\n", encoding="utf-8"
+    )
+    state.status = "stopped_author"
+    save(state)
+    return False
+
+
+def _step_materialize_brief(state: RunState, ops: Ops) -> bool:
+    """Copy durable intake bytes into the target branch before S2.
+
+    The machine-local original path is intentionally absent from ``run.json``.
+    ``runner.start`` has already copied and re-gated it under the run directory;
+    every initial/resumed pass compares those bytes with the ledger descriptor.
+    A completed op is not blindly trusted: destination bytes are checked again
+    so manual tampering cannot flow into authoring or a commit.
+    """
+    if state.brief is None:
+        return True
+    key = "materialize-brief"
+    intake_root = run_dir(state.run_id) / "brief-input"
+    try:
+        source = brief_input.inspect_materialized(intake_root, ".")
+    except brief_input.BriefInputError as exc:
+        return _brief_stop(state, f"durable intake не читается: {exc}")
+    if source.as_state() != state.brief:
+        return _brief_stop(
+            state,
+            "durable intake bytes не совпадают с descriptor в run.json",
+        )
+
+    if op_status(state, key) == "completed":
+        try:
+            destination = brief_input.inspect_materialized(
+                Path(state.target_dir), state.bundle_dir
+            )
+        except brief_input.BriefInputError as exc:
+            return _brief_stop(state, f"source layer в bundle повреждён: {exc}")
+        if destination.as_state() != state.brief:
+            return _brief_stop(
+                state,
+                "source layer в bundle не совпадает с descriptor в run.json",
+            )
+        return True
+
+    _ensure_started(state, key)
+    try:
+        brief_input.materialize(
+            source, Path(state.target_dir), state.bundle_dir
+        )
+        destination = brief_input.inspect_materialized(
+            Path(state.target_dir), state.bundle_dir
+        )
+    except brief_input.BriefInputError as exc:
+        return _brief_stop(state, f"materialization отказала: {exc}")
+    if destination.as_state() != state.brief:
+        return _brief_stop(
+            state, "materialized source не совпадает с descriptor в run.json"
+        )
+    op_complete(state, key, source_blobs=state.brief["source_blobs"])
+    return True
+
+
 def _disp_behaviour_task(subject: str, bundle_path: str) -> str:
     """Task-текст для `ops.author_disp` (behaviour-spec узел, B2 Task 2).
 
@@ -898,9 +964,20 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 state.target_dir, task, config_path, _disp_doc_slug(state)
             )
         else:
-            exit_code = ops.author(
+            author_args = (
                 state.target_dir, kind, state.subject, state.bundle_dir
             )
+            if state.brief is not None and kind in (
+                "charter", "requirements",
+            ):
+                exit_code = ops.author(
+                    *author_args, brief_context=state.brief
+                )
+            else:
+                # Preserve the exact classic API call and prompts. In
+                # particular, third-party test/fake Ops implementations with
+                # the pre-E1 signature remain valid for no-brief runs.
+                exit_code = ops.author(*author_args)
         if exit_code != 0:
             state.status = "stopped_author"
             save(state)
