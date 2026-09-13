@@ -526,6 +526,25 @@ def test_brief_materializes_after_branch_and_reaches_two_author_prompts(
                 target_dir, kind, subject, bundle_dir,
                 brief_context=brief_context,
             )
+            if kind == "charter":
+                assert brief_context is not None
+                pins = brief_context["source_blobs"]
+                names = list(pins)
+                path = Path(target_dir) / bundle_dir / "00-charter.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: charter\n"
+                    "status: draft\n"
+                    "owner_role: product\n"
+                    f"traces_to: [{', '.join(names)}]\n"
+                    "upstream_hashes:\n"
+                    + "".join(
+                        f'  {name}: "{blob}"\n'
+                        for name, blob in pins.items()
+                    )
+                    + "---\n# charter\n",
+                    encoding="utf-8",
+                )
             if kind == "requirements":
                 path = Path(target_dir) / bundle_dir / "10-requirements.md"
                 path.write_text(
@@ -636,6 +655,47 @@ def test_brief_coverage_stops_after_requirements_before_next_paid_author(
     ).read_text(encoding="utf-8")
     assert "GC-BRIEF-COVERAGE" in findings
     assert "NFR-01" in findings
+
+
+def test_brief_source_pin_is_required_by_prospective_gate(
+    tmp_path: Path, runs_root,
+) -> None:
+    source = _brief_source(tmp_path)
+
+    class MissingSourcePinOps(FakeOps):
+        def author(
+            self, target_dir, kind, subject, bundle_dir, brief_context=None,
+        ):
+            rc = super().author(
+                target_dir, kind, subject, bundle_dir,
+                brief_context=brief_context,
+            )
+            path = Path(target_dir) / bundle_dir
+            if kind == "charter":
+                (path / "00-charter.md").write_text(
+                    "---\nspec_stage: charter\nstatus: draft\n"
+                    "traces_to: [discovery-brief]\n---\n# charter\n",
+                    encoding="utf-8",
+                )
+            if kind == "requirements":
+                req = path / "10-requirements.md"
+                req.write_text(
+                    req.read_text(encoding="utf-8")
+                    + "\n#### NFR-01: Safety\n**Priority**: Should\n",
+                    encoding="utf-8",
+                )
+            return rc
+
+    state = runner.start(**_start_kwargs(
+        tmp_path, "r-brief-unpinned", MissingSourcePinOps(),
+        brief_source=source, merge_authority="human",
+    ))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        rs.run_dir(state.run_id) / "gate-findings.txt"
+    ).read_text(encoding="utf-8")
+    assert "source-ребро discovery-brief без upstream_hashes" in findings
 
 
 def _green_bundle(profile, bundle) -> bundle_state.BundleState:

@@ -27,6 +27,7 @@ from governance import approval_facts as af
 from governance import approval_ledger as al
 from governance import approve_node as an
 from governance import bundle_dag
+from governance import bundle_inputs
 from governance import node_approval as na
 from governance import run_state as rs
 from governance.frontmatter import join_frontmatter, split_frontmatter
@@ -364,6 +365,72 @@ def test_phase1_writes_four_values_and_no_signature(world: World) -> None:
     assert not meta["approved_by"] and not meta["approved_at"]
     assert op["content_hashes"]["requirements"] == meta[na.SELF_HASH_KEY]
     assert key in world.state.ops
+
+
+def test_brief_source_pin_survives_candidate_and_finalize(world: World) -> None:
+    source_blob = _enable_brief(world)
+
+    first = approve(world, "charter")
+    assert first.request is not None
+    op = world.state.ops[first.request]
+    assert op["upstream_pins"]["charter"] == {
+        "discovery-brief": source_blob
+    }
+    candidate_text = _show(
+        world.target, f"{op['branch']}:{BUNDLE}/00-charter.md"
+    )
+    assert split_frontmatter(candidate_text)[0]["upstream_hashes"] == {
+        "discovery-brief": source_blob
+    }
+
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+    op = world.state.ops[first.request]
+    merge_pr(world, op["finalize_pr"])
+    approve(world, "charter")
+    world.sync()
+
+    assert world.base_meta("00-charter.md")["upstream_hashes"] == {
+        "discovery-brief": source_blob
+    }
+    resolved = bundle_inputs.direct_blobs(
+        world.state, world.ops, bundle_dag.BUNDLE_DAG, "charter", "master"
+    )
+    assert na.node_debt(
+        "charter", world.base_text("00-charter.md"), resolved.value or {}
+    ) is None
+
+
+def test_candidate_snapshot_rejects_source_changed_at_head(world: World) -> None:
+    _enable_brief(world)
+    first = approve(world, "charter")
+    op = world.state.ops[first.request]
+    source = world.target / BUNDLE / "00-discovery/brief.md"
+    source.write_text("changed source\n", encoding="utf-8")
+    _git(world.target, "add", "-A")
+    _git(world.target, "commit", "-qm", "mutate source")
+    changed_head = _git(world.target, "rev-parse", "HEAD")
+
+    assert an._snapshot_is_published(
+        world.state, world.ops, bundle_dag.BUNDLE_DAG, op, changed_head
+    ) is False
+
+
+def test_candidate_snapshot_rejects_removed_source_pin(world: World) -> None:
+    _enable_brief(world)
+    first = approve(world, "charter")
+    op = world.state.ops[first.request]
+    path = world.target / BUNDLE / "00-charter.md"
+    meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+    meta.pop("upstream_hashes")
+    path.write_text(join_frontmatter(meta, body), encoding="utf-8")
+    _git(world.target, "add", "-A")
+    _git(world.target, "commit", "-qm", "remove source pin")
+    changed_head = _git(world.target, "rev-parse", "HEAD")
+
+    assert an._snapshot_is_published(
+        world.state, world.ops, bundle_dag.BUNDLE_DAG, op, changed_head
+    ) is False
 
 
 def test_candidate_pr_is_ready_and_labelled_at_creation(world: World) -> None:
@@ -1915,6 +1982,30 @@ def test_reopened_pr_of_a_terminal_request_refuses(world: World) -> None:
 
 
 # --- Вспомогательное ----------------------------------------------------
+
+
+def _enable_brief(world: World) -> str:
+    """Commit one immutable discovery source and attach its descriptor."""
+    _git(world.human, "fetch", "-q", "origin")
+    _git(world.human, "switch", "-q", "master")
+    _git(world.human, "reset", "-q", "--hard", "origin/master")
+    source = world.human / BUNDLE / "00-discovery/brief.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("discovery source\n", encoding="utf-8")
+    _git(world.human, "add", "-A")
+    _git(world.human, "commit", "-qm", "add discovery source")
+    _git(world.human, "push", "-q", "origin", "master")
+    world.sync()
+    blob = _git(world.target, "rev-parse", f"master:{BUNDLE}/00-discovery/brief.md")
+    world.state.brief = {
+        "frame": "customer",
+        "primary": "00-discovery/brief.md",
+        "requirements_source": "00-discovery/brief.md",
+        "source_paths": ["00-discovery/brief.md"],
+        "source_blobs": {"discovery-brief": blob},
+    }
+    rs.save(world.state)
+    return blob
 
 
 def _blob(world: World, fname: str) -> str:

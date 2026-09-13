@@ -46,12 +46,12 @@ from pathlib import Path
 from governance import approval_facts as af
 from governance import approval_ledger as al
 from governance import bundle_dag
+from governance import bundle_inputs
 from governance import node_approval as na
 from governance.approval_facts import Disposition, Outcome
 from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.ops import Ops
 from governance.run_state import RunState
-from governance.stale_adapter import blob_sha1
 
 #: Машинная метка обоих approval-PR. Вешается В САМОМ вызове создания PR
 #: (`ops.create_pr`), а не отдельным шагом после: PR без метки означал бы,
@@ -187,11 +187,13 @@ def _base_upstream_blobs(
     dag: tuple[tuple[str, tuple[str, ...]], ...],
     node: str,
 ) -> dict[str, str]:
-    """Фактические блобы прямых upstream'ов узла в `base`."""
-    return {
-        up: blob_sha1(_base_text(ops, state, _filename(dag, up)))
-        for up in _upstreams(dag, node)
-    }
+    """Фактические блобы всех direct inputs узла в `base`."""
+    fact = bundle_inputs.direct_blobs(
+        state, ops, dag, node, _base_ref(state)
+    )
+    if fact.outcome is not Outcome.FOUND or fact.value is None:
+        raise _unresolved(f"direct inputs узла {node} в base — {fact.detail}")
+    return fact.value
 
 
 # --- Точка входа --------------------------------------------------------
@@ -391,13 +393,25 @@ def read_dag_state(
             return DagState(None, unresolved=fact.detail)
         texts[bundle_dag.node_id(fname)] = fact.value
     debts: list[na.NodeDebt] = []
-    for fname, ups in dag:
+    known_texts = {
+        _filename(dag, node): text for node, text in texts.items()
+    }
+    for fname, _ups in dag:
         node = bundle_dag.node_id(fname)
-        blobs = {up: blob_sha1(texts[up]) for up in ups}
+        inputs = bundle_inputs.direct_blobs(
+            state,
+            ops,
+            dag,
+            node,
+            _base_ref(state),
+            known_texts=known_texts,
+        )
+        if inputs.outcome is not Outcome.FOUND or inputs.value is None:
+            return DagState(None, unresolved=inputs.detail)
         debt = na.node_debt(
             node,
             texts[node],
-            blobs,
+            inputs.value,
             awaiting_merge_pr=_pr_awaiting_merge(state, node),
         )
         if debt is not None:
@@ -959,6 +973,16 @@ def _snapshot_is_published(
         if fact.outcome is not Outcome.FOUND or fact.value is None:
             return None
         if not _carries_snapshot_shape(fact.value, op, node):
+            return False
+        direct = bundle_inputs.direct_blobs(state, ops, dag, node, head)
+        if direct.outcome is Outcome.FORBIDDEN:
+            return False
+        if direct.outcome is not Outcome.FOUND or direct.value is None:
+            return None
+        meta, _body = split_frontmatter(fact.value)
+        pins = meta.get("upstream_hashes")
+        pins = dict(pins) if isinstance(pins, dict) else {}
+        if pins != direct.value:
             return False
     return True
 

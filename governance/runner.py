@@ -28,10 +28,13 @@ from governance import (
     acceptance_guard,
     authority_root,
     brief_input,
+    bundle_dag,
+    bundle_inputs,
     decomposition_guard,
     design_guard,
 )
 from governance.merge_gate import PrFacts, decide
+from governance.facts import Outcome
 from governance.stale_adapter import blob_sha1
 from governance.ops import Ops, RealOps
 from governance.policy_sources import (
@@ -574,6 +577,7 @@ def verify(
         bundle_dir=parent.bundle_dir,
         profile=parent.profile,
         run_id=run_id,
+        brief=parent.brief,
         merge_authority=parent.merge_authority,
         author_backend=parent.author_backend,
     )
@@ -1195,6 +1199,43 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
                 f"{upstream_fname} в worktree "
                 f"({actual[:8] + '…' if actual else 'файла нет'})"
             )
+    if state.brief is not None:
+        source_inputs = bundle_inputs.direct_blobs(
+            state, ops, bundle_dag.BUNDLE_DAG, "charter", None
+        )
+        if source_inputs.outcome is not Outcome.FOUND or source_inputs.value is None:
+            local_findings.append(
+                "error GC-BRIEF-SOURCE(prospective): direct inputs charter "
+                f"не установлены — {source_inputs.detail}"
+            )
+        else:
+            charter = Path(state.target_dir) / state.bundle_dir / "00-charter.md"
+            front = _frontmatter(charter.read_text(encoding="utf-8"))
+            for source_name, actual in source_inputs.value.items():
+                declares = re.search(
+                    rf"^\s*-\s+{re.escape(source_name)}\s*$|"
+                    rf"traces_to:.*\b{re.escape(source_name)}\b",
+                    front,
+                    re.M,
+                )
+                if not declares:
+                    local_findings.append(
+                        "error GC-UNPINNED(prospective): 00-charter.md — "
+                        f"source-ребро {source_name} не объявлено в traces_to"
+                    )
+                    continue
+                pin = _upstream_pin(front, source_name)
+                if pin is None:
+                    local_findings.append(
+                        "error GC-UNPINNED(prospective): 00-charter.md — "
+                        f"source-ребро {source_name} без upstream_hashes"
+                    )
+                elif pin != actual:
+                    local_findings.append(
+                        "error GC-STALE(prospective): 00-charter.md — source "
+                        f"пин {source_name} ({pin[:8]}…) != blob "
+                        f"({actual[:8]}…)"
+                    )
     # Гард вакуумного зелёного (боевой прогон kapelle#47): узел может быть
     # candidate_valid при НУЛЕ распознаваемых DSL-заголовков — гейту steward
     # нечего флагать, когда автор писал в своём диалекте (`### BS-*`/`REQ-*`),
