@@ -8,8 +8,10 @@ behaviour-spec бандла и генерирует managed-спеку `spec/<ws
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1853,6 +1855,49 @@ _SPEC_RUNNER_PROBE = (
     'print(json.dumps(out))\n'
 )
 
+_SPEC_RUNNER_PROBE_ENV = "DEVTOOLS_LIVE_SPEC_RUNNER_PROBE"
+_SPEC_RUNNER_PROBE_TIMEOUT = 15
+
+
+def _live_spec_runner_probe_enabled() -> bool:
+    return os.environ.get(_SPEC_RUNNER_PROBE_ENV) == "1"
+
+
+def _run_spec_runner_probe(argv: list[str], **kwargs):
+    """Run an explicitly enabled neighbour probe with a hard time bound."""
+
+    return subprocess.run(
+        argv,
+        timeout=_SPEC_RUNNER_PROBE_TIMEOUT,
+        **kwargs,
+    )
+
+
+def test_live_spec_runner_probe_is_explicit_opt_in(monkeypatch) -> None:
+    monkeypatch.delenv(_SPEC_RUNNER_PROBE_ENV, raising=False)
+    assert _live_spec_runner_probe_enabled() is False
+    monkeypatch.setenv(_SPEC_RUNNER_PROBE_ENV, "1")
+    assert _live_spec_runner_probe_enabled() is True
+    monkeypatch.setenv(_SPEC_RUNNER_PROBE_ENV, "true")
+    assert _live_spec_runner_probe_enabled() is False
+
+
+def test_spec_runner_probe_wrapper_sets_hard_timeout(monkeypatch) -> None:
+    captured = {}
+    completed = object()
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return completed
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert (
+        _run_spec_runner_probe(["neighbour-python", "-c", "pass"])
+        is completed
+    )
+    assert captured["timeout"] == _SPEC_RUNNER_PROBE_TIMEOUT
+
 
 def _parse_with_spec_runner(text: str):
     """Разобрать наш рендер ПАРСЕРОМ СОСЕДА и вернуть его вывод, либо None.
@@ -1862,11 +1907,12 @@ def _parse_with_spec_runner(text: str):
     связать проекты рантаймом. Дерево spec-runner не трогается вовсе —
     только чтение установленного пакета и временный файл в tmp.
 
+    Вызывается только при явном ``DEVTOOLS_LIVE_SPEC_RUNNER_PROBE=1``.
     None — окружения нет; тест на нём ПРОПУСКАЕТСЯ, а не зеленеет:
-    «не проверено» и «проверено» обязаны различаться.
+    «не проверено» и «проверено» обязаны различаться. Каждый subprocess
+    ограничен общим timeout, поэтому зависший сосед не вешает наш suite.
     """
     import json
-    import subprocess
     import tempfile
 
     interpreter = (
@@ -1888,7 +1934,7 @@ def _parse_with_spec_runner(text: str):
     # devtools не чинилось бы.
     #
     # Красное — только за разбор; версия соседа — причина пропуска.
-    available = subprocess.run(
+    available = _run_spec_runner_probe(
         [
             str(interpreter),
             "-c",
@@ -1906,7 +1952,7 @@ def _parse_with_spec_runner(text: str):
         handle.write(text)
         path = Path(handle.name)
     try:
-        done = subprocess.run(
+        done = _run_spec_runner_probe(
             [str(interpreter), "-c", _SPEC_RUNNER_PROBE, str(path)],
             capture_output=True,
             text=True,
@@ -1925,6 +1971,7 @@ def _parse_with_spec_runner(text: str):
 def test_rendered_marker_is_read_back_by_the_spec_runner_parser() -> None:
     """Сквозной тест: сгенерированную спеку разбирает САМ spec-runner.
 
+    Это явный opt-in integration probe, не зависимость обычного pytest.
     Без него у нас два регекспа, написанных по памяти друг о друге: наш
     рендер и `spec_runner.task.TDD_WAIVER`. Разойтись они могут молча —
     каждая сторона зелена на своих фикстурах, — и обнаружилось бы это
@@ -1932,6 +1979,8 @@ def test_rendered_marker_is_read_back_by_the_spec_runner_parser() -> None:
     то, что разобранное проходит закрытый словарь класса и грамматику
     санкции соседа.
     """
+    if not _live_spec_runner_probe_enabled():
+        pytest.skip(f"set {_SPEC_RUNNER_PROBE_ENV}=1 to run neighbour probe")
     parsed = _parse_with_spec_runner(_render_waived())
     if parsed is None:
         pytest.skip(
@@ -1984,10 +2033,9 @@ _SPEC_RUNNER_SELECTOR_PROBE = (
 
 
 def _probe_spec_runner_selector_dictionary():
-    """Read the neighbour's real adapter dictionary, or return None."""
+    """Opt-in read of the neighbour adapter dictionary, or return None."""
 
     import json
-    import subprocess
     import tempfile
 
     interpreter = (
@@ -1999,7 +2047,7 @@ def _probe_spec_runner_selector_dictionary():
     )
     if not interpreter.exists():
         return None
-    available = subprocess.run(
+    available = _run_spec_runner_probe(
         [
             str(interpreter),
             "-c",
@@ -2019,7 +2067,7 @@ def _probe_spec_runner_selector_dictionary():
         )
         (root / "docs").mkdir()
         (root / "docs/manual.md").write_text("manual\n", encoding="utf-8")
-        done = subprocess.run(
+        done = _run_spec_runner_probe(
             [str(interpreter), "-c", _SPEC_RUNNER_SELECTOR_PROBE, str(root)],
             capture_output=True,
             text=True,
@@ -2032,10 +2080,12 @@ def _probe_spec_runner_selector_dictionary():
 
 
 def test_vendored_selector_policy_matches_spec_runner_dictionary() -> None:
-    """Read-only cross-repo probe for the accepted devtools#201 boundary."""
+    """Opt-in cross-repo probe for the accepted devtools#201 boundary."""
 
     from governance.spec_runner_contract import SELECTOR_POLICIES
 
+    if not _live_spec_runner_probe_enabled():
+        pytest.skip(f"set {_SPEC_RUNNER_PROBE_ENV}=1 to run neighbour probe")
     observed = _probe_spec_runner_selector_dictionary()
     if observed is None:
         pytest.skip(
