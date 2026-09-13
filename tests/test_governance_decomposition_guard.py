@@ -871,6 +871,74 @@ def test_verify_group_underivable_is_a_fatal_finding() -> None:
     )
 
 
+def test_manual_only_verify_group_is_underivable() -> None:
+    """A document checked by a human is not an executable selector."""
+
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Реализация\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_one`\n\n"
+        "#### BEH-02: Документ\n**checked_by** `kind: manual` "
+        "`target: docs/manual.md`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
+        "#### DT-02: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: solo\n"
+        "verifies: [docs/manual.md]\n"
+    )
+
+    findings = graph_findings(beh, dt)
+    assert any(
+        "DT-02" in finding
+        and "группа наблюдения не выводится" in finding
+        and "kind: manual" in finding
+        for finding in findings
+    )
+
+
+def test_file_target_obeys_resolved_adapter_capability() -> None:
+    """Bare files pass for pytest and fail early, by name, for ExUnit."""
+
+    from governance.decomposition_guard import graph_findings
+    from governance.spec_runner_contract import SELECTOR_POLICIES
+
+    beh = (
+        "#### BEH-01: Реализация\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_one`\n\n"
+        "#### BEH-02: Проверка\n**checked_by** `kind: integration` "
+        "`target: test/check_test.exs`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
+        "#### DT-02: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: solo\n"
+    )
+
+    assert graph_findings(
+        beh, dt, selector_policy=SELECTOR_POLICIES["pytest"]
+    ) == []
+    findings = graph_findings(
+        beh, dt, selector_policy=SELECTOR_POLICIES["exunit"]
+    )
+    assert any(
+        "DT-02" in finding
+        and "exunit" in finding
+        and "path:line" in finding
+        for finding in findings
+    )
+
+    selected = beh.replace("test/check_test.exs`", "test/check_test.exs:12`")
+    assert graph_findings(
+        selected, dt, selector_policy=SELECTOR_POLICIES["exunit"]
+    ) == []
+
+
 def test_orphan_verifies_target_is_non_fatal_finding() -> None:
     """Round 7 ревью PR #161, минор (контракт владельца): элемент
     verifies, не совпавший ни с одной checked_by-целью бандла, — опечатка

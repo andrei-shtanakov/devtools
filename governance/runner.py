@@ -53,6 +53,7 @@ from governance.run_state import (
     validate_id_component,
     validate_merge_authority,
 )
+from governance.spec_runner_contract import target_selector_policy
 
 _ROLLUP_GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 
@@ -1189,11 +1190,19 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
                 beh_text, decomp_text
             )
         ]
+        try:
+            selector_policy = target_selector_policy(state.target_dir)
+        except ValueError as exc:
+            graph_findings = [f"selector dictionary: {exc}"]
+        else:
+            graph_findings = decomposition_guard.graph_findings(
+                beh_text,
+                decomp_text,
+                selector_policy=selector_policy,
+            )
         graph = [
             f"error GC-DT-GRAPH: {finding}"
-            for finding in decomposition_guard.graph_findings(
-                beh_text, decomp_text
-            )
+            for finding in graph_findings
         ]
         if graph:
             (run_dir(state.run_id) / "gate-findings.txt").write_text(
