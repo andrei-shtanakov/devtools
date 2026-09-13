@@ -199,6 +199,10 @@ class Ops(Protocol):
 
     def show_file(self, target_dir: str, ref: str, path: str) -> str | None: ...
 
+    def show_file_bytes(
+        self, target_dir: str, ref: str, path: str
+    ) -> bytes | None: ...
+
     def show_file_for_carry(
         self, target_dir: str, ref: str, path: str
     ) -> str | None: ...
@@ -1575,6 +1579,17 @@ class RealOps:
         done = subprocess.run(
             ["git", "show", f"{ref}:{path}"],
             cwd=target_dir, capture_output=True, text=True,
+        )
+        return done.stdout if done.returncode == 0 else None
+
+    def show_file_bytes(
+        self, target_dir: str, ref: str, path: str
+    ) -> bytes | None:
+        """`git show <ref>:<path>` as exact bytes, or None."""
+        done = subprocess.run(
+            ["git", "show", f"{ref}:{path}"],
+            cwd=target_dir,
+            capture_output=True,
         )
         return done.stdout if done.returncode == 0 else None
 

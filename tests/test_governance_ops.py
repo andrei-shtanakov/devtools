@@ -1471,6 +1471,29 @@ def test_show_file_returns_content_at_ref(tmp_path) -> None:
     ) == "hello\n"
 
 
+def test_show_file_bytes_preserves_crlf_at_ref(tmp_path) -> None:
+    import subprocess as real_subprocess
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    spec_dir = tmp_path / "spec"
+    spec_dir.mkdir()
+    data = b"hello\r\nexact\r\n"
+    (spec_dir / "x.md").write_bytes(data)
+    real_subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "core.autocrlf=false", "add", "-A"],
+        check=True,
+    )
+    real_subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c",
+         "user.name=t", "commit", "-q", "-m", "c"],
+        check=True,
+    )
+
+    assert RealOps().show_file_bytes(
+        str(tmp_path), "HEAD", "spec/x.md"
+    ) == data
+
+
 def test_show_file_none_for_missing_path(tmp_path) -> None:
     import subprocess as real_subprocess
 

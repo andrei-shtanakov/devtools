@@ -336,6 +336,22 @@ def read_blob_text(
     return Fact(Outcome.FOUND, text, f"{ref}:{path} прочитан")
 
 
+def read_blob_bytes(
+    ops: Ops, target_dir: str, ref: str, path: str
+) -> Fact[bytes]:
+    """Exact bytes in a revision, with the same fail-closed outcome model."""
+    try:
+        data = ops.show_file_bytes(target_dir, ref, path)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        return unavailable(f"{ref}:{path}: чтение байтов не удалось ({exc})")
+    if data is None:
+        return unavailable(
+            f"{ref}:{path}: вывод байтов не удался — «нет ревизии» и "
+            "«нет файла» слой ops не различает (issue #177)"
+        )
+    return Fact(Outcome.FOUND, data, f"{ref}:{path} прочитан побайтово")
+
+
 # --- Факт: закрытие PR подтверждено --------------------------------------
 
 

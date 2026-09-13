@@ -5,6 +5,9 @@ on:
     - cron: "23 6 * * 1"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   drift:
     runs-on: ubuntu-latest
@@ -16,4 +19,3 @@ jobs:
       - run: uv run --frozen tools/check_discovery_vendor.py drift
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

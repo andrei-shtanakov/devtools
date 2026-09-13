@@ -449,6 +449,12 @@ class _StubOps:
         """
         return _bundle_from_tree(target_dir, path)
 
+    def show_file_bytes(
+        self, target_dir: str, ref: str, path: str
+    ) -> bytes | None:
+        candidate = Path(target_dir) / path
+        return candidate.read_bytes() if candidate.is_file() else None
+
 
 def _target(tmp_path: Path) -> Path:
     target = tmp_path / "alpha"
@@ -3045,6 +3051,40 @@ def test_gate_refusal_on_unresolved_is_not_a_debt(
     assert not _effects(ops)
 
 
+def test_gate_refusal_on_changed_discovery_source_is_not_retryable(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from governance import run_state as rs
+
+    state = _recon_state(tmp_path, monkeypatch)
+    source = Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"changed source\n")
+    state.brief = {
+        "frame": "customer",
+        "primary": "00-discovery/brief.md",
+        "requirements_source": "00-discovery/brief.md",
+        "source_paths": ["00-discovery/brief.md"],
+        "source_blobs": {"discovery-brief": "0" * 40},
+    }
+    rs.save(state)
+    before = _ledger_bytes()
+    ops = _ReconOps()
+
+    with pytest.raises(RuntimeError, match="запрещён") as failure:
+        task_bridge.deliver_for_run(state, ops)
+
+    message = str(failure.value)
+    assert "новый workstream/run" in message
+    assert "повторите вызов" not in message
+    assert _ledger_bytes() == before
+    assert not _effects(ops)
+
+    notice = task_bridge._debt_notice(state, ops, None)
+    assert "расходится с intake descriptor" in notice
+    assert "новый workstream/run" in notice
+
+
 def test_wave_fate_is_recorded_before_any_delivery_effect(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -5240,12 +5280,46 @@ def test_delivered_content_anchor_requires_source_from_pr_head(
                 return None
             return _bundle_from_tree(target_dir, path)
 
+        def show_file_bytes(self, target_dir, ref, path):
+            self.calls.append(("show_file_bytes", ref, path))
+            if path.endswith("/00-discovery/brief.md"):
+                return None
+            text = _bundle_from_tree(target_dir, path)
+            return text.encode("utf-8") if text is not None else None
+
     ops = MissingHeadSource()
 
     assert tb._delivered_content_anchor(
         state, ops, {"headRefOid": "delivered-head"}, None
     ) is None
     assert source.exists(), "current base source exists but must not be used"
+
+
+def test_delivered_content_anchor_preserves_crlf_source_from_pr_head(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    source = (
+        Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
+    )
+    source.parent.mkdir(parents=True, exist_ok=True)
+    data = b"source\r\nfrom-head\r\n"
+    source.write_bytes(data)
+    state.brief = {"source_paths": ["00-discovery/brief.md"]}
+
+    class HeadBytes(_SupersedeOps):
+        def show_file_bytes(self, target_dir, ref, path):
+            if path.endswith("/00-discovery/brief.md"):
+                return data
+            return super().show_file_bytes(target_dir, ref, path)
+
+    assert tb._delivered_content_anchor(
+        state, HeadBytes(), {"headRefOid": "delivered-head"}, None
+    ) == tb._content_anchor(
+        state.target_dir, state.bundle_dir, None, state.brief
+    )
 
 
 def test_supersede_is_noop_when_bundle_and_source_are_unchanged(

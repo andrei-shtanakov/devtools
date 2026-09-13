@@ -7,7 +7,7 @@ from pathlib import Path
 from governance import brief_input, bundle_dag, bundle_inputs
 from governance.facts import Outcome
 from governance import run_state as rs
-from governance.stale_adapter import blob_sha1
+from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 
 
 class ShowOps:
@@ -18,6 +18,13 @@ class ShowOps:
     def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
         self.calls.append((ref, path))
         return self.values.get((ref, path))
+
+    def show_file_bytes(
+        self, target_dir: str, ref: str, path: str
+    ) -> bytes | None:
+        self.calls.append((ref, path))
+        value = self.values.get((ref, path))
+        return value.encode("utf-8") if value is not None else None
 
 
 def _state(tmp_path: Path, *, brief=None) -> rs.RunState:
@@ -125,6 +132,30 @@ def test_changed_source_is_forbidden_not_replaced_by_descriptor(
     assert fact.outcome is Outcome.FORBIDDEN
     assert fact.value is None
     assert "descriptor" in fact.detail
+
+
+def test_source_blob_preserves_crlf_bytes(tmp_path: Path) -> None:
+    data = b"source\r\nbytes\r\n"
+    descriptor = {
+        "frame": "customer",
+        "primary": brief_input.PRIMARY_REL,
+        "requirements_source": brief_input.PRIMARY_REL,
+        "source_paths": [brief_input.PRIMARY_REL],
+        "source_blobs": {"discovery-brief": blob_sha1_bytes(data)},
+    }
+    state = _state(tmp_path, brief=descriptor)
+    rel = f"{state.bundle_dir}/{brief_input.PRIMARY_REL}"
+
+    fact = bundle_inputs.direct_blobs(
+        state,
+        ShowOps({("base", rel): data.decode("utf-8")}),
+        bundle_dag.BUNDLE_DAG,
+        "charter",
+        "base",
+    )
+
+    assert fact.outcome is Outcome.FOUND
+    assert fact.value == descriptor["source_blobs"]
 
 
 def test_missing_source_is_unavailable(tmp_path: Path) -> None:

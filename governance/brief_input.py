@@ -8,7 +8,7 @@ import re
 from typing import Literal
 
 from governance.discovery_contract import gate_check
-from governance.stale_adapter import blob_sha1
+from governance.stale_adapter import blob_sha1_bytes
 
 PRIMARY_REL = "00-discovery/brief.md"
 
@@ -40,11 +40,18 @@ class BriefSource:
         }
 
 
-def _read(path: Path) -> str:
+def _read_bytes(path: Path) -> bytes:
     try:
-        return path.read_text(encoding="utf-8")
+        data = path.read_bytes()
+        data.decode("utf-8")
+        return data
     except (OSError, UnicodeError) as exc:
         raise BriefInputError(f"discovery-brief {path} не читается: {exc}") from exc
+
+
+def _decode(data: bytes) -> str:
+    """Decode UTF-8 and mirror Python text-mode newline normalization."""
+    return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _gate(path: Path, text: str) -> gate_check.Brief:
@@ -59,6 +66,24 @@ def _gate(path: Path, text: str) -> gate_check.Brief:
     parsed = gate_check.parse_brief(text)
     if parsed is None:  # defensive: GC-01 above should already have refused
         raise BriefInputError(f"discovery-brief {path} не разобран после gate pass")
+    coverage = parsed.meta.get("coverage")
+    gate_passed = (
+        coverage.get("gate_passed") if isinstance(coverage, dict) else None
+    )
+    blocking = parsed.meta.get("blocking_open_questions")
+    blocking_clear = (
+        isinstance(blocking, int)
+        and not isinstance(blocking, bool)
+        and blocking == 0
+    )
+    if gate_passed is not True or not blocking_clear:
+        raise BriefInputError(
+            f"discovery admission отказал для {path}: "
+            "coverage.gate_passed должен быть true и "
+            "blocking_open_questions — 0; "
+            f"получено gate_passed={gate_passed!r}, "
+            f"blocking_open_questions={blocking!r}"
+        )
     return parsed
 
 
@@ -110,11 +135,12 @@ def _resolve_like_gate(ref: str, base_dir: Path) -> Path | None:
 def inspect_brief(path: Path) -> BriefSource:
     """Validate an input brief and resolve its effective requirements source."""
     path = path.resolve()
-    primary_text = _read(path)
+    primary_data = _read_bytes(path)
+    primary_text = _decode(primary_data)
     primary = _gate(path, primary_text)
     interview = primary.meta.get("interview") or {}
     frame = interview.get("frame") if isinstance(interview, dict) else None
-    primary_blob = blob_sha1(primary_text)
+    primary_blob = blob_sha1_bytes(primary_data)
     if frame == "customer":
         return BriefSource(
             frame="customer",
@@ -132,7 +158,8 @@ def inspect_brief(path: Path) -> BriefSource:
     customer_path = _resolve_like_gate(ref, path.parent)
     if customer_path is None:
         raise BriefInputError(f"customer upstream {ref!r} не разрешается")
-    customer_text = _read(customer_path)
+    customer_data = _read_bytes(customer_path)
+    customer_text = _decode(customer_data)
     customer = _gate(customer_path, customer_text)
     customer_interview = customer.meta.get("interview") or {}
     customer_frame = (
@@ -160,17 +187,18 @@ def inspect_brief(path: Path) -> BriefSource:
         source_paths=(PRIMARY_REL, requirements_rel),
         source_blobs=(
             ("discovery-brief", primary_blob),
-            ("discovery-customer", blob_sha1(customer_text)),
+            ("discovery-customer", blob_sha1_bytes(customer_data)),
         ),
     )
 
 
 def _current_blobs(source: BriefSource) -> dict[str, str]:
-    primary_text = _read(source.primary_input)
-    found = {"discovery-brief": blob_sha1(primary_text)}
+    found = {
+        "discovery-brief": blob_sha1_bytes(_read_bytes(source.primary_input))
+    }
     if source.frame == "engineer":
-        found["discovery-customer"] = blob_sha1(
-            _read(source.requirements_input)
+        found["discovery-customer"] = blob_sha1_bytes(
+            _read_bytes(source.requirements_input)
         )
     return found
 

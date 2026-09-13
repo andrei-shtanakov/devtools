@@ -16,7 +16,6 @@ CLI: ``python -m governance.task_bridge --run-id <id>`` (make behaviour-tasks).
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import re
 import tempfile
@@ -60,7 +59,7 @@ from governance.run_state import (
     save,
 )
 from governance.spec_runner_contract import target_selector_policy
-from governance.stale_adapter import blob_sha1
+from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 
 # [a-z]?-суффикс: раунды ревью бандлов вставляют сценарии как BEH-18a —
 # без суффикса в грамматике мост молча ронял сценарий (PR spec-runner#369,
@@ -812,9 +811,7 @@ def _canonical_dag_hash(
         lines.append(f"{node_id} {canon[node_id]}")
     for relative in source_paths:
         data = (base / relative).read_bytes()
-        source_blob = hashlib.sha1(
-            b"blob %d\x00%s" % (len(data), data)
-        ).hexdigest()
+        source_blob = blob_sha1_bytes(data)
         lines.append(f"source {relative} {source_blob}")
     return f"{_CANON_VERSION}:{blob_sha1(chr(10).join(lines) + chr(10))}"
 
@@ -899,6 +896,13 @@ def _debt_notice(state: RunState, ops: Ops, legacy_bundle: int | None) -> str:
     Пустая строка — «сказать нечего»: DAG честно одобрен целиком.
     """
     verdict = read_dag_state(state, ops, _dag_for(legacy_bundle))
+    if verdict.forbidden:
+        return (
+            "discovery source активного DAG расходится с intake descriptor: "
+            f"{verdict.forbidden}. Восстановите исходные source bytes либо "
+            "создайте новый workstream/run с другим ws-id. Переиздание это "
+            "не затронуло — апстрим не менялся, и вызов бесследен"
+        )
     if verdict.unresolved:
         return (
             "долг активного DAG установить не удалось: "
@@ -1731,16 +1735,16 @@ def _delivered_content_anchor(
             ):
                 return None
             for relative in source_paths:
-                text = ops.show_file(
+                data = ops.show_file_bytes(
                     state.target_dir,
                     head,
                     f"{state.bundle_dir}/{relative}",
                 )
-                if text is None:
+                if data is None:
                     return None
                 destination = shadow / state.bundle_dir / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_text(text, encoding="utf-8")
+                destination.write_bytes(data)
         try:
             return _content_anchor(
                 str(shadow), state.bundle_dir, legacy_bundle, state.brief
@@ -1816,6 +1820,13 @@ def _approved_dag_or_refuse(
     _check_bundle_composition(state.target_dir, state.bundle_dir, dag)
     verdict = read_dag_state(state, ops, dag)
     if verdict.evidence is None:
+        if verdict.forbidden:
+            raise RuntimeError(
+                "discovery source активного DAG запрещён — доставка не "
+                f"начата: {verdict.forbidden}. Восстановите исходные "
+                "source bytes либо создайте новый workstream/run с другим "
+                "ws-id; повтор без исправления не поможет"
+            )
         if verdict.unresolved:
             raise RuntimeError(
                 "состояние активного DAG не установлено, доставка не "

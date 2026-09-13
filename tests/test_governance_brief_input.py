@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from governance import brief_input
+from governance.stale_adapter import blob_sha1_bytes
 
 
 def customer_brief(*, status: str = "draft", validation: str = "pass") -> str:
@@ -130,6 +131,30 @@ def test_invalid_customer_is_rejected_with_gate_id(tmp_path: Path) -> None:
         brief_input.inspect_brief(path)
 
 
+def test_consistent_gate_failed_customer_is_rejected_at_admission(
+    tmp_path: Path,
+) -> None:
+    text = customer_brief().replace(
+        "  functions: covered", "  functions: missing"
+    ).replace("  gate_passed: true", "  gate_passed: false")
+    path = _write(tmp_path / "brief.md", text)
+
+    with pytest.raises(brief_input.BriefInputError, match="admission"):
+        brief_input.inspect_brief(path)
+
+
+def test_blocking_question_is_rejected_at_admission(tmp_path: Path) -> None:
+    text = customer_brief().replace(
+        "  gate_passed: true", "  gate_passed: false"
+    ).replace("blocking_open_questions: 0", "blocking_open_questions: 1")
+    path = _write(tmp_path / "brief.md", text)
+
+    with pytest.raises(
+        brief_input.BriefInputError, match="blocking_open_questions"
+    ):
+        brief_input.inspect_brief(path)
+
+
 def test_engineer_resolves_one_approved_customer(tmp_path: Path) -> None:
     customer = _write(
         tmp_path / "sources/customer.md", customer_brief(status="approved")
@@ -148,8 +173,8 @@ def test_engineer_resolves_one_approved_customer(tmp_path: Path) -> None:
         "00-discovery/sources/customer.md",
     )
     assert dict(source.source_blobs) == {
-        "discovery-brief": brief_input.blob_sha1(engineer.read_text()),
-        "discovery-customer": brief_input.blob_sha1(customer.read_text()),
+        "discovery-brief": blob_sha1_bytes(engineer.read_bytes()),
+        "discovery-customer": blob_sha1_bytes(customer.read_bytes()),
     }
 
 
@@ -203,6 +228,18 @@ def test_materialize_preserves_bytes_and_is_reinspectable(tmp_path: Path) -> Non
         target, "workstreams/ws/spec"
     )
     assert restored.as_state() == source.as_state()
+
+
+def test_descriptor_hash_preserves_crlf_source_bytes(tmp_path: Path) -> None:
+    data = customer_brief().replace("\n", "\r\n").encode("utf-8")
+    path = tmp_path / "brief.md"
+    path.write_bytes(data)
+
+    source = brief_input.inspect_brief(path)
+
+    assert dict(source.source_blobs) == {
+        "discovery-brief": blob_sha1_bytes(data)
+    }
 
 
 def test_materialized_tamper_is_detected(tmp_path: Path) -> None:

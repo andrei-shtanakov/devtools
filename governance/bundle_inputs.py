@@ -10,7 +10,7 @@ from governance import bundle_dag
 from governance.facts import Fact, Outcome, unavailable
 from governance.ops import Ops
 from governance.run_state import RunState
-from governance.stale_adapter import blob_sha1
+from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 
 
 def _filename(
@@ -108,17 +108,37 @@ def direct_blobs(
         for upstream in _upstreams(dag, node)
     }
     named_paths.update(source_fact.value)
+    source_names = set(source_fact.value)
     actual: dict[str, str] = {}
     for name, relative in named_paths.items():
         bundle_path = f"{state.bundle_dir}/{relative}"
         if known_texts is not None and relative in known_texts:
             text = known_texts[relative]
+        elif ref is None and name in source_names:
+            path = Path(state.target_dir) / bundle_path
+            try:
+                data = path.read_bytes()
+            except OSError as exc:
+                return unavailable(f"байты {bundle_path} в worktree: {exc}")
+            actual[name] = blob_sha1_bytes(data)
+            continue
         elif ref is None:
             path = Path(state.target_dir) / bundle_path
             try:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeError) as exc:
                 return unavailable(f"байты {bundle_path} в worktree: {exc}")
+        elif name in source_names:
+            bytes_fact = af.read_blob_bytes(
+                ops, state.target_dir, ref, bundle_path
+            )
+            if (
+                bytes_fact.outcome is not Outcome.FOUND
+                or bytes_fact.value is None
+            ):
+                return Fact(bytes_fact.outcome, None, bytes_fact.detail)
+            actual[name] = blob_sha1_bytes(bytes_fact.value)
+            continue
         else:
             fact = af.read_blob_text(
                 ops, state.target_dir, ref, bundle_path

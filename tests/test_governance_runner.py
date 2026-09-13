@@ -698,6 +698,80 @@ def test_brief_source_pin_is_required_by_prospective_gate(
     assert "source-ребро discovery-brief без upstream_hashes" in findings
 
 
+def test_real_candidate_gate_accepts_materialized_brief_source(
+    tmp_path: Path, runs_root,
+) -> None:
+    """The real steward CLI accepts the source layer and charter source edge."""
+    from governance.ops import DEVTOOLS_ROOT, RealOps
+
+    if not (DEVTOOLS_ROOT / ".venv" / "bin" / "gate-check").exists():
+        pytest.skip("gate-check CLI недоступен (uv sync без группы governance)")
+
+    class CliBriefOps(_DtSmokeOps):
+        def author(
+            self, target_dir, kind, subject, bundle_dir, brief_context=None,
+        ):
+            rc = _DtSmokeOps.author(
+                self, target_dir, kind, subject, bundle_dir
+            )
+            bundle = Path(target_dir) / bundle_dir
+            if kind == "charter":
+                assert brief_context is not None
+                pins = brief_context["source_blobs"]
+                (bundle / "00-charter.md").write_text(
+                    "---\nspec_stage: charter\nstatus: draft\n"
+                    "owner_role: product\n"
+                    f"traces_to: [{', '.join(pins)}]\n"
+                    "upstream_hashes:\n"
+                    + "".join(
+                        f'  {name}: "{blob}"\n'
+                        for name, blob in pins.items()
+                    )
+                    + "---\n# Charter\n",
+                    encoding="utf-8",
+                )
+            if kind == "requirements":
+                path = bundle / "10-requirements.md"
+                path.write_text(
+                    path.read_text(encoding="utf-8")
+                    + "\n#### NFR-01: Safety\n**Priority**: Should\n",
+                    encoding="utf-8",
+                )
+            return rc
+
+        def gate_check_candidate(
+            self, target_dir: str, bundle_dir: str, profile: str
+        ) -> tuple[int, str]:
+            self.calls.append(("gate_check_candidate", bundle_dir))
+            return RealOps().gate_check_candidate(
+                target_dir, bundle_dir, profile
+            )
+
+    source = _brief_source(tmp_path)
+    kwargs = _start_kwargs(
+        tmp_path,
+        "r-real-brief-gate",
+        CliBriefOps(review_exit=1),
+        brief_source=source,
+        merge_authority="human",
+    )
+    roles = Path(kwargs["target_dir"]) / "profiles/roles.yaml"
+    roles.write_text(
+        (Path(__file__).parents[1] / "profiles/roles.yaml").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+    state = runner.start(**kwargs)
+
+    assert state.status != "stopped_gate", (
+        (rs.run_dir(state.run_id) / "gate-findings.txt").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state.ops["gate-candidate"]["status"] == "completed"
+
+
 def _green_bundle(profile, bundle) -> bundle_state.BundleState:
     return bundle_state.BundleState((), 0, None, (), ())
 

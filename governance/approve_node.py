@@ -191,6 +191,13 @@ def _base_upstream_blobs(
     fact = bundle_inputs.direct_blobs(
         state, ops, dag, node, _base_ref(state)
     )
+    if fact.outcome is Outcome.FORBIDDEN:
+        raise RuntimeError(
+            f"direct inputs узла {node} запрещены: {fact.detail}. "
+            "Восстановите исходные discovery source bytes либо создайте "
+            "новый workstream/run с другим ws-id; повтор без исправления "
+            "не поможет"
+        )
     if fact.outcome is not Outcome.FOUND or fact.value is None:
         raise _unresolved(f"direct inputs узла {node} в base — {fact.detail}")
     return fact.value
@@ -341,9 +348,10 @@ class DagState:
 
     `evidence` непусто ТОГДА И ТОЛЬКО ТОГДА, когда предикат сошёлся на
     каждом узле и состав установлен; иначе непусты `debts` (узлы с долгом,
-    для диагностики отказа) либо `unresolved` (факт не установлен).
+    для диагностики отказа), `unresolved` (факт не установлен) либо
+    `forbidden` (детерминированное нарушение immutable source descriptor).
 
-    Три величины вместе, а не три вызова: гейту доставки нужны и решение,
+    Четыре величины вместе, а не четыре вызова: гейту доставки нужны решение,
     и перечень непрошедших узлов с процедурами, и различие «в долгу» от
     «не установлено», — а собери он их отдельными обходами, обходы
     разошлись бы.
@@ -352,6 +360,7 @@ class DagState:
     evidence: ApprovedDag | None
     debts: tuple[na.NodeDebt, ...] = ()
     unresolved: str = ""
+    forbidden: str = ""
 
 
 def read_dag_state(
@@ -382,7 +391,9 @@ def read_dag_state(
     вовсе.
 
     Неустановленный факт не превращается ни в долг, ни в одобренность:
-    `unresolved` — третий исход, и он не даёт свидетельства.
+    `unresolved` — третий исход, и он не даёт свидетельства. Положительно
+    установленное расхождение source bytes — отдельный `forbidden`, потому
+    что повтор запроса его не исправит.
     """
     texts: dict[str, str] = {}
     for fname, _ in dag:
@@ -406,6 +417,8 @@ def read_dag_state(
             _base_ref(state),
             known_texts=known_texts,
         )
+        if inputs.outcome is Outcome.FORBIDDEN:
+            return DagState(None, forbidden=inputs.detail)
         if inputs.outcome is not Outcome.FOUND or inputs.value is None:
             return DagState(None, unresolved=inputs.detail)
         debt = na.node_debt(

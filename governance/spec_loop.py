@@ -601,7 +601,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-id", help="явный выбор при неоднозначности")
     parser.add_argument("--bundle-dir", help="дефолт workstreams/<ws-id>/spec")
     parser.add_argument(
-        "--brief", help="approved discovery-brief для нового прогона"
+        "--brief", help="gate-passed discovery-brief для нового прогона"
     )
     parser.add_argument("--profile", default="profiles/team-exp.yaml")
     parser.add_argument(

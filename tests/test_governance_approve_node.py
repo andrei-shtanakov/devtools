@@ -2008,6 +2008,25 @@ def _enable_brief(world: World) -> str:
     return blob
 
 
+def test_changed_discovery_source_is_forbidden_without_retry_advice(
+    world: World,
+) -> None:
+    _enable_brief(world)
+    source = world.human / BUNDLE / "00-discovery/brief.md"
+    source.write_text("changed discovery source\n", encoding="utf-8")
+    _git(world.human, "add", "-A")
+    _git(world.human, "commit", "-qm", "change discovery source")
+    _git(world.human, "push", "-q", "origin", "master")
+    world.sync()
+
+    with pytest.raises(RuntimeError, match="запрещены") as failure:
+        approve(world, "charter")
+
+    message = str(failure.value)
+    assert "новый workstream/run" in message
+    assert "повторите вызов" not in message
+
+
 def _blob(world: World, fname: str) -> str:
     return _git(world.target, "rev-parse", f"master:{BUNDLE}/{fname}")
 
