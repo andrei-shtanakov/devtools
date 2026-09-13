@@ -927,6 +927,7 @@ def _prospective_anchor(
     форме значения (`_require_resumable_epoch`).
     """
     dag = _dag_for(legacy_bundle)
+    _check_bundle_composition(target_dir, bundle_dir, dag)
     path = Path(target_dir) / bundle_dir / dag[-1][0]
     return blob_sha1(path.read_text(encoding="utf-8"))
 
@@ -1327,13 +1328,8 @@ def deliver(
     # приёмки PR #96, Task 7): ПОСЛЕ checkout_and_pull, ДО ensure_branch.
     dag = _dag_for(legacy_bundle)
     base = Path(target_dir) / bundle_dir
-    behaviour = base / "15-behaviour-spec.md"
-    if not behaviour.exists():
-        raise RuntimeError(
-            f"{behaviour} не найден на {base_ref} — бандл не вмержен "
-            "или путь неверен"
-        )
     _check_bundle_composition(target_dir, bundle_dir, dag)
+    behaviour = base / "15-behaviour-spec.md"
     # Preflight: та же проверка, что стопит раннер `stopped_preflight`'ом —
     # target-профиль может не декларировать design/acceptance/decomposition
     # вовсе (старая копия того же имени у соседнего репо), и доставка не

@@ -559,10 +559,12 @@ def test_deliver_dirty_target_refuses(tmp_path: Path) -> None:
         )
 
 
-def test_deliver_missing_behaviour_refuses(tmp_path: Path) -> None:
+def test_deliver_missing_bundle_dir_names_configuration_error(
+    tmp_path: Path,
+) -> None:
     target = tmp_path / "alpha"
     target.mkdir()
-    with pytest.raises(RuntimeError, match="15-behaviour-spec"):
+    with pytest.raises(RuntimeError, match="каталога бандла") as failure:
         task_bridge.deliver(
             target_dir=str(target),
             repo_slug="owner/alpha",
@@ -572,6 +574,32 @@ def test_deliver_missing_behaviour_refuses(tmp_path: Path) -> None:
             base_ref="master",
             ops=_StubOps(),
         )
+    message = str(failure.value)
+    assert "bundle_dir в run.json" in message
+    assert "вмержен в base" in message
+    assert "--legacy-bundle" in message
+
+
+def test_deliver_existing_wrong_bundle_dir_names_path_and_base(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "alpha"
+    bundle = target / "workstreams/WS-alpha-7/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text(CHARTER_MD)
+    (bundle / "10-requirements.md").write_text(REQUIREMENTS_MD)
+
+    with pytest.raises(RuntimeError, match="состав бандла") as failure:
+        task_bridge.deliver(
+            target_dir=str(target), repo_slug="owner/alpha",
+            ws_id="WS-alpha-7", subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master", ops=_StubOps(),
+        )
+    message = str(failure.value)
+    assert "bundle_dir" in message
+    assert "весь бандл вмержен в base" in message
+    assert "15-behaviour-spec.md" in message
 
 
 def test_deliver_reads_bundle_only_after_base_checkout(tmp_path: Path) -> None:
@@ -1225,6 +1253,32 @@ def test_deliver_conform_legacy_mismatch_refuses_before_ops(
         )
     assert not any(c[0] == "find_pr" for c in ops.calls)
     assert not any(c[0] == "ensure_branch" for c in ops.calls)
+
+
+def test_conform_approved_missing_bundle_dir_names_configuration(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "alpha"
+    target.mkdir()
+
+    with pytest.raises(RuntimeError, match="каталога бандла") as failure:
+        task_bridge.conform_approved(
+            str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
+        )
+    assert "bundle_dir в run.json" in str(failure.value)
+
+
+def test_deliver_conform_missing_bundle_dir_refuses_before_ops(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target = tmp_path / "alpha"
+    target.mkdir()
+    ops = _ConformOps()
+
+    with pytest.raises(RuntimeError, match="каталога бандла") as failure:
+        task_bridge.deliver_conform(_conform_state(target, monkeypatch), ops)
+    assert "bundle_dir в run.json" in str(failure.value)
+    assert not ops.calls
 
 
 # --- группировка по файлу цели (@id:task-bridge-beh-grouping, урок 8) -------
@@ -8040,6 +8094,36 @@ def test_composition_without_design_refuses_without_legacy_flag(
 
     with pytest.raises(RuntimeError) as failure:
         _composition(target, None)
+    message = str(failure.value)
+    assert "20-design.md" in message
+    assert "--legacy-bundle=3|4|5" in message
+
+
+def test_composition_missing_directory_is_not_an_empty_bundle(
+    tmp_path: Path,
+) -> None:
+    """#168: нет каталога ≠ есть каталог без узлов."""
+    target = tmp_path / "alpha"
+    target.mkdir()
+
+    with pytest.raises(RuntimeError, match="каталога бандла") as failure:
+        _composition(str(target), None)
+    message = str(failure.value)
+    assert "состав бандла []" not in message
+    assert "bundle_dir в run.json" in message
+
+
+def test_prospective_anchor_guards_composition_itself(tmp_path: Path) -> None:
+    """#181: якорь не полагается на порядок внешнего caller'а."""
+    target = _composition_bundle(
+        tmp_path, "00-charter.md", "10-requirements.md",
+        "15-behaviour-spec.md",
+    )
+
+    with pytest.raises(RuntimeError) as failure:
+        task_bridge._prospective_anchor(
+            target, "workstreams/WS-alpha-7/spec"
+        )
     message = str(failure.value)
     assert "20-design.md" in message
     assert "--legacy-bundle=3|4|5" in message
