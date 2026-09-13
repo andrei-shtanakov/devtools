@@ -313,19 +313,33 @@ def test_author_prompt_carries_dsl_and_filenames(monkeypatch):
 # --- B2 Task 2: author_disp — opt-in бэкенд disp (спека §5, OQ-1) ----------
 
 
-def test_author_disp_command_and_project_path(monkeypatch):
+def test_author_disp_runs_the_document_pipeline_kind(monkeypatch):
+    """Точный вектор вызова вида `document` (disputatio SPEC-002 §3.1).
+
+    Вид выводится из формы конфига, не из флага, поэтому `--config`
+    обязателен в векторе: без него disp взял бы дефолтный
+    `<root>/<DEFAULT_CONFIG_NAME>` — чужой конфиг рабочего дерева цели.
+    """
     calls = _install_fake_run(monkeypatch, returncode=0)
     ops = RealOps()
 
-    result = ops.author_disp("/tmp/devtools", "subject='x' bundle=spec/15.md")
+    result = ops.author_disp(
+        "/tmp/devtools",
+        "subject='x' bundle=spec/15.md",
+        "/tmp/runs/r1/disp-doc.toml",
+        "beh-ws-42",
+    )
 
     assert result == 0
     call = calls[0]
     expected_project = str(ops_mod.DEVTOOLS_ROOT.parent / "disputatio")
     assert call.argv == [
         "uv", "run", "--project", expected_project,
-        "disp", "run", "--mode", "develop",
-        "--root", "/tmp/devtools", "subject='x' bundle=spec/15.md",
+        "disp", "pipeline", "run",
+        "--task", "subject='x' bundle=spec/15.md",
+        "--slug", "beh-ws-42",
+        "--config", "/tmp/runs/r1/disp-doc.toml",
+        "--root", "/tmp/devtools",
     ]
     assert call.kwargs["cwd"] == "/tmp/devtools"
 
@@ -334,9 +348,28 @@ def test_author_disp_returncode_passthrough(monkeypatch):
     _install_fake_run(monkeypatch, returncode=2)
     ops = RealOps()
 
-    result = ops.author_disp("/tmp/devtools", "task")
+    result = ops.author_disp("/tmp/devtools", "task", "/tmp/c.toml", "beh-ws")
 
     assert result == 2
+
+
+def test_no_governance_module_asks_disp_for_a_develop_mode():
+    """Режима `--mode develop` (и любого `--mode`) у disp нет.
+
+    Гвард на весь пакет, а не на одну строку: прежняя реализация звала
+    `disp run --mode develop` как обходной путь, пока вид `document` не
+    приехал (disputatio#52 → PR #64). Обходной путь снят, и вернуться он
+    может только вместе с этой подстрокой.
+    """
+    package = Path(ops_mod.__file__).parent
+    offenders = [
+        f"{path.name}:{n}"
+        for path in sorted(package.rglob("*.py"))
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "--mode" in line and "develop" in line
+    ]
+
+    assert not offenders, f"disp больше не знает режимов: {offenders}"
 
 
 def test_latest_review_body_honours_review_login_env(monkeypatch):

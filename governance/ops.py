@@ -138,7 +138,9 @@ class Ops(Protocol):
         self, target_dir: str, kind: str, subject: str, bundle_dir: str
     ) -> int: ...
 
-    def author_disp(self, target_dir: str, task: str) -> int: ...
+    def author_disp(
+        self, target_dir: str, task: str, config_path: str, slug: str
+    ) -> int: ...
 
     def commit_paths(
         self, target_dir: str, paths: list[str], message: str
@@ -1061,20 +1063,47 @@ class RealOps:
         done = subprocess.run(argv, cwd=target_dir)
         return done.returncode
 
-    def author_disp(self, target_dir: str, task: str) -> int:
-        """disp `run --mode develop` — opt-in авторинг-бэкенд behaviour-spec узла.
+    def author_disp(
+        self, target_dir: str, task: str, config_path: str, slug: str
+    ) -> int:
+        """Вид пайплайна `document` — opt-in авторинг-бэкенд behaviour-spec узла.
 
-        Спека §5 называла `disp --mode document`; такого РЕЖИМА у disp нет и
-        не появилось. OQ-1 закрыт иначе (disputatio#52 → PR #64, 2026-09-01):
-        приехал ВИД пайплайна `document`, выводимый из формы секции
-        `[pipeline]` (`document_path`), команды прежние — `disp pipeline run`.
-        Переключение на него — @id:behaviour-authoring-document-mode в
-        `TODO.md` (нужен конфиг с оператор-чеклистом `doc`), не предмет
-        этого коммита; до него используется `run --mode develop`.
+        Спека §5 называла «режим `document`»; РЕЖИМА с таким именем у disp
+        нет и не было. OQ-1 закрыт иначе (disputatio#52 → их PR #64,
+        2026-09-01): приехал **вид** пайплайна `document`, и вид выводится
+        не из флага, а из формы конфига.
+
+        Форма взята из disputatio по факту, а не по нашей памяти о ней:
+
+        * команда и её флаги — `disputatio-SPEC-002-doc-pipeline.md` §3.1
+          (`disp pipeline run --slug <slug> [--task <файл|строка>]
+          [--config <toml>]`) и реализация `src/disputatio/cli.py`
+          (`_add_pipeline_common`: `--slug` обязателен, `--config` с
+          дефолтом `<root>/<DEFAULT_CONFIG_NAME>`, `--root` с дефолтом
+          `"."`). `--root` в перечне §3.1 не показан, но объявлен у всех
+          пяти команд — сверено по коду, потому что расхождение спеки и
+          реализации здесь решает реализация;
+        * форма конфига вида `document` — §3.2 того же документа: секция
+          `[pipeline]` с `document_path` (и **без** `spec_path`/`plan_path`
+          и `max_architectural_returns` — их присутствие там объявлено
+          fail-closed отказом `ConfigError`), плюс `[pipeline.checklists.doc]`
+          с обязательным `findings_item` и операторским составом
+          `[pipeline.checklists.doc.items]`.
+
+        Конфиг пишет раннер в каталог прогона до вызова: состав чеклиста —
+        операторский (§5.3), то есть решение нашего контура, а не disputatio,
+        и держать его рядом с прогоном честнее, чем в чужом репозитории.
         """
         done = subprocess.run(
-            ["uv", "run", "--project", str(DEVTOOLS_ROOT.parent / "disputatio"),
-             "disp", "run", "--mode", "develop", "--root", target_dir, task],
+            [
+                "uv", "run", "--project",
+                str(DEVTOOLS_ROOT.parent / "disputatio"),
+                "disp", "pipeline", "run",
+                "--task", task,
+                "--slug", slug,
+                "--config", config_path,
+                "--root", target_dir,
+            ],
             cwd=target_dir,
         )
         return done.returncode
