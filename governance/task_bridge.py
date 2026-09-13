@@ -47,6 +47,7 @@ from governance.bundle_dag import (
     node_id as _node_id,
 )
 from governance.frontmatter import join_frontmatter, split_frontmatter
+from governance.facts import Outcome
 from governance.ops import Ops, RealOps
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
 from governance.run_state import RunState, load, op_complete, op_start, save
@@ -2390,12 +2391,13 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
     оба SHA. То же на пустом `replaces_head_sha` (запись старого
     образца): сверять нечем — значит не удаляем.
 
-    Отсутствие ссылки — выполненный шаг, а не сбой: `None` от
-    `remote_branch_head` и от `rev_parse` молчат. `False` от удаления
-    перепроверяется тем же lookup: ссылка могла исчезнуть между сверкой и
-    удалением. Если она осталась на прежнем SHA, отказ печатается с ручной
-    процедурой; если под тем же именем появился другой SHA, чужая работа
-    остаётся нетронутой и диагностика называет расхождение.
+    Отсутствие ссылки — выполненный шаг, а не сбой. Оно читается только из
+    типизированного `ABSENT`: `UNAVAILABLE` не выдаётся за отсутствие и
+    печатает неподтверждённый исход. `False` от удаления перепроверяется тем
+    же lookup: ссылка могла исчезнуть между сверкой и удалением. Если она
+    осталась на прежнем SHA, отказ печатается с ручной процедурой; если под
+    тем же именем появился другой SHA, чужая работа остаётся нетронутой и
+    диагностика называет расхождение.
     """
     branch = op.get("replaces_branch")
     if not branch:
@@ -2411,18 +2413,34 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
     for where, locate, drop in (
         (
             "origin",
-            lambda: ops.remote_branch_head(state.repo_slug, branch),
+            lambda: ops.remote_branch_head_fact(state.repo_slug, branch),
             lambda: ops.delete_remote_branch(state.repo_slug, branch),
         ),
         (
             "локально",
-            lambda: ops.rev_parse(state.target_dir, branch),
+            lambda: ops.local_branch_head_fact(state.target_dir, branch),
             lambda: ops.delete_local_branch(state.target_dir, branch),
         ),
     ):
-        actual = locate()
-        if actual is None:
+        before = locate()
+        if before.outcome is Outcome.UNAVAILABLE:
+            print(
+                f"ветка {branch} ({where}) не проверена после замены "
+                f"ревизии v{op.get('replaces_revision', '?')} "
+                f"(PR #{op.get('replaces_pr', '?')}): состояние ссылки "
+                f"установить не удалось ({before.detail}); удаление не "
+                "выполнялось — проверьте ссылку вручную"
+            )
+            continue
+        if before.outcome is Outcome.ABSENT:
             continue          # ссылки нет — шаг по этой половине состоялся
+        actual = before.value
+        if before.outcome is not Outcome.FOUND or not isinstance(actual, str):
+            print(
+                f"ветка {branch} ({where}) не проверена: неожиданный "
+                f"исход чтения {before.outcome.value}; удаление не выполнялось"
+            )
+            continue
         if actual != head:
             print(
                 f"ветка {branch} ({where}) оставлена: она стоит на "
@@ -2434,13 +2452,30 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
             removed.append(where)
             continue
         after = locate()
-        if after is None:
+        if after.outcome is Outcome.ABSENT:
             removed.append(where)
             continue
-        if after != head:
+        if after.outcome is Outcome.UNAVAILABLE:
+            print(
+                f"ветка {branch} ({where}) не удалена после замены ревизии "
+                f"v{op.get('replaces_revision', '?')} "
+                f"(PR #{op.get('replaces_pr', '?')}): удаление не "
+                "подтверждено — состояние ссылки после операции установить "
+                f"не удалось ({after.detail}); проверьте ссылку вручную"
+            )
+            continue
+        after_sha = after.value
+        if after.outcome is not Outcome.FOUND or not isinstance(after_sha, str):
+            print(
+                f"ветка {branch} ({where}) не удалена: неожиданный исход "
+                f"повторного чтения {after.outcome.value}; проверьте ссылку "
+                "вручную"
+            )
+            continue
+        if after_sha != head:
             print(
                 f"ветка {branch} ({where}) оставлена после неудачного "
-                f"удаления: теперь она стоит на {after[:7]}, а отозванная "
+                f"удаления: теперь она стоит на {after_sha[:7]}, а отозванная "
                 f"ревизия — на {head[:7]}; под тем же именем чужая работа"
             )
             continue

@@ -19,6 +19,8 @@ import subprocess
 from pathlib import Path
 from typing import Protocol
 
+from governance.facts import Fact, Outcome, unavailable
+
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
 REVIEW_GH_CONFIG_DIR = Path.home() / ".config" / "review"
 
@@ -127,6 +129,14 @@ class Ops(Protocol):
     def remote_branch_head(
         self, repo_slug: str, branch: str
     ) -> str | None: ...
+
+    def remote_branch_head_fact(
+        self, repo_slug: str, branch: str
+    ) -> Fact[str]: ...
+
+    def local_branch_head_fact(
+        self, target_dir: str, branch: str
+    ) -> Fact[str]: ...
 
     def delete_remote_branch(self, repo_slug: str, branch: str) -> bool: ...
 
@@ -963,6 +973,89 @@ class RealOps:
         if done.returncode != 0:
             return None
         return done.stdout.strip() or None
+
+    def remote_branch_head_fact(
+        self, repo_slug: str, branch: str
+    ) -> Fact[str]:
+        """Head удалённой ветки: FOUND / ABSENT / UNAVAILABLE.
+
+        REST 404 не отличает отсутствующий ref от скрытого/недоступного репо.
+        Один GraphQL-ответ сохраняет границу: существующий `repository` с
+        `ref: null` — установленное отсутствие, любой сбой, `repository:
+        null` или неожиданная форма — неизвестность.
+        """
+        owner, name = repo_slug.split("/", 1)
+        query = (
+            "query($o:String!,$n:String!,$q:String!){"
+            "repository(owner:$o,name:$n){"
+            "ref(qualifiedName:$q){target{oid}}}}"
+        )
+        done = subprocess.run(
+            [
+                "gh", "api", "graphql", "-f", f"query={query}",
+                "-F", f"o={owner}", "-F", f"n={name}",
+                "-F", f"q=refs/heads/{branch}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if done.returncode != 0:
+            detail = done.stderr.strip() or f"gh api rc={done.returncode}"
+            return unavailable(
+                f"head origin/{branch}: запрос не удался ({detail})"
+            )
+        try:
+            repository = json.loads(done.stdout)["data"]["repository"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            return unavailable(
+                f"head origin/{branch}: неожиданный ответ ({exc})"
+            )
+        if not isinstance(repository, dict):
+            return unavailable(
+                f"head origin/{branch}: репозиторий не прочитан"
+            )
+        ref = repository.get("ref")
+        if ref is None:
+            return Fact(
+                Outcome.ABSENT, None, f"ветки origin/{branch} нет"
+            )
+        try:
+            oid = ref["target"]["oid"]
+        except (KeyError, TypeError):
+            return unavailable(
+                f"head origin/{branch}: неожиданная форма ref"
+            )
+        if not isinstance(oid, str) or not oid:
+            return unavailable(f"head origin/{branch}: пустой SHA")
+        return Fact(
+            Outcome.FOUND, oid, f"ветка origin/{branch} стоит на {oid}"
+        )
+
+    def local_branch_head_fact(
+        self, target_dir: str, branch: str
+    ) -> Fact[str]:
+        """Head локальной ветки: FOUND / ABSENT / UNAVAILABLE."""
+        done = subprocess.run(
+            [
+                "git", "-C", target_dir, "rev-parse", "--verify",
+                "--quiet", branch,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        oid = done.stdout.strip()
+        if done.returncode == 0 and oid:
+            return Fact(
+                Outcome.FOUND, oid, f"локальная ветка {branch} стоит на {oid}"
+            )
+        if done.returncode == 1 and not oid:
+            return Fact(
+                Outcome.ABSENT, None, f"локальной ветки {branch} нет"
+            )
+        detail = done.stderr.strip() or f"git rev-parse rc={done.returncode}"
+        return unavailable(
+            f"head локальной ветки {branch}: чтение не удалось ({detail})"
+        )
 
     def delete_remote_branch(self, repo_slug: str, branch: str) -> bool:
         """DELETE refs/heads/<branch> на origin; rc0->True.
