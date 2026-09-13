@@ -1242,3 +1242,59 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 - [x] verify-DT в decomposition-мосте включаются после доставки verify-first @id:decomposition-verify-first-unblock @owner:github:andrei-shtanakov @blocked_by:spec-runner#367
 - [ ] Принять контракт файловой цели verify-first (inbox devtools#201, slug: verify-first-file-target-contract-accepted; spec-runner TASK-015): голый `checked_by target: tests/x.py` без `::` — легитимный элемент `**Verifies:**` (состав по репортёру адаптера, правило учтённости + «хотя бы один исполнен», асимметрия с node id), поэтому в `task_bridge` снять «полные селекторы НАМЕРЕННО» из контракта рендера verify-DT, цели `kind: manual` (документы) в группу не рендерить, зонд к соседу — на форму словаря (подмножество: только тестовый файл под адаптером с `supports_file_targets`; директории/glob/не-тестовые файлы — отказ `validate`) @id:accept-file-target-contract @owner:github:andrei-shtanakov
   Источник: `docs/architecture.md` spec-runner (после #457), devtools#201.
+  Реализация этого пункта должна также закрыть исходный несовместимый контракт
+  devtools#159: отдельной задачи на преобразование file→node-id больше не
+  требуется.
+
+## Триаж открытого governance-долга — 2026-09-13
+
+> Решение владельца: внутренние issues принимаются не построчным зеркалом
+> GitHub, а замкнутыми workstream-пунктами. Каждый дочерний issue остаётся
+> открытым до merged evidence именно по своему требованию. Порядок запуска:
+> сначала fidelity ревью и активный fail-honest supersede, затем file-target
+> #201; document-runner — до следующего behaviour-авторинга; остаточные
+> bridge/waiver-миноры — после #201, чтобы не править одну поверхность
+> параллельно. Legacy-v1 долг имеет явный триггер и до него не исполняется.
+> Все перечисленные дочерние issues — внутренние, без лейбла `inbox`;
+> производная приёмка ADR-ECO-006 к ним не применяется. Единственный inbox
+> здесь — #201, и его slug находится на строке собственного чекбокса выше.
+
+- [ ] Fidelity терминального ревью: дерево ревьюера совпадает с head дифа, а локально материализованный head проверяется по SHA до платного вызова @owner:github:andrei-shtanakov @id:review-evidence-fidelity-wave
+  Источники и обязательная приёмка: devtools#136 (freshness materialized
+  HEAD) и #166 (review-pr видит head-дерево, а не base). Один workstream на
+  общую причину «доверие чекауту вместо SHA», но отдельный регрессионный тест
+  на каждый entry point; устранение одного не закрывает второй.
+
+- [ ] Остатки document-pipeline авторинга behaviour-узла: согласовать doc-чеклист с DSL-гейтом, определить self-target anchor и сделать повторный запуск идемпотентным @owner:github:andrei-shtanakov @id:behaviour-document-runner-residuals
+  Источник: devtools#204 после merged PR #203. До реализации проверить по
+  коду disputatio контракт существующего pipeline-dir и выбрать ровно один
+  путь retry/resume; живой платный прогон не подменять стаб-тестом в описи
+  evidence.
+
+- [ ] Fail-honest переиздания tasks: перенос состояния, состав бандла и удаление заменённой ветки дают различимые подтверждённые исходы без молчания и traceback @owner:github:andrei-shtanakov @id:tasks-supersede-fail-honest-wave
+  Источники: devtools#177 (сначала различить факты ops и недоступную base),
+  #168 + #181 (единый composition guard для отсутствующего каталога и всех
+  entry points), затем #175 (не скрывать неподтверждённое удаление ветки;
+  использовать различимый результат #177). DONE — только с отдельным
+  regression/evidence на каждый из четырёх классов.
+
+- [ ] Legacy-v1 хвосты переиздания: fail-closed для completed без PR, честный след reconcile→abandoned перед no-op и обязательная §I8-сверка при постороннем `.md` @owner:github:andrei-shtanakov @trigger:"перед следующим переизданием legacy-v1 воркстрима" @id:tasks-supersede-legacy-debt
+  Источники: devtools#170, #171 и #173. Это редкие аварийные входы, а не
+  текущий v2-путь с `content_anchor`; до триггера пункт остаётся waiting, но
+  не теряется в россыпи GitHub. devtools#169 сюда намеренно не входит:
+  дефекта поведения нет, необязательный API-рефакторинг закрыт not planned.
+
+- [ ] Формулировки и защитные проверки governance-контракта привести к фактическим гарантиям без расширения runtime-механики @owner:github:andrei-shtanakov @id:governance-contract-truth-batch
+  Источники: devtools#182 (граница blob-anchor), #184 (`merge-pr.sh` — policy
+  и defense-in-depth, не security boundary), #185 (движение базы не
+  проверялось) и #195 (две известные дыры guard слепых зон). Это один малый
+  батч, но #195 обязан сохранить negative self-check: одной правки прозы для
+  него недостаточно.
+
+- [ ] Остаточный долг decomposition/task_bridge: legacy-граф, verifies-парсер и waiver-контракт привести к одной исполнимой форме после file-target cutover @owner:github:andrei-shtanakov @id:task-bridge-residual-debt-wave @blocked_by:todo://devtools/accept-file-target-contract
+  Источники: devtools#123 (оставшаяся линейность legacy-графа; уже закрытые
+  Traces/owner_role повторно не делать), #162 (три локальных остатка verifies),
+  #198 (три остатка waiver-проекции) и #200 (ложные комментарии +
+  негерметичный зонд). Приёмка обязана различать runtime-фиксы, уточнения
+  контракта и test-only изменения; доступ к соседнему spec-runner в обычном
+  pytest не становится неявной обязательной зависимостью.
