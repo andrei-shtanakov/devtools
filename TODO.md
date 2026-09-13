@@ -1242,8 +1242,9 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 - [x] verify-DT в decomposition-мосте включаются после доставки verify-first @id:decomposition-verify-first-unblock @owner:github:andrei-shtanakov @blocked_by:spec-runner#367
 - [ ] Принять контракт файловой цели verify-first (inbox devtools#201, slug: verify-first-file-target-contract-accepted; spec-runner TASK-015): голый `checked_by target: tests/x.py` без `::` — легитимный элемент `**Verifies:**` (состав по репортёру адаптера, правило учтённости + «хотя бы один исполнен», асимметрия с node id), поэтому в `task_bridge` снять «полные селекторы НАМЕРЕННО» из контракта рендера verify-DT, цели `kind: manual` (документы) в группу не рендерить, зонд к соседу — на форму словаря (подмножество: только тестовый файл под адаптером с `supports_file_targets`; директории/glob/не-тестовые файлы — отказ `validate`) @id:accept-file-target-contract @owner:github:andrei-shtanakov
   Источник: `docs/architecture.md` spec-runner (после #457), devtools#201.
-  Этот же пункт закрывает исходный несовместимый контракт devtools#159:
-  отдельной задачи на преобразование file→node-id больше не требуется.
+  Реализация этого пункта должна также закрыть исходный несовместимый контракт
+  devtools#159: отдельной задачи на преобразование file→node-id больше не
+  требуется.
 
 ## Триаж открытого governance-долга — 2026-09-13
 
@@ -1254,6 +1255,9 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 > #201; document-runner — до следующего behaviour-авторинга; остаточные
 > bridge/waiver-миноры — после #201, чтобы не править одну поверхность
 > параллельно. Legacy-v1 долг имеет явный триггер и до него не исполняется.
+> Все перечисленные дочерние issues — внутренние, без лейбла `inbox`;
+> производная приёмка ADR-ECO-006 к ним не применяется. Единственный inbox
+> здесь — #201, и его slug находится на строке собственного чекбокса выше.
 
 - [ ] Fidelity терминального ревью: дерево ревьюера совпадает с head дифа, а локально материализованный head проверяется по SHA до платного вызова @owner:github:andrei-shtanakov @id:review-evidence-fidelity-wave
   Источники и обязательная приёмка: devtools#136 (freshness materialized
