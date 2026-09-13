@@ -1352,6 +1352,9 @@ def test_show_file_returns_content_at_ref(tmp_path) -> None:
     )
 
     assert RealOps().show_file(str(tmp_path), "HEAD", "spec/x.md") == "hello\n"
+    assert RealOps().show_file_for_carry(
+        str(tmp_path), "HEAD", "spec/x.md"
+    ) == "hello\n"
 
 
 def test_show_file_none_for_missing_path(tmp_path) -> None:
@@ -1360,6 +1363,32 @@ def test_show_file_none_for_missing_path(tmp_path) -> None:
     real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
 
     assert RealOps().show_file(str(tmp_path), "HEAD", "spec/nope.md") is None
+
+
+def test_show_file_for_carry_distinguishes_absent_path(tmp_path) -> None:
+    import subprocess as real_subprocess
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    real_subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c",
+         "user.name=t", "commit", "--allow-empty", "-q", "-m", "c"],
+        check=True,
+    )
+
+    assert RealOps().show_file_for_carry(
+        str(tmp_path), "HEAD", "spec/nope.md"
+    ) is None
+
+
+def test_show_file_for_carry_raises_when_revision_is_unavailable(tmp_path) -> None:
+    import subprocess as real_subprocess
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    with pytest.raises(RuntimeError, match="missing-ref"):
+        RealOps().show_file_for_carry(
+            str(tmp_path), "missing-ref", "spec/x.md"
+        )
 
 
 def test_commit_parent_returns_sha(monkeypatch):

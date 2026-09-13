@@ -178,6 +178,10 @@ class Ops(Protocol):
 
     def show_file(self, target_dir: str, ref: str, path: str) -> str | None: ...
 
+    def show_file_for_carry(
+        self, target_dir: str, ref: str, path: str
+    ) -> str | None: ...
+
 
 # --- Харнесс авторинга (лимиты codex, 2026-09-03; парный слой к харнессу
 # ревьюера в review-pr.sh). Выбор: env AUTHOR_HARNESS/AUTHOR_MODEL >
@@ -1347,3 +1351,34 @@ class RealOps:
             cwd=target_dir, capture_output=True, text=True,
         )
         return done.stdout if done.returncode == 0 else None
+
+    def show_file_for_carry(
+        self, target_dir: str, ref: str, path: str
+    ) -> str | None:
+        """Строгое чтение §I11: текст / доказанно нет / исключение."""
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if resolved.returncode != 0 or not resolved.stdout.strip():
+            detail = resolved.stderr.strip() or "ревизия не найдена"
+            raise RuntimeError(f"show_file_for_carry: {ref}: {detail}")
+
+        listed = subprocess.run(
+            ["git", "ls-tree", "-z", "--name-only", ref, "--", path],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if listed.returncode != 0:
+            detail = listed.stderr.strip() or "git ls-tree failed"
+            raise RuntimeError(f"show_file_for_carry: {ref}:{path}: {detail}")
+        if not listed.stdout:
+            return None
+
+        done = subprocess.run(
+            ["git", "show", f"{ref}:{path}"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            detail = done.stderr.strip() or "git show failed"
+            raise RuntimeError(f"show_file_for_carry: {ref}:{path}: {detail}")
+        return done.stdout
