@@ -6234,12 +6234,9 @@ class _ReplaceOps(_SupersedeOps):
             self.closed.append((pr, comment))
         return self.close_ok
 
-    def remote_branch_head(self, repo_slug, branch):
-        self.calls.append(("remote_branch_head", branch))
-        return self.remote_head if branch == _REPLACED_BRANCH else None
-
     def remote_branch_head_fact(self, repo_slug, branch):
-        actual = self.remote_branch_head(repo_slug, branch)
+        self.calls.append(("remote_branch_head_fact", branch))
+        actual = self.remote_head if branch == _REPLACED_BRANCH else None
         if actual is None:
             return Fact(Outcome.ABSENT, None, "ветки на origin нет")
         return Fact(Outcome.FOUND, actual, "ветка на origin прочитана")
@@ -6636,7 +6633,7 @@ def test_replace_accepts_pr_closed_by_operator(tmp_path, monkeypatch):
     # На этом пути (`pr_state != "OPEN"`) сверка идентичности не
     # выполнялась ни разу за прогон: `_check_replacement_target` выходит
     # до неё. Значит шаг 5 обязан сверить head сам.
-    assert ("remote_branch_head", _REPLACED_BRANCH) in ops.calls
+    assert ("remote_branch_head_fact", _REPLACED_BRANCH) in ops.calls
     assert ("rev_parse", _REPLACED_BRANCH) in ops.calls
 
 
