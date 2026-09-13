@@ -1242,3 +1242,47 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 - [x] verify-DT в decomposition-мосте включаются после доставки verify-first @id:decomposition-verify-first-unblock @owner:github:andrei-shtanakov @blocked_by:spec-runner#367
 - [ ] Принять контракт файловой цели verify-first (inbox devtools#201, slug: verify-first-file-target-contract-accepted; spec-runner TASK-015): голый `checked_by target: tests/x.py` без `::` — легитимный элемент `**Verifies:**` (состав по репортёру адаптера, правило учтённости + «хотя бы один исполнен», асимметрия с node id), поэтому в `task_bridge` снять «полные селекторы НАМЕРЕННО» из контракта рендера verify-DT, цели `kind: manual` (документы) в группу не рендерить, зонд к соседу — на форму словаря (подмножество: только тестовый файл под адаптером с `supports_file_targets`; директории/glob/не-тестовые файлы — отказ `validate`) @id:accept-file-target-contract @owner:github:andrei-shtanakov
   Источник: `docs/architecture.md` spec-runner (после #457), devtools#201.
+  Этот же пункт закрывает исходный несовместимый контракт devtools#159:
+  отдельной задачи на преобразование file→node-id больше не требуется.
+
+## Триаж открытого governance-долга — 2026-09-13
+
+> Решение владельца: внутренние issues принимаются не построчным зеркалом
+> GitHub, а замкнутыми workstream-пунктами. Каждый дочерний issue остаётся
+> открытым до merged evidence именно по своему требованию. Порядок запуска:
+> сначала fidelity ревью и document-runner, затем file-target #201 и
+> supersede; остаточные bridge/waiver-миноры — после #201, чтобы не править
+> одну поверхность параллельно.
+
+- [ ] Fidelity терминального ревью и accept/merge-диагностики: дерево ревьюера совпадает с head дифа, локально материализованный head проверяется до платного вызова, а тексты не обещают непроверенную базу или несуществующую security boundary @owner:github:andrei-shtanakov @id:review-evidence-fidelity-wave
+  Источники и обязательная приёмка: devtools#136 (freshness materialized
+  HEAD), #166 (review-pr видит head-дерево, а не base), #184
+  (`merge-pr.sh` честно документирован как policy + defense-in-depth) и #185
+  (диагностика не утверждает, что база не двигалась, если её не проверяли).
+  Один workstream, но декомпозиция обязана сохранить отдельный тест/evidence
+  на каждый из четырёх классов; устранение одного не закрывает остальные.
+
+- [ ] Остатки document-pipeline авторинга behaviour-узла: согласовать doc-чеклист с DSL-гейтом, определить self-target anchor и сделать повторный запуск идемпотентным @owner:github:andrei-shtanakov @id:behaviour-document-runner-residuals
+  Источник: devtools#204 после merged PR #203. До реализации проверить по
+  коду disputatio контракт существующего pipeline-dir и выбрать ровно один
+  путь retry/resume; живой платный прогон не подменять стаб-тестом в описи
+  evidence.
+
+- [ ] Fail-honest и контрактная целостность переиздания tasks: убрать молчаливые/traceback-исходы, согласовать no-op и anchor-гарантии, вернуть структурированный результат вызывающему @owner:github:andrei-shtanakov @id:tasks-supersede-debt-wave
+  Источники: devtools#168 (нет каталога), #169 (stdout внутри библиотеки),
+  #170 (v1 completed без PR), #171 (reconcile→abandoned перед no-op), #173
+  (лишний `.md` отключает legacy-сверку), #175 (неподтверждённое удаление
+  ветки), #177 (неразличимые факты ops), #181 (утраченный composition guard),
+  #182 (граница blob-anchor) и #195 (две дыры guard слепых зон).
+  Декомпозиция может разбить workstream на несколько PR, но DONE ставится
+  только после закрытия всех десяти дочерних требований и регрессии всех
+  затронутых entry points (`deliver`, `deliver_conform`, `conform_approved`,
+  `--supersede`, `--approve-node`).
+
+- [ ] Остаточный долг decomposition/task_bridge: legacy-граф, verifies-парсер и waiver-контракт привести к одной исполнимой форме после file-target cutover @owner:github:andrei-shtanakov @id:task-bridge-residual-debt-wave @blocked_by:todo://devtools/accept-file-target-contract
+  Источники: devtools#123 (оставшаяся линейность legacy-графа; уже закрытые
+  Traces/owner_role повторно не делать), #162 (три локальных остатка verifies),
+  #198 (три остатка waiver-проекции) и #200 (ложные комментарии +
+  негерметичный зонд). Приёмка обязана различать runtime-фиксы, уточнения
+  контракта и test-only изменения; доступ к соседнему spec-runner в обычном
+  pytest не становится неявной обязательной зависимостью.
