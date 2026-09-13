@@ -16,13 +16,14 @@ CLI: ``python -m governance.task_bridge --run-id <id>`` (make behaviour-tasks).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple
 
 from governance import acceptance_guard, decomposition_guard, design_guard
@@ -759,6 +760,7 @@ def _canonical_dag_hash(
     target_dir: str,
     bundle_dir: str,
     dag: tuple[tuple[str, tuple[str, ...]], ...],
+    source_paths: tuple[str, ...] = (),
 ) -> str:
     """Канонический хэш DAG: содержание бандла без провенанса approve.
 
@@ -808,6 +810,12 @@ def _canonical_dag_hash(
         node_id = _node_id(fname)
         canon[node_id] = blob_sha1(join_frontmatter(meta, body))
         lines.append(f"{node_id} {canon[node_id]}")
+    for relative in source_paths:
+        data = (base / relative).read_bytes()
+        source_blob = hashlib.sha1(
+            b"blob %d\x00%s" % (len(data), data)
+        ).hexdigest()
+        lines.append(f"source {relative} {source_blob}")
     return f"{_CANON_VERSION}:{blob_sha1(chr(10).join(lines) + chr(10))}"
 
 
@@ -934,6 +942,7 @@ def _content_anchor(
     target_dir: str,
     bundle_dir: str,
     legacy_bundle: int | None = None,
+    brief: dict[str, object] | None = None,
 ) -> str:
     """`content_anchor` §I5: канонический хэш активного DAG в base.
 
@@ -969,7 +978,28 @@ def _content_anchor(
     """
     dag = _dag_for(legacy_bundle)
     _check_bundle_composition(target_dir, bundle_dir, dag)
-    return _canonical_dag_hash(target_dir, bundle_dir, dag)
+    source_paths: tuple[str, ...] = ()
+    if brief is not None:
+        raw_paths = brief.get("source_paths")
+        if not isinstance(raw_paths, list) or not all(
+            isinstance(path, str) for path in raw_paths
+        ):
+            raise ValueError("brief descriptor не несёт source_paths")
+        for path in raw_paths:
+            pure = PurePosixPath(path)
+            if (
+                "\\" in path
+                or pure.is_absolute()
+                or ".." in pure.parts
+                or not path.startswith("00-discovery/")
+            ):
+                raise ValueError(
+                    f"brief descriptor несёт непереносимый source path {path!r}"
+                )
+        source_paths = tuple(raw_paths)
+    return _canonical_dag_hash(
+        target_dir, bundle_dir, dag, source_paths
+    )
 
 
 def _prospective_anchor(
@@ -1694,9 +1724,26 @@ def _delivered_content_anchor(
             (shadow / state.bundle_dir / fname).write_text(
                 text, encoding="utf-8"
             )
+        if state.brief is not None:
+            source_paths = state.brief.get("source_paths")
+            if not isinstance(source_paths, list) or not all(
+                isinstance(path, str) for path in source_paths
+            ):
+                return None
+            for relative in source_paths:
+                text = ops.show_file(
+                    state.target_dir,
+                    head,
+                    f"{state.bundle_dir}/{relative}",
+                )
+                if text is None:
+                    return None
+                destination = shadow / state.bundle_dir / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(text, encoding="utf-8")
         try:
             return _content_anchor(
-                str(shadow), state.bundle_dir, legacy_bundle
+                str(shadow), state.bundle_dir, legacy_bundle, state.brief
             )
         except ValueError:
             return None
@@ -1921,7 +1968,7 @@ def deliver_for_run(
         """
         stamped["anchor"] = commit_facts["anchor_blob"]
         stamped["content_anchor"] = _content_anchor(
-            state.target_dir, state.bundle_dir, legacy_bundle
+            state.target_dir, state.bundle_dir, legacy_bundle, state.brief
         )
 
     # Гейт §I12 — непосредственно перед ПЕРВЫМ delivery-эффектом, а не
@@ -3344,7 +3391,7 @@ def deliver_superseded(
     # §I5 — ДО провенанса и ДО любого сетевого вызова: `content_anchor`
     # считается локально по проштампованному дереву и подписи не видит.
     content = _content_anchor(
-        state.target_dir, state.bundle_dir, legacy_bundle
+        state.target_dir, state.bundle_dir, legacy_bundle, state.brief
     )
     recorded_content = prev_op.get("content_anchor")
     comparable = _comparable_anchors(recorded_content, content)
