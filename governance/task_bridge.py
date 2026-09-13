@@ -2391,7 +2391,11 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
     образца): сверять нечем — значит не удаляем.
 
     Отсутствие ссылки — выполненный шаг, а не сбой: `None` от
-    `remote_branch_head` и от `rev_parse` молчат.
+    `remote_branch_head` и от `rev_parse` молчат. `False` от удаления
+    перепроверяется тем же lookup: ссылка могла исчезнуть между сверкой и
+    удалением. Если она осталась на прежнем SHA, отказ печатается с ручной
+    процедурой; если под тем же именем появился другой SHA, чужая работа
+    остаётся нетронутой и диагностика называет расхождение.
     """
     branch = op.get("replaces_branch")
     if not branch:
@@ -2404,18 +2408,19 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
         )
         return
     removed: list[str] = []
-    for where, actual, drop in (
+    for where, locate, drop in (
         (
             "origin",
-            ops.remote_branch_head(state.repo_slug, branch),
+            lambda: ops.remote_branch_head(state.repo_slug, branch),
             lambda: ops.delete_remote_branch(state.repo_slug, branch),
         ),
         (
             "локально",
-            ops.rev_parse(state.target_dir, branch),
+            lambda: ops.rev_parse(state.target_dir, branch),
             lambda: ops.delete_local_branch(state.target_dir, branch),
         ),
     ):
+        actual = locate()
         if actual is None:
             continue          # ссылки нет — шаг по этой половине состоялся
         if actual != head:
@@ -2428,12 +2433,23 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
         if drop():
             removed.append(where)
             continue
+        after = locate()
+        if after is None:
+            removed.append(where)
+            continue
+        if after != head:
+            print(
+                f"ветка {branch} ({where}) оставлена после неудачного "
+                f"удаления: теперь она стоит на {after[:7]}, а отозванная "
+                f"ревизия — на {head[:7]}; под тем же именем чужая работа"
+            )
+            continue
         print(
             f"ветка {branch} ({where}) не удалена после замены ревизии "
             f"v{op.get('replaces_revision', '?')} "
-            f"(PR #{op.get('replaces_pr', '?')}): ссылка уже исчезла "
-            "после проверки либо операция отказала; проверьте ссылку и, "
-            f"если она всё ещё стоит на {head[:7]}, удалите вручную"
+            f"(PR #{op.get('replaces_pr', '?')}): операция удаления "
+            f"отказала, а ссылка по-прежнему стоит на {head[:7]}; "
+            "удалите её вручную"
         )
     if removed:
         print(

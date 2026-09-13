@@ -7279,10 +7279,10 @@ def test_branch_delete_failure_is_visible_but_does_not_undo_delivery(
 ):
     """Неподтверждённое удаление видно, но состоявшаяся доставка успешна.
 
-    `delete_*_branch -> False` не различает отказ операции и ссылку,
-    исчезнувшую между head-сверкой и удалением. Поэтому сообщение честно
-    называет обе возможности, половину и ручную процедуру; исключение или
-    ненулевой RC сказали бы неправду об уже созданном PR новой ревизии.
+    После `delete_*_branch -> False` повторный lookup подтверждает, что
+    ссылка осталась на прежнем SHA. Поэтому сообщение называет половину и
+    ручную процедуру; исключение или ненулевой RC сказали бы неправду об уже
+    созданном PR новой ревизии.
     """
     from governance import task_bridge as tb
 
@@ -7298,8 +7298,96 @@ def test_branch_delete_failure_is_visible_but_does_not_undo_delivery(
     out = capsys.readouterr().out
     assert f"ветка {_REPLACED_BRANCH} ({where}) не удалена" in out
     assert "ревизии v3 (PR #408)" in out
-    assert "ссылка уже исчезла после проверки либо операция отказала" in out
-    assert "проверьте ссылку" in out
+    assert "операция удаления отказала" in out
+    assert f"ссылка по-прежнему стоит на {_REPLACED_HEAD[:7]}" in out
+    assert "удалите её вручную" in out
+
+
+@pytest.mark.parametrize(
+    "kw, lookup_name",
+    [
+        ({"remote_delete_ok": False}, "remote_branch_head"),
+        ({"local_delete_ok": False}, "rev_parse"),
+    ],
+    ids=["origin-disappeared", "local-disappeared"],
+)
+def test_branch_disappearing_during_delete_is_a_completed_cleanup(
+    kw, lookup_name, tmp_path, monkeypatch, capsys
+):
+    """False от удаления не тревожит, если повторный lookup видит отсутствие.
+
+    Это реальное окно гонки: обе половины раньше резолвились заранее, а между
+    сверкой и удалением ссылку мог снять оператор. По §I10 отсутствие — уже
+    выполненный шаг, поэтому ручная процедура здесь была бы ложной тревогой.
+    """
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+    answers = iter([_REPLACED_HEAD, None])
+
+    if lookup_name == "remote_branch_head":
+        ops.remote_branch_head = lambda repo_slug, branch: next(answers)
+    else:
+        original_rev_parse = ops.rev_parse
+
+        def rev_parse(target_dir, ref):
+            if ref == _REPLACED_BRANCH:
+                return next(answers)
+            return original_rev_parse(target_dir, ref)
+
+        ops.rev_parse = rev_parse
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+
+    out = capsys.readouterr().out
+    assert _REPLACED_BRANCH in out
+    assert "удалена (origin, локально)" in out
+    assert "не удалена" not in out
+    assert "оставлена после неудачного удаления" not in out
+
+
+@pytest.mark.parametrize(
+    "kw, lookup_name, where",
+    [
+        ({"remote_delete_ok": False}, "remote_branch_head", "origin"),
+        ({"local_delete_ok": False}, "rev_parse", "локально"),
+    ],
+    ids=["origin-replaced", "local-replaced"],
+)
+def test_branch_replaced_during_failed_delete_is_not_touched(
+    kw, lookup_name, where, tmp_path, monkeypatch, capsys
+):
+    """Новый SHA после отказа удаления — чужая работа, а не cleanup target."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+    answers = iter([_REPLACED_HEAD, "ЧУЖОЙ-SHA"])
+
+    if lookup_name == "remote_branch_head":
+        ops.remote_branch_head = lambda repo_slug, branch: next(answers)
+    else:
+        original_rev_parse = ops.rev_parse
+
+        def rev_parse(target_dir, ref):
+            if ref == _REPLACED_BRANCH:
+                return next(answers)
+            return original_rev_parse(target_dir, ref)
+
+        ops.rev_parse = rev_parse
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+
+    out = capsys.readouterr().out
+    assert f"({where}) оставлена после неудачного удаления" in out
+    assert "теперь она стоит на ЧУЖОЙ-" in out
+    assert "под тем же именем чужая работа" in out
+    assert "удалите её вручную" not in out
 
 
 @pytest.mark.parametrize(
