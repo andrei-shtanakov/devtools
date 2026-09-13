@@ -1555,9 +1555,16 @@ def test_remote_branch_head_fact_distinguishes_found_and_absent(monkeypatch):
         {"returncode": 1, "stderr": "rate limited"},
         {"stdout": "not json"},
         {"stdout": '{"data":{"repository":null}}'},
+        {"stdout": '{"data":{"repository":{}}}'},
         {"stdout": '{"data":{"repository":{"ref":{"target":{}}}}}'},
     ],
-    ids=["request-failed", "invalid-json", "repo-unavailable", "bad-ref"],
+    ids=[
+        "request-failed",
+        "invalid-json",
+        "repo-unavailable",
+        "missing-ref",
+        "bad-ref",
+    ],
 )
 def test_remote_branch_head_fact_keeps_unknown_unavailable(kw, monkeypatch):
     _install_fake_run(monkeypatch, **kw)

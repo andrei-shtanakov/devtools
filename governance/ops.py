@@ -994,7 +994,11 @@ class RealOps:
             return unavailable(
                 f"head origin/{branch}: репозиторий не прочитан"
             )
-        ref = repository.get("ref")
+        if "ref" not in repository:
+            return unavailable(
+                f"head origin/{branch}: в ответе нет поля ref"
+            )
+        ref = repository["ref"]
         if ref is None:
             return Fact(
                 Outcome.ABSENT, None, f"ветки origin/{branch} нет"
@@ -1040,10 +1044,11 @@ class RealOps:
     def delete_remote_branch(self, repo_slug: str, branch: str) -> bool:
         """DELETE refs/heads/<branch> на origin; rc0->True.
 
-        False — и «нет прав», и «ветки уже нет»: различать нечем, а
-        вызывающему разница не нужна — шаг удаления идемпотентен по
-        смыслу (ветки нет ⇒ шаг состоялся). Коммиты и сам PR остаются:
-        удаляется живая ветка, не история.
+        False — и «нет прав», и «ветки уже нет»: внутри примитива различать
+        нечем. Вызывающий `_replacement_cleanup` устанавливает исход
+        повторным `remote_branch_head_fact`: ветки нет ⇒ шаг состоялся,
+        неизвестность или оставшаяся ссылка ⇒ нужна диагностика. Коммиты и
+        сам PR остаются: удаляется живая ветка, не история.
         """
         env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
         done = subprocess.run(
@@ -1059,7 +1064,8 @@ class RealOps:
         Именно `-D`: отзываемая ветка по построению не вмержена, и `-d`
         отказал бы на каждой. Парный шаг к `delete_remote_branch` —
         удаляется ссылка в обеих половинах, коммиты остаются достижимы
-        через закрытый PR.
+        через закрытый PR. False перепроверяется вызывающим через
+        `local_branch_head_fact`, а не толкуется как отсутствие.
         """
         done = subprocess.run(
             ["git", "-C", target_dir, "branch", "-D", branch],
