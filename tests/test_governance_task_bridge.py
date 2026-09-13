@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from governance import bundle_dag, decomposition_guard, node_approval, task_bridge
+from governance.facts import Fact, Outcome, unavailable
 from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.stale_adapter import blob_sha1
 
@@ -6174,6 +6175,8 @@ class _ReplaceOps(_SupersedeOps):
         facts_by_pr=None,
         remote_head=_REPLACED_HEAD,
         local_head=_REPLACED_HEAD,
+        remote_delete_ok=True,
+        local_delete_ok=True,
         **kw,
     ):
         # Ветка заменяемой ревизии РЕЗОЛВИТСЯ в её PR — так на живом
@@ -6208,6 +6211,8 @@ class _ReplaceOps(_SupersedeOps):
         # «ссылки уже нет», другой SHA — «под тем же именем чужая работа».
         self.remote_head = remote_head
         self.local_head = local_head
+        self.remote_delete_ok = remote_delete_ok
+        self.local_delete_ok = local_delete_ok
 
     def pr_facts(self, repo_slug, pr):
         if pr not in self.facts_by_pr:
@@ -6229,9 +6234,12 @@ class _ReplaceOps(_SupersedeOps):
             self.closed.append((pr, comment))
         return self.close_ok
 
-    def remote_branch_head(self, repo_slug, branch):
-        self.calls.append(("remote_branch_head", branch))
-        return self.remote_head if branch == _REPLACED_BRANCH else None
+    def remote_branch_head_fact(self, repo_slug, branch):
+        self.calls.append(("remote_branch_head_fact", branch))
+        actual = self.remote_head if branch == _REPLACED_BRANCH else None
+        if actual is None:
+            return Fact(Outcome.ABSENT, None, "ветки на origin нет")
+        return Fact(Outcome.FOUND, actual, "ветка на origin прочитана")
 
     def rev_parse(self, target_dir, ref):
         if ref == _REPLACED_BRANCH:
@@ -6239,15 +6247,23 @@ class _ReplaceOps(_SupersedeOps):
             return self.local_head
         return super().rev_parse(target_dir, ref)
 
+    def local_branch_head_fact(self, target_dir, branch):
+        actual = self.rev_parse(target_dir, branch)
+        if actual is None:
+            return Fact(Outcome.ABSENT, None, "локальной ветки нет")
+        return Fact(Outcome.FOUND, actual, "локальная ветка прочитана")
+
     def delete_remote_branch(self, repo_slug, branch):
         self.calls.append(("delete_remote_branch", branch))
-        self.deleted.append(branch)
-        return True
+        if self.remote_delete_ok:
+            self.deleted.append(branch)
+        return self.remote_delete_ok
 
     def delete_local_branch(self, target_dir, branch):
         self.calls.append(("delete_local_branch", branch))
-        self.deleted_local.append(branch)
-        return True
+        if self.local_delete_ok:
+            self.deleted_local.append(branch)
+        return self.local_delete_ok
 
 
 def _replace_state(tmp_path, monkeypatch, **rev3):
@@ -6617,7 +6633,7 @@ def test_replace_accepts_pr_closed_by_operator(tmp_path, monkeypatch):
     # На этом пути (`pr_state != "OPEN"`) сверка идентичности не
     # выполнялась ни разу за прогон: `_check_replacement_target` выходит
     # до неё. Значит шаг 5 обязан сверить head сам.
-    assert ("remote_branch_head", _REPLACED_BRANCH) in ops.calls
+    assert ("remote_branch_head_fact", _REPLACED_BRANCH) in ops.calls
     assert ("rev_parse", _REPLACED_BRANCH) in ops.calls
 
 
@@ -7248,6 +7264,199 @@ def test_discharge_costs_nothing_without_revocations_in_the_ledger(
     assert [c for c in ops.calls if c[0] == "pr_facts"] == [
         ("pr_facts", _REPLACED_PR)
     ]
+
+
+@pytest.mark.parametrize(
+    "kw, where, deleted, deleted_local",
+    [
+        (
+            {"remote_delete_ok": False},
+            "origin",
+            [],
+            [_REPLACED_BRANCH],
+        ),
+        (
+            {"local_delete_ok": False},
+            "локально",
+            [_REPLACED_BRANCH],
+            [],
+        ),
+    ],
+    ids=["origin-delete-failed", "local-delete-failed"],
+)
+def test_branch_delete_failure_is_visible_but_does_not_undo_delivery(
+    kw, where, deleted, deleted_local, tmp_path, monkeypatch, capsys
+):
+    """Неподтверждённое удаление видно, но состоявшаяся доставка успешна.
+
+    После `delete_*_branch -> False` повторный lookup подтверждает, что
+    ссылка осталась на прежнем SHA. Поэтому сообщение называет половину и
+    ручную процедуру; исключение или ненулевой RC сказали бы неправду об уже
+    созданном PR новой ревизии.
+    """
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+
+    assert ops.deleted == deleted
+    assert ops.deleted_local == deleted_local
+    out = capsys.readouterr().out
+    assert f"ветка {_REPLACED_BRANCH} ({where}) не удалена" in out
+    assert "ревизии v3 (PR #408)" in out
+    assert "операция удаления отказала" in out
+    assert f"ссылка по-прежнему стоит на {_REPLACED_HEAD[:7]}" in out
+    assert "удалите её вручную" in out
+
+
+@pytest.mark.parametrize(
+    "kw, lookup_name, removed_where",
+    [
+        (
+            {"remote_delete_ok": False},
+            "remote_branch_head_fact",
+            "локально",
+        ),
+        (
+            {"local_delete_ok": False},
+            "local_branch_head_fact",
+            "origin",
+        ),
+    ],
+    ids=["origin-disappeared", "local-disappeared"],
+)
+def test_branch_disappearing_during_delete_is_a_completed_cleanup(
+    kw, lookup_name, removed_where, tmp_path, monkeypatch, capsys
+):
+    """False от удаления не тревожит, если повторный lookup видит отсутствие.
+
+    Это реальное окно гонки: обе половины раньше резолвились заранее, а между
+    сверкой и удалением ссылку мог снять оператор. По §I10 отсутствие — уже
+    выполненный шаг, поэтому ручная процедура здесь была бы ложной тревогой.
+    """
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+    answers = iter([
+        Fact(Outcome.FOUND, _REPLACED_HEAD, "ветка найдена"),
+        Fact(Outcome.ABSENT, None, "ветка исчезла"),
+    ])
+    setattr(ops, lookup_name, lambda first, second: next(answers))
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+
+    out = capsys.readouterr().out
+    assert _REPLACED_BRANCH in out
+    assert f"удалена ({removed_where})" in out
+    assert "удалена (origin, локально)" not in out
+    assert "не удалена" not in out
+    assert "оставлена после неудачного удаления" not in out
+
+
+@pytest.mark.parametrize(
+    "kw, lookup_name, where",
+    [
+        ({"remote_delete_ok": False}, "remote_branch_head_fact", "origin"),
+        ({"local_delete_ok": False}, "local_branch_head_fact", "локально"),
+    ],
+    ids=["origin-replaced", "local-replaced"],
+)
+def test_branch_replaced_during_failed_delete_is_not_touched(
+    kw, lookup_name, where, tmp_path, monkeypatch, capsys
+):
+    """Новый SHA после отказа удаления — чужая работа, а не cleanup target."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+    answers = iter([
+        Fact(Outcome.FOUND, _REPLACED_HEAD, "ветка найдена"),
+        Fact(Outcome.FOUND, "ЧУЖОЙ-SHA", "ветка переиспользована"),
+    ])
+    setattr(ops, lookup_name, lambda first, second: next(answers))
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+
+    out = capsys.readouterr().out
+    assert f"({where}) оставлена после неудачного удаления" in out
+    assert "теперь она стоит на ЧУЖОЙ-" in out
+    assert "под тем же именем чужая работа" in out
+    assert "удалите её вручную" not in out
+
+
+@pytest.mark.parametrize(
+    "kw, lookup_name, where",
+    [
+        ({"remote_delete_ok": False}, "remote_branch_head_fact", "origin"),
+        ({"local_delete_ok": False}, "local_branch_head_fact", "локально"),
+    ],
+    ids=["origin-unavailable", "local-unavailable"],
+)
+def test_branch_state_unavailable_after_failed_delete_is_not_success(
+    kw, lookup_name, where, tmp_path, monkeypatch, capsys
+):
+    """Unknown после False не превращается в ложное «ветка удалена»."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
+    answers = iter([
+        Fact(Outcome.FOUND, _REPLACED_HEAD, "ветка найдена"),
+        unavailable("состояние недоступно"),
+    ])
+    setattr(ops, lookup_name, lambda first, second: next(answers))
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+
+    out = capsys.readouterr().out
+    assert f"ветка {_REPLACED_BRANCH} ({where}) не удалена" in out
+    assert "удаление не подтверждено" in out
+    assert "состояние ссылки после операции установить не удалось" in out
+    assert f"удалена ({where})" not in out
+
+
+@pytest.mark.parametrize(
+    "lookup_name, delete_call, where",
+    [
+        ("remote_branch_head_fact", "delete_remote_branch", "origin"),
+        ("local_branch_head_fact", "delete_local_branch", "локально"),
+    ],
+    ids=["origin-unavailable", "local-unavailable"],
+)
+def test_branch_state_unavailable_before_delete_skips_the_effect(
+    lookup_name, delete_call, where, tmp_path, monkeypatch, capsys
+):
+    """Unknown до удаления не разрешает необратимый эффект по имени ветки."""
+    from governance import task_bridge as tb
+
+    state = _replace_state(tmp_path, monkeypatch)
+    ops = _ReplaceOps(prs=[_MERGED_PR])
+    setattr(
+        ops,
+        lookup_name,
+        lambda first, second: unavailable("состояние недоступно"),
+    )
+
+    assert tb.deliver_superseded(
+        state, ops, replace=_replace()
+    ) == tb.SupersedeResult("delivered", 77)
+
+    assert not any(call[0] == delete_call for call in ops.calls)
+    out = capsys.readouterr().out
+    assert f"ветка {_REPLACED_BRANCH} ({where}) не проверена" in out
+    assert "состояние ссылки установить не удалось" in out
+    assert "удаление не выполнялось" in out
 
 
 @pytest.mark.parametrize(

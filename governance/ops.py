@@ -2,10 +2,11 @@
 
 ``Ops`` — протокол, закрывающий ВЕСЬ набор внешних вызовов (git/gh/codex/
 gate-check), которыми пользуется behaviour runner. ``RealOps`` — тонкая
-subprocess-обёртка над ним: каждый метод строит одну команду, разбирает её
-результат в примитив (str/int/bool/list/dict) и ничего не интерпретирует —
-решения (мерж/нет, готов ли бандл и т.п.) принимает runner (Task 4), не этот
-модуль. ``FakeOps`` для тестов runner'а живёт в тестах runner'а, не здесь.
+subprocess-обёртка над ним: каждый метод строит одну команду и не принимает
+решений runner'а (мерж/нет, готов ли бандл и т.п.). Обычно ответ разбирается
+в примитив; исключение — fact-методы, которым нужен типизированный исход у
+самого subprocess-вызова, пока `ABSENT` ещё можно отличить от `UNAVAILABLE`.
+``FakeOps`` для тестов runner'а живёт в тестах runner'а, не здесь.
 """
 
 from __future__ import annotations
@@ -19,11 +20,18 @@ import subprocess
 from pathlib import Path
 from typing import Protocol
 
+from governance.facts import Fact, Outcome, unavailable
+
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
 REVIEW_GH_CONFIG_DIR = Path.home() / ".config" / "review"
 
 _PR_URL_RE = re.compile(r"/pull/(\d+)")
 _ISSUE_URL_RE = re.compile(r"/issues/(\d+)")
+_REMOTE_BRANCH_HEAD_QUERY = (
+    "query($o:String!,$n:String!,$q:String!){"
+    "repository(owner:$o,name:$n){"
+    "ref(qualifiedName:$q){target{oid}}}}"
+)
 
 #: Логин ревью-контура по умолчанию — канон `review-pr.sh:66`.
 REVIEW_LOGIN_DEFAULT = "ai-prosto"
@@ -124,9 +132,13 @@ class Ops(Protocol):
 
     def close_pr(self, repo_slug: str, pr: int, comment: str) -> bool: ...
 
-    def remote_branch_head(
+    def remote_branch_head_fact(
         self, repo_slug: str, branch: str
-    ) -> str | None: ...
+    ) -> Fact[str]: ...
+
+    def local_branch_head_fact(
+        self, target_dir: str, branch: str
+    ) -> Fact[str]: ...
 
     def delete_remote_branch(self, repo_slug: str, branch: str) -> bool: ...
 
@@ -947,30 +959,99 @@ class RealOps:
         )
         return done.returncode == 0
 
-    def remote_branch_head(self, repo_slug: str, branch: str) -> str | None:
-        """SHA ветки на origin; None — ветки нет либо узнать не удалось.
+    def remote_branch_head_fact(
+        self, repo_slug: str, branch: str
+    ) -> Fact[str]:
+        """Head удалённой ветки: FOUND / ABSENT / UNAVAILABLE.
 
-        Спрашивается СВОЙ ref, а не `headRefOid` PR: после закрытия PR в
-        ветку могли дописать, и вопрос «что удаляем прямо сейчас»
-        задаётся именно ссылке. Сырой ответ форджи — интерпретация
-        (совпал ли SHA с записанным) не входит в ops.
+        REST 404 не отличает отсутствующий ref от скрытого/недоступного репо.
+        Один GraphQL-ответ сохраняет границу: существующий `repository` с
+        `ref: null` — установленное отсутствие, любой сбой, `repository:
+        null` или неожиданная форма — неизвестность.
         """
+        owner, name = repo_slug.split("/", 1)
         done = subprocess.run(
-            ["gh", "api", f"repos/{repo_slug}/git/ref/heads/{branch}",
-             "--jq", ".object.sha"],
-            capture_output=True, text=True,
+            [
+                "gh", "api", "graphql", "-f",
+                f"query={_REMOTE_BRANCH_HEAD_QUERY}",
+                "-F", f"o={owner}", "-F", f"n={name}",
+                "-F", f"q=refs/heads/{branch}",
+            ],
+            capture_output=True,
+            text=True,
         )
         if done.returncode != 0:
-            return None
-        return done.stdout.strip() or None
+            detail = done.stderr.strip() or f"gh api rc={done.returncode}"
+            return unavailable(
+                f"head origin/{branch}: запрос не удался ({detail})"
+            )
+        try:
+            repository = json.loads(done.stdout)["data"]["repository"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            return unavailable(
+                f"head origin/{branch}: неожиданный ответ ({exc})"
+            )
+        if not isinstance(repository, dict):
+            return unavailable(
+                f"head origin/{branch}: репозиторий не прочитан"
+            )
+        if "ref" not in repository:
+            return unavailable(
+                f"head origin/{branch}: в ответе нет поля ref"
+            )
+        ref = repository["ref"]
+        if ref is None:
+            return Fact(
+                Outcome.ABSENT, None, f"ветки origin/{branch} нет"
+            )
+        try:
+            oid = ref["target"]["oid"]
+        except (KeyError, TypeError):
+            return unavailable(
+                f"head origin/{branch}: неожиданная форма ref"
+            )
+        if not isinstance(oid, str) or not oid:
+            return unavailable(f"head origin/{branch}: пустой SHA")
+        return Fact(
+            Outcome.FOUND, oid, f"ветка origin/{branch} стоит на {oid}"
+        )
+
+    def local_branch_head_fact(
+        self, target_dir: str, branch: str
+    ) -> Fact[str]:
+        """Head локальной ветки: FOUND / ABSENT / UNAVAILABLE."""
+        done = subprocess.run(
+            [
+                "git", "-C", target_dir, "rev-parse", "--verify",
+                "--quiet", f"refs/heads/{branch}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        oid = done.stdout.strip()
+        if done.returncode == 0 and oid:
+            return Fact(
+                Outcome.FOUND, oid, f"локальная ветка {branch} стоит на {oid}"
+            )
+        if done.returncode == 1 and not oid:
+            return Fact(
+                Outcome.ABSENT, None, f"локальной ветки {branch} нет"
+            )
+        detail = done.stderr.strip() or f"git rev-parse rc={done.returncode}"
+        return unavailable(
+            f"head локальной ветки {branch}: чтение не удалось ({detail})"
+        )
 
     def delete_remote_branch(self, repo_slug: str, branch: str) -> bool:
         """DELETE refs/heads/<branch> на origin; rc0->True.
 
-        False — и «нет прав», и «ветки уже нет»: различать нечем, а
-        вызывающему разница не нужна — шаг удаления идемпотентен по
-        смыслу (ветки нет ⇒ шаг состоялся). Коммиты и сам PR остаются:
-        удаляется живая ветка, не история.
+        False — и «нет прав», и «ветки уже нет»: внутри примитива различать
+        нечем. `_replacement_cleanup` устанавливает исход повторным
+        `remote_branch_head_fact`: ветки нет ⇒ шаг состоялся, неизвестность
+        или оставшаяся ссылка ⇒ нужна диагностика. Второй потребитель,
+        `_bury_downstream_requests`, сознательно не перечитывает и не
+        блокирует каскад: его уникальная ветка — только неубранный мусор.
+        Коммиты и сам PR остаются: удаляется живая ветка, не история.
         """
         env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
         done = subprocess.run(
@@ -986,7 +1067,8 @@ class RealOps:
         Именно `-D`: отзываемая ветка по построению не вмержена, и `-d`
         отказал бы на каждой. Парный шаг к `delete_remote_branch` —
         удаляется ссылка в обеих половинах, коммиты остаются достижимы
-        через закрытый PR.
+        через закрытый PR. False перепроверяется вызывающим через
+        `local_branch_head_fact`, а не толкуется как отсутствие.
         """
         done = subprocess.run(
             ["git", "-C", target_dir, "branch", "-D", branch],
