@@ -7314,15 +7314,23 @@ def test_branch_delete_failure_is_visible_but_does_not_undo_delivery(
 
 
 @pytest.mark.parametrize(
-    "kw, lookup_name",
+    "kw, lookup_name, removed_where",
     [
-        ({"remote_delete_ok": False}, "remote_branch_head_fact"),
-        ({"local_delete_ok": False}, "local_branch_head_fact"),
+        (
+            {"remote_delete_ok": False},
+            "remote_branch_head_fact",
+            "локально",
+        ),
+        (
+            {"local_delete_ok": False},
+            "local_branch_head_fact",
+            "origin",
+        ),
     ],
     ids=["origin-disappeared", "local-disappeared"],
 )
 def test_branch_disappearing_during_delete_is_a_completed_cleanup(
-    kw, lookup_name, tmp_path, monkeypatch, capsys
+    kw, lookup_name, removed_where, tmp_path, monkeypatch, capsys
 ):
     """False от удаления не тревожит, если повторный lookup видит отсутствие.
 
@@ -7346,7 +7354,8 @@ def test_branch_disappearing_during_delete_is_a_completed_cleanup(
 
     out = capsys.readouterr().out
     assert _REPLACED_BRANCH in out
-    assert "удалена (origin, локально)" in out
+    assert f"удалена ({removed_where})" in out
+    assert "удалена (origin, локально)" not in out
     assert "не удалена" not in out
     assert "оставлена после неудачного удаления" not in out
 

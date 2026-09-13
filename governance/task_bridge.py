@@ -2453,7 +2453,6 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
             continue
         after = locate()
         if after.outcome is Outcome.ABSENT:
-            removed.append(where)
             continue
         if after.outcome is Outcome.UNAVAILABLE:
             print(

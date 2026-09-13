@@ -1546,6 +1546,8 @@ def test_remote_branch_head_fact_distinguishes_found_and_absent(monkeypatch):
     assert fact.value == "deadbeef"
     assert calls[0].argv[:3] == ["gh", "api", "graphql"]
     assert f"query={_EXPECTED_REMOTE_BRANCH_HEAD_QUERY}" in calls[0].argv
+    assert "o=andrei-shtanakov" in calls[0].argv
+    assert "n=devtools" in calls[0].argv
     assert "q=refs/heads/spec/x-v3" in calls[0].argv
 
     absent = json.dumps({"data": {"repository": {"ref": None}}})
