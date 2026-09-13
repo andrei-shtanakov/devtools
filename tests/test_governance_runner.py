@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from types import SimpleNamespace
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2434,7 +2435,9 @@ def test_disp_backend_used_only_for_behaviour_node(
     # Конфиг вида `document`: форма секции `[pipeline]` и есть объявление
     # вида (disputatio SPEC-002 §3.2), поэтому проверяется форма, а не факт
     # существования файла.
-    assert slug == f"beh-{state.ws_id}"
+    # Нормализованный, а не сырой: грамматика соседа — только нижний регистр.
+    assert slug == f"beh-{state.ws_id}".lower()
+    assert re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", slug), slug
     assert config_path == str(rs.run_dir(run_id) / "disp-doc.toml")
     config = Path(config_path).read_text(encoding="utf-8")
     assert f'document_path = "{BUNDLE_DIR}/15-behaviour-spec.md"' in config
@@ -2447,6 +2450,52 @@ def test_disp_backend_used_only_for_behaviour_node(
     assert "spec_path" not in config
     assert "plan_path" not in config
     assert "max_architectural_returns" not in config
+
+    # Условие (3) пункта плана: анкер обязан резолвиться ВНЕ рабочего дерева
+    # цели, иначе disp отказывает на старте (`validate_anchor_path`
+    # сверяет containment против toplevel репо цели). Задаём явно, а не
+    # полагаемся на дефолт соседа.
+    anchor_line = [ln for ln in config.splitlines() if ln.startswith("anchor_path")]
+    assert len(anchor_line) == 1, config
+    anchor = Path(anchor_line[0].split('"')[1])
+    assert anchor.is_absolute()
+    assert not anchor.resolve().is_relative_to(Path(target_dir).resolve()), (
+        f"анкер {anchor} лежит внутри дерева цели {target_dir} — disp откажет на старте"
+    )
+
+
+@pytest.mark.parametrize(
+    ("ws_id", "expected"),
+    [
+        ("WS-1", "beh-ws-1"),
+        ("WS-spec-runner-341", "beh-ws-spec-runner-341"),
+        ("ws.with_underscore", "beh-ws.with_underscore"),
+        ("WS/slash", "beh-ws-slash"),
+    ],
+)
+def test_disp_doc_slug_matches_disputatio_grammar(ws_id: str, expected: str) -> None:
+    """Слаг обязан пройти грамматику §4.1 соседа: `[a-z0-9][a-z0-9._-]{0,63}`.
+
+    Не косметика: наш `ws_id` обычно в ВЕРХНЕМ регистре, а `validate_slug`
+    зовётся `fullmatch`, так что `beh-WS-…` отвергается `ValueError` →
+    `ConfigError` ещё до старта пайплайна. Приведение однозначно, поэтому
+    нормализуем, а не отказываем.
+    """
+    state = SimpleNamespace(ws_id=ws_id)
+    slug = runner._disp_doc_slug(state)
+
+    assert slug == expected
+    assert re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", slug), slug
+
+
+def test_disp_doc_slug_is_truncated_to_the_grammar_limit() -> None:
+    """Длина слага ограничена 64 символами той же грамматикой."""
+    state = SimpleNamespace(ws_id="W" * 200)
+
+    slug = runner._disp_doc_slug(state)
+
+    assert len(slug) == 64
+    assert re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", slug), slug
 
 
 def test_disp_backend_author_disp_failure_stops_author(
