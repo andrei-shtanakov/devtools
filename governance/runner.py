@@ -712,6 +712,58 @@ def _disp_behaviour_task(subject: str, bundle_path: str) -> str:
     )
 
 
+#: Операторский чеклист контура `doc` — зеркало того, что S4
+#: (`gate-candidate`) требует от DSL поведенческого узла. Состав объявляет
+#: оператор (disputatio SPEC-002 §5.3), поэтому он живёт здесь, а не у
+#: соседа: сойдётся документ или нет, решают НАШИ условия.
+#:
+#: `findings_item` обязателен и называет пункт-роль «нет blocker/major»
+#: (§5.2 V8); остальные пункты — предметные.
+_DOC_CHECKLIST: dict[str, str] = {
+    "B1": "каждый пункт поведения — заголовок `#### BEH-NN`",
+    "B2": "у каждого BEH есть поле `traces:` и пункт `- **checked_by**:`",
+    "B3": "нет blocker/major-находок",
+}
+_DOC_FINDINGS_ITEM = "B3"
+
+
+def _write_disp_doc_config(state: RunState, document_path: str) -> str:
+    """Конфиг вида `document` для прогона; возвращает путь к нему.
+
+    Вид пайплайна disputatio выводит из ФОРМЫ секции `[pipeline]`
+    (SPEC-002 §3.2), а не из флага: `document_path` без `spec_path`/
+    `plan_path` и без `max_architectural_returns` — иначе `ConfigError` до
+    любой мутации. Пишем ровно эту форму.
+
+    Каталог прогона, а не рабочее дерево цели: конфиг — артефакт прогона,
+    он не должен попадать в коммит узла (doc-scope контура ограничивает
+    правки файлом узла, и лишний файл в дереве цели этот контур бы и
+    заметил).
+    """
+    lines = [
+        "[pipeline]",
+        f'document_path = "{document_path}"',
+        "soft_max_pipeline_tokens = 0",
+        "soft_max_pipeline_wall_seconds = 0",
+        'protected_branches = ["master", "main"]',
+        "",
+        "[pipeline.checklists.doc]",
+        f'findings_item = "{_DOC_FINDINGS_ITEM}"',
+        "",
+        "[pipeline.checklists.doc.items]",
+    ]
+    lines += [f'{key} = "{text}"' for key, text in _DOC_CHECKLIST.items()]
+    lines += ["", "[agents.author]", "[agents.reviewer]", "[limits]", ""]
+    path = run_dir(state.run_id) / "disp-doc.toml"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return str(path)
+
+
+def _disp_doc_slug(state: RunState) -> str:
+    """Слаг пайплайна документа: `beh-<ws_id>` (§4.1 — имя пайплайна)."""
+    return f"beh-{state.ws_id}"
+
+
 def _step_authoring(state: RunState, ops: Ops) -> bool:
     """S2/S3: charter/requirements/behaviour-spec — файл есть → пропустить.
 
@@ -722,13 +774,15 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     (OQ-1, `docs/superpowers/specs/2026-08-30-behaviour-spec-pipeline-design.md`).
 
     B2 Task 2: `state.author_backend == "disp"` переключает ТОЛЬКО
-    behaviour-spec узел на `ops.author_disp` (`disp run --mode develop`) —
-    спека §5 называет `disp --mode document`, такого режима у disp нет
-    (факт 2026-08-30), используем `run --mode develop`; выравнивание со
-    спекой — inbox-issue в disputatio (OQ-1). charter/requirements всегда
-    остаются на `ops.author` (codex) независимо от `author_backend` —
-    disp-цикл осмыслен для полируемого документа, не для одноразовых
-    артефактов.
+    behaviour-spec узел на `ops.author_disp`. Спека §5 называла «режим
+    `document`»; режима с таким именем у disp нет — OQ-1 закрыт видом
+    пайплайна `document` (disputatio#52 → их PR #64, 2026-09-01), который
+    выводится из формы конфига, а не из флага. Раннер пишет этот конфиг в
+    каталог прогона (`_write_disp_doc_config`) и передаёт слаг
+    `beh-<ws_id>`; команда — `disp pipeline run`.
+    charter/requirements всегда остаются на `ops.author` (codex) независимо
+    от `author_backend` — цикл полировки осмыслен для документа, который
+    доводят до сходимости, не для одноразовых артефактов.
 
     Preflight (Task 8; хардкод имени профиля снят фикс-раундом ревью) — ДО
     фактического авторинга узлов `design`/`decomposition` (Task 5 обобщила
@@ -778,7 +832,10 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
         if kind == "behaviour-spec" and state.author_backend == "disp":
             bundle_path = f"{state.bundle_dir}/{filename}"
             task = _disp_behaviour_task(state.subject, bundle_path)
-            exit_code = ops.author_disp(state.target_dir, task)
+            config_path = _write_disp_doc_config(state, bundle_path)
+            exit_code = ops.author_disp(
+                state.target_dir, task, config_path, _disp_doc_slug(state)
+            )
         else:
             exit_code = ops.author(
                 state.target_dir, kind, state.subject, state.bundle_dir
