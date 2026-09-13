@@ -27,6 +27,11 @@ REVIEW_GH_CONFIG_DIR = Path.home() / ".config" / "review"
 
 _PR_URL_RE = re.compile(r"/pull/(\d+)")
 _ISSUE_URL_RE = re.compile(r"/issues/(\d+)")
+_REMOTE_BRANCH_HEAD_QUERY = (
+    "query($o:String!,$n:String!,$q:String!){"
+    "repository(owner:$o,name:$n){"
+    "ref(qualifiedName:$q){target{oid}}}}"
+)
 
 #: Логин ревью-контура по умолчанию — канон `review-pr.sh:66`.
 REVIEW_LOGIN_DEFAULT = "ai-prosto"
@@ -965,14 +970,10 @@ class RealOps:
         null` или неожиданная форма — неизвестность.
         """
         owner, name = repo_slug.split("/", 1)
-        query = (
-            "query($o:String!,$n:String!,$q:String!){"
-            "repository(owner:$o,name:$n){"
-            "ref(qualifiedName:$q){target{oid}}}}"
-        )
         done = subprocess.run(
             [
-                "gh", "api", "graphql", "-f", f"query={query}",
+                "gh", "api", "graphql", "-f",
+                f"query={_REMOTE_BRANCH_HEAD_QUERY}",
                 "-F", f"o={owner}", "-F", f"n={name}",
                 "-F", f"q=refs/heads/{branch}",
             ],
@@ -1045,10 +1046,12 @@ class RealOps:
         """DELETE refs/heads/<branch> на origin; rc0->True.
 
         False — и «нет прав», и «ветки уже нет»: внутри примитива различать
-        нечем. Вызывающий `_replacement_cleanup` устанавливает исход
-        повторным `remote_branch_head_fact`: ветки нет ⇒ шаг состоялся,
-        неизвестность или оставшаяся ссылка ⇒ нужна диагностика. Коммиты и
-        сам PR остаются: удаляется живая ветка, не история.
+        нечем. `_replacement_cleanup` устанавливает исход повторным
+        `remote_branch_head_fact`: ветки нет ⇒ шаг состоялся, неизвестность
+        или оставшаяся ссылка ⇒ нужна диагностика. Второй потребитель,
+        `_bury_downstream_requests`, сознательно не перечитывает и не
+        блокирует каскад: его уникальная ветка — только неубранный мусор.
+        Коммиты и сам PR остаются: удаляется живая ветка, не история.
         """
         env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
         done = subprocess.run(

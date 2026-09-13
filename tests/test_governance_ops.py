@@ -20,6 +20,11 @@ from governance.facts import Outcome
 from governance.ops import RealOps
 
 REPO_SLUG = "andrei-shtanakov/devtools"
+_EXPECTED_REMOTE_BRANCH_HEAD_QUERY = (
+    "query($o:String!,$n:String!,$q:String!){"
+    "repository(owner:$o,name:$n){"
+    "ref(qualifiedName:$q){target{oid}}}}"
+)
 
 
 class RecordedCall:
@@ -1540,6 +1545,7 @@ def test_remote_branch_head_fact_distinguishes_found_and_absent(monkeypatch):
     assert fact.outcome is Outcome.FOUND
     assert fact.value == "deadbeef"
     assert calls[0].argv[:3] == ["gh", "api", "graphql"]
+    assert f"query={_EXPECTED_REMOTE_BRANCH_HEAD_QUERY}" in calls[0].argv
     assert "q=refs/heads/spec/x-v3" in calls[0].argv
 
     absent = json.dumps({"data": {"repository": {"ref": None}}})
