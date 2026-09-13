@@ -1312,11 +1312,11 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 > Инвариант §2.2: результат, нужный для продолжения, проверки или
 > воспроизведения прогона, не существует только на машине оператора.
 
-- [ ] E0.6a Восстановление леджера spec-loop из фактов GitHub: повтор `make spec-loop` по (repo, subject) без `out/governance-runs/` находит бандл-PR по ветке `spec/<ws-id>-behaviour`, статусы узлов — по frontmatter бандла, tasks-PR — по ветке (durable reconciliation уже есть); приёмка — прогон R3 продолжен после удаления `out/` и `.steward/` @owner:github:andrei-shtanakov @id:durable-governance-state-ledger
+- [ ] E0.6a Восстановление леджера spec-loop из фактов GitHub: повтор `make spec-loop` по (repo, subject) без `out/governance-runs/` находит бандл-PR по ветке `spec/<ws-id>-behaviour`, статусы узлов — по frontmatter бандла, tasks-PR — по ветке (durable reconciliation уже есть); приёмка — прогон R3 продолжен после удаления `out/governance-runs/` (единственное место леджера; `.steward/` в репо-цели транзиентен и durable-состояния не несёт) @owner:github:andrei-shtanakov @id:durable-governance-state-ledger
       Объём ограничен состоянием R3 (план §3 E0.6). Что не восстановимо по
       фактам GitHub — назвать явно в отчёте, а не молчать: fail-closed с
       подсказкой, какой факт отсутствует.
-- [ ] E0.6b S8-вердикт едет внутри tasks-PR того же цикла: `deliver` кладёт `.steward/gate_verdicts.jsonl` из run_dir в `workstreams/<ws-id>/evidence/` тем же коммитом, что tasks-спека; отдельный evidence-PR не создаётся, у tasks-PR собственного S8 нет (терминально) @owner:github:andrei-shtanakov @id:s8-verdict-in-tasks-pr @blocked_by:todo://devtools/accept-file-target-contract
+- [ ] E0.6b S8-вердикт едет внутри tasks-PR того же цикла: `deliver` кладёт `out/governance-runs/<run-id>/s8-gate-verdicts.jsonl` (gate-verdicts/v1; исходное место записи гейта `.steward/gate_verdicts.jsonl` в корне репо-цели прибирается после S8) в `workstreams/<ws-id>/evidence/` тем же коммитом, что tasks-спека; отдельный evidence-PR не создаётся, у tasks-PR собственного S8 нет (терминально) @owner:github:andrei-shtanakov @id:s8-verdict-in-tasks-pr @blocked_by:todo://devtools/accept-file-target-contract
       Порядок в коде: `resume` → `completed` (S8 внутри) → `deliver`
       (`governance/spec_loop.py`). Правит `task_bridge` — поэтому после
       #201, как и остальные bridge-правки (триаж 2026-09-13). Альтернатива
