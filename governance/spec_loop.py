@@ -27,6 +27,11 @@
 - повтор ищет прогон по точным (repo, subject) среди ВСЕХ леджеров;
   дата участвует только в генерации нового ws-id — запуск на следующий
   день продолжает существующий workstream, а не открывает новый;
+- если локальных леджеров нет, повтор восстанавливает минимальный леджер
+  из durable-фактов GitHub: MERGED bundle-PR по head-ветке, run-id из его
+  тела, bundle-dir из списка файлов; S8 безопасно переисполняется, а
+  tasks-PR реконсилируется существующим мостом по своей ветке; OPEN не
+  доказывает прохождение review/verdict и потому отказывает;
 - любая неоднозначность (несколько кандидатов, битый леджер, ws-id-
   коллизия с чужим subject, расхождение манифеста и origin) — fail-closed
   с перечислением кандидатов и подсказкой `--run-id`/`--ws-id`.
@@ -57,6 +62,21 @@ MANIFEST_PATH = (
 )
 
 _SLUG_MAX = 40
+
+_BUNDLE_FILENAMES = frozenset(
+    {
+        "00-charter.md",
+        "10-requirements.md",
+        "15-behaviour-spec.md",
+        "20-design.md",
+        "25-acceptance.md",
+        "30-decomposition.md",
+    }
+)
+_RUN_BODY_RE = re.compile(
+    r"^Автоматический прогон governance runner'а "
+    r"\((?P<run_id>[A-Za-z0-9][A-Za-z0-9._-]*)\)\.$"
+)
 
 
 class SpecLoopError(RuntimeError):
@@ -209,6 +229,245 @@ def find_runs(repo: str, subject: str) -> list[rs.RunState]:
     return matches
 
 
+def _bundle_dir_from_pr_files(files: list[str]) -> str:
+    """Единственный каталог, содержащий полный шестиузловой бандл PR.
+
+    Не подставляем современный дефолт молча: исходный запуск мог передать
+    ``--bundle-dir``. Список файлов PR — durable-факт, позволяющий вернуть
+    точное значение даже для такого запуска.
+    """
+    by_parent: dict[str, set[str]] = {}
+    for raw in files:
+        path = Path(raw)
+        if path.name in _BUNDLE_FILENAMES and str(path.parent) not in (
+            "", ".",
+        ):
+            by_parent.setdefault(str(path.parent), set()).add(path.name)
+    complete = sorted(
+        parent for parent, names in by_parent.items()
+        if names == _BUNDLE_FILENAMES
+    )
+    if len(complete) != 1:
+        detail = (
+            complete if complete else "нет полного шестиузлового каталога"
+        )
+        raise SpecLoopError(
+            "bundle-dir не восстанавливается из файлов bundle-PR: "
+            f"{detail!r}; нужен ровно один каталог с "
+            f"{sorted(_BUNDLE_FILENAMES)!r}"
+        )
+    return complete[0]
+
+
+def _remote_branch_pattern(
+    subject: str, ws_id: str | None
+) -> tuple[str, re.Pattern]:
+    """Префикс запроса и точная грамматика bundle-ветки восстановления."""
+    if ws_id is not None:
+        try:
+            rs.validate_id_component(ws_id, label="ws_id")
+        except ValueError as exc:
+            raise SpecLoopError(str(exc)) from exc
+        branch = f"spec/{ws_id}-behaviour"
+        return branch, re.compile(rf"^{re.escape(branch)}$")
+    slug = slug_from_subject(subject)
+    prefix = f"spec/{slug}-"
+    return prefix, re.compile(
+        rf"^{re.escape(prefix)}(?P<started>\d{{8}})-behaviour$"
+    )
+
+
+def recover_run_from_github(
+    *,
+    subject: str,
+    repo: str,
+    repo_slug: str,
+    target_dir: str,
+    profile: str,
+    author_backend: str,
+    requested_ws_id: str | None,
+    requested_bundle_dir: str | None,
+    ops,
+) -> rs.RunState | None:
+    """Восстановить минимальный resumable ledger из durable GitHub-фактов.
+
+    Внутренние op-записи S1–S7 из GitHub доказать нельзя и мы их не
+    выдумываем. Восстановленный run ставится ровно на человеческую границу
+    ``waiting_human_merge`` только при доказанном MERGED:
+    ``runner.resume`` повторно сверит этот факт и идемпотентно выполнит
+    authoritative S8. Дальнейший мост сам читает статусы узлов из
+    frontmatter base и реконсилирует tasks-PR по
+    ``spec/<ws-id>-tasks``. OPEN отказывает: по нему не восстановить,
+    прошли ли S6 review и S7 verdict.
+    """
+    prefix, pattern = _remote_branch_pattern(subject, requested_ws_id)
+    try:
+        discovered = ops.prs_by_head_prefix(repo_slug, prefix)
+    except RuntimeError as exc:
+        raise SpecLoopError(
+            f"поиск bundle-PR для восстановления не удался: {exc}"
+        ) from exc
+
+    candidates: list[tuple[dict, str]] = []
+    for item in discovered:
+        head = item.get("head")
+        branch = head.get("ref") if isinstance(head, dict) else None
+        if not isinstance(branch, str):
+            raise SpecLoopError(
+                f"GitHub вернул PR без head.ref: {item!r}"
+            )
+        match = pattern.fullmatch(branch)
+        if match is None:
+            continue
+        ws_id = branch.removeprefix("spec/").removesuffix("-behaviour")
+        candidates.append((item, ws_id))
+
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        rendered = ", ".join(
+            f"#{item.get('number')} ({item['head']['ref']})"
+            for item, _ws_id in candidates
+        )
+        distinct_ws_ids = {candidate_ws for _item, candidate_ws in candidates}
+        hint = (
+            "задайте --ws-id"
+            if requested_ws_id is None and len(distinct_ws_ids) > 1
+            else "одна head-ветка соответствует нескольким PR; "
+                 "восстановите ledger вручную"
+        )
+        raise SpecLoopError(
+            f"несколько bundle-PR подходят для восстановления: {rendered}; "
+            f"{hint}"
+        )
+
+    item, ws_id = candidates[0]
+    number = item.get("number")
+    title = item.get("title")
+    body = item.get("body")
+    branch = item["head"]["ref"]
+    if not isinstance(number, int):
+        raise SpecLoopError(
+            f"bundle-PR по ветке {branch!r} не несёт числовой number"
+        )
+    expected_title = f"{subject} — behaviour bundle {ws_id}"
+    if title != expected_title:
+        raise SpecLoopError(
+            f"bundle-PR #{number} по ветке {branch!r} несёт title "
+            f"{title!r}, ожидался {expected_title!r}; связь с subject не "
+            "доказана, новый workstream не создаётся"
+        )
+    body_match = _RUN_BODY_RE.fullmatch(body or "")
+    if body_match is None:
+        raise SpecLoopError(
+            f"bundle-PR #{number} не несёт канонический run-id в body — "
+            "идентичность прежнего прогона не восстановлена"
+        )
+    run_id = body_match.group("run_id")
+
+    try:
+        facts = ops.pr_facts(repo_slug, number)
+        files = ops.pr_files(repo_slug, number)
+    except Exception as exc:
+        raise SpecLoopError(
+            f"факты bundle-PR #{number} недоступны: {exc}"
+        ) from exc
+    pr_state = facts.get("state")
+    if pr_state == "OPEN":
+        raise SpecLoopError(
+            f"bundle-PR #{number} по ветке {branch!r} ещё OPEN, а GitHub "
+            "не доказывает, были ли пройдены S6 review и S7 verdict; "
+            "восстановите исходный run.json либо вручную решите судьбу PR. "
+            "Автоматически объявлять его waiting_human_merge запрещено"
+        )
+    if pr_state != "MERGED":
+        raise SpecLoopError(
+            f"bundle-PR #{number} по ветке {branch!r} закрыт без мержа "
+            f"(state={pr_state!r}); судьба workstream не выводится, новый "
+            "не создаётся"
+        )
+    base_ref = facts.get("baseRefName")
+    if not isinstance(base_ref, str) or not base_ref:
+        raise SpecLoopError(
+            f"bundle-PR #{number} не несёт baseRefName — S8 не знает, "
+            "какую authoritative-ветку проверять"
+        )
+    bundle_dir = _bundle_dir_from_pr_files(files)
+    if requested_bundle_dir is not None and requested_bundle_dir != bundle_dir:
+        raise SpecLoopError(
+            f"--bundle-dir={requested_bundle_dir!r} расходится с GitHub-"
+            f"фактом bundle-PR #{number}: {bundle_dir!r}"
+        )
+
+    # Не перезаписывать валидный локальный журнал с тем же run-id, если он
+    # относится к другой работе. Пустой stub безопасно заменяется: GitHub
+    # доказывает точную идентичность созданного runner'ом PR.
+    if run_id in rs.all_run_ids():
+        ledger_path = rs.run_dir(run_id) / "run.json"
+        raw = ledger_path.read_text(encoding="utf-8")
+        if raw.strip():
+            try:
+                existing = rs.load(run_id)
+            except Exception as exc:
+                raise SpecLoopError(
+                    f"локальный ledger {run_id!r} нечитаем и совпал с "
+                    "run-id bundle-PR; почините его вручную"
+                ) from exc
+            if (existing.repo, existing.subject, existing.ws_id) != (
+                repo, subject, ws_id,
+            ):
+                raise SpecLoopError(
+                    f"run-id {run_id!r} из bundle-PR занят другим локальным "
+                    "ledger; автоматическое восстановление запрещено"
+                )
+            return existing
+
+    state = rs.new_run(
+        subject=subject,
+        repo=repo,
+        repo_slug=repo_slug,
+        ws_id=ws_id,
+        target_dir=target_dir,
+        bundle_dir=bundle_dir,
+        profile=profile,
+        run_id=run_id,
+        merge_authority="human",
+        author_backend=author_backend,
+    )
+    # Только MERGED — достаточный durable-факт для этой границы. OPEN мог
+    # быть создан как draft до S6 либо остановлен красным review/verdict;
+    # считать его waiting_human_merge означало бы навсегда пропустить S6/S7.
+    state.status = "waiting_human_merge"
+    state.branch = branch
+    state.pr = number
+    state.head = facts.get("headRefOid")
+    state.base_ref = base_ref
+    state.ops["ledger-recovery"] = {
+        "status": "completed",
+        "source": "github",
+        "bundle_pr": number,
+        # Исторический profile PR не хранит. Это конфигурация ТЕКУЩЕГО
+        # authoritative S8, взятая из текущего CLI/default, а не выданная
+        # за восстановленный факт. После MERGED author_backend не
+        # исполняется вовсе, но его источник фиксируется симметрично.
+        "profile": profile,
+        "profile_source": "current-invocation-not-github",
+        "author_backend": author_backend,
+        "author_backend_effective": False,
+    }
+    rs.save(state)
+    print(
+        f"spec-loop: локальный ledger отсутствовал; восстановлен из "
+        f"bundle-PR #{number} ({branch}), run-id={run_id}"
+    )
+    print(
+        f"spec-loop: profile={profile!r} взят из текущего вызова "
+        "(GitHub исторический profile не хранит); author_backend после "
+        "MERGED не исполняется"
+    )
+    return state
+
+
 # --- маршрутизация ----------------------------------------------------------
 
 
@@ -343,11 +602,38 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  --run-id {st.run_id}  [{st.status}] ws={st.ws_id}")
             return 1
 
-        if matches:
-            state = matches[0]
-            target_dir = state.target_dir
-            self_check_slug = state.repo_slug
-            action = state.status
+        state = matches[0] if matches else None
+        target_dir = (
+            state.target_dir
+            if state is not None
+            else args.target_dir or str(WORKSPACE_ROOT / entry.repo)
+        )
+        self_check_slug = (
+            state.repo_slug if state is not None else entry.repo_slug
+        )
+        origin_slug = repo_slug_from_url(_origin_url(target_dir))
+        if origin_slug != self_check_slug:
+            raise SpecLoopError(
+                f"origin целевого чекаута {target_dir!r} = "
+                f"{origin_slug!r}, манифест/леджер ждёт "
+                f"{self_check_slug!r} — расхождение origin"
+            )
+
+        ops = _real_ops()
+        if state is None and args.run_id is None:
+            state = recover_run_from_github(
+                subject=args.subject,
+                repo=args.repo,
+                repo_slug=entry.repo_slug,
+                target_dir=target_dir,
+                profile=args.profile,
+                author_backend=args.author_backend,
+                requested_ws_id=args.ws_id,
+                requested_bundle_dir=args.bundle_dir,
+                ops=ops,
+            )
+
+        if state is not None:
             values = {
                 "subject": state.subject,
                 "repo": state.repo,
@@ -357,7 +643,7 @@ def main(argv: list[str] | None = None) -> int:
                 "target-dir": state.target_dir,
                 "bundle-dir": state.bundle_dir,
                 "profile": state.profile,
-                "действие": f"продолжение ({action})",
+                "действие": f"продолжение ({state.status})",
             }
         else:
             ws_id = args.ws_id or ws_id_for(args.subject, date.today())
@@ -377,12 +663,9 @@ def main(argv: list[str] | None = None) -> int:
                     f"{collisions!r} с другой парой (repo, subject) — "
                     "задайте --ws-id"
                 )
-            target_dir = args.target_dir or str(WORKSPACE_ROOT / entry.repo)
-            self_check_slug = entry.repo_slug
             # run-id материализуется ДО таблицы разрешённых значений.
             run_id = f"{ws_id}-{os.urandom(3).hex()}"
             bundle_dir = args.bundle_dir or f"workstreams/{ws_id}/spec"
-            state = None
             values = {
                 "subject": args.subject,
                 "repo": args.repo,
@@ -396,16 +679,7 @@ def main(argv: list[str] | None = None) -> int:
                 "действие": "start (новый прогон)",
             }
 
-        origin_slug = repo_slug_from_url(_origin_url(target_dir))
-        if origin_slug != self_check_slug:
-            raise SpecLoopError(
-                f"origin целевого чекаута {target_dir!r} = "
-                f"{origin_slug!r}, манифест/леджер ждёт "
-                f"{self_check_slug!r} — расхождение origin"
-            )
-
         _print_values(values)
-        ops = _real_ops()
         if state is not None:
             return _dispatch(state, ops)
         started = runner.start(

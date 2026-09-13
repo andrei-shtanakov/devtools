@@ -84,6 +84,10 @@ class Ops(Protocol):
         self, repo_slug: str, branch: str, *, any_state: bool = False
     ) -> int | None: ...
 
+    def prs_by_head_prefix(
+        self, repo_slug: str, branch_prefix: str
+    ) -> list[dict]: ...
+
     def create_pr(
         self,
         target_dir: str,
@@ -723,6 +727,97 @@ class RealOps:
         if not isinstance(found, list):
             raise RuntimeError(f"find_pr: unexpected JSON shape: {done.stdout!r}")
         return found[0]["number"] if found else None
+
+    def prs_by_head_prefix(
+        self, repo_slug: str, branch_prefix: str
+    ) -> list[dict]:
+        """Все PR, чья head-ветка начинается с ``branch_prefix``.
+
+        Восстановление spec-loop не имеет локального леджера, поэтому
+        спрашивает ВСЮ историю PR репозитория, включая merged/closed.
+        ``gh pr list --limit`` оставлял бы скрытую верхнюю границу и мог
+        прочитать неоднозначный набор как единственный; GraphQL pagination
+        + ``--slurp`` возвращает страницы явно и только нужные поля. Любой
+        неожиданный ответ —
+        unknown/fail-closed, не пустой список.
+        """
+        try:
+            owner, name = repo_slug.split("/", 1)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"prs_by_head_prefix: invalid repo slug {repo_slug!r}"
+            ) from exc
+        query = (
+            "query($owner:String!,$name:String!,$endCursor:String){"
+            "repository(owner:$owner,name:$name){pullRequests("
+            "first:100,after:$endCursor,"
+            "orderBy:{field:CREATED_AT,direction:DESC}){"
+            "nodes{number title body headRefName}"
+            "pageInfo{hasNextPage endCursor}}}}"
+        )
+        done = subprocess.run(
+            [
+                "gh", "api", "graphql", "--paginate", "--slurp",
+                "-f", f"query={query}", "-f", f"owner={owner}",
+                "-f", f"name={name}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if done.returncode != 0:
+            raise RuntimeError(
+                "prs_by_head_prefix: gh api rc="
+                f"{done.returncode}: {done.stderr.strip()}"
+            )
+        try:
+            pages = json.loads(done.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"prs_by_head_prefix: invalid JSON: {done.stdout!r}"
+            ) from exc
+        if not isinstance(pages, list) or not all(
+            isinstance(page, dict) for page in pages
+        ):
+            raise RuntimeError(
+                "prs_by_head_prefix: unexpected paginated JSON shape: "
+                f"{done.stdout!r}"
+            )
+        found: list[dict] = []
+        for page in pages:
+            try:
+                items = page["data"]["repository"]["pullRequests"]["nodes"]
+            except (KeyError, TypeError) as exc:
+                raise RuntimeError(
+                    "prs_by_head_prefix: PR nodes отсутствуют: "
+                    f"{page!r}"
+                ) from exc
+            if not isinstance(items, list):
+                raise RuntimeError(
+                    "prs_by_head_prefix: unexpected PR nodes: "
+                    f"{items!r}"
+                )
+            for item in items:
+                if not isinstance(item, dict):
+                    raise RuntimeError(
+                        "prs_by_head_prefix: unexpected PR JSON item: "
+                        f"{item!r}"
+                    )
+                head_ref = item.get("headRefName")
+                if not isinstance(head_ref, str):
+                    raise RuntimeError(
+                        "prs_by_head_prefix: PR без headRefName: "
+                        f"{item!r}"
+                    )
+                if head_ref.startswith(branch_prefix):
+                    found.append(
+                        {
+                            "number": item.get("number"),
+                            "title": item.get("title"),
+                            "body": item.get("body"),
+                            "head": {"ref": head_ref},
+                        }
+                    )
+        return found
 
     def create_pr(
         self,
