@@ -21,6 +21,7 @@ class _Ops:
     dirty: bool = False
     branch: str | None = "master"
     materialize_error: str | None = None
+    materialized_sha: str | None = None
     #: OID базы вердикта — приходит ИЗ `changed_paths`, тем же fetch'ем,
     #: что и список путей (ревью #183, круг 3).
     base_oid: str = "base000"
@@ -35,10 +36,11 @@ class _Ops:
         self.calls.append(("current_branch",))
         return self.branch
 
-    def materialize_pr_head(self, target_dir: str, pr: int, sha: str) -> None:
+    def materialize_pr_head(self, target_dir: str, pr: int, sha: str) -> str:
         self.calls.append(("materialize", pr, sha))
         if self.materialize_error is not None:
             raise RuntimeError(self.materialize_error)
+        return self.materialized_sha or sha
 
     def ensure_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("restore", branch))
@@ -481,6 +483,30 @@ def test_materialize_failure_stops_and_restores(capsys) -> None:
     assert not any(c[0] == "review" for c in ops.calls)
     assert ("restore", "master") in ops.calls
     assert "материализ" in capsys.readouterr().out
+
+
+def test_materialized_head_mismatch_stops_before_paid_review(capsys) -> None:
+    """devtools#136: switch без SHA-сверки не является доказательством head.
+
+    Даже если сам примитив не поднял ошибку, фактический HEAD обязан совпасть
+    с headRefOid, по которому построен диапазон. Несовпадение — fail-closed с
+    восстановлением исходной ветки до changed_paths и платного ревью.
+    """
+    ops = _Ops(
+        facts_seq=[_facts()], materialized_sha="dead" * 10,
+    )
+
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+
+    assert rc == 1
+    assert not any(c[0] in ("changed_paths", "review") for c in ops.calls)
+    assert ("restore", "master") in ops.calls
+    out = capsys.readouterr().out
+    assert "не совпал" in out
+    assert ("cafe" * 10)[:7] in out
+    assert ("dead" * 10)[:7] in out
 
 
 def test_origin_slug_parses_ssh_and_https() -> None:

@@ -96,6 +96,21 @@ fi
 exit "${REVIEW_STUB_EXIT:-0}"
 """
 
+LOCAL_SH_TREE_STUB = """#!/bin/sh
+# Этот кит существует только в исходном чекауте: PR-head его не содержит.
+# Лог доказывает одновременно две половины контракта #166: исполняется
+# доверенный файл отсюда, а cwd/рабочее дерево принадлежит exact PR head.
+echo "local.sh $*" >> "$LOCAL_SH_LOG"
+{
+  echo "script=$0"
+  echo "cwd=$(pwd)"
+  echo "head=$(git rev-parse HEAD)"
+  echo "content=$(cat a.txt)"
+} > "$REVIEW_STUB_TREE_LOG"
+echo "stub verdict body"
+exit 0
+"""
+
 
 def _git(*args: str, cwd: Path) -> str:
     """Запустить git и вернуть stdout (строго, с проверкой кода)."""
@@ -287,6 +302,37 @@ def test_kit_receives_pr_range(fleet: Fleet) -> None:
     assert "--fetch" in call
     assert "--head refs/review/pr-7" in call
     assert "--format markdown" in call
+
+
+def test_reviewer_reads_exact_pr_head_from_ephemeral_worktree(
+    fleet: Fleet,
+) -> None:
+    """devtools#166: diff и дерево ревьюера относятся к одному head.
+
+    Кит берётся из исходного доверенного чекаута: синтетический PR-head не
+    содержит scripts/review/local.sh вовсе. Его cwd при этом — временный
+    detached worktree exact head; основной чекаут остаётся на master и после
+    выхода временный worktree зарегистрированным не остаётся.
+    """
+    fleet.write_kit(LOCAL_SH_TREE_STUB)
+    tree_log = fleet.tmp / "review-tree.log"
+
+    res = fleet.run(
+        "demo", "7", REVIEW_STUB_TREE_LOG=str(tree_log),
+    )
+
+    assert res.returncode == 0, res.stderr
+    facts = dict(
+        line.split("=", 1) for line in tree_log.read_text().splitlines()
+    )
+    assert facts["script"] == str(fleet.repo / "scripts/review/local.sh")
+    assert facts["head"] == fleet.head_sha
+    assert facts["content"] == "changed"
+    assert Path(facts["cwd"]) != fleet.repo
+    assert _git("branch", "--show-current", cwd=fleet.repo) == "master"
+    assert (fleet.repo / "a.txt").read_text() == "base\n"
+    worktrees = _git("worktree", "list", "--porcelain", cwd=fleet.repo)
+    assert worktrees.count("worktree ") == 1
 
 
 def test_findings_request_changes(fleet: Fleet) -> None:

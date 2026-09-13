@@ -154,9 +154,20 @@ def accept(
     # head — detached switch на пинованный sha, а не на ветку PR, чтобы
     # гонка с параллельным push не подменила проверяемое содержимое.
     try:
-        ops.materialize_pr_head(target_dir, pr, head0)
+        materialized_head = ops.materialize_pr_head(target_dir, pr, head0)
     except RuntimeError as exc:
         print(f"accept-pr: не удалось материализовать head PR ({exc}) — стоп")
+        ops.ensure_branch(target_dir, branch0)
+        return 1
+    # devtools#136: успешный switch — не факт о том, что видит ревьюер.
+    # Явный rev-parse возвращает примитив, а вызывающий связывает его с тем же
+    # headRefOid, по которому дальше пинуются ревью и мерж. Несовпадение
+    # останавливает контур ДО changed_paths и платного вызова review-kit.
+    if materialized_head != head0:
+        print(
+            "accept-pr: материализованный HEAD не совпал с head PR "
+            f"({materialized_head[:7]} != {head0[:7]}) — стоп до ревью"
+        )
         ops.ensure_branch(target_dir, branch0)
         return 1
     try:

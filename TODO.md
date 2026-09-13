@@ -1259,11 +1259,17 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 > производная приёмка ADR-ECO-006 к ним не применяется. Единственный inbox
 > здесь — #201, и его slug находится на строке собственного чекбокса выше.
 
-- [ ] Fidelity терминального ревью: дерево ревьюера совпадает с head дифа, а локально материализованный head проверяется по SHA до платного вызова @owner:github:andrei-shtanakov @id:review-evidence-fidelity-wave
+- [x] Fidelity терминального ревью: дерево ревьюера совпадает с head дифа, а локально материализованный head проверяется по SHA до платного вызова @owner:github:andrei-shtanakov @id:review-evidence-fidelity-wave — PR этой ветки
   Источники и обязательная приёмка: devtools#136 (freshness materialized
   HEAD) и #166 (review-pr видит head-дерево, а не base). Один workstream на
   общую причину «доверие чекауту вместо SHA», но отдельный регрессионный тест
   на каждый entry point; устранение одного не закрывает второй.
+  Evidence: `accept-pr` сравнивает возвращённый `git rev-parse HEAD` с
+  `headRefOid` до `changed_paths` и платного review-kit; прямой
+  `review-pr.sh` читает exact head из временного detached worktree, исполняя
+  kit/prompt/schema из доверенного исходного чекаута, и удаляет worktree при
+  любом выходе. Регрессия — `tests/test_governance_accept_pr.py`,
+  `tests/test_governance_ops.py`, `tests/test_review_pr.py`.
 
 - [ ] Остатки document-pipeline авторинга behaviour-узла: согласовать doc-чеклист с DSL-гейтом, определить self-target anchor и сделать повторный запуск идемпотентным @owner:github:andrei-shtanakov @id:behaviour-document-runner-residuals
   Источник: devtools#204 после merged PR #203. До реализации проверить по
