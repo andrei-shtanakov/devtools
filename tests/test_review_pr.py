@@ -96,6 +96,36 @@ fi
 exit "${REVIEW_STUB_EXIT:-0}"
 """
 
+LOCAL_SH_TREE_STUB = """#!/bin/sh
+# Этот кит существует только в исходном чекауте: PR-head его не содержит.
+# Лог доказывает одновременно две половины контракта #166: исполняется
+# доверенный файл отсюда, а cwd/рабочее дерево принадлежит exact PR head.
+echo "local.sh $*" >> "$LOCAL_SH_LOG"
+{
+  echo "script=$0"
+  echo "cwd=$(pwd)"
+  echo "head=$(git rev-parse HEAD)"
+  echo "content=$(cat a.txt)"
+} > "$REVIEW_STUB_TREE_LOG"
+echo "stub verdict body"
+exit 0
+"""
+
+LOCAL_SH_RELATIVE_CONFIG_STUB = """#!/bin/sh
+# Относительные операторские override-пути должны быть привязаны к исходному
+# доверенному checkout, хотя cwd кита находится в exact-head worktree.
+{
+  echo "script=$0"
+  echo "kit=$REVIEW_KIT_DIR"
+  echo "schema=$REVIEW_SCHEMA"
+  echo "prompt=$REVIEW_PROMPT"
+  echo "schema_content=$(cat "$REVIEW_SCHEMA")"
+  echo "prompt_content=$(cat "$REVIEW_PROMPT")"
+} > "$REVIEW_STUB_CONFIG_LOG"
+echo "stub verdict body"
+exit 0
+"""
+
 
 def _git(*args: str, cwd: Path) -> str:
     """Запустить git и вернуть stdout (строго, с проверкой кода)."""
@@ -287,6 +317,79 @@ def test_kit_receives_pr_range(fleet: Fleet) -> None:
     assert "--fetch" in call
     assert "--head refs/review/pr-7" in call
     assert "--format markdown" in call
+
+
+def test_reviewer_reads_exact_pr_head_from_ephemeral_worktree(
+    fleet: Fleet,
+) -> None:
+    """devtools#166: diff и дерево ревьюера относятся к одному head.
+
+    Кит берётся из исходного доверенного чекаута: синтетический PR-head не
+    содержит scripts/review/local.sh вовсе. Его cwd при этом — временный
+    detached worktree exact head; основной чекаут остаётся на master и после
+    выхода временный worktree зарегистрированным не остаётся.
+    """
+    fleet.write_kit(LOCAL_SH_TREE_STUB)
+    tree_log = fleet.tmp / "review-tree.log"
+
+    res = fleet.run(
+        "demo", "7", REVIEW_STUB_TREE_LOG=str(tree_log),
+    )
+
+    assert res.returncode == 0, res.stderr
+    facts = dict(
+        line.split("=", 1) for line in tree_log.read_text().splitlines()
+    )
+    assert facts["script"] == str(fleet.repo / "scripts/review/local.sh")
+    assert facts["head"] == fleet.head_sha
+    assert facts["content"] == "changed"
+    assert Path(facts["cwd"]) != fleet.repo
+    assert _git("branch", "--show-current", cwd=fleet.repo) == "master"
+    assert (fleet.repo / "a.txt").read_text() == "base\n"
+    worktrees = _git("worktree", "list", "--porcelain", cwd=fleet.repo)
+    assert worktrees.count("worktree ") == 1
+
+
+def test_relative_review_config_resolves_from_trusted_checkout(
+    fleet: Fleet,
+) -> None:
+    """Относительные overrides сохраняют прежнюю базу разрешения.
+
+    Ни custom kit, ни prompt/schema не входят в PR-head. Если хотя бы один
+    путь начнёт разрешаться от ephemeral worktree, прогон завершится ошибкой.
+    """
+    kit = fleet.repo / "trusted" / "review"
+    kit.mkdir(parents=True)
+    local_sh = kit / "local.sh"
+    local_sh.write_text(LOCAL_SH_RELATIVE_CONFIG_STUB)
+    local_sh.chmod(local_sh.stat().st_mode | stat.S_IXUSR)
+    config = fleet.repo / "trusted" / "config"
+    config.mkdir()
+    (config / "schema.json").write_text("trusted schema\n")
+    (config / "prompt.md").write_text("trusted prompt\n")
+    config_log = fleet.tmp / "review-config.log"
+
+    res = fleet.run(
+        "demo",
+        "7",
+        REVIEW_KIT_DIR="trusted/review",
+        REVIEW_SCHEMA="trusted/config/schema.json",
+        REVIEW_PROMPT="trusted/config/prompt.md",
+        REVIEW_STUB_CONFIG_LOG=str(config_log),
+    )
+
+    assert res.returncode == 0, res.stderr
+    facts = dict(
+        line.split("=", 1) for line in config_log.read_text().splitlines()
+    )
+    assert facts == {
+        "script": str(local_sh),
+        "kit": str(kit),
+        "schema": str(config / "schema.json"),
+        "prompt": str(config / "prompt.md"),
+        "schema_content": "trusted schema",
+        "prompt_content": "trusted prompt",
+    }
 
 
 def test_findings_request_changes(fleet: Fleet) -> None:

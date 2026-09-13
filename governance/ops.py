@@ -58,7 +58,7 @@ class Ops(Protocol):
 
     def materialize_pr_head(
         self, target_dir: str, pr: int, sha: str
-    ) -> None: ...
+    ) -> str: ...
 
     def changed_paths(
         self, target_dir: str, base_branch: str
@@ -490,8 +490,8 @@ class RealOps:
         )
         return done.stdout.strip() or None
 
-    def materialize_pr_head(self, target_dir: str, pr: int, sha: str) -> None:
-        """fetch pull/<pr>/head + detached switch на пин sha; сбой — RuntimeError.
+    def materialize_pr_head(self, target_dir: str, pr: int, sha: str) -> str:
+        """Fetch + detached switch на sha; вернуть фактический HEAD.
 
         Ретроспектива 2026-09-02 (урок 7, devtools#110): review-kit считает
         локальное дерево авторитетным — перед ревью чекаут цели обязан стоять
@@ -520,6 +520,16 @@ class RealOps:
                 f"materialize_pr_head: git switch --detach {sha[:7]} "
                 f"rc={switch.returncode}: {switch.stderr.strip()}"
             )
+        actual = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if actual.returncode != 0 or not actual.stdout.strip():
+            raise RuntimeError(
+                "materialize_pr_head: git rev-parse HEAD "
+                f"rc={actual.returncode}: {actual.stderr.strip()}"
+            )
+        return actual.stdout.strip()
 
     def changed_paths(
         self, target_dir: str, base_branch: str

@@ -41,7 +41,9 @@
 # --fetch (--fingerprint-only с --fetch несовместим по построению).
 #
 # Рабочее дерево целевого репо НЕ трогается: голова PR фетчится в служебный
-# ref refs/review/pr-<N>, кит работает по ref'ам без checkout.
+# ref refs/review/pr-<N> и раскладывается во временный detached worktree.
+# Ревьюер читает дерево exact head, но исполняется доверенная копия review-kit
+# из исходного чекаута; код harness из PR до вердикта не запускается.
 set -eu
 
 usage() {
@@ -204,6 +206,10 @@ esac
 
 repo_dir="$FLEET_ROOT/$repo"
 [ -d "$repo_dir" ] || die 2 "репо '$repo' не найдено в $FLEET_ROOT"
+# Абсолютный путь нужен после перехода cwd в ephemeral head-worktree: kit
+# остаётся в исходном доверенном чекауте и не должен резолвиться относительно
+# нового дерева (devtools#166).
+repo_dir=$(cd "$repo_dir" && pwd)
 [ -f "$repo_dir/scripts/review/local.sh" ] \
     || die 2 "в '$repo' нет scripts/review/local.sh — review-kit не завендорен"
 
@@ -263,9 +269,56 @@ if [ "$head_sha" != "$head_oid" ]; then
         "ревьюим зафетченное." >&2
 fi
 
+source_repo_dir="$repo_dir"
+# До ephemeral worktree относительные override-пути разрешались от корня
+# исходного чекаута. Сохраняем эту семантику явно: после `cd` они не должны
+# внезапно указывать внутрь проверяемого PR-head.
+resolve_from_source() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s/%s\n' "$source_repo_dir" "$1" ;;
+    esac
+}
+trusted_kit_dir=$(resolve_from_source \
+    "${REVIEW_KIT_DIR:-scripts/review}")
+trusted_schema=$(resolve_from_source \
+    "${REVIEW_SCHEMA:-.github/codex/review-schema.json}")
+trusted_prompt=$(resolve_from_source \
+    "${REVIEW_PROMPT:-.github/codex/review-prompt.md}")
 work=$(mktemp -d)
-# shellcheck disable=SC2064
-trap "rm -rf '$work'" EXIT
+review_tree="$work/review-tree"
+review_tree_added=0
+# shellcheck disable=SC2329  # trap EXIT invokes cleanup indirectly.
+cleanup() {
+    if [ "$review_tree_added" -eq 1 ]; then
+        git -C "$source_repo_dir" worktree remove --force "$review_tree" \
+            >/dev/null 2>&1 || true
+    fi
+    rm -rf "$work"
+}
+trap cleanup EXIT
+if ! worktree_err=$(git -C "$source_repo_dir" worktree add --detach \
+    "$review_tree" "$head_sha" 2>&1); then
+    echo "$worktree_err" >&2
+    die 2 "не удалось материализовать head $head_sha во временный worktree"
+fi
+review_tree_added=1
+repo_dir="$review_tree"
+
+# Кит и его доверенные инструкции берутся из исходного чекаута, а git/cwd —
+# из exact-head worktree. Простое исполнение local.sh из head дало бы PR право
+# переписать собственный ревьюер до вынесения вердикта. REVIEW_KIT_DIR нужен
+# local.sh для его дочерних скриптов; prompt/schema тоже пинуются доверенным
+# деревом, как в CI.
+run_kit() {
+    (
+        cd "$repo_dir"
+        REVIEW_KIT_DIR="$trusted_kit_dir" \
+        REVIEW_SCHEMA="$trusted_schema" \
+        REVIEW_PROMPT="$trusted_prompt" \
+            sh "$trusted_kit_dir/local.sh" "$@"
+    )
+}
 
 # Финальная сверка головы: между прогоном (или вычислением отпечатка) и
 # вердиктом в PR могли запушить — тогда вердикт относился бы не к тому коду.
@@ -378,7 +431,7 @@ try_use_verdict_file() {
 # обычный полный прогон без дедупа; ре-вендор флота не пререквизит.
 fp=""
 fp_supported=0
-if grep -q -- '--fingerprint-only' "$repo_dir/scripts/review/local.sh"; then
+if grep -q -- '--fingerprint-only' "$trusted_kit_dir/local.sh"; then
     fp_supported=1
 fi
 if [ "$fp_supported" -eq 1 ]; then
@@ -397,8 +450,8 @@ if [ "$fp_supported" -eq 1 ]; then
         die 2 "не удалось освежить базу origin/$base_ref перед отпечатком"
     fi
     set +e
-    fp_out=$( (cd "$repo_dir" && sh scripts/review/local.sh \
-        --base "origin/$base_ref" --head "$review_ref" --fingerprint-only) \
+    fp_out=$(run_kit \
+        --base "origin/$base_ref" --head "$review_ref" --fingerprint-only \
         2> "$work/fp.err")
     fp_code=$?
     set -e
@@ -548,14 +601,15 @@ if [ -n "$inh_state" ]; then
 fi
 
 # --- Полный прогон -------------------------------------------------------
-# Кит запускается из корня целевого репо его же копией local.sh — промпт,
-# схема, пороги и контекст берутся оттуда. Свежесть базы: при fp-ките база
-# уже освежена явным fetch выше (и отпечаток обязан видеть то же состояние),
-# у старого кита --fetch остаётся его собственной заботой.
+# Доверенный кит запускается с cwd в exact-head worktree: код, промпт и схема
+# приходят из исходного чекаута, а контекст файлов — из проверяемого дерева.
+# Свежесть базы: при fp-ките база уже освежена явным fetch выше (и отпечаток
+# обязан видеть то же состояние), у старого кита --fetch остаётся его
+# собственной заботой.
 set -- --base "origin/$base_ref" --head "$review_ref" --format markdown
 [ "$fp_supported" -eq 1 ] || set -- "$@" --fetch
 set +e
-(cd "$repo_dir" && sh scripts/review/local.sh "$@") \
+run_kit "$@" \
     > "$work/verdict.md" 2> "$work/local.err"
 kit_code=$?
 set -e

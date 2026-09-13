@@ -722,15 +722,20 @@ def test_current_branch_detached_returns_none(monkeypatch):
 
 
 def test_materialize_pr_head_fetch_then_detach(monkeypatch):
-    calls = _install_fake_run(monkeypatch, returncode=0)
+    calls = _install_fake_run(
+        monkeypatch, returncode=0, stdout="cafe" * 10 + "\n",
+    )
     ops = RealOps()
-    ops.materialize_pr_head("/tmp/kapelle", 59, "cafe" * 10)
+    assert ops.materialize_pr_head(
+        "/tmp/kapelle", 59, "cafe" * 10,
+    ) == "cafe" * 10
     assert calls[0].argv == ["git", "fetch", "origin", "pull/59/head"]
     # --no-overwrite-ignore (приёмка PR #113, круг 5): голый switch молча
     # перезаписал бы ignored-файл оператора версией из PR.
     assert calls[1].argv == [
         "git", "switch", "--no-overwrite-ignore", "--detach", "cafe" * 10,
     ]
+    assert calls[2].argv == ["git", "rev-parse", "HEAD"]
     assert all(c.kwargs["cwd"] == "/tmp/kapelle" for c in calls)
 
 
@@ -754,6 +759,18 @@ def test_materialize_pr_head_switch_failure_raises(monkeypatch):
     ops = RealOps()
     with pytest.raises(RuntimeError, match="switch"):
         ops.materialize_pr_head("/tmp/kapelle", 59, "cafe" * 10)
+
+
+def test_materialize_pr_head_rev_parse_failure_raises(monkeypatch):
+    def fake_run(argv, **kwargs):
+        rc = 128 if argv[:2] == ["git", "rev-parse"] else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="rev-parse HEAD"):
+        RealOps().materialize_pr_head(
+            "/tmp/kapelle", 59, "cafe" * 10,
+        )
 
 
 def test_pr_facts_requests_base_ref_oid(monkeypatch):

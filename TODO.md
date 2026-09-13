@@ -1259,11 +1259,17 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 > производная приёмка ADR-ECO-006 к ним не применяется. Единственный inbox
 > здесь — #201, и его slug находится на строке собственного чекбокса выше.
 
-- [ ] Fidelity терминального ревью: дерево ревьюера совпадает с head дифа, а локально материализованный head проверяется по SHA до платного вызова @owner:github:andrei-shtanakov @id:review-evidence-fidelity-wave
+- [x] Fidelity терминального ревью: дерево ревьюера совпадает с head дифа, а локально материализованный head проверяется по SHA до платного вызова @owner:github:andrei-shtanakov @id:review-evidence-fidelity-wave — PR этой ветки
   Источники и обязательная приёмка: devtools#136 (freshness materialized
   HEAD) и #166 (review-pr видит head-дерево, а не base). Один workstream на
   общую причину «доверие чекауту вместо SHA», но отдельный регрессионный тест
   на каждый entry point; устранение одного не закрывает второй.
+  Evidence: `accept-pr` сравнивает возвращённый `git rev-parse HEAD` с
+  `headRefOid` до `changed_paths` и платного review-kit; прямой
+  `review-pr.sh` читает exact head из временного detached worktree, исполняя
+  kit/prompt/schema из доверенного исходного чекаута, и удаляет worktree при
+  любом выходе. Регрессия — `tests/test_governance_accept_pr.py`,
+  `tests/test_governance_ops.py`, `tests/test_review_pr.py`.
 
 - [ ] Остатки document-pipeline авторинга behaviour-узла: согласовать doc-чеклист с DSL-гейтом, определить self-target anchor и сделать повторный запуск идемпотентным @owner:github:andrei-shtanakov @id:behaviour-document-runner-residuals
   Источник: devtools#204 после merged PR #203. До реализации проверить по
@@ -1327,7 +1333,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       (`governance/spec_loop.py`). Правит `task_bridge` — поэтому после
       #201, как и остальные bridge-правки (триаж 2026-09-13). Альтернатива
       без записи в репо — check run на sha мержа бандла — не выбрана.
-- [ ] E1 Вход конвейера из discovery-brief: `spec-loop --brief <path>` — бриф обязан пройти вендоренный gate_check (pass, иначе fail-closed), хэш брифа входит в `upstream_hashes` charter, бриф лежит нулевым узлом в `workstreams/<ws-id>/spec/` и едет бандл-PR-ом; промпты charter/requirements получают бриф как источник (G-NN/FR-NN переносятся с трассировкой), гвард «каждый Must-FR брифа встречается в requirements»; приёмка — живой прогон engineer-фрейм → бриф → spec-loop → approved tasks-спека → исполнение spec-runner @owner:github:andrei-shtanakov @id:spec-loop-brief-input @blocked_by:todo://devtools/review-evidence-fidelity-wave @blocked_by:todo://devtools/accept-file-target-contract
+- [ ] E1 Вход конвейера из discovery-brief: `spec-loop --brief <path>` — бриф обязан пройти вендоренный gate_check (pass, иначе fail-closed), хэш брифа входит в `upstream_hashes` charter, бриф лежит нулевым узлом в `workstreams/<ws-id>/spec/` и едет бандл-PR-ом; промпты charter/requirements получают бриф как источник (G-NN/FR-NN переносятся с трассировкой), гвард «каждый Must-FR брифа встречается в requirements»; приёмка — живой прогон engineer-фрейм → бриф → spec-loop → approved tasks-спека → исполнение spec-runner @owner:github:andrei-shtanakov @id:spec-loop-brief-input @blocked_by:todo://devtools/accept-file-target-contract
       Граница author ≠ execute discovery сохраняется: PR открывает конвейер,
       не discovery. gate_check вендорится КОДОМ пиненой копией по образцу
       discovery (`discovery/src/discovery/contract/`: copy-integrity против
