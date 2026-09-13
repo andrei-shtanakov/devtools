@@ -5295,7 +5295,7 @@ def test_delivered_content_anchor_requires_source_from_pr_head(
     assert source.exists(), "current base source exists but must not be used"
 
 
-def test_delivered_content_anchor_preserves_crlf_source_from_pr_head(
+def test_delivered_content_anchor_preserves_exact_source_from_pr_head(
     tmp_path: Path, monkeypatch,
 ) -> None:
     from governance import task_bridge as tb
@@ -5305,7 +5305,7 @@ def test_delivered_content_anchor_preserves_crlf_source_from_pr_head(
         Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
     )
     source.parent.mkdir(parents=True, exist_ok=True)
-    data = b"source\r\nfrom-head\r\n"
+    data = "точный source из head\n".encode("utf-8")
     source.write_bytes(data)
     state.brief = {"source_paths": ["00-discovery/brief.md"]}
 

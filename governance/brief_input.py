@@ -44,7 +44,15 @@ def _read_bytes(path: Path) -> bytes:
     try:
         data = path.read_bytes()
         data.decode("utf-8")
+        if b"\r" in data:
+            raise BriefInputError(
+                f"discovery-brief {path} использует CR/CRLF; "
+                "source-вход обязан быть UTF-8 с LF, чтобы git eol-"
+                "нормализация не изменила immutable blob после intake"
+            )
         return data
+    except BriefInputError:
+        raise
     except (OSError, UnicodeError) as exc:
         raise BriefInputError(f"discovery-brief {path} не читается: {exc}") from exc
 

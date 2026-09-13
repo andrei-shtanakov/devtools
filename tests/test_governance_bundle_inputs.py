@@ -134,8 +134,8 @@ def test_changed_source_is_forbidden_not_replaced_by_descriptor(
     assert "descriptor" in fact.detail
 
 
-def test_source_blob_preserves_crlf_bytes(tmp_path: Path) -> None:
-    data = b"source\r\nbytes\r\n"
+def test_source_blob_hashes_exact_utf8_bytes(tmp_path: Path) -> None:
+    data = "точные source bytes\n".encode("utf-8")
     descriptor = {
         "frame": "customer",
         "primary": brief_input.PRIMARY_REL,

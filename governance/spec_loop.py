@@ -47,6 +47,7 @@ import argparse
 import os
 import re
 import subprocess
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from datetime import date
@@ -410,15 +411,35 @@ def recover_run_from_github(
                 f"bundle-PR #{number} несёт неполный discovery source layer: "
                 f"есть {sorted(source_files)!r}, но нет {primary_path!r}"
             )
+        head = facts.get("headRefOid")
+        if not isinstance(head, str) or not head:
+            raise SpecLoopError(
+                f"bundle-PR #{number} не несёт headRefOid — immutable "
+                "discovery source восстановить нельзя"
+            )
         try:
+            with tempfile.TemporaryDirectory(prefix="brief-recovery-") as tmp:
+                snapshot = Path(tmp)
+                for source_path in sorted(source_files):
+                    data = ops.show_file_bytes(target_dir, head, source_path)
+                    if data is None:
+                        raise BriefInputError(
+                            f"{head}:{source_path} не читается из head bundle-PR"
+                        )
+                    destination = snapshot / source_path
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(data)
+                recovered_source = brief_input.inspect_materialized(
+                    snapshot, bundle_dir
+                )
             ops.checkout_and_pull(target_dir, base_ref)
-            recovered_source = brief_input.inspect_materialized(
+            current_source = brief_input.inspect_materialized(
                 Path(target_dir), bundle_dir
             )
         except (brief_input.BriefInputError, OSError, RuntimeError) as exc:
             raise SpecLoopError(
                 f"discovery source bundle-PR #{number} не восстанавливается "
-                f"из {base_ref!r}: {exc}"
+                f"из immutable head {head!r}: {exc}"
             ) from exc
         expected_source_files = {
             f"{bundle_dir}/{rel}" for rel in recovered_source.source_paths
@@ -428,6 +449,12 @@ def recover_run_from_github(
             raise SpecLoopError(
                 f"bundle-PR #{number} несёт неполный discovery source layer: "
                 f"в его diff отсутствуют {sorted(missing)!r}"
+            )
+        if current_source.as_state() != recovered_source.as_state():
+            raise SpecLoopError(
+                f"discovery source после bundle-PR #{number} изменён в "
+                f"{base_ref!r}; восстановите bytes из head {head} либо "
+                "создайте новый workstream с другим ws-id"
             )
         brief_descriptor = recovered_source.as_state()
 

@@ -183,7 +183,9 @@ make spec-loop SUBJECT="Published workflow app" REPO=alpha \
 
 `customer` brief сам является источником FR/NFR. Для `engineer` brief его
 `traces_to` обязан называть ровно один переносимый относительный путь к
-`approved customer` brief; в bundle побайтово попадут оба файла. Source layer
+`approved customer` brief; в bundle побайтово попадут оба файла. Source-файлы
+принимаются только как UTF-8 с LF: CR/CRLF отсекаются до авторинга, чтобы eol-
+нормализация целевого Git не могла изменить immutable blob. Source layer
 лежит под `workstreams/<ws-id>/spec/00-discovery/`, пинуется charter и входит
 в `content_anchor`. До author-вызовов вход проходит вендоренный discovery
 gate; после requirements отдельный гард проверяет точный перенос каждого

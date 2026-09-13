@@ -221,7 +221,9 @@ def test_find_runs_broken_ledger_fails_closed(runs_root) -> None:
 
 
 class _RecoveryOps:
-    def __init__(self, prs, *, state="MERGED", files=None):
+    def __init__(
+        self, prs, *, state="MERGED", files=None, head_files=None
+    ):
         self.prs = prs
         self.state = state
         self.files = files or [
@@ -230,6 +232,7 @@ class _RecoveryOps:
         ]
         self.prefixes: list[str] = []
         self.checkouts: list[tuple[str, str]] = []
+        self.head_files = head_files or {}
 
     def prs_by_head_prefix(self, repo_slug, branch_prefix):
         self.prefixes.append(branch_prefix)
@@ -247,6 +250,9 @@ class _RecoveryOps:
 
     def checkout_and_pull(self, target_dir, branch):
         self.checkouts.append((target_dir, branch))
+
+    def show_file_bytes(self, target_dir, ref, path):
+        return self.head_files.get(path)
 
 
 def _bundle_pr(
@@ -315,8 +321,15 @@ def test_recover_customer_source_descriptor_from_merged_bundle(
     primary.parent.mkdir(parents=True)
     primary.write_text(_customer_brief(), encoding="utf-8")
     files = [f"{bundle}/{name}" for name in spec_loop._BUNDLE_FILENAMES]
-    files.append(f"{bundle}/{brief_input.PRIMARY_REL}")
-    ops = _RecoveryOps([_bundle_pr()], files=files)
+    source_path = f"{bundle}/{brief_input.PRIMARY_REL}"
+    files.append(source_path)
+    ops = _RecoveryOps(
+        [_bundle_pr()],
+        files=files,
+        head_files={
+            f"{bundle}/{brief_input.PRIMARY_REL}": primary.read_bytes()
+        },
+    )
 
     state = spec_loop.recover_run_from_github(
         subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
@@ -330,6 +343,34 @@ def test_recover_customer_source_descriptor_from_merged_bundle(
     assert ops.checkouts == [(str(target), "master")]
 
 
+def test_recover_refuses_source_changed_after_bundle_pr(
+    runs_root, tmp_path
+) -> None:
+    bundle = "workstreams/fleet-inbox-20260901/spec"
+    target = tmp_path / "alpha"
+    primary = target / bundle / brief_input.PRIMARY_REL
+    primary.parent.mkdir(parents=True)
+    original = _customer_brief().encode("utf-8")
+    primary.write_text(
+        _customer_brief().replace("Goal", "Changed goal"), encoding="utf-8"
+    )
+    source_path = f"{bundle}/{brief_input.PRIMARY_REL}"
+    files = [f"{bundle}/{name}" for name in spec_loop._BUNDLE_FILENAMES]
+    files.append(source_path)
+
+    with pytest.raises(spec_loop.SpecLoopError, match="изменён"):
+        spec_loop.recover_run_from_github(
+            subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
+            target_dir=str(target), profile="profiles/team-exp.yaml",
+            author_backend="codex", requested_ws_id=None,
+            requested_bundle_dir=None,
+            ops=_RecoveryOps(
+                [_bundle_pr()], files=files,
+                head_files={source_path: original},
+            ),
+        )
+
+
 def test_recover_engineer_refuses_incomplete_source_layer(
     runs_root, tmp_path
 ) -> None:
@@ -341,15 +382,19 @@ def test_recover_engineer_refuses_incomplete_source_layer(
     customer = target / bundle / "00-discovery/customer.md"
     customer.write_text(_customer_brief(status="approved"), encoding="utf-8")
     files = [f"{bundle}/{name}" for name in spec_loop._BUNDLE_FILENAMES]
-    files.append(f"{bundle}/{brief_input.PRIMARY_REL}")
+    source_path = f"{bundle}/{brief_input.PRIMARY_REL}"
+    files.append(source_path)
 
-    with pytest.raises(spec_loop.SpecLoopError, match="неполный"):
+    with pytest.raises(spec_loop.SpecLoopError, match="не восстанавливается"):
         spec_loop.recover_run_from_github(
             subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
             target_dir=str(target), profile="profiles/team-exp.yaml",
             author_backend="codex", requested_ws_id=None,
             requested_bundle_dir=None,
-            ops=_RecoveryOps([_bundle_pr()], files=files),
+            ops=_RecoveryOps(
+                [_bundle_pr()], files=files,
+                head_files={source_path: primary.read_bytes()},
+            ),
         )
 
 

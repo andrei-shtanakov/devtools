@@ -230,16 +230,13 @@ def test_materialize_preserves_bytes_and_is_reinspectable(tmp_path: Path) -> Non
     assert restored.as_state() == source.as_state()
 
 
-def test_descriptor_hash_preserves_crlf_source_bytes(tmp_path: Path) -> None:
+def test_intake_rejects_crlf_before_descriptor_is_created(tmp_path: Path) -> None:
     data = customer_brief().replace("\n", "\r\n").encode("utf-8")
     path = tmp_path / "brief.md"
     path.write_bytes(data)
 
-    source = brief_input.inspect_brief(path)
-
-    assert dict(source.source_blobs) == {
-        "discovery-brief": blob_sha1_bytes(data)
-    }
+    with pytest.raises(brief_input.BriefInputError, match="CR/CRLF"):
+        brief_input.inspect_brief(path)
 
 
 def test_materialized_tamper_is_detected(tmp_path: Path) -> None:
