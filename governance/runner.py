@@ -949,6 +949,40 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 save(state)
                 return False
     for key, kind, filename in _AUTHOR_STEPS:
+        if kind == "behaviour-spec" and state.brief is not None:
+            descriptor = state.brief
+            source_rel = descriptor.get("requirements_source")
+            if not isinstance(source_rel, str):
+                return _brief_stop(
+                    state, "run.json не несёт requirements_source"
+                )
+            bundle = Path(state.target_dir) / state.bundle_dir
+            try:
+                source_text = (bundle / source_rel).read_text(encoding="utf-8")
+                requirements_text = (bundle / "10-requirements.md").read_text(
+                    encoding="utf-8"
+                )
+            except (OSError, UnicodeError) as exc:
+                return _brief_stop(
+                    state, f"source/requirements не читаются: {exc}"
+                )
+            findings = brief_input.requirements_findings(
+                source_text, requirements_text
+            )
+            if findings:
+                (run_dir(state.run_id) / "brief-findings.txt").write_text(
+                    "\n".join(
+                        f"error GC-BRIEF-COVERAGE: {finding}"
+                        for finding in findings
+                    ) + "\n",
+                    encoding="utf-8",
+                )
+                state.status = "stopped_author"
+                save(state)
+                return False
+            (run_dir(state.run_id) / "brief-findings.txt").unlink(
+                missing_ok=True
+            )
         if op_status(state, key) == "completed":
             continue
         target = Path(state.target_dir) / state.bundle_dir / filename

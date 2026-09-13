@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+import re
 from typing import Literal
 
 from governance.discovery_contract import gate_check
@@ -197,3 +198,83 @@ def inspect_materialized(target_dir: Path, bundle_dir: str) -> BriefSource:
     """Rebuild a source descriptor from a materialized bundle."""
     return inspect_brief(target_dir / bundle_dir / PRIMARY_REL)
 
+
+_REQ_HEAD_RE = re.compile(r"^####\s+((?:FR|NFR)-\d+[a-z]?):", re.M)
+_REQ_NEAR_RE = re.compile(r"^#{2,6}\s+((?:FR|NFR)-[^\s:]*)", re.M)
+_SECTION_RE = re.compile(r"^#{1,3}\s", re.M)
+_PRIORITY_RE = re.compile(r"^\*\*Priority\*\*:\s*(\S+)", re.M)
+
+
+def _downstream_requirements(
+    text: str,
+) -> tuple[dict[str, list[str | None]], list[str]]:
+    """Strict requirements blocks plus explicit near-miss findings."""
+    findings: list[str] = []
+    strict_starts = {match.start() for match in _REQ_HEAD_RE.finditer(text)}
+    for near in _REQ_NEAR_RE.finditer(text):
+        if near.start() not in strict_starts:
+            findings.append(
+                f"{near.group(1)}: заголовок requirements не соответствует "
+                "машинной грамматике `#### FR-NN:`/`#### NFR-NN:`"
+            )
+    heads = list(_REQ_HEAD_RE.finditer(text))
+    parsed: dict[str, list[str | None]] = {}
+    for index, head in enumerate(heads):
+        end = heads[index + 1].start() if index + 1 < len(heads) else len(text)
+        block = text[head.end():end]
+        section = _SECTION_RE.search(block)
+        if section is not None:
+            block = block[:section.start()]
+        priority = _PRIORITY_RE.search(block)
+        parsed.setdefault(head.group(1), []).append(
+            priority.group(1) if priority is not None else None
+        )
+    return parsed, findings
+
+
+def requirements_findings(source_text: str, requirements_text: str) -> list[str]:
+    """Check exact FR/NFR carry from discovery source to requirements.
+
+    This is deliberately syntactic, not an LLM semantic judgment. The source
+    IDs define the coverage set; downstream prose and additional requirements
+    remain outside this guard.
+    """
+    source = gate_check.parse_brief(source_text)
+    if source is None:
+        return ["discovery source не разбирается как brief"]
+    source_entries = [
+        entry for entry in source.entries if entry.prefix in ("FR", "NFR")
+    ]
+    source_counts: dict[str, int] = {}
+    for entry in source_entries:
+        source_counts[entry.eid] = source_counts.get(entry.eid, 0) + 1
+
+    downstream, findings = _downstream_requirements(requirements_text)
+    for source_id, count in sorted(source_counts.items()):
+        if count != 1:
+            findings.append(
+                f"{source_id}: discovery source объявляет id {count} раза "
+                "(ожидается ровно один)"
+            )
+            continue
+        occurrences = downstream.get(source_id, [])
+        if len(occurrences) != 1:
+            findings.append(
+                f"{source_id}: в requirements найдено {len(occurrences)} "
+                "объявлений (ожидается ровно одно)"
+            )
+
+    must_ids = {
+        entry.eid
+        for entry in source_entries
+        if entry.prefix == "FR" and entry.priority() == "Must"
+    }
+    for source_id in sorted(must_ids):
+        priorities = downstream.get(source_id, [])
+        if len(priorities) == 1 and priorities[0] != "Must":
+            rendered = priorities[0] if priorities[0] is not None else "отсутствует"
+            findings.append(
+                f"{source_id}: source Priority Must понижен; downstream "
+                f"Priority={rendered!r}"
+            )
+    return findings

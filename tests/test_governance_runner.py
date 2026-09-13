@@ -518,7 +518,26 @@ def _brief_source(tmp_path: Path) -> brief_input.BriefSource:
 def test_brief_materializes_after_branch_and_reaches_two_author_prompts(
     tmp_path: Path, runs_root,
 ) -> None:
-    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    class CoveredBriefOps(FakeOps):
+        def author(
+            self, target_dir, kind, subject, bundle_dir, brief_context=None,
+        ):
+            rc = super().author(
+                target_dir, kind, subject, bundle_dir,
+                brief_context=brief_context,
+            )
+            if kind == "requirements":
+                path = Path(target_dir) / bundle_dir / "10-requirements.md"
+                path.write_text(
+                    path.read_text(encoding="utf-8")
+                    + "\n#### NFR-01: Safety\n**Priority**: Should\n",
+                    encoding="utf-8",
+                )
+            return rc
+
+    ops = CoveredBriefOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES
+    )
     source = _brief_source(tmp_path)
     kwargs = _start_kwargs(
         tmp_path, "r-brief-source", ops, brief_source=source,
@@ -596,6 +615,27 @@ def test_brief_materialization_refuses_changed_durable_intake(
     assert result.status == "stopped_author"
     assert ops.authored == []
     assert not (Path(state.target_dir) / state.bundle_dir).exists()
+
+
+def test_brief_coverage_stops_after_requirements_before_next_paid_author(
+    tmp_path: Path, runs_root,
+) -> None:
+    source = _brief_source(tmp_path)
+    ops = FakeOps()
+
+    state = runner.start(**_start_kwargs(
+        tmp_path, "r-brief-coverage", ops, brief_source=source,
+        merge_authority="human",
+    ))
+
+    assert state.status == "stopped_author"
+    assert ops.authored == ["charter", "requirements"]
+    assert "author-behaviour" not in state.ops
+    findings = (
+        rs.run_dir(state.run_id) / "brief-findings.txt"
+    ).read_text(encoding="utf-8")
+    assert "GC-BRIEF-COVERAGE" in findings
+    assert "NFR-01" in findings
 
 
 def _green_bundle(profile, bundle) -> bundle_state.BundleState:

@@ -217,3 +217,49 @@ def test_materialized_tamper_is_detected(tmp_path: Path) -> None:
     assert brief_input.inspect_materialized(
         target, "workstreams/ws/spec"
     ).as_state() != source.as_state()
+
+
+def _requirements() -> str:
+    return """\
+#### FR-01: Feature
+**Priority**: Must
+
+#### NFR-01: Safety
+**Priority**: Should
+"""
+
+
+def test_requirements_findings_accepts_exact_source_coverage() -> None:
+    assert brief_input.requirements_findings(
+        customer_brief(), _requirements()
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("requirements", "needle"),
+    [
+        (_requirements().replace("#### NFR-01: Safety\n**Priority**: Should\n", ""),
+         "NFR-01: в requirements найдено 0"),
+        (_requirements() + "\n#### FR-01: Duplicate\n**Priority**: Must\n",
+         "FR-01: в requirements найдено 2"),
+        (_requirements().replace("**Priority**: Must", "**Priority**: Should"),
+         "source Priority Must понижен"),
+        (_requirements().replace("#### FR-01:", "### FR-01:"),
+         "не соответствует машинной грамматике"),
+    ],
+)
+def test_requirements_findings_named_failures(
+    requirements: str, needle: str,
+) -> None:
+    findings = brief_input.requirements_findings(
+        customer_brief(), requirements
+    )
+    assert any(needle in finding for finding in findings)
+
+
+def test_requirements_findings_rejects_duplicate_source_id() -> None:
+    duplicated = customer_brief() + "\n#### FR-01: duplicate\n**Priority**: Must\n"
+
+    findings = brief_input.requirements_findings(duplicated, _requirements())
+
+    assert any("discovery source объявляет id 2 раза" in item for item in findings)
