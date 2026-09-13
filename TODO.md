@@ -1312,10 +1312,16 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 > Инвариант §2.2: результат, нужный для продолжения, проверки или
 > воспроизведения прогона, не существует только на машине оператора.
 
-- [ ] E0.6a Восстановление леджера spec-loop из фактов GitHub: повтор `make spec-loop` по (repo, subject) без `out/governance-runs/` находит бандл-PR по префиксу ветки `spec/<slug(subject)>-*-behaviour` (ws-id несёт дату старта, без леджера она известна только из имени ветки; несколько совпадений — fail-closed, `--ws-id` обязателен), статусы узлов — по frontmatter бандла, tasks-PR — по ветке (durable reconciliation уже есть); приёмка — прогон R3 продолжен после удаления `out/governance-runs/` (единственное место леджера; `.steward/` в репо-цели транзиентен и durable-состояния не несёт) @owner:github:andrei-shtanakov @id:durable-governance-state-ledger
+- [x] E0.6a Восстановление леджера spec-loop из фактов GitHub: повтор `make spec-loop` по (repo, subject) без `out/governance-runs/` находит бандл-PR по префиксу ветки `spec/<slug(subject)>-*-behaviour` (ws-id несёт дату старта, без леджера она известна только из имени ветки; несколько совпадений — fail-closed, `--ws-id` обязателен), статусы узлов — по frontmatter бандла, tasks-PR — по ветке (durable reconciliation уже есть); приёмка — прогон R3 продолжен после удаления `out/governance-runs/` (единственное место леджера; `.steward/` в репо-цели транзиентен и durable-состояния не несёт) @owner:github:andrei-shtanakov @id:durable-governance-state-ledger
       Объём ограничен состоянием R3 (план §3 E0.6). Что не восстановимо по
       фактам GitHub — назвать явно в отчёте, а не молчать: fail-closed с
       подсказкой, какой факт отсутствует.
+      Доставлено devtools#211. Live-приёмка 2026-09-13: в изолированном
+      временном клоне и с пустым `RUNS_ROOT` восстановлен реальный R3
+      `real-llm-provider-adapters-20260907-d0844e` из kapelle#76, повторный
+      S8 завершился `exit=0`, существующий tasks-PR kapelle#77 найден
+      реконсиляцией; внешние мутации smoke-харнессом запрещены и не
+      предпринимались.
 - [ ] E0.6b S8-вердикт едет внутри tasks-PR того же цикла: `deliver` кладёт `out/governance-runs/<run-id>/s8-gate-verdicts.jsonl` (gate-verdicts/v1; исходное место записи гейта `.steward/gate_verdicts.jsonl` в корне репо-цели прибирается после S8) в `workstreams/<ws-id>/evidence/` тем же коммитом, что tasks-спека; отдельный evidence-PR не создаётся, у tasks-PR собственного S8 нет (терминально) @owner:github:andrei-shtanakov @id:s8-verdict-in-tasks-pr @blocked_by:todo://devtools/accept-file-target-contract
       Порядок в коде: `resume` → `completed` (S8 внутри) → `deliver`
       (`governance/spec_loop.py`). Правит `task_bridge` — поэтому после
