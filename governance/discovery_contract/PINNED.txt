@@ -1,0 +1,6 @@
+upstream: git@github.com:andrei-shtanakov/discovery-toolkit.git
+commit: ee93092fdfe6195c28c7392d85b41c6b94b9fe0a
+
+DISCOVERY-BRIEF-CONTRACT.md 082346bed016d996bf9df13bf3379efb918d7e1c261c0648f61effe795638c60
+gate_check.py f226ab93f6f4b54f161c459746b589fe9a49c8d04f91a53eb55cb185a8c54524
+
