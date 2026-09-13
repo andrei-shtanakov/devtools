@@ -131,6 +131,141 @@ def test_find_runs_broken_ledger_fails_closed(runs_root) -> None:
         spec_loop.find_runs("alpha", "Subject A")
 
 
+class _RecoveryOps:
+    def __init__(self, prs, *, state="MERGED", files=None):
+        self.prs = prs
+        self.state = state
+        self.files = files or [
+            f"workstreams/fleet-inbox-20260901/spec/{name}"
+            for name in sorted(spec_loop._BUNDLE_FILENAMES)
+        ]
+        self.prefixes: list[str] = []
+
+    def prs_by_head_prefix(self, repo_slug, branch_prefix):
+        self.prefixes.append(branch_prefix)
+        return self.prs
+
+    def pr_facts(self, repo_slug, pr):
+        return {
+            "state": self.state,
+            "baseRefName": "master",
+            "headRefOid": "a" * 40,
+        }
+
+    def pr_files(self, repo_slug, pr):
+        return self.files
+
+
+def _bundle_pr(
+    number=41,
+    *,
+    branch="spec/fleet-inbox-20260901-behaviour",
+    subject="Fleet Inbox",
+    run_id="fleet-inbox-20260901-a1b2c3",
+):
+    ws_id = branch.removeprefix("spec/").removesuffix("-behaviour")
+    return {
+        "number": number,
+        "head": {"ref": branch},
+        "title": f"{subject} — behaviour bundle {ws_id}",
+        "body": f"Автоматический прогон governance runner'а ({run_id}).",
+    }
+
+
+def test_recover_run_from_github_rebuilds_minimal_merge_boundary(
+    runs_root, tmp_path
+) -> None:
+    ops = _RecoveryOps([_bundle_pr()])
+
+    state = spec_loop.recover_run_from_github(
+        subject="Fleet Inbox",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        target_dir=str(tmp_path / "alpha"),
+        profile="profiles/team-exp.yaml",
+        author_backend="codex",
+        requested_ws_id=None,
+        requested_bundle_dir=None,
+        ops=ops,
+    )
+
+    assert state is not None
+    assert state.run_id == "fleet-inbox-20260901-a1b2c3"
+    assert state.ws_id == "fleet-inbox-20260901"
+    assert state.bundle_dir == "workstreams/fleet-inbox-20260901/spec"
+    assert state.status == "waiting_human_merge"
+    assert state.branch == "spec/fleet-inbox-20260901-behaviour"
+    assert state.pr == 41
+    assert state.base_ref == "master"
+    assert state.ops == {}
+    assert rs.load(state.run_id) == state
+    assert ops.prefixes == ["spec/fleet-inbox-"]
+
+
+def test_recover_multiple_candidates_requires_ws_id(
+    runs_root, tmp_path
+) -> None:
+    ops = _RecoveryOps(
+        [
+            _bundle_pr(),
+            _bundle_pr(
+                42,
+                branch="spec/fleet-inbox-20260902-behaviour",
+                run_id="fleet-inbox-20260902-d4e5f6",
+            ),
+        ]
+    )
+
+    with pytest.raises(spec_loop.SpecLoopError, match="--ws-id"):
+        spec_loop.recover_run_from_github(
+            subject="Fleet Inbox",
+            repo="alpha",
+            repo_slug="owner/alpha",
+            target_dir=str(tmp_path / "alpha"),
+            profile="profiles/team-exp.yaml",
+            author_backend="codex",
+            requested_ws_id=None,
+            requested_bundle_dir=None,
+            ops=ops,
+        )
+    assert rs.all_run_ids() == []
+
+
+def test_recover_refuses_missing_run_id_fact(runs_root, tmp_path) -> None:
+    pr = _bundle_pr()
+    pr["body"] = "body отредактирован"
+
+    with pytest.raises(spec_loop.SpecLoopError, match="run-id"):
+        spec_loop.recover_run_from_github(
+            subject="Fleet Inbox",
+            repo="alpha",
+            repo_slug="owner/alpha",
+            target_dir=str(tmp_path / "alpha"),
+            profile="profiles/team-exp.yaml",
+            author_backend="codex",
+            requested_ws_id=None,
+            requested_bundle_dir=None,
+            ops=_RecoveryOps([pr]),
+        )
+
+
+def test_recover_refuses_closed_unmerged_bundle_pr(
+    runs_root, tmp_path
+) -> None:
+    with pytest.raises(spec_loop.SpecLoopError, match="закрыт без мержа"):
+        spec_loop.recover_run_from_github(
+            subject="Fleet Inbox",
+            repo="alpha",
+            repo_slug="owner/alpha",
+            target_dir=str(tmp_path / "alpha"),
+            profile="profiles/team-exp.yaml",
+            author_backend="codex",
+            requested_ws_id=None,
+            requested_bundle_dir=None,
+            ops=_RecoveryOps([_bundle_pr()], state="CLOSED"),
+        )
+
+
 # --- CLI: жёсткий merge_authority ------------------------------------------
 
 
@@ -167,7 +302,11 @@ class _LoopEnv:
         monkeypatch.setattr(
             spec_loop.task_bridge, "deliver_for_run", self._deliver
         )
-        monkeypatch.setattr(spec_loop, "_real_ops", lambda: object())
+        class _NoRemoteRuns:
+            def prs_by_head_prefix(self, repo_slug, branch_prefix):
+                return []
+
+        monkeypatch.setattr(spec_loop, "_real_ops", _NoRemoteRuns)
 
     def _start(self, **kwargs):
         self.calls.append(("start", kwargs))
@@ -211,6 +350,49 @@ def test_no_run_starts_with_human_authority_and_prints_values(
     assert kwargs["run_id"] in out
     assert "owner/alpha" in out
     assert "waiting_human_merge" in out
+
+
+def test_missing_ledger_recovers_then_resumes_s8_and_reconciles_tasks_pr(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """Приёмка R3: RUNS_ROOT пуст, durable GitHub-факты продолжают цикл."""
+    target = tmp_path / "alpha"
+    (target / ".git").mkdir(parents=True)
+    manifest = tmp_path / "manifest.toml"
+    manifest.write_text(MANIFEST, encoding="utf-8")
+    monkeypatch.setattr(spec_loop, "MANIFEST_PATH", manifest)
+    monkeypatch.setattr(spec_loop, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        spec_loop, "_origin_url", lambda _d: "git@github.com:owner/alpha.git"
+    )
+    ops = _RecoveryOps([_bundle_pr()])
+    monkeypatch.setattr(spec_loop, "_real_ops", lambda: ops)
+    calls: list[tuple] = []
+
+    def _resume(run_id, passed_ops):
+        state = rs.load(run_id)
+        calls.append(("resume-s8", run_id, passed_ops is ops))
+        state.status = "completed"
+        rs.save(state)
+        return state
+
+    def _deliver(state, passed_ops, legacy_bundle=None):
+        calls.append(("reconcile-tasks", state.ws_id, passed_ops is ops))
+        return 77
+
+    monkeypatch.setattr(spec_loop.runner, "resume", _resume)
+    monkeypatch.setattr(spec_loop.task_bridge, "deliver_for_run", _deliver)
+
+    rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
+
+    assert rc == 0
+    assert calls == [
+        ("resume-s8", "fleet-inbox-20260901-a1b2c3", True),
+        ("reconcile-tasks", "fleet-inbox-20260901", True),
+    ]
+    out = capsys.readouterr().out
+    assert "ledger отсутствовал; восстановлен" in out
+    assert "tasks-спека доставлена: PR #77" in out
 
 
 def test_repeat_finds_run_without_date_and_resumes(

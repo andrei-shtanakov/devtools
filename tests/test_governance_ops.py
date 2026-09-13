@@ -159,6 +159,54 @@ def test_find_pr_valid_list_returns_number(monkeypatch):
     assert result == 42
 
 
+def test_prs_by_head_prefix_paginates_all_states_and_filters(monkeypatch):
+    payload = [
+        {"data": {"repository": {"pullRequests": {"nodes": [
+            {
+                "number": 41,
+                "title": "new",
+                "body": "body",
+                "headRefName": "spec/fleet-20260901-behaviour",
+            },
+            {
+                "number": 40,
+                "title": "other",
+                "body": "body",
+                "headRefName": "unrelated",
+            },
+        ]}}}},
+        {"data": {"repository": {"pullRequests": {"nodes": [
+            {
+                "number": 12,
+                "title": "old",
+                "body": "body",
+                "headRefName": "spec/fleet-20260801-behaviour",
+            },
+        ]}}}},
+    ]
+    calls = _install_fake_run(
+        monkeypatch, returncode=0, stdout=json.dumps(payload)
+    )
+    ops = RealOps()
+
+    result = ops.prs_by_head_prefix(REPO_SLUG, "spec/fleet-")
+
+    assert [item["number"] for item in result] == [41, 12]
+    argv = calls[0].argv
+    assert argv[:5] == ["gh", "api", "graphql", "--paginate", "--slurp"]
+    assert "-f" in argv
+    assert f"owner={REPO_SLUG.split('/')[0]}" in argv
+    assert f"name={REPO_SLUG.split('/')[1]}" in argv
+
+
+@pytest.mark.parametrize("stdout", ["not json", "{}", '[{"number": 1}]'])
+def test_prs_by_head_prefix_rejects_unknown_response(monkeypatch, stdout):
+    _install_fake_run(monkeypatch, returncode=0, stdout=stdout)
+
+    with pytest.raises(RuntimeError, match="prs_by_head_prefix"):
+        RealOps().prs_by_head_prefix(REPO_SLUG, "spec/fleet-")
+
+
 # --- Кейс 3: create_draft_pr ---------------------------------------------
 
 
