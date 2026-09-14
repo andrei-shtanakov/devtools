@@ -180,7 +180,11 @@ NEW_KIT_STUB = """#!/bin/sh
   echo "REVIEW_HARNESS=${REVIEW_HARNESS-<unset>}"
   echo "REVIEW_MODEL=${REVIEW_MODEL-<unset>}"
   echo "PATH=$PATH"
+  echo "CWD=$(pwd -P)"
 } >> "${HARNESS_KIT_LOG:?}"
+# Шум в stderr — как у настоящего кита (предупреждения префлайта): в строку
+# ревьюера попасть не должен.
+echo "kit stderr noise" >&2
 if [ -n "${REVIEW_KIT_STUB_FAIL:-}" ]; then
   echo "кит отказал: адаптера нет" >&2; exit 2
 fi
@@ -404,6 +408,8 @@ def test_new_kit_claude_config_goes_through_kit_not_shim(tmp_path: Path) -> None
     assert env["REVIEW_MODEL"] == "claude-opus-5"
     assert env["REVIEW_CMD"] == "<unset>"
     assert "scripts/harness" not in env["PATH"]
+    # Кит зовётся из чекаута репо (как run_kit), не из cwd оператора.
+    assert Path(env["CWD"]) == (fleet_root / "demo").resolve()
 
 
 def test_new_kit_cli_flags_beat_env_and_config(tmp_path: Path) -> None:

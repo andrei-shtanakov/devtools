@@ -183,9 +183,10 @@ kit_has_harness_layer() {
 }
 # Выставить окружение ревьюера под конкретный кит и вычислить reviewer_label.
 # Вызывается ровно один раз: зондом --print-review-cmd либо прогоном после
-# резолва доверенного кита.
+# резолва доверенного кита. $2 — cwd для кита (чекаут репо, как у run_kit).
 configure_reviewer() {
     kit_dir="$1"
+    kit_cwd="${2:-.}"
     if [ "$external_review_cmd" -eq 1 ]; then
         reviewer_label="$REVIEW_CMD"
         return 0
@@ -205,10 +206,19 @@ configure_reviewer() {
             # привязана к слою харнесса, чужую из окружения не наследуем.
             unset REVIEW_MODEL || true
         fi
-        if ! reviewer_label=$(REVIEW_KIT_DIR="$kit_dir"                 sh "$kit_dir/local.sh" --print-review-cmd 2>&1); then
-            echo "$reviewer_label" >&2
+        # stdout кита — строка ревьюера (в тело ревью и отпечаток), stderr —
+        # оператору как есть; в reviewer_label он попасть не должен.
+        kit_err=$(mktemp)
+        if ! reviewer_label=$(cd "$kit_cwd" && REVIEW_KIT_DIR="$kit_dir" \
+                sh "$kit_dir/local.sh" --print-review-cmd 2>"$kit_err"); then
+            cat "$kit_err" >&2
+            rm -f "$kit_err"
             die 2 "кит отказал в резолве ревьюера (local.sh --print-review-cmd)"
         fi
+        cat "$kit_err" >&2
+        rm -f "$kit_err"
+        [ -n "$reviewer_label" ] \
+            || die 2 "кит не назвал команду ревьюера (пустой --print-review-cmd)"
         return 0
     fi
     # Старая копия кита: прежняя механика без изменений.
@@ -237,7 +247,7 @@ if [ "$print_review_cmd" -eq 1 ]; then
     # как в прогоне); без чекаута — ветка старого кита.
     probe_kit="$FLEET_ROOT/$repo/${REVIEW_KIT_DIR:-scripts/review}"
     [ -f "$probe_kit/local.sh" ] || probe_kit=""
-    configure_reviewer "$probe_kit"
+    configure_reviewer "$probe_kit" "$FLEET_ROOT/$repo"
     echo "$reviewer_label"
     exit 0
 fi
@@ -332,8 +342,9 @@ trusted_schema=$(resolve_from_source \
     "${REVIEW_SCHEMA:-.github/codex/review-schema.json}")
 trusted_prompt=$(resolve_from_source \
     "${REVIEW_PROMPT:-.github/codex/review-prompt.md}")
-# Окружение ревьюера — под доверенный кит, до отпечатка и до прогона.
-configure_reviewer "$trusted_kit_dir"
+# Окружение ревьюера — под доверенный кит, до отпечатка и до прогона; cwd —
+# исходный чекаут, как у run_kit до материализации head-worktree.
+configure_reviewer "$trusted_kit_dir" "$source_repo_dir"
 work=$(mktemp -d)
 review_tree="$work/review-tree"
 review_tree_added=0
