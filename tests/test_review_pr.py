@@ -868,9 +868,11 @@ def test_new_kit_full_run_labels_reviewer_from_kit(fleet: Fleet, tmp_path: Path)
     assert not any("scripts/harness" in line for line in env_lines if line.startswith("PATH="))
 
 
-def test_old_kit_full_run_keeps_shim_label(fleet: Fleet) -> None:
-    """Старая копия кита (стаб без литерала) — прежняя ветка: в теле ревью
-    `claude-review --model …`, как до devtools#222."""
+def test_old_kit_full_run_with_claude_is_refused_before_review(fleet: Fleet) -> None:
+    """Копия кита без харнесс-слоя (стаб без литерала) + claude: отказ до
+    прогона и до публикации — переходник снят волной devtools#228."""
     res = fleet.run("demo", "7", "--harness", "claude", "--model", "claude-sonnet-4-6")
-    assert res.returncode == 0, res.stderr
-    assert "`claude-review --model claude-sonnet-4-6`" in fleet.body_out.read_text()
+    assert res.returncode == 2, res.stdout
+    assert "без харнесс-слоя" in res.stderr
+    assert "pr review" not in fleet.gh_calls()
+    assert not fleet.body_out.exists()

@@ -57,8 +57,8 @@ usage() {
     echo "  --harness/--model — ревьюер; порядок: флаг > env REVIEW_HARNESS/" >&2
     echo "    REVIEW_MODEL > ~/.config/ai-prosto/harness.env > codex (историч.)" >&2
     echo "  внешний REVIEW_CMD побеждает всё, кроме явных флагов" >&2
-    echo "  свежий кит (local.sh --print-review-cmd) получает REVIEW_HARNESS/" >&2
-    echo "    REVIEW_MODEL окружением; старый — REVIEW_CMD + переходник" >&2
+    echo "  кит с харнесс-слоем (local.sh --print-review-cmd) получает REVIEW_HARNESS/" >&2
+    echo "    REVIEW_MODEL окружением; кит без него умеет только codex" >&2
 }
 
 die() {
@@ -131,14 +131,12 @@ fi
 # кроме явных флагов --harness/--model.
 #
 # Материализация под кит — ниже, в configure_reviewer (devtools#222, кит
-# steward @ a2d7e71): свежий кит читает REVIEW_HARNESS/REVIEW_MODEL из
-# окружения и зовёт свой scripts/review/harness-claude сам, строку ревьюера
-# для тела и отпечатка отдаёт `local.sh --print-review-cmd`. Старая копия
-# кита (без этого литерала) идёт прежней дорогой: REVIEW_CMD с голым именем
-# `claude-review` (машинно-независимый отпечаток) и переходник
-# scripts/harness в PATH сабшелла — до волны ре-вендора по флоту
-# (todo://steward/review-kit-harness-fleet-wave), после которой переходник
-# удаляется (@id:review-harness-shim-removal).
+# steward @ a2d7e71): кит с харнесс-слоем читает REVIEW_HARNESS/REVIEW_MODEL
+# из окружения и зовёт свой scripts/review/harness-claude сам, строку
+# ревьюера для тела и отпечатка отдаёт `local.sh --print-review-cmd`. Копия
+# кита без этого литерала умеет только codex (REVIEW_CMD как раньше);
+# claude на ней — отказ «ре-вендорьте кит»: переходник scripts/harness/
+# claude-review снят после волны devtools#228 (шаг 2 devtools#222).
 harness_env_file="${AI_PROSTO_HARNESS_ENV:-$HOME/.config/ai-prosto/harness.env}"
 cfg_harness=""
 cfg_model=""
@@ -221,13 +219,12 @@ configure_reviewer() {
             || die 2 "кит не назвал команду ревьюера (пустой --print-review-cmd)"
         return 0
     fi
-    # Старая копия кита: прежняя механика без изменений.
+    # Копия кита без харнесс-слоя: codex — как раньше; claude — отказ, а не
+    # тихий уход на codex (переходник снят волной devtools#228).
     case "$harness" in
         claude)
-            PATH="$script_dir/scripts/harness:$PATH"
-            export PATH
-            REVIEW_CMD="claude-review --model ${model:-claude-opus-5}"
-            export REVIEW_CMD
+            die 2 "кит ${kit_dir:-$repo} без харнесс-слоя (нет local.sh --print-review-cmd): \
+claude требует кит steward >= a2d7e71 — ре-вендорьте (волна devtools#228)"
             ;;
         codex)
             # Без модели REVIEW_CMD не выставляется вовсе: дефолт кита
