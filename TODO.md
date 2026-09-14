@@ -873,6 +873,16 @@
       меняется (`claude-review --model X` → `harness-claude --model X`) —
       опубликованные claude-вердикты перегоняются один раз, это ожидаемо.
       Харнесс-путь (`_HARNESS_PREFIXES`): ревью из доверенного дерева, мерж — человек.
+- [ ] Волна ре-вендора review-kit с харнесс-слоем по флоту: 23 копии кита → steward @ a2d7e71, два PR на потребителя (PR-1 — 6 файлов кита + `.github/codex/review-prompt.md`, 6 строк PIN, старый base-чекер зелёный; PR-2 — `scripts/review/harness-claude` 100755 + 7-я строка PIN), исключение spec-runner (пара @ 761285f) снимается; приёмка — у всех 23 копий `# SOURCE: steward @ a2d7e71`, 7 строк PIN, `REVIEW_HARNESS=claude sh scripts/review/local.sh --print-review-cmd` → `harness-claude --model claude-opus-5` @owner:github:andrei-shtanakov @id:review-kit-harness-wave
+      Принято из devtools#228 (inbox, from steward#review-kit-harness-fleet-wave;
+      прецедент — `@id:review-kit-fp-wave`). Решение владельца 2026-09-14: кит и
+      промпт едут одним пином (схема v2 `kind`, apply-threshold и секция «Тип
+      находки» атомарны); 21 промпт байт-равен steward@ee6d85a, workspace —
+      старше (без линзы), devtools уже @ a2d7e71. Проверка PR-1 механическая:
+      `checksum.sh --pin` новым чекером и base-чекером (как CI) + sha256-таблица
+      в теле. PR-1 трогает `.github/` (authority-root) — мерж человек; PR-2 —
+      после посадки PR-1. Дальше: шаг 2 devtools#222 (`review-harness-shim-removal`),
+      steward закрывает `review-kit-harness-fleet-wave` и `review-kit-harness-member-promotion`.
 - [ ] Удалить переходник claude-review после канонизации харнесс-слоя в ките steward @owner:github:andrei-shtanakov @id:review-harness-shim-removal @blocked_by:todo://steward/review-kit-harness-fleet-wave
       Шаг 2 devtools#222: после волны ре-вендора кита по флоту ни один репо не
       идёт старой веткой, и `scripts/harness/claude-review` с его тестами
