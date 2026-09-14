@@ -317,12 +317,14 @@ def test_commit_paths_force_adds_source_files_after_plain_add(monkeypatch):
         force_paths=("workstreams/WS-1/spec/00-discovery/brief.md",),
     )
 
-    assert [c.argv[:2] for c in calls] == [
-        ["git", "add"], ["git", "add"], ["git", "diff"], ["git", "commit"],
+    assert [c.argv[:3] for c in calls] == [
+        ["git", "add", "--"], ["git", "--literal-pathspecs", "add"],
+        ["git", "diff", "--cached"], ["git", "commit", "-m"],
     ]
     assert calls[0].argv == ["git", "add", "--", "workstreams/WS-1/spec"]
     assert calls[1].argv == [
-        "git", "add", "-f", "--", "workstreams/WS-1/spec/00-discovery/brief.md",
+        "git", "--literal-pathspecs", "add", "-f", "--",
+        "workstreams/WS-1/spec/00-discovery/brief.md",
     ]
     assert calls[1].kwargs["check"] is True
 
@@ -354,6 +356,11 @@ def test_commit_paths_force_paths_defeat_target_gitignore(tmp_path):
     source = bundle / "00-discovery" / "brief.md"
     source.write_bytes(b"---\nspec_stage: discovery\n---\n# brief\n")
     rel = "workstreams/WS-1/spec/00-discovery/brief.md"
+    # engineer-ref с glob-метасимволами в имени (ревью #220): без
+    # --literal-pathspecs git прочёл бы `[v2]` как класс символов.
+    glob_name = bundle / "00-discovery" / "notes[v2].md"
+    glob_name.write_bytes(b"# customer\n")
+    glob_rel = "workstreams/WS-1/spec/00-discovery/notes[v2].md"
     ops = RealOps()
 
     ops.commit_paths(str(repo), ["workstreams/WS-1/spec"], "without force")
@@ -361,12 +368,14 @@ def test_commit_paths_force_paths_defeat_target_gitignore(tmp_path):
     assert _git(repo, "rev-parse", f"HEAD:{rel}").returncode != 0  # контроль
 
     ops.commit_paths(
-        str(repo), ["workstreams/WS-1/spec"], "with force", force_paths=(rel,),
+        str(repo), ["workstreams/WS-1/spec"], "with force",
+        force_paths=(rel, glob_rel),
     )
     shown = _git(repo, "rev-parse", f"HEAD:{rel}")
     assert shown.returncode == 0
     assert shown.stdout.strip() == ops.blob_in_commit(str(repo), "HEAD", rel)
     assert _git(repo, "show", f"HEAD:{rel}").stdout.encode() == source.read_bytes()
+    assert ops.blob_in_commit(str(repo), "HEAD", glob_rel) is not None
 
 
 def test_commit_paths_empty_index_does_not_commit(monkeypatch):

@@ -1369,8 +1369,11 @@ class RealOps:
         """
         subprocess.run(["git", "add", "--", *paths], cwd=target_dir, check=True)
         if force_paths:
+            # `--literal-pathspecs`: имя source-файла приходит из traces_to
+            # engineer-брифа и может нести `[`, `*`, `?` — без literal git
+            # прочёл бы их как glob и не нашёл бы файл (ревью #220).
             subprocess.run(
-                ["git", "add", "-f", "--", *force_paths],
+                ["git", "--literal-pathspecs", "add", "-f", "--", *force_paths],
                 cwd=target_dir, check=True,
             )
         clean = subprocess.run(
