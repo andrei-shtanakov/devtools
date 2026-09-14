@@ -68,8 +68,7 @@
 #     подменённый шаблон меняет глоб, не исполнив ни строчки чужого кода;
 #   * contracts/authority-root/v1/paths.env — перечень защищённых путей;
 #     он и сам authority-root, так что гвард 4 стережёт его собою;
-#   * scripts/harness/ — каталог, который review-pr.sh препендит в PATH.
-# Все три перечислены в `_HARNESS_PREFIXES` (governance/accept_pr.py): PR,
+# Все они перечислены в `_HARNESS_PREFIXES` (governance/accept_pr.py): PR,
 # который их трогает, до мержа не доходит вовсе — ни ревью, ни мерж
 # агентом. НЕ приходят из дерева: `.git/config` (origin-URL, откуда
 # выводится slug — не часть worktree), бинарь `gh` (PATH оператора),

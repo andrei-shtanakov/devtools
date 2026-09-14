@@ -48,10 +48,9 @@ from governance.ops import DEVTOOLS_ROOT, Ops, RealOps
 # пути, не ревьюится агентом вовсе (гард по локальному диффу head0).
 # Корневой review-pr.sh — тоже harness (круг 6): для PR в сам devtools
 # target_dir совпадает с DEVTOOLS_ROOT, и Ops.review исполнил бы версию
-# скрипта из недоверенного PR. scripts/harness/ — переходники ревьюера
-# (первая находка боевого claude-ревью, PR #121): review-pr.sh препендит
-# этот каталог в PATH сабшелла кита, и голое имя `claude-review`
-# резолвится в файл из материализованного дерева.
+# скрипта из недоверенного PR. (scripts/harness/ — переходник claude-review
+# — снят после волны devtools#228: адаптер живёт в самом ките,
+# scripts/review/harness-claude, и накрыт префиксом scripts/review/.)
 #
 # merge-pr.sh — ровно тот же случай и тем же путём (ревью #183, круг 3):
 # `Ops.merge` исполняет `DEVTOOLS_ROOT/merge-pr.sh`, а дерево к этому
@@ -69,7 +68,6 @@ from governance.ops import DEVTOOLS_ROOT, Ops, RealOps
 # «исполнено»: тише.
 _HARNESS_PREFIXES = (
     "scripts/review/",
-    "scripts/harness/",
     "review-pr.sh",
     "merge-pr.sh",
     "contracts/approval-branches/",
