@@ -478,3 +478,23 @@ def test_old_kit_keeps_shim_path(tmp_path: Path) -> None:
     (kit / "local.sh").write_text("#!/bin/sh\necho old kit\n", encoding="utf-8")
     cmd = _resolve(tmp_path, repo="demo", cfg="REVIEW_HARNESS=claude\n")
     assert cmd == "claude-review --model claude-opus-5"
+
+
+def test_new_kit_probe_honours_absolute_review_kit_dir(tmp_path: Path) -> None:
+    """Абсолютный REVIEW_KIT_DIR (как в прогоне через resolve_from_source)
+    зонд берёт как есть — не склеивает с чекаутом и не уходит молча в ветку
+    старого кита."""
+    fleet_root, log = _new_kit_fleet(tmp_path)
+    elsewhere = tmp_path / "kit-elsewhere"
+    elsewhere.mkdir()
+    local_sh = elsewhere / "local.sh"
+    local_sh.write_text(NEW_KIT_STUB, encoding="utf-8")
+    local_sh.chmod(local_sh.stat().st_mode | stat.S_IXUSR)
+    cmd = _resolve(
+        tmp_path,
+        repo="demo",
+        cfg="REVIEW_HARNESS=claude\n",
+        env_extra={"HARNESS_KIT_LOG": str(log), "REVIEW_KIT_DIR": str(elsewhere)},
+    )
+    assert cmd == "harness-claude --model claude-opus-5"
+    assert _kit_env(log)["REVIEW_HARNESS"] == "claude"

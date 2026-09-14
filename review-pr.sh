@@ -245,7 +245,12 @@ if [ "$print_review_cmd" -eq 1 ]; then
     # Отладочный зонд для тестов: показать разрешённую команду и выйти,
     # не трогая GitHub. Кит — из чекаута репо, если он есть (feature-detect
     # как в прогоне); без чекаута — ветка старого кита.
-    probe_kit="$FLEET_ROOT/$repo/${REVIEW_KIT_DIR:-scripts/review}"
+    # То же правило, что resolve_from_source в прогоне: абсолютный
+    # REVIEW_KIT_DIR берётся как есть, относительный — от чекаута репо.
+    case "${REVIEW_KIT_DIR:-scripts/review}" in
+        /*) probe_kit="$REVIEW_KIT_DIR" ;;
+        *)  probe_kit="$FLEET_ROOT/$repo/${REVIEW_KIT_DIR:-scripts/review}" ;;
+    esac
     [ -f "$probe_kit/local.sh" ] || probe_kit=""
     configure_reviewer "$probe_kit" "$FLEET_ROOT/$repo"
     echo "$reviewer_label"
