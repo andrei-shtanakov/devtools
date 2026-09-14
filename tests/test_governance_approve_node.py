@@ -108,6 +108,9 @@ class Forge:
     #: D5): 0 — мерж исполняется от ai-prosto; иное — «обвязка отказала»,
     #: PR остаётся человеку.
     agent_merge_rc: int = 0
+    #: Очередь кодов на ближайшие вызовы `merge` (транзиентные отказы):
+    #: исчерпана — действует `agent_merge_rc`.
+    agent_merge_rc_seq: list[int] = field(default_factory=list)
     #: Журнал вызовов `Ops.merge`: (pr, пин головы).
     merge_calls: list[tuple[int, str]] = field(default_factory=list)
 
@@ -199,8 +202,13 @@ class Ops(RealOps):
             return 3
         if self.forge.head_of(rec["branch"]) != sha:
             return 2
-        if self.forge.agent_merge_rc != 0:
-            return self.forge.agent_merge_rc
+        rc = (
+            self.forge.agent_merge_rc_seq.pop(0)
+            if self.forge.agent_merge_rc_seq
+            else self.forge.agent_merge_rc
+        )
+        if rc != 0:
+            return rc
         _merge_into_origin(self.forge, pr, login=AGENT, when=AGENT_MERGED_AT)
         return 0
 
@@ -229,6 +237,7 @@ class World:
 def world(tmp_path: Path, monkeypatch) -> World:
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, HUMAN)
+    monkeypatch.setattr(an, "_SLEEP", lambda seconds: None)
     origin = tmp_path / "origin.git"
     subprocess.run(
         ["git", "init", "-q", "--bare", "-b", "master", str(origin)], check=True
@@ -2403,8 +2412,9 @@ def test_safety_unknown_routes_finalize_to_human(world: World, monkeypatch) -> N
 
 def test_agent_merge_refusal_leaves_finalize_to_human(world: World) -> None:
     """Отказ обвязки — не ошибка: PR без лейбла остаётся человеку, заявка
-    жива, повтор не мержит вторично, человеческий мерж завершает."""
-    world.forge.agent_merge_rc = 4
+    жива; повторный вызов пробует агентский мерж снова (ревью #233), а
+    человеческий мерж завершает заявку."""
+    world.forge.agent_merge_rc = 4          # форджа отклонила — не транзиент
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
@@ -2412,15 +2422,47 @@ def test_agent_merge_refusal_leaves_finalize_to_human(world: World) -> None:
     finalize_pr = world.state.ops[key]["finalize_pr"]
     assert world.forge.prs[finalize_pr]["state"] == "OPEN"
     assert world.forge.prs[finalize_pr]["label"] == ""
-    assert len(world.forge.merge_calls) == 1
+    assert len(world.forge.merge_calls) == 1, "код 4 не повторяется"
     assert "отказал кодом 4" in outcome.message
     assert "human-merge" in outcome.message
     assert al.is_live(world.state.ops[key])
-    assert "ждём мержа" in approve(world, "charter").message
-    assert len(world.forge.merge_calls) == 1, "повтор не мержит вторично"
+    again = approve(world, "charter")
+    assert len(world.forge.merge_calls) == 2, "повтор пробует мерж снова"
+    assert "отказал кодом 4" in again.message
     merge_pr(world, finalize_pr)
     approve(world, "charter")
     assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+
+
+def test_transient_refusal_is_retried_within_the_call(world: World) -> None:
+    """UNKNOWN у форджи (код 3) / сеть (код 2) — транзиент: повтор с паузой
+    в том же вызове, мерж состоялся, заявка завершена."""
+    world.forge.agent_merge_rc_seq = [3, 2, 0]
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+    assert len(world.forge.merge_calls) == 3
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+    assert world.forge.prs[world.state.ops[key]["finalize_pr"]]["mergedBy"] == {
+        "login": AGENT
+    }
+
+
+def test_open_finalize_is_merged_by_agent_on_repeat_call(world: World) -> None:
+    """Прошлый заход исчерпал попытки — следующий вызов мержит сам, без
+    человека: дефолт D5 не деградирует до человеческого мержа."""
+    world.forge.agent_merge_rc_seq = [3, 3, 3]
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    first = approve(world, "charter")
+    assert "отказал кодом 3" in first.message
+    assert al.is_live(world.state.ops[key])
+    second = approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+    assert "завершена" in second.message
+    assert len(world.forge.merge_calls) == 4
 
 
 def test_finalize_merge_policy_axes(tmp_path: Path, monkeypatch) -> None:

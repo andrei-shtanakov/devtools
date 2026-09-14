@@ -40,6 +40,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1459,6 +1460,23 @@ def _reconcile_finalize(
     pr = op["finalize_pr"]
     where = _disposition(_pr_facts(state, ops, pr), pr)
     if where is Disposition.OPEN:
+        # По агентской политике открытый finalize — не «ждём человека», а
+        # повтор агентского мержа (ревью #233): прошлый заход мог упасть на
+        # транзиентном UNKNOWN форджи или сети. Гейт формы и пин головы
+        # делают повтор безопасным; лейбл человеку обвязка чтит сама.
+        head = op.get("finalize_head_sha")
+        if head is not None and finalize_merge_policy(state.target_dir)[0] == "agent":
+            reason = _try_agent_merge(
+                state, ops, dag, op, list(op["nodes"]), pr, str(head)
+            )
+            if reason is None:
+                return _reconcile_finalize(state, ops, dag, op, key)
+            return ApprovalOutcome(
+                f"финализирующий PR #{pr} открыт: {reason} — мержит человек "
+                f"(`make human-merge`). Заявка {key} жива всегда, пока он "
+                "открыт; повторный вызов пробует агентский мерж снова",
+                request=key,
+            )
         return ApprovalOutcome(
             f"финализирующий PR #{pr} открыт — ждём мержа. Заявка {key} "
             "жива всегда, пока он открыт",
@@ -1765,27 +1783,19 @@ def _publish_envelope(
         # авторила сама (пин `finalize_head_sha` из леджера), и лишь если
         # его дифф — ровно конверт. Ветка, лишь похожая на finalize, этим
         # путём не мержится вовсе: для accept-pr/S7 она обычный PR с ревью.
-        defect = _envelope_form_defect(state, ops, dag, op, nodes, finalize_head)
-        if defect is not None:
-            return ApprovalOutcome(
-                f"финализирующий PR #{pr}: агентский мерж НЕ выполнен — "
-                f"{defect}. PR остаётся человеку (`make human-merge`), "
-                "заявка жива",
-                request=key,
-                changed=tuple(changed),
-            )
-        # База не пинуется намеренно: PR только что создан от текущей base,
-        # а сверка с baseRefOid GitHub ложно отказывает после любого
-        # соседнего мержа (devtools#223). Отказ обвязки — не ошибка: PR
-        # остаётся человеку, заявка жива (следующий вызов реконсилирует).
-        code = ops.merge(state.repo, pr, finalize_head, None)
-        if code == 0:
+        # Отказ — не ошибка: PR остаётся человеку, заявка жива, следующий
+        # вызов пробует агентский мерж снова.
+        reason = _try_agent_merge(
+            state, ops, dag, op, nodes, pr, finalize_head
+        )
+        if reason is None:
             return _reconcile_finalize(state, ops, dag, state.ops[key], key)
         return ApprovalOutcome(
             f"подпись узлов {', '.join(nodes)} вынесена финализирующим PR #{pr} "
             f"(approved_by = {op['merged_by']}, approved_at = "
-            f"{op['merged_at']}); агентский мерж отказал кодом {code} — "
-            "мержит человек (`make human-merge`), затем повторите вызов",
+            f"{op['merged_at']}); {reason} — PR остаётся человеку "
+            "(`make human-merge`), заявка жива; повторный вызов пробует "
+            "агентский мерж снова",
             request=key,
             changed=tuple(changed),
         )
@@ -1802,6 +1812,44 @@ def _publish_envelope(
 
 
 _ENVELOPE_KEYS = ("status", "approved_by", "approved_at")
+#: Агентский мерж finalize: форджа считает mergeability асинхронно, и сразу
+#: после создания PR обвязка может увидеть UNKNOWN (код 3) либо сеть (код 2)
+#: — коды транзиентные, попытка повторяется с паузой; 4 (форджа отклонила)
+#: не повторяется. `_SLEEP` — точка подмены в тестах.
+_MERGE_ATTEMPTS = 3
+_MERGE_RETRY_DELAY = 2.0
+_TRANSIENT_MERGE_CODES = frozenset({2, 3})
+_SLEEP = time.sleep
+
+
+def _try_agent_merge(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    op: dict,
+    nodes: list[str],
+    pr: int,
+    head: str,
+) -> str | None:
+    """Агентский мерж finalize: None — вмержен; иначе причина, по которой
+    PR остаётся человеку. Идемпотентно: гейт формы читает коммит, голова
+    пинована — повторный вызов `--approve-node` пробует снова (ревью #233).
+    """
+    defect = _envelope_form_defect(state, ops, dag, op, nodes, head)
+    if defect is not None:
+        return f"агентский мерж НЕ выполнен — {defect}"
+    # База не пинуется намеренно: PR создан от текущей base, а сверка с
+    # baseRefOid GitHub ложно отказывает после любого соседнего мержа
+    # (devtools#223).
+    code = 0
+    for attempt in range(_MERGE_ATTEMPTS):
+        code = ops.merge(state.repo, pr, head, None)
+        if code == 0:
+            return None
+        if code not in _TRANSIENT_MERGE_CODES or attempt == _MERGE_ATTEMPTS - 1:
+            break
+        _SLEEP(_MERGE_RETRY_DELAY)
+    return f"агентский мерж отказал кодом {code}"
 
 
 def _strip_envelope(meta: dict) -> dict:

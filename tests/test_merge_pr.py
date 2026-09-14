@@ -1019,5 +1019,8 @@ def test_guard_inputs_are_authority_root() -> None:
     prefixes = set(authority_root.prefixes())
     assert "merge-pr.sh" in prefixes
     assert "contracts/approval-branches/" in prefixes
+    # Вход человеческого акта (ADR-ECO-011 D6): агентски смерженная правка
+    # исполнялась бы затем от учётки человека из allowlist (ревью #233).
+    assert "human-merge.sh" in prefixes
     # И сам перечень — тоже: иначе агент вынес бы путь из-под защиты.
     assert "contracts/authority-root/" in prefixes

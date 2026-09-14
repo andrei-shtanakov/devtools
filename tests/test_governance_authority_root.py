@@ -28,6 +28,8 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         # такого PR открыл бы дорогу следующему уже без гварда.
         "contracts/approval-branches/",
         "merge-pr.sh",
+        # Вход человеческого акта (D6) — той же категории (ревью #233).
+        "human-merge.sh",
     }
 
 
