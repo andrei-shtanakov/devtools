@@ -54,18 +54,30 @@ class StaleFinding:
 
 def blob_sha1(text: str) -> str:
     """`git hash-object` содержимого — чистым stdlib, git не нужен."""
-    data = text.encode("utf-8")
+    return blob_sha1_bytes(text.encode("utf-8"))
+
+
+def blob_sha1_bytes(data: bytes) -> str:
+    """`git hash-object` exact bytes — without newline normalization."""
     return hashlib.sha1(b"blob %d\x00%s" % (len(data), data)).hexdigest()
 
 
-def check_stale(artifacts: list[Any]) -> list[StaleFinding]:
-    """Пины каждого артефакта против blob-хешей upstream-узлов того же бандла."""
+def check_stale(
+    artifacts: list[Any],
+    supplemental_blobs: dict[str, str] | None = None,
+) -> list[StaleFinding]:
+    """Пины против блобов upstream-узлов и явных source-входов."""
     by_node = {a.node_id: a for a in artifacts if a.node_id is not None}
+    supplemental_blobs = supplemental_blobs or {}
     findings: list[StaleFinding] = []
     for artifact in artifacts:
         for upstream, pinned in artifact.meta.upstream_hashes:
             up = by_node.get(upstream)
-            actual = blob_sha1(up.text) if up is not None else None
+            actual = (
+                blob_sha1(up.text)
+                if up is not None
+                else supplemental_blobs.get(upstream)
+            )
             if actual != pinned:
                 findings.append(
                     StaleFinding(

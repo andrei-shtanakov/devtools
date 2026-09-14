@@ -81,6 +81,9 @@ class RunState:
     # charter/requirements авторятся codex независимо от значения (disp-цикл
     # осмыслен для полируемого документа, не для одноразовых артефактов).
     author_backend: str = "codex"
+    # Переносимое описание discovery source layer (E1). Абсолютные пути и
+    # байты сюда не попадают; старые run.json без поля читаются через default.
+    brief: dict[str, object] | None = None
 
 
 _ALLOWED_AUTHOR_BACKENDS = ("codex", "disp")
@@ -123,6 +126,7 @@ def new_run(
     run_id: str,
     merge_authority: str | None = None,
     author_backend: str = "codex",
+    brief: dict[str, object] | None = None,
 ) -> RunState:
     """Новый прогон (S0). `run_id` подаётся снаружи (вызывающая сторона)."""
     validate_merge_authority(merge_authority)
@@ -144,6 +148,7 @@ def new_run(
         ops={},
         remediated_by=None,
         author_backend=author_backend,
+        brief=brief,
     )
 
 

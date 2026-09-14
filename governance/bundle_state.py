@@ -45,6 +45,7 @@ from steward.gatecheck.trace_matrix import build_trace_matrix
 from steward.graph import SpecGraph, load_profile
 from steward.roles import load_roles_catalog
 
+from governance import brief_input
 from governance.stale_adapter import check_stale
 
 
@@ -70,7 +71,13 @@ def candidate_state(profile_path: Path, bundle_dir: Path) -> BundleState:
     graph = load_profile(profile_path, roles)
     artifacts, findings = collect_bundle(graph, bundle_dir)
     findings = [*findings, *check_behaviour_spec(graph, artifacts)]
-    stale = check_stale(artifacts)
+    supplemental_blobs: dict[str, str] = {}
+    if (bundle_dir / brief_input.PRIMARY_REL).is_file():
+        supplemental_blobs = dict(
+            brief_input.inspect_brief(bundle_dir / brief_input.PRIMARY_REL)
+            .source_blobs
+        )
+    stale = check_stale(artifacts, supplemental_blobs)
 
     per_node: dict[str, list[str]] = {}
     for f in findings:

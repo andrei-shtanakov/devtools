@@ -22,7 +22,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple
 
 from governance import acceptance_guard, decomposition_guard, design_guard
@@ -59,7 +59,7 @@ from governance.run_state import (
     save,
 )
 from governance.spec_runner_contract import target_selector_policy
-from governance.stale_adapter import blob_sha1
+from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 
 # [a-z]?-суффикс: раунды ревью бандлов вставляют сценарии как BEH-18a —
 # без суффикса в грамматике мост молча ронял сценарий (PR spec-runner#369,
@@ -759,6 +759,7 @@ def _canonical_dag_hash(
     target_dir: str,
     bundle_dir: str,
     dag: tuple[tuple[str, tuple[str, ...]], ...],
+    source_paths: tuple[str, ...] = (),
 ) -> str:
     """Канонический хэш DAG: содержание бандла без провенанса approve.
 
@@ -808,6 +809,18 @@ def _canonical_dag_hash(
         node_id = _node_id(fname)
         canon[node_id] = blob_sha1(join_frontmatter(meta, body))
         lines.append(f"{node_id} {canon[node_id]}")
+    for relative in source_paths:
+        source_path = base / relative
+        try:
+            data = source_path.read_bytes()
+        except OSError as exc:
+            raise RuntimeError(
+                f"immutable discovery source {relative!r} не читается: "
+                f"{exc}. Восстановите исходные source bytes либо создайте "
+                "новый workstream/run с другим ws-id"
+            ) from exc
+        source_blob = blob_sha1_bytes(data)
+        lines.append(f"source {relative} {source_blob}")
     return f"{_CANON_VERSION}:{blob_sha1(chr(10).join(lines) + chr(10))}"
 
 
@@ -891,6 +904,13 @@ def _debt_notice(state: RunState, ops: Ops, legacy_bundle: int | None) -> str:
     Пустая строка — «сказать нечего»: DAG честно одобрен целиком.
     """
     verdict = read_dag_state(state, ops, _dag_for(legacy_bundle))
+    if verdict.forbidden:
+        return (
+            "discovery source активного DAG расходится с intake descriptor: "
+            f"{verdict.forbidden}. Восстановите исходные source bytes либо "
+            "создайте новый workstream/run с другим ws-id. Переиздание это "
+            "не затронуло — апстрим не менялся, и вызов бесследен"
+        )
     if verdict.unresolved:
         return (
             "долг активного DAG установить не удалось: "
@@ -934,6 +954,7 @@ def _content_anchor(
     target_dir: str,
     bundle_dir: str,
     legacy_bundle: int | None = None,
+    brief: dict[str, object] | None = None,
 ) -> str:
     """`content_anchor` §I5: канонический хэш активного DAG в base.
 
@@ -969,7 +990,28 @@ def _content_anchor(
     """
     dag = _dag_for(legacy_bundle)
     _check_bundle_composition(target_dir, bundle_dir, dag)
-    return _canonical_dag_hash(target_dir, bundle_dir, dag)
+    source_paths: tuple[str, ...] = ()
+    if brief is not None:
+        raw_paths = brief.get("source_paths")
+        if not isinstance(raw_paths, list) or not all(
+            isinstance(path, str) for path in raw_paths
+        ):
+            raise ValueError("brief descriptor не несёт source_paths")
+        for path in raw_paths:
+            pure = PurePosixPath(path)
+            if (
+                "\\" in path
+                or pure.is_absolute()
+                or ".." in pure.parts
+                or not path.startswith("00-discovery/")
+            ):
+                raise ValueError(
+                    f"brief descriptor несёт непереносимый source path {path!r}"
+                )
+        source_paths = tuple(raw_paths)
+    return _canonical_dag_hash(
+        target_dir, bundle_dir, dag, source_paths
+    )
 
 
 def _prospective_anchor(
@@ -1694,9 +1736,26 @@ def _delivered_content_anchor(
             (shadow / state.bundle_dir / fname).write_text(
                 text, encoding="utf-8"
             )
+        if state.brief is not None:
+            source_paths = state.brief.get("source_paths")
+            if not isinstance(source_paths, list) or not all(
+                isinstance(path, str) for path in source_paths
+            ):
+                return None
+            for relative in source_paths:
+                data = ops.show_file_bytes(
+                    state.target_dir,
+                    head,
+                    f"{state.bundle_dir}/{relative}",
+                )
+                if data is None:
+                    return None
+                destination = shadow / state.bundle_dir / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(data)
         try:
             return _content_anchor(
-                str(shadow), state.bundle_dir, legacy_bundle
+                str(shadow), state.bundle_dir, legacy_bundle, state.brief
             )
         except ValueError:
             return None
@@ -1769,6 +1828,13 @@ def _approved_dag_or_refuse(
     _check_bundle_composition(state.target_dir, state.bundle_dir, dag)
     verdict = read_dag_state(state, ops, dag)
     if verdict.evidence is None:
+        if verdict.forbidden:
+            raise RuntimeError(
+                "discovery source активного DAG запрещён — доставка не "
+                f"начата: {verdict.forbidden}. Восстановите исходные "
+                "source bytes либо создайте новый workstream/run с другим "
+                "ws-id; повтор без исправления не поможет"
+            )
         if verdict.unresolved:
             raise RuntimeError(
                 "состояние активного DAG не установлено, доставка не "
@@ -1921,7 +1987,7 @@ def deliver_for_run(
         """
         stamped["anchor"] = commit_facts["anchor_blob"]
         stamped["content_anchor"] = _content_anchor(
-            state.target_dir, state.bundle_dir, legacy_bundle
+            state.target_dir, state.bundle_dir, legacy_bundle, state.brief
         )
 
     # Гейт §I12 — непосредственно перед ПЕРВЫМ delivery-эффектом, а не
@@ -3344,7 +3410,7 @@ def deliver_superseded(
     # §I5 — ДО провенанса и ДО любого сетевого вызова: `content_anchor`
     # считается локально по проштампованному дереву и подписи не видит.
     content = _content_anchor(
-        state.target_dir, state.bundle_dir, legacy_bundle
+        state.target_dir, state.bundle_dir, legacy_bundle, state.brief
     )
     recorded_content = prev_op.get("content_anchor")
     comparable = _comparable_anchors(recorded_content, content)

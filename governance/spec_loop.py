@@ -47,12 +47,13 @@ import argparse
 import os
 import re
 import subprocess
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from governance import run_state as rs
+from governance import brief_input, run_state as rs
 from governance import runner, task_bridge
 from governance.ops import DEVTOOLS_ROOT, RealOps
 
@@ -399,6 +400,66 @@ def recover_run_from_github(
             f"фактом bundle-PR #{number}: {bundle_dir!r}"
         )
 
+    file_set = set(files)
+    source_prefix = f"{bundle_dir}/00-discovery/"
+    source_files = {path for path in file_set if path.startswith(source_prefix)}
+    primary_path = f"{bundle_dir}/{brief_input.PRIMARY_REL}"
+    brief_descriptor = None
+    if source_files:
+        if primary_path not in source_files:
+            raise SpecLoopError(
+                f"bundle-PR #{number} несёт неполный discovery source layer: "
+                f"есть {sorted(source_files)!r}, но нет {primary_path!r}"
+            )
+        head = facts.get("headRefOid")
+        if not isinstance(head, str) or not head:
+            raise SpecLoopError(
+                f"bundle-PR #{number} не несёт headRefOid — immutable "
+                "discovery source восстановить нельзя"
+            )
+        try:
+            with tempfile.TemporaryDirectory(prefix="brief-recovery-") as tmp:
+                snapshot = Path(tmp)
+                for source_path in sorted(source_files):
+                    data = ops.show_repo_file_bytes(
+                        repo_slug, head, source_path
+                    )
+                    if data is None:
+                        raise brief_input.BriefInputError(
+                            f"{head}:{source_path} не читается из head bundle-PR"
+                        )
+                    destination = snapshot / source_path
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(data)
+                recovered_source = brief_input.inspect_materialized(
+                    snapshot, bundle_dir
+                )
+            ops.checkout_and_pull(target_dir, base_ref)
+            current_source = brief_input.inspect_materialized(
+                Path(target_dir), bundle_dir
+            )
+        except (brief_input.BriefInputError, OSError, RuntimeError) as exc:
+            raise SpecLoopError(
+                f"discovery source bundle-PR #{number} не восстанавливается "
+                f"из immutable head {head!r}: {exc}"
+            ) from exc
+        expected_source_files = {
+            f"{bundle_dir}/{rel}" for rel in recovered_source.source_paths
+        }
+        missing = expected_source_files - source_files
+        if missing:
+            raise SpecLoopError(
+                f"bundle-PR #{number} несёт неполный discovery source layer: "
+                f"в его diff отсутствуют {sorted(missing)!r}"
+            )
+        if current_source.as_state() != recovered_source.as_state():
+            raise SpecLoopError(
+                f"discovery source после bundle-PR #{number} изменён в "
+                f"{base_ref!r}; восстановите bytes из head {head} либо "
+                "создайте новый workstream с другим ws-id"
+            )
+        brief_descriptor = recovered_source.as_state()
+
     # Не перезаписывать валидный локальный журнал с тем же run-id, если он
     # относится к другой работе. Пустой stub безопасно заменяется: GitHub
     # доказывает точную идентичность созданного runner'ом PR.
@@ -433,6 +494,7 @@ def recover_run_from_github(
         run_id=run_id,
         merge_authority="human",
         author_backend=author_backend,
+        brief=brief_descriptor,
     )
     # Только MERGED — достаточный durable-факт для этой границы. OPEN мог
     # быть создан как draft до S6 либо остановлен красным review/verdict;
@@ -567,6 +629,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ws-id", help="override деривации slug+дата")
     parser.add_argument("--run-id", help="явный выбор при неоднозначности")
     parser.add_argument("--bundle-dir", help="дефолт workstreams/<ws-id>/spec")
+    parser.add_argument(
+        "--brief", help="gate-passed discovery-brief для нового прогона"
+    )
     parser.add_argument("--profile", default="profiles/team-exp.yaml")
     parser.add_argument(
         "--author-backend", choices=["codex", "disp"], default="codex"
@@ -577,6 +642,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        # Intake обязан завершиться до генерации run-id, GitHub-вызовов и
+        # любых runner effects. В ledger уйдёт descriptor, не этот Path.
+        supplied_brief = (
+            brief_input.inspect_brief(Path(args.brief)) if args.brief else None
+        )
         entry = manifest_repo_entry(
             MANIFEST_PATH.read_text(encoding="utf-8"), args.repo
         )
@@ -603,6 +673,12 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         state = matches[0] if matches else None
+        if state is not None and supplied_brief is not None:
+            if state.brief != supplied_brief.as_state():
+                raise SpecLoopError(
+                    "--brief не совпадает с discovery source этого прогона; "
+                    "создайте новый workstream с другим --ws-id"
+                )
         target_dir = (
             state.target_dir
             if state is not None
@@ -620,6 +696,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         ops = _real_ops()
+        recovered = False
         if state is None and args.run_id is None:
             state = recover_run_from_github(
                 subject=args.subject,
@@ -632,6 +709,13 @@ def main(argv: list[str] | None = None) -> int:
                 requested_bundle_dir=args.bundle_dir,
                 ops=ops,
             )
+            recovered = state is not None
+        if recovered and supplied_brief is not None:
+            raise SpecLoopError(
+                "восстановленный из GitHub прогон не принимает --brief "
+                "задним числом; продолжите без флага либо создайте новый "
+                "workstream с другим --ws-id"
+            )
 
         if state is not None:
             values = {
@@ -643,6 +727,12 @@ def main(argv: list[str] | None = None) -> int:
                 "target-dir": state.target_dir,
                 "bundle-dir": state.bundle_dir,
                 "profile": state.profile,
+                "brief-frame": (
+                    state.brief.get("frame") if state.brief else "нет"
+                ),
+                "brief-source": (
+                    state.brief.get("source_paths") if state.brief else "нет"
+                ),
                 "действие": f"продолжение ({state.status})",
             }
         else:
@@ -675,6 +765,13 @@ def main(argv: list[str] | None = None) -> int:
                 "target-dir": target_dir,
                 "bundle-dir": bundle_dir,
                 "profile": args.profile,
+                "brief-frame": (
+                    supplied_brief.frame if supplied_brief else "нет"
+                ),
+                "brief-source": (
+                    list(supplied_brief.source_paths)
+                    if supplied_brief else "нет"
+                ),
                 "merge-authority": "human (жёстко, без override)",
                 "действие": "start (новый прогон)",
             }
@@ -694,6 +791,7 @@ def main(argv: list[str] | None = None) -> int:
             ops=ops,
             merge_authority="human",
             author_backend=args.author_backend,
+            brief_source=supplied_brief,
         )
         print(f"статус прогона: {started.status}")
         if started.status == "waiting_human_merge":
@@ -705,7 +803,7 @@ def main(argv: list[str] | None = None) -> int:
         if started.status == "completed":
             return _deliver_phase(started, ops)
         return _report_state(started)
-    except (SpecLoopError, FileNotFoundError) as exc:
+    except (SpecLoopError, brief_input.BriefInputError, FileNotFoundError) as exc:
         print(f"spec-loop: {exc}")
         return 1
 

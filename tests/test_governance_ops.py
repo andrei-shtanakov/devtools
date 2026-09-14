@@ -364,6 +364,42 @@ def test_author_prompt_carries_dsl_and_filenames(monkeypatch):
     assert "checked_by" in beh_prompt
 
 
+def test_author_prompt_adds_brief_context_only_to_charter_and_requirements(
+    monkeypatch,
+):
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
+    monkeypatch.delenv("AUTHOR_HARNESS", raising=False)
+    monkeypatch.delenv("AUTHOR_MODEL", raising=False)
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+    context = {
+        "frame": "engineer",
+        "primary": "00-discovery/brief.md",
+        "requirements_source": "00-discovery/customer.md",
+        "source_paths": [
+            "00-discovery/brief.md", "00-discovery/customer.md",
+        ],
+        "source_blobs": {
+            "discovery-brief": "a" * 40,
+            "discovery-customer": "b" * 40,
+        },
+    }
+
+    ops.author("/t", "charter", "s", "ws/spec", brief_context=context)
+    ops.author("/t", "requirements", "s", "ws/spec", brief_context=context)
+    ops.author("/t", "behaviour-spec", "s", "ws/spec")
+
+    charter, requirements, behaviour = [call.argv[5] for call in calls]
+    for prompt in (charter, requirements):
+        assert "ws/spec/00-discovery/brief.md" in prompt
+        assert "ws/spec/00-discovery/customer.md" in prompt
+        assert "'discovery-brief': 'aaaaaaaa" in prompt
+        assert "Source IDs are immutable" in prompt
+    assert "direct traces_to edge" in charter
+    assert "direct traces_to edge" not in requirements
+    assert "Discovery source layer" not in behaviour
+
+
 # --- B2 Task 2: author_disp — opt-in бэкенд disp (спека §5, OQ-1) ----------
 
 
@@ -1433,6 +1469,43 @@ def test_show_file_returns_content_at_ref(tmp_path) -> None:
     assert RealOps().show_file_for_carry(
         str(tmp_path), "HEAD", "spec/x.md"
     ) == "hello\n"
+
+
+def test_show_file_bytes_preserves_crlf_at_ref(tmp_path) -> None:
+    import subprocess as real_subprocess
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    spec_dir = tmp_path / "spec"
+    spec_dir.mkdir()
+    data = b"hello\r\nexact\r\n"
+    (spec_dir / "x.md").write_bytes(data)
+    real_subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "core.autocrlf=false", "add", "-A"],
+        check=True,
+    )
+    real_subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c",
+         "user.name=t", "commit", "-q", "-m", "c"],
+        check=True,
+    )
+
+    assert RealOps().show_file_bytes(
+        str(tmp_path), "HEAD", "spec/x.md"
+    ) == data
+
+
+def test_show_repo_file_bytes_uses_forge_raw_endpoint(monkeypatch) -> None:
+    calls = _install_fake_run(monkeypatch, stdout=b"exact\nbytes\n")
+
+    assert RealOps().show_repo_file_bytes(
+        "owner/repo", "a" * 40, "workstreams/ws/spec/brief.md"
+    ) == b"exact\nbytes\n"
+    assert calls[0].argv == [
+        "gh", "api",
+        "repos/owner/repo/contents/workstreams/ws/spec/brief.md?ref="
+        + "a" * 40,
+        "-H", "Accept: application/vnd.github.raw+json",
+    ]
 
 
 def test_show_file_none_for_missing_path(tmp_path) -> None:

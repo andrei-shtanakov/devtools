@@ -27,10 +27,14 @@ from typing import Any
 from governance import (
     acceptance_guard,
     authority_root,
+    brief_input,
+    bundle_dag,
+    bundle_inputs,
     decomposition_guard,
     design_guard,
 )
 from governance.merge_gate import PrFacts, decide
+from governance.facts import Outcome
 from governance.stale_adapter import blob_sha1
 from governance.ops import Ops, RealOps
 from governance.policy_sources import (
@@ -255,6 +259,7 @@ def start(
     ops: Ops,
     merge_authority: str | None = None,
     author_backend: str = "codex",
+    brief_source: brief_input.BriefSource | None = None,
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
@@ -283,6 +288,19 @@ def start(
             "(verify(...)) прежде чем начинать новый авторинг-прогон"
         )
     _reserve_run_id(run_id)
+    brief_descriptor = None
+    if brief_source is not None:
+        # Durable local intake copy: run.json remains portable, while a crash
+        # before the target materialization step cannot make resume depend on
+        # the caller machine's original path still existing.
+        intake_root = run_dir(run_id) / "brief-input"
+        brief_input.materialize(brief_source, intake_root, ".")
+        staged = brief_input.inspect_materialized(intake_root, ".")
+        brief_descriptor = staged.as_state()
+        if brief_descriptor != brief_source.as_state():
+            raise brief_input.BriefInputError(
+                "discovery source descriptor изменился при durable intake"
+            )
     state = new_run(
         subject=subject,
         repo=repo,
@@ -294,6 +312,7 @@ def start(
         run_id=run_id,
         merge_authority=merge_authority,
         author_backend=author_backend,
+        brief=brief_descriptor,
     )
     save(state)
     return advance(state, ops)
@@ -318,6 +337,7 @@ def advance(state: RunState, ops: Ops) -> RunState:
         )
     steps = (
         _step_branch,
+        _step_materialize_brief,
         _step_authoring,
         _step_commit,
         _step_gate,
@@ -557,6 +577,7 @@ def verify(
         bundle_dir=parent.bundle_dir,
         profile=parent.profile,
         run_id=run_id,
+        brief=parent.brief,
         merge_authority=parent.merge_authority,
         author_backend=parent.author_backend,
     )
@@ -695,6 +716,71 @@ def _step_branch(state: RunState, ops: Ops) -> bool:
     _ensure_started(state, key)
     ops.ensure_branch(state.target_dir, state.branch)
     op_complete(state, key)
+    return True
+
+
+def _brief_stop(state: RunState, message: str) -> bool:
+    """Persist a named, resumable source failure before paid authoring."""
+    (run_dir(state.run_id) / "brief-findings.txt").write_text(
+        f"error GC-BRIEF-SOURCE: {message}\n", encoding="utf-8"
+    )
+    state.status = "stopped_author"
+    save(state)
+    return False
+
+
+def _step_materialize_brief(state: RunState, ops: Ops) -> bool:
+    """Copy durable intake bytes into the target branch before S2.
+
+    The machine-local original path is intentionally absent from ``run.json``.
+    ``runner.start`` has already copied and re-gated it under the run directory;
+    every initial/resumed pass compares those bytes with the ledger descriptor.
+    A completed op is not blindly trusted: destination bytes are checked again
+    so manual tampering cannot flow into authoring or a commit.
+    """
+    if state.brief is None:
+        return True
+    key = "materialize-brief"
+    intake_root = run_dir(state.run_id) / "brief-input"
+    try:
+        source = brief_input.inspect_materialized(intake_root, ".")
+    except brief_input.BriefInputError as exc:
+        return _brief_stop(state, f"durable intake не читается: {exc}")
+    if source.as_state() != state.brief:
+        return _brief_stop(
+            state,
+            "durable intake bytes не совпадают с descriptor в run.json",
+        )
+
+    if op_status(state, key) == "completed":
+        try:
+            destination = brief_input.inspect_materialized(
+                Path(state.target_dir), state.bundle_dir
+            )
+        except brief_input.BriefInputError as exc:
+            return _brief_stop(state, f"source layer в bundle повреждён: {exc}")
+        if destination.as_state() != state.brief:
+            return _brief_stop(
+                state,
+                "source layer в bundle не совпадает с descriptor в run.json",
+            )
+        return True
+
+    _ensure_started(state, key)
+    try:
+        brief_input.materialize(
+            source, Path(state.target_dir), state.bundle_dir
+        )
+        destination = brief_input.inspect_materialized(
+            Path(state.target_dir), state.bundle_dir
+        )
+    except brief_input.BriefInputError as exc:
+        return _brief_stop(state, f"materialization отказала: {exc}")
+    if destination.as_state() != state.brief:
+        return _brief_stop(
+            state, "materialized source не совпадает с descriptor в run.json"
+        )
+    op_complete(state, key, source_blobs=state.brief["source_blobs"])
     return True
 
 
@@ -867,6 +953,40 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 save(state)
                 return False
     for key, kind, filename in _AUTHOR_STEPS:
+        if kind == "behaviour-spec" and state.brief is not None:
+            descriptor = state.brief
+            source_rel = descriptor.get("requirements_source")
+            if not isinstance(source_rel, str):
+                return _brief_stop(
+                    state, "run.json не несёт requirements_source"
+                )
+            bundle = Path(state.target_dir) / state.bundle_dir
+            try:
+                source_text = (bundle / source_rel).read_text(encoding="utf-8")
+                requirements_text = (bundle / "10-requirements.md").read_text(
+                    encoding="utf-8"
+                )
+            except (OSError, UnicodeError) as exc:
+                return _brief_stop(
+                    state, f"source/requirements не читаются: {exc}"
+                )
+            findings = brief_input.requirements_findings(
+                source_text, requirements_text
+            )
+            if findings:
+                (run_dir(state.run_id) / "brief-findings.txt").write_text(
+                    "\n".join(
+                        f"error GC-BRIEF-COVERAGE: {finding}"
+                        for finding in findings
+                    ) + "\n",
+                    encoding="utf-8",
+                )
+                state.status = "stopped_author"
+                save(state)
+                return False
+            (run_dir(state.run_id) / "brief-findings.txt").unlink(
+                missing_ok=True
+            )
         if op_status(state, key) == "completed":
             continue
         target = Path(state.target_dir) / state.bundle_dir / filename
@@ -882,9 +1002,20 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 state.target_dir, task, config_path, _disp_doc_slug(state)
             )
         else:
-            exit_code = ops.author(
+            author_args = (
                 state.target_dir, kind, state.subject, state.bundle_dir
             )
+            if state.brief is not None and kind in (
+                "charter", "requirements",
+            ):
+                exit_code = ops.author(
+                    *author_args, brief_context=state.brief
+                )
+            else:
+                # Preserve the exact classic API call and prompts. In
+                # particular, third-party test/fake Ops implementations with
+                # the pre-E1 signature remain valid for no-brief runs.
+                exit_code = ops.author(*author_args)
         if exit_code != 0:
             state.status = "stopped_author"
             save(state)
@@ -1068,6 +1199,43 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
                 f"{upstream_fname} в worktree "
                 f"({actual[:8] + '…' if actual else 'файла нет'})"
             )
+    if state.brief is not None:
+        source_inputs = bundle_inputs.direct_blobs(
+            state, ops, bundle_dag.BUNDLE_DAG, "charter", None
+        )
+        if source_inputs.outcome is not Outcome.FOUND or source_inputs.value is None:
+            local_findings.append(
+                "error GC-BRIEF-SOURCE(prospective): direct inputs charter "
+                f"не установлены — {source_inputs.detail}"
+            )
+        else:
+            charter = Path(state.target_dir) / state.bundle_dir / "00-charter.md"
+            front = _frontmatter(charter.read_text(encoding="utf-8"))
+            for source_name, actual in source_inputs.value.items():
+                declares = re.search(
+                    rf"^\s*-\s+{re.escape(source_name)}\s*$|"
+                    rf"traces_to:.*\b{re.escape(source_name)}\b",
+                    front,
+                    re.M,
+                )
+                if not declares:
+                    local_findings.append(
+                        "error GC-UNPINNED(prospective): 00-charter.md — "
+                        f"source-ребро {source_name} не объявлено в traces_to"
+                    )
+                    continue
+                pin = _upstream_pin(front, source_name)
+                if pin is None:
+                    local_findings.append(
+                        "error GC-UNPINNED(prospective): 00-charter.md — "
+                        f"source-ребро {source_name} без upstream_hashes"
+                    )
+                elif pin != actual:
+                    local_findings.append(
+                        "error GC-STALE(prospective): 00-charter.md — source "
+                        f"пин {source_name} ({pin[:8]}…) != blob "
+                        f"({actual[:8]}…)"
+                    )
     # Гард вакуумного зелёного (боевой прогон kapelle#47): узел может быть
     # candidate_valid при НУЛЕ распознаваемых DSL-заголовков — гейту steward
     # нечего флагать, когда автор писал в своём диалекте (`### BS-*`/`REQ-*`),

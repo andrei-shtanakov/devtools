@@ -115,6 +115,98 @@ def test_good_bundle_is_candidate_valid(tmp_path: Path) -> None:
     assert by_id["tasks"].status == "delegated"
 
 
+def test_discovery_source_pin_is_resolved_from_materialized_brief(
+    tmp_path: Path,
+) -> None:
+    profile = make_profile(tmp_path)
+    bundle = make_bundle(tmp_path, behaviour_ok=True)
+    source_text = """\
+---
+spec_stage: discovery
+status: draft
+version: 1
+generated_by: discovery-agent@test
+generated_at: 2026-09-13
+validation: pass
+owner_role: product
+schema: discovery-brief
+schema_version: 1
+feeds: [charter, requirements]
+interview:
+  frame: customer
+  sessions:
+    - participant_role: product-owner
+coverage:
+  goals: covered
+  personas: covered
+  jobs: covered
+  functions: covered
+  nfr: covered
+  constraints: covered
+  success_metrics: covered
+  out_of_scope: covered
+  gate_passed: true
+open_questions: 0
+blocking_open_questions: 0
+conflicts: 0
+traces_to: []
+---
+
+- **G-01** Goal
+- **P-01** Persona
+- **J-01** `traces: [G-01]` Job
+#### FR-01: Feature `traces: [G-01, J-01]`
+**Priority**: Must
+**Acceptance**: works
+#### NFR-01: Safety `traces: [CON-01]`
+**Target**: zero writes
+- **CON-01** Constraint
+- **M-01** `traces: [G-01]` Metric
+- **OUT-01** Not in scope
+"""
+    source_path = bundle / "00-discovery/brief.md"
+    source_path.parent.mkdir()
+    source_path.write_text(source_text, encoding="utf-8")
+    requirements = bundle / "10-requirements.md"
+    charter = bundle / "00-charter.md"
+    charter.write_text(
+        "---\nspec_stage: charter\nstatus: draft\nowner_role: analysts\n"
+        "traces_to: [discovery-brief]\nupstream_hashes:\n"
+        f'  discovery-brief: "{blob_sha1(source_text)}"\n'
+        "---\n# Charter\n",
+        encoding="utf-8",
+    )
+    # mini-profile starts at requirements, so the extra charter is not a
+    # profile artifact. The assertion is specifically that its source pin is
+    # resolvable when a profile containing charter consumes the same layer.
+    # Remove it here and exercise the adapter directly through a tiny profile.
+    profile.write_text(
+        "profile: mini-source\nsolo_auto_approve: true\nartifacts:\n"
+        "  - {id: charter, template: charter.md, owner_role: analysts}\n"
+        "  - id: requirements\n    template: requirements.md\n"
+        "    owner_role: analysts\n    upstream: [charter]\n",
+        encoding="utf-8",
+    )
+    requirements_text = requirements.read_text(encoding="utf-8")
+    requirements.write_text(
+        requirements_text.replace(
+            "owner_role: analysts\n---",
+            "owner_role: analysts\ntraces_to: [charter]\nupstream_hashes:\n"
+            f'  charter: "{blob_sha1(charter.read_text(encoding="utf-8"))}"\n---',
+        ),
+        encoding="utf-8",
+    )
+    (bundle / "15-behaviour-spec.md").unlink()
+
+    state = candidate_state(profile, bundle)
+
+    charter_state = next(
+        node for node in state.nodes if node.node_id == "charter"
+    )
+    assert charter_state.status == "candidate_valid"
+    assert not any("discovery-brief" in finding for finding in charter_state.findings)
+
+
 def test_bad_bundle_is_draft_with_findings(tmp_path: Path) -> None:
     profile = make_profile(tmp_path)
     bundle = make_bundle(tmp_path, behaviour_ok=False)

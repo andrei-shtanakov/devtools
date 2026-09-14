@@ -15,6 +15,7 @@ import pytest
 
 from governance import run_state as rs
 from governance import spec_loop
+from governance import brief_input
 
 
 @pytest.fixture()
@@ -46,6 +47,94 @@ git_dir  = "gamma"
 [tools.gamma-b]
 repo_url = "git@github.com:owner/gamma-two.git"
 git_dir  = "gamma"
+"""
+
+
+def _customer_brief(*, status: str = "draft", validation: str = "pass") -> str:
+    return f"""\
+---
+spec_stage: discovery
+status: {status}
+version: 1
+generated_by: discovery-agent@test
+generated_at: 2026-09-13
+validation: {validation}
+owner_role: product
+schema: discovery-brief
+schema_version: 1
+feeds: [charter, requirements]
+interview:
+  frame: customer
+  sessions:
+    - participant_role: product-owner
+coverage:
+  goals: covered
+  personas: covered
+  jobs: covered
+  functions: covered
+  nfr: covered
+  constraints: covered
+  success_metrics: covered
+  out_of_scope: covered
+  gate_passed: true
+open_questions: 0
+blocking_open_questions: 0
+conflicts: 0
+traces_to: []
+---
+
+- **G-01** Goal
+- **P-01** Persona
+- **J-01** `traces: [G-01]` Job
+#### FR-01: Feature `traces: [G-01, J-01]`
+**Priority**: Must
+**Acceptance**: works
+#### NFR-01: Safety `traces: [CON-01]`
+**Target**: zero writes
+- **CON-01** Constraint
+- **M-01** `traces: [G-01]` Metric
+- **OUT-01** Not in scope
+"""
+
+
+def _engineer_brief(ref: str = "customer.md") -> str:
+    return f"""\
+---
+spec_stage: discovery
+status: draft
+version: 1
+generated_by: discovery-agent@test
+generated_at: 2026-09-13
+validation: pass
+owner_role: architect
+schema: discovery-brief
+schema_version: 1
+feeds: [system-assessment, tech-selection]
+interview:
+  frame: engineer
+  sessions:
+    - participant_role: platform-engineer
+coverage:
+  systems: covered
+  interfaces: covered
+  constraints: covered
+  arch_preferences: covered
+  risks: covered
+  feasibility_review: covered
+  gate_passed: true
+open_questions: 0
+blocking_open_questions: 0
+conflicts: 0
+traces_to: [{ref}]
+---
+
+- **S-01** System
+- **IF-01** `traces: [S-01]` Interface
+- **CON-01** Constraint
+- **AP-01** `traces: [S-01, CON-01]` Preference
+- **RK-01** Risk
+## Feasibility
+- FR-01 is feasible.
 """
 
 
@@ -132,7 +221,9 @@ def test_find_runs_broken_ledger_fails_closed(runs_root) -> None:
 
 
 class _RecoveryOps:
-    def __init__(self, prs, *, state="MERGED", files=None):
+    def __init__(
+        self, prs, *, state="MERGED", files=None, head_files=None
+    ):
         self.prs = prs
         self.state = state
         self.files = files or [
@@ -140,6 +231,8 @@ class _RecoveryOps:
             for name in sorted(spec_loop._BUNDLE_FILENAMES)
         ]
         self.prefixes: list[str] = []
+        self.checkouts: list[tuple[str, str]] = []
+        self.head_files = head_files or {}
 
     def prs_by_head_prefix(self, repo_slug, branch_prefix):
         self.prefixes.append(branch_prefix)
@@ -154,6 +247,12 @@ class _RecoveryOps:
 
     def pr_files(self, repo_slug, pr):
         return self.files
+
+    def checkout_and_pull(self, target_dir, branch):
+        self.checkouts.append((target_dir, branch))
+
+    def show_repo_file_bytes(self, repo_slug, ref, path):
+        return self.head_files.get(path)
 
 
 def _bundle_pr(
@@ -210,6 +309,115 @@ def test_recover_run_from_github_rebuilds_minimal_merge_boundary(
     }
     assert rs.load(state.run_id) == state
     assert ops.prefixes == ["spec/fleet-inbox-"]
+    assert ops.checkouts == []
+
+
+def test_recover_customer_source_descriptor_from_merged_bundle(
+    runs_root, tmp_path
+) -> None:
+    bundle = "workstreams/fleet-inbox-20260901/spec"
+    target = tmp_path / "alpha"
+    primary = target / bundle / brief_input.PRIMARY_REL
+    primary.parent.mkdir(parents=True)
+    primary.write_text(_customer_brief(), encoding="utf-8")
+    files = [f"{bundle}/{name}" for name in spec_loop._BUNDLE_FILENAMES]
+    source_path = f"{bundle}/{brief_input.PRIMARY_REL}"
+    files.append(source_path)
+    ops = _RecoveryOps(
+        [_bundle_pr()],
+        files=files,
+        head_files={
+            f"{bundle}/{brief_input.PRIMARY_REL}": primary.read_bytes()
+        },
+    )
+
+    state = spec_loop.recover_run_from_github(
+        subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
+        target_dir=str(target), profile="profiles/team-exp.yaml",
+        author_backend="codex", requested_ws_id=None,
+        requested_bundle_dir=None, ops=ops,
+    )
+
+    assert state is not None
+    assert state.brief == brief_input.inspect_brief(primary).as_state()
+    assert ops.checkouts == [(str(target), "master")]
+
+
+def test_recover_refuses_source_changed_after_bundle_pr(
+    runs_root, tmp_path
+) -> None:
+    bundle = "workstreams/fleet-inbox-20260901/spec"
+    target = tmp_path / "alpha"
+    primary = target / bundle / brief_input.PRIMARY_REL
+    primary.parent.mkdir(parents=True)
+    original = _customer_brief().encode("utf-8")
+    primary.write_text(
+        _customer_brief().replace("Goal", "Changed goal"), encoding="utf-8"
+    )
+    source_path = f"{bundle}/{brief_input.PRIMARY_REL}"
+    files = [f"{bundle}/{name}" for name in spec_loop._BUNDLE_FILENAMES]
+    files.append(source_path)
+
+    with pytest.raises(spec_loop.SpecLoopError, match="изменён"):
+        spec_loop.recover_run_from_github(
+            subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
+            target_dir=str(target), profile="profiles/team-exp.yaml",
+            author_backend="codex", requested_ws_id=None,
+            requested_bundle_dir=None,
+            ops=_RecoveryOps(
+                [_bundle_pr()], files=files,
+                head_files={source_path: original},
+            ),
+        )
+
+
+def test_recover_missing_head_source_is_contractual_refusal(
+    runs_root, tmp_path
+) -> None:
+    bundle = "workstreams/fleet-inbox-20260901/spec"
+    target = tmp_path / "alpha"
+    primary = target / bundle / brief_input.PRIMARY_REL
+    primary.parent.mkdir(parents=True)
+    primary.write_text(_customer_brief(), encoding="utf-8")
+    source_path = f"{bundle}/{brief_input.PRIMARY_REL}"
+    files = [f"{bundle}/{name}" for name in spec_loop._BUNDLE_FILENAMES]
+    files.append(source_path)
+
+    with pytest.raises(spec_loop.SpecLoopError, match="immutable head"):
+        spec_loop.recover_run_from_github(
+            subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
+            target_dir=str(target), profile="profiles/team-exp.yaml",
+            author_backend="codex", requested_ws_id=None,
+            requested_bundle_dir=None,
+            ops=_RecoveryOps([_bundle_pr()], files=files),
+        )
+
+
+def test_recover_engineer_refuses_incomplete_source_layer(
+    runs_root, tmp_path
+) -> None:
+    bundle = "workstreams/fleet-inbox-20260901/spec"
+    target = tmp_path / "alpha"
+    primary = target / bundle / brief_input.PRIMARY_REL
+    primary.parent.mkdir(parents=True)
+    primary.write_text(_engineer_brief(), encoding="utf-8")
+    customer = target / bundle / "00-discovery/customer.md"
+    customer.write_text(_customer_brief(status="approved"), encoding="utf-8")
+    files = [f"{bundle}/{name}" for name in spec_loop._BUNDLE_FILENAMES]
+    source_path = f"{bundle}/{brief_input.PRIMARY_REL}"
+    files.append(source_path)
+
+    with pytest.raises(spec_loop.SpecLoopError, match="не восстанавливается"):
+        spec_loop.recover_run_from_github(
+            subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
+            target_dir=str(target), profile="profiles/team-exp.yaml",
+            author_backend="codex", requested_ws_id=None,
+            requested_bundle_dir=None,
+            ops=_RecoveryOps(
+                [_bundle_pr()], files=files,
+                head_files={source_path: primary.read_bytes()},
+            ),
+        )
 
 
 def test_recover_multiple_candidates_requires_ws_id(
@@ -374,6 +582,10 @@ class _LoopEnv:
             profile=kwargs["profile"],
             run_id=kwargs["run_id"],
             merge_authority=kwargs["merge_authority"],
+            brief=(
+                kwargs["brief_source"].as_state()
+                if kwargs.get("brief_source") else None
+            ),
         )
         state.status = "waiting_human_merge"
         return state
@@ -404,6 +616,73 @@ def test_no_run_starts_with_human_authority_and_prints_values(
     assert kwargs["run_id"] in out
     assert "owner/alpha" in out
     assert "waiting_human_merge" in out
+
+
+def test_new_run_accepts_brief_before_start_and_prints_source(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    source = tmp_path / "input.md"
+    source.write_text(_customer_brief(), encoding="utf-8")
+
+    rc = spec_loop.main([
+        "--subject", "Fleet Inbox", "--repo", "alpha",
+        "--brief", str(source),
+    ])
+
+    assert rc == 0
+    kwargs = env.calls[0][1]
+    assert kwargs["brief_source"].frame == "customer"
+    out = capsys.readouterr().out
+    assert "brief-frame" in out and "customer" in out
+    assert "00-discovery/brief.md" in out
+
+
+def test_invalid_brief_refuses_before_runner_or_remote_calls(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    source = tmp_path / "bad.md"
+    source.write_text(
+        _customer_brief(validation="pending"), encoding="utf-8"
+    )
+
+    rc = spec_loop.main([
+        "--subject", "Fleet Inbox", "--repo", "alpha",
+        "--brief", str(source),
+    ])
+
+    assert rc == 1
+    assert env.calls == []
+    assert rs.all_run_ids() == []
+
+
+def test_existing_run_rejects_different_brief(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    original = tmp_path / "original.md"
+    original.write_text(_customer_brief(), encoding="utf-8")
+    descriptor = brief_input.inspect_brief(original).as_state()
+    state = _mk_run(
+        "fleet-inbox-existing", "Fleet Inbox", status="completed",
+        target_dir=str(env.target),
+    )
+    state.brief = descriptor
+    rs.save(state)
+    changed = tmp_path / "changed.md"
+    changed.write_text(
+        _customer_brief().replace("Goal", "Changed goal"), encoding="utf-8"
+    )
+
+    rc = spec_loop.main([
+        "--subject", "Fleet Inbox", "--repo", "alpha",
+        "--brief", str(changed),
+    ])
+
+    assert rc == 1
+    assert env.calls == []
+    assert "другим --ws-id" in capsys.readouterr().out
 
 
 def test_missing_ledger_recovers_then_resumes_s8_and_reconciles_tasks_pr(

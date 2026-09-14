@@ -174,6 +174,27 @@ behaviour-spec узел: `codex` (дефолт, `ops.author`) или `disp` (opt
 disp-цикл. charter/requirements авторятся `codex` независимо от значения;
 переключение затрагивает только behaviour-spec (B2 Task 2).
 
+Готовый discovery-brief можно сделать source-входом нового workstream:
+
+```bash
+make spec-loop SUBJECT="Published workflow app" REPO=alpha \
+  ARGS="--brief /path/to/brief.md"
+```
+
+`customer` brief сам является источником FR/NFR. Для `engineer` brief его
+`traces_to` обязан называть ровно один переносимый относительный путь к
+`approved customer` brief; в bundle побайтово попадут оба файла. Source-файлы
+принимаются только как UTF-8 с LF: CR/CRLF отсекаются до авторинга, чтобы eol-
+нормализация целевого Git не могла изменить immutable blob. Source layer
+лежит под `workstreams/<ws-id>/spec/00-discovery/`, пинуется charter и входит
+в `content_anchor`. До author-вызовов вход проходит вендоренный discovery
+gate; после requirements отдельный гард проверяет точный перенос каждого
+source FR/NFR и сохранение `Must`.
+
+E1 принимает уже выпущенный brief и не запускает discovery-интервью. Запуск
+стадии Need и пауза `awaiting_input` относятся к следующему этапу E2. Без
+`--brief` CLI и исторические ledger работают по прежнему classic-пути.
+
 Сегодня S7 (merge_gate) у любого прогона уходит в `waiting_human_merge`: по
 данным вендоренной копии steward-политики (`contracts/steward-actor-policy/v1/`)
 `agent_merge_allowed=false`, а `ai-prosto` не входит в `agent_identities` —

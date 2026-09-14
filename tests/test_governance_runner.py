@@ -14,7 +14,7 @@ import pytest
 
 pytest.importorskip("steward")
 
-from governance import bundle_state, merge_gate, runner, task_bridge
+from governance import brief_input, bundle_state, merge_gate, runner, task_bridge
 from governance import run_state as rs
 from governance.stale_adapter import blob_sha1
 from tests.governance_fixtures.bundles import make_bundle, make_profile
@@ -134,6 +134,9 @@ class FakeOps:
     checkout_and_pull_error: str | None = None
     head_sha_error: str | None = None
     authored: list[str] = field(default_factory=list)
+    author_contexts: list[tuple[str, dict[str, object] | None]] = field(
+        default_factory=list
+    )
     author_disp_calls: list[tuple[str, str, str, str]] = field(default_factory=list)
     author_disp_exit: int = 0
     comments: list[str] = field(default_factory=list)
@@ -217,10 +220,12 @@ class FakeOps:
         self.comments.append(body)
 
     def author(
-        self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        self, target_dir: str, kind: str, subject: str, bundle_dir: str,
+        brief_context: dict[str, object] | None = None,
     ) -> int:
         self.calls.append(("author", kind))
         self.authored.append(kind)
+        self.author_contexts.append((kind, brief_context))
         filename = {
             "charter": "00-charter.md",
             "requirements": "10-requirements.md",
@@ -455,6 +460,316 @@ def _start_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
         if not profile_path.exists():
             profile_path.write_text(_TEAM_EXP_PROFILE_TEXT, encoding="utf-8")
     return kwargs
+
+
+def _customer_brief_text() -> str:
+    return """\
+---
+spec_stage: discovery
+status: draft
+version: 1
+generated_by: discovery-agent@test
+generated_at: 2026-09-13
+validation: pass
+owner_role: product
+schema: discovery-brief
+schema_version: 1
+feeds: [charter, requirements]
+interview:
+  frame: customer
+  sessions:
+    - participant_role: product-owner
+coverage:
+  goals: covered
+  personas: covered
+  jobs: covered
+  functions: covered
+  nfr: covered
+  constraints: covered
+  success_metrics: covered
+  out_of_scope: covered
+  gate_passed: true
+open_questions: 0
+blocking_open_questions: 0
+conflicts: 0
+traces_to: []
+---
+
+- **G-01** Goal
+- **P-01** Persona
+- **J-01** `traces: [G-01]` Job
+#### FR-01: Feature `traces: [G-01, J-01]`
+**Priority**: Must
+**Acceptance**: works
+#### NFR-01: Safety `traces: [CON-01]`
+**Target**: zero writes
+- **CON-01** Constraint
+- **M-01** `traces: [G-01]` Metric
+- **OUT-01** Not in scope
+"""
+
+
+def _brief_source(tmp_path: Path) -> brief_input.BriefSource:
+    path = tmp_path / "discovery-input.md"
+    path.write_text(_customer_brief_text(), encoding="utf-8")
+    return brief_input.inspect_brief(path)
+
+
+def test_brief_materializes_after_branch_and_reaches_two_author_prompts(
+    tmp_path: Path, runs_root,
+) -> None:
+    class CoveredBriefOps(FakeOps):
+        def author(
+            self, target_dir, kind, subject, bundle_dir, brief_context=None,
+        ):
+            rc = super().author(
+                target_dir, kind, subject, bundle_dir,
+                brief_context=brief_context,
+            )
+            if kind == "charter":
+                assert brief_context is not None
+                pins = brief_context["source_blobs"]
+                names = list(pins)
+                path = Path(target_dir) / bundle_dir / "00-charter.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: charter\n"
+                    "status: draft\n"
+                    "owner_role: product\n"
+                    f"traces_to: [{', '.join(names)}]\n"
+                    "upstream_hashes:\n"
+                    + "".join(
+                        f'  {name}: "{blob}"\n'
+                        for name, blob in pins.items()
+                    )
+                    + "---\n# charter\n",
+                    encoding="utf-8",
+                )
+            if kind == "requirements":
+                path = Path(target_dir) / bundle_dir / "10-requirements.md"
+                path.write_text(
+                    path.read_text(encoding="utf-8")
+                    + "\n#### NFR-01: Safety\n**Priority**: Should\n",
+                    encoding="utf-8",
+                )
+            return rc
+
+    ops = CoveredBriefOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES
+    )
+    source = _brief_source(tmp_path)
+    kwargs = _start_kwargs(
+        tmp_path, "r-brief-source", ops, brief_source=source,
+        merge_authority="human",
+    )
+
+    state = runner.start(**kwargs)
+
+    destination = (
+        Path(state.target_dir) / state.bundle_dir / brief_input.PRIMARY_REL
+    )
+    assert destination.read_bytes() == source.primary_input.read_bytes()
+    assert state.ops["branch"]["status"] == "completed"
+    assert state.ops["materialize-brief"] == {
+        "status": "completed",
+        "source_blobs": dict(source.source_blobs),
+    }
+    contexts = dict(ops.author_contexts)
+    assert contexts["charter"] == source.as_state()
+    assert contexts["requirements"] == source.as_state()
+    for kind in ("behaviour-spec", "design", "acceptance", "decomposition"):
+        assert contexts[kind] is None
+
+
+def test_completed_brief_materialization_detects_destination_tamper_before_author(
+    tmp_path: Path, runs_root,
+) -> None:
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    source = _brief_source(tmp_path)
+    state = runner.start(**_start_kwargs(
+        tmp_path, "r-brief-tamper", ops, brief_source=source,
+        merge_authority="human",
+    ))
+    destination = (
+        Path(state.target_dir) / state.bundle_dir / brief_input.PRIMARY_REL
+    )
+    destination.write_text(
+        _customer_brief_text().replace("Goal", "Changed"), encoding="utf-8"
+    )
+    state.status = "running"
+    rs.save(state)
+    calls_before = len(ops.calls)
+
+    result = runner.advance(state, ops)
+
+    assert result.status == "stopped_author"
+    assert len(ops.calls) == calls_before
+    findings = rs.run_dir(state.run_id) / "brief-findings.txt"
+    assert "не совпадает" in findings.read_text(encoding="utf-8")
+
+
+def test_brief_materialization_refuses_changed_durable_intake(
+    tmp_path: Path, runs_root,
+) -> None:
+    source = _brief_source(tmp_path)
+    state = rs.new_run(
+        subject="brief", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+        target_dir=str(tmp_path / "target"), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id="r-brief-intake",
+        brief=source.as_state(),
+    )
+    Path(state.target_dir).mkdir()
+    intake = rs.run_dir(state.run_id) / "brief-input"
+    brief_input.materialize(source, intake, ".")
+    staged = intake / brief_input.PRIMARY_REL
+    staged.write_text(
+        _customer_brief_text().replace("Goal", "Changed"), encoding="utf-8"
+    )
+    state.ops["branch"] = {"status": "completed"}
+    rs.save(state)
+    ops = FakeOps()
+
+    result = runner.advance(state, ops)
+
+    assert result.status == "stopped_author"
+    assert ops.authored == []
+    assert not (Path(state.target_dir) / state.bundle_dir).exists()
+
+
+def test_brief_coverage_stops_after_requirements_before_next_paid_author(
+    tmp_path: Path, runs_root,
+) -> None:
+    source = _brief_source(tmp_path)
+    ops = FakeOps()
+
+    state = runner.start(**_start_kwargs(
+        tmp_path, "r-brief-coverage", ops, brief_source=source,
+        merge_authority="human",
+    ))
+
+    assert state.status == "stopped_author"
+    assert ops.authored == ["charter", "requirements"]
+    assert "author-behaviour" not in state.ops
+    findings = (
+        rs.run_dir(state.run_id) / "brief-findings.txt"
+    ).read_text(encoding="utf-8")
+    assert "GC-BRIEF-COVERAGE" in findings
+    assert "NFR-01" in findings
+
+
+def test_brief_source_pin_is_required_by_prospective_gate(
+    tmp_path: Path, runs_root,
+) -> None:
+    source = _brief_source(tmp_path)
+
+    class MissingSourcePinOps(FakeOps):
+        def author(
+            self, target_dir, kind, subject, bundle_dir, brief_context=None,
+        ):
+            rc = super().author(
+                target_dir, kind, subject, bundle_dir,
+                brief_context=brief_context,
+            )
+            path = Path(target_dir) / bundle_dir
+            if kind == "charter":
+                (path / "00-charter.md").write_text(
+                    "---\nspec_stage: charter\nstatus: draft\n"
+                    "traces_to: [discovery-brief]\n---\n# charter\n",
+                    encoding="utf-8",
+                )
+            if kind == "requirements":
+                req = path / "10-requirements.md"
+                req.write_text(
+                    req.read_text(encoding="utf-8")
+                    + "\n#### NFR-01: Safety\n**Priority**: Should\n",
+                    encoding="utf-8",
+                )
+            return rc
+
+    state = runner.start(**_start_kwargs(
+        tmp_path, "r-brief-unpinned", MissingSourcePinOps(),
+        brief_source=source, merge_authority="human",
+    ))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        rs.run_dir(state.run_id) / "gate-findings.txt"
+    ).read_text(encoding="utf-8")
+    assert "source-ребро discovery-brief без upstream_hashes" in findings
+
+
+def test_real_candidate_gate_accepts_materialized_brief_source(
+    tmp_path: Path, runs_root,
+) -> None:
+    """The real steward CLI accepts the source layer and charter source edge."""
+    from governance.ops import DEVTOOLS_ROOT, RealOps
+
+    if not (DEVTOOLS_ROOT / ".venv" / "bin" / "gate-check").exists():
+        pytest.skip("gate-check CLI недоступен (uv sync без группы governance)")
+
+    class CliBriefOps(_DtSmokeOps):
+        def author(
+            self, target_dir, kind, subject, bundle_dir, brief_context=None,
+        ):
+            rc = _DtSmokeOps.author(
+                self, target_dir, kind, subject, bundle_dir
+            )
+            bundle = Path(target_dir) / bundle_dir
+            if kind == "charter":
+                assert brief_context is not None
+                pins = brief_context["source_blobs"]
+                (bundle / "00-charter.md").write_text(
+                    "---\nspec_stage: charter\nstatus: draft\n"
+                    "owner_role: product\n"
+                    f"traces_to: [{', '.join(pins)}]\n"
+                    "upstream_hashes:\n"
+                    + "".join(
+                        f'  {name}: "{blob}"\n'
+                        for name, blob in pins.items()
+                    )
+                    + "---\n# Charter\n",
+                    encoding="utf-8",
+                )
+            if kind == "requirements":
+                path = bundle / "10-requirements.md"
+                path.write_text(
+                    path.read_text(encoding="utf-8")
+                    + "\n#### NFR-01: Safety\n**Priority**: Should\n",
+                    encoding="utf-8",
+                )
+            return rc
+
+        def gate_check_candidate(
+            self, target_dir: str, bundle_dir: str, profile: str
+        ) -> tuple[int, str]:
+            self.calls.append(("gate_check_candidate", bundle_dir))
+            return RealOps().gate_check_candidate(
+                target_dir, bundle_dir, profile
+            )
+
+    source = _brief_source(tmp_path)
+    kwargs = _start_kwargs(
+        tmp_path,
+        "r-real-brief-gate",
+        CliBriefOps(review_exit=1),
+        brief_source=source,
+        merge_authority="human",
+    )
+    roles = Path(kwargs["target_dir"]) / "profiles/roles.yaml"
+    roles.write_text(
+        (Path(__file__).parents[1] / "profiles/roles.yaml").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+    state = runner.start(**kwargs)
+
+    assert state.status != "stopped_gate", (
+        (rs.run_dir(state.run_id) / "gate-findings.txt").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state.ops["gate-candidate"]["status"] == "completed"
 
 
 def _green_bundle(profile, bundle) -> bundle_state.BundleState:

@@ -449,6 +449,12 @@ class _StubOps:
         """
         return _bundle_from_tree(target_dir, path)
 
+    def show_file_bytes(
+        self, target_dir: str, ref: str, path: str
+    ) -> bytes | None:
+        candidate = Path(target_dir) / path
+        return candidate.read_bytes() if candidate.is_file() else None
+
 
 def _target(tmp_path: Path) -> Path:
     target = tmp_path / "alpha"
@@ -3045,6 +3051,40 @@ def test_gate_refusal_on_unresolved_is_not_a_debt(
     assert not _effects(ops)
 
 
+def test_gate_refusal_on_changed_discovery_source_is_not_retryable(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from governance import run_state as rs
+
+    state = _recon_state(tmp_path, monkeypatch)
+    source = Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"changed source\n")
+    state.brief = {
+        "frame": "customer",
+        "primary": "00-discovery/brief.md",
+        "requirements_source": "00-discovery/brief.md",
+        "source_paths": ["00-discovery/brief.md"],
+        "source_blobs": {"discovery-brief": "0" * 40},
+    }
+    rs.save(state)
+    before = _ledger_bytes()
+    ops = _ReconOps()
+
+    with pytest.raises(RuntimeError, match="запрещён") as failure:
+        task_bridge.deliver_for_run(state, ops)
+
+    message = str(failure.value)
+    assert "новый workstream/run" in message
+    assert "повторите вызов" not in message
+    assert _ledger_bytes() == before
+    assert not _effects(ops)
+
+    notice = task_bridge._debt_notice(state, ops, None)
+    assert "расходится с intake descriptor" in notice
+    assert "новый workstream/run" in notice
+
+
 def test_wave_fate_is_recorded_before_any_delivery_effect(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -5197,6 +5237,130 @@ def test_content_anchor_is_signature_free(tmp_path: Path) -> None:
         before_bytes.decode("utf-8")
     ), "артефактный anchor подпись видит"
     assert task_bridge._content_anchor(target, bundle, None) == before_hash
+
+
+def test_content_anchor_includes_exact_discovery_source_bytes(
+    tmp_path: Path,
+) -> None:
+    target = str(_target(tmp_path))
+    bundle = "workstreams/WS-alpha-7/spec"
+    source = Path(target) / bundle / "00-discovery/brief.md"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"---\nstatus: approved\n---\nsource v1\n")
+    brief = {
+        "source_paths": ["00-discovery/brief.md"],
+    }
+    before = task_bridge._content_anchor(target, bundle, None, brief)
+
+    # Source is immutable input, not a governance node: even a field that
+    # resembles approval provenance is hashed byte-for-byte, without the
+    # signature stripping applied to the six authored nodes.
+    source.write_bytes(b"---\nstatus: approved\napproved_by: x\n---\nsource v1\n")
+
+    assert task_bridge._content_anchor(target, bundle, None, brief) != before
+
+
+def test_content_anchor_names_missing_discovery_source(tmp_path: Path) -> None:
+    target = str(_target(tmp_path))
+    bundle = "workstreams/WS-alpha-7/spec"
+    brief = {"source_paths": ["00-discovery/brief.md"]}
+
+    with pytest.raises(RuntimeError, match="immutable discovery source") as error:
+        task_bridge._content_anchor(target, bundle, None, brief)
+
+    assert "новый workstream/run" in str(error.value)
+
+
+def test_delivered_content_anchor_requires_source_from_pr_head(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    source = (
+        Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
+    )
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("present only in current base\n", encoding="utf-8")
+    state.brief = {"source_paths": ["00-discovery/brief.md"]}
+
+    class MissingHeadSource(_SupersedeOps):
+        def show_file(self, target_dir, ref, path):
+            self.calls.append(("show_file", ref, path))
+            if path.endswith("/00-discovery/brief.md"):
+                return None
+            return _bundle_from_tree(target_dir, path)
+
+        def show_file_bytes(self, target_dir, ref, path):
+            self.calls.append(("show_file_bytes", ref, path))
+            if path.endswith("/00-discovery/brief.md"):
+                return None
+            text = _bundle_from_tree(target_dir, path)
+            return text.encode("utf-8") if text is not None else None
+
+    ops = MissingHeadSource()
+
+    assert tb._delivered_content_anchor(
+        state, ops, {"headRefOid": "delivered-head"}, None
+    ) is None
+    assert source.exists(), "current base source exists but must not be used"
+
+
+def test_delivered_content_anchor_preserves_exact_source_from_pr_head(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    source = (
+        Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
+    )
+    source.parent.mkdir(parents=True, exist_ok=True)
+    data = "точный source из head\n".encode("utf-8")
+    source.write_bytes(data)
+    state.brief = {"source_paths": ["00-discovery/brief.md"]}
+
+    class HeadBytes(_SupersedeOps):
+        def show_file_bytes(self, target_dir, ref, path):
+            if path.endswith("/00-discovery/brief.md"):
+                return data
+            return super().show_file_bytes(target_dir, ref, path)
+
+    assert tb._delivered_content_anchor(
+        state, HeadBytes(), {"headRefOid": "delivered-head"}, None
+    ) == tb._content_anchor(
+        state.target_dir, state.bundle_dir, None, state.brief
+    )
+
+
+def test_supersede_is_noop_when_bundle_and_source_are_unchanged(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    source = (
+        Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
+    )
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("unchanged source\n", encoding="utf-8")
+    state.brief = {"source_paths": ["00-discovery/brief.md"]}
+    _stamp_base_as_previous_delivery(state)
+    content = tb._content_anchor(
+        state.target_dir, state.bundle_dir, None, state.brief
+    )
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "old",
+        "content_anchor": content,
+    }
+    rs.save(state)
+    before = (rs.run_dir(state.run_id) / "run.json").read_bytes()
+
+    assert tb.deliver_superseded(state, _SupersedeOps()) == tb.SupersedeResult(
+        "noop"
+    )
+    assert (rs.run_dir(state.run_id) / "run.json").read_bytes() == before
 
 
 def test_content_anchor_does_not_leak_signature_through_pins(
