@@ -104,9 +104,15 @@ workstreams/<ws-id>/spec/00-discovery/brief.md
 или вторым source-файлом — fail-closed.
 
 Source-слой материализуется новым write-ahead op `materialize-brief` после
-создания ветки S1 и до первого author-вызова S2. Коммит S3 уже коммитит весь
+создания ветки S1 и до первого author-вызова S2. Коммит S3 коммитит весь
 `bundle_dir`, поэтому source и шесть authored-узлов едут одним bundle-PR.
-Отдельного brief-PR нет.
+Отдельного brief-PR нет. Source-файлы добавляются в индекс поштучно и
+принудительно (`git add -f`): ignore-правила репо-цели (`workstreams/*/spec/*`
+с carve-out только `!*.md`) про подкаталог `00-discovery/` не знают, и
+обычный `git add -- <bundle_dir>` пропускал его молча (живой прогон
+2026-09-14, spec-runner#490). После коммита раннер fail-closed сверяет blob
+каждого source-файла в HEAD с descriptor: отсутствие или расхождение ⇒
+`stopped_author` с именем файла, push не выполняется.
 
 `RunState` получает обратносуместимое опциональное поле `brief`:
 

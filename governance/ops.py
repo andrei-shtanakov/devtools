@@ -165,7 +165,8 @@ class Ops(Protocol):
     ) -> int: ...
 
     def commit_paths(
-        self, target_dir: str, paths: list[str], message: str
+        self, target_dir: str, paths: list[str], message: str,
+        force_paths: tuple[str, ...] = (),
     ) -> None: ...
 
     def gate_check_s8(
@@ -1347,15 +1348,34 @@ class RealOps:
         )
         return done.returncode
 
-    def commit_paths(self, target_dir: str, paths: list[str], message: str) -> None:
+    def commit_paths(
+        self, target_dir: str, paths: list[str], message: str,
+        force_paths: tuple[str, ...] = (),
+    ) -> None:
         """`git add -- <paths>` (явный список, не `-A`) + коммит.
 
         Круг 5 (codex-ревью PR #88): `git add -A` сгребал в коммит прогона
         чужие незакоммиченные изменения где угодно в `target_dir` — заменено
         на явный список путей (runner передаёт ровно `[bundle_dir]`). Пустой
         индекс после `add` (нечего коммитить) — не ошибка.
+
+        `force_paths` — файлы, которые обязаны попасть в коммит даже под
+        ignore-правилом репо-цели (`git add -f -- <file>`, поштучно, не
+        каталогом): source-слой E1 `00-discovery/`. Живой прогон 2026-09-14
+        (spec-runner#490): `.gitignore` цели держит `workstreams/*/spec/*` с
+        carve-out только `!*.md`, подкаталог под него не попадает, и
+        `git add -- <bundle_dir>` молча пропустил оба source-файла — бандл
+        уехал PR-ом без источника, на который пинуется charter.
         """
         subprocess.run(["git", "add", "--", *paths], cwd=target_dir, check=True)
+        if force_paths:
+            # `--literal-pathspecs`: имя source-файла приходит из traces_to
+            # engineer-брифа и может нести `[`, `*`, `?` — без literal git
+            # прочёл бы их как glob и не нашёл бы файл (ревью #220).
+            subprocess.run(
+                ["git", "--literal-pathspecs", "add", "-f", "--", *force_paths],
+                cwd=target_dir, check=True,
+            )
         clean = subprocess.run(
             ["git", "diff", "--cached", "--quiet"], cwd=target_dir,
         )

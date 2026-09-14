@@ -1045,8 +1045,51 @@ def _step_commit(state: RunState, ops: Ops) -> bool:
         f"docs(governance): behaviour bundle {state.ws_id} — {state.subject}\n\n"
         "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
     )
-    ops.commit_paths(state.target_dir, [state.bundle_dir], message)
+    force: tuple[str, ...] = ()
+    if state.brief is not None:
+        # Source-слой E1 лежит в подкаталоге bundle_dir; ignore-правила
+        # репо-цели (`workstreams/*/spec/*` + `!*.md`) его не пускают —
+        # добавляем поштучно с `-f` и ниже сверяем, что он в HEAD.
+        force = tuple(
+            f"{state.bundle_dir}/{rel}" for rel in state.brief["source_paths"]
+        )
+    ops.commit_paths(
+        state.target_dir, [state.bundle_dir], message, force_paths=force,
+    )
+    if state.brief is not None and not _source_layer_committed(state, ops):
+        return False
     op_complete(state, key)
+    return True
+
+
+def _source_layer_committed(state: RunState, ops: Ops) -> bool:
+    """Fail-closed после S3: каждый source-файл лежит в HEAD своими байтами.
+
+    Сверка по blob-ам descriptor'а, не по факту вызова `git add`: ignore-
+    правило цели, чужой хук или усечённый add оставляют файл вне коммита
+    молча, а bundle-PR без источника — это charter с пинами на blob-ы,
+    которых у читателя нет (spec-runner#490, круг 1 ревью).
+    """
+    assert state.brief is not None
+    head = ops.rev_parse(state.target_dir, "HEAD")
+    if head is None:
+        return _brief_stop(state, "HEAD не резолвится после коммита S3")
+    paths = list(state.brief["source_paths"])
+    blobs = list(state.brief["source_blobs"].values())
+    if len(paths) != len(blobs):
+        return _brief_stop(
+            state, "descriptor brief: source_paths и source_blobs разной длины"
+        )
+    for rel, expected in zip(paths, blobs):
+        full = f"{state.bundle_dir}/{rel}"
+        actual = ops.blob_in_commit(state.target_dir, head, full)
+        if actual != expected:
+            return _brief_stop(
+                state,
+                f"source layer не в коммите S3: {full} — в HEAD "
+                f"{actual or 'отсутствует'}, ожидался blob {expected} "
+                "(ignore-правило .gitignore цели? add без -f?)",
+            )
     return True
 
 
