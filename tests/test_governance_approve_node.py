@@ -2435,9 +2435,9 @@ def test_agent_merge_refusal_leaves_finalize_to_human(world: World) -> None:
 
 
 def test_transient_refusal_is_retried_within_the_call(world: World) -> None:
-    """UNKNOWN у форджи (код 3) / сеть (код 2) — транзиент: повтор с паузой
-    в том же вызове, мерж состоялся, заявка завершена."""
-    world.forge.agent_merge_rc_seq = [3, 2, 0]
+    """UNKNOWN у форджи / сеть (код 2) — транзиент: повтор с паузой в том же
+    вызове, мерж состоялся, заявка завершена."""
+    world.forge.agent_merge_rc_seq = [2, 2, 0]
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
@@ -2452,17 +2452,58 @@ def test_transient_refusal_is_retried_within_the_call(world: World) -> None:
 def test_open_finalize_is_merged_by_agent_on_repeat_call(world: World) -> None:
     """Прошлый заход исчерпал попытки — следующий вызов мержит сам, без
     человека: дефолт D5 не деградирует до человеческого мержа."""
-    world.forge.agent_merge_rc_seq = [3, 3, 3]
+    world.forge.agent_merge_rc_seq = [2, 2, 2]
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
     first = approve(world, "charter")
-    assert "отказал кодом 3" in first.message
+    assert "отказал кодом 2" in first.message
+    assert "повторный вызов пробует снова" in first.message
     assert al.is_live(world.state.ops[key])
     second = approve(world, "charter")
     assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
     assert "завершена" in second.message
     assert len(world.forge.merge_calls) == 4
+
+
+def test_guard_code_is_not_retried_and_not_promised(world: World) -> None:
+    """Код 3 — гвард обвязки: одна попытка, без паузы, диагностика не обещает
+    успешный повтор (ревью #233)."""
+    world.forge.agent_merge_rc = 3
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    outcome = approve(world, "charter")
+    assert len(world.forge.merge_calls) == 1
+    assert "отказал кодом 3" in outcome.message
+    assert "повтор не поможет" in outcome.message
+    assert "пробует снова" not in outcome.message
+    assert al.is_live(world.state.ops[key])
+
+
+def test_repeat_call_restores_missing_envelope_object_by_fetch(
+    world: World,
+) -> None:
+    """Клон пересоздан при живом леджере: объект конверта подтягивается
+    веткой заявки, гейт формы читает его и агент мержит (ревью #233)."""
+    world.forge.agent_merge_rc_seq = [2, 2, 2]
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+    rec = world.state.ops[key]
+    _git(world.target, "switch", "-q", "master")
+    _git(world.target, "branch", "-q", "-D", rec["finalize_branch"])
+    _git(
+        world.target, "update-ref", "-d",
+        f"refs/remotes/origin/{rec['finalize_branch']}",
+    )
+    _git(world.target, "reflog", "expire", "--expire=now", "--all")
+    _git(world.target, "gc", "-q", "--prune=now")
+    gone = f"{rec['finalize_head_sha']}^{{commit}}"   # голый sha не проверяет объект
+    assert world.ops.rev_parse(str(world.target), gone) is None
+    approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
 
 
 def test_finalize_merge_policy_axes(tmp_path: Path, monkeypatch) -> None:

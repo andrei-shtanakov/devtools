@@ -1472,9 +1472,9 @@ def _reconcile_finalize(
             if reason is None:
                 return _reconcile_finalize(state, ops, dag, op, key)
             return ApprovalOutcome(
-                f"финализирующий PR #{pr} открыт: {reason} — мержит человек "
+                f"финализирующий PR #{pr} открыт: {reason} "
                 f"(`make human-merge`). Заявка {key} жива всегда, пока он "
-                "открыт; повторный вызов пробует агентский мерж снова",
+                "открыт",
                 request=key,
             )
         return ApprovalOutcome(
@@ -1793,9 +1793,8 @@ def _publish_envelope(
         return ApprovalOutcome(
             f"подпись узлов {', '.join(nodes)} вынесена финализирующим PR #{pr} "
             f"(approved_by = {op['merged_by']}, approved_at = "
-            f"{op['merged_at']}); {reason} — PR остаётся человеку "
-            "(`make human-merge`), заявка жива; повторный вызов пробует "
-            "агентский мерж снова",
+            f"{op['merged_at']}); {reason}. PR остаётся человеку "
+            "(`make human-merge`), заявка жива",
             request=key,
             changed=tuple(changed),
         )
@@ -1813,12 +1812,19 @@ def _publish_envelope(
 
 _ENVELOPE_KEYS = ("status", "approved_by", "approved_at")
 #: Агентский мерж finalize: форджа считает mergeability асинхронно, и сразу
-#: после создания PR обвязка может увидеть UNKNOWN (код 3) либо сеть (код 2)
-#: — коды транзиентные, попытка повторяется с паузой; 4 (форджа отклонила)
-#: не повторяется. `_SLEEP` — точка подмены в тестах.
+#: после создания PR обвязка видит UNKNOWN — «факт не установлен», код 2
+#: (как сеть/неразобранные факты); только он транзиентен: попытка
+#: повторяется с паузой в том же вызове, а открытый finalize пробуется
+#: снова следующим вызовом. Код 3 — гвард (лейбл, форма, authority-root):
+#: повтор не поможет; 4 — форджа отклонила. `_SLEEP` — точка подмены.
 _MERGE_ATTEMPTS = 3
 _MERGE_RETRY_DELAY = 2.0
-_TRANSIENT_MERGE_CODES = frozenset({2, 3})
+_TRANSIENT_MERGE_CODES = frozenset({2})
+_MERGE_CODE_HINTS = {
+    2: "факт не установлен или сеть — повторный вызов пробует снова",
+    3: "гвард обвязки — мержит человек, повтор не поможет",
+    4: "форджа отклонила мерж — мержит человек",
+}
 _SLEEP = time.sleep
 
 
@@ -1835,6 +1841,19 @@ def _try_agent_merge(
     PR остаётся человеку. Идемпотентно: гейт формы читает коммит, голова
     пинована — повторный вызов `--approve-node` пробует снова (ревью #233).
     """
+    # `^{commit}` обязателен: голый 40-hex `rev-parse --verify` принимает
+    # синтаксически, не проверяя, что объект есть в клоне.
+    if ops.rev_parse(state.target_dir, f"{head}^{{commit}}") is None:
+        # Клон мог быть пересоздан при живом леджере: объект конверта
+        # подтягивается веткой заявки, как на пути возобновления публикации,
+        # а не выдаётся за дефект формы (ревью #233).
+        ops.fetch_branch(state.target_dir, op["finalize_branch"])
+        if ops.rev_parse(state.target_dir, f"{head}^{{commit}}") is None:
+            return (
+                f"коммит конверта {head[:8]} недоступен в клоне. Процедура: "
+                f"подтяните ветку заявки (git fetch origin "
+                f"{op['finalize_branch']}) и повторите вызов"
+            )
     defect = _envelope_form_defect(state, ops, dag, op, nodes, head)
     if defect is not None:
         return f"агентский мерж НЕ выполнен — {defect}"
@@ -1849,7 +1868,8 @@ def _try_agent_merge(
         if code not in _TRANSIENT_MERGE_CODES or attempt == _MERGE_ATTEMPTS - 1:
             break
         _SLEEP(_MERGE_RETRY_DELAY)
-    return f"агентский мерж отказал кодом {code}"
+    hint = _MERGE_CODE_HINTS.get(code, "мержит человек")
+    return f"агентский мерж отказал кодом {code}: {hint}"
 
 
 def _strip_envelope(meta: dict) -> dict:

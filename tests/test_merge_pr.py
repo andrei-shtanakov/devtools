@@ -564,23 +564,26 @@ def test_allowlisted_merge_state_merges(fleet: Fleet, state: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "state",
-    # BEHIND/DIRTY — запрещающие; DRAFT — мержить нечего; UNKNOWN — «форджа
-    # ещё не посчитала»; пусто/null/мусор — факт не разобран; NEW_ENUM_VALUE —
-    # значение, которого GitHub ещё не придумал.
-    ["BEHIND", "DIRTY", "DRAFT", "UNKNOWN", "", "null", "NEW_ENUM_VALUE"],
+    ("state", "code"),
+    # BEHIND/DIRTY — запрещающие; DRAFT — мержить нечего; NEW_ENUM_VALUE —
+    # значение, которого GitHub ещё не придумал: гвард, код 3. UNKNOWN —
+    # «форджа ещё не посчитала»; пусто/null — факт не разобран: факт НЕ
+    # УСТАНОВЛЕН, код 2 — вызывающий вправе повторить (ревью #233).
+    [("BEHIND", 3), ("DIRTY", 3), ("DRAFT", 3), ("NEW_ENUM_VALUE", 3),
+     ("UNKNOWN", 2), ("", 2), ("null", 2)],
 )
 def test_non_allowlisted_merge_state_does_not_merge(
-    fleet: Fleet, state: str
+    fleet: Fleet, state: str, code: int
 ) -> None:
     """Неустановленный факт двери не открывает — включая ЭТОТ факт.
 
     Регрессия на находку ревью #183 (круг 4): проверка была denylist'ом, и
     `mergeStateStatus` оставался единственным фактом PR, чьё пустое или
-    неизвестное значение читалось В ПОЛЬЗУ мержа.
+    неизвестное значение читалось В ПОЛЬЗУ мержа. Код различает
+    «не установлен» (2, повтор уместен) и «запрещает» (3, гвард).
     """
     res = fleet.run(GH_STUB_HEADREF="feat/ordinary", GH_STUB_MERGESTATE=state)
-    assert res.returncode == 3, res.stdout
+    assert res.returncode == code, res.stdout
     assert fleet.merge_calls() == []
 
 
