@@ -1348,7 +1348,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       verdicts из ledger до write-ahead доставки, а `deliver` переносит
       точные байты в один `commit_paths` вместе с tasks; прямой legacy-вызов
       без run-контекста сохраняет прежний контракт.
-- [ ] E1 Вход конвейера из discovery-brief: `spec-loop --brief <path>` — бриф обязан пройти вендоренный gate_check (pass, иначе fail-closed), хэш брифа входит в `upstream_hashes` charter, бриф лежит нулевым узлом в `workstreams/<ws-id>/spec/` и едет бандл-PR-ом; промпты charter/requirements получают бриф как источник (G-NN/FR-NN переносятся с трассировкой), гвард «каждый Must-FR брифа встречается в requirements»; приёмка — живой прогон engineer-фрейм → бриф → spec-loop → approved tasks-спека → исполнение spec-runner @owner:github:andrei-shtanakov @id:spec-loop-brief-input
+- [x] E1 Вход конвейера из discovery-brief: `spec-loop --brief <path>` — бриф обязан пройти вендоренный gate_check (pass, иначе fail-closed), хэш брифа входит в `upstream_hashes` charter, бриф лежит нулевым узлом в `workstreams/<ws-id>/spec/` и едет бандл-PR-ом; промпты charter/requirements получают бриф как источник (G-NN/FR-NN переносятся с трассировкой), гвард «каждый Must-FR брифа встречается в requirements»; приёмка — живой прогон engineer-фрейм → бриф → spec-loop → approved tasks-спека → исполнение spec-runner @owner:github:andrei-shtanakov @id:spec-loop-brief-input
       Граница author ≠ execute discovery сохраняется: PR открывает конвейер,
       не discovery. gate_check вендорится КОДОМ пиненой копией по образцу
       discovery (`discovery/src/discovery/contract/`: copy-integrity против
@@ -1357,6 +1357,13 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       uv-пином в `[tool.uv.sources]` не подключается — механизм пина steward
       здесь неприменим. Дизайн — отдельной спекой в
       `docs/superpowers/specs/` до кода; SDD-прогон как у acceptance-узла.
+      Доставлено: код — devtools#219 (мерж `e2aea14`), дефект коммита
+      source-слоя — devtools#220; живая приёмка 2026-09-14 на spec-runner#485 —
+      `docs/evidence/2026-09-14-discovery-brief-spec-loop-run.md`: engineer-бриф
+      (approved customer upstream) → bundle #490 → §I12 #493–#504 → tasks #505 →
+      approve #506 → `run --all --strict` 4/4 success (integration-PR #508, #509,
+      #512, #513), spec-runner master `7d3def0`. Попутно: spec-runner#507, #510→#511,
+      devtools#221 (finalize-PR), devtools#223 (пин базы accept-pr).
 - [ ] Finalize-PR §I12 мержит агент по умолчанию; человеческий мерж — настройка, а не форма ветки: finalize-PR только записывает уже состоявшийся факт (подпись сформирована мержем candidate-PR учёткой из allowlist) и подписи не создаёт, поэтому пункт 2 категорических отказов `merge-pr.sh` и лейбл `human-merge-required` на finalize снимаются; обязательный человеческий мерж finalize остаётся opt-in через конфигурацию (репо-уровень `Мерж: человек` / `merge_policy` экосистемного конфига / объявление прогона `merge_authority: human`, ADR-ECO-008 D5 — прогон может только ужесточить); candidate-PR по-прежнему всегда человек — это сам акт. Человеческий мерж (candidate всегда, finalize по настройке) — не только кнопка в браузере: нужен триггер по команде (`make`-цель/CLI, кнопка в консоли — форма не важна), который выполняет мерж от учётки человека из allowlist, чтобы подпись §I12 осталась верной; приёмка — цикл одобрения шести узлов с 6 человеческими актами вместо 12 и негативный контроль: при включённой настройке агент отказывает на finalize, как сегодня @owner:github:andrei-shtanakov @id:finalize-pr-agent-merge-default
       Решение владельца 2026-09-14 (живая приёмка E1 на spec-runner#490:
       6 узлов × 2 PR = 12 ручных мержей на бандл — узкое место DarkFactory,
