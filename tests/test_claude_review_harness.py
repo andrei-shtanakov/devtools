@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -169,6 +170,50 @@ def test_shim_refuses_unknown_arg_and_wrong_sandbox(tmp_path: Path) -> None:
 
 # --- review-pr.sh: резолюция харнесса ---------------------------------------
 
+#: Стаб СВЕЖЕГО кита (steward @ a2d7e71): несёт литерал --print-review-cmd
+#: (feature-detect), резолвит REVIEW_HARNESS/REVIEW_MODEL как настоящий
+#: local.sh §4 (REVIEW_CMD-оверрайд; пустая REVIEW_MODEL — код 2) и пишет в
+#: HARNESS_KIT_LOG то, что review-pr.sh ему передал окружением.
+NEW_KIT_STUB = """#!/bin/sh
+{
+  echo "REVIEW_CMD=${REVIEW_CMD-<unset>}"
+  echo "REVIEW_HARNESS=${REVIEW_HARNESS-<unset>}"
+  echo "REVIEW_MODEL=${REVIEW_MODEL-<unset>}"
+  echo "PATH=$PATH"
+} >> "${HARNESS_KIT_LOG:?}"
+if [ -n "${REVIEW_KIT_STUB_FAIL:-}" ]; then
+  echo "кит отказал: адаптера нет" >&2; exit 2
+fi
+if [ -n "${REVIEW_CMD:-}" ]; then
+  review_cmd="$REVIEW_CMD"
+else
+  if [ -n "${REVIEW_MODEL+x}" ] && [ -z "$REVIEW_MODEL" ]; then
+    echo "REVIEW_MODEL задан пустым" >&2; exit 2
+  fi
+  case "${REVIEW_HARNESS-codex}" in
+    codex) review_cmd="codex exec${REVIEW_MODEL:+ -m $REVIEW_MODEL}" ;;
+    claude) review_cmd="harness-claude --model ${REVIEW_MODEL:-claude-opus-5}" ;;
+    *) echo "неизвестный харнесс" >&2; exit 2 ;;
+  esac
+fi
+case " $* " in
+  *" --print-review-cmd "*) echo "$review_cmd"; exit 0 ;;
+esac
+echo "stub verdict body"
+exit 0
+"""
+
+
+def _new_kit_fleet(tmp_path: Path) -> tuple[Path, Path]:
+    """FLEET_ROOT с репо `demo`, чей scripts/review/local.sh — свежий кит."""
+    fleet_root = tmp_path / "fleet"
+    kit = fleet_root / "demo" / "scripts" / "review"
+    kit.mkdir(parents=True)
+    local_sh = kit / "local.sh"
+    local_sh.write_text(NEW_KIT_STUB, encoding="utf-8")
+    local_sh.chmod(local_sh.stat().st_mode | stat.S_IXUSR)
+    return fleet_root, tmp_path / "kit.log"
+
 
 def _resolve(
     tmp_path: Path,
@@ -176,6 +221,8 @@ def _resolve(
     argv: list[str] = (),
     env_extra: dict[str, str] | None = None,
     cfg: str | None = None,
+    repo: str = "dummy",
+    expect_rc: int = 0,
 ) -> str:
     cfg_path = tmp_path / "harness.env"
     if cfg is not None:
@@ -183,19 +230,22 @@ def _resolve(
     env = {
         **os.environ,
         "AI_PROSTO_HARNESS_ENV": str(cfg_path),
+        # Герметичность: без FLEET_ROOT зонд нашёл бы настоящий чекаут
+        # репо `dummy`/`demo` в воркспейсе.
+        "FLEET_ROOT": str(tmp_path / "fleet"),
     }
     env.pop("REVIEW_HARNESS", None)
     env.pop("REVIEW_MODEL", None)
     env.pop("REVIEW_CMD", None)
     env.update(env_extra or {})
     res = subprocess.run(
-        ["sh", str(REVIEW_PR), "dummy", "1", "--print-review-cmd", *argv],
+        ["sh", str(REVIEW_PR), repo, "1", "--print-review-cmd", *argv],
         capture_output=True,
         text=True,
         env=env,
     )
-    assert res.returncode == 0, res.stderr
-    return res.stdout.strip()
+    assert res.returncode == expect_rc, res.stderr
+    return res.stdout.strip() if expect_rc == 0 else res.stderr.strip()
 
 
 def test_resolution_builtin_default_is_codex(tmp_path: Path) -> None:
@@ -317,4 +367,108 @@ def test_config_accepts_export_prefix_and_indent(tmp_path: Path) -> None:
         tmp_path,
         cfg="  export REVIEW_HARNESS=claude\nexport REVIEW_MODEL=claude-opus-5\n",
     )
+    assert cmd == "claude-review --model claude-opus-5"
+
+
+# --- review-pr.sh: свежий кит (devtools#222) ---------------------------------
+
+
+def _kit_env(log: Path) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in log.read_text().splitlines())
+
+
+def test_new_kit_default_is_codex_via_kit_env(tmp_path: Path) -> None:
+    fleet_root, log = _new_kit_fleet(tmp_path)
+    cmd = _resolve(tmp_path, repo="demo", env_extra={"HARNESS_KIT_LOG": str(log)})
+    assert cmd == "codex exec"
+    env = _kit_env(log)
+    assert env["REVIEW_HARNESS"] == "codex"
+    assert env["REVIEW_MODEL"] == "<unset>"
+    assert env["REVIEW_CMD"] == "<unset>"
+
+
+def test_new_kit_claude_config_goes_through_kit_not_shim(tmp_path: Path) -> None:
+    """Свежий кит: строка ревьюера — от кита (`harness-claude`), окружение
+    несёт REVIEW_HARNESS/REVIEW_MODEL, REVIEW_CMD не собирается и
+    scripts/harness в PATH не подмешивается."""
+    fleet_root, log = _new_kit_fleet(tmp_path)
+    cmd = _resolve(
+        tmp_path,
+        repo="demo",
+        cfg="REVIEW_HARNESS=claude\nREVIEW_MODEL=claude-opus-5\n",
+        env_extra={"HARNESS_KIT_LOG": str(log)},
+    )
+    assert cmd == "harness-claude --model claude-opus-5"
+    env = _kit_env(log)
+    assert env["REVIEW_HARNESS"] == "claude"
+    assert env["REVIEW_MODEL"] == "claude-opus-5"
+    assert env["REVIEW_CMD"] == "<unset>"
+    assert "scripts/harness" not in env["PATH"]
+
+
+def test_new_kit_cli_flags_beat_env_and_config(tmp_path: Path) -> None:
+    fleet_root, log = _new_kit_fleet(tmp_path)
+    cmd = _resolve(
+        tmp_path,
+        repo="demo",
+        argv=["--harness", "claude", "--model", "claude-sonnet-4-6"],
+        cfg="REVIEW_HARNESS=codex\n",
+        env_extra={"REVIEW_HARNESS": "codex", "REVIEW_MODEL": "gpt-5.5", "HARNESS_KIT_LOG": str(log)},
+    )
+    assert cmd == "harness-claude --model claude-sonnet-4-6"
+    assert _kit_env(log)["REVIEW_MODEL"] == "claude-sonnet-4-6"
+
+
+def test_new_kit_harness_flag_without_model_does_not_inherit_env_model(
+    tmp_path: Path,
+) -> None:
+    """Модель привязана к слою: `--harness codex` при REVIEW_MODEL=claude-opus-5
+    в окружении обязан дать `codex exec`, а не `codex exec -m claude-opus-5`
+    (и не пустую REVIEW_MODEL, которую кит отверг бы кодом 2)."""
+    fleet_root, log = _new_kit_fleet(tmp_path)
+    cmd = _resolve(
+        tmp_path,
+        repo="demo",
+        argv=["--harness", "codex"],
+        env_extra={"REVIEW_HARNESS": "claude", "REVIEW_MODEL": "claude-opus-5", "HARNESS_KIT_LOG": str(log)},
+    )
+    assert cmd == "codex exec"
+    assert _kit_env(log)["REVIEW_MODEL"] == "<unset>"
+
+
+def test_new_kit_external_review_cmd_wins_without_flags(tmp_path: Path) -> None:
+    fleet_root, log = _new_kit_fleet(tmp_path)
+    cmd = _resolve(
+        tmp_path,
+        repo="demo",
+        cfg="REVIEW_HARNESS=claude\n",
+        env_extra={"REVIEW_CMD": "codex exec --model спец", "HARNESS_KIT_LOG": str(log)},
+    )
+    assert cmd == "codex exec --model спец"
+    assert not log.exists(), "с внешним REVIEW_CMD кит для строки не зовётся"
+
+
+def test_new_kit_refusal_is_propagated_not_guessed(tmp_path: Path) -> None:
+    """Кит отказал (код 2, например адаптера harness-claude нет) —
+    review-pr.sh передаёт отказ и не подставляет строку ревьюера сам."""
+    fleet_root, log = _new_kit_fleet(tmp_path)
+    err = _resolve(
+        tmp_path,
+        repo="demo",
+        argv=["--harness", "claude"],
+        env_extra={"HARNESS_KIT_LOG": str(log), "REVIEW_KIT_STUB_FAIL": "1"},
+        expect_rc=2,
+    )
+    assert "кит отказал: адаптера нет" in err
+    assert "print-review-cmd" in err
+
+
+def test_old_kit_keeps_shim_path(tmp_path: Path) -> None:
+    """Старая копия кита (без литерала --print-review-cmd) — прежняя ветка:
+    REVIEW_CMD с голым `claude-review` и переходник в PATH."""
+    fleet_root = tmp_path / "fleet"
+    kit = fleet_root / "demo" / "scripts" / "review"
+    kit.mkdir(parents=True)
+    (kit / "local.sh").write_text("#!/bin/sh\necho old kit\n", encoding="utf-8")
+    cmd = _resolve(tmp_path, repo="demo", cfg="REVIEW_HARNESS=claude\n")
     assert cmd == "claude-review --model claude-opus-5"

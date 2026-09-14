@@ -57,6 +57,8 @@ usage() {
     echo "  --harness/--model — ревьюер; порядок: флаг > env REVIEW_HARNESS/" >&2
     echo "    REVIEW_MODEL > ~/.config/ai-prosto/harness.env > codex (историч.)" >&2
     echo "  внешний REVIEW_CMD побеждает всё, кроме явных флагов" >&2
+    echo "  свежий кит (local.sh --print-review-cmd) получает REVIEW_HARNESS/" >&2
+    echo "    REVIEW_MODEL окружением; старый — REVIEW_CMD + переходник" >&2
 }
 
 die() {
@@ -128,10 +130,15 @@ fi
 # файл не исполняется). Уже выставленный снаружи REVIEW_CMD побеждает всё,
 # кроме явных флагов --harness/--model.
 #
-# Для claude отпечаток входа обязан быть машинно-независимым: review_cmd —
-# компонента fp кита, и абсолютный путь к переходнику развёл бы отпечатки
-# между машинами. Поэтому в REVIEW_CMD идёт голое имя `claude-review`, а
-# каталог переходника добавляется в PATH сабшелла кита.
+# Материализация под кит — ниже, в configure_reviewer (devtools#222, кит
+# steward @ a2d7e71): свежий кит читает REVIEW_HARNESS/REVIEW_MODEL из
+# окружения и зовёт свой scripts/review/harness-claude сам, строку ревьюера
+# для тела и отпечатка отдаёт `local.sh --print-review-cmd`. Старая копия
+# кита (без этого литерала) идёт прежней дорогой: REVIEW_CMD с голым именем
+# `claude-review` (машинно-независимый отпечаток) и переходник
+# scripts/harness в PATH сабшелла — до волны ре-вендора по флоту
+# (todo://steward/review-kit-harness-fleet-wave), после которой переходник
+# удаляется (@id:review-harness-shim-removal).
 harness_env_file="${AI_PROSTO_HARNESS_ENV:-$HOME/.config/ai-prosto/harness.env}"
 cfg_harness=""
 cfg_model=""
@@ -161,13 +168,50 @@ else
     harness="${cfg_harness:-codex}"
     model="${opt_model:-${REVIEW_MODEL:-${cfg_model:-}}}"
 fi
+case "$harness" in
+    claude|codex) ;;
+    *) die 2 "неизвестный харнесс: '$harness' (claude|codex)" ;;
+esac
+external_review_cmd=0
 if [ -n "${REVIEW_CMD:-}" ] && [ -z "$opt_harness" ] && [ -z "$opt_model" ]; then
-    : # внешний REVIEW_CMD — осознанный оверрайд целиком, не трогаем
-else
-    # Явный флаг перекрывает и внешний REVIEW_CMD (то же ревью, второй
-    # minor): `--harness codex` без модели обязан дать дефолт кита, а не
-    # оставить унаследованный из окружения claude-переходник.
+    external_review_cmd=1 # внешний REVIEW_CMD — осознанный оверрайд целиком
+fi
+# Feature-detect по литералу в доверенном local.sh — тот же паттерн, что у
+# --fingerprint-only ниже: старая копия кита литерала не содержит.
+kit_has_harness_layer() {
+    grep -q -- '--print-review-cmd' "$1/local.sh"
+}
+# Выставить окружение ревьюера под конкретный кит и вычислить reviewer_label.
+# Вызывается ровно один раз: зондом --print-review-cmd либо прогоном после
+# резолва доверенного кита.
+configure_reviewer() {
+    kit_dir="$1"
+    if [ "$external_review_cmd" -eq 1 ]; then
+        reviewer_label="$REVIEW_CMD"
+        return 0
+    fi
+    # Явный флаг перекрывает и внешний REVIEW_CMD (боевое claude-ревью
+    # PR #121, второй minor): `--harness codex` без модели обязан дать
+    # дефолт кита, а не унаследованный из окружения claude-переходник.
     unset REVIEW_CMD || true
+    if [ -n "$kit_dir" ] && kit_has_harness_layer "$kit_dir"; then
+        REVIEW_HARNESS="$harness"
+        export REVIEW_HARNESS
+        if [ -n "$model" ]; then
+            REVIEW_MODEL="$model"
+            export REVIEW_MODEL
+        else
+            # Пустое значение для кита — отказ (D6), а не умолчание; модель
+            # привязана к слою харнесса, чужую из окружения не наследуем.
+            unset REVIEW_MODEL || true
+        fi
+        if ! reviewer_label=$(REVIEW_KIT_DIR="$kit_dir"                 sh "$kit_dir/local.sh" --print-review-cmd 2>&1); then
+            echo "$reviewer_label" >&2
+            die 2 "кит отказал в резолве ревьюера (local.sh --print-review-cmd)"
+        fi
+        return 0
+    fi
+    # Старая копия кита: прежняя механика без изменений.
     case "$harness" in
         claude)
             PATH="$script_dir/scripts/harness:$PATH"
@@ -184,13 +228,16 @@ else
                 export REVIEW_CMD
             fi
             ;;
-        *) die 2 "неизвестный харнесс: '$harness' (claude|codex)" ;;
     esac
-fi
-reviewer_label="${REVIEW_CMD:-codex exec}"
+    reviewer_label="${REVIEW_CMD:-codex exec}"
+}
 if [ "$print_review_cmd" -eq 1 ]; then
     # Отладочный зонд для тестов: показать разрешённую команду и выйти,
-    # не трогая ни репо, ни GitHub.
+    # не трогая GitHub. Кит — из чекаута репо, если он есть (feature-detect
+    # как в прогоне); без чекаута — ветка старого кита.
+    probe_kit="$FLEET_ROOT/$repo/${REVIEW_KIT_DIR:-scripts/review}"
+    [ -f "$probe_kit/local.sh" ] || probe_kit=""
+    configure_reviewer "$probe_kit"
     echo "$reviewer_label"
     exit 0
 fi
@@ -285,6 +332,8 @@ trusted_schema=$(resolve_from_source \
     "${REVIEW_SCHEMA:-.github/codex/review-schema.json}")
 trusted_prompt=$(resolve_from_source \
     "${REVIEW_PROMPT:-.github/codex/review-prompt.md}")
+# Окружение ревьюера — под доверенный кит, до отпечатка и до прогона.
+configure_reviewer "$trusted_kit_dir"
 work=$(mktemp -d)
 review_tree="$work/review-tree"
 review_tree_added=0
