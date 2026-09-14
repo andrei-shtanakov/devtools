@@ -865,7 +865,7 @@
       пишет бандл и считает git hash-object). issue_classify/issue_worker
       не в критическом пути — ждут общего agent-runner из архитектурной
       части.
-- [ ] `review-pr.sh` → харнесс-слой кита: `--harness/--model` и `~/.config/ai-prosto/harness.env` выставляют `REVIEW_HARNESS`/`REVIEW_MODEL` окружения кита вместо сборки `REVIEW_CMD`, `PATH`-подмешивание `scripts/harness` для свежего кита снимается, `reviewer_label` — из `local.sh --print-review-cmd`; feature-detect по литералу `--print-review-cmd` в доверенном `local.sh` репо — старая копия кита по флоту идёт прежней веткой (`REVIEW_CMD` + переходник) до волны ре-вендора; признак «сделано» — боевой прогон на репо со свежим китом несёт в теле ревью `harness-claude --model …` @owner:github:andrei-shtanakov @id:review-pr-harness-env
+- [x] `review-pr.sh` → харнесс-слой кита: `--harness/--model` и `~/.config/ai-prosto/harness.env` выставляют `REVIEW_HARNESS`/`REVIEW_MODEL` окружения кита вместо сборки `REVIEW_CMD`, `PATH`-подмешивание `scripts/harness` для свежего кита снимается, `reviewer_label` — из `local.sh --print-review-cmd`; feature-detect по литералу `--print-review-cmd` в доверенном `local.sh` репо — старая копия кита по флоту идёт прежней веткой (`REVIEW_CMD` + переходник) до волны ре-вендора; признак «сделано» — боевой прогон на репо со свежим китом несёт в теле ревью `harness-claude --model …` @owner:github:andrei-shtanakov @id:review-pr-harness-env
       Принято из devtools#222 (inbox, from steward#review-kit-harness-layer,
       кит steward @ a2d7e71, спека `docs/superpowers/specs/2026-09-14-review-kit-harness-layer-design.md`).
       Шаг 1 из двух: разблокирует `todo://steward/review-kit-harness-fleet-wave`
@@ -873,6 +873,10 @@
       меняется (`claude-review --model X` → `harness-claude --model X`) —
       опубликованные claude-вердикты перегоняются один раз, это ожидаемо.
       Харнесс-путь (`_HARNESS_PREFIXES`): ревью из доверенного дерева, мерж — человек.
+      ВЫПОЛНЕНО 2026-09-14: devtools#227 (мерж владельцем, bc82fd9) — три круга
+      ревью из доверенного дерева; боевой зонд после мержа: steward →
+      `harness-claude --model claude-opus-5`, dispatcher (старый кит на тот
+      момент) → `claude-review …`. Шаг 2 — `review-harness-shim-removal`.
 - [x] Волна ре-вендора review-kit с харнесс-слоем по флоту: 23 копии кита → steward @ a2d7e71, два PR на потребителя (PR-1 — 6 файлов кита + `.github/codex/review-prompt.md`, 6 строк PIN, старый base-чекер зелёный; PR-2 — `scripts/review/harness-claude` 100755 + 7-я строка PIN), исключение spec-runner (пара @ 761285f) снимается; приёмка — у всех 23 копий `# SOURCE: steward @ a2d7e71`, 7 строк PIN, `REVIEW_HARNESS=claude sh scripts/review/local.sh --print-review-cmd` → `harness-claude --model claude-opus-5` @owner:github:andrei-shtanakov @id:review-kit-harness-wave
       Принято из devtools#228 (inbox, from steward#review-kit-harness-fleet-wave;
       прецедент — `@id:review-kit-fp-wave`). Решение владельца 2026-09-14: кит и
