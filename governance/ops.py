@@ -201,6 +201,8 @@ class Ops(Protocol):
 
     def show_file(self, target_dir: str, ref: str, path: str) -> str | None: ...
 
+    def commit_files(self, target_dir: str, sha: str) -> list[str] | None: ...
+
     def show_file_bytes(
         self, target_dir: str, ref: str, path: str
     ) -> bytes | None: ...
@@ -1606,6 +1608,17 @@ class RealOps:
             cwd=target_dir, capture_output=True, text=True,
         )
         return done.stdout if done.returncode == 0 else None
+
+    def commit_files(self, target_dir: str, sha: str) -> list[str] | None:
+        """Пути, которые коммит `sha` меняет относительно родителя; None —
+        ревизии нет (fail-closed у вызывающего)."""
+        done = subprocess.run(
+            ["git", "show", "--name-only", "--format=", sha],
+            cwd=target_dir, capture_output=True, text=True,
+        )
+        if done.returncode != 0:
+            return None
+        return [ln for ln in done.stdout.splitlines() if ln]
 
     def show_file_bytes(
         self, target_dir: str, ref: str, path: str

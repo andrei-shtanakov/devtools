@@ -276,7 +276,6 @@ def test_candidate_guard_survives_wave_numbering(fleet: Fleet) -> None:
         # в природе от захода до правки контракта; гвард обязан отбивать их
         # тоже, иначе дыра открывается ровно там, где менялась схема имён.
         "spec/ws-42-approve-3-2",
-        "spec/ws-42-approve-3-2-final",
         # И совсем ранняя, одноуровневая.
         "spec/ws-42-approve-3",
     ],
@@ -287,17 +286,39 @@ def test_historic_approval_forms_still_blocked(fleet: Fleet, branch: str) -> Non
     assert fleet.merge_calls() == []
 
 
+def test_historic_finalize_form_is_ordinary_like_current(fleet: Fleet) -> None:
+    """Прежняя finalize-форма (`-final` без номера заявки) — тоже не отказ по
+    форме (D5), и не принимается за candidate: исключение стоит ДО глоба."""
+    res = fleet.run(GH_STUB_HEADREF="spec/ws-42-approve-3-2-final")
+    assert res.returncode == 0, res.stderr
+    assert len(fleet.merge_calls()) == 1
+
+
 # --- гвард 2: финализирующая ветка -----------------------------------------
 
 
-def test_finalize_branch_blocks_merge(fleet: Fleet) -> None:
-    """Доказательство 1b: finalize-ветка блокирует отдельно от candidate."""
+def test_finalize_branch_is_not_refused_by_form(fleet: Fleet) -> None:
+    """ADR-ECO-011 D5: финализирующий PR подписи не создаёт — по форме
+    ветки он НЕ отказ, и мержится как обычный (с пином головы).
+
+    Finalize удовлетворяет и глобу candidate: перепутанный порядок проверок
+    назвал бы его актом одобрения — поэтому отдельно проверяется, что отказа
+    по candidate-форме тоже нет.
+    """
     branch = approval_branches.finalize_branch("ws-42", 3, 2, 1)
     res = fleet.run(GH_STUB_HEADREF=branch)
+    assert res.returncode == 0, res.stderr
+    assert "candidate" not in res.stderr
+    assert len(fleet.merge_calls()) == 1
+    assert f"sha={HEAD_SHA}" in fleet.merge_calls()[0]
+
+
+def test_finalize_branch_with_human_label_stays_human(fleet: Fleet) -> None:
+    """Human-политика finalize несётся лейблом, не формой: с лейблом — отказ."""
+    branch = approval_branches.finalize_branch("ws-42", 3, 2, 1)
+    res = fleet.run(GH_STUB_HEADREF=branch, GH_STUB_LABELS="human-merge-required")
     assert res.returncode == 3, res.stderr
-    # Диагностика называет ИМЕННО фазу финализации: finalize удовлетворяет и
-    # форме candidate, и перепутанный порядок проверок назвал бы не ту.
-    assert "финализирующий PR" in res.stderr
+    assert "human-merge-required" in res.stderr
     assert fleet.merge_calls() == []
 
 
