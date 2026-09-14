@@ -23,8 +23,10 @@ merge. A `tasks.md` spec for spec-runner is not this axis at all — it is what
 
 The harness is `codex`, hardcoded, like `issue_worker`. `AUTHOR_HARNESS` and the
 review shim resolve a harness already, but neither covers what a worker needs:
-`governance/ops.py` builds claude write-only and without a schema, and
-`scripts/harness/claude-review` requires `--sandbox read-only`. A worker needs
+`governance/ops.py` builds claude write-only and without a schema, and the
+review kit's own `scripts/review/harness-claude` (steward ≥ a2d7e71; the old
+devtools shim `scripts/harness/claude-review` is gone) requires
+`--sandbox read-only`. A worker needs
 both sandboxes WITH structured output, and that layer belongs in one shared
 place, not in a third private copy — `TODO.md @id:worker-harness-layer`.
 

@@ -228,6 +228,11 @@ class Fleet:
             # тесты — резолюция идёт от вшитого дефолта codex.
             AI_PROSTO_HARNESS_ENV=str(self.tmp / "no-harness.env"),
         )
+        # …и от env-слоя оболочки оператора (ревью #231): экспортированный
+        # REVIEW_HARNESS=claude на ките-стабе без харнесс-слоя дал бы код 2
+        # во всех full-run тестах, а внешний REVIEW_CMD — чужую строку.
+        for key in ("REVIEW_HARNESS", "REVIEW_MODEL", "REVIEW_CMD"):
+            env.pop(key, None)
         env.update(extra)
         return env
 
