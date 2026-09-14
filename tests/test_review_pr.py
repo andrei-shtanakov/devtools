@@ -842,3 +842,35 @@ def test_inherited_dry_run_also_writes_verdict(
     assert f"fp={FP}\n" in verdict.read_text()
     calls = _kit_calls(fp_fleet)
     assert len(calls) == 1 and "--fingerprint-only" in calls[0]
+
+
+# --- свежий кит steward (devtools#222): env вместо REVIEW_CMD ---------------
+
+
+def test_new_kit_full_run_labels_reviewer_from_kit(fleet: Fleet, tmp_path: Path) -> None:
+    """Признак «сделано» из devtools#222: прогон на репо со свежим китом идёт
+    через харнесс-слой кита — в теле ревью `harness-claude --model …`, кит
+    получает REVIEW_HARNESS/REVIEW_MODEL окружением, REVIEW_CMD не собран и
+    scripts/harness в PATH сабшелла кита нет."""
+    from tests.test_claude_review_harness import NEW_KIT_STUB
+
+    fleet.write_kit(NEW_KIT_STUB)
+    kit_log = tmp_path / "kit.log"
+    res = fleet.run("demo", "7", "--harness", "claude", HARNESS_KIT_LOG=str(kit_log))
+    assert res.returncode == 0, res.stderr
+    body = fleet.body_out.read_text()
+    assert "`harness-claude --model claude-opus-5`" in body
+    assert "claude-review" not in body
+    env_lines = kit_log.read_text().splitlines()
+    assert "REVIEW_HARNESS=claude" in env_lines
+    assert "REVIEW_MODEL=<unset>" in env_lines
+    assert "REVIEW_CMD=<unset>" in env_lines
+    assert not any("scripts/harness" in line for line in env_lines if line.startswith("PATH="))
+
+
+def test_old_kit_full_run_keeps_shim_label(fleet: Fleet) -> None:
+    """Старая копия кита (стаб без литерала) — прежняя ветка: в теле ревью
+    `claude-review --model …`, как до devtools#222."""
+    res = fleet.run("demo", "7", "--harness", "claude", "--model", "claude-sonnet-4-6")
+    assert res.returncode == 0, res.stderr
+    assert "`claude-review --model claude-sonnet-4-6`" in fleet.body_out.read_text()

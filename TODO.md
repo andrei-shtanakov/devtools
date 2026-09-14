@@ -865,7 +865,18 @@
       пишет бандл и считает git hash-object). issue_classify/issue_worker
       не в критическом пути — ждут общего agent-runner из архитектурной
       части.
-- [ ] Удалить переходник claude-review после канонизации харнесс-слоя в ките steward @owner:github:andrei-shtanakov @id:review-harness-shim-removal @blocked_by:steward#147
+- [ ] `review-pr.sh` → харнесс-слой кита: `--harness/--model` и `~/.config/ai-prosto/harness.env` выставляют `REVIEW_HARNESS`/`REVIEW_MODEL` окружения кита вместо сборки `REVIEW_CMD`, `PATH`-подмешивание `scripts/harness` для свежего кита снимается, `reviewer_label` — из `local.sh --print-review-cmd`; feature-detect по литералу `--print-review-cmd` в доверенном `local.sh` репо — старая копия кита по флоту идёт прежней веткой (`REVIEW_CMD` + переходник) до волны ре-вендора; признак «сделано» — боевой прогон на репо со свежим китом несёт в теле ревью `harness-claude --model …` @owner:github:andrei-shtanakov @id:review-pr-harness-env
+      Принято из devtools#222 (inbox, from steward#review-kit-harness-layer,
+      кит steward @ a2d7e71, спека `docs/superpowers/specs/2026-09-14-review-kit-harness-layer-design.md`).
+      Шаг 1 из двух: разблокирует `todo://steward/review-kit-harness-fleet-wave`
+      (24 репо); удаление переходника — шаг 2 ниже. Отпечаток claude-вердиктов
+      меняется (`claude-review --model X` → `harness-claude --model X`) —
+      опубликованные claude-вердикты перегоняются один раз, это ожидаемо.
+      Харнесс-путь (`_HARNESS_PREFIXES`): ревью из доверенного дерева, мерж — человек.
+- [ ] Удалить переходник claude-review после канонизации харнесс-слоя в ките steward @owner:github:andrei-shtanakov @id:review-harness-shim-removal @blocked_by:todo://steward/review-kit-harness-fleet-wave
+      Шаг 2 devtools#222: после волны ре-вендора кита по флоту ни один репо не
+      идёт старой веткой, и `scripts/harness/claude-review` с его тестами
+      удаляется вместе с legacy-веткой `review-pr.sh` (`@id:review-pr-harness-env`).
       Когда steward доставит REVIEW_HARNESS в самом local.sh (и ре-вендор
       доедет до devtools), переходник удаляется, review-pr.sh переходит с
       REVIEW_CMD на REVIEW_HARNESS. Миграция односторонняя, без вилки.
