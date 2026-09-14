@@ -16,7 +16,7 @@ pytest.importorskip("steward")
 
 from governance import brief_input, bundle_state, merge_gate, runner, task_bridge
 from governance import run_state as rs
-from governance.stale_adapter import blob_sha1
+from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 from tests.governance_fixtures.bundles import make_bundle, make_profile
 
 GREEN_PR_FACTS: dict[str, Any] = {
@@ -115,6 +115,8 @@ class FakeOps:
     review_fresh_exit: int = 0
     review_body: str | None = None
     existing_files: set[str] = field(default_factory=set)
+    ignored_paths: set[str] = field(default_factory=set)
+    forced_paths: list[str] = field(default_factory=list)
     facts: dict[str, Any] = field(default_factory=dict)
     files: list[str] = field(default_factory=list)
     threads: bool | None = False
@@ -410,9 +412,26 @@ class FakeOps:
                 return 900 + idx + 1
         return None
 
-    def commit_paths(self, target_dir: str, paths: list[str], message: str) -> None:
+    def commit_paths(
+        self, target_dir: str, paths: list[str], message: str,
+        force_paths: tuple[str, ...] = (),
+    ) -> None:
         self.calls.append(("commit_paths", tuple(paths)))
         self.committed.append((target_dir, paths, message))
+        self.forced_paths.extend(force_paths)
+
+    def rev_parse(self, target_dir: str, ref: str) -> str | None:
+        return "fakehead"
+
+    def blob_in_commit(
+        self, target_dir: str, sha: str, rel_path: str
+    ) -> str | None:
+        """Модель git: файл под ignore-правилом попадает в коммит только
+        через `-f` (`forced_paths`); остальное — байты рабочего дерева."""
+        if rel_path in self.ignored_paths and rel_path not in self.forced_paths:
+            return None
+        path = Path(target_dir) / rel_path
+        return blob_sha1_bytes(path.read_bytes()) if path.exists() else None
 
 
 @pytest.fixture()
@@ -515,45 +534,49 @@ def _brief_source(tmp_path: Path) -> brief_input.BriefSource:
     return brief_input.inspect_brief(path)
 
 
+class CoveredBriefOps(FakeOps):
+    """FakeOps, чей author пишет charter с source-пинами и requirements с
+    NFR-01 — так brief-прогон проходит source-гард и доходит до S3."""
+
+    def author(
+        self, target_dir, kind, subject, bundle_dir, brief_context=None,
+    ):
+        rc = super().author(
+            target_dir, kind, subject, bundle_dir,
+            brief_context=brief_context,
+        )
+        if kind == "charter":
+            assert brief_context is not None
+            pins = brief_context["source_blobs"]
+            names = list(pins)
+            path = Path(target_dir) / bundle_dir / "00-charter.md"
+            path.write_text(
+                "---\n"
+                "spec_stage: charter\n"
+                "status: draft\n"
+                "owner_role: product\n"
+                f"traces_to: [{', '.join(names)}]\n"
+                "upstream_hashes:\n"
+                + "".join(
+                    f'  {name}: "{blob}"\n'
+                    for name, blob in pins.items()
+                )
+                + "---\n# charter\n",
+                encoding="utf-8",
+            )
+        if kind == "requirements":
+            path = Path(target_dir) / bundle_dir / "10-requirements.md"
+            path.write_text(
+                path.read_text(encoding="utf-8")
+                + "\n#### NFR-01: Safety\n**Priority**: Should\n",
+                encoding="utf-8",
+            )
+        return rc
+
+
 def test_brief_materializes_after_branch_and_reaches_two_author_prompts(
     tmp_path: Path, runs_root,
 ) -> None:
-    class CoveredBriefOps(FakeOps):
-        def author(
-            self, target_dir, kind, subject, bundle_dir, brief_context=None,
-        ):
-            rc = super().author(
-                target_dir, kind, subject, bundle_dir,
-                brief_context=brief_context,
-            )
-            if kind == "charter":
-                assert brief_context is not None
-                pins = brief_context["source_blobs"]
-                names = list(pins)
-                path = Path(target_dir) / bundle_dir / "00-charter.md"
-                path.write_text(
-                    "---\n"
-                    "spec_stage: charter\n"
-                    "status: draft\n"
-                    "owner_role: product\n"
-                    f"traces_to: [{', '.join(names)}]\n"
-                    "upstream_hashes:\n"
-                    + "".join(
-                        f'  {name}: "{blob}"\n'
-                        for name, blob in pins.items()
-                    )
-                    + "---\n# charter\n",
-                    encoding="utf-8",
-                )
-            if kind == "requirements":
-                path = Path(target_dir) / bundle_dir / "10-requirements.md"
-                path.write_text(
-                    path.read_text(encoding="utf-8")
-                    + "\n#### NFR-01: Safety\n**Priority**: Should\n",
-                    encoding="utf-8",
-                )
-            return rc
-
     ops = CoveredBriefOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES
     )
@@ -579,6 +602,67 @@ def test_brief_materializes_after_branch_and_reaches_two_author_prompts(
     assert contexts["requirements"] == source.as_state()
     for kind in ("behaviour-spec", "design", "acceptance", "decomposition"):
         assert contexts[kind] is None
+
+
+def test_brief_source_layer_is_force_added_and_verified_in_s3_commit(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Живой прогон 2026-09-14 (spec-runner#490): `.gitignore` цели держит
+    `workstreams/*/spec/*` с carve-out только `!*.md`, `00-discovery/` под него
+    не попадает — `git add -- <bundle_dir>` молча пропускал source-слой, и
+    bundle-PR уезжал без файлов, на blob-ы которых пинуется charter."""
+    source_full = f"{BUNDLE_DIR}/{brief_input.PRIMARY_REL}"
+    ops = CoveredBriefOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        ignored_paths={source_full},
+    )
+    source = _brief_source(tmp_path)
+    kwargs = _start_kwargs(
+        tmp_path, "r-brief-commit", ops, brief_source=source,
+        merge_authority="human",
+    )
+
+    state = runner.start(**kwargs)
+
+    assert state.ops["commit"]["status"] == "completed"
+    assert ops.forced_paths == [source_full]
+    assert [paths for _t, paths, _m in ops.committed] == [[BUNDLE_DIR]]
+    assert "push_branch" in [c[0] for c in ops.calls]
+
+
+def test_brief_source_layer_missing_from_commit_stops_before_push(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Подсадка: ops, который добавляет bundle_dir без `-f` (прежнее
+    поведение) — гвард обязан остановить прогон до push и назвать файл."""
+
+    class NoForceOps(CoveredBriefOps):
+        def commit_paths(
+            self, target_dir, paths, message, force_paths=(),
+        ):
+            super().commit_paths(target_dir, paths, message)  # -f потерян
+
+    source_full = f"{BUNDLE_DIR}/{brief_input.PRIMARY_REL}"
+    ops = NoForceOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        ignored_paths={source_full},
+    )
+    source = _brief_source(tmp_path)
+    kwargs = _start_kwargs(
+        tmp_path, "r-brief-noforce", ops, brief_source=source,
+        merge_authority="human",
+    )
+
+    state = runner.start(**kwargs)
+
+    assert state.status == "stopped_author"
+    assert state.ops["commit"]["status"] != "completed"
+    assert "push_branch" not in [c[0] for c in ops.calls]
+    findings = (rs.run_dir(state.run_id) / "brief-findings.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "source layer не в коммите S3" in findings
+    assert source_full in findings
 
 
 def test_completed_brief_materialization_detects_destination_tamper_before_author(

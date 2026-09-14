@@ -306,6 +306,69 @@ def test_commit_paths_multiple_paths(monkeypatch):
     assert calls[0].argv == ["git", "add", "--", "a/spec", "b/spec"]
 
 
+def test_commit_paths_force_adds_source_files_after_plain_add(monkeypatch):
+    """E1 source-слой: `git add -f -- <файл>` поштучно, после обычного add
+    каталога бандла; без force_paths второго add нет (тесты выше)."""
+    calls = _install_fake_run(monkeypatch, returncode=1)
+    ops = RealOps()
+
+    ops.commit_paths(
+        "/tmp/devtools", ["workstreams/WS-1/spec"], "message",
+        force_paths=("workstreams/WS-1/spec/00-discovery/brief.md",),
+    )
+
+    assert [c.argv[:2] for c in calls] == [
+        ["git", "add"], ["git", "add"], ["git", "diff"], ["git", "commit"],
+    ]
+    assert calls[0].argv == ["git", "add", "--", "workstreams/WS-1/spec"]
+    assert calls[1].argv == [
+        "git", "add", "-f", "--", "workstreams/WS-1/spec/00-discovery/brief.md",
+    ]
+    assert calls[1].kwargs["check"] is True
+
+
+def _git(repo, *args):
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True,
+    )
+
+
+def test_commit_paths_force_paths_defeat_target_gitignore(tmp_path):
+    """Настоящий git с ignore-правилом spec-runner (`workstreams/*/spec/*` +
+    `!*.md`): без force_paths source-файл в коммит не попадает (контроль —
+    фикстура кусается), с force_paths — попадает теми же байтами."""
+    repo = tmp_path / "target"
+    repo.mkdir()
+    assert _git(repo, "init", "-q").returncode == 0
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / ".gitignore").write_text(
+        "!workstreams/*/spec/\nworkstreams/*/spec/*\n!workstreams/*/spec/*.md\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", ".gitignore")
+    assert _git(repo, "commit", "-q", "-m", "init").returncode == 0
+    bundle = repo / "workstreams" / "WS-1" / "spec"
+    (bundle / "00-discovery").mkdir(parents=True)
+    (bundle / "00-charter.md").write_text("# charter\n", encoding="utf-8")
+    source = bundle / "00-discovery" / "brief.md"
+    source.write_bytes(b"---\nspec_stage: discovery\n---\n# brief\n")
+    rel = "workstreams/WS-1/spec/00-discovery/brief.md"
+    ops = RealOps()
+
+    ops.commit_paths(str(repo), ["workstreams/WS-1/spec"], "without force")
+    assert _git(repo, "rev-parse", "HEAD:workstreams/WS-1/spec/00-charter.md").returncode == 0
+    assert _git(repo, "rev-parse", f"HEAD:{rel}").returncode != 0  # контроль
+
+    ops.commit_paths(
+        str(repo), ["workstreams/WS-1/spec"], "with force", force_paths=(rel,),
+    )
+    shown = _git(repo, "rev-parse", f"HEAD:{rel}")
+    assert shown.returncode == 0
+    assert shown.stdout.strip() == ops.blob_in_commit(str(repo), "HEAD", rel)
+    assert _git(repo, "show", f"HEAD:{rel}").stdout.encode() == source.read_bytes()
+
+
 def test_commit_paths_empty_index_does_not_commit(monkeypatch):
     calls = _install_fake_run(monkeypatch, returncode=0)  # diff --cached: clean
     ops = RealOps()
