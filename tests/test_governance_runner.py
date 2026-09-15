@@ -140,6 +140,7 @@ class FakeOps:
         default_factory=list
     )
     author_disp_calls: list[tuple[str, str, str, str]] = field(default_factory=list)
+    author_disp_resume: list[bool] = field(default_factory=list)
     author_disp_exit: int = 0
     comments: list[str] = field(default_factory=list)
     merged: list[tuple[int, str]] = field(default_factory=list)
@@ -362,10 +363,12 @@ class FakeOps:
         return 0
 
     def author_disp(
-        self, target_dir: str, task: str, config_path: str, slug: str
+        self, target_dir: str, task: str, config_path: str, slug: str,
+        resume: bool = False,
     ) -> int:
         self.calls.append(("author_disp", task))
         self.author_disp_calls.append((target_dir, task, config_path, slug))
+        self.author_disp_resume.append(resume)
         return self.author_disp_exit
 
     def review_fresh(self, repo_name: str, pr: int) -> int:
@@ -2895,6 +2898,200 @@ def test_disp_doc_slug_is_truncated_to_the_grammar_limit() -> None:
 
     assert len(slug) == 64
     assert re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", slug), slug
+
+
+def test_disp_doc_checklist_carries_the_dsl_frontmatter_and_pin(
+    tmp_path: Path, runs_root,
+) -> None:
+    """devtools#204 п.1: чеклист сходимости `doc` зеркалит ВЕСЬ DSL узла,
+    включая frontmatter (`spec_stage`/`status`) и пин `upstream_hashes` —
+    иначе «сошедшийся» документ стопит S4 `gate-candidate`. Пункт берётся из
+    того же `_AUTHOR_DSL`, что и промпт авторинга: одно место, не пересказ.
+    """
+    import tomllib
+    from governance.ops import _AUTHOR_DSL
+
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    runner.start(**_start_kwargs(
+        tmp_path, "r-disp-dsl", ops, author_backend="disp",
+    ))
+    _, _, config_path, _ = ops.author_disp_calls[0]
+    config = tomllib.loads(Path(config_path).read_text(encoding="utf-8"))
+    items = config["pipeline"]["checklists"]["doc"]["items"]
+    assert items["B0"] == _AUTHOR_DSL["behaviour-spec"]
+    assert "upstream_hashes" in items["B0"] and "spec_stage" in items["B0"]
+    assert config["pipeline"]["checklists"]["doc"]["findings_item"] in items
+
+
+def test_disp_doc_anchor_leaves_the_target_when_runs_root_is_inside_it(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """devtools#204 п.2: цель прогона — сам devtools ⇒ `RUNS_ROOT` лежит
+    внутри дерева цели, и анкер в каталоге прогона отказал бы на старте
+    (`validate_anchor_path`). Тогда анкер уходит в пользовательский
+    state-каталог (`XDG_STATE_HOME`), как дефолт самого disp."""
+    xdg = tmp_path.parent / f"xdg-{tmp_path.name}"
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    # runs_root = tmp_path/"runs" — внутри цели, если цель = tmp_path.
+    runner.start(**_start_kwargs(
+        tmp_path, "r-disp-self", ops, author_backend="disp",
+        target_dir=str(tmp_path),
+    ))
+    target_dir, _, config_path, _ = ops.author_disp_calls[0]
+    config = Path(config_path).read_text(encoding="utf-8")
+    anchor_line = [ln for ln in config.splitlines() if ln.startswith("anchor_path")]
+    anchor = Path(anchor_line[0].split('"')[1])
+    assert not anchor.resolve().is_relative_to(Path(target_dir).resolve()), anchor
+    assert anchor.resolve().is_relative_to(xdg.resolve()), anchor
+    assert "r-disp-self" in str(anchor)
+
+
+def test_disp_anchor_dir_is_pinned_and_survives_an_environment_change(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Ревью #242: анкер — координата начатого пайплайна, как слаг. Retry
+    из другого окружения (иной XDG_STATE_HOME) обязан отдать соседу ТОТ ЖЕ
+    каталог: `resume` ищет журнал целостности по живому `anchor_path`."""
+    first = tmp_path.parent / f"xdg-a-{tmp_path.name}"
+    monkeypatch.setenv("XDG_STATE_HOME", str(first))
+    ops = FakeOps(author_disp_exit=1)
+    run_id = "r-disp-anchor-pin"
+    state = runner.start(**_start_kwargs(
+        tmp_path, run_id, ops, author_backend="disp", target_dir=str(tmp_path),
+    ))
+    assert state.status == "stopped_author"
+
+    def anchor_of(config_path: str) -> Path:
+        config = Path(config_path).read_text(encoding="utf-8")
+        line = [ln for ln in config.splitlines() if ln.startswith("anchor_path")]
+        return Path(line[0].split('"')[1])
+
+    pinned = anchor_of(ops.author_disp_calls[0][2])
+    assert pinned.resolve().is_relative_to(first.resolve())
+    assert Path(rs.load(run_id).disp_anchor_dir) == pinned
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path.parent / f"xdg-b-{tmp_path.name}"))
+    ops.author_disp_exit = 0
+    runner.resume(run_id, ops)
+    assert anchor_of(ops.author_disp_calls[1][2]) == pinned
+
+
+def test_disp_slug_is_pinned_in_run_state_and_reused_on_retry(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """devtools#204 п.3 (решение владельца в issue): слаг пинуется в
+    `run.json` при первом старте — смена правил нормализации не осиротит
+    начатый пайплайн; retry читает пин, а не считает заново."""
+    ops = FakeOps(author_disp_exit=1)
+    run_id = "r-disp-pin"
+    state = runner.start(**_start_kwargs(
+        tmp_path, run_id, ops, author_backend="disp",
+    ))
+    assert state.status == "stopped_author"
+    first_slug = ops.author_disp_calls[0][3]
+    assert state.disp_slug == first_slug
+    assert rs.load(run_id).disp_slug == first_slug
+
+    monkeypatch.setattr(runner, "_disp_doc_slug", lambda _s: "rules-changed")
+    ops.author_disp_exit = 0
+    state = runner.resume(run_id, ops)
+    assert ops.author_disp_calls[1][3] == first_slug
+    assert state.ops["author-behaviour"]["status"] == "completed"
+
+
+def test_disp_retry_resumes_an_existing_pipeline_dir_instead_of_run(
+    tmp_path: Path, runs_root,
+) -> None:
+    """devtools#204 п.3: `disp pipeline run` на существующем
+    `.disputatio/pipelines/<slug>/` отказывает (`_check_pipeline_dir_absent`
+    у соседа: «продолжите через resume»). Ровно один путь retry: каталог
+    есть ⇒ `resume`, нет ⇒ `run`."""
+    ops = FakeOps(author_disp_exit=1)
+    run_id = "r-disp-resume"
+    state = runner.start(**_start_kwargs(
+        tmp_path, run_id, ops, author_backend="disp",
+    ))
+    assert ops.author_disp_resume == [False]
+    target_dir, _, _, slug = ops.author_disp_calls[0]
+    (Path(target_dir) / ".disputatio" / "pipelines" / slug).mkdir(parents=True)
+    # Первый авторский раунд соседа уже написал черновик узла в дереве
+    # цели (ревью #242): это НЕ готовый узел и не повод для skip.
+    draft = Path(target_dir) / BUNDLE_DIR / "15-behaviour-spec.md"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("# черновик первого раунда\n", encoding="utf-8")
+
+    ops.author_disp_exit = 0
+    state = runner.resume(run_id, ops)
+    assert ops.author_disp_resume == [False, True]
+    assert state.ops["author-behaviour"]["status"] == "completed"
+    assert state.ops["author-behaviour"].get("skipped") is False
+
+
+def test_hand_fixed_node_without_pipeline_dir_is_accepted_after_pin(
+    tmp_path: Path, runs_root, capsys,
+) -> None:
+    """Ревью #242, круг 3: операторский выход из пинованного состояния.
+    Стоп → оператор убирает каталог пайплайна соседа и кладёт/чинит файл
+    узла руками → resume принимает файл как есть, без вызова соседа."""
+    ops = FakeOps(author_disp_exit=1)
+    run_id = "r-disp-handfix"
+    state = runner.start(**_start_kwargs(
+        tmp_path, run_id, ops, author_backend="disp",
+    ))
+    assert state.status == "stopped_author"
+    assert "принять узел руками" in capsys.readouterr().out
+    target_dir, _, _, slug = ops.author_disp_calls[0]
+    # Каталог пайплайна сосед не создал (или оператор убрал); файл — руками.
+    assert not (Path(target_dir) / ".disputatio" / "pipelines" / slug).exists()
+    node = Path(target_dir) / BUNDLE_DIR / "15-behaviour-spec.md"
+    node.parent.mkdir(parents=True, exist_ok=True)
+    node.write_text("#### BEH-01\n", encoding="utf-8")
+
+    state = runner.resume(run_id, ops)
+    assert len(ops.author_disp_calls) == 1
+    assert state.ops["author-behaviour"] == {"status": "completed", "skipped": True}
+
+
+def test_foreign_pipeline_dir_on_first_start_stops_instead_of_resuming(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Ревью #242: каталог `.disputatio/pipelines/<slug>/` от чужого или
+    заброшенного прогона на ПЕРВОМ старте — стоп с подсказкой, а не `resume`
+    с нашим конфигом и анкером поверх чужого манифеста."""
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    run_id = "r-disp-foreign"
+    kwargs = _start_kwargs(tmp_path, run_id, ops, author_backend="disp")
+    foreign = Path(kwargs["target_dir"]) / ".disputatio" / "pipelines" / "beh-ws-1"
+    foreign.mkdir(parents=True)
+
+    state = runner.start(**kwargs)
+
+    assert state.status == "stopped_author"
+    assert ops.author_disp_calls == []
+    assert state.disp_slug is None and state.disp_anchor_dir is None
+
+
+def test_foreign_pipeline_dir_with_its_draft_still_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Ревью #242, круг 4: чужой каталог пайплайна уже написал черновик
+    узла — черновик не наш готовый узел, стоп-гард стоит ДО skip-ветки."""
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    run_id = "r-disp-foreign-draft"
+    kwargs = _start_kwargs(tmp_path, run_id, ops, author_backend="disp")
+    target = Path(kwargs["target_dir"])
+    (target / ".disputatio" / "pipelines" / "beh-ws-1").mkdir(parents=True)
+    draft = target / BUNDLE_DIR / "15-behaviour-spec.md"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("#### BEH-01 чужой черновик\n", encoding="utf-8")
+
+    state = runner.start(**kwargs)
+
+    assert state.status == "stopped_author"
+    assert ops.author_disp_calls == []
+    assert state.ops.get("author-behaviour", {}).get("skipped") is not True
+    assert state.disp_slug is None
 
 
 def test_disp_backend_author_disp_failure_stops_author(

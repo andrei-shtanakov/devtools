@@ -161,7 +161,8 @@ class Ops(Protocol):
     ) -> int: ...
 
     def author_disp(
-        self, target_dir: str, task: str, config_path: str, slug: str
+        self, target_dir: str, task: str, config_path: str, slug: str,
+        resume: bool = False,
     ) -> int: ...
 
     def commit_paths(
@@ -1311,9 +1312,22 @@ class RealOps:
         return done.returncode
 
     def author_disp(
-        self, target_dir: str, task: str, config_path: str, slug: str
+        self, target_dir: str, task: str, config_path: str, slug: str,
+        resume: bool = False,
     ) -> int:
         """Вид пайплайна `document` — opt-in авторинг-бэкенд behaviour-spec узла.
+
+        `resume=True` — продолжение НАЧАТОГО пайплайна того же слага
+        (devtools#204 п.3): `disp pipeline run` на существующем
+        `.disputatio/pipelines/<slug>/` отказывает по коду соседа
+        (`_check_pipeline_dir_absent`: «продолжите через resume»), поэтому
+        путь retry ровно один и выбирается по факту каталога, а не по
+        памяти прогона. У `resume` нет `--task` (задача уже в манифесте),
+        `--config` обязателен так же, как у `run` (§8.1 шаг 0 ищет журнал
+        целостности по живому `anchor_path`), флаги санкции
+        (`--discard-round`/`--adopt-external`) НЕ передаются: на
+        неатрибутируемом дереве сосед откажет сам — fail-closed, решение
+        оператору, не раннеру.
 
         Спека §5 называла «режим `document`»; РЕЖИМА с таким именем у disp
         нет и не было. OQ-1 закрыт иначе (disputatio#52 → их PR #64,
@@ -1341,18 +1355,15 @@ class RealOps:
         операторский (§5.3), то есть решение нашего контура, а не disputatio,
         и держать его рядом с прогоном честнее, чем в чужом репозитории.
         """
-        done = subprocess.run(
-            [
-                "uv", "run", "--project",
-                str(DEVTOOLS_ROOT.parent / "disputatio"),
-                "disp", "pipeline", "run",
-                "--task", task,
-                "--slug", slug,
-                "--config", config_path,
-                "--root", target_dir,
-            ],
-            cwd=target_dir,
-        )
+        argv = [
+            "uv", "run", "--project",
+            str(DEVTOOLS_ROOT.parent / "disputatio"),
+            "disp", "pipeline", "resume" if resume else "run",
+        ]
+        if not resume:
+            argv += ["--task", task]
+        argv += ["--slug", slug, "--config", config_path, "--root", target_dir]
+        done = subprocess.run(argv, cwd=target_dir)
         return done.returncode
 
     def commit_paths(
