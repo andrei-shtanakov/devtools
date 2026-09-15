@@ -1425,7 +1425,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       (согласован по секциям 2026-09-15, решения владельца D1–D6). Тесты по
       слоям runner/spec_loop/RealOps + opt-in smoke с настоящим discovery;
       negative controls на три гварда. Evidence живого прогона — §9 спеки.
-      Код — ветка feat/need-stage (Tasks 1–11 плана, opt-in smoke
+      Код — PR #246 (ветка feat/need-stage; Tasks 1–11 плана, opt-in smoke
       `DEVTOOLS_DISCOVERY_SMOKE=1`); чекбокс — после живой приёмки §9 спеки
       с реальным стейкхолдером.
 - [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; до доставки соседа маршрут отказывает до run-id @owner:github:andrei-shtanakov @id:spec-loop-need-engineer-route @blocked_by:discovery#49
