@@ -15,6 +15,7 @@ import pytest
 pytest.importorskip("steward")
 
 from governance import brief_input, bundle_state, merge_gate, runner, task_bridge
+from governance import interview as iv
 from governance import run_state as rs
 from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 from tests.governance_fixtures.bundles import make_bundle, make_profile
@@ -151,6 +152,11 @@ class FakeOps:
     committed: list[tuple[str, list[str], str]] = field(default_factory=list)
     checked_out: list[tuple[str, str]] = field(default_factory=list)
     calls: list[tuple] = field(default_factory=list)
+    # Очередь ответов discovery: ("start"|"status"|"brief", DiscoveryReply).
+    discovery: list[tuple[str, Any]] = field(default_factory=list)
+    discovery_calls: list[tuple] = field(default_factory=list)
+    # Текст, который `discovery_brief` пишет в `out_path` при кодах 0/10/11/20.
+    brief_text: str = ""
 
     def ensure_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("ensure_branch", branch))
@@ -436,6 +442,30 @@ class FakeOps:
         path = Path(target_dir) / rel_path
         return blob_sha1_bytes(path.read_bytes()) if path.exists() else None
 
+    def _discovery_reply(self, kind: str):
+        assert self.discovery and self.discovery[0][0] == kind, (
+            f"неожиданный вызов discovery {kind!r}; очередь {self.discovery!r}"
+        )
+        return self.discovery.pop(0)[1]
+
+    def discovery_start(self, frame, target, traces_to, upstream_path, cwd):
+        self.discovery_calls.append(
+            ("start", frame, target, traces_to, upstream_path)
+        )
+        return self._discovery_reply("start")
+
+    def discovery_status(self, session_id, cwd):
+        self.discovery_calls.append(("status", session_id))
+        return self._discovery_reply("status")
+
+    def discovery_brief(self, session_id, out_path, cwd):
+        self.discovery_calls.append(("brief", session_id, out_path))
+        reply = self._discovery_reply("brief")
+        # Стенд пишет артефакт при кодах 0/10/11/20, как сосед.
+        if reply.code in (0, 10, 11, 20):
+            Path(out_path).write_text(self.brief_text, encoding="utf-8")
+        return reply
+
 
 @pytest.fixture()
 def runs_root(tmp_path: Path, monkeypatch):
@@ -482,6 +512,69 @@ def _start_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
         if not profile_path.exists():
             profile_path.write_text(_TEAM_EXP_PROFILE_TEXT, encoding="utf-8")
     return kwargs
+
+
+def _reply(code: int, **over) -> iv.DiscoveryReply:
+    env = {
+        "lifecycle": "awaiting_input", "gate": "unknown", "readiness": "unknown",
+        "next_action": {"session_id": "s-1", "question_id": "Q-01"},
+        "findings": [], "readiness_findings": [],
+        "operation": {"status": "ok", "reason": ""},
+    }
+    if code == 0:
+        env.update(lifecycle="complete", gate="pass", readiness="ready",
+                    next_action={})
+    if code in (10, 11):
+        env.update(
+            lifecycle="complete", gate="fail" if code == 10 else "pass",
+            readiness="incomplete", next_action={},
+            findings=[{"rule": "GC-04", "message": "x"}],
+        )
+    if code in (1, 2):
+        env.update(
+            lifecycle="unknown",
+            operation={"status": "refused", "reason": "boom"},
+        )
+    env.update(over)
+    return iv.DiscoveryReply(code, env, "")
+
+
+def _need_spec(**over) -> iv.InterviewSpec:
+    base = dict(
+        frame="customer", stakeholder_role="po", target="owner/alpha",
+        traces_to=None, upstream_blob=None,
+    )
+    base.update(over)
+    return iv.InterviewSpec(**base)
+
+
+def test_need_start_20_waits_without_branch(tmp_path: Path, runs_root) -> None:
+    ops = FakeOps(discovery=[("start", _reply(20))])
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-need-1", ops), interview_spec=_need_spec()
+    )
+    assert state.status == "waiting_interview"
+    assert state.interview["session_id"] == "s-1"
+    assert state.ops["interview-start"]["status"] == "completed"
+    assert ops.discovery_calls == [("start", "customer", "owner/alpha", None, None)]
+    assert not any(c[0] in ("is_dirty", "ensure_branch") for c in ops.calls)
+    assert state.branch == ""
+    assert rs.load("r-need-1").status == "waiting_interview"
+
+
+@pytest.mark.parametrize("code", [1, 2, 0, 10, 11])
+def test_need_start_non_20_stops_without_session(
+    tmp_path: Path, runs_root, code
+) -> None:
+    ops = FakeOps(discovery=[("start", _reply(code))])
+    state = runner.start(
+        **_start_kwargs(tmp_path, f"r-need-{code}", ops),
+        interview_spec=_need_spec(),
+    )
+    assert state.status == "stopped_interview"
+    assert state.interview["session_id"] is None
+    assert state.ops["interview-start"]["status"] == "started"
+    assert not any(c[0] in ("is_dirty", "ensure_branch") for c in ops.calls)
 
 
 def _customer_brief_text() -> str:

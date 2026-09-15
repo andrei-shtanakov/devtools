@@ -33,10 +33,11 @@ from governance import (
     decomposition_guard,
     design_guard,
 )
+from governance import interview as iv
 from governance.merge_gate import PrFacts, decide
 from governance.facts import Outcome
 from governance.stale_adapter import blob_sha1
-from governance.ops import _AUTHOR_DSL, Ops, RealOps
+from governance.ops import _AUTHOR_DSL, ENGINEER_BLOCKED, Ops, RealOps
 from governance.policy_sources import (
     PREFLIGHT_PROCEDURE_HINT,
     build_authority,
@@ -60,6 +61,10 @@ from governance.run_state import (
 from governance.spec_runner_contract import target_selector_policy
 
 _ROLLUP_GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+
+# Operation keys стадии Need (E2, спека §4/§5): S0.5 `_step_interview`.
+INTERVIEW_START = "interview-start"
+INTERVIEW_BRIEF = "interview-brief"
 
 # (op key, kind для ops.author, ожидаемое имя файла в bundle_dir) — S2/S3.
 _AUTHOR_STEPS = (
@@ -260,6 +265,7 @@ def start(
     merge_authority: str | None = None,
     author_backend: str = "codex",
     brief_source: brief_input.BriefSource | None = None,
+    interview_spec: iv.InterviewSpec | None = None,
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
@@ -273,6 +279,11 @@ def start(
     недостижимо (`choices=["codex", "disp"]`), но `start()` — публичный
     API, и симметрия проверок здесь — инвариант.
 
+    `interview_spec`/`brief_source` взаимоисключающи (E2, спека §5) — стадия
+    Need стартует либо с готовым brief'ом, либо с discovery-интервью, но не
+    с обоими сразу; проверяется той же группой, что и координаты выше — до
+    любого побочного эффекта.
+
     WS-lock проверяется ДО резервирования `run_id` (круг 7): у неё тоже нет
     побочных эффектов, а `_reserve_run_id` создаёт файл — так отказ по
     WS-lock не оставляет пустой `run.json`-заглушку под несостоявшимся
@@ -280,6 +291,8 @@ def start(
     """
     validate_merge_authority(merge_authority)
     validate_author_backend(author_backend)
+    if interview_spec is not None and brief_source is not None:
+        raise ValueError("--need и --brief взаимоисключающи")
     blocker = _blocking_merged_unverified(ws_id)
     if blocker is not None:
         raise ValueError(
@@ -313,6 +326,7 @@ def start(
         merge_authority=merge_authority,
         author_backend=author_backend,
         brief=brief_descriptor,
+        interview=interview_spec.as_state() if interview_spec else None,
     )
     save(state)
     return advance(state, ops)
@@ -336,6 +350,7 @@ def advance(state: RunState, ops: Ops) -> RunState:
             "verification-run через verify(...)"
         )
     steps = (
+        _step_interview,
         _step_branch,
         _step_materialize_brief,
         _step_authoring,
@@ -687,6 +702,87 @@ def _stop_with_comment(state: RunState, ops: Ops, status: str, body: str) -> Non
         ops.comment(state.repo_slug, state.pr, body)
     except Exception as exc:  # noqa: BLE001 — best-effort, не должен ронять шаг
         print(f"_stop_with_comment: comment ({status!r}) не удался: {exc}")
+
+
+def _interview_stop(state: RunState, reason: str) -> bool:
+    """Персистентный стоп стадии Need; координаты и session_id не трогаются."""
+    print(f"_step_interview: {reason}")
+    state.status = "stopped_interview"
+    save(state)
+    return False
+
+
+def _print_answer_hint(state: RunState, reply: iv.DiscoveryReply) -> None:
+    """Подсказка стейкхолдеру: на какой вопрос и какой командой отвечать."""
+    action = reply.envelope.get("next_action", {})
+    print(
+        f"_step_interview: вопрос {action.get('question_id')}: "
+        f"{action.get('question_text', '')}"
+    )
+    print("ответьте вне spec-loop и повторите команду:")
+    print(
+        "  " + iv.answer_command(
+            state.interview["session_id"], state.interview["stakeholder_role"]
+        )
+    )
+
+
+def _upstream_path(state: RunState, spec: iv.InterviewSpec) -> str | None:
+    """Путь upstream-blob'а для engineer-фрейма; `None` для остальных."""
+    if spec.frame != "engineer":
+        return None
+    return str(
+        run_dir(state.run_id) / "brief-input" / "00-discovery" / spec.traces_to
+    )
+
+
+def _interview_poll(
+    state: RunState, ops: Ops, spec: iv.InterviewSpec, cwd: str
+) -> bool:
+    """S0.5 опрос статуса/получение brief'а — заглушка (Task 6 заменяет)."""
+    return _interview_stop(state, "poll не реализован")
+
+
+def _step_interview(state: RunState, ops: Ops) -> bool:
+    """S0.5 — стадия Need (спека §5). Прогон без interview проходит насквозь."""
+    if state.interview is None or state.interview.get("completed_at"):
+        return True
+    spec = iv.InterviewSpec.from_state(state.interview)
+    cwd = str(run_dir(state.run_id))
+    if op_status(state, INTERVIEW_START) != "completed":
+        if (
+            state.interview.get("session_id") is None
+            and op_status(state, INTERVIEW_START) == "started"
+        ):
+            # Сирота: сессия могла быть создана без записи — discovery не
+            # зовём, оператор разбирается вручную.
+            state.status = "stopped_interview"
+            save(state)
+            print(
+                "_step_interview: сессия могла быть создана без записи — "
+                "присоедините её: --session <id>, либо --new-run --ws-id "
+                "<fresh-id>"
+            )
+            return False
+        _ensure_started(state, INTERVIEW_START)
+        if spec.frame == "engineer" and spec.upstream_blob is None:
+            return _interview_stop(state, ENGINEER_BLOCKED)
+        reply = ops.discovery_start(
+            spec.frame, spec.target, spec.traces_to,
+            _upstream_path(state, spec), cwd,
+        )
+        if reply.code != 20:
+            return _interview_stop(
+                state,
+                f"start вернул {reply.code}: "
+                f"{reply.envelope['operation'].get('reason', '')}",
+            )
+        state.interview["session_id"] = reply.envelope["next_action"]["session_id"]
+        state.status = "waiting_interview"
+        op_complete(state, INTERVIEW_START, session_id=state.interview["session_id"])
+        _print_answer_hint(state, reply)
+        return False
+    return _interview_poll(state, ops, spec, cwd)
 
 
 def _step_branch(state: RunState, ops: Ops) -> bool:
