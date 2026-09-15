@@ -3072,6 +3072,28 @@ def test_foreign_pipeline_dir_on_first_start_stops_instead_of_resuming(
     assert state.disp_slug is None and state.disp_anchor_dir is None
 
 
+def test_foreign_pipeline_dir_with_its_draft_still_stops(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Ревью #242, круг 4: чужой каталог пайплайна уже написал черновик
+    узла — черновик не наш готовый узел, стоп-гард стоит ДО skip-ветки."""
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    run_id = "r-disp-foreign-draft"
+    kwargs = _start_kwargs(tmp_path, run_id, ops, author_backend="disp")
+    target = Path(kwargs["target_dir"])
+    (target / ".disputatio" / "pipelines" / "beh-ws-1").mkdir(parents=True)
+    draft = target / BUNDLE_DIR / "15-behaviour-spec.md"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("#### BEH-01 чужой черновик\n", encoding="utf-8")
+
+    state = runner.start(**kwargs)
+
+    assert state.status == "stopped_author"
+    assert ops.author_disp_calls == []
+    assert state.ops.get("author-behaviour", {}).get("skipped") is not True
+    assert state.disp_slug is None
+
+
 def test_disp_backend_author_disp_failure_stops_author(
     tmp_path: Path, runs_root,
 ) -> None:

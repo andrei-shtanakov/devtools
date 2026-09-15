@@ -1081,6 +1081,22 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
         # состояния (ревью #242, круг 3) — тот же файл без каталога
         # пайплайна: убрал каталог (или сосед его не создал) и положил/
         # починил узел руками ⇒ узел принимается как есть, как у codex.
+        if disp_node and pipeline_dir.is_dir() and not started_here:
+            # Ревью #242: продолжать чужой/заброшенный пайплайн с нашим
+            # конфигом и анкером нельзя — `resume` соседа доверял бы чужому
+            # манифесту, а его черновик узла — не наш готовый узел. Поэтому
+            # проверка стоит ДО skip-ветки (круг 4) и до пинов: первый
+            # старт не пинует координаты пайплайна, который не наш. Стоп с
+            # подсказкой, решение — оператору.
+            print(
+                f"_step_authoring: каталог пайплайна {pipeline_dir} уже "
+                "существует, но этот прогон его не начинал — продолжите "
+                f"его вручную (`disp pipeline resume --slug {slug}`) "
+                "либо уберите каталог и повторите resume"
+            )
+            state.status = "stopped_author"
+            save(state)
+            return False
         if target.exists() and not (started_here and pipeline_dir.is_dir()):
             op_complete(state, key, skipped=True)
             continue
@@ -1088,21 +1104,6 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
         if disp_node:
             bundle_path = f"{state.bundle_dir}/{filename}"
             task = _disp_behaviour_task(state.subject, bundle_path)
-            # Порядок: сначала факт чужого каталога, потом пины — чтобы
-            # первый старт не пиновал координаты пайплайна, который не наш.
-            if pipeline_dir.is_dir() and not started_here:
-                # Ревью #242: продолжать чужой/заброшенный пайплайн с нашим
-                # конфигом и анкером нельзя — `resume` соседа доверял бы
-                # чужому манифесту. Стоп с подсказкой, решение — оператору.
-                print(
-                    f"_step_authoring: каталог пайплайна {pipeline_dir} уже "
-                    "существует, но этот прогон его не начинал — продолжите "
-                    f"его вручную (`disp pipeline resume --slug {slug}`) "
-                    "либо уберите каталог и повторите resume"
-                )
-                state.status = "stopped_author"
-                save(state)
-                return False
             anchor_dir = _pinned_disp_anchor_dir(state)
             if anchor_dir is None:
                 print(
