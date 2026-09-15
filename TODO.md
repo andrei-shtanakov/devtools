@@ -1350,7 +1350,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   не теряется в россыпи GitHub. devtools#169 сюда намеренно не входит:
   дефекта поведения нет, необязательный API-рефакторинг закрыт not planned.
 
-- [ ] Формулировки и защитные проверки governance-контракта привести к фактическим гарантиям без расширения runtime-механики @owner:github:andrei-shtanakov @id:governance-contract-truth-batch
+- [x] Формулировки и защитные проверки governance-контракта привести к фактическим гарантиям без расширения runtime-механики @owner:github:andrei-shtanakov @id:governance-contract-truth-batch — PR #239 (#182/#185/#195/#237, agent-merge 61e1e2f) + PR #240 (#184, харнесс, мерж человеком 592393b); все пять issues закрыты с evidence
   Источники: devtools#182 (граница blob-anchor), #184 (`merge-pr.sh` — policy
   и defense-in-depth, не security boundary), #185 (движение базы не
   проверялось; #237 — та же ветка `else`: ABSENT верхушки после D1) и #195 (две известные дыры guard слепых зон). Это один малый
