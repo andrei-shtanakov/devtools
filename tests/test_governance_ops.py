@@ -1850,3 +1850,70 @@ def test_local_branch_head_fact_distinguishes_all_outcomes(
         "git", "-C", "/tmp/clone", "rev-parse", "--verify", "--quiet",
         "refs/heads/spec/x-v3",
     ]
+
+
+# Task 4: discovery_* methods
+def _capture(monkeypatch, returncode=20, stdout=None):
+    """Фейк subprocess.run для discovery CLI вызовов."""
+    from types import SimpleNamespace
+    seen: list[dict] = []
+    payload = stdout if stdout is not None else json.dumps({
+        "lifecycle": "awaiting_input", "gate": "unknown", "readiness": "unknown",
+        "next_action": {"session_id": "s-9", "question_id": "Q-01"},
+        "findings": [], "readiness_findings": [],
+        "operation": {"status": "ok", "reason": ""}})
+
+    def fake_run(argv, **kwargs):
+        seen.append({"argv": list(argv), **kwargs})
+        return SimpleNamespace(returncode=returncode, stdout=payload, stderr="")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    return seen
+
+
+def test_discovery_start_argv_and_boundary(monkeypatch, tmp_path):
+    seen = _capture(monkeypatch)
+    reply = RealOps().discovery_start("customer", "o/alpha", None, None, str(tmp_path))
+    argv = seen[0]["argv"]
+    assert argv[:5] == ["uv", "run", "--frozen", "--project",
+                        str(ops_mod.DEVTOOLS_ROOT.parent / "discovery")]
+    assert argv[5:] == [
+        "discovery", "start", "--frame", "customer", "--target", "o/alpha",
+    ]
+    assert seen[0]["cwd"] == str(tmp_path)
+    assert seen[0]["capture_output"] is True and seen[0]["text"] is True
+    assert reply.code == 20 and reply.envelope["next_action"]["session_id"] == "s-9"
+
+
+def test_discovery_start_engineer_traces_to_argv(monkeypatch, tmp_path):
+    seen = _capture(monkeypatch)
+    RealOps().discovery_start("engineer", "o/alpha", "customer.md", None, str(tmp_path))
+    assert seen[0]["argv"][-2:] == ["--traces-to", "customer.md"]
+
+
+def test_discovery_start_refuses_upstream_until_inbox(monkeypatch, tmp_path):
+    seen = _capture(monkeypatch)
+    reply = RealOps().discovery_start(
+        "engineer", "o/alpha", "customer.md",
+        str(tmp_path / "customer.md"), str(tmp_path),
+    )
+    assert seen == []  # сосед не вызван
+    assert reply.code == 1 and "discovery#49" in reply.envelope["operation"]["reason"]
+
+
+def test_discovery_status_and_brief_argv(monkeypatch, tmp_path):
+    seen = _capture(monkeypatch, returncode=0, stdout=json.dumps({
+        "lifecycle": "complete", "gate": "pass", "readiness": "ready",
+        "next_action": {}, "findings": [], "readiness_findings": [],
+        "operation": {"status": "ok", "reason": ""}}))
+    RealOps().discovery_status("s-9", str(tmp_path))
+    RealOps().discovery_brief("s-9", str(tmp_path / "out.md"), str(tmp_path))
+    assert seen[0]["argv"][5:] == ["discovery", "status", "--session", "s-9"]
+    assert seen[1]["argv"][5:] == ["discovery", "brief", "--session", "s-9",
+                                   "--out", str(tmp_path / "out.md")]
+
+
+def test_discovery_reply_is_synthetic_on_bad_stdout(monkeypatch, tmp_path):
+    _capture(monkeypatch, returncode=0, stdout="garbage")
+    reply = RealOps().discovery_status("s-9", str(tmp_path))
+    assert reply.code == 1

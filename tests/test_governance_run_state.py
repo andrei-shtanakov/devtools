@@ -118,3 +118,19 @@ def test_validate_id_component_accepts_and_rejects(runs_root) -> None:
     rs.validate_id_component("WS-1-abc123")  # не поднимает
     with pytest.raises(ValueError, match="ws_id"):
         rs.validate_id_component("../escape", label="ws_id")
+
+
+def test_new_run_carries_interview_state_and_old_ledgers_load(runs_root) -> None:
+    st = rs.new_run(
+        subject="s", repo="alpha", repo_slug="o/alpha", ws_id="WS-1",
+        target_dir="/tmp/x", bundle_dir="spec",
+        profile="profiles/team-exp.yaml", run_id="r-int",
+        interview={"session_id": None, "frame": "customer"},
+    )
+    rs.save(st)
+    assert rs.load("r-int").interview == {"session_id": None, "frame": "customer"}
+    # старый run.json без поля читается через default
+    raw = (rs.run_dir("r-int") / "run.json").read_text(encoding="utf-8")
+    data = json.loads(raw); del data["interview"]
+    (rs.run_dir("r-int") / "run.json").write_text(json.dumps(data), encoding="utf-8")
+    assert rs.load("r-int").interview is None

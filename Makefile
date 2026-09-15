@@ -49,6 +49,7 @@ help:
 	@echo "  make arch-freshness-read  — читатель локального статуса: просрочка ⇒ unknown (exit 2)"
 	@echo "  make behaviour-run ARGS=… — governance runner CLI: start|resume|verify|status (uv + группа governance)"
 	@echo "  make spec-loop SUBJECT='…' REPO=… — операторская кнопка: start → мерж бандла (человек) → одобрение узлов (человек, --approve-node) → повтор той же команды → deliver tasks-спеки → approve (человек); merge-authority жёстко human, неоднозначности — fail-closed (--run-id/--ws-id через ARGS)"
+	@echo "  make spec-loop ARGS='--need --frame customer --stakeholder <role>' — стадия Need вместо готового --brief: запускает discovery-интервью, прогон паркуется в waiting_interview и печатает команду ответа стейкхолдеру; ответьте вне spec-loop и повторите ту же команду с --run-id <id> (engineer-фрейм отказан до discovery#49)"
 	@echo "  make behaviour-console ARGS=… — governance console TUI (uv + группа governance)"
 	@echo "  make behaviour-tasks ARGS='--run-id …' — draft tasks.md-спека из бандла PR-ом (approve — человек)"
 	@echo "  make behaviour-tasks ARGS='--run-id … --approve-node <node-id>' — одобрение узла бандла: candidate-PR → мерж ЧЕЛОВЕКОМ (это и есть акт; make human-merge ARGS='<repo> <pr>' — тот же акт командой) → повтор той же команды дописывает подпись финализирующим PR-ом и по умолчанию сам его мержит агентом (ADR-ECO-011 D5; человеческий мерж finalize — настройка 'Мерж: человек' в CLAUDE.md цели). Единственная дорога узла в approved (§I12); порядок — топологический, доставка одобренность только проверяет"

@@ -15,6 +15,7 @@ import pytest
 pytest.importorskip("steward")
 
 from governance import brief_input, bundle_state, merge_gate, runner, task_bridge
+from governance import interview as iv
 from governance import run_state as rs
 from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 from tests.governance_fixtures.bundles import make_bundle, make_profile
@@ -151,6 +152,14 @@ class FakeOps:
     committed: list[tuple[str, list[str], str]] = field(default_factory=list)
     checked_out: list[tuple[str, str]] = field(default_factory=list)
     calls: list[tuple] = field(default_factory=list)
+    # Очередь ответов discovery: ("start"|"status"|"brief", DiscoveryReply).
+    discovery: list[tuple[str, Any]] = field(default_factory=list)
+    discovery_calls: list[tuple] = field(default_factory=list)
+    # Текст, который `discovery_brief` пишет в `out_path` при кодах 0/10/11/20.
+    brief_text: str = ""
+    # Байты вместо `brief_text`, если заданы (напр. невалидный UTF-8 —
+    # finding 3 финальной волны ревью: UnicodeDecodeError вместо traceback).
+    brief_bytes: bytes | None = None
 
     def ensure_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("ensure_branch", branch))
@@ -436,6 +445,33 @@ class FakeOps:
         path = Path(target_dir) / rel_path
         return blob_sha1_bytes(path.read_bytes()) if path.exists() else None
 
+    def _discovery_reply(self, kind: str):
+        assert self.discovery and self.discovery[0][0] == kind, (
+            f"неожиданный вызов discovery {kind!r}; очередь {self.discovery!r}"
+        )
+        return self.discovery.pop(0)[1]
+
+    def discovery_start(self, frame, target, traces_to, upstream_path, cwd):
+        self.discovery_calls.append(
+            ("start", frame, target, traces_to, upstream_path)
+        )
+        return self._discovery_reply("start")
+
+    def discovery_status(self, session_id, cwd):
+        self.discovery_calls.append(("status", session_id))
+        return self._discovery_reply("status")
+
+    def discovery_brief(self, session_id, out_path, cwd):
+        self.discovery_calls.append(("brief", session_id, out_path))
+        reply = self._discovery_reply("brief")
+        # Стенд пишет артефакт при кодах 0/10/11/20, как сосед.
+        if reply.code in (0, 10, 11, 20):
+            if self.brief_bytes is not None:
+                Path(out_path).write_bytes(self.brief_bytes)
+            else:
+                Path(out_path).write_text(self.brief_text, encoding="utf-8")
+        return reply
+
 
 @pytest.fixture()
 def runs_root(tmp_path: Path, monkeypatch):
@@ -484,6 +520,165 @@ def _start_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
     return kwargs
 
 
+def _reply(code: int, **over) -> iv.DiscoveryReply:
+    env = {
+        "lifecycle": "awaiting_input", "gate": "unknown", "readiness": "unknown",
+        "next_action": {"session_id": "s-1", "question_id": "Q-01"},
+        "findings": [], "readiness_findings": [],
+        "operation": {"status": "ok", "reason": ""},
+    }
+    if code == 0:
+        env.update(lifecycle="complete", gate="pass", readiness="ready",
+                    next_action={})
+    if code in (10, 11):
+        env.update(
+            lifecycle="complete", gate="fail" if code == 10 else "pass",
+            readiness="incomplete", next_action={},
+            findings=[{"rule": "GC-04", "message": "x"}],
+        )
+    if code in (1, 2):
+        env.update(
+            lifecycle="unknown",
+            operation={"status": "refused", "reason": "boom"},
+        )
+    env.update(over)
+    return iv.DiscoveryReply(code, env, "")
+
+
+def _need_spec(**over) -> iv.InterviewSpec:
+    base = dict(
+        frame="customer", stakeholder_role="po", target="owner/alpha",
+        traces_to=None, upstream_blob=None,
+    )
+    base.update(over)
+    return iv.InterviewSpec(**base)
+
+
+def test_need_start_20_waits_without_branch(tmp_path: Path, runs_root) -> None:
+    ops = FakeOps(discovery=[("start", _reply(20))])
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-need-1", ops), interview_spec=_need_spec()
+    )
+    assert state.status == "waiting_interview"
+    assert state.interview["session_id"] == "s-1"
+    assert state.ops["interview-start"]["status"] == "completed"
+    assert ops.discovery_calls == [("start", "customer", "owner/alpha", None, None)]
+    assert not any(c[0] in ("is_dirty", "ensure_branch") for c in ops.calls)
+    assert state.branch == ""
+    assert rs.load("r-need-1").status == "waiting_interview"
+
+
+@pytest.mark.parametrize("code", [1, 2, 0, 10, 11])
+def test_need_start_non_20_stops_without_session(
+    tmp_path: Path, runs_root, code
+) -> None:
+    ops = FakeOps(discovery=[("start", _reply(code))])
+    state = runner.start(
+        **_start_kwargs(tmp_path, f"r-need-{code}", ops),
+        interview_spec=_need_spec(),
+    )
+    assert state.status == "stopped_interview"
+    assert state.interview["session_id"] is None
+    assert state.ops["interview-start"]["status"] == "started"
+    assert not any(c[0] in ("is_dirty", "ensure_branch") for c in ops.calls)
+    persisted = rs.load(f"r-need-{code}")
+    assert persisted.status == "stopped_interview"
+    assert persisted.ops["interview-start"]["status"] == "started"
+    assert persisted.interview["session_id"] is None
+
+
+def _waiting_run(tmp_path: Path, runs_root, run_id: str, extra_replies: list):
+    ops = FakeOps(discovery=[("start", _reply(20)), *extra_replies])
+    state = runner.start(
+        **_start_kwargs(tmp_path, run_id, ops), interview_spec=_need_spec()
+    )
+    assert state.status == "waiting_interview"
+    return ops, state
+
+
+def test_status_20_from_waiting_keeps_ledger_bytes(
+    tmp_path: Path, runs_root, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ops, _ = _waiting_run(
+        tmp_path, runs_root, "r-w20", [("status", _reply(20))]
+    )
+    before = (rs.run_dir("r-w20") / "run.json").read_bytes()
+    state = runner.resume("r-w20", ops)
+    assert state.status == "waiting_interview"
+    assert (rs.run_dir("r-w20") / "run.json").read_bytes() == before
+    out = capsys.readouterr().out
+    assert "discovery answer --session s-1 --role po" in out
+
+
+def test_status_20_with_foreign_session_id_stops(
+    tmp_path: Path, runs_root
+) -> None:
+    ops, _ = _waiting_run(
+        tmp_path, runs_root, "r-w-foreign",
+        [(
+            "status",
+            _reply(20, next_action={"session_id": "s-9", "question_id": "Q-02"}),
+        )],
+    )
+    assert runner.resume("r-w-foreign", ops).status == "stopped_interview"
+
+
+@pytest.mark.parametrize("code", [10, 11])
+def test_status_10_11_stops_with_findings_and_template(
+    tmp_path: Path, runs_root, code, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ops, _ = _waiting_run(
+        tmp_path, runs_root, f"r-w{code}", [("status", _reply(code))]
+    )
+    state = runner.resume(f"r-w{code}", ops)
+    assert state.status == "stopped_interview"
+    findings_path = rs.run_dir(f"r-w{code}") / "interview-findings.txt"
+    assert "GC-04" in findings_path.read_text()
+    out = capsys.readouterr().out
+    assert "--question <QUESTION_ID> --supersede" in out
+
+
+def test_stopped_then_status_20_returns_to_waiting(
+    tmp_path: Path, runs_root
+) -> None:
+    ops, _ = _waiting_run(
+        tmp_path, runs_root, "r-s20",
+        [("status", _reply(10)), ("status", _reply(20))],
+    )
+    assert runner.resume("r-s20", ops).status == "stopped_interview"
+    state = runner.resume("r-s20", ops)
+    assert state.status == "waiting_interview"
+    assert not (rs.run_dir("r-s20") / "interview-findings.txt").exists()
+
+
+@pytest.mark.parametrize("code", [1, 2])
+def test_status_1_2_stops_and_keeps_session(
+    tmp_path: Path, runs_root, code, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ops, _ = _waiting_run(
+        tmp_path, runs_root, f"r-e{code}", [("status", _reply(code))]
+    )
+    state = runner.resume(f"r-e{code}", ops)
+    assert state.status == "stopped_interview"
+    assert state.interview["session_id"] == "s-1"
+    out = capsys.readouterr().out
+    assert "--new-run --ws-id" in out
+    assert "s-1" in out
+
+
+def test_orphan_stop_resume_does_not_call_discovery(
+    tmp_path: Path, runs_root, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ops = FakeOps(discovery=[("start", _reply(2))])
+    runner.start(
+        **_start_kwargs(tmp_path, "r-orphan", ops), interview_spec=_need_spec()
+    )
+    state = runner.resume("r-orphan", ops)
+    assert state.status == "stopped_interview"
+    assert [c for c in ops.discovery_calls if c[0] != "start"] == []
+    assert "--session" in capsys.readouterr().out
+
+
 def _customer_brief_text() -> str:
     return """\
 ---
@@ -529,6 +724,287 @@ traces_to: []
 - **M-01** `traces: [G-01]` Metric
 - **OUT-01** Not in scope
 """
+
+
+def _need_brief_text(target: str = "owner/alpha", roles=("po",)) -> str:
+    """Бриф, каким его рендерит discovery: `_customer_brief_text()` + H1
+    после frontmatter + блок `sessions`, ЗАМЕНЁННЫЙ на заданные роли (пустой
+    кортеж → `sessions: []`)."""
+    base = _customer_brief_text()
+    old_sessions = "  sessions:\n    - participant_role: product-owner\n"
+    assert base.count(old_sessions) == 1
+    new_sessions = (
+        "  sessions:\n"
+        + "".join(f"    - participant_role: {r}\n" for r in roles)
+        if roles
+        else "  sessions: []\n"
+    )
+    text = base.replace(old_sessions, new_sessions)
+    head, body = text.split("---\n\n", 1)
+    return head + "---\n\n" + iv.h1_line(target, "customer") + "\n\n" + body
+
+
+def test_status_0_brief_0_publishes_and_continues_by_e1(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0)),
+        ],
+        brief_text=_need_brief_text(),
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-pub", ops), interview_spec=_need_spec()
+    )
+    state = runner.resume("r-pub", ops)
+    assert state.interview["completed_at"]
+    assert state.brief and state.brief["frame"] == "customer"
+    brief = rs.run_dir("r-pub") / "brief-input" / "00-discovery" / "brief.md"
+    assert brief.exists() and not brief.with_name(".brief.tmp").exists()
+    assert state.ops["interview-brief"]["status"] == "completed"
+    # E1: source layer материализован в бандл и charter получил brief_context
+    assert state.ops["materialize-brief"]["status"] == "completed"
+    assert any(c[0] == "author" and c[1] == "charter" for c in ops.calls)
+
+
+def test_brief_20_returns_to_waiting_without_publish(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(20)),
+        ],
+        brief_text=_need_brief_text(),
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-b20", ops), interview_spec=_need_spec()
+    )
+    state = runner.resume("r-b20", ops)
+    assert state.status == "waiting_interview" and state.brief is None
+    d = rs.run_dir("r-b20") / "brief-input" / "00-discovery"
+    assert not (d / "brief.md").exists() and not (d / ".brief.tmp").exists()
+    assert "interview-brief" not in state.ops
+
+
+@pytest.mark.parametrize("code", [10, 11, 1, 2])
+def test_brief_non_zero_stops_without_publish(
+    tmp_path: Path, runs_root, code
+) -> None:
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(code)),
+        ],
+        brief_text=_need_brief_text(),
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, f"r-b{code}", ops), interview_spec=_need_spec()
+    )
+    state = runner.resume(f"r-b{code}", ops)
+    assert state.status == "stopped_interview" and state.brief is None
+    assert not (
+        rs.run_dir(f"r-b{code}") / "brief-input" / "00-discovery" / "brief.md"
+    ).exists()
+
+
+def test_brief_0_failing_inspect_or_coordinates_stops(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0)),
+        ],
+        brief_text=_need_brief_text(target="owner/beta"),
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-bad", ops), interview_spec=_need_spec()
+    )
+    state = runner.resume("r-bad", ops)
+    assert state.status == "stopped_interview" and state.brief is None
+    assert not (
+        rs.run_dir("r-bad") / "brief-input" / "00-discovery" / "brief.md"
+    ).exists()
+    assert not any(c[0] in ("is_dirty", "ensure_branch") for c in ops.calls)
+
+
+def test_brief_0_non_utf8_stops_without_traceback(
+    tmp_path: Path, runs_root
+) -> None:
+    """Finding 3 финальной волны: `UnicodeDecodeError` из `tmp.read_text`
+    не должен утекать наружу traceback'ом — рефузный путь стопит run."""
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0)),
+        ],
+        brief_bytes=b"\xff\xfe invalid utf-8 brief",
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-badutf8", ops), interview_spec=_need_spec()
+    )
+    state = runner.resume("r-badutf8", ops)
+    assert state.status == "stopped_interview" and state.brief is None
+    assert not (
+        rs.run_dir("r-badutf8") / "brief-input" / "00-discovery" / "brief.md"
+    ).exists()
+
+
+def test_brief_0_with_second_participant_role_is_accepted(
+    tmp_path: Path, runs_root
+) -> None:
+    """D3: роль — декларация; второй участник законен на штатном пути."""
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0)),
+        ],
+        brief_text=_need_brief_text(roles=("po", "qa")),
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-two", ops), interview_spec=_need_spec()
+    )
+    assert runner.resume("r-two", ops).brief is not None
+
+
+def _published_run(
+    tmp_path: Path, runs_root, run_id: str, brief_text: str | None = None
+) -> FakeOps:
+    """Прогон до опубликованного брифа (`interview-brief` completed)."""
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0)),
+        ],
+        brief_text=brief_text or _need_brief_text(),
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, run_id, ops), interview_spec=_need_spec()
+    )
+    state = runner.resume(run_id, ops)  # status 0 → brief 0 → replace → brief.md
+    assert state.brief is not None
+    assert (rs.run_dir(run_id) / "brief-input/00-discovery/brief.md").exists()
+    return ops
+
+
+def _crash_after(state_run_id: str, brief_present: bool, tmp_present: bool) -> None:
+    """Имитация гибели: op ``started``, дескриптора (``state.brief``) нет."""
+    st = rs.load(state_run_id)
+    st.brief = None
+    st.interview["completed_at"] = None
+    st.status = "running"
+    st.ops["interview-brief"] = {"status": "started"}
+    rs.save(st)
+    d = rs.run_dir(state_run_id) / "brief-input" / "00-discovery"
+    d.mkdir(parents=True, exist_ok=True)
+    if not brief_present:
+        (d / "brief.md").unlink(missing_ok=True)
+    if tmp_present:
+        (d / ".brief.tmp").write_text("stale", encoding="utf-8")
+
+
+def test_crash_without_tmp_or_brief_re_renders(tmp_path: Path, runs_root) -> None:
+    ops = _published_run(tmp_path, runs_root, "r-c0")
+    _crash_after("r-c0", brief_present=False, tmp_present=False)
+    ops.discovery = [("brief", _reply(0))]
+    state = runner.resume("r-c0", ops)
+    assert state.brief is not None
+    assert state.ops["interview-brief"]["status"] == "completed"
+
+
+def test_crash_with_stale_tmp_re_renders(tmp_path: Path, runs_root) -> None:
+    ops = _published_run(tmp_path, runs_root, "r-c1")
+    _crash_after("r-c1", brief_present=False, tmp_present=True)
+    ops.discovery = [("brief", _reply(0))]
+    state = runner.resume("r-c1", ops)
+    assert state.brief is not None
+    assert not (
+        rs.run_dir("r-c1") / "brief-input/00-discovery/.brief.tmp"
+    ).exists()
+
+
+def test_crash_after_replace_reconciles_by_re_render_equality(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = _published_run(tmp_path, runs_root, "r-c2")
+    before = (
+        rs.run_dir("r-c2") / "brief-input/00-discovery/brief.md"
+    ).read_bytes()
+    _crash_after("r-c2", brief_present=True, tmp_present=False)
+    ops.discovery = [("brief", _reply(0))]  # тот же brief_text ⇒ байты равны
+    state = runner.resume("r-c2", ops)
+    assert state.brief is not None
+    assert (
+        rs.run_dir("r-c2") / "brief-input/00-discovery/brief.md"
+    ).read_bytes() == before
+    # повторный рендер — во ВТОРОЙ tmp (§5.5), не в brief.md и не в .brief.tmp
+    assert [c for c in ops.discovery_calls if c[0] == "brief"][-1][2].endswith(
+        ".brief.reconcile.tmp"
+    )
+
+
+def test_crash_after_replace_with_diverged_render_stops(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = _published_run(tmp_path, runs_root, "r-c3")
+    _crash_after("r-c3", brief_present=True, tmp_present=False)
+    ops.brief_text = _need_brief_text(roles=("po", "qa"))  # другие байты
+    ops.discovery = [("brief", _reply(0))]
+    state = runner.resume("r-c3", ops)
+    assert state.status == "stopped_interview" and state.brief is None
+
+
+def test_crash_after_replace_requires_code_0_on_re_render(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = _published_run(tmp_path, runs_root, "r-c4")
+    _crash_after("r-c4", brief_present=True, tmp_present=False)
+    ops.discovery = [("brief", _reply(20))]
+    assert runner.resume("r-c4", ops).status == "stopped_interview"
+
+
+def test_attach_session_only_for_orphans_and_verifies_brief(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = FakeOps(
+        discovery=[("start", _reply(2))], brief_text=_need_brief_text(roles=())
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-att", ops), interview_spec=_need_spec()
+    )
+    ops.discovery = [("brief", _reply(20))]
+    state = runner.attach_session("r-att", "s-77", ops)
+    assert state.interview["session_id"] == "s-77"
+    assert state.ops["interview-start"]["status"] == "completed"
+    # повторное присоединение при записанном id — отказ
+    with pytest.raises(ValueError):
+        runner.attach_session("r-att", "s-78", ops)
+
+
+def test_attach_session_rejects_foreign_role(tmp_path: Path, runs_root) -> None:
+    ops = FakeOps(
+        discovery=[("start", _reply(1))], brief_text=_need_brief_text(roles=("qa",))
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-att-bad", ops), interview_spec=_need_spec()
+    )
+    ops.discovery = [("brief", _reply(20))]
+    with pytest.raises(ValueError):
+        runner.attach_session("r-att-bad", "s-77", ops)
+    assert rs.load("r-att-bad").interview["session_id"] is None
+
+
+@pytest.mark.parametrize("code", [1, 2])
+def test_attach_session_rejects_render_codes_1_2(
+    tmp_path: Path, runs_root, code
+) -> None:
+    ops = FakeOps(
+        discovery=[("start", _reply(1))], brief_text=_need_brief_text(roles=())
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, f"r-att-{code}", ops), interview_spec=_need_spec()
+    )
+    ops.discovery = [("brief", _reply(code))]
+    with pytest.raises(ValueError):
+        runner.attach_session(f"r-att-{code}", "s-77", ops)
 
 
 def _brief_source(tmp_path: Path) -> brief_input.BriefSource:
