@@ -765,7 +765,7 @@ def test_need_start_20_waits_without_branch(tmp_path, runs_root) -> None:
     assert state.interview["session_id"] == "s-1"
     assert state.ops["interview-start"]["status"] == "completed"
     assert ops.discovery_calls == [("start", "customer", "owner/alpha", None, None)]
-    assert not any(c[0] == "restore" for c in ops.calls)  # ensure_branch не звался
+    assert not any(c[0] in ("is_dirty", "ensure_branch") for c in ops.calls)
     assert state.branch == ""
     assert rs.load("r-need-1").status == "waiting_interview"
 
@@ -778,7 +778,7 @@ def test_need_start_non_20_stops_without_session(tmp_path, runs_root, code) -> N
     assert state.status == "stopped_interview"
     assert state.interview["session_id"] is None
     assert state.ops["interview-start"]["status"] == "started"
-    assert not any(c[0] == "restore" for c in ops.calls)
+    assert not any(c[0] in ("is_dirty", "ensure_branch") for c in ops.calls)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -795,10 +795,13 @@ from governance import interview as iv
 INTERVIEW_START = "interview-start"
 INTERVIEW_BRIEF = "interview-brief"
 
-# start(): параметр `interview_spec: iv.InterviewSpec | None = None`,
-# после brief_descriptor:
+# start(): параметр `interview_spec: iv.InterviewSpec | None = None`.
+# Проверка взаимоисключения — РЯДОМ с validate_merge_authority/
+# validate_author_backend, ДО _reserve_run_id (иначе отказ оставит пустую
+# run.json-заглушку; start() — публичный API):
     if interview_spec is not None and brief_source is not None:
         raise ValueError("--need и --brief взаимоисключающи")
+# new_run(...):
     state = new_run(..., brief=brief_descriptor,
                     interview=interview_spec.as_state() if interview_spec else None)
 
@@ -1048,19 +1051,26 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-def _customer_brief_text(target="owner/alpha", roles=("po",)):
-    # берётся из tests/test_governance_spec_loop.py::_customer_brief() — gate-passing
-    # customer-бриф; здесь дописать H1 discovery и sessions:
-    from tests.test_governance_spec_loop import _customer_brief
-    text = _customer_brief()
-    return text.replace("interview:\n  frame: customer",
-                        "interview:\n  frame: customer\n  sessions:\n"
-                        + "".join(f"    - participant_role: {r}\n" for r in roles))
+def _need_brief_text(target: str = "owner/alpha", roles=("po",)) -> str:
+    """Бриф, каким его рендерит discovery: существующий gate-passing
+    `_need_brief_text()` этого модуля (tests/test_governance_runner.py:487)
+    + H1 `iv.h1_line(target, "customer")` после frontmatter + блок `sessions`,
+    ЗАМЕНЁННЫЙ на заданные роли (пустой кортеж → `sessions: []`)."""
+    base = _customer_brief_text()
+    old_sessions = "  sessions:\n    - participant_role: product-owner\n"
+    assert base.count(old_sessions) == 1
+    new_sessions = (
+        "  sessions:\n" + "".join(f"    - participant_role: {r}\n" for r in roles)
+        if roles else "  sessions: []\n"
+    )
+    text = base.replace(old_sessions, new_sessions)
+    head, body = text.split("---\n\n", 1)
+    return head + "---\n\n" + iv.h1_line(target, "customer") + "\n\n" + body
 
 
 def test_status_0_brief_0_publishes_and_continues_by_e1(tmp_path, runs_root) -> None:
     ops = FakeOps(discovery=[("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0))],
-                  brief_text=_customer_brief_text(),
+                  brief_text=_need_brief_text(),
                   review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     runner.start(**_start_kwargs(tmp_path, "r-pub", ops), interview_spec=_need_spec())
     state = runner.resume("r-pub", ops)
@@ -1076,7 +1086,7 @@ def test_status_0_brief_0_publishes_and_continues_by_e1(tmp_path, runs_root) -> 
 
 def test_brief_20_returns_to_waiting_without_publish(tmp_path, runs_root) -> None:
     ops = FakeOps(discovery=[("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(20))],
-                  brief_text=_customer_brief_text())
+                  brief_text=_need_brief_text())
     runner.start(**_start_kwargs(tmp_path, "r-b20", ops), interview_spec=_need_spec())
     state = runner.resume("r-b20", ops)
     assert state.status == "waiting_interview" and state.brief is None
@@ -1088,7 +1098,7 @@ def test_brief_20_returns_to_waiting_without_publish(tmp_path, runs_root) -> Non
 @pytest.mark.parametrize("code", [10, 11, 1, 2])
 def test_brief_non_zero_stops_without_publish(tmp_path, runs_root, code) -> None:
     ops = FakeOps(discovery=[("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(code))],
-                  brief_text=_customer_brief_text())
+                  brief_text=_need_brief_text())
     runner.start(**_start_kwargs(tmp_path, f"r-b{code}", ops), interview_spec=_need_spec())
     state = runner.resume(f"r-b{code}", ops)
     assert state.status == "stopped_interview" and state.brief is None
@@ -1097,18 +1107,18 @@ def test_brief_non_zero_stops_without_publish(tmp_path, runs_root, code) -> None
 
 def test_brief_0_failing_inspect_or_coordinates_stops(tmp_path, runs_root) -> None:
     ops = FakeOps(discovery=[("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0))],
-                  brief_text=_customer_brief_text(target="owner/beta"))
+                  brief_text=_need_brief_text(target="owner/beta"))
     runner.start(**_start_kwargs(tmp_path, "r-bad", ops), interview_spec=_need_spec())
     state = runner.resume("r-bad", ops)
     assert state.status == "stopped_interview" and state.brief is None
     assert not (rs.run_dir("r-bad") / "brief-input" / "00-discovery" / "brief.md").exists()
-    assert not any(c[0] == "restore" for c in ops.calls)
+    assert not any(c[0] in ("is_dirty", "ensure_branch") for c in ops.calls)
 
 
 def test_brief_0_with_second_participant_role_is_accepted(tmp_path, runs_root) -> None:
     """D3: роль — декларация; второй участник законен на штатном пути."""
     ops = FakeOps(discovery=[("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0))],
-                  brief_text=_customer_brief_text(roles=("po", "qa")),
+                  brief_text=_need_brief_text(roles=("po", "qa")),
                   review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     runner.start(**_start_kwargs(tmp_path, "r-two", ops), interview_spec=_need_spec())
     assert runner.resume("r-two", ops).brief is not None
@@ -1189,9 +1199,12 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```python
 def _published_run(tmp_path, runs_root, run_id, brief_text=None):
     ops = FakeOps(discovery=[("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0))],
-                  brief_text=brief_text or _customer_brief_text(),
+                  brief_text=brief_text or _need_brief_text(),
                   review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     runner.start(**_start_kwargs(tmp_path, run_id, ops), interview_spec=_need_spec())
+    state = runner.resume(run_id, ops)   # status 0 → brief 0 → replace → brief.md
+    assert state.brief is not None
+    assert (rs.run_dir(run_id) / "brief-input/00-discovery/brief.md").exists()
     return ops
 
 
@@ -1202,6 +1215,7 @@ def _crash_after(state_run_id, brief_present: bool, tmp_present: bool):
     st.ops["interview-brief"] = {"status": "started"}
     rs.save(st)
     d = rs.run_dir(state_run_id) / "brief-input" / "00-discovery"
+    d.mkdir(parents=True, exist_ok=True)
     if not brief_present: (d / "brief.md").unlink(missing_ok=True)
     if tmp_present: (d / ".brief.tmp").write_text("stale", encoding="utf-8")
 
@@ -1237,7 +1251,7 @@ def test_crash_after_replace_reconciles_by_re_render_equality(tmp_path, runs_roo
 def test_crash_after_replace_with_diverged_render_stops(tmp_path, runs_root) -> None:
     ops = _published_run(tmp_path, runs_root, "r-c3")
     _crash_after("r-c3", brief_present=True, tmp_present=False)
-    ops.brief_text = _customer_brief_text(roles=("po", "qa"))   # другие байты
+    ops.brief_text = _need_brief_text(roles=("po", "qa"))   # другие байты
     ops.discovery = [("brief", _reply(0))]
     state = runner.resume("r-c3", ops)
     assert state.status == "stopped_interview" and state.brief is None
@@ -1251,7 +1265,7 @@ def test_crash_after_replace_requires_code_0_on_re_render(tmp_path, runs_root) -
 
 
 def test_attach_session_only_for_orphans_and_verifies_brief(tmp_path, runs_root) -> None:
-    ops = FakeOps(discovery=[("start", _reply(2))], brief_text=_customer_brief_text(roles=()))
+    ops = FakeOps(discovery=[("start", _reply(2))], brief_text=_need_brief_text(roles=()))
     runner.start(**_start_kwargs(tmp_path, "r-att", ops), interview_spec=_need_spec())
     ops.discovery = [("brief", _reply(20))]
     state = runner.attach_session("r-att", "s-77", ops)
@@ -1263,7 +1277,7 @@ def test_attach_session_only_for_orphans_and_verifies_brief(tmp_path, runs_root)
 
 
 def test_attach_session_rejects_foreign_role(tmp_path, runs_root) -> None:
-    ops = FakeOps(discovery=[("start", _reply(1))], brief_text=_customer_brief_text(roles=("qa",)))
+    ops = FakeOps(discovery=[("start", _reply(1))], brief_text=_need_brief_text(roles=("qa",)))
     runner.start(**_start_kwargs(tmp_path, "r-att-bad", ops), interview_spec=_need_spec())
     ops.discovery = [("brief", _reply(20))]
     with pytest.raises(ValueError):
@@ -1273,7 +1287,7 @@ def test_attach_session_rejects_foreign_role(tmp_path, runs_root) -> None:
 
 @pytest.mark.parametrize("code", [1, 2])
 def test_attach_session_rejects_render_codes_1_2(tmp_path, runs_root, code) -> None:
-    ops = FakeOps(discovery=[("start", _reply(1))], brief_text=_customer_brief_text(roles=()))
+    ops = FakeOps(discovery=[("start", _reply(1))], brief_text=_need_brief_text(roles=()))
     runner.start(**_start_kwargs(tmp_path, f"r-att-{code}", ops), interview_spec=_need_spec())
     ops.discovery = [("brief", _reply(code))]
     with pytest.raises(ValueError):
@@ -1391,7 +1405,25 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```python
 # tests/test_governance_spec_loop.py — _LoopEnv._start: добавить в rs.new_run
 #   interview=(kwargs["interview_spec"].as_state() if kwargs.get("interview_spec") else None)
-# и статус: если interview — "waiting_interview", иначе как было.
+# и статус: если interview — "waiting_interview", иначе как было. `_start`
+# леджер НЕ сохраняет (как и сейчас); тесты, которым нужен найденный прогон,
+# создают его сохранённым — через `_make_need_run` (ниже) или `_mk_run`.
+from governance import interview as iv
+
+
+def _make_need_run(env, run_id_suffix="", status="waiting_interview", session="s-1",
+                   stakeholder="product owner"):
+    st = rs.new_run(subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
+                    ws_id="ws-a" + run_id_suffix, target_dir=str(env.target),
+                    bundle_dir="workstreams/ws-a/spec", profile="profiles/team-exp.yaml",
+                    run_id="r-a" + run_id_suffix, merge_authority="human",
+                    interview={**iv.InterviewSpec("customer", stakeholder, "owner/alpha",
+                                                  None, None).as_state(), "session_id": session})
+    st.status = status
+    st.ops["interview-start"] = {"status": "completed" if session else "started"}
+    rs.save(st)
+    return st
+
 
 def _need(*extra):
     return ["--subject", "Fleet Inbox", "--repo", "alpha", "--need",
@@ -1436,21 +1468,20 @@ def test_need_without_stakeholder_explains_rule_and_brief_route(runs_root, tmp_p
 
 
 def test_need_repeat_with_other_coordinates_refuses(runs_root, tmp_path, monkeypatch, capsys):
-    env = _LoopEnv(monkeypatch, tmp_path, resume_result=None)
-    spec_loop.main(_need())
-    state = rs.load(env.calls[0][1]["run_id"]); state.status = "waiting_interview"; rs.save(state)
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _make_need_run(env)   # сохранённый леджер в waiting_interview, stakeholder "product owner"
     rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha", "--need",
                          "--frame", "customer", "--stakeholder", "qa"])
     assert rc == 1 and "координаты" in capsys.readouterr().out
-    assert [c[0] for c in env.calls] == ["start"]
+    assert env.calls == []
 
 
 def test_need_against_run_without_interview_refuses(runs_root, tmp_path, monkeypatch, capsys):
     env = _LoopEnv(monkeypatch, tmp_path)
-    spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])   # legacy-прогон
+    _mk_run("r-legacy", "Fleet Inbox", target_dir=str(env.target), status="waiting_human_merge")
     rc = spec_loop.main(_need())
     assert rc == 1 and "--new-run --ws-id" in capsys.readouterr().out
-    assert [c[0] for c in env.calls] == ["start"]
+    assert env.calls == []
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1507,7 +1538,20 @@ def build_interview_spec(args, repo_slug: str) -> iv.InterviewSpec | None:
     raise SpecLoopError(ops_mod.ENGINEER_BLOCKED)   # D6, до discovery#49
 ```
 
-В `main` — сразу после `supplied_brief = …` и `entry = …`: `interview_spec = build_interview_spec(args, entry.repo_slug)`. При найденном `state`:
+В `main` порядок: `entry = manifest_repo_entry(...)` → `interview_spec =
+build_interview_spec(args, entry.repo_slug)` → и только затем `supplied_brief =
+inspect_brief(...)`: взаимоисключение `--need`/`--brief` проверяется по
+аргументам ДО чтения файла брифа (иначе несуществующий `x.md` отказал бы
+чтением, а не preflight). После `runner.start(...)`:
+
+```python
+        if started.status == "waiting_interview":
+            print("интервью начато — ответьте стейкхолдеру вне spec-loop и "
+                  f"повторите: make spec-loop … ARGS='--need … --run-id {started.run_id}'")
+            return 0
+```
+
+При найденном `state`:
 
 ```python
         if state is not None and interview_spec is not None:
@@ -1555,18 +1599,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-def _make_need_run(env, run_id_suffix="", status="waiting_interview", session="s-1"):
-    st = rs.new_run(subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
-                    ws_id="ws-a" + run_id_suffix, target_dir=str(env.target),
-                    bundle_dir="workstreams/ws-a/spec", profile="profiles/team-exp.yaml",
-                    run_id="r-a" + run_id_suffix, merge_authority="human",
-                    interview={**iv.InterviewSpec("customer", "product owner", "owner/alpha",
-                                                  None, None).as_state(), "session_id": session})
-    st.status = status
-    st.ops["interview-start"] = {"status": "completed" if session else "started"}
-    rs.save(st)
-    return st
-
+# `_make_need_run` — помощник из Task 9 (уже в файле).
 
 def test_waiting_interview_resume_still_waiting_exits_0(runs_root, tmp_path, monkeypatch, capsys):
     env = _LoopEnv(monkeypatch, tmp_path)
@@ -1687,10 +1720,10 @@ Expected: FAIL
                 print(f"spec-loop: прежний прогон {st.run_id} остаётся ({st.status}), "
                       f"сессия discovery: {(st.interview or {}).get('session_id')}")
             state = None
-# после runner.start при interview_spec: печать
-        if started.status == "waiting_interview":
-            print(f"интервью начато — ответьте и повторите: make spec-loop … ARGS='--need … --run-id {started.run_id}'")
-# подсказка E1 (две строки «другим --ws-id») → "--new-run --ws-id <fresh-id>"
+# подсказка E1 (spec_loop.py:680 и :717 «создайте новый workstream с другим
+# --ws-id») → "новый прогон: --new-run --ws-id <fresh-id>"; вместе с ней
+# правится существующий assert tests/test_governance_spec_loop.py:685
+# (`"другим --ws-id" in out` → `"--new-run --ws-id" in out`).
 ```
 
 `ValueError` из `attach_session` — обернуть в `SpecLoopError(str(exc))`.
