@@ -22,8 +22,10 @@ from typing import Protocol
 from urllib.parse import quote
 
 from governance.facts import Fact, Outcome, unavailable
+from governance import interview as _interview
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
+ENGINEER_BLOCKED = "engineer-маршрут ждёт discovery#49 (приём upstream при start)"
 REVIEW_GH_CONFIG_DIR = Path.home() / ".config" / "review"
 
 _PR_URL_RE = re.compile(r"/pull/(\d+)")
@@ -164,6 +166,17 @@ class Ops(Protocol):
         self, target_dir: str, task: str, config_path: str, slug: str,
         resume: bool = False,
     ) -> int: ...
+
+    def discovery_start(
+        self, frame: str, target: str, traces_to: str | None,
+        upstream_path: str | None, cwd: str,
+    ) -> _interview.DiscoveryReply: ...
+
+    def discovery_status(self, session_id: str, cwd: str) -> _interview.DiscoveryReply: ...
+
+    def discovery_brief(
+        self, session_id: str, out_path: str, cwd: str
+    ) -> _interview.DiscoveryReply: ...
 
     def commit_paths(
         self, target_dir: str, paths: list[str], message: str,
@@ -1365,6 +1378,46 @@ class RealOps:
         argv += ["--slug", slug, "--config", config_path, "--root", target_dir]
         done = subprocess.run(argv, cwd=target_dir)
         return done.returncode
+
+    def _discovery(self, args: list[str], cwd: str) -> _interview.DiscoveryReply:
+        """Один вызов discovery CLI соседа + проверка границы (спека §6).
+
+        `--frozen --project`: тот же способ, что у disputatio (`author_disp`).
+        stdout захватывается целиком — envelope один на вызов; stderr
+        сохраняется для диагностики, но в контракт не входит.
+        """
+        argv = [
+            "uv", "run", "--frozen", "--project",
+            str(DEVTOOLS_ROOT.parent / "discovery"), "discovery", *args,
+        ]
+        done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
+        return _interview.parse_reply(done.returncode, done.stdout, done.stderr)
+
+    def discovery_start(
+        self, frame: str, target: str, traces_to: str | None,
+        upstream_path: str | None, cwd: str,
+    ) -> _interview.DiscoveryReply:
+        """`discovery start`. `upstream_path` — durable-копия из run_dir; до
+        discovery#49 сосед upstream не принимает — отказ ДО вызова, тем же
+        текстом, что preflight spec-loop (порт после разблокировки не меняется)."""
+        if upstream_path is not None:
+            return _interview.DiscoveryReply(
+                1, _interview.synthetic_envelope(ENGINEER_BLOCKED), ""
+            )
+        args = ["start", "--frame", frame, "--target", target]
+        if traces_to:
+            args += ["--traces-to", traces_to]
+        return self._discovery(args, cwd)
+
+    def discovery_status(self, session_id: str, cwd: str) -> _interview.DiscoveryReply:
+        return self._discovery(["status", "--session", session_id], cwd)
+
+    def discovery_brief(
+        self, session_id: str, out_path: str, cwd: str
+    ) -> _interview.DiscoveryReply:
+        return self._discovery(
+            ["brief", "--session", session_id, "--out", out_path], cwd
+        )
 
     def commit_paths(
         self, target_dir: str, paths: list[str], message: str,
