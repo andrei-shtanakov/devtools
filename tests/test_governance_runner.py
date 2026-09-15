@@ -2947,6 +2947,30 @@ def test_disp_doc_anchor_leaves_the_target_when_runs_root_is_inside_it(
     assert "r-disp-self" in str(anchor)
 
 
+def test_disp_anchor_dir_is_canonical_even_for_relative_xdg_state_home(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Ревью #242, круг 5: относительный `XDG_STATE_HOME` резолвится по CWD
+    раннера, а disp резолвил бы сырую строку от `cwd=target_dir`. В конфиг и
+    в пин уходит абсолютный канонизированный путь."""
+    outside = tmp_path.parent / f"cwd-{tmp_path.name}"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    monkeypatch.setenv("XDG_STATE_HOME", "state-rel")
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    run_id = "r-disp-rel-xdg"
+    state = runner.start(**_start_kwargs(
+        tmp_path, run_id, ops, author_backend="disp", target_dir=str(tmp_path),
+    ))
+    _, _, config_path, _ = ops.author_disp_calls[0]
+    config = Path(config_path).read_text(encoding="utf-8")
+    line = [ln for ln in config.splitlines() if ln.startswith("anchor_path")]
+    anchor = Path(line[0].split('"')[1])
+    assert anchor.is_absolute(), anchor
+    assert anchor == (outside / "state-rel" / "devtools" / "disp-anchors" / run_id).resolve()
+    assert Path(state.disp_anchor_dir) == anchor
+
+
 def test_disp_anchor_dir_is_pinned_and_survives_an_environment_change(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:

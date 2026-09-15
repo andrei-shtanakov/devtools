@@ -911,8 +911,13 @@ def _disp_anchor_dir(state: RunState) -> Path | None:
         Path(xdg) / "devtools" / "disp-anchors" / state.run_id
     )
     for candidate in candidates:
-        if not candidate.expanduser().resolve().is_relative_to(target):
-            return candidate
+        # Пинуется и уходит в конфиг КАНОНИЗИРОВАННЫЙ путь (ревью #242,
+        # круг 5): относительный или `~`-`XDG_STATE_HOME` прошёл бы наш
+        # containment по CWD раннера, а disp резолвил бы сырую строку от
+        # `cwd=target_dir` — внутри цели — и отказал бы на старте.
+        canonical = candidate.expanduser().resolve()
+        if not canonical.is_relative_to(target):
+            return canonical
     return None
 
 
