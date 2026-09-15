@@ -1420,6 +1420,16 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       verdicts из ledger до write-ahead доставки, а `deliver` переносит
       точные байты в один `commit_paths` вместе с tasks; прямой legacy-вызов
       без run-контекста сохраняет прежний контракт.
+- [ ] E2 Стадия Need вызывается прогоном, customer-маршрут: `spec-loop --need --frame customer --stakeholder <role>` — `start` через порт `Ops.discovery_*`, персистентный `waiting_interview` без ветки/worktree/авторинга, пауза печатает точную команду `discovery answer` (ответы — человек, вне spec-loop), `status` 0 → `brief` в tmp → `inspect_brief` → `os.replace` → `state.brief` → S1 по E1; `stopped_interview` продолжаемый; recovery `--session` только при сироте; `--new-run` только для прогонов до S1; транспортный контракт с синтетическим кодом 1; живая приёмка с реальным стейкхолдером @owner:github:andrei-shtanakov @id:spec-loop-need-stage
+      Дизайн — `docs/superpowers/specs/2026-09-15-need-stage-design.md`
+      (согласован по секциям 2026-09-15, решения владельца D1–D6). Тесты по
+      слоям runner/spec_loop/RealOps + opt-in smoke с настоящим discovery;
+      negative controls на три гварда. Evidence живого прогона — §9 спеки.
+- [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; до доставки соседа маршрут отказывает до run-id @owner:github:andrei-shtanakov @id:spec-loop-need-engineer-route @blocked_by:discovery#49
+      Ждёт discovery#49 п.1 (slug orchestrated-start-upstream-and-session-id):
+      приём upstream при `start --frame engineer`. П.2 (caller-assigned
+      session id) и п.3 (метаданные в envelope) — улучшения, не блокеры.
+
 - [x] E1 Вход конвейера из discovery-brief: `spec-loop --brief <path>` — бриф обязан пройти вендоренный gate_check (pass, иначе fail-closed), хэш брифа входит в `upstream_hashes` charter, бриф лежит нулевым узлом в `workstreams/<ws-id>/spec/` и едет бандл-PR-ом; промпты charter/requirements получают бриф как источник (G-NN/FR-NN переносятся с трассировкой), гвард «каждый Must-FR брифа встречается в requirements»; приёмка — живой прогон engineer-фрейм → бриф → spec-loop → approved tasks-спека → исполнение spec-runner @owner:github:andrei-shtanakov @id:spec-loop-brief-input
       Граница author ≠ execute discovery сохраняется: PR открывает конвейер,
       не discovery. gate_check вендорится КОДОМ пиненой копией по образцу
