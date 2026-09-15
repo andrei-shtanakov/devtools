@@ -857,6 +857,12 @@ def _interview_publish(
     tmp = out_dir / ".brief.tmp"
     final = out_dir / "brief.md"
     _ensure_started(state, INTERVIEW_BRIEF)
+    if (
+        op_status(state, INTERVIEW_BRIEF) == "started"
+        and final.exists()
+        and state.brief is None
+    ):
+        return _interview_reconcile_published(state, ops, spec, cwd, final)
     tmp.unlink(missing_ok=True)
     reply = ops.discovery_brief(session_id, str(tmp), cwd)
     if reply.code != 0:
@@ -882,6 +888,110 @@ def _interview_publish(
     state.status = "running"
     op_complete(state, INTERVIEW_BRIEF, brief_blob=dict(source.source_blobs))
     return True
+
+
+def _interview_reconcile_published(
+    state: RunState, ops: Ops, spec: iv.InterviewSpec, cwd: str, final: Path
+) -> bool:
+    """§5.5: реконсиляционное окно после гибели между `replace` и `op_complete`.
+
+    `brief.md` уже лежит durable, но op `interview-brief` остался ``started``
+    и `state.brief` пуст — descriptor не успел зафиксироваться. Повторный
+    рендер ТОЙ ЖЕ сессии во второй, отдельный tmp обязан вернуть код 0 и
+    побайтово совпасть с уже опубликованным `brief.md`; расхождение или
+    ненулевой код значит, что сессия ушла от опубликованного состояния —
+    стоп без повторного `os.replace`. При совпадении координаты и
+    `inspect_brief` перепроверяются заново (durable-файл мог быть подменён
+    вручную между гибелью и recovery), и op завершается с ``reconciled=True``
+    вместо второго replace.
+    """
+    probe = final.with_name(".brief.reconcile.tmp")
+    probe.unlink(missing_ok=True)
+    reply = ops.discovery_brief(state.interview["session_id"], str(probe), cwd)
+    try:
+        if reply.code != 0:
+            return _interview_stop(
+                state,
+                f"recovery: повторный рендер вернул {reply.code}, "
+                "сессия ушла от опубликованного состояния",
+            )
+        if not probe.exists():
+            return _interview_stop(
+                state, "recovery: повторный рендер не записал артефакт"
+            )
+        if probe.read_bytes() != final.read_bytes():
+            return _interview_stop(
+                state, "recovery: повторный рендер не совпадает с durable brief.md"
+            )
+    finally:
+        probe.unlink(missing_ok=True)
+    text = final.read_text(encoding="utf-8")
+    findings = iv.brief_coordinate_findings(text, spec)
+    if findings:
+        return _interview_stop(state, "recovery: координаты: " + "; ".join(findings))
+    try:
+        source = brief_input.inspect_brief(final)
+    except brief_input.BriefInputError as exc:
+        return _interview_stop(state, f"recovery: inspect_brief: {exc}")
+    state.brief = source.as_state()
+    state.interview["completed_at"] = datetime.now(timezone.utc).isoformat(
+        timespec="seconds"
+    )
+    state.status = "running"
+    op_complete(
+        state, INTERVIEW_BRIEF, brief_blob=dict(source.source_blobs), reconciled=True
+    )
+    return True
+
+
+def attach_session(run_id: str, session_id: str, ops: Ops) -> RunState:
+    """§5.3: присоединение сироты — сессия, созданная без записи `session_id`.
+
+    Допустимо только когда `interview-start` остался ``started`` и
+    `session_id` ещё не записан (иначе замена сессии запрещена —
+    `ValueError`). Кандидат проверяется рендером брифа в одноразовый probe:
+    коды 0/10/11/20 (сосед пишет артефакт при любом из них) принимаются,
+    1/2 — операционный отказ рендера, тоже `ValueError`. Отсутствующий файл
+    после «успешного» кода — тоже отказ, не traceback. Найденный бриф
+    сверяется `iv.attach_findings` (H1/frame/traces_to + роли участников
+    ⊆ {stakeholder_role}); расхождение — отказ, сессия не записывается.
+    При успехе `session_id` фиксируется, run переходит в
+    ``waiting_interview``, `interview-start` завершается с
+    ``attached=True``.
+    """
+    state = load(run_id)
+    if state.interview is None:
+        raise ValueError("у прогона нет стадии Need")
+    if state.interview.get("session_id") is not None:
+        raise ValueError("session_id уже записан — замена сессии запрещена")
+    if op_status(state, INTERVIEW_START) != "started":
+        raise ValueError(
+            "присоединение допустимо только при interview-start == started"
+        )
+    spec = iv.InterviewSpec.from_state(state.interview)
+    probe = run_dir(run_id) / "brief-input" / ".attach.tmp"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    reply = ops.discovery_brief(session_id, str(probe), str(run_dir(run_id)))
+    # `cmd_brief` соседа пишет артефакт (`write_artifact`) ДО `_emit` при
+    # любом коде, кроме отказа загрузки сессии (discovery `cli.py:267-283`);
+    # 1/2 — отказ присоединения, отсутствующий файл — тоже отказ, не
+    # traceback.
+    try:
+        if reply.code not in (0, 10, 11, 20):
+            raise ValueError(f"рендер сессии {session_id} вернул {reply.code}")
+        if not probe.exists():
+            raise ValueError(f"рендер сессии {session_id} не записал артефакт")
+        findings = iv.attach_findings(probe.read_text(encoding="utf-8"), spec)
+    finally:
+        probe.unlink(missing_ok=True)
+    if findings:
+        raise ValueError(
+            "сессия не совпадает с координатами прогона: " + "; ".join(findings)
+        )
+    state.interview["session_id"] = session_id
+    state.status = "waiting_interview"
+    op_complete(state, INTERVIEW_START, session_id=session_id, attached=True)
+    return state
 
 
 def _step_interview(state: RunState, ops: Ops) -> bool:

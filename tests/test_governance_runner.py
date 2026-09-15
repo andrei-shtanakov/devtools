@@ -838,6 +838,148 @@ def test_brief_0_with_second_participant_role_is_accepted(
     assert runner.resume("r-two", ops).brief is not None
 
 
+def _published_run(
+    tmp_path: Path, runs_root, run_id: str, brief_text: str | None = None
+) -> FakeOps:
+    """Прогон до опубликованного брифа (`interview-brief` completed)."""
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0)),
+        ],
+        brief_text=brief_text or _need_brief_text(),
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, run_id, ops), interview_spec=_need_spec()
+    )
+    state = runner.resume(run_id, ops)  # status 0 → brief 0 → replace → brief.md
+    assert state.brief is not None
+    assert (rs.run_dir(run_id) / "brief-input/00-discovery/brief.md").exists()
+    return ops
+
+
+def _crash_after(state_run_id: str, brief_present: bool, tmp_present: bool) -> None:
+    """Имитация гибели: op ``started``, дескриптора (``state.brief``) нет."""
+    st = rs.load(state_run_id)
+    st.brief = None
+    st.interview["completed_at"] = None
+    st.status = "running"
+    st.ops["interview-brief"] = {"status": "started"}
+    rs.save(st)
+    d = rs.run_dir(state_run_id) / "brief-input" / "00-discovery"
+    d.mkdir(parents=True, exist_ok=True)
+    if not brief_present:
+        (d / "brief.md").unlink(missing_ok=True)
+    if tmp_present:
+        (d / ".brief.tmp").write_text("stale", encoding="utf-8")
+
+
+def test_crash_without_tmp_or_brief_re_renders(tmp_path: Path, runs_root) -> None:
+    ops = _published_run(tmp_path, runs_root, "r-c0")
+    _crash_after("r-c0", brief_present=False, tmp_present=False)
+    ops.discovery = [("brief", _reply(0))]
+    state = runner.resume("r-c0", ops)
+    assert state.brief is not None
+    assert state.ops["interview-brief"]["status"] == "completed"
+
+
+def test_crash_with_stale_tmp_re_renders(tmp_path: Path, runs_root) -> None:
+    ops = _published_run(tmp_path, runs_root, "r-c1")
+    _crash_after("r-c1", brief_present=False, tmp_present=True)
+    ops.discovery = [("brief", _reply(0))]
+    state = runner.resume("r-c1", ops)
+    assert state.brief is not None
+    assert not (
+        rs.run_dir("r-c1") / "brief-input/00-discovery/.brief.tmp"
+    ).exists()
+
+
+def test_crash_after_replace_reconciles_by_re_render_equality(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = _published_run(tmp_path, runs_root, "r-c2")
+    before = (
+        rs.run_dir("r-c2") / "brief-input/00-discovery/brief.md"
+    ).read_bytes()
+    _crash_after("r-c2", brief_present=True, tmp_present=False)
+    ops.discovery = [("brief", _reply(0))]  # тот же brief_text ⇒ байты равны
+    state = runner.resume("r-c2", ops)
+    assert state.brief is not None
+    assert (
+        rs.run_dir("r-c2") / "brief-input/00-discovery/brief.md"
+    ).read_bytes() == before
+    # повторный рендер — во ВТОРОЙ tmp (§5.5), не в brief.md и не в .brief.tmp
+    assert [c for c in ops.discovery_calls if c[0] == "brief"][-1][2].endswith(
+        ".brief.reconcile.tmp"
+    )
+
+
+def test_crash_after_replace_with_diverged_render_stops(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = _published_run(tmp_path, runs_root, "r-c3")
+    _crash_after("r-c3", brief_present=True, tmp_present=False)
+    ops.brief_text = _need_brief_text(roles=("po", "qa"))  # другие байты
+    ops.discovery = [("brief", _reply(0))]
+    state = runner.resume("r-c3", ops)
+    assert state.status == "stopped_interview" and state.brief is None
+
+
+def test_crash_after_replace_requires_code_0_on_re_render(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = _published_run(tmp_path, runs_root, "r-c4")
+    _crash_after("r-c4", brief_present=True, tmp_present=False)
+    ops.discovery = [("brief", _reply(20))]
+    assert runner.resume("r-c4", ops).status == "stopped_interview"
+
+
+def test_attach_session_only_for_orphans_and_verifies_brief(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = FakeOps(
+        discovery=[("start", _reply(2))], brief_text=_need_brief_text(roles=())
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-att", ops), interview_spec=_need_spec()
+    )
+    ops.discovery = [("brief", _reply(20))]
+    state = runner.attach_session("r-att", "s-77", ops)
+    assert state.interview["session_id"] == "s-77"
+    assert state.ops["interview-start"]["status"] == "completed"
+    # повторное присоединение при записанном id — отказ
+    with pytest.raises(ValueError):
+        runner.attach_session("r-att", "s-78", ops)
+
+
+def test_attach_session_rejects_foreign_role(tmp_path: Path, runs_root) -> None:
+    ops = FakeOps(
+        discovery=[("start", _reply(1))], brief_text=_need_brief_text(roles=("qa",))
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-att-bad", ops), interview_spec=_need_spec()
+    )
+    ops.discovery = [("brief", _reply(20))]
+    with pytest.raises(ValueError):
+        runner.attach_session("r-att-bad", "s-77", ops)
+    assert rs.load("r-att-bad").interview["session_id"] is None
+
+
+@pytest.mark.parametrize("code", [1, 2])
+def test_attach_session_rejects_render_codes_1_2(
+    tmp_path: Path, runs_root, code
+) -> None:
+    ops = FakeOps(
+        discovery=[("start", _reply(1))], brief_text=_need_brief_text(roles=())
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, f"r-att-{code}", ops), interview_spec=_need_spec()
+    )
+    ops.discovery = [("brief", _reply(code))]
+    with pytest.raises(ValueError):
+        runner.attach_session(f"r-att-{code}", "s-77", ops)
+
+
 def _brief_source(tmp_path: Path) -> brief_input.BriefSource:
     path = tmp_path / "discovery-input.md"
     path.write_text(_customer_brief_text(), encoding="utf-8")
