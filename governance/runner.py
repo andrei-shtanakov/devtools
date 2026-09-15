@@ -916,6 +916,25 @@ def _disp_anchor_dir(state: RunState) -> Path | None:
     return None
 
 
+def _pinned_disp_anchor_dir(state: RunState) -> Path | None:
+    """Каталог анкера — из `run.json`, а не из окружения (ревью #242).
+
+    Тот же принцип, что у слага: координата начатого пайплайна выбирается
+    один раз write-ahead. `_disp_anchor_dir` читает `XDG_STATE_HOME`/`HOME`
+    при каждом вызове, а retry из другого шелла/cron получил бы другой
+    каталог — и `disp pipeline resume` искал бы журнал целостности там, где
+    его нет. `None` — положить некуда, вызывающий останавливает прогон.
+    """
+    if state.disp_anchor_dir:
+        return Path(state.disp_anchor_dir)
+    chosen = _disp_anchor_dir(state)
+    if chosen is None:
+        return None
+    state.disp_anchor_dir = str(chosen)
+    save(state)
+    return chosen
+
+
 def _pinned_disp_slug(state: RunState) -> str:
     """Слаг пайплайна — из `run.json`, а не заново (devtools#204 п.3).
 
@@ -1055,7 +1074,7 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
         if kind == "behaviour-spec" and state.author_backend == "disp":
             bundle_path = f"{state.bundle_dir}/{filename}"
             task = _disp_behaviour_task(state.subject, bundle_path)
-            anchor_dir = _disp_anchor_dir(state)
+            anchor_dir = _pinned_disp_anchor_dir(state)
             if anchor_dir is None:
                 print(
                     "_step_authoring: анкер P9 некуда положить вне дерева "

@@ -90,6 +90,11 @@ class RunState:
     # состояния, а не операции: `_reset_stopped_author` снимает незавершённые
     # author-операции целиком, и пин внутри них не пережил бы retry.
     disp_slug: str | None = None
+    # Пин каталога анкера P9 (ревью #242): такая же координата начатого
+    # пайплайна, как слаг — `resume` соседа ищет журнал целостности по
+    # живому `anchor_path` из конфига, и пересчёт из окружения (другой
+    # XDG_STATE_HOME/HOME) на retry увёл бы его в пустой каталог.
+    disp_anchor_dir: str | None = None
 
 
 _ALLOWED_AUTHOR_BACKENDS = ("codex", "disp")

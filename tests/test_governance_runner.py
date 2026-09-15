@@ -2947,6 +2947,36 @@ def test_disp_doc_anchor_leaves_the_target_when_runs_root_is_inside_it(
     assert "r-disp-self" in str(anchor)
 
 
+def test_disp_anchor_dir_is_pinned_and_survives_an_environment_change(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Ревью #242: анкер — координата начатого пайплайна, как слаг. Retry
+    из другого окружения (иной XDG_STATE_HOME) обязан отдать соседу ТОТ ЖЕ
+    каталог: `resume` ищет журнал целостности по живому `anchor_path`."""
+    first = tmp_path.parent / f"xdg-a-{tmp_path.name}"
+    monkeypatch.setenv("XDG_STATE_HOME", str(first))
+    ops = FakeOps(author_disp_exit=1)
+    run_id = "r-disp-anchor-pin"
+    state = runner.start(**_start_kwargs(
+        tmp_path, run_id, ops, author_backend="disp", target_dir=str(tmp_path),
+    ))
+    assert state.status == "stopped_author"
+
+    def anchor_of(config_path: str) -> Path:
+        config = Path(config_path).read_text(encoding="utf-8")
+        line = [ln for ln in config.splitlines() if ln.startswith("anchor_path")]
+        return Path(line[0].split('"')[1])
+
+    pinned = anchor_of(ops.author_disp_calls[0][2])
+    assert pinned.resolve().is_relative_to(first.resolve())
+    assert Path(rs.load(run_id).disp_anchor_dir) == pinned
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path.parent / f"xdg-b-{tmp_path.name}"))
+    ops.author_disp_exit = 0
+    runner.resume(run_id, ops)
+    assert anchor_of(ops.author_disp_calls[1][2]) == pinned
+
+
 def test_disp_slug_is_pinned_in_run_state_and_reused_on_retry(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
