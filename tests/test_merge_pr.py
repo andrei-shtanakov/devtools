@@ -701,6 +701,24 @@ def test_diff_is_taken_between_two_pinned_shas(fleet: Fleet) -> None:
     assert "/files" not in fleet.gh_calls()
 
 
+def test_diff_is_taken_from_live_tip_not_pr_snapshot(fleet: Fleet) -> None:
+    """Compare гварда 4 идёт от ЖИВОЙ верхушки, не от baseRefOid (devtools#223,
+    ревью #235): three-dot compare — диф деревьев, от старого снимка откат
+    чужого post-fork коммита по authority-root пути невидим. Подсадка
+    разводит снимок и верхушку: адрес compare обязан назвать верхушку.
+    """
+    stale = "b" * 40
+    fleet.run(
+        GH_STUB_HEADREF="feat/ordinary",
+        GH_STUB_BASEOID=stale,
+        GH_STUB_LIVE_TIP=BASE_SHA,
+    )
+    compare = [ln for ln in fleet.gh_calls().splitlines() if "/compare/" in ln]
+    assert len(compare) == 1
+    assert f"compare/{BASE_SHA}...{HEAD_SHA}" in compare[0]
+    assert f"compare/{stale}" not in fleet.gh_calls()
+
+
 def test_truncated_file_list_does_not_merge(fleet: Fleet) -> None:
     """Полнота списка не подтверждена — гвард не может ручаться, значит отказ.
 
