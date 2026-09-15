@@ -193,9 +193,40 @@ make spec-loop SUBJECT="Published workflow app" REPO=alpha \
 gate; после requirements отдельный гард проверяет точный перенос каждого
 source FR/NFR и сохранение `Must`.
 
-E1 принимает уже выпущенный brief и не запускает discovery-интервью. Запуск
-стадии Need и пауза `awaiting_input` относятся к следующему этапу E2. Без
-`--brief` CLI и исторические ledger работают по прежнему classic-пути.
+E1 принимает уже выпущенный brief и не запускает discovery-интервью. Стадию
+Need (E2) запускает `--need`, когда готового брифа ещё нет — вместо brief-
+входа, взаимоисключающе с `--brief`:
+
+```bash
+make spec-loop SUBJECT="Published workflow app" REPO=alpha \
+  ARGS="--need --frame customer --stakeholder po"
+```
+
+`--frame customer|engineer` обязателен вместе с `--need`, `--stakeholder
+<role>` — декларация реального стейкхолдера (не проверка, но без неё стадия
+не стартует). `engineer`-фрейм пока отказывает: `--traces-to` заблокирован
+до discovery#49. Команда запускает discovery-интервью, прогон паркуется в
+постоянном статусе `waiting_interview` — bundle-ветка и worktree целевого
+репо ещё не создаются — и печатает точную команду ответа вида
+`discovery answer --session <id> --role <role> --file answer.yaml`.
+Стейкхолдер отвечает ЭТОЙ командой вне spec-loop, затем оператор повторяет
+кнопку с тем же `--run-id`:
+
+```bash
+make spec-loop SUBJECT="Published workflow app" REPO=alpha \
+  ARGS="--need --frame customer --stakeholder po --run-id <run-id>"
+```
+
+Стадия останавливается статусом `stopped_interview` двумя способами: если
+discovery отверг ответ — файлом findings рядом с прогоном и подсказкой
+повторного ответа с `--supersede`; если это операционный отказ discovery —
+подсказкой восстановить ту же сессию. Восстановление доступно двумя
+флагами, каждый только в своей ситуации: `--session <id>` присоединяет
+сессию к сироте (interview начат, но `session_id` ещё не записан);
+`--new-run --ws-id <fresh-id>` начинает новый прогон и допустим только
+до стадии S1 (пока стадия Need не продвинулась дальше). Без
+`--brief`/`--need` CLI и исторические ledger работают по прежнему
+classic-пути.
 
 Сегодня S7 (merge_gate) у любого прогона уходит в `waiting_human_merge`: по
 данным вендоренной копии steward-политики (`contracts/steward-actor-policy/v1/`)
