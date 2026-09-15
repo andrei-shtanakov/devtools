@@ -1522,9 +1522,22 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
             # Ровно один путь retry (devtools#204 п.3): пайплайн начат этим
             # прогоном и его каталог есть ⇒ `resume` (на нём `run`
             # отказывает по коду соседа); каталога нет ⇒ `run`.
+            resume = started_here and pipeline_dir.is_dir()
+            if not resume:
+                # Сосед стартует только на чистом дереве (document-pipeline.md
+                # §2: первый PROPOSING делает `reset --hard` + `clean`, потому
+                # untracked-путь вне `.disputatio/` — отказ, не потеря). Узлы
+                # до behaviour и source-слой E1 лежат в бандле untracked —
+                # коммитим их той же процедурой, что S3 (живой прогон
+                # spec-runner#480: без этого disp вернул 2). Перед `resume`
+                # не коммитим: черновик узла живого пайплайна — не наш.
+                _commit_bundle(
+                    state, ops,
+                    f"docs(governance): behaviour bundle {state.ws_id} — "
+                    f"{state.subject}: узлы до disp-авторинга",
+                )
             exit_code = ops.author_disp(
-                state.target_dir, task, config_path, slug,
-                resume=started_here and pipeline_dir.is_dir(),
+                state.target_dir, task, config_path, slug, resume=resume,
             )
             if exit_code != 0:
                 # Процедура, а не только факт (ревью #242, круг 3): как
@@ -1579,25 +1592,38 @@ def _step_commit(state: RunState, ops: Ops) -> bool:
     if op_status(state, key) == "completed":
         return True
     _ensure_started(state, key)
+    _commit_bundle(
+        state, ops,
+        f"docs(governance): behaviour bundle {state.ws_id} — {state.subject}",
+    )
+    if state.brief is not None and not _source_layer_committed(state, ops):
+        return False
+    op_complete(state, key)
+    return True
+
+
+def _commit_bundle(state: RunState, ops: Ops, subject_line: str) -> None:
+    """Коммит `bundle_dir` (и source-слоя E1 с `-f`) под заданной темой.
+
+    Одна процедура на два входа: S3 (`_step_commit`) и коммит перед первым
+    `run` disp-авторинга, которому сосед требует чистое дерево. Идемпотентна:
+    пустой индекс — не ошибка (`RealOps.commit_paths`).
+    """
     message = (
-        f"docs(governance): behaviour bundle {state.ws_id} — {state.subject}\n\n"
+        f"{subject_line}\n\n"
         "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
     )
     force: tuple[str, ...] = ()
     if state.brief is not None:
         # Source-слой E1 лежит в подкаталоге bundle_dir; ignore-правила
         # репо-цели (`workstreams/*/spec/*` + `!*.md`) его не пускают —
-        # добавляем поштучно с `-f` и ниже сверяем, что он в HEAD.
+        # добавляем поштучно с `-f`; S3 ниже сверяет, что он в HEAD.
         force = tuple(
             f"{state.bundle_dir}/{rel}" for rel in state.brief["source_paths"]
         )
     ops.commit_paths(
         state.target_dir, [state.bundle_dir], message, force_paths=force,
     )
-    if state.brief is not None and not _source_layer_committed(state, ops):
-        return False
-    op_complete(state, key)
-    return True
 
 
 def _source_layer_committed(state: RunState, ops: Ops) -> bool:
