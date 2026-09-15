@@ -3015,11 +3015,36 @@ def test_disp_retry_resumes_an_existing_pipeline_dir_instead_of_run(
     assert ops.author_disp_resume == [False]
     target_dir, _, _, slug = ops.author_disp_calls[0]
     (Path(target_dir) / ".disputatio" / "pipelines" / slug).mkdir(parents=True)
+    # Первый авторский раунд соседа уже написал черновик узла в дереве
+    # цели (ревью #242): это НЕ готовый узел и не повод для skip.
+    draft = Path(target_dir) / BUNDLE_DIR / "15-behaviour-spec.md"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("# черновик первого раунда\n", encoding="utf-8")
 
     ops.author_disp_exit = 0
     state = runner.resume(run_id, ops)
     assert ops.author_disp_resume == [False, True]
     assert state.ops["author-behaviour"]["status"] == "completed"
+    assert state.ops["author-behaviour"].get("skipped") is False
+
+
+def test_foreign_pipeline_dir_on_first_start_stops_instead_of_resuming(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Ревью #242: каталог `.disputatio/pipelines/<slug>/` от чужого или
+    заброшенного прогона на ПЕРВОМ старте — стоп с подсказкой, а не `resume`
+    с нашим конфигом и анкером поверх чужого манифеста."""
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    run_id = "r-disp-foreign"
+    kwargs = _start_kwargs(tmp_path, run_id, ops, author_backend="disp")
+    foreign = Path(kwargs["target_dir"]) / ".disputatio" / "pipelines" / "beh-ws-1"
+    foreign.mkdir(parents=True)
+
+    state = runner.start(**kwargs)
+
+    assert state.status == "stopped_author"
+    assert ops.author_disp_calls == []
+    assert state.disp_slug is None and state.disp_anchor_dir is None
 
 
 def test_disp_backend_author_disp_failure_stops_author(
