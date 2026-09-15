@@ -1,6 +1,9 @@
 # E2: стадия Need вызывается прогоном — `spec-loop --need`
 
-Дата: 2026-09-15. Статус: draft, ревизия 2 — по ревью владельца спеки (четыре
+Дата: 2026-09-15. Статус: accepted (владелец, 2026-09-15, после ревизии 3).
+Ревизия 3 — `status` 20 из `stopped_interview` возвращает в `waiting_interview`;
+crash-окно без tmp и без `brief.md`; уточнение §7 про `start`/`status`/`brief`.
+Ревизия 2 — по ревью владельца спеки (четыре
 разрыва: stop без сессии, тотальность таблицы, `--new-run --ws-id`, условность
 need-флагов; минорные: канонический synthetic envelope, подсказка при исчезнувшей
 сессии, smoke по всему банку, алгоритм `upstream_blob`). Дизайн согласован по
@@ -120,7 +123,7 @@ need-специфичные флаги (`--frame`, `--stakeholder`, `--traces-to
 | `start` | 20 | `session_id` (из `next_action.session_id`) записан, `interview-start` → `completed`, run → `waiting_interview`; печать `next_action` и команды ответа |
 | `start` | 0, 10, 11 | невозможная для `start` форма (пустая сессия не бывает `complete`); envelope без `next_action` не несёт `session_id` ⇒ как 1: `stopped_interview`, `interview-start` остаётся `started`, `session_id is None` |
 | `start` | 1, 2 | `stopped_interview`; `interview-start` остаётся `started`, `session_id is None`; S1 не вызывается |
-| `status` (повтор) | 20 | состояние не меняется (`run.json` байт в байт); печать `next_action` и команды ответа; spec-loop — код 0. `next_action.session_id` обязан совпасть с записанным; неполный `next_action` — fail-closed стоп |
+| `status` (повтор) | 20 | из `waiting_interview`: состояние не меняется (`run.json` байт в байт); из `stopped_interview` (10/11 или 1/2 ранее): статус → `waiting_interview`, findings-файл удаляется; в обоих случаях печать `next_action` и команды ответа, spec-loop — код 0. Для любого `status`/`brief` → 20 `next_action.session_id` обязан совпасть с записанным; неполный `next_action` или чужой id — fail-closed стоп |
 | `status` | 0 | `interview-brief` → `started`; `discovery brief --out <run_dir>/brief-input/00-discovery/.brief.tmp`; **код `brief` — по строкам `brief` ниже** |
 | `brief` | 0 | `inspect_brief` полного source-слоя на tmp, сверка координат (§5.3), `os.replace` → `brief.md`, `state.brief`, `completed_at`, `running`; далее S1 по E1 |
 | `brief` | 20 | сосед снова ждёт ответа (между `status` и `brief` появился вопрос): run → `waiting_interview`, tmp удаляется, публикации нет; `interview-brief` сбрасывается; печать команды ответа |
@@ -192,8 +195,11 @@ workstream: ветка уже есть). Старые леджеры и сесс
 Итоговый бриф session id не несёт, поэтому существования `brief.md`
 недостаточно. При `op == started` и `state.brief is None`:
 
-- есть только `.brief.tmp` (гибель до `replace`) — повторный рендер в
-  новый tmp, проверка, обычная публикация;
+- нет ни `.brief.tmp`, ни `brief.md` (гибель сразу после write-ahead, до
+  вызова discovery) — повторный рендер в новый tmp, дальше по полной
+  таблице §5.1 (в т.ч. 20 → обратно в `waiting_interview`);
+- есть только `.brief.tmp` (гибель до `replace`) — старый tmp удаляется,
+  повторный рендер в новый tmp, проверка, обычная публикация;
 - есть `brief.md` — повторный `discovery_brief` записанного `session_id`
   во второй tmp, требуется код 0 (публикация состоялась только при 0, иной
   код означает, что сессия ушла от опубликованного состояния — стоп),
@@ -254,9 +260,10 @@ preflight, — порт менять после разблокировки не 
   полного source-слоя; `state.brief` — только после `replace`. Дальше
   `_step_materialize_brief` E1 без изменений: он читает `run_dir/brief-input`
   и сверяет байты с дескриптором.
-- Повторный `spec-loop --need` при существующем леджере **никогда** не зовёт
-  `discovery start` — только `status`; `start` идёт ровно один раз на
-  прогон.
+- `discovery start` идёт ровно один раз на прогон и при существующем
+  леджере **никогда** не повторяется. Обычный повтор вызывает `status`;
+  orphan-recovery (`--session`) сначала вызывает `brief` во временный файл
+  для сверки присоединения (§5.3) и только затем `status`.
 - Преамбула charter/requirements (E1) не меняется: source-слой тот же.
 
 ## 8. Тестовая матрица
@@ -283,9 +290,12 @@ preflight, — порт менять после разблокировки не 
   печатает recovery-команду; после `--session` — обычный `status`;
 - `brief` 0, но tmp не проходит `inspect_brief`/сверку координат →
   `stopped_interview`, без `replace` и S1;
-- crash: только `.brief.tmp` → повторный рендер и публикация; `brief.md` без
-  дескриптора → повторный рендер, байты равны → op завершён без `replace`;
-  байты не равны → стоп;
+- `stopped_interview` (после 10/11) → `status` 20 → `waiting_interview`,
+  findings-файл удалён, spec-loop код 0;
+- crash: `interview-brief` `started` без tmp и без `brief.md` → повторный
+  рендер и обработка по полной таблице; только `.brief.tmp` → повторный
+  рендер и публикация; `brief.md` без дескриптора → повторный рендер,
+  байты равны → op завершён без `replace`; байты не равны → стоп;
 - recovery `--session`: разрешён только при `started` без `session_id`;
   H1/frame/traces_to/sessions сверяются; чужая роль — отказ; повторный
   `--session` при записанном id — отказ;
