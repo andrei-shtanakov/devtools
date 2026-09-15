@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import tomllib
@@ -666,6 +667,46 @@ def _dispatch(state: rs.RunState, ops) -> int:
         if after.status == "completed":
             return _deliver_phase(after, ops)
         return _report_state(after)
+    if state.status in ("waiting_interview", "stopped_interview"):
+        if state.interview and state.interview.get("session_id") is None:
+            # Сирота — координаты стадии Need без записанной сессии.
+            # `runner.resume` тоже отказался бы звать discovery, но кнопка
+            # проверяет это САМА и не делает вызов вовсе (ruling 2, Task 10):
+            # диагностика orphan-состояния не должна зависеть от того,
+            # дошёл ли вызов до runner.
+            print(
+                "spec-loop: стадия Need без записанной сессии — "
+                "присоедините её: повторите команду с --session <id>, "
+                "либо новый прогон: --new-run --ws-id <fresh-id>"
+            )
+            return 1
+        after = runner.resume(state.run_id, ops)
+        if after.status == "waiting_interview":
+            return 0
+        if after.status == "stopped_interview":
+            findings_path = rs.run_dir(after.run_id) / runner.INTERVIEW_FINDINGS
+            if findings_path.exists():
+                print(
+                    f"spec-loop: findings: {findings_path} — ответьте и "
+                    "повторите команду"
+                )
+            else:
+                session_id = (after.interview or {}).get("session_id")
+                print(
+                    "spec-loop: стоп стадии Need: см. причину выше; "
+                    f"восстановите ту же сессию {shlex.quote(session_id)} "
+                    "и повторите либо --new-run --ws-id <fresh-id>"
+                )
+            return 1
+        if after.status == "waiting_human_merge":
+            print(
+                f"бандл-PR #{after.pr} создан ({after.repo_slug}) — "
+                "смержьте его и повторите make spec-loop"
+            )
+            return 0
+        if after.status == "completed":
+            return _deliver_phase(after, ops)
+        return _report_state(after)
     if state.status == "completed":
         return _deliver_phase(state, ops)
     return _report_state(state)
@@ -737,21 +778,57 @@ def main(argv: list[str] | None = None) -> int:
             matches: list[rs.RunState] = [state]
         else:
             matches = find_runs(args.repo, args.subject)
-        if len(matches) > 1:
-            print(
-                "spec-loop: несколько прогонов с этими (repo, subject) — "
-                "выберите явно через --run-id:"
-            )
-            for st in matches:
-                print(f"  --run-id {st.run_id}  [{st.status}] ws={st.ws_id}")
-            return 1
 
-        state = matches[0] if matches else None
+        if args.new_run:
+            # --new-run отменяет гвард неоднозначности «--run-id» ниже:
+            # запросили новый прогон явно, а старые (сколько бы их ни
+            # было) остаются нетронутыми — но только пока НИ ОДИН не
+            # прошёл дальше S1 (waiting_interview/stopped_interview).
+            # Прогон, достигший S1, уже произвёл бандл-PR/эффекты — молча
+            # плодить рядом с ним второй workstream с тем же (repo,
+            # subject) запрещено (ruling 4, controller Task 10).
+            past_s1 = [
+                st for st in matches
+                if st.status not in ("waiting_interview", "stopped_interview")
+            ]
+            if past_s1:
+                raise SpecLoopError(
+                    "--new-run запрещён: прогон(ы) с этими (repo, subject) "
+                    "уже достигли S1: "
+                    + ", ".join(
+                        f"--run-id {st.run_id} [{st.status}]"
+                        for st in past_s1
+                    )
+                )
+            for st in matches:
+                print(
+                    f"spec-loop: прежний прогон {st.run_id} остаётся "
+                    f"({st.status}), сессия discovery: "
+                    f"{(st.interview or {}).get('session_id')}"
+                )
+            state = None
+        else:
+            if len(matches) > 1:
+                print(
+                    "spec-loop: несколько прогонов с этими (repo, subject) "
+                    "— выберите явно через --run-id:"
+                )
+                for st in matches:
+                    print(
+                        f"  --run-id {st.run_id}  [{st.status}] "
+                        f"ws={st.ws_id}"
+                    )
+                return 1
+            state = matches[0] if matches else None
+
         if state is not None and supplied_brief is not None:
             if state.brief != supplied_brief.as_state():
                 raise SpecLoopError(
-                    "--brief не совпадает с discovery source этого прогона; "
-                    "создайте новый workstream с другим --ws-id"
+                    "--brief не совпадает с discovery source этого "
+                    "прогона; прогон с этими (repo, subject) уже есть — "
+                    "продолжите его без --brief либо выберите --run-id; "
+                    "новый прогон с тем же subject без --need невозможен, "
+                    "уберите или переименуйте леджер вручную"
                 )
         target_dir = (
             state.target_dir
@@ -787,8 +864,10 @@ def main(argv: list[str] | None = None) -> int:
         if recovered and supplied_brief is not None:
             raise SpecLoopError(
                 "восстановленный из GitHub прогон не принимает --brief "
-                "задним числом; продолжите без флага либо создайте новый "
-                "workstream с другим --ws-id"
+                "задним числом; прогон с этими (repo, subject) уже есть "
+                "— продолжите его без --brief либо выберите --run-id; "
+                "новый прогон с тем же subject без --need невозможен, "
+                "уберите или переименуйте леджер вручную"
             )
         if state is not None and interview_spec is not None:
             if state.interview is None:
@@ -809,6 +888,21 @@ def main(argv: list[str] | None = None) -> int:
                     f"traces_to={recorded.traces_to!r}) — сменить их: "
                     "--new-run --ws-id"
                 )
+
+        if args.session:
+            # Позиция намеренная (ruling 3, controller Task 10): ПОСЛЕ
+            # ops = _real_ops() и после recover_run_from_github — state
+            # уже окончателен — и ДО таблицы разрешённых значений/
+            # _dispatch, чтобы они увидели уже присоединённую сессию.
+            if state is None:
+                raise SpecLoopError(
+                    "--session присоединяет сессию к существующему "
+                    "прогону, а прогон с этими (repo, subject) не найден"
+                )
+            try:
+                state = runner.attach_session(state.run_id, args.session, ops)
+            except ValueError as exc:
+                raise SpecLoopError(str(exc)) from exc
 
         if state is not None:
             values = {

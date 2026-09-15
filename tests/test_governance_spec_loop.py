@@ -688,7 +688,7 @@ def test_existing_run_rejects_different_brief(
 
     assert rc == 1
     assert env.calls == []
-    assert "другим --ws-id" in capsys.readouterr().out
+    assert "без --need невозможен" in capsys.readouterr().out
 
 
 def test_missing_ledger_recovers_then_resumes_s8_and_reconciles_tasks_pr(
@@ -1091,3 +1091,97 @@ def test_need_against_recovered_run_without_interview_refuses(
     assert "--new-run --ws-id" in out
     assert resume_calls == []
     assert rs.all_run_ids() == ["fleet-inbox-20260901-a1b2c3"]
+
+
+# --- стадия Need: диспетчер waiting/stopped_interview, --session, --new-run ---
+
+
+def test_waiting_interview_resume_still_waiting_exits_0(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = _make_need_run(env)
+    env.resume_result = st
+    assert spec_loop.main(_need()) == 0
+    assert [c[0] for c in env.calls] == ["resume"]
+    # команду ответа печатает runner (`_print_answer_hint`), spec_loop её не
+    # дублирует; здесь runner.resume заглушён — проверяется только код
+    # выхода
+
+
+def test_stopped_interview_with_session_resumes_and_exits_1_if_still_stopped(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = _make_need_run(env, status="stopped_interview")
+    env.resume_result = st
+    assert spec_loop.main(_need()) == 1
+    assert [c[0] for c in env.calls] == ["resume"]
+
+
+def test_stopped_interview_orphan_prints_recovery_without_resume(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _make_need_run(env, status="stopped_interview", session=None)
+    assert spec_loop.main(_need()) == 1
+    assert env.calls == []
+    out = capsys.readouterr().out
+    assert "--session" in out and "--new-run --ws-id" in out
+
+
+def test_session_attach_calls_attach_then_resume(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = _make_need_run(env, status="stopped_interview", session=None)
+    attached = []
+
+    def _attach(run_id, session_id, ops):
+        attached.append((run_id, session_id))
+        st.interview["session_id"] = session_id
+        st.status = "waiting_interview"
+        rs.save(st)
+        return st
+
+    monkeypatch.setattr(spec_loop.runner, "attach_session", _attach)
+    env.resume_result = st
+    assert spec_loop.main(_need("--session", "s-77")) == 0
+    assert attached == [("r-a", "s-77")] and [c[0] for c in env.calls] == [
+        "resume"
+    ]
+
+
+def test_new_run_requires_pre_s1_runs_and_prints_run_id(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _make_need_run(env, status="stopped_interview")
+    # два совпавших — гвард неоднозначности НЕ применяется
+    _make_need_run(env, run_id_suffix="2", status="waiting_interview")
+    rc = spec_loop.main(_need("--new-run", "--ws-id", "ws-fresh"))
+    assert rc == 0
+    assert env.calls[0][0] == "start" and env.calls[0][1]["ws_id"] == "ws-fresh"
+    out = capsys.readouterr().out
+    assert f"--run-id {env.calls[0][1]['run_id']}" in out
+    assert rs.load("r-a").status == "stopped_interview"  # старые леджеры целы
+
+
+def test_new_run_refused_when_a_match_reached_s1(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = _make_need_run(env, status="waiting_human_merge")
+    st.branch = "spec/ws-a-behaviour"
+    rs.save(st)
+    assert spec_loop.main(_need("--new-run", "--ws-id", "ws-fresh")) == 1
+    assert env.calls == [] and "--run-id" in capsys.readouterr().out
+
+
+def test_need_with_run_id_on_repeat_is_allowed(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = _make_need_run(env)
+    env.resume_result = st
+    assert spec_loop.main(_need("--run-id", "r-a")) == 0
