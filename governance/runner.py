@@ -768,6 +768,12 @@ def _interview_poll(
     ``interview-brief`` не ``new`` значит brief уже запрошен/получен на
     прошлом заходе — управление сразу передаётся `_interview_publish`
     (Task 7/8), повторный `status` не нужен.
+
+    Интеграционно это эквивалентно повтору `status`: после стопа на
+    `brief` повтор команды перерендеривает бриф, а не опрашивает `status`,
+    но сосед считает тот же lifecycle в обоих `cmd_brief` и `cmd_status`
+    (discovery `cli.py:266-288`) и выдаёт тот же следующий вопрос —
+    поэтому run не может зависнуть, застряв между двумя опросами.
     """
     session_id = state.interview["session_id"]
     if op_status(state, INTERVIEW_BRIEF) != "new":
@@ -832,10 +838,12 @@ def _interview_after_reply(
             "либо новый прогон: --new-run --ws-id <fresh-id>"
         )
         return _interview_stop(state, f"{call} вернул {reply.code}: {reason}")
-    assert reply.code == 0
-    if call == "status":
+    if reply.code == 0 and call == "status":
         return _interview_publish(state, ops, spec, cwd)
-    return True  # brief 0 обрабатывает вызывающий (Task 7)
+    # `call == "brief"` с кодом 0 сюда не попадает: `_interview_publish`
+    # маршрутизирует в эту функцию только НЕнулевые коды brief (Task 7) —
+    # остаётся только неизвестный код у любого из вызовов.
+    return _interview_stop(state, f"{call}: неизвестный код {reply.code}")
 
 
 def _interview_publish(
@@ -870,7 +878,7 @@ def _interview_publish(
         return _interview_after_reply(state, ops, spec, cwd, reply, "brief")
     try:
         text = tmp.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         return _interview_stop(state, f"brief tmp нечитаем: {exc}")
     findings = iv.brief_coordinate_findings(text, spec)
     if findings:
@@ -925,7 +933,10 @@ def _interview_reconcile_published(
             )
     finally:
         probe.unlink(missing_ok=True)
-    text = final.read_text(encoding="utf-8")
+    try:
+        text = final.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return _interview_stop(state, f"recovery: brief.md нечитаем: {exc}")
     findings = iv.brief_coordinate_findings(text, spec)
     if findings:
         return _interview_stop(state, "recovery: координаты: " + "; ".join(findings))
@@ -981,7 +992,13 @@ def attach_session(run_id: str, session_id: str, ops: Ops) -> RunState:
             raise ValueError(f"рендер сессии {session_id} вернул {reply.code}")
         if not probe.exists():
             raise ValueError(f"рендер сессии {session_id} не записал артефакт")
-        findings = iv.attach_findings(probe.read_text(encoding="utf-8"), spec)
+        try:
+            probe_text = probe.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ValueError(
+                f"рендер сессии {session_id} нечитаем: {exc}"
+            ) from exc
+        findings = iv.attach_findings(probe_text, spec)
     finally:
         probe.unlink(missing_ok=True)
     if findings:

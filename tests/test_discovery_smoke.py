@@ -92,8 +92,11 @@ def test_real_discovery_customer_loop(tmp_path: Path, monkeypatch) -> None:
         answer = tmp_path / "answer.yaml"
         answer.write_text(yaml.safe_dump(_answer_for(action.get("coverage_key", "")),
                                          allow_unicode=True), encoding="utf-8")
-        ops._discovery(["answer", "--session", session, "--role", "po",
-                        "--file", str(answer)], cwd)
+        answer_reply = ops._discovery(
+            ["answer", "--session", session, "--role", "po",
+             "--file", str(answer)], cwd,
+        )
+        assert answer_reply.code in (0, 20, 10, 11), answer_reply
         reply = ops.discovery_status(session, cwd)
         if reply.code != 20:
             break

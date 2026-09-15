@@ -157,6 +157,9 @@ class FakeOps:
     discovery_calls: list[tuple] = field(default_factory=list)
     # Текст, который `discovery_brief` пишет в `out_path` при кодах 0/10/11/20.
     brief_text: str = ""
+    # Байты вместо `brief_text`, если заданы (напр. невалидный UTF-8 —
+    # finding 3 финальной волны ревью: UnicodeDecodeError вместо traceback).
+    brief_bytes: bytes | None = None
 
     def ensure_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("ensure_branch", branch))
@@ -463,7 +466,10 @@ class FakeOps:
         reply = self._discovery_reply("brief")
         # Стенд пишет артефакт при кодах 0/10/11/20, как сосед.
         if reply.code in (0, 10, 11, 20):
-            Path(out_path).write_text(self.brief_text, encoding="utf-8")
+            if self.brief_bytes is not None:
+                Path(out_path).write_bytes(self.brief_bytes)
+            else:
+                Path(out_path).write_text(self.brief_text, encoding="utf-8")
         return reply
 
 
@@ -819,6 +825,27 @@ def test_brief_0_failing_inspect_or_coordinates_stops(
         rs.run_dir("r-bad") / "brief-input" / "00-discovery" / "brief.md"
     ).exists()
     assert not any(c[0] in ("is_dirty", "ensure_branch") for c in ops.calls)
+
+
+def test_brief_0_non_utf8_stops_without_traceback(
+    tmp_path: Path, runs_root
+) -> None:
+    """Finding 3 финальной волны: `UnicodeDecodeError` из `tmp.read_text`
+    не должен утекать наружу traceback'ом — рефузный путь стопит run."""
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0)),
+        ],
+        brief_bytes=b"\xff\xfe invalid utf-8 brief",
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-badutf8", ops), interview_spec=_need_spec()
+    )
+    state = runner.resume("r-badutf8", ops)
+    assert state.status == "stopped_interview" and state.brief is None
+    assert not (
+        rs.run_dir("r-badutf8") / "brief-input" / "00-discovery" / "brief.md"
+    ).exists()
 
 
 def test_brief_0_with_second_participant_role_is_accepted(

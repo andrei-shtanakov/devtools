@@ -172,7 +172,9 @@ class Ops(Protocol):
         upstream_path: str | None, cwd: str,
     ) -> _interview.DiscoveryReply: ...
 
-    def discovery_status(self, session_id: str, cwd: str) -> _interview.DiscoveryReply: ...
+    def discovery_status(
+        self, session_id: str, cwd: str
+    ) -> _interview.DiscoveryReply: ...
 
     def discovery_brief(
         self, session_id: str, out_path: str, cwd: str

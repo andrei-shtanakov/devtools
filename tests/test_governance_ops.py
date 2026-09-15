@@ -1877,7 +1877,9 @@ def test_discovery_start_argv_and_boundary(monkeypatch, tmp_path):
     argv = seen[0]["argv"]
     assert argv[:5] == ["uv", "run", "--frozen", "--project",
                         str(ops_mod.DEVTOOLS_ROOT.parent / "discovery")]
-    assert argv[5:] == ["discovery", "start", "--frame", "customer", "--target", "o/alpha"]
+    assert argv[5:] == [
+        "discovery", "start", "--frame", "customer", "--target", "o/alpha",
+    ]
     assert seen[0]["cwd"] == str(tmp_path)
     assert seen[0]["capture_output"] is True and seen[0]["text"] is True
     assert reply.code == 20 and reply.envelope["next_action"]["session_id"] == "s-9"
@@ -1892,7 +1894,9 @@ def test_discovery_start_engineer_traces_to_argv(monkeypatch, tmp_path):
 def test_discovery_start_refuses_upstream_until_inbox(monkeypatch, tmp_path):
     seen = _capture(monkeypatch)
     reply = RealOps().discovery_start(
-        "engineer", "o/alpha", "customer.md", str(tmp_path / "customer.md"), str(tmp_path))
+        "engineer", "o/alpha", "customer.md",
+        str(tmp_path / "customer.md"), str(tmp_path),
+    )
     assert seen == []  # сосед не вызван
     assert reply.code == 1 and "discovery#49" in reply.envelope["operation"]["reason"]
 
