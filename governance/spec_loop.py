@@ -55,6 +55,8 @@ from pathlib import Path
 
 from governance import brief_input, run_state as rs
 from governance import runner, task_bridge
+from governance import interview as iv
+from governance import ops as ops_mod
 from governance.ops import DEVTOOLS_ROOT, RealOps
 
 WORKSPACE_ROOT = DEVTOOLS_ROOT.parent
@@ -193,6 +195,54 @@ def _origin_url(target_dir: str | Path) -> str:
             "либо задайте --target-dir"
         ) from exc
     return out.stdout.strip()
+
+
+NEED_ONLY = ("frame", "stakeholder", "traces_to", "session", "new_run")
+STAKEHOLDER_RULE = (
+    "стадия Need запускается только при наличии реального стейкхолдера — "
+    "укажите --stakeholder <role> (декларация, не проверка); без "
+    "стейкхолдера используйте вход из готового брифа: --brief <path>"
+)
+
+
+def build_interview_spec(args, repo_slug: str) -> iv.InterviewSpec | None:
+    """Preflight need-флагов — весь до run-id (спека §3).
+
+    Чистая функция: только разбор аргументов, никаких побочных эффектов
+    и никакого обращения к леджерам/GitHub. Взаимоисключение `--need`/
+    `--brief` проверяется здесь же, по аргументам, ДО чтения файла брифа
+    в `main` — иначе несуществующий путь брифа отказал бы чтением файла,
+    а не preflight-правилом.
+    """
+    given = [f for f in NEED_ONLY if getattr(args, f)]
+    if not args.need:
+        if given:
+            flags = [f"--{g.replace('_', '-')}" for g in given]
+            raise SpecLoopError(
+                f"флаги {flags} существуют только вместе с --need"
+            )
+        return None
+    if args.brief:
+        raise SpecLoopError("--need и --brief взаимоисключающи")
+    if not args.frame:
+        raise SpecLoopError("--need требует явный --frame customer|engineer")
+    if not args.stakeholder:
+        raise SpecLoopError(STAKEHOLDER_RULE)
+    if args.new_run and (args.run_id or args.session):
+        raise SpecLoopError(
+            "--new-run взаимоисключающ с --run-id и --session"
+        )
+    if args.new_run and not args.ws_id:
+        raise SpecLoopError("--new-run требует --ws-id <fresh-id>")
+    if args.frame == "customer":
+        if args.traces_to:
+            raise SpecLoopError("customer-фрейм не принимает --traces-to")
+        return iv.InterviewSpec("customer", args.stakeholder, repo_slug, None, None)
+    if not args.traces_to:
+        raise SpecLoopError(
+            "engineer-фрейм требует --traces-to <approved customer-brief>"
+        )
+    raise SpecLoopError(ops_mod.ENGINEER_BLOCKED)  # D6, до discovery#49
 
 
 def find_runs(repo: str, subject: str) -> list[rs.RunState]:
@@ -632,6 +682,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--brief", help="gate-passed discovery-brief для нового прогона"
     )
+    parser.add_argument(
+        "--need", action="store_true",
+        help="стадия Need: интервью discovery из прогона (E2)"
+    )
+    parser.add_argument("--frame", choices=["customer", "engineer"])
+    parser.add_argument(
+        "--stakeholder", help="роль реального стейкхолдера (декларация)"
+    )
+    parser.add_argument(
+        "--traces-to", help="approved customer-brief для engineer"
+    )
+    parser.add_argument(
+        "--session", help="recovery: присоединить сессию discovery"
+    )
+    parser.add_argument(
+        "--new-run", action="store_true",
+        help="новый прогон при существующем (только до S1), требует --ws-id"
+    )
     parser.add_argument("--profile", default="profiles/team-exp.yaml")
     parser.add_argument(
         "--author-backend", choices=["codex", "disp"], default="codex"
@@ -644,11 +712,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # Intake обязан завершиться до генерации run-id, GitHub-вызовов и
         # любых runner effects. В ledger уйдёт descriptor, не этот Path.
-        supplied_brief = (
-            brief_input.inspect_brief(Path(args.brief)) if args.brief else None
-        )
+        # Порядок намеренный (контроллер, Task 9): entry раньше —
+        # build_interview_spec нужен repo_slug; она же раньше supplied_brief
+        # — взаимоисключение --need/--brief проверяется по аргументам ДО
+        # чтения файла брифа (иначе несуществующий путь отказал бы чтением
+        # файла, а не preflight-правилом).
         entry = manifest_repo_entry(
             MANIFEST_PATH.read_text(encoding="utf-8"), args.repo
+        )
+        interview_spec = build_interview_spec(args, entry.repo_slug)
+        supplied_brief = (
+            brief_input.inspect_brief(Path(args.brief)) if args.brief else None
         )
         if args.run_id:
             state = rs.load(args.run_id)
@@ -716,6 +790,25 @@ def main(argv: list[str] | None = None) -> int:
                 "задним числом; продолжите без флага либо создайте новый "
                 "workstream с другим --ws-id"
             )
+        if state is not None and interview_spec is not None:
+            if state.interview is None:
+                raise SpecLoopError(
+                    "у прогона нет стадии Need (создан через --brief/legacy "
+                    "или восстановлен из GitHub) — новый: --need … "
+                    "--new-run --ws-id <fresh-id>"
+                )
+            recorded = iv.InterviewSpec.from_state(state.interview)
+            if (recorded.frame, recorded.stakeholder_role, recorded.traces_to) != (
+                interview_spec.frame, interview_spec.stakeholder_role,
+                interview_spec.traces_to,
+            ):
+                raise SpecLoopError(
+                    "координаты интервью зафиксированы стартом "
+                    f"(frame={recorded.frame}, "
+                    f"stakeholder={recorded.stakeholder_role!r}, "
+                    f"traces_to={recorded.traces_to!r}) — сменить их: "
+                    "--new-run --ws-id"
+                )
 
         if state is not None:
             values = {
@@ -732,6 +825,13 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "brief-source": (
                     state.brief.get("source_paths") if state.brief else "нет"
+                ),
+                "need-frame": (
+                    state.interview.get("frame") if state.interview else "нет"
+                ),
+                "stakeholder": (
+                    state.interview.get("stakeholder_role")
+                    if state.interview else "нет"
                 ),
                 "действие": f"продолжение ({state.status})",
             }
@@ -772,6 +872,13 @@ def main(argv: list[str] | None = None) -> int:
                     list(supplied_brief.source_paths)
                     if supplied_brief else "нет"
                 ),
+                "need-frame": (
+                    interview_spec.frame if interview_spec else "нет"
+                ),
+                "stakeholder": (
+                    interview_spec.stakeholder_role
+                    if interview_spec else "нет"
+                ),
                 "merge-authority": "human (жёстко, без override)",
                 "действие": "start (новый прогон)",
             }
@@ -792,8 +899,16 @@ def main(argv: list[str] | None = None) -> int:
             merge_authority="human",
             author_backend=args.author_backend,
             brief_source=supplied_brief,
+            interview_spec=interview_spec,
         )
         print(f"статус прогона: {started.status}")
+        if started.status == "waiting_interview":
+            print(
+                "интервью начато — ответьте стейкхолдеру вне spec-loop и "
+                f"повторите: make spec-loop … ARGS='--need … --run-id "
+                f"{started.run_id}'"
+            )
+            return 0
         if started.status == "waiting_human_merge":
             print(
                 f"бандл-PR #{started.pr} создан ({started.repo_slug}) — "

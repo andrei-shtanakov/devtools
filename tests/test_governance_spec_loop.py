@@ -16,6 +16,7 @@ import pytest
 from governance import run_state as rs
 from governance import spec_loop
 from governance import brief_input
+from governance import interview as iv
 
 
 @pytest.fixture()
@@ -572,6 +573,10 @@ class _LoopEnv:
 
     def _start(self, **kwargs):
         self.calls.append(("start", kwargs))
+        interview = (
+            kwargs["interview_spec"].as_state()
+            if kwargs.get("interview_spec") else None
+        )
         state = rs.new_run(
             subject=kwargs["subject"],
             repo=kwargs["repo"],
@@ -586,8 +591,9 @@ class _LoopEnv:
                 kwargs["brief_source"].as_state()
                 if kwargs.get("brief_source") else None
             ),
+            interview=interview,
         )
-        state.status = "waiting_human_merge"
+        state.status = "waiting_interview" if interview else "waiting_human_merge"
         return state
 
     def _resume(self, run_id, ops):
@@ -919,3 +925,168 @@ def test_origin_url_on_non_git_dir_fails_closed(tmp_path: Path) -> None:
     сообщение кнопки, не CalledProcessError-traceback."""
     with pytest.raises(spec_loop.SpecLoopError, match="чекаут"):
         spec_loop._origin_url(tmp_path)
+
+
+# --- стадия Need: --need-флаги и preflight ----------------------------------
+
+
+def _make_need_run(
+    env, run_id_suffix="", status="waiting_interview", session="s-1",
+    stakeholder="product owner",
+):
+    st = rs.new_run(
+        subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
+        ws_id="ws-a" + run_id_suffix, target_dir=str(env.target),
+        bundle_dir="workstreams/ws-a/spec", profile="profiles/team-exp.yaml",
+        run_id="r-a" + run_id_suffix, merge_authority="human",
+        interview={
+            **iv.InterviewSpec(
+                "customer", stakeholder, "owner/alpha", None, None
+            ).as_state(),
+            "session_id": session,
+        },
+    )
+    st.status = status
+    st.ops["interview-start"] = {
+        "status": "completed" if session else "started"
+    }
+    rs.save(st)
+    return st
+
+
+def _need(*extra):
+    return [
+        "--subject", "Fleet Inbox", "--repo", "alpha", "--need",
+        "--frame", "customer", "--stakeholder", "product owner", *extra,
+    ]
+
+
+def test_need_customer_starts_with_interview_spec(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main(_need())
+    assert rc == 0
+    spec = env.calls[0][1]["interview_spec"]
+    assert (spec.frame, spec.stakeholder_role, spec.target) == (
+        "customer", "product owner", "owner/alpha",
+    )
+    assert spec.traces_to is None
+    assert "waiting_interview" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "argv,needle",
+    [
+        (
+            ["--subject", "s", "--repo", "alpha", "--need", "--frame", "customer"],
+            "--stakeholder",
+        ),
+        (
+            ["--subject", "s", "--repo", "alpha", "--need", "--stakeholder", "r"],
+            "--frame",
+        ),
+        (
+            ["--subject", "s", "--repo", "alpha", "--frame", "customer"],
+            "--need",
+        ),
+        (
+            ["--subject", "s", "--repo", "alpha", "--stakeholder", "r"],
+            "--need",
+        ),
+        (
+            ["--subject", "s", "--repo", "alpha", "--session", "s-1"],
+            "--need",
+        ),
+        (
+            ["--subject", "s", "--repo", "alpha", "--new-run", "--ws-id", "x"],
+            "--need",
+        ),
+        (_need("--traces-to", "c.md"), "customer"),
+        (_need("--brief", "x.md"), "--brief"),
+        (
+            [
+                "--subject", "s", "--repo", "alpha", "--need", "--frame", "engineer",
+                "--stakeholder", "r", "--traces-to", "c.md",
+            ],
+            "discovery#49",
+        ),
+    ],
+)
+def test_need_preflight_refuses_before_run_id(
+    runs_root, tmp_path, monkeypatch, capsys, argv, needle
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main(argv)
+    assert rc == 1
+    assert env.calls == [] and rs.all_run_ids() == []
+    assert needle in capsys.readouterr().out
+
+
+def test_need_without_stakeholder_explains_rule_and_brief_route(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    _LoopEnv(monkeypatch, tmp_path)
+    spec_loop.main(
+        ["--subject", "s", "--repo", "alpha", "--need", "--frame", "customer"]
+    )
+    out = capsys.readouterr().out
+    assert "реального стейкхолдера" in out and "--brief" in out
+
+
+def test_need_repeat_with_other_coordinates_refuses(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _make_need_run(env)  # сохранённый леджер в waiting_interview, stakeholder "product owner"
+    rc = spec_loop.main([
+        "--subject", "Fleet Inbox", "--repo", "alpha", "--need",
+        "--frame", "customer", "--stakeholder", "qa",
+    ])
+    assert rc == 1 and "координаты" in capsys.readouterr().out
+    assert env.calls == []
+
+
+def test_need_against_run_without_interview_refuses(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _mk_run(
+        "r-legacy", "Fleet Inbox", target_dir=str(env.target),
+        status="waiting_human_merge",
+    )
+    rc = spec_loop.main(_need())
+    assert rc == 1 and "--new-run --ws-id" in capsys.readouterr().out
+    assert env.calls == []
+
+
+def test_need_against_recovered_run_without_interview_refuses(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """Ruling 2: гвард стоит ПОСЛЕ recover_run_from_github — восстановленный
+    из GitHub прогон тоже не несёт interview, и `--need` на нём отказывает
+    той же подсказкой `--new-run --ws-id`, не вызывая resume."""
+    target = tmp_path / "alpha"
+    (target / ".git").mkdir(parents=True)
+    manifest = tmp_path / "manifest.toml"
+    manifest.write_text(MANIFEST, encoding="utf-8")
+    monkeypatch.setattr(spec_loop, "MANIFEST_PATH", manifest)
+    monkeypatch.setattr(spec_loop, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        spec_loop, "_origin_url", lambda _d: "git@github.com:owner/alpha.git"
+    )
+    ops = _RecoveryOps([_bundle_pr()])
+    monkeypatch.setattr(spec_loop, "_real_ops", lambda: ops)
+    resume_calls: list[str] = []
+    monkeypatch.setattr(
+        spec_loop.runner, "resume",
+        lambda run_id, passed_ops: resume_calls.append(run_id),
+    )
+
+    rc = spec_loop.main(_need())
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "--new-run --ws-id" in out
+    assert resume_calls == []
+    assert rs.all_run_ids() == ["fleet-inbox-20260901-a1b2c3"]
