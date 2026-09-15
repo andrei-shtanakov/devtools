@@ -3028,6 +3028,31 @@ def test_disp_retry_resumes_an_existing_pipeline_dir_instead_of_run(
     assert state.ops["author-behaviour"].get("skipped") is False
 
 
+def test_hand_fixed_node_without_pipeline_dir_is_accepted_after_pin(
+    tmp_path: Path, runs_root, capsys,
+) -> None:
+    """Ревью #242, круг 3: операторский выход из пинованного состояния.
+    Стоп → оператор убирает каталог пайплайна соседа и кладёт/чинит файл
+    узла руками → resume принимает файл как есть, без вызова соседа."""
+    ops = FakeOps(author_disp_exit=1)
+    run_id = "r-disp-handfix"
+    state = runner.start(**_start_kwargs(
+        tmp_path, run_id, ops, author_backend="disp",
+    ))
+    assert state.status == "stopped_author"
+    assert "принять узел руками" in capsys.readouterr().out
+    target_dir, _, _, slug = ops.author_disp_calls[0]
+    # Каталог пайплайна сосед не создал (или оператор убрал); файл — руками.
+    assert not (Path(target_dir) / ".disputatio" / "pipelines" / slug).exists()
+    node = Path(target_dir) / BUNDLE_DIR / "15-behaviour-spec.md"
+    node.parent.mkdir(parents=True, exist_ok=True)
+    node.write_text("#### BEH-01\n", encoding="utf-8")
+
+    state = runner.resume(run_id, ops)
+    assert len(ops.author_disp_calls) == 1
+    assert state.ops["author-behaviour"] == {"status": "completed", "skipped": True}
+
+
 def test_foreign_pipeline_dir_on_first_start_stops_instead_of_resuming(
     tmp_path: Path, runs_root,
 ) -> None:

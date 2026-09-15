@@ -1068,12 +1068,20 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
             continue
         target = Path(state.target_dir) / state.bundle_dir / filename
         disp_node = kind == "behaviour-spec" and state.author_backend == "disp"
+        started_here = disp_node and bool(state.disp_slug)
+        slug = state.disp_slug or (_disp_doc_slug(state) if disp_node else "")
+        pipeline_dir = (
+            Path(state.target_dir) / ".disputatio" / "pipelines" / slug
+        )
         # Черновик, который написал НАЧАТЫЙ этим прогоном пайплайн соседа, —
-        # не готовый узел (ревью #242): без этого retry после первого
-        # авторского раунда глотал бы его как `skipped` и `resume` был бы
-        # недостижим. Признак «начат этим прогоном» — пин слага в run.json:
-        # он пишется write-ahead до первого вызова соседа.
-        if target.exists() and not (disp_node and state.disp_slug):
+        # не готовый узел (ревью #242): пока каталог пайплайна жив, retry
+        # идёт в `resume`, а не глотает черновик как `skipped`. Признак
+        # «начат этим прогоном» — пин слага в run.json (write-ahead до
+        # первого вызова соседа). Операторский выход из пинованного
+        # состояния (ревью #242, круг 3) — тот же файл без каталога
+        # пайплайна: убрал каталог (или сосед его не создал) и положил/
+        # починил узел руками ⇒ узел принимается как есть, как у codex.
+        if target.exists() and not (started_here and pipeline_dir.is_dir()):
             op_complete(state, key, skipped=True)
             continue
         _ensure_started(state, key)
@@ -1082,11 +1090,6 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
             task = _disp_behaviour_task(state.subject, bundle_path)
             # Порядок: сначала факт чужого каталога, потом пины — чтобы
             # первый старт не пиновал координаты пайплайна, который не наш.
-            started_here = bool(state.disp_slug)
-            slug = state.disp_slug or _disp_doc_slug(state)
-            pipeline_dir = (
-                Path(state.target_dir) / ".disputatio" / "pipelines" / slug
-            )
             if pipeline_dir.is_dir() and not started_here:
                 # Ревью #242: продолжать чужой/заброшенный пайплайн с нашим
                 # конфигом и анкером нельзя — `resume` соседа доверял бы
@@ -1120,6 +1123,19 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 state.target_dir, task, config_path, slug,
                 resume=started_here and pipeline_dir.is_dir(),
             )
+            if exit_code != 0:
+                # Процедура, а не только факт (ревью #242, круг 3): как
+                # выйти из пинованного состояния руками.
+                print(
+                    f"_step_authoring: disp вернул {exit_code} по слагу "
+                    f"{slug}. Повтор — `resume` (продолжит пайплайн "
+                    f"{pipeline_dir}); принять узел руками — уберите этот "
+                    "каталог, положите/почините файл узла и повторите "
+                    "resume: файл будет принят как есть. Тот же выход, если "
+                    "пайплайн уже терминален (сошёлся, а прогон упал до "
+                    "записи результата): `resume` соседа на терминальном "
+                    "пайплайне отказывает (PipelineNotResumable)"
+                )
         else:
             author_args = (
                 state.target_dir, kind, state.subject, state.bundle_dir
