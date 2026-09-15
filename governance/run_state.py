@@ -95,6 +95,10 @@ class RunState:
     # живому `anchor_path` из конфига, и пересчёт из окружения (другой
     # XDG_STATE_HOME/HOME) на retry увёл бы его в пустой каталог.
     disp_anchor_dir: str | None = None
+    # Координаты стадии Need (E2, спека §4): session_id, frame,
+    # stakeholder_role, target, traces_to, upstream_blob, brief_rel,
+    # started_at, completed_at. None — прогон без интервью (E1/legacy).
+    interview: dict | None = None
 
 
 _ALLOWED_AUTHOR_BACKENDS = ("codex", "disp")
@@ -138,6 +142,7 @@ def new_run(
     merge_authority: str | None = None,
     author_backend: str = "codex",
     brief: dict[str, object] | None = None,
+    interview: dict | None = None,
 ) -> RunState:
     """Новый прогон (S0). `run_id` подаётся снаружи (вызывающая сторона)."""
     validate_merge_authority(merge_authority)
@@ -160,6 +165,7 @@ def new_run(
         remediated_by=None,
         author_backend=author_backend,
         brief=brief,
+        interview=interview,
     )
 
 
