@@ -36,7 +36,7 @@ from governance import (
 from governance.merge_gate import PrFacts, decide
 from governance.facts import Outcome
 from governance.stale_adapter import blob_sha1
-from governance.ops import Ops, RealOps
+from governance.ops import _AUTHOR_DSL, Ops, RealOps
 from governance.policy_sources import (
     PREFLIGHT_PROCEDURE_HINT,
     build_authority,
@@ -804,9 +804,16 @@ def _disp_behaviour_task(subject: str, bundle_path: str) -> str:
 #: оператор (disputatio SPEC-002 §5.3), поэтому он живёт здесь, а не у
 #: соседа: сойдётся документ или нет, решают НАШИ условия.
 #:
+#: Судья DSL — по-прежнему ТОЛЬКО S4 (devtools#204 п.1): чеклист не
+#: заменяет гейт, а ведёт авторинг к тому, что гейт примет. Поэтому B0 —
+#: не пересказ, а тот же текст `_AUTHOR_DSL["behaviour-spec"]`, которым
+#: промпт авторинга требует frontmatter (`spec_stage`, `status`) и пин
+#: `upstream_hashes`: у правила одно место, здесь — ссылка на него.
+#:
 #: `findings_item` обязателен и называет пункт-роль «нет blocker/major»
 #: (§5.2 V8); остальные пункты — предметные.
 _DOC_CHECKLIST: dict[str, str] = {
+    "B0": _AUTHOR_DSL["behaviour-spec"],
     "B1": "каждый пункт поведения — заголовок `#### BEH-NN`",
     "B2": "у каждого BEH есть поле `traces:` и пункт `- **checked_by**:`",
     "B3": "нет blocker/major-находок",
@@ -817,7 +824,9 @@ _DOC_FINDINGS_ITEM = "B3"
 _SLUG_ALPHABET = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
 
 
-def _write_disp_doc_config(state: RunState, document_path: str) -> str:
+def _write_disp_doc_config(
+    state: RunState, document_path: str, anchor_dir: Path
+) -> str:
     """Конфиг вида `document` для прогона; возвращает путь к нему.
 
     Вид пайплайна disputatio выводит из ФОРМЫ секции `[pipeline]`
@@ -839,11 +848,10 @@ def _write_disp_doc_config(state: RunState, document_path: str) -> str:
       это условие (3) самого пункта плана: анкер обязан резолвиться вне
       рабочего дерева цели, иначе старт отказывает
       (`validate_anchor_path`: containment проверяется против toplevel репо
-      цели, совпадение с границей — тоже нарушение). Дефолт disp
-      (`_default_anchor_root`, пользовательский state-каталог) этому
-      условию удовлетворяет, но он не наш и может измениться у соседа;
-      каталог прогона — наш, лежит вне дерева цели по построению, и держит
-      анкер рядом с конфигом и остальными артефактами того же прогона;
+      цели, совпадение с границей — тоже нарушение). Выбор каталога —
+      `_disp_anchor_dir`: каталог прогона, а при self-target (цель — сам
+      devtools, `RUNS_ROOT` внутри её дерева) — пользовательский
+      state-каталог;
     * пустые `[agents.author]` / `[agents.reviewer]` / `[limits]` — секции
       сессии SPEC-001, общие для обоих видов; пустыми они означают
       «дефолты disp», и присутствие секций повторяет пример §3.2.
@@ -860,18 +868,68 @@ def _write_disp_doc_config(state: RunState, document_path: str) -> str:
         "soft_max_pipeline_tokens = 0",
         "soft_max_pipeline_wall_seconds = 0",
         'protected_branches = ["master", "main"]',
-        f'anchor_path = "{directory / "disp-anchors"}"',
+        f'anchor_path = "{anchor_dir}"',
         "",
         "[pipeline.checklists.doc]",
         f'findings_item = "{_DOC_FINDINGS_ITEM}"',
         "",
         "[pipeline.checklists.doc.items]",
     ]
-    lines += [f'{key} = "{text}"' for key, text in _DOC_CHECKLIST.items()]
+    # TOML-экранирование: текст DSL несёт кавычки (`{requirements: "<hash>"}`).
+    lines += [
+        f'{key} = "{_toml_str(text)}"' for key, text in _DOC_CHECKLIST.items()
+    ]
     lines += ["", "[agents.author]", "[agents.reviewer]", "[limits]", ""]
     path = directory / "disp-doc.toml"
     path.write_text("\n".join(lines), encoding="utf-8")
     return str(path)
+
+
+def _toml_str(text: str) -> str:
+    """Тело TOML basic string: экранировать `\\` и `"`."""
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _disp_anchor_dir(state: RunState) -> Path | None:
+    """Каталог анкера P9 — ВНЕ дерева цели, иначе disp откажет на старте.
+
+    По умолчанию — каталог прогона (`run_dir/disp-anchors`): свой, рядом с
+    конфигом. «Вне дерева цели по построению» это верно для любой цели,
+    кроме одной (devtools#204 п.2): цель — сам devtools, и `RUNS_ROOT`
+    лежит внутри её дерева. Тогда анкер — в пользовательском state-каталоге
+    (`XDG_STATE_HOME`, иначе `~/.local/state`; тот же выбор, что у дефолта
+    disp `_default_anchor_root`), под именем прогона. `None` — и он внутри
+    цели (цель = домашний каталог?): анкер положить некуда, старт
+    отказывает вслух, а не отдаёт соседу заведомо негодный путь.
+    Containment — той же канонизацией, что у `validate_anchor_path`
+    (`resolve`, совпадение с корнем — тоже нарушение).
+    """
+    target = Path(state.target_dir).expanduser().resolve()
+    candidates = [run_dir(state.run_id) / "disp-anchors"]
+    xdg = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
+    candidates.append(
+        Path(xdg) / "devtools" / "disp-anchors" / state.run_id
+    )
+    for candidate in candidates:
+        if not candidate.expanduser().resolve().is_relative_to(target):
+            return candidate
+    return None
+
+
+def _pinned_disp_slug(state: RunState) -> str:
+    """Слаг пайплайна — из `run.json`, а не заново (devtools#204 п.3).
+
+    Решение владельца в issue: слаг вычисляется нормализацией, и смена её
+    правил осиротила бы уже начатый пайплайн (retry искал бы другой
+    каталог). Пин — поле состояния `disp_slug`, записанное write-ahead до
+    первого вызова соседа; операция авторинга его не несёт, потому что
+    `_reset_stopped_author` снимает её целиком при retry.
+    """
+    if state.disp_slug:
+        return state.disp_slug
+    state.disp_slug = _disp_doc_slug(state)
+    save(state)
+    return state.disp_slug
 
 
 #: Грамматика слага пайплайна disputatio (§4.1, `events/pipeline_paths.py`
@@ -997,9 +1055,27 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
         if kind == "behaviour-spec" and state.author_backend == "disp":
             bundle_path = f"{state.bundle_dir}/{filename}"
             task = _disp_behaviour_task(state.subject, bundle_path)
-            config_path = _write_disp_doc_config(state, bundle_path)
+            anchor_dir = _disp_anchor_dir(state)
+            if anchor_dir is None:
+                print(
+                    "_step_authoring: анкер P9 некуда положить вне дерева "
+                    f"цели {state.target_dir!r} — ни каталог прогона, ни "
+                    "XDG_STATE_HOME не лежат снаружи; задайте "
+                    "XDG_STATE_HOME вне цели и повторите resume"
+                )
+                state.status = "stopped_author"
+                save(state)
+                return False
+            config_path = _write_disp_doc_config(state, bundle_path, anchor_dir)
+            slug = _pinned_disp_slug(state)
+            # Ровно один путь retry (devtools#204 п.3): каталог пайплайна
+            # соседа есть ⇒ `resume` (на нём `run` отказывает), нет ⇒ `run`.
+            pipeline_dir = (
+                Path(state.target_dir) / ".disputatio" / "pipelines" / slug
+            )
             exit_code = ops.author_disp(
-                state.target_dir, task, config_path, _disp_doc_slug(state)
+                state.target_dir, task, config_path, slug,
+                resume=pipeline_dir.is_dir(),
             )
         else:
             author_args = (

@@ -84,6 +84,12 @@ class RunState:
     # Переносимое описание discovery source layer (E1). Абсолютные пути и
     # байты сюда не попадают; старые run.json без поля читаются через default.
     brief: dict[str, object] | None = None
+    # Пин слага пайплайна disputatio для behaviour-spec узла (devtools#204
+    # п.3): пишется при первом старте авторинга, `run`/`resume` читают его же
+    # — смена правил нормализации не осиротит начатый пайплайн. Поле
+    # состояния, а не операции: `_reset_stopped_author` снимает незавершённые
+    # author-операции целиком, и пин внутри них не пережил бы retry.
+    disp_slug: str | None = None
 
 
 _ALLOWED_AUTHOR_BACKENDS = ("codex", "disp")

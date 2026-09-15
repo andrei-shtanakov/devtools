@@ -411,6 +411,29 @@ def test_author_command_and_prompt_contains_fields(monkeypatch):
     assert call.kwargs["cwd"] == "/tmp/devtools"
 
 
+def test_author_disp_resume_uses_pipeline_resume_without_task(monkeypatch):
+    """devtools#204 п.3: retry на существующем каталоге пайплайна — `disp
+    pipeline resume --slug --config --root`, без `--task` (задача уже в
+    манифесте) и без флагов санкции (на неатрибутируемом дереве сосед
+    откажет сам — fail-closed, решение оператору)."""
+    from types import SimpleNamespace
+
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    RealOps().author_disp("/t", "task", "/cfg.toml", "beh-x", resume=True)
+    argv = seen[0]
+    assert argv[argv.index("pipeline") + 1] == "resume"
+    assert "--task" not in argv
+    assert argv[argv.index("--slug") + 1] == "beh-x"
+    assert argv[argv.index("--config") + 1] == "/cfg.toml"
+    assert argv[argv.index("--root") + 1] == "/t"
+
+
 def test_author_prompt_carries_dsl_and_filenames(monkeypatch):
     monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
     monkeypatch.delenv("AUTHOR_HARNESS", raising=False)
