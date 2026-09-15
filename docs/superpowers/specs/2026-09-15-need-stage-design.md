@@ -1,7 +1,10 @@
 # E2: стадия Need вызывается прогоном — `spec-loop --need`
 
-Дата: 2026-09-15. Статус: draft, на ревью владельца (дизайн согласован по
-секциям в сессии 2026-09-15; решения владельца зафиксированы ниже).
+Дата: 2026-09-15. Статус: draft, ревизия 2 — по ревью владельца спеки (четыре
+разрыва: stop без сессии, тотальность таблицы, `--new-run --ws-id`, условность
+need-флагов; минорные: канонический synthetic envelope, подсказка при исчезнувшей
+сессии, smoke по всему банку, алгоритм `upstream_blob`). Дизайн согласован по
+секциям в сессии 2026-09-15; решения владельца зафиксированы ниже.
 Источник: принятый план
 `prograph-vault/authored/notes/2026-09-13-pipeline-interview-to-implementation-plan.md`,
 §3 E2 и §4 (Need только с реальным стейкхолдером; публикуется только бриф;
@@ -48,11 +51,15 @@ make spec-loop SUBJECT='…' REPO=… \
         [--traces-to <file>] [--session <id>] [--new-run]'
 ```
 
-Preflight — весь до run-id, до леджера, до любого вызова соседа:
+Preflight — весь до run-id, до леджера, до любого вызова соседа. Все
+need-специфичные флаги (`--frame`, `--stakeholder`, `--traces-to`,
+`--session`, `--new-run`) **существуют только вместе с `--need`**: без него
+любой из них — отказ; существующие запуски (`--brief`, legacy без источника)
+не меняются.
 
 - `--need` и `--brief` взаимоисключающи.
-- `--frame` обязателен, без дефолта.
-- `--stakeholder` обязателен. Отказ без него называет правило владельца
+- При `--need`: `--frame` обязателен, без дефолта.
+- При `--need`: `--stakeholder` обязателен. Отказ без него называет правило владельца
   («стадия Need запускается только при наличии реального стейкхолдера») и
   маршрут через `--brief`. Значение только записывается — это декларация,
   не машинная проверка.
@@ -69,7 +76,8 @@ Preflight — весь до run-id, до леджера, до любого вы�
   текстом «engineer-маршрут ждёт discovery#49» (D6): discovery разрешает
   `traces_to` только внутри каталога сессии (`_resolve_ref` в вендоренном
   `gate_check`), публичного способа принять upstream у него нет.
-- `--session <id>` — только recovery (§5.3). `--new-run` — §5.4.
+- `--session <id>` — только recovery (§5.3). `--new-run --ws-id <fresh-id>` —
+  §5.4; `--new-run` взаимоисключающ с `--run-id` и `--session`.
 - Повтор команды находит прогон по (repo, subject), как сейчас. Повтор с
   иными `--frame`/`--stakeholder`/`--traces-to` при леджере в
   `waiting_interview` или `stopped_interview` — отказ: координаты интервью
@@ -86,7 +94,7 @@ Preflight — весь до run-id, до леджера, до любого вы�
 | `stakeholder_role` | декларация D3; подставляется в `--role` |
 | `target` | `repo_slug` цели — то, что уходит в `discovery start --target` и стоит в H1 брифа |
 | `traces_to` | переносимая ссылка (относительное имя) или `null` |
-| `upstream_blob` | hash durable-копии upstream или `null` |
+| `upstream_blob` | git-blob SHA-1 durable-копии upstream (`blob_sha1_bytes`, тот же алгоритм, что у `source_blobs` E1) или `null` |
 | `brief_rel` | `brief-input/00-discovery/brief.md` |
 | `started_at`, `completed_at` | метки; `completed_at` = момент `state.brief` |
 
@@ -104,16 +112,22 @@ Preflight — весь до run-id, до леджера, до любого вы�
 Коды — публичный контракт discovery (README «What a caller reads»):
 `1 > 2 > 20 > 10 > 11 > 0`.
 
+Таблица тотальна: у каждого вызова определён исход для каждого из шести
+кодов; синтетический 1 (§6) обрабатывается как 1.
+
 | Вызов | Код | Переход |
 |---|---|---|
-| `start` | 20 | `session_id` записан, `interview-start` → `completed`, run → `waiting_interview`; печать `next_action` и команды ответа |
+| `start` | 20 | `session_id` (из `next_action.session_id`) записан, `interview-start` → `completed`, run → `waiting_interview`; печать `next_action` и команды ответа |
+| `start` | 0, 10, 11 | невозможная для `start` форма (пустая сессия не бывает `complete`); envelope без `next_action` не несёт `session_id` ⇒ как 1: `stopped_interview`, `interview-start` остаётся `started`, `session_id is None` |
 | `start` | 1, 2 | `stopped_interview`; `interview-start` остаётся `started`, `session_id is None`; S1 не вызывается |
 | `status` (повтор) | 20 | состояние не меняется (`run.json` байт в байт); печать `next_action` и команды ответа; spec-loop — код 0. `next_action.session_id` обязан совпасть с записанным; неполный `next_action` — fail-closed стоп |
-| `status` | 0 | `interview-brief` → `started`; `discovery brief --out <run_dir>/brief-input/00-discovery/.brief.tmp`; **код `brief` — по этой же таблице**; при 0: `inspect_brief` полного source-слоя на tmp, сверка координат (§5.3), `os.replace` → `brief.md`, `state.brief`, `completed_at`, `running`; далее S1 по E1 |
-| `status`/`brief` | 10, 11 | `stopped_interview`; `findings`/`readiness_findings` → `run_dir/interview-findings.txt`; печать шаблона `discovery answer --session <id> --role <role> --question <QUESTION_ID> --supersede --file <answer.yaml>` — `question_id` подставляет человек, из findings он не выводится; spec-loop — код 1 |
-| любой | 1, 2 | `stopped_interview` с `operation.reason`; координаты не трогаются; код 1 |
+| `status` | 0 | `interview-brief` → `started`; `discovery brief --out <run_dir>/brief-input/00-discovery/.brief.tmp`; **код `brief` — по строкам `brief` ниже** |
+| `brief` | 0 | `inspect_brief` полного source-слоя на tmp, сверка координат (§5.3), `os.replace` → `brief.md`, `state.brief`, `completed_at`, `running`; далее S1 по E1 |
+| `brief` | 20 | сосед снова ждёт ответа (между `status` и `brief` появился вопрос): run → `waiting_interview`, tmp удаляется, публикации нет; `interview-brief` сбрасывается; печать команды ответа |
+| `status`/`brief` | 10, 11 | `stopped_interview`; `findings`/`readiness_findings` → `run_dir/interview-findings.txt`; tmp удаляется; печать шаблона `discovery answer --session <id> --role <role> --question <QUESTION_ID> --supersede --file <answer.yaml>` — `question_id` подставляет человек, из findings он не выводится; spec-loop — код 1 |
+| `status`/`brief` | 1, 2 | `stopped_interview` с `operation.reason`; координаты и `session_id` не трогаются; tmp удаляется; код 1 |
 | `brief` 0, но tmp не проходит `inspect_brief` или сверку координат | — | `stopped_interview`; tmp не становится `brief.md`; S1 не вызывается |
-| сессия исчезла / tmp нечитаем | — | `stopped_interview`, fail-closed: сессию не пересоздаём и не ищем; подсказка `--session <id>` или `--new-run` |
+| записанная сессия исчезла (`status` → 1 с reason о сессии) / tmp нечитаем | — | `stopped_interview`, fail-closed: сессию не пересоздаём и не ищем; замена id запрещена (§5.3), поэтому подсказка — «восстановите ту же сессию `<id>` в `$DISCOVERY_HOME` и повторите» либо `--new-run --ws-id <fresh-id>` |
 
 Инвариант `status`: **replay-safe, не read-only**. `status` зовёт
 `_issue_if_needed` и может дописать `question_asked` в журнал, но при уже
@@ -127,8 +141,9 @@ Preflight — весь до run-id, до леджера, до любого вы�
 |---|---|---|
 | `waiting_interview` | сверка координат → `runner.resume` → остался `waiting` | 0 (печать команды ответа) |
 | `waiting_interview` | … → перешёл в `running` | продолжается как сейчас |
-| `stopped_interview` | сверка координат → `runner.resume` → остался `stopped` | 1 (findings, шаблон ответа) |
-| `stopped_interview` | … → `waiting`/`running` | как выше |
+| `stopped_interview`, `session_id` записан | сверка координат → `runner.resume` (обычный `status`) → остался `stopped` | 1 (findings, шаблон ответа) |
+| `stopped_interview`, `session_id` записан | … → `waiting`/`running` | как выше |
+| `stopped_interview`, `session_id is None` (сирота после `start` ≠ 20) | discovery **не вызывается**; печать recovery-команды `… --session <id>` и `--new-run --ws-id <fresh-id>`; после успешного attach — обычный `status` тем же вызовом | 1 |
 
 Сегодня `_report_state` для `stopped_*` не зовёт `resume`; для
 `stopped_interview` это меняется явно — стоп интервью продолжаемый.
@@ -142,8 +157,9 @@ Preflight — весь до run-id, до леджера, до любого вы�
 между вызовом `start` и записью). Только в этом состоянии разрешён
 `--session <id>`; при записанном `session_id` — отказ, замена сессии
 невозможна. Присоединение fail-closed по **фактической форме брифа**
-(приватный `header.json` не читается): `discovery brief --out <tmp>` (пишет
-артефакт в любой фазе), затем:
+(приватный `header.json` не читается): `discovery brief --out <tmp>` — артефакт
+законно пишется при кодах 0, 10, 11 и 20, все четыре допустимы для сверки;
+1 и 2 — отказ присоединения. Затем:
 
 - точное равенство строки H1 с `# Discovery Brief — {target} ({frame}-фрейм)`
   (`render.py:371`);
@@ -162,7 +178,10 @@ session id, записанный write-ahead); `--session` останется а
 
 Существующий прогон с теми же (repo, subject) матчится всегда, поэтому
 «создайте новый workstream с другим `--ws-id`» (нынешняя подсказка E1)
-неисполнимо — заменяется на `--new-run`. Разрешён, только если **все**
+неисполнимо — заменяется на `--new-run --ws-id <fresh-id>`. Явный `--ws-id`
+обязателен: без него снова вычислится прежний `<slug>-<date>` и сработает
+существующий collision guard по `ws_id` (`spec_loop.py:738`). `--new-run`
+взаимоисключающ с `--run-id` и `--session`. Разрешён, только если **все**
 совпавшие прогоны стоят до S1 (`waiting_interview`/`stopped_interview`);
 если хотя бы один достиг S1 — отказ с перечнем и `--run-id` (дубль
 workstream: ветка уже есть). Старые леджеры и сессии не меняются; их
@@ -176,7 +195,9 @@ workstream: ветка уже есть). Старые леджеры и сесс
 - есть только `.brief.tmp` (гибель до `replace`) — повторный рендер в
   новый tmp, проверка, обычная публикация;
 - есть `brief.md` — повторный `discovery_brief` записанного `session_id`
-  во второй tmp, требуется код 0, **байты равны** durable `brief.md`,
+  во второй tmp, требуется код 0 (публикация состоялась только при 0, иной
+  код означает, что сессия ушла от опубликованного состояния — стоп),
+  **байты равны** durable `brief.md`,
   повтор сверки координат и `inspect_brief` полного source-слоя, и только
   затем op завершается **без повторного `replace`**; расхождение байтов —
   стоп: durable-файл не совпадает с сессией, выбирать сторону молча нельзя.
@@ -197,7 +218,8 @@ start`; её hash — `interview.upstream_blob`. Пересверяется пе
 @dataclass(frozen=True)
 class DiscoveryReply:
     code: int          # см. транспортный контракт
-    envelope: dict     # разобранный JSON stdout ({} при синтетическом 1)
+    envelope: dict     # разобранный JSON stdout; при синтетическом 1 —
+                       # канонический synthetic envelope (ниже)
     stderr: str
 
 def discovery_start(self, frame, target, traces_to, upstream_path: str | None) -> DiscoveryReply
@@ -220,7 +242,11 @@ preflight, — порт менять после разблокировки не 
   `gate`, `readiness`, `next_action`, `findings`, `readiness_findings`,
   `operation`), неизвестный код, невозможная для кода форма envelope
   (например, 20 без `next_action.question_id`/`session_id`) ⇒ синтетический
-  `code 1` с `operation.reason`, называющим дефект.
+  `code 1` с **каноническим synthetic envelope** формы протокола:
+  `{"lifecycle": "unknown", "gate": "unknown", "readiness": "unknown",
+  "next_action": {}, "findings": [], "readiness_findings": [],
+  "operation": {"status": "unknown", "reason": "<дефект границы>"}}` —
+  потребитель всегда читает одну форму.
 
 ## 7. Передача в E1 и идемпотентность
 
@@ -250,7 +276,11 @@ preflight, — порт менять после разблокировки не 
 - `status` 0 → `brief` 0 → `inspect_brief` → `replace` → `state.brief` → S1
   по E1 (`materialize-brief` op выполняется, charter получает
   `brief_context`);
-- `brief` ≠ 0 — по таблице, tmp не становится `brief.md`;
+- `brief` 20 → `waiting_interview`, tmp удалён, публикации нет; `brief`
+  10/11/1/2 — по таблице, tmp не становится `brief.md`;
+- `start` 0/10/11 — как 1: `stopped_interview` без `session_id`;
+- `stopped_interview` без `session_id`: повтор не вызывает discovery,
+  печатает recovery-команду; после `--session` — обычный `status`;
 - `brief` 0, но tmp не проходит `inspect_brief`/сверку координат →
   `stopped_interview`, без `replace` и S1;
 - crash: только `.brief.tmp` → повторный рендер и публикация; `brief.md` без
@@ -264,8 +294,9 @@ preflight, — порт менять после разблокировки не 
 
 **spec_loop**: CLI-preflight (все отказы до run-id: без `--stakeholder`, без
 `--frame`, `--need`+`--brief`, customer с `--traces-to`, engineer до inbox);
-`--new-run` разрешён только при прогонах до S1 и **не меняет** старые
-леджеры; координаты повторного вызова; печатаемые команды shell-safe (роль с
+need-флаги без `--need` — отказ; `--new-run` требует `--ws-id`, взаимоисключающ
+с `--run-id`/`--session`, разрешён только при прогонах до S1 и **не
+меняет** старые леджеры и сессии; координаты повторного вызова; печатаемые команды shell-safe (роль с
 пробелами через `shlex.quote`); коды выхода 0/1 по §5.2.
 
 **RealOps**: argv `start`/`status`/`brief` (в т.ч. `--frozen --project`,
@@ -274,9 +305,11 @@ envelope → синтетический 1, валидный контракт →
 переопределяется.
 
 **Интеграционный smoke**: настоящий `discovery` с временным
-`DISCOVERY_HOME`: `start` → 20 с настоящим `next_action`, `answer` через
-CLI, `status` → 0, `brief` → файл проходит `inspect_brief`. Opt-in (маркер
-как у зондов к spec-runner), чтобы обычный pytest не зависел от соседа.
+`DISCOVERY_HOME`: `start` → 20 с настоящим `next_action`, затем **цикл по
+всему реальному банку вопросов** фрейма (`answer` через CLI на каждый
+`next_action`, синтетические ответы с покрытием required-ключей) до
+`status` → 0, `brief` → файл проходит `inspect_brief`. Opt-in (маркер как у
+зондов к spec-runner), чтобы обычный pytest не зависел от соседа.
 
 Negative controls обязательны для трёх гвардов: сверка роли при
 присоединении, требование кода 0 у `brief`, сравнение байтов при recovery.
