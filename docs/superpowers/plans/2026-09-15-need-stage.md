@@ -1245,7 +1245,8 @@ def test_crash_after_replace_reconciles_by_re_render_equality(tmp_path, runs_roo
     state = runner.resume("r-c2", ops)
     assert state.brief is not None
     assert (rs.run_dir("r-c2") / "brief-input/00-discovery/brief.md").read_bytes() == before
-    assert [c for c in ops.discovery_calls if c[0] == "brief"][-1][2].endswith(".brief.tmp")
+    # повторный рендер — во ВТОРОЙ tmp (§5.5), не в brief.md и не в .brief.tmp
+    assert [c for c in ops.discovery_calls if c[0] == "brief"][-1][2].endswith(".brief.reconcile.tmp")
 
 
 def test_crash_after_replace_with_diverged_render_stops(tmp_path, runs_root) -> None:
@@ -1601,13 +1602,14 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```python
 # `_make_need_run` — помощник из Task 9 (уже в файле).
 
-def test_waiting_interview_resume_still_waiting_exits_0(runs_root, tmp_path, monkeypatch, capsys):
+def test_waiting_interview_resume_still_waiting_exits_0(runs_root, tmp_path, monkeypatch):
     env = _LoopEnv(monkeypatch, tmp_path)
     st = _make_need_run(env)
     env.resume_result = st
     assert spec_loop.main(_need()) == 0
     assert [c[0] for c in env.calls] == ["resume"]
-    assert "discovery answer" in capsys.readouterr().out
+    # команду ответа печатает runner (`_print_answer_hint`), spec_loop её не
+    # дублирует; здесь runner.resume заглушён — проверяется только код выхода
 
 
 def test_stopped_interview_with_session_resumes_and_exits_1_if_still_stopped(runs_root, tmp_path, monkeypatch):
@@ -1664,13 +1666,8 @@ def test_need_with_run_id_on_repeat_is_allowed(runs_root, tmp_path, monkeypatch)
     st = _make_need_run(env); env.resume_result = st
     assert spec_loop.main(_need("--run-id", "r-a")) == 0
 
-
-def test_e1_hint_names_new_run_instead_of_ws_id(runs_root, tmp_path, monkeypatch, capsys):
-    env = _LoopEnv(monkeypatch, tmp_path)
-    spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
-    source = tmp_path / "input.md"; source.write_text(_customer_brief(), encoding="utf-8")
-    spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha", "--brief", str(source)])
-    assert "--new-run --ws-id" in capsys.readouterr().out
+# Подсказку E1 покрывает существующий `test_existing_run_rejects_different_brief`
+# после правки его ассерта (:685) на `"--new-run --ws-id" in out`.
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
