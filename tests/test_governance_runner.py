@@ -581,6 +581,98 @@ def test_need_start_non_20_stops_without_session(
     assert persisted.interview["session_id"] is None
 
 
+def _waiting_run(tmp_path: Path, runs_root, run_id: str, extra_replies: list):
+    ops = FakeOps(discovery=[("start", _reply(20)), *extra_replies])
+    state = runner.start(
+        **_start_kwargs(tmp_path, run_id, ops), interview_spec=_need_spec()
+    )
+    assert state.status == "waiting_interview"
+    return ops, state
+
+
+def test_status_20_from_waiting_keeps_ledger_bytes(
+    tmp_path: Path, runs_root, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ops, _ = _waiting_run(
+        tmp_path, runs_root, "r-w20", [("status", _reply(20))]
+    )
+    before = (rs.run_dir("r-w20") / "run.json").read_bytes()
+    state = runner.resume("r-w20", ops)
+    assert state.status == "waiting_interview"
+    assert (rs.run_dir("r-w20") / "run.json").read_bytes() == before
+    out = capsys.readouterr().out
+    assert "discovery answer --session s-1 --role po" in out
+
+
+def test_status_20_with_foreign_session_id_stops(
+    tmp_path: Path, runs_root
+) -> None:
+    ops, _ = _waiting_run(
+        tmp_path, runs_root, "r-w-foreign",
+        [(
+            "status",
+            _reply(20, next_action={"session_id": "s-9", "question_id": "Q-02"}),
+        )],
+    )
+    assert runner.resume("r-w-foreign", ops).status == "stopped_interview"
+
+
+@pytest.mark.parametrize("code", [10, 11])
+def test_status_10_11_stops_with_findings_and_template(
+    tmp_path: Path, runs_root, code, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ops, _ = _waiting_run(
+        tmp_path, runs_root, f"r-w{code}", [("status", _reply(code))]
+    )
+    state = runner.resume(f"r-w{code}", ops)
+    assert state.status == "stopped_interview"
+    findings_path = rs.run_dir(f"r-w{code}") / "interview-findings.txt"
+    assert "GC-04" in findings_path.read_text()
+    out = capsys.readouterr().out
+    assert "--question <QUESTION_ID> --supersede" in out
+
+
+def test_stopped_then_status_20_returns_to_waiting(
+    tmp_path: Path, runs_root
+) -> None:
+    ops, _ = _waiting_run(
+        tmp_path, runs_root, "r-s20",
+        [("status", _reply(10)), ("status", _reply(20))],
+    )
+    assert runner.resume("r-s20", ops).status == "stopped_interview"
+    state = runner.resume("r-s20", ops)
+    assert state.status == "waiting_interview"
+    assert not (rs.run_dir("r-s20") / "interview-findings.txt").exists()
+
+
+@pytest.mark.parametrize("code", [1, 2])
+def test_status_1_2_stops_and_keeps_session(
+    tmp_path: Path, runs_root, code, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ops, _ = _waiting_run(
+        tmp_path, runs_root, f"r-e{code}", [("status", _reply(code))]
+    )
+    state = runner.resume(f"r-e{code}", ops)
+    assert state.status == "stopped_interview"
+    assert state.interview["session_id"] == "s-1"
+    out = capsys.readouterr().out
+    assert "--new-run --ws-id" in out
+    assert "s-1" in out
+
+
+def test_orphan_stop_resume_does_not_call_discovery(
+    tmp_path: Path, runs_root, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ops = FakeOps(discovery=[("start", _reply(2))])
+    runner.start(
+        **_start_kwargs(tmp_path, "r-orphan", ops), interview_spec=_need_spec()
+    )
+    state = runner.resume("r-orphan", ops)
+    assert state.status == "stopped_interview"
+    assert [c for c in ops.discovery_calls if c[0] != "start"] == []
+    assert "--session" in capsys.readouterr().out
+
+
 def _customer_brief_text() -> str:
     return """\
 ---

@@ -18,8 +18,10 @@ PR человеку (`waiting_human_merge`), S8 не запускается са
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
+import shlex
 import time
 from pathlib import Path
 from typing import Any
@@ -65,6 +67,9 @@ _ROLLUP_GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 # Operation keys стадии Need (E2, спека §4/§5): S0.5 `_step_interview`.
 INTERVIEW_START = "interview-start"
 INTERVIEW_BRIEF = "interview-brief"
+# Файл findings, который `_interview_after_reply` пишет при 10/11 (§5.1) и
+# `_interview_stop`/код 20 удаляет при возврате в `waiting_interview`.
+INTERVIEW_FINDINGS = "interview-findings.txt"
 
 # (op key, kind для ops.author, ожидаемое имя файла в bundle_dir) — S2/S3.
 _AUTHOR_STEPS = (
@@ -430,6 +435,11 @@ def resume(run_id: str, ops: Ops) -> RunState:
     PR всё ещё ``OPEN`` — состояние не меняется, run продолжает ждать
     человека.
 
+    ``waiting_interview``/``stopped_interview`` (E2, спека §5.1/§5.2) — без
+    записанного ``session_id`` (сирота) discovery не зовётся, run возвращается
+    как есть; иначе статус ставится в ``running`` и зовётся `advance()`,
+    который в `_step_interview` опрашивает `discovery status` (`_interview_poll`).
+
     Из любого ``stopped_*`` — reconciliation вместо слепого no-op (финальное
     ревью F-1/M-1): op(ы), на которых прогон встал, сбрасываются в pending, и
     только после этого зовётся `advance()`. ``stopped_gate`` (S4 красный) и
@@ -476,6 +486,19 @@ def resume(run_id: str, ops: Ops) -> RunState:
             save(state)
             _step_s8(state, ops)
             return state
+    if state.status in ("waiting_interview", "stopped_interview"):
+        if state.interview and state.interview.get("session_id") is None:
+            # Сирота — координаты стадии Need без сессии: discovery не
+            # зовём, оператор присоединяется вручную (спека §5.2).
+            print(
+                "resume: стадия Need без записанной сессии — "
+                "присоедините её: --session <id>, либо --new-run "
+                "--ws-id <fresh-id>"
+            )
+            return state
+        state.status = "running"
+        save(state)
+        return advance(state, ops)
     if state.status == "stopped_author":
         _reset_stopped_author(state)
         state.status = "running"
@@ -739,8 +762,86 @@ def _upstream_path(state: RunState, spec: iv.InterviewSpec) -> str | None:
 def _interview_poll(
     state: RunState, ops: Ops, spec: iv.InterviewSpec, cwd: str
 ) -> bool:
-    """S0.5 опрос статуса/получение brief'а — заглушка (Task 6 заменяет)."""
-    return _interview_stop(state, "poll не реализован")
+    """S0.5 опрос статуса (`discovery status`, §5.1).
+
+    ``interview-brief`` не ``new`` значит brief уже запрошен/получен на
+    прошлом заходе — управление сразу передаётся `_interview_publish`
+    (Task 7/8), повторный `status` не нужен.
+    """
+    session_id = state.interview["session_id"]
+    if op_status(state, INTERVIEW_BRIEF) != "new":
+        return _interview_publish(state, ops, spec, cwd)
+    reply = ops.discovery_status(session_id, cwd)
+    return _interview_after_reply(state, ops, spec, cwd, reply, "status")
+
+
+def _interview_after_reply(
+    state: RunState,
+    ops: Ops,
+    spec: iv.InterviewSpec,
+    cwd: str,
+    reply: iv.DiscoveryReply,
+    call: str,
+) -> bool:
+    """Общая таблица переходов для `status` и `brief` (§5.1).
+
+    20 — стейкхолдер ждёт следующий вопрос: ту же записанную сессию
+    возвращает `waiting_interview` (findings прошлого 10/11 чистятся, если
+    были), другую — стоп (координаты интервью разъехались). 10/11 —
+    discovery отверг ответ: findings сохраняются файлом, печатается шаблон
+    повторного ответа с `--supersede`, run стопится. 1/2 — операционный
+    отказ discovery: run стопится, но сессия остаётся записанной —
+    печатается подсказка восстановить ЕЁ ЖЕ, а не начинать новую.
+    """
+    session_id = state.interview["session_id"]
+    findings_file = run_dir(state.run_id) / INTERVIEW_FINDINGS
+    reason = reply.envelope.get("operation", {}).get("reason", "")
+    if reply.code == 20:
+        if reply.envelope["next_action"].get("session_id") != session_id:
+            return _interview_stop(
+                state, "next_action.session_id ≠ записанной сессии"
+            )
+        findings_file.unlink(missing_ok=True)
+        state.ops.pop(INTERVIEW_BRIEF, None)
+        state.status = "waiting_interview"
+        save(state)
+        _print_answer_hint(state, reply)
+        return False
+    if reply.code in (10, 11):
+        findings_file.write_text(
+            json.dumps(
+                {
+                    "findings": reply.envelope["findings"],
+                    "readiness_findings": reply.envelope["readiness_findings"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print("повторный ответ по findings (question_id подставьте сами):")
+        print("  " + iv.supersede_template(session_id, spec.stakeholder_role))
+        return _interview_stop(
+            state, f"{call} вернул {reply.code}: findings в {findings_file}"
+        )
+    if reply.code in (1, 2):
+        print(
+            "_step_interview: восстановите ту же сессию "
+            f"{shlex.quote(session_id)} в $DISCOVERY_HOME и повторите, "
+            "либо новый прогон: --new-run --ws-id <fresh-id>"
+        )
+        return _interview_stop(state, f"{call} вернул {reply.code}: {reason}")
+    assert reply.code == 0
+    if call == "status":
+        return _interview_publish(state, ops, spec, cwd)
+    return True  # brief 0 обрабатывает вызывающий (Task 7)
+
+
+def _interview_publish(
+    state: RunState, ops: Ops, spec: iv.InterviewSpec, cwd: str
+) -> bool:
+    """S0.5 публикация brief'а — заглушка (Task 7 заменяет)."""
+    return _interview_stop(state, "publish не реализован")
 
 
 def _step_interview(state: RunState, ops: Ops) -> bool:
