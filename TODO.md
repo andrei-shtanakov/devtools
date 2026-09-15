@@ -1353,7 +1353,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 - [ ] Формулировки и защитные проверки governance-контракта привести к фактическим гарантиям без расширения runtime-механики @owner:github:andrei-shtanakov @id:governance-contract-truth-batch
   Источники: devtools#182 (граница blob-anchor), #184 (`merge-pr.sh` — policy
   и defense-in-depth, не security boundary), #185 (движение базы не
-  проверялось) и #195 (две известные дыры guard слепых зон). Это один малый
+  проверялось; #237 — та же ветка `else`: ABSENT верхушки после D1) и #195 (две известные дыры guard слепых зон). Это один малый
   батч, но #195 обязан сохранить negative self-check: одной правки прозы для
   него недостаточно.
 
@@ -1372,7 +1372,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   без снятых утверждений, author-промпт запинован на словари класса и
   санкции, оба соседских зонда требуют явного opt-in и имеют hard timeout.
 
-- [ ] Пин базы вердикта: `merge-pr.sh --expect-base` сверять с живой верхушкой `origin/<base>` (`git/ref/heads`), а не с `baseRefOid` — снимком базы PR у форджи, который не двигается без update-branch (ложный отказ «база уехала» на живой приёмке E1, spec-runner#512, три круга подряд); диагностика `accept_pr` на коде 5 тоже переходит на живую верхушку; после этого повтор приёмки при неподвижном merge-base наследует вердикт по `head + fp` бесплатно (уже есть в review-pr.sh) — автоматический повтор (D2) заводится только по живому наблюдению гонки; auto-update-branch не вводится @owner:github:andrei-shtanakov @id:merge-base-live-tip-fp-reconcile
+- [x] Пин базы вердикта: `merge-pr.sh --expect-base` сверять с живой верхушкой `origin/<base>` (`git/ref/heads`), а не с `baseRefOid` — снимком базы PR у форджи, который не двигается без update-branch (ложный отказ «база уехала» на живой приёмке E1, spec-runner#512, три круга подряд); диагностика `accept_pr` на коде 5 тоже переходит на живую верхушку; после этого повтор приёмки при неподвижном merge-base наследует вердикт по `head + fp` бесплатно (уже есть в review-pr.sh) — автоматический повтор (D2) заводится только по живому наблюдению гонки; auto-update-branch не вводится @owner:github:andrei-shtanakov @id:merge-base-live-tip-fp-reconcile — спека #234/#235 (accepted), D1 — PR #236 (мерж человеком 9b58582), #223 закрыт
       Источник: devtools#223. Дизайн — `docs/superpowers/specs/2026-09-15-merge-base-live-tip-design.md`
       (accepted 2026-09-15): D1 — сейчас отдельным PR; D2 — не делать до
       наблюдаемой гонки; D3 — без update-branch; D4 — не вводить, объём
