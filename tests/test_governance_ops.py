@@ -390,6 +390,38 @@ def test_commit_paths_empty_index_does_not_commit(monkeypatch):
 # --- Кейс 5: author -------------------------------------------------------
 
 
+def _harness_file(tmp_path, monkeypatch, **kv):
+    path = tmp_path / "harness.env"
+    path.write_text("".join(f"{k}={v}\n" for k, v in kv.items()), encoding="utf-8")
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", str(path))
+    for k in ("AUTHOR_HARNESS", "AUTHOR_MODEL", "REVIEW_HARNESS", "REVIEW_MODEL"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_disp_agent_maps_harness_layer_to_disputatio_adapter(tmp_path, monkeypatch):
+    """Адаптер disp — из того же харнесс-слоя, что авторинг/ревью
+    (harness.env): claude → claude_code, codex → codex; author из AUTHOR_*,
+    reviewer из REVIEW_*."""
+    _harness_file(tmp_path, monkeypatch, AUTHOR_HARNESS="claude",
+                  AUTHOR_MODEL="claude-opus-5", REVIEW_HARNESS="codex",
+                  REVIEW_MODEL="gpt-5-codex")
+    assert ops_mod.disp_agent("author") == ("claude_code", "claude-opus-5")
+    assert ops_mod.disp_agent("reviewer") == ("codex", "gpt-5-codex")
+
+
+def test_disp_agent_defaults_claude_model_and_refuses_codex_without_model(tmp_path, monkeypatch):
+    _harness_file(tmp_path, monkeypatch, AUTHOR_HARNESS="claude", REVIEW_HARNESS="codex")
+    assert ops_mod.disp_agent("author") == ("claude_code", "claude-opus-5")
+    with pytest.raises(ValueError):
+        ops_mod.disp_agent("reviewer")   # disp требует model, у codex дефолта нет
+
+
+def test_disp_agent_env_overrides_file(tmp_path, monkeypatch):
+    _harness_file(tmp_path, monkeypatch, AUTHOR_HARNESS="codex", AUTHOR_MODEL="x")
+    monkeypatch.setenv("AUTHOR_HARNESS", "claude")
+    assert ops_mod.disp_agent("author") == ("claude_code", "claude-opus-5")
+
+
 def test_author_command_and_prompt_contains_fields(monkeypatch):
     monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
     monkeypatch.delenv("AUTHOR_HARNESS", raising=False)
