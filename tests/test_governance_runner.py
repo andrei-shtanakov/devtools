@@ -3330,6 +3330,13 @@ def test_disp_backend_used_only_for_behaviour_node(
     assert "checked_by" in task
     assert state.ops["author-behaviour"]["status"] == "completed"
     assert state.author_backend == "disp"
+    # Сосед стартует только на чистом дереве (document-pipeline.md §2: первый
+    # PROPOSING делает reset --hard + clean): charter/requirements и source-
+    # слой обязаны быть в коммите ДО `run`. Живой прогон spec-runner#480:
+    # без этого disp вернул 2 «рабочее дерево не готово к run».
+    commit_at = ops.calls.index(("commit_paths", (BUNDLE_DIR,)))
+    disp_at = ops.calls.index(("author_disp", task))
+    assert commit_at < disp_at, ops.calls
 
     # Конфиг вида `document`: форма секции `[pipeline]` и есть объявление
     # вида (disputatio SPEC-002 §3.2), поэтому проверяется форма, а не факт
@@ -3557,10 +3564,19 @@ def test_disp_retry_resumes_an_existing_pipeline_dir_instead_of_run(
     draft.write_text("# черновик первого раунда\n", encoding="utf-8")
 
     ops.author_disp_exit = 0
+    commits_before = ops.calls.count(("commit_paths", (BUNDLE_DIR,)))
     state = runner.resume(run_id, ops)
     assert ops.author_disp_resume == [False, True]
     assert state.ops["author-behaviour"]["status"] == "completed"
     assert state.ops["author-behaviour"].get("skipped") is False
+    # Коммит бандла — только перед `run`; `resume` продолжает живой пайплайн
+    # соседа, и его черновик узла коммитить под нашим сообщением нельзя.
+    # Следующий commit_paths — штатный S3 после авторинга.
+    disp_resume_at = len(ops.calls) - 1 - ops.calls[::-1].index(
+        ("author_disp", ops.author_disp_calls[1][1])
+    )
+    before_resume = ops.calls[:disp_resume_at]
+    assert before_resume.count(("commit_paths", (BUNDLE_DIR,))) == commits_before
 
 
 def test_hand_fixed_node_without_pipeline_dir_is_accepted_after_pin(
