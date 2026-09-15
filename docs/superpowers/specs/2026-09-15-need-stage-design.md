@@ -1,6 +1,9 @@
 # E2: стадия Need вызывается прогоном — `spec-loop --need`
 
 Дата: 2026-09-15. Статус: accepted (владелец, 2026-09-15, после ревизии 3).
+Ревизия 4 — по терминальному ревью #244: роль — декларация (сверка ролей только
+при attach), повтор после `--new-run` с `--run-id`, `--need` против прогона без
+`interview` — отказ, детерминизм рендера подтверждён (`generated_at = created_at`).
 Ревизия 3 — `status` 20 из `stopped_interview` возвращает в `waiting_interview`;
 crash-окно без tmp и без `brief.md`; уточнение §7 про `start`/`status`/`brief`.
 Ревизия 2 — по ревью владельца спеки (четыре
@@ -85,6 +88,10 @@ need-специфичные флаги (`--frame`, `--stakeholder`, `--traces-to
   иными `--frame`/`--stakeholder`/`--traces-to` при леджере в
   `waiting_interview` или `stopped_interview` — отказ: координаты интервью
   зафиксированы стартом; сменить их — `--new-run`.
+- `--need` при найденном прогоне с `interview is None` (создан через
+  `--brief`, legacy без источника, либо восстановлен из GitHub по
+  bundle-PR) — отказ с подсказкой `--new-run --ws-id <fresh-id>`: у такого
+  прогона стадии Need не было и быть не может.
 
 ## 4. Состояние
 
@@ -125,7 +132,7 @@ need-специфичные флаги (`--frame`, `--stakeholder`, `--traces-to
 | `start` | 1, 2 | `stopped_interview`; `interview-start` остаётся `started`, `session_id is None`; S1 не вызывается |
 | `status` (повтор) | 20 | из `waiting_interview`: состояние не меняется (`run.json` байт в байт); из `stopped_interview` (10/11 или 1/2 ранее): статус → `waiting_interview`, findings-файл удаляется; в обоих случаях печать `next_action` и команды ответа, spec-loop — код 0. Для любого `status`/`brief` → 20 `next_action.session_id` обязан совпасть с записанным; неполный `next_action` или чужой id — fail-closed стоп |
 | `status` | 0 | `interview-brief` → `started`; `discovery brief --out <run_dir>/brief-input/00-discovery/.brief.tmp`; **код `brief` — по строкам `brief` ниже** |
-| `brief` | 0 | `inspect_brief` полного source-слоя на tmp, сверка координат (§5.3), `os.replace` → `brief.md`, `state.brief`, `completed_at`, `running`; далее S1 по E1 |
+| `brief` | 0 | `inspect_brief` полного source-слоя на tmp, сверка координат брифа — **только** H1, `interview.frame`, `traces_to` (роли участников не сверяются: `--stakeholder` — декларация, D3; второй легитимный участник интервью законен), `os.replace` → `brief.md`, `state.brief`, `completed_at`, `running`; далее S1 по E1 |
 | `brief` | 20 | сосед снова ждёт ответа (между `status` и `brief` появился вопрос): run → `waiting_interview`, tmp удаляется, публикации нет; `interview-brief` сбрасывается; печать команды ответа |
 | `status`/`brief` | 10, 11 | `stopped_interview`; `findings`/`readiness_findings` → `run_dir/interview-findings.txt`; tmp удаляется; печать шаблона `discovery answer --session <id> --role <role> --question <QUESTION_ID> --supersede --file <answer.yaml>` — `question_id` подставляет человек, из findings он не выводится; spec-loop — код 1 |
 | `status`/`brief` | 1, 2 | `stopped_interview` с `operation.reason`; координаты и `session_id` не трогаются; tmp удаляется; код 1 |
@@ -169,7 +176,11 @@ need-специфичные флаги (`--frame`, `--stakeholder`, `--traces-to
 - `interview.frame == frame`; `traces_to == [traces_to]` или `[]`;
 - `interview.sessions` — список **уникальных ролей из ответов**, до первого
   ответа пуст: допустимо только `[]` или ровно `[{participant_role:
-  <stakeholder>}]`; любая чужая или дополнительная роль — отказ.
+  <stakeholder>}]`; любая чужая или дополнительная роль — отказ. Эта
+  сверка ролей применяется **только при присоединении** (`--session`):
+  здесь роль — единственный признак, что сессия наша, и аварийный вход
+  вправе быть строже декларации. В штатном пути (`brief` 0) роли не
+  сверяются (D3).
 
 При совпадении `session_id` записывается и `interview-start` → `completed`;
 дальше обычный `status`.
@@ -188,7 +199,10 @@ session id, записанный write-ahead); `--session` останется а
 совпавшие прогоны стоят до S1 (`waiting_interview`/`stopped_interview`);
 если хотя бы один достиг S1 — отказ с перечнем и `--run-id` (дубль
 workstream: ветка уже есть). Старые леджеры и сессии не меняются; их
-`session_id` печатаются для ручной уборки.
+`session_id` печатаются для ручной уборки. После `--new-run` старый леджер
+продолжает матчиться по (repo, subject), поэтому spec-loop печатает команду
+повтора **с `--run-id <новый>`**, и `--run-id` вместе с `--need` на повторе
+разрешён явно (координаты сверяются с указанным прогоном).
 
 ### 5.5. Crash-recovery `interview-brief`
 
@@ -203,7 +217,10 @@ workstream: ветка уже есть). Старые леджеры и сесс
 - есть `brief.md` — повторный `discovery_brief` записанного `session_id`
   во второй tmp, требуется код 0 (публикация состоялась только при 0, иной
   код означает, что сессия ушла от опубликованного состояния — стоп),
-  **байты равны** durable `brief.md`,
+  **байты равны** durable `brief.md` (рендер детерминирован при
+  неизменной сессии: `generated_at` — это `created_at` сессии,
+  `render.py:355`, а не момент рендера; smoke это подтверждает двумя
+  рендерами подряд),
   повтор сверки координат и `inspect_brief` полного source-слоя, и только
   затем op завершается **без повторного `replace`**; расхождение байтов —
   стоп: durable-файл не совпадает с сессией, выбирать сторону молча нельзя.
@@ -304,7 +321,9 @@ preflight, — порт менять после разблокировки не 
 
 **spec_loop**: CLI-preflight (все отказы до run-id: без `--stakeholder`, без
 `--frame`, `--need`+`--brief`, customer с `--traces-to`, engineer до inbox);
-need-флаги без `--need` — отказ; `--new-run` требует `--ws-id`, взаимоисключающ
+need-флаги без `--need` — отказ; `--need` против прогона с `interview is
+None` — отказ с подсказкой; повтор после `--new-run` проходит по
+напечатанному `--run-id` без ручного выбора; `--new-run` требует `--ws-id`, взаимоисключающ
 с `--run-id`/`--session`, разрешён только при прогонах до S1 и **не
 меняет** старые леджеры и сессии; координаты повторного вызова; печатаемые команды shell-safe (роль с
 пробелами через `shlex.quote`); коды выхода 0/1 по §5.2.
