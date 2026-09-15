@@ -473,6 +473,22 @@ class FakeOps:
         return reply
 
 
+@pytest.fixture(autouse=True)
+def _disp_harness_env(monkeypatch):
+    """Детерминированный харнесс-слой для disp-конфига во всём модуле.
+
+    `ops.disp_agent` читает AUTHOR_*/REVIEW_* из окружения и harness.env
+    машины; на CI файла нет, и codex без модели останавливал бы каждый
+    disp-тест `stopped_author`. Тест, которому нужен иной харнесс, ставит
+    свой env поверх (monkeypatch в теле теста побеждает autouse).
+    """
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
+    monkeypatch.setenv("AUTHOR_HARNESS", "claude")
+    monkeypatch.setenv("REVIEW_HARNESS", "claude")
+    monkeypatch.delenv("AUTHOR_MODEL", raising=False)
+    monkeypatch.delenv("REVIEW_MODEL", raising=False)
+
+
 @pytest.fixture()
 def runs_root(tmp_path: Path, monkeypatch):
     root = tmp_path / "runs"
@@ -3291,6 +3307,11 @@ def test_disp_backend_used_only_for_behaviour_node(
     """`author_backend="disp"` переключает ТОЛЬКО behaviour-spec узел на
     `ops.author_disp`; charter/requirements остаются на `ops.author` (codex)
     — disp-цикл осмыслен только для полируемого документа."""
+    # Форма конфига не должна зависеть от harness.env машины (на CI его нет):
+    # харнесс задаётся окружением явно.
+    monkeypatch.setenv("AUTHOR_HARNESS", "claude")
+    monkeypatch.setenv("REVIEW_HARNESS", "claude")
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-disp-behaviour"
 
@@ -3340,6 +3361,20 @@ def test_disp_backend_used_only_for_behaviour_node(
     assert not anchor.resolve().is_relative_to(Path(target_dir).resolve()), (
         f"анкер {anchor} лежит внутри дерева цели {target_dir} — disp откажет на старте"
     )
+
+    # Живой прогон 2026-09-15 (spec-runner#480): disputatio отверг конфиг —
+    # «нет обязательного ключа agents.author.adapter». Секции `[agents.*]`
+    # и `[limits]` у соседа НЕ дефолтные: adapter/model и четыре целых
+    # обязательны (SPEC-002 §3.2, pipeline_config._agent/_session_profile).
+    import tomllib
+    parsed = tomllib.loads(config)
+    for role in ("author", "reviewer"):
+        agent = parsed["agents"][role]
+        assert agent["adapter"] in ("claude_code", "codex"), agent
+        assert isinstance(agent["model"], str) and agent["model"], agent
+    limits = parsed["limits"]
+    for key in ("max_rounds", "max_total_tokens", "max_wall_seconds", "schema_retries"):
+        assert isinstance(limits[key], int) and not isinstance(limits[key], bool)
 
 
 @pytest.mark.parametrize(
@@ -3592,6 +3627,23 @@ def test_foreign_pipeline_dir_with_its_draft_still_stops(
     assert ops.author_disp_calls == []
     assert state.ops.get("author-behaviour", {}).get("skipped") is not True
     assert state.disp_slug is None
+
+
+def test_disp_config_without_model_stops_author_with_reason(
+    tmp_path: Path, runs_root, monkeypatch, capsys,
+) -> None:
+    """codex без модели: disputatio требует agents.*.model — стоп с причиной
+    до вызова соседа, не traceback."""
+    monkeypatch.setenv("AUTHOR_HARNESS", "codex")
+    monkeypatch.delenv("AUTHOR_MODEL", raising=False)
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
+    ops = FakeOps()
+    state = runner.start(**_start_kwargs(
+        tmp_path, "r-disp-nomodel", ops, author_backend="disp",
+    ))
+    assert state.status == "stopped_author"
+    assert ops.author_disp_calls == []
+    assert "AUTHOR_MODEL" in capsys.readouterr().out
 
 
 def test_disp_backend_author_disp_failure_stops_author(

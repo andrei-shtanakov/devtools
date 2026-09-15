@@ -40,7 +40,9 @@ from governance import interview as iv
 from governance.merge_gate import PrFacts, decide
 from governance.facts import Outcome
 from governance.stale_adapter import blob_sha1
-from governance.ops import _AUTHOR_DSL, ENGINEER_BLOCKED, Ops, RealOps
+from governance.ops import (
+    _AUTHOR_DSL, ENGINEER_BLOCKED, Ops, RealOps, disp_agent,
+)
 from governance.policy_sources import (
     PREFLIGHT_PROCEDURE_HINT,
     build_authority,
@@ -1184,6 +1186,15 @@ _DOC_CHECKLIST: dict[str, str] = {
 }
 _DOC_FINDINGS_ITEM = "B3"
 
+#: `[limits]` сессии disputatio — обязательные целые (SPEC-002 §3.2, пример
+#: `docs/document-pipeline.md` соседа). Значения примера, не наши догадки.
+_DOC_LIMITS: dict[str, int] = {
+    "max_rounds": 6,
+    "max_total_tokens": 2_000_000,
+    "max_wall_seconds": 7200,
+    "schema_retries": 2,
+}
+
 #: Допустимые символы слага после первого (§4.1).
 _SLUG_ALPHABET = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
 
@@ -1216,9 +1227,12 @@ def _write_disp_doc_config(
       `_disp_anchor_dir`: каталог прогона, а при self-target (цель — сам
       devtools, `RUNS_ROOT` внутри её дерева) — пользовательский
       state-каталог;
-    * пустые `[agents.author]` / `[agents.reviewer]` / `[limits]` — секции
-      сессии SPEC-001, общие для обоих видов; пустыми они означают
-      «дефолты disp», и присутствие секций повторяет пример §3.2.
+    * `[agents.author]` / `[agents.reviewer]` / `[limits]` — секции сессии
+      SPEC-001, общие для обоих видов. Они НЕ дефолтные (живой прогон
+      2026-09-15, spec-runner#480: «нет обязательного ключа
+      agents.author.adapter»): `adapter`/`model` обязательны у обеих ролей и
+      берутся из харнесс-слоя оператора (`ops.disp_agent`), `[limits]` —
+      четыре обязательных целых, значения — пример §3.2 (`_DOC_LIMITS`).
 
     Каталог прогона, а не рабочее дерево цели: конфиг — артефакт прогона,
     он не должен попадать в коммит узла (doc-scope контура ограничивает
@@ -1243,7 +1257,16 @@ def _write_disp_doc_config(
     lines += [
         f'{key} = "{_toml_str(text)}"' for key, text in _DOC_CHECKLIST.items()
     ]
-    lines += ["", "[agents.author]", "[agents.reviewer]", "[limits]", ""]
+    for role in ("author", "reviewer"):
+        adapter, model = disp_agent(role)
+        lines += [
+            "", f"[agents.{role}]",
+            f'adapter = "{_toml_str(adapter)}"',
+            f'model = "{_toml_str(model)}"',
+        ]
+    lines += ["", "[limits]"]
+    lines += [f"{key} = {value}" for key, value in _DOC_LIMITS.items()]
+    lines.append("")
     path = directory / "disp-doc.toml"
     path.write_text("\n".join(lines), encoding="utf-8")
     return str(path)
@@ -1484,7 +1507,17 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 state.status = "stopped_author"
                 save(state)
                 return False
-            config_path = _write_disp_doc_config(state, bundle_path, anchor_dir)
+            try:
+                config_path = _write_disp_doc_config(
+                    state, bundle_path, anchor_dir
+                )
+            except ValueError as exc:
+                # Харнесс-слой не даёт adapter/model для disp (например codex
+                # без модели) — стоп с причиной до вызова соседа.
+                print(f"_step_authoring: конфиг disp не собрать: {exc}")
+                state.status = "stopped_author"
+                save(state)
+                return False
             slug = _pinned_disp_slug(state)
             # Ровно один путь retry (devtools#204 п.3): пайплайн начат этим
             # прогоном и его каталог есть ⇒ `resume` (на нём `run`

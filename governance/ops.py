@@ -238,7 +238,9 @@ class Ops(Protocol):
 # своего харнесса (урок ревью PR #121): харнесс со слоя выше не наследует
 # модель слоя ниже. Файл ПАРСИТСЯ (KEY=VALUE, export/отступы терпимы),
 # не исполняется.
-_HARNESS_ENV_KEYS = ("AUTHOR_HARNESS", "AUTHOR_MODEL")
+_HARNESS_ENV_KEYS = (
+    "AUTHOR_HARNESS", "AUTHOR_MODEL", "REVIEW_HARNESS", "REVIEW_MODEL",
+)
 
 
 def _harness_env_values() -> dict[str, str]:
@@ -262,6 +264,54 @@ def _harness_env_values() -> dict[str, str]:
     return values
 
 
+def _harness_for(prefix: str) -> tuple[str, str]:
+    """(harness, model) слоя `<prefix>_HARNESS`/`<prefix>_MODEL`.
+
+    Порядок тот же, что у `_author_argv`: env > harness.env > вшитый codex;
+    модель привязана к слою, из которого пришёл харнесс (env-харнесс НЕ
+    наследует модель файла).
+    """
+    cfg = _harness_env_values()
+    env_harness = os.environ.get(f"{prefix}_HARNESS", "")
+    harness = env_harness or cfg.get(f"{prefix}_HARNESS", "") or "codex"
+    if env_harness:
+        model = os.environ.get(f"{prefix}_MODEL", "")
+    else:
+        model = os.environ.get(f"{prefix}_MODEL", "") or cfg.get(
+            f"{prefix}_MODEL", ""
+        )
+    return harness, model
+
+
+#: Харнесс операторского слоя → адаптер disputatio (`composition.py`).
+_DISP_ADAPTERS = {"claude": "claude_code", "codex": "codex"}
+
+
+def disp_agent(role: str) -> tuple[str, str]:
+    """(adapter, model) для `[agents.<role>]` конфига пайплайна disputatio.
+
+    Живой прогон 2026-09-15 (spec-runner#480): сосед отверг конфиг с пустыми
+    секциями — `adapter` и `model` обязательны (SPEC-002 §3.2). Источник — тот
+    же харнесс-слой, что у авторинга и ревью: author ← AUTHOR_*, reviewer ←
+    REVIEW_*. Дефолт модели есть только у claude (как в `_author_argv`); у
+    codex его нет — без модели отказ, а не выдуманное имя.
+    """
+    prefix = {"author": "AUTHOR", "reviewer": "REVIEW"}[role]
+    harness, model = _harness_for(prefix)
+    if harness not in _DISP_ADAPTERS:
+        raise ValueError(
+            f"неизвестный {prefix}_HARNESS: {harness!r} (claude|codex)"
+        )
+    if not model:
+        if harness != "claude":
+            raise ValueError(
+                f"{prefix}_MODEL обязателен для {harness}: disputatio требует "
+                f"agents.{role}.model, дефолта у codex нет"
+            )
+        model = "claude-opus-5"
+    return _DISP_ADAPTERS[harness], model
+
+
 def _author_argv(prompt: str) -> list[str]:
     """argv авторинг-агента по выбранному харнессу; неизвестный — ValueError.
 
@@ -272,15 +322,7 @@ def _author_argv(prompt: str) -> list[str]:
     целевом чекауте). --strict-mcp-config/--no-session-persistence — не
     тащить MCP оператора и не сорить сессиями в целевом репо.
     """
-    cfg = _harness_env_values()
-    env_harness = os.environ.get("AUTHOR_HARNESS", "")
-    harness = env_harness or cfg.get("AUTHOR_HARNESS", "") or "codex"
-    if env_harness:
-        model = os.environ.get("AUTHOR_MODEL", "")
-    else:
-        model = os.environ.get("AUTHOR_MODEL", "") or cfg.get(
-            "AUTHOR_MODEL", ""
-        )
+    harness, model = _harness_for("AUTHOR")
     if harness == "claude":
         return [
             "claude", "-p", "--model", model or "claude-opus-5",
