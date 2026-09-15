@@ -575,6 +575,10 @@ def test_need_start_non_20_stops_without_session(
     assert state.interview["session_id"] is None
     assert state.ops["interview-start"]["status"] == "started"
     assert not any(c[0] in ("is_dirty", "ensure_branch") for c in ops.calls)
+    persisted = rs.load(f"r-need-{code}")
+    assert persisted.status == "stopped_interview"
+    assert persisted.ops["interview-start"]["status"] == "started"
+    assert persisted.interview["session_id"] is None
 
 
 def _customer_brief_text() -> str:
