@@ -231,7 +231,13 @@ class Fleet:
         # …и от env-слоя оболочки оператора (ревью #231): экспортированный
         # REVIEW_HARNESS=claude на ките-стабе без харнесс-слоя дал бы код 2
         # во всех full-run тестах, а внешний REVIEW_CMD — чужую строку.
-        for key in ("REVIEW_HARNESS", "REVIEW_MODEL", "REVIEW_CMD"):
+        # Потолки дифа (ревью #250) — тот же класс: экспортированный
+        # REVIEW_MAX_DIFF_BYTES оператора валил бы full-run тесты на стабе
+        # кита без литерала --max-diff-bytes кодом 2.
+        for key in (
+            "REVIEW_HARNESS", "REVIEW_MODEL", "REVIEW_CMD",
+            "REVIEW_MAX_DIFF_BYTES", "REVIEW_MAX_DIFF_FILES",
+        ):
             env.pop(key, None)
         env.update(extra)
         return env
@@ -541,7 +547,7 @@ def test_diff_caps_flags_reach_both_kit_calls(caps_fleet: Fleet) -> None:
         assert "--max-diff-files 40" in call, call
     body = caps_fleet.body_out.read_text()
     assert "потолки дифа подняты явно" in body
-    assert "--max-diff-bytes 500000 --max-diff-files 40" in body
+    assert "--max-diff-bytes 500000 (флаг) --max-diff-files 40 (флаг)" in body
 
 
 def test_diff_caps_env_fallback_and_flag_wins(caps_fleet: Fleet) -> None:
@@ -553,6 +559,9 @@ def test_diff_caps_env_fallback_and_flag_wins(caps_fleet: Fleet) -> None:
     assert res.returncode == 0, res.stderr
     assert all("--max-diff-bytes 450000" in c for c in _kit_calls(caps_fleet))
     assert all("--max-diff-files" not in c for c in _kit_calls(caps_fleet))
+    # Шапка называет слой, из которого пришёл потолок: S6 раннера флагов не
+    # передаёт, и «явно оператором» без источника вводило бы в заблуждение.
+    assert "(env REVIEW_MAX_DIFF_BYTES)" in caps_fleet.body_out.read_text()
     caps_fleet.local_log.unlink()
     res = caps_fleet.run(
         "demo", "7", "--max-diff-bytes", "500000",
@@ -585,6 +594,19 @@ def test_diff_caps_reject_empty_and_non_integer(
     assert flag in res.stderr
     assert _kit_calls(caps_fleet) == []
     assert "pr review" not in caps_fleet.gh_calls()
+
+
+def test_diff_caps_env_non_integer_names_the_env_source(
+    caps_fleet: Fleet,
+) -> None:
+    """Отказ на env-пути называет переменную, а не только флаг: в вызове S6
+    раннера флага нет, и оператор искал бы его напрасно."""
+    res = caps_fleet.run(
+        "demo", "7", REVIEW_STUB_FP=FP, REVIEW_MAX_DIFF_BYTES="1MiB",
+    )
+    assert res.returncode == 2, res.stderr
+    assert "REVIEW_MAX_DIFF_BYTES" in res.stderr
+    assert _kit_calls(caps_fleet) == []
 
 
 def test_diff_caps_refused_on_kit_without_flag(fp_fleet: Fleet) -> None:

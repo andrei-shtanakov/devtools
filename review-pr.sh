@@ -526,26 +526,39 @@ fi
 # в доверенном local.sh — как у --fingerprint-only: кит без потолков не
 # может исполнить явный оверрайд, и это отказ с причиной, а не тихий прогон
 # с умолчанием.
-max_diff_bytes="${opt_max_diff_bytes:-${REVIEW_MAX_DIFF_BYTES:-}}"
-max_diff_files="${opt_max_diff_files:-${REVIEW_MAX_DIFF_FILES:-}}"
+# Источник значения запоминается отдельно (ревью #250): S6 раннера флагов не
+# передаёт, и отказ «--max-diff-bytes не целое» отправил бы оператора искать
+# флаг, которого в вызове нет; шапка вердикта тоже обязана назвать слой.
+max_diff_bytes="$opt_max_diff_bytes"; src_bytes="флаг"
+if [ -z "$max_diff_bytes" ]; then
+    max_diff_bytes="${REVIEW_MAX_DIFF_BYTES:-}"; src_bytes="env REVIEW_MAX_DIFF_BYTES"
+fi
+max_diff_files="$opt_max_diff_files"; src_files="флаг"
+if [ -z "$max_diff_files" ]; then
+    max_diff_files="${REVIEW_MAX_DIFF_FILES:-}"; src_files="env REVIEW_MAX_DIFF_FILES"
+fi
 check_cap_int() {
     case "$2" in
         '') ;;
-        *[!0-9]*) die 2 "--$1 обязан быть целым числом, получено: $2" ;;
+        *[!0-9]*) die 2 "потолок --$1 обязан быть целым числом, получено: $2 \
+(источник: $3)" ;;
     esac
 }
-check_cap_int max-diff-bytes "$max_diff_bytes"
-check_cap_int max-diff-files "$max_diff_files"
+check_cap_int max-diff-bytes "$max_diff_bytes" "$src_bytes"
+check_cap_int max-diff-files "$max_diff_files" "$src_files"
 cap_args=""
+cap_note=""
 if [ -n "$max_diff_bytes" ] || [ -n "$max_diff_files" ]; then
     grep -q -- '--max-diff-bytes' "$trusted_kit_dir/local.sh" \
         || die 2 "кит ${repo} не знает --max-diff-bytes/--max-diff-files — \
 явный потолок исполнить нельзя: ре-вендорьте кит (steward) или разбейте PR."
     if [ -n "$max_diff_bytes" ]; then
         cap_args="$cap_args --max-diff-bytes $max_diff_bytes"
+        cap_note="$cap_note --max-diff-bytes $max_diff_bytes ($src_bytes)"
     fi
     if [ -n "$max_diff_files" ]; then
         cap_args="$cap_args --max-diff-files $max_diff_files"
+        cap_note="$cap_note --max-diff-files $max_diff_files ($src_files)"
     fi
 fi
 
@@ -763,8 +776,8 @@ fi
     if [ -n "$cap_args" ]; then
         # Поднятый потолок — факт о прогоне, который читатель вердикта обязан
         # видеть: умолчания кита на этот диф не действовали.
-        echo "- потолки дифа подняты явно оператором:$cap_args" \
-            "(умолчания кита не действовали)"
+        echo "- потолки дифа подняты явно:$cap_note" \
+            "— умолчания кита не действовали"
     fi
     echo
     cat "$work/verdict.md"
