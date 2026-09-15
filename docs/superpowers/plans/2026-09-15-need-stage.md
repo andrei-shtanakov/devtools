@@ -1320,6 +1320,8 @@ def _interview_reconcile_published(state, ops, spec, cwd, final) -> bool:
             return _interview_stop(
                 state, f"recovery: повторный рендер вернул {reply.code}, "
                 "сессия ушла от опубликованного состояния")
+        if not probe.exists():
+            return _interview_stop(state, "recovery: повторный рендер не записал артефакт")
         if probe.read_bytes() != final.read_bytes():
             return _interview_stop(
                 state, "recovery: повторный рендер не совпадает с durable brief.md")
@@ -1354,9 +1356,14 @@ def attach_session(run_id: str, session_id: str, ops: Ops) -> RunState:
     probe = run_dir(run_id) / "brief-input" / ".attach.tmp"
     probe.parent.mkdir(parents=True, exist_ok=True)
     reply = ops.discovery_brief(session_id, str(probe), str(run_dir(run_id)))
+    # `cmd_brief` соседа пишет артефакт (`write_artifact`) ДО `_emit` при любом
+    # коде, кроме отказа загрузки сессии (discovery `cli.py:267–283`); 1/2 —
+    # отказ присоединения, отсутствующий файл — тоже отказ, не traceback.
     try:
         if reply.code not in (0, 10, 11, 20):
             raise ValueError(f"рендер сессии {session_id} вернул {reply.code}")
+        if not probe.exists():
+            raise ValueError(f"рендер сессии {session_id} не записал артефакт")
         findings = iv.attach_findings(probe.read_text(encoding="utf-8"), spec)
     finally:
         probe.unlink(missing_ok=True)
@@ -1373,21 +1380,24 @@ def attach_session(run_id: str, session_id: str, ops: Ops) -> RunState:
 Run: `uv run --frozen pytest -q tests/test_governance_runner.py -k "crash_ or attach_session or need or brief_ or status_"`
 Expected: PASS
 
-- [ ] **Step 5: Negative controls (выполнить, зафиксировать в сообщении коммита)**
-
-Мутант A: в `attach_session` заменить `if findings:` на `if False:` → `test_attach_session_rejects_foreign_role` красный. Мутант B: в `_interview_reconcile_published` заменить `if reply.code != 0` на `if False` → `test_crash_after_replace_requires_code_0_on_re_render` красный. Мутант C: заменить сравнение байтов на `if False` → `test_crash_after_replace_with_diverged_render_stops` красный. Каждый мутант откатить (`git checkout governance/runner.py` после проверки).
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit the implementation FIRST**
 
 ```bash
 git add governance/runner.py tests/test_governance_runner.py
 git commit -m "feat(runner): crash-recovery interview-brief (три окна, повторный рендер, байты) и attach_session для сирот (E2, Task 8)
 
-Негативные проверки: мутанты «сверка ролей снята», «код 0 не требуется»,
-«байты не сравниваются» — по одному красному тесту каждый.
-
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
+
+- [ ] **Step 6: Negative controls — ПОСЛЕ коммита, откат из закоммиченного состояния**
+
+Каждый мутант: правка → фокусный тест → `git checkout -- governance/runner.py` (возвращает закоммиченную реализацию, не пустой файл).
+
+- Мутант A: в `attach_session` заменить `if findings:` на `if False:` → `uv run --frozen pytest -q tests/test_governance_runner.py -k attach_session_rejects_foreign_role` красный.
+- Мутант B: в `_interview_reconcile_published` заменить `if reply.code != 0:` на `if False:` → `-k crash_after_replace_requires_code_0` красный.
+- Мутант C: там же заменить `if probe.read_bytes() != final.read_bytes():` на `if False:` → `-k crash_after_replace_with_diverged_render_stops` красный.
+
+После трёх откатов `git status` обязан быть чистым. Результат записать в отчёт задачи (три имени теста и «красный»); если какой-то мутант выжил — это дефект теста, чинить тест и коммитить отдельно.
 
 ---
 
@@ -1667,7 +1677,7 @@ def test_need_with_run_id_on_repeat_is_allowed(runs_root, tmp_path, monkeypatch)
     assert spec_loop.main(_need("--run-id", "r-a")) == 0
 
 # Подсказку E1 покрывает существующий `test_existing_run_rejects_different_brief`
-# после правки его ассерта (:685) на `"--new-run --ws-id" in out`.
+# после правки его ассерта (:685) на `"без --need невозможен" in out`.
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1700,7 +1710,8 @@ Expected: FAIL
             return _deliver_phase(after, ops)
         return _report_state(after)
 
-# main: после выбора state и проверки координат (Task 9):
+# main: ПОСЛЕ `ops = _real_ops()` и после `recover_run_from_github` (state
+# окончателен) и до `_print_values`/`_dispatch`:
         if args.session:
             if state is None:
                 raise SpecLoopError("--session присоединяет сессию к существующему прогону, а его нет")
@@ -1718,9 +1729,12 @@ Expected: FAIL
                       f"сессия discovery: {(st.interview or {}).get('session_id')}")
             state = None
 # подсказка E1 (spec_loop.py:680 и :717 «создайте новый workstream с другим
-# --ws-id») → "новый прогон: --new-run --ws-id <fresh-id>"; вместе с ней
-# правится существующий assert tests/test_governance_spec_loop.py:685
-# (`"другим --ws-id" in out` → `"--new-run --ws-id" in out`).
+# --ws-id») — честная замена, без ссылки на --new-run (он существует только
+# с --need): «прогон с этими (repo, subject) уже есть (run-id …, статус …);
+# продолжите его без --brief либо выберите --run-id; новый прогон с тем же
+# subject без --need невозможен — уберите/переименуйте леджер вручную».
+# Существующий assert tests/test_governance_spec_loop.py:685
+# (`"другим --ws-id" in out`) заменить на `"без --need невозможен" in out`.
 ```
 
 `ValueError` из `attach_session` — обернуть в `SpecLoopError(str(exc))`.
