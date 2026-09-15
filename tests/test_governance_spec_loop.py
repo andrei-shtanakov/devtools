@@ -1038,7 +1038,8 @@ def test_need_repeat_with_other_coordinates_refuses(
     runs_root, tmp_path, monkeypatch, capsys
 ) -> None:
     env = _LoopEnv(monkeypatch, tmp_path)
-    _make_need_run(env)  # сохранённый леджер в waiting_interview, stakeholder "product owner"
+    # сохранённый леджер в waiting_interview, stakeholder "product owner"
+    _make_need_run(env)
     rc = spec_loop.main([
         "--subject", "Fleet Inbox", "--repo", "alpha", "--need",
         "--frame", "customer", "--stakeholder", "qa",
