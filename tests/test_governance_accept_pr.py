@@ -28,6 +28,8 @@ class _Ops:
     #: Живая верхушка базы, которую читает диагностика кода 5 (devtools#223);
     #: None — факт не установлен (UNAVAILABLE).
     live_tip: str | None = "base000"
+    #: Установленное отсутствие ветки базы (Outcome.ABSENT) — не «не двигалась».
+    live_tip_absent: bool = False
     calls: list[tuple] = field(default_factory=list)
     merge_args: tuple | None = None
 
@@ -65,6 +67,10 @@ class _Ops:
 
     def remote_branch_head_fact(self, repo_slug: str, branch: str):
         self.calls.append(("remote_branch_head_fact", branch))
+        if self.live_tip_absent:
+            return facts.Fact(
+                facts.Outcome.ABSENT, None, f"head origin/{branch}: ветки нет"
+            )
         if self.live_tip is None:
             return facts.unavailable(f"head origin/{branch}: стенд")
         return facts.Fact(facts.Outcome.FOUND, self.live_tip)
@@ -229,6 +235,10 @@ def test_guard_refusal_is_not_reported_as_a_moved_base(capsys) -> None:
     assert rc == 1
     out = capsys.readouterr().out
     assert "база уехала" not in out
+    # devtools#185: на кодах 2/3/4 база НЕ проверялась — так и говорится,
+    # а не «не двигалась» (факт, которого никто не устанавливал).
+    assert "не проверялось" in out
+    assert "не двигалась" not in out
     # И лишнего запроса за фактами ПОСЛЕ мержа тоже нет: решать по ним
     # нечего, а гонку они бы только расширили. (В начале приёмки
     # `pr_facts` зовётся законно — проверяется хвост, а не весь журнал.)
@@ -241,7 +251,8 @@ def test_guard_refusal_is_not_reported_as_a_moved_base(capsys) -> None:
 def test_merge_failure_without_base_move_does_not_blame_the_base(
     capsys,
 ) -> None:
-    """Не догадываться: база не двигалась — так и сказать, причина выше."""
+    """Код 5 при совпавших голове и верхушке — сказать ровно это, не
+    «база не двигалась» как вывод обо всём (devtools#185)."""
     ops = _Ops(
         facts_seq=[_facts()], merge_ok=False, merge_code=5,
         base_oid="base000",
@@ -252,7 +263,24 @@ def test_merge_failure_without_base_move_does_not_blame_the_base(
     assert rc == 1
     out = capsys.readouterr().out
     assert "база уехала" not in out
-    assert "причина названа merge-pr.sh" in out
+    assert "совпадают с проверенными" in out
+    assert "не двигалась" not in out
+
+
+def test_absent_base_branch_is_named_not_reported_as_unmoved(capsys) -> None:
+    """devtools#237: ABSENT верхушки (ветка базы исчезла между отказом и
+    диагностикой) — установленный факт, но не «не двигалась»."""
+    ops = _Ops(
+        facts_seq=[_facts()], merge_ok=False, merge_code=5,
+        base_oid="base000", live_tip_absent=True,
+    )
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "не двигалась" not in out
+    assert "ветки нет" in out and "origin/master" in out
 
 
 def test_review_findings_stop_without_merge(capsys) -> None:
