@@ -23,6 +23,7 @@ import os
 import re
 import shlex
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -840,8 +841,47 @@ def _interview_after_reply(
 def _interview_publish(
     state: RunState, ops: Ops, spec: iv.InterviewSpec, cwd: str
 ) -> bool:
-    """S0.5 публикация brief'а — заглушка (Task 7 заменяет)."""
-    return _interview_stop(state, "publish не реализован")
+    """S0.5 публикация brief'а (§5.1/§7): tmp → координаты/gate → replace.
+
+    `status` 0 запрашивает `discovery brief` во временный файл рядом с
+    итоговым путём; код ≠ 0 обрабатывается общей таблицей
+    `_interview_after_reply`. Код 0 проверяется дважды до необратимого
+    `os.replace`: координаты (`brief_coordinate_findings`, без ролей — D3)
+    и полный `inspect_brief` (discovery gate). Любой отказ стопит run,
+    tmp НЕ переименовывается. Реконсиляционное окно Task 8 вставляется
+    сразу после `_ensure_started` ниже.
+    """
+    session_id = state.interview["session_id"]
+    out_dir = run_dir(state.run_id) / "brief-input" / "00-discovery"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tmp = out_dir / ".brief.tmp"
+    final = out_dir / "brief.md"
+    _ensure_started(state, INTERVIEW_BRIEF)
+    tmp.unlink(missing_ok=True)
+    reply = ops.discovery_brief(session_id, str(tmp), cwd)
+    if reply.code != 0:
+        tmp.unlink(missing_ok=True)
+        return _interview_after_reply(state, ops, spec, cwd, reply, "brief")
+    try:
+        text = tmp.read_text(encoding="utf-8")
+    except OSError as exc:
+        return _interview_stop(state, f"brief tmp нечитаем: {exc}")
+    findings = iv.brief_coordinate_findings(text, spec)
+    if findings:
+        return _interview_stop(state, "координаты брифа: " + "; ".join(findings))
+    try:
+        brief_input.inspect_brief(tmp)
+    except brief_input.BriefInputError as exc:
+        return _interview_stop(state, f"бриф не проходит inspect_brief: {exc}")
+    os.replace(tmp, final)
+    source = brief_input.inspect_brief(final)  # дескриптор — по durable-пути
+    state.brief = source.as_state()
+    state.interview["completed_at"] = datetime.now(timezone.utc).isoformat(
+        timespec="seconds"
+    )
+    state.status = "running"
+    op_complete(state, INTERVIEW_BRIEF, brief_blob=dict(source.source_blobs))
+    return True
 
 
 def _step_interview(state: RunState, ops: Ops) -> bool:

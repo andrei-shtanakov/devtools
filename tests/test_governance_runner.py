@@ -720,6 +720,124 @@ traces_to: []
 """
 
 
+def _need_brief_text(target: str = "owner/alpha", roles=("po",)) -> str:
+    """Бриф, каким его рендерит discovery: `_customer_brief_text()` + H1
+    после frontmatter + блок `sessions`, ЗАМЕНЁННЫЙ на заданные роли (пустой
+    кортеж → `sessions: []`)."""
+    base = _customer_brief_text()
+    old_sessions = "  sessions:\n    - participant_role: product-owner\n"
+    assert base.count(old_sessions) == 1
+    new_sessions = (
+        "  sessions:\n"
+        + "".join(f"    - participant_role: {r}\n" for r in roles)
+        if roles
+        else "  sessions: []\n"
+    )
+    text = base.replace(old_sessions, new_sessions)
+    head, body = text.split("---\n\n", 1)
+    return head + "---\n\n" + iv.h1_line(target, "customer") + "\n\n" + body
+
+
+def test_status_0_brief_0_publishes_and_continues_by_e1(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0)),
+        ],
+        brief_text=_need_brief_text(),
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-pub", ops), interview_spec=_need_spec()
+    )
+    state = runner.resume("r-pub", ops)
+    assert state.interview["completed_at"]
+    assert state.brief and state.brief["frame"] == "customer"
+    brief = rs.run_dir("r-pub") / "brief-input" / "00-discovery" / "brief.md"
+    assert brief.exists() and not brief.with_name(".brief.tmp").exists()
+    assert state.ops["interview-brief"]["status"] == "completed"
+    # E1: source layer материализован в бандл и charter получил brief_context
+    assert state.ops["materialize-brief"]["status"] == "completed"
+    assert any(c[0] == "author" and c[1] == "charter" for c in ops.calls)
+
+
+def test_brief_20_returns_to_waiting_without_publish(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(20)),
+        ],
+        brief_text=_need_brief_text(),
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-b20", ops), interview_spec=_need_spec()
+    )
+    state = runner.resume("r-b20", ops)
+    assert state.status == "waiting_interview" and state.brief is None
+    d = rs.run_dir("r-b20") / "brief-input" / "00-discovery"
+    assert not (d / "brief.md").exists() and not (d / ".brief.tmp").exists()
+    assert "interview-brief" not in state.ops
+
+
+@pytest.mark.parametrize("code", [10, 11, 1, 2])
+def test_brief_non_zero_stops_without_publish(
+    tmp_path: Path, runs_root, code
+) -> None:
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(code)),
+        ],
+        brief_text=_need_brief_text(),
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, f"r-b{code}", ops), interview_spec=_need_spec()
+    )
+    state = runner.resume(f"r-b{code}", ops)
+    assert state.status == "stopped_interview" and state.brief is None
+    assert not (
+        rs.run_dir(f"r-b{code}") / "brief-input" / "00-discovery" / "brief.md"
+    ).exists()
+
+
+def test_brief_0_failing_inspect_or_coordinates_stops(
+    tmp_path: Path, runs_root
+) -> None:
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0)),
+        ],
+        brief_text=_need_brief_text(target="owner/beta"),
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-bad", ops), interview_spec=_need_spec()
+    )
+    state = runner.resume("r-bad", ops)
+    assert state.status == "stopped_interview" and state.brief is None
+    assert not (
+        rs.run_dir("r-bad") / "brief-input" / "00-discovery" / "brief.md"
+    ).exists()
+    assert not any(c[0] in ("is_dirty", "ensure_branch") for c in ops.calls)
+
+
+def test_brief_0_with_second_participant_role_is_accepted(
+    tmp_path: Path, runs_root
+) -> None:
+    """D3: роль — декларация; второй участник законен на штатном пути."""
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)), ("status", _reply(0)), ("brief", _reply(0)),
+        ],
+        brief_text=_need_brief_text(roles=("po", "qa")),
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-two", ops), interview_spec=_need_spec()
+    )
+    assert runner.resume("r-two", ops).brief is not None
+
+
 def _brief_source(tmp_path: Path) -> brief_input.BriefSource:
     path = tmp_path / "discovery-input.md"
     path.write_text(_customer_brief_text(), encoding="utf-8")
