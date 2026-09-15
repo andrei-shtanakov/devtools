@@ -51,7 +51,7 @@ help:
 	@echo "  make spec-loop SUBJECT='…' REPO=… — операторская кнопка: start → мерж бандла (человек) → одобрение узлов (человек, --approve-node) → повтор той же команды → deliver tasks-спеки → approve (человек); merge-authority жёстко human, неоднозначности — fail-closed (--run-id/--ws-id через ARGS)"
 	@echo "  make behaviour-console ARGS=… — governance console TUI (uv + группа governance)"
 	@echo "  make behaviour-tasks ARGS='--run-id …' — draft tasks.md-спека из бандла PR-ом (approve — человек)"
-	@echo "  make behaviour-tasks ARGS='--run-id … --approve-node <node-id>' — одобрение узла бандла: candidate-PR → мерж ЧЕЛОВЕКОМ (это и есть акт) → повтор той же команды дописывает подпись финализирующим PR-ом. Единственная дорога узла в approved (§I12); порядок — топологический, доставка одобренность только проверяет"
+	@echo "  make behaviour-tasks ARGS='--run-id … --approve-node <node-id>' — одобрение узла бандла: candidate-PR → мерж ЧЕЛОВЕКОМ (это и есть акт; make human-merge ARGS='<repo> <pr>' — тот же акт командой) → повтор той же команды дописывает подпись финализирующим PR-ом и по умолчанию сам его мержит агентом (ADR-ECO-011 D5; человеческий мерж finalize — настройка 'Мерж: человек' в CLAUDE.md цели). Единственная дорога узла в approved (§I12); порядок — топологический, доставка одобренность только проверяет"
 	@echo "  make behaviour-tasks ARGS='--run-id … --legacy-bundle=3' — точный состав charter+requirements+behaviour-spec, без design/acceptance/decomposition (WS-SMOKE-001, non-conformant против team-exp); =4 — + design, без acceptance/decomposition; =5 — + decomposition, без acceptance (бандл до раскатки acceptance-узла, decomposition пинует только design); без флага — полный DAG (+ acceptance, decomposition пинует design и acceptance); состав каталога обязан совпасть РОВНО"
 	@echo "  make accept-pr ARGS='--repo <r> --pr <n>' — приёмка integration-PR spec-runner: ревью → чеки → DarkFactory-мерж"
 	@echo "  make preflight ARGS='--repo <r>' — преflight перед прогоном spec-runner: конфиг-эталон / insteadOf / state-DB / live-smoke"
@@ -96,4 +96,5 @@ spec-loop: ; @uv run --frozen --group governance python -m governance.spec_loop 
 behaviour-console: ; @uv run --frozen --group governance python -m governance.console $(ARGS)
 behaviour-tasks: ; @uv run --frozen --group governance python -m governance.task_bridge $(ARGS)
 accept-pr: ; @uv run --frozen python -m governance.accept_pr $(ARGS)
+human-merge: ; @sh ./human-merge.sh $(ARGS)
 preflight: ; @uv run --frozen python ./spec_run_preflight.py $(ARGS)

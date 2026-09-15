@@ -40,18 +40,43 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from governance import approval_facts as af
 from governance import approval_ledger as al
-from governance import bundle_dag
-from governance import bundle_inputs
+from governance import bundle_dag, bundle_inputs
 from governance import node_approval as na
 from governance.approval_facts import Disposition, Outcome
 from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.ops import Ops
+from governance.policy_sources import build_authority, load_safety
 from governance.run_state import RunState
+
+
+def finalize_merge_policy(target_dir: str) -> tuple[str, str]:
+    """Кто мержит финализирующий PR: `agent` по умолчанию, `human` по
+    настройке (ADR-ECO-011 D5).
+
+    Оси те же, что у merge_gate, минус ревью: authority — экосистема и
+    репо (`Мерж: человек` в CLAUDE.md цели); объявление прогона
+    `merge_authority` сюда НЕ входит — оно про мержи результата прогона
+    (S7), и `make spec-loop` объявляет `human` жёстко. Safety — срез
+    steward-политики: агентский мерж разрешён и ai-prosto — агент; любой
+    `unknown` читается как human (fail-closed). Ревью-вердикт не
+    требуется: конверт — три поля, и приёмка заявки сверяет их байт в байт.
+    """
+    authority = build_authority(Path(target_dir), None)
+    if authority.effective() != "agent":
+        return "human", "политика authority (экосистема/репо) — человек"
+    safety = load_safety()
+    if safety.agent_merge_allowed is not True:
+        return "human", "safety steward: агентский мерж не разрешён/unknown"
+    if safety.actor_class != "agent":
+        return "human", f"safety steward: ai-prosto — {safety.actor_class}"
+    return "agent", "ADR-ECO-011 D5: finalize мержит агент"
+
 
 #: Машинная метка обоих approval-PR. Вешается В САМОМ вызове создания PR
 #: (`ops.create_pr`), а не отдельным шагом после: PR без метки означал бы,
@@ -1117,6 +1142,7 @@ def _adopt_or_create_pr(
     head_sha: str,
     title: str,
     body: str,
+    label: str = HUMAN_MERGE_LABEL,
 ) -> int:
     """PR на ветке: усыновить свой (по head) либо создать; иначе отказ.
 
@@ -1140,7 +1166,7 @@ def _adopt_or_create_pr(
             branch,
             title,
             body,
-            HUMAN_MERGE_LABEL,
+            label,
         )
     pr = int(found.value or 0)
     head = _pr_facts(state, ops, pr).get("headRefOid")
@@ -1434,6 +1460,23 @@ def _reconcile_finalize(
     pr = op["finalize_pr"]
     where = _disposition(_pr_facts(state, ops, pr), pr)
     if where is Disposition.OPEN:
+        # По агентской политике открытый finalize — не «ждём человека», а
+        # повтор агентского мержа (ревью #233): прошлый заход мог упасть на
+        # транзиентном UNKNOWN форджи или сети. Гейт формы и пин головы
+        # делают повтор безопасным; лейбл человеку обвязка чтит сама.
+        head = op.get("finalize_head_sha")
+        if head is not None and finalize_merge_policy(state.target_dir)[0] == "agent":
+            reason = _try_agent_merge(
+                state, ops, dag, op, list(op["nodes"]), pr, str(head)
+            )
+            if reason is None:
+                return _reconcile_finalize(state, ops, dag, op, key)
+            return ApprovalOutcome(
+                f"финализирующий PR #{pr} открыт: {reason} "
+                f"(`make human-merge`). Заявка {key} жива всегда, пока он "
+                "открыт",
+                request=key,
+            )
         return ApprovalOutcome(
             f"финализирующий PR #{pr} открыт — ждём мержа. Заявка {key} "
             "жива всегда, пока он открыт",
@@ -1719,25 +1762,167 @@ def _publish_envelope(
             _rel(state, _filename(dag, node)) for node in nodes
         ]
     ops.push_branch(state.target_dir, branch)
+    # ADR-ECO-011 D5: финализирующий PR подписи не создаёт — по умолчанию
+    # его мержит агент в этом же вызове; лейбл «человеку» — только по
+    # human-политике (тогда обвязка отказывает по лейблу, как раньше).
+    who, why = finalize_merge_policy(state.target_dir)
+    finalize_head = str(state.ops[key]["finalize_head_sha"])
     pr = _adopt_or_create_pr(
         state,
         ops,
         branch,
-        str(state.ops[key]["finalize_head_sha"]),
+        finalize_head,
         f"spec: {state.ws_id} — подпись узлов {', '.join(nodes)} (§I12, "
         "конверт)",
         _finalize_body(state, state.ops[key], nodes),
+        HUMAN_MERGE_LABEL if who == "human" else "",
     )
     al.record_finalize_pr(state, key, pr)
+    if who == "agent":
+        # Гейт вместо ревью: мержится ТОЛЬКО коммит, который механика
+        # авторила сама (пин `finalize_head_sha` из леджера), и лишь если
+        # его дифф — ровно конверт. Ветка, лишь похожая на finalize, этим
+        # путём не мержится вовсе: для accept-pr/S7 она обычный PR с ревью.
+        # Отказ — не ошибка: PR остаётся человеку, заявка жива, следующий
+        # вызов пробует агентский мерж снова.
+        reason = _try_agent_merge(
+            state, ops, dag, op, nodes, pr, finalize_head
+        )
+        if reason is None:
+            return _reconcile_finalize(state, ops, dag, state.ops[key], key)
+        return ApprovalOutcome(
+            f"подпись узлов {', '.join(nodes)} вынесена финализирующим PR #{pr} "
+            f"(approved_by = {op['merged_by']}, approved_at = "
+            f"{op['merged_at']}); {reason}. PR остаётся человеку "
+            "(`make human-merge`), заявка жива",
+            request=key,
+            changed=tuple(changed),
+        )
     return ApprovalOutcome(
         f"подпись узлов {', '.join(nodes)} вынесена финализирующим PR #{pr} "
         f"(approved_by = {op['merged_by']}, approved_at = "
         f"{op['merged_at']}). Мержит его учётка из "
-        f"{af.APPROVER_ALLOWLIST_ENV}; источником подписи он НЕ является — "
-        "подпись сформирована фактами мержа candidate-PR",
+        f"{af.APPROVER_ALLOWLIST_ENV} — человек ({why}; `make human-merge`); "
+        "источником подписи он НЕ является — подпись сформирована фактами "
+        "мержа candidate-PR",
         request=key,
         changed=tuple(changed),
     )
+
+
+_ENVELOPE_KEYS = ("status", "approved_by", "approved_at")
+#: Агентский мерж finalize: форджа считает mergeability асинхронно, и сразу
+#: после создания PR обвязка видит UNKNOWN — «факт не установлен», код 2
+#: (как сеть/неразобранные факты); только он транзиентен: попытка
+#: повторяется с паузой в том же вызове, а открытый finalize пробуется
+#: снова следующим вызовом. Код 3 — гвард (лейбл, форма, authority-root):
+#: повтор не поможет; 4 — форджа отклонила. `_SLEEP` — точка подмены.
+_MERGE_ATTEMPTS = 3
+_MERGE_RETRY_DELAY = 2.0
+_TRANSIENT_MERGE_CODES = frozenset({2})
+_MERGE_CODE_HINTS = {
+    2: "факт не установлен или сеть — повторный вызов пробует снова",
+    3: "гвард обвязки — мержит человек, повтор не поможет",
+    4: "форджа отклонила мерж — мержит человек",
+}
+_SLEEP = time.sleep
+
+
+def _try_agent_merge(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    op: dict,
+    nodes: list[str],
+    pr: int,
+    head: str,
+) -> str | None:
+    """Агентский мерж finalize: None — вмержен; иначе причина, по которой
+    PR остаётся человеку. Идемпотентно: гейт формы читает коммит, голова
+    пинована — повторный вызов `--approve-node` пробует снова (ревью #233).
+    """
+    # `^{commit}` обязателен: голый 40-hex `rev-parse --verify` принимает
+    # синтаксически, не проверяя, что объект есть в клоне.
+    if ops.rev_parse(state.target_dir, f"{head}^{{commit}}") is None:
+        # Клон мог быть пересоздан при живом леджере: объект конверта
+        # подтягивается веткой заявки, как на пути возобновления публикации,
+        # а не выдаётся за дефект формы (ревью #233).
+        ops.fetch_branch(state.target_dir, op["finalize_branch"])
+        if ops.rev_parse(state.target_dir, f"{head}^{{commit}}") is None:
+            return (
+                f"коммит конверта {head[:8]} недоступен в клоне. Процедура: "
+                f"подтяните ветку заявки (git fetch origin "
+                f"{op['finalize_branch']}) и повторите вызов"
+            )
+    defect = _envelope_form_defect(state, ops, dag, op, nodes, head)
+    if defect is not None:
+        return f"агентский мерж НЕ выполнен — {defect}"
+    # База не пинуется намеренно: PR создан от текущей base, а сверка с
+    # baseRefOid GitHub ложно отказывает после любого соседнего мержа
+    # (devtools#223).
+    code = 0
+    for attempt in range(_MERGE_ATTEMPTS):
+        code = ops.merge(state.repo, pr, head, None)
+        if code == 0:
+            return None
+        if code not in _TRANSIENT_MERGE_CODES or attempt == _MERGE_ATTEMPTS - 1:
+            break
+        _SLEEP(_MERGE_RETRY_DELAY)
+    hint = _MERGE_CODE_HINTS.get(code, "мержит человек")
+    return f"агентский мерж отказал кодом {code}: {hint}"
+
+
+def _strip_envelope(meta: dict) -> dict:
+    return {k: v for k, v in meta.items() if k not in _ENVELOPE_KEYS}
+
+
+def _envelope_form_defect(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    op: dict,
+    nodes: list[str],
+    head: str,
+) -> str | None:
+    """Дифф finalize-коммита относительно родителя — ровно конверт?
+
+    Ровно файлы узлов заявки; в каждом — только три поля конверта, и их
+    значения — записанная подпись (`approval_pending → approved`,
+    `merged_by`/`merged_at` из леджера); тело и остальной frontmatter —
+    байт в байт. Это и есть пред-мержевая проверка формы, которой
+    ADR-ECO-011 D5 заменяет ревью-вердикт; любое расхождение — строка
+    причины, мерж не выполняется.
+    """
+    expected = {_rel(state, _filename(dag, node)) for node in nodes}
+    touched = ops.commit_files(state.target_dir, head)
+    if touched is None:
+        return f"коммит конверта {head[:12]} не читается"
+    if set(touched) != expected:
+        return (
+            f"коммит конверта трогает {sorted(touched)}, ожидались "
+            f"ровно {sorted(expected)}"
+        )
+    for path in sorted(expected):
+        before = ops.show_file(state.target_dir, f"{head}~1", path)
+        after = ops.show_file(state.target_dir, head, path)
+        if before is None or after is None:
+            return f"{path}: версии до/после конверта не читаются"
+        meta_b, body_b = split_frontmatter(before)
+        meta_a, body_a = split_frontmatter(after)
+        if body_a != body_b:
+            return f"{path}: конверт трогает тело узла"
+        if _strip_envelope(meta_a) != _strip_envelope(meta_b):
+            return f"{path}: конверт трогает поля вне {list(_ENVELOPE_KEYS)}"
+        if meta_b.get("status") != na.STATUS_APPROVAL_PENDING:
+            return f"{path}: до конверта статус {meta_b.get('status')!r}"
+        signed = (
+            meta_a.get("status"),
+            meta_a.get("approved_by"),
+            meta_a.get("approved_at"),
+        )
+        if signed != (na.STATUS_APPROVED, op["merged_by"], op["merged_at"]):
+            return f"{path}: конверт {signed} не равен записи заявки"
+    return None
 
 
 def _finalize_body(state: RunState, op: dict, nodes: list[str]) -> str:

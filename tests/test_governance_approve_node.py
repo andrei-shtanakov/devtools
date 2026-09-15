@@ -28,6 +28,7 @@ from governance import approval_ledger as al
 from governance import approve_node as an
 from governance import bundle_dag
 from governance import bundle_inputs
+from governance import merge_gate as mg
 from governance import node_approval as na
 from governance import run_state as rs
 from governance.frontmatter import join_frontmatter, split_frontmatter
@@ -39,6 +40,7 @@ SLUG = "owner/alpha"
 HUMAN = "andrei-shtanakov"
 AGENT = "ai-prosto"
 MERGED_AT = "2026-09-10T08:00:00Z"
+AGENT_MERGED_AT = "2026-09-10T08:05:00Z"
 
 #: Активный DAG стенда — тот же, что у моста; списываем его состав, а не
 #: переопределяем: разойдясь, тест проверял бы другой граф.
@@ -100,6 +102,17 @@ class Forge:
     mute: set[str] = field(default_factory=set)
     #: `close_pr` не подтверждает закрытие (нет прав либо уже закрыт — #177).
     close_confirms: bool = True
+    #: Клон, которым исполняются мержи (и человеческие, и агентские).
+    merger: Path | None = None
+    #: Код обвязки `merge-pr.sh` для агентского мержа finalize (ADR-ECO-011
+    #: D5): 0 — мерж исполняется от ai-prosto; иное — «обвязка отказала»,
+    #: PR остаётся человеку.
+    agent_merge_rc: int = 0
+    #: Очередь кодов на ближайшие вызовы `merge` (транзиентные отказы):
+    #: исчерпана — действует `agent_merge_rc`.
+    agent_merge_rc_seq: list[int] = field(default_factory=list)
+    #: Журнал вызовов `Ops.merge`: (pr, пин головы).
+    merge_calls: list[tuple[int, str]] = field(default_factory=list)
 
     def head_of(self, branch: str) -> str | None:
         done = subprocess.run(
@@ -173,6 +186,32 @@ class Ops(RealOps):
         )
         return done.returncode == 0
 
+    def merge(
+        self, repo_name: str, pr: int, sha: str, base: str | None = None
+    ) -> int:
+        """Агентский мерж — зеркало гвардов `merge-pr.sh`, не сети.
+
+        Лейбл `human-merge-required` и уехавшая голова отказывают так же,
+        как обвязка (коды 3 и 2); `agent_merge_rc` моделирует любой иной
+        отказ. Успех — настоящий merge-коммит в origin от ai-prosto:
+        реконсиляция сверяет байты base, а не ответ форджи.
+        """
+        self.forge.merge_calls.append((pr, sha))
+        rec = self.forge.prs[pr]
+        if rec["label"] == an.HUMAN_MERGE_LABEL:
+            return 3
+        if self.forge.head_of(rec["branch"]) != sha:
+            return 2
+        rc = (
+            self.forge.agent_merge_rc_seq.pop(0)
+            if self.forge.agent_merge_rc_seq
+            else self.forge.agent_merge_rc
+        )
+        if rc != 0:
+            return rc
+        _merge_into_origin(self.forge, pr, login=AGENT, when=AGENT_MERGED_AT)
+        return 0
+
 
 @dataclass
 class World:
@@ -198,6 +237,7 @@ class World:
 def world(tmp_path: Path, monkeypatch) -> World:
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, HUMAN)
+    monkeypatch.setattr(an, "_SLEEP", lambda seconds: None)
     origin = tmp_path / "origin.git"
     subprocess.run(
         ["git", "init", "-q", "--bare", "-b", "master", str(origin)], check=True
@@ -224,7 +264,7 @@ def world(tmp_path: Path, monkeypatch) -> World:
         _git(clone, "config", "user.email", "t@e.st")
         _git(clone, "config", "user.name", "test")
 
-    forge = Forge(origin=origin)
+    forge = Forge(origin=origin, merger=human)
     state = rs.new_run(
         subject="одобрение узлов",
         repo="alpha",
@@ -244,16 +284,23 @@ def merge_pr(
     world: World, pr: int, *, login: str = HUMAN, when: str = MERGED_AT
 ) -> str:
     """Человек мержит PR: настоящий merge-коммит уезжает в origin."""
-    rec = world.forge.prs[pr]
-    _git(world.human, "fetch", "-q", "origin")
-    _git(world.human, "switch", "-q", "master")
-    _git(world.human, "reset", "-q", "--hard", "origin/master")
+    return _merge_into_origin(world.forge, pr, login=login, when=when)
+
+
+def _merge_into_origin(forge: Forge, pr: int, *, login: str, when: str) -> str:
+    rec = forge.prs[pr]
+    assert rec["state"] == "OPEN", f"PR #{pr} уже {rec['state']}"
+    clone = forge.merger
+    assert clone is not None
+    _git(clone, "fetch", "-q", "origin")
+    _git(clone, "switch", "-q", "master")
+    _git(clone, "reset", "-q", "--hard", "origin/master")
     _git(
-        world.human, "merge", "-q", "--no-ff", f"origin/{rec['branch']}",
+        clone, "merge", "-q", "--no-ff", f"origin/{rec['branch']}",
         "-m", f"Merge pull request #{pr}",
     )
-    sha = _git(world.human, "rev-parse", "HEAD")
-    _git(world.human, "push", "-q", "origin", "master")
+    sha = _git(clone, "rev-parse", "HEAD")
+    _git(clone, "push", "-q", "origin", "master")
     rec.update(
         state="MERGED",
         mergedBy={"login": login},
@@ -288,10 +335,29 @@ def drive_to_approved(
     assert first.request is not None
     candidate = world.state.ops[first.request]["candidate_pr"]
     merge_pr(world, candidate, login=login)
+    # Второй вызов выносит конверт И мержит его агентом (ADR-ECO-011 D5):
+    # заявка завершена тем же вызовом, третьего не нужно.
     approve(world, node, legacy_bundle=legacy_bundle)
-    finalize = world.state.ops[first.request]["finalize_pr"]
-    merge_pr(world, finalize, login=login)
-    approve(world, node, legacy_bundle=legacy_bundle)
+    assert world.state.ops[first.request]["status"] == al.STATUS_COMPLETED
+
+
+def declare_human_merge(world: World) -> None:
+    """Репо-политика «Мерж: человек» (CLAUDE.md цели): finalize ждёт человека.
+
+    Не «отказ обвязки», а настройка — та самая, которой ADR-ECO-011 D5
+    оставляет человеческий мерж finalize. Файл едет в base через origin
+    (untracked он делал бы target грязным — механика отказывает до старта).
+    """
+    _git(world.human, "fetch", "-q", "origin")
+    _git(world.human, "switch", "-q", "master")
+    _git(world.human, "reset", "-q", "--hard", "origin/master")
+    (world.human / "CLAUDE.md").write_text(
+        "# alpha\n\n- Мерж: человек\n", encoding="utf-8"
+    )
+    _git(world.human, "add", "CLAUDE.md")
+    _git(world.human, "commit", "-qm", "policy: Мерж: человек")
+    _git(world.human, "push", "-q", "origin", "master")
+    world.sync()
 
 
 def only_request(world: World) -> tuple[str, dict]:
@@ -384,10 +450,7 @@ def test_brief_source_pin_survives_candidate_and_finalize(world: World) -> None:
     }
 
     merge_pr(world, op["candidate_pr"])
-    approve(world, "charter")
-    op = world.state.ops[first.request]
-    merge_pr(world, op["finalize_pr"])
-    approve(world, "charter")
+    approve(world, "charter")   # конверт + агентский мерж finalize
     world.sync()
 
     assert world.base_meta("00-charter.md")["upstream_hashes"] == {
@@ -556,9 +619,7 @@ def test_two_nodes_of_one_level_share_one_candidate(world: World) -> None:
         )
         assert meta["status"] == na.STATUS_APPROVAL_PENDING, fname
     merge_pr(world, op["candidate_pr"])
-    approve(world, "design")
-    merge_pr(world, world.state.ops[key]["finalize_pr"])
-    approve(world, "design")
+    approve(world, "design")   # конверт + агентский мерж finalize
     world.sync()
     for node, fname in (("design", "20-design.md"), ("acceptance", "25-acceptance.md")):
         assert na.node_debt(
@@ -620,12 +681,10 @@ def test_merged_candidate_is_not_joined_but_starts_a_new_attempt(
 
     # И обе доводятся до конца: акт над design не сгорел.
     approve(world, "design")
-    merge_pr(world, world.state.ops[design_key]["finalize_pr"])
-    approve(world, "design")
+    assert world.state.ops[design_key]["status"] == al.STATUS_COMPLETED
     merge_pr(world, acceptance_op["candidate_pr"])
     approve(world, "acceptance")
-    merge_pr(world, world.state.ops[acceptance_key]["finalize_pr"])
-    approve(world, "acceptance")
+    assert world.state.ops[acceptance_key]["status"] == al.STATUS_COMPLETED
     world.sync()
     upstreams = {
         "requirements": _blob(world, "10-requirements.md"),
@@ -704,9 +763,7 @@ def test_resume_republishes_a_joined_node_that_never_reached_the_pr(
 
     # Выход есть и он обычный: заявка доводится до конца обоими узлами.
     merge_pr(world, pr)
-    approve(world, "design")
-    merge_pr(world, world.state.ops[key]["finalize_pr"])
-    approve(world, "design")
+    approve(world, "design")   # конверт + агентский мерж finalize
     world.sync()
     assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
     upstreams = {
@@ -755,6 +812,7 @@ def test_completed_needs_the_envelope_in_base_not_a_merged_pr(
     world: World,
 ) -> None:
     """Состояние PR — не конверт: `completed` пишется по БАЙТАМ в base."""
+    declare_human_merge(world)
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
@@ -802,9 +860,7 @@ def test_join_to_a_request_without_a_commit_carries_both_nodes(
     for fname in ("20-design.md", "25-acceptance.md"):
         assert fname in published, f"{fname} не вынесен"
     merge_pr(world, joined["candidate_pr"])
-    approve(world, "design")
-    merge_pr(world, world.state.ops[key]["finalize_pr"])
-    approve(world, "design")
+    approve(world, "design")   # конверт + агентский мерж finalize
     world.sync()
     upstreams = {
         "requirements": _blob(world, "10-requirements.md"),
@@ -910,6 +966,7 @@ def test_pending_upstream_diagnostics_names_the_awaited_pr(
     утверждал про открытый PR то, чего в стенде уже не было.
     """
     drive_to_approved(world, "charter")
+    declare_human_merge(world)
     approve(world, "requirements")
     key, op = _request_over(world, "requirements")
     if stage == "candidate":
@@ -1208,6 +1265,7 @@ def test_crash_between_merge_and_finalize_resumes_the_same_request(
     world: World,
 ) -> None:
     """Вмерженный candidate заявку не закрывает: следующий шаг — финализация."""
+    declare_human_merge(world)
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
@@ -1223,6 +1281,7 @@ def test_crash_between_merge_and_finalize_resumes_the_same_request(
 def test_finalize_pr_is_adopted_by_its_own_head(world: World) -> None:
     """У конверта свой коммит и свой записанный head — одно поле не может
     назвать два разных коммита."""
+    declare_human_merge(world)
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
@@ -1247,8 +1306,8 @@ def test_finalize_writes_only_the_envelope(world: World) -> None:
     merge_pr(world, op["candidate_pr"])
     world.sync()  # снимок берётся с ФАКТИЧЕСКОГО base, а не с протухшего клона
     before = split_frontmatter(world.base_text("10-requirements.md"))
-    approve(world, "requirements")
-    merge_pr(world, world.state.ops[key]["finalize_pr"])
+    approve(world, "requirements")   # конверт + агентский мерж finalize
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
     world.sync()
     after_text = world.base_text("10-requirements.md")
     after_meta, after_body = split_frontmatter(after_text)
@@ -1403,6 +1462,7 @@ def test_merge_identity_diverged_on_resume_invalidates(
     только логин, подменённый merge-коммит прошёл бы насквозь, а именно он
     отвечает на вопрос «тот ли это акт».
     """
+    declare_human_merge(world)
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
@@ -1446,6 +1506,7 @@ def test_self_hash_field_tampered_after_the_merge_invalidates(
 
 
 def test_closed_finalize_pr_invalidates(world: World) -> None:
+    declare_human_merge(world)
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
@@ -1521,6 +1582,7 @@ def test_policy_change_does_not_reauthorize_the_past(
     классифицированная раньше, обязана дойти: иначе правка конфигурации
     убивала бы прошлое, а ровно от этого §I12 сделал решение записанным.
     """
+    declare_human_merge(world)
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
@@ -1562,6 +1624,7 @@ def test_broken_authorization_record_is_not_accepted(
     потому, что решение записано и ПРОВЕРЯЕМО; каждая из трёх поломок
     делает его непроверяемым по-своему, и ни одна не должна проходить.
     """
+    declare_human_merge(world)
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
@@ -1958,8 +2021,7 @@ def test_invalidated_request_recovers_end_to_end(world: World) -> None:
     assert live["branch"] != dead["branch"]
 
     merge_pr(world, live["candidate_pr"])
-    approve(world, "charter")
-    merge_pr(world, world.state.ops[live_key]["finalize_pr"])
+    approve(world, "charter")   # конверт + агентский мерж finalize
     outcome = approve(world, "charter")
     world.sync()
 
@@ -2283,3 +2345,231 @@ def test_the_proposal_path_does_resolve_it() -> None:
         _calls_reachable_from("_propose") | _calls_reachable_from("approve_node")
         | {"read_dag_state"}
     )
+
+
+# --- ADR-ECO-011 D5: finalize мержит агент по умолчанию ------------------
+
+
+def test_finalize_is_merged_by_agent_in_the_same_call(world: World) -> None:
+    """Дефолт D5: второй вызов выносит конверт, мержит его от ai-prosto и
+    завершает заявку; подпись в base — от мержера candidate, не finalize."""
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    outcome = approve(world, "charter")
+    rec = world.state.ops[key]
+    finalize = world.forge.prs[rec["finalize_pr"]]
+    assert finalize["label"] == "", "лейбл человеку по дефолту не ставится"
+    assert finalize["state"] == "MERGED"
+    assert finalize["mergedBy"] == {"login": AGENT}
+    assert world.forge.merge_calls == [
+        (rec["finalize_pr"], rec["finalize_head_sha"])
+    ], "мерж — с пином головы конверта"
+    assert rec["status"] == al.STATUS_COMPLETED
+    assert "завершена" in outcome.message
+    world.sync()
+    meta = world.base_meta("00-charter.md")
+    assert meta["status"] == na.STATUS_APPROVED
+    assert meta["approved_by"] == HUMAN
+    assert meta["approved_at"] == MERGED_AT
+
+
+def test_repo_human_policy_labels_finalize_and_waits(world: World) -> None:
+    """«Мерж: человек» в CLAUDE.md цели — лейбл, ни одного вызова мержа,
+    заявка ждёт; человеческий мерж завершает её следующим вызовом."""
+    declare_human_merge(world)
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    outcome = approve(world, "charter")
+    finalize_pr = world.state.ops[key]["finalize_pr"]
+    assert world.forge.prs[finalize_pr]["label"] == an.HUMAN_MERGE_LABEL
+    assert world.forge.prs[finalize_pr]["state"] == "OPEN"
+    assert world.forge.merge_calls == []
+    assert "Мержит его учётка" in outcome.message
+    assert "человек" in outcome.message
+    assert "ждём мержа" in approve(world, "charter").message
+    merge_pr(world, finalize_pr)
+    approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+
+
+def test_safety_unknown_routes_finalize_to_human(world: World, monkeypatch) -> None:
+    """Ось safety (срез steward) читается fail-closed: unknown = человек."""
+    monkeypatch.setattr(
+        an, "load_safety",
+        lambda: mg.Safety(agent_merge_allowed=None, actor_class="unknown"),
+    )
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+    finalize_pr = world.state.ops[key]["finalize_pr"]
+    assert world.forge.prs[finalize_pr]["label"] == an.HUMAN_MERGE_LABEL
+    assert world.forge.merge_calls == []
+    assert al.is_live(world.state.ops[key])
+
+
+def test_agent_merge_refusal_leaves_finalize_to_human(world: World) -> None:
+    """Отказ обвязки — не ошибка: PR без лейбла остаётся человеку, заявка
+    жива; повторный вызов пробует агентский мерж снова (ревью #233), а
+    человеческий мерж завершает заявку."""
+    world.forge.agent_merge_rc = 4          # форджа отклонила — не транзиент
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    outcome = approve(world, "charter")
+    finalize_pr = world.state.ops[key]["finalize_pr"]
+    assert world.forge.prs[finalize_pr]["state"] == "OPEN"
+    assert world.forge.prs[finalize_pr]["label"] == ""
+    assert len(world.forge.merge_calls) == 1, "код 4 не повторяется"
+    assert "отказал кодом 4" in outcome.message
+    assert "human-merge" in outcome.message
+    assert al.is_live(world.state.ops[key])
+    again = approve(world, "charter")
+    assert len(world.forge.merge_calls) == 2, "повтор пробует мерж снова"
+    assert "отказал кодом 4" in again.message
+    merge_pr(world, finalize_pr)
+    approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+
+
+def test_transient_refusal_is_retried_within_the_call(world: World) -> None:
+    """UNKNOWN у форджи / сеть (код 2) — транзиент: повтор с паузой в том же
+    вызове, мерж состоялся, заявка завершена."""
+    world.forge.agent_merge_rc_seq = [2, 2, 0]
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+    assert len(world.forge.merge_calls) == 3
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+    assert world.forge.prs[world.state.ops[key]["finalize_pr"]]["mergedBy"] == {
+        "login": AGENT
+    }
+
+
+def test_open_finalize_is_merged_by_agent_on_repeat_call(world: World) -> None:
+    """Прошлый заход исчерпал попытки — следующий вызов мержит сам, без
+    человека: дефолт D5 не деградирует до человеческого мержа."""
+    world.forge.agent_merge_rc_seq = [2, 2, 2]
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    first = approve(world, "charter")
+    assert "отказал кодом 2" in first.message
+    assert "повторный вызов пробует снова" in first.message
+    assert al.is_live(world.state.ops[key])
+    second = approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+    assert "завершена" in second.message
+    assert len(world.forge.merge_calls) == 4
+
+
+def test_guard_code_is_not_retried_and_not_promised(world: World) -> None:
+    """Код 3 — гвард обвязки: одна попытка, без паузы, диагностика не обещает
+    успешный повтор (ревью #233)."""
+    world.forge.agent_merge_rc = 3
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    outcome = approve(world, "charter")
+    assert len(world.forge.merge_calls) == 1
+    assert "отказал кодом 3" in outcome.message
+    assert "повтор не поможет" in outcome.message
+    assert "пробует снова" not in outcome.message
+    assert al.is_live(world.state.ops[key])
+
+
+def test_repeat_call_restores_missing_envelope_object_by_fetch(
+    world: World,
+) -> None:
+    """Клон пересоздан при живом леджере: объект конверта подтягивается
+    веткой заявки, гейт формы читает его и агент мержит (ревью #233)."""
+    world.forge.agent_merge_rc_seq = [2, 2, 2]
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+    rec = world.state.ops[key]
+    _git(world.target, "switch", "-q", "master")
+    _git(world.target, "branch", "-q", "-D", rec["finalize_branch"])
+    _git(
+        world.target, "update-ref", "-d",
+        f"refs/remotes/origin/{rec['finalize_branch']}",
+    )
+    _git(world.target, "reflog", "expire", "--expire=now", "--all")
+    _git(world.target, "gc", "-q", "--prune=now")
+    gone = f"{rec['finalize_head_sha']}^{{commit}}"   # голый sha не проверяет объект
+    assert world.ops.rev_parse(str(world.target), gone) is None
+    approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+
+
+def test_finalize_merge_policy_axes(tmp_path: Path, monkeypatch) -> None:
+    """Дефолт agent; репо «Мерж: человек» — human; safety не-agent — human;
+    объявление прогона (`merge_authority`) на finalize НЕ влияет."""
+    assert an.finalize_merge_policy(str(tmp_path))[0] == "agent"
+    monkeypatch.setattr(
+        an, "load_safety",
+        lambda: mg.Safety(agent_merge_allowed=False, actor_class="agent"),
+    )
+    who, why = an.finalize_merge_policy(str(tmp_path))
+    assert (who, "safety" in why) == ("human", True)
+    monkeypatch.setattr(
+        an, "load_safety",
+        lambda: mg.Safety(agent_merge_allowed=True, actor_class="human"),
+    )
+    assert an.finalize_merge_policy(str(tmp_path))[0] == "human"
+    monkeypatch.undo()
+    (tmp_path / "CLAUDE.md").write_text("Мерж: человек\n", encoding="utf-8")
+    who, why = an.finalize_merge_policy(str(tmp_path))
+    assert (who, "authority" in why) == ("human", True)
+
+
+def test_malformed_envelope_is_not_merged_by_agent(world: World, monkeypatch) -> None:
+    """Подсадка: конверт, тронувший тело узла, агент НЕ мержит — гейт формы
+    дифа стоит до `ops.merge`, PR остаётся человеку, заявка жива."""
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    real_join = an.join_frontmatter
+    monkeypatch.setattr(
+        an, "join_frontmatter",
+        lambda meta, body: real_join(meta, body + "лишняя строка\n"),
+    )
+    outcome = approve(world, "charter")
+    finalize_pr = world.state.ops[key]["finalize_pr"]
+    assert world.forge.merge_calls == []
+    assert world.forge.prs[finalize_pr]["state"] == "OPEN"
+    assert "трогает тело узла" in outcome.message
+    assert "НЕ выполнен" in outcome.message
+    assert al.is_live(world.state.ops[key])
+
+
+def test_envelope_form_defect_names_each_deviation(world: World) -> None:
+    """Единичная проверка формы: чужая подпись, лишний файл, нечитаемый sha."""
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    world.forge.agent_merge_rc = 4          # конверт остаётся веткой
+    approve(world, "charter")
+    rec = world.state.ops[key]
+    head = rec["finalize_head_sha"]
+    dag = bundle_dag.BUNDLE_DAG
+    assert an._envelope_form_defect(
+        world.state, world.ops, dag, rec, ["charter"], head
+    ) is None
+    wrong_sig = dict(rec, merged_by="someone-else")
+    defect = an._envelope_form_defect(
+        world.state, world.ops, dag, wrong_sig, ["charter"], head
+    )
+    assert defect is not None and "не равен записи заявки" in defect
+    defect = an._envelope_form_defect(
+        world.state, world.ops, dag, rec, ["charter", "requirements"], head
+    )
+    assert defect is not None and "ожидались ровно" in defect
+    defect = an._envelope_form_defect(
+        world.state, world.ops, dag, rec, ["charter"], "0" * 40
+    )
+    assert defect is not None and "не читается" in defect
