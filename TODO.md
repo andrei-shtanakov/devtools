@@ -1372,6 +1372,16 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   без снятых утверждений, author-промпт запинован на словари класса и
   санкции, оба соседских зонда требуют явного opt-in и имеют hard timeout.
 
+- [ ] Пин базы вердикта: `merge-pr.sh --expect-base` сверять с живой верхушкой `origin/<base>` (`git/ref/heads`), а не с `baseRefOid` — снимком базы PR у форджи, который не двигается без update-branch (ложный отказ «база уехала» на живой приёмке E1, spec-runner#512, три круга подряд); диагностика `accept_pr` на коде 5 тоже переходит на живую верхушку; после этого повтор приёмки при неподвижном merge-base наследует вердикт по `head + fp` бесплатно (уже есть в review-pr.sh) — автоматический повтор (D2) заводится только по живому наблюдению гонки; auto-update-branch не вводится @owner:github:andrei-shtanakov @id:merge-base-live-tip-fp-reconcile
+      Источник: devtools#223. Дизайн — `docs/superpowers/specs/2026-09-15-merge-base-live-tip-design.md`
+      (D1 предикат, D2 реконсиляция по fp, D3 без update-branch); решения
+      владельца — §6 спеки. D1 правит `merge-pr.sh` (харнесс-путь и
+      authority-root): ревью из доверенного дерева, мерж человеком; D2 —
+      обычный путь. Приёмка: подсадка `baseRefOid ≠ live tip` (мерж проходит) и
+      `baseRefOid == base0` при уехавшей верхушке (диагностика кода 5),
+      живой сценарий двух параллельных PR без update-branch и без второго
+      ревью.
+
 ## План развития пайплайна «интервью → реализация» — принят 2026-09-13
 
 > Источник: prograph-vault `authored/notes/2026-09-13-pipeline-interview-to-implementation-plan.md`
