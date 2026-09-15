@@ -55,6 +55,7 @@ case "$*" in
     printf '%s\\n' "${GH_STUB_BASEOID-$GH_STUB_DEFAULT_BASE}"
     printf '%s\\n' "${GH_STUB_MERGESTATE-CLEAN}"
     printf '%s\\n' "${GH_STUB_CROSSREPO-false}"
+    printf '%s\\n' "${GH_STUB_BASEREF-master}"
     if [ -n "${GH_STUB_LABELS:-}" ]; then
       printf '%s\\n' "$GH_STUB_LABELS"
     fi ;;
@@ -87,6 +88,20 @@ case "$*" in
       body=$(printf '%s\\n' "${GH_STUB_FILES-lib/x.ex}" \
              | jq -R '{filename:.}' | jq -s '{files:.}')
     fi
+    filter=""; prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--jq" ]; then filter="$a"; fi
+      prev="$a"
+    done
+    printf '%s' "$body" | jq -r "$filter" ;;
+  *"/git/ref/heads/"*)
+    # Живая верхушка базы (devtools#223): `git/ref/heads/<base>` — то, что
+    # сверяет --expect-base; baseRefOid PR — лишь снимок форджи.
+    if [ -n "${GH_STUB_REF_FAIL:-}" ]; then
+      echo "gh: Not Found (HTTP 404)" >&2
+      exit 1
+    fi
+    body=$(printf '{"object":{"sha":"%s"}}' "${GH_STUB_LIVE_TIP-$GH_STUB_DEFAULT_BASE}")
     filter=""; prev=""
     for a in "$@"; do
       if [ "$prev" = "--jq" ]; then filter="$a"; fi
@@ -525,6 +540,48 @@ def test_expect_base_mismatch_does_not_merge(fleet: Fleet) -> None:
     assert fleet.merge_calls() == []
 
 
+def test_expect_base_compares_with_live_tip_not_pr_snapshot(fleet: Fleet) -> None:
+    """devtools#223: baseRefOid PR — снимок базы на момент открытия, GitHub его
+    не двигает при мержах в master. Пин базы вердикта сверяется с ЖИВОЙ
+    верхушкой origin/<base>; устаревший снимок мерж не блокирует."""
+    res = fleet.run(
+        "--expect-base", BASE_SHA,
+        GH_STUB_HEADREF="feat/ordinary",
+        GH_STUB_BASEOID="b" * 40,  # снимок форджи отстал от верхушки
+        GH_STUB_LIVE_TIP=BASE_SHA,
+    )
+    assert res.returncode == 0, res.stderr
+    assert BASE_SHA in res.stdout and "база пинована" in res.stdout
+    assert len(fleet.merge_calls()) == 1
+
+
+def test_expect_base_mismatch_with_live_tip_names_both(fleet: Fleet) -> None:
+    """Верхушка ушла вперёд после вердикта — отказ, даже если снимок форджи
+    совпадает с пином (baseRefOid не двигается без update-branch)."""
+    res = fleet.run(
+        "--expect-base", BASE_SHA,
+        GH_STUB_HEADREF="feat/ordinary",
+        GH_STUB_BASEOID=BASE_SHA,
+        GH_STUB_LIVE_TIP="a" * 40,
+    )
+    assert res.returncode == 5, res.stdout
+    assert "база уехала" in res.stderr
+    assert "a" * 40 in res.stderr and BASE_SHA in res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_live_tip_unavailable_does_not_merge(fleet: Fleet) -> None:
+    """Не прочитанная верхушка — не «совпала»: fail-closed, как у прочих фактов."""
+    res = fleet.run(
+        "--expect-base", BASE_SHA,
+        GH_STUB_HEADREF="feat/ordinary",
+        GH_STUB_REF_FAIL="1",
+    )
+    assert res.returncode == 2, res.stdout
+    assert "верхушк" in res.stderr
+    assert fleet.merge_calls() == []
+
+
 def test_expect_base_match_merges_and_says_so(fleet: Fleet) -> None:
     res = fleet.run("--expect-base", BASE_SHA, GH_STUB_HEADREF="feat/ordinary")
     assert res.returncode == 0, res.stderr
@@ -642,6 +699,24 @@ def test_diff_is_taken_between_two_pinned_shas(fleet: Fleet) -> None:
     assert len(compare) == 1
     assert f"compare/{BASE_SHA}...{HEAD_SHA}" in compare[0]
     assert "/files" not in fleet.gh_calls()
+
+
+def test_diff_is_taken_from_live_tip_not_pr_snapshot(fleet: Fleet) -> None:
+    """Compare гварда 4 идёт от ЖИВОЙ верхушки, не от baseRefOid (devtools#223,
+    ревью #235): three-dot compare — диф деревьев, от старого снимка откат
+    чужого post-fork коммита по authority-root пути невидим. Подсадка
+    разводит снимок и верхушку: адрес compare обязан назвать верхушку.
+    """
+    stale = "b" * 40
+    fleet.run(
+        GH_STUB_HEADREF="feat/ordinary",
+        GH_STUB_BASEOID=stale,
+        GH_STUB_LIVE_TIP=BASE_SHA,
+    )
+    compare = [ln for ln in fleet.gh_calls().splitlines() if "/compare/" in ln]
+    assert len(compare) == 1
+    assert f"compare/{BASE_SHA}...{HEAD_SHA}" in compare[0]
+    assert f"compare/{stale}" not in fleet.gh_calls()
 
 
 def test_truncated_file_list_does_not_merge(fleet: Fleet) -> None:

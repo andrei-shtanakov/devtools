@@ -1857,9 +1857,10 @@ def _try_agent_merge(
     defect = _envelope_form_defect(state, ops, dag, op, nodes, head)
     if defect is not None:
         return f"агентский мерж НЕ выполнен — {defect}"
-    # База не пинуется намеренно: PR создан от текущей base, а сверка с
-    # baseRefOid GitHub ложно отказывает после любого соседнего мержа
-    # (devtools#223).
+    # База не пинуется намеренно: у конверта заявки нет вердикта, от базы
+    # которого его можно было бы пиновать, — пин базы есть свойство
+    # вызывающего с вердиктом (accept-pr). Обвязка сверяет пин с живой
+    # верхушкой (devtools#223), но пиновать здесь по-прежнему нечего.
     code = 0
     for attempt in range(_MERGE_ATTEMPTS):
         code = ops.merge(state.repo, pr, head, None)

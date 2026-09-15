@@ -54,7 +54,11 @@
 # сверка базы остаётся TOCTOU, и вопрос лишь в том, насколько узок остаток.
 # Обвязка сама не знает, от какой базы вынесен вердикт (она приходит на PR
 # без истории), поэтому база пинуется вызывающим: `--expect-base <sha>`
-# сверяется с `baseRefOid`, и окно сужается до промежутка «сверка → мерж».
+# сверяется с ЖИВОЙ верхушкой `git/ref/heads/<base>`, и окно сужается до
+# промежутка «сверка → мерж». НЕ с `baseRefOid` PR: это снимок базы на
+# момент открытия PR или последнего update-branch, форджа его при мержах в
+# базу не пересчитывает — сверка с ним отказывала повторно на том же входе
+# (devtools#223), а совпадала лишь пока база не двигалась с открытия PR.
 # Без этого флага база НЕ проверяется, и обвязка об этом не молчит.
 # `mergeStateStatus` BEHIND/DIRTY отбивается сам по себе, но заменой
 # --expect-base не является: BEHIND сообщается лишь там, где защита ветки
@@ -106,7 +110,7 @@ usage() {
     echo "  --expect-head — голова, которую видел вызывающий; расхождение" >&2
     echo "    с фактической — отказ (мерж всё равно идёт с пином головы)" >&2
     echo "  --expect-base — база, ОТ КОТОРОЙ вынесен вердикт; расхождение" >&2
-    echo "    с baseRefOid — отказ (см. про базу в шапке скрипта)" >&2
+    echo "    с живой верхушкой origin/<base> — отказ (см. шапку скрипта)" >&2
     echo "  --dry-run — показать разрешённую команду мержа, не выполняя" >&2
     echo "  --print-globs — показать выведённые формы веток и выйти" >&2
 }
@@ -305,10 +309,11 @@ fi
 # перевода строки не содержит, а пробелы содержать может — поэтому строки,
 # а не одно поле).
 if ! pr_facts=$(gh_a pr view "$pr" --repo "$slug" \
-    --json headRefName,headRefOid,baseRefOid,mergeStateStatus,\
+    --json headRefName,headRefOid,baseRefOid,baseRefName,mergeStateStatus,\
 isCrossRepository,labels,state \
     --jq '.headRefName, .headRefOid, .state, .baseRefOid,
-          .mergeStateStatus, .isCrossRepository, (.labels[].name)' 2>&1); then
+          .mergeStateStatus, .isCrossRepository, .baseRefName,
+          (.labels[].name)' 2>&1); then
     die 2 "не удалось прочитать факты PR ${slug}#${pr}: $pr_facts"
 fi
 head_ref=$(printf '%s\n' "$pr_facts" | sed -n '1p')
@@ -317,18 +322,34 @@ state=$(printf '%s\n' "$pr_facts" | sed -n '3p')
 base_oid=$(printf '%s\n' "$pr_facts" | sed -n '4p')
 merge_state=$(printf '%s\n' "$pr_facts" | sed -n '5p')
 cross_repo=$(printf '%s\n' "$pr_facts" | sed -n '6p')
-labels=$(printf '%s\n' "$pr_facts" | sed -n '7,$p')
+base_ref=$(printf '%s\n' "$pr_facts" | sed -n '7p')
+labels=$(printf '%s\n' "$pr_facts" | sed -n '8,$p')
 
 # Fail-closed на КАЖДОМ факте: пусто и `null` (jq отдаёт его на
 # отсутствующем поле) — это «факт не получен», а не «факта нет».
 for _pair in "headRefName:$head_ref" "headRefOid:$head_oid" "state:$state" \
-    "baseRefOid:$base_oid" "isCrossRepository:$cross_repo"; do
+    "baseRefOid:$base_oid" "isCrossRepository:$cross_repo" \
+    "baseRefName:$base_ref"; do
     _name="${_pair%%:*}"
     _value="${_pair#*:}"
     [ -n "$_value" ] && [ "$_value" != "null" ] \
         || die 2 "факт $_name PR ${slug}#${pr} не получен ('$_value') — \
 мерж не выполняется"
 done
+
+# Живая верхушка базы — отдельный факт (devtools#223). `baseRefOid` выше —
+# снимок форджи о PR, для сверки пина базы он непригоден (см. шапку); всё,
+# что решается «по базе» (пин --expect-base, compare гварда 4, журнал), идёт
+# от этой величины. Fail-closed как у прочих фактов: не прочитано ≠ совпало.
+if ! live_tip=$(gh_a api "repos/$slug/git/ref/heads/$base_ref" \
+    --jq '.object.sha' 2>&1); then
+    die 2 "верхушка базы origin/$base_ref для ${slug}#${pr} не прочитана: \
+$live_tip — сверять пин базы не с чем, мерж не выполняется"
+fi
+case "$live_tip" in
+    ""|null) die 2 "верхушка базы origin/$base_ref для ${slug}#${pr} не \
+получена ('$live_tip') — мерж не выполняется" ;;
+esac
 # Голова обязана быть похожа на sha: мержим ПРОВЕРЕННЫЙ oid, и подсунуть
 # в --match-head-commit неразобранный мусор значило бы проверить не то.
 case "$head_oid" in
@@ -408,10 +429,15 @@ IFS="$_saved_ifs"
 # Без `--paginate` намеренно: постраничная выдача compare листает КОММИТЫ, а
 # `files` каждая страница несёт целиком — со `--paginate` файлы повторялись бы
 # по числу страниц, и счётчик ниже перестал бы что-либо значить.
+# От живой верхушки, не от baseRefOid: three-dot compare — диф ДЕРЕВЬЕВ
+# merge-base и head, откат чужого post-fork коммита по authority-root пути
+# от старого снимка невидим (ревью #235). merge-base(live tip, head) не
+# старше merge-base(baseRefOid, head); при нерибейзнутой голове совпадают —
+# ложных отказов это не добавляет.
 if ! compare_files=$(gh_a api \
-    "repos/$slug/compare/$base_oid...$head_oid" \
+    "repos/$slug/compare/$live_tip...$head_oid" \
     --jq '.files[].filename' 2>&1); then
-    die 2 "не удалось получить дифф ${base_oid}...${head_oid} для \
+    die 2 "не удалось получить дифф ${live_tip}...${head_oid} для \
 ${slug}#${pr}: $compare_files — состав диффа неизвестен, мерж не выполняется"
 fi
 # Форджа обрезает список файлов (у GitHub — 300) и признака усечения в ответе
@@ -457,9 +483,10 @@ if [ -n "$expect_head" ] && [ "$expect_head" != "$head_oid" ]; then
     die 5 "PR ${slug}#${pr}: голова $head_oid, а вызывающий проверял \
 $expect_head — вердикт относится не к этому коду. Мерж не выполняется."
 fi
-if [ -n "$expect_base" ] && [ "$expect_base" != "$base_oid" ]; then
+if [ -n "$expect_base" ] && [ "$expect_base" != "$live_tip" ]; then
     die 5 "PR ${slug}#${pr}: база уехала — вердикт вынесен от \
-$expect_base, сейчас $base_oid. В базу приехали изменения, которых ревью \
+$expect_base, верхушка origin/$base_ref сейчас $live_tip. В базу приехали \
+изменения, которых ревью \
 не видело; смерженный результат не равен проверенному. Мерж не \
 выполняется — перегоните вердикт на новой базе (собственный дифф PR при \
 этом не менялся, менялось то, во что он вливается)."
@@ -525,7 +552,7 @@ set -- api -X PUT "repos/$slug/pulls/$pr/merge" \
 # видно в журнале прогона, иначе отсутствие проверки не отличить от
 # пройденной.
 if [ -n "$expect_base" ]; then
-    base_note="база пинована ($base_oid)"
+    base_note="база пинована ($live_tip)"
 else
     base_note="база НЕ пинована (нет --expect-base), merge_state=$merge_state"
 fi

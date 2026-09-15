@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from governance import accept_pr
+from governance import accept_pr, facts
 
 
 @dataclass
@@ -25,6 +25,9 @@ class _Ops:
     #: OID базы вердикта — приходит ИЗ `changed_paths`, тем же fetch'ем,
     #: что и список путей (ревью #183, круг 3).
     base_oid: str = "base000"
+    #: Живая верхушка базы, которую читает диагностика кода 5 (devtools#223);
+    #: None — факт не установлен (UNAVAILABLE).
+    live_tip: str | None = "base000"
     calls: list[tuple] = field(default_factory=list)
     merge_args: tuple | None = None
 
@@ -59,6 +62,12 @@ class _Ops:
         self.calls.append(("pr_facts",))
         return self.facts_seq.pop(0) if len(self.facts_seq) > 1 \
             else self.facts_seq[0]
+
+    def remote_branch_head_fact(self, repo_slug: str, branch: str):
+        self.calls.append(("remote_branch_head_fact", branch))
+        if self.live_tip is None:
+            return facts.unavailable(f"head origin/{branch}: стенд")
+        return facts.Fact(facts.Outcome.FOUND, self.live_tip)
 
     def pr_files(self, repo_slug: str, pr: int) -> list[str]:
         self.calls.append(("pr_files",))
@@ -149,9 +158,9 @@ def test_moved_base_names_both_shas_and_the_procedure(capsys) -> None:
     Прежняя строка «гонка head/base / правило репо» была догадкой сразу обо
     всём: оператор видел её и не знал, повторять ли, и во что это встанет.
     """
-    moved = _facts(baseRefOid="base999")
     ops = _Ops(
-        facts_seq=[moved], merge_ok=False, merge_code=5, base_oid="base000",
+        facts_seq=[_facts()], merge_ok=False, merge_code=5,
+        base_oid="base000", live_tip="base999",
     )
     rc = accept_pr.accept(
         "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
@@ -165,6 +174,40 @@ def test_moved_base_names_both_shas_and_the_procedure(capsys) -> None:
     assert "make accept-pr" in out
     assert "ревью пройдёт заново" in out
     assert "чеки заново не ждутся" in out
+
+
+def test_moved_base_is_read_from_live_tip_not_pr_snapshot(capsys) -> None:
+    """devtools#223: `baseRefOid` PR не двигается без update-branch — по нему
+    диагностика сказала бы «база не двигалась» ровно тогда, когда обвязка
+    отказала из-за ушедшей верхушки. Читать живую верхушку."""
+    ops = _Ops(
+        facts_seq=[_facts(baseRefOid="base000")], merge_ok=False,
+        merge_code=5, base_oid="base000", live_tip="base999",
+    )
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "база уехала" in out and "base999"[:7] in out
+    assert "не двигалась" not in out
+    assert ("remote_branch_head_fact", "master") in ops.calls
+
+
+def test_unknown_live_tip_is_not_reported_as_unmoved(capsys) -> None:
+    """Неустановленная верхушка — не «не двигалась»: назвать факт, который
+    не прочитан."""
+    ops = _Ops(
+        facts_seq=[_facts()], merge_ok=False, merge_code=5,
+        base_oid="base000", live_tip=None,
+    )
+    rc = accept_pr.accept(
+        "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "не двигалась" not in out
+    assert "верхушк" in out and "не установлен" in out
 
 
 def test_guard_refusal_is_not_reported_as_a_moved_base(capsys) -> None:
