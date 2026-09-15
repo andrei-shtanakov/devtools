@@ -309,8 +309,17 @@ def _accept_on_head(
         # (3) повтор упрётся в тот же запрет, у форджи (4) причина своя:
         # объявлять там «база уехала» значит увести оператора чинить не то.
         after = ops.pr_facts(repo_slug, pr) if merge_code == 5 else {}
-        base_now = after.get("baseRefOid")
         head_now = after.get("headRefOid")
+        # Базу читать ЖИВОЙ верхушкой, не `after["baseRefOid"]`: снимок
+        # форджи о PR не двигается без update-branch и сказал бы «база не
+        # двигалась» ровно тогда, когда обвязка отказала из-за ушедшей
+        # верхушки (devtools#223). Неустановленный факт — не «не двигалась».
+        tip = (
+            ops.remote_branch_head_fact(repo_slug, base_branch)
+            if merge_code == 5 else None
+        )
+        base_now = tip.value if tip is not None and tip.established else None
+        tip_unknown = tip is not None and not tip.established
         if head_now and head_now != head:
             # Код 5 общий для обоих пинов, а процедуры разные: у головы
             # заново нужны и чеки. Сказать здесь «голова не менялась» (текст
@@ -329,6 +338,13 @@ def _accept_on_head(
                 "пройдёт заново по НОВОЙ базе (диапазон изменился — вердикт "
                 "обязан относиться к нему), а чеки заново не ждутся — "
                 "голова не менялась."
+            )
+        elif tip_unknown:
+            print(
+                "accept-pr: мерж не выполнен — пин разошёлся (код 5), а "
+                f"верхушка базы не установлена ({tip.detail}): сказать, "
+                "двигалась ли база, нечем. Повторите приёмку, когда GitHub "
+                "отвечает."
             )
         else:
             print(
