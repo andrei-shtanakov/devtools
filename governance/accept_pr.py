@@ -40,6 +40,7 @@ import subprocess
 import time
 from collections.abc import Callable
 
+from governance.facts import Outcome
 from governance import authority_root
 from governance.ops import DEVTOOLS_ROOT, Ops, RealOps
 # Исполняемый ревью-harness целевого репо: review-pr.sh запускает
@@ -318,8 +319,16 @@ def _accept_on_head(
             ops.remote_branch_head_fact(repo_slug, base_branch)
             if merge_code == 5 else None
         )
-        base_now = tip.value if tip is not None and tip.established else None
+        # Пригоден для «двигалась/не двигалась» ТОЛЬКО FOUND: ABSENT —
+        # установленный факт, но факт об отсутствии ветки, не о её
+        # неподвижности (devtools#237).
+        base_now = (
+            tip.value
+            if tip is not None and tip.outcome is Outcome.FOUND
+            else None
+        )
         tip_unknown = tip is not None and not tip.established
+        tip_absent = tip is not None and tip.outcome is Outcome.ABSENT
         if head_now and head_now != head:
             # Код 5 общий для обоих пинов, а процедуры разные: у головы
             # заново нужны и чеки. Сказать здесь «голова не менялась» (текст
@@ -339,6 +348,16 @@ def _accept_on_head(
                 "обязан относиться к нему), а чеки заново не ждутся — "
                 "голова не менялась."
             )
+        elif merge_code != 5:
+            # devtools#185: на этих кодах база НЕ проверялась — и не должна:
+            # повтор упёрся бы в тот же гвард (3) или тот же ответ форджи
+            # (4). Говорить «не двигалась» значило бы утверждать факт,
+            # которого никто не устанавливал.
+            print(
+                "accept-pr: мерж не выполнен — причина названа merge-pr.sh "
+                "выше (гвард обвязки либо правило репо). Движение базы не "
+                "проверялось: на этом коде оно ни на что не влияет. Стоп."
+            )
         elif tip_unknown:
             print(
                 "accept-pr: мерж не выполнен — пин разошёлся (код 5), а "
@@ -346,11 +365,18 @@ def _accept_on_head(
                 "двигалась ли база, нечем. Повторите приёмку, когда GitHub "
                 "отвечает."
             )
+        elif tip_absent:
+            print(
+                "accept-pr: мерж не выполнен — пин разошёлся (код 5), а "
+                f"ветки нет: origin/{base_branch} ({tip.detail}). Судить о "
+                "движении базы нечего — её больше нет; PR остаётся человеку."
+            )
         else:
             print(
-                "accept-pr: мерж не выполнен — причина названа merge-pr.sh "
-                "выше (гвард обвязки либо правило репо); база при этом не "
-                "двигалась. Стоп."
+                "accept-pr: мерж не выполнен — пин разошёлся (код 5), но "
+                f"голова ({head[:7]}) и верхушка базы ({base0[:7]}) сейчас "
+                "совпадают с проверенными: расхождение было временным либо "
+                "обвязка сверяла иную величину. Повторите приёмку."
             )
         return 1
     print(
