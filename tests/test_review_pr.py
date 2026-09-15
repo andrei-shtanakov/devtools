@@ -508,6 +508,98 @@ def fp_fleet(tmp_path: Path) -> Fleet:
     return f
 
 
+# Кит, знающий потолки дифа: feature-detect в review-pr.sh идёт по литералу
+# `--max-diff-bytes` в local.sh (как у --fingerprint-only), поэтому стаб несёт
+# его в комментарии — argv он и так пишет в лог целиком.
+LOCAL_SH_CAPS_STUB = LOCAL_SH_FP_STUB.replace(
+    'case " $* " in',
+    '# потолки: --max-diff-bytes N --max-diff-files N\ncase " $* " in',
+    1,
+)
+
+
+@pytest.fixture
+def caps_fleet(tmp_path: Path) -> Fleet:
+    f = Fleet(tmp_path)
+    f.write_kit(LOCAL_SH_CAPS_STUB)
+    return f
+
+
+def test_diff_caps_flags_reach_both_kit_calls(caps_fleet: Fleet) -> None:
+    """Явный потолок уходит и в fp-вызов, и в полный прогон — иначе отпечаток
+    отказал бы на том же потолке раньше ревью (живой прогон spec-runner#522:
+    бандл 447 260 байт при умолчании 400 000). Факт поднятия — в шапке."""
+    res = caps_fleet.run(
+        "demo", "7", "--max-diff-bytes", "500000", "--max-diff-files", "40",
+        REVIEW_STUB_FP=FP,
+    )
+    assert res.returncode == 0, res.stderr
+    calls = _kit_calls(caps_fleet)
+    assert len(calls) == 2
+    for call in calls:
+        assert "--max-diff-bytes 500000" in call, call
+        assert "--max-diff-files 40" in call, call
+    body = caps_fleet.body_out.read_text()
+    assert "потолки дифа подняты явно" in body
+    assert "--max-diff-bytes 500000 --max-diff-files 40" in body
+
+
+def test_diff_caps_env_fallback_and_flag_wins(caps_fleet: Fleet) -> None:
+    """Без флага потолок берётся из REVIEW_MAX_DIFF_*: так его получает S6
+    раннера (`RealOps.review` без параметров, env наследуется). Флаг сильнее."""
+    res = caps_fleet.run(
+        "demo", "7", REVIEW_STUB_FP=FP, REVIEW_MAX_DIFF_BYTES="450000",
+    )
+    assert res.returncode == 0, res.stderr
+    assert all("--max-diff-bytes 450000" in c for c in _kit_calls(caps_fleet))
+    assert all("--max-diff-files" not in c for c in _kit_calls(caps_fleet))
+    caps_fleet.local_log.unlink()
+    res = caps_fleet.run(
+        "demo", "7", "--max-diff-bytes", "500000",
+        REVIEW_STUB_FP=FP, REVIEW_MAX_DIFF_BYTES="450000",
+    )
+    assert res.returncode == 0, res.stderr
+    assert all("--max-diff-bytes 500000" in c for c in _kit_calls(caps_fleet))
+
+
+def test_diff_caps_without_override_stay_silent(caps_fleet: Fleet) -> None:
+    res = caps_fleet.run("demo", "7", REVIEW_STUB_FP=FP)
+    assert res.returncode == 0, res.stderr
+    assert all("--max-diff" not in c for c in _kit_calls(caps_fleet))
+    assert "потолки" not in caps_fleet.body_out.read_text()
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [("--max-diff-bytes", ""), ("--max-diff-bytes", "1MiB"),
+     ("--max-diff-files", ""), ("--max-diff-files", "x")],
+)
+def test_diff_caps_reject_empty_and_non_integer(
+    caps_fleet: Fleet, flag: str, value: str,
+) -> None:
+    """Пустое значение молча ушло бы в умолчание кита (обещанный оверрайд
+    испарился бы), нечисловое — упало бы внутри кита: отказ здесь, до
+    единого вызова кита и до публикации."""
+    res = caps_fleet.run("demo", "7", flag, value, REVIEW_STUB_FP=FP)
+    assert res.returncode == 2, res.stderr
+    assert flag in res.stderr
+    assert _kit_calls(caps_fleet) == []
+    assert "pr review" not in caps_fleet.gh_calls()
+
+
+def test_diff_caps_refused_on_kit_without_flag(fp_fleet: Fleet) -> None:
+    """Кит без --max-diff-bytes (LOCAL_SH_FP_STUB): явный оверрайд не может
+    исполниться — отказ с причиной, не тихий прогон с умолчанием и не usage
+    старого скрипта."""
+    res = fp_fleet.run(
+        "demo", "7", "--max-diff-bytes", "500000", REVIEW_STUB_FP=FP,
+    )
+    assert res.returncode == 2, res.stderr
+    assert "не знает --max-diff-bytes" in res.stderr
+    assert _kit_calls(fp_fleet) == []
+    assert "pr review" not in fp_fleet.gh_calls()
+
+
 def test_fp_kit_drops_fetch_and_stamps_marker(fp_fleet: Fleet) -> None:
     """fp-кит: база освежается явным fetch, оба вызова без --fetch,
     маркер несёт отпечаток."""

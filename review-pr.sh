@@ -49,7 +49,8 @@ set -eu
 usage() {
     echo "usage: review-pr.sh <repo> <pr-number> [--dry-run] [--fresh]" \
         "[--write-verdict <file> | --use-verdict <file>]" \
-        "[--harness claude|codex] [--model <M>]" >&2
+        "[--harness claude|codex] [--model <M>]" \
+        "[--max-diff-bytes N] [--max-diff-files N]" >&2
     echo "  <repo> — имя каталога репо во флоте (например dispatcher)" >&2
     echo "  --fresh — не наследовать вердикт даже при совпавшем отпечатке" >&2
     echo "  --write-verdict — атомарно сохранить результат dry-run для боевого прогона" >&2
@@ -57,6 +58,9 @@ usage() {
     echo "  --harness/--model — ревьюер; порядок: флаг > env REVIEW_HARNESS/" >&2
     echo "    REVIEW_MODEL > ~/.config/ai-prosto/harness.env > codex (историч.)" >&2
     echo "  внешний REVIEW_CMD побеждает всё, кроме явных флагов" >&2
+    echo "  --max-diff-bytes/--max-diff-files — явно поднять потолки дифа кита" >&2
+    echo "    (флаг > env REVIEW_MAX_DIFF_BYTES/REVIEW_MAX_DIFF_FILES); уходят в" >&2
+    echo "    оба вызова кита (отпечаток и полный прогон), факт — в шапке вердикта" >&2
     echo "  кит с харнесс-слоем (local.sh --print-review-cmd) получает REVIEW_HARNESS/" >&2
     echo "    REVIEW_MODEL окружением; кит без него умеет только codex" >&2
 }
@@ -91,6 +95,8 @@ write_verdict=""
 use_verdict=""
 opt_harness=""
 opt_model=""
+opt_max_diff_bytes=""
+opt_max_diff_files=""
 print_review_cmd=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -109,6 +115,17 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || die 2 "--model требует значение"
             opt_model="$2"; shift 2 ;;
         --print-review-cmd) print_review_cmd=1; shift ;;
+        # Потолки дифа кита. Пустое значение — отказ здесь: проброс ниже
+        # гейтится [ -n ], и явно запрошенный оверрайд молча ушёл бы в
+        # умолчание кита (тот же довод, что у local.sh --max-diff-bytes "").
+        --max-diff-bytes)
+            [ $# -ge 2 ] || die 2 "--max-diff-bytes требует целое число байт"
+            [ -n "$2" ] || die 2 "--max-diff-bytes передан с пустым значением"
+            opt_max_diff_bytes="$2"; shift 2 ;;
+        --max-diff-files)
+            [ $# -ge 2 ] || die 2 "--max-diff-files требует целое число"
+            [ -n "$2" ] || die 2 "--max-diff-files передан с пустым значением"
+            opt_max_diff_files="$2"; shift 2 ;;
         -*) usage; exit 2 ;;
         *)
             if [ -z "$repo" ]; then repo="$1"
@@ -496,6 +513,42 @@ fp_supported=0
 if grep -q -- '--fingerprint-only' "$trusted_kit_dir/local.sh"; then
     fp_supported=1
 fi
+# --- Потолки дифа кита (явный оверрайд оператора) ---------------------------
+# Кит отказывает на дифе больше потолка (умолчания build-prompt.sh: 400000
+# байт / 30 файлов) и сам предлагает поднять его явно локальным прогоном —
+# значит, поддерживаемый вызывающий обязан уметь передать потолок, иначе
+# обещанный путь восстановления не существует (живой прогон spec-runner#522:
+# бандл семи узлов — 447 260 байт). Флаг сильнее env; env — путь для S6
+# раннера (`RealOps.review` параметров не имеет, окружение наследуется).
+# Один и тот же набор уходит в ОБА вызова кита: отпечаток идёт через ту же
+# сборку промпта и отказал бы на том же потолке раньше ревью. Нечисловое
+# значение — отказ здесь, до единого вызова кита. Feature-detect по литералу
+# в доверенном local.sh — как у --fingerprint-only: кит без потолков не
+# может исполнить явный оверрайд, и это отказ с причиной, а не тихий прогон
+# с умолчанием.
+max_diff_bytes="${opt_max_diff_bytes:-${REVIEW_MAX_DIFF_BYTES:-}}"
+max_diff_files="${opt_max_diff_files:-${REVIEW_MAX_DIFF_FILES:-}}"
+check_cap_int() {
+    case "$2" in
+        '') ;;
+        *[!0-9]*) die 2 "--$1 обязан быть целым числом, получено: $2" ;;
+    esac
+}
+check_cap_int max-diff-bytes "$max_diff_bytes"
+check_cap_int max-diff-files "$max_diff_files"
+cap_args=""
+if [ -n "$max_diff_bytes" ] || [ -n "$max_diff_files" ]; then
+    grep -q -- '--max-diff-bytes' "$trusted_kit_dir/local.sh" \
+        || die 2 "кит ${repo} не знает --max-diff-bytes/--max-diff-files — \
+явный потолок исполнить нельзя: ре-вендорьте кит (steward) или разбейте PR."
+    if [ -n "$max_diff_bytes" ]; then
+        cap_args="$cap_args --max-diff-bytes $max_diff_bytes"
+    fi
+    if [ -n "$max_diff_files" ]; then
+        cap_args="$cap_args --max-diff-files $max_diff_files"
+    fi
+fi
+
 if [ "$fp_supported" -eq 1 ]; then
     # Согласованность диапазона: отпечаток и фактическое ревью обязаны видеть
     # ОДНО состояние базы — освежаем её явным fetch здесь, дальше оба вызова
@@ -512,9 +565,10 @@ if [ "$fp_supported" -eq 1 ]; then
         die 2 "не удалось освежить базу origin/$base_ref перед отпечатком"
     fi
     set +e
+    # shellcheck disable=SC2086 — cap_args проверен: только флаги и цифры.
     fp_out=$(run_kit \
         --base "origin/$base_ref" --head "$review_ref" --fingerprint-only \
-        2> "$work/fp.err")
+        $cap_args 2> "$work/fp.err")
     fp_code=$?
     set -e
     cat "$work/fp.err" >&2
@@ -670,6 +724,8 @@ fi
 # собственной заботой.
 set -- --base "origin/$base_ref" --head "$review_ref" --format markdown
 [ "$fp_supported" -eq 1 ] || set -- "$@" --fetch
+# shellcheck disable=SC2086 — cap_args проверен: только флаги и цифры.
+[ -z "$cap_args" ] || set -- "$@" $cap_args
 set +e
 run_kit "$@" \
     > "$work/verdict.md" 2> "$work/local.err"
@@ -704,6 +760,12 @@ fi
     echo "- PR: ${slug}#${pr}, проревьюирован head \`$head_sha\`"
     echo "- ревьюер: \`$reviewer_label\` через review-kit репо;" \
         "публикация: $REVIEW_LOGIN"
+    if [ -n "$cap_args" ]; then
+        # Поднятый потолок — факт о прогоне, который читатель вердикта обязан
+        # видеть: умолчания кита на этот диф не действовали.
+        echo "- потолки дифа подняты явно оператором:$cap_args" \
+            "(умолчания кита не действовали)"
+    fi
     echo
     cat "$work/verdict.md"
     echo
