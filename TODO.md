@@ -1331,7 +1331,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   любом выходе. Регрессия — `tests/test_governance_accept_pr.py`,
   `tests/test_governance_ops.py`, `tests/test_review_pr.py`.
 
-- [ ] Остатки document-pipeline авторинга behaviour-узла: согласовать doc-чеклист с DSL-гейтом, определить self-target anchor и сделать повторный запуск идемпотентным @owner:github:andrei-shtanakov @id:behaviour-document-runner-residuals
+- [x] Остатки document-pipeline авторинга behaviour-узла: согласовать doc-чеклист с DSL-гейтом, определить self-target anchor и сделать повторный запуск идемпотентным @owner:github:andrei-shtanakov @id:behaviour-document-runner-residuals — живой прогон 2026-09-15 (spec-runner#480, `docs/evidence/2026-09-15-need-stage-live-run.md`): disp сошёлся за 2 раунда, пины в run.json; два дефекта конфига/дерева — PR #248, #249
   Источник: devtools#204 после merged PR #203. До реализации проверить по
   коду disputatio контракт существующего pipeline-dir и выбрать ровно один
   путь retry/resume; живой платный прогон не подменять стаб-тестом в описи
@@ -1428,6 +1428,13 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Код — PR #246 (ветка feat/need-stage; Tasks 1–11 плана, opt-in smoke
       `DEVTOOLS_DISCOVERY_SMOKE=1`); чекбокс — после живой приёмки §9 спеки
       с реальным стейкхолдером.
+      Живая приёмка 2026-09-15/16 на spec-runner#480 — evidence
+      `docs/evidence/2026-09-15-need-stage-live-run.md`: стадия Need и путь
+      до S5 отработали; три дефекта devtools влиты (#248, #249, #250);
+      `waiting_human_merge` не достигнут — bundle-PR spec-runner#522 в
+      request-changes после семи кругов ревью, остановка по решению
+      владельца 2026-09-16. Закрытие чекбокса по этому evidence — решение
+      владельца.
 - [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; до доставки соседа маршрут отказывает до run-id @owner:github:andrei-shtanakov @id:spec-loop-need-engineer-route @blocked_by:discovery#49
       Ждёт discovery#49 п.1 (slug orchestrated-start-upstream-and-session-id):
       приём upstream при `start --frame engineer`. П.2 (caller-assigned
