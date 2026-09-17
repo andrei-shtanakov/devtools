@@ -351,12 +351,25 @@ def advance(state: RunState, ops: Ops) -> RunState:
     ``merged_unverified`` — терминально и навсегда (спека §5): повторный
     ``advance()`` над таким состоянием отвергается явно, продвижение — только
     через дочерний run (`verify`).
+
+    Op ``merge`` уже ``completed`` — весь пред-мержевой конвейер (review,
+    verdict, ...) переигрывать нельзя: это платный повтор на PR, который
+    уже смержен (ревью #253). Единственная оставшаяся работа — S8, и
+    только она выполняется; `_step_s8` идемпотентен и на уже терминальном
+    ``state.status`` (комментарий у самой функции). Без этой проверки
+    нетерминальный отказ `_step_s8` (например, `checkout_and_pull` не
+    удался) оставлял бы `state.status == "running"` с незавершёнными
+    пред-мержевыми op'ами (`review`, `author-*`) — следующий resume падал
+    бы в общий шаговый цикл и переигрывал их вхолостую на смерженном PR.
     """
     if state.status == "merged_unverified":
         raise ValueError(
             f"run {state.run_id!r} — merged_unverified навсегда; создайте "
             "verification-run через verify(...)"
         )
+    if op_status(state, "merge") == "completed":
+        _step_s8(state, ops)
+        return state
     steps = (
         _step_interview,
         _step_branch,
@@ -535,10 +548,13 @@ def _reconcile_pr_merged_out_of_band(state: RunState, ops: Ops) -> bool:
     spec-runner#480, bundle-PR #522: смержен вручную из `stopped_review`).
 
     Возвращает ``True``, если реконсиляция сработала — вызывающий должен
-    вернуть ``state`` как есть и ничего больше не делать (`_step_s8` уже
-    отработал или остановил run на своём терминальном исходе). ``False`` —
-    PR ещё не создан (``state.pr is None``) либо остаётся ``OPEN``;
-    вызывающий продолжает обычной веткой.
+    вернуть ``state`` как есть и ничего больше не делать. S8 может при этом
+    остаться незавершённым (нетерминальный отказ — `checkout_and_pull` не
+    удался и т.п.): за это отвечает НЕ эта функция, а общая проверка `op
+    "merge" == "completed"` в начале `advance()` (ревью #253, круг 2) — она
+    же не даст следующему resume переиграть пред-мержевые op'ы вхолостую.
+    ``False`` — PR ещё не создан (``state.pr is None``) либо остаётся
+    ``OPEN``; вызывающий продолжает обычной веткой.
     """
     if state.pr is None:
         return False
@@ -556,7 +572,7 @@ def _reconcile_pr_merged_out_of_band(state: RunState, ops: Ops) -> bool:
         op_complete(state, "merge", merged=True)
     state.status = "running"
     save(state)
-    _step_s8(state, ops)
+    advance(state, ops)
     return True
 
 

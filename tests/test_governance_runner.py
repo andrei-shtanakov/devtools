@@ -2410,6 +2410,52 @@ def test_resume_from_stopped_author_pr_merged_out_of_band_runs_s8(
     assert result.status == "completed"
 
 
+def test_resume_after_merged_reconciliation_with_nonterminal_s8_does_not_replay_review(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Ревью #253, круг 2: `_step_s8` может отказать нетерминально
+    (`checkout_and_pull` не удался) и не меняет `state.status` — при
+    реконсиляции из `stopped_review` это оставляло бы `review` op
+    `started`, и следующий resume() падал бы в общий шаговый цикл,
+    переигрывая платный `review` на уже смерженном PR. Общая проверка
+    ``merge completed`` в начале `advance()` обязана перехватить это
+    раньше, чем цикл дойдёт до `_step_review`."""
+    ops = FakeOps(
+        review_exit=1, facts=dict(GREEN_PR_FACTS),
+        checkout_and_pull_error="ff-only diverged",
+    )
+    run_id = "r-resume-review-merged-s8-nonterminal"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_review"
+    assert state.ops["review"]["status"] == "started"
+
+    ops.facts = {**ops.facts, "state": "MERGED"}
+    result = runner.resume(run_id, ops)
+
+    assert result.status == "running"
+    assert result.ops["merge"] == {"status": "completed", "merged": True}
+    assert "gate_check_s8" not in [c[0] for c in ops.calls]
+    calls_before = len(ops.calls)
+
+    # Второй resume — тот же нетерминальный отказ, но review НЕ должен
+    # переиграться: ни разу за оба захода.
+    result = runner.resume(run_id, ops)
+
+    calls_after = [c[0] for c in ops.calls[calls_before:]]
+    assert "review" not in calls_after
+    assert "push_branch" not in calls_after
+    assert result.status == "running"
+    review_calls_total = sum(1 for c in ops.calls if c[0] == "review")
+
+    # Убрать отказ — S8 доходит до конца, review за весь путь звался
+    # ровно один раз (изначальный прогон, давший stopped_review).
+    ops.checkout_and_pull_error = None
+    result = runner.resume(run_id, ops)
+    assert result.status == "completed"
+    assert sum(1 for c in ops.calls if c[0] == "review") == review_calls_total
+
+
 def test_resume_from_stopped_review_pr_still_open_resets_as_before(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
