@@ -2352,6 +2352,64 @@ def test_resume_from_stopped_review_pr_merged_out_of_band_runs_s8(
     assert result.ops["gate-authoritative"]["status"] == "completed"
 
 
+def test_resume_from_stopped_review_pr_merged_records_base_ref_from_facts(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Ревью #253: `_step_verdict` (единственная другая точка записи
+    `state.base_ref`) не выполнялся на пути `stopped_review` — реконсиляция
+    обязана взять `baseRefName` из тех же фактов PR, что уже прочитала,
+    иначе S8 молча гейтит захардкоженный фолбэк "master" на репо с другой
+    дефолтной веткой."""
+    ops = FakeOps(
+        review_exit=1, facts={**GREEN_PR_FACTS, "baseRefName": "main"}, s8_exit=0,
+    )
+    run_id = "r-resume-review-merged-baseref"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_review"
+    assert state.base_ref is None
+
+    ops.facts = {**ops.facts, "state": "MERGED"}
+    result = runner.resume(run_id, ops)
+
+    assert result.base_ref == "main"
+    assert ("checkout_and_pull", "main") in ops.calls
+    assert result.status == "completed"
+
+
+def test_resume_from_stopped_author_pr_merged_out_of_band_runs_s8(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Ревью #253: `stopped_author` НЕ гарантирует отсутствие PR — brief-
+    coverage внутри `_step_authoring` (E1) выполняется на каждом заходе, до
+    проверки завершённости узлов, и может остановить run этим статусом уже
+    после того, как PR создан (resume из stopped_review/stopped_gate
+    доходит сюда повторно). Реконсиляция обязана сработать и здесь, не
+    только `_reset_stopped_author`."""
+    run_id = "r-resume-author-merged"
+    state = rs.new_run(
+        subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+        target_dir=str(tmp_path / "target"), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id=run_id,
+    )
+    state.branch = "spec/WS-1-behaviour"
+    state.pr = 9
+    state.ops = {
+        "branch": {"status": "completed"},
+        "author-charter": {"status": "completed", "exit": 0, "skipped": False},
+    }
+    state.status = "stopped_author"
+    rs.save(state)
+
+    ops = FakeOps(facts={**GREEN_PR_FACTS, "state": "MERGED"}, s8_exit=0)
+    result = runner.resume(run_id, ops)
+
+    assert ("author", "charter") not in ops.calls
+    assert not any(c[0] == "push_branch" for c in ops.calls)
+    assert result.ops["merge"] == {"status": "completed", "merged": True}
+    assert result.status == "completed"
+
+
 def test_resume_from_stopped_review_pr_still_open_resets_as_before(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:

@@ -462,8 +462,11 @@ def resume(run_id: str, ops: Ops) -> RunState:
     (``commit``, ``gate-candidate``, ``push``, ``ready``, ``review``, но не
     ``pr`` — круг 9: человек мог поправить бандл в worktree между стопом и
     resume, и старый `commit`/`push` унесли бы докоррекционное дерево дальше
-    по конвейеру); ``stopped_author`` — незавершённые ``author-*`` плюс тот
-    же диапазон (до ``pr``, реконсиляция неприменима — PR ещё не создан);
+    по конвейеру); ``stopped_author`` — реконсиляция ПРИМЕНИМА (brief-
+    coverage в `_step_authoring`, E1, останавливает run этим статусом на
+    каждом заходе, до проверки завершённости узлов — PR к этому моменту
+    вполне может уже существовать с прошлого прохода S5), затем
+    незавершённые ``author-*`` плюс тот же диапазон;
     ``stopped_merge_refused`` (S7 `refuse`, отдельный от ``stopped_gate``
     статус — M-1) — ``verdict``, хотя фактическая пересверка вердикта
     теперь происходит на каждом заходе в S7 независимо от этого сброса (см.
@@ -495,6 +498,15 @@ def resume(run_id: str, ops: Ops) -> RunState:
         save(state)
         return advance(state, ops)
     if state.status == "stopped_author":
+        # Ревью #253: `stopped_author` НЕ гарантирует отсутствие PR — brief-
+        # coverage внутри `_step_authoring` (E1) выполняется на каждом
+        # заходе, ДО проверки `op_status(key) == "completed"`, и может
+        # остановить run этим статусом уже после того, как PR создан
+        # (resume из stopped_review/stopped_gate доходит сюда повторно).
+        # `state.pr is None` внутри реконсиляции делает вызов безопасным и
+        # для «настоящего» stopped_author без PR.
+        if _reconcile_pr_merged_out_of_band(state, ops):
+            return state
         _reset_stopped_author(state)
         state.status = "running"
         save(state)
@@ -533,6 +545,13 @@ def _reconcile_pr_merged_out_of_band(state: RunState, ops: Ops) -> bool:
     pr_facts_now = ops.pr_facts(state.repo_slug, state.pr)
     if pr_facts_now.get("state") != "MERGED":
         return False
+    # Ревью #253: реконсиляция может сработать до того, как `_step_verdict`
+    # хоть раз записал `state.base_ref` (stopped_review/stopped_gate — он
+    # не выполнялся ни разу), а `_step_s8` ниже по стеку фолбэкается на
+    # литерал "master" при пустом `base_ref`. Тот же фолбэк, что у
+    # `_step_verdict` (F-5): молчаливый на пустом/отсутствующем
+    # `baseRefName`, но здесь — явное поле факта, не догадка.
+    state.base_ref = pr_facts_now.get("baseRefName") or "master"
     if op_status(state, "merge") != "completed":
         op_complete(state, "merge", merged=True)
     state.status = "running"
