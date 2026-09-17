@@ -313,7 +313,34 @@ medium (`doctor` в эфемерном scratch-проекте; перенос г
 (1–2), closure (3–6), open calls (2, 4, 7, 8). Решение о продолжении —
 снова за владельцем.
 
-## Итог (по состоянию на круг 8, 2026-09-17 — решение о продолжении за владельцем)
+### S6, круги 9–10 (2026-09-17) — правки владельца и ручной мерж #522
+
+После круга 8 владелец сам отработал находку правила круга 4 (коммиты
+spec-runner `4104711` «исключение evidence close-call/purge из правила
+«более поздний прогон без open calls блокирует restore»» и `d6f11c5`
+«пересчёт upstream_hashes») и смержил **spec-runner#522** напрямую из
+GitHub (`973081b`, `mergedBy: andrei-shtanakov`) — минуя S7 раннера.
+
+### D-4: resume из `stopped_review` не реконсилировал мерж вне S7
+
+Раннер стоял в `stopped_review` (S6 red, op `review` = `started`).
+Reconciliation «PR уже `MERGED`» существовала только для
+`waiting_human_merge`/`stopped_merge_refused` — из `stopped_review` `resume`
+сбросил бы `commit`→`review` и попытался `push_branch` на ветку, которую
+GitHub уже удалил (`--delete-branch` при мерже) — неперехваченная ошибка.
+
+| # | причина | исправление |
+|---|---|---|
+| D-4 | реконсиляция «PR MERGED» не покрывала `stopped_gate`/`stopped_review`/`stopped_author` | devtools PR #253 (agent-merge `ce24cb8`, 4 круга ревью): общий `_reconcile_pr_merged_out_of_band`, короткое замыкание в `advance()` на `op "merge" == completed` (покрывает и нетерминальный отказ S8), `state.base_ref` из фактов PR, гард грязного дерева перед переходом на S8 (тот же, что `task_bridge.deliver_for_run`) |
+
+Resume после мержа #253 (`make behaviour-run ARGS='resume --run-id
+durable-continuation-checkpoint-evidence-20260915-4c2a3e'`, master
+`ce24cb8`): реконсиляция сработала на первом же заходе — `merge`
+зафиксирован (`merged=True`), `sync-default`/`gate-authoritative`
+отработали (exit=0) без переигрывания `review`/`push`/`commit`. **Run
+`durable-continuation-checkpoint-evidence-20260915-4c2a3e` — `completed`.**
+
+## Итог
 
 | Требование §9 спеки | Факт |
 |---|---|
@@ -321,33 +348,35 @@ medium (`doctor` в эфемерном scratch-проекте; перенос г
 | пауза `waiting_interview` без ветки/worktree/авторинга; повтор кнопки → `brief` → S1 по E1 | выполнено (разделы выше: 0 `spec/*` веток, 1 worktree; descriptor, blobs) |
 | SHA devtools/discovery, session id, коды вызовов, SHA-256 брифа и transcript | записаны |
 | stakeholder role, descriptor source-слоя | записаны |
-| номера bundle-/tasks-/approval-PR, approved tasks-спека | **bundle-PR spec-runner#522**; tasks-/approval-PR — **нет**: прогон остановлен на S6 (`stopped_review`) после восьми кругов терминального ревью бандла |
+| номера bundle-/tasks-/approval-PR, approved tasks-спека | **bundle-PR spec-runner#522** смержен (`973081b`); **run `completed`** (S8 authoritative gate exit=0 на master); tasks-/approval-PR — **ещё не заведены**, отдельный шаг `make behaviour-tasks` (E1-путь) |
 | `behaviour-document-runner-residuals`: disp использован, `disp_slug`/`disp_anchor_dir` в evidence | выполнено (раздел «Behaviour-узел через disp»): пайплайн сошёлся за 2 раунда, узел экспортирован, пины в run.json |
 
-Сама стадия Need и путь до S5 отработали без ручных вмешательств в
-механику; три дефекта devtools, найденные прогоном, исправлены и влиты
-(#248, #249 — agent-merge; #250 — харнесс, мерж владельца). Не достигнуто
-`waiting_human_merge`: содержимое бандла (behaviour-узел 1160 строк +
-четыре узла ниже, авторинг одним проходом) восемь кругов подряд получало
-1–2 major от терминального ревью, зоны major сменяли друг друга (сайты и
-lock → таксономия closure → процедура open calls, дважды подряд — круги
-7 и 8). Каждый фикс — субагент на PR-ветке, гейт `--candidate` зелёный,
-цепочка `upstream_hashes` сверена; коммиты `a90bcf2`, `59a45a8`,
-`bef9887`, `95ebf36`, `57fe973`, `3907996`, `2fec3f8`. Открытые находки
-круга 8 — в вердикте ai-prosto на #522.
+Стадия Need, путь до S5 и итоговый мерж бандла отработали до конца.
+Терминальное ревью бандла заняло восемь кругов (major-зоны сменяли друг
+друга: сайты и lock → таксономия closure → процедура open calls) — все
+закрыты фиксами субагентов на PR-ветке (гейт `--candidate` зелёный,
+цепочка `upstream_hashes` сверена каждый раз: коммиты `a90bcf2`,
+`59a45a8`, `bef9887`, `95ebf36`, `57fe973`, `3907996`, `2fec3f8`,
+`4104711`, `d6f11c5`) плюс правки владельца на последнем круге и ручной
+мерж. Четыре дефекта devtools, найденные живым прогоном, исправлены и
+влиты: #248, #249 — agent-merge; #250 — харнесс, мерж владельца; #253
+(reconciliation мержа вне S7) — agent-merge, 4 круга ревью.
 
-Что остаётся владельцу: (1) судьба #522 — доработать по кругу 8 (major:
-правило круга 4 «более поздний прогон без open calls → отказ» блокирует
-restore навсегда через собственную дверь `evidence close-call`; medium-
-major: `restore` попадает под своё же правило; 2 minor) и продолжить
-прогон (`REVIEW_MAX_DIFF_BYTES=800000 make behaviour-run ARGS='resume
---run-id durable-continuation-checkpoint-evidence-20260915-4c2a3e'`), либо
-разбить/закрыть; (2) чекбокс `spec-loop-need-stage` — по букве §9 не
-закрыт (нет `waiting_human_merge`), решение о закрытии по этому evidence —
-за владельцем.
+Что остаётся: `make behaviour-tasks ARGS='--run-id
+durable-continuation-checkpoint-evidence-20260915-4c2a3e'` — черновик
+tasks.md-спеки из смерженного бандла (approve — человек, §I12, узел за
+узлом). Чекбокс `spec-loop-need-stage` закрывается по этому evidence —
+Need-стадия и путь до completed run доказаны живым прогоном; approved
+tasks-спека и сама реализация spec-runner#480 — отдельный, последующий
+шаг E1, не блокирующий закрытие E2.
 
 Уроки для конвейера (не для этого прогона): бандл в 6.3k строк за один
 disp-проход — за пределами того, что терминальное ревью подтверждает за
 разумное число кругов; потолок кита пришлось поднимать трижды (умолчание
-400k → 500k → 700k в ходе прогона → 800k для продолжения). Кандидат в план: ограничение размера behaviour-узла или
-дробление на несколько PR — отдельным пунктом TODO по решению владельца.
+400k → 500k → 700k в ходе прогона → 800k для продолжения). Кандидат в
+план: ограничение размера behaviour-узла или дробление на несколько PR —
+отдельным пунктом TODO по решению владельца. Второй урок — из D-4:
+reconciliation «мерж вне контролируемого пути» была реализована только
+для тех стопов, где она была впервые нужна (`waiting_human_merge`), а не
+как общее свойство раннера — обобщить такие гварды на весь класс входа,
+не на конкретный наблюдённый случай.
