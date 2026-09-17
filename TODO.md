@@ -1430,11 +1430,16 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       с реальным стейкхолдером.
       Живая приёмка 2026-09-15/17 на spec-runner#480 — evidence
       `docs/evidence/2026-09-15-need-stage-live-run.md`: стадия Need и путь
-      до S5 отработали; три дефекта devtools влиты (#248, #249, #250);
-      `waiting_human_merge` не достигнут — bundle-PR spec-runner#522 в
-      request-changes после восьми кругов ревью (2026-09-17), решение о
-      продолжении — за владельцем. Закрытие чекбокса по этому evidence —
-      решение владельца.
+      до S5 отработали без ручных вмешательств; disp-авторинг сошёлся;
+      S3–S6 (восемь кругов терминального ревью бандла, три из четырёх
+      находок круга 8 не подтверждены повторным ревью) и S7/S8-
+      реконсиляция после агент-мержа #253 довели run до `completed`
+      (S8 authoritative gate exit=0). Четыре дефекта devtools влиты (#248,
+      #249, #250, #253 — resume не реконсилировал PR spec-runner#522,
+      смерженный человеком вручную из `stopped_review` в обход S7, 4 круга
+      ревью). По букве §9 приёмка НЕ завершена: `waiting_human_merge`
+      раннером не пройден, tasks-/approval-PR не заведены, approved
+      tasks-спеки нет — чекбокс остаётся открытым до решения владельца.
 - [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; до доставки соседа маршрут отказывает до run-id @owner:github:andrei-shtanakov @id:spec-loop-need-engineer-route @blocked_by:discovery#49
       Ждёт discovery#49 п.1 (slug orchestrated-start-upstream-and-session-id):
       приём upstream при `start --frame engineer`. П.2 (caller-assigned
