@@ -2456,6 +2456,42 @@ def test_resume_after_merged_reconciliation_with_nonterminal_s8_does_not_replay_
     assert sum(1 for c in ops.calls if c[0] == "review") == review_calls_total
 
 
+def test_resume_from_stopped_review_pr_merged_dirty_tree_stops_before_s8(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Ревью #253, круг 3: `stopped_review` разрешает оператору держать
+    незакоммиченные правки бандла в `target_dir` между стопом и resume
+    (`_BUNDLE_EDIT_RESET_OPS`). Если PR тем временем смержен вручную,
+    переход на S8 без гарда чекаутил бы грязное дерево на base_ref — тот
+    же гард, что `deliver_for_run` ставит перед своим `checkout_and_pull`
+    (task_bridge.py, ревью #191 круг 2). `merge` op не фиксируется, пока
+    дерево грязное: следующий resume обязан зайти в ту же проверку, не
+    в короткое замыкание `advance()` по `merge completed`."""
+    # dirty=False на start(): S1 (`_step_branch`) проверяет is_dirty только
+    # на первом заходе (op "branch" ещё "new") — грязным дерево становится
+    # ПОСЛЕ, во время правки бандла между стопом и resume.
+    ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS))
+    run_id = "r-resume-review-merged-dirty"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_review"
+
+    ops.facts = {**ops.facts, "state": "MERGED"}
+    ops.dirty = True
+    result = runner.resume(run_id, ops)
+
+    assert result.status == "stopped_review"
+    assert "merge" not in result.ops
+    assert "gate_check_s8" not in [c[0] for c in ops.calls]
+    assert "незакоммиченные правки" in ops.comments[-1]
+
+    # Дерево очищено — тот же resume теперь реконсилирует до конца.
+    ops.dirty = False
+    result = runner.resume(run_id, ops)
+    assert result.ops["merge"] == {"status": "completed", "merged": True}
+    assert result.status == "completed"
+
+
 def test_resume_from_stopped_review_pr_still_open_resets_as_before(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
