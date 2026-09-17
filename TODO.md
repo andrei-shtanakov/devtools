@@ -1428,13 +1428,13 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Код — PR #246 (ветка feat/need-stage; Tasks 1–11 плана, opt-in smoke
       `DEVTOOLS_DISCOVERY_SMOKE=1`); чекбокс — после живой приёмки §9 спеки
       с реальным стейкхолдером.
-      Живая приёмка 2026-09-15/16 на spec-runner#480 — evidence
+      Живая приёмка 2026-09-15/17 на spec-runner#480 — evidence
       `docs/evidence/2026-09-15-need-stage-live-run.md`: стадия Need и путь
       до S5 отработали; три дефекта devtools влиты (#248, #249, #250);
       `waiting_human_merge` не достигнут — bundle-PR spec-runner#522 в
-      request-changes после семи кругов ревью, остановка по решению
-      владельца 2026-09-16. Закрытие чекбокса по этому evidence — решение
-      владельца.
+      request-changes после восьми кругов ревью (2026-09-17), решение о
+      продолжении — за владельцем. Закрытие чекбокса по этому evidence —
+      решение владельца.
 - [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; до доставки соседа маршрут отказывает до run-id @owner:github:andrei-shtanakov @id:spec-loop-need-engineer-route @blocked_by:discovery#49
       Ждёт discovery#49 п.1 (slug orchestrated-start-upstream-and-session-id):
       приём upstream при `start --frame engineer`. П.2 (caller-assigned
