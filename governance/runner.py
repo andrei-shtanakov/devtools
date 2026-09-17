@@ -445,19 +445,32 @@ def resume(run_id: str, ops: Ops) -> RunState:
 
     Из любого ``stopped_*`` — reconciliation вместо слепого no-op (финальное
     ревью F-1/M-1): op(ы), на которых прогон встал, сбрасываются в pending, и
-    только после этого зовётся `advance()`. ``stopped_gate`` (S4 красный) и
-    ``stopped_review`` — весь диапазон ``commit``→``review`` (``commit``,
-    ``gate-candidate``, ``push``, ``ready``, ``review``, но не ``pr`` —
-    круг 9: человек мог поправить бандл в worktree между стопом и resume,
-    и старый `commit`/`push` унесли бы докоррекционное дерево дальше по
-    конвейеру); ``stopped_author`` — незавершённые ``author-*`` плюс тот же
-    диапазон; ``stopped_merge_refused`` (S7 `refuse`, отдельный от
-    ``stopped_gate`` статус — M-1) — ``verdict``, хотя фактическая
-    пересверка вердикта теперь происходит на каждом заходе в
-    S7 независимо от этого сброса (см. `_step_verdict`, F-2);
-    ``stopped_dirty`` (S1 fail-closed dirty-гард, круг 5) — сбрасывать
-    нечего (``branch`` не стартовала), только статус обратно в ``running``.
-    Любой другой статус — обычный ``advance()``.
+    только после этого зовётся `advance()`. Но сперва — реконсиляция «человек
+    смержил PR напрямую, минуя раннер» (`_reconcile_pr_merged_out_of_band`,
+    живой прогон spec-runner#480/#522, круг 9→10: PR смержен из
+    ``stopped_review`` в обход S7, GitHub удалил ветку `--delete-branch`, и
+    слепой сброс `commit`→`review` попытался бы `push` несуществующей ветки).
+    Реконсиляция применяется к ЛЮБОМУ статусу с уже созданным PR — не только
+    к ``waiting_human_merge``/``stopped_merge_refused``, где она была раньше,
+    но и к ``stopped_gate``/``stopped_review``, если у run'а уже есть ``pr``
+    (S4 в конвейере идёт ДО ``pr`` — на первом заходе его ещё нет, но после
+    хотя бы одного успешного прохода S4→S5 PR остаётся и при повторном
+    `stopped_gate` на следующем цикле реконсиляция применима). Если PR ``MERGED``
+    — фиксирует op ``merge`` и выполняет только
+    S8, возврат сразу. Иначе — обычный сброс диапазона:
+    ``stopped_gate``/``stopped_review`` — весь диапазон ``commit``→``review``
+    (``commit``, ``gate-candidate``, ``push``, ``ready``, ``review``, но не
+    ``pr`` — круг 9: человек мог поправить бандл в worktree между стопом и
+    resume, и старый `commit`/`push` унесли бы докоррекционное дерево дальше
+    по конвейеру); ``stopped_author`` — незавершённые ``author-*`` плюс тот
+    же диапазон (до ``pr``, реконсиляция неприменима — PR ещё не создан);
+    ``stopped_merge_refused`` (S7 `refuse`, отдельный от ``stopped_gate``
+    статус — M-1) — ``verdict``, хотя фактическая пересверка вердикта
+    теперь происходит на каждом заходе в S7 независимо от этого сброса (см.
+    `_step_verdict`, F-2); ``stopped_dirty`` (S1 fail-closed dirty-гард,
+    круг 5) — сбрасывать нечего (``branch`` не стартовала, PR тем более),
+    только статус обратно в ``running``. Любой другой статус — обычный
+    `advance()`.
     """
     state = load(run_id)
     if state.status == "merged_unverified":
@@ -466,29 +479,8 @@ def resume(run_id: str, ops: Ops) -> RunState:
             "verification-run через verify(...)"
         )
     if state.status == "waiting_human_merge":
-        pr_facts_now = ops.pr_facts(state.repo_slug, state.pr)
-        if pr_facts_now.get("state") != "MERGED":
-            return state
-        if op_status(state, "merge") != "completed":
-            op_complete(state, "merge", merged=True)
-        state.status = "running"
-        save(state)
-        _step_s8(state, ops)
+        _reconcile_pr_merged_out_of_band(state, ops)
         return state
-    if state.status == "stopped_merge_refused" and state.pr is not None:
-        # Reconciliation «человек смержил ПОСЛЕ отказа агента» (боевой
-        # прогон kapelle#51): раньше эта ветка была только у
-        # waiting_human_merge, и влитый вручную PR оставлял run навсегда в
-        # stopped_merge_refused — resume лишь переигрывал verdict по тем же
-        # красным фактам. PR ещё OPEN → падаем в общий сброс verdict ниже.
-        pr_facts_now = ops.pr_facts(state.repo_slug, state.pr)
-        if pr_facts_now.get("state") == "MERGED":
-            if op_status(state, "merge") != "completed":
-                op_complete(state, "merge", merged=True)
-            state.status = "running"
-            save(state)
-            _step_s8(state, ops)
-            return state
     if state.status in ("waiting_interview", "stopped_interview"):
         if state.interview and state.interview.get("session_id") is None:
             # Сирота — координаты стадии Need без сессии: discovery не
@@ -508,12 +500,45 @@ def resume(run_id: str, ops: Ops) -> RunState:
         save(state)
         return advance(state, ops)
     if state.status in _STOPPED_RESET_OPS:
+        if _reconcile_pr_merged_out_of_band(state, ops):
+            return state
         for key in _STOPPED_RESET_OPS[state.status]:
             state.ops.pop(key, None)
         state.status = "running"
         save(state)
         return advance(state, ops)
     return advance(state, ops)
+
+
+def _reconcile_pr_merged_out_of_band(state: RunState, ops: Ops) -> bool:
+    """PR уже ``MERGED`` — человек смержил напрямую, минуя раннер.
+
+    Общая реконсиляция для ``waiting_human_merge`` и для любого
+    ``stopped_*`` с уже созданным PR (``stopped_gate``, ``stopped_review``,
+    ``stopped_merge_refused``): фиксирует op ``merge`` (если ещё не
+    зафиксирован) и переводит run сразу на S8. Без неё `resume()` пытался
+    бы переиграть ``commit``→``review`` на ветке, которую GitHub уже удалил
+    после мержа (`merge-pr.sh --delete-branch` или ручной мерж с той же
+    опцией), и падал бы на `push` несуществующей ветки (живой прогон
+    spec-runner#480, bundle-PR #522: смержен вручную из `stopped_review`).
+
+    Возвращает ``True``, если реконсиляция сработала — вызывающий должен
+    вернуть ``state`` как есть и ничего больше не делать (`_step_s8` уже
+    отработал или остановил run на своём терминальном исходе). ``False`` —
+    PR ещё не создан (``state.pr is None``) либо остаётся ``OPEN``;
+    вызывающий продолжает обычной веткой.
+    """
+    if state.pr is None:
+        return False
+    pr_facts_now = ops.pr_facts(state.repo_slug, state.pr)
+    if pr_facts_now.get("state") != "MERGED":
+        return False
+    if op_status(state, "merge") != "completed":
+        op_complete(state, "merge", merged=True)
+    state.status = "running"
+    save(state)
+    _step_s8(state, ops)
+    return True
 
 
 def _next_verify_run_id(parent_run_id: str) -> str:

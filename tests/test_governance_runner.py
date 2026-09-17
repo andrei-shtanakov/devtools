@@ -2325,6 +2325,88 @@ def test_resume_from_stopped_review_reruns_ready_and_review(
     assert result.ops["review"]["status"] == "completed"
 
 
+def test_resume_from_stopped_review_pr_merged_out_of_band_runs_s8(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Живой прогон spec-runner#480/#522: PR смержен вручную из
+    `stopped_review`, в обход S7 — GitHub удалил ветку (`--delete-branch`).
+    Слепой сброс `commit`→`review` до этой правки пытался бы `push`
+    несуществующую ветку; реконсиляция обязана заметить `MERGED` ПЕРЕД
+    сбросом и пойти прямо на S8, не трогая commit/push/review."""
+    ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS), s8_exit=0)
+    run_id = "r-resume-review-merged"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_review"
+    calls_before = len(ops.calls)
+
+    ops.facts = {**ops.facts, "state": "MERGED"}
+    result = runner.resume(run_id, ops)
+
+    calls_after = [c[0] for c in ops.calls[calls_before:]]
+    assert "push_branch" not in calls_after
+    assert "review" not in calls_after
+    assert "commit_paths" not in calls_after
+    assert result.ops["merge"] == {"status": "completed", "merged": True}
+    assert result.status == "completed"
+    assert result.ops["gate-authoritative"]["status"] == "completed"
+
+
+def test_resume_from_stopped_review_pr_still_open_resets_as_before(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Регрессия: PR ``OPEN`` (обычный случай) — реконсиляция не должна
+    менять существовавшее поведение F-1 (сброс commit→review, повтор
+    review)."""
+    ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS))
+    run_id = "r-resume-review-still-open"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_review"
+    calls_before = len(ops.calls)
+
+    ops.review_exit = 0
+    result = runner.resume(run_id, ops)
+
+    review_calls_after = [c for c in ops.calls[calls_before:] if c[0] == "review"]
+    assert review_calls_after
+    assert "merge" not in result.ops
+    assert result.status != "stopped_review"
+    assert result.ops["review"]["status"] == "completed"
+
+
+def test_resume_from_stopped_gate_pr_merged_out_of_band_runs_s8(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Тот же класс реконсиляции для `stopped_gate`. S4 идёт ДО `pr` в
+    конвейере, так что на первом заходе PR ещё нет — сценарий строится в два
+    шага, как в бою: сперва обычный `stopped_review` (PR уже создан), затем
+    resume с гейтом, вновь красным на пересбросе `_BUNDLE_EDIT_RESET_OPS`
+    (`gate-candidate` в нём сбрасывается вместе с `review`) — это и есть
+    `stopped_gate` с уже существующим PR."""
+    ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS))
+    run_id = "r-resume-gate-merged"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_review"
+    assert state.pr is not None
+
+    ops.gate_candidate = [(1, "снова красный")]
+    state = runner.resume(run_id, ops)
+    assert state.status == "stopped_gate"
+    calls_before = len(ops.calls)
+
+    ops.facts = {**ops.facts, "state": "MERGED"}
+    ops.s8_exit = 0
+    result = runner.resume(run_id, ops)
+
+    calls_after = [c[0] for c in ops.calls[calls_before:]]
+    assert "push_branch" not in calls_after
+    assert "gate_check_candidate" not in calls_after
+    assert result.ops["merge"] == {"status": "completed", "merged": True}
+    assert result.status == "completed"
+
+
 def test_resume_from_stopped_review_recommits_edited_bundle(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
