@@ -42,6 +42,10 @@ case "$*" in
         echo "the --slurp option is not supported with --jq or --template" >&2
         exit 1 ;;
     esac
+    if [ -n "${GH_STUB_REVIEWS_EXIT:-}" ]; then
+      echo "${GH_STUB_REVIEWS_ERR:-stub: reviews api unavailable}" >&2
+      exit "$GH_STUB_REVIEWS_EXIT"
+    fi
     if [ -n "${GH_STUB_REVIEWS_JSON:-}" ] && [ -f "$GH_STUB_REVIEWS_JSON" ]; then
       cat "$GH_STUB_REVIEWS_JSON"
     else
@@ -105,7 +109,7 @@ echo "local.sh $*" >> "$LOCAL_SH_LOG"
   echo "script=$0"
   echo "cwd=$(pwd)"
   echo "head=$(git rev-parse HEAD)"
-  echo "content=$(cat a.txt)"
+  echo "content=$(cat a.py)"
 } > "$REVIEW_STUB_TREE_LOG"
 echo "stub verdict body"
 exit 0
@@ -164,14 +168,14 @@ class Fleet:
         _git("init", "-b", "master", cwd=seed)
         _git("config", "user.email", "t@example.com", cwd=seed)
         _git("config", "user.name", "t", cwd=seed)
-        (seed / "a.txt").write_text("base\n")
+        (seed / "a.py").write_text("base\n")
         _git("add", ".", cwd=seed)
         _git("commit", "-m", "base", cwd=seed)
         _git("remote", "add", "origin", str(self.origin), cwd=seed)
         _git("push", "-q", "origin", "master", cwd=seed)
         # Ветка PR: один коммит поверх master, выложен как refs/pull/7/head —
         # ровно так PR выглядит на настоящем GitHub-remote.
-        (seed / "a.txt").write_text("changed\n")
+        (seed / "a.py").write_text("changed\n")
         _git("commit", "-am", "pr change", cwd=seed)
         self.head_sha = _git("rev-parse", "HEAD", cwd=seed)
         _git("push", "-q", "origin", "HEAD:refs/pull/7/head", cwd=seed)
@@ -269,6 +273,13 @@ def test_no_args_usage(fleet: Fleet) -> None:
     assert "usage:" in res.stderr
 
 
+def test_usage_documents_print_scope(fleet: Fleet) -> None:
+    """Находка 10: `--print-scope` — операторский флаг, не только тестовый
+    зонд, и обязан быть в usage()."""
+    res = fleet.run()
+    assert "--print-scope" in res.stderr
+
+
 def test_non_numeric_pr(fleet: Fleet) -> None:
     res = fleet.run("demo", "abc")
     assert res.returncode == 2
@@ -359,7 +370,7 @@ def test_reviewer_reads_exact_pr_head_from_ephemeral_worktree(
     assert facts["content"] == "changed"
     assert Path(facts["cwd"]) != fleet.repo
     assert _git("branch", "--show-current", cwd=fleet.repo) == "master"
-    assert (fleet.repo / "a.txt").read_text() == "base\n"
+    assert (fleet.repo / "a.py").read_text() == "base\n"
     worktrees = _git("worktree", "list", "--porcelain", cwd=fleet.repo)
     assert worktrees.count("worktree ") == 1
 
@@ -681,6 +692,17 @@ def test_inherit_same_head_publishes_nothing(fp_fleet: Fleet) -> None:
     assert "pr review" not in fp_fleet.gh_calls()
     calls = _kit_calls(fp_fleet)  # codex не вызывался: только fp-режим
     assert len(calls) == 1 and "--fingerprint-only" in calls[0]
+
+
+@needs_jq
+def test_reviews_endpoint_fetched_once_per_run(fp_fleet: Fleet) -> None:
+    """Находка 12: блок последнего доставленного ревью (stop rule) и блок
+    поиска наследуемого вердикта по отпечатку читают ОДИН и тот же ответ
+    `/reviews` — второй запрос к API не идёт."""
+    reviews = fp_fleet.write_reviews(_review("APPROVED", fp_fleet.head_sha, FP))
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP, GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 0, res.stderr
+    assert fp_fleet.gh_calls().count("/reviews") == 1
 
 
 @needs_jq
@@ -1236,3 +1258,370 @@ def test_override_bypassing_stop_rule_leaves_a_trace(fleet: Fleet) -> None:
     assert "владелец: новый код после approve" in body
 
 
+def _scope_review(head: str, login: str = "ai-prosto") -> dict:
+    body = "## Automated scope attestation — prose-only\n\n"
+    body += f"<!-- ai-prosto-scope-review version=1 kind=prose-only head={head} -->\n"
+    return {"user": {"login": login}, "state": "APPROVED", "body": body}
+
+
+@needs_jq
+def test_unmarked_review_does_not_hide_terminal_verdict(fleet: Fleet) -> None:
+    """Ревью без префикса маркера — не кандидат протокола: более ранний
+    terminal-вердикт остаётся виден stop rule."""
+    reviews = fleet.write_reviews(
+        _review("APPROVED", OLD_HEAD, FP),
+        _scope_review(OLD_HEAD),
+    )
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 2, res.stdout
+    assert "блокирующ" in res.stderr.lower()
+
+
+@needs_jq
+def test_scope_attestation_does_not_gate_full_review_by_stop_rule(
+    fleet: Fleet,
+) -> None:
+    """§5 сценарий 5 спеки: последнее ревью ai-prosto — scope-attestation
+    (опубликована как APPROVE), terminal-вердикта codex-terminal-review на
+    PR нет. Новый head приносит код: аттестация — не кандидат протокола
+    (другой маркер), stop rule обязан молчать, модель обязана быть вызвана
+    БЕЗ --budget-override."""
+    reviews = fleet.write_reviews(_scope_review(OLD_HEAD))
+    _seed_files(fleet, "docs/guide.md", "src/tool.py")
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 0, res.stderr
+    assert _kit_calls(fleet) != []
+    assert "--approve" in fleet.gh_calls()
+    body = fleet.body_out.read_text()
+    assert "вопреки stop rule" not in body
+    assert "бюджет платных прогонов превышен" not in body
+    ledger = fleet.tmp / "review-budget" / "andrei-shtanakov_demo-7.log"
+    assert ledger.exists()
+
+
+@needs_jq
+def test_malformed_terminal_review_does_not_resurrect_older(fleet: Fleet) -> None:
+    """Новый кандидат с задублированным маркером — miss; предыдущий
+    валидный approve НЕ воскресает, прогон разрешён."""
+    reviews = fleet.write_reviews(
+        _review("APPROVED", OLD_HEAD, FP),
+        _review("APPROVED", OLD_HEAD, FP, markers=2),
+    )
+    assert fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews).returncode == 0
+
+
+@needs_jq
+def test_dismissed_terminal_review_does_not_resurrect_older(fleet: Fleet) -> None:
+    """DISMISSED — кандидат протокола, не прошедший валидацию: miss,
+    поиск назад не ведётся."""
+    reviews = fleet.write_reviews(
+        _review("APPROVED", OLD_HEAD, FP),
+        _review("DISMISSED", OLD_HEAD, FP),
+    )
+    assert fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews).returncode == 0
+
+
+def _seed_files(fleet: Fleet, *paths: str) -> None:
+    """Переложить голову PR так, чтобы диф трогал ровно эти пути."""
+    work = fleet.tmp / "reseed"
+    if work.exists():
+        shutil.rmtree(work)
+    subprocess.run(
+        ["git", "clone", "-q", str(fleet.origin), str(work)],
+        check=True, capture_output=True,
+    )
+    _git("config", "user.email", "t@example.com", cwd=work)
+    _git("config", "user.name", "t", cwd=work)
+    for p in paths:
+        target = work / p
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("changed\n")
+    _git("add", "-A", cwd=work)
+    _git("commit", "-m", "pr change", cwd=work)
+    fleet.head_sha = _git("rev-parse", "HEAD", cwd=work)
+    _git("push", "-qf", "origin", "HEAD:refs/pull/7/head", cwd=work)
+
+
+def test_scope_prose_only_when_every_path_is_prose(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md", "TODO.md", "notes.txt")
+    res = fleet.run("demo", "7", "--print-scope")
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "prose"
+
+
+def test_scope_code_when_any_path_is_code(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md", "src/tool.py")
+    res = fleet.run("demo", "7", "--print-scope")
+    assert res.stdout.strip() == "code"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/workflows/ci.md",
+        "contracts/review-scope/v1/notes.md",
+        "eval/corpus/case.md",
+        "fixtures/sample.md",
+        "schemas/readme.md",
+    ],
+)
+def test_markdown_in_code_dirs_is_code(fleet: Fleet, path: str) -> None:
+    _seed_files(fleet, path)
+    assert fleet.run("demo", "7", "--print-scope").stdout.strip() == "code"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "requirements.txt",
+        "requirements-dev.txt",
+        "src/requirements.txt",
+        "constraints.txt",
+        "constraints-lock.txt",
+        "src/constraints.txt",
+    ],
+)
+def test_dependency_pin_files_are_code(fleet: Fleet, path: str) -> None:
+    """Находка 6: `*.txt` в PROSE иначе забирал бы бамп пинов зависимостей
+    мимо модельного ревьюера (срез B)."""
+    _seed_files(fleet, path)
+    assert fleet.run("demo", "7", "--print-scope").stdout.strip() == "code"
+
+
+def test_rename_from_code_to_prose_stays_code(fleet: Fleet) -> None:
+    """Переименование проверяется по ОБОИМ путям: --no-renames показывает
+    и удаление старого, и добавление нового."""
+    work = fleet.tmp / "rename"
+    subprocess.run(
+        ["git", "clone", "-q", str(fleet.origin), str(work)],
+        check=True, capture_output=True,
+    )
+    _git("config", "user.email", "t@example.com", cwd=work)
+    _git("config", "user.name", "t", cwd=work)
+    (work / "tool.py").write_text("x\n")
+    _git("add", "-A", cwd=work)
+    _git("commit", "-m", "add code", cwd=work)
+    _git("push", "-q", "origin", "master", cwd=work)
+    # git mv не создаёт директорию назначения сам.
+    (work / "docs").mkdir(parents=True, exist_ok=True)
+    _git("mv", "tool.py", "docs/tool.md", cwd=work)
+    _git("commit", "-m", "rename to prose", cwd=work)
+    fleet.head_sha = _git("rev-parse", "HEAD", cwd=work)
+    _git("push", "-qf", "origin", "HEAD:refs/pull/7/head", cwd=work)
+    assert fleet.run("demo", "7", "--print-scope").stdout.strip() == "code"
+
+
+def test_unreadable_file_list_falls_back_to_code(fleet: Fleet) -> None:
+    """Fail-closed: голова PR не имеет общего предка с базой — merge-base
+    падает, область не определена, PR ревьюится как кодовый."""
+    work = fleet.tmp / "orphan"
+    subprocess.run(
+        ["git", "clone", "-q", str(fleet.origin), str(work)],
+        check=True, capture_output=True,
+    )
+    _git("config", "user.email", "t@example.com", cwd=work)
+    _git("config", "user.name", "t", cwd=work)
+    _git("checkout", "-q", "--orphan", "unrelated", cwd=work)
+    _git("rm", "-rqf", ".", cwd=work)
+    (work / "b.py").write_text("x\n")
+    _git("add", "-A", cwd=work)
+    _git("commit", "-m", "unrelated root", cwd=work)
+    fleet.head_sha = _git("rev-parse", "HEAD", cwd=work)
+    _git("push", "-qf", "origin", "HEAD:refs/pull/7/head", cwd=work)
+    res = fleet.run("demo", "7", "--print-scope")
+    assert res.stdout.strip() == "code"
+    assert "область ревью не определена" in res.stderr
+
+
+# --- Формат контракта — канон governance/ssot_env.py (находки 2, 3) --------
+
+
+def _write_contract(fleet: Fleet, text: str) -> str:
+    path = fleet.tmp / "prose-paths.env"
+    path.write_text(text)
+    return str(path)
+
+
+def test_scope_contract_duplicate_key_refuses(fleet: Fleet) -> None:
+    """Находка 2: дубль ключа — отказ разбора, как в governance/ssot_env.py,
+    а не молчаливая склейка значений в одно расширенное правило."""
+    contract = _write_contract(
+        fleet,
+        "PROSE=*.md\nPROSE=*.txt\nCODE_OVERRIDE=contracts/*\n",
+    )
+    res = fleet.run(
+        "demo", "7", "--print-scope", REVIEW_SCOPE_CONTRACT=contract
+    )
+    assert res.returncode == 2, res.stdout
+    assert "PROSE" in res.stderr
+    assert "2" in res.stderr
+
+
+def test_scope_contract_missing_code_override_refuses(fleet: Fleet) -> None:
+    """Находка 3: усечённая вендор-копия без CODE_OVERRIDE не должна молча
+    расширять прозу на самый опасный класс путей (.github/, contracts/,
+    eval/, fixtures/, schemas/) — отказ, симметричный отсутствию PROSE."""
+    contract = _write_contract(fleet, "PROSE=*.md *.txt\n")
+    res = fleet.run(
+        "demo", "7", "--print-scope", REVIEW_SCOPE_CONTRACT=contract
+    )
+    assert res.returncode == 2, res.stdout
+    assert "CODE_OVERRIDE" in res.stderr
+
+
+def test_scope_contract_missing_prose_refuses(fleet: Fleet) -> None:
+    contract = _write_contract(fleet, "CODE_OVERRIDE=contracts/*\n")
+    res = fleet.run(
+        "demo", "7", "--print-scope", REVIEW_SCOPE_CONTRACT=contract
+    )
+    assert res.returncode == 2, res.stdout
+    assert "PROSE" in res.stderr
+
+
+def test_scope_contract_single_line_per_key_works(fleet: Fleet) -> None:
+    """Канонический формат: один ключ — одна строка, список глобов через
+    пробел внутри значения."""
+    _seed_files(fleet, "contracts/review-scope/v1/notes.md", "TODO.md")
+    contract = _write_contract(
+        fleet,
+        "PROSE=*.md TODO.md\nCODE_OVERRIDE=contracts/* */contracts/*\n",
+    )
+    res = fleet.run(
+        "demo", "7", "--print-scope", REVIEW_SCOPE_CONTRACT=contract
+    )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "code"
+
+
+@needs_jq
+def test_prose_only_publishes_attestation_without_kit(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md", "TODO.md")
+    res = fleet.run("demo", "7")
+    assert res.returncode == 0, res.stderr
+    assert _kit_calls(fleet) == []
+    body = fleet.body_out.read_text()
+    assert "Automated scope attestation — prose-only" in body
+    assert "review-scope/v1" in body
+    assert "required CI checks остаются обязательным независимым" in body
+    assert f"kind=prose-only head={fleet.head_sha}" in body
+    assert "codex-terminal-review" not in body
+    assert "--approve" in fleet.gh_calls()
+
+
+@needs_jq
+def test_prose_only_write_verdict_flag_is_noted_and_ignored(fleet: Fleet) -> None:
+    """Находка 8: --write-verdict относится к вердикту кита — на prose-only
+    PR кит не вызывается, флаг молча не игнорируется."""
+    _seed_files(fleet, "docs/guide.md")
+    verdict_path = fleet.tmp / "verdict.txt"
+    res = fleet.run(
+        "demo", "7", "--dry-run", "--write-verdict", str(verdict_path)
+    )
+    assert res.returncode == 0, res.stderr
+    assert not verdict_path.exists()
+    assert "--write-verdict не применяется" in res.stderr
+
+
+@needs_jq
+def test_prose_only_use_verdict_flag_is_noted_and_ignored(fleet: Fleet) -> None:
+    """Находка 8: та же заметка для --use-verdict — verdict-файл не
+    читался, аттестация публикуется как обычно."""
+    _seed_files(fleet, "docs/guide.md")
+    verdict_path = fleet.tmp / "verdict.txt"
+    verdict_path.write_text("codex-terminal-review-verdict/v1\nbogus\n")
+    res = fleet.run("demo", "7", "--use-verdict", str(verdict_path))
+    assert res.returncode == 0, res.stderr
+    assert "--use-verdict не применяется" in res.stderr
+    assert "--approve" in fleet.gh_calls()
+
+
+@needs_jq
+def test_prose_only_does_not_charge_budget(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md")
+    fleet.run("demo", "7")
+    ledger = fleet.tmp / "review-budget" / "andrei-shtanakov_demo-7.log"
+    assert not ledger.exists()
+
+
+def test_mixed_diff_runs_full_review(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md", "src/tool.py")
+    res = fleet.run("demo", "7")
+    assert res.returncode == 0, res.stderr
+    assert _kit_calls(fleet) != []
+    assert "Automated scope attestation" not in fleet.body_out.read_text()
+
+
+@needs_jq
+def test_prose_only_after_changes_requested_stays_with_human(fleet: Fleet) -> None:
+    """Красный модельный вердикт аттестацией не гасится: не публикуется
+    ничего, модель не вызывается, PR остаётся человеку."""
+    _seed_files(fleet, "docs/guide.md")
+    reviews = fleet.write_reviews(_review("CHANGES_REQUESTED", OLD_HEAD, FP))
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 2, res.stdout
+    assert _kit_calls(fleet) == []
+    assert not fleet.body_out.exists()
+    assert "остаётся человеку" in res.stderr
+
+
+def _review_old_marker(state: str, head: str, login: str = "ai-prosto") -> dict:
+    """Красный вердикт от кита без --fingerprint-only: маркер БЕЗ `fp`.
+
+    Валидатор stop rule (строгий формат `head=…fp=…`) читает такой маркер
+    как miss — но вердикт всё равно ДОСТАВЛЕН на PR (находка 1)."""
+    body = "## Codex CLI review — терминальный прогон\n\nвердикт...\n"
+    body += f"<!-- codex-terminal-review head={head} -->\n"
+    return {"user": {"login": login}, "state": state, "body": body}
+
+
+@needs_jq
+def test_prose_guard_blocks_on_delivered_changes_requested_without_fp(
+    fleet: Fleet,
+) -> None:
+    """Находка 1: красный вердикт со СТАРЫМ маркером (без `fp`) — miss для
+    stop rule, но ДОСТАВЛЕН на PR. Аттестация обязана его увидеть и не
+    погасить синтетическим approve."""
+    _seed_files(fleet, "docs/guide.md")
+    reviews = fleet.write_reviews(
+        _review_old_marker("CHANGES_REQUESTED", OLD_HEAD)
+    )
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 2, res.stdout
+    assert _kit_calls(fleet) == []
+    assert not fleet.body_out.exists()
+    assert "остаётся человеку" in res.stderr
+
+
+def test_prose_guard_refuses_when_review_list_unreadable(fleet: Fleet) -> None:
+    """Находка 1: пустой lr_state и «факта нет» неотличимы без lr_known.
+    Отказ gh на /reviews — факт не получен, а не «красного нет»: аттестация
+    не публикуется, отказ fail-closed вместо тихого approve."""
+    _seed_files(fleet, "docs/guide.md")
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_EXIT="1")
+    assert res.returncode == 2, res.stdout
+    assert _kit_calls(fleet) == []
+    assert not fleet.body_out.exists()
+    assert "не прочитан" in res.stderr
+
+
+@needs_jq
+def test_prose_only_is_idempotent_on_same_head(fleet: Fleet) -> None:
+    """Находка 4: считаем число вызовов `gh pr review`, а не текст тела —
+    сравнение текста не поймало бы и десять публикаций подряд, потому что
+    вторая полностью повторяет первую по содержанию."""
+    _seed_files(fleet, "docs/guide.md")
+    assert fleet.run("demo", "7").returncode == 0
+    assert fleet.gh_calls().count("pr review 7 --repo") == 1
+    reviews = fleet.write_reviews(_scope_review(fleet.head_sha))
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 0, res.stderr
+    assert "уже опубликована" in res.stdout
+    assert fleet.gh_calls().count("pr review 7 --repo") == 1
+
+
+@needs_jq
+def test_prose_only_aborts_when_head_moved(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md")
+    res = fleet.run("demo", "7", GH_STUB_HEADOID2="f" * 40)
+    assert res.returncode == 4, res.stdout
+    assert not fleet.body_out.exists()

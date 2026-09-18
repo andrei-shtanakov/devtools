@@ -1525,3 +1525,14 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       отказа по finalize-форме, `human-merge.sh` — authority-root,
       `human-merge.sh` / `make human-merge` — акт человека от его учётки с
       allowlist-проверкой и пином головы.
+- [ ] Срез B: перенести правило области ревью в review-kit — `prose-paths.env`
+      вендорится в `scripts/review/`, фильтр живёт в `local.sh` и накрывает три
+      канала (local.sh, pre-push хук, review-pr.sh); там же становится
+      возможна фильтрация кодового подмножества внутри смешанного дифа
+      (кит строит диф без pathspec, `local.sh:528`). Цена — волна ре-вендора
+      по флоту @owner:github:andrei-shtanakov @id:review-scope-kit-wave
+- [ ] Покрыть тестом `die 2` при реально недостижимой базе: хойст fetch
+      расширил класс затронутых прогонов — раньше отказ получали только репо
+      с fp-китом, теперь и репо со старым китом, которые прежде отдавали
+      фетч базы самому киту
+      @owner:github:andrei-shtanakov @id:review-scope-unreachable-base-coverage

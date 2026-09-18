@@ -48,13 +48,15 @@ set -eu
 
 usage() {
     echo "usage: review-pr.sh <repo> <pr-number> [--dry-run] [--fresh]" \
-        "[--write-verdict <file> | --use-verdict <file>]" \
+        "[--write-verdict <file> | --use-verdict <file>] [--print-scope]" \
         "[--harness claude|codex] [--model <M>]" \
         "[--max-diff-bytes N] [--max-diff-files N]" >&2
     echo "  <repo> — имя каталога репо во флоте (например dispatcher)" >&2
     echo "  --fresh — не наследовать вердикт даже при совпавшем отпечатке" >&2
     echo "  --write-verdict — атомарно сохранить результат dry-run для боевого прогона" >&2
     echo "  --use-verdict — использовать сохранённый результат при точных head + fp" >&2
+    echo "  --print-scope — напечатать область ревью (prose|code) и выйти;" >&2
+    echo "    операторский флаг, не только тестовый зонд" >&2
     echo "  --budget-override <причина> — превысить бюджет платных прогонов" >&2
     echo "  --harness/--model — ревьюер; порядок: флаг > env REVIEW_HARNESS/" >&2
     echo "    REVIEW_MODEL > ~/.config/ai-prosto/harness.env > codex (историч.)" >&2
@@ -100,6 +102,7 @@ opt_max_diff_bytes=""
 opt_max_diff_files=""
 budget_override=""
 print_review_cmd=0
+print_scope=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) dry_run=1; shift ;;
@@ -134,6 +137,7 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || die 2 "--model требует значение"
             opt_model="$2"; shift 2 ;;
         --print-review-cmd) print_review_cmd=1; shift ;;
+        --print-scope) print_scope=1; shift ;;
         # Потолки дифа кита. Пустое значение — отказ здесь: проброс ниже
         # гейтится [ -n ], и явно запрошенный оверрайд молча ушёл бы в
         # умолчание кита (тот же довод, что у local.sh --max-diff-bytes "").
@@ -523,6 +527,329 @@ try_use_verdict_file() {
     exit "$kit_code"
 }
 
+# Согласованность диапазона: классификация области, отпечаток и фактическое
+# ревью обязаны видеть ОДНО состояние базы — освежаем её явным fetch здесь,
+# дальше все вызовы кита идут без --fetch. Destination в refspec делает
+# освежение безусловным даже на single-branch клоне (devtools#73).
+if ! fetch_err=$(git -C "$repo_dir" fetch -q origin \
+    "+refs/heads/$base_ref:refs/remotes/origin/$base_ref" 2>&1); then
+    echo "$fetch_err" >&2
+    die 2 "не удалось освежить базу origin/$base_ref перед ревью"
+fi
+
+# --- Область ревью (contracts/review-scope/v1) -----------------------------
+# Правило живёт файлом-контрактом, а не литералом: срез B вендорит ТОТ ЖЕ
+# файл в кит, и второго написания правила не возникает. Литерал списка путей
+# в этом репо уже однажды разъехался молча — см. governance/runner.py.
+prose_paths_file="${REVIEW_SCOPE_CONTRACT:-$script_dir/contracts/review-scope/v1/prose-paths.env}"
+prose_globs=""
+code_globs=""
+[ -f "$prose_paths_file" ] \
+    || die 2 "нет контракта области ревью: $prose_paths_file"
+# Формат — канон governance/ssot_env.py (эта половина — shell, python читает
+# тот же формат для других контрактов): один ключ — одна строка, дубль —
+# отказ. Выбирать за человека, какое из двух значений настоящее, нельзя —
+# именно такой молчаливый выбор уже однажды развёл литерал и контракт
+# (governance/runner.py). Ведущие/хвостовые пробелы обрезаются; пустая
+# строка и `#`-комментарий пропускаются.
+scope_contract_lines=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    "$prose_paths_file" | grep -v '^#' | grep -v '^$') || true
+# Читает РОВНО ОДНО определение $1 из $scope_contract_lines в scope_key_value.
+# Вызывается напрямую (не через `$(...)`), чтобы `die` внутри действительно
+# завершал скрипт, а не только подоболочку командной подстановки.
+read_scope_key() {
+    _rsk_key="$1"
+    _rsk_matches=$(printf '%s\n' "$scope_contract_lines" \
+        | grep "^${_rsk_key}=") || _rsk_matches=""
+    _rsk_count=0
+    [ -z "$_rsk_matches" ] \
+        || _rsk_count=$(printf '%s\n' "$_rsk_matches" | wc -l | tr -d ' ')
+    case "$_rsk_count" in
+        0) die 2 "контракт области ревью не называет $_rsk_key: \
+$prose_paths_file" ;;
+        1) : ;;
+        *) die 2 "в $prose_paths_file ключ $_rsk_key определён \
+$_rsk_count раз — файл битый; какое значение настоящее, решает человек, \
+не разбор" ;;
+    esac
+    scope_key_value="${_rsk_matches#"${_rsk_key}="}"
+    [ -n "$scope_key_value" ] || die 2 "в $prose_paths_file нет непустого \
+$_rsk_key"
+}
+read_scope_key PROSE
+prose_globs="$scope_key_value"
+# CODE_OVERRIDE обязателен, а не опционален: усечённая вендор-копия без этого
+# ключа молча расширила бы прозу ровно на класс путей, который он защищает
+# (.github/, contracts/, eval/, fixtures/, schemas/) — read_scope_key
+# откажет на нём тем же путём "не называет KEY", что и на пропущенном PROSE.
+read_scope_key CODE_OVERRIDE
+code_globs="$scope_key_value"
+
+# 0 — путь проза, 1 — код. CODE_OVERRIDE сильнее PROSE: Markdown внутри
+# .github/, contracts/, eval/, fixtures/, schemas/ — данные, не проза.
+# `set -f` вокруг обоих циклов: `for _g in $code_globs` — обычное unquoted
+# расширение параметра, и без noglob шелл подверг бы каждый расщеплённый
+# токен (contracts/*, docs/* и т.п.) pathname-expansion от ТЕКУЩЕГО cwd —
+# в этом самом воркдереве docs/ и contracts/ реальны, и глоб молча
+# подменился бы списком настоящих файлов вместо литерального паттерна для
+# `case`. `set +f` перед каждым return восстанавливает поведение до выхода
+# из функции — снаружи globbing не тронут.
+path_is_prose() {
+    set -f
+    for _g in $code_globs; do
+        # глоб намеренно не в кавычках
+        # shellcheck disable=SC2254
+        case "$1" in $_g) set +f; return 1 ;; esac
+    done
+    for _g in $prose_globs; do
+        # глоб намеренно не в кавычках
+        # shellcheck disable=SC2254
+        case "$1" in $_g) set +f; return 0 ;; esac
+    done
+    set +f
+    return 1
+}
+
+# Печатает prose либо code. Fail-closed: список файлов не получен, не
+# разобран или пуст — PR считается КОДОВЫМ и ревьюится как прежде.
+# --no-renames намеренно: переименование приходит парой удаление+добавление,
+# и оба пути проходят классификацию; иначе путь-источник остался бы невиден.
+classify_scope() {
+    if ! _mb=$(git -C "$repo_dir" merge-base "origin/$base_ref" "$review_ref" \
+        2> "$work/scope.err"); then
+        cat "$work/scope.err" >&2
+        echo "ЗАМЕТКА: область ревью не определена (merge-base) —" \
+            "PR ревьюится как кодовый." >&2
+        echo code
+        return 0
+    fi
+    if ! _files=$(git -C "$repo_dir" diff --no-renames --name-only \
+        "$_mb..$head_sha" 2> "$work/scope.err"); then
+        cat "$work/scope.err" >&2
+        echo "ЗАМЕТКА: область ревью не определена (diff) —" \
+            "PR ревьюится как кодовый." >&2
+        echo code
+        return 0
+    fi
+    _any=0
+    _verdict=prose
+    # `for _f in $_files` — unquoted расширение параметра: без `set -f` и без
+    # IFS=newline классификация пути с глоб-метасимволом или пробелом в имени
+    # зависела бы от pathname expansion (от cwd) и от разбиения по пробелу, а
+    # не только от переводов строк, которыми `git diff --name-only` разделяет
+    # пути. Список слов цикла `for` вычисляется РОВНО ОДИН РАЗ, в момент входа
+    # в цикл — правки IFS/`set -f` внутри тела на уже вычисленный список не
+    # влияют, поэтому оба восстанавливаются сразу на первой строке тела: сам
+    # `path_is_prose` ниже расщепляет `$code_globs`/`$prose_globs` по
+    # ПРОБЕЛУ и ему нужны штатные IFS и globbing.
+    _old_ifs=$IFS
+    IFS="
+"
+    set -f
+    for _f in $_files; do
+        set +f
+        IFS=$_old_ifs
+        _any=1
+        path_is_prose "$_f" || { _verdict=code; break; }
+    done
+    set +f
+    IFS=$_old_ifs
+    [ "$_any" -eq 1 ] || {
+        echo "ЗАМЕТКА: область ревью не определена (пустой диапазон) —" \
+            "PR ревьюится как кодовый." >&2
+        _verdict=code
+    }
+    echo "$_verdict"
+}
+
+scope=$(classify_scope)
+if [ "$print_scope" -eq 1 ]; then
+    echo "$scope"
+    exit 0
+fi
+
+# --- Последнее доставленное ревью (источник истины для stop rule) ---------
+# Источник истины про «был ли уже вердикт» — опубликованные ревью самого PR, а
+# не локальный журнал бюджета: журнал списывает круг сразу по коду кита, то
+# есть и там, где вердикт до PR не дошёл (dry-run без публикации, «голова
+# уехала», провал публикации), и он локален — на другой машине пуст, а ревью
+# лежит в PR, где его видит человек.
+#
+# Строгость разбора — та же, что у дедупа ниже: ровно ОДИН маркер полного
+# формата. Тело ревью содержит вывод порога, то есть текст модели, пришедший
+# из недоверенного дифа; маркер оттуда, стоящий раньше настоящего, иначе
+# выбирал бы базу адресного ревью — вплоть до пустого диапазона, который кит
+# закрывает нулём, а обвязка публикует как approve.
+lr_state=""
+# lr_head/lr_fp разбираются здесь же, но потребителя в этом PR нет: адресный
+# recheck (`--targeted`) вынесен отдельно (devtools#260). Разбор общий и
+# строгий, чтобы этот потребитель не завёл себе второй, более слабый.
+lr_head=""
+lr_fp=""
+# lr_delivered_state — состояние последнего ДОСТАВЛЕННОГО ревью $REVIEW_LOGIN,
+# без требований к маркеру (в отличие от lr_state — марк output stop rule,
+# который признаёт только строгий формат `head=…fp=…`). Нужен отдельно: PR,
+# на котором лежит красный вердикт от кита без --fingerprint-only (маркер без
+# `fp`), для stop rule — miss, но для guard'а ветки прозы (находка 1) это
+# ДОСТАВЛЕННЫЙ CHANGES_REQUESTED, и его нельзя молча погасить аттестацией.
+lr_delivered_state=""
+lr_known=0
+# lr_json/lr_fetch_ok кэшируют СЫРОЙ ответ /reviews для повторного
+# использования ниже, в блоке поиска наследуемого вердикта по отпечатку
+# (находка 12): без кэша тот блок звал бы `gh_r api --paginate` ВТОРОЙ раз на
+# каждом прогоне — лишний round-trip и расход rate limit. lr_fetch_ok=1
+# означает «запрос состоялся», а не «разбор успешен» — второй потребитель
+# сам решает, что делать с сырым JSON.
+lr_json=""
+lr_fetch_ok=0
+# Запрос идёт на КАЖДОМ прогоне, а не только при дедупе: stop rule обязан знать
+# про доставленный вердикт независимо от отпечатка и от --fresh. Недоступность
+# ответа (нет jq, отказ API) stop rule не отключает молча — она об этом
+# ГРОМКО говорит: жёсткий лимит бюджета при этом продолжает работать, а
+# уточнение «после approve круга нет» деградирует с предупреждением, а не
+# тихо.
+#
+# lr_known выставляется в 1, только если оба запроса к ОДНОМУ и тому же
+# lr_json разобрались: маркерный (lr_state, строгость stop rule не трогаем ни
+# на символ) и безмаркерный (lr_delivered_state, находка 1). Это два разных
+# вопроса к одному списку ревью, не замена одного другим.
+if command -v jq >/dev/null 2>&1; then
+    if lr_json=$(gh_r api --paginate "repos/$slug/pulls/$pr/reviews" \
+        2> "$work/lastreview.err"); then
+        lr_fetch_ok=1
+        if lr_line=$(printf '%s' "$lr_json" | jq -rs \
+            '([ .[][]
+               | select(.user.login == "'"$REVIEW_LOGIN"'")
+               | select(((.body // "") | index("<!-- codex-terminal-review ")) != null)
+             ] | last) as $r
+                | if $r == null then "none none none"
+                  else
+                    (($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) as $n
+                    | (($r.body // "") | [match("<!-- codex-terminal-review head=([0-9a-f]{40}) fp=([0-9a-f]{64}) -->")]) as $ms
+                    | if $n == 1 and ($ms | length) == 1
+                         and ($r.state == "APPROVED" or $r.state == "CHANGES_REQUESTED")
+                      then $r.state + " " + $ms[0].captures[0].string + " " + $ms[0].captures[1].string
+                      else "miss miss miss" end
+                  end' 2> "$work/lastreview.err") \
+            && lr_delivered_state=$(printf '%s' "$lr_json" | jq -rs \
+            '([ .[][]
+               | select(.user.login == "'"$REVIEW_LOGIN"'")
+               | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")
+             ] | last) as $r
+            | if $r == null then "none" else $r.state end' \
+            2> "$work/lastreview.err"); then
+            # shellcheck disable=SC2034 — lr_head/lr_fp пока не читает
+            # никто: их потребитель, адресный recheck, вынесен в
+            # devtools#260. Разбирать их здесь всё равно надо — строгий
+            # разбор один на всех потребителей, см. комментарий выше.
+            read -r lr_state lr_head lr_fp <<EOF
+$lr_line
+EOF
+            lr_known=1
+            # shellcheck disable=SC2034 — потребитель lr_head в devtools#260
+            [ "$lr_state" != "none" ] && [ "$lr_state" != "miss" ] || lr_head=""
+            [ "$lr_state" != "miss" ] || lr_state=""
+            [ "$lr_state" != "none" ] || lr_state=""
+            [ "$lr_delivered_state" != "none" ] || lr_delivered_state=""
+        else
+            cat "$work/lastreview.err" >&2
+        fi
+    else
+        cat "$work/lastreview.err" >&2
+    fi
+fi
+[ "$lr_known" -eq 1 ] || echo "ВНИМАНИЕ: последнее ревью $REVIEW_LOGIN не" \
+    "прочитано (нет jq или отказ API) — stop rule «после approve круга нет»" \
+    "на этом прогоне не проверен; лимит бюджета продолжает действовать." >&2
+
+# --- Прозаическая область ревью (scope=prose, решение владельца 2026-09-18) -
+# Прозаический PR модельному ревьюеру не отдаётся: платный ревьюер — только
+# код. Публикуется scope-аттестация — отдельная governance-сущность, а НЕ
+# вердикт: у неё собственный маркер, которого не знает ни один потребитель
+# протокола codex-terminal-review, поэтому появление кода на этом же PR не
+# потребует --budget-override.
+#
+# Красный вердикт аттестацией не гасится. Опубликовать approve поверх
+# доставленного CHANGES_REQUESTED значило бы снять его синтетическим
+# зелёным; вызвать ревьюера — нарушить правило «модель не видит прозу».
+# Поэтому здесь отказ: PR остаётся человеку.
+#
+# Guard решает по lr_delivered_state (без требований к маркеру), а не по
+# lr_state (маркерному): красный вердикт от старого кита без --fingerprint-
+# only публикует маркер без `fp`, и для строгого stop-rule разбора это miss —
+# но он всё равно ДОСТАВЛЕН и обязан быть виден здесь. Пустой lr_state (и
+# пустой lr_delivered_state) означает либо «красного нет», либо «факт не
+# получен» — эти два состояния различает именно lr_known, и без него решать
+# нечем: fail-closed, а не тихий approve поверх непрочитанного вердикта.
+if [ "$scope" = "prose" ]; then
+    # Находка 8: ветка прозы выходит раньше, чем --write-verdict/--use-
+    # verdict успевают что-то значить (оба относятся к вердикту кита, а на
+    # prose-only PR кит не вызывается вовсе) — как и прочие ветки «делаю не
+    # то, что просили», печатаем ЗАМЕТКУ, а не молчим.
+    [ -z "$write_verdict" ] || echo "ЗАМЕТКА: --write-verdict не применяется" \
+        "на prose-only PR (кит не вызывается) — verdict-файл не записан." >&2
+    [ -z "$use_verdict" ] || echo "ЗАМЕТКА: --use-verdict не применяется на" \
+        "prose-only PR (кит не вызывается) — verdict-файл не читался." >&2
+    [ "$lr_known" -eq 1 ] || die 2 "prose-only диф, но список ревью" \
+        "${slug}#${pr} не прочитан (нет jq или отказ API): решить, нет ли" \
+        "доставленного request-changes, не на чем. Аттестация не публикуется —" \
+        "PR остаётся человеку."
+    if [ "$lr_delivered_state" = "CHANGES_REQUESTED" ]; then
+        die 2 "prose-only диф при доставленном request-changes от" \
+            "$REVIEW_LOGIN на ${slug}#${pr}: аттестация не публикуется" \
+            "(она погасила бы красный вердикт), ревьюер не вызывается" \
+            "(проза платному ревью не подлежит) — PR остаётся человеку." \
+            "Появится код в дифе — прогон пойдёт обычным путём."
+    fi
+    # Дедуп (находка 4): повторный/resume-прогон на ТОМ ЖЕ head не кладёт в
+    # PR ещё одну аттестацию — иначе каждый повтор добавлял бы новый APPROVE.
+    # У кодового пути дедуп есть (по отпечатку входа), у прозы его не было.
+    # Ищем в уже прочитанном lr_json (второй запрос к API не нужен) маркер
+    # `ai-prosto-scope-review` от $REVIEW_LOGIN с ТЕКУЩИМ head_sha; guard
+    # выше гарантирует lr_known=1, то есть jq доступен и lr_json прочитан.
+    if _att_seen=$(printf '%s' "$lr_json" | jq -rs --arg h "$head_sha" \
+        '([ .[][]
+           | select(.user.login == "'"$REVIEW_LOGIN"'")
+           | select(((.body // "") | index(
+               "<!-- ai-prosto-scope-review version=1 kind=prose-only head="
+               + $h + " -->"
+             )) != null)
+         ] | length) > 0' 2> "$work/att.err") && [ "$_att_seen" = "true" ]; then
+        echo "ЗАМЕТКА: аттестация на этой голове уже опубликована — ничего" \
+            "не публикуется."
+        exit 0
+    fi
+    # Отказ самого дедупа (не «не нашли», а «проверить не удалось») обязан быть
+    # слышен: молчаливый путь здесь стоил бы второго APPROVE в PR. Публикацию он
+    # не отменяет — иначе сбой проверки лишал бы PR аттестации вовсе.
+    [ ! -s "$work/att.err" ] || {
+        cat "$work/att.err" >&2
+        echo "ВНИМАНИЕ: проверка «аттестация уже опубликована» не отработала —" \
+            "возможен повторный APPROVE на ${slug}#${pr}." >&2
+    }
+    {
+        echo "## Automated scope attestation — prose-only"
+        echo
+        echo "- PR: ${slug}#${pr}, head \`$head_sha\`"
+        echo "- classifier: \`review-scope/v1\`"
+        echo "- все изменённые пути классифицированы как prose-only"
+        echo "- модельный ревьюер не вызывался; содержательная корректность" \
+            "прозы не проверялась"
+        echo "- required CI checks остаются обязательным независимым" \
+            "условием мержа"
+        echo
+        echo "<!-- ai-prosto-scope-review version=1 kind=prose-only" \
+            "head=$head_sha -->"
+    } > "$work/body.md"
+    if [ "$dry_run" -eq 1 ]; then
+        echo "=== dry-run: scope-аттестация, ничего не публикуется ==="
+        cat "$work/body.md"
+        exit 0
+    fi
+    publish approve
+    exit 0
+fi
+
 # --- Отпечаток входа ревью (дедуп, devtools#72) ------------------------------
 # Feature-detect по литералу в local.sh ЦЕЛЕВОГО репо — тот же паттерн, каким
 # кит сам определяет возможности build-prompt (--generated-list). Нет флага →
@@ -582,20 +909,6 @@ if [ -n "$max_diff_bytes" ] || [ -n "$max_diff_files" ]; then
 fi
 
 if [ "$fp_supported" -eq 1 ]; then
-    # Согласованность диапазона: отпечаток и фактическое ревью обязаны видеть
-    # ОДНО состояние базы — освежаем её явным fetch здесь, дальше оба вызова
-    # кита идут без --fetch (fp-режим с --fetch несовместим по построению).
-    # Refspec с явным destination: оппортунистическое обновление tracking-ref
-    # (git ≥1.8.4) покрывает штатный клон, но зависит от refspec-конфигурации
-    # remote'а — single-branch клон с ДРУГОЙ базой PR оставил бы origin/<base>
-    # stale, и отпечаток с наследованием считались бы по устаревшему
-    # диапазону. Destination делает освежение безусловным (боевая находка
-    # codex-ревью этого же PR, devtools#73).
-    if ! fetch_err=$(git -C "$repo_dir" fetch -q origin \
-        "+refs/heads/$base_ref:refs/remotes/origin/$base_ref" 2>&1); then
-        echo "$fetch_err" >&2
-        die 2 "не удалось освежить базу origin/$base_ref перед отпечатком"
-    fi
     set +e
     # shellcheck disable=SC2086 — cap_args проверен: только флаги и цифры.
     fp_out=$(run_kit \
@@ -656,19 +969,33 @@ fi
 # shape [[...],[...]], что давал --slurp. gh и jq вызываются раздельно,
 # чтобы отказ каждого был виден со СВОЕЙ причиной, а не маскировался
 # пайпом под «нет ревью».
+#
+# reviews_json — тот же СЫРОЙ ответ /reviews, что уже прочитан выше в
+# lr_json (находка 12): второй запрос к API не идёт, кэш переиспользуется
+# lr_fetch_ok различает «запроса не было/отказал» и «пришёл пустой список» —
+# поведение при отказе gh не меняется, деградация с предупреждением, не молча.
 inh_state=""
 inh_head=""
 if [ -n "$fp" ] && [ "$fresh" -eq 0 ]; then
     if ! command -v jq >/dev/null 2>&1; then
         echo "ЗАМЕТКА: jq не найден — поиск наследуемого вердикта пропущен," \
             "идёт полный прогон." >&2
-    elif ! reviews_json=$(gh_r api --paginate \
-        "repos/$slug/pulls/$pr/reviews" 2> "$work/reviews.err"); then
-        cat "$work/reviews.err" >&2
+    elif [ "$lr_fetch_ok" -ne 1 ]; then
         echo "ЗАМЕТКА: прошлые ревью не прочитались (gh) — дедуп пропущен," \
             "идёт полный прогон." >&2
-    elif ! candidate=$(printf '%s' "$reviews_json" | jq -rs \
-        '([ .[][] | select(.user.login == "'"$REVIEW_LOGIN"'") ] | last) as $r
+    # Отбор кандидата и валидация РАЗНЕСЕНЫ намеренно. Кандидат протокола —
+    # ревью, в теле которого есть префикс маркера; выбирается ПОСЛЕДНИЙ такой,
+    # и только он валидируется. Правило «последнее ВАЛИДНОЕ ревью» пропускало бы
+    # новый повреждённый или задублированный маркер и воскрешало перекрытый им
+    # вердикт — stop rule решал бы по вердикту, который свежее событие протокола
+    # уже отменило. Повреждённый, задублированный и DISMISSED кандидат остаётся
+    # miss, поиск назад НЕ ведётся. Не-кандидаты (scope-аттестации, любые ревью
+    # $REVIEW_LOGIN без префикса) на результат не влияют.
+    elif ! candidate=$(printf '%s' "$lr_json" | jq -rs \
+        '([ .[][]
+           | select(.user.login == "'"$REVIEW_LOGIN"'")
+           | select(((.body // "") | index("<!-- codex-terminal-review ")) != null)
+         ] | last) as $r
             | if $r == null then "none none none"
               else
                 (($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) as $n
@@ -747,68 +1074,6 @@ if [ -n "$inh_state" ]; then
     publish "$action"
     exit "$kit_code"
 fi
-
-# --- Последнее доставленное ревью (источник истины для stop rule) ---------
-# Источник истины про «был ли уже вердикт» — опубликованные ревью самого PR, а
-# не локальный журнал бюджета: журнал списывает круг сразу по коду кита, то
-# есть и там, где вердикт до PR не дошёл (dry-run без публикации, «голова
-# уехала», провал публикации), и он локален — на другой машине пуст, а ревью
-# лежит в PR, где его видит человек.
-#
-# Строгость разбора — та же, что у дедупа ниже: ровно ОДИН маркер полного
-# формата. Тело ревью содержит вывод порога, то есть текст модели, пришедший
-# из недоверенного дифа; маркер оттуда, стоящий раньше настоящего, иначе
-# выбирал бы базу адресного ревью — вплоть до пустого диапазона, который кит
-# закрывает нулём, а обвязка публикует как approve.
-lr_state=""
-# lr_head/lr_fp разбираются здесь же, но потребителя в этом PR нет: адресный
-# recheck (`--targeted`) вынесен отдельно (devtools#260). Разбор общий и
-# строгий, чтобы этот потребитель не завёл себе второй, более слабый.
-lr_head=""
-lr_fp=""
-lr_known=0
-# Запрос идёт на КАЖДОМ прогоне, а не только при дедупе: stop rule обязан знать
-# про доставленный вердикт независимо от отпечатка и от --fresh. Недоступность
-# ответа (нет jq, отказ API) stop rule не отключает молча — она об этом
-# ГРОМКО говорит: жёсткий лимит бюджета при этом продолжает работать, а
-# уточнение «после approve круга нет» деградирует с предупреждением, а не
-# тихо.
-if command -v jq >/dev/null 2>&1; then
-    if lr_json=$(gh_r api --paginate "repos/$slug/pulls/$pr/reviews" \
-        2> "$work/lastreview.err"); then
-        if lr_line=$(printf '%s' "$lr_json" | jq -rs \
-            '([ .[][] | select(.user.login == "'"$REVIEW_LOGIN"'") ] | last) as $r
-                | if $r == null then "none none none"
-                  else
-                    (($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) as $n
-                    | (($r.body // "") | [match("<!-- codex-terminal-review head=([0-9a-f]{40}) fp=([0-9a-f]{64}) -->")]) as $ms
-                    | if $n == 1 and ($ms | length) == 1
-                         and ($r.state == "APPROVED" or $r.state == "CHANGES_REQUESTED")
-                      then $r.state + " " + $ms[0].captures[0].string + " " + $ms[0].captures[1].string
-                      else "miss miss miss" end
-                  end' 2> "$work/lastreview.err"); then
-            # shellcheck disable=SC2034 — lr_head/lr_fp пока не читает
-            # никто: их потребитель, адресный recheck, вынесен в
-            # devtools#260. Разбирать их здесь всё равно надо — строгий
-            # разбор один на всех потребителей, см. комментарий выше.
-            read -r lr_state lr_head lr_fp <<EOF
-$lr_line
-EOF
-            lr_known=1
-            # shellcheck disable=SC2034 — потребитель lr_head в devtools#260
-            [ "$lr_state" != "none" ] && [ "$lr_state" != "miss" ] || lr_head=""
-            [ "$lr_state" != "miss" ] || lr_state=""
-            [ "$lr_state" != "none" ] || lr_state=""
-        else
-            cat "$work/lastreview.err" >&2
-        fi
-    else
-        cat "$work/lastreview.err" >&2
-    fi
-fi
-[ "$lr_known" -eq 1 ] || echo "ВНИМАНИЕ: последнее ревью $REVIEW_LOGIN не" \
-    "прочитано (нет jq или отказ API) — stop rule «после approve круга нет»" \
-    "на этом прогоне не проверен; лимит бюджета продолжает действовать." >&2
 
 # --- Бюджет платных прогонов (решение владельца 2026-09-18) ---------------
 # Всё, что выше, до модели не доходит: отпечаток (`--fingerprint-only`),
