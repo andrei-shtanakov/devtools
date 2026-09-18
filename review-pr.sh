@@ -100,6 +100,7 @@ opt_max_diff_bytes=""
 opt_max_diff_files=""
 budget_override=""
 print_review_cmd=0
+print_scope=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) dry_run=1; shift ;;
@@ -134,6 +135,7 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || die 2 "--model требует значение"
             opt_model="$2"; shift 2 ;;
         --print-review-cmd) print_review_cmd=1; shift ;;
+        --print-scope) print_scope=1; shift ;;
         # Потолки дифа кита. Пустое значение — отказ здесь: проброс ниже
         # гейтится [ -n ], и явно запрошенный оверрайд молча ушёл бы в
         # умолчание кита (тот же довод, что у local.sh --max-diff-bytes "").
@@ -523,6 +525,104 @@ try_use_verdict_file() {
     exit "$kit_code"
 }
 
+# Согласованность диапазона: классификация области, отпечаток и фактическое
+# ревью обязаны видеть ОДНО состояние базы — освежаем её явным fetch здесь,
+# дальше все вызовы кита идут без --fetch. Destination в refspec делает
+# освежение безусловным даже на single-branch клоне (devtools#73).
+# Отказ самого fetch (недостижимая/переименованная база) намеренно НЕ die
+# здесь: классификация ниже сама fail-closed на недостижимый origin/$base_ref
+# (merge-base не вычислится — код), а fp/полный прогон кита откажут на той
+# же причине собственным кодом выхода (существующий die по 2|3). Единый die
+# тут замаскировал бы разницу между «база недостижима» (мягко деградирует в
+# code) и «кит не смог отработать» (жёсткий отказ).
+if ! fetch_err=$(git -C "$repo_dir" fetch -q origin \
+    "+refs/heads/$base_ref:refs/remotes/origin/$base_ref" 2>&1); then
+    echo "$fetch_err" >&2
+    echo "ЗАМЕТКА: не удалось освежить базу origin/$base_ref перед" \
+        "ревью — используется то, что уже есть локально." >&2
+fi
+
+# --- Область ревью (contracts/review-scope/v1) -----------------------------
+# Правило живёт файлом-контрактом, а не литералом: срез B вендорит ТОТ ЖЕ
+# файл в кит, и второго написания правила не возникает. Литерал списка путей
+# в этом репо уже однажды разъехался молча — см. governance/runner.py.
+prose_paths_file="${REVIEW_SCOPE_CONTRACT:-$script_dir/contracts/review-scope/v1/prose-paths.env}"
+prose_globs=""
+code_globs=""
+[ -f "$prose_paths_file" ] \
+    || die 2 "нет контракта области ревью: $prose_paths_file"
+# Повторы ключа склеиваются (список переносится по строкам), а не
+# перекрывают друг друга: `tail -1`, как в harness.env, здесь молча терял бы
+# все группы, кроме последней.
+prose_globs=$(sed -n 's/^PROSE=//p' "$prose_paths_file" | tr '\n' ' ')
+code_globs=$(sed -n 's/^CODE_OVERRIDE=//p' "$prose_paths_file" | tr '\n' ' ')
+[ -n "$prose_globs" ] \
+    || die 2 "контракт области ревью не называет PROSE: $prose_paths_file"
+
+# 0 — путь проза, 1 — код. CODE_OVERRIDE сильнее PROSE: Markdown внутри
+# .github/, contracts/, eval/, fixtures/, schemas/ — данные, не проза.
+# `set -f` вокруг обоих циклов: `for _g in $code_globs` — обычное unquoted
+# расширение параметра, и без noglob шелл подверг бы каждый расщеплённый
+# токен (contracts/*, docs/* и т.п.) pathname-expansion от ТЕКУЩЕГО cwd —
+# в этом самом воркдереве docs/ и contracts/ реальны, и глоб молча
+# подменился бы списком настоящих файлов вместо литерального паттерна для
+# `case`. `set +f` перед каждым return восстанавливает поведение до выхода
+# из функции — снаружи globbing не тронут.
+path_is_prose() {
+    set -f
+    for _g in $code_globs; do
+        # shellcheck disable=SC2254 — глоб намеренно не в кавычках
+        case "$1" in $_g) set +f; return 1 ;; esac
+    done
+    for _g in $prose_globs; do
+        # shellcheck disable=SC2254 — глоб намеренно не в кавычках
+        case "$1" in $_g) set +f; return 0 ;; esac
+    done
+    set +f
+    return 1
+}
+
+# Печатает prose либо code. Fail-closed: список файлов не получен, не
+# разобран или пуст — PR считается КОДОВЫМ и ревьюится как прежде.
+# --no-renames намеренно: переименование приходит парой удаление+добавление,
+# и оба пути проходят классификацию; иначе путь-источник остался бы невиден.
+classify_scope() {
+    if ! _mb=$(git -C "$repo_dir" merge-base "origin/$base_ref" "$review_ref" \
+        2> "$work/scope.err"); then
+        cat "$work/scope.err" >&2
+        echo "ЗАМЕТКА: область ревью не определена (merge-base) —" \
+            "PR ревьюится как кодовый." >&2
+        echo code
+        return 0
+    fi
+    if ! _files=$(git -C "$repo_dir" diff --no-renames --name-only \
+        "$_mb..$head_sha" 2> "$work/scope.err"); then
+        cat "$work/scope.err" >&2
+        echo "ЗАМЕТКА: область ревью не определена (diff) —" \
+            "PR ревьюится как кодовый." >&2
+        echo code
+        return 0
+    fi
+    _any=0
+    _verdict=prose
+    for _f in $_files; do
+        _any=1
+        path_is_prose "$_f" || { _verdict=code; break; }
+    done
+    [ "$_any" -eq 1 ] || {
+        echo "ЗАМЕТКА: область ревью не определена (пустой диапазон) —" \
+            "PR ревьюится как кодовый." >&2
+        _verdict=code
+    }
+    echo "$_verdict"
+}
+
+scope=$(classify_scope)
+if [ "$print_scope" -eq 1 ]; then
+    echo "$scope"
+    exit 0
+fi
+
 # --- Отпечаток входа ревью (дедуп, devtools#72) ------------------------------
 # Feature-detect по литералу в local.sh ЦЕЛЕВОГО репо — тот же паттерн, каким
 # кит сам определяет возможности build-prompt (--generated-list). Нет флага →
@@ -582,20 +682,6 @@ if [ -n "$max_diff_bytes" ] || [ -n "$max_diff_files" ]; then
 fi
 
 if [ "$fp_supported" -eq 1 ]; then
-    # Согласованность диапазона: отпечаток и фактическое ревью обязаны видеть
-    # ОДНО состояние базы — освежаем её явным fetch здесь, дальше оба вызова
-    # кита идут без --fetch (fp-режим с --fetch несовместим по построению).
-    # Refspec с явным destination: оппортунистическое обновление tracking-ref
-    # (git ≥1.8.4) покрывает штатный клон, но зависит от refspec-конфигурации
-    # remote'а — single-branch клон с ДРУГОЙ базой PR оставил бы origin/<base>
-    # stale, и отпечаток с наследованием считались бы по устаревшему
-    # диапазону. Destination делает освежение безусловным (боевая находка
-    # codex-ревью этого же PR, devtools#73).
-    if ! fetch_err=$(git -C "$repo_dir" fetch -q origin \
-        "+refs/heads/$base_ref:refs/remotes/origin/$base_ref" 2>&1); then
-        echo "$fetch_err" >&2
-        die 2 "не удалось освежить базу origin/$base_ref перед отпечатком"
-    fi
     set +e
     # shellcheck disable=SC2086 — cap_args проверен: только флаги и цифры.
     fp_out=$(run_kit \

@@ -105,7 +105,7 @@ echo "local.sh $*" >> "$LOCAL_SH_LOG"
   echo "script=$0"
   echo "cwd=$(pwd)"
   echo "head=$(git rev-parse HEAD)"
-  echo "content=$(cat a.txt)"
+  echo "content=$(cat a.py)"
 } > "$REVIEW_STUB_TREE_LOG"
 echo "stub verdict body"
 exit 0
@@ -164,14 +164,14 @@ class Fleet:
         _git("init", "-b", "master", cwd=seed)
         _git("config", "user.email", "t@example.com", cwd=seed)
         _git("config", "user.name", "t", cwd=seed)
-        (seed / "a.txt").write_text("base\n")
+        (seed / "a.py").write_text("base\n")
         _git("add", ".", cwd=seed)
         _git("commit", "-m", "base", cwd=seed)
         _git("remote", "add", "origin", str(self.origin), cwd=seed)
         _git("push", "-q", "origin", "master", cwd=seed)
         # Ветка PR: один коммит поверх master, выложен как refs/pull/7/head —
         # ровно так PR выглядит на настоящем GitHub-remote.
-        (seed / "a.txt").write_text("changed\n")
+        (seed / "a.py").write_text("changed\n")
         _git("commit", "-am", "pr change", cwd=seed)
         self.head_sha = _git("rev-parse", "HEAD", cwd=seed)
         _git("push", "-q", "origin", "HEAD:refs/pull/7/head", cwd=seed)
@@ -359,7 +359,7 @@ def test_reviewer_reads_exact_pr_head_from_ephemeral_worktree(
     assert facts["content"] == "changed"
     assert Path(facts["cwd"]) != fleet.repo
     assert _git("branch", "--show-current", cwd=fleet.repo) == "master"
-    assert (fleet.repo / "a.txt").read_text() == "base\n"
+    assert (fleet.repo / "a.py").read_text() == "base\n"
     worktrees = _git("worktree", "list", "--porcelain", cwd=fleet.repo)
     assert worktrees.count("worktree ") == 1
 
@@ -1277,3 +1277,82 @@ def test_dismissed_terminal_review_does_not_resurrect_older(fleet: Fleet) -> Non
         _review("DISMISSED", OLD_HEAD, FP),
     )
     assert fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews).returncode == 0
+
+
+def _seed_files(fleet: Fleet, *paths: str) -> None:
+    """Переложить голову PR так, чтобы диф трогал ровно эти пути."""
+    work = fleet.tmp / "reseed"
+    if work.exists():
+        shutil.rmtree(work)
+    subprocess.run(
+        ["git", "clone", "-q", str(fleet.origin), str(work)],
+        check=True, capture_output=True,
+    )
+    _git("config", "user.email", "t@example.com", cwd=work)
+    _git("config", "user.name", "t", cwd=work)
+    for p in paths:
+        target = work / p
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("changed\n")
+    _git("add", "-A", cwd=work)
+    _git("commit", "-m", "pr change", cwd=work)
+    fleet.head_sha = _git("rev-parse", "HEAD", cwd=work)
+    _git("push", "-qf", "origin", "HEAD:refs/pull/7/head", cwd=work)
+
+
+def test_scope_prose_only_when_every_path_is_prose(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md", "TODO.md", "notes.txt")
+    res = fleet.run("demo", "7", "--print-scope")
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "prose"
+
+
+def test_scope_code_when_any_path_is_code(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md", "src/tool.py")
+    res = fleet.run("demo", "7", "--print-scope")
+    assert res.stdout.strip() == "code"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/workflows/ci.md",
+        "contracts/review-scope/v1/notes.md",
+        "eval/corpus/case.md",
+        "fixtures/sample.md",
+        "schemas/readme.md",
+    ],
+)
+def test_markdown_in_code_dirs_is_code(fleet: Fleet, path: str) -> None:
+    _seed_files(fleet, path)
+    assert fleet.run("demo", "7", "--print-scope").stdout.strip() == "code"
+
+
+def test_rename_from_code_to_prose_stays_code(fleet: Fleet) -> None:
+    """Переименование проверяется по ОБОИМ путям: --no-renames показывает
+    и удаление старого, и добавление нового."""
+    work = fleet.tmp / "rename"
+    subprocess.run(
+        ["git", "clone", "-q", str(fleet.origin), str(work)],
+        check=True, capture_output=True,
+    )
+    _git("config", "user.email", "t@example.com", cwd=work)
+    _git("config", "user.name", "t", cwd=work)
+    (work / "tool.py").write_text("x\n")
+    _git("add", "-A", cwd=work)
+    _git("commit", "-m", "add code", cwd=work)
+    _git("push", "-q", "origin", "master", cwd=work)
+    # git mv не создаёт директорию назначения сам.
+    (work / "docs").mkdir(parents=True, exist_ok=True)
+    _git("mv", "tool.py", "docs/tool.md", cwd=work)
+    _git("commit", "-m", "rename to prose", cwd=work)
+    fleet.head_sha = _git("rev-parse", "HEAD", cwd=work)
+    _git("push", "-qf", "origin", "HEAD:refs/pull/7/head", cwd=work)
+    assert fleet.run("demo", "7", "--print-scope").stdout.strip() == "code"
+
+
+def test_unreadable_file_list_falls_back_to_code(fleet: Fleet) -> None:
+    """Fail-closed: merge-base не вычисляется — PR считается кодовым."""
+    res = fleet.run("demo", "7", "--print-scope", GH_STUB_BASEREF="no-such-base")
+    assert res.stdout.strip() == "code"
+    assert "область ревью не определена" in res.stderr
