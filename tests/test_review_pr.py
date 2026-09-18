@@ -227,6 +227,9 @@ class Fleet:
             # реальный ~/.config/ai-prosto/harness.env не должен влиять на
             # тесты — резолюция идёт от вшитого дефолта codex.
             AI_PROSTO_HARNESS_ENV=str(self.tmp / "no-harness.env"),
+            # Бюджет платных прогонов ведётся на диске; тесты обязаны быть
+            # герметичны от состояния машины оператора и друг от друга.
+            REVIEW_BUDGET_DIR=str(self.tmp / "review-budget"),
         )
         # …и от env-слоя оболочки оператора (ревью #231): экспортированный
         # REVIEW_HARNESS=claude на ките-стабе без харнесс-слоя дал бы код 2
@@ -995,3 +998,118 @@ def test_old_kit_full_run_with_claude_is_refused_before_review(fleet: Fleet) -> 
     assert "без харнесс-слоя" in res.stderr
     assert "pr review" not in fleet.gh_calls()
     assert not fleet.body_out.exists()
+
+
+# --- Бюджет платных прогонов (решение владельца 2026-09-18) ------------------
+# Предыстория: неформальный гейт «чинить любую находку и повторять до чистого
+# вердикта» дал 14 платных кругов на одном PR. Формальный порог (blocker/major
+# + high) при этом НЕ нарушался — каждый новый круг открывала настоящая
+# блокирующая находка. Ограничивать надо не порог, а число платных проходов, и
+# ограничение обязано быть барьером, а не прозой: правило в CLAUDE.md обходится
+# рационализацией (наблюдалось дважды за одну сессию), отказ инструмента — нет.
+#
+# Считаются ФАКТИЧЕСКИЕ вызовы модели. Отпечаток (`--fingerprint-only`) и
+# наследование вердикта (`--use-verdict`) выходят до вызова ревьюера и потому
+# не платят — бюджет им не расходуется.
+
+
+def test_budget_allows_full_plus_targeted(fleet: Fleet) -> None:
+    """Бюджет — 1 полный + 1 адресный: два платных прогона проходят."""
+    assert fleet.run("demo", "7").returncode == 0
+    assert fleet.run("demo", "7").returncode == 0
+
+
+def test_budget_refuses_third_paid_run(fleet: Fleet) -> None:
+    fleet.run("demo", "7")
+    fleet.run("demo", "7")
+    before = fleet.gh_calls().count("pr review")
+    kit_before = fleet.local_log.read_text().count("--format markdown")
+    res = fleet.run("demo", "7")
+    assert res.returncode == 2, res.stdout
+    assert "бюджет" in res.stderr.lower()
+    # Отказ обязан называть путь обхода, иначе оператор не знает, что делать.
+    assert "--budget-override" in res.stderr
+    # Fail-closed: третий прогон не дошёл до кита и ничего не опубликовал.
+    # Считаем ПРИРОСТ: в общем логе лежат публикации первых двух кругов.
+    assert fleet.gh_calls().count("pr review") == before
+    assert fleet.local_log.read_text().count("--format markdown") == kit_before
+
+
+def test_dry_run_consumes_budget(fleet: Fleet) -> None:
+    """--dry-run платит так же: сегодня все 14 кругов были dry-run, и по
+    опубликованным вердиктам их было бы видно ОДИН."""
+    fleet.run("demo", "7", "--dry-run")
+    fleet.run("demo", "7", "--dry-run")
+    res = fleet.run("demo", "7", "--dry-run")
+    assert res.returncode == 2, res.stdout
+    assert "бюджет" in res.stderr.lower()
+
+
+def test_budget_is_per_pr(fleet: Fleet) -> None:
+    fleet.run("demo", "7")
+    fleet.run("demo", "7")
+    # Другой PR — свой бюджет. Ветку восьмого надо выложить: review-pr.sh
+    # фетчит refs/pull/<n>/head, и без неё прогон упал бы не по бюджету.
+    _git(
+        "push", "-q", "origin", f"{fleet.head_sha}:refs/pull/8/head",
+        cwd=fleet.repo,
+    )
+    assert fleet.run("demo", "8").returncode == 0
+
+
+def test_budget_override_requires_reason(fleet: Fleet) -> None:
+    res = fleet.run("demo", "7", "--budget-override")
+    assert res.returncode == 2
+    assert "причин" in res.stderr.lower()
+
+
+def test_budget_override_rejects_empty_reason(fleet: Fleet) -> None:
+    res = fleet.run("demo", "7", "--budget-override", "  ")
+    assert res.returncode == 2
+    assert "причин" in res.stderr.lower()
+
+
+def test_budget_override_allows_and_records_reason(fleet: Fleet) -> None:
+    fleet.run("demo", "7")
+    fleet.run("demo", "7")
+    res = fleet.run(
+        "demo", "7", "--budget-override", "владелец: critical-профиль",
+    )
+    assert res.returncode == 0, res.stderr
+    # Перерасход обязан быть виден в опубликованном вердикте, а не только в
+    # локальном логе: читатель PR узнаёт о нём без чтения прозы агента.
+    body = fleet.body_out.read_text()
+    assert "бюджет" in body.lower()
+    assert "владелец: critical-профиль" in body
+
+
+def test_budget_override_not_needed_within_budget(fleet: Fleet) -> None:
+    """Обход в пределах бюджета не помечает вердикт — отметка означает
+    перерасход, иначе она обесценивается."""
+    res = fleet.run("demo", "7", "--budget-override", "на всякий случай")
+    assert res.returncode == 0, res.stderr
+    assert "бюджет" not in fleet.body_out.read_text().lower()
+
+
+def test_use_verdict_bypasses_exhausted_budget(fp_fleet: Fleet) -> None:
+    """Перенос готового вердикта модель не зовёт — и потому бюджетом не
+    ограничен. Утверждение из комментария к барьеру: без этого теста оно было
+    бы такой же непроверяемой прозой, какую процесс требует убирать."""
+    verdict = fp_fleet.tmp / "v.out"
+    res = fp_fleet.run(
+        "demo", "7", "--dry-run", "--write-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+    )
+    assert res.returncode == 0, res.stderr
+    # Выбираем остаток бюджета: один платный прогон уже потрачен выше.
+    assert fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP).returncode == 0
+    assert fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP).returncode == 2
+
+    kit_before = fp_fleet.local_log.read_text().count("--format markdown")
+    res = fp_fleet.run(
+        "demo", "7", "--use-verdict", str(verdict), REVIEW_STUB_FP=FP,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "codex не вызывался" in res.stdout
+    # Кит для тела не звался — значит и платить было нечем.
+    assert fp_fleet.local_log.read_text().count("--format markdown") == kit_before

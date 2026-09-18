@@ -55,6 +55,7 @@ usage() {
     echo "  --fresh — не наследовать вердикт даже при совпавшем отпечатке" >&2
     echo "  --write-verdict — атомарно сохранить результат dry-run для боевого прогона" >&2
     echo "  --use-verdict — использовать сохранённый результат при точных head + fp" >&2
+    echo "  --budget-override <причина> — превысить бюджет платных прогонов" >&2
     echo "  --harness/--model — ревьюер; порядок: флаг > env REVIEW_HARNESS/" >&2
     echo "    REVIEW_MODEL > ~/.config/ai-prosto/harness.env > codex (историч.)" >&2
     echo "  внешний REVIEW_CMD побеждает всё, кроме явных флагов" >&2
@@ -97,11 +98,21 @@ opt_harness=""
 opt_model=""
 opt_max_diff_bytes=""
 opt_max_diff_files=""
+budget_override=""
 print_review_cmd=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) dry_run=1; shift ;;
         --fresh) fresh=1; shift ;;
+        --budget-override)
+            # Причина обязательна и не может быть пробелами: перерасход
+            # бюджета — решение владельца, и оно обязано быть названным.
+            [ $# -ge 2 ] \
+                || die 2 "--budget-override требует причину (решение владельца)"
+            budget_override=$(printf '%s' "$2" | tr -d '[:space:]')
+            [ -n "$budget_override" ] \
+                || die 2 "--budget-override требует непустую причину"
+            budget_override="$2"; shift 2 ;;
         --write-verdict)
             [ $# -ge 2 ] || die 2 "--write-verdict требует путь"
             write_verdict="$2"; shift 2 ;;
@@ -729,6 +740,51 @@ if [ -n "$inh_state" ]; then
     exit "$kit_code"
 fi
 
+# --- Бюджет платных прогонов (решение владельца 2026-09-18) ---------------
+# Всё, что выше, до модели не доходит: отпечаток (`--fingerprint-only`),
+# наследование по fp и `--use-verdict` выходят раньше. Поэтому счётчик стоит
+# ровно здесь — один раз на один фактический вызов ревьюера.
+#
+# Зачем барьер, а не правило в CLAUDE.md: формальный порог (blocker/major +
+# high confidence) сам по себе перерасход не останавливает — поверх него
+# возникает неформальный гейт «чинить любую находку и повторять до чистого
+# вердикта». На spec-runner#526 это дало девять платных кругов при том, что
+# КАЖДЫЙ новый круг открывала настоящая блокирующая находка, то есть порог не
+# нарушался ни разу. Прозаическое правило при этом обходится рационализацией:
+# в той же сессии агент дважды нашёл довод превысить порог, и оба раза довод
+# звучал разумно. Отказ инструмента таких доводов не слушает.
+#
+# Это правило и defense-in-depth, а не security boundary: вызвать кит напрямую
+# обвязка не мешает. Она делает перерасход осознанным и видимым.
+budget_max=2  # 1 полный review + 1 адресный recheck
+budget_dir="${REVIEW_BUDGET_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ai-prosto/review-budget}"
+budget_ledger="$budget_dir/$(printf '%s' "$slug" | tr '/' '_')-${pr}.log"
+budget_used=0
+[ ! -f "$budget_ledger" ] \
+    || budget_used=$(wc -l < "$budget_ledger" | tr -d ' ')
+budget_exceeded=0
+if [ "$budget_used" -ge "$budget_max" ]; then
+    if [ -z "$budget_override" ]; then
+        die 2 "бюджет платных прогонов исчерпан:" \
+            "${slug}#${pr} — $budget_used из $budget_max" \
+            "(1 полный review + 1 адресный recheck)." \
+            "Не-блокирующие находки нового круга не открывают: чините без" \
+            "повторного ревью либо записывайте в debt." \
+            "Нужен ещё круг — это решение владельца:" \
+            "--budget-override '<причина>'." \
+            "Журнал: $budget_ledger"
+    fi
+    budget_exceeded=1
+fi
+mkdir -p "$budget_dir" || die 2 "не удалось создать каталог бюджета: $budget_dir"
+budget_round=$((budget_used + 1))
+{
+    printf 'round=%s at=%s head=%s' \
+        "$budget_round" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$head_sha"
+    [ "$budget_exceeded" -eq 0 ] || printf ' override=%s' "$budget_override"
+    printf '\n'
+} >> "$budget_ledger" || die 2 "не удалось записать журнал бюджета: $budget_ledger"
+
 # --- Полный прогон -------------------------------------------------------
 # Доверенный кит запускается с cwd в exact-head worktree: код, промпт и схема
 # приходят из исходного чекаута, а контекст файлов — из проверяемого дерева.
@@ -773,6 +829,13 @@ fi
     echo "- PR: ${slug}#${pr}, проревьюирован head \`$head_sha\`"
     echo "- ревьюер: \`$reviewer_label\` через review-kit репо;" \
         "публикация: $REVIEW_LOGIN"
+    if [ "$budget_exceeded" -eq 1 ]; then
+        # Перерасход — факт о прогоне, который читатель вердикта обязан
+        # видеть: иначе он остаётся только в прозе агента и в локальном
+        # журнале, то есть невидим тому, кто принимает остаточный риск.
+        echo "- бюджет платных прогонов превышен: круг $budget_round при" \
+            "лимите $budget_max, по решению владельца — $budget_override"
+    fi
     if [ -n "$cap_args" ]; then
         # Поднятый потолок — факт о прогоне, который читатель вердикта обязан
         # видеть: умолчания кита на этот диф не действовали.
