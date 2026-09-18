@@ -762,7 +762,7 @@ fi
 # закрывает нулём, а обвязка публикует как approve.
 lr_state=""
 # lr_head/lr_fp разбираются здесь же, но потребителя в этом PR нет: адресный
-# recheck (`--targeted`) вынесен отдельно — см. issue про него. Разбор общий и
+# recheck (`--targeted`) вынесен отдельно (devtools#260). Разбор общий и
 # строгий, чтобы этот потребитель не завёл себе второй, более слабый.
 lr_head=""
 lr_fp=""
@@ -787,10 +787,15 @@ if command -v jq >/dev/null 2>&1; then
                       then $r.state + " " + $ms[0].captures[0].string + " " + $ms[0].captures[1].string
                       else "miss miss miss" end
                   end' 2> "$work/lastreview.err"); then
+            # shellcheck disable=SC2034 — lr_head/lr_fp пока не читает
+            # никто: их потребитель, адресный recheck, вынесен в
+            # devtools#260. Разбирать их здесь всё равно надо — строгий
+            # разбор один на всех потребителей, см. комментарий выше.
             read -r lr_state lr_head lr_fp <<EOF
 $lr_line
 EOF
             lr_known=1
+            # shellcheck disable=SC2034 — потребитель lr_head в devtools#260
             [ "$lr_state" != "none" ] && [ "$lr_state" != "miss" ] || lr_head=""
             [ "$lr_state" != "miss" ] || lr_state=""
             [ "$lr_state" != "none" ] || lr_state=""
