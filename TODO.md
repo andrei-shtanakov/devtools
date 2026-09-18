@@ -1432,7 +1432,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `docs/evidence/2026-09-15-need-stage-live-run.md`: стадия Need и путь
       до S5 отработали без ручных вмешательств; disp-авторинг сошёлся;
       S3–S6 (восемь кругов терминального ревью бандла, три из четырёх
-      находок круга 8 не подтверждены повторным ревью) и S7/S8-
+      находок круга 8 остались неотработанными до ручного мержа) и S7/S8-
       реконсиляция после агент-мержа #253 довели run до `completed`
       (S8 authoritative gate exit=0). Четыре дефекта devtools влиты (#248,
       #249, #250, #253 — resume не реконсилировал PR spec-runner#522,
@@ -1440,6 +1440,17 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       ревью). По букве §9 приёмка НЕ завершена: `waiting_human_merge`
       раннером не пройден, tasks-/approval-PR не заведены, approved
       tasks-спеки нет — чекбокс остаётся открытым до решения владельца.
+      Остатки круга 8 доработаны 2026-09-18 (evidence, раздел «Остатки
+      круга 8»): две находки из трёх закрыты в spec-runner — правило
+      `restore` (#524 `312d7f0` + #526 `ef8b32e`) и тип отказа гварда
+      (#524); третья (`doctor`) не закрыта, вынесена в spec-runner#525.
+      Ревью доработки нашло сверх круга 8 два дефекта, уже лежавших в
+      master: ложное утверждение в Must FR-05 и невычислимый критерий шага
+      5 — оба исправлены в #526, ключом стал закрытый перечень подкоманд
+      плюс acknowledged checkpoint с механическим гвардом полноты. Принятый
+      владельцем пробел (молчаливая потеря правки при смерти в окне
+      доставки checkpoint-а) — spec-runner#527. Цена доработки: 14 платных
+      кругов терминального ревью (5 по #524, 9 по #526).
 - [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; до доставки соседа маршрут отказывает до run-id @owner:github:andrei-shtanakov @id:spec-loop-need-engineer-route @blocked_by:discovery#49
       Ждёт discovery#49 п.1 (slug orchestrated-start-upstream-and-session-id):
       приём upstream при `start --frame engineer`. П.2 (caller-assigned
