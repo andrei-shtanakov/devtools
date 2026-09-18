@@ -602,7 +602,8 @@ if [ "$fp_supported" -eq 1 ]; then
     set +e
     # shellcheck disable=SC2086 — cap_args проверен: только флаги и цифры.
     fp_out=$(run_kit \
-        --base "origin/$base_ref" --head "$review_ref" --fingerprint-only \
+        --base "${targeted_base:-origin/$base_ref}" --head "$review_ref" \
+        --fingerprint-only \
         $cap_args 2> "$work/fp.err")
     fp_code=$?
     set -e
@@ -819,6 +820,15 @@ if [ "$targeted" -eq 1 ]; then
         || die 2 "--targeted невозможен: у ${slug}#${pr} нет ревью" \
             "$REVIEW_LOGIN с ровно одним маркером отревьюированной головы." \
             "Первый круг — обычный полный прогон."
+    # Голова не сдвинулась — перепроверять нечего: фикс в PR не приехал.
+    # Без этого отказа диапазон пуст, кит штатно выходит нулём («ревьюировать
+    # нечего: диф пуст»), обвязка маппит 0 в approve и ПУБЛИКУЕТ его — не
+    # показав модели ни строки и отменив прошлый request-changes. Тот же
+    # approve закрыл бы и stop rule: следующий круг потребовал бы override.
+    [ "$targeted_base" != "$head_sha" ] \
+        || die 2 "--targeted невозможен: голова ${slug}#${pr} не сдвинулась" \
+            "с прошлого круга ($head_sha) — перепроверять нечего." \
+            "Фикс ещё не в PR либо уехал в другое репо."
     echo "адресный recheck: база — прошлая отревьюированная голова" \
         "$targeted_base"
 fi

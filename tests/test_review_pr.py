@@ -1198,12 +1198,6 @@ def test_second_round_allowed_after_red_verdict(fleet: Fleet) -> None:
     assert fleet.run("demo", "7").returncode == 0
 
 
-def test_override_opens_round_after_approve(fleet: Fleet) -> None:
-    fleet.run("demo", "7")
-    res = fleet.run("demo", "7", "--budget-override", "владелец: проверка")
-    assert res.returncode == 0, res.stderr
-
-
 @needs_jq
 def test_targeted_reviews_against_last_reviewed_head(fleet: Fleet) -> None:
     """Адресный recheck смотрит фикс-коммиты относительно прошлой
@@ -1284,3 +1278,18 @@ def test_override_bypassing_stop_rule_leaves_a_trace(fleet: Fleet) -> None:
     assert res.returncode == 0, res.stderr
     body = fleet.body_out.read_text()
     assert "владелец: новый код после approve" in body
+
+
+@needs_jq
+def test_targeted_refuses_when_head_did_not_move(fleet: Fleet) -> None:
+    """База равна голове — перепроверять нечего: фикс не приехал в PR. Без
+    отказа диапазон пуст, кит выходит нулём («ревьюировать нечего»), и
+    обвязка публикует approve, не показав модели ни строки, — да ещё и
+    отменяя прошлый request-changes."""
+    reviews = fleet.write_reviews(
+        _review("CHANGES_REQUESTED", fleet.head_sha, FP)
+    )
+    res = fleet.run("demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 2, res.stdout
+    assert "не сдвинулась" in res.stderr
+    assert "pr review" not in fleet.gh_calls()
