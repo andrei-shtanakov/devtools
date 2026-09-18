@@ -1113,3 +1113,42 @@ def test_use_verdict_bypasses_exhausted_budget(fp_fleet: Fleet) -> None:
     assert "codex не вызывался" in res.stdout
     # Кит для тела не звался — значит и платить было нечем.
     assert fp_fleet.local_log.read_text().count("--format markdown") == kit_before
+
+
+def test_budget_override_rejects_flag_shaped_reason(fleet: Fleet) -> None:
+    """Забытая причина съела бы следующий флаг: `--budget-override --dry-run`
+    дало бы боевую публикацию вместо dry-run — необратимый внешний эффект от
+    опечатки."""
+    res = fleet.run("demo", "7", "--budget-override", "--dry-run")
+    assert res.returncode == 2
+    assert "не может начинаться" in res.stderr
+    assert "pr review" not in fleet.gh_calls()
+
+
+def test_instrument_failure_does_not_consume_budget(fleet: Fleet) -> None:
+    """Отказ прибора вердикта не даёт — списывать за него значило бы тратить
+    бюджет на прогоны, ни один из которых ревью не принёс."""
+    assert fleet.run("demo", "7", REVIEW_STUB_EXIT="3").returncode == 3
+    assert fleet.run("demo", "7", REVIEW_STUB_EXIT="3").returncode == 3
+    # Бюджет не тронут: оба платных круга ещё доступны.
+    assert fleet.run("demo", "7").returncode == 0
+    assert fleet.run("demo", "7").returncode == 0
+    assert fleet.run("demo", "7").returncode == 2
+
+
+def test_documented_flow_costs_one_round(fp_fleet: Fleet) -> None:
+    """Штатный флоу CLAUDE.md (`--write-verdict` → `--use-verdict`) стоит
+    ОДИН круг: иначе один цикл ревью съедал бы весь бюджет и обещанный
+    адресный recheck был бы недостижим."""
+    verdict = fp_fleet.tmp / "v.out"
+    assert fp_fleet.run(
+        "demo", "7", "--dry-run", "--write-verdict", str(verdict),
+        REVIEW_STUB_FP=FP,
+    ).returncode == 0
+    assert fp_fleet.run(
+        "demo", "7", "--use-verdict", str(verdict), REVIEW_STUB_FP=FP,
+    ).returncode == 0
+    # Круг потрачен ровно один — адресный recheck доступен без override.
+    assert fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP).returncode == 0
+    # И только теперь бюджет исчерпан.
+    assert fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP).returncode == 2

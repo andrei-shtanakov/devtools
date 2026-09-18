@@ -112,6 +112,14 @@ while [ $# -gt 0 ]; do
             budget_override=$(printf '%s' "$2" | tr -d '[:space:]')
             [ -n "$budget_override" ] \
                 || die 2 "--budget-override требует непустую причину"
+            # Забытая причина съела бы следующий флаг: `--budget-override
+            # --dry-run` дало бы боевую публикацию вместо dry-run, то есть
+            # необратимый внешний эффект от опечатки. Закрытая форма, как у
+            # allowlist стратегий в merge-pr.sh.
+            case "$2" in
+                -*) die 2 "--budget-override: причина не может начинаться" \
+                    "с '-' (похоже на флаг: '$2')" ;;
+            esac
             budget_override="$2"; shift 2 ;;
         --write-verdict)
             [ $# -ge 2 ] || die 2 "--write-verdict требует путь"
@@ -778,12 +786,20 @@ if [ "$budget_used" -ge "$budget_max" ]; then
 fi
 mkdir -p "$budget_dir" || die 2 "не удалось создать каталог бюджета: $budget_dir"
 budget_round=$((budget_used + 1))
-{
-    printf 'round=%s at=%s head=%s' \
-        "$budget_round" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$head_sha"
-    [ "$budget_exceeded" -eq 0 ] || printf ' override=%s' "$budget_override"
-    printf '\n'
-} >> "$budget_ledger" || die 2 "не удалось записать журнал бюджета: $budget_ledger"
+# Списывается СОСТОЯВШИЙСЯ вердикт, а не попытка: отказ прибора (кит 2/3)
+# вердикта не даёт, и списывать за него значило бы тратить бюджет на прогоны,
+# ни один из которых ревью не принёс. Поэтому запись в журнал — ниже, после
+# успешного кода кита. Проверка при этом остаётся здесь, до вызова: барьер
+# обязан быть fail-closed.
+budget_charge() {
+    {
+        printf 'round=%s at=%s head=%s' \
+            "$budget_round" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$head_sha"
+        [ "$budget_exceeded" -eq 0 ] || printf ' override=%s' "$budget_override"
+        printf '\n'
+    } >> "$budget_ledger" \
+        || die 2 "не удалось записать журнал бюджета: $budget_ledger"
+}
 
 # --- Полный прогон -------------------------------------------------------
 # Доверенный кит запускается с cwd в exact-head worktree: код, промпт и схема
@@ -805,8 +821,11 @@ set -e
 cat "$work/local.err" >&2
 
 case "$kit_code" in
-    0) action="approve" ;;
-    1) action="request-changes" ;;
+    # Вердикт состоялся — модель отработала и деньги потрачены: круг
+    # списывается здесь, до любых дальнейших отказов (в т.ч. «голова уехала»:
+    # прогон был платным независимо от того, публикуем ли мы его).
+    0) action="approve"; budget_charge ;;
+    1) action="request-changes"; budget_charge ;;
     2|3)
         cat "$work/verdict.md" >&2
         die "$kit_code" "ревью не состоялось (кит вернул $kit_code) —" \
