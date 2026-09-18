@@ -110,6 +110,33 @@
       контрактной поверхности, а не коммиты (two-contract-guarantees, «files,
       not manifests»). Обязательство steward закрыто встречным PR там же.
 
+## Исполнение stop rule ревью
+
+- [ ] Вызывающий контур исполняет stop rule ревью механически, а не прозой: targeted recheck только после блокирующей находки, non-gate находки круга не открывают, адресный режим `--base <последняя отревьюированная head>` @owner:github:andrei-shtanakov @id:review-loop-limit-enforcement @epic:eco.tooling
+      Принято по devtools#256 (`from: steward#170`). Канон — prograph-vault
+      `authored/rules/git-workflow.md`, stop rule (vault#135, закрыт):
+      steward — источник контракта, devtools — место исполнения.
+      **Сделано PR #257:** лимит 1 full + 1 targeted как барьер в
+      `review-pr.sh` (fail-closed, exit 2), счёт по фактическим вызовам
+      модели (`--dry-run` платит, отпечаток и `--use-verdict` — нет),
+      списание за состоявшийся вердикт, обход только
+      `--budget-override '<причина>'` с записью в журнал и в шапку
+      опубликованного вердикта; штатный флоу переведён на один платный вызов
+      (`--write-verdict` → `--use-verdict`).
+      **Сделано PR #259:** (1) «новый круг только после блокирующей
+      находки» механически — код вердикта прошлого круга пишется в журнал, и
+      после approve круг не открывается (порог считает
+      `apply-threshold.sh`, агент находки не классифицирует); (2) адресный
+      recheck `--targeted` — база из маркера последнего ревью ai-prosto, без
+      маркера отказ с причиной, а не тихий полный прогон под видом адресного;
+      (3) `CLAUDE.md` ссылается на канон vault как на SSOT.
+      Следствие правила, отмеченное в `CLAUDE.md`: новая голова после approve
+      сама по себе круга не даёт — лимит на PR.
+      Правки `review-pr.sh` — харнесс-путь: агент их не ревьюит из
+      проверяемого дерева и не мержит, мерж человеком.
+      Смежный debt: #258 (отдельный код выхода на исчерпание и его
+      распознавание раннером/`accept_pr`).
+
 ## Fleet plan-check по расписанию
 
 - [ ] Scheduled fleet plan-check: DAILY-прогон настоящего кросс-репного чекера над свежим клоном флота @owner:github:andrei-shtanakov @trigger:"после появления общего scheduled-run status/freshness-контракта в переходе launchd→CI" @id:scheduled-fleet-plan-check @epic:eco.tooling

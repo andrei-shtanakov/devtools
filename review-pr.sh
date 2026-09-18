@@ -56,6 +56,7 @@ usage() {
     echo "  --write-verdict — атомарно сохранить результат dry-run для боевого прогона" >&2
     echo "  --use-verdict — использовать сохранённый результат при точных head + fp" >&2
     echo "  --budget-override <причина> — превысить бюджет платных прогонов" >&2
+    echo "  --targeted — адресный recheck: база = прошлая отревьюированная голова" >&2
     echo "  --harness/--model — ревьюер; порядок: флаг > env REVIEW_HARNESS/" >&2
     echo "    REVIEW_MODEL > ~/.config/ai-prosto/harness.env > codex (историч.)" >&2
     echo "  внешний REVIEW_CMD побеждает всё, кроме явных флагов" >&2
@@ -99,11 +100,13 @@ opt_model=""
 opt_max_diff_bytes=""
 opt_max_diff_files=""
 budget_override=""
+targeted=0
 print_review_cmd=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) dry_run=1; shift ;;
         --fresh) fresh=1; shift ;;
+        --targeted) targeted=1; shift ;;
         --budget-override)
             # Причина обязательна и не может быть пробелами: перерасход
             # бюджета — решение владельца, и оно обязано быть названным.
@@ -748,6 +751,44 @@ if [ -n "$inh_state" ]; then
     exit "$kit_code"
 fi
 
+# --- Адресный recheck (stop rule, канон vault `rules/git-workflow.md`) -----
+# «Recheck адресный: проверяются исправленная находка и изменённые строки, а не
+# весь PR заново». Новой механики не нужно: кит умеет произвольный диапазон, а
+# прошлая отревьюированная голова лежит в маркере последнего ревью ai-prosto —
+# том же, из которого работает дедуп по отпечатку выше. Здесь условие мягче:
+# отпечаток совпадать не обязан (голова как раз другая), нужен только маркер.
+#
+# Голова берётся из ревью, а не из журнала бюджета: журнал локален и на другой
+# машине пуст, а маркер живёт в самом PR — там же, где его видит человек.
+targeted_base=""
+if [ "$targeted" -eq 1 ]; then
+    command -v jq >/dev/null 2>&1 \
+        || die 2 "--targeted требует jq: прошлая отревьюированная голова" \
+            "читается из маркера последнего ревью $REVIEW_LOGIN"
+    if ! t_json=$(gh_r api --paginate "repos/$slug/pulls/$pr/reviews" \
+        2> "$work/targeted.err"); then
+        cat "$work/targeted.err" >&2
+        die 2 "--targeted: прошлые ревью не прочитались (gh)"
+    fi
+    targeted_base=$(printf '%s' "$t_json" | jq -rs \
+        '([ .[][] | select(.user.login == "'"$REVIEW_LOGIN"'") ] | last) as $r
+            | if $r == null then ""
+              else (($r.body // "")
+                    | [match("<!-- codex-terminal-review head=([0-9a-f]{40})")]
+                    | if length == 1 then .[0].captures[0].string else "" end)
+              end' 2>/dev/null || true)
+    case "$targeted_base" in
+        [0-9a-f]*) : ;;
+        *) targeted_base="" ;;
+    esac
+    [ -n "$targeted_base" ] \
+        || die 2 "--targeted невозможен: у ${slug}#${pr} нет ревью" \
+            "$REVIEW_LOGIN с маркером отревьюированной головы." \
+            "Первый круг — обычный полный прогон."
+    echo "адресный recheck: база — прошлая отревьюированная голова" \
+        "$targeted_base"
+fi
+
 # --- Бюджет платных прогонов (решение владельца 2026-09-18) ---------------
 # Всё, что выше, до модели не доходит: отпечаток (`--fingerprint-only`),
 # наследование по fp и `--use-verdict` выходят раньше. Поэтому счётчик стоит
@@ -771,6 +812,25 @@ budget_used=0
 [ ! -f "$budget_ledger" ] \
     || budget_used=$(wc -l < "$budget_ledger" | tr -d ' ')
 budget_exceeded=0
+# Stop rule (канон — prograph-vault `authored/rules/git-workflow.md`): новый
+# круг открывает ТОЛЬКО находка, блокирующая по порогу гейта. Классифицировать
+# находки самому не нужно и не следует — это уже сделал `apply-threshold.sh`, и
+# его решение пришло кодом выхода прошлого круга: 1 = красный (блокирующая
+# находка есть), 0 = approve (ни одна до порога не добрала). Поэтому «minor
+# нового круга не открывает» проверяется механически, а не доверием к тому, как
+# агент прочитал вердикт.
+if [ "$budget_used" -gt 0 ] && [ -z "$budget_override" ]; then
+    last_code=$(sed -n '$s/.*code=\([0-9]*\).*/\1/p' "$budget_ledger")
+    if [ "$last_code" = "0" ]; then
+        die 2 "новый круг ревью открывает только блокирующая находка:" \
+            "прошлый круг ${slug}#${pr} дал approve — по порогу" \
+            "(blocker/major + confidence: high + evidence) блокирующих" \
+            "находок не было. Не-блокирующее чините без повторного ревью" \
+            "либо записывайте в debt." \
+            "Нужен круг вопреки этому — решение владельца:" \
+            "--budget-override '<причина>'."
+    fi
+fi
 if [ "$budget_used" -ge "$budget_max" ]; then
     if [ -z "$budget_override" ]; then
         die 2 "бюджет платных прогонов исчерпан:" \
@@ -793,8 +853,9 @@ budget_round=$((budget_used + 1))
 # обязан быть fail-closed.
 budget_charge() {
     {
-        printf 'round=%s at=%s head=%s' \
-            "$budget_round" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$head_sha"
+        printf 'round=%s at=%s head=%s code=%s' \
+            "$budget_round" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$head_sha" \
+            "$kit_code"
         [ "$budget_exceeded" -eq 0 ] || printf ' override=%s' "$budget_override"
         printf '\n'
     } >> "$budget_ledger" \
@@ -807,7 +868,15 @@ budget_charge() {
 # Свежесть базы: при fp-ките база уже освежена явным fetch выше (и отпечаток
 # обязан видеть то же состояние), у старого кита --fetch остаётся его
 # собственной заботой.
-set -- --base "origin/$base_ref" --head "$review_ref" --format markdown
+# Адресный режим сужает диапазон до «что изменилось с прошлого круга».
+# Голова прошлого круга обязана быть достижима локально: после force-push
+# ветки её может не быть, и тогда отказывает кит со своей причиной — своей
+# машинерии доставать удалённые объекты обвязка не строит.
+if [ -n "$targeted_base" ]; then
+    set -- --base "$targeted_base" --head "$review_ref" --format markdown
+else
+    set -- --base "origin/$base_ref" --head "$review_ref" --format markdown
+fi
 [ "$fp_supported" -eq 1 ] || set -- "$@" --fetch
 # shellcheck disable=SC2086 — cap_args проверен: только флаги и цифры.
 [ -z "$cap_args" ] || set -- "$@" $cap_args
