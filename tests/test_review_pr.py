@@ -1551,6 +1551,37 @@ def test_mixed_diff_runs_full_review(fleet: Fleet) -> None:
     assert "Automated scope attestation" not in fleet.body_out.read_text()
 
 
+# --- Код выхода 5 кита (срез B): диф отфильтрован целиком --------------
+
+
+@needs_jq
+def test_kit_exit_five_publishes_attestation(fleet: Fleet) -> None:
+    """Кит отфильтровал всё — обвязка публикует аттестацию, а не approve."""
+    _seed_files(fleet, "src/tool.py")  # обвязка считает PR кодовым
+    res = fleet.run("demo", "7", REVIEW_STUB_EXIT="5")
+    assert res.returncode == 0, res.stderr
+    body = fleet.body_out.read_text()
+    assert "Automated scope attestation" in body
+    assert "codex-terminal-review" not in body
+
+
+@needs_jq
+def test_kit_exit_five_does_not_charge_budget(fleet: Fleet) -> None:
+    _seed_files(fleet, "src/tool.py")
+    fleet.run("demo", "7", REVIEW_STUB_EXIT="5")
+    ledger = fleet.tmp / "review-budget" / "andrei-shtanakov_demo-7.log"
+    assert not ledger.exists()
+
+
+def test_include_prose_bypasses_early_attestation(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md")
+    res = fleet.run("demo", "7", "--include-prose")
+    assert res.returncode == 0, res.stderr
+    assert _kit_calls(fleet) != []
+    assert "--include-prose" in _kit_calls(fleet)[0]
+    assert "Automated scope attestation" not in fleet.body_out.read_text()
+
+
 @needs_jq
 def test_prose_only_after_changes_requested_stays_with_human(fleet: Fleet) -> None:
     """Красный модельный вердикт аттестацией не гасится: не публикуется

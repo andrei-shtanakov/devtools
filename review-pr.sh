@@ -49,7 +49,7 @@ set -eu
 usage() {
     echo "usage: review-pr.sh <repo> <pr-number> [--dry-run] [--fresh]" \
         "[--write-verdict <file> | --use-verdict <file>] [--print-scope]" \
-        "[--harness claude|codex] [--model <M>]" \
+        "[--include-prose] [--harness claude|codex] [--model <M>]" \
         "[--max-diff-bytes N] [--max-diff-files N]" >&2
     echo "  <repo> — имя каталога репо во флоте (например dispatcher)" >&2
     echo "  --fresh — не наследовать вердикт даже при совпавшем отпечатке" >&2
@@ -57,6 +57,8 @@ usage() {
     echo "  --use-verdict — использовать сохранённый результат при точных head + fp" >&2
     echo "  --print-scope — напечатать область ревью (prose|code) и выйти;" >&2
     echo "    операторский флаг, не только тестовый зонд" >&2
+    echo "  --include-prose — обойти и раннюю классификацию (scope=prose)," >&2
+    echo "    и фильтр области у кита (срез B, код 5): диф идёт модели целиком" >&2
     echo "  --budget-override <причина> — превысить бюджет платных прогонов" >&2
     echo "  --harness/--model — ревьюер; порядок: флаг > env REVIEW_HARNESS/" >&2
     echo "    REVIEW_MODEL > ~/.config/ai-prosto/harness.env > codex (историч.)" >&2
@@ -103,10 +105,12 @@ opt_max_diff_files=""
 budget_override=""
 print_review_cmd=0
 print_scope=0
+include_prose=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) dry_run=1; shift ;;
         --fresh) fresh=1; shift ;;
+        --include-prose) include_prose=1; shift ;;
         --budget-override)
             # Причина обязательна и не может быть пробелами: перерасход
             # бюджета — решение владельца, и оно обязано быть названным.
@@ -781,7 +785,7 @@ fi
 # пустой lr_delivered_state) означает либо «красного нет», либо «факт не
 # получен» — эти два состояния различает именно lr_known, и без него решать
 # нечем: fail-closed, а не тихий approve поверх непрочитанного вердикта.
-if [ "$scope" = "prose" ]; then
+publish_scope_attestation() {
     # Находка 8: ветка прозы выходит раньше, чем --write-verdict/--use-
     # verdict успевают что-то значить (оба относятся к вердикту кита, а на
     # prose-only PR кит не вызывается вовсе) — как и прочие ветки «делаю не
@@ -848,6 +852,13 @@ if [ "$scope" = "prose" ]; then
     fi
     publish approve
     exit 0
+}
+
+# --include-prose снимает и раннюю классификацию (эту ветку), и фильтр
+# кита (проброс флага в его вызов ниже) — оператору нужен один флаг,
+# чтобы прогнать модельное ревью на диффе, который иначе кит бы отфильтровал.
+if [ "$scope" = "prose" ] && [ "$include_prose" -eq 0 ]; then
+    publish_scope_attestation
 fi
 
 # --- Отпечаток входа ревью (дедуп, devtools#72) ------------------------------
@@ -908,12 +919,20 @@ if [ -n "$max_diff_bytes" ] || [ -n "$max_diff_files" ]; then
     fi
 fi
 
+# --include-prose уходит в ОБА вызова кита (отпечаток и полный прогон) — тем
+# же путём, что и cap_args: кит фильтрует прозу сам (срез B), и снять фильтр
+# для отпечатка, но не для полного прогона (или наоборот), означало бы
+# наследовать вердикт с одной областью на PR, ревьюированный с другой.
+include_prose_arg=""
+[ "$include_prose" -eq 0 ] || include_prose_arg="--include-prose"
+
 if [ "$fp_supported" -eq 1 ]; then
     set +e
-    # shellcheck disable=SC2086 — cap_args проверен: только флаги и цифры.
+    # shellcheck disable=SC2086 — cap_args/include_prose_arg проверены:
+    # только флаги и цифры.
     fp_out=$(run_kit \
         --base "origin/$base_ref" --head "$review_ref" --fingerprint-only \
-        $cap_args 2> "$work/fp.err")
+        $cap_args $include_prose_arg 2> "$work/fp.err")
     fp_code=$?
     set -e
     cat "$work/fp.err" >&2
@@ -1156,6 +1175,7 @@ set -- --base "origin/$base_ref" --head "$review_ref" --format markdown
 [ "$fp_supported" -eq 1 ] || set -- "$@" --fetch
 # shellcheck disable=SC2086 — cap_args проверен: только флаги и цифры.
 [ -z "$cap_args" ] || set -- "$@" $cap_args
+[ -z "$include_prose_arg" ] || set -- "$@" $include_prose_arg
 set +e
 run_kit "$@" \
     > "$work/verdict.md" 2> "$work/local.err"
@@ -1171,6 +1191,10 @@ case "$kit_code" in
     # прогон был платным независимо от того, публикуем ли мы его).
     0) action="approve"; budget_charge ;;
     1) action="request-changes"; budget_charge ;;
+    # Кит отфильтровал прозу целиком (срез B). Модель не звалась, круг не
+    # списывается. Обвязка могла классифицировать PR как кодовый — репо-конфиг
+    # и пиненое правило кита видит именно кит, и его слово здесь последнее.
+    5) publish_scope_attestation; exit 0 ;;
     2|3)
         cat "$work/verdict.md" >&2
         die "$kit_code" "ревью не состоялось (кит вернул $kit_code) —" \
