@@ -667,8 +667,19 @@ if [ -n "$fp" ] && [ "$fresh" -eq 0 ]; then
         cat "$work/reviews.err" >&2
         echo "ЗАМЕТКА: прошлые ревью не прочитались (gh) — дедуп пропущен," \
             "идёт полный прогон." >&2
+    # Отбор кандидата и валидация РАЗНЕСЕНЫ намеренно. Кандидат протокола —
+    # ревью, в теле которого есть префикс маркера; выбирается ПОСЛЕДНИЙ такой,
+    # и только он валидируется. Правило «последнее ВАЛИДНОЕ ревью» пропускало бы
+    # новый повреждённый или задублированный маркер и воскрешало перекрытый им
+    # вердикт — stop rule решал бы по вердикту, который свежее событие протокола
+    # уже отменило. Повреждённый, задублированный и DISMISSED кандидат остаётся
+    # miss, поиск назад НЕ ведётся. Не-кандидаты (scope-аттестации, любые ревью
+    # $REVIEW_LOGIN без префикса) на результат не влияют.
     elif ! candidate=$(printf '%s' "$reviews_json" | jq -rs \
-        '([ .[][] | select(.user.login == "'"$REVIEW_LOGIN"'") ] | last) as $r
+        '([ .[][]
+           | select(.user.login == "'"$REVIEW_LOGIN"'")
+           | select(((.body // "") | index("<!-- codex-terminal-review ")) != null)
+         ] | last) as $r
             | if $r == null then "none none none"
               else
                 (($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) as $n
@@ -777,7 +788,10 @@ if command -v jq >/dev/null 2>&1; then
     if lr_json=$(gh_r api --paginate "repos/$slug/pulls/$pr/reviews" \
         2> "$work/lastreview.err"); then
         if lr_line=$(printf '%s' "$lr_json" | jq -rs \
-            '([ .[][] | select(.user.login == "'"$REVIEW_LOGIN"'") ] | last) as $r
+            '([ .[][]
+               | select(.user.login == "'"$REVIEW_LOGIN"'")
+               | select(((.body // "") | index("<!-- codex-terminal-review ")) != null)
+             ] | last) as $r
                 | if $r == null then "none none none"
                   else
                     (($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) as $n

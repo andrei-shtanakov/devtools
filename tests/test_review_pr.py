@@ -1236,3 +1236,44 @@ def test_override_bypassing_stop_rule_leaves_a_trace(fleet: Fleet) -> None:
     assert "владелец: новый код после approve" in body
 
 
+
+
+def _scope_review(head: str, login: str = "ai-prosto") -> dict:
+    body = "## Automated scope attestation — prose-only\n\n"
+    body += f"<!-- ai-prosto-scope-review version=1 kind=prose-only head={head} -->\n"
+    return {"user": {"login": login}, "state": "APPROVED", "body": body}
+
+
+@needs_jq
+def test_unmarked_review_does_not_hide_terminal_verdict(fleet: Fleet) -> None:
+    """Ревью без префикса маркера — не кандидат протокола: более ранний
+    terminal-вердикт остаётся виден stop rule."""
+    reviews = fleet.write_reviews(
+        _review("APPROVED", OLD_HEAD, FP),
+        _scope_review(OLD_HEAD),
+    )
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 2, res.stdout
+    assert "блокирующ" in res.stderr.lower()
+
+
+@needs_jq
+def test_malformed_terminal_review_does_not_resurrect_older(fleet: Fleet) -> None:
+    """Новый кандидат с задублированным маркером — miss; предыдущий
+    валидный approve НЕ воскресает, прогон разрешён."""
+    reviews = fleet.write_reviews(
+        _review("APPROVED", OLD_HEAD, FP),
+        _review("APPROVED", OLD_HEAD, FP, markers=2),
+    )
+    assert fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews).returncode == 0
+
+
+@needs_jq
+def test_dismissed_terminal_review_does_not_resurrect_older(fleet: Fleet) -> None:
+    """DISMISSED — кандидат протокола, не прошедший валидацию: miss,
+    поиск назад не ведётся."""
+    reviews = fleet.write_reviews(
+        _review("APPROVED", OLD_HEAD, FP),
+        _review("DISMISSED", OLD_HEAD, FP),
+    )
+    assert fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews).returncode == 0
