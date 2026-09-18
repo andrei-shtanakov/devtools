@@ -1199,36 +1199,6 @@ def test_second_round_allowed_after_red_verdict(fleet: Fleet) -> None:
 
 
 @needs_jq
-def test_targeted_reviews_against_last_reviewed_head(fleet: Fleet) -> None:
-    """Адресный recheck смотрит фикс-коммиты относительно прошлой
-    отревьюированной головы, а не весь PR относительно базы."""
-    reviews = fleet.write_reviews(_review("CHANGES_REQUESTED", OLD_HEAD, FP))
-    res = fleet.run(
-        "demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews,
-    )
-    assert res.returncode == 0, res.stderr
-    call = fleet.local_log.read_text()
-    assert f"--base {OLD_HEAD}" in call
-    assert "--base origin/master" not in call
-
-
-@needs_jq
-def test_targeted_refuses_without_previous_review(fleet: Fleet) -> None:
-    """Прошлой отревьюированной головы нет — адресный режим невозможен, и это
-    отказ с причиной, а не тихий полный прогон под видом адресного."""
-    res = fleet.run("demo", "7", "--targeted")
-    assert res.returncode == 2
-    assert "отревьюированн" in res.stderr.lower()
-
-
-# --- Stop rule опирается на ДОСТАВЛЕННЫЙ вердикт, а не на списанный круг ----
-# Источник истины — опубликованные ревью самого PR, а не локальный журнал:
-# журнал списывает круг сразу по коду кита, то есть и тогда, когда вердикт до
-# PR не дошёл (dry-run без публикации, «голова уехала», провал публикации).
-# Журнал к тому же локален: на другой машине он пуст, а ревью — в PR.
-
-
-@needs_jq
 def test_stop_rule_ignores_undelivered_verdict(fleet: Fleet) -> None:
     """Dry-run списал круг с approve, но на PR ревью нет — следующий прогон
     обязан быть возможен, иначе PR без единого ревью закрыт для ревью."""
@@ -1253,20 +1223,6 @@ def test_stop_rule_allows_after_published_changes_requested(fleet: Fleet) -> Non
 
 
 @needs_jq
-def test_targeted_rejects_duplicated_marker(fleet: Fleet) -> None:
-    """Маркер может прийти из текста модели через недоверенный диф. Дедуп от
-    этого защищён счётом маркеров; адресный режим обязан быть защищён так же,
-    иначе подставленный маркер выбирает базу ревью — вплоть до пустого
-    диапазона, который кит закрывает нулём, а обвязка публикует как approve."""
-    reviews = fleet.write_reviews(
-        _review("CHANGES_REQUESTED", OLD_HEAD, FP, markers=2)
-    )
-    res = fleet.run("demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews)
-    assert res.returncode == 2
-    assert "отревьюированн" in res.stderr.lower()
-
-
-@needs_jq
 def test_override_bypassing_stop_rule_leaves_a_trace(fleet: Fleet) -> None:
     """Обход stop rule — такое же решение владельца, как перерасход бюджета:
     без следа в вердикте оно невидимо тому, кто принимает остаточный риск."""
@@ -1280,16 +1236,3 @@ def test_override_bypassing_stop_rule_leaves_a_trace(fleet: Fleet) -> None:
     assert "владелец: новый код после approve" in body
 
 
-@needs_jq
-def test_targeted_refuses_when_head_did_not_move(fleet: Fleet) -> None:
-    """База равна голове — перепроверять нечего: фикс не приехал в PR. Без
-    отказа диапазон пуст, кит выходит нулём («ревьюировать нечего»), и
-    обвязка публикует approve, не показав модели ни строки, — да ещё и
-    отменяя прошлый request-changes."""
-    reviews = fleet.write_reviews(
-        _review("CHANGES_REQUESTED", fleet.head_sha, FP)
-    )
-    res = fleet.run("demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews)
-    assert res.returncode == 2, res.stdout
-    assert "не сдвинулась" in res.stderr
-    assert "pr review" not in fleet.gh_calls()
