@@ -814,11 +814,19 @@ if [ "$scope" = "prose" ]; then
                "<!-- ai-prosto-scope-review version=1 kind=prose-only head="
                + $h + " -->"
              )) != null)
-         ] | length) > 0' 2>/dev/null) && [ "$_att_seen" = "true" ]; then
+         ] | length) > 0' 2> "$work/att.err") && [ "$_att_seen" = "true" ]; then
         echo "ЗАМЕТКА: аттестация на этой голове уже опубликована — ничего" \
             "не публикуется."
         exit 0
     fi
+    # Отказ самого дедупа (не «не нашли», а «проверить не удалось») обязан быть
+    # слышен: молчаливый путь здесь стоил бы второго APPROVE в PR. Публикацию он
+    # не отменяет — иначе сбой проверки лишал бы PR аттестации вовсе.
+    [ ! -s "$work/att.err" ] || {
+        cat "$work/att.err" >&2
+        echo "ВНИМАНИЕ: проверка «аттестация уже опубликована» не отработала —" \
+            "возможен повторный APPROVE на ${slug}#${pr}." >&2
+    }
     {
         echo "## Automated scope attestation — prose-only"
         echo

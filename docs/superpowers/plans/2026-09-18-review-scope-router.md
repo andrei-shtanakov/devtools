@@ -375,17 +375,20 @@ prose_globs=""
 code_globs=""
 [ -f "$prose_paths_file" ] \
     || die 2 "нет контракта области ревью: $prose_paths_file"
-# Повторы ключа склеиваются (список переносится по строкам), а не
-# перекрывают друг друга: `tail -1`, как в harness.env, здесь молча терял бы
-# все группы, кроме последней.
-prose_globs=$(sed -n 's/^PROSE=//p' "$prose_paths_file" | tr '\n' ' ')
-code_globs=$(sed -n 's/^CODE_OVERRIDE=//p' "$prose_paths_file" | tr '\n' ' ')
+# Разбор по канону `governance/ssot_env.py`: ключ обязан встретиться ровно
+# один раз, дубль — отказ. `tail -1`/склейка выбирали бы за человека, какое из
+# двух значений настоящее.
 [ -n "$prose_globs" ] \
     || die 2 "контракт области ревью не называет PROSE: $prose_paths_file"
 
 # 0 — путь проза, 1 — код. CODE_OVERRIDE сильнее PROSE: Markdown внутри
 # .github/, contracts/, eval/, fixtures/, schemas/ — данные, не проза.
 path_is_prose() {
+    # `set -f` обязателен: unquoted $code_globs проходит не только
+    # word-splitting, но и pathname expansion от cwd — `docs/*` развернулся бы
+    # в реальные файлы вместо литерального паттерна для `case`. Снимать перед
+    # КАЖДЫМ return.
+    set -f
     for _g in $code_globs; do
         # shellcheck disable=SC2254 — глоб намеренно не в кавычках
         case "$1" in $_g) return 1 ;; esac
@@ -671,7 +674,7 @@ git add review-pr.sh tests/test_review_pr.py CLAUDE.md TODO.md
 git commit -m "$(cat <<'EOF'
 feat(review-scope): prose-only PR получает scope-аттестацию вместо вердикта
 
-Замер: ~19 PR/день по флоту, ~85% прозаические. Платный ревьюер — только код
+Замер: ~22 PR/день по флоту, 36% прозаические. Платный ревьюер — только код
 (решение владельца 2026-09-18); формат спек и планов проверяется скриптом.
 
 Аттестация — отдельная governance-сущность с маркером ai-prosto-scope-review,
