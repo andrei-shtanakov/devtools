@@ -273,6 +273,13 @@ def test_no_args_usage(fleet: Fleet) -> None:
     assert "usage:" in res.stderr
 
 
+def test_usage_documents_print_scope(fleet: Fleet) -> None:
+    """Находка 10: `--print-scope` — операторский флаг, не только тестовый
+    зонд, и обязан быть в usage()."""
+    res = fleet.run()
+    assert "--print-scope" in res.stderr
+
+
 def test_non_numeric_pr(fleet: Fleet) -> None:
     res = fleet.run("demo", "abc")
     assert res.returncode == 2
@@ -685,6 +692,17 @@ def test_inherit_same_head_publishes_nothing(fp_fleet: Fleet) -> None:
     assert "pr review" not in fp_fleet.gh_calls()
     calls = _kit_calls(fp_fleet)  # codex не вызывался: только fp-режим
     assert len(calls) == 1 and "--fingerprint-only" in calls[0]
+
+
+@needs_jq
+def test_reviews_endpoint_fetched_once_per_run(fp_fleet: Fleet) -> None:
+    """Находка 12: блок последнего доставленного ревью (stop rule) и блок
+    поиска наследуемого вердикта по отпечатку читают ОДИН и тот же ответ
+    `/reviews` — второй запрос к API не идёт."""
+    reviews = fp_fleet.write_reviews(_review("APPROVED", fp_fleet.head_sha, FP))
+    res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP, GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 0, res.stderr
+    assert fp_fleet.gh_calls().count("/reviews") == 1
 
 
 @needs_jq
@@ -1240,8 +1258,6 @@ def test_override_bypassing_stop_rule_leaves_a_trace(fleet: Fleet) -> None:
     assert "владелец: новый код после approve" in body
 
 
-
-
 def _scope_review(head: str, login: str = "ai-prosto") -> dict:
     body = "## Automated scope attestation — prose-only\n\n"
     body += f"<!-- ai-prosto-scope-review version=1 kind=prose-only head={head} -->\n"
@@ -1259,6 +1275,28 @@ def test_unmarked_review_does_not_hide_terminal_verdict(fleet: Fleet) -> None:
     res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
     assert res.returncode == 2, res.stdout
     assert "блокирующ" in res.stderr.lower()
+
+
+@needs_jq
+def test_scope_attestation_does_not_gate_full_review_by_stop_rule(
+    fleet: Fleet,
+) -> None:
+    """§5 сценарий 5 спеки: последнее ревью ai-prosto — scope-attestation
+    (опубликована как APPROVE), terminal-вердикта codex-terminal-review на
+    PR нет. Новый head приносит код: аттестация — не кандидат протокола
+    (другой маркер), stop rule обязан молчать, модель обязана быть вызвана
+    БЕЗ --budget-override."""
+    reviews = fleet.write_reviews(_scope_review(OLD_HEAD))
+    _seed_files(fleet, "docs/guide.md", "src/tool.py")
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 0, res.stderr
+    assert _kit_calls(fleet) != []
+    assert "--approve" in fleet.gh_calls()
+    body = fleet.body_out.read_text()
+    assert "вопреки stop rule" not in body
+    assert "бюджет платных прогонов превышен" not in body
+    ledger = fleet.tmp / "review-budget" / "andrei-shtanakov_demo-7.log"
+    assert ledger.exists()
 
 
 @needs_jq
@@ -1471,6 +1509,33 @@ def test_prose_only_publishes_attestation_without_kit(fleet: Fleet) -> None:
 
 
 @needs_jq
+def test_prose_only_write_verdict_flag_is_noted_and_ignored(fleet: Fleet) -> None:
+    """Находка 8: --write-verdict относится к вердикту кита — на prose-only
+    PR кит не вызывается, флаг молча не игнорируется."""
+    _seed_files(fleet, "docs/guide.md")
+    verdict_path = fleet.tmp / "verdict.txt"
+    res = fleet.run(
+        "demo", "7", "--dry-run", "--write-verdict", str(verdict_path)
+    )
+    assert res.returncode == 0, res.stderr
+    assert not verdict_path.exists()
+    assert "--write-verdict не применяется" in res.stderr
+
+
+@needs_jq
+def test_prose_only_use_verdict_flag_is_noted_and_ignored(fleet: Fleet) -> None:
+    """Находка 8: та же заметка для --use-verdict — verdict-файл не
+    читался, аттестация публикуется как обычно."""
+    _seed_files(fleet, "docs/guide.md")
+    verdict_path = fleet.tmp / "verdict.txt"
+    verdict_path.write_text("codex-terminal-review-verdict/v1\nbogus\n")
+    res = fleet.run("demo", "7", "--use-verdict", str(verdict_path))
+    assert res.returncode == 0, res.stderr
+    assert "--use-verdict не применяется" in res.stderr
+    assert "--approve" in fleet.gh_calls()
+
+
+@needs_jq
 def test_prose_only_does_not_charge_budget(fleet: Fleet) -> None:
     _seed_files(fleet, "docs/guide.md")
     fleet.run("demo", "7")
@@ -1541,11 +1606,17 @@ def test_prose_guard_refuses_when_review_list_unreadable(fleet: Fleet) -> None:
 
 @needs_jq
 def test_prose_only_is_idempotent_on_same_head(fleet: Fleet) -> None:
+    """Находка 4: считаем число вызовов `gh pr review`, а не текст тела —
+    сравнение текста не поймало бы и десять публикаций подряд, потому что
+    вторая полностью повторяет первую по содержанию."""
     _seed_files(fleet, "docs/guide.md")
     assert fleet.run("demo", "7").returncode == 0
-    first = fleet.body_out.read_text()
-    assert fleet.run("demo", "7").returncode == 0
-    assert fleet.body_out.read_text() == first
+    assert fleet.gh_calls().count("pr review 7 --repo") == 1
+    reviews = fleet.write_reviews(_scope_review(fleet.head_sha))
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 0, res.stderr
+    assert "уже опубликована" in res.stdout
+    assert fleet.gh_calls().count("pr review 7 --repo") == 1
 
 
 @needs_jq

@@ -48,13 +48,15 @@ set -eu
 
 usage() {
     echo "usage: review-pr.sh <repo> <pr-number> [--dry-run] [--fresh]" \
-        "[--write-verdict <file> | --use-verdict <file>]" \
+        "[--write-verdict <file> | --use-verdict <file>] [--print-scope]" \
         "[--harness claude|codex] [--model <M>]" \
         "[--max-diff-bytes N] [--max-diff-files N]" >&2
     echo "  <repo> — имя каталога репо во флоте (например dispatcher)" >&2
     echo "  --fresh — не наследовать вердикт даже при совпавшем отпечатке" >&2
     echo "  --write-verdict — атомарно сохранить результат dry-run для боевого прогона" >&2
     echo "  --use-verdict — использовать сохранённый результат при точных head + fp" >&2
+    echo "  --print-scope — напечатать область ревью (prose|code) и выйти;" >&2
+    echo "    операторский флаг, не только тестовый зонд" >&2
     echo "  --budget-override <причина> — превысить бюджет платных прогонов" >&2
     echo "  --harness/--model — ревьюер; порядок: флаг > env REVIEW_HARNESS/" >&2
     echo "    REVIEW_MODEL > ~/.config/ai-prosto/harness.env > codex (историч.)" >&2
@@ -595,11 +597,13 @@ code_globs="$scope_key_value"
 path_is_prose() {
     set -f
     for _g in $code_globs; do
-        # shellcheck disable=SC2254 — глоб намеренно не в кавычках
+        # глоб намеренно не в кавычках
+        # shellcheck disable=SC2254
         case "$1" in $_g) set +f; return 1 ;; esac
     done
     for _g in $prose_globs; do
-        # shellcheck disable=SC2254 — глоб намеренно не в кавычках
+        # глоб намеренно не в кавычках
+        # shellcheck disable=SC2254
         case "$1" in $_g) set +f; return 0 ;; esac
     done
     set +f
@@ -629,10 +633,27 @@ classify_scope() {
     fi
     _any=0
     _verdict=prose
+    # `for _f in $_files` — unquoted расширение параметра: без `set -f` и без
+    # IFS=newline классификация пути с глоб-метасимволом или пробелом в имени
+    # зависела бы от pathname expansion (от cwd) и от разбиения по пробелу, а
+    # не только от переводов строк, которыми `git diff --name-only` разделяет
+    # пути. Список слов цикла `for` вычисляется РОВНО ОДИН РАЗ, в момент входа
+    # в цикл — правки IFS/`set -f` внутри тела на уже вычисленный список не
+    # влияют, поэтому оба восстанавливаются сразу на первой строке тела: сам
+    # `path_is_prose` ниже расщепляет `$code_globs`/`$prose_globs` по
+    # ПРОБЕЛУ и ему нужны штатные IFS и globbing.
+    _old_ifs=$IFS
+    IFS="
+"
+    set -f
     for _f in $_files; do
+        set +f
+        IFS=$_old_ifs
         _any=1
         path_is_prose "$_f" || { _verdict=code; break; }
     done
+    set +f
+    IFS=$_old_ifs
     [ "$_any" -eq 1 ] || {
         echo "ЗАМЕТКА: область ревью не определена (пустой диапазон) —" \
             "PR ревьюится как кодовый." >&2
@@ -673,6 +694,14 @@ lr_fp=""
 # ДОСТАВЛЕННЫЙ CHANGES_REQUESTED, и его нельзя молча погасить аттестацией.
 lr_delivered_state=""
 lr_known=0
+# lr_json/lr_fetch_ok кэшируют СЫРОЙ ответ /reviews для повторного
+# использования ниже, в блоке поиска наследуемого вердикта по отпечатку
+# (находка 12): без кэша тот блок звал бы `gh_r api --paginate` ВТОРОЙ раз на
+# каждом прогоне — лишний round-trip и расход rate limit. lr_fetch_ok=1
+# означает «запрос состоялся», а не «разбор успешен» — второй потребитель
+# сам решает, что делать с сырым JSON.
+lr_json=""
+lr_fetch_ok=0
 # Запрос идёт на КАЖДОМ прогоне, а не только при дедупе: stop rule обязан знать
 # про доставленный вердикт независимо от отпечатка и от --fresh. Недоступность
 # ответа (нет jq, отказ API) stop rule не отключает молча — она об этом
@@ -687,6 +716,7 @@ lr_known=0
 if command -v jq >/dev/null 2>&1; then
     if lr_json=$(gh_r api --paginate "repos/$slug/pulls/$pr/reviews" \
         2> "$work/lastreview.err"); then
+        lr_fetch_ok=1
         if lr_line=$(printf '%s' "$lr_json" | jq -rs \
             '([ .[][]
                | select(.user.login == "'"$REVIEW_LOGIN"'")
@@ -752,6 +782,14 @@ fi
 # получен» — эти два состояния различает именно lr_known, и без него решать
 # нечем: fail-closed, а не тихий approve поверх непрочитанного вердикта.
 if [ "$scope" = "prose" ]; then
+    # Находка 8: ветка прозы выходит раньше, чем --write-verdict/--use-
+    # verdict успевают что-то значить (оба относятся к вердикту кита, а на
+    # prose-only PR кит не вызывается вовсе) — как и прочие ветки «делаю не
+    # то, что просили», печатаем ЗАМЕТКУ, а не молчим.
+    [ -z "$write_verdict" ] || echo "ЗАМЕТКА: --write-verdict не применяется" \
+        "на prose-only PR (кит не вызывается) — verdict-файл не записан." >&2
+    [ -z "$use_verdict" ] || echo "ЗАМЕТКА: --use-verdict не применяется на" \
+        "prose-only PR (кит не вызывается) — verdict-файл не читался." >&2
     [ "$lr_known" -eq 1 ] || die 2 "prose-only диф, но список ревью" \
         "${slug}#${pr} не прочитан (нет jq или отказ API): решить, нет ли" \
         "доставленного request-changes, не на чем. Аттестация не публикуется —" \
@@ -762,6 +800,24 @@ if [ "$scope" = "prose" ]; then
             "(она погасила бы красный вердикт), ревьюер не вызывается" \
             "(проза платному ревью не подлежит) — PR остаётся человеку." \
             "Появится код в дифе — прогон пойдёт обычным путём."
+    fi
+    # Дедуп (находка 4): повторный/resume-прогон на ТОМ ЖЕ head не кладёт в
+    # PR ещё одну аттестацию — иначе каждый повтор добавлял бы новый APPROVE.
+    # У кодового пути дедуп есть (по отпечатку входа), у прозы его не было.
+    # Ищем в уже прочитанном lr_json (второй запрос к API не нужен) маркер
+    # `ai-prosto-scope-review` от $REVIEW_LOGIN с ТЕКУЩИМ head_sha; guard
+    # выше гарантирует lr_known=1, то есть jq доступен и lr_json прочитан.
+    if _att_seen=$(printf '%s' "$lr_json" | jq -rs --arg h "$head_sha" \
+        '([ .[][]
+           | select(.user.login == "'"$REVIEW_LOGIN"'")
+           | select(((.body // "") | index(
+               "<!-- ai-prosto-scope-review version=1 kind=prose-only head="
+               + $h + " -->"
+             )) != null)
+         ] | length) > 0' 2>/dev/null) && [ "$_att_seen" = "true" ]; then
+        echo "ЗАМЕТКА: аттестация на этой голове уже опубликована — ничего" \
+            "не публикуется."
+        exit 0
     fi
     {
         echo "## Automated scope attestation — prose-only"
@@ -905,15 +961,18 @@ fi
 # shape [[...],[...]], что давал --slurp. gh и jq вызываются раздельно,
 # чтобы отказ каждого был виден со СВОЕЙ причиной, а не маскировался
 # пайпом под «нет ревью».
+#
+# reviews_json — тот же СЫРОЙ ответ /reviews, что уже прочитан выше в
+# lr_json (находка 12): второй запрос к API не идёт, кэш переиспользуется
+# lr_fetch_ok различает «запроса не было/отказал» и «пришёл пустой список» —
+# поведение при отказе gh не меняется, деградация с предупреждением, не молча.
 inh_state=""
 inh_head=""
 if [ -n "$fp" ] && [ "$fresh" -eq 0 ]; then
     if ! command -v jq >/dev/null 2>&1; then
         echo "ЗАМЕТКА: jq не найден — поиск наследуемого вердикта пропущен," \
             "идёт полный прогон." >&2
-    elif ! reviews_json=$(gh_r api --paginate \
-        "repos/$slug/pulls/$pr/reviews" 2> "$work/reviews.err"); then
-        cat "$work/reviews.err" >&2
+    elif [ "$lr_fetch_ok" -ne 1 ]; then
         echo "ЗАМЕТКА: прошлые ревью не прочитались (gh) — дедуп пропущен," \
             "идёт полный прогон." >&2
     # Отбор кандидата и валидация РАЗНЕСЕНЫ намеренно. Кандидат протокола —
@@ -924,7 +983,7 @@ if [ -n "$fp" ] && [ "$fresh" -eq 0 ]; then
     # уже отменило. Повреждённый, задублированный и DISMISSED кандидат остаётся
     # miss, поиск назад НЕ ведётся. Не-кандидаты (scope-аттестации, любые ревью
     # $REVIEW_LOGIN без префикса) на результат не влияют.
-    elif ! candidate=$(printf '%s' "$reviews_json" | jq -rs \
+    elif ! candidate=$(printf '%s' "$lr_json" | jq -rs \
         '([ .[][]
            | select(.user.login == "'"$REVIEW_LOGIN"'")
            | select(((.body // "") | index("<!-- codex-terminal-review ")) != null)
