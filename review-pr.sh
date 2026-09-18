@@ -751,39 +751,73 @@ if [ -n "$inh_state" ]; then
     exit "$kit_code"
 fi
 
+# --- Последнее доставленное ревью (stop rule и --targeted) ----------------
+# Источник истины про «был ли уже вердикт» — опубликованные ревью самого PR, а
+# не локальный журнал бюджета: журнал списывает круг сразу по коду кита, то
+# есть и там, где вердикт до PR не дошёл (dry-run без публикации, «голова
+# уехала», провал публикации), и он локален — на другой машине пуст, а ревью
+# лежит в PR, где его видит человек.
+#
+# Строгость разбора — та же, что у дедупа ниже: ровно ОДИН маркер полного
+# формата. Тело ревью содержит вывод порога, то есть текст модели, пришедший
+# из недоверенного дифа; маркер оттуда, стоящий раньше настоящего, иначе
+# выбирал бы базу адресного ревью — вплоть до пустого диапазона, который кит
+# закрывает нулём, а обвязка публикует как approve.
+lr_state=""
+lr_head=""
+lr_fp=""
+lr_known=0
+# Запрос идёт на КАЖДОМ прогоне, а не только при дедупе: stop rule обязан знать
+# про доставленный вердикт независимо от отпечатка и от --fresh. Недоступность
+# ответа (нет jq, отказ API) stop rule не отключает молча — она об этом
+# ГРОМКО говорит: жёсткий лимит бюджета при этом продолжает работать, а
+# уточнение «после approve круга нет» деградирует с предупреждением, а не
+# тихо.
+if command -v jq >/dev/null 2>&1; then
+    if lr_json=$(gh_r api --paginate "repos/$slug/pulls/$pr/reviews" \
+        2> "$work/lastreview.err"); then
+        if lr_line=$(printf '%s' "$lr_json" | jq -rs \
+            '([ .[][] | select(.user.login == "'"$REVIEW_LOGIN"'") ] | last) as $r
+                | if $r == null then "none none none"
+                  else
+                    (($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) as $n
+                    | (($r.body // "") | [match("<!-- codex-terminal-review head=([0-9a-f]{40}) fp=([0-9a-f]{64}) -->")]) as $ms
+                    | if $n == 1 and ($ms | length) == 1
+                         and ($r.state == "APPROVED" or $r.state == "CHANGES_REQUESTED")
+                      then $r.state + " " + $ms[0].captures[0].string + " " + $ms[0].captures[1].string
+                      else "miss miss miss" end
+                  end' 2> "$work/lastreview.err"); then
+            read -r lr_state lr_head lr_fp <<EOF
+$lr_line
+EOF
+            lr_known=1
+            [ "$lr_state" != "none" ] && [ "$lr_state" != "miss" ] || lr_head=""
+            [ "$lr_state" != "miss" ] || lr_state=""
+            [ "$lr_state" != "none" ] || lr_state=""
+        else
+            cat "$work/lastreview.err" >&2
+        fi
+    else
+        cat "$work/lastreview.err" >&2
+    fi
+fi
+[ "$lr_known" -eq 1 ] || echo "ВНИМАНИЕ: последнее ревью $REVIEW_LOGIN не" \
+    "прочитано (нет jq или отказ API) — stop rule «после approve круга нет»" \
+    "на этом прогоне не проверен; лимит бюджета продолжает действовать." >&2
+
 # --- Адресный recheck (stop rule, канон vault `rules/git-workflow.md`) -----
 # «Recheck адресный: проверяются исправленная находка и изменённые строки, а не
 # весь PR заново». Новой механики не нужно: кит умеет произвольный диапазон, а
-# прошлая отревьюированная голова лежит в маркере последнего ревью ai-prosto —
-# том же, из которого работает дедуп по отпечатку выше. Здесь условие мягче:
-# отпечаток совпадать не обязан (голова как раз другая), нужен только маркер.
-#
-# Голова берётся из ревью, а не из журнала бюджета: журнал локален и на другой
-# машине пуст, а маркер живёт в самом PR — там же, где его видит человек.
+# прошлая отревьюированная голова лежит в маркере последнего ревью ai-prosto.
 targeted_base=""
 if [ "$targeted" -eq 1 ]; then
-    command -v jq >/dev/null 2>&1 \
-        || die 2 "--targeted требует jq: прошлая отревьюированная голова" \
-            "читается из маркера последнего ревью $REVIEW_LOGIN"
-    if ! t_json=$(gh_r api --paginate "repos/$slug/pulls/$pr/reviews" \
-        2> "$work/targeted.err"); then
-        cat "$work/targeted.err" >&2
-        die 2 "--targeted: прошлые ревью не прочитались (gh)"
-    fi
-    targeted_base=$(printf '%s' "$t_json" | jq -rs \
-        '([ .[][] | select(.user.login == "'"$REVIEW_LOGIN"'") ] | last) as $r
-            | if $r == null then ""
-              else (($r.body // "")
-                    | [match("<!-- codex-terminal-review head=([0-9a-f]{40})")]
-                    | if length == 1 then .[0].captures[0].string else "" end)
-              end' 2>/dev/null || true)
-    case "$targeted_base" in
-        [0-9a-f]*) : ;;
-        *) targeted_base="" ;;
-    esac
+    [ "$lr_known" -eq 1 ] \
+        || die 2 "--targeted: прошлые ревью не прочитались (нужен jq и" \
+            "доступ к API) — база адресного ревью неизвестна"
+    targeted_base="$lr_head"
     [ -n "$targeted_base" ] \
         || die 2 "--targeted невозможен: у ${slug}#${pr} нет ревью" \
-            "$REVIEW_LOGIN с маркером отревьюированной головы." \
+            "$REVIEW_LOGIN с ровно одним маркером отревьюированной головы." \
             "Первый круг — обычный полный прогон."
     echo "адресный recheck: база — прошлая отревьюированная голова" \
         "$targeted_base"
@@ -809,27 +843,24 @@ budget_max=2  # 1 полный review + 1 адресный recheck
 budget_dir="${REVIEW_BUDGET_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ai-prosto/review-budget}"
 budget_ledger="$budget_dir/$(printf '%s' "$slug" | tr '/' '_')-${pr}.log"
 budget_used=0
+budget_exceeded=0
 [ ! -f "$budget_ledger" ] \
     || budget_used=$(wc -l < "$budget_ledger" | tr -d ' ')
-budget_exceeded=0
-# Stop rule (канон — prograph-vault `authored/rules/git-workflow.md`): новый
-# круг открывает ТОЛЬКО находка, блокирующая по порогу гейта. Классифицировать
-# находки самому не нужно и не следует — это уже сделал `apply-threshold.sh`, и
-# его решение пришло кодом выхода прошлого круга: 1 = красный (блокирующая
-# находка есть), 0 = approve (ни одна до порога не добрала). Поэтому «minor
-# нового круга не открывает» проверяется механически, а не доверием к тому, как
-# агент прочитал вердикт.
-if [ "$budget_used" -gt 0 ] && [ -z "$budget_override" ]; then
-    last_code=$(sed -n '$s/.*code=\([0-9]*\).*/\1/p' "$budget_ledger")
-    if [ "$last_code" = "0" ]; then
+budget_override_used=0
+if [ "$lr_state" = "APPROVED" ]; then
+    if [ -z "$budget_override" ]; then
         die 2 "новый круг ревью открывает только блокирующая находка:" \
-            "прошлый круг ${slug}#${pr} дал approve — по порогу" \
-            "(blocker/major + confidence: high + evidence) блокирующих" \
-            "находок не было. Не-блокирующее чините без повторного ревью" \
-            "либо записывайте в debt." \
-            "Нужен круг вопреки этому — решение владельца:" \
-            "--budget-override '<причина>'."
+            "последнее ревью $REVIEW_LOGIN на ${slug}#${pr} — approve," \
+            "то есть по порогу (blocker/major + confidence: high +" \
+            "evidence) блокирующих находок не было. Не-блокирующее чините" \
+            "без повторного ревью либо записывайте в debt." \
+            "Нужен круг вопреки этому (например, на PR приехал новый код)" \
+            "— это решение владельца: --budget-override '<причина>'."
     fi
+    # Обход stop rule — такое же решение владельца, как перерасход бюджета, и
+    # так же обязан быть виден в вердикте: иначе он остаётся только в памяти
+    # того, кто его принял.
+    budget_override_used=1
 fi
 if [ "$budget_used" -ge "$budget_max" ]; then
     if [ -z "$budget_override" ]; then
@@ -856,7 +887,8 @@ budget_charge() {
         printf 'round=%s at=%s head=%s code=%s' \
             "$budget_round" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$head_sha" \
             "$kit_code"
-        [ "$budget_exceeded" -eq 0 ] || printf ' override=%s' "$budget_override"
+        [ "$budget_exceeded" -eq 0 ] && [ "$budget_override_used" -eq 0 ] \
+        || printf ' override=%s' "$budget_override"
         printf '\n'
     } >> "$budget_ledger" \
         || die 2 "не удалось записать журнал бюджета: $budget_ledger"
@@ -923,6 +955,9 @@ fi
         # журнале, то есть невидим тому, кто принимает остаточный риск.
         echo "- бюджет платных прогонов превышен: круг $budget_round при" \
             "лимите $budget_max, по решению владельца — $budget_override"
+    elif [ "$budget_override_used" -eq 1 ]; then
+        echo "- круг открыт вопреки stop rule (прошлое ревью — approve)," \
+            "по решению владельца — $budget_override"
     fi
     if [ -n "$cap_args" ]; then
         # Поднятый потолок — факт о прогоне, который читатель вердикта обязан

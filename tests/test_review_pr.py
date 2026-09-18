@@ -746,7 +746,9 @@ def test_inherit_new_head_dry_run(fp_fleet: Fleet) -> None:
 
 @needs_jq
 def test_fresh_bypasses_inheritance_but_stamps_fp(fp_fleet: Fleet) -> None:
-    reviews = fp_fleet.write_reviews(_review("APPROVED", fp_fleet.head_sha, FP))
+    # Ревью красное, а не approve: после доставленного approve stop rule
+    # круга не открывает, а предмет теста — отпечаток, не stop rule.
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", fp_fleet.head_sha, FP))
     res = fp_fleet.run(
         "demo",
         "7",
@@ -755,7 +757,9 @@ def test_fresh_bypasses_inheritance_but_stamps_fp(fp_fleet: Fleet) -> None:
         GH_STUB_REVIEWS_JSON=reviews,
     )
     assert res.returncode == 0, res.stderr
-    assert "/reviews" not in fp_fleet.gh_calls()  # поиск вердикта обойдён
+    # `--fresh` обходит НАСЛЕДОВАНИЕ, а не чтение ревью: stop rule читает их на
+    # каждом прогоне. Наблюдаемое — полный прогон, а не пропуск запроса.
+    assert "унаследован" not in res.stdout
     calls = _kit_calls(fp_fleet)
     assert any("--format markdown" in c for c in calls)  # полный прогон
     assert f"fp={FP} -->" in fp_fleet.body_out.read_text()  # fp публикуется
@@ -799,7 +803,9 @@ def test_foreign_author_is_ignored(fp_fleet: Fleet) -> None:
 
 @needs_jq
 def test_fp_mismatch_runs_full(fp_fleet: Fleet) -> None:
-    reviews = fp_fleet.write_reviews(_review("APPROVED", fp_fleet.head_sha, FP_OTHER))
+    # Ревью красное, а не approve: после доставленного approve stop rule
+    # круга не открывает, а предмет теста — отпечаток, не stop rule.
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", fp_fleet.head_sha, FP_OTHER))
     res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP, GH_STUB_REVIEWS_JSON=reviews)
     assert res.returncode == 0, res.stderr
     assert any("--format markdown" in c for c in _kit_calls(fp_fleet))
@@ -819,7 +825,8 @@ def test_fp_empty_stdout_falls_through_to_full_run(fp_fleet: Fleet) -> None:
     маркер без fp."""
     res = fp_fleet.run("demo", "7")
     assert res.returncode == 0, res.stderr
-    assert "/reviews" not in fp_fleet.gh_calls()
+    # Наследовать нечего — прогон полный; сам запрос ревью делает stop rule.
+    assert "унаследован" not in res.stdout
     assert any("--format markdown" in c for c in _kit_calls(fp_fleet))
     assert "fp=" not in fp_fleet.body_out.read_text()
 
@@ -927,8 +934,10 @@ def test_invalid_file_does_not_fall_through_to_github_inheritance(
     )
     assert dry.returncode == 1, dry.stderr
     verdict.write_text(verdict.read_text().replace(f"fp={FP}", f"fp={FP_OTHER}", 1))
+    # Ревью красное, а не approve: после доставленного approve stop rule
+    # круга не открывает, а предмет теста — отпечаток, не stop rule.
     reviews = fp_fleet.write_reviews(
-        _review("APPROVED", fp_fleet.head_sha, FP)
+        _review("CHANGES_REQUESTED", fp_fleet.head_sha, FP)
     )
     calls_after_dry = len(_kit_calls(fp_fleet))
     gh_after_dry = len(fp_fleet.gh_calls())
@@ -938,7 +947,9 @@ def test_invalid_file_does_not_fall_through_to_github_inheritance(
         GH_STUB_REVIEWS_JSON=reviews,
     )
     assert live.returncode == 0, live.stderr
-    assert "/reviews" not in fp_fleet.gh_calls()[gh_after_dry:]
+    # Не «эндпоинт не звался» (его читает stop rule на каждом прогоне), а
+    # именно «вердикт не унаследован»: прогон полный.
+    assert "унаследован" not in live.stdout
     assert any(
         "--format markdown" in call
         for call in _kit_calls(fp_fleet)[calls_after_dry:]
@@ -1179,18 +1190,10 @@ def test_documented_flow_costs_one_round(fp_fleet: Fleet) -> None:
 # не по классификации находок моделью.
 
 
-def test_second_round_requires_blocking_finding(fleet: Fleet) -> None:
-    """После approve второй платный круг не открывается: блокирующей находки
-    не было, а non-gate находки круга не открывают."""
-    assert fleet.run("demo", "7").returncode == 0
-    res = fleet.run("demo", "7")
-    assert res.returncode == 2, res.stdout
-    assert "блокирующ" in res.stderr.lower()
-    assert "--budget-override" in res.stderr
-
-
 def test_second_round_allowed_after_red_verdict(fleet: Fleet) -> None:
-    """Красный вердикт — законный повод для адресного recheck."""
+    """Красный вердикт — законный повод для адресного recheck. Здесь же
+    покрыт случай «ревью на PR ещё нет»: stop rule молчит, пока вердикт не
+    доставлен."""
     assert fleet.run("demo", "7", REVIEW_STUB_EXIT="1").returncode == 1
     assert fleet.run("demo", "7").returncode == 0
 
@@ -1222,3 +1225,62 @@ def test_targeted_refuses_without_previous_review(fleet: Fleet) -> None:
     res = fleet.run("demo", "7", "--targeted")
     assert res.returncode == 2
     assert "отревьюированн" in res.stderr.lower()
+
+
+# --- Stop rule опирается на ДОСТАВЛЕННЫЙ вердикт, а не на списанный круг ----
+# Источник истины — опубликованные ревью самого PR, а не локальный журнал:
+# журнал списывает круг сразу по коду кита, то есть и тогда, когда вердикт до
+# PR не дошёл (dry-run без публикации, «голова уехала», провал публикации).
+# Журнал к тому же локален: на другой машине он пуст, а ревью — в PR.
+
+
+@needs_jq
+def test_stop_rule_ignores_undelivered_verdict(fleet: Fleet) -> None:
+    """Dry-run списал круг с approve, но на PR ревью нет — следующий прогон
+    обязан быть возможен, иначе PR без единого ревью закрыт для ревью."""
+    assert fleet.run("demo", "7", "--dry-run").returncode == 0
+    res = fleet.run("demo", "7")
+    assert res.returncode == 0, res.stderr
+
+
+@needs_jq
+def test_stop_rule_keys_on_published_approve(fleet: Fleet) -> None:
+    """Approve, доставленный на PR, круг закрывает."""
+    reviews = fleet.write_reviews(_review("APPROVED", OLD_HEAD, FP))
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 2, res.stdout
+    assert "блокирующ" in res.stderr.lower()
+
+
+@needs_jq
+def test_stop_rule_allows_after_published_changes_requested(fleet: Fleet) -> None:
+    reviews = fleet.write_reviews(_review("CHANGES_REQUESTED", OLD_HEAD, FP))
+    assert fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews).returncode == 0
+
+
+@needs_jq
+def test_targeted_rejects_duplicated_marker(fleet: Fleet) -> None:
+    """Маркер может прийти из текста модели через недоверенный диф. Дедуп от
+    этого защищён счётом маркеров; адресный режим обязан быть защищён так же,
+    иначе подставленный маркер выбирает базу ревью — вплоть до пустого
+    диапазона, который кит закрывает нулём, а обвязка публикует как approve."""
+    reviews = fleet.write_reviews(
+        _review("CHANGES_REQUESTED", OLD_HEAD, FP, markers=2)
+    )
+    res = fleet.run("demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 2
+    assert "отревьюированн" in res.stderr.lower()
+
+
+@needs_jq
+def test_override_bypassing_stop_rule_leaves_a_trace(fleet: Fleet) -> None:
+    """Обход stop rule — такое же решение владельца, как перерасход бюджета:
+    без следа в вердикте оно невидимо тому, кто принимает остаточный риск."""
+    reviews = fleet.write_reviews(_review("APPROVED", OLD_HEAD, FP))
+    res = fleet.run(
+        "demo", "7", "--budget-override", "владелец: новый код после approve",
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+    assert res.returncode == 0, res.stderr
+    body = fleet.body_out.read_text()
+    assert "владелец: новый код после approve" in body
