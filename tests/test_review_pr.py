@@ -556,10 +556,13 @@ def test_diff_caps_flags_reach_both_kit_calls(caps_fleet: Fleet) -> None:
 def test_diff_caps_env_fallback_and_flag_wins(caps_fleet: Fleet) -> None:
     """Без флага потолок берётся из REVIEW_MAX_DIFF_*: так его получает S6
     раннера (`RealOps.review` без параметров, env наследуется). Флаг сильнее."""
+    # Первый круг красный: после approve второй круг не открывает
+    # stop rule, а предмет теста — не бюджет.
     res = caps_fleet.run(
         "demo", "7", REVIEW_STUB_FP=FP, REVIEW_MAX_DIFF_BYTES="450000",
+        REVIEW_STUB_EXIT="1",
     )
-    assert res.returncode == 0, res.stderr
+    assert res.returncode == 1, res.stderr
     assert all("--max-diff-bytes 450000" in c for c in _kit_calls(caps_fleet))
     assert all("--max-diff-files" not in c for c in _kit_calls(caps_fleet))
     # Шапка называет слой, из которого пришёл потолок: S6 раннера флагов не
@@ -743,7 +746,9 @@ def test_inherit_new_head_dry_run(fp_fleet: Fleet) -> None:
 
 @needs_jq
 def test_fresh_bypasses_inheritance_but_stamps_fp(fp_fleet: Fleet) -> None:
-    reviews = fp_fleet.write_reviews(_review("APPROVED", fp_fleet.head_sha, FP))
+    # Ревью красное, а не approve: после доставленного approve stop rule
+    # круга не открывает, а предмет теста — отпечаток, не stop rule.
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", fp_fleet.head_sha, FP))
     res = fp_fleet.run(
         "demo",
         "7",
@@ -752,7 +757,9 @@ def test_fresh_bypasses_inheritance_but_stamps_fp(fp_fleet: Fleet) -> None:
         GH_STUB_REVIEWS_JSON=reviews,
     )
     assert res.returncode == 0, res.stderr
-    assert "/reviews" not in fp_fleet.gh_calls()  # поиск вердикта обойдён
+    # `--fresh` обходит НАСЛЕДОВАНИЕ, а не чтение ревью: stop rule читает их на
+    # каждом прогоне. Наблюдаемое — полный прогон, а не пропуск запроса.
+    assert "унаследован" not in res.stdout
     calls = _kit_calls(fp_fleet)
     assert any("--format markdown" in c for c in calls)  # полный прогон
     assert f"fp={FP} -->" in fp_fleet.body_out.read_text()  # fp публикуется
@@ -796,7 +803,9 @@ def test_foreign_author_is_ignored(fp_fleet: Fleet) -> None:
 
 @needs_jq
 def test_fp_mismatch_runs_full(fp_fleet: Fleet) -> None:
-    reviews = fp_fleet.write_reviews(_review("APPROVED", fp_fleet.head_sha, FP_OTHER))
+    # Ревью красное, а не approve: после доставленного approve stop rule
+    # круга не открывает, а предмет теста — отпечаток, не stop rule.
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", fp_fleet.head_sha, FP_OTHER))
     res = fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP, GH_STUB_REVIEWS_JSON=reviews)
     assert res.returncode == 0, res.stderr
     assert any("--format markdown" in c for c in _kit_calls(fp_fleet))
@@ -816,7 +825,8 @@ def test_fp_empty_stdout_falls_through_to_full_run(fp_fleet: Fleet) -> None:
     маркер без fp."""
     res = fp_fleet.run("demo", "7")
     assert res.returncode == 0, res.stderr
-    assert "/reviews" not in fp_fleet.gh_calls()
+    # Наследовать нечего — прогон полный; сам запрос ревью делает stop rule.
+    assert "унаследован" not in res.stdout
     assert any("--format markdown" in c for c in _kit_calls(fp_fleet))
     assert "fp=" not in fp_fleet.body_out.read_text()
 
@@ -861,11 +871,13 @@ def test_dry_run_writes_verdict_and_live_run_uses_it(fp_fleet: Fleet) -> None:
 @pytest.mark.parametrize("field", ["head", "fp"])
 def test_verdict_context_mismatch_runs_full(fp_fleet: Fleet, field: str) -> None:
     verdict = fp_fleet.tmp / "verdict.out"
+    # Первый круг красный: после approve второй круг не открывает
+    # stop rule, а предмет теста — не бюджет.
     dry = fp_fleet.run(
         "demo", "7", "--dry-run", "--write-verdict", str(verdict),
-        REVIEW_STUB_FP=FP,
+        REVIEW_STUB_FP=FP, REVIEW_STUB_EXIT="1",
     )
-    assert dry.returncode == 0, dry.stderr
+    assert dry.returncode == 1, dry.stderr
     text = verdict.read_text()
     if field == "head":
         text = text.replace(f"head={fp_fleet.head_sha}", f"head={'0' * 40}", 1)
@@ -888,11 +900,13 @@ def test_verdict_context_mismatch_runs_full(fp_fleet: Fleet, field: str) -> None
 
 def test_corrupt_verdict_body_runs_full(fp_fleet: Fleet) -> None:
     verdict = fp_fleet.tmp / "verdict.out"
+    # Первый круг красный: после approve второй круг не открывает
+    # stop rule, а предмет теста — не бюджет.
     dry = fp_fleet.run(
         "demo", "7", "--dry-run", "--write-verdict", str(verdict),
-        REVIEW_STUB_FP=FP,
+        REVIEW_STUB_FP=FP, REVIEW_STUB_EXIT="1",
     )
-    assert dry.returncode == 0, dry.stderr
+    assert dry.returncode == 1, dry.stderr
     verdict.write_text(verdict.read_text() + "corruption\n")
     calls_after_dry = len(_kit_calls(fp_fleet))
     live = fp_fleet.run(
@@ -912,14 +926,18 @@ def test_invalid_file_does_not_fall_through_to_github_inheritance(
     fp_fleet: Fleet,
 ) -> None:
     verdict = fp_fleet.tmp / "verdict.out"
+    # Первый круг красный: после approve второй круг не открывает
+    # stop rule, а предмет теста — не бюджет.
     dry = fp_fleet.run(
         "demo", "7", "--dry-run", "--write-verdict", str(verdict),
-        REVIEW_STUB_FP=FP,
+        REVIEW_STUB_FP=FP, REVIEW_STUB_EXIT="1",
     )
-    assert dry.returncode == 0, dry.stderr
+    assert dry.returncode == 1, dry.stderr
     verdict.write_text(verdict.read_text().replace(f"fp={FP}", f"fp={FP_OTHER}", 1))
+    # Ревью красное, а не approve: после доставленного approve stop rule
+    # круга не открывает, а предмет теста — отпечаток, не stop rule.
     reviews = fp_fleet.write_reviews(
-        _review("APPROVED", fp_fleet.head_sha, FP)
+        _review("CHANGES_REQUESTED", fp_fleet.head_sha, FP)
     )
     calls_after_dry = len(_kit_calls(fp_fleet))
     gh_after_dry = len(fp_fleet.gh_calls())
@@ -929,7 +947,9 @@ def test_invalid_file_does_not_fall_through_to_github_inheritance(
         GH_STUB_REVIEWS_JSON=reviews,
     )
     assert live.returncode == 0, live.stderr
-    assert "/reviews" not in fp_fleet.gh_calls()[gh_after_dry:]
+    # Не «эндпоинт не звался» (его читает stop rule на каждом прогоне), а
+    # именно «вердикт не унаследован»: прогон полный.
+    assert "унаследован" not in live.stdout
     assert any(
         "--format markdown" in call
         for call in _kit_calls(fp_fleet)[calls_after_dry:]
@@ -1014,14 +1034,15 @@ def test_old_kit_full_run_with_claude_is_refused_before_review(fleet: Fleet) -> 
 
 
 def test_budget_allows_full_plus_targeted(fleet: Fleet) -> None:
-    """Бюджет — 1 полный + 1 адресный: два платных прогона проходят."""
-    assert fleet.run("demo", "7").returncode == 0
-    assert fleet.run("demo", "7").returncode == 0
+    """Бюджет — 1 полный + 1 адресный: два платных прогона проходят, если
+    первый дал блокирующую находку (иначе второй не откроет stop rule)."""
+    assert fleet.run("demo", "7", REVIEW_STUB_EXIT="1").returncode == 1
+    assert fleet.run("demo", "7", REVIEW_STUB_EXIT="1").returncode == 1
 
 
 def test_budget_refuses_third_paid_run(fleet: Fleet) -> None:
-    fleet.run("demo", "7")
-    fleet.run("demo", "7")
+    fleet.run("demo", "7", REVIEW_STUB_EXIT="1")
+    fleet.run("demo", "7", REVIEW_STUB_EXIT="1")
     before = fleet.gh_calls().count("pr review")
     kit_before = fleet.local_log.read_text().count("--format markdown")
     res = fleet.run("demo", "7")
@@ -1038,16 +1059,16 @@ def test_budget_refuses_third_paid_run(fleet: Fleet) -> None:
 def test_dry_run_consumes_budget(fleet: Fleet) -> None:
     """--dry-run платит так же: сегодня все 14 кругов были dry-run, и по
     опубликованным вердиктам их было бы видно ОДИН."""
-    fleet.run("demo", "7", "--dry-run")
-    fleet.run("demo", "7", "--dry-run")
-    res = fleet.run("demo", "7", "--dry-run")
+    fleet.run("demo", "7", "--dry-run", REVIEW_STUB_EXIT="1")
+    fleet.run("demo", "7", "--dry-run", REVIEW_STUB_EXIT="1")
+    res = fleet.run("demo", "7", "--dry-run", REVIEW_STUB_EXIT="1")
     assert res.returncode == 2, res.stdout
     assert "бюджет" in res.stderr.lower()
 
 
 def test_budget_is_per_pr(fleet: Fleet) -> None:
-    fleet.run("demo", "7")
-    fleet.run("demo", "7")
+    fleet.run("demo", "7", REVIEW_STUB_EXIT="1")
+    fleet.run("demo", "7", REVIEW_STUB_EXIT="1")
     # Другой PR — свой бюджет. Ветку восьмого надо выложить: review-pr.sh
     # фетчит refs/pull/<n>/head, и без неё прогон упал бы не по бюджету.
     _git(
@@ -1070,8 +1091,8 @@ def test_budget_override_rejects_empty_reason(fleet: Fleet) -> None:
 
 
 def test_budget_override_allows_and_records_reason(fleet: Fleet) -> None:
-    fleet.run("demo", "7")
-    fleet.run("demo", "7")
+    fleet.run("demo", "7", REVIEW_STUB_EXIT="1")
+    fleet.run("demo", "7", REVIEW_STUB_EXIT="1")
     res = fleet.run(
         "demo", "7", "--budget-override", "владелец: critical-профиль",
     )
@@ -1096,21 +1117,25 @@ def test_use_verdict_bypasses_exhausted_budget(fp_fleet: Fleet) -> None:
     ограничен. Утверждение из комментария к барьеру: без этого теста оно было
     бы такой же непроверяемой прозой, какую процесс требует убирать."""
     verdict = fp_fleet.tmp / "v.out"
-    res = fp_fleet.run(
+    # Оба круга красные: после approve второй не открыл бы stop rule, и мы
+    # упёрлись бы не в бюджет.
+    assert fp_fleet.run(
         "demo", "7", "--dry-run", "--write-verdict", str(verdict),
-        REVIEW_STUB_FP=FP,
-    )
-    assert res.returncode == 0, res.stderr
-    # Выбираем остаток бюджета: один платный прогон уже потрачен выше.
-    assert fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP).returncode == 0
-    assert fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP).returncode == 2
+        REVIEW_STUB_FP=FP, REVIEW_STUB_EXIT="1",
+    ).returncode == 1
+    assert fp_fleet.run(
+        "demo", "7", "--fresh", REVIEW_STUB_FP=FP, REVIEW_STUB_EXIT="1",
+    ).returncode == 1
+    # Бюджет исчерпан: платный прогон отказан.
+    assert fp_fleet.run(
+        "demo", "7", "--fresh", REVIEW_STUB_FP=FP, REVIEW_STUB_EXIT="1",
+    ).returncode == 2
 
     kit_before = fp_fleet.local_log.read_text().count("--format markdown")
     res = fp_fleet.run(
         "demo", "7", "--use-verdict", str(verdict), REVIEW_STUB_FP=FP,
     )
-    assert res.returncode == 0, res.stderr
-    assert "codex не вызывался" in res.stdout
+    assert res.returncode == 1, res.stderr
     # Кит для тела не звался — значит и платить было нечем.
     assert fp_fleet.local_log.read_text().count("--format markdown") == kit_before
 
@@ -1131,9 +1156,9 @@ def test_instrument_failure_does_not_consume_budget(fleet: Fleet) -> None:
     assert fleet.run("demo", "7", REVIEW_STUB_EXIT="3").returncode == 3
     assert fleet.run("demo", "7", REVIEW_STUB_EXIT="3").returncode == 3
     # Бюджет не тронут: оба платных круга ещё доступны.
-    assert fleet.run("demo", "7").returncode == 0
-    assert fleet.run("demo", "7").returncode == 0
-    assert fleet.run("demo", "7").returncode == 2
+    assert fleet.run("demo", "7", REVIEW_STUB_EXIT="1").returncode == 1
+    assert fleet.run("demo", "7", REVIEW_STUB_EXIT="1").returncode == 1
+    assert fleet.run("demo", "7", REVIEW_STUB_EXIT="1").returncode == 2
 
 
 def test_documented_flow_costs_one_round(fp_fleet: Fleet) -> None:
@@ -1143,12 +1168,71 @@ def test_documented_flow_costs_one_round(fp_fleet: Fleet) -> None:
     verdict = fp_fleet.tmp / "v.out"
     assert fp_fleet.run(
         "demo", "7", "--dry-run", "--write-verdict", str(verdict),
-        REVIEW_STUB_FP=FP,
-    ).returncode == 0
+        REVIEW_STUB_FP=FP, REVIEW_STUB_EXIT="1",
+    ).returncode == 1
     assert fp_fleet.run(
         "demo", "7", "--use-verdict", str(verdict), REVIEW_STUB_FP=FP,
-    ).returncode == 0
+    ).returncode == 1
     # Круг потрачен ровно один — адресный recheck доступен без override.
-    assert fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP).returncode == 0
+    assert fp_fleet.run(
+        "demo", "7", "--fresh", REVIEW_STUB_FP=FP, REVIEW_STUB_EXIT="1",
+    ).returncode == 1
     # И только теперь бюджет исчерпан.
-    assert fp_fleet.run("demo", "7", REVIEW_STUB_FP=FP).returncode == 2
+    assert fp_fleet.run(
+        "demo", "7", "--fresh", REVIEW_STUB_FP=FP, REVIEW_STUB_EXIT="1",
+    ).returncode == 2
+
+# --- Stop rule: круг открывает только блокирующая находка (devtools#256) ----
+# Канон — prograph-vault `authored/rules/git-workflow.md`, stop rule (vault#135).
+# Порог решает `apply-threshold.sh`: красный вердикт (кит 1) = блокирующая
+# находка есть; approve (кит 0) = не добрала до порога. Значит «не
+# перезапускать из-за minor» проверяется механически по коду прошлого круга, а
+# не по классификации находок моделью.
+
+
+def test_second_round_allowed_after_red_verdict(fleet: Fleet) -> None:
+    """Красный вердикт — законный повод для адресного recheck. Здесь же
+    покрыт случай «ревью на PR ещё нет»: stop rule молчит, пока вердикт не
+    доставлен."""
+    assert fleet.run("demo", "7", REVIEW_STUB_EXIT="1").returncode == 1
+    assert fleet.run("demo", "7").returncode == 0
+
+
+@needs_jq
+def test_stop_rule_ignores_undelivered_verdict(fleet: Fleet) -> None:
+    """Dry-run списал круг с approve, но на PR ревью нет — следующий прогон
+    обязан быть возможен, иначе PR без единого ревью закрыт для ревью."""
+    assert fleet.run("demo", "7", "--dry-run").returncode == 0
+    res = fleet.run("demo", "7")
+    assert res.returncode == 0, res.stderr
+
+
+@needs_jq
+def test_stop_rule_keys_on_published_approve(fleet: Fleet) -> None:
+    """Approve, доставленный на PR, круг закрывает."""
+    reviews = fleet.write_reviews(_review("APPROVED", OLD_HEAD, FP))
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 2, res.stdout
+    assert "блокирующ" in res.stderr.lower()
+
+
+@needs_jq
+def test_stop_rule_allows_after_published_changes_requested(fleet: Fleet) -> None:
+    reviews = fleet.write_reviews(_review("CHANGES_REQUESTED", OLD_HEAD, FP))
+    assert fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews).returncode == 0
+
+
+@needs_jq
+def test_override_bypassing_stop_rule_leaves_a_trace(fleet: Fleet) -> None:
+    """Обход stop rule — такое же решение владельца, как перерасход бюджета:
+    без следа в вердикте оно невидимо тому, кто принимает остаточный риск."""
+    reviews = fleet.write_reviews(_review("APPROVED", OLD_HEAD, FP))
+    res = fleet.run(
+        "demo", "7", "--budget-override", "владелец: новый код после approve",
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+    assert res.returncode == 0, res.stderr
+    body = fleet.body_out.read_text()
+    assert "владелец: новый код после approve" in body
+
+
