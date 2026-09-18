@@ -544,13 +544,44 @@ prose_globs=""
 code_globs=""
 [ -f "$prose_paths_file" ] \
     || die 2 "нет контракта области ревью: $prose_paths_file"
-# Повторы ключа склеиваются (список переносится по строкам), а не
-# перекрывают друг друга: `tail -1`, как в harness.env, здесь молча терял бы
-# все группы, кроме последней.
-prose_globs=$(sed -n 's/^PROSE=//p' "$prose_paths_file" | tr '\n' ' ')
-code_globs=$(sed -n 's/^CODE_OVERRIDE=//p' "$prose_paths_file" | tr '\n' ' ')
-[ -n "$prose_globs" ] \
-    || die 2 "контракт области ревью не называет PROSE: $prose_paths_file"
+# Формат — канон governance/ssot_env.py (эта половина — shell, python читает
+# тот же формат для других контрактов): один ключ — одна строка, дубль —
+# отказ. Выбирать за человека, какое из двух значений настоящее, нельзя —
+# именно такой молчаливый выбор уже однажды развёл литерал и контракт
+# (governance/runner.py). Ведущие/хвостовые пробелы обрезаются; пустая
+# строка и `#`-комментарий пропускаются.
+scope_contract_lines=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    "$prose_paths_file" | grep -v '^#' | grep -v '^$') || true
+# Читает РОВНО ОДНО определение $1 из $scope_contract_lines в scope_key_value.
+# Вызывается напрямую (не через `$(...)`), чтобы `die` внутри действительно
+# завершал скрипт, а не только подоболочку командной подстановки.
+read_scope_key() {
+    _rsk_key="$1"
+    _rsk_matches=$(printf '%s\n' "$scope_contract_lines" \
+        | grep "^${_rsk_key}=") || _rsk_matches=""
+    _rsk_count=0
+    [ -z "$_rsk_matches" ] \
+        || _rsk_count=$(printf '%s\n' "$_rsk_matches" | wc -l | tr -d ' ')
+    case "$_rsk_count" in
+        0) die 2 "контракт области ревью не называет $_rsk_key: \
+$prose_paths_file" ;;
+        1) : ;;
+        *) die 2 "в $prose_paths_file ключ $_rsk_key определён \
+$_rsk_count раз — файл битый; какое значение настоящее, решает человек, \
+не разбор" ;;
+    esac
+    scope_key_value="${_rsk_matches#"${_rsk_key}="}"
+    [ -n "$scope_key_value" ] || die 2 "в $prose_paths_file нет непустого \
+$_rsk_key"
+}
+read_scope_key PROSE
+prose_globs="$scope_key_value"
+# CODE_OVERRIDE обязателен, а не опционален: усечённая вендор-копия без этого
+# ключа молча расширила бы прозу ровно на класс путей, который он защищает
+# (.github/, contracts/, eval/, fixtures/, schemas/) — read_scope_key
+# откажет на нём тем же путём "не называет KEY", что и на пропущенном PROSE.
+read_scope_key CODE_OVERRIDE
+code_globs="$scope_key_value"
 
 # 0 — путь проза, 1 — код. CODE_OVERRIDE сильнее PROSE: Markdown внутри
 # .github/, contracts/, eval/, fixtures/, schemas/ — данные, не проза.

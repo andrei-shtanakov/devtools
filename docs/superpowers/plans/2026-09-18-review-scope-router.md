@@ -199,6 +199,12 @@ EOF
 
 Create `contracts/review-scope/v1/prose-paths.env`:
 
+> Обновлено по итогам финального ревью (находки 2, 3, 6, 2026-09-18): формат
+> приведён к канону `governance/ssot_env.py` (один ключ — одна строка, дубль
+> — отказ разбора), CODE_OVERRIDE стал обязательным ключом, добавлены
+> `requirements*.txt`/`constraints*.txt`. Актуальный файл —
+> `contracts/review-scope/v1/prose-paths.env`.
+
 ```sh
 # Область ревью v1 — какие пути НЕ отправляются модельному ревьюеру.
 #
@@ -209,9 +215,11 @@ Create `contracts/review-scope/v1/prose-paths.env`:
 #
 # Формат: строки KEY=VALUE, значения — глобы через пробел, сопоставляются
 # оболочечным `case` (в нём `*` покрывает и `/`, поэтому docs/* — это всё
-# дерево docs). Ключ можно повторять: значения СКЛЕИВАЮТСЯ, а не
-# перекрывают друг друга — так список переносится по строкам и остаётся
-# читаемым. Файл ПАРСИТСЯ, не исполняется.
+# дерево docs). Канон формата — governance/ssot_env.py (эта же схема, что у
+# authority-root/v1/paths.env и approval-branches/v1/patterns.env): один
+# ключ — одна строка; дубль ключа — отказ разбора, какое значение настоящее,
+# решает человек, а не парсер. Ведущие/хвостовые пробелы обрезаются. Файл
+# ПАРСИТСЯ, не исполняется.
 #
 # Читатели: devtools/review-pr.sh. Срез B вендорит этот же файл в
 # scripts/review/ целевых репо — правило не переписывается второй раз.
@@ -219,12 +227,11 @@ PROSE=*.md *.txt TODO.md docs/* workstreams/*/spec/*
 
 # Сильнее PROSE: эти пути остаются кодом при любом расширении. Markdown
 # внутри них — данные, а не проза: на steward#170 оба блокирующих
-# gold-дефекта лежали именно в таком Markdown.
-CODE_OVERRIDE=.github/* */.github/*
-CODE_OVERRIDE=contracts/* */contracts/*
-CODE_OVERRIDE=eval/* */eval/*
-CODE_OVERRIDE=fixtures/* */fixtures/*
-CODE_OVERRIDE=schemas/* */schemas/*
+# gold-дефекта лежали именно в таком Markdown. Обязателен: усечённая
+# вендор-копия без этого ключа отказывает разбором, а не молча расширяет
+# прозу на самый опасный класс путей. requirements*.txt/constraints*.txt —
+# иначе `*.txt` в PROSE забирал бы бамп пинов зависимостей мимо ревьюера.
+CODE_OVERRIDE=.github/* */.github/* contracts/* */contracts/* eval/* */eval/* fixtures/* */fixtures/* schemas/* */schemas/* requirements*.txt */requirements*.txt constraints*.txt */constraints*.txt
 ```
 
 - [ ] **Step 2: Написать падающие тесты классификатора**

@@ -1332,6 +1332,24 @@ def test_markdown_in_code_dirs_is_code(fleet: Fleet, path: str) -> None:
     assert fleet.run("demo", "7", "--print-scope").stdout.strip() == "code"
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "requirements.txt",
+        "requirements-dev.txt",
+        "src/requirements.txt",
+        "constraints.txt",
+        "constraints-lock.txt",
+        "src/constraints.txt",
+    ],
+)
+def test_dependency_pin_files_are_code(fleet: Fleet, path: str) -> None:
+    """Находка 6: `*.txt` в PROSE иначе забирал бы бамп пинов зависимостей
+    мимо модельного ревьюера (срез B)."""
+    _seed_files(fleet, path)
+    assert fleet.run("demo", "7", "--print-scope").stdout.strip() == "code"
+
+
 def test_rename_from_code_to_prose_stays_code(fleet: Fleet) -> None:
     """Переименование проверяется по ОБОИМ путям: --no-renames показывает
     и удаление старого, и добавление нового."""
@@ -1375,6 +1393,66 @@ def test_unreadable_file_list_falls_back_to_code(fleet: Fleet) -> None:
     res = fleet.run("demo", "7", "--print-scope")
     assert res.stdout.strip() == "code"
     assert "область ревью не определена" in res.stderr
+
+
+# --- Формат контракта — канон governance/ssot_env.py (находки 2, 3) --------
+
+
+def _write_contract(fleet: Fleet, text: str) -> str:
+    path = fleet.tmp / "prose-paths.env"
+    path.write_text(text)
+    return str(path)
+
+
+def test_scope_contract_duplicate_key_refuses(fleet: Fleet) -> None:
+    """Находка 2: дубль ключа — отказ разбора, как в governance/ssot_env.py,
+    а не молчаливая склейка значений в одно расширенное правило."""
+    contract = _write_contract(
+        fleet,
+        "PROSE=*.md\nPROSE=*.txt\nCODE_OVERRIDE=contracts/*\n",
+    )
+    res = fleet.run(
+        "demo", "7", "--print-scope", REVIEW_SCOPE_CONTRACT=contract
+    )
+    assert res.returncode == 2, res.stdout
+    assert "PROSE" in res.stderr
+    assert "2" in res.stderr
+
+
+def test_scope_contract_missing_code_override_refuses(fleet: Fleet) -> None:
+    """Находка 3: усечённая вендор-копия без CODE_OVERRIDE не должна молча
+    расширять прозу на самый опасный класс путей (.github/, contracts/,
+    eval/, fixtures/, schemas/) — отказ, симметричный отсутствию PROSE."""
+    contract = _write_contract(fleet, "PROSE=*.md *.txt\n")
+    res = fleet.run(
+        "demo", "7", "--print-scope", REVIEW_SCOPE_CONTRACT=contract
+    )
+    assert res.returncode == 2, res.stdout
+    assert "CODE_OVERRIDE" in res.stderr
+
+
+def test_scope_contract_missing_prose_refuses(fleet: Fleet) -> None:
+    contract = _write_contract(fleet, "CODE_OVERRIDE=contracts/*\n")
+    res = fleet.run(
+        "demo", "7", "--print-scope", REVIEW_SCOPE_CONTRACT=contract
+    )
+    assert res.returncode == 2, res.stdout
+    assert "PROSE" in res.stderr
+
+
+def test_scope_contract_single_line_per_key_works(fleet: Fleet) -> None:
+    """Канонический формат: один ключ — одна строка, список глобов через
+    пробел внутри значения."""
+    _seed_files(fleet, "contracts/review-scope/v1/notes.md", "TODO.md")
+    contract = _write_contract(
+        fleet,
+        "PROSE=*.md TODO.md\nCODE_OVERRIDE=contracts/* */contracts/*\n",
+    )
+    res = fleet.run(
+        "demo", "7", "--print-scope", REVIEW_SCOPE_CONTRACT=contract
+    )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "code"
 
 
 @needs_jq
