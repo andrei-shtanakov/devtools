@@ -634,6 +634,13 @@ lr_state=""
 # строгий, чтобы этот потребитель не завёл себе второй, более слабый.
 lr_head=""
 lr_fp=""
+# lr_delivered_state — состояние последнего ДОСТАВЛЕННОГО ревью $REVIEW_LOGIN,
+# без требований к маркеру (в отличие от lr_state — марк output stop rule,
+# который признаёт только строгий формат `head=…fp=…`). Нужен отдельно: PR,
+# на котором лежит красный вердикт от кита без --fingerprint-only (маркер без
+# `fp`), для stop rule — miss, но для guard'а ветки прозы (находка 1) это
+# ДОСТАВЛЕННЫЙ CHANGES_REQUESTED, и его нельзя молча погасить аттестацией.
+lr_delivered_state=""
 lr_known=0
 # Запрос идёт на КАЖДОМ прогоне, а не только при дедупе: stop rule обязан знать
 # про доставленный вердикт независимо от отпечатка и от --fresh. Недоступность
@@ -641,6 +648,11 @@ lr_known=0
 # ГРОМКО говорит: жёсткий лимит бюджета при этом продолжает работать, а
 # уточнение «после approve круга нет» деградирует с предупреждением, а не
 # тихо.
+#
+# lr_known выставляется в 1, только если оба запроса к ОДНОМУ и тому же
+# lr_json разобрались: маркерный (lr_state, строгость stop rule не трогаем ни
+# на символ) и безмаркерный (lr_delivered_state, находка 1). Это два разных
+# вопроса к одному списку ревью, не замена одного другим.
 if command -v jq >/dev/null 2>&1; then
     if lr_json=$(gh_r api --paginate "repos/$slug/pulls/$pr/reviews" \
         2> "$work/lastreview.err"); then
@@ -657,7 +669,14 @@ if command -v jq >/dev/null 2>&1; then
                          and ($r.state == "APPROVED" or $r.state == "CHANGES_REQUESTED")
                       then $r.state + " " + $ms[0].captures[0].string + " " + $ms[0].captures[1].string
                       else "miss miss miss" end
-                  end' 2> "$work/lastreview.err"); then
+                  end' 2> "$work/lastreview.err") \
+            && lr_delivered_state=$(printf '%s' "$lr_json" | jq -rs \
+            '([ .[][]
+               | select(.user.login == "'"$REVIEW_LOGIN"'")
+               | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")
+             ] | last) as $r
+            | if $r == null then "none" else $r.state end' \
+            2> "$work/lastreview.err"); then
             # shellcheck disable=SC2034 — lr_head/lr_fp пока не читает
             # никто: их потребитель, адресный recheck, вынесен в
             # devtools#260. Разбирать их здесь всё равно надо — строгий
@@ -670,6 +689,7 @@ EOF
             [ "$lr_state" != "none" ] && [ "$lr_state" != "miss" ] || lr_head=""
             [ "$lr_state" != "miss" ] || lr_state=""
             [ "$lr_state" != "none" ] || lr_state=""
+            [ "$lr_delivered_state" != "none" ] || lr_delivered_state=""
         else
             cat "$work/lastreview.err" >&2
         fi
@@ -692,8 +712,20 @@ fi
 # доставленного CHANGES_REQUESTED значило бы снять его синтетическим
 # зелёным; вызвать ревьюера — нарушить правило «модель не видит прозу».
 # Поэтому здесь отказ: PR остаётся человеку.
+#
+# Guard решает по lr_delivered_state (без требований к маркеру), а не по
+# lr_state (маркерному): красный вердикт от старого кита без --fingerprint-
+# only публикует маркер без `fp`, и для строгого stop-rule разбора это miss —
+# но он всё равно ДОСТАВЛЕН и обязан быть виден здесь. Пустой lr_state (и
+# пустой lr_delivered_state) означает либо «красного нет», либо «факт не
+# получен» — эти два состояния различает именно lr_known, и без него решать
+# нечем: fail-closed, а не тихий approve поверх непрочитанного вердикта.
 if [ "$scope" = "prose" ]; then
-    if [ "$lr_state" = "CHANGES_REQUESTED" ]; then
+    [ "$lr_known" -eq 1 ] || die 2 "prose-only диф, но список ревью" \
+        "${slug}#${pr} не прочитан (нет jq или отказ API): решить, нет ли" \
+        "доставленного request-changes, не на чем. Аттестация не публикуется —" \
+        "PR остаётся человеку."
+    if [ "$lr_delivered_state" = "CHANGES_REQUESTED" ]; then
         die 2 "prose-only диф при доставленном request-changes от" \
             "$REVIEW_LOGIN на ${slug}#${pr}: аттестация не публикуется" \
             "(она погасила бы красный вердикт), ревьюер не вызывается" \

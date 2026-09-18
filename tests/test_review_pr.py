@@ -42,6 +42,10 @@ case "$*" in
         echo "the --slurp option is not supported with --jq or --template" >&2
         exit 1 ;;
     esac
+    if [ -n "${GH_STUB_REVIEWS_EXIT:-}" ]; then
+      echo "${GH_STUB_REVIEWS_ERR:-stub: reviews api unavailable}" >&2
+      exit "$GH_STUB_REVIEWS_EXIT"
+    fi
     if [ -n "${GH_STUB_REVIEWS_JSON:-}" ] && [ -f "$GH_STUB_REVIEWS_JSON" ]; then
       cat "$GH_STUB_REVIEWS_JSON"
     else
@@ -1373,6 +1377,7 @@ def test_unreadable_file_list_falls_back_to_code(fleet: Fleet) -> None:
     assert "область ревью не определена" in res.stderr
 
 
+@needs_jq
 def test_prose_only_publishes_attestation_without_kit(fleet: Fleet) -> None:
     _seed_files(fleet, "docs/guide.md", "TODO.md")
     res = fleet.run("demo", "7")
@@ -1387,6 +1392,7 @@ def test_prose_only_publishes_attestation_without_kit(fleet: Fleet) -> None:
     assert "--approve" in fleet.gh_calls()
 
 
+@needs_jq
 def test_prose_only_does_not_charge_budget(fleet: Fleet) -> None:
     _seed_files(fleet, "docs/guide.md")
     fleet.run("demo", "7")
@@ -1415,6 +1421,47 @@ def test_prose_only_after_changes_requested_stays_with_human(fleet: Fleet) -> No
     assert "остаётся человеку" in res.stderr
 
 
+def _review_old_marker(state: str, head: str, login: str = "ai-prosto") -> dict:
+    """Красный вердикт от кита без --fingerprint-only: маркер БЕЗ `fp`.
+
+    Валидатор stop rule (строгий формат `head=…fp=…`) читает такой маркер
+    как miss — но вердикт всё равно ДОСТАВЛЕН на PR (находка 1)."""
+    body = "## Codex CLI review — терминальный прогон\n\nвердикт...\n"
+    body += f"<!-- codex-terminal-review head={head} -->\n"
+    return {"user": {"login": login}, "state": state, "body": body}
+
+
+@needs_jq
+def test_prose_guard_blocks_on_delivered_changes_requested_without_fp(
+    fleet: Fleet,
+) -> None:
+    """Находка 1: красный вердикт со СТАРЫМ маркером (без `fp`) — miss для
+    stop rule, но ДОСТАВЛЕН на PR. Аттестация обязана его увидеть и не
+    погасить синтетическим approve."""
+    _seed_files(fleet, "docs/guide.md")
+    reviews = fleet.write_reviews(
+        _review_old_marker("CHANGES_REQUESTED", OLD_HEAD)
+    )
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 2, res.stdout
+    assert _kit_calls(fleet) == []
+    assert not fleet.body_out.exists()
+    assert "остаётся человеку" in res.stderr
+
+
+def test_prose_guard_refuses_when_review_list_unreadable(fleet: Fleet) -> None:
+    """Находка 1: пустой lr_state и «факта нет» неотличимы без lr_known.
+    Отказ gh на /reviews — факт не получен, а не «красного нет»: аттестация
+    не публикуется, отказ fail-closed вместо тихого approve."""
+    _seed_files(fleet, "docs/guide.md")
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_EXIT="1")
+    assert res.returncode == 2, res.stdout
+    assert _kit_calls(fleet) == []
+    assert not fleet.body_out.exists()
+    assert "не прочитан" in res.stderr
+
+
+@needs_jq
 def test_prose_only_is_idempotent_on_same_head(fleet: Fleet) -> None:
     _seed_files(fleet, "docs/guide.md")
     assert fleet.run("demo", "7").returncode == 0
@@ -1423,6 +1470,7 @@ def test_prose_only_is_idempotent_on_same_head(fleet: Fleet) -> None:
     assert fleet.body_out.read_text() == first
 
 
+@needs_jq
 def test_prose_only_aborts_when_head_moved(fleet: Fleet) -> None:
     _seed_files(fleet, "docs/guide.md")
     res = fleet.run("demo", "7", GH_STUB_HEADOID2="f" * 40)
