@@ -1352,7 +1352,22 @@ def test_rename_from_code_to_prose_stays_code(fleet: Fleet) -> None:
 
 
 def test_unreadable_file_list_falls_back_to_code(fleet: Fleet) -> None:
-    """Fail-closed: merge-base не вычисляется — PR считается кодовым."""
-    res = fleet.run("demo", "7", "--print-scope", GH_STUB_BASEREF="no-such-base")
+    """Fail-closed: голова PR не имеет общего предка с базой — merge-base
+    падает, область не определена, PR ревьюится как кодовый."""
+    work = fleet.tmp / "orphan"
+    subprocess.run(
+        ["git", "clone", "-q", str(fleet.origin), str(work)],
+        check=True, capture_output=True,
+    )
+    _git("config", "user.email", "t@example.com", cwd=work)
+    _git("config", "user.name", "t", cwd=work)
+    _git("checkout", "-q", "--orphan", "unrelated", cwd=work)
+    _git("rm", "-rqf", ".", cwd=work)
+    (work / "b.py").write_text("x\n")
+    _git("add", "-A", cwd=work)
+    _git("commit", "-m", "unrelated root", cwd=work)
+    fleet.head_sha = _git("rev-parse", "HEAD", cwd=work)
+    _git("push", "-qf", "origin", "HEAD:refs/pull/7/head", cwd=work)
+    res = fleet.run("demo", "7", "--print-scope")
     assert res.stdout.strip() == "code"
     assert "область ревью не определена" in res.stderr
