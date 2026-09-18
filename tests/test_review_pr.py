@@ -1371,3 +1371,60 @@ def test_unreadable_file_list_falls_back_to_code(fleet: Fleet) -> None:
     res = fleet.run("demo", "7", "--print-scope")
     assert res.stdout.strip() == "code"
     assert "область ревью не определена" in res.stderr
+
+
+def test_prose_only_publishes_attestation_without_kit(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md", "TODO.md")
+    res = fleet.run("demo", "7")
+    assert res.returncode == 0, res.stderr
+    assert _kit_calls(fleet) == []
+    body = fleet.body_out.read_text()
+    assert "Automated scope attestation — prose-only" in body
+    assert "review-scope/v1" in body
+    assert "required CI checks остаются обязательным независимым" in body
+    assert f"kind=prose-only head={fleet.head_sha}" in body
+    assert "codex-terminal-review" not in body
+    assert "--approve" in fleet.gh_calls()
+
+
+def test_prose_only_does_not_charge_budget(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md")
+    fleet.run("demo", "7")
+    ledger = fleet.tmp / "review-budget" / "andrei-shtanakov_demo-7.log"
+    assert not ledger.exists()
+
+
+def test_mixed_diff_runs_full_review(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md", "src/tool.py")
+    res = fleet.run("demo", "7")
+    assert res.returncode == 0, res.stderr
+    assert _kit_calls(fleet) != []
+    assert "Automated scope attestation" not in fleet.body_out.read_text()
+
+
+@needs_jq
+def test_prose_only_after_changes_requested_stays_with_human(fleet: Fleet) -> None:
+    """Красный модельный вердикт аттестацией не гасится: не публикуется
+    ничего, модель не вызывается, PR остаётся человеку."""
+    _seed_files(fleet, "docs/guide.md")
+    reviews = fleet.write_reviews(_review("CHANGES_REQUESTED", OLD_HEAD, FP))
+    res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
+    assert res.returncode == 2, res.stdout
+    assert _kit_calls(fleet) == []
+    assert not fleet.body_out.exists()
+    assert "остаётся человеку" in res.stderr
+
+
+def test_prose_only_is_idempotent_on_same_head(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md")
+    assert fleet.run("demo", "7").returncode == 0
+    first = fleet.body_out.read_text()
+    assert fleet.run("demo", "7").returncode == 0
+    assert fleet.body_out.read_text() == first
+
+
+def test_prose_only_aborts_when_head_moved(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md")
+    res = fleet.run("demo", "7", GH_STUB_HEADOID2="f" * 40)
+    assert res.returncode == 4, res.stdout
+    assert not fleet.body_out.exists()

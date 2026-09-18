@@ -616,6 +616,113 @@ if [ "$print_scope" -eq 1 ]; then
     exit 0
 fi
 
+# --- Последнее доставленное ревью (источник истины для stop rule) ---------
+# Источник истины про «был ли уже вердикт» — опубликованные ревью самого PR, а
+# не локальный журнал бюджета: журнал списывает круг сразу по коду кита, то
+# есть и там, где вердикт до PR не дошёл (dry-run без публикации, «голова
+# уехала», провал публикации), и он локален — на другой машине пуст, а ревью
+# лежит в PR, где его видит человек.
+#
+# Строгость разбора — та же, что у дедупа ниже: ровно ОДИН маркер полного
+# формата. Тело ревью содержит вывод порога, то есть текст модели, пришедший
+# из недоверенного дифа; маркер оттуда, стоящий раньше настоящего, иначе
+# выбирал бы базу адресного ревью — вплоть до пустого диапазона, который кит
+# закрывает нулём, а обвязка публикует как approve.
+lr_state=""
+# lr_head/lr_fp разбираются здесь же, но потребителя в этом PR нет: адресный
+# recheck (`--targeted`) вынесен отдельно (devtools#260). Разбор общий и
+# строгий, чтобы этот потребитель не завёл себе второй, более слабый.
+lr_head=""
+lr_fp=""
+lr_known=0
+# Запрос идёт на КАЖДОМ прогоне, а не только при дедупе: stop rule обязан знать
+# про доставленный вердикт независимо от отпечатка и от --fresh. Недоступность
+# ответа (нет jq, отказ API) stop rule не отключает молча — она об этом
+# ГРОМКО говорит: жёсткий лимит бюджета при этом продолжает работать, а
+# уточнение «после approve круга нет» деградирует с предупреждением, а не
+# тихо.
+if command -v jq >/dev/null 2>&1; then
+    if lr_json=$(gh_r api --paginate "repos/$slug/pulls/$pr/reviews" \
+        2> "$work/lastreview.err"); then
+        if lr_line=$(printf '%s' "$lr_json" | jq -rs \
+            '([ .[][]
+               | select(.user.login == "'"$REVIEW_LOGIN"'")
+               | select(((.body // "") | index("<!-- codex-terminal-review ")) != null)
+             ] | last) as $r
+                | if $r == null then "none none none"
+                  else
+                    (($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) as $n
+                    | (($r.body // "") | [match("<!-- codex-terminal-review head=([0-9a-f]{40}) fp=([0-9a-f]{64}) -->")]) as $ms
+                    | if $n == 1 and ($ms | length) == 1
+                         and ($r.state == "APPROVED" or $r.state == "CHANGES_REQUESTED")
+                      then $r.state + " " + $ms[0].captures[0].string + " " + $ms[0].captures[1].string
+                      else "miss miss miss" end
+                  end' 2> "$work/lastreview.err"); then
+            # shellcheck disable=SC2034 — lr_head/lr_fp пока не читает
+            # никто: их потребитель, адресный recheck, вынесен в
+            # devtools#260. Разбирать их здесь всё равно надо — строгий
+            # разбор один на всех потребителей, см. комментарий выше.
+            read -r lr_state lr_head lr_fp <<EOF
+$lr_line
+EOF
+            lr_known=1
+            # shellcheck disable=SC2034 — потребитель lr_head в devtools#260
+            [ "$lr_state" != "none" ] && [ "$lr_state" != "miss" ] || lr_head=""
+            [ "$lr_state" != "miss" ] || lr_state=""
+            [ "$lr_state" != "none" ] || lr_state=""
+        else
+            cat "$work/lastreview.err" >&2
+        fi
+    else
+        cat "$work/lastreview.err" >&2
+    fi
+fi
+[ "$lr_known" -eq 1 ] || echo "ВНИМАНИЕ: последнее ревью $REVIEW_LOGIN не" \
+    "прочитано (нет jq или отказ API) — stop rule «после approve круга нет»" \
+    "на этом прогоне не проверен; лимит бюджета продолжает действовать." >&2
+
+# --- Прозаическая область ревью (scope=prose, решение владельца 2026-09-18) -
+# Прозаический PR модельному ревьюеру не отдаётся: платный ревьюер — только
+# код. Публикуется scope-аттестация — отдельная governance-сущность, а НЕ
+# вердикт: у неё собственный маркер, которого не знает ни один потребитель
+# протокола codex-terminal-review, поэтому появление кода на этом же PR не
+# потребует --budget-override.
+#
+# Красный вердикт аттестацией не гасится. Опубликовать approve поверх
+# доставленного CHANGES_REQUESTED значило бы снять его синтетическим
+# зелёным; вызвать ревьюера — нарушить правило «модель не видит прозу».
+# Поэтому здесь отказ: PR остаётся человеку.
+if [ "$scope" = "prose" ]; then
+    if [ "$lr_state" = "CHANGES_REQUESTED" ]; then
+        die 2 "prose-only диф при доставленном request-changes от" \
+            "$REVIEW_LOGIN на ${slug}#${pr}: аттестация не публикуется" \
+            "(она погасила бы красный вердикт), ревьюер не вызывается" \
+            "(проза платному ревью не подлежит) — PR остаётся человеку." \
+            "Появится код в дифе — прогон пойдёт обычным путём."
+    fi
+    {
+        echo "## Automated scope attestation — prose-only"
+        echo
+        echo "- PR: ${slug}#${pr}, head \`$head_sha\`"
+        echo "- classifier: \`review-scope/v1\`"
+        echo "- все изменённые пути классифицированы как prose-only"
+        echo "- модельный ревьюер не вызывался; содержательная корректность" \
+            "прозы не проверялась"
+        echo "- required CI checks остаются обязательным независимым" \
+            "условием мержа"
+        echo
+        echo "<!-- ai-prosto-scope-review version=1 kind=prose-only" \
+            "head=$head_sha -->"
+    } > "$work/body.md"
+    if [ "$dry_run" -eq 1 ]; then
+        echo "=== dry-run: scope-аттестация, ничего не публикуется ==="
+        cat "$work/body.md"
+        exit 0
+    fi
+    publish approve
+    exit 0
+fi
+
 # --- Отпечаток входа ревью (дедуп, devtools#72) ------------------------------
 # Feature-detect по литералу в local.sh ЦЕЛЕВОГО репо — тот же паттерн, каким
 # кит сам определяет возможности build-prompt (--generated-list). Нет флага →
@@ -837,71 +944,6 @@ if [ -n "$inh_state" ]; then
     publish "$action"
     exit "$kit_code"
 fi
-
-# --- Последнее доставленное ревью (источник истины для stop rule) ---------
-# Источник истины про «был ли уже вердикт» — опубликованные ревью самого PR, а
-# не локальный журнал бюджета: журнал списывает круг сразу по коду кита, то
-# есть и там, где вердикт до PR не дошёл (dry-run без публикации, «голова
-# уехала», провал публикации), и он локален — на другой машине пуст, а ревью
-# лежит в PR, где его видит человек.
-#
-# Строгость разбора — та же, что у дедупа ниже: ровно ОДИН маркер полного
-# формата. Тело ревью содержит вывод порога, то есть текст модели, пришедший
-# из недоверенного дифа; маркер оттуда, стоящий раньше настоящего, иначе
-# выбирал бы базу адресного ревью — вплоть до пустого диапазона, который кит
-# закрывает нулём, а обвязка публикует как approve.
-lr_state=""
-# lr_head/lr_fp разбираются здесь же, но потребителя в этом PR нет: адресный
-# recheck (`--targeted`) вынесен отдельно (devtools#260). Разбор общий и
-# строгий, чтобы этот потребитель не завёл себе второй, более слабый.
-lr_head=""
-lr_fp=""
-lr_known=0
-# Запрос идёт на КАЖДОМ прогоне, а не только при дедупе: stop rule обязан знать
-# про доставленный вердикт независимо от отпечатка и от --fresh. Недоступность
-# ответа (нет jq, отказ API) stop rule не отключает молча — она об этом
-# ГРОМКО говорит: жёсткий лимит бюджета при этом продолжает работать, а
-# уточнение «после approve круга нет» деградирует с предупреждением, а не
-# тихо.
-if command -v jq >/dev/null 2>&1; then
-    if lr_json=$(gh_r api --paginate "repos/$slug/pulls/$pr/reviews" \
-        2> "$work/lastreview.err"); then
-        if lr_line=$(printf '%s' "$lr_json" | jq -rs \
-            '([ .[][]
-               | select(.user.login == "'"$REVIEW_LOGIN"'")
-               | select(((.body // "") | index("<!-- codex-terminal-review ")) != null)
-             ] | last) as $r
-                | if $r == null then "none none none"
-                  else
-                    (($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) as $n
-                    | (($r.body // "") | [match("<!-- codex-terminal-review head=([0-9a-f]{40}) fp=([0-9a-f]{64}) -->")]) as $ms
-                    | if $n == 1 and ($ms | length) == 1
-                         and ($r.state == "APPROVED" or $r.state == "CHANGES_REQUESTED")
-                      then $r.state + " " + $ms[0].captures[0].string + " " + $ms[0].captures[1].string
-                      else "miss miss miss" end
-                  end' 2> "$work/lastreview.err"); then
-            # shellcheck disable=SC2034 — lr_head/lr_fp пока не читает
-            # никто: их потребитель, адресный recheck, вынесен в
-            # devtools#260. Разбирать их здесь всё равно надо — строгий
-            # разбор один на всех потребителей, см. комментарий выше.
-            read -r lr_state lr_head lr_fp <<EOF
-$lr_line
-EOF
-            lr_known=1
-            # shellcheck disable=SC2034 — потребитель lr_head в devtools#260
-            [ "$lr_state" != "none" ] && [ "$lr_state" != "miss" ] || lr_head=""
-            [ "$lr_state" != "miss" ] || lr_state=""
-            [ "$lr_state" != "none" ] || lr_state=""
-        else
-            cat "$work/lastreview.err" >&2
-        fi
-    else
-        cat "$work/lastreview.err" >&2
-    fi
-fi
-[ "$lr_known" -eq 1 ] || echo "ВНИМАНИЕ: последнее ревью $REVIEW_LOGIN не" \
-    "прочитано (нет jq или отказ API) — stop rule «после approve круга нет»" \
-    "на этом прогоне не проверен; лимит бюджета продолжает действовать." >&2
 
 # --- Бюджет платных прогонов (решение владельца 2026-09-18) ---------------
 # Всё, что выше, до модели не доходит: отпечаток (`--fingerprint-only`),
