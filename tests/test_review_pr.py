@@ -1258,9 +1258,13 @@ def test_override_bypassing_stop_rule_leaves_a_trace(fleet: Fleet) -> None:
     assert "владелец: новый код после approve" in body
 
 
-def _scope_review(head: str, login: str = "ai-prosto") -> dict:
-    body = "## Automated scope attestation — prose-only\n\n"
-    body += f"<!-- ai-prosto-scope-review version=1 kind=prose-only head={head} -->\n"
+def _scope_review(
+    head: str, login: str = "ai-prosto", kind: str = "prose-only"
+) -> dict:
+    body = f"## Automated scope attestation — {kind}\n\n"
+    body += (
+        f"<!-- ai-prosto-scope-review version=1 kind={kind} head={head} -->\n"
+    )
     return {"user": {"login": login}, "state": "APPROVED", "body": body}
 
 
@@ -1549,6 +1553,84 @@ def test_mixed_diff_runs_full_review(fleet: Fleet) -> None:
     assert res.returncode == 0, res.stderr
     assert _kit_calls(fleet) != []
     assert "Automated scope attestation" not in fleet.body_out.read_text()
+
+
+# --- Код выхода 5 кита (срез B): диф отфильтрован целиком --------------
+
+
+@needs_jq
+def test_kit_exit_five_publishes_attestation(fleet: Fleet) -> None:
+    """Кит отфильтровал всё — обвязка публикует аттестацию, а не approve."""
+    _seed_files(fleet, "src/tool.py")  # обвязка считает PR кодовым
+    res = fleet.run("demo", "7", REVIEW_STUB_EXIT="5")
+    assert res.returncode == 0, res.stderr
+    body = fleet.body_out.read_text()
+    assert "Automated scope attestation" in body
+    assert "codex-terminal-review" not in body
+
+
+@needs_jq
+def test_kit_exit_five_does_not_charge_budget(fleet: Fleet) -> None:
+    _seed_files(fleet, "src/tool.py")
+    fleet.run("demo", "7", REVIEW_STUB_EXIT="5")
+    ledger = fleet.tmp / "review-budget" / "andrei-shtanakov_demo-7.log"
+    assert not ledger.exists()
+
+
+@needs_jq
+def test_kit_exit_five_attestation_is_honest_about_kind(fleet: Fleet) -> None:
+    """Обвязка сама сочла диф кодовым (src/tool.py) — тело не имеет права
+    утверждать «все пути — проза»: это решение кита (kind=kit-filtered),
+    не ранней классификации обвязки (kind=prose-only)."""
+    _seed_files(fleet, "src/tool.py")
+    res = fleet.run("demo", "7", REVIEW_STUB_EXIT="5")
+    assert res.returncode == 0, res.stderr
+    body = fleet.body_out.read_text()
+    assert "kind=kit-filtered" in body
+    assert "kind=prose-only" not in body
+    assert "prose-only" not in body
+    assert "решение вынес" in body
+
+
+@needs_jq
+def test_scope_attestation_dedup_recognizes_both_kinds(fleet: Fleet) -> None:
+    """Дедуп ищет маркер аттестации ЛЮБОГО kind на текущем head: прошлый
+    прогон мог опубликовать другой вид (например prose-only ранней
+    классификацией), а этот прогон идёт по ветке kit-filtered (код 5) — вторая
+    аттестация на том же head не нужна ни в каком сочетании kind."""
+    _seed_files(fleet, "src/tool.py")
+    reviews = fleet.write_reviews(
+        _scope_review(fleet.head_sha, kind="prose-only")
+    )
+    res = fleet.run(
+        "demo", "7", REVIEW_STUB_EXIT="5", GH_STUB_REVIEWS_JSON=reviews
+    )
+    assert res.returncode == 0, res.stderr
+    assert "уже опубликована" in res.stdout
+    assert fleet.gh_calls().count("pr review 7 --repo") == 0
+
+
+def test_include_prose_bypasses_early_attestation(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md")
+    res = fleet.run("demo", "7", "--include-prose")
+    assert res.returncode == 0, res.stderr
+    assert _kit_calls(fleet) != []
+    assert "--include-prose" in _kit_calls(fleet)[0]
+    assert "Automated scope attestation" not in fleet.body_out.read_text()
+
+
+def test_include_prose_reaches_both_kit_calls(fp_fleet: Fleet) -> None:
+    """Как у --max-diff-bytes/--max-diff-files (см.
+    test_diff_caps_flags_reach_both_kit_calls): отпечаток и полный прогон
+    обязаны видеть один и тот же вход. Проброс только в один из двух вызовов
+    воспроизвёл бы ровно ту опасность, ради которой заведён --fingerprint-
+    only — наследование вердикта, снятого по чужому входу."""
+    res = fp_fleet.run("demo", "7", "--include-prose", REVIEW_STUB_FP=FP)
+    assert res.returncode == 0, res.stderr
+    calls = _kit_calls(fp_fleet)
+    assert len(calls) == 2
+    for call in calls:
+        assert "--include-prose" in call, call
 
 
 @needs_jq
