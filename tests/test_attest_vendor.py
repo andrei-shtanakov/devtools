@@ -1,19 +1,27 @@
 """Тесты attest-vendor.sh — детерминированная аттестация целостности
 вендор-копии review-kit на волновом PR ре-вендора (решение владельца
-2026-09-19; фикс-заход после ревью 6af24ee: см. .superpowers/sdd/
-vendor-attest/review.md и fix-brief.md).
+2026-09-19). Два фикс-захода после ревью: 6af24ee (C1/C2/I1-I4, см.
+.superpowers/sdd/vendor-attest/review.md + fix-brief.md) и 1ce441b
+(монотонность апстрима к базе PR, честное «N из M» в теле, тест с
+враждебным checksum.sh в голове — см. rereview.md).
 
 Принцип, проверяемый этим набором: НИ ОДИН факт, определяющий исход, не
 может приходить из дерева проверяемого PR. Инвентарь и полнота PIN
 сверяются checksum.sh, ИЗВЛЕЧЁННЫМ ИЗ АПСТРИМА (не из головы PR — это и
 есть ядро C1: старая версия исполняла checksum.sh из дерева головы, и PR,
 сузивший собственный инвентарь, получал зелёную аттестацию, не показав
-подменённый файл). Поэтому фикстура несёт НАСТОЯЩИЙ (не стаб с
-управляемым кодом выхода) checksum.sh в апстриме steward — сокращённая,
-но функционирующая версия контракта steward/scripts/review/checksum.sh с
-маленьким составом кита (2 члена вместо 7), чтобы фикстура оставалась
-компактной, сохраняя реальную логику: полнота PIN, сверка хешей,
-отказ на постороннем файле.
+подменённый файл — test_narrowed_inventory_attack_is_caught и
+test_hostile_checksum_sh_in_head_is_ignored_apstream_enforced проверяют
+именно это, второй — с враждебной копией checksum.sh ПРЯМО В ГОЛОВЕ PR).
+Апстрим также обязан двигаться только ВПЕРЁД относительно апстрима базы
+PR (монотонность, I1) — иначе ancestry-проверка одна не ловит откат на
+старый, но всё ещё валидный коммит доверенной ветки steward. Поэтому
+фикстура несёт НАСТОЯЩИЙ (не стаб с управляемым кодом выхода) checksum.sh
+в апстриме steward — сокращённая, но функционирующая версия контракта
+steward/scripts/review/checksum.sh с маленьким составом кита (3
+обязательных члена + 1 переходный вместо 7 боевых), чтобы фикстура
+оставалась компактной, сохраняя реальную логику: полнота PIN (включая
+`?`-семантику переходных членов), сверка хешей, отказ на постороннем файле.
 
 Стратегия — по образцу tests/test_review_pr.py: git настоящий (bare-репо в
 роли origin демо-репо И origin апстрима steward), `gh` — стаб.
@@ -21,8 +29,9 @@ vendor-attest/review.md и fix-brief.md).
 Контракт кодов выхода attest-vendor.sh:
   0 — сверка чиста, аттестация опубликована (или dry-run, или дедуп);
   2 — конфигурация/аргументы/состояние PR/публикация/неустановленный факт;
-  3 — сверка НЕ прошла (апстрим не предок доверенной ветки, PR трогает
-      пути вне кита, расхождение с апстримом, красный checksum.sh);
+  3 — сверка НЕ прошла (апстрим не предок доверенной ветки или откат
+      относительно апстрима базы PR, PR трогает пути вне кита, расхождение
+      с апстримом, красный checksum.sh);
   4 — голова PR уехала между сверкой и публикацией.
 """
 
@@ -87,14 +96,21 @@ def _sha256(path: Path) -> str:
 KIT_MEMBERS = (
     "scripts/review/build-prompt.sh",
     "scripts/review/local.sh",
+    "scripts/review/checksum.sh",
 )
+# Переходный (опциональный) член — `?path` в required_kit_default: легально
+# отсутствует и в PIN, и на диске (двухшаговый ре-вендор состава кита,
+# devtools#228). Именно на этом члене проверяется «честное N из M» (residual
+# 1 ре-ревью): checksum.sh зелёный без него, тело обязано назвать его
+# поимённо, а не растворить в «все совпали».
+OPTIONAL_MEMBER = "scripts/review/harness-claude"
 
 # Сокращённая, но НАСТОЯЩАЯ реализация контракта steward/scripts/review/
 # checksum.sh: реальное хеширование, реальная проверка полноты PIN против
-# зашитого инвентаря (`required_kit`), реальный отказ на постороннем
-# файле. Состав — 2 члена вместо 7 боевых, чтобы фикстура оставалась
-# компактной; логика инвариантов — та же самая по духу, не стаб с
-# управляемым `exit $CODE`.
+# зашитого инвентаря (`required_kit`, включая переходную `?`-семантику),
+# реальный отказ на постороннем файле. Состав — 3 обязательных члена + 1
+# переходный вместо 7 боевых, чтобы фикстура оставалась компактной; логика
+# инвариантов — та же самая по духу, не стаб с управляемым `exit $CODE`.
 REAL_CHECKSUM_SH = """#!/bin/sh
 set -eu
 usage() {{ echo "usage: checksum.sh --pin <file> [--root <dir>]" >&2; }}
@@ -105,7 +121,8 @@ hash_file() {{
         shasum -a 256 "$1" | cut -d' ' -f1
     fi
 }}
-required_kit="{required_kit}"
+required_kit_default="{required_kit}"
+required_kit="$required_kit_default"
 pin=""; root=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -135,7 +152,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     esac
     [ ${{#hash_expected}} -eq 64 ] || {{ echo "битая строка PIN: $line" >&2; exit 2; }}
     case " $required_kit " in
-        *" $path "*) ;;
+        *" $path "*|*" ?$path "*) ;;
         *) echo "PIN перечисляет файл вне состава кита: $path" >&2; exit 2 ;;
     esac
     checked=$((checked + 1))
@@ -154,6 +171,21 @@ done < "$pin"
 [ "$checked" -gt 0 ] || {{ echo "PIN пуст" >&2; exit 2; }}
 missing=""
 for member in $required_kit; do
+    case "$member" in
+        '?'*)
+            optional_path=${{member#?}}
+            case " $seen " in
+                *" $optional_path "*) ;;
+                *)
+                    if [ -e "$root/$optional_path" ]; then
+                        echo "переходный член присутствует, но не запинован: \
+$optional_path" >&2
+                        failed=$((failed + 1))
+                    fi
+                    ;;
+            esac
+            continue ;;
+    esac
     case " $seen " in
         *" $member "*) ;;
         *) missing="$missing $member" ;;
@@ -166,7 +198,7 @@ if [ "$failed" -gt 0 ]; then
     exit 1
 fi
 echo "копия кита совпадает с PIN: $checked файла(ов)."
-""".format(required_kit=" ".join(KIT_MEMBERS))
+""".format(required_kit=" ".join(KIT_MEMBERS) + " ?" + OPTIONAL_MEMBER)
 
 
 class Fleet:
@@ -221,6 +253,7 @@ class Fleet:
 
         self.seed = seed
         self._write_kit(seed, "base\n")
+        self._write_checksum(seed)
         self._write_pin(seed, self.upstream_sha)
         _git("add", ".", cwd=seed)
         _git("commit", "-m", "vendor: re-vendor review-kit", cwd=seed)
@@ -248,7 +281,10 @@ class Fleet:
         return path
 
     def _write_kit(self, root: Path, content: str) -> None:
-        for member in KIT_MEMBERS:
+        """Пишет ОБА generic-члена (build-prompt.sh, local.sh) — не
+        checksum.sh, у него фиксированное содержимое (_write_checksum), и
+        не OPTIONAL_MEMBER, который по умолчанию легально отсутствует."""
+        for member in KIT_MEMBERS[:2]:
             f = root / member
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text(content)
@@ -273,6 +309,44 @@ class Fleet:
         """Закоммитить текущее состояние seed как новую голову PR #7."""
         _git("add", ".", cwd=self.seed)
         _git("commit", "-m", "tamper", cwd=self.seed)
+        self.head_sha = _git("rev-parse", "HEAD", cwd=self.seed)
+        _git(
+            "push", "-q", "-f", "origin", "HEAD:refs/pull/7/head", cwd=self.seed,
+        )
+
+    def rebase_pr_on_merged_vendor(
+        self,
+        base_upstream_sha: str,
+        base_content: str,
+        head_upstream_sha: str,
+        head_content: str,
+    ) -> None:
+        """Смержить в master УЖЕ отревьюенный вендор `base_upstream_sha`
+        (отдельным чекаутом, не трогая `seed`), затем открыть НОВУЮ голову
+        PR #7 поверх этого master, вендорящую `head_upstream_sha`. Нужно
+        тестам монотонности (I1): апстрим базы PR читается ИЗ origin/master,
+        апстрим головы — из PIN PR-ветки."""
+        base_checkout = self.tmp / "base-vendor-checkout"
+        subprocess.run(
+            ["git", "clone", "-q", str(self.demo_origin), str(base_checkout)],
+            check=True, capture_output=True,
+        )
+        _git("config", "user.email", "t@example.com", cwd=base_checkout)
+        _git("config", "user.name", "t", cwd=base_checkout)
+        self._write_kit(base_checkout, base_content)
+        self._write_checksum(base_checkout)
+        self._write_pin(base_checkout, base_upstream_sha)
+        _git("add", ".", cwd=base_checkout)
+        _git("commit", "-m", "vendor: base state (уже смержено)", cwd=base_checkout)
+        _git("push", "-q", "origin", "HEAD:master", cwd=base_checkout)
+
+        _git("fetch", "-q", "origin", "master", cwd=self.seed)
+        _git("checkout", "-B", "pr-branch", "origin/master", cwd=self.seed)
+        self._write_kit(self.seed, head_content)
+        self._write_checksum(self.seed)
+        self._write_pin(self.seed, head_upstream_sha)
+        _git("add", ".", cwd=self.seed)
+        _git("commit", "-m", "vendor: re-vendor review-kit (v2)", cwd=self.seed)
         self.head_sha = _git("rev-parse", "HEAD", cwd=self.seed)
         _git(
             "push", "-q", "-f", "origin", "HEAD:refs/pull/7/head", cwd=self.seed,
@@ -382,12 +456,43 @@ def test_clean_verdict_approves(fleet: Fleet) -> None:
     body = fleet.body_out.read_text()
     assert fleet.head_sha in body
     assert fleet.upstream_sha in body
-    assert "2 член(ов)" in body
+    # N из M: 3 присутствующих обязательных члена из 4 (переходный
+    # harness-claude легально отсутствует на этом репо — residual 1).
+    assert f"{len(KIT_MEMBERS)} из {len(KIT_MEMBERS) + 1} член(ов)" in body
+    assert OPTIONAL_MEMBER in body
+    assert "монотонность не проверялась" in body
     # C2: тело — только наш собственный текст. Ни путей из PIN, ни сырого
-    # вывода апстримного checksum.sh (даже успешного) в теле нет.
+    # вывода апстримного checksum.sh (даже успешного) в теле нет; исключение
+    # — OPTIONAL_MEMBER выше, он читается из ДОВЕРЕННОГО апстримного
+    # checksum.sh, не из PR.
     assert "build-prompt.sh" not in body
     assert "local.sh" not in body
     assert "копия кита совпадает с PIN" not in body
+
+
+def test_optional_member_fully_vendored_reports_full_count(fleet: Fleet) -> None:
+    """Когда переходный член ТОЖЕ довезён (и в steward, и в голове, PIN его
+    покрывает) — N == M, отдельной строки про отсутствие нет."""
+    (fleet.steward / OPTIONAL_MEMBER).write_text("harness\n")
+    (fleet.steward / OPTIONAL_MEMBER).chmod(0o755)
+    _git("add", ".", cwd=fleet.steward)
+    _git("commit", "-m", "vendor harness-claude", cwd=fleet.steward)
+    _git("push", "-q", "origin", "master", cwd=fleet.steward)
+    new_upstream_sha = _git("rev-parse", "HEAD", cwd=fleet.steward)
+
+    (fleet.seed / OPTIONAL_MEMBER).write_text("harness\n")
+    (fleet.seed / OPTIONAL_MEMBER).chmod(0o755)
+    fleet._write_pin(
+        fleet.seed, new_upstream_sha, members=(*KIT_MEMBERS, OPTIONAL_MEMBER),
+    )
+    fleet.push_head()
+
+    res = fleet.run("demo", "7", GH_STUB_HEADOID=fleet.head_sha)
+    assert res.returncode == 0, res.stderr
+    body = fleet.body_out.read_text()
+    total = len(KIT_MEMBERS) + 1
+    assert f"{total} из {total} член(ов)" in body
+    assert "переходные члены апстрима, отсутствующие" not in body
 
 
 def test_body_disclaims_content_review(fleet: Fleet) -> None:
@@ -433,16 +538,18 @@ def test_source_line_trailing_text_not_leaked_into_body(fleet: Fleet) -> None:
 
 def test_narrowed_inventory_attack_is_caught(fleet: Fleet) -> None:
     """Ядро C1: подменить local.sh (драйвер ревью) и вычистить его строку
-    из PIN, оставив только build-prompt.sh. В СТАРОЙ версии инструмента
-    (исполнявшей checksum.sh головы) это давало зелёную аттестацию, не
-    показав подменённый файл. Теперь checksum.sh извлекается из апстрима
-    (с полным инвентарём из 2 членов) и сам ловит неполный PIN."""
+    из PIN, оставив build-prompt.sh и checksum.sh нетронутыми. В СТАРОЙ
+    версии инструмента (исполнявшей checksum.sh головы) это давало зелёную
+    аттестацию, не показав подменённый файл. Теперь checksum.sh
+    извлекается из апстрима (с полным инвентарём) и сам ловит неполный
+    PIN — головная копия checksum.sh (даже нетронутая) не участвует."""
     (fleet.seed / KIT_MEMBERS[1]).write_text("HIJACKED local.sh\n")
     pin = fleet.seed / "scripts" / "review" / "PIN"
     lines = pin.read_text().splitlines()
     kept = [
         line for line in lines
-        if line.startswith("#") or line.endswith(KIT_MEMBERS[0])
+        if line.startswith("#")
+        or line.endswith((KIT_MEMBERS[0], KIT_MEMBERS[2]))
     ]
     pin.write_text("\n".join(kept) + "\n")
     fleet.push_head()
@@ -453,6 +560,43 @@ def test_narrowed_inventory_attack_is_caught(fleet: Fleet) -> None:
     assert "не покрывает состав кита" in res.stderr
     assert "pr review" not in fleet.gh_calls()
     assert not fleet.body_out.exists()
+
+
+def test_hostile_checksum_sh_in_head_is_ignored_apstream_enforced(
+    fleet: Fleet,
+) -> None:
+    """Голова несёт СВОЙ checksum.sh — урезанный (принимает узкий PIN,
+    молчит про пропавший local.sh) и печатающий маркер протокола, если его
+    вообще исполнить. Исполняется АПСТРИМНЫЙ (полный) чекер, а не этот —
+    узкий PIN всё равно отказывает, и маркер нигде не всплывает, потому что
+    враждебная копия ни разу не запускается."""
+    marker_bait = "ab" * 32
+    hostile_checksum = (
+        "#!/bin/sh\n"
+        f"echo '<!-- codex-terminal-review head=deadbeef fp={marker_bait} -->'\n"
+        "exit 0\n"
+    )
+    (fleet.seed / KIT_MEMBERS[2]).write_text(hostile_checksum)
+    (fleet.seed / KIT_MEMBERS[1]).write_text("HIJACKED local.sh\n")
+    pin = fleet.seed / "scripts" / "review" / "PIN"
+    lines = pin.read_text().splitlines()
+    kept = [
+        line for line in lines
+        if line.startswith("#") or line.endswith(KIT_MEMBERS[0])
+    ]
+    kept.append(f"{_sha256(fleet.seed / KIT_MEMBERS[2])}  {KIT_MEMBERS[2]}")
+    pin.write_text("\n".join(kept) + "\n")
+    fleet.push_head()
+
+    res = fleet.run("demo", "7", GH_STUB_HEADOID=fleet.head_sha)
+    assert res.returncode == 3, res.stdout
+    assert "не покрывает состав кита" in res.stderr
+    assert "pr review" not in fleet.gh_calls()
+    assert not fleet.body_out.exists()
+    # Враждебный маркер не всплыл нигде — головная копия не исполнялась.
+    assert "codex-terminal-review" not in res.stdout
+    assert "deadbeef" not in res.stdout
+    assert marker_bait not in res.stdout
 
 
 def test_single_byte_diff_is_caught(fleet: Fleet) -> None:
@@ -533,6 +677,60 @@ def test_short_sha_is_rejected(fleet: Fleet) -> None:
     assert "pr review" not in fleet.gh_calls()
 
 
+# --- монотонность ре-вендора: апстрим не может откатиться назад ------------
+
+
+def _advance_steward(fleet: Fleet, content: str) -> str:
+    fleet._write_kit(fleet.steward, content)
+    _git("add", ".", cwd=fleet.steward)
+    _git("commit", "-m", "vendor v2", cwd=fleet.steward)
+    _git("push", "-q", "origin", "master", cwd=fleet.steward)
+    return _git("rev-parse", "HEAD", cwd=fleet.steward)
+
+
+def test_monotonic_forward_revendor_is_accepted(fleet: Fleet) -> None:
+    """База PR уже везёт v1 (fleet.upstream_sha, смержено), голова
+    двигается вперёд на v2 (потомок v1 в истории steward) — законный
+    ре-вендор новой версии кита, обязан пройти."""
+    v2_sha = _advance_steward(fleet, "v2\n")
+    fleet.rebase_pr_on_merged_vendor(
+        fleet.upstream_sha, "base\n", v2_sha, "v2\n",
+    )
+
+    res = fleet.run("demo", "7", GH_STUB_HEADOID=fleet.head_sha)
+    assert res.returncode == 0, res.stderr
+    body = fleet.body_out.read_text()
+    assert "потомок апстрима базы PR" in body
+    assert fleet.upstream_sha in body
+
+
+def test_downgrade_revendor_is_refused(fleet: Fleet) -> None:
+    """База PR уже везёт v2 (свежее, смержено), голова откатывает на v1 —
+    v1 РЕАЛЬНО существует и остаётся предком origin/master steward (ancestry
+    в одиночку это пропустила бы), но это откат правки внутри кита: этот
+    класс атаки закрывает именно монотонность к базе PR, а не ancestry."""
+    v2_sha = _advance_steward(fleet, "v2\n")
+    fleet.rebase_pr_on_merged_vendor(
+        v2_sha, "v2\n", fleet.upstream_sha, "base\n",
+    )
+
+    res = fleet.run("demo", "7", GH_STUB_HEADOID=fleet.head_sha)
+    assert res.returncode == 3, res.stdout
+    assert "это откат" in res.stderr
+    assert "pr review" not in fleet.gh_calls()
+    assert not fleet.body_out.exists()
+
+
+def test_first_revendor_in_repo_skips_monotonicity_with_note(fleet: Fleet) -> None:
+    """Дефолтная фикстура (без rebase_pr_on_merged_vendor) — это ровно
+    случай «в базе PR нет PIN»: монотонность пропускается ГРОМКО, не
+    молча."""
+    res = fleet.run("demo", "7")
+    assert res.returncode == 0, res.stderr
+    assert "первый ре-вендор" in res.stderr
+    assert "монотонность не проверялась" in fleet.body_out.read_text()
+
+
 # --- I2: PR обязан целиком лежать внутри состава кита ------------------------
 
 
@@ -601,7 +799,8 @@ def test_dry_run_still_enforces_checks(fleet: Fleet) -> None:
     lines = pin.read_text().splitlines()
     kept = [
         line for line in lines
-        if line.startswith("#") or line.endswith(KIT_MEMBERS[0])
+        if line.startswith("#")
+        or line.endswith((KIT_MEMBERS[0], KIT_MEMBERS[2]))
     ]
     pin.write_text("\n".join(kept) + "\n")
     fleet.push_head()
