@@ -812,6 +812,34 @@ def test_dedup_idempotent_on_same_head(fleet: Fleet) -> None:
     assert fleet.gh_calls().count("pr review") == calls_after_first
 
 
+def test_moved_upstream_is_not_short_circuited_by_dedup(fleet: Fleet) -> None:
+    """Апстрим уехал, голова PR та же, прогон повторён.
+
+    Дедуп обязан НЕ срабатывать: он ключуется полным маркером, включая
+    upstream. Иначе средство от протухания, которое шапка и тело обещают
+    оператору («повторный прогон»), недостижимо — выход нулём без единой
+    проверки на копии, которая по правилу инструмента уже недействительна.
+    """
+    first = fleet.run("demo", "7")
+    assert first.returncode == 0, first.stderr
+    published_body = fleet.body_out.read_text()
+    reviews = fleet.reviews_file(_review("APPROVED", published_body))
+
+    # Кит в апстриме меняется — вендор-копия в голове PR устаревает.
+    fleet._write_kit(fleet.steward, "moved\n")
+    fleet._write_checksum(fleet.steward)
+    _git("add", ".", cwd=fleet.steward)
+    _git("commit", "-m", "upstream moved", cwd=fleet.steward)
+    _git("push", "-q", "origin", "HEAD:master", cwd=fleet.steward)
+
+    second = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
+    assert second.returncode == 3, second.stdout + second.stderr
+    assert "уже опубликована" not in second.stdout
+    assert "НЕ ПРОШЛА" in second.stderr
+    # Ровно одна публикация за оба прогона — вторая не состоялась.
+    assert fleet.gh_calls().count("pr review") == 1
+
+
 # --- голова уехала -----------------------------------------------------------
 
 
