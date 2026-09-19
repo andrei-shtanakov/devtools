@@ -1,24 +1,31 @@
 """Тесты attest-vendor.sh — детерминированная аттестация целостности
 вендор-копии review-kit на волновом PR ре-вендора (решение владельца
-2026-09-19). Два фикс-захода после ревью: 6af24ee (C1/C2/I1-I4, см.
-.superpowers/sdd/vendor-attest/review.md + fix-brief.md) и 1ce441b
-(монотонность апстрима к базе PR, честное «N из M» в теле, тест с
-враждебным checksum.sh в голове — см. rereview.md).
+2026-09-19). Три захода: 6af24ee (C1/C2/I1-I4 фикс-раунда, см.
+.superpowers/sdd/vendor-attest/review.md + fix-brief.md), 1ce441b
+(честное «N из M» в теле, тест с враждебным checksum.sh в голове — оба
+остались; см. rereview.md) и финальная правка владельца поверх
+1ce441b — монотонность к базе PR ОТМЕНЕНА: вместо слежки за направлением
+истории steward сверка (инвентарь И побайт/режим) идёт против АКТУАЛЬНОГО
+origin/master, а не против коммита, названного в SOURCE головы.
 
 Принцип, проверяемый этим набором: НИ ОДИН факт, определяющий исход, не
 может приходить из дерева проверяемого PR. Инвентарь и полнота PIN
-сверяются checksum.sh, ИЗВЛЕЧЁННЫМ ИЗ АПСТРИМА (не из головы PR — это и
-есть ядро C1: старая версия исполняла checksum.sh из дерева головы, и PR,
-сузивший собственный инвентарь, получал зелёную аттестацию, не показав
-подменённый файл — test_narrowed_inventory_attack_is_caught и
+сверяются checksum.sh, ИЗВЛЕЧЁННЫМ ИЗ ТЕКУЩЕГО АПСТРИМА (не из головы PR
+и не из коммита SOURCE — это и есть ядро C1: старая версия исполняла
+checksum.sh из дерева головы, и PR, сузивший собственный инвентарь,
+получал зелёную аттестацию, не показав подменённый файл —
+test_narrowed_inventory_attack_is_caught и
 test_hostile_checksum_sh_in_head_is_ignored_apstream_enforced проверяют
 именно это, второй — с враждебной копией checksum.sh ПРЯМО В ГОЛОВЕ PR).
-Апстрим также обязан двигаться только ВПЕРЁД относительно апстрима базы
-PR (монотонность, I1) — иначе ancestry-проверка одна не ловит откат на
-старый, но всё ещё валидный коммит доверенной ветки steward. Поэтому
-фикстура несёт НАСТОЯЩИЙ (не стаб с управляемым кодом выхода) checksum.sh
-в апстриме steward — сокращённая, но функционирующая версия контракта
-steward/scripts/review/checksum.sh с маленьким составом кита (3
+SOURCE-коммит из PIN головы остаётся только САНИТАРНОЙ проверкой
+провенанса (обязан существовать и быть предком origin/master steward) —
+дальше в сверке не участвует: откат закрывается ПО СУЩЕСТВУ (старые байты
+не совпадут с сегодняшним апстримом), не слежкой за историей — см.
+test_stale_content_rejected_once_current_upstream_moves_on и
+test_stale_source_line_accepted_when_content_matches_current_upstream.
+Поэтому фикстура несёт НАСТОЯЩИЙ (не стаб с управляемым кодом выхода)
+checksum.sh в апстриме steward — сокращённая, но функционирующая версия
+контракта steward/scripts/review/checksum.sh с маленьким составом кита (3
 обязательных члена + 1 переходный вместо 7 боевых), чтобы фикстура
 оставалась компактной, сохраняя реальную логику: полнота PIN (включая
 `?`-семантику переходных членов), сверка хешей, отказ на постороннем файле.
@@ -29,9 +36,8 @@ steward/scripts/review/checksum.sh с маленьким составом кит
 Контракт кодов выхода attest-vendor.sh:
   0 — сверка чиста, аттестация опубликована (или dry-run, или дедуп);
   2 — конфигурация/аргументы/состояние PR/публикация/неустановленный факт;
-  3 — сверка НЕ прошла (апстрим не предок доверенной ветки или откат
-      относительно апстрима базы PR, PR трогает пути вне кита, расхождение
-      с апстримом, красный checksum.sh);
+  3 — сверка НЕ прошла (апстрим не предок доверенной ветки, PR трогает
+      пути вне кита, расхождение с ТЕКУЩИМ апстримом, красный checksum.sh);
   4 — голова PR уехала между сверкой и публикацией.
 """
 
@@ -143,7 +149,9 @@ fi
 checked=0
 failed=0
 seen=""
+cr=$(printf '\r')
 while IFS= read -r line || [ -n "$line" ]; do
+    line=${{line%"$cr"}}
     case "$line" in ''|'#'*) continue ;; esac
     hash_expected=${{line%%  *}}
     path=${{line#*  }}
@@ -314,44 +322,6 @@ class Fleet:
             "push", "-q", "-f", "origin", "HEAD:refs/pull/7/head", cwd=self.seed,
         )
 
-    def rebase_pr_on_merged_vendor(
-        self,
-        base_upstream_sha: str,
-        base_content: str,
-        head_upstream_sha: str,
-        head_content: str,
-    ) -> None:
-        """Смержить в master УЖЕ отревьюенный вендор `base_upstream_sha`
-        (отдельным чекаутом, не трогая `seed`), затем открыть НОВУЮ голову
-        PR #7 поверх этого master, вендорящую `head_upstream_sha`. Нужно
-        тестам монотонности (I1): апстрим базы PR читается ИЗ origin/master,
-        апстрим головы — из PIN PR-ветки."""
-        base_checkout = self.tmp / "base-vendor-checkout"
-        subprocess.run(
-            ["git", "clone", "-q", str(self.demo_origin), str(base_checkout)],
-            check=True, capture_output=True,
-        )
-        _git("config", "user.email", "t@example.com", cwd=base_checkout)
-        _git("config", "user.name", "t", cwd=base_checkout)
-        self._write_kit(base_checkout, base_content)
-        self._write_checksum(base_checkout)
-        self._write_pin(base_checkout, base_upstream_sha)
-        _git("add", ".", cwd=base_checkout)
-        _git("commit", "-m", "vendor: base state (уже смержено)", cwd=base_checkout)
-        _git("push", "-q", "origin", "HEAD:master", cwd=base_checkout)
-
-        _git("fetch", "-q", "origin", "master", cwd=self.seed)
-        _git("checkout", "-B", "pr-branch", "origin/master", cwd=self.seed)
-        self._write_kit(self.seed, head_content)
-        self._write_checksum(self.seed)
-        self._write_pin(self.seed, head_upstream_sha)
-        _git("add", ".", cwd=self.seed)
-        _git("commit", "-m", "vendor: re-vendor review-kit (v2)", cwd=self.seed)
-        self.head_sha = _git("rev-parse", "HEAD", cwd=self.seed)
-        _git(
-            "push", "-q", "-f", "origin", "HEAD:refs/pull/7/head", cwd=self.seed,
-        )
-
     def env(self, **extra: str) -> dict[str, str]:
         env = os.environ.copy()
         env.update(
@@ -455,12 +425,14 @@ def test_clean_verdict_approves(fleet: Fleet) -> None:
         assert f"GH_CONFIG_DIR={fleet.profile_dir}" in line
     body = fleet.body_out.read_text()
     assert fleet.head_sha in body
+    # provenance (SOURCE) и актуальный апстрим совпадают в этом прогоне
+    # (steward не продвигался) — оба называются в теле явно.
     assert fleet.upstream_sha in body
+    assert "ТЕКУЩИМ апстримом" in body
     # N из M: 3 присутствующих обязательных члена из 4 (переходный
     # harness-claude легально отсутствует на этом репо — residual 1).
     assert f"{len(KIT_MEMBERS)} из {len(KIT_MEMBERS) + 1} член(ов)" in body
     assert OPTIONAL_MEMBER in body
-    assert "монотонность не проверялась" in body
     # C2: тело — только наш собственный текст. Ни путей из PIN, ни сырого
     # вывода апстримного checksum.sh (даже успешного) в теле нет; исключение
     # — OPTIONAL_MEMBER выше, он читается из ДОВЕРЕННОГО апстримного
@@ -661,23 +633,67 @@ def test_unresolvable_upstream_commit_is_config_error(fleet: Fleet) -> None:
     fleet.push_head()
     res = fleet.run("demo", "7", GH_STUB_HEADOID=fleet.head_sha)
     assert res.returncode == 2
-    assert "не найден" in res.stderr
+    assert "не резолвится" in res.stderr
+    assert "провенанс не подтверждён" in res.stderr
     assert "pr review" not in fleet.gh_calls()
 
 
-def test_short_sha_is_rejected(fleet: Fleet) -> None:
+def test_abbreviated_sha_is_resolved_and_accepted(fleet: Fleet) -> None:
+    """Блокер приёмочного ревью: реальный флот пишет в PIN СОКРАЩЁННЫЙ SHA
+    (`a2d7e71`, 7 hex) — не полные 40. Требование полных 40 hex делало
+    основной сценарий недостижимым на любом настоящем репо. Сокращённый
+    SHA обязан резолвиться против доверенного steward и приниматься."""
     pin = fleet.seed / "scripts" / "review" / "PIN"
     lines = pin.read_text().splitlines()
-    lines[0] = f"# SOURCE: steward @ {fleet.upstream_sha[:7]} (short)"
+    short = fleet.upstream_sha[:7]
+    lines[0] = f"# SOURCE: steward @ {short} (master, short)"
     pin.write_text("\n".join(lines) + "\n")
     fleet.push_head()
+
+    res = fleet.run("demo", "7", GH_STUB_HEADOID=fleet.head_sha)
+    assert res.returncode == 0, res.stderr
+    body = fleet.body_out.read_text()
+    assert short in body
+    assert fleet.upstream_sha in body  # резолвлен в полный oid
+
+
+def test_unknown_abbreviated_sha_is_config_error(fleet: Fleet) -> None:
+    """Сокращённый SHA, не матчащий НИ ОДИН коммит steward после fetch —
+    git сам откажет (не «неизвестен» ≠ «отказ формата»: строгость на
+    факте, не на длине строки)."""
+    pin = fleet.seed / "scripts" / "review" / "PIN"
+    lines = pin.read_text().splitlines()
+    lines[0] = "# SOURCE: steward @ deadbee (master, unknown)"
+    pin.write_text("\n".join(lines) + "\n")
+    fleet.push_head()
+
     res = fleet.run("demo", "7", GH_STUB_HEADOID=fleet.head_sha)
     assert res.returncode == 2
-    assert "40 hex" in res.stderr
+    assert "не резолвится" in res.stderr
     assert "pr review" not in fleet.gh_calls()
 
 
-# --- монотонность ре-вендора: апстрим не может откатиться назад ------------
+def test_non_hex_source_sha_is_config_error(fleet: Fleet) -> None:
+    pin = fleet.seed / "scripts" / "review" / "PIN"
+    lines = pin.read_text().splitlines()
+    lines[0] = "# SOURCE: steward @ not-a-sha (garbage)"
+    pin.write_text("\n".join(lines) + "\n")
+    fleet.push_head()
+
+    res = fleet.run("demo", "7", GH_STUB_HEADOID=fleet.head_sha)
+    assert res.returncode == 2
+    assert "не hex" in res.stderr
+    assert "pr review" not in fleet.gh_calls()
+
+
+# --- сверка идёт с ТЕКУЩИМ апстримом, а не с коммитом из SOURCE ------------
+# Решение владельца поверх первого фикс-захода: монотонность к базе PR не
+# делаем вовсе — вместо слежки за направлением истории steward сверка
+# (инвентарь И побайт/режим) идёт против АКТУАЛЬНОГО origin/master. Это
+# закрывает откат по существу (старые байты не совпадут с сегодняшним
+# апстримом), не наказывает открытые PR за посторонние коммиты в steward
+# (если кит не менялся — байты совпадают), и корректно красит ре-вендор,
+# отставший от реального изменения кита.
 
 
 def _advance_steward(fleet: Fleet, content: str) -> str:
@@ -688,47 +704,55 @@ def _advance_steward(fleet: Fleet, content: str) -> str:
     return _git("rev-parse", "HEAD", cwd=fleet.steward)
 
 
-def test_monotonic_forward_revendor_is_accepted(fleet: Fleet) -> None:
-    """База PR уже везёт v1 (fleet.upstream_sha, смержено), голова
-    двигается вперёд на v2 (потомок v1 в истории steward) — законный
-    ре-вендор новой версии кита, обязан пройти."""
+def test_stale_content_rejected_once_current_upstream_moves_on(fleet: Fleet) -> None:
+    """Апстрим steward продвинулся на v2 (кит реально изменился); голова PR
+    по-прежнему называет И везёт v1 (fleet.upstream_sha остаётся РЕАЛЬНЫМ
+    предком origin/master — санитарная проверка провенанса прошла бы), но
+    сверка идёт с СЕГОДНЯШНИМ апстримом — старые байты не совпадают,
+    ре-вендор обязан покраснеть и обновиться."""
     v2_sha = _advance_steward(fleet, "v2\n")
-    fleet.rebase_pr_on_merged_vendor(
-        fleet.upstream_sha, "base\n", v2_sha, "v2\n",
-    )
 
-    res = fleet.run("demo", "7", GH_STUB_HEADOID=fleet.head_sha)
-    assert res.returncode == 0, res.stderr
-    body = fleet.body_out.read_text()
-    assert "потомок апстрима базы PR" in body
-    assert fleet.upstream_sha in body
-
-
-def test_downgrade_revendor_is_refused(fleet: Fleet) -> None:
-    """База PR уже везёт v2 (свежее, смержено), голова откатывает на v1 —
-    v1 РЕАЛЬНО существует и остаётся предком origin/master steward (ancestry
-    в одиночку это пропустила бы), но это откат правки внутри кита: этот
-    класс атаки закрывает именно монотонность к базе PR, а не ancestry."""
-    v2_sha = _advance_steward(fleet, "v2\n")
-    fleet.rebase_pr_on_merged_vendor(
-        v2_sha, "v2\n", fleet.upstream_sha, "base\n",
-    )
-
-    res = fleet.run("demo", "7", GH_STUB_HEADOID=fleet.head_sha)
+    res = fleet.run("demo", "7")
     assert res.returncode == 3, res.stdout
-    assert "это откат" in res.stderr
+    assert "ТЕКУЩИМ steward" in res.stderr
+    assert v2_sha in res.stderr
     assert "pr review" not in fleet.gh_calls()
     assert not fleet.body_out.exists()
 
 
-def test_first_revendor_in_repo_skips_monotonicity_with_note(fleet: Fleet) -> None:
-    """Дефолтная фикстура (без rebase_pr_on_merged_vendor) — это ровно
-    случай «в базе PR нет PIN»: монотонность пропускается ГРОМКО, не
-    молча."""
+def test_stale_source_line_accepted_when_content_matches_current_upstream(
+    fleet: Fleet,
+) -> None:
+    """Обратная сторона: SOURCE называет устаревший (но валидный) коммит
+    v1 — оператор забыл обновить комментарий, — а фактически довезённые
+    байты СОВПАДАЮТ с сегодняшним апстримом (v2). Аттестация обязана
+    пройти: named SOURCE — не якорь сверки, только санитарная проверка
+    происхождения, а факт совпадения с текущим апстримом доказан."""
+    v2_sha = _advance_steward(fleet, "v2\n")
+    fleet._write_kit(fleet.seed, "v2\n")
+    fleet._write_checksum(fleet.seed)
+    fleet._write_pin(fleet.seed, fleet.upstream_sha)  # устаревший SOURCE
+    fleet.push_head()
+
+    res = fleet.run("demo", "7", GH_STUB_HEADOID=fleet.head_sha)
+    assert res.returncode == 0, res.stderr
+    body = fleet.body_out.read_text()
+    assert fleet.upstream_sha in body  # провенанс — как заявлено (устарел)
+    assert v2_sha in body              # но сверено с сегодняшним апстримом
+
+
+def test_unrelated_steward_commit_does_not_break_unchanged_pr(fleet: Fleet) -> None:
+    """Посторонний коммит в steward, не менявший кит (например, правка вне
+    scripts/review/), не должен красить открытый PR: диапазон, включающий
+    все kit-файлы фикстуры, не затронут — старые байты кита продолжают
+    совпадать с новым HEAD steward."""
+    (fleet.steward / "README.md").write_text("посторонняя правка steward\n")
+    _git("add", ".", cwd=fleet.steward)
+    _git("commit", "-m", "steward: unrelated change", cwd=fleet.steward)
+    _git("push", "-q", "origin", "master", cwd=fleet.steward)
+
     res = fleet.run("demo", "7")
     assert res.returncode == 0, res.stderr
-    assert "первый ре-вендор" in res.stderr
-    assert "монотонность не проверялась" in fleet.body_out.read_text()
 
 
 # --- I2: PR обязан целиком лежать внутри состава кита ------------------------
@@ -744,6 +768,23 @@ def test_pr_touching_path_outside_kit_is_refused(fleet: Fleet) -> None:
     assert "вне состава кита" in res.stderr
     assert ".github/workflows.yml" in res.stderr
     assert "pr review" not in fleet.gh_calls()
+
+
+def test_crlf_checkout_does_not_falsely_flag_out_of_scope(fleet: Fleet) -> None:
+    """Minor 1 приёмочного ревью: чекаут с autocrlf кладёт \\r в конец
+    строк PIN. Без среза пути в members.list несут \\r, I2 не находит
+    совпадений с git-диффом (у которого \\r нет) и ложно обвиняет
+    побайтово корректную копию в «постороннем дифе». Апстримный
+    checksum.sh срезает \\r намеренно — аттестатор обязан делать то же,
+    иначе зелёный чекер и красный аттестатор расходятся на одном входе."""
+    pin_path = fleet.seed / "scripts" / "review" / "PIN"
+    crlf_content = pin_path.read_text().replace("\n", "\r\n")
+    pin_path.write_bytes(crlf_content.encode())
+    fleet.push_head()
+
+    res = fleet.run("demo", "7", GH_STUB_HEADOID=fleet.head_sha)
+    assert res.returncode == 0, res.stderr
+    assert "вне состава кита" not in res.stderr
 
 
 # --- I3: красный вердикт не гасится, дедуп -----------------------------------
