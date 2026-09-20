@@ -1632,7 +1632,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Хойст fetch расширил класс затронутых прогонов — раньше отказ получали
       только репо с fp-китом, теперь и репо со старым китом, которые прежде
       отдавали фетч базы самому киту.
-- [ ] Инструкции агентов не уходят из-под ревью как проза: `CODE_OVERRIDE` в SSOT области ревью покрывает `.claude/*`, `.agents/*` и `CLAUDE.md`/`AGENTS.md` на любой глубине @owner:github:andrei-shtanakov @id:review-scope-code-override-agent-instructions @epic:eco.tooling
+- [ ] Инструкции агентов не уходят из-под ревью как проза: `CODE_OVERRIDE` в SSOT области ревью покрывает `.claude/*`, `.agents/*` и `CLAUDE.md`/`AGENTS.md` на любой глубине @owner:github:andrei-shtanakov @id:review-scope-code-override-agent-instructions @epic:eco.tooling @blocked_by:steward#180
       Принято по devtools#265 (`from: atp-platform#review-kit-catchup-scope`).
       Найдено ревью-контуром на atp-platform#329 (major, confidence medium);
       класс фронтальный для флота, поэтому чиним в SSOT, а не repo-конфигом.
@@ -1652,4 +1652,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `.github/codex/review-scope.env` (как у atp-platform) нам не нужна.
       **Осталось:** вендор-копия кита `scripts/review/prose-paths.env` — она в
       инвентаре `checksum.sh`, на месте не правится; для `local.sh` и pre-push
-      правило приедет обычным ре-вендором после steward.
+      правило приедет обычным ре-вендором после steward. Заявка — steward#180
+      (`slug: review-kit-scope-agent-instructions`); блокер пока в переходной
+      issue-форме, потому что на той стороне пункта плана ещё нет — после
+      принятия перевести на канонический `todo://steward/<принятый-слаг>`.
