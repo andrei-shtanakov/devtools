@@ -416,12 +416,25 @@ repo_dir="$review_tree"
 # переписать собственный ревьюер до вынесения вердикта. REVIEW_KIT_DIR нужен
 # local.sh для его дочерних скриптов; prompt/schema тоже пинуются доверенным
 # деревом, как в CI.
+#
+# REVIEW_SCOPE_RULES — то же правило области, которым классифицировала
+# `classify_scope` выше. Без него кит берёт `$kit_dir/prose-paths.env`
+# (local.sh:227), то есть вендор-копию ЦЕЛЕВОГО репо, и два решения об одном
+# дифе принимаются по разным файлам. Расхождение даёт исход хуже непокрытия:
+# кит отвечает `exit 5` («всё отфильтровано»), а он не разобран в fp-ветке
+# (`case "$fp_code"`) и вырождается в `die 3` — прогон падает, `accept_pr`
+# останавливает приёмку; в полном прогоне тот же 5 уходит в kit-filtered
+# аттестацию, то есть approve без единого взгляда модели. Найдено ревью на
+# devtools#270; SSOT обязан быть один и для ранней классификации, и для кита.
+# Кит без поддержки переменной её игнорирует — но такой кит и фильтра области
+# не содержит, значит кода 5 не вернёт и расходиться ему не с чем.
 run_kit() {
     (
         cd "$repo_dir"
         REVIEW_KIT_DIR="$trusted_kit_dir" \
         REVIEW_SCHEMA="$trusted_schema" \
         REVIEW_PROMPT="$trusted_prompt" \
+        REVIEW_SCOPE_RULES="$prose_paths_file" \
             sh "$trusted_kit_dir/local.sh" "$@"
     )
 }
@@ -546,6 +559,16 @@ fi
 # файл в кит, и второго написания правила не возникает. Литерал списка путей
 # в этом репо уже однажды разъехался молча — см. governance/runner.py.
 prose_paths_file="${REVIEW_SCOPE_CONTRACT:-$script_dir/contracts/review-scope/v1/prose-paths.env}"
+# Абсолютизируем СРАЗУ: этот путь уезжает киту через REVIEW_SCOPE_RULES, а кит
+# работает из head-worktree. Относительный операторский override после `cd`
+# указывал бы внутрь проверяемого PR-head — тот самый режим отказа, от
+# которого `resolve_from_source` страхует kit/schema/prompt. База — cwd
+# обвязки, а не `$source_repo_dir`: так сохраняется семантика собственного
+# чтения контракта, и оба читателя гарантированно берут ОДИН файл.
+case "$prose_paths_file" in
+    /*) ;;
+    *) prose_paths_file="$(pwd)/$prose_paths_file" ;;
+esac
 prose_globs=""
 code_globs=""
 [ -f "$prose_paths_file" ] \

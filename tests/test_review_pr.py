@@ -131,6 +131,19 @@ exit 0
 """
 
 
+LOCAL_SH_SCOPE_RULES_STUB = """#!/bin/sh
+# Предмет теста — не argv, а ОКРУЖЕНИЕ. Настоящий кит читает правило области
+# как `${REVIEW_SCOPE_RULES:-$kit_dir/prose-paths.env}` (local.sh:227), то
+# есть свою вендор-копию он берёт ровно тогда, когда переменной нет. Стаб
+# печатает то, что ему передали, и ничего не фильтрует: расхождение правил
+# наблюдаемо здесь, а не в поведении фильтра.
+echo "scope_rules=${REVIEW_SCOPE_RULES:-<не передан>}" \
+    > "$REVIEW_STUB_SCOPE_LOG"
+echo "stub verdict body"
+exit 0
+"""
+
+
 def _git(*args: str, cwd: Path) -> str:
     """Запустить git и вернуть stdout (строго, с проверкой кода)."""
     res = subprocess.run(
@@ -1490,6 +1503,67 @@ def _write_contract(fleet: Fleet, text: str) -> str:
     path = fleet.tmp / "prose-paths.env"
     path.write_text(text)
     return str(path)
+
+
+SSOT_CONTRACT = str(SCRIPT.parent / "contracts/review-scope/v1/prose-paths.env")
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_kit_gets_the_same_scope_rule_the_wrapper_classified_with(
+    fleet: Fleet, override: bool
+) -> None:
+    """Находка ревью на devtools#270 (major, confidence high).
+
+    Обвязка классифицирует PR по SSOT, а кит без этой переменной читает СВОЮ
+    вендор-копию — и расхождение даёт исход хуже непокрытия: `exit 5` кита
+    («всё отфильтровано») в fp-режиме не разобран в `case "$fp_code"` и
+    превращается в `die 3`, а в полном прогоне — в kit-filtered аттестацию,
+    то есть approve без единого взгляда модели.
+
+    Обе половины параметра нужны: случай `override` ловит захардкоженный
+    путь, случай по умолчанию — подстановку `$REVIEW_SCOPE_CONTRACT` вместо
+    фактически использованного правила.
+    """
+    fleet.write_kit(LOCAL_SH_SCOPE_RULES_STUB)
+    scope_log = fleet.tmp / "review-scope.log"
+    env = {"REVIEW_STUB_SCOPE_LOG": str(scope_log)}
+    expected = SSOT_CONTRACT
+    if override:
+        expected = _write_contract(
+            fleet, "PROSE=*.md\nCODE_OVERRIDE=contracts/*\n"
+        )
+        env["REVIEW_SCOPE_CONTRACT"] = expected
+
+    res = fleet.run("demo", "7", **env)
+
+    assert res.returncode == 0, res.stderr
+    assert scope_log.read_text().strip() == f"scope_rules={expected}"
+
+
+def test_relative_scope_contract_reaches_kit_as_absolute_path(
+    fleet: Fleet,
+) -> None:
+    """Кит работает из head-worktree, обвязка — из cwd оператора.
+
+    Относительный `REVIEW_SCOPE_CONTRACT` после `cd` указывал бы внутрь
+    проверяемого PR-head — ровно то, от чего страхует `resolve_from_source`
+    для kit/schema/prompt. Тогда «одно правило на двоих» снова распалось бы
+    на два файла, причём второй пришёл бы из недоверенного дерева.
+    """
+    fleet.write_kit(LOCAL_SH_SCOPE_RULES_STUB)
+    scope_log = fleet.tmp / "review-scope.log"
+    relative = "contracts/review-scope/v1/prose-paths.env"
+    assert (SCRIPT.parent / relative).is_file(), "фикстура ссылается на SSOT"
+
+    res = fleet.run(
+        "demo",
+        "7",
+        REVIEW_SCOPE_CONTRACT=relative,
+        REVIEW_STUB_SCOPE_LOG=str(scope_log),
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert scope_log.read_text().strip() == f"scope_rules={SSOT_CONTRACT}"
 
 
 def test_scope_contract_duplicate_key_refuses(fleet: Fleet) -> None:
