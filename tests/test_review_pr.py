@@ -1392,6 +1392,52 @@ def test_dependency_pin_files_are_code(fleet: Fleet, path: str) -> None:
     assert fleet.run("demo", "7", "--print-scope").stdout.strip() == "code"
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".claude/skills/spec-bridge/SKILL.md",
+        "sub/.claude/skills/spec-bridge/SKILL.md",
+        ".agents/skills/review.md",
+        "sub/.agents/skills/review.md",
+        "CLAUDE.md",
+        "sub/CLAUDE.md",
+        "AGENTS.md",
+        "sub/AGENTS.md",
+    ],
+)
+def test_agent_instruction_files_are_code(fleet: Fleet, path: str) -> None:
+    """devtools#265 (`from: atp-platform#329`): инструкция агента — не проза.
+
+    Её правка меняет поведение исполнителя и самого ревьюера, а до этого
+    ключа ветка, трогающая только такой файл, давала scope=prose и вердикт
+    не выносился вовсе.
+    """
+    _seed_files(fleet, path)
+    assert fleet.run("demo", "7", "--print-scope").stdout.strip() == "code"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/claude-notes.md",
+        "docs/agents.md",
+        "claude-setup.md",
+        "docs/CLAUDE-migration.md",
+    ],
+)
+def test_agent_instruction_lookalikes_stay_prose(fleet: Fleet, path: str) -> None:
+    """Базовая половина к `test_agent_instruction_files_are_code`.
+
+    Без неё утверждение «инструкции агентов — код» удовлетворяется и глобом
+    вида `*claude*` (или `*`), который увёл бы под платное ревью всю прозу,
+    лишь упоминающую агента в имени.
+    """
+    _seed_files(fleet, path)
+    res = fleet.run("demo", "7", "--print-scope")
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "prose"
+
+
 def test_rename_from_code_to_prose_stays_code(fleet: Fleet) -> None:
     """Переименование проверяется по ОБОИМ путям: --no-renames показывает
     и удаление старого, и добавление нового."""
