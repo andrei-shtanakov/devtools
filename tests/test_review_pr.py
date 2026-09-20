@@ -542,6 +542,60 @@ def _review(
     return {"user": {"login": login}, "state": state, "body": body}
 
 
+def _advance_pr_head(fleet: Fleet, path: str = "src/fix.py") -> str:
+    """Дописать коммит ПОВЕРХ головы PR; вернуть прежнюю голову.
+
+    Адресный recheck (devtools#260) сужает базу до прошлой отревьюированной
+    головы, и та обязана быть настоящим предком текущей. `_seed_files`
+    коммитит от master, поэтому для этих тестов не годится: прежняя голова
+    предком не была бы, и гвард предка отказал бы по делу, маскируя всё
+    остальное.
+    """
+    previous = fleet.head_sha
+    work = fleet.tmp / "advance"
+    if work.exists():
+        shutil.rmtree(work)
+    subprocess.run(
+        ["git", "clone", "-q", str(fleet.origin), str(work)],
+        check=True, capture_output=True,
+    )
+    _git("config", "user.email", "t@example.com", cwd=work)
+    _git("config", "user.name", "t", cwd=work)
+    _git("fetch", "-q", "origin", f"{previous}:refs/heads/prhead", cwd=work)
+    _git("checkout", "-q", "prhead", cwd=work)
+    target = work / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("fix\n")
+    _git("add", "-A", cwd=work)
+    _git("commit", "-m", "fix after review", cwd=work)
+    fleet.head_sha = _git("rev-parse", "HEAD", cwd=work)
+    _git("push", "-qf", "origin", "HEAD:refs/pull/7/head", cwd=work)
+    return previous
+
+
+def _advance_master(fleet: Fleet) -> str:
+    """Продвинуть master; вернуть его новую голову.
+
+    Такой коммит приезжает в чекаут как `origin/master`, то есть локально
+    ЕСТЬ, но предком головы PR не является — ровно вход гварда предка.
+    """
+    work = fleet.tmp / "master-advance"
+    if work.exists():
+        shutil.rmtree(work)
+    subprocess.run(
+        ["git", "clone", "-q", str(fleet.origin), str(work)],
+        check=True, capture_output=True,
+    )
+    _git("config", "user.email", "t@example.com", cwd=work)
+    _git("config", "user.name", "t", cwd=work)
+    (work / "master-only.py").write_text("later\n")
+    _git("add", "-A", cwd=work)
+    _git("commit", "-m", "master moves on", cwd=work)
+    sha = _git("rev-parse", "HEAD", cwd=work)
+    _git("push", "-q", "origin", "HEAD:master", cwd=work)
+    return sha
+
+
 def _kit_calls(fleet: Fleet) -> list[str]:
     log = fleet.local_log.read_text() if fleet.local_log.exists() else ""
     return log.strip().splitlines()
@@ -1869,3 +1923,207 @@ def test_prose_only_aborts_when_head_moved(fleet: Fleet) -> None:
     res = fleet.run("demo", "7", GH_STUB_HEADOID2="f" * 40)
     assert res.returncode == 4, res.stdout
     assert not fleet.body_out.exists()
+
+
+# --- Адресный recheck (--targeted, devtools#260) ----------------------------
+# База — прошлая отревьюированная голова, а не база PR. Все проверки здесь на
+# fp-стенде намеренно: на стенде без отпечатка половина путей не наблюдается,
+# и ровно это пропустило no-op прошлой, вырезанной реализации (fp считался по
+# полному диапазону, потому что переменная базы использовалась раньше
+# присваивания).
+
+
+@needs_jq
+def test_targeted_narrows_base_in_both_kit_calls(fp_fleet: Fleet) -> None:
+    """Отпечаток и полный прогон обязаны видеть ОДИН диапазон.
+
+    Литерал `--base origin/<base>` стоял в двух местах; разойтись они могли
+    молча, и именно это дало no-op: fp считался по полному диапазону при
+    вердикте по узкому.
+    """
+    old = _advance_pr_head(fp_fleet)
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", old, FP))
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", "--dry-run",
+        REVIEW_STUB_FP="cd" * 32, REVIEW_STUB_EXIT="1",
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 1, res.stderr
+    calls = [c for c in _kit_calls(fp_fleet) if "--base" in c]
+    assert len(calls) == 2, calls
+    for call in calls:
+        assert f"--base {old}" in call, call
+        assert "--base origin/master" not in call, call
+
+
+@needs_jq
+def test_without_targeted_base_stays_the_pr_base(fp_fleet: Fleet) -> None:
+    """Негативная половина: без флага база прежняя.
+
+    Без неё «сужает базу» удовлетворялось бы и реализацией, сужающей всегда.
+    """
+    old = _advance_pr_head(fp_fleet)
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", old, FP))
+
+    res = fp_fleet.run(
+        "demo", "7", "--dry-run",
+        REVIEW_STUB_FP="cd" * 32, REVIEW_STUB_EXIT="1",
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 1, res.stderr
+    calls = [c for c in _kit_calls(fp_fleet) if "--base" in c]
+    assert calls, "кит не вызывался"
+    for call in calls:
+        assert "--base origin/master" in call, call
+        assert f"--base {old}" not in call, call
+
+
+@needs_jq
+def test_targeted_refuses_empty_range(fp_fleet: Fleet) -> None:
+    """Фикс ещё не в PR: прошлая голова совпадает с текущей.
+
+    Диф пуст, кит вышел бы нулём, а обвязка опубликовала бы approve — то
+    есть отменила бы прошлый request-changes, не показав модели ни строки.
+    Отказ обязан быть ДО вызова кита.
+    """
+    reviews = fp_fleet.write_reviews(
+        _review("CHANGES_REQUESTED", fp_fleet.head_sha, FP)
+    )
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 2, res.stdout
+    assert "пуст" in res.stderr.lower()
+    assert _kit_calls(fp_fleet) == []
+    assert "pr review" not in fp_fleet.gh_calls()
+
+
+@needs_jq
+def test_targeted_refuses_without_a_delivered_marker(fp_fleet: Fleet) -> None:
+    """Нет прошлого вердикта с маркером — базы не существует."""
+    reviews = fp_fleet.write_reviews()
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 2, res.stdout
+    # Текст отказа, а не только код: неизвестный флаг тоже даёт 2 и тоже не
+    # зовёт кита — без этой привязки тест был бы зелен до реализации.
+    assert "прошлого вердикта с маркером" in res.stderr
+    assert _kit_calls(fp_fleet) == []
+
+
+@needs_jq
+def test_targeted_refuses_when_previous_head_is_not_an_ancestor(
+    fp_fleet: Fleet,
+) -> None:
+    """Force-push/rebase: прошлая голова не предок текущей.
+
+    Узкий диф был бы не «что изменилось после ревью», а произвольным
+    сравнением двух веток.
+    """
+    # Коммит, который ЕСТЬ локально (приезжает как origin/master), но в
+    # историю головы PR не входит. Отсутствующий объект — другой гвард и
+    # другой тест ниже.
+    sidewards = _advance_master(fp_fleet)
+    reviews = fp_fleet.write_reviews(
+        _review("CHANGES_REQUESTED", sidewards, FP)
+    )
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 2, res.stdout
+    # Причина названа: иначе тест зелен и от неизвестного флага, и от
+    # соседнего гварда «объекта нет локально».
+    assert "не предок" in res.stderr
+    assert _kit_calls(fp_fleet) == []
+
+
+@needs_jq
+def test_targeted_refuses_when_previous_head_is_absent_locally(
+    fp_fleet: Fleet,
+) -> None:
+    """Перезаписанная история: объекта прошлой головы нет вовсе.
+
+    Отдельно от «не предок»: гварда два, и сообщения у них разные — иначе
+    оператор не отличит «историю переписали» от «сравнивать нечего».
+    """
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", OLD_HEAD, FP))
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 2, res.stdout
+    assert "недоступна локально" in res.stderr
+    assert _kit_calls(fp_fleet) == []
+
+
+@needs_jq
+def test_targeted_ignores_a_planted_marker_in_the_body(
+    fp_fleet: Fleet,
+) -> None:
+    """Тело ревью несёт текст модели из недоверенного дифа.
+
+    Маркер оттуда, стоящий раньше настоящего, выбирал бы базу адресного
+    ревью. Разбор строгий и общий с дедупом: два маркера — не кандидат.
+    """
+    old = _advance_pr_head(fp_fleet)
+    planted = _review("CHANGES_REQUESTED", old, FP, markers=2)
+    reviews = fp_fleet.write_reviews(planted)
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 2, res.stdout
+    # Два маркера — не кандидат, значит базы нет: тот же отказ, что без
+    # маркера вовсе. Текст обязателен по той же причине, что выше.
+    assert "прошлого вердикта с маркером" in res.stderr
+    assert _kit_calls(fp_fleet) == []
+
+
+@needs_jq
+def test_targeted_verdict_discloses_the_narrowing(fp_fleet: Fleet) -> None:
+    """Approve из адресного прогона иначе читается как полное ревью головы."""
+    old = _advance_pr_head(fp_fleet)
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", old, FP))
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted",
+        REVIEW_STUB_FP="cd" * 32, GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 0, res.stderr
+    body = fp_fleet.body_out.read_text()
+    assert "адресный recheck" in body
+    assert old in body
+    assert "НЕ заменяет" in body
+
+
+@needs_jq
+def test_targeted_after_approve_still_hits_the_stop_rule(
+    fp_fleet: Fleet,
+) -> None:
+    """Барьер stop rule сильнее режима: после approve круга нет вовсе."""
+    old = _advance_pr_head(fp_fleet)
+    reviews = fp_fleet.write_reviews(_review("APPROVED", old, FP))
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 6, res.stdout
+    # Отпечаток бесплатен и считается ДО барьера — это штатный порядок:
+    # барьер стережёт ПЛАТНЫЙ вызов. Предмет проверки — что полного
+    # прогона не было и ничего не опубликовано.
+    assert not any("--format markdown" in c for c in _kit_calls(fp_fleet))
+    assert "pr review" not in fp_fleet.gh_calls()
