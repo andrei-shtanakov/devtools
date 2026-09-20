@@ -1483,10 +1483,55 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       владельцем пробел (молчаливая потеря правки при смерти в окне
       доставки checkpoint-а) — spec-runner#527. Цена доработки: 14 платных
       кругов терминального ревью (5 по #524, 9 по #526).
-- [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; до доставки соседа маршрут отказывает до run-id @owner:github:andrei-shtanakov @id:spec-loop-need-engineer-route @blocked_by:discovery#49
-      Ждёт discovery#49 п.1 (slug orchestrated-start-upstream-and-session-id):
-      приём upstream при `start --frame engineer`. П.2 (caller-assigned
-      session id) и п.3 (метаданные в envelope) — улучшения, не блокеры.
+- [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; маршрут отказывает до run-id, пока не реализован @owner:github:andrei-shtanakov @id:spec-loop-need-engineer-route
+      **Разблокирован 2026-09-18.** Ждал п.1 discovery#49 (приём upstream при
+      `start --frame engineer`); сосед доставил его PR-ом discovery#50
+      (`49dbc2a`, master) вместе с п.2 — пункт продюсера
+      `todo://discovery/orchestrated-start-upstream-and-session-id` закрыт.
+      П.3 (метаданные сессии в envelope) сосед в объём не взял — улучшение,
+      не блокер.
+      Три расхождения доставленного соседом с принятым дизайном
+      (`docs/superpowers/specs/2026-09-15-need-stage-design.md`, §5.6 и D6),
+      которые реализация обязана учесть:
+      1. Имя durable-копии внутри сессии — **фиксированное `upstream.md`**, не
+         `<basename>` источника: при совпадении basename с именем итогового
+         брифа `traces_to` разрешился бы в сам бриф — GC-16 зелёный, а
+         GC-05(engineer) сверял бы документ сам с собой (молчаливый ложный
+         pass). Провенанс источника остаётся у вызывающего
+         (`interview.upstream_blob`), имя в сессии информативным больше не
+         является; `brief --out .../upstream.md` такой сессии сосед отклоняет.
+      2. Сосед валидирует источник **до** создания сессии (`schema:
+         discovery-brief`, `interview.frame: customer`, `status: approved`,
+         ноль error-findings `gate_check`). Preflight devtools не отменяется —
+         отказ до run-id дешевле, — но он больше не единственный, и текст
+         отказа не должен утверждать обратное.
+      3. `--session-id` снимает класс сиротства «сессия создана, запись не
+         успела» по построению: вызывающий пишет id write-ahead. Аварийный
+         вход `--session` после этого нужен только для сессий, созданных без
+         caller-assigned id.
+      Текст отказа `ENGINEER_BLOCKED` («engineer-маршрут ждёт discovery#49»,
+      `governance/ops.py:28`, `governance/spec_loop.py:246`) называет закрытую
+      заявку: отказ верен, причина в нём — нет. Правится вместе с реализацией
+      маршрута, тем же PR.
+
+- [ ] Контур approval discovery-брифа: назвать акт, которым бриф получает `status: approved`, и место его подписи @owner:github:andrei-shtanakov @id:discovery-brief-approval-act
+      Сегодня цепочка customer → engineer внутри одного прогона держится на
+      ручной правке frontmatter: `--need` выпускает бриф со `status: draft`
+      (D5 дизайна need-stage — автоматически в `approved` он не превращается),
+      а `start --upstream` соседа принимает **только** `approved` и проверяет
+      это до создания сессии. На живой приёмке E1 (фаза B,
+      `docs/evidence/2026-09-14-discovery-brief-spec-loop-run.md`) одобрение
+      владельца пришло сообщением в сессии, а `status`/`approved_by`/
+      `approved_at` дописал агент — то есть подпись сделана той же рукой,
+      которую она должна ограничивать.
+      D5 обещал «отдельный явный акт approval, отдельный TODO-контур» —
+      контур не заведён: ни здесь, ни в `discovery/TODO.md`, и подкоманды
+      `approve` у соседа нет (`discovery/src/discovery/cli.py` — четыре
+      подкоманды: start/status/answer/brief).
+      Решение владельца: чей это акт (человек в `spec-loop`, подкоманда
+      discovery, отдельный PR в репо-цель) и откуда берётся подпись, чтобы
+      она не была строкой, дописанной агентом. Кода не блокирует —
+      делает engineer-маршрут недостижимым без ручной правки файла.
 
 - [x] E1 Вход конвейера из discovery-brief: `spec-loop --brief <path>` — бриф обязан пройти вендоренный gate_check (pass, иначе fail-closed), хэш брифа входит в `upstream_hashes` charter, бриф лежит нулевым узлом в `workstreams/<ws-id>/spec/` и едет бандл-PR-ом; промпты charter/requirements получают бриф как источник (G-NN/FR-NN переносятся с трассировкой), гвард «каждый Must-FR брифа встречается в requirements»; приёмка — живой прогон engineer-фрейм → бриф → spec-loop → approved tasks-спека → исполнение spec-runner @owner:github:andrei-shtanakov @id:spec-loop-brief-input
       Граница author ≠ execute discovery сохраняется: PR открывает конвейер,

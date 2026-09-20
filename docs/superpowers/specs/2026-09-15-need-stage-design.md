@@ -18,7 +18,8 @@ need-флагов; минорные: канонический synthetic envelope
 §3 E2 и §4 (Need только с реальным стейкхолдером; публикуется только бриф;
 окно до брифа — принятое локальное исключение). Исполняемые пункты —
 `TODO.md` `@id:spec-loop-need-stage` (customer) и
-`@id:spec-loop-need-engineer-route` (engineer, `@blocked_by` discovery#49).
+`@id:spec-loop-need-engineer-route` (engineer; ожидание discovery#49 снято
+2026-09-18 — см. поправку §5.6).
 
 ## 1. Цель и граница
 
@@ -48,8 +49,8 @@ argv `start` и preflight входа.
 | D2 | `--frame customer\|engineer` явный, без дефолта; customer без `--traces-to`, engineer требует `--traces-to <approved customer-brief>`; C (два интервью в одном прогоне) не вводим |
 | D3 | `--stakeholder <role>` обязателен: декларация оператора в `run.json`, подставляется в команду ответа; без него отказ до изменения состояния с подсказкой `--brief` |
 | D4 | Подход 1: стадия внутри раннера, `waiting_interview` — полноценное персистентное состояние; до готовности брифа ветка, worktree и авторинг не создаются |
-| D5 | Итоговый бриф остаётся `status: draft`, отдельного approval-стопа нет. Честно: мерж бандл-PR и §I12 одобряют governance-узлы, не discovery-источник; автоматически бриф в `approved` не превращается. Если customer-brief позже станет upstream для engineer — отдельный явный акт approval, отдельный TODO-контур |
-| D6 | Engineer-маршрут до discovery#49 fail-closed до run-id; customer-маршрут полностью рабочий |
+| D5 | Итоговый бриф остаётся `status: draft`, отдельного approval-стопа нет. Честно: мерж бандл-PR и §I12 одобряют governance-узлы, не discovery-источник; автоматически бриф в `approved` не превращается. Если customer-brief позже станет upstream для engineer — отдельный явный акт approval, отдельный TODO-контур. Контур заведён 2026-09-20: `TODO.md` `@id:discovery-brief-approval-act` (акт и место подписи — решение владельца) |
+| D6 | Engineer-маршрут до discovery#49 fail-closed до run-id; customer-маршрут полностью рабочий. **С 2026-09-18 ожидание кончилось** (discovery#50 доставил приём upstream и caller-assigned session id): отказ остаётся верным, но его причина — «не реализован», а не «ждёт соседа»; текст `ENGINEER_BLOCKED` правится вместе с реализацией маршрута (`TODO.md` `@id:spec-loop-need-engineer-route`) |
 
 ## 3. Интерфейс
 
@@ -259,6 +260,19 @@ start`; её hash — `interview.upstream_blob`. Пересверяется пе
 останавливает прогон **до** обращения к discovery. После доставки копия —
 второй файл source-слоя, как в E1.
 
+> **Поправка 2026-09-18 (discovery#50).** Дизайн предполагал, что discovery
+> примет копию под именем `<basename>` источника (§3, строка durable-копии).
+> Сосед назвал имя внутри сессии **фиксированным — `upstream.md`** и обосновал:
+> при совпадении basename с именем итогового брифа `traces_to` разрешился бы в
+> сам бриф, GC-16 остался бы зелёным, а GC-05(engineer) сверил бы документ сам
+> с собой — молчаливый ложный pass дороже потери информативности имени.
+> Провенанс источника живёт у вызывающего (`interview.upstream_blob`), так что
+> для devtools меняется только имя, передаваемое в `--upstream`; `brief --out`
+> в `upstream.md` такой сессии сосед отклоняет. Второе: сосед валидирует
+> источник (`schema`, `interview.frame: customer`, `status: approved`, ноль
+> error-findings `gate_check`) **до** создания сессии — preflight здесь не
+> отменяется, но единственным он больше не является.
+
 ## 6. Порт discovery в `Ops`
 
 ```python
@@ -276,7 +290,10 @@ def discovery_brief(self, session_id, out_path) -> DiscoveryReply
 
 `upstream_path` — durable-копия из `run_dir` (не файл оператора); до
 discovery#49 реализация отказывает на непустом значении тем же текстом, что
-preflight, — порт менять после разблокировки не придётся.
+preflight, — порт менять после разблокировки не придётся. Разблокировка
+случилась 2026-09-18 (discovery#50): форма порта подтвердилась, отказ на
+непустом значении держится до реализации маршрута, имя копии — `upstream.md`
+(поправка §5.6).
 
 Запуск: `uv run --frozen --project <workspace>/discovery discovery …`,
 `cwd` — каталог прогона. `target` для `start` — `repo_slug`.
