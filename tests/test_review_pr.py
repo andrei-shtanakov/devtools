@@ -573,6 +573,31 @@ def _advance_pr_head(fleet: Fleet, path: str = "src/fix.py") -> str:
     return previous
 
 
+def _advance_pr_head_empty(fleet: Fleet) -> str:
+    """Пустой коммит поверх головы PR; вернуть прежнюю голову.
+
+    `git commit --allow-empty` — ходовой приём перезапуска чеков: головы
+    разные, дерево тождественно. Гвард пустоты обязан смотреть на
+    содержимое, а не на равенство sha.
+    """
+    previous = fleet.head_sha
+    work = fleet.tmp / "empty-advance"
+    if work.exists():
+        shutil.rmtree(work)
+    subprocess.run(
+        ["git", "clone", "-q", str(fleet.origin), str(work)],
+        check=True, capture_output=True,
+    )
+    _git("config", "user.email", "t@example.com", cwd=work)
+    _git("config", "user.name", "t", cwd=work)
+    _git("fetch", "-q", "origin", f"{previous}:refs/heads/prhead", cwd=work)
+    _git("checkout", "-q", "prhead", cwd=work)
+    _git("commit", "-q", "--allow-empty", "-m", "retrigger CI", cwd=work)
+    fleet.head_sha = _git("rev-parse", "HEAD", cwd=work)
+    _git("push", "-qf", "origin", "HEAD:refs/pull/7/head", cwd=work)
+    return previous
+
+
 def _advance_master(fleet: Fleet) -> str:
     """Продвинуть master; вернуть его новую голову.
 
@@ -2127,3 +2152,70 @@ def test_targeted_after_approve_still_hits_the_stop_rule(
     # прогона не было и ничего не опубликовано.
     assert not any("--format markdown" in c for c in _kit_calls(fp_fleet))
     assert "pr review" not in fp_fleet.gh_calls()
+
+
+@needs_jq
+def test_targeted_refuses_empty_range_when_heads_differ(
+    fp_fleet: Fleet,
+) -> None:
+    """Пустота диапазона — свойство СОДЕРЖИМОГО, не равенства sha.
+
+    Находка ревью на devtools#281 (blocker): `git commit --allow-empty`
+    (ходовой приём перезапуска чеков) или пара «коммит + revert» дают
+    H1 != H2 при пустом дифе. Прежний гвард сравнивал только sha, кит на
+    пустом дифе штатно выходил нулём, обвязка маппила 0 в approve — и
+    публиковала его поверх ДОСТАВЛЕННОГО request-changes, не показав
+    модели ни строки.
+    """
+    old = _advance_pr_head_empty(fp_fleet)
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", old, FP))
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 2, res.stdout
+    assert "пуст" in res.stderr.lower()
+    assert _kit_calls(fp_fleet) == []
+    assert "pr review" not in fp_fleet.gh_calls()
+
+
+@needs_jq
+def test_targeted_scope_is_classified_over_the_narrowed_range(
+    fp_fleet: Fleet,
+) -> None:
+    """Область ревью считается по ТОМУ ЖЕ диапазону, что уходит киту.
+
+    Находка ревью на devtools#281 (blocker): классификация шла по полному
+    диапазону, а кит получал узкий. Фикс, тронувший только прозу, давал
+    scope=code у обвязки и «всё отфильтровано» у кита — код 5, который в
+    fp-ветке не разобран и вырождается в `die 3` «ревьюер не отработал»,
+    то есть в ложную причину. Сужение базы ломало ровно ту
+    согласованность, ради которой киту пробрасывается REVIEW_SCOPE_RULES.
+    """
+    old = _advance_pr_head(fp_fleet, "docs/note.md")
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", old, FP))
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", "--print-scope",
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "prose"
+
+
+@needs_jq
+def test_full_run_scope_still_sees_the_whole_pr(fp_fleet: Fleet) -> None:
+    """Негативная половина: без `--targeted` область — по полному диапазону.
+
+    То же дерево: после прошлого ревью изменилась только проза, но сам PR
+    несёт код. Без неё «считается по суженному» удовлетворялось бы и
+    реализацией, всегда считающей по узкому.
+    """
+    _advance_pr_head(fp_fleet, "docs/note.md")
+
+    res = fp_fleet.run("demo", "7", "--print-scope")
+
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "code"
