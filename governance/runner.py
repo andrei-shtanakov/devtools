@@ -41,7 +41,8 @@ from governance.merge_gate import PrFacts, decide
 from governance.facts import Outcome
 from governance.stale_adapter import blob_sha1
 from governance.ops import (
-    _AUTHOR_DSL, ENGINEER_BLOCKED, Ops, RealOps, disp_agent,
+    _AUTHOR_DSL, ENGINEER_BLOCKED, REVIEW_BARRIER_EXIT, REVIEW_BARRIER_STOP,
+    Ops, RealOps, disp_agent,
 )
 from governance.policy_sources import (
     PREFLIGHT_PROCEDURE_HINT,
@@ -2298,6 +2299,14 @@ def _step_review(state: RunState, ops: Ops) -> bool:
                 # (приёмка PR #102, minor): 2/3 — отказ прибора, не
                 # «сохранившиеся находки»; 4 — голова уехала, тот же
                 # reset-путь, что и внизу функции.
+                if fresh_exit == REVIEW_BARRIER_EXIT:
+                    # Барьер, а не сбой прибора (devtools#258). Op'ы не
+                    # трогаем: содержимое ветки ни при чём.
+                    _stop_with_comment(
+                        state, ops, "stopped_review",
+                        REVIEW_BARRIER_STOP,
+                    )
+                    return False
                 if fresh_exit in (2, 3):
                     _stop_with_comment(
                         state, ops, "stopped_review", "прибор не отработал"
@@ -2318,6 +2327,24 @@ def _step_review(state: RunState, ops: Ops) -> bool:
             "ревью нашло находки, прогон остановлен\n\n"
             "Известный ложный класс находок «файлов нет» опровергается "
             f"прямой проверкой `git cat-file -e {head}:<путь>`.",
+        )
+        return False
+    if exit_code == REVIEW_BARRIER_EXIT:
+        # Барьер бюджета/stop rule (devtools#258): прогон возможен, но
+        # требует решения владельца. Ветка обязана стоять ДО `in (2, 3)`:
+        # под кодом 2 в PR уходила ложная причина («прибор не отработал»).
+        # И до reset-ветки ниже — та оставляет статус `running`, то есть
+        # стоп не персистентен и шаг переигрывается на следующем заходе.
+        #
+        # Чего эта ветка НЕ даёт (находка ревью devtools#275): сохранения
+        # контентного гейта. Op'ы здесь действительно не трогаются, но
+        # единственный путь продолжения из `stopped_review` — `resume()`, а
+        # он безусловно попает весь `_BUNDLE_EDIT_RESET_OPS`, включая
+        # `gate-candidate`/`push`/`ready`. Это осознанно: между стопом и
+        # resume бандл мог быть отредактирован человеком, и сброс
+        # fail-safe. Довести сохранение до конца — devtools#276.
+        _stop_with_comment(
+            state, ops, "stopped_review", REVIEW_BARRIER_STOP
         )
         return False
     if exit_code in (2, 3):
