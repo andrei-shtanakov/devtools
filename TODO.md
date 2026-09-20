@@ -1452,7 +1452,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       verdicts из ledger до write-ahead доставки, а `deliver` переносит
       точные байты в один `commit_paths` вместе с tasks; прямой legacy-вызов
       без run-контекста сохраняет прежний контракт.
-- [ ] E2 Стадия Need вызывается прогоном, customer-маршрут: `spec-loop --need --frame customer --stakeholder <role>` — `start` через порт `Ops.discovery_*`, персистентный `waiting_interview` без ветки/worktree/авторинга, пауза печатает точную команду `discovery answer` (ответы — человек, вне spec-loop), `status` 0 → `brief` в tmp → `inspect_brief` → `os.replace` → `state.brief` → S1 по E1; `stopped_interview` продолжаемый; recovery `--session` только при сироте; `--new-run` только для прогонов до S1; транспортный контракт с синтетическим кодом 1; живая приёмка с реальным стейкхолдером @owner:github:andrei-shtanakov @id:spec-loop-need-stage
+- [ ] E2 Стадия Need вызывается прогоном, customer-маршрут: `spec-loop --need --frame customer --stakeholder <role>` — `start` через порт `Ops.discovery_*`, персистентный `waiting_interview` без ветки/worktree/авторинга, пауза печатает точную команду `discovery answer` (ответы — человек, вне spec-loop), `status` 0 → `brief` в tmp → `inspect_brief` → `os.replace` → `state.brief` → S1 по E1; `stopped_interview` продолжаемый; recovery `--session` только при сироте; `--new-run` только для прогонов до S1; транспортный контракт с синтетическим кодом 1; живая приёмка с реальным стейкхолдером @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:spec-loop-need-stage
       Дизайн — `docs/superpowers/specs/2026-09-15-need-stage-design.md`
       (согласован по секциям 2026-09-15, решения владельца D1–D6). Тесты по
       слоям runner/spec_loop/RealOps + opt-in smoke с настоящим discovery;
@@ -1480,10 +1480,17 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       master: ложное утверждение в Must FR-05 и невычислимый критерий шага
       5 — оба исправлены в #526, ключом стал закрытый перечень подкоманд
       плюс acknowledged checkpoint с механическим гвардом полноты. Принятый
+      **Решение владельца 2026-09-20 принято: §9 разделена (ревизия 6
+      спеки).** Half «стадия Need работает» признан выполненным этим же
+      прогоном (§9.1); чекбокс закрывается хвостом §9.2 —
+      `@id:s7-control-run` ниже. Сквозной критерий «ни один артефакт не
+      создан руками» не вычеркнут: §9.3, триггер — первый внешний проект
+      полигона. Основание — vault-нота `2026-09-20-pipeline-and-polygon-decisions`.
+      Принятый
       владельцем пробел (молчаливая потеря правки при смерти в окне
       доставки checkpoint-а) — spec-runner#527. Цена доработки: 14 платных
       кругов терминального ревью (5 по #524, 9 по #526).
-- [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; маршрут отказывает до run-id, пока не реализован @owner:github:andrei-shtanakov @id:spec-loop-need-engineer-route
+- [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; маршрут отказывает до run-id, пока не реализован @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:spec-loop-need-engineer-route
       **Разблокирован 2026-09-18.** Ждал п.1 discovery#49 (приём upstream при
       `start --frame engineer`); сосед доставил его PR-ом discovery#50
       (`49dbc2a`, master) вместе с п.2 — пункт продюсера
@@ -1514,7 +1521,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       заявку: отказ верен, причина в нём — нет. Правится вместе с реализацией
       маршрута, тем же PR.
 
-- [ ] Контур approval discovery-брифа: назвать акт, которым бриф получает `status: approved`, и место его подписи @owner:github:andrei-shtanakov @id:discovery-brief-approval-act
+- [ ] Контур approval discovery-брифа: назвать акт, которым бриф получает `status: approved`, и место его подписи @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:discovery-brief-approval-act
       Сегодня цепочка customer → engineer внутри одного прогона держится на
       ручной правке frontmatter: `--need` выпускает бриф со `status: draft`
       (D5 дизайна need-stage — автоматически в `approved` он не превращается),
@@ -1528,10 +1535,56 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       контур не заведён: ни здесь, ни в `discovery/TODO.md`, и подкоманды
       `approve` у соседа нет (`discovery/src/discovery/cli.py` — четыре
       подкоманды: start/status/answer/brief).
-      Решение владельца: чей это акт (человек в `spec-loop`, подкоманда
-      discovery, отдельный PR в репо-цель) и откуда берётся подпись, чтобы
-      она не была строкой, дописанной агентом. Кода не блокирует —
-      делает engineer-маршрут недостижимым без ручной правки файла.
+      **Решение владельца 2026-09-20: акт — мерж брифового PR учёткой
+      человека, поля frontmatter зеркалят `merged_by`/`merged_at`; контракт
+      брифа не меняется — он это уже объявил (`approver` = git-handle
+      человека, подтвердившего PR-merge, C2 REQ-402 + правило зеркала).
+      Код принадлежит producer'у**, не нам: один писатель frontmatter,
+      правило зеркала объявлено в контракте discovery, и в полигонной
+      модели прогона в момент утверждения может не быть вовсе. По
+      ADR-ECO-006 заведена заявка **discovery#55** (`slug:
+      brief-approval-act`) — своими руками соседа не правим; здесь
+      остаются триггер мержа (`human-merge.sh`), preflight-отказ и
+      вендоренный read-side гейт. Основание — vault-нота
+      `2026-09-20-pipeline-and-polygon-decisions`, решения 2 и 8.
+      Кода не блокирует — делает engineer-маршрут недостижимым без ручной
+      правки файла.
+
+- [ ] Контрольный прогон хвоста S7: дешёвый `spec-loop --brief` на крошечном предмете доказывает §9.2 спеки need-stage — раннер САМ дошёл до `waiting_human_merge`, мерж бандл-PR сделан через `make human-merge` (учётка человека из `AUTHORIZED_APPROVER_ACCOUNTS`, сверка логина), `resume` подтвердил факт и перевёл на S8, S8 `exit=0` (не `merged_unverified`), заведён draft tasks-PR, получена approved tasks-спека; негативный контроль — мерж в обход раннера реконсилируется `_reconcile_pr_merged_out_of_band`, а не теряется @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:s7-control-run
+      Вход `--brief`, а не `--need`, — осознанно: `_step_verdict`/
+      `_step_merge`/`_step_s8` и доставка tasks общие для обоих входов,
+      поэтому дорогой прогон с интервью доказал бы ровно то же. Повод —
+      непройденный участок УЖЕ всплыл: на приёмке E2 бандл-PR
+      spec-runner#522 смержили вручную из `stopped_review`, то есть до
+      выполнения S7, и дыру в реконсиляции закрывали дефектом #253.
+      Evidence — `docs/evidence/`, с номерами bundle-/tasks-/approval-PR и
+      подтверждением, что мерж прошёл через `human-merge.sh`.
+      Закрывает чекбокс `@id:spec-loop-need-stage` по §9.2.
+
+- [ ] Спека: последовательное одобрение узлов бандла — человеческий гейт переносится ВНУТРЬ авторинга, нижний узел пишется против уже одобренного и запиненного верхнего; три гейта (после `10-requirements`, после `15-behaviour-spec`, после пары `20-design`+`25-acceptance`), `30-decomposition` закрывается вместе с бандлом; `_step_authoring` перестаёт писать шесть узлов одним заходом, S5/S6/S7 повторяются на каждом гейте, паузы по идиому `waiting_human_merge` @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:sequential-node-approval
+      Решение владельца 2026-09-20 вместо нарезки предмета прогона на N
+      бандлов (она снята). Проблема не в размере, а в связности: все шесть
+      документов пишутся до первого одобрения, и правка одного тянет
+      правки в четырёх соседних. Замороженный верхний делает каскад
+      невозможным по построению — находка в нижнем становится явным
+      переоткрытием (`stale`), а не тихой волной.
+      Авторинг уже последователен ПО ДАННЫМ (`bundle_dag.py` пинует
+      upstream топологически, behaviour-spec читает `10-requirements.md`
+      под гвардом `requirements_findings`) — непоследователен только
+      человеческий гейт. Число человеческих актов не растёт: их уже шесть
+      на бандл после `@id:finalize-pr-agent-merge-default`.
+      Платного ревью не добавляет — `workstreams/*/spec/*` проза по
+      роутеру области ревью. Кода без спеки не пишем.
+
+- [ ] Спека: документы бандла как оракул проверки продукта — `15-behaviour-spec` и `25-acceptance` становятся набором адресуемых критериев, на которые ссылается исполнение и evidence прогона; продолжение существующей трассировки `бриф G-NN/FR-NN → requirements` вниз @owner:github:andrei-shtanakov @epic:eco.dark-factory @blocked_by:todo://devtools/sequential-node-approval @id:bundle-docs-as-oracle
+      Порядок обязателен: оракул должен быть зафиксирован ДО появления
+      проверяемого, иначе он подстраивается. Одобренный и запиненный по
+      хешу содержимого узел и есть такая фиксация — её даёт
+      `@id:sequential-node-approval`. Прецедент честного оракула —
+      disputatio D6: вердикт semantic equivalence был честным потому, что
+      инварианты D1 зафиксировали до получения диффа.
+      Затрагивает spec-runner — кросс-репная часть пойдёт заявкой по
+      ADR-ECO-006, а не пунктом этого плана.
 
 - [x] E1 Вход конвейера из discovery-brief: `spec-loop --brief <path>` — бриф обязан пройти вендоренный gate_check (pass, иначе fail-closed), хэш брифа входит в `upstream_hashes` charter, бриф лежит нулевым узлом в `workstreams/<ws-id>/spec/` и едет бандл-PR-ом; промпты charter/requirements получают бриф как источник (G-NN/FR-NN переносятся с трассировкой), гвард «каждый Must-FR брифа встречается в requirements»; приёмка — живой прогон engineer-фрейм → бриф → spec-loop → approved tasks-спека → исполнение spec-runner @owner:github:andrei-shtanakov @id:spec-loop-brief-input
       Граница author ≠ execute discovery сохраняется: PR открывает конвейер,
