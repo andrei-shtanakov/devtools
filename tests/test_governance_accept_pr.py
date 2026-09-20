@@ -376,6 +376,13 @@ def test_review_harness_paths_stop_before_review(capsys) -> None:
         # имён approval-веток. Подменённый шаблон меняет глоб, и гвард
         # перестаёт ловить нужные ветки, не исполнив ни строчки чужого кода.
         "contracts/approval-branches/v1/patterns.env",
+        # Тот же класс (devtools#271): правило области ревью. Обвязка читает
+        # его из дерева для ранней классификации И с devtools#270 отдаёт киту
+        # через REVIEW_SCOPE_RULES. PR, расширивший PROSE на собственные
+        # пути, сделал бы свой диф прозой — ранняя ветка публикует
+        # scope-аттестацию и модель не зовёт, то есть правка, отключившая
+        # ревью, сама ревью не прошла бы.
+        "contracts/review-scope/v1/prose-paths.env",
     ],
 )
 def test_merge_harness_paths_stop_before_review(capsys, path: str) -> None:
