@@ -663,6 +663,12 @@ def test_missing_base_oid_does_not_merge(fleet: Fleet) -> None:
         # Перечень защищённых путей и сам защищён: иначе агент вынес бы путь
         # из-под защиты и следом смержил правку в нём.
         "contracts/authority-root/v1/paths.env",
+        # Правило области ревью (devtools#271): по нему решается, дойдёт ли
+        # диф до модели вообще. Агентски смерженная правка `PROSE` сняла бы
+        # ревью-гейт со всех последующих PR — гвард той же категории, что
+        # merge-pr.sh и approval-branches, только обезоруживает не имя
+        # ветки, а область ревью.
+        "contracts/review-scope/v1/prose-paths.env",
     ],
 )
 def test_authority_root_paths_block_merge(fleet: Fleet, path: str) -> None:
@@ -1102,3 +1108,10 @@ def test_guard_inputs_are_authority_root() -> None:
     assert "human-merge.sh" in prefixes
     # И сам перечень — тоже: иначе агент вынес бы путь из-под защиты.
     assert "contracts/authority-root/" in prefixes
+    # Правило области ревью (devtools#271): по нему `review-pr.sh` решает,
+    # звать ли модель вообще, и с devtools#270 оно же уезжает киту. PR,
+    # расширивший `PROSE`, снял бы ревью-гейт со ВСЕХ последующих PR —
+    # ровно «обезоруживает обвязку», только гвардом здесь служит не имя
+    # ветки, а область ревью. Одного `_HARNESS_PREFIXES` мало: он держит
+    # стадию приёмки, а `merge-pr.sh` и S7 раннера решают по ЭТОМУ списку.
+    assert "contracts/review-scope/" in prefixes

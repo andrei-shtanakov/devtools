@@ -79,6 +79,16 @@ _HARNESS_PREFIXES = (
     # Он и сам authority-root (см. SSOT-файл), но защиты разные по стадии:
     # здесь PR не доходит даже до ревью, там — до мержа.
     "contracts/authority-root/",
+    # Правило области ревью (devtools#271). Тот же класс, что
+    # approval-branches: не исполняется, но читается обвязкой из дерева —
+    # `review-pr.sh` классифицирует по нему PR и с devtools#270 отдаёт его
+    # же киту через REVIEW_SCOPE_RULES. PR, расширивший `PROSE` на
+    # собственные пути, сделал бы свой диф прозой: ранняя ветка публикует
+    # scope-аттестацию и модель не зовёт — правка, отключившая ревью, сама
+    # ревью не прошла бы. Само правило `merge-pr.sh` и формулирует:
+    # «добавляя чтение чего-либо из $script_dir, проверьте, что путь накрыт
+    # _HARNESS_PREFIXES»; на devtools#270 чтение добавили, а проверку — нет.
+    "contracts/review-scope/",
 )
 _PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED", ""}
 _GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
