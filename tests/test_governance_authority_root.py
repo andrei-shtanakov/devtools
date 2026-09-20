@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from governance import authority_root
+from governance import accept_pr, authority_root
 
 
 def test_prefixes_read_from_the_ssot_file() -> None:
@@ -34,7 +34,40 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         # модели вообще. Агентски смерженная правка `PROSE` сняла бы
         # ревью-гейт со всех последующих PR.
         "contracts/review-scope/",
+        # Драйвер ревью-контура (devtools#273): исполняется из дерева и,
+        # в отличие от кита, собственного детерминированного гейта не
+        # имеет. 7 из 7 таких PR человек мержил руками по ручному лейблу —
+        # теперь это механика, а не память агента.
+        "review-pr.sh",
     }
+
+
+def test_every_harness_input_is_authority_root_but_the_kit() -> None:
+    """devtools#273: соотношение двух перечней — множествами, не литералами.
+
+    `_HARNESS_PREFIXES` держит стадию ПРИЁМКИ (accept_pr отказывает до
+    ревью), authority-root — стадию МЕРЖА (`merge-pr.sh` и merge_gate
+    раннера). Канон в самом SSOT (`paths.env`, ревью #183 круг 9): вход
+    обвязки обязан быть в обоих, иначе агент смержит PR, снимающий гвард.
+    Пробел и жил ровно здесь: оба перечня закреплены литералами в РАЗНЫХ
+    тестах, и расхождение между ними прогон не краснил.
+
+    Исключение ровно одно и оно решение владельца (2026-09-20), а не
+    недосмотр: у вендор-копии кита есть собственный детерминированный
+    гейт — `attest-vendor.sh` сверяет байты с текущим апстримом и
+    отказывает на любом пути вне инвентаря. Объявить `scripts/review/`
+    authority-root значило бы сделать волну ре-вендора (≈23 PR по флоту)
+    человеко-мержимой и обесценить инструмент, построенный ради их
+    дешевизны.
+
+    Проверяется РАВЕНСТВО разности, а не вхождение: новый харнесс-вход без
+    authority краснит прогон, и исчезновение исключения — тоже (значит
+    довод выше пора переписать, а не терять молча).
+    """
+    harness = set(accept_pr._HARNESS_PREFIXES)
+    authority = set(authority_root.prefixes())
+
+    assert harness - authority == {"scripts/review/"}
 
 
 def test_touched_returns_matching_paths_in_order() -> None:
