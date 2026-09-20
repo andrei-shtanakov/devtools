@@ -41,7 +41,7 @@ from governance.merge_gate import PrFacts, decide
 from governance.facts import Outcome
 from governance.stale_adapter import blob_sha1
 from governance.ops import (
-    _AUTHOR_DSL, ENGINEER_BLOCKED, REVIEW_BUDGET_EXIT, REVIEW_BUDGET_STOP,
+    _AUTHOR_DSL, ENGINEER_BLOCKED, REVIEW_BARRIER_EXIT, REVIEW_BARRIER_STOP,
     Ops, RealOps, disp_agent,
 )
 from governance.policy_sources import (
@@ -2299,12 +2299,12 @@ def _step_review(state: RunState, ops: Ops) -> bool:
                 # (приёмка PR #102, minor): 2/3 — отказ прибора, не
                 # «сохранившиеся находки»; 4 — голова уехала, тот же
                 # reset-путь, что и внизу функции.
-                if fresh_exit == REVIEW_BUDGET_EXIT:
+                if fresh_exit == REVIEW_BARRIER_EXIT:
                     # Барьер, а не сбой прибора (devtools#258). Op'ы не
                     # трогаем: содержимое ветки ни при чём.
                     _stop_with_comment(
                         state, ops, "stopped_review",
-                        REVIEW_BUDGET_STOP,
+                        REVIEW_BARRIER_STOP,
                     )
                     return False
                 if fresh_exit in (2, 3):
@@ -2329,7 +2329,7 @@ def _step_review(state: RunState, ops: Ops) -> bool:
             f"прямой проверкой `git cat-file -e {head}:<путь>`.",
         )
         return False
-    if exit_code == REVIEW_BUDGET_EXIT:
+    if exit_code == REVIEW_BARRIER_EXIT:
         # Барьер бюджета/stop rule (devtools#258): прогон возможен, но
         # требует решения владельца. Ветка обязана стоять ДО `in (2, 3)` и
         # ДО reset-ветки ниже: под кодом 2 в PR уходила ложная причина
@@ -2337,7 +2337,7 @@ def _step_review(state: RunState, ops: Ops) -> bool:
         # `gate-candidate`/`push`/`ready`, то есть переигрывание
         # контентного гейта из-за барьера, к содержимому не относящегося.
         _stop_with_comment(
-            state, ops, "stopped_review", REVIEW_BUDGET_STOP
+            state, ops, "stopped_review", REVIEW_BARRIER_STOP
         )
         return False
     if exit_code in (2, 3):

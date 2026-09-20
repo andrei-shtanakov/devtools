@@ -4493,7 +4493,7 @@ def test_review_fresh_instrument_failure_routed_honestly(
     assert any("прибор не отработал" in c for c in ops.comments)
 
 
-def test_budget_stop_is_named_and_keeps_ops(tmp_path: Path, runs_root) -> None:
+def test_barrier_stop_is_named_and_keeps_ops(tmp_path: Path, runs_root) -> None:
     """devtools#258: код 6 — барьер, а не сбой прибора.
 
     Под кодом 2 контур постил в PR «прибор не отработал» — ложную причину:
@@ -4504,22 +4504,26 @@ def test_budget_stop_is_named_and_keeps_ops(tmp_path: Path, runs_root) -> None:
     из-за барьера, к содержимому отношения не имеющего.
     """
     ops = FakeOps(
-        review_exit=ops_mod.REVIEW_BUDGET_EXIT, facts=GREEN_PR_FACTS,
+        review_exit=ops_mod.REVIEW_BARRIER_EXIT, facts=GREEN_PR_FACTS,
         files=GREEN_BUNDLE_FILES,
     )
     state = runner.start(**_start_kwargs(tmp_path, "r-budget", ops))
 
     assert state.status == "stopped_review"
-    assert any(ops_mod.REVIEW_BUDGET_STOP in c for c in ops.comments)
+    assert any(ops_mod.REVIEW_BARRIER_STOP in c for c in ops.comments)
     assert not any("прибор не отработал" in c for c in ops.comments)
     # Совет «повторите обычный запуск» помочь не может: журнал ключуется по
     # slug#pr, новая голова круга не открывает.
-    assert not any("повторите" in c for c in ops.comments)
+    assert not any("повторите обычный" in c for c in ops.comments)
+    # Находка ревью PR #275 (major): код 6 несёт ДВЕ причины — бюджет и
+    # stop rule, — и комментарий в PR не вправе утверждать одну из них как
+    # факт. Обе обязаны быть названы.
+    assert any("stop rule" in c for c in ops.comments)
     for op in ("gate-candidate", "push", "ready"):
         assert op in state.ops, f"{op} сброшен барьерным стопом"
 
 
-def test_budget_stop_on_fresh_path_is_named_too(
+def test_barrier_stop_on_fresh_path_is_named_too(
     tmp_path: Path, runs_root,
 ) -> None:
     """Тот же барьер на пути авто-опровержения (`review_fresh`).
@@ -4528,14 +4532,14 @@ def test_budget_stop_on_fresh_path_is_named_too(
     fresh после опровержения) — правка одной оставила бы вторую врущей.
     """
     ops = FakeOps(
-        review_exit=1, review_fresh_exit=ops_mod.REVIEW_BUDGET_EXIT,
+        review_exit=1, review_fresh_exit=ops_mod.REVIEW_BARRIER_EXIT,
         review_body=_FM_BODY, existing_files={"governance/foo.py"},
         facts=GREEN_PR_FACTS,
     )
     state = runner.start(**_start_kwargs(tmp_path, "r-budget-fresh", ops))
 
     assert state.status == "stopped_review"
-    assert any(ops_mod.REVIEW_BUDGET_STOP in c for c in ops.comments)
+    assert any(ops_mod.REVIEW_BARRIER_STOP in c for c in ops.comments)
     assert not any("прибор не отработал" in c for c in ops.comments)
 
 

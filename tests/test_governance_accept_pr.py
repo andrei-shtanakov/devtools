@@ -294,7 +294,7 @@ def test_review_findings_stop_without_merge(capsys) -> None:
     assert "ревью" in capsys.readouterr().out
 
 
-def test_budget_stop_names_itself_and_does_not_advise_a_plain_retry(
+def test_barrier_stop_names_both_causes_and_no_plain_retry(
     capsys,
 ) -> None:
     """devtools#258: код 6 — барьер, требующий решения владельца.
@@ -304,15 +304,20 @@ def test_budget_stop_names_itself_and_does_not_advise_a_plain_retry(
     `slug#pr`, поэтому новая голова круга не открывает и повтор без
     override отказал бы снова.
     """
-    ops = _Ops(review_exit=ops_mod.REVIEW_BUDGET_EXIT, facts_seq=[_facts()])
+    ops = _Ops(review_exit=ops_mod.REVIEW_BARRIER_EXIT, facts_seq=[_facts()])
     rc = accept_pr.accept(
         "kapelle", "o/kapelle", 59, ops, "/tmp/kapelle", sleep=_no_sleep,
     )
     assert rc == 1
     assert not any(c[0] == "merge" for c in ops.calls)
     out = capsys.readouterr().out
-    assert ops_mod.REVIEW_BUDGET_STOP in out
+    assert ops_mod.REVIEW_BARRIER_STOP in out
     assert "отработайте находки" not in out
+    # Находка ревью PR #275 (major): код 6 приходит и от stop rule при
+    # неисчерпанном бюджете, поэтому текст не вправе утверждать исчерпание
+    # как факт — он обязан называть ОБЕ причины барьера.
+    assert "stop rule" in out
+    assert not out.startswith("accept-pr: Бюджет исчерпан")
 
 
 def test_red_checks_stop_without_merge(capsys) -> None:

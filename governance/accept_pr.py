@@ -43,7 +43,7 @@ from collections.abc import Callable
 from governance.facts import Outcome
 from governance import authority_root
 from governance.ops import (
-    DEVTOOLS_ROOT, REVIEW_BUDGET_EXIT, REVIEW_BUDGET_STOP, Ops, RealOps,
+    DEVTOOLS_ROOT, REVIEW_BARRIER_EXIT, REVIEW_BARRIER_STOP, Ops, RealOps,
 )
 # Исполняемый ревью-harness целевого репо: review-pr.sh запускает
 # scripts/review/local.sh из локального дерева, которое материализация
@@ -246,12 +246,12 @@ def _accept_on_head(
         )
         return 1
     review_exit = ops.review(repo, pr)
-    if review_exit == REVIEW_BUDGET_EXIT:
+    if review_exit == REVIEW_BARRIER_EXIT:
         # Барьер, а не находки (devtools#258). Общий совет ниже здесь
         # принципиально не работает: журнал бюджета ключуется по `slug#pr`,
         # поэтому фикс-коммиты новую голову дают, а круг — нет, и повтор
         # без override отказал бы снова.
-        print(f"accept-pr: {REVIEW_BUDGET_STOP}")
+        print(f"accept-pr: {REVIEW_BARRIER_STOP}")
         return 1
     if review_exit != 0:
         print(

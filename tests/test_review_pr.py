@@ -1269,6 +1269,14 @@ def test_stop_rule_keys_on_published_approve(fleet: Fleet) -> None:
     # так же, а не как «ревьюер не отработал».
     assert res.returncode == 6, res.stdout
     assert "блокирующ" in res.stderr.lower()
+    # Находка ревью PR #275 (major): код 6 приходит и при НЕисчерпанном
+    # бюджете — stop rule стоит до обращения к журналу. Значит текст стопа,
+    # который контур постит в PR, не вправе утверждать «бюджет исчерпан»
+    # как факт. Журнал здесь пуст: платных кругов не было вовсе.
+    ledger = fleet.tmp / "review-budget" / "andrei-shtanakov_demo-7.log"
+    assert not ledger.exists() or len(
+        ledger.read_text().splitlines()
+    ) < 2, "стенд обязан отказать по stop rule, а не по бюджету"
 
 
 @needs_jq
