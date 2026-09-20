@@ -669,6 +669,11 @@ def test_missing_base_oid_does_not_merge(fleet: Fleet) -> None:
         # merge-pr.sh и approval-branches, только обезоруживает не имя
         # ветки, а область ревью.
         "contracts/review-scope/v1/prose-paths.env",
+        # Драйвер ревью-контура (devtools#273): исполняется из дерева, и
+        # собственного детерминированного гейта, в отличие от кита, у него
+        # нет. До этого пункта `accept_pr` такой PR останавливал, а
+        # агентский мерж — нет.
+        "review-pr.sh",
     ],
 )
 def test_authority_root_paths_block_merge(fleet: Fleet, path: str) -> None:
@@ -682,6 +687,29 @@ def test_authority_root_paths_block_merge(fleet: Fleet, path: str) -> None:
     assert "authority-root" in res.stderr
     assert path in res.stderr
     assert fleet.merge_calls() == []
+
+
+def test_vendored_kit_is_the_named_exception_and_still_merges(
+    fleet: Fleet,
+) -> None:
+    """Негативная половина к списку выше (devtools#273).
+
+    `scripts/review/` — единственный харнесс-вход, намеренно НЕ объявленный
+    authority-root: у вендор-копии кита есть собственный детерминированный
+    гейт (`attest-vendor.sh` сверяет байты с текущим апстримом и отказывает
+    на любом пути вне инвентаря), а человеко-мерж волны ре-вендора (≈23 PR
+    по флоту) обесценил бы инструмент, построенный ради их дешевизны.
+
+    Без этой половины утверждение «authority-root блокирует» удовлетворялось
+    бы и списком, накрывшим вообще всё. Тест закрепляет решение владельца
+    2026-09-20 как решение: оно видимо и обратимо, а не потеряно в тишине.
+    """
+    res = fleet.run(
+        GH_STUB_HEADREF="feat/ordinary",
+        GH_STUB_FILES="lib/x.ex\nscripts/review/local.sh",
+    )
+    assert res.returncode == 0, res.stderr
+    assert fleet.merge_calls() != []
 
 
 def test_authority_prefix_match_is_literal(fleet: Fleet) -> None:
@@ -977,8 +1005,18 @@ def test_shell_reads_authority_ssot_and_hardcodes_nothing() -> None:
         "все защищённые пути попали в исключения — тест перестал "
         "проверять что-либо; проверьте перечень"
     )
+    # Комментарии не считаются (devtools#273): предмет проверки — второе
+    # ОПРЕДЕЛЕНИЕ перечня, а не упоминание соседнего инструмента в прозе.
+    # `review-pr.sh` стал authority-root, и merge-pr.sh законно называет
+    # его трижды в комментариях (общий профиль публикации, источник
+    # `--print-review-cmd`). Расширять `own` значило бы вывести путь
+    # из-под проверки целиком — здесь же он остаётся проверяемым для кода.
+    # Тот же приём, что в питоновской половине выше.
+    code = "\n".join(
+        line for line in text.splitlines() if not line.strip().startswith("#")
+    )
     for prefix in checked:
-        assert prefix not in text, f"литерал {prefix!r} в merge-pr.sh"
+        assert prefix not in code, f"литерал {prefix!r} в merge-pr.sh"
 
 
 def test_glob_is_not_bound_to_current_arity() -> None:
@@ -1099,6 +1137,13 @@ def test_guard_inputs_are_authority_root() -> None:
 
     `_HARNESS_PREFIXES` это НЕ закрывает: он велит исполнять доверенную
     версию при приёмке, а не отдавать человеку PR, который её меняет.
+
+    Литералы ниже — документация конкретных доводов, по одному на вход.
+    ОБЩИЙ инвариант («каждый харнесс-вход, кроме названного исключения, —
+    authority-root») живёт множествами в
+    `test_every_harness_input_is_authority_root_but_the_kit`: именно
+    отсутствие такой кросс-проверки и позволило перечням разойтись
+    (devtools#273).
     """
     prefixes = set(authority_root.prefixes())
     assert "merge-pr.sh" in prefixes
