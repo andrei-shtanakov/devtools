@@ -626,12 +626,57 @@ def _deliver_phase(state: rs.RunState, ops) -> int:
     return 0
 
 
+def _report_interview_stop(state: rs.RunState) -> int:
+    """Стоп стадии Need: как его чинить. Одна формулировка на все пути.
+
+    Зовут и диспетчер (`_dispatch`), и start-путь `main`: до devtools#247
+    второй уходил в `_report_state`, который советовал `behaviour-run
+    resume` — а восстанавливать нечего, если `discovery start` вернул 1/2 и
+    сессия не создана. Два похожих текста разъехались бы; здесь он один.
+
+    Три случая различает состояние, а не догадка: файл findings существует
+    ⇔ стоп ТЕКУЩЕГО захода — 10/11 (инвариант `runner.INTERVIEW_FINDINGS`).
+
+    Сирота проверяется ПЕРВОЙ. До сведения двух текстов в одну функцию
+    порядок держала структура кода: orphan-ветка `_dispatch` возвращалась
+    до всякого взгляда на файл. Теперь он стал утверждением, и оно такое:
+    пока сессии нет, «ответьте на findings» — совет в пустоту, отвечать
+    некому.
+    """
+    session_id = (state.interview or {}).get("session_id")
+    if session_id is None:
+        print(
+            "spec-loop: стадия Need без записанной сессии — "
+            "присоедините её: повторите команду с --session <id>, "
+            "либо новый прогон: --new-run --ws-id <fresh-id>"
+        )
+        return 1
+    findings_path = rs.run_dir(state.run_id) / runner.INTERVIEW_FINDINGS
+    if findings_path.exists():
+        print(
+            f"spec-loop: findings: {findings_path} — ответьте и "
+            "повторите команду"
+        )
+        return 1
+    print(
+        "spec-loop: стоп стадии Need: см. причину выше; "
+        f"восстановите ту же сессию {shlex.quote(session_id)} "
+        "и повторите либо --new-run --ws-id <fresh-id>"
+    )
+    return 1
+
+
 def _report_state(state: rs.RunState) -> int:
-    """Не-продолжаемые статусы: отчёт + подсказка, ненулевой RC."""
+    """Не-продолжаемые статусы: отчёт + подсказка, ненулевой RC.
+
+    Перечня продолжаемых статусов здесь намеренно нет: он уже устарел молча
+    один раз (E2 добавил `waiting_interview`/`stopped_interview`, а фраза
+    осталась про два), и устареет снова. Продолжаемость решает `_dispatch`,
+    сюда попадает то, что он не взял.
+    """
     print(
         f"spec-loop: прогон {state.run_id!r} в статусе {state.status!r} — "
-        "кнопка автоматически продолжает только waiting_human_merge/"
-        "completed; без скрытых ретраев."
+        "кнопка его не продолжает; без скрытых ретраев."
     )
     hints = {
         "running": (
@@ -674,30 +719,12 @@ def _dispatch(state: rs.RunState, ops) -> int:
             # проверяет это САМА и не делает вызов вовсе (ruling 2, Task 10):
             # диагностика orphan-состояния не должна зависеть от того,
             # дошёл ли вызов до runner.
-            print(
-                "spec-loop: стадия Need без записанной сессии — "
-                "присоедините её: повторите команду с --session <id>, "
-                "либо новый прогон: --new-run --ws-id <fresh-id>"
-            )
-            return 1
+            return _report_interview_stop(state)
         after = runner.resume(state.run_id, ops)
         if after.status == "waiting_interview":
             return 0
         if after.status == "stopped_interview":
-            findings_path = rs.run_dir(after.run_id) / runner.INTERVIEW_FINDINGS
-            if findings_path.exists():
-                print(
-                    f"spec-loop: findings: {findings_path} — ответьте и "
-                    "повторите команду"
-                )
-            else:
-                session_id = (after.interview or {}).get("session_id")
-                print(
-                    "spec-loop: стоп стадии Need: см. причину выше; "
-                    f"восстановите ту же сессию {shlex.quote(session_id)} "
-                    "и повторите либо --new-run --ws-id <fresh-id>"
-                )
-            return 1
+            return _report_interview_stop(after)
         if after.status == "waiting_human_merge":
             print(
                 f"бандл-PR #{after.pr} создан ({after.repo_slug}) — "
@@ -1011,6 +1038,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if started.status == "completed":
             return _deliver_phase(started, ops)
+        if started.status == "stopped_interview":
+            # `discovery start` вернул 1/2 — сессии может не быть вовсе.
+            # Подсказка — та же, что у диспетчера (devtools#247).
+            return _report_interview_stop(started)
         return _report_state(started)
     except (SpecLoopError, brief_input.BriefInputError, FileNotFoundError) as exc:
         print(f"spec-loop: {exc}")

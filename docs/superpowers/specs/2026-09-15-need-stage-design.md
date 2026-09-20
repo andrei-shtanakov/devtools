@@ -137,7 +137,7 @@ need-специфичные флаги (`--frame`, `--stakeholder`, `--traces-to
 | `start` | 20 | `session_id` (из `next_action.session_id`) записан, `interview-start` → `completed`, run → `waiting_interview`; печать `next_action` и команды ответа |
 | `start` | 0, 10, 11 | невозможная для `start` форма (пустая сессия не бывает `complete`); envelope без `next_action` не несёт `session_id` ⇒ как 1: `stopped_interview`, `interview-start` остаётся `started`, `session_id is None` |
 | `start` | 1, 2 | `stopped_interview`; `interview-start` остаётся `started`, `session_id is None`; S1 не вызывается |
-| `status` (повтор) | 20 | из `waiting_interview`: состояние не меняется (`run.json` байт в байт); из `stopped_interview` (10/11 или 1/2 ранее): статус → `waiting_interview`, findings-файл удаляется; в обоих случаях печать `next_action` и команды ответа, spec-loop — код 0. Для любого `status`/`brief` → 20 `next_action.session_id` обязан совпасть с записанным; неполный `next_action` или чужой id — fail-closed стоп |
+| `status` (повтор) | 20 | из `waiting_interview`: состояние не меняется (`run.json` байт в байт); из `stopped_interview` (10/11 или 1/2 ранее): статус → `waiting_interview`; в обоих случаях печать `next_action` и команды ответа, spec-loop — код 0. Для любого `status`/`brief` → 20 `next_action.session_id` обязан совпасть с записанным; неполный `next_action` или чужой id — fail-closed стоп |
 | `status` | 0 | `interview-brief` → `started`; `discovery brief --out <run_dir>/brief-input/00-discovery/.brief.tmp`; **код `brief` — по строкам `brief` ниже** |
 | `brief` | 0 | `inspect_brief` полного source-слоя на tmp, сверка координат брифа — **только** H1, `interview.frame`, `traces_to` (критерий — как в E1 и §5.3: customer — без путевых элементов, engineer — ровно один путевой элемент, равный записанному `interview.traces_to`; роли участников не сверяются: `--stakeholder` — декларация, D3; второй легитимный участник интервью законен), `os.replace` → `brief.md`, `state.brief`, `completed_at`, `running`; далее S1 по E1 |
 | `brief` | 20 | сосед снова ждёт ответа (между `status` и `brief` появился вопрос): run → `waiting_interview`, tmp удаляется, публикации нет; `interview-brief` сбрасывается; печать команды ответа |
@@ -172,6 +172,16 @@ need-специфичные флаги (`--frame`, `--stakeholder`, `--traces-to
 пишется — §5.1), findings-путь печатать нечего: вместо него печатается
 recovery-подсказка «восстановите ту же сессию `<id>` и повторите либо
 `--new-run --ws-id <fresh-id>`» — та же форма, что и для сироты выше.
+
+Различение работает только пока файл описывает стоп ТЕКУЩЕГО захода,
+поэтому удаление привязано не к переходу 20, как говорила первая редакция
+таблицы, а к входу в стадию: `_step_interview` снимает файл до любого
+обращения к discovery (devtools#247). Перечня обесценивающих переходов
+здесь нет намеренно — он неполон по построению: шорткат
+`_interview_poll` → `_interview_publish` (после brief 10/11 op
+`interview-brief` уже не `new`) вообще не проходит через разбор ответа.
+Сирота проверяется раньше findings: пока сессии нет, отвечать на них
+некому.
 
 Печатаемые команды строятся через `shlex.quote` (роль с пробелами,
 пути с пробелами).
@@ -354,6 +364,12 @@ preflight, — порт менять после разблокировки не 
   `stopped_interview`, без `replace` и S1;
 - `stopped_interview` (после 10/11) → `status` 20 → `waiting_interview`,
   findings-файл удалён, spec-loop код 0;
+- findings прошлого захода не переживают стоп по другой причине
+  (devtools#247): 10 → 1/2; 10 → `status` 0 → отказ координат brief; и
+  шорткат `brief` 11 → повтор → `brief` 0 с плохими координатами, где
+  разбор ответа не вызывается вовсе. Негативная половина — две строки выше:
+  файл всё ещё пишется при 10/11 и всё ещё исчезает на 20, иначе инвариант
+  удовлетворялся бы «никогда не писать»;
 - crash: `interview-brief` `started` без tmp и без `brief.md` → повторный
   рендер и обработка по полной таблице; только `.brief.tmp` → повторный
   рендер и публикация; `brief.md` без дескриптора → повторный рендер,

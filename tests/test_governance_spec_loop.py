@@ -549,6 +549,10 @@ class _LoopEnv:
     def __init__(self, monkeypatch, tmp_path: Path, resume_result=None):
         self.calls: list[tuple] = []
         self.resume_result = resume_result
+        # devtools#247: start может закончиться и НЕпродолжаемым статусом —
+        # `discovery start` вернул 1/2, сессия не создана вовсе. Тест задаёт
+        # такой исход парой (status, session_id).
+        self.start_override: tuple[str, str | None] | None = None
         target = tmp_path / "alpha"
         (target / ".git").mkdir(parents=True)
         self.target = target
@@ -594,6 +598,10 @@ class _LoopEnv:
             interview=interview,
         )
         state.status = "waiting_interview" if interview else "waiting_human_merge"
+        if self.start_override is not None:
+            state.status, session_id = self.start_override
+            if state.interview is not None:
+                state.interview["session_id"] = session_id
         return state
 
     def _resume(self, run_id, ops):
@@ -822,7 +830,13 @@ def test_completed_run_goes_straight_to_deliver(
 def test_non_continuable_statuses_report_without_calls(
     runs_root, tmp_path, monkeypatch, capsys, status
 ) -> None:
-    """Автоматически продолжается ТОЛЬКО waiting_human_merge/completed."""
+    """Статусы, которых диспетчер не берёт: отчёт без единого вызова.
+
+    Перечня продолжаемых статусов тут нет намеренно — он устарел молча,
+    когда E2 добавил `waiting_interview`/`stopped_interview`, и прожил так
+    до devtools#247. Предмет проверки — что вызовов не было и статус
+    назван, а не список.
+    """
     _mk_run("r-s", "S", status=status, target_dir=str(tmp_path / "alpha"))
     env = _LoopEnv(monkeypatch, tmp_path)
     rc = spec_loop.main(["--subject", "S", "--repo", "alpha"])
@@ -1117,6 +1131,52 @@ def test_stopped_interview_with_session_resumes_and_exits_1_if_still_stopped(
     env.resume_result = st
     assert spec_loop.main(_need()) == 1
     assert [c[0] for c in env.calls] == ["resume"]
+
+
+def test_start_landing_on_orphan_stop_prints_the_same_recovery(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """devtools#247: на start-пути `stopped_interview` уходил в
+    `_report_state`, а тот советовал `behaviour-run resume`.
+
+    Восстанавливать этим нечего: `discovery start` вернул 1/2, сессии не
+    существует. Подсказка обязана быть той же, что у диспетчера, — и
+    буквально той же, а не похожей: иначе два текста разъедутся.
+    """
+    env = _LoopEnv(monkeypatch, tmp_path)
+    env.start_override = ("stopped_interview", None)
+
+    rc = spec_loop.main(_need())
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "--session" in out and "--new-run --ws-id" in out
+    assert "behaviour-run" not in out
+
+
+def test_orphan_hint_wins_over_a_findings_file(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """Сирота важнее findings: восстанавливать нечего, пока нет сессии.
+
+    До сведения подсказок в одну функцию orphan-ветка `_dispatch` про файл
+    findings не знала вовсе, и порядок был гарантирован структурой кода.
+    Теперь оба случая решает одна функция — порядок стал утверждением, и
+    его надо держать тестом, иначе сирота получит совет «ответьте на
+    findings», отвечать на которые некому.
+    """
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = _make_need_run(env, status="stopped_interview", session=None)
+    findings = rs.run_dir(st.run_id) / spec_loop.runner.INTERVIEW_FINDINGS
+    findings.parent.mkdir(parents=True, exist_ok=True)
+    findings.write_text("{}", encoding="utf-8")
+
+    assert spec_loop.main(_need()) == 1
+
+    assert env.calls == []
+    out = capsys.readouterr().out
+    assert "--session" in out and "--new-run --ws-id" in out
+    assert "findings" not in out
 
 
 def test_stopped_interview_orphan_prints_recovery_without_resume(

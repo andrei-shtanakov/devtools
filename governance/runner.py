@@ -70,8 +70,11 @@ _ROLLUP_GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 # Operation keys стадии Need (E2, спека §4/§5): S0.5 `_step_interview`.
 INTERVIEW_START = "interview-start"
 INTERVIEW_BRIEF = "interview-brief"
-# Файл findings, который `_interview_after_reply` пишет при 10/11 (§5.1) и
-# `_interview_stop`/код 20 удаляет при возврате в `waiting_interview`.
+# Файл findings, который `_interview_after_reply` пишет при 10/11 (§5.1).
+# Он описывает стоп ТЕКУЩЕГО захода: чистка стоит на входе в стадию
+# (`_step_interview`), поэтому следующий заход по любому маршруту — 20,
+# 1/2, отказ публикации после `status` 0, шорткат сразу в brief — застаёт
+# файл снятым (devtools#247).
 INTERVIEW_FINDINGS = "interview-findings.txt"
 
 # (op key, kind для ops.author, ожидаемое имя файла в bundle_dir) — S2/S3.
@@ -880,13 +883,16 @@ def _interview_after_reply(
 ) -> bool:
     """Общая таблица переходов для `status` и `brief` (§5.1).
 
+    Файл findings пишется только здесь (ветка 10/11), а снимается на входе
+    в стадию — `_step_interview`, см. комментарий там (devtools#247).
+
     20 — стейкхолдер ждёт следующий вопрос: ту же записанную сессию
-    возвращает `waiting_interview` (findings прошлого 10/11 чистятся, если
-    были), другую — стоп (координаты интервью разъехались). 10/11 —
-    discovery отверг ответ: findings сохраняются файлом, печатается шаблон
-    повторного ответа с `--supersede`, run стопится. 1/2 — операционный
-    отказ discovery: run стопится, но сессия остаётся записанной —
-    печатается подсказка восстановить ЕЁ ЖЕ, а не начинать новую.
+    возвращает `waiting_interview`, другую — стоп (координаты интервью
+    разъехались). 10/11 — discovery отверг ответ: findings сохраняются
+    файлом, печатается шаблон повторного ответа с `--supersede`, run
+    стопится. 1/2 — операционный отказ discovery: run стопится, но сессия
+    остаётся записанной — печатается подсказка восстановить ЕЁ ЖЕ, а не
+    начинать новую.
     """
     session_id = state.interview["session_id"]
     findings_file = run_dir(state.run_id) / INTERVIEW_FINDINGS
@@ -896,7 +902,6 @@ def _interview_after_reply(
             return _interview_stop(
                 state, "next_action.session_id ≠ записанной сессии"
             )
-        findings_file.unlink(missing_ok=True)
         state.ops.pop(INTERVIEW_BRIEF, None)
         state.status = "waiting_interview"
         save(state)
@@ -1105,6 +1110,20 @@ def _step_interview(state: RunState, ops: Ops) -> bool:
         return True
     spec = iv.InterviewSpec.from_state(state.interview)
     cwd = str(run_dir(state.run_id))
+    # Инвариант (devtools#247): файл findings описывает стоп ТЕКУЩЕГО
+    # захода, потому что `spec_loop` по его существованию и решает, что
+    # причина стопа — findings. Чистка стоит здесь, на входе в стадию, а
+    # запись — только в ветке 10/11 `_interview_after_reply`.
+    #
+    # Почему не в `_interview_after_reply` и не списком веток. Список
+    # обесценивающих переходов — опись: заявка #247 просила «как минимум
+    # `status` 0», и следующий забылся бы так же. Вход в разбор ответа
+    # тоже мимо: `_interview_poll` при `interview-brief != new` уходит в
+    # `_interview_publish` НАПРЯМУЮ (шорткат после brief 10/11), и разбор
+    # на этом заходе не вызывается вовсе — найдено ревью на devtools#274.
+    # Заход в стадию — единственная точка, через которую проходят все
+    # маршруты.
+    (run_dir(state.run_id) / INTERVIEW_FINDINGS).unlink(missing_ok=True)
     if op_status(state, INTERVIEW_START) != "completed":
         if (
             state.interview.get("session_id") is None
