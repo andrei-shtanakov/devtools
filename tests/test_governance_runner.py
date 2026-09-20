@@ -722,6 +722,41 @@ def test_findings_do_not_survive_a_later_brief_refusal(
     assert not findings.exists()
 
 
+def test_findings_do_not_survive_the_brief_shortcut(
+    tmp_path: Path, runs_root
+) -> None:
+    """Находка ревью на devtools#274: шорткат `_interview_poll` обходит
+    разбор ответа.
+
+    После brief 10/11 op `interview-brief` остаётся `started`, и следующий
+    заход идёт СРАЗУ в `_interview_publish`, минуя `_interview_after_reply`.
+    Пока чистка стояла там, файл прошлого захода переживал стоп по отказу
+    координат — то есть исходный дефект #247 на этом пути сохранялся, а
+    докстроки заявляли инвариант шире, чем он держался.
+    """
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)),
+            ("status", _reply(0)),
+            ("brief", _reply(11)),
+            ("brief", _reply(0)),
+        ],
+        brief_text=_need_brief_text(target="owner/beta"),
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-shortcut", ops),
+        interview_spec=_need_spec(),
+    )
+    findings = rs.run_dir("r-shortcut") / "interview-findings.txt"
+    assert runner.resume("r-shortcut", ops).status == "stopped_interview"
+    assert findings.exists(), "предусловие: brief 11 записал findings"
+
+    state = runner.resume("r-shortcut", ops)
+
+    assert state.status == "stopped_interview" and state.brief is None
+    assert not findings.exists()
+
+
 @pytest.mark.parametrize("code", [1, 2])
 def test_status_1_2_stops_and_keeps_session(
     tmp_path: Path, runs_root, code, capsys: pytest.CaptureFixture[str]

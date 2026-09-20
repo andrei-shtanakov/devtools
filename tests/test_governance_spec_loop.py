@@ -1154,6 +1154,31 @@ def test_start_landing_on_orphan_stop_prints_the_same_recovery(
     assert "behaviour-run" not in out
 
 
+def test_orphan_hint_wins_over_a_findings_file(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """Сирота важнее findings: восстанавливать нечего, пока нет сессии.
+
+    До сведения подсказок в одну функцию orphan-ветка `_dispatch` про файл
+    findings не знала вовсе, и порядок был гарантирован структурой кода.
+    Теперь оба случая решает одна функция — порядок стал утверждением, и
+    его надо держать тестом, иначе сирота получит совет «ответьте на
+    findings», отвечать на которые некому.
+    """
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = _make_need_run(env, status="stopped_interview", session=None)
+    findings = rs.run_dir(st.run_id) / spec_loop.runner.INTERVIEW_FINDINGS
+    findings.parent.mkdir(parents=True, exist_ok=True)
+    findings.write_text("{}", encoding="utf-8")
+
+    assert spec_loop.main(_need()) == 1
+
+    assert env.calls == []
+    out = capsys.readouterr().out
+    assert "--session" in out and "--new-run --ws-id" in out
+    assert "findings" not in out
+
+
 def test_stopped_interview_orphan_prints_recovery_without_resume(
     runs_root, tmp_path, monkeypatch, capsys
 ) -> None:

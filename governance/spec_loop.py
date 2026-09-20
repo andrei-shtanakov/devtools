@@ -636,20 +636,26 @@ def _report_interview_stop(state: rs.RunState) -> int:
 
     Три случая различает состояние, а не догадка: файл findings существует
     ⇔ стоп ТЕКУЩЕГО захода — 10/11 (инвариант `runner.INTERVIEW_FINDINGS`).
+
+    Сирота проверяется ПЕРВОЙ. До сведения двух текстов в одну функцию
+    порядок держала структура кода: orphan-ветка `_dispatch` возвращалась
+    до всякого взгляда на файл. Теперь он стал утверждением, и оно такое:
+    пока сессии нет, «ответьте на findings» — совет в пустоту, отвечать
+    некому.
     """
-    findings_path = rs.run_dir(state.run_id) / runner.INTERVIEW_FINDINGS
-    if findings_path.exists():
-        print(
-            f"spec-loop: findings: {findings_path} — ответьте и "
-            "повторите команду"
-        )
-        return 1
     session_id = (state.interview or {}).get("session_id")
     if session_id is None:
         print(
             "spec-loop: стадия Need без записанной сессии — "
             "присоедините её: повторите команду с --session <id>, "
             "либо новый прогон: --new-run --ws-id <fresh-id>"
+        )
+        return 1
+    findings_path = rs.run_dir(state.run_id) / runner.INTERVIEW_FINDINGS
+    if findings_path.exists():
+        print(
+            f"spec-loop: findings: {findings_path} — ответьте и "
+            "повторите команду"
         )
         return 1
     print(
