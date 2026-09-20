@@ -262,10 +262,20 @@ class Fleet:
         env.update(extra)
         return env
 
-    def run(self, *args: str, **env_extra: str) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, *args: str, cwd: Path | None = None, **env_extra: str
+    ) -> subprocess.CompletedProcess[str]:
+        env = self.env(**env_extra)
+        if cwd is not None:
+            # env скопирован из os.environ и несёт PWD процесса pytest.
+            # Оболочка печатает именно его, если он валиден, — устаревшее
+            # значение сделало бы `$(pwd)` в обвязке ложью, и тест пинал бы
+            # не ту базу абсолютизации, а прежнюю.
+            env["PWD"] = str(cwd)
         return subprocess.run(
             ["sh", str(SCRIPT), *args],
-            env=self.env(**env_extra),
+            cwd=None if cwd is None else str(cwd),
+            env=env,
             capture_output=True,
             text=True,
             check=False,  # код выхода — предмет проверки самих тестов
@@ -1540,7 +1550,7 @@ def test_kit_gets_the_same_scope_rule_the_wrapper_classified_with(
     assert scope_log.read_text().strip() == f"scope_rules={expected}"
 
 
-def test_relative_scope_contract_reaches_kit_as_absolute_path(
+def test_relative_scope_contract_resolves_against_wrapper_cwd(
     fleet: Fleet,
 ) -> None:
     """Кит работает из head-worktree, обвязка — из cwd оператора.
@@ -1549,21 +1559,32 @@ def test_relative_scope_contract_reaches_kit_as_absolute_path(
     проверяемого PR-head — ровно то, от чего страхует `resolve_from_source`
     для kit/schema/prompt. Тогда «одно правило на двоих» снова распалось бы
     на два файла, причём второй пришёл бы из недоверенного дерева.
+
+    Прогон идёт из каталога, который НЕ является ни корнем репо, ни чекаутом
+    цели: при cwd == корень репо значение `$(pwd)/rel` неотличимо от
+    `$script_dir/rel`, и подмена базы прошла бы тест незамеченной (находка
+    ревью на этом же PR, minor).
     """
     fleet.write_kit(LOCAL_SH_SCOPE_RULES_STUB)
     scope_log = fleet.tmp / "review-scope.log"
-    relative = "contracts/review-scope/v1/prose-paths.env"
-    assert (SCRIPT.parent / relative).is_file(), "фикстура ссылается на SSOT"
+    operator_cwd = fleet.tmp / "operator-cwd"
+    (operator_cwd / "rules").mkdir(parents=True)
+    (operator_cwd / "rules" / "prose-paths.env").write_text(
+        "PROSE=*.md\nCODE_OVERRIDE=contracts/*\n"
+    )
 
     res = fleet.run(
         "demo",
         "7",
-        REVIEW_SCOPE_CONTRACT=relative,
+        cwd=operator_cwd,
+        REVIEW_SCOPE_CONTRACT="rules/prose-paths.env",
         REVIEW_STUB_SCOPE_LOG=str(scope_log),
     )
 
     assert res.returncode == 0, res.stderr
-    assert scope_log.read_text().strip() == f"scope_rules={SSOT_CONTRACT}"
+    assert scope_log.read_text().strip() == (
+        f"scope_rules={operator_cwd}/rules/prose-paths.env"
+    )
 
 
 def test_scope_contract_duplicate_key_refuses(fleet: Fleet) -> None:
