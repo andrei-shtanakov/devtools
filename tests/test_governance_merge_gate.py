@@ -70,6 +70,10 @@ def test_authority_garbage_is_fail_closed(auth: Authority) -> None:
         (2, "human"),  # прибор не отработал
         (3, "human"),
         (4, "human"),  # голова уехала
+        # Барьер бюджета/stop rule (devtools#258): вердикта нет вовсе,
+        # значит мержить нечего. Fail-closed по умолчанию это уже даёт —
+        # строка пинует, что умолчание не изменится молча.
+        (6, "human"),
         (None, "human"),  # ревью не приходило вовсе = unknown
     ],
 )

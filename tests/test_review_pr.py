@@ -1091,7 +1091,12 @@ def test_budget_refuses_third_paid_run(fleet: Fleet) -> None:
     before = fleet.gh_calls().count("pr review")
     kit_before = fleet.local_log.read_text().count("--format markdown")
     res = fleet.run("demo", "7")
-    assert res.returncode == 2, res.stdout
+    # Код 6 — «барьер отказал», отдельный от 2 («конфигурация/прибор»):
+    # контур обязан назвать стоп своим именем (devtools#258). Пятёрка занята
+    # соседним слоем — это код КИТА «всё отфильтровано как проза», и второй
+    # смысл у той же цифры воспроизвёл бы дефект, ради которого issue и
+    # заведена.
+    assert res.returncode == 6, res.stdout
     assert "бюджет" in res.stderr.lower()
     # Отказ обязан называть путь обхода, иначе оператор не знает, что делать.
     assert "--budget-override" in res.stderr
@@ -1107,7 +1112,7 @@ def test_dry_run_consumes_budget(fleet: Fleet) -> None:
     fleet.run("demo", "7", "--dry-run", REVIEW_STUB_EXIT="1")
     fleet.run("demo", "7", "--dry-run", REVIEW_STUB_EXIT="1")
     res = fleet.run("demo", "7", "--dry-run", REVIEW_STUB_EXIT="1")
-    assert res.returncode == 2, res.stdout
+    assert res.returncode == 6, res.stdout
     assert "бюджет" in res.stderr.lower()
 
 
@@ -1171,10 +1176,10 @@ def test_use_verdict_bypasses_exhausted_budget(fp_fleet: Fleet) -> None:
     assert fp_fleet.run(
         "demo", "7", "--fresh", REVIEW_STUB_FP=FP, REVIEW_STUB_EXIT="1",
     ).returncode == 1
-    # Бюджет исчерпан: платный прогон отказан.
+    # Бюджет исчерпан: платный прогон отказан барьерным кодом 6.
     assert fp_fleet.run(
         "demo", "7", "--fresh", REVIEW_STUB_FP=FP, REVIEW_STUB_EXIT="1",
-    ).returncode == 2
+    ).returncode == 6
 
     kit_before = fp_fleet.local_log.read_text().count("--format markdown")
     res = fp_fleet.run(
@@ -1200,10 +1205,11 @@ def test_instrument_failure_does_not_consume_budget(fleet: Fleet) -> None:
     бюджет на прогоны, ни один из которых ревью не принёс."""
     assert fleet.run("demo", "7", REVIEW_STUB_EXIT="3").returncode == 3
     assert fleet.run("demo", "7", REVIEW_STUB_EXIT="3").returncode == 3
-    # Бюджет не тронут: оба платных круга ещё доступны.
+    # Бюджет не тронут: оба платных круга ещё доступны, третий упирается
+    # в барьер (6), а не в отказ прибора.
     assert fleet.run("demo", "7", REVIEW_STUB_EXIT="1").returncode == 1
     assert fleet.run("demo", "7", REVIEW_STUB_EXIT="1").returncode == 1
-    assert fleet.run("demo", "7", REVIEW_STUB_EXIT="1").returncode == 2
+    assert fleet.run("demo", "7", REVIEW_STUB_EXIT="1").returncode == 6
 
 
 def test_documented_flow_costs_one_round(fp_fleet: Fleet) -> None:
@@ -1222,10 +1228,11 @@ def test_documented_flow_costs_one_round(fp_fleet: Fleet) -> None:
     assert fp_fleet.run(
         "demo", "7", "--fresh", REVIEW_STUB_FP=FP, REVIEW_STUB_EXIT="1",
     ).returncode == 1
-    # И только теперь бюджет исчерпан.
+    # И только теперь бюджет исчерпан — барьерным кодом 6, не отказом
+    # прибора (2).
     assert fp_fleet.run(
         "demo", "7", "--fresh", REVIEW_STUB_FP=FP, REVIEW_STUB_EXIT="1",
-    ).returncode == 2
+    ).returncode == 6
 
 # --- Stop rule: круг открывает только блокирующая находка (devtools#256) ----
 # Канон — prograph-vault `authored/rules/git-workflow.md`, stop rule (vault#135).
@@ -1257,7 +1264,10 @@ def test_stop_rule_keys_on_published_approve(fleet: Fleet) -> None:
     """Approve, доставленный на PR, круг закрывает."""
     reviews = fleet.write_reviews(_review("APPROVED", OLD_HEAD, FP))
     res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
-    assert res.returncode == 2, res.stdout
+    # Тот же барьерный код 6, что и у исчерпания бюджета (devtools#258):
+    # отказ лечится тем же решением владельца и обязан читаться контуром
+    # так же, а не как «ревьюер не отработал».
+    assert res.returncode == 6, res.stdout
     assert "блокирующ" in res.stderr.lower()
 
 
@@ -1300,7 +1310,7 @@ def test_unmarked_review_does_not_hide_terminal_verdict(fleet: Fleet) -> None:
         _scope_review(OLD_HEAD),
     )
     res = fleet.run("demo", "7", GH_STUB_REVIEWS_JSON=reviews)
-    assert res.returncode == 2, res.stdout
+    assert res.returncode == 6, res.stdout
     assert "блокирующ" in res.stderr.lower()
 
 
