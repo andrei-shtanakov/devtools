@@ -1623,14 +1623,50 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       отказа по finalize-форме, `human-merge.sh` — authority-root,
       `human-merge.sh` / `make human-merge` — акт человека от его учётки с
       allowlist-проверкой и пином головы.
-- [ ] Срез B: перенести правило области ревью в review-kit — `prose-paths.env`
-      вендорится в `scripts/review/`, фильтр живёт в `local.sh` и накрывает три
-      канала (local.sh, pre-push хук, review-pr.sh); там же становится
+- [ ] Срез B: перенести правило области ревью в review-kit — `prose-paths.env` вендорится в `scripts/review/`, фильтр живёт в `local.sh` и накрывает три канала @owner:github:andrei-shtanakov @id:review-scope-kit-wave
+      Каналы — `local.sh`, pre-push хук, `review-pr.sh`. Там же становится
       возможна фильтрация кодового подмножества внутри смешанного дифа
       (кит строит диф без pathspec, `local.sh:528`). Цена — волна ре-вендора
-      по флоту @owner:github:andrei-shtanakov @id:review-scope-kit-wave
-- [ ] Покрыть тестом `die 2` при реально недостижимой базе: хойст fetch
-      расширил класс затронутых прогонов — раньше отказ получали только репо
-      с fp-китом, теперь и репо со старым китом, которые прежде отдавали
-      фетч базы самому киту
-      @owner:github:andrei-shtanakov @id:review-scope-unreachable-base-coverage
+      по флоту.
+- [ ] Покрыть тестом `die 2` при реально недостижимой базе @owner:github:andrei-shtanakov @id:review-scope-unreachable-base-coverage
+      Хойст fetch расширил класс затронутых прогонов — раньше отказ получали
+      только репо с fp-китом, теперь и репо со старым китом, которые прежде
+      отдавали фетч базы самому киту.
+- [ ] Инструкции агентов не уходят из-под ревью как проза: `CODE_OVERRIDE` в SSOT области ревью покрывает `.claude/*`, `.agents/*` и `CLAUDE.md`/`AGENTS.md` на любой глубине @owner:github:andrei-shtanakov @id:review-scope-code-override-agent-instructions @epic:eco.tooling @blocked_by:steward#180
+      Принято по devtools#265 (`from: atp-platform#review-kit-catchup-scope`).
+      Найдено ревью-контуром на atp-platform#329 (major, confidence medium);
+      класс фронтальный для флота, поэтому чиним в SSOT, а не repo-конфигом.
+      Регрессия покрытия среза B: до неё диф шёл ревьюеру целиком, после —
+      ветка только со `SKILL.md` или корневым `CLAUDE.md` даёт scope=prose и
+      вердикт не выносится вовсе. `CLAUDE.md` при этом не накрыт и
+      authority-root, хотя именно в нём живут `merge_policy`, «Мерж: человек»
+      и бюджет платных прогонов.
+      **Сделано PR этой ветки:** `contracts/review-scope/v1/prose-paths.env` —
+      восемь глобов в `CODE_OVERRIDE` плюс довод в шапке; тесты
+      `test_agent_instruction_files_are_code` (8 путей) и базовая половина
+      `test_agent_instruction_lookalikes_stay_prose` (`docs/claude-notes.md`,
+      `docs/CLAUDE-migration.md` и т.п. остаются прозой — без неё утверждение
+      удовлетворяется глобом `*`).
+      Правки SSOT для этого НЕ хватило, и довод «ранняя классификация
+      срабатывает до кита, значит платный канал покрыт» оказался неверным:
+      она срабатывает раньше, но не отменяет СОБСТВЕННЫЙ фильтр кита, который
+      читал свою вендор-копию (`local.sh:227`). Расхождение давало исход хуже
+      непокрытия — `exit 5` кита не разобран в fp-ветке `case "$fp_code"` и
+      вырождался в `die 3` (прогон падает, `accept_pr` останавливает приёмку),
+      а в полном прогоне тот же 5 уходил в kit-filtered аттестацию, то есть
+      approve без взгляда модели. Радиус — весь флот: обвязка для всех целей
+      читает одну копию SSOT, кит в каждой цели — свою.
+      Поэтому `run_kit` передаёт киту `REVIEW_SCOPE_RULES` = тот же файл, по
+      которому классифицировала обвязка (23 из 24 китов флота переменную
+      понимают; двадцать четвёртый фильтра области не имеет вовсе и кода 5 не
+      вернёт). Заодно путь абсолютизируется на месте чтения: кит работает из
+      head-worktree, и относительный операторский `REVIEW_SCOPE_CONTRACT`
+      после `cd` указывал бы внутрь проверяемого PR-head.
+      Следствие: `review-pr.sh` — харнесс-путь, поэтому **мерж человеком**,
+      а ревью — из доверенного дерева.
+      **Осталось:** вендор-копия кита `scripts/review/prose-paths.env` — она в
+      инвентаре `checksum.sh`, на месте не правится; для pre-push и прямого
+      `local.sh` правило приедет обычным ре-вендором после steward. Заявка —
+      steward#180 (`slug: review-kit-scope-agent-instructions`); блокер пока в
+      переходной issue-форме, потому что на той стороне пункта плана ещё нет —
+      после принятия перевести на канонический `todo://steward/<слаг>`.

@@ -131,6 +131,19 @@ exit 0
 """
 
 
+LOCAL_SH_SCOPE_RULES_STUB = """#!/bin/sh
+# Предмет теста — не argv, а ОКРУЖЕНИЕ. Настоящий кит читает правило области
+# как `${REVIEW_SCOPE_RULES:-$kit_dir/prose-paths.env}` (local.sh:227), то
+# есть свою вендор-копию он берёт ровно тогда, когда переменной нет. Стаб
+# печатает то, что ему передали, и ничего не фильтрует: расхождение правил
+# наблюдаемо здесь, а не в поведении фильтра.
+echo "scope_rules=${REVIEW_SCOPE_RULES:-<не передан>}" \
+    > "$REVIEW_STUB_SCOPE_LOG"
+echo "stub verdict body"
+exit 0
+"""
+
+
 def _git(*args: str, cwd: Path) -> str:
     """Запустить git и вернуть stdout (строго, с проверкой кода)."""
     res = subprocess.run(
@@ -249,10 +262,20 @@ class Fleet:
         env.update(extra)
         return env
 
-    def run(self, *args: str, **env_extra: str) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, *args: str, cwd: Path | None = None, **env_extra: str
+    ) -> subprocess.CompletedProcess[str]:
+        env = self.env(**env_extra)
+        if cwd is not None:
+            # env скопирован из os.environ и несёт PWD процесса pytest.
+            # Оболочка печатает именно его, если он валиден, — устаревшее
+            # значение сделало бы `$(pwd)` в обвязке ложью, и тест пинал бы
+            # не ту базу абсолютизации, а прежнюю.
+            env["PWD"] = str(cwd)
         return subprocess.run(
             ["sh", str(SCRIPT), *args],
-            env=self.env(**env_extra),
+            cwd=None if cwd is None else str(cwd),
+            env=env,
             capture_output=True,
             text=True,
             check=False,  # код выхода — предмет проверки самих тестов
@@ -1392,6 +1415,52 @@ def test_dependency_pin_files_are_code(fleet: Fleet, path: str) -> None:
     assert fleet.run("demo", "7", "--print-scope").stdout.strip() == "code"
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".claude/skills/spec-bridge/SKILL.md",
+        "sub/.claude/skills/spec-bridge/SKILL.md",
+        ".agents/skills/review.md",
+        "sub/.agents/skills/review.md",
+        "CLAUDE.md",
+        "sub/CLAUDE.md",
+        "AGENTS.md",
+        "sub/AGENTS.md",
+    ],
+)
+def test_agent_instruction_files_are_code(fleet: Fleet, path: str) -> None:
+    """devtools#265 (`from: atp-platform#329`): инструкция агента — не проза.
+
+    Её правка меняет поведение исполнителя и самого ревьюера, а до этого
+    ключа ветка, трогающая только такой файл, давала scope=prose и вердикт
+    не выносился вовсе.
+    """
+    _seed_files(fleet, path)
+    assert fleet.run("demo", "7", "--print-scope").stdout.strip() == "code"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/claude-notes.md",
+        "docs/agents.md",
+        "claude-setup.md",
+        "docs/CLAUDE-migration.md",
+    ],
+)
+def test_agent_instruction_lookalikes_stay_prose(fleet: Fleet, path: str) -> None:
+    """Базовая половина к `test_agent_instruction_files_are_code`.
+
+    Без неё утверждение «инструкции агентов — код» удовлетворяется и глобом
+    вида `*claude*` (или `*`), который увёл бы под платное ревью всю прозу,
+    лишь упоминающую агента в имени.
+    """
+    _seed_files(fleet, path)
+    res = fleet.run("demo", "7", "--print-scope")
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "prose"
+
+
 def test_rename_from_code_to_prose_stays_code(fleet: Fleet) -> None:
     """Переименование проверяется по ОБОИМ путям: --no-renames показывает
     и удаление старого, и добавление нового."""
@@ -1444,6 +1513,78 @@ def _write_contract(fleet: Fleet, text: str) -> str:
     path = fleet.tmp / "prose-paths.env"
     path.write_text(text)
     return str(path)
+
+
+SSOT_CONTRACT = str(SCRIPT.parent / "contracts/review-scope/v1/prose-paths.env")
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_kit_gets_the_same_scope_rule_the_wrapper_classified_with(
+    fleet: Fleet, override: bool
+) -> None:
+    """Находка ревью на devtools#270 (major, confidence high).
+
+    Обвязка классифицирует PR по SSOT, а кит без этой переменной читает СВОЮ
+    вендор-копию — и расхождение даёт исход хуже непокрытия: `exit 5` кита
+    («всё отфильтровано») в fp-режиме не разобран в `case "$fp_code"` и
+    превращается в `die 3`, а в полном прогоне — в kit-filtered аттестацию,
+    то есть approve без единого взгляда модели.
+
+    Обе половины параметра нужны: случай `override` ловит захардкоженный
+    путь, случай по умолчанию — подстановку `$REVIEW_SCOPE_CONTRACT` вместо
+    фактически использованного правила.
+    """
+    fleet.write_kit(LOCAL_SH_SCOPE_RULES_STUB)
+    scope_log = fleet.tmp / "review-scope.log"
+    env = {"REVIEW_STUB_SCOPE_LOG": str(scope_log)}
+    expected = SSOT_CONTRACT
+    if override:
+        expected = _write_contract(
+            fleet, "PROSE=*.md\nCODE_OVERRIDE=contracts/*\n"
+        )
+        env["REVIEW_SCOPE_CONTRACT"] = expected
+
+    res = fleet.run("demo", "7", **env)
+
+    assert res.returncode == 0, res.stderr
+    assert scope_log.read_text().strip() == f"scope_rules={expected}"
+
+
+def test_relative_scope_contract_resolves_against_wrapper_cwd(
+    fleet: Fleet,
+) -> None:
+    """Кит работает из head-worktree, обвязка — из cwd оператора.
+
+    Относительный `REVIEW_SCOPE_CONTRACT` после `cd` указывал бы внутрь
+    проверяемого PR-head — ровно то, от чего страхует `resolve_from_source`
+    для kit/schema/prompt. Тогда «одно правило на двоих» снова распалось бы
+    на два файла, причём второй пришёл бы из недоверенного дерева.
+
+    Прогон идёт из каталога, который НЕ является ни корнем репо, ни чекаутом
+    цели: при cwd == корень репо значение `$(pwd)/rel` неотличимо от
+    `$script_dir/rel`, и подмена базы прошла бы тест незамеченной (находка
+    ревью на этом же PR, minor).
+    """
+    fleet.write_kit(LOCAL_SH_SCOPE_RULES_STUB)
+    scope_log = fleet.tmp / "review-scope.log"
+    operator_cwd = fleet.tmp / "operator-cwd"
+    (operator_cwd / "rules").mkdir(parents=True)
+    (operator_cwd / "rules" / "prose-paths.env").write_text(
+        "PROSE=*.md\nCODE_OVERRIDE=contracts/*\n"
+    )
+
+    res = fleet.run(
+        "demo",
+        "7",
+        cwd=operator_cwd,
+        REVIEW_SCOPE_CONTRACT="rules/prose-paths.env",
+        REVIEW_STUB_SCOPE_LOG=str(scope_log),
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert scope_log.read_text().strip() == (
+        f"scope_rules={operator_cwd}/rules/prose-paths.env"
+    )
 
 
 def test_scope_contract_duplicate_key_refuses(fleet: Fleet) -> None:
