@@ -674,6 +674,11 @@ def test_missing_base_oid_does_not_merge(fleet: Fleet) -> None:
         # нет. До этого пункта `accept_pr` такой PR останавливал, а
         # агентский мерж — нет.
         "review-pr.sh",
+        # Тот же довод (находка ревью devtools#279): скрипт публикует
+        # `--approve` от ai-prosto, то есть решает, будет ли у PR
+        # одобряющее ревью. На нём же держится исключение для
+        # `scripts/review/` — см. тест ниже.
+        "attest-vendor.sh",
     ],
 )
 def test_authority_root_paths_block_merge(fleet: Fleet, path: str) -> None:
