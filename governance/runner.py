@@ -70,8 +70,10 @@ _ROLLUP_GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 # Operation keys стадии Need (E2, спека §4/§5): S0.5 `_step_interview`.
 INTERVIEW_START = "interview-start"
 INTERVIEW_BRIEF = "interview-brief"
-# Файл findings, который `_interview_after_reply` пишет при 10/11 (§5.1) и
-# `_interview_stop`/код 20 удаляет при возврате в `waiting_interview`.
+# Файл findings, который `_interview_after_reply` пишет при 10/11 (§5.1).
+# Он описывает ПОСЛЕДНИЙ ответ discovery: чистка стоит на входе в разбор
+# ответа, поэтому любой следующий ответ — хоть 20, хоть 1/2, хоть отказ
+# публикации после `status` 0 — файл снимает (devtools#247).
 INTERVIEW_FINDINGS = "interview-findings.txt"
 
 # (op key, kind для ops.author, ожидаемое имя файла в bundle_dir) — S2/S3.
@@ -880,23 +882,35 @@ def _interview_after_reply(
 ) -> bool:
     """Общая таблица переходов для `status` и `brief` (§5.1).
 
+    Файл findings прошлого 10/11 снимается на входе, а не в какой-то из
+    веток: он описывает последний ответ discovery, и любой новый ответ его
+    обесценивает (devtools#247).
+
     20 — стейкхолдер ждёт следующий вопрос: ту же записанную сессию
-    возвращает `waiting_interview` (findings прошлого 10/11 чистятся, если
-    были), другую — стоп (координаты интервью разъехались). 10/11 —
-    discovery отверг ответ: findings сохраняются файлом, печатается шаблон
-    повторного ответа с `--supersede`, run стопится. 1/2 — операционный
-    отказ discovery: run стопится, но сессия остаётся записанной —
-    печатается подсказка восстановить ЕЁ ЖЕ, а не начинать новую.
+    возвращает `waiting_interview`, другую — стоп (координаты интервью
+    разъехались). 10/11 — discovery отверг ответ: findings сохраняются
+    файлом, печатается шаблон повторного ответа с `--supersede`, run
+    стопится. 1/2 — операционный отказ discovery: run стопится, но сессия
+    остаётся записанной — печатается подсказка восстановить ЕЁ ЖЕ, а не
+    начинать новую.
     """
     session_id = state.interview["session_id"]
     findings_file = run_dir(state.run_id) / INTERVIEW_FINDINGS
+    # Инвариант (devtools#247): файл описывает ПОСЛЕДНИЙ ответ discovery.
+    # Любой новый ответ его обесценивает, поэтому чистка стоит здесь, до
+    # разбора кода, а запись — только в ветке 10/11 ниже. Прежде unlink жил
+    # в одной ветке (код 20), и файл переживал стоп по другой причине:
+    # `spec_loop._dispatch` считает его существование признаком «текущий
+    # стоп — findings-стоп» и печатал прошлые findings как причину. Чинить
+    # это перечислением обесценивающих переходов значило бы вести опись —
+    # забыли `status` 0, забудем и следующий.
+    findings_file.unlink(missing_ok=True)
     reason = reply.envelope.get("operation", {}).get("reason", "")
     if reply.code == 20:
         if reply.envelope["next_action"].get("session_id") != session_id:
             return _interview_stop(
                 state, "next_action.session_id ≠ записанной сессии"
             )
-        findings_file.unlink(missing_ok=True)
         state.ops.pop(INTERVIEW_BRIEF, None)
         state.status = "waiting_interview"
         save(state)

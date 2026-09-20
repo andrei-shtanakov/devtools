@@ -1490,6 +1490,20 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       владельцем пробел (молчаливая потеря правки при смерти в окне
       доставки checkpoint-а) — spec-runner#527. Цена доработки: 14 платных
       кругов терминального ревью (5 по #524, 9 по #526).
+      Диагностические остатки ревью #246 закрыты 2026-09-20 (devtools#247,
+      PR этой ветки) — поведение машины состояний они не меняли, но обе
+      правки убирают ложное сообщение. Файл findings теперь снимается на
+      входе в разбор ответа discovery, а не в ветке кода 20: его
+      существование и есть признак «текущий стоп — findings-стоп», и
+      прошлый файл печатался как причина чужого стопа. Перечислять
+      обесценивающие переходы (как предлагала заявка) значило бы вести
+      опись. Подсказка стопа стадии Need сведена в одну функцию
+      `_report_interview_stop`, которую зовут и диспетчер, и start-путь:
+      прежде start уходил в `_report_state` и советовал `behaviour-run
+      resume`, хотя восстанавливать нечего — `discovery start` вернул 1/2 и
+      сессии не существует. Из `_report_state` заодно убран перечень
+      продолжаемых статусов: он устарел молча, когда E2 добавил
+      `waiting_interview`/`stopped_interview`.
 - [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; маршрут отказывает до run-id, пока не реализован @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:spec-loop-need-engineer-route
       **Разблокирован 2026-09-18.** Ждал п.1 discovery#49 (приём upstream при
       `start --frame engineer`); сосед доставил его PR-ом discovery#50

@@ -668,6 +668,61 @@ def test_stopped_then_status_20_returns_to_waiting(
 
 
 @pytest.mark.parametrize("code", [1, 2])
+def test_findings_do_not_survive_a_later_operational_refusal(
+    tmp_path: Path, runs_root, code
+) -> None:
+    """devtools#247: файл findings описывает ПОСЛЕДНИЙ ответ discovery.
+
+    Прежде он удалялся только в ветке кода 20, поэтому переживал стоп по
+    другой причине — и `spec-loop` печатал его путь как причину ТЕКУЩЕГО
+    стопа. Перечислять переходы, которые его обесценивают, значит вести
+    опись: инвариант дешевле и не забывается.
+    """
+    ops, _ = _waiting_run(
+        tmp_path, runs_root, f"r-stale{code}",
+        [("status", _reply(10)), ("status", _reply(code))],
+    )
+    assert runner.resume(f"r-stale{code}", ops).status == "stopped_interview"
+    assert (rs.run_dir(f"r-stale{code}") / "interview-findings.txt").exists()
+
+    state = runner.resume(f"r-stale{code}", ops)
+
+    assert state.status == "stopped_interview"
+    assert not (
+        rs.run_dir(f"r-stale{code}") / "interview-findings.txt"
+    ).exists()
+
+
+def test_findings_do_not_survive_a_later_brief_refusal(
+    tmp_path: Path, runs_root
+) -> None:
+    """Буквальный сценарий devtools#247: 10 → ответ с --supersede → status 0
+    → brief-отказ по координатам. Стоп текущего захода — НЕ findings-стоп,
+    и файл прошлого захода обязан исчезнуть до него."""
+    ops = FakeOps(
+        discovery=[
+            ("start", _reply(20)),
+            ("status", _reply(10)),
+            ("status", _reply(0)),
+            ("brief", _reply(0)),
+        ],
+        brief_text=_need_brief_text(target="owner/beta"),
+    )
+    runner.start(
+        **_start_kwargs(tmp_path, "r-stale-brief", ops),
+        interview_spec=_need_spec(),
+    )
+    findings = rs.run_dir("r-stale-brief") / "interview-findings.txt"
+    assert runner.resume("r-stale-brief", ops).status == "stopped_interview"
+    assert findings.exists()
+
+    state = runner.resume("r-stale-brief", ops)
+
+    assert state.status == "stopped_interview" and state.brief is None
+    assert not findings.exists()
+
+
+@pytest.mark.parametrize("code", [1, 2])
 def test_status_1_2_stops_and_keeps_session(
     tmp_path: Path, runs_root, code, capsys: pytest.CaptureFixture[str]
 ) -> None:
