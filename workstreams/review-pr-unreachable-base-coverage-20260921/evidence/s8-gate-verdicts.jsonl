@@ -1,0 +1,9 @@
+{"kind": "header", "schema_version": "1", "source_commit": "7a67fcd7c4151e4dc2958c02331bcee52968a097", "dirty": false, "generated_at": "2026-09-21T11:12:06.652369+00:00", "profile": "team-exp", "bundle": "workstreams/review-pr-unreachable-base-coverage-20260921/spec"}
+{"kind": "artifact", "path": "00-charter.md", "node_id": "charter", "status": "draft", "owner_roles": ["product"], "prev_hash": "c44a4ec42e4d68e9fe1f7d09c5baa4c3b83ee3ff0e1de02ac4a88a2225ec0659"}
+{"kind": "artifact", "path": "00-discovery/brief.md", "node_id": null, "status": "draft", "owner_roles": [], "prev_hash": "f62c2fa0a0b0be638f23d08d084fe7b1f0a2d618fe4f55e043438f64a044617e"}
+{"kind": "artifact", "path": "10-requirements.md", "node_id": "requirements", "status": "draft", "owner_roles": ["product"], "prev_hash": "16b78fac01fbf0ad5be9eb4ff176a464a2010e38e32051d8c39f876ae0cbfe99"}
+{"kind": "artifact", "path": "15-behaviour-spec.md", "node_id": "behaviour-spec", "status": "draft", "owner_roles": ["product"], "prev_hash": "4e11e1b58ef52ef5cd0787e2fcefd760111b467b8db42d45b364734132cdfd31"}
+{"kind": "artifact", "path": "20-design.md", "node_id": "design", "status": "draft", "owner_roles": ["architects"], "prev_hash": "d182e22c4ed3fdc723007d0d4f29b5ef0f0cf3d9639aac6d45ca2b9f71b6f14e"}
+{"kind": "artifact", "path": "25-acceptance.md", "node_id": "acceptance", "status": "draft", "owner_roles": ["qa"], "prev_hash": "b34d180150668d7d75273adffb884c3787ceb2758eb3a68cbe4bbcc155b6c2a3"}
+{"kind": "artifact", "path": "30-decomposition.md", "node_id": "decomposition", "status": "draft", "owner_roles": ["tech-lead"], "prev_hash": "e3e744fbb2a62ea406aa9e52d2b5f77ad3e1f68705c2636fd861eabfe77389bd"}
+{"kind": "finding", "gate_id": "GC-STAGE", "obligation": "quality", "verdict": "warn", "artifact": "00-discovery/brief.md", "message": "spec_stage 'discovery' is not a node of profile 'team-exp'", "prev_hash": "2e5bbf735aef36c03e3abd967a04c39e4c8a324e04fb507ebabf19af6700ed65"}
