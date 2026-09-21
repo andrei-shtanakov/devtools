@@ -1,6 +1,6 @@
 ---
 spec_stage: design
-status: approval_pending
+status: approved
 owner_role: architects
 traces_to:
 - requirements
@@ -10,6 +10,8 @@ upstream_hashes:
   behaviour-spec: 6f1c8d91c0d05d96d800f60d50f7f4fdde9dc371
 version: 2
 approved_content_hash: 7e77c97aebe54070079378c7d65a0279316f7550
+approved_by: andrei-shtanakov
+approved_at: '2026-09-21T08:50:35Z'
 ---
 
 # Design: Барьерный стоп S6 сохраняет op'ы только до resume (devtools#276)
