@@ -1471,10 +1471,10 @@ def _reconcile_finalize(
             )
             if reason is None:
                 return _reconcile_finalize(state, ops, dag, op, key)
+            advice = " (`make human-merge`)" if reason.human_merge_helps else ""
             return ApprovalOutcome(
-                f"финализирующий PR #{pr} открыт: {reason} "
-                f"(`make human-merge`). Заявка {key} жива всегда, пока он "
-                "открыт",
+                f"финализирующий PR #{pr} открыт: {reason.reason}"
+                f"{advice}. Заявка {key} жива всегда, пока он открыт",
                 request=key,
             )
         return ApprovalOutcome(
@@ -1790,11 +1790,15 @@ def _publish_envelope(
         )
         if reason is None:
             return _reconcile_finalize(state, ops, dag, state.ops[key], key)
+        tail = (
+            " PR остаётся человеку (`make human-merge`), заявка жива"
+            if reason.human_merge_helps
+            else " Заявка жива"
+        )
         return ApprovalOutcome(
             f"подпись узлов {', '.join(nodes)} вынесена финализирующим PR #{pr} "
             f"(approved_by = {op['merged_by']}, approved_at = "
-            f"{op['merged_at']}); {reason}. PR остаётся человеку "
-            "(`make human-merge`), заявка жива",
+            f"{op['merged_at']}); {reason.reason}.{tail}",
             request=key,
             changed=tuple(changed),
         )
@@ -1823,9 +1827,80 @@ _TRANSIENT_MERGE_CODES = frozenset({2})
 _MERGE_CODE_HINTS = {
     2: "факт не установлен или сеть — повторный вызов пробует снова",
     3: "гвард обвязки — мержит человек, повтор не поможет",
-    4: "форджа отклонила мерж — мержит человек",
+    # Не «мержит человек»: одобряющее ревью проверено ДО вызова, и самый
+    # частый повод сюда больше не доходит. Проверка предсказывает правило
+    # форджи, но решает всегда она — причину называет её ответ.
+    4: (
+        "форджа отклонила мерж — решение за ней; одобрение проверено до "
+        "вызова, значит причина в другом правиле репозитория (rulesets)"
+    ),
 }
 _SLEEP = time.sleep
+
+
+@dataclass(frozen=True)
+class MergeRefusal:
+    """Почему агентский мерж не состоялся — и помогает ли тут человек.
+
+    Отказ форджи или гварда обвязки человек закрывает собой, и звать его
+    правильно. Отсутствующую scope-аттестацию он собой не закрывает: её
+    публикует ревью-контур, после чего мержит тот же агент. Совет «мержит
+    человек», дописанный к такому отказу, противоречил бы инструкции,
+    которую отказ уже несёт, — поэтому повод для совета решает сам отказ,
+    а не место, где его печатают.
+    """
+
+    reason: str
+    human_merge_helps: bool
+
+
+def _missing_approving_review(
+    state: RunState, ops: Ops, pr: int
+) -> str | None:
+    """Есть ли у finalize-PR действующее одобряющее ревью? None — есть.
+
+    Правило репозитория требует одного одобряющего ревью, а автор PR —
+    учётка, запустившая механику, и себя она апрувить не может. У свежего
+    finalize-PR одобрения нет ни разу: прогон S7 (2026-09-21) дал шесть
+    отказов из шести. Лечит его scope-аттестация, которую ревью-контур
+    публикует на подтверждённо прозаический PR без вызова модели, — но
+    шага не было в процедуре, и отказ форджи называл лекарством человека.
+
+    Проверка ПРЕДВАРИТЕЛЬНАЯ: она предсказывает одно правило, а мерж
+    разрешает форджа целиком. Поэтому «одобрение есть» мержа не обещает —
+    оно лишь снимает повод не пробовать.
+
+    Действующим считается ПОСЛЕДНЕЕ ревью каждого логина: `APPROVED`,
+    перекрытый позднейшим `CHANGES_REQUESTED`, одобрением не является.
+    «Последнее» берётся из порядка, в котором ревью отдаёт
+    `pulls/<n>/reviews` — хронологического; своей сортировки здесь нет,
+    потому что поля времени `ops.pr_reviews` не проецирует.
+    Логин не сверяется ни с кем: правило форджи засчитывает одобрение
+    любого, у кого есть доступ, и требовать именно учётку контура значило
+    бы отказывать там, где форджа пропускает.
+    """
+    reviews = ops.pr_reviews(state.repo_slug, pr)
+    if reviews is None:
+        return (
+            f"агентский мерж НЕ выполнен — список ревью finalize-PR #{pr} "
+            "не получен: «одобрения нет» и «его не видно» неразличимы, "
+            "fail-closed. Процедура: повторите вызов"
+        )
+    effective: dict[str, str] = {}
+    for review in reviews:
+        stateful = str(review.get("state", ""))
+        if stateful == "PENDING":
+            continue
+        effective[str(review.get("login"))] = stateful
+    if "APPROVED" in effective.values():
+        return None
+    return (
+        f"агентский мерж НЕ выполнен — у finalize-PR #{pr} нет действующего "
+        "одобряющего ревью, которого требует правило репозитория. "
+        f"Процедура: опубликуйте scope-аттестацию (`review-pr.sh {pr}`; для "
+        "PR, подтверждённого как prose-only, она публикуется без вызова "
+        "модели), затем повторите тот же вызов `--approve-node`"
+    )
 
 
 def _try_agent_merge(
@@ -1836,10 +1911,11 @@ def _try_agent_merge(
     nodes: list[str],
     pr: int,
     head: str,
-) -> str | None:
-    """Агентский мерж finalize: None — вмержен; иначе причина, по которой
-    PR остаётся человеку. Идемпотентно: гейт формы читает коммит, голова
-    пинована — повторный вызов `--approve-node` пробует снова (ревью #233).
+) -> MergeRefusal | None:
+    """Агентский мерж finalize: None — вмержен; иначе отказ с причиной и
+    признаком, помогает ли здесь человеческий мерж. Идемпотентно: гейт
+    формы читает коммит, голова пинована — повторный вызов
+    `--approve-node` пробует снова (ревью #233).
     """
     # `^{commit}` обязателен: голый 40-hex `rev-parse --verify` принимает
     # синтаксически, не проверяя, что объект есть в клоне.
@@ -1849,14 +1925,20 @@ def _try_agent_merge(
         # а не выдаётся за дефект формы (ревью #233).
         ops.fetch_branch(state.target_dir, op["finalize_branch"])
         if ops.rev_parse(state.target_dir, f"{head}^{{commit}}") is None:
-            return (
+            return MergeRefusal(
                 f"коммит конверта {head[:8]} недоступен в клоне. Процедура: "
                 f"подтяните ветку заявки (git fetch origin "
-                f"{op['finalize_branch']}) и повторите вызов"
+                f"{op['finalize_branch']}) и повторите вызов",
+                human_merge_helps=False,
             )
     defect = _envelope_form_defect(state, ops, dag, op, nodes, head)
     if defect is not None:
-        return f"агентский мерж НЕ выполнен — {defect}"
+        return MergeRefusal(
+            f"агентский мерж НЕ выполнен — {defect}", human_merge_helps=True
+        )
+    missing = _missing_approving_review(state, ops, pr)
+    if missing is not None:
+        return MergeRefusal(missing, human_merge_helps=False)
     # База не пинуется намеренно: у конверта заявки нет вердикта, от базы
     # которого его можно было бы пиновать, — пин базы есть свойство
     # вызывающего с вердиктом (accept-pr). Обвязка сверяет пин с живой
@@ -1870,7 +1952,9 @@ def _try_agent_merge(
             break
         _SLEEP(_MERGE_RETRY_DELAY)
     hint = _MERGE_CODE_HINTS.get(code, "мержит человек")
-    return f"агентский мерж отказал кодом {code}: {hint}"
+    return MergeRefusal(
+        f"агентский мерж отказал кодом {code}: {hint}", human_merge_helps=True
+    )
 
 
 def _strip_envelope(meta: dict) -> dict:
