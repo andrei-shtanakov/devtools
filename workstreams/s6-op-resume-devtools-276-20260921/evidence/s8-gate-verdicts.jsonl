@@ -1,0 +1,7 @@
+{"kind": "header", "schema_version": "1", "source_commit": "eb56e738d89ef161e9dc049248083efd35a430a4", "dirty": false, "generated_at": "2026-09-21T08:32:26.044779+00:00", "profile": "team-exp", "bundle": "workstreams/s6-op-resume-devtools-276-20260921/spec"}
+{"kind": "artifact", "path": "00-charter.md", "node_id": "charter", "status": "draft", "owner_roles": ["product"], "prev_hash": "71a94296c7f3f294cfd43cb93bed6da228c60ac72e483ea725cc0ff85739efc2"}
+{"kind": "artifact", "path": "10-requirements.md", "node_id": "requirements", "status": "draft", "owner_roles": ["product"], "prev_hash": "461ff692313c92cabb23aa6b586530d8cce9a9b43bd2f53b680f340ad87db5d0"}
+{"kind": "artifact", "path": "15-behaviour-spec.md", "node_id": "behaviour-spec", "status": "draft", "owner_roles": ["product"], "prev_hash": "e1690ae8256a8be4dea0a67d75dedb1d49cc85eccd1dc732b90f47b2b94ab775"}
+{"kind": "artifact", "path": "20-design.md", "node_id": "design", "status": "draft", "owner_roles": ["architects"], "prev_hash": "203009c85e770b6a79bf07f9713c1f2b8385745e8fdf25470eca9ce7dff89316"}
+{"kind": "artifact", "path": "25-acceptance.md", "node_id": "acceptance", "status": "draft", "owner_roles": ["qa"], "prev_hash": "f976c3a9b4dbd8d69a5f0f2646eab66427bba6fdea9cd377887a1888e6ceb94e"}
+{"kind": "artifact", "path": "30-decomposition.md", "node_id": "decomposition", "status": "draft", "owner_roles": ["tech-lead"], "prev_hash": "cb9859c062a2a8a0356c3b9a9cffd9796adbc850d6e91e746c7797b545bbc2ce"}
