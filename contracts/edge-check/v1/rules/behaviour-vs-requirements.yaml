@@ -1,0 +1,22 @@
+edge: behaviour-vs-requirements
+subject_role: behaviour-spec
+basis_roles: [requirements]
+items:
+  - id: R1
+    text: >-
+      Каждое Must/Should-требование получает реализацию по существу: сценарий,
+      обоснованное обязательство или waiver с названной причиной.
+  - id: R2
+    text: >-
+      Поведение не вводит необоснованных обязательств и не противоречит
+      требованиям; уточнение поведения само по себе допустимо.
+  - id: R3
+    text: >-
+      Сценарий наблюдаем снаружи: не описывает внутреннее устройство.
+  - id: R4
+    text: >-
+      Формулировка сценария допускает единственное прочтение.
+severity:
+  blocking: [blocker, major]
+  advisory: [minor]
+applicability: []
