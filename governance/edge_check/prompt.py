@@ -15,9 +15,17 @@ from governance.edge_check.rules import EdgeCheckError, RuleSet
 #: чтобы «поместилось/не поместилось» можно было перепроверить руками.
 _BYTES_PER_TOKEN = 4
 
+#: Версия шаблона запроса — часть `check_identity` (D8, находка I2). Правка
+#: `build_prompt`, меняющая сборку запроса модели, обязана её поднять,
+#: иначе результаты, снятые по прежней сборке, молча останутся действующими.
+PROMPT_TEMPLATE_VERSION = 1
+
 
 @dataclass(frozen=True)
 class Measure:
+    #: Единица измерения `size` (минорная находка: было "tokens", хотя
+    #: `size` считается в utf-8 байтах — `estimate_tokens` и соседние поля
+    #: самоочевидны по имени и в отдельной единице не нуждаются).
     unit: str
     method: str
     size: int
@@ -84,7 +92,7 @@ def build_prompt(
     return Prompt(
         text,
         Measure(
-            unit="tokens",
+            unit="utf8-bytes",
             method="utf8-bytes/4",
             size=size,
             estimate_tokens=estimate,

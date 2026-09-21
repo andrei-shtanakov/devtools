@@ -120,6 +120,21 @@ def load_rules(edge_id: str, contracts_dir: Path) -> RuleSet:
             "missing_instruction", f"{instr_path}: инструкция не найдена: {exc}"
         ) from exc
 
+    # I2: check_identity обязана меняться и от правки схемы ответа, и от
+    # правки шаблона запроса (D8 перечисляет пять составляющих, здесь их
+    # было три) — иначе результаты, снятые под прежней сборкой, молча
+    # останутся действующими. Локальный импорт рвёт цикл rules↔prompt
+    # (prompt.py сам импортирует EdgeCheckError/RuleSet отсюда).
+    from governance.edge_check.prompt import PROMPT_TEMPLATE_VERSION
+
+    schema_path = contracts_dir / "response-schema.json"
+    try:
+        schema_sha256 = hashlib.sha256(schema_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise EdgeCheckError(
+            "missing_schema", f"{schema_path}: схема ответа не найдена: {exc}"
+        ) from exc
+
     canon = json.dumps(
         {
             "edge": edge_id,
@@ -130,6 +145,8 @@ def load_rules(edge_id: str, contracts_dir: Path) -> RuleSet:
                 "advisory": sorted(severity.advisory),
             },
             "applicability": [[a.id, a.role] for a in applicability],
+            "response_schema_sha256": schema_sha256,
+            "prompt_template_version": PROMPT_TEMPLATE_VERSION,
         },
         ensure_ascii=False,
         sort_keys=False,

@@ -142,3 +142,38 @@ applicability:
     assert exc.value.code == "multi_basis_applicability_unsupported"
 
 
+# === I2: check_identity покрывает схему ответа и версию шаблона промпта ===
+
+
+def test_identity_changes_when_response_schema_changes(tmp_path: Path) -> None:
+    """Правка `response-schema.json` не входила в identity — результаты,
+    снятые до правки схемы, молча остались бы действующими."""
+    rules_dir = tmp_path / "rules"
+    rules_dir.mkdir(parents=True)
+    src = CONTRACTS / "rules/behaviour-vs-requirements.yaml"
+    rules_dir.joinpath("behaviour-vs-requirements.yaml").write_text(
+        src.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (tmp_path / "instruction.md").write_text(
+        (CONTRACTS / "instruction.md").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (tmp_path / "response-schema.json").write_text('{"changed": true}', encoding="utf-8")
+
+    baseline = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    changed = r.load_rules("behaviour-vs-requirements", tmp_path)
+    assert baseline.identity != changed.identity
+
+
+def test_identity_changes_when_prompt_template_version_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Правка `prompt.py`, меняющая сборку запроса, обязана поднять
+    `PROMPT_TEMPLATE_VERSION` — иначе identity не заметит смену шаблона."""
+    from governance.edge_check import prompt as p
+
+    baseline = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    monkeypatch.setattr(p, "PROMPT_TEMPLATE_VERSION", p.PROMPT_TEMPLATE_VERSION + 1)
+    bumped = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    assert baseline.identity != bumped.identity
+
+
