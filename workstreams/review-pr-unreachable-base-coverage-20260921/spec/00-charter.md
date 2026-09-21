@@ -1,10 +1,13 @@
 ---
 spec_stage: charter
-status: draft
+status: approval_pending
 owner_role: product
-traces_to: [discovery-brief]
+traces_to:
+- discovery-brief
 upstream_hashes:
-  discovery-brief: "2bbddceb7cba17bdb4bde59ef4ef66a6cae91ddf"
+  discovery-brief: 2bbddceb7cba17bdb4bde59ef4ef66a6cae91ddf
+version: 2
+approved_content_hash: a82af116d3dd05f5d432aae5bd44a3c7cffbaf7f
 ---
 
 # Charter: отказ обвязки ревью при недостижимой базе PR доказан тестом
