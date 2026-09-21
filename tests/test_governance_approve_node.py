@@ -113,6 +113,13 @@ class Forge:
     agent_merge_rc_seq: list[int] = field(default_factory=list)
     #: Журнал вызовов `Ops.merge`: (pr, пин головы).
     merge_calls: list[tuple[int, str]] = field(default_factory=list)
+    #: Ревью конкретного PR: `[{"login": ..., "state": ...}, ...]`. PR без
+    #: записи отдаёт `default_reviews` — нормальное состояние finalize-PR
+    #: ПОСЛЕ scope-аттестации, в котором агентский мерж и пробуется.
+    reviews: dict[int, list[dict]] = field(default_factory=dict)
+    default_reviews: list[dict] = field(
+        default_factory=lambda: [{"login": AGENT, "state": "APPROVED"}]
+    )
 
     def head_of(self, branch: str) -> str | None:
         done = subprocess.run(
@@ -185,6 +192,14 @@ class Ops(RealOps):
             capture_output=True, text=True,
         )
         return done.returncode == 0
+
+    def pr_reviews(self, repo_slug: str, pr: int) -> list[dict] | None:
+        """Ревью PR. `mute` даёт None — «факт не получен», а не исключение:
+        контракт `RealOps.pr_reviews` именно таков, и вызывающий обязан
+        читать его fail-closed."""
+        if "pr_reviews" in self.forge.mute:
+            return None
+        return list(self.forge.reviews.get(pr, self.forge.default_reviews))
 
     def merge(
         self, repo_name: str, pr: int, sha: str, base: str | None = None
@@ -2424,13 +2439,110 @@ def test_agent_merge_refusal_leaves_finalize_to_human(world: World) -> None:
     assert world.forge.prs[finalize_pr]["label"] == ""
     assert len(world.forge.merge_calls) == 1, "код 4 не повторяется"
     assert "отказал кодом 4" in outcome.message
-    assert "human-merge" in outcome.message
+    assert "human-merge" in outcome.message, (
+        "отказ самой форджи — повод звать человека; снимается только совет "
+        "там, где лечит аттестация"
+    )
     assert al.is_live(world.state.ops[key])
     again = approve(world, "charter")
     assert len(world.forge.merge_calls) == 2, "повтор пробует мерж снова"
     assert "отказал кодом 4" in again.message
     merge_pr(world, finalize_pr)
     approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+
+
+def test_finalize_without_approving_review_names_the_attestation_step(
+    world: World,
+) -> None:
+    """Нет действующего одобрения — мержа не пробуем вовсе, а называем шаг.
+
+    Находка 2 контрольного прогона S7 (2026-09-21): правило форджи требует
+    одного одобряющего ревью, у свежего finalize-PR его нет, и шесть узлов
+    из шести отказали кодом 4 с советом «мержит человек». Совет неверный:
+    мержит тот же агент — после scope-аттестации.
+    """
+    world.forge.default_reviews = []
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    outcome = approve(world, "charter")
+    finalize_pr = world.state.ops[key]["finalize_pr"]
+    assert world.forge.merge_calls == [], "мерж не пробуется без одобрения"
+    assert str(finalize_pr) in outcome.message
+    assert "review-pr.sh" in outcome.message
+    assert "--approve-node" in outcome.message
+    assert "мержит человек" not in outcome.message
+    # Обёртка отказа дописывала совет безусловно, и он противоречил бы
+    # инструкции выше: лечит аттестация, а не человеческий мерж.
+    assert "human-merge" not in outcome.message
+    assert al.is_live(world.state.ops[key])
+    # Повторный заход по тому же PR идёт другим путём (`_reconcile_finalize`)
+    # и обязан говорить то же самое.
+    again = approve(world, "charter")
+    assert world.forge.merge_calls == []
+    assert "review-pr.sh" in again.message
+    assert "human-merge" not in again.message
+
+
+def test_finalize_merges_after_the_attestation_appears(world: World) -> None:
+    """Позитивный двойник: аттестация опубликована — тот же вызов мержит.
+
+    Повтор продолжает ТОТ ЖЕ finalize-PR, номер не меняется.
+    """
+    world.forge.default_reviews = []
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+    finalize_pr = world.state.ops[key]["finalize_pr"]
+    assert world.forge.merge_calls == []
+    world.forge.reviews[finalize_pr] = [{"login": AGENT, "state": "APPROVED"}]
+    approve(world, "charter")
+    assert world.state.ops[key]["finalize_pr"] == finalize_pr, "тот же PR"
+    assert len(world.forge.merge_calls) == 1
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+
+
+def test_unknown_review_list_is_fail_closed(world: World) -> None:
+    """Список ревью не получен — «одобрения нет» и «его не видно» неразличимы,
+    поэтому мержа нет и об этом говорится прямо."""
+    world.forge.mute.add("pr_reviews")
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    outcome = approve(world, "charter")
+    assert world.forge.merge_calls == []
+    assert "не получен" in outcome.message
+    assert al.is_live(world.state.ops[key])
+
+
+def test_changes_requested_over_earlier_approval_is_not_effective(
+    world: World,
+) -> None:
+    """Действующее — ПОСЛЕДНЕЕ ревью логина: `CHANGES_REQUESTED` поверх
+    прежнего `APPROVED` одобрением больше не является."""
+    world.forge.default_reviews = [
+        {"login": AGENT, "state": "APPROVED"},
+        {"login": AGENT, "state": "CHANGES_REQUESTED"},
+    ]
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+    assert world.forge.merge_calls == []
+    assert al.is_live(world.state.ops[key])
+
+
+def test_human_approval_counts_as_well_as_the_contour(world: World) -> None:
+    """Проверка предсказывает правило форджи, а не строже его: одобрение
+    человека засчитывается так же, как аттестация ревью-контура."""
+    world.forge.default_reviews = [{"login": HUMAN, "state": "APPROVED"}]
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+    assert len(world.forge.merge_calls) == 1
     assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
 
 
