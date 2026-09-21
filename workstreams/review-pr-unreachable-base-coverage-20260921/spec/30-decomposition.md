@@ -1,7 +1,7 @@
 ---
 spec_stage: decomposition
 dt_contract_version: 2
-status: approval_pending
+status: approved
 owner_role: tech-lead
 traces_to:
 - design
@@ -11,6 +11,8 @@ upstream_hashes:
   acceptance: cbcba8764775a43d4b4827ebcf668d83bad2985d
 version: 2
 approved_content_hash: 76da8c077a8cccb5e6ecec4e4138164585614dd5
+approved_by: andrei-shtanakov
+approved_at: '2026-09-21T12:41:56Z'
 ---
 
 # Decomposition: отказ обвязки ревью при недостижимой базе PR доказан тестом
