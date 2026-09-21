@@ -47,10 +47,19 @@ def parse_response(
     except (json.JSONDecodeError, AttributeError, KeyError, TypeError) as exc:
         raise EdgeCheckError("invalid_response", f"ответ негоден: {exc}") from exc
 
-    criteria = tuple(
-        Criterion(str(c["id"]), str(c["status"]), str(c.get("reason", "")))
-        for c in criteria_raw
-    )
+    try:
+        criteria = tuple(
+            Criterion(
+                str(c["id"]), str(c["status"]), str(c.get("reason", ""))
+            )
+            for c in criteria_raw
+        )
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise EdgeCheckError(
+            "invalid_response",
+            f"критерии негодны: {exc}",
+        ) from exc
+
     declared = [it.id for it in ruleset.items]
     got = [c.id for c in criteria]
     missing = [rid for rid in declared if rid not in got]
@@ -60,34 +69,61 @@ def parse_response(
             f"модель не ответила по пунктам: {', '.join(missing)}",
         )
 
-    lines_by_path = {f.path: f.text.count("\n") + 1 for f in prepared.files}
-    findings: list[Finding] = []
-    for f in findings_raw:
-        path = str(f["path"])
-        if path not in lines_by_path:
-            raise EdgeCheckError(
-                "finding_outside_input", f"находка ссылается вне входа: {path}"
-            )
-        cls = str(f["class"])
-        if cls not in ruleset.severity.known():
-            raise EdgeCheckError(
-                "invalid_finding_class",
-                f"класс находки {cls!r} не объявлен",
-            )
-        start, end = (int(f["lines"][0]), int(f["lines"][1]))
-        if not 1 <= start <= end <= lines_by_path[path]:
-            raise EdgeCheckError(
-                "invalid_line_range",
-                f"{path}: строки {start}–{end} вне файла "
-                f"({lines_by_path[path]} строк)",
-            )
-        findings.append(
-            Finding(
-                str(f["rule_id"]),
-                cls,
-                path,
-                (start, end),
-                str(f["statement"]),
-            )
+    extra = [rid for rid in got if rid not in declared]
+    duplicates = [rid for rid in got if got.count(rid) > 1]
+    malformed = extra + (duplicates if duplicates else [])
+    if malformed:
+        raise EdgeCheckError(
+            "criteria_malformed",
+            f"неправильные пункты: {', '.join(set(malformed))}",
         )
+
+    lines_by_path = {f.path: len(f.text.splitlines()) for f in prepared.files}
+    findings: list[Finding] = []
+    valid_rule_ids = {it.id for it in ruleset.items}
+
+    try:
+        for f in findings_raw:
+            path = str(f["path"])
+            if path not in lines_by_path:
+                raise EdgeCheckError(
+                    "finding_outside_input",
+                    f"находка ссылается вне входа: {path}",
+                )
+            cls = str(f["class"])
+            if cls not in ruleset.severity.known():
+                raise EdgeCheckError(
+                    "invalid_finding_class",
+                    f"класс находки {cls!r} не объявлен",
+                )
+            rule_id = str(f["rule_id"])
+            if rule_id not in valid_rule_ids:
+                raise EdgeCheckError(
+                    "invalid_finding_rule",
+                    f"находка ссылается на неизвестное правило: {rule_id}",
+                )
+            start, end = (int(f["lines"][0]), int(f["lines"][1]))
+            if not 1 <= start <= end <= lines_by_path[path]:
+                raise EdgeCheckError(
+                    "invalid_line_range",
+                    f"{path}: строки {start}–{end} вне файла "
+                    f"({lines_by_path[path]} строк)",
+                )
+            findings.append(
+                Finding(
+                    rule_id,
+                    cls,
+                    path,
+                    (start, end),
+                    str(f["statement"]),
+                )
+            )
+    except EdgeCheckError:
+        raise
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise EdgeCheckError(
+            "invalid_response",
+            f"находки негодны: {exc}",
+        ) from exc
+
     return Response(criteria, tuple(findings))
