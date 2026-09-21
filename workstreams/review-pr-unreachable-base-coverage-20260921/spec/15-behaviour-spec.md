@@ -1,6 +1,6 @@
 ---
 spec_stage: behaviour-spec
-status: approval_pending
+status: approved
 owner_role: product
 traces_to:
 - requirements
@@ -8,6 +8,8 @@ upstream_hashes:
   requirements: ee75e06b4891ef2418e983706bf1afd887f19c6c
 version: 2
 approved_content_hash: 7b593d07d78ea884388ef0922ea83c5120d7f99c
+approved_by: andrei-shtanakov
+approved_at: '2026-09-21T12:08:30Z'
 ---
 
 # Behaviour Spec: отказ обвязки ревью при недостижимой базе PR доказан тестом
