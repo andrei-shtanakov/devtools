@@ -1,6 +1,6 @@
 ---
 spec_stage: acceptance
-status: approval_pending
+status: approved
 owner_role: qa
 traces_to:
 - requirements
@@ -10,6 +10,8 @@ upstream_hashes:
   behaviour-spec: 6f1c8d91c0d05d96d800f60d50f7f4fdde9dc371
 version: 2
 approved_content_hash: 7995d518f9a6f06efc33d8bbf909943967aa46a6
+approved_by: andrei-shtanakov
+approved_at: '2026-09-21T08:54:08Z'
 ---
 
 # Acceptance: Барьерный стоп S6 сохраняет op'ы только до resume (devtools#276)
