@@ -198,7 +198,9 @@ def test_real_path_records_env_passthrough_harness_version_and_model_id(
         reviewer_mod, "harness_version", lambda: "2.1.0 (Claude Code)"
     )
 
-    def fake_run_reviewer(text, argv, workdir, timeout):  # noqa: ANN001, ANN202
+    def fake_run_reviewer(  # noqa: ANN001, ANN202
+        text, argv, workdir, timeout, env=None,
+    ):
         return json.dumps({
             "model": "claude-opus-5-20260101",
             "structured_output": {
@@ -237,7 +239,9 @@ def test_real_path_workdir_is_outside_the_workspace(
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
     seen: list[Path] = []
 
-    def fake_run_reviewer(text, argv, workdir, timeout):  # noqa: ANN001, ANN202
+    def fake_run_reviewer(  # noqa: ANN001, ANN202
+        text, argv, workdir, timeout, env=None,
+    ):
         seen.append(workdir)
         return json.dumps({
             "structured_output": {

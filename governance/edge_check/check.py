@@ -137,13 +137,18 @@ def run_check(
         argv = reviewer_mod.reviewer_argv(model, schema, effort)
         # I3: версия харнесса и состав allowlist окружения — в запись, а не
         # молчанием; фактический model_id (если конверт его несёт)
-        # проставляется ниже, после разбора ответа.
+        # проставляется ниже, после разбора ответа. reviewer_env() считаем
+        # один раз и переиспользуем в вызове, а не пересчитываем внутри
+        # run_reviewer вторым обращением к os.environ.
+        subprocess_env = reviewer_mod.reviewer_env()
         record["reviewer"]["harness_version"] = reviewer_mod.harness_version()
-        record["reviewer"]["env_passthrough"] = sorted(reviewer_mod.reviewer_env())
+        record["reviewer"]["env_passthrough"] = sorted(subprocess_env)
 
         def call_real(text: str) -> str:
             with tempfile.TemporaryDirectory(prefix="edge-check-") as tmp:
-                return reviewer_mod.run_reviewer(text, argv, Path(tmp), timeout)
+                return reviewer_mod.run_reviewer(
+                    text, argv, Path(tmp), timeout, env=subprocess_env
+                )
 
         call = call_real
 

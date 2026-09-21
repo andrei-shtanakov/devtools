@@ -101,6 +101,25 @@ def test_reviewer_env_names_are_stable_allowlist() -> None:
     assert "PATH" in names
 
 
+def test_run_reviewer_uses_explicit_env_when_given(tmp_path: Path) -> None:
+    """Параметр `env` — не мёртвый шов: переданное значение реально
+    используется подпроцессом, а не пересчитанный внутри `reviewer_env()`
+    (ре-ревью волны: check.py считает allowlist один раз и передаёт сюда)."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    argv = [
+        sys.executable, "-c",
+        "import json, os, sys; print(json.dumps(dict(os.environ)))",
+    ]
+    custom_env = {"PATH": os.environ.get("PATH", ""), "EDGE_CHECK_MARKER": "тут"}
+    out = rv.run_reviewer("prompt", argv, empty, timeout=5, env=custom_env)
+    seen = json.loads(out)
+    assert seen.get("EDGE_CHECK_MARKER") == "тут"
+    # реальное окружение оператора точно несёт HOME — его нет в custom_env,
+    # и если бы `env` игнорировался в пользу reviewer_env(), HOME доехал бы
+    assert "HOME" not in seen
+
+
 @pytest.mark.skipif(
     os.environ.get("DEVTOOLS_EDGE_SMOKE") != "1" or shutil.which("claude") is None,
     reason="боевой вызов ревьюера: DEVTOOLS_EDGE_SMOKE=1 и наличие claude",

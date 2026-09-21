@@ -24,6 +24,10 @@ from governance.edge_check.rules import EdgeCheckError
 _ENV_ALLOWLIST = (
     "PATH",
     "HOME",
+    # Без USER аутентификация CLI ищет учётку и считает себя незалогиненным
+    # ("Not logged in · Please run /login") — измерено smoke-пробой после
+    # раскатки I3: боевой путь был красным именно из-за отсутствия USER.
+    "USER",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
@@ -37,6 +41,17 @@ _ENV_ALLOWLIST = (
     "AWS_SESSION_TOKEN",
     "CLOUD_ML_REGION",
     "ANTHROPIC_VERTEX_PROJECT_ID",
+    # Корпоративные сети: без прокси/CA транспорт до модели не достучится;
+    # сами по себе секретов не несут.
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "NODE_EXTRA_CA_CERTS",
+    # TMPDIR — куда харнесс сам кладёт временные файлы; LANG — кодировка
+    # вывода. Обе не несут секретов.
+    "TMPDIR",
+    "LANG",
 )
 
 

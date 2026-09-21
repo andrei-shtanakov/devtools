@@ -157,7 +157,9 @@ def test_identity_changes_when_response_schema_changes(tmp_path: Path) -> None:
     (tmp_path / "instruction.md").write_text(
         (CONTRACTS / "instruction.md").read_text(encoding="utf-8"), encoding="utf-8"
     )
-    (tmp_path / "response-schema.json").write_text('{"changed": true}', encoding="utf-8")
+    (tmp_path / "response-schema.json").write_text(
+        '{"changed": true}', encoding="utf-8"
+    )
 
     baseline = r.load_rules("behaviour-vs-requirements", CONTRACTS)
     changed = r.load_rules("behaviour-vs-requirements", tmp_path)
