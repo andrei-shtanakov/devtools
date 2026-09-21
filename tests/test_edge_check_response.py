@@ -109,7 +109,7 @@ def test_lines_not_int_raw_error() -> None:
             "lines": [1, "a"], "statement": "x"}]
     with pytest.raises(r.EdgeCheckError) as exc:
         resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
-    assert exc.value.code == "invalid_response"
+    assert exc.value.code == "invalid_line_range"
 
 
 # === Critical 2: офф-бай-уан в подсчёте строк (2 теста) ===
@@ -174,3 +174,42 @@ def test_invalid_finding_rule_id() -> None:
     with pytest.raises(r.EdgeCheckError) as exc:
         resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
     assert exc.value.code == "invalid_finding_rule"
+
+
+# === Critical 3: валидация формы lines (4 теста) ===
+
+
+def test_lines_too_short_raw_error() -> None:
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    bad = [{"rule_id": "R1", "class": "major", "path": "15-behaviour-spec.md",
+            "lines": [1], "statement": "x"}]
+    with pytest.raises(r.EdgeCheckError) as exc:
+        resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
+    assert exc.value.code == "invalid_line_range"
+
+
+def test_lines_empty_raw_error() -> None:
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    bad = [{"rule_id": "R1", "class": "major", "path": "15-behaviour-spec.md",
+            "lines": [], "statement": "x"}]
+    with pytest.raises(r.EdgeCheckError) as exc:
+        resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
+    assert exc.value.code == "invalid_line_range"
+
+
+def test_lines_as_string_silent_error() -> None:
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    bad = [{"rule_id": "R1", "class": "major", "path": "15-behaviour-spec.md",
+            "lines": "12", "statement": "x"}]
+    with pytest.raises(r.EdgeCheckError) as exc:
+        resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
+    assert exc.value.code == "invalid_line_range"
+
+
+def test_lines_too_long_silent_error() -> None:
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    bad = [{"rule_id": "R1", "class": "major", "path": "15-behaviour-spec.md",
+            "lines": [1, 2, 3], "statement": "x"}]
+    with pytest.raises(r.EdgeCheckError) as exc:
+        resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
+    assert exc.value.code == "invalid_line_range"

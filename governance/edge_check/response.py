@@ -102,7 +102,30 @@ def parse_response(
                     "invalid_finding_rule",
                     f"находка ссылается на неизвестное правило: {rule_id}",
                 )
-            start, end = (int(f["lines"][0]), int(f["lines"][1]))
+
+            lines = f.get("lines")
+            if not isinstance(lines, (list, tuple)):
+                raise EdgeCheckError(
+                    "invalid_line_range",
+                    f"диапазон должен быть списком, получен "
+                    f"{type(lines).__name__}",
+                )
+            if len(lines) != 2:
+                raise EdgeCheckError(
+                    "invalid_line_range",
+                    f"диапазон должен содержать 2 элемента, получено "
+                    f"{len(lines)}",
+                )
+
+            for i, elem in enumerate(lines):
+                if not isinstance(elem, int) or isinstance(elem, bool):
+                    raise EdgeCheckError(
+                        "invalid_line_range",
+                        f"элемент диапазона [{i}] должен быть целым, получен "
+                        f"{type(elem).__name__}",
+                    )
+
+            start, end = (int(lines[0]), int(lines[1]))
             if not 1 <= start <= end <= lines_by_path[path]:
                 raise EdgeCheckError(
                     "invalid_line_range",
@@ -120,7 +143,13 @@ def parse_response(
             )
     except EdgeCheckError:
         raise
-    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+    except (
+        AttributeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        IndexError,
+    ) as exc:
         raise EdgeCheckError(
             "invalid_response",
             f"находки негодны: {exc}",
