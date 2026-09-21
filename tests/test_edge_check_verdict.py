@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from governance.edge_check import check as c
 from governance.edge_check import rules as r
 
@@ -154,3 +156,47 @@ def test_parse_failure_keeps_specific_edge_check_error_code(tmp_path: Path) -> N
     )
     assert out["verdict"] == "ERROR"
     assert out["error_code"] == "invalid_response"
+
+
+def test_real_path_records_env_passthrough_harness_version_and_model_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I3: реальный путь (`call=None`) обязан записать состав allowlist
+    окружения, версию харнесса и фактический model_id из конверта — не
+    молчанием."""
+    from governance.edge_check import reviewer as reviewer_mod
+
+    b = _bundle(tmp_path)
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+
+    monkeypatch.setattr(reviewer_mod, "reviewer_env", lambda: {"PATH": "/usr/bin"})
+    monkeypatch.setattr(
+        reviewer_mod, "harness_version", lambda: "2.1.0 (Claude Code)"
+    )
+
+    def fake_run_reviewer(text, argv, workdir, timeout):  # noqa: ANN001, ANN202
+        return json.dumps({
+            "model": "claude-opus-5-20260101",
+            "structured_output": {
+                "criteria": [
+                    {"id": it.id, "status": "pass", "reason": "ок"}
+                    for it in rs.items
+                ],
+                "findings": [],
+            },
+        })
+
+    monkeypatch.setattr(reviewer_mod, "run_reviewer", fake_run_reviewer)
+
+    out = c.run_check(
+        "behaviour-vs-requirements",
+        b,
+        [b / "15-behaviour-spec.md"],
+        [("requirements", b / "10-requirements.md")],
+        contracts_dir=CONTRACTS,
+        model="claude-opus-5",
+    )
+    assert out["verdict"] == "PASS"
+    assert out["reviewer"]["env_passthrough"] == ["PATH"]
+    assert out["reviewer"]["harness_version"] == "2.1.0 (Claude Code)"
+    assert out["reviewer"]["model_id"] == "claude-opus-5-20260101"

@@ -69,7 +69,14 @@ def run_check(
             "id": edge_id,
             "items": [[i.id, i.text] for i in ruleset.items],
         },
-        "reviewer": {"harness": "claude", "model": model, "effort": effort},
+        "reviewer": {
+            "harness": "claude",
+            "harness_version": None,
+            "model": model,
+            "model_id": None,
+            "effort": effort,
+            "env_passthrough": [],
+        },
         "subject": [],
         "bases": [],
         "absence": [],
@@ -128,6 +135,11 @@ def run_check(
     if call is None:
         schema = contracts_dir / "response-schema.json"
         argv = reviewer_mod.reviewer_argv(model, schema, effort)
+        # I3: версия харнесса и состав allowlist окружения — в запись, а не
+        # молчанием; фактический model_id (если конверт его несёт)
+        # проставляется ниже, после разбора ответа.
+        record["reviewer"]["harness_version"] = reviewer_mod.harness_version()
+        record["reviewer"]["env_passthrough"] = sorted(reviewer_mod.reviewer_env())
 
         def call_real(text: str) -> str:
             with tempfile.TemporaryDirectory(prefix="edge-check-") as tmp:
@@ -157,6 +169,7 @@ def run_check(
             reason=f"разбор ответа упал ({type(exc).__name__}): {exc}",
         )
 
+    record["reviewer"]["model_id"] = parsed.model_id
     record["criteria"] = [
         {"id": c.id, "status": c.status, "reason": c.reason} for c in parsed.criteria
     ]

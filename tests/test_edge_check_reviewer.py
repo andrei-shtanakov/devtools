@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,35 @@ def test_reviewer_invalid_utf8_output_is_reviewer_failed(tmp_path: Path) -> None
     with pytest.raises(r.EdgeCheckError) as exc:
         rv.run_reviewer("prompt", argv, empty, timeout=5)
     assert exc.value.code == "reviewer_failed"
+
+
+# === I3: окружение подпроцесса — явный allowlist, а не полный inherit ===
+
+
+def test_env_outside_allowlist_does_not_reach_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Флаги закрывают настройки/CLAUDE.md/MCP, но не транспорт — без
+    явного allowlist любой секрет оператора уезжал бы в подпроцесс молча."""
+    monkeypatch.setenv("EDGE_CHECK_TEST_SECRET", "не должен доехать")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    argv = [
+        sys.executable, "-c",
+        "import json, os, sys; print(json.dumps(dict(os.environ)))",
+    ]
+    out = rv.run_reviewer("prompt", argv, empty, timeout=5)
+    seen = json.loads(out)
+    assert "EDGE_CHECK_TEST_SECRET" not in seen
+    assert "PATH" in seen, "PATH нужен, чтобы найти интерпретатор/бинарь"
+
+
+def test_reviewer_env_names_are_stable_allowlist() -> None:
+    """Имена переменных allowlist — публичный контракт записи (I3): именно
+    их состав, а не значения, попадает в `record["reviewer"]`."""
+    names = rv.reviewer_env()
+    assert isinstance(names, dict)
+    assert "PATH" in names
 
 
 @pytest.mark.skipif(

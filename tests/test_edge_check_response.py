@@ -34,6 +34,26 @@ def test_complete_answer_parses() -> None:
     assert [c.id for c in out.criteria] == [it.id for it in rs.items]
 
 
+# === I3: фактический идентификатор модели из конверта ответа ===
+
+
+def test_model_id_absent_is_honest_none() -> None:
+    """Конверт без `model` — `None`, а не угаданное значение (I3)."""
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    out = resp.parse_response(_envelope(_all_pass(rs), []), rs, _prepared())
+    assert out.model_id is None
+
+
+def test_model_id_read_from_envelope() -> None:
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    envelope = json.dumps({
+        "model": "claude-opus-5-20260101",
+        "structured_output": {"criteria": _all_pass(rs), "findings": []},
+    })
+    out = resp.parse_response(envelope, rs, _prepared())
+    assert out.model_id == "claude-opus-5-20260101"
+
+
 def test_missing_criterion_is_error() -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
     partial = _all_pass(rs)[:-1]

@@ -34,6 +34,10 @@ class Finding:
 class Response:
     criteria: tuple[Criterion, ...]
     findings: tuple[Finding, ...]
+    #: Фактически известный идентификатор модели из конверта ответа
+    #: (находка I3, спека §4.3); `None` — честный признак, что конверт его
+    #: не нёс, а не молчаливое умолчание.
+    model_id: str | None = None
 
 
 def parse_response(
@@ -46,6 +50,10 @@ def parse_response(
         findings_raw = payload["findings"]
     except (json.JSONDecodeError, AttributeError, KeyError, TypeError) as exc:
         raise EdgeCheckError("invalid_response", f"ответ негоден: {exc}") from exc
+
+    model_id = envelope.get("model") if isinstance(envelope, dict) else None
+    if not isinstance(model_id, str) or not model_id:
+        model_id = None
 
     try:
         criteria = tuple(
@@ -155,4 +163,4 @@ def parse_response(
             f"находки негодны: {exc}",
         ) from exc
 
-    return Response(criteria, tuple(findings))
+    return Response(criteria, tuple(findings), model_id)
