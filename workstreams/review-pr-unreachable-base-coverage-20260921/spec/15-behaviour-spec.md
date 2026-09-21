@@ -1,10 +1,13 @@
 ---
 spec_stage: behaviour-spec
-status: draft
+status: approval_pending
 owner_role: product
-traces_to: [requirements]
+traces_to:
+- requirements
 upstream_hashes:
-  requirements: "063989d758890b0d4c5f73ae66198f872b27ce75"
+  requirements: ee75e06b4891ef2418e983706bf1afd887f19c6c
+version: 2
+approved_content_hash: 7b593d07d78ea884388ef0922ea83c5120d7f99c
 ---
 
 # Behaviour Spec: отказ обвязки ревью при недостижимой базе PR доказан тестом
