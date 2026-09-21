@@ -2410,6 +2410,55 @@ def test_safety_unknown_routes_finalize_to_human(world: World, monkeypatch) -> N
     assert al.is_live(world.state.ops[key])
 
 
+def test_empty_allowlist_refuses_before_any_candidate_is_created(
+    world: World, monkeypatch
+) -> None:
+    """Пустая политика — отказ ДО заявки и PR, а не после человеческого акта.
+
+    Пустой дефолт `AUTHORIZED_APPROVER_ACCOUNTS` — правильный fail-closed и
+    остаётся как есть. Дефект был в МОМЕНТЕ: механика заводила candidate-PR,
+    человек его мержил, и только потом слышала, что подписи этот мерж не
+    создаёт (devtools#278). На шаге предложения известно всё нужное:
+    политика пуста ⇒ ни один мерж подписи не даст ⇒ предлагать акт незачем.
+    """
+    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "")
+    with pytest.raises(RuntimeError) as caught:
+        approve(world, "charter")
+    message = str(caught.value)
+    assert af.APPROVER_ALLOWLIST_ENV in message
+    assert world.state.ops == {}, "заявка не заводится"
+    assert world.forge.prs == {}, "candidate-PR не создаётся"
+
+
+def test_empty_allowlist_refusal_is_not_about_the_merger(
+    world: World, monkeypatch
+) -> None:
+    """Причина — «политика недоступна», и она отличима от «мержер не
+    авторизован»: вторая обвиняет человека в том, чего он не делал."""
+    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "")
+    with pytest.raises(RuntimeError) as caught:
+        approve(world, "charter")
+    message = str(caught.value)
+    assert "пуст" in message, "названа пустота политики, а не учётка"
+    assert "не входит в" not in message, "это формулировка отказа мержеру"
+
+
+def test_no_op_over_approved_node_survives_empty_allowlist(
+    world: World, monkeypatch
+) -> None:
+    """Повтор над честно одобренным узлом ничего не создаёт, поэтому пустая
+    политика ему не помеха: отказ здесь был бы ложным."""
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+    world.sync()
+    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "")
+    outcome = approve(world, "charter")
+    assert "no-op" in outcome.message
+
+
 def test_agent_merge_refusal_leaves_finalize_to_human(world: World) -> None:
     """Отказ обвязки — не ошибка: PR без лейбла остаётся человеку, заявка
     жива; повторный вызов пробует агентский мерж снова (ревью #233), а
