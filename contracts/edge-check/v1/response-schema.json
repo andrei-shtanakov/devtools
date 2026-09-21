@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["criteria", "findings"],
+  "properties": {
+    "criteria": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "reason"],
+        "properties": {
+          "id": {"type": "string"},
+          "status": {"enum": ["pass", "fail"]},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rule_id", "class", "path", "lines", "statement"],
+        "properties": {
+          "rule_id": {"type": "string"},
+          "class": {"type": "string"},
+          "path": {"type": "string"},
+          "lines": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "statement": {"type": "string"}
+        }
+      }
+    }
+  }
+}
