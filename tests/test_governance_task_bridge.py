@@ -9611,3 +9611,125 @@ def test_projection_check_counts_by_the_declared_id_not_by_a_prefix() -> None:
     )
 
     task_bridge._assert_delivers_after_carry([task], block)
+
+
+# ── §3b.6: повтор обязательства доезжает проверкой, не реализацией ──
+
+DT_RESTATES_MD = """\
+#### DT-01: Ядро · type: implement · owner: dev
+scenarios: [BEH-01]
+depends_on: []
+parallel_group: core
+delivers:
+  - id: DEL-01
+    kind: capability
+    statement: "retention_days ограничен 7-365"
+    sources:
+      - "acceptance#AC-07"
+
+Проза.
+
+#### DT-12: Отчёты · type: implement · owner: dev
+scenarios: [BEH-02]
+depends_on: [DT-01]
+parallel_group: core
+delivers:
+  - id: DEL-12
+    kind: capability
+    statement: "retention_days ограничен 7-365"
+    sources:
+      - "acceptance#AC-07"
+    restates: DEL-01
+
+Проза.
+"""
+
+
+def _render_restates(source: str = DT_RESTATES_MD) -> str:
+    scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(source)
+    assert findings == [], findings
+    return task_bridge.render_tasks_dt(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="workstreams/WS-x-1/spec/30-decomposition.md",
+        scenarios=scenarios,
+        dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00",
+        anchor_blob="ab" * 20,
+    )
+
+
+def test_restated_obligation_becomes_a_check_naming_the_earlier_task() -> None:
+    """§3b.6: повтор доезжает ПРОВЕРКОЙ и называет исходную задачу.
+
+    Немаркированный пункт заставил бы исполнителя либо переписать уже
+    сделанное, либо отчитаться о работе, которой он не делал. Поэтому
+    обязательство остаётся видимым (инвариант §3b), но пункт говорит, что
+    от исполнителя требуется — проверить, а не реализовать, — и называет
+    задачу, в которой обязательство исполнено.
+    """
+    rendered = _render_restates()
+
+    items = [ln for ln in rendered.splitlines() if ln.startswith("- [ ] DEL-12")]
+    assert len(items) == 1, rendered
+    (item,) = items
+    assert "проверить" in item, item
+    assert "retention_days ограничен 7-365" in item, item
+    assert "DEL-01" in item and "TASK-001" in item, item
+
+
+def test_restated_item_does_not_claim_the_work_is_done() -> None:
+    """Зависимость в плане НЕ доказывает выполнение (решение владельца).
+
+    Формулировка «DT-01 уже это сделал» утверждала бы факт, которого мост
+    не знает: ребро графа говорит о порядке, а не о результате. Пункт
+    обязан требовать проверки, а не сообщать о готовности.
+    """
+    rendered = _render_restates()
+
+    (item,) = [
+        ln for ln in rendered.splitlines() if ln.startswith("- [ ] DEL-12")
+    ]
+    lowered = item.lower()
+    for claim in ("уже сделано", "уже реализован", "выполнено"):
+        assert claim not in lowered, item
+
+
+def test_first_task_keeps_its_own_obligation_unmarked() -> None:
+    """Базовая половина: исходное обязательство остаётся обычным пунктом.
+
+    Без неё «повтор рендерится проверкой» удовлетворялось бы и мостом,
+    превратившим в проверку КАЖДЫЙ результат — включая тот единственный,
+    который кто-то обязан реализовать.
+    """
+    rendered = _render_restates()
+
+    (item,) = [
+        ln for ln in rendered.splitlines() if ln.startswith("- [ ] DEL-01")
+    ]
+    assert "проверить" not in item, item
+    assert item.endswith("retention_days ограничен 7-365"), item
+
+
+def test_restated_and_covered_obligation_rides_the_scenario_item() -> None:
+    """`covered_by` + `restates`: текст едет в пункт сценария, без своего.
+
+    Решение владельца: отдельного чекбокса не заводится. Иначе один и тот
+    же результат получил бы два носителя состояния, а §I11 переносит
+    отметку по тексту пункта — расхождение между ними было бы молчаливым.
+    """
+    source = DT_RESTATES_MD.replace(
+        "    restates: DEL-01\n",
+        "    restates: DEL-01\n    covered_by: BEH-02\n",
+    )
+    rendered = _render_restates(source)
+
+    own = [ln for ln in rendered.splitlines() if ln.startswith("- [ ] DEL-12")]
+    assert own == [], own
+    (beh_item,) = [
+        ln for ln in rendered.splitlines()
+        if ln.startswith("- [ ] реализовать BEH-02")
+    ]
+    assert "DEL-12" in beh_item and "проверить" in beh_item, beh_item
+    assert "DEL-01" in beh_item and "TASK-001" in beh_item, beh_item

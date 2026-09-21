@@ -1538,3 +1538,119 @@ def test_contract_form_id_is_accepted() -> None:
     errors, _ = dt_contract_findings(_V2_FM + _DT_V2, node_index=_INDEX)
 
     assert errors == [], errors
+
+
+# ── §3b.6: повторное обязательство между задачами ──
+
+_DT_RESTATES = (
+    "#### DT-01: Ядро · type: implement · owner: dev\n"
+    "scenarios: [BEH-01]\n"
+    "depends_on: []\n"
+    "parallel_group: core\n"
+    "delivers:\n"
+    "  - id: DEL-01\n"
+    "    kind: capability\n"
+    "    statement: \"retention_days ограничен 7-365\"\n"
+    "    sources:\n"
+    "      - \"acceptance#AC-07\"\n"
+    "Проза.\n"
+    "\n"
+    "#### DT-12: Отчёты · type: implement · owner: dev\n"
+    "scenarios: [BEH-02]\n"
+    "depends_on: [DT-01]\n"
+    "parallel_group: core\n"
+    "delivers:\n"
+    "  - id: DEL-12\n"
+    "    kind: capability\n"
+    "    statement: \"retention_days ограничен 7-365\"\n"
+    "    sources:\n"
+    "      - \"acceptance#AC-07\"\n"
+    "    restates: DEL-01\n"
+    "Проза.\n"
+)
+
+
+def test_restates_pointing_at_a_dependency_is_accepted() -> None:
+    """Базовая половина: объявленный повтор через ребро зависимости валиден.
+
+    Без неё «гвард отвергает битый restates» удовлетворялось бы и гвардом,
+    отвергающим любой.
+    """
+    errors, warnings = dt_contract_findings(
+        _V2_FM + _DT_RESTATES, node_index=_INDEX
+    )
+
+    assert errors == [], errors
+    assert warnings == [], warnings
+    tasks, _ = parse_dt_tasks(_V2_FM + _DT_RESTATES)
+    assert tasks[1].delivers[0].restates == "DEL-01"
+
+
+def test_restates_of_an_unknown_deliverable_is_an_error() -> None:
+    text = _DT_RESTATES.replace("restates: DEL-01", "restates: DEL-99")
+
+    errors, _ = dt_contract_findings(_V2_FM + text, node_index=_INDEX)
+
+    assert any("DEL-99" in e for e in errors), errors
+
+
+def test_restates_of_own_deliverable_is_an_error() -> None:
+    """Повтор ССЫЛАЕТСЯ на предшествующую задачу, а не на себя.
+
+    Самоссылка объявляла бы задачу повторяющей собственное обязательство —
+    пункт превратился бы в «проверить, что сделано в этой же задаче», то
+    есть в проверку без исполнителя.
+
+    Утверждение привязано к ПРИЧИНЕ, а не к факту красноты: мутант,
+    снимавший эту проверку, ВЫЖИВАЛ на прежней редакции теста. Самоссылка
+    попутно нарушает ещё два инварианта — замыкание `depends_on` и запрет
+    цепочек, — и тест подтверждался существованием ЧУЖОЙ находки, в
+    которой случайно нашлось то же слово.
+    """
+    text = _DT_RESTATES.replace("restates: DEL-01", "restates: DEL-12")
+
+    errors, _ = dt_contract_findings(_V2_FM + text, node_index=_INDEX)
+
+    assert any("ссылка на себя" in e for e in errors), errors
+
+
+def test_restates_without_a_dependency_edge_is_an_error() -> None:
+    """Без ребра «уже сделано» НЕ гарантировано — пометка была бы ложью.
+
+    Тот же инвариант, что у `delivered_by` и `verifies`: владелец обязан
+    лежать в транзитивном замыкании `depends_on`. Иначе задачи могут идти
+    параллельно, и исполнитель получит указание проверить результат,
+    которого ещё нет.
+    """
+    text = _DT_RESTATES.replace("depends_on: [DT-01]", "depends_on: []")
+
+    errors, _ = dt_contract_findings(_V2_FM + text, node_index=_INDEX)
+
+    assert any("depends_on" in e for e in errors), errors
+
+
+def test_chain_of_restates_is_an_error() -> None:
+    """Цепочки запрещены: ссылка ведёт на ИСХОДНОЕ обязательство.
+
+    Цепочка рассеивает источник: пункт назвал бы задачу-посредника, а не
+    ту, где обязательство действительно исполнено, — и исполнитель пошёл
+    бы проверять не туда.
+    """
+    text = _DT_RESTATES + (
+        "\n#### DT-20: Экспорт · type: implement · owner: dev\n"
+        "scenarios: [BEH-03]\n"
+        "depends_on: [DT-12]\n"
+        "parallel_group: core\n"
+        "delivers:\n"
+        "  - id: DEL-20\n"
+        "    kind: capability\n"
+        "    statement: \"retention_days ограничен 7-365\"\n"
+        "    sources:\n"
+        "      - \"acceptance#AC-07\"\n"
+        "    restates: DEL-12\n"
+        "Проза.\n"
+    )
+
+    errors, _ = dt_contract_findings(_V2_FM + text, node_index=_INDEX)
+
+    assert any("цепоч" in e.lower() for e in errors), errors
