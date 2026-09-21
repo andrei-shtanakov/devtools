@@ -2109,8 +2109,33 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # зелёный гейт здесь означает «форма верна», а не «результаты
     # поставки доставлены».
     if decomp_path.exists():
+        # Индекс узлов бандла для разрешения `sources` (#282, срез 2).
+        # Файлы читает гейт, а не гвард: тот остаётся чистой функцией над
+        # строками, иначе его нельзя звать из гейта и моста одним
+        # способом. Ключ индекса — имя узла, как его пишет ссылка
+        # (`acceptance#AC-07`), а не имя файла.
+        #
+        # Индексируются ТОЛЬКО существующие файлы, и отсутствующий узел
+        # остаётся вне индекса намеренно: ссылка на него получит отказ
+        # «узла нет в бандле» — честную причину, отличную от «пункт не
+        # найден». Пустой индекс (бандл без единого узла) — законный
+        # вход, на котором не разрешается ни одна ссылка.
+        node_index = {
+            node: decomposition_guard.node_ids(
+                path.read_text(encoding="utf-8")
+            )
+            for node, path in (
+                ("requirements", req_path),
+                ("design", node_paths["design"]),
+                ("behaviour-spec", beh_path),
+                ("acceptance", node_paths["acceptance"]),
+                ("decomposition", decomp_path),
+            )
+            if path.exists()
+        }
         dt_errors, dt_warnings = decomposition_guard.dt_contract_findings(
             decomp_path.read_text(encoding="utf-8"),
+            node_index=node_index,
             allow_legacy_dt=state.allow_legacy_dt,
         )
         warnings.extend(

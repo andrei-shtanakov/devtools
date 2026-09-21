@@ -513,6 +513,127 @@ def render_tasks(
     return "\n".join(line for line in lines if line is not None) + "\n"
 
 
+#: Id результата поставки в уже отрендеренном тексте задачи. Нужен, чтобы
+#: сверка читала РЕЗУЛЬТАТ рендера, а не свои же промежуточные списки:
+#: проверка по ним была бы утверждением о себе и пропустила бы ровно тот
+#: дефект, ради которого заведена, — расхождение между объявленным и
+#: напечатанным.
+_DELIVERS_ID_RE = re.compile(r"\bDEL-\d+\b")
+
+
+def _assert_delivers_projected(
+    task: decomposition_guard.DtTask, block: list[str]
+) -> None:
+    """Пост-условие переноса `delivers` в одну задачу (#282, срез 2).
+
+    Наличие id в метастроке НЕ доказывает переноса обязательства —
+    доказывает эта сверка. Проверяется четыре вещи, и каждая отвечает за
+    свой способ потерять результат:
+
+    1. Состав метастроки равен объявленному — РАВЕНСТВОМ множеств:
+       вхождение не проваливается от лишнего и, при поштучной проверке,
+       от потерянного.
+    2. Каждый объявленный id встречается в чек-листе РОВНО ОДИН раз:
+       ноль — потеря (исполнитель обязательства не увидит), два — дубль
+       (§I11 переносит состояние по тексту пункта и неуникальные
+       выбрасывает, то есть отметка потерялась бы при переиздании).
+    3. В чек-листе нет результатов, которых DT не объявлял.
+    4. Для результата без объявленной связи в его пункте стоит полный
+       `statement`. Без этого пункт `- [ ] DEL-01 (capability):` с пустым
+       хвостом прошёл бы сверку id — «обязательство доехало» было бы
+       верно про ключ и ложно про само обязательство.
+
+    Путь потери не гипотетический: `covered_by` гвард сверяет со
+    `scenarios` того же DT, а группа строится из сценариев, НАЙДЕННЫХ в
+    behaviour-spec. Сценарий, объявленный в DT и отсутствующий в
+    behaviour-spec, проходит гвард и выпадает из группы — аннотации
+    садиться не на что.
+    """
+    if not task.delivers:
+        return
+    declared = [d.id for d in task.delivers]
+    meta = [ln for ln in block if ln.startswith("**Delivers:**")]
+    if len(meta) != 1:
+        raise RuntimeError(
+            f"{task.dt_id}: строк **Delivers:** в задаче {len(meta)}, "
+            "ожидается ровно одна"
+        )
+    meta_ids = [
+        part.strip()
+        for part in meta[0].removeprefix("**Delivers:**").split(",")
+        if part.strip()
+    ]
+    if sorted(meta_ids) != sorted(declared):
+        raise RuntimeError(
+            f"{task.dt_id}: состав **Delivers:** {meta_ids} не совпадает с "
+            f"объявленным {declared}"
+        )
+    items = [ln for ln in block if ln.startswith("- [ ]")]
+    for item_id in declared:
+        hits = [ln for ln in items if item_id in _DELIVERS_ID_RE.findall(ln)]
+        if len(hits) != 1:
+            raise RuntimeError(
+                f"{task.dt_id}: результат {item_id} встречается в чек-листе "
+                f"{len(hits)} раз(а), ожидается ровно один — объявленный "
+                "результат обязан доехать до исполнителя и остаться "
+                "единственным носителем своего состояния"
+            )
+    stray = {
+        found for ln in items for found in _DELIVERS_ID_RE.findall(ln)
+    } - set(declared)
+    if stray:
+        raise RuntimeError(
+            f"{task.dt_id}: в чек-листе есть результаты, не объявленные в "
+            f"DT: {sorted(stray)}"
+        )
+    for d in task.delivers:
+        if d.covered_by:
+            continue
+        own = [ln for ln in items if ln.startswith(f"- [ ] {d.id} (")]
+        if not own or d.statement not in own[0]:
+            raise RuntimeError(
+                f"{task.dt_id}: пункт результата {d.id} не несёт его "
+                "statement — id доехал, обязательство нет"
+            )
+
+
+_TASK_SOURCE_RE = re.compile(r"^Source: .*#(DT-\d+)\s*$")
+
+
+def _assert_delivers_after_carry(
+    tasks: list[decomposition_guard.DtTask], text: str
+) -> None:
+    """Пост-условие переноса §I11: обязательства пережили второго писателя.
+
+    Блок задачи опознаётся по её собственной строке `Source: …#DT-NN`, а
+    не по порядковому номеру в списке: нумерация задач — производная от
+    порядка DT, и сверка по индексу молча сравнила бы одну задачу с
+    объявлением другой ровно тогда, когда порядок и съехал.
+    """
+    if not tasks:
+        return
+    lines = text.splitlines()
+    bounds = _task_bounds(lines)
+    by_dt: dict[str, list[str]] = {}
+    for start, end in bounds:
+        block = lines[start:end]
+        for line in block:
+            m = _TASK_SOURCE_RE.match(line)
+            if m is not None:
+                by_dt[m.group(1)] = block
+                break
+    for task in tasks:
+        block = by_dt.get(task.dt_id)
+        if block is None:
+            if task.delivers:
+                raise RuntimeError(
+                    f"{task.dt_id}: задача не найдена в тексте после "
+                    "переноса состояния — объявленные результаты потеряны"
+                )
+            continue
+        _assert_delivers_projected(task, block)
+
+
 def render_tasks_dt(
     ws_id: str,
     subject: str,
@@ -568,6 +689,7 @@ def render_tasks_dt(
             else f"проверка группы {', '.join(beh_ids)} определена и зелёная"
         )
         idx = number[t.dt_id]
+        task_start = len(lines)
         action = "Проверить" if t.type == "verify" else "Реализовать"
         lines += [
             f"### TASK-{idx:03d}: {t.title}",
@@ -673,6 +795,19 @@ def render_tasks_dt(
                 f"**TDD-waiver:** {t.waiver.node_class} "
                 f"· sanction: {t.waiver.sanction}"
             )
+        if t.delivers:
+            # Машинный индекс обязательств задачи (#282, срез 2, решение
+            # владельца 2026-09-21). Только ID: полный `statement` живёт
+            # в пункте чек-листа — единственном, что видит и отмечает
+            # исполнитель. Наличие id здесь НЕ доказывает, что
+            # обязательство доехало; это доказывает сверка ниже.
+            #
+            # Строка и пункты порождаются из ОДНОГО набора `t.delivers` —
+            # два обхода одного объявления разошлись бы молча, и разойтись
+            # могли бы как раз на потерянном результате.
+            lines.append(
+                "**Delivers:** " + ", ".join(d.id for d in t.delivers)
+            )
         if t.depends_on:
             # Та же пер-ссылочная форма, что у Traces to: TASK_REF
             # spec-runner требует ] сразу после id (minor ревью PR #149)
@@ -714,8 +849,32 @@ def render_tasks_dt(
                 "класса: " + "; ".join(conditions)
             )
         item_verb = "проверить" if t.type == "verify" else "реализовать"
+        # Связь объявлена, а не угадана: аннотация садится на пункт
+        # сценария, названного в `covered_by`. Совпадение пути или
+        # похожего текста таким объявлением не является — это тот же
+        # прокси, от которого отказывается §3b, применённый с другой
+        # стороны. Гвард уже отверг `covered_by`, называющий чужой
+        # сценарий, поэтому здесь остаётся только разложить объявленное.
+        covered: dict[str, list[str]] = {}
+        for d in t.delivers:
+            if d.covered_by:
+                covered.setdefault(d.covered_by, []).append(d.id)
+        for g in group:
+            item = f"- [ ] {item_verb} {g.beh_id}: {g.title}"
+            if g.beh_id in covered:
+                item += " (" + ", ".join(covered[g.beh_id]) + ")"
+            lines.append(item)
+        # Результат без объявленной связи получает СВОЙ пункт: иначе его
+        # обязательство существовало бы только в метастроке, то есть для
+        # исполнителя не существовало бы вовсе — ровно дефект, против
+        # которого заведён #282. `kind` в тексте не украшение: он
+        # классифицирует результат, и без него два пункта разных видов с
+        # похожими формулировками выходили бы неразличимы, а §I11
+        # переносит состояние по ТЕКСТУ пункта.
         lines += [
-            f"- [ ] {item_verb} {g.beh_id}: {g.title}" for g in group
+            f"- [ ] {d.id} ({d.kind}): {d.statement}"
+            for d in t.delivers
+            if not d.covered_by
         ]
         traces = []
         for g in group:
@@ -735,6 +894,10 @@ def render_tasks_dt(
             ),
             "",
         ]
+        # Сверка читает УЖЕ отрендеренный блок задачи, а не промежуточные
+        # списки, из которых он собран: проверка по ним была бы
+        # утверждением о себе.
+        _assert_delivers_projected(t, lines[task_start:])
     return "\n".join(line for line in lines if line is not None) + "\n"
 
 
@@ -1555,21 +1718,15 @@ def deliver(
         # tech-lead-узлом и уже проверен graph_findings выше; здесь только
         # парсинг тела DT-задач и джойн BEH →
         # checked_by.
-        # Барьер среза 1 (devtools#282, решение владельца 2026-09-21):
-        # перенос результатов поставки ещё не реализован, поэтому бандл,
-        # ОБЪЯВИВШИЙ `delivers`, доставлять нельзя. Иначе мост принял бы
-        # объявленное и молча потерял его при рендере по старому контракту —
-        # тот же дефект, ради которого заведена заявка, только теперь с
-        # формальным объявлением на входе. Fail-closed до среза 2; рендер
-        # старого формата (версии нет) не меняется.
-        _dt_meta, _ = split_frontmatter(anchor_text)
-        if "dt_contract_version" in _dt_meta:
-            raise RuntimeError(
-                "мост не доставляет бандл с объявленной "
-                "dt_contract_version: перенос результатов поставки "
-                "(delivers) ещё не реализован — devtools#282, срез 2. "
-                "Доставка сейчас потеряла бы объявленные результаты молча."
-            )
+        # Барьер среза 1 (devtools#282) СНЯТ срезом 2 вместе с переносом,
+        # а не раньше него: он стоял ровно потому, что мост принял бы
+        # объявленные результаты и молча потерял их при рендере по старому
+        # контракту. Теперь их переносит `render_tasks_dt`, а доказывает
+        # перенос пост-условие `_assert_delivers_projected` — сначала на
+        # рендере, затем ПОВТОРНО на тексте после переноса состояния §I11
+        # (ниже): между рендером и записанным файлом лежит ещё один
+        # писатель, и «строка была отрендерена» про записанный файл не
+        # утверждает ничего.
         dt_tasks, _form_findings = decomposition_guard.parse_dt_tasks(
             anchor_text
         )
@@ -1585,7 +1742,9 @@ def deliver(
             acceptance_text=acceptance_text,
             version=version,
         )
+        projected = dt_tasks
     else:
+        projected = []
         text = render_tasks(
             ws_id=ws_id,
             subject=subject,
@@ -1604,6 +1763,11 @@ def deliver(
         # файла, иначе возобновление не опознало бы собственный коммит.
         carried = _carry_execution_state_with_report(text, carry_from or "")
         text = carried.text
+        # Перенос состояния — ВТОРОЙ писатель этого текста. Он работает с
+        # пунктами чек-листа, то есть ровно с тем носителем, в который
+        # срез 2 кладёт обязательства; проверка «после рендера» про
+        # результат его работы не утверждает ничего.
+        _assert_delivers_after_carry(projected, text)
         carry_report = {
             "matched_tasks": carried.matched_tasks,
             "total_tasks": carried.total_tasks,

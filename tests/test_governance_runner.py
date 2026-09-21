@@ -7037,3 +7037,82 @@ def test_allow_legacy_dt_survives_resume(tmp_path: Path, runs_root) -> None:
     )
 
     assert runner.load("r-dt-resume").allow_legacy_dt is False
+
+
+def _with_delivers(ops_cls, source_ref: str):
+    """FakeOps, чей DT-01 объявляет версию 2 и один результат поставки.
+
+    Правится УЖЕ написанный фикстурой документ — тест не заводит второго
+    тела decomposition и потому не разъезжается с ней на первой же правке.
+    """
+
+    class _Ops(ops_cls):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind != "decomposition":
+                return rc
+            path = Path(target_dir) / bundle_dir / "30-decomposition.md"
+            text = path.read_text(encoding="utf-8")
+            text = text.replace(
+                "spec_stage: decomposition\n",
+                "spec_stage: decomposition\ndt_contract_version: 2\n",
+                1,
+            ).replace(
+                "parallel_group: solo\n",
+                "parallel_group: solo\n"
+                "delivers:\n"
+                "  - id: DEL-01\n"
+                "    kind: capability\n"
+                '    statement: "x отвергает пустой ввод"\n'
+                "    sources:\n"
+                f'      - "{source_ref}"\n',
+                1,
+            )
+            path.write_text(text, encoding="utf-8")
+            return rc
+
+    return _Ops
+
+
+def test_gate_resolves_delivers_sources_against_bundle_nodes(
+    tmp_path: Path, runs_root
+) -> None:
+    """Базовая половина: разрешимая ссылка проходит гейт.
+
+    Без неё «гейт краснеет на неразрешимой ссылке» удовлетворялось бы и
+    гейтом, который не построил индекс вовсе: пустой индекс отвергает
+    ЛЮБУЮ ссылку, и красный был бы одинаков для верной и для битой.
+    """
+    ops = _with_delivers(FakeOps, "acceptance#AC-01")(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-del-ok", ops))
+
+    findings_path = runner.run_dir("r-del-ok") / "gate-findings.txt"
+    findings = (
+        findings_path.read_text(encoding="utf-8")
+        if findings_path.exists()
+        else ""
+    )
+    assert state.status != "stopped_gate", findings
+    assert "error GC-DT-CONTRACT" not in findings, findings
+
+
+def test_gate_stops_on_unresolvable_delivers_source(
+    tmp_path: Path, runs_root
+) -> None:
+    """Ссылка на несуществующий пункт — стоп, а не молчание.
+
+    Неразрешимая ссылка значит, что обязательство привязано к тексту,
+    которого в бандле нет: ревьюер не сможет свериться с источником, а
+    редактура, которая его «переименовала», не оставит следа.
+    """
+    ops = _with_delivers(FakeOps, "acceptance#AC-99")(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-del-bad", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-del-bad") / "gate-findings.txt"
+    ).read_text(encoding="utf-8")
+    assert "GC-DT-CONTRACT" in findings, findings
+    assert "AC-99" in findings, findings

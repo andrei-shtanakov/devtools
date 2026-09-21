@@ -8,6 +8,7 @@ behaviour-spec бандла и генерирует managed-спеку `spec/<ws
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import shutil
@@ -9113,14 +9114,20 @@ def test_stamp_epoch_intent_refuses_before_any_effect(
     assert _ledger_bytes() == before
 
 
-def test_bridge_refuses_to_deliver_a_v2_bundle(tmp_path: Path) -> None:
-    """Барьер среза 1 (devtools#282, решение владельца 2026-09-21).
+def test_v2_bundle_without_delivers_is_refused_by_the_guard_not_the_bridge(
+    tmp_path: Path,
+) -> None:
+    """Барьер среза 1 СНЯТ срезом 2 — вместе с переносом, не раньше него.
 
-    Перенос результатов поставки ещё не реализован. Без этого отказа мост
-    ПРИНЯЛ бы бандл, объявивший `delivers`, отрендерил tasks по старому
-    контракту и МОЛЧА ПОТЕРЯЛ объявленное — то есть ровно тот дефект, ради
-    которого заведена заявка, только теперь с формальным объявлением на
-    входе. Fail-closed до среза 2.
+    Он стоял ровно потому, что мост принял бы объявленные результаты и
+    молча потерял их. Теперь их переносит рендер, а доказывает перенос
+    пост-условие — дважды: на рендере и на тексте после §I11.
+
+    Что при этом НЕ переехало в мост: суждение о форме. Бандл, объявивший
+    версию 2 и не объявивший `delivers`, мост доставляет — его отвергает
+    S4-гейт находкой `GC-DT-CONTRACT` РАНЬШЕ доставки. Второй судья формы
+    в мосте был бы вторым вычислителем того же предиката и разошёлся бы с
+    гвардом молча.
     """
     target = _target(tmp_path)
     anchor = target / "workstreams/WS-alpha-7/spec/30-decomposition.md"
@@ -9132,16 +9139,23 @@ def test_bridge_refuses_to_deliver_a_v2_bundle(tmp_path: Path) -> None:
         )
     )
 
-    with pytest.raises(RuntimeError, match="dt_contract_version"):
-        task_bridge.deliver(
-            target_dir=str(target),
-            repo_slug="owner/alpha",
-            ws_id="WS-alpha-7",
-            subject="s",
-            bundle_dir="workstreams/WS-alpha-7/spec",
-            base_ref="master",
-            ops=_StubOps(),
-        )
+    pr = task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=_StubOps(),
+    )
+
+    assert pr == 77
+    written = (target / "spec/WS-alpha-7-tasks.md").read_text()
+    assert "**Delivers:**" not in written, written
+    errors, _ = decomposition_guard.dt_contract_findings(
+        anchor.read_text(), node_index={}
+    )
+    assert any("delivers" in e for e in errors), errors
 
 
 def test_bridge_still_delivers_a_versionless_bundle(tmp_path: Path) -> None:
@@ -9167,3 +9181,351 @@ def test_bridge_still_delivers_a_versionless_bundle(tmp_path: Path) -> None:
     assert "### TASK-001: Реализация" in (
         target / "spec/WS-alpha-7-tasks.md"
     ).read_text()
+
+
+# ── срез 2 #282: проекция delivers в задачу и чек-лист ──
+
+DT_DELIVERS_MD = """\
+#### DT-01: Ядро · type: implement · owner: dev
+scenarios: [BEH-01, BEH-02]
+depends_on: []
+parallel_group: core
+delivers:
+  - id: DEL-01
+    kind: capability
+    statement: "ядро отвергает пустой ввод"
+    sources:
+      - "acceptance#AC-07"
+  - id: DEL-02
+    kind: module
+    statement: "модуль разбора выделен и вызывается ядром"
+    sources:
+      - "acceptance#AC-08"
+    covered_by: BEH-02
+
+Проза предмета, которая до исполнителя НЕ доезжает.
+"""
+
+
+def _render_delivers() -> str:
+    scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(DT_DELIVERS_MD)
+    assert findings == [], findings
+    return task_bridge.render_tasks_dt(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="workstreams/WS-x-1/spec/30-decomposition.md",
+        scenarios=scenarios,
+        dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00",
+        anchor_blob="ab" * 20,
+    )
+
+
+def test_delivers_metaline_lists_every_declared_id() -> None:
+    """Метастрока — машинный индекс обязательств задачи.
+
+    Состав утверждается РАВЕНСТВОМ множества, а не вхождением: вхождение
+    не проваливается от потерянного id, если проверять по одному, и не
+    проваливается от лишнего никогда.
+    """
+    rendered = _render_delivers()
+
+    (line,) = [
+        ln for ln in rendered.splitlines() if ln.startswith("**Delivers:**")
+    ]
+    ids = {part.strip() for part in line.removeprefix("**Delivers:**").split(",")}
+    assert ids == {"DEL-01", "DEL-02"}, line
+
+
+def test_deliverable_without_cover_becomes_its_own_checklist_item() -> None:
+    """`statement` обязан доехать ПУНКТОМ, а не остаться в метастроке.
+
+    Прецедент §3a прямой: проза DT в промпт исполнителя не подставляется
+    вовсе. Id в метастроке доказывает только объявление; обязательство
+    исполнитель видит и отмечает единственным способом — пунктом.
+    """
+    rendered = _render_delivers()
+
+    items = [ln for ln in rendered.splitlines() if ln.startswith("- [ ] DEL-01")]
+    assert len(items) == 1, rendered
+    assert "ядро отвергает пустой ввод" in items[0], items[0]
+
+
+def test_covered_deliverable_annotates_the_existing_item_without_a_duplicate(
+) -> None:
+    """DT-04 (§3b.5): перенос без дубля, доказанный ЯВНОЙ связью.
+
+    Отсутствие дубля доказывается тем, что DEL-02 стоит НА пункте BEH-02,
+    объявленном в `covered_by`, — а не совпадением файла, сценария или
+    похожего текста. Совпадение было бы тем же прокси, от которого
+    отказывается весь §3b, применённым с другой стороны.
+    """
+    rendered = _render_delivers()
+
+    own_items = [
+        ln for ln in rendered.splitlines() if ln.startswith("- [ ] DEL-02")
+    ]
+    assert own_items == [], own_items
+    beh_items = [
+        ln for ln in rendered.splitlines() if ln.startswith("- [ ] реализовать BEH-02")
+    ]
+    assert len(beh_items) == 1, rendered
+    assert "DEL-02" in beh_items[0], beh_items[0]
+
+
+DT_DELIVERS_LOST_MD = """\
+#### DT-01: Ядро · type: implement · owner: dev
+scenarios: [BEH-01, BEH-77]
+depends_on: []
+parallel_group: core
+delivers:
+  - id: DEL-01
+    kind: capability
+    statement: "ядро отвергает пустой ввод"
+    sources:
+      - "acceptance#AC-07"
+  - id: DEL-02
+    kind: module
+    statement: "модуль разбора выделен и вызывается ядром"
+    sources:
+      - "acceptance#AC-08"
+    covered_by: BEH-77
+
+Проза предмета.
+"""
+
+
+def test_deliverable_lost_in_projection_is_refused() -> None:
+    """Обязательный падающий пример §3b.5: потеря результата при переносе.
+
+    Путь потери НЕ гипотетический. `covered_by` гвард сверяет со
+    `scenarios` ТОГО ЖЕ DT, а мост строит группу из сценариев, которые
+    нашлись в behaviour-spec. Сценарий, объявленный в DT и отсутствующий в
+    behaviour-spec, проходит гвард и выпадает из группы — аннотации
+    садиться не на что, и DEL-02 исчезает из чек-листа, оставшись в
+    метастроке. Исполнитель получил бы задачу, где обязательство
+    перечислено и не поручено.
+
+    Поэтому сверка состава — не украшение: id в метастроке не доказывает
+    переноса, и без этой проверки доказать его было бы нечем.
+    """
+    scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(DT_DELIVERS_LOST_MD)
+    assert findings == [], findings
+
+    with pytest.raises(RuntimeError) as exc:
+        task_bridge.render_tasks_dt(
+            ws_id="WS-x-1",
+            subject="s",
+            bundle_path="workstreams/WS-x-1/spec/30-decomposition.md",
+            scenarios=scenarios,
+            dt_tasks=dt_tasks,
+            generated_at="2026-09-05T12:00:00",
+            anchor_blob="ab" * 20,
+        )
+
+    assert "DEL-02" in str(exc.value), str(exc.value)
+
+
+def test_v2_bundle_is_delivered_with_its_deliverables(tmp_path: Path) -> None:
+    """Срез 2 снимает барьер среза 1 — но только вместе с переносом.
+
+    Регрессия идёт по ФАКТИЧЕСКОМУ пути доставки, а не по рендеру:
+    «парсер spec-runner игнорирует незнакомую строку» ничего не говорит о
+    том, доживает ли она до записанного файла. Между рендером и файлом
+    лежит перенос состояния §I11, и именно там строка могла бы исчезнуть.
+    """
+    target = _target(tmp_path)
+    anchor = target / "workstreams/WS-alpha-7/spec/30-decomposition.md"
+    anchor.write_text(
+        DECOMPOSITION_MD.replace(
+            "spec_stage: decomposition\n",
+            "spec_stage: decomposition\ndt_contract_version: 2\n",
+            1,
+        ).replace(
+            "parallel_group: solo\n",
+            "parallel_group: solo\n"
+            "delivers:\n"
+            "  - id: DEL-01\n"
+            "    kind: capability\n"
+            '    statement: "ядро отвергает пустой ввод"\n'
+            "    sources:\n"
+            '      - "acceptance#AC-07"\n',
+            1,
+        )
+    )
+
+    pr = task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=_StubOps(),
+    )
+
+    assert pr == 77
+    written = (target / "spec/WS-alpha-7-tasks.md").read_text()
+    assert "**Delivers:** DEL-01" in written, written
+    assert "- [ ] DEL-01 (capability): ядро отвергает пустой ввод" in written
+
+
+def test_checked_deliverable_item_survives_reissue() -> None:
+    """Отметка на пункте результата переносится §I11 как любая другая.
+
+    Проверяется не «перенос вообще работает», а что пункт результата ему
+    ВИДЕН: §I11 переносит состояние по ТЕКСТУ пункта и неуникальные
+    выбрасывает. Текст пункта результата начинается с его id и потому
+    уникален построением — но это свойство надо держать проверкой, а не
+    надеждой: потеряй пункт id, отметка исчезала бы при каждом
+    переиздании, притом что статус самой задачи переносится.
+    """
+    first = _render_delivers()
+    delivered = first.replace(
+        "- [ ] DEL-01 (capability): ядро отвергает пустой ввод",
+        "- [x] DEL-01 (capability): ядро отвергает пустой ввод",
+        1,
+    )
+    assert delivered != first
+
+    carried = task_bridge._carry_execution_state(_render_delivers(), delivered)
+
+    assert "- [x] DEL-01 (capability): ядро отвергает пустой ввод" in carried
+    assert "**Delivers:** DEL-01, DEL-02" in carried
+
+
+def _delivers_task():
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(DT_DELIVERS_MD)
+    assert findings == [], findings
+    return dt_tasks
+
+
+def test_post_carry_check_catches_a_dropped_item() -> None:
+    """Пост-проверку после §I11 надо проверять ПОДСАДКОЙ, а не цветом.
+
+    Живой перенос состояния пункты не удаляет, поэтому через `deliver()`
+    отказ этой проверки не наблюдается никогда — зелёный прогон был бы
+    утверждением о ней, которое никто не проверял. Носитель подставляется
+    руками: текст, из которого пункт результата исчез, а метастрока
+    осталась, — ровно та форма, в которой обязательство перечислено и не
+    поручено.
+    """
+    text = _render_delivers()
+    broken = "\n".join(
+        ln for ln in text.splitlines()
+        if not ln.startswith("- [ ] DEL-01 (")
+    )
+
+    with pytest.raises(RuntimeError, match="DEL-01"):
+        task_bridge._assert_delivers_after_carry(_delivers_task(), broken)
+
+
+def test_post_carry_check_catches_a_lost_task_block() -> None:
+    """Исчезла вся задача — тоже потеря, и названа своей причиной."""
+    with pytest.raises(RuntimeError, match="DT-01"):
+        task_bridge._assert_delivers_after_carry(
+            _delivers_task(), "# tasks\n\nНи одной задачи.\n"
+        )
+
+
+def test_projection_check_catches_an_id_without_its_statement() -> None:
+    """Id доехал, обязательство нет — отдельная находка.
+
+    Без неё пункт `- [ ] DEL-01 (capability):` с пустым хвостом прошёл бы
+    сверку состава: «обязательство доехало» было бы верно про ключ и
+    ложно про то, ради чего ключ заведён.
+    """
+    text = _render_delivers()
+    gutted = text.replace(
+        "- [ ] DEL-01 (capability): ядро отвергает пустой ввод",
+        "- [ ] DEL-01 (capability): ",
+        1,
+    )
+
+    with pytest.raises(RuntimeError, match="statement"):
+        task_bridge._assert_delivers_after_carry(_delivers_task(), gutted)
+
+
+def test_projection_check_catches_an_unannounced_deliverable() -> None:
+    """Результат, которого DT не объявлял, — тоже расхождение.
+
+    Сверка состава есть РАВЕНСТВО множеств, а не вхождение: проверка
+    «всё объявленное на месте» не проваливается от лишнего никогда.
+    """
+    text = _render_delivers()
+    extra = text.replace(
+        "- [ ] DEL-01 (capability): ядро отвергает пустой ввод",
+        "- [ ] DEL-01 (capability): ядро отвергает пустой ввод\n"
+        "- [ ] DEL-09 (module): обязательство, которого DT не объявлял",
+        1,
+    )
+
+    with pytest.raises(RuntimeError, match="DEL-09"):
+        task_bridge._assert_delivers_after_carry(_delivers_task(), extra)
+
+
+def test_delivery_refuses_when_the_carry_writer_drops_a_deliverable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Проводка пост-проверки, а не сама проверка.
+
+    Живой `_carry_execution_state_with_report` строк НЕ удаляет: он
+    переписывает символ статуса и ставит `[x]` на месте. Значит отказ
+    пост-проверки через `deliver()` сегодня не наблюдается ни на одном
+    входе — она сторожит БУДУЩЕГО писателя этого текста, и «зелёный
+    прогон» про её проводку не утверждает ничего.
+
+    Поэтому дефект подсаживается ровно на шов: подменённый перенос
+    возвращает текст без пункта результата — ту самую форму, в которой
+    обязательство перечислено в метастроке и не поручено никому. Слепота
+    подмены и есть предмет теста: она изображает регрессию переноса,
+    которую иначе пришлось бы ждать годами.
+    """
+    target = _target(tmp_path)
+    anchor = target / "workstreams/WS-alpha-7/spec/30-decomposition.md"
+    anchor.write_text(
+        DECOMPOSITION_MD.replace(
+            "spec_stage: decomposition\n",
+            "spec_stage: decomposition\ndt_contract_version: 2\n",
+            1,
+        ).replace(
+            "parallel_group: solo\n",
+            "parallel_group: solo\n"
+            "delivers:\n"
+            "  - id: DEL-01\n"
+            "    kind: capability\n"
+            '    statement: "ядро отвергает пустой ввод"\n'
+            "    sources:\n"
+            '      - "acceptance#AC-07"\n',
+            1,
+        )
+    )
+    real = task_bridge._carry_execution_state_with_report
+
+    def _dropping(text: str, delivered: str):
+        result = real(text, delivered)
+        return dataclasses.replace(
+            result,
+            text="\n".join(
+                ln for ln in result.text.splitlines()
+                if not ln.startswith("- [ ] DEL-01 (")
+            ),
+        )
+
+    monkeypatch.setattr(
+        task_bridge, "_carry_execution_state_with_report", _dropping
+    )
+
+    with pytest.raises(RuntimeError, match="DEL-01"):
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=_StubOps(),
+            report_carry=True,
+        )
