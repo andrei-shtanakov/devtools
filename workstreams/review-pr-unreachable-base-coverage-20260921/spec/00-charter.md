@@ -6,7 +6,7 @@ traces_to:
 - discovery-brief
 upstream_hashes:
   discovery-brief: 2bbddceb7cba17bdb4bde59ef4ef66a6cae91ddf
-version: 2
+version: 3
 approved_content_hash: a82af116d3dd05f5d432aae5bd44a3c7cffbaf7f
 ---
 
