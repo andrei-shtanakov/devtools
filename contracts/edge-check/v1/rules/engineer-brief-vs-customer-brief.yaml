@@ -1,0 +1,17 @@
+edge: engineer-brief-vs-customer-brief
+subject_role: engineer-brief
+basis_roles: [customer-brief]
+items:
+  - id: R1
+    text: >-
+      Каждое Must-требование брифа заказчика получает вердикт выполнимости по
+      существу, а не только упоминание идентификатора.
+  - id: R2
+    text: >-
+      Названные ограничения и интерфейсы не противоречат целям заказчика.
+severity:
+  blocking: [blocker, major]
+  advisory: [minor]
+applicability:
+  - id: A1
+    role: customer-brief
