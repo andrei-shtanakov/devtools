@@ -6313,7 +6313,24 @@ def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
     findings_path = (
         runner.run_dir("r-acceptance-declaration-only") / "gate-findings.txt"
     )
-    assert not findings_path.exists()
+    # Утверждение сужено с «файла находок нет» до «нет ни одной ошибки»
+    # (#282, врезка GC-DT-CONTRACT в гейт). Прежняя форма была прокси
+    # СИЛЬНЕЕ того, что тест называет: с переходным дефолтом
+    # `allow_legacy_dt=True` каждый бандл без объявленной версии
+    # получает НЕ останавливающий warning, и «файла нет» стало ложным
+    # для всех зелёных прогонов разом. Авторитетный признак «гейт
+    # прошёл» — `state.status`, как и говорит комментарий к `warnings`
+    # в `_step_gate`; предмет самого теста — GC-DSL-EMPTY и
+    # GC-AC-COVERAGE, и он проверяется теперь поимённо, а не через
+    # отсутствие файла.
+    findings = (
+        findings_path.read_text(encoding="utf-8")
+        if findings_path.exists()
+        else ""
+    )
+    assert "error" not in findings, findings
+    assert "GC-DSL-EMPTY" not in findings, findings
+    assert "GC-AC-COVERAGE" not in findings, findings
     assert "push" in state.ops
     assert state.status == "completed"
 
@@ -6891,3 +6908,132 @@ def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
         "decomposition",
     ]
     assert "push" not in state.ops
+
+
+def test_gate_reports_dt_contract_findings(tmp_path: Path, runs_root) -> None:
+    """Находка ревью #289: проверка среза 1 не звалась ни на одном живом пути.
+
+    `dt_contract_findings` была достижима только из тестов: S4-гейт знал про
+    `graph_findings`/`non_fatal_findings`, а мост отказывал барьером по
+    ДРУГОЙ причине и о дефектах `delivers` молчал. То есть оператор не
+    получал ни одной новой находки формы, а сам гейт оставался зелёным.
+    """
+    class _Ops(FakeOps):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "decomposition":
+                # Версия вставляется в УЖЕ написанный фикстурой документ:
+                # тест не знает её тела и не заводит второго — иначе
+                # разъехался бы с ней на первой же правке.
+                path = Path(target_dir) / bundle_dir / "30-decomposition.md"
+                path.write_text(
+                    path.read_text(encoding="utf-8").replace(
+                        "spec_stage: decomposition\n",
+                        "spec_stage: decomposition\ndt_contract_version: 2\n",
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+            return rc
+
+    ops = _Ops(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-dt-contract", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-dt-contract") / "gate-findings.txt"
+    ).read_text()
+    assert "delivers" in findings, findings
+
+
+def _declare_dt_version(ops_cls, version: str | None):
+    """FakeOps, чей decomposition объявляет `dt_contract_version: <version>`.
+
+    Версия вставляется в УЖЕ написанный фикстурой документ: тест не знает
+    её тела и не заводит второго — иначе разъехался бы с ней на первой же
+    правке. `None` — документ остаётся как есть (легаси, без версии).
+    """
+
+    class _Ops(ops_cls):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "decomposition" and version is not None:
+                path = Path(target_dir) / bundle_dir / "30-decomposition.md"
+                path.write_text(
+                    path.read_text(encoding="utf-8").replace(
+                        "spec_stage: decomposition\n",
+                        f"spec_stage: decomposition\ndt_contract_version: "
+                        f"{version}\n",
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+            return rc
+
+    return _Ops
+
+
+def test_gate_passes_legacy_dt_but_says_guarantee_is_absent(
+    tmp_path: Path, runs_root
+) -> None:
+    """Базовая половина к стопу выше: переходный дефолт НЕ красит гейт.
+
+    Без неё утверждение «гейт краснеет на дефектной форме» удовлетворял бы
+    и гвард, красящий всё подряд, — а такой гвард остановил бы конвейер на
+    каждом бандле, который тот сам же и создал (авторинг версию не пишет
+    до среза 3). Здесь же фиксируется вторая половина: пропуск обязан быть
+    ГРОМКИМ — оператор видит, что гарантии переноса нет.
+    """
+    ops = _declare_dt_version(FakeOps, None)(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-dt-legacy", ops))
+
+    assert state.status != "stopped_gate"
+    findings = (
+        runner.run_dir("r-dt-legacy") / "gate-findings.txt"
+    ).read_text(encoding="utf-8")
+    assert "GC-DT-CONTRACT" in findings, findings
+    assert "ГАРАНТИЯ ПЕРЕНОСА" in findings, findings
+
+
+def test_gate_refuses_legacy_dt_when_operator_turns_compat_off(
+    tmp_path: Path, runs_root
+) -> None:
+    """Решение оператора обязано ДОЕХАТЬ до гварда, а не остаться в CLI.
+
+    Пин против врезки, зовущей гвард с зашитым `allow_legacy_dt=True`:
+    такая проходит и стоп по форме выше, и базовую половину, оставляя
+    ужесточающий флаг молча неработающим.
+    """
+    ops = _declare_dt_version(FakeOps, None)(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(
+            tmp_path, "r-dt-strict", ops, allow_legacy_dt=False
+        )
+    )
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-dt-strict") / "gate-findings.txt"
+    ).read_text(encoding="utf-8")
+    assert "error GC-DT-CONTRACT" in findings, findings
+    assert "dt_contract_version" in findings, findings
+
+
+def test_allow_legacy_dt_survives_resume(tmp_path: Path, runs_root) -> None:
+    """Решение оператора переживает перезапуск: поле состояния, не аргумент.
+
+    Иначе прогон, начатый в строгом режиме, после `resume` судил бы тот же
+    документ переходным дефолтом — и зеленел бы на том, на чём встал.
+    """
+    ops = _declare_dt_version(FakeOps, None)(facts=GREEN_PR_FACTS)
+    runner.start(
+        **_start_kwargs(
+            tmp_path, "r-dt-resume", ops, allow_legacy_dt=False
+        )
+    )
+
+    assert runner.load("r-dt-resume").allow_legacy_dt is False
