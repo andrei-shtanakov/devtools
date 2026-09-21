@@ -1741,7 +1741,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Хойст fetch расширил класс затронутых прогонов — раньше отказ получали
       только репо с fp-китом, теперь и репо со старым китом, которые прежде
       отдавали фетч базы самому киту.
-- [ ] Инструкции агентов не уходят из-под ревью как проза: `CODE_OVERRIDE` в SSOT области ревью покрывает `.claude/*`, `.agents/*` и `CLAUDE.md`/`AGENTS.md` на любой глубине @owner:github:andrei-shtanakov @id:review-scope-code-override-agent-instructions @epic:eco.tooling @blocked_by:steward#180
+- [x] Инструкции агентов не уходят из-под ревью как проза: `CODE_OVERRIDE` в SSOT области ревью покрывает `.claude/*`, `.agents/*` и `CLAUDE.md`/`AGENTS.md` на любой глубине @owner:github:andrei-shtanakov @id:review-scope-code-override-agent-instructions @epic:eco.tooling — SSOT: PR #270; кит-копия: ре-вендор PR #283
       Принято по devtools#265 (`from: atp-platform#review-kit-catchup-scope`).
       Найдено ревью-контуром на atp-platform#329 (major, confidence medium);
       класс фронтальный для флота, поэтому чиним в SSOT, а не repo-конфигом.
@@ -1773,9 +1773,13 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       после `cd` указывал бы внутрь проверяемого PR-head.
       Следствие: `review-pr.sh` — харнесс-путь, поэтому **мерж человеком**,
       а ревью — из доверенного дерева.
-      **Осталось:** вендор-копия кита `scripts/review/prose-paths.env` — она в
-      инвентаре `checksum.sh`, на месте не правится; для pre-push и прямого
-      `local.sh` правило приедет обычным ре-вендором после steward. Заявка —
-      steward#180 (`slug: review-kit-scope-agent-instructions`); блокер пока в
-      переходной issue-форме, потому что на той стороне пункта плана ещё нет —
-      после принятия перевести на канонический `todo://steward/<слаг>`.
+      **Закрыто 2026-09-21 ре-вендором PR #283** (steward доставил обе
+      половины одним PR #182, `5bfd829`). Кит-копия
+      `scripts/review/prose-paths.env` несёт те же восемь глобов; ключи
+      `PROSE` и `CODE_OVERRIDE` совпадают с нашим SSOT побайтово, провенанс
+      копии — `VENDORED: devtools @ 8cd6456`, наш же коммит из #270. До этого
+      правило действовало только на ранней классификации обвязки, а pre-push
+      и прямой `local.sh` фильтровали по старому списку.
+      Заявка соседа (devtools#265) остаётся открытой: её DoD включает
+      доставку в atp-platform, а это волна ре-вендора по флоту —
+      `review-kit-next-wave` на стороне steward, не наш пункт.
