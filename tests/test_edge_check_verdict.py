@@ -53,6 +53,30 @@ def test_blocking_finding_gives_fail(tmp_path: Path) -> None:
     assert out["verdict"] == "FAIL"
 
 
+def test_failed_criterion_without_findings_gives_fail(tmp_path: Path) -> None:
+    """§9.1: второй оператор decide() — FAIL по статусу пункта, даже без
+    единой находки (сегодня покрыт только путь через блокирующий класс)."""
+    b = _bundle(tmp_path)
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    criteria = [
+        {"id": it.id, "status": "pass", "reason": "ок"} for it in rs.items
+    ]
+    criteria[0]["status"] = "fail"
+    criteria[0]["reason"] = "входа недостаточно"
+    answer = json.dumps({"structured_output": {"criteria": criteria, "findings": []}})
+    out = c.run_check(
+        "behaviour-vs-requirements",
+        b,
+        [b / "15-behaviour-spec.md"],
+        [("requirements", b / "10-requirements.md")],
+        contracts_dir=CONTRACTS,
+        model="claude-opus-5",
+        call=lambda prompt: answer,
+    )
+    assert out["verdict"] == "FAIL"
+    assert out["findings"] == []
+
+
 def test_advisory_only_gives_pass_and_keeps_findings(tmp_path: Path) -> None:
     out = _run(tmp_path, [{"rule_id": "R4", "class": "minor",
                            "path": "15-behaviour-spec.md", "lines": [1, 1],
@@ -200,3 +224,45 @@ def test_real_path_records_env_passthrough_harness_version_and_model_id(
     assert out["reviewer"]["env_passthrough"] == ["PATH"]
     assert out["reviewer"]["harness_version"] == "2.1.0 (Claude Code)"
     assert out["reviewer"]["model_id"] == "claude-opus-5-20260101"
+
+
+def test_real_path_workdir_is_outside_the_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§9.1: рабочий каталог ревьюера — пустой временный каталог ВНЕ
+    воркспейса (спека §4.1), а не что-то под корнем репозитория/бандла."""
+    from governance.edge_check import reviewer as reviewer_mod
+
+    b = _bundle(tmp_path)
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    seen: list[Path] = []
+
+    def fake_run_reviewer(text, argv, workdir, timeout):  # noqa: ANN001, ANN202
+        seen.append(workdir)
+        return json.dumps({
+            "structured_output": {
+                "criteria": [
+                    {"id": it.id, "status": "pass", "reason": "ок"}
+                    for it in rs.items
+                ],
+                "findings": [],
+            },
+        })
+
+    monkeypatch.setattr(reviewer_mod, "run_reviewer", fake_run_reviewer)
+
+    c.run_check(
+        "behaviour-vs-requirements",
+        b,
+        [b / "15-behaviour-spec.md"],
+        [("requirements", b / "10-requirements.md")],
+        contracts_dir=CONTRACTS,
+        model="claude-opus-5",
+    )
+
+    repo_root = Path(__file__).resolve().parents[1]
+    assert len(seen) == 1
+    workdir = seen[0].resolve()
+    assert not workdir.is_relative_to(repo_root)
+    assert not workdir.is_relative_to(b.resolve())
+    assert not workdir.is_relative_to(tmp_path.resolve())

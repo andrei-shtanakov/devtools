@@ -113,3 +113,76 @@ def test_unexpected_exception_is_exit_3_not_1(
          "--basis", f"requirements={b / '10-requirements.md'}"]
     )
     assert got == 3
+
+
+# === §9.1: сквозной прогон CLI, коды 0 и 1, с ревьюером-заглушкой ===
+
+
+def _fake_claude(bin_dir: Path, findings: list[dict]) -> None:
+    """Заглушка `claude`: читает stdin (промпт) и печатает фиксированный
+    envelope — без сети и без реальной модели."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({
+        "structured_output": {
+            "criteria": [
+                {"id": rid, "status": "pass", "reason": "ок"}
+                for rid in ("R1", "R2", "R3", "R4")
+            ],
+            "findings": findings,
+        }
+    })
+    script = bin_dir / "claude"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stdin.read()\n"
+        f"print({payload!r})\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+
+def _run_with_fake_claude(
+    args: list[str], bin_dir: Path
+) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    return subprocess.run(
+        [sys.executable, str(REPO / "edge_check.py"), *args],
+        capture_output=True, text=True, cwd=REPO, env=env,
+    )
+
+
+def test_end_to_end_pass_is_exit_0(tmp_path: Path) -> None:
+    """§9.1: сквозной CLI-прогон, все пункты pass, находок нет — код 0."""
+    b = _bundle(tmp_path)
+    bin_dir = tmp_path / "bin-pass"
+    _fake_claude(bin_dir, findings=[])
+    got = _run_with_fake_claude(
+        ["--edge", "behaviour-vs-requirements", "--bundle", str(b),
+         "--subject", str(b / "15-behaviour-spec.md"),
+         "--basis", f"requirements={b / '10-requirements.md'}"],
+        bin_dir,
+    )
+    assert got.returncode == 0, got.stderr
+    record = json.loads(got.stdout)
+    assert record["verdict"] == "PASS"
+
+
+def test_end_to_end_blocking_finding_is_exit_1(tmp_path: Path) -> None:
+    """§9.1: та же цепочка, но с блокирующей находкой — код 1."""
+    b = _bundle(tmp_path)
+    bin_dir = tmp_path / "bin-fail"
+    _fake_claude(bin_dir, findings=[
+        {"rule_id": "R2", "class": "major", "path": "15-behaviour-spec.md",
+         "lines": [1, 1], "statement": "вводит лишнее обязательство"},
+    ])
+    got = _run_with_fake_claude(
+        ["--edge", "behaviour-vs-requirements", "--bundle", str(b),
+         "--subject", str(b / "15-behaviour-spec.md"),
+         "--basis", f"requirements={b / '10-requirements.md'}"],
+        bin_dir,
+    )
+    assert got.returncode == 1, got.stderr
+    record = json.loads(got.stdout)
+    assert record["verdict"] == "FAIL"
