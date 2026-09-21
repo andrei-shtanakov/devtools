@@ -1,6 +1,6 @@
 ---
 spec_stage: acceptance
-status: approval_pending
+status: approved
 owner_role: qa
 traces_to:
 - requirements
@@ -10,6 +10,8 @@ upstream_hashes:
   behaviour-spec: 502af9daa01733730b3d105b7cae29fab0441748
 version: 2
 approved_content_hash: 68c3ad35845cab81690634f07e5c322d871a3e4a
+approved_by: andrei-shtanakov
+approved_at: '2026-09-21T12:36:15Z'
 ---
 
 # Acceptance: отказ обвязки ревью при недостижимой базе PR доказан тестом
