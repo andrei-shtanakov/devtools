@@ -1851,6 +1851,12 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `verifier` даёт статическую гарантию отсутствия агентских CLI, и
       edge-check не попадает ни в одну полосу; заявка по ADR-ECO-006 после
       приёмки v1.
+      Срез 1 доставлен PR этой ветки: одна проверка, вызываемая оператором
+      (`make edge-check`), каталог правил `contracts/edge-check/v1/`,
+      изоляция подтверждена opt-in smoke (`DEVTOOLS_EDGE_SMOKE=1`). Чего ещё
+      нет: состава рёбер из профиля, ключа результата и инвалидации,
+      готовности цепочки, леджера, публикации на PR — срезы 2 и 3 плана
+      `docs/superpowers/plans/2026-09-21-edge-check-v1.md`.
 
 - [x] E1 Вход конвейера из discovery-brief: `spec-loop --brief <path>` — бриф обязан пройти вендоренный gate_check (pass, иначе fail-closed), хэш брифа входит в `upstream_hashes` charter, бриф лежит нулевым узлом в `workstreams/<ws-id>/spec/` и едет бандл-PR-ом; промпты charter/requirements получают бриф как источник (G-NN/FR-NN переносятся с трассировкой), гвард «каждый Must-FR брифа встречается в requirements»; приёмка — живой прогон engineer-фрейм → бриф → spec-loop → approved tasks-спека → исполнение spec-runner @owner:github:andrei-shtanakov @id:spec-loop-brief-input
       Граница author ≠ execute discovery сохраняется: PR открывает конвейер,
