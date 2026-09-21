@@ -1,13 +1,18 @@
 ---
 spec_stage: decomposition
 dt_contract_version: 2
-status: draft
+status: approval_pending
 owner_role: tech-lead
-traces_to: [design, acceptance]
+traces_to:
+- design
+- acceptance
 upstream_hashes:
-  design: "0d315e8817e6f9b3c974fabed4301b63793b64b8"
-  acceptance: "22ff140f9cfc4f70bfd46c51f84bb5630ca3c21c"
+  design: 71f9a313d13d84650ba52990cb502b28e357959d
+  acceptance: 9f912776bb2c3ae8c9f17ce7f74e1f2adfdcc2bd
+version: 2
+approved_content_hash: defcf6cbd627ab8faf0f21ddbc97dfd8a272197a
 ---
+
 # Decomposition: Барьерный стоп S6 сохраняет op'ы только до resume (devtools#276)
 
 ## Задачи
