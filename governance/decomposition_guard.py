@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from typing import NamedTuple
 
 import yaml
@@ -980,14 +980,26 @@ def _delivers_region(block: str) -> str | None:
 _NODE_ID_RE = re.compile(r"^####\s+([A-Z][A-Z0-9]*-\d+[a-z]?)(?=[\s:]|$)", re.M)
 
 
-def node_ids(text: str) -> frozenset[str]:
-    """Id пунктов одного узла бандла — сырьё для индекса `sources`.
+def node_id_counts(text: str) -> dict[str, int]:
+    """Id пунктов одного узла бандла → сколько РАЗ каждый определён.
+
+    Сырьё для индекса `sources`, и именно в этой форме: кратность обязана
+    дожить до проверки ссылки. Схлопни её во множество раньше — и ссылка
+    на дважды определённый id разрешится молча, выбрав одно из двух
+    определений без права на такой выбор.
+
+    Заголовок `#### <ID>` — место ОПРЕДЕЛЕНИЯ пункта; упоминания того же
+    id в прозе заголовками не являются и здесь не считаются.
 
     Чистая функция над текстом: файлы читает вызывающий. Гвард остаётся
     без файлового ввода-вывода намеренно — иначе его нельзя было бы
     звать из моста и гейта одним и тем же способом.
     """
-    return frozenset(_NODE_ID_RE.findall(text))
+    counts: dict[str, int] = {}
+    for found in _NODE_ID_RE.findall(text):
+        counts[found] = counts.get(found, 0) + 1
+    return counts
+
 
 
 def _parse_delivers(
@@ -1141,17 +1153,23 @@ def _parse_delivers(
 def _sources_findings(
     dt_id: str,
     records: list[Deliverable],
-    node_index: Mapping[str, Collection[str]],
+    node_index: Mapping[str, Mapping[str, int]],
 ) -> list[str]:
     """Разрешение `sources` против индекса узлов бандла (спека §3b.2).
 
-    Гвард проверяет СУЩЕСТВОВАНИЕ узла и пункта; обоснованность ссылки —
-    предмет ревью, и притворяться, что структурная проверка её доказывает,
-    он не вправе.
+    Гвард проверяет РАЗРЕШИМОСТЬ ссылки; обоснованность — предмет ревью, и
+    притворяться, что структурная проверка её доказывает, он не вправе.
 
-    «Узла нет в бандле» и «пункта нет в узле» — РАЗНЫЕ сообщения: одно на
-    оба случая заставило бы автора искать опечатку в id там, где узел не
-    подключён к профилю вовсе.
+    Три причины неразрешимости, и каждая — своё сообщение, потому что
+    каждая чинится в своём месте:
+
+    * узла нет в бандле — чинится составом бандла/профилем;
+    * пункта нет в узле — чинится id в ссылке (обычно опечатка);
+    * пункт определён больше одного раза — чинится САМИМ УЗЛОМ: пока
+      определений два, ссылка указывает на оба сразу, и выбрать за автора
+      одно из них гвард не вправе. Молчаливое разрешение здесь было бы
+      худшим исходом: ревьюер сверялся бы с источником, которого автор не
+      имел в виду.
     """
     findings: list[str] = []
     for record in records:
@@ -1163,11 +1181,20 @@ def _sources_findings(
                     f"узел {node!r} в бандле отсутствует (известны: "
                     f"{', '.join(sorted(node_index)) or 'ни одного'})"
                 )
-            elif item not in node_index[node]:
+                continue
+            count = node_index[node].get(item, 0)
+            if count == 0:
                 findings.append(
                     f"{dt_id}: delivers {record.id} ссылается на {ref} — "
                     f"пункт {item!r} в узле {node!r} не найден; номер "
                     f"строки и текст заголовка идентификаторами не считаются"
+                )
+            elif count > 1:
+                findings.append(
+                    f"{dt_id}: delivers {record.id} ссылается на {ref} — "
+                    f"пункт {item!r} определён в узле {node!r} "
+                    f"{count} раза: ссылка неоднозначна, определение "
+                    f"должно быть ровно одно"
                 )
     return findings
 
@@ -1235,7 +1262,7 @@ def _restates_findings(
 def dt_contract_findings(
     decomposition_text: str,
     *,
-    node_index: Mapping[str, Collection[str]],
+    node_index: Mapping[str, Mapping[str, int]],
     allow_legacy_dt: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Версия DT-диалекта и форма `delivers` → (ошибки, предупреждения).
@@ -1254,7 +1281,8 @@ def dt_contract_findings(
     с забытым полем молча обошёл бы контракт, то есть барьер отключался бы
     ровно тем, от чего защищает. Режим включает оператор параметром.
 
-    `node_index` (узел → id его пунктов, стройте через `node_ids`) —
+    `node_index` (узел → id его пунктов с КРАТНОСТЬЮ определения,
+    стройте через `node_id_counts`) —
     параметр БЕЗ значения по умолчанию, и это не придирка к сигнатуре.
     Дефолт `None` со смыслом «тогда не проверяем» превратил бы забывчивость
     вызывающего в тихое отключение проверки — класс отказа, который в этом

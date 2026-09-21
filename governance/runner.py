@@ -2120,22 +2120,46 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         # способом. Ключ индекса — имя узла, как его пишет ссылка
         # (`acceptance#AC-07`), а не имя файла.
         #
+        # Состав берётся из ОБЪЯВЛЕННОГО состава бандла
+        # (`bundle_dag.node_filenames` над активным DAG), а не из
+        # собственного кортежа гейта. Прежняя редакция перечисляла узлы
+        # здесь — и charter в перечисление не попал: ссылки
+        # `charter#CON-01`, `charter#M-01`, `charter#OUT-02` отвергались
+        # как «узла нет в бандле», хотя `00-charter.md` лежал в бандле
+        # (боевой прогон review-pr-unreachable-base-coverage-20260921,
+        # S4). Классы CON/M/OUT/RK существуют ТОЛЬКО в charter — ниже по
+        # конвейеру их нет вовсе, — поэтому у результата поставки,
+        # происходящего от ограничения или метрики, другого законного
+        # адреса в бандле не существует.
+        #
+        # `dag_for(None)` — полный состав: у раннера режима легаси нет
+        # (он авторит бандл целиком), и это ЕДИНСТВЕННОЕ место, куда
+        # подставится другой состав, если режим появится.
+        #
+        # Индекс несёт КРАТНОСТЬ определения (`node_id_counts`), а не
+        # множество id: дважды определённый id обязан дать отказ
+        # «ссылка неоднозначна», а множество потеряло бы повтор
+        # раньше, чем его успели проверить. Функции, отдающей одно
+        # лишь множество, в гварде больше нет — иначе она осталась бы
+        # готовым способом потерять повтор снова.
+        #
         # Индексируются ТОЛЬКО существующие файлы, и отсутствующий узел
         # остаётся вне индекса намеренно: ссылка на него получит отказ
         # «узла нет в бандле» — честную причину, отличную от «пункт не
         # найден». Пустой индекс (бандл без единого узла) — законный
         # вход, на котором не разрешается ни одна ссылка.
+        bundle_root = Path(state.target_dir) / state.bundle_dir
+        declared_paths = {
+            node: bundle_root / filename
+            for node, filename in bundle_dag.node_filenames(
+                bundle_dag.dag_for(None)
+            )
+        }
         node_index = {
-            node: decomposition_guard.node_ids(
+            node: decomposition_guard.node_id_counts(
                 path.read_text(encoding="utf-8")
             )
-            for node, path in (
-                ("requirements", req_path),
-                ("design", node_paths["design"]),
-                ("behaviour-spec", beh_path),
-                ("acceptance", node_paths["acceptance"]),
-                ("decomposition", decomp_path),
-            )
+            for node, path in declared_paths.items()
             if path.exists()
         }
         dt_errors, dt_warnings = decomposition_guard.dt_contract_findings(
