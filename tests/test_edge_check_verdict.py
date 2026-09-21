@@ -112,3 +112,45 @@ def test_absent_optional_basis_gives_na_without_calling_the_model(
     assert out["verdict"] == "N/A"
     assert out["absence"][0]["rule_id"] == "A1"
     assert called == [], "при N/A модель не зовётся"
+
+
+def test_call_exception_other_than_edge_check_error_becomes_reviewer_failed(
+    tmp_path: Path,
+) -> None:
+    """Инъекция `call` — публичный параметр; контракт `run_check` не должен
+    зависеть от того, что именно она бросает."""
+    b = _bundle(tmp_path)
+
+    def boom(prompt: str) -> str:
+        raise RuntimeError("сеть недоступна")
+
+    out = c.run_check(
+        "behaviour-vs-requirements",
+        b,
+        [b / "15-behaviour-spec.md"],
+        [("requirements", b / "10-requirements.md")],
+        contracts_dir=CONTRACTS,
+        model="claude-opus-5",
+        call=boom,
+    )
+    assert out["verdict"] == "ERROR"
+    assert out["error_code"] == "reviewer_failed"
+    assert "RuntimeError" in out["reason"]
+
+
+def test_parse_failure_keeps_specific_edge_check_error_code(tmp_path: Path) -> None:
+    """Задача 5 закрыла пути к «дикому» исключению из `parse_response`: любой
+    отказ там уже приходит как `EdgeCheckError` со своим кодом. Проверяем,
+    что широкая ловушка в `run_check` не подменяет этот код на общий."""
+    b = _bundle(tmp_path)
+    out = c.run_check(
+        "behaviour-vs-requirements",
+        b,
+        [b / "15-behaviour-spec.md"],
+        [("requirements", b / "10-requirements.md")],
+        contracts_dir=CONTRACTS,
+        model="claude-opus-5",
+        call=lambda prompt: "не json",
+    )
+    assert out["verdict"] == "ERROR"
+    assert out["error_code"] == "invalid_response"

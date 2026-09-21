@@ -51,6 +51,9 @@ def run_check(
 
     Неизвестное ребро (`unknown_edge`) вылетает наружу — его ловит задача 7.
     Любой другой `EdgeCheckError` превращается в запись с `verdict: "ERROR"`.
+    Параметр `call` — публичный, и контракт не зависит от того, что именно
+    он бросает: сбой вызова ревьюера любого типа тоже даёт `ERROR` (код
+    `reviewer_failed`), как и сбой разбора его ответа (код `invalid_response`).
     """
     started = _now()
     attempt_id = uuid.uuid4().hex
@@ -134,9 +137,25 @@ def run_check(
 
     try:
         raw = call(built.text)
+    except EdgeCheckError as exc:
+        return finish("ERROR", code=exc.code, reason=str(exc))
+    except Exception as exc:  # noqa: BLE001 — контракт `call` произволен
+        return finish(
+            "ERROR",
+            code="reviewer_failed",
+            reason=f"ревьюер упал ({type(exc).__name__}): {exc}",
+        )
+
+    try:
         parsed = response_mod.parse_response(raw, ruleset, prepared)
     except EdgeCheckError as exc:
         return finish("ERROR", code=exc.code, reason=str(exc))
+    except Exception as exc:  # noqa: BLE001 — контракт разбора не гарантирован
+        return finish(
+            "ERROR",
+            code="invalid_response",
+            reason=f"разбор ответа упал ({type(exc).__name__}): {exc}",
+        )
 
     record["criteria"] = [
         {"id": c.id, "status": c.status, "reason": c.reason} for c in parsed.criteria

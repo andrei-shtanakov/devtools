@@ -62,6 +62,15 @@ def test_reviewer_timeout_raises_timeout_error(tmp_path: Path) -> None:
     assert exc.value.code == "timeout"
 
 
+def test_reviewer_invalid_utf8_output_is_reviewer_failed(tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    argv = ["/bin/sh", "-c", "printf '\\377\\376'"]
+    with pytest.raises(r.EdgeCheckError) as exc:
+        rv.run_reviewer("prompt", argv, empty, timeout=5)
+    assert exc.value.code == "reviewer_failed"
+
+
 @pytest.mark.skipif(
     os.environ.get("DEVTOOLS_EDGE_SMOKE") != "1" or shutil.which("claude") is None,
     reason="боевой вызов ревьюера: DEVTOOLS_EDGE_SMOKE=1 и наличие claude",

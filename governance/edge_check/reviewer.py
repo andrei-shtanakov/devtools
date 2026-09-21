@@ -69,6 +69,10 @@ def run_reviewer(
         raise EdgeCheckError(
             "reviewer_failed", f"ревьюер не запустился: {exc}"
         ) from exc
+    except UnicodeDecodeError as exc:
+        raise EdgeCheckError(
+            "reviewer_failed", f"вывод ревьюера не в UTF-8: {exc}"
+        ) from exc
     if proc.returncode != 0:
         raise EdgeCheckError(
             "reviewer_failed",
