@@ -278,6 +278,7 @@ def start(
     author_backend: str = "codex",
     brief_source: brief_input.BriefSource | None = None,
     interview_spec: iv.InterviewSpec | None = None,
+    allow_legacy_dt: bool = True,
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
@@ -339,6 +340,7 @@ def start(
         author_backend=author_backend,
         brief=brief_descriptor,
         interview=interview_spec.as_state() if interview_spec else None,
+        allow_legacy_dt=allow_legacy_dt,
     )
     save(state)
     return advance(state, ops)
@@ -711,6 +713,7 @@ def verify(
         brief=parent.brief,
         merge_authority=parent.merge_authority,
         author_backend=parent.author_backend,
+        allow_legacy_dt=parent.allow_legacy_dt,
     )
     child.remediated_by = parent_run_id
     child.branch = parent.branch
@@ -2092,6 +2095,37 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
             state.status = "stopped_gate"
             save(state)
             return False
+    # Гард контракта DT (#282, срез 1): версия DT-диалекта и форма
+    # `delivers`. Отдельная находка от GC-DT-GRAPH выше и, в отличие от
+    # неё, НЕ обусловлена наличием behaviour-spec: предмет проверки —
+    # один документ decomposition, и требовать соседа значило бы молча
+    # пропускать контракт в профиле без behaviour-spec.
+    #
+    # Что эта врезка НЕ даёт: гейт судит только ФОРМУ объявленного —
+    # что `delivers` разбирается, что id уникальны в пределах бандла.
+    # Что объявленное доезжает до tasks.md, он не проверяет: перенос и
+    # разрешение `sources` — срез 2, а до него мост отказывает любому
+    # бандлу с объявленной версией (`task_bridge.deliver`). То есть
+    # зелёный гейт здесь означает «форма верна», а не «результаты
+    # поставки доставлены».
+    if decomp_path.exists():
+        dt_errors, dt_warnings = decomposition_guard.dt_contract_findings(
+            decomp_path.read_text(encoding="utf-8"),
+            allow_legacy_dt=state.allow_legacy_dt,
+        )
+        warnings.extend(
+            f"warning GC-DT-CONTRACT: {finding}" for finding in dt_warnings
+        )
+        contract = [
+            f"error GC-DT-CONTRACT: {finding}" for finding in dt_errors
+        ]
+        if contract:
+            (run_dir(state.run_id) / "gate-findings.txt").write_text(
+                "\n".join(warnings + contract) + "\n", encoding="utf-8"
+            )
+            state.status = "stopped_gate"
+            save(state)
+            return False
     # Гард Must-покрытия acceptance (Task 6 плана acceptance-node):
     # инварианты `acceptance_guard.coverage_findings` (Must-FR/NFR без
     # покрывающего AC, ссылочная целостность AC на requirements/
@@ -2646,6 +2680,17 @@ def main(argv: list[str] | None = None) -> int:
     start_p.add_argument(
         "--author-backend", default="codex", choices=["codex", "disp"],
     )
+    # Обе формы заведены сразу (BooleanOptionalAction), хотя сегодня
+    # смысл имеет только ужесточающая: дефолт переходный и снимается
+    # срезом 3 (см. `RunState.allow_legacy_dt`), а переименование флага
+    # вместе с флипом дефолта осиротило бы уже записанные команды.
+    start_p.add_argument(
+        "--allow-legacy-dt",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="принимать decomposition без dt_contract_version (переходный "
+        "дефолт; --no-allow-legacy-dt требует объявленной версии)",
+    )
     start_p.add_argument(
         "--run-id", default=None, help="дефолт <ws-id>-<3 случайных байта hex>"
     )
@@ -2694,6 +2739,7 @@ def main(argv: list[str] | None = None) -> int:
             ops=ops,
             merge_authority=args.merge_authority,
             author_backend=args.author_backend,
+            allow_legacy_dt=args.allow_legacy_dt,
         )
     elif args.command == "resume":
         state = resume(args.run_id, ops)

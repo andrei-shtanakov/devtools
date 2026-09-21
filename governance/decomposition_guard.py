@@ -9,6 +9,9 @@ import re
 from dataclasses import dataclass
 from datetime import date
 
+import yaml
+
+from governance.frontmatter import split_frontmatter
 from governance.spec_runner_contract import (
     SelectorPolicy,
     is_file_target_form,
@@ -851,3 +854,194 @@ def graph_findings(
                     f"стоков (нет: {', '.join(sorted(missing))})"
                 )
     return findings
+
+
+# --- Версия DT-контракта и форма `delivers` (devtools#282, спека §3b) ------
+#: Единственная поддержанная версия DT-диалекта. Список закрытый: неизвестная
+#: версия — ошибка, а не «наверное, совместимо».
+_DT_CONTRACT_VERSIONS = ("2",)
+
+#: Ссылка на пункт источника: `<узел>#<id>`. Номера строк и текст заголовка
+#: идентификаторами НЕ считаются (спека §3b.2) — и то и другое меняется при
+#: редактуре, а ссылка обязана её переживать.
+_SOURCE_REF_RE = re.compile(r"^[a-z][a-z0-9-]*#[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+_DELIVERS_KEY_RE = re.compile(r"^delivers:", re.M)
+
+#: Закрытый словарь видов результата (спека §3b.1). Открытый превратил бы
+#: машинную классификацию в свободный текст — тот же провал, от которого
+#: репо закрылось `WAIVER_CLASSES`: при открытом словаре видом становилось
+#: бы любое слово, которое автор счёл подходящим.
+DELIVERABLE_KINDS = ("capability", "module", "document", "config")
+
+
+def _dt_blocks(text: str) -> list[tuple[str, str]]:
+    """(dt_id, тело блока) — та же нарезка, что у `parse_dt_tasks`.
+
+    Границы блока не переопределяются: второе определение разъехалось бы с
+    парсером, и проверка формы смотрела бы не на тот текст, что разбор.
+    """
+    matches = list(_DT_HEAD_RE.finditer(text))
+    out: list[tuple[str, str]] = []
+    for idx, m in enumerate(matches):
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        block = text[m.end() : end]
+        section = _SECTION_RE.search(block)
+        if section is not None:
+            block = block[: section.start()]
+        out.append((m.group(1), block))
+    return out
+
+
+def _delivers_region(block: str) -> str | None:
+    """Текст `delivers:` вместе с его отступленным продолжением.
+
+    Регион вырезается и отдаётся YAML целиком, а не разбирается регуляркой
+    по полям: запись — вложенная структура, и свой разбор здесь был бы
+    вторым, более слабым YAML.
+    """
+    lines = block.splitlines()
+    for i, line in enumerate(lines):
+        if not line.startswith("delivers:"):
+            continue
+        region = [line]
+        for nxt in lines[i + 1:]:
+            if nxt.strip() and not nxt.startswith((" ", "\t")):
+                break
+            region.append(nxt)
+        return "\n".join(region)
+    return None
+
+
+def _delivers_findings(dt_id: str, block: str) -> tuple[list[str], list[str]]:
+    """Находки формы `delivers` одного DT и объявленные в нём id.
+
+    Id возвращаются СПИСКОМ с сохранением повторов, а не множеством:
+    множество схлопывало дубль до сверки, и внутри-DT повтор не находился
+    никогда — собственное сообщение проверки для него нельзя было даже
+    напечатать (блокер ревью PR #289).
+    """
+    keys = len(_DELIVERS_KEY_RE.findall(block))
+    if keys > 1:
+        # Число ключей считается отдельно от числа разборов — канон репо
+        # для этого класса (`tdd_waiver`). Регион берётся по первому
+        # совпадению, поэтому строка-заглушка выше настоящего блока молча
+        # съедала бы его.
+        return ([f"{dt_id}: ключ delivers объявлен дважды ({keys}) — "
+                 f"разбирается только первый, объявленное ниже невидимо"], [])
+    region = _delivers_region(block)
+    if region is None:
+        return ([f"{dt_id}: поле delivers отсутствует (dt_contract_version: 2 "
+                 f"требует его у каждого DT; `delivers: []` — законное "
+                 f"утверждение «объявленных результатов нет»)"], [])
+    try:
+        parsed = yaml.safe_load(region)
+    except yaml.YAMLError as exc:
+        return ([f"{dt_id}: поле delivers не разобрано как YAML: {exc}"], set())
+    items = (parsed or {}).get("delivers")
+    if items is None:
+        # Ключ есть, значения нет — находка формы, а не «поля нет»: тот же
+        # приём, что у `verifies` (round 13 ревью PR #161).
+        return ([f"{dt_id}: поле delivers объявлено, но пусто — ожидается "
+                 f"список записей либо явный `delivers: []`"], [])
+    if items == []:
+        return ([], [])
+    if not isinstance(items, list):
+        return ([f"{dt_id}: delivers обязан быть списком записей"], [])
+    findings: list[str] = []
+    ids: list[str] = []
+    for pos, item in enumerate(items, start=1):
+        where = f"{dt_id}: delivers[{pos}]"
+        if not isinstance(item, dict):
+            findings.append(f"{where}: ожидается запись с полями id/kind/"
+                            f"statement/sources")
+            continue
+        for field in ("id", "kind", "statement", "sources"):
+            if not item.get(field):
+                findings.append(f"{where}: поле {field} отсутствует или пусто")
+        del_id = item.get("id")
+        if isinstance(del_id, str) and del_id:
+            ids.append(del_id)
+        kind = item.get("kind")
+        if isinstance(kind, str) and kind and kind not in DELIVERABLE_KINDS:
+            findings.append(
+                f"{where}: неизвестный kind {kind!r} — словарь закрыт "
+                f"({', '.join(DELIVERABLE_KINDS)}); при открытом видом "
+                f"стало бы любое слово, которое автор счёл подходящим"
+            )
+        statement = item.get("statement")
+        if isinstance(statement, str) and statement and not statement.strip():
+            findings.append(f"{where}: statement пуст")
+        sources = item.get("sources")
+        if isinstance(sources, list):
+            for ref in sources:
+                if not isinstance(ref, str) or not _SOURCE_REF_RE.match(ref):
+                    findings.append(
+                        f"{where}: sources — ожидается `<узел>#<id>` "
+                        f"(например `acceptance#AC-07`), получено {ref!r}; "
+                        f"номер строки и текст заголовка идентификаторами "
+                        f"не считаются"
+                    )
+        elif sources is not None:
+            findings.append(f"{where}: sources обязан быть списком ссылок")
+    return (findings, ids)
+
+
+def dt_contract_findings(
+    decomposition_text: str, *, allow_legacy_dt: bool = False
+) -> tuple[list[str], list[str]]:
+    """Версия DT-диалекта и форма `delivers` → (ошибки, предупреждения).
+
+    Одна функция на обе половины намеренно: версия порождает и фатальную
+    находку, и предупреждение, и два входа с одним флагом разъехались бы.
+
+    Таблица (решение владельца 2026-09-21, спека §3b.4):
+
+    | версии нет, совместимость выключена | ошибка |
+    | версии нет, совместимость включена  | легаси + явная диагностика |
+    | версия 2                            | полная проверка, флаг не влияет |
+    | версия неизвестна/не разобрана      | ошибка, совместимость не маскирует |
+
+    ОТСУТСТВИЕ ВЕРСИИ САМО ПО СЕБЕ РЕЖИМ НЕ ВКЛЮЧАЕТ: иначе новый документ
+    с забытым полем молча обошёл бы контракт, то есть барьер отключался бы
+    ровно тем, от чего защищает. Режим включает оператор параметром.
+    """
+    try:
+        meta, body = split_frontmatter(decomposition_text)
+    except ValueError as exc:
+        return ([f"decomposition: frontmatter не разобран: {exc}"], [])
+    if "dt_contract_version" not in meta:
+        if allow_legacy_dt:
+            return ([], [
+                "decomposition: dt_contract_version не объявлена — старый "
+                "формат по явному разрешению оператора; ГАРАНТИЯ ПЕРЕНОСА "
+                "deliverables ОТСУТСТВУЕТ"
+            ])
+        return ([
+            "decomposition: требуется версия контракта "
+            "(`dt_contract_version` во frontmatter); отсутствие поля режим "
+            "совместимости НЕ включает — его включает оператор"
+        ], [])
+    raw = meta["dt_contract_version"]
+    version = "" if raw is None else str(raw)
+    if version not in _DT_CONTRACT_VERSIONS:
+        return ([
+            f"decomposition: неизвестная dt_contract_version {version!r} "
+            f"(поддержана: {', '.join(_DT_CONTRACT_VERSIONS)}); режим "
+            f"совместимости неизвестную версию не маскирует"
+        ], [])
+    errors: list[str] = []
+    seen: dict[str, str] = {}
+    for dt_id, block in _dt_blocks(body):
+        block_errors, ids = _delivers_findings(dt_id, block)
+        errors.extend(block_errors)
+        for del_id in ids:
+            if del_id in seen:
+                errors.append(
+                    f"{dt_id}: delivers id {del_id} уже объявлен в "
+                    f"{seen[del_id]} — id обеспечивает связь, дубль сделал "
+                    f"бы её неоднозначной"
+                )
+            else:
+                seen[del_id] = dt_id
+    return (errors, [])

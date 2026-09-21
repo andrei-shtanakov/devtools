@@ -99,6 +99,23 @@ class RunState:
     # stakeholder_role, target, traces_to, upstream_blob, brief_rel,
     # started_at, completed_at. None — прогон без интервью (E1/legacy).
     interview: dict | None = None
+    # Решение оператора о совместимости с DT-документами без объявленной
+    # `dt_contract_version` (#282, срез 1). Живёт в состоянии, а не в
+    # аргументах шага, потому что `resume` обязан судить тот же документ
+    # тем же правилом: иначе прогон, начатый в режиме совместимости,
+    # после перезапуска краснел бы на своём же бандле.
+    #
+    # ПЕРЕХОДНЫЙ ДЕФОЛТ `True`, и он обязан быть снят срезом 3. Порядок
+    # поставки зафиксирован владельцем: гвард и барьер → перенос и
+    # разрешение ссылок → новый авторинг. До среза 3 авторинг версию НЕ
+    # пишет, поэтому дефолт `False` покрасил бы гейт на каждом бандле,
+    # который сам же конвейер и создал, — то есть поставил бы барьер
+    # раньше того, что он охраняет. Сам гвард при этом умолчанию НЕ
+    # доверяет: `dt_contract_findings(allow_legacy_dt=False)` — его
+    # сигнатурный дефолт, отсутствие версии режим не включает, режим
+    # включает вот это явное значение. Документ, объявивший версию 2,
+    # проверяется полностью независимо от флага.
+    allow_legacy_dt: bool = True
 
 
 _ALLOWED_AUTHOR_BACKENDS = ("codex", "disp")
@@ -143,6 +160,7 @@ def new_run(
     author_backend: str = "codex",
     brief: dict[str, object] | None = None,
     interview: dict | None = None,
+    allow_legacy_dt: bool = True,
 ) -> RunState:
     """Новый прогон (S0). `run_id` подаётся снаружи (вызывающая сторона)."""
     validate_merge_authority(merge_authority)
@@ -166,6 +184,7 @@ def new_run(
         author_backend=author_backend,
         brief=brief,
         interview=interview,
+        allow_legacy_dt=allow_legacy_dt,
     )
 
 

@@ -9111,3 +9111,59 @@ def test_stamp_epoch_intent_refuses_before_any_effect(
     assert "approval_pr" in message, "признак эпохи назван"
     assert not _effects(ops), "ни одного эффекта — отказ до коммита"
     assert _ledger_bytes() == before
+
+
+def test_bridge_refuses_to_deliver_a_v2_bundle(tmp_path: Path) -> None:
+    """Барьер среза 1 (devtools#282, решение владельца 2026-09-21).
+
+    Перенос результатов поставки ещё не реализован. Без этого отказа мост
+    ПРИНЯЛ бы бандл, объявивший `delivers`, отрендерил tasks по старому
+    контракту и МОЛЧА ПОТЕРЯЛ объявленное — то есть ровно тот дефект, ради
+    которого заведена заявка, только теперь с формальным объявлением на
+    входе. Fail-closed до среза 2.
+    """
+    target = _target(tmp_path)
+    anchor = target / "workstreams/WS-alpha-7/spec/30-decomposition.md"
+    anchor.write_text(
+        DECOMPOSITION_MD.replace(
+            "spec_stage: decomposition\n",
+            "spec_stage: decomposition\ndt_contract_version: 2\n",
+            1,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="dt_contract_version"):
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=_StubOps(),
+        )
+
+
+def test_bridge_still_delivers_a_versionless_bundle(tmp_path: Path) -> None:
+    """Негативная половина: барьер ограничен объявленной версией 2.
+
+    Без неё «мост отказывает на v2» удовлетворялось бы и мостом,
+    отказывающим всегда, — а рендер старого формата обязан остаться
+    неизменным до среза 2.
+    """
+    target = _target(tmp_path)
+
+    pr = task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=_StubOps(),
+    )
+
+    assert pr == 77
+    assert "### TASK-001: Реализация" in (
+        target / "spec/WS-alpha-7-tasks.md"
+    ).read_text()
