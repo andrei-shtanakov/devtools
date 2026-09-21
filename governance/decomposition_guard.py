@@ -917,6 +917,15 @@ class Deliverable(NamedTuple):
     statement: str
     sources: tuple[str, ...]
     covered_by: str | None
+    #: Повтор обязательства предшествующей задачи (§3b.6, контракт
+    #: владельца 2026-09-21). Ссылка ведёт на ИСХОДНОЕ обязательство, а не
+    #: на посредника: цепочка рассеяла бы источник, и пункт назвал бы
+    #: задачу, где обязательство лишь повторено, а не исполнено.
+    #: `restates` значит ПОВТОР ТОГО ЖЕ обязательства; расширение или
+    #: новое ограничение — самостоятельный результат со своим id.
+    #: Смысловую эквивалентность гвард НЕ судит и судить не может — это
+    #: предмет ревью; здесь проверяется только структура связи.
+    restates: str | None = None
 
 
 def _dt_blocks(text: str) -> list[tuple[str, str]]:
@@ -1057,6 +1066,19 @@ def _parse_delivers(
         statement = item.get("statement")
         if isinstance(statement, str) and statement and not statement.strip():
             findings.append(f"{where}: statement пуст")
+        elif isinstance(statement, str) and "\n" in statement.strip():
+            # Пункт чек-листа — ОДНА физическая строка по построению: и
+            # spec-runner разбирает его построчно, и перенос §I11 опознаёт
+            # носитель состояния по строке. Многострочный statement рвал
+            # пункт на две, и доставка падала с ложной причиной
+            # «результат встречается 0 раз» — пункт был отрендерен целиком
+            # (находка ревью PR #295). Судья формы — гвард, и отказ обязан
+            # приходить от него: на своей стадии и с верной причиной.
+            findings.append(
+                f"{where}: statement занимает несколько строк — "
+                f"обязательство доезжает до исполнителя ОДНОЙ строкой "
+                f"чек-листа, и многострочный текст её разорвал бы"
+            )
         sources = item.get("sources")
         refs: list[str] = []
         if isinstance(sources, list):
@@ -1093,6 +1115,15 @@ def _parse_delivers(
                 f"связь объявлена с пунктом, которого в задаче не будет"
             )
             covered_by = None
+        restates = item.get("restates")
+        if restates is not None and not (
+            isinstance(restates, str) and _DELIVERABLE_ID_RE.match(restates)
+        ):
+            findings.append(
+                f"{where}: restates — ожидается id результата в форме "
+                f"`DEL-NN`, получено {restates!r}"
+            )
+            restates = None
         if isinstance(del_id, str) and del_id:
             records.append(
                 Deliverable(
@@ -1101,6 +1132,7 @@ def _parse_delivers(
                     statement=statement if isinstance(statement, str) else "",
                     sources=tuple(refs),
                     covered_by=covered_by,
+                    restates=restates,
                 )
             )
     return (findings, records)
@@ -1136,6 +1168,66 @@ def _sources_findings(
                     f"{dt_id}: delivers {record.id} ссылается на {ref} — "
                     f"пункт {item!r} в узле {node!r} не найден; номер "
                     f"строки и текст заголовка идентификаторами не считаются"
+                )
+    return findings
+
+
+def _restates_findings(
+    owner_of: dict[str, str],
+    records_of: dict[str, list[Deliverable]],
+    edges: dict[str, tuple[str, ...]],
+) -> list[str]:
+    """Кросс-DT инварианты повтора обязательства (§3b.6).
+
+    Четыре правила, и каждое закрывает свой способ сделать пометку ложной:
+
+    1. цель существует — иначе пункт отошлёт исполнителя к обязательству,
+       которого в бандле нет;
+    2. цель принадлежит ДРУГОМУ DT — самоссылка дала бы «проверить, что
+       сделано в этой же задаче», то есть проверку без исполнителя;
+    3. DT-владелец лежит в транзитивном замыкании `depends_on` — тот же
+       инвариант, что у `delivered_by` и `verifies`. Без ребра «уже
+       сделано» НЕ гарантировано: задачи могут идти параллельно, и
+       пометка станет ложью ровно в тот момент, когда на неё положатся;
+    4. цепочек нет — ссылка ведёт на ИСХОДНОЕ обязательство. Цепочка
+       рассеивает источник: пункт назвал бы задачу-посредника, где
+       обязательство лишь повторено, а не исполнено.
+
+    Чего здесь нет и быть не может: суждения, что два `statement`
+    действительно об одном и том же. Это смысл, его судит ревью; структурный
+    гвард, притворившийся его судьёй, лишь спрятал бы вопрос.
+    """
+    findings: list[str] = []
+    for dt_id, records in records_of.items():
+        for record in records:
+            target = record.restates
+            if target is None:
+                continue
+            where = f"{dt_id}: delivers {record.id} restates {target}"
+            if target not in owner_of:
+                findings.append(
+                    f"{where} — такого результата в бандле нет"
+                )
+                continue
+            owner = owner_of[target]
+            if owner == dt_id:
+                findings.append(
+                    f"{where} — это результат самого {dt_id}: повтор "
+                    f"ссылается на ПРЕДШЕСТВУЮЩУЮ задачу, а ссылка на себя "
+                    f"дала бы проверку без исполнителя"
+                )
+                continue
+            if owner not in _transitive_deps(dt_id, edges):
+                findings.append(
+                    f"{where} — {owner} не лежит в транзитивном замыкании "
+                    f"depends_on {dt_id}: без ребра «уже сделано» не "
+                    f"гарантировано, задачи могут идти параллельно"
+                )
+            if any(r.id == target and r.restates for r in records_of[owner]):
+                findings.append(
+                    f"{where} — цепочка повторов: {target} сам объявлен "
+                    f"повтором. Ссылка обязана вести на ИСХОДНОЕ "
+                    f"обязательство, иначе пункт назовёт посредника"
                 )
     return findings
 
@@ -1199,10 +1291,14 @@ def dt_contract_findings(
         ], [])
     errors: list[str] = []
     seen: dict[str, str] = {}
+    records_of: dict[str, list[Deliverable]] = {}
+    edges: dict[str, tuple[str, ...]] = {}
     for dt_id, block in _dt_blocks(body):
         block_errors, records = _parse_delivers(dt_id, block)
         errors.extend(block_errors)
         errors.extend(_sources_findings(dt_id, records, node_index))
+        records_of[dt_id] = records
+        edges[dt_id] = _list_field(block, "depends_on") or ()
         for del_id in (r.id for r in records):
             if del_id in seen:
                 errors.append(
@@ -1212,4 +1308,5 @@ def dt_contract_findings(
                 )
             else:
                 seen[del_id] = dt_id
+    errors.extend(_restates_findings(seen, records_of, edges))
     return (errors, [])

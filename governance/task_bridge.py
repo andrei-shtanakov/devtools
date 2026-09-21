@@ -596,15 +596,38 @@ def _assert_delivers_projected(
             if re.search(rf"(?<![\w-]){re.escape(item_id)}(?![\w-])", line)
         ]
         if len(hits) != 1:
+            # Диагностика, а не второе суждение о форме: отказ стоит в
+            # любом случае, но причину он обязан назвать верно.
+            # Многострочный `statement` рвёт пункт на две физические
+            # строки, и «встречается 0 раз» про отрендеренный целиком
+            # пункт — ложь, стоящая отладочной сессии (ревью PR #295).
+            # Саму эту форму отвергает гвард, раньше и по существу.
+            multiline = next(
+                (
+                    d for d in task.delivers
+                    if d.id == item_id and "\n" in d.statement.strip()
+                ),
+                None,
+            )
+            because = (
+                " — его statement занимает несколько строк и разорвал пункт"
+                if multiline is not None and not hits
+                else ""
+            )
             raise RuntimeError(
                 f"{task.dt_id}: результат {item_id} встречается в чек-листе "
-                f"{len(hits)} раз(а), ожидается ровно один — объявленный "
-                "результат обязан доехать до исполнителя и остаться "
-                "единственным носителем своего состояния"
+                f"{len(hits)} раз(а), ожидается ровно один{because}; "
+                "объявленный результат обязан доехать до исполнителя и "
+                "остаться единственным носителем своего состояния"
             )
+    # Помимо собственных id, в пункте законно стоит ЦЕЛЬ повтора (§3b.6):
+    # пункт обязан назвать обязательство, которое он просит проверить.
+    # Это объявленная ссылка, а не посторонний результат, — иначе сверка
+    # отвергала бы ровно ту форму, которую сама же требует напечатать.
+    referenced = {d.restates for d in task.delivers if d.restates}
     stray = {
         found for ln in items for found in _DELIVERS_ID_RE.findall(ln)
-    } - set(declared)
+    } - set(declared) - referenced
     if stray:
         raise RuntimeError(
             f"{task.dt_id}: в чек-листе есть результаты, не объявленные в "
@@ -620,9 +643,18 @@ def _assert_delivers_projected(
             and m.group("text").startswith(f"{d.id} (")
         ]
         if not own or d.statement not in own[0]:
+            # Та же диагностика, что у счётчика выше, на второй форме
+            # текста: после сериализации многострочный statement режется,
+            # и пункт несёт лишь его первую строку. Отказ верен в обоих
+            # случаях, но причина обязана называться своим именем.
+            because = (
+                " — его statement занимает несколько строк"
+                if "\n" in d.statement.strip()
+                else ""
+            )
             raise RuntimeError(
                 f"{task.dt_id}: пункт результата {d.id} не несёт его "
-                "statement — id доехал, обязательство нет"
+                f"statement{because} — id доехал, обязательство нет"
             )
 
 
@@ -695,6 +727,10 @@ def render_tasks_dt(
     # эпохи блокера снят (@id:decomposition-verify-first-unblock).
     by_beh = {sc.beh_id: sc for sc in scenarios}
     number = {t.dt_id: idx for idx, t in enumerate(dt_tasks, start=1)}
+    # DEL → DT-владелец: нужен, чтобы повтор (§3b.6) назвал НОМЕР задачи,
+    # в которой обязательство исполнено. Строится из тех же `delivers`,
+    # что и всё остальное, — второго источника у связи нет.
+    owner_of_del = {d.id: task.dt_id for task in dt_tasks for d in task.delivers}
     lines = _render_header(
         ws_id, subject, generated_at, anchor_blob, anchor_node_id="decomposition",
         version=version,
@@ -884,10 +920,36 @@ def render_tasks_dt(
         # прокси, от которого отказывается §3b, применённый с другой
         # стороны. Гвард уже отверг `covered_by`, называющий чужой
         # сценарий, поэтому здесь остаётся только разложить объявленное.
+        def _deliverable_text(d: decomposition_guard.Deliverable) -> str:
+            """Текст обязательства в чек-листе — один на обе формы пункта.
+
+            У повтора (§3b.6) он говорит, что от исполнителя требуется:
+            ПРОВЕРИТЬ, а не реализовать, — и называет задачу, в которой
+            обязательство исполнено. Утверждать, что работа сделана, мост
+            не вправе: ребро графа говорит о ПОРЯДКЕ, а не о результате,
+            и «DT-01 уже это сделал» было бы фактом, которого он не знает.
+            """
+            if not d.restates:
+                return f"{d.id} ({d.kind}): {d.statement}"
+            owner = owner_of_del.get(d.restates)
+            if owner is None or owner not in number:
+                # Гвард такую ссылку не пропускает; если она всё же дошла
+                # сюда, молча напечатать пункт без адреса значило бы
+                # отправить исполнителя проверять неизвестно что.
+                raise RuntimeError(
+                    f"{t.dt_id}: delivers {d.id} повторяет {d.restates}, "
+                    "но владелец этого результата в бандле не найден"
+                )
+            return (
+                f"{d.id} ({d.kind}): проверить, что {d.statement} — "
+                f"повтор обязательства {d.restates} из "
+                f"TASK-{number[owner]:03d}"
+            )
+
         covered: dict[str, list[str]] = {}
         for d in t.delivers:
             if d.covered_by:
-                covered.setdefault(d.covered_by, []).append(d.id)
+                covered.setdefault(d.covered_by, []).append(_deliverable_text(d))
         for g in group:
             item = f"- [ ] {item_verb} {g.beh_id}: {g.title}"
             if g.beh_id in covered:
@@ -901,7 +963,7 @@ def render_tasks_dt(
         # похожими формулировками выходили бы неразличимы, а §I11
         # переносит состояние по ТЕКСТУ пункта.
         lines += [
-            f"- [ ] {d.id} ({d.kind}): {d.statement}"
+            f"- [ ] {_deliverable_text(d)}"
             for d in t.delivers
             if not d.covered_by
         ]

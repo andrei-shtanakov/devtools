@@ -74,3 +74,31 @@ def test_decomposition_dsl_takes_the_closed_kind_vocabulary_from_the_guard():
     assert "|".join(DELIVERABLE_KINDS) in dsl, dsl
     for kind in DELIVERABLE_KINDS:
         assert f"`{kind}`" in dsl, kind
+
+
+def test_decomposition_dsl_declares_the_restates_contract():
+    """§3b.6: повтор обязательства объявляется, а не угадывается.
+
+    Промпт — единственное место, где автор узнаёт о носителе. Молчи он о
+    `restates`, повтор остался бы прозой «Предмета», то есть для
+    исполнителя не существовал бы вовсе — ровно дефект, против которого
+    заведён раздел.
+    """
+    from governance.ops import _AUTHOR_DSL
+
+    dsl = _AUTHOR_DSL["decomposition"]
+    assert "`restates: DEL-NN`" in dsl, dsl
+    for needle in ("depends_on", "NOT a chain", "same obligation"):
+        assert needle in dsl, needle
+
+
+def test_decomposition_dsl_requires_a_single_line_statement():
+    """Находка ревью #295: форма, которую мост спроецировать не может.
+
+    Промпт обязан сказать об ограничении там же, где требует statement, —
+    иначе автор узнает о нём только отказом гейта.
+    """
+    from governance.ops import _AUTHOR_DSL
+
+    dsl = _AUTHOR_DSL["decomposition"]
+    assert "SINGLE LINE" in dsl, dsl
