@@ -15,7 +15,14 @@ import pytest
 
 pytest.importorskip("steward")
 
-from governance import brief_input, bundle_state, merge_gate, runner, task_bridge
+from governance import (
+    brief_input,
+    bundle_dag,
+    bundle_state,
+    merge_gate,
+    runner,
+    task_bridge,
+)
 from governance import ops as ops_mod
 from governance import interview as iv
 from governance import run_state as rs
@@ -368,7 +375,10 @@ class FakeOps:
         # Минимально DSL-корректное содержимое (зеркало обогащённого промпта
         # RealOps.author): гард GC-DSL-EMPTY в S4 читает эти файлы.
         body = {
-            "charter": "# charter\n",
+            # `#### CON-01` — не украшение фикстуры: charter обязан быть
+            # АДРЕСУЕМЫМ узлом (`charter#CON-01` в `sources`), и без
+            # заголовка проверить это нечем.
+            "charter": "# charter\n\n#### CON-01: ограничение\n\nтекст\n",
             "requirements": _DEFAULT_REQUIREMENTS_BODY,
             "behaviour-spec": _DEFAULT_BEHAVIOUR_BODY,
         }[kind]
@@ -7134,6 +7144,93 @@ def test_gate_stops_on_unresolvable_delivers_source(
     ).read_text(encoding="utf-8")
     assert "GC-DT-CONTRACT" in findings, findings
     assert "AC-99" in findings, findings
+
+
+def test_gate_resolves_a_delivers_source_in_charter(
+    tmp_path: Path, runs_root
+) -> None:
+    """charter — адресуемый узел наравне с остальными.
+
+    Классы `CON-*`/`M-*`/`OUT-*` живут ТОЛЬКО в charter: ниже по
+    конвейеру их нет вовсе (requirements несёт FR/NFR, design — Q,
+    acceptance — AC, behaviour-spec — BEH). Не будь charter в индексе, у
+    результата поставки, происходящего от ограничения, не было бы в
+    бандле ни одного законного адреса — ровно это и случилось на боевом
+    прогоне review-pr-unreachable-base-coverage-20260921.
+    """
+    ops = _with_delivers(FakeOps, "charter#CON-01")(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-del-charter", ops))
+
+    findings_path = runner.run_dir("r-del-charter") / "gate-findings.txt"
+    findings = (
+        findings_path.read_text(encoding="utf-8")
+        if findings_path.exists()
+        else ""
+    )
+    assert state.status != "stopped_gate", findings
+    assert "error GC-DT-CONTRACT" not in findings, findings
+
+
+def test_gate_index_covers_exactly_the_declared_bundle_composition(
+    tmp_path: Path, runs_root
+) -> None:
+    """Состав индекса = объявленный состав бандла, не список гейта.
+
+    Проверяется через наблюдаемое поведение, а не чтением кода: ссылка на
+    КАЖДЫЙ узел активного DAG обязана разрешаться, а ссылка на нулевой
+    узел discovery (`00-discovery/brief.md`, в `BUNDLE_DAG` не входит) —
+    отвергаться как «узла нет». Иначе граница «что адресуемо» держалась
+    бы на том, что читатель заметил кортеж в гейте.
+    """
+    declared = set(bundle_dag.composition(bundle_dag.dag_for(None)))
+    assert "charter" in declared and "discovery-brief" not in declared
+
+    ops = _with_delivers(FakeOps, "discovery-brief#G-01")(
+        facts=GREEN_PR_FACTS
+    )
+    state = runner.start(**_start_kwargs(tmp_path, "r-del-brief", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-del-brief") / "gate-findings.txt"
+    ).read_text(encoding="utf-8")
+    assert "discovery-brief" in findings, findings
+    assert "узел" in findings, findings
+
+
+def test_gate_rejects_an_ambiguous_delivers_source(
+    tmp_path: Path, runs_root
+) -> None:
+    """Дважды определённый пункт не разрешается молча.
+
+    Кратность обязана дожить от чтения файла до проверки ссылки: собери
+    гейт индекс множеством — и повтор исчез бы раньше, чем его проверили,
+    а ссылка указала бы на одно из двух определений без права на выбор.
+    """
+
+    class _Doubled(_with_delivers(FakeOps, "charter#CON-01")):
+        def author(
+            self, target_dir: str, kind: str, subject: str, bundle_dir: str
+        ) -> int:
+            rc = super().author(target_dir, kind, subject, bundle_dir)
+            if kind == "charter":
+                path = Path(target_dir) / bundle_dir / "00-charter.md"
+                path.write_text(
+                    path.read_text(encoding="utf-8")
+                    + "\n#### CON-01: оно же второй раз\n\nдругой текст\n",
+                    encoding="utf-8",
+                )
+            return rc
+
+    ops = _Doubled(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-del-dup", ops))
+
+    assert state.status == "stopped_gate"
+    findings = (
+        runner.run_dir("r-del-dup") / "gate-findings.txt"
+    ).read_text(encoding="utf-8")
+    assert "CON-01" in findings, findings
+    assert "неоднозначн" in findings, findings
 
 
 def test_run_json_without_the_compat_field_resumes_strictly(

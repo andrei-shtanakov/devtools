@@ -392,7 +392,19 @@ _KINDS_LIST = ", ".join(f"`{_kind}`" for _kind in DELIVERABLE_KINDS)
 _AUTHOR_DSL = {
     "charter": (
         "YAML frontmatter (required): spec_stage: charter, status: draft, "
-        "owner_role: product."
+        "owner_role: product. Every item that carries an id — goals G-NN, "
+        "personas P-NN, jobs J-NN, functional FR-NN, non-functional "
+        "NFR-NN, constraints CON-NN, success metrics M-NN, out-of-scope "
+        "OUT-NN, risks RK-NN, open questions Q-NN — MUST be DEFINED "
+        "exactly once as a heading `#### <ID>: <title>`, with its prose "
+        "below the heading. That heading is the item's ADDRESS: the "
+        "decomposition node references charter items as `charter#CON-01`, "
+        "and constraints, success metrics and out-of-scope items have no "
+        "other node in the bundle to be addressed from — their classes "
+        "exist nowhere downstream. Mentions of an id elsewhere in the "
+        "document stay prose and MUST NOT be headings: a second "
+        "`#### <ID>` for the same id is a second definition, and every "
+        "reference to that id is then rejected as ambiguous."
     ),
     "requirements": (
         "YAML frontmatter (required): spec_stage: requirements, status: "

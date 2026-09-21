@@ -9,7 +9,7 @@ from governance.decomposition_guard import (
     DELIVERABLE_KINDS,
     DtTask,
     dt_contract_findings,
-    node_ids,
+    node_id_counts,
     parse_dt_tasks,
 )
 
@@ -1224,7 +1224,7 @@ _V2_FM = "---\nspec_stage: decomposition\ndt_contract_version: 2\n---\n"
 #: Индекс узлов бандла для фикстур ниже: единственная ссылка, которую они
 #: объявляют, — `acceptance#AC-07`. Тесты, чей предмет — САМО разрешение
 #: ссылок, подают свой индекс и эту константу не берут.
-_INDEX: dict[str, set[str]] = {"acceptance": {"AC-07"}}
+_INDEX: dict[str, dict[str, int]] = {"acceptance": {"AC-07": 1}}
 _NO_FM = "---\nspec_stage: decomposition\n---\n"
 
 _DT_V2 = (
@@ -1472,17 +1472,17 @@ def test_node_ids_extracts_both_heading_forms() -> None:
     знающий одну, молча отдал бы пустой индекс для другого узла, и КАЖДАЯ
     ссылка на него стала бы «пункт не найден».
     """
-    assert node_ids("#### AC-07: отказ без actor · verification: test\n") == (
-        frozenset({"AC-07"})
-    )
-    assert node_ids(
+    assert node_id_counts(
+        "#### AC-07: отказ без actor · verification: test\n"
+    ) == {"AC-07": 1}
+    assert node_id_counts(
         "#### Q-03 · owner_role: architects · resolution: resolved\n"
-    ) == frozenset({"Q-03"})
+    ) == {"Q-03": 1}
 
 
 def test_sources_pointing_at_a_missing_item_is_an_error() -> None:
     errors, _ = dt_contract_findings(
-        _V2_FM + _DT_V2, node_index={"acceptance": {"AC-01"}}
+        _V2_FM + _DT_V2, node_index={"acceptance": {"AC-01": 1}}
     )
 
     assert any("AC-07" in e for e in errors), errors
@@ -1506,7 +1506,7 @@ def test_sources_resolved_against_the_index_is_accepted() -> None:
     краснеющей на любом входе.
     """
     errors, warnings = dt_contract_findings(
-        _V2_FM + _DT_V2, node_index={"acceptance": {"AC-07", "AC-01"}}
+        _V2_FM + _DT_V2, node_index={"acceptance": {"AC-07": 1, "AC-01": 1}}
     )
 
     assert errors == [], errors
@@ -1683,3 +1683,73 @@ def test_single_line_statement_stays_accepted() -> None:
     errors, _ = dt_contract_findings(_V2_FM + _DT_V2, node_index=_INDEX)
 
     assert errors == [], errors
+
+
+def test_node_id_counts_reports_repeated_definitions() -> None:
+    """Индекс несёт КРАТНОСТЬ определения, а не только факт наличия.
+
+    `frozenset` схлопывает два `#### CON-01` в один элемент, и ссылка на
+    такой id разрешается молча — выбрав неизвестно какое из двух
+    определений. Кратность обязана дожить до проверки `sources`, иначе
+    неоднозначность теряется раньше, чем её успевают заметить.
+    """
+    counts = node_id_counts(
+        "#### CON-01: ограничение\nтекст\n\n"
+        "#### CON-01: оно же второй раз\nдругой текст\n\n"
+        "#### CON-02: второе ограничение\n"
+    )
+
+    assert counts["CON-01"] == 2
+    assert counts["CON-02"] == 1
+
+
+def test_sources_pointing_at_a_charter_item_resolves() -> None:
+    """charter — адресуемый узел бандла наравне с остальными.
+
+    Ограничения (`CON-*`), метрики успеха (`M-*`) и не-цели (`OUT-*`)
+    существуют ТОЛЬКО в charter: ниже по конвейеру их классов нет вовсе.
+    Не будь charter в индексе, у результата поставки, происходящего от
+    ограничения, не было бы в бандле ни одного законного адреса.
+    """
+    text = _V2_FM + _DT_V2.replace('"acceptance#AC-07"', '"charter#CON-01"')
+
+    errors, _ = dt_contract_findings(
+        text, node_index={"charter": {"CON-01": 1}}
+    )
+
+    assert errors == []
+
+
+def test_missing_charter_item_names_the_item_not_the_node() -> None:
+    """Узел есть, пункта нет — причина об ОТСУТСТВУЮЩЕМ ПУНКТЕ.
+
+    Обратное сообщение («узла нет») отправило бы автора чинить состав
+    бандла там, где у него опечатка в id.
+    """
+    text = _V2_FM + _DT_V2.replace('"acceptance#AC-07"', '"charter#CON-99"')
+
+    errors, _ = dt_contract_findings(
+        text, node_index={"charter": {"CON-01": 1}}
+    )
+
+    assert len(errors) == 1, errors
+    assert "CON-99" in errors[0] and "пункт" in errors[0], errors
+    assert "узел" not in errors[0].lower(), errors
+
+
+def test_sources_pointing_at_a_twice_defined_item_is_ambiguous() -> None:
+    """Повторённый id НЕ разрешается — ни молча, ни «первым попавшимся».
+
+    Два определения одного id делают ссылку указывающей на оба сразу:
+    ревьюер не может свериться с источником, потому что источников два, а
+    выбор между ними гвард сделать не вправе.
+    """
+    text = _V2_FM + _DT_V2.replace('"acceptance#AC-07"', '"charter#CON-01"')
+
+    errors, _ = dt_contract_findings(
+        text, node_index={"charter": {"CON-01": 2}}
+    )
+
+    assert len(errors) == 1, errors
+    assert "CON-01" in errors[0], errors
+    assert "неоднозначн" in errors[0], errors
