@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import pytest
 
-from governance.decomposition_guard import DtTask, parse_dt_tasks
+from governance.decomposition_guard import (
+    DtTask,
+    dt_contract_findings,
+    parse_dt_tasks,
+)
 
 DT_OK = (
     "#### DT-01: Парсер · type: implement · owner: dev\n"
@@ -1206,3 +1210,128 @@ def test_unknown_beh_suffix_form_is_a_form_finding() -> None:
     )
     findings = graph_findings(beh, dt)
     assert any("BEH-18A" in f and "грамматик" in f for f in findings)
+
+
+# --- Версия DT-контракта и форма delivers (devtools#282, спека §3b) --------
+# Таблица поведения — решение владельца 2026-09-21. Ключевое: ОТСУТСТВИЕ
+# ВЕРСИИ САМО ПО СЕБЕ РЕЖИМ НЕ ВКЛЮЧАЕТ. Иначе новый документ с забытым
+# полем молча обошёл бы контракт — то есть барьер отключался бы ровно тем,
+# от чего защищает.
+
+_V2_FM = "---\nspec_stage: decomposition\ndt_contract_version: 2\n---\n"
+_NO_FM = "---\nspec_stage: decomposition\n---\n"
+
+_DT_V2 = (
+    "#### DT-01: Парсер · type: implement · owner: dev\n"
+    "scenarios: [BEH-01]\n"
+    "depends_on: []\n"
+    "parallel_group: core\n"
+    "delivers:\n"
+    "  - id: DEL-01\n"
+    "    kind: capability\n"
+    "    statement: \"парсер отвергает дубль ключа\"\n"
+    "    sources:\n"
+    "      - \"acceptance#AC-07\"\n"
+    "Проза предмета.\n"
+)
+
+
+def test_missing_version_without_compat_is_an_error() -> None:
+    """Забытое поле — отказ, а не молчаливый легаси-режим."""
+    errors, warnings = dt_contract_findings(_NO_FM + DT_OK, allow_legacy_dt=False)
+    assert any("версия" in e.lower() for e in errors), errors
+    assert warnings == []
+
+
+def test_missing_version_with_compat_is_legacy_with_diagnostic() -> None:
+    """Режим включает ОПЕРАТОР параметром, а не отсутствие поля."""
+    errors, warnings = dt_contract_findings(_NO_FM + DT_OK, allow_legacy_dt=True)
+    assert errors == []
+    # Регистр не пинуем: предмет проверки — что диагностика есть и
+    # называет отсутствие гарантии, а не её типографика.
+    assert any("гарантия переноса" in w.lower() for w in warnings), warnings
+
+
+def test_v2_is_checked_regardless_of_the_compat_switch() -> None:
+    """Объявленная версия сильнее переключателя: совместимость её не гасит."""
+    for allow in (False, True):
+        errors, warnings = dt_contract_findings(
+            _V2_FM + _DT_V2, allow_legacy_dt=allow
+        )
+        assert errors == [], (allow, errors)
+        assert warnings == [], (allow, warnings)
+
+
+def test_v2_requires_delivers_on_every_dt() -> None:
+    errors, _ = dt_contract_findings(_V2_FM + DT_OK, allow_legacy_dt=True)
+    assert any("DT-01" in e and "delivers" in e for e in errors), errors
+
+
+def test_v2_accepts_an_explicitly_empty_list() -> None:
+    """`[]` — утверждение автора «объявленных результатов нет», не пропуск."""
+    text = _V2_FM + DT_OK.replace(
+        "parallel_group: core\nПроза предмета.",
+        "parallel_group: core\ndelivers: []\nПроза предмета.",
+        1,
+    ).replace(
+        "parallel_group: core\nverifies:",
+        "parallel_group: core\ndelivers: []\nverifies:",
+        1,
+    )
+    errors, _ = dt_contract_findings(text, allow_legacy_dt=False)
+    assert errors == [], errors
+
+
+@pytest.mark.parametrize("version", ["1", "3", "two", "2.0", ""])
+def test_unknown_or_malformed_version_is_an_error_compat_does_not_mask(
+    version: str,
+) -> None:
+    """Совместимость не маскирует неизвестную версию — иначе её включение
+    стало бы способом обойти любой будущий контракт."""
+    fm = f"---\nspec_stage: decomposition\ndt_contract_version: {version}\n---\n"
+    for allow in (False, True):
+        errors, _ = dt_contract_findings(fm + DT_OK, allow_legacy_dt=allow)
+        # Причина названа, а не просто «ошибки есть»: мутант, пропускающий
+        # неизвестную версию при включённой совместимости, ВЫЖИЛ на прежней
+        # редакции — прогон краснел от постороннего «delivers отсутствует»,
+        # и тест подтверждал существование чужой находки.
+        assert any("неизвестная dt_contract_version" in e for e in errors), (
+            version, allow, errors
+        )
+
+
+@pytest.mark.parametrize(
+    ("broken", "expect"),
+    [
+        # Отступы включены в вырезаемую строку намеренно: без них
+        # .replace склеивает остаток с соседней строкой и ломает YAML —
+        # тест падал бы на разборе, а не на отсутствии поля.
+        ("    statement: \"парсер отвергает дубль ключа\"\n", "statement"),
+        ("      - \"acceptance#AC-07\"\n", "sources"),
+        ("    kind: capability\n", "kind"),
+    ],
+)
+def test_v2_delivers_form_requires_every_field(broken: str, expect: str) -> None:
+    """Вида и идентификатора мало (спека §3b.1): statement обязателен, и
+    отсутствие каждого поля называется своим именем."""
+    errors, _ = dt_contract_findings(
+        _V2_FM + _DT_V2.replace(broken, "", 1), allow_legacy_dt=False
+    )
+    assert any(expect in e for e in errors), (expect, errors)
+
+
+def test_v2_delivers_rejects_duplicate_ids() -> None:
+    """`id` обеспечивает связь; дубль сделал бы связь неоднозначной."""
+    doubled = _DT_V2 + _DT_V2.replace("DT-01", "DT-02").replace(
+        "Парсер", "Второй"
+    )
+    errors, _ = dt_contract_findings(_V2_FM + doubled, allow_legacy_dt=False)
+    assert any("DEL-01" in e for e in errors), errors
+
+
+def test_v2_source_must_be_addressed_not_a_heading() -> None:
+    """Номера строк и текст заголовка идентификаторами не считаются
+    (спека §3b.2): и то и другое меняется при редактуре."""
+    bad = _DT_V2.replace('"acceptance#AC-07"', '"25-acceptance.md:41"')
+    errors, _ = dt_contract_findings(_V2_FM + bad, allow_legacy_dt=False)
+    assert any("sources" in e for e in errors), errors
