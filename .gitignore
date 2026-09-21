@@ -4,3 +4,4 @@ __pycache__/
 out/
 .venv/
 .superpowers/
+.aider*
