@@ -1,8 +1,11 @@
 ---
 spec_stage: charter
-status: draft
+status: approval_pending
 owner_role: product
+version: 2
+approved_content_hash: 89f4017bce26938bdb0340b21daae428eea7f6c8
 ---
+
 # Charter: Барьерный стоп S6 сохраняет op'ы только до resume (devtools#276)
 
 ## Контекст
