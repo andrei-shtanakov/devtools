@@ -99,4 +99,4 @@ behaviour-tasks: ; @uv run --frozen --group governance python -m governance.task
 accept-pr: ; @uv run --frozen python -m governance.accept_pr $(ARGS)
 human-merge: ; @sh ./human-merge.sh $(ARGS)
 preflight: ; @uv run --frozen python ./spec_run_preflight.py $(ARGS)
-edge-check:  ; @python3 ./edge_check.py $(ARGS)
+edge-check:  ; @uv run --frozen python ./edge_check.py $(ARGS)
