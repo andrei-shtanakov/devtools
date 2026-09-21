@@ -1,10 +1,13 @@
 ---
 spec_stage: requirements
-status: draft
+status: approval_pending
 owner_role: product
-traces_to: [charter]
+traces_to:
+- charter
 upstream_hashes:
-  charter: "b51ea104b1261bcb225e78091cc8ad0903600c4a"
+  charter: 9e0d0ee427acf42fc99ad79b628f789a990f3007
+version: 2
+approved_content_hash: fd5dfc6c1ebf3c62edcad928902dc56dd6641509
 ---
 
 # Requirements: отказ обвязки ревью при недостижимой базе PR доказан тестом
