@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -77,3 +79,37 @@ def test_make_edge_check_target_runs_under_uv(tmp_path: Path) -> None:
     )
     assert got.returncode == 2, got.stderr
     assert "ModuleNotFoundError" not in got.stderr
+
+
+def test_out_write_failure_does_not_lose_the_finished_record(tmp_path: Path) -> None:
+    """I6: сбой записи `--out` не должен прятать уже посчитанный результат."""
+    b = _bundle(tmp_path)
+    bad_out = tmp_path / "no-such-dir" / "record.json"
+    got = _run(["--edge", "behaviour-vs-requirements", "--bundle", str(b),
+                "--subject", str(b / "15-behaviour-spec.md"),
+                "--basis", f"requirements={b / 'nope.md'}",
+                "--out", str(bad_out)])
+    assert got.returncode == 2
+    record = json.loads(got.stdout)
+    assert record["verdict"] == "ERROR"
+    assert not bad_out.exists()
+
+
+def test_unexpected_exception_is_exit_3_not_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C2: последний рубеж main() — сломанный прибор не должен выдавать себя
+    за код 1 (FAIL по словарю `_EXIT`)."""
+    import edge_check
+
+    def boom(*args: object, **kwargs: object) -> dict:
+        raise RuntimeError("сюрприз")
+
+    monkeypatch.setattr(edge_check, "run_check", boom)
+    b = _bundle(tmp_path)
+    got = edge_check.main(
+        ["--edge", "behaviour-vs-requirements", "--bundle", str(b),
+         "--subject", str(b / "15-behaviour-spec.md"),
+         "--basis", f"requirements={b / '10-requirements.md'}"]
+    )
+    assert got == 3

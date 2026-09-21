@@ -50,15 +50,26 @@ def main(argv: list[str] | None = None) -> int:
             contracts_dir=args.contracts, model=args.model,
             effort=args.effort, timeout=args.timeout,
         )
-    except EdgeCheckError as exc:  # только конфигурация: неизвестное ребро
+        # Печать — ДО записи в файл (находка I6): сбой `--out` не должен
+        # прятать уже посчитанный результат состоявшегося вызова.
+        text = json.dumps(record, ensure_ascii=False, indent=2, sort_keys=False)
+        print(text)
+        if args.out:
+            try:
+                args.out.write_text(text + "\n", encoding="utf-8")
+            except OSError as exc:
+                print(f"edge-check: не удалось записать --out: {exc}",
+                      file=sys.stderr)
+                return 2
+        return _EXIT[record["verdict"]]
+    except EdgeCheckError as exc:  # только конфигурация: каталог правил/ребро
         print(f"edge-check: {exc}", file=sys.stderr)
         return 2
-
-    text = json.dumps(record, ensure_ascii=False, indent=2, sort_keys=False)
-    if args.out:
-        args.out.write_text(text + "\n", encoding="utf-8")
-    print(text)
-    return _EXIT[record["verdict"]]
+    except Exception as exc:  # noqa: BLE001 — последний рубеж (находка C2):
+        # сломанный прибор не должен выдавать себя за код 1 (FAIL)
+        print(f"edge-check: неожиданный сбой ({type(exc).__name__}): {exc}",
+              file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":

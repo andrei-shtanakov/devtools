@@ -45,6 +45,10 @@ def test_identity_changes_when_items_are_reordered(tmp_path: Path) -> None:
     (tmp_path / "instruction.md").write_text(
         (CONTRACTS / "instruction.md").read_text(encoding="utf-8"), encoding="utf-8"
     )
+    (tmp_path / "response-schema.json").write_text(
+        (CONTRACTS / "response-schema.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     second = r.load_rules("behaviour-vs-requirements", tmp_path)
 
     assert first.identity != second.identity
@@ -55,3 +59,60 @@ def test_unknown_edge_is_config_error() -> None:
         r.load_rules("no-such-edge", CONTRACTS)
     assert exc.value.code == "unknown_edge"
     assert "no-such-edge" in str(exc.value)
+
+
+def _copy_contracts(dest: Path, *, rules_yaml: str) -> None:
+    """Скопировать инструкцию и схему, положить свой rules-файл (для тестов
+    на сломанный каталог правил — C2, I2, I4)."""
+    rules_dir = dest / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "behaviour-vs-requirements.yaml").write_text(
+        rules_yaml, encoding="utf-8"
+    )
+    (dest / "instruction.md").write_text(
+        (CONTRACTS / "instruction.md").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (dest / "response-schema.json").write_text(
+        (CONTRACTS / "response-schema.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+
+# === C2: отказ каталога правил — код, а не сырой трейсбек ===
+
+
+def test_malformed_items_structure_is_malformed_rules(tmp_path: Path) -> None:
+    """items — не список пунктов, а строка: TypeError не должен уйти наружу
+    как FAIL (код 1); ожидаем именованный код конфигурации."""
+    _copy_contracts(tmp_path, rules_yaml="edge: x\nitems: не список, а строка\n")
+    with pytest.raises(r.EdgeCheckError) as exc:
+        r.load_rules("behaviour-vs-requirements", tmp_path)
+    assert exc.value.code == "malformed_rules"
+
+
+def test_broken_yaml_is_malformed_rules(tmp_path: Path) -> None:
+    _copy_contracts(tmp_path, rules_yaml="items: [\n  - id: R1\n text: не закрыто")
+    with pytest.raises(r.EdgeCheckError) as exc:
+        r.load_rules("behaviour-vs-requirements", tmp_path)
+    assert exc.value.code == "malformed_rules"
+
+
+def test_missing_instruction_file_is_missing_instruction(tmp_path: Path) -> None:
+    rules_dir = tmp_path / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "behaviour-vs-requirements.yaml").write_text(
+        (CONTRACTS / "rules/behaviour-vs-requirements.yaml").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "response-schema.json").write_text(
+        (CONTRACTS / "response-schema.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    # instruction.md сознательно не кладём
+    with pytest.raises(r.EdgeCheckError) as exc:
+        r.load_rules("behaviour-vs-requirements", tmp_path)
+    assert exc.value.code == "missing_instruction"
+
+
