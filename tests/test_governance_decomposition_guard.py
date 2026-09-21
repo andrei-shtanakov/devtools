@@ -9,6 +9,7 @@ from governance.decomposition_guard import (
     DELIVERABLE_KINDS,
     DtTask,
     dt_contract_findings,
+    node_ids,
     parse_dt_tasks,
 )
 
@@ -1220,6 +1221,10 @@ def test_unknown_beh_suffix_form_is_a_form_finding() -> None:
 # от чего защищает.
 
 _V2_FM = "---\nspec_stage: decomposition\ndt_contract_version: 2\n---\n"
+#: Индекс узлов бандла для фикстур ниже: единственная ссылка, которую они
+#: объявляют, — `acceptance#AC-07`. Тесты, чей предмет — САМО разрешение
+#: ссылок, подают свой индекс и эту константу не берут.
+_INDEX: dict[str, set[str]] = {"acceptance": {"AC-07"}}
 _NO_FM = "---\nspec_stage: decomposition\n---\n"
 
 _DT_V2 = (
@@ -1239,14 +1244,14 @@ _DT_V2 = (
 
 def test_missing_version_without_compat_is_an_error() -> None:
     """Забытое поле — отказ, а не молчаливый легаси-режим."""
-    errors, warnings = dt_contract_findings(_NO_FM + DT_OK, allow_legacy_dt=False)
+    errors, warnings = dt_contract_findings(_NO_FM + DT_OK, allow_legacy_dt=False, node_index=_INDEX)
     assert any("версия" in e.lower() for e in errors), errors
     assert warnings == []
 
 
 def test_missing_version_with_compat_is_legacy_with_diagnostic() -> None:
     """Режим включает ОПЕРАТОР параметром, а не отсутствие поля."""
-    errors, warnings = dt_contract_findings(_NO_FM + DT_OK, allow_legacy_dt=True)
+    errors, warnings = dt_contract_findings(_NO_FM + DT_OK, allow_legacy_dt=True, node_index=_INDEX)
     assert errors == []
     # Регистр не пинуем: предмет проверки — что диагностика есть и
     # называет отсутствие гарантии, а не её типографика.
@@ -1257,14 +1262,14 @@ def test_v2_is_checked_regardless_of_the_compat_switch() -> None:
     """Объявленная версия сильнее переключателя: совместимость её не гасит."""
     for allow in (False, True):
         errors, warnings = dt_contract_findings(
-            _V2_FM + _DT_V2, allow_legacy_dt=allow
-        )
+            _V2_FM + _DT_V2, allow_legacy_dt=allow, node_index=_INDEX
+    )
         assert errors == [], (allow, errors)
         assert warnings == [], (allow, warnings)
 
 
 def test_v2_requires_delivers_on_every_dt() -> None:
-    errors, _ = dt_contract_findings(_V2_FM + DT_OK, allow_legacy_dt=True)
+    errors, _ = dt_contract_findings(_V2_FM + DT_OK, allow_legacy_dt=True, node_index=_INDEX)
     assert any("DT-01" in e and "delivers" in e for e in errors), errors
 
 
@@ -1279,7 +1284,7 @@ def test_v2_accepts_an_explicitly_empty_list() -> None:
         "parallel_group: core\ndelivers: []\nverifies:",
         1,
     )
-    errors, _ = dt_contract_findings(text, allow_legacy_dt=False)
+    errors, _ = dt_contract_findings(text, allow_legacy_dt=False, node_index=_INDEX)
     assert errors == [], errors
 
 
@@ -1291,7 +1296,7 @@ def test_unknown_or_malformed_version_is_an_error_compat_does_not_mask(
     стало бы способом обойти любой будущий контракт."""
     fm = f"---\nspec_stage: decomposition\ndt_contract_version: {version}\n---\n"
     for allow in (False, True):
-        errors, _ = dt_contract_findings(fm + DT_OK, allow_legacy_dt=allow)
+        errors, _ = dt_contract_findings(fm + DT_OK, allow_legacy_dt=allow, node_index=_INDEX)
         # Причина названа, а не просто «ошибки есть»: мутант, пропускающий
         # неизвестную версию при включённой совместимости, ВЫЖИЛ на прежней
         # редакции — прогон краснел от постороннего «delivers отсутствует»,
@@ -1316,7 +1321,7 @@ def test_v2_delivers_form_requires_every_field(broken: str, expect: str) -> None
     """Вида и идентификатора мало (спека §3b.1): statement обязателен, и
     отсутствие каждого поля называется своим именем."""
     errors, _ = dt_contract_findings(
-        _V2_FM + _DT_V2.replace(broken, "", 1), allow_legacy_dt=False
+        _V2_FM + _DT_V2.replace(broken, "", 1), allow_legacy_dt=False, node_index=_INDEX
     )
     assert any(expect in e for e in errors), (expect, errors)
 
@@ -1326,7 +1331,7 @@ def test_v2_delivers_rejects_duplicate_ids() -> None:
     doubled = _DT_V2 + _DT_V2.replace("DT-01", "DT-02").replace(
         "Парсер", "Второй"
     )
-    errors, _ = dt_contract_findings(_V2_FM + doubled, allow_legacy_dt=False)
+    errors, _ = dt_contract_findings(_V2_FM + doubled, allow_legacy_dt=False, node_index=_INDEX)
     assert any("DEL-01" in e for e in errors), errors
 
 
@@ -1334,7 +1339,7 @@ def test_v2_source_must_be_addressed_not_a_heading() -> None:
     """Номера строк и текст заголовка идентификаторами не считаются
     (спека §3b.2): и то и другое меняется при редактуре."""
     bad = _DT_V2.replace('"acceptance#AC-07"', '"25-acceptance.md:41"')
-    errors, _ = dt_contract_findings(_V2_FM + bad, allow_legacy_dt=False)
+    errors, _ = dt_contract_findings(_V2_FM + bad, allow_legacy_dt=False, node_index=_INDEX)
     assert any("sources" in e for e in errors), errors
 
 
@@ -1357,7 +1362,7 @@ def test_v2_delivers_rejects_duplicate_ids_inside_one_dt() -> None:
         "      - \"acceptance#AC-08\"\n",
         1,
     )
-    errors, _ = dt_contract_findings(_V2_FM + doubled, allow_legacy_dt=False)
+    errors, _ = dt_contract_findings(_V2_FM + doubled, allow_legacy_dt=False, node_index=_INDEX)
     assert any("DEL-01" in e for e in errors), errors
 
 
@@ -1370,7 +1375,7 @@ def test_v2_rejects_a_second_delivers_key_in_the_same_dt() -> None:
     числа разборов (как у `tdd_waiver`).
     """
     text = _DT_V2.replace("delivers:\n", "delivers: []\ndelivers:\n", 1)
-    errors, _ = dt_contract_findings(_V2_FM + text, allow_legacy_dt=False)
+    errors, _ = dt_contract_findings(_V2_FM + text, allow_legacy_dt=False, node_index=_INDEX)
     assert any("delivers" in e and "дважды" in e for e in errors), errors
 
 
@@ -1379,7 +1384,7 @@ def test_v2_kind_is_a_closed_vocabulary(kind: str) -> None:
     """Открытый словарь превратил бы машинную классификацию в свободный
     текст — тот же провал, от которого репо закрылось `WAIVER_CLASSES`."""
     text = _DT_V2.replace("kind: capability", f"kind: {kind}", 1)
-    errors, _ = dt_contract_findings(_V2_FM + text, allow_legacy_dt=False)
+    errors, _ = dt_contract_findings(_V2_FM + text, allow_legacy_dt=False, node_index=_INDEX)
     assert any("kind" in e for e in errors), (kind, errors)
 
 
@@ -1391,5 +1396,145 @@ def test_v2_accepts_every_declared_kind() -> None:
     """
     for kind in DELIVERABLE_KINDS:
         text = _DT_V2.replace("kind: capability", f"kind: {kind}", 1)
-        errors, _ = dt_contract_findings(_V2_FM + text, allow_legacy_dt=False)
+        errors, _ = dt_contract_findings(_V2_FM + text, allow_legacy_dt=False, node_index=_INDEX)
         assert errors == [], (kind, errors)
+
+
+# ── срез 2 #282: delivers доезжает структурой, covered_by, sources ──
+
+
+def test_parse_dt_tasks_exposes_delivers_records() -> None:
+    """Мост обязан получать `delivers` из ТОГО ЖЕ парсера, что и гвард.
+
+    Второй разбор того же текста в мосте был бы вторым вычислителем
+    предиката: он разошёлся бы с гвардом молча, и разойтись мог бы как раз
+    на том, что гвард признал валидным.
+    """
+    tasks, findings = parse_dt_tasks(_V2_FM + _DT_V2)
+
+    assert findings == [], findings
+    (task,) = tasks
+    (deliverable,) = task.delivers
+    assert deliverable.id == "DEL-01"
+    assert deliverable.kind == "capability"
+    assert deliverable.statement == "парсер отвергает дубль ключа"
+    assert deliverable.sources == ("acceptance#AC-07",)
+    assert deliverable.covered_by is None
+
+
+_DT_V2_COVERED = (
+    "#### DT-01: Парсер · type: implement · owner: dev\n"
+    "scenarios: [BEH-01]\n"
+    "depends_on: []\n"
+    "parallel_group: core\n"
+    "delivers:\n"
+    "  - id: DEL-01\n"
+    "    kind: capability\n"
+    "    statement: \"парсер отвергает дубль ключа\"\n"
+    "    sources:\n"
+    "      - \"acceptance#AC-07\"\n"
+    "    covered_by: BEH-01\n"
+    "Проза предмета.\n"
+)
+
+
+def test_covered_by_naming_own_scenario_is_accepted() -> None:
+    """Базовая половина: объявленная связь с пунктом ЭТОГО DT валидна."""
+    errors, warnings = dt_contract_findings(_V2_FM + _DT_V2_COVERED, node_index=_INDEX)
+
+    assert errors == [], errors
+    assert warnings == [], warnings
+    (task,) = parse_dt_tasks(_V2_FM + _DT_V2_COVERED)[0]
+    assert task.delivers[0].covered_by == "BEH-01"
+
+
+def test_covered_by_naming_a_foreign_scenario_is_an_error() -> None:
+    """Связь обязана быть объявлена ПРОВЕРЯЕМО, а не просто записана.
+
+    `covered_by` работает тем, что отменяет создание отдельного пункта.
+    Если он называет сценарий, которого у этого DT нет, пункта с такой
+    связью в задаче не появится вовсе — результат исчезнет молча, то есть
+    ровно тот дефект, против которого заведён #282, только приобретённый
+    через сам механизм защиты от него.
+    """
+    text = _V2_FM + _DT_V2_COVERED.replace("covered_by: BEH-01", "covered_by: BEH-99")
+
+    errors, _ = dt_contract_findings(text, node_index=_INDEX)
+
+    assert any("covered_by" in e and "BEH-99" in e for e in errors), errors
+
+
+def test_node_ids_extracts_both_heading_forms() -> None:
+    """Индекс строится из текста узла — обе живые формы заголовка.
+
+    `#### AC-07: <текст>` (двоеточие) и `#### Q-03 · owner_role: …`
+    (интерпункт) — разные DSL разных узлов одного бандла. Экстрактор,
+    знающий одну, молча отдал бы пустой индекс для другого узла, и КАЖДАЯ
+    ссылка на него стала бы «пункт не найден».
+    """
+    assert node_ids("#### AC-07: отказ без actor · verification: test\n") == (
+        frozenset({"AC-07"})
+    )
+    assert node_ids(
+        "#### Q-03 · owner_role: architects · resolution: resolved\n"
+    ) == frozenset({"Q-03"})
+
+
+def test_sources_pointing_at_a_missing_item_is_an_error() -> None:
+    errors, _ = dt_contract_findings(
+        _V2_FM + _DT_V2, node_index={"acceptance": {"AC-01"}}
+    )
+
+    assert any("AC-07" in e for e in errors), errors
+
+
+def test_sources_pointing_at_a_missing_node_is_an_error() -> None:
+    """Узла нет в бандле — отдельная причина от «пункта нет в узле».
+
+    Одно сообщение на оба случая заставило бы автора искать опечатку в id
+    там, где узел не подключён к профилю вовсе.
+    """
+    errors, _ = dt_contract_findings(_V2_FM + _DT_V2, node_index={})
+
+    assert any("acceptance" in e and "узел" in e.lower() for e in errors), errors
+
+
+def test_sources_resolved_against_the_index_is_accepted() -> None:
+    """Базовая половина: разрешимая ссылка не порождает находок.
+
+    Без неё «ссылка не разрешилась» удовлетворялось бы и проверкой,
+    краснеющей на любом входе.
+    """
+    errors, warnings = dt_contract_findings(
+        _V2_FM + _DT_V2, node_index={"acceptance": {"AC-07", "AC-01"}}
+    )
+
+    assert errors == [], errors
+    assert warnings == [], warnings
+
+
+def test_deliverable_id_must_follow_the_contract_form() -> None:
+    """Находка ревью #290 (major): формы id не проверял никто.
+
+    Гвард объявлен ЕДИНСТВЕННЫМ судьёй формы `delivers`, а мост опознаёт
+    результат в чек-листе по контрактной форме `DEL-NN`. Пропусти гвард
+    id иной формы — гейт зеленел бы, а доставка падала бы RuntimeError с
+    ЛОЖНОЙ причиной «результат не доехал», хотя пункт отрендерен и на
+    месте. Судья формы обязан судить форму.
+    """
+    text = _V2_FM + _DT_V2.replace("id: DEL-01", "id: OUT-01", 1)
+
+    errors, _ = dt_contract_findings(text, node_index=_INDEX)
+
+    assert any("OUT-01" in e and "DEL-" in e for e in errors), errors
+
+
+def test_contract_form_id_is_accepted() -> None:
+    """Базовая половина: контрактная форма проходит.
+
+    Без неё «гвард отвергает чужую форму» удовлетворялось бы и гвардом,
+    отвергающим любой id.
+    """
+    errors, _ = dt_contract_findings(_V2_FM + _DT_V2, node_index=_INDEX)
+
+    assert errors == [], errors

@@ -8,6 +8,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
+from collections.abc import Collection, Mapping
+from typing import NamedTuple
 
 import yaml
 
@@ -248,6 +250,12 @@ class DtTask:
     parallel_group: str
     verifies: tuple[str, ...] = ()
     waiver: DtWaiver | None = None
+    #: Объявленные результаты поставки (спека §3b). Пустой кортеж у
+    #: легаси-DT неотличим от `delivers: []` НАМЕРЕННО: судит эту разницу
+    #: `dt_contract_findings` под объявленной версией, а не парсер —
+    #: иначе каждый легаси-бандл получал бы находку формы оттуда, где
+    #: версия вообще не читается.
+    delivers: tuple[Deliverable, ...] = ()
 
 
 def _waiver_field(
@@ -417,6 +425,14 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
         # чего).
         if dt_type == "implement" and verifies:
             findings.append(f"{dt_id}: verifies запрещён при type: implement")
+        # Находки формы `delivers` здесь СОЗНАТЕЛЬНО отбрасываются: их
+        # единственный судья — `dt_contract_findings`, который один знает
+        # объявленную версию диалекта. Парсер версии не читает, и,
+        # вынеси он те же находки, легаси-бандл краснел бы оттуда, где
+        # режим совместимости не виден вовсе. Дефектная запись при этом
+        # до моста не доезжает по другому пути: гейт останавливает
+        # прогон на ошибках `GC-DT-CONTRACT` раньше доставки.
+        _, delivers = _parse_delivers(dt_id, block)
         waiver, waiver_findings = _waiver_field(block, dt_id, dt_type,
                                                 depends_on or ())
         findings += waiver_findings
@@ -426,6 +442,7 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
             depends_on=depends_on or (), delivered_by=delivered_by,
             parallel_group=group_m.group(1) if group_m else "",
             verifies=verifies, waiver=waiver,
+            delivers=tuple(delivers),
         ))
     for dt_id, count in seen.items():
         if count > 1:
@@ -868,11 +885,38 @@ _SOURCE_REF_RE = re.compile(r"^[a-z][a-z0-9-]*#[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 _DELIVERS_KEY_RE = re.compile(r"^delivers:", re.M)
 
+#: Контрактная форма id результата поставки (спека §3b.3 — «задача
+#: сохраняет ссылку на `DEL-NN`»). Проверяется ЗДЕСЬ, потому что гвард
+#: объявлен единственным судьёй формы `delivers`, а мост опознаёт
+#: результат в чек-листе по этой же форме. Разойдись они — гейт зеленел
+#: бы, а доставка падала бы с ЛОЖНОЙ причиной «результат не доехал»,
+#: хотя пункт отрендерен и на месте (находка ревью PR #290).
+_DELIVERABLE_ID_RE = re.compile(r"^DEL-\d+$")
+
 #: Закрытый словарь видов результата (спека §3b.1). Открытый превратил бы
 #: машинную классификацию в свободный текст — тот же провал, от которого
 #: репо закрылось `WAIVER_CLASSES`: при открытом словаре видом становилось
 #: бы любое слово, которое автор счёл подходящим.
 DELIVERABLE_KINDS = ("capability", "module", "document", "config")
+
+
+class Deliverable(NamedTuple):
+    """Один объявленный результат поставки DT (спека §3b.1).
+
+    Три поля несут три разные роли и не заменяют друг друга: `kind`
+    классифицирует, `id` обеспечивает связь, `statement` задаёт
+    обязательство. `covered_by` — четвёртое, отдельное: оно объявляет, что
+    результат уже закрыт существующим пунктом чек-листа (сценарием того же
+    DT), и ровно поэтому мост не создаёт для него второй пункт. Совпадение
+    пути или похожего текста таким объявлением НЕ является — это тот же
+    прокси, от которого отказывается весь §3b.
+    """
+
+    id: str
+    kind: str
+    statement: str
+    sources: tuple[str, ...]
+    covered_by: str | None
 
 
 def _dt_blocks(text: str) -> list[tuple[str, str]]:
@@ -913,13 +957,44 @@ def _delivers_region(block: str) -> str | None:
     return None
 
 
-def _delivers_findings(dt_id: str, block: str) -> tuple[list[str], list[str]]:
-    """Находки формы `delivers` одного DT и объявленные в нём id.
+#: Id узла в заголовке ЛЮБОГО DSL бандла. Две живые формы разделителя, и
+#: обе обязаны разбираться одним экстрактором: `#### AC-07: <текст>`
+#: (двоеточие, acceptance/behaviour/requirements) и `#### Q-03 ·
+#: owner_role: …` (интерпункт, design). Экстрактор, знающий одну форму,
+#: отдал бы для другого узла ПУСТОЙ индекс — и каждая ссылка на него
+#: стала бы «пункт не найден», то есть отказ по несуществующей причине.
+#:
+#: Интерпункт в границе НЕ перечислен намеренно: в живой форме design он
+#: отделён от id пробелом, который `\s` уже покрывает. Перечисление его
+#: отдельно выглядело бы проверкой, которой нет — мутация, снявшая эту
+#: ветку, выжила бы, потому что предикат от неё не зависит.
+_NODE_ID_RE = re.compile(r"^####\s+([A-Z][A-Z0-9]*-\d+[a-z]?)(?=[\s:]|$)", re.M)
 
-    Id возвращаются СПИСКОМ с сохранением повторов, а не множеством:
-    множество схлопывало дубль до сверки, и внутри-DT повтор не находился
-    никогда — собственное сообщение проверки для него нельзя было даже
-    напечатать (блокер ревью PR #289).
+
+def node_ids(text: str) -> frozenset[str]:
+    """Id пунктов одного узла бандла — сырьё для индекса `sources`.
+
+    Чистая функция над текстом: файлы читает вызывающий. Гвард остаётся
+    без файлового ввода-вывода намеренно — иначе его нельзя было бы
+    звать из моста и гейта одним и тем же способом.
+    """
+    return frozenset(_NODE_ID_RE.findall(text))
+
+
+def _parse_delivers(
+    dt_id: str, block: str
+) -> tuple[list[str], list[Deliverable]]:
+    """Находки формы `delivers` одного DT и разобранные записи.
+
+    ОДИН разбор на обоих потребителей — гвард и мост. Второй разбор того
+    же текста в мосте был бы вторым вычислителем предиката: он разошёлся
+    бы с гвардом молча, и разойтись мог бы как раз на том, что гвард
+    признал валидным.
+
+    Записи возвращаются СПИСКОМ с сохранением порядка и повторов id, а не
+    множеством: множество схлопывало дубль до сверки, и внутри-DT повтор
+    не находился никогда — собственное сообщение проверки для него нельзя
+    было даже напечатать (блокер ревью PR #289).
     """
     keys = len(_DELIVERS_KEY_RE.findall(block))
     if keys > 1:
@@ -937,7 +1012,7 @@ def _delivers_findings(dt_id: str, block: str) -> tuple[list[str], list[str]]:
     try:
         parsed = yaml.safe_load(region)
     except yaml.YAMLError as exc:
-        return ([f"{dt_id}: поле delivers не разобрано как YAML: {exc}"], set())
+        return ([f"{dt_id}: поле delivers не разобрано как YAML: {exc}"], [])
     items = (parsed or {}).get("delivers")
     if items is None:
         # Ключ есть, значения нет — находка формы, а не «поля нет»: тот же
@@ -949,7 +1024,11 @@ def _delivers_findings(dt_id: str, block: str) -> tuple[list[str], list[str]]:
     if not isinstance(items, list):
         return ([f"{dt_id}: delivers обязан быть списком записей"], [])
     findings: list[str] = []
-    ids: list[str] = []
+    records: list[Deliverable] = []
+    # Сценарии читаются из ТОГО ЖЕ блока: связь `covered_by` локальна DT,
+    # и проверять её по соседям значило бы принять пункт, который в этой
+    # задаче не окажется.
+    own_scenarios = _list_field(block, "scenarios") or ()
     for pos, item in enumerate(items, start=1):
         where = f"{dt_id}: delivers[{pos}]"
         if not isinstance(item, dict):
@@ -960,8 +1039,14 @@ def _delivers_findings(dt_id: str, block: str) -> tuple[list[str], list[str]]:
             if not item.get(field):
                 findings.append(f"{where}: поле {field} отсутствует или пусто")
         del_id = item.get("id")
-        if isinstance(del_id, str) and del_id:
-            ids.append(del_id)
+        if isinstance(del_id, str) and del_id and not _DELIVERABLE_ID_RE.match(
+            del_id
+        ):
+            findings.append(
+                f"{where}: id {del_id!r} не соответствует контрактной форме "
+                f"`DEL-NN`; по ней результат опознаётся в чек-листе, и id "
+                f"иной формы дал бы отказ доставки с ложной причиной"
+            )
         kind = item.get("kind")
         if isinstance(kind, str) and kind and kind not in DELIVERABLE_KINDS:
             findings.append(
@@ -973,6 +1058,7 @@ def _delivers_findings(dt_id: str, block: str) -> tuple[list[str], list[str]]:
         if isinstance(statement, str) and statement and not statement.strip():
             findings.append(f"{where}: statement пуст")
         sources = item.get("sources")
+        refs: list[str] = []
         if isinstance(sources, list):
             for ref in sources:
                 if not isinstance(ref, str) or not _SOURCE_REF_RE.match(ref):
@@ -982,13 +1068,83 @@ def _delivers_findings(dt_id: str, block: str) -> tuple[list[str], list[str]]:
                         f"номер строки и текст заголовка идентификаторами "
                         f"не считаются"
                     )
+                else:
+                    refs.append(ref)
         elif sources is not None:
             findings.append(f"{where}: sources обязан быть списком ссылок")
-    return (findings, ids)
+        covered_by = item.get("covered_by")
+        if covered_by is not None and not (
+            isinstance(covered_by, str) and covered_by.strip()
+        ):
+            findings.append(
+                f"{where}: covered_by — ожидается id сценария этого DT "
+                f"(например `BEH-33`), получено {covered_by!r}"
+            )
+            covered_by = None
+        elif isinstance(covered_by, str) and covered_by not in own_scenarios:
+            # `covered_by` работает тем, что ОТМЕНЯЕТ создание отдельного
+            # пункта. Назови он чужой сценарий — пункта с такой связью в
+            # задаче не появится вовсе, и результат исчезнет молча: тот
+            # самый дефект, против которого заведён §3b, приобретённый
+            # через сам механизм защиты от него. Поэтому не предупреждение.
+            findings.append(
+                f"{where}: covered_by {covered_by!r} не входит в scenarios "
+                f"этого DT ({', '.join(own_scenarios) or 'пусто'}) — "
+                f"связь объявлена с пунктом, которого в задаче не будет"
+            )
+            covered_by = None
+        if isinstance(del_id, str) and del_id:
+            records.append(
+                Deliverable(
+                    id=del_id,
+                    kind=kind if isinstance(kind, str) else "",
+                    statement=statement if isinstance(statement, str) else "",
+                    sources=tuple(refs),
+                    covered_by=covered_by,
+                )
+            )
+    return (findings, records)
+
+
+def _sources_findings(
+    dt_id: str,
+    records: list[Deliverable],
+    node_index: Mapping[str, Collection[str]],
+) -> list[str]:
+    """Разрешение `sources` против индекса узлов бандла (спека §3b.2).
+
+    Гвард проверяет СУЩЕСТВОВАНИЕ узла и пункта; обоснованность ссылки —
+    предмет ревью, и притворяться, что структурная проверка её доказывает,
+    он не вправе.
+
+    «Узла нет в бандле» и «пункта нет в узле» — РАЗНЫЕ сообщения: одно на
+    оба случая заставило бы автора искать опечатку в id там, где узел не
+    подключён к профилю вовсе.
+    """
+    findings: list[str] = []
+    for record in records:
+        for ref in record.sources:
+            node, _, item = ref.partition("#")
+            if node not in node_index:
+                findings.append(
+                    f"{dt_id}: delivers {record.id} ссылается на {ref} — "
+                    f"узел {node!r} в бандле отсутствует (известны: "
+                    f"{', '.join(sorted(node_index)) or 'ни одного'})"
+                )
+            elif item not in node_index[node]:
+                findings.append(
+                    f"{dt_id}: delivers {record.id} ссылается на {ref} — "
+                    f"пункт {item!r} в узле {node!r} не найден; номер "
+                    f"строки и текст заголовка идентификаторами не считаются"
+                )
+    return findings
 
 
 def dt_contract_findings(
-    decomposition_text: str, *, allow_legacy_dt: bool = False
+    decomposition_text: str,
+    *,
+    node_index: Mapping[str, Collection[str]],
+    allow_legacy_dt: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Версия DT-диалекта и форма `delivers` → (ошибки, предупреждения).
 
@@ -1005,6 +1161,17 @@ def dt_contract_findings(
     ОТСУТСТВИЕ ВЕРСИИ САМО ПО СЕБЕ РЕЖИМ НЕ ВКЛЮЧАЕТ: иначе новый документ
     с забытым полем молча обошёл бы контракт, то есть барьер отключался бы
     ровно тем, от чего защищает. Режим включает оператор параметром.
+
+    `node_index` (узел → id его пунктов, стройте через `node_ids`) —
+    параметр БЕЗ значения по умолчанию, и это не придирка к сигнатуре.
+    Дефолт `None` со смыслом «тогда не проверяем» превратил бы забывчивость
+    вызывающего в тихое отключение проверки — класс отказа, который в этом
+    репо уже случался (45 тестов шли мимо пина, который считались
+    покрывающими). Пустой индекс `{}` — законный вход со ЗНАЧЕНИЕМ «узлов
+    нет», и каждая ссылка на нём честно не разрешается.
+
+    Файлы читает вызывающий: гвард остаётся чистой функцией над строками,
+    иначе его нельзя звать из гейта и моста одним способом.
     """
     try:
         meta, body = split_frontmatter(decomposition_text)
@@ -1033,9 +1200,10 @@ def dt_contract_findings(
     errors: list[str] = []
     seen: dict[str, str] = {}
     for dt_id, block in _dt_blocks(body):
-        block_errors, ids = _delivers_findings(dt_id, block)
+        block_errors, records = _parse_delivers(dt_id, block)
         errors.extend(block_errors)
-        for del_id in ids:
+        errors.extend(_sources_findings(dt_id, records, node_index))
+        for del_id in (r.id for r in records):
             if del_id in seen:
                 errors.append(
                     f"{dt_id}: delivers id {del_id} уже объявлен в "
