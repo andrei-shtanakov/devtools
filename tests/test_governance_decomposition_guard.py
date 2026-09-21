@@ -1511,3 +1511,30 @@ def test_sources_resolved_against_the_index_is_accepted() -> None:
 
     assert errors == [], errors
     assert warnings == [], warnings
+
+
+def test_deliverable_id_must_follow_the_contract_form() -> None:
+    """Находка ревью #290 (major): формы id не проверял никто.
+
+    Гвард объявлен ЕДИНСТВЕННЫМ судьёй формы `delivers`, а мост опознаёт
+    результат в чек-листе по контрактной форме `DEL-NN`. Пропусти гвард
+    id иной формы — гейт зеленел бы, а доставка падала бы RuntimeError с
+    ЛОЖНОЙ причиной «результат не доехал», хотя пункт отрендерен и на
+    месте. Судья формы обязан судить форму.
+    """
+    text = _V2_FM + _DT_V2.replace("id: DEL-01", "id: OUT-01", 1)
+
+    errors, _ = dt_contract_findings(text, node_index=_INDEX)
+
+    assert any("OUT-01" in e and "DEL-" in e for e in errors), errors
+
+
+def test_contract_form_id_is_accepted() -> None:
+    """Базовая половина: контрактная форма проходит.
+
+    Без неё «гвард отвергает чужую форму» удовлетворялось бы и гвардом,
+    отвергающим любой id.
+    """
+    errors, _ = dt_contract_findings(_V2_FM + _DT_V2, node_index=_INDEX)
+
+    assert errors == [], errors

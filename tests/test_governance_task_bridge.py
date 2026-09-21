@@ -9529,3 +9529,85 @@ def test_delivery_refuses_when_the_carry_writer_drops_a_deliverable(
             ops=_StubOps(),
             report_carry=True,
         )
+
+
+def test_post_carry_check_accepts_an_already_checked_deliverable() -> None:
+    """Находка ревью Copilot на PR #290: проверка слепла к `- [x]`.
+
+    Носитель состояния — ОДИН И ТОТ ЖЕ пункт; перенос §I11 меняет в нём
+    ровно символ отметки. Проверка, читавшая только `- [ ]`, объявляла
+    отмеченный результат ПОТЕРЯННЫМ и отказывала в доставке — то есть
+    конвейер вставал на втором переиздании любой задачи, где исполнитель
+    успел отметить обязательство. Отказ приходил бы тем позже, чем лучше
+    шла работа.
+
+    Форма пункта — не предмет этой проверки: её задаёт `_CHECKLIST_RE`,
+    единственное место, где она определена.
+    """
+    text = _render_delivers()
+    delivered = text.replace(
+        "- [ ] DEL-01 (capability):", "- [x] DEL-01 (capability):", 1
+    )
+    carried = task_bridge._carry_execution_state(text, delivered)
+    assert "- [x] DEL-01 (capability):" in carried, carried
+
+    task_bridge._assert_delivers_after_carry(_delivers_task(), carried)
+
+
+def test_post_carry_check_accepts_a_checked_covering_item() -> None:
+    """Та же слепота на пункте, несущем аннотацию `covered_by`.
+
+    Отдельным тестом, а не вхождением в предыдущий: аннотированный пункт
+    доезжает до проверки ДРУГОЙ веткой (он принадлежит сценарию, а не
+    результату), и один тест на оба случая прошёл бы при починке одной.
+    """
+    text = _render_delivers()
+    beh_item = next(
+        ln for ln in text.splitlines()
+        if ln.startswith("- [ ] реализовать BEH-02")
+    )
+    delivered = text.replace(beh_item, beh_item.replace("- [ ]", "- [x]", 1), 1)
+    carried = task_bridge._carry_execution_state(text, delivered)
+    assert "- [x] реализовать BEH-02" in carried, carried
+
+    task_bridge._assert_delivers_after_carry(_delivers_task(), carried)
+
+
+def test_projection_check_counts_by_the_declared_id_not_by_a_prefix() -> None:
+    """Вторая половина находки #290 (major): сверка не зашивает форму id.
+
+    Форму `DEL-NN` судит гвард — и теперь судит. Но сверка моста опознавала
+    результат по ЗАШИТОМУ префиксу, то есть повторяла то же правило вторым
+    вычислителем. Разойдись они хоть на одном входе — мост сказал бы
+    «результат не доехал» про пункт, который отрендерил сам: диагноз,
+    указывающий не туда, куда надо смотреть.
+
+    `parse_dt_tasks` форму id не проверяет (её судья — гейт), поэтому
+    задача с иной формой конструируема, и сверка обязана считать её
+    пункты по ОБЪЯВЛЕННОМУ id.
+    """
+    task = decomposition_guard.DtTask(
+        dt_id="DT-01", title="Ядро", type="implement", owner="dev",
+        scenarios=("BEH-01",), depends_on=(), delivered_by=(),
+        parallel_group="core",
+        delivers=(
+            decomposition_guard.Deliverable(
+                id="OUT-01", kind="capability",
+                statement="ядро отвергает пустой ввод",
+                sources=("acceptance#AC-07",), covered_by=None,
+            ),
+        ),
+    )
+    block = (
+        "### TASK-001: Ядро\n"
+        "P2 | TODO   Est: 0.5d\n"
+        "\n"
+        "Source: b/30-decomposition.md#DT-01\n"
+        "**Delivers:** OUT-01\n"
+        "\n"
+        "**Checklist:**\n"
+        "- [ ] реализовать BEH-01: Первый\n"
+        "- [ ] OUT-01 (capability): ядро отвергает пустой ввод\n"
+    )
+
+    task_bridge._assert_delivers_after_carry([task], block)

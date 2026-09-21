@@ -885,6 +885,14 @@ _SOURCE_REF_RE = re.compile(r"^[a-z][a-z0-9-]*#[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 _DELIVERS_KEY_RE = re.compile(r"^delivers:", re.M)
 
+#: Контрактная форма id результата поставки (спека §3b.3 — «задача
+#: сохраняет ссылку на `DEL-NN`»). Проверяется ЗДЕСЬ, потому что гвард
+#: объявлен единственным судьёй формы `delivers`, а мост опознаёт
+#: результат в чек-листе по этой же форме. Разойдись они — гейт зеленел
+#: бы, а доставка падала бы с ЛОЖНОЙ причиной «результат не доехал»,
+#: хотя пункт отрендерен и на месте (находка ревью PR #290).
+_DELIVERABLE_ID_RE = re.compile(r"^DEL-\d+$")
+
 #: Закрытый словарь видов результата (спека §3b.1). Открытый превратил бы
 #: машинную классификацию в свободный текст — тот же провал, от которого
 #: репо закрылось `WAIVER_CLASSES`: при открытом словаре видом становилось
@@ -1031,6 +1039,14 @@ def _parse_delivers(
             if not item.get(field):
                 findings.append(f"{where}: поле {field} отсутствует или пусто")
         del_id = item.get("id")
+        if isinstance(del_id, str) and del_id and not _DELIVERABLE_ID_RE.match(
+            del_id
+        ):
+            findings.append(
+                f"{where}: id {del_id!r} не соответствует контрактной форме "
+                f"`DEL-NN`; по ней результат опознаётся в чек-листе, и id "
+                f"иной формы дал бы отказ доставки с ложной причиной"
+            )
         kind = item.get("kind")
         if isinstance(kind, str) and kind and kind not in DELIVERABLE_KINDS:
             findings.append(
