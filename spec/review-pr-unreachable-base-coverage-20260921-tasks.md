@@ -1,17 +1,18 @@
 ---
-spec_stage: tasks
-status: draft
-owner_role: stream-owner
-version: 1
-generated_by: fleet-agent
-generated_at: "2026-09-21T16:45:28+04:00"
-source_prompt_version: ""
-validation: ""
-approved_by: ""
 traces_to:
 - decomposition
 upstream_hashes:
   decomposition: b5c89748566035d3ab4d6d761c9fa8cdd796d827
+spec_stage: tasks
+status: approved
+version: 2
+generated_by: fleet-agent
+generated_at: '2026-09-21T16:45:28+04:00'
+source_prompt_version: ''
+validation: pass
+approved_by: andrei-shtanakov
+approved_at: '2026-09-21T12:48:35Z'
+owner_role: stream-owner
 ---
 
 ## Milestone 1: review-pr unreachable base coverage
