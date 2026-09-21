@@ -12,7 +12,8 @@ from governance.edge_check import rules as r
 
 
 def test_argv_disables_every_tool_and_every_customization() -> None:
-    argv = rv.reviewer_argv("claude-opus-5", Path("contracts/edge-check/v1/response-schema.json"), None)
+    schema = Path("contracts/edge-check/v1/response-schema.json")
+    argv = rv.reviewer_argv("claude-opus-5", schema, None)
     assert argv[0] == "claude"
     # инструментов ноль — пустая строка, а не перечень
     assert "--tools" in argv and argv[argv.index("--tools") + 1] == ""
@@ -44,6 +45,21 @@ def test_reviewer_nonzero_exit_is_reviewer_failed(tmp_path: Path) -> None:
     with pytest.raises(r.EdgeCheckError) as exc:
         rv.run_reviewer("prompt", ["false"], empty, timeout=5)
     assert exc.value.code == "reviewer_failed"
+
+
+def test_missing_schema_is_edge_check_error(tmp_path: Path) -> None:
+    missing = tmp_path / "no-such-schema.json"
+    with pytest.raises(r.EdgeCheckError) as exc:
+        rv.reviewer_argv("claude-opus-5", missing, None)
+    assert exc.value.code == "missing_schema"
+
+
+def test_reviewer_timeout_raises_timeout_error(tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(r.EdgeCheckError) as exc:
+        rv.run_reviewer("prompt", ["sleep", "5"], empty, timeout=1)
+    assert exc.value.code == "timeout"
 
 
 @pytest.mark.skipif(

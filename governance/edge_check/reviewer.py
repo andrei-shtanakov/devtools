@@ -17,12 +17,24 @@ from governance.edge_check.rules import EdgeCheckError
 
 
 def reviewer_argv(model: str, schema_path: Path, effort: str | None) -> list[str]:
+    """Собрать argv ревьюера: ноль инструментов, ни одной кастомизации.
+
+    Каждый флаг закрывает свой источник постороннего входа: `--tools ""` —
+    инструменты, `--restricted`/`--safe-mode`/`--strict-mcp-config` —
+    пользовательские настройки, CLAUDE.md, скиллы, плагины, хуки и MCP.
+    """
+    try:
+        schema_text = schema_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise EdgeCheckError(
+            "missing_schema", f"{schema_path}: схема ответа не найдена"
+        ) from exc
     argv = ["claude", "-p", "--model", model]
     if effort:
         argv += ["--effort", effort]
     return [
         *argv,
-        "--json-schema", schema_path.read_text(encoding="utf-8"),
+        "--json-schema", schema_text,
         "--output-format", "json",
         "--restricted",
         "--safe-mode",
