@@ -80,3 +80,38 @@ def test_file_outside_bundle_is_unsafe(tmp_path: Path) -> None:
             rs, b, [b / "15-behaviour-spec.md"], [("requirements", outside)]
         )
     assert exc.value.code == "unsafe_input"
+
+
+# === I1: роли входа сверяются с каталогом (basis_roles) ===
+
+
+def test_extra_basis_role_is_rejected(tmp_path: Path) -> None:
+    """Воспроизведение находки: посторонняя роль не должна тихо превратить
+    ребро в PASS без реальной проверки по объявленному основанию."""
+    b = _bundle(tmp_path)
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    with pytest.raises(r.EdgeCheckError) as exc:
+        i.prepare_input(
+            rs, b, [b / "15-behaviour-spec.md"], [("z", b / "15-behaviour-spec.md")]
+        )
+    assert exc.value.code == "basis_role_mismatch"
+
+
+def test_missing_mandatory_basis_role_is_rejected(tmp_path: Path) -> None:
+    b = _bundle(tmp_path)
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    with pytest.raises(r.EdgeCheckError) as exc:
+        i.prepare_input(rs, b, [b / "15-behaviour-spec.md"], [])
+    assert exc.value.code == "basis_role_mismatch"
+
+
+def test_duplicate_basis_role_is_rejected(tmp_path: Path) -> None:
+    b = _bundle(tmp_path)
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    with pytest.raises(r.EdgeCheckError) as exc:
+        i.prepare_input(
+            rs, b, [b / "15-behaviour-spec.md"],
+            [("requirements", b / "10-requirements.md"),
+             ("requirements", b / "10-requirements.md")],
+        )
+    assert exc.value.code == "basis_role_mismatch"

@@ -68,6 +68,37 @@ def _read(role: str, path: Path, bundle_dir: Path) -> InputFile:
     return InputFile(role, rel, hashlib.sha256(data).hexdigest(), len(data), text)
 
 
+def _validate_basis_roles(
+    ruleset: RuleSet, bases: list[tuple[str, Path]]
+) -> None:
+    """Роли переданных оснований обязаны совпасть с `ruleset.basis_roles`
+    (находка I1): без этого посторонняя или пропущенная роль тихо
+    проходит, и запись `PASS` утверждает проверку сочетания, которое не
+    проверялось (спека §5.2)."""
+    got = [role for role, _ in bases]
+    dup = sorted({role for role in got if got.count(role) > 1})
+    if dup:
+        raise EdgeCheckError(
+            "basis_role_mismatch",
+            f"{ruleset.edge_id}: роль основания продублирована: "
+            f"{', '.join(dup)}",
+        )
+    expected, got_set = set(ruleset.basis_roles), set(got)
+    if got_set != expected:
+        missing = sorted(expected - got_set)
+        extra = sorted(got_set - expected)
+        detail = []
+        if missing:
+            detail.append(f"не хватает: {', '.join(missing)}")
+        if extra:
+            detail.append(f"лишние: {', '.join(extra)}")
+        raise EdgeCheckError(
+            "basis_role_mismatch",
+            f"{ruleset.edge_id}: роли оснований не совпадают с набором "
+            f"{sorted(expected)}; {'; '.join(detail)}",
+        )
+
+
 def prepare_input(
     ruleset: RuleSet,
     bundle_dir: Path,
@@ -75,6 +106,7 @@ def prepare_input(
     bases: list[tuple[str, Path]],
 ) -> PreparedInput:
     """Прочитать объявленный вход; решение о применимости — ДО вызова модели."""
+    _validate_basis_roles(ruleset, bases)
     optional_roles = {a.role: a.id for a in ruleset.applicability}
     files: list[InputFile] = []
     absences: list[Absence] = []
