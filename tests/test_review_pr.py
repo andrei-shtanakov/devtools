@@ -2369,3 +2369,46 @@ def test_targeted_prose_refuses_instead_of_attesting(fp_fleet: Fleet) -> None:
     assert "нет кода" in res.stderr
     assert old in res.stderr
     assert "pr review" not in fp_fleet.gh_calls()
+
+
+@needs_jq
+def test_targeted_use_verdict_is_not_budget_limited(fp_fleet: Fleet) -> None:
+    """Штатный двухфазный флоу работает и в адресном режиме.
+
+    Блокер круга 3 (devtools#281): барьер я поставил перед ВСЕМ блоком, то
+    есть и перед `--use-verdict`, который модель не зовёт и по контракту
+    CLAUDE.md бюджетом не ограничен. Оператор, идущий штатным путём
+    (`--dry-run --write-verdict`, затем `--use-verdict`), получал код 6 на
+    втором шаге: вердикт уже оплачен, а опубликовать его нечем.
+
+    Обходы тоже не работали: `--budget-override` на публикации не попадает в
+    тело (оно берётся из файла), а без `--targeted` не совпадает отпечаток.
+    """
+    old = _advance_pr_head(fp_fleet)
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", old, FP))
+    verdict = fp_fleet.tmp / "v-targeted.out"
+    # Доводим журнал до лимита: два платных круга.
+    for _ in range(2):
+        fp_fleet.run(
+            "demo", "7", "--fresh", REVIEW_STUB_FP="cd" * 32,
+            REVIEW_STUB_EXIT="1", GH_STUB_REVIEWS_JSON=reviews,
+        )
+    fp_fleet.run(
+        "demo", "7", "--targeted", "--dry-run", "--write-verdict",
+        str(verdict), "--budget-override", "стенд: наполнить файл вердикта",
+        REVIEW_STUB_FP="cd" * 32, REVIEW_STUB_EXIT="1",
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+    assert verdict.exists(), "предусловие: вердикт-файл получен"
+
+    kit_before = fp_fleet.local_log.read_text().count("--format markdown")
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", "--use-verdict", str(verdict),
+        REVIEW_STUB_FP="cd" * 32, GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 1, res.stderr
+    # Кит для тела не звался — значит и платить было нечем.
+    assert (
+        fp_fleet.local_log.read_text().count("--format markdown") == kit_before
+    )
