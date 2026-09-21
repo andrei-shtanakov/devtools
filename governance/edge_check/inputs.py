@@ -60,11 +60,18 @@ def _read(role: str, path: Path, bundle_dir: Path) -> InputFile:
         )
     rel = _compute_relative_path(path, bundle_dir)
 
+    # I5: хэш — по сырым байтам файла, а не по `read_text()`, который
+    # транслирует CRLF→LF. D13 пересчитывает тот же SHA-256 по содержимому
+    # блоба на коммите — там CRLF остаётся как есть, и нормализованный хэш
+    # никогда бы не сошёлся.
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        data = path.read_bytes()
+    except OSError as exc:
         raise EdgeCheckError("unreadable_input", f"{path}: {exc}") from exc
-    data = text.encode("utf-8")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EdgeCheckError("unreadable_input", f"{path}: {exc}") from exc
     return InputFile(role, rel, hashlib.sha256(data).hexdigest(), len(data), text)
 
 
