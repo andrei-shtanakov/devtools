@@ -79,7 +79,7 @@ def parse_response(
 
     extra = [rid for rid in got if rid not in declared]
     duplicates = [rid for rid in got if got.count(rid) > 1]
-    malformed = extra + (duplicates if duplicates else [])
+    malformed = extra + duplicates
     if malformed:
         raise EdgeCheckError(
             "criteria_malformed",
