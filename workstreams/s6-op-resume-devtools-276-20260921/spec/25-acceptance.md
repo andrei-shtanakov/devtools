@@ -1,12 +1,17 @@
 ---
 spec_stage: acceptance
-status: draft
+status: approval_pending
 owner_role: qa
-traces_to: [requirements, behaviour-spec]
+traces_to:
+- requirements
+- behaviour-spec
 upstream_hashes:
-  requirements: "edeb58d089bb60c2ce78f37a6179239da8ec1a1e"
-  behaviour-spec: "112db0344f3d3bd616fd0237ed76c258605a92fa"
+  requirements: 5798be4c6af7e5df7d1c435bef2e6d16e35becbb
+  behaviour-spec: 6f1c8d91c0d05d96d800f60d50f7f4fdde9dc371
+version: 2
+approved_content_hash: 7995d518f9a6f06efc33d8bbf909943967aa46a6
 ---
+
 # Acceptance: Барьерный стоп S6 сохраняет op'ы только до resume (devtools#276)
 
 Документ — единственный источник приёмки этой темы. Нумерация AC заведена
