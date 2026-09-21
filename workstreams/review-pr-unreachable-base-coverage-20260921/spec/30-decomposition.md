@@ -5,8 +5,8 @@ status: draft
 owner_role: tech-lead
 traces_to: [design, acceptance]
 upstream_hashes:
-  design: "50727ebe3ae5e36e07b275f1e399b015fa782bdf"
-  acceptance: "2978e6df6ed986aa97ee517f727dea4e3e0251f3"
+  design: "1676fee899c4bfdc1d027eea76d7a69987af851d"
+  acceptance: "9c4ea512db51a2ad35a6e070772dfee611deaee0"
 ---
 
 # Decomposition: отказ обвязки ревью при недостижимой базе PR доказан тестом

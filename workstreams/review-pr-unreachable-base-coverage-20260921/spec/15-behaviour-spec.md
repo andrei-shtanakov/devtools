@@ -4,7 +4,7 @@ status: draft
 owner_role: product
 traces_to: [requirements]
 upstream_hashes:
-  requirements: "230bd898dfc43b93abeb78b63dae2a15ee9de00d"
+  requirements: "063989d758890b0d4c5f73ae66198f872b27ce75"
 ---
 
 # Behaviour Spec: отказ обвязки ревью при недостижимой базе PR доказан тестом

@@ -4,8 +4,8 @@ status: draft
 owner_role: architects
 traces_to: [requirements, behaviour-spec]
 upstream_hashes:
-  requirements: "230bd898dfc43b93abeb78b63dae2a15ee9de00d"
-  behaviour-spec: "15168bc0b1e5fae2426ede46acf5490ab4925220"
+  requirements: "063989d758890b0d4c5f73ae66198f872b27ce75"
+  behaviour-spec: "0177d69826764220aebe67650d71cad5908c36dc"
 ---
 
 # Design: отказ обвязки ревью при недостижимой базе PR доказан тестом

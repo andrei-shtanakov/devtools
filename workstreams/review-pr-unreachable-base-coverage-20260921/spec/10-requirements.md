@@ -4,7 +4,7 @@ status: draft
 owner_role: product
 traces_to: [charter]
 upstream_hashes:
-  charter: "14d91707ecc1abac5112ad82037ae3b98a363b17"
+  charter: "b51ea104b1261bcb225e78091cc8ad0903600c4a"
 ---
 
 # Requirements: отказ обвязки ревью при недостижимой базе PR доказан тестом
