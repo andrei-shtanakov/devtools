@@ -1,6 +1,6 @@
 ---
 spec_stage: design
-status: approval_pending
+status: approved
 owner_role: architects
 traces_to:
 - requirements
@@ -10,6 +10,8 @@ upstream_hashes:
   behaviour-spec: 502af9daa01733730b3d105b7cae29fab0441748
 version: 2
 approved_content_hash: 4aae5707fc48bdc29fb70279d72e31f656d1fd8a
+approved_by: andrei-shtanakov
+approved_at: '2026-09-21T12:26:10Z'
 ---
 
 # Design: отказ обвязки ревью при недостижимой базе PR доказан тестом
