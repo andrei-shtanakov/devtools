@@ -9733,3 +9733,45 @@ def test_restated_and_covered_obligation_rides_the_scenario_item() -> None:
     ]
     assert "DEL-12" in beh_item and "проверить" in beh_item, beh_item
     assert "DEL-01" in beh_item and "TASK-001" in beh_item, beh_item
+
+
+def test_multiline_statement_refusal_names_its_real_cause() -> None:
+    """Диагностика последнего рубежа: отказ обязан назвать причину.
+
+    Многострочный `statement` отвергает гвард, поэтому до моста такая
+    запись в бою не доходит. Но пост-условие остаётся последним рубежом, и
+    его прежнее сообщение — «результат встречается в чек-листе 0 раз» —
+    было ЛОЖНЫМ: пункт отрендерен целиком, просто занял две физические
+    строки. Неверный диагноз стоит отладочной сессии тому, кто однажды
+    сюда дойдёт.
+    """
+    task = decomposition_guard.DtTask(
+        dt_id="DT-01", title="Ядро", type="implement", owner="dev",
+        scenarios=("BEH-01",), depends_on=(), delivered_by=(),
+        parallel_group="core",
+        delivers=(
+            decomposition_guard.Deliverable(
+                id="DEL-01", kind="capability",
+                statement="первая строка\nвторая строка",
+                sources=("acceptance#AC-07",), covered_by=None,
+            ),
+        ),
+    )
+    # Форма РЕНДЕРА: пункт ещё один элемент списка, и перевод строки
+    # внутри него делает элемент неопознаваемым как чекбокс целиком.
+    # После сериализации форма другая — строка режется, и срабатывает
+    # вторая ветка; обе достижимы, поэтому проверяются обе.
+    rendered_block = [
+        "### TASK-001: Ядро",
+        "Source: b/30-decomposition.md#DT-01",
+        "**Delivers:** DEL-01",
+        "",
+        "**Checklist:**",
+        "- [ ] DEL-01 (capability): первая строка\nвторая строка",
+    ]
+    with pytest.raises(RuntimeError, match="несколько строк"):
+        task_bridge._assert_delivers_projected(task, rendered_block)
+
+    serialized = "\n".join(rendered_block)
+    with pytest.raises(RuntimeError, match="несколько строк"):
+        task_bridge._assert_delivers_after_carry([task], serialized)

@@ -90,3 +90,15 @@ def test_decomposition_dsl_declares_the_restates_contract():
     assert "`restates: DEL-NN`" in dsl, dsl
     for needle in ("depends_on", "NOT a chain", "same obligation"):
         assert needle in dsl, needle
+
+
+def test_decomposition_dsl_requires_a_single_line_statement():
+    """Находка ревью #295: форма, которую мост спроецировать не может.
+
+    Промпт обязан сказать об ограничении там же, где требует statement, —
+    иначе автор узнает о нём только отказом гейта.
+    """
+    from governance.ops import _AUTHOR_DSL
+
+    dsl = _AUTHOR_DSL["decomposition"]
+    assert "SINGLE LINE" in dsl, dsl

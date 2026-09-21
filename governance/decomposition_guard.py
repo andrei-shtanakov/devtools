@@ -1066,6 +1066,19 @@ def _parse_delivers(
         statement = item.get("statement")
         if isinstance(statement, str) and statement and not statement.strip():
             findings.append(f"{where}: statement пуст")
+        elif isinstance(statement, str) and "\n" in statement.strip():
+            # Пункт чек-листа — ОДНА физическая строка по построению: и
+            # spec-runner разбирает его построчно, и перенос §I11 опознаёт
+            # носитель состояния по строке. Многострочный statement рвал
+            # пункт на две, и доставка падала с ложной причиной
+            # «результат встречается 0 раз» — пункт был отрендерен целиком
+            # (находка ревью PR #295). Судья формы — гвард, и отказ обязан
+            # приходить от него: на своей стадии и с верной причиной.
+            findings.append(
+                f"{where}: statement занимает несколько строк — "
+                f"обязательство доезжает до исполнителя ОДНОЙ строкой "
+                f"чек-листа, и многострочный текст её разорвал бы"
+            )
         sources = item.get("sources")
         refs: list[str] = []
         if isinstance(sources, list):

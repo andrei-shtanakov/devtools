@@ -1654,3 +1654,32 @@ def test_chain_of_restates_is_an_error() -> None:
     errors, _ = dt_contract_findings(_V2_FM + text, node_index=_INDEX)
 
     assert any("цепоч" in e.lower() for e in errors), errors
+
+
+def test_multiline_statement_is_rejected_by_the_guard() -> None:
+    """Находка ревью #295 (major): гвард пропускал непроецируемую форму.
+
+    Пункт чек-листа — ОДНА физическая строка по построению: и spec-runner
+    разбирает его построчно, и перенос §I11 опознаёт носитель состояния по
+    строке. Многострочный `statement` рвал пункт на две, и доставка падала
+    RuntimeError «результат встречается 0 раз» — причина ложная, пункт был
+    отрендерен целиком.
+
+    Судья формы — гвард, и отказ обязан приходить от него: на своей стадии
+    и с верной причиной.
+    """
+    text = _V2_FM + _DT_V2.replace(
+        '    statement: "парсер отвергает дубль ключа"\n',
+        "    statement: |\n      парсер отвергает дубль ключа\n      и пишет причину\n",
+    )
+
+    errors, _ = dt_contract_findings(text, node_index=_INDEX)
+
+    assert any("statement" in e and "строк" in e for e in errors), errors
+
+
+def test_single_line_statement_stays_accepted() -> None:
+    """Базовая половина: обычный однострочный statement не задет."""
+    errors, _ = dt_contract_findings(_V2_FM + _DT_V2, node_index=_INDEX)
+
+    assert errors == [], errors
