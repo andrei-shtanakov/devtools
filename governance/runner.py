@@ -278,7 +278,7 @@ def start(
     author_backend: str = "codex",
     brief_source: brief_input.BriefSource | None = None,
     interview_spec: iv.InterviewSpec | None = None,
-    allow_legacy_dt: bool = True,
+    allow_legacy_dt: bool = False,
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
@@ -2710,16 +2710,16 @@ def main(argv: list[str] | None = None) -> int:
     start_p.add_argument(
         "--author-backend", default="codex", choices=["codex", "disp"],
     )
-    # Обе формы заведены сразу (BooleanOptionalAction), хотя сегодня
-    # смысл имеет только ужесточающая: дефолт переходный и снимается
-    # срезом 3 (см. `RunState.allow_legacy_dt`), а переименование флага
-    # вместе с флипом дефолта осиротило бы уже записанные команды.
+    # Обе формы заведены с самого начала (BooleanOptionalAction) — и
+    # именно поэтому флип дефолта срезом 3 не осиротил ни одной уже
+    # записанной команды: переименования не потребовалось.
     start_p.add_argument(
         "--allow-legacy-dt",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="принимать decomposition без dt_contract_version (переходный "
-        "дефолт; --no-allow-legacy-dt требует объявленной версии)",
+        default=False,
+        help="принимать decomposition без dt_contract_version (по "
+        "умолчанию выключено: авторинг выпускает версию 2, и её "
+        "отсутствие значит чужой или старый бандл)",
     )
     start_p.add_argument(
         "--run-id", default=None, help="дефолт <ws-id>-<3 случайных байта hex>"

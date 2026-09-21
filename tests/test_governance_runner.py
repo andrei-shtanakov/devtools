@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from types import SimpleNamespace
@@ -342,6 +343,7 @@ class FakeOps:
             path.write_text(
                 "---\n"
                 "spec_stage: decomposition\n"
+                "dt_contract_version: 2\n"
                 "status: draft\n"
                 "owner_role: tech-lead\n"
                 "traces_to: [design, acceptance]\n"
@@ -354,6 +356,7 @@ class FakeOps:
                 "scenarios: [BEH-01]\n"
                 "depends_on: []\n"
                 "parallel_group: solo\n"
+                "delivers: []\n"
                 "Проза предмета.\n\n"
                 "## Инварианты графа\n\nСоблюдены.\n\n"
                 "## Порядок и параллельность\n\n"
@@ -1489,6 +1492,7 @@ def _repin_bundle(bundle_dir: Path) -> None:
     (bundle_dir / "30-decomposition.md").write_text(
         "---\n"
         "spec_stage: decomposition\n"
+        "dt_contract_version: 2\n"
         "status: draft\n"
         "owner_role: tech-lead\n"
         "traces_to: [design, acceptance]\n"
@@ -1501,6 +1505,7 @@ def _repin_bundle(bundle_dir: Path) -> None:
         f"scenarios: [{', '.join(beh_ids)}]\n"
         "depends_on: []\n"
         "parallel_group: solo\n"
+        "delivers: []\n"
         "Проза предмета.\n\n"
         "## Инварианты графа\n\nСоблюдены.\n\n"
         "## Порядок и параллельность\n\n"
@@ -5581,6 +5586,7 @@ def test_gate_decomposition_unpinned_edge_stops(
             path.write_text(
                 "---\n"
                 "spec_stage: decomposition\n"
+                "dt_contract_version: 2\n"
                 "status: draft\n"
                 "owner_role: tech-lead\n"
                 "traces_to: [design]\n"
@@ -5623,6 +5629,7 @@ def test_gate_decomposition_stale_pin_stops(tmp_path: Path, runs_root) -> None:
             path.write_text(
                 "---\n"
                 "spec_stage: decomposition\n"
+                "dt_contract_version: 2\n"
                 "status: draft\n"
                 "owner_role: tech-lead\n"
                 "traces_to: [design]\n"
@@ -5667,6 +5674,7 @@ def test_gate_decomposition_undeclared_design_edge_stops(
             path.write_text(
                 "---\n"
                 "spec_stage: decomposition\n"
+                "dt_contract_version: 2\n"
                 "status: draft\n"
                 "owner_role: tech-lead\n"
                 "traces_to: []\n"
@@ -5712,6 +5720,7 @@ def test_gate_decomposition_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
             path.write_text(
                 "---\n"
                 "spec_stage: decomposition\n"
+                "dt_contract_version: 2\n"
                 "status: draft\n"
                 "owner_role: tech-lead\n"
                 "traces_to: [design]\n"
@@ -5817,6 +5826,7 @@ def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
                 path.write_text(
                     "---\n"
                     "spec_stage: decomposition\n"
+                    "dt_contract_version: 2\n"
                     "status: draft\n"
                     "owner_role: tech-lead\n"
                     "traces_to: [design, acceptance]\n"
@@ -5829,11 +5839,13 @@ def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
                     "scenarios: [BEH-01]\n"
                     "depends_on: []\n"
                     "parallel_group: solo\n\n"
+                    "delivers: []\n"
                     "#### DT-02: y · type: verify · owner: qa\n"
                     "scenarios: [BEH-02]\n"
                     "depends_on: [DT-01]\n"
                     "delivered_by: [DT-01]\n"
                     "parallel_group: solo\n"
+                    "delivers: []\n"
                     "verifies:\n  - tests/test_typo.py\n\n"
                     "## Инварианты графа\n\nСоблюдены.\n\n"
                     "## Порядок и параллельность\n\nПоследовательно.\n\n"
@@ -5898,6 +5910,7 @@ def test_gate_dt_graph_finding_stops_on_underivable_group(
                 path.write_text(
                     "---\n"
                     "spec_stage: decomposition\n"
+                    "dt_contract_version: 2\n"
                     "status: draft\n"
                     "owner_role: tech-lead\n"
                     "traces_to: [design, acceptance]\n"
@@ -5910,11 +5923,13 @@ def test_gate_dt_graph_finding_stops_on_underivable_group(
                     "scenarios: [BEH-01]\n"
                     "depends_on: []\n"
                     "parallel_group: solo\n\n"
+                    "delivers: []\n"
                     "#### DT-02: y · type: verify · owner: qa\n"
                     "scenarios: [BEH-02]\n"
                     "depends_on: [DT-01]\n"
                     "delivered_by: [DT-01]\n"
                     "parallel_group: solo\n"
+                    "delivers: []\n"
                     "verifies:\n  - tests/test_typo.py\n\n"
                     "## Инварианты графа\n\nСоблюдены.\n\n"
                     "## Порядок и параллельность\n\nПоследовательно.\n\n"
@@ -6177,6 +6192,7 @@ def test_gate_decomposition_acceptance_edge_unpinned_stops(
             path.write_text(
                 "---\n"
                 "spec_stage: decomposition\n"
+                "dt_contract_version: 2\n"
                 "status: draft\n"
                 "owner_role: tech-lead\n"
                 "traces_to: [design, acceptance]\n"
@@ -6457,6 +6473,7 @@ def test_gate_dt_graph_warning_survives_later_ac_coverage_stop(
                 path.write_text(
                     "---\n"
                     "spec_stage: decomposition\n"
+                    "dt_contract_version: 2\n"
                     "status: draft\n"
                     "owner_role: tech-lead\n"
                     "traces_to: [design, acceptance]\n"
@@ -6469,11 +6486,13 @@ def test_gate_dt_graph_warning_survives_later_ac_coverage_stop(
                     "scenarios: [BEH-01]\n"
                     "depends_on: []\n"
                     "parallel_group: solo\n\n"
+                    "delivers: []\n"
                     "#### DT-02: y · type: verify · owner: qa\n"
                     "scenarios: [BEH-02]\n"
                     "depends_on: [DT-01]\n"
                     "delivered_by: [DT-01]\n"
                     "parallel_group: solo\n"
+                    "delivers: []\n"
                     "verifies:\n  - tests/test_typo.py\n\n"
                     "## Инварианты графа\n\nСоблюдены.\n\n"
                     "## Порядок и параллельность\n\nПоследовательно.\n\n"
@@ -6596,6 +6615,7 @@ def _dt_smoke_decomposition_body(design_pin: str, acceptance_pin: str) -> str:
     return (
         "---\n"
         "spec_stage: decomposition\n"
+        "dt_contract_version: 2\n"
         "status: draft\n"
         "owner_role: tech-lead\n"
         "traces_to: [design, acceptance]\n"
@@ -6608,11 +6628,13 @@ def _dt_smoke_decomposition_body(design_pin: str, acceptance_pin: str) -> str:
         "scenarios: [BEH-01]\n"
         "depends_on: []\n"
         "parallel_group: core\n"
+        "delivers: []\n"
         "Реализовать ядро.\n\n"
         "#### DT-02: Расширение · type: implement · owner: dev\n"
         "scenarios: [BEH-02]\n"
         "depends_on: [DT-01]\n"
         "parallel_group: core\n"
+        "delivers: []\n"
         "Реализовать расширение.\n\n"
         "## Инварианты графа\n\nСоблюдены.\n\n"
         "## Порядок и параллельность\n\n"
@@ -6918,27 +6940,9 @@ def test_gate_reports_dt_contract_findings(tmp_path: Path, runs_root) -> None:
     ДРУГОЙ причине и о дефектах `delivers` молчал. То есть оператор не
     получал ни одной новой находки формы, а сам гейт оставался зелёным.
     """
-    class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
-            if kind == "decomposition":
-                # Версия вставляется в УЖЕ написанный фикстурой документ:
-                # тест не знает её тела и не заводит второго — иначе
-                # разъехался бы с ней на первой же правке.
-                path = Path(target_dir) / bundle_dir / "30-decomposition.md"
-                path.write_text(
-                    path.read_text(encoding="utf-8").replace(
-                        "spec_stage: decomposition\n",
-                        "spec_stage: decomposition\ndt_contract_version: 2\n",
-                        1,
-                    ),
-                    encoding="utf-8",
-                )
-            return rc
-
-    ops = _Ops(facts=GREEN_PR_FACTS)
+    ops = _strip_dt_contract(
+        FakeOps, drop_version=False, drop_delivers=True
+    )(facts=GREEN_PR_FACTS)
     state = runner.start(**_start_kwargs(tmp_path, "r-dt-contract", ops))
 
     assert state.status == "stopped_gate"
@@ -6948,12 +6952,14 @@ def test_gate_reports_dt_contract_findings(tmp_path: Path, runs_root) -> None:
     assert "delivers" in findings, findings
 
 
-def _declare_dt_version(ops_cls, version: str | None):
-    """FakeOps, чей decomposition объявляет `dt_contract_version: <version>`.
+def _strip_dt_contract(ops_cls, *, drop_version: bool, drop_delivers: bool):
+    """FakeOps, чей decomposition ОТКАТЫВАЕТ часть контракта среза 3.
 
-    Версия вставляется в УЖЕ написанный фикстурой документ: тест не знает
-    её тела и не заводит второго — иначе разъехался бы с ней на первой же
-    правке. `None` — документ остаётся как есть (легаси, без версии).
+    Фикстура теперь пост-состояние нового авторинга — версия и `delivers`
+    в ней есть. Документы, нужные тестам контракта (легаси; версия без
+    `delivers`), строятся СНЯТИЕМ строки из того же тела, а не вторым
+    телом: два тела разъехались бы с фикстурой на первой же её правке, и
+    тест проверял бы документ, которого конвейер не производит.
     """
 
     class _Ops(ops_cls):
@@ -6961,17 +6967,17 @@ def _declare_dt_version(ops_cls, version: str | None):
             self, target_dir: str, kind: str, subject: str, bundle_dir: str
         ) -> int:
             rc = super().author(target_dir, kind, subject, bundle_dir)
-            if kind == "decomposition" and version is not None:
-                path = Path(target_dir) / bundle_dir / "30-decomposition.md"
-                path.write_text(
-                    path.read_text(encoding="utf-8").replace(
-                        "spec_stage: decomposition\n",
-                        f"spec_stage: decomposition\ndt_contract_version: "
-                        f"{version}\n",
-                        1,
-                    ),
-                    encoding="utf-8",
-                )
+            if kind != "decomposition":
+                return rc
+            path = Path(target_dir) / bundle_dir / "30-decomposition.md"
+            text = path.read_text(encoding="utf-8")
+            if drop_version:
+                assert "dt_contract_version: 2\n" in text, text
+                text = text.replace("dt_contract_version: 2\n", "", 1)
+            if drop_delivers:
+                assert "delivers: []\n" in text, text
+                text = text.replace("delivers: []\n", "", 1)
+            path.write_text(text, encoding="utf-8")
             return rc
 
     return _Ops
@@ -6980,16 +6986,24 @@ def _declare_dt_version(ops_cls, version: str | None):
 def test_gate_passes_legacy_dt_but_says_guarantee_is_absent(
     tmp_path: Path, runs_root
 ) -> None:
-    """Базовая половина к стопу выше: переходный дефолт НЕ красит гейт.
+    """Базовая половина к стопу ниже: режим совместимости НЕ красит гейт.
 
-    Без неё утверждение «гейт краснеет на дефектной форме» удовлетворял бы
-    и гвард, красящий всё подряд, — а такой гвард остановил бы конвейер на
-    каждом бандле, который тот сам же и создал (авторинг версию не пишет
-    до среза 3). Здесь же фиксируется вторая половина: пропуск обязан быть
-    ГРОМКИМ — оператор видит, что гарантии переноса нет.
+    Без неё утверждение «гейт краснеет на документе без версии»
+    удовлетворял бы и гвард, красящий всё подряд. Здесь же вторая
+    половина: пропуск обязан быть ГРОМКИМ — оператор видит, что гарантии
+    переноса нет.
+
+    Со среза 3 дефолт строгий, и режим включает ТОЛЬКО оператор явным
+    `allow_legacy_dt=True`. Тем самым тест пинует и то, что решение
+    оператора доезжает до гварда: зашей врезка `False`, легаси-документ
+    краснел бы и здесь.
     """
-    ops = _declare_dt_version(FakeOps, None)(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-dt-legacy", ops))
+    ops = _strip_dt_contract(
+        FakeOps, drop_version=True, drop_delivers=True
+    )(facts=GREEN_PR_FACTS)
+    state = runner.start(
+        **_start_kwargs(tmp_path, "r-dt-legacy", ops, allow_legacy_dt=True)
+    )
 
     assert state.status != "stopped_gate"
     findings = (
@@ -6999,21 +7013,25 @@ def test_gate_passes_legacy_dt_but_says_guarantee_is_absent(
     assert "ГАРАНТИЯ ПЕРЕНОСА" in findings, findings
 
 
-def test_gate_refuses_legacy_dt_when_operator_turns_compat_off(
+def test_gate_refuses_a_versionless_bundle_by_default(
     tmp_path: Path, runs_root
 ) -> None:
-    """Решение оператора обязано ДОЕХАТЬ до гварда, а не остаться в CLI.
+    """Со среза 3 дефолт строгий: документ без версии краснеет сам.
 
-    Пин против врезки, зовущей гвард с зашитым `allow_legacy_dt=True`:
-    такая проходит и стоп по форме выше, и базовую половину, оставляя
-    ужесточающий флаг молча неработающим.
+    Авторинг выпускает `dt_contract_version: 2`, поэтому отсутствие поля
+    значит чужой или старый бандл, а не «конвейер так умеет». Отсутствие
+    версии режим совместимости НЕ включает — его включает оператор,
+    явно; иначе новый документ с забытым полем молча обошёл бы контракт,
+    то есть барьер отключался бы ровно тем, от чего защищает.
+
+    Парой с базовой половиной выше этот тест пинует и проводку решения
+    оператора: зашей врезка любое из двух значений, одна из двух половин
+    покраснеет.
     """
-    ops = _declare_dt_version(FakeOps, None)(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(
-            tmp_path, "r-dt-strict", ops, allow_legacy_dt=False
-        )
-    )
+    ops = _strip_dt_contract(
+        FakeOps, drop_version=True, drop_delivers=True
+    )(facts=GREEN_PR_FACTS)
+    state = runner.start(**_start_kwargs(tmp_path, "r-dt-strict", ops))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7029,14 +7047,18 @@ def test_allow_legacy_dt_survives_resume(tmp_path: Path, runs_root) -> None:
     Иначе прогон, начатый в строгом режиме, после `resume` судил бы тот же
     документ переходным дефолтом — и зеленел бы на том, на чём встал.
     """
-    ops = _declare_dt_version(FakeOps, None)(facts=GREEN_PR_FACTS)
+    ops = _strip_dt_contract(
+        FakeOps, drop_version=True, drop_delivers=True
+    )(facts=GREEN_PR_FACTS)
     runner.start(
         **_start_kwargs(
-            tmp_path, "r-dt-resume", ops, allow_legacy_dt=False
+            tmp_path, "r-dt-resume", ops, allow_legacy_dt=True
         )
     )
 
-    assert runner.load("r-dt-resume").allow_legacy_dt is False
+    # Пинуется НЕдефолтное значение: `False` совпало бы с дефолтом, и тест
+    # проходил бы, даже если поле не сохраняется вовсе.
+    assert runner.load("r-dt-resume").allow_legacy_dt is True
 
 
 def _with_delivers(ops_cls, source_ref: str):
@@ -7055,13 +7077,9 @@ def _with_delivers(ops_cls, source_ref: str):
                 return rc
             path = Path(target_dir) / bundle_dir / "30-decomposition.md"
             text = path.read_text(encoding="utf-8")
+            assert "delivers: []\n" in text, text
             text = text.replace(
-                "spec_stage: decomposition\n",
-                "spec_stage: decomposition\ndt_contract_version: 2\n",
-                1,
-            ).replace(
-                "parallel_group: solo\n",
-                "parallel_group: solo\n"
+                "delivers: []\n",
                 "delivers:\n"
                 "  - id: DEL-01\n"
                 "    kind: capability\n"
@@ -7116,3 +7134,29 @@ def test_gate_stops_on_unresolvable_delivers_source(
     ).read_text(encoding="utf-8")
     assert "GC-DT-CONTRACT" in findings, findings
     assert "AC-99" in findings, findings
+
+
+def test_run_json_without_the_compat_field_resumes_strictly(
+    tmp_path: Path, runs_root
+) -> None:
+    """Дефолт поля судит СТАРЫЕ run.json — те, что записаны до среза 1.
+
+    `RunState(**json.loads(raw))` берёт значение из дефолта дата-класса,
+    когда ключа в файле нет. На пути `start()` этот дефолт не виден вовсе
+    (координатор всегда передаёт значение явно), поэтому мутант,
+    откативший его в `True`, выживал: ни один тест не читал run.json без
+    поля.
+
+    Правило одно и то же на обоих входах: ОТСУТСТВИЕ не включает режим
+    совместимости. Ни отсутствие версии в документе, ни отсутствие ключа
+    в состоянии — иначе барьер отключался бы ровно тем, от чего защищает,
+    и достаточно было бы предъявить файл постарше.
+    """
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    runner.start(**_start_kwargs(tmp_path, "r-old-state", ops))
+    path = runner.run_dir("r-old-state") / "run.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    del raw["allow_legacy_dt"]
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    assert runner.load("r-old-state").allow_legacy_dt is False

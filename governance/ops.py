@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
 
+from governance.decomposition_guard import DELIVERABLE_KINDS
 from governance.facts import Fact, Outcome, unavailable
 from governance import interview as _interview
 
@@ -381,6 +382,13 @@ _AUTHOR_FILENAMES = {
     "acceptance": "25-acceptance.md",
     "decomposition": "30-decomposition.md",
 }
+#: Закрытый словарь видов результата ВЫВОДИТСЯ из гварда, а не
+#: пересказывается здесь второй редакцией: пересказ дрейфует молча, и
+#: промпт продолжал бы предлагать вид, который гвард уже отверг, —
+#: автор получал бы отказ за то, что сделал ровно как написано.
+_KINDS_ALT = "|".join(DELIVERABLE_KINDS)
+_KINDS_LIST = ", ".join(f"`{_kind}`" for _kind in DELIVERABLE_KINDS)
+
 _AUTHOR_DSL = {
     "charter": (
         "YAML frontmatter (required): spec_stage: charter, status: draft, "
@@ -478,6 +486,7 @@ _AUTHOR_DSL = {
     ),
     "decomposition": (
         "YAML frontmatter (required): spec_stage: decomposition, "
+        "dt_contract_version: 2, "
         "status: draft, owner_role: tech-lead, traces_to: [design, acceptance], "
         "upstream_hashes: {design: \"<hash20>\", acceptance: \"<hash25>\"} where "
         "<hash20> and <hash25> are the outputs of `git hash-object "
@@ -493,8 +502,36 @@ _AUTHOR_DSL = {
         "MUST be declared in the document AFTER all DTs it depends_on — "
         "topological declaration order), `delivered_by: [DT-…]` "
         "(REQUIRED for type: verify, FORBIDDEN for type: implement), "
-        "`parallel_group: <name|solo>`, then a prose paragraph (subject, "
-        "boundaries). `tdd_waiver: <class> · sanction: <id>` is OPTIONAL "
+        "`parallel_group: <name|solo>`, "
+        "`delivers:` (REQUIRED under dt_contract_version: 2 — see below), "
+        "then a prose paragraph (subject, "
+        "boundaries). `delivers:` is a block YAML list declaring what this "
+        "task DELIVERS, and it is the ONLY channel by which a deliverable "
+        "reaches the executor: DT prose is not substituted into the "
+        "executor prompt at all, so a result stated only in prose does not "
+        "exist for them. Each entry has `id: DEL-NN` (this exact form; it "
+        "is the stable key the task and the checklist refer to), "
+        f"`kind: <one of {_KINDS_ALT}>` (CLOSED "
+        f"vocabulary: {_KINDS_LIST}; "
+        "an open one would make the kind any word the author found "
+        "fitting), `statement: \"<observable result>\"` and "
+        "`sources: [<node>#<id>, …]`. The statement MUST describe an "
+        "OBSERVABLE RESULT, not an action of yours and not the mere "
+        "existence of a file: `id` and `kind` let others refer to the "
+        "result but say nothing about what confirms it. Each `sources` "
+        "entry MUST resolve INSIDE the bundle (`acceptance#AC-07`, "
+        "`design#Q-03`, `behaviour-spec#BEH-01`): line numbers and heading "
+        "text are NOT identifiers, because both change under editing and a "
+        "reference must survive editing — if a design item has no stable "
+        "id, ADD one, that is part of the work. `covered_by: BEH-NN` is "
+        "OPTIONAL and declares that an EXISTING checklist item already "
+        "closes this result, so no duplicate item is created; it MUST name "
+        "a scenario of THIS DT (one listed in its own `scenarios`), and it "
+        "is the ONLY way to declare that link — a matching path or similar "
+        "wording is a guess, not a declaration. DEL ids MUST be unique "
+        "across the whole bundle. `delivers: []` is legitimate and means, "
+        "explicitly, «this task declares no deliverables» — write it when "
+        "that is true rather than omitting the key. `tdd_waiver: <class> · sanction: <id>` is OPTIONAL "
         "and declares, machine-readably, that honest baseline RED is "
         "impossible for this task; the ONLY accepted class today is "
         "`characterisation` (characterisation coverage of behaviour "
