@@ -1,6 +1,6 @@
 ---
 spec_stage: requirements
-status: approval_pending
+status: approved
 owner_role: product
 traces_to:
 - charter
@@ -8,6 +8,8 @@ upstream_hashes:
   charter: 9e0d0ee427acf42fc99ad79b628f789a990f3007
 version: 2
 approved_content_hash: fd5dfc6c1ebf3c62edcad928902dc56dd6641509
+approved_by: andrei-shtanakov
+approved_at: '2026-09-21T11:41:20Z'
 ---
 
 # Requirements: отказ обвязки ревью при недостижимой базе PR доказан тестом
