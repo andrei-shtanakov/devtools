@@ -84,7 +84,10 @@ exit "${REVIEW_STUB_EXIT:-0}"
 
 LOCAL_SH_FP_STUB = """#!/bin/sh
 # Стаб fp-кита: содержит литерал --fingerprint-only (feature-detect греппит
-# файл), в fp-режиме отдаёт управляемый отпечаток и код.
+# файл), в fp-режиме отдаёт управляемый отпечаток и код. Литерал
+# --trusted-base здесь же: с ре-вендора steward@5bfd829 кит умеет принимать
+# границу доверия отдельно от диапазона дифа, и обвязка определяет это тем
+# же греп-приёмом (devtools#260).
 echo "local.sh $*" >> "$LOCAL_SH_LOG"
 case " $* " in
   *" --fingerprint-only "*)
@@ -641,6 +644,13 @@ LOCAL_SH_CAPS_STUB = LOCAL_SH_FP_STUB.replace(
     '# потолки: --max-diff-bytes N --max-diff-files N\ncase " $* " in',
     1,
 )
+
+
+#: Кит ДО ре-вендора steward@5bfd829: границу доверия отдельно от диапазона
+#: не умеет. Адресный recheck на таком ките обязан отказывать fail-closed —
+#: сужение без разделения границы и есть блокер, из-за которого режим не
+#: отгрузили с первого раза (devtools#260, круг 2).
+LOCAL_SH_OLD_KIT_STUB = LOCAL_SH_FP_STUB.replace("--trusted-base", "(снят)")
 
 
 @pytest.fixture
@@ -2219,3 +2229,143 @@ def test_full_run_scope_still_sees_the_whole_pr(fp_fleet: Fleet) -> None:
 
     assert res.returncode == 0, res.stderr
     assert res.stdout.strip() == "code"
+
+
+@needs_jq
+def test_targeted_passes_the_trusted_base_to_the_kit(fp_fleet: Fleet) -> None:
+    """Сужается ТОЛЬКО диапазон дифа; граница доверия остаётся на влитой базе.
+
+    Блокер круга 2 (devtools#281): из `merge-base(--base, head)` кит берёт не
+    только диф, но и generated-декларацию и курируемый контекст. С суженной
+    базой оба входа читались бы из коммита ВЕТКИ PR — автору достаточно
+    объявить свои файлы `linguist-generated`, и фикс-коммиты уедут под
+    маркер опущения, а кит выйдет нулём. Починено у источника
+    (steward#181): `--trusted-base` отделён от `--base`.
+    """
+    old = _advance_pr_head(fp_fleet)
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", old, FP))
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", "--dry-run",
+        REVIEW_STUB_FP="cd" * 32, REVIEW_STUB_EXIT="1",
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 1, res.stderr
+    calls = [c for c in _kit_calls(fp_fleet) if "--base" in c]
+    assert len(calls) == 2, calls
+    for call in calls:
+        assert f"--base {old}" in call, call
+        assert "--trusted-base origin/master" in call, call
+
+
+@needs_jq
+def test_full_run_does_not_pass_a_trusted_base(fp_fleet: Fleet) -> None:
+    """Негативная половина: без сужения разделять нечего.
+
+    Умолчание кита — граница совпадает с базой; передавать его явно значило
+    бы утверждать разделение там, где его нет.
+    """
+    old = _advance_pr_head(fp_fleet)
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", old, FP))
+
+    res = fp_fleet.run(
+        "demo", "7", "--dry-run",
+        REVIEW_STUB_FP="cd" * 32, REVIEW_STUB_EXIT="1",
+        GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 1, res.stderr
+    calls = [c for c in _kit_calls(fp_fleet) if "--base" in c]
+    assert calls, "кит не вызывался"
+    for call in calls:
+        assert "--trusted-base" not in call, call
+
+
+@needs_jq
+def test_targeted_refuses_on_a_kit_without_trusted_base(
+    fp_fleet: Fleet,
+) -> None:
+    """Кит отстал на релиз — сужать нельзя.
+
+    Без разделения границы сужение и есть блокер круга 2. Отказ fail-closed,
+    а не «сузим и понадеемся»: кит в этом состоянии молча читал бы
+    доверенные входы из ветки PR.
+    """
+    fp_fleet.write_kit(LOCAL_SH_OLD_KIT_STUB)
+    old = _advance_pr_head(fp_fleet)
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", old, FP))
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 2, res.stdout
+    assert "--trusted-base" in res.stderr
+    assert _kit_calls(fp_fleet) == []
+
+
+@needs_jq
+def test_targeted_prose_after_approve_hits_the_barrier(
+    fp_fleet: Fleet,
+) -> None:
+    """Барьер выполняется ДО любого успешного выхода — включая scope=prose.
+
+    Блокер круга 2: ветка прозы выходила нулём раньше барьера, то есть
+    `--targeted` после approve проходил без `--budget-override` — вопреки
+    правилу. Здесь узкий диапазон целиком прозаический, а PR содержит код.
+    """
+    old = _advance_pr_head(fp_fleet, "docs/note.md")
+    reviews = fp_fleet.write_reviews(_review("APPROVED", old, FP))
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 6, res.stdout
+    assert "pr review" not in fp_fleet.gh_calls()
+
+
+@needs_jq
+def test_plain_prose_pr_still_gets_a_free_attestation(fleet: Fleet) -> None:
+    """Негативная половина решения владельца 2026-09-21.
+
+    Барьер переносится ДО прозаической ветки только в адресном режиме. У
+    обычного прогона ветка прозы срабатывает, лишь когда ВЕСЬ PR
+    прозаический — платного круга там не бывает вовсе, и отказ кодом 6
+    заблокировал бы бесплатную и полезную аттестацию.
+    """
+    _seed_files(fleet, "docs/guide.md", "TODO.md")
+
+    res = fleet.run("demo", "7")
+
+    assert res.returncode == 0, res.stderr
+    assert "pr review" in fleet.gh_calls()
+    assert not any("--format markdown" in c for c in _kit_calls(fleet))
+
+
+@needs_jq
+def test_targeted_prose_refuses_instead_of_attesting(fp_fleet: Fleet) -> None:
+    """Аттестация под сужением не публикуется вовсе — отказ человеку.
+
+    Аттестация утверждает «этот PR платного ревью не требует». Под
+    `--targeted` прозой классифицирован лишь диапазон после прошлого ревью,
+    а сам PR содержит код: то же тело утверждало бы про весь PR то, что
+    верно про его хвост, и читатель различить не может. Требование
+    владельца «аттестация называет проверенный диапазон и не делает
+    утверждений обо всём PR» выполняется отказом, а не переписыванием
+    текста: у отказа один смысл, у аттестации — два.
+    """
+    old = _advance_pr_head(fp_fleet, "docs/note.md")
+    reviews = fp_fleet.write_reviews(_review("CHANGES_REQUESTED", old, FP))
+
+    res = fp_fleet.run(
+        "demo", "7", "--targeted", GH_STUB_REVIEWS_JSON=reviews,
+    )
+
+    assert res.returncode == 2, res.stdout
+    # Причина названа своя, а не «нет маркера» и не общий guard аттестации:
+    # иначе тест зелен от любого отказа выше по течению.
+    assert "нет кода" in res.stderr
+    assert old in res.stderr
+    assert "pr review" not in fp_fleet.gh_calls()
