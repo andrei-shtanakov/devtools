@@ -102,6 +102,16 @@ def load_rules(edge_id: str, contracts_dir: Path) -> RuleSet:
     if not items:
         raise EdgeCheckError("unknown_edge", f"{path}: пустой items")
 
+    if len(basis_roles) > 1 and applicability:
+        # I4: семантика частичного отсутствия у нескольких оснований не
+        # решена — закрываем дыру fail-closed, а не догадкой. Сегодняшние
+        # наборы правил (по одному основанию) под запрет не попадают.
+        raise EdgeCheckError(
+            "multi_basis_applicability_unsupported",
+            f"{path}: несколько оснований ({', '.join(basis_roles)}) вместе "
+            "с applicability не поддерживаются в этом срезе",
+        )
+
     instr_path = contracts_dir / "instruction.md"
     try:
         instruction = instr_path.read_text(encoding="utf-8")

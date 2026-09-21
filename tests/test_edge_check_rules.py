@@ -116,3 +116,29 @@ def test_missing_instruction_file_is_missing_instruction(tmp_path: Path) -> None
     assert exc.value.code == "missing_instruction"
 
 
+# === I4: несколько оснований + applicability — ошибка конфигурации ===
+
+
+def test_multi_basis_with_applicability_is_rejected(tmp_path: Path) -> None:
+    """Семантика частичного отсутствия у нескольких оснований не решена
+    (findings I4) — закрываем дыру fail-closed на загрузке каталога."""
+    rules_yaml = """
+edge: x
+subject_role: subject-thing
+basis_roles: [a, b]
+items:
+  - id: R1
+    text: правило
+severity:
+  blocking: [major]
+  advisory: [minor]
+applicability:
+  - id: A1
+    role: a
+"""
+    _copy_contracts(tmp_path, rules_yaml=rules_yaml)
+    with pytest.raises(r.EdgeCheckError) as exc:
+        r.load_rules("behaviour-vs-requirements", tmp_path)
+    assert exc.value.code == "multi_basis_applicability_unsupported"
+
+
