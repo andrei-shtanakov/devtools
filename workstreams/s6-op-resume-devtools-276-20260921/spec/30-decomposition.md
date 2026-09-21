@@ -1,7 +1,7 @@
 ---
 spec_stage: decomposition
 dt_contract_version: 2
-status: approval_pending
+status: approved
 owner_role: tech-lead
 traces_to:
 - design
@@ -11,6 +11,8 @@ upstream_hashes:
   acceptance: 9f912776bb2c3ae8c9f17ce7f74e1f2adfdcc2bd
 version: 2
 approved_content_hash: defcf6cbd627ab8faf0f21ddbc97dfd8a272197a
+approved_by: andrei-shtanakov
+approved_at: '2026-09-21T08:57:56Z'
 ---
 
 # Decomposition: Барьерный стоп S6 сохраняет op'ы только до resume (devtools#276)
