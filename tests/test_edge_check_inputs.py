@@ -22,13 +22,18 @@ def test_hash_is_computed_over_the_prepared_copy(tmp_path: Path) -> None:
     b = _bundle(tmp_path)
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
     prepared = i.prepare_input(
-        rs, b, [b / "15-behaviour-spec.md"], [("requirements", b / "10-requirements.md")]
+        rs,
+        b,
+        [b / "15-behaviour-spec.md"],
+        [("requirements", b / "10-requirements.md")],
     )
     subject = next(f for f in prepared.files if f.role == "subject")
     # sha256 ровно того текста, что уедет в запрос
     import hashlib
 
-    assert subject.sha256 == hashlib.sha256(subject.text.encode("utf-8")).hexdigest()
+    assert (
+        subject.sha256 == hashlib.sha256(subject.text.encode("utf-8")).hexdigest()
+    )
     assert subject.path == "15-behaviour-spec.md"
     assert prepared.applicable is True
 
@@ -63,3 +68,15 @@ def test_unreadable_file_is_not_absence(tmp_path: Path) -> None:
     with pytest.raises(r.EdgeCheckError) as exc:
         i.prepare_input(rs, b, [b / "15-behaviour-spec.md"], [("requirements", bad)])
     assert exc.value.code == "unreadable_input"
+
+
+def test_file_outside_bundle_is_unsafe(tmp_path: Path) -> None:
+    b = _bundle(tmp_path)
+    outside = tmp_path / "outside-secret.md"
+    outside.write_text("secret\n", encoding="utf-8")
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    with pytest.raises(r.EdgeCheckError) as exc:
+        i.prepare_input(
+            rs, b, [b / "15-behaviour-spec.md"], [("requirements", outside)]
+        )
+    assert exc.value.code == "unsafe_input"

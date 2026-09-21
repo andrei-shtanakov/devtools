@@ -35,16 +35,35 @@ class PreparedInput:
     applicable: bool
 
 
+def _compute_relative_path(path: Path, bundle_dir: Path) -> str:
+    """Вычислить путь относительно bundle_dir с проверкой границы.
+
+    Проверяет, что путь лежит ВНУТРИ bundle_dir.
+    """
+    resolved_path = path.resolve()
+    resolved_bundle = bundle_dir.resolve()
+
+    if not resolved_path.is_relative_to(resolved_bundle):
+        raise EdgeCheckError(
+            "unsafe_input",
+            f"{path}: путь вне каталога бандла {bundle_dir} — вход отклонён",
+        )
+
+    return str(resolved_path.relative_to(resolved_bundle))
+
+
 def _read(role: str, path: Path, bundle_dir: Path) -> InputFile:
+    # Проверка границы и ссылки ДО чтения
     if path.is_symlink():
         raise EdgeCheckError(
             "unsafe_input", f"{path}: ссылка, а не обычный файл — вход отклонён"
         )
+    rel = _compute_relative_path(path, bundle_dir)
+
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise EdgeCheckError("unreadable_input", f"{path}: {exc}") from exc
-    rel = str(path.resolve().relative_to(bundle_dir.resolve()))
     data = text.encode("utf-8")
     return InputFile(role, rel, hashlib.sha256(data).hexdigest(), len(data), text)
 
@@ -77,7 +96,7 @@ def prepare_input(
                 "missing_mandatory_input",
                 f"обязательное основание {role!r} отсутствует: {path}",
             )
-        rel = str((path.resolve()).relative_to(bundle_dir.resolve()))
+        rel = _compute_relative_path(path, bundle_dir)
         absences.append(Absence(rel, rule_id))
 
     return PreparedInput(tuple(files), tuple(absences), len(absences) == 0)
