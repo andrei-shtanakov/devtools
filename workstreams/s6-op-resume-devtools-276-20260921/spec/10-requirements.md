@@ -1,11 +1,15 @@
 ---
 spec_stage: requirements
-status: draft
+status: approval_pending
 owner_role: product
-traces_to: [charter]
+traces_to:
+- charter
 upstream_hashes:
-  charter: "8a7544257c7d49c504773ef384dc16dfd9a488b4"
+  charter: 42ac3df37193d849d90958948437ec8df5c454c9
+version: 2
+approved_content_hash: b2a644e97a8637bab1a17228c53a73bc96295308
 ---
+
 # Requirements: Барьерный стоп S6 сохраняет op'ы только до resume (devtools#276)
 
 ## Область требований
