@@ -868,6 +868,12 @@ _SOURCE_REF_RE = re.compile(r"^[a-z][a-z0-9-]*#[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 _DELIVERS_KEY_RE = re.compile(r"^delivers:", re.M)
 
+#: Закрытый словарь видов результата (спека §3b.1). Открытый превратил бы
+#: машинную классификацию в свободный текст — тот же провал, от которого
+#: репо закрылось `WAIVER_CLASSES`: при открытом словаре видом становилось
+#: бы любое слово, которое автор счёл подходящим.
+DELIVERABLE_KINDS = ("capability", "module", "document", "config")
+
 
 def _dt_blocks(text: str) -> list[tuple[str, str]]:
     """(dt_id, тело блока) — та же нарезка, что у `parse_dt_tasks`.
@@ -907,13 +913,27 @@ def _delivers_region(block: str) -> str | None:
     return None
 
 
-def _delivers_findings(dt_id: str, block: str) -> tuple[list[str], set[str]]:
-    """Находки формы `delivers` одного DT и объявленные в нём id."""
+def _delivers_findings(dt_id: str, block: str) -> tuple[list[str], list[str]]:
+    """Находки формы `delivers` одного DT и объявленные в нём id.
+
+    Id возвращаются СПИСКОМ с сохранением повторов, а не множеством:
+    множество схлопывало дубль до сверки, и внутри-DT повтор не находился
+    никогда — собственное сообщение проверки для него нельзя было даже
+    напечатать (блокер ревью PR #289).
+    """
+    keys = len(_DELIVERS_KEY_RE.findall(block))
+    if keys > 1:
+        # Число ключей считается отдельно от числа разборов — канон репо
+        # для этого класса (`tdd_waiver`). Регион берётся по первому
+        # совпадению, поэтому строка-заглушка выше настоящего блока молча
+        # съедала бы его.
+        return ([f"{dt_id}: ключ delivers объявлен дважды ({keys}) — "
+                 f"разбирается только первый, объявленное ниже невидимо"], [])
     region = _delivers_region(block)
     if region is None:
         return ([f"{dt_id}: поле delivers отсутствует (dt_contract_version: 2 "
                  f"требует его у каждого DT; `delivers: []` — законное "
-                 f"утверждение «объявленных результатов нет»)"], set())
+                 f"утверждение «объявленных результатов нет»)"], [])
     try:
         parsed = yaml.safe_load(region)
     except yaml.YAMLError as exc:
@@ -923,13 +943,13 @@ def _delivers_findings(dt_id: str, block: str) -> tuple[list[str], set[str]]:
         # Ключ есть, значения нет — находка формы, а не «поля нет»: тот же
         # приём, что у `verifies` (round 13 ревью PR #161).
         return ([f"{dt_id}: поле delivers объявлено, но пусто — ожидается "
-                 f"список записей либо явный `delivers: []`"], set())
+                 f"список записей либо явный `delivers: []`"], [])
     if items == []:
-        return ([], set())
+        return ([], [])
     if not isinstance(items, list):
-        return ([f"{dt_id}: delivers обязан быть списком записей"], set())
+        return ([f"{dt_id}: delivers обязан быть списком записей"], [])
     findings: list[str] = []
-    ids: set[str] = set()
+    ids: list[str] = []
     for pos, item in enumerate(items, start=1):
         where = f"{dt_id}: delivers[{pos}]"
         if not isinstance(item, dict):
@@ -941,7 +961,14 @@ def _delivers_findings(dt_id: str, block: str) -> tuple[list[str], set[str]]:
                 findings.append(f"{where}: поле {field} отсутствует или пусто")
         del_id = item.get("id")
         if isinstance(del_id, str) and del_id:
-            ids.add(del_id)
+            ids.append(del_id)
+        kind = item.get("kind")
+        if isinstance(kind, str) and kind and kind not in DELIVERABLE_KINDS:
+            findings.append(
+                f"{where}: неизвестный kind {kind!r} — словарь закрыт "
+                f"({', '.join(DELIVERABLE_KINDS)}); при открытом видом "
+                f"стало бы любое слово, которое автор счёл подходящим"
+            )
         statement = item.get("statement")
         if isinstance(statement, str) and statement and not statement.strip():
             findings.append(f"{where}: statement пуст")
@@ -1008,7 +1035,7 @@ def dt_contract_findings(
     for dt_id, block in _dt_blocks(body):
         block_errors, ids = _delivers_findings(dt_id, block)
         errors.extend(block_errors)
-        for del_id in sorted(ids):
+        for del_id in ids:
             if del_id in seen:
                 errors.append(
                     f"{dt_id}: delivers id {del_id} уже объявлен в "

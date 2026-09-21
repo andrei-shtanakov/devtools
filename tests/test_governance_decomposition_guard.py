@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from governance.decomposition_guard import (
+    DELIVERABLE_KINDS,
     DtTask,
     dt_contract_findings,
     parse_dt_tasks,
@@ -1335,3 +1336,60 @@ def test_v2_source_must_be_addressed_not_a_heading() -> None:
     bad = _DT_V2.replace('"acceptance#AC-07"', '"25-acceptance.md:41"')
     errors, _ = dt_contract_findings(_V2_FM + bad, allow_legacy_dt=False)
     assert any("sources" in e for e in errors), errors
+
+
+def test_v2_delivers_rejects_duplicate_ids_inside_one_dt() -> None:
+    """Блокер ревью #289: `set` схлопывал дубль ДО сверки.
+
+    Проверка уникальности ловила только межзадачные дубли, а внутри-DT
+    повтор исчезал ещё в сборе — то есть собственное сообщение проверки
+    («уже объявлен в <DT>») для этого случая не могло быть напечатано
+    даже структурно. Копипаст записи внутри одного DT — ровно тот вход, на
+    котором она нужнее всего.
+    """
+    doubled = _DT_V2.replace(
+        "      - \"acceptance#AC-07\"\n",
+        "      - \"acceptance#AC-07\"\n"
+        "  - id: DEL-01\n"
+        "    kind: capability\n"
+        "    statement: \"второе обязательство\"\n"
+        "    sources:\n"
+        "      - \"acceptance#AC-08\"\n",
+        1,
+    )
+    errors, _ = dt_contract_findings(_V2_FM + doubled, allow_legacy_dt=False)
+    assert any("DEL-01" in e for e in errors), errors
+
+
+def test_v2_rejects_a_second_delivers_key_in_the_same_dt() -> None:
+    """Строка-заглушка, оставшаяся выше настоящего блока, молча съедала его.
+
+    Регион берётся по ПЕРВОМУ совпадению, поэтому `delivers: []` читался
+    как законное «результатов нет», а объявленный ниже DEL-01 не видел
+    никто. Канон репо для этого класса — считать число ключей отдельно от
+    числа разборов (как у `tdd_waiver`).
+    """
+    text = _DT_V2.replace("delivers:\n", "delivers: []\ndelivers:\n", 1)
+    errors, _ = dt_contract_findings(_V2_FM + text, allow_legacy_dt=False)
+    assert any("delivers" in e and "дважды" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("kind", ["потому-что-надо", "модуль", ""])
+def test_v2_kind_is_a_closed_vocabulary(kind: str) -> None:
+    """Открытый словарь превратил бы машинную классификацию в свободный
+    текст — тот же провал, от которого репо закрылось `WAIVER_CLASSES`."""
+    text = _DT_V2.replace("kind: capability", f"kind: {kind}", 1)
+    errors, _ = dt_contract_findings(_V2_FM + text, allow_legacy_dt=False)
+    assert any("kind" in e for e in errors), (kind, errors)
+
+
+def test_v2_accepts_every_declared_kind() -> None:
+    """Негативная половина к словарю: объявленные значения принимаются.
+
+    Без неё «закрытый словарь» удовлетворялся бы словарём из одного
+    значения или пустым.
+    """
+    for kind in DELIVERABLE_KINDS:
+        text = _DT_V2.replace("kind: capability", f"kind: {kind}", 1)
+        errors, _ = dt_contract_findings(_V2_FM + text, allow_legacy_dt=False)
+        assert errors == [], (kind, errors)
