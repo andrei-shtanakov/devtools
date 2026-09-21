@@ -1,6 +1,6 @@
 ---
 spec_stage: behaviour-spec
-status: approval_pending
+status: approved
 owner_role: product
 traces_to:
 - requirements
@@ -8,6 +8,8 @@ upstream_hashes:
   requirements: 5798be4c6af7e5df7d1c435bef2e6d16e35becbb
 version: 2
 approved_content_hash: 00e4e8dfbd5429894991dc9a94ef60393e999daa
+approved_by: andrei-shtanakov
+approved_at: '2026-09-21T08:46:16Z'
 ---
 
 # Behaviour Spec: Барьерный стоп S6 сохраняет op'ы только до resume (devtools#276)
