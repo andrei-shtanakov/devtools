@@ -1,7 +1,7 @@
 ---
 spec_stage: decomposition
 dt_contract_version: 2
-status: approval_pending
+status: approved
 owner_role: tech-lead
 traces_to:
 - design
@@ -11,6 +11,8 @@ upstream_hashes:
   acceptance: 7cc56034c22349aefd3bb88d7562c9a34d23a838
 approved_content_hash: baa3e0e39134d0f9ad8bccd5fb22465345a2b603
 version: 2
+approved_at: '2026-09-22T17:32:04Z'
+approved_by: andrei-shtanakov
 ---
 
 # Decomposition: посторонний `.md` больше не отключает сверку §I8 для легаси-v1
