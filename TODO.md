@@ -1888,7 +1888,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       не был адресуем в `delivers.sources`; починено PR #313, отдельного
       открытого пункта не требует. Остальные находки прогона заведены
       ниже. Evidence: `docs/evidence/2026-09-21-s7-control-run.md`.
-- [ ] Процедура §I12 называет шаг scope-аттестации: finalize-PR не уходит человеку из-за отсутствующего одобряющего ревью @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:finalize-approving-review-step
+- [x] Процедура §I12 называет шаг scope-аттестации: finalize-PR не уходит человеку из-за отсутствующего одобряющего ревью @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:finalize-approving-review-step — PR #331
       Наблюдаемый дефект (прогон S7, 2026-09-21; ранее — цепочка
       spec-runner 2026-09-20): правило репозитория требует одного
       одобряющего ревью, автор finalize-PR — учётка, запустившая
@@ -1913,6 +1913,16 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `APPROVED`, перекрытого позднейшим `CHANGES_REQUESTED`.
       Автотриггер аттестации на ветках `spec/*-final` (чтобы исчезла и
       лишняя команда) — ОТДЕЛЬНЫЙ пункт, здесь намеренно не берётся.
+      **Закрыто PR #331** (сверено 2026-09-22 по регрессиям, чекбокс не был
+      поставлен тем же PR): `--approve-node` без действующего одобрения не
+      пробует мерж и называет PR, команду аттестации и повтор
+      (`test_finalize_without_approving_review_names_the_attestation_step`),
+      повтор мержит тот же finalize-PR (`…_merges_after_the_attestation_appears`),
+      неполученный список ревью — fail-closed (`test_unknown_review_list_is_fail_closed`),
+      `APPROVED` под позднейшим `CHANGES_REQUESTED` не действует
+      (`test_changes_requested_over_earlier_approval_is_not_effective`). Вторая
+      половина devtools#277 — `human-merge.sh` под rulesets — этим пунктом не
+      покрывалась и остаётся в issue.
 - [ ] `atp-platform-testing` догоняет review-kit до текущего апстрима — двухфазным ре-вендором полного состава, ПЕРЕД возобновлением разработки в нём @owner:github:andrei-shtanakov @epic:eco.tooling @id:atp-platform-testing-kit-catchup
       Исключён из волны devtools#292 решением владельца 2026-09-21: репо
       спящее (ноль открытых issues, последний коммит 14.09), а обновление
