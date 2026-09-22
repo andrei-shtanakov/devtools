@@ -73,11 +73,15 @@ def update_frontmatter(text: str, updates: Mapping[str, object]) -> str:
     Изменённый ключ рендерится каноном `safe_dump` — авторская форма
     именно этого ключа не сохраняется, и это честно: значение сменилось.
 
-    Fail-closed против класса «0 замен выглядит как успех» (ретроспектива
-    2026-09-02): результат ПЕРЕЧИТЫВАЕТСЯ парсером и обязан дать ровно
-    `meta | updates`, иначе `ValueError` без записи. Дубль ключа,
-    многострочная авторская форма, которую регекс не увидел, — всё ловится
-    этой сверкой, а не доверием к замене.
+    Против класса «0 замен выглядит как успех» (ретроспектива 2026-09-02):
+    результат ПЕРЕЧИТЫВАЕТСЯ парсером и обязан дать ровно `meta | updates`.
+    Не дал — построчная правка этой формы не умеет (flow-маппинг верхнего
+    уровня `{node: …}` одной строкой, дубль ключа, форма, которую регекс
+    не увидел), и тогда файл рендерится КАНОНОМ из словаря, как делал
+    `join_frontmatter` до этой функции: авторская форма не сохраняется,
+    но результат верен по построению. Правильность здесь старше
+    сохранности байтов; отказом это быть не должно — прежний путь такой
+    вход принимал (major ревью PR #338).
     """
     meta, _body = split_frontmatter(text)
     head, sep, rest = text[4:].partition("\n---\n")
@@ -104,12 +108,14 @@ def update_frontmatter(text: str, updates: Mapping[str, object]) -> str:
         return dumped.rstrip("\n").split("\n")
 
     replaced: list[tuple[int, int, list[str]]] = []
+    expected = dict(meta)
+    expected.update(updates)
     for key in updates:
         if key in meta and meta[key] == updates[key]:
             continue
         found = [i for i, k in starts if k == key]
         if len(found) > 1:
-            raise ValueError(f"frontmatter: ключ {key!r} объявлен дважды")
+            return join_frontmatter(expected, _body)
         if found:
             replaced.append((found[0], span(found[0]), render(key)))
         else:
@@ -118,12 +124,10 @@ def update_frontmatter(text: str, updates: Mapping[str, object]) -> str:
         lines[start:end] = new_lines
     result = "---\n" + "\n".join(lines) + "\n---\n" + rest
 
-    check, _ = split_frontmatter(result)
-    expected = dict(meta)
-    expected.update(updates)
+    try:
+        check, _ = split_frontmatter(result)
+    except ValueError:
+        return join_frontmatter(expected, _body)
     if check != expected:
-        raise ValueError(
-            "правка frontmatter не сошлась с ожидаемой: перечитано "
-            f"{check!r}, ожидалось {expected!r} — запись не выполняется"
-        )
+        return join_frontmatter(expected, _body)
     return result
