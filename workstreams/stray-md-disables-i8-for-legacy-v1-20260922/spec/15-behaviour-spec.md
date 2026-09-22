@@ -1,6 +1,6 @@
 ---
 spec_stage: behaviour-spec
-status: approval_pending
+status: approved
 owner_role: product
 traces_to:
 - requirements
@@ -8,6 +8,8 @@ upstream_hashes:
   requirements: ad2c13717742f377a1e0a5e70378907b7dcc0485
 approved_content_hash: 86945e2bfd6f0e1edf610d21da86166e301b473b
 version: 2
+approved_at: '2026-09-22T16:06:19Z'
+approved_by: andrei-shtanakov
 ---
 
 # Behaviour Spec: посторонний `.md` больше не отключает сверку §I8 для легаси-v1
