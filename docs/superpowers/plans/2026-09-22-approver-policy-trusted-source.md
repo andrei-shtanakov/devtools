@@ -438,6 +438,7 @@ POLICY_REFUSAL_SOURCE = "source"
 POLICY_REFUSAL_ABSENT = "absent"
 POLICY_REFUSAL_SUPERSEDED = "superseded"
 POLICY_REFUSAL_EMPTY = "empty"
+INVALIDATION_POLICY_CHANGED = "policy_changed"   # префикс причины invalidated при смене версии
 
 
 def policy_source() -> tuple[str, str, str]:
@@ -684,7 +685,9 @@ def test_policy_change_invalidates_and_new_candidate_pins_the_new_version(
     assert "политика сменилась" in str(caught.value)
     record = world.state.ops[key]
     assert record["status"] == al.STATUS_INVALIDATED
+    assert record["reason"].startswith("policy_changed:")
     assert record["authorization"] is None
+    assert record["policy"]["sha"] == "p" * 40 and record["candidate_pr"] == op["candidate_pr"], "история сохранена"
     # повторное установление авторизации — новый candidate под новым пином
     outcome = approve(world, "charter")
     assert outcome.request is not None and outcome.request != key
@@ -852,7 +855,9 @@ def _policy_ref(op: dict) -> str:
         refusal = policy.value
         assert refusal is not None
         if refusal.kind == af.POLICY_REFUSAL_SUPERSEDED:
-            al.invalidate_request(state, key, refusal.detail)
+            # Причина с машинным префиксом (решение владельца 2026-09-22):
+            # отличима от прочих invalidated, запись заявки сохраняется целиком.
+            al.invalidate_request(state, key, f"{af.INVALIDATION_POLICY_CHANGED}: {refusal.detail}")
             raise RuntimeError(
                 f"{refusal.detail}. Заявка {key} — invalidated; повторное "
                 "установление авторизации — новый candidate над теми же узлами"
