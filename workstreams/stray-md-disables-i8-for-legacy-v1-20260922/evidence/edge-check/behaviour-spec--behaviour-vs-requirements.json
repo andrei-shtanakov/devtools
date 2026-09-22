@@ -1,0 +1,95 @@
+{
+  "absence": [],
+  "attempt_id": "68bd94251d5c4f37a77c304e9189ab82",
+  "bases": [
+    {
+      "path": "10-requirements.md",
+      "role": "requirements",
+      "sha256": "6e21da18d417a1e9ad905114d3343d0c6af0f5b287471b3fcc0be3503ab34f34",
+      "size": 26068
+    }
+  ],
+  "check_identity": "d4da48b881977e42e9a5922fc7c47deb67241dc78972bd1aad22283f59e646ba",
+  "context": {
+    "estimate_tokens": 16156,
+    "limit_tokens": 120000,
+    "method": "utf8-bytes/4",
+    "reserve_tokens": 8000,
+    "size": 64625,
+    "unit": "utf8-bytes"
+  },
+  "criteria": [
+    {
+      "id": "R1",
+      "reason": "Все Must/Should требования FR-01…FR-08 и NFR-01…NFR-05 закрыты сценариями по существу, включая каждый отдельный пункт Acceptance (например, три критерия FR-04 → BEH-07 и BEH-08, обе половины NFR-01 → BEH-15 и BEH-20).",
+      "status": "pass"
+    },
+    {
+      "id": "R2",
+      "reason": "Спека не вводит обязательств сверх источника: пять веток unavailable в BEH-09 опираются на FR-05 и перечень Q-05, мутации BEH-08/BEH-19 предписаны Acceptance'ами FR-04 и NFR-04, противоречий требованиям нет.",
+      "status": "pass"
+    },
+    {
+      "id": "R3",
+      "reason": "Сценарии наблюдают вывод и исход прогона, а не устройство (BEH-01 прямо отказывается смотреть промежуточный результат, BEH-05 не предписывает порядок, BEH-20 опирается на дифф), а белоящичный «Дано» BEH-07/BEH-08 мандатирован самим FR-04.",
+      "status": "pass"
+    },
+    {
+      "id": "R4",
+      "reason": "Формулировки «Тогда» однозначны, а потенциально спорные понятия («слово о пропуске», база сравнения времени, «различимые причины» при открытом Q-05) определены в общих допущениях и разделе об открытых вопросах.",
+      "status": "pass"
+    }
+  ],
+  "edge": "behaviour-vs-requirements",
+  "findings": [],
+  "finished_at": "2026-09-22T16:02:09.266605+00:00",
+  "node": "behaviour-spec",
+  "result_key": "e0cdc2e521f44419afda70898de47f7a19f40499ba84574b5a88a74046479cd8",
+  "reviewer": {
+    "effort": null,
+    "env_passthrough": [
+      "HOME",
+      "LANG",
+      "PATH",
+      "TMPDIR",
+      "USER"
+    ],
+    "harness": "claude",
+    "harness_version": "2.1.278 (Claude Code)",
+    "model": "claude-opus-5",
+    "model_id": null
+  },
+  "rules": {
+    "id": "behaviour-vs-requirements",
+    "items": [
+      [
+        "R1",
+        "Каждое Must/Should-требование получает реализацию по существу: сценарий, обоснованное обязательство или waiver с названной причиной."
+      ],
+      [
+        "R2",
+        "Поведение не вводит необоснованных обязательств и не противоречит требованиям; уточнение поведения само по себе допустимо."
+      ],
+      [
+        "R3",
+        "Сценарий наблюдаем снаружи: не описывает внутреннее устройство."
+      ],
+      [
+        "R4",
+        "Формулировка сценария допускает единственное прочтение."
+      ]
+    ]
+  },
+  "schema_version": 1,
+  "started_at": "2026-09-22T15:58:39.075575+00:00",
+  "subject": [
+    {
+      "path": "15-behaviour-spec.md",
+      "role": "subject",
+      "sha256": "f134725b8c870df464974394d820393b1858e7c57988ec6893ed4de9b46be13a",
+      "size": 35025
+    }
+  ],
+  "verdict": "PASS",
+  "wave": 3
+}
