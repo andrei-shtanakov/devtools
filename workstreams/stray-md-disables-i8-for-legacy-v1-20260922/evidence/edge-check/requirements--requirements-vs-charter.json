@@ -1,0 +1,95 @@
+{
+  "absence": [],
+  "attempt_id": "0d69f67f031a45bc81a2b5784ce70282",
+  "bases": [
+    {
+      "path": "00-charter.md",
+      "role": "charter",
+      "sha256": "dd1c4b780cd38bbc09b1c77ab9ddbfe2969744c7486a4e60463338928bd955c9",
+      "size": 17994
+    }
+  ],
+  "check_identity": "d65ac9507ea75d3e5e9115a10e1ba16ad4e193643d05fd849732401adb432615",
+  "context": {
+    "estimate_tokens": 11853,
+    "limit_tokens": 120000,
+    "method": "utf8-bytes/4",
+    "reserve_tokens": 8000,
+    "size": 47415,
+    "unit": "utf8-bytes"
+  },
+  "criteria": [
+    {
+      "id": "R1",
+      "reason": "G-01, G-02, CON-01, CON-02, M-01 и M-02 каждый закрыт хотя бы одним требованием (FR-04 для CON-01/M-01, FR-07 для CON-02, FR-02/FR-05 для M-02).",
+      "status": "pass"
+    },
+    {
+      "id": "R2",
+      "reason": "Ни одно Must не расходится с CON-01, CON-02 и рамками charter: FR-07 сохраняет читаемость легаси-v1, FR-04/NFR-03 не смягчают проверку состава, NFR-05 держит границу devtools.",
+      "status": "pass"
+    },
+    {
+      "id": "R3",
+      "reason": "Добавленные FR-04…FR-08 и NFR-03…NFR-05 выводятся из ограничений, рисков и критериев charter и несут явные ссылки на его идентификаторы.",
+      "status": "pass"
+    },
+    {
+      "id": "R4",
+      "reason": "Каждое Must/Should проверяется по наблюдаемому исходу прогона, диффу или выводу, а структурный по природе FR-04 снабжён дифференциальным и мутационным контролем вместо чтения исходника.",
+      "status": "pass"
+    }
+  ],
+  "edge": "requirements-vs-charter",
+  "findings": [],
+  "finished_at": "2026-09-22T15:21:52.943598+00:00",
+  "node": "requirements",
+  "result_key": "fd4d54487f0a86bd6a7005e5cc0af8408f876c3611bc0ec77ddf6e6301ac40d5",
+  "reviewer": {
+    "effort": null,
+    "env_passthrough": [
+      "HOME",
+      "LANG",
+      "PATH",
+      "TMPDIR",
+      "USER"
+    ],
+    "harness": "claude",
+    "harness_version": "2.1.278 (Claude Code)",
+    "model": "claude-opus-5",
+    "model_id": null
+  },
+  "rules": {
+    "id": "requirements-vs-charter",
+    "items": [
+      [
+        "R1",
+        "Каждая цель, ограничение и метрика charter (G-*, CON-*, M-*) имеет хотя бы одно требование, которое её реализует или явно отклоняет с названной причиной."
+      ],
+      [
+        "R2",
+        "Ни одно Must-требование не противоречит ограничениям charter."
+      ],
+      [
+        "R3",
+        "Требование не вводит цель, которой нет в charter, без ссылки на него."
+      ],
+      [
+        "R4",
+        "Формулировка каждого Must/Should проверяема снаружи: наблюдаемый результат, не внутреннее устройство."
+      ]
+    ]
+  },
+  "schema_version": 1,
+  "started_at": "2026-09-22T15:19:44.672602+00:00",
+  "subject": [
+    {
+      "path": "10-requirements.md",
+      "role": "subject",
+      "sha256": "6d2d983f34155ed252a879e2199ca6b13efae7ed557182ed63eac442123d0841",
+      "size": 25924
+    }
+  ],
+  "verdict": "PASS",
+  "wave": 2
+}
