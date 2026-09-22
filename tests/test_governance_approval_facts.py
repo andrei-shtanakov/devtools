@@ -226,52 +226,136 @@ def test_incomplete_merge_facts_are_unavailable(missing: str, name: str) -> None
 # --- Подпись создаёт только авторизованная учётка ------------------------
 
 
-def test_allowlist_is_empty_by_default(monkeypatch) -> None:
-    """Пустой дефолт значит «подписать не может никто» — fail-closed.
+from dataclasses import dataclass, field
 
-    Подписи нет (`value is None`, не `FOUND`), но исход — `UNAVAILABLE`, а
-    не `FORBIDDEN` (@id:approver-allowlist-process-boundary): candidate под
-    пустой политикой не создаётся (devtools#278), поэтому пустота в
-    процессе, устанавливающем факт, — потеря значения между процессами, а
-    не решение о мержере. Учётка не проверялась, и сообщение её не винит.
-    """
-    monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
-    assert af.approver_allowlist() == frozenset()
-    fact = af.authorized_signature(
-        MergeEvent("andrei-shtanakov", "2026-09-10T08:00:00Z", "abc123")
+from governance.facts import Fact, unavailable
+
+SHA_A, SHA_B = "a" * 40, "b" * 40
+
+
+@dataclass
+class PolicyOps:
+    """Фейк форджи политики: версия по пути и тексты по SHA."""
+
+    version: Fact = field(
+        default_factory=lambda: Fact(Outcome.FOUND, SHA_A, "")
     )
-    assert fact.outcome is Outcome.UNAVAILABLE
-    assert fact.value is None, "подписи нет"
-    assert "пуст" in fact.detail
-    assert "учётки нет в" not in fact.detail, "это отказ мержеру, не политике"
+    files: dict[str, Fact] = field(default_factory=lambda: {
+        SHA_A: Fact(
+            Outcome.FOUND, "AUTHORIZED_APPROVER_ACCOUNTS=andrei-shtanakov\n", ""
+        ),
+    })
+    calls: list[tuple] = field(default_factory=list)
+
+    def policy_version_fact(self, repo, branch, path):
+        self.calls.append(("version", repo, branch, path))
+        return self.version
+
+    def repo_file_fact(self, repo, sha, path):
+        self.calls.append(("file", repo, sha, path))
+        return self.files.get(sha, Fact(Outcome.ABSENT, None, "нет"))
 
 
-def test_configured_account_signs_and_review_circuit_never_does(
-    monkeypatch,
-) -> None:
-    """Один и тот же список даёт РАЗНЫЕ ответы на разные учётки.
+def test_snapshot_found_pins_sha_and_fingerprint(monkeypatch) -> None:
+    """Снимок несёт версию (SHA последнего коммита по пути), состав и
+    отпечаток — тот же `v1:31bf1658…`, что в ледгерах прошлых прогонов."""
+    monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
+    fact = af.policy_snapshot(PolicyOps(), pinned_sha=None)
+    assert fact.outcome is Outcome.FOUND
+    snap = fact.value
+    assert isinstance(snap, af.PolicySnapshot)
+    assert snap.sha == SHA_A and snap.accounts == frozenset({"andrei-shtanakov"})
+    assert snap.fingerprint == "v1:31bf16586b6cfbb69a29b23d8850bfe57931d99b"
+    assert snap.repo == "andrei-shtanakov/approval-policy"
+    assert snap.path == "policy/approvers.env"
+    assert snap.source == (
+        f"github:andrei-shtanakov/approval-policy@{SHA_A}:policy/approvers.env"
+    )
 
-    Учётка ревью-контура не разрешена и по умолчанию, и при настроенном
-    списке: агентский мерж подписи не создаёт, а даёт отказ финализации.
-    Это законная дорога в `invalidated` — факт прочитан и однозначен.
-    """
+
+def test_env_variable_is_a_named_refusal_before_any_forge_call(monkeypatch) -> None:
+    """S7: переменная больше не источник; выставленная — отказ до форджи,
+    не молчаливое игнорирование, и не обвинение учётки."""
     monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "andrei-shtanakov")
+    ops = PolicyOps()
+    fact = af.policy_snapshot(ops, pinned_sha=None)
+    assert fact.outcome is Outcome.FORBIDDEN
+    assert isinstance(fact.value, af.PolicyRefusal)
+    assert fact.value.kind == af.POLICY_REFUSAL_ENV
+    assert ops.calls == [], "до форджи дело не дошло"
+    assert "approval-policy" in fact.detail and "учётки нет в" not in fact.detail
+
+
+def test_superseded_when_current_version_differs_from_pin(monkeypatch) -> None:
+    monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
+    fact = af.policy_snapshot(PolicyOps(), pinned_sha=SHA_B)
+    assert fact.outcome is Outcome.FORBIDDEN
+    assert isinstance(fact.value, af.PolicyRefusal)
+    assert fact.value.kind == af.POLICY_REFUSAL_SUPERSEDED
+    assert fact.value.pinned == SHA_B and fact.value.current == SHA_A
+
+
+def test_empty_after_parsing_is_forbidden_not_found(monkeypatch) -> None:
+    """`= , ,` проходит read_key, но даёт пустое множество — это «подписать
+    не может никто», FORBIDDEN(empty), а не FOUND с пустым accounts."""
+    monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
+    ops = PolicyOps(files={
+        SHA_A: Fact(Outcome.FOUND, "AUTHORIZED_APPROVER_ACCOUNTS= , ,\n", ""),
+    })
+    fact = af.policy_snapshot(ops, pinned_sha=None)
+    assert fact.outcome is Outcome.FORBIDDEN
+    assert isinstance(fact.value, af.PolicyRefusal)
+    assert fact.value.kind == af.POLICY_REFUSAL_EMPTY
+    assert "учётки нет в" not in fact.detail
+
+
+def test_unavailable_version_or_file_keeps_outcome_unavailable(monkeypatch) -> None:
+    monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
+    fact = af.policy_snapshot(PolicyOps(version=unavailable("net")), pinned_sha=None)
+    assert fact.outcome is Outcome.UNAVAILABLE
+    ops = PolicyOps(files={SHA_A: unavailable("net")})
+    assert af.policy_snapshot(ops, pinned_sha=None).outcome is Outcome.UNAVAILABLE
+
+
+def test_absent_branch_or_file_is_forbidden_absent(monkeypatch) -> None:
+    monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
+    fact = af.policy_snapshot(
+        PolicyOps(version=Fact(Outcome.ABSENT, None, "нет ветки")), pinned_sha=None
+    )
+    assert fact.outcome is Outcome.FORBIDDEN
+    assert isinstance(fact.value, af.PolicyRefusal)
+    assert fact.value.kind == af.POLICY_REFUSAL_ABSENT
+    fact = af.policy_snapshot(PolicyOps(files={}), pinned_sha=None)
+    assert fact.outcome is Outcome.FORBIDDEN
+    assert isinstance(fact.value, af.PolicyRefusal)
+    assert fact.value.kind == af.POLICY_REFUSAL_ABSENT
+
+
+def test_signature_judges_login_against_snapshot(monkeypatch) -> None:
+    """Один и тот же снимок даёт РАЗНЫЕ ответы на разные учётки; источник
+    решения — репозиторий политики по SHA, не переменная."""
+    monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
+    snap = af.policy_snapshot(PolicyOps(), pinned_sha=None).value
+    assert isinstance(snap, af.PolicySnapshot)
     human = af.authorized_signature(
-        MergeEvent("andrei-shtanakov", "2026-09-10T08:00:00Z", "abc123")
+        MergeEvent("andrei-shtanakov", "2026-09-10T08:00:00Z", "abc"), snap
     )
     agent = af.authorized_signature(
-        MergeEvent("ai-prosto", "2026-09-10T08:00:00Z", "abc123")
+        MergeEvent("ai-prosto", "2026-09-10T08:00:00Z", "abc"), snap
     )
     assert human.outcome is Outcome.FOUND
-    assert agent.outcome is Outcome.FORBIDDEN
-    assert agent.established, "FORBIDDEN — установленный факт, не сбой"
-    assert af.APPROVER_ALLOWLIST_ENV in agent.detail
+    assert human.value is not None
+    assert human.value.source == (
+        f"github:andrei-shtanakov/approval-policy@{SHA_A}:policy/approvers.env"
+    )
+    assert human.value.policy == snap.fingerprint
+    assert agent.outcome is Outcome.FORBIDDEN and agent.established
+    assert "approval-policy" in agent.detail
 
 
-def test_allowlist_drops_empty_items(monkeypatch) -> None:
-    """Непустой список случайно не получить: пустые элементы отброшены."""
-    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, " , ,")
-    assert af.approver_allowlist() == frozenset()
+def test_env_reader_is_gone() -> None:
+    """Чтение allowlist из окружения удалено целиком (S7)."""
+    assert not hasattr(af, "approver_allowlist")
 
 
 # --- Закрытие PR --------------------------------------------------------

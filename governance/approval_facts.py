@@ -40,9 +40,12 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+from collections.abc import Iterable
+from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
 
+from governance import ssot_env
 from governance.facts import Fact, Outcome, unavailable
 from governance.ops import Ops
 
@@ -191,49 +194,23 @@ def merge_event(facts: dict) -> Fact[MergeEvent]:
 
 # --- Факт: создаёт ли этот мерж подпись ----------------------------------
 
-#: Единственная точка настройки списка авторизованных approver-учёток
-#: (§I12). Имя говорит про АВТОРИЗАЦИЮ, а не про человечность: «список
-#: человеческих merger-логинов» обещал бы ровно то, чего механизм не
-#: проверяет. Дефолт — ПУСТО, то есть «подписать не может никто».
-#:
-#: Не путать с allowlist'ом §I10 (`REPLACEMENT_REVIEW_ALLOWLIST`): у них
-#: разные предметы и противоположная полярность — тот перечисляет, чьё
-#: ревью НЕ блокирует замену, этот — чей мерж СОЗДАЁТ подпись. Общее
-#: только fail-closed по умолчанию.
+#: Ключ политики в `policy/approvers.env` репозитория `approval-policy` — И имя
+#: переменной окружения, выставление которой теперь есть ОТКАЗ (спека
+#: approval-policy S7): переменная больше не источник, а молчаливое
+#: игнорирование оставило бы оператора, действующего по старому правилу, в
+#: уверенности, что его намерение исполняется. Одно имя в двух местах —
+#: намеренно: правило волта и файл политики читаются одним словарём.
 APPROVER_ALLOWLIST_ENV = "AUTHORIZED_APPROVER_ACCOUNTS"
 
-
-def approver_allowlist() -> frozenset[str]:
-    """Учётки, чей мерж создаёт подпись; по умолчанию — НИ ОДНОЙ.
-
-    Пустой дефолт — не заготовка, а поведение: пока список не выставлен
-    явно, подписать не может никто. Получить непустой случайно нельзя —
-    имя переменной уникально, значение перечисляется поимённо, пустые
-    элементы отбрасываются.
-
-    Учётки ревью-контура здесь нет и по умолчанию быть не может: опознание
-    контура через непустой дефолт §I12 убрал как вторую, несовместимую
-    семантику «списка учёток» рядом с той, которую репо уже принял в §I10.
-
-    ГРАНИЦА, которую стоит знать вслух: источник — окружение процесса,
-    то есть та же сторона, чью работу подпись санкционирует. Запусти
-    финализацию агент — политику, против которой проверяется человеческая
-    подпись, подаёт он сам. Значит эта проверка есть defense-in-depth и
-    независимой авторизации НЕ обеспечивает; формулировки вида «мерж
-    человеком из allowlist» описывают намерение, а не гарантию.
-
-    Решение владельца (2026-09-21) о целевом состоянии: канонический
-    список задаёт владелец ВНЕ проверяемого дерева, в конфигурации с
-    независимым управлением доступом; аргументы запуска и окружение
-    исполнителя переопределять его не могут; candidate и finalize берут
-    одну закреплённую версию политики, а недоступная или изменившаяся —
-    отказ с явной причиной, не молчаливая подмена. До появления такого
-    источника здесь описано ВРЕМЕННОЕ состояние
-    (`@id:approver-policy-trusted-source`).
-    """
-    raw = os.environ.get(APPROVER_ALLOWLIST_ENV, "")
-    return frozenset(part.strip() for part in raw.split(",") if part.strip())
-
+#: Координаты источника политики — SSOT под authority-root (S8): константу
+#: в этом модуле агент перенаправил бы своим PR под агентским мержем.
+POLICY_SOURCE_FILE = (
+    Path(__file__).resolve().parent.parent
+    / "contracts"
+    / "approval-policy-source"
+    / "v1"
+    / "source.env"
+)
 
 #: Версия схемы отпечатка политики. Отпечаток обязан меняться, когда
 #: меняется СПОСОБ его вычисления, а не только состав списка, — иначе две
@@ -241,23 +218,161 @@ def approver_allowlist() -> frozenset[str]:
 #: отвечать на свой вопрос.
 POLICY_SCHEME = "v1"
 
+#: Машинные различители отказа снимка (§4.2): по ним фазы решают, сохранять
+#: заявку или терминализировать. Ни один не про учётку мержера.
+POLICY_REFUSAL_ENV = "env"
+POLICY_REFUSAL_SOURCE = "source"
+POLICY_REFUSAL_ABSENT = "absent"
+POLICY_REFUSAL_SUPERSEDED = "superseded"
+POLICY_REFUSAL_EMPTY = "empty"
+#: Префикс причины `invalidated` при смене версии политики (решение
+#: владельца 2026-09-22): отличим от прочих причин, запись заявки сохраняется.
+INVALIDATION_POLICY_CHANGED = "policy_changed"
 
-def policy_fingerprint() -> str:
-    """Отпечаток политики авторизации на момент решения.
 
-    Решение об авторизации мержа принимается ОДИН раз (§I12, решение
-    владельца 2026-09-10) и записывается вместе с тем, ПО КАКОЙ политике
-    оно принято. Без этого «мы авторизовали по такой-то политике»
-    остаётся умолчанием: перечитать список задним числом значит
-    переавторизовать прошлое новой конфигурацией, а не проверить старое
-    решение.
+def policy_source() -> tuple[str, str, str]:
+    """(repo, ref, path) из SSOT под authority-root; RuntimeError на битом файле."""
+    what = "SSOT источника политики подписи"
+    return (
+        ssot_env.read_key(POLICY_SOURCE_FILE, "APPROVAL_POLICY_REPO", what),
+        ssot_env.read_key(POLICY_SOURCE_FILE, "APPROVAL_POLICY_REF", what),
+        ssot_env.read_key(POLICY_SOURCE_FILE, "APPROVAL_POLICY_PATH", what),
+    )
 
-    Отпечаток, а не сам список: он отвечает на вопрос «та же ли это
-    политика», и только на него; хранить перечень учёток в журнале
-    прогона незачем.
-    """
-    payload = ",".join(sorted(approver_allowlist())).encode("utf-8")
+
+def policy_fingerprint(accounts: Iterable[str]) -> str:
+    """Отпечаток политики по составу списка — `v1:` + sha1 отсортированного
+    перечня через запятую. Совместим с ледгерами прошлых прогонов; отвечает
+    «та же ли политика по содержанию», версию источника не кодирует."""
+    payload = ",".join(sorted(accounts)).encode("utf-8")
     return f"{POLICY_SCHEME}:{hashlib.sha1(payload).hexdigest()}"
+
+
+@dataclass(frozen=True)
+class PolicySnapshot:
+    """Прочитанная версия политики: откуда, какой SHA, какой состав.
+
+    `sha` — последний коммит `ref`, тронувший `path` (S5): правка README
+    рядом версию не меняет. `fingerprint` — по составу (совместим с
+    прошлыми записями). `source` — то, что пишется в `Authorization`.
+    """
+
+    repo: str
+    ref: str
+    path: str
+    sha: str
+    accounts: frozenset[str]
+    fingerprint: str
+
+    @property
+    def source(self) -> str:
+        return f"github:{self.repo}@{self.sha}:{self.path}"
+
+    def as_record(self) -> dict[str, str]:
+        """Поле `policy` заявки: без состава — состав восстанавливается по SHA."""
+        return {
+            "repo": self.repo,
+            "ref": self.ref,
+            "path": self.path,
+            "sha": self.sha,
+            "fingerprint": self.fingerprint,
+        }
+
+
+@dataclass(frozen=True)
+class PolicyRefusal:
+    """Установленный отказ по ПОЛИТИКЕ (не по мержеру): `kind` из POLICY_REFUSAL_*."""
+
+    kind: str
+    detail: str
+    pinned: str | None = None
+    current: str | None = None
+
+
+PolicyFact = Fact[PolicySnapshot | PolicyRefusal]
+
+
+def _forbidden(kind: str, detail: str, **extra: str) -> PolicyFact:
+    return Fact(Outcome.FORBIDDEN, PolicyRefusal(kind, detail, **extra), detail)
+
+
+def policy_snapshot(ops: Ops, *, pinned_sha: str | None) -> PolicyFact:
+    """Снимок политики из репозитория `approval-policy` (спека §4.2).
+
+    Порядок — таблица §4.2: выставленная переменная → отказ до форджи;
+    координаты не читаются → отказ о конфигурации devtools; версия
+    `UNAVAILABLE` → неустановленный факт; версия `ABSENT` → отказ об
+    источнике; `pinned_sha` задан и версия ≠ ему → `superseded` с обеими
+    версиями; содержимое — тем же порядком; значение без единого логина
+    (`= , ,` проходит `read_key`) → `empty`. `FOUND` с пустым `accounts`
+    невозможен по построению. Ни одно сообщение не упоминает учётку мержера.
+    """
+    if os.environ.get(APPROVER_ALLOWLIST_ENV) is not None:
+        return _forbidden(
+            POLICY_REFUSAL_ENV,
+            f"{APPROVER_ALLOWLIST_ENV} выставлена в окружении, но переменная "
+            "больше не источник политики подписи — источник репозиторий "
+            "approval-policy; снимите переменную и повторите",
+        )
+    try:
+        repo, ref, path = policy_source()
+    except RuntimeError as exc:
+        return _forbidden(
+            POLICY_REFUSAL_SOURCE,
+            f"конфигурация источника политики не читается: {exc}",
+        )
+    version = ops.policy_version_fact(repo, ref, path)
+    if version.outcome is Outcome.UNAVAILABLE:
+        return unavailable(
+            f"версия политики {repo}:{path}@{ref} не установлена: {version.detail}"
+        )
+    if version.outcome is Outcome.ABSENT or not isinstance(version.value, str):
+        return _forbidden(
+            POLICY_REFUSAL_ABSENT, f"источник политики пуст: {version.detail}"
+        )
+    sha = version.value
+    if pinned_sha is not None and sha != pinned_sha:
+        return _forbidden(
+            POLICY_REFUSAL_SUPERSEDED,
+            f"политика сменилась: закреплена {pinned_sha}, актуальная {sha}",
+            pinned=pinned_sha,
+            current=sha,
+        )
+    content = ops.repo_file_fact(repo, sha, path)
+    if content.outcome is Outcome.UNAVAILABLE:
+        return unavailable(
+            f"содержимое политики {repo}@{sha}:{path} не прочитано: "
+            f"{content.detail}"
+        )
+    if content.outcome is Outcome.ABSENT or not isinstance(content.value, str):
+        return _forbidden(POLICY_REFUSAL_ABSENT, f"в версии {sha} нет {path}")
+    lines = ssot_env.definition_lines(content.value, APPROVER_ALLOWLIST_ENV)
+    if len(lines) != 1 or not lines[0]:
+        reason = (
+            "ключ отсутствует" if not lines
+            else "дубль ключа" if len(lines) > 1
+            else "пустое значение"
+        )
+        return _forbidden(
+            POLICY_REFUSAL_EMPTY,
+            f"{path}@{sha}: {reason} {APPROVER_ALLOWLIST_ENV} — подписать не "
+            "может никто",
+        )
+    accounts = frozenset(p.strip() for p in lines[0].split(",") if p.strip())
+    if not accounts:
+        return _forbidden(
+            POLICY_REFUSAL_EMPTY,
+            f"{path}@{sha}: {APPROVER_ALLOWLIST_ENV} без единого логина — "
+            "подписать не может никто",
+        )
+    snapshot = PolicySnapshot(
+        repo, ref, path, sha, accounts, policy_fingerprint(accounts)
+    )
+    return Fact(
+        Outcome.FOUND,
+        snapshot,
+        f"политика {snapshot.source}, отпечаток {snapshot.fingerprint}",
+    )
 
 
 @dataclass(frozen=True)
@@ -265,10 +380,10 @@ class Authorization:
     """Записанное решение об авторизации мержа: кого, по какой политике.
 
     `login` — учётка, о которой решение принято; `policy` — отпечаток
-    политики на тот момент; `source` — где эта политика настраивается.
-    Втроём они делают решение проверяемым фактом: фаза 3 сверяет его
-    ЦЕЛОСТНОСТЬ (то ли это решение и о том ли мерже), а не применяет
-    allowlist заново.
+    политики на тот момент; `source` — версия источника
+    (`github:<repo>@<sha>:<path>`). Втроём они делают решение проверяемым
+    фактом: фаза 3 сверяет его ЦЕЛОСТНОСТЬ (то ли это решение и о том ли
+    мерже), а не применяет allowlist заново.
     """
 
     login: str
@@ -284,55 +399,31 @@ class Authorization:
         }
 
 
-def authorized_signature(event: MergeEvent) -> Fact[Authorization]:
-    """Создаёт ли этот мерж подпись: `FOUND` либо `FORBIDDEN`.
+def authorized_signature(
+    event: MergeEvent, snapshot: PolicySnapshot
+) -> Fact[Authorization]:
+    """Создаёт ли этот мерж подпись по закреплённому снимку: FOUND / FORBIDDEN.
 
-    `FOUND` несёт РЕШЕНИЕ, а не просто «да»: учётка плюс отпечаток
-    политики, по которой она признана авторизованной. Записывается оно
-    один раз и при возобновлении не пересматривается — последующая правка
-    списка влияет только на ещё не классифицированные мержи.
+    `FOUND` несёт РЕШЕНИЕ: учётка плюс отпечаток и версия политики, по
+    которой она признана авторизованной. Записывается один раз и при
+    возобновлении не пересматривается.
 
-    `FORBIDDEN` — положительно установленный факт: учётка прочитана, её
-    нет в `authorized_approver_accounts`, и агентский мерж подписи не
-    создаёт. Это законная дорога в `invalidated` — заявка терминальна с
-    причиной, восстановление идёт новым candidate (§I12). Значения у него
-    нет: решения об авторизации не состоялось, и записывать нечего.
-
-    `UNAVAILABLE` — allowlist ПУСТ в процессе, устанавливающем факт
-    (@id:approver-allowlist-process-boundary). Раньше пустота читалась как
-    «подписать не может никто» и давала `FORBIDDEN` — и в S7 2026-09-21
-    так была похоронена живая заявка: candidate #315 смержила учётка из
-    allowlist, а финализацию запустил процесс без переменной. С
-    devtools#278 candidate вообще не создаётся под пустой политикой, значит
-    пустота на этой фазе — ПОТЕРЯ значения между процессами, а не решение
-    о мержере: факт не установлен, заявка сохраняется, повтор с политикой
-    судит тот же мерж. Учётка при этом НЕ проверялась, и сообщение не
-    вправе её обвинять.
+    `FORBIDDEN` — положительно установленный факт: учётка прочитана, её нет
+    в закреплённой версии политики, подписи этот мерж не создаёт. Законная
+    дорога в `invalidated` (§I12). Пустого снимка здесь не бывает —
+    `policy_snapshot` отказывает на нём раньше.
     """
-    allowlist = approver_allowlist()
-    if not allowlist:
-        return Fact(
-            Outcome.UNAVAILABLE,
-            None,
-            f"{APPROVER_ALLOWLIST_ENV} пуст в этом процессе — политика "
-            f"подписи недоступна, и мерж от {event.login} судить не по чему; "
-            "учётка не проверялась. Объявите политику (для этого флота — "
-            "`prograph-vault/authored/rules/approver-policy.md`) в окружении "
-            "ТОГО вызова, который устанавливает факт, и повторите",
-        )
-    if event.login in allowlist:
+    if event.login in snapshot.accounts:
         return Fact(
             Outcome.FOUND,
-            Authorization(
-                event.login, policy_fingerprint(), APPROVER_ALLOWLIST_ENV
-            ),
-            f"{event.login} авторизован политикой {policy_fingerprint()}",
+            Authorization(event.login, snapshot.fingerprint, snapshot.source),
+            f"{event.login} авторизован политикой {snapshot.source}",
         )
     return Fact(
         Outcome.FORBIDDEN,
         None,
-        f"мерж от {event.login}: учётки нет в "
-        f"{APPROVER_ALLOWLIST_ENV} — подписи этот мерж не создаёт",
+        f"мерж от {event.login}: учётки нет в политике {snapshot.source} — "
+        "подписи этот мерж не создаёт",
     )
 
 

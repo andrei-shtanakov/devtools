@@ -30,7 +30,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def _definition_lines(text: str, key: str) -> list[str]:
+def definition_lines(text: str, key: str) -> list[str]:
     """Строки-определения `key` (по правилам формата выше)."""
     prefix = f"{key}="
     found = []
@@ -53,7 +53,7 @@ def read_key(path: Path, key: str, what: str) -> str:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:  # noqa: TRY003 — путь важнее классификации
         raise RuntimeError(f"{what} недоступен: {path} ({exc})") from exc
-    found = _definition_lines(text, key)
+    found = definition_lines(text, key)
     if len(found) > 1:
         raise RuntimeError(
             f"в {path} ключ {key} определён {len(found)} раз — файл битый; "
