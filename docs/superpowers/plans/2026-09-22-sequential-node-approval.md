@@ -194,7 +194,7 @@ def test_unknown_authoring_is_refused() -> None:
 - Test: `tests/test_governance_policy_sources.py` (существующий; добавить)
 
 **Interfaces:**
-- Produces: `wave_profile_dir(target_dir: str, profile: str, wave: int, run_dir: Path) -> Path` — копирует `<target_dir>/<dirname(profile)>/` целиком в `<run_dir>/profile-w<wave>/`, усекает копию профиля до узлов уровней ≤ `wave − 1` (по `upstream` профиля — уровни считаются по нему, не по `BUNDLE_DAG`), пишет `<run_dir>/profile-w<wave>/PROJECTION.sha256` (sha256 каждого скопированного файла target'а) и возвращает путь усечённого профиля; `verify_wave_profile_dir(target_dir, profile, projected: Path) -> list[str]` — расхождения sha256 копий с target (пусто = совпало).
+- Produces: `wave_profile_dir(target_dir: str, profile: str, wave: int, run_dir: Path) -> Path` — копирует `<target_dir>/<dirname(profile)>/` целиком в `<run_dir>/profile-w<wave>/`, усекает копию профиля до узлов уровней ≤ `wave − 1` (по `upstream` профиля — уровни считаются по нему, не по `BUNDLE_DAG`), пишет `<run_dir>/profile-w<wave>/PROJECTION.sha256` (sha256 каждого скопированного файла target'а) и возвращает путь усечённого профиля; `verify_wave_profile_dir(target_dir, profile, projected: Path, level: int) -> list[str]` — расхождения между КОПИЕЙ (её читает steward) и закреплёнными байтами исходников: sibling'и — по digest копии, усечённый профиль — как ожидаемое преобразование закреплённого полного профиля, лишние/отсутствующие файлы копии — тоже расхождение (пусто = совпало).
 
 - [ ] **Step 1: Failing tests**
 
@@ -211,9 +211,23 @@ def test_wave_profile_is_a_level_prefix_of_the_target_profile(tmp_path) -> None:
     assert [a["id"] for a in data["artifacts"]] == ["charter", "requirements"]
     assert projected.parent.name == "profile-w2"
     assert (projected.parent / "roles.yaml").read_text() == "# roles.yaml\n"
-    assert policy_sources.verify_wave_profile_dir(str(target), "profiles/team-exp.yaml", projected) == []
-    (target / "profiles/roles.yaml").write_text("# changed\n", encoding="utf-8")
-    assert policy_sources.verify_wave_profile_dir(str(target), "profiles/team-exp.yaml", projected) == ["roles.yaml"]
+    verify = policy_sources.verify_wave_profile_dir
+    assert verify(str(target), "profiles/team-exp.yaml", projected, 1) == []
+    # Отрицательный контроль по КОПИИ (ревью #343, R1): именно её читает steward.
+    (projected.parent / "roles.yaml").write_text("# changed copy\n", encoding="utf-8")
+    assert verify(str(target), "profiles/team-exp.yaml", projected, 1) == ["roles.yaml"]
+    (projected.parent / "roles.yaml").write_text("# roles.yaml\n", encoding="utf-8")
+    projected.write_text(projected.read_text() + "# tampered\n", encoding="utf-8")
+    assert verify(str(target), "profiles/team-exp.yaml", projected, 1) == ["team-exp.yaml"]
+    (projected.parent / "extra.yaml").write_text("x: 1\n", encoding="utf-8")
+    assert "extra.yaml" in verify(str(target), "profiles/team-exp.yaml", projected, 1)
+
+
+def test_wave_profile_pins_source_bytes_read_before_copy(tmp_path, monkeypatch) -> None:
+    """Исходник, изменившийся между чтением и записью копии, не подменяет пин:
+    копия пишется из тех же байтов, что закреплены (R1)."""
+    ...  # monkeypatch Path.write_bytes так, чтобы после первого чтения roles.yaml
+         # исходник менялся; manifest и копия обязаны совпадать друг с другом
 
 
 def test_wave_profile_last_wave_equals_source_artifacts(tmp_path) -> None:
@@ -247,24 +261,55 @@ def wave_profile_dir(target_dir: str, profile: str, wave: int, run_dir: Path) ->
     dst_dir = run_dir / f"profile-w{wave}"
     if dst_dir.exists():
         shutil.rmtree(dst_dir)
-    shutil.copytree(src_dir, dst_dir)
-    digests = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in src_dir.iterdir() if p.is_file()}
+    # Байты исходников читаются ОДИН раз и пинуются ДО копирования: копия
+    # строится из тех же байтов, что закреплены, а не из файла, который мог
+    # смениться между copytree и хешированием (ревью #343, R1).
+    sources = {p.name: p.read_bytes() for p in src_dir.iterdir() if p.is_file()}
+    dst_dir.mkdir(parents=True)
+    for name, data in sources.items():
+        (dst_dir / name).write_bytes(data)
     (dst_dir / "PROJECTION.sha256").write_text(
-        "".join(f"{d}  {n}\n" for n, d in sorted(digests.items())), encoding="utf-8")
+        "".join(f"{hashlib.sha256(d).hexdigest()}  {n}\n" for n, d in sorted(sources.items())),
+        encoding="utf-8")
     projected = dst_dir / Path(profile).name
-    data = yaml.safe_load(projected.read_text(encoding="utf-8"))
-    lv = _profile_levels(data["artifacts"])
-    data["artifacts"] = [a for a in data["artifacts"] if lv[a["id"]] <= level]
-    projected.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    projected.write_bytes(_truncate_profile(sources[Path(profile).name], level))
     return projected
 
 
-def verify_wave_profile_dir(target_dir: str, profile: str, projected: Path) -> list[str]:
-    src_dir = Path(target_dir) / Path(profile).parent
-    recorded = dict(line.split("  ", 1)[::-1] for line in
-                    (projected.parent / "PROJECTION.sha256").read_text(encoding="utf-8").splitlines())
-    return sorted(n for n, d in recorded.items()
-                  if hashlib.sha256((src_dir / n).read_bytes()).hexdigest() != d)
+def _truncate_profile(source: bytes, level: int) -> bytes:
+    """Детерминированное преобразование полного профиля в проекцию уровней ≤ level."""
+    data = yaml.safe_load(source.decode("utf-8"))
+    lv = _profile_levels(data["artifacts"])
+    data["artifacts"] = [a for a in data["artifacts"] if lv[a["id"]] <= level]
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True).encode("utf-8")
+
+
+def verify_wave_profile_dir(target_dir: str, profile: str, projected: Path, level: int) -> list[str]:
+    """Расхождения между тем, что прочитает steward (КОПИЯ), и закреплённым.
+
+    Сверяются байты КОПИИ каждого sibling с закреплённым в PROJECTION.sha256
+    digest'ом (не исходники — их изменение после копирования проекцию не
+    портит, а изменение копии портит); усечённый профиль сверяется как
+    ожидаемое преобразование закреплённого полного профиля; лишний файл в
+    копии или отсутствующий — тоже расхождение.
+    """
+    dst_dir = projected.parent
+    recorded = {n: d for d, n in (line.split("  ", 1) for line in
+                (dst_dir / "PROJECTION.sha256").read_text(encoding="utf-8").splitlines())}
+    bad: list[str] = []
+    profile_name = Path(profile).name
+    for name, digest in recorded.items():
+        copy = dst_dir / name
+        if not copy.exists():
+            bad.append(name); continue
+        if name == profile_name:
+            src = (Path(target_dir) / Path(profile).parent / name).read_bytes()
+            if hashlib.sha256(src).hexdigest() != digest or copy.read_bytes() != _truncate_profile(src, level):
+                bad.append(name)
+        elif hashlib.sha256(copy.read_bytes()).hexdigest() != digest:
+            bad.append(name)
+    extra = {p.name for p in dst_dir.iterdir() if p.is_file()} - set(recorded) - {"PROJECTION.sha256"}
+    return sorted(bad + sorted(extra))
 ```
 Компромисс S5 — в докстроке: гейт судит по копии, которую пишет раннер; sha256 удерживает копию равной target; целевое состояние — `--upto` у steward (заявка соседу — Task 12).
 
@@ -385,9 +430,9 @@ def test_missing_lower_nodes_keep_read_dag_state_unresolved(waves_world: World) 
 - Test: `tests/test_governance_edge_check_coordinator.py`
 
 **Interfaces:**
-- Produces: `coordinator.edges_for_level(profile_artifacts: list[dict], level: int, *, has_engineer_brief: bool) -> list[Edge]` (`Edge(node, edge_id, bases: dict[role, node])` из `upstream` профиля; для charter — `charter-vs-customer-brief` всегда и `charter-vs-engineer-brief` всегда (второе даёт `N/A` по applicability, когда инженерного брифа нет); `coordinator.result_key(subject_files, bases_files, check_identity) -> str` (D9); `coordinator.run_level(state, run_dir, wave, profile_path, *, call=None) -> LevelResult` (`level = wave − 1` внутри) (`records: dict[node, record]`, `verdict: "PASS" | "FAIL" | "ERROR"`, `exit_code: 0|1|3`) — пишет `<run_dir>/edge-check/w<wave>/<node>.json` (каталог по номеру волны, как `profile-w<wave>`) и леджер `<run_dir>/edge-check/ledger.jsonl` (ключ D9, `attempt_id`, действующий результат — последняя завершённая попытка D10).
+- Produces: `coordinator.edges_for_level(profile_artifacts: list[dict], level: int, *, has_engineer_brief: bool) -> list[Edge]` (`Edge(node, edge_id, bases: dict[role, node])` из `upstream` профиля; для charter — `charter-vs-customer-brief` всегда и `charter-vs-engineer-brief` всегда (второе даёт `N/A` по applicability, когда инженерного брифа нет); `coordinator.result_key(subject_files, bases_files, check_identity) -> str` (D9); `coordinator.run_level(state, run_dir, wave, profile_path, *, call=None) -> LevelResult` (`level = wave − 1` внутри; `records: dict[tuple[node, edge_id], record]` — у charter ДВА ребра, ключ по узлу их затёр бы) (`records: dict[node, record]`, `verdict: "PASS" | "FAIL" | "ERROR"`, `exit_code: 0|1|3`) — пишет `<run_dir>/edge-check/w<wave>/<node>--<edge_id>.json` (каталог по номеру волны, как `profile-w<wave>`; по файлу на ребро — у charter их два) и леджер `<run_dir>/edge-check/ledger.jsonl` (ключ D9, `attempt_id`, действующий результат — последняя завершённая попытка D10).
 
-- [ ] **Step 1: Failing tests** — три: (а) `edges_for_level` для team-exp даёт на уровне 3 два ребра (design, acceptance) с базами requirements+behaviour-spec, на уровне 0 — два ребра charter (customer-brief, engineer-brief); (б) `run_level` с фейковым `call`, отвечающим `PASS` для всех, пишет два файла и возвращает код 0; ответ `FAIL` для одного — код 1, `verdict: FAIL`; исключение `call` — код 3, `ERROR`; (в) повторный `run_level` при неизменных входах даёт новый `attempt_id`, действующий результат — последний.
+- [ ] **Step 1: Failing tests** — три: (а) `edges_for_level` для team-exp даёт на уровне 3 два ребра (design, acceptance) с базами requirements+behaviour-spec, на уровне 0 — два ребра charter (customer-brief, engineer-brief); (б) `run_level` с фейковым `call`, отвечающим `PASS` для всех, пишет по файлу на ребро и возвращает код 0; ответ `FAIL` для одного — код 1, `verdict: FAIL`; исключение `call` — код 3; (б′) W1: два ребра charter — `PASS`+`N/A` (без инженерного брифа) → код 0 и два файла, `FAIL`+`PASS` → код 1, оба файла на месте, `ERROR`; (в) повторный `run_level` при неизменных входах даёт новый `attempt_id`, действующий результат — последний.
 - [ ] **Step 2: Run** — FAIL. **Step 3:** реализация поверх `run_check` (`governance/edge_check/check.py`): subject — файл узла в worktree ветки волны, bases — файлы upstream **в base** (`ops.show_file` в temp-каталог) плюс source-слой для charter; `call` пробрасывается. **Step 4:** PASS. **Step 5: Commit** `git commit -m "feat(edge_check): координатор волны — состав рёбер из профиля, леджер результатов"`
 
 ---
@@ -446,7 +491,7 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(tmp_path, runs_
 - `_step_materialize_brief`: ключ `materialize-brief-<w>`, тело без изменений.
 - `_step_authoring`: в `waves` перед циклом — `_upstream_ready(state, ops, dag, level=state.wave - 1)`; отказ → `stopped_stale` с `_stop_with_comment`; цикл только по `_AUTHOR_STEPS` с `levels[kind] == state.wave - 1`; `--reopen` (Task 10) снимает файл и op заранее.
 - `_step_commit`: ключ `commit-<w>`.
-- `_step_gate`: в `waves` — `projected = wave_profile_dir(...)`, `mismatch = verify_wave_profile_dir(...)` → `stopped_gate` «проекция не совпала: …»; `gate_check_candidate(target_dir, bundle_dir, str(projected))`; локальный GC-COMPLETENESS — по `bundle_dag.dag_upto(dag, state.wave - 1)`; ключ `gate-<w>`.
+- `_step_gate`: в `waves` — `projected = wave_profile_dir(state.target_dir, state.profile, state.wave, run_dir)`, затем `mismatch = verify_wave_profile_dir(state.target_dir, state.profile, projected, state.wave - 1)` НЕПОСРЕДСТВЕННО перед вызовом гейта → `stopped_gate` «проекция не совпала: …»; `gate_check_candidate(target_dir, bundle_dir, str(projected))`; локальный GC-COMPLETENESS — по `bundle_dag.dag_upto(dag, state.wave - 1)`; ключ `gate-<w>`.
 - `_step_edge` (после гейта): `(run_dir / "edge-findings.txt").unlink(missing_ok=True)`; `result = coordinator.run_level(state, run_dir, state.wave, projected, call=None)`; код 0 → `op_complete(edge-<w>)`; код 1 → findings-файл из `records[*].findings`, `stopped_review`; код 3 → findings с `error_code`, `stopped_review`. В `legacy` шаг — no-op.
 - `advance`: список шагов в `waves` — `_step_interview, _step_branch, _step_materialize_brief, _step_authoring, _step_commit, _step_gate, _step_edge, _step_candidate (Task 8)`; после `waiting_human_merge` волны — Task 9.
 - `_STOPPED_RESET_OPS` — статический dict, `resume` его итерирует, а `_reset_stopped_author` pop'ает статический `_BUNDLE_EDIT_RESET_OPS`: оба заменяются функцией `reset_ops_for(state) -> tuple[str, ...]` — в `legacy` возвращает прежние кортежи, в `waves` — `commit-<w>`, `gate-<w>`, `edge-<w>` текущей волны (без `push`/`ready`/`review`); `stopped_stale: ()`. Тесты `_STOPPED_RESET_OPS` из legacy остаются зелёными: словарь сохраняется как источник для `legacy`.
@@ -467,10 +512,10 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(tmp_path, runs_
 
 **Interfaces:**
 - Consumes: Task 5 (`propose_from_source`, `_publish_candidate(push=False/True)`), Task 6 (`LevelResult`).
-- Produces: `publish.publish_wave(state, ops, key, level_result) -> int` — (1) проверяет поверхность D16: изменённые пути коммита заявки ⊆ {файлы узлов заявки, каскад `stale`, `00-discovery/*` для W1} — иначе `RuntimeError` до PR; (2) пишет `workstreams/<ws>/evidence/edge-check/<node>.json` из записей координатора, коммитит одним коммитом поверх головы заявки, `al.record_head_sha` (перезапись), `ops.push_branch`; (3) `_publish_candidate(push=True)` создаёт/усыновляет PR; (4) сверка головы PR == записанный `head_sha` (иначе код 4); (5) `ops.publish_review(..., event="APPROVE", body=<чек-лист с identity и SHA>, marker="edge-check")` — только при `verdict == "PASS"`; `CHANGES_REQUESTED` человека не гасится (читает `ops.pr_reviews`, при наличии — код 1); коды 0/1/3/4 из словаря раннера.
-- `_step_candidate` (ключ `candidate-<w>`): `outcome = an.propose_from_source(state, ops, nodes_of_level, head_sha_of_branch)`; `state.base_ref = pr_facts(candidate_pr)["baseRefName"] or "master"` (в waves его больше никто не ставит — legacy ставил `_step_verdict`); `code = publish_wave(...)`; 0 → `waiting_human_merge` с `state.wave` и `candidate_pr` в комментарии; 4 → сброс `gate-<w>`/`edge-<w>`, повтор; 1/3 → `stopped_review`.
+- Produces: `publish.publish_wave(state, ops, key, level_result) -> int` — (1) проверяет поверхность D16: изменённые пути коммита заявки ⊆ {файлы узлов заявки, каскад `stale`, `00-discovery/*` для W1} — иначе `RuntimeError` до PR; (2) пишет `workstreams/<ws>/evidence/edge-check/<node>--<edge_id>.json` (по файлу на ребро) из записей координатора, коммитит одним коммитом поверх головы заявки, `al.record_head_sha` (перезапись), `ops.push_branch`; (3) `_publish_candidate(push=True)` создаёт/усыновляет PR; (4) сверка головы PR == записанный `head_sha` (иначе код 4); (5) `ops.publish_review(..., event="APPROVE", body=<чек-лист с identity и SHA>, marker="edge-check")` — только при `verdict == "PASS"`; `CHANGES_REQUESTED` человека не гасится (читает `ops.pr_reviews`, при наличии — код 1); коды 0/1/3/4 из словаря раннера.
+- `_step_candidate` (ключ `candidate-<w>`): база для подготовки — `_base_ref(state)` (известный контекст прогона; до первого candidate `state.base_ref` пуст и фолбэчит на `master`, как в approve_node); `outcome = an.propose_from_source(state, ops, nodes_of_level, head_sha_of_branch)` — PR ещё НЕТ (`push=False`); `op_start(candidate-<w>, request=outcome.request)` — ключ заявки пишется в op write-ahead (нужен Task 9, R3); `code = publish_wave(...)` — создаёт/усыновляет PR (п. 3); **после** успешного п. 3 — `state.base_ref = pr_facts(candidate_pr)["baseRefName"] or "master"` (в waves его больше никто не ставит — legacy ставил `_step_verdict`); 0 → `waiting_human_merge` с `state.wave` и `candidate_pr` в комментарии; 4 → сброс `gate-<w>`/`edge-<w>`, повтор; 1/3 → `stopped_review`. Тест свежего W1: порядок внешних вызовов `propose → publish(create PR) → pr_facts(<номер созданного PR>)`, ни одного `pr_facts(None)`.
 
-- [ ] **Step 1: Failing tests** — стенд approve_node (настоящий git): после `propose_from_source` + `publish_wave` в ветке заявки лежит `evidence/edge-check/charter.json`, `head_sha` заявки == голова ветки, у PR ревью `APPROVED` от логина ревьюера с маркером `edge-check`; посторонний путь в коммите заявки → `RuntimeError` до PR; повтор `publish_wave` (падение между push и review) идемпотентен — критерий: дерево головы заявки уже содержит `evidence/edge-check/*.json` с теми же байтами ⇒ evidence-коммит не создаётся, `head_sha` не меняется, публикуется только ревью. Раннер (FakeOps): `_step_candidate` даёт `waiting_human_merge` с комментарием, называющим номер PR и волну.
+- [ ] **Step 1: Failing tests** — стенд approve_node (настоящий git): после `propose_from_source` + `publish_wave` в ветке заявки лежат `evidence/edge-check/charter--charter-vs-customer-brief.json` и `…--charter-vs-engineer-brief.json`, `head_sha` заявки == голова ветки, у PR ревью `APPROVED` от логина ревьюера с маркером `edge-check`; посторонний путь в коммите заявки → `RuntimeError` до PR; повтор `publish_wave` (падение между push и review) идемпотентен — критерий: дерево головы заявки уже содержит `evidence/edge-check/*.json` с теми же байтами ⇒ evidence-коммит не создаётся, `head_sha` не меняется, публикуется только ревью. Раннер (FakeOps): `_step_candidate` даёт `waiting_human_merge` с комментарием, называющим номер PR и волну.
 - [ ] **Step 2: Run** — FAIL. **Step 3:** реализация по интерфейсу. **Step 4:** PASS. **Step 5: Commit** `git commit -m "feat(edge_check): адаптер публикации — evidence в candidate, одобряющее ревью edge-check, шаг candidate раннера"`
 
 ---
@@ -483,9 +528,9 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(tmp_path, runs_
 
 **Interfaces:**
 - Consumes: Task 8; `an.approve_node` (finalize путь), `ops.review` (аттестация finalize-PR), `_missing_approving_review`.
-- Produces: в `waves`: `resume` при `waiting_human_merge` находит заявку волны как **живую заявку над любым узлом уровня** — `al.live_request_over(state, node)` для узлов волны (не `live_request_for_step`: та отдаёт заявки только до мержа candidate, и падение между `record_merge` и finalize оставила бы resume без заявки при открытом finalize-PR); `pr_facts(candidate_pr)`: OPEN → стоим; MERGED (или факт мержа уже записан) → `_finalize_wave`: `an.approve_node(state, ops, node)` (фаза 2 + finalize-PR), затем `ops.review(state.repo, finalize_pr)` (аттестация; ненулевой код → «finalize остаётся человеку», `waiting_human_merge` с причиной) и повторный `approve_node` (агентский мерж finalize); заявка `completed` → `state.wave += 1`, `status = "running"`, `advance` (следующая волна) либо после W5 (`state.wave > bundle_dag.wave_count(dag)`) — `_step_s8`. Реконсиляция «мерж вне раннера» ключуется на `candidate_pr` заявки, не на `state.pr`.
+- Produces: в `waves`: `resume` при `waiting_human_merge` находит заявку волны **по сохранённому ключу** — `state.ops[f"candidate-{wave}"]["request"]` (пишется write-ahead в `_step_candidate`, R2) — и читает её запись `state.ops[key]` **включая терминальные статусы**: `completed` → волна уже завершена, только продвижение (`state.wave += 1`, ровно один переход, без повторного candidate/review); `abandoned`/`invalidated` → `stopped_stale`-подобный стоп с причиной («заявка волны терминальна — новый candidate по `--reopen`»); живая → как ниже. Не `live_request_over` (исключает терминальные — крэш между `complete_request` и сохранением следующей волны оставил бы resume без заявки) и не «последняя завершённая заявка узла» (после `--reopen` у узла история попыток); `pr_facts(candidate_pr)`: OPEN → стоим; MERGED (или факт мержа уже записан) → `_finalize_wave`: `an.approve_node(state, ops, node)` (фаза 2 + finalize-PR), затем `ops.review(state.repo, finalize_pr)` (аттестация; ненулевой код → «finalize остаётся человеку», `waiting_human_merge` с причиной) и повторный `approve_node` (агентский мерж finalize); заявка `completed` → `state.wave += 1`, `status = "running"`, `advance` (следующая волна) либо после W5 (`state.wave > bundle_dag.wave_count(dag)`) — `_step_s8`. Реконсиляция «мерж вне раннера» ключуется на `candidate_pr` заявки, не на `state.pr`.
 
-- [ ] **Step 1: Failing tests** — (а) FakeOps: после `waiting_human_merge(wave=1)` помечаем candidate MERGED → `resume` зовёт approve_node дважды и `review` на finalize, `state.wave == 2`, авторится requirements; (а′) стенд approve_node: крэш после `record_merge` (finalize-PR открыт, заявка на шаге `AWAIT_FINALIZE_MERGE`) → `resume` находит заявку через `live_request_over` и доводит finalize; (а″) `state.base_ref` после `_step_candidate` равен `baseRefName` candidate-PR; (б) `review` на finalize вернул 6 → статус `waiting_human_merge`, комментарий «finalize остаётся человеку»; (в) сквозной на стенде approve_node: пять волн → пять `merge_pr` человеком → `read_dag_state` = approved DAG → `deliver_for_run` проходит (число человеческих актов = 5 + approve tasks).
+- [ ] **Step 1: Failing tests** — (а) FakeOps: после `waiting_human_merge(wave=1)` помечаем candidate MERGED → `resume` зовёт approve_node дважды и `review` на finalize, `state.wave == 2`, авторится requirements; (а′) стенд approve_node: крэш после `record_merge` (finalize-PR открыт, заявка на шаге `AWAIT_FINALIZE_MERGE`) → `resume` находит заявку по ключу из `candidate-<w>` и доводит finalize; (а‴) crash/reload после `persist(completed)` и ДО `persist(state.wave += 1)`: `resume` делает ровно один переход к следующей волне, `approve_node`/`review`/`create_pr` не вызываются повторно (журнал FakeOps пуст на этих ключах); (а″) `state.base_ref` после `_step_candidate` равен `baseRefName` созданного candidate-PR, прочитанному ПОСЛЕ его создания (журнал FakeOps: `create_pr` раньше `pr_facts`); (б) `review` на finalize вернул 6 → статус `waiting_human_merge`, комментарий «finalize остаётся человеку»; (в) сквозной на стенде approve_node: пять волн → пять `merge_pr` человеком → `read_dag_state` = approved DAG → `deliver_for_run` проходит (число человеческих актов = 5 + approve tasks).
 - [ ] **Step 2: Run** — FAIL. **Step 3:** реализация. **Step 4:** PASS. **Step 5: Commit** `git commit -m "feat(runner): resume волны — реконсиляция по candidate, finalize агентом после аттестации, переход к следующему уровню"`
 
 ---
@@ -497,9 +542,9 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(tmp_path, runs_
 - Test: `tests/test_governance_runner.py`, `tests/test_governance_approve_node.py`
 
 **Interfaces:**
-- Produces: `runner.reopen(run_id, node, ops, manual=False) -> RunState`: `state.wave = level(node) + 1`; ветка `spec/<ws>-behaviour-w<k>` от base (S9); файл узла удаляется из worktree и `author-<node>` сбрасывается; `manual` → `stopped_author` с подсказкой; иначе `advance` (авторинг заново → гейт → candidate над новым текстом; `_publish_candidate` каскадом ставит `stale` нижним, лежащим в base). `stale_below_top_level` — узлы `stale` в base ниже верхнего approved уровня; `_upstream_ready` использует его для `stopped_stale`; после переодобрения по уровням (заявки без `source_sha`, Task 5) продвижение возобновляется.
+- Produces: `runner.reopen(run_id, node, ops, manual=False) -> RunState`: `state.wave = level(node) + 1`; ветка волны создаётся **новым именем** `spec/<ws>-behaviour-w<k>-r<n>` (`n` — счётчик переоткрытий волны в `state.ops`, `reopen-<w>`: `count`), а не пересозданием `…-w<k>`: прежняя авторская ветка уже пушилась и её history в base не входит — `switch -C` + обычный `push -u` дали бы non-fast-forward; `_step_branch` читает имя из `state.branch`; файл узла удаляется из worktree и `author-<node>` сбрасывается; `manual` → `stopped_author` с подсказкой; иначе `advance` (авторинг заново → гейт → candidate над новым текстом; `_publish_candidate` каскадом ставит `stale` нижним, лежащим в base). `stale_below_top_level` — узлы `stale` в base ниже верхнего approved уровня; `_upstream_ready` использует его для `stopped_stale`; после переодобрения по уровням (заявки без `source_sha`, Task 5) продвижение возобновляется.
 
-- [ ] **Step 1: Failing tests** — стенд approve_node: W1..W3 approved; `reopen(run_id, "requirements")` → FakeOps не применим, стенд настоящий git: новая ветка `…-w1` от base без `10-requirements.md`; после авторинга (файл пишется тестом) и `propose_from_source` candidate несёт `stale` у `15-behaviour-spec.md`; после мержа/finalize `stale_below_top_level` == `["behaviour-spec"]`; `deliver_for_run` отказывает; переодобрение behaviour-spec заявкой без `source_sha` → пусто → продвижение.
+- [ ] **Step 1: Failing tests** — стенд approve_node: W1..W3 approved; `reopen(run_id, "requirements")` → FakeOps не применим, стенд настоящий git с origin: после W1..W3 remote-ветка `…-w2` существует; `reopen(run_id, "requirements")` создаёт `…-w2-r1` от base без `10-requirements.md` и пушит её без non-fast-forward (проверяется настоящим `git push`); после авторинга (файл пишется тестом) и `propose_from_source` candidate несёт `stale` у `15-behaviour-spec.md`; после мержа/finalize `stale_below_top_level` == `["behaviour-spec"]`; `deliver_for_run` отказывает; переодобрение behaviour-spec заявкой без `source_sha` → пусто → продвижение.
 - [ ] **Step 2–5:** FAIL → реализация → PASS → `git commit -m "feat(runner): --reopen — явное переоткрытие узла, stopped_stale и переодобрение по уровням"`
 
 ---
