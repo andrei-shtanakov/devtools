@@ -971,7 +971,7 @@
       (`#### BEH-NN`, `traces:`, `checked_by`) сосед держит вне объёма
       (SPEC-002 §11, приедет своим PR): после переключения авторинг
       идёт по baseline-чеклисту без проверки нашей разметки.
-- [ ] Эксперимент: одна LLM-петля конвейера как `.libretto`-программа — ритуал обработки ревью-стопа (разбор находки → правка бандла → перепиновка → resume) @owner:github:andrei-shtanakov @id:libretto-review-stop-loop
+- [ ] Эксперимент: одна LLM-петля конвейера как `.libretto`-программа — ритуал обработки ревью-стопа (разбор находки → правка бандла → перепиновка → resume) @owner:github:andrei-shtanakov @id:libretto-review-stop-loop @epic:eco.libretto-runtime
       Заведён 2026-09-02 решением владельца («да, заведи пункт»). НЕ замена
       скриптов: детерминированное ядро (гейты, пины, ожидание чеков,
       DarkFactory-мерж) остаётся кодом — libretto пробуем только на слое,
@@ -1221,7 +1221,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Теперь `legacy_waits` + оговорка в detail; сам слаг здесь НЕ резолвится —
       пара слаг↔пункт правило пакета (`check_legacy_fleet`), приватное было бы
       повторением ошибки круга 5.
-- [ ] Слаг приёмки как токен — в пакете `plan-fields`, а не приватно в devtools @owner:github:andrei-shtanakov @id:inbox-slug-token-match @blocked_by:todo://dispatcher/slug-token-match
+- [ ] Слаг приёмки как токен — в пакете `plan-fields`, а не приватно в devtools @owner:github:andrei-shtanakov @id:inbox-slug-token-match @blocked_by:todo://dispatcher/slug-token-match @epic:eco.plan-fields
       `inbox.is_accepted` матчит слаг подстрокой и документирует слабость:
       `benchmark-2` совпадает с пунктом про `benchmark-20`. Ужесточение —
       «the package's call» (ADR-ECO-005 D9), приватное правило в скрипте есть
@@ -1342,7 +1342,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Третье эхо той же неправды — в докстроке теста гарда — снято PR #130:
       формулировку я написал в двух местах, а исправил сначала одно. Грепом
       проверено, что копий больше нет.
-- [ ] Харнесс-слой воркеров: один резолвер с обеими песочницами и structured output @owner:github:andrei-shtanakov @id:worker-harness-layer @trigger:"лимит подписки на стороне воркера или классификатора"
+- [ ] Харнесс-слой воркеров: один резолвер с обеими песочницами и structured output @owner:github:andrei-shtanakov @id:worker-harness-layer @trigger:"лимит подписки на стороне воркера или классификатора" @epic:eco.tooling
       ПРИОРИТЕТ НИЗКИЙ (решение владельца 2026-09-04). Переключение харнесса
       уже закрыто там, где оно понадобилось на практике: ревью и авторинг
       переехали на claude ровно тогда, когда упёрлись в лимит подписки openai.
