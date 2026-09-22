@@ -2368,6 +2368,33 @@ def test_resume_from_stopped_gate_reruns_gate_candidate(
     assert result.ops["gate-candidate"]["status"] == "completed"
 
 
+def test_green_gate_removes_findings_of_the_previous_round(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """`gate-findings.txt` отражает ПОСЛЕДНИЙ прогон гейта
+    (@id:gate-findings-stale-on-green).
+
+    Прогон S7 2026-09-21: круг 1 записал пять находок, круг 2 прошёл чисто,
+    файл остался прежним — читающий видел красный там, где гейт зелёный.
+    Класс «артефакт переживает состояние, которое описывал».
+    """
+    ops = FakeOps(gate_candidate=[(1, "error GC-X: bad\n"), (0, "")])
+    run_id = "r-gate-stale"
+
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_gate"
+    findings_file = rs.run_dir(run_id) / "gate-findings.txt"
+    assert "GC-X" in findings_file.read_text(encoding="utf-8")
+
+    result = runner.resume(run_id, ops)
+
+    assert result.ops["gate-candidate"]["status"] == "completed"
+    assert not findings_file.exists(), (
+        "зелёный гейт оставил находки прошлого круга: "
+        + findings_file.read_text(encoding="utf-8")
+    )
+
+
 def test_resume_from_stopped_gate_recommits_edited_bundle(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:

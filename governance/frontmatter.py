@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
+
 import yaml
 
 
@@ -47,3 +50,84 @@ def join_frontmatter(meta: dict, body: str) -> str:
         meta, sort_keys=False, allow_unicode=True, default_flow_style=False
     )
     return f"---\n{dumped}---\n\n{body}"
+
+
+#: Строка верхнего уровня frontmatter, открывающая ключ: без отступа,
+#: не комментарий, `ключ:` с пробелом или концом строки после двоеточия.
+_TOP_KEY_RE = re.compile(r"^([^\s#\-][^:]*?):(?:\s|$)")
+
+
+def update_frontmatter(text: str, updates: Mapping[str, object]) -> str:
+    """Переписать ТОЛЬКО названные ключи frontmatter; остальные байты — как были.
+
+    Штампы конвейера (`approve_node`: candidate, stale-каскад, finalize)
+    меняют по смыслу две-четыре величины, а `join_frontmatter` переписывал
+    весь блок в каноне `yaml.safe_dump`: flow-список становился блочным, с
+    хэшей слетали кавычки, и человек перед подписью читал шум вместо
+    содержательных строк (@id:approval-stamp-frontmatter-roundtrip, S7
+    2026-09-21). Здесь заменяется диапазон строк изменившегося ключа —
+    от его строки до следующего ключа верхнего уровня либо комментария в
+    первой колонке; ключ, значение которого совпадает с уже записанным,
+    не трогается вовсе; отсутствующий — дописывается в конец блока.
+
+    Изменённый ключ рендерится каноном `safe_dump` — авторская форма
+    именно этого ключа не сохраняется, и это честно: значение сменилось.
+
+    Против класса «0 замен выглядит как успех» (ретроспектива 2026-09-02):
+    результат ПЕРЕЧИТЫВАЕТСЯ парсером и обязан дать ровно `meta | updates`.
+    Не дал — построчная правка этой формы не умеет (flow-маппинг верхнего
+    уровня `{node: …}` одной строкой, дубль ключа, форма, которую регекс
+    не увидел), и тогда файл рендерится КАНОНОМ из словаря, как делал
+    `join_frontmatter` до этой функции: авторская форма не сохраняется,
+    но результат верен по построению. Правильность здесь старше
+    сохранности байтов; отказом это быть не должно — прежний путь такой
+    вход принимал (major ревью PR #338).
+    """
+    meta, _body = split_frontmatter(text)
+    head, sep, rest = text[4:].partition("\n---\n")
+    assert sep, "split_frontmatter уже проверил разделитель"
+    lines = head.split("\n")
+    starts = [
+        (i, m.group(1).strip()) for i, line in enumerate(lines)
+        if (m := _TOP_KEY_RE.match(line))
+    ]
+    boundaries = sorted(
+        {i for i, _ in starts}
+        | {i for i, line in enumerate(lines) if line.startswith("#")}
+        | {len(lines)}
+    )
+
+    def span(start: int) -> int:
+        return next(b for b in boundaries if b > start)
+
+    def render(key: str) -> list[str]:
+        dumped = yaml.safe_dump(
+            {key: updates[key]}, sort_keys=False, allow_unicode=True,
+            default_flow_style=False,
+        )
+        return dumped.rstrip("\n").split("\n")
+
+    replaced: list[tuple[int, int, list[str]]] = []
+    expected = dict(meta)
+    expected.update(updates)
+    for key in updates:
+        if key in meta and meta[key] == updates[key]:
+            continue
+        found = [i for i, k in starts if k == key]
+        if len(found) > 1:
+            return join_frontmatter(expected, _body)
+        if found:
+            replaced.append((found[0], span(found[0]), render(key)))
+        else:
+            replaced.append((len(lines), len(lines), render(key)))
+    for start, end, new_lines in sorted(replaced, reverse=True):
+        lines[start:end] = new_lines
+    result = "---\n" + "\n".join(lines) + "\n---\n" + rest
+
+    try:
+        check, _ = split_frontmatter(result)
+    except ValueError:
+        return join_frontmatter(expected, _body)
+    if check != expected:
+        return join_frontmatter(expected, _body)
+    return result

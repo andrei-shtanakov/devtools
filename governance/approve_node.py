@@ -49,7 +49,7 @@ from governance import approval_ledger as al
 from governance import bundle_dag, bundle_inputs
 from governance import node_approval as na
 from governance.approval_facts import Disposition, Outcome
-from governance.frontmatter import join_frontmatter, split_frontmatter
+from governance.frontmatter import split_frontmatter, update_frontmatter
 from governance.ops import Ops
 from governance.policy_sources import build_authority, load_safety
 from governance.run_state import RunState
@@ -912,14 +912,20 @@ def _carried_text(
             f"(записано {recorded}, в base {actual}) — предложение не "
             "публикуется"
         )
-    meta, body = split_frontmatter(text)
-    meta["status"] = na.STATUS_APPROVAL_PENDING
-    meta["version"] = int(meta.get("version") or 1) + 1
+    meta, _body = split_frontmatter(text)
+    # Только четыре величины, побайтово поверх авторского текста
+    # (@id:approval-stamp-frontmatter-roundtrip): человек перед подписью
+    # читает диф candidate-PR, и в нём обязаны быть лишь строки, которые
+    # штамп меняет по смыслу.
+    updates: dict[str, object] = {
+        "status": na.STATUS_APPROVAL_PENDING,
+        "version": int(meta.get("version") or 1) + 1,
+        na.SELF_HASH_KEY: recorded,
+    }
     pins = op["upstream_pins"][node]
     if pins:
-        meta["upstream_hashes"] = dict(pins)
-    meta[na.SELF_HASH_KEY] = recorded
-    return join_frontmatter(meta, body)
+        updates["upstream_hashes"] = dict(pins)
+    return update_frontmatter(text, updates)
 
 
 def _sync_branch_to_snapshot(
@@ -1082,11 +1088,14 @@ def _cascade_stale(
             if current not in ups:
                 continue
             path = Path(state.target_dir) / _rel(state, fname)
-            meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
+            meta, _body = split_frontmatter(text)
             if not na.cascade_marks_stale(meta.get("status")):
                 continue
-            meta["status"] = na.STATUS_STALE
-            path.write_text(join_frontmatter(meta, body), encoding="utf-8")
+            path.write_text(
+                update_frontmatter(text, {"status": na.STATUS_STALE}),
+                encoding="utf-8",
+            )
             changed.append(_rel(state, fname))
             frontier.append(child)
     return changed
@@ -1462,6 +1471,13 @@ def _reconcile_candidate(
     merged = event.value
     assert merged is not None
     signature = af.authorized_signature(merged)
+    if signature.outcome is Outcome.UNAVAILABLE:
+        # Политика не пережила границу процессов — отказ с сохранением
+        # заявки, не `invalidated`: мерж состоялся, судить его не по чему
+        # ЗДЕСЬ, а не вообще (@id:approver-allowlist-process-boundary).
+        raise _unresolved(
+            f"подпись мержа candidate-PR #{pr}: {signature.detail}"
+        )
     if signature.outcome is Outcome.FORBIDDEN:
         al.invalidate_request(state, key, signature.detail)
         raise RuntimeError(
@@ -1764,11 +1780,17 @@ def _publish_envelope(
         changed: list[str] = []
         for node in nodes:
             path = Path(state.target_dir) / _rel(state, _filename(dag, node))
-            meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
-            meta["status"] = na.STATUS_APPROVED
-            meta["approved_by"] = op["merged_by"]
-            meta["approved_at"] = op["merged_at"]
-            path.write_text(join_frontmatter(meta, body), encoding="utf-8")
+            path.write_text(
+                update_frontmatter(
+                    path.read_text(encoding="utf-8"),
+                    {
+                        "status": na.STATUS_APPROVED,
+                        "approved_by": op["merged_by"],
+                        "approved_at": op["merged_at"],
+                    },
+                ),
+                encoding="utf-8",
+            )
             changed.append(_rel(state, _filename(dag, node)))
         ops.commit_paths(
             state.target_dir,

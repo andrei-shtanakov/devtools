@@ -2474,6 +2474,114 @@ def test_no_op_over_approved_node_survives_empty_allowlist(
     assert "no-op" in outcome.message
 
 
+def test_finalize_without_policy_refuses_and_keeps_the_request(
+    world: World, monkeypatch
+) -> None:
+    """Политика не пережила границу процессов — отказ, не `invalidated`
+    (@id:approver-allowlist-process-boundary).
+
+    Прогон S7 2026-09-21, candidate #315: мерж выполнен учёткой из
+    allowlist процессом A, финализацию запустил процесс B без переменной в
+    окружении — контур увидел «подписать не может никто» и похоронил
+    живую заявку. Candidate существует только под непустой политикой
+    (devtools#278), поэтому пустота на фазе 2 — потеря значения, а не
+    решение о мержере: факт не установлен, заявка сохраняется, повтор с
+    политикой завершает её тем же candidate.
+    """
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])          # процесс A: политика есть
+    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "")   # процесс B: нет
+
+    with pytest.raises(RuntimeError) as caught:
+        approve(world, "charter")
+
+    message = str(caught.value)
+    assert "пуст" in message, "названа недоступность политики"
+    assert "учётки нет в" not in message, "это формулировка отказа мержеру"
+    record = world.state.ops[key]
+    assert al.is_live(record), record.get("reason")
+    assert record["status"] != al.STATUS_INVALIDATED
+    assert record.get("authorization") is None, (
+        "решение об авторизации не записано"
+    )
+    assert world.forge.prs[op["candidate_pr"]]["state"] == "MERGED"
+
+    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, HUMAN)
+    approve(world, "charter")                    # повтор ТОЙ ЖЕ заявки
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+    assert world.state.ops[key]["authorization"]["login"] == HUMAN
+
+
+AUTHORED_FRONTMATTER_LINES = (
+    "traces_to: [discovery-brief]",
+    'brief_sha256: "e3b0c44298fc1c149afbfbf4c8996fb92427ae41e4649b934ca495991b7852b8"',
+)
+
+
+def _seed_authored_charter(world: World) -> None:
+    """Узел charter с авторскими строками во flow-стиле и с кавычками —
+    ровно те формы, которые `yaml.safe_dump` переписывает по-своему."""
+    _git(world.human, "fetch", "-q", "origin")
+    _git(world.human, "switch", "-q", "master")
+    _git(world.human, "reset", "-q", "--hard", "origin/master")
+    (world.human / BUNDLE / "00-charter.md").write_text(
+        "---\n"
+        "node: charter\n"
+        "status: draft\n"
+        "version: 1\n"
+        + "\n".join(AUTHORED_FRONTMATTER_LINES) + "\n"
+        "approved_by: ''\n"
+        "approved_at: ''\n"
+        "---\n"
+        "\n"
+        "Содержание узла charter.\n",
+        encoding="utf-8",
+    )
+    _git(world.human, "add", "-A")
+    _git(world.human, "commit", "-qm", "charter: авторский frontmatter")
+    _git(world.human, "push", "-q", "origin", "master")
+    world.sync()
+
+
+def test_approval_stamp_leaves_authored_frontmatter_bytes_alone(
+    world: World,
+) -> None:
+    """Диф candidate/finalize содержит ТОЛЬКО строки, которые штамп меняет
+    по смыслу (@id:approval-stamp-frontmatter-roundtrip).
+
+    Прогон S7 2026-09-21, candidate #316: `--approve-node` прогонял
+    frontmatter через `split_frontmatter`/`join_frontmatter`, и в дифе
+    появлялись правки, которых автор не делал — flow-список становился
+    блочным, с хэшей слетали кавычки. Человек перед подписью читал шум
+    вместо трёх содержательных строк, а «авторский текст сохраняется» по
+    конвейеру в целом было неверно.
+    """
+    _seed_authored_charter(world)
+    first = approve(world, "charter")
+    assert first.request is not None
+    candidate = world.state.ops[first.request]["candidate_pr"]
+    branch = world.forge.prs[candidate]["branch"]
+    proposed = _show(world.target, f"origin/{branch}:{BUNDLE}/00-charter.md")
+    for line in AUTHORED_FRONTMATTER_LINES:
+        assert line in proposed.splitlines(), (
+            f"candidate переписал авторскую строку {line!r}:\n{proposed}"
+        )
+
+    merge_pr(world, candidate)
+    approve(world, "charter")
+    world.sync()
+    final = world.base_text("00-charter.md")
+    for line in AUTHORED_FRONTMATTER_LINES:
+        assert line in final.splitlines(), (
+            f"finalize переписал авторскую строку {line!r}:\n{final}"
+        )
+    meta = world.base_meta("00-charter.md")
+    assert meta["status"] == na.STATUS_APPROVED
+    assert meta["approved_by"] == HUMAN
+    assert meta[na.SELF_HASH_KEY] == na.self_hash(final)
+
+
 def test_agent_merge_refusal_leaves_finalize_to_human(world: World) -> None:
     """Отказ обвязки — не ошибка: PR без лейбла остаётся человеку, заявка
     жива; повторный вызов пробует агентский мерж снова (ревью #233), а
@@ -2694,10 +2802,10 @@ def test_malformed_envelope_is_not_merged_by_agent(world: World, monkeypatch) ->
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
-    real_join = an.join_frontmatter
+    real_update = an.update_frontmatter
     monkeypatch.setattr(
-        an, "join_frontmatter",
-        lambda meta, body: real_join(meta, body + "лишняя строка\n"),
+        an, "update_frontmatter",
+        lambda text, updates: real_update(text, updates) + "лишняя строка\n",
     )
     outcome = approve(world, "charter")
     finalize_pr = world.state.ops[key]["finalize_pr"]

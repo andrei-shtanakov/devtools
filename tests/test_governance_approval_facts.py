@@ -227,13 +227,23 @@ def test_incomplete_merge_facts_are_unavailable(missing: str, name: str) -> None
 
 
 def test_allowlist_is_empty_by_default(monkeypatch) -> None:
-    """Пустой дефолт значит «подписать не может никто» — fail-closed."""
+    """Пустой дефолт значит «подписать не может никто» — fail-closed.
+
+    Подписи нет (`value is None`, не `FOUND`), но исход — `UNAVAILABLE`, а
+    не `FORBIDDEN` (@id:approver-allowlist-process-boundary): candidate под
+    пустой политикой не создаётся (devtools#278), поэтому пустота в
+    процессе, устанавливающем факт, — потеря значения между процессами, а
+    не решение о мержере. Учётка не проверялась, и сообщение её не винит.
+    """
     monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
     assert af.approver_allowlist() == frozenset()
     fact = af.authorized_signature(
         MergeEvent("andrei-shtanakov", "2026-09-10T08:00:00Z", "abc123")
     )
-    assert fact.outcome is Outcome.FORBIDDEN
+    assert fact.outcome is Outcome.UNAVAILABLE
+    assert fact.value is None, "подписи нет"
+    assert "пуст" in fact.detail
+    assert "учётки нет в" not in fact.detail, "это отказ мержеру, не политике"
 
 
 def test_configured_account_signs_and_review_circuit_never_does(
