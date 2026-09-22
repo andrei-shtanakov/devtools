@@ -1,6 +1,6 @@
 ---
 spec_stage: requirements
-status: approval_pending
+status: approved
 owner_role: product
 traces_to:
 - charter
@@ -8,6 +8,8 @@ upstream_hashes:
   charter: aa18c8d63d4131bb619416c4a210ba377e779491
 approved_content_hash: bfacdf5b5f9103716efcd3fedb4a07585f37eae0
 version: 2
+approved_at: '2026-09-22T15:27:24Z'
+approved_by: andrei-shtanakov
 ---
 
 # Requirements: посторонний `.md` больше не отключает сверку §I8 для легаси-v1
