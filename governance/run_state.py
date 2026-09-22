@@ -210,6 +210,8 @@ def new_run(
         interview=interview,
         allow_legacy_dt=allow_legacy_dt,
         authoring=authoring,
+        # Волны 1-based (S1): прогон начинается с W1; legacy — 0.
+        wave=1 if authoring == "waves" else 0,
     )
 
 

@@ -155,6 +155,7 @@ def test_waves_authoring_is_persisted(tmp_path: Path, runs_root) -> None:
     )
     rs.save(state)
     assert rs.load("r-2").authoring == "waves"
+    assert rs.load("r-2").wave == 1, "волны 1-based: прогон начинается с W1"
 
 
 def test_unknown_authoring_is_refused() -> None:

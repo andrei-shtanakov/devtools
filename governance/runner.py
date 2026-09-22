@@ -37,6 +37,8 @@ from governance import (
     design_guard,
 )
 from governance import interview as iv
+from governance.edge_check.rules import EdgeCheckError
+from governance.frontmatter import split_frontmatter
 from governance.merge_gate import PrFacts, decide
 from governance.facts import Outcome
 from governance.stale_adapter import blob_sha1
@@ -49,6 +51,8 @@ from governance.policy_sources import (
     build_authority,
     load_safety,
     target_profile_declares,
+    verify_wave_profile_dir,
+    wave_profile_dir,
 )
 from governance.run_state import (
     RunState,
@@ -380,26 +384,94 @@ def advance(state: RunState, ops: Ops) -> RunState:
     if op_status(state, "merge") == "completed":
         _step_s8(state, ops)
         return state
-    steps = (
-        _step_interview,
-        _step_branch,
-        _step_materialize_brief,
-        _step_authoring,
-        _step_commit,
-        _step_gate,
-        _step_push,
-        _step_pr,
-        _step_ready,
-        _step_review,
-        _step_verdict,
-        _step_s8,
-    )
+    steps = _WAVE_STEPS if _waves(state) else _LEGACY_STEPS
     for step in steps:
         if state.status != "running":
             break
         if not step(state, ops):
             break
     return state
+
+
+# --- Волновой режим (спека sequential-node-approval, S9/S10/S13) ----------
+
+
+def _waves(state: RunState) -> bool:
+    """`authoring: waves` — узлы едут волнами; run.json без поля — legacy."""
+    return state.authoring == "waves"
+
+
+def wave_key(state: RunState, base: str) -> str:
+    """Ключ op'а: per-wave (`<base>-<w>`, S10) в волнах, прежний в legacy."""
+    return f"{base}-{state.wave}" if _waves(state) else base
+
+
+def _wave_level(state: RunState) -> int:
+    """Уровень DAG текущей волны: волны 1-based, уровни 0-based (S1)."""
+    return state.wave - 1
+
+
+def _wave_branch(state: RunState) -> str:
+    """Ветка волны (S9): `spec/<ws>-behaviour-w<k>`."""
+    return f"spec/{state.ws_id}-behaviour-w{state.wave}"
+
+
+def _wave_dag() -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Активный DAG волнового раннера — полный (легаси-состава у него нет)."""
+    return bundle_dag.dag_for(None)
+
+
+def _author_steps_for(state: RunState) -> tuple[tuple[str, str, str], ...]:
+    """Шаги авторинга этого захода: в волнах — только узлы уровня волны."""
+    if not _waves(state):
+        return _AUTHOR_STEPS
+    levels = bundle_dag.levels(_wave_dag())
+    level = _wave_level(state)
+    return tuple(step for step in _AUTHOR_STEPS if levels[step[1]] == level)
+
+
+def _upstream_ready(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    level: int,
+) -> str | None:
+    """Инвариант 1 (§3.3): все узлы уровней < `level` `approved` в base и ни
+    один узел бандла в base не `stale`; → текст отказа с именами узлов либо
+    None. Читается BASE, не рабочее дерево: окончательные байты upstream
+    появляются только после finalize."""
+    levels = bundle_dag.levels(dag)
+    base = state.base_ref or "master"
+    problems: list[str] = []
+    for fname, _ in dag:
+        node = bundle_dag.node_id(fname)
+        text = ops.show_file(state.target_dir, base, f"{state.bundle_dir}/{fname}")
+        status = split_frontmatter(text)[0].get("status") if text is not None else None
+        if levels[node] < level:
+            if text is None:
+                problems.append(f"{node}: нет в base")
+            elif status != "approved":
+                problems.append(f"{node}: статус {status!r} в base, нужен approved")
+        elif status == "stale":
+            problems.append(f"{node}: stale в base")
+    return "; ".join(problems) or None
+
+
+def reset_ops_for(state: RunState) -> tuple[str, ...]:
+    """Op'ы, которые `resume` снимает для статуса прогона.
+
+    Legacy — прежние кортежи `_STOPPED_RESET_OPS`; волны — диапазон
+    ТЕКУЩЕЙ волны `commit-<w>`…`edge-<w>` (без push/ready/review: их в
+    волнах нет, публикацию делает шаг candidate), `stopped_stale`/
+    `stopped_dirty`/`stopped_preflight` — ничего, только статус.
+    """
+    if not _waves(state):
+        return _STOPPED_RESET_OPS.get(state.status, ())
+    if state.status in ("stopped_gate", "stopped_review", "stopped_author"):
+        return tuple(
+            wave_key(state, base) for base in ("commit", "gate-candidate", "edge")
+        )
+    return ()
 
 
 # stopped_author/stopped_gate/stopped_review: между стопом и resume человек
@@ -438,17 +510,22 @@ _STOPPED_RESET_OPS: dict[str, tuple[str, ...]] = {
     # обновлённый профиль PR-ом между стопом и resume). Пустой кортеж —
     # без него `resume()` был бы тихим no-op (инвариант F-1).
     "stopped_preflight": (),
+    # stopped_stale (волны, §3.4): в base есть stale ниже верхнего approved
+    # уровня — сбрасывать нечего, статус обратно в running, чтобы
+    # `_step_authoring` перечитал base после переодобрения уровней.
+    "stopped_stale": (),
 }
 
 
 def _reset_stopped_author(state: RunState) -> None:
     """stopped_author: незавершённые ``author-*`` + диапазон commit→review
     (круг 9) — та же логика, что `_BUNDLE_EDIT_RESET_OPS`, на случай, если
-    контент бандла успел измениться после починки."""
+    контент бандла успел измениться после починки. В волнах диапазон —
+    текущей волны (`reset_ops_for`)."""
     for key, _kind, _filename in _AUTHOR_STEPS:
         if op_status(state, key) != "completed":
             state.ops.pop(key, None)
-    for key in _BUNDLE_EDIT_RESET_OPS:
+    for key in reset_ops_for(state) if _waves(state) else _BUNDLE_EDIT_RESET_OPS:
         state.ops.pop(key, None)
 
 
@@ -537,7 +614,7 @@ def resume(run_id: str, ops: Ops) -> RunState:
     if state.status in _STOPPED_RESET_OPS:
         if _reconcile_pr_merged_out_of_band(state, ops):
             return state
-        for key in _STOPPED_RESET_OPS[state.status]:
+        for key in reset_ops_for(state):
             state.ops.pop(key, None)
         state.status = "running"
         save(state)
@@ -821,6 +898,14 @@ def _stop_with_comment(state: RunState, ops: Ops, status: str, body: str) -> Non
     """
     state.status = status
     save(state)
+    if state.pr is None:
+        # Волновой прогон до первого candidate-PR: комментировать нечего —
+        # причина стопа пишется в каталог прогона и в лог, не теряется.
+        (run_dir(state.run_id) / "stop-reason.txt").write_text(
+            body + "\n", encoding="utf-8"
+        )
+        print(f"_stop_with_comment ({status!r}): {body}")
+        return
     try:
         ops.comment(state.repo_slug, state.pr, body)
     except Exception as exc:  # noqa: BLE001 — best-effort, не должен ронять шаг
@@ -1180,6 +1265,8 @@ def _step_branch(state: RunState, ops: Ops) -> bool:
     ручной очистки — обычный `advance()`: `branch` так и не стартовала,
     проверка просто повторяется.
     """
+    if _waves(state):
+        return _step_wave_branch(state, ops)
     key = "branch"
     state.branch = f"spec/{state.ws_id}-behaviour"
     if op_status(state, key) == "completed":
@@ -1195,6 +1282,36 @@ def _step_branch(state: RunState, ops: Ops) -> bool:
     _ensure_started(state, key)
     ops.ensure_branch(state.target_dir, state.branch)
     op_complete(state, key)
+    return True
+
+
+def _step_wave_branch(state: RunState, ops: Ops) -> bool:
+    """S1 волны (S9): ветка волны ОТ СВЕЖЕГО BASE, не от текущего HEAD.
+
+    `checkout_and_pull(base)` + `switch_to(branch, base)` (`git switch -C`):
+    в base лежат upstream с конвертами — пины авторского агента совпадут с
+    base. Не `ensure_branch`: та ветвит от текущего HEAD, а после прошлой
+    волны HEAD стоит на её ветке. Отдельная ветка на волну: переписанная
+    история одной ветки давала бы non-ff на push. Грязное дерево на входе —
+    `stopped_dirty`, ничего не затирается молча.
+    """
+    key = wave_key(state, "branch")
+    if op_status(state, key) == "completed":
+        return True
+    if op_status(state, key) == "new" and ops.is_dirty(state.target_dir):
+        print(
+            f"_step_branch: target_dir {state.target_dir!r} грязный "
+            f"(git status --porcelain непуст) — волна {state.wave} не начата"
+        )
+        state.status = "stopped_dirty"
+        save(state)
+        return False
+    _ensure_started(state, key)
+    base = state.base_ref or "master"
+    ops.checkout_and_pull(state.target_dir, base)
+    state.branch = _wave_branch(state)
+    ops.switch_to(state.target_dir, state.branch, base)
+    op_complete(state, key, branch=state.branch)
     return True
 
 
@@ -1219,7 +1336,7 @@ def _step_materialize_brief(state: RunState, ops: Ops) -> bool:
     """
     if state.brief is None:
         return True
-    key = "materialize-brief"
+    key = wave_key(state, "materialize-brief")  # per-wave (S9): дерево волны новое
     intake_root = run_dir(state.run_id) / "brief-input"
     try:
         source = brief_input.inspect_materialized(intake_root, ".")
@@ -1518,6 +1635,19 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     завершены (resume после S2, вручную собранный бандл), проверять
     нечего — несоответствие профиля поймает S4 (`gate-check --candidate`).
     """
+    if _waves(state):
+        # Инвариант 1 (§3.3): нижние уровни `approved` в base, `stale` нет.
+        # Читается ДО оплаченного авторинга; узел в `approval_pending`
+        # (открытый candidate) сюда штатно не доходит — resume ждёт мержа.
+        reason = _upstream_ready(state, ops, _wave_dag(), _wave_level(state))
+        if reason is not None:
+            _stop_with_comment(
+                state, ops, "stopped_stale",
+                f"волна {state.wave}: авторинг уровня {_wave_level(state)} "
+                f"невозможен — {reason}. Переодобрите нижние уровни "
+                "(approve-node по base) и повторите resume",
+            )
+            return False
     authoring_pending = any(
         op_status(state, key) != "completed" for key, _, _ in _AUTHOR_STEPS
     )
@@ -1534,7 +1664,7 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 state.status = "stopped_preflight"
                 save(state)
                 return False
-    for key, kind, filename in _AUTHOR_STEPS:
+    for key, kind, filename in _author_steps_for(state):
         if kind == "behaviour-spec" and state.brief is not None:
             descriptor = state.brief
             source_rel = descriptor.get("requirements_source")
@@ -1701,13 +1831,14 @@ def _step_commit(state: RunState, ops: Ops) -> bool:
     -A` сгребал бы в этот коммит и чужие незакоммиченные изменения где
     угодно в `target_dir` — заменено на явный список путей.
     """
-    key = "commit"
+    key = wave_key(state, "commit")
     if op_status(state, key) == "completed":
         return True
     _ensure_started(state, key)
     _commit_bundle(
         state, ops,
-        f"docs(governance): behaviour bundle {state.ws_id} — {state.subject}",
+        f"docs(governance): behaviour bundle {state.ws_id} — {state.subject}"
+        + (f" (волна {state.wave})" if _waves(state) else ""),
     )
     if state.brief is not None and not _source_layer_committed(state, ops):
         return False
@@ -1817,10 +1948,32 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     candidate_state остаётся у консоли (bundle_summary) — её view-model этот
     шаг не трогает.
     """
-    key = "gate-candidate"
+    key = wave_key(state, "gate-candidate")
     if op_status(state, key) == "completed":
         return True
     _ensure_started(state, key)
+    profile_arg = state.profile
+    if _waves(state):
+        # S5: гейт steward судит бандл по профилю, а у волны бандл неполон —
+        # копия каталога профиля с усечением до уровней ≤ wave−1, sha256
+        # siblings сверяется НЕПОСРЕДСТВЕННО перед вызовом. Компромисс
+        # назван в `wave_profile_dir`; целевое состояние — `--upto` у steward.
+        projected = wave_profile_dir(
+            state.target_dir, state.profile, state.wave, run_dir(state.run_id)
+        )
+        mismatch = verify_wave_profile_dir(
+            state.target_dir, state.profile, projected, _wave_level(state)
+        )
+        if mismatch:
+            (run_dir(state.run_id) / "gate-findings.txt").write_text(
+                "error GC-PROFILE-PROJECTION: проекция профиля не совпала с "
+                f"профилем target: {', '.join(mismatch)}\n",
+                encoding="utf-8",
+            )
+            state.status = "stopped_gate"
+            save(state)
+            return False
+        profile_arg = str(projected)
     # `gate-findings.txt` отражает ПОСЛЕДНИЙ прогон гейта
     # (@id:gate-findings-stale-on-green, прогон S7 2026-09-21): круг 1
     # записал находки, круг 2 прошёл чисто, файл остался — читающий видел
@@ -1830,7 +1983,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # состояния. Каждая ветка ниже пишет файл заново целиком.
     (run_dir(state.run_id) / "gate-findings.txt").unlink(missing_ok=True)
     rc, output = ops.gate_check_candidate(
-        state.target_dir, state.bundle_dir, state.profile
+        state.target_dir, state.bundle_dir, profile_arg
     )
     if rc != 0:
         (run_dir(state.run_id) / "gate-findings.txt").write_text(
@@ -1840,6 +1993,13 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         state.status = "stopped_gate"
         save(state)
         return False
+    # Волны (S5): локальная полнота — по уровням ≤ wave−1, иначе гард
+    # останавливал бы каждую волну до W4 за отсутствующий design.
+    in_scope = (
+        {bundle_dag.node_id(f) for f, _ in bundle_dag.dag_upto(_wave_dag(), _wave_level(state))}
+        if _waves(state)
+        else None
+    )
     # Гард отсутствия design/decomposition (спека Task 4, обобщено Task 6):
     # required-узел — локальный (не через bundle_state.candidate_state — та
     # остаётся у консоли, runner без импорта steward). MINOR-1 финального
@@ -1863,7 +2023,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         node_paths[node] = Path(state.target_dir) / state.bundle_dir / node_file
         node_required = target_profile_declares(
             state.target_dir, state.profile, node
-        )
+        ) and (in_scope is None or node in in_scope)
         if node_required and not node_paths[node].exists():
             (run_dir(state.run_id) / "gate-findings.txt").write_text(
                 f"error GC-COMPLETENESS({node}): required-узел {node} "
@@ -2228,6 +2388,70 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         )
     op_complete(state, key, exit=rc)
     return True
+
+
+def _step_edge(state: RunState, ops: Ops) -> bool:
+    """Edge-check волны (S6, D4): обязателен, обхода нет; legacy — no-op.
+
+    `PASS` (включая `N/A` по applicability) — op завершён; `FAIL` —
+    `stopped_review` с находками в `edge-findings.txt` (файл снимается на
+    входе — класс #338); `ERROR`/невозможность (нет ревьюера, неполный
+    вход, набора правил нет) — `stopped_review` с `error_code`. Результаты
+    лежат в каталоге прогона (леджер D12), не в worktree цели.
+    """
+    if not _waves(state):
+        return True
+    key = wave_key(state, "edge")
+    if op_status(state, key) == "completed":
+        return True
+    _ensure_started(state, key)
+    findings_path = run_dir(state.run_id) / "edge-findings.txt"
+    findings_path.unlink(missing_ok=True)
+    projected = (
+        run_dir(state.run_id) / f"profile-w{state.wave}" / Path(state.profile).name
+    )
+    try:
+        result = ops.edge_check_level(
+            state, run_dir(state.run_id), state.wave, projected
+        )
+    except EdgeCheckError as exc:
+        findings_path.write_text(
+            f"error EDGE-CHECK({exc.code}): {exc}\n", encoding="utf-8"
+        )
+        state.status = "stopped_review"
+        save(state)
+        return False
+    records = getattr(result, "records", {})
+    verdict = getattr(result, "verdict", "ERROR")
+    if verdict == "PASS":
+        op_complete(
+            state, key, verdict=verdict,
+            edges={f"{n}--{e}": r["verdict"] for (n, e), r in records.items()},
+        )
+        return True
+    lines: list[str] = []
+    for (node, edge), record in records.items():
+        if record["verdict"] == "ERROR":
+            lines.append(
+                f"error EDGE-CHECK({node}/{edge}): "
+                f"{record.get('error_code', 'error')}: {record.get('reason', '')}"
+            )
+        for finding in record.get("findings", []):
+            loc = finding.get("location") or {}
+            lines.append(
+                f"error EDGE-CHECK({node}/{edge}): {finding.get('rule_id')} "
+                f"{finding.get('class')}: {finding.get('statement')} "
+                f"@ {loc.get('path')}:{loc.get('lines')}"
+            )
+        if record["verdict"] == "FAIL" and not record.get("findings"):
+            lines.append(
+                f"error EDGE-CHECK({node}/{edge}): FAIL по статусу пунктов "
+                "без находок"
+            )
+    findings_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    state.status = "stopped_review"
+    save(state)
+    return False
 
 
 def _step_push(state: RunState, ops: Ops) -> bool:
@@ -2723,6 +2947,34 @@ def _print_status(state: RunState) -> None:
         print(f"  {key}: {op['status']}{suffix}")
 
 
+# Порядок шагов двух режимов (спека sequential-node-approval §3.1/S10).
+# Legacy — прежний конвейер бандл-PR; волны — S1–S4 per-wave + edge-check,
+# затем шаг candidate (публикация заявки волны) и ожидание человека.
+_LEGACY_STEPS = (
+    _step_interview,
+    _step_branch,
+    _step_materialize_brief,
+    _step_authoring,
+    _step_commit,
+    _step_gate,
+    _step_push,
+    _step_pr,
+    _step_ready,
+    _step_review,
+    _step_verdict,
+    _step_s8,
+)
+_WAVE_STEPS = (
+    _step_interview,
+    _step_branch,
+    _step_materialize_brief,
+    _step_authoring,
+    _step_commit,
+    _step_gate,
+    _step_edge,
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI: `python -m governance.runner start|resume|verify|status ...`.
 
@@ -2818,3 +3070,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

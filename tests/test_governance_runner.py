@@ -169,6 +169,48 @@ class FakeOps:
     # Байты вместо `brief_text`, если заданы (напр. невалидный UTF-8 —
     # finding 3 финальной волны ревью: UnicodeDecodeError вместо traceback).
     brief_bytes: bytes | None = None
+    # Волны: файлы base по пути (`show_file`), журнал `switch_to`, вердикт
+    # edge-check по узлу (дефолт PASS; "FAIL" | "ERROR").
+    base_files: dict[str, str] = field(default_factory=dict)
+    switched: list[tuple[str, str]] = field(default_factory=list)
+    edge_results: dict[str, str] = field(default_factory=dict)
+    edge_calls: list[tuple[int, str]] = field(default_factory=list)
+
+    def switch_to(self, target_dir: str, branch: str, start_point: str) -> None:
+        self.calls.append(("switch_to", branch, start_point))
+        self.switched.append((branch, start_point))
+        self.existing_branches.add(branch)
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        self.calls.append(("show_file", ref, path))
+        return self.base_files.get(path)
+
+    def edge_check_level(self, state, run_dir: Path, wave: int, profile_path: Path):
+        """Стенд координатора: рёбра — из проекции профиля (как в бою),
+        вердикт — из `edge_results` по узлу."""
+        import yaml
+
+        from governance.edge_check import coordinator as co
+
+        self.calls.append(("edge_check_level", wave, str(profile_path)))
+        self.edge_calls.append((wave, str(profile_path)))
+        arts = yaml.safe_load(profile_path.read_text(encoding="utf-8"))["artifacts"]
+        records = {}
+        for edge in co.edges_for_level(arts, wave - 1):
+            verdict = self.edge_results.get(edge.node, "PASS")
+            record: dict = {"verdict": verdict, "findings": []}
+            if verdict == "FAIL":
+                record["findings"] = [{
+                    "rule_id": "R1", "class": "major", "statement": "не покрыто",
+                    "location": {"path": f"{edge.node}.md", "lines": [1, 1]},
+                }]
+            if verdict == "ERROR":
+                record["error_code"] = "reviewer_failed"
+                record["reason"] = "ревьюер недоступен"
+            records[(edge.node, edge.edge_id)] = record
+        verdicts = {r["verdict"] for r in records.values()}
+        verdict = "ERROR" if "ERROR" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
+        return co.LevelResult(records, verdict, {"PASS": 0, "FAIL": 1, "ERROR": 3}[verdict])
 
     def ensure_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("ensure_branch", branch))
@@ -7284,3 +7326,153 @@ def test_run_json_without_the_compat_field_resumes_strictly(
     path.write_text(json.dumps(raw), encoding="utf-8")
 
     assert runner.load("r-old-state").allow_legacy_dt is False
+
+
+# --- Волновой режим (спека sequential-node-approval; план Task 7) ----------
+
+
+def _waves_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
+    kwargs = _start_kwargs(tmp_path, run_id, ops, **overrides)
+    profiles = Path(kwargs["target_dir"]) / "profiles"
+    for sib in ("roles.yaml", "gate-catalog.yaml"):
+        (profiles / sib).write_text(f"# {sib}\n", encoding="utf-8")
+    return kwargs
+
+
+def _approved(node: str) -> str:
+    return f"---\nnode: {node}\nstatus: approved\nversion: 2\n---\n\n#### CON-01: x\n"
+
+
+def test_waves_run_authors_only_level_zero_and_stops_at_edge_fail(
+    tmp_path: Path, runs_root,
+) -> None:
+    ops = FakeOps(edge_results={"charter": "FAIL"})
+    state = runner.start(
+        **_waves_kwargs(tmp_path, "r-w-edge", ops), authoring="waves"
+    )
+    assert ops.authored == ["charter"], "авторится только уровень 0"
+    assert state.wave == 1 and state.status == "stopped_review"
+    findings = (rs.run_dir("r-w-edge") / "edge-findings.txt").read_text()
+    assert "EDGE-CHECK(charter/charter-vs-customer-brief)" in findings
+    assert state.ops["branch-1"]["status"] == "completed"
+    assert state.ops["commit-1"]["status"] == "completed"
+    assert state.ops["gate-candidate-1"]["status"] == "completed"
+    assert state.ops["edge-1"]["status"] == "started"
+    assert state.branch == "spec/WS-1-behaviour-w1"
+    assert ops.switched == [("spec/WS-1-behaviour-w1", "master")]
+    assert ("checkout_and_pull", "master") in ops.calls
+    assert not any(c[0] in ("ensure_branch", "push_branch", "create_draft_pr")
+                   for c in ops.calls)
+    assert "branch" not in state.ops and "commit" not in state.ops
+
+
+def test_waves_gate_uses_projected_profile_with_siblings(
+    tmp_path: Path, runs_root,
+) -> None:
+    ops = FakeOps()
+    state = runner.start(
+        **_waves_kwargs(tmp_path, "r-w-gate", ops), authoring="waves"
+    )
+    assert state.status == "running", (rs.run_dir("r-w-gate") / "gate-findings.txt").read_text() if (rs.run_dir("r-w-gate") / "gate-findings.txt").exists() else ""
+    gate_calls = [c for c in ops.calls if c[0] == "gate_check_candidate"]
+    assert len(gate_calls) == 1
+    projected = rs.run_dir("r-w-gate") / "profile-w1" / "team-exp.yaml"
+    assert projected.exists() and (projected.parent / "roles.yaml").read_text() == "# roles.yaml\n"
+    assert (projected.parent / "PROJECTION.sha256").exists()
+    import yaml
+    data = yaml.safe_load(projected.read_text(encoding="utf-8"))
+    assert [a["id"] for a in data["artifacts"]] == ["charter"]
+    assert ops.edge_calls == [(1, str(projected))]
+    assert state.ops["edge-1"]["status"] == "completed"
+    assert state.ops["edge-1"]["edges"] == {
+        "charter--charter-vs-customer-brief": "PASS",
+        "charter--charter-vs-engineer-brief": "PASS",
+    }
+
+
+def test_waves_local_completeness_is_by_level(tmp_path: Path, runs_root) -> None:
+    """GC-COMPLETENESS по полному профилю остановил бы W1 за отсутствующий
+    design; в волнах required — только узлы уровней ≤ wave−1."""
+    ops = FakeOps()
+    state = runner.start(
+        **_waves_kwargs(tmp_path, "r-w-compl", ops), authoring="waves"
+    )
+    assert state.status != "stopped_gate"
+    assert not (rs.run_dir("r-w-compl") / "gate-findings.txt").exists()
+
+
+def test_waves_refuse_to_author_level_when_upstream_not_approved(
+    tmp_path: Path, runs_root,
+) -> None:
+    ops = FakeOps()
+    state = runner.start(
+        **_waves_kwargs(tmp_path, "r-w-up", ops), authoring="waves"
+    )
+    state.wave = 2
+    state.status = "running"
+    rs.save(state)
+    result = runner.advance(state, ops)
+    assert result.status == "stopped_stale"
+    reason = (rs.run_dir("r-w-up") / "stop-reason.txt").read_text()
+    assert "charter: нет в base" in reason
+    assert ops.authored == ["charter"], "requirements не авторился"
+    assert result.ops["branch-2"]["status"] == "completed"
+
+    # charter approved в base, но behaviour-spec stale — тоже стоп.
+    ops.base_files = {
+        f"{BUNDLE_DIR}/00-charter.md": _approved("charter"),
+        f"{BUNDLE_DIR}/15-behaviour-spec.md": _approved("behaviour-spec").replace(
+            "approved", "stale"),
+    }
+    resumed = runner.resume("r-w-up", ops)
+    assert resumed.status == "stopped_stale"
+    assert "behaviour-spec: stale в base" in (rs.run_dir("r-w-up") / "stop-reason.txt").read_text()
+
+    # Нижний уровень approved, stale нет — авторится requirements.
+    ops.base_files = {f"{BUNDLE_DIR}/00-charter.md": _approved("charter")}
+    resumed = runner.resume("r-w-up", ops)
+    assert ops.authored == ["charter", "requirements"]
+    assert resumed.ops["commit-2"]["status"] == "completed"
+
+
+def test_waves_stopped_gate_resume_resets_only_the_wave_range(
+    tmp_path: Path, runs_root,
+) -> None:
+    ops = FakeOps(gate_candidate=[(1, "error GC-X: красный\n")])
+    state = runner.start(
+        **_waves_kwargs(tmp_path, "r-w-gate-stop", ops), authoring="waves"
+    )
+    assert state.status == "stopped_gate"
+    assert runner.reset_ops_for(state) == ("commit-1", "gate-candidate-1", "edge-1")
+    resumed = runner.resume("r-w-gate-stop", ops)
+    assert resumed.status == "running"
+    assert resumed.ops["branch-1"]["status"] == "completed"
+    assert resumed.ops["gate-candidate-1"]["status"] == "completed"
+    assert resumed.ops["edge-1"]["status"] == "completed"
+    assert ops.authored == ["charter"], "автор не переигран"
+    assert len([c for c in ops.calls if c[0] == "commit_paths"]) == 2
+
+
+def test_waves_projection_mismatch_stops_gate(tmp_path: Path, runs_root, monkeypatch) -> None:
+    ops = FakeOps()
+    monkeypatch.setattr(
+        runner, "verify_wave_profile_dir",
+        lambda target_dir, profile, projected, level: ["roles.yaml"],
+    )
+    state = runner.start(
+        **_waves_kwargs(tmp_path, "r-w-proj", ops), authoring="waves"
+    )
+    assert state.status == "stopped_gate"
+    text = (rs.run_dir("r-w-proj") / "gate-findings.txt").read_text()
+    assert "GC-PROFILE-PROJECTION" in text and "roles.yaml" in text
+    assert not any(c[0] == "gate_check_candidate" for c in ops.calls)
+
+
+def test_legacy_reset_table_is_unchanged_by_waves(tmp_path: Path, runs_root) -> None:
+    state = rs.new_run(
+        subject="s", repo="r", repo_slug="o/r", ws_id="WS", target_dir=str(tmp_path),
+        bundle_dir="spec", profile="profiles/team-exp.yaml", run_id="r-legacy",
+    )
+    state.status = "stopped_gate"
+    assert runner.reset_ops_for(state) == runner._BUNDLE_EDIT_RESET_OPS
+    assert runner._STOPPED_RESET_OPS["stopped_stale"] == ()

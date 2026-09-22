@@ -248,6 +248,10 @@ class Ops(Protocol):
         self, target_dir: str, bundle_dir: str, profile: str
     ) -> tuple[int, str]: ...
 
+    def edge_check_level(
+        self, state: object, run_dir: Path, wave: int, profile_path: Path
+    ) -> object: ...
+
     def create_issue(self, repo_slug: str, title: str, body: str) -> int: ...
 
     def find_issue(self, repo_slug: str, body_prefix: str) -> int | None: ...
@@ -1778,6 +1782,20 @@ class RealOps:
             cwd=target_dir, capture_output=True, text=True,
         )
         return done.returncode, done.stdout + done.stderr
+
+    def edge_check_level(
+        self, state: object, run_dir: Path, wave: int, profile_path: Path
+    ) -> object:
+        """Edge-check всех рёбер волны (спека sequential-node-approval S6).
+
+        Платный вызов ревьюера на каждое ребро — потому на `Ops`, как
+        `author` и `gate_check_candidate`: стенды подменяют исход, не
+        монкипатчат координатор. Возвращает `coordinator.LevelResult`
+        (импорт локальный: координатор сам зависит от `Ops`).
+        """
+        from governance.edge_check.coordinator import run_level
+
+        return run_level(state, self, run_dir, wave, profile_path)  # type: ignore[arg-type]
 
     def create_issue(self, repo_slug: str, title: str, body: str) -> int:
         """gh issue create -R <slug> --label inbox; номер из URL stdout."""
