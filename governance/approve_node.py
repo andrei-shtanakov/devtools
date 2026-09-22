@@ -186,6 +186,32 @@ def _base_text(ops: Ops, state: RunState, fname: str) -> str:
     return fact.value
 
 
+def _source_text(ops: Ops, state: RunState, source_sha: str, fname: str) -> str:
+    """Байты файла бандла в коммите ветки волны `source_sha` (S2)."""
+    fact = af.read_blob_text(
+        ops, state.target_dir, source_sha, _rel(state, fname)
+    )
+    if fact.outcome is not Outcome.FOUND or fact.value is None:
+        raise _unresolved(
+            f"байты {fname} в коммите ветки волны {source_sha[:8]} — "
+            f"{fact.detail}"
+        )
+    return fact.value
+
+
+def _node_text(ops: Ops, state: RunState, op: dict, fname: str) -> str:
+    """Байты узла, которые заявка выносит: из `source_sha` либо из base.
+
+    Переключатель источника — поле заявки, не режим прогона (спека
+    sequential-node-approval S4): переодобрение `stale` уровней после
+    переоткрытия идёт заявками без `source_sha` и читает base, как сегодня.
+    """
+    source_sha = op.get("source_sha")
+    if source_sha is None:
+        return _base_text(ops, state, fname)
+    return _source_text(ops, state, source_sha, fname)
+
+
 def _pr_facts(state: RunState, ops: Ops, pr: int) -> dict:
     """Факты PR либо отказ без эффектов (заявка остаётся живой)."""
     fact = af.read_pr(ops, state.repo_slug, pr)
@@ -209,9 +235,19 @@ def _base_upstream_blobs(
     node: str,
 ) -> dict[str, str]:
     """Фактические блобы всех direct inputs узла в `base`."""
-    fact = bundle_inputs.direct_blobs(
-        state, ops, dag, node, _base_ref(state)
-    )
+    return _upstream_blobs_at(ops, state, dag, node, _base_ref(state), "base")
+
+
+def _upstream_blobs_at(
+    ops: Ops,
+    state: RunState,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    node: str,
+    ref: str,
+    where: str,
+) -> dict[str, str]:
+    """Фактические блобы всех direct inputs узла в ревизии `ref`."""
+    fact = bundle_inputs.direct_blobs(state, ops, dag, node, ref)
     if fact.outcome is Outcome.FORBIDDEN:
         raise RuntimeError(
             f"direct inputs узла {node} запрещены: {fact.detail}. "
@@ -220,8 +256,27 @@ def _base_upstream_blobs(
             "не поможет"
         )
     if fact.outcome is not Outcome.FOUND or fact.value is None:
-        raise _unresolved(f"direct inputs узла {node} в base — {fact.detail}")
+        raise _unresolved(f"direct inputs узла {node} в {where} — {fact.detail}")
     return fact.value
+
+
+def _source_upstream_blobs(
+    ops: Ops,
+    state: RunState,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    node: str,
+    source_sha: str,
+) -> dict[str, str]:
+    """Direct inputs узла заявки волны: DAG-upstream — в base (там лежат их
+    конверты, S4г), source-слой charter — в коммите ветки волны (S2: W1
+    несёт `00-discovery/*` сам, в base его ещё нет). Байты по ref
+    хешируются и сверяются с descriptor'ом внутри `direct_blobs`."""
+    if _upstreams(dag, node):
+        return _base_upstream_blobs(ops, state, dag, node)
+    return _upstream_blobs_at(
+        ops, state, dag, node, source_sha,
+        f"коммите ветки волны {source_sha[:8]}",
+    )
 
 
 # --- Точка входа --------------------------------------------------------
@@ -248,24 +303,8 @@ def approve_node(
     3. живой заявки нет — решение принимается по состоянию узла в base.
     """
     dag = bundle_dag.dag_for(legacy_bundle)
-    if ops.is_dirty(state.target_dir):
-        raise RuntimeError(
-            f"target_dir {state.target_dir!r} грязный — одобрение не "
-            "начато. Процедура: разберитесь с незакоммиченными правками "
-            "(они могли остаться от упавшего захода — тогда их безопасно "
-            "снять: заявка приводит ветку к своему снимку заново) и "
-            "повторите вызов"
-        )
-    ops.checkout_and_pull(state.target_dir, _base_ref(state))
-    bundle_dag.check_bundle_composition(state.target_dir, state.bundle_dir, dag)
-    _settle_requests_outside_dag(state, ops, dag)
-    known = [bundle_dag.node_id(fname) for fname, _ in dag]
-    if node_id not in known:
-        raise RuntimeError(
-            f"узел {node_id!r} не входит в активный DAG. Допустимы: "
-            f"{', '.join(known)}. Процедура: назовите node-id из этого "
-            "перечня либо укажите --legacy-bundle с точным составом бандла"
-        )
+    _sync_base_and_settle(state, ops, dag)
+    _require_known(dag, [node_id])
     # Сверка состава — по ВСЕМ живым заявкам и ДО ветвления, а не внутри
     # ветки продвижения. Заявка, у которой выпали ВСЕ узлы, иначе
     # недостижима ни одним вызовом: по её узлам приходит отказ «нет в
@@ -278,6 +317,46 @@ def approve_node(
         nums, op = live
         return _advance(state, ops, dag, op, al.request_key(*nums))
     return _propose(state, ops, dag, node_id)
+
+
+def _sync_base_and_settle(
+    state: RunState, ops: Ops, dag: tuple[tuple[str, tuple[str, ...]], ...]
+) -> None:
+    """Общий вход обеих точек: чистое дерево, свежий base, состав, сверка
+    живых заявок с активным DAG.
+
+    Правило состава переключает `state.authoring` (спека
+    sequential-node-approval S4), а не наличие `source_sha` у заявки:
+    иначе переодобрение по base после переоткрытия требовало бы полного
+    DAG. В волновом режиме base обязан быть префиксом DAG по уровням.
+    """
+    if ops.is_dirty(state.target_dir):
+        raise RuntimeError(
+            f"target_dir {state.target_dir!r} грязный — одобрение не "
+            "начато. Процедура: разберитесь с незакоммиченными правками "
+            "(они могли остаться от упавшего захода — тогда их безопасно "
+            "снять: заявка приводит ветку к своему снимку заново) и "
+            "повторите вызов"
+        )
+    ops.checkout_and_pull(state.target_dir, _base_ref(state))
+    mode = "waves" if state.authoring == "waves" else "full"
+    bundle_dag.check_bundle_composition(
+        state.target_dir, state.bundle_dir, dag, mode=mode
+    )
+    _settle_requests_outside_dag(state, ops, dag)
+
+
+def _require_known(
+    dag: tuple[tuple[str, tuple[str, ...]], ...], node_ids: list[str]
+) -> None:
+    known = [bundle_dag.node_id(fname) for fname, _ in dag]
+    for node_id in node_ids:
+        if node_id not in known:
+            raise RuntimeError(
+                f"узел {node_id!r} не входит в активный DAG. Допустимы: "
+                f"{', '.join(known)}. Процедура: назовите node-id из этого "
+                "перечня либо укажите --legacy-bundle с точным составом бандла"
+            )
 
 
 # --- Предложение: новая заявка либо присоединение к идущему шагу ---------
@@ -324,34 +403,14 @@ def _propose(
     nodes = bundle_dag.composition(dag)
     fingerprint = bundle_dag.composition_fingerprint(nodes)
     joined = _join_target(state, ops, fingerprint, step)
-    joined_pin: str | None = None
-    if joined is not None:
-        joined_policy = joined[1].get("policy")
-        if not joined_policy:
-            raise RuntimeError(
-                f"живая заявка {al.request_key(*joined[0])} не закрепила "
-                "версию политики (старый формат) — присоединиться к ней "
-                "нельзя; дождитесь её терминализации (фаза 2 объявит её "
-                "invalidated) и повторите"
-            )
-        joined_pin = joined_policy["sha"]
-    policy = af.policy_snapshot(ops, pinned_sha=joined_pin)
-    if policy.outcome is Outcome.UNAVAILABLE:
-        raise _unresolved(f"политика подписи для узла {node_id}: {policy.detail}")
-    if policy.outcome is Outcome.FORBIDDEN:
-        assert isinstance(policy.value, af.PolicyRefusal)
-        raise RuntimeError(_policy_refusal_text(policy.value, joined is not None))
-    snapshot = policy.value
-    assert isinstance(snapshot, af.PolicySnapshot)
-    if (
-        joined is not None
-        and snapshot.fingerprint != joined[1]["policy"]["fingerprint"]
-    ):
+    if joined is not None and joined[1].get("source_sha") is not None:
         raise RuntimeError(
-            f"политика {snapshot.source}: прочитано не то, что закрепляла "
-            f"заявка {al.request_key(*joined[0])} — узел не дописан, ничего "
-            "не записано"
+            f"живая заявка {al.request_key(*joined[0])} шага несёт байты "
+            f"ветки волны ({joined[1]['source_sha'][:8]}), а узел {node_id} "
+            "предлагается по base — в одну заявку они не соединяются; "
+            "дождитесь её терминализации и повторите"
         )
+    snapshot = _pinned_policy(state, ops, joined, node_id)
 
     _close_obsolete_wave(state, nodes, fingerprint)
     wave = _wave_for(state, nodes, fingerprint)
@@ -565,6 +624,143 @@ def reconcile_wave_after_approved_dag(
         f"({approved.fingerprint})",
     )
     return al.WAVE_OBSOLETE
+
+
+def _pinned_policy(
+    state: RunState,
+    ops: Ops,
+    joined: tuple[tuple[int, int, int], dict] | None,
+    what: str,
+) -> af.PolicySnapshot:
+    """Снимок политики подписи ДО первой записи (спека approval-policy §4.3):
+    новая заявка — актуальная версия; присоединение к живой — только под её
+    пином, и прочитанное обязано совпасть с закреплённым по отпечатку."""
+    joined_pin: str | None = None
+    if joined is not None:
+        joined_policy = joined[1].get("policy")
+        if not joined_policy:
+            raise RuntimeError(
+                f"живая заявка {al.request_key(*joined[0])} не закрепила "
+                "версию политики (старый формат) — присоединиться к ней "
+                "нельзя; дождитесь её терминализации (фаза 2 объявит её "
+                "invalidated) и повторите"
+            )
+        joined_pin = joined_policy["sha"]
+    policy = af.policy_snapshot(ops, pinned_sha=joined_pin)
+    if policy.outcome is Outcome.UNAVAILABLE:
+        raise _unresolved(f"политика подписи для {what}: {policy.detail}")
+    if policy.outcome is Outcome.FORBIDDEN:
+        assert isinstance(policy.value, af.PolicyRefusal)
+        raise RuntimeError(_policy_refusal_text(policy.value, joined is not None))
+    snapshot = policy.value
+    assert isinstance(snapshot, af.PolicySnapshot)
+    if (
+        joined is not None
+        and snapshot.fingerprint != joined[1]["policy"]["fingerprint"]
+    ):
+        raise RuntimeError(
+            f"политика {snapshot.source}: прочитано не то, что закрепляла "
+            f"заявка {al.request_key(*joined[0])} — узел не дописан, ничего "
+            "не записано"
+        )
+    return snapshot
+
+
+def propose_from_source(
+    state: RunState,
+    ops: Ops,
+    node_ids: list[str],
+    source_sha: str,
+    *,
+    legacy_bundle: int | None = None,
+    push: bool = True,
+) -> ApprovalOutcome:
+    """Заявка волны: узлы ОДНОГО уровня, байты — из коммита ветки волны.
+
+    Спека sequential-node-approval S2/S4: источник байтов узла — коммит
+    `source_sha` (записывается в заявку), не base и не рабочий каталог;
+    self-hash считается по нему, пины DAG-upstream — по base (там лежат
+    их конверты), source-слой charter — по `source_sha`. Гварды те же, что
+    у `_propose`: upstream `approved` в base, PR терминальных заявок над
+    узлом не переоткрыт; плюс два своих — узлы одного уровня (зависимые
+    уровни в одном candidate запрещены §I12) и отсутствие живой заявки над
+    узлом (её продвигает `approve_node`, вторая не заводится).
+
+    `push=False` — адаптер раннера (S7): ветка приводится к снимку и
+    `head_sha` записан, а push и PR отложены до evidence-коммита
+    edge-check поверх головы заявки; `approve_node` по узлу доигрывает
+    публикацию тем же кодом, что и после падения.
+    """
+    if not node_ids:
+        raise RuntimeError("заявка волны: перечень узлов пуст")
+    dag = bundle_dag.dag_for(legacy_bundle)
+    _sync_base_and_settle(state, ops, dag)
+    _require_known(dag, node_ids)
+    if ops.rev_parse(state.target_dir, source_sha) is None:
+        raise _unresolved(
+            f"коммит ветки волны {source_sha[:8]} недоступен в клоне "
+            f"{state.target_dir!r}"
+        )
+    levels = _levels(dag)
+    steps = {levels[node] for node in node_ids}
+    if len(steps) != 1:
+        raise RuntimeError(
+            f"узлы {', '.join(node_ids)} лежат на разных уровнях DAG "
+            f"({sorted(steps)}): зависимые уровни в одном candidate "
+            "запрещены (§I12) — каждая волна выносит один уровень"
+        )
+    step = steps.pop()
+    for node in node_ids:
+        live = al.live_request_over(state, node)
+        if live is not None:
+            raise RuntimeError(
+                f"над узлом {node} уже есть живая заявка "
+                f"{al.request_key(*live[0])} — её продвигает approve_node, "
+                "вторая не заводится"
+            )
+        _require_upstream_ready(state, ops, dag, node)
+        _require_no_reopened_pr(state, ops, node)
+    hashes = {
+        node: na.self_hash(_source_text(ops, state, source_sha, _filename(dag, node)))
+        for node in node_ids
+    }
+    pins = {
+        node: _source_upstream_blobs(ops, state, dag, node, source_sha)
+        for node in node_ids
+    }
+    nodes = bundle_dag.composition(dag)
+    fingerprint = bundle_dag.composition_fingerprint(nodes)
+    joined = _join_target(state, ops, fingerprint, step)
+    if joined is not None and joined[1].get("source_sha") != source_sha:
+        raise RuntimeError(
+            f"живая заявка {al.request_key(*joined[0])} шага несёт байты из "
+            f"{joined[1].get('source_sha')!r}, а не из {source_sha[:8]} — "
+            "в одну заявку они не соединяются; дождитесь её терминализации"
+        )
+    snapshot = _pinned_policy(state, ops, joined, f"узлов {', '.join(node_ids)}")
+
+    _close_obsolete_wave(state, nodes, fingerprint)
+    wave = _wave_for(state, nodes, fingerprint)
+    remaining = list(node_ids)
+    if joined is not None:
+        key = al.request_key(*joined[0])
+    else:
+        first = remaining.pop(0)
+        key = al.start_request(
+            state,
+            state.ws_id,
+            wave,
+            step,
+            al.next_attempt(state, wave, step),
+            [first],
+            {first: hashes[first]},
+            {first: pins[first]},
+            policy=snapshot.as_record(),
+            source_sha=source_sha,
+        )
+    for node in remaining:
+        al.extend_request(state, key, node, hashes[node], pins[node])
+    return _publish_candidate(state, ops, dag, key, push=push)
 
 
 def _close_obsolete_wave(
@@ -953,23 +1149,33 @@ def _carried_text(
     пишется — акта ещё не было; прежняя, если узел шёл из `approved`,
     остаётся нетронутой.
     """
-    text = _base_text(ops, state, _filename(dag, node))
+    fname = _filename(dag, node)
+    text = _node_text(ops, state, op, fname)
     recorded = op["content_hashes"][node]
     actual = na.self_hash(text)
     if actual != recorded:
         raise RuntimeError(
-            f"{node}: собственные байты в base не те, что вынесла заявка "
-            f"(записано {recorded}, в base {actual}) — предложение не "
-            "публикуется"
+            f"{node}: собственные байты в источнике не те, что вынесла "
+            f"заявка (записано {recorded}, прочитано {actual}) — "
+            "предложение не публикуется"
         )
     meta, _body = split_frontmatter(text)
+    version = int(meta.get("version") or 1)
+    if op.get("source_sha") is not None and ops.file_exists_at(
+        state.target_dir, _base_ref(state), _rel(state, fname)
+    ):
+        # S4е: переавторенный файл несёт `version: 1`, а в base может
+        # лежать `approved` поколение 2 — «один акт — одно поколение»
+        # (§I12) требует шагнуть от старшего из двух.
+        base_meta, _ = split_frontmatter(_base_text(ops, state, fname))
+        version = max(version, int(base_meta.get("version") or 1))
     # Только четыре величины, побайтово поверх авторского текста
     # (@id:approval-stamp-frontmatter-roundtrip): человек перед подписью
     # читает диф candidate-PR, и в нём обязаны быть лишь строки, которые
     # штамп меняет по смыслу.
     updates: dict[str, object] = {
         "status": na.STATUS_APPROVAL_PENDING,
-        "version": int(meta.get("version") or 1) + 1,
+        "version": version + 1,
         na.SELF_HASH_KEY: recorded,
     }
     pins = op["upstream_pins"][node]
@@ -1010,18 +1216,27 @@ def _sync_branch_to_snapshot(
         carried = _carried_text(state, ops, dag, op, node)
         rel = _rel(state, _filename(dag, node))
         path = Path(state.target_dir) / rel
-        if path.read_text(encoding="utf-8") == carried:
+        # Узла в ветке может не быть вовсе: заявка волны приносит его
+        # первым коммитом (S2), base его ещё не содержит.
+        if path.is_file() and path.read_text(encoding="utf-8") == carried:
             continue
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(carried, encoding="utf-8")
         changed.append(rel)
         changed += _cascade_stale(state, dag, node)
+    forced = _sync_source_layer(state, ops, op)
+    changed += forced
     if not changed:
         return ()
+    # `force_paths` — только когда source-слой есть: форма вызова без него
+    # остаётся прежней (стенды подменяют `commit_paths` тремя аргументами).
+    force = {"force_paths": tuple(forced)} if forced else {}
     ops.commit_paths(
         state.target_dir,
         changed,
         f"spec: {state.ws_id} — узел(ы) {', '.join(op['nodes'])} вынесены "
         f"на одобрение (approval_pending), каскад stale (fleet-agent)",
+        **force,
     )
     head = ops.rev_parse(state.target_dir, "HEAD")
     if head is None:
@@ -1031,6 +1246,36 @@ def _sync_branch_to_snapshot(
         )
     al.record_head_sha(state, key, head)
     return tuple(changed)
+
+
+def _sync_source_layer(state: RunState, ops: Ops, op: dict) -> list[str]:
+    """Source-слой charter (`00-discovery/*`) из `source_sha` в ветку заявки.
+
+    S2/S4д: W1 несёт прямой вход charter сам — в base его ещё нет, а
+    `_snapshot_is_published` и фаза 3 читают его по ref. Пути идут в
+    `force_paths`: ignore-правило цели `workstreams/*/spec/*` + `!*.md`
+    не пускает `00-discovery/` без `-f` (как в `_commit_bundle`).
+    → rel-пути, которые изменились.
+    """
+    source_sha = op.get("source_sha")
+    if source_sha is None or "charter" not in op["nodes"] or not state.brief:
+        return []
+    changed: list[str] = []
+    for rel_source in state.brief.get("source_paths") or []:
+        rel = f"{state.bundle_dir}/{rel_source}"
+        fact = af.read_blob_bytes(ops, state.target_dir, source_sha, rel)
+        if fact.outcome is not Outcome.FOUND or fact.value is None:
+            raise _unresolved(
+                f"source-слой {rel} в коммите ветки волны {source_sha[:8]} — "
+                f"{fact.detail}"
+            )
+        path = Path(state.target_dir) / rel
+        if path.is_file() and path.read_bytes() == fact.value:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(fact.value)
+        changed.append(rel)
+    return changed
 
 
 def _carries_snapshot_shape(text: str, op: dict, node: str) -> bool:
@@ -1138,6 +1383,12 @@ def _cascade_stale(
             if current not in ups:
                 continue
             path = Path(state.target_dir) / _rel(state, fname)
+            if not path.is_file():
+                # S4б: в волновом прогоне узлов нижних уровней в base ещё
+                # нет — помечать нечего, каскад обрывается. Единственное
+                # место, где отсутствие файла пропускается: предикаты
+                # доставки (`read_dag_state`) его по-прежнему не прощают.
+                continue
             text = path.read_text(encoding="utf-8")
             meta, _body = split_frontmatter(text)
             if not na.cascade_marks_stale(meta.get("status")):
@@ -1157,8 +1408,14 @@ def _publish_candidate(
     dag: tuple[tuple[str, tuple[str, ...]], ...],
     key: str,
     debt: na.NodeDebt | None = None,
+    *,
+    push: bool = True,
 ) -> ApprovalOutcome:
     """Опубликовать заявку: ветка приводится к снимку, пушится, PR есть.
+
+    `push=False` (S7): остановиться после коммита и записи `head_sha` —
+    адаптер раннера докладывает evidence-коммит edge-check поверх головы,
+    перезаписывает `head_sha` и публикует тем же кодом с `push=True`.
 
     «Опубликовать» здесь значит одно: в ветке лежит ровно то, что в
     снимке, и это видно снаружи. Приведение идёт ЦЕЛИКОМ и идемпотентно,
@@ -1177,6 +1434,15 @@ def _publish_candidate(
         _invalidate_downstream(state, ops, dag, node, key)
     changed = _sync_branch_to_snapshot(state, ops, dag, key)
     op = state.ops[key]
+    if not push:
+        head = op.get("head_sha") or ""
+        return ApprovalOutcome(
+            f"{', '.join(op['nodes'])}: ветка {op['branch']} приведена к "
+            f"снимку (коммит {head[:8]}); push и candidate-PR отложены "
+            "адаптеру",
+            request=key,
+            changed=changed,
+        )
     ops.push_branch(state.target_dir, op["branch"])
     pr = op.get("candidate_pr")
     if pr is None:

@@ -273,6 +273,23 @@ class World:
 
 @pytest.fixture()
 def world(tmp_path: Path, monkeypatch) -> World:
+    return _make_world(tmp_path, monkeypatch, seed_nodes=True)
+
+
+@pytest.fixture()
+def waves_world(tmp_path: Path, monkeypatch) -> World:
+    """Как `world`, но base ПУСТОЙ (каталога бандла нет) и `authoring=waves`.
+
+    Волновой прогон (спека sequential-node-approval) начинается с base без
+    единого узла: W1 приносит charter своим candidate."""
+    return _make_world(
+        tmp_path, monkeypatch, seed_nodes=False, authoring="waves"
+    )
+
+
+def _make_world(
+    tmp_path: Path, monkeypatch, *, seed_nodes: bool, authoring: str = "legacy"
+) -> World:
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
     monkeypatch.setattr(an, "_SLEEP", lambda seconds: None)
@@ -284,10 +301,13 @@ def world(tmp_path: Path, monkeypatch) -> World:
     subprocess.run(["git", "init", "-q", "-b", "master", str(seed)], check=True)
     _git(seed, "config", "user.email", "t@e.st")
     _git(seed, "config", "user.name", "test")
-    (seed / BUNDLE).mkdir()
-    for fname in NODES:
-        node = fname.rsplit(".", 1)[0].split("-", 1)[1]
-        (seed / BUNDLE / fname).write_text(_node_text(node), encoding="utf-8")
+    if seed_nodes:
+        (seed / BUNDLE).mkdir()
+        for fname in NODES:
+            node = fname.rsplit(".", 1)[0].split("-", 1)[1]
+            (seed / BUNDLE / fname).write_text(_node_text(node), encoding="utf-8")
+    else:
+        (seed / "README.md").write_text("alpha\n", encoding="utf-8")
     _git(seed, "add", "-A")
     _git(seed, "commit", "-qm", "bundle")
     _git(seed, "remote", "add", "origin", str(origin))
@@ -312,6 +332,7 @@ def world(tmp_path: Path, monkeypatch) -> World:
         bundle_dir=BUNDLE,
         profile="profiles/team-exp.yaml",
         run_id="r-approve",
+        authoring=authoring,
     )
     state.base_ref = "master"
     rs.save(state)
@@ -2949,3 +2970,266 @@ def test_no_module_reads_the_allowlist_from_the_environment() -> None:
             if reads_env:
                 hits.add(path.name)
     assert hits == {"approval_facts.py"}, hits
+
+
+# --- Волны: заявка над байтами ветки волны (sequential-node-approval S2/S4) --
+
+
+def authored_branch(
+    world: World, wave: int, files: dict[str, str], *, reopen: int = 0
+) -> str:
+    """Ветка волны (1-based) от base с авторскими байтами; → SHA коммита.
+
+    Имя — как у раннера (S9): `spec/<ws>-behaviour-w<k>`, при переоткрытии
+    `…-w<k>-r<n>`. Ветка пушится: `source_sha` заявки обязан быть доступен
+    и другому клону."""
+    branch = f"spec/{WS_ID}-behaviour-w{wave}" + (f"-r{reopen}" if reopen else "")
+    _git(world.target, "switch", "-q", "-C", branch, "master")
+    for fname, text in files.items():
+        path = world.target / BUNDLE / fname
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    _git(world.target, "add", "-A")
+    _git(world.target, "commit", "-qm", f"author wave {wave}")
+    _git(world.target, "push", "-q", "-u", "origin", branch)
+    sha = _git(world.target, "rev-parse", "HEAD")
+    _git(world.target, "switch", "-q", "master")
+    return sha
+
+
+def drive_wave(world: World, wave: int, files: dict[str, str]) -> str:
+    """Волна целиком: авторская ветка → candidate → человеческий мерж →
+    finalize агентом; → ключ заявки."""
+    sha = authored_branch(world, wave, files)
+    nodes = [bundle_dag.node_id(f) for f in files]
+    outcome = an.propose_from_source(world.state, world.ops, nodes, sha)
+    assert outcome.request is not None
+    op = world.state.ops[outcome.request]
+    merge_pr(world, op["candidate_pr"])
+    an.approve_node(world.state, world.ops, nodes[0])
+    world.sync()
+    assert world.state.ops[outcome.request]["status"] == al.STATUS_COMPLETED
+    return outcome.request
+
+
+def test_w1_candidate_carries_authored_bytes_from_source_sha(
+    waves_world: World,
+) -> None:
+    w = waves_world
+    sha = authored_branch(
+        w, 1, {"00-charter.md": _node_text("charter", body="Хартия v1.")}
+    )
+    outcome = an.propose_from_source(w.state, w.ops, ["charter"], sha)
+    key, op = only_request(w)
+    assert outcome.request == key
+    assert op["source_sha"] == sha and op["nodes"] == ["charter"]
+    branch = w.forge.prs[op["candidate_pr"]]["branch"]
+    text = _show(w.target, f"origin/{branch}:{BUNDLE}/00-charter.md")
+    assert "Хартия v1." in text and "status: approval_pending" in text
+    assert split_frontmatter(text)[0]["version"] == 2
+    assert f"run-id: {w.state.run_id}" in w.forge.prs[op["candidate_pr"]]["body"]
+    merge_pr(w, op["candidate_pr"])
+    an.approve_node(w.state, w.ops, "charter")  # finalize агентом
+    w.sync()
+    meta = w.base_meta("00-charter.md")
+    assert meta["status"] == na.STATUS_APPROVED and meta["approved_by"] == HUMAN
+    assert w.state.ops[key]["status"] == al.STATUS_COMPLETED
+
+
+def test_w2_pins_the_approved_charter_from_base(waves_world: World) -> None:
+    w = waves_world
+    drive_wave(w, 1, {"00-charter.md": _node_text("charter")})
+    charter_blob = _blob(w, "00-charter.md")
+    drive_wave(w, 2, {"10-requirements.md": _node_text("requirements")})
+    meta = w.base_meta("10-requirements.md")
+    assert meta["status"] == na.STATUS_APPROVED
+    assert meta["upstream_hashes"] == {"charter": charter_blob}
+    assert w.base_meta("00-charter.md")["status"] == na.STATUS_APPROVED
+    resolved = bundle_inputs.direct_blobs(
+        w.state, w.ops, bundle_dag.BUNDLE_DAG, "requirements", "master"
+    )
+    assert na.node_debt(
+        "requirements", w.base_text("10-requirements.md"), resolved.value or {}
+    ) is None
+
+
+def test_w1_candidate_carries_the_discovery_source_layer(
+    waves_world: World,
+) -> None:
+    """W1 несёт и source-слой (S2): прямой вход charter едет из `source_sha`,
+    пин — по его байтам, и после мержа base содержит источник."""
+    w = waves_world
+    source = "discovery source\n"
+    sha = authored_branch(w, 1, {
+        "00-charter.md": _node_text("charter"),
+        "00-discovery/brief.md": source,
+    })
+    blob = _git(w.target, "rev-parse", f"{sha}:{BUNDLE}/00-discovery/brief.md")
+    w.state.brief = {
+        "frame": "customer",
+        "primary": "00-discovery/brief.md",
+        "requirements_source": "00-discovery/brief.md",
+        "source_paths": ["00-discovery/brief.md"],
+        "source_blobs": {"discovery-brief": blob},
+    }
+    rs.save(w.state)
+    outcome = an.propose_from_source(w.state, w.ops, ["charter"], sha)
+    key, op = only_request(w)
+    assert op["upstream_pins"]["charter"] == {"discovery-brief": blob}
+    branch = op["branch"]
+    assert _show(w.target, f"origin/{branch}:{BUNDLE}/00-discovery/brief.md") == source
+    assert f"{BUNDLE}/00-discovery/brief.md" in outcome.changed
+    merge_pr(w, op["candidate_pr"])
+    an.approve_node(w.state, w.ops, "charter")
+    w.sync()
+    assert w.base_meta("00-charter.md")["upstream_hashes"] == {
+        "discovery-brief": blob
+    }
+    assert w.state.ops[key]["status"] == al.STATUS_COMPLETED
+
+
+def test_composition_prefix_rule_accepts_reopen_and_stale_reapproval(
+    waves_world: World,
+) -> None:
+    """Переоткрытие requirements после W3 (S4, S11): candidate над новыми
+    байтами с `source_sha`; каскад `stale` — по существующему behaviour-spec,
+    отсутствующие design/acceptance пропущены (S4б); затем переодобрение
+    behaviour-spec БЕЗ `source_sha` (байты из base) — правило префикса
+    принимает base уровней ≤ 2; байты нижнего узла не переписаны (D2)."""
+    w = waves_world
+    drive_wave(w, 1, {"00-charter.md": _node_text("charter")})
+    drive_wave(w, 2, {"10-requirements.md": _node_text("requirements")})
+    drive_wave(w, 3, {"15-behaviour-spec.md": _node_text("behaviour-spec")})
+    before = w.base_text("15-behaviour-spec.md")
+
+    sha = authored_branch(
+        w, 2, {"10-requirements.md": _node_text("requirements", body="v2")},
+        reopen=1,
+    )
+    outcome = an.propose_from_source(w.state, w.ops, ["requirements"], sha)
+    key, op = _request_over(w, "requirements")
+    assert outcome.request == key and op["source_sha"] == sha
+    branch = op["branch"]
+    req = split_frontmatter(_show(w.target, f"origin/{branch}:{BUNDLE}/10-requirements.md"))[0]
+    assert req["version"] == 3, "max(version в base, version в source) + 1"
+    stale = split_frontmatter(_show(w.target, f"origin/{branch}:{BUNDLE}/15-behaviour-spec.md"))[0]
+    assert stale["status"] == na.STATUS_STALE
+    merge_pr(w, op["candidate_pr"])
+    an.approve_node(w.state, w.ops, "requirements")
+    w.sync()
+    assert w.base_meta("10-requirements.md")["status"] == na.STATUS_APPROVED
+    assert w.base_meta("15-behaviour-spec.md")["status"] == na.STATUS_STALE
+    _, after_body = split_frontmatter(w.base_text("15-behaviour-spec.md"))
+    assert after_body == split_frontmatter(before)[1], "нижний узел не переписан (D2)"
+
+    # Переодобрение stale уровня — по base, без source_sha (S4).
+    second = an.approve_node(w.state, w.ops, "behaviour-spec")
+    key2, op2 = _request_over(w, "behaviour-spec")
+    assert second.request == key2 and op2["source_sha"] is None
+    assert op2["upstream_pins"]["behaviour-spec"] == {
+        "requirements": _blob(w, "10-requirements.md")
+    }
+    merge_pr(w, op2["candidate_pr"])
+    an.approve_node(w.state, w.ops, "behaviour-spec")
+    w.sync()
+    assert w.base_meta("15-behaviour-spec.md")["status"] == na.STATUS_APPROVED
+    assert split_frontmatter(w.base_text("15-behaviour-spec.md"))[1] == \
+        split_frontmatter(before)[1]
+
+
+def test_missing_lower_nodes_keep_read_dag_state_unresolved(
+    waves_world: World,
+) -> None:
+    """S4в: неполный base — `unresolved`, гейт доставки не проходим."""
+    w = waves_world
+    drive_wave(w, 1, {"00-charter.md": _node_text("charter")})
+    dag_state = an.read_dag_state(w.state, w.ops, bundle_dag.BUNDLE_DAG)
+    assert dag_state.evidence is None and dag_state.unresolved
+
+
+def test_wave_over_unapproved_upstream_creates_no_request(
+    waves_world: World,
+) -> None:
+    """Charter вынесен, но не вмержен — requirements не заводится (S4г)."""
+    w = waves_world
+    sha1 = authored_branch(w, 1, {"00-charter.md": _node_text("charter")})
+    an.propose_from_source(w.state, w.ops, ["charter"], sha1)
+    sha2 = authored_branch(w, 2, {"10-requirements.md": _node_text("requirements")})
+    with pytest.raises(RuntimeError):
+        an.propose_from_source(w.state, w.ops, ["requirements"], sha2)
+    assert len(al.requests(w.state)) == 1
+
+
+def test_wave_refuses_dependent_levels_in_one_candidate(
+    waves_world: World,
+) -> None:
+    w = waves_world
+    sha = authored_branch(w, 1, {
+        "00-charter.md": _node_text("charter"),
+        "10-requirements.md": _node_text("requirements"),
+    })
+    with pytest.raises(RuntimeError, match="зависимые уровни"):
+        an.propose_from_source(w.state, w.ops, ["charter", "requirements"], sha)
+    assert al.requests(w.state) == []
+
+
+def test_wave_refuses_reopened_pr_of_a_terminal_request(
+    waves_world: World,
+) -> None:
+    w = waves_world
+    key = drive_wave(w, 1, {"00-charter.md": _node_text("charter")})
+    w.forge.prs[w.state.ops[key]["candidate_pr"]]["state"] = "OPEN"
+    sha = authored_branch(w, 1, {"00-charter.md": _node_text("charter", body="v2")}, reopen=1)
+    with pytest.raises(RuntimeError, match="переоткрыт"):
+        an.propose_from_source(w.state, w.ops, ["charter"], sha)
+    assert len(al.requests(w.state)) == 1
+
+
+def test_wave_refuses_a_second_request_over_a_live_one(
+    waves_world: World,
+) -> None:
+    w = waves_world
+    sha = authored_branch(w, 1, {"00-charter.md": _node_text("charter")})
+    an.propose_from_source(w.state, w.ops, ["charter"], sha)
+    with pytest.raises(RuntimeError, match="живая заявка"):
+        an.propose_from_source(w.state, w.ops, ["charter"], sha)
+    assert len(al.requests(w.state)) == 1
+
+
+def test_wave_refuses_unreachable_source_sha_without_writes(
+    waves_world: World,
+) -> None:
+    w = waves_world
+    with pytest.raises(RuntimeError, match="факт не установлен"):
+        an.propose_from_source(w.state, w.ops, ["charter"], "c" * 40)
+    assert al.requests(w.state) == []
+
+
+def test_wave_with_push_deferred_commits_but_creates_no_pr(
+    waves_world: World,
+) -> None:
+    """`push=False` (S7, адаптер раннера): ветка приведена к снимку и
+    `head_sha` записан, PR не создан; повторная публикация создаёт PR по
+    записанной голове."""
+    w = waves_world
+    sha = authored_branch(w, 1, {"00-charter.md": _node_text("charter")})
+    outcome = an.propose_from_source(
+        w.state, w.ops, ["charter"], sha, push=False
+    )
+    key, op = only_request(w)
+    assert outcome.request == key and op["head_sha"] and op["candidate_pr"] is None
+    assert w.forge.prs == {} and w.forge.head_of(op["branch"]) is None
+    assert _git(w.target, "rev-parse", "HEAD") == op["head_sha"]
+    second = an.approve_node(w.state, w.ops, "charter")
+    op = w.state.ops[key]
+    assert second.request == key and op["candidate_pr"] in w.forge.prs
+    assert w.forge.head_of(op["branch"]) == op["head_sha"]
+
+
+def test_legacy_mode_still_requires_the_full_composition(world: World) -> None:
+    """Режим состава переключает `state.authoring`, не `source_sha` (S4)."""
+    (world.target / BUNDLE / "30-decomposition.md").unlink()
+    _git(world.target, "commit", "-qam", "drop terminal node")
+    _git(world.target, "push", "-q", "origin", "master")
+    with pytest.raises(RuntimeError, match="не совпадает с заявленным"):
+        approve(world, "charter")
