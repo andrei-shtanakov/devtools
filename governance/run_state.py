@@ -268,9 +268,14 @@ def op_status(state: RunState, key: str) -> str:
     return "new" if op is None else op["status"]
 
 
-def op_start(state: RunState, key: str) -> None:
-    """Помечает операцию `started` и сохраняет ДО эффекта (write-ahead, §4)."""
-    state.ops[key] = {"status": "started"}
+def op_start(state: RunState, key: str, **fields: object) -> None:
+    """Помечает операцию `started` и сохраняет ДО эффекта (write-ahead, §4).
+
+    `fields` — то, что обязано пережить падение между записью и эффектом
+    (ключ заявки волны в `candidate-<w>`, ревью #343 R2): resume читает
+    их из записи, а не восстанавливает по косвенным признакам.
+    """
+    state.ops[key] = {"status": "started", **fields}
     save(state)
 
 

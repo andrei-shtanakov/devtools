@@ -180,6 +180,10 @@ class Ops(Protocol):
 
     def pr_reviews(self, repo_slug: str, pr: int) -> list[dict] | None: ...
 
+    def publish_review(
+        self, repo_slug: str, pr: int, *, event: str, body: str, marker: str
+    ) -> bool: ...
+
     def merge(
         self, repo_name: str, pr: int, sha: str, base: str | None = None
     ) -> int: ...
@@ -1261,6 +1265,29 @@ class RealOps:
             except json.JSONDecodeError:
                 return None
         return found
+
+    def publish_review(
+        self, repo_slug: str, pr: int, *, event: str, body: str, marker: str
+    ) -> bool:
+        """Опубликовать ревью PR от учётки ревью-контура (профиль
+        `REVIEW_GH_CONFIG_DIR`, как `review-pr.sh`); True — опубликовано.
+
+        Тело ОБЯЗАНО нести маркер `<!-- <marker> … -->`: немаркированное
+        ревью неотличимо от человеческого, и повтор публикации не смог бы
+        опознать своё (edge-check D16). Отсутствие маркера — ошибка
+        вызывающего, не сети: ValueError, не False.
+        """
+        if f"<!-- {marker} " not in body:
+            raise ValueError(f"тело ревью без маркера {marker!r}")
+        env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
+        done = subprocess.run(
+            ["gh", "api", f"repos/{repo_slug}/pulls/{pr}/reviews",
+             "-f", f"event={event}", "-f", f"body={body}"],
+            capture_output=True, text=True, env=env,
+        )
+        if done.returncode != 0:
+            print(f"publish_review: rc={done.returncode}: {done.stderr.strip()}")
+        return done.returncode == 0
 
     def close_pr(self, repo_slug: str, pr: int, comment: str) -> bool:
         """`gh pr close --comment` под профилем ai-prosto; rc0->True.

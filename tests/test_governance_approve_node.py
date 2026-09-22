@@ -124,6 +124,9 @@ class Forge:
     #: Источник политики подписи (спека approval-policy): версия по пути и
     #: тексты по SHA; `mute` с ключами "policy_version"/"policy_file" даёт
     #: UNAVAILABLE. Подмена текста под тем же SHA моделирует «прочитано не то».
+    #: `Ops.review` (аттестация finalize-PR на resume волны, S8).
+    review_exit: int = 0
+    review_calls: list[int] = field(default_factory=list)
     policy_sha: str | None = "p" * 40
     policy_files: dict[str, str] = field(default_factory=lambda: {
         "p" * 40: f"AUTHORIZED_APPROVER_ACCOUNTS={HUMAN}\n",
@@ -223,6 +226,34 @@ class Ops(RealOps):
         if "pr_reviews" in self.forge.mute:
             return None
         return list(self.forge.reviews.get(pr, self.forge.default_reviews))
+
+    def review(self, repo_name: str, pr: int) -> int:
+        """`review-pr.sh` стенда: код из форджи, без прибора; на 0 —
+        scope-аттестация опубликована (одобряющее ревью AGENT)."""
+        self.forge.review_calls.append(pr)
+        if self.forge.review_exit == 0:
+            self.forge.reviews.setdefault(pr, []).append(
+                {"login": AGENT, "state": "APPROVED"}
+            )
+        return self.forge.review_exit
+
+    def publish_review(
+        self, repo_slug: str, pr: int, *, event: str, body: str, marker: str
+    ) -> bool:
+        """Публикация ревью ревью-контуром: запись в форджу от AGENT."""
+        assert f"<!-- {marker} " in body
+        if "publish_review" in self.forge.mute:
+            return False
+        state = {"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}[event]
+        self.forge.reviews.setdefault(pr, list(self.forge.default_reviews))
+        self.forge.reviews[pr].append({"login": AGENT, "state": state, "body": body})
+        return True
+
+    def latest_review_body(self, repo_slug: str, pr: int) -> str | None:
+        bodies = [
+            r.get("body") for r in self.forge.reviews.get(pr, []) if r.get("login") == AGENT
+        ]
+        return bodies[-1] if bodies else None
 
     def merge(
         self, repo_name: str, pr: int, sha: str, base: str | None = None
@@ -3233,3 +3264,186 @@ def test_legacy_mode_still_requires_the_full_composition(world: World) -> None:
     _git(world.target, "push", "-q", "origin", "master")
     with pytest.raises(RuntimeError, match="не совпадает с заявленным"):
         approve(world, "charter")
+
+
+# --- Адаптер публикации edge-check (срез 3, S7) ----------------------------
+
+
+def _wave_records(head_note: str = "") -> dict[tuple[str, str], dict]:
+    base = {"check_identity": "abc123" * 10, "subject": [{"role": "subject",
+            "path": "00-charter.md", "sha256": "f" * 64}], "findings": [],
+            "absence": [], "bases": [], "node": "charter", "wave": 1}
+    return {
+        ("charter", "charter-vs-customer-brief"): {
+            **base, "edge": "charter-vs-customer-brief", "verdict": "PASS",
+        },
+        ("charter", "charter-vs-engineer-brief"): {
+            **base, "edge": "charter-vs-engineer-brief", "verdict": "N/A",
+            "absence": [{"path": "00-discovery/engineer-brief.absent",
+                         "rule_id": "R0-no-engineer-brief"}],
+        },
+    }
+
+
+def _published_bodies(world: World, pr: int) -> list[str]:
+    return [r["body"] for r in world.forge.reviews.get(pr, []) if "body" in r]
+
+
+def test_publish_wave_adds_evidence_creates_pr_and_approving_review(
+    waves_world: World,
+) -> None:
+    from governance.edge_check import publish as pub
+
+    w = waves_world
+    sha = authored_branch(w, 1, {"00-charter.md": _node_text("charter")})
+    outcome = an.propose_from_source(w.state, w.ops, ["charter"], sha, push=False)
+    key = outcome.request
+    snapshot_head = w.state.ops[key]["head_sha"]
+    w.forge.default_reviews = []          # свежий candidate: ревью нет
+    assert pub.publish_wave(w.state, w.ops, key, _wave_records()) == 0
+    op = w.state.ops[key]
+    assert op["head_sha"] != snapshot_head, "head_sha перезаписан на evidence-коммит"
+    assert w.forge.head_of(op["branch"]) == op["head_sha"]
+    files = _git(w.target, "show", "--name-only", "--format=", op["head_sha"]).splitlines()
+    assert sorted(files) == [
+        "evidence/edge-check/charter--charter-vs-customer-brief.json",
+        "evidence/edge-check/charter--charter-vs-engineer-brief.json",
+    ]
+    evidence = _show(w.target, f"{op['head_sha']}:evidence/edge-check/charter--charter-vs-customer-brief.json")
+    assert '"verdict": "PASS"' in evidence
+    pr = op["candidate_pr"]
+    assert pr in w.forge.prs and w.forge.prs[pr]["label"] == an.HUMAN_MERGE_LABEL
+    (body,) = _published_bodies(w, pr)
+    assert f"<!-- {pub.EDGE_MARKER} head={op['head_sha']} -->" in body
+    assert "charter-vs-engineer-brief | N/A" in body
+    assert w.forge.reviews[pr][-1]["state"] == "APPROVED"
+    # Идемпотентность: повтор (падение между push и ревью) — ни коммита, ни
+    # второго ревью.
+    assert pub.publish_wave(w.state, w.ops, key, _wave_records()) == 0
+    assert w.state.ops[key]["head_sha"] == op["head_sha"]
+    assert len(_published_bodies(w, pr)) == 1
+    # Дальше — обычный путь §I12: человек мержит, finalize агентом (finalize-PR
+    # получает scope-аттестацию — дефолт стенда).
+    w.forge.default_reviews = [{"login": AGENT, "state": "APPROVED"}]
+    merge_pr(w, pr)
+    an.approve_node(w.state, w.ops, "charter")
+    w.sync()
+    assert w.base_meta("00-charter.md")["status"] == na.STATUS_APPROVED
+    assert (w.target / "evidence/edge-check/charter--charter-vs-customer-brief.json").exists()
+
+
+def test_publish_wave_refuses_paths_outside_the_surface(waves_world: World) -> None:
+    from governance.edge_check import publish as pub
+
+    w = waves_world
+    sha = authored_branch(w, 1, {"00-charter.md": _node_text("charter")})
+    key = an.propose_from_source(w.state, w.ops, ["charter"], sha, push=False).request
+    op = w.state.ops[key]
+    _git(w.target, "switch", "-q", op["branch"])
+    (w.target / "README.md").write_text("tampered\n", encoding="utf-8")
+    _git(w.target, "commit", "-qam", "foreign path")
+    al.record_head_sha(w.state, key, _git(w.target, "rev-parse", "HEAD"))
+    with pytest.raises(RuntimeError, match="вне поверхности"):
+        pub.publish_wave(w.state, w.ops, key, _wave_records())
+    assert w.forge.prs == {}, "PR не создан"
+
+
+def test_publish_wave_codes_for_human_changes_head_move_and_verdict(
+    waves_world: World,
+) -> None:
+    from governance.edge_check import publish as pub
+
+    w = waves_world
+    sha = authored_branch(w, 1, {"00-charter.md": _node_text("charter")})
+    key = an.propose_from_source(w.state, w.ops, ["charter"], sha, push=False).request
+    failed = _wave_records()
+    failed[("charter", "charter-vs-customer-brief")]["verdict"] = "FAIL"
+    assert pub.publish_wave(w.state, w.ops, key, failed) == 1
+    assert w.forge.prs == {}, "не-PASS: до PR дело не доходит"
+
+    w.forge.default_reviews = []
+    assert pub.publish_wave(w.state, w.ops, key, _wave_records()) == 0
+    pr = w.state.ops[key]["candidate_pr"]
+    # Человек запросил правки — не гасится, второго APPROVE нет.
+    w.forge.reviews[pr].append({"login": HUMAN, "state": "CHANGES_REQUESTED"})
+    assert pub.publish_wave(w.state, w.ops, key, _wave_records()) == 1
+    assert len(_published_bodies(w, pr)) == 1
+    w.forge.reviews[pr].pop()
+    # Ревью не получить — факт не установлен (3), заявка жива, ничего нового.
+    w.forge.mute.add("pr_reviews")
+    assert pub.publish_wave(w.state, w.ops, key, _wave_records()) == 3
+    w.forge.mute.discard("pr_reviews")
+    assert al.is_live(w.state.ops[key]) and len(_published_bodies(w, pr)) == 1
+    # Чужой push поверх головы — код 4 ДО push, ничего не публикуется.
+    branch = w.state.ops[key]["branch"]
+    _git(w.human, "fetch", "-q", "origin")
+    _git(w.human, "switch", "-q", "-C", branch, f"origin/{branch}")
+    (w.human / "spec/00-charter.md").write_text("foreign\n", encoding="utf-8")
+    _git(w.human, "commit", "-qam", "foreign push")
+    _git(w.human, "push", "-q", "origin", branch)
+    assert pub.publish_wave(w.state, w.ops, key, _wave_records()) == 4
+    assert len(_published_bodies(w, pr)) == 1
+
+
+# --- Сквозной проход волн (план Task 9, приёмка §6.2) ----------------------
+
+_WAVE_FILES = (
+    {"00-charter.md": _node_text("charter")},
+    {"10-requirements.md": _node_text("requirements")},
+    {"15-behaviour-spec.md": _node_text("behaviour-spec")},
+    {"20-design.md": _node_text("design"), "25-acceptance.md": _node_text("acceptance")},
+    {"30-decomposition.md": _node_text("decomposition")},
+)
+
+
+def test_five_waves_five_human_merges_give_an_approved_dag(
+    waves_world: World,
+) -> None:
+    """Пять волн → пять человеческих мержей candidate → весь DAG честно
+    одобрен (`read_dag_state`), design+acceptance — одной заявкой уровня."""
+    w = waves_world
+    keys = [drive_wave(w, wave, files) for wave, files in enumerate(_WAVE_FILES, 1)]
+    human_merges = [
+        pr for pr, rec in w.forge.prs.items()
+        if rec["state"] == "MERGED" and rec["mergedBy"]["login"] == HUMAN
+    ]
+    assert len(human_merges) == 5
+    assert w.state.ops[keys[3]]["nodes"] == ["design", "acceptance"]
+    dag_state = an.read_dag_state(w.state, w.ops, bundle_dag.BUNDLE_DAG)
+    assert dag_state.evidence is not None and not dag_state.debts
+    assert dag_state.evidence.nodes == bundle_dag.composition(bundle_dag.BUNDLE_DAG)
+    assert bundle_dag.check_bundle_composition(
+        str(w.target), BUNDLE, bundle_dag.BUNDLE_DAG
+    ) == 4, "полный состав — и legacy-режим проверки состава принимает base"
+
+
+def test_wave_finalize_resumes_from_await_finalize_merge(
+    waves_world: World, monkeypatch,
+) -> None:
+    """(а′) падение после `record_merge`: finalize-PR открыт, заявка на
+    шаге AWAIT_FINALIZE_MERGE — `runner._finalize_wave` находит её по
+    ключу из `candidate-<w>` и доводит (аттестация + агентский мерж)."""
+    from governance import runner
+
+    w = waves_world
+    monkeypatch.setattr(rs, "RUNS_ROOT", Path(w.state.target_dir).parent / "runs")
+    sha = authored_branch(w, 1, {"00-charter.md": _node_text("charter")})
+    key = an.propose_from_source(w.state, w.ops, ["charter"], sha).request
+    rs.op_complete(w.state, "candidate-1", request=key,
+                   candidate_pr=w.state.ops[key]["candidate_pr"])
+    w.state.status = "waiting_human_merge"
+    rs.save(w.state)
+    merge_pr(w, w.state.ops[key]["candidate_pr"])
+    # Первый заход: конверт + finalize-PR, агентский мерж отказан (нет ревью).
+    w.forge.default_reviews = []
+    an.approve_node(w.state, w.ops, "charter")
+    op = w.state.ops[key]
+    assert al.next_step(op) is al.Step.AWAIT_FINALIZE_MERGE
+    finalize_pr = op["finalize_pr"]
+    # resume волны: аттестация публикует одобрение, повтор мержит агентом.
+    resumed = runner._finalize_wave(w.state, w.ops, key)
+    assert w.forge.review_calls == [finalize_pr]
+    assert w.state.ops[key]["status"] == al.STATUS_COMPLETED
+    assert resumed.wave == 2, "переход к следующей волне — ровно один"
+    w.sync()
+    assert w.base_meta("00-charter.md")["status"] == na.STATUS_APPROVED

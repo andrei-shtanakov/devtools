@@ -1537,6 +1537,35 @@ def _adopt_or_create_pr(
     return pr
 
 
+# --- Публичный шов для адаптера публикации (edge-check срез 3, S7) --------
+
+
+def switch_to_request(state: RunState, ops: Ops, key: str) -> None:
+    """Встать на ветку заявки на её записанный коммит (для evidence-коммита)."""
+    op = state.ops[key]
+    _switch_to_request_branch(state, ops, op["branch"], op.get("head_sha"))
+
+
+def publish_request(
+    state: RunState,
+    ops: Ops,
+    key: str,
+    *,
+    legacy_bundle: int | None = None,
+) -> ApprovalOutcome:
+    """Довести публикацию заявки: ветка к снимку, push, PR есть (усыновить
+    по записанному `head_sha` либо создать). Идемпотентно."""
+    return _publish_candidate(
+        state, ops, bundle_dag.dag_for(legacy_bundle), key, push=True
+    )
+
+
+def pr_head(state: RunState, ops: Ops, pr: int) -> str | None:
+    """Голова PR по фактам форджи; отказ — `_unresolved` (заявка живёт)."""
+    head = _pr_facts(state, ops, pr).get("headRefOid")
+    return head if isinstance(head, str) and head else None
+
+
 # --- Продвижение живой заявки -------------------------------------------
 
 

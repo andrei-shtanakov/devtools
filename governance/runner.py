@@ -36,7 +36,11 @@ from governance import (
     decomposition_guard,
     design_guard,
 )
+from governance import approval_ledger as al
+from governance import approve_node as an
 from governance import interview as iv
+from governance.edge_check import coordinator as edge_coordinator
+from governance.edge_check import publish as edge_publish
 from governance.edge_check.rules import EdgeCheckError
 from governance.frontmatter import split_frontmatter
 from governance.merge_gate import PrFacts, decide
@@ -581,6 +585,10 @@ def resume(run_id: str, ops: Ops) -> RunState:
             f"run {run_id!r} — merged_unverified навсегда; создайте "
             "verification-run через verify(...)"
         )
+    if _waves(state) and state.status != "completed":
+        resumed = _resume_wave(state, ops)
+        if resumed is not None:
+            return resumed
     if state.status == "waiting_human_merge":
         _reconcile_pr_merged_out_of_band(state, ops)
         return state
@@ -619,6 +627,168 @@ def resume(run_id: str, ops: Ops) -> RunState:
         state.status = "running"
         save(state)
         return advance(state, ops)
+    return advance(state, ops)
+
+
+def _resume_wave(state: RunState, ops: Ops) -> RunState | None:
+    """Resume волнового прогона по СОХРАНЁННОМУ ключу заявки (ревью #343, R3).
+
+    Заявка волны читается из `candidate-<w>` (`request`, write-ahead в
+    `_step_candidate`) — не `live_request_over` (исключает терминальные:
+    падение между `complete_request` и сохранением следующей волны
+    оставило бы resume без заявки) и не «последняя заявка узла» (после
+    `--reopen` у узла история попыток). Запись читается ВКЛЮЧАЯ
+    терминальные статусы:
+
+    - `completed` → волна завершена, ровно один переход к следующей
+      (`_next_wave`), без повторного candidate/review;
+    - `abandoned`/`invalidated` → `stopped_stale`-подобный стоп с причиной:
+      новый candidate — через `--reopen`;
+    - живая без `candidate_pr` / с незавершённым шагом candidate →
+      публикация доигрывается тем же шагом (`advance`);
+    - живая с открытым candidate → стоим (`waiting_human_merge`);
+    - candidate вмержен (или факт мержа уже записан) → `_finalize_wave`.
+
+    Реконсиляция «человек смержил, минуя раннер» здесь же — ключуется на
+    `candidate_pr` заявки, не на `state.pr` (S10), и применяется к любому
+    статусу, у которого заявка волны уже есть. `None` — заявки волны ещё
+    нет: вызывающий идёт обычным путём (сброс op'ов, `advance`).
+    """
+    record = state.ops.get(wave_key(state, "candidate")) or {}
+    request = record.get("request")
+    if request is None:
+        return None
+    op = state.ops.get(request)
+    if op is None:
+        _stop_with_comment(
+            state, ops, "stopped_review",
+            f"волна {state.wave}: заявка {request} записана в "
+            f"{wave_key(state, 'candidate')}, но в леджере её нет — "
+            "восстановить нечем",
+        )
+        return state
+    status = op.get("status")
+    if status == al.STATUS_COMPLETED:
+        return _next_wave(state, ops)
+    if status in al.TERMINAL_STATUSES:
+        _stop_with_comment(
+            state, ops, "stopped_stale",
+            f"волна {state.wave}: заявка {request} терминальна ({status}: "
+            f"{op.get('reason')!r}) — новый candidate заводится через "
+            "--reopen <node>",
+        )
+        return state
+    pr = op.get("candidate_pr")
+    if pr is None or record.get("status") != "completed":
+        # Публикация не дошла до конца (PR нет / ревью не опубликовано):
+        # доигрывает тот же шаг — он идемпотентен и знает свою заявку.
+        state.status = "running"
+        save(state)
+        return advance(state, ops)
+    if not op.get("merged_by"):
+        facts = ops.pr_facts(state.repo_slug, pr)
+        if facts.get("state") == "OPEN":
+            print(
+                f"resume: волна {state.wave} — candidate-PR #{pr} открыт, "
+                "ждём человеческого мержа"
+            )
+            if state.status != "waiting_human_merge":
+                state.status = "waiting_human_merge"
+                save(state)
+            return state
+    return _finalize_wave(state, ops, request)
+
+
+def _finalize_wave(state: RunState, ops: Ops, request: str) -> RunState:
+    """Finalize волны агентом на resume (S8): фаза 2 §I12 → scope-аттестация
+    finalize-PR → повторный approve-node (агентский мерж) → следующая волна.
+
+    Ненулевой код `ops.review` на finalize (6 — stop rule/бюджет, 2 —
+    прибор, доставленный CHANGES_REQUESTED) = «finalize остаётся
+    человеку», не `stopped_review`; отказ форджи на мерже — как сегодня,
+    человеку. Отказ `approve_node` с сохранённой заявкой (`_unresolved`) —
+    `stopped_review` с причиной, повтор resume; терминализация заявки
+    (`invalidated`) — `stopped_stale`, новый candidate через `--reopen`.
+    """
+    node = state.ops[request]["nodes"][0]
+    att_key = wave_key(state, "finalize")
+
+    def _approve() -> bool:
+        try:
+            an.approve_node(state, ops, node)
+        except RuntimeError as exc:
+            op_now = state.ops.get(request) or {}
+            if op_now.get("status") in al.TERMINAL_STATUSES:
+                _stop_with_comment(
+                    state, ops, "stopped_stale",
+                    f"волна {state.wave}: заявка {request} — "
+                    f"{op_now.get('status')}: {exc}. Новый candidate — "
+                    "через --reopen <node>",
+                )
+            else:
+                _stop_with_comment(
+                    state, ops, "stopped_review",
+                    f"волна {state.wave}: finalize заявки {request} не "
+                    f"продвинулся — {exc}",
+                )
+            return False
+        return True
+
+    if not _approve():
+        return state
+    op = state.ops[request]
+    if op["status"] == al.STATUS_COMPLETED:
+        return _next_wave(state, ops)
+    finalize_pr = op.get("finalize_pr")
+    if finalize_pr is None:
+        # Акта мержа candidate ещё нет — ждём человека.
+        if state.status != "waiting_human_merge":
+            state.status = "waiting_human_merge"
+            save(state)
+        return state
+    if op_status(state, att_key) != "completed":
+        _ensure_started(state, att_key)
+        rc = ops.review(state.repo, finalize_pr)
+        op_complete(state, att_key, finalize_pr=finalize_pr, review_exit=rc)
+        if rc != 0:
+            _wave_pause(
+                state, ops, finalize_pr,
+                f"Волна {state.wave}: finalize-PR #{finalize_pr} остаётся "
+                f"человеку — review-pr.sh вернул {rc} (аттестация не "
+                "опубликована). После мержа — resume.",
+            )
+            return state
+    if not _approve():
+        return state
+    op = state.ops[request]
+    if op["status"] == al.STATUS_COMPLETED:
+        return _next_wave(state, ops)
+    _wave_pause(
+        state, ops, finalize_pr,
+        f"Волна {state.wave}: finalize-PR #{finalize_pr} не вмержен агентом "
+        "(см. причину в выводе approve-node) — мерж человеком, затем resume.",
+    )
+    return state
+
+
+def _next_wave(state: RunState, ops: Ops) -> RunState:
+    """Ровно один переход: следующая волна либо S8 после последней.
+
+    После последней волны фиксируется op `merge` — та же метка «весь
+    пред-мержевой конвейер позади, осталась S8», по которой `advance` и
+    `resume` идут только в `_step_s8` (в волнах бандл-PR нет, мержей было
+    пять — по одному на candidate).
+    """
+    total = bundle_dag.wave_count(_wave_dag())
+    if state.wave >= total:
+        if op_status(state, "merge") != "completed":
+            op_complete(state, "merge", merged=True, waves=state.wave)
+        state.status = "running"
+        save(state)
+        return advance(state, ops)
+    state.wave += 1
+    state.status = "running"
+    save(state)
     return advance(state, ops)
 
 
@@ -2454,6 +2624,99 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
     return False
 
 
+def _wave_pause(state: RunState, ops: Ops, pr: int, body: str) -> None:
+    """`waiting_human_merge` волны: статус ДО best-effort комментария в
+    candidate-PR (та же дисциплина, что `_stop_with_comment`)."""
+    state.status = "waiting_human_merge"
+    save(state)
+    try:
+        ops.comment(state.repo_slug, pr, body)
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        print(f"_wave_pause: comment на PR #{pr} не удался: {exc}")
+
+
+def _step_candidate(state: RunState, ops: Ops) -> bool:
+    """Candidate волны (S7/S10, edge-check срез 3): заявка §I12 над байтами
+    ветки волны, evidence-коммит, PR, одобряющее ревью edge-check, пауза.
+
+    Порядок (ревью #343, R2): ветка волны пушится (`push-<w>` — `source_sha`
+    нужен другому клону для восстановления S13); `propose_from_source`
+    собирает заявку по всем узлам уровня и приводит её ветку к снимку БЕЗ
+    push и PR; ключ заявки пишется в `candidate-<w>` write-ahead — resume
+    (Task 9) читает его из записи, включая терминальные статусы заявки;
+    `publish_wave` докладывает evidence, пушит, создаёт/усыновляет PR и
+    публикует ревью; `base_ref` — из фактов СОЗДАННОГО PR (в волнах его
+    больше никто не ставит). Коды 1/3/4 — `stopped_review` с причиной;
+    заявка остаётся живой, повтор публикации идемпотентен.
+    """
+    if not _waves(state):
+        return True
+    key = wave_key(state, "candidate")
+    if op_status(state, key) == "completed":
+        return True
+    push_key = wave_key(state, "push")
+    if op_status(state, push_key) != "completed":
+        _ensure_started(state, push_key)
+        ops.push_branch(state.target_dir, state.branch)
+        op_complete(state, push_key, branch=state.branch)
+    if op_status(state, key) == "new":
+        source_sha = ops.rev_parse(state.target_dir, state.branch)
+        if source_sha is None:
+            _stop_with_comment(
+                state, ops, "stopped_review",
+                f"волна {state.wave}: ветка {state.branch} не разрешается в "
+                "коммит — candidate не собран",
+            )
+            return False
+        nodes = [kind for _, kind, _ in _author_steps_for(state)]
+        outcome = an.propose_from_source(
+            state, ops, nodes, source_sha, push=False
+        )
+        op_start(state, key, request=outcome.request, source_sha=source_sha)
+    request = state.ops[key]["request"]
+    records = edge_coordinator.load_level_records(run_dir(state.run_id), state.wave)
+    try:
+        code = edge_publish.publish_wave(state, ops, request, records)
+    except RuntimeError as exc:
+        _stop_with_comment(
+            state, ops, "stopped_review",
+            f"волна {state.wave}: публикация candidate заявки {request} не "
+            f"состоялась — {exc}",
+        )
+        return False
+    if code != edge_publish.CODE_OK:
+        reason = {
+            edge_publish.CODE_CHANGES: "вердикт edge-check не PASS либо у "
+            "человека действующее CHANGES_REQUESTED",
+            edge_publish.CODE_UNRESOLVED: "факт не установлен (ревью/сеть) — "
+            "повторите resume",
+            edge_publish.CODE_HEAD_MOVED: "голова candidate-PR не равна "
+            "записанной заявкой (чужой push) — разберитесь с PR вручную",
+        }.get(code, f"код {code}")
+        _stop_with_comment(
+            state, ops, "stopped_review",
+            f"волна {state.wave}: candidate заявки {request} не опубликован — "
+            f"{reason}",
+        )
+        return False
+    pr = state.ops[request]["candidate_pr"]
+    facts = ops.pr_facts(state.repo_slug, pr)
+    state.base_ref = facts.get("baseRefName") or "master"
+    op_complete(
+        state, key, request=request, candidate_pr=pr,
+        source_sha=state.ops[key].get("source_sha"),
+    )
+    _wave_pause(
+        state, ops, pr,
+        f"Волна {state.wave}/{bundle_dag.wave_count(_wave_dag())} прогона "
+        f"`{state.run_id}`: candidate-PR #{pr} над узлами "
+        f"{', '.join(state.ops[request]['nodes'])} ждёт человеческого мержа "
+        "(мерж = акт одобрения, §I12). После мержа — resume: finalize "
+        "агентом и следующая волна.",
+    )
+    return False
+
+
 def _step_push(state: RunState, ops: Ops) -> bool:
     """S5a: push черновой ветки."""
     key = "push"
@@ -2972,6 +3235,7 @@ _WAVE_STEPS = (
     _step_commit,
     _step_gate,
     _step_edge,
+    _step_candidate,
 )
 
 

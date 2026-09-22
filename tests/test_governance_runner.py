@@ -176,6 +176,18 @@ class FakeOps:
     edge_results: dict[str, str] = field(default_factory=dict)
     edge_calls: list[tuple[int, str]] = field(default_factory=list)
 
+    published_reviews: list[tuple[int, str, str]] = field(default_factory=list)
+    reviews: list[dict] | None = field(default_factory=list)
+
+    def publish_review(self, repo_slug, pr, *, event, body, marker) -> bool:
+        self.calls.append(("publish_review", pr, event))
+        self.published_reviews.append((pr, event, body))
+        return True
+
+    def pr_reviews(self, repo_slug: str, pr: int) -> list[dict] | None:
+        self.calls.append(("pr_reviews", pr))
+        return self.reviews
+
     def switch_to(self, target_dir: str, branch: str, start_point: str) -> None:
         self.calls.append(("switch_to", branch, start_point))
         self.switched.append((branch, start_point))
@@ -7367,13 +7379,14 @@ def test_waves_run_authors_only_level_zero_and_stops_at_edge_fail(
 
 
 def test_waves_gate_uses_projected_profile_with_siblings(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    ops = FakeOps()
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
         **_waves_kwargs(tmp_path, "r-w-gate", ops), authoring="waves"
     )
-    assert state.status == "running", (rs.run_dir("r-w-gate") / "gate-findings.txt").read_text() if (rs.run_dir("r-w-gate") / "gate-findings.txt").exists() else ""
+    assert state.status == "waiting_human_merge"
     gate_calls = [c for c in ops.calls if c[0] == "gate_check_candidate"]
     assert len(gate_calls) == 1
     projected = rs.run_dir("r-w-gate") / "profile-w1" / "team-exp.yaml"
@@ -7390,21 +7403,25 @@ def test_waves_gate_uses_projected_profile_with_siblings(
     }
 
 
-def test_waves_local_completeness_is_by_level(tmp_path: Path, runs_root) -> None:
+def test_waves_local_completeness_is_by_level(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
     """GC-COMPLETENESS по полному профилю остановил бы W1 за отсутствующий
     design; в волнах required — только узлы уровней ≤ wave−1."""
-    ops = FakeOps()
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
         **_waves_kwargs(tmp_path, "r-w-compl", ops), authoring="waves"
     )
-    assert state.status != "stopped_gate"
+    assert state.status == "waiting_human_merge"
     assert not (rs.run_dir("r-w-compl") / "gate-findings.txt").exists()
 
 
 def test_waves_refuse_to_author_level_when_upstream_not_approved(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    ops = FakeOps()
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
         **_waves_kwargs(tmp_path, "r-w-up", ops), authoring="waves"
     )
@@ -7433,19 +7450,24 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(
     resumed = runner.resume("r-w-up", ops)
     assert ops.authored == ["charter", "requirements"]
     assert resumed.ops["commit-2"]["status"] == "completed"
+    assert resumed.status == "waiting_human_merge" and resumed.wave == 2
 
 
 def test_waves_stopped_gate_resume_resets_only_the_wave_range(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    ops = FakeOps(gate_candidate=[(1, "error GC-X: красный\n")])
+    ops = FakeOps(
+        gate_candidate=[(1, "error GC-X: красный\n")],
+        facts={"state": "OPEN", "baseRefName": "master"},
+    )
+    _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
         **_waves_kwargs(tmp_path, "r-w-gate-stop", ops), authoring="waves"
     )
     assert state.status == "stopped_gate"
     assert runner.reset_ops_for(state) == ("commit-1", "gate-candidate-1", "edge-1")
     resumed = runner.resume("r-w-gate-stop", ops)
-    assert resumed.status == "running"
+    assert resumed.status == "waiting_human_merge"
     assert resumed.ops["branch-1"]["status"] == "completed"
     assert resumed.ops["gate-candidate-1"]["status"] == "completed"
     assert resumed.ops["edge-1"]["status"] == "completed"
@@ -7476,3 +7498,233 @@ def test_legacy_reset_table_is_unchanged_by_waves(tmp_path: Path, runs_root) -> 
     state.status = "stopped_gate"
     assert runner.reset_ops_for(state) == runner._BUNDLE_EDIT_RESET_OPS
     assert runner._STOPPED_RESET_OPS["stopped_stale"] == ()
+
+
+def _fake_wave_adapters(monkeypatch, ops: FakeOps, *, code: int = 0) -> list[str]:
+    """Шов раннера: заявка и публикация — реальный git-стенд approve_node;
+    здесь проверяется ОРКЕСТРАЦИЯ (порядок вызовов, запись ключа, пауза)."""
+    from governance import approval_ledger as al
+
+    journal: list[str] = []
+
+    def propose(state, ops_, nodes, source_sha, *, push=True, legacy_bundle=None):
+        assert push is False, "PR ещё НЕТ: push и PR — у адаптера (S7)"
+        journal.append(f"propose:{','.join(nodes)}:{source_sha}")
+        ops.calls.append(("propose_from_source", tuple(nodes), source_sha))
+        step = bundle_dag.levels(bundle_dag.BUNDLE_DAG)[nodes[0]]
+        key = al.start_request(
+            state, state.ws_id, 1, step, al.next_attempt(state, 1, step), list(nodes),
+            {n: "h" for n in nodes}, {n: {} for n in nodes}, source_sha=source_sha,
+        )
+        al.record_head_sha(state, key, "c0ffee" * 6 + "abcd")
+        return runner.an.ApprovalOutcome("ok", request=key)
+
+    def publish(state, ops_, key, records, *, legacy_bundle=None):
+        journal.append(f"publish:{key}:{sorted(records)}")
+        ops.calls.append(("publish_wave", key))
+        if code == 0:
+            al.record_candidate_pr(state, key, 777)
+        return code
+
+    monkeypatch.setattr(runner.an, "propose_from_source", propose)
+    monkeypatch.setattr(runner.edge_publish, "publish_wave", publish)
+    return journal
+
+
+def test_waves_candidate_step_pauses_on_the_wave_pr(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "main"})
+    journal = _fake_wave_adapters(monkeypatch, ops)
+    state = runner.start(
+        **_waves_kwargs(tmp_path, "r-w-cand", ops), authoring="waves"
+    )
+    assert state.status == "waiting_human_merge" and state.wave == 1
+    assert journal[0].startswith("propose:charter:fakehead")
+    assert journal[1].startswith("publish:approve-1-0-1:")
+    names = [c[0] for c in ops.calls]
+    assert names.index("push_branch") < names.index("propose_from_source")
+    assert names.index("publish_wave") < names.index("pr_facts")
+    assert ("push_branch", "spec/WS-1-behaviour-w1") in ops.calls
+    assert ("pr_facts", 777) in ops.calls and ("pr_facts", None) not in ops.calls
+    assert state.base_ref == "main", "base_ref — из фактов созданного PR"
+    cand = state.ops["candidate-1"]
+    assert cand["status"] == "completed" and cand["request"] == "approve-1-0-1"
+    assert cand["candidate_pr"] == 777 and cand["source_sha"] == "fakehead"
+    assert state.ops["push-1"]["status"] == "completed"
+    assert state.pr is None, "бандл-PR в волнах нет"
+    assert "candidate-PR #777" in ops.comments[-1] and "Волна 1/5" in ops.comments[-1]
+    assert ("comment", 777, ops.comments[-1]) in ops.calls
+    assert rs.load("r-w-cand").status == "waiting_human_merge"
+
+
+def test_waves_candidate_step_records_request_before_publishing(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Ключ заявки — write-ahead в `candidate-<w>` (R2): падение публикации
+    оставляет запись, повтор публикует ТУ ЖЕ заявку, не заводит вторую."""
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    journal = _fake_wave_adapters(monkeypatch, ops, code=3)
+    state = runner.start(
+        **_waves_kwargs(tmp_path, "r-w-cand-3", ops), authoring="waves"
+    )
+    assert state.status == "stopped_review"
+    assert state.ops["candidate-1"] == {
+        "status": "started", "request": "approve-1-0-1", "source_sha": "fakehead",
+    }
+    reason = (rs.run_dir("r-w-cand-3") / "stop-reason.txt").read_text()
+    assert "approve-1-0-1" in reason and "факт не установлен" in reason
+    assert len([j for j in journal if j.startswith("propose")]) == 1
+
+    journal2 = _fake_wave_adapters(monkeypatch, ops, code=0)
+    resumed = runner.resume("r-w-cand-3", ops)
+    assert resumed.status == "waiting_human_merge"
+    assert [j.split(":")[0] for j in journal2] == ["publish"], "заявка не пересобрана"
+    assert resumed.ops["candidate-1"]["request"] == "approve-1-0-1"
+
+
+# --- Resume волны (план Task 9) --------------------------------------------
+
+
+def _fake_approve_node(monkeypatch, ops: FakeOps, *, merge_on_call: int = 2):
+    """Стенд approve_node: первый вызов — факт мержа + finalize-PR, второй
+    (или `merge_on_call`-й) — заявка `completed`."""
+    from governance import approval_ledger as al
+
+    calls: list[str] = []
+
+    def approve(state, ops_, node, *, legacy_bundle=None):
+        calls.append(node)
+        ops.calls.append(("approve_node", node))
+        key = state.ops[f"candidate-{state.wave}"]["request"]
+        op = state.ops[key]
+        if not op.get("merged_by"):
+            op.update(merged_by="andrei-shtanakov", merged_at="2026-09-22T10:00:00Z",
+                      merge_commit="m" * 40, authorization={"login": "andrei-shtanakov",
+                                                            "policy": "p"})
+            rs.save(state)
+        if op.get("finalize_pr") is None:
+            al.record_finalize_pr(state, key, 800 + state.wave)
+        if len(calls) >= merge_on_call:
+            al.complete_request(state, key)
+        return runner.an.ApprovalOutcome("ok", request=key)
+
+    monkeypatch.setattr(runner.an, "approve_node", approve)
+    return calls
+
+
+def _waiting_wave1(tmp_path, monkeypatch, ops: FakeOps, run_id: str):
+    _fake_wave_adapters(monkeypatch, ops)
+    state = runner.start(**_waves_kwargs(tmp_path, run_id, ops), authoring="waves")
+    assert state.status == "waiting_human_merge" and state.wave == 1
+    return state
+
+
+def test_waves_resume_finalizes_merged_candidate_and_starts_next_wave(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _waiting_wave1(tmp_path, monkeypatch, ops, "r-w-res")
+    # Пока candidate открыт — стоим, approve_node не зовётся.
+    calls = _fake_approve_node(monkeypatch, ops)
+    still = runner.resume("r-w-res", ops)
+    assert still.status == "waiting_human_merge" and calls == []
+    # Человек смержил candidate.
+    ops.facts = {"state": "MERGED", "baseRefName": "master",
+                 "mergedBy": {"login": "andrei-shtanakov"}}
+    ops.base_files = {f"{BUNDLE_DIR}/00-charter.md": _approved("charter")}
+    resumed = runner.resume("r-w-res", ops)
+    assert calls == ["charter", "charter"], "фаза 2 + агентский мерж finalize"
+    assert ("review", 801) in ops.calls, "scope-аттестация finalize-PR"
+    names = [c[0] for c in ops.calls]
+    assert names.index("review") > names.index("approve_node")
+    assert resumed.ops["finalize-1"] == {
+        "status": "completed", "finalize_pr": 801, "review_exit": 0,
+    }
+    assert resumed.wave == 2 and ops.authored == ["charter", "requirements"]
+    assert resumed.status == "waiting_human_merge"
+    assert resumed.ops["candidate-2"]["request"] == "approve-1-1-1"
+    assert resumed.ops["branch-2"]["status"] == "completed"
+    assert ("switch_to", "spec/WS-1-behaviour-w2", "master") in ops.calls
+
+
+def test_waves_resume_after_crash_between_completed_and_next_wave(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """(а‴) заявка `completed`, `state.wave` не продвинут: ровно один
+    переход, ни approve_node, ни review, ни повторного candidate."""
+    from governance import approval_ledger as al
+
+    ops = FakeOps(facts={"state": "MERGED", "baseRefName": "master"})
+    state = _waiting_wave1(tmp_path, monkeypatch, ops, "r-w-crash")
+    key = state.ops["candidate-1"]["request"]
+    state.ops[key].update(merged_by="h", merged_at="t", merge_commit="m" * 40,
+                          authorization={"login": "h", "policy": "p"})
+    al.record_finalize_pr(state, key, 801)
+    al.complete_request(state, key)
+    calls = _fake_approve_node(monkeypatch, ops)
+    before = len(ops.calls)
+    ops.base_files = {f"{BUNDLE_DIR}/00-charter.md": _approved("charter")}
+    resumed = runner.resume("r-w-crash", ops)
+    assert resumed.wave == 2 and calls == []
+    assert not any(c[0] == "review" for c in ops.calls[before:])
+    assert ops.authored == ["charter", "requirements"]
+    assert resumed.ops["candidate-1"]["request"] == key, "запись волны 1 не тронута"
+
+
+def test_waves_resume_leaves_finalize_to_human_when_attestation_fails(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"}, review_exit=6)
+    _waiting_wave1(tmp_path, monkeypatch, ops, "r-w-att")
+    calls = _fake_approve_node(monkeypatch, ops)
+    ops.facts = {"state": "MERGED", "baseRefName": "master"}
+    resumed = runner.resume("r-w-att", ops)
+    assert calls == ["charter"], "второго approve-node (агентский мерж) нет"
+    assert resumed.status == "waiting_human_merge" and resumed.wave == 1
+    assert "finalize-PR #801 остаётся человеку" in ops.comments[-1]
+    assert ("comment", 801, ops.comments[-1]) in ops.calls
+    assert resumed.ops["finalize-1"]["review_exit"] == 6
+    # Человек смержил finalize → resume: аттестация не повторяется,
+    # approve_node доводит заявку.
+    resumed = runner.resume("r-w-att", ops)
+    assert calls == ["charter", "charter"]
+    assert len([c for c in ops.calls if c[0] == "review"]) == 1
+    assert resumed.wave == 2
+
+
+def test_waves_resume_on_terminal_request_stops_stale(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    from governance import approval_ledger as al
+
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    state = _waiting_wave1(tmp_path, monkeypatch, ops, "r-w-term")
+    key = state.ops["candidate-1"]["request"]
+    al.abandon_request(state, key, "candidate закрыт без мержа")
+    resumed = runner.resume("r-w-term", ops)
+    assert resumed.status == "stopped_stale" and resumed.wave == 1
+    reason = (rs.run_dir("r-w-term") / "stop-reason.txt").read_text()
+    assert key in reason and "abandoned" in reason and "--reopen" in reason
+
+
+def test_waves_last_wave_completion_enters_s8(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    from governance import approval_ledger as al
+
+    ops = FakeOps(facts={"state": "MERGED", "baseRefName": "master"})
+    state = _waiting_wave1(tmp_path, monkeypatch, ops, "r-w-s8")
+    key = state.ops["candidate-1"]["request"]
+    al.complete_request(state, key)
+    state.wave = 5
+    state.ops["candidate-5"] = dict(state.ops["candidate-1"])
+    rs.save(state)
+    resumed = runner.resume("r-w-s8", ops)
+    assert resumed.status == "completed" and resumed.wave == 5
+    assert resumed.ops["merge"] == {"status": "completed", "merged": True, "waves": 5}
+    assert ("gate_check_s8", BUNDLE_DIR) in ops.calls
+    # Повторный resume — только S8 (короткое замыкание по `merge`), без волн.
+    before = len(ops.calls)
+    again = runner.resume("r-w-s8", ops)
+    assert again.status == "completed" and ops.calls[before:] == []

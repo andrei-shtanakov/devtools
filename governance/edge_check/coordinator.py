@@ -171,6 +171,16 @@ def run_level(
     return LevelResult(records, verdict, _EXIT[verdict])
 
 
+def load_level_records(run_dir: Path, wave: int) -> dict[tuple[str, str], dict]:
+    """Записи рёбер волны из каталога прогона (по файлу на ребро)."""
+    out_dir = run_dir / "edge-check" / f"w{wave}"
+    records: dict[tuple[str, str], dict] = {}
+    for path in sorted(out_dir.glob("*.json")) if out_dir.is_dir() else []:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        records[(record["node"], record["edge"])] = record
+    return records
+
+
 def effective_results(run_dir: Path) -> dict[str, dict]:
     """Действующий результат по ключу D9 — последняя завершённая попытка (D10)."""
     ledger = run_dir / "edge-check" / LEDGER_NAME
