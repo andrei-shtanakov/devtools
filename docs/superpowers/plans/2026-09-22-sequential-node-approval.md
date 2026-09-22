@@ -23,6 +23,8 @@
 - Ничего не удаляется и не переписывается автоматически; `--reopen` — явная команда (D2, S11).
 - Коммиты по-русски, трейлеры `Epic: eco.dark-factory` и `Co-Authored-By` в финальном блоке; PR кода — обычный агентский мерж (харнесс-путей и authority-root в дифе нет), кроме задач, трогающих `profiles/` (authority-root) — их нет в плане: проекция пишется в каталог прогона.
 - Прежний путь «один бандл-PR» остаётся рабочим на каждом шаге плана (S13: run.json без `authoring` = legacy).
+- **Порядок с планом approval-policy:** этот план исполняется ПОСЛЕ мержа кода `2026-09-22-approver-policy-trusted-source.md` (параметр `start_request(..., policy=)`, `af.policy_snapshot`, `_join_target` приходят оттуда); пункт `@id:sequential-node-approval` несёт `@blocked_by:todo://devtools/approver-policy-trusted-source` до его закрытия.
+- **Нумерация волн — 1-based, как в спеке** (W1..W5): `state.wave ∈ 1..5`, `level(node) = wave − 1`; ключи op'ов и ветки — `…-w1`…`…-w5`, `waiting_human_merge(wave=1)`.
 
 ---
 
@@ -134,7 +136,7 @@ def check_bundle_composition(target_dir, bundle_dir, dag, *, mode: str = "full")
         raise RuntimeError(...)   # прежний текст
     return max(levels(dag).values())
 ```
-В `approve_node.py` тело `_levels` заменить на `return bundle_dag.levels(dag)` (имя и вызовы остаются).
+В `approve_node.py` тело `_levels` заменить на `return bundle_dag.levels(dag)` (имя и вызовы остаются). `check_bundle_composition` зовут ещё семь мест `task_bridge` (через алиас `_check_bundle_composition`) с игнорируемым возвратом — совместимость держится на дефолте `mode="full"`; тест `test_full_mode_is_unchanged` это и фиксирует, плюс в `tests/test_governance_task_bridge.py` один тест-страж: вызов без `mode` на полном бандле проходит, на неполном — прежний `RuntimeError`.
 
 - [ ] **Step 4: Run** `uv run --frozen pytest tests/test_governance_bundle_dag.py tests/test_governance_approve_node.py -q -k "levels or composition"` — PASS.
 
@@ -223,9 +225,18 @@ def test_wave_profile_full_level_equals_source_artifacts(tmp_path) -> None:
 
 ```python
 def _profile_levels(artifacts: list[dict]) -> dict[str, int]:
+    """Уровни по `upstream` профиля; порядок `artifacts` не предполагается
+    топологическим (steward сортирует сам) — считаем до неподвижной точки."""
+    by_id = {a["id"]: a.get("upstream", []) for a in artifacts}
     lv: dict[str, int] = {}
-    for art in artifacts:                 # профиль топологичен по построению
-        lv[art["id"]] = 1 + max((lv[u] for u in art.get("upstream", [])), default=-1)
+    pending = set(by_id)
+    while pending:
+        ready = [i for i in pending if all(u in lv for u in by_id[i])]
+        if not ready:
+            raise RuntimeError(f"профиль: цикл или неизвестный upstream среди {sorted(pending)}")
+        for i in ready:
+            lv[i] = 1 + max((lv[u] for u in by_id[i]), default=-1)
+            pending.discard(i)
     return lv
 
 
@@ -347,7 +358,7 @@ def test_missing_lower_nodes_keep_read_dag_state_unresolved(waves_world: World) 
 2. `_node_text(ops, state, op, fname) -> str`: если `op.get("source_sha")` — `ops.show_file(state.target_dir, op["source_sha"], _rel(state, fname))` (None → `_unresolved`), иначе `_base_text`. `_carried_text` и `_snapshot_is_published` (в части исходного текста) читают через него; `_carried_text` при `source_sha`: `version = max(version в base если файл в base есть, version в source) + 1` (S4е).
 3. `_cascade_stale`: `if not path.exists(): continue` с комментарием (S4б — узлов нижних уровней в base ещё нет).
 4. `_sync_branch_to_snapshot` при `source_sha`: source-слой (`state.brief["source_paths"]`, если `state.brief`) копируется из `source_sha` (`ops.show_file_bytes`) и добавляется в `changed` с `force_paths` (S4д); файлы узлов — как сегодня из `_carried_text`.
-5. `propose_from_source(state, ops, node_ids, source_sha, *, legacy_bundle=None)`: `dag`, `is_dirty`, `checkout_and_pull(base)`, `check_bundle_composition(mode="waves")`; для каждого узла — `self_hash` по тексту из `source_sha`, `upstream_blobs` — `bundle_inputs.direct_blobs(state, ops, dag, node, base_ref)` (upstream в base) с `known_texts` для узлов **того же уровня из source** (design ↔ acceptance друг на друга не ссылаются — `known_texts` нужны только source-слою; при отсутствии — `_unresolved`); политика подписи — как в `_propose` (Task 6 плана approval-policy); `_close_obsolete_wave`/`_wave_for`; `start_request(..., policy=..., source_sha=source_sha)` с первым узлом, `extend_request` для остальных; `_publish_candidate` **без** push — см. Task 8 (адаптер публикует один evidence-коммит и делает push); возвращает `ApprovalOutcome(request=key)`. Гвард: все `node_ids` одного уровня, иначе `RuntimeError` («зависимые уровни в одном candidate запрещены»).
+5. `propose_from_source(state, ops, node_ids, source_sha, *, legacy_bundle=None)`: `dag`, `is_dirty`, `checkout_and_pull(base)`, `check_bundle_composition(mode="waves")`, `_settle_requests_outside_dag`; гвард «все `node_ids` одного уровня» (иначе `RuntimeError` «зависимые уровни в одном candidate запрещены»); для каждого узла — **те же гварды, что у `_propose`**: `_require_upstream_ready(state, ops, dag, node)` (upstream `approved` в base) и `_require_no_reopened_pr(state, ops, node)`; `self_hash` по тексту из `source_sha`; `upstream_blobs` — `bundle_inputs.direct_blobs(state, ops, dag, node, ref)`, где для узлов с DAG-upstream `ref = base_ref` (upstream в base), а для charter (DAG-upstream нет, только source-слой) `ref = source_sha` — source-слой по ref хешируется БАЙТАМИ и сверяется с descriptor, `known_texts` не используется (тот хеширует текст и дал бы ложный FORBIDDEN); политика подписи — `_join_target` + `af.policy_snapshot` как в `_propose`; `_close_obsolete_wave`/`_wave_for`; `start_request(..., policy=..., source_sha=source_sha)` с первым узлом, `extend_request` для остальных; `_publish_candidate(push=False)` — см. Task 8; возвращает `ApprovalOutcome(request=key)`. Тесты: «W2 при charter не `approved` в base → `RuntimeError` от `_require_upstream_ready`, заявка не создана»; «узел с открытым PR терминальной заявки → отказ `_require_no_reopened_pr`».
 6. `_candidate_body`: строка `run-id: {state.run_id}` (S2, m3) и, при `policy`, `policy: …` (план approval-policy).
 7. `_publish_candidate(..., push: bool = True)` — при `push=False` возвращает после `_sync_branch_to_snapshot` (коммит и `record_head_sha` сделаны, PR не создан); адаптер (Task 8) докладывает evidence-коммит, перезаписывает `head_sha`, пушит и зовёт `_publish_candidate(push=True)` для создания PR (тот усыновит/создаст PR по записанному `head_sha`).
 
@@ -361,7 +372,13 @@ def test_missing_lower_nodes_keep_read_dag_state_unresolved(waves_world: World) 
 
 **Files:**
 - Create: `governance/edge_check/coordinator.py`
-- Modify: `contracts/edge-check/v1/rules/` (добавить наборы `requirements-vs-charter.yaml`, `design-vs-requirements-behaviour.yaml`, `acceptance-vs-requirements-behaviour.yaml`, `decomposition-vs-design-acceptance.yaml`, `charter-vs-briefs.yaml` — по форме `behaviour-vs-requirements.yaml`, правила из edge-check §5)
+- Modify: `contracts/edge-check/v1/rules/` — пять новых наборов той же YAML-формы, что `behaviour-vs-requirements.yaml` (`id`, `items[id,text]`, `severity`, `applicability`); содержание нормативно для D4 (без набора проверка = `ERROR`):
+  - `requirements-vs-charter.yaml` (subject requirements; bases charter): R1 каждая цель/ограничение/метрика charter (`G-*`, `CON-*`, `M-*`) имеет хотя бы одно требование, которое её реализует или явно отклоняет с причиной; R2 ни одно Must-требование не противоречит ограничениям charter; R3 требование не вводит цель, которой нет в charter, без ссылки на него; R4 формулировка каждого Must/Should проверяема снаружи (наблюдаемый результат, не внутреннее устройство). severity: R1, R2 → FAIL; R3, R4 → замечание. applicability: пусто (charter обязателен).
+  - `design-vs-requirements-behaviour.yaml` (subject design; bases requirements, behaviour-spec): R1 каждое Must-требование и каждый сценарий BEH получают в дизайне названный механизм (компонент/поток/решение) или явный отказ с причиной; R2 дизайн не противоречит требованиям и сценариям (не меняет их смысл, не сужает без объявления); R3 каждое решение дизайна (`D-*`) прослеживается к требованию или сценарию; R4 состояния ошибок и границы authority из требований отражены в дизайне. severity: R1, R2 → FAIL; R3, R4 → замечание. applicability: пусто.
+  - `acceptance-vs-requirements-behaviour.yaml` (subject acceptance; bases requirements, behaviour-spec): R1 каждый сценарий BEH покрыт хотя бы одним критерием приёмки (`AC-*`) с наблюдаемым исходом; R2 каждый Must-FR имеет критерий, различающий выполнено/не выполнено; R3 критерий не утверждает больше, чем даёт сценарий (нет обязательств вне требований); R4 критерий выполним без доступа к внутреннему состоянию. severity: R1, R2 → FAIL; R3, R4 → замечание. applicability: пусто.
+  - `decomposition-vs-design-acceptance.yaml` (subject decomposition; bases design, acceptance): R1 каждый DT ссылается на решение дизайна или критерий приёмки, который он реализует; R2 каждый критерий приёмки закрыт хотя бы одним DT (сценарии/`delivers`); R3 DT не вводит обязательств, отсутствующих в дизайне и приёмке (без `sources` в бандле — находка); R4 зависимости DT совместимы с порядком, который задаёт дизайн. severity: R1, R2 → FAIL; R3, R4 → замечание. applicability: пусто.
+  - `charter-vs-briefs.yaml` (subject charter; bases customer-brief, engineer-brief): R1 каждая цель/ограничение брифа заказчика отражена в charter или явно отклонена с причиной; R2 charter не вводит целей, отсутствующих в брифах; R3 метрики charter выводимы из брифа. severity: R1 → FAIL; R2, R3 → замечание. applicability: `engineer-brief` может отсутствовать — разрешено правилом `R0-no-engineer-brief` (customer-маршрут E2).
+  Каждый набор — тест «идентичность каталога стабильна» по образцу теста срез 1 (`check_identity` меняется только с содержанием).
 - Test: `tests/test_governance_edge_check_coordinator.py`
 
 **Interfaces:**
@@ -429,7 +446,8 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(tmp_path, runs_
 - `_step_gate`: в `waves` — `projected = wave_profile_dir(...)`, `mismatch = verify_wave_profile_dir(...)` → `stopped_gate` «проекция не совпала: …»; `gate_check_candidate(target_dir, bundle_dir, str(projected))`; локальный GC-COMPLETENESS — по `bundle_dag.dag_upto(dag, state.wave)`; ключ `gate-<w>`.
 - `_step_edge` (после гейта): `(run_dir / "edge-findings.txt").unlink(missing_ok=True)`; `result = coordinator.run_level(state, run_dir, state.wave, projected, call=None)`; код 0 → `op_complete(edge-<w>)`; код 1 → findings-файл из `records[*].findings`, `stopped_review`; код 3 → findings с `error_code`, `stopped_review`. В `legacy` шаг — no-op.
 - `advance`: список шагов в `waves` — `_step_interview, _step_branch, _step_materialize_brief, _step_authoring, _step_commit, _step_gate, _step_edge, _step_candidate (Task 8)`; после `waiting_human_merge` волны — Task 9.
-- `_STOPPED_RESET_OPS` для `waves`: `stopped_gate`/`stopped_review` сбрасывают `commit-<w>`, `gate-<w>`, `edge-<w>` (без `push`/`ready`/`review` — их в волне нет); `stopped_stale: ()`.
+- `_STOPPED_RESET_OPS` — статический dict, `resume` его итерирует, а `_reset_stopped_author` pop'ает статический `_BUNDLE_EDIT_RESET_OPS`: оба заменяются функцией `reset_ops_for(state) -> tuple[str, ...]` — в `legacy` возвращает прежние кортежи, в `waves` — `commit-<w>`, `gate-<w>`, `edge-<w>` текущей волны (без `push`/`ready`/`review`); `stopped_stale: ()`. Тесты `_STOPPED_RESET_OPS` из legacy остаются зелёными: словарь сохраняется как источник для `legacy`.
+- `console_model.PIPELINE_KEYS` — статический кортеж, покрыт тестами FR-04 (индекс `"commit"`) и `_REQUIRED_STEP_KEYS`: в Task 7 он не трогается — **между Task 7 и Task 11 консоль показывает волновой прогон неверно** (промежуточное состояние названо; legacy показывается верно); Task 11 вводит `pipeline_keys(state)` при сохранённом кортеже.
 
 - [ ] **Step 4: Run** `uv run --frozen pytest tests/test_governance_runner.py -q` — PASS (legacy-тесты без изменений).
 
@@ -447,9 +465,9 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(tmp_path, runs_
 **Interfaces:**
 - Consumes: Task 5 (`propose_from_source`, `_publish_candidate(push=False/True)`), Task 6 (`LevelResult`).
 - Produces: `publish.publish_wave(state, ops, key, level_result) -> int` — (1) проверяет поверхность D16: изменённые пути коммита заявки ⊆ {файлы узлов заявки, каскад `stale`, `00-discovery/*` для W1} — иначе `RuntimeError` до PR; (2) пишет `workstreams/<ws>/evidence/edge-check/<node>.json` из записей координатора, коммитит одним коммитом поверх головы заявки, `al.record_head_sha` (перезапись), `ops.push_branch`; (3) `_publish_candidate(push=True)` создаёт/усыновляет PR; (4) сверка головы PR == записанный `head_sha` (иначе код 4); (5) `ops.publish_review(..., event="APPROVE", body=<чек-лист с identity и SHA>, marker="edge-check")` — только при `verdict == "PASS"`; `CHANGES_REQUESTED` человека не гасится (читает `ops.pr_reviews`, при наличии — код 1); коды 0/1/3/4 из словаря раннера.
-- `_step_candidate` (ключ `candidate-<w>`): `outcome = an.propose_from_source(state, ops, nodes_of_level, head_sha_of_branch)`; `code = publish_wave(...)`; 0 → `waiting_human_merge` с `state.wave` и `candidate_pr` в комментарии; 4 → сброс `gate-<w>`/`edge-<w>`, повтор; 1/3 → `stopped_review`.
+- `_step_candidate` (ключ `candidate-<w>`): `outcome = an.propose_from_source(state, ops, nodes_of_level, head_sha_of_branch)`; `state.base_ref = pr_facts(candidate_pr)["baseRefName"] or "master"` (в waves его больше никто не ставит — legacy ставил `_step_verdict`); `code = publish_wave(...)`; 0 → `waiting_human_merge` с `state.wave` и `candidate_pr` в комментарии; 4 → сброс `gate-<w>`/`edge-<w>`, повтор; 1/3 → `stopped_review`.
 
-- [ ] **Step 1: Failing tests** — стенд approve_node (настоящий git): после `propose_from_source` + `publish_wave` в ветке заявки лежит `evidence/edge-check/charter.json`, `head_sha` заявки == голова ветки, у PR ревью `APPROVED` от логина ревьюера с маркером `edge-check`; посторонний путь в коммите заявки → `RuntimeError` до PR; повтор `publish_wave` (падение между push и review) идемпотентен — второго evidence-коммита нет. Раннер (FakeOps): `_step_candidate` даёт `waiting_human_merge` с комментарием, называющим номер PR и волну.
+- [ ] **Step 1: Failing tests** — стенд approve_node (настоящий git): после `propose_from_source` + `publish_wave` в ветке заявки лежит `evidence/edge-check/charter.json`, `head_sha` заявки == голова ветки, у PR ревью `APPROVED` от логина ревьюера с маркером `edge-check`; посторонний путь в коммите заявки → `RuntimeError` до PR; повтор `publish_wave` (падение между push и review) идемпотентен — критерий: дерево головы заявки уже содержит `evidence/edge-check/*.json` с теми же байтами ⇒ evidence-коммит не создаётся, `head_sha` не меняется, публикуется только ревью. Раннер (FakeOps): `_step_candidate` даёт `waiting_human_merge` с комментарием, называющим номер PR и волну.
 - [ ] **Step 2: Run** — FAIL. **Step 3:** реализация по интерфейсу. **Step 4:** PASS. **Step 5: Commit** `git commit -m "feat(edge_check): адаптер публикации — evidence в candidate, одобряющее ревью edge-check, шаг candidate раннера"`
 
 ---
@@ -462,9 +480,9 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(tmp_path, runs_
 
 **Interfaces:**
 - Consumes: Task 8; `an.approve_node` (finalize путь), `ops.review` (аттестация finalize-PR), `_missing_approving_review`.
-- Produces: в `waves`: `resume` при `waiting_human_merge` читает заявку текущей волны (`al.live_request_for_step(state, open_wave, level)`), `pr_facts(candidate_pr)`: OPEN → стоим; MERGED → `_finalize_wave`: `an.approve_node(state, ops, node)` (фаза 2 + finalize-PR), затем `ops.review(state.repo, finalize_pr)` (аттестация; ненулевой код → «finalize остаётся человеку», `waiting_human_merge` с причиной) и повторный `approve_node` (агентский мерж finalize); заявка `completed` → `state.wave += 1`, `status = "running"`, `advance` (следующая волна) либо после W5 — `_step_s8`. Реконсиляция «мерж вне раннера» ключуется на `candidate_pr` заявки, не на `state.pr`.
+- Produces: в `waves`: `resume` при `waiting_human_merge` находит заявку волны как **живую заявку над любым узлом уровня** — `al.live_request_over(state, node)` для узлов волны (не `live_request_for_step`: та отдаёт заявки только до мержа candidate, и падение между `record_merge` и finalize оставила бы resume без заявки при открытом finalize-PR); `pr_facts(candidate_pr)`: OPEN → стоим; MERGED (или факт мержа уже записан) → `_finalize_wave`: `an.approve_node(state, ops, node)` (фаза 2 + finalize-PR), затем `ops.review(state.repo, finalize_pr)` (аттестация; ненулевой код → «finalize остаётся человеку», `waiting_human_merge` с причиной) и повторный `approve_node` (агентский мерж finalize); заявка `completed` → `state.wave += 1`, `status = "running"`, `advance` (следующая волна) либо после W5 — `_step_s8`. Реконсиляция «мерж вне раннера» ключуется на `candidate_pr` заявки, не на `state.pr`.
 
-- [ ] **Step 1: Failing tests** — (а) FakeOps: после `waiting_human_merge(wave=0)` помечаем candidate MERGED → `resume` зовёт approve_node дважды и `review` на finalize, `state.wave == 1`, авторится requirements; (б) `review` на finalize вернул 6 → статус `waiting_human_merge`, комментарий «finalize остаётся человеку»; (в) сквозной на стенде approve_node: пять волн → пять `merge_pr` человеком → `read_dag_state` = approved DAG → `deliver_for_run` проходит (число человеческих актов = 5 + approve tasks).
+- [ ] **Step 1: Failing tests** — (а) FakeOps: после `waiting_human_merge(wave=1)` помечаем candidate MERGED → `resume` зовёт approve_node дважды и `review` на finalize, `state.wave == 2`, авторится requirements; (а′) стенд approve_node: крэш после `record_merge` (finalize-PR открыт, заявка на шаге `AWAIT_FINALIZE_MERGE`) → `resume` находит заявку через `live_request_over` и доводит finalize; (а″) `state.base_ref` после `_step_candidate` равен `baseRefName` candidate-PR; (б) `review` на finalize вернул 6 → статус `waiting_human_merge`, комментарий «finalize остаётся человеку»; (в) сквозной на стенде approve_node: пять волн → пять `merge_pr` человеком → `read_dag_state` = approved DAG → `deliver_for_run` проходит (число человеческих актов = 5 + approve tasks).
 - [ ] **Step 2: Run** — FAIL. **Step 3:** реализация. **Step 4:** PASS. **Step 5: Commit** `git commit -m "feat(runner): resume волны — реконсиляция по candidate, finalize агентом после аттестации, переход к следующему уровню"`
 
 ---
@@ -486,7 +504,7 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(tmp_path, runs_
 ### Task 11: `spec-loop`, консоль, документы
 
 **Files:**
-- Modify: `governance/spec_loop.py` (флаг `--waves` → `authoring="waves"`; сообщения паузы называют волну и candidate-PR; восстановление из фактов GitHub для волнового прогона — по PR ветки `spec/<ws>-approve-*` последней волны, `run-id` из тела; `_APPROVE_NODE_HINT` и docstring — две модели), `governance/console_model.py` (`PIPELINE_KEYS` per-wave через `wave_key`; показ волны и edge-check), `CLAUDE.md`, `README.md`, `docs/superpowers/specs/2026-09-09-tasks-supersede-contract-design.md` (§I12: заявка волны над байтами ветки волны, таблица актов), `TODO.md`
+- Modify: `governance/spec_loop.py` (флаг `--waves` → `authoring="waves"`; сообщения паузы называют волну и candidate-PR; восстановление из фактов GitHub для волнового прогона: `prs_by_head_prefix("spec/<ws-id>-approve-")` → кандидаты по глобу `patterns.env`; «последняя волна» = максимальный `(W, K, A)` из имени ветки среди PR со `state == MERGED`; тело обязано нести `run-id:` (иначе отказ «PR без run-id — восстановить нечем»); OPEN candidate/finalize → отказ «одобрение в полёте, восстановление после мержа»; несколько MERGED с одинаковым `(W, K, A)` → отказ с перечнем; ноль — `None` (новый прогон). Восстановленный леджер: `authoring=waves`, `wave = K + 1`, заявки волн ≤ K — `completed` по факту MERGED finalize-PR; `_APPROVE_NODE_HINT` и docstring — две модели), `governance/console_model.py` (`PIPELINE_KEYS` per-wave через `wave_key`; показ волны и edge-check), `CLAUDE.md`, `README.md`, `docs/superpowers/specs/2026-09-09-tasks-supersede-contract-design.md` (§I12: заявка волны над байтами ветки волны, таблица актов), `TODO.md`
 - Test: `tests/test_governance_spec_loop.py`, `tests/test_governance_console_model.py`
 
 - [ ] **Step 1: Failing tests** — `spec-loop --waves` стартует прогон с `authoring == "waves"`; пауза печатает `wave=<k>` и `candidate-PR #<n>`; восстановление находит прогон по candidate последней волны; консоль показывает `edge-0 … edge-4`.
