@@ -134,7 +134,7 @@ APPROVAL_POLICY_PATH=policy/approvers.env
 # Подключается `. "$script_dir/ssot_env.sh"` ПОСЛЕ определения `die`.
 # Третьей копии формата быть не должно: python и этот файл — обе половины.
 ```
-В `merge-pr.sh` на месте определения функции: `. "$script_dir/ssot_env.sh"`. `script_dir` в `merge-pr.sh` определяется ниже функции — перенести строку `script_dir=$(cd "$(dirname "$0")" && pwd)` выше подключения.
+В `merge-pr.sh` на месте определения функции: `. "$script_dir/ssot_env.sh"`. `script_dir` в `merge-pr.sh` определяется ниже функции — перенести строку `script_dir=$(cd "$(dirname "$0")" && pwd)` выше подключения. Докстроки, называющие «`ssot_key` в `merge-pr.sh`» и «две половины» (`governance/ssot_env.py:3`, `tests/test_ssot_env_format.py:3`), — на `ssot_env.sh`; `tests/test_ssot_env_format.py` гоняет настоящий `merge-pr.sh --print-globs` и обязан остаться зелёным.
 
 - [ ] **Step 5: Run** `uv run --frozen pytest tests/test_governance_authority_root.py tests/test_merge_pr.py -q` — PASS (включая существующий `test_every_harness_input_is_authority_root_but_the_kit`: разность `harness − authority` не меняется).
 
@@ -406,6 +406,7 @@ def test_absent_branch_or_file_is_forbidden_absent(monkeypatch) -> None:
 def test_signature_judges_login_against_snapshot(monkeypatch) -> None:
     monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
     snap = af.policy_snapshot(PolicyOps(), pinned_sha=None).value
+    assert isinstance(snap, af.PolicySnapshot)
     human = af.authorized_signature(MergeEvent("andrei-shtanakov", "2026-09-10T08:00:00Z", "abc"), snap)
     agent = af.authorized_signature(MergeEvent("ai-prosto", "2026-09-10T08:00:00Z", "abc"), snap)
     assert human.outcome is Outcome.FOUND
@@ -480,11 +481,14 @@ class PolicyRefusal:
     current: str | None = None
 
 
-def _forbidden(kind: str, detail: str, **extra: str) -> Fact[PolicySnapshot]:
+PolicyFact = Fact[PolicySnapshot | PolicyRefusal]   # FOUND несёт снимок, FORBIDDEN — отказ
+
+
+def _forbidden(kind: str, detail: str, **extra: str) -> PolicyFact:
     return Fact(Outcome.FORBIDDEN, PolicyRefusal(kind, detail, **extra), detail)
 
 
-def policy_snapshot(ops, *, pinned_sha: str | None) -> Fact[PolicySnapshot]:
+def policy_snapshot(ops: Ops, *, pinned_sha: str | None) -> PolicyFact:
     """Снимок политики из репозитория (спека §4.2); порядок проверок — таблица §4.2."""
     if os.environ.get(APPROVER_ALLOWLIST_ENV) is not None:
         return _forbidden(
@@ -517,7 +521,7 @@ def policy_snapshot(ops, *, pinned_sha: str | None) -> Fact[PolicySnapshot]:
         return _forbidden(POLICY_REFUSAL_ABSENT, f"в версии {sha} нет {path}")
     text = content.value
     assert isinstance(text, str)
-    lines = ssot_env._definition_lines(text, APPROVER_ALLOWLIST_ENV)
+    lines = ssot_env.definition_lines(text, APPROVER_ALLOWLIST_ENV)
     if len(lines) != 1 or not lines[0]:
         reason = "ключ отсутствует" if not lines else ("дубль ключа" if len(lines) > 1 else "пустое значение")
         return _forbidden(POLICY_REFUSAL_EMPTY, f"{path}@{sha}: {reason} {APPROVER_ALLOWLIST_ENV} — подписать не может никто")
@@ -540,7 +544,7 @@ def authorized_signature(event: MergeEvent, snapshot: PolicySnapshot) -> Fact[Au
         f"мерж от {event.login}: учётки нет в политике {snapshot.source} — подписи этот мерж не создаёт",
     )
 ```
-`_definition_lines` — сделать публичным именем `definition_lines` в `ssot_env.py` (переименовать и обновить единственного вызывающего `read_key`), чтобы не звать приватное имя. Докстроки — перенести доводы из прежних (граница defense-in-depth уточняется: «в меру authority-root»).
+`_definition_lines` → публичное `definition_lines` в `ssot_env.py` (единственный вызывающий — `read_key`, строка 55). Потребители `policy_snapshot` сужают `value` через `isinstance` (`PolicySnapshot` на `FOUND`, `PolicyRefusal` на `FORBIDDEN`) — контракт `Fact(Generic[T])` соблюдён типом `PolicyFact`. Шапки `governance/ssot_env.py` («две половины») и `tests/test_ssot_env_format.py` (`ssot_key` в `merge-pr.sh`) — на `ssot_env.sh`. Докстроки — перенести доводы из прежних (граница defense-in-depth уточняется: «в меру authority-root»).
 
 - [ ] **Step 4: Run** `uv run --frozen pytest tests/test_governance_approval_facts.py -q` — PASS. Остальной suite на этом шаге красный (потребители) — ожидаемо до Task 6.
 
@@ -621,7 +625,7 @@ def test_request_pins_policy_snapshot_write_ahead(state) -> None:
 ```
 Импорт `from governance.facts import Fact, Outcome, unavailable`. В фикстуре `world` строку `monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, HUMAN)` заменить на `monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)`.
 
-- [ ] **Step 2: Failing tests** (вместо `test_empty_allowlist_refuses_before_any_candidate_is_created`, `test_empty_allowlist_refusal_is_not_about_the_merger`, `test_no_op_over_approved_node_survives_empty_allowlist`, `test_finalize_without_policy_refuses_and_keeps_the_request`; тест `test_agent_merge_invalidates_and_names_the_allowlist` — заменить `match=af.APPROVER_ALLOWLIST_ENV` на `match="approval-policy"`; в тесте на 1600–1615 `setenv("")` заменить на `world.forge.mute.add("policy_version")` с тем же ожиданием — фаза 3 источник не читает)
+- [ ] **Step 2: Failing tests** (вместо `test_empty_allowlist_refuses_before_any_candidate_is_created`, `test_empty_allowlist_refusal_is_not_about_the_merger`, `test_no_op_over_approved_node_survives_empty_allowlist`, `test_finalize_without_policy_refuses_and_keeps_the_request`; тест `test_agent_merge_invalidates_and_names_the_allowlist` — заменить `match=af.APPROVER_ALLOWLIST_ENV` на `match="approval-policy"`; в тесте на 1600–1615 `setenv("")` заменить на `world.forge.mute.add("policy_version")` и снять строку `assert af.approver_allowlist() == frozenset()` — функции больше нет; ожидание прежнее: фаза 3 источник не читает)
 
 ```python
 POLICY_SHA_2 = "q" * 40
@@ -758,35 +762,57 @@ def test_join_reads_policy_under_the_live_request_pin(world: World) -> None:
     # §4.3): новая заявка — актуальная версия; присоединение к живой —
     # только под её пином. Ветки no-op и долга выше намеренно: они ничего
     # не создают.
-    joined_pin = _live_join_pin(state, dag, node_id)   # None — новая заявка
+    # ОДНО решение «присоединяюсь ли», принятое до чтения политики и
+    # переиспользованное ниже: второе определение разошлось бы с первым
+    # (класс `ApprovedDag`). Read-only: открытая волна, сверка отпечатка
+    # состава (как в `_wave_for`), `live_request_for_step`,
+    # `_still_accumulating`. Записи (`_close_obsolete_wave`, `_wave_for`,
+    # `extend_request`/`start_request`) — ПОСЛЕ снимка (§4.3 «до первой записи»).
+    step = _levels(dag)[node_id]
+    nodes = bundle_dag.composition(dag)
+    fingerprint = bundle_dag.composition_fingerprint(nodes)
+    joined = _join_target(state, ops, fingerprint, step)   # (nums, op) | None
+    joined_pin = None
+    if joined is not None:
+        joined_policy = joined[1].get("policy")
+        if not joined_policy:
+            raise RuntimeError(
+                f"живая заявка {al.request_key(*joined[0])} не закрепила версию "
+                "политики (старый формат) — присоединиться к ней нельзя; дождитесь "
+                "её терминализации (фаза 2 объявит её invalidated) и повторите"
+            )
+        joined_pin = joined_policy["sha"]
     policy = af.policy_snapshot(ops, pinned_sha=joined_pin)
     if policy.outcome is Outcome.UNAVAILABLE:
         raise _unresolved(f"политика подписи для узла {node_id}: {policy.detail}")
     if policy.outcome is Outcome.FORBIDDEN:
-        raise RuntimeError(_policy_refusal_text(policy.value, joined_pin is not None))
+        assert isinstance(policy.value, af.PolicyRefusal)
+        raise RuntimeError(_policy_refusal_text(policy.value, joined is not None))
     snapshot = policy.value
-    assert snapshot is not None
+    assert isinstance(snapshot, af.PolicySnapshot)
+    if joined is not None and snapshot.fingerprint != joined[1]["policy"]["fingerprint"]:
+        raise RuntimeError(
+            f"политика {snapshot.source}: прочитано не то, что закрепляла заявка "
+            f"{al.request_key(*joined[0])} — узел не дописан, ничего не записано"
+        )
 ```
 где
 ```python
-def _live_join_pin(state, dag, node_id) -> str | None:
-    """SHA политики живой заявки шага узла, если узел присоединяется; иначе None."""
-    step = _levels(dag)[node_id]
-    nodes = bundle_dag.composition(dag)
+def _join_target(state, ops, fingerprint: str, step: int):
+    """Живая заявка шага в ОТКРЫТОЙ волне с тем же отпечатком состава, к
+    которой узел присоединится; None — будет новая. Read-only зеркало решения
+    `_close_obsolete_wave` + `_wave_for` + `live_request_for_step` +
+    `_still_accumulating` — без записей."""
     wave = al.open_wave(state)
     if wave is None:
         return None
+    record = al.wave_records(state).get(wave) or {}
+    if (record.get("intent") or {}).get("fingerprint") != fingerprint:
+        return None          # `_close_obsolete_wave` ниже закроет её как obsolete
     joined = al.live_request_for_step(state, wave, step)
-    if joined is None:
+    if joined is None or not _still_accumulating(state, ops, joined[1]):
         return None
-    policy = joined[1].get("policy")
-    if not policy:
-        raise RuntimeError(
-            f"живая заявка {al.request_key(*joined[0])} не закрепила версию "
-            "политики (старый формат) — присоединиться к ней нельзя; дождитесь "
-            "её терминализации (фаза 2 объявит её invalidated) и повторите"
-        )
-    return policy["sha"]
+    return joined
 
 
 def _policy_refusal_text(refusal: af.PolicyRefusal, joining: bool) -> str:
@@ -797,7 +823,7 @@ def _policy_refusal_text(refusal: af.PolicyRefusal, joining: bool) -> str:
         )
     return f"{refusal.detail}. Ничего не создано; повторите вызов после исправления источника"
 ```
-Сверка отпечатка на присоединении (§4.3, `FOUND`): после получения `snapshot` при `joined_pin is not None` — `if snapshot.fingerprint != joined_policy_fingerprint: raise RuntimeError("прочитано не то, что закрепляла заявка …")`; `_live_join_pin` возвращает пару `(sha, fingerprint)`, а не только SHA. В вызове `al.start_request(...)` добавить `policy=snapshot.as_record()`. Существующие вычисления `wave`/`step`/`joined` ниже остаются — `_live_join_pin` дублирует только чтение, не запись.
+Ниже по `_propose` существующий блок `_close_obsolete_wave` / `_wave_for` / `live_request_for_step` / `_still_accumulating` **заменяется** использованием уже вычисленных `joined`, `nodes`, `fingerprint`, `step`: `_close_obsolete_wave(state, nodes, fingerprint)`; `wave = _wave_for(state, nodes, fingerprint)`; если `joined is not None` — `extend_request` по его ключу, иначе `start_request(..., policy=snapshot.as_record())`. Точное имя поля отпечатка в записи волны (`intent.fingerprint`) взять из `open_wave_record`/`_wave_for` при реализации — `_join_target` обязан читать тот же ключ, что пишет `_wave_for`; тест: `_join_target` и решение `_propose` совпадают на трёх стендах (открытая волна с тем же отпечатком; с другим; заявка с вмерженным candidate → `_still_accumulating` False).
 
 - [ ] **Step 5: Реализация — тексты** — в `_publish_candidate` (строка 1146), `_candidate_body` (1159), `_reconcile_candidate` (1430, 1435), финализация (1857) заменить `af.APPROVER_ALLOWLIST_ENV` на `_policy_ref(op)`:
 ```python
@@ -807,7 +833,7 @@ def _policy_ref(op: dict) -> str:
         return "политики (заявка старого формата)"
     return f"политики approval-policy@{policy['sha']}"
 ```
-и в `_candidate_body` добавить строку `f"policy: {policy['repo']}@{policy['sha']}"` после «Узлы: …» (её читает `human-merge.sh`).
+и в `_candidate_body` добавить после «Узлы: …» строку `f"policy: {policy['repo']}@{policy['sha']}"` **только при `op.get("policy")`** (возобновление `CREATE_CANDIDATE` заявки старого формата существует — `_advance`; без гварда — `TypeError`); её читает `human-merge.sh`.
 
 - [ ] **Step 6: Реализация — фаза 2** (в `_reconcile_candidate` перед `signature = af.authorized_signature(merged)`)
 
@@ -867,9 +893,10 @@ def _policy_ref(op: dict) -> str:
 
 ```bash
   *"api graphql"*)
+    # Стаб игнорирует --jq и печатает уже «отжатые» значения — как ветка pr view.
     case "$*" in
-      *history*) printf '{"data":{"repository":{"ref":{"target":{"history":{"nodes":[{"oid":"%s"}]}}}}}}\n' "${GH_STUB_POLICY_SHA:-pppppppppppppppppppppppppppppppppppppppp}" ;;
-      *)         printf '{"data":{"repository":{"object":{"file":{"object":{"text":"AUTHORIZED_APPROVER_ACCOUNTS=%s\\n","isBinary":false,"isTruncated":false}}}}}}\n' "${GH_STUB_POLICY_ACCOUNTS:-andrei-shtanakov}" ;;
+      *history*) printf '%s\n' "${GH_STUB_POLICY_SHA:-pppppppppppppppppppppppppppppppppppppppp}" ;;
+      *)         printf 'AUTHORIZED_APPROVER_ACCOUNTS=%s\n' "${GH_STUB_POLICY_ACCOUNTS:-andrei-shtanakov}" ;;
     esac ;;
 ```
 и в ветке `pr view` добавить четвёртую строку тела: `printf '%s\n' "${GH_STUB_BODY-policy: andrei-shtanakov/approval-policy@pppppppppppppppppppppppppppppppppppppppp}"` (скрипт запрашивает `--json state,headRefOid,mergeStateStatus,body` и читает 4 строки; тело — одной строкой через `--jq '.body | gsub("\n";" ")'`).
@@ -896,7 +923,7 @@ def test_env_variable_is_refused(fleet: Fleet) -> None:
     done = fleet.run("demo", "7", AUTHORIZED_APPROVER_ACCOUNTS=HUMAN)
     assert done.returncode == 3 and "больше не источник" in done.stderr
 ```
-Существующие тесты «пустой allowlist — отказ 3» удалить; «логин не в списке» — заменить на `test_login_outside_policy_is_refused`.
+Существующие тесты «пустой allowlist — отказ 3» удалить; «логин не в списке» — заменить на `test_login_outside_policy_is_refused`. Код для «тело без `policy:`» — **2** (состояние PR, не авторизация актора); спека §4.5 говорила «отказ» без кода в одном месте и «код 3» в другом — править спеку на 2 тем же PR.
 
 - [ ] **Step 2: Run** `uv run --frozen pytest tests/test_human_merge.py -q` — FAIL.
 
@@ -915,7 +942,7 @@ p_ref=$(ssot_key "$src" APPROVAL_POLICY_REF "SSOT источника полит�
 p_path=$(ssot_key "$src" APPROVAL_POLICY_PATH "SSOT источника политики") || exit $?
 p_owner="${p_repo%%/*}"; p_name="${p_repo#*/}"
 ```
-Чтение PR расширить: `--json state,headRefOid,mergeStateStatus,body --jq '.state, .headRefOid, .mergeStateStatus, (.body | gsub("\n";" "))'`, четвёртая строка — `body`. Пин из тела:
+Чтение PR расширить: `--json state,headRefOid,mergeStateStatus,body --jq '.state, .headRefOid, .mergeStateStatus, (.body // "" | gsub("\n";" "))'` (`// ""` — PR без тела даёт пустую строку, а не ошибку jq), четвёртая строка — `body`. Чтение `text` через `--jq` при `file: null` печатает строку `null` → отказ «без AUTHORIZED…» (код 3): для скрипта это приемлемо и названо здесь. Пин из тела:
 ```sh
 pin=$(printf '%s\n' "$body" | sed -n 's/.*policy: [^@ ]*@\([0-9a-f]\{40\}\).*/\1/p' | head -n 1)
 [ -n "$pin" ] || die 2 "PR ${slug}#${pr}: тело без строки 'policy: <repo>@<sha>' — candidate старого формата, новый candidate"
@@ -950,21 +977,34 @@ allow=$(printf '%s\n' "$text" | sed -n 's/^[[:space:]]*AUTHORIZED_APPROVER_ACCOU
 def test_no_module_reads_the_allowlist_from_the_environment() -> None:
     """Единственное чтение переменной — отказ S7 в policy_snapshot."""
     import ast, pathlib
-    hits = []
-    for path in pathlib.Path(an.__file__).parent.glob("*.py"):
+    def names_the_key(node: ast.AST) -> bool:
+        return (
+            (isinstance(node, ast.Name) and node.id == "APPROVER_ALLOWLIST_ENV")
+            or (isinstance(node, ast.Attribute) and node.attr == "APPROVER_ALLOWLIST_ENV")
+            or (isinstance(node, ast.Constant) and node.value == "AUTHORIZED_APPROVER_ACCOUNTS")
+        )
+
+    hits = set()
+    for path in pathlib.Path(an.__file__).parent.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and getattr(node.func, "attr", "") in ("get", "getenv"):
-                if any(isinstance(a, ast.Name) and a.id == "APPROVER_ALLOWLIST_ENV" for a in node.args):
-                    hits.append(path.name)
-    assert hits == ["approval_facts.py"]
+            reads_env = (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "attr", "") in ("get", "getenv")
+                and any(names_the_key(a) for a in node.args)
+            ) or (
+                isinstance(node, ast.Subscript) and names_the_key(node.slice)
+            )
+            if reads_env:
+                hits.add(path.name)
+    assert hits == {"approval_facts.py"}, hits
 ```
 
 - [ ] **Step 2: Правки документов** — по таблице §5 спеки: в §I12 строка про пустой дефолт → «фаза 1 отказывает до candidate по снимку из approval-policy; на фазе 2 пустота недостижима (SHA неизменяем)»; строка 2069 и 2130–2131: «повтор устанавливает факт по закреплённой версии политики, не по актуальной»; новая строка таблицы: «версия политики сменилась между candidate и установлением факта | заявка → `invalidated` с обеими версиями; новый candidate закрепляет новую версию | ≠0».
 
 - [ ] **Step 3: Полный прогон** `uv run --frozen pytest -q` — ожидается PASS (≈10 мин); `make plan-check-selftest` — OK.
 
-- [ ] **Step 4: Commit** `git add -A && git commit -m "docs: политика подписи читается из approval-policy — CLAUDE.md, §I12, TODO"`
+- [ ] **Step 4: Commit** `git add CLAUDE.md README.md TODO.md docs/superpowers/specs/2026-09-09-tasks-supersede-contract-design.md docs/superpowers/specs/2026-09-15-need-stage-design.md docs/superpowers/specs/2026-09-22-approver-policy-trusted-source-design.md tests/test_governance_approve_node.py && git commit -m "docs: политика подписи читается из approval-policy — CLAUDE.md, §I12, TODO"`
 
 - [ ] **Step 5: Draft PR → TODO с номером → ready.** Ветка `spec/approver-policy-trusted-source` (спека уже там). PR трогает `human-merge.sh` и `contracts/authority-root/` — **мержит человек** (`make human-merge` без переменной, после Task 1). До мержа — правка правила волта (prograph-vault#147): команда без `AUTHORIZED_APPROVER_ACCOUNTS=`, ссылка на репозиторий.
 

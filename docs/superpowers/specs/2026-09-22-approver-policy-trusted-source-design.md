@@ -269,8 +269,9 @@ PolicySnapshot(repo, ref, path, sha, accounts: frozenset[str], fingerprint)
 по SHA из тела PR (`policy: <repo>@<sha>`); до мержа скрипт читает
 актуальную версию (S5) и отказывает кодом 3, если она ≠ пину: «политика
 сменилась после candidate — мерж не создаст подписи; новый candidate».
-Выставленная `AUTHORIZED_APPROVER_ACCOUNTS` — отказ S7 до всего. Тело без
-строки `policy:` — отказ (candidate старого формата).
+Выставленная `AUTHORIZED_APPROVER_ACCOUNTS` — отказ S7 (код 3) до всего.
+Тело без строки `policy:` — код 2: это состояние PR (candidate старого
+формата), не авторизация актора.
 
 ### 4.6. Заявки старого формата
 
