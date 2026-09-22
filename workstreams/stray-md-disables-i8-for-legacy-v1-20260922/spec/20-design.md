@@ -1,6 +1,6 @@
 ---
 spec_stage: design
-status: approval_pending
+status: approved
 owner_role: architects
 traces_to:
 - requirements
@@ -10,6 +10,8 @@ upstream_hashes:
   behaviour-spec: a058fcbbc414a8af14ba0d3f0b55cbbb0dcf0878
 approved_content_hash: 0367f393a1d3f7a21e84a52c9eecd00be4610213
 version: 2
+approved_at: '2026-09-22T16:45:47Z'
+approved_by: andrei-shtanakov
 ---
 
 # Design: посторонний `.md` больше не отключает сверку §I8 для легаси-v1
