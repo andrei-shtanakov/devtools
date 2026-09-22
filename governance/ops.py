@@ -37,6 +37,22 @@ _REMOTE_BRANCH_HEAD_QUERY = (
     "ref(qualifiedName:$q){target{oid}}}}"
 )
 
+#: Политика подписи §I12 (спека approval-policy §4.1): версия — последний
+#: коммит ветки, тронувший путь; содержимое — по `object(oid:)` +
+#: `file(path:)`, где «коммита нет» и «пути нет» — два разных положительных
+#: отсутствия (REST 404 их сливает с недоступностью).
+_POLICY_VERSION_QUERY = (
+    "query($o:String!,$n:String!,$q:String!,$p:String!){"
+    "repository(owner:$o,name:$n){ref(qualifiedName:$q){target{"
+    "... on Commit{history(first:1,path:$p){nodes{oid}}}}}}}"
+)
+_REPO_FILE_QUERY = (
+    "query($o:String!,$n:String!,$s:GitObjectID!,$p:String!){"
+    "repository(owner:$o,name:$n){object(oid:$s){"
+    "... on Commit{file(path:$p){object{"
+    "... on Blob{text isBinary isTruncated}}}}}}}"
+)
+
 #: Логин ревью-контура по умолчанию — канон `review-pr.sh:66`.
 REVIEW_LOGIN_DEFAULT = "ai-prosto"
 
@@ -177,6 +193,12 @@ class Ops(Protocol):
     def local_branch_head_fact(
         self, target_dir: str, branch: str
     ) -> Fact[str]: ...
+
+    def policy_version_fact(
+        self, repo_slug: str, branch: str, path: str
+    ) -> Fact[str]: ...
+
+    def repo_file_fact(self, repo_slug: str, sha: str, path: str) -> Fact[str]: ...
 
     def delete_remote_branch(self, repo_slug: str, branch: str) -> bool: ...
 
@@ -1312,6 +1334,87 @@ class RealOps:
         return Fact(
             Outcome.FOUND, oid, f"ветка origin/{branch} стоит на {oid}"
         )
+
+    def _graphql_repository(
+        self, query: str, **variables: str
+    ) -> dict | None:
+        """`data.repository` ответа GraphQL либо None на ЛЮБОЙ сбой.
+
+        `-F` для всех переменных, как у `remote_branch_head_fact`: строки
+        (в т.ч. `GitObjectID`) уходят как есть, конвертируются только
+        `true/false/null/целые`.
+        """
+        argv = ["gh", "api", "graphql", "-f", f"query={query}"]
+        for key, value in variables.items():
+            argv += ["-F", f"{key}={value}"]
+        done = subprocess.run(argv, capture_output=True, text=True)
+        if done.returncode != 0:
+            return None
+        try:
+            repository = json.loads(done.stdout)["data"]["repository"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return None
+        return repository if isinstance(repository, dict) else None
+
+    def policy_version_fact(
+        self, repo_slug: str, branch: str, path: str
+    ) -> Fact[str]:
+        """SHA последнего коммита `branch`, тронувшего `path` (спека S5).
+
+        `ref: null` — ветки нет (ABSENT); пустая история — файла по пути
+        никогда не было (ABSENT); коммит удаления файла история включает —
+        отсутствие тогда ловит `repo_file_fact`. Любая иная форма — UNAVAILABLE.
+        """
+        owner, name = repo_slug.split("/", 1)
+        repository = self._graphql_repository(
+            _POLICY_VERSION_QUERY, o=owner, n=name,
+            q=f"refs/heads/{branch}", p=path,
+        )
+        what = f"версия {repo_slug}:{path}@{branch}"
+        if repository is None or "ref" not in repository:
+            return unavailable(f"{what}: запрос не удался")
+        ref = repository["ref"]
+        if ref is None:
+            return Fact(Outcome.ABSENT, None, f"ветки {branch} в {repo_slug} нет")
+        try:
+            nodes = ref["target"]["history"]["nodes"]
+        except (KeyError, TypeError):
+            return unavailable(f"{what}: неожиданная форма ответа")
+        if not isinstance(nodes, list):
+            return unavailable(f"{what}: неожиданная форма истории")
+        if not nodes:
+            return Fact(
+                Outcome.ABSENT, None,
+                f"{path} в {repo_slug}@{branch} никогда не было",
+            )
+        oid = nodes[0].get("oid") if isinstance(nodes[0], dict) else None
+        if not isinstance(oid, str) or not oid:
+            return unavailable(f"{what}: пустой SHA")
+        return Fact(Outcome.FOUND, oid, f"{path}: последний коммит {oid}")
+
+    def repo_file_fact(self, repo_slug: str, sha: str, path: str) -> Fact[str]:
+        """Текст `path` в коммите `sha`: FOUND / ABSENT / UNAVAILABLE."""
+        owner, name = repo_slug.split("/", 1)
+        repository = self._graphql_repository(
+            _REPO_FILE_QUERY, o=owner, n=name, s=sha, p=path
+        )
+        what = f"{repo_slug}@{sha}:{path}"
+        if repository is None or "object" not in repository:
+            return unavailable(f"{what}: запрос не удался")
+        commit = repository["object"]
+        if commit is None:
+            return Fact(Outcome.ABSENT, None, f"коммита {sha} в {repo_slug} нет")
+        entry = commit.get("file") if isinstance(commit, dict) else None
+        if entry is None:
+            return Fact(Outcome.ABSENT, None, f"в {repo_slug}@{sha} нет {path}")
+        blob = entry.get("object") if isinstance(entry, dict) else None
+        text = blob.get("text") if isinstance(blob, dict) else None
+        if (
+            not isinstance(text, str)
+            or (isinstance(blob, dict) and (blob.get("isBinary") or blob.get("isTruncated")))
+        ):
+            return unavailable(f"{what}: содержимое не прочитано")
+        return Fact(Outcome.FOUND, text, f"{path}@{sha} прочитан")
 
     def local_branch_head_fact(
         self, target_dir: str, branch: str
