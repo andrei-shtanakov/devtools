@@ -171,10 +171,10 @@ def test_wave_profile_last_wave_equals_source_artifacts(tmp_path: Path) -> None:
     assert ps.verify_wave_profile_dir(str(target), _PROFILE, projected, 4) == []
 
 
-def test_profile_levels_refuse_cycle_or_unknown_upstream() -> None:
+def testprofile_levels_refuse_cycle_or_unknown_upstream() -> None:
     from governance import policy_sources as ps
 
     with pytest.raises(RuntimeError, match="цикл|неизвестный"):
-        ps._profile_levels([{"id": "a", "upstream": ["b"]}, {"id": "b", "upstream": ["a"]}])
+        ps.profile_levels([{"id": "a", "upstream": ["b"]}, {"id": "b", "upstream": ["a"]}])
     with pytest.raises(RuntimeError, match="цикл|неизвестный"):
-        ps._profile_levels([{"id": "a", "upstream": ["zzz"]}])
+        ps.profile_levels([{"id": "a", "upstream": ["zzz"]}])

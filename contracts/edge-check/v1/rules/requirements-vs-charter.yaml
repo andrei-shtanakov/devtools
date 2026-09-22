@@ -1,0 +1,23 @@
+edge: requirements-vs-charter
+subject_role: requirements
+basis_roles: [charter]
+items:
+  - id: R1
+    text: >-
+      Каждая цель, ограничение и метрика charter (G-*, CON-*, M-*) имеет хотя
+      бы одно требование, которое её реализует или явно отклоняет с названной
+      причиной.
+  - id: R2
+    text: >-
+      Ни одно Must-требование не противоречит ограничениям charter.
+  - id: R3
+    text: >-
+      Требование не вводит цель, которой нет в charter, без ссылки на него.
+  - id: R4
+    text: >-
+      Формулировка каждого Must/Should проверяема снаружи: наблюдаемый
+      результат, не внутреннее устройство.
+severity:
+  blocking: [blocker, major]
+  advisory: [minor]
+applicability: []

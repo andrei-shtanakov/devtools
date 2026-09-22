@@ -1,0 +1,18 @@
+# Customer-маршрут E2 без инженерного брифа — N/A, не ERROR (R0-no-engineer-brief).
+edge: charter-vs-engineer-brief
+subject_role: charter
+basis_roles: [engineer-brief]
+items:
+  - id: R1
+    text: >-
+      Уточнения инженерного брифа (ограничения реализации, границы) отражены в
+      charter.
+  - id: R2
+    text: >-
+      Charter не противоречит инженерному брифу.
+severity:
+  blocking: [blocker, major]
+  advisory: [minor]
+applicability:
+  - id: R0-no-engineer-brief
+    role: engineer-brief

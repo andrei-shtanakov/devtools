@@ -1,0 +1,22 @@
+edge: acceptance-vs-requirements-behaviour
+subject_role: acceptance
+basis_roles: [requirements, behaviour-spec]
+items:
+  - id: R1
+    text: >-
+      Каждый сценарий BEH покрыт хотя бы одним критерием приёмки (AC-*) с
+      наблюдаемым исходом.
+  - id: R2
+    text: >-
+      Каждый Must-FR имеет критерий, различающий «выполнено» и «не выполнено».
+  - id: R3
+    text: >-
+      Критерий не утверждает больше, чем даёт сценарий: нет обязательств вне
+      требований.
+  - id: R4
+    text: >-
+      Критерий выполним без доступа к внутреннему состоянию.
+severity:
+  blocking: [blocker, major]
+  advisory: [minor]
+applicability: []

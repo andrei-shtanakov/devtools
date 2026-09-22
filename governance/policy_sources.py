@@ -136,7 +136,7 @@ def target_profile_declares(target_dir: str, profile: str, node_id: str) -> bool
 PROJECTION_MANIFEST = "PROJECTION.sha256"
 
 
-def _profile_levels(artifacts: list[dict]) -> dict[str, int]:
+def profile_levels(artifacts: list[dict]) -> dict[str, int]:
     """Уровни узлов по `upstream` ПРОФИЛЯ (не по `BUNDLE_DAG`).
 
     Порядок `artifacts` топологическим не предполагается (steward сортирует
@@ -162,7 +162,7 @@ def _profile_levels(artifacts: list[dict]) -> dict[str, int]:
 def _truncate_profile(source: bytes, level: int) -> bytes:
     """Детерминированная проекция полного профиля на узлы уровней ≤ `level`."""
     data = yaml.safe_load(source.decode("utf-8"))
-    lv = _profile_levels(data["artifacts"])
+    lv = profile_levels(data["artifacts"])
     data["artifacts"] = [a for a in data["artifacts"] if lv[a["id"]] <= level]
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True).encode("utf-8")
 

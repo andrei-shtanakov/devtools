@@ -1,0 +1,21 @@
+edge: decomposition-vs-design-acceptance
+subject_role: decomposition
+basis_roles: [design, acceptance]
+items:
+  - id: R1
+    text: >-
+      Каждый DT ссылается на решение дизайна или критерий приёмки, который он
+      реализует.
+  - id: R2
+    text: >-
+      Каждый критерий приёмки закрыт хотя бы одним DT (сценарии или delivers).
+  - id: R3
+    text: >-
+      DT не вводит обязательств, отсутствующих в дизайне и приёмке.
+  - id: R4
+    text: >-
+      Зависимости DT совместимы с порядком, который задаёт дизайн.
+severity:
+  blocking: [blocker, major]
+  advisory: [minor]
+applicability: []
