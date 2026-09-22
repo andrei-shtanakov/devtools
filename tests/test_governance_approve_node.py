@@ -2915,3 +2915,37 @@ def test_envelope_form_defect_names_each_deviation(world: World) -> None:
         world.state, world.ops, dag, rec, ["charter"], "0" * 40
     )
     assert defect is not None and "не читается" in defect
+
+
+def test_no_module_reads_the_allowlist_from_the_environment() -> None:
+    """Единственное чтение переменной — отказ S7 в `policy_snapshot`
+    (спека approval-policy §4.7). Страж ловит `os.environ.get(NAME)`,
+    `os.getenv(NAME)`, `os.environ[NAME]` и все три формы имени: константу
+    `APPROVER_ALLOWLIST_ENV`, атрибут `af.APPROVER_ALLOWLIST_ENV`, литерал."""
+    import pathlib
+
+    def names_the_key(node: ast.AST) -> bool:
+        return (
+            (isinstance(node, ast.Name) and node.id == "APPROVER_ALLOWLIST_ENV")
+            or (
+                isinstance(node, ast.Attribute)
+                and node.attr == "APPROVER_ALLOWLIST_ENV"
+            )
+            or (
+                isinstance(node, ast.Constant)
+                and node.value == "AUTHORIZED_APPROVER_ACCOUNTS"
+            )
+        )
+
+    hits: set[str] = set()
+    for path in pathlib.Path(an.__file__).parent.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            reads_env = (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "attr", "") in ("get", "getenv")
+                and any(names_the_key(a) for a in node.args)
+            ) or (isinstance(node, ast.Subscript) and names_the_key(node.slice))
+            if reads_env:
+                hits.add(path.name)
+    assert hits == {"approval_facts.py"}, hits

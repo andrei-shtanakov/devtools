@@ -1411,7 +1411,10 @@ class RealOps:
         text = blob.get("text") if isinstance(blob, dict) else None
         if (
             not isinstance(text, str)
-            or (isinstance(blob, dict) and (blob.get("isBinary") or blob.get("isTruncated")))
+            or (
+                isinstance(blob, dict)
+                and (blob.get("isBinary") or blob.get("isTruncated"))
+            )
         ):
             return unavailable(f"{what}: содержимое не прочитано")
         return Fact(Outcome.FOUND, text, f"{path}@{sha} прочитан")

@@ -51,11 +51,12 @@ def test_version_absent_when_branch_missing_or_history_empty(monkeypatch) -> Non
 
 def test_version_unavailable_on_rc_or_odd_shape(monkeypatch) -> None:
     _gh(monkeypatch, None, rc=1)
-    assert RealOps().policy_version_fact(REPO, BRANCH, PATH).outcome is Outcome.UNAVAILABLE
+    version = RealOps().policy_version_fact
+    assert version(REPO, BRANCH, PATH).outcome is Outcome.UNAVAILABLE
     _gh(monkeypatch, {"data": {"repository": None}})
-    assert RealOps().policy_version_fact(REPO, BRANCH, PATH).outcome is Outcome.UNAVAILABLE
+    assert version(REPO, BRANCH, PATH).outcome is Outcome.UNAVAILABLE
     _gh(monkeypatch, {"data": {"repository": {"ref": {"target": {}}}}})
-    assert RealOps().policy_version_fact(REPO, BRANCH, PATH).outcome is Outcome.UNAVAILABLE
+    assert version(REPO, BRANCH, PATH).outcome is Outcome.UNAVAILABLE
 
 
 def test_file_found_absent_unavailable(monkeypatch) -> None:

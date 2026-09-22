@@ -41,14 +41,13 @@ import hashlib
 import os
 import subprocess
 from collections.abc import Iterable
-from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 from governance import ssot_env
 from governance.facts import Fact, Outcome, unavailable
 from governance.ops import Ops
-
 
 # --- Факт: есть ли PR на ветке заявки -----------------------------------
 

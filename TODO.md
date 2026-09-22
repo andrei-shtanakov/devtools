@@ -1976,7 +1976,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       решает `@id:approver-policy-trusted-source` (источник вне
       проверяемого дерева), и второй, временный, разошёлся бы с ним.
       Регрессия: `test_finalize_without_policy_refuses_and_keeps_the_request`.
-- [ ] Политика подписи §I12 приходит из источника, который проверяющий не может изменить @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:approver-policy-trusted-source
+- [x] Политика подписи §I12 приходит из источника, который проверяющий не может изменить @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:approver-policy-trusted-source — PR этой ветки (код по плану #341)
       Наблюдаемый дефект (прогон S7, 2026-09-21): `--approve-node` после
       мержа сверяет фактического мержера против
       `AUTHORIZED_APPROVER_ACCOUNTS` из СВОЕГО окружения. Запусти
@@ -2020,7 +2020,18 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       дизайне: `docs/superpowers/specs/2026-09-22-approver-policy-trusted-source-design.md`
       + план `docs/superpowers/plans/2026-09-22-approver-policy-trusted-source.md`
       — spec и pair converged 2026-09-22 (локальный цикл Codex), **PR #341**
-      (драфт до подписи владельца под уточнением D3).
+      влит (D3 подписано). **Сделано PR этой ветки (Tasks 2–8 плана):** SSOT
+      координат под authority-root + общий `ssot_env.sh`; два GraphQL-факта
+      `Ops`; `policy_snapshot` с пятью отказами, `approver_allowlist` удалён,
+      AST-страж от возврата чтения из окружения; заявка закрепляет `policy`;
+      фаза 1 — одно решение о присоединении до чтения политики, фаза 2 —
+      перечитывание по пину, смена версии → `invalidated` с причиной
+      `policy_changed`; `human-merge.sh` сверяет логин и пин против репозитория
+      до мержа. **Не сделано здесь:** Task 1 — создание репозитория
+      `andrei-shtanakov/approval-policy` (отдельное разрешение владельца);
+      до него живой §I12-прогон отказывает «источник политики пуст» — это
+      fail-closed, а не дефект. Ловушка стенда: SHA в стабах обязаны быть hex
+      (`p`*40 не проходит разбор пина в скрипте). Правило волта — vault#147.
 - [x] Зелёный гейт не оставляет находки прошлого круга: `gate-findings.txt` отражает ПОСЛЕДНИЙ прогон гейта @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:gate-findings-stale-on-green — PR этой ветки
       Наблюдаемый дефект (прогон S7, 2026-09-21): круг 1 записал пять
       находок в 14:03; круг 2 прошёл чисто (`run.json` 14:53,

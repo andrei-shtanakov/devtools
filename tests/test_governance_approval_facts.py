@@ -10,12 +10,14 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import dataclass, field
 
 import pytest
 
 from governance import approval_facts as af
 from governance import ops as ops_mod
 from governance.approval_facts import Disposition, MergeEvent, Outcome
+from governance.facts import Fact, unavailable
 from governance.ops import RealOps
 
 
@@ -225,10 +227,6 @@ def test_incomplete_merge_facts_are_unavailable(missing: str, name: str) -> None
 
 # --- Подпись создаёт только авторизованная учётка ------------------------
 
-
-from dataclasses import dataclass, field
-
-from governance.facts import Fact, unavailable
 
 SHA_A, SHA_B = "a" * 40, "b" * 40
 
