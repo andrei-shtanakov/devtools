@@ -400,3 +400,17 @@ def test_request_pins_policy_snapshot_write_ahead(state: rs.RunState) -> None:
         state, WS_ID, 1, 0, 2, ["charter"], {"charter": "h"}, {"charter": {}},
     )
     assert rs.load(state.run_id).ops[legacy]["policy"] is None
+
+
+def test_request_records_source_sha(state: rs.RunState) -> None:
+    """Источник байтов узла заявки волны — коммит ветки волны (спека
+    sequential-node-approval S2/S4); без аргумента — байты из base."""
+    key = al.start_request(
+        state, WS_ID, 1, 0, 1, ["charter"], {"charter": "h"}, {"charter": {}},
+        source_sha="c" * 40,
+    )
+    assert rs.load(state.run_id).ops[key]["source_sha"] == "c" * 40
+    plain = al.start_request(
+        state, WS_ID, 1, 0, 2, ["charter"], {"charter": "h"}, {"charter": {}},
+    )
+    assert rs.load(state.run_id).ops[plain]["source_sha"] is None

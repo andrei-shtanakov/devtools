@@ -366,8 +366,13 @@ def start_request(
     content_hashes: dict[str, str],
     upstream_pins: dict[str, dict[str, str]],
     policy: dict[str, str] | None = None,
+    source_sha: str | None = None,
 ) -> str:
     """Write-ahead намерения заявки (§I4); → её ключ в леджере.
+
+    `source_sha` — коммит, из которого заявка берёт байты узлов (спека
+    sequential-node-approval S2/S4: ветка волны с авторскими байтами);
+    `None` — байты из base, как у одиночного `approve_node`.
 
     `policy` — закреплённая версия политики подписи (спека approval-policy
     §4.3: repo/ref/path/sha/fingerprint), тем же write'ом, что намерение;
@@ -399,6 +404,10 @@ def start_request(
         # Закреплённая версия политики подписи (спека approval-policy §4.3);
         # None — старый формат, фаза 2 объявит его invalidated (§4.6).
         "policy": dict(policy) if policy else None,
+        # Источник байтов узлов заявки: коммит ветки волны (S4) либо None —
+        # base. Фиксируется write-ahead: снимок заявки без источника
+        # нельзя ни привести к ветке, ни сверить на повторе.
+        "source_sha": source_sha,
         "branch": approval_branches.candidate_branch(
             ws_id, wave, step, attempt
         ),
