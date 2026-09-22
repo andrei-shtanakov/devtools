@@ -198,6 +198,7 @@ def _mk_run(run_id: str, subject: str, repo: str = "alpha", **kw) -> rs.RunState
         bundle_dir="workstreams/x/spec",
         profile="profiles/team-exp.yaml",
         run_id=run_id,
+        authoring=kw.get("authoring", "legacy"),
     )
     state.status = kw.get("status", "running")
     rs.save(state)
@@ -543,6 +544,19 @@ def test_cli_rejects_merge_authority_override(capsys) -> None:
 # --- маршрутизация ---------------------------------------------------------
 
 
+def _seed_wave_candidate(state: rs.RunState, wave: int, pr: int) -> None:
+    """Леджер волнового прогона на паузе: заявка волны с candidate-PR."""
+    key = f"approve-1-{wave - 1}-1"
+    state.ops[key] = {
+        "status": "started", "wave": 1, "step": wave - 1, "attempt": 1,
+        "nodes": ["charter"], "candidate_pr": pr,
+    }
+    state.ops[f"candidate-{wave}"] = {
+        "status": "completed", "request": key, "candidate_pr": pr,
+    }
+    state.wave = wave
+
+
 class _LoopEnv:
     """Подмены runner.start/resume и deliver_for_run с записью вызовов."""
 
@@ -596,8 +610,11 @@ class _LoopEnv:
                 if kwargs.get("brief_source") else None
             ),
             interview=interview,
+            authoring=kwargs.get("authoring", "legacy"),
         )
         state.status = "waiting_interview" if interview else "waiting_human_merge"
+        if state.authoring == "waves":
+            _seed_wave_candidate(state, 1, 501)
         if self.start_override is not None:
             state.status, session_id = self.start_override
             if state.interview is not None:
@@ -1245,3 +1262,157 @@ def test_need_with_run_id_on_repeat_is_allowed(
     st = _make_need_run(env)
     env.resume_result = st
     assert spec_loop.main(_need("--run-id", "r-a")) == 0
+
+
+# --- Волновой режим кнопки (план Task 11, S13) ------------------------------
+
+
+def test_waves_flag_starts_a_wave_run_and_names_the_candidate(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main(
+        ["--subject", "Fleet Inbox", "--repo", "alpha", "--waves"]
+    )
+    assert rc == 0
+    kwargs = env.calls[0][1]
+    assert kwargs["authoring"] == "waves"
+    assert kwargs["merge_authority"] == "human"
+    out = capsys.readouterr().out
+    assert "authoring:" in out and "waves" in out
+    assert "wave=1/5" in out and "candidate-PR #501" in out
+    assert "бандл-PR" not in out
+
+
+def test_default_start_is_legacy(runs_root, tmp_path, monkeypatch) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
+    assert env.calls[0][1]["authoring"] == "legacy"
+
+
+def test_wave_resume_pause_names_wave_and_pr(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    state = _mk_run(
+        "fleet-inbox-20260901-abc123", "Fleet Inbox",
+        ws_id="fleet-inbox-20260901", status="waiting_human_merge",
+        target_dir=str(tmp_path / "alpha"), authoring="waves",
+    )
+    _seed_wave_candidate(state, 3, 640)
+    rs.save(state)
+    env = _LoopEnv(monkeypatch, tmp_path, resume_result=state)
+    rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
+    assert rc == 0 and env.calls == [("resume", "fleet-inbox-20260901-abc123")]
+    out = capsys.readouterr().out
+    assert "wave=3/5" in out and "candidate-PR #640" in out
+    # finalize остался человеку (аттестация не опубликована) — назван он.
+    state.ops["approve-1-2-1"]["finalize_pr"] = 641
+    state.ops["finalize-3"] = {"status": "completed", "finalize_pr": 641, "review_exit": 6}
+    rs.save(state)
+    spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
+    assert "finalize-PR #641" in capsys.readouterr().out
+
+
+class _WaveRecoveryOps:
+    def __init__(self, prs, states=None):
+        self.prs = prs
+        self.states = states or {}
+        self.prefixes: list[str] = []
+
+    def prs_by_head_prefix(self, repo_slug, branch_prefix):
+        self.prefixes.append(branch_prefix)
+        return self.prs
+
+    def pr_facts(self, repo_slug, pr):
+        return {
+            "state": self.states.get(pr, "MERGED"), "baseRefName": "master",
+            "headRefOid": "b" * 40,
+        }
+
+    def pr_files(self, repo_slug, pr):
+        return []
+
+
+def _wave_pr(number, wave, step, attempt, *, final=False, run_id="fleet-inbox-20260901-a1b2c3",
+             ws_id="fleet-inbox-20260901"):
+    branch = f"spec/{ws_id}-approve-{wave}-{step}-{attempt}" + ("-final" if final else "")
+    body = "" if final else f"Предложение об одобрении узлов бандла {ws_id} (§I12).\n\nrun-id: {run_id}\n"
+    return {"number": number, "head": {"ref": branch}, "title": "x", "body": body}
+
+
+def _wave_recovery_env(tmp_path, monkeypatch, ops):
+    target = tmp_path / "alpha"
+    (target / ".git").mkdir(parents=True)
+    (tmp_path / "manifest.toml").write_text(MANIFEST, encoding="utf-8")
+    monkeypatch.setattr(spec_loop, "MANIFEST_PATH", tmp_path / "manifest.toml")
+    monkeypatch.setattr(spec_loop, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(spec_loop, "_origin_url", lambda _d: "git@github.com:owner/alpha.git")
+    monkeypatch.setattr(spec_loop, "_real_ops", lambda: ops)
+
+
+def test_missing_ledger_recovers_wave_run_from_candidate_prs(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    ops = _WaveRecoveryOps([
+        _wave_pr(10, 1, 0, 1), _wave_pr(11, 1, 0, 1, final=True),
+        _wave_pr(12, 1, 1, 1), _wave_pr(13, 1, 1, 1, final=True),
+    ])
+    _wave_recovery_env(tmp_path, monkeypatch, ops)
+    seen: list[str] = []
+
+    def _resume(run_id, passed_ops):
+        state = rs.load(run_id)
+        seen.append(run_id)
+        assert state.authoring == "waves" and state.wave == 2
+        assert state.ops["candidate-1"]["request"] == "approve-1-0-1"
+        assert state.ops["candidate-2"] == {
+            "status": "completed", "request": "approve-1-1-1", "candidate_pr": 12,
+        }
+        assert state.ops["approve-1-1-1"]["status"] == "completed"
+        assert state.ops["approve-1-1-1"]["finalize_pr"] == 13
+        assert state.base_ref == "master" and state.pr is None
+        assert state.ops["ledger-recovery"]["kind"] == "waves"
+        state.wave = 3
+        _seed_wave_candidate(state, 3, 14)
+        rs.save(state)
+        return state
+
+    monkeypatch.setattr(spec_loop.runner, "resume", _resume)
+    rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
+    assert rc == 0 and seen == ["fleet-inbox-20260901-a1b2c3"]
+    assert ops.prefixes == ["spec/fleet-inbox-", "spec/fleet-inbox-"]
+    out = capsys.readouterr().out
+    assert "восстановлен из candidate-PR волн (последняя — #12, волна 2)" in out
+    assert "wave=3/5" in out and "candidate-PR #14" in out
+
+
+@pytest.mark.parametrize(
+    ("prs", "states", "message"),
+    [
+        ([_wave_pr(10, 1, 0, 1), _wave_pr(11, 1, 0, 1, final=True)], {11: "OPEN"}, "в полёте"),
+        ([_wave_pr(10, 1, 0, 1)], {}, "finalize-PR волны"),
+        ([_wave_pr(10, 1, 0, 1, run_id="") | {"body": "без run-id"},
+          _wave_pr(11, 1, 0, 1, final=True)], {}, "run-id"),
+        ([_wave_pr(10, 1, 0, 1), _wave_pr(11, 1, 0, 1, final=True),
+          _wave_pr(12, 1, 1, 1, run_id="other-run"), _wave_pr(13, 1, 1, 1, final=True)],
+         {}, "разные run-id"),
+        ([_wave_pr(10, 1, 0, 1), _wave_pr(15, 1, 0, 1), _wave_pr(11, 1, 0, 1, final=True)],
+         {}, "несколько MERGED candidate-PR"),
+    ],
+)
+def test_wave_recovery_refusals(
+    runs_root, tmp_path, monkeypatch, capsys, prs, states, message
+) -> None:
+    _wave_recovery_env(tmp_path, monkeypatch, _WaveRecoveryOps(prs, states))
+    rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
+    assert rc == 1 and message in capsys.readouterr().out
+
+
+def test_wave_recovery_with_no_candidates_starts_a_new_run(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    ops = _WaveRecoveryOps([_wave_pr(10, 1, 0, 1, ws_id="other-subject-20260901")])
+    env = _LoopEnv(monkeypatch, tmp_path)
+    monkeypatch.setattr(spec_loop, "_real_ops", lambda: ops)
+    rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
+    assert rc == 0 and [c[0] for c in env.calls] == ["start"]

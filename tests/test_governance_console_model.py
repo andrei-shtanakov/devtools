@@ -272,3 +272,40 @@ def test_detail_to_json_roundtrips(runs_root) -> None:
     assert payload["row"]["run_id"] == "r-0008"
     assert payload["ops"][0] == ["branch", "new"]
     assert payload["verdict_reason"] is None
+
+
+# --- Волновой режим (план Task 11) -----------------------------------------
+
+
+def test_wave_run_pipeline_keys_and_step(runs_root) -> None:
+    s = rs.new_run(
+        subject="s", repo="alpha", repo_slug="o/alpha", ws_id="WS-W",
+        target_dir="/tmp/alpha", bundle_dir="spec",
+        profile="profiles/team-exp.yaml", run_id="r-waves", authoring="waves",
+    )
+    s.wave = 2
+    for key in ("branch-1", "author-charter", "commit-1", "gate-candidate-1",
+                "edge-1", "push-1", "candidate-1", "finalize-1", "branch-2"):
+        rs.op_start(s, key)
+        rs.op_complete(s, key)
+    s.ops["approve-1-1-1"] = {"status": "started", "candidate_pr": 640}
+    s.ops["candidate-2"] = {"status": "started", "request": "approve-1-1-1"}
+    rs.save(s)
+    keys = cm.pipeline_keys(s)
+    assert keys[:4] == ("branch-1", "materialize-brief-1", "author-charter", "commit-1")
+    assert "edge-1" in keys and "edge-2" in keys and "author-requirements" in keys
+    assert keys.index("author-requirements") > keys.index("finalize-1")
+    assert keys[-4:] == ("merge", "sync-default", "gate-authoritative", "remediation-issue")
+    assert "pr" not in keys and "review" not in keys
+    row = next(r for r in cm.list_runs() if r.run_id == "r-waves")
+    assert row.step == "author-requirements" and row.wave == 2
+    assert row.pr == 640, "в волнах показывается candidate-PR волны"
+    detail_keys = [k for k, _ in cm.run_detail("r-waves").ops]
+    assert "edge-1" in detail_keys and "materialize-brief-1" not in detail_keys
+    assert dict(cm.run_detail("r-waves").ops)["edge-1"] == "completed"
+
+
+def test_legacy_pipeline_keys_are_the_static_tuple(runs_root) -> None:
+    s = _mk("r-legacy-keys")
+    assert cm.pipeline_keys(s) == cm.PIPELINE_KEYS
+    assert cm.required_step_keys(s) == cm._REQUIRED_STEP_KEYS

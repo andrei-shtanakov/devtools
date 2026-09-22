@@ -10,6 +10,7 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from governance import bundle_dag
 from governance import run_state as rs
 from governance.bundle_state import candidate_state
 
@@ -65,6 +66,57 @@ _REQUIRED_STEP_KEYS: tuple[str, ...] = tuple(
 # только от условного `remediation-issue`.
 _TERMINAL_STATUSES: tuple[str, ...] = ("completed", "merged_unverified")
 
+# Хвост пайплайна после авторинга/публикации — общий для обоих режимов.
+_TAIL_KEYS: tuple[str, ...] = (
+    "merge", "sync-default", "gate-authoritative", "remediation-issue",
+)
+_AUTHOR_KEY_OF = {
+    "charter": "author-charter",
+    "requirements": "author-requirements",
+    "behaviour-spec": "author-behaviour",
+    "design": "author-design",
+    "acceptance": "author-acceptance",
+    "decomposition": "author-decomposition",
+}
+
+
+def pipeline_keys(state: rs.RunState) -> tuple[str, ...]:
+    """Порядок op-ключей ЭТОГО прогона: legacy — `PIPELINE_KEYS`; волны —
+    per-wave ключи (S10) волн 1..`state.wave` и общий хвост S8.
+
+    Статический кортеж `PIPELINE_KEYS` сохраняется как источник legacy и
+    для тестов FR-04; волновой порядок выводится из уровней DAG, а не
+    хардкодится второй раз.
+    """
+    if state.authoring != "waves":
+        return PIPELINE_KEYS
+    levels = bundle_dag.levels(bundle_dag.BUNDLE_DAG)
+    keys: list[str] = []
+    for wave in range(1, max(state.wave, 1) + 1):
+        keys += [f"branch-{wave}", f"materialize-brief-{wave}"]
+        keys += [
+            _AUTHOR_KEY_OF[node] for node in levels if levels[node] == wave - 1
+        ]
+        keys += [
+            f"commit-{wave}", f"gate-candidate-{wave}", f"edge-{wave}",
+            f"push-{wave}", f"candidate-{wave}", f"finalize-{wave}",
+        ]
+    return tuple(keys) + _TAIL_KEYS
+
+
+def required_step_keys(state: rs.RunState) -> tuple[str, ...]:
+    """Обязательные шаги прогона для «текущего шага» (без условного
+    `remediation-issue`; в волнах — и без `push-<w>`/`finalize-<w>`,
+    которые наступают не в каждой волне: push пропускает режим reapprove,
+    finalize — заявка, вмерженная агентом с первого захода)."""
+    conditional = {"remediation-issue"}
+    if state.authoring == "waves":
+        conditional |= {
+            key for key in pipeline_keys(state)
+            if key.startswith(("push-", "finalize-"))
+        }
+    return tuple(k for k in pipeline_keys(state) if k not in conditional)
+
 
 @dataclass(frozen=True)
 class RunRow:
@@ -75,6 +127,8 @@ class RunRow:
     step: str
     pr: int | None
     remediated_by: str | None
+    # Волна прогона (0 — legacy); показ волнового режима (Task 11).
+    wave: int = 0
 
 
 @dataclass(frozen=True)
@@ -100,8 +154,8 @@ def _current_step(state: rs.RunState) -> str:
     """
     if state.status in _TERMINAL_STATUSES:
         return "—"
-    for key in _REQUIRED_STEP_KEYS:
-        if key == "materialize-brief" and state.brief is None:
+    for key in required_step_keys(state):
+        if key.startswith("materialize-brief") and state.brief is None:
             continue
         if _op_status_of(state.ops, key) != "completed":
             return key
@@ -115,9 +169,20 @@ def _row_from_state(state: rs.RunState) -> RunRow:
         repo=state.repo,
         status=state.status,
         step=_current_step(state),
-        pr=state.pr,
+        pr=state.pr if state.pr is not None else _wave_pr(state),
         remediated_by=state.remediated_by,
+        wave=state.wave,
     )
+
+
+def _wave_pr(state: rs.RunState) -> int | None:
+    """В волнах бандл-PR нет: показывается candidate-PR текущей волны."""
+    if state.authoring != "waves":
+        return None
+    record = state.ops.get(f"candidate-{state.wave}") or {}
+    op = state.ops.get(record.get("request") or "") or {}
+    pr = op.get("candidate_pr")
+    return pr if isinstance(pr, int) else None
 
 
 def _corrupt_row(run_id: str) -> RunRow:
@@ -155,8 +220,8 @@ def run_detail(run_id: str) -> RunDetail:
     """Детальная карточка прогона: ops в порядке пайплайна, findings, verdict."""
     state = rs.load(run_id)
     visible_keys = tuple(
-        key for key in PIPELINE_KEYS
-        if key != "materialize-brief" or state.brief is not None
+        key for key in pipeline_keys(state)
+        if not key.startswith("materialize-brief") or state.brief is not None
     )
     ops = tuple((key, _op_status_of(state.ops, key)) for key in visible_keys)
     verdict_op = state.ops.get("verdict")

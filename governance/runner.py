@@ -507,6 +507,24 @@ def _upstream_ready(
     return "; ".join(problems) or None
 
 
+def wave_candidate_pr(state: RunState) -> int | None:
+    """Candidate-PR текущей волны по записи `candidate-<w>` (S10)."""
+    record = state.ops.get(wave_key(state, "candidate")) or {}
+    request = record.get("request")
+    op = state.ops.get(request) if request else None
+    pr = (op or {}).get("candidate_pr")
+    return pr if isinstance(pr, int) else None
+
+
+def wave_finalize_pr(state: RunState) -> int | None:
+    """Finalize-PR текущей волны, если заявка его уже завела."""
+    record = state.ops.get(wave_key(state, "candidate")) or {}
+    request = record.get("request")
+    op = state.ops.get(request) if request else None
+    pr = (op or {}).get("finalize_pr")
+    return pr if isinstance(pr, int) else None
+
+
 def reset_ops_for(state: RunState) -> tuple[str, ...]:
     """Op'ы, которые `resume` снимает для статуса прогона.
 
