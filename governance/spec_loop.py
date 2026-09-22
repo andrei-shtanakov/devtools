@@ -20,6 +20,14 @@
   неизвестный статус) — отчёт и ненулевой RC без скрытых ретраев и
   платных вызовов.
 
+Две модели авторинга (спека sequential-node-approval, S13): прежняя —
+один бандл-PR (выше); `--waves` — узлы едут волнами по уровням DAG, каждая
+волна своим candidate-PR (мерж = акт одобрения), паузы
+`waiting_human_merge` называют волну и candidate-PR, finalize мержит агент
+на resume; бандл-PR нет, и восстановление леджера из фактов GitHub для
+такого прогона идёт по candidate-PR последней волны (ветки заявок по
+шаблону `contracts/approval-branches/v1/patterns.env`).
+
 Инварианты кнопки (дизайн-решения владельца, 2026-09-07):
 
 - `merge_authority` жёстко `"human"` и НЕ переопределяется флагом —
@@ -54,7 +62,9 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from governance import brief_input, run_state as rs
+from governance import approval_branches
+from governance import approval_ledger as al
+from governance import brief_input, bundle_dag, run_state as rs
 from governance import runner, task_bridge
 from governance import interview as iv
 from governance import ops as ops_mod
@@ -81,6 +91,42 @@ _RUN_BODY_RE = re.compile(
     r"^Автоматический прогон governance runner'а "
     r"\((?P<run_id>[A-Za-z0-9][A-Za-z0-9._-]*)\)\.$"
 )
+#: Строка `run-id:` в теле candidate-PR волны (S2, m3): восстановление
+#: S13 находит прогон по ней.
+_WAVE_RUN_ID_RE = re.compile(
+    r"^run-id: (?P<run_id>[A-Za-z0-9][A-Za-z0-9._-]*)$", re.M
+)
+
+
+def _wave_branch_grammar(ws_id: str | None, slug: str) -> tuple[str, re.Pattern]:
+    """(префикс запроса, грамматика) веток заявок волн — ИЗ шаблона SSOT.
+
+    Имя ветки заявки не собирается здесь литералом (второе определение
+    разъехалось бы молча — гвард `test_no_second_definition_of_approval_
+    branch_names`): шаблон читается из `patterns.env` через
+    `approval_branches`, плейсхолдеры превращаются в именованные группы,
+    финализирующая форма — тот же шаблон плюс суффикс.
+    """
+    template = approval_branches.candidate_template()
+    suffix = approval_branches.finalize_suffix()
+    ws_group = (
+        re.escape(ws_id) if ws_id is not None else rf"{re.escape(slug)}-\d{{8}}"
+    )
+    groups = {
+        "ws_id": f"(?P<ws_id>{ws_group})",
+        "wave": r"(?P<wave>\d+)",
+        "step": r"(?P<step>\d+)",
+        "attempt": r"(?P<attempt>\d+)",
+    }
+    pattern = "^" + re.sub(
+        r"\\\{([A-Za-z_]+)\\\}", lambda m: groups[m.group(1)], re.escape(template)
+    ) + f"(?P<final>{re.escape(suffix)})?$"
+    head, _wave_placeholder, _ = template.partition("{wave}")
+    if ws_id is not None:
+        prefix = head.format(ws_id=ws_id)
+    else:
+        prefix = head.partition("{ws_id}")[0] + f"{slug}-"
+    return prefix, re.compile(pattern)
 
 
 class SpecLoopError(RuntimeError):
@@ -327,6 +373,181 @@ def _remote_branch_pattern(
     return prefix, re.compile(
         rf"^{re.escape(prefix)}(?P<started>\d{{8}})-behaviour$"
     )
+
+
+def recover_wave_run_from_github(
+    *,
+    subject: str,
+    repo: str,
+    repo_slug: str,
+    target_dir: str,
+    profile: str,
+    author_backend: str,
+    requested_ws_id: str | None,
+    requested_bundle_dir: str | None,
+    ops,
+) -> rs.RunState | None:
+    """Восстановить леджер ВОЛНОВОГО прогона по candidate-PR (S13).
+
+    Бандл-PR у волнового прогона нет; durable-факты — PR веток заявок
+    `(W, K, A)` и их финализирующих форм по шаблону `patterns.env`.
+    Последняя волна = максимальный `(W, K, A)` среди MERGED candidate;
+    тело candidate обязано нести `run-id:` (иначе восстанавливать нечем);
+    OPEN candidate/finalize — отказ «одобрение в полёте»; MERGED candidate
+    без MERGED finalize — тоже в полёте; несколько MERGED с одним
+    `(W, K, A)` — отказ с перечнем; ноль — `None` (новый прогон).
+
+    Восстановленный леджер: `authoring=waves`, `wave = K + 1`, заявки волн
+    ≤ K — `completed` по факту MERGED finalize-PR, `candidate-<w>` указывает
+    на них; статус `waiting_human_merge` — `runner.resume` увидит
+    завершённую заявку волны и сделает ровно один переход дальше.
+    """
+    if requested_ws_id is not None:
+        try:
+            rs.validate_id_component(requested_ws_id, label="ws_id")
+        except ValueError as exc:
+            raise SpecLoopError(str(exc)) from exc
+    prefix, grammar = _wave_branch_grammar(
+        requested_ws_id, slug_from_subject(subject)
+    )
+    try:
+        discovered = ops.prs_by_head_prefix(repo_slug, prefix)
+    except RuntimeError as exc:
+        raise SpecLoopError(
+            f"поиск candidate-PR волн для восстановления не удался: {exc}"
+        ) from exc
+    triples: dict[tuple[str, int, int, int], dict[str, list[dict]]] = {}
+    for item in discovered:
+        head = item.get("head")
+        branch = head.get("ref") if isinstance(head, dict) else None
+        if not isinstance(branch, str):
+            raise SpecLoopError(f"GitHub вернул PR без head.ref: {item!r}")
+        match = grammar.fullmatch(branch)
+        if match is None:
+            continue
+        ws_id = match.group("ws_id")
+        key = (ws_id, int(match.group("wave")), int(match.group("step")),
+               int(match.group("attempt")))
+        kind = "final" if match.group("final") else "candidate"
+        triples.setdefault(key, {"candidate": [], "final": []})[kind].append(item)
+    if not triples:
+        return None
+    ws_ids = {key[0] for key in triples}
+    if len(ws_ids) > 1:
+        raise SpecLoopError(
+            f"candidate-PR волн относятся к разным ws-id {sorted(ws_ids)!r}; "
+            "задайте --ws-id"
+        )
+    facts_of: dict[int, dict] = {}
+
+    def _facts(number: int) -> dict:
+        if number not in facts_of:
+            try:
+                facts_of[number] = ops.pr_facts(repo_slug, number)
+            except Exception as exc:
+                raise SpecLoopError(
+                    f"факты PR #{number} недоступны: {exc}"
+                ) from exc
+        return facts_of[number]
+
+    merged: dict[tuple[str, int, int, int], tuple[dict, dict]] = {}
+    run_ids: set[str] = set()
+    for key, prs in sorted(triples.items()):
+        for item in prs["candidate"] + prs["final"]:
+            number = item.get("number")
+            if not isinstance(number, int):
+                raise SpecLoopError(f"PR по ветке {item['head']['ref']!r} без number")
+            if _facts(number).get("state") == "OPEN":
+                raise SpecLoopError(
+                    f"PR #{number} ({item['head']['ref']}) ещё OPEN — одобрение "
+                    "волны в полёте; восстановление после мержа"
+                )
+        cands = [
+            c for c in prs["candidate"] if _facts(c["number"]).get("state") == "MERGED"
+        ]
+        if not cands:
+            continue
+        if len(cands) > 1:
+            raise SpecLoopError(
+                f"несколько MERGED candidate-PR с одним (W, K, A)={key[1:]!r}: "
+                f"{[c['number'] for c in cands]!r}; восстановите леджер вручную"
+            )
+        finals = [
+            f for f in prs["final"] if _facts(f["number"]).get("state") == "MERGED"
+        ]
+        if not finals:
+            raise SpecLoopError(
+                f"candidate-PR #{cands[0]['number']} вмержен, а finalize-PR "
+                f"волны (W, K, A)={key[1:]!r} не вмержен — одобрение в "
+                "полёте; доведите finalize и повторите"
+            )
+        body_match = _WAVE_RUN_ID_RE.search(cands[0].get("body") or "")
+        if body_match is None:
+            raise SpecLoopError(
+                f"candidate-PR #{cands[0]['number']} без `run-id:` в теле — "
+                "восстановить нечем"
+            )
+        run_ids.add(body_match.group("run_id"))
+        merged[key] = (cands[0], finals[-1])
+    if not merged:
+        return None
+    if len(run_ids) != 1:
+        raise SpecLoopError(
+            f"candidate-PR волн несут разные run-id {sorted(run_ids)!r}; "
+            "восстановите леджер вручную"
+        )
+    run_id = run_ids.pop()
+    ws_id, _w, last_step, _a = max(merged)
+    if run_id in rs.all_run_ids():
+        raw = (rs.run_dir(run_id) / "run.json").read_text(encoding="utf-8")
+        if raw.strip():
+            existing = rs.load(run_id)
+            if (existing.repo, existing.subject, existing.ws_id) != (
+                repo, subject, ws_id,
+            ):
+                raise SpecLoopError(
+                    f"run-id {run_id!r} из candidate-PR занят другим локальным "
+                    "ledger; автоматическое восстановление запрещено"
+                )
+            return existing
+    last_cand, _ = merged[max(merged)]
+    base_ref = _facts(last_cand["number"]).get("baseRefName")
+    if not isinstance(base_ref, str) or not base_ref:
+        raise SpecLoopError(
+            f"candidate-PR #{last_cand['number']} не несёт baseRefName"
+        )
+    bundle_dir = requested_bundle_dir or f"workstreams/{ws_id}/spec"
+    state = rs.new_run(
+        subject=subject, repo=repo, repo_slug=repo_slug, ws_id=ws_id,
+        target_dir=target_dir, bundle_dir=bundle_dir, profile=profile,
+        run_id=run_id, merge_authority="human", author_backend=author_backend,
+        authoring="waves",
+    )
+    state.wave = last_step + 1
+    state.base_ref = base_ref
+    for (_ws, wave, step, attempt), (cand, final) in merged.items():
+        key = al.request_key(wave, step, attempt)
+        state.ops[key] = {
+            "status": al.STATUS_COMPLETED, "wave": wave, "step": step,
+            "attempt": attempt, "nodes": [], "candidate_pr": cand["number"],
+            "finalize_pr": final["number"], "recovered": "github",
+        }
+        state.ops[f"candidate-{step + 1}"] = {
+            "status": "completed", "request": key, "candidate_pr": cand["number"],
+        }
+    state.status = "waiting_human_merge"
+    state.ops["ledger-recovery"] = {
+        "status": "completed", "source": "github", "kind": "waves",
+        "last_candidate_pr": last_cand["number"], "profile": profile,
+        "profile_source": "current-invocation-not-github",
+    }
+    rs.save(state)
+    print(
+        f"spec-loop: локальный ledger отсутствовал; восстановлен из "
+        f"candidate-PR волн (последняя — #{last_cand['number']}, "
+        f"волна {last_step + 1}), run-id={run_id}"
+    )
+    return state
 
 
 def recover_run_from_github(
@@ -590,9 +811,36 @@ def _print_values(values: dict[str, object]) -> None:
         print(f"{key + ':':<{width + 1}} {value}")
 
 
+def _pause_message(state: rs.RunState) -> str:
+    """Что ждёт кнопка на `waiting_human_merge` — по модели авторинга."""
+    if state.authoring != "waves":
+        return (
+            f"ждём мерж бандл-PR #{state.pr} ({state.repo_slug}) — "
+            "после мержа повторите make spec-loop"
+        )
+    total = bundle_dag.wave_count(bundle_dag.BUNDLE_DAG)
+    finalize = runner.wave_finalize_pr(state)
+    candidate = runner.wave_candidate_pr(state)
+    if finalize is not None and (
+        (state.ops.get(f"finalize-{state.wave}") or {}).get("review_exit")
+    ):
+        return (
+            f"wave={state.wave}/{total}: finalize-PR #{finalize} "
+            f"({state.repo_slug}) остаётся человеку — после мержа повторите "
+            "make spec-loop"
+        )
+    return (
+        f"wave={state.wave}/{total}: ждём человеческий мерж candidate-PR "
+        f"#{candidate} ({state.repo_slug}) — это акт одобрения узлов волны "
+        "(§I12); после мержа повторите make spec-loop"
+    )
+
+
 _APPROVE_NODE_HINT = (
     "человеческая граница — одобрение узлов DAG (§I12): мерж бандл-PR "
-    "одобрением не является, и штамповать узлы доставке больше нечем. "
+    "одобрением не является, и штамповать узлы доставке больше нечем "
+    "(в волновом режиме, --waves, узлы одобряются по ходу авторинга — "
+    "candidate-PR каждой волны — и до этой границы прогон не доходит). "
     "По каждому долговому узлу из отказа выше, в топологическом порядке: "
     "`make behaviour-tasks ARGS='--run-id {run_id} --approve-node "
     "<node-id>'` → мерж candidate-PR ЧЕЛОВЕКОМ (это и есть акт) → "
@@ -704,10 +952,7 @@ def _dispatch(state: rs.RunState, ops) -> int:
     if state.status == "waiting_human_merge":
         after = runner.resume(state.run_id, ops)
         if after.status == "waiting_human_merge":
-            print(
-                f"ждём мерж бандл-PR #{after.pr} ({after.repo_slug}) — "
-                "после мержа повторите make spec-loop"
-            )
+            print(_pause_message(after))
             return 0
         if after.status == "completed":
             return _deliver_phase(after, ops)
@@ -726,10 +971,7 @@ def _dispatch(state: rs.RunState, ops) -> int:
         if after.status == "stopped_interview":
             return _report_interview_stop(after)
         if after.status == "waiting_human_merge":
-            print(
-                f"бандл-PR #{after.pr} создан ({after.repo_slug}) — "
-                "смержьте его и повторите make spec-loop"
-            )
+            print(_pause_message(after))
             return 0
         if after.status == "completed":
             return _deliver_phase(after, ops)
@@ -773,6 +1015,12 @@ def main(argv: list[str] | None = None) -> int:
         "--author-backend", choices=["codex", "disp"], default="codex"
     )
     parser.add_argument("--target-dir", help="override деривации из манифеста")
+    parser.add_argument(
+        "--waves", action="store_true",
+        help="волновой авторинг (спека sequential-node-approval): узлы "
+        "одобряются по уровням DAG candidate-PR каждой волны; дефолт — "
+        "прежний бандл-PR (до двух живых прогонов, S13)",
+    )
     # --merge-authority НАМЕРЕННО отсутствует: кнопка всегда передаёт
     # "human" (решение владельца 2026-09-07) — argparse отвергнет попытку.
     args = parser.parse_args(argv)
@@ -887,6 +1135,20 @@ def main(argv: list[str] | None = None) -> int:
                 requested_bundle_dir=args.bundle_dir,
                 ops=ops,
             )
+            if state is None:
+                # Бандл-PR нет — возможно, прогон волновой (S13): его
+                # durable-факты — candidate-PR волн.
+                state = recover_wave_run_from_github(
+                    subject=args.subject,
+                    repo=args.repo,
+                    repo_slug=entry.repo_slug,
+                    target_dir=target_dir,
+                    profile=args.profile,
+                    author_backend=args.author_backend,
+                    requested_ws_id=args.ws_id,
+                    requested_bundle_dir=args.bundle_dir,
+                    ops=ops,
+                )
             recovered = state is not None
         if recovered and supplied_brief is not None:
             raise SpecLoopError(
@@ -1001,6 +1263,7 @@ def main(argv: list[str] | None = None) -> int:
                     if interview_spec else "нет"
                 ),
                 "merge-authority": "human (жёстко, без override)",
+                "authoring": "waves" if args.waves else "legacy",
                 "действие": "start (новый прогон)",
             }
 
@@ -1021,6 +1284,7 @@ def main(argv: list[str] | None = None) -> int:
             author_backend=args.author_backend,
             brief_source=supplied_brief,
             interview_spec=interview_spec,
+            authoring="waves" if args.waves else "legacy",
         )
         print(f"статус прогона: {started.status}")
         if started.status == "waiting_interview":
@@ -1031,10 +1295,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if started.status == "waiting_human_merge":
-            print(
-                f"бандл-PR #{started.pr} создан ({started.repo_slug}) — "
-                "смержьте его и повторите make spec-loop"
-            )
+            print(_pause_message(started))
             return 0
         if started.status == "completed":
             return _deliver_phase(started, ops)

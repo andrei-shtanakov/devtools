@@ -2136,7 +2136,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       подтверждением, что мерж прошёл через `human-merge.sh`.
       Закрывает чекбокс `@id:spec-loop-need-stage` по §9.2.
 
-- [ ] Спека: последовательное одобрение узлов бандла — человеческий гейт переносится ВНУТРЬ авторинга, нижний узел пишется против уже одобренного и запиненного верхнего; три гейта (после `10-requirements`, после `15-behaviour-spec`, после пары `20-design`+`25-acceptance`), `30-decomposition` закрывается вместе с бандлом; `_step_authoring` перестаёт писать шесть узлов одним заходом, S5/S6/S7 повторяются на каждом гейте, паузы по идиому `waiting_human_merge` @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:sequential-node-approval @blocked_by:todo://devtools/approver-policy-trusted-source
+- [x] Спека: последовательное одобрение узлов бандла — человеческий гейт переносится ВНУТРЬ авторинга, нижний узел пишется против уже одобренного и запиненного верхнего; три гейта (после `10-requirements`, после `15-behaviour-spec`, после пары `20-design`+`25-acceptance`), `30-decomposition` закрывается вместе с бандлом; `_step_authoring` перестаёт писать шесть узлов одним заходом, S5/S6/S7 повторяются на каждом гейте, паузы по идиому `waiting_human_merge` @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:sequential-node-approval — код PR #346 (Tasks 1–11 плана); живая приёмка — отдельным пунктом ниже
       Решение владельца 2026-09-20 вместо нарезки предмета прогона на N
       бандлов (она снята). Проблема не в размере, а в связности: все шесть
       документов пишутся до первого одобрения, и правка одного тянет
@@ -2160,7 +2160,20 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `docs/superpowers/specs/2026-09-22-sequential-node-approval-design.md`
       + план `docs/superpowers/plans/2026-09-22-sequential-node-approval.md`
       — spec и pair converged 2026-09-22 (локальный цикл Codex), **PR #343**
-      (драфт до вычитки; код — после плана политики).
+      (влит после вычитки владельцем); код — **PR #346** после плана политики
+      (#344). Ловушки кода: правило состава переключает `state.authoring`, не
+      `source_sha`; `_upstream_ready` смотрит только уровни ниже (stale выше —
+      след каскада, режим `reapprove` волны решается по base на входе);
+      `publish_wave` сверяет голову существующего PR ДО push (иначе non-ff
+      вместо кода 4); `reset_ops_for(state)` вместо статической таблицы; в
+      волнах бандл-PR нет — `_stop_with_comment` без PR пишет
+      `stop-reason.txt` в каталог прогона. Компромисс S5 (проекция профиля
+      копией) — заявка соседу steward#187 (`gate-check --upto`).
+
+- [ ] Живая приёмка волнового режима (спека sequential-node-approval §6.3): `make spec-loop … ARGS='--brief … --waves'` на крошечном предмете; evidence `docs/evidence/<дата>-waves-live-run.md` — 6 человеческих актов, edge-check evidence и его ревью на каждом candidate, ноль платных ревью моделью на candidate/finalize, ноль правок узлов после одобрения без `--reopen`; после двух живых прогонов — дефолт `waves` и удаление прежнего пути (S13) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:waves-live-acceptance @blocked_by:todo://devtools/sequential-node-approval
+      Требует человеческих мержей candidate (пять на бандл) — акт владельца.
+      Предусловие учёток (S7): автор candidate/finalize ≠ `ai-prosto`,
+      иначе форджа не примет одобряющее ревью edge-check на свой же PR.
 
 - [ ] Спека: документы бандла как оракул проверки продукта — `15-behaviour-spec` и `25-acceptance` становятся набором адресуемых критериев, на которые ссылается исполнение и evidence прогона; продолжение существующей трассировки `бриф G-NN/FR-NN → requirements` вниз @owner:github:andrei-shtanakov @epic:eco.dark-factory @blocked_by:todo://devtools/sequential-node-approval @id:bundle-docs-as-oracle
       Порядок обязателен: оракул должен быть зафиксирован ДО появления
@@ -2172,7 +2185,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Затрагивает spec-runner — кросс-репная часть пойдёт заявкой по
       ADR-ECO-006, а не пунктом этого плана.
 
-- [ ] Смысловое ревью узлов бандла (`edge-check`): проверка «узел против его объявленных оснований по объявленным правилам» перед человеческим гейтом, с закрытым входом (содержимое в запросе, инструментов ноль), результатом с вычисленными хэшами всех прочитанных входов и identity правил, координатором бандла (ключ по содержимому, инвалидация как следствие ключа, готовность цепочки отдельно от актуальности) и публикующим адаптером (сверка входов с blob'ами выбранного SHA, один review со своим маркером, коды из словаря раннера) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:bundle-edge-check
+- [x] Смысловое ревью узлов бандла (`edge-check`): проверка «узел против его объявленных оснований по объявленным правилам» перед человеческим гейтом, с закрытым входом (содержимое в запросе, инструментов ноль), результатом с вычисленными хэшами всех прочитанных входов и identity правил, координатором бандла (ключ по содержимому, инвалидация как следствие ключа, готовность цепочки отдельно от актуальности) и публикующим адаптером (сверка входов с blob'ами выбранного SHA, один review со своим маркером, коды из словаря раннера) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:bundle-edge-check — срез 1 PR #291, срезы 2–3 (координатор + адаптер публикации) PR #346
       Дизайн — `docs/superpowers/specs/2026-09-21-edge-check-design.md`
       (согласован по секциям с владельцем 2026-09-21, ждёт вычитки).
       Повод не экономия, а дыра: после роутера области ревью
@@ -2197,10 +2210,16 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       приёмки v1.
       Срез 1 доставлен PR этой ветки: одна проверка, вызываемая оператором
       (`make edge-check`), каталог правил `contracts/edge-check/v1/`,
-      изоляция подтверждена opt-in smoke (`DEVTOOLS_EDGE_SMOKE=1`). Чего ещё
-      нет: состава рёбер из профиля, ключа результата и инвалидации,
-      готовности цепочки, леджера, публикации на PR — срезы 2 и 3 плана
-      `docs/superpowers/plans/2026-09-21-edge-check-v1.md`.
+      изоляция подтверждена opt-in smoke (`DEVTOOLS_EDGE_SMOKE=1`). Срезы 2 и
+      3 — PR #346 в составе волнового режима: `governance/edge_check/
+      coordinator.py` (состав рёбер из `upstream` профиля, ключ D9, леджер
+      попыток D10, основания из base; шесть новых каталогов правил, charter
+      разбит на два ребра из-за запрета «несколько оснований + applicability»
+      у загрузчика) и `governance/edge_check/publish.py` (поверхность D16,
+      evidence-коммит поверх головы заявки, одобряющее ревью с маркером
+      `ai-prosto-edge-check` под профилем review; CHANGES_REQUESTED человека
+      не гасится; коды 0/1/3/4). Батч-режим и интеграция с disputatio — вне
+      объёма (§6.4 частично: поузловой режим доставлен).
 
 - [x] E1 Вход конвейера из discovery-brief: `spec-loop --brief <path>` — бриф обязан пройти вендоренный gate_check (pass, иначе fail-closed), хэш брифа входит в `upstream_hashes` charter, бриф лежит нулевым узлом в `workstreams/<ws-id>/spec/` и едет бандл-PR-ом; промпты charter/requirements получают бриф как источник (G-NN/FR-NN переносятся с трассировкой), гвард «каждый Must-FR брифа встречается в requirements»; приёмка — живой прогон engineer-фрейм → бриф → spec-loop → approved tasks-спека → исполнение spec-runner @owner:github:andrei-shtanakov @id:spec-loop-brief-input
       Граница author ≠ execute discovery сохраняется: PR открывает конвейер,

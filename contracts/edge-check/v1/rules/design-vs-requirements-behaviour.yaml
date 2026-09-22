@@ -1,0 +1,22 @@
+edge: design-vs-requirements-behaviour
+subject_role: design
+basis_roles: [requirements, behaviour-spec]
+items:
+  - id: R1
+    text: >-
+      Каждое Must-требование и каждый сценарий BEH получают в дизайне названный
+      механизм (компонент, поток, решение) или явный отказ с причиной.
+  - id: R2
+    text: >-
+      Дизайн не противоречит требованиям и сценариям и не сужает их без
+      объявления.
+  - id: R3
+    text: >-
+      Каждое решение дизайна (D-*) прослеживается к требованию или сценарию.
+  - id: R4
+    text: >-
+      Состояния ошибок и границы authority из требований отражены в дизайне.
+severity:
+  blocking: [blocker, major]
+  advisory: [minor]
+applicability: []

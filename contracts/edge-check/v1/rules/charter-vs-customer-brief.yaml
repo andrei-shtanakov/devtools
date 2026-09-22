@@ -1,0 +1,19 @@
+# Бриф заказчика обязателен: у W1 нет других оснований (applicability пуст).
+edge: charter-vs-customer-brief
+subject_role: charter
+basis_roles: [customer-brief]
+items:
+  - id: R1
+    text: >-
+      Каждая цель и ограничение брифа заказчика отражены в charter или явно
+      отклонены с причиной.
+  - id: R2
+    text: >-
+      Charter не вводит целей, отсутствующих в брифе.
+  - id: R3
+    text: >-
+      Метрики charter выводимы из брифа.
+severity:
+  blocking: [blocker, major]
+  advisory: [minor]
+applicability: []

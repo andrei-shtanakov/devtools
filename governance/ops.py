@@ -180,6 +180,10 @@ class Ops(Protocol):
 
     def pr_reviews(self, repo_slug: str, pr: int) -> list[dict] | None: ...
 
+    def publish_review(
+        self, repo_slug: str, pr: int, *, event: str, body: str, marker: str
+    ) -> bool: ...
+
     def merge(
         self, repo_name: str, pr: int, sha: str, base: str | None = None
     ) -> int: ...
@@ -247,6 +251,10 @@ class Ops(Protocol):
     def gate_check_candidate(
         self, target_dir: str, bundle_dir: str, profile: str
     ) -> tuple[int, str]: ...
+
+    def edge_check_level(
+        self, state: object, run_dir: Path, wave: int, profile_path: Path
+    ) -> object: ...
 
     def create_issue(self, repo_slug: str, title: str, body: str) -> int: ...
 
@@ -1258,6 +1266,29 @@ class RealOps:
                 return None
         return found
 
+    def publish_review(
+        self, repo_slug: str, pr: int, *, event: str, body: str, marker: str
+    ) -> bool:
+        """Опубликовать ревью PR от учётки ревью-контура (профиль
+        `REVIEW_GH_CONFIG_DIR`, как `review-pr.sh`); True — опубликовано.
+
+        Тело ОБЯЗАНО нести маркер `<!-- <marker> … -->`: немаркированное
+        ревью неотличимо от человеческого, и повтор публикации не смог бы
+        опознать своё (edge-check D16). Отсутствие маркера — ошибка
+        вызывающего, не сети: ValueError, не False.
+        """
+        if f"<!-- {marker} " not in body:
+            raise ValueError(f"тело ревью без маркера {marker!r}")
+        env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
+        done = subprocess.run(
+            ["gh", "api", f"repos/{repo_slug}/pulls/{pr}/reviews",
+             "-f", f"event={event}", "-f", f"body={body}"],
+            capture_output=True, text=True, env=env,
+        )
+        if done.returncode != 0:
+            print(f"publish_review: rc={done.returncode}: {done.stderr.strip()}")
+        return done.returncode == 0
+
     def close_pr(self, repo_slug: str, pr: int, comment: str) -> bool:
         """`gh pr close --comment` под профилем ai-prosto; rc0->True.
 
@@ -1778,6 +1809,20 @@ class RealOps:
             cwd=target_dir, capture_output=True, text=True,
         )
         return done.returncode, done.stdout + done.stderr
+
+    def edge_check_level(
+        self, state: object, run_dir: Path, wave: int, profile_path: Path
+    ) -> object:
+        """Edge-check всех рёбер волны (спека sequential-node-approval S6).
+
+        Платный вызов ревьюера на каждое ребро — потому на `Ops`, как
+        `author` и `gate_check_candidate`: стенды подменяют исход, не
+        монкипатчат координатор. Возвращает `coordinator.LevelResult`
+        (импорт локальный: координатор сам зависит от `Ops`).
+        """
+        from governance.edge_check.coordinator import run_level
+
+        return run_level(state, self, run_dir, wave, profile_path)  # type: ignore[arg-type]
 
     def create_issue(self, repo_slug: str, title: str, body: str) -> int:
         """gh issue create -R <slug> --label inbox; номер из URL stdout."""

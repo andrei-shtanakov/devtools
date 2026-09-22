@@ -36,7 +36,13 @@ from governance import (
     decomposition_guard,
     design_guard,
 )
+from governance import approval_ledger as al
+from governance import approve_node as an
 from governance import interview as iv
+from governance.edge_check import coordinator as edge_coordinator
+from governance.edge_check import publish as edge_publish
+from governance.edge_check.rules import EdgeCheckError
+from governance.frontmatter import split_frontmatter
 from governance.merge_gate import PrFacts, decide
 from governance.facts import Outcome
 from governance.stale_adapter import blob_sha1
@@ -49,6 +55,8 @@ from governance.policy_sources import (
     build_authority,
     load_safety,
     target_profile_declares,
+    verify_wave_profile_dir,
+    wave_profile_dir,
 )
 from governance.run_state import (
     RunState,
@@ -61,6 +69,7 @@ from governance.run_state import (
     run_dir,
     save,
     validate_author_backend,
+    validate_authoring,
     validate_id_component,
     validate_merge_authority,
 )
@@ -279,6 +288,7 @@ def start(
     brief_source: brief_input.BriefSource | None = None,
     interview_spec: iv.InterviewSpec | None = None,
     allow_legacy_dt: bool = False,
+    authoring: str = "legacy",
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
@@ -304,6 +314,7 @@ def start(
     """
     validate_merge_authority(merge_authority)
     validate_author_backend(author_backend)
+    validate_authoring(authoring)
     if interview_spec is not None and brief_source is not None:
         raise ValueError("--need и --brief взаимоисключающи")
     blocker = _blocking_merged_unverified(ws_id)
@@ -341,6 +352,7 @@ def start(
         brief=brief_descriptor,
         interview=interview_spec.as_state() if interview_spec else None,
         allow_legacy_dt=allow_legacy_dt,
+        authoring=authoring,
     )
     save(state)
     return advance(state, ops)
@@ -376,26 +388,158 @@ def advance(state: RunState, ops: Ops) -> RunState:
     if op_status(state, "merge") == "completed":
         _step_s8(state, ops)
         return state
-    steps = (
-        _step_interview,
-        _step_branch,
-        _step_materialize_brief,
-        _step_authoring,
-        _step_commit,
-        _step_gate,
-        _step_push,
-        _step_pr,
-        _step_ready,
-        _step_review,
-        _step_verdict,
-        _step_s8,
-    )
+    steps = _WAVE_STEPS if _waves(state) else _LEGACY_STEPS
     for step in steps:
         if state.status != "running":
             break
         if not step(state, ops):
             break
     return state
+
+
+# --- Волновой режим (спека sequential-node-approval, S9/S10/S13) ----------
+
+
+def _waves(state: RunState) -> bool:
+    """`authoring: waves` — узлы едут волнами; run.json без поля — legacy."""
+    return state.authoring == "waves"
+
+
+def wave_key(state: RunState, base: str) -> str:
+    """Ключ op'а: per-wave (`<base>-<w>`, S10) в волнах, прежний в legacy."""
+    return f"{base}-{state.wave}" if _waves(state) else base
+
+
+def _wave_level(state: RunState) -> int:
+    """Уровень DAG текущей волны: волны 1-based, уровни 0-based (S1)."""
+    return state.wave - 1
+
+
+def _wave_branch(state: RunState) -> str:
+    """Ветка волны (S9): `spec/<ws>-behaviour-w<k>`; после переоткрытия —
+    `…-w<k>-r<n>` (S11): прежняя ветка уже пушилась, пересоздание под тем
+    же именем дало бы non-fast-forward."""
+    count = (state.ops.get(f"reopen-{state.wave}") or {}).get("count", 0)
+    suffix = f"-r{count}" if count else ""
+    return f"spec/{state.ws_id}-behaviour-w{state.wave}{suffix}"
+
+
+def _wave_mode(state: RunState) -> str:
+    """Режим волны: `author` (узлы уровня авторятся на ветке волны) либо
+    `reapprove` (§3.4: узлы уровня `stale` в base после переоткрытия выше —
+    edge-check + candidate над байтами base, без авторинга и push)."""
+    return str((state.ops.get(wave_key(state, "branch")) or {}).get("mode", "author"))
+
+
+def _decide_wave_mode(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+) -> tuple[str, str | None]:
+    """(`author`|`reapprove`, отказ): узлы уровня отсутствуют в base —
+    авторинг; все `stale` — переодобрение; переоткрытый узел этой волны —
+    авторинг; иное (`approved`/`approval_pending`/смесь) — отказ."""
+    level = _wave_level(state)
+    levels = bundle_dag.levels(dag)
+    base = state.base_ref or "master"
+    reopened = (state.ops.get(f"reopen-{state.wave}") or {}).get("node")
+    statuses: dict[str, str | None] = {}
+    for fname, _ in dag:
+        node = bundle_dag.node_id(fname)
+        if levels[node] != level:
+            continue
+        text = ops.show_file(state.target_dir, base, f"{state.bundle_dir}/{fname}")
+        statuses[node] = (
+            str(split_frontmatter(text)[0].get("status")) if text is not None else None
+        )
+    if reopened in statuses:
+        return "author", None
+    if all(v is None for v in statuses.values()):
+        return "author", None
+    if all(v == "stale" for v in statuses.values()):
+        return "reapprove", None
+    return "author", (
+        f"узлы уровня {level} в base уже в статусах "
+        f"{ {k: v for k, v in statuses.items()} } — авторить или переодобрять "
+        "нечего; переписать узел — `--reopen <node>`"
+    )
+
+
+def _wave_dag() -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Активный DAG волнового раннера — полный (легаси-состава у него нет)."""
+    return bundle_dag.dag_for(None)
+
+
+def _author_steps_for(state: RunState) -> tuple[tuple[str, str, str], ...]:
+    """Шаги авторинга этого захода: в волнах — только узлы уровня волны."""
+    if not _waves(state):
+        return _AUTHOR_STEPS
+    levels = bundle_dag.levels(_wave_dag())
+    level = _wave_level(state)
+    return tuple(step for step in _AUTHOR_STEPS if levels[step[1]] == level)
+
+
+def _upstream_ready(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    level: int,
+) -> str | None:
+    """Инвариант 1 (§3.3): все узлы уровней < `level` `approved` в base —
+    в том числе не `stale` (переодобрение идёт по уровням снизу вверх,
+    §3.4); → текст отказа с именами узлов либо None. Уровни ≥ `level` не
+    смотрятся: `stale` выше — ожидаемый след каскада. Читается BASE, не
+    рабочее дерево: окончательные байты upstream появляются только после
+    finalize."""
+    levels = bundle_dag.levels(dag)
+    base = state.base_ref or "master"
+    problems: list[str] = []
+    for fname, _ in dag:
+        node = bundle_dag.node_id(fname)
+        if levels[node] >= level:
+            continue
+        text = ops.show_file(state.target_dir, base, f"{state.bundle_dir}/{fname}")
+        status = split_frontmatter(text)[0].get("status") if text is not None else None
+        if text is None:
+            problems.append(f"{node}: нет в base")
+        elif status != "approved":
+            problems.append(f"{node}: статус {status!r} в base, нужен approved")
+    return "; ".join(problems) or None
+
+
+def wave_candidate_pr(state: RunState) -> int | None:
+    """Candidate-PR текущей волны по записи `candidate-<w>` (S10)."""
+    record = state.ops.get(wave_key(state, "candidate")) or {}
+    request = record.get("request")
+    op = state.ops.get(request) if request else None
+    pr = (op or {}).get("candidate_pr")
+    return pr if isinstance(pr, int) else None
+
+
+def wave_finalize_pr(state: RunState) -> int | None:
+    """Finalize-PR текущей волны, если заявка его уже завела."""
+    record = state.ops.get(wave_key(state, "candidate")) or {}
+    request = record.get("request")
+    op = state.ops.get(request) if request else None
+    pr = (op or {}).get("finalize_pr")
+    return pr if isinstance(pr, int) else None
+
+
+def reset_ops_for(state: RunState) -> tuple[str, ...]:
+    """Op'ы, которые `resume` снимает для статуса прогона.
+
+    Legacy — прежние кортежи `_STOPPED_RESET_OPS`; волны — диапазон
+    ТЕКУЩЕЙ волны `commit-<w>`…`edge-<w>` (без push/ready/review: их в
+    волнах нет, публикацию делает шаг candidate), `stopped_stale`/
+    `stopped_dirty`/`stopped_preflight` — ничего, только статус.
+    """
+    if not _waves(state):
+        return _STOPPED_RESET_OPS.get(state.status, ())
+    if state.status in ("stopped_gate", "stopped_review", "stopped_author"):
+        return tuple(
+            wave_key(state, base) for base in ("commit", "gate-candidate", "edge")
+        )
+    return ()
 
 
 # stopped_author/stopped_gate/stopped_review: между стопом и resume человек
@@ -434,17 +578,22 @@ _STOPPED_RESET_OPS: dict[str, tuple[str, ...]] = {
     # обновлённый профиль PR-ом между стопом и resume). Пустой кортеж —
     # без него `resume()` был бы тихим no-op (инвариант F-1).
     "stopped_preflight": (),
+    # stopped_stale (волны, §3.4): в base есть stale ниже верхнего approved
+    # уровня — сбрасывать нечего, статус обратно в running, чтобы
+    # `_step_authoring` перечитал base после переодобрения уровней.
+    "stopped_stale": (),
 }
 
 
 def _reset_stopped_author(state: RunState) -> None:
     """stopped_author: незавершённые ``author-*`` + диапазон commit→review
     (круг 9) — та же логика, что `_BUNDLE_EDIT_RESET_OPS`, на случай, если
-    контент бандла успел измениться после починки."""
+    контент бандла успел измениться после починки. В волнах диапазон —
+    текущей волны (`reset_ops_for`)."""
     for key, _kind, _filename in _AUTHOR_STEPS:
         if op_status(state, key) != "completed":
             state.ops.pop(key, None)
-    for key in _BUNDLE_EDIT_RESET_OPS:
+    for key in reset_ops_for(state) if _waves(state) else _BUNDLE_EDIT_RESET_OPS:
         state.ops.pop(key, None)
 
 
@@ -500,6 +649,10 @@ def resume(run_id: str, ops: Ops) -> RunState:
             f"run {run_id!r} — merged_unverified навсегда; создайте "
             "verification-run через verify(...)"
         )
+    if _waves(state) and state.status != "completed":
+        resumed = _resume_wave(state, ops)
+        if resumed is not None:
+            return resumed
     if state.status == "waiting_human_merge":
         _reconcile_pr_merged_out_of_band(state, ops)
         return state
@@ -533,11 +686,265 @@ def resume(run_id: str, ops: Ops) -> RunState:
     if state.status in _STOPPED_RESET_OPS:
         if _reconcile_pr_merged_out_of_band(state, ops):
             return state
-        for key in _STOPPED_RESET_OPS[state.status]:
+        for key in reset_ops_for(state):
             state.ops.pop(key, None)
         state.status = "running"
         save(state)
         return advance(state, ops)
+    return advance(state, ops)
+
+
+def _resume_wave(state: RunState, ops: Ops) -> RunState | None:
+    """Resume волнового прогона по СОХРАНЁННОМУ ключу заявки (ревью #343, R3).
+
+    Заявка волны читается из `candidate-<w>` (`request`, write-ahead в
+    `_step_candidate`) — не `live_request_over` (исключает терминальные:
+    падение между `complete_request` и сохранением следующей волны
+    оставило бы resume без заявки) и не «последняя заявка узла» (после
+    `--reopen` у узла история попыток). Запись читается ВКЛЮЧАЯ
+    терминальные статусы:
+
+    - `completed` → волна завершена, ровно один переход к следующей
+      (`_next_wave`), без повторного candidate/review;
+    - `abandoned`/`invalidated` → `stopped_stale`-подобный стоп с причиной:
+      новый candidate — через `--reopen`;
+    - живая без `candidate_pr` / с незавершённым шагом candidate →
+      публикация доигрывается тем же шагом (`advance`);
+    - живая с открытым candidate → стоим (`waiting_human_merge`);
+    - candidate вмержен (или факт мержа уже записан) → `_finalize_wave`.
+
+    Реконсиляция «человек смержил, минуя раннер» здесь же — ключуется на
+    `candidate_pr` заявки, не на `state.pr` (S10), и применяется к любому
+    статусу, у которого заявка волны уже есть. `None` — заявки волны ещё
+    нет: вызывающий идёт обычным путём (сброс op'ов, `advance`).
+    """
+    record = state.ops.get(wave_key(state, "candidate")) or {}
+    request = record.get("request")
+    if request is None:
+        return None
+    op = state.ops.get(request)
+    if op is None:
+        _stop_with_comment(
+            state, ops, "stopped_review",
+            f"волна {state.wave}: заявка {request} записана в "
+            f"{wave_key(state, 'candidate')}, но в леджере её нет — "
+            "восстановить нечем",
+        )
+        return state
+    status = op.get("status")
+    if status == al.STATUS_COMPLETED:
+        return _next_wave(state, ops)
+    if status in al.TERMINAL_STATUSES:
+        _stop_with_comment(
+            state, ops, "stopped_stale",
+            f"волна {state.wave}: заявка {request} терминальна ({status}: "
+            f"{op.get('reason')!r}) — новый candidate заводится через "
+            "--reopen <node>",
+        )
+        return state
+    pr = op.get("candidate_pr")
+    if pr is None or record.get("status") != "completed":
+        # Публикация не дошла до конца (PR нет / ревью не опубликовано):
+        # доигрывает тот же шаг — он идемпотентен и знает свою заявку.
+        state.status = "running"
+        save(state)
+        return advance(state, ops)
+    if not op.get("merged_by"):
+        facts = ops.pr_facts(state.repo_slug, pr)
+        if facts.get("state") == "OPEN":
+            print(
+                f"resume: волна {state.wave} — candidate-PR #{pr} открыт, "
+                "ждём человеческого мержа"
+            )
+            if state.status != "waiting_human_merge":
+                state.status = "waiting_human_merge"
+                save(state)
+            return state
+    return _finalize_wave(state, ops, request)
+
+
+def _finalize_wave(state: RunState, ops: Ops, request: str) -> RunState:
+    """Finalize волны агентом на resume (S8): фаза 2 §I12 → scope-аттестация
+    finalize-PR → повторный approve-node (агентский мерж) → следующая волна.
+
+    Ненулевой код `ops.review` на finalize (6 — stop rule/бюджет, 2 —
+    прибор, доставленный CHANGES_REQUESTED) = «finalize остаётся
+    человеку», не `stopped_review`; отказ форджи на мерже — как сегодня,
+    человеку. Отказ `approve_node` с сохранённой заявкой (`_unresolved`) —
+    `stopped_review` с причиной, повтор resume; терминализация заявки
+    (`invalidated`) — `stopped_stale`, новый candidate через `--reopen`.
+    """
+    node = state.ops[request]["nodes"][0]
+    att_key = wave_key(state, "finalize")
+
+    def _approve() -> bool:
+        try:
+            an.approve_node(state, ops, node)
+        except RuntimeError as exc:
+            op_now = state.ops.get(request) or {}
+            if op_now.get("status") in al.TERMINAL_STATUSES:
+                _stop_with_comment(
+                    state, ops, "stopped_stale",
+                    f"волна {state.wave}: заявка {request} — "
+                    f"{op_now.get('status')}: {exc}. Новый candidate — "
+                    "через --reopen <node>",
+                )
+            else:
+                _stop_with_comment(
+                    state, ops, "stopped_review",
+                    f"волна {state.wave}: finalize заявки {request} не "
+                    f"продвинулся — {exc}",
+                )
+            return False
+        return True
+
+    if not _approve():
+        return state
+    op = state.ops[request]
+    if op["status"] == al.STATUS_COMPLETED:
+        return _next_wave(state, ops)
+    finalize_pr = op.get("finalize_pr")
+    if finalize_pr is None:
+        # Акта мержа candidate ещё нет — ждём человека.
+        if state.status != "waiting_human_merge":
+            state.status = "waiting_human_merge"
+            save(state)
+        return state
+    if op_status(state, att_key) != "completed":
+        _ensure_started(state, att_key)
+        rc = ops.review(state.repo, finalize_pr)
+        op_complete(state, att_key, finalize_pr=finalize_pr, review_exit=rc)
+        if rc != 0:
+            _wave_pause(
+                state, ops, finalize_pr,
+                f"Волна {state.wave}: finalize-PR #{finalize_pr} остаётся "
+                f"человеку — review-pr.sh вернул {rc} (аттестация не "
+                "опубликована). После мержа — resume.",
+            )
+            return state
+    if not _approve():
+        return state
+    op = state.ops[request]
+    if op["status"] == al.STATUS_COMPLETED:
+        return _next_wave(state, ops)
+    _wave_pause(
+        state, ops, finalize_pr,
+        f"Волна {state.wave}: finalize-PR #{finalize_pr} не вмержен агентом "
+        "(см. причину в выводе approve-node) — мерж человеком, затем resume.",
+    )
+    return state
+
+
+def reopen(
+    run_id: str, node: str, ops: Ops, *, manual: bool = False
+) -> RunState:
+    """`--reopen <node>` (S11, D2/D3): явное переоткрытие одобренного узла.
+
+    `state.wave` = уровень узла + 1; ветка волны — НОВЫМ именем
+    `…-w<k>-r<n>` от свежего base; op'ы волны и `author-<node>` сброшены;
+    файл узла удалён из worktree — иначе `_step_authoring` пропустил бы
+    существующий (approved) файл и candidate поехал бы над старыми
+    байтами. `manual` — `stopped_author` с подсказкой: оператор кладёт
+    файл сам и делает resume. Иначе — `advance`: авторинг заново → гейт →
+    edge-check → candidate над новым текстом (каскад `stale` нижним
+    ставит `_publish_candidate`, их байты не трогаются). Дальше прогон
+    идёт по уровням: каждый `stale` уровень — режим `reapprove` волны.
+
+    Отказы (ValueError, без эффектов): не волновой прогон, узел не из
+    DAG, живые заявки (открытый candidate/finalize — сперва мерж или
+    закрытие), прогон после последней волны (op `merge` — переоткрытие
+    через новый прогон). Грязное дерево — `stopped_dirty`.
+    """
+    state = load(run_id)
+    if not _waves(state):
+        raise ValueError("--reopen — только для прогона с authoring=waves")
+    dag = _wave_dag()
+    levels = bundle_dag.levels(dag)
+    if node not in levels:
+        raise ValueError(
+            f"узел {node!r} не входит в DAG; допустимы: {', '.join(levels)}"
+        )
+    live = [al.request_key(*nums) for nums, _ in al.live_requests(state)]
+    if live:
+        raise ValueError(
+            f"живые заявки {', '.join(live)} — дождитесь мержа либо "
+            "закройте их PR, затем повторите --reopen"
+        )
+    if op_status(state, "merge") == "completed":
+        raise ValueError(
+            "прогон прошёл последнюю волну — переоткрытие узла делается "
+            "новым прогоном"
+        )
+    if ops.is_dirty(state.target_dir):
+        print(f"reopen: target_dir {state.target_dir!r} грязный — не начато")
+        state.status = "stopped_dirty"
+        save(state)
+        return state
+    state.wave = levels[node] + 1
+    count = (state.ops.get(f"reopen-{state.wave}") or {}).get("count", 0) + 1
+    state.ops[f"reopen-{state.wave}"] = {
+        "status": "completed", "count": count, "node": node,
+    }
+    # Op'ы переоткрытой волны И ВСЕХ выше снимаются (ревью #346, major 2):
+    # каскад переведёт нижние узлы в `stale`, и каждая их волна обязана
+    # пройти новый edge-check и переодобрение; оставшиеся `completed`
+    # `branch-<w>`/`candidate-<w>` первого прохода выдали бы старую
+    # завершённую заявку за завершение текущей волны. Записи заявок
+    # (`approve-*`) остаются — это история.
+    total = bundle_dag.wave_count(dag)
+    for wave in range(state.wave, total + 1):
+        for base_key in (
+            "branch", "materialize-brief", "commit", "gate-candidate", "edge",
+            "push", "candidate", "finalize",
+        ):
+            state.ops.pop(f"{base_key}-{wave}", None)
+    filename = ""
+    for author_key, kind, fname in _AUTHOR_STEPS:
+        if kind == node:
+            state.ops.pop(author_key, None)
+            filename = fname
+    save(state)
+    base = state.base_ref or "master"
+    ops.checkout_and_pull(state.target_dir, base)
+    state.branch = _wave_branch(state)
+    ops.switch_to(state.target_dir, state.branch, base)
+    (Path(state.target_dir) / state.bundle_dir / filename).unlink(missing_ok=True)
+    op_complete(
+        state, wave_key(state, "branch"), branch=state.branch, mode="author",
+        reopen=count,
+    )
+    if manual:
+        print(
+            f"reopen: узел {node} снят с ветки {state.branch}; положите "
+            f"новый {state.bundle_dir}/{filename} в worktree и выполните "
+            "resume — гейт, edge-check и candidate пойдут над ним"
+        )
+        state.status = "stopped_author"
+        save(state)
+        return state
+    state.status = "running"
+    save(state)
+    return advance(state, ops)
+
+
+def _next_wave(state: RunState, ops: Ops) -> RunState:
+    """Ровно один переход: следующая волна либо S8 после последней.
+
+    После последней волны фиксируется op `merge` — та же метка «весь
+    пред-мержевой конвейер позади, осталась S8», по которой `advance` и
+    `resume` идут только в `_step_s8` (в волнах бандл-PR нет, мержей было
+    пять — по одному на candidate).
+    """
+    total = bundle_dag.wave_count(_wave_dag())
+    if state.wave >= total:
+        if op_status(state, "merge") != "completed":
+            op_complete(state, "merge", merged=True, waves=state.wave)
+        state.status = "running"
+        save(state)
+        return advance(state, ops)
+    state.wave += 1
+    state.status = "running"
+    save(state)
     return advance(state, ops)
 
 
@@ -817,6 +1224,14 @@ def _stop_with_comment(state: RunState, ops: Ops, status: str, body: str) -> Non
     """
     state.status = status
     save(state)
+    if state.pr is None:
+        # Волновой прогон до первого candidate-PR: комментировать нечего —
+        # причина стопа пишется в каталог прогона и в лог, не теряется.
+        (run_dir(state.run_id) / "stop-reason.txt").write_text(
+            body + "\n", encoding="utf-8"
+        )
+        print(f"_stop_with_comment ({status!r}): {body}")
+        return
     try:
         ops.comment(state.repo_slug, state.pr, body)
     except Exception as exc:  # noqa: BLE001 — best-effort, не должен ронять шаг
@@ -1176,6 +1591,8 @@ def _step_branch(state: RunState, ops: Ops) -> bool:
     ручной очистки — обычный `advance()`: `branch` так и не стартовала,
     проверка просто повторяется.
     """
+    if _waves(state):
+        return _step_wave_branch(state, ops)
     key = "branch"
     state.branch = f"spec/{state.ws_id}-behaviour"
     if op_status(state, key) == "completed":
@@ -1191,6 +1608,42 @@ def _step_branch(state: RunState, ops: Ops) -> bool:
     _ensure_started(state, key)
     ops.ensure_branch(state.target_dir, state.branch)
     op_complete(state, key)
+    return True
+
+
+def _step_wave_branch(state: RunState, ops: Ops) -> bool:
+    """S1 волны (S9): ветка волны ОТ СВЕЖЕГО BASE, не от текущего HEAD.
+
+    `checkout_and_pull(base)` + `switch_to(branch, base)` (`git switch -C`):
+    в base лежат upstream с конвертами — пины авторского агента совпадут с
+    base. Не `ensure_branch`: та ветвит от текущего HEAD, а после прошлой
+    волны HEAD стоит на её ветке. Отдельная ветка на волну: переписанная
+    история одной ветки давала бы non-ff на push. Грязное дерево на входе —
+    `stopped_dirty`, ничего не затирается молча.
+    """
+    key = wave_key(state, "branch")
+    if op_status(state, key) == "completed":
+        return True
+    if op_status(state, key) == "new" and ops.is_dirty(state.target_dir):
+        print(
+            f"_step_branch: target_dir {state.target_dir!r} грязный "
+            f"(git status --porcelain непуст) — волна {state.wave} не начата"
+        )
+        state.status = "stopped_dirty"
+        save(state)
+        return False
+    _ensure_started(state, key)
+    base = state.base_ref or "master"
+    ops.checkout_and_pull(state.target_dir, base)
+    mode, refusal = _decide_wave_mode(state, ops, _wave_dag())
+    if refusal is not None:
+        _stop_with_comment(
+            state, ops, "stopped_stale", f"волна {state.wave}: {refusal}"
+        )
+        return False
+    state.branch = _wave_branch(state)
+    ops.switch_to(state.target_dir, state.branch, base)
+    op_complete(state, key, branch=state.branch, mode=mode)
     return True
 
 
@@ -1215,7 +1668,7 @@ def _step_materialize_brief(state: RunState, ops: Ops) -> bool:
     """
     if state.brief is None:
         return True
-    key = "materialize-brief"
+    key = wave_key(state, "materialize-brief")  # per-wave (S9): дерево волны новое
     intake_root = run_dir(state.run_id) / "brief-input"
     try:
         source = brief_input.inspect_materialized(intake_root, ".")
@@ -1514,6 +1967,23 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     завершены (resume после S2, вручную собранный бандл), проверять
     нечего — несоответствие профиля поймает S4 (`gate-check --candidate`).
     """
+    if _waves(state):
+        # Инвариант 1 (§3.3): нижние уровни `approved` в base (и не stale).
+        # Читается ДО оплаченного авторинга; узел в `approval_pending`
+        # (открытый candidate) сюда штатно не доходит — resume ждёт мержа.
+        reason = _upstream_ready(state, ops, _wave_dag(), _wave_level(state))
+        if reason is not None:
+            _stop_with_comment(
+                state, ops, "stopped_stale",
+                f"волна {state.wave}: авторинг уровня {_wave_level(state)} "
+                f"невозможен — {reason}. Переодобрите нижние уровни "
+                "(resume ведёт их по уровням) и повторите resume",
+            )
+            return False
+        if _wave_mode(state) == "reapprove":
+            # §3.4: узлы уровня `stale` в base — байты не трогаются (D2),
+            # проверка и candidate идут над base. Авторить нечего.
+            return True
     authoring_pending = any(
         op_status(state, key) != "completed" for key, _, _ in _AUTHOR_STEPS
     )
@@ -1530,7 +2000,7 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 state.status = "stopped_preflight"
                 save(state)
                 return False
-    for key, kind, filename in _AUTHOR_STEPS:
+    for key, kind, filename in _author_steps_for(state):
         if kind == "behaviour-spec" and state.brief is not None:
             descriptor = state.brief
             source_rel = descriptor.get("requirements_source")
@@ -1697,13 +2167,14 @@ def _step_commit(state: RunState, ops: Ops) -> bool:
     -A` сгребал бы в этот коммит и чужие незакоммиченные изменения где
     угодно в `target_dir` — заменено на явный список путей.
     """
-    key = "commit"
+    key = wave_key(state, "commit")
     if op_status(state, key) == "completed":
         return True
     _ensure_started(state, key)
     _commit_bundle(
         state, ops,
-        f"docs(governance): behaviour bundle {state.ws_id} — {state.subject}",
+        f"docs(governance): behaviour bundle {state.ws_id} — {state.subject}"
+        + (f" (волна {state.wave})" if _waves(state) else ""),
     )
     if state.brief is not None and not _source_layer_committed(state, ops):
         return False
@@ -1813,10 +2284,32 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     candidate_state остаётся у консоли (bundle_summary) — её view-model этот
     шаг не трогает.
     """
-    key = "gate-candidate"
+    key = wave_key(state, "gate-candidate")
     if op_status(state, key) == "completed":
         return True
     _ensure_started(state, key)
+    profile_arg = state.profile
+    if _waves(state):
+        # S5: гейт steward судит бандл по профилю, а у волны бандл неполон —
+        # копия каталога профиля с усечением до уровней ≤ wave−1, sha256
+        # siblings сверяется НЕПОСРЕДСТВЕННО перед вызовом. Компромисс
+        # назван в `wave_profile_dir`; целевое состояние — `--upto` у steward.
+        projected = wave_profile_dir(
+            state.target_dir, state.profile, state.wave, run_dir(state.run_id)
+        )
+        mismatch = verify_wave_profile_dir(
+            state.target_dir, state.profile, projected, _wave_level(state)
+        )
+        if mismatch:
+            (run_dir(state.run_id) / "gate-findings.txt").write_text(
+                "error GC-PROFILE-PROJECTION: проекция профиля не совпала с "
+                f"профилем target: {', '.join(mismatch)}\n",
+                encoding="utf-8",
+            )
+            state.status = "stopped_gate"
+            save(state)
+            return False
+        profile_arg = str(projected)
     # `gate-findings.txt` отражает ПОСЛЕДНИЙ прогон гейта
     # (@id:gate-findings-stale-on-green, прогон S7 2026-09-21): круг 1
     # записал находки, круг 2 прошёл чисто, файл остался — читающий видел
@@ -1826,7 +2319,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # состояния. Каждая ветка ниже пишет файл заново целиком.
     (run_dir(state.run_id) / "gate-findings.txt").unlink(missing_ok=True)
     rc, output = ops.gate_check_candidate(
-        state.target_dir, state.bundle_dir, state.profile
+        state.target_dir, state.bundle_dir, profile_arg
     )
     if rc != 0:
         (run_dir(state.run_id) / "gate-findings.txt").write_text(
@@ -1836,6 +2329,13 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         state.status = "stopped_gate"
         save(state)
         return False
+    # Волны (S5): локальная полнота — по уровням ≤ wave−1, иначе гард
+    # останавливал бы каждую волну до W4 за отсутствующий design.
+    in_scope = (
+        {bundle_dag.node_id(f) for f, _ in bundle_dag.dag_upto(_wave_dag(), _wave_level(state))}
+        if _waves(state)
+        else None
+    )
     # Гард отсутствия design/decomposition (спека Task 4, обобщено Task 6):
     # required-узел — локальный (не через bundle_state.candidate_state — та
     # остаётся у консоли, runner без импорта steward). MINOR-1 финального
@@ -1859,7 +2359,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         node_paths[node] = Path(state.target_dir) / state.bundle_dir / node_file
         node_required = target_profile_declares(
             state.target_dir, state.profile, node
-        )
+        ) and (in_scope is None or node in in_scope)
         if node_required and not node_paths[node].exists():
             (run_dir(state.run_id) / "gate-findings.txt").write_text(
                 f"error GC-COMPLETENESS({node}): required-узел {node} "
@@ -2224,6 +2724,180 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         )
     op_complete(state, key, exit=rc)
     return True
+
+
+def _step_edge(state: RunState, ops: Ops) -> bool:
+    """Edge-check волны (S6, D4): обязателен, обхода нет; legacy — no-op.
+
+    `PASS` (включая `N/A` по applicability) — op завершён; `FAIL` —
+    `stopped_review` с находками в `edge-findings.txt` (файл снимается на
+    входе — класс #338); `ERROR`/невозможность (нет ревьюера, неполный
+    вход, набора правил нет) — `stopped_review` с `error_code`. Результаты
+    лежат в каталоге прогона (леджер D12), не в worktree цели.
+    """
+    if not _waves(state):
+        return True
+    key = wave_key(state, "edge")
+    if op_status(state, key) == "completed":
+        return True
+    _ensure_started(state, key)
+    findings_path = run_dir(state.run_id) / "edge-findings.txt"
+    findings_path.unlink(missing_ok=True)
+    projected = (
+        run_dir(state.run_id) / f"profile-w{state.wave}" / Path(state.profile).name
+    )
+    try:
+        result = ops.edge_check_level(
+            state, run_dir(state.run_id), state.wave, projected
+        )
+    except EdgeCheckError as exc:
+        findings_path.write_text(
+            f"error EDGE-CHECK({exc.code}): {exc}\n", encoding="utf-8"
+        )
+        state.status = "stopped_review"
+        save(state)
+        return False
+    records = getattr(result, "records", {})
+    verdict = getattr(result, "verdict", "ERROR")
+    if verdict == "PASS":
+        op_complete(
+            state, key, verdict=verdict,
+            edges={f"{n}--{e}": r["verdict"] for (n, e), r in records.items()},
+        )
+        return True
+    lines: list[str] = []
+    for (node, edge), record in records.items():
+        if record["verdict"] == "ERROR":
+            lines.append(
+                f"error EDGE-CHECK({node}/{edge}): "
+                f"{record.get('error_code', 'error')}: {record.get('reason', '')}"
+            )
+        for finding in record.get("findings", []):
+            loc = finding.get("location") or {}
+            lines.append(
+                f"error EDGE-CHECK({node}/{edge}): {finding.get('rule_id')} "
+                f"{finding.get('class')}: {finding.get('statement')} "
+                f"@ {loc.get('path')}:{loc.get('lines')}"
+            )
+        if record["verdict"] == "FAIL" and not record.get("findings"):
+            lines.append(
+                f"error EDGE-CHECK({node}/{edge}): FAIL по статусу пунктов "
+                "без находок"
+            )
+    findings_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    state.status = "stopped_review"
+    save(state)
+    return False
+
+
+def _wave_pause(state: RunState, ops: Ops, pr: int, body: str) -> None:
+    """`waiting_human_merge` волны: статус ДО best-effort комментария в
+    candidate-PR (та же дисциплина, что `_stop_with_comment`)."""
+    state.status = "waiting_human_merge"
+    save(state)
+    try:
+        ops.comment(state.repo_slug, pr, body)
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        print(f"_wave_pause: comment на PR #{pr} не удался: {exc}")
+
+
+def _step_candidate(state: RunState, ops: Ops) -> bool:
+    """Candidate волны (S7/S10, edge-check срез 3): заявка §I12 над байтами
+    ветки волны, evidence-коммит, PR, одобряющее ревью edge-check, пауза.
+
+    Порядок (ревью #343, R2): ветка волны пушится (`push-<w>` — `source_sha`
+    нужен другому клону для восстановления S13); `propose_from_source`
+    собирает заявку по всем узлам уровня и приводит её ветку к снимку БЕЗ
+    push и PR; ключ заявки пишется в `candidate-<w>` write-ahead — resume
+    (Task 9) читает его из записи, включая терминальные статусы заявки;
+    `publish_wave` докладывает evidence, пушит, создаёт/усыновляет PR и
+    публикует ревью; `base_ref` — из фактов СОЗДАННОГО PR (в волнах его
+    больше никто не ставит). Коды 1/3/4 — `stopped_review` с причиной;
+    заявка остаётся живой, повтор публикации идемпотентен.
+    """
+    if not _waves(state):
+        return True
+    key = wave_key(state, "candidate")
+    if op_status(state, key) == "completed":
+        return True
+    reapprove = _wave_mode(state) == "reapprove"
+    push_key = wave_key(state, "push")
+    if not reapprove and op_status(state, push_key) != "completed":
+        _ensure_started(state, push_key)
+        ops.push_branch(state.target_dir, state.branch)
+        op_complete(state, push_key, branch=state.branch)
+    nodes = [kind for _, kind, _ in _author_steps_for(state)]
+    if op_status(state, key) == "new" and reapprove:
+        # Переодобрение stale уровня (§3.4, S4): заявки без `source_sha` —
+        # байты из base; узлы одного уровня накапливаются в одной заявке
+        # (§I12), PR создаётся первым вызовом, evidence докладывает адаптер.
+        request = None
+        for node in nodes:
+            outcome = an.approve_node(state, ops, node)
+            if outcome.request is None:
+                _stop_with_comment(
+                    state, ops, "stopped_stale",
+                    f"волна {state.wave}: {outcome.message}",
+                )
+                return False
+            request = outcome.request
+        op_start(state, key, request=request, source_sha=None, reapprove=True)
+    elif op_status(state, key) == "new":
+        source_sha = ops.rev_parse(state.target_dir, state.branch)
+        if source_sha is None:
+            _stop_with_comment(
+                state, ops, "stopped_review",
+                f"волна {state.wave}: ветка {state.branch} не разрешается в "
+                "коммит — candidate не собран",
+            )
+            return False
+        outcome = an.propose_from_source(
+            state, ops, nodes, source_sha, push=False
+        )
+        op_start(state, key, request=outcome.request, source_sha=source_sha)
+    request = state.ops[key]["request"]
+    records = edge_coordinator.load_level_records(run_dir(state.run_id), state.wave)
+    try:
+        code = edge_publish.publish_wave(state, ops, request, records)
+    except RuntimeError as exc:
+        _stop_with_comment(
+            state, ops, "stopped_review",
+            f"волна {state.wave}: публикация candidate заявки {request} не "
+            f"состоялась — {exc}",
+        )
+        return False
+    if code != edge_publish.CODE_OK:
+        reason = {
+            edge_publish.CODE_CHANGES: "вердикт edge-check не PASS либо у "
+            "человека действующее CHANGES_REQUESTED",
+            edge_publish.CODE_UNRESOLVED: "факт не установлен (ревью/сеть) — "
+            "повторите resume",
+            edge_publish.CODE_HEAD_MOVED: "голова candidate-PR не равна "
+            "записанной заявкой (чужой push) — разберитесь с PR вручную",
+        }.get(code, f"код {code}")
+        _stop_with_comment(
+            state, ops, "stopped_review",
+            f"волна {state.wave}: candidate заявки {request} не опубликован — "
+            f"{reason}",
+        )
+        return False
+    pr = state.ops[request]["candidate_pr"]
+    facts = ops.pr_facts(state.repo_slug, pr)
+    state.base_ref = facts.get("baseRefName") or "master"
+    op_complete(
+        state, key, request=request, candidate_pr=pr,
+        source_sha=state.ops[key].get("source_sha"),
+        reapprove=bool(state.ops[key].get("reapprove", False)),
+    )
+    _wave_pause(
+        state, ops, pr,
+        f"Волна {state.wave}/{bundle_dag.wave_count(_wave_dag())} прогона "
+        f"`{state.run_id}`: candidate-PR #{pr} над узлами "
+        f"{', '.join(state.ops[request]['nodes'])} ждёт человеческого мержа "
+        "(мерж = акт одобрения, §I12). После мержа — resume: finalize "
+        "агентом и следующая волна.",
+    )
+    return False
 
 
 def _step_push(state: RunState, ops: Ops) -> bool:
@@ -2719,6 +3393,35 @@ def _print_status(state: RunState) -> None:
         print(f"  {key}: {op['status']}{suffix}")
 
 
+# Порядок шагов двух режимов (спека sequential-node-approval §3.1/S10).
+# Legacy — прежний конвейер бандл-PR; волны — S1–S4 per-wave + edge-check,
+# затем шаг candidate (публикация заявки волны) и ожидание человека.
+_LEGACY_STEPS = (
+    _step_interview,
+    _step_branch,
+    _step_materialize_brief,
+    _step_authoring,
+    _step_commit,
+    _step_gate,
+    _step_push,
+    _step_pr,
+    _step_ready,
+    _step_review,
+    _step_verdict,
+    _step_s8,
+)
+_WAVE_STEPS = (
+    _step_interview,
+    _step_branch,
+    _step_materialize_brief,
+    _step_authoring,
+    _step_commit,
+    _step_gate,
+    _step_edge,
+    _step_candidate,
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI: `python -m governance.runner start|resume|verify|status ...`.
 
@@ -2756,9 +3459,25 @@ def main(argv: list[str] | None = None) -> int:
     start_p.add_argument(
         "--run-id", default=None, help="дефолт <ws-id>-<3 случайных байта hex>"
     )
+    start_p.add_argument(
+        "--authoring", default="legacy", choices=["legacy", "waves"],
+        help="waves — узлы бандла одобряются волнами по уровням DAG, "
+        "каждая волна своим candidate-PR (спека sequential-node-approval); "
+        "legacy — один бандл-PR",
+    )
 
     resume_p = sub.add_parser("resume", help="подхватить сохранённый прогон")
     resume_p.add_argument("--run-id", required=True)
+
+    reopen_p = sub.add_parser(
+        "reopen", help="переоткрыть одобренный узел волнового прогона (S11)"
+    )
+    reopen_p.add_argument("--run-id", required=True)
+    reopen_p.add_argument("--node", required=True, metavar="NODE-ID")
+    reopen_p.add_argument(
+        "--manual", action="store_true",
+        help="не авторить заново: stopped_author, файл узла кладёт оператор",
+    )
 
     verify_p = sub.add_parser(
         "verify", help="verification-run для merged_unverified родителя"
@@ -2802,9 +3521,12 @@ def main(argv: list[str] | None = None) -> int:
             merge_authority=args.merge_authority,
             author_backend=args.author_backend,
             allow_legacy_dt=args.allow_legacy_dt,
+            authoring=args.authoring,
         )
     elif args.command == "resume":
         state = resume(args.run_id, ops)
+    elif args.command == "reopen":
+        state = reopen(args.run_id, args.node, ops, manual=args.manual)
     else:
         state = verify(args.parent, ops, args.run_id)
 
@@ -2814,3 +3536,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
