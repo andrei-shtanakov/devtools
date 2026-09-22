@@ -807,7 +807,7 @@ def _join_target(state, ops, fingerprint: str, step: int):
     if wave is None:
         return None
     record = al.wave_records(state).get(wave) or {}
-    if (record.get("intent") or {}).get("fingerprint") != fingerprint:
+    if _intent_of(record, wave)["fingerprint"] != fingerprint:   # fail-closed на битой записи, как _close_obsolete_wave
         return None          # `_close_obsolete_wave` ниже закроет её как obsolete
     joined = al.live_request_for_step(state, wave, step)
     if joined is None or not _still_accumulating(state, ops, joined[1]):
@@ -1004,7 +1004,7 @@ def test_no_module_reads_the_allowlist_from_the_environment() -> None:
 
 - [ ] **Step 3: Полный прогон** `uv run --frozen pytest -q` — ожидается PASS (≈10 мин); `make plan-check-selftest` — OK.
 
-- [ ] **Step 4: Commit** `git add CLAUDE.md README.md TODO.md docs/superpowers/specs/2026-09-09-tasks-supersede-contract-design.md docs/superpowers/specs/2026-09-15-need-stage-design.md docs/superpowers/specs/2026-09-22-approver-policy-trusted-source-design.md tests/test_governance_approve_node.py && git commit -m "docs: политика подписи читается из approval-policy — CLAUDE.md, §I12, TODO"`
+- [ ] **Step 4: Commit** `git add CLAUDE.md README.md TODO.md docs/superpowers/specs/2026-09-09-tasks-supersede-contract-design.md docs/superpowers/specs/2026-09-15-need-stage-design.md docs/superpowers/specs/2026-09-22-approver-policy-trusted-source-design.md docs/superpowers/plans/2026-09-22-approver-policy-trusted-source.md tests/test_governance_approve_node.py && git commit -m "docs: политика подписи читается из approval-policy — CLAUDE.md, §I12, TODO"`
 
 - [ ] **Step 5: Draft PR → TODO с номером → ready.** Ветка `spec/approver-policy-trusted-source` (спека уже там). PR трогает `human-merge.sh` и `contracts/authority-root/` — **мержит человек** (`make human-merge` без переменной, после Task 1). До мержа — правка правила волта (prograph-vault#147): команда без `AUTHORIZED_APPROVER_ACCOUNTS=`, ссылка на репозиторий.
 

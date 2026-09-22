@@ -330,7 +330,7 @@ PolicySnapshot(repo, ref, path, sha, accounts: frozenset[str], fingerprint)
 - пустой/битый `approvers.env` в актуальной версии — фаза 1 отказывает до
   candidate, текст называет ключ и репозиторий, не учётку;
 - `human-merge.sh`: логин вне списка — код 3; версия сменилась — код 3 до
-  мержа; тело без `policy:` — код 3; выставленная переменная — отказ;
+  мержа; тело без `policy:` — код 2; выставленная переменная — код 3;
 - AST-страж: `os.environ.get(APPROVER_ALLOWLIST_ENV` в `governance/` — только
   в проверке S7;
 - authority-root: `contracts/approval-policy-source/` в перечне (отдельный
