@@ -1676,7 +1676,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   использовать различимый результат #177). DONE — только с отдельным
   regression/evidence на каждый из четырёх классов.
 
-- [ ] Legacy-v1 хвосты переиздания: fail-closed для completed без PR, честный след reconcile→abandoned перед no-op и обязательная §I8-сверка при постороннем `.md` @owner:github:andrei-shtanakov @trigger:"перед следующим переизданием legacy-v1 воркстрима" @id:tasks-supersede-legacy-debt
+- [ ] Legacy-v1 хвосты переиздания: fail-closed для completed без PR, честный след reconcile→abandoned перед no-op и обязательная §I8-сверка при постороннем `.md` @owner:github:andrei-shtanakov @trigger:"перед следующим переизданием legacy-v1 воркстрима" @id:tasks-supersede-legacy-debt @epic:eco.dark-factory
   Источники: devtools#170, #171 и #173. Это редкие аварийные входы, а не
   текущий v2-путь с `content_anchor`; до триггера пункт остаётся waiting, но
   не теряется в россыпи GitHub. devtools#169 сюда намеренно не входит:
@@ -2203,7 +2203,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       отказа по finalize-форме, `human-merge.sh` — authority-root,
       `human-merge.sh` / `make human-merge` — акт человека от его учётки с
       allowlist-проверкой и пином головы.
-- [ ] Срез B: перенести правило области ревью в review-kit — `prose-paths.env` вендорится в `scripts/review/`, фильтр живёт в `local.sh` и накрывает три канала @owner:github:andrei-shtanakov @id:review-scope-kit-wave
+- [ ] Срез B: перенести правило области ревью в review-kit — `prose-paths.env` вендорится в `scripts/review/`, фильтр живёт в `local.sh` и накрывает три канала @owner:github:andrei-shtanakov @id:review-scope-kit-wave @epic:eco.codex-review-rollout
       Каналы — `local.sh`, pre-push хук, `review-pr.sh`. Там же становится
       возможна фильтрация кодового подмножества внутри смешанного дифа
       (кит строит диф без pathspec, `local.sh:528`). Цена — волна ре-вендора
@@ -2282,7 +2282,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       как неоднозначный, а не разрешается молча. Уточнение контракта — §3b.2
       спеки decomposition-node; грамматика charter (`#### <ID>: <title>`) —
       в DSL авторинга.
-- [ ] Покрыть тестом `die 2` при реально недостижимой базе @owner:github:andrei-shtanakov @id:review-scope-unreachable-base-coverage
+- [ ] Покрыть тестом `die 2` при реально недостижимой базе @owner:github:andrei-shtanakov @id:review-scope-unreachable-base-coverage @epic:eco.codex-review-rollout
       Хойст fetch расширил класс затронутых прогонов — раньше отказ получали
       только репо с fp-китом, теперь и репо со старым китом, которые прежде
       отдавали фетч базы самому киту.
