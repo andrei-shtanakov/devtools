@@ -25,8 +25,8 @@
 волна своим candidate-PR (мерж = акт одобрения), паузы
 `waiting_human_merge` называют волну и candidate-PR, finalize мержит агент
 на resume; бандл-PR нет, и восстановление леджера из фактов GitHub для
-такого прогона идёт по candidate-PR последней волны (ветки
-`spec/<ws-id>-approve-*` по глобу `patterns.env`).
+такого прогона идёт по candidate-PR последней волны (ветки заявок по
+шаблону `contracts/approval-branches/v1/patterns.env`).
 
 Инварианты кнопки (дизайн-решения владельца, 2026-09-07):
 
@@ -62,6 +62,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from governance import approval_branches
 from governance import approval_ledger as al
 from governance import brief_input, bundle_dag, run_state as rs
 from governance import runner, task_bridge
@@ -95,10 +96,37 @@ _RUN_BODY_RE = re.compile(
 _WAVE_RUN_ID_RE = re.compile(
     r"^run-id: (?P<run_id>[A-Za-z0-9][A-Za-z0-9._-]*)$", re.M
 )
-_WAVE_BRANCH_RE = re.compile(
-    r"^spec/(?P<ws_id>[A-Za-z0-9][A-Za-z0-9._-]*?)-approve-"
-    r"(?P<wave>\d+)-(?P<step>\d+)-(?P<attempt>\d+)(?P<final>-final)?$"
-)
+
+
+def _wave_branch_grammar(ws_id: str | None, slug: str) -> tuple[str, re.Pattern]:
+    """(префикс запроса, грамматика) веток заявок волн — ИЗ шаблона SSOT.
+
+    Имя ветки заявки не собирается здесь литералом (второе определение
+    разъехалось бы молча — гвард `test_no_second_definition_of_approval_
+    branch_names`): шаблон читается из `patterns.env` через
+    `approval_branches`, плейсхолдеры превращаются в именованные группы,
+    финализирующая форма — тот же шаблон плюс суффикс.
+    """
+    template = approval_branches.candidate_template()
+    suffix = approval_branches.finalize_suffix()
+    ws_group = (
+        re.escape(ws_id) if ws_id is not None else rf"{re.escape(slug)}-\d{{8}}"
+    )
+    groups = {
+        "ws_id": f"(?P<ws_id>{ws_group})",
+        "wave": r"(?P<wave>\d+)",
+        "step": r"(?P<step>\d+)",
+        "attempt": r"(?P<attempt>\d+)",
+    }
+    pattern = "^" + re.sub(
+        r"\\\{([A-Za-z_]+)\\\}", lambda m: groups[m.group(1)], re.escape(template)
+    ) + f"(?P<final>{re.escape(suffix)})?$"
+    head, _wave_placeholder, _ = template.partition("{wave}")
+    if ws_id is not None:
+        prefix = head.format(ws_id=ws_id)
+    else:
+        prefix = head.partition("{ws_id}")[0] + f"{slug}-"
+    return prefix, re.compile(pattern)
 
 
 class SpecLoopError(RuntimeError):
@@ -361,8 +389,8 @@ def recover_wave_run_from_github(
 ) -> rs.RunState | None:
     """Восстановить леджер ВОЛНОВОГО прогона по candidate-PR (S13).
 
-    Бандл-PR у волнового прогона нет; durable-факты — PR веток
-    `spec/<ws-id>-approve-<W>-<K>-<A>[-final]` (глоб `patterns.env`).
+    Бандл-PR у волнового прогона нет; durable-факты — PR веток заявок
+    `(W, K, A)` и их финализирующих форм по шаблону `patterns.env`.
     Последняя волна = максимальный `(W, K, A)` среди MERGED candidate;
     тело candidate обязано нести `run-id:` (иначе восстанавливать нечем);
     OPEN candidate/finalize — отказ «одобрение в полёте»; MERGED candidate
@@ -379,30 +407,25 @@ def recover_wave_run_from_github(
             rs.validate_id_component(requested_ws_id, label="ws_id")
         except ValueError as exc:
             raise SpecLoopError(str(exc)) from exc
-        prefix = f"spec/{requested_ws_id}-approve-"
-    else:
-        prefix = f"spec/{slug_from_subject(subject)}-"
+    prefix, grammar = _wave_branch_grammar(
+        requested_ws_id, slug_from_subject(subject)
+    )
     try:
         discovered = ops.prs_by_head_prefix(repo_slug, prefix)
     except RuntimeError as exc:
         raise SpecLoopError(
             f"поиск candidate-PR волн для восстановления не удался: {exc}"
         ) from exc
-    slug = slug_from_subject(subject)
     triples: dict[tuple[str, int, int, int], dict[str, list[dict]]] = {}
     for item in discovered:
         head = item.get("head")
         branch = head.get("ref") if isinstance(head, dict) else None
         if not isinstance(branch, str):
             raise SpecLoopError(f"GitHub вернул PR без head.ref: {item!r}")
-        match = _WAVE_BRANCH_RE.fullmatch(branch)
+        match = grammar.fullmatch(branch)
         if match is None:
             continue
         ws_id = match.group("ws_id")
-        if requested_ws_id is None and not re.fullmatch(
-            rf"{re.escape(slug)}-\d{{8}}", ws_id
-        ):
-            continue
         key = (ws_id, int(match.group("wave")), int(match.group("step")),
                int(match.group("attempt")))
         kind = "final" if match.group("final") else "candidate"
