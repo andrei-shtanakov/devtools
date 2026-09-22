@@ -2143,7 +2143,9 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       edge-check — обязательная проверка гейта, результат — evidence,
       ошибка/невозможность блокирует, успех не заменяет человека. Дизайн:
       `docs/superpowers/specs/2026-09-22-sequential-node-approval-design.md`
-      (draft, локальный цикл ревью по правилу spec-authoring).
+      + план `docs/superpowers/plans/2026-09-22-sequential-node-approval.md`
+      — spec и pair converged 2026-09-22 (локальный цикл Codex), **PR #343**
+      (драфт до вычитки; код — после плана политики).
 
 - [ ] Спека: документы бандла как оракул проверки продукта — `15-behaviour-spec` и `25-acceptance` становятся набором адресуемых критериев, на которые ссылается исполнение и evidence прогона; продолжение существующей трассировки `бриф G-NN/FR-NN → requirements` вниз @owner:github:andrei-shtanakov @epic:eco.dark-factory @blocked_by:todo://devtools/sequential-node-approval @id:bundle-docs-as-oracle
       Порядок обязателен: оракул должен быть зафиксирован ДО появления
