@@ -365,8 +365,13 @@ def start_request(
     nodes: list[str],
     content_hashes: dict[str, str],
     upstream_pins: dict[str, dict[str, str]],
+    policy: dict[str, str] | None = None,
 ) -> str:
     """Write-ahead намерения заявки (§I4); → её ключ в леджере.
+
+    `policy` — закреплённая версия политики подписи (спека approval-policy
+    §4.3: repo/ref/path/sha/fingerprint), тем же write'ом, что намерение;
+    `None` — заявка старого формата, на фазе 2 она `invalidated` (§4.6).
 
     Пишется ДО единого эффекта — до коммита, ветки и PR: иначе падение
     между эффектом и записью оставило бы работу, которую некому опознать.
@@ -391,6 +396,9 @@ def start_request(
         "nodes": list(nodes),
         "content_hashes": dict(content_hashes),
         "upstream_pins": {n: dict(p) for n, p in upstream_pins.items()},
+        # Закреплённая версия политики подписи (спека approval-policy §4.3);
+        # None — старый формат, фаза 2 объявит его invalidated (§4.6).
+        "policy": dict(policy) if policy else None,
         "branch": approval_branches.candidate_branch(
             ws_id, wave, step, attempt
         ),

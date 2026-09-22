@@ -1,6 +1,7 @@
 """Разбор SSOT-файлов формата KEY=VALUE — python-половина.
 
-Формат читают ДВЕ половины: этот модуль и функция `ssot_key` в `merge-pr.sh`.
+Формат читают ДВЕ половины: этот модуль и функция `ssot_key` в `ssot_env.sh`
+(подключается `merge-pr.sh` и `human-merge.sh`).
 Поэтому **поведение на битом входе — часть формата**, а не деталь реализации:
 разойдясь на нём, половины разойдутся молча, и SSOT перестанет быть SSOT ровно
 там, где заводился (ревью #183, круг 6 — python брал первое вхождение ключа,
@@ -29,7 +30,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def _definition_lines(text: str, key: str) -> list[str]:
+def definition_lines(text: str, key: str) -> list[str]:
     """Строки-определения `key` (по правилам формата выше)."""
     prefix = f"{key}="
     found = []
@@ -52,7 +53,7 @@ def read_key(path: Path, key: str, what: str) -> str:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:  # noqa: TRY003 — путь важнее классификации
         raise RuntimeError(f"{what} недоступен: {path} ({exc})") from exc
-    found = _definition_lines(text, key)
+    found = definition_lines(text, key)
     if len(found) > 1:
         raise RuntimeError(
             f"в {path} ключ {key} определён {len(found)} раз — файл битый; "

@@ -444,8 +444,10 @@ Evidence в `docs/evidence/`:
 - раннер **сам** дошёл до `waiting_human_merge` (а не был застигнут в
   `stopped_review`);
 - мерж бандл-PR выполнен санкционированным путём — `make human-merge`
-  (ADR-ECO-011 D6: учётка человека из `AUTHORIZED_APPROVER_ACCOUNTS`,
-  сверка логина), а не голым `gh pr merge`;
+  (ADR-ECO-011 D6: учётка человека из политики подписи — с 2026-09-22
+  источник не переменная, а репозиторий `approval-policy`, см. спеку
+  `2026-09-22-approver-policy-trusted-source-design.md`; сверка логина), а не
+  голым `gh pr merge`;
 - `resume` подтвердил факт мержа и перевёл прогон на S8; S8 завершился
   `exit=0` (не `merged_unverified`);
 - заведён draft tasks-PR, получена approved tasks-спека; номера

@@ -54,7 +54,10 @@ def _merge(state: rs.RunState, key: str, login: str = "andrei-shtanakov") -> Non
         state,
         key,
         MergeEvent(login, "2026-09-10T08:00:00Z", "commit-1"),
-        Authorization(login, "v1:deadbeef", "AUTHORIZED_APPROVER_ACCOUNTS"),
+        Authorization(
+            login, "v1:deadbeef",
+            "github:o/p@" + "a" * 40 + ":policy/approvers.env",
+        ),
     )
 
 
@@ -155,7 +158,7 @@ def test_merge_facts_come_from_the_forge_event(state: rs.RunState) -> None:
     assert on_disk["authorization"] == {
         "login": "andrei-shtanakov",
         "policy": "v1:deadbeef",
-        "source": "AUTHORIZED_APPROVER_ACCOUNTS",
+        "source": "github:o/p@" + "a" * 40 + ":policy/approvers.env",
     }, "решение об авторизации записано ТЕМ ЖЕ write'ом, что факты мержа"
 
 
@@ -381,3 +384,19 @@ def test_wave_record_is_not_read_as_a_request(state: rs.RunState) -> None:
     _open_wave(state, 3, "charter")
     _start(state, 3, 0, 1)
     assert [nums for nums, _ in al.requests(state)] == [(3, 0, 1)]
+
+
+def test_request_pins_policy_snapshot_write_ahead(state: rs.RunState) -> None:
+    """Версия политики закрепляется ТЕМ ЖЕ write-ahead, что и намерение
+    заявки (спека approval-policy §4.3); без аргумента — заявка старого
+    формата (`None`), которую фаза 2 объявит invalidated (§4.6)."""
+    key = al.start_request(
+        state, WS_ID, 1, 0, 1, ["charter"], {"charter": "h"}, {"charter": {}},
+        policy={"repo": "o/p", "ref": "main", "path": "policy/approvers.env",
+                "sha": "a" * 40, "fingerprint": "v1:x"},
+    )
+    assert rs.load(state.run_id).ops[key]["policy"]["sha"] == "a" * 40
+    legacy = al.start_request(
+        state, WS_ID, 1, 0, 2, ["charter"], {"charter": "h"}, {"charter": {}},
+    )
+    assert rs.load(state.run_id).ops[legacy]["policy"] is None

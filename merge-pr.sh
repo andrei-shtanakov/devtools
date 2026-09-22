@@ -148,35 +148,10 @@ gh_a() {
     GH_CONFIG_DIR="$MERGE_GH_CONFIG_DIR" gh "$@"
 }
 
-# Разбор SSOT-файлов формата KEY=VALUE — ОДНА функция на все такие файлы.
-# Правила формата и поведение на битом входе описаны в governance/ssot_env.py
-# и обязаны совпадать с ним дословно: формат читают две половины, и разойдясь
-# на битом входе они разойдутся молча (ревью #183, круг 6 — python брал первое
-# вхождение ключа, shell последнее). Коротко:
-#   * строка обрезается по краям; пустая и начинающаяся с `#` игнорируются;
-#   * определение — строка ровно с `KEY=` после ведущих пробелов; `KEY =…`,
-#     `export KEY=…`, `key=…` определениями НЕ считаются;
-#   * значение — остаток, обрезанный по краям (пробелы ВНУТРИ сохраняются);
-#   * дубль ключа, отсутствие ключа, пустое значение — отказ.
-#
-# Вызывать ТОЛЬКО как `v=$(ssot_key …) || exit $?`: `die` внутри подстановки
-# убивает подшелл, а не скрипт, и без проверки статуса пустое значение поехало
-# бы дальше — fail-open ровно в разборе правил.
-ssot_key() {
-    _file="$1"; _key="$2"; _what="$3"
-    [ -f "$_file" ] && [ -r "$_file" ] \
-        || die 2 "$_what недоступен: $_file"
-    _count=$(grep -c "^[[:space:]]*$_key=" "$_file" || true)
-    [ "$_count" -le 1 ] || die 2 "в $_file ключ $_key определён $_count раз \
-— файл битый; какое значение настоящее, решает человек, не разбор"
-    [ "$_count" -eq 1 ] || die 2 "в $_file нет $_key"
-    _value=$(sed -n "s/^[[:space:]]*$_key=//p" "$_file" \
-        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-    [ -n "$_value" ] || die 2 "в $_file нет непустого $_key"
-    printf '%s\n' "$_value"
-}
-
 script_dir=$(cd "$(dirname "$0")" && pwd)
+. "$script_dir/ssot_env.sh"
+. "$script_dir/approval_branches.sh"
+
 FLEET_ROOT="${FLEET_ROOT:-$(dirname "$script_dir")}"
 APPROVAL_PATTERNS="${APPROVAL_PATTERNS:-\
 $script_dir/contracts/approval-branches/v1/patterns.env}"
@@ -235,34 +210,11 @@ if [ -z "$strategy" ]; then
 fi
 
 # --- Формы веток одобрения: выводятся из SSOT-шаблона ----------------------
-# Файл ПАРСИТСЯ, не исполняется (тот же приём, что harness.env в
-# review-pr.sh). Отсутствие файла или ключа — отказ, а не вшитый дефолт:
-# молчаливый дефолт и был бы тем вторым определением имён, которое
-# разъезжается.
-_ssot_what="SSOT имён веток одобрения"
-candidate_template=$(ssot_key "$APPROVAL_PATTERNS" \
-    APPROVAL_CANDIDATE_TEMPLATE "$_ssot_what") || exit $?
-finalize_suffix=$(ssot_key "$APPROVAL_PATTERNS" \
-    APPROVAL_FINALIZE_SUFFIX "$_ssot_what") || exit $?
-# Глоб ФОРМЫ имени — два шага, дословно те же, что в
-# approval_branches._template_glob:
-#   1. каждый плейсхолдер → `*`;
-#   2. соседние `*`, разделённые одним разделителем, схлопываются — до
-#      неподвижной точки.
-# Второй шаг существен: без него глоб был бы привязан к сегодняшней арности
-# нумерации (`spec/*-approve-*-*-*`), и ветка ПРЕЖНЕЙ формы `<W>-<K>`, без
-# номера заявки, прошла бы мимо гварда. Такие ветки могли остаться в
-# природе — дыра ради чистоты шаблона дороже, чем лишняя строка вывода.
-candidate_glob=$(printf '%s\n' "$candidate_template" \
-    | sed 's/{[A-Za-z_][A-Za-z0-9_]*}/*/g')
-while :; do
-    collapsed=$(printf '%s\n' "$candidate_glob" | sed 's/\*[-._]\*/*/g')
-    if [ "$collapsed" = "$candidate_glob" ]; then
-        break
-    fi
-    candidate_glob="$collapsed"
-done
-finalize_glob="$candidate_glob$finalize_suffix"
+# Вывод глоба — в approval_branches.sh (общий с human-merge.sh): второе
+# определение форм имён разъезжалось бы молча.
+_globs=$(approval_globs "$APPROVAL_PATTERNS") || exit $?
+candidate_glob=$(printf '%s\n' "$_globs" | sed -n '1p')
+finalize_glob=$(printf '%s\n' "$_globs" | sed -n '2p')
 
 # --- Authority-root пути: тот же SSOT, что у accept_pr и раннера -----------
 AUTHORITY_PATHS="${AUTHORITY_PATHS:-\

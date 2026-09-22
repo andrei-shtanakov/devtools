@@ -312,32 +312,14 @@ def _propose(
         # истинным на вид.
         raise RuntimeError(debt.render())
 
-    # Пустая политика проверяется ЗДЕСЬ, а не после мержа: на этом шаге
-    # известно всё нужное — подписать не может никто, значит и предлагать
-    # человеческий акт незачем. Раньше механика заводила candidate-PR,
-    # человек его мержил, и только на фазе установления факта слышал, что
-    # подписи этот мерж не создаёт: акт потрачен впустую, заявка
-    # invalidated (devtools#278; боевой случай — candidate #315).
-    #
-    # Ниже ветки no-op и долга по пинам НАМЕРЕННО: они ничего не создают,
-    # и отказ по политике на них был бы ложным.
-    #
-    # Проверка предварительная и НЕ независимая: значение приходит из
-    # окружения того, кто запускает механику. Независимую авторизацию она
-    # не обеспечивает и не притворяется, что обеспечивает
-    # (`@id:approver-policy-trusted-source`).
-    if not af.approver_allowlist():
-        raise RuntimeError(
-            f"{af.APPROVER_ALLOWLIST_ENV} пуст — подписать не может НИКТО, "
-            "поэтому выносить узел на человеческий акт незачем: мерж "
-            "candidate-PR подписи не создаст, и заявка будет "
-            "invalidated. Пустой дефолт — так и задумано (fail-closed): "
-            "это не дефект политики, а её отсутствие в этом окружении. "
-            "Процедура: объявите политику (для этого флота — "
-            "`prograph-vault/authored/rules/approver-policy.md`) и "
-            "повторите вызов"
-        )
-
+    # Политика подписи закрепляется ДО первой записи (спека approval-policy
+    # §4.3): новая заявка — актуальная версия; присоединение к живой —
+    # только под её пином. Решение «присоединяюсь ли» принимается ОДИН раз
+    # (`_join_target`, read-only) и переиспользуется ниже: второе
+    # определение разошлось бы с первым (класс `ApprovedDag`). Записи
+    # (`_close_obsolete_wave`, `_wave_for`, `extend`/`start`) — после снимка.
+    # Ветки no-op и долга по пинам выше намеренно: они ничего не создают, и
+    # отказ по политике на них был бы ложным (devtools#332).
     _require_upstream_ready(state, ops, dag, node_id)
     _require_no_reopened_pr(state, ops, node_id)
 
@@ -345,12 +327,38 @@ def _propose(
     step = _levels(dag)[node_id]
     nodes = bundle_dag.composition(dag)
     fingerprint = bundle_dag.composition_fingerprint(nodes)
+    joined = _join_target(state, ops, fingerprint, step)
+    joined_pin: str | None = None
+    if joined is not None:
+        joined_policy = joined[1].get("policy")
+        if not joined_policy:
+            raise RuntimeError(
+                f"живая заявка {al.request_key(*joined[0])} не закрепила "
+                "версию политики (старый формат) — присоединиться к ней "
+                "нельзя; дождитесь её терминализации (фаза 2 объявит её "
+                "invalidated) и повторите"
+            )
+        joined_pin = joined_policy["sha"]
+    policy = af.policy_snapshot(ops, pinned_sha=joined_pin)
+    if policy.outcome is Outcome.UNAVAILABLE:
+        raise _unresolved(f"политика подписи для узла {node_id}: {policy.detail}")
+    if policy.outcome is Outcome.FORBIDDEN:
+        assert isinstance(policy.value, af.PolicyRefusal)
+        raise RuntimeError(_policy_refusal_text(policy.value, joined is not None))
+    snapshot = policy.value
+    assert isinstance(snapshot, af.PolicySnapshot)
+    if (
+        joined is not None
+        and snapshot.fingerprint != joined[1]["policy"]["fingerprint"]
+    ):
+        raise RuntimeError(
+            f"политика {snapshot.source}: прочитано не то, что закрепляла "
+            f"заявка {al.request_key(*joined[0])} — узел не дописан, ничего "
+            "не записано"
+        )
+
     _close_obsolete_wave(state, nodes, fingerprint)
     wave = _wave_for(state, nodes, fingerprint)
-
-    joined = al.live_request_for_step(state, wave, step)
-    if joined is not None and not _still_accumulating(state, ops, joined[1]):
-        joined = None
     if joined is not None:
         nums, op = joined
         key = al.request_key(*nums)
@@ -366,6 +374,7 @@ def _propose(
             [node_id],
             {node_id: self_hash},
             {node_id: upstream_blobs},
+            policy=snapshot.as_record(),
         )
     return _publish_candidate(state, ops, dag, key, debt)
 
@@ -611,6 +620,51 @@ def _wave_for(
     fresh = al.next_wave(state)
     al.open_wave_record(state, fresh, nodes, fingerprint)
     return fresh
+
+
+def _join_target(
+    state: RunState, ops: Ops, fingerprint: str, step: int
+) -> tuple[tuple[int, int, int], dict] | None:
+    """Живая заявка шага в ОТКРЫТОЙ волне с тем же отпечатком состава, к
+    которой узел присоединится; None — будет новая.
+
+    Read-only зеркало решения `_close_obsolete_wave` + `_wave_for` +
+    `live_request_for_step` + `_still_accumulating` — без записей, чтобы
+    снимок политики читался ДО первой записи (спека approval-policy §4.3)
+    под пином той заявки, к которой узел действительно присоединится.
+    Intent волны читается тем же `_intent_of`, что и в `_close_obsolete_wave`:
+    битая запись отказывает здесь так же, как отказала бы там.
+    """
+    wave = al.open_wave(state)
+    if wave is None:
+        return None
+    _, recorded = _intent_of(al.wave_records(state)[wave], wave)
+    if recorded != fingerprint:
+        return None          # `_close_obsolete_wave` закроет её как obsolete
+    joined = al.live_request_for_step(state, wave, step)
+    if joined is None or not _still_accumulating(state, ops, joined[1]):
+        return None
+    return joined
+
+
+def _policy_refusal_text(refusal: af.PolicyRefusal, joining: bool) -> str:
+    if refusal.kind == af.POLICY_REFUSAL_SUPERSEDED and joining:
+        return (
+            f"{refusal.detail}; живая заявка закреплена на старой версии — "
+            "дождитесь её терминализации фазой 2, затем новый candidate"
+        )
+    return (
+        f"{refusal.detail}. Ничего не создано; повторите вызов после "
+        "исправления источника"
+    )
+
+
+def _policy_ref(op: dict) -> str:
+    """Как назвать политику заявки в сообщениях оператору."""
+    policy = op.get("policy") or {}
+    if not policy:
+        return "политики (заявка старого формата)"
+    return f"политики approval-policy@{policy['sha']}"
 
 
 def _still_accumulating(state: RunState, ops: Ops, op: dict) -> bool:
@@ -1143,7 +1197,7 @@ def _publish_candidate(
     return ApprovalOutcome(
         f"{', '.join(op['nodes'])}: вынесены на одобрение, candidate-PR "
         f"#{pr}. Одобрение совершает МЕРЖ этого PR учёткой из "
-        f"{af.APPROVER_ALLOWLIST_ENV}; после мержа повторите вызов — он "
+        f"{_policy_ref(op)}; после мержа повторите вызов — он "
         "запишет подпись финализирующим PR",
         request=key,
         changed=changed,
@@ -1156,15 +1210,21 @@ def _candidate_body(state: RunState, op: dict, debt: na.NodeDebt | None) -> str:
         "",
         "**Мерж этого PR И ЕСТЬ акт одобрения**: подпись узла берётся из "
         f"`mergedBy`/`mergedAt` этого мержа, поэтому мержит его человек из "
-        f"`{af.APPROVER_ALLOWLIST_ENV}`. Агентский мерж подписи не создаёт "
+        f"{_policy_ref(op)}. Агентский мерж подписи не создаёт "
         "и приведёт к отказу финализации.",
         "",
         f"Узлы: {', '.join(op['nodes'])}.",
+        f"run-id: {state.run_id}",
         "Изменено: `status → approval_pending`, `version + 1`, пины с "
         "фактических байтов upstream в base, `approved_content_hash` с "
         "собственных байтов узла, плюс рекурсивный каскад `stale` вниз по "
         "DAG. Подпись НЕ записана — акта ещё не было.",
     ]
+    policy = op.get("policy") or {}
+    if policy:
+        # Строку читает `human-merge.sh`: сверяет пин с актуальной версией
+        # ДО мержа, чтобы смена политики не сжигала человеческий акт.
+        lines.append(f"policy: {policy['repo']}@{policy['sha']}")
     if debt is not None:
         lines += ["", f"Повод: {debt.reason}."]
     return "\n".join(lines)
@@ -1426,13 +1486,12 @@ def _reconcile_candidate(
             return ApprovalOutcome(
                 f"предложение заявки {key} допубликовано в PR #{pr}: "
                 f"узлы снимка ({', '.join(op['nodes'])}) не все были в его "
-                f"голове. Дальше — мерж учёткой из "
-                f"{af.APPROVER_ALLOWLIST_ENV}",
+                f"голове. Дальше — мерж учёткой из {_policy_ref(op)}",
                 request=key,
             )
         return ApprovalOutcome(
             f"candidate-PR #{pr} открыт — ждём мержа учёткой из "
-            f"{af.APPROVER_ALLOWLIST_ENV}. Заявка {key} жива, ничего не "
+            f"{_policy_ref(op)}. Заявка {key} жива, ничего не "
             "изменено",
             request=key,
         )
@@ -1470,14 +1529,50 @@ def _reconcile_candidate(
         raise _unresolved(f"акт мержа candidate-PR #{pr} — {event.detail}")
     merged = event.value
     assert merged is not None
-    signature = af.authorized_signature(merged)
-    if signature.outcome is Outcome.UNAVAILABLE:
-        # Политика не пережила границу процессов — отказ с сохранением
-        # заявки, не `invalidated`: мерж состоялся, судить его не по чему
-        # ЗДЕСЬ, а не вообще (@id:approver-allowlist-process-boundary).
-        raise _unresolved(
-            f"подпись мержа candidate-PR #{pr}: {signature.detail}"
+    # Политика перечитывается по ПИНУ заявки (спека approval-policy §4.4).
+    # Неустановленный факт (сеть) и отказы об инструменте/окружении
+    # сохраняют заявку; смена версии — установленный факт о паре версий →
+    # invalidated с причиной `policy_changed` (D3, подписано 2026-09-22),
+    # запись заявки сохраняется целиком; новый candidate — повторное
+    # установление авторизации под новой версией.
+    pinned = op.get("policy")
+    if not pinned:
+        al.invalidate_request(
+            state, key,
+            "заявка не закрепила версию политики (старый формат, §4.6)",
         )
+        raise RuntimeError(
+            f"заявка {key} не закрепила версию политики — invalidated; "
+            "восстановление: новый candidate над теми же узлами"
+        )
+    policy = af.policy_snapshot(ops, pinned_sha=pinned["sha"])
+    if policy.outcome is Outcome.UNAVAILABLE:
+        raise _unresolved(f"политика подписи для мержа PR #{pr}: {policy.detail}")
+    if policy.outcome is Outcome.FORBIDDEN:
+        refusal = policy.value
+        assert isinstance(refusal, af.PolicyRefusal)
+        if refusal.kind == af.POLICY_REFUSAL_SUPERSEDED:
+            al.invalidate_request(
+                state, key, f"{af.INVALIDATION_POLICY_CHANGED}: {refusal.detail}"
+            )
+            raise RuntimeError(
+                f"{refusal.detail}. Заявка {key} — invalidated; повторное "
+                "установление авторизации — новый candidate над теми же узлами"
+            )
+        raise RuntimeError(
+            f"{refusal.detail}. Заявка {key} жива, факт мержа не записан; "
+            "исправьте источник/окружение и повторите"
+        )
+    snapshot = policy.value
+    assert isinstance(snapshot, af.PolicySnapshot)
+    if snapshot.fingerprint != pinned["fingerprint"]:
+        raise RuntimeError(
+            f"политика {snapshot.source}: прочитано не то, что закрепляла "
+            f"заявка {key} (отпечаток {snapshot.fingerprint} ≠ "
+            f"{pinned['fingerprint']}) — подмена или сбой пути чтения; "
+            "заявка жива, ничего не записано"
+        )
+    signature = af.authorized_signature(merged, snapshot)
     if signature.outcome is Outcome.FORBIDDEN:
         al.invalidate_request(state, key, signature.detail)
         raise RuntimeError(
@@ -1854,7 +1949,7 @@ def _publish_envelope(
         f"подпись узлов {', '.join(nodes)} вынесена финализирующим PR #{pr} "
         f"(approved_by = {op['merged_by']}, approved_at = "
         f"{op['merged_at']}). Мержит его учётка из "
-        f"{af.APPROVER_ALLOWLIST_ENV} — человек ({why}; `make human-merge`); "
+        f"{_policy_ref(op)} — человек ({why}; `make human-merge`); "
         "источником подписи он НЕ является — подпись сформирована фактами "
         "мержа candidate-PR",
         request=key,
