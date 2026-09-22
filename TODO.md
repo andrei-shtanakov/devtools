@@ -2136,7 +2136,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       подтверждением, что мерж прошёл через `human-merge.sh`.
       Закрывает чекбокс `@id:spec-loop-need-stage` по §9.2.
 
-- [ ] Спека: последовательное одобрение узлов бандла — человеческий гейт переносится ВНУТРЬ авторинга, нижний узел пишется против уже одобренного и запиненного верхнего; три гейта (после `10-requirements`, после `15-behaviour-spec`, после пары `20-design`+`25-acceptance`), `30-decomposition` закрывается вместе с бандлом; `_step_authoring` перестаёт писать шесть узлов одним заходом, S5/S6/S7 повторяются на каждом гейте, паузы по идиому `waiting_human_merge` @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:sequential-node-approval
+- [ ] Спека: последовательное одобрение узлов бандла — человеческий гейт переносится ВНУТРЬ авторинга, нижний узел пишется против уже одобренного и запиненного верхнего; три гейта (после `10-requirements`, после `15-behaviour-spec`, после пары `20-design`+`25-acceptance`), `30-decomposition` закрывается вместе с бандлом; `_step_authoring` перестаёт писать шесть узлов одним заходом, S5/S6/S7 повторяются на каждом гейте, паузы по идиому `waiting_human_merge` @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:sequential-node-approval @blocked_by:todo://devtools/approver-policy-trusted-source
       Решение владельца 2026-09-20 вместо нарезки предмета прогона на N
       бандлов (она снята). Проблема не в размере, а в связности: все шесть
       документов пишутся до первого одобрения, и правка одного тянет
@@ -2158,7 +2158,9 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       edge-check — обязательная проверка гейта, результат — evidence,
       ошибка/невозможность блокирует, успех не заменяет человека. Дизайн:
       `docs/superpowers/specs/2026-09-22-sequential-node-approval-design.md`
-      (draft, локальный цикл ревью по правилу spec-authoring).
+      + план `docs/superpowers/plans/2026-09-22-sequential-node-approval.md`
+      — spec и pair converged 2026-09-22 (локальный цикл Codex), **PR #343**
+      (драфт до вычитки; код — после плана политики).
 
 - [ ] Спека: документы бандла как оракул проверки продукта — `15-behaviour-spec` и `25-acceptance` становятся набором адресуемых критериев, на которые ссылается исполнение и evidence прогона; продолжение существующей трассировки `бриф G-NN/FR-NN → requirements` вниз @owner:github:andrei-shtanakov @epic:eco.dark-factory @blocked_by:todo://devtools/sequential-node-approval @id:bundle-docs-as-oracle
       Порядок обязателен: оракул должен быть зафиксирован ДО появления
