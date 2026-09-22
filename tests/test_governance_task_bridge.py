@@ -1714,6 +1714,7 @@ scenarios: [BEH-03]
 depends_on: [DT-01]
 parallel_group: regression
 tdd_waiver: characterisation · sanction: batch-approve-2026-09-09
+negative_control: tests/test_c.py::test_third_survives_mutant
 
 Проза DT, которая до исполнителя НЕ доезжает.
 """
@@ -1786,6 +1787,7 @@ scenarios: [BEH-02]
 depends_on: [DT-01]
 parallel_group: regression
 tdd_waiver: characterisation · sanction: batch-approve-2026-09-09
+negative_control: tests/test_a.py::test_second
 
 Проза.
 
@@ -1794,6 +1796,7 @@ scenarios: [BEH-03]
 depends_on: [DT-01]
 parallel_group: regression
 tdd_waiver: characterisation · sanction: batch-approve-2026-09-09
+negative_control: tests/test_c.py::test_third
 
 Проза.
 """
@@ -1809,8 +1812,8 @@ def test_waiver_items_of_one_batch_sanction_survive_supersede() -> None:
     (`marked & _unique(...)`), и при переиздании отметка терялась бы у
     ВСЕХ — притом что `DONE` самой задачи переносится. Получалась бы
     DONE-задача с неотмеченным waiver-пунктом, то есть потерянный
-    единственный durable-след условия про negative control: гейта на
-    него в spec-runner нет вовсе.
+    единственный durable-след условия про negative control (до
+    spec-runner#428 гейта на него не было вовсе).
 
     Фикстура с ОДНИМ waived DT этого не видит по построению — та же
     слепота формы, что уже стоила нам круга.
@@ -1873,6 +1876,45 @@ def test_waived_task_carries_the_machine_readable_marker() -> None:
     assert "**TDD-waiver:**" not in plain
 
 
+def test_waived_task_carries_negative_control_marker_and_obligation() -> None:
+    """devtools#336: waived-задача несёт `**Negative-control:**` и пункт.
+
+    spec-runner ≥ 3.0.0 отказывает waived-задаче без этой строки до
+    платного вызова. Путь патча — канонический и ВЫВОДИТСЯ мостом из
+    номера задачи (DT номера не знает), в подкаталоге воркстрима:
+    TASK-ID уникален только внутри одной tasks-спеки, а в репо их
+    несколько, и плоский `spec/negative-controls/TASK-002.patch` двух
+    воркстримов перетирал бы друг друга. Селектор — из объявления DT,
+    не из догадки.
+
+    Пункт чек-листа несёт то же самое словами: промпт исполнителя у
+    соседа строится из чек-листа, meta-строку он не читает — без пункта
+    исполнитель не узнал бы, куда положить патч.
+    """
+    text = _render_waived()
+    waived = text.split("### TASK-002:")[1]
+    plain = text.split("### TASK-001:")[1].split("### TASK-002:")[0]
+
+    marker = (
+        "**Negative-control:** spec/negative-controls/WS-x-1/TASK-002.patch"
+        " :: tests/test_c.py::test_third_survives_mutant"
+    )
+    assert marker in waived
+    assert len([
+        line for line in waived.splitlines()
+        if line.startswith("**Negative-control:**")
+    ]) == 1
+    assert "**Negative-control:**" not in plain
+
+    item = next(
+        line for line in waived.splitlines()
+        if line.startswith("- [ ] TDD-waiver")
+    )
+    head = item.split("условия класса:", 1)[0]
+    assert "spec/negative-controls/WS-x-1/TASK-002.patch" in head
+    assert "tests/test_c.py::test_third_survives_mutant" in head
+
+
 #: Зонд, исполняемый интерпретатором СОСЕДА: разбирает наш рендер его
 #: парсером и прогоняет через его же резолвер. Держится строкой, а не
 #: файлом в их дереве, — сосед read-only, и тест не вправе в нём ничего
@@ -1892,6 +1934,11 @@ _SPEC_RUNNER_PROBE = (
     "        'raw': task.tdd_waiver,\n"
     "        'class': applied.node_class if applied else None,\n"
     "        'sanction': applied.sanction if applied else None,\n"
+    "        'control': (\n"
+    "            [str(task.negative_control.patch), task.negative_control.selector]\n"
+    "            if getattr(task, 'negative_control', None) else None\n"
+    "        ),\n"
+    "        'control_error': getattr(task, 'negative_control_error', None),\n"
     '    }\n'
     'print(json.dumps(out))\n'
 )
@@ -2034,6 +2081,13 @@ def test_rendered_marker_is_read_back_by_the_spec_runner_parser() -> None:
         "raw": "characterisation · sanction: batch-approve-2026-09-09",
         "class": "characterisation",
         "sanction": "batch-approve-2026-09-09",
+        # devtools#336: сосед ≥ 3.0.0 читает и контроль — путь и селектор
+        # раздельно, без ошибки разбора.
+        "control": [
+            "spec/negative-controls/WS-x-1/TASK-002.patch",
+            "tests/test_c.py::test_third_survives_mutant",
+        ],
+        "control_error": None,
     }
     # Половина «адресность»: у обычной задачи сосед не видит ни режима,
     # ни маркера — обычный `standard` там остаётся нетронутым.

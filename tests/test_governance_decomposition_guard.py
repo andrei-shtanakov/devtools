@@ -52,12 +52,21 @@ def test_parse_two_tasks() -> None:
 # причину — иначе оператору некуда идти.
 
 
+WAIVER_LINE = "tdd_waiver: characterisation · sanction: batch-approve-2026-09-09"
+CONTROL_LINE = "negative_control: tests/test_a.py::test_two"
+
+
 def _waived(
-    line: str = "tdd_waiver: characterisation · sanction: batch-approve-2026-09-09",
+    line: str = WAIVER_LINE,
     dt_type: str = "implement",
     depends: str = "[DT-01]",
+    control: str | None = CONTROL_LINE,
 ) -> str:
-    """DT-02 с объявлением waiver'а; DT-01 — доставляющая зависимость."""
+    """DT-02 с объявлением waiver'а; DT-01 — доставляющая зависимость.
+
+    ``control`` — строка `negative_control:`; None — строки нет вовсе
+    (объявление без контроля, которое spec-runner ≥ 3.0.0 отказывает).
+    """
     return (
         "#### DT-01: Поведение · type: implement · owner: dev\n"
         "scenarios: [BEH-01]\n"
@@ -71,7 +80,8 @@ def _waived(
         + ("delivered_by: [DT-01]\n" if dt_type == "verify" else "")
         + "parallel_group: regression\n"
         f"{line}\n"
-        "Проза.\n"
+        + (f"{control}\n" if control is not None else "")
+        + "Проза.\n"
     )
 
 
@@ -227,13 +237,81 @@ def test_all_waiver_findings_are_reported_at_once() -> None:
             "tdd_waiver: выдуманный · sanction: потому-что-можно",
             dt_type="verify",
             depends="[]",
+            control=None,
         )
     )
     mine = [f for f in findings if "DT-02" in f]
-    assert len(mine) == 4, f"названы не все причины: {findings}"
+    assert len(mine) == 5, f"названы не все причины: {findings}"
     joined = "\n".join(mine)
-    for expected in ("класс", "sanction", "verify", "зависим"):
+    for expected in (
+        "класс", "sanction", "verify", "зависим", "negative_control",
+    ):
         assert expected in joined, f"причина {expected!r} не названа"
+
+
+def test_waiver_without_negative_control_is_refused() -> None:
+    """Waiver без контроля — не достижимое состояние (devtools#336).
+
+    spec-runner ≥ 3.0.0 (#428) отказывает waived-задаче без строки
+    `**Negative-control:**` до первого платного вызова, терминально.
+    Мост печатает эту строку только из объявления DT, поэтому DT с
+    `tdd_waiver` и без `negative_control` породил бы задачу, которая не
+    запускается никогда — и выглядела бы при этом запускаемой.
+    """
+    _, findings = parse_dt_tasks(_waived(control=None))
+    assert any(
+        "DT-02" in f and "negative_control" in f for f in findings
+    ), f"waiver без контроля принят: {findings}"
+
+
+def test_negative_control_without_waiver_is_refused() -> None:
+    """Контроль без снятого обязательства не имеет предмета.
+
+    Зеркало отказа потребителя (`validate`: «Negative-control без
+    TDD-waiver»): строка объявлена у DT, которому RED никто не снимал.
+    """
+    _, findings = parse_dt_tasks(_waived(line="", control=CONTROL_LINE))
+    assert any(
+        "DT-02" in f and "negative_control" in f and "tdd_waiver" in f
+        for f in findings
+    ), f"контроль без waiver'а принят: {findings}"
+
+
+@pytest.mark.parametrize("control", [
+    "negative_control:",
+    "negative_control: tests/test_a.py::test_two :: лишнее",
+    "negative_control: tests/test a.py::test_two",
+])
+def test_malformed_negative_control_is_a_finding(control: str) -> None:
+    """Ключ есть, форма не разобрана — находка, а не «поля нет».
+
+    Селектор — один токен без пробелов: разделитель потребителя ` :: `
+    (с пробелами) внутри значения породил бы у него неоднозначное
+    деление, а пробел в пути — селектор, которого никто не писал.
+    """
+    _, findings = parse_dt_tasks(_waived(control=control))
+    assert any(
+        "DT-02" in f and "negative_control" in f for f in findings
+    ), f"битая форма проглочена молча: {findings!r}"
+
+
+def test_negative_control_declared_twice_is_a_finding() -> None:
+    _, findings = parse_dt_tasks(
+        _waived(control=f"{CONTROL_LINE}\n{CONTROL_LINE}")
+    )
+    assert any(
+        "DT-02" in f and "negative_control" in f and "2" in f
+        for f in findings
+    ), f"дубль ключа не назван: {findings}"
+
+
+def test_declared_negative_control_is_parsed_into_the_waiver() -> None:
+    """Селектор живёт НА waiver'е: без waiver'а его не бывает."""
+    tasks, findings = parse_dt_tasks(_waived())
+    assert findings == []
+    waiver = tasks[1].waiver
+    assert waiver is not None
+    assert waiver.control_selector == "tests/test_a.py::test_two"
 
 
 def test_declared_waiver_is_parsed_into_the_task() -> None:
@@ -311,6 +389,36 @@ def test_clean_graph_no_findings() -> None:
         "scenarios: [BEH-03]\ndepends_on: []\nparallel_group: side\n"
     )
     assert graph_findings(BEH, dt) == []
+
+
+def test_negative_control_outside_own_checked_by_files_is_refused() -> None:
+    """Селектор контроля — в файле, которым DT владеет через checked_by.
+
+    Контроль доказывает, что НОВЫЙ тест задачи краснеет под патчем; тест
+    в файле другого DT — чужой, и красный там ничего не говорит о работе
+    этой задачи. Совпадение с объявленной checked_by-целью — объявленная
+    связь, а не догадка по пути.
+    """
+    from governance.decomposition_guard import graph_findings
+    own = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01, BEH-02]\ndepends_on: []\n"
+        "parallel_group: core\n\n"
+        "#### DT-02: B · type: implement · owner: dev\n"
+        "scenarios: [BEH-03]\ndepends_on: [DT-01]\nparallel_group: side\n"
+        f"{WAIVER_LINE}\n"
+        "negative_control: tests/test_b.py::test_three_broken\n"
+    )
+    assert graph_findings(BEH, own) == []
+    foreign = own.replace(
+        "negative_control: tests/test_b.py::test_three_broken",
+        "negative_control: tests/test_a.py::test_one",
+    )
+    findings = graph_findings(BEH, foreign)
+    assert any(
+        "DT-02" in f and "negative_control" in f and "tests/test_a.py" in f
+        for f in findings
+    ), f"чужой файл в контроле принят: {findings}"
 
 
 def test_uncovered_and_double_covered_beh() -> None:
