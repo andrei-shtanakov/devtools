@@ -10,15 +10,22 @@
 # (merged_by ∈ allowlist) не сложилась бы. Это зеркало merge-pr.sh: тот
 # сверяет, что мержит ai-prosto, этот — что мержит человек из allowlist.
 #
-# Fail-closed: логин обязан входить в AUTHORIZED_APPROVER_ACCOUNTS (пустой
-# список — отказ, как у §I12: «подписать не может никто»); PR открыт;
-# mergeStateStatus из разрешающих (тот же перечень, что у merge-pr.sh);
-# голова пинуется `sha=` (--expect-head — пин вызывающего). Стратегия по
-# умолчанию — merge-коммит: подпись читается из фактов мержа, не из формы,
-# а merge-коммит сохраняет историю candidate-ветки видимой.
+# Fail-closed: логин обязан входить в политику подписи — файл
+# `policy/approvers.env` репозитория approval-policy (координаты — SSOT
+# contracts/approval-policy-source/v1/source.env), прочитанный по SHA из тела
+# PR (`policy: <repo>@<sha>`); актуальная версия обязана совпасть с пином —
+# иначе мерж не создаст подписи и человеческий акт сгорел бы (спека
+# 2026-09-22-approver-policy-trusted-source, §4.5). Переменная окружения
+# AUTHORIZED_APPROVER_ACCOUNTS больше не источник: выставленная — отказ.
+# PR открыт; mergeStateStatus из разрешающих (тот же перечень, что у
+# merge-pr.sh); голова пинуется `sha=` (--expect-head — пин вызывающего).
+# Стратегия по умолчанию — merge-коммит: подпись читается из фактов мержа,
+# не из формы, а merge-коммит сохраняет историю candidate-ветки видимой.
 #
 # Коды выхода: 0 — мерж выполнен (или показан при --dry-run); 2 —
-# аргументы/профиль/состояние PR; 3 — актор не авторизован; 4 — форджа
+# аргументы/профиль/состояние PR (в т.ч. тело без строки `policy:`, версия
+# политики не прочитана); 3 — актор не авторизован (логин вне политики,
+# политика сменилась после candidate, выставленная переменная); 4 — форджа
 # отклонила мерж.
 set -eu
 
@@ -27,12 +34,14 @@ usage() {
         "[--merge|--squash] [--dry-run]" >&2
     echo "  <repo> — имя каталога репо во флоте; мерж от учётки ОПЕРАТОРА" >&2
     echo "  (HUMAN_GH_CONFIG_DIR — иной профиль gh; ~/.config/review — отказ)" >&2
-    echo "  логин обязан входить в AUTHORIZED_APPROVER_ACCOUNTS (пусто — отказ)" >&2
+    echo "  логин обязан входить в политику approval-policy (версия — пин из тела PR)" >&2
+    echo "  переменная AUTHORIZED_APPROVER_ACCOUNTS больше не читается — выставленная даёт отказ" >&2
 }
 
 die() { _code="$1"; shift; echo "$*" >&2; exit "$_code"; }
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
+. "$script_dir/ssot_env.sh"
 FLEET_ROOT="${FLEET_ROOT:-$(dirname "$script_dir")}"
 
 [ $# -ge 2 ] || { usage; exit 2; }
@@ -81,12 +90,48 @@ case "$origin_url" in
 esac
 slug="${slug%.git}"
 
-# Allowlist — тот же env, что читает механика одобрения (§I12): пустой
-# список означает «подписать не может никто», и мерж под таким списком
-# был бы актом, который заявка не признает.
-allow="${AUTHORIZED_APPROVER_ACCOUNTS:-}"
-[ -n "$allow" ] || die 3 "AUTHORIZED_APPROVER_ACCOUNTS пуст — человеческий акт не авторизован"
+# Источник политики подписи — репозиторий approval-policy (спека
+# 2026-09-22-approver-policy-trusted-source, §4.5). Переменная окружения
+# больше не источник: выставленная — отказ, чтобы старое правило не
+# исполнялось молча не так, как задумано.
+[ -z "${AUTHORIZED_APPROVER_ACCOUNTS+x}" ] || die 3 "AUTHORIZED_APPROVER_ACCOUNTS выставлена, но переменная больше не источник политики — источник репозиторий approval-policy; снимите её"
+src="$script_dir/contracts/approval-policy-source/v1/source.env"
+p_repo=$(ssot_key "$src" APPROVAL_POLICY_REPO "SSOT источника политики") || exit $?
+p_ref=$(ssot_key "$src" APPROVAL_POLICY_REF "SSOT источника политики") || exit $?
+p_path=$(ssot_key "$src" APPROVAL_POLICY_PATH "SSOT источника политики") || exit $?
+p_owner="${p_repo%%/*}"; p_name="${p_repo#*/}"
+
 login=$(gh_h api user --jq .login 2>&1) || die 2 "профиль оператора не отвечает: $login"
+
+if ! facts=$(gh_h pr view "$pr" --repo "$slug" \
+        --json state,headRefOid,mergeStateStatus,body \
+        --jq '.state, .headRefOid, .mergeStateStatus, (.body // "" | gsub("\n";" "))' 2>&1); then
+    die 2 "не удалось прочитать PR ${slug}#${pr}: $facts"
+fi
+state=$(printf '%s\n' "$facts" | sed -n '1p')
+head_oid=$(printf '%s\n' "$facts" | sed -n '2p')
+merge_state=$(printf '%s\n' "$facts" | sed -n '3p')
+body=$(printf '%s\n' "$facts" | sed -n '4p')
+[ "$state" = "OPEN" ] || die 2 "PR ${slug}#${pr} не открыт (state=$state)"
+[ -n "$head_oid" ] || die 2 "PR ${slug}#${pr}: голова не установлена"
+
+# Пин версии политики — из тела candidate (пишет approve_node); актуальная
+# версия обязана совпасть, иначе мерж не создаст подписи и акт сгорит.
+pin=$(printf '%s\n' "$body" | sed -n 's/.*policy: [^@ ]*@\([0-9a-f]\{40\}\).*/\1/p' | head -n 1)
+[ -n "$pin" ] || die 2 "PR ${slug}#${pr}: тело без строки 'policy: <repo>@<sha>' — candidate старого формата; новый candidate"
+current=$(gh_h api graphql -f 'query=query($o:String!,$n:String!,$q:String!,$p:String!){repository(owner:$o,name:$n){ref(qualifiedName:$q){target{... on Commit{history(first:1,path:$p){nodes{oid}}}}}}}' \
+    -F "o=$p_owner" -F "n=$p_name" -F "q=refs/heads/$p_ref" -F "p=$p_path" \
+    --jq '.data.repository.ref.target.history.nodes[0].oid' 2>&1) \
+    || die 2 "версия политики $p_repo не прочитана: $current"
+[ "$current" = "$pin" ] || die 3 "политика сменилась после candidate (закреплена $pin, актуальная $current) — мерж не создаст подписи; новый candidate"
+text=$(gh_h api graphql -f 'query=query($o:String!,$n:String!,$s:GitObjectID!,$p:String!){repository(owner:$o,name:$n){object(oid:$s){... on Commit{file(path:$p){object{... on Blob{text}}}}}}}' \
+    -F "o=$p_owner" -F "n=$p_name" -F "s=$pin" -F "p=$p_path" \
+    --jq '.data.repository.object.file.object.text' 2>&1) \
+    || die 2 "политика $p_repo@$pin не прочитана: $text"
+# `file: null` печатается как строка `null` → ниже отказ «без ключа» (код 3):
+# для скрипта это приемлемо и названо здесь.
+allow=$(printf '%s\n' "$text" | sed -n 's/^[[:space:]]*AUTHORIZED_APPROVER_ACCOUNTS=//p' | head -n 1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+[ -n "$allow" ] || die 3 "политика $p_repo@$pin без AUTHORIZED_APPROVER_ACCOUNTS — подписать не может никто"
 _ok=0
 _saved_ifs="$IFS"; IFS=','
 for _acc in $allow; do
@@ -94,18 +139,7 @@ for _acc in $allow; do
     [ "$_acc" = "$login" ] && _ok=1
 done
 IFS="$_saved_ifs"
-[ "$_ok" -eq 1 ] || die 3 "логин '$login' не входит в AUTHORIZED_APPROVER_ACCOUNTS ($allow)"
-
-if ! facts=$(gh_h pr view "$pr" --repo "$slug" \
-        --json state,headRefOid,mergeStateStatus \
-        --jq '.state, .headRefOid, .mergeStateStatus' 2>&1); then
-    die 2 "не удалось прочитать PR ${slug}#${pr}: $facts"
-fi
-state=$(printf '%s\n' "$facts" | sed -n '1p')
-head_oid=$(printf '%s\n' "$facts" | sed -n '2p')
-merge_state=$(printf '%s\n' "$facts" | sed -n '3p')
-[ "$state" = "OPEN" ] || die 2 "PR ${slug}#${pr} не открыт (state=$state)"
-[ -n "$head_oid" ] || die 2 "PR ${slug}#${pr}: голова не установлена"
+[ "$_ok" -eq 1 ] || die 3 "логин '$login' не входит в политику $p_repo@$pin ($allow)"
 if [ -n "$expect_head" ] && [ "$expect_head" != "$head_oid" ]; then
     die 2 "PR ${slug}#${pr}: голова $head_oid, вызывающий ждал $expect_head — перепроверьте"
 fi

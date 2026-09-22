@@ -31,7 +31,14 @@ case "$*" in
   *"pr view"*)
     printf '%s\\n' "${GH_STUB_STATE:-OPEN}"
     printf '%s\\n' "${GH_STUB_HEADOID-$GH_STUB_DEFAULT_OID}"
-    printf '%s\\n' "${GH_STUB_MERGESTATE-CLEAN}" ;;
+    printf '%s\\n' "${GH_STUB_MERGESTATE-CLEAN}"
+    printf '%s\\n' "${GH_STUB_BODY-policy: andrei-shtanakov/approval-policy@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" ;;
+  *"api graphql"*)
+    # Стаб игнорирует --jq и печатает уже «отжатые» значения — как pr view.
+    case "$*" in
+      *history*) printf '%s\\n' "${GH_STUB_POLICY_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" ;;
+      *)         printf 'AUTHORIZED_APPROVER_ACCOUNTS=%s\\n' "${GH_STUB_POLICY_ACCOUNTS:-andrei-shtanakov}" ;;
+    esac ;;
   *"/merge"*)
     if [ -n "${GH_STUB_MERGE_FAIL:-}" ]; then
       echo "Head branch was modified. Review and try the merge again." >&2
@@ -72,7 +79,6 @@ class Fleet:
             FLEET_ROOT=str(self.fleet_root),
             GH_STUB_LOG=str(self.gh_log),
             GH_STUB_DEFAULT_OID=HEAD_SHA,
-            AUTHORIZED_APPROVER_ACCOUNTS=HUMAN,
         )
         env.update(extra)
         return env
@@ -130,23 +136,38 @@ def test_agent_profile_named_explicitly_is_refused(
     assert fleet.calls() == []
 
 
-def test_empty_allowlist_refuses_before_forge(fleet: Fleet) -> None:
-    res = fleet.run(AUTHORIZED_APPROVER_ACCOUNTS="")
+def test_login_outside_policy_is_refused(fleet: Fleet) -> None:
+    res = fleet.run(GH_STUB_POLICY_ACCOUNTS="someone-else")
     assert res.returncode == 3, res.stderr
-    assert "AUTHORIZED_APPROVER_ACCOUNTS" in res.stderr
-    assert fleet.calls() == []
+    assert "approval-policy" in res.stderr
+    assert "/merge" not in fleet.gh_log.read_text()
 
 
-def test_login_outside_allowlist_refuses(fleet: Fleet) -> None:
-    res = fleet.run(GH_STUB_LOGIN="ai-prosto")
-    assert res.returncode == 3, res.stderr
-    assert "'ai-prosto' не входит" in res.stderr
-    assert fleet.merge_calls() == []
-
-
-def test_allowlist_is_comma_separated_with_spaces(fleet: Fleet) -> None:
-    res = fleet.run(AUTHORIZED_APPROVER_ACCOUNTS=f"someone, {HUMAN} ,other")
+def test_policy_list_is_comma_separated_with_spaces(fleet: Fleet) -> None:
+    res = fleet.run(GH_STUB_POLICY_ACCOUNTS=f"someone, {HUMAN} ,other")
     assert res.returncode == 0, res.stderr
+
+
+def test_policy_changed_after_candidate_is_refused_before_merge(fleet: Fleet) -> None:
+    """Смена версии политики после candidate не сжигает человеческий акт:
+    отказ до мержа (спека approval-policy §4.5)."""
+    res = fleet.run(GH_STUB_POLICY_SHA="b" * 40)
+    assert res.returncode == 3, res.stderr
+    assert "сменилась" in res.stderr
+    assert "/merge" not in fleet.gh_log.read_text()
+
+
+def test_body_without_policy_line_is_refused(fleet: Fleet) -> None:
+    res = fleet.run(GH_STUB_BODY="без пина")
+    assert res.returncode == 2, res.stderr
+    assert "policy:" in res.stderr
+
+
+def test_env_variable_is_refused(fleet: Fleet) -> None:
+    """S7: переменная больше не источник; выставленная — отказ, не молчание."""
+    res = fleet.run(AUTHORIZED_APPROVER_ACCOUNTS=HUMAN)
+    assert res.returncode == 3, res.stderr
+    assert "больше не источник" in res.stderr
 
 
 def test_head_pin_mismatch_refuses(fleet: Fleet) -> None:
