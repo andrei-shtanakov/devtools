@@ -1,6 +1,6 @@
 ---
 spec_stage: charter
-status: approval_pending
+status: approved
 owner_role: product
 traces_to:
 - discovery-brief
@@ -8,6 +8,8 @@ upstream_hashes:
   discovery-brief: 9c9ad4a0a8a581efa59bb9e37602971482487a5e
 approved_content_hash: 8b73d7a3f51bef0d2b18fffe716a5cbef9fd644f
 version: 2
+approved_at: '2026-09-22T15:05:56Z'
+approved_by: andrei-shtanakov
 ---
 
 # Charter: посторонний `.md` больше не отключает сверку §I8 для легаси-v1
