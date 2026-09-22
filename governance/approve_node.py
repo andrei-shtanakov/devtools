@@ -138,11 +138,7 @@ def _levels(dag: tuple[tuple[str, tuple[str, ...]], ...]) -> dict[str, int]:
     и одну ветку, а порядок вызовов на это влиять не вправе. Обход идёт по
     `dag`, который топологичен по построению.
     """
-    levels: dict[str, int] = {}
-    for fname, ups in dag:
-        node = bundle_dag.node_id(fname)
-        levels[node] = 1 + max((levels[u] for u in ups), default=-1)
-    return levels
+    return bundle_dag.levels(dag)
 
 
 def _downstream_closure(

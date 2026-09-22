@@ -73,6 +73,39 @@ def node_filenames(
     return tuple((node_id(fname), fname) for fname, _ in dag)
 
 
+def levels(
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+) -> dict[str, int]:
+    """Уровень узла: 0 у корня, иначе `1 + max` по прямым upstream (§I12 `K`).
+
+    Единственное определение уровня в governance: `approve_node._levels`
+    делегирует сюда, волновой прогон (`sequential-node-approval` S1) считает
+    номер волны как `level + 1`. Обход идёт по `dag`, который топологичен по
+    построению, поэтому upstream всегда уже посчитан.
+    """
+    out: dict[str, int] = {}
+    for fname, ups in dag:
+        out[node_id(fname)] = 1 + max((out[u] for u in ups), default=-1)
+    return out
+
+
+def wave_count(dag: tuple[tuple[str, tuple[str, ...]], ...]) -> int:
+    """Число волн DAG — число уровней (волны 1-based: `wave = level + 1`)."""
+    return max(levels(dag).values(), default=-1) + 1
+
+
+def dag_upto(
+    dag: tuple[tuple[str, tuple[str, ...]], ...], level: int
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Узлы уровней ≤ `level` — префикс DAG по уровням, порядок сохранён.
+
+    `level < 0` — пустой префикс (бандла ещё нет)."""
+    lv = levels(dag)
+    return tuple(
+        (fname, ups) for fname, ups in dag if lv[node_id(fname)] <= level
+    )
+
+
 # Якорный узел моста — терминальный узел DAG (decomposition). Выводится из
 # BUNDLE_DAG, а не хардкодится второй раз (Task 6): смена терминального
 # узла бандла — правка одной строки DAG, не поиск по файлу.
@@ -110,8 +143,18 @@ def check_bundle_composition(
     target_dir: str,
     bundle_dir: str,
     dag: tuple[tuple[str, tuple[str, ...]], ...],
-) -> None:
+    *,
+    mode: str = "full",
+) -> int:
     """Заявленный состав бандла (`dag`) обязан совпасть с фактическим РОВНО.
+
+    Возвращает максимальный уровень фактического состава. `mode="full"` —
+    прежнее поведение (вызовы моста возврат игнорируют). `mode="waves"`
+    (спека sequential-node-approval S4а): отсутствующий каталог — пустой
+    состав (`-1`), а фактический состав обязан быть ПРЕФИКСОМ DAG по
+    уровням — `dag_upto(dag, m)` для некоторого `m`; «дыра» в уровнях
+    (есть узел волны 3, нет узла волны 2) — отказ, волновой прогон не
+    продолжается.
 
     «По самому длинному существующему» запрещён (спека §4): красил бы
     недоавторенный бандл зелёным, если в каталоге случайно лежит лишний
@@ -125,6 +168,8 @@ def check_bundle_composition(
     """
     bundle = Path(target_dir) / bundle_dir
     if not bundle.is_dir():
+        if mode == "waves":
+            return -1
         raise RuntimeError(
             f"каталога бандла {bundle_dir!r} нет в {target_dir!r}: "
             "проверьте bundle_dir в run.json и что бандл вмержен "
@@ -137,6 +182,8 @@ def check_bundle_composition(
         p.name for p in bundle.glob("*.md")
         if p.name in known
     }
+    if mode == "waves":
+        return _level_prefix(dag, actual)
     if actual != declared:
         raise RuntimeError(
             f"состав бандла {sorted(actual)} не совпадает с заявленным "
@@ -145,6 +192,23 @@ def check_bundle_composition(
             "недостающие узлы либо передайте "
             "--legacy-bundle=3|4|5 с ТОЧНЫМ фактическим составом"
         )
+    return max(levels(dag).values(), default=-1)
+
+
+def _level_prefix(
+    dag: tuple[tuple[str, tuple[str, ...]], ...], actual: set[str]
+) -> int:
+    """Верхний уровень `actual`, если это префикс `dag` по уровням; иначе отказ."""
+    lv = levels(dag)
+    top = max((lv[node_id(f)] for f in actual), default=-1)
+    prefix = {fname for fname, _ in dag_upto(dag, top)}
+    if actual != prefix:
+        raise RuntimeError(
+            f"состав бандла {sorted(actual)} не является префиксом DAG по "
+            f"уровням (ожидалось {sorted(prefix)} для уровней ≤ {top}): "
+            "дыра в уровнях — волновой прогон не продолжается"
+        )
+    return top
 
 
 #: Версия схемы отпечатка состава. Отвечает за КАНОНИЗАЦИЮ: смена правил
