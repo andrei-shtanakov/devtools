@@ -162,6 +162,19 @@ _WAIVER_RE = re.compile(
 )
 _WAIVER_KEY_RE = re.compile(r"^tdd_waiver:", re.M)
 
+#: Негативный контроль (devtools#336, spec-runner#428): селектор теста,
+#: который ОБЯЗАН покраснеть под патчем, ломающим проверяемое свойство.
+#: Один токен без пробелов — намеренно: разделитель потребителя ` :: `
+#: (с пробелами по обе стороны) внутри значения дал бы у него
+#: неоднозначное деление, а пробел в пути — селектор, которого никто не
+#: писал. Путь патча здесь НЕ объявляется: его выводит мост из номера
+#: задачи, которого DT не знает.
+#: `[ \t]*`, а не `\s*`: в многострочном режиме `\s*` перешагивает перенос
+#: строки и берёт селектором ПЕРВОЕ слово следующей строки — пустое
+#: значение читалось бы как валидное.
+_CONTROL_RE = re.compile(r"^negative_control:[ \t]*(\S+)[ \t]*$", re.M)
+_CONTROL_KEY_RE = re.compile(r"^negative_control:", re.M)
+
 #: Санкция — ЗАКРЫТАЯ грамматика, а не свободный текст: иначе поле есть
 #: украшение, и `sanction: потому-что-можно` прошло бы наравне с
 #: настоящим решением. Две формы, обе машиночитаемы: датированное решение
@@ -211,6 +224,37 @@ class DtWaiver:
 
     node_class: str
     sanction: str
+    #: Селектор негативного контроля (devtools#336). Живёт НА waiver'е,
+    #: а не отдельным полем DT: контроль без снятого обязательства не
+    #: имеет предмета, а waiver без контроля spec-runner ≥ 3.0.0 отказывает
+    #: до платного вызова — ни одно из двух состояний не должно быть
+    #: достижимым, и структура держит это построением.
+    control_selector: str
+
+
+def _control_field(block: str, dt_id: str) -> tuple[str | None, list[str], bool]:
+    """`negative_control:` → (селектор, находки формы, ключ_присутствует).
+
+    Та же дисциплина, что у `tdd_waiver`: число ключей считается раньше
+    разбора, дубль и неразобранная форма — находки, не молчание.
+    Парность с waiver'ом судит вызывающий: этой функции waiver не виден.
+    """
+    keys = len(_CONTROL_KEY_RE.findall(block))
+    if keys == 0:
+        return None, [], False
+    matches = _CONTROL_RE.findall(block)
+    if keys > 1:
+        return None, [
+            f"{dt_id}: negative_control объявлен {keys} раза "
+            "(ожидается ровно один)"
+        ], True
+    if keys != len(matches):
+        return None, [
+            f"{dt_id}: поле negative_control объявлено, но не разобрано — "
+            "ожидается `negative_control: <селектор>`: один токен без "
+            "пробелов, без ` :: `"
+        ], True
+    return matches[0], [], True
 
 
 def _verifies_field(block: str) -> tuple[str, ...] | None:
@@ -298,6 +342,8 @@ def _waiver_field(
     факт не открывает дверь.
     """
     findings: list[str] = []
+    selector, control_findings, control_declared = _control_field(block, dt_id)
+    findings += control_findings
     matches = _WAIVER_RE.findall(block)
     # Сначала считается ЧИСЛО КЛЮЧЕЙ (минор ревью #197). Ветка `keys > 1`
     # выше всего и ловит смешанный случай «битая + валидная» именно как
@@ -318,6 +364,14 @@ def _waiver_field(
         )
         return None, findings
     if not matches:
+        if control_declared:
+            # Зеркало отказа потребителя (`validate`: «Negative-control без
+            # TDD-waiver»): контроль без снятого обязательства не имеет
+            # предмета, и молчать здесь значило бы отдать отказ соседу.
+            findings.append(
+                f"{dt_id}: negative_control объявлен без tdd_waiver — "
+                "контроль без снятого обязательства не имеет предмета"
+            )
         return None, findings
     node_class, sanction = matches[0]
     # Четыре условия проверяются ВСЕ, а не до первого отказа: у гейта
@@ -346,9 +400,23 @@ def _waiver_field(
             "класс требует, чтобы поведение было доставлено зависимостями, "
             "а доставлять его нечем"
         )
-    if findings:
+    if not control_declared:
+        # Пятое условие (devtools#336). spec-runner ≥ 3.0.0 (#428)
+        # отказывает waived-задаче без `**Negative-control:**` до первого
+        # платного вызова, терминально; мост печатает эту строку ТОЛЬКО из
+        # объявления DT. Пропустить объявление здесь значило бы доставить
+        # задачу, которая выглядит запускаемой и не запускается никогда.
+        findings.append(
+            f"{dt_id}: tdd_waiver объявлен без negative_control — "
+            "spec-runner ≥ 3.0.0 отказывает waived-задаче без "
+            "`**Negative-control:**` до платного вызова; ожидается "
+            "`negative_control: <селектор теста, который краснеет под патчем>`"
+        )
+    if findings or selector is None:
         return None, findings
-    return DtWaiver(node_class=node_class, sanction=sanction), findings
+    return DtWaiver(
+        node_class=node_class, sanction=sanction, control_selector=selector,
+    ), findings
 
 
 def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
@@ -702,6 +770,32 @@ def graph_findings(
                     f"{prior} и {t.dt_id}"
                 )
             file_owner.setdefault(target, t.dt_id)
+
+    # Негативный контроль — в файле, которым DT владеет через checked_by
+    # своих сценариев (devtools#336). Контроль доказывает, что НОВЫЙ тест
+    # задачи краснеет под патчем; тест в файле другого DT — чужой, и его
+    # краснота ничего не говорит о работе этой задачи. Совпадение с
+    # объявленной checked_by-целью — объявленная связь, а не догадка по
+    # пути: сверяется ФАЙЛ селектора с файлами целей, `::` режется той же
+    # грамматикой, что у `_parse_beh_bindings`. Manual-цели — документы,
+    # тест в них не живёт.
+    for t in tasks:
+        if t.waiver is None:
+            continue
+        own_files = sorted({
+            target for target, kind in (
+                bindings.get(beh, (None, None)) for beh in t.scenarios
+            )
+            if target is not None and kind != "manual"
+        })
+        control_file = t.waiver.control_selector.split("::", 1)[0]
+        if control_file not in own_files:
+            findings.append(
+                f"{t.dt_id}: negative_control {t.waiver.control_selector} "
+                f"указывает на файл {control_file}, которым DT не владеет "
+                "через checked_by своих сценариев (владеет: "
+                f"{', '.join(own_files) or 'ничем исполняемым'})"
+            )
 
     # Группа наблюдения verify-DT не выводится ВООБЩЕ — FATAL (round 13
     # ревью PR #161, минор, промотирована из non-fatal, см. докстринг
