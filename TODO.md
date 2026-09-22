@@ -2018,7 +2018,9 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       переход на новую версию — повторное установление авторизации; CLI и
       окружение список не переопределяют. Имя репозитория и доступ — в
       дизайне: `docs/superpowers/specs/2026-09-22-approver-policy-trusted-source-design.md`
-      (draft, локальный цикл ревью по правилу spec-authoring).
+      + план `docs/superpowers/plans/2026-09-22-approver-policy-trusted-source.md`
+      — spec и pair converged 2026-09-22 (локальный цикл Codex), **PR #341**
+      (драфт до подписи владельца под уточнением D3).
 - [x] Зелёный гейт не оставляет находки прошлого круга: `gate-findings.txt` отражает ПОСЛЕДНИЙ прогон гейта @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:gate-findings-stale-on-green — PR этой ветки
       Наблюдаемый дефект (прогон S7, 2026-09-21): круг 1 записал пять
       находок в 14:03; круг 2 прошёл чисто (`run.json` 14:53,
