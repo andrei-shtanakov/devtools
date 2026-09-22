@@ -30,6 +30,9 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         "merge-pr.sh",
         # Вход человеческого акта (D6) — той же категории (ревью #233).
         "human-merge.sh",
+        # Координаты источника политики подписи (спека approval-policy S8):
+        # константу в governance/ агент перенаправил бы своим PR.
+        "contracts/approval-policy-source/",
         # Правило области ревью (devtools#271): решает, дойдёт ли диф до
         # модели вообще. Агентски смерженная правка `PROSE` сняла бы
         # ревью-гейт со всех последующих PR.
@@ -142,3 +145,12 @@ def test_missing_key_raises(
     monkeypatch.setattr(authority_root, "PATHS_FILE", broken)
     with pytest.raises(RuntimeError, match="AUTHORITY_ROOT_PREFIXES"):
         authority_root.prefixes()
+
+
+def test_approval_policy_source_is_authority_root() -> None:
+    """Координаты источника политики подписи агент не вправе перенаправить
+    своим PR под агентским мержем (спека approval-policy S8)."""
+    assert "contracts/approval-policy-source/" in authority_root.prefixes()
+    assert authority_root.touched(
+        ["contracts/approval-policy-source/v1/source.env"]
+    ) == ["contracts/approval-policy-source/v1/source.env"]
