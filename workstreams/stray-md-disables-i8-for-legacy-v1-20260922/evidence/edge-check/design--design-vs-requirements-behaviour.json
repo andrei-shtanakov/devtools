@@ -1,0 +1,101 @@
+{
+  "absence": [],
+  "attempt_id": "62c51b7f1d56456b98ab3241bcc699b2",
+  "bases": [
+    {
+      "path": "10-requirements.md",
+      "role": "requirements",
+      "sha256": "6e21da18d417a1e9ad905114d3343d0c6af0f5b287471b3fcc0be3503ab34f34",
+      "size": 26068
+    },
+    {
+      "path": "15-behaviour-spec.md",
+      "role": "behaviour-spec",
+      "sha256": "f220eb2dfe4666ad653c7133b784ee65edbfe49e1d539d4941dd8f340e95ccd7",
+      "size": 35169
+    }
+  ],
+  "check_identity": "78815afd4c10e4ed48faa9e4769b9b71d3c6f41cef725bbd49eced7a3d28403c",
+  "context": {
+    "estimate_tokens": 25384,
+    "limit_tokens": 120000,
+    "method": "utf8-bytes/4",
+    "reserve_tokens": 8000,
+    "size": 101538,
+    "unit": "utf8-bytes"
+  },
+  "criteria": [
+    {
+      "id": "R1",
+      "reason": "Все Must-требования и все BEH-01…BEH-20 получают названный механизм — общая функция в bundle_dag.py, правка _previous_dag, третья возвращаемая величина, единственная точка печати, эвиденция и карта модулей; FR-03 держится сохранённой ветвью отказа §I8, Q-01 закрыт явной отложенностью с причиной.",
+      "status": "pass"
+    },
+    {
+      "id": "R2",
+      "reason": "Противоречий требованиям и сценариям нет, а единственное поведенческое расхождение (строгий is_file в общем обходе) объявлено прямо и разобрано против NFR-01, NFR-03 и BEH-17.",
+      "status": "pass"
+    },
+    {
+      "id": "R3",
+      "reason": "Отдельных D-* документ не вводит, и каждое принятое решение — Q-02…Q-06 и пять пунктов «Механики» — сопровождается ссылкой на FR/NFR/BEH или CON-01.",
+      "status": "pass"
+    },
+    {
+      "id": "R4",
+      "reason": "Отказы на отсутствующем каталоге, по §I8 и по составу бандла, а также пять веток unavailable и границы authority (Q-01 → продукт/Q-07, OUT-01…OUT-03, READ-ONLY соседей, неизменность dag_source) в дизайне отражены.",
+      "status": "pass"
+    }
+  ],
+  "edge": "design-vs-requirements-behaviour",
+  "findings": [],
+  "finished_at": "2026-09-22T16:41:43.076847+00:00",
+  "node": "design",
+  "result_key": "6056700ecfa1320c711e0c1b2e7d3f77c875ee5dc02cd6b08bfa9193d14f0b0f",
+  "reviewer": {
+    "effort": null,
+    "env_passthrough": [
+      "HOME",
+      "LANG",
+      "PATH",
+      "TMPDIR",
+      "USER"
+    ],
+    "harness": "claude",
+    "harness_version": "2.1.278 (Claude Code)",
+    "model": "claude-opus-5",
+    "model_id": null
+  },
+  "rules": {
+    "id": "design-vs-requirements-behaviour",
+    "items": [
+      [
+        "R1",
+        "Каждое Must-требование и каждый сценарий BEH получают в дизайне названный механизм (компонент, поток, решение) или явный отказ с причиной."
+      ],
+      [
+        "R2",
+        "Дизайн не противоречит требованиям и сценариям и не сужает их без объявления."
+      ],
+      [
+        "R3",
+        "Каждое решение дизайна (D-*) прослеживается к требованию или сценарию."
+      ],
+      [
+        "R4",
+        "Состояния ошибок и границы authority из требований отражены в дизайне."
+      ]
+    ]
+  },
+  "schema_version": 1,
+  "started_at": "2026-09-22T16:38:10.171754+00:00",
+  "subject": [
+    {
+      "path": "20-design.md",
+      "role": "subject",
+      "sha256": "d172a06a38780d530067802582c9c30777ed892571c9705ad2f05d7b27cf94e9",
+      "size": 36660
+    }
+  ],
+  "verdict": "PASS",
+  "wave": 4
+}
