@@ -885,11 +885,19 @@ def reopen(
     state.ops[f"reopen-{state.wave}"] = {
         "status": "completed", "count": count, "node": node,
     }
-    for base_key in (
-        "branch", "materialize-brief", "commit", "gate-candidate", "edge",
-        "push", "candidate", "finalize",
-    ):
-        state.ops.pop(wave_key(state, base_key), None)
+    # Op'ы переоткрытой волны И ВСЕХ выше снимаются (ревью #346, major 2):
+    # каскад переведёт нижние узлы в `stale`, и каждая их волна обязана
+    # пройти новый edge-check и переодобрение; оставшиеся `completed`
+    # `branch-<w>`/`candidate-<w>` первого прохода выдали бы старую
+    # завершённую заявку за завершение текущей волны. Записи заявок
+    # (`approve-*`) остаются — это история.
+    total = bundle_dag.wave_count(dag)
+    for wave in range(state.wave, total + 1):
+        for base_key in (
+            "branch", "materialize-brief", "commit", "gate-candidate", "edge",
+            "push", "candidate", "finalize",
+        ):
+            state.ops.pop(f"{base_key}-{wave}", None)
     filename = ""
     for author_key, kind, fname in _AUTHOR_STEPS:
         if kind == node:

@@ -710,13 +710,20 @@ def propose_from_source(
             "запрещены (§I12) — каждая волна выносит один уровень"
         )
     step = steps.pop()
+    resumed = _same_live_request(state, node_ids, source_sha)
+    if resumed is not None:
+        # Падение между `start_request` и записью ключа заявки вызывающим
+        # (ревью #346): заявка над теми же узлами из того же коммита уже
+        # есть — доигрывается её публикация, второй не заводится.
+        return _publish_candidate(state, ops, dag, resumed, push=push)
     for node in node_ids:
         live = al.live_request_over(state, node)
         if live is not None:
             raise RuntimeError(
                 f"над узлом {node} уже есть живая заявка "
-                f"{al.request_key(*live[0])} — её продвигает approve_node, "
-                "вторая не заводится"
+                f"{al.request_key(*live[0])} (source_sha "
+                f"{str(live[1].get('source_sha'))[:8]}) — её продвигает "
+                "approve_node, вторая не заводится"
             )
         _require_upstream_ready(state, ops, dag, node)
         _require_no_reopened_pr(state, ops, node)
@@ -761,6 +768,19 @@ def propose_from_source(
     for node in remaining:
         al.extend_request(state, key, node, hashes[node], pins[node])
     return _publish_candidate(state, ops, dag, key, push=push)
+
+
+def _same_live_request(
+    state: RunState, node_ids: list[str], source_sha: str
+) -> str | None:
+    """Ключ живой заявки РОВНО над `node_ids` из `source_sha`, если есть."""
+    for nums, op in al.live_requests(state):
+        if (
+            op.get("source_sha") == source_sha
+            and sorted(op.get("nodes") or ()) == sorted(node_ids)
+        ):
+            return al.request_key(*nums)
+    return None
 
 
 def _close_obsolete_wave(

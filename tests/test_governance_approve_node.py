@@ -3219,11 +3219,18 @@ def test_wave_refuses_reopened_pr_of_a_terminal_request(
 def test_wave_refuses_a_second_request_over_a_live_one(
     waves_world: World,
 ) -> None:
+    """Живая заявка над узлом: тот же source_sha — доигрывается она же
+    (ревью #346, major 3), другой — отказ, второй заявки нет."""
     w = waves_world
     sha = authored_branch(w, 1, {"00-charter.md": _node_text("charter")})
-    an.propose_from_source(w.state, w.ops, ["charter"], sha)
+    first = an.propose_from_source(w.state, w.ops, ["charter"], sha)
+    same = an.propose_from_source(w.state, w.ops, ["charter"], sha)
+    assert same.request == first.request
+    other = authored_branch(
+        w, 1, {"00-charter.md": _node_text("charter", body="v2")}, reopen=1
+    )
     with pytest.raises(RuntimeError, match="живая заявка"):
-        an.propose_from_source(w.state, w.ops, ["charter"], sha)
+        an.propose_from_source(w.state, w.ops, ["charter"], other)
     assert len(al.requests(w.state)) == 1
 
 
@@ -3497,3 +3504,47 @@ def test_reopen_makes_a_new_branch_name_and_stale_is_reapproved_by_levels(
     w.sync()
     assert an.stale_below_top_level(w.state, w.ops, bundle_dag.BUNDLE_DAG) == []
     assert w.base_meta("15-behaviour-spec.md")["status"] == na.STATUS_APPROVED
+
+
+def test_publish_wave_after_approve_node_created_the_pr(world: World) -> None:
+    """Режим reapprove (ревью #346, major 1): PR уже создан `approve_node`
+    на голове H; адаптер докладывает evidence-коммит E поверх — это НЕ
+    чужой push (H — предок E): код 0, голова PR становится E."""
+    from governance.edge_check import publish as pub
+
+    outcome = approve(world, "charter")
+    key = outcome.request
+    op = world.state.ops[key]
+    pr, head_before = op["candidate_pr"], op["head_sha"]
+    assert world.forge.head_of(op["branch"]) == head_before
+    world.forge.default_reviews = []
+    world.state.wave = 1
+    assert pub.publish_wave(world.state, world.ops, key, _wave_records()) == 0
+    op = world.state.ops[key]
+    assert op["head_sha"] != head_before
+    assert world.forge.head_of(op["branch"]) == op["head_sha"]
+    assert op["candidate_pr"] == pr, "тот же PR, второго нет"
+    assert len(_published_bodies(world, pr)) == 1
+    # Повтор — идемпотентен (голова PR == записанная).
+    assert pub.publish_wave(world.state, world.ops, key, _wave_records()) == 0
+    assert len(_published_bodies(world, pr)) == 1
+
+
+def test_propose_from_source_resumes_its_own_live_request(
+    waves_world: World,
+) -> None:
+    """Падение между `start_request` и записью ключа раннером (ревью #346,
+    major 3): повторный вызов с теми же узлами и source_sha доигрывает ТУ ЖЕ
+    заявку; другой source_sha — отказ."""
+    w = waves_world
+    sha = authored_branch(w, 1, {"00-charter.md": _node_text("charter")})
+    first = an.propose_from_source(w.state, w.ops, ["charter"], sha, push=False)
+    again = an.propose_from_source(w.state, w.ops, ["charter"], sha, push=False)
+    assert again.request == first.request
+    assert len(al.requests(w.state)) == 1 and w.forge.prs == {}
+    published = an.propose_from_source(w.state, w.ops, ["charter"], sha)
+    assert published.request == first.request
+    assert w.state.ops[first.request]["candidate_pr"] in w.forge.prs
+    other = authored_branch(w, 1, {"00-charter.md": _node_text("charter", body="v2")}, reopen=1)
+    with pytest.raises(RuntimeError, match="живая заявка"):
+        an.propose_from_source(w.state, w.ops, ["charter"], other)

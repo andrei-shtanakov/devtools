@@ -7807,8 +7807,19 @@ def test_reopen_reauthors_the_node_on_a_new_branch_name(
     (Path(state.target_dir) / BUNDLE_DIR / "10-requirements.md").write_text(
         "старый текст\n", encoding="utf-8"
     )
+    # Первый проход дошёл до W3 (op'ы завершены) — reopen обязан снять их
+    # тоже, иначе W3 после переодобрения W2 пропустил бы edge-check и
+    # выдал старую заявку за завершение (ревью #346, major 2).
+    state = rs.load("r-reopen")
+    for key in ("branch-3", "edge-3", "candidate-3", "branch-4"):
+        rs.op_complete(state, key, request="approve-1-2-1")
+    state.ops["approve-1-2-1"] = {"status": "completed", "nodes": ["behaviour-spec"]}
+    rs.save(state)
     reopened = runner.reopen("r-reopen", "requirements", ops)
     assert reopened.wave == 2 and reopened.branch == "spec/WS-1-behaviour-w2-r1"
+    assert not any(k in reopened.ops for k in ("branch-3", "edge-3", "candidate-3", "branch-4"))
+    assert reopened.ops["approve-1-2-1"]["status"] == "completed", "история заявок цела"
+    assert reopened.ops["branch-1"]["status"] == "completed", "волны ниже не тронуты"
     assert ("switch_to", "spec/WS-1-behaviour-w2-r1", "master") in ops.calls
     assert reopened.ops["reopen-2"] == {
         "status": "completed", "count": 1, "node": "requirements",

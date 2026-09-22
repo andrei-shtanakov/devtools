@@ -161,6 +161,24 @@ def publish_wave(
             f"коммит заявки {key} ({head[:8]}) меняет пути вне поверхности "
             f"candidate (D16): {', '.join(bad)} — PR не создаётся"
         )
+    # Уже созданный PR (режим reapprove: `approve_node` пушит и создаёт PR
+    # ДО адаптера) сверяется с записанной головой ДО evidence-коммита:
+    # чужой push поверх головы — код 4, а не сырой non-ff на push. Голова
+    # PR, являющаяся ПРЕДКОМ записанной, — наша же (повтор после
+    # evidence-коммита, не дошедшего до push), это не чужой push.
+    existing = op.get("candidate_pr")
+    if existing is not None:
+        remote = an.pr_head(state, ops, existing)
+        if remote != head:
+            ops.fetch_branch(state.target_dir, op["branch"])
+            ours = (
+                ops.is_ancestor(state.target_dir, remote, head)
+                if remote else False
+            )
+            if ours is None:
+                return CODE_UNRESOLVED
+            if not ours:
+                return CODE_HEAD_MOVED
     files = evidence_files(state, records)
     if not _already_in_head(state, ops, head, files):
         an.switch_to_request(state, ops, key)
@@ -180,11 +198,6 @@ def publish_wave(
             raise an._unresolved("HEAD после evidence-коммита")
         al.record_head_sha(state, key, new_head)
         head = new_head
-    # Уже созданный PR сверяется с записанной головой ДО push: чужой push
-    # поверх головы дал бы non-ff с сырой ошибкой git вместо кода 4.
-    existing = op.get("candidate_pr")
-    if existing is not None and an.pr_head(state, ops, existing) != head:
-        return CODE_HEAD_MOVED
     an.publish_request(state, ops, key, legacy_bundle=legacy_bundle)
     op = state.ops[key]
     pr = op["candidate_pr"]
