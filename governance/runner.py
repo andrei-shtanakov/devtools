@@ -1817,6 +1817,14 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     if op_status(state, key) == "completed":
         return True
     _ensure_started(state, key)
+    # `gate-findings.txt` отражает ПОСЛЕДНИЙ прогон гейта
+    # (@id:gate-findings-stale-on-green, прогон S7 2026-09-21): круг 1
+    # записал находки, круг 2 прошёл чисто, файл остался — читающий видел
+    # красный там, где гейт зелёный. Снимается НА ВХОДЕ в шаг, а не в
+    # зелёной ветке: зелёных выходов из этой функции несколько, и стоп по
+    # исключению посреди гейта тоже не должен оставлять описание чужого
+    # состояния. Каждая ветка ниже пишет файл заново целиком.
+    (run_dir(state.run_id) / "gate-findings.txt").unlink(missing_ok=True)
     rc, output = ops.gate_check_candidate(
         state.target_dir, state.bundle_dir, state.profile
     )

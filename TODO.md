@@ -1938,7 +1938,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `local.sh --fingerprint-only` на ветке только с `CLAUDE.md`
       перестаёт давать код 5 (контроль: ветка только с `docs/*.md` его
       по-прежнему даёт).
-- [ ] `AUTHORIZED_APPROVER_ACCOUNTS` переживает границу процессов: одобрение узла §I12 не теряется оттого, что мерж и проверку подписи запускали из разных окон @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:approver-allowlist-process-boundary
+- [x] `AUTHORIZED_APPROVER_ACCOUNTS` переживает границу процессов: одобрение узла §I12 не теряется оттого, что мерж и проверку подписи запускали из разных окон @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:approver-allowlist-process-boundary — PR этой ветки
       Наблюдаемый дефект (прогон S7, 2026-09-21): candidate #315 смержен
       учёткой из allowlist верно, но финализирующую команду
       (`--approve-node <узел>`) запустил другой процесс, где переменной в
@@ -1956,6 +1956,16 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       обоим (как `harness.env` у харнессов), либо финализация отказывает
       ДО создания конверта с причиной «политика недоступна», отличной от
       «мержер не авторизован». Регрессия воспроизводит оба исхода.
+      **Сделано PR этой ветки — вторым исходом критерия (отказ, не общий
+      источник):** `authorized_signature` при пустом allowlist отвечает
+      `UNAVAILABLE`, а не `FORBIDDEN`; `_reconcile_candidate` поднимает
+      `_unresolved` — заявка жива, факт не записан, повтор с политикой
+      завершает ТОТ ЖЕ candidate. Основание считать пустоту потерей, а не
+      решением: с devtools#278 candidate под пустой политикой не создаётся
+      вовсе. Общий читаемый источник НЕ заведён намеренно — где он живёт,
+      решает `@id:approver-policy-trusted-source` (источник вне
+      проверяемого дерева), и второй, временный, разошёлся бы с ним.
+      Регрессия: `test_finalize_without_policy_refuses_and_keeps_the_request`.
 - [ ] Политика подписи §I12 приходит из источника, который проверяющий не может изменить @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:approver-policy-trusted-source
       Наблюдаемый дефект (прогон S7, 2026-09-21): `--approve-node` после
       мержа сверяет фактического мержера против
@@ -1991,7 +2001,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       аргументом запуска отказывает; регрессия воспроизводит расхождение
       версии политики между candidate и finalize как отказ, а не как
       молчаливый пересчёт.
-- [ ] Зелёный гейт не оставляет находки прошлого круга: `gate-findings.txt` отражает ПОСЛЕДНИЙ прогон гейта @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:gate-findings-stale-on-green
+- [x] Зелёный гейт не оставляет находки прошлого круга: `gate-findings.txt` отражает ПОСЛЕДНИЙ прогон гейта @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:gate-findings-stale-on-green — PR этой ветки
       Наблюдаемый дефект (прогон S7, 2026-09-21): круг 1 записал пять
       находок в 14:03; круг 2 прошёл чисто (`run.json` 14:53,
       `gate-candidate: exit=0`), но файл остался прежним. Читающий
@@ -2002,6 +2012,13 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       либо содержит явную отметку чистого прогона с его временем;
       регрессия — красный прогон, затем зелёный, затем чтение файла не
       даёт ни одной находки прошлого круга.
+      **Сделано PR этой ветки:** файл снимается НА ВХОДЕ в `_step_gate`
+      (`unlink(missing_ok=True)`), а не в зелёной ветке — зелёных выходов
+      несколько, и исключение посреди гейта тоже не должно оставлять
+      описание чужого состояния; каждая ветка пишет файл заново целиком.
+      `s8-findings.txt` этим классом не страдает: он производный от журнала
+      `gate-authoritative` и пересобирается. Регрессия:
+      `test_green_gate_removes_findings_of_the_previous_round`.
 - [ ] Желаемое поведение ревью tasks-PR определено: машинная evidence не уводит PR в платный круг молча @owner:github:andrei-shtanakov @epic:eco.tooling @id:tasks-pr-evidence-review-scope
       Наблюдение (прогон S7, 2026-09-21): tasks-PR #328 везёт
       `spec/<ws>-tasks.md` (проза) и
@@ -2028,7 +2045,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       спеку конвейера; поведение на tasks-PR воспроизводится тестом —
       либо аттестация + зелёная детерминированная проверка evidence,
       либо вердикт с явно названной причиной платности.
-- [ ] Штамп одобрения не переформатирует авторский frontmatter @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:approval-stamp-frontmatter-roundtrip
+- [x] Штамп одобрения не переформатирует авторский frontmatter @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:approval-stamp-frontmatter-roundtrip — PR этой ветки
       Наблюдаемый дефект (прогон S7, 2026-09-21, candidate #316 и далее):
       `--approve-node` прогоняет frontmatter через
       `split_frontmatter`/`join_frontmatter`, и в дифе заявки, помимо
@@ -2043,6 +2060,19 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       которые штамп меняет по смыслу; регрессия — узел с
       `traces_to: [x]` в flow-стиле и закавыченным пином проходит
       одобрение, и обе строки остаются побайтово прежними.
+      **Сделано PR этой ветки:** `frontmatter.update_frontmatter(text,
+      updates)` — заменяет диапазон строк ТОЛЬКО изменившегося ключа
+      верхнего уровня (до следующего ключа или комментария в первой
+      колонке), совпавший по значению не трогает, отсутствующий дописывает;
+      результат перечитывается парсером и обязан дать `meta | updates`,
+      иначе `ValueError` без записи (класс «0 замен выглядит как успех»,
+      ретроспектива 2026-09-02). Все три штампа `approve_node` (candidate,
+      stale-каскад, finalize) переведены на него; `self_hash` не зависит от
+      байтов — считается по канонической проекции. Изменённый ключ
+      рендерится каноном `safe_dump`: авторская форма ЭТОГО ключа не
+      сохраняется, значение сменилось. `conform_approved` tasks-спеки
+      (моста) — другая поверхность, не трогалась. Регрессия:
+      `test_approval_stamp_leaves_authored_frontmatter_bytes_alone`.
 - [ ] Copilot не приходит на PR без явной просьбы: правило «OFF по умолчанию» исполняется, а не только записано @owner:github:andrei-shtanakov @epic:eco.tooling @id:copilot-autotrigger-off
       Наблюдаемый дефект (прогон S7, 2026-09-21): на finalize-PR #317
       пришёл `copilot-pull-request-reviewer[bot]` с

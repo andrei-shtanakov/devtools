@@ -298,10 +298,29 @@ def authorized_signature(event: MergeEvent) -> Fact[Authorization]:
     причиной, восстановление идёт новым candidate (§I12). Значения у него
     нет: решения об авторизации не состоялось, и записывать нечего.
 
-    `UNAVAILABLE` здесь не бывает: пустой allowlist — не «не удалось
-    прочитать конфигурацию», а прочитанное «подписать не может никто».
+    `UNAVAILABLE` — allowlist ПУСТ в процессе, устанавливающем факт
+    (@id:approver-allowlist-process-boundary). Раньше пустота читалась как
+    «подписать не может никто» и давала `FORBIDDEN` — и в S7 2026-09-21
+    так была похоронена живая заявка: candidate #315 смержила учётка из
+    allowlist, а финализацию запустил процесс без переменной. С
+    devtools#278 candidate вообще не создаётся под пустой политикой, значит
+    пустота на этой фазе — ПОТЕРЯ значения между процессами, а не решение
+    о мержере: факт не установлен, заявка сохраняется, повтор с политикой
+    судит тот же мерж. Учётка при этом НЕ проверялась, и сообщение не
+    вправе её обвинять.
     """
-    if event.login in approver_allowlist():
+    allowlist = approver_allowlist()
+    if not allowlist:
+        return Fact(
+            Outcome.UNAVAILABLE,
+            None,
+            f"{APPROVER_ALLOWLIST_ENV} пуст в этом процессе — политика "
+            f"подписи недоступна, и мерж от {event.login} судить не по чему; "
+            "учётка не проверялась. Объявите политику (для этого флота — "
+            "`prograph-vault/authored/rules/approver-policy.md`) в окружении "
+            "ТОГО вызова, который устанавливает факт, и повторите",
+        )
+    if event.login in allowlist:
         return Fact(
             Outcome.FOUND,
             Authorization(
