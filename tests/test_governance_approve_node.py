@@ -31,6 +31,7 @@ from governance import bundle_inputs
 from governance import merge_gate as mg
 from governance import node_approval as na
 from governance import run_state as rs
+from governance.facts import Fact, Outcome, unavailable
 from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.ops import RealOps
 
@@ -120,6 +121,13 @@ class Forge:
     default_reviews: list[dict] = field(
         default_factory=lambda: [{"login": AGENT, "state": "APPROVED"}]
     )
+    #: Источник политики подписи (спека approval-policy): версия по пути и
+    #: тексты по SHA; `mute` с ключами "policy_version"/"policy_file" даёт
+    #: UNAVAILABLE. Подмена текста под тем же SHA моделирует «прочитано не то».
+    policy_sha: str | None = "p" * 40
+    policy_files: dict[str, str] = field(default_factory=lambda: {
+        "p" * 40: f"AUTHORIZED_APPROVER_ACCOUNTS={HUMAN}\n",
+    })
 
     def head_of(self, branch: str) -> str | None:
         done = subprocess.run(
@@ -193,6 +201,21 @@ class Ops(RealOps):
         )
         return done.returncode == 0
 
+    def policy_version_fact(self, repo_slug, branch, path):
+        if "policy_version" in self.forge.mute:
+            return unavailable("policy: нет сети")
+        if self.forge.policy_sha is None:
+            return Fact(Outcome.ABSENT, None, "политики нет")
+        return Fact(Outcome.FOUND, self.forge.policy_sha, "ok")
+
+    def repo_file_fact(self, repo_slug, sha, path):
+        if "policy_file" in self.forge.mute:
+            return unavailable("policy: нет сети")
+        text = self.forge.policy_files.get(sha)
+        if text is None:
+            return Fact(Outcome.ABSENT, None, "нет файла")
+        return Fact(Outcome.FOUND, text, "ok")
+
     def pr_reviews(self, repo_slug: str, pr: int) -> list[dict] | None:
         """Ревью PR. `mute` даёт None — «факт не получен», а не исключение:
         контракт `RealOps.pr_reviews` именно таков, и вызывающий обязан
@@ -251,7 +274,7 @@ class World:
 @pytest.fixture()
 def world(tmp_path: Path, monkeypatch) -> World:
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
-    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, HUMAN)
+    monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
     monkeypatch.setattr(an, "_SLEEP", lambda seconds: None)
     origin = tmp_path / "origin.git"
     subprocess.run(
@@ -1348,7 +1371,7 @@ def test_agent_merge_invalidates_and_names_the_allowlist(
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"], login=AGENT)
-    with pytest.raises(RuntimeError, match=af.APPROVER_ALLOWLIST_ENV):
+    with pytest.raises(RuntimeError, match="approval-policy"):
         approve(world, "charter")
     record = world.state.ops[key]
     assert record["status"] == al.STATUS_INVALIDATED
@@ -1583,8 +1606,10 @@ def test_authorization_decision_is_recorded_with_the_policy(
     approve(world, "charter")
     auth = rs.load("r-approve").ops[key]["authorization"]
     assert auth["login"] == HUMAN
-    assert auth["policy"] == af.policy_fingerprint()
-    assert auth["source"] == af.APPROVER_ALLOWLIST_ENV
+    assert auth["policy"] == af.policy_fingerprint({HUMAN})
+    assert auth["source"] == (
+        f"github:andrei-shtanakov/approval-policy@{'p' * 40}:policy/approvers.env"
+    )
 
 
 def test_policy_change_does_not_reauthorize_the_past(
@@ -1604,8 +1629,7 @@ def test_policy_change_does_not_reauthorize_the_past(
     approve(world, "charter")                    # решение записано
     world.state.ops[key]["finalize_pr"] = None   # крэш-окно до записи номера
     rs.save(world.state)
-    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "")
-    assert af.approver_allowlist() == frozenset()
+    world.forge.mute.add("policy_version")       # фаза 3 источник не читает
 
     approve(world, "charter")                    # возобновление
     assert world.state.ops[key]["finalize_pr"] is not None
@@ -2425,94 +2449,6 @@ def test_safety_unknown_routes_finalize_to_human(world: World, monkeypatch) -> N
     assert al.is_live(world.state.ops[key])
 
 
-def test_empty_allowlist_refuses_before_any_candidate_is_created(
-    world: World, monkeypatch
-) -> None:
-    """Пустая политика — отказ ДО заявки и PR, а не после человеческого акта.
-
-    Пустой дефолт `AUTHORIZED_APPROVER_ACCOUNTS` — правильный fail-closed и
-    остаётся как есть. Дефект был в МОМЕНТЕ: механика заводила candidate-PR,
-    человек его мержил, и только потом слышала, что подписи этот мерж не
-    создаёт (devtools#278). На шаге предложения известно всё нужное:
-    политика пуста ⇒ ни один мерж подписи не даст ⇒ предлагать акт незачем.
-    """
-    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "")
-    with pytest.raises(RuntimeError) as caught:
-        approve(world, "charter")
-    message = str(caught.value)
-    assert af.APPROVER_ALLOWLIST_ENV in message
-    assert world.state.ops == {}, "заявка не заводится"
-    assert world.forge.prs == {}, "candidate-PR не создаётся"
-
-
-def test_empty_allowlist_refusal_is_not_about_the_merger(
-    world: World, monkeypatch
-) -> None:
-    """Причина — «политика недоступна», и она отличима от «мержер не
-    авторизован»: вторая обвиняет человека в том, чего он не делал."""
-    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "")
-    with pytest.raises(RuntimeError) as caught:
-        approve(world, "charter")
-    message = str(caught.value)
-    assert "пуст" in message, "названа пустота политики, а не учётка"
-    assert "не входит в" not in message, "это формулировка отказа мержеру"
-
-
-def test_no_op_over_approved_node_survives_empty_allowlist(
-    world: World, monkeypatch
-) -> None:
-    """Повтор над честно одобренным узлом ничего не создаёт, поэтому пустая
-    политика ему не помеха: отказ здесь был бы ложным."""
-    approve(world, "charter")
-    key, op = only_request(world)
-    merge_pr(world, op["candidate_pr"])
-    approve(world, "charter")
-    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
-    world.sync()
-    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "")
-    outcome = approve(world, "charter")
-    assert "no-op" in outcome.message
-
-
-def test_finalize_without_policy_refuses_and_keeps_the_request(
-    world: World, monkeypatch
-) -> None:
-    """Политика не пережила границу процессов — отказ, не `invalidated`
-    (@id:approver-allowlist-process-boundary).
-
-    Прогон S7 2026-09-21, candidate #315: мерж выполнен учёткой из
-    allowlist процессом A, финализацию запустил процесс B без переменной в
-    окружении — контур увидел «подписать не может никто» и похоронил
-    живую заявку. Candidate существует только под непустой политикой
-    (devtools#278), поэтому пустота на фазе 2 — потеря значения, а не
-    решение о мержере: факт не установлен, заявка сохраняется, повтор с
-    политикой завершает её тем же candidate.
-    """
-    approve(world, "charter")
-    key, op = only_request(world)
-    merge_pr(world, op["candidate_pr"])          # процесс A: политика есть
-    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "")   # процесс B: нет
-
-    with pytest.raises(RuntimeError) as caught:
-        approve(world, "charter")
-
-    message = str(caught.value)
-    assert "пуст" in message, "названа недоступность политики"
-    assert "учётки нет в" not in message, "это формулировка отказа мержеру"
-    record = world.state.ops[key]
-    assert al.is_live(record), record.get("reason")
-    assert record["status"] != al.STATUS_INVALIDATED
-    assert record.get("authorization") is None, (
-        "решение об авторизации не записано"
-    )
-    assert world.forge.prs[op["candidate_pr"]]["state"] == "MERGED"
-
-    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, HUMAN)
-    approve(world, "charter")                    # повтор ТОЙ ЖЕ заявки
-    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
-    assert world.state.ops[key]["authorization"]["login"] == HUMAN
-
-
 AUTHORED_FRONTMATTER_LINES = (
     "traces_to: [discovery-brief]",
     'brief_sha256: "e3b0c44298fc1c149afbfbf4c8996fb92427ae41e4649b934ca495991b7852b8"',
@@ -2580,6 +2516,143 @@ def test_approval_stamp_leaves_authored_frontmatter_bytes_alone(
     assert meta["status"] == na.STATUS_APPROVED
     assert meta["approved_by"] == HUMAN
     assert meta[na.SELF_HASH_KEY] == na.self_hash(final)
+
+
+POLICY_SHA_2 = "q" * 40
+
+
+def test_candidate_pins_the_policy_version(world: World) -> None:
+    """Фаза 1 закрепляет версию политики тем же write-ahead, что намерение,
+    и называет её в теле candidate (его читает human-merge.sh)."""
+    approve(world, "charter")
+    key, op = only_request(world)
+    assert op["policy"]["sha"] == "p" * 40
+    assert op["policy"]["fingerprint"] == "v1:31bf16586b6cfbb69a29b23d8850bfe57931d99b"
+    body = world.forge.prs[op["candidate_pr"]]["body"]
+    assert f"policy: andrei-shtanakov/approval-policy@{'p' * 40}" in body
+    assert af.APPROVER_ALLOWLIST_ENV not in body
+
+
+def test_env_variable_refuses_before_any_effect(world: World, monkeypatch) -> None:
+    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, HUMAN)
+    with pytest.raises(RuntimeError, match="больше не источник"):
+        approve(world, "charter")
+    assert world.state.ops == {} and world.forge.prs == {}
+
+
+def test_unavailable_policy_is_unresolved_and_creates_nothing(world: World) -> None:
+    world.forge.mute.add("policy_version")
+    with pytest.raises(RuntimeError, match="факт не установлен"):
+        approve(world, "charter")
+    assert world.state.ops == {} and world.forge.prs == {}
+
+
+def test_empty_policy_refuses_before_candidate_without_blaming_a_login(
+    world: World,
+) -> None:
+    world.forge.policy_files["p" * 40] = "AUTHORIZED_APPROVER_ACCOUNTS= , ,\n"
+    with pytest.raises(RuntimeError) as caught:
+        approve(world, "charter")
+    assert "подписать не может никто" in str(caught.value)
+    assert "учётки нет в" not in str(caught.value)
+    assert world.state.ops == {}
+
+
+def test_no_op_over_approved_node_survives_unavailable_policy(world: World) -> None:
+    """Повтор над честно одобренным узлом ничего не создаёт, поэтому
+    недоступная политика ему не помеха: отказ здесь был бы ложным."""
+    drive_to_approved(world, "charter")
+    world.sync()
+    world.forge.mute.add("policy_version")
+    assert "no-op" in approve(world, "charter").message
+
+
+def test_policy_change_invalidates_and_new_candidate_pins_the_new_version(
+    world: World,
+) -> None:
+    """D3 (подписано 2026-09-22): смена версии — установленный факт →
+    invalidated с причиной policy_changed, история заявки сохраняется;
+    повторное установление авторизации — новый candidate под новым пином."""
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    world.forge.policy_sha = POLICY_SHA_2
+    world.forge.policy_files[POLICY_SHA_2] = f"AUTHORIZED_APPROVER_ACCOUNTS={HUMAN}\n"
+    with pytest.raises(RuntimeError) as caught:
+        approve(world, "charter")
+    assert "политика сменилась" in str(caught.value)
+    record = world.state.ops[key]
+    assert record["status"] == al.STATUS_INVALIDATED
+    assert record["reason"].startswith("policy_changed:")
+    assert record["authorization"] is None
+    assert record["policy"]["sha"] == "p" * 40, "история сохранена"
+    assert record["candidate_pr"] == op["candidate_pr"]
+    outcome = approve(world, "charter")
+    assert outcome.request is not None and outcome.request != key
+    assert world.state.ops[outcome.request]["policy"]["sha"] == POLICY_SHA_2
+    merge_pr(world, world.state.ops[outcome.request]["candidate_pr"])
+    approve(world, "charter")
+    assert world.state.ops[outcome.request]["status"] == al.STATUS_COMPLETED
+
+
+def test_substituted_content_under_same_sha_keeps_the_request(world: World) -> None:
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    world.forge.policy_files["p" * 40] = "AUTHORIZED_APPROVER_ACCOUNTS=someone-else\n"
+    with pytest.raises(RuntimeError, match="прочитано не то"):
+        approve(world, "charter")
+    assert al.is_live(world.state.ops[key])
+    assert world.state.ops[key]["authorization"] is None
+
+
+def test_env_variable_at_phase_two_refuses_and_keeps_the_request(
+    world: World, monkeypatch
+) -> None:
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, HUMAN)
+    with pytest.raises(RuntimeError, match="больше не источник"):
+        approve(world, "charter")
+    assert al.is_live(world.state.ops[key])
+
+
+def test_completed_request_records_policy_source(world: World) -> None:
+    drive_to_approved(world, "charter")
+    _, op = only_request(world)
+    assert op["authorization"]["source"] == (
+        f"github:andrei-shtanakov/approval-policy@{'p' * 40}:policy/approvers.env"
+    )
+    assert op["authorization"]["policy"] == op["policy"]["fingerprint"]
+
+
+def test_legacy_request_without_policy_is_invalidated(world: World) -> None:
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    world.state.ops[key]["policy"] = None
+    rs.save(world.state)
+    with pytest.raises(RuntimeError, match="не закрепила версию"):
+        approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
+
+
+def test_join_reads_policy_under_the_live_request_pin(world: World) -> None:
+    """design+acceptance — один уровень: второй узел присоединяется к заявке
+    первого только под её пином; сменившаяся версия — отказ без записей."""
+    for node in ("charter", "requirements", "behaviour-spec"):
+        drive_to_approved(world, node)
+    world.sync()
+    approve(world, "design")
+    (nums, op), = al.live_requests(world.state)
+    key = al.request_key(*nums)
+    world.forge.policy_sha = POLICY_SHA_2
+    world.forge.policy_files[POLICY_SHA_2] = f"AUTHORIZED_APPROVER_ACCOUNTS={HUMAN}\n"
+    with pytest.raises(RuntimeError, match="политика сменилась"):
+        approve(world, "acceptance")
+    assert world.state.ops[key]["nodes"] == ["design"], "узел не дописан"
+    assert al.is_live(world.state.ops[key])
 
 
 def test_agent_merge_refusal_leaves_finalize_to_human(world: World) -> None:
