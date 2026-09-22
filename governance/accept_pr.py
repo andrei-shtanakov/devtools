@@ -84,6 +84,11 @@ _HARNESS_PREFIXES = (
     # Триггер человеческого мержа (ADR-ECO-011 D6): сверяет, что мержит
     # человек из allowlist, — та же категория гварда, что merge-pr.sh.
     "human-merge.sh",
+    # Подключаемые модули обвязки: разбор SSOT и формы веток одобрения. Код,
+    # который исполняют merge-pr.sh и human-merge.sh, защищён наравне с ними
+    # (blocker ревью PR #344: вынесенная функция вышла бы из-под гварда).
+    "ssot_env.sh",
+    "approval_branches.sh",
     "contracts/approval-branches/",
     # Перечень authority-root путей обвязка тоже читает из дерева.
     # Он и сам authority-root (см. SSOT-файл), но защиты разные по стадии:

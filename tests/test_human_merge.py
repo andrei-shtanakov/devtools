@@ -32,7 +32,8 @@ case "$*" in
     printf '%s\\n' "${GH_STUB_STATE:-OPEN}"
     printf '%s\\n' "${GH_STUB_HEADOID-$GH_STUB_DEFAULT_OID}"
     printf '%s\\n' "${GH_STUB_MERGESTATE-CLEAN}"
-    printf '%s\\n' "${GH_STUB_BODY-policy: andrei-shtanakov/approval-policy@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" ;;
+    printf '%s\\n' "${GH_STUB_BODY-policy: andrei-shtanakov/approval-policy@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+    printf '%s\\n' "${GH_STUB_HEADREF-spec/WS-T1-approve-1-0-1}" ;;
   *"api graphql"*)
     # Стаб игнорирует --jq и печатает уже «отжатые» значения — как pr view.
     case "$*" in
@@ -161,6 +162,24 @@ def test_body_without_policy_line_is_refused(fleet: Fleet) -> None:
     res = fleet.run(GH_STUB_BODY="без пина")
     assert res.returncode == 2, res.stderr
     assert "policy:" in res.stderr
+
+
+def test_finalize_pr_without_pin_is_judged_by_current_version(fleet: Fleet) -> None:
+    """Finalize-PR под «Мерж: человек» пина не несёт — и не обязан: логин
+    судится по актуальной версии политики (major ревью PR #344)."""
+    res = fleet.run(GH_STUB_HEADREF="spec/WS-T1-approve-1-0-1-final", GH_STUB_BODY="без пина")
+    assert res.returncode == 0, res.stderr
+    assert "/merge" in fleet.gh_log.read_text()
+    res = fleet.run(
+        GH_STUB_HEADREF="spec/WS-T1-approve-1-0-1-final", GH_STUB_BODY="без пина",
+        GH_STUB_POLICY_ACCOUNTS="someone-else",
+    )
+    assert res.returncode == 3, res.stderr
+
+
+def test_non_approval_branch_needs_no_pin(fleet: Fleet) -> None:
+    res = fleet.run(GH_STUB_HEADREF="feat/anything", GH_STUB_BODY="обычный PR с лейблом human-merge-required")
+    assert res.returncode == 0, res.stderr
 
 
 def test_env_variable_is_refused(fleet: Fleet) -> None:

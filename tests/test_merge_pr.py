@@ -1004,6 +1004,10 @@ def test_shell_reads_authority_ssot_and_hardcodes_nothing() -> None:
         "contracts/authority-root/",   # SSOT, который скрипт читает
         "contracts/approval-branches/",  # SSOT имён, который он читает
         "merge-pr.sh",                 # он сам: usage, шапка, диагностика
+        # Подключаемые модули — собственные входы обвязки (`. "$script_dir/…"`),
+        # сами authority-root и харнесс-пути (blocker ревью PR #344).
+        "ssot_env.sh",
+        "approval_branches.sh",
     }
     checked = [p for p in authority_root.prefixes() if p not in own]
     assert checked, (
