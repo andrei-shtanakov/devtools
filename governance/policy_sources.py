@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 from pathlib import Path
 
 import yaml
@@ -128,3 +129,119 @@ def target_profile_declares(target_dir: str, profile: str, node_id: str) -> bool
         )
         return False
     return node_id in node_ids
+
+
+# --- проекция профиля на волну (спека sequential-node-approval S5) ---
+
+PROJECTION_MANIFEST = "PROJECTION.sha256"
+
+
+def _profile_levels(artifacts: list[dict]) -> dict[str, int]:
+    """Уровни узлов по `upstream` ПРОФИЛЯ (не по `BUNDLE_DAG`).
+
+    Порядок `artifacts` топологическим не предполагается (steward сортирует
+    сам) — считаем до неподвижной точки; цикл или неизвестный upstream —
+    отказ, а не бесконечный цикл.
+    """
+    by_id = {a["id"]: list(a.get("upstream") or []) for a in artifacts}
+    lv: dict[str, int] = {}
+    pending = set(by_id)
+    while pending:
+        ready = [i for i in pending if all(u in lv for u in by_id[i])]
+        if not ready:
+            raise RuntimeError(
+                "профиль: цикл или неизвестный upstream среди "
+                f"{sorted(pending)}"
+            )
+        for i in ready:
+            lv[i] = 1 + max((lv[u] for u in by_id[i]), default=-1)
+            pending.discard(i)
+    return lv
+
+
+def _truncate_profile(source: bytes, level: int) -> bytes:
+    """Детерминированная проекция полного профиля на узлы уровней ≤ `level`."""
+    data = yaml.safe_load(source.decode("utf-8"))
+    lv = _profile_levels(data["artifacts"])
+    data["artifacts"] = [a for a in data["artifacts"] if lv[a["id"]] <= level]
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True).encode("utf-8")
+
+
+def wave_profile_dir(
+    target_dir: str, profile: str, wave: int, run_dir: Path
+) -> Path:
+    """Копия каталога профиля target'а, усечённая до волны `wave`.
+
+    Компромисс S5: gate-check steward'а судит бандл по профилю, а у волны
+    бандл неполон — поэтому раннер даёт гейту КОПИЮ каталога профиля
+    (`<run_dir>/profile-w<wave>/`), в которой сам профиль усечён до узлов
+    уровней ≤ `wave − 1` (волны 1-based, уровни 0-based; уровни считаются
+    по `upstream` профиля), а sibling'и (roles, gate-catalog, …) скопированы
+    байт в байт. `PROJECTION.sha256` закрепляет sha256 каждого исходника,
+    `verify_wave_profile_dir` держит копию равной закреплённому. Целевое
+    состояние — `gate-check --upto` у steward (заявка соседу, Task 12), и
+    тогда копия исчезает.
+
+    Байты исходников читаются ОДИН раз и закрепляются ДО записи копии:
+    копия строится из тех же байтов, что и manifest, а не из файла, который
+    мог смениться между копированием и хешированием (ревью #343, R1).
+    Возвращает путь усечённого профиля внутри копии.
+    """
+    level = wave - 1
+    src_dir = Path(target_dir) / Path(profile).parent
+    dst_dir = run_dir / f"profile-w{wave}"
+    if dst_dir.exists():
+        shutil.rmtree(dst_dir)
+    sources = {p.name: p.read_bytes() for p in src_dir.iterdir() if p.is_file()}
+    dst_dir.mkdir(parents=True)
+    for name, data in sources.items():
+        (dst_dir / name).write_bytes(data)
+    (dst_dir / PROJECTION_MANIFEST).write_text(
+        "".join(
+            f"{hashlib.sha256(d).hexdigest()}  {n}\n"
+            for n, d in sorted(sources.items())
+        ),
+        encoding="utf-8",
+    )
+    projected = dst_dir / Path(profile).name
+    projected.write_bytes(_truncate_profile(sources[Path(profile).name], level))
+    return projected
+
+
+def verify_wave_profile_dir(
+    target_dir: str, profile: str, projected: Path, level: int
+) -> list[str]:
+    """Расхождения между тем, что прочитает steward (КОПИЯ), и закреплённым.
+
+    Сверяются байты КОПИИ каждого sibling'а с digest'ом из
+    `PROJECTION.sha256` (не исходники: их изменение после копирования
+    проекцию не портит, изменение копии — портит); усечённый профиль
+    сверяется как ожидаемое преобразование закреплённого полного профиля
+    (исходник обязан совпасть с digest'ом, копия — с его усечением);
+    лишний файл в копии или отсутствующий — тоже расхождение. Пустой список
+    — совпало.
+    """
+    dst_dir = projected.parent
+    manifest = (dst_dir / PROJECTION_MANIFEST).read_text(encoding="utf-8")
+    recorded = {
+        name: digest
+        for digest, name in (line.split("  ", 1) for line in manifest.splitlines())
+    }
+    profile_name = Path(profile).name
+    bad: list[str] = []
+    for name, digest in recorded.items():
+        copy = dst_dir / name
+        if not copy.is_file():
+            bad.append(name)
+        elif name == profile_name:
+            src = (Path(target_dir) / Path(profile).parent / name).read_bytes()
+            if (
+                hashlib.sha256(src).hexdigest() != digest
+                or copy.read_bytes() != _truncate_profile(src, level)
+            ):
+                bad.append(name)
+        elif hashlib.sha256(copy.read_bytes()).hexdigest() != digest:
+            bad.append(name)
+    present = {p.name for p in dst_dir.iterdir() if p.is_file()}
+    extra = present - set(recorded) - {PROJECTION_MANIFEST}
+    return sorted(bad) + sorted(extra)
