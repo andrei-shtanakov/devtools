@@ -1221,7 +1221,10 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Теперь `legacy_waits` + оговорка в detail; сам слаг здесь НЕ резолвится —
       пара слаг↔пункт правило пакета (`check_legacy_fleet`), приватное было бы
       повторением ошибки круга 5.
-- [ ] Слаг приёмки как токен — в пакете `plan-fields`, а не приватно в devtools @owner:github:andrei-shtanakov @id:inbox-slug-token-match @blocked_by:todo://dispatcher/slug-token-match @epic:eco.plan-fields
+- [ ] Слаг приёмки как токен — в пакете `plan-fields`, а не приватно в devtools @owner:github:andrei-shtanakov @id:inbox-slug-token-match @epic:eco.plan-fields
+      Ожидание доставлено: `todo://dispatcher/slug-token-match` закрыт
+      (dispatcher PR #270) — тег снят, пункт actionable (PF-BLOCKER-STALE);
+      остаток здесь — принять токенное сопоставление пакета вместо приватного.
       `inbox.is_accepted` матчит слаг подстрокой и документирует слабость:
       `benchmark-2` совпадает с пунктом про `benchmark-20`. Ужесточение —
       «the package's call» (ADR-ECO-005 D9), приватное правило в скрипте есть
@@ -2170,12 +2173,17 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `stop-reason.txt` в каталог прогона. Компромисс S5 (проекция профиля
       копией) — заявка соседу steward#187 (`gate-check --upto`).
 
-- [ ] Живая приёмка волнового режима (спека sequential-node-approval §6.3): `make spec-loop … ARGS='--brief … --waves'` на крошечном предмете; evidence `docs/evidence/<дата>-waves-live-run.md` — 6 человеческих актов, edge-check evidence и его ревью на каждом candidate, ноль платных ревью моделью на candidate/finalize, ноль правок узлов после одобрения без `--reopen`; после двух живых прогонов — дефолт `waves` и удаление прежнего пути (S13) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:waves-live-acceptance @blocked_by:todo://devtools/sequential-node-approval
+- [ ] Живая приёмка волнового режима (спека sequential-node-approval §6.3): `make spec-loop … ARGS='--brief … --waves'` на крошечном предмете; evidence `docs/evidence/<дата>-waves-live-run.md` — 6 человеческих актов, edge-check evidence и его ревью на каждом candidate, ноль платных ревью моделью на candidate/finalize, ноль правок узлов после одобрения без `--reopen`; после двух живых прогонов — дефолт `waves` и удаление прежнего пути (S13) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:waves-live-acceptance
+      Ожидание доставлено 2026-09-22: `todo://devtools/sequential-node-approval`
+      закрыт кодом #346 (master `ed9e7b0`) — тег снят, пункт actionable
+      (PF-BLOCKER-STALE). Остаток — человеческие акты прогона, не блокер соседа.
       Требует человеческих мержей candidate (пять на бандл) — акт владельца.
       Предусловие учёток (S7): автор candidate/finalize ≠ `ai-prosto`,
       иначе форджа не примет одобряющее ревью edge-check на свой же PR.
 
-- [ ] Спека: документы бандла как оракул проверки продукта — `15-behaviour-spec` и `25-acceptance` становятся набором адресуемых критериев, на которые ссылается исполнение и evidence прогона; продолжение существующей трассировки `бриф G-NN/FR-NN → requirements` вниз @owner:github:andrei-shtanakov @epic:eco.dark-factory @blocked_by:todo://devtools/sequential-node-approval @id:bundle-docs-as-oracle
+- [ ] Спека: документы бандла как оракул проверки продукта — `15-behaviour-spec` и `25-acceptance` становятся набором адресуемых критериев, на которые ссылается исполнение и evidence прогона; продолжение существующей трассировки `бриф G-NN/FR-NN → requirements` вниз @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:bundle-docs-as-oracle
+      Ожидание доставлено 2026-09-22: `todo://devtools/sequential-node-approval`
+      закрыт кодом #346 — тег снят, пункт actionable (PF-BLOCKER-STALE).
       Порядок обязателен: оракул должен быть зафиксирован ДО появления
       проверяемого, иначе он подстраивается. Одобренный и запиненный по
       хешу содержимого узел и есть такая фиксация — её даёт
