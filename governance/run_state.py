@@ -119,6 +119,25 @@ class RunState:
     # отключался бы ровно тем, от чего защищает. Документ, объявивший
     # версию 2, проверяется полностью независимо от флага.
     allow_legacy_dt: bool = False
+    # Режим авторинга бандла (спека sequential-node-approval S13):
+    # "legacy" — прежний путь, бандл целиком одним PR; "waves" — узлы
+    # одобряются волнами по уровням DAG, каждая волна — свой candidate-PR
+    # под §I12. Старые run.json без поля читаются как legacy.
+    authoring: str = "legacy"
+    # Номер текущей волны (1-based, `wave = level + 1`) в режиме waves;
+    # `0` — не волновой режим. `runner.start` в waves ставит `wave = 1`.
+    wave: int = 0
+
+
+_ALLOWED_AUTHORING = ("legacy", "waves")
+
+
+def validate_authoring(authoring: str) -> None:
+    """Валидирует `authoring` прогона (S13): только `legacy`/`waves`."""
+    if authoring not in _ALLOWED_AUTHORING:
+        raise ValueError(
+            f"authoring {authoring!r} невалиден: допустимо {_ALLOWED_AUTHORING!r}"
+        )
 
 
 _ALLOWED_AUTHOR_BACKENDS = ("codex", "disp")
@@ -164,10 +183,12 @@ def new_run(
     brief: dict[str, object] | None = None,
     interview: dict | None = None,
     allow_legacy_dt: bool = False,
+    authoring: str = "legacy",
 ) -> RunState:
     """Новый прогон (S0). `run_id` подаётся снаружи (вызывающая сторона)."""
     validate_merge_authority(merge_authority)
     validate_author_backend(author_backend)
+    validate_authoring(authoring)
     return RunState(
         run_id=run_id,
         subject=subject,
@@ -188,6 +209,7 @@ def new_run(
         brief=brief,
         interview=interview,
         allow_legacy_dt=allow_legacy_dt,
+        authoring=authoring,
     )
 
 

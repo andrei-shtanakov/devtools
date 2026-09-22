@@ -134,3 +134,29 @@ def test_new_run_carries_interview_state_and_old_ledgers_load(runs_root) -> None
     data = json.loads(raw); del data["interview"]
     (rs.run_dir("r-int") / "run.json").write_text(json.dumps(data), encoding="utf-8")
     assert rs.load("r-int").interview is None
+
+
+def test_run_state_defaults_to_legacy_authoring(tmp_path: Path, runs_root) -> None:
+    state = rs.new_run(
+        subject="s", repo="r", repo_slug="o/r", ws_id="WS",
+        target_dir=str(tmp_path), bundle_dir="spec",
+        profile="profiles/team-exp.yaml", run_id="r-1",
+    )
+    assert state.authoring == "legacy" and state.wave == 0  # 0 — не волны
+    rs.save(state)
+    assert rs.load("r-1").authoring == "legacy"
+
+
+def test_waves_authoring_is_persisted(tmp_path: Path, runs_root) -> None:
+    state = rs.new_run(
+        subject="s", repo="r", repo_slug="o/r", ws_id="WS",
+        target_dir=str(tmp_path), bundle_dir="spec",
+        profile="profiles/team-exp.yaml", run_id="r-2", authoring="waves",
+    )
+    rs.save(state)
+    assert rs.load("r-2").authoring == "waves"
+
+
+def test_unknown_authoring_is_refused() -> None:
+    with pytest.raises(ValueError, match="authoring"):
+        rs.validate_authoring("chunks")

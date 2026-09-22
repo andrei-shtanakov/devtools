@@ -61,6 +61,7 @@ from governance.run_state import (
     run_dir,
     save,
     validate_author_backend,
+    validate_authoring,
     validate_id_component,
     validate_merge_authority,
 )
@@ -279,6 +280,7 @@ def start(
     brief_source: brief_input.BriefSource | None = None,
     interview_spec: iv.InterviewSpec | None = None,
     allow_legacy_dt: bool = False,
+    authoring: str = "legacy",
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
@@ -304,6 +306,7 @@ def start(
     """
     validate_merge_authority(merge_authority)
     validate_author_backend(author_backend)
+    validate_authoring(authoring)
     if interview_spec is not None and brief_source is not None:
         raise ValueError("--need и --brief взаимоисключающи")
     blocker = _blocking_merged_unverified(ws_id)
@@ -341,6 +344,7 @@ def start(
         brief=brief_descriptor,
         interview=interview_spec.as_state() if interview_spec else None,
         allow_legacy_dt=allow_legacy_dt,
+        authoring=authoring,
     )
     save(state)
     return advance(state, ops)
