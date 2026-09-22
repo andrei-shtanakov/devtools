@@ -3447,3 +3447,53 @@ def test_wave_finalize_resumes_from_await_finalize_merge(
     assert resumed.wave == 2, "переход к следующей волне — ровно один"
     w.sync()
     assert w.base_meta("00-charter.md")["status"] == na.STATUS_APPROVED
+
+
+def test_reopen_makes_a_new_branch_name_and_stale_is_reapproved_by_levels(
+    waves_world: World,
+) -> None:
+    """Task 10 на настоящем git: после W1..W3 remote-ветка `…-w2` есть;
+    `reopen` создаёт `…-w2-r1` от base без файла узла и её push не даёт
+    non-fast-forward; candidate над новым текстом ставит `stale`
+    behaviour-spec; `stale_below_top_level` ведёт переодобрение."""
+    from governance import runner
+
+    w = waves_world
+    for wave, files in enumerate(_WAVE_FILES[:3], 1):
+        drive_wave(w, wave, files)
+    assert w.forge.head_of("spec/WS-T1-behaviour-w2") is not None
+
+    stopped = runner.reopen(w.state.run_id, "requirements", w.ops, manual=True)
+    assert stopped.status == "stopped_author" and stopped.wave == 2
+    assert stopped.branch == "spec/WS-T1-behaviour-w2-r1"
+    assert _git(w.target, "rev-parse", "--abbrev-ref", "HEAD") == stopped.branch
+    assert not (w.target / BUNDLE / "10-requirements.md").exists()
+    assert (w.target / BUNDLE / "15-behaviour-spec.md").exists(), "нижние не тронуты"
+
+    (w.target / BUNDLE / "10-requirements.md").write_text(
+        _node_text("requirements", body="Требования v2."), encoding="utf-8"
+    )
+    _git(w.target, "add", "-A")
+    _git(w.target, "commit", "-qm", "reauthor requirements")
+    _git(w.target, "push", "-q", "-u", "origin", stopped.branch)   # без non-ff
+    sha = _git(w.target, "rev-parse", "HEAD")
+    _git(w.target, "switch", "-q", "master")
+    w.state = rs.load(w.state.run_id)
+    outcome = an.propose_from_source(w.state, w.ops, ["requirements"], sha)
+    op = w.state.ops[outcome.request]
+    stale = split_frontmatter(_show(w.target, f"origin/{op['branch']}:{BUNDLE}/15-behaviour-spec.md"))[0]
+    assert stale["status"] == na.STATUS_STALE
+    merge_pr(w, op["candidate_pr"])
+    an.approve_node(w.state, w.ops, "requirements")
+    w.sync()
+    assert an.stale_below_top_level(w.state, w.ops, bundle_dag.BUNDLE_DAG) == ["behaviour-spec"]
+    assert "Требования v2." in w.base_text("10-requirements.md")
+
+    second = an.approve_node(w.state, w.ops, "behaviour-spec")   # без source_sha
+    op2 = w.state.ops[second.request]
+    assert op2["source_sha"] is None
+    merge_pr(w, op2["candidate_pr"])
+    an.approve_node(w.state, w.ops, "behaviour-spec")
+    w.sync()
+    assert an.stale_below_top_level(w.state, w.ops, bundle_dag.BUNDLE_DAG) == []
+    assert w.base_meta("15-behaviour-spec.md")["status"] == na.STATUS_APPROVED

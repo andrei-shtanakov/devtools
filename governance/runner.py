@@ -416,8 +416,53 @@ def _wave_level(state: RunState) -> int:
 
 
 def _wave_branch(state: RunState) -> str:
-    """Ветка волны (S9): `spec/<ws>-behaviour-w<k>`."""
-    return f"spec/{state.ws_id}-behaviour-w{state.wave}"
+    """Ветка волны (S9): `spec/<ws>-behaviour-w<k>`; после переоткрытия —
+    `…-w<k>-r<n>` (S11): прежняя ветка уже пушилась, пересоздание под тем
+    же именем дало бы non-fast-forward."""
+    count = (state.ops.get(f"reopen-{state.wave}") or {}).get("count", 0)
+    suffix = f"-r{count}" if count else ""
+    return f"spec/{state.ws_id}-behaviour-w{state.wave}{suffix}"
+
+
+def _wave_mode(state: RunState) -> str:
+    """Режим волны: `author` (узлы уровня авторятся на ветке волны) либо
+    `reapprove` (§3.4: узлы уровня `stale` в base после переоткрытия выше —
+    edge-check + candidate над байтами base, без авторинга и push)."""
+    return str((state.ops.get(wave_key(state, "branch")) or {}).get("mode", "author"))
+
+
+def _decide_wave_mode(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+) -> tuple[str, str | None]:
+    """(`author`|`reapprove`, отказ): узлы уровня отсутствуют в base —
+    авторинг; все `stale` — переодобрение; переоткрытый узел этой волны —
+    авторинг; иное (`approved`/`approval_pending`/смесь) — отказ."""
+    level = _wave_level(state)
+    levels = bundle_dag.levels(dag)
+    base = state.base_ref or "master"
+    reopened = (state.ops.get(f"reopen-{state.wave}") or {}).get("node")
+    statuses: dict[str, str | None] = {}
+    for fname, _ in dag:
+        node = bundle_dag.node_id(fname)
+        if levels[node] != level:
+            continue
+        text = ops.show_file(state.target_dir, base, f"{state.bundle_dir}/{fname}")
+        statuses[node] = (
+            str(split_frontmatter(text)[0].get("status")) if text is not None else None
+        )
+    if reopened in statuses:
+        return "author", None
+    if all(v is None for v in statuses.values()):
+        return "author", None
+    if all(v == "stale" for v in statuses.values()):
+        return "reapprove", None
+    return "author", (
+        f"узлы уровня {level} в base уже в статусах "
+        f"{ {k: v for k, v in statuses.items()} } — авторить или переодобрять "
+        "нечего; переписать узел — `--reopen <node>`"
+    )
 
 
 def _wave_dag() -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -440,24 +485,25 @@ def _upstream_ready(
     dag: tuple[tuple[str, tuple[str, ...]], ...],
     level: int,
 ) -> str | None:
-    """Инвариант 1 (§3.3): все узлы уровней < `level` `approved` в base и ни
-    один узел бандла в base не `stale`; → текст отказа с именами узлов либо
-    None. Читается BASE, не рабочее дерево: окончательные байты upstream
-    появляются только после finalize."""
+    """Инвариант 1 (§3.3): все узлы уровней < `level` `approved` в base —
+    в том числе не `stale` (переодобрение идёт по уровням снизу вверх,
+    §3.4); → текст отказа с именами узлов либо None. Уровни ≥ `level` не
+    смотрятся: `stale` выше — ожидаемый след каскада. Читается BASE, не
+    рабочее дерево: окончательные байты upstream появляются только после
+    finalize."""
     levels = bundle_dag.levels(dag)
     base = state.base_ref or "master"
     problems: list[str] = []
     for fname, _ in dag:
         node = bundle_dag.node_id(fname)
+        if levels[node] >= level:
+            continue
         text = ops.show_file(state.target_dir, base, f"{state.bundle_dir}/{fname}")
         status = split_frontmatter(text)[0].get("status") if text is not None else None
-        if levels[node] < level:
-            if text is None:
-                problems.append(f"{node}: нет в base")
-            elif status != "approved":
-                problems.append(f"{node}: статус {status!r} в base, нужен approved")
-        elif status == "stale":
-            problems.append(f"{node}: stale в base")
+        if text is None:
+            problems.append(f"{node}: нет в base")
+        elif status != "approved":
+            problems.append(f"{node}: статус {status!r} в base, нужен approved")
     return "; ".join(problems) or None
 
 
@@ -769,6 +815,90 @@ def _finalize_wave(state: RunState, ops: Ops, request: str) -> RunState:
         "(см. причину в выводе approve-node) — мерж человеком, затем resume.",
     )
     return state
+
+
+def reopen(
+    run_id: str, node: str, ops: Ops, *, manual: bool = False
+) -> RunState:
+    """`--reopen <node>` (S11, D2/D3): явное переоткрытие одобренного узла.
+
+    `state.wave` = уровень узла + 1; ветка волны — НОВЫМ именем
+    `…-w<k>-r<n>` от свежего base; op'ы волны и `author-<node>` сброшены;
+    файл узла удалён из worktree — иначе `_step_authoring` пропустил бы
+    существующий (approved) файл и candidate поехал бы над старыми
+    байтами. `manual` — `stopped_author` с подсказкой: оператор кладёт
+    файл сам и делает resume. Иначе — `advance`: авторинг заново → гейт →
+    edge-check → candidate над новым текстом (каскад `stale` нижним
+    ставит `_publish_candidate`, их байты не трогаются). Дальше прогон
+    идёт по уровням: каждый `stale` уровень — режим `reapprove` волны.
+
+    Отказы (ValueError, без эффектов): не волновой прогон, узел не из
+    DAG, живые заявки (открытый candidate/finalize — сперва мерж или
+    закрытие), прогон после последней волны (op `merge` — переоткрытие
+    через новый прогон). Грязное дерево — `stopped_dirty`.
+    """
+    state = load(run_id)
+    if not _waves(state):
+        raise ValueError("--reopen — только для прогона с authoring=waves")
+    dag = _wave_dag()
+    levels = bundle_dag.levels(dag)
+    if node not in levels:
+        raise ValueError(
+            f"узел {node!r} не входит в DAG; допустимы: {', '.join(levels)}"
+        )
+    live = [al.request_key(*nums) for nums, _ in al.live_requests(state)]
+    if live:
+        raise ValueError(
+            f"живые заявки {', '.join(live)} — дождитесь мержа либо "
+            "закройте их PR, затем повторите --reopen"
+        )
+    if op_status(state, "merge") == "completed":
+        raise ValueError(
+            "прогон прошёл последнюю волну — переоткрытие узла делается "
+            "новым прогоном"
+        )
+    if ops.is_dirty(state.target_dir):
+        print(f"reopen: target_dir {state.target_dir!r} грязный — не начато")
+        state.status = "stopped_dirty"
+        save(state)
+        return state
+    state.wave = levels[node] + 1
+    count = (state.ops.get(f"reopen-{state.wave}") or {}).get("count", 0) + 1
+    state.ops[f"reopen-{state.wave}"] = {
+        "status": "completed", "count": count, "node": node,
+    }
+    for base_key in (
+        "branch", "materialize-brief", "commit", "gate-candidate", "edge",
+        "push", "candidate", "finalize",
+    ):
+        state.ops.pop(wave_key(state, base_key), None)
+    filename = ""
+    for author_key, kind, fname in _AUTHOR_STEPS:
+        if kind == node:
+            state.ops.pop(author_key, None)
+            filename = fname
+    save(state)
+    base = state.base_ref or "master"
+    ops.checkout_and_pull(state.target_dir, base)
+    state.branch = _wave_branch(state)
+    ops.switch_to(state.target_dir, state.branch, base)
+    (Path(state.target_dir) / state.bundle_dir / filename).unlink(missing_ok=True)
+    op_complete(
+        state, wave_key(state, "branch"), branch=state.branch, mode="author",
+        reopen=count,
+    )
+    if manual:
+        print(
+            f"reopen: узел {node} снят с ветки {state.branch}; положите "
+            f"новый {state.bundle_dir}/{filename} в worktree и выполните "
+            "resume — гейт, edge-check и candidate пойдут над ним"
+        )
+        state.status = "stopped_author"
+        save(state)
+        return state
+    state.status = "running"
+    save(state)
+    return advance(state, ops)
 
 
 def _next_wave(state: RunState, ops: Ops) -> RunState:
@@ -1479,9 +1609,15 @@ def _step_wave_branch(state: RunState, ops: Ops) -> bool:
     _ensure_started(state, key)
     base = state.base_ref or "master"
     ops.checkout_and_pull(state.target_dir, base)
+    mode, refusal = _decide_wave_mode(state, ops, _wave_dag())
+    if refusal is not None:
+        _stop_with_comment(
+            state, ops, "stopped_stale", f"волна {state.wave}: {refusal}"
+        )
+        return False
     state.branch = _wave_branch(state)
     ops.switch_to(state.target_dir, state.branch, base)
-    op_complete(state, key, branch=state.branch)
+    op_complete(state, key, branch=state.branch, mode=mode)
     return True
 
 
@@ -1806,7 +1942,7 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     нечего — несоответствие профиля поймает S4 (`gate-check --candidate`).
     """
     if _waves(state):
-        # Инвариант 1 (§3.3): нижние уровни `approved` в base, `stale` нет.
+        # Инвариант 1 (§3.3): нижние уровни `approved` в base (и не stale).
         # Читается ДО оплаченного авторинга; узел в `approval_pending`
         # (открытый candidate) сюда штатно не доходит — resume ждёт мержа.
         reason = _upstream_ready(state, ops, _wave_dag(), _wave_level(state))
@@ -1815,9 +1951,13 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 state, ops, "stopped_stale",
                 f"волна {state.wave}: авторинг уровня {_wave_level(state)} "
                 f"невозможен — {reason}. Переодобрите нижние уровни "
-                "(approve-node по base) и повторите resume",
+                "(resume ведёт их по уровням) и повторите resume",
             )
             return False
+        if _wave_mode(state) == "reapprove":
+            # §3.4: узлы уровня `stale` в base — байты не трогаются (D2),
+            # проверка и candidate идут над base. Авторить нечего.
+            return True
     authoring_pending = any(
         op_status(state, key) != "completed" for key, _, _ in _AUTHOR_STEPS
     )
@@ -2654,12 +2794,29 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
     key = wave_key(state, "candidate")
     if op_status(state, key) == "completed":
         return True
+    reapprove = _wave_mode(state) == "reapprove"
     push_key = wave_key(state, "push")
-    if op_status(state, push_key) != "completed":
+    if not reapprove and op_status(state, push_key) != "completed":
         _ensure_started(state, push_key)
         ops.push_branch(state.target_dir, state.branch)
         op_complete(state, push_key, branch=state.branch)
-    if op_status(state, key) == "new":
+    nodes = [kind for _, kind, _ in _author_steps_for(state)]
+    if op_status(state, key) == "new" and reapprove:
+        # Переодобрение stale уровня (§3.4, S4): заявки без `source_sha` —
+        # байты из base; узлы одного уровня накапливаются в одной заявке
+        # (§I12), PR создаётся первым вызовом, evidence докладывает адаптер.
+        request = None
+        for node in nodes:
+            outcome = an.approve_node(state, ops, node)
+            if outcome.request is None:
+                _stop_with_comment(
+                    state, ops, "stopped_stale",
+                    f"волна {state.wave}: {outcome.message}",
+                )
+                return False
+            request = outcome.request
+        op_start(state, key, request=request, source_sha=None, reapprove=True)
+    elif op_status(state, key) == "new":
         source_sha = ops.rev_parse(state.target_dir, state.branch)
         if source_sha is None:
             _stop_with_comment(
@@ -2668,7 +2825,6 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
                 "коммит — candidate не собран",
             )
             return False
-        nodes = [kind for _, kind, _ in _author_steps_for(state)]
         outcome = an.propose_from_source(
             state, ops, nodes, source_sha, push=False
         )
@@ -2705,6 +2861,7 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
     op_complete(
         state, key, request=request, candidate_pr=pr,
         source_sha=state.ops[key].get("source_sha"),
+        reapprove=bool(state.ops[key].get("reapprove", False)),
     )
     _wave_pause(
         state, ops, pr,
@@ -3276,9 +3433,25 @@ def main(argv: list[str] | None = None) -> int:
     start_p.add_argument(
         "--run-id", default=None, help="дефолт <ws-id>-<3 случайных байта hex>"
     )
+    start_p.add_argument(
+        "--authoring", default="legacy", choices=["legacy", "waves"],
+        help="waves — узлы бандла одобряются волнами по уровням DAG, "
+        "каждая волна своим candidate-PR (спека sequential-node-approval); "
+        "legacy — один бандл-PR",
+    )
 
     resume_p = sub.add_parser("resume", help="подхватить сохранённый прогон")
     resume_p.add_argument("--run-id", required=True)
+
+    reopen_p = sub.add_parser(
+        "reopen", help="переоткрыть одобренный узел волнового прогона (S11)"
+    )
+    reopen_p.add_argument("--run-id", required=True)
+    reopen_p.add_argument("--node", required=True, metavar="NODE-ID")
+    reopen_p.add_argument(
+        "--manual", action="store_true",
+        help="не авторить заново: stopped_author, файл узла кладёт оператор",
+    )
 
     verify_p = sub.add_parser(
         "verify", help="verification-run для merged_unverified родителя"
@@ -3322,9 +3495,12 @@ def main(argv: list[str] | None = None) -> int:
             merge_authority=args.merge_authority,
             author_backend=args.author_backend,
             allow_legacy_dt=args.allow_legacy_dt,
+            authoring=args.authoring,
         )
     elif args.command == "resume":
         state = resume(args.run_id, ops)
+    elif args.command == "reopen":
+        state = reopen(args.run_id, args.node, ops, manual=args.manual)
     else:
         state = verify(args.parent, ops, args.run_id)
 

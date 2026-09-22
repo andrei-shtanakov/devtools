@@ -1537,6 +1537,35 @@ def _adopt_or_create_pr(
     return pr
 
 
+# --- Предикат переоткрытия (sequential-node-approval §3.4) ---------------
+
+
+def stale_below_top_level(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+) -> list[str]:
+    """Узлы `stale` в base — по уровням снизу вверх (§3.4).
+
+    Это узлы ниже верхнего авторенного уровня бандла, чьи одобрения
+    устарели: после `--reopen` узла его downstream получает `stale`
+    каскадом (D2), и продвижение (авторинг новых уровней, доставка)
+    возобновляется только после их переодобрения по уровням (D3) — режим
+    `reapprove` волны раннера. Отсутствующие узлы не считаются — их ещё не
+    авторили. Пустой список — переодобрять нечего.
+    """
+    levels = bundle_dag.levels(dag)
+    stale: list[str] = []
+    for fname, _ in dag:
+        node = bundle_dag.node_id(fname)
+        text = ops.show_file(state.target_dir, _base_ref(state), _rel(state, fname))
+        if text is None:
+            continue
+        if split_frontmatter(text)[0].get("status") == na.STATUS_STALE:
+            stale.append(node)
+    return sorted(stale, key=lambda n: (levels[n], n))
+
+
 # --- Публичный шов для адаптера публикации (edge-check срез 3, S7) --------
 
 
