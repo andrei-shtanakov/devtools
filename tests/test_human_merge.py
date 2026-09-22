@@ -177,6 +177,16 @@ def test_finalize_pr_without_pin_is_judged_by_current_version(fleet: Fleet) -> N
     assert res.returncode == 3, res.stderr
 
 
+def test_missing_head_ref_refuses_before_pin_classification(fleet: Fleet) -> None:
+    """Пустое/`null` имя ветки не должно уводить в ветвь «прочий PR» и снимать
+    проверку пина (major адресного ревью PR #344)."""
+    for ref in ("", "null"):
+        res = fleet.run(GH_STUB_HEADREF=ref, GH_STUB_POLICY_SHA="b" * 40)
+        assert res.returncode == 2, res.stderr
+        assert "имя head-ветки" in res.stderr
+        assert "/merge" not in fleet.gh_log.read_text()
+
+
 def test_non_approval_branch_needs_no_pin(fleet: Fleet) -> None:
     res = fleet.run(GH_STUB_HEADREF="feat/anything", GH_STUB_BODY="обычный PR с лейблом human-merge-required")
     assert res.returncode == 0, res.stderr
