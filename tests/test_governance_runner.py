@@ -120,6 +120,8 @@ class FakeOps:
     """Ops-сценарий для тестов runner'а: журнал вызовов + управляемый исход."""
 
     existing_branches: set[str] = field(default_factory=set)
+    #: Журнал `delete_remote_branch` — чистка авторинговых веток волн.
+    deleted_branches: list[str] = field(default_factory=list)
     existing_prs: dict[str, int] = field(default_factory=dict)
     review_exit: int = 0
     review_fresh_exit: int = 0
@@ -237,6 +239,10 @@ class FakeOps:
         if self.head_sha_error is not None:
             raise RuntimeError(self.head_sha_error)
         return self.head
+
+    def delete_remote_branch(self, repo_slug: str, branch: str) -> bool:
+        self.deleted_branches.append(branch)
+        return True
 
     def push_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("push_branch", branch))
@@ -7680,6 +7686,63 @@ def test_waves_resume_finalizes_merged_candidate_and_starts_next_wave(
     assert resumed.ops["candidate-2"]["request"] == "approve-1-1-1"
     assert resumed.ops["branch-2"]["status"] == "completed"
     assert ("switch_to", "spec/WS-1-behaviour-w2", "master") in ops.calls
+
+
+def test_completed_wave_run_deletes_its_authoring_branches(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Прогон дошёл до `completed` — ветки волн сняты с origin.
+
+    Наблюдение 2026-09-23: `…-behaviour-wN` не имеют PR по построению
+    (их пушит раннер ради `source_sha`), поэтому автоудаление форджи их не
+    касается и ритуал «после мержа удали ветку» не покрывает. После двух
+    прогонов на origin осталось десять таких веток. Содержимое к этому
+    моменту уже в base — его принёс candidate каждой волны.
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=0,
+    )
+    state = rs.new_run(
+        subject="brief", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+        target_dir=str(tmp_path / "target"), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id="r-w-cleanup",
+        authoring="waves",
+    )
+    Path(state.target_dir).mkdir()
+    state.wave = 5
+    state.status = "running"
+    rs.save(state)
+
+    runner._step_s8(state, ops)
+
+    assert state.status == "completed"
+    assert ops.deleted_branches == [
+        f"spec/{state.ws_id}-behaviour-w{k}" for k in range(1, 6)
+    ], ops.deleted_branches
+
+
+def test_legacy_run_deletes_nothing_on_completion(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Прежний путь веток волн не заводит — и чистить ему нечего."""
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=0,
+    )
+    state = rs.new_run(
+        subject="brief", repo="alpha", repo_slug="owner/alpha", ws_id="WS-2",
+        target_dir=str(tmp_path / "target"), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id="r-legacy-cleanup",
+    )
+    Path(state.target_dir).mkdir()
+    state.status = "running"
+    rs.save(state)
+
+    runner._step_s8(state, ops)
+
+    assert state.status == "completed"
+    assert ops.deleted_branches == []
 
 
 def test_waves_resume_after_crash_between_completed_and_next_wave(
