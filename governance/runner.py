@@ -541,10 +541,33 @@ def _drop_wave_branches(state: RunState, ops: Ops) -> None:
     """
     if not _waves(state):
         return
+    saved_wave = state.wave
+    branches: list[str] = []
     for wave in range(1, bundle_dag.wave_count(bundle_dag.BUNDLE_DAG) + 1):
-        branch = f"spec/{state.ws_id}-behaviour-w{wave}"
+        # Имя ветки волны знает `_wave_branch` — спрашиваем ЕГО, а не
+        # собираем имя второй раз: переоткрытая волна живёт на `…-w<k>-r<n>`
+        # (S11), и собственная сборка имени её теряла (ревью #379).
+        # Прежняя ветка волны тоже пушилась и тоже подлежит снятию, поэтому
+        # к суффиксной добавляется базовая.
+        state.wave = wave
+        branches.append(_wave_branch(state))
+        base = f"spec/{state.ws_id}-behaviour-w{wave}"
+        if base not in branches:
+            branches.append(base)
+    state.wave = saved_wave
+    for branch in branches:
         try:
-            ops.delete_remote_branch(state.repo_slug, branch)
+            # Примитив отказ возвращает ЗНАЧЕНИЕМ, а не исключением, и
+            # False у него значит и «нет прав», и «ветки уже нет» — внутри
+            # различить нечем (`ops.delete_remote_branch`). Поэтому говорим
+            # «не подтверждено», а не «не удалена»: второе было бы
+            # утверждением, которого у нас нет.
+            if not ops.delete_remote_branch(state.repo_slug, branch):
+                print(
+                    f"_drop_wave_branches: снятие {branch} не подтверждено "
+                    "(нет прав либо ветки уже нет) — прогон завершён, "
+                    "ветка без PR ничего не держит"
+                )
         except Exception as exc:  # noqa: BLE001 — best-effort, но вслух
             print(f"_drop_wave_branches: {branch} не удалена: {exc}")
 

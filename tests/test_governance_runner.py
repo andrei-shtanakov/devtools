@@ -122,6 +122,9 @@ class FakeOps:
     existing_branches: set[str] = field(default_factory=set)
     #: Журнал `delete_remote_branch` — чистка авторинговых веток волн.
     deleted_branches: list[str] = field(default_factory=list)
+    #: Исход примитива удаления: False — «не подтверждено» БЕЗ исключения
+    #: (нет прав либо ветки уже нет — примитив их не различает).
+    delete_branch_ok: bool = True
     existing_prs: dict[str, int] = field(default_factory=dict)
     review_exit: int = 0
     review_fresh_exit: int = 0
@@ -242,7 +245,7 @@ class FakeOps:
 
     def delete_remote_branch(self, repo_slug: str, branch: str) -> bool:
         self.deleted_branches.append(branch)
-        return True
+        return self.delete_branch_ok
 
     def push_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("push_branch", branch))
@@ -7720,6 +7723,72 @@ def test_completed_wave_run_deletes_its_authoring_branches(
     assert ops.deleted_branches == [
         f"spec/{state.ws_id}-behaviour-w{k}" for k in range(1, 6)
     ], ops.deleted_branches
+
+
+def test_cleanup_covers_reopened_wave_branches(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Переоткрытая волна живёт на ветке `…-w<k>-r<n>` — снимается и она.
+
+    Находка ревью #379 (minor): чистка строила только имена без суффикса
+    переоткрытия, и ветка `…-w2-r1`, реально созданная `--reopen`,
+    оставалась на origin. Имя ветки волны знает `_wave_branch`, и чистка
+    обязана спрашивать его, а не собирать имя второй раз.
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=0,
+    )
+    state = rs.new_run(
+        subject="brief", repo="alpha", repo_slug="owner/alpha", ws_id="WS-3",
+        target_dir=str(tmp_path / "target"), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id="r-w-reopened",
+        authoring="waves",
+    )
+    Path(state.target_dir).mkdir()
+    state.wave = 5
+    state.status = "running"
+    state.ops["reopen-2"] = {"status": "completed", "count": 1}
+    rs.save(state)
+
+    runner._step_s8(state, ops)
+
+    assert f"spec/{state.ws_id}-behaviour-w2-r1" in ops.deleted_branches
+    assert f"spec/{state.ws_id}-behaviour-w2" in ops.deleted_branches, (
+        "исходная ветка волны тоже пушилась и тоже подлежит снятию"
+    )
+
+
+def test_unconfirmed_branch_deletion_is_spoken(
+    tmp_path: Path, runs_root, capsys,
+) -> None:
+    """Примитив вернул False — чистка говорит об этом, а не молчит.
+
+    Находка ревью #379 (minor): `delete_remote_branch` отказ возвращает
+    ЗНАЧЕНИЕМ, а не исключением, и диагностика в `except` до него не
+    доходила. Докстринг обещал «вслух», код молчал — обещание и поведение
+    расходились ровно в том месте, ради которого чистка и заводилась.
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=0, delete_branch_ok=False,
+    )
+    state = rs.new_run(
+        subject="brief", repo="alpha", repo_slug="owner/alpha", ws_id="WS-4",
+        target_dir=str(tmp_path / "target"), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id="r-w-nodelete",
+        authoring="waves",
+    )
+    Path(state.target_dir).mkdir()
+    state.wave = 5
+    state.status = "running"
+    rs.save(state)
+
+    runner._step_s8(state, ops)
+
+    out = capsys.readouterr().out
+    assert f"spec/{state.ws_id}-behaviour-w1" in out
+    assert "не подтверждено" in out
 
 
 def test_legacy_run_deletes_nothing_on_completion(
