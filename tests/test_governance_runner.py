@@ -3760,7 +3760,7 @@ def test_default_author_backend_is_codex_author_disp_not_called(
     идут через `ops.author`, `ops.author_disp` не вызывается вовсе."""
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-disp-default", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-disp-default", ops, monkeypatch, 5)
 
     assert ops.authored == [
         "charter", "requirements", "behaviour-spec", "design", "acceptance",
@@ -3784,14 +3784,19 @@ def test_disp_backend_used_only_for_behaviour_node(
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-disp-behaviour"
 
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp",
-        authoring="legacy",
-    ))
+    # W3 — волна, на которой узел behaviour-spec и авторится. Дальше
+    # прогон не ведём намеренно: стенд `author_disp` файл узла НЕ создаёт
+    # (disp — отдельный пайплайн, документ приезжает позже), и на W4 пин
+    # design/acceptance упирается в отсутствующий файл. Это свойство
+    # стенда, а не продукта, и предметом теста не является.
+    # Что ОСТАЛЬНЫЕ узлы идут через codex, утверждает соседний тест
+    # `test_default_author_backend_is_codex_author_disp_not_called` —
+    # там весь DAG проходит `ops.author`. Здесь предмет — сам переключатель.
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 3, author_backend="disp")
 
-    assert ops.authored == [
-        "charter", "requirements", "design", "acceptance", "decomposition",
-    ]
+    assert ops.authored == ["charter", "requirements"], (
+        "behaviour-spec не должен попасть в codex-авторинг"
+    )
     assert len(ops.author_disp_calls) == 1
     target_dir, task, config_path, slug = ops.author_disp_calls[0]
     assert target_dir == str(tmp_path / f"target-{run_id}")
@@ -3889,7 +3894,7 @@ def test_disp_doc_slug_is_truncated_to_the_grammar_limit() -> None:
 
 
 def test_disp_doc_checklist_carries_the_dsl_frontmatter_and_pin(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """devtools#204 п.1: чеклист сходимости `doc` зеркалит ВЕСЬ DSL узла,
     включая frontmatter (`spec_stage`/`status`) и пин `upstream_hashes` —
@@ -3900,10 +3905,7 @@ def test_disp_doc_checklist_carries_the_dsl_frontmatter_and_pin(
     from governance.ops import _AUTHOR_DSL
 
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
-    runner.start(**_start_kwargs(
-        tmp_path, "r-disp-dsl", ops, author_backend="disp",
-        authoring="legacy",
-    ))
+    _drive_waves_to(tmp_path, "r-disp-dsl", ops, monkeypatch, 5, author_backend="disp")
     _, _, config_path, _ = ops.author_disp_calls[0]
     config = tomllib.loads(Path(config_path).read_text(encoding="utf-8"))
     items = config["pipeline"]["checklists"]["doc"]["items"]
@@ -3923,11 +3925,7 @@ def test_disp_doc_anchor_leaves_the_target_when_runs_root_is_inside_it(
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     # runs_root = tmp_path/"runs" — внутри цели, если цель = tmp_path.
-    runner.start(**_start_kwargs(
-        tmp_path, "r-disp-self", ops, author_backend="disp",
-        target_dir=str(tmp_path),
-        authoring="legacy",
-    ))
+    _drive_waves_to(tmp_path, "r-disp-self", ops, monkeypatch, 5, author_backend="disp", target_dir=str(tmp_path))
     target_dir, _, config_path, _ = ops.author_disp_calls[0]
     config = Path(config_path).read_text(encoding="utf-8")
     anchor_line = [ln for ln in config.splitlines() if ln.startswith("anchor_path")]
@@ -3949,10 +3947,7 @@ def test_disp_anchor_dir_is_canonical_even_for_relative_xdg_state_home(
     monkeypatch.setenv("XDG_STATE_HOME", "state-rel")
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-disp-rel-xdg"
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp", target_dir=str(tmp_path),
-        authoring="legacy",
-    ))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5, author_backend="disp", target_dir=str(tmp_path))
     _, _, config_path, _ = ops.author_disp_calls[0]
     config = Path(config_path).read_text(encoding="utf-8")
     line = [ln for ln in config.splitlines() if ln.startswith("anchor_path")]
@@ -3972,10 +3967,7 @@ def test_disp_anchor_dir_is_pinned_and_survives_an_environment_change(
     monkeypatch.setenv("XDG_STATE_HOME", str(first))
     ops = FakeOps(author_disp_exit=1)
     run_id = "r-disp-anchor-pin"
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp", target_dir=str(tmp_path),
-        authoring="legacy",
-    ))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5, author_backend="disp", target_dir=str(tmp_path))
     assert state.status == "stopped_author"
 
     def anchor_of(config_path: str) -> Path:
@@ -4001,10 +3993,7 @@ def test_disp_slug_is_pinned_in_run_state_and_reused_on_retry(
     начатый пайплайн; retry читает пин, а не считает заново."""
     ops = FakeOps(author_disp_exit=1)
     run_id = "r-disp-pin"
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp",
-        authoring="legacy",
-    ))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5, author_backend="disp")
     assert state.status == "stopped_author"
     first_slug = ops.author_disp_calls[0][3]
     assert state.disp_slug == first_slug
@@ -4018,7 +4007,7 @@ def test_disp_slug_is_pinned_in_run_state_and_reused_on_retry(
 
 
 def test_disp_retry_resumes_an_existing_pipeline_dir_instead_of_run(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """devtools#204 п.3: `disp pipeline run` на существующем
     `.disputatio/pipelines/<slug>/` отказывает (`_check_pipeline_dir_absent`
@@ -4026,10 +4015,7 @@ def test_disp_retry_resumes_an_existing_pipeline_dir_instead_of_run(
     есть ⇒ `resume`, нет ⇒ `run`."""
     ops = FakeOps(author_disp_exit=1)
     run_id = "r-disp-resume"
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp",
-        authoring="legacy",
-    ))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5, author_backend="disp")
     assert ops.author_disp_resume == [False]
     target_dir, _, _, slug = ops.author_disp_calls[0]
     (Path(target_dir) / ".disputatio" / "pipelines" / slug).mkdir(parents=True)
@@ -4056,17 +4042,14 @@ def test_disp_retry_resumes_an_existing_pipeline_dir_instead_of_run(
 
 
 def test_hand_fixed_node_without_pipeline_dir_is_accepted_after_pin(
-    tmp_path: Path, runs_root, capsys,
+    tmp_path: Path, runs_root, capsys, monkeypatch,
 ) -> None:
     """Ревью #242, круг 3: операторский выход из пинованного состояния.
     Стоп → оператор убирает каталог пайплайна соседа и кладёт/чинит файл
     узла руками → resume принимает файл как есть, без вызова соседа."""
     ops = FakeOps(author_disp_exit=1)
     run_id = "r-disp-handfix"
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp",
-        authoring="legacy",
-    ))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5, author_backend="disp")
     assert state.status == "stopped_author"
     assert "принять узел руками" in capsys.readouterr().out
     target_dir, _, _, slug = ops.author_disp_calls[0]
@@ -4131,27 +4114,21 @@ def test_disp_config_without_model_stops_author_with_reason(
     monkeypatch.delenv("AUTHOR_MODEL", raising=False)
     monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
     ops = FakeOps()
-    state = runner.start(**_start_kwargs(
-        tmp_path, "r-disp-nomodel", ops, author_backend="disp",
-        authoring="legacy",
-    ))
+    state = _drive_waves_to(tmp_path, "r-disp-nomodel", ops, monkeypatch, 5, author_backend="disp")
     assert state.status == "stopped_author"
     assert ops.author_disp_calls == []
     assert "AUTHOR_MODEL" in capsys.readouterr().out
 
 
 def test_disp_backend_author_disp_failure_stops_author(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Провал `author_disp` (rc != 0) останавливает прогон так же, как
     провал `ops.author` — `stopped_author`, статус не подменяется бэкендом."""
     ops = FakeOps(author_disp_exit=1)
     run_id = "r-disp-fail"
 
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp",
-        authoring="legacy",
-    ))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5, author_backend="disp")
 
     assert state.status == "stopped_author"
     assert state.ops["author-behaviour"]["status"] == "started"
