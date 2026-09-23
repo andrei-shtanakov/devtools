@@ -1759,6 +1759,59 @@ def _agent_merge_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
     return _start_kwargs(tmp_path, run_id, ops, **overrides)
 
 
+#: Узлы уровней DAG по волнам (спека sequential-node-approval §3.1).
+_WAVE_NODES = {
+    1: ("charter",), 2: ("requirements",), 3: ("behaviour-spec",),
+    4: ("design", "acceptance"), 5: ("decomposition",),
+}
+_NODE_FILE = {
+    "charter": "00-charter.md", "requirements": "10-requirements.md",
+    "behaviour-spec": "15-behaviour-spec.md", "design": "20-design.md",
+    "acceptance": "25-acceptance.md", "decomposition": "30-decomposition.md",
+}
+
+
+def _drive_waves_to(
+    tmp_path: Path, run_id: str, ops: FakeOps, monkeypatch, wave: int, **over,
+):
+    """Волновой прогон, доведённый до волны `wave` человеческими мержами.
+
+    Гейт — ОБЩИЙ шаг обоих режимов, но в волнах он видит ровно те узлы,
+    которые авторит текущий уровень. Поэтому тест про грамматику
+    `15-behaviour-spec.md` обязан доехать до W3: раньше его предмета в
+    бандле просто нет, и «гейт промолчал» означало бы лишь, что проверять
+    было нечего.
+
+    Каждый промежуточный шаг настоящий: заявка волны закрывается мержем
+    человека, base получает approved-узел уровня, прогон продолжается
+    `resume`. Останавливается там, где остановился прогон, — если гейт
+    целевой волны краснеет, вернётся её `stopped_gate`.
+    """
+    from governance import approval_ledger as al
+
+    _fake_wave_adapters(monkeypatch, ops)
+    open_facts = dict(ops.facts) or {"state": "OPEN", "baseRefName": "master"}
+    state = runner.start(**_waves_kwargs(tmp_path, run_id, ops, **over))
+    approved: dict[str, str] = {}
+    while state.wave < wave and state.status == "waiting_human_merge":
+        key = state.ops[f"candidate-{state.wave}"]["request"]
+        op = state.ops[key]
+        op.update(
+            merged_by="andrei-shtanakov", merged_at="t", merge_commit="m" * 40,
+            authorization={"login": "andrei-shtanakov", "policy": "p"},
+        )
+        al.record_finalize_pr(state, key, 800 + state.wave)
+        al.complete_request(state, key)
+        for node in _WAVE_NODES[state.wave]:
+            approved[f"{BUNDLE_DIR}/{_NODE_FILE[node]}"] = _approved(node)
+        ops.base_files = dict(approved)
+        ops.facts = {**open_facts, "state": "MERGED",
+                     "mergedBy": {"login": "andrei-shtanakov"}}
+        rs.save(state)
+        state = runner.resume(run_id, ops)
+    return state
+
+
 def _wave_run_at_s8(
     tmp_path: Path, run_id: str, ops: FakeOps,
     base_ref: str | None = None, **over,
@@ -4132,16 +4185,16 @@ def test_gate_stops_on_dsl_empty_bundle(
             return rc
 
     ops = DialectOps(review_exit=0, facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-dsl-empty", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-dsl-empty", ops, monkeypatch, 3)
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir("r-dsl-empty") / "gate-findings.txt").read_text()
     assert "GC-DSL-EMPTY" in findings and "15-behaviour-spec.md" in findings
-    assert "push" not in state.ops
+    assert f"push-{state.wave}" not in state.ops
 
 
 def test_gate_dsl_empty_design_message_names_design_grammar(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """MINOR-2: GC-DSL-EMPTY для 20-design.md обязан называть СВОЮ
     грамматику (`#### Q-NN · owner_role: … · resolution: …`), не чужую
@@ -4177,9 +4230,7 @@ def test_gate_dsl_empty_design_message_names_design_grammar(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-design-dsl-empty-msg", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-design-dsl-empty-msg", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -4191,7 +4242,7 @@ def test_gate_dsl_empty_design_message_names_design_grammar(
 
 
 def test_gate_accepts_design_heading_with_nonstandard_middot_spacing(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """MINOR-2: паттерн GC-DSL-EMPTY для design синхронизирован с
     `design_guard._DESIGN_Q_RE` (`\\s*·\\s*`) — заголовок, который
@@ -4240,16 +4291,14 @@ def test_gate_accepts_design_heading_with_nonstandard_middot_spacing(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-design-dsl-nonstd-space", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-design-dsl-nonstd-space", ops, monkeypatch, 4)
 
     findings_file = (
         runner.run_dir("r-design-dsl-nonstd-space") / "gate-findings.txt"
     )
     findings = findings_file.read_text() if findings_file.exists() else ""
     assert "GC-DSL-EMPTY" not in findings
-    assert state.ops["gate-candidate"]["status"] == "completed"
+    assert state.ops[f"gate-candidate-{state.wave}"]["status"] == "completed"
 
 
 def test_rollup_unstable_failure_still_refuses(
@@ -4313,7 +4362,7 @@ def test_resume_merge_refused_after_human_merge_runs_s8(
 
 
 def test_gate_unpinned_draft_edge_stops_locally(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Гард GC-UNPINNED(prospective) поверх CLI (приёмка PR #101, major):
     stale-каскад gate-check живёт только на approved — draft-узел с
@@ -4339,16 +4388,16 @@ def test_gate_unpinned_draft_edge_stops_locally(
             return rc
 
     ops = UnpinnedAuthorOps(facts=GREEN_PR_FACTS)  # CLI-гейт (FakeOps) даёт 0
-    state = runner.start(**_start_kwargs(tmp_path, "r-unpinned", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-unpinned", ops, monkeypatch, 3)
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir("r-unpinned") / "gate-findings.txt").read_text()
     assert "GC-UNPINNED" in findings and "requirements" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_pinned_draft_edge_passes_local_guard(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     class PinnedAuthorOps(FakeOps):
         def author(
@@ -4376,11 +4425,11 @@ def test_gate_pinned_draft_edge_passes_local_guard(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=0,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-pinned", ops, authoring="legacy"))
-    assert state.ops["gate-candidate"]["status"] == "completed"
+    state = _drive_waves_to(tmp_path, "r-pinned", ops, monkeypatch, 3)
+    assert state.ops[f"gate-candidate-{state.wave}"]["status"] == "completed"
 
 
-def test_gate_stale_draft_pin_stops_locally(tmp_path: Path, runs_root) -> None:
+def test_gate_stale_draft_pin_stops_locally(tmp_path: Path, runs_root, monkeypatch) -> None:
     """GC-STALE(prospective) поверх CLI (приёмка PR #101, круг 2): пин
     присутствует, но НЕ равен blob-хешу upstream в worktree — стоп, не
     fail-open по одному лишь наличию 40 hex."""
@@ -4406,16 +4455,16 @@ def test_gate_stale_draft_pin_stops_locally(tmp_path: Path, runs_root) -> None:
             return rc
 
     ops = StalePinOps(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-stale-pin", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-stale-pin", ops, monkeypatch, 3)
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir("r-stale-pin") / "gate-findings.txt").read_text()
     assert "GC-STALE" in findings and "не совпадает" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_inline_upstream_hashes_form_passes(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Inline-форма `upstream_hashes: {requirements: "<hash>"}` — ровно та,
     что предписывает авторский промпт (приёмка PR #101, круг 3) — обязана
@@ -4445,12 +4494,12 @@ def test_gate_inline_upstream_hashes_form_passes(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=0,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-inline-pin", ops, authoring="legacy"))
-    assert state.ops["gate-candidate"]["status"] == "completed"
+    state = _drive_waves_to(tmp_path, "r-inline-pin", ops, monkeypatch, 3)
+    assert state.ops[f"gate-candidate-{state.wave}"]["status"] == "completed"
 
 
 def test_gate_foreign_toplevel_key_is_not_a_pin(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Приёмка PR #101, круг 4: пустой `upstream_hashes: {}` + посторонний
     верхнеуровневый ключ `requirements: <верный hash>` ниже — это НЕ пин;
@@ -4478,7 +4527,7 @@ def test_gate_foreign_toplevel_key_is_not_a_pin(
             return rc
 
     ops = ForeignKeyOps(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-foreign-key", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-foreign-key", ops, monkeypatch, 3)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -4810,35 +4859,35 @@ def _design_pin_ops(bad_edge: str) -> type:
 
 
 def test_gate_design_missing_requirements_pin_is_unpinned(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-UNPINNED(prospective) на ребре design→requirements: пин
     behaviour-spec корректен, requirements — не запинен вовсе."""
     ops = _design_pin_ops("requirements")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-unpinned-req", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-design-unpinned-req", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-design-unpinned-req") / "gate-findings.txt"
     ).read_text()
     assert "GC-UNPINNED" in findings and "requirements" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_design_missing_behaviour_pin_is_unpinned(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-UNPINNED(prospective) на ребре design→behaviour-spec: пин
     requirements корректен, behaviour-spec — не запинен вовсе."""
     ops = _design_pin_ops("behaviour-spec")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-unpinned-beh", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-design-unpinned-beh", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-design-unpinned-beh") / "gate-findings.txt"
     ).read_text()
     assert "GC-UNPINNED" in findings and "behaviour-spec" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def _design_undeclared_edge_ops(missing_edge: str) -> type:
@@ -4890,16 +4939,14 @@ def _design_undeclared_edge_ops(missing_edge: str) -> type:
 
 
 def test_gate_design_undeclared_requirements_edge_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """MAJOR-1: design `traces_to` несёт только `behaviour-spec` — ребро
     requirements не объявлено ВООБЩЕ (не «не запинено», а отсутствует в
     traces_to) — S4 обязан стопить prospective-находкой, не молча
     пропускать необъявленное required-ребро."""
     ops = _design_undeclared_edge_ops("requirements")(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-design-undeclared-req", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-design-undeclared-req", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -4907,19 +4954,17 @@ def test_gate_design_undeclared_requirements_edge_stops(
     ).read_text()
     assert "GC-UNPINNED" in findings and "requirements" in findings
     assert "не объявлено в traces_to" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_design_undeclared_behaviour_edge_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """MAJOR-1: design `traces_to` несёт только `requirements` — ребро
     behaviour-spec не объявлено ВООБЩЕ — S4 обязан стопить, не
     пропускать."""
     ops = _design_undeclared_edge_ops("behaviour-spec")(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-design-undeclared-beh", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-design-undeclared-beh", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -4927,7 +4972,7 @@ def test_gate_design_undeclared_behaviour_edge_stops(
     ).read_text()
     assert "GC-UNPINNED" in findings and "behaviour-spec" in findings
     assert "не объявлено в traces_to" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_edges_derived_from_bundle_dag() -> None:
@@ -5004,36 +5049,36 @@ def _design_stale_ops(stale_edge: str) -> type:
     return _Ops
 
 
-def test_gate_design_stale_requirements_pin(tmp_path: Path, runs_root) -> None:
+def test_gate_design_stale_requirements_pin(tmp_path: Path, runs_root, monkeypatch) -> None:
     """GC-STALE(prospective) на ребре design→requirements: пин
     синтаксически валиден, но не совпадает с blob-хешем в worktree."""
     ops = _design_stale_ops("requirements")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-stale-req", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-design-stale-req", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-design-stale-req") / "gate-findings.txt"
     ).read_text()
     assert "GC-STALE" in findings and "requirements" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
-def test_gate_design_stale_behaviour_pin(tmp_path: Path, runs_root) -> None:
+def test_gate_design_stale_behaviour_pin(tmp_path: Path, runs_root, monkeypatch) -> None:
     """GC-STALE(prospective) на ребре design→behaviour-spec: пин
     синтаксически валиден, но не совпадает с blob-хешем в worktree."""
     ops = _design_stale_ops("behaviour-spec")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-stale-beh", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-design-stale-beh", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-design-stale-beh") / "gate-findings.txt"
     ).read_text()
     assert "GC-STALE" in findings and "behaviour-spec" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_stops_on_uncovered_architect_question(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-DESIGN-COVERAGE (спека Task 4): architects-Q из requirements без
     резолюции в design — стоп, отдельно от DSL-EMPTY/UNPINNED/STALE (оба
@@ -5077,14 +5122,14 @@ def test_gate_stops_on_uncovered_architect_question(
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = UncoveredQOps(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-uncovered-q", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-design-uncovered-q", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-design-uncovered-q") / "gate-findings.txt"
     ).read_text()
     assert "GC-DESIGN-COVERAGE" in findings and "Q-03" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 # --- Task 8: preflight профиля target — design-узел обязателен -----------
@@ -5679,7 +5724,7 @@ def test_gate_stops_when_decomposition_missing_from_bundle(
 
 
 def test_gate_decomposition_unpinned_edge_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-UNPINNED(prospective) на ребре decomposition→design: `traces_to`
     объявляет design, но `upstream_hashes` пуст."""
@@ -5710,19 +5755,17 @@ def test_gate_decomposition_unpinned_edge_stops(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-unpinned", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-decomposition-unpinned", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-decomposition-unpinned") / "gate-findings.txt"
     ).read_text()
     assert "GC-UNPINNED" in findings and "design" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
-def test_gate_decomposition_stale_pin_stops(tmp_path: Path, runs_root) -> None:
+def test_gate_decomposition_stale_pin_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     """GC-STALE(prospective) на ребре decomposition→design: пин
     синтаксически валиден (40 hex), но не совпадает с blob-хешем design в
     worktree."""
@@ -5754,18 +5797,18 @@ def test_gate_decomposition_stale_pin_stops(tmp_path: Path, runs_root) -> None:
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-decomposition-stale", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-decomposition-stale", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-decomposition-stale") / "gate-findings.txt"
     ).read_text()
     assert "GC-STALE" in findings and "design" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_decomposition_undeclared_design_edge_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """MAJOR-1-аналог на decomposition: `traces_to` не несёт design вовсе
     (не «не запинено» — отсутствует в traces_to) — required-ребро
@@ -5797,9 +5840,7 @@ def test_gate_decomposition_undeclared_design_edge_stops(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-undeclared", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-decomposition-undeclared", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -5807,10 +5848,10 @@ def test_gate_decomposition_undeclared_design_edge_stops(
     ).read_text()
     assert "GC-UNPINNED" in findings and "design" in findings
     assert "не объявлено в traces_to" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
-def test_gate_decomposition_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
+def test_gate_decomposition_dsl_empty_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     """Гард GC-DSL-EMPTY на 30-decomposition.md: пин design корректен,
     ребро объявлено, но ни одного распознаваемого DT-заголовка."""
 
@@ -5842,9 +5883,7 @@ def test_gate_decomposition_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-dsl-empty", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-decomposition-dsl-empty", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -5852,10 +5891,10 @@ def test_gate_decomposition_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
     ).read_text()
     assert "GC-DSL-EMPTY" in findings and "30-decomposition.md" in findings
     assert "DT-NN" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
-def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root) -> None:
+def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     """GC-DT-GRAPH (спека Task 6): DSL decomposition валиден, ребро
     design запинено верно, но граф несюръективен — BEH-02 не покрыт ни
     одной DT-задачей (decomposition остаётся дефолтным, покрывающим только
@@ -5879,20 +5918,18 @@ def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root) -> None:
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-dt-graph", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-decomposition-dt-graph", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-decomposition-dt-graph") / "gate-findings.txt"
     ).read_text()
     assert "GC-DT-GRAPH" in findings and "BEH-02" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Round 7 ревью PR #161 (минор, контракт владельца), фикстура
     обновлена в round 13 (major того же раунда промотировал «группа
@@ -5965,9 +6002,7 @@ def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-dt-graph-warning", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-dt-graph-warning", ops, monkeypatch, 5)
 
     assert state.status != "stopped_gate"
     findings_path = (
@@ -5981,7 +6016,7 @@ def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
 
 
 def test_gate_dt_graph_finding_stops_on_underivable_group(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Round 13 ревью PR #161, минор (контракт владельца): «группа
     наблюдения не выводится вовсе» промотирована в FATAL — гейт теперь
@@ -6049,9 +6084,7 @@ def test_gate_dt_graph_finding_stops_on_underivable_group(
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-dt-graph-underivable-stop", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-dt-graph-underivable-stop", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -6142,7 +6175,7 @@ def test_gate_stops_when_acceptance_missing_from_bundle(
 
 
 def test_gate_acceptance_unpinned_requirements_edge_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-UNPINNED(prospective) на ребре acceptance→requirements:
     `traces_to` объявляет requirements, но `upstream_hashes` не несёт его
@@ -6177,20 +6210,18 @@ def test_gate_acceptance_unpinned_requirements_edge_stops(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-unpinned", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-acceptance-unpinned", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-acceptance-unpinned") / "gate-findings.txt"
     ).read_text()
     assert "GC-UNPINNED" in findings and "requirements" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_acceptance_stale_behaviour_pin_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-STALE(prospective) на ребре acceptance→behaviour-spec: пин
     синтаксически валиден (40 hex), но не совпадает с blob-хешем
@@ -6226,18 +6257,18 @@ def test_gate_acceptance_stale_behaviour_pin_stops(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-acceptance-stale", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-acceptance-stale", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-acceptance-stale") / "gate-findings.txt"
     ).read_text()
     assert "GC-STALE" in findings and "behaviour-spec" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_acceptance_undeclared_edge_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """MAJOR-1-аналог на acceptance: `traces_to` не несёт ни requirements,
     ни behaviour-spec — оба required-ребра acceptance обязаны стопить S4
@@ -6266,9 +6297,7 @@ def test_gate_acceptance_undeclared_edge_stops(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-undeclared", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-acceptance-undeclared", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -6276,11 +6305,11 @@ def test_gate_acceptance_undeclared_edge_stops(
     ).read_text()
     assert "GC-UNPINNED" in findings
     assert "не объявлено в traces_to" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_decomposition_acceptance_edge_unpinned_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-UNPINNED(prospective) на ребре decomposition→acceptance:
     `traces_to` объявляет acceptance, но `upstream_hashes` не несёт его
@@ -6317,9 +6346,7 @@ def test_gate_decomposition_acceptance_edge_unpinned_stops(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-acceptance-unpinned", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-decomposition-acceptance-unpinned", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -6327,10 +6354,10 @@ def test_gate_decomposition_acceptance_edge_unpinned_stops(
         / "gate-findings.txt"
     ).read_text()
     assert "GC-UNPINNED" in findings and "acceptance" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
-def test_gate_acceptance_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
+def test_gate_acceptance_dsl_empty_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     """Гард GC-DSL-EMPTY на 25-acceptance.md: пины requirements/
     behaviour-spec корректны, оба ребра объявлены, но ни одного
     распознаваемого AC-заголовка и без строки-декларации пустого
@@ -6367,9 +6394,7 @@ def test_gate_acceptance_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-dsl-empty", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-acceptance-dsl-empty", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -6377,11 +6402,11 @@ def test_gate_acceptance_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
     ).read_text()
     assert "GC-DSL-EMPTY" in findings and "25-acceptance.md" in findings
     assert "AC-NN" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Минор круга 3 ревью спеки: файл ТОЛЬКО со строкой-декларацией
     (Must-множество требований пусто, `#### AC-` не нужен) НЕ стопится
@@ -6431,9 +6456,7 @@ def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = _Ops(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-declaration-only", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-acceptance-declaration-only", ops, monkeypatch, 4)
 
     findings_path = (
         runner.run_dir("r-acceptance-declaration-only") / "gate-findings.txt"
@@ -6456,11 +6479,14 @@ def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
     assert "error" not in findings, findings
     assert "GC-DSL-EMPTY" not in findings, findings
     assert "GC-AC-COVERAGE" not in findings, findings
-    assert "push" in state.ops
-    assert state.status == "completed"
+    assert f"push-{state.wave}" in state.ops
+    # Гейт пропустил — волна доехала до заявки и ждёт подписи человека.
+    # В прежнем пути тем же смыслом было `completed`: там за гейтом шёл
+    # весь остаток конвейера, здесь — конец волны.
+    assert state.status == "waiting_human_merge"
 
 
-def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root) -> None:
+def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     """GC-AC-COVERAGE (Task 6 плана acceptance-node,
     `governance/acceptance_guard.coverage_findings`): валидный DSL, оба
     ребра корректно запинованы, но Must-FR остаётся непокрытым ни одним
@@ -6512,20 +6538,18 @@ def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root) -> None:
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-ac-coverage", ops, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-acceptance-ac-coverage", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-acceptance-ac-coverage") / "gate-findings.txt"
     ).read_text()
     assert "GC-AC-COVERAGE" in findings and "FR-01" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_dt_graph_warning_survives_later_ac_coverage_stop(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Round 7 ревью PR #161, минор (контракт владельца, точка 3): давний
     баг рядом с нашим кодом — каждая находка в `_step_gate` писала
@@ -6639,8 +6663,15 @@ def test_gate_dt_graph_warning_survives_later_ac_coverage_stop(
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
+    # S13-REWRITE: предмет (находки НАКАПЛИВАЮТСЯ, warning не затирается
+    # поздним fatal) из продукта не уходит, но ИМЕННО ЭТА пара недостижима
+    # в одной волне: GC-AC-COVERAGE краснеет на W4 и останавливает прогон
+    # раньше, чем W5 вообще авторит decomposition с его GC-DT-GRAPH. Нужна
+    # пара, возникающая внутри одной волны; до переписывания тест едет
+    # прежним путём и НЕ подлежит сносу по метке.
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-dt-graph-warning-then-ac-stop", ops, authoring="legacy")
+        **_start_kwargs(tmp_path, "r-dt-graph-warning-then-ac-stop", ops,
+                        authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -7041,7 +7072,7 @@ def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
     assert "push" not in state.ops
 
 
-def test_gate_reports_dt_contract_findings(tmp_path: Path, runs_root) -> None:
+def test_gate_reports_dt_contract_findings(tmp_path: Path, runs_root, monkeypatch) -> None:
     """Находка ревью #289: проверка среза 1 не звалась ни на одном живом пути.
 
     `dt_contract_findings` была достижима только из тестов: S4-гейт знал про
@@ -7052,7 +7083,7 @@ def test_gate_reports_dt_contract_findings(tmp_path: Path, runs_root) -> None:
     ops = _strip_dt_contract(
         FakeOps, drop_version=False, drop_delivers=True
     )(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-dt-contract", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-dt-contract", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7093,7 +7124,7 @@ def _strip_dt_contract(ops_cls, *, drop_version: bool, drop_delivers: bool):
 
 
 def test_gate_passes_legacy_dt_but_says_guarantee_is_absent(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Базовая половина к стопу ниже: режим совместимости НЕ красит гейт.
 
@@ -7110,9 +7141,7 @@ def test_gate_passes_legacy_dt_but_says_guarantee_is_absent(
     ops = _strip_dt_contract(
         FakeOps, drop_version=True, drop_delivers=True
     )(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-dt-legacy", ops, allow_legacy_dt=True, authoring="legacy")
-    )
+    state = _drive_waves_to(tmp_path, "r-dt-legacy", ops, monkeypatch, 5, allow_legacy_dt=True)
 
     assert state.status != "stopped_gate"
     findings = (
@@ -7123,7 +7152,7 @@ def test_gate_passes_legacy_dt_but_says_guarantee_is_absent(
 
 
 def test_gate_refuses_a_versionless_bundle_by_default(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Со среза 3 дефолт строгий: документ без версии краснеет сам.
 
@@ -7140,7 +7169,7 @@ def test_gate_refuses_a_versionless_bundle_by_default(
     ops = _strip_dt_contract(
         FakeOps, drop_version=True, drop_delivers=True
     )(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-dt-strict", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-dt-strict", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7205,7 +7234,7 @@ def _with_delivers(ops_cls, source_ref: str):
 
 
 def test_gate_resolves_delivers_sources_against_bundle_nodes(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Базовая половина: разрешимая ссылка проходит гейт.
 
@@ -7214,7 +7243,7 @@ def test_gate_resolves_delivers_sources_against_bundle_nodes(
     ЛЮБУЮ ссылку, и красный был бы одинаков для верной и для битой.
     """
     ops = _with_delivers(FakeOps, "acceptance#AC-01")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-ok", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-del-ok", ops, monkeypatch, 5)
 
     findings_path = runner.run_dir("r-del-ok") / "gate-findings.txt"
     findings = (
@@ -7227,7 +7256,7 @@ def test_gate_resolves_delivers_sources_against_bundle_nodes(
 
 
 def test_gate_stops_on_unresolvable_delivers_source(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Ссылка на несуществующий пункт — стоп, а не молчание.
 
@@ -7236,7 +7265,7 @@ def test_gate_stops_on_unresolvable_delivers_source(
     редактура, которая его «переименовала», не оставит следа.
     """
     ops = _with_delivers(FakeOps, "acceptance#AC-99")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-bad", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-del-bad", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7247,7 +7276,7 @@ def test_gate_stops_on_unresolvable_delivers_source(
 
 
 def test_gate_resolves_a_delivers_source_in_charter(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """charter — адресуемый узел наравне с остальными.
 
@@ -7259,7 +7288,7 @@ def test_gate_resolves_a_delivers_source_in_charter(
     прогоне review-pr-unreachable-base-coverage-20260921.
     """
     ops = _with_delivers(FakeOps, "charter#CON-01")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-charter", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-del-charter", ops, monkeypatch, 5)
 
     findings_path = runner.run_dir("r-del-charter") / "gate-findings.txt"
     findings = (
@@ -7272,7 +7301,7 @@ def test_gate_resolves_a_delivers_source_in_charter(
 
 
 def test_gate_index_covers_exactly_the_declared_bundle_composition(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Состав индекса = объявленный состав бандла, не список гейта.
 
@@ -7288,7 +7317,7 @@ def test_gate_index_covers_exactly_the_declared_bundle_composition(
     ops = _with_delivers(FakeOps, "discovery-brief#G-01")(
         facts=GREEN_PR_FACTS
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-brief", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-del-brief", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7299,7 +7328,7 @@ def test_gate_index_covers_exactly_the_declared_bundle_composition(
 
 
 def test_gate_rejects_an_ambiguous_delivers_source(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Дважды определённый пункт не разрешается молча.
 
@@ -7323,7 +7352,7 @@ def test_gate_rejects_an_ambiguous_delivers_source(
             return rc
 
     ops = _Doubled(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-dup", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-del-dup", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
