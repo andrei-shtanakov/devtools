@@ -8184,3 +8184,67 @@ def test_reopen_refuses_legacy_runs_and_finished_waves(
     )
     with pytest.raises(ValueError, match="authoring=waves"):
         runner.reopen("r-legacy-reopen", "charter", ops)
+
+
+# --- S13: resume прежнего пути авторинга отказывает (спека §4, D3) --------
+
+
+def _saved_legacy_run(run_id: str, status: str = "stopped_review") -> rs.RunState:
+    """Сохранённый леджер прежнего пути — без исполнения конвейера.
+
+    Тесты стража намеренно НЕ зовут `runner.start()`: предмет проверки —
+    сам факт отказа на загруженном леджере, а не то, как он туда попал.
+    Исторические прогоны в `out/governance-runs` выглядят именно так —
+    `run.json`, оставшийся от сессии, которой больше нет.
+    """
+    state = rs.new_run(
+        subject="тест", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+        target_dir="/nonexistent/alpha", bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id=run_id,
+    )
+    assert state.authoring == "legacy"
+    state.status = status
+    state.branch = "spec/WS-1-behaviour"
+    state.pr = 42
+    rs.save(state)
+    return state
+
+
+def test_resume_of_a_legacy_run_refuses_with_a_named_reason(runs_root) -> None:
+    """D3: отказ называет ЧТО удалено, КОГДА, ЧЬИМ решением и что делать.
+
+    Без этих четырёх фактов сообщение неотличимо от поломки: оператор
+    исторического прогона не может понять, чинить ли ему окружение.
+    """
+    _saved_legacy_run("r-s13-refuse")
+    ops = FakeOps()
+
+    with pytest.raises(ValueError) as exc:
+        runner.resume("r-s13-refuse", ops)
+
+    message = str(exc.value)
+    assert "r-s13-refuse" in message
+    assert "2026-09-23" in message, "дата решения"
+    assert "S13" in message, "пункт спеки"
+    assert "waves" in message, "что делать вместо"
+    assert ops.calls == [], "ни одного обращения к git/фордже"
+
+
+def test_resume_refusal_of_a_legacy_run_leaves_the_ledger_byte_identical(
+    runs_root,
+) -> None:
+    """D3, отдельным тестом от предыдущего: «отказал» и «отказал бесследно»
+    — разные свойства, и второе ломается молча (§I5 проверяет его так же —
+    байтами, не прозой)."""
+    _saved_legacy_run("r-s13-traceless")
+    ledger = rs.run_dir("r-s13-traceless") / "run.json"
+    before = ledger.read_bytes()
+    listing_before = sorted(p.name for p in rs.run_dir("r-s13-traceless").iterdir())
+
+    with pytest.raises(ValueError):
+        runner.resume("r-s13-traceless", FakeOps())
+
+    assert ledger.read_bytes() == before
+    assert sorted(p.name for p in rs.run_dir("r-s13-traceless").iterdir()) == (
+        listing_before
+    ), "отказ не создал ни файла находок, ни артефакта"
