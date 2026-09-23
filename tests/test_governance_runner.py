@@ -1278,13 +1278,16 @@ def test_brief_materializes_after_branch_and_reaches_two_author_prompts(
         "status": "completed",
         "source_blobs": dict(source.source_blobs),
     }
-    # brief_context получают узлы, для которых он объявлен профилем
-    # (charter и requirements). В волнах они на РАЗНЫХ волнах, поэтому на
-    # W1 наблюдаем charter, а отсутствие контекста у узлов ниже — по
-    # факту «до них дело не дошло», что и есть содержание уровня.
+    # brief_context получают ДВА узла — charter и requirements, — и в
+    # волнах они на разных уровнях. Ревью #385 (major): остановка на W1
+    # снимала проверку с requirements, и расширение условия `disp_node`
+    # или потеря контекста у второго узла перестали бы краснить. Доводим
+    # до W2 и утверждаем оба; узлы ниже контекста не получают.
+    state = _drive_waves(state, "r-brief-source", ops, 2)
     contexts = dict(ops.author_contexts)
     assert contexts["charter"] == source.as_state()
-    assert set(contexts) == {"charter"}, contexts
+    assert contexts["requirements"] == source.as_state()
+    assert set(contexts) == {"charter", "requirements"}, contexts
 
 
 def test_brief_source_layer_is_force_added_and_verified_in_s3_commit(
@@ -3886,19 +3889,28 @@ def test_disp_backend_used_only_for_behaviour_node(
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-disp-behaviour"
 
-    # W3 — волна, на которой узел behaviour-spec и авторится. Дальше
-    # прогон не ведём намеренно: стенд `author_disp` файл узла НЕ создаёт
-    # (disp — отдельный пайплайн, документ приезжает позже), и на W4 пин
-    # design/acceptance упирается в отсутствующий файл. Это свойство
-    # стенда, а не продукта, и предметом теста не является.
-    # Что ОСТАЛЬНЫЕ узлы идут через codex, утверждает соседний тест
-    # `test_default_author_backend_is_codex_author_disp_not_called` —
-    # там весь DAG проходит `ops.author`. Здесь предмет — сам переключатель.
-    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 3, author_backend="disp")
+    # Ревью #385 (major): прогон обязан пройти ВЕСЬ DAG, иначе ошибочное
+    # расширение `disp_node` на design перестаёт краснить — остановка на
+    # W3 маршрутизацию последующих узлов не проверяет вовсе. Общий стенд
+    # `author_disp` документа не создаёт, поэтому ЗДЕСЬ он его пишет: в
+    # бою disp именно доставляет узел, и без этого W4 упирается в пин на
+    # отсутствующий файл — свойство стенда, а не продукта.
+    original_author_disp = ops.author_disp
 
-    assert ops.authored == ["charter", "requirements"], (
-        "behaviour-spec не должен попасть в codex-авторинг"
-    )
+    def delivering_author_disp(target_dir, task, config_path, slug, resume=False):
+        rc = original_author_disp(target_dir, task, config_path, slug, resume)
+        path = Path(target_dir) / BUNDLE_DIR / "15-behaviour-spec.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_DEFAULT_BEHAVIOUR_BODY, encoding="utf-8")
+        return rc
+
+    ops.author_disp = delivering_author_disp  # type: ignore[method-assign]
+
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 6, author_backend="disp")
+
+    assert ops.authored == [
+        "charter", "requirements", "design", "acceptance", "decomposition",
+    ], "через codex обязаны пройти ВСЕ узлы, кроме behaviour-spec"
     assert len(ops.author_disp_calls) == 1
     target_dir, task, config_path, slug = ops.author_disp_calls[0]
     assert target_dir == str(tmp_path / f"target-{run_id}")
