@@ -1759,16 +1759,55 @@ def _agent_merge_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
     return _start_kwargs(tmp_path, run_id, ops, **overrides)
 
 
-def test_s8_success_completes(tmp_path: Path, runs_root, monkeypatch) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+def _wave_run_at_s8(
+    tmp_path: Path, run_id: str, ops: FakeOps,
+    base_ref: str | None = None, **over,
+):
+    """Волновой прогон, доехавший до S8: заявки закрыты, шаг зовётся прямо.
+
+    S8 — ОБЩИЙ шаг обоих режимов, и в волнах op `merge` пишет `_next_wave`,
+    а не шаг прежнего пути. Поэтому тесты САМОГО S8 строят состояние и
+    зовут шаг напрямую — тем же приёмом, каким это уже делают тесты чистки
+    авторинговых веток волн.
+
+    Что шов цел — то есть что волновой прогон до этого шага ДОЕЗЖАЕТ —
+    утверждает отдельный тест (`test_waves_last_wave_completion_enters_s8`:
+    `merge` фиксируется волной, `gate_check_s8` вызывается, повторный
+    resume коротко замыкается на S8). Это правильная единица разделения:
+    «S8 делает своё» и «до S8 доходят» ломаются порознь, и один тест на оба
+    свойства скрыл бы, которое из них сломалось.
+    """
+    target_dir = tmp_path / f"target-{run_id}"
+    target_dir.mkdir(exist_ok=True)
+    kwargs = dict(
+        subject="тестовый функционал", repo="alpha", repo_slug="owner/alpha",
+        ws_id="WS-1", target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id=run_id, authoring="waves",
     )
+    kwargs.update(over)
+    state = rs.new_run(**kwargs)
+    state.wave = 5
+    state.status = "running"
+    state.branch = f"spec/{state.ws_id}-behaviour-w5"
+    state.pr = 700
+    state.head = ops.head
+    state.ops["merge"] = {"status": "completed", "merged": True, "waves": 5}
+    if base_ref is not None:
+        # В волнах `base_ref` пишет шаг candidate из фактов candidate-PR
+        # (`runner.py:2961`), а не шаг прежнего пути. `None` оставляет поле
+        # пустым — это вход для СОБСТВЕННОГО фолбэка S8.
+        state.base_ref = base_ref
+    rs.save(state)
+    return state
+
+
+def test_s8_success_completes(tmp_path: Path, runs_root) -> None:
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-ok", ops, authoring="legacy"))
+    state = _wave_run_at_s8(tmp_path, "r-s8-ok", ops)
+    runner._step_s8(state, ops)
 
     assert state.status == "completed"
     assert state.ops["gate-authoritative"] == {"status": "completed", "exit": 0}
@@ -1796,16 +1835,13 @@ def test_s8_stale_verdicts_do_not_mask_missing_artifact(
     """Приёмка PR #114, круг 2: verdict-файл прерванной ПРЕДЫДУЩЕЙ попытки
     не должен сойти за артефакт текущего вызова гейта. Pre-clean уносит
     его (True), текущий гейт файла не создал (False) — fail-closed стоп."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=0, collect_verdicts_queue=[True, False],
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-stale", ops, authoring="legacy"))
+    state = _wave_run_at_s8(tmp_path, "r-s8-stale", ops)
+    runner._step_s8(state, ops)
 
     assert state.status != "completed"
     gate_op = state.ops.get("gate-authoritative")
@@ -1819,16 +1855,13 @@ def test_s8_success_without_verdicts_is_not_completed(
     фиксации (спека §5). Зелёный exit gate-check без gate_verdicts.jsonl —
     неполный результат: fail-closed стоп ДО op_complete, шаг resumable,
     completed не выставляется."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=0, collect_verdicts_ok=False,
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-noverd", ops, authoring="legacy"))
+    state = _wave_run_at_s8(tmp_path, "r-s8-noverd", ops)
+    runner._step_s8(state, ops)
 
     assert state.status != "completed"
     gate_op = state.ops.get("gate-authoritative")
@@ -1839,16 +1872,13 @@ def test_s8_success_without_verdicts_is_not_completed(
 def test_s8_fail_marks_merged_unverified_and_opens_issue(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     run_id = "r-s8-fail"
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, run_id, ops, authoring="legacy"))
+    state = _wave_run_at_s8(tmp_path, run_id, ops)
+    runner._step_s8(state, ops)
 
     assert state.status == "merged_unverified"
     # Круг 3 (codex-ревью PR #88): gate-authoritative — аудит-запись, тоже
@@ -1966,10 +1996,6 @@ def test_s8_fail_does_not_reuse_issue_from_different_cycle(
     молча терялись бы под чужим issue. `find_issue` всё равно вызывается
     (реконсиляция остаётся безусловной, round 3), но не находит совпадение
     по своему префиксу -> `create_issue` создаёт НОВЫЙ, отдельный issue."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -1983,7 +2009,8 @@ def test_s8_fail_does_not_reuse_issue_from_different_cycle(
         f"{other_cycle_prefix}\nfrom: devtools#r-earlier-cycle\n\nGC-OLD\n",
     ))
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, run_id, ops, authoring="legacy"))
+    state = _wave_run_at_s8(tmp_path, run_id, ops)
+    runner._step_s8(state, ops)
 
     own_prefix = f"slug: beh-remediation-{run_id}"
     assert state.status == "merged_unverified"
@@ -2005,15 +2032,12 @@ def test_verify_child_reuses_parent_remediation_issue_same_cycle(
     `remediated_by` ещё `None`). Потомок с ФРЕШ `remediation-issue`
     ("new", round 3: реконсиляция безусловна) должен найти и переиспользовать
     issue родителя, а не открыть второй под тем же циклом."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-cycle-parent"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
     assert len(ops.issues) == 1
     parent_issue_number = parent.ops["remediation-issue"]["number"]
@@ -2031,15 +2055,12 @@ def test_verify_child_reuses_parent_remediation_issue_same_cycle(
 def test_verify_child_completes_parent_stays_merged_unverified(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
     assert len(ops.issues) == 1  # родитель открыл ровно одно remediation-issue
 
@@ -2066,15 +2087,12 @@ def test_verify_refuses_when_parent_already_has_green_child(
     или после того как сессия уже закрылась) на уже зелёном потомке
     создавал бы ЕЩЁ ОДИН verification-run поверх уже верифицированного
     родителя."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-already-verified"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     ops.s8_exit = 0  # находки устранены фикс-PR'ом
@@ -2094,15 +2112,12 @@ def test_verify_allowed_again_after_failed_child(
     """Провальный (`merged_unverified`) потомок НЕ блокирует повторный
     `verify()` — только ЗЕЛЁНЫЙ (`completed`) значит «уже верифицирован»;
     цикл «verify → всё ещё красный → verify снова» остаётся штатным."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-retry"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     failed_child = runner.verify(parent_id, ops, "r-s8-child-failed")
@@ -2128,15 +2143,12 @@ def test_verify_without_run_id_serializes_when_ids_collide(
     Первый вызов резервирует и создаёт потомка, второй с тем же
     вычисленным id получает `ValueError` вместо параллельного запуска S8
     в одном `target_dir`."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-race"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     monkeypatch.setattr(runner, "_next_verify_run_id", lambda pid: f"{pid}-v1")
@@ -2166,15 +2178,12 @@ def test_next_verify_run_id_skips_dangling_reservation(
     конкурентом» и блокирует `verify()` (см. `test_verify_refuses_when_
     dangling_reservation_is_fresh`) — этот тест про труп round 6, который
     старше грейс-периода, поэтому его нужно состарить явно."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-dangling"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     # Оборванная резервация: процесс умер между _reserve_run_id и
@@ -2206,15 +2215,12 @@ def test_verify_refuses_when_child_is_running(
     держится на СОСТОЯНИИ потомков: валидный `run.json` со `status` не в
     `{"completed", "merged_unverified"}` (например `"running"` — S8 ещё
     не отработал) — активный потомок, второй `verify()` отказывает."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-active-child"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     # Валидный, но ещё не терминальный потомок (S8 в процессе).
@@ -2241,15 +2247,12 @@ def test_verify_refuses_when_dangling_reservation_is_fresh(
     свой RunState» — активный, а не труп round 6. mtime моложе
     `_ACTIVE_VERIFY_GRACE_SECONDS` (тест не состаривает файл, в отличие от
     `test_next_verify_run_id_skips_dangling_reservation`)."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-fresh-dangling"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     dangling_id = f"{parent_id}-v1"
@@ -2268,15 +2271,12 @@ def test_active_verify_child_ignores_merged_unverified_child(
     активный: не блокирует повторный `verify()` (round 3/round 7 согласны
     друг с другом — только `_has_green_child` реагирует на `completed`,
     `_active_verify_child` реагирует на нетерминальные статусы)."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-failed-not-active"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     failed_child = runner.verify(parent_id, ops)
@@ -2296,15 +2296,12 @@ def test_verify_without_run_id_increments_attempt_after_failed_child(
     провального (`merged_unverified`) потомка следующий `verify()` без
     `run_id` вычисляет НОВЫЙ id (`-v2`), а не повторяет `-v1` (что упёрлось
     бы в уже занятый `run_id` того же провального потомка)."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-attempts"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     first_child = runner.verify(parent_id, ops)
@@ -3155,15 +3152,12 @@ def test_verify_with_existing_run_id_raises(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """`verify()` — та же защита для дочернего run_id."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-verify-parent-taken"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     # Занятый child run_id — например, случайно совпал с чужим прогоном.
@@ -3192,22 +3186,19 @@ def test_verify_with_existing_run_id_raises(
 def test_s8_syncs_to_default_branch_before_gate_check(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    """S8 чекаутит default-ветку (`base_ref` из `pr_facts.baseRefName`,
-    зафиксированный на S7) и подтягивает merge-коммит ПЕРЕД `gate_check_s8` —
-    иначе authoritative-срез читал бы feature-ветку прогона."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
+    """S8 чекаутит записанную default-ветку и подтягивает merge-коммит
+    ПЕРЕД `gate_check_s8` — иначе authoritative-срез читал бы feature-ветку
+    прогона. Кто записал `base_ref`, S8 не знает и знать не должен: в волнах
+    это шаг candidate из фактов candidate-PR."""
     ops = FakeOps(
         review_exit=0, facts={**GREEN_PR_FACTS, "baseRefName": "main"},
         files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-sync", ops, authoring="legacy"))
+    state = _wave_run_at_s8(tmp_path, "r-s8-sync", ops, base_ref="main")
+    runner._step_s8(state, ops)
 
     assert state.status == "completed"
-    assert state.base_ref == "main"
     assert ops.checked_out == [(state.target_dir, "main")]
     call_names = [c[0] for c in ops.calls]
     assert call_names.index("checkout_and_pull") < call_names.index("gate_check_s8")
@@ -3215,22 +3206,24 @@ def test_s8_syncs_to_default_branch_before_gate_check(
 
 
 def test_s8_sync_falls_back_to_master_when_base_ref_missing(
-    tmp_path: Path, runs_root, monkeypatch,
+    tmp_path: Path, runs_root,
 ) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
+    """Фолбэк СОБСТВЕННЫЙ у S8, а не унаследованный от записавшего шага.
+
+    Прежде поле всегда заполнял шаг перед мержем, и фолбэк внутри S8
+    (`base_ref = state.base_ref or "master"`) был недостижим — тест
+    проверял чужой фолбэк, думая, что проверяет этот. Прогон, доехавший до
+    S8 без записанного `base_ref`, — ровно тот случай, ради которого
+    фолбэк в S8 и стоит."""
     ops = FakeOps(
         review_exit=0, facts={**GREEN_PR_FACTS, "baseRefName": ""},
         files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
 
-    state = runner.start(
-        **_agent_merge_kwargs(tmp_path, "r-s8-sync-fallback", ops, authoring="legacy")
-    )
+    state = _wave_run_at_s8(tmp_path, "r-s8-sync-fallback", ops)
+    assert state.base_ref is None, "вход: поле не записано"
+    runner._step_s8(state, ops)
 
-    assert state.base_ref == "master"
     assert ops.checked_out == [(state.target_dir, "master")]
 
 
@@ -3240,16 +3233,13 @@ def test_s8_sync_failure_stops_without_touching_status_or_gate(
     """`checkout_and_pull` падает (например, локальные правки/дивергенция) —
     S8 останавливается ДО `gate_check_s8`, статус run'а не меняется (retry
     на следующем `advance()`/`resume()`, тот же паттерн, что `_step_pr`)."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         checkout_and_pull_error="ff-only diverged",
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-sync-fail", ops, authoring="legacy"))
+    state = _wave_run_at_s8(tmp_path, "r-s8-sync-fail", ops)
+    runner._step_s8(state, ops)
 
     assert state.status == "running"
     assert state.ops["sync-default"]["status"] == "started"
@@ -3259,18 +3249,14 @@ def test_s8_sync_failure_stops_without_touching_status_or_gate(
 def test_verify_child_reuses_parent_base_ref(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts={**GREEN_PR_FACTS, "baseRefName": "main"},
         files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-sync-parent"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="main")
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
-    assert parent.base_ref == "main"
 
     ops.s8_exit = 0
     calls_before_verify = len(ops.calls)
