@@ -1,6 +1,6 @@
 ---
 spec_stage: acceptance
-status: approval_pending
+status: approved
 owner_role: qa
 traces_to:
 - requirements
@@ -10,6 +10,8 @@ upstream_hashes:
   behaviour-spec: 4dc3260ac3556743343119d91e1a1d979b35cf23
 approved_content_hash: d69be277c87bec73615078228cb68e9640b4ebb9
 version: 2
+approved_at: '2026-09-23T08:54:08Z'
+approved_by: andrei-shtanakov
 ---
 
 # Acceptance: no-op §I5 перестаёт объявлять бесследность над изменённым журналом
