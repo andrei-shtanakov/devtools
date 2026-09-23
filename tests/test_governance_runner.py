@@ -6548,33 +6548,34 @@ def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root, monkeypatch) 
     assert f"candidate-{state.wave}" not in state.ops
 
 
-def test_gate_dt_graph_warning_survives_later_ac_coverage_stop(
+def test_gate_warning_survives_a_later_fatal_in_the_same_gate_call(
     tmp_path: Path, runs_root, monkeypatch
 ) -> None:
-    """Round 7 ревью PR #161, минор (контракт владельца, точка 3): давний
-    баг рядом с нашим кодом — каждая находка в `_step_gate` писала
-    gate-findings.txt через `write_text`, ЗАТИРАЯ любую предыдущую запись
-    целиком. Non-fatal GC-DT-GRAPH warning (round 6) — первая НЕ
-    останавливающая запись в этой функции, и более поздний fatal-стоп
-    (GC-AC-COVERAGE) стирал её молча. Теперь находки НАКАПЛИВАЮТСЯ: warning
-    остаётся в файле рядом с error, даже когда прогон в итоге стопится
-    позже по другой причине.
+    """Находки НАКАПЛИВАЮТСЯ: non-fatal warning не затирается поздним fatal.
 
-    Фикстура обновлена в round 13 (осиротевший путь в verifies — теперь
-    единственный non-fatal класс; «группа наблюдения не выводится» стала
-    fatal и сама стопила бы гейт раньше, чем дело дошло бы до
-    GC-AC-COVERAGE)."""
+    Round 7 ревью PR #161 (минор, контракт владельца): каждая находка в
+    `_step_gate` писала gate-findings.txt через `write_text`, ЗАТИРАЯ
+    предыдущую запись целиком. Для fatal-веток это было безопасно — стоп
+    сразу же, — но non-fatal `warning GC-DT-GRAPH` (round 6) единственная
+    НЕ останавливает, и более поздний fatal стирал её молча.
+
+    Пара находок подобрана заново под волновой режим (S13). Прежняя —
+    warning из decomposition плюс fatal GC-AC-COVERAGE — в волнах
+    недостижима: покрытие AC краснеет на W4 и останавливает прогон
+    раньше, чем W5 вообще авторит decomposition. Здесь обе находки родом
+    из ОДНОЙ волны W5 и из одного вызова гейта: warning даёт осиротевший
+    путь в `verifies`, fatal — неразрешимый `sources` в `delivers`
+    (GC-DT-CONTRACT), и его ветка лежит НИЖЕ по `_step_gate`, чем сбор
+    warnings. Расстояние между записями то же, что проверял прежний
+    тест, — именно оно и есть предмет.
+    """
     beh_two = (
         _DEFAULT_BEHAVIOUR_BODY
         + "\n#### BEH-02: y\n`traces: [FR-01]`\n- **checked_by**: "
         "`kind: integration` `target: tests/test_y.py`\n"
     )
-    req_two = (
-        "#### FR-01: x\n**Priority**: Must\n"
-        "#### NFR-01: y\n**Priority**: Should\n"
-    )
 
-    class _Ops(FakeOps):
+    class _Warned(FakeOps):
         def author(
             self, target_dir: str, kind: str, subject: str, bundle_dir: str
         ) -> int:
@@ -6584,13 +6585,6 @@ def test_gate_dt_graph_warning_survives_later_ac_coverage_stop(
                 path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(beh_two, encoding="utf-8")
-                return 0
-            if kind == "requirements":
-                self.calls.append(("author", kind))
-                self.authored.append(kind)
-                path = Path(target_dir) / bundle_dir / "10-requirements.md"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(req_two, encoding="utf-8")
                 return 0
             if kind == "decomposition":
                 self.calls.append(("author", kind))
@@ -6633,91 +6627,21 @@ def test_gate_dt_graph_warning_survives_later_ac_coverage_stop(
                     encoding="utf-8",
                 )
                 return 0
-            if kind == "acceptance":
-                self.calls.append(("author", kind))
-                self.authored.append(kind)
-                bundle = Path(target_dir) / bundle_dir
-                req_pin = blob_sha1(
-                    (bundle / "10-requirements.md").read_text(encoding="utf-8")
-                )
-                beh_pin = blob_sha1(
-                    (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
-                )
-                path = bundle / "25-acceptance.md"
-                path.write_text(
-                    "---\n"
-                    "spec_stage: acceptance\n"
-                    "status: draft\n"
-                    "owner_role: qa\n"
-                    "traces_to: [requirements, behaviour-spec]\n"
-                    "upstream_hashes:\n"
-                    f'  requirements: "{req_pin}"\n'
-                    f'  behaviour-spec: "{beh_pin}"\n'
-                    "---\n"
-                    "#### AC-01: x · verification: manual\n"
-                    "traces: [NFR-01]\n"
-                    "Наблюдаемый признак: человек видит x.\n",
-                    encoding="utf-8",
-                )
-                return 0
             return super().author(target_dir, kind, subject, bundle_dir)
 
-    ops = _Ops(facts=GREEN_PR_FACTS)
-    # S13-REWRITE: предмет (находки НАКАПЛИВАЮТСЯ, warning не затирается
-    # поздним fatal) из продукта не уходит, но ИМЕННО ЭТА пара недостижима
-    # в одной волне: GC-AC-COVERAGE краснеет на W4 и останавливает прогон
-    # раньше, чем W5 вообще авторит decomposition с его GC-DT-GRAPH. Нужна
-    # пара, возникающая внутри одной волны; до переписывания тест едет
-    # прежним путём и НЕ подлежит сносу по метке.
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-dt-graph-warning-then-ac-stop", ops,
-                        authoring="legacy")
-    )
+    ops = _with_delivers(_Warned, "acceptance#AC-99")(facts=GREEN_PR_FACTS)
+    state = _drive_waves_to(tmp_path, "r-warn-then-fatal", ops, monkeypatch, 5)
 
-    assert state.status == "stopped_gate"
+    assert state.status == "stopped_gate", "поздняя находка обязана остановить"
     findings = (
-        runner.run_dir("r-dt-graph-warning-then-ac-stop")
-        / "gate-findings.txt"
-    ).read_text()
-    assert "GC-AC-COVERAGE" in findings and "FR-01" in findings
-    assert "warning GC-DT-GRAPH" in findings and "DT-02" in findings
-
-
-# --- Task 9: сквозной смоук decomposition-узла + deliver ---------------------
-
-
-_DT_SMOKE_BEHAVIOUR_SCENARIOS = (
-    "#### BEH-01: Первый\n"
-    "`traces: [FR-01]`\n"
-    "- **checked_by**: `status: planned` `kind: integration` `owner: qa` "
-    "`target: tests/test_a.py`\n\n"
-    "#### BEH-02: Второй\n"
-    "`traces: [FR-01]`\n"
-    "- **checked_by**: `status: planned` `kind: e2e` `owner: qa` "
-    "`target: tests/test_b.py`\n"
-)
-
-# `FakeOps.author` (общий фикстур) пишет charter/requirements БЕЗ
-# frontmatter — ни один прежний тест этого не замечал, потому что ни один
-# не доходил до `task_bridge.deliver()`/`stamp_bundle_approved` после
-# runner-прогона: тот штампует ВЕСЬ DAG (devtools#110, урок 2 —
-# «после мержа charter/requirements/behaviour-spec остаются status:
-# draft»), а не только design/decomposition, и требует frontmatter на
-# КАЖДОМ узле. Локальный фикстур смоука ниже несёт реалистичное
-# содержимое charter/requirements (та же DSL-форма, что `governance/
-# ops.py::_AUTHOR_DSL["charter"|"requirements"]` требует от реального
-# author-бэкенда) — правка ограничена этим тестовым модулем, общий
-# `FakeOps.author` не тронут (используется ~сотней других тестов, не
-# упирающихся в deliver()).
-_DT_SMOKE_CHARTER_BODY = (
-    "---\n"
-    "spec_stage: charter\n"
-    "status: draft\n"
-    "owner_role: product\n"
-    "---\n"
-    "# Charter\n\nТекст charter.\n"
-)
-
+        runner.run_dir("r-warn-then-fatal") / "gate-findings.txt"
+    ).read_text(encoding="utf-8")
+    assert "GC-DT-CONTRACT" in findings and "AC-99" in findings, findings
+    assert "warning GC-DT-GRAPH" in findings, (
+        "warning затёрт поздней fatal-записью — ровно тот баг, "
+        f"ради которого находки накапливают: {findings}"
+    )
+    assert "tests/test_typo.py" in findings, findings
 
 def _dt_smoke_requirements_body(charter_pin: str, extra: str = "") -> str:
     return (
