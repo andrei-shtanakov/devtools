@@ -1,17 +1,18 @@
 ---
-spec_stage: tasks
-status: draft
-owner_role: stream-owner
-version: 1
-generated_by: fleet-agent
-generated_at: "2026-09-22T21:36:10+04:00"
-source_prompt_version: ""
-validation: ""
-approved_by: ""
 traces_to:
 - decomposition
 upstream_hashes:
   decomposition: a304e1ca88bce83b09ecc79fa5a41fc4a4b0fda7
+spec_stage: tasks
+status: approved
+version: 2
+generated_by: fleet-agent
+generated_at: '2026-09-22T21:36:10+04:00'
+source_prompt_version: ''
+validation: pass
+approved_by: andrei-shtanakov
+approved_at: '2026-09-23T05:01:04Z'
+owner_role: stream-owner
 ---
 
 ## Milestone 1: stray md disables i8 for legacy v1
