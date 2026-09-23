@@ -120,6 +120,59 @@ def test_branch_without_pr_not_merged_is_reported(tmp_path: Path) -> None:
     assert findings[0].age_seconds is not None
 
 
+def test_remote_branch_without_pr_is_reported(tmp_path: Path) -> None:
+    """Ветка живёт ТОЛЬКО на origin — сенсор обязан её видеть.
+
+    Наблюдение 2026-09-23: в devtools накопилось 36 веток на origin при
+    ОДНОЙ локальной, и скан молчал — он перечислял `refs/heads`, то есть
+    только локальный клон. «Salvage чист» означало «чист мой клон», а
+    накапливаются ветки ровно на той половине, куда он не смотрел.
+    """
+    repo = make_cloned_repo(tmp_path)
+    run_git(repo, "switch", "-q", "-c", "left-on-origin")
+    commit(repo, "f.txt", "wip")
+    run_git(repo, "push", "-q", "-u", "origin", "left-on-origin")
+    run_git(repo, "switch", "-q", "main")
+    run_git(repo, "branch", "-q", "-D", "left-on-origin")
+
+    findings = scan_branches(repo, "main", now=NOW, pr_heads=set())
+
+    assert [f.klass for f in findings] == ["branch-no-pr"]
+    assert "left-on-origin" in findings[0].obj
+
+
+def test_branch_present_both_locally_and_on_origin_is_reported_once(
+    tmp_path: Path,
+) -> None:
+    """Одна ветка — одна находка: origin и локальная копия не двоятся."""
+    repo = make_cloned_repo(tmp_path)
+    run_git(repo, "switch", "-q", "-c", "feature-x")
+    commit(repo, "f.txt", "wip")
+    run_git(repo, "push", "-q", "-u", "origin", "feature-x")
+    run_git(repo, "switch", "-q", "main")
+
+    findings = scan_branches(repo, "main", now=NOW, pr_heads=set())
+
+    assert len(findings) == 1, [f.obj for f in findings]
+    assert "feature-x" in findings[0].obj
+
+
+def test_remote_branch_merged_into_default_is_not_reported(
+    tmp_path: Path,
+) -> None:
+    """Влитая ветка на origin — не находка: предикат прежний, шире охват."""
+    repo = make_cloned_repo(tmp_path)
+    run_git(repo, "switch", "-q", "-c", "merged-x")
+    commit(repo, "f.txt", "wip")
+    run_git(repo, "switch", "-q", "main")
+    run_git(repo, "merge", "-q", "--no-ff", "-m", "merge", "merged-x")
+    run_git(repo, "push", "-q", "origin", "main")
+    run_git(repo, "push", "-q", "-u", "origin", "merged-x")
+    run_git(repo, "branch", "-q", "-D", "merged-x")
+
+    assert scan_branches(repo, "main", now=NOW, pr_heads=set()) == []
+
+
 def test_branch_with_open_pr_is_not_reported(tmp_path: Path) -> None:
     repo = make_cloned_repo(tmp_path)
     run_git(repo, "switch", "-q", "-c", "feature-x")

@@ -197,21 +197,36 @@ def scan_branches(
     pr_heads: set[str] | None,
 ) -> list[Finding]:
     """branch-no-pr; pr_heads=None (gh недоступен) — явная пометка, не молчание."""
+    # ОБЕ половины: `refs/heads` и `refs/remotes/origin`. Только локальная
+    # была слепа ровно к тому месту, где ветки и копятся: 2026-09-23 в
+    # devtools их было 36 на origin при ОДНОЙ локальной, и скан молчал —
+    # «salvage чист» означало «чист мой клон». Имя нормализуется к общему
+    # виду (`origin/x` → `x`), поэтому ветка, живущая в обеих половинах,
+    # даёт ОДНУ находку, а не две.
     raw = git(
         repo,
         "for-each-ref",
         "refs/heads",
+        "refs/remotes/origin",
         "--format=%(refname:short)\x1f%(committerdate:unix)",
     )
     merge_targets = [default]
     if _ref_exists(repo, f"refs/remotes/origin/{default}"):
         merge_targets.append(f"origin/{default}")
     findings: list[Finding] = []
+    seen: set[str] = set()
     for line in raw.splitlines():
-        name, _, stamp = line.partition("\x1f")
+        ref, _, stamp = line.partition("\x1f")
+        # `origin/HEAD` — символическая ссылка на дефолт, не ветка.
+        if ref in ("origin/HEAD",) or ref.endswith("/HEAD"):
+            continue
+        name = ref.removeprefix("origin/")
         if name == default:
             continue
-        if any(_is_ancestor(repo, name, target) for target in merge_targets):
+        if name in seen:
+            continue
+        seen.add(name)
+        if any(_is_ancestor(repo, ref, target) for target in merge_targets):
             continue
         if pr_heads is not None and name in pr_heads:
             continue
