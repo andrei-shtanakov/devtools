@@ -1255,38 +1255,40 @@ class CoveredBriefOps(FakeOps):
 
 
 def test_brief_materializes_after_branch_and_reaches_two_author_prompts(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     ops = CoveredBriefOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES
     )
     source = _brief_source(tmp_path)
-    kwargs = _start_kwargs(
+    kwargs = _waves_kwargs(
         tmp_path, "r-brief-source", ops, brief_source=source,
-        merge_authority="human",
-        authoring="legacy",
+        merge_authority="human"
     )
 
+    _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(**kwargs)
 
     destination = (
         Path(state.target_dir) / state.bundle_dir / brief_input.PRIMARY_REL
     )
     assert destination.read_bytes() == source.primary_input.read_bytes()
-    assert state.ops["branch"]["status"] == "completed"
-    assert state.ops["materialize-brief"] == {
+    assert state.ops[f"branch-{state.wave}"]["status"] == "completed"
+    assert state.ops[f"materialize-brief-{state.wave}"] == {
         "status": "completed",
         "source_blobs": dict(source.source_blobs),
     }
+    # brief_context получают узлы, для которых он объявлен профилем
+    # (charter и requirements). В волнах они на РАЗНЫХ волнах, поэтому на
+    # W1 наблюдаем charter, а отсутствие контекста у узлов ниже — по
+    # факту «до них дело не дошло», что и есть содержание уровня.
     contexts = dict(ops.author_contexts)
     assert contexts["charter"] == source.as_state()
-    assert contexts["requirements"] == source.as_state()
-    for kind in ("behaviour-spec", "design", "acceptance", "decomposition"):
-        assert contexts[kind] is None
+    assert set(contexts) == {"charter"}, contexts
 
 
 def test_brief_source_layer_is_force_added_and_verified_in_s3_commit(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Живой прогон 2026-09-14 (spec-runner#490): `.gitignore` цели держит
     `workstreams/*/spec/*` с carve-out только `!*.md`, `00-discovery/` под него
@@ -1298,22 +1300,22 @@ def test_brief_source_layer_is_force_added_and_verified_in_s3_commit(
         ignored_paths={source_full},
     )
     source = _brief_source(tmp_path)
-    kwargs = _start_kwargs(
+    kwargs = _waves_kwargs(
         tmp_path, "r-brief-commit", ops, brief_source=source,
-        merge_authority="human",
-        authoring="legacy",
+        merge_authority="human"
     )
 
+    _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(**kwargs)
 
-    assert state.ops["commit"]["status"] == "completed"
+    assert state.ops[f"commit-{state.wave}"]["status"] == "completed"
     assert ops.forced_paths == [source_full]
     assert [paths for _t, paths, _m in ops.committed] == [[BUNDLE_DIR]]
     assert "push_branch" in [c[0] for c in ops.calls]
 
 
 def test_brief_source_layer_missing_from_commit_stops_before_push(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Подсадка: ops, который добавляет bundle_dir без `-f` (прежнее
     поведение) — гвард обязан остановить прогон до push и назвать файл."""
@@ -1330,16 +1332,16 @@ def test_brief_source_layer_missing_from_commit_stops_before_push(
         ignored_paths={source_full},
     )
     source = _brief_source(tmp_path)
-    kwargs = _start_kwargs(
+    kwargs = _waves_kwargs(
         tmp_path, "r-brief-noforce", ops, brief_source=source,
-        merge_authority="human",
-        authoring="legacy",
+        merge_authority="human"
     )
 
+    _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(**kwargs)
 
     assert state.status == "stopped_author"
-    assert state.ops["commit"]["status"] != "completed"
+    assert state.ops[f"commit-{state.wave}"]["status"] != "completed"
     assert "push_branch" not in [c[0] for c in ops.calls]
     findings = (rs.run_dir(state.run_id) / "brief-findings.txt").read_text(
         encoding="utf-8"
@@ -1491,7 +1493,7 @@ def test_brief_source_pin_is_required_by_prospective_gate(
 
 
 def test_real_candidate_gate_accepts_materialized_brief_source(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """The real steward CLI accepts the source layer and charter source edge."""
     from governance.ops import DEVTOOLS_ROOT, RealOps
@@ -1540,13 +1542,13 @@ def test_real_candidate_gate_accepts_materialized_brief_source(
             )
 
     source = _brief_source(tmp_path)
-    kwargs = _start_kwargs(
+    ops = CliBriefOps(review_exit=1)
+    kwargs = _waves_kwargs(
         tmp_path,
         "r-real-brief-gate",
-        CliBriefOps(review_exit=1),
+        ops,
         brief_source=source,
         merge_authority="human",
-        authoring="legacy",
     )
     roles = Path(kwargs["target_dir"]) / "profiles/roles.yaml"
     roles.write_text(
@@ -1555,6 +1557,7 @@ def test_real_candidate_gate_accepts_materialized_brief_source(
         ),
         encoding="utf-8",
     )
+    _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(**kwargs)
 
     assert state.status != "stopped_gate", (
@@ -1562,7 +1565,7 @@ def test_real_candidate_gate_accepts_materialized_brief_source(
             encoding="utf-8"
         )
     )
-    assert state.ops["gate-candidate"]["status"] == "completed"
+    assert state.ops[f"gate-candidate-{state.wave}"]["status"] == "completed"
 
 
 def _green_bundle(profile, bundle) -> bundle_state.BundleState:
@@ -3080,12 +3083,12 @@ def test_commit_paths_called_between_author_and_push(
     `bundle_dir` (круг 5: не `git add -A`, явный список путей)."""
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-commit", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-commit", ops, monkeypatch, 1)
 
     call_names = [c[0] for c in ops.calls]
     assert call_names.index("author") < call_names.index("commit_paths")
     assert call_names.index("commit_paths") < call_names.index("push_branch")
-    assert state.ops["commit"]["status"] == "completed"
+    assert state.ops[f"commit-{state.wave}"]["status"] == "completed"
     assert len(ops.committed) == 1
     _target_dir, paths, message = ops.committed[0]
     assert paths == [BUNDLE_DIR]
