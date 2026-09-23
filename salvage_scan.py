@@ -197,22 +197,57 @@ def scan_branches(
     pr_heads: set[str] | None,
 ) -> list[Finding]:
     """branch-no-pr; pr_heads=None (gh недоступен) — явная пометка, не молчание."""
+    # ОБЕ половины: `refs/heads` и `refs/remotes/origin`. Только локальная
+    # была слепа ровно к тому месту, где ветки и копятся: 2026-09-23 в
+    # devtools их было 36 на origin при ОДНОЙ локальной, и скан молчал —
+    # «salvage чист» означало «чист мой клон». Имя нормализуется к общему
+    # виду (`origin/x` → `x`), поэтому ветка, живущая в обеих половинах,
+    # даёт ОДНУ находку, а не две.
     raw = git(
         repo,
         "for-each-ref",
         "refs/heads",
-        "--format=%(refname:short)\x1f%(committerdate:unix)",
+        "refs/remotes/origin",
+        # ПОЛНОЕ имя, а не `refname:short`: короткая форма не различает
+        # пространства, и локальная ветка `origin/main` читалась бы как
+        # remote-ссылка на дефолт (ревью #378, круг 2). Имя дикое, но git
+        # его допускает, а судить надо по пространству ссылки.
+        "--format=%(refname)\x1f%(committerdate:unix)",
     )
-    merge_targets = [default]
+    # Цели слияния — ПОЛНЫМИ именами: короткое `origin/main` git разрешил
+    # бы в локальную ветку с таким именем, и она оказалась бы предком самой
+    # себя, то есть «влитой» (продолжение находки ревью #378, круг 2).
+    merge_targets = [f"refs/heads/{default}"]
     if _ref_exists(repo, f"refs/remotes/origin/{default}"):
-        merge_targets.append(f"origin/{default}")
+        merge_targets.append(f"refs/remotes/origin/{default}")
     findings: list[Finding] = []
+    seen: set[str] = set()
     for line in raw.splitlines():
-        name, _, stamp = line.partition("\x1f")
+        ref, _, stamp = line.partition("\x1f")
+        if ref.startswith("refs/heads/"):
+            name = ref.removeprefix("refs/heads/")
+        elif ref.startswith("refs/remotes/origin/"):
+            name = ref.removeprefix("refs/remotes/origin/")
+            # ТОЛЬКО служебная символическая ссылка на дефолт, и только
+            # она: `endswith("/HEAD")` выкидывал бы и обычную ветку
+            # `feature/HEAD` (ревью #378, круг 1). Имя странное, но
+            # законное, и молчаливо терять такую ветку сенсор не вправе.
+            if name == "HEAD":
+                continue
+        else:
+            continue
         if name == default:
             continue
-        if any(_is_ancestor(repo, name, target) for target in merge_targets):
+        # Порядок проверок важен: «влита ли» судится ПО КАЖДОЙ ссылке, и
+        # только затем имя схлопывается. Обратный порядок (ревью #378,
+        # major) давал молчание там, где локальная копия влита и подтянута,
+        # а на origin лежит голова впереди: отфильтрованная локальная
+        # ссылка записывала имя в `seen`, и remote не смотрели вовсе.
+        if any(_is_ancestor(repo, ref, target) for target in merge_targets):
             continue
+        if name in seen:
+            continue
+        seen.add(name)
         if pr_heads is not None and name in pr_heads:
             continue
         obj = name if pr_heads is not None else f"{name} (PR state unknown)"

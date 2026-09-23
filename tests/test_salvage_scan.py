@@ -120,6 +120,123 @@ def test_branch_without_pr_not_merged_is_reported(tmp_path: Path) -> None:
     assert findings[0].age_seconds is not None
 
 
+def test_remote_branch_without_pr_is_reported(tmp_path: Path) -> None:
+    """Ветка живёт ТОЛЬКО на origin — сенсор обязан её видеть.
+
+    Наблюдение 2026-09-23: в devtools накопилось 36 веток на origin при
+    ОДНОЙ локальной, и скан молчал — он перечислял `refs/heads`, то есть
+    только локальный клон. «Salvage чист» означало «чист мой клон», а
+    накапливаются ветки ровно на той половине, куда он не смотрел.
+    """
+    repo = make_cloned_repo(tmp_path)
+    run_git(repo, "switch", "-q", "-c", "left-on-origin")
+    commit(repo, "f.txt", "wip")
+    run_git(repo, "push", "-q", "-u", "origin", "left-on-origin")
+    run_git(repo, "switch", "-q", "main")
+    run_git(repo, "branch", "-q", "-D", "left-on-origin")
+
+    findings = scan_branches(repo, "main", now=NOW, pr_heads=set())
+
+    assert [f.klass for f in findings] == ["branch-no-pr"]
+    assert "left-on-origin" in findings[0].obj
+
+
+def test_branch_present_both_locally_and_on_origin_is_reported_once(
+    tmp_path: Path,
+) -> None:
+    """Одна ветка — одна находка: origin и локальная копия не двоятся."""
+    repo = make_cloned_repo(tmp_path)
+    run_git(repo, "switch", "-q", "-c", "feature-x")
+    commit(repo, "f.txt", "wip")
+    run_git(repo, "push", "-q", "-u", "origin", "feature-x")
+    run_git(repo, "switch", "-q", "main")
+
+    findings = scan_branches(repo, "main", now=NOW, pr_heads=set())
+
+    assert len(findings) == 1, [f.obj for f in findings]
+    assert "feature-x" in findings[0].obj
+
+
+def test_remote_branch_merged_into_default_is_not_reported(
+    tmp_path: Path,
+) -> None:
+    """Влитая ветка на origin — не находка: предикат прежний, шире охват."""
+    repo = make_cloned_repo(tmp_path)
+    run_git(repo, "switch", "-q", "-c", "merged-x")
+    commit(repo, "f.txt", "wip")
+    run_git(repo, "switch", "-q", "main")
+    run_git(repo, "merge", "-q", "--no-ff", "-m", "merge", "merged-x")
+    run_git(repo, "push", "-q", "origin", "main")
+    run_git(repo, "push", "-q", "-u", "origin", "merged-x")
+    run_git(repo, "branch", "-q", "-D", "merged-x")
+
+    assert scan_branches(repo, "main", now=NOW, pr_heads=set()) == []
+
+
+def test_merged_local_tip_does_not_hide_unmerged_remote(
+    tmp_path: Path,
+) -> None:
+    """Влитая ЛОКАЛЬНАЯ копия не гасит НЕвлитую ветку на origin.
+
+    Находка ревью #378 (major): дедуп по имени срабатывал раньше проверки
+    «влита ли», поэтому отфильтрованная локальная ссылка записывала имя в
+    `seen` и remote с тем же именем не смотрели вовсе. Расхождение двух
+    половин — обычное дело: локально влито и подтянуто, на origin лежит
+    более новая голова.
+    """
+    repo = make_cloned_repo(tmp_path)
+    run_git(repo, "switch", "-q", "-c", "split-x")
+    commit(repo, "f.txt", "ahead")
+    run_git(repo, "push", "-q", "-u", "origin", "split-x")
+    # локальная копия откатывается на влитую точку, remote остаётся впереди
+    run_git(repo, "reset", "-q", "--hard", "main")
+    run_git(repo, "switch", "-q", "main")
+
+    findings = scan_branches(repo, "main", now=NOW, pr_heads=set())
+
+    assert [f.klass for f in findings] == ["branch-no-pr"], (
+        "невлитая голова на origin невидима из-за влитой локальной копии"
+    )
+    assert "split-x" in findings[0].obj
+
+
+def test_local_branch_named_head_is_still_scanned(tmp_path: Path) -> None:
+    """Ветка `feature/HEAD` — обычная ветка, а не служебный `origin/HEAD`.
+
+    Находка ревью #378 (major): фильтр по суффиксу `/HEAD` выкидывал любую
+    ветку, чей последний сегмент — HEAD, вместе со служебной ссылкой.
+    """
+    repo = make_cloned_repo(tmp_path)
+    run_git(repo, "switch", "-q", "-c", "feature/HEAD")
+    commit(repo, "f.txt", "wip")
+    run_git(repo, "switch", "-q", "main")
+
+    findings = scan_branches(repo, "main", now=NOW, pr_heads=set())
+
+    assert [f.obj for f in findings] == ["feature/HEAD"]
+
+
+def test_local_branch_named_like_a_remote_is_not_swallowed(
+    tmp_path: Path,
+) -> None:
+    """Локальная ветка с именем `origin/main` — не дефолт и не remote.
+
+    Находка ревью #378, круг 2 (major): `refname:short` не различает
+    пространства имён, и безусловное снятие префикса `origin/` превращало
+    локальную ветку `origin/main` в `main`, то есть в дефолт, — она молча
+    исчезала из охвата. Имя дикое, но git его допускает, а сенсор обязан
+    судить по пространству ссылки, а не по виду строки.
+    """
+    repo = make_cloned_repo(tmp_path)
+    run_git(repo, "switch", "-q", "-c", "origin/main")
+    commit(repo, "f.txt", "wip")
+    run_git(repo, "switch", "-q", "main")
+
+    findings = scan_branches(repo, "main", now=NOW, pr_heads=set())
+
+    assert [f.obj for f in findings] == ["origin/main"]
+
+
 def test_branch_with_open_pr_is_not_reported(tmp_path: Path) -> None:
     repo = make_cloned_repo(tmp_path)
     run_git(repo, "switch", "-q", "-c", "feature-x")
