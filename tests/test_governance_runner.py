@@ -943,7 +943,7 @@ def _need_brief_text(target: str = "owner/alpha", roles=("po",)) -> str:
 
 
 def test_status_0_brief_0_publishes_and_continues_by_e1(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     ops = FakeOps(
         discovery=[
@@ -952,8 +952,9 @@ def test_status_0_brief_0_publishes_and_continues_by_e1(
         brief_text=_need_brief_text(),
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
     )
+    _fake_wave_adapters(monkeypatch, ops)
     runner.start(
-        **_start_kwargs(tmp_path, "r-pub", ops, authoring="legacy"), interview_spec=_need_spec()
+        **_waves_kwargs(tmp_path, "r-pub", ops), interview_spec=_need_spec()
     )
     state = runner.resume("r-pub", ops)
     assert state.interview["completed_at"]
@@ -962,7 +963,9 @@ def test_status_0_brief_0_publishes_and_continues_by_e1(
     assert brief.exists() and not brief.with_name(".brief.tmp").exists()
     assert state.ops["interview-brief"]["status"] == "completed"
     # E1: source layer материализован в бандл и charter получил brief_context
-    assert state.ops["materialize-brief"]["status"] == "completed"
+    # В волнах ключ per-wave: дерево волны новое, и слой источника
+    # материализуется в каждое заново (`wave_key`).
+    assert state.ops[f"materialize-brief-{state.wave}"]["status"] == "completed"
     assert any(c[0] == "author" and c[1] == "charter" for c in ops.calls)
 
 
@@ -1737,7 +1740,8 @@ def test_gate_red_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
 
 def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> None:
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
-    kwargs = _start_kwargs(tmp_path, "r-skip", ops, authoring="legacy")
+    kwargs = _waves_kwargs(tmp_path, "r-skip", ops)
+    _fake_wave_adapters(monkeypatch, ops)
     bundle_dir = Path(kwargs["target_dir"]) / kwargs["bundle_dir"]
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "00-charter.md").write_text("# charter\n", encoding="utf-8")
@@ -1757,13 +1761,15 @@ def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> 
 
     state = runner.start(**kwargs)
 
+    # Перечисление шести узлов было артефактом прежнего пути: он авторил
+    # весь DAG одним проходом, и «пропущены все шесть» читалось в одном
+    # состоянии. Предикат же один и тот же — файл на месте, платного
+    # автора не зовём, — и применяется он к узлу СВОЕЙ волны. Здесь это
+    # W1/charter; что предикат общий для шага, а не для узла, видно по
+    # тому, что ветка в `_step_authoring` одна на всех.
     assert ops.authored == []
     assert state.ops["author-charter"]["skipped"] is True
-    assert state.ops["author-requirements"]["skipped"] is True
-    assert state.ops["author-behaviour"]["skipped"] is True
-    assert state.ops["author-design"]["skipped"] is True
-    assert state.ops["author-acceptance"]["skipped"] is True
-    assert state.ops["author-decomposition"]["skipped"] is True
+    assert state.wave == 1
 
 
 def test_facts_from_fail_closed() -> None:
@@ -1829,8 +1835,21 @@ def _drive_waves_to(
     from governance import approval_ledger as al
 
     _fake_wave_adapters(monkeypatch, ops)
-    open_facts = dict(ops.facts) or {"state": "OPEN", "baseRefName": "master"}
     state = runner.start(**_waves_kwargs(tmp_path, run_id, ops, **over))
+    return _drive_waves(state, run_id, ops, wave)
+
+
+def _drive_waves(state, run_id: str, ops: FakeOps, wave: int):
+    """Тот же цикл волн для теста, который стартовал прогон сам.
+
+    Отдельная функция, а не флаг: часть тестов готовит kwargs заранее
+    (правит профиль, подкладывает чужой каталог пайплайна) и обязана
+    звать `runner.start` своими руками — предмет у них в том, что
+    происходит НА СТАРТЕ.
+    """
+    from governance import approval_ledger as al
+
+    open_facts = dict(ops.facts) or {"state": "OPEN", "baseRefName": "master"}
     approved: dict[str, str] = {}
     while state.wave < wave and state.status == "waiting_human_merge":
         key = state.ops[f"candidate-{state.wave}"]["request"]
@@ -3211,7 +3230,8 @@ def test_start_with_existing_run_id_raises_and_does_not_overwrite(
     занятости) — уничтожение чужого леджера. Отказ ДО каких-либо эффектов;
     существующий файл не тронут ни байтом."""
     run_id = "r-taken"
-    kwargs = _start_kwargs(tmp_path, run_id, FakeOps(), authoring="legacy")
+    kwargs = _waves_kwargs(tmp_path, run_id, FakeOps())
+    _fake_wave_adapters(monkeypatch, FakeOps())
     original = runner.start(**kwargs)
     assert original.status != "merged_unverified"  # леджер реально живёт
     before = rs.run_dir(run_id).joinpath("run.json").read_text(encoding="utf-8")
@@ -4097,18 +4117,21 @@ def test_hand_fixed_node_without_pipeline_dir_is_accepted_after_pin(
 
 
 def test_foreign_pipeline_dir_on_first_start_stops_instead_of_resuming(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Ревью #242: каталог `.disputatio/pipelines/<slug>/` от чужого или
     заброшенного прогона на ПЕРВОМ старте — стоп с подсказкой, а не `resume`
     с нашим конфигом и анкером поверх чужого манифеста."""
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-disp-foreign"
-    kwargs = _start_kwargs(tmp_path, run_id, ops, author_backend="disp", authoring="legacy")
+    kwargs = _waves_kwargs(tmp_path, run_id, ops, author_backend="disp")
+    _fake_wave_adapters(monkeypatch, ops)
     foreign = Path(kwargs["target_dir"]) / ".disputatio" / "pipelines" / "beh-ws-1"
     foreign.mkdir(parents=True)
 
-    state = runner.start(**kwargs)
+    # Чужой каталог пайплайна видит шаг авторинга узла
+    # behaviour-spec — это W3; до неё прогон доводится волнами.
+    state = _drive_waves(runner.start(**kwargs), run_id, ops, 3)
 
     assert state.status == "stopped_author"
     assert ops.author_disp_calls == []
@@ -4116,20 +4139,23 @@ def test_foreign_pipeline_dir_on_first_start_stops_instead_of_resuming(
 
 
 def test_foreign_pipeline_dir_with_its_draft_still_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Ревью #242, круг 4: чужой каталог пайплайна уже написал черновик
     узла — черновик не наш готовый узел, стоп-гард стоит ДО skip-ветки."""
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-disp-foreign-draft"
-    kwargs = _start_kwargs(tmp_path, run_id, ops, author_backend="disp", authoring="legacy")
+    kwargs = _waves_kwargs(tmp_path, run_id, ops, author_backend="disp")
+    _fake_wave_adapters(monkeypatch, ops)
     target = Path(kwargs["target_dir"])
     (target / ".disputatio" / "pipelines" / "beh-ws-1").mkdir(parents=True)
     draft = target / BUNDLE_DIR / "15-behaviour-spec.md"
     draft.parent.mkdir(parents=True, exist_ok=True)
     draft.write_text("#### BEH-01 чужой черновик\n", encoding="utf-8")
 
-    state = runner.start(**kwargs)
+    # Чужой каталог пайплайна видит шаг авторинга узла
+    # behaviour-spec — это W3; до неё прогон доводится волнами.
+    state = _drive_waves(runner.start(**kwargs), run_id, ops, 3)
 
     assert state.status == "stopped_author"
     assert ops.author_disp_calls == []
