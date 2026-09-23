@@ -1,6 +1,6 @@
 ---
 spec_stage: charter
-status: approval_pending
+status: approved
 owner_role: product
 traces_to:
 - discovery-brief
@@ -8,6 +8,8 @@ upstream_hashes:
   discovery-brief: 7c1939ebc239c1d48ee0e58ab4f3806bbfd4d984
 approved_content_hash: 28ba96002d2a19f2fa7fe4a9a294c64d66f362bd
 version: 2
+approved_at: '2026-09-23T06:11:44Z'
+approved_by: andrei-shtanakov
 ---
 
 # Charter: no-op §I5 перестаёт объявлять бесследность над изменённым журналом
