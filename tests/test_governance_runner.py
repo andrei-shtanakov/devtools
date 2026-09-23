@@ -583,6 +583,15 @@ _TEAM_EXP_PROFILE_TEXT = (
 ).read_text(encoding="utf-8")
 
 
+#: Третий исход разбора S13 (спека §6): тест, который СТРОИТ прогон
+#: прежнего режима намеренно, потому что его предмет — ОТНОШЕНИЕ к такому
+#: прогону (отказ, чтение, блокировка), а не исполнение прежнего пути.
+#: Такой тест обязан ПЕРЕЖИТЬ удаление: после него он нужнее, чем до.
+#: Отличим от `authoring="legacy"` грепом — и снос Task 3 идёт по строке
+#: режима, а этот маркер её не содержит.
+_LEGACY_HISTORY = "legacy"
+
+
 def _start_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
     target_dir = tmp_path / f"target-{run_id}"
     target_dir.mkdir(exist_ok=True)
@@ -3424,7 +3433,7 @@ def test_start_broken_neighbor_run_json_is_skipped(
     broken_dir.mkdir(parents=True)
     (broken_dir / "run.json").write_text("not json at all", encoding="utf-8")
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-after-broken", FakeOps(), authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-after-broken", FakeOps(), monkeypatch, 1)
 
     assert state.run_id == "r-after-broken"
 
@@ -7120,7 +7129,9 @@ def test_gate_refuses_a_versionless_bundle_by_default(
     assert "dt_contract_version" in findings, findings
 
 
-def test_allow_legacy_dt_survives_resume(tmp_path: Path, runs_root) -> None:
+def test_allow_legacy_dt_survives_resume(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
     """Решение оператора переживает перезапуск: поле состояния, не аргумент.
 
     Иначе прогон, начатый в строгом режиме, после `resume` судил бы тот же
@@ -7129,12 +7140,7 @@ def test_allow_legacy_dt_survives_resume(tmp_path: Path, runs_root) -> None:
     ops = _strip_dt_contract(
         FakeOps, drop_version=True, drop_delivers=True
     )(facts=GREEN_PR_FACTS)
-    runner.start(
-        **_start_kwargs(
-            tmp_path, "r-dt-resume", ops, allow_legacy_dt=True,
-            authoring="legacy",
-        )
-    )
+    _drive_waves_to(tmp_path, "r-dt-resume", ops, monkeypatch, 1, allow_legacy_dt=True)
 
     # Пинуется НЕдефолтное значение: `False` совпало бы с дефолтом, и тест
     # проходил бы, даже если поле не сохраняется вовсе.
@@ -7304,7 +7310,7 @@ def test_gate_rejects_an_ambiguous_delivers_source(
 
 
 def test_run_json_without_the_compat_field_resumes_strictly(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Дефолт поля судит СТАРЫЕ run.json — те, что записаны до среза 1.
 
@@ -7320,7 +7326,7 @@ def test_run_json_without_the_compat_field_resumes_strictly(
     и достаточно было бы предъявить файл постарше.
     """
     ops = FakeOps(facts=GREEN_PR_FACTS)
-    runner.start(**_start_kwargs(tmp_path, "r-old-state", ops, authoring="legacy"))
+    _drive_waves_to(tmp_path, "r-old-state", ops, monkeypatch, 1)
     path = runner.run_dir("r-old-state") / "run.json"
     raw = json.loads(path.read_text(encoding="utf-8"))
     del raw["allow_legacy_dt"]
@@ -8049,6 +8055,12 @@ def test_reopen_refuses_legacy_runs_and_finished_waves(
     monkeypatch.setattr(
         runner, "load_safety", lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    runner.start(**_start_kwargs(tmp_path, "r-legacy-reopen", ops, authoring="legacy"))
+    # ИСТОРИЧЕСКИЙ СТРАЖ (`_LEGACY_HISTORY`): предмет теста — сам отказ
+    # `--reopen` на прогоне прежнего режима. Прогон здесь не исполняет
+    # удаляемый путь, он им ЯВЛЯЕТСЯ — предъявленным на вход гварду.
+    runner.start(
+        **_start_kwargs(tmp_path, "r-legacy-reopen", ops,
+                        authoring=_LEGACY_HISTORY)
+    )
     with pytest.raises(ValueError, match="authoring=waves"):
         runner.reopen("r-legacy-reopen", "charter", ops)
