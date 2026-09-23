@@ -1,0 +1,95 @@
+{
+  "absence": [],
+  "attempt_id": "4ea67dce707446779d68c92b064fb6d8",
+  "bases": [
+    {
+      "path": "00-charter.md",
+      "role": "charter",
+      "sha256": "1d7d6290d43c32649228846bb667c18a9b1a4dc0f0187f3977968745446f4c5f",
+      "size": 21473
+    }
+  ],
+  "check_identity": "d65ac9507ea75d3e5e9115a10e1ba16ad4e193643d05fd849732401adb432615",
+  "context": {
+    "estimate_tokens": 12536,
+    "limit_tokens": 120000,
+    "method": "utf8-bytes/4",
+    "reserve_tokens": 8000,
+    "size": 50145,
+    "unit": "utf8-bytes"
+  },
+  "criteria": [
+    {
+      "id": "R1",
+      "reason": "G-01, G-02, CON-01, CON-02 и M-01 покрыты требованиями (FR-01…FR-08, NFR-01…NFR-05), инлайновые Traces и матрица совпадают.",
+      "status": "pass"
+    },
+    {
+      "id": "R2",
+      "reason": "Ни одно Must не противоречит CON-01/CON-02 и рамкам OUT-02/OUT-03: NFR-03 и NFR-04 их воспроизводят, спорный вариант переноса оставлен открытым вопросом.",
+      "status": "pass"
+    },
+    {
+      "id": "R3",
+      "reason": "Каждое требование, включая добавленные на этой стадии FR-04…FR-08 и NFR-03…NFR-05, ссылается на цели, ограничения, риски или рамки charter.",
+      "status": "pass"
+    },
+    {
+      "id": "R4",
+      "reason": "Все Must/Should предъявляются наблюдаемым признаком — подстроки вывода, байты run.json, исход и RC, набор ключей, отсутствие сети, замер времени, мутационный контроль.",
+      "status": "pass"
+    }
+  ],
+  "edge": "requirements-vs-charter",
+  "findings": [],
+  "finished_at": "2026-09-23T06:54:03.276782+00:00",
+  "node": "requirements",
+  "result_key": "db957bfacabd777ea3c8c6b0a8d4bd7f84a7f7306806ee37ce21f101795aa7d3",
+  "reviewer": {
+    "effort": null,
+    "env_passthrough": [
+      "HOME",
+      "LANG",
+      "PATH",
+      "TMPDIR",
+      "USER"
+    ],
+    "harness": "claude",
+    "harness_version": "2.1.280 (Claude Code)",
+    "model": "claude-opus-5",
+    "model_id": null
+  },
+  "rules": {
+    "id": "requirements-vs-charter",
+    "items": [
+      [
+        "R1",
+        "Каждая цель, ограничение и метрика charter (G-*, CON-*, M-*) имеет хотя бы одно требование, которое её реализует или явно отклоняет с названной причиной."
+      ],
+      [
+        "R2",
+        "Ни одно Must-требование не противоречит ограничениям charter."
+      ],
+      [
+        "R3",
+        "Требование не вводит цель, которой нет в charter, без ссылки на него."
+      ],
+      [
+        "R4",
+        "Формулировка каждого Must/Should проверяема снаружи: наблюдаемый результат, не внутреннее устройство."
+      ]
+    ]
+  },
+  "schema_version": 1,
+  "started_at": "2026-09-23T06:51:32.951186+00:00",
+  "subject": [
+    {
+      "path": "10-requirements.md",
+      "role": "subject",
+      "sha256": "1e4c365a343ffe01329f15fb53fd86b757e3e179a3a2876c3ba520cb2c2e5c88",
+      "size": 25175
+    }
+  ],
+  "verdict": "PASS",
+  "wave": 2
+}
