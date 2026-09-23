@@ -1401,20 +1401,44 @@ def test_brief_materialization_refuses_changed_durable_intake(
 
 
 def test_brief_coverage_stops_after_requirements_before_next_paid_author(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     source = _brief_source(tmp_path)
-    ops = FakeOps()
 
-    state = runner.start(**_start_kwargs(
-        tmp_path, "r-brief-coverage", ops, brief_source=source,
-        merge_authority="human",
-        authoring="legacy",
-    ))
+    class _UncoveredOps(CoveredBriefOps):
+        """Charter с source-пинами (иначе гейт W1 краснеет раньше гарда),
+        requirements БЕЗ NFR-01 — непокрытой остаётся ровно та цель брифа,
+        про которую гард и обязан сказать.
+
+        В прежнем пути charter мог быть каким угодно: авторинг проходил
+        весь DAG до гейта, и гард покрытия успевал остановить прогон до
+        того, как гейт вообще звался. В волнах гейт W1 стоит РАНЬШЕ
+        авторинга behaviour-spec, поэтому вход должен быть валиден с
+        первой волны — иначе тест краснел бы не на своём предмете.
+        """
+
+        def author(self, target_dir, kind, subject, bundle_dir,
+                   brief_context=None):
+            if kind == "requirements":
+                return FakeOps.author(
+                    self, target_dir, kind, subject, bundle_dir,
+                    brief_context=brief_context,
+                )
+            return super().author(
+                target_dir, kind, subject, bundle_dir,
+                brief_context=brief_context,
+            )
+
+    ops = _UncoveredOps()
+
+    state = _drive_waves_to(
+        tmp_path, "r-brief-coverage", ops, monkeypatch, 3,
+        brief_source=source, merge_authority="human",
+    )
 
     assert state.status == "stopped_author"
     assert ops.authored == ["charter", "requirements"]
-    assert "author-behaviour" not in state.ops
+    assert "author-behaviour-spec" not in state.ops
     findings = (
         rs.run_dir(state.run_id) / "brief-findings.txt"
     ).read_text(encoding="utf-8")
@@ -1795,6 +1819,12 @@ def _drive_waves_to(
     человека, base получает approved-узел уровня, прогон продолжается
     `resume`. Останавливается там, где остановился прогон, — если гейт
     целевой волны краснеет, вернётся её `stopped_gate`.
+
+    `wave=6` — «довести бандл до конца»: закрывается и заявка W5, после
+    чего `_next_wave` фиксирует op `merge` и прогон входит в ОБЩИЙ S8.
+    Шестой волны не существует; число выбрано как «на одну дальше
+    последней», чтобы вызывающему не приходилось писать отдельный флаг
+    для того же самого цикла.
     """
     from governance import approval_ledger as al
 
@@ -2868,16 +2898,21 @@ def test_resume_from_stopped_author_reruns_unfinished_author(
     ops.author = flaky_author  # type: ignore[method-assign]
     run_id = "r-resume-author"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
+    # W2 — волна узла requirements, на котором стенд и падает один раз.
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 2)
     assert state.status == "stopped_author"
     assert state.ops["author-charter"]["status"] == "completed"
     assert state.ops["author-requirements"]["status"] == "started"
-    assert "author-behaviour" not in state.ops
+    # Узел следующего уровня в волнах не авторится вовсе — не потому, что
+    # шаг остановился, а потому, что он не этой волны. Прежний путь авторил
+    # весь DAG подряд, и «не дошли до следующего» там было утверждением о
+    # порядке; здесь то же свойство выражает номер волны.
+    assert "author-behaviour-spec" not in state.ops
+    assert state.wave == 2
 
     result = runner.resume(run_id, ops)
 
     assert result.ops["author-requirements"]["status"] == "completed"
-    assert result.ops["author-behaviour"]["status"] == "completed"
     assert result.status != "stopped_author"
 
 
@@ -3156,7 +3191,7 @@ def test_s8_findings_include_gate_check_output(
     )
     run_id = "r-s8-output"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 6)
 
     assert state.status == "merged_unverified"
     findings_file = rs.run_dir(run_id) / "s8-findings.txt"
@@ -3183,7 +3218,7 @@ def test_start_with_existing_run_id_raises_and_does_not_overwrite(
 
     other_ops = FakeOps()
     with pytest.raises(ValueError):
-        runner.start(**_start_kwargs(tmp_path, run_id, other_ops, authoring="legacy"))
+        _drive_waves_to(tmp_path, run_id, other_ops, monkeypatch, 5)
 
     after = rs.run_dir(run_id).joinpath("run.json").read_text(encoding="utf-8")
     assert after == before  # ни байта не изменилось
@@ -3225,9 +3260,7 @@ def test_verify_with_existing_run_id_raises(
     # Другой ws_id, чтобы не наткнуться на WS-lock того же ws_id — здесь
     # проверяется отдельно занятость run_id, не WS-lock (круг 5).
     taken_child_id = "r-verify-child-taken"
-    runner.start(
-        **_start_kwargs(tmp_path, taken_child_id, FakeOps(), ws_id="WS-9", authoring="legacy")
-    )
+    _drive_waves_to(tmp_path, taken_child_id, FakeOps(), monkeypatch, 5, ws_id="WS-9")
     before = rs.run_dir(taken_child_id).joinpath("run.json").read_text(
         encoding="utf-8"
     )
@@ -3381,17 +3414,12 @@ def test_start_blocked_by_merged_unverified_without_green_child(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     blocked_ws = "WS-LOCK-1"
-    parent = runner.start(
-        **_agent_merge_kwargs(tmp_path, "r-lock-parent", ops, ws_id=blocked_ws, authoring="legacy")
-    )
+    parent = _drive_waves_to(tmp_path, "r-lock-parent", ops, monkeypatch, 6, ws_id=blocked_ws)
     assert parent.status == "merged_unverified"
 
     blocked_run_id = "r-lock-blocked-attempt"
     with pytest.raises(ValueError, match="WS-LOCK-1"):
-        runner.start(**_start_kwargs(
-            tmp_path, blocked_run_id, FakeOps(), ws_id=blocked_ws,
-            authoring="legacy",
-        ))
+        _drive_waves_to(tmp_path, blocked_run_id, FakeOps(), monkeypatch, 5, ws_id=blocked_ws)
     # WS-lock проверяется до резервирования run_id (круг 7) — отказ не
     # оставляет пустую run.json-заглушку под несостоявшимся прогоном.
     assert not (rs.run_dir(blocked_run_id) / "run.json").exists()
@@ -3408,9 +3436,7 @@ def test_start_unblocked_after_verify_child_completes(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     ws = "WS-LOCK-2"
-    parent = runner.start(
-        **_agent_merge_kwargs(tmp_path, "r-lock-parent2", ops, ws_id=ws, authoring="legacy")
-    )
+    parent = _drive_waves_to(tmp_path, "r-lock-parent2", ops, monkeypatch, 6, ws_id=ws)
     assert parent.status == "merged_unverified"
 
     ops.s8_exit = 0  # находки устранены фикс-PR'ом
@@ -3418,10 +3444,7 @@ def test_start_unblocked_after_verify_child_completes(
     assert child.status == "completed"
 
     # Разблокировано зелёным потомком — новый прогон стартует без ValueError.
-    unblocked = runner.start(**_start_kwargs(
-        tmp_path, "r-lock-after-fix", FakeOps(), ws_id=ws,
-        authoring="legacy",
-    ))
+    unblocked = _drive_waves_to(tmp_path, "r-lock-after-fix", FakeOps(), monkeypatch, 5, ws_id=ws)
     assert unblocked.run_id == "r-lock-after-fix"
 
 
@@ -5330,7 +5353,7 @@ def test_start_preflight_silent_on_six_node_profile(
     )
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-preflight-ok", ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, "r-preflight-ok", ops, monkeypatch, 6)
 
     assert state.status != "stopped_preflight"
     assert state.ops["merge"]["status"] == "completed"
@@ -5554,7 +5577,7 @@ def test_resume_after_profile_delivered_continues_run(
 # --- Task 9: сквозной смоук design-узла -------------------------------------
 
 
-def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root) -> None:
+def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root, monkeypatch) -> None:
     """Сквозной смоук S2→S4 design-узла (Task 9), один прогон `start()`.
 
     Не дублирует то, что уже проверено по частям:
@@ -5616,7 +5639,7 @@ def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root) -> None:
     ops = CoveredQOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-design-e2e-smoke"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 6)
 
     # S2: все шесть author-шагов прошли РОВНО в этом порядке.
     assert ops.authored == [
@@ -5632,7 +5655,11 @@ def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root) -> None:
     # architects-Q) — прогон дошёл до мержа, не остановился на gate/review.
     assert state.status == "completed"
     assert state.ops["merge"]["status"] == "completed"
-    assert ops.merged == [(state.pr, ops.head)]
+    # `ops.merged` в волнах пуст намеренно: акт мержа candidate совершает
+    # человек, finalize мержит `approve_node`. Через `ops.merge` раннер в
+    # этом режиме не мержит ничего, и утверждать обратное значило бы
+    # сторожить шаг, которого в конвейере нет.
+    assert ops.merged == []
 
 
 # --- Task 6: S4-гарды decomposition (отсутствие, ребро design, DSL, граф DT) --
@@ -6798,7 +6825,7 @@ class _DtSmokeOps(FakeOps):
 
 
 def test_decomposition_node_end_to_end_smoke_and_deliver(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Сквозной смоук 6-узлового профиля (Task 9 плана acceptance-node,
     прежде — Task 9 плана decomposition-node на 5 узлах; профиль вырос
@@ -6836,7 +6863,7 @@ def test_decomposition_node_end_to_end_smoke_and_deliver(
     ops = _DtSmokeOps(facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-decomposition-e2e-smoke"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 6)
 
     # S2: все шесть author-шагов прошли РОВНО в этом порядке.
     assert ops.authored == [
@@ -6847,7 +6874,11 @@ def test_decomposition_node_end_to_end_smoke_and_deliver(
     # мержа, не остановился на gate/review.
     assert state.status == "completed"
     assert state.ops["merge"]["status"] == "completed"
-    assert ops.merged == [(state.pr, ops.head)]
+    # `ops.merged` в волнах пуст намеренно: акт мержа candidate совершает
+    # человек, finalize мержит `approve_node`. Через `ops.merge` раннер в
+    # этом режиме не мержит ничего, и утверждать обратное значило бы
+    # сторожить шаг, которого в конвейере нет.
+    assert ops.merged == []
 
     pr = task_bridge.deliver(
         target_dir=state.target_dir,
@@ -6885,7 +6916,7 @@ def test_decomposition_node_end_to_end_smoke_and_deliver(
 
 
 def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Негативный полукруг того же смоука: ТОТ ЖЕ валидный 2-DT граф
     (`_dt_smoke_decomposition_body` — DT-01/DT-02, DT-02 зависит от
@@ -6925,7 +6956,7 @@ def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
     ops = _GapOps(facts=GREEN_PR_FACTS)
     run_id = "r-decomposition-e2e-smoke-gap"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
@@ -6934,7 +6965,7 @@ def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
 
 
 def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Второй негативный полукруг того же 6-узлового смоука (Task 9 плана
     acceptance-node): граф DT валиден РОВНО как у позитивного смоука
@@ -7006,7 +7037,7 @@ def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
     ops = _AcGapOps(facts=GREEN_PR_FACTS)
     run_id = "r-acceptance-e2e-smoke-gap"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 6)
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
@@ -7015,9 +7046,10 @@ def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
     # только после — `_step_authoring` в governance/runner.py); граф DT
     # валиден, поэтому GC-DT-GRAPH пропускает, и стоп приходит только на
     # GC-AC-COVERAGE.
+    # Гейт краснеет на W4 (acceptance), и W5 до decomposition не доходит —
+    # в прежнем пути его успевали доавторить до единственного гейта.
     assert ops.authored == [
         "charter", "requirements", "behaviour-spec", "design", "acceptance",
-        "decomposition",
     ]
     assert "push" not in state.ops
 
