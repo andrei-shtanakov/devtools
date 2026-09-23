@@ -1022,9 +1022,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target-dir", help="override деривации из манифеста")
     parser.add_argument(
         "--waves", action="store_true",
-        help="волновой авторинг (спека sequential-node-approval): узлы "
-        "одобряются по уровням DAG candidate-PR каждой волны; дефолт — "
-        "прежний бандл-PR (до двух живых прогонов, S13)",
+        help="волновой авторинг — ДЕФОЛТ с 2026-09-23 (S13, две живых "
+        "приёмки). Флаг принимается и дальше: он в доках, Makefile и "
+        "операторских скриптах, и отказ по нему стоил бы больше, чем no-op",
+    )
+    parser.add_argument(
+        "--legacy", action="store_true",
+        help="прежний путь: бандл целиком одним PR. Остаётся достижим — "
+        "S13 удаляет его ОТДЕЛЬНЫМ пунктом, не флипом дефолта",
     )
     # --merge-authority НАМЕРЕННО отсутствует: кнопка всегда передаёт
     # "human" (решение владельца 2026-09-07) — argparse отвергнет попытку.
@@ -1268,7 +1273,7 @@ def main(argv: list[str] | None = None) -> int:
                     if interview_spec else "нет"
                 ),
                 "merge-authority": "human (жёстко, без override)",
-                "authoring": "waves" if args.waves else "legacy",
+                "authoring": "legacy" if args.legacy else "waves",
                 "действие": "start (новый прогон)",
             }
 
@@ -1289,7 +1294,7 @@ def main(argv: list[str] | None = None) -> int:
             author_backend=args.author_backend,
             brief_source=supplied_brief,
             interview_spec=interview_spec,
-            authoring="waves" if args.waves else "legacy",
+            authoring="legacy" if args.legacy else "waves",
         )
         print(f"статус прогона: {started.status}")
         if started.status == "waiting_interview":

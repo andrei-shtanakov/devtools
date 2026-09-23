@@ -1284,10 +1284,17 @@ def test_waves_flag_starts_a_wave_run_and_names_the_candidate(
     assert "бандл-PR" not in out
 
 
-def test_default_start_is_legacy(runs_root, tmp_path, monkeypatch) -> None:
+def test_default_start_is_waves_after_the_flip(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    """Тот же вызов, что до 2026-09-23 давал legacy, теперь даёт waves.
+
+    Тест не удалён, а переписан: развилка та же, изменился её исход, и
+    удаление унесло бы единственное место, где дефолт кнопки пинуется.
+    """
     env = _LoopEnv(monkeypatch, tmp_path)
     spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
-    assert env.calls[0][1]["authoring"] == "legacy"
+    assert env.calls[0][1]["authoring"] == "waves"
 
 
 def test_wave_resume_pause_names_wave_and_pr(
@@ -1448,3 +1455,69 @@ def test_wave_recovery_with_no_candidates_starts_a_new_run(
     monkeypatch.setattr(spec_loop, "_real_ops", lambda: ops)
     rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
     assert rc == 0 and [c[0] for c in env.calls] == ["start"]
+
+
+
+# --- S13: дефолт авторинга — волны ----------------------------------------
+# Два живых прогона выполнены (evidence 2026-09-22 и 2026-09-23), и второй
+# подтвердил самостоятельное завершение волны после devtools#362. S13:
+# «дефолт после двух живых прогонов — волны; прежний путь удаляется отдельным
+# пунктом» — поэтому здесь ТОЛЬКО флип, прежний путь остаётся достижим.
+
+
+def test_new_run_without_flags_is_waves(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    """Кнопка без флагов заводит волновой прогон. До флипа — legacy."""
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
+    assert rc == 0
+    assert env.calls[0][1]["authoring"] == "waves"
+
+
+def test_legacy_flag_still_starts_the_previous_path(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    """`--legacy` — явный вход в прежний путь: флип дефолта его не уносит."""
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main(
+        ["--subject", "Fleet Inbox", "--repo", "alpha", "--legacy"]
+    )
+    assert rc == 0
+    assert env.calls[0][1]["authoring"] == "legacy"
+
+
+def test_waves_flag_survives_the_flip_as_a_noop(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    """`--waves` остаётся принимаемым: он в доках, скриптах и Makefile."""
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main(
+        ["--subject", "Fleet Inbox", "--repo", "alpha", "--waves"]
+    )
+    assert rc == 0
+    assert env.calls[0][1]["authoring"] == "waves"
+
+
+def test_ledger_without_authoring_field_still_reads_as_legacy(
+    runs_root, tmp_path
+) -> None:
+    """Исторический run.json без поля — по-прежнему legacy (инвариант S13).
+
+    Флип касается СОЗДАНИЯ прогона. Десериализация читает отсутствие поля
+    как прежний путь: иначе давно завершённые прогоны задним числом стали бы
+    волновыми, и восстановление из фактов GitHub искало бы candidate-PR там,
+    где был бандл-PR.
+    """
+    import json
+    run_id = "r-historic-no-authoring"
+    d = rs.run_dir(run_id)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "run.json").write_text(json.dumps({
+        "run_id": run_id, "ws_id": "ws", "subject": "s", "repo": "alpha",
+        "repo_slug": "owner/alpha", "target_dir": str(tmp_path),
+        "bundle_dir": "workstreams/ws/spec", "profile": "profiles/p.yaml",
+        "merge_authority": "human", "status": "completed", "ops": {},
+        "branch": None, "pr": None, "head": None, "remediated_by": None,
+    }), encoding="utf-8")
+    assert rs.load(run_id).authoring == "legacy"
