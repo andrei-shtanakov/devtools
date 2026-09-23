@@ -1,7 +1,7 @@
 ---
 spec_stage: decomposition
 dt_contract_version: 2
-status: approval_pending
+status: approved
 owner_role: tech-lead
 traces_to:
 - design
@@ -11,6 +11,8 @@ upstream_hashes:
   acceptance: 59b44110aad17a05994df9a0ce7e1d2dce038265
 approved_content_hash: 0557eb0bb92579fcb4a98139cb808be368428430
 version: 2
+approved_at: '2026-09-23T09:13:33Z'
+approved_by: andrei-shtanakov
 ---
 
 # Decomposition: no-op §I5 перестаёт объявлять бесследность над изменённым журналом
