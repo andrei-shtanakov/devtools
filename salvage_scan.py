@@ -217,17 +217,25 @@ def scan_branches(
     seen: set[str] = set()
     for line in raw.splitlines():
         ref, _, stamp = line.partition("\x1f")
-        # `origin/HEAD` — символическая ссылка на дефолт, не ветка.
-        if ref in ("origin/HEAD",) or ref.endswith("/HEAD"):
+        # ТОЛЬКО служебная символическая ссылка на дефолт, и только она:
+        # `endswith("/HEAD")` выкидывал бы и обычную ветку `feature/HEAD`
+        # (ревью #378, major). Ветка с таким именем странная, но законная,
+        # и молчаливо терять её сенсор не вправе.
+        if ref == "origin/HEAD":
             continue
         name = ref.removeprefix("origin/")
         if name == default:
             continue
+        # Порядок проверок важен: «влита ли» судится ПО КАЖДОЙ ссылке, и
+        # только затем имя схлопывается. Обратный порядок (ревью #378,
+        # major) давал молчание там, где локальная копия влита и подтянута,
+        # а на origin лежит голова впереди: отфильтрованная локальная
+        # ссылка записывала имя в `seen`, и remote не смотрели вовсе.
+        if any(_is_ancestor(repo, ref, target) for target in merge_targets):
+            continue
         if name in seen:
             continue
         seen.add(name)
-        if any(_is_ancestor(repo, ref, target) for target in merge_targets):
-            continue
         if pr_heads is not None and name in pr_heads:
             continue
         obj = name if pr_heads is not None else f"{name} (PR state unknown)"

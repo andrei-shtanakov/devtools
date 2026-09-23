@@ -173,6 +173,49 @@ def test_remote_branch_merged_into_default_is_not_reported(
     assert scan_branches(repo, "main", now=NOW, pr_heads=set()) == []
 
 
+def test_merged_local_tip_does_not_hide_unmerged_remote(
+    tmp_path: Path,
+) -> None:
+    """Влитая ЛОКАЛЬНАЯ копия не гасит НЕвлитую ветку на origin.
+
+    Находка ревью #378 (major): дедуп по имени срабатывал раньше проверки
+    «влита ли», поэтому отфильтрованная локальная ссылка записывала имя в
+    `seen` и remote с тем же именем не смотрели вовсе. Расхождение двух
+    половин — обычное дело: локально влито и подтянуто, на origin лежит
+    более новая голова.
+    """
+    repo = make_cloned_repo(tmp_path)
+    run_git(repo, "switch", "-q", "-c", "split-x")
+    commit(repo, "f.txt", "ahead")
+    run_git(repo, "push", "-q", "-u", "origin", "split-x")
+    # локальная копия откатывается на влитую точку, remote остаётся впереди
+    run_git(repo, "reset", "-q", "--hard", "main")
+    run_git(repo, "switch", "-q", "main")
+
+    findings = scan_branches(repo, "main", now=NOW, pr_heads=set())
+
+    assert [f.klass for f in findings] == ["branch-no-pr"], (
+        "невлитая голова на origin невидима из-за влитой локальной копии"
+    )
+    assert "split-x" in findings[0].obj
+
+
+def test_local_branch_named_head_is_still_scanned(tmp_path: Path) -> None:
+    """Ветка `feature/HEAD` — обычная ветка, а не служебный `origin/HEAD`.
+
+    Находка ревью #378 (major): фильтр по суффиксу `/HEAD` выкидывал любую
+    ветку, чей последний сегмент — HEAD, вместе со служебной ссылкой.
+    """
+    repo = make_cloned_repo(tmp_path)
+    run_git(repo, "switch", "-q", "-c", "feature/HEAD")
+    commit(repo, "f.txt", "wip")
+    run_git(repo, "switch", "-q", "main")
+
+    findings = scan_branches(repo, "main", now=NOW, pr_heads=set())
+
+    assert [f.obj for f in findings] == ["feature/HEAD"]
+
+
 def test_branch_with_open_pr_is_not_reported(tmp_path: Path) -> None:
     repo = make_cloned_repo(tmp_path)
     run_git(repo, "switch", "-q", "-c", "feature-x")
