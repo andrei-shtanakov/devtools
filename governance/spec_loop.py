@@ -821,9 +821,14 @@ def _pause_message(state: rs.RunState) -> str:
     total = bundle_dag.wave_count(bundle_dag.BUNDLE_DAG)
     finalize = runner.wave_finalize_pr(state)
     candidate = runner.wave_candidate_pr(state)
-    if finalize is not None and (
-        (state.ops.get(f"finalize-{state.wave}") or {}).get("review_exit")
-    ):
+    # Заведённый finalize-PR означает, что candidate УЖЕ влит человеком:
+    # конверт подписи существует только поверх состоявшегося акта. Значит
+    # ждут его, а не candidate, — и неважно, чем кончилась аттестация.
+    # Прежнее условие смотрело на истинность `review_exit`, поэтому нулевой
+    # код (аттестация прошла, а мерж отказал) читался как «finalize ещё
+    # нет», и пауза звала мержить уже влитый candidate — живой волновой
+    # прогон 2026-09-22, пять раз из пяти.
+    if finalize is not None:
         return (
             f"wave={state.wave}/{total}: finalize-PR #{finalize} "
             f"({state.repo_slug}) остаётся человеку — после мержа повторите "

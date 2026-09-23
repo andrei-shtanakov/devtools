@@ -7355,6 +7355,41 @@ def _approved(node: str) -> str:
     return f"---\nnode: {node}\nstatus: approved\nversion: 2\n---\n\n#### CON-01: x\n"
 
 
+def test_edge_findings_do_not_outlive_the_round_they_described(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Находки edge-check не переживают круг, который описывали.
+
+    Живой волновой прогон 2026-09-22: круг edge-check покраснел, автор
+    правил узел, следующий заход упёрся в ГЕЙТ (`stopped_gate`) — и
+    `edge-findings.txt` прошлого круга остался лежать, читаясь как описание
+    текущего стопа. Класс тот же, что уже закрыт для `gate-findings.txt`
+    (@id:gate-findings-stale-on-green): артефакт переживает состояние,
+    которое описывал. У edge-файла он не был закрыт, потому что шаг
+    снимает файл только на СВОЁМ входе, а до входа дело не доходит.
+    """
+    ops = FakeOps(
+        edge_results={"charter": "FAIL"},
+        gate_candidate=[(0, ""), (1, "error GC-X: bad\n")],
+    )
+    run_id = "r-w-edge-stale"
+    state = runner.start(
+        **_waves_kwargs(tmp_path, run_id, ops), authoring="waves"
+    )
+    assert state.status == "stopped_review"
+    findings = rs.run_dir(run_id) / "edge-findings.txt"
+    assert "EDGE-CHECK" in findings.read_text(encoding="utf-8")
+
+    result = runner.resume(run_id, ops)
+
+    assert result.status == "stopped_gate", "второй круг встал на гейте"
+    assert not findings.exists(), (
+        "находки edge-check прошлого круга пережили его и читаются как "
+        "описание гейтового стопа: "
+        + findings.read_text(encoding="utf-8")
+    )
+
+
 def test_waves_run_authors_only_level_zero_and_stops_at_edge_fail(
     tmp_path: Path, runs_root,
 ) -> None:
