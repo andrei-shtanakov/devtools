@@ -1,6 +1,6 @@
 ---
 spec_stage: requirements
-status: approval_pending
+status: approved
 owner_role: product
 traces_to:
 - charter
@@ -8,6 +8,8 @@ upstream_hashes:
   charter: 3625c20d25744f91fb625d164c21410c90236ffd
 approved_content_hash: 6de3e85e386642a2d16f4987ca2e8d053b733f3d
 version: 2
+approved_at: '2026-09-23T07:00:21Z'
+approved_by: andrei-shtanakov
 ---
 
 # Requirements: no-op §I5 перестаёт объявлять бесследность над изменённым журналом
