@@ -1,0 +1,95 @@
+{
+  "absence": [],
+  "attempt_id": "83eaf9f157584720bf64965ea9d480ad",
+  "bases": [
+    {
+      "path": "10-requirements.md",
+      "role": "requirements",
+      "sha256": "11b69b323b4c160409ad33b02274653225f41d8bac8f4c5f42ddaffc9dcfa6cf",
+      "size": 25319
+    }
+  ],
+  "check_identity": "d4da48b881977e42e9a5922fc7c47deb67241dc78972bd1aad22283f59e646ba",
+  "context": {
+    "estimate_tokens": 16876,
+    "limit_tokens": 120000,
+    "method": "utf8-bytes/4",
+    "reserve_tokens": 8000,
+    "size": 67505,
+    "unit": "utf8-bytes"
+  },
+  "criteria": [
+    {
+      "id": "R1",
+      "reason": "Все Must/Should-критерии Acceptance (FR-01…FR-08, NFR-01…NFR-05) закрыты сценариями BEH-01…BEH-21, а единственная неснятая половина FR-06 («до §I5 не доходят») отведена BEH-13 с названной причиной — ненаблюдаемость порядка шагов.",
+      "status": "pass"
+    },
+    {
+      "id": "R2",
+      "reason": "Новые обязательства (закрытый перечень подстрок, настоящие файлы на диске, RC 0 на пути Б, SHA деревьев, сравнение с прочитанным полем) выводятся из Acceptance источника и требованиям не противоречат.",
+      "status": "pass"
+    },
+    {
+      "id": "R3",
+      "reason": "Все «Тогда» сформулированы через возвращённое значение, текст оператору и байты run.json; BEH-13 прямо отказывается предписывать порядок внутренних шагов, а чтение __doc__ прямо требует FR-05.",
+      "status": "pass"
+    },
+    {
+      "id": "R4",
+      "reason": "Потенциально двоякие места сняты явными оговорками (весь вывод в BEH-02, мутации по одной в BEH-06/BEH-11, три отдельных входа и источник равенства анкеров в BEH-21).",
+      "status": "pass"
+    }
+  ],
+  "edge": "behaviour-vs-requirements",
+  "findings": [],
+  "finished_at": "2026-09-23T07:21:00.392757+00:00",
+  "node": "behaviour-spec",
+  "result_key": "f60530ed7a7ffce5ac9c87872638d172204dd77d121466c73044b06737c4cfc6",
+  "reviewer": {
+    "effort": null,
+    "env_passthrough": [
+      "HOME",
+      "LANG",
+      "PATH",
+      "TMPDIR",
+      "USER"
+    ],
+    "harness": "claude",
+    "harness_version": "2.1.280 (Claude Code)",
+    "model": "claude-opus-5",
+    "model_id": null
+  },
+  "rules": {
+    "id": "behaviour-vs-requirements",
+    "items": [
+      [
+        "R1",
+        "Каждое Must/Should-требование получает реализацию по существу: сценарий, обоснованное обязательство или waiver с названной причиной."
+      ],
+      [
+        "R2",
+        "Поведение не вводит необоснованных обязательств и не противоречит требованиям; уточнение поведения само по себе допустимо."
+      ],
+      [
+        "R3",
+        "Сценарий наблюдаем снаружи: не описывает внутреннее устройство."
+      ],
+      [
+        "R4",
+        "Формулировка сценария допускает единственное прочтение."
+      ]
+    ]
+  },
+  "schema_version": 1,
+  "started_at": "2026-09-23T07:16:47.549270+00:00",
+  "subject": [
+    {
+      "path": "15-behaviour-spec.md",
+      "role": "subject",
+      "sha256": "9cc932059af3edb0a1695741d44cf2bdad9eb91a8cf5a063775d135796ca7bc9",
+      "size": 38654
+    }
+  ],
+  "verdict": "PASS",
+  "wave": 3
+}
