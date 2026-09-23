@@ -3681,7 +3681,19 @@ def test_stop_with_comment_saves_status_before_commenting(
     `save()` оставляла run в `"running"`, и следующий `advance()` переигрывал
     этот же шаг с нуля, включая повторный (дублирующий) комментарий.
     Проверка через "шпиона": `ops.comment`, вызванный, читает `run.json` с
-    диска в момент своего вызова — статус там уже обязан быть терминальным."""
+    диска в момент своего вызова — статус там уже обязан быть терминальным.
+
+    S13, разбор: тест остаётся на прежнем пути НЕ по признаку падения, а
+    потому что КОММЕНТИРУЮЩАЯ половина `_stop_with_comment` достижима
+    только там. Она ключуется на `state.pr`, а `state.pr` выставляет
+    единственный шаг — `_step_pr`, удаляемый. В волнах у прогона `pr`
+    остаётся `None`, и помощник уходит в ветку «PR нет»: пишет
+    `stop-reason.txt` и печатает причину, комментария не делает вовсе.
+    Сам помощник переживает удаление и продолжает звать́ся из шага
+    candidate и из `_resume_wave` — но проверяемое здесь свойство после
+    удаления станет ненаблюдаемым. Живой аналог — `_wave_pause`, у него
+    своя реализация того же порядка и свой тест ниже.
+    """
     ops = FakeOps(review_exit=1)
     run_id = "r-comment-order"
     seen_status_at_comment_time: dict[str, str] = {}
@@ -3697,6 +3709,41 @@ def test_stop_with_comment_saves_status_before_commenting(
 
     assert state.status == "stopped_review"
     assert seen_status_at_comment_time["status"] == "stopped_review"
+
+
+def test_wave_pause_saves_status_before_commenting(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Та же дисциплина у `_wave_pause` — и это ВТОРАЯ её реализация.
+
+    Пауза волны не зовёт `_stop_with_comment`, а повторяет порядок у себя.
+    Мутация помощника её не роняет, и без отдельного теста дублированное
+    свойство осталось бы без стража ровно наполовину.
+
+    Наблюдать обязательно ПЕРВУЮ паузу прогона. На любой следующей на
+    диске уже лежит `waiting_human_merge` с прошлого раза, и «до» не
+    отличается от «после» — тест зеленеет при любом порядке. Первая пауза
+    идёт из `running`, и неверный порядок виден.
+    """
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    run_id = "r-pause-order"
+    seen: list[str] = []
+    original_comment = ops.comment
+
+    def spying_comment(repo_slug: str, pr: int, body: str) -> None:
+        seen.append(rs.load(run_id).status)
+        return original_comment(repo_slug, pr, body)
+
+    ops.comment = spying_comment  # type: ignore[method-assign]
+
+    state = _waiting_wave1(tmp_path, monkeypatch, ops, run_id)
+
+    assert state.status == "waiting_human_merge"
+    assert seen, "пауза волны обязана была прокомментировать candidate-PR"
+    assert seen[0] == "waiting_human_merge", (
+        f"на диске в момент комментария было {seen[0]!r} — статус "
+        "зафиксирован ПОСЛЕ best-effort комментария"
+    )
 
 
 def test_resume_from_stopped_review_does_not_repost_comment_when_fixed(
