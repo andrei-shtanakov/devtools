@@ -1,0 +1,101 @@
+{
+  "absence": [],
+  "attempt_id": "1cc5ab6de65a442389ac68f45eed46c2",
+  "bases": [
+    {
+      "path": "10-requirements.md",
+      "role": "requirements",
+      "sha256": "11b69b323b4c160409ad33b02274653225f41d8bac8f4c5f42ddaffc9dcfa6cf",
+      "size": 25319
+    },
+    {
+      "path": "15-behaviour-spec.md",
+      "role": "behaviour-spec",
+      "sha256": "bd5a42fa638eba004db54dd1b6d45863c3aa01400fa9873ead366d65937ad0da",
+      "size": 38798
+    }
+  ],
+  "check_identity": "05c66eb4b707951a6c5d33af1026a0602b203f17cf6703497768d465a5a22c25",
+  "context": {
+    "estimate_tokens": 23376,
+    "limit_tokens": 120000,
+    "method": "utf8-bytes/4",
+    "reserve_tokens": 8000,
+    "size": 93504,
+    "unit": "utf8-bytes"
+  },
+  "criteria": [
+    {
+      "id": "R1",
+      "reason": "Все сценарии BEH-01…BEH-21 названы хотя бы одним критерием (BEH-04 — AC-03, BEH-18 — AC-15 и AC-16), и каждый такой критерий несёт наблюдаемый признак: текст вывода, байты или ключи run.json с диска, возвращённое значение, RC либо зафиксированный красный прогон.",
+      "status": "pass"
+    },
+    {
+      "id": "R2",
+      "reason": "Каждое Must-требование (FR-01…FR-06, FR-08, NFR-01…NFR-05) имеет критерий с бинарным признаком, отличающим выполненное от невыполненного, и проекция покрытия сходится с инлайновыми traces всех двадцати критериев.",
+      "status": "pass"
+    },
+    {
+      "id": "R3",
+      "reason": "Ни один критерий не выходит за свои сценарии и требования: бесследности на пути З никто не требует (OUT-01), соседние пути проверяются только на неизменность, а AC-04 прямо отказывается поднимать планку именованием дерева, оставляя его AC-16 по NFR-02.",
+      "status": "pass"
+    },
+    {
+      "id": "R4",
+      "reason": "Все признаки снимаются снаружи — вывод оператору, байты и ключи run.json с диска, возвращённое значение и RC, __doc__ двух единиц, дифф тестов и записи прогонов в сдаточных материалах; доступа к внутреннему состоянию ни один критерий не предполагает.",
+      "status": "pass"
+    }
+  ],
+  "edge": "acceptance-vs-requirements-behaviour",
+  "findings": [],
+  "finished_at": "2026-09-23T08:31:34.540695+00:00",
+  "node": "acceptance",
+  "result_key": "b845d2df2419dc716cd0375e90d0ea6eaea1e5ba1c86a32d271fa21f4f9ce6aa",
+  "reviewer": {
+    "effort": null,
+    "env_passthrough": [
+      "HOME",
+      "LANG",
+      "PATH",
+      "TMPDIR",
+      "USER"
+    ],
+    "harness": "claude",
+    "harness_version": "2.1.280 (Claude Code)",
+    "model": "claude-opus-5",
+    "model_id": null
+  },
+  "rules": {
+    "id": "acceptance-vs-requirements-behaviour",
+    "items": [
+      [
+        "R1",
+        "Каждый сценарий BEH покрыт хотя бы одним критерием приёмки (AC-*) с наблюдаемым исходом."
+      ],
+      [
+        "R2",
+        "Каждый Must-FR имеет критерий, различающий «выполнено» и «не выполнено»."
+      ],
+      [
+        "R3",
+        "Критерий не утверждает больше, чем даёт сценарий: нет обязательств вне требований."
+      ],
+      [
+        "R4",
+        "Критерий выполним без доступа к внутреннему состоянию."
+      ]
+    ]
+  },
+  "schema_version": 1,
+  "started_at": "2026-09-23T08:29:28.494273+00:00",
+  "subject": [
+    {
+      "path": "25-acceptance.md",
+      "role": "subject",
+      "sha256": "1117b7bbdbfc071a69384ff9723abaea6be23b470074086873f1222fe596c52b",
+      "size": 25843
+    }
+  ],
+  "verdict": "PASS",
+  "wave": 4
+}

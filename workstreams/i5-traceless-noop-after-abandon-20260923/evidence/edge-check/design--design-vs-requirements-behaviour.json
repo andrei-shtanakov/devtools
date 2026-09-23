@@ -1,0 +1,101 @@
+{
+  "absence": [],
+  "attempt_id": "52b7e7c9f0734bf89956d53feae0673a",
+  "bases": [
+    {
+      "path": "10-requirements.md",
+      "role": "requirements",
+      "sha256": "11b69b323b4c160409ad33b02274653225f41d8bac8f4c5f42ddaffc9dcfa6cf",
+      "size": 25319
+    },
+    {
+      "path": "15-behaviour-spec.md",
+      "role": "behaviour-spec",
+      "sha256": "bd5a42fa638eba004db54dd1b6d45863c3aa01400fa9873ead366d65937ad0da",
+      "size": 38798
+    }
+  ],
+  "check_identity": "78815afd4c10e4ed48faa9e4769b9b71d3c6f41cef725bbd49eced7a3d28403c",
+  "context": {
+    "estimate_tokens": 24527,
+    "limit_tokens": 120000,
+    "method": "utf8-bytes/4",
+    "reserve_tokens": 8000,
+    "size": 98111,
+    "unit": "utf8-bytes"
+  },
+  "criteria": [
+    {
+      "id": "R1",
+      "reason": "Все Must-требования и сценарии BEH-01…BEH-21 получают названный механизм (М-1…М-5, М-3а, «Рамки red-дизайна», карта модулей) либо явный отказ с причиной (Q-06 — сторож не вводится, М-3а — механизм совместимости не вводится).",
+      "status": "pass"
+    },
+    {
+      "id": "R2",
+      "reason": "Расхождений с FR/NFR и сценариями не обнаружено, а единственное сужение (одна формулировка о неустановленном факте вместо трёх входов BEH-21) объявлено отдельным блоком с причиной и маршрутом --reopen.",
+      "status": "pass"
+    },
+    {
+      "id": "R3",
+      "reason": "Решения помечены Q-01…Q-06 и М-1…М-5/М-3а вместо D-*, но каждое несёт явную ссылку на требование или сценарий (Q-03→FR-07/FR-06, М-1→FR-07/NFR-03, М-3а→NFR-04/BEH-21, М-5→FR-05/BEH-10).",
+      "status": "pass"
+    },
+    {
+      "id": "R4",
+      "reason": "Состояния ошибок отражены (запрет op[...], op.get(\"base_sha\", \"?\"), noop и RC 0 по NFR-05/BEH-21), границы authority — тоже (OUT-01…OUT-03, _abandon_revision как граница NFR-03/BEH-19, Q-07 оставлен владельцу).",
+      "status": "pass"
+    }
+  ],
+  "edge": "design-vs-requirements-behaviour",
+  "findings": [],
+  "finished_at": "2026-09-23T08:29:28.441324+00:00",
+  "node": "design",
+  "result_key": "0a52a58cec2d265821aca54a1e4a6b42bf7f7e9a249b155d51b1096bfe0c57b5",
+  "reviewer": {
+    "effort": null,
+    "env_passthrough": [
+      "HOME",
+      "LANG",
+      "PATH",
+      "TMPDIR",
+      "USER"
+    ],
+    "harness": "claude",
+    "harness_version": "2.1.280 (Claude Code)",
+    "model": "claude-opus-5",
+    "model_id": null
+  },
+  "rules": {
+    "id": "design-vs-requirements-behaviour",
+    "items": [
+      [
+        "R1",
+        "Каждое Must-требование и каждый сценарий BEH получают в дизайне названный механизм (компонент, поток, решение) или явный отказ с причиной."
+      ],
+      [
+        "R2",
+        "Дизайн не противоречит требованиям и сценариям и не сужает их без объявления."
+      ],
+      [
+        "R3",
+        "Каждое решение дизайна (D-*) прослеживается к требованию или сценарию."
+      ],
+      [
+        "R4",
+        "Состояния ошибок и границы authority из требований отражены в дизайне."
+      ]
+    ]
+  },
+  "schema_version": 1,
+  "started_at": "2026-09-23T08:26:01.446009+00:00",
+  "subject": [
+    {
+      "path": "20-design.md",
+      "role": "subject",
+      "sha256": "102e235bb6a911ee79c89cd62221d081353891289395e5166fa4205bd8542068",
+      "size": 30353
+    }
+  ],
+  "verdict": "PASS",
+  "wave": 4
+}
