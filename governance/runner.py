@@ -525,6 +525,53 @@ def wave_finalize_pr(state: RunState) -> int | None:
     return pr if isinstance(pr, int) else None
 
 
+def _drop_wave_branches(state: RunState, ops: Ops) -> None:
+    """Снимает с origin авторинговые ветки волн завершённого прогона.
+
+    `spec/<ws>-behaviour-w<k>` PR не имеют ПО ПОСТРОЕНИЮ: их пушит раннер,
+    чтобы `source_sha` был доступен другому клону (S9), а содержимое узлов
+    приносит в base candidate каждой волны. Значит ни автоудаление форджи
+    (оно привязано к мержу PR), ни ритуал «после мержа удали ветку» их не
+    касаются — после каждого прогона на origin оставалось по пять веток
+    (наблюдение 2026-09-23: десять за два прогона).
+
+    Best-effort: неудача удаления прогон не валит — он уже `completed`, и
+    ветка без PR ничего не держит. Но молчать о ней тоже нельзя, иначе
+    чистка станет верой.
+    """
+    if not _waves(state):
+        return
+    saved_wave = state.wave
+    branches: list[str] = []
+    for wave in range(1, bundle_dag.wave_count(bundle_dag.BUNDLE_DAG) + 1):
+        # Имя ветки волны знает `_wave_branch` — спрашиваем ЕГО, а не
+        # собираем имя второй раз: переоткрытая волна живёт на `…-w<k>-r<n>`
+        # (S11), и собственная сборка имени её теряла (ревью #379).
+        # Прежняя ветка волны тоже пушилась и тоже подлежит снятию, поэтому
+        # к суффиксной добавляется базовая.
+        state.wave = wave
+        branches.append(_wave_branch(state))
+        base = f"spec/{state.ws_id}-behaviour-w{wave}"
+        if base not in branches:
+            branches.append(base)
+    state.wave = saved_wave
+    for branch in branches:
+        try:
+            # Примитив отказ возвращает ЗНАЧЕНИЕМ, а не исключением, и
+            # False у него значит и «нет прав», и «ветки уже нет» — внутри
+            # различить нечем (`ops.delete_remote_branch`). Поэтому говорим
+            # «не подтверждено», а не «не удалена»: второе было бы
+            # утверждением, которого у нас нет.
+            if not ops.delete_remote_branch(state.repo_slug, branch):
+                print(
+                    f"_drop_wave_branches: снятие {branch} не подтверждено "
+                    "(нет прав либо ветки уже нет) — прогон завершён, "
+                    "ветка без PR ничего не держит"
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort, но вслух
+            print(f"_drop_wave_branches: {branch} не удалена: {exc}")
+
+
 def reset_ops_for(state: RunState) -> tuple[str, ...]:
     """Op'ы, которые `resume` снимает для статуса прогона.
 
@@ -3312,6 +3359,7 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
             if state.status != "completed":
                 state.status = "completed"
                 save(state)
+                _drop_wave_branches(state, ops)
             return True
         findings = _s8_findings_text(gate_op.get("exit"), gate_op.get("output", ""))
         findings_path.write_text(findings, encoding="utf-8")
@@ -3363,6 +3411,7 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
             op_complete(state, key, exit=exit_code)
             state.status = "completed"
             save(state)
+            _drop_wave_branches(state, ops)
             return True
         op_complete(state, key, exit=exit_code, output=output)
         findings = _s8_findings_text(exit_code, output)
