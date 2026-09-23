@@ -1,0 +1,101 @@
+{
+  "absence": [],
+  "attempt_id": "258cd4eeddf9452f91246fdac2f345ff",
+  "bases": [
+    {
+      "path": "20-design.md",
+      "role": "design",
+      "sha256": "73f25ec2ac696db5a909c92b409a741188c352ff933b9a338e8f84267c707e16",
+      "size": 30497
+    },
+    {
+      "path": "25-acceptance.md",
+      "role": "acceptance",
+      "sha256": "177c02e856b3b60c03d615820bb9f7775411637a5d5b7c348fdd96e9d02653b8",
+      "size": 25987
+    }
+  ],
+  "check_identity": "03501b870f1c03b4bd232de5a779cff6ae63110cfd53553c2c6fb1048dae9b9e",
+  "context": {
+    "estimate_tokens": 25450,
+    "limit_tokens": 120000,
+    "method": "utf8-bytes/4",
+    "reserve_tokens": 8000,
+    "size": 101801,
+    "unit": "utf8-bytes"
+  },
+  "criteria": [
+    {
+      "id": "R1",
+      "reason": "Каждая из трёх DT привязана к названным резолюциям дизайна (Q-03…Q-06) и/или критериям приёмки: DT-01 — к Q-03…Q-06 и AC-01/02/06/08/10–14/17–19, DT-02 — к AC-04/AC-09/AC-20, DT-03 — к AC-15/AC-16.",
+      "status": "pass"
+    },
+    {
+      "id": "R2",
+      "reason": "Все двадцать критериев AC-01…AC-20 имеют владеющую DT через scenarios и delivers (AC-04/09/20 → DT-02, AC-15/16 → DT-03, остальные → DT-01), а незакрытая половина AC-19 — расхождение двух одобренных верхних узлов, вынесенное отдельным DEL-30, а не пропуск распределения.",
+      "status": "pass"
+    },
+    {
+      "id": "R3",
+      "reason": "Каждое обязательство DEL-01…DEL-40 возводится к дизайну (Q-03…Q-06, М-1…М-5, «Рамки red-дизайна») или к признаку критерия приёмки; обязательств сверх них не введено.",
+      "status": "pass"
+    },
+    {
+      "id": "R4",
+      "reason": "Рёбра DT-01 → DT-02 и DT-01 → DT-03 отвечают порядку дизайна (мутации и замер «в полном составе» возможны только по поставленному набору), а базовый замер DT-03 на пред-темном дереве зависимости от DT-01 не нарушает.",
+      "status": "pass"
+    }
+  ],
+  "edge": "decomposition-vs-design-acceptance",
+  "findings": [],
+  "finished_at": "2026-09-23T09:10:16.663773+00:00",
+  "node": "decomposition",
+  "result_key": "b3e82242c966a3f3c5e67a0a6ef81dd53a5514db5622ecb2de2d0eae295c3b17",
+  "reviewer": {
+    "effort": null,
+    "env_passthrough": [
+      "HOME",
+      "LANG",
+      "PATH",
+      "TMPDIR",
+      "USER"
+    ],
+    "harness": "claude",
+    "harness_version": "2.1.280 (Claude Code)",
+    "model": "claude-opus-5",
+    "model_id": null
+  },
+  "rules": {
+    "id": "decomposition-vs-design-acceptance",
+    "items": [
+      [
+        "R1",
+        "Каждый DT ссылается на решение дизайна или критерий приёмки, который он реализует."
+      ],
+      [
+        "R2",
+        "Каждый критерий приёмки закрыт хотя бы одним DT (сценарии или delivers)."
+      ],
+      [
+        "R3",
+        "DT не вводит обязательств, отсутствующих в дизайне и приёмке."
+      ],
+      [
+        "R4",
+        "Зависимости DT совместимы с порядком, который задаёт дизайн."
+      ]
+    ]
+  },
+  "schema_version": 1,
+  "started_at": "2026-09-23T09:07:30.066852+00:00",
+  "subject": [
+    {
+      "path": "30-decomposition.md",
+      "role": "subject",
+      "sha256": "7381f6cfe6a7c86398909568a3a5b3c80c0021a5e378244471017ea12d9bd61f",
+      "size": 41834
+    }
+  ],
+  "verdict": "PASS",
+  "wave": 5
+}
