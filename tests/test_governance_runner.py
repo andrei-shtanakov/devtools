@@ -2481,7 +2481,7 @@ def test_resume_from_stopped_gate_reruns_gate_candidate(
     ops = FakeOps(gate_candidate=[(1, "error GC-X: bad\n"), (0, "")])
     run_id = "r-resume-gate"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 1)
     assert state.status == "stopped_gate"
 
     result = runner.resume(run_id, ops)
@@ -2489,7 +2489,7 @@ def test_resume_from_stopped_gate_reruns_gate_candidate(
     gate_calls = [c for c in ops.calls if c[0] == "gate_check_candidate"]
     assert len(gate_calls) == 2  # S4 реально переигран, не пропущен
     assert result.status != "stopped_gate"
-    assert result.ops["gate-candidate"]["status"] == "completed"
+    assert result.ops[f"gate-candidate-{result.wave}"]["status"] == "completed"
 
 
 def test_green_gate_removes_findings_of_the_previous_round(
@@ -2505,14 +2505,14 @@ def test_green_gate_removes_findings_of_the_previous_round(
     ops = FakeOps(gate_candidate=[(1, "error GC-X: bad\n"), (0, "")])
     run_id = "r-gate-stale"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 1)
     assert state.status == "stopped_gate"
     findings_file = rs.run_dir(run_id) / "gate-findings.txt"
     assert "GC-X" in findings_file.read_text(encoding="utf-8")
 
     result = runner.resume(run_id, ops)
 
-    assert result.ops["gate-candidate"]["status"] == "completed"
+    assert result.ops[f"gate-candidate-{result.wave}"]["status"] == "completed"
     assert not findings_file.exists(), (
         "зелёный гейт оставил находки прошлого круга: "
         + findings_file.read_text(encoding="utf-8")
@@ -2533,21 +2533,20 @@ def test_resume_from_stopped_gate_recommits_edited_bundle(
     )
     run_id = "r-resume-gate-recommit"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 1)
     assert state.status == "stopped_gate"
     # commit шёл ДО гейта в конвейере — на первом проходе он уже completed
     # со СТАРЫМ (красным по гейту) содержимым.
-    assert state.ops["commit"]["status"] == "completed"
+    assert state.ops[f"commit-{state.wave}"]["status"] == "completed"
     calls_before_resume = len(ops.calls)
 
-    # Человек правит бандл в worktree, устраняя находку гейта
-    # (DSL-корректно — иначе стоп повторит гард GC-DSL-EMPTY).
+    # Человек правит узел волны в worktree, устраняя находку гейта
+    # (DSL-корректно — иначе стоп повторит гард GC-DSL-EMPTY). На W1
+    # уровень один, charter: узлов выше в дереве ещё нет, и пинить нечего.
     bundle_dir = Path(state.target_dir) / state.bundle_dir
-    (bundle_dir / "15-behaviour-spec.md").write_text(
-        "#### BEH-01: fixed\n`traces: [FR-01]`\n- **checked_by**: x\n",
-        encoding="utf-8",
+    (bundle_dir / "00-charter.md").write_text(
+        "#### CON-01: поправленное ограничение\n", encoding="utf-8",
     )
-    _repin_bundle(bundle_dir)
 
     result = runner.resume(run_id, ops)
 
@@ -2557,7 +2556,7 @@ def test_resume_from_stopped_gate_recommits_edited_bundle(
     assert new_calls.index("commit_paths") < new_calls.index("push_branch")
     assert new_calls.count("gate_check_candidate") == 1  # гейт переигран
     assert result.status != "stopped_gate"
-    assert result.ops["gate-candidate"]["status"] == "completed"
+    assert result.ops[f"gate-candidate-{result.wave}"]["status"] == "completed"
     committed_paths = [paths for _t, paths, _m in ops.committed]
     assert committed_paths  # commit_paths реально вызван с путями бандла
 
@@ -3349,14 +3348,14 @@ def test_resume_after_cleanup_from_stopped_dirty_proceeds(
     )
     run_id = "r-dirty-resume"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 1)
     assert state.status == "stopped_dirty"
 
     ops.dirty = False  # человек прибрался
     result = runner.resume(run_id, ops)
 
     assert result.status != "stopped_dirty"
-    assert result.ops["branch"]["status"] == "completed"
+    assert result.ops[f"branch-{result.wave}"]["status"] == "completed"
 
 
 # --- Круг 5, часть 3: WS-lock по merged_unverified --------------------------
@@ -5543,14 +5542,11 @@ def test_resume_after_profile_delivered_continues_run(
     """Step 1(г): «доставили» обновлённый профиль (дописали design в
     target-профиль) ⇒ `resume(run_id)` ПРОДОЛЖАЕТ прогон, не тихий no-op —
     `stopped_preflight` обязан быть в `_STOPPED_RESET_OPS`."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
-    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    ops = FakeOps(review_exit=0, facts={"state": "OPEN", "baseRefName": "master"})
     run_id = "r-preflight-resume"
-    kwargs = _start_kwargs(tmp_path, run_id, ops, authoring="legacy")
+    kwargs = _waves_kwargs(tmp_path, run_id, ops)
     profile_path = _write_stale_profile(Path(kwargs["target_dir"]))
+    _fake_wave_adapters(monkeypatch, ops)
 
     stopped = runner.start(**kwargs)
     assert stopped.status == "stopped_preflight"
@@ -5562,7 +5558,11 @@ def test_resume_after_profile_delivered_continues_run(
     resumed = runner.resume(run_id, ops)
 
     assert resumed.status != "stopped_preflight"
-    assert resumed.ops["merge"]["status"] == "completed"
+    # Прогон поехал дальше: волна доавторила свой уровень и дошла до
+    # заявки. В прежнем пути тем же смыслом было `merge` completed — там
+    # за преflight'ом шёл весь остаток конвейера, здесь — конец волны.
+    assert resumed.status == "waiting_human_merge"
+    assert resumed.ops[f"candidate-{resumed.wave}"]["status"] == "completed"
 
 
 # --- Task 9: сквозной смоук design-узла -------------------------------------
