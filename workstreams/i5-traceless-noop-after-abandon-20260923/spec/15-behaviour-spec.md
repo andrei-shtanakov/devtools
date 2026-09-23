@@ -1,6 +1,6 @@
 ---
 spec_stage: behaviour-spec
-status: approval_pending
+status: approved
 owner_role: product
 traces_to:
 - requirements
@@ -8,6 +8,8 @@ upstream_hashes:
   requirements: b407b89c39d982d0bdc535f555ce9b1449cecb9c
 approved_content_hash: 0fcdc00b5074ec8d1ad8170e7c9303a5282eee74
 version: 2
+approved_at: '2026-09-23T07:36:19Z'
+approved_by: andrei-shtanakov
 ---
 
 # Behaviour Spec: no-op §I5 перестаёт объявлять бесследность над изменённым журналом
