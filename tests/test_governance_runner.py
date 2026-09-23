@@ -6643,6 +6643,46 @@ def test_gate_warning_survives_a_later_fatal_in_the_same_gate_call(
     )
     assert "tests/test_typo.py" in findings, findings
 
+
+
+
+# --- Task 9: сквозной смоук decomposition-узла + deliver ---------------------
+
+
+_DT_SMOKE_BEHAVIOUR_SCENARIOS = (
+    "#### BEH-01: Первый\n"
+    "`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: integration` `owner: qa` "
+    "`target: tests/test_a.py`\n\n"
+    "#### BEH-02: Второй\n"
+    "`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: e2e` `owner: qa` "
+    "`target: tests/test_b.py`\n"
+)
+
+# `FakeOps.author` (общий фикстур) пишет charter/requirements БЕЗ
+# frontmatter — ни один прежний тест этого не замечал, потому что ни один
+# не доходил до `task_bridge.deliver()`/`stamp_bundle_approved` после
+# runner-прогона: тот штампует ВЕСЬ DAG (devtools#110, урок 2 —
+# «после мержа charter/requirements/behaviour-spec остаются status:
+# draft»), а не только design/decomposition, и требует frontmatter на
+# КАЖДОМ узле. Локальный фикстур смоука ниже несёт реалистичное
+# содержимое charter/requirements (та же DSL-форма, что `governance/
+# ops.py::_AUTHOR_DSL["charter"|"requirements"]` требует от реального
+# author-бэкенда) — правка ограничена этим тестовым модулем, общий
+# `FakeOps.author` не тронут (используется ~сотней других тестов, не
+# упирающихся в deliver()).
+_DT_SMOKE_CHARTER_BODY = (
+    "---\n"
+    "spec_stage: charter\n"
+    "status: draft\n"
+    "owner_role: product\n"
+    "---\n"
+    "# Charter\n\nТекст charter.\n"
+)
+
+
+
 def _dt_smoke_requirements_body(charter_pin: str, extra: str = "") -> str:
     return (
         "---\n"
