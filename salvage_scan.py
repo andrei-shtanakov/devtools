@@ -208,22 +208,34 @@ def scan_branches(
         "for-each-ref",
         "refs/heads",
         "refs/remotes/origin",
-        "--format=%(refname:short)\x1f%(committerdate:unix)",
+        # ПОЛНОЕ имя, а не `refname:short`: короткая форма не различает
+        # пространства, и локальная ветка `origin/main` читалась бы как
+        # remote-ссылка на дефолт (ревью #378, круг 2). Имя дикое, но git
+        # его допускает, а судить надо по пространству ссылки.
+        "--format=%(refname)\x1f%(committerdate:unix)",
     )
-    merge_targets = [default]
+    # Цели слияния — ПОЛНЫМИ именами: короткое `origin/main` git разрешил
+    # бы в локальную ветку с таким именем, и она оказалась бы предком самой
+    # себя, то есть «влитой» (продолжение находки ревью #378, круг 2).
+    merge_targets = [f"refs/heads/{default}"]
     if _ref_exists(repo, f"refs/remotes/origin/{default}"):
-        merge_targets.append(f"origin/{default}")
+        merge_targets.append(f"refs/remotes/origin/{default}")
     findings: list[Finding] = []
     seen: set[str] = set()
     for line in raw.splitlines():
         ref, _, stamp = line.partition("\x1f")
-        # ТОЛЬКО служебная символическая ссылка на дефолт, и только она:
-        # `endswith("/HEAD")` выкидывал бы и обычную ветку `feature/HEAD`
-        # (ревью #378, major). Ветка с таким именем странная, но законная,
-        # и молчаливо терять её сенсор не вправе.
-        if ref == "origin/HEAD":
+        if ref.startswith("refs/heads/"):
+            name = ref.removeprefix("refs/heads/")
+        elif ref.startswith("refs/remotes/origin/"):
+            name = ref.removeprefix("refs/remotes/origin/")
+            # ТОЛЬКО служебная символическая ссылка на дефолт, и только
+            # она: `endswith("/HEAD")` выкидывал бы и обычную ветку
+            # `feature/HEAD` (ревью #378, круг 1). Имя странное, но
+            # законное, и молчаливо терять такую ветку сенсор не вправе.
+            if name == "HEAD":
+                continue
+        else:
             continue
-        name = ref.removeprefix("origin/")
         if name == default:
             continue
         # Порядок проверок важен: «влита ли» судится ПО КАЖДОЙ ссылке, и

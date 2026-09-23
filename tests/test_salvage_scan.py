@@ -216,6 +216,27 @@ def test_local_branch_named_head_is_still_scanned(tmp_path: Path) -> None:
     assert [f.obj for f in findings] == ["feature/HEAD"]
 
 
+def test_local_branch_named_like_a_remote_is_not_swallowed(
+    tmp_path: Path,
+) -> None:
+    """Локальная ветка с именем `origin/main` — не дефолт и не remote.
+
+    Находка ревью #378, круг 2 (major): `refname:short` не различает
+    пространства имён, и безусловное снятие префикса `origin/` превращало
+    локальную ветку `origin/main` в `main`, то есть в дефолт, — она молча
+    исчезала из охвата. Имя дикое, но git его допускает, а сенсор обязан
+    судить по пространству ссылки, а не по виду строки.
+    """
+    repo = make_cloned_repo(tmp_path)
+    run_git(repo, "switch", "-q", "-c", "origin/main")
+    commit(repo, "f.txt", "wip")
+    run_git(repo, "switch", "-q", "main")
+
+    findings = scan_branches(repo, "main", now=NOW, pr_heads=set())
+
+    assert [f.obj for f in findings] == ["origin/main"]
+
+
 def test_branch_with_open_pr_is_not_reported(tmp_path: Path) -> None:
     repo = make_cloned_repo(tmp_path)
     run_git(repo, "switch", "-q", "-c", "feature-x")
