@@ -596,6 +596,12 @@ def _start_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
         profile="profiles/team-exp.yaml",
         run_id=run_id,
         ops=ops,
+        # Дефолт прогона — волновой (PR #375), и тесты обязаны ехать тем же
+        # режимом, что продукт. Явный `authoring="legacy"` у теста — это НЕ
+        # настройка, а РАЗМЕТКА: «этот тест исполняет удаляемый путь». Task 3
+        # удаляет ровно тех, кто её несёт, и проверить это можно грепом, а не
+        # памятью (спека §6, исход «удаление»).
+        authoring="waves",
     )
     kwargs.update(overrides)
     # Без материализации файла preflight (Task 8) стопил бы статусом
@@ -938,7 +944,7 @@ def test_status_0_brief_0_publishes_and_continues_by_e1(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
     )
     runner.start(
-        **_start_kwargs(tmp_path, "r-pub", ops), interview_spec=_need_spec()
+        **_start_kwargs(tmp_path, "r-pub", ops, authoring="legacy"), interview_spec=_need_spec()
     )
     state = runner.resume("r-pub", ops)
     assert state.interview["completed_at"]
@@ -1246,6 +1252,7 @@ def test_brief_materializes_after_branch_and_reaches_two_author_prompts(
     kwargs = _start_kwargs(
         tmp_path, "r-brief-source", ops, brief_source=source,
         merge_authority="human",
+        authoring="legacy",
     )
 
     state = runner.start(**kwargs)
@@ -1282,6 +1289,7 @@ def test_brief_source_layer_is_force_added_and_verified_in_s3_commit(
     kwargs = _start_kwargs(
         tmp_path, "r-brief-commit", ops, brief_source=source,
         merge_authority="human",
+        authoring="legacy",
     )
 
     state = runner.start(**kwargs)
@@ -1313,6 +1321,7 @@ def test_brief_source_layer_missing_from_commit_stops_before_push(
     kwargs = _start_kwargs(
         tmp_path, "r-brief-noforce", ops, brief_source=source,
         merge_authority="human",
+        authoring="legacy",
     )
 
     state = runner.start(**kwargs)
@@ -1391,6 +1400,7 @@ def test_brief_coverage_stops_after_requirements_before_next_paid_author(
     state = runner.start(**_start_kwargs(
         tmp_path, "r-brief-coverage", ops, brief_source=source,
         merge_authority="human",
+        authoring="legacy",
     ))
 
     assert state.status == "stopped_author"
@@ -1500,6 +1510,7 @@ def test_real_candidate_gate_accepts_materialized_brief_source(
         CliBriefOps(review_exit=1),
         brief_source=source,
         merge_authority="human",
+        authoring="legacy",
     )
     roles = Path(kwargs["target_dir"]) / "profiles/roles.yaml"
     roles.write_text(
@@ -1595,7 +1606,7 @@ def test_happy_path_agent_merge(tmp_path: Path, runs_root, monkeypatch) -> None:
     )
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-happy", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-happy", ops, authoring="legacy"))
 
     assert state.ops["merge"]["status"] == "completed"
     assert ops.merged == [(state.pr, ops.head)]
@@ -1613,7 +1624,7 @@ def test_today_reality_agent_merges(tmp_path: Path, runs_root, monkeypatch) -> N
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-human", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-human", ops, authoring="legacy"))
 
     assert state.ops["merge"]["status"] == "completed"
     assert ops.merged == [(state.pr, ops.head)]
@@ -1627,7 +1638,7 @@ def test_merge_authority_human_still_waits(
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-human-override", ops, merge_authority="human")
+        **_start_kwargs(tmp_path, "r-human-override", ops, merge_authority="human", authoring="legacy")
     )
 
     assert "merge" not in state.ops
@@ -1639,7 +1650,7 @@ def test_merge_authority_human_still_waits(
 def test_review_request_changes_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     ops = FakeOps(review_exit=1)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-review", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-review", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert ops.merged == []
@@ -1693,7 +1704,7 @@ def test_gate_red_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
 
 def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> None:
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
-    kwargs = _start_kwargs(tmp_path, "r-skip", ops)
+    kwargs = _start_kwargs(tmp_path, "r-skip", ops, authoring="legacy")
     bundle_dir = Path(kwargs["target_dir"]) / kwargs["bundle_dir"]
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "00-charter.md").write_text("# charter\n", encoding="utf-8")
@@ -1757,7 +1768,7 @@ def test_s8_success_completes(tmp_path: Path, runs_root, monkeypatch) -> None:
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-ok", ops))
+    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-ok", ops, authoring="legacy"))
 
     assert state.status == "completed"
     assert state.ops["gate-authoritative"] == {"status": "completed", "exit": 0}
@@ -1794,7 +1805,7 @@ def test_s8_stale_verdicts_do_not_mask_missing_artifact(
         s8_exit=0, collect_verdicts_queue=[True, False],
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-stale", ops))
+    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-stale", ops, authoring="legacy"))
 
     assert state.status != "completed"
     gate_op = state.ops.get("gate-authoritative")
@@ -1817,7 +1828,7 @@ def test_s8_success_without_verdicts_is_not_completed(
         s8_exit=0, collect_verdicts_ok=False,
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-noverd", ops))
+    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-noverd", ops, authoring="legacy"))
 
     assert state.status != "completed"
     gate_op = state.ops.get("gate-authoritative")
@@ -1837,7 +1848,7 @@ def test_s8_fail_marks_merged_unverified_and_opens_issue(
     )
     run_id = "r-s8-fail"
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_agent_merge_kwargs(tmp_path, run_id, ops, authoring="legacy"))
 
     assert state.status == "merged_unverified"
     # Круг 3 (codex-ревью PR #88): gate-authoritative — аудит-запись, тоже
@@ -1972,7 +1983,7 @@ def test_s8_fail_does_not_reuse_issue_from_different_cycle(
         f"{other_cycle_prefix}\nfrom: devtools#r-earlier-cycle\n\nGC-OLD\n",
     ))
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_agent_merge_kwargs(tmp_path, run_id, ops, authoring="legacy"))
 
     own_prefix = f"slug: beh-remediation-{run_id}"
     assert state.status == "merged_unverified"
@@ -2002,7 +2013,7 @@ def test_verify_child_reuses_parent_remediation_issue_same_cycle(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-cycle-parent"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
     assert parent.status == "merged_unverified"
     assert len(ops.issues) == 1
     parent_issue_number = parent.ops["remediation-issue"]["number"]
@@ -2028,7 +2039,7 @@ def test_verify_child_completes_parent_stays_merged_unverified(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
     assert parent.status == "merged_unverified"
     assert len(ops.issues) == 1  # родитель открыл ровно одно remediation-issue
 
@@ -2063,7 +2074,7 @@ def test_verify_refuses_when_parent_already_has_green_child(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-already-verified"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
     assert parent.status == "merged_unverified"
 
     ops.s8_exit = 0  # находки устранены фикс-PR'ом
@@ -2091,7 +2102,7 @@ def test_verify_allowed_again_after_failed_child(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-retry"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
     assert parent.status == "merged_unverified"
 
     failed_child = runner.verify(parent_id, ops, "r-s8-child-failed")
@@ -2125,7 +2136,7 @@ def test_verify_without_run_id_serializes_when_ids_collide(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-race"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
     assert parent.status == "merged_unverified"
 
     monkeypatch.setattr(runner, "_next_verify_run_id", lambda pid: f"{pid}-v1")
@@ -2163,7 +2174,7 @@ def test_next_verify_run_id_skips_dangling_reservation(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-dangling"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
     assert parent.status == "merged_unverified"
 
     # Оборванная резервация: процесс умер между _reserve_run_id и
@@ -2203,7 +2214,7 @@ def test_verify_refuses_when_child_is_running(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-active-child"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
     assert parent.status == "merged_unverified"
 
     # Валидный, но ещё не терминальный потомок (S8 в процессе).
@@ -2238,7 +2249,7 @@ def test_verify_refuses_when_dangling_reservation_is_fresh(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-fresh-dangling"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
     assert parent.status == "merged_unverified"
 
     dangling_id = f"{parent_id}-v1"
@@ -2265,7 +2276,7 @@ def test_active_verify_child_ignores_merged_unverified_child(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-failed-not-active"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
     assert parent.status == "merged_unverified"
 
     failed_child = runner.verify(parent_id, ops)
@@ -2293,7 +2304,7 @@ def test_verify_without_run_id_increments_attempt_after_failed_child(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-attempts"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
     assert parent.status == "merged_unverified"
 
     first_child = runner.verify(parent_id, ops)
@@ -2315,7 +2326,7 @@ def test_resume_waiting_human_merge_open_still_waits(
     run_id = "r-resume-open"
 
     state = runner.start(
-        **_start_kwargs(tmp_path, run_id, ops, merge_authority="human")
+        **_start_kwargs(tmp_path, run_id, ops, merge_authority="human", authoring="legacy")
     )
     assert state.status == "waiting_human_merge"
 
@@ -2334,7 +2345,7 @@ def test_resume_waiting_human_merge_merged_runs_s8(
     run_id = "r-resume-merged"
 
     state = runner.start(
-        **_start_kwargs(tmp_path, run_id, ops, merge_authority="human")
+        **_start_kwargs(tmp_path, run_id, ops, merge_authority="human", authoring="legacy")
     )
     assert state.status == "waiting_human_merge"
     assert "merge" not in state.ops
@@ -2420,7 +2431,7 @@ def test_resume_from_stopped_gate_reruns_gate_candidate(
     ops = FakeOps(gate_candidate=[(1, "error GC-X: bad\n"), (0, "")])
     run_id = "r-resume-gate"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_gate"
 
     result = runner.resume(run_id, ops)
@@ -2444,7 +2455,7 @@ def test_green_gate_removes_findings_of_the_previous_round(
     ops = FakeOps(gate_candidate=[(1, "error GC-X: bad\n"), (0, "")])
     run_id = "r-gate-stale"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_gate"
     findings_file = rs.run_dir(run_id) / "gate-findings.txt"
     assert "GC-X" in findings_file.read_text(encoding="utf-8")
@@ -2472,7 +2483,7 @@ def test_resume_from_stopped_gate_recommits_edited_bundle(
     )
     run_id = "r-resume-gate-recommit"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_gate"
     # commit шёл ДО гейта в конвейере — на первом проходе он уже completed
     # со СТАРЫМ (красным по гейту) содержимым.
@@ -2508,7 +2519,7 @@ def test_resume_from_stopped_review_reruns_ready_and_review(
     ops = FakeOps(review_exit=1)
     run_id = "r-resume-review"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     calls_before = len(ops.calls)
 
@@ -2532,7 +2543,7 @@ def test_resume_from_stopped_review_pr_merged_out_of_band_runs_s8(
     ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS), s8_exit=0)
     run_id = "r-resume-review-merged"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     calls_before = len(ops.calls)
 
@@ -2561,7 +2572,7 @@ def test_resume_from_stopped_review_pr_merged_records_base_ref_from_facts(
     )
     run_id = "r-resume-review-merged-baseref"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     assert state.base_ref is None
 
@@ -2622,7 +2633,7 @@ def test_resume_after_merged_reconciliation_with_nonterminal_s8_does_not_replay_
     )
     run_id = "r-resume-review-merged-s8-nonterminal"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     assert state.ops["review"]["status"] == "started"
 
@@ -2669,7 +2680,7 @@ def test_resume_from_stopped_review_pr_merged_dirty_tree_stops_before_s8(
     ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS))
     run_id = "r-resume-review-merged-dirty"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
 
     ops.facts = {**ops.facts, "state": "MERGED"}
@@ -2697,7 +2708,7 @@ def test_resume_from_stopped_review_pr_still_open_resets_as_before(
     ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS))
     run_id = "r-resume-review-still-open"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     calls_before = len(ops.calls)
 
@@ -2723,7 +2734,7 @@ def test_resume_from_stopped_gate_pr_merged_out_of_band_runs_s8(
     ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS))
     run_id = "r-resume-gate-merged"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     assert state.pr is not None
 
@@ -2754,7 +2765,7 @@ def test_resume_from_stopped_review_recommits_edited_bundle(
     ops = FakeOps(review_exit=1)
     run_id = "r-resume-review-recommit"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     assert state.ops["commit"]["status"] == "completed"
     gate_first = [c for c in ops.calls if c[0] == "gate_check_candidate"]
@@ -2799,7 +2810,7 @@ def test_resume_from_stopped_author_reruns_unfinished_author(
     ops.author = flaky_author  # type: ignore[method-assign]
     run_id = "r-resume-author"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_author"
     assert state.ops["author-charter"]["status"] == "completed"
     assert state.ops["author-requirements"]["status"] == "started"
@@ -2823,7 +2834,7 @@ def test_verdict_refuse_status_is_distinct_from_stopped_gate(
         files=GREEN_BUNDLE_FILES,
     )
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-refuse", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refuse", ops, authoring="legacy"))
 
     assert state.status == "stopped_merge_refused"
     assert state.status != "stopped_gate"
@@ -2844,7 +2855,7 @@ def test_resume_from_stopped_merge_refused_reverdicts(
     )
     run_id = "r-resume-refused"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_merge_refused"
 
     ops.facts = dict(GREEN_PR_FACTS)  # rollup зазеленел
@@ -2957,7 +2968,7 @@ def test_commit_paths_called_between_author_and_push(
     `bundle_dir` (круг 5: не `git add -A`, явный список путей)."""
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-commit", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-commit", ops, authoring="legacy"))
 
     call_names = [c[0] for c in ops.calls]
     assert call_names.index("author") < call_names.index("commit_paths")
@@ -2978,7 +2989,7 @@ def test_review_exit4_resets_gate_candidate_and_push_too(
     """F-7: голова PR уехала (exit 4) — S4 обязан переиграться, не только S6."""
     ops = FakeOps(review_exit=4)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-review-moved", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-review-moved", ops, authoring="legacy"))
 
     assert state.status == "running"
     assert "gate-candidate" not in state.ops
@@ -3087,7 +3098,7 @@ def test_s8_findings_include_gate_check_output(
     )
     run_id = "r-s8-output"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
 
     assert state.status == "merged_unverified"
     findings_file = rs.run_dir(run_id) / "s8-findings.txt"
@@ -3107,14 +3118,14 @@ def test_start_with_existing_run_id_raises_and_does_not_overwrite(
     занятости) — уничтожение чужого леджера. Отказ ДО каких-либо эффектов;
     существующий файл не тронут ни байтом."""
     run_id = "r-taken"
-    kwargs = _start_kwargs(tmp_path, run_id, FakeOps())
+    kwargs = _start_kwargs(tmp_path, run_id, FakeOps(), authoring="legacy")
     original = runner.start(**kwargs)
     assert original.status != "merged_unverified"  # леджер реально живёт
     before = rs.run_dir(run_id).joinpath("run.json").read_text(encoding="utf-8")
 
     other_ops = FakeOps()
     with pytest.raises(ValueError):
-        runner.start(**_start_kwargs(tmp_path, run_id, other_ops))
+        runner.start(**_start_kwargs(tmp_path, run_id, other_ops, authoring="legacy"))
 
     after = rs.run_dir(run_id).joinpath("run.json").read_text(encoding="utf-8")
     assert after == before  # ни байта не изменилось
@@ -3152,7 +3163,7 @@ def test_verify_with_existing_run_id_raises(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-verify-parent-taken"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
     assert parent.status == "merged_unverified"
 
     # Занятый child run_id — например, случайно совпал с чужим прогоном.
@@ -3160,7 +3171,7 @@ def test_verify_with_existing_run_id_raises(
     # проверяется отдельно занятость run_id, не WS-lock (круг 5).
     taken_child_id = "r-verify-child-taken"
     runner.start(
-        **_start_kwargs(tmp_path, taken_child_id, FakeOps(), ws_id="WS-9")
+        **_start_kwargs(tmp_path, taken_child_id, FakeOps(), ws_id="WS-9", authoring="legacy")
     )
     before = rs.run_dir(taken_child_id).joinpath("run.json").read_text(
         encoding="utf-8"
@@ -3193,7 +3204,7 @@ def test_s8_syncs_to_default_branch_before_gate_check(
         files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-sync", ops))
+    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-sync", ops, authoring="legacy"))
 
     assert state.status == "completed"
     assert state.base_ref == "main"
@@ -3216,7 +3227,7 @@ def test_s8_sync_falls_back_to_master_when_base_ref_missing(
     )
 
     state = runner.start(
-        **_agent_merge_kwargs(tmp_path, "r-s8-sync-fallback", ops)
+        **_agent_merge_kwargs(tmp_path, "r-s8-sync-fallback", ops, authoring="legacy")
     )
 
     assert state.base_ref == "master"
@@ -3238,7 +3249,7 @@ def test_s8_sync_failure_stops_without_touching_status_or_gate(
         checkout_and_pull_error="ff-only diverged",
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-sync-fail", ops))
+    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-sync-fail", ops, authoring="legacy"))
 
     assert state.status == "running"
     assert state.ops["sync-default"]["status"] == "started"
@@ -3257,7 +3268,7 @@ def test_verify_child_reuses_parent_base_ref(
         files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-sync-parent"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops, authoring="legacy"))
     assert parent.status == "merged_unverified"
     assert parent.base_ref == "main"
 
@@ -3299,7 +3310,7 @@ def test_resume_after_cleanup_from_stopped_dirty_proceeds(
     )
     run_id = "r-dirty-resume"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_dirty"
 
     ops.dirty = False  # человек прибрался
@@ -3324,7 +3335,7 @@ def test_start_blocked_by_merged_unverified_without_green_child(
     )
     blocked_ws = "WS-LOCK-1"
     parent = runner.start(
-        **_agent_merge_kwargs(tmp_path, "r-lock-parent", ops, ws_id=blocked_ws)
+        **_agent_merge_kwargs(tmp_path, "r-lock-parent", ops, ws_id=blocked_ws, authoring="legacy")
     )
     assert parent.status == "merged_unverified"
 
@@ -3332,6 +3343,7 @@ def test_start_blocked_by_merged_unverified_without_green_child(
     with pytest.raises(ValueError, match="WS-LOCK-1"):
         runner.start(**_start_kwargs(
             tmp_path, blocked_run_id, FakeOps(), ws_id=blocked_ws,
+            authoring="legacy",
         ))
     # WS-lock проверяется до резервирования run_id (круг 7) — отказ не
     # оставляет пустую run.json-заглушку под несостоявшимся прогоном.
@@ -3350,7 +3362,7 @@ def test_start_unblocked_after_verify_child_completes(
     )
     ws = "WS-LOCK-2"
     parent = runner.start(
-        **_agent_merge_kwargs(tmp_path, "r-lock-parent2", ops, ws_id=ws)
+        **_agent_merge_kwargs(tmp_path, "r-lock-parent2", ops, ws_id=ws, authoring="legacy")
     )
     assert parent.status == "merged_unverified"
 
@@ -3361,6 +3373,7 @@ def test_start_unblocked_after_verify_child_completes(
     # Разблокировано зелёным потомком — новый прогон стартует без ValueError.
     unblocked = runner.start(**_start_kwargs(
         tmp_path, "r-lock-after-fix", FakeOps(), ws_id=ws,
+        authoring="legacy",
     ))
     assert unblocked.run_id == "r-lock-after-fix"
 
@@ -3373,7 +3386,7 @@ def test_start_broken_neighbor_run_json_is_skipped(
     broken_dir.mkdir(parents=True)
     (broken_dir / "run.json").write_text("not json at all", encoding="utf-8")
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-after-broken", FakeOps()))
+    state = runner.start(**_start_kwargs(tmp_path, "r-after-broken", FakeOps(), authoring="legacy"))
 
     assert state.run_id == "r-after-broken"
 
@@ -3590,7 +3603,7 @@ def test_stop_with_comment_saves_status_before_commenting(
 
     ops.comment = spying_comment  # type: ignore[method-assign]
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert seen_status_at_comment_time["status"] == "stopped_review"
@@ -3607,7 +3620,7 @@ def test_resume_from_stopped_review_does_not_repost_comment_when_fixed(
     ops = FakeOps(review_exit=1)
     run_id = "r-comment-no-repost"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     assert len(ops.comments) == 1
 
@@ -3672,7 +3685,7 @@ def test_stop_review_comment_includes_evidence_hint(
     ops = FakeOps(review_exit=1)
     run_id = "r-review-evidence"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert ops.comments
@@ -3692,7 +3705,7 @@ def test_stop_review_comment_survives_head_sha_failure(
     ops = FakeOps(review_exit=1, head_sha_error="fatal: bad revision")
     run_id = "r-review-evidence-head-fails"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert ops.comments
@@ -3709,7 +3722,7 @@ def test_default_author_backend_is_codex_author_disp_not_called(
     идут через `ops.author`, `ops.author_disp` не вызывается вовсе."""
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-disp-default", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-disp-default", ops, authoring="legacy"))
 
     assert ops.authored == [
         "charter", "requirements", "behaviour-spec", "design", "acceptance",
@@ -3735,6 +3748,7 @@ def test_disp_backend_used_only_for_behaviour_node(
 
     state = runner.start(**_start_kwargs(
         tmp_path, run_id, ops, author_backend="disp",
+        authoring="legacy",
     ))
 
     assert ops.authored == [
@@ -3850,6 +3864,7 @@ def test_disp_doc_checklist_carries_the_dsl_frontmatter_and_pin(
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     runner.start(**_start_kwargs(
         tmp_path, "r-disp-dsl", ops, author_backend="disp",
+        authoring="legacy",
     ))
     _, _, config_path, _ = ops.author_disp_calls[0]
     config = tomllib.loads(Path(config_path).read_text(encoding="utf-8"))
@@ -3873,6 +3888,7 @@ def test_disp_doc_anchor_leaves_the_target_when_runs_root_is_inside_it(
     runner.start(**_start_kwargs(
         tmp_path, "r-disp-self", ops, author_backend="disp",
         target_dir=str(tmp_path),
+        authoring="legacy",
     ))
     target_dir, _, config_path, _ = ops.author_disp_calls[0]
     config = Path(config_path).read_text(encoding="utf-8")
@@ -3897,6 +3913,7 @@ def test_disp_anchor_dir_is_canonical_even_for_relative_xdg_state_home(
     run_id = "r-disp-rel-xdg"
     state = runner.start(**_start_kwargs(
         tmp_path, run_id, ops, author_backend="disp", target_dir=str(tmp_path),
+        authoring="legacy",
     ))
     _, _, config_path, _ = ops.author_disp_calls[0]
     config = Path(config_path).read_text(encoding="utf-8")
@@ -3919,6 +3936,7 @@ def test_disp_anchor_dir_is_pinned_and_survives_an_environment_change(
     run_id = "r-disp-anchor-pin"
     state = runner.start(**_start_kwargs(
         tmp_path, run_id, ops, author_backend="disp", target_dir=str(tmp_path),
+        authoring="legacy",
     ))
     assert state.status == "stopped_author"
 
@@ -3947,6 +3965,7 @@ def test_disp_slug_is_pinned_in_run_state_and_reused_on_retry(
     run_id = "r-disp-pin"
     state = runner.start(**_start_kwargs(
         tmp_path, run_id, ops, author_backend="disp",
+        authoring="legacy",
     ))
     assert state.status == "stopped_author"
     first_slug = ops.author_disp_calls[0][3]
@@ -3971,6 +3990,7 @@ def test_disp_retry_resumes_an_existing_pipeline_dir_instead_of_run(
     run_id = "r-disp-resume"
     state = runner.start(**_start_kwargs(
         tmp_path, run_id, ops, author_backend="disp",
+        authoring="legacy",
     ))
     assert ops.author_disp_resume == [False]
     target_dir, _, _, slug = ops.author_disp_calls[0]
@@ -4007,6 +4027,7 @@ def test_hand_fixed_node_without_pipeline_dir_is_accepted_after_pin(
     run_id = "r-disp-handfix"
     state = runner.start(**_start_kwargs(
         tmp_path, run_id, ops, author_backend="disp",
+        authoring="legacy",
     ))
     assert state.status == "stopped_author"
     assert "принять узел руками" in capsys.readouterr().out
@@ -4030,7 +4051,7 @@ def test_foreign_pipeline_dir_on_first_start_stops_instead_of_resuming(
     с нашим конфигом и анкером поверх чужого манифеста."""
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-disp-foreign"
-    kwargs = _start_kwargs(tmp_path, run_id, ops, author_backend="disp")
+    kwargs = _start_kwargs(tmp_path, run_id, ops, author_backend="disp", authoring="legacy")
     foreign = Path(kwargs["target_dir"]) / ".disputatio" / "pipelines" / "beh-ws-1"
     foreign.mkdir(parents=True)
 
@@ -4048,7 +4069,7 @@ def test_foreign_pipeline_dir_with_its_draft_still_stops(
     узла — черновик не наш готовый узел, стоп-гард стоит ДО skip-ветки."""
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-disp-foreign-draft"
-    kwargs = _start_kwargs(tmp_path, run_id, ops, author_backend="disp")
+    kwargs = _start_kwargs(tmp_path, run_id, ops, author_backend="disp", authoring="legacy")
     target = Path(kwargs["target_dir"])
     (target / ".disputatio" / "pipelines" / "beh-ws-1").mkdir(parents=True)
     draft = target / BUNDLE_DIR / "15-behaviour-spec.md"
@@ -4074,6 +4095,7 @@ def test_disp_config_without_model_stops_author_with_reason(
     ops = FakeOps()
     state = runner.start(**_start_kwargs(
         tmp_path, "r-disp-nomodel", ops, author_backend="disp",
+        authoring="legacy",
     ))
     assert state.status == "stopped_author"
     assert ops.author_disp_calls == []
@@ -4090,6 +4112,7 @@ def test_disp_backend_author_disp_failure_stops_author(
 
     state = runner.start(**_start_kwargs(
         tmp_path, run_id, ops, author_backend="disp",
+        authoring="legacy",
     ))
 
     assert state.status == "stopped_author"
@@ -4123,7 +4146,7 @@ def test_gate_stops_on_dsl_empty_bundle(
             return rc
 
     ops = DialectOps(review_exit=0, facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-dsl-empty", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-dsl-empty", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir("r-dsl-empty") / "gate-findings.txt").read_text()
@@ -4169,7 +4192,7 @@ def test_gate_dsl_empty_design_message_names_design_grammar(
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-design-dsl-empty-msg", ops)
+        **_start_kwargs(tmp_path, "r-design-dsl-empty-msg", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -4232,7 +4255,7 @@ def test_gate_accepts_design_heading_with_nonstandard_middot_spacing(
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-design-dsl-nonstd-space", ops)
+        **_start_kwargs(tmp_path, "r-design-dsl-nonstd-space", ops, authoring="legacy")
     )
 
     findings_file = (
@@ -4257,7 +4280,7 @@ def test_rollup_unstable_failure_still_refuses(
         "mergeStateStatus": "UNSTABLE",
     }
     ops = FakeOps(review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES)
-    state = runner.start(**_start_kwargs(tmp_path, "r-unstable", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-unstable", ops, authoring="legacy"))
 
     assert state.status == "stopped_merge_refused"
     assert ops.merged == []
@@ -4272,7 +4295,7 @@ def test_rollup_red_blocked_still_refuses(
         "mergeStateStatus": "BLOCKED",
     }
     ops = FakeOps(review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES)
-    state = runner.start(**_start_kwargs(tmp_path, "r-blocked", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-blocked", ops, authoring="legacy"))
 
     assert state.status == "stopped_merge_refused"
     assert ops.merged == []
@@ -4292,7 +4315,7 @@ def test_resume_merge_refused_after_human_merge_runs_s8(
         review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
     run_id = "r-refused-merged"
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_merge_refused"
 
     ops.facts = {**ops.facts, "state": "MERGED"}
@@ -4330,7 +4353,7 @@ def test_gate_unpinned_draft_edge_stops_locally(
             return rc
 
     ops = UnpinnedAuthorOps(facts=GREEN_PR_FACTS)  # CLI-гейт (FakeOps) даёт 0
-    state = runner.start(**_start_kwargs(tmp_path, "r-unpinned", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-unpinned", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir("r-unpinned") / "gate-findings.txt").read_text()
@@ -4367,7 +4390,7 @@ def test_gate_pinned_draft_edge_passes_local_guard(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=0,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-pinned", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-pinned", ops, authoring="legacy"))
     assert state.ops["gate-candidate"]["status"] == "completed"
 
 
@@ -4397,7 +4420,7 @@ def test_gate_stale_draft_pin_stops_locally(tmp_path: Path, runs_root) -> None:
             return rc
 
     ops = StalePinOps(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-stale-pin", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-stale-pin", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir("r-stale-pin") / "gate-findings.txt").read_text()
@@ -4436,7 +4459,7 @@ def test_gate_inline_upstream_hashes_form_passes(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=0,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-inline-pin", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-inline-pin", ops, authoring="legacy"))
     assert state.ops["gate-candidate"]["status"] == "completed"
 
 
@@ -4469,7 +4492,7 @@ def test_gate_foreign_toplevel_key_is_not_a_pin(
             return rc
 
     ops = ForeignKeyOps(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-foreign-key", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-foreign-key", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -4520,7 +4543,7 @@ def test_review_auto_refutes_file_missing(
         existing_files={"governance/foo.py"},
         facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-ok", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-ok", ops, authoring="legacy"))
 
     assert state.ops["review-refute"]["status"] == "completed"
     assert state.ops["review"] == {"status": "completed", "exit": 0}
@@ -4537,7 +4560,7 @@ def test_review_mixed_verdict_goes_to_human(
         existing_files={"governance/foo.py", "governance/bar.py"},
         facts=GREEN_PR_FACTS,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-mixed", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-mixed", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert not any(c[0] == "review_fresh" for c in ops.calls)
@@ -4548,7 +4571,7 @@ def test_review_truly_missing_file_goes_to_human(
     tmp_path: Path, runs_root,
 ) -> None:
     ops = FakeOps(review_exit=1, review_body=_FM_BODY, facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-real", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-real", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert not any(c[0] == "review_fresh" for c in ops.calls)
@@ -4563,7 +4586,7 @@ def test_review_refute_is_single_attempt(
         existing_files={"governance/foo.py"},
         facts=GREEN_PR_FACTS,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-again", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-again", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert [c[0] for c in ops.calls].count("review_fresh") == 1
@@ -4592,7 +4615,7 @@ def test_review_fresh_instrument_failure_routed_honestly(
         existing_files={"governance/foo.py"},
         facts=GREEN_PR_FACTS,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-instr", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-instr", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert any("прибор не отработал" in c for c in ops.comments)
@@ -4618,7 +4641,7 @@ def test_barrier_stop_is_named_and_persistent(tmp_path: Path, runs_root) -> None
         review_exit=ops_mod.REVIEW_BARRIER_EXIT, facts=GREEN_PR_FACTS,
         files=GREEN_BUNDLE_FILES,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-budget", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-budget", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert any(ops_mod.REVIEW_BARRIER_STOP in c for c in ops.comments)
@@ -4650,7 +4673,7 @@ def test_barrier_stop_on_fresh_path_is_named_too(
         review_body=_FM_BODY, existing_files={"governance/foo.py"},
         facts=GREEN_PR_FACTS,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-budget-fresh", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-budget-fresh", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert any(ops_mod.REVIEW_BARRIER_STOP in c for c in ops.comments)
@@ -4667,7 +4690,7 @@ def test_head_move_after_refute_restores_attempt(
         existing_files={"governance/foo.py"},
         facts=GREEN_PR_FACTS,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-head", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-head", ops, authoring="legacy"))
 
     assert "review-refute" not in state.ops
     assert "review" not in state.ops  # весь цикл переигрывается
@@ -4806,7 +4829,7 @@ def test_gate_design_missing_requirements_pin_is_unpinned(
     """GC-UNPINNED(prospective) на ребре design→requirements: пин
     behaviour-spec корректен, requirements — не запинен вовсе."""
     ops = _design_pin_ops("requirements")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-unpinned-req", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-design-unpinned-req", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -4822,7 +4845,7 @@ def test_gate_design_missing_behaviour_pin_is_unpinned(
     """GC-UNPINNED(prospective) на ребре design→behaviour-spec: пин
     requirements корректен, behaviour-spec — не запинен вовсе."""
     ops = _design_pin_ops("behaviour-spec")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-unpinned-beh", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-design-unpinned-beh", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -4889,7 +4912,7 @@ def test_gate_design_undeclared_requirements_edge_stops(
     пропускать необъявленное required-ребро."""
     ops = _design_undeclared_edge_ops("requirements")(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-design-undeclared-req", ops)
+        **_start_kwargs(tmp_path, "r-design-undeclared-req", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -4909,7 +4932,7 @@ def test_gate_design_undeclared_behaviour_edge_stops(
     пропускать."""
     ops = _design_undeclared_edge_ops("behaviour-spec")(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-design-undeclared-beh", ops)
+        **_start_kwargs(tmp_path, "r-design-undeclared-beh", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -4999,7 +5022,7 @@ def test_gate_design_stale_requirements_pin(tmp_path: Path, runs_root) -> None:
     """GC-STALE(prospective) на ребре design→requirements: пин
     синтаксически валиден, но не совпадает с blob-хешем в worktree."""
     ops = _design_stale_ops("requirements")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-stale-req", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-design-stale-req", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -5013,7 +5036,7 @@ def test_gate_design_stale_behaviour_pin(tmp_path: Path, runs_root) -> None:
     """GC-STALE(prospective) на ребре design→behaviour-spec: пин
     синтаксически валиден, но не совпадает с blob-хешем в worktree."""
     ops = _design_stale_ops("behaviour-spec")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-stale-beh", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-design-stale-beh", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -5068,7 +5091,7 @@ def test_gate_stops_on_uncovered_architect_question(
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = UncoveredQOps(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-uncovered-q", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-design-uncovered-q", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -5291,7 +5314,7 @@ def test_start_preflight_silent_on_six_node_profile(
     )
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-preflight-ok", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-preflight-ok", ops, authoring="legacy"))
 
     assert state.status != "stopped_preflight"
     assert state.ops["merge"]["status"] == "completed"
@@ -5495,7 +5518,7 @@ def test_resume_after_profile_delivered_continues_run(
     )
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-preflight-resume"
-    kwargs = _start_kwargs(tmp_path, run_id, ops)
+    kwargs = _start_kwargs(tmp_path, run_id, ops, authoring="legacy")
     profile_path = _write_stale_profile(Path(kwargs["target_dir"]))
 
     stopped = runner.start(**kwargs)
@@ -5576,7 +5599,7 @@ def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root) -> None:
     ops = CoveredQOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-design-e2e-smoke"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
 
     # S2: все шесть author-шагов прошли РОВНО в этом порядке.
     assert ops.authored == [
@@ -5702,7 +5725,7 @@ def test_gate_decomposition_unpinned_edge_stops(
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-unpinned", ops)
+        **_start_kwargs(tmp_path, "r-decomposition-unpinned", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -5745,7 +5768,7 @@ def test_gate_decomposition_stale_pin_stops(tmp_path: Path, runs_root) -> None:
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-decomposition-stale", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-decomposition-stale", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -5789,7 +5812,7 @@ def test_gate_decomposition_undeclared_design_edge_stops(
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-undeclared", ops)
+        **_start_kwargs(tmp_path, "r-decomposition-undeclared", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -5834,7 +5857,7 @@ def test_gate_decomposition_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-dsl-empty", ops)
+        **_start_kwargs(tmp_path, "r-decomposition-dsl-empty", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -5871,7 +5894,7 @@ def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root) -> None:
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-dt-graph", ops)
+        **_start_kwargs(tmp_path, "r-decomposition-dt-graph", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -5957,7 +5980,7 @@ def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-dt-graph-warning", ops)
+        **_start_kwargs(tmp_path, "r-dt-graph-warning", ops, authoring="legacy")
     )
 
     assert state.status != "stopped_gate"
@@ -6041,7 +6064,7 @@ def test_gate_dt_graph_finding_stops_on_underivable_group(
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-dt-graph-underivable-stop", ops)
+        **_start_kwargs(tmp_path, "r-dt-graph-underivable-stop", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -6169,7 +6192,7 @@ def test_gate_acceptance_unpinned_requirements_edge_stops(
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-unpinned", ops)
+        **_start_kwargs(tmp_path, "r-acceptance-unpinned", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -6217,7 +6240,7 @@ def test_gate_acceptance_stale_behaviour_pin_stops(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-acceptance-stale", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-acceptance-stale", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -6258,7 +6281,7 @@ def test_gate_acceptance_undeclared_edge_stops(
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-undeclared", ops)
+        **_start_kwargs(tmp_path, "r-acceptance-undeclared", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -6309,7 +6332,7 @@ def test_gate_decomposition_acceptance_edge_unpinned_stops(
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-acceptance-unpinned", ops)
+        **_start_kwargs(tmp_path, "r-decomposition-acceptance-unpinned", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -6359,7 +6382,7 @@ def test_gate_acceptance_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-dsl-empty", ops)
+        **_start_kwargs(tmp_path, "r-acceptance-dsl-empty", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -6423,7 +6446,7 @@ def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
 
     ops = _Ops(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-declaration-only", ops)
+        **_start_kwargs(tmp_path, "r-acceptance-declaration-only", ops, authoring="legacy")
     )
 
     findings_path = (
@@ -6504,7 +6527,7 @@ def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root) -> None:
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-ac-coverage", ops)
+        **_start_kwargs(tmp_path, "r-acceptance-ac-coverage", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -6631,7 +6654,7 @@ def test_gate_dt_graph_warning_survives_later_ac_coverage_stop(
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-dt-graph-warning-then-ac-stop", ops)
+        **_start_kwargs(tmp_path, "r-dt-graph-warning-then-ac-stop", ops, authoring="legacy")
     )
 
     assert state.status == "stopped_gate"
@@ -6846,7 +6869,7 @@ def test_decomposition_node_end_to_end_smoke_and_deliver(
     ops = _DtSmokeOps(facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-decomposition-e2e-smoke"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
 
     # S2: все шесть author-шагов прошли РОВНО в этом порядке.
     assert ops.authored == [
@@ -6935,7 +6958,7 @@ def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
     ops = _GapOps(facts=GREEN_PR_FACTS)
     run_id = "r-decomposition-e2e-smoke-gap"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
@@ -7016,7 +7039,7 @@ def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
     ops = _AcGapOps(facts=GREEN_PR_FACTS)
     run_id = "r-acceptance-e2e-smoke-gap"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
@@ -7043,7 +7066,7 @@ def test_gate_reports_dt_contract_findings(tmp_path: Path, runs_root) -> None:
     ops = _strip_dt_contract(
         FakeOps, drop_version=False, drop_delivers=True
     )(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-dt-contract", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-dt-contract", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7102,7 +7125,7 @@ def test_gate_passes_legacy_dt_but_says_guarantee_is_absent(
         FakeOps, drop_version=True, drop_delivers=True
     )(facts=GREEN_PR_FACTS)
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-dt-legacy", ops, allow_legacy_dt=True)
+        **_start_kwargs(tmp_path, "r-dt-legacy", ops, allow_legacy_dt=True, authoring="legacy")
     )
 
     assert state.status != "stopped_gate"
@@ -7131,7 +7154,7 @@ def test_gate_refuses_a_versionless_bundle_by_default(
     ops = _strip_dt_contract(
         FakeOps, drop_version=True, drop_delivers=True
     )(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-dt-strict", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-dt-strict", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7152,7 +7175,8 @@ def test_allow_legacy_dt_survives_resume(tmp_path: Path, runs_root) -> None:
     )(facts=GREEN_PR_FACTS)
     runner.start(
         **_start_kwargs(
-            tmp_path, "r-dt-resume", ops, allow_legacy_dt=True
+            tmp_path, "r-dt-resume", ops, allow_legacy_dt=True,
+            authoring="legacy",
         )
     )
 
@@ -7204,7 +7228,7 @@ def test_gate_resolves_delivers_sources_against_bundle_nodes(
     ЛЮБУЮ ссылку, и красный был бы одинаков для верной и для битой.
     """
     ops = _with_delivers(FakeOps, "acceptance#AC-01")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-ok", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-del-ok", ops, authoring="legacy"))
 
     findings_path = runner.run_dir("r-del-ok") / "gate-findings.txt"
     findings = (
@@ -7226,7 +7250,7 @@ def test_gate_stops_on_unresolvable_delivers_source(
     редактура, которая его «переименовала», не оставит следа.
     """
     ops = _with_delivers(FakeOps, "acceptance#AC-99")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-bad", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-del-bad", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7249,7 +7273,7 @@ def test_gate_resolves_a_delivers_source_in_charter(
     прогоне review-pr-unreachable-base-coverage-20260921.
     """
     ops = _with_delivers(FakeOps, "charter#CON-01")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-charter", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-del-charter", ops, authoring="legacy"))
 
     findings_path = runner.run_dir("r-del-charter") / "gate-findings.txt"
     findings = (
@@ -7278,7 +7302,7 @@ def test_gate_index_covers_exactly_the_declared_bundle_composition(
     ops = _with_delivers(FakeOps, "discovery-brief#G-01")(
         facts=GREEN_PR_FACTS
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-brief", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-del-brief", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7313,7 +7337,7 @@ def test_gate_rejects_an_ambiguous_delivers_source(
             return rc
 
     ops = _Doubled(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-dup", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-del-dup", ops, authoring="legacy"))
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7340,7 +7364,7 @@ def test_run_json_without_the_compat_field_resumes_strictly(
     и достаточно было бы предъявить файл постарше.
     """
     ops = FakeOps(facts=GREEN_PR_FACTS)
-    runner.start(**_start_kwargs(tmp_path, "r-old-state", ops))
+    runner.start(**_start_kwargs(tmp_path, "r-old-state", ops, authoring="legacy"))
     path = runner.run_dir("r-old-state") / "run.json"
     raw = json.loads(path.read_text(encoding="utf-8"))
     del raw["allow_legacy_dt"]
@@ -7383,7 +7407,7 @@ def test_edge_findings_do_not_outlive_the_round_they_described(
     )
     run_id = "r-w-edge-stale"
     state = runner.start(
-        **_waves_kwargs(tmp_path, run_id, ops), authoring="waves"
+        **_waves_kwargs(tmp_path, run_id, ops)
     )
     assert state.status == "stopped_review"
     findings = rs.run_dir(run_id) / "edge-findings.txt"
@@ -7404,7 +7428,7 @@ def test_waves_run_authors_only_level_zero_and_stops_at_edge_fail(
 ) -> None:
     ops = FakeOps(edge_results={"charter": "FAIL"})
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-edge", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-edge", ops)
     )
     assert ops.authored == ["charter"], "авторится только уровень 0"
     assert state.wave == 1 and state.status == "stopped_review"
@@ -7428,7 +7452,7 @@ def test_waves_gate_uses_projected_profile_with_siblings(
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-gate", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-gate", ops)
     )
     assert state.status == "waiting_human_merge"
     gate_calls = [c for c in ops.calls if c[0] == "gate_check_candidate"]
@@ -7455,7 +7479,7 @@ def test_waves_local_completeness_is_by_level(
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-compl", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-compl", ops)
     )
     assert state.status == "waiting_human_merge"
     assert not (rs.run_dir("r-w-compl") / "gate-findings.txt").exists()
@@ -7467,7 +7491,7 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-up", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-up", ops)
     )
     state.wave = 2
     state.status = "running"
@@ -7505,7 +7529,7 @@ def test_waves_stopped_gate_resume_resets_only_the_wave_range(
     )
     _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-gate-stop", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-gate-stop", ops)
     )
     assert state.status == "stopped_gate"
     assert runner.reset_ops_for(state) == ("commit-1", "gate-candidate-1", "edge-1")
@@ -7525,7 +7549,7 @@ def test_waves_projection_mismatch_stops_gate(tmp_path: Path, runs_root, monkeyp
         lambda target_dir, profile, projected, level: ["roles.yaml"],
     )
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-proj", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-proj", ops)
     )
     assert state.status == "stopped_gate"
     text = (rs.run_dir("r-w-proj") / "gate-findings.txt").read_text()
@@ -7580,7 +7604,7 @@ def test_waves_candidate_step_pauses_on_the_wave_pr(
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "main"})
     journal = _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-cand", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-cand", ops)
     )
     assert state.status == "waiting_human_merge" and state.wave == 1
     assert journal[0].startswith("propose:charter:fakehead")
@@ -7609,7 +7633,7 @@ def test_waves_candidate_step_records_request_before_publishing(
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     journal = _fake_wave_adapters(monkeypatch, ops, code=3)
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-cand-3", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-cand-3", ops)
     )
     assert state.status == "stopped_review"
     assert state.ops["candidate-1"] == {
@@ -7658,7 +7682,7 @@ def _fake_approve_node(monkeypatch, ops: FakeOps, *, merge_on_call: int = 2):
 
 def _waiting_wave1(tmp_path, monkeypatch, ops: FakeOps, run_id: str):
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, run_id, ops), authoring="waves")
+    state = runner.start(**_waves_kwargs(tmp_path, run_id, ops))
     assert state.status == "waiting_human_merge" and state.wave == 1
     return state
 
@@ -7959,7 +7983,7 @@ def test_reopen_reauthors_the_node_on_a_new_branch_name(
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
     _fake_approve_node_full(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-reopen", ops), authoring="waves")
+    state = runner.start(**_waves_kwargs(tmp_path, "r-reopen", ops))
     assert state.status == "waiting_human_merge"
     with pytest.raises(ValueError, match="живые заявки"):
         runner.reopen("r-reopen", "requirements", ops)
@@ -8006,7 +8030,7 @@ def test_reopen_manual_stops_for_the_operator_then_resumes(
 ) -> None:
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-reopen-m", ops), authoring="waves")
+    state = runner.start(**_waves_kwargs(tmp_path, "r-reopen-m", ops))
     from governance import approval_ledger as al
     al.abandon_request(state, state.ops["candidate-1"]["request"], "стенд")
     rs.save(state)
@@ -8035,7 +8059,7 @@ def test_stale_level_is_reapproved_over_base_without_authoring(
     ops = FakeOps(facts={"state": "MERGED", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
     calls = _fake_approve_node_full(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-reapp", ops), authoring="waves")
+    state = runner.start(**_waves_kwargs(tmp_path, "r-reapp", ops))
     from governance import approval_ledger as al
     key1 = state.ops["candidate-1"]["request"]
     al.complete_request(state, key1)
@@ -8069,6 +8093,6 @@ def test_reopen_refuses_legacy_runs_and_finished_waves(
     monkeypatch.setattr(
         runner, "load_safety", lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    runner.start(**_start_kwargs(tmp_path, "r-legacy-reopen", ops))
+    runner.start(**_start_kwargs(tmp_path, "r-legacy-reopen", ops, authoring="legacy"))
     with pytest.raises(ValueError, match="authoring=waves"):
         runner.reopen("r-legacy-reopen", "charter", ops)
