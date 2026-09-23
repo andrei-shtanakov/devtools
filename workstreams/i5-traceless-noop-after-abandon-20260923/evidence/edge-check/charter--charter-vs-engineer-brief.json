@@ -1,0 +1,51 @@
+{
+  "absence": [
+    {
+      "path": "00-discovery/engineer-brief.absent",
+      "rule_id": "R0-no-engineer-brief"
+    }
+  ],
+  "attempt_id": "7827c999e4f349069e30a25b8234de29",
+  "bases": [],
+  "check_identity": "76c4040d2972158e01b6a954cc1526c0cb97f139c572acba7f9efbbfac341efa",
+  "criteria": [],
+  "edge": "charter-vs-engineer-brief",
+  "findings": [],
+  "finished_at": "2026-09-23T06:03:00.616676+00:00",
+  "node": "charter",
+  "reason": "основание отсутствует, разрешено правилом R0-no-engineer-brief",
+  "result_key": "0b87b082e5fa7c03813f56422552051348dd6db397b69816df9b6c2ba3ccd7db",
+  "reviewer": {
+    "effort": null,
+    "env_passthrough": [],
+    "harness": "claude",
+    "harness_version": null,
+    "model": "claude-opus-5",
+    "model_id": null
+  },
+  "rules": {
+    "id": "charter-vs-engineer-brief",
+    "items": [
+      [
+        "R1",
+        "Уточнения инженерного брифа (ограничения реализации, границы) отражены в charter."
+      ],
+      [
+        "R2",
+        "Charter не противоречит инженерному брифу."
+      ]
+    ]
+  },
+  "schema_version": 1,
+  "started_at": "2026-09-23T06:03:00.614325+00:00",
+  "subject": [
+    {
+      "path": "00-charter.md",
+      "role": "subject",
+      "sha256": "de42abcd7aaa89da7bb2f229ccae95594441ddbeb2584f7f0ae8edd4b3069c24",
+      "size": 21329
+    }
+  ],
+  "verdict": "N/A",
+  "wave": 1
+}
