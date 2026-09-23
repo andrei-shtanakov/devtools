@@ -1,6 +1,6 @@
 ---
 spec_stage: design
-status: approval_pending
+status: approved
 owner_role: architects
 traces_to:
 - requirements
@@ -10,6 +10,8 @@ upstream_hashes:
   behaviour-spec: 4dc3260ac3556743343119d91e1a1d979b35cf23
 approved_content_hash: 87dec0658c5db9df882b3d05806a7d91710a4134
 version: 2
+approved_at: '2026-09-23T08:54:08Z'
+approved_by: andrei-shtanakov
 ---
 
 # Design: no-op §I5 перестаёт объявлять бесследность над изменённым журналом
