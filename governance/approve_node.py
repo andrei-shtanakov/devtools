@@ -51,6 +51,7 @@ from governance import node_approval as na
 from governance.approval_facts import Disposition, Outcome
 from governance.frontmatter import split_frontmatter, update_frontmatter
 from governance.ops import Ops
+from governance import pr_checks
 from governance.policy_sources import build_authority, load_safety
 from governance.run_state import RunState
 
@@ -2319,6 +2320,13 @@ _MERGE_CODE_HINTS = {
     ),
 }
 _SLEEP = time.sleep
+#: Ожидание обязательных проверок ПЕРЕД мержем finalize (devtools#277,
+#: живой волновой прогон 2026-09-22): форджа отклоняла мерж кодом 405
+#: «Required status check is in progress» ровно один раз на волну, и
+#: каждый отказ стоил оператору лишнего resume. Потолок — произведение:
+#: опрос раз в `_CHECKS_POLL_SECONDS`, не более `_CHECKS_POLL_LIMIT` раз.
+_CHECKS_POLL_LIMIT = 40
+_CHECKS_POLL_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -2426,6 +2434,9 @@ def _try_agent_merge(
     # которого его можно было бы пиновать, — пин базы есть свойство
     # вызывающего с вердиктом (accept-pr). Обвязка сверяет пин с живой
     # верхушкой (devtools#223), но пиновать здесь по-прежнему нечего.
+    waited = _await_required_checks(state, ops, pr, head)
+    if waited is not None:
+        return waited
     code = 0
     for attempt in range(_MERGE_ATTEMPTS):
         code = ops.merge(state.repo, pr, head, None)
@@ -2437,6 +2448,52 @@ def _try_agent_merge(
     hint = _MERGE_CODE_HINTS.get(code, "мержит человек")
     return MergeRefusal(
         f"агентский мерж отказал кодом {code}: {hint}", human_merge_helps=True
+    )
+
+
+def _await_required_checks(
+    state: RunState, ops: Ops, pr: int, head: str
+) -> MergeRefusal | None:
+    """Ждёт обязательные проверки PR'а; `None` — можно мержить.
+
+    Предикат зелени — общий с `accept_pr` (`pr_checks.checks_state`), а не
+    второй его вычислитель: расходиться этим путям незачем, а пустой
+    rollup обязан читаться как `pending` в обоих (репо совсем без чеков
+    упирается в потолок и уходит человеку — fail-closed).
+
+    Ожидание пинуется на ту голову, с которой началось: оно вводит окно в
+    минуты между решением «мержим» и самим мержем, и без пина в это окно
+    поместился бы посторонний push. Уехавшая голова — отказ, а не мерж
+    чужих байтов; `human_merge_helps=False` у всех трёх исходов: красные
+    проверки и уехавшую голову человеческий мерж не лечит, а незавершённые
+    лечит время и повторный вызов.
+    """
+    for _ in range(_CHECKS_POLL_LIMIT):
+        facts = ops.pr_facts(state.repo_slug, pr)
+        actual = facts.get("headRefOid")
+        if actual != head:
+            return MergeRefusal(
+                f"голова finalize-PR #{pr} уехала за время ожидания "
+                f"проверок: ждали {head[:8]}, на PR {str(actual)[:8]}. "
+                "Агентский мерж не выполнен — повторите вызов",
+                human_merge_helps=False,
+            )
+        verdict = pr_checks.checks_state(facts)
+        if verdict == "green":
+            return None
+        if verdict == "red":
+            return MergeRefusal(
+                f"обязательные проверки finalize-PR #{pr} красные "
+                f"({pr_checks.failing_names(facts)}) — агентский мерж не "
+                "выполнен; чинит автор изменения, не мерж",
+                human_merge_helps=False,
+            )
+        _SLEEP(_CHECKS_POLL_SECONDS)
+    return MergeRefusal(
+        f"обязательные проверки finalize-PR #{pr} не завершились за "
+        f"{int(_CHECKS_POLL_LIMIT * _CHECKS_POLL_SECONDS)} с — агентский "
+        "мерж не выполнен; повторите вызов, когда проверки дойдут",
+        human_merge_helps=False,
     )
 
 

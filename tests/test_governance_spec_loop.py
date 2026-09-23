@@ -1313,6 +1313,38 @@ def test_wave_resume_pause_names_wave_and_pr(
     assert "finalize-PR #641" in capsys.readouterr().out
 
 
+def test_wave_pause_names_finalize_when_its_merge_was_refused(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """Аттестация прошла (`review_exit: 0`), а мерж finalize отказал — пауза
+    обязана назвать finalize-PR, а не уже влитый candidate.
+
+    Живой волновой прогон 2026-09-22: candidate #352 влит человеком,
+    агентский мерж finalize #353 отказал по незелёным проверкам, и кнопка
+    печатала «ждём человеческий мерж candidate-PR #352» — отправляла
+    человека делать сделанное. Условие смотрело на ИСТИННОСТЬ `review_exit`,
+    поэтому нулевой код (успех аттестации) читался как «finalize ещё нет».
+    """
+    state = _mk_run(
+        "fleet-inbox-20260901-abc123", "Fleet Inbox",
+        ws_id="fleet-inbox-20260901", status="waiting_human_merge",
+        target_dir=str(tmp_path / "alpha"), authoring="waves",
+    )
+    _seed_wave_candidate(state, 3, 640)
+    state.ops["approve-1-2-1"]["finalize_pr"] = 641
+    state.ops["finalize-3"] = {
+        "status": "completed", "finalize_pr": 641, "review_exit": 0,
+    }
+    rs.save(state)
+    _LoopEnv(monkeypatch, tmp_path, resume_result=state)
+    spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
+    out = capsys.readouterr().out
+    assert "finalize-PR #641" in out
+    assert "candidate-PR #640" not in out, (
+        "candidate уже влит человеком — звать его мержить снова неверно"
+    )
+
+
 class _WaveRecoveryOps:
     def __init__(self, prs, states=None):
         self.prs = prs

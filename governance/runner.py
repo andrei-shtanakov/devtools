@@ -542,6 +542,32 @@ def reset_ops_for(state: RunState) -> tuple[str, ...]:
     return ()
 
 
+#: Файл находок, который ведёт шаг. Ключ — БАЗА op'а (`wave_key` даёт
+#: `<base>-<w>` в волнах и `<base>` в legacy).
+_FINDINGS_OF_STEP = {
+    "edge": "edge-findings.txt",
+    "gate-candidate": "gate-findings.txt",
+}
+
+
+def _drop_findings_of(state: RunState, keys: tuple[str, ...]) -> None:
+    """Снимает файлы находок тех шагов, которые `resume` сбрасывает.
+
+    Шаг снимает свой файл на СВОЁМ входе — этого хватает, пока следующий
+    круг до него доходит. Не доходит: круг edge-check покраснел, автор
+    правил узел, а следующий заход встал раньше — на гейте. Тогда
+    `edge-findings.txt` прошлого круга лежит рядом с гейтовым стопом и
+    читается как его описание (живой волновой прогон 2026-09-22).
+    Снятие здесь закрывает класс целиком: сброшенный op и его находки
+    уходят вместе, каким бы ни был следующий стоп.
+    """
+    for key in keys:
+        base = key.rsplit("-", 1)[0] if key.rsplit("-", 1)[-1].isdigit() else key
+        name = _FINDINGS_OF_STEP.get(base)
+        if name is not None:
+            (run_dir(state.run_id) / name).unlink(missing_ok=True)
+
+
 # stopped_author/stopped_gate/stopped_review: между стопом и resume человек
 # правит файлы бандла в worktree (устраняет gate-findings, отрабатывает
 # review-находки) — сброс ТОЛЬКО op'а, отвечавшего за сам стоп, оставлял бы
@@ -686,7 +712,9 @@ def resume(run_id: str, ops: Ops) -> RunState:
     if state.status in _STOPPED_RESET_OPS:
         if _reconcile_pr_merged_out_of_band(state, ops):
             return state
-        for key in reset_ops_for(state):
+        keys = reset_ops_for(state)
+        _drop_findings_of(state, keys)
+        for key in keys:
             state.ops.pop(key, None)
         state.status = "running"
         save(state)

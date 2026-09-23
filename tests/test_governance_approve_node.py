@@ -127,10 +127,22 @@ class Forge:
     #: `Ops.review` (аттестация finalize-PR на resume волны, S8).
     review_exit: int = 0
     review_calls: list[int] = field(default_factory=list)
+    #: `statusCheckRollup` PR'а — то, что отдаёт `pr_facts`. Умолчание
+    #: зелёное, чтобы тесты, которым проверки безразличны, не описывали их
+    #: вовсе. Смену состояния по ходу ожидания делает хук `_SLEEP`: очередь
+    #: снимков не годится — `pr_facts` зовут и другие шаги, они бы её и
+    #: вычерпали.
+    checks: list[dict] = field(
+        default_factory=lambda: [{"name": "test", "conclusion": "SUCCESS"}]
+    )
     policy_sha: str | None = "p" * 40
     policy_files: dict[str, str] = field(default_factory=lambda: {
         "p" * 40: f"AUTHORIZED_APPROVER_ACCOUNTS={HUMAN}\n",
     })
+
+    def next_checks(self) -> list[dict]:
+        """Текущий снимок проверок."""
+        return self.checks
 
     def head_of(self, branch: str) -> str | None:
         done = subprocess.run(
@@ -168,6 +180,7 @@ class Ops(RealOps):
             "mergedAt": rec.get("mergedAt"),
             "mergeCommit": rec.get("mergeCommit"),
             "isDraft": rec["draft"],
+            "statusCheckRollup": self.forge.next_checks(),
         }
 
     def create_pr(
@@ -269,6 +282,16 @@ class Ops(RealOps):
         rec = self.forge.prs[pr]
         if rec["label"] == an.HUMAN_MERGE_LABEL:
             return 3
+        # Живой отказ форджи, ради которого и заводится ожидание: пока
+        # обязательная проверка идёт, `PUT /merge` отвечает 405 «Required
+        # status check is in progress», а обвязка возвращает 4 (devtools#277,
+        # 5 отказов из 5 на живом волновом прогоне 2026-09-22).
+        if any(
+            (c.get("conclusion") or c.get("status") or "").upper()
+            not in ("SUCCESS", "NEUTRAL", "SKIPPED")
+            for c in self.forge.next_checks()
+        ):
+            return 4
         if self.forge.head_of(rec["branch"]) != sha:
             return 2
         rc = (
@@ -3548,3 +3571,103 @@ def test_propose_from_source_resumes_its_own_live_request(
     other = authored_branch(w, 1, {"00-charter.md": _node_text("charter", body="v2")}, reopen=1)
     with pytest.raises(RuntimeError, match="живая заявка"):
         an.propose_from_source(w.state, w.ops, ["charter"], other)
+
+
+# --- ожидание обязательных проверок перед агентским мержем finalize --------
+# devtools#277 (принята 2026-09-23 по живому прогону
+# stray-md-disables-i8-for-legacy-v1-20260922-51772c): обвязка звала мерж
+# сразу после создания finalize-PR, когда `test` ещё шёл, и получала
+# `405 Required status check "test" is in progress` — ровно один раз на
+# волну, 5 из 5. Отказ корректный, но каждый стоил лишнего resume.
+
+_PENDING_CHECK = [{"name": "test", "status": "IN_PROGRESS"}]
+_GREEN_CHECKS = [{"name": "test", "conclusion": "SUCCESS"}]
+_RED_CHECKS = [{"name": "test", "conclusion": "FAILURE"}]
+
+
+def _finalize_ready(world: World) -> tuple[str, int]:
+    """Заявка до состояния «candidate влит, finalize ждёт мержа»."""
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    return key, op["candidate_pr"]
+
+
+def test_finalize_merge_waits_until_required_checks_finish(
+    world: World, monkeypatch
+) -> None:
+    """Проверки идут — мерж не пробуется; дошли зелёными — мерж состоялся.
+
+    Без ожидания первый же вызов упирался в отказ форджи и оставлял PR
+    человеку, хотя через минуту тот же мерж прошёл бы сам.
+    """
+    key, _ = _finalize_ready(world)
+    world.forge.checks = _PENDING_CHECK
+    monkeypatch.setattr(
+        an, "_SLEEP",
+        lambda seconds: world.forge.__setattr__("checks", _GREEN_CHECKS),
+    )
+    approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED, (
+        "finalize обязан смержиться сам, без вмешательства оператора"
+    )
+    assert len(world.forge.merge_calls) == 1, (
+        "мерж пробуется один раз — на зелёных проверках, а не на каждом "
+        "опросе"
+    )
+
+
+def test_finalize_merge_refuses_on_red_checks_without_trying(
+    world: World,
+) -> None:
+    """Красная обязательная проверка — понятная остановка, мержа нет."""
+    key, _ = _finalize_ready(world)
+    world.forge.checks = _RED_CHECKS
+    outcome = approve(world, "charter")
+    assert world.forge.merge_calls == [], "на красных проверках мерж не зовут"
+    assert "проверк" in outcome.message.lower()
+    assert "test" in outcome.message, "красная проверка названа поимённо"
+    assert al.is_live(world.state.ops[key]), "заявка сохраняется"
+
+
+def test_finalize_merge_stops_by_timeout_naming_the_wait(world: World) -> None:
+    """Проверки не дошли за потолок опроса — стоп с названной причиной."""
+    key, _ = _finalize_ready(world)
+    world.forge.checks = _PENDING_CHECK
+    outcome = approve(world, "charter")
+    assert world.forge.merge_calls == [], "мерж не пробуется на незавершённых"
+    assert "проверк" in outcome.message.lower()
+    assert al.is_live(world.state.ops[key]), "заявка сохраняется"
+
+
+def test_checks_wait_is_pinned_to_the_head_it_started_on(
+    world: World, monkeypatch
+) -> None:
+    """Голова уехала ПОКА ждали — стоп, а не мерж чужих байтов.
+
+    Ожидание вводит окно, которого раньше не было: между решением «мержим»
+    и самим мержем проходят минуты. Пин на голову, с которой ожидание
+    началось, — то, что делает это окно безопасным.
+    """
+    key, _ = _finalize_ready(world)
+    world.forge.checks = _PENDING_CHECK
+
+    def _drift(_seconds: float) -> None:
+        """Посторонний коммит в ветку конверта прямо во время ожидания."""
+        clone = world.forge.merger
+        assert clone is not None
+        op = world.state.ops[key]
+        branch = op["finalize_branch"]
+        _git(clone, "fetch", "origin", branch)
+        _git(clone, "switch", "-C", branch, "FETCH_HEAD")
+        (clone / "drift.txt").write_text("уехали\n", encoding="utf-8")
+        _git(clone, "add", "drift.txt")
+        _git(clone, "commit", "-m", "посторонний коммит поверх конверта")
+        _git(clone, "push", "origin", branch)
+        world.forge.checks = _GREEN_CHECKS
+
+    monkeypatch.setattr(an, "_SLEEP", _drift)
+    outcome = approve(world, "charter")
+    assert world.forge.merge_calls == [], "чужую голову не мержим"
+    assert "голов" in outcome.message.lower()
+    assert al.is_live(world.state.ops[key])
