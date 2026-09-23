@@ -3488,10 +3488,10 @@ def main(argv: list[str] | None = None) -> int:
         "--run-id", default=None, help="дефолт <ws-id>-<3 случайных байта hex>"
     )
     start_p.add_argument(
-        "--authoring", default="legacy", choices=["legacy", "waves"],
-        help="waves — узлы бандла одобряются волнами по уровням DAG, "
-        "каждая волна своим candidate-PR (спека sequential-node-approval); "
-        "legacy — один бандл-PR",
+        "--authoring", default="waves", choices=["legacy", "waves"],
+        help="waves (ДЕФОЛТ с 2026-09-23, S13) — узлы бандла одобряются "
+        "волнами по уровням DAG, каждая волна своим candidate-PR; "
+        "legacy — прежний путь, один бандл-PR",
     )
 
     resume_p = sub.add_parser("resume", help="подхватить сохранённый прогон")
