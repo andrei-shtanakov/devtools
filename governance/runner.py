@@ -185,16 +185,56 @@ def _blocking_merged_unverified(ws_id: str) -> str | None:
     проверенное. Возвращает run_id блокирующего прогона либо ``None``.
     """
     states = _load_all_runs()
-    verified_parents = {
+    verified_roots = {
         s.remediated_by
         for s in states.values()
         if s.remediated_by and s.status == "completed"
     }
     for run_id, s in states.items():
-        if s.ws_id == ws_id and s.status == "merged_unverified":
-            if run_id not in verified_parents:
-                return run_id
+        if s.ws_id != ws_id or s.status != "merged_unverified":
+            continue
+        if _belongs_to_cycle(s, states) is not None:
+            # Доказанный потомок держателем не является: новый мерж в base
+            # он не вносил — проверял тот же самый, что и корень. Иначе
+            # провальная попытка держала бы ws_id НАВСЕГДА: освободить её
+            # мог бы только потомок ПОТОМКА, а следующий `verify()`
+            # заводится от корня (D4a, замер 2026-09-24).
+            continue
+        if run_id not in verified_roots:
+            return run_id
     return None
+
+
+def _belongs_to_cycle(
+    state: RunState, states: dict[str, RunState]
+) -> str | None:
+    """Корень цикла верификации, которому принадлежит `state`, или `None`.
+
+    Предикат ПОЛНЫЙ и fail-closed (§5a). Он не совпадает с допуском §2a:
+    тот про право доиграть S8 и корня цикла не требует, этот — про право
+    НЕ считаться самостоятельным держателем лока, и здесь родитель обязан
+    быть именно корнем. Общее у них одно — `source == remediated_by`.
+
+    Недоказанная принадлежность (нечитаемый родитель, родитель не в
+    `merged_unverified`, родитель сам чей-то потомок, отсутствующий или
+    чужой `source`) возвращает `None`: запись считается САМОСТОЯТЕЛЬНЫМ
+    держателем, и лок держится. Заполненного поля `remediated_by` мало —
+    иначе лок снимался бы одним фактом его наличия.
+    """
+    parent_id = state.remediated_by
+    if not parent_id:
+        return None
+    parent = states.get(parent_id)
+    if parent is None or parent.status != "merged_unverified":
+        return None
+    if parent.remediated_by:
+        return None
+    record = state.ops.get("merge") or {}
+    if record.get("status") != "completed":
+        return None
+    if record.get("source") != parent_id:
+        return None
+    return parent_id
 
 
 def _has_green_child(parent_run_id: str) -> bool:
@@ -699,6 +739,51 @@ def _reset_stopped_author(state: RunState) -> None:
 _LEGACY_REMOVED_ON = "2026-09-23"
 
 
+def _verification_admission_refusal(state: RunState) -> str | None:
+    """Допуск verification-потомка к повтору S8 (§2a, devtools#384).
+
+    Возвращает причину отказа или `None`, если допущен. Предикатов ДВА, и
+    они про разное: **доказанная связь с родителем** — разрешение на
+    повторный вход, **`merge=completed`** — основание пропустить конвейер.
+    Смешать их нельзя: из 16 реальных леджеров двенадцать исторических
+    legacy-прогонов несут завершённый `merge`, и по одному ему они
+    получили бы перезапуск S8 — прогон authoritative-гейта СТАРОГО дерева
+    против СЕГОДНЯШНЕГО мастера. Различает их `remediated_by`.
+
+    Проверка мода-независима намеренно: у потомка волнового родителя
+    `resume` уходит в S8 коротким замыканием `advance`, минуя страж S13, и
+    без этой проверки испорченное основание там не увидел бы никто.
+    """
+    parent_id = state.remediated_by
+    if not parent_id:
+        return "прогон не является verification-потомком"
+    try:
+        parent = load(parent_id)
+    except Exception as exc:  # noqa: BLE001 — леджер родителя мог исчезнуть
+        return f"родитель {parent_id!r} не читается: {exc}"
+    if parent.status != "merged_unverified":
+        return (
+            f"родитель {parent_id!r} в статусе {parent.status!r}, а не "
+            "merged_unverified — верифицировать нечего"
+        )
+    record = state.ops.get("merge") or {}
+    if record.get("status") != "completed":
+        return "у потомка нет завершённого op merge — основание не записано"
+    source = record.get("source")
+    if source is None:
+        return (
+            "op merge потомка не несёт `source` — основание не предъявлено "
+            "(так выглядит потомок, созданный до devtools#384; домысливать "
+            "его нельзя)"
+        )
+    if source != parent_id:
+        return (
+            f"op merge потомка ссылается на {source!r}, а remediated_by — "
+            f"на {parent_id!r}: связь не доказана"
+        )
+    return None
+
+
 def _refuse_legacy_resume(state: RunState) -> None:
     """S13: `resume` не исполняет прежний путь авторинга (спека §4, D3).
 
@@ -784,7 +869,17 @@ def resume(run_id: str, ops: Ops) -> RunState:
             f"run {run_id!r} — merged_unverified навсегда; создайте "
             "verification-run через verify(...)"
         )
-    _refuse_legacy_resume(state)
+    if state.remediated_by:
+        # Verification-потомок судится СВОИМ предикатом (§2a), а не
+        # стражем режима: его путь — только S8, и авторинга в нём нет.
+        refusal = _verification_admission_refusal(state)
+        if refusal is not None:
+            raise ValueError(
+                f"run {state.run_id!r}: повтор S8 не допущен — {refusal} "
+                f"(S13/devtools#384, решение владельца {_LEGACY_REMOVED_ON})"
+            )
+    else:
+        _refuse_legacy_resume(state)
     if state.status != "completed":
         resumed = _resume_wave(state, ops)
         if resumed is not None:
@@ -1268,6 +1363,36 @@ def verify(
         raise ValueError(
             f"verify уже идёт: {active_child} (resume или дождитесь)"
         )
+    # devtools#384, D1: основание `merge=completed` у потомка — ПЕРЕНОС
+    # доказанного факта, не допущение. Если у родителя мерж не доказан,
+    # переносить нечего. Проверка здесь, в группе входных, — до
+    # `_reserve_run_id`: тот создаёт файл, и отказ после него оставил бы
+    # заглушку под несостоявшимся потомком.
+    if op_status(parent, "merge") != "completed":
+        raise ValueError(
+            f"родитель {parent_run_id!r} не несёт завершённого op merge — "
+            "факт мержа не доказан, и verification-потомку его перенести "
+            "не из чего; восстановите леджер родителя"
+        )
+    if not parent.head:
+        # Вторая половина условия 3 (спека #384, §2). Мало знать, ЧТО мерж
+        # был, — надо знать, КАКИЕ байты он внёс: без головы идентичность
+        # верифицируемого результата не установлена ничем, и потомок
+        # подтвердил бы неизвестно что.
+        #
+        # До prerequisite #393 эта проверка была невыполнима: `head` в
+        # волнах не писал никто, и она закрыла бы `verify()` для каждого
+        # волнового прогона. Прогоны, завершённые ДО той правки, поэтому
+        # сюда и упираются — по D4 их восстановление это отдельное явное
+        # действие из данных исходного finalize-PR, а не подстановка
+        # сегодняшнего tip'а.
+        raise ValueError(
+            f"родитель {parent_run_id!r} не несёт head — идентичность "
+            "верифицируемого результата не установлена; verification-"
+            "потомку подтверждать нечего. Прогон завершён до devtools#393; "
+            "восстановление идентичности — отдельное действие из данных "
+            "исходного finalize-PR"
+        )
     if run_id is None:
         run_id = _next_verify_run_id(parent_run_id)
     _reserve_run_id(run_id)
@@ -1284,6 +1409,11 @@ def verify(
         merge_authority=parent.merge_authority,
         author_backend=parent.author_backend,
         allow_legacy_dt=parent.allow_legacy_dt,
+        # D3: потомок принадлежит ЦИКЛУ родителя, и поле про это правда.
+        # Волновым его объявить нельзя — «только S8» и «волновое
+        # авторство» разные вещи, и консоль по этому полю строит перечень
+        # шагов волн, которых у потомка нет.
+        authoring=parent.authoring,
     )
     child.remediated_by = parent_run_id
     child.branch = parent.branch
@@ -1292,6 +1422,14 @@ def verify(
     child.base_ref = parent.base_ref
     child.status = "running"
     save(child)
+    # Основание — В ЛЕДЖЕР и ДО S8 (D1): гибель внутри шага не должна
+    # оставить потомка без него, иначе повторный resume снова не узнает,
+    # что мерж доказан. `source` называет родительский op поимённо —
+    # запись ссылается, а не сочиняет.
+    op_complete(
+        child, "merge", merged=True, source=parent_run_id,
+        pr=parent.pr, head=parent.head,
+    )
     _step_s8(child, ops)
     return child
 

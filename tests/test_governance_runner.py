@@ -1774,6 +1774,9 @@ def _drive_waves(state, run_id: str, ops: FakeOps, wave: int):
             authorization={"login": "andrei-shtanakov", "policy": "p"},
         )
         al.record_finalize_pr(state, key, 800 + state.wave)
+        # Порядок продакшена: идентичность результата — ДО завершения
+        # заявки, и её SHA отличен от candidate-мержа (#392/#393).
+        al.record_finalize_merge_commit(state, key, f"f{state.wave:039d}")
         al.complete_request(state, key)
         for node in _WAVE_NODES[state.wave]:
             approved[f"{BUNDLE_DIR}/{_NODE_FILE[node]}"] = _approved(node)
@@ -7587,64 +7590,454 @@ def test_resume_of_a_legacy_run_refuses_with_a_named_reason(runs_root) -> None:
     assert ops.calls == [], "ни одного обращения к git/фордже"
 
 
-def test_resume_of_a_verification_child_refuses_without_rewriting_its_mode(
-    tmp_path: Path, runs_root, monkeypatch,
+def test_verify_refuses_when_parent_merge_is_not_completed(
+    tmp_path: Path, runs_root,
 ) -> None:
-    """D3, решение владельца 2026-09-23: поведение verification-потомка
-    определено РЕШЕНИЕМ, а не следствием.
+    """devtools#384, D1: основание `merge=completed` у потомка — ПЕРЕНОС
+    доказанного факта, а не допущение.
 
-    `verify()` строит потомка через `new_run` без `authoring`, и тот
-    наследует умолчание — значит попадает под общий отказ. Три вещи
-    утверждаются здесь явно, потому что каждая ломается молча:
-
-    - отказ происходит и до него нет побочных эффектов;
-    - `authoring` потомку НЕ переписывается ради прохода через гвард —
-      это переписало бы происхождение прогона, ровно та
-      переинтерпретация прошлого, которую запрещает D2;
-    - родитель остаётся `merged_unverified`, то есть WS-lock продолжает
-      держать соседей.
-
-    Восстановление верификации — devtools#384, за границей этой поставки.
+    Если у родителя op `merge` не завершён, переносить нечего: отказ, и
+    отказ ДО создания каталога потомка — иначе под несостоявшимся id
+    осталась бы заглушка.
     """
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=1,
     )
-    parent_id = "r-verify-parent"
+    parent_id = "r-384-no-merge"
     parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="master")
     runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
-    # Потомок встаёт НЕтерминально (синхронизация не удалась) — именно в
-    # этом состоянии оператору и предлагают `resume` (сообщение
-    # `verify уже идёт: … (resume или дождитесь)`), поэтому отказ здесь не
-    # умозрителен.
-    ops.s8_exit = 0
-    ops.checkout_and_pull_error = "ff-only diverged"
-    child = runner.verify(parent_id, ops, "r-verify-child")
-    assert child.status not in ("completed", "merged_unverified"), child.status
-    assert child.remediated_by == parent_id
-    assert child.authoring == "legacy", (
-        "потомок наследует умолчание — это факт, от которого отказ и "
-        "происходит; тест обязан упасть, если умолчание изменят молча"
+    # Родитель без доказанного мержа — состояние, которого штатно не бывает
+    # (в merged_unverified попадают только ПОСЛЕ мержа), но леджер редактируем
+    # руками, и гвард обязан смотреть на факт, а не на статус.
+    parent.ops.pop("merge")
+    rs.save(parent)
+
+    with pytest.raises(ValueError, match="merge"):
+        runner.verify(parent_id, ops, "r-384-child-absent")
+
+    assert "r-384-child-absent" not in rs.all_run_ids(), (
+        "каталог потомка не создан — отказ до побочных эффектов"
     )
 
-    ledger = rs.run_dir("r-verify-child") / "run.json"
+
+def test_verify_refuses_when_parent_head_is_empty(
+    tmp_path: Path, runs_root,
+) -> None:
+    """D1, условие 3 ЦЕЛИКОМ: op `merge` завершён И `head` родителя непуст.
+
+    Ревью #391 нашло первую половину реализованной, вторую — нет. Родитель
+    с `head=None` проходил гвард, потомок создавался и доходил до
+    `completed`, неся перенесённое основание с `head=None`: идентичность
+    верифицируемого результата не была установлена ничем. Верифицировать
+    при этом нечего — без головы неизвестно, какие байты подтверждены.
+
+    Почему это стало выполнимо только теперь: до #393 `head` в волнах не
+    писал никто, и буквальная проверка закрыла бы `verify()` для каждого
+    волнового прогона. Prerequisite научил прогон помнить SHA своего
+    мержа, и условие 3 стало истинным по существу, а не по букве.
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=1,
+    )
+    parent_id = "r-391-no-head"
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="master")
+    runner._step_s8(parent, ops)
+    assert parent.status == "merged_unverified"
+    assert parent.ops["merge"]["status"] == "completed", "первая половина цела"
+
+    parent.head = None
+    rs.save(parent)
+    calls_before = len(ops.calls)
+
+    with pytest.raises(ValueError, match="head"):
+        runner.verify(parent_id, ops, "r-391-no-head-child")
+
+    assert "r-391-no-head-child" not in rs.all_run_ids(), (
+        "каталог потомка не создан — отказ до побочных эффектов"
+    )
+    assert ops.calls[calls_before:] == [], "ни одной операции"
+
+
+def test_verify_child_carries_the_proven_merge_before_running_s8(
+    tmp_path: Path, runs_root,
+) -> None:
+    """D1: факт пишется В ЛЕДЖЕР потомка и ДО запуска S8.
+
+    Порядок — предмет: гибель внутри S8 не должна оставить потомка без
+    основания, иначе повторный resume снова не знал бы, что мерж доказан.
+    Проверяется журналом вызовов, а не «после всего».
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=1,
+    )
+    parent_id = "r-384-basis"
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="master")
+    runner._step_s8(parent, ops)
+
+    ops.s8_exit = 0
+    child = runner.verify(parent_id, ops, "r-384-basis-child")
+
+    assert child.ops["merge"]["status"] == "completed"
+    assert child.ops["merge"]["source"] == parent_id, (
+        "запись ссылается на родительский op, а не сочиняет свой"
+    )
+    # На диске — тоже: основание обязано пережить гибель процесса.
+    assert rs.load("r-384-basis-child").ops["merge"]["source"] == parent_id
+    assert child.authoring == parent.authoring, (
+        "потомок принадлежит циклу родителя (D3)"
+    )
+
+
+def test_resume_of_a_verification_child_runs_only_s8(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """devtools#384, D2: потомок после НЕтерминального отказа доигрывает
+    только S8 — ни интервью, ни авторинга, ни PR, ни повторного мержа.
+
+    Пересматривает решение от 2026-09-23 («потомку отказывать»): оно
+    принималось, когда альтернативой была тихая перезапись `authoring`
+    ради прохода через гвард. Теперь основание другое — доказанный и
+    ЗАПИСАННЫЙ факт мержа (§2a), а `authoring` потомок наследует.
+
+    Проверяется журналом вызовов, а не статусом на выходе: «дошёл до
+    completed» истинно и для прогона, который прошёл весь конвейер заново.
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=1,
+    )
+    parent_id = "r-384-resume-parent"
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="master")
+    runner._step_s8(parent, ops)
+    assert parent.status == "merged_unverified"
+
+    # Потомок встаёт НЕтерминально: синхронизация не удалась.
+    ops.s8_exit = 0
+    ops.checkout_and_pull_error = "ff-only diverged"
+    child = runner.verify(parent_id, ops, "r-384-resume-child")
+    assert child.status not in ("completed", "merged_unverified"), child.status
+
+    # Основание — НА ДИСКЕ до повтора: повтор обязан опираться на леджер,
+    # а не на поле живого объекта. Читаем файл, а не `child`.
+    on_disk = rs.load("r-384-resume-child")
+    assert on_disk.ops["merge"]["source"] == parent_id
+    assert on_disk.ops.get("gate-authoritative", {}).get("status") != "completed"
+
+    ops.checkout_and_pull_error = None
+    before = len(ops.calls)
+    resumed = runner.resume("r-384-resume-child", ops)
+
+    names = [c[0] for c in ops.calls[before:]]
+    assert "author" not in names and "create_draft_pr" not in names
+    assert "merge" not in names, "повторного мержа быть не может"
+    assert ("gate_check_s8", resumed.bundle_dir) in ops.calls[before:]
+    assert resumed.status == "completed"
+    assert rs.load(parent_id).status == "merged_unverified", (
+        "родитель терминален навсегда и не трогается"
+    )
+
+
+def test_ws_lock_releases_only_after_the_child_completes(
+    tmp_path: Path, runs_root,
+) -> None:
+    """D4: лок отпускает ws_id ровно на `completed`-потомке — и держит,
+    пока верификация не удалась.
+
+    Обе стороны в одном тесте намеренно: «лок отпустил» без «лок держал»
+    истинно и у сломанного лока.
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=1,
+    )
+    parent_id = "r-384-lock-parent"
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="master")
+    runner._step_s8(parent, ops)
+    assert parent.status == "merged_unverified"
+    assert runner._blocking_merged_unverified(parent.ws_id) == parent_id
+
+    # Провальная верификация лок СОХРАНЯЕТ: подтверждения так и нет.
+    failed = runner.verify(parent_id, ops, "r-384-lock-failed")
+    assert failed.status == "merged_unverified"
+    # Лок ДЕРЖИТСЯ, и держателем остаётся КОРЕНЬ ЦИКЛА (D4a). Провальный
+    # потомок самостоятельным держателем не становится: нового мержа в
+    # base он не вносил — проверял тот же самый. До D4a держателем
+    # считался он, и освободить его мог бы только потомок ПОТОМКА,
+    # которого не бывает: лок висел бы вечно даже после успешного брата.
+    assert runner._blocking_merged_unverified(parent.ws_id) == parent_id
+
+    ops.s8_exit = 0
+    green = runner.verify(parent_id, ops, "r-384-lock-green")
+    assert green.status == "completed"
+    assert runner._blocking_merged_unverified(parent.ws_id) is None
+    assert rs.load(parent_id).status == "merged_unverified", (
+        "родитель терминален навсегда"
+    )
+
+
+def test_full_lock_regression_root_failed_sibling_green_then_new_run(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """D4a, регрессия ЦЕЛИКОМ: родитель → провальный потомок → успешный
+    брат → новый прогон с тем же `ws_id` разрешён.
+
+    До успеха запрещён на КАЖДОМ шаге, включая промежуток после провальной
+    попытки: «лок отпустил» без «лок держал на каждом шаге» истинно и у
+    сломанного лока.
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=1,
+    )
+    parent_id = "r-384-full-parent"
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="master")
+    runner._step_s8(parent, ops)
+    ws_id = parent.ws_id
+
+    def _new_run_allowed() -> bool:
+        return runner._blocking_merged_unverified(ws_id) is None
+
+    assert not _new_run_allowed(), "после merged_unverified — запрещён"
+
+    runner.verify(parent_id, ops, "r-384-full-failed")
+    assert not _new_run_allowed(), "после ПРОВАЛЬНОЙ попытки — всё ещё запрещён"
+
+    ops.s8_exit = 0
+    green = runner.verify(parent_id, ops, "r-384-full-green")
+    assert green.status == "completed"
+    assert _new_run_allowed(), "успешный брат освобождает ЦИКЛ"
+
+    # И это действительно разрешает новый прогон, а не только меняет
+    # значение предиката: `start()` по тому же ws_id больше не отказывает.
+    _fake_wave_adapters(monkeypatch, ops)
+    fresh = runner.start(
+        **_waves_kwargs(tmp_path, "r-384-full-fresh", ops, ws_id=ws_id)
+    )
+    assert fresh.run_id == "r-384-full-fresh"
+    assert rs.load(parent_id).status == "merged_unverified", "корень не тронут"
+    assert rs.load("r-384-full-failed").status == "merged_unverified", (
+        "история попыток не переписана"
+    )
+
+
+def test_unproven_cycle_membership_keeps_holding_the_lock(
+    tmp_path: Path, runs_root,
+) -> None:
+    """D4a, негативная половина: читаемый КОРЕНЬ, но противоречивый
+    `source` — запись остаётся САМОСТОЯТЕЛЬНЫМ держателем, и успешный
+    брат её не снимает.
+
+    Без второго утверждения «лок отпустило» и «блокер перестал считаться»
+    неразличимы: обе гипотезы дают None у предиката.
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=1,
+    )
+    parent_id = "r-384-unproven-parent"
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="master")
+    runner._step_s8(parent, ops)
+    ws_id = parent.ws_id
+
+    rogue = runner.verify(parent_id, ops, "r-384-unproven-rogue")
+    assert rogue.status == "merged_unverified"
+    rogue.ops["merge"]["source"] = "r-somebody-else"
+    rs.save(rogue)
+
+    ops.s8_exit = 0
+    green = runner.verify(parent_id, ops, "r-384-unproven-green")
+    assert green.status == "completed"
+
+    holder = runner._blocking_merged_unverified(ws_id)
+    assert holder == "r-384-unproven-rogue", (
+        "недоказанная связь оставляет запись самостоятельным держателем, "
+        f"и успешный брат её не снимает; держатель: {holder!r}"
+    )
+
+
+def test_console_renders_a_verification_child_without_a_corrupt_row(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Task 3: потребители леджера переживают наследование `authoring`.
+
+    Потомок наследует режим родителя (D3), а не объявляется волновым —
+    иначе консоль строила бы по полю перечень шагов ВОЛН, а `_wave_pr`
+    искал бы candidate-PR волны: ни того, ни другого у потомка нет.
+    """
+    from governance import console_model as cm
+
+    monkeypatch.setattr(cm, "RUNS_ROOT", rs.RUNS_ROOT, raising=False)
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=1,
+    )
+    parent_id = "r-384-console-parent"
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="master")
+    runner._step_s8(parent, ops)
+    ops.s8_exit = 0
+    child = runner.verify(parent_id, ops, "r-384-console-child")
+
+    rows = {row.run_id: row for row in cm.list_runs()}
+    assert set(rows) == {parent_id, "r-384-console-child"}
+    assert all(row.status for row in rows.values()), "ни одной строки-заглушки"
+    assert rows["r-384-console-child"].status == "completed"
+
+    detail = cm.run_detail("r-384-console-child")
+    assert detail.row.status == "completed"
+    assert child.authoring == parent.authoring
+
+
+def test_grandchild_whose_parent_is_not_the_root_holds_the_lock(
+    tmp_path: Path, runs_root,
+) -> None:
+    """§5a, условие 3: родитель обязан быть КОРНЕМ цикла.
+
+    Запись, чей `remediated_by` указывает на прогон, который сам чей-то
+    потомок, принадлежность к циклу не доказала — и остаётся
+    самостоятельным держателем. Без этого условия цепочка
+    «корень → потомок → потомок потомка» молча снимала бы лок: у каждого
+    звена родитель читается, статус подходит, `source` совпадает.
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=1,
+    )
+    root_id = "r-384-chain-root"
+    root = _wave_run_at_s8(tmp_path, root_id, ops, base_ref="master")
+    runner._step_s8(root, ops)
+    ws_id = root.ws_id
+
+    child = runner.verify(root_id, ops, "r-384-chain-child")
+    assert child.status == "merged_unverified"
+
+    # Внук: связь с ПОТОМКОМ, а не с корнем. Все прочие условия §5a у него
+    # истинны — потому тест и различает именно условие 3.
+    grandchild = runner.verify("r-384-chain-child", ops, "r-384-chain-grand")
+    assert grandchild.remediated_by == "r-384-chain-child"
+    assert grandchild.ops["merge"]["source"] == "r-384-chain-child"
+    assert grandchild.status == "merged_unverified"
+
+    # Корень верифицирован — но внук остаётся держателем: его цикл не
+    # доказан, и снимать лок его наличием нельзя.
+    ops.s8_exit = 0
+    assert runner.verify(root_id, ops, "r-384-chain-green").status == "completed"
+
+    holder = runner._blocking_merged_unverified(ws_id)
+    assert holder == "r-384-chain-grand", (
+        "родитель внука сам потомок — принадлежность к циклу не доказана; "
+        f"держатель: {holder!r}"
+    )
+
+
+def test_resume_of_a_completed_verification_child_does_nothing(
+    tmp_path: Path, runs_root,
+) -> None:
+    """D3, таблица: `completed`-потомок — возврат БЕЗ эффектов.
+
+    Проверяется журналом вызовов и байтами леджера, а не статусом: статус
+    завершённого прогона совпадает до и после при ЛЮБОМ поведении, и
+    утверждать по нему значило бы не проверять ничего.
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=1,
+    )
+    parent_id = "r-384-done-parent"
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="master")
+    runner._step_s8(parent, ops)
+
+    ops.s8_exit = 0
+    child = runner.verify(parent_id, ops, "r-384-done-child")
+    assert child.status == "completed"
+
+    ledger = rs.run_dir("r-384-done-child") / "run.json"
     before = ledger.read_bytes()
     calls_before = len(ops.calls)
 
-    with pytest.raises(ValueError) as exc:
-        runner.resume("r-verify-child", ops)
+    again = runner.resume("r-384-done-child", ops)
 
-    assert "2026-09-23" in str(exc.value) and "S13" in str(exc.value)
-    assert ledger.read_bytes() == before, "отказ обязан быть бесследным"
-    assert ops.calls[calls_before:] == [], "ни одного обращения к фордже/git"
-    assert rs.load("r-verify-child").authoring == "legacy", (
-        "режим потомку НЕ переписывается ради прохода через гвард (D2)"
+    assert again.status == "completed"
+    assert ops.calls[calls_before:] == [], (
+        "ни gate_check_s8, ни любой другой op не вызывается"
     )
-    assert rs.load(parent_id).status == "merged_unverified", (
-        "родитель остаётся терминальным — WS-lock держит соседей как прежде"
+    assert ledger.read_bytes() == before
+
+
+def test_historical_legacy_ledger_with_completed_merge_is_still_refused(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Негативная половина §2a — и она обязательна, а не для симметрии.
+
+    Из 16 реальных леджеров ДВЕНАДЦАТЬ несут `merge=completed`. По
+    предикату «legacy и merge не завершён» они получили бы S8-повтор:
+    прогон authoritative-гейта СТАРОГО дерева против СЕГОДНЯШНЕГО
+    мастера. Различает их не `merge`, а `remediated_by` — у исторических
+    он пуст.
+    """
+    state = _saved_legacy_run("r-384-historical", status="completed")
+    state.ops["merge"] = {"status": "completed", "merged": True}
+    rs.save(state)
+    ledger = rs.run_dir("r-384-historical") / "run.json"
+    before = ledger.read_bytes()
+    ops = FakeOps()
+
+    # Сверяем ИМЕННО стража режима, а не любое сообщение с «S13»: эта
+    # подстрока есть и в отказе допуска потомка, и под наивным предикатом
+    # («различаем по merge») тест проходил бы по ЧУЖОЙ причине —
+    # исторический прогон уходил бы в ветку потомка и отказывался там.
+    with pytest.raises(ValueError, match="прежний путь авторинга удалён"):
+        runner.resume("r-384-historical", ops)
+
+    assert ledger.read_bytes() == before
+    assert ops.calls == []
+
+
+@pytest.mark.parametrize(
+    "damage, why",
+    [
+        ("no_source", "основание не предъявлено"),
+        ("foreign_source", "ссылается не на того родителя"),
+        ("parent_not_unverified", "родителю верифицировать нечего"),
+    ],
+)
+def test_verification_child_admission_is_fail_closed(
+    tmp_path: Path, runs_root, damage: str, why: str,
+) -> None:
+    """Границы допуска §2a — fail-closed. Каждый случай ломает РОВНО одно
+    из четырёх условий, остальные три оставляя истинными: иначе тест
+    проходил бы по чужой причине."""
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=1,
     )
+    parent_id = "r-384-fc-parent"
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="master")
+    runner._step_s8(parent, ops)
+
+    ops.s8_exit = 0
+    ops.checkout_and_pull_error = "ff-only diverged"
+    child = runner.verify(parent_id, ops, "r-384-fc-child")
+    ops.checkout_and_pull_error = None
+
+    if damage == "no_source":
+        child.ops["merge"].pop("source")
+    elif damage == "foreign_source":
+        child.ops["merge"]["source"] = "r-somebody-else"
+    else:
+        parent.status = "completed"
+        rs.save(parent)
+    rs.save(child)
+
+    # Отказ ИМЕННО допуска, а не стража режима: у потомка волнового
+    # родителя страж не срабатывает вовсе, и совпадение по «S13» не
+    # отличило бы одно от другого.
+    with pytest.raises(ValueError, match="повтор S8 не допущен"):
+        runner.resume("r-384-fc-child", ops)
 
 
 def test_resume_refusal_of_a_legacy_run_leaves_the_ledger_byte_identical(
