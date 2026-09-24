@@ -1,0 +1,81 @@
+{
+  "author_backend": "codex",
+  "base_ref": "master",
+  "branch": "spec/WS-SMOKE-001-behaviour",
+  "bundle_dir": "workstreams/WS-SMOKE-001/spec",
+  "head": null,
+  "merge_authority": null,
+  "ops": {
+    "author-behaviour": {
+      "exit": 0,
+      "skipped": false,
+      "status": "completed"
+    },
+    "author-charter": {
+      "exit": 0,
+      "skipped": false,
+      "status": "completed"
+    },
+    "author-requirements": {
+      "exit": 0,
+      "skipped": false,
+      "status": "completed"
+    },
+    "branch": {
+      "status": "completed"
+    },
+    "commit": {
+      "status": "completed"
+    },
+    "gate-authoritative": {
+      "exit": 2,
+      "output": "config error: [Errno 2] No such file or directory: 'profiles/gate-catalog.yaml'\n",
+      "status": "completed"
+    },
+    "gate-candidate": {
+      "error_count": 0,
+      "required_absent": [],
+      "status": "completed"
+    },
+    "merge": {
+      "merged": true,
+      "status": "completed"
+    },
+    "pr": {
+      "number": 91,
+      "status": "completed"
+    },
+    "push": {
+      "status": "completed"
+    },
+    "ready": {
+      "status": "completed"
+    },
+    "remediation-issue": {
+      "number": 92,
+      "status": "completed"
+    },
+    "review": {
+      "exit": 0,
+      "status": "completed"
+    },
+    "sync-default": {
+      "status": "completed"
+    },
+    "verdict": {
+      "decision": "human",
+      "reason": "дифф затрагивает authority-root пути (ADR-ECO-004 I2)",
+      "status": "completed"
+    }
+  },
+  "pr": 91,
+  "profile": "profiles/team-exp.yaml",
+  "remediated_by": null,
+  "repo": "devtools",
+  "repo_slug": "andrei-shtanakov/devtools",
+  "run_id": "WS-SMOKE-001-a1",
+  "status": "merged_unverified",
+  "subject": "Наблюдаемость прогонов behaviour-runner: список прогонов и их статусов в консоли (смоук WS-SMOKE-001)",
+  "target_dir": "/fixture/smoke-devtools",
+  "ws_id": "WS-SMOKE-001"
+}

@@ -1,0 +1,27 @@
+{
+  "author_backend": "codex",
+  "base_ref": "master",
+  "branch": "spec/WS-SMOKE-001-behaviour",
+  "bundle_dir": "workstreams/WS-SMOKE-001/spec",
+  "head": null,
+  "merge_authority": null,
+  "ops": {
+    "gate-authoritative": {
+      "exit": 0,
+      "status": "completed"
+    },
+    "sync-default": {
+      "status": "completed"
+    }
+  },
+  "pr": 91,
+  "profile": "profiles/team-exp.yaml",
+  "remediated_by": "WS-SMOKE-001-a1",
+  "repo": "devtools",
+  "repo_slug": "andrei-shtanakov/devtools",
+  "run_id": "WS-SMOKE-001-a1-v1",
+  "status": "completed",
+  "subject": "Наблюдаемость прогонов behaviour-runner: список прогонов и их статусов в консоли (смоук WS-SMOKE-001)",
+  "target_dir": "/fixture/smoke-devtools",
+  "ws_id": "WS-SMOKE-001"
+}

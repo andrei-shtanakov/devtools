@@ -1641,97 +1641,6 @@ def _repin_bundle(bundle_dir: Path) -> None:
     )
 
 
-def test_happy_path_agent_merge(tmp_path: Path, runs_root, monkeypatch) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
-    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
-
-    state = runner.start(**_start_kwargs(tmp_path, "r-happy", ops, authoring="legacy"))
-
-    assert state.ops["merge"]["status"] == "completed"
-    assert ops.merged == [(state.pr, ops.head)]
-    # Мерж адресован каталогом репо, а не слагом: S7 ходит через
-    # `merge-pr.sh` — единственный путь агентского мержа, — и обвязка
-    # выводит slug из сырого origin этого чекаута сама.
-    assert ops.merge_targets == [state.repo]
-    assert "/" not in ops.merge_targets[0]
-
-
-def test_today_reality_agent_merges(tmp_path: Path, runs_root, monkeypatch) -> None:
-    """Без monkeypatch safety: вендоренная копия @ steward 6a70d15 —
-    allowed=True, ai-prosto=agent → зелёный document-PR мержится агентом."""
-    ops = FakeOps(
-        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
-    )
-
-    state = runner.start(**_start_kwargs(tmp_path, "r-human", ops, authoring="legacy"))
-
-    assert state.ops["merge"]["status"] == "completed"
-    assert ops.merged == [(state.pr, ops.head)]
-    assert state.status == "completed"
-
-
-def test_merge_authority_human_still_waits(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """Run-override merge_authority=human обгоняет разрешающую safety."""
-    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
-
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-human-override", ops, merge_authority="human", authoring="legacy")
-    )
-
-    assert "merge" not in state.ops
-    assert ops.merged == []
-    assert ops.comments
-    assert state.status == "waiting_human_merge"
-
-
-def test_review_request_changes_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
-    ops = FakeOps(review_exit=1)
-
-    state = runner.start(**_start_kwargs(tmp_path, "r-review", ops, authoring="legacy"))
-
-    assert state.status == "stopped_review"
-    assert ops.merged == []
-    assert "verdict" not in state.ops
-
-
-def test_resume_does_not_duplicate_pr(tmp_path: Path, runs_root) -> None:
-    ops = FakeOps()
-    kwargs = _start_kwargs(tmp_path, "r-resume", ops)
-    branch = "spec/WS-1-behaviour"
-    state = rs.new_run(authoring="legacy", 
-        subject=kwargs["subject"], repo=kwargs["repo"],
-        repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
-        target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
-        profile=kwargs["profile"], run_id=kwargs["run_id"],
-    )
-    state.branch = branch
-    state.ops = {
-        "branch": {"status": "completed"},
-        "author-charter": {"status": "completed", "skipped": True},
-        "author-requirements": {"status": "completed", "skipped": True},
-        "author-behaviour": {"status": "completed", "skipped": True},
-        "gate-candidate": {
-            "status": "completed", "exit": 0,
-        },
-        "push": {"status": "completed"},
-        "pr": {"status": "started"},
-    }
-    rs.save(state)
-    # Симулируем: PR реально создан до "гибели" прогона.
-    ops.existing_prs[branch] = 42
-
-    result = runner.advance(state, ops)
-
-    assert "create_draft_pr" not in [c[0] for c in ops.calls]
-    assert result.pr == 42
-    assert result.ops["pr"] == {"status": "completed", "number": 42}
-
-
 def test_gate_red_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     ops = FakeOps(gate_candidate=[(1, "error GC-X: bad\n")])
 
@@ -2620,113 +2529,10 @@ def test_resume_from_stopped_author_reruns_unfinished_author(
     assert result.status != "stopped_author"
 
 
-def test_verdict_refuse_status_is_distinct_from_stopped_gate(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """M-1: S7 `refuse` получает свой статус, не путается с S4 stopped_gate —
-    у них разные причины и разная починка."""
-    ops = FakeOps(
-        review_exit=0,
-        facts={**GREEN_PR_FACTS, "statusCheckRollup": [{"conclusion": "FAILURE"}]},
-        files=GREEN_BUNDLE_FILES,
-    )
-
-    state = runner.start(**_start_kwargs(tmp_path, "r-refuse", ops, authoring="legacy"))
-
-    assert state.status == "stopped_merge_refused"
-    assert state.status != "stopped_gate"
-
-
 # --- F-2: verdict — аудит, не кэш решения -----------------------------------
 
 
-def test_stale_cached_agent_verdict_does_not_merge_on_fresh_red_facts(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """F-2: op verdict уже completed=agent в run.json (write-ahead между
-    _step_verdict и _step_merge), но свежий опрос PR даёт красный rollup —
-    merge НЕ вызывается, decide() пересчитывается заново на этом заходе."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
-    ops = FakeOps(
-        review_exit=0,
-        facts={**GREEN_PR_FACTS, "statusCheckRollup": [{"conclusion": "FAILURE"}]},
-        files=GREEN_BUNDLE_FILES,
-    )
-    kwargs = _start_kwargs(tmp_path, "r-verdict-stale", ops)
-    state = rs.new_run(authoring="legacy", 
-        subject=kwargs["subject"], repo=kwargs["repo"],
-        repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
-        target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
-        profile=kwargs["profile"], run_id=kwargs["run_id"],
-    )
-    state.branch = "spec/WS-1-behaviour"
-    state.pr = 100
-    state.head = "deadbeef"
-    state.ops = {
-        "branch": {"status": "completed"},
-        "author-charter": {"status": "completed", "skipped": True},
-        "author-requirements": {"status": "completed", "skipped": True},
-        "author-behaviour": {"status": "completed", "skipped": True},
-        "commit": {"status": "completed"},
-        "gate-candidate": {
-            "status": "completed", "exit": 0,
-        },
-        "push": {"status": "completed"},
-        "pr": {"status": "completed", "number": 100},
-        "ready": {"status": "completed"},
-        "review": {"status": "completed", "exit": 0},
-        # Кэшированный вердикт с прошлого захода — устарел за время простоя.
-        "verdict": {"status": "completed", "decision": "agent", "reason": "stale"},
-    }
-    rs.save(state)
-
-    result = runner.advance(state, ops)
-
-    assert ops.merged == []
-    assert result.ops.get("merge", {}).get("status") != "completed"
-    assert result.status == "stopped_merge_refused"
-    assert result.ops["verdict"]["decision"] == "refuse"
-
-
 # --- F-5: find_pr транзиентный сбой -----------------------------------------
-
-
-def test_pr_reconciliation_find_pr_failure_stops_without_duplicate(
-    tmp_path: Path, runs_root,
-) -> None:
-    """F-5: `find_pr` поднимает RuntimeError на сбое gh — не читать как
-    "PR нет", не открывать второй; op остаётся started, run продолжает ждать."""
-    ops = FakeOps(find_pr_error="gh pr list: transient network error")
-    kwargs = _start_kwargs(tmp_path, "r-pr-transient", ops)
-    state = rs.new_run(authoring="legacy", 
-        subject=kwargs["subject"], repo=kwargs["repo"],
-        repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
-        target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
-        profile=kwargs["profile"], run_id=kwargs["run_id"],
-    )
-    state.branch = "spec/WS-1-behaviour"
-    state.ops = {
-        "branch": {"status": "completed"},
-        "author-charter": {"status": "completed", "skipped": True},
-        "author-requirements": {"status": "completed", "skipped": True},
-        "author-behaviour": {"status": "completed", "skipped": True},
-        "commit": {"status": "completed"},
-        "gate-candidate": {
-            "status": "completed", "exit": 0,
-        },
-        "push": {"status": "completed"},
-        "pr": {"status": "started"},
-    }
-    rs.save(state)
-
-    result = runner.advance(state, ops)
-
-    assert "create_draft_pr" not in [c[0] for c in ops.calls]
-    assert result.ops["pr"] == {"status": "started"}
-    assert result.status == "running"
 
 
 # --- F-6: commit перед push --------------------------------------------------
@@ -2752,22 +2558,6 @@ def test_commit_paths_called_between_author_and_push(
 
 
 # --- F-7: exit 4 переигрывает и prospective-гейт -----------------------------
-
-
-def test_review_exit4_resets_gate_candidate_and_push_too(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """F-7: голова PR уехала (exit 4) — S4 обязан переиграться, не только S6."""
-    ops = FakeOps(review_exit=4)
-
-    state = runner.start(**_start_kwargs(tmp_path, "r-review-moved", ops, authoring="legacy"))
-
-    assert state.status == "running"
-    assert "gate-candidate" not in state.ops
-    assert "push" not in state.ops
-    assert "ready" not in state.ops
-    assert "review" not in state.ops
-    assert state.ops["pr"]["status"] == "completed"  # PR не переоткрывается
 
 
 # --- F-4 → CLI: шов runner ↔ gate-check --candidate, без мока ---------------
@@ -3382,45 +3172,6 @@ def test_resume_rebuilds_missing_s8_findings_from_op_output(
 # --- Круг 10: статус фиксируется до стоп-комментария -----------------------
 
 
-def test_stop_with_comment_saves_status_before_commenting(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """Круг 10 (codex-major): статус сохраняется на диске ДО best-effort
-    комментария во всех стоп-с-комментарием путях (S6 exit 1/2/3, S7
-    human/refuse, merge False) — иначе гибель между `ops.comment` и
-    `save()` оставляла run в `"running"`, и следующий `advance()` переигрывал
-    этот же шаг с нуля, включая повторный (дублирующий) комментарий.
-    Проверка через "шпиона": `ops.comment`, вызванный, читает `run.json` с
-    диска в момент своего вызова — статус там уже обязан быть терминальным.
-
-    S13, разбор: тест остаётся на прежнем пути НЕ по признаку падения, а
-    потому что КОММЕНТИРУЮЩАЯ половина `_stop_with_comment` достижима
-    только там. Она ключуется на `state.pr`, а `state.pr` выставляет
-    единственный шаг — `_step_pr`, удаляемый. В волнах у прогона `pr`
-    остаётся `None`, и помощник уходит в ветку «PR нет»: пишет
-    `stop-reason.txt` и печатает причину, комментария не делает вовсе.
-    Сам помощник переживает удаление и продолжает звать́ся из шага
-    candidate и из `_resume_wave` — но проверяемое здесь свойство после
-    удаления станет ненаблюдаемым. Живой аналог — `_wave_pause`, у него
-    своя реализация того же порядка и свой тест ниже.
-    """
-    ops = FakeOps(review_exit=1)
-    run_id = "r-comment-order"
-    seen_status_at_comment_time: dict[str, str] = {}
-    original_comment = ops.comment
-
-    def spying_comment(repo_slug: str, pr: int, body: str) -> None:
-        seen_status_at_comment_time["status"] = rs.load(run_id).status
-        return original_comment(repo_slug, pr, body)
-
-    ops.comment = spying_comment  # type: ignore[method-assign]
-
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-
-    assert state.status == "stopped_review"
-    assert seen_status_at_comment_time["status"] == "stopped_review"
-
-
 def test_wave_pause_saves_status_before_commenting(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
@@ -3495,42 +3246,6 @@ def test_start_rejects_invalid_author_backend_before_reserving_run_id(
         runner.start(**kwargs)
 
     assert not (rs.run_dir(run_id) / "run.json").exists()
-
-
-def test_stop_review_comment_includes_evidence_hint(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """Спека §7: стоп-комментарий S6 (exit 1) дополняется evidence-подсказкой
-    про известный ложный класс находок «файлов нет» — `git cat-file -e
-    <head>:<путь>` с реальной подставленной головой."""
-    ops = FakeOps(review_exit=1)
-    run_id = "r-review-evidence"
-
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-
-    assert state.status == "stopped_review"
-    assert ops.comments
-    assert f"git cat-file -e {ops.head}" in ops.comments[-1]
-
-
-def test_stop_review_comment_survives_head_sha_failure(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """I-6, финальное ревью: `head_sha` — чисто косметическая evidence-
-    подсказка, вызывается на СТОП-пути ДО `_stop_with_comment`. Если ветки
-    нет локально/`target_dir` уехал (`RealOps.head_sha` зовёт `git
-    rev-parse` с `check=True`), штатная остановка «ревью нашло находки» не
-    должна превращаться в необработанное исключение вместо
-    comment+`stopped_review` — сбой глотается, в подсказку идёт литерал
-    `<head>`."""
-    ops = FakeOps(review_exit=1, head_sha_error="fatal: bad revision")
-    run_id = "r-review-evidence-head-fails"
-
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-
-    assert state.status == "stopped_review"
-    assert ops.comments
-    assert "git cat-file -e <head>" in ops.comments[-1]
 
 
 # --- B2 Task 2: авторинг-бэкенд codex|disp ----------------------------------
@@ -4075,41 +3790,6 @@ def test_gate_accepts_design_heading_with_nonstandard_middot_spacing(
     assert state.ops[f"gate-candidate-{state.wave}"]["status"] == "completed"
 
 
-def test_rollup_unstable_failure_still_refuses(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """Любой FAILURE = red даже при mergeStateStatus=UNSTABLE (приёмка
-    PR #99): в rulesets флота нет required-чеков, UNSTABLE означает «упало
-    что угодно, хоть тесты» — поблажка мержила бы агентом красный test."""
-    facts = {
-        **GREEN_PR_FACTS,
-        "statusCheckRollup": [
-            {"conclusion": "SUCCESS"}, {"conclusion": "FAILURE"},
-        ],
-        "mergeStateStatus": "UNSTABLE",
-    }
-    ops = FakeOps(review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES)
-    state = runner.start(**_start_kwargs(tmp_path, "r-unstable", ops, authoring="legacy"))
-
-    assert state.status == "stopped_merge_refused"
-    assert ops.merged == []
-
-
-def test_rollup_red_blocked_still_refuses(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    facts = {
-        **GREEN_PR_FACTS,
-        "statusCheckRollup": [{"conclusion": "FAILURE"}],
-        "mergeStateStatus": "BLOCKED",
-    }
-    ops = FakeOps(review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES)
-    state = runner.start(**_start_kwargs(tmp_path, "r-blocked", ops, authoring="legacy"))
-
-    assert state.status == "stopped_merge_refused"
-    assert ops.merged == []
-
-
 def test_gate_unpinned_draft_edge_stops_locally(
     tmp_path: Path, runs_root, monkeypatch
 ) -> None:
@@ -4317,66 +3997,6 @@ def test_file_missing_parser() -> None:
     assert runner._file_missing_refute_candidates("### [minor] x — `a:1`\n") is None
 
 
-def test_review_auto_refutes_file_missing(
-    tmp_path: Path, runs_root,
-) -> None:
-    """Спека §7: все блокирующие — file-missing, файлы существуют →
-    комментарий с evidence, пере-прогон --fresh, зелёный — прогон едет дальше."""
-    ops = FakeOps(
-        review_exit=1, review_fresh_exit=0, review_body=_FM_BODY,
-        existing_files={"governance/foo.py"},
-        facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
-    )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-ok", ops, authoring="legacy"))
-
-    assert state.ops["review-refute"]["status"] == "completed"
-    assert state.ops["review"] == {"status": "completed", "exit": 0}
-    assert any(c[0] == "review_fresh" for c in ops.calls)
-    assert any("Авто-опровержение" in c for c in ops.comments)
-    assert state.status == "completed"
-
-
-def test_review_mixed_verdict_goes_to_human(
-    tmp_path: Path, runs_root,
-) -> None:
-    ops = FakeOps(
-        review_exit=1, review_body=_MIXED_BODY,
-        existing_files={"governance/foo.py", "governance/bar.py"},
-        facts=GREEN_PR_FACTS,
-    )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-mixed", ops, authoring="legacy"))
-
-    assert state.status == "stopped_review"
-    assert not any(c[0] == "review_fresh" for c in ops.calls)
-    assert "review-refute" not in state.ops
-
-
-def test_review_truly_missing_file_goes_to_human(
-    tmp_path: Path, runs_root,
-) -> None:
-    ops = FakeOps(review_exit=1, review_body=_FM_BODY, facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-real", ops, authoring="legacy"))
-
-    assert state.status == "stopped_review"
-    assert not any(c[0] == "review_fresh" for c in ops.calls)
-
-
-def test_review_refute_is_single_attempt(
-    tmp_path: Path, runs_root,
-) -> None:
-    """Fresh-прогон снова красный → стоп; вторая авто-попытка не делается."""
-    ops = FakeOps(
-        review_exit=1, review_fresh_exit=1, review_body=_FM_BODY,
-        existing_files={"governance/foo.py"},
-        facts=GREEN_PR_FACTS,
-    )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-again", ops, authoring="legacy"))
-
-    assert state.status == "stopped_review"
-    assert [c[0] for c in ops.calls].count("review_fresh") == 1
-    assert state.ops["review-refute"]["status"] == "completed"
-
-
 def test_parser_defect_mentioning_file_missing_literal_is_not_refutable() -> None:
     """Приёмка PR #102: defect-находка, чей текст лишь УПОМИНАЕТ литерал
     `file-missing` (без kindline рендера), не классифицируется как
@@ -4387,97 +4007,6 @@ def test_parser_defect_mentioning_file_missing_literal_is_not_refutable() -> Non
         "- confidence: high → БЛОКИРУЕТ\n"
     )
     assert runner._file_missing_refute_candidates(body) is None
-
-
-def test_review_fresh_instrument_failure_routed_honestly(
-    tmp_path: Path, runs_root,
-) -> None:
-    """Приёмка PR #102, minor: fresh exit 2/3 — «прибор не отработал»,
-    не «сохранившиеся находки»."""
-    ops = FakeOps(
-        review_exit=1, review_fresh_exit=2, review_body=_FM_BODY,
-        existing_files={"governance/foo.py"},
-        facts=GREEN_PR_FACTS,
-    )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-instr", ops, authoring="legacy"))
-
-    assert state.status == "stopped_review"
-    assert any("прибор не отработал" in c for c in ops.comments)
-
-
-def test_barrier_stop_is_named_and_persistent(tmp_path: Path, runs_root) -> None:
-    """devtools#258: код 6 — барьер, а не сбой прибора.
-
-    Под кодом 2 контур постил в PR «прибор не отработал» — ложную причину:
-    прогон возможен, но требует решения владельца.
-
-    Второе утверждение — ПЕРСИСТЕНТНОСТЬ стопа: неопознанный код падал бы в
-    ветку «голова уехала», а она оставляет статус `running`, то есть шаг
-    переигрывается на следующем заходе, и барьерный стоп человеку не
-    виден. Заодно эта ветка не трогает op'ы — но гарантией сохранения
-    контентного гейта это НЕ является, и раньше докстринг утверждал
-    обратное (находка ревью devtools#275): единственный путь продолжения,
-    `resume()`, безусловно попает `_BUNDLE_EDIT_RESET_OPS`. Проверка ниже
-    фиксирует состояние в момент стопа, а не после resume. Довести
-    сохранение до конца — devtools#276.
-    """
-    ops = FakeOps(
-        review_exit=ops_mod.REVIEW_BARRIER_EXIT, facts=GREEN_PR_FACTS,
-        files=GREEN_BUNDLE_FILES,
-    )
-    state = runner.start(**_start_kwargs(tmp_path, "r-budget", ops, authoring="legacy"))
-
-    assert state.status == "stopped_review"
-    assert any(ops_mod.REVIEW_BARRIER_STOP in c for c in ops.comments)
-    assert not any("прибор не отработал" in c for c in ops.comments)
-    # Совет «повторите обычный запуск» помочь не может: журнал ключуется по
-    # slug#pr, новая голова круга не открывает.
-    assert not any("повторите обычный" in c for c in ops.comments)
-    # Находка ревью PR #275 (major): код 6 несёт ДВЕ причины — бюджет и
-    # stop rule, — и комментарий в PR не вправе утверждать одну из них как
-    # факт. Обе обязаны быть названы.
-    assert any("stop rule" in c for c in ops.comments)
-    # Эта ветка их не трогает — в отличие от reset-ветки, с которой её и
-    # надо различать. Что `resume()` их всё равно попает — сказано в
-    # докстринге; здесь проверяется момент стопа.
-    for op in ("gate-candidate", "push", "ready"):
-        assert op in state.ops, f"{op} сброшен барьерным стопом"
-
-
-def test_barrier_stop_on_fresh_path_is_named_too(
-    tmp_path: Path, runs_root,
-) -> None:
-    """Тот же барьер на пути авто-опровержения (`review_fresh`).
-
-    Две точки маршрутизации кодов ревью живут порознь (первичный прогон и
-    fresh после опровержения) — правка одной оставила бы вторую врущей.
-    """
-    ops = FakeOps(
-        review_exit=1, review_fresh_exit=ops_mod.REVIEW_BARRIER_EXIT,
-        review_body=_FM_BODY, existing_files={"governance/foo.py"},
-        facts=GREEN_PR_FACTS,
-    )
-    state = runner.start(**_start_kwargs(tmp_path, "r-budget-fresh", ops, authoring="legacy"))
-
-    assert state.status == "stopped_review"
-    assert any(ops_mod.REVIEW_BARRIER_STOP in c for c in ops.comments)
-    assert not any("прибор не отработал" in c for c in ops.comments)
-
-
-def test_head_move_after_refute_restores_attempt(
-    tmp_path: Path, runs_root,
-) -> None:
-    """Приёмка PR #102, круг 2: fresh exit 4 (голова уехала) сбрасывает и
-    review-refute — новый цикл получает свежую авто-попытку."""
-    ops = FakeOps(
-        review_exit=1, review_fresh_exit=4, review_body=_FM_BODY,
-        existing_files={"governance/foo.py"},
-        facts=GREEN_PR_FACTS,
-    )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-head", ops, authoring="legacy"))
-
-    assert "review-refute" not in state.ops
-    assert "review" not in state.ops  # весь цикл переигрывается
 
 
 def test_parser_takes_path_from_header_tail_not_forged_title() -> None:
@@ -7312,16 +6841,6 @@ def test_waves_projection_mismatch_stops_gate(tmp_path: Path, runs_root, monkeyp
     assert not any(c[0] == "gate_check_candidate" for c in ops.calls)
 
 
-def test_legacy_reset_table_is_unchanged_by_waves(tmp_path: Path, runs_root) -> None:
-    state = rs.new_run(authoring=_LEGACY_HISTORY, 
-        subject="s", repo="r", repo_slug="o/r", ws_id="WS", target_dir=str(tmp_path),
-        bundle_dir="spec", profile="profiles/team-exp.yaml", run_id="r-legacy",
-    )
-    state.status = "stopped_gate"
-    assert runner.reset_ops_for(state) == runner._BUNDLE_EDIT_RESET_OPS
-    assert runner._STOPPED_RESET_OPS["stopped_stale"] == ()
-
-
 def _fake_wave_adapters(monkeypatch, ops: FakeOps, *, code: int = 0) -> list[str]:
     """Шов раннера: заявка и публикация — реальный git-стенд approve_node;
     здесь проверяется ОРКЕСТРАЦИЯ (порядок вызовов, запись ключа, пауза)."""
@@ -7845,16 +7364,23 @@ def test_reopen_refuses_legacy_runs_and_finished_waves(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
-    monkeypatch.setattr(
-        runner, "load_safety", lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     # ИСТОРИЧЕСКИЙ СТРАЖ (`_LEGACY_HISTORY`): предмет теста — сам отказ
     # `--reopen` на прогоне прежнего режима. Прогон здесь не исполняет
     # удаляемый путь, он им ЯВЛЯЕТСЯ — предъявленным на вход гварду.
-    runner.start(
-        **_start_kwargs(tmp_path, "r-legacy-reopen", ops,
-                        authoring=_LEGACY_HISTORY)
+    #
+    # Леджер строится НАПРЯМУЮ: после S13 `start()` ведёт только волны, и
+    # получить legacy-прогон его вызовом больше нельзя. Исторические
+    # леджеры в `out/governance-runs` выглядят ровно так — файл, оставшийся
+    # от сессии, которой больше нет.
+    state = rs.new_run(
+        subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+        target_dir=str(tmp_path / "target"), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id="r-legacy-reopen",
+        authoring=_LEGACY_HISTORY,
     )
+    state.status = "stopped_review"
+    rs.save(state)
+
     with pytest.raises(ValueError, match="authoring=waves"):
         runner.reopen("r-legacy-reopen", "charter", ops)
 

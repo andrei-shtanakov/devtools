@@ -1,0 +1,522 @@
+{
+  "allow_legacy_dt": false,
+  "author_backend": "codex",
+  "authoring": "waves",
+  "base_ref": "master",
+  "branch": "spec/i5-traceless-noop-after-abandon-20260923-behaviour-w5",
+  "brief": {
+    "frame": "customer",
+    "primary": "00-discovery/brief.md",
+    "requirements_source": "00-discovery/brief.md",
+    "source_blobs": {
+      "discovery-brief": "7c1939ebc239c1d48ee0e58ab4f3806bbfd4d984"
+    },
+    "source_paths": [
+      "00-discovery/brief.md"
+    ]
+  },
+  "bundle_dir": "workstreams/i5-traceless-noop-after-abandon-20260923/spec",
+  "disp_anchor_dir": null,
+  "disp_slug": null,
+  "head": null,
+  "interview": null,
+  "merge_authority": "human",
+  "ops": {
+    "approve-1-0-1": {
+      "attempt": 1,
+      "authorization": {
+        "login": "andrei-shtanakov",
+        "policy": "v1:31bf16586b6cfbb69a29b23d8850bfe57931d99b",
+        "source": "github:andrei-shtanakov/approval-policy@12d198fb4db9ed6fbb1c5b00af308eeb31e4ec22:policy/approvers.env"
+      },
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-approve-1-0-1",
+      "candidate_pr": 363,
+      "content_hashes": {
+        "charter": "28ba96002d2a19f2fa7fe4a9a294c64d66f362bd"
+      },
+      "finalize_branch": "spec/i5-traceless-noop-after-abandon-20260923-approve-1-0-1-final",
+      "finalize_head_sha": "7520c71b1e91630b410e3b1246db92f4ac2e058a",
+      "finalize_pr": 364,
+      "head_sha": "719dfca3654d7613047d82e2025bcc9a51f58365",
+      "invalidated_by": null,
+      "merge_commit": "084efc0267e35717a76c83138c404d47d5277b8b",
+      "merged_at": "2026-09-23T06:11:44Z",
+      "merged_by": "andrei-shtanakov",
+      "nodes": [
+        "charter"
+      ],
+      "policy": {
+        "fingerprint": "v1:31bf16586b6cfbb69a29b23d8850bfe57931d99b",
+        "path": "policy/approvers.env",
+        "ref": "main",
+        "repo": "andrei-shtanakov/approval-policy",
+        "sha": "12d198fb4db9ed6fbb1c5b00af308eeb31e4ec22"
+      },
+      "reason": null,
+      "source_sha": "041914494ea5e79104a688b9bca55b91053538a2",
+      "status": "completed",
+      "step": 0,
+      "upstream_pins": {
+        "charter": {
+          "discovery-brief": "7c1939ebc239c1d48ee0e58ab4f3806bbfd4d984"
+        }
+      },
+      "wave": 1
+    },
+    "approve-1-1-1": {
+      "attempt": 1,
+      "authorization": {
+        "login": "andrei-shtanakov",
+        "policy": "v1:31bf16586b6cfbb69a29b23d8850bfe57931d99b",
+        "source": "github:andrei-shtanakov/approval-policy@12d198fb4db9ed6fbb1c5b00af308eeb31e4ec22:policy/approvers.env"
+      },
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-approve-1-1-1",
+      "candidate_pr": 365,
+      "content_hashes": {
+        "requirements": "6de3e85e386642a2d16f4987ca2e8d053b733f3d"
+      },
+      "finalize_branch": "spec/i5-traceless-noop-after-abandon-20260923-approve-1-1-1-final",
+      "finalize_head_sha": "7f918d078440b6d8a5a899498f30ac4ee7dc5443",
+      "finalize_pr": 366,
+      "head_sha": "1469d1670d4e1e19013a4f3cc16bdd29ae527747",
+      "invalidated_by": null,
+      "merge_commit": "448ef6033c7ec4ba64cbcd13e28c4febf882572c",
+      "merged_at": "2026-09-23T07:00:21Z",
+      "merged_by": "andrei-shtanakov",
+      "nodes": [
+        "requirements"
+      ],
+      "policy": {
+        "fingerprint": "v1:31bf16586b6cfbb69a29b23d8850bfe57931d99b",
+        "path": "policy/approvers.env",
+        "ref": "main",
+        "repo": "andrei-shtanakov/approval-policy",
+        "sha": "12d198fb4db9ed6fbb1c5b00af308eeb31e4ec22"
+      },
+      "reason": null,
+      "source_sha": "3c66925af6214fe001f085a56f46417238108d3e",
+      "status": "completed",
+      "step": 1,
+      "upstream_pins": {
+        "requirements": {
+          "charter": "3625c20d25744f91fb625d164c21410c90236ffd"
+        }
+      },
+      "wave": 1
+    },
+    "approve-1-2-1": {
+      "attempt": 1,
+      "authorization": {
+        "login": "andrei-shtanakov",
+        "policy": "v1:31bf16586b6cfbb69a29b23d8850bfe57931d99b",
+        "source": "github:andrei-shtanakov/approval-policy@12d198fb4db9ed6fbb1c5b00af308eeb31e4ec22:policy/approvers.env"
+      },
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-approve-1-2-1",
+      "candidate_pr": 367,
+      "content_hashes": {
+        "behaviour-spec": "0fcdc00b5074ec8d1ad8170e7c9303a5282eee74"
+      },
+      "finalize_branch": "spec/i5-traceless-noop-after-abandon-20260923-approve-1-2-1-final",
+      "finalize_head_sha": "2bfd506466ab445a3e6b0ef30f71bad270ed154b",
+      "finalize_pr": 368,
+      "head_sha": "4bdf60391c8c9d3b9f21072efa605fe818e96f7f",
+      "invalidated_by": null,
+      "merge_commit": "3ce18573249d4174550d332181859bb6b2c0245e",
+      "merged_at": "2026-09-23T07:36:19Z",
+      "merged_by": "andrei-shtanakov",
+      "nodes": [
+        "behaviour-spec"
+      ],
+      "policy": {
+        "fingerprint": "v1:31bf16586b6cfbb69a29b23d8850bfe57931d99b",
+        "path": "policy/approvers.env",
+        "ref": "main",
+        "repo": "andrei-shtanakov/approval-policy",
+        "sha": "12d198fb4db9ed6fbb1c5b00af308eeb31e4ec22"
+      },
+      "reason": null,
+      "source_sha": "59f40779f3d780513b38651828de2f160c6236d7",
+      "status": "completed",
+      "step": 2,
+      "upstream_pins": {
+        "behaviour-spec": {
+          "requirements": "b407b89c39d982d0bdc535f555ce9b1449cecb9c"
+        }
+      },
+      "wave": 1
+    },
+    "approve-1-3-1": {
+      "attempt": 1,
+      "authorization": {
+        "login": "andrei-shtanakov",
+        "policy": "v1:31bf16586b6cfbb69a29b23d8850bfe57931d99b",
+        "source": "github:andrei-shtanakov/approval-policy@12d198fb4db9ed6fbb1c5b00af308eeb31e4ec22:policy/approvers.env"
+      },
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-approve-1-3-1",
+      "candidate_pr": 369,
+      "content_hashes": {
+        "acceptance": "d69be277c87bec73615078228cb68e9640b4ebb9",
+        "design": "87dec0658c5db9df882b3d05806a7d91710a4134"
+      },
+      "finalize_branch": "spec/i5-traceless-noop-after-abandon-20260923-approve-1-3-1-final",
+      "finalize_head_sha": "c7a1659141dd5bf127712f7be531e30b8d83b3a7",
+      "finalize_pr": 370,
+      "head_sha": "22a58eb818e50baad63af911cd8fd1d46d4e6565",
+      "invalidated_by": null,
+      "merge_commit": "856b6ba55df72a9c26b77b4614e824b4c910a4b1",
+      "merged_at": "2026-09-23T08:54:08Z",
+      "merged_by": "andrei-shtanakov",
+      "nodes": [
+        "design",
+        "acceptance"
+      ],
+      "policy": {
+        "fingerprint": "v1:31bf16586b6cfbb69a29b23d8850bfe57931d99b",
+        "path": "policy/approvers.env",
+        "ref": "main",
+        "repo": "andrei-shtanakov/approval-policy",
+        "sha": "12d198fb4db9ed6fbb1c5b00af308eeb31e4ec22"
+      },
+      "reason": null,
+      "source_sha": "1fb50ba8351e4e0136e497d4399ec5d6b24a592f",
+      "status": "completed",
+      "step": 3,
+      "upstream_pins": {
+        "acceptance": {
+          "behaviour-spec": "4dc3260ac3556743343119d91e1a1d979b35cf23",
+          "requirements": "b407b89c39d982d0bdc535f555ce9b1449cecb9c"
+        },
+        "design": {
+          "behaviour-spec": "4dc3260ac3556743343119d91e1a1d979b35cf23",
+          "requirements": "b407b89c39d982d0bdc535f555ce9b1449cecb9c"
+        }
+      },
+      "wave": 1
+    },
+    "approve-1-4-1": {
+      "attempt": 1,
+      "authorization": {
+        "login": "andrei-shtanakov",
+        "policy": "v1:31bf16586b6cfbb69a29b23d8850bfe57931d99b",
+        "source": "github:andrei-shtanakov/approval-policy@12d198fb4db9ed6fbb1c5b00af308eeb31e4ec22:policy/approvers.env"
+      },
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-approve-1-4-1",
+      "candidate_pr": 371,
+      "content_hashes": {
+        "decomposition": "0557eb0bb92579fcb4a98139cb808be368428430"
+      },
+      "finalize_branch": "spec/i5-traceless-noop-after-abandon-20260923-approve-1-4-1-final",
+      "finalize_head_sha": "a99c4ebe3c3ad45bbba7f9fd8440df52418cfb40",
+      "finalize_pr": 372,
+      "head_sha": "d80224809817c42932ff2d732004fec206863198",
+      "invalidated_by": null,
+      "merge_commit": "6e6fa8d0716ee96e219bc68396b6a6d853d95d5f",
+      "merged_at": "2026-09-23T09:13:33Z",
+      "merged_by": "andrei-shtanakov",
+      "nodes": [
+        "decomposition"
+      ],
+      "policy": {
+        "fingerprint": "v1:31bf16586b6cfbb69a29b23d8850bfe57931d99b",
+        "path": "policy/approvers.env",
+        "ref": "main",
+        "repo": "andrei-shtanakov/approval-policy",
+        "sha": "12d198fb4db9ed6fbb1c5b00af308eeb31e4ec22"
+      },
+      "reason": null,
+      "source_sha": "ee365adf46ae4d27fdd03fa39e1aa0249c9358e8",
+      "status": "completed",
+      "step": 4,
+      "upstream_pins": {
+        "decomposition": {
+          "acceptance": "59b44110aad17a05994df9a0ce7e1d2dce038265",
+          "design": "387a91968782057f7f3feef6b14cbe3fce62f024"
+        }
+      },
+      "wave": 1
+    },
+    "approve-wave-1": {
+      "actual": null,
+      "intent": {
+        "dag": [
+          "charter",
+          "requirements",
+          "behaviour-spec",
+          "design",
+          "acceptance",
+          "decomposition"
+        ],
+        "fingerprint": "v1:f361afc78889079d5488e1a5ed851fe0ba13bcd0"
+      },
+      "reason": null,
+      "status": "completed",
+      "wave": 1
+    },
+    "author-acceptance": {
+      "exit": 0,
+      "skipped": false,
+      "status": "completed"
+    },
+    "author-behaviour": {
+      "exit": 0,
+      "skipped": false,
+      "status": "completed"
+    },
+    "author-charter": {
+      "exit": 0,
+      "skipped": false,
+      "status": "completed"
+    },
+    "author-decomposition": {
+      "exit": 0,
+      "skipped": false,
+      "status": "completed"
+    },
+    "author-design": {
+      "exit": 0,
+      "skipped": false,
+      "status": "completed"
+    },
+    "author-requirements": {
+      "exit": 0,
+      "skipped": false,
+      "status": "completed"
+    },
+    "branch-1": {
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-behaviour-w1",
+      "mode": "author",
+      "status": "completed"
+    },
+    "branch-2": {
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-behaviour-w2",
+      "mode": "author",
+      "status": "completed"
+    },
+    "branch-3": {
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-behaviour-w3",
+      "mode": "author",
+      "status": "completed"
+    },
+    "branch-4": {
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-behaviour-w4",
+      "mode": "author",
+      "status": "completed"
+    },
+    "branch-5": {
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-behaviour-w5",
+      "mode": "author",
+      "status": "completed"
+    },
+    "candidate-1": {
+      "candidate_pr": 363,
+      "reapprove": false,
+      "request": "approve-1-0-1",
+      "source_sha": "041914494ea5e79104a688b9bca55b91053538a2",
+      "status": "completed"
+    },
+    "candidate-2": {
+      "candidate_pr": 365,
+      "reapprove": false,
+      "request": "approve-1-1-1",
+      "source_sha": "3c66925af6214fe001f085a56f46417238108d3e",
+      "status": "completed"
+    },
+    "candidate-3": {
+      "candidate_pr": 367,
+      "reapprove": false,
+      "request": "approve-1-2-1",
+      "source_sha": "59f40779f3d780513b38651828de2f160c6236d7",
+      "status": "completed"
+    },
+    "candidate-4": {
+      "candidate_pr": 369,
+      "reapprove": false,
+      "request": "approve-1-3-1",
+      "source_sha": "1fb50ba8351e4e0136e497d4399ec5d6b24a592f",
+      "status": "completed"
+    },
+    "candidate-5": {
+      "candidate_pr": 371,
+      "reapprove": false,
+      "request": "approve-1-4-1",
+      "source_sha": "ee365adf46ae4d27fdd03fa39e1aa0249c9358e8",
+      "status": "completed"
+    },
+    "commit-1": {
+      "status": "completed"
+    },
+    "commit-2": {
+      "status": "completed"
+    },
+    "commit-3": {
+      "status": "completed"
+    },
+    "commit-4": {
+      "status": "completed"
+    },
+    "commit-5": {
+      "status": "completed"
+    },
+    "edge-1": {
+      "edges": {
+        "charter--charter-vs-customer-brief": "PASS",
+        "charter--charter-vs-engineer-brief": "N/A"
+      },
+      "status": "completed",
+      "verdict": "PASS"
+    },
+    "edge-2": {
+      "edges": {
+        "requirements--requirements-vs-charter": "PASS"
+      },
+      "status": "completed",
+      "verdict": "PASS"
+    },
+    "edge-3": {
+      "edges": {
+        "behaviour-spec--behaviour-vs-requirements": "PASS"
+      },
+      "status": "completed",
+      "verdict": "PASS"
+    },
+    "edge-4": {
+      "edges": {
+        "acceptance--acceptance-vs-requirements-behaviour": "PASS",
+        "design--design-vs-requirements-behaviour": "PASS"
+      },
+      "status": "completed",
+      "verdict": "PASS"
+    },
+    "edge-5": {
+      "edges": {
+        "decomposition--decomposition-vs-design-acceptance": "PASS"
+      },
+      "status": "completed",
+      "verdict": "PASS"
+    },
+    "finalize-1": {
+      "finalize_pr": 364,
+      "review_exit": 0,
+      "status": "completed"
+    },
+    "finalize-2": {
+      "finalize_pr": 366,
+      "review_exit": 0,
+      "status": "completed"
+    },
+    "finalize-3": {
+      "finalize_pr": 368,
+      "review_exit": 0,
+      "status": "completed"
+    },
+    "finalize-4": {
+      "finalize_pr": 370,
+      "review_exit": 0,
+      "status": "completed"
+    },
+    "finalize-5": {
+      "finalize_pr": 372,
+      "review_exit": 0,
+      "status": "completed"
+    },
+    "gate-authoritative": {
+      "exit": 0,
+      "status": "completed"
+    },
+    "gate-candidate-1": {
+      "exit": 0,
+      "status": "completed"
+    },
+    "gate-candidate-2": {
+      "exit": 0,
+      "status": "completed"
+    },
+    "gate-candidate-3": {
+      "exit": 0,
+      "status": "completed"
+    },
+    "gate-candidate-4": {
+      "exit": 0,
+      "status": "completed"
+    },
+    "gate-candidate-5": {
+      "exit": 0,
+      "status": "completed"
+    },
+    "materialize-brief-1": {
+      "source_blobs": {
+        "discovery-brief": "7c1939ebc239c1d48ee0e58ab4f3806bbfd4d984"
+      },
+      "status": "completed"
+    },
+    "materialize-brief-2": {
+      "source_blobs": {
+        "discovery-brief": "7c1939ebc239c1d48ee0e58ab4f3806bbfd4d984"
+      },
+      "status": "completed"
+    },
+    "materialize-brief-3": {
+      "source_blobs": {
+        "discovery-brief": "7c1939ebc239c1d48ee0e58ab4f3806bbfd4d984"
+      },
+      "status": "completed"
+    },
+    "materialize-brief-4": {
+      "source_blobs": {
+        "discovery-brief": "7c1939ebc239c1d48ee0e58ab4f3806bbfd4d984"
+      },
+      "status": "completed"
+    },
+    "materialize-brief-5": {
+      "source_blobs": {
+        "discovery-brief": "7c1939ebc239c1d48ee0e58ab4f3806bbfd4d984"
+      },
+      "status": "completed"
+    },
+    "merge": {
+      "merged": true,
+      "status": "completed",
+      "waves": 5
+    },
+    "push-1": {
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-behaviour-w1",
+      "status": "completed"
+    },
+    "push-2": {
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-behaviour-w2",
+      "status": "completed"
+    },
+    "push-3": {
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-behaviour-w3",
+      "status": "completed"
+    },
+    "push-4": {
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-behaviour-w4",
+      "status": "completed"
+    },
+    "push-5": {
+      "branch": "spec/i5-traceless-noop-after-abandon-20260923-behaviour-w5",
+      "status": "completed"
+    },
+    "sync-default": {
+      "status": "completed"
+    },
+    "tasks-deliver": {
+      "anchor": "3434393e957fc60de12508054a807f848fd053cf",
+      "content_anchor": "v2:dd734a439ddec4807950a0d6ae6e6a7b177ece98",
+      "pr": 373,
+      "status": "completed"
+    }
+  },
+  "pr": null,
+  "profile": "profiles/team-exp.yaml",
+  "remediated_by": null,
+  "repo": "devtools",
+  "repo_slug": "andrei-shtanakov/devtools",
+  "run_id": "i5-traceless-noop-after-abandon-20260923-3e0ea3",
+  "status": "completed",
+  "subject": "i5 traceless noop after abandon",
+  "target_dir": "/fixture/devtools-171",
+  "wave": 5,
+  "ws_id": "i5-traceless-noop-after-abandon-20260923"
+}
