@@ -1384,7 +1384,7 @@ def test_brief_materialization_refuses_changed_durable_intake(
     tmp_path: Path, runs_root,
 ) -> None:
     source = _brief_source(tmp_path)
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject="brief", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
         target_dir=str(tmp_path / "target"), bundle_dir=BUNDLE_DIR,
         profile="profiles/team-exp.yaml", run_id="r-brief-intake",
@@ -1703,7 +1703,7 @@ def test_resume_does_not_duplicate_pr(tmp_path: Path, runs_root) -> None:
     ops = FakeOps()
     kwargs = _start_kwargs(tmp_path, "r-resume", ops)
     branch = "spec/WS-1-behaviour"
-    state = rs.new_run(
+    state = rs.new_run(authoring="legacy", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -2051,7 +2051,7 @@ def test_resume_after_death_between_create_issue_and_op_complete_reuses_issue(
     # зафиксирован неуспехом, findings уже на диске, remediation-issue —
     # started (write-ahead отработал), а сам issue РЕАЛЬНО создан (эффект
     # состоялся), но op_complete не успел записаться.
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -2342,7 +2342,7 @@ def test_verify_refuses_when_child_is_running(
 
     # Валидный, но ещё не терминальный потомок (S8 в процессе).
     child_id = f"{parent_id}-v1"
-    child_state = rs.new_run(
+    child_state = rs.new_run(authoring="waves", 
         subject=parent.subject, repo=parent.repo, repo_slug=parent.repo_slug,
         ws_id=parent.ws_id, target_dir=parent.target_dir,
         bundle_dir=parent.bundle_dir, profile=parent.profile, run_id=child_id,
@@ -2481,7 +2481,7 @@ def test_cli_status_prints_run_state(
     без внешних вызовов — `status` не строит `RealOps`.
     """
     run_id = "r-cli-status"
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject="тестовый функционал", repo="alpha", repo_slug="owner/alpha",
         ws_id="WS-1", target_dir=str(tmp_path / "target-cli"),
         bundle_dir=BUNDLE_DIR, profile="profiles/team-exp.yaml", run_id=run_id,
@@ -2707,7 +2707,7 @@ def test_resume_from_stopped_author_pr_merged_out_of_band_runs_s8(
     доходит сюда повторно). Реконсиляция обязана сработать и здесь, не
     только `_reset_stopped_author`."""
     run_id = "r-resume-author-merged"
-    state = rs.new_run(
+    state = rs.new_run(authoring="legacy", 
         subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
         target_dir=str(tmp_path / "target"), bundle_dir=BUNDLE_DIR,
         profile="profiles/team-exp.yaml", run_id=run_id,
@@ -3003,7 +3003,7 @@ def test_stale_cached_agent_verdict_does_not_merge_on_fresh_red_facts(
         files=GREEN_BUNDLE_FILES,
     )
     kwargs = _start_kwargs(tmp_path, "r-verdict-stale", ops)
-    state = rs.new_run(
+    state = rs.new_run(authoring="legacy", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -3048,7 +3048,7 @@ def test_pr_reconciliation_find_pr_failure_stops_without_duplicate(
     "PR нет", не открывать второй; op остаётся started, run продолжает ждать."""
     ops = FakeOps(find_pr_error="gh pr list: transient network error")
     kwargs = _start_kwargs(tmp_path, "r-pr-transient", ops)
-    state = rs.new_run(
+    state = rs.new_run(authoring="legacy", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -3152,6 +3152,14 @@ def test_gate_seam_required_absent_blocks_without_mock(
             subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
             target_dir=str(target_dir), bundle_dir="spec",
             profile="profiles/mini.yaml", run_id=run_id,
+            # S13-PENDING: предмет (РЕАЛЬНЫЙ `gate-check --candidate`)
+            # переживает удаление, но фикстурный `mini.yaml` объявляет
+            # НЕПОЛНЫЙ DAG — без узла уровня 0. Волновой режим такой
+            # состав отвергает по построению («дыра в уровнях»), и
+            # перевод требует правки ОБЩЕГО фикстур-профиля, который
+            # используют другие модули. Это уже не перенос покрытия, а
+            # изменение фикстуры флота — решение владельца.
+            authoring="legacy",
         )
         state.branch = "spec/WS-1-behaviour"
         state.ops = {
@@ -3524,7 +3532,7 @@ def test_resume_completes_when_gate_authoritative_done_but_status_stuck_running(
     ops = FakeOps()
     run_id = "r-s8-stuck-ok"
     kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -3558,7 +3566,7 @@ def test_resume_completes_fail_path_when_status_stuck_running_after_gate_fail(
     ops = FakeOps()
     run_id = "r-s8-stuck-fail"
     kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -3601,7 +3609,7 @@ def test_sync_default_always_rechecked_even_if_already_completed(
     ops = FakeOps(s8_exit=0)
     run_id = "r-s8-resync"
     kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -3639,7 +3647,7 @@ def test_resume_rebuilds_missing_s8_findings_from_op_output(
     ops = FakeOps()
     run_id = "r-s8-findings-missing"
     kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -4256,7 +4264,7 @@ def test_disp_backend_author_disp_failure_stops_author(
 
 def test_new_run_rejects_unknown_author_backend() -> None:
     with pytest.raises(ValueError):
-        rs.new_run(
+        rs.new_run(authoring="waves", 
             subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
             target_dir="/tmp/x", bundle_dir="spec",
             profile="profiles/team-exp.yaml", run_id="r-bad-backend",
@@ -4881,21 +4889,25 @@ def test_gate_stops_when_design_node_missing_from_bundle(
     (bundle_dir / "15-behaviour-spec.md").write_text(
         _DEFAULT_BEHAVIOUR_BODY, encoding="utf-8"
     )
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
         target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
         profile="profiles/team-exp.yaml", run_id=run_id,
     )
-    state.branch = "spec/WS-1-behaviour"
+    state.wave = 5
+    state.branch = f"spec/WS-1-behaviour-w5"
     state.ops = {
-        "branch": {"status": "completed"},
+        "branch-5": {"status": "completed"},
         "author-charter": {"status": "completed", "skipped": True},
         "author-requirements": {"status": "completed", "skipped": True},
         "author-behaviour": {"status": "completed", "skipped": True},
         # design намеренно НЕ авторен и не пропущен — файла нет вовсе.
         "author-design": {"status": "completed", "skipped": True},
-        "commit": {"status": "completed"},
+        "commit-5": {"status": "completed"},
     }
+    # base несёт approved-узлы: предмет — ОТСУТСТВИЕ файла в
+    # рабочем дереве волны, а не stale-уровень в базе.
+    ops.base_files = _all_approved()
     rs.save(state)
 
     result = runner.advance(state, ops)
@@ -5793,22 +5805,34 @@ def test_gate_stops_when_decomposition_missing_from_bundle(
         "Открытых архитектурных вопросов нет (входной набор пуст)\n",
         encoding="utf-8",
     )
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
         target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
         profile="profiles/team-exp.yaml", run_id=run_id,
     )
-    state.branch = "spec/WS-1-behaviour"
+    state.wave = 5
+    state.branch = f"spec/WS-1-behaviour-w5"
     state.ops = {
-        "branch": {"status": "completed"},
+        "branch-5": {"status": "completed"},
         "author-charter": {"status": "completed", "skipped": True},
         "author-requirements": {"status": "completed", "skipped": True},
         "author-behaviour": {"status": "completed", "skipped": True},
         "author-design": {"status": "completed", "skipped": True},
         # decomposition намеренно НЕ авторен и не пропущен — файла нет вовсе.
         "author-decomposition": {"status": "completed", "skipped": True},
-        "commit": {"status": "completed"},
+        "commit-5": {"status": "completed"},
     }
+    # В волнах required — узлы уровней ≤ wave−1, и acceptance (уровень 3)
+    # обязан присутствовать: иначе гард назовёт ЕГО, а не decomposition, и
+    # тест проверял бы не свой предмет. Прежний путь гейтил весь бандл
+    # одним проходом и до acceptance в этой фикстуре просто не доходил.
+    (bundle_dir / "25-acceptance.md").write_text(
+        _acceptance_body(_DEFAULT_REQUIREMENTS_BODY, req_pin, beh_pin),
+        encoding="utf-8",
+    )
+    # base несёт approved-узлы: предмет — ОТСУТСТВИЕ файла в
+    # рабочем дереве волны, а не stale-уровень в базе.
+    ops.base_files = _all_approved()
     rs.save(state)
 
     result = runner.advance(state, ops)
@@ -6243,14 +6267,15 @@ def test_gate_stops_when_acceptance_missing_from_bundle(
         "Открытых архитектурных вопросов нет (входной набор пуст)\n",
         encoding="utf-8",
     )
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
         target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
         profile="profiles/team-exp.yaml", run_id=run_id,
     )
-    state.branch = "spec/WS-1-behaviour"
+    state.wave = 5
+    state.branch = f"spec/WS-1-behaviour-w5"
     state.ops = {
-        "branch": {"status": "completed"},
+        "branch-5": {"status": "completed"},
         "author-charter": {"status": "completed", "skipped": True},
         "author-requirements": {"status": "completed", "skipped": True},
         "author-behaviour": {"status": "completed", "skipped": True},
@@ -6258,8 +6283,11 @@ def test_gate_stops_when_acceptance_missing_from_bundle(
         # acceptance намеренно НЕ авторен и не пропущен — файла нет вовсе.
         "author-acceptance": {"status": "completed", "skipped": True},
         "author-decomposition": {"status": "completed", "skipped": True},
-        "commit": {"status": "completed"},
+        "commit-5": {"status": "completed"},
     }
+    # base несёт approved-узлы: предмет — ОТСУТСТВИЕ файла в
+    # рабочем дереве волны, а не stale-уровень в базе.
+    ops.base_files = _all_approved()
     rs.save(state)
 
     result = runner.advance(state, ops)
@@ -7640,7 +7668,7 @@ def test_waves_projection_mismatch_stops_gate(tmp_path: Path, runs_root, monkeyp
 
 
 def test_legacy_reset_table_is_unchanged_by_waves(tmp_path: Path, runs_root) -> None:
-    state = rs.new_run(
+    state = rs.new_run(authoring=_LEGACY_HISTORY, 
         subject="s", repo="r", repo_slug="o/r", ws_id="WS", target_dir=str(tmp_path),
         bundle_dir="spec", profile="profiles/team-exp.yaml", run_id="r-legacy",
     )
@@ -7905,7 +7933,7 @@ def test_legacy_run_deletes_nothing_on_completion(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=0,
     )
-    state = rs.new_run(
+    state = rs.new_run(authoring=_LEGACY_HISTORY, 
         subject="brief", repo="alpha", repo_slug="owner/alpha", ws_id="WS-2",
         target_dir=str(tmp_path / "target"), bundle_dir=BUNDLE_DIR,
         profile="profiles/team-exp.yaml", run_id="r-legacy-cleanup",
