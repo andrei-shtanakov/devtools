@@ -1,0 +1,75 @@
+{
+  "author_backend": "codex",
+  "base_ref": "master",
+  "branch": "spec/WS-dispatcher-229-behaviour",
+  "bundle_dir": "workstreams/WS-dispatcher-229/spec",
+  "head": null,
+  "merge_authority": null,
+  "ops": {
+    "author-behaviour": {
+      "exit": 0,
+      "skipped": false,
+      "status": "completed"
+    },
+    "author-charter": {
+      "exit": 0,
+      "skipped": false,
+      "status": "completed"
+    },
+    "author-requirements": {
+      "exit": 0,
+      "skipped": false,
+      "status": "completed"
+    },
+    "branch": {
+      "status": "completed"
+    },
+    "commit": {
+      "status": "completed"
+    },
+    "gate-authoritative": {
+      "exit": 0,
+      "status": "completed"
+    },
+    "gate-candidate": {
+      "exit": 0,
+      "status": "completed"
+    },
+    "merge": {
+      "merged": true,
+      "status": "completed"
+    },
+    "pr": {
+      "number": 230,
+      "status": "completed"
+    },
+    "push": {
+      "status": "completed"
+    },
+    "ready": {
+      "status": "completed"
+    },
+    "review": {
+      "exit": 0,
+      "status": "completed"
+    },
+    "sync-default": {
+      "status": "completed"
+    },
+    "verdict": {
+      "decision": "human",
+      "reason": "rollup 'unknown' не читается как зелёный",
+      "status": "completed"
+    }
+  },
+  "pr": 230,
+  "profile": "profiles/team-exp.yaml",
+  "remediated_by": null,
+  "repo": "dispatcher",
+  "repo_slug": "andrei-shtanakov/dispatcher",
+  "run_id": "WS-dispatcher-229-7ed609",
+  "status": "completed",
+  "subject": "PF-OWNER-REPO-SELF: диагностика владельца repo:<свой> в plan_fields (dispatcher#229)",
+  "target_dir": "/fixture/dispatcher",
+  "ws_id": "WS-dispatcher-229"
+}

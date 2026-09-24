@@ -563,16 +563,24 @@ def recover_run_from_github(
     requested_bundle_dir: str | None,
     ops,
 ) -> rs.RunState | None:
-    """Восстановить минимальный resumable ledger из durable GitHub-фактов.
+    """Распознать бандл-PR прежнего пути и ОТКАЗАТЬ в его исполнении (S13).
 
-    Внутренние op-записи S1–S7 из GitHub доказать нельзя и мы их не
-    выдумываем. Восстановленный run ставится ровно на человеческую границу
-    ``waiting_human_merge`` только при доказанном MERGED:
-    ``runner.resume`` повторно сверит этот факт и идемпотентно выполнит
-    authoritative S8. Дальнейший мост сам читает статусы узлов из
-    frontmatter base и реконсилирует tasks-PR по
-    ``spec/<ws-id>-tasks``. OPEN отказывает: по нему не восстановить,
-    прошли ли S6 review и S7 verdict.
+    Функция была входом в прежний путь: строила новый леджер на границе
+    ``waiting_human_merge``, чтобы раннер довёл прогон бандл-PR до конца.
+    Исполнение удалено (решение владельца 2026-09-23), и вход закрыт —
+    но закрыт ОТКАЗОМ, а не молчанием: бандл-PR исторических прогонов в
+    фордже остаются, оператор может позвать `spec-loop` на таком репо, и
+    внятное «путь удалён» полезнее, чем «прогон не найден».
+
+    Распознавание сохранено целиком: соответствие ветки шаблону, единственность
+    кандидата, связь title с subject, канонический ``run-id`` в теле. Всё это —
+    диагностика, которая делает отказ адресным. Реконструкции нет: отказ
+    наступает ДО создания леджера и любых записей.
+
+    Возвращает ``None``, когда подходящего бандл-PR нет: вызывающий идёт
+    дальше своим путём. Порядок у вызывающего — СНАЧАЛА волновое
+    восстановление: исторический бандл-PR не должен своим присутствием
+    заслонять живой волновой прогон.
     """
     prefix, pattern = _remote_branch_pattern(subject, requested_ws_id)
     try:
@@ -639,168 +647,15 @@ def recover_run_from_github(
         )
     run_id = body_match.group("run_id")
 
-    try:
-        facts = ops.pr_facts(repo_slug, number)
-        files = ops.pr_files(repo_slug, number)
-    except Exception as exc:
-        raise SpecLoopError(
-            f"факты bundle-PR #{number} недоступны: {exc}"
-        ) from exc
-    pr_state = facts.get("state")
-    if pr_state == "OPEN":
-        raise SpecLoopError(
-            f"bundle-PR #{number} по ветке {branch!r} ещё OPEN, а GitHub "
-            "не доказывает, были ли пройдены S6 review и S7 verdict; "
-            "восстановите исходный run.json либо вручную решите судьбу PR. "
-            "Автоматически объявлять его waiting_human_merge запрещено"
-        )
-    if pr_state != "MERGED":
-        raise SpecLoopError(
-            f"bundle-PR #{number} по ветке {branch!r} закрыт без мержа "
-            f"(state={pr_state!r}); судьба workstream не выводится, новый "
-            "не создаётся"
-        )
-    base_ref = facts.get("baseRefName")
-    if not isinstance(base_ref, str) or not base_ref:
-        raise SpecLoopError(
-            f"bundle-PR #{number} не несёт baseRefName — S8 не знает, "
-            "какую authoritative-ветку проверять"
-        )
-    bundle_dir = _bundle_dir_from_pr_files(files)
-    if requested_bundle_dir is not None and requested_bundle_dir != bundle_dir:
-        raise SpecLoopError(
-            f"--bundle-dir={requested_bundle_dir!r} расходится с GitHub-"
-            f"фактом bundle-PR #{number}: {bundle_dir!r}"
-        )
-
-    file_set = set(files)
-    source_prefix = f"{bundle_dir}/00-discovery/"
-    source_files = {path for path in file_set if path.startswith(source_prefix)}
-    primary_path = f"{bundle_dir}/{brief_input.PRIMARY_REL}"
-    brief_descriptor = None
-    if source_files:
-        if primary_path not in source_files:
-            raise SpecLoopError(
-                f"bundle-PR #{number} несёт неполный discovery source layer: "
-                f"есть {sorted(source_files)!r}, но нет {primary_path!r}"
-            )
-        head = facts.get("headRefOid")
-        if not isinstance(head, str) or not head:
-            raise SpecLoopError(
-                f"bundle-PR #{number} не несёт headRefOid — immutable "
-                "discovery source восстановить нельзя"
-            )
-        try:
-            with tempfile.TemporaryDirectory(prefix="brief-recovery-") as tmp:
-                snapshot = Path(tmp)
-                for source_path in sorted(source_files):
-                    data = ops.show_repo_file_bytes(
-                        repo_slug, head, source_path
-                    )
-                    if data is None:
-                        raise brief_input.BriefInputError(
-                            f"{head}:{source_path} не читается из head bundle-PR"
-                        )
-                    destination = snapshot / source_path
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    destination.write_bytes(data)
-                recovered_source = brief_input.inspect_materialized(
-                    snapshot, bundle_dir
-                )
-            ops.checkout_and_pull(target_dir, base_ref)
-            current_source = brief_input.inspect_materialized(
-                Path(target_dir), bundle_dir
-            )
-        except (brief_input.BriefInputError, OSError, RuntimeError) as exc:
-            raise SpecLoopError(
-                f"discovery source bundle-PR #{number} не восстанавливается "
-                f"из immutable head {head!r}: {exc}"
-            ) from exc
-        expected_source_files = {
-            f"{bundle_dir}/{rel}" for rel in recovered_source.source_paths
-        }
-        missing = expected_source_files - source_files
-        if missing:
-            raise SpecLoopError(
-                f"bundle-PR #{number} несёт неполный discovery source layer: "
-                f"в его diff отсутствуют {sorted(missing)!r}"
-            )
-        if current_source.as_state() != recovered_source.as_state():
-            raise SpecLoopError(
-                f"discovery source после bundle-PR #{number} изменён в "
-                f"{base_ref!r}; восстановите bytes из head {head} либо "
-                "создайте новый workstream с другим ws-id"
-            )
-        brief_descriptor = recovered_source.as_state()
-
-    # Не перезаписывать валидный локальный журнал с тем же run-id, если он
-    # относится к другой работе. Пустой stub безопасно заменяется: GitHub
-    # доказывает точную идентичность созданного runner'ом PR.
-    if run_id in rs.all_run_ids():
-        ledger_path = rs.run_dir(run_id) / "run.json"
-        raw = ledger_path.read_text(encoding="utf-8")
-        if raw.strip():
-            try:
-                existing = rs.load(run_id)
-            except Exception as exc:
-                raise SpecLoopError(
-                    f"локальный ledger {run_id!r} нечитаем и совпал с "
-                    "run-id bundle-PR; почините его вручную"
-                ) from exc
-            if (existing.repo, existing.subject, existing.ws_id) != (
-                repo, subject, ws_id,
-            ):
-                raise SpecLoopError(
-                    f"run-id {run_id!r} из bundle-PR занят другим локальным "
-                    "ledger; автоматическое восстановление запрещено"
-                )
-            return existing
-
-    state = rs.new_run(
-        subject=subject,
-        repo=repo,
-        repo_slug=repo_slug,
-        ws_id=ws_id,
-        target_dir=target_dir,
-        bundle_dir=bundle_dir,
-        profile=profile,
-        run_id=run_id,
-        merge_authority="human",
-        author_backend=author_backend,
-        brief=brief_descriptor,
+    raise SpecLoopError(
+        f"bundle-PR #{number} (ветка {branch!r}, run-id {run_id!r}) — "
+        "прогон прежнего пути авторинга. Его исполнение удалено "
+        "(решение владельца 2026-09-23, S13 спеки sequential-node-approval), "
+        "и восстановление леджера по бандл-PR больше не поддерживается. "
+        "Сам PR и его история в фордже не тронуты; читаются как прежде и "
+        "прогоны в out/governance-runs. Новая работа идёт волнами "
+        "(authoring=waves, дефолт с 2026-09-23)."
     )
-    # Только MERGED — достаточный durable-факт для этой границы. OPEN мог
-    # быть создан как draft до S6 либо остановлен красным review/verdict;
-    # считать его waiting_human_merge означало бы навсегда пропустить S6/S7.
-    state.status = "waiting_human_merge"
-    state.branch = branch
-    state.pr = number
-    state.head = facts.get("headRefOid")
-    state.base_ref = base_ref
-    state.ops["ledger-recovery"] = {
-        "status": "completed",
-        "source": "github",
-        "bundle_pr": number,
-        # Исторический profile PR не хранит. Это конфигурация ТЕКУЩЕГО
-        # authoritative S8, взятая из текущего CLI/default, а не выданная
-        # за восстановленный факт. После MERGED author_backend не
-        # исполняется вовсе, но его источник фиксируется симметрично.
-        "profile": profile,
-        "profile_source": "current-invocation-not-github",
-        "author_backend": author_backend,
-        "author_backend_effective": False,
-    }
-    rs.save(state)
-    print(
-        f"spec-loop: локальный ledger отсутствовал; восстановлен из "
-        f"bundle-PR #{number} ({branch}), run-id={run_id}"
-    )
-    print(
-        f"spec-loop: profile={profile!r} взят из текущего вызова "
-        "(GitHub исторический profile не хранит); author_backend после "
-        "MERGED не исполняется"
-    )
-    return state
 
 
 # --- маршрутизация ----------------------------------------------------------
@@ -1150,7 +1005,12 @@ def main(argv: list[str] | None = None) -> int:
         ops = _real_ops()
         recovered = False
         if state is None and args.run_id is None:
-            state = recover_run_from_github(
+            # ПОРЯДОК ЗНАЧИМ (S13): сперва волновое восстановление.
+            # Исторический бандл-PR прежнего пути не должен своим
+            # присутствием заслонять живой волновой прогон — раньше
+            # legacy-ветка шла первой и отказ по ней наступал бы до того,
+            # как кто-то вообще посмотрел на candidate-PR волн.
+            state = recover_wave_run_from_github(
                 subject=args.subject,
                 repo=args.repo,
                 repo_slug=entry.repo_slug,
@@ -1162,9 +1022,10 @@ def main(argv: list[str] | None = None) -> int:
                 ops=ops,
             )
             if state is None:
-                # Бандл-PR нет — возможно, прогон волновой (S13): его
-                # durable-факты — candidate-PR волн.
-                state = recover_wave_run_from_github(
+                # Волнового кандидата нет. Если найдётся бандл-PR прежнего
+                # пути — отказ с названной причиной ДО создания леджера;
+                # если и его нет, функция вернёт None и пойдёт новый прогон.
+                recover_run_from_github(
                     subject=args.subject,
                     repo=args.repo,
                     repo_slug=entry.repo_slug,

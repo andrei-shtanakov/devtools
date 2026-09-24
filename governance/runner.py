@@ -288,7 +288,7 @@ def start(
     brief_source: brief_input.BriefSource | None = None,
     interview_spec: iv.InterviewSpec | None = None,
     allow_legacy_dt: bool = False,
-    authoring: str = "legacy",
+    authoring: str = "waves",
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
@@ -315,6 +315,24 @@ def start(
     validate_merge_authority(merge_authority)
     validate_author_backend(author_backend)
     validate_authoring(authoring)
+    if authoring != "waves":
+        # Ревью #389 (major): умолчание `new_run` — `legacy`, и оно
+        # НАМЕРЕННО такое (D2: описывает прошлое, а не будущее). Но
+        # `start()` заводит НОВЫЙ прогон, и прежнего пути для него больше
+        # нет: с `legacy` он получал бы `wave=0`, ветку `…-w0` и пустую
+        # выборку узлов уровня −1 — конвейер отработал бы вхолостую и
+        # молча, а resume созданного леджера отказал бы как legacy.
+        # Отказ здесь, в группе проверок входа, — ДО `_reserve_run_id` и
+        # любого касания целевого репо.
+        raise ValueError(
+            f"authoring={authoring!r}: прежний путь авторинга удалён из "
+            f"исполнения (решение владельца {_LEGACY_REMOVED_ON}, S13 "
+            "спеки sequential-node-approval) — новый прогон заводится "
+            "только волновым (authoring='waves'). Умолчание поля в "
+            "леджере остаётся "
+            "'legacy': оно описывает прошлое исторических прогонов, "
+            "которые читаются как прежде."
+        )
     if interview_spec is not None and brief_source is not None:
         raise ValueError("--need и --brief взаимоисключающи")
     blocker = _blocking_merged_unverified(ws_id)
@@ -388,8 +406,7 @@ def advance(state: RunState, ops: Ops) -> RunState:
     if op_status(state, "merge") == "completed":
         _step_s8(state, ops)
         return state
-    steps = _WAVE_STEPS if _waves(state) else _LEGACY_STEPS
-    for step in steps:
+    for step in _STEPS:
         if state.status != "running":
             break
         if not step(state, ops):
@@ -400,14 +417,23 @@ def advance(state: RunState, ops: Ops) -> RunState:
 # --- Волновой режим (спека sequential-node-approval, S9/S10/S13) ----------
 
 
-def _waves(state: RunState) -> bool:
-    """`authoring: waves` — узлы едут волнами; run.json без поля — legacy."""
-    return state.authoring == "waves"
+def _is_legacy_ledger(state: RunState) -> bool:
+    """Леджер прежнего пути — ИСТОРИЧЕСКИЙ факт о прогоне, не режим.
+
+    Предикат режима (`_waves`) исчез вместе с прежним исполнением: режим
+    один, и развилок по нему в конвейере больше нет. Осталось другое —
+    отличить прогон, который БЫЛ прежним, чтобы отказать ему адресно.
+    Сюда смотрят только гварды отказа (`--reopen`, `resume`), ни один шаг
+    конвейера. Умолчание поля (`legacy`) при этом не трогается: оно
+    описывает прошлое, и переписать его значило бы переинтерпретировать
+    14 исторических прогонов (D2).
+    """
+    return state.authoring != "waves"
 
 
 def wave_key(state: RunState, base: str) -> str:
-    """Ключ op'а: per-wave (`<base>-<w>`, S10) в волнах, прежний в legacy."""
-    return f"{base}-{state.wave}" if _waves(state) else base
+    """Ключ op'а — всегда per-wave (`<base>-<w>`, S10)."""
+    return f"{base}-{state.wave}"
 
 
 def _wave_level(state: RunState) -> int:
@@ -471,9 +497,7 @@ def _wave_dag() -> tuple[tuple[str, tuple[str, ...]], ...]:
 
 
 def _author_steps_for(state: RunState) -> tuple[tuple[str, str, str], ...]:
-    """Шаги авторинга этого захода: в волнах — только узлы уровня волны."""
-    if not _waves(state):
-        return _AUTHOR_STEPS
+    """Шаги авторинга этого захода — только узлы уровня волны."""
     levels = bundle_dag.levels(_wave_dag())
     level = _wave_level(state)
     return tuple(step for step in _AUTHOR_STEPS if levels[step[1]] == level)
@@ -539,7 +563,11 @@ def _drop_wave_branches(state: RunState, ops: Ops) -> None:
     ветка без PR ничего не держит. Но молчать о ней тоже нельзя, иначе
     чистка станет верой.
     """
-    if not _waves(state):
+    if state.wave == 0:
+        # Прогон, у которого волн не было вовсе (исторический леджер
+        # прежнего пути; `verify()` строит потомка тем же умолчанием).
+        # Это предикат ДАННЫХ, а не режима: снимать нечего, и обращаться
+        # к фордже за несуществующими ветками незачем.
         return
     saved_wave = state.wave
     branches: list[str] = []
@@ -580,8 +608,6 @@ def reset_ops_for(state: RunState) -> tuple[str, ...]:
     волнах нет, публикацию делает шаг candidate), `stopped_stale`/
     `stopped_dirty`/`stopped_preflight` — ничего, только статус.
     """
-    if not _waves(state):
-        return _STOPPED_RESET_OPS.get(state.status, ())
     if state.status in ("stopped_gate", "stopped_review", "stopped_author"):
         return tuple(
             wave_key(state, base) for base in ("commit", "gate-candidate", "edge")
@@ -666,7 +692,7 @@ def _reset_stopped_author(state: RunState) -> None:
     for key, _kind, _filename in _AUTHOR_STEPS:
         if op_status(state, key) != "completed":
             state.ops.pop(key, None)
-    for key in reset_ops_for(state) if _waves(state) else _BUNDLE_EDIT_RESET_OPS:
+    for key in reset_ops_for(state):
         state.ops.pop(key, None)
 
 
@@ -759,7 +785,7 @@ def resume(run_id: str, ops: Ops) -> RunState:
             "verification-run через verify(...)"
         )
     _refuse_legacy_resume(state)
-    if _waves(state) and state.status != "completed":
+    if state.status != "completed":
         resumed = _resume_wave(state, ops)
         if resumed is not None:
             return resumed
@@ -968,7 +994,7 @@ def reopen(
     через новый прогон). Грязное дерево — `stopped_dirty`.
     """
     state = load(run_id)
-    if not _waves(state):
+    if _is_legacy_ledger(state):
         raise ValueError("--reopen — только для прогона с authoring=waves")
     dag = _wave_dag()
     levels = bundle_dag.levels(dag)
@@ -1320,34 +1346,33 @@ def _ensure_started(state: RunState, key: str) -> None:
 
 
 def _stop_with_comment(state: RunState, ops: Ops, status: str, body: str) -> None:
-    """Фиксирует стоп-статус ДО best-effort комментария (круг 10, codex-major).
+    """Фиксирует стоп-статус и сохраняет причину рядом с прогоном.
 
-    Раньше `ops.comment` звался ПЕРЕД `state.status = ...`/`save()` во всех
-    стоп-с-комментарием путях (S6 exit 1/2/3, S7 human/refuse, merge False):
-    гибель между вызовом комментария и фиксацией статуса оставляла run в
-    `"running"`, и следующий `advance()`/`resume()` переигрывал этот же шаг
-    с нуля — включая повторный `ops.comment`, дублируя комментарий в PR на
-    каждом таком падении. Порядок инвертирован: статус сохраняется ПЕРВЫМ
-    (после него шаг уже не переигрывается — `advance()` останавливается по
-    `state.status != "running"` до следующего явного `resume()` со сбросом
-    op'ов); комментарий — best-effort ПОСЛЕ: его сбой не откатывает уже
-    зафиксированный статус, но и не глотается совсем молча — печатается
-    предупреждение.
+    Имя историческое: функция вела ДВЕ ветки — комментарий в PR и запись
+    причины, — и главным в ней был ПОРЯДОК (круг 10, codex-major): статус
+    сохранялся ПЕРВЫМ, комментарий шёл best-effort после, иначе гибель
+    между ними оставляла run в `"running"`, и следующий заход переигрывал
+    шаг с нуля, дублируя комментарий в PR.
+
+    Комментирующая ветка снята (S13, 2026-09-23) — проверено по вызовам,
+    а не рассуждением: она ключевалась на `state.pr`, а после удаления
+    `_step_pr` и входа `recover_run_from_github` единственный писатель
+    этого поля — `verify()`, наследующий его от ИСТОРИЧЕСКОГО родителя. Ни
+    один вызывающий `_stop_with_comment` до такого состояния не доходит:
+    все они — шаги и гварды волнового прогона, где `pr` не пишет никто, а
+    resume потомка отказывает раньше (D3). Ветка была мертва.
+
+    Комментарий в candidate-PR делает `_wave_pause` — своей реализацией и
+    со своим стражем порядка (`test_wave_pause_saves_status_before_commenting`).
+    Здесь порядок «статус раньше записи» сохранён: `stop-reason.txt` тоже
+    сторонний эффект, и его дубль на переигранном шаге так же нежелателен.
     """
     state.status = status
     save(state)
-    if state.pr is None:
-        # Волновой прогон до первого candidate-PR: комментировать нечего —
-        # причина стопа пишется в каталог прогона и в лог, не теряется.
-        (run_dir(state.run_id) / "stop-reason.txt").write_text(
-            body + "\n", encoding="utf-8"
-        )
-        print(f"_stop_with_comment ({status!r}): {body}")
-        return
-    try:
-        ops.comment(state.repo_slug, state.pr, body)
-    except Exception as exc:  # noqa: BLE001 — best-effort, не должен ронять шаг
-        print(f"_stop_with_comment: comment ({status!r}) не удался: {exc}")
+    (run_dir(state.run_id) / "stop-reason.txt").write_text(
+        body + "\n", encoding="utf-8"
+    )
+    print(f"_stop_with_comment ({status!r}): {body}")
 
 
 def _interview_stop(state: RunState, reason: str) -> bool:
@@ -1703,25 +1728,7 @@ def _step_branch(state: RunState, ops: Ops) -> bool:
     ручной очистки — обычный `advance()`: `branch` так и не стартовала,
     проверка просто повторяется.
     """
-    if _waves(state):
-        return _step_wave_branch(state, ops)
-    key = "branch"
-    state.branch = f"spec/{state.ws_id}-behaviour"
-    if op_status(state, key) == "completed":
-        return True
-    if op_status(state, key) == "new" and ops.is_dirty(state.target_dir):
-        print(
-            f"_step_branch: target_dir {state.target_dir!r} грязный "
-            "(git status --porcelain непуст) — прогон не начат"
-        )
-        state.status = "stopped_dirty"
-        save(state)
-        return False
-    _ensure_started(state, key)
-    ops.ensure_branch(state.target_dir, state.branch)
-    op_complete(state, key)
-    return True
-
+    return _step_wave_branch(state, ops)
 
 def _step_wave_branch(state: RunState, ops: Ops) -> bool:
     """S1 волны (S9): ветка волны ОТ СВЕЖЕГО BASE, не от текущего HEAD.
@@ -2079,23 +2086,22 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     завершены (resume после S2, вручную собранный бандл), проверять
     нечего — несоответствие профиля поймает S4 (`gate-check --candidate`).
     """
-    if _waves(state):
-        # Инвариант 1 (§3.3): нижние уровни `approved` в base (и не stale).
-        # Читается ДО оплаченного авторинга; узел в `approval_pending`
-        # (открытый candidate) сюда штатно не доходит — resume ждёт мержа.
-        reason = _upstream_ready(state, ops, _wave_dag(), _wave_level(state))
-        if reason is not None:
-            _stop_with_comment(
-                state, ops, "stopped_stale",
-                f"волна {state.wave}: авторинг уровня {_wave_level(state)} "
-                f"невозможен — {reason}. Переодобрите нижние уровни "
-                "(resume ведёт их по уровням) и повторите resume",
-            )
-            return False
-        if _wave_mode(state) == "reapprove":
-            # §3.4: узлы уровня `stale` в base — байты не трогаются (D2),
-            # проверка и candidate идут над base. Авторить нечего.
-            return True
+    # Инвариант 1 (§3.3): нижние уровни `approved` в base (и не stale).
+    # Читается ДО оплаченного авторинга; узел в `approval_pending`
+    # (открытый candidate) сюда штатно не доходит — resume ждёт мержа.
+    reason = _upstream_ready(state, ops, _wave_dag(), _wave_level(state))
+    if reason is not None:
+        _stop_with_comment(
+            state, ops, "stopped_stale",
+            f"волна {state.wave}: авторинг уровня {_wave_level(state)} "
+            f"невозможен — {reason}. Переодобрите нижние уровни "
+            "(resume ведёт их по уровням) и повторите resume",
+        )
+        return False
+    if _wave_mode(state) == "reapprove":
+        # §3.4: узлы уровня `stale` в base — байты не трогаются (D2),
+        # проверка и candidate идут над base. Авторить нечего.
+        return True
     authoring_pending = any(
         op_status(state, key) != "completed" for key, _, _ in _AUTHOR_STEPS
     )
@@ -2286,7 +2292,7 @@ def _step_commit(state: RunState, ops: Ops) -> bool:
     _commit_bundle(
         state, ops,
         f"docs(governance): behaviour bundle {state.ws_id} — {state.subject}"
-        + (f" (волна {state.wave})" if _waves(state) else ""),
+        + f" (волна {state.wave})",
     )
     if state.brief is not None and not _source_layer_committed(state, ops):
         return False
@@ -2401,27 +2407,26 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         return True
     _ensure_started(state, key)
     profile_arg = state.profile
-    if _waves(state):
-        # S5: гейт steward судит бандл по профилю, а у волны бандл неполон —
-        # копия каталога профиля с усечением до уровней ≤ wave−1, sha256
-        # siblings сверяется НЕПОСРЕДСТВЕННО перед вызовом. Компромисс
-        # назван в `wave_profile_dir`; целевое состояние — `--upto` у steward.
-        projected = wave_profile_dir(
-            state.target_dir, state.profile, state.wave, run_dir(state.run_id)
+    # S5: гейт steward судит бандл по профилю, а у волны бандл неполон —
+    # копия каталога профиля с усечением до уровней ≤ wave−1, sha256
+    # siblings сверяется НЕПОСРЕДСТВЕННО перед вызовом. Компромисс
+    # назван в `wave_profile_dir`; целевое состояние — `--upto` у steward.
+    projected = wave_profile_dir(
+        state.target_dir, state.profile, state.wave, run_dir(state.run_id)
+    )
+    mismatch = verify_wave_profile_dir(
+        state.target_dir, state.profile, projected, _wave_level(state)
+    )
+    if mismatch:
+        (run_dir(state.run_id) / "gate-findings.txt").write_text(
+            "error GC-PROFILE-PROJECTION: проекция профиля не совпала с "
+            f"профилем target: {', '.join(mismatch)}\n",
+            encoding="utf-8",
         )
-        mismatch = verify_wave_profile_dir(
-            state.target_dir, state.profile, projected, _wave_level(state)
-        )
-        if mismatch:
-            (run_dir(state.run_id) / "gate-findings.txt").write_text(
-                "error GC-PROFILE-PROJECTION: проекция профиля не совпала с "
-                f"профилем target: {', '.join(mismatch)}\n",
-                encoding="utf-8",
-            )
-            state.status = "stopped_gate"
-            save(state)
-            return False
-        profile_arg = str(projected)
+        state.status = "stopped_gate"
+        save(state)
+        return False
+    profile_arg = str(projected)
     # `gate-findings.txt` отражает ПОСЛЕДНИЙ прогон гейта
     # (@id:gate-findings-stale-on-green, прогон S7 2026-09-21): круг 1
     # записал находки, круг 2 прошёл чисто, файл остался — читающий видел
@@ -2445,8 +2450,6 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # останавливал бы каждую волну до W4 за отсутствующий design.
     in_scope = (
         {bundle_dag.node_id(f) for f, _ in bundle_dag.dag_upto(_wave_dag(), _wave_level(state))}
-        if _waves(state)
-        else None
     )
     # Гард отсутствия design/decomposition (спека Task 4, обобщено Task 6):
     # required-узел — локальный (не через bundle_state.candidate_state — та
@@ -2847,8 +2850,6 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
     вход, набора правил нет) — `stopped_review` с `error_code`. Результаты
     лежат в каталоге прогона (леджер D12), не в worktree цели.
     """
-    if not _waves(state):
-        return True
     key = wave_key(state, "edge")
     if op_status(state, key) == "completed":
         return True
@@ -2927,8 +2928,6 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
     больше никто не ставит). Коды 1/3/4 — `stopped_review` с причиной;
     заявка остаётся живой, повтор публикации идемпотентен.
     """
-    if not _waves(state):
-        return True
     key = wave_key(state, "candidate")
     if op_status(state, key) == "completed":
         return True
@@ -3012,68 +3011,6 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
     return False
 
 
-def _step_push(state: RunState, ops: Ops) -> bool:
-    """S5a: push черновой ветки."""
-    key = "push"
-    if op_status(state, key) == "completed":
-        return True
-    _ensure_started(state, key)
-    ops.push_branch(state.target_dir, state.branch)
-    op_complete(state, key)
-    return True
-
-
-def _step_pr(state: RunState, ops: Ops) -> bool:
-    """S5b: PR черновиком; started → find_pr первым — второй PR не открывать.
-
-    ``find_pr`` поднимает ``RuntimeError`` на транзиентном сбое `gh` (не
-    отличимом от «PR нет» иначе — финальное ревью F-5): реконсиляция обязана
-    остановиться, а не читать сбой опроса как «PR не создан» и открывать
-    второй PR на ту же ветку. Op остаётся ``started``, статус run'а не
-    меняется — следующий `advance()`/`resume()` попробует снова.
-    """
-    key = "pr"
-    status = op_status(state, key)
-    if status == "completed":
-        return True
-    if status == "started":
-        try:
-            existing = ops.find_pr(state.repo_slug, state.branch)
-        except RuntimeError as exc:
-            print(f"_step_pr: реконсиляция find_pr не удалась: {exc}")
-            return False
-        if existing is not None:
-            state.pr = existing
-            op_complete(state, key, number=existing)
-            return True
-    else:
-        op_start(state, key)
-    title = f"{state.subject} — behaviour bundle {state.ws_id}"
-    body = f"Автоматический прогон governance runner'а ({state.run_id})."
-    pr_number = ops.create_draft_pr(
-        state.target_dir,
-        state.repo_slug,
-        state.branch,
-        title,
-        body,
-        "",
-    )
-    state.pr = pr_number
-    op_complete(state, key, number=pr_number)
-    return True
-
-
-def _step_ready(state: RunState, ops: Ops) -> bool:
-    """S6a: снять draft-статус перед ревью."""
-    key = "ready"
-    if op_status(state, key) == "completed":
-        return True
-    _ensure_started(state, key)
-    ops.mark_ready(state.repo_slug, state.pr)
-    op_complete(state, key)
-    return True
-
-
 def _file_missing_refute_candidates(body: str) -> list[str] | None:
     """Пути «отсутствующих» файлов, если ВСЕ блокирующие находки — file-missing.
 
@@ -3112,211 +3049,6 @@ def _file_missing_refute_candidates(body: str) -> list[str] | None:
             return None
         paths.append(path)
     return paths if blocking_seen else None
-
-
-def _step_review(state: RunState, ops: Ops) -> bool:
-    """S6b: review-pr.sh; started → перезапустить (дедуп по fp — дёшево)."""
-    key = "review"
-    _ensure_started(state, key)
-    if op_status(state, key) == "completed":
-        return True
-    exit_code = ops.review(state.repo, state.pr)
-    if exit_code == 0:
-        op_complete(state, key, exit=exit_code)
-        return True
-    if exit_code == 1:
-        # Evidence-подсказка (B2 follow-up приёмки B1, спека §7): известный
-        # ложный класс находок «файлов нет» опровергается прямой проверкой
-        # `git cat-file -e <head>:<путь>` — до машинного типа находки в ките
-        # steward перегон такого false positive не автоматизирован, но
-        # подсказка сокращает ручной цикл проверки. Голова берётся живьём
-        # (`ops.head_sha`), а не из `state.head` — то поле заполняется только
-        # на S7 (`_step_merge`), на S6 оно ещё пусто.
-        #
-        # `head_sha` — единственный git-вызов на СТОП-пути (финальное ревью
-        # I-6): `RealOps.head_sha` зовёт `git rev-parse` с `check=True`, и
-        # если ветки нет локально/`target_dir` уехал, штатная остановка
-        # «ревью нашло находки» превращалась в необработанный
-        # `CalledProcessError` — комментарий не постился, `state.status`
-        # оставался `running` на диске, и `resume()` заходил с неверным
-        # состоянием. Подсказка чисто косметическая и не стоит того, чтобы
-        # ронять стоп — сбой глотается, литерал `<head>` вместо реальной sha.
-        try:
-            head = ops.head_sha(state.target_dir, state.branch)
-        except Exception:  # noqa: BLE001 — косметика не должна ронять стоп
-            head = "<head>"
-        # Авто-опровержение ложного класса «файлов нет» (спека §7; машинный
-        # тип kind: file-missing доставлен steward#141/#142). Ровно ОДНА
-        # попытка на ревью-цикл (op review-refute): все блокирующие находки
-        # file-missing И каждый названный файл существует на head → комментарий
-        # с evidence + пере-прогон --fresh (обычный прогон унаследовал бы тот
-        # же красный вердикт по fp). Смешанный вердикт — человеку целиком.
-        if op_status(state, "review-refute") == "new" and head != "<head>":
-            body = ops.latest_review_body(state.repo_slug, state.pr)
-            candidates = (
-                _file_missing_refute_candidates(body) if body else None
-            )
-            if candidates and all(
-                ops.file_exists_at(state.target_dir, head, p)
-                for p in candidates
-            ):
-                op_start(state, "review-refute")
-                proofs = "\n".join(
-                    f"- `git cat-file -e {head}:{p}` — файл существует"
-                    for p in candidates
-                )
-                ops.comment(
-                    state.repo_slug, state.pr,
-                    "Авто-опровержение находок класса `file-missing` "
-                    f"(спека §7): все блокирующие находки заявляют "
-                    "отсутствие файлов, опровергнутое по дереву head:\n"
-                    f"{proofs}\n\nПере-прогон ревью с --fresh.",
-                )
-                op_complete(state, "review-refute", files=candidates)
-                fresh_exit = ops.review_fresh(state.repo, state.pr)
-                if fresh_exit == 0:
-                    op_complete(state, key, exit=fresh_exit)
-                    return True
-                # Коды fresh-прогона маршрутизируются как у первичного
-                # (приёмка PR #102, minor): 2/3 — отказ прибора, не
-                # «сохранившиеся находки»; 4 — голова уехала, тот же
-                # reset-путь, что и внизу функции.
-                if fresh_exit == REVIEW_BARRIER_EXIT:
-                    # Барьер, а не сбой прибора (devtools#258). Op'ы не
-                    # трогаем: содержимое ветки ни при чём.
-                    _stop_with_comment(
-                        state, ops, "stopped_review",
-                        REVIEW_BARRIER_STOP,
-                    )
-                    return False
-                if fresh_exit in (2, 3):
-                    _stop_with_comment(
-                        state, ops, "stopped_review", "прибор не отработал"
-                    )
-                    return False
-                if fresh_exit != 1:
-                    state.ops.pop("gate-candidate", None)
-                    state.ops.pop("push", None)
-                    state.ops.pop("ready", None)
-                    state.ops.pop(key, None)
-                    # Новая голова = новый ревью-цикл: попытка
-                    # авто-опровержения возвращается (приёмка PR #102, круг 2).
-                    state.ops.pop("review-refute", None)
-                    save(state)
-                    return False
-        _stop_with_comment(
-            state, ops, "stopped_review",
-            "ревью нашло находки, прогон остановлен\n\n"
-            "Известный ложный класс находок «файлов нет» опровергается "
-            f"прямой проверкой `git cat-file -e {head}:<путь>`.",
-        )
-        return False
-    if exit_code == REVIEW_BARRIER_EXIT:
-        # Барьер бюджета/stop rule (devtools#258): прогон возможен, но
-        # требует решения владельца. Ветка обязана стоять ДО `in (2, 3)`:
-        # под кодом 2 в PR уходила ложная причина («прибор не отработал»).
-        # И до reset-ветки ниже — та оставляет статус `running`, то есть
-        # стоп не персистентен и шаг переигрывается на следующем заходе.
-        #
-        # Чего эта ветка НЕ даёт (находка ревью devtools#275): сохранения
-        # контентного гейта. Op'ы здесь действительно не трогаются, но
-        # единственный путь продолжения из `stopped_review` — `resume()`, а
-        # он безусловно попает весь `_BUNDLE_EDIT_RESET_OPS`, включая
-        # `gate-candidate`/`push`/`ready`. Это осознанно: между стопом и
-        # resume бандл мог быть отредактирован человеком, и сброс
-        # fail-safe. Довести сохранение до конца — devtools#276.
-        _stop_with_comment(
-            state, ops, "stopped_review", REVIEW_BARRIER_STOP
-        )
-        return False
-    if exit_code in (2, 3):
-        _stop_with_comment(state, ops, "stopped_review", "прибор не отработал")
-        return False
-    # exit_code == 4 (или иной неопознанный) — голова PR уехала: в ветку
-    # пришло новое содержимое, поэтому контентный гейт S4 (отработавший по
-    # СТАРОЙ голове) обязан переиграться, не только весь S6 (финальное
-    # ревью F-7) — иначе прошедший когда-то gate-candidate молча продолжает
-    # покрывать содержимое, которого он не видел. push сбрасывается вместе с
-    # gate-candidate: новый коммит после правок ещё не запушен.
-    state.ops.pop("gate-candidate", None)
-    state.ops.pop("push", None)
-    state.ops.pop("ready", None)
-    state.ops.pop(key, None)
-    state.ops.pop("review-refute", None)
-    save(state)
-    return False
-
-
-def _step_verdict(state: RunState, ops: Ops) -> bool:
-    """S7: merge_gate → agent продолжает мержем, human/refuse — стоп.
-
-    ``verdict`` — только аудит-запись, НЕ кэш решения (финальное ревью F-2):
-    пока op ``merge`` не ``completed``, факты PR пересобираются и `decide()`
-    вызывается заново на КАЖДОМ заходе в этот шаг. Достижимо штатным
-    write-ahead-сценарием: `_step_verdict` зафиксировал ``agent``,
-    `_step_merge` начал op ``merge`` (``started``) и процесс умер раньше
-    самого мержа — статус run'а остаётся ``running``, и без пересверки
-    следующий `advance()` домержил бы по кэшированному вердикту, хотя за
-    время простоя на том же sha мог покраснеть rollup, открыться review
-    thread или PR — отстать от base (спека §8: «resume без reconciliation
-    запрещён» — единственный неотменяемый шаг). Мерж стартует только на
-    свежем ``agent``.
-    """
-    if op_status(state, "merge") == "completed":
-        return True
-
-    _ensure_started(state, "verdict")
-    authority = build_authority(Path(state.target_dir), state.merge_authority)
-    safety = load_safety()
-    review_exit = state.ops.get("review", {}).get("exit")
-    pr_facts_raw = ops.pr_facts(state.repo_slug, state.pr)
-    # S8 гейтит default-ветку целевого репо, не feature-ветку прогона — ей
-    # нужно имя (круг 5); фолбэк "master" на пустой/отсутствующий baseRefName.
-    state.base_ref = pr_facts_raw.get("baseRefName") or "master"
-    files = ops.pr_files(state.repo_slug, state.pr)
-    threads = ops.unresolved_threads(state.repo_slug, state.pr)
-    facts = facts_from(pr_facts_raw, files, threads, state.bundle_dir)
-    verdict = decide(authority, safety, review_exit, facts)
-    decision, reason = verdict.decision, verdict.reason
-    op_complete(state, "verdict", decision=decision, reason=reason)
-
-    if decision == "agent":
-        return _step_merge(state, ops)
-
-    # refuse получает свой статус, отдельный от stopped_gate (S4): причины и
-    # починки разные, и resume() должен различать их (финальное ревью M-1).
-    status = (
-        "stopped_merge_refused" if decision == "refuse" else "waiting_human_merge"
-    )
-    _stop_with_comment(state, ops, status, f"merge_gate: {decision} — {reason}")
-    return False
-
-
-def _step_merge(state: RunState, ops: Ops) -> bool:
-    """S7 (продолжение): merge; started → pr_facts.state==MERGED → complete."""
-    key = "merge"
-    status = op_status(state, key)
-    if status == "completed":
-        return True
-    if status == "new":
-        state.head = ops.head_sha(state.target_dir, state.branch)
-        op_start(state, key)
-    else:
-        pr_facts_now = ops.pr_facts(state.repo_slug, state.pr)
-        if pr_facts_now.get("state") == "MERGED":
-            op_complete(state, key, merged=True)
-            return True
-    # Имя КАТАЛОГА репо, не slug: мерж идёт через `merge-pr.sh` (единственный
-    # путь агентского мержа), а обвязка адресуется каталогом во флоте и
-    # выводит slug из его сырого origin — так же, как `ops.review` выше.
-    merged = ops.merge(state.repo, state.pr, state.head) == 0
-    if merged:
-        op_complete(state, key, merged=True)
-        return True
-    _stop_with_comment(
-        state, ops, "waiting_human_merge", "мерж не удался, ждёт человека"
-    )
-    return False
 
 
 def _s8_findings_text(exit_code: int | None, output: str) -> str:
@@ -3507,24 +3239,11 @@ def _print_status(state: RunState) -> None:
         print(f"  {key}: {op['status']}{suffix}")
 
 
-# Порядок шагов двух режимов (спека sequential-node-approval §3.1/S10).
-# Legacy — прежний конвейер бандл-PR; волны — S1–S4 per-wave + edge-check,
-# затем шаг candidate (публикация заявки волны) и ожидание человека.
-_LEGACY_STEPS = (
-    _step_interview,
-    _step_branch,
-    _step_materialize_brief,
-    _step_authoring,
-    _step_commit,
-    _step_gate,
-    _step_push,
-    _step_pr,
-    _step_ready,
-    _step_review,
-    _step_verdict,
-    _step_s8,
-)
-_WAVE_STEPS = (
+# Порядок шагов конвейера (спека sequential-node-approval §3.1/S10):
+# S1–S4 per-wave + edge-check, затем шаг candidate (публикация заявки
+# волны) и ожидание человека. Прежний путь бандл-PR удалён (S13).
+#: Единственный конвейер (S13, 2026-09-23): прежний путь удалён.
+_STEPS = (
     _step_interview,
     _step_branch,
     _step_materialize_brief,
@@ -3574,10 +3293,12 @@ def main(argv: list[str] | None = None) -> int:
         "--run-id", default=None, help="дефолт <ws-id>-<3 случайных байта hex>"
     )
     start_p.add_argument(
-        "--authoring", default="waves", choices=["legacy", "waves"],
-        help="waves (ДЕФОЛТ с 2026-09-23, S13) — узлы бандла одобряются "
-        "волнами по уровням DAG, каждая волна своим candidate-PR; "
-        "legacy — прежний путь, один бандл-PR",
+        "--authoring", default="waves", choices=["waves"],
+        help="waves — единственный режим (S13, 2026-09-23): узлы бандла "
+        "одобряются волнами по уровням DAG, каждая волна своим "
+        "candidate-PR. Флаг оставлен принимаемым — он в скриптах и "
+        "доках; `legacy` argparse отвергнет перечнем допустимых значений, "
+        "а не молчанием",
     )
 
     resume_p = sub.add_parser("resume", help="подхватить сохранённый прогон")
