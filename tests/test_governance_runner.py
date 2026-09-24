@@ -1774,6 +1774,9 @@ def _drive_waves(state, run_id: str, ops: FakeOps, wave: int):
             authorization={"login": "andrei-shtanakov", "policy": "p"},
         )
         al.record_finalize_pr(state, key, 800 + state.wave)
+        # Порядок продакшена: идентичность результата — ДО завершения
+        # заявки, и её SHA отличен от candidate-мержа (#392/#393).
+        al.record_finalize_merge_commit(state, key, f"f{state.wave:039d}")
         al.complete_request(state, key)
         for node in _WAVE_NODES[state.wave]:
             approved[f"{BUNDLE_DIR}/{_NODE_FILE[node]}"] = _approved(node)
@@ -7618,6 +7621,45 @@ def test_verify_refuses_when_parent_merge_is_not_completed(
     assert "r-384-child-absent" not in rs.all_run_ids(), (
         "каталог потомка не создан — отказ до побочных эффектов"
     )
+
+
+def test_verify_refuses_when_parent_head_is_empty(
+    tmp_path: Path, runs_root,
+) -> None:
+    """D1, условие 3 ЦЕЛИКОМ: op `merge` завершён И `head` родителя непуст.
+
+    Ревью #391 нашло первую половину реализованной, вторую — нет. Родитель
+    с `head=None` проходил гвард, потомок создавался и доходил до
+    `completed`, неся перенесённое основание с `head=None`: идентичность
+    верифицируемого результата не была установлена ничем. Верифицировать
+    при этом нечего — без головы неизвестно, какие байты подтверждены.
+
+    Почему это стало выполнимо только теперь: до #393 `head` в волнах не
+    писал никто, и буквальная проверка закрыла бы `verify()` для каждого
+    волнового прогона. Prerequisite научил прогон помнить SHA своего
+    мержа, и условие 3 стало истинным по существу, а не по букве.
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=1,
+    )
+    parent_id = "r-391-no-head"
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="master")
+    runner._step_s8(parent, ops)
+    assert parent.status == "merged_unverified"
+    assert parent.ops["merge"]["status"] == "completed", "первая половина цела"
+
+    parent.head = None
+    rs.save(parent)
+    calls_before = len(ops.calls)
+
+    with pytest.raises(ValueError, match="head"):
+        runner.verify(parent_id, ops, "r-391-no-head-child")
+
+    assert "r-391-no-head-child" not in rs.all_run_ids(), (
+        "каталог потомка не создан — отказ до побочных эффектов"
+    )
+    assert ops.calls[calls_before:] == [], "ни одной операции"
 
 
 def test_verify_child_carries_the_proven_merge_before_running_s8(
