@@ -56,6 +56,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 import tomllib
 from dataclasses import dataclass
@@ -1028,12 +1029,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--legacy", action="store_true",
-        help="прежний путь: бандл целиком одним PR. Остаётся достижим — "
-        "S13 удаляет его ОТДЕЛЬНЫМ пунктом, не флипом дефолта",
+        help="УДАЛЁН (S13, решение владельца 2026-09-23). Флаг принимается "
+        "парсером и отказывает с причиной: оператор обязан прочитать "
+        "«путь удалён», а не `unrecognized arguments`",
     )
     # --merge-authority НАМЕРЕННО отсутствует: кнопка всегда передаёт
     # "human" (решение владельца 2026-09-07) — argparse отвергнет попытку.
     args = parser.parse_args(argv)
+    if args.legacy:
+        # Отказ ДО любых побочных эффектов: ни леджера, ни git, ни
+        # evidence. Тот же текст, что у стража `resume` (S13, спека §4):
+        # что удалено, когда, чьим решением и что делать вместо.
+        print(
+            "--legacy: прежний путь авторинга удалён из исполнения "
+            "(решение владельца 2026-09-23, S13 спеки "
+            "sequential-node-approval). Исторические прогоны читаются как "
+            "прежде — status, консоль, WS-lock. Новая работа идёт волнами "
+            "(authoring=waves, дефолт с 2026-09-23); флаг --waves "
+            "принимается и ничего не меняет.",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         # Intake обязан завершиться до генерации run-id, GitHub-вызовов и
