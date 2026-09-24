@@ -583,6 +583,15 @@ _TEAM_EXP_PROFILE_TEXT = (
 ).read_text(encoding="utf-8")
 
 
+#: Третий исход разбора S13 (спека §6): тест, который СТРОИТ прогон
+#: прежнего режима намеренно, потому что его предмет — ОТНОШЕНИЕ к такому
+#: прогону (отказ, чтение, блокировка), а не исполнение прежнего пути.
+#: Такой тест обязан ПЕРЕЖИТЬ удаление: после него он нужнее, чем до.
+#: Отличим от `authoring="legacy"` грепом — и снос Task 3 идёт по строке
+#: режима, а этот маркер её не содержит.
+_LEGACY_HISTORY = "legacy"
+
+
 def _start_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
     target_dir = tmp_path / f"target-{run_id}"
     target_dir.mkdir(exist_ok=True)
@@ -596,6 +605,12 @@ def _start_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
         profile="profiles/team-exp.yaml",
         run_id=run_id,
         ops=ops,
+        # Дефолт прогона — волновой (PR #375), и тесты обязаны ехать тем же
+        # режимом, что продукт. Явный `authoring="legacy"` у теста — это НЕ
+        # настройка, а РАЗМЕТКА: «этот тест исполняет удаляемый путь». Task 3
+        # удаляет ровно тех, кто её несёт, и проверить это можно грепом, а не
+        # памятью (спека §6, исход «удаление»).
+        authoring="waves",
     )
     kwargs.update(overrides)
     # Без материализации файла preflight (Task 8) стопил бы статусом
@@ -928,7 +943,7 @@ def _need_brief_text(target: str = "owner/alpha", roles=("po",)) -> str:
 
 
 def test_status_0_brief_0_publishes_and_continues_by_e1(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     ops = FakeOps(
         discovery=[
@@ -937,8 +952,9 @@ def test_status_0_brief_0_publishes_and_continues_by_e1(
         brief_text=_need_brief_text(),
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
     )
+    _fake_wave_adapters(monkeypatch, ops)
     runner.start(
-        **_start_kwargs(tmp_path, "r-pub", ops), interview_spec=_need_spec()
+        **_waves_kwargs(tmp_path, "r-pub", ops), interview_spec=_need_spec()
     )
     state = runner.resume("r-pub", ops)
     assert state.interview["completed_at"]
@@ -947,7 +963,9 @@ def test_status_0_brief_0_publishes_and_continues_by_e1(
     assert brief.exists() and not brief.with_name(".brief.tmp").exists()
     assert state.ops["interview-brief"]["status"] == "completed"
     # E1: source layer материализован в бандл и charter получил brief_context
-    assert state.ops["materialize-brief"]["status"] == "completed"
+    # В волнах ключ per-wave: дерево волны новое, и слой источника
+    # материализуется в каждое заново (`wave_key`).
+    assert state.ops[f"materialize-brief-{state.wave}"]["status"] == "completed"
     assert any(c[0] == "author" and c[1] == "charter" for c in ops.calls)
 
 
@@ -1237,37 +1255,43 @@ class CoveredBriefOps(FakeOps):
 
 
 def test_brief_materializes_after_branch_and_reaches_two_author_prompts(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     ops = CoveredBriefOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES
     )
     source = _brief_source(tmp_path)
-    kwargs = _start_kwargs(
+    kwargs = _waves_kwargs(
         tmp_path, "r-brief-source", ops, brief_source=source,
-        merge_authority="human",
+        merge_authority="human"
     )
 
+    _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(**kwargs)
 
     destination = (
         Path(state.target_dir) / state.bundle_dir / brief_input.PRIMARY_REL
     )
     assert destination.read_bytes() == source.primary_input.read_bytes()
-    assert state.ops["branch"]["status"] == "completed"
-    assert state.ops["materialize-brief"] == {
+    assert state.ops[f"branch-{state.wave}"]["status"] == "completed"
+    assert state.ops[f"materialize-brief-{state.wave}"] == {
         "status": "completed",
         "source_blobs": dict(source.source_blobs),
     }
+    # brief_context получают ДВА узла — charter и requirements, — и в
+    # волнах они на разных уровнях. Ревью #385 (major): остановка на W1
+    # снимала проверку с requirements, и расширение условия `disp_node`
+    # или потеря контекста у второго узла перестали бы краснить. Доводим
+    # до W2 и утверждаем оба; узлы ниже контекста не получают.
+    state = _drive_waves(state, "r-brief-source", ops, 2)
     contexts = dict(ops.author_contexts)
     assert contexts["charter"] == source.as_state()
     assert contexts["requirements"] == source.as_state()
-    for kind in ("behaviour-spec", "design", "acceptance", "decomposition"):
-        assert contexts[kind] is None
+    assert set(contexts) == {"charter", "requirements"}, contexts
 
 
 def test_brief_source_layer_is_force_added_and_verified_in_s3_commit(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Живой прогон 2026-09-14 (spec-runner#490): `.gitignore` цели держит
     `workstreams/*/spec/*` с carve-out только `!*.md`, `00-discovery/` под него
@@ -1279,21 +1303,22 @@ def test_brief_source_layer_is_force_added_and_verified_in_s3_commit(
         ignored_paths={source_full},
     )
     source = _brief_source(tmp_path)
-    kwargs = _start_kwargs(
+    kwargs = _waves_kwargs(
         tmp_path, "r-brief-commit", ops, brief_source=source,
-        merge_authority="human",
+        merge_authority="human"
     )
 
+    _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(**kwargs)
 
-    assert state.ops["commit"]["status"] == "completed"
+    assert state.ops[f"commit-{state.wave}"]["status"] == "completed"
     assert ops.forced_paths == [source_full]
     assert [paths for _t, paths, _m in ops.committed] == [[BUNDLE_DIR]]
     assert "push_branch" in [c[0] for c in ops.calls]
 
 
 def test_brief_source_layer_missing_from_commit_stops_before_push(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Подсадка: ops, который добавляет bundle_dir без `-f` (прежнее
     поведение) — гвард обязан остановить прогон до push и назвать файл."""
@@ -1310,15 +1335,16 @@ def test_brief_source_layer_missing_from_commit_stops_before_push(
         ignored_paths={source_full},
     )
     source = _brief_source(tmp_path)
-    kwargs = _start_kwargs(
+    kwargs = _waves_kwargs(
         tmp_path, "r-brief-noforce", ops, brief_source=source,
-        merge_authority="human",
+        merge_authority="human"
     )
 
+    _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(**kwargs)
 
     assert state.status == "stopped_author"
-    assert state.ops["commit"]["status"] != "completed"
+    assert state.ops[f"commit-{state.wave}"]["status"] != "completed"
     assert "push_branch" not in [c[0] for c in ops.calls]
     findings = (rs.run_dir(state.run_id) / "brief-findings.txt").read_text(
         encoding="utf-8"
@@ -1383,19 +1409,44 @@ def test_brief_materialization_refuses_changed_durable_intake(
 
 
 def test_brief_coverage_stops_after_requirements_before_next_paid_author(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     source = _brief_source(tmp_path)
-    ops = FakeOps()
 
-    state = runner.start(**_start_kwargs(
-        tmp_path, "r-brief-coverage", ops, brief_source=source,
-        merge_authority="human",
-    ))
+    class _UncoveredOps(CoveredBriefOps):
+        """Charter с source-пинами (иначе гейт W1 краснеет раньше гарда),
+        requirements БЕЗ NFR-01 — непокрытой остаётся ровно та цель брифа,
+        про которую гард и обязан сказать.
+
+        В прежнем пути charter мог быть каким угодно: авторинг проходил
+        весь DAG до гейта, и гард покрытия успевал остановить прогон до
+        того, как гейт вообще звался. В волнах гейт W1 стоит РАНЬШЕ
+        авторинга behaviour-spec, поэтому вход должен быть валиден с
+        первой волны — иначе тест краснел бы не на своём предмете.
+        """
+
+        def author(self, target_dir, kind, subject, bundle_dir,
+                   brief_context=None):
+            if kind == "requirements":
+                return FakeOps.author(
+                    self, target_dir, kind, subject, bundle_dir,
+                    brief_context=brief_context,
+                )
+            return super().author(
+                target_dir, kind, subject, bundle_dir,
+                brief_context=brief_context,
+            )
+
+    ops = _UncoveredOps()
+
+    state = _drive_waves_to(
+        tmp_path, "r-brief-coverage", ops, monkeypatch, 3,
+        brief_source=source, merge_authority="human",
+    )
 
     assert state.status == "stopped_author"
     assert ops.authored == ["charter", "requirements"]
-    assert "author-behaviour" not in state.ops
+    assert "author-behaviour-spec" not in state.ops
     findings = (
         rs.run_dir(state.run_id) / "brief-findings.txt"
     ).read_text(encoding="utf-8")
@@ -1445,7 +1496,7 @@ def test_brief_source_pin_is_required_by_prospective_gate(
 
 
 def test_real_candidate_gate_accepts_materialized_brief_source(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """The real steward CLI accepts the source layer and charter source edge."""
     from governance.ops import DEVTOOLS_ROOT, RealOps
@@ -1494,10 +1545,11 @@ def test_real_candidate_gate_accepts_materialized_brief_source(
             )
 
     source = _brief_source(tmp_path)
-    kwargs = _start_kwargs(
+    ops = CliBriefOps(review_exit=1)
+    kwargs = _waves_kwargs(
         tmp_path,
         "r-real-brief-gate",
-        CliBriefOps(review_exit=1),
+        ops,
         brief_source=source,
         merge_authority="human",
     )
@@ -1508,6 +1560,7 @@ def test_real_candidate_gate_accepts_materialized_brief_source(
         ),
         encoding="utf-8",
     )
+    _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(**kwargs)
 
     assert state.status != "stopped_gate", (
@@ -1515,7 +1568,7 @@ def test_real_candidate_gate_accepts_materialized_brief_source(
             encoding="utf-8"
         )
     )
-    assert state.ops["gate-candidate"]["status"] == "completed"
+    assert state.ops[f"gate-candidate-{state.wave}"]["status"] == "completed"
 
 
 def _green_bundle(profile, bundle) -> bundle_state.BundleState:
@@ -1595,7 +1648,7 @@ def test_happy_path_agent_merge(tmp_path: Path, runs_root, monkeypatch) -> None:
     )
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-happy", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-happy", ops, authoring="legacy"))
 
     assert state.ops["merge"]["status"] == "completed"
     assert ops.merged == [(state.pr, ops.head)]
@@ -1613,7 +1666,7 @@ def test_today_reality_agent_merges(tmp_path: Path, runs_root, monkeypatch) -> N
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-human", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-human", ops, authoring="legacy"))
 
     assert state.ops["merge"]["status"] == "completed"
     assert ops.merged == [(state.pr, ops.head)]
@@ -1627,7 +1680,7 @@ def test_merge_authority_human_still_waits(
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
     state = runner.start(
-        **_start_kwargs(tmp_path, "r-human-override", ops, merge_authority="human")
+        **_start_kwargs(tmp_path, "r-human-override", ops, merge_authority="human", authoring="legacy")
     )
 
     assert "merge" not in state.ops
@@ -1639,7 +1692,7 @@ def test_merge_authority_human_still_waits(
 def test_review_request_changes_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     ops = FakeOps(review_exit=1)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-review", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-review", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert ops.merged == []
@@ -1693,7 +1746,8 @@ def test_gate_red_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
 
 def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> None:
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
-    kwargs = _start_kwargs(tmp_path, "r-skip", ops)
+    kwargs = _waves_kwargs(tmp_path, "r-skip", ops)
+    _fake_wave_adapters(monkeypatch, ops)
     bundle_dir = Path(kwargs["target_dir"]) / kwargs["bundle_dir"]
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "00-charter.md").write_text("# charter\n", encoding="utf-8")
@@ -1713,13 +1767,15 @@ def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> 
 
     state = runner.start(**kwargs)
 
+    # Перечисление шести узлов было артефактом прежнего пути: он авторил
+    # весь DAG одним проходом, и «пропущены все шесть» читалось в одном
+    # состоянии. Предикат же один и тот же — файл на месте, платного
+    # автора не зовём, — и применяется он к узлу СВОЕЙ волны. Здесь это
+    # W1/charter; что предикат общий для шага, а не для узла, видно по
+    # тому, что ветка в `_step_authoring` одна на всех.
     assert ops.authored == []
     assert state.ops["author-charter"]["skipped"] is True
-    assert state.ops["author-requirements"]["skipped"] is True
-    assert state.ops["author-behaviour"]["skipped"] is True
-    assert state.ops["author-design"]["skipped"] is True
-    assert state.ops["author-acceptance"]["skipped"] is True
-    assert state.ops["author-decomposition"]["skipped"] is True
+    assert state.wave == 1
 
 
 def test_facts_from_fail_closed() -> None:
@@ -1748,16 +1804,127 @@ def _agent_merge_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
     return _start_kwargs(tmp_path, run_id, ops, **overrides)
 
 
-def test_s8_success_completes(tmp_path: Path, runs_root, monkeypatch) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
+#: Узлы уровней DAG по волнам (спека sequential-node-approval §3.1).
+_WAVE_NODES = {
+    1: ("charter",), 2: ("requirements",), 3: ("behaviour-spec",),
+    4: ("design", "acceptance"), 5: ("decomposition",),
+}
+_NODE_FILE = {
+    "charter": "00-charter.md", "requirements": "10-requirements.md",
+    "behaviour-spec": "15-behaviour-spec.md", "design": "20-design.md",
+    "acceptance": "25-acceptance.md", "decomposition": "30-decomposition.md",
+}
+
+
+def _drive_waves_to(
+    tmp_path: Path, run_id: str, ops: FakeOps, monkeypatch, wave: int, **over,
+):
+    """Волновой прогон, доведённый до волны `wave` человеческими мержами.
+
+    Гейт — ОБЩИЙ шаг обоих режимов, но в волнах он видит ровно те узлы,
+    которые авторит текущий уровень. Поэтому тест про грамматику
+    `15-behaviour-spec.md` обязан доехать до W3: раньше его предмета в
+    бандле просто нет, и «гейт промолчал» означало бы лишь, что проверять
+    было нечего.
+
+    Каждый промежуточный шаг настоящий: заявка волны закрывается мержем
+    человека, base получает approved-узел уровня, прогон продолжается
+    `resume`. Останавливается там, где остановился прогон, — если гейт
+    целевой волны краснеет, вернётся её `stopped_gate`.
+
+    `wave=6` — «довести бандл до конца»: закрывается и заявка W5, после
+    чего `_next_wave` фиксирует op `merge` и прогон входит в ОБЩИЙ S8.
+    Шестой волны не существует; число выбрано как «на одну дальше
+    последней», чтобы вызывающему не приходилось писать отдельный флаг
+    для того же самого цикла.
+    """
+    from governance import approval_ledger as al
+
+    _fake_wave_adapters(monkeypatch, ops)
+    state = runner.start(**_waves_kwargs(tmp_path, run_id, ops, **over))
+    return _drive_waves(state, run_id, ops, wave)
+
+
+def _drive_waves(state, run_id: str, ops: FakeOps, wave: int):
+    """Тот же цикл волн для теста, который стартовал прогон сам.
+
+    Отдельная функция, а не флаг: часть тестов готовит kwargs заранее
+    (правит профиль, подкладывает чужой каталог пайплайна) и обязана
+    звать `runner.start` своими руками — предмет у них в том, что
+    происходит НА СТАРТЕ.
+    """
+    from governance import approval_ledger as al
+
+    open_facts = dict(ops.facts) or {"state": "OPEN", "baseRefName": "master"}
+    approved: dict[str, str] = {}
+    while state.wave < wave and state.status == "waiting_human_merge":
+        key = state.ops[f"candidate-{state.wave}"]["request"]
+        op = state.ops[key]
+        op.update(
+            merged_by="andrei-shtanakov", merged_at="t", merge_commit="m" * 40,
+            authorization={"login": "andrei-shtanakov", "policy": "p"},
+        )
+        al.record_finalize_pr(state, key, 800 + state.wave)
+        al.complete_request(state, key)
+        for node in _WAVE_NODES[state.wave]:
+            approved[f"{BUNDLE_DIR}/{_NODE_FILE[node]}"] = _approved(node)
+        ops.base_files = dict(approved)
+        ops.facts = {**open_facts, "state": "MERGED",
+                     "mergedBy": {"login": "andrei-shtanakov"}}
+        rs.save(state)
+        state = runner.resume(run_id, ops)
+    return state
+
+
+def _wave_run_at_s8(
+    tmp_path: Path, run_id: str, ops: FakeOps,
+    base_ref: str | None = None, **over,
+):
+    """Волновой прогон, доехавший до S8: заявки закрыты, шаг зовётся прямо.
+
+    S8 — ОБЩИЙ шаг обоих режимов, и в волнах op `merge` пишет `_next_wave`,
+    а не шаг прежнего пути. Поэтому тесты САМОГО S8 строят состояние и
+    зовут шаг напрямую — тем же приёмом, каким это уже делают тесты чистки
+    авторинговых веток волн.
+
+    Что шов цел — то есть что волновой прогон до этого шага ДОЕЗЖАЕТ —
+    утверждает отдельный тест (`test_waves_last_wave_completion_enters_s8`:
+    `merge` фиксируется волной, `gate_check_s8` вызывается, повторный
+    resume коротко замыкается на S8). Это правильная единица разделения:
+    «S8 делает своё» и «до S8 доходят» ломаются порознь, и один тест на оба
+    свойства скрыл бы, которое из них сломалось.
+    """
+    target_dir = tmp_path / f"target-{run_id}"
+    target_dir.mkdir(exist_ok=True)
+    kwargs = dict(
+        subject="тестовый функционал", repo="alpha", repo_slug="owner/alpha",
+        ws_id="WS-1", target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id=run_id, authoring="waves",
     )
+    kwargs.update(over)
+    state = rs.new_run(**kwargs)
+    state.wave = 5
+    state.status = "running"
+    state.branch = f"spec/{state.ws_id}-behaviour-w5"
+    state.pr = 700
+    state.head = ops.head
+    state.ops["merge"] = {"status": "completed", "merged": True, "waves": 5}
+    if base_ref is not None:
+        # В волнах `base_ref` пишет шаг candidate из фактов candidate-PR
+        # (`runner.py:2961`), а не шаг прежнего пути. `None` оставляет поле
+        # пустым — это вход для СОБСТВЕННОГО фолбэка S8.
+        state.base_ref = base_ref
+    rs.save(state)
+    return state
+
+
+def test_s8_success_completes(tmp_path: Path, runs_root) -> None:
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-ok", ops))
+    state = _wave_run_at_s8(tmp_path, "r-s8-ok", ops)
+    runner._step_s8(state, ops)
 
     assert state.status == "completed"
     assert state.ops["gate-authoritative"] == {"status": "completed", "exit": 0}
@@ -1785,16 +1952,13 @@ def test_s8_stale_verdicts_do_not_mask_missing_artifact(
     """Приёмка PR #114, круг 2: verdict-файл прерванной ПРЕДЫДУЩЕЙ попытки
     не должен сойти за артефакт текущего вызова гейта. Pre-clean уносит
     его (True), текущий гейт файла не создал (False) — fail-closed стоп."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=0, collect_verdicts_queue=[True, False],
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-stale", ops))
+    state = _wave_run_at_s8(tmp_path, "r-s8-stale", ops)
+    runner._step_s8(state, ops)
 
     assert state.status != "completed"
     gate_op = state.ops.get("gate-authoritative")
@@ -1808,16 +1972,13 @@ def test_s8_success_without_verdicts_is_not_completed(
     фиксации (спека §5). Зелёный exit gate-check без gate_verdicts.jsonl —
     неполный результат: fail-closed стоп ДО op_complete, шаг resumable,
     completed не выставляется."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=0, collect_verdicts_ok=False,
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-noverd", ops))
+    state = _wave_run_at_s8(tmp_path, "r-s8-noverd", ops)
+    runner._step_s8(state, ops)
 
     assert state.status != "completed"
     gate_op = state.ops.get("gate-authoritative")
@@ -1828,16 +1989,13 @@ def test_s8_success_without_verdicts_is_not_completed(
 def test_s8_fail_marks_merged_unverified_and_opens_issue(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     run_id = "r-s8-fail"
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, run_id, ops))
+    state = _wave_run_at_s8(tmp_path, run_id, ops)
+    runner._step_s8(state, ops)
 
     assert state.status == "merged_unverified"
     # Круг 3 (codex-ревью PR #88): gate-authoritative — аудит-запись, тоже
@@ -1955,10 +2113,6 @@ def test_s8_fail_does_not_reuse_issue_from_different_cycle(
     молча терялись бы под чужим issue. `find_issue` всё равно вызывается
     (реконсиляция остаётся безусловной, round 3), но не находит совпадение
     по своему префиксу -> `create_issue` создаёт НОВЫЙ, отдельный issue."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -1972,7 +2126,8 @@ def test_s8_fail_does_not_reuse_issue_from_different_cycle(
         f"{other_cycle_prefix}\nfrom: devtools#r-earlier-cycle\n\nGC-OLD\n",
     ))
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, run_id, ops))
+    state = _wave_run_at_s8(tmp_path, run_id, ops)
+    runner._step_s8(state, ops)
 
     own_prefix = f"slug: beh-remediation-{run_id}"
     assert state.status == "merged_unverified"
@@ -1994,15 +2149,12 @@ def test_verify_child_reuses_parent_remediation_issue_same_cycle(
     `remediated_by` ещё `None`). Потомок с ФРЕШ `remediation-issue`
     ("new", round 3: реконсиляция безусловна) должен найти и переиспользовать
     issue родителя, а не открыть второй под тем же циклом."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-cycle-parent"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
     assert len(ops.issues) == 1
     parent_issue_number = parent.ops["remediation-issue"]["number"]
@@ -2020,15 +2172,12 @@ def test_verify_child_reuses_parent_remediation_issue_same_cycle(
 def test_verify_child_completes_parent_stays_merged_unverified(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
     assert len(ops.issues) == 1  # родитель открыл ровно одно remediation-issue
 
@@ -2055,15 +2204,12 @@ def test_verify_refuses_when_parent_already_has_green_child(
     или после того как сессия уже закрылась) на уже зелёном потомке
     создавал бы ЕЩЁ ОДИН verification-run поверх уже верифицированного
     родителя."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-already-verified"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     ops.s8_exit = 0  # находки устранены фикс-PR'ом
@@ -2083,15 +2229,12 @@ def test_verify_allowed_again_after_failed_child(
     """Провальный (`merged_unverified`) потомок НЕ блокирует повторный
     `verify()` — только ЗЕЛЁНЫЙ (`completed`) значит «уже верифицирован»;
     цикл «verify → всё ещё красный → verify снова» остаётся штатным."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-retry"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     failed_child = runner.verify(parent_id, ops, "r-s8-child-failed")
@@ -2117,15 +2260,12 @@ def test_verify_without_run_id_serializes_when_ids_collide(
     Первый вызов резервирует и создаёт потомка, второй с тем же
     вычисленным id получает `ValueError` вместо параллельного запуска S8
     в одном `target_dir`."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-race"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     monkeypatch.setattr(runner, "_next_verify_run_id", lambda pid: f"{pid}-v1")
@@ -2155,15 +2295,12 @@ def test_next_verify_run_id_skips_dangling_reservation(
     конкурентом» и блокирует `verify()` (см. `test_verify_refuses_when_
     dangling_reservation_is_fresh`) — этот тест про труп round 6, который
     старше грейс-периода, поэтому его нужно состарить явно."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-dangling"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     # Оборванная резервация: процесс умер между _reserve_run_id и
@@ -2195,15 +2332,12 @@ def test_verify_refuses_when_child_is_running(
     держится на СОСТОЯНИИ потомков: валидный `run.json` со `status` не в
     `{"completed", "merged_unverified"}` (например `"running"` — S8 ещё
     не отработал) — активный потомок, второй `verify()` отказывает."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-active-child"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     # Валидный, но ещё не терминальный потомок (S8 в процессе).
@@ -2230,15 +2364,12 @@ def test_verify_refuses_when_dangling_reservation_is_fresh(
     свой RunState» — активный, а не труп round 6. mtime моложе
     `_ACTIVE_VERIFY_GRACE_SECONDS` (тест не состаривает файл, в отличие от
     `test_next_verify_run_id_skips_dangling_reservation`)."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-fresh-dangling"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     dangling_id = f"{parent_id}-v1"
@@ -2257,15 +2388,12 @@ def test_active_verify_child_ignores_merged_unverified_child(
     активный: не блокирует повторный `verify()` (round 3/round 7 согласны
     друг с другом — только `_has_green_child` реагирует на `completed`,
     `_active_verify_child` реагирует на нетерминальные статусы)."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-failed-not-active"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     failed_child = runner.verify(parent_id, ops)
@@ -2285,15 +2413,12 @@ def test_verify_without_run_id_increments_attempt_after_failed_child(
     провального (`merged_unverified`) потомка следующий `verify()` без
     `run_id` вычисляет НОВЫЙ id (`-v2`), а не повторяет `-v1` (что упёрлось
     бы в уже занятый `run_id` того же провального потомка)."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-parent-attempts"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     first_child = runner.verify(parent_id, ops)
@@ -2315,7 +2440,7 @@ def test_resume_waiting_human_merge_open_still_waits(
     run_id = "r-resume-open"
 
     state = runner.start(
-        **_start_kwargs(tmp_path, run_id, ops, merge_authority="human")
+        **_start_kwargs(tmp_path, run_id, ops, merge_authority="human", authoring="legacy")
     )
     assert state.status == "waiting_human_merge"
 
@@ -2334,7 +2459,7 @@ def test_resume_waiting_human_merge_merged_runs_s8(
     run_id = "r-resume-merged"
 
     state = runner.start(
-        **_start_kwargs(tmp_path, run_id, ops, merge_authority="human")
+        **_start_kwargs(tmp_path, run_id, ops, merge_authority="human", authoring="legacy")
     )
     assert state.status == "waiting_human_merge"
     assert "merge" not in state.ops
@@ -2420,7 +2545,7 @@ def test_resume_from_stopped_gate_reruns_gate_candidate(
     ops = FakeOps(gate_candidate=[(1, "error GC-X: bad\n"), (0, "")])
     run_id = "r-resume-gate"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 1)
     assert state.status == "stopped_gate"
 
     result = runner.resume(run_id, ops)
@@ -2428,7 +2553,7 @@ def test_resume_from_stopped_gate_reruns_gate_candidate(
     gate_calls = [c for c in ops.calls if c[0] == "gate_check_candidate"]
     assert len(gate_calls) == 2  # S4 реально переигран, не пропущен
     assert result.status != "stopped_gate"
-    assert result.ops["gate-candidate"]["status"] == "completed"
+    assert result.ops[f"gate-candidate-{result.wave}"]["status"] == "completed"
 
 
 def test_green_gate_removes_findings_of_the_previous_round(
@@ -2444,14 +2569,14 @@ def test_green_gate_removes_findings_of_the_previous_round(
     ops = FakeOps(gate_candidate=[(1, "error GC-X: bad\n"), (0, "")])
     run_id = "r-gate-stale"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 1)
     assert state.status == "stopped_gate"
     findings_file = rs.run_dir(run_id) / "gate-findings.txt"
     assert "GC-X" in findings_file.read_text(encoding="utf-8")
 
     result = runner.resume(run_id, ops)
 
-    assert result.ops["gate-candidate"]["status"] == "completed"
+    assert result.ops[f"gate-candidate-{result.wave}"]["status"] == "completed"
     assert not findings_file.exists(), (
         "зелёный гейт оставил находки прошлого круга: "
         + findings_file.read_text(encoding="utf-8")
@@ -2472,21 +2597,20 @@ def test_resume_from_stopped_gate_recommits_edited_bundle(
     )
     run_id = "r-resume-gate-recommit"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 1)
     assert state.status == "stopped_gate"
     # commit шёл ДО гейта в конвейере — на первом проходе он уже completed
     # со СТАРЫМ (красным по гейту) содержимым.
-    assert state.ops["commit"]["status"] == "completed"
+    assert state.ops[f"commit-{state.wave}"]["status"] == "completed"
     calls_before_resume = len(ops.calls)
 
-    # Человек правит бандл в worktree, устраняя находку гейта
-    # (DSL-корректно — иначе стоп повторит гард GC-DSL-EMPTY).
+    # Человек правит узел волны в worktree, устраняя находку гейта
+    # (DSL-корректно — иначе стоп повторит гард GC-DSL-EMPTY). На W1
+    # уровень один, charter: узлов выше в дереве ещё нет, и пинить нечего.
     bundle_dir = Path(state.target_dir) / state.bundle_dir
-    (bundle_dir / "15-behaviour-spec.md").write_text(
-        "#### BEH-01: fixed\n`traces: [FR-01]`\n- **checked_by**: x\n",
-        encoding="utf-8",
+    (bundle_dir / "00-charter.md").write_text(
+        "#### CON-01: поправленное ограничение\n", encoding="utf-8",
     )
-    _repin_bundle(bundle_dir)
 
     result = runner.resume(run_id, ops)
 
@@ -2496,7 +2620,7 @@ def test_resume_from_stopped_gate_recommits_edited_bundle(
     assert new_calls.index("commit_paths") < new_calls.index("push_branch")
     assert new_calls.count("gate_check_candidate") == 1  # гейт переигран
     assert result.status != "stopped_gate"
-    assert result.ops["gate-candidate"]["status"] == "completed"
+    assert result.ops[f"gate-candidate-{result.wave}"]["status"] == "completed"
     committed_paths = [paths for _t, paths, _m in ops.committed]
     assert committed_paths  # commit_paths реально вызван с путями бандла
 
@@ -2508,7 +2632,7 @@ def test_resume_from_stopped_review_reruns_ready_and_review(
     ops = FakeOps(review_exit=1)
     run_id = "r-resume-review"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     calls_before = len(ops.calls)
 
@@ -2532,7 +2656,7 @@ def test_resume_from_stopped_review_pr_merged_out_of_band_runs_s8(
     ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS), s8_exit=0)
     run_id = "r-resume-review-merged"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     calls_before = len(ops.calls)
 
@@ -2561,7 +2685,7 @@ def test_resume_from_stopped_review_pr_merged_records_base_ref_from_facts(
     )
     run_id = "r-resume-review-merged-baseref"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     assert state.base_ref is None
 
@@ -2622,7 +2746,7 @@ def test_resume_after_merged_reconciliation_with_nonterminal_s8_does_not_replay_
     )
     run_id = "r-resume-review-merged-s8-nonterminal"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     assert state.ops["review"]["status"] == "started"
 
@@ -2669,7 +2793,7 @@ def test_resume_from_stopped_review_pr_merged_dirty_tree_stops_before_s8(
     ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS))
     run_id = "r-resume-review-merged-dirty"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
 
     ops.facts = {**ops.facts, "state": "MERGED"}
@@ -2697,7 +2821,7 @@ def test_resume_from_stopped_review_pr_still_open_resets_as_before(
     ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS))
     run_id = "r-resume-review-still-open"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     calls_before = len(ops.calls)
 
@@ -2723,7 +2847,7 @@ def test_resume_from_stopped_gate_pr_merged_out_of_band_runs_s8(
     ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS))
     run_id = "r-resume-gate-merged"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     assert state.pr is not None
 
@@ -2754,7 +2878,7 @@ def test_resume_from_stopped_review_recommits_edited_bundle(
     ops = FakeOps(review_exit=1)
     run_id = "r-resume-review-recommit"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     assert state.ops["commit"]["status"] == "completed"
     gate_first = [c for c in ops.calls if c[0] == "gate_check_candidate"]
@@ -2799,16 +2923,21 @@ def test_resume_from_stopped_author_reruns_unfinished_author(
     ops.author = flaky_author  # type: ignore[method-assign]
     run_id = "r-resume-author"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    # W2 — волна узла requirements, на котором стенд и падает один раз.
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 2)
     assert state.status == "stopped_author"
     assert state.ops["author-charter"]["status"] == "completed"
     assert state.ops["author-requirements"]["status"] == "started"
-    assert "author-behaviour" not in state.ops
+    # Узел следующего уровня в волнах не авторится вовсе — не потому, что
+    # шаг остановился, а потому, что он не этой волны. Прежний путь авторил
+    # весь DAG подряд, и «не дошли до следующего» там было утверждением о
+    # порядке; здесь то же свойство выражает номер волны.
+    assert "author-behaviour-spec" not in state.ops
+    assert state.wave == 2
 
     result = runner.resume(run_id, ops)
 
     assert result.ops["author-requirements"]["status"] == "completed"
-    assert result.ops["author-behaviour"]["status"] == "completed"
     assert result.status != "stopped_author"
 
 
@@ -2823,7 +2952,7 @@ def test_verdict_refuse_status_is_distinct_from_stopped_gate(
         files=GREEN_BUNDLE_FILES,
     )
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-refuse", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refuse", ops, authoring="legacy"))
 
     assert state.status == "stopped_merge_refused"
     assert state.status != "stopped_gate"
@@ -2844,7 +2973,7 @@ def test_resume_from_stopped_merge_refused_reverdicts(
     )
     run_id = "r-resume-refused"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_merge_refused"
 
     ops.facts = dict(GREEN_PR_FACTS)  # rollup зазеленел
@@ -2957,12 +3086,12 @@ def test_commit_paths_called_between_author_and_push(
     `bundle_dir` (круг 5: не `git add -A`, явный список путей)."""
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-commit", ops))
+    state = _drive_waves_to(tmp_path, "r-commit", ops, monkeypatch, 1)
 
     call_names = [c[0] for c in ops.calls]
     assert call_names.index("author") < call_names.index("commit_paths")
     assert call_names.index("commit_paths") < call_names.index("push_branch")
-    assert state.ops["commit"]["status"] == "completed"
+    assert state.ops[f"commit-{state.wave}"]["status"] == "completed"
     assert len(ops.committed) == 1
     _target_dir, paths, message = ops.committed[0]
     assert paths == [BUNDLE_DIR]
@@ -2978,7 +3107,7 @@ def test_review_exit4_resets_gate_candidate_and_push_too(
     """F-7: голова PR уехала (exit 4) — S4 обязан переиграться, не только S6."""
     ops = FakeOps(review_exit=4)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-review-moved", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-review-moved", ops, authoring="legacy"))
 
     assert state.status == "running"
     assert "gate-candidate" not in state.ops
@@ -3087,7 +3216,7 @@ def test_s8_findings_include_gate_check_output(
     )
     run_id = "r-s8-output"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 6)
 
     assert state.status == "merged_unverified"
     findings_file = rs.run_dir(run_id) / "s8-findings.txt"
@@ -3107,14 +3236,15 @@ def test_start_with_existing_run_id_raises_and_does_not_overwrite(
     занятости) — уничтожение чужого леджера. Отказ ДО каких-либо эффектов;
     существующий файл не тронут ни байтом."""
     run_id = "r-taken"
-    kwargs = _start_kwargs(tmp_path, run_id, FakeOps())
+    kwargs = _waves_kwargs(tmp_path, run_id, FakeOps())
+    _fake_wave_adapters(monkeypatch, FakeOps())
     original = runner.start(**kwargs)
     assert original.status != "merged_unverified"  # леджер реально живёт
     before = rs.run_dir(run_id).joinpath("run.json").read_text(encoding="utf-8")
 
     other_ops = FakeOps()
     with pytest.raises(ValueError):
-        runner.start(**_start_kwargs(tmp_path, run_id, other_ops))
+        _drive_waves_to(tmp_path, run_id, other_ops, monkeypatch, 5)
 
     after = rs.run_dir(run_id).joinpath("run.json").read_text(encoding="utf-8")
     assert after == before  # ни байта не изменилось
@@ -3144,24 +3274,19 @@ def test_verify_with_existing_run_id_raises(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """`verify()` — та же защита для дочернего run_id."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-verify-parent-taken"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
     # Занятый child run_id — например, случайно совпал с чужим прогоном.
     # Другой ws_id, чтобы не наткнуться на WS-lock того же ws_id — здесь
     # проверяется отдельно занятость run_id, не WS-lock (круг 5).
     taken_child_id = "r-verify-child-taken"
-    runner.start(
-        **_start_kwargs(tmp_path, taken_child_id, FakeOps(), ws_id="WS-9")
-    )
+    _drive_waves_to(tmp_path, taken_child_id, FakeOps(), monkeypatch, 5, ws_id="WS-9")
     before = rs.run_dir(taken_child_id).joinpath("run.json").read_text(
         encoding="utf-8"
     )
@@ -3181,22 +3306,19 @@ def test_verify_with_existing_run_id_raises(
 def test_s8_syncs_to_default_branch_before_gate_check(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    """S8 чекаутит default-ветку (`base_ref` из `pr_facts.baseRefName`,
-    зафиксированный на S7) и подтягивает merge-коммит ПЕРЕД `gate_check_s8` —
-    иначе authoritative-срез читал бы feature-ветку прогона."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
+    """S8 чекаутит записанную default-ветку и подтягивает merge-коммит
+    ПЕРЕД `gate_check_s8` — иначе authoritative-срез читал бы feature-ветку
+    прогона. Кто записал `base_ref`, S8 не знает и знать не должен: в волнах
+    это шаг candidate из фактов candidate-PR."""
     ops = FakeOps(
         review_exit=0, facts={**GREEN_PR_FACTS, "baseRefName": "main"},
         files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-sync", ops))
+    state = _wave_run_at_s8(tmp_path, "r-s8-sync", ops, base_ref="main")
+    runner._step_s8(state, ops)
 
     assert state.status == "completed"
-    assert state.base_ref == "main"
     assert ops.checked_out == [(state.target_dir, "main")]
     call_names = [c[0] for c in ops.calls]
     assert call_names.index("checkout_and_pull") < call_names.index("gate_check_s8")
@@ -3204,22 +3326,24 @@ def test_s8_syncs_to_default_branch_before_gate_check(
 
 
 def test_s8_sync_falls_back_to_master_when_base_ref_missing(
-    tmp_path: Path, runs_root, monkeypatch,
+    tmp_path: Path, runs_root,
 ) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
+    """Фолбэк СОБСТВЕННЫЙ у S8, а не унаследованный от записавшего шага.
+
+    Прежде поле всегда заполнял шаг перед мержем, и фолбэк внутри S8
+    (`base_ref = state.base_ref or "master"`) был недостижим — тест
+    проверял чужой фолбэк, думая, что проверяет этот. Прогон, доехавший до
+    S8 без записанного `base_ref`, — ровно тот случай, ради которого
+    фолбэк в S8 и стоит."""
     ops = FakeOps(
         review_exit=0, facts={**GREEN_PR_FACTS, "baseRefName": ""},
         files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
 
-    state = runner.start(
-        **_agent_merge_kwargs(tmp_path, "r-s8-sync-fallback", ops)
-    )
+    state = _wave_run_at_s8(tmp_path, "r-s8-sync-fallback", ops)
+    assert state.base_ref is None, "вход: поле не записано"
+    runner._step_s8(state, ops)
 
-    assert state.base_ref == "master"
     assert ops.checked_out == [(state.target_dir, "master")]
 
 
@@ -3229,16 +3353,13 @@ def test_s8_sync_failure_stops_without_touching_status_or_gate(
     """`checkout_and_pull` падает (например, локальные правки/дивергенция) —
     S8 останавливается ДО `gate_check_s8`, статус run'а не меняется (retry
     на следующем `advance()`/`resume()`, тот же паттерн, что `_step_pr`)."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         checkout_and_pull_error="ff-only diverged",
     )
 
-    state = runner.start(**_agent_merge_kwargs(tmp_path, "r-s8-sync-fail", ops))
+    state = _wave_run_at_s8(tmp_path, "r-s8-sync-fail", ops)
+    runner._step_s8(state, ops)
 
     assert state.status == "running"
     assert state.ops["sync-default"]["status"] == "started"
@@ -3248,18 +3369,14 @@ def test_s8_sync_failure_stops_without_touching_status_or_gate(
 def test_verify_child_reuses_parent_base_ref(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts={**GREEN_PR_FACTS, "baseRefName": "main"},
         files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     parent_id = "r-s8-sync-parent"
-    parent = runner.start(**_agent_merge_kwargs(tmp_path, parent_id, ops))
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="main")
+    runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
-    assert parent.base_ref == "main"
 
     ops.s8_exit = 0
     calls_before_verify = len(ops.calls)
@@ -3299,14 +3416,14 @@ def test_resume_after_cleanup_from_stopped_dirty_proceeds(
     )
     run_id = "r-dirty-resume"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 1)
     assert state.status == "stopped_dirty"
 
     ops.dirty = False  # человек прибрался
     result = runner.resume(run_id, ops)
 
     assert result.status != "stopped_dirty"
-    assert result.ops["branch"]["status"] == "completed"
+    assert result.ops[f"branch-{result.wave}"]["status"] == "completed"
 
 
 # --- Круг 5, часть 3: WS-lock по merged_unverified --------------------------
@@ -3323,16 +3440,12 @@ def test_start_blocked_by_merged_unverified_without_green_child(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     blocked_ws = "WS-LOCK-1"
-    parent = runner.start(
-        **_agent_merge_kwargs(tmp_path, "r-lock-parent", ops, ws_id=blocked_ws)
-    )
+    parent = _drive_waves_to(tmp_path, "r-lock-parent", ops, monkeypatch, 6, ws_id=blocked_ws)
     assert parent.status == "merged_unverified"
 
     blocked_run_id = "r-lock-blocked-attempt"
     with pytest.raises(ValueError, match="WS-LOCK-1"):
-        runner.start(**_start_kwargs(
-            tmp_path, blocked_run_id, FakeOps(), ws_id=blocked_ws,
-        ))
+        _drive_waves_to(tmp_path, blocked_run_id, FakeOps(), monkeypatch, 5, ws_id=blocked_ws)
     # WS-lock проверяется до резервирования run_id (круг 7) — отказ не
     # оставляет пустую run.json-заглушку под несостоявшимся прогоном.
     assert not (rs.run_dir(blocked_run_id) / "run.json").exists()
@@ -3349,9 +3462,7 @@ def test_start_unblocked_after_verify_child_completes(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
     ws = "WS-LOCK-2"
-    parent = runner.start(
-        **_agent_merge_kwargs(tmp_path, "r-lock-parent2", ops, ws_id=ws)
-    )
+    parent = _drive_waves_to(tmp_path, "r-lock-parent2", ops, monkeypatch, 6, ws_id=ws)
     assert parent.status == "merged_unverified"
 
     ops.s8_exit = 0  # находки устранены фикс-PR'ом
@@ -3359,9 +3470,7 @@ def test_start_unblocked_after_verify_child_completes(
     assert child.status == "completed"
 
     # Разблокировано зелёным потомком — новый прогон стартует без ValueError.
-    unblocked = runner.start(**_start_kwargs(
-        tmp_path, "r-lock-after-fix", FakeOps(), ws_id=ws,
-    ))
+    unblocked = _drive_waves_to(tmp_path, "r-lock-after-fix", FakeOps(), monkeypatch, 5, ws_id=ws)
     assert unblocked.run_id == "r-lock-after-fix"
 
 
@@ -3373,7 +3482,7 @@ def test_start_broken_neighbor_run_json_is_skipped(
     broken_dir.mkdir(parents=True)
     (broken_dir / "run.json").write_text("not json at all", encoding="utf-8")
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-after-broken", FakeOps()))
+    state = _drive_waves_to(tmp_path, "r-after-broken", FakeOps(), monkeypatch, 1)
 
     assert state.run_id == "r-after-broken"
 
@@ -3578,7 +3687,19 @@ def test_stop_with_comment_saves_status_before_commenting(
     `save()` оставляла run в `"running"`, и следующий `advance()` переигрывал
     этот же шаг с нуля, включая повторный (дублирующий) комментарий.
     Проверка через "шпиона": `ops.comment`, вызванный, читает `run.json` с
-    диска в момент своего вызова — статус там уже обязан быть терминальным."""
+    диска в момент своего вызова — статус там уже обязан быть терминальным.
+
+    S13, разбор: тест остаётся на прежнем пути НЕ по признаку падения, а
+    потому что КОММЕНТИРУЮЩАЯ половина `_stop_with_comment` достижима
+    только там. Она ключуется на `state.pr`, а `state.pr` выставляет
+    единственный шаг — `_step_pr`, удаляемый. В волнах у прогона `pr`
+    остаётся `None`, и помощник уходит в ветку «PR нет»: пишет
+    `stop-reason.txt` и печатает причину, комментария не делает вовсе.
+    Сам помощник переживает удаление и продолжает звать́ся из шага
+    candidate и из `_resume_wave` — но проверяемое здесь свойство после
+    удаления станет ненаблюдаемым. Живой аналог — `_wave_pause`, у него
+    своя реализация того же порядка и свой тест ниже.
+    """
     ops = FakeOps(review_exit=1)
     run_id = "r-comment-order"
     seen_status_at_comment_time: dict[str, str] = {}
@@ -3590,10 +3711,45 @@ def test_stop_with_comment_saves_status_before_commenting(
 
     ops.comment = spying_comment  # type: ignore[method-assign]
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert seen_status_at_comment_time["status"] == "stopped_review"
+
+
+def test_wave_pause_saves_status_before_commenting(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Та же дисциплина у `_wave_pause` — и это ВТОРАЯ её реализация.
+
+    Пауза волны не зовёт `_stop_with_comment`, а повторяет порядок у себя.
+    Мутация помощника её не роняет, и без отдельного теста дублированное
+    свойство осталось бы без стража ровно наполовину.
+
+    Наблюдать обязательно ПЕРВУЮ паузу прогона. На любой следующей на
+    диске уже лежит `waiting_human_merge` с прошлого раза, и «до» не
+    отличается от «после» — тест зеленеет при любом порядке. Первая пауза
+    идёт из `running`, и неверный порядок виден.
+    """
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    run_id = "r-pause-order"
+    seen: list[str] = []
+    original_comment = ops.comment
+
+    def spying_comment(repo_slug: str, pr: int, body: str) -> None:
+        seen.append(rs.load(run_id).status)
+        return original_comment(repo_slug, pr, body)
+
+    ops.comment = spying_comment  # type: ignore[method-assign]
+
+    state = _waiting_wave1(tmp_path, monkeypatch, ops, run_id)
+
+    assert state.status == "waiting_human_merge"
+    assert seen, "пауза волны обязана была прокомментировать candidate-PR"
+    assert seen[0] == "waiting_human_merge", (
+        f"на диске в момент комментария было {seen[0]!r} — статус "
+        "зафиксирован ПОСЛЕ best-effort комментария"
+    )
 
 
 def test_resume_from_stopped_review_does_not_repost_comment_when_fixed(
@@ -3607,7 +3763,7 @@ def test_resume_from_stopped_review_does_not_repost_comment_when_fixed(
     ops = FakeOps(review_exit=1)
     run_id = "r-comment-no-repost"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_review"
     assert len(ops.comments) == 1
 
@@ -3672,7 +3828,7 @@ def test_stop_review_comment_includes_evidence_hint(
     ops = FakeOps(review_exit=1)
     run_id = "r-review-evidence"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert ops.comments
@@ -3692,7 +3848,7 @@ def test_stop_review_comment_survives_head_sha_failure(
     ops = FakeOps(review_exit=1, head_sha_error="fatal: bad revision")
     run_id = "r-review-evidence-head-fails"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert ops.comments
@@ -3709,7 +3865,7 @@ def test_default_author_backend_is_codex_author_disp_not_called(
     идут через `ops.author`, `ops.author_disp` не вызывается вовсе."""
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-disp-default", ops))
+    state = _drive_waves_to(tmp_path, "r-disp-default", ops, monkeypatch, 5)
 
     assert ops.authored == [
         "charter", "requirements", "behaviour-spec", "design", "acceptance",
@@ -3733,13 +3889,28 @@ def test_disp_backend_used_only_for_behaviour_node(
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-disp-behaviour"
 
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp",
-    ))
+    # Ревью #385 (major): прогон обязан пройти ВЕСЬ DAG, иначе ошибочное
+    # расширение `disp_node` на design перестаёт краснить — остановка на
+    # W3 маршрутизацию последующих узлов не проверяет вовсе. Общий стенд
+    # `author_disp` документа не создаёт, поэтому ЗДЕСЬ он его пишет: в
+    # бою disp именно доставляет узел, и без этого W4 упирается в пин на
+    # отсутствующий файл — свойство стенда, а не продукта.
+    original_author_disp = ops.author_disp
+
+    def delivering_author_disp(target_dir, task, config_path, slug, resume=False):
+        rc = original_author_disp(target_dir, task, config_path, slug, resume)
+        path = Path(target_dir) / BUNDLE_DIR / "15-behaviour-spec.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_DEFAULT_BEHAVIOUR_BODY, encoding="utf-8")
+        return rc
+
+    ops.author_disp = delivering_author_disp  # type: ignore[method-assign]
+
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 6, author_backend="disp")
 
     assert ops.authored == [
         "charter", "requirements", "design", "acceptance", "decomposition",
-    ]
+    ], "через codex обязаны пройти ВСЕ узлы, кроме behaviour-spec"
     assert len(ops.author_disp_calls) == 1
     target_dir, task, config_path, slug = ops.author_disp_calls[0]
     assert target_dir == str(tmp_path / f"target-{run_id}")
@@ -3837,7 +4008,7 @@ def test_disp_doc_slug_is_truncated_to_the_grammar_limit() -> None:
 
 
 def test_disp_doc_checklist_carries_the_dsl_frontmatter_and_pin(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """devtools#204 п.1: чеклист сходимости `doc` зеркалит ВЕСЬ DSL узла,
     включая frontmatter (`spec_stage`/`status`) и пин `upstream_hashes` —
@@ -3848,9 +4019,7 @@ def test_disp_doc_checklist_carries_the_dsl_frontmatter_and_pin(
     from governance.ops import _AUTHOR_DSL
 
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
-    runner.start(**_start_kwargs(
-        tmp_path, "r-disp-dsl", ops, author_backend="disp",
-    ))
+    _drive_waves_to(tmp_path, "r-disp-dsl", ops, monkeypatch, 5, author_backend="disp")
     _, _, config_path, _ = ops.author_disp_calls[0]
     config = tomllib.loads(Path(config_path).read_text(encoding="utf-8"))
     items = config["pipeline"]["checklists"]["doc"]["items"]
@@ -3870,10 +4039,7 @@ def test_disp_doc_anchor_leaves_the_target_when_runs_root_is_inside_it(
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg))
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     # runs_root = tmp_path/"runs" — внутри цели, если цель = tmp_path.
-    runner.start(**_start_kwargs(
-        tmp_path, "r-disp-self", ops, author_backend="disp",
-        target_dir=str(tmp_path),
-    ))
+    _drive_waves_to(tmp_path, "r-disp-self", ops, monkeypatch, 5, author_backend="disp", target_dir=str(tmp_path))
     target_dir, _, config_path, _ = ops.author_disp_calls[0]
     config = Path(config_path).read_text(encoding="utf-8")
     anchor_line = [ln for ln in config.splitlines() if ln.startswith("anchor_path")]
@@ -3895,9 +4061,7 @@ def test_disp_anchor_dir_is_canonical_even_for_relative_xdg_state_home(
     monkeypatch.setenv("XDG_STATE_HOME", "state-rel")
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-disp-rel-xdg"
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp", target_dir=str(tmp_path),
-    ))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5, author_backend="disp", target_dir=str(tmp_path))
     _, _, config_path, _ = ops.author_disp_calls[0]
     config = Path(config_path).read_text(encoding="utf-8")
     line = [ln for ln in config.splitlines() if ln.startswith("anchor_path")]
@@ -3917,9 +4081,7 @@ def test_disp_anchor_dir_is_pinned_and_survives_an_environment_change(
     monkeypatch.setenv("XDG_STATE_HOME", str(first))
     ops = FakeOps(author_disp_exit=1)
     run_id = "r-disp-anchor-pin"
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp", target_dir=str(tmp_path),
-    ))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5, author_backend="disp", target_dir=str(tmp_path))
     assert state.status == "stopped_author"
 
     def anchor_of(config_path: str) -> Path:
@@ -3945,9 +4107,7 @@ def test_disp_slug_is_pinned_in_run_state_and_reused_on_retry(
     начатый пайплайн; retry читает пин, а не считает заново."""
     ops = FakeOps(author_disp_exit=1)
     run_id = "r-disp-pin"
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp",
-    ))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5, author_backend="disp")
     assert state.status == "stopped_author"
     first_slug = ops.author_disp_calls[0][3]
     assert state.disp_slug == first_slug
@@ -3961,7 +4121,7 @@ def test_disp_slug_is_pinned_in_run_state_and_reused_on_retry(
 
 
 def test_disp_retry_resumes_an_existing_pipeline_dir_instead_of_run(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """devtools#204 п.3: `disp pipeline run` на существующем
     `.disputatio/pipelines/<slug>/` отказывает (`_check_pipeline_dir_absent`
@@ -3969,9 +4129,7 @@ def test_disp_retry_resumes_an_existing_pipeline_dir_instead_of_run(
     есть ⇒ `resume`, нет ⇒ `run`."""
     ops = FakeOps(author_disp_exit=1)
     run_id = "r-disp-resume"
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp",
-    ))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5, author_backend="disp")
     assert ops.author_disp_resume == [False]
     target_dir, _, _, slug = ops.author_disp_calls[0]
     (Path(target_dir) / ".disputatio" / "pipelines" / slug).mkdir(parents=True)
@@ -3998,16 +4156,14 @@ def test_disp_retry_resumes_an_existing_pipeline_dir_instead_of_run(
 
 
 def test_hand_fixed_node_without_pipeline_dir_is_accepted_after_pin(
-    tmp_path: Path, runs_root, capsys,
+    tmp_path: Path, runs_root, capsys, monkeypatch,
 ) -> None:
     """Ревью #242, круг 3: операторский выход из пинованного состояния.
     Стоп → оператор убирает каталог пайплайна соседа и кладёт/чинит файл
     узла руками → resume принимает файл как есть, без вызова соседа."""
     ops = FakeOps(author_disp_exit=1)
     run_id = "r-disp-handfix"
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp",
-    ))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5, author_backend="disp")
     assert state.status == "stopped_author"
     assert "принять узел руками" in capsys.readouterr().out
     target_dir, _, _, slug = ops.author_disp_calls[0]
@@ -4023,18 +4179,21 @@ def test_hand_fixed_node_without_pipeline_dir_is_accepted_after_pin(
 
 
 def test_foreign_pipeline_dir_on_first_start_stops_instead_of_resuming(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Ревью #242: каталог `.disputatio/pipelines/<slug>/` от чужого или
     заброшенного прогона на ПЕРВОМ старте — стоп с подсказкой, а не `resume`
     с нашим конфигом и анкером поверх чужого манифеста."""
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-disp-foreign"
-    kwargs = _start_kwargs(tmp_path, run_id, ops, author_backend="disp")
+    kwargs = _waves_kwargs(tmp_path, run_id, ops, author_backend="disp")
+    _fake_wave_adapters(monkeypatch, ops)
     foreign = Path(kwargs["target_dir"]) / ".disputatio" / "pipelines" / "beh-ws-1"
     foreign.mkdir(parents=True)
 
-    state = runner.start(**kwargs)
+    # Чужой каталог пайплайна видит шаг авторинга узла
+    # behaviour-spec — это W3; до неё прогон доводится волнами.
+    state = _drive_waves(runner.start(**kwargs), run_id, ops, 3)
 
     assert state.status == "stopped_author"
     assert ops.author_disp_calls == []
@@ -4042,20 +4201,23 @@ def test_foreign_pipeline_dir_on_first_start_stops_instead_of_resuming(
 
 
 def test_foreign_pipeline_dir_with_its_draft_still_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Ревью #242, круг 4: чужой каталог пайплайна уже написал черновик
     узла — черновик не наш готовый узел, стоп-гард стоит ДО skip-ветки."""
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-disp-foreign-draft"
-    kwargs = _start_kwargs(tmp_path, run_id, ops, author_backend="disp")
+    kwargs = _waves_kwargs(tmp_path, run_id, ops, author_backend="disp")
+    _fake_wave_adapters(monkeypatch, ops)
     target = Path(kwargs["target_dir"])
     (target / ".disputatio" / "pipelines" / "beh-ws-1").mkdir(parents=True)
     draft = target / BUNDLE_DIR / "15-behaviour-spec.md"
     draft.parent.mkdir(parents=True, exist_ok=True)
     draft.write_text("#### BEH-01 чужой черновик\n", encoding="utf-8")
 
-    state = runner.start(**kwargs)
+    # Чужой каталог пайплайна видит шаг авторинга узла
+    # behaviour-spec — это W3; до неё прогон доводится волнами.
+    state = _drive_waves(runner.start(**kwargs), run_id, ops, 3)
 
     assert state.status == "stopped_author"
     assert ops.author_disp_calls == []
@@ -4072,25 +4234,21 @@ def test_disp_config_without_model_stops_author_with_reason(
     monkeypatch.delenv("AUTHOR_MODEL", raising=False)
     monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
     ops = FakeOps()
-    state = runner.start(**_start_kwargs(
-        tmp_path, "r-disp-nomodel", ops, author_backend="disp",
-    ))
+    state = _drive_waves_to(tmp_path, "r-disp-nomodel", ops, monkeypatch, 5, author_backend="disp")
     assert state.status == "stopped_author"
     assert ops.author_disp_calls == []
     assert "AUTHOR_MODEL" in capsys.readouterr().out
 
 
 def test_disp_backend_author_disp_failure_stops_author(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Провал `author_disp` (rc != 0) останавливает прогон так же, как
     провал `ops.author` — `stopped_author`, статус не подменяется бэкендом."""
     ops = FakeOps(author_disp_exit=1)
     run_id = "r-disp-fail"
 
-    state = runner.start(**_start_kwargs(
-        tmp_path, run_id, ops, author_backend="disp",
-    ))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5, author_backend="disp")
 
     assert state.status == "stopped_author"
     assert state.ops["author-behaviour"]["status"] == "started"
@@ -4123,16 +4281,16 @@ def test_gate_stops_on_dsl_empty_bundle(
             return rc
 
     ops = DialectOps(review_exit=0, facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-dsl-empty", ops))
+    state = _drive_waves_to(tmp_path, "r-dsl-empty", ops, monkeypatch, 3)
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir("r-dsl-empty") / "gate-findings.txt").read_text()
     assert "GC-DSL-EMPTY" in findings and "15-behaviour-spec.md" in findings
-    assert "push" not in state.ops
+    assert f"push-{state.wave}" not in state.ops
 
 
 def test_gate_dsl_empty_design_message_names_design_grammar(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """MINOR-2: GC-DSL-EMPTY для 20-design.md обязан называть СВОЮ
     грамматику (`#### Q-NN · owner_role: … · resolution: …`), не чужую
@@ -4168,9 +4326,7 @@ def test_gate_dsl_empty_design_message_names_design_grammar(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-design-dsl-empty-msg", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-design-dsl-empty-msg", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -4182,7 +4338,7 @@ def test_gate_dsl_empty_design_message_names_design_grammar(
 
 
 def test_gate_accepts_design_heading_with_nonstandard_middot_spacing(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """MINOR-2: паттерн GC-DSL-EMPTY для design синхронизирован с
     `design_guard._DESIGN_Q_RE` (`\\s*·\\s*`) — заголовок, который
@@ -4231,16 +4387,14 @@ def test_gate_accepts_design_heading_with_nonstandard_middot_spacing(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-design-dsl-nonstd-space", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-design-dsl-nonstd-space", ops, monkeypatch, 4)
 
     findings_file = (
         runner.run_dir("r-design-dsl-nonstd-space") / "gate-findings.txt"
     )
     findings = findings_file.read_text() if findings_file.exists() else ""
     assert "GC-DSL-EMPTY" not in findings
-    assert state.ops["gate-candidate"]["status"] == "completed"
+    assert state.ops[f"gate-candidate-{state.wave}"]["status"] == "completed"
 
 
 def test_rollup_unstable_failure_still_refuses(
@@ -4257,7 +4411,7 @@ def test_rollup_unstable_failure_still_refuses(
         "mergeStateStatus": "UNSTABLE",
     }
     ops = FakeOps(review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES)
-    state = runner.start(**_start_kwargs(tmp_path, "r-unstable", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-unstable", ops, authoring="legacy"))
 
     assert state.status == "stopped_merge_refused"
     assert ops.merged == []
@@ -4272,7 +4426,7 @@ def test_rollup_red_blocked_still_refuses(
         "mergeStateStatus": "BLOCKED",
     }
     ops = FakeOps(review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES)
-    state = runner.start(**_start_kwargs(tmp_path, "r-blocked", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-blocked", ops, authoring="legacy"))
 
     assert state.status == "stopped_merge_refused"
     assert ops.merged == []
@@ -4292,7 +4446,7 @@ def test_resume_merge_refused_after_human_merge_runs_s8(
         review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
     run_id = "r-refused-merged"
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
     assert state.status == "stopped_merge_refused"
 
     ops.facts = {**ops.facts, "state": "MERGED"}
@@ -4304,7 +4458,7 @@ def test_resume_merge_refused_after_human_merge_runs_s8(
 
 
 def test_gate_unpinned_draft_edge_stops_locally(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Гард GC-UNPINNED(prospective) поверх CLI (приёмка PR #101, major):
     stale-каскад gate-check живёт только на approved — draft-узел с
@@ -4330,16 +4484,16 @@ def test_gate_unpinned_draft_edge_stops_locally(
             return rc
 
     ops = UnpinnedAuthorOps(facts=GREEN_PR_FACTS)  # CLI-гейт (FakeOps) даёт 0
-    state = runner.start(**_start_kwargs(tmp_path, "r-unpinned", ops))
+    state = _drive_waves_to(tmp_path, "r-unpinned", ops, monkeypatch, 3)
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir("r-unpinned") / "gate-findings.txt").read_text()
     assert "GC-UNPINNED" in findings and "requirements" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_pinned_draft_edge_passes_local_guard(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     class PinnedAuthorOps(FakeOps):
         def author(
@@ -4367,11 +4521,11 @@ def test_gate_pinned_draft_edge_passes_local_guard(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=0,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-pinned", ops))
-    assert state.ops["gate-candidate"]["status"] == "completed"
+    state = _drive_waves_to(tmp_path, "r-pinned", ops, monkeypatch, 3)
+    assert state.ops[f"gate-candidate-{state.wave}"]["status"] == "completed"
 
 
-def test_gate_stale_draft_pin_stops_locally(tmp_path: Path, runs_root) -> None:
+def test_gate_stale_draft_pin_stops_locally(tmp_path: Path, runs_root, monkeypatch) -> None:
     """GC-STALE(prospective) поверх CLI (приёмка PR #101, круг 2): пин
     присутствует, но НЕ равен blob-хешу upstream в worktree — стоп, не
     fail-open по одному лишь наличию 40 hex."""
@@ -4397,16 +4551,16 @@ def test_gate_stale_draft_pin_stops_locally(tmp_path: Path, runs_root) -> None:
             return rc
 
     ops = StalePinOps(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-stale-pin", ops))
+    state = _drive_waves_to(tmp_path, "r-stale-pin", ops, monkeypatch, 3)
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir("r-stale-pin") / "gate-findings.txt").read_text()
     assert "GC-STALE" in findings and "не совпадает" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_inline_upstream_hashes_form_passes(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Inline-форма `upstream_hashes: {requirements: "<hash>"}` — ровно та,
     что предписывает авторский промпт (приёмка PR #101, круг 3) — обязана
@@ -4436,12 +4590,12 @@ def test_gate_inline_upstream_hashes_form_passes(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=0,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-inline-pin", ops))
-    assert state.ops["gate-candidate"]["status"] == "completed"
+    state = _drive_waves_to(tmp_path, "r-inline-pin", ops, monkeypatch, 3)
+    assert state.ops[f"gate-candidate-{state.wave}"]["status"] == "completed"
 
 
 def test_gate_foreign_toplevel_key_is_not_a_pin(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Приёмка PR #101, круг 4: пустой `upstream_hashes: {}` + посторонний
     верхнеуровневый ключ `requirements: <верный hash>` ниже — это НЕ пин;
@@ -4469,7 +4623,7 @@ def test_gate_foreign_toplevel_key_is_not_a_pin(
             return rc
 
     ops = ForeignKeyOps(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-foreign-key", ops))
+    state = _drive_waves_to(tmp_path, "r-foreign-key", ops, monkeypatch, 3)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -4520,7 +4674,7 @@ def test_review_auto_refutes_file_missing(
         existing_files={"governance/foo.py"},
         facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-ok", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-ok", ops, authoring="legacy"))
 
     assert state.ops["review-refute"]["status"] == "completed"
     assert state.ops["review"] == {"status": "completed", "exit": 0}
@@ -4537,7 +4691,7 @@ def test_review_mixed_verdict_goes_to_human(
         existing_files={"governance/foo.py", "governance/bar.py"},
         facts=GREEN_PR_FACTS,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-mixed", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-mixed", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert not any(c[0] == "review_fresh" for c in ops.calls)
@@ -4548,7 +4702,7 @@ def test_review_truly_missing_file_goes_to_human(
     tmp_path: Path, runs_root,
 ) -> None:
     ops = FakeOps(review_exit=1, review_body=_FM_BODY, facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-real", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-real", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert not any(c[0] == "review_fresh" for c in ops.calls)
@@ -4563,7 +4717,7 @@ def test_review_refute_is_single_attempt(
         existing_files={"governance/foo.py"},
         facts=GREEN_PR_FACTS,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-again", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-again", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert [c[0] for c in ops.calls].count("review_fresh") == 1
@@ -4592,7 +4746,7 @@ def test_review_fresh_instrument_failure_routed_honestly(
         existing_files={"governance/foo.py"},
         facts=GREEN_PR_FACTS,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-instr", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-instr", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert any("прибор не отработал" in c for c in ops.comments)
@@ -4618,7 +4772,7 @@ def test_barrier_stop_is_named_and_persistent(tmp_path: Path, runs_root) -> None
         review_exit=ops_mod.REVIEW_BARRIER_EXIT, facts=GREEN_PR_FACTS,
         files=GREEN_BUNDLE_FILES,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-budget", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-budget", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert any(ops_mod.REVIEW_BARRIER_STOP in c for c in ops.comments)
@@ -4650,7 +4804,7 @@ def test_barrier_stop_on_fresh_path_is_named_too(
         review_body=_FM_BODY, existing_files={"governance/foo.py"},
         facts=GREEN_PR_FACTS,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-budget-fresh", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-budget-fresh", ops, authoring="legacy"))
 
     assert state.status == "stopped_review"
     assert any(ops_mod.REVIEW_BARRIER_STOP in c for c in ops.comments)
@@ -4667,7 +4821,7 @@ def test_head_move_after_refute_restores_attempt(
         existing_files={"governance/foo.py"},
         facts=GREEN_PR_FACTS,
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-refute-head", ops))
+    state = runner.start(**_start_kwargs(tmp_path, "r-refute-head", ops, authoring="legacy"))
 
     assert "review-refute" not in state.ops
     assert "review" not in state.ops  # весь цикл переигрывается
@@ -4801,35 +4955,35 @@ def _design_pin_ops(bad_edge: str) -> type:
 
 
 def test_gate_design_missing_requirements_pin_is_unpinned(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-UNPINNED(prospective) на ребре design→requirements: пин
     behaviour-spec корректен, requirements — не запинен вовсе."""
     ops = _design_pin_ops("requirements")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-unpinned-req", ops))
+    state = _drive_waves_to(tmp_path, "r-design-unpinned-req", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-design-unpinned-req") / "gate-findings.txt"
     ).read_text()
     assert "GC-UNPINNED" in findings and "requirements" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_design_missing_behaviour_pin_is_unpinned(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-UNPINNED(prospective) на ребре design→behaviour-spec: пин
     requirements корректен, behaviour-spec — не запинен вовсе."""
     ops = _design_pin_ops("behaviour-spec")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-unpinned-beh", ops))
+    state = _drive_waves_to(tmp_path, "r-design-unpinned-beh", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-design-unpinned-beh") / "gate-findings.txt"
     ).read_text()
     assert "GC-UNPINNED" in findings and "behaviour-spec" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def _design_undeclared_edge_ops(missing_edge: str) -> type:
@@ -4881,16 +5035,14 @@ def _design_undeclared_edge_ops(missing_edge: str) -> type:
 
 
 def test_gate_design_undeclared_requirements_edge_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """MAJOR-1: design `traces_to` несёт только `behaviour-spec` — ребро
     requirements не объявлено ВООБЩЕ (не «не запинено», а отсутствует в
     traces_to) — S4 обязан стопить prospective-находкой, не молча
     пропускать необъявленное required-ребро."""
     ops = _design_undeclared_edge_ops("requirements")(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-design-undeclared-req", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-design-undeclared-req", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -4898,19 +5050,17 @@ def test_gate_design_undeclared_requirements_edge_stops(
     ).read_text()
     assert "GC-UNPINNED" in findings and "requirements" in findings
     assert "не объявлено в traces_to" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_design_undeclared_behaviour_edge_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """MAJOR-1: design `traces_to` несёт только `requirements` — ребро
     behaviour-spec не объявлено ВООБЩЕ — S4 обязан стопить, не
     пропускать."""
     ops = _design_undeclared_edge_ops("behaviour-spec")(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-design-undeclared-beh", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-design-undeclared-beh", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -4918,7 +5068,7 @@ def test_gate_design_undeclared_behaviour_edge_stops(
     ).read_text()
     assert "GC-UNPINNED" in findings and "behaviour-spec" in findings
     assert "не объявлено в traces_to" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_edges_derived_from_bundle_dag() -> None:
@@ -4995,36 +5145,36 @@ def _design_stale_ops(stale_edge: str) -> type:
     return _Ops
 
 
-def test_gate_design_stale_requirements_pin(tmp_path: Path, runs_root) -> None:
+def test_gate_design_stale_requirements_pin(tmp_path: Path, runs_root, monkeypatch) -> None:
     """GC-STALE(prospective) на ребре design→requirements: пин
     синтаксически валиден, но не совпадает с blob-хешем в worktree."""
     ops = _design_stale_ops("requirements")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-stale-req", ops))
+    state = _drive_waves_to(tmp_path, "r-design-stale-req", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-design-stale-req") / "gate-findings.txt"
     ).read_text()
     assert "GC-STALE" in findings and "requirements" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
-def test_gate_design_stale_behaviour_pin(tmp_path: Path, runs_root) -> None:
+def test_gate_design_stale_behaviour_pin(tmp_path: Path, runs_root, monkeypatch) -> None:
     """GC-STALE(prospective) на ребре design→behaviour-spec: пин
     синтаксически валиден, но не совпадает с blob-хешем в worktree."""
     ops = _design_stale_ops("behaviour-spec")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-stale-beh", ops))
+    state = _drive_waves_to(tmp_path, "r-design-stale-beh", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-design-stale-beh") / "gate-findings.txt"
     ).read_text()
     assert "GC-STALE" in findings and "behaviour-spec" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_stops_on_uncovered_architect_question(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-DESIGN-COVERAGE (спека Task 4): architects-Q из requirements без
     резолюции в design — стоп, отдельно от DSL-EMPTY/UNPINNED/STALE (оба
@@ -5068,14 +5218,14 @@ def test_gate_stops_on_uncovered_architect_question(
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = UncoveredQOps(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-design-uncovered-q", ops))
+    state = _drive_waves_to(tmp_path, "r-design-uncovered-q", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-design-uncovered-q") / "gate-findings.txt"
     ).read_text()
     assert "GC-DESIGN-COVERAGE" in findings and "Q-03" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 # --- Task 8: preflight профиля target — design-узел обязателен -----------
@@ -5291,7 +5441,7 @@ def test_start_preflight_silent_on_six_node_profile(
     )
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-preflight-ok", ops))
+    state = _drive_waves_to(tmp_path, "r-preflight-ok", ops, monkeypatch, 6)
 
     assert state.status != "stopped_preflight"
     assert state.ops["merge"]["status"] == "completed"
@@ -5489,14 +5639,11 @@ def test_resume_after_profile_delivered_continues_run(
     """Step 1(г): «доставили» обновлённый профиль (дописали design в
     target-профиль) ⇒ `resume(run_id)` ПРОДОЛЖАЕТ прогон, не тихий no-op —
     `stopped_preflight` обязан быть в `_STOPPED_RESET_OPS`."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
-    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    ops = FakeOps(review_exit=0, facts={"state": "OPEN", "baseRefName": "master"})
     run_id = "r-preflight-resume"
-    kwargs = _start_kwargs(tmp_path, run_id, ops)
+    kwargs = _waves_kwargs(tmp_path, run_id, ops)
     profile_path = _write_stale_profile(Path(kwargs["target_dir"]))
+    _fake_wave_adapters(monkeypatch, ops)
 
     stopped = runner.start(**kwargs)
     assert stopped.status == "stopped_preflight"
@@ -5508,13 +5655,17 @@ def test_resume_after_profile_delivered_continues_run(
     resumed = runner.resume(run_id, ops)
 
     assert resumed.status != "stopped_preflight"
-    assert resumed.ops["merge"]["status"] == "completed"
+    # Прогон поехал дальше: волна доавторила свой уровень и дошла до
+    # заявки. В прежнем пути тем же смыслом было `merge` completed — там
+    # за преflight'ом шёл весь остаток конвейера, здесь — конец волны.
+    assert resumed.status == "waiting_human_merge"
+    assert resumed.ops[f"candidate-{resumed.wave}"]["status"] == "completed"
 
 
 # --- Task 9: сквозной смоук design-узла -------------------------------------
 
 
-def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root) -> None:
+def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root, monkeypatch) -> None:
     """Сквозной смоук S2→S4 design-узла (Task 9), один прогон `start()`.
 
     Не дублирует то, что уже проверено по частям:
@@ -5576,7 +5727,7 @@ def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root) -> None:
     ops = CoveredQOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-design-e2e-smoke"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 6)
 
     # S2: все шесть author-шагов прошли РОВНО в этом порядке.
     assert ops.authored == [
@@ -5592,7 +5743,11 @@ def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root) -> None:
     # architects-Q) — прогон дошёл до мержа, не остановился на gate/review.
     assert state.status == "completed"
     assert state.ops["merge"]["status"] == "completed"
-    assert ops.merged == [(state.pr, ops.head)]
+    # `ops.merged` в волнах пуст намеренно: акт мержа candidate совершает
+    # человек, finalize мержит `approve_node`. Через `ops.merge` раннер в
+    # этом режиме не мержит ничего, и утверждать обратное значило бы
+    # сторожить шаг, которого в конвейере нет.
+    assert ops.merged == []
 
 
 # --- Task 6: S4-гарды decomposition (отсутствие, ребро design, DSL, граф DT) --
@@ -5670,7 +5825,7 @@ def test_gate_stops_when_decomposition_missing_from_bundle(
 
 
 def test_gate_decomposition_unpinned_edge_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-UNPINNED(prospective) на ребре decomposition→design: `traces_to`
     объявляет design, но `upstream_hashes` пуст."""
@@ -5701,19 +5856,17 @@ def test_gate_decomposition_unpinned_edge_stops(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-unpinned", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-decomposition-unpinned", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-decomposition-unpinned") / "gate-findings.txt"
     ).read_text()
     assert "GC-UNPINNED" in findings and "design" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
-def test_gate_decomposition_stale_pin_stops(tmp_path: Path, runs_root) -> None:
+def test_gate_decomposition_stale_pin_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     """GC-STALE(prospective) на ребре decomposition→design: пин
     синтаксически валиден (40 hex), но не совпадает с blob-хешем design в
     worktree."""
@@ -5745,18 +5898,18 @@ def test_gate_decomposition_stale_pin_stops(tmp_path: Path, runs_root) -> None:
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-decomposition-stale", ops))
+    state = _drive_waves_to(tmp_path, "r-decomposition-stale", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-decomposition-stale") / "gate-findings.txt"
     ).read_text()
     assert "GC-STALE" in findings and "design" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_decomposition_undeclared_design_edge_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """MAJOR-1-аналог на decomposition: `traces_to` не несёт design вовсе
     (не «не запинено» — отсутствует в traces_to) — required-ребро
@@ -5788,9 +5941,7 @@ def test_gate_decomposition_undeclared_design_edge_stops(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-undeclared", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-decomposition-undeclared", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -5798,10 +5949,10 @@ def test_gate_decomposition_undeclared_design_edge_stops(
     ).read_text()
     assert "GC-UNPINNED" in findings and "design" in findings
     assert "не объявлено в traces_to" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
-def test_gate_decomposition_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
+def test_gate_decomposition_dsl_empty_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     """Гард GC-DSL-EMPTY на 30-decomposition.md: пин design корректен,
     ребро объявлено, но ни одного распознаваемого DT-заголовка."""
 
@@ -5833,9 +5984,7 @@ def test_gate_decomposition_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-dsl-empty", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-decomposition-dsl-empty", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -5843,10 +5992,10 @@ def test_gate_decomposition_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
     ).read_text()
     assert "GC-DSL-EMPTY" in findings and "30-decomposition.md" in findings
     assert "DT-NN" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
-def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root) -> None:
+def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     """GC-DT-GRAPH (спека Task 6): DSL decomposition валиден, ребро
     design запинено верно, но граф несюръективен — BEH-02 не покрыт ни
     одной DT-задачей (decomposition остаётся дефолтным, покрывающим только
@@ -5870,20 +6019,18 @@ def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root) -> None:
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-dt-graph", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-decomposition-dt-graph", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-decomposition-dt-graph") / "gate-findings.txt"
     ).read_text()
     assert "GC-DT-GRAPH" in findings and "BEH-02" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Round 7 ревью PR #161 (минор, контракт владельца), фикстура
     обновлена в round 13 (major того же раунда промотировал «группа
@@ -5956,9 +6103,7 @@ def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-dt-graph-warning", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-dt-graph-warning", ops, monkeypatch, 5)
 
     assert state.status != "stopped_gate"
     findings_path = (
@@ -5972,7 +6117,7 @@ def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
 
 
 def test_gate_dt_graph_finding_stops_on_underivable_group(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Round 13 ревью PR #161, минор (контракт владельца): «группа
     наблюдения не выводится вовсе» промотирована в FATAL — гейт теперь
@@ -6040,9 +6185,7 @@ def test_gate_dt_graph_finding_stops_on_underivable_group(
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-dt-graph-underivable-stop", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-dt-graph-underivable-stop", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -6133,7 +6276,7 @@ def test_gate_stops_when_acceptance_missing_from_bundle(
 
 
 def test_gate_acceptance_unpinned_requirements_edge_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-UNPINNED(prospective) на ребре acceptance→requirements:
     `traces_to` объявляет requirements, но `upstream_hashes` не несёт его
@@ -6168,20 +6311,18 @@ def test_gate_acceptance_unpinned_requirements_edge_stops(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-unpinned", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-acceptance-unpinned", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-acceptance-unpinned") / "gate-findings.txt"
     ).read_text()
     assert "GC-UNPINNED" in findings and "requirements" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_acceptance_stale_behaviour_pin_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-STALE(prospective) на ребре acceptance→behaviour-spec: пин
     синтаксически валиден (40 hex), но не совпадает с blob-хешем
@@ -6217,18 +6358,18 @@ def test_gate_acceptance_stale_behaviour_pin_stops(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-acceptance-stale", ops))
+    state = _drive_waves_to(tmp_path, "r-acceptance-stale", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-acceptance-stale") / "gate-findings.txt"
     ).read_text()
     assert "GC-STALE" in findings and "behaviour-spec" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_acceptance_undeclared_edge_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """MAJOR-1-аналог на acceptance: `traces_to` не несёт ни requirements,
     ни behaviour-spec — оба required-ребра acceptance обязаны стопить S4
@@ -6257,9 +6398,7 @@ def test_gate_acceptance_undeclared_edge_stops(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-undeclared", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-acceptance-undeclared", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -6267,11 +6406,11 @@ def test_gate_acceptance_undeclared_edge_stops(
     ).read_text()
     assert "GC-UNPINNED" in findings
     assert "не объявлено в traces_to" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_decomposition_acceptance_edge_unpinned_stops(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """GC-UNPINNED(prospective) на ребре decomposition→acceptance:
     `traces_to` объявляет acceptance, но `upstream_hashes` не несёт его
@@ -6308,9 +6447,7 @@ def test_gate_decomposition_acceptance_edge_unpinned_stops(
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-decomposition-acceptance-unpinned", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-decomposition-acceptance-unpinned", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -6318,10 +6455,10 @@ def test_gate_decomposition_acceptance_edge_unpinned_stops(
         / "gate-findings.txt"
     ).read_text()
     assert "GC-UNPINNED" in findings and "acceptance" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
-def test_gate_acceptance_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
+def test_gate_acceptance_dsl_empty_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     """Гард GC-DSL-EMPTY на 25-acceptance.md: пины requirements/
     behaviour-spec корректны, оба ребра объявлены, но ни одного
     распознаваемого AC-заголовка и без строки-декларации пустого
@@ -6358,9 +6495,7 @@ def test_gate_acceptance_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
             return rc
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-dsl-empty", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-acceptance-dsl-empty", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -6368,11 +6503,11 @@ def test_gate_acceptance_dsl_empty_stops(tmp_path: Path, runs_root) -> None:
     ).read_text()
     assert "GC-DSL-EMPTY" in findings and "25-acceptance.md" in findings
     assert "AC-NN" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
 def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Минор круга 3 ревью спеки: файл ТОЛЬКО со строкой-декларацией
     (Must-множество требований пусто, `#### AC-` не нужен) НЕ стопится
@@ -6422,9 +6557,7 @@ def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = _Ops(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-declaration-only", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-acceptance-declaration-only", ops, monkeypatch, 4)
 
     findings_path = (
         runner.run_dir("r-acceptance-declaration-only") / "gate-findings.txt"
@@ -6447,11 +6580,14 @@ def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
     assert "error" not in findings, findings
     assert "GC-DSL-EMPTY" not in findings, findings
     assert "GC-AC-COVERAGE" not in findings, findings
-    assert "push" in state.ops
-    assert state.status == "completed"
+    assert f"push-{state.wave}" in state.ops
+    # Гейт пропустил — волна доехала до заявки и ждёт подписи человека.
+    # В прежнем пути тем же смыслом было `completed`: там за гейтом шёл
+    # весь остаток конвейера, здесь — конец волны.
+    assert state.status == "waiting_human_merge"
 
 
-def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root) -> None:
+def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     """GC-AC-COVERAGE (Task 6 плана acceptance-node,
     `governance/acceptance_guard.coverage_findings`): валидный DSL, оба
     ребра корректно запинованы, но Must-FR остаётся непокрытым ни одним
@@ -6503,45 +6639,44 @@ def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root) -> None:
             return super().author(target_dir, kind, subject, bundle_dir)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-acceptance-ac-coverage", ops)
-    )
+    state = _drive_waves_to(tmp_path, "r-acceptance-ac-coverage", ops, monkeypatch, 4)
 
     assert state.status == "stopped_gate"
     findings = (
         runner.run_dir("r-acceptance-ac-coverage") / "gate-findings.txt"
     ).read_text()
     assert "GC-AC-COVERAGE" in findings and "FR-01" in findings
-    assert "push" not in state.ops
+    assert f"candidate-{state.wave}" not in state.ops
 
 
-def test_gate_dt_graph_warning_survives_later_ac_coverage_stop(
-    tmp_path: Path, runs_root,
+def test_gate_warning_survives_a_later_fatal_in_the_same_gate_call(
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
-    """Round 7 ревью PR #161, минор (контракт владельца, точка 3): давний
-    баг рядом с нашим кодом — каждая находка в `_step_gate` писала
-    gate-findings.txt через `write_text`, ЗАТИРАЯ любую предыдущую запись
-    целиком. Non-fatal GC-DT-GRAPH warning (round 6) — первая НЕ
-    останавливающая запись в этой функции, и более поздний fatal-стоп
-    (GC-AC-COVERAGE) стирал её молча. Теперь находки НАКАПЛИВАЮТСЯ: warning
-    остаётся в файле рядом с error, даже когда прогон в итоге стопится
-    позже по другой причине.
+    """Находки НАКАПЛИВАЮТСЯ: non-fatal warning не затирается поздним fatal.
 
-    Фикстура обновлена в round 13 (осиротевший путь в verifies — теперь
-    единственный non-fatal класс; «группа наблюдения не выводится» стала
-    fatal и сама стопила бы гейт раньше, чем дело дошло бы до
-    GC-AC-COVERAGE)."""
+    Round 7 ревью PR #161 (минор, контракт владельца): каждая находка в
+    `_step_gate` писала gate-findings.txt через `write_text`, ЗАТИРАЯ
+    предыдущую запись целиком. Для fatal-веток это было безопасно — стоп
+    сразу же, — но non-fatal `warning GC-DT-GRAPH` (round 6) единственная
+    НЕ останавливает, и более поздний fatal стирал её молча.
+
+    Пара находок подобрана заново под волновой режим (S13). Прежняя —
+    warning из decomposition плюс fatal GC-AC-COVERAGE — в волнах
+    недостижима: покрытие AC краснеет на W4 и останавливает прогон
+    раньше, чем W5 вообще авторит decomposition. Здесь обе находки родом
+    из ОДНОЙ волны W5 и из одного вызова гейта: warning даёт осиротевший
+    путь в `verifies`, fatal — неразрешимый `sources` в `delivers`
+    (GC-DT-CONTRACT), и его ветка лежит НИЖЕ по `_step_gate`, чем сбор
+    warnings. Расстояние между записями то же, что проверял прежний
+    тест, — именно оно и есть предмет.
+    """
     beh_two = (
         _DEFAULT_BEHAVIOUR_BODY
         + "\n#### BEH-02: y\n`traces: [FR-01]`\n- **checked_by**: "
         "`kind: integration` `target: tests/test_y.py`\n"
     )
-    req_two = (
-        "#### FR-01: x\n**Priority**: Must\n"
-        "#### NFR-01: y\n**Priority**: Should\n"
-    )
 
-    class _Ops(FakeOps):
+    class _Warned(FakeOps):
         def author(
             self, target_dir: str, kind: str, subject: str, bundle_dir: str
         ) -> int:
@@ -6551,13 +6686,6 @@ def test_gate_dt_graph_warning_survives_later_ac_coverage_stop(
                 path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(beh_two, encoding="utf-8")
-                return 0
-            if kind == "requirements":
-                self.calls.append(("author", kind))
-                self.authored.append(kind)
-                path = Path(target_dir) / bundle_dir / "10-requirements.md"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(req_two, encoding="utf-8")
                 return 0
             if kind == "decomposition":
                 self.calls.append(("author", kind))
@@ -6600,47 +6728,23 @@ def test_gate_dt_graph_warning_survives_later_ac_coverage_stop(
                     encoding="utf-8",
                 )
                 return 0
-            if kind == "acceptance":
-                self.calls.append(("author", kind))
-                self.authored.append(kind)
-                bundle = Path(target_dir) / bundle_dir
-                req_pin = blob_sha1(
-                    (bundle / "10-requirements.md").read_text(encoding="utf-8")
-                )
-                beh_pin = blob_sha1(
-                    (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
-                )
-                path = bundle / "25-acceptance.md"
-                path.write_text(
-                    "---\n"
-                    "spec_stage: acceptance\n"
-                    "status: draft\n"
-                    "owner_role: qa\n"
-                    "traces_to: [requirements, behaviour-spec]\n"
-                    "upstream_hashes:\n"
-                    f'  requirements: "{req_pin}"\n'
-                    f'  behaviour-spec: "{beh_pin}"\n'
-                    "---\n"
-                    "#### AC-01: x · verification: manual\n"
-                    "traces: [NFR-01]\n"
-                    "Наблюдаемый признак: человек видит x.\n",
-                    encoding="utf-8",
-                )
-                return 0
             return super().author(target_dir, kind, subject, bundle_dir)
 
-    ops = _Ops(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-dt-graph-warning-then-ac-stop", ops)
-    )
+    ops = _with_delivers(_Warned, "acceptance#AC-99")(facts=GREEN_PR_FACTS)
+    state = _drive_waves_to(tmp_path, "r-warn-then-fatal", ops, monkeypatch, 5)
 
-    assert state.status == "stopped_gate"
+    assert state.status == "stopped_gate", "поздняя находка обязана остановить"
     findings = (
-        runner.run_dir("r-dt-graph-warning-then-ac-stop")
-        / "gate-findings.txt"
-    ).read_text()
-    assert "GC-AC-COVERAGE" in findings and "FR-01" in findings
-    assert "warning GC-DT-GRAPH" in findings and "DT-02" in findings
+        runner.run_dir("r-warn-then-fatal") / "gate-findings.txt"
+    ).read_text(encoding="utf-8")
+    assert "GC-DT-CONTRACT" in findings and "AC-99" in findings, findings
+    assert "warning GC-DT-GRAPH" in findings, (
+        "warning затёрт поздней fatal-записью — ровно тот баг, "
+        f"ради которого находки накапливают: {findings}"
+    )
+    assert "tests/test_typo.py" in findings, findings
+
+
 
 
 # --- Task 9: сквозной смоук decomposition-узла + deliver ---------------------
@@ -6677,6 +6781,7 @@ _DT_SMOKE_CHARTER_BODY = (
     "---\n"
     "# Charter\n\nТекст charter.\n"
 )
+
 
 
 def _dt_smoke_requirements_body(charter_pin: str, extra: str = "") -> str:
@@ -6808,7 +6913,7 @@ class _DtSmokeOps(FakeOps):
 
 
 def test_decomposition_node_end_to_end_smoke_and_deliver(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Сквозной смоук 6-узлового профиля (Task 9 плана acceptance-node,
     прежде — Task 9 плана decomposition-node на 5 узлах; профиль вырос
@@ -6846,7 +6951,7 @@ def test_decomposition_node_end_to_end_smoke_and_deliver(
     ops = _DtSmokeOps(facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     run_id = "r-decomposition-e2e-smoke"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 6)
 
     # S2: все шесть author-шагов прошли РОВНО в этом порядке.
     assert ops.authored == [
@@ -6857,7 +6962,11 @@ def test_decomposition_node_end_to_end_smoke_and_deliver(
     # мержа, не остановился на gate/review.
     assert state.status == "completed"
     assert state.ops["merge"]["status"] == "completed"
-    assert ops.merged == [(state.pr, ops.head)]
+    # `ops.merged` в волнах пуст намеренно: акт мержа candidate совершает
+    # человек, finalize мержит `approve_node`. Через `ops.merge` раннер в
+    # этом режиме не мержит ничего, и утверждать обратное значило бы
+    # сторожить шаг, которого в конвейере нет.
+    assert ops.merged == []
 
     pr = task_bridge.deliver(
         target_dir=state.target_dir,
@@ -6895,7 +7004,7 @@ def test_decomposition_node_end_to_end_smoke_and_deliver(
 
 
 def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Негативный полукруг того же смоука: ТОТ ЖЕ валидный 2-DT граф
     (`_dt_smoke_decomposition_body` — DT-01/DT-02, DT-02 зависит от
@@ -6935,7 +7044,7 @@ def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
     ops = _GapOps(facts=GREEN_PR_FACTS)
     run_id = "r-decomposition-e2e-smoke-gap"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
@@ -6944,7 +7053,7 @@ def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
 
 
 def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
-    tmp_path: Path, runs_root,
+    tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
     """Второй негативный полукруг того же 6-узлового смоука (Task 9 плана
     acceptance-node): граф DT валиден РОВНО как у позитивного смоука
@@ -7016,7 +7125,7 @@ def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
     ops = _AcGapOps(facts=GREEN_PR_FACTS)
     run_id = "r-acceptance-e2e-smoke-gap"
 
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops))
+    state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 6)
 
     assert state.status == "stopped_gate"
     findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
@@ -7025,14 +7134,15 @@ def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
     # только после — `_step_authoring` в governance/runner.py); граф DT
     # валиден, поэтому GC-DT-GRAPH пропускает, и стоп приходит только на
     # GC-AC-COVERAGE.
+    # Гейт краснеет на W4 (acceptance), и W5 до decomposition не доходит —
+    # в прежнем пути его успевали доавторить до единственного гейта.
     assert ops.authored == [
         "charter", "requirements", "behaviour-spec", "design", "acceptance",
-        "decomposition",
     ]
     assert "push" not in state.ops
 
 
-def test_gate_reports_dt_contract_findings(tmp_path: Path, runs_root) -> None:
+def test_gate_reports_dt_contract_findings(tmp_path: Path, runs_root, monkeypatch) -> None:
     """Находка ревью #289: проверка среза 1 не звалась ни на одном живом пути.
 
     `dt_contract_findings` была достижима только из тестов: S4-гейт знал про
@@ -7043,7 +7153,7 @@ def test_gate_reports_dt_contract_findings(tmp_path: Path, runs_root) -> None:
     ops = _strip_dt_contract(
         FakeOps, drop_version=False, drop_delivers=True
     )(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-dt-contract", ops))
+    state = _drive_waves_to(tmp_path, "r-dt-contract", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7084,7 +7194,7 @@ def _strip_dt_contract(ops_cls, *, drop_version: bool, drop_delivers: bool):
 
 
 def test_gate_passes_legacy_dt_but_says_guarantee_is_absent(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Базовая половина к стопу ниже: режим совместимости НЕ красит гейт.
 
@@ -7101,9 +7211,7 @@ def test_gate_passes_legacy_dt_but_says_guarantee_is_absent(
     ops = _strip_dt_contract(
         FakeOps, drop_version=True, drop_delivers=True
     )(facts=GREEN_PR_FACTS)
-    state = runner.start(
-        **_start_kwargs(tmp_path, "r-dt-legacy", ops, allow_legacy_dt=True)
-    )
+    state = _drive_waves_to(tmp_path, "r-dt-legacy", ops, monkeypatch, 5, allow_legacy_dt=True)
 
     assert state.status != "stopped_gate"
     findings = (
@@ -7114,7 +7222,7 @@ def test_gate_passes_legacy_dt_but_says_guarantee_is_absent(
 
 
 def test_gate_refuses_a_versionless_bundle_by_default(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Со среза 3 дефолт строгий: документ без версии краснеет сам.
 
@@ -7131,7 +7239,7 @@ def test_gate_refuses_a_versionless_bundle_by_default(
     ops = _strip_dt_contract(
         FakeOps, drop_version=True, drop_delivers=True
     )(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-dt-strict", ops))
+    state = _drive_waves_to(tmp_path, "r-dt-strict", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7141,7 +7249,9 @@ def test_gate_refuses_a_versionless_bundle_by_default(
     assert "dt_contract_version" in findings, findings
 
 
-def test_allow_legacy_dt_survives_resume(tmp_path: Path, runs_root) -> None:
+def test_allow_legacy_dt_survives_resume(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
     """Решение оператора переживает перезапуск: поле состояния, не аргумент.
 
     Иначе прогон, начатый в строгом режиме, после `resume` судил бы тот же
@@ -7150,11 +7260,7 @@ def test_allow_legacy_dt_survives_resume(tmp_path: Path, runs_root) -> None:
     ops = _strip_dt_contract(
         FakeOps, drop_version=True, drop_delivers=True
     )(facts=GREEN_PR_FACTS)
-    runner.start(
-        **_start_kwargs(
-            tmp_path, "r-dt-resume", ops, allow_legacy_dt=True
-        )
-    )
+    _drive_waves_to(tmp_path, "r-dt-resume", ops, monkeypatch, 1, allow_legacy_dt=True)
 
     # Пинуется НЕдефолтное значение: `False` совпало бы с дефолтом, и тест
     # проходил бы, даже если поле не сохраняется вовсе.
@@ -7195,7 +7301,7 @@ def _with_delivers(ops_cls, source_ref: str):
 
 
 def test_gate_resolves_delivers_sources_against_bundle_nodes(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Базовая половина: разрешимая ссылка проходит гейт.
 
@@ -7204,7 +7310,7 @@ def test_gate_resolves_delivers_sources_against_bundle_nodes(
     ЛЮБУЮ ссылку, и красный был бы одинаков для верной и для битой.
     """
     ops = _with_delivers(FakeOps, "acceptance#AC-01")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-ok", ops))
+    state = _drive_waves_to(tmp_path, "r-del-ok", ops, monkeypatch, 5)
 
     findings_path = runner.run_dir("r-del-ok") / "gate-findings.txt"
     findings = (
@@ -7217,7 +7323,7 @@ def test_gate_resolves_delivers_sources_against_bundle_nodes(
 
 
 def test_gate_stops_on_unresolvable_delivers_source(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Ссылка на несуществующий пункт — стоп, а не молчание.
 
@@ -7226,7 +7332,7 @@ def test_gate_stops_on_unresolvable_delivers_source(
     редактура, которая его «переименовала», не оставит следа.
     """
     ops = _with_delivers(FakeOps, "acceptance#AC-99")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-bad", ops))
+    state = _drive_waves_to(tmp_path, "r-del-bad", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7237,7 +7343,7 @@ def test_gate_stops_on_unresolvable_delivers_source(
 
 
 def test_gate_resolves_a_delivers_source_in_charter(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """charter — адресуемый узел наравне с остальными.
 
@@ -7249,7 +7355,7 @@ def test_gate_resolves_a_delivers_source_in_charter(
     прогоне review-pr-unreachable-base-coverage-20260921.
     """
     ops = _with_delivers(FakeOps, "charter#CON-01")(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-charter", ops))
+    state = _drive_waves_to(tmp_path, "r-del-charter", ops, monkeypatch, 5)
 
     findings_path = runner.run_dir("r-del-charter") / "gate-findings.txt"
     findings = (
@@ -7262,7 +7368,7 @@ def test_gate_resolves_a_delivers_source_in_charter(
 
 
 def test_gate_index_covers_exactly_the_declared_bundle_composition(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Состав индекса = объявленный состав бандла, не список гейта.
 
@@ -7278,7 +7384,7 @@ def test_gate_index_covers_exactly_the_declared_bundle_composition(
     ops = _with_delivers(FakeOps, "discovery-brief#G-01")(
         facts=GREEN_PR_FACTS
     )
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-brief", ops))
+    state = _drive_waves_to(tmp_path, "r-del-brief", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7289,7 +7395,7 @@ def test_gate_index_covers_exactly_the_declared_bundle_composition(
 
 
 def test_gate_rejects_an_ambiguous_delivers_source(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Дважды определённый пункт не разрешается молча.
 
@@ -7313,7 +7419,7 @@ def test_gate_rejects_an_ambiguous_delivers_source(
             return rc
 
     ops = _Doubled(facts=GREEN_PR_FACTS)
-    state = runner.start(**_start_kwargs(tmp_path, "r-del-dup", ops))
+    state = _drive_waves_to(tmp_path, "r-del-dup", ops, monkeypatch, 5)
 
     assert state.status == "stopped_gate"
     findings = (
@@ -7324,7 +7430,7 @@ def test_gate_rejects_an_ambiguous_delivers_source(
 
 
 def test_run_json_without_the_compat_field_resumes_strictly(
-    tmp_path: Path, runs_root
+    tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     """Дефолт поля судит СТАРЫЕ run.json — те, что записаны до среза 1.
 
@@ -7340,7 +7446,7 @@ def test_run_json_without_the_compat_field_resumes_strictly(
     и достаточно было бы предъявить файл постарше.
     """
     ops = FakeOps(facts=GREEN_PR_FACTS)
-    runner.start(**_start_kwargs(tmp_path, "r-old-state", ops))
+    _drive_waves_to(tmp_path, "r-old-state", ops, monkeypatch, 1)
     path = runner.run_dir("r-old-state") / "run.json"
     raw = json.loads(path.read_text(encoding="utf-8"))
     del raw["allow_legacy_dt"]
@@ -7383,7 +7489,7 @@ def test_edge_findings_do_not_outlive_the_round_they_described(
     )
     run_id = "r-w-edge-stale"
     state = runner.start(
-        **_waves_kwargs(tmp_path, run_id, ops), authoring="waves"
+        **_waves_kwargs(tmp_path, run_id, ops)
     )
     assert state.status == "stopped_review"
     findings = rs.run_dir(run_id) / "edge-findings.txt"
@@ -7404,7 +7510,7 @@ def test_waves_run_authors_only_level_zero_and_stops_at_edge_fail(
 ) -> None:
     ops = FakeOps(edge_results={"charter": "FAIL"})
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-edge", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-edge", ops)
     )
     assert ops.authored == ["charter"], "авторится только уровень 0"
     assert state.wave == 1 and state.status == "stopped_review"
@@ -7428,7 +7534,7 @@ def test_waves_gate_uses_projected_profile_with_siblings(
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-gate", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-gate", ops)
     )
     assert state.status == "waiting_human_merge"
     gate_calls = [c for c in ops.calls if c[0] == "gate_check_candidate"]
@@ -7455,7 +7561,7 @@ def test_waves_local_completeness_is_by_level(
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-compl", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-compl", ops)
     )
     assert state.status == "waiting_human_merge"
     assert not (rs.run_dir("r-w-compl") / "gate-findings.txt").exists()
@@ -7467,7 +7573,7 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-up", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-up", ops)
     )
     state.wave = 2
     state.status = "running"
@@ -7505,7 +7611,7 @@ def test_waves_stopped_gate_resume_resets_only_the_wave_range(
     )
     _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-gate-stop", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-gate-stop", ops)
     )
     assert state.status == "stopped_gate"
     assert runner.reset_ops_for(state) == ("commit-1", "gate-candidate-1", "edge-1")
@@ -7525,7 +7631,7 @@ def test_waves_projection_mismatch_stops_gate(tmp_path: Path, runs_root, monkeyp
         lambda target_dir, profile, projected, level: ["roles.yaml"],
     )
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-proj", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-proj", ops)
     )
     assert state.status == "stopped_gate"
     text = (rs.run_dir("r-w-proj") / "gate-findings.txt").read_text()
@@ -7580,7 +7686,7 @@ def test_waves_candidate_step_pauses_on_the_wave_pr(
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "main"})
     journal = _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-cand", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-cand", ops)
     )
     assert state.status == "waiting_human_merge" and state.wave == 1
     assert journal[0].startswith("propose:charter:fakehead")
@@ -7609,7 +7715,7 @@ def test_waves_candidate_step_records_request_before_publishing(
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     journal = _fake_wave_adapters(monkeypatch, ops, code=3)
     state = runner.start(
-        **_waves_kwargs(tmp_path, "r-w-cand-3", ops), authoring="waves"
+        **_waves_kwargs(tmp_path, "r-w-cand-3", ops)
     )
     assert state.status == "stopped_review"
     assert state.ops["candidate-1"] == {
@@ -7658,7 +7764,7 @@ def _fake_approve_node(monkeypatch, ops: FakeOps, *, merge_on_call: int = 2):
 
 def _waiting_wave1(tmp_path, monkeypatch, ops: FakeOps, run_id: str):
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, run_id, ops), authoring="waves")
+    state = runner.start(**_waves_kwargs(tmp_path, run_id, ops))
     assert state.status == "waiting_human_merge" and state.wave == 1
     return state
 
@@ -7959,7 +8065,7 @@ def test_reopen_reauthors_the_node_on_a_new_branch_name(
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
     _fake_approve_node_full(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-reopen", ops), authoring="waves")
+    state = runner.start(**_waves_kwargs(tmp_path, "r-reopen", ops))
     assert state.status == "waiting_human_merge"
     with pytest.raises(ValueError, match="живые заявки"):
         runner.reopen("r-reopen", "requirements", ops)
@@ -8006,7 +8112,7 @@ def test_reopen_manual_stops_for_the_operator_then_resumes(
 ) -> None:
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-reopen-m", ops), authoring="waves")
+    state = runner.start(**_waves_kwargs(tmp_path, "r-reopen-m", ops))
     from governance import approval_ledger as al
     al.abandon_request(state, state.ops["candidate-1"]["request"], "стенд")
     rs.save(state)
@@ -8035,7 +8141,7 @@ def test_stale_level_is_reapproved_over_base_without_authoring(
     ops = FakeOps(facts={"state": "MERGED", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
     calls = _fake_approve_node_full(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-reapp", ops), authoring="waves")
+    state = runner.start(**_waves_kwargs(tmp_path, "r-reapp", ops))
     from governance import approval_ledger as al
     key1 = state.ops["candidate-1"]["request"]
     al.complete_request(state, key1)
@@ -8069,6 +8175,12 @@ def test_reopen_refuses_legacy_runs_and_finished_waves(
     monkeypatch.setattr(
         runner, "load_safety", lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
     )
-    runner.start(**_start_kwargs(tmp_path, "r-legacy-reopen", ops))
+    # ИСТОРИЧЕСКИЙ СТРАЖ (`_LEGACY_HISTORY`): предмет теста — сам отказ
+    # `--reopen` на прогоне прежнего режима. Прогон здесь не исполняет
+    # удаляемый путь, он им ЯВЛЯЕТСЯ — предъявленным на вход гварду.
+    runner.start(
+        **_start_kwargs(tmp_path, "r-legacy-reopen", ops,
+                        authoring=_LEGACY_HISTORY)
+    )
     with pytest.raises(ValueError, match="authoring=waves"):
         runner.reopen("r-legacy-reopen", "charter", ops)
