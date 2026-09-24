@@ -1836,7 +1836,7 @@ def test_s8_success_completes(tmp_path: Path, runs_root) -> None:
     runner._step_s8(state, ops)
 
     assert state.status == "completed"
-    assert state.ops["gate-authoritative"] == {"status": "completed", "exit": 0}
+    assert state.ops["gate-authoritative"] == {"status": "completed", "exit": 0, "tree_sha": ops.head}
     assert ops.issues == []
     # Ретроспектива 2026-09-02 (@id:runner-s8-verdicts-cleanup): verdicts
     # --emit-verdicts не остаются в чекауте цели — уборка и на успехе;
@@ -1912,7 +1912,7 @@ def test_s8_fail_marks_merged_unverified_and_opens_issue(
     # exit, не сам статус op'а — run терминален в обоих случаях. `output`
     # (круг 8) — источник для s8-findings.txt на resume, файл производный.
     assert state.ops["gate-authoritative"] == {
-        "status": "completed", "exit": 1, "output": "",
+        "status": "completed", "exit": 1, "output": "", "tree_sha": ops.head,
     }
     assert state.ops["remediation-issue"] == {"status": "completed", "number": 901}
     # Уборка verdicts и на провале — dirty-чекаут не должен пережить S8.
@@ -2095,7 +2095,7 @@ def test_verify_child_completes_parent_stays_merged_unverified(
 
     assert child.status == "completed"
     assert child.remediated_by == parent_id
-    assert child.ops["gate-authoritative"] == {"status": "completed", "exit": 0}
+    assert child.ops["gate-authoritative"] == {"status": "completed", "exit": 0, "tree_sha": ops.head}
     assert "remediation-issue" not in child.ops  # gate прошёл — issue не нужен
     assert len(ops.issues) == 1  # потомок не плодит второй issue
 
@@ -3115,7 +3115,7 @@ def test_sync_default_always_rechecked_even_if_already_completed(
 
     assert ("checkout_and_pull", "main") in ops.calls
     assert result.status == "completed"
-    assert result.ops["gate-authoritative"] == {"status": "completed", "exit": 0}
+    assert result.ops["gate-authoritative"] == {"status": "completed", "exit": 0, "tree_sha": ops.head}
 
 
 # --- Круг 8: s8-findings.txt производный от журнала, не источник истины ----
@@ -6947,6 +6947,11 @@ def _fake_approve_node(monkeypatch, ops: FakeOps, *, merge_on_call: int = 2):
         if op.get("finalize_pr") is None:
             al.record_finalize_pr(state, key, 800 + state.wave)
         if len(calls) >= merge_on_call:
+            # Стенд повторяет ПОРЯДОК продакшена: идентичность результата
+            # фиксируется ДО завершения заявки, и её SHA ОТЛИЧЕН от
+            # candidate-мержа — иначе тест не отличил бы происхождение
+            # `head` от простого «непустое значение» (#392).
+            al.record_finalize_merge_commit(state, key, "f" * 40)
             al.complete_request(state, key)
         return runner.an.ApprovalOutcome("ok", request=key)
 
@@ -6987,6 +6992,71 @@ def test_waves_resume_finalizes_merged_candidate_and_starts_next_wave(
     assert resumed.ops["candidate-2"]["request"] == "approve-1-1-1"
     assert resumed.ops["branch-2"]["status"] == "completed"
     assert ("switch_to", "spec/WS-1-behaviour-w2", "master") in ops.calls
+
+
+def test_last_wave_records_the_finalize_merge_sha_as_identity(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """#392: `head` — SHA мержа FINALIZE последней заявки, не candidate.
+
+    Различие SHA в стенде обязательно: при совпадающих значениях тест
+    доказал бы непустоту `head`, но не его происхождение — а именно
+    происхождение и есть предмет. Проверяется и обратное равенство:
+    `head` НЕ равен `merge_commit` candidate.
+    """
+    ops = FakeOps(facts={"state": "MERGED", "baseRefName": "master"})
+    state = _waiting_wave1(tmp_path, monkeypatch, ops, "r-392-head")
+    _fake_approve_node(monkeypatch, ops)
+    key = state.ops["candidate-1"]["request"]
+    state.wave = 5
+    state.ops["candidate-5"] = dict(state.ops["candidate-1"])
+    rs.save(state)
+
+    resumed = runner.resume("r-392-head", ops)
+
+    assert resumed.status == "completed"
+    request = resumed.ops[key]
+    assert request["finalize_merge_commit"] == "f" * 40
+    assert request["merge_commit"] == "m" * 40, "акт одобрения на месте"
+    assert resumed.head == "f" * 40, "идентичность — мерж finalize"
+    assert resumed.head != request["merge_commit"], (
+        "candidate-мерж — доказательство АКТА, а не идентичность результата"
+    )
+    # И на диске: идентичность обязана пережить гибель процесса.
+    assert rs.load("r-392-head").head == "f" * 40
+
+
+def test_s8_records_the_checked_tree_separately_from_the_merge_result(
+    tmp_path: Path, runs_root,
+) -> None:
+    """#392, D2: `tree_sha` — дерево, на котором гейт ФАКТИЧЕСКИ шёл.
+
+    База уехала после мержа, и величины расходятся. Обе — SHA КОММИТА:
+    сравнение разнотипных величин неравно всегда и не доказывало бы
+    ничего. Повтор уже завершённого гейта evidence не перезаписывает —
+    иначе оно отвечало бы «на чём проверяли в последний раз».
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
+    )
+    ops.head = "a" * 40  # tip базы на момент гейта
+    state = _wave_run_at_s8(tmp_path, "r-392-tree", ops, base_ref="master")
+    state.head = "f" * 40  # результат мержа — про прошлое
+    rs.save(state)
+
+    runner._step_s8(state, ops)
+
+    gate = state.ops["gate-authoritative"]
+    assert gate["tree_sha"] == "a" * 40
+    assert gate["tree_sha"] != state.head, (
+        "продвижение базы обязано быть видно: результат мержа и дерево "
+        "прогона — разные величины"
+    )
+
+    # База уехала ещё дальше, гейт уже завершён — evidence не трогается.
+    ops.head = "b" * 40
+    runner._step_s8(state, ops)
+    assert state.ops["gate-authoritative"]["tree_sha"] == "a" * 40
 
 
 def test_completed_wave_run_deletes_its_authoring_branches(
@@ -7233,6 +7303,11 @@ def _fake_approve_node_full(monkeypatch, ops: FakeOps):
         if op.get("finalize_pr") is None:
             al.record_finalize_pr(state, key, 800 + state.wave)
         else:
+            # Стенд повторяет ПОРЯДОК продакшена: идентичность результата
+            # фиксируется ДО завершения заявки, и её SHA ОТЛИЧЕН от
+            # candidate-мержа — иначе тест не отличил бы происхождение
+            # `head` от простого «непустое значение» (#392).
+            al.record_finalize_merge_commit(state, key, "f" * 40)
             al.complete_request(state, key)
         return runner.an.ApprovalOutcome("ok", request=key)
 

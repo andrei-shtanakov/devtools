@@ -1927,6 +1927,27 @@ def _reconcile_candidate(
     return _finalize(state, ops, dag, state.ops[key], key, facts)
 
 
+def _record_finalize_identity(
+    state: RunState, ops: Ops, key: str, pr: int
+) -> None:
+    """SHA мержа finalize у форджи — в заявку, ДО её завершения (#392).
+
+    Источник тот же, что у candidate (`af.merge_event`, fail-closed на
+    отсутствующем `mergeCommit.oid`), но предмет другой: это идентичность
+    РЕЗУЛЬТАТА, тогда как `merge_commit` candidate — доказательство акта.
+
+    Отказ читать факт не хоронит заявку: `_unresolved` оставляет её живой
+    и предлагает повтор. Молча завершить заявку без идентичности нельзя —
+    тогда прогон снова не помнил бы, что именно подтверждает.
+    """
+    fact = af.merge_event(_pr_facts(state, ops, pr))
+    if fact.outcome is not Outcome.FOUND or fact.value is None:
+        raise _unresolved(
+            f"SHA мержа finalize-PR #{pr} — {fact.detail}"
+        )
+    al.record_finalize_merge_commit(state, key, fact.value.commit)
+
+
 def _reconcile_finalize(
     state: RunState,
     ops: Ops,
@@ -1976,6 +1997,7 @@ def _reconcile_finalize(
             f"финализирующий PR #{pr} вмержен, но узлы {', '.join(pending)} "
             "в base по-прежнему approval_pending — конверта там нет",
         )
+        _record_finalize_identity(state, ops, key, pr)
         al.complete_request(state, key)
         return ApprovalOutcome(
             f"конверт подписи в base (PR #{pr}): узлы "

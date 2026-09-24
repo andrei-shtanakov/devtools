@@ -1065,6 +1065,30 @@ def reopen(
     return advance(state, ops)
 
 
+def _verified_result_sha(state: RunState) -> str | None:
+    """Идентичность результата прогона — SHA мержа finalize ПОСЛЕДНЕЙ волны.
+
+    Спека `2026-09-24-waves-merge-identity-design.md` §2. Берётся из
+    ЛЕДЖЕРА, не у форджи: заявка уже сохранила подтверждённый факт перед
+    своим завершением, и второй поход к фордже добавил бы новую точку
+    отказа ради уже установленного.
+
+    НЕ `merge_commit` заявки: тот про мерж candidate, то есть про акт
+    одобрения; последние байты в base вносит finalize.
+
+    `None` возвращается честно — прогон, чья последняя заявка записана до
+    этой правки, идентичности не несёт, и подставлять вместо неё
+    сегодняшний tip нельзя (D4): он не то, что подтверждали.
+    """
+    record = state.ops.get(wave_key(state, "candidate")) or {}
+    request = record.get("request")
+    if not request:
+        return None
+    op = state.ops.get(request) or {}
+    commit = op.get("finalize_merge_commit")
+    return str(commit) if commit else None
+
+
 def _next_wave(state: RunState, ops: Ops) -> RunState:
     """Ровно один переход: следующая волна либо S8 после последней.
 
@@ -1076,6 +1100,7 @@ def _next_wave(state: RunState, ops: Ops) -> RunState:
     total = bundle_dag.wave_count(_wave_dag())
     if state.wave >= total:
         if op_status(state, "merge") != "completed":
+            state.head = _verified_result_sha(state)
             op_complete(state, "merge", merged=True, waves=state.wave)
         state.status = "running"
         save(state)
@@ -3142,6 +3167,17 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
             print(f"_step_s8: checkout_and_pull({base_ref!r}) не удался: {exc}")
             return False
         op_complete(state, sync_key)
+        # Дерево, на котором S8 ФАКТИЧЕСКИ исполняется (#392, D2). Это НЕ
+        # `state.head`: тот — результат мержа, про прошлое и неизменен, а
+        # база могла уехать между мержем и гейтом, и у повторного resume
+        # уедет дальше. Величина того же типа — SHA КОММИТА, иначе
+        # неравенство с `head` не доказывало бы продвижение базы.
+        # Момент: ПОСЛЕ успешного чекаута, перед вызовом гейта.
+        try:
+            tree_sha: str | None = ops.head_sha(state.target_dir, base_ref)
+        except Exception as exc:  # noqa: BLE001 — evidence, не управление
+            print(f"_step_s8: head_sha({base_ref!r}) не удался: {exc}")
+            tree_sha = None
         _ensure_started(state, key)
         # Прибрать verdict-файл ПРЕДЫДУЩЕЙ попытки до запуска гейта
         # (приёмка PR #114, круг 2): иначе harvested=True после гейта мог
@@ -3177,12 +3213,12 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
                     "(verdicts — обязательный артефакт S8)"
                 )
                 return False
-            op_complete(state, key, exit=exit_code)
+            op_complete(state, key, exit=exit_code, tree_sha=tree_sha)
             state.status = "completed"
             save(state)
             _drop_wave_branches(state, ops)
             return True
-        op_complete(state, key, exit=exit_code, output=output)
+        op_complete(state, key, exit=exit_code, output=output, tree_sha=tree_sha)
         findings = _s8_findings_text(exit_code, output)
         findings_path.write_text(findings, encoding="utf-8")
 
