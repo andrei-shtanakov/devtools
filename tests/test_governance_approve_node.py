@@ -451,7 +451,19 @@ def drive_to_approved(
     # Второй вызов выносит конверт И мержит его агентом (ADR-ECO-011 D5):
     # заявка завершена тем же вызовом, третьего не нужно.
     approve(world, node, legacy_bundle=legacy_bundle)
-    assert world.state.ops[first.request]["status"] == al.STATUS_COMPLETED
+    op = world.state.ops[first.request]
+    assert op["status"] == al.STATUS_COMPLETED
+    # Ревью #393: идентичность результата обязана быть записана ПРОДАКШЕНОМ
+    # на пути завершения заявки — без неё прогон не помнит, что
+    # подтверждает. Проверяется здесь, в общем помощнике, а не в тесте
+    # раннера: там approve_node подменён стендом, и стенд писал поле ЗА
+    # него — тест проходил бы и при снятой записи.
+    assert op.get("finalize_merge_commit"), (
+        "SHA мержа finalize не записан при завершении заявки"
+    )
+    assert op["finalize_merge_commit"] != op.get("merge_commit"), (
+        "идентичность результата — мерж finalize, а не candidate"
+    )
 
 
 def declare_human_merge(world: World) -> None:
@@ -2486,6 +2498,49 @@ def test_finalize_is_merged_by_agent_in_the_same_call(world: World) -> None:
     assert meta["status"] == na.STATUS_APPROVED
     assert meta["approved_by"] == HUMAN
     assert meta["approved_at"] == MERGED_AT
+
+
+def test_identity_is_recovered_when_the_finalize_number_was_lost(
+    world: World,
+) -> None:
+    """Ревью #393: восстановление идентичности на пути «конверт уже в base».
+
+    Последовательность реальная, а не смоделированная подменой: finalize-PR
+    создан → номер потерян (гибель между созданием и записью) → человек
+    мержит PR руками → повтор видит готовый конверт. Прежде заявка
+    завершалась БЕЗ `finalize_merge_commit`, и прогон навсегда терял знание
+    о том, что подтверждает.
+
+    Обычные assertions пути одобрения эту ветку не проходят: там номер на
+    месте, и восстановление не запускается вовсе.
+    """
+    declare_human_merge(world)
+    approve(world, "charter")
+    key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    approve(world, "charter")
+
+    finalize_pr = world.state.ops[key]["finalize_pr"]
+    branch = world.state.ops[key]["finalize_branch"]
+
+    # Гибель между созданием PR и записью его номера: в леджере остаётся
+    # только ветка. Идентичности тоже ещё нет — её пишут при завершении.
+    del world.state.ops[key]["finalize_pr"]
+    world.state.ops[key].pop("finalize_merge_commit", None)
+    rs.save(world.state)
+
+    merge_pr(world, finalize_pr)
+    outcome = approve(world, "charter")
+
+    restored = world.state.ops[key]
+    assert restored["status"] == al.STATUS_COMPLETED, outcome.message
+    assert restored["finalize_pr"] == finalize_pr, (
+        f"номер восстановлен по ветке {branch}"
+    )
+    assert restored["finalize_merge_commit"], "идентичность восстановлена"
+    assert restored["finalize_merge_commit"] != restored["merge_commit"], (
+        "это мерж finalize, а не candidate"
+    )
 
 
 def test_repo_human_policy_labels_finalize_and_waits(world: World) -> None:

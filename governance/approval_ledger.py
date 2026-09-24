@@ -552,6 +552,21 @@ def record_finalize_pr(state: RunState, key: str, pr: int) -> None:
     _update(state, key, finalize_pr=pr)
 
 
+def record_finalize_merge_commit(state: RunState, key: str, commit: str) -> None:
+    """SHA мержа finalize-PR — ИДЕНТИЧНОСТЬ результата заявки (#392, D1).
+
+    Отдельно от `merge_commit`: тот про мерж candidate, то есть про АКТ
+    ОДОБРЕНИЯ. Последние байты в base вносит finalize (`_publish_envelope`:
+    `approval_pending → approved` плюс подпись), и верифицируется потом
+    именно его результат. Две роли, два поля; подменять одно другим
+    нельзя.
+
+    Пишется ДО `complete_request`: после завершения заявка терминальна, и
+    дописывать в неё факт задним числом значит редактировать прошлое.
+    """
+    _update(state, key, finalize_merge_commit=commit)
+
+
 def complete_request(state: RunState, key: str) -> None:
     """Терминальный `completed`: конверт в base, предикат сходится."""
     _update(state, key, status=STATUS_COMPLETED)
