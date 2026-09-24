@@ -451,7 +451,19 @@ def drive_to_approved(
     # Второй вызов выносит конверт И мержит его агентом (ADR-ECO-011 D5):
     # заявка завершена тем же вызовом, третьего не нужно.
     approve(world, node, legacy_bundle=legacy_bundle)
-    assert world.state.ops[first.request]["status"] == al.STATUS_COMPLETED
+    op = world.state.ops[first.request]
+    assert op["status"] == al.STATUS_COMPLETED
+    # Ревью #393: идентичность результата обязана быть записана ПРОДАКШЕНОМ
+    # на пути завершения заявки — без неё прогон не помнит, что
+    # подтверждает. Проверяется здесь, в общем помощнике, а не в тесте
+    # раннера: там approve_node подменён стендом, и стенд писал поле ЗА
+    # него — тест проходил бы и при снятой записи.
+    assert op.get("finalize_merge_commit"), (
+        "SHA мержа finalize не записан при завершении заявки"
+    )
+    assert op["finalize_merge_commit"] != op.get("merge_commit"), (
+        "идентичность результата — мерж finalize, а не candidate"
+    )
 
 
 def declare_human_merge(world: World) -> None:

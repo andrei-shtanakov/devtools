@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from governance import approval_facts as af
+from governance import approval_branches as ab
 from governance import approval_ledger as al
 from governance import bundle_dag, bundle_inputs
 from governance import node_approval as na
@@ -1948,6 +1949,45 @@ def _record_finalize_identity(
     al.record_finalize_merge_commit(state, key, fact.value.commit)
 
 
+def _ensure_finalize_identity(
+    state: RunState, ops: Ops, key: str, op: dict
+) -> None:
+    """Идентичность результата ПЕРЕД завершением заявки — на ЛЮБОМ пути.
+
+    Ревью #393 (блокирующее): путь «конверт уже в base» завершал заявку
+    без `finalize_merge_commit`. Достижим он буднично — гибель после
+    создания finalize-PR, но ДО сохранения его номера: человек мержит PR
+    руками, повтор видит готовый конверт и закрывает заявку. Прогон при
+    этом навсегда теряет знание о том, что подтверждает.
+
+    Восстановление, а не только отказ: номер PR ищется по ВЕТКЕ заявки,
+    если в леджере его нет. Не нашли — `_unresolved`: заявка остаётся
+    живой, оператор видит причину. Завершить без идентичности нельзя ни
+    при каких обстоятельствах — это и есть предмет правки.
+    """
+    if op.get("finalize_merge_commit"):
+        return
+    pr = op.get("finalize_pr")
+    if pr is None:
+        branch = ab.finalize_branch(
+            op["ws_id"], op["wave"], op["step"], op["attempt"]
+        )
+        try:
+            pr = ops.find_pr(state.repo_slug, branch)
+        except RuntimeError as exc:
+            raise _unresolved(
+                f"поиск finalize-PR заявки {key} по ветке {branch}: {exc}"
+            ) from exc
+        if pr is None:
+            raise _unresolved(
+                f"finalize-PR заявки {key} не найден ни в леджере, ни по "
+                f"ветке {branch} — идентичность результата не установлена, "
+                "и завершать заявку без неё нельзя"
+            )
+        al.record_finalize_pr(state, key, pr)
+    _record_finalize_identity(state, ops, key, pr)
+
+
 def _reconcile_finalize(
     state: RunState,
     ops: Ops,
@@ -1997,7 +2037,7 @@ def _reconcile_finalize(
             f"финализирующий PR #{pr} вмержен, но узлы {', '.join(pending)} "
             "в base по-прежнему approval_pending — конверта там нет",
         )
-        _record_finalize_identity(state, ops, key, pr)
+        _ensure_finalize_identity(state, ops, key, op)
         al.complete_request(state, key)
         return ApprovalOutcome(
             f"конверт подписи в base (PR #{pr}): узлы "
@@ -2116,6 +2156,7 @@ def _finalize(
         )
     pending = _verify_nodes_in_base(state, ops, dag, op, key)
     if not pending:
+        _ensure_finalize_identity(state, ops, key, op)
         al.complete_request(state, key)
         return ApprovalOutcome(
             f"конверт узлов {', '.join(op['nodes'])} уже в base — заявка "

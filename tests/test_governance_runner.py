@@ -7059,6 +7059,38 @@ def test_s8_records_the_checked_tree_separately_from_the_merge_result(
     assert state.ops["gate-authoritative"]["tree_sha"] == "a" * 40
 
 
+def test_s8_stops_before_the_gate_when_the_tree_sha_is_unavailable(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Ревью #393: отказ примитива НЕ даёт прогону стать `completed` без
+    ответа «на чём проверяли».
+
+    Раньше ошибка глоталась и шаг шёл дальше с `tree_sha=None`. Теперь
+    стоп ДО гейта; статус не меняется, значит шаг resumable и повтор
+    штатный — проверяется тем, что после починки примитива тот же прогон
+    доходит до конца.
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=0,
+        head_sha_error="fatal: bad revision",
+    )
+    state = _wave_run_at_s8(tmp_path, "r-393-tree", ops, base_ref="master")
+
+    assert runner._step_s8(state, ops) is False
+    assert state.status != "completed"
+    assert "gate-authoritative" not in state.ops or (
+        state.ops["gate-authoritative"]["status"] != "completed"
+    )
+    assert not any(c[0] == "gate_check_s8" for c in ops.calls), (
+        "гейт не запускался — дерево прогона не установлено"
+    )
+
+    ops.head_sha_error = None
+    assert runner._step_s8(state, ops) is True
+    assert state.status == "completed"
+    assert state.ops["gate-authoritative"]["tree_sha"] == ops.head
+
+
 def test_completed_wave_run_deletes_its_authoring_branches(
     tmp_path: Path, runs_root,
 ) -> None:

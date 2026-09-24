@@ -3174,10 +3174,20 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
         # неравенство с `head` не доказывало бы продвижение базы.
         # Момент: ПОСЛЕ успешного чекаута, перед вызовом гейта.
         try:
-            tree_sha: str | None = ops.head_sha(state.target_dir, base_ref)
-        except Exception as exc:  # noqa: BLE001 — evidence, не управление
+            tree_sha = ops.head_sha(state.target_dir, base_ref)
+        except Exception as exc:  # noqa: BLE001 — примитив может отказать
+            # Ревью #393 (блокирующее): раньше отказ глотался, и шаг шёл
+            # дальше с `tree_sha=None` — прогон мог стать `completed` без
+            # ответа на вопрос «на чём проверяли». Теперь стоп ДО гейта,
+            # статус не меняется: шаг resumable, повтор штатный.
             print(f"_step_s8: head_sha({base_ref!r}) не удался: {exc}")
-            tree_sha = None
+            return False
+        if not tree_sha:
+            print(
+                f"_step_s8: head_sha({base_ref!r}) вернул пусто — дерево "
+                "прогона не установлено, гейт не запускается"
+            )
+            return False
         _ensure_started(state, key)
         # Прибрать verdict-файл ПРЕДЫДУЩЕЙ попытки до запуска гейта
         # (приёмка PR #114, круг 2): иначе harvested=True после гейта мог
