@@ -273,154 +273,34 @@ def _bundle_pr(
     }
 
 
-def test_recover_run_from_github_rebuilds_minimal_merge_boundary(
+def test_recover_run_from_github_refuses_the_removed_path(
     runs_root, tmp_path
 ) -> None:
+    """S13: бандл-PR прежнего пути РАСПОЗНАЁТСЯ, но его исполнение не
+    восстанавливается. Отказ адресный — называет PR, ветку и run-id, —
+    и наступает ДО создания леджера: каталог прогонов остаётся пуст.
+    """
     ops = _RecoveryOps([_bundle_pr()])
 
-    state = spec_loop.recover_run_from_github(
-        subject="Fleet Inbox",
-        repo="alpha",
-        repo_slug="owner/alpha",
-        target_dir=str(tmp_path / "alpha"),
-        profile="profiles/team-exp.yaml",
-        author_backend="codex",
-        requested_ws_id=None,
-        requested_bundle_dir=None,
-        ops=ops,
-    )
-
-    assert state is not None
-    assert state.run_id == "fleet-inbox-20260901-a1b2c3"
-    assert state.ws_id == "fleet-inbox-20260901"
-    assert state.bundle_dir == "workstreams/fleet-inbox-20260901/spec"
-    assert state.status == "waiting_human_merge"
-    assert state.branch == "spec/fleet-inbox-20260901-behaviour"
-    assert state.pr == 41
-    assert state.base_ref == "master"
-    assert state.ops == {
-        "ledger-recovery": {
-            "status": "completed",
-            "source": "github",
-            "bundle_pr": 41,
-            "profile": "profiles/team-exp.yaml",
-            "profile_source": "current-invocation-not-github",
-            "author_backend": "codex",
-            "author_backend_effective": False,
-        }
-    }
-    assert rs.load(state.run_id) == state
-    assert ops.prefixes == ["spec/fleet-inbox-"]
-    assert ops.checkouts == []
-
-
-def test_recover_customer_source_descriptor_from_merged_bundle(
-    runs_root, tmp_path
-) -> None:
-    bundle = "workstreams/fleet-inbox-20260901/spec"
-    target = tmp_path / "alpha"
-    primary = target / bundle / brief_input.PRIMARY_REL
-    primary.parent.mkdir(parents=True)
-    primary.write_text(_customer_brief(), encoding="utf-8")
-    files = [f"{bundle}/{name}" for name in spec_loop._BUNDLE_FILENAMES]
-    source_path = f"{bundle}/{brief_input.PRIMARY_REL}"
-    files.append(source_path)
-    ops = _RecoveryOps(
-        [_bundle_pr()],
-        files=files,
-        head_files={
-            f"{bundle}/{brief_input.PRIMARY_REL}": primary.read_bytes()
-        },
-    )
-
-    state = spec_loop.recover_run_from_github(
-        subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
-        target_dir=str(target), profile="profiles/team-exp.yaml",
-        author_backend="codex", requested_ws_id=None,
-        requested_bundle_dir=None, ops=ops,
-    )
-
-    assert state is not None
-    assert state.brief == brief_input.inspect_brief(primary).as_state()
-    assert ops.checkouts == [(str(target), "master")]
-
-
-def test_recover_refuses_source_changed_after_bundle_pr(
-    runs_root, tmp_path
-) -> None:
-    bundle = "workstreams/fleet-inbox-20260901/spec"
-    target = tmp_path / "alpha"
-    primary = target / bundle / brief_input.PRIMARY_REL
-    primary.parent.mkdir(parents=True)
-    original = _customer_brief().encode("utf-8")
-    primary.write_text(
-        _customer_brief().replace("Goal", "Changed goal"), encoding="utf-8"
-    )
-    source_path = f"{bundle}/{brief_input.PRIMARY_REL}"
-    files = [f"{bundle}/{name}" for name in spec_loop._BUNDLE_FILENAMES]
-    files.append(source_path)
-
-    with pytest.raises(spec_loop.SpecLoopError, match="изменён"):
+    with pytest.raises(spec_loop.SpecLoopError) as exc:
         spec_loop.recover_run_from_github(
-            subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
-            target_dir=str(target), profile="profiles/team-exp.yaml",
-            author_backend="codex", requested_ws_id=None,
+            subject="Fleet Inbox",
+            repo="alpha",
+            repo_slug="owner/alpha",
+            target_dir=str(tmp_path / "alpha"),
+            profile="profiles/team-exp.yaml",
+            author_backend="codex",
+            requested_ws_id=None,
             requested_bundle_dir=None,
-            ops=_RecoveryOps(
-                [_bundle_pr()], files=files,
-                head_files={source_path: original},
-            ),
+            ops=ops,
         )
 
-
-def test_recover_missing_head_source_is_contractual_refusal(
-    runs_root, tmp_path
-) -> None:
-    bundle = "workstreams/fleet-inbox-20260901/spec"
-    target = tmp_path / "alpha"
-    primary = target / bundle / brief_input.PRIMARY_REL
-    primary.parent.mkdir(parents=True)
-    primary.write_text(_customer_brief(), encoding="utf-8")
-    source_path = f"{bundle}/{brief_input.PRIMARY_REL}"
-    files = [f"{bundle}/{name}" for name in spec_loop._BUNDLE_FILENAMES]
-    files.append(source_path)
-
-    with pytest.raises(spec_loop.SpecLoopError, match="immutable head"):
-        spec_loop.recover_run_from_github(
-            subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
-            target_dir=str(target), profile="profiles/team-exp.yaml",
-            author_backend="codex", requested_ws_id=None,
-            requested_bundle_dir=None,
-            ops=_RecoveryOps([_bundle_pr()], files=files),
-        )
-
-
-def test_recover_engineer_refuses_incomplete_source_layer(
-    runs_root, tmp_path
-) -> None:
-    bundle = "workstreams/fleet-inbox-20260901/spec"
-    target = tmp_path / "alpha"
-    primary = target / bundle / brief_input.PRIMARY_REL
-    primary.parent.mkdir(parents=True)
-    primary.write_text(_engineer_brief(), encoding="utf-8")
-    customer = target / bundle / "00-discovery/customer.md"
-    customer.write_text(_customer_brief(status="approved"), encoding="utf-8")
-    files = [f"{bundle}/{name}" for name in spec_loop._BUNDLE_FILENAMES]
-    source_path = f"{bundle}/{brief_input.PRIMARY_REL}"
-    files.append(source_path)
-
-    with pytest.raises(spec_loop.SpecLoopError, match="не восстанавливается"):
-        spec_loop.recover_run_from_github(
-            subject="Fleet Inbox", repo="alpha", repo_slug="owner/alpha",
-            target_dir=str(target), profile="profiles/team-exp.yaml",
-            author_backend="codex", requested_ws_id=None,
-            requested_bundle_dir=None,
-            ops=_RecoveryOps(
-                [_bundle_pr()], files=files,
-                head_files={source_path: primary.read_bytes()},
-            ),
-        )
-
+    message = str(exc.value)
+    assert "#41" in message and "spec/fleet-inbox-20260901-behaviour" in message
+    assert "fleet-inbox-20260901-a1b2c3" in message, "run-id прежнего прогона"
+    assert "2026-09-23" in message and "S13" in message
+    assert "waves" in message, "что делать вместо"
+    assert rs.all_run_ids() == [], "леджер не создан — отказ бесследен"
 
 def test_recover_multiple_candidates_requires_ws_id(
     runs_root, tmp_path
@@ -498,7 +378,11 @@ def test_recover_refuses_missing_run_id_fact(runs_root, tmp_path) -> None:
 def test_recover_refuses_closed_unmerged_bundle_pr(
     runs_root, tmp_path
 ) -> None:
-    with pytest.raises(spec_loop.SpecLoopError, match="закрыт без мержа"):
+    # S13: отказ по состоянию PR больше не наступает — распознав
+    # бандл-PR прежнего пути, восстановление отказывает раньше и по
+    # более общей причине. Закрытый без мержа PR прежнего пути
+    # интересен теперь только тем, что он прежнего пути.
+    with pytest.raises(spec_loop.SpecLoopError, match="S13"):
         spec_loop.recover_run_from_github(
             subject="Fleet Inbox",
             repo="alpha",
@@ -515,7 +399,11 @@ def test_recover_refuses_closed_unmerged_bundle_pr(
 def test_recover_refuses_open_pr_because_review_verdict_is_unknown(
     runs_root, tmp_path
 ) -> None:
-    with pytest.raises(spec_loop.SpecLoopError, match="S6 review и S7 verdict"):
+    # S13: отказ по состоянию PR больше не наступает — распознав
+    # бандл-PR прежнего пути, восстановление отказывает раньше и по
+    # более общей причине. Ещё открытый PR прежнего пути
+    # интересен теперь только тем, что он прежнего пути.
+    with pytest.raises(spec_loop.SpecLoopError, match="S13"):
         spec_loop.recover_run_from_github(
             subject="Fleet Inbox",
             repo="alpha",
@@ -714,50 +602,6 @@ def test_existing_run_rejects_different_brief(
     assert rc == 1
     assert env.calls == []
     assert "без --need невозможен" in capsys.readouterr().out
-
-
-def test_missing_ledger_recovers_then_resumes_s8_and_reconciles_tasks_pr(
-    runs_root, tmp_path, monkeypatch, capsys
-) -> None:
-    """Приёмка R3: RUNS_ROOT пуст, durable GitHub-факты продолжают цикл."""
-    target = tmp_path / "alpha"
-    (target / ".git").mkdir(parents=True)
-    manifest = tmp_path / "manifest.toml"
-    manifest.write_text(MANIFEST, encoding="utf-8")
-    monkeypatch.setattr(spec_loop, "MANIFEST_PATH", manifest)
-    monkeypatch.setattr(spec_loop, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(
-        spec_loop, "_origin_url", lambda _d: "git@github.com:owner/alpha.git"
-    )
-    ops = _RecoveryOps([_bundle_pr()])
-    monkeypatch.setattr(spec_loop, "_real_ops", lambda: ops)
-    calls: list[tuple] = []
-
-    def _resume(run_id, passed_ops):
-        state = rs.load(run_id)
-        calls.append(("resume-s8", run_id, passed_ops is ops))
-        state.status = "completed"
-        rs.save(state)
-        return state
-
-    def _deliver(state, passed_ops, legacy_bundle=None):
-        calls.append(("reconcile-tasks", state.ws_id, passed_ops is ops))
-        return 77
-
-    monkeypatch.setattr(spec_loop.runner, "resume", _resume)
-    monkeypatch.setattr(spec_loop.task_bridge, "deliver_for_run", _deliver)
-
-    rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
-
-    assert rc == 0
-    assert calls == [
-        ("resume-s8", "fleet-inbox-20260901-a1b2c3", True),
-        ("reconcile-tasks", "fleet-inbox-20260901", True),
-    ]
-    out = capsys.readouterr().out
-    assert "ledger отсутствовал; восстановлен" in out
-    assert "GitHub исторический profile не хранит" in out
-    assert "tasks-спека доставлена: PR #77" in out
 
 
 def test_repeat_finds_run_without_date_and_resumes(
@@ -1092,38 +936,6 @@ def test_need_against_run_without_interview_refuses(
     assert env.calls == []
 
 
-def test_need_against_recovered_run_without_interview_refuses(
-    runs_root, tmp_path, monkeypatch, capsys
-) -> None:
-    """Ruling 2: гвард стоит ПОСЛЕ recover_run_from_github — восстановленный
-    из GitHub прогон тоже не несёт interview, и `--need` на нём отказывает
-    той же подсказкой `--new-run --ws-id`, не вызывая resume."""
-    target = tmp_path / "alpha"
-    (target / ".git").mkdir(parents=True)
-    manifest = tmp_path / "manifest.toml"
-    manifest.write_text(MANIFEST, encoding="utf-8")
-    monkeypatch.setattr(spec_loop, "MANIFEST_PATH", manifest)
-    monkeypatch.setattr(spec_loop, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(
-        spec_loop, "_origin_url", lambda _d: "git@github.com:owner/alpha.git"
-    )
-    ops = _RecoveryOps([_bundle_pr()])
-    monkeypatch.setattr(spec_loop, "_real_ops", lambda: ops)
-    resume_calls: list[str] = []
-    monkeypatch.setattr(
-        spec_loop.runner, "resume",
-        lambda run_id, passed_ops: resume_calls.append(run_id),
-    )
-
-    rc = spec_loop.main(_need())
-
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "--new-run --ws-id" in out
-    assert resume_calls == []
-    assert rs.all_run_ids() == ["fleet-inbox-20260901-a1b2c3"]
-
-
 # --- стадия Need: диспетчер waiting/stopped_interview, --session, --new-run ---
 
 
@@ -1389,6 +1201,46 @@ def _wave_recovery_env(tmp_path, monkeypatch, ops):
     monkeypatch.setattr(spec_loop, "_real_ops", lambda: ops)
 
 
+def test_historical_bundle_pr_does_not_block_wave_recovery(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """Сосуществование (S13, решение владельца 2026-09-23): в фордже лежат
+    И бандл-PR прежнего прогона, И candidate-PR живого волнового.
+
+    Порядок обязан отдать волновой: иначе присутствие исторического
+    бандла одним своим фактом закрывало бы восстановление живого прогона
+    отказом «путь удалён» — отказ был бы формально верен и практически
+    вреден. Проверяется не порядок вызовов, а ИСХОД: прогон восстановлен,
+    отказа нет.
+    """
+    ops = _WaveRecoveryOps([
+        _bundle_pr(),  # исторический бандл-PR прежнего пути — в той же выдаче
+        _wave_pr(10, 1, 0, 1), _wave_pr(11, 1, 0, 1, final=True),
+        _wave_pr(12, 1, 1, 1), _wave_pr(13, 1, 1, 1, final=True),
+    ])
+    _wave_recovery_env(tmp_path, monkeypatch, ops)
+    seen: list[str] = []
+
+    def _resume(run_id, passed_ops):
+        state = rs.load(run_id)
+        seen.append(run_id)
+        assert state.authoring == "waves", (
+            "восстановлен волновой прогон, а не прежний"
+        )
+        state.wave = 3
+        _seed_wave_candidate(state, 3, 14)
+        rs.save(state)
+        return state
+
+    monkeypatch.setattr(spec_loop.runner, "resume", _resume)
+    rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
+
+    assert rc == 0 and seen == ["fleet-inbox-20260901-a1b2c3"]
+    assert ops.prefixes == ["spec/fleet-inbox-"], (
+        "к бандл-PR прежнего пути обвязка не обращалась вовсе"
+    )
+
+
 def test_missing_ledger_recovers_wave_run_from_candidate_prs(
     runs_root, tmp_path, monkeypatch, capsys
 ) -> None:
@@ -1419,7 +1271,10 @@ def test_missing_ledger_recovers_wave_run_from_candidate_prs(
     monkeypatch.setattr(spec_loop.runner, "resume", _resume)
     rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
     assert rc == 0 and seen == ["fleet-inbox-20260901-a1b2c3"]
-    assert ops.prefixes == ["spec/fleet-inbox-", "spec/fleet-inbox-"]
+    # ОДИН поиск, не два: волновое восстановление идёт ПЕРВЫМ (S13), и
+    # найдя candidate-PR, к бандл-PR прежнего пути обвязка не обращается
+    # вовсе — исторический бандл не заслоняет живой волновой прогон.
+    assert ops.prefixes == ["spec/fleet-inbox-"]
     out = capsys.readouterr().out
     assert "восстановлен из candidate-PR волн (последняя — #12, волна 2)" in out
     assert "wave=3/5" in out and "candidate-PR #14" in out
