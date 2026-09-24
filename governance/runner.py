@@ -288,7 +288,7 @@ def start(
     brief_source: brief_input.BriefSource | None = None,
     interview_spec: iv.InterviewSpec | None = None,
     allow_legacy_dt: bool = False,
-    authoring: str = "legacy",
+    authoring: str = "waves",
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
@@ -315,6 +315,24 @@ def start(
     validate_merge_authority(merge_authority)
     validate_author_backend(author_backend)
     validate_authoring(authoring)
+    if authoring != "waves":
+        # Ревью #389 (major): умолчание `new_run` — `legacy`, и оно
+        # НАМЕРЕННО такое (D2: описывает прошлое, а не будущее). Но
+        # `start()` заводит НОВЫЙ прогон, и прежнего пути для него больше
+        # нет: с `legacy` он получал бы `wave=0`, ветку `…-w0` и пустую
+        # выборку узлов уровня −1 — конвейер отработал бы вхолостую и
+        # молча, а resume созданного леджера отказал бы как legacy.
+        # Отказ здесь, в группе проверок входа, — ДО `_reserve_run_id` и
+        # любого касания целевого репо.
+        raise ValueError(
+            f"authoring={authoring!r}: прежний путь авторинга удалён из "
+            f"исполнения (решение владельца {_LEGACY_REMOVED_ON}, S13 "
+            "спеки sequential-node-approval) — новый прогон заводится "
+            "только волновым (authoring='waves'). Умолчание поля в "
+            "леджере остаётся "
+            "'legacy': оно описывает прошлое исторических прогонов, "
+            "которые читаются как прежде."
+        )
     if interview_spec is not None and brief_source is not None:
         raise ValueError("--need и --brief взаимоисключающи")
     blocker = _blocking_merged_unverified(ws_id)

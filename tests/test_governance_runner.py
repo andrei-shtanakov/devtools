@@ -7385,6 +7385,57 @@ def test_reopen_refuses_legacy_runs_and_finished_waves(
         runner.reopen("r-legacy-reopen", "charter", ops)
 
 
+def test_public_start_without_authoring_creates_a_wave_run(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Ревью #389 (major): умолчание ПУБЛИЧНОГО `start()` обязано быть
+    волновым.
+
+    Умолчание поля в `new_run` — `legacy`, и оно намеренно такое: описывает
+    прошлое (D2). Но `start()` заводит НОВЫЙ прогон, и с `legacy` он
+    получал бы `wave=0` — ветку `…-w0` и выборку узлов уровня −1, то есть
+    пустую. Конвейер отработал бы вхолостую и МОЛЧА, а resume созданного
+    леджера отказал бы как legacy. Общий тестовый помощник подставляет
+    `authoring="waves"` явно и этот дефект скрывал — здесь `start()`
+    зовётся без него намеренно.
+    """
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    kwargs = _waves_kwargs(tmp_path, "r-default-mode", ops)
+    kwargs.pop("authoring")
+
+    state = runner.start(**kwargs)
+
+    assert state.authoring == "waves"
+    assert state.wave == 1, "волна 1, а не 0 — иначе уровень узлов −1"
+    assert state.branch.endswith("-w1")
+    assert ops.authored == ["charter"], "узел уровня 0 реально авторен"
+
+
+def test_public_start_refuses_legacy_before_reserving_the_run_id(
+    tmp_path: Path, runs_root,
+) -> None:
+    """Явный `authoring="legacy"` у `start()` — отказ ДО побочных эффектов.
+
+    Проверяется не только сам отказ, но и его бесследность: `run_id` не
+    зарезервирован, каталог прогона не создан, к целевому репо обращений
+    нет. Резервирование создаёт файл, и отказ после него оставлял бы
+    пустую заглушку под несостоявшимся прогоном.
+    """
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    kwargs = _waves_kwargs(tmp_path, "r-explicit-legacy", ops)
+    kwargs["authoring"] = "legacy"
+
+    with pytest.raises(ValueError) as exc:
+        runner.start(**kwargs)
+
+    message = str(exc.value)
+    assert "2026-09-23" in message and "S13" in message
+    assert "waves" in message
+    assert rs.all_run_ids() == [], "run_id не зарезервирован"
+    assert ops.calls == [], "целевое репо не тронуто"
+
+
 # --- S13: resume прежнего пути авторинга отказывает (спека §4, D3) --------
 
 
