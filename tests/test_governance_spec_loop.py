@@ -1475,16 +1475,27 @@ def test_new_run_without_flags_is_waves(
     assert env.calls[0][1]["authoring"] == "waves"
 
 
-def test_legacy_flag_still_starts_the_previous_path(
-    runs_root, tmp_path, monkeypatch
+def test_legacy_flag_refuses_with_a_named_reason(
+    runs_root, tmp_path, monkeypatch, capsys
 ) -> None:
-    """`--legacy` — явный вход в прежний путь: флип дефолта его не уносит."""
+    """S13: `--legacy` принимается парсером и ОТКАЗЫВАЕТ с названной
+    причиной — оператор обязан прочитать «путь удалён», а не
+    `unrecognized arguments`, и не пойти искать опечатку.
+
+    Отказ до побочных эффектов: прогон не заводится, `runner.start` не
+    зовётся вовсе.
+    """
     env = _LoopEnv(monkeypatch, tmp_path)
     rc = spec_loop.main(
         ["--subject", "Fleet Inbox", "--repo", "alpha", "--legacy"]
     )
-    assert rc == 0
-    assert env.calls[0][1]["authoring"] == "legacy"
+    assert rc != 0, "отказ обязан быть отличим кодом возврата"
+    assert env.calls == [], "ни одного прогона заведено не было"
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "2026-09-23" in out, "дата решения"
+    assert "S13" in out, "пункт спеки"
+    assert "waves" in out, "что делать вместо"
 
 
 def test_waves_flag_survives_the_flip_as_a_noop(

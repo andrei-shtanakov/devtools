@@ -1384,7 +1384,7 @@ def test_brief_materialization_refuses_changed_durable_intake(
     tmp_path: Path, runs_root,
 ) -> None:
     source = _brief_source(tmp_path)
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject="brief", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
         target_dir=str(tmp_path / "target"), bundle_dir=BUNDLE_DIR,
         profile="profiles/team-exp.yaml", run_id="r-brief-intake",
@@ -1703,7 +1703,7 @@ def test_resume_does_not_duplicate_pr(tmp_path: Path, runs_root) -> None:
     ops = FakeOps()
     kwargs = _start_kwargs(tmp_path, "r-resume", ops)
     branch = "spec/WS-1-behaviour"
-    state = rs.new_run(
+    state = rs.new_run(authoring="legacy", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -2051,7 +2051,7 @@ def test_resume_after_death_between_create_issue_and_op_complete_reuses_issue(
     # зафиксирован неуспехом, findings уже на диске, remediation-issue —
     # started (write-ahead отработал), а сам issue РЕАЛЬНО создан (эффект
     # состоялся), но op_complete не успел записаться.
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -2342,7 +2342,7 @@ def test_verify_refuses_when_child_is_running(
 
     # Валидный, но ещё не терминальный потомок (S8 в процессе).
     child_id = f"{parent_id}-v1"
-    child_state = rs.new_run(
+    child_state = rs.new_run(authoring="waves", 
         subject=parent.subject, repo=parent.repo, repo_slug=parent.repo_slug,
         ws_id=parent.ws_id, target_dir=parent.target_dir,
         bundle_dir=parent.bundle_dir, profile=parent.profile, run_id=child_id,
@@ -2431,47 +2431,6 @@ def test_verify_without_run_id_increments_attempt_after_failed_child(
     assert second_child.status == "completed"
 
 
-def test_resume_waiting_human_merge_open_still_waits(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """merge_authority=human (safety с пина 6a70d15 разрешает агентский
-    мерж, ждущее состояние достигается run-override-ом)."""
-    ops = FakeOps(review_exit=0, facts=dict(GREEN_PR_FACTS), files=GREEN_BUNDLE_FILES)
-    run_id = "r-resume-open"
-
-    state = runner.start(
-        **_start_kwargs(tmp_path, run_id, ops, merge_authority="human", authoring="legacy")
-    )
-    assert state.status == "waiting_human_merge"
-
-    result = runner.resume(run_id, ops)
-
-    assert result.status == "waiting_human_merge"
-    assert "gate_check_s8" not in [c[0] for c in ops.calls]
-
-
-def test_resume_waiting_human_merge_merged_runs_s8(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    ops = FakeOps(
-        review_exit=0, facts=dict(GREEN_PR_FACTS), files=GREEN_BUNDLE_FILES, s8_exit=0,
-    )
-    run_id = "r-resume-merged"
-
-    state = runner.start(
-        **_start_kwargs(tmp_path, run_id, ops, merge_authority="human", authoring="legacy")
-    )
-    assert state.status == "waiting_human_merge"
-    assert "merge" not in state.ops
-
-    ops.facts = {**ops.facts, "state": "MERGED"}
-    result = runner.resume(run_id, ops)
-
-    assert result.ops["merge"] == {"status": "completed", "merged": True}
-    assert result.status == "completed"
-    assert result.ops["gate-authoritative"]["status"] == "completed"
-
-
 def test_cli_status_prints_run_state(
     tmp_path: Path, runs_root, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -2481,7 +2440,7 @@ def test_cli_status_prints_run_state(
     без внешних вызовов — `status` не строит `RealOps`.
     """
     run_id = "r-cli-status"
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject="тестовый функционал", repo="alpha", repo_slug="owner/alpha",
         ws_id="WS-1", target_dir=str(tmp_path / "target-cli"),
         bundle_dir=BUNDLE_DIR, profile="profiles/team-exp.yaml", run_id=run_id,
@@ -2625,286 +2584,6 @@ def test_resume_from_stopped_gate_recommits_edited_bundle(
     assert committed_paths  # commit_paths реально вызван с путями бандла
 
 
-def test_resume_from_stopped_review_reruns_ready_and_review(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """F-1: resume из stopped_review переигрывает ready+review."""
-    ops = FakeOps(review_exit=1)
-    run_id = "r-resume-review"
-
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-    assert state.status == "stopped_review"
-    calls_before = len(ops.calls)
-
-    ops.review_exit = 0
-    result = runner.resume(run_id, ops)
-
-    review_calls_after = [c for c in ops.calls[calls_before:] if c[0] == "review"]
-    assert review_calls_after  # review реально перезапустился
-    assert result.status != "stopped_review"
-    assert result.ops["review"]["status"] == "completed"
-
-
-def test_resume_from_stopped_review_pr_merged_out_of_band_runs_s8(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """Живой прогон spec-runner#480/#522: PR смержен вручную из
-    `stopped_review`, в обход S7 — GitHub удалил ветку (`--delete-branch`).
-    Слепой сброс `commit`→`review` до этой правки пытался бы `push`
-    несуществующую ветку; реконсиляция обязана заметить `MERGED` ПЕРЕД
-    сбросом и пойти прямо на S8, не трогая commit/push/review."""
-    ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS), s8_exit=0)
-    run_id = "r-resume-review-merged"
-
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-    assert state.status == "stopped_review"
-    calls_before = len(ops.calls)
-
-    ops.facts = {**ops.facts, "state": "MERGED"}
-    result = runner.resume(run_id, ops)
-
-    calls_after = [c[0] for c in ops.calls[calls_before:]]
-    assert "push_branch" not in calls_after
-    assert "review" not in calls_after
-    assert "commit_paths" not in calls_after
-    assert result.ops["merge"] == {"status": "completed", "merged": True}
-    assert result.status == "completed"
-    assert result.ops["gate-authoritative"]["status"] == "completed"
-
-
-def test_resume_from_stopped_review_pr_merged_records_base_ref_from_facts(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """Ревью #253: `_step_verdict` (единственная другая точка записи
-    `state.base_ref`) не выполнялся на пути `stopped_review` — реконсиляция
-    обязана взять `baseRefName` из тех же фактов PR, что уже прочитала,
-    иначе S8 молча гейтит захардкоженный фолбэк "master" на репо с другой
-    дефолтной веткой."""
-    ops = FakeOps(
-        review_exit=1, facts={**GREEN_PR_FACTS, "baseRefName": "main"}, s8_exit=0,
-    )
-    run_id = "r-resume-review-merged-baseref"
-
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-    assert state.status == "stopped_review"
-    assert state.base_ref is None
-
-    ops.facts = {**ops.facts, "state": "MERGED"}
-    result = runner.resume(run_id, ops)
-
-    assert result.base_ref == "main"
-    assert ("checkout_and_pull", "main") in ops.calls
-    assert result.status == "completed"
-
-
-def test_resume_from_stopped_author_pr_merged_out_of_band_runs_s8(
-    tmp_path: Path, runs_root,
-) -> None:
-    """Ревью #253: `stopped_author` НЕ гарантирует отсутствие PR — brief-
-    coverage внутри `_step_authoring` (E1) выполняется на каждом заходе, до
-    проверки завершённости узлов, и может остановить run этим статусом уже
-    после того, как PR создан (resume из stopped_review/stopped_gate
-    доходит сюда повторно). Реконсиляция обязана сработать и здесь, не
-    только `_reset_stopped_author`."""
-    run_id = "r-resume-author-merged"
-    state = rs.new_run(
-        subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
-        target_dir=str(tmp_path / "target"), bundle_dir=BUNDLE_DIR,
-        profile="profiles/team-exp.yaml", run_id=run_id,
-    )
-    state.branch = "spec/WS-1-behaviour"
-    state.pr = 9
-    state.ops = {
-        "branch": {"status": "completed"},
-        "author-charter": {"status": "completed", "exit": 0, "skipped": False},
-    }
-    state.status = "stopped_author"
-    rs.save(state)
-
-    ops = FakeOps(facts={**GREEN_PR_FACTS, "state": "MERGED"}, s8_exit=0)
-    result = runner.resume(run_id, ops)
-
-    assert ("author", "charter") not in ops.calls
-    assert not any(c[0] == "push_branch" for c in ops.calls)
-    assert result.ops["merge"] == {"status": "completed", "merged": True}
-    assert result.status == "completed"
-
-
-def test_resume_after_merged_reconciliation_with_nonterminal_s8_does_not_replay_review(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """Ревью #253, круг 2: `_step_s8` может отказать нетерминально
-    (`checkout_and_pull` не удался) и не меняет `state.status` — при
-    реконсиляции из `stopped_review` это оставляло бы `review` op
-    `started`, и следующий resume() падал бы в общий шаговый цикл,
-    переигрывая платный `review` на уже смерженном PR. Общая проверка
-    ``merge completed`` в начале `advance()` обязана перехватить это
-    раньше, чем цикл дойдёт до `_step_review`."""
-    ops = FakeOps(
-        review_exit=1, facts=dict(GREEN_PR_FACTS),
-        checkout_and_pull_error="ff-only diverged",
-    )
-    run_id = "r-resume-review-merged-s8-nonterminal"
-
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-    assert state.status == "stopped_review"
-    assert state.ops["review"]["status"] == "started"
-
-    ops.facts = {**ops.facts, "state": "MERGED"}
-    result = runner.resume(run_id, ops)
-
-    assert result.status == "running"
-    assert result.ops["merge"] == {"status": "completed", "merged": True}
-    assert "gate_check_s8" not in [c[0] for c in ops.calls]
-    calls_before = len(ops.calls)
-
-    # Второй resume — тот же нетерминальный отказ, но review НЕ должен
-    # переиграться: ни разу за оба захода.
-    result = runner.resume(run_id, ops)
-
-    calls_after = [c[0] for c in ops.calls[calls_before:]]
-    assert "review" not in calls_after
-    assert "push_branch" not in calls_after
-    assert result.status == "running"
-    review_calls_total = sum(1 for c in ops.calls if c[0] == "review")
-
-    # Убрать отказ — S8 доходит до конца, review за весь путь звался
-    # ровно один раз (изначальный прогон, давший stopped_review).
-    ops.checkout_and_pull_error = None
-    result = runner.resume(run_id, ops)
-    assert result.status == "completed"
-    assert sum(1 for c in ops.calls if c[0] == "review") == review_calls_total
-
-
-def test_resume_from_stopped_review_pr_merged_dirty_tree_stops_before_s8(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """Ревью #253, круг 3: `stopped_review` разрешает оператору держать
-    незакоммиченные правки бандла в `target_dir` между стопом и resume
-    (`_BUNDLE_EDIT_RESET_OPS`). Если PR тем временем смержен вручную,
-    переход на S8 без гарда чекаутил бы грязное дерево на base_ref — тот
-    же гард, что `deliver_for_run` ставит перед своим `checkout_and_pull`
-    (task_bridge.py, ревью #191 круг 2). `merge` op не фиксируется, пока
-    дерево грязное: следующий resume обязан зайти в ту же проверку, не
-    в короткое замыкание `advance()` по `merge completed`."""
-    # dirty=False на start(): S1 (`_step_branch`) проверяет is_dirty только
-    # на первом заходе (op "branch" ещё "new") — грязным дерево становится
-    # ПОСЛЕ, во время правки бандла между стопом и resume.
-    ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS))
-    run_id = "r-resume-review-merged-dirty"
-
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-    assert state.status == "stopped_review"
-
-    ops.facts = {**ops.facts, "state": "MERGED"}
-    ops.dirty = True
-    result = runner.resume(run_id, ops)
-
-    assert result.status == "stopped_review"
-    assert "merge" not in result.ops
-    assert "gate_check_s8" not in [c[0] for c in ops.calls]
-    assert "незакоммиченные правки" in ops.comments[-1]
-
-    # Дерево очищено — тот же resume теперь реконсилирует до конца.
-    ops.dirty = False
-    result = runner.resume(run_id, ops)
-    assert result.ops["merge"] == {"status": "completed", "merged": True}
-    assert result.status == "completed"
-
-
-def test_resume_from_stopped_review_pr_still_open_resets_as_before(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """Регрессия: PR ``OPEN`` (обычный случай) — реконсиляция не должна
-    менять существовавшее поведение F-1 (сброс commit→review, повтор
-    review)."""
-    ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS))
-    run_id = "r-resume-review-still-open"
-
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-    assert state.status == "stopped_review"
-    calls_before = len(ops.calls)
-
-    ops.review_exit = 0
-    result = runner.resume(run_id, ops)
-
-    review_calls_after = [c for c in ops.calls[calls_before:] if c[0] == "review"]
-    assert review_calls_after
-    assert "merge" not in result.ops
-    assert result.status != "stopped_review"
-    assert result.ops["review"]["status"] == "completed"
-
-
-def test_resume_from_stopped_gate_pr_merged_out_of_band_runs_s8(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """Тот же класс реконсиляции для `stopped_gate`. S4 идёт ДО `pr` в
-    конвейере, так что на первом заходе PR ещё нет — сценарий строится в два
-    шага, как в бою: сперва обычный `stopped_review` (PR уже создан), затем
-    resume с гейтом, вновь красным на пересбросе `_BUNDLE_EDIT_RESET_OPS`
-    (`gate-candidate` в нём сбрасывается вместе с `review`) — это и есть
-    `stopped_gate` с уже существующим PR."""
-    ops = FakeOps(review_exit=1, facts=dict(GREEN_PR_FACTS))
-    run_id = "r-resume-gate-merged"
-
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-    assert state.status == "stopped_review"
-    assert state.pr is not None
-
-    ops.gate_candidate = [(1, "снова красный")]
-    state = runner.resume(run_id, ops)
-    assert state.status == "stopped_gate"
-    calls_before = len(ops.calls)
-
-    ops.facts = {**ops.facts, "state": "MERGED"}
-    ops.s8_exit = 0
-    result = runner.resume(run_id, ops)
-
-    calls_after = [c[0] for c in ops.calls[calls_before:]]
-    assert "push_branch" not in calls_after
-    assert "gate_check_candidate" not in calls_after
-    assert result.ops["merge"] == {"status": "completed", "merged": True}
-    assert result.status == "completed"
-
-
-def test_resume_from_stopped_review_recommits_edited_bundle(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """Круг 9 (codex-ревью PR #88): resume из `stopped_review` тоже
-    сбрасывает `commit`+`gate-candidate`+`push`, не только `ready`+`review`
-    — человек мог отработать находки ревью правкой бандла; старый коммит
-    (уже `completed` с первого прохода) не должен уехать дальше со старым
-    деревом."""
-    ops = FakeOps(review_exit=1)
-    run_id = "r-resume-review-recommit"
-
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-    assert state.status == "stopped_review"
-    assert state.ops["commit"]["status"] == "completed"
-    gate_first = [c for c in ops.calls if c[0] == "gate_check_candidate"]
-    assert len(gate_first) == 1  # гейт уже прогнан на первом проходе
-    calls_before_resume = len(ops.calls)
-
-    # Человек правит бандл в worktree, отрабатывая находки ревью.
-    bundle_dir = Path(state.target_dir) / state.bundle_dir
-    (bundle_dir / "15-behaviour-spec.md").write_text(
-        "#### BEH-01: review fix\n`traces: [FR-01]`\n- **checked_by**: x\n",
-        encoding="utf-8",
-    )
-    _repin_bundle(bundle_dir)
-    ops.review_exit = 0
-    result = runner.resume(run_id, ops)
-
-    new_calls = [c[0] for c in ops.calls[calls_before_resume:]]
-    assert "commit_paths" in new_calls  # новый коммит, не пропущен по кэшу
-    assert "push_branch" in new_calls
-    assert new_calls.index("commit_paths") < new_calls.index("push_branch")
-    assert new_calls.count("gate_check_candidate") == 1  # переигран, не кэш
-    assert result.status != "stopped_review"
-    assert result.ops["review"]["status"] == "completed"
-    assert result.ops["gate-candidate"]["status"] == "completed"
-
-
 def test_resume_from_stopped_author_reruns_unfinished_author(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
@@ -2958,32 +2637,6 @@ def test_verdict_refuse_status_is_distinct_from_stopped_gate(
     assert state.status != "stopped_gate"
 
 
-def test_resume_from_stopped_merge_refused_reverdicts(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """F-1: resume из stopped_merge_refused пересверяет вердикт, не no-op."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
-    ops = FakeOps(
-        review_exit=0,
-        facts={**GREEN_PR_FACTS, "statusCheckRollup": [{"conclusion": "FAILURE"}]},
-        files=GREEN_BUNDLE_FILES,
-    )
-    run_id = "r-resume-refused"
-
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-    assert state.status == "stopped_merge_refused"
-
-    ops.facts = dict(GREEN_PR_FACTS)  # rollup зазеленел
-    result = runner.resume(run_id, ops)
-
-    assert result.status != "stopped_merge_refused"
-    assert result.ops["merge"]["status"] == "completed"
-    assert ops.merged == [(result.pr, ops.head)]
-
-
 # --- F-2: verdict — аудит, не кэш решения -----------------------------------
 
 
@@ -3003,7 +2656,7 @@ def test_stale_cached_agent_verdict_does_not_merge_on_fresh_red_facts(
         files=GREEN_BUNDLE_FILES,
     )
     kwargs = _start_kwargs(tmp_path, "r-verdict-stale", ops)
-    state = rs.new_run(
+    state = rs.new_run(authoring="legacy", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -3048,7 +2701,7 @@ def test_pr_reconciliation_find_pr_failure_stops_without_duplicate(
     "PR нет", не открывать второй; op остаётся started, run продолжает ждать."""
     ops = FakeOps(find_pr_error="gh pr list: transient network error")
     kwargs = _start_kwargs(tmp_path, "r-pr-transient", ops)
-    state = rs.new_run(
+    state = rs.new_run(authoring="legacy", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -3123,11 +2776,18 @@ def test_review_exit4_resets_gate_candidate_and_push_too(
 def test_gate_seam_required_absent_blocks_without_mock(
     tmp_path: Path, runs_root,
 ) -> None:
-    """F-4 после миграции S4: интеграционный тест шва — РЕАЛЬНЫЙ
-    `gate-check --candidate` (публичный CLI steward#140), не мок.
+    """Шов S4 на РЕАЛЬНОМ `gate-check --candidate` (публичный CLI steward#140).
 
-    Хороший бандл проходит S4 зелёным; бандл без единого frontmatter-узла
-    обязан остановить S4 (GC-COMPLETENESS у CLI), а не пройти насквозь.
+    Проверяются ДВЕ стороны, и вместе они доказывают, что прогон доходит до
+    самого гейта, а не спотыкается об устройство стенда: без required-узла
+    отказ называет ИМЕННО его, а с добавленным узлом эта находка исчезает.
+    Одна сторона такого не доказывает — красный бывает и от сломанной
+    фикстуры.
+
+    Профиль СВОЙ, не общий `mini.yaml` (S13): волновой режим требует, чтобы
+    состав бандла был префиксом DAG по уровням, а `mini.yaml` объявляет
+    неполный DAG — без узла уровня 0. Менять общий фикстур-профиль ради
+    одного теста нельзя: им пользуются другие модули.
     """
     from governance.ops import DEVTOOLS_ROOT, RealOps
 
@@ -3143,61 +2803,105 @@ def test_gate_seam_required_absent_blocks_without_mock(
                 target_dir, bundle_dir, profile
             )
 
-    def _run_to_gate(run_id: str, build_bundle) -> rs.RunState:
+    charter_text = (
+        "---\nspec_stage: charter\nstatus: draft\nowner_role: analysts\n"
+        "---\n\n#### CON-01: ограничение\n"
+    )
+
+    def _run_to_gate(run_id: str, *, with_charter: bool) -> rs.RunState:
         target_dir = tmp_path / run_id
         target_dir.mkdir()
-        make_profile(target_dir)
-        build_bundle(target_dir)
+        prof_dir = target_dir / "profiles"
+        prof_dir.mkdir()
+        # Свой минимальный профиль: корректный волновой DAG уровней 0..2,
+        # роли — из фикстурного каталога (`analysts`), а не из каталога репо.
+        (prof_dir / "roles.yaml").write_text(
+            "version: 1\nslug_pattern: \"^[a-z][a-z-]*$\"\n"
+            "roles:\n  - {slug: analysts, display: Analysts}\n",
+            encoding="utf-8",
+        )
+        (prof_dir / "gate-catalog.yaml").write_text(
+            (Path(__file__).parents[1] / "profiles" / "gate-catalog.yaml")
+            .read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (prof_dir / "seam.yaml").write_text(
+            "profile: seam\nsolo_auto_approve: true\nartifacts:\n"
+            "  - {id: charter, template: charter.md, owner_role: analysts}\n"
+            "  - id: requirements\n    template: requirements.md\n"
+            "    owner_role: analysts\n    upstream: [charter]\n"
+            "  - id: behaviour-spec\n    template: behaviour-spec.md\n"
+            "    owner_role: analysts\n    upstream: [requirements]\n",
+            encoding="utf-8",
+        )
+        make_bundle(target_dir, behaviour_ok=True)
+        if with_charter:
+            (target_dir / "spec" / "00-charter.md").write_text(
+                charter_text, encoding="utf-8"
+            )
         state = rs.new_run(
             subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
             target_dir=str(target_dir), bundle_dir="spec",
-            profile="profiles/mini.yaml", run_id=run_id,
+            profile="profiles/seam.yaml", run_id=run_id, authoring="waves",
         )
-        state.branch = "spec/WS-1-behaviour"
+        state.wave = 3
+        state.branch = "spec/WS-1-behaviour-w3"
         state.ops = {
-            "branch": {"status": "completed"},
+            "branch-3": {"status": "completed"},
             "author-charter": {"status": "completed", "skipped": True},
             "author-requirements": {"status": "completed", "skipped": True},
             "author-behaviour": {"status": "completed", "skipped": True},
-            # mini.yaml (fixture-профиль этого теста) не несёт узлы design/
-            # acceptance/decomposition — все три шага обязаны быть
-            # завершены-пропущены явно в фикстуре: этот тест конструирует
-            # state вручную и зовёт advance() напрямую (минуя
-            # _step_authoring целиком), а не через start(), поэтому
-            # preflight design/acceptance/decomposition-узлов (Task 8 +
-            # Task 5, `governance.policy_sources.target_profile_declares`)
-            # сюда вовсе не попадает — вызывать его нечем без реального
-            # profiles/mini.yaml-файла в target_dir. Цель теста — S4
-            # (реальный `gate-check --candidate`), не S2/preflight; когда бы
-            # шаг остался НЕзавершённым, `_step_authoring` либо авторил бы
-            # узел (до фикс-раунда), либо теперь стопил бы
-            # `stopped_preflight` (после) — оба исхода мимо сценария этого
-            # теста, поэтому все три шага пропущены явно.
+            # Профиль `seam.yaml` узлов ниже не объявляет; preflight
+            # (Task 8) читает ФАКТИЧЕСКИЙ файл профиля и остановил бы
+            # прогон `stopped_preflight` раньше гейта. Шаги помечены
+            # завершёнными явно — предмет теста S4, не S2.
             "author-design": {"status": "completed", "skipped": True},
             "author-acceptance": {"status": "completed", "skipped": True},
             "author-decomposition": {"status": "completed", "skipped": True},
-            "commit": {"status": "completed"},
+            "commit-3": {"status": "completed"},
         }
         rs.save(state)
-        return runner.advance(state, CliGateOps())
+        ops = CliGateOps()
+        # Предшественники одобрены в base: предмет — гейт, а не каскад
+        # переодобрения уровней.
+        ops.base_files = {
+            "spec/00-charter.md": _approved("charter"),
+            "spec/10-requirements.md": _approved("requirements"),
+        }
+        return runner.advance(state, ops), ops
 
-    good_result = _run_to_gate(
-        "r-gate-good-seam", lambda d: make_bundle(d, behaviour_ok=True),
+    absent, absent_ops = _run_to_gate("r-gate-seam-absent", with_charter=False)
+    absent_text = (
+        rs.run_dir("r-gate-seam-absent") / "gate-findings.txt"
+    ).read_text(encoding="utf-8")
+
+    assert ("gate_check_candidate", "spec") in absent_ops.calls, (
+        "прогон обязан ДОЙТИ до реального гейта, а не встать раньше"
     )
-    assert good_result.status != "stopped_gate"
-    assert good_result.ops["gate-candidate"]["status"] == "completed"
+    assert "gate-check[candidate]" in absent_text, (
+        "находки обязаны быть выводом РЕАЛЬНОГО CLI, а не проспективного "
+        "гарда обвязки: " + absent_text
+    )
+    assert absent.status == "stopped_gate"
+    assert "GC-COMPLETENESS" in absent_text and "charter" in absent_text, (
+        "отказ обязан назвать ИМЕННО отсутствующий required-узел: "
+        + absent_text
+    )
 
-    def _no_frontmatter(target_dir: Path) -> None:
-        bundle = target_dir / "spec"
-        bundle.mkdir()
-        (bundle / "notes.md").write_text("без frontmatter\n", encoding="utf-8")
+    present, present_ops = _run_to_gate("r-gate-seam-present", with_charter=True)
+    present_file = rs.run_dir("r-gate-seam-present") / "gate-findings.txt"
+    present_text = (
+        present_file.read_text(encoding="utf-8") if present_file.exists() else ""
+    )
 
-    red_result = _run_to_gate("r-gate-empty-seam", _no_frontmatter)
-
-    assert red_result.status == "stopped_gate"
-    findings_file = rs.run_dir("r-gate-empty-seam") / "gate-findings.txt"
-    assert findings_file.exists()
-    assert "GC-COMPLETENESS" in findings_file.read_text(encoding="utf-8")
+    assert ("gate_check_candidate", "spec") in present_ops.calls
+    assert "GC-COMPLETENESS" not in present_text, (
+        "узел добавлен — находка про его отсутствие обязана исчезнуть: "
+        + present_text
+    )
+    # Прочие находки бандла-фикстуры (пины рёбер) тут не предмет: вторая
+    # сторона доказывает, что исчезла ИМЕННО та находка, не что гейт стал
+    # зелёным. Зелёного от этой фикстуры и не ждём.
 
 
 # --- M-2: s8-findings.txt несёт вывод gate-check, не только код -------------
@@ -3524,7 +3228,7 @@ def test_resume_completes_when_gate_authoritative_done_but_status_stuck_running(
     ops = FakeOps()
     run_id = "r-s8-stuck-ok"
     kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -3558,7 +3262,7 @@ def test_resume_completes_fail_path_when_status_stuck_running_after_gate_fail(
     ops = FakeOps()
     run_id = "r-s8-stuck-fail"
     kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -3601,7 +3305,7 @@ def test_sync_default_always_rechecked_even_if_already_completed(
     ops = FakeOps(s8_exit=0)
     run_id = "r-s8-resync"
     kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -3639,7 +3343,7 @@ def test_resume_rebuilds_missing_s8_findings_from_op_output(
     ops = FakeOps()
     run_id = "r-s8-findings-missing"
     kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject=kwargs["subject"], repo=kwargs["repo"],
         repo_slug=kwargs["repo_slug"], ws_id=kwargs["ws_id"],
         target_dir=kwargs["target_dir"], bundle_dir=kwargs["bundle_dir"],
@@ -3750,32 +3454,6 @@ def test_wave_pause_saves_status_before_commenting(
         f"на диске в момент комментария было {seen[0]!r} — статус "
         "зафиксирован ПОСЛЕ best-effort комментария"
     )
-
-
-def test_resume_from_stopped_review_does_not_repost_comment_when_fixed(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """Круг 10: resume из уже сохранённого `stopped_review`, когда причина
-    устранена (review теперь проходит) — второго комментария нет.
-    Комментарий — часть самого стоп-пути (`_stop_with_comment` в
-    `_step_review`), не безусловный побочный эффект `resume()` — он
-    срабатывает, только если review реально проваливается СНОВА."""
-    ops = FakeOps(review_exit=1)
-    run_id = "r-comment-no-repost"
-
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-    assert state.status == "stopped_review"
-    assert len(ops.comments) == 1
-
-    ops.review_exit = 0  # находки устранены
-    result = runner.resume(run_id, ops)
-
-    # Пайплайн продолжается дальше и мог легитимно оставить свой комментарий
-    # (например S7 human/refuse без мока безопасности) — важно, что комментарий
-    # ИМЕННО про этот стоп на review не задублирован.
-    assert result.status != "stopped_review"
-    review_stop_comments = [c for c in ops.comments if "ревью нашло находки" in c]
-    assert len(review_stop_comments) == 1
 
 
 # --- B2 Task 1: follow-ups приёмки B1 ---------------------------------------
@@ -4256,7 +3934,7 @@ def test_disp_backend_author_disp_failure_stops_author(
 
 def test_new_run_rejects_unknown_author_backend() -> None:
     with pytest.raises(ValueError):
-        rs.new_run(
+        rs.new_run(authoring="waves", 
             subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
             target_dir="/tmp/x", bundle_dir="spec",
             profile="profiles/team-exp.yaml", run_id="r-bad-backend",
@@ -4430,31 +4108,6 @@ def test_rollup_red_blocked_still_refuses(
 
     assert state.status == "stopped_merge_refused"
     assert ops.merged == []
-
-
-def test_resume_merge_refused_after_human_merge_runs_s8(
-    tmp_path: Path, runs_root, monkeypatch,
-) -> None:
-    """Reconciliation refuse→merged (боевой прогон kapelle#51): человек
-    смержил отказанный PR — resume фиксирует мерж и гонит S8."""
-    facts = {
-        **GREEN_PR_FACTS,
-        "statusCheckRollup": [{"conclusion": "FAILURE"}],
-        "mergeStateStatus": "BLOCKED",
-    }
-    ops = FakeOps(
-        review_exit=0, facts=facts, files=GREEN_BUNDLE_FILES, s8_exit=0,
-    )
-    run_id = "r-refused-merged"
-    state = runner.start(**_start_kwargs(tmp_path, run_id, ops, authoring="legacy"))
-    assert state.status == "stopped_merge_refused"
-
-    ops.facts = {**ops.facts, "state": "MERGED"}
-    result = runner.resume(run_id, ops)
-
-    assert result.ops["merge"] == {"status": "completed", "merged": True}
-    assert result.ops["gate-authoritative"]["status"] == "completed"
-    assert result.status == "completed"
 
 
 def test_gate_unpinned_draft_edge_stops_locally(
@@ -4881,21 +4534,25 @@ def test_gate_stops_when_design_node_missing_from_bundle(
     (bundle_dir / "15-behaviour-spec.md").write_text(
         _DEFAULT_BEHAVIOUR_BODY, encoding="utf-8"
     )
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
         target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
         profile="profiles/team-exp.yaml", run_id=run_id,
     )
-    state.branch = "spec/WS-1-behaviour"
+    state.wave = 5
+    state.branch = f"spec/WS-1-behaviour-w5"
     state.ops = {
-        "branch": {"status": "completed"},
+        "branch-5": {"status": "completed"},
         "author-charter": {"status": "completed", "skipped": True},
         "author-requirements": {"status": "completed", "skipped": True},
         "author-behaviour": {"status": "completed", "skipped": True},
         # design намеренно НЕ авторен и не пропущен — файла нет вовсе.
         "author-design": {"status": "completed", "skipped": True},
-        "commit": {"status": "completed"},
+        "commit-5": {"status": "completed"},
     }
+    # base несёт approved-узлы: предмет — ОТСУТСТВИЕ файла в
+    # рабочем дереве волны, а не stale-уровень в базе.
+    ops.base_files = _all_approved()
     rs.save(state)
 
     result = runner.advance(state, ops)
@@ -5793,22 +5450,34 @@ def test_gate_stops_when_decomposition_missing_from_bundle(
         "Открытых архитектурных вопросов нет (входной набор пуст)\n",
         encoding="utf-8",
     )
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
         target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
         profile="profiles/team-exp.yaml", run_id=run_id,
     )
-    state.branch = "spec/WS-1-behaviour"
+    state.wave = 5
+    state.branch = f"spec/WS-1-behaviour-w5"
     state.ops = {
-        "branch": {"status": "completed"},
+        "branch-5": {"status": "completed"},
         "author-charter": {"status": "completed", "skipped": True},
         "author-requirements": {"status": "completed", "skipped": True},
         "author-behaviour": {"status": "completed", "skipped": True},
         "author-design": {"status": "completed", "skipped": True},
         # decomposition намеренно НЕ авторен и не пропущен — файла нет вовсе.
         "author-decomposition": {"status": "completed", "skipped": True},
-        "commit": {"status": "completed"},
+        "commit-5": {"status": "completed"},
     }
+    # В волнах required — узлы уровней ≤ wave−1, и acceptance (уровень 3)
+    # обязан присутствовать: иначе гард назовёт ЕГО, а не decomposition, и
+    # тест проверял бы не свой предмет. Прежний путь гейтил весь бандл
+    # одним проходом и до acceptance в этой фикстуре просто не доходил.
+    (bundle_dir / "25-acceptance.md").write_text(
+        _acceptance_body(_DEFAULT_REQUIREMENTS_BODY, req_pin, beh_pin),
+        encoding="utf-8",
+    )
+    # base несёт approved-узлы: предмет — ОТСУТСТВИЕ файла в
+    # рабочем дереве волны, а не stale-уровень в базе.
+    ops.base_files = _all_approved()
     rs.save(state)
 
     result = runner.advance(state, ops)
@@ -6243,14 +5912,15 @@ def test_gate_stops_when_acceptance_missing_from_bundle(
         "Открытых архитектурных вопросов нет (входной набор пуст)\n",
         encoding="utf-8",
     )
-    state = rs.new_run(
+    state = rs.new_run(authoring="waves", 
         subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
         target_dir=str(target_dir), bundle_dir=BUNDLE_DIR,
         profile="profiles/team-exp.yaml", run_id=run_id,
     )
-    state.branch = "spec/WS-1-behaviour"
+    state.wave = 5
+    state.branch = f"spec/WS-1-behaviour-w5"
     state.ops = {
-        "branch": {"status": "completed"},
+        "branch-5": {"status": "completed"},
         "author-charter": {"status": "completed", "skipped": True},
         "author-requirements": {"status": "completed", "skipped": True},
         "author-behaviour": {"status": "completed", "skipped": True},
@@ -6258,8 +5928,11 @@ def test_gate_stops_when_acceptance_missing_from_bundle(
         # acceptance намеренно НЕ авторен и не пропущен — файла нет вовсе.
         "author-acceptance": {"status": "completed", "skipped": True},
         "author-decomposition": {"status": "completed", "skipped": True},
-        "commit": {"status": "completed"},
+        "commit-5": {"status": "completed"},
     }
+    # base несёт approved-узлы: предмет — ОТСУТСТВИЕ файла в
+    # рабочем дереве волны, а не stale-уровень в базе.
+    ops.base_files = _all_approved()
     rs.save(state)
 
     result = runner.advance(state, ops)
@@ -7640,7 +7313,7 @@ def test_waves_projection_mismatch_stops_gate(tmp_path: Path, runs_root, monkeyp
 
 
 def test_legacy_reset_table_is_unchanged_by_waves(tmp_path: Path, runs_root) -> None:
-    state = rs.new_run(
+    state = rs.new_run(authoring=_LEGACY_HISTORY, 
         subject="s", repo="r", repo_slug="o/r", ws_id="WS", target_dir=str(tmp_path),
         bundle_dir="spec", profile="profiles/team-exp.yaml", run_id="r-legacy",
     )
@@ -7905,7 +7578,7 @@ def test_legacy_run_deletes_nothing_on_completion(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=0,
     )
-    state = rs.new_run(
+    state = rs.new_run(authoring=_LEGACY_HISTORY, 
         subject="brief", repo="alpha", repo_slug="owner/alpha", ws_id="WS-2",
         target_dir=str(tmp_path / "target"), bundle_dir=BUNDLE_DIR,
         profile="profiles/team-exp.yaml", run_id="r-legacy-cleanup",
@@ -8184,3 +7857,127 @@ def test_reopen_refuses_legacy_runs_and_finished_waves(
     )
     with pytest.raises(ValueError, match="authoring=waves"):
         runner.reopen("r-legacy-reopen", "charter", ops)
+
+
+# --- S13: resume прежнего пути авторинга отказывает (спека §4, D3) --------
+
+
+def _saved_legacy_run(run_id: str, status: str = "stopped_review") -> rs.RunState:
+    """Сохранённый леджер прежнего пути — без исполнения конвейера.
+
+    Тесты стража намеренно НЕ зовут `runner.start()`: предмет проверки —
+    сам факт отказа на загруженном леджере, а не то, как он туда попал.
+    Исторические прогоны в `out/governance-runs` выглядят именно так —
+    `run.json`, оставшийся от сессии, которой больше нет.
+    """
+    state = rs.new_run(
+        subject="тест", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
+        target_dir="/nonexistent/alpha", bundle_dir=BUNDLE_DIR,
+        profile="profiles/team-exp.yaml", run_id=run_id,
+    )
+    assert state.authoring == "legacy"
+    state.status = status
+    state.branch = "spec/WS-1-behaviour"
+    state.pr = 42
+    rs.save(state)
+    return state
+
+
+def test_resume_of_a_legacy_run_refuses_with_a_named_reason(runs_root) -> None:
+    """D3: отказ называет ЧТО удалено, КОГДА, ЧЬИМ решением и что делать.
+
+    Без этих четырёх фактов сообщение неотличимо от поломки: оператор
+    исторического прогона не может понять, чинить ли ему окружение.
+    """
+    _saved_legacy_run("r-s13-refuse")
+    ops = FakeOps()
+
+    with pytest.raises(ValueError) as exc:
+        runner.resume("r-s13-refuse", ops)
+
+    message = str(exc.value)
+    assert "r-s13-refuse" in message
+    assert "2026-09-23" in message, "дата решения"
+    assert "S13" in message, "пункт спеки"
+    assert "waves" in message, "что делать вместо"
+    assert ops.calls == [], "ни одного обращения к git/фордже"
+
+
+def test_resume_of_a_verification_child_refuses_without_rewriting_its_mode(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """D3, решение владельца 2026-09-23: поведение verification-потомка
+    определено РЕШЕНИЕМ, а не следствием.
+
+    `verify()` строит потомка через `new_run` без `authoring`, и тот
+    наследует умолчание — значит попадает под общий отказ. Три вещи
+    утверждаются здесь явно, потому что каждая ломается молча:
+
+    - отказ происходит и до него нет побочных эффектов;
+    - `authoring` потомку НЕ переписывается ради прохода через гвард —
+      это переписало бы происхождение прогона, ровно та
+      переинтерпретация прошлого, которую запрещает D2;
+    - родитель остаётся `merged_unverified`, то есть WS-lock продолжает
+      держать соседей.
+
+    Восстановление верификации — devtools#384, за границей этой поставки.
+    """
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
+        s8_exit=1,
+    )
+    parent_id = "r-verify-parent"
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="master")
+    runner._step_s8(parent, ops)
+    assert parent.status == "merged_unverified"
+
+    # Потомок встаёт НЕтерминально (синхронизация не удалась) — именно в
+    # этом состоянии оператору и предлагают `resume` (сообщение
+    # `verify уже идёт: … (resume или дождитесь)`), поэтому отказ здесь не
+    # умозрителен.
+    ops.s8_exit = 0
+    ops.checkout_and_pull_error = "ff-only diverged"
+    child = runner.verify(parent_id, ops, "r-verify-child")
+    assert child.status not in ("completed", "merged_unverified"), child.status
+    assert child.remediated_by == parent_id
+    assert child.authoring == "legacy", (
+        "потомок наследует умолчание — это факт, от которого отказ и "
+        "происходит; тест обязан упасть, если умолчание изменят молча"
+    )
+
+    ledger = rs.run_dir("r-verify-child") / "run.json"
+    before = ledger.read_bytes()
+    calls_before = len(ops.calls)
+
+    with pytest.raises(ValueError) as exc:
+        runner.resume("r-verify-child", ops)
+
+    assert "2026-09-23" in str(exc.value) and "S13" in str(exc.value)
+    assert ledger.read_bytes() == before, "отказ обязан быть бесследным"
+    assert ops.calls[calls_before:] == [], "ни одного обращения к фордже/git"
+    assert rs.load("r-verify-child").authoring == "legacy", (
+        "режим потомку НЕ переписывается ради прохода через гвард (D2)"
+    )
+    assert rs.load(parent_id).status == "merged_unverified", (
+        "родитель остаётся терминальным — WS-lock держит соседей как прежде"
+    )
+
+
+def test_resume_refusal_of_a_legacy_run_leaves_the_ledger_byte_identical(
+    runs_root,
+) -> None:
+    """D3, отдельным тестом от предыдущего: «отказал» и «отказал бесследно»
+    — разные свойства, и второе ломается молча (§I5 проверяет его так же —
+    байтами, не прозой)."""
+    _saved_legacy_run("r-s13-traceless")
+    ledger = rs.run_dir("r-s13-traceless") / "run.json"
+    before = ledger.read_bytes()
+    listing_before = sorted(p.name for p in rs.run_dir("r-s13-traceless").iterdir())
+
+    with pytest.raises(ValueError):
+        runner.resume("r-s13-traceless", FakeOps())
+
+    assert ledger.read_bytes() == before
+    assert sorted(p.name for p in rs.run_dir("r-s13-traceless").iterdir()) == (
+        listing_before
+    ), "отказ не создал ни файла находок, ни артефакта"

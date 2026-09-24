@@ -670,6 +670,42 @@ def _reset_stopped_author(state: RunState) -> None:
         state.ops.pop(key, None)
 
 
+_LEGACY_REMOVED_ON = "2026-09-23"
+
+
+def _refuse_legacy_resume(state: RunState) -> None:
+    """S13: `resume` не исполняет прежний путь авторинга (спека §4, D3).
+
+    Отказ обязан быть БЕСследным — ни записи леджера, ни обращения к git,
+    ни evidence, — поэтому зовётся сразу после `load()`, прежде любой
+    реконсиляции и сброса op'ов. Соседний `merged_unverified` стоит выше
+    намеренно: он тоже бесследен (D3 требует отсутствия эффектов, а не
+    первой строки), но диагноз у него точнее и лечение — `verify(...)` —
+    работает и сегодня; спрятав его за этим отказом, мы отправляли бы
+    оператора единственного живого `merged_unverified`-прогона не туда.
+
+    Чтение истории не задето: `load`, `status`, консоль и WS-lock читают
+    такие леджеры как прежде (D2) — удаление пути не меняет прошлого.
+
+    Следствие, которое стоит знать: verification-потомок (`verify()`)
+    наследует `authoring="legacy"` от умолчания `new_run`, поэтому его
+    resume тоже отказывает. Регрессией это не является — сегодня такой
+    resume не делает S8, а заводит потомка в шаговый цикл с S1; штатный
+    путь повтора верификации был и остаётся `verify(...)`.
+    """
+    if state.authoring == "waves":
+        return
+    raise ValueError(
+        f"run {state.run_id!r}: authoring={state.authoring!r} — прежний путь "
+        f"авторинга удалён из исполнения (решение владельца "
+        f"{_LEGACY_REMOVED_ON}, S13 спеки sequential-node-approval), resume "
+        "его не ведёт. Леджер остаётся читаемым: status/консоль/WS-lock "
+        "работают как прежде; merged_unverified лечится verify(...). Новая "
+        "работа — волновым прогоном (authoring=waves, дефолт с "
+        f"{_LEGACY_REMOVED_ON})."
+    )
+
+
 def resume(run_id: str, ops: Ops) -> RunState:
     """Явный подхват сохранённого run'а (спека §5).
 
@@ -722,6 +758,7 @@ def resume(run_id: str, ops: Ops) -> RunState:
             f"run {run_id!r} — merged_unverified навсегда; создайте "
             "verification-run через verify(...)"
         )
+    _refuse_legacy_resume(state)
     if _waves(state) and state.status != "completed":
         resumed = _resume_wave(state, ops)
         if resumed is not None:
