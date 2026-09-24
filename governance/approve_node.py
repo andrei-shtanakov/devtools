@@ -1969,11 +1969,20 @@ def _ensure_finalize_identity(
         return
     pr = op.get("finalize_pr")
     if pr is None:
-        branch = ab.finalize_branch(
-            op["ws_id"], op["wave"], op["step"], op["attempt"]
-        )
+        # Имя ветки берётся из САМОЙ заявки (`finalize_branch`), а не
+        # собирается заново: `ws_id`/`step`/`attempt` в op есть, но
+        # `ws_id` там НЕ лежит — ревью #393, круг 2, поймало KeyError.
+        # Второе вычисление имени было бы и лишним, и расходящимся.
+        branch = op.get("finalize_branch")
+        if not branch:
+            raise _unresolved(
+                f"заявка {key} не несёт ни finalize_pr, ни finalize_branch — "
+                "идентичность результата восстановить не из чего"
+            )
         try:
-            pr = ops.find_pr(state.repo_slug, branch)
+            # `any_state=True` обязателен: искомый finalize УЖЕ вмержен,
+            # а поиск по умолчанию видит только открытые PR (ревью #393).
+            pr = ops.find_pr(state.repo_slug, branch, any_state=True)
         except RuntimeError as exc:
             raise _unresolved(
                 f"поиск finalize-PR заявки {key} по ветке {branch}: {exc}"
