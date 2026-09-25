@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import IO
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 HERE = Path(__file__).resolve().parent
 REPO = "andrei-shtanakov/prograph-vault"
@@ -53,6 +54,7 @@ TITLE = "R16: утверждения KB требуют разбора"
 TRIAGE_DAYS = 7
 SCHEMA_VERSION = 1
 CHECK_ID = "r16-kb-freshness"
+CYCLE_TZ = "Asia/Tbilisi"  # fixed by the owner 2026-09-25 — not an env setting
 CYCLE_WEEKDAY = 1  # Tuesday (Monday is 0)
 CYCLE_START = time(9, 30)
 MAX_ATTEMPTS = 3
@@ -144,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         cfg = resolve_config(vars(args), os.environ)
+        zone = cycle_zone()
     except ConfigError as exc:
         print(f"r16: {exc}", file=sys.stderr)
         return 2
@@ -155,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         except BlockingIOError:
             print("another run holds the lock")
             return 0
-        return run_cycle(cfg, datetime.now().replace(microsecond=0), args.dry_run)
+        return run_cycle(cfg, datetime.now(zone).replace(microsecond=0), args.dry_run)
 
 
 def resolve_config(cli: Mapping[str, object], env: Mapping[str, str]) -> Config:
@@ -212,7 +215,8 @@ def run_cycle(cfg: Config, now: datetime, dry_run: bool) -> int:
         delivery = Delivery("dry-run")
     else:
         delivery = deliver(cfg, found, now.date(), last_issue(cfg.receipts))
-    record = receipt(audit, found, delivery, now.isoformat())
+    finished = datetime.now(now.tzinfo).replace(microsecond=0)
+    record = receipt(audit, found, delivery, now.isoformat(), finished.isoformat())
     attempt = (existing or {}).get("attempt", 0) + 1
     record |= {"cycle_id": cid, "attempt": attempt, "producer": producer(cfg)}
     print(json.dumps(record, ensure_ascii=False))
@@ -222,10 +226,28 @@ def run_cycle(cfg: Config, now: datetime, dry_run: bool) -> int:
     return 0 if record["ok"] else 1
 
 
+def cycle_zone() -> ZoneInfo:
+    """The cycle's zone; a host without tzdata is a configuration error."""
+    try:
+        return ZoneInfo(CYCLE_TZ)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ConfigError(
+            f"зона цикла {CYCLE_TZ} не найдена — поставьте tzdata"
+        ) from exc
+
+
 def cycle_start(now: datetime) -> datetime:
-    """Start of the cycle `now` falls in: the latest Tuesday 09:30 not after it."""
+    """Start of the cycle `now` falls in: the latest Tuesday 09:30 Tbilisi not after it.
+
+    A naive `now` is refused: on a UTC host it would silently shift Tuesday.
+    """
+    if now.tzinfo is None:
+        raise ValueError("cycle_start needs an aware datetime")
+    now = now.astimezone(cycle_zone())
     days = (now.weekday() - CYCLE_WEEKDAY) % 7
-    start = datetime.combine(now.date() - timedelta(days=days), CYCLE_START)
+    start = datetime.combine(
+        now.date() - timedelta(days=days), CYCLE_START, tzinfo=now.tzinfo
+    )
     return start if start <= now else start - timedelta(days=7)
 
 
@@ -530,7 +552,9 @@ def issue_body(found: Problems, first: date, today: date) -> str:
     return "\n".join(parts) + "\n"
 
 
-def receipt(audit: Audit, found: Problems, delivery: Delivery, run_at: str) -> dict:
+def receipt(
+    audit: Audit, found: Problems, delivery: Delivery, run_at: str, finished_at: str
+) -> dict:
     """The record every attempt leaves behind (cycle fields are added by the caller)."""
     completed = audit.completed
     delivered = delivery.action not in ("failed", "skipped")
@@ -543,7 +567,7 @@ def receipt(audit: Audit, found: Problems, delivery: Delivery, run_at: str) -> d
         "schema_version": SCHEMA_VERSION,
         "check_id": CHECK_ID,
         "started_at": run_at,
-        "finished_at": datetime.now().replace(microsecond=0).isoformat(),
+        "finished_at": finished_at,
         "target": "published",
         "execution": "completed" if completed else "failed",
         "revisions": {r["repo"]: r["sha"] or r["error"] for r in audit.revisions},

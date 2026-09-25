@@ -6,12 +6,16 @@ Run: uv run --frozen pytest tests/test_r16_runner.py
 import fcntl
 import json
 import os
-from datetime import date, datetime
+import time
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
+from zoneinfo import ZoneInfo
 
 import r16_runner as run
+
+TBILISI = ZoneInfo("Asia/Tbilisi")
 
 ENV_NAMES = {
     "workspace": "R16_WORKSPACE",
@@ -166,7 +170,7 @@ def test_receipt_separates_run_problems_and_delivery() -> None:
         lines(verdict("changed"), revision(), summary(unchanged=0, changed=1))
     )
     delivery = run.Delivery("updated", 42, None)
-    receipt = run.receipt(audit, run.problems(audit), delivery, "2026-09-29T09:30:00")
+    receipt = run.receipt(audit, run.problems(audit), delivery, "2026-09-29T09:30:00", "2026-09-29T09:31:00+04:00")
     assert receipt["delivery"]["issue_url"].endswith("/issues/42")
     assert receipt["coverage"] == {
         "notes": 10,
@@ -183,13 +187,15 @@ def test_receipt_separates_run_problems_and_delivery() -> None:
 def test_failed_delivery_makes_the_receipt_not_ok() -> None:
     audit = run.parse_audit(lines(verdict("changed"), summary(changed=1)))
     delivery = run.Delivery("failed", None, "gh: HTTP 502")
-    receipt = run.receipt(audit, run.problems(audit), delivery, "t")
+    receipt = run.receipt(audit, run.problems(audit), delivery, "t", "t")
     assert (receipt["execution"], receipt["ok"]) == ("completed", False)
 
 
 def test_failed_run_makes_the_receipt_not_ok() -> None:
     audit = run.parse_audit("boom\n")
-    receipt = run.receipt(audit, run.problems(audit), run.Delivery("skipped"), "t")
+    receipt = run.receipt(
+        audit, run.problems(audit), run.Delivery("skipped"), "t", "t"
+    )
     assert (receipt["execution"], receipt["ok"]) == ("failed", False)
 
 
@@ -212,10 +218,10 @@ def test_no_receipts_no_known_issue(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("now", "start"),
     [
-        (datetime(2026, 9, 22, 9, 30), datetime(2026, 9, 22, 9, 30)),  # on the dot
-        (datetime(2026, 9, 22, 9, 29), datetime(2026, 9, 15, 9, 30)),  # just before
-        (datetime(2026, 9, 23, 17, 0), datetime(2026, 9, 22, 9, 30)),  # Wednesday
-        (datetime(2026, 9, 28, 23, 0), datetime(2026, 9, 22, 9, 30)),  # Monday
+        (datetime(2026, 9, 22, 9, 30, tzinfo=TBILISI), datetime(2026, 9, 22, 9, 30, tzinfo=TBILISI)),  # on the dot
+        (datetime(2026, 9, 22, 9, 29, tzinfo=TBILISI), datetime(2026, 9, 15, 9, 30, tzinfo=TBILISI)),  # just before
+        (datetime(2026, 9, 23, 17, 0, tzinfo=TBILISI), datetime(2026, 9, 22, 9, 30, tzinfo=TBILISI)),  # Wednesday
+        (datetime(2026, 9, 28, 23, 0, tzinfo=TBILISI), datetime(2026, 9, 22, 9, 30, tzinfo=TBILISI)),  # Monday
     ],
 )
 def test_cycle_starts_on_tuesday_morning(now: datetime, start: datetime) -> None:
@@ -266,7 +272,7 @@ def test_run_cycle_marks_missed_cycles_and_caps_attempts(
     )
     broken = run.parse_audit("boom\n")
     monkeypatch.setattr(run, "run_audit", lambda _cfg: broken)
-    now = datetime(2026, 9, 23, 17, 0)
+    now = datetime(2026, 9, 23, 17, 0, tzinfo=TBILISI)
 
     codes = [run.run_cycle(cfg, now, dry_run=False) for _ in range(4)]
 
@@ -381,3 +387,80 @@ def test_concurrent_run_writes_nothing(
         fcntl.flock(held, fcntl.LOCK_EX)
         assert run.main(argv_for(values)) == 0
     assert {p.name: p.stat().st_mtime_ns for p in receipts.iterdir()} == before
+
+
+# --- cycle zone (spec §1.2 п.2) -------------------------------------------------
+
+
+@pytest.fixture
+def utc_system(monkeypatch: pytest.MonkeyPatch):
+    """The VPS case: process zone is UTC."""
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+@pytest.mark.parametrize(
+    ("utc", "start"),
+    [
+        (datetime(2026, 9, 22, 5, 30, tzinfo=timezone.utc), "2026-09-22T09:30:00+04:00"),
+        (datetime(2026, 9, 22, 5, 29, tzinfo=timezone.utc), "2026-09-15T09:30:00+04:00"),
+    ],
+)
+def test_cycle_is_tbilisi_under_utc_system_zone(
+    utc_system: None, utc: datetime, start: str
+) -> None:
+    assert run.cycle_start(utc).isoformat() == start
+
+
+def test_naive_now_is_refused() -> None:
+    with pytest.raises(ValueError, match="aware"):
+        run.cycle_start(datetime(2026, 9, 22, 9, 30))
+
+
+def test_missing_zone_exits_2_before_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = layout(tmp_path)
+    monkeypatch.setattr(run, "CYCLE_TZ", "Nowhere/Nothing")
+    assert run.main(["--dry-run", *argv_for(values)]) == 2
+    assert not (tmp_path / "state" / "r16.lock").exists()
+
+
+def test_receipt_timestamps_carry_the_offset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = cfg_for(tmp_path)
+    clean = json.dumps({"summary": {"unchanged": 1, "with_evidence": 1}})
+    monkeypatch.setattr(run, "producer", lambda _cfg: {"runner": "r", "auditor": "a"})
+    monkeypatch.setattr(run, "deliver", lambda *_: run.Delivery("not-needed"))
+    monkeypatch.setattr(run, "run_audit", lambda _cfg: run.parse_audit(clean))
+    run.run_cycle(cfg, datetime(2026, 9, 23, 17, 0, tzinfo=TBILISI), dry_run=False)
+    record = json.loads((cfg.receipts / "2026-09-22.json").read_text())
+    assert record["started_at"].endswith("+04:00")
+    assert record["finished_at"].endswith("+04:00")
+
+
+def test_legacy_naive_receipt_carries_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A receipt copied from the Mac (no offset) still counts its attempts."""
+    cfg = cfg_for(tmp_path)
+    (cfg.receipts / "2026-09-22.json").write_text(
+        json.dumps(
+            {
+                "cycle_id": "2026-09-22",
+                "attempt": 2,
+                "ok": False,
+                "started_at": "2026-09-22T10:00:00",
+                "execution": "failed",
+            }
+        )
+    )
+    monkeypatch.setattr(run, "producer", lambda _cfg: {"runner": "r", "auditor": "a"})
+    monkeypatch.setattr(run, "run_audit", lambda _cfg: run.parse_audit("boom\n"))
+    run.run_cycle(cfg, datetime(2026, 9, 23, 17, 0, tzinfo=TBILISI), dry_run=False)
+    record = json.loads((cfg.receipts / "2026-09-22.json").read_text())
+    assert record["attempt"] == 3
