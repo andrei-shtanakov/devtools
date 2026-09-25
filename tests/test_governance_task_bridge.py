@@ -1232,8 +1232,12 @@ def _stamped_tasks(
     extra: list[str] | None = None,
     pin: str | None = None,
     status: str = "approved",
+    with_profile: bool = True,
 ) -> None:
     """tasks-спека в форме, которую пишет `spec approve tasks --profile`.
+
+    `with_profile` — рядом лежит эталон stage-профиля, как после доставки
+    с devtools#386; без него — спека, доставленная до #386.
 
     spec-runner сохраняет существующий `traces_to` первым и дописывает
     найденные в узле id; пин — git blob ТЕКУЩИХ байтов узла (живой замер
@@ -1254,6 +1258,15 @@ def _stamped_tasks(
         "---\n\n## Milestone 1: s\n",
         encoding="utf-8",
     )
+    if with_profile:
+        legacy = {"15-behaviour-spec.md": 3, "20-design.md": 4}.get(
+            anchor_filename
+        )
+        rel, text = task_bridge.stage_profile(
+            "WS-alpha-7", "workstreams/WS-alpha-7/spec", legacy
+        )
+        (target / rel).parent.mkdir(parents=True, exist_ok=True)
+        (target / rel).write_text(text, encoding="utf-8")
 
 
 def test_check_approved_accepts_spec_runner_stamp_unchanged(
@@ -1356,8 +1369,36 @@ def test_deliver_approve_opens_pr(tmp_path: Path, monkeypatch) -> None:
     pr = task_bridge.deliver_approve(_approve_state(target, monkeypatch), ops)
     assert pr == 77
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
-    assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
+    assert commit[1] == (
+        "spec/WS-alpha-7-tasks.md", "spec/profiles/workstream.yaml"
+    )
     assert ("push_branch", "spec/WS-alpha-7-tasks-approve") in ops.calls
+    # Тело PR говорит то, что установлено, — не «записал spec-runner».
+    assert "совпадает с текущими байтами узла" in ops.pr_body
+
+
+def test_deliver_approve_lays_missing_profile_and_names_next_step(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Спека доставлена до #386: профиля в репо нет, и `spec approve
+    --profile` запустить нечем. Мост кладёт эталон, отказывает с командой,
+    ветку не заводит; повтор после approve доставляет профиль тем же PR."""
+    target = _target(tmp_path)
+    _stamped_tasks(target, with_profile=False)
+    state = _approve_state(target, monkeypatch)
+    ops = _ApproveOps()
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge.deliver_approve(state, ops)
+    assert task_bridge.approve_command("WS-alpha-7") in str(exc_info.value)
+    assert not ops.calls
+    rel, text = task_bridge.stage_profile(
+        "WS-alpha-7", "workstreams/WS-alpha-7/spec"
+    )
+    assert (target / rel).read_text(encoding="utf-8") == text
+
+    assert task_bridge.deliver_approve(state, ops) == 77
+    commit = next(c for c in ops.calls if c[0] == "commit_paths")
+    assert rel in commit[1]
 
 
 def test_deliver_approve_rerun_updates_existing_pr(

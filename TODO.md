@@ -2579,6 +2579,14 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       4.1.0: approve с профилем → проверка проходит; узел правлен + approve
       без профиля → отказ; тот же узел + approve с профилем → проходит.
 
+- [ ] Нестандартный `--bundle-dir` отказывает на входе прогона, а не на доставке tasks-спеки @owner:github:andrei-shtanakov @id:bundle-dir-layout-refused-at-start @epic:eco.dark-factory
+      Находка ревью PR #396 (minor, high): stage-профиль выражает путь узла
+      только как `workstreams/{ws}/spec`, поэтому `deliver` отказывает иной
+      раскладке — но уже после S0–S8. Сейчас отказ честный и называет
+      выход (перезапуск с раскладкой по умолчанию); в 16 леджерах
+      нестандартных раскладок 0. Правка — проверка в `start` раннера /
+      spec-loop (и в восстановлении `_bundle_dir_from_pr_files`).
+
 - [x] ~~Мост выводит `**Scenarios:**` в verify-задачах (inbox devtools#388, slug: verify-task-scenarios-line; from: spec-runner#402)~~ @owner:github:andrei-shtanakov @id:verify-task-scenarios-line @epic:eco.dark-factory — НЕ ДЕЛАЕТСЯ: #388 закрыт not planned 2026-09-25 по замеру
       Доставлено у соседа PR spec-runner#590 (`4d10e5b`), вошло в 4.1.0.
       Рядом с `**Mode:** verify_first` рендер verify-задачи в

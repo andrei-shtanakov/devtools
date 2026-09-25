@@ -1369,7 +1369,9 @@ def stage_profile(
         raise RuntimeError(
             f"bundle_dir={bundle_dir!r}: stage-профиль spec-runner выражает "
             f"путь узла только как workstreams/{{ws}}/spec, а у этого прогона "
-            "бандл лежит иначе — `spec approve tasks` не нашёл бы узел"
+            "бандл лежит иначе — `spec approve tasks` не нашёл бы узел. "
+            "Tasks-спеку такого прогона мост не доставляет: перезапустите "
+            "прогон с раскладкой по умолчанию (--bundle-dir не задавать)"
         )
     anchor_filename = _dag_for(legacy_bundle)[-1][0]
     anchor = _node_id(anchor_filename)
@@ -1423,15 +1425,22 @@ def check_approved(
     bundle_dir: str,
     legacy_bundle: int | None = None,
 ) -> None:
-    """Штамп владельца на tasks-спеке сделан `spec approve` С профилем.
+    """Штамп владельца на tasks-спеке пинует ТЕКУЩИЕ байты узла.
 
     Проверка, а не нормализация (devtools#386): frontmatter пишет
-    spec-runner, мост его не переписывает. Признаки approve с профилем:
-    `status: approved`, `traces_to` начинается с якоря (spec-runner
-    дописывает к нему найденные в узле id — это его право, не дефект), и
-    `upstream_hashes` ровно `{якорь: blob узла}`. Approve без профиля
-    оставил бы пин доставки, который после правки узла устарел бы молча, —
-    поэтому пин сверяется с текущими байтами узла.
+    spec-runner, мост его не переписывает. Проверяется: `status: approved`,
+    `traces_to` начинается с якоря (spec-runner дописывает к нему найденные
+    в узле id — это его право, не дефект), `upstream_hashes` ровно
+    `{якорь: blob текущих байтов узла}`.
+
+    Чем именно approve сделан, проверка НЕ различает — во frontmatter нет
+    поля, называющего профиль. Различать и не нужно: пин = текущие байты
+    значит, что узел не менялся с момента пина, а `status` узла лежит в
+    тех же байтах. Approve с профилем пинует байты, чей допуск проверил
+    spec-runner; approve без профиля оставляет пин доставки — байты, чью
+    одобренность проверил гейт §I12 при доставке. Правка узла после пина
+    в обоих случаях ловится расхождением, и отказ называет команду с
+    профилем.
 
     Состав бандла проверяется В НАЧАЛЕ — отсутствие файла-анкера
     ловится явным RuntimeError с процедурой, не сырым traceback.
@@ -3972,10 +3981,12 @@ def deliver_approve(
 
     Глобального dirty-гарда здесь НЕТ намеренно: approve-штамп владельца
     живёт в рабочем дереве незакоммиченным — он и есть груз этого PR.
-    commit_paths берёт только tasks-файл.
+    commit_paths берёт только tasks-файл и stage-профиль.
 
     Проверка идёт В НАЧАЛЕ функции, ДО `ops.ensure_branch`: отказ не должен
-    оставлять в target созданную approve-ветку.
+    оставлять в target созданную approve-ветку. Единственный эффект до
+    ветки — эталон профиля у спеки, доставленной до #386 (см. ниже): без
+    него шаг, который называет отказ, выполнить нечем.
 
     Идемпотентность (приёмка PR #117, круги 1–2): при уже открытом PR
     ветки повторный запуск НЕ создаёт второй PR (`gh pr create` упал бы),
@@ -3991,6 +4002,29 @@ def deliver_approve(
     # `--replace-revision`» (§I12, таблица); доставка штампа TASKS-СПЕКИ
     # узлов бандла не судит. Допуск по статусу узла проверяет сам
     # `spec approve` по профилю.
+    # Состав — первым, как у всех путей: иначе забытый/лишний
+    # --legacy-bundle положил бы эталон ЧУЖОГО режима и назвал не ту причину.
+    _check_bundle_composition(
+        target_dir, state.bundle_dir, _dag_for(legacy_bundle)
+    )
+    # Спека, доставленная ДО devtools#386, пришла без профиля — и
+    # `spec approve --profile` в таком репо запустить нечем. Мост кладёт
+    # эталон сам (тот же, что положила бы доставка) и называет следующий
+    # шаг; профиль уезжает этим же approve-PR.
+    profile_rel, profile_text = stage_profile(
+        ws_id, state.bundle_dir, legacy_bundle
+    )
+    _check_stage_profile(target_dir, profile_rel, profile_text)
+    profile_path = Path(target_dir) / profile_rel
+    if not profile_path.exists():
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_path.write_text(profile_text, encoding="utf-8")
+        raise RuntimeError(
+            f"в репо не было {profile_rel} (спека доставлена до "
+            "devtools#386) — эталон положен в рабочее дерево; выполните "
+            f"`{approve_command(ws_id, legacy_bundle)}` и повторите "
+            "--deliver-approve: профиль уедет этим же PR"
+        )
     check_approved(
         target_dir, ws_id, state.bundle_dir, legacy_bundle=legacy_bundle
     )
@@ -3998,9 +4032,11 @@ def deliver_approve(
     existing = ops.find_pr(repo_slug, branch)
     ops.ensure_branch(target_dir, branch)
     rel = f"spec/{ws_id}-tasks.md"
+    # Профиль — в списке всегда: у уже закоммиченного эталона `git add`
+    # ничего не меняет, а положенный миграцией выше уезжает этим PR.
     ops.commit_paths(
         target_dir,
-        [rel],
+        [rel, profile_rel],
         f"spec: {ws_id} tasks — approve-штамп владельца",
     )
     ops.push_branch(target_dir, branch)
@@ -4012,11 +4048,12 @@ def deliver_approve(
         branch,
         f"spec: {ws_id} tasks — approve",
         (
-            f"Approve-штамп владельца для spec/{ws_id}-tasks.md, сделанный "
-            f"`{approve_command(ws_id, legacy_bundle)}`: допуск по статусу "
-            "узла, traces_to и пин upstream_hashes записал spec-runner по "
-            "stage-профилю; мост проверил, что пин совпадает с текущими "
-            "байтами узла, и frontmatter не переписывал."
+            f"Approve-штамп владельца для spec/{ws_id}-tasks.md "
+            f"(штатно — `{approve_command(ws_id, legacy_bundle)}`). Мост "
+            "проверил: status approved, traces_to начинается с "
+            f"{_node_id(_dag_for(legacy_bundle)[-1][0])}, пин upstream_hashes "
+            "совпадает с текущими байтами узла (узел не менялся с момента "
+            "пина). Frontmatter мост не переписывал."
         ),
         "",
     )
