@@ -49,7 +49,7 @@ governance = [
 
 [package.metadata]
 requires-dist = [
-    { name = "plan-fields", git = "https://github.com/andrei-shtanakov/dispatcher?subdirectory=packages%2Fplan-fields&rev=65f03ea9e5964e4488bcd254e491fc42abb1bd96" },
+    { name = "plan-fields", git = "https://github.com/andrei-shtanakov/dispatcher?subdirectory=packages%2Fplan-fields&rev=f7f2cbcbbffc8d83870848317228c0a3487780ec" },
     { name = "pyyaml", specifier = ">=6.0.3" },
 ]
 
@@ -154,8 +154,8 @@ wheels = [
 
 [[package]]
 name = "plan-fields"
-version = "0.8.1"
-source = { git = "https://github.com/andrei-shtanakov/dispatcher?subdirectory=packages%2Fplan-fields&rev=65f03ea9e5964e4488bcd254e491fc42abb1bd96#65f03ea9e5964e4488bcd254e491fc42abb1bd96" }
+version = "0.11.0"
+source = { git = "https://github.com/andrei-shtanakov/dispatcher?subdirectory=packages%2Fplan-fields&rev=f7f2cbcbbffc8d83870848317228c0a3487780ec#f7f2cbcbbffc8d83870848317228c0a3487780ec" }
 dependencies = [
     { name = "jsonschema" },
 ]
