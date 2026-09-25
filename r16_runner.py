@@ -1,0 +1,483 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""R16 weekly run: audit KB claims against published code (ADR-ECO-009 cadence, Tue).
+
+Catch-up, not a calendar slot (interim, until the runner moves to the VPS —
+devtools graduation): launchd starts it at load and hourly; it runs only when
+the current cycle (Tuesday 09:30 → next Tuesday 09:30) has no successful
+receipt yet, at most MAX_ATTEMPTS times per cycle, one run at a time (lock).
+A laptop that was off for weeks runs the current cycle once and records the
+skipped cycles as `missed` — it does not pretend today's data describe them.
+
+A stage of its own, not part of the R-2 sweep: it runs even when the sweep does
+not, and the sweep's "proposals only, no GitHub writes" mandate stays intact —
+publishing is this runner's job, from the ai-prosto profile.
+
+Every attempt leaves a receipt in receipts/<cycle_id>.json (cycle_id = the
+cycle's Tuesday): schema version, check id, attempt, start/finish, producer
+SHAs, target SHA per repo, coverage, status counts, delivery. Kept apart:
+  execution  completed (the audit printed a summary), failed, or missed
+  problems   claims that are not unchanged, revisions that failed to resolve,
+             coverage gaps (no evidence at all); a completed run may have them
+  delivery   what happened to the single open `kb-freshness` issue: created,
+             updated, closed, not-needed, skipped (run failed) or failed
+`ok` in the receipt is true only for a completed run with a delivered result.
+The Tuesday watchdog (ops/r2-liveness-check.sh) reads it.
+
+Triage (owner, one week from the first detection): confirm the change, schedule
+a fix, or accept the limit. Re-runs update the issue but keep the original
+deadline; the issue closes itself once a run finds nothing.
+
+Usage: uv run _cowork_output/cadence/r16/run.py [--dry-run]
+"""
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+WORKSPACE = HERE.parents[2]
+AUDIT = WORKSPACE / "prograph-vault" / "scripts" / "kb_freshness.py"
+RECEIPTS = HERE / "receipts"
+REPO = "andrei-shtanakov/prograph-vault"
+LABEL = "kb-freshness"
+TITLE = "R16: утверждения KB требуют разбора"
+TRIAGE_DAYS = 7
+REVIEW_PROFILE = Path.home() / ".config" / "review"
+SCHEMA_VERSION = 1
+CHECK_ID = "r16-kb-freshness"
+CYCLE_WEEKDAY = 1  # Tuesday (Monday is 0)
+CYCLE_START = time(9, 30)
+MAX_ATTEMPTS = 3
+FIRST_DETECTED = re.compile(r"<!-- r16 first-detected=(\d{4}-\d{2}-\d{2}) -->")
+
+
+@dataclass(frozen=True)
+class Audit:
+    """Parsed JSONL output of kb_freshness.py --json."""
+
+    verdicts: list[dict]
+    revisions: list[dict]
+    summary: dict | None
+    raw_tail: str = ""
+
+    @property
+    def completed(self) -> bool:
+        """The audit ran to its summary line."""
+        return self.summary is not None
+
+
+@dataclass(frozen=True)
+class Problems:
+    """What needs the owner's triage."""
+
+    claims: list[dict]
+    revisions: list[str]
+    coverage: list[str]
+
+    def __bool__(self) -> bool:
+        return bool(self.claims or self.revisions or self.coverage)
+
+
+@dataclass(frozen=True)
+class Delivery:
+    """What happened to the tracking issue."""
+
+    action: str
+    issue: int | None = None
+    error: str | None = field(default=None)
+
+
+def main() -> int:
+    """Run the current cycle if it still needs a run; write its receipt."""
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--dry-run", action="store_true", help="no writes at all")
+    args = parser.parse_args()
+    RECEIPTS.mkdir(exist_ok=True)
+    with (RECEIPTS / ".lock").open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("another run holds the lock")
+            return 0
+        return run_cycle(datetime.now().replace(microsecond=0), args.dry_run)
+
+
+def run_cycle(now: datetime, dry_run: bool) -> int:
+    """Decide, mark missed cycles, audit, deliver, write the receipt."""
+    cid = cycle_start(now).date().isoformat()
+    existing = load_receipt(cid)
+    action = "run" if dry_run else decide(existing)
+    if action != "run":
+        print(f"cycle {cid}: {action}")
+        return 0
+    if not dry_run:
+        for missed in missed_cycles(latest_cycle(RECEIPTS, before=cid), cid):
+            write_receipt(missed_receipt(missed, now.isoformat()))
+    audit = run_audit()
+    found = problems(audit)
+    if not audit.completed:
+        delivery = Delivery("skipped", None, "audit did not complete")
+    elif dry_run:
+        delivery = Delivery("dry-run")
+    else:
+        delivery = deliver(found, now.date(), last_issue(RECEIPTS))
+    record = receipt(audit, found, delivery, now.isoformat())
+    attempt = (existing or {}).get("attempt", 0) + 1
+    record |= {"cycle_id": cid, "attempt": attempt, "producer": producer()}
+    print(json.dumps(record, ensure_ascii=False))
+    if dry_run:  # a trial run must not look like this cycle's receipt
+        return 0 if audit.completed else 1
+    write_receipt(record)
+    return 0 if record["ok"] else 1
+
+
+def cycle_start(now: datetime) -> datetime:
+    """Start of the cycle `now` falls in: the latest Tuesday 09:30 not after it."""
+    days = (now.weekday() - CYCLE_WEEKDAY) % 7
+    start = datetime.combine(now.date() - timedelta(days=days), CYCLE_START)
+    return start if start <= now else start - timedelta(days=7)
+
+
+def missed_cycles(last: str | None, current: str) -> list[str]:
+    """Cycle ids strictly between the last one with a receipt and the current."""
+    if last is None:
+        return []
+    day, end = date.fromisoformat(last) + timedelta(days=7), date.fromisoformat(current)
+    missed = []
+    while day < end:
+        missed.append(day.isoformat())
+        day += timedelta(days=7)
+    return missed
+
+
+def decide(existing: dict | None) -> str:
+    """run, done (already succeeded) or gave-up (MAX_ATTEMPTS failed)."""
+    if existing is None:
+        return "run"
+    if existing.get("ok"):
+        return "done"
+    return "gave-up" if existing.get("attempt", 0) >= MAX_ATTEMPTS else "run"
+
+
+def missed_receipt(cid: str, noted_at: str) -> dict:
+    """A cycle nobody ran: recorded as such, with no data claiming to describe it."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "check_id": CHECK_ID,
+        "cycle_id": cid,
+        "attempt": 0,
+        "noted_at": noted_at,
+        "execution": "missed",
+        "revisions": {},
+        "delivery": {
+            "action": "not-run",
+            "issue": None,
+            "issue_url": None,
+            "error": None,
+        },
+        "ok": False,
+    }
+
+
+def load_receipt(cid: str) -> dict | None:
+    """This cycle's receipt, if any."""
+    path = RECEIPTS / f"{cid}.json"
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def latest_cycle(receipts: Path, before: str) -> str | None:
+    """The newest cycle id with a receipt, older than `before`."""
+    ids = sorted(p.stem for p in receipts.glob("????-??-??.json") if p.stem < before)
+    return ids[-1] if ids else None
+
+
+def write_receipt(record: dict) -> None:
+    """receipts/<cycle_id>.json, replaced atomically."""
+    path = RECEIPTS / f"{record['cycle_id']}.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+    tmp.replace(path)
+
+
+def producer() -> dict[str, str | None]:
+    """SHAs of the code that produced the receipt (runner and auditor)."""
+    return {
+        "runner": head_sha(WORKSPACE, HERE / "run.py"),
+        "auditor": head_sha(AUDIT.parents[1], AUDIT),
+    }
+
+
+def head_sha(repo: Path, file: Path) -> str | None:
+    """HEAD of `repo`, suffixed `+dirty` when `file` has local edits."""
+    sha = (
+        subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        or None
+    )
+    dirty = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--", str(file)],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    return f"{sha}+dirty" if sha and dirty else sha
+
+
+def run_audit() -> Audit:
+    """Run the published-target audit and parse what it printed."""
+    out = subprocess.run(
+        ["uv", "run", str(AUDIT), "--json", "--target", "published"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return parse_audit(out.stdout, out.stderr)
+
+
+def parse_audit(stdout: str, stderr: str = "") -> Audit:
+    """Split the JSONL stream into verdicts, revisions and the summary."""
+    verdicts, revisions, summary = [], [], None
+    for line in stdout.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if "summary" in record:
+            summary = record["summary"]
+        elif "revision" in record:
+            revisions.append(record["revision"])
+        elif "status" in record:
+            verdicts.append(record)
+    tail = "\n".join((stdout + stderr).strip().splitlines()[-5:])
+    return Audit(verdicts, revisions, summary, tail)
+
+
+def problems(audit: Audit) -> Problems:
+    """Claims, revisions and coverage that need a human look."""
+    claims = [v for v in audit.verdicts if v["status"] != "unchanged"]
+    revisions = [f"{r['repo']}: {r['error']}" for r in audit.revisions if r["error"]]
+    coverage = []
+    if audit.summary is not None and audit.summary.get("with_evidence", 0) == 0:
+        coverage.append("no note declares evidence")
+    return Problems(claims, revisions, coverage)
+
+
+def deliver(found: Problems, today: date, known: int | None = None) -> Delivery:
+    """Create, update or close the single open tracking issue."""
+    try:
+        existing = open_issue(known)
+        if not found:
+            if existing is None:
+                return Delivery("not-needed")
+            number = existing["number"]
+            note = f"Прогон {today}: все утверждения `unchanged`, закрываю."
+            gh("issue", "comment", str(number), "--body", note)
+            gh("issue", "close", str(number))
+            return Delivery("closed", number)
+        first = first_detected(existing["body"]) if existing else None
+        body = issue_body(found, first or today, today)
+        if existing is None:
+            ensure_label()
+            url = gh(
+                "issue", "create", "--title", TITLE, "--label", LABEL, "--body", body
+            )
+            return Delivery("created", int(url.rstrip().rsplit("/", 1)[-1]))
+        gh("issue", "edit", str(existing["number"]), "--body", body)
+        return Delivery("updated", existing["number"])
+    except (subprocess.CalledProcessError, ValueError, KeyError) as exc:
+        detail = getattr(exc, "stderr", None) or str(exc)
+        return Delivery("failed", None, " ".join(str(detail).split())[:300])
+
+
+def last_issue(receipts: Path) -> int | None:
+    """Issue number from the newest receipt that names one.
+
+    Read back directly, it beats the label listing, which is served from an index
+    that lags seconds behind: a same-day re-run would otherwise open a duplicate.
+    """
+    for path in sorted(receipts.glob("*.json"), reverse=True):
+        try:
+            issue = json.loads(path.read_text())["delivery"]["issue"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        if issue:
+            return int(issue)
+    return None
+
+
+def open_issue(known: int | None = None) -> dict | None:
+    """The open tracking issue, if any: the known number first, then by label.
+
+    The label listing comes from an index that lags both ways (a just-created
+    issue is missing, a just-closed one still shows as open), so it only supplies
+    candidates; each one's state is read directly before it is used.
+    """
+    listing = gh(
+        "issue",
+        "list",
+        "--label",
+        LABEL,
+        "--state",
+        "open",
+        "--json",
+        "number",
+        "--limit",
+        "20",
+    )
+    listed = sorted(i["number"] for i in json.loads(listing or "[]"))
+    candidates = ([known] if known is not None else []) + listed
+    for number in dict.fromkeys(candidates):
+        issue = json.loads(
+            gh("issue", "view", str(number), "--json", "number,body,state")
+        )
+        if issue["state"] == "OPEN":
+            return issue
+    return None
+
+
+def ensure_label() -> None:
+    """Create the tracking label once; an existing label is fine."""
+    subprocess.run(
+        [
+            "gh",
+            "label",
+            "create",
+            LABEL,
+            "-R",
+            REPO,
+            "--color",
+            "C5DEF5",
+            "--description",
+            "R16 claim-level freshness: triage needed",
+        ],
+        env=gh_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def gh(*args: str) -> str:
+    """Run gh against the vault repo from the ai-prosto profile."""
+    out = subprocess.run(
+        ["gh", *args, "-R", REPO],
+        env=gh_env(),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout
+
+
+def gh_env() -> dict[str, str]:
+    """Environment that points gh at the reviewer profile."""
+    return os.environ | {"GH_CONFIG_DIR": str(REVIEW_PROFILE)}
+
+
+def first_detected(body: str) -> date | None:
+    """The first-detection date kept in the issue body, if this runner wrote it."""
+    match = FIRST_DETECTED.search(body)
+    return date.fromisoformat(match.group(1)) if match else None
+
+
+def issue_body(found: Problems, first: date, today: date) -> str:
+    """Issue text: what to triage, by when, and the evidence."""
+    due = first + timedelta(days=TRIAGE_DAYS)
+    parts = [
+        f"<!-- r16 first-detected={first.isoformat()} -->",
+        f"Еженедельный прогон R16 (`kb_freshness.py --target published`), "
+        f"последний — {today}. Впервые обнаружено {first}.",
+        "",
+        f"**Владелец: Андрей. Первичный разбор до {due}** — по каждой строке одно из: "
+        "подтвердить изменение, назначить исправление или принять ограничение "
+        "(поднять `baseline` PR-ом после перепроверки). Исправление в неделю "
+        "укладываться не обязано; повторные прогоны срок не сдвигают.",
+    ]
+    if found.claims:
+        parts += [
+            "",
+            "## Утверждения",
+            "",
+            "| статус | заметка | claim | опора | детали |",
+            "|---|---|---|---|---|",
+        ]
+        parts += [
+            f"| `{v['status']}` | `{v['doc']}` | `{v['id']}` | "
+            f"`{v['repo']}/{v['path']}` | {v['detail']} |"
+            for v in found.claims
+        ]
+        parts += [
+            "",
+            *[
+                f"- `^{v['block']}`: {v['statement']}"
+                for v in found.claims
+                if v.get("block")
+            ],
+        ]
+    if found.revisions:
+        parts += [
+            "",
+            "## Ревизии (проверка не выполнена)",
+            "",
+            *[f"- {r}" for r in found.revisions],
+        ]
+    if found.coverage:
+        parts += ["", "## Покрытие", "", *[f"- {c}" for c in found.coverage]]
+    parts += ["", "Квитанции прогонов: `_cowork_output/cadence/r16/receipts/`."]
+    return "\n".join(parts) + "\n"
+
+
+def receipt(audit: Audit, found: Problems, delivery: Delivery, run_at: str) -> dict:
+    """The record every attempt leaves behind (cycle fields are added by the caller)."""
+    completed = audit.completed
+    delivered = delivery.action not in ("failed", "skipped")
+    summary = audit.summary or {}
+    coverage_keys = ("notes", "with_evidence", "unparsed_frontmatter")
+    url = (
+        f"https://github.com/{REPO}/issues/{delivery.issue}" if delivery.issue else None
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "check_id": CHECK_ID,
+        "started_at": run_at,
+        "finished_at": datetime.now().replace(microsecond=0).isoformat(),
+        "target": "published",
+        "execution": "completed" if completed else "failed",
+        "revisions": {r["repo"]: r["sha"] or r["error"] for r in audit.revisions},
+        "coverage": {k: summary[k] for k in coverage_keys if k in summary},
+        "statuses": {k: v for k, v in summary.items() if k not in coverage_keys},
+        "problems": {
+            "claims": len(found.claims),
+            "revisions": len(found.revisions),
+            "coverage": len(found.coverage),
+        },
+        "delivery": {
+            "action": delivery.action,
+            "issue": delivery.issue,
+            "issue_url": url,
+            "error": delivery.error,
+        },
+        "audit_tail": None if completed else audit.raw_tail,
+        "ok": completed and delivered,
+    }
+
+
+if __name__ == "__main__":
+    sys.exit(main())
