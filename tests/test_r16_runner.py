@@ -6,6 +6,7 @@ Run: uv run --frozen pytest tests/test_r16_runner.py
 import fcntl
 import json
 import os
+import subprocess as sp
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -264,6 +265,7 @@ def test_run_cycle_marks_missed_cycles_and_caps_attempts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End to end over the cycle logic, with audit and delivery stubbed."""
+    monkeypatch.setattr(run, "sync_vault", lambda _v: None)
     cfg = cfg_for(tmp_path)
     monkeypatch.setattr(run, "producer", lambda _cfg: {"runner": "r", "auditor": "a"})
     monkeypatch.setattr(run, "deliver", lambda *_: run.Delivery("not-needed"))
@@ -351,6 +353,7 @@ def test_lock_is_held_through_delivery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Audit and GitHub delivery both run under the lock, not after it."""
+    monkeypatch.setattr(run, "sync_vault", lambda _v: None)
     values = layout(tmp_path)
     lock = tmp_path / "state" / "r16.lock"
     seen: list[str] = []
@@ -432,6 +435,7 @@ def test_missing_zone_exits_2_before_lock(
 def test_receipt_timestamps_carry_the_offset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(run, "sync_vault", lambda _v: None)
     cfg = cfg_for(tmp_path)
     clean = json.dumps({"summary": {"unchanged": 1, "with_evidence": 1}})
     monkeypatch.setattr(run, "producer", lambda _cfg: {"runner": "r", "auditor": "a"})
@@ -447,6 +451,7 @@ def test_legacy_naive_receipt_carries_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A receipt copied from the Mac (no offset) still counts its attempts."""
+    monkeypatch.setattr(run, "sync_vault", lambda _v: None)
     cfg = cfg_for(tmp_path)
     (cfg.receipts / "2026-09-22.json").write_text(
         json.dumps(
@@ -464,3 +469,96 @@ def test_legacy_naive_receipt_carries_attempt(
     run.run_cycle(cfg, datetime(2026, 9, 23, 17, 0, tzinfo=TBILISI), dry_run=False)
     record = json.loads((cfg.receipts / "2026-09-22.json").read_text())
     assert record["attempt"] == 3
+
+
+# --- vault at the published branch (spec §1.2 п.3) ----------------------------
+
+GIT_ENV = {
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+}
+
+
+def git(repo: Path, *args: str) -> str:
+    return sp.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ | GIT_ENV,
+    ).stdout
+
+
+@pytest.fixture
+def published(tmp_path: Path) -> tuple[Path, Path]:
+    """(origin bare repo, clone on its default branch `main`, clean)."""
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    git(seed, "init", "-q", "-b", "main")
+    (seed / "note.md").write_text("v1\n")
+    git(seed, "add", ".")
+    git(seed, "commit", "-qm", "v1")
+    origin = tmp_path / "origin.git"
+    sp.run(["git", "clone", "-q", "--bare", str(seed), str(origin)], check=True)
+    clone = tmp_path / "clone"
+    sp.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+    return origin, clone
+
+
+def advance_origin(tmp_path: Path, origin: Path) -> None:
+    work = tmp_path / "pusher"
+    sp.run(["git", "clone", "-q", str(origin), str(work)], check=True)
+    (work / "note.md").write_text("v2\n")
+    git(work, "commit", "-qam", "v2")
+    git(work, "push", "-q", "origin", "main")
+
+
+def test_sync_vault_fast_forwards_to_origin(
+    tmp_path: Path, published: tuple[Path, Path]
+) -> None:
+    origin, clone = published
+    advance_origin(tmp_path, origin)
+    assert run.sync_vault(clone) is None
+    assert (clone / "note.md").read_text() == "v2\n"
+
+
+@pytest.mark.parametrize(
+    "case", ["unreachable", "wrong-branch", "ahead", "tracked-edit", "untracked"]
+)
+def test_sync_vault_refuses(
+    tmp_path: Path, published: tuple[Path, Path], case: str
+) -> None:
+    _origin, clone = published
+    if case == "unreachable":
+        git(clone, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    elif case == "wrong-branch":
+        git(clone, "checkout", "-qb", "feature")
+    elif case == "ahead":
+        (clone / "note.md").write_text("local\n")
+        git(clone, "commit", "-qam", "local")
+    elif case == "tracked-edit":
+        (clone / "note.md").write_text("edited\n")
+    else:
+        (clone / "stray.md").write_text("not published\n")
+    assert run.sync_vault(clone) is not None
+
+
+def test_unpublished_vault_fails_the_attempt_without_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = cfg_for(tmp_path)
+    monkeypatch.setattr(run, "sync_vault", lambda _v: "HEAD ahead of origin/main")
+
+    def forbidden(_cfg: object) -> None:
+        raise AssertionError("audit must not run over an unpublished vault")
+
+    monkeypatch.setattr(run, "run_audit", forbidden)
+    monkeypatch.setattr(run, "producer", lambda _cfg: {"runner": "r", "auditor": "a"})
+    now = datetime(2026, 9, 23, 17, 0, tzinfo=TBILISI)
+    code = run.run_cycle(cfg, now, dry_run=False)
+    record = json.loads((cfg.receipts / "2026-09-22.json").read_text())
+    assert code == 1
+    assert (record["execution"], record["delivery"]["action"]) == ("failed", "skipped")
+    assert "HEAD ahead of origin/main" in record["audit_tail"]

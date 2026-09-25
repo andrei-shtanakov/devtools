@@ -60,6 +60,7 @@ CYCLE_START = time(9, 30)
 MAX_ATTEMPTS = 3
 FIRST_DETECTED = re.compile(r"<!-- r16 first-detected=(\d{4}-\d{2}-\d{2}) -->")
 VAULT_DIR = "prograph-vault"
+DEFAULT_BRANCH = re.compile(r"^ref: refs/heads/(\S+)\tHEAD$", re.MULTILINE)
 AUDIT_REL = Path("scripts") / "kb_freshness.py"
 SETTINGS = (
     ("workspace", "R16_WORKSPACE"),
@@ -207,7 +208,12 @@ def run_cycle(cfg: Config, now: datetime, dry_run: bool) -> int:
     if not dry_run:
         for missed in missed_cycles(latest_cycle(cfg.receipts, before=cid), cid):
             write_receipt(cfg.receipts, missed_receipt(missed, now.isoformat()))
-    audit = run_audit(cfg)
+    unpublished = sync_vault(cfg.vault)
+    audit = (
+        Audit([], [], None, f"vault not published: {unpublished}")
+        if unpublished
+        else run_audit(cfg)
+    )
     found = problems(audit)
     if not audit.completed:
         delivery = Delivery("skipped", None, "audit did not complete")
@@ -340,6 +346,45 @@ def head_sha(repo: Path, file: Path) -> str | None:
         check=False,
     ).stdout.strip()
     return f"{sha}+dirty" if sha and dirty else sha
+
+
+def git_out(repo: Path, *args: str) -> str | None:
+    """stdout of a git command in `repo`, or None when it failed."""
+    out = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=False
+    )
+    return out.stdout if out.returncode == 0 else None
+
+
+def sync_vault(vault: Path) -> str | None:
+    """Bring the vault clone to origin's default branch and prove it got there.
+
+    A successful `pull --ff-only` is not proof: local commits ahead of
+    upstream and uncommitted or untracked files survive it, and the audit
+    reads notes from disk. None means published and clean; otherwise the
+    reason, and the audit must not run.
+    """
+    symref = git_out(vault, "ls-remote", "--symref", "origin", "HEAD")
+    if symref is None:
+        return "origin unreachable"
+    match = DEFAULT_BRANCH.search(symref)
+    if match is None:
+        return "origin did not name its default branch"
+    branch = match.group(1)
+    current = (git_out(vault, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
+    if current != branch:
+        return f"clone is on {current or '?'}, origin publishes {branch}"
+    if git_out(vault, "pull", "--ff-only", "--quiet", "origin", branch) is None:
+        return f"pull --ff-only origin {branch} failed"
+    head = (git_out(vault, "rev-parse", "HEAD") or "").strip()
+    remote = (git_out(vault, "rev-parse", f"refs/remotes/origin/{branch}") or "").strip()
+    if not head or head != remote:
+        return f"HEAD {head[:12]} is not origin/{branch} {remote[:12]}"
+    dirty = git_out(vault, "status", "--porcelain", "--untracked-files=all")
+    if dirty is None or dirty.strip():
+        first = (dirty or "").strip().splitlines()[:3]
+        return "working tree not clean: " + "; ".join(first)
+    return None
 
 
 def run_audit(cfg: Config) -> Audit:
