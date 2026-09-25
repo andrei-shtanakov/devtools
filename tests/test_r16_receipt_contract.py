@@ -108,3 +108,21 @@ def test_pre_contract_mac_receipt_is_distinguishable_and_still_read(
     cfg = cfg_for(tmp_path)
     (cfg.receipts / "2026-09-22.json").write_text(json.dumps(mac))
     assert run.decide(run.load_receipt(cfg.receipts, "2026-09-22")) == "done"
+
+
+def test_pre_contract_rule_does_not_exempt_missed_receipts() -> None:
+    """Every valid `missed` receipt lacks producer.host by schema (review #399).
+
+    So the pre-contract discriminator must be "an executed attempt without
+    producer.host", never "any file without producer.host".
+    """
+    readme = (V1 / "README.md").read_text()
+    section = readme.split("## Квитанции до контракта", 1)[1].split("## ", 1)[0]
+    assert "`execution: completed | failed`" in section
+    assert "`missed`" in section and "проверяются схемой всегда" in section
+    assert "от файлов без `producer.host`" not in section
+
+
+def test_mac_missed_receipt_is_v1_valid() -> None:
+    """The Mac runner's `missed` form (naive noted_at) already satisfies v1."""
+    validate(run.missed_receipt("2026-09-15", "2026-09-23T17:00:00"))

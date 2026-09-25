@@ -5,13 +5,22 @@
 
 ## 1. Установка
 
+**Сначала доступ.** `setup.sh` клонирует репо от пользователя `r16` по
+`GIT_BASE`, и без доступа оборвётся на первом `git clone`, не дойдя до
+юнитов и `r16.env` (повторный прогон идемпотентен, но лучше не доводить).
+Поэтому до `setup.sh`: создать пользователя и положить ему ключ с доступом
+на чтение (deploy key или ключ машины) и `known_hosts` для github.com, затем
+проверить `sudo -u r16 git ls-remote "$GIT_BASE/devtools.git" HEAD`.
+
 ```bash
+sudo useradd --system --home-dir /srv/r16 --shell /usr/sbin/nologin r16   # если ещё нет
+# ключ → /srv/r16/.ssh/ (0700, файлы 0600, r16:r16)
+sudo -u r16 git ls-remote git@github.com:andrei-shtanakov/devtools.git HEAD
 sudo GIT_BASE=git@github.com:andrei-shtanakov deploy/r16/setup.sh
 sudo -e /srv/r16/r16.env            # R16_HOST_LABEL=<имя VPS>
 ```
 
-Пользователю `r16` нужен ssh-доступ на чтение к `GIT_BASE` (deploy key или
-ключ машины). Профиль gh ai-prosto:
+Профиль gh ai-prosto:
 
 ```bash
 sudo install -o r16 -g r16 -m 0600 <hosts.yml ai-prosto> /srv/r16/gh/hosts.yml
@@ -69,8 +78,9 @@ sudo -u robin cat /srv/r16/state/receipts/<последний>.json >/dev/null &
 sudo -u robin cat /srv/r16/state/receipts/legacy/<файл>.json >/dev/null && echo ok
 ```
 
-Перенесённые файлы — история до контракта: у них нет `producer.host`, и
-схеме v1 они не соответствуют. Раннер их читает как раньше
+Перенесённые выполненные попытки (`completed`/`failed`) — история до
+контракта: у них нет `producer.host`, и схеме v1 они не соответствуют;
+перенесённые `missed` схеме соответствуют. Раннер их читает как раньше
 (`contracts/r16-receipt/v1/README.md`, «Квитанции до контракта»).
 
 Включение (шаг 4) — право на issue переходит к VPS ровно здесь:
