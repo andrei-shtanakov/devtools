@@ -392,3 +392,42 @@ def test_an_item_without_a_stray_tag_is_still_surfaced(plan_check) -> None:
     )
     hit = [w for w in warnings if "PF-ID-MISSING" in w]
     assert hit and "stray tag" not in hit[0], hit
+
+
+# --- devtools#381: PF-OWNER-REPO-SELF — видна и считается отдельно ----------
+
+
+def _ownership_note(plan_check, *repos) -> str:
+    index = _index(*(r.repo for r in repos))
+    report = plan_check.Report()
+    codes = plan_check.resolve_graph(list(repos), index, report)
+    plan_check.check_reporting(list(repos), index, codes, report)
+    return next(n for n in report.notes if n.startswith("ownership: "))
+
+
+def test_self_owner_is_a_visible_warning(plan_check) -> None:
+    """Синтетический self-owner обязателен: на чистом флоте «0 warnings» не
+    доказывает, что диагностика не теряется в `_canonical_line`."""
+    warnings = _warnings_for(
+        plan_check, _repo("maestro", "- [ ] штука @owner:repo:maestro @id:s\n")
+    )
+    hit = [w for w in warnings if "PF-OWNER-REPO-SELF" in w]
+    assert hit, warnings
+    assert "todo://maestro/s" in hit[0], "находка обязана назвать пункт"
+
+
+def test_other_owner_findings_stay_coverage_notes(plan_check) -> None:
+    """Исключение только для SELF: прочие `PF-OWNER-*` идут в свою корзину."""
+    warnings = _warnings_for(plan_check, _repo("maestro", "- [ ] штука @id:s\n"))
+    assert not [w for w in warnings if "PF-OWNER-" in w], warnings
+
+
+def test_self_owner_gets_its_own_bucket(plan_check) -> None:
+    """Self-owner не считается валидным repo-owned; внешний владелец — считается."""
+    note = _ownership_note(
+        plan_check,
+        _repo("maestro", "- [ ] свой @owner:repo:maestro @id:s\n"),
+        _repo("proctor", "- [ ] чужой @owner:repo:maestro @id:e\n"),
+    )
+    assert "repo-owned=1" in note, note
+    assert "self-owned=1" in note, note

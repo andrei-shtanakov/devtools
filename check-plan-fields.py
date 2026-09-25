@@ -68,6 +68,9 @@ from pathlib import Path
 
 try:
     from plan_fields import (
+        REPO_OWNER_EXTERNAL,
+        REPO_OWNER_SELF,
+        REPO_OWNER_UNKNOWN,
         ManifestIndex,
         RepoInput,
         ScrapedItem,
@@ -75,6 +78,7 @@ try:
         check_legacy_fleet,
         parse_fleet,
         parse_owner,
+        repo_owner_verdicts,
         scrape_items,
     )
     from plan_fields import fleet as _pf_fleet
@@ -115,11 +119,15 @@ class Report:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: The package's repo-owner verdict per ``(repo, line)`` of an @id'd item,
+    #: filled by `resolve_graph` from its one graph pass (devtools#381).
+    owner_verdicts: dict[tuple[str, int], str] = field(default_factory=dict)
 
 
 _OWNERSHIP = (
     "human-owned",
     "repo-owned",
+    "self-owned",
     "TBD",
     "missing",
     "invalid-owner",
@@ -590,6 +598,7 @@ def resolve_graph(
     false substring hit) on a ref whose state is resolved elsewhere.
     """
     snapshot = parse_fleet(inputs, index)
+    report.owner_verdicts.update(_repo_owner_verdicts(snapshot))
     canonical = list(snapshot["diagnostics"]) + check_fleet(snapshot)
     by_item: dict[tuple[str, int], set[str]] = {}
     # Fleet-only: a cycle is invisible from inside either half of it.
@@ -672,18 +681,52 @@ def _canonical_line(diag: dict, hint: int | None = None) -> str | None:
     warning now, with the cause named when there is one.
 
     The @id-only owner findings stay coverage notes: they have their own bucket.
+    `PF-OWNER-REPO-SELF` is the exception (devtools#381): a self-owner hands the
+    item to no external principal, and the bucket alone hides WHICH item it is.
     """
     code = diag["code"]
-    if code.startswith("PF-OWNER-"):
+    if code.startswith("PF-OWNER-") and code != "PF-OWNER-REPO-SELF":
         return None
     if code == "PF-ID-MISSING" and hint is not None:
         return (f"{diag['message']}; stray tag on continuation line {hint} "
                 f"[{code}]")
+    if code == "PF-OWNER-REPO-SELF":
+        # The package message names the repo, not the item: 27 of them in one
+        # repo would read as one line repeated.
+        return f"{diag['message']} ({diag['subject_uri']}) [{code}]"
     return f"{diag['message']} [{code}]"
 
 
-def _ownership_bucket(owner: str | None, index: ManifestIndex) -> str:
-    """One ADR-ECO-005a ownership bucket, using only package grammar."""
+def _repo_owner_verdicts(snapshot: dict) -> dict[tuple[str, int], str]:
+    """The package's repo-owner verdict per ``(repo, line)`` of an @id'd item.
+
+    Self vs external is the package's call (`plan_fields.views`), read back
+    from its own diagnostics — devtools does not re-normalize owner identity
+    against the item's repo (devtools#381). Items without @id are not graph
+    nodes and get no verdict here.
+    """
+    by_uri = repo_owner_verdicts(snapshot)
+    verdicts: dict[tuple[str, int], str] = {}
+    for node in snapshot["nodes"]:
+        verdict = by_uri.get(node["node_id"])
+        if verdict is not None:
+            prov = node["provenance"]
+            verdicts[(prov["repo"], prov["line"])] = verdict
+    return verdicts
+
+
+def _ownership_bucket(
+    owner: str | None, index: ManifestIndex, verdict: str | None = None
+) -> str:
+    """One ADR-ECO-005a ownership bucket, using only package grammar.
+
+    ``verdict`` is the package's repo-owner verdict for an @id'd item; without
+    it (no @id) a repository owner falls back to the manifest-key check, which
+    cannot tell self from external: a self-owner WITHOUT @id lands in
+    ``repo-owned``. Accepted, not hidden — the item already carries
+    `PF-ID-MISSING`, and comparing the owner with the source repo here would be
+    the second identity normalization devtools#381 asked to avoid.
+    """
     owner_ref, _owner_role, diagnostic = parse_owner(owner)
     if diagnostic == "PF-OWNER-MISSING":
         return "missing"
@@ -695,6 +738,12 @@ def _ownership_bucket(owner: str | None, index: ManifestIndex) -> str:
     if owner_ref["kind"] == "tbd":
         return "TBD"
     if owner_ref["kind"] == "repository":
+        if verdict is not None:
+            return {
+                REPO_OWNER_SELF: "self-owned",
+                REPO_OWNER_EXTERNAL: "repo-owned",
+                REPO_OWNER_UNKNOWN: "unknown-repo-owner",
+            }[verdict]
         return (
             "repo-owned"
             if owner_ref["id"] in index.canonical_keys
@@ -732,7 +781,11 @@ def check_reporting(
             continue
         opens = [i for i in scrape_items(inp.todo_text) if not i.checked]
         for item in opens:
-            owner = _ownership_bucket(item.tags.get("owner"), index)
+            owner = _ownership_bucket(
+                item.tags.get("owner"),
+                index,
+                report.owner_verdicts.get((inp.repo, item.line)),
+            )
             state = _movement_bucket(
                 item, condition_codes.get((inp.repo, item.line), set())
             )

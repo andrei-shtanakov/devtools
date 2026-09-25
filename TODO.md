@@ -2528,7 +2528,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 > 4.1.0 (выпущен, тег `v4.1.0`; локальный CLI — 4.1.0), блокера нет; #382 —
 > крупнейшая, начинается со спеки, а не с кода.
 
-- [ ] Fleet plan-check показывает `PF-OWNER-REPO-SELF` и различает self-owner в ownership-сводке (inbox devtools#381, slug: plan-fields-self-owner-reporting; from: prograph-vault#164) @owner:github:andrei-shtanakov @id:plan-fields-self-owner-reporting @epic:eco.plan-fields
+- [x] Fleet plan-check показывает `PF-OWNER-REPO-SELF` и различает self-owner в ownership-сводке (inbox devtools#381, slug: plan-fields-self-owner-reporting; from: prograph-vault#164) @owner:github:andrei-shtanakov @id:plan-fields-self-owner-reporting @epic:eco.plan-fields — PR этой ветки
       Три уровня, одного бампа мало: (1) пин plan-fields в `pyproject.toml`
       (dispatcher `65f03ea`) → версия с `f3d3581`; перед бампом сравнить
       старый и кандидатный пин на одном снимке TODO/manifest — диагностики,
@@ -2537,6 +2537,25 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `check-plan-fields.py` перестаёт отбрасывать `PF-OWNER-REPO-SELF`,
       остальные `PF-OWNER-*` не трогать; (3) `_ownership_bucket` берёт
       self-owner из публичной классификации пакета (`views`).
+      **Сделано:** пин → dispatcher `f7f2cbc` (plan-fields 0.8.1 → 0.11.0,
+      кончик пакета, содержит `f3d3581`). Сравнение на одном снимке флота
+      2026-09-25 (23 репо, 834 узла): вывод чекера на старом и новом пине
+      побайтово совпал (0/0, rc=0 в default и `--strict`); сырые
+      диагностики пакета отличаются ровно на `PF-OWNER-REPO-SELF`=30
+      (deployer 27, github-checker 2, dispatcher 1), прочие коды равны.
+      После правки эти 30 — warnings; ежедневный `fleet-plan-check` зовёт
+      чекер без `--strict`, exit не меняется. Новая корзина `self-owned`;
+      у пункта без `@id` вердикта пакета нет, там прежняя проверка ключа
+      манифеста (на флоте таких repo-owner пунктов 0). Три теста на
+      синтетике, четыре мутации (фильтр назад, фильтр снят, вердикт не
+      передан, self→repo-owned) — каждая краснит тест.
+
+- [ ] Job summary `fleet-plan-check` держит ownership-сводку видимой при десятках warnings @owner:github:andrei-shtanakov @id:fleet-plan-check-summary-keeps-notes @epic:eco.tooling
+      Находка ревью PR #395 (minor, medium): summary берёт `tail -40` лога,
+      а чекер печатает notes ДО warnings — 30 `PF-OWNER-REPO-SELF` выталкивают
+      строку `ownership:` за хвост (полный лог остаётся в artifact). Правка —
+      в `.github/workflows/fleet-plan-check.yml`, это authority-root: отдельный
+      PR, мерж человеком.
 
 - [ ] Мост объявляет repo-local stage-профиль `workstream` и одобряет tasks через `spec approve tasks --profile workstream`, снимая `--conform-approve` (inbox devtools#386, slug: workstream-stage-profile; from: spec-runner#338) @owner:github:andrei-shtanakov @id:workstream-stage-profile @epic:eco.dark-factory
       Доставлено у соседа PR spec-runner#589 (`125ab40`), вошло в 4.1.0.

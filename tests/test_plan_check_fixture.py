@@ -110,15 +110,15 @@ def test_reporting_splits_ownership_movement_and_full_matrix(tmp_path):
     code, out = _run(ws)
     assert code == 1, out  # stale-condition remains the canonical hard failure
     assert (
-        "ownership: human-owned=2, repo-owned=1, TBD=1, missing=1, "
+        "ownership: human-owned=2, repo-owned=0, self-owned=1, TBD=1, missing=1, "
         "invalid-owner=1, unknown-repo-owner=1"
-    ) in out
+    ) in out  # `repo:alpha` в самом alpha — self-owner, не repo-owned (#381)
     assert (
         "movement: actionable=3, waiting-by-trigger=1, waiting-by-blocker=1, "
         "stale-condition=1, malformed-condition=1"
     ) in out
     matrix_lines = [line for line in out.splitlines() if "ownership×movement" in line]
-    assert len(matrix_lines) == 6
+    assert len(matrix_lines) == 7
     assert "missing: actionable=0" in out
     assert "stale-condition=1" in next(line for line in matrix_lines if "missing:" in line)
 

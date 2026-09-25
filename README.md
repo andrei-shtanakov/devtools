@@ -133,13 +133,21 @@ identity это не error; канонический stale по `@id` — вал
 одинаково.
 
 ADR-ECO-005a разделяет две независимые оси. Ownership публикуется как
-`human-owned | repo-owned | TBD | missing | invalid-owner |
+`human-owned | repo-owned | self-owned | TBD | missing | invalid-owner |
 unknown-repo-owner`; movement — как `actionable | waiting-by-trigger |
 waiting-by-blocker | stale-condition | malformed-condition`. `plan-check`
 печатает обе суммы и полную матрицу ownership × movement. Каждая открытая
 строка входит ровно в одну ячейку, включая строки без `@id`; trigger или blocker
 никогда не превращается в owner. При конфликте условий fail-closed приоритет:
 `malformed-condition` → `stale-condition` → blocker → trigger → actionable.
+`self-owned` — `@owner:repo:<свой репо>` (devtools#381): пункт не передан
+никакому внешнему принципалу, и каждый такой пункт виден ещё и warning'ом
+`PF-OWNER-REPO-SELF` с адресом `todo://`. Self vs external решает пакет
+(`repo_owner_verdicts`) — поэтому только для пунктов с `@id`: у пункта без
+`@id` вердикта нет, и он классифицируется по ключу манифеста, то есть свой
+репо там считается `repo-owned`. Недосчёт принят, а не скрыт: такой пункт и
+так несёт `PF-ID-MISSING`, а вторая нормализация identity в devtools —
+ровно то, от чего заявка просила уйти.
 Owner grammar не копируется в devtools: даже для строк без `@id` используется
 публичный `plan_fields.parse_owner()` из immutable pin.
 
