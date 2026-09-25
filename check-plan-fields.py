@@ -721,7 +721,11 @@ def _ownership_bucket(
     """One ADR-ECO-005a ownership bucket, using only package grammar.
 
     ``verdict`` is the package's repo-owner verdict for an @id'd item; without
-    it (no @id) a repository owner falls back to the manifest-key check.
+    it (no @id) a repository owner falls back to the manifest-key check, which
+    cannot tell self from external: a self-owner WITHOUT @id lands in
+    ``repo-owned``. Accepted, not hidden — the item already carries
+    `PF-ID-MISSING`, and comparing the owner with the source repo here would be
+    the second identity normalization devtools#381 asked to avoid.
     """
     owner_ref, _owner_role, diagnostic = parse_owner(owner)
     if diagnostic == "PF-OWNER-MISSING":
