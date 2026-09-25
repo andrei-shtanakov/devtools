@@ -1,0 +1,13 @@
+[Unit]
+Description=R16: weekly KB claim freshness (devtools r16_runner.py)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=r16
+Group=r16
+UMask=0027
+EnvironmentFile=/srv/r16/r16.env
+WorkingDirectory=/srv/r16/devtools
+ExecStart=/usr/local/bin/uv run --script /srv/r16/devtools/r16_runner.py
