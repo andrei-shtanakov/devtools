@@ -2519,3 +2519,48 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Заявка соседа (devtools#265) остаётся открытой: её DoD включает
       доставку в atp-platform, а это волна ре-вендора по флоту —
       `review-kit-next-wave` на стороне steward, не наш пункт.
+
+## Входящие 2026-09-23/24 (inbox, приняты 2026-09-25)
+
+> Четыре заявки ADR-ECO-006 приняты владельцем одним решением. Порядок:
+> #381 первым (малый объём, соседей не ждёт); #386 + #388 одной поставкой —
+> обе правят рендер `governance/task_bridge.py` и опираются на spec-runner
+> 4.1.0 (выпущен, тег `v4.1.0`; локальный CLI — 4.1.0), блокера нет; #382 —
+> крупнейшая, начинается со спеки, а не с кода.
+
+- [ ] Fleet plan-check показывает `PF-OWNER-REPO-SELF` и различает self-owner в ownership-сводке (inbox devtools#381, slug: plan-fields-self-owner-reporting; from: prograph-vault#164) @owner:github:andrei-shtanakov @id:plan-fields-self-owner-reporting @epic:eco.plan-fields
+      Три уровня, одного бампа мало: (1) пин plan-fields в `pyproject.toml`
+      (dispatcher `65f03ea`) → версия с `f3d3581`; перед бампом сравнить
+      старый и кандидатный пин на одном снимке TODO/manifest — диагностики,
+      warnings/errors, матрица ownership, exit code в default и `--strict`
+      (между пинами приехали эпики, `@dag`, проверка `@id`); (2) рендер
+      `check-plan-fields.py` перестаёт отбрасывать `PF-OWNER-REPO-SELF`,
+      остальные `PF-OWNER-*` не трогать; (3) `_ownership_bucket` берёт
+      self-owner из публичной классификации пакета (`views`).
+
+- [ ] Мост объявляет repo-local stage-профиль `workstream` и одобряет tasks через `spec approve tasks --profile workstream`, снимая `--conform-approve` (inbox devtools#386, slug: workstream-stage-profile; from: spec-runner#338) @owner:github:andrei-shtanakov @id:workstream-stage-profile @epic:eco.dark-factory
+      Доставлено у соседа PR spec-runner#589 (`125ab40`), вошло в 4.1.0.
+      Профиль `spec/profiles/workstream.yaml`: `decomposition` — внешняя
+      стадия (`external: true`, `path: workstreams/{ws}/spec/30-decomposition.md`),
+      `tasks` — upstream от неё; для legacy-режимов 3/4 — тот же вид с
+      `15-behaviour-spec.md` / `20-design.md`. Признак «сделано»: `spec
+      approve tasks` с профилем даёт тот же frontmatter, что сегодня
+      `--conform-approve`, и `conform_approved` снят.
+
+- [ ] Мост выводит `**Scenarios:**` в verify-задачах (inbox devtools#388, slug: verify-task-scenarios-line; from: spec-runner#402) @owner:github:andrei-shtanakov @id:verify-task-scenarios-line @epic:eco.dark-factory
+      Доставлено у соседа PR spec-runner#590 (`4d10e5b`), вошло в 4.1.0.
+      Рядом с `**Mode:** verify_first` рендер verify-задачи в
+      `governance/task_bridge.py` печатает сценарии DT (`t.scenarios`),
+      формат id `[A-Z]+-\d+[a-z]?` через запятую одной строкой. Поставлять
+      вместе с devtools#386 — та же поверхность рендера.
+
+- [ ] R16 runner выпускается из dev-scratch в devtools и работает на VPS отдельным сервисом (inbox devtools#382, slug: r16-runner-graduation; from: prograph-vault R16, vault#151–#166) @owner:github:andrei-shtanakov @id:r16-runner-graduation @epic:eco.tooling
+      Сейчас `_cowork_output/cadence/r16/run.py` под launchd на ноутбуке —
+      пропущенные вторники. Acceptance (из заявки): код в devtools без
+      чтения `_cowork_output/`, логика как есть (циклы, `decide`, `missed`,
+      `flock`, дедуп issue прямым `gh issue view`); схема квитанции
+      (`schema_version: 1`) — контракт devtools, Robin вендорит копию;
+      VPS-сервис со своими клонами, доступными на запись (`--target
+      published` делает fetch). Начинать со спеки: контракт квитанции и
+      развёртывание на VPS — решения, а не перенос кода. Telegram-часть —
+      отдельная заявка в robin-runtime, не здесь.
