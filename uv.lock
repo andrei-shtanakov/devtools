@@ -40,6 +40,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "jsonschema" },
     { name = "pytest" },
 ]
 governance = [
@@ -54,7 +55,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8" }]
+dev = [
+    { name = "jsonschema", specifier = ">=4" },
+    { name = "pytest", specifier = ">=8" },
+]
 governance = [
     { name = "steward", git = "https://github.com/andrei-shtanakov/steward?rev=2c71ed770015f6baa00dedc708e8c0bbc5a8e41b" },
     { name = "textual", specifier = ">=1" },
