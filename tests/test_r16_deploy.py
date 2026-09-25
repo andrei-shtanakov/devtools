@@ -52,3 +52,34 @@ def test_env_example_names_every_setting() -> None:
     env = (DEPLOY / "env.example").read_text()
     for name in ("R16_WORKSPACE", "R16_STATE_DIR", "R16_GH_CONFIG_DIR", "R16_HOST_LABEL"):
         assert f"{name}=" in env
+
+
+def test_service_has_a_start_timeout() -> None:
+    """A hung git/gh call must not hold r16.lock forever (final review I1)."""
+    unit = (DEPLOY / "r16-kb-freshness.service").read_text().splitlines()
+    assert "TimeoutStartSec=30min" in unit
+
+
+def readme() -> str:
+    return (DEPLOY / "README.md").read_text()
+
+
+def test_rollback_waits_for_activating_not_for_inactive() -> None:
+    """After ok:false the oneshot unit is `failed`, never `inactive` (final review I2)."""
+    text = readme()
+    assert '= inactive ]' not in text
+    assert "is-active -q r16-kb-freshness.service" in text
+
+
+def test_mac_lock_check_does_not_need_flock() -> None:
+    """macOS has no flock(1) (final review I3): the Mac step uses Python fcntl."""
+    mac_step = readme().split("На Mac (шаг 2):", 1)[1].split("Снимок (шаг 3)", 1)[0]
+    assert "flock -n" not in mac_step
+    assert "fcntl.LOCK_NB" in mac_step
+
+
+def test_setup_fails_when_the_manifest_yields_no_vault() -> None:
+    """python3 < 3.11 has no tomllib: an empty repo list must stop setup (review M4)."""
+    setup = (DEPLOY / "setup.sh").read_text()
+    assert "mapfile -t REPOS < <(" not in setup
+    assert 'grep -qx prograph-vault <<<"$REPO_LIST"' in setup

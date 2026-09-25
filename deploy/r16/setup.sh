@@ -35,7 +35,9 @@ echo "== code (updated by hand later: pull --ff-only) =="
 echo "== workspace clones: canonical names from workspace-manifest.toml =="
 WS="$R16_HOME/workspace"
 [ -d "$WS/ai-orchestrators-workspace/.git" ] || sudo -u r16 git clone -q "$GIT_BASE/ai-orchestrators-workspace.git" "$WS/ai-orchestrators-workspace"
-mapfile -t REPOS < <(python3 - "$WS/ai-orchestrators-workspace/workspace-manifest.toml" <<'PY'
+# A plain assignment (not a process substitution): set -e sees a failed
+# python3 (e.g. < 3.11 has no tomllib) instead of cloning nothing and exiting 0.
+REPO_LIST=$(python3 - "$WS/ai-orchestrators-workspace/workspace-manifest.toml" <<'PY'
 import sys, tomllib
 m = tomllib.load(open(sys.argv[1], "rb"))
 dirs = {
@@ -47,7 +49,8 @@ dirs = {
 print("\n".join(sorted(dirs)))
 PY
 )
-for repo in "${REPOS[@]}"; do
+grep -qx prograph-vault <<<"$REPO_LIST" || { echo ">>> manifest yielded no prograph-vault — python3 >= 3.11 needed"; exit 1; }
+for repo in $REPO_LIST; do
     [ -d "$WS/$repo/.git" ] || sudo -u r16 git clone -q "$GIT_BASE/$repo.git" "$WS/$repo"
 done
 

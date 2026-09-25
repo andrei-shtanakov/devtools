@@ -42,7 +42,9 @@ ai-prosto. Пробный прогон gh не вызывает — автори
 ```bash
 launchctl bootout gui/$UID/dev.atp.r16-kb-freshness
 rm ~/Library/LaunchAgents/dev.atp.r16-kb-freshness.plist
-flock -n ~/labs/all_ai_orchestrators/_cowork_output/cadence/r16/receipts/.lock true && echo "прогон не идёт"
+# на macOS нет flock(1) — проверка тем же fcntl, что у раннера
+python3 -c 'import fcntl,sys; fcntl.flock(open(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)' \
+  ~/labs/all_ai_orchestrators/_cowork_output/cadence/r16/receipts/.lock && echo "прогон не идёт"
 ```
 
 Тем же шагом в `_cowork_output/ops/r2-liveness-check.sh` выключить блок R16
@@ -81,7 +83,10 @@ sudo systemctl enable --now r16-kb-freshness.timer
 
 ```bash
 sudo systemctl disable --now r16-kb-freshness.timer
-until [ "$(systemctl is-active r16-kb-freshness.service)" = inactive ]; do sleep 5; done
+# ждём, пока прогон не закончится: после ok:false юнит в состоянии `failed`,
+# а не `inactive`, поэтому ждём ухода из activating/active
+while systemctl is-active -q r16-kb-freshness.service \
+   || [ "$(systemctl is-active r16-kb-freshness.service)" = activating ]; do sleep 5; done
 sudo -u r16 flock -n /srv/r16/state/r16.lock true && echo "блокировка свободна"
 ```
 
