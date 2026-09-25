@@ -152,7 +152,7 @@ reason: Нужны замеры нагрузки перед выбором ша�
 # FR-01 (Must-требований в REQUIREMENTS_MD нет вовсе — трасса берёт
 # существующий id из behaviour-spec, а не выдуманный), все 4 обязательные
 # секции DSL (`governance/ops.py::_AUTHOR_DSL["acceptance"]`). Без этого
-# файла ВСЕ full-DAG тесты deliver/stamp/conform падают на
+# файла ВСЕ full-DAG тесты deliver/stamp/approve падают на
 # `_check_bundle_composition` — узел acceptance вошёл в `_BUNDLE_DAG`.
 ACCEPTANCE_MD = """\
 ---
@@ -494,12 +494,21 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
     # входят вовсе (§I7). Это наблюдаемое следствие, по которому
     # снаружи видно, что одобренность доставка проверяет, а не создаёт.
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
-    assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
+    assert commit[1] == (
+        "spec/WS-alpha-7-tasks.md", "spec/profiles/workstream.yaml"
+    )
     assert ("push_branch", "spec/WS-alpha-7-tasks") in ops.calls
     assert "draft" in ops.pr_body.lower()
     # Тело PR обещает ровно то, что PR делает: файлы бандла он не трогает.
     assert "Файлы бандла этот PR не трогает" in ops.pr_body
     assert "штамп" not in ops.pr_body
+    # devtools#386: профиль едет тем же коммитом, тело PR называет команду
+    # approve С профилем.
+    profile_rel, profile_text = task_bridge.stage_profile(
+        "WS-alpha-7", "workstreams/WS-alpha-7/spec"
+    )
+    assert (target / profile_rel).read_text(encoding="utf-8") == profile_text
+    assert task_bridge.approve_command("WS-alpha-7") in ops.pr_body
     # Пин tasks-спеки — blob decomposition ПОСЛЕ штампа (иначе протух бы в
     # том же PR): decomposition — терминальный узел _BUNDLE_DAG (Task 7).
     from governance.stale_adapter import blob_sha1
@@ -532,6 +541,53 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
     assert "- ограничение: без batching на старте" in spec_text
 
 
+def _deliver_alpha(target: Path, ops) -> int:
+    return task_bridge.deliver(
+        target_dir=str(target),
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        base_ref="master",
+        ops=ops,
+    )
+
+
+def test_deliver_keeps_identical_stage_profile_out_of_commit(
+    tmp_path: Path,
+) -> None:
+    """Профиль общий на репо: вторая доставка в тот же репо находит эталон
+    на месте и в коммит его не берёт — диф tasks-PR остаётся прозой."""
+    target = _target(tmp_path)
+    rel, text = task_bridge.stage_profile(
+        "WS-alpha-7", "workstreams/WS-alpha-7/spec"
+    )
+    (target / rel).parent.mkdir(parents=True)
+    (target / rel).write_text(text, encoding="utf-8")
+    ops = _StubOps()
+    assert _deliver_alpha(target, ops) == 77
+    commit = next(c for c in ops.calls if c[0] == "commit_paths")
+    assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
+
+
+def test_deliver_refuses_hand_edited_stage_profile_before_branch(
+    tmp_path: Path,
+) -> None:
+    """Чужую правку общего профиля мост не перезаписывает молча — и отказ
+    приходит ДО ветки доставки, как у прочих гардов."""
+    target = _target(tmp_path)
+    rel, text = task_bridge.stage_profile(
+        "WS-alpha-7", "workstreams/WS-alpha-7/spec"
+    )
+    (target / rel).parent.mkdir(parents=True)
+    (target / rel).write_text(text + "# правка\n", encoding="utf-8")
+    ops = _StubOps()
+    with pytest.raises(RuntimeError, match="отличается от эталона"):
+        _deliver_alpha(target, ops)
+    assert not any(c[0] == "ensure_branch" for c in ops.calls)
+    assert (target / rel).read_text(encoding="utf-8").endswith("# правка\n")
+
+
 def test_deliver_commits_s8_evidence_with_tasks(tmp_path: Path) -> None:
     """E0.6b: S8 evidence и tasks — один commit, одна ветка, один PR."""
     target = _target(tmp_path)
@@ -559,6 +615,7 @@ def test_deliver_commits_s8_evidence_with_tasks(tmp_path: Path) -> None:
         "commit_paths",
         (
             "spec/WS-alpha-7-tasks.md",
+            "spec/profiles/workstream.yaml",
             "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl",
         ),
     )]
@@ -984,41 +1041,25 @@ def _target_legacy(tmp_path: Path) -> Path:
     return target
 
 
-def test_conform_legacy_normalizes_to_behaviour_spec_no_design_read(
+def test_check_approved_legacy_anchors_on_behaviour_spec(
     tmp_path: Path,
 ) -> None:
-    """Step 3b: `conform_approved(..., legacy_bundle=3)` якорит на
-    behaviour-spec и не читает 20-design.md (бандл его не несёт вовсе —
-    отсутствие файла не должно всплыть traceback'ом)."""
-    from governance.stale_adapter import blob_sha1
-
+    """`check_approved(..., legacy_bundle=3)` якорит на behaviour-spec и не
+    читает 20-design.md (бандл его не несёт вовсе — отсутствие файла не
+    должно всплыть traceback'ом)."""
     target = _target_legacy(tmp_path)
-    spec_dir = target / "spec"
-    spec_dir.mkdir()
-    (spec_dir / "WS-alpha-7-tasks.md").write_text(
-        "---\nspec_stage: tasks\nstatus: approved\nversion: 2\n"
-        "traces_to:\n- design\nupstream_hashes:\n  design: " + "2" * 40 + "\n"
-        "---\n\n## Milestone 1: s\n",
-        encoding="utf-8",
-    )
-    changed = task_bridge.conform_approved(
+    _stamped_tasks(target, "15-behaviour-spec.md", extra=["BEH-01"])
+    before = (target / "spec/WS-alpha-7-tasks.md").read_bytes()
+    task_bridge.check_approved(
         str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec",
         legacy_bundle=3,
     )
-    assert changed is True
-    meta, _ = task_bridge.split_frontmatter(
-        (spec_dir / "WS-alpha-7-tasks.md").read_text(encoding="utf-8")
-    )
-    assert meta["traces_to"] == ["behaviour-spec"]
-    assert meta["upstream_hashes"] == {
-        "behaviour-spec": blob_sha1(
-            (target / "workstreams/WS-alpha-7/spec/15-behaviour-spec.md")
-            .read_text(encoding="utf-8")
-        )
-    }
+    assert (target / "spec/WS-alpha-7-tasks.md").read_bytes() == before
 
 
-def test_conform_legacy_bundle_without_flag_refuses(tmp_path: Path) -> None:
+def test_check_approved_legacy_bundle_without_flag_refuses(
+    tmp_path: Path,
+) -> None:
     """Без флага на легаси-бандле (approved tasks-спека, но 20-design.md
     нет) — тот же RuntimeError с процедурой, не сырой traceback."""
     target = _target_legacy(tmp_path)
@@ -1029,7 +1070,7 @@ def test_conform_legacy_bundle_without_flag_refuses(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(RuntimeError) as exc_info:
-        task_bridge.conform_approved(
+        task_bridge.check_approved(
             str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec",
         )
     message = str(exc_info.value)
@@ -1086,7 +1127,9 @@ def test_deliver_legacy_bundle_writes_spec_anchored_on_behaviour(
     # входят вовсе (§I7). Это наблюдаемое следствие, по которому
     # снаружи видно, что одобренность доставка проверяет, а не создаёт.
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
-    assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
+    assert commit[1] == (
+        "spec/WS-alpha-7-tasks.md", "spec/profiles/workstream-legacy3.yaml"
+    )
     # секция резолюций design не рендерится вовсе — легаси-бандл design
     # текста не несёт
     assert "Решения открытых вопросов" not in spec.read_text()
@@ -1182,76 +1225,101 @@ def test_deliver_reads_design_only_after_base_checkout(tmp_path: Path) -> None:
     assert pr == 77
 
 
-def test_conform_normalizes_after_approve(tmp_path: Path) -> None:
-    """Task 7: якорь — decomposition (терминальный узел `_BUNDLE_DAG`), не
-    behaviour-spec. Регрессия: изменённый вручную (или унаследованный от
-    старого поведения) `traces_to: [behaviour-spec]` нормализуется К
-    decomposition, а НЕ откатывается обратно к behaviour-spec."""
-    from governance.stale_adapter import blob_sha1
+def _stamped_tasks(
+    target: Path,
+    anchor_filename: str = "30-decomposition.md",
+    *,
+    extra: list[str] | None = None,
+    pin: str | None = None,
+    status: str = "approved",
+) -> None:
+    """tasks-спека в форме, которую пишет `spec approve tasks --profile`.
 
-    target = _target(tmp_path)
+    spec-runner сохраняет существующий `traces_to` первым и дописывает
+    найденные в узле id; пин — git blob ТЕКУЩИХ байтов узла (живой замер
+    на spec-runner 4.1.0, devtools#386).
+    """
+    from governance.stale_adapter import blob_sha1_bytes
+
+    anchor = anchor_filename.split("-", 1)[1].removesuffix(".md")
+    node = target / "workstreams/WS-alpha-7/spec" / anchor_filename
+    blob = pin or blob_sha1_bytes(node.read_bytes())
+    traces = "".join(f"- {t}\n" for t in [anchor, *(extra or [])])
     spec_dir = target / "spec"
-    spec_dir.mkdir()
+    spec_dir.mkdir(exist_ok=True)
     (spec_dir / "WS-alpha-7-tasks.md").write_text(
-        "---\n"
-        "spec_stage: tasks\n"
-        "status: approved\n"
-        "version: 2\n"
+        f"---\nspec_stage: tasks\nstatus: {status}\nversion: 3\n"
         "approved_by: andrei-shtanakov\n"
-        "traces_to:\n- behaviour-spec\n"
-        "upstream_hashes:\n  behaviour-spec: " + "1" * 40 + "\n"
+        f"traces_to:\n{traces}upstream_hashes:\n  {anchor}: {blob}\n"
         "---\n\n## Milestone 1: s\n",
         encoding="utf-8",
     )
-    changed = task_bridge.conform_approved(
-        str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
-    )
-    assert changed is True
-    meta, body = task_bridge.split_frontmatter(
-        (spec_dir / "WS-alpha-7-tasks.md").read_text(encoding="utf-8")
-    )
-    assert meta["traces_to"] == ["decomposition"]
-    assert meta["upstream_hashes"] == {
-        "decomposition": blob_sha1(
-            (target / "workstreams/WS-alpha-7/spec/30-decomposition.md")
-            .read_text(encoding="utf-8")
-        )
-    }
-    # поля approve владельца не тронуты
-    assert meta["status"] == "approved"
-    assert meta["approved_by"] == "andrei-shtanakov"
-    assert "## Milestone 1: s" in body
-    # идемпотентность: второй прогон НЕ трогает уже нормализованный якорь
-    assert task_bridge.conform_approved(
-        str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
-    ) is False
-    meta2, _ = task_bridge.split_frontmatter(
-        (spec_dir / "WS-alpha-7-tasks.md").read_text(encoding="utf-8")
-    )
-    assert meta2["traces_to"] == ["decomposition"]
 
 
-def test_conform_refuses_draft(tmp_path: Path) -> None:
-    """Инвариант №4: нормализация — ПОСЛЕ человеческого approve, не вместо."""
+def test_check_approved_accepts_spec_runner_stamp_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Расширенный `traces_to` (якорь + id из узла) — законная форма штампа
+    spec-runner, а не повод переписывать: мост только проверяет."""
     target = _target(tmp_path)
-    spec_dir = target / "spec"
-    spec_dir.mkdir()
-    (spec_dir / "WS-alpha-7-tasks.md").write_text(
-        "---\nspec_stage: tasks\nstatus: draft\n---\n\nbody\n",
+    _stamped_tasks(target, extra=["AC-01", "BEH-01", "DT-01"])
+    before = (target / "spec/WS-alpha-7-tasks.md").read_bytes()
+    task_bridge.check_approved(
+        str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
+    )
+    assert (target / "spec/WS-alpha-7-tasks.md").read_bytes() == before
+
+
+def test_check_approved_refuses_stale_pin(tmp_path: Path) -> None:
+    """Пин не на текущие байты узла — approve шёл без профиля (либо узел
+    правили после). Отказ называет команду С профилем."""
+    target = _target(tmp_path)
+    _stamped_tasks(target, pin="1" * 40)
+    with pytest.raises(RuntimeError) as exc_info:
+        task_bridge.check_approved(
+            str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
+        )
+    assert (
+        "spec-runner spec approve tasks --profile workstream "
+        "--spec-prefix WS-alpha-7-"
+    ) in str(exc_info.value)
+
+
+def test_check_approved_refuses_foreign_first_trace(tmp_path: Path) -> None:
+    """`traces_to` обязан начинаться с якоря — по нему `_previous_dag`
+    опознаёт состав доставки."""
+    target = _target(tmp_path)
+    _stamped_tasks(target)
+    rel = target / "spec/WS-alpha-7-tasks.md"
+    rel.write_text(
+        rel.read_text(encoding="utf-8").replace(
+            "traces_to:\n- decomposition\n",
+            "traces_to:\n- behaviour-spec\n- decomposition\n",
+        ),
         encoding="utf-8",
     )
-    with pytest.raises(RuntimeError, match="approve"):
-        task_bridge.conform_approved(
+    with pytest.raises(RuntimeError, match="traces_to начинается"):
+        task_bridge.check_approved(
             str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
         )
 
 
-def _conform_state(target: Path, monkeypatch):
-    """Леджер прогона для `--conform-approve`.
+def test_check_approved_refuses_draft(tmp_path: Path) -> None:
+    """Инвариант №4: доставляется штамп человеческого approve, не вместо."""
+    target = _target(tmp_path)
+    _stamped_tasks(target, status="draft")
+    with pytest.raises(RuntimeError, match="spec approve tasks --profile"):
+        task_bridge.check_approved(
+            str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
+        )
+
+
+def _approve_state(target: Path, monkeypatch):
+    """Леджер прогона для `--deliver-approve`.
 
     Гейта §I12 на этом пути НЕТ (контракт перечисляет гейтируемые пути
-    поимённо и `--conform-approve` в них не входит), но леджер прогона
-    нужен всё равно: `deliver_conform` берёт из него target, слаг и
+    поимённо и `--deliver-approve` в них не входит), но леджер прогона
+    нужен всё равно: `deliver_approve` берёт из него target, слаг и
     bundle_dir.
     """
     from governance import run_state as rs
@@ -1261,7 +1329,7 @@ def _conform_state(target: Path, monkeypatch):
         subject="s", repo="alpha", repo_slug="owner/alpha",
         ws_id="WS-alpha-7", target_dir=str(target),
         bundle_dir="workstreams/WS-alpha-7/spec", profile=None,
-        run_id="r-conform",
+        run_id="r-approve",
     )
     state.status = "completed"
     state.base_ref = "master"
@@ -1269,7 +1337,7 @@ def _conform_state(target: Path, monkeypatch):
     return state
 
 
-class _ConformOps(_StubOps):
+class _ApproveOps(_StubOps):
     def __init__(self, existing_pr: int | None = None) -> None:
         super().__init__()
         self.existing_pr = existing_pr
@@ -1281,63 +1349,43 @@ class _ConformOps(_StubOps):
         return self.existing_pr
 
 
-def _approved_tasks(target: Path) -> None:
-    spec_dir = target / "spec"
-    spec_dir.mkdir(exist_ok=True)
-    (spec_dir / "WS-alpha-7-tasks.md").write_text(
-        "---\nspec_stage: tasks\nstatus: approved\nversion: 2\n"
-        "traces_to:\n- behaviour-spec\n- design\n"
-        "---\n\nbody\n",
-        encoding="utf-8",
-    )
-
-
-def test_deliver_conform_opens_pr(tmp_path: Path, monkeypatch) -> None:
+def test_deliver_approve_opens_pr(tmp_path: Path, monkeypatch) -> None:
     target = _target(tmp_path)
-    _approved_tasks(target)
-    ops = _ConformOps()
-    pr = task_bridge.deliver_conform(
-        _conform_state(target, monkeypatch),
-        ops,
-    )
+    _stamped_tasks(target)
+    ops = _ApproveOps()
+    pr = task_bridge.deliver_approve(_approve_state(target, monkeypatch), ops)
     assert pr == 77
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
     assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
     assert ("push_branch", "spec/WS-alpha-7-tasks-approve") in ops.calls
 
 
-def test_deliver_conform_rerun_updates_existing_pr(
+def test_deliver_approve_rerun_updates_existing_pr(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Приёмка PR #117, круги 1–2: при открытом PR ветки второй PR не
     создаётся, но свежий незакоммиченный approve-штамп ДОСТАВЛЯЕТСЯ —
-    нормализация, коммит и push идут в ту же ветку."""
+    коммит и push идут в ту же ветку, а байты штампа не переписаны."""
     target = _target(tmp_path)
-    _approved_tasks(target)
-    ops = _ConformOps(existing_pr=88)
-    pr = task_bridge.deliver_conform(
-        _conform_state(target, monkeypatch),
-        ops,
-    )
+    _stamped_tasks(target, extra=["BEH-01"])
+    before = (target / "spec/WS-alpha-7-tasks.md").read_bytes()
+    ops = _ApproveOps(existing_pr=88)
+    pr = task_bridge.deliver_approve(_approve_state(target, monkeypatch), ops)
     assert pr == 88
     names = [c[0] for c in ops.calls]
     assert names == ["find_pr", "ensure_branch", "commit_paths", "push_branch"]
-    # содержимое действительно нормализовано, не только найден PR
-    meta, _ = task_bridge.split_frontmatter(
-        (target / "spec/WS-alpha-7-tasks.md").read_text(encoding="utf-8")
-    )
-    assert meta["traces_to"] == ["decomposition"]
+    assert (target / "spec/WS-alpha-7-tasks.md").read_bytes() == before
 
 
-def test_deliver_conform_runs_over_unapproved_dag(
+def test_deliver_approve_runs_over_unapproved_dag(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Гейт §I12 на `--conform-approve` НЕ стоит (минор ревью #191, круг 2).
+    """Гейт §I12 на `--deliver-approve` НЕ стоит (минор ревью #191, круг 2).
 
     Контракт перечисляет гейтируемые пути поимённо — первая доставка,
-    `--supersede`, `--replace-revision` — и отдельно предупреждает не
-    путать с `--conform-approve`: тот нормализует frontmatter TASKS-спеки
-    по штампу владельца и узлов бандла не читает вовсе.
+    `--supersede`, `--replace-revision`; доставка штампа tasks-спеки узлов
+    бандла не судит (допуск по статусу узла проверяет сам `spec approve`
+    по профилю).
 
     Фикстура доводится до состояния, на котором гейт отказал бы
     ГАРАНТИРОВАННО: каждый узел DAG возвращён в `draft` со снятой
@@ -1354,60 +1402,115 @@ def test_deliver_conform_runs_over_unapproved_dag(
                     node_approval.SELF_HASH_KEY):
             meta.pop(key, None)
         path.write_text(join_frontmatter(meta, body), encoding="utf-8")
-    _approved_tasks(target)
-    ops = _ConformOps()
-    pr = task_bridge.deliver_conform(
-        _conform_state(target, monkeypatch),
-        ops,
-    )
+    _stamped_tasks(target)
+    ops = _ApproveOps()
+    pr = task_bridge.deliver_approve(_approve_state(target, monkeypatch), ops)
     assert pr == 77
     assert ("push_branch", "spec/WS-alpha-7-tasks-approve") in ops.calls
 
 
-def test_deliver_conform_legacy_mismatch_refuses_before_ops(
+def test_deliver_approve_unstamped_refuses_before_ops(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Штамп без профиля (устаревший пин) — отказ ДО ветки: отказ не должен
+    оставлять в target созданную approve-ветку."""
+    target = _target(tmp_path)
+    _stamped_tasks(target, pin="1" * 40)
+    ops = _ApproveOps()
+    with pytest.raises(RuntimeError, match="--profile workstream"):
+        task_bridge.deliver_approve(_approve_state(target, monkeypatch), ops)
+    assert not ops.calls
+
+
+def test_deliver_approve_legacy_mismatch_refuses_before_ops(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Находка 1 финального ревью: `--legacy-bundle` с несовпадающим
     фактическим составом отказывает RuntimeError'ом по составу И до
-    любых вызовов ops (find_pr/ensure_branch) — `_check_bundle_composition`
-    стоит в начале `deliver_conform`, до side-эффектов."""
+    любых вызовов ops (find_pr/ensure_branch)."""
     target = _target(tmp_path)  # полный 5-узловой бандл (с decomposition)
-    _approved_tasks(target)
-    ops = _ConformOps()
+    _stamped_tasks(target)
+    ops = _ApproveOps()
     with pytest.raises(RuntimeError, match="не совпадает"):
-        task_bridge.deliver_conform(
-            _conform_state(target, monkeypatch),
+        task_bridge.deliver_approve(
+            _approve_state(target, monkeypatch),
             ops,
             legacy_bundle=3,
         )
-    assert not any(c[0] == "find_pr" for c in ops.calls)
-    assert not any(c[0] == "ensure_branch" for c in ops.calls)
+    assert not ops.calls
 
 
-def test_conform_approved_missing_bundle_dir_names_configuration(
+def test_check_approved_missing_bundle_dir_names_configuration(
     tmp_path: Path,
 ) -> None:
     target = tmp_path / "alpha"
     target.mkdir()
 
     with pytest.raises(RuntimeError, match="каталога бандла") as failure:
-        task_bridge.conform_approved(
+        task_bridge.check_approved(
             str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
         )
     assert "bundle_dir в run.json" in str(failure.value)
 
 
-def test_deliver_conform_missing_bundle_dir_refuses_before_ops(
+def test_deliver_approve_missing_bundle_dir_refuses_before_ops(
     tmp_path: Path, monkeypatch
 ) -> None:
     target = tmp_path / "alpha"
     target.mkdir()
-    ops = _ConformOps()
+    ops = _ApproveOps()
 
     with pytest.raises(RuntimeError, match="каталога бандла") as failure:
-        task_bridge.deliver_conform(_conform_state(target, monkeypatch), ops)
+        task_bridge.deliver_approve(_approve_state(target, monkeypatch), ops)
     assert "bundle_dir в run.json" in str(failure.value)
     assert not ops.calls
+
+
+# --- stage-профиль spec-runner (devtools#386) --------------------------------
+
+
+@pytest.mark.parametrize(
+    ("legacy", "name", "anchor", "filename"),
+    [
+        (None, "workstream", "decomposition", "30-decomposition.md"),
+        (5, "workstream", "decomposition", "30-decomposition.md"),
+        (4, "workstream-legacy4", "design", "20-design.md"),
+        (3, "workstream-legacy3", "behaviour-spec", "15-behaviour-spec.md"),
+    ],
+)
+def test_stage_profile_declares_anchor_as_external_upstream(
+    legacy, name, anchor, filename
+) -> None:
+    """Форма профиля — та, что прошла живой `spec approve tasks` на
+    spec-runner 4.1.0 (devtools#386): якорь — внешняя стадия по пути с
+    плейсхолдером `{ws}`, tasks — её единственный downstream."""
+    import yaml
+
+    rel, text = task_bridge.stage_profile(
+        "WS-alpha-7", "workstreams/WS-alpha-7/spec", legacy
+    )
+    assert rel == f"spec/profiles/{name}.yaml"
+    doc = yaml.safe_load(text)
+    assert doc["name"] == name
+    external, tasks = doc["stages"]
+    assert external == {
+        "name": anchor,
+        "external": True,
+        "path": f"workstreams/{{ws}}/spec/{filename}",
+        "upstream": [],
+    }
+    assert tasks["name"] == "tasks"
+    assert tasks["upstream"] == [anchor]
+    assert f"--profile {name} " in task_bridge.approve_command(
+        "WS-alpha-7", legacy
+    )
+
+
+def test_stage_profile_refuses_non_default_bundle_dir() -> None:
+    """Плейсхолдер `{ws}` выражает только `workstreams/<ws>/spec`: профиль,
+    указывающий мимо бандла, хуже отказа."""
+    with pytest.raises(RuntimeError, match="workstreams/\\{ws\\}/spec"):
+        task_bridge.stage_profile("WS-alpha-7", "elsewhere/spec")
 
 
 # --- группировка по файлу цели (@id:task-bridge-beh-grouping, урок 8) -------
@@ -2226,7 +2329,7 @@ def test_waived_task_points_its_source_at_the_declaration() -> None:
 
 
 def test_render_dt_frontmatter_traces_decomposition_from_birth() -> None:
-    """Рендер (не conform!) сразу пишет traces_to: [decomposition] и
+    """Рендер (не approve!) сразу пишет traces_to: [decomposition] и
     upstream_hashes: {decomposition: "<blob 30-decomposition.md>"}."""
     scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
     dt_tasks, _ = decomposition_guard.parse_dt_tasks(DT_TWO_MD)
@@ -2764,7 +2867,9 @@ def test_legacy_5_goes_dt_path_with_graph_validation(tmp_path: Path) -> None:
     # входят вовсе (§I7). Это наблюдаемое следствие, по которому
     # снаружи видно, что одобренность доставка проверяет, а не создаёт.
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
-    assert commit[1] == ("spec/WS-alpha-7-tasks.md",)
+    assert commit[1] == (
+        "spec/WS-alpha-7-tasks.md", "spec/profiles/workstream.yaml"
+    )
 
 
 def test_deliver_refuses_bare_file_target_for_exunit_before_branch(
@@ -3208,6 +3313,7 @@ def test_deliver_for_run_write_ahead_op_and_completion(
     )
     assert ("commit_paths", (
         "spec/WS-alpha-7-tasks.md",
+        "spec/profiles/workstream.yaml",
         "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl",
     )) in ops.calls
     # Повтор: op completed → ни одного нового ЭФФЕКТА. База при этом
@@ -6781,21 +6887,32 @@ def test_cli_supersede_with_abandon_revision_refuses(
     [["--supersede"], ["--abandon-revision", "2", "--reason", "р"]],
     ids=["supersede", "abandon"],
 )
-def test_cli_conform_approve_with_other_action_refuses(
+def test_cli_deliver_approve_with_other_action_refuses(
     extra, tmp_path, monkeypatch, capsys
 ):
-    """`--conform-approve` — третье действие, и оно тоже не молчит (C-6).
+    """`--deliver-approve` — третье действие, и оно тоже не молчит (C-6).
 
     Диспетчер проверяет флаги по очереди, поэтому без гварда первый
-    сработавший молча съедал бы `--conform-approve` — та же «победа
+    сработавший молча съедал бы `--deliver-approve` — та же «победа
     второго флага», ради которой отбито `--supersede`+`--abandon-revision`.
     """
     from governance import task_bridge as tb
 
     with pytest.raises(SystemExit) as exc:
-        tb.main(["--run-id", "r", "--conform-approve", *extra])
+        tb.main(["--run-id", "r", "--deliver-approve", *extra])
     assert exc.value.code == 2
-    assert "--conform-approve" in capsys.readouterr().err
+    assert "--deliver-approve" in capsys.readouterr().err
+
+
+def test_cli_conform_approve_is_removed_with_a_named_way(capsys) -> None:
+    """Снятый флаг отказывает с причиной и называет замену (devtools#386)."""
+    from governance import task_bridge as tb
+
+    with pytest.raises(SystemExit) as exc:
+        tb.main(["--run-id", "r", "--conform-approve"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "devtools#386" in err and "--deliver-approve" in err
 
 
 def test_cli_abandon_revision_requires_reason(tmp_path, monkeypatch, capsys):
@@ -8876,7 +8993,7 @@ def test_supersede_resume_reproduces_the_same_bytes(tmp_path, monkeypatch):
 #
 # Прежде эти свойства проверялись через штамп, который звал гвард первым
 # делом. Штампа нет, гвард остался — его зовут `deliver` и
-# `conform_approved`; сменилась точка входа, не свойство. Четвёртый тест
+# `check_approved`; сменилась точка входа, не свойство. Четвёртый тест
 # той же группы (`_prospective_anchor` на неполном бандле) удалён: его
 # предметом была теневая копия заявленного подмножества, а копии больше
 # нет — anchor читает один файл, который либо есть, либо нет.

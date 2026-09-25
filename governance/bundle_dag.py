@@ -126,7 +126,7 @@ def dag_for(
     acceptance-узла — decomposition этой эры пинует только design). Иное
     значение — ValueError, argparse (`choices=(3, 4, 5)`) отсекает его на
     CLI-границе раньше, но функция вызывается и напрямую (тесты,
-    `stamp_bundle_approved`/`conform_approved`/`deliver`/`deliver_conform`).
+    `stamp_bundle_approved`/`check_approved`/`deliver`/`deliver_approve`).
     """
     if legacy_bundle is None:
         return BUNDLE_DAG

@@ -338,8 +338,8 @@ def _render_header(
 
     Форма активного governance-профиля сразу при рождении (урок 1
     ретроспективы): traces_to/upstream_hashes переживают `spec approve`
-    (он мержит traces и не трогает существующий пин), так что рукам после
-    approve остаётся только нормализация `--conform-approve`.
+    (он мержит traces к существующим), а с stage-профилем (devtools#386)
+    approve сам перепинивает узел — нормализации после него нет.
 
     `version` (Task 7 плана supersede): номер ревизии tasks-спеки —
     `1` у первой доставки, `_previous_tasks_version(state) + 1` у
@@ -1279,7 +1279,7 @@ def _content_anchor(
     голым `FileNotFoundError` — мимо `except RuntimeError` в `main`, то
     есть трассировкой вместо процедуры. Гвард состава называет и файл, и
     что делать; он же стоит первым у `--approve-node` и у
-    `--conform-approve`, и расходиться этим путям незачем.
+    `--deliver-approve`, и расходиться этим путям незачем.
     """
     dag = _dag_for(legacy_bundle)
     _check_bundle_composition(target_dir, bundle_dir, dag)
@@ -1334,54 +1334,134 @@ def _prospective_anchor(
     return blob_sha1(path.read_text(encoding="utf-8"))
 
 
-def conform_approved(
+#: Имя stage-профиля spec-runner по составу бандла. Полный DAG и
+#: `--legacy-bundle=5` якорятся на одном узле (decomposition) — профиль у них
+#: общий; 3/4 якорятся на behaviour-spec/design и получают свой.
+_STAGE_PROFILE_NAMES: dict[int | None, str] = {
+    None: "workstream",
+    5: "workstream",
+    3: "workstream-legacy3",
+    4: "workstream-legacy4",
+}
+
+
+def stage_profile(
+    ws_id: str, bundle_dir: str, legacy_bundle: int | None = None
+) -> tuple[str, str]:
+    """Repo-local stage-профиль spec-runner → (путь в репо-цели, текст).
+
+    devtools#386 (from spec-runner#338): терминальный узел бандла объявлен
+    ВНЕШНЕЙ стадией, tasks — его downstream. Тогда `spec approve tasks
+    --profile <name>` сам проверяет допуск (узел существует и `approved`),
+    сам пишет `traces_to` и пинит `upstream_hashes` на git blob узла — то,
+    что прежде доводила нормализация `--conform-approve`.
+
+    Путь узла в профиле выражен плейсхолдером `{ws}`, поэтому профиль один
+    на репо и годится любому воркстриму — но только при раскладке по
+    умолчанию `workstreams/<ws_id>/spec`. Иную раскладку плейсхолдер не
+    выражает, и доставка отказывает, а не кладёт профиль, указывающий мимо
+    бандла.
+
+    Мост доставляет профиль вместе с tasks-спекой (`deliver`); стадия
+    `tasks` у spec-runner встроенная, её поля взяты из встроенного профиля.
+    """
+    if bundle_dir != f"workstreams/{ws_id}/spec":
+        raise RuntimeError(
+            f"bundle_dir={bundle_dir!r}: stage-профиль spec-runner выражает "
+            f"путь узла только как workstreams/{{ws}}/spec, а у этого прогона "
+            "бандл лежит иначе — `spec approve tasks` не нашёл бы узел"
+        )
+    anchor_filename = _dag_for(legacy_bundle)[-1][0]
+    anchor = _node_id(anchor_filename)
+    name = _STAGE_PROFILE_NAMES[legacy_bundle]
+    text = (
+        "# Сгенерировано task_bridge (devtools#386): терминальный узел бандла\n"
+        "# — внешняя стадия, tasks — её downstream. Не править руками: мост\n"
+        "# сверяет файл с эталоном при каждой доставке.\n"
+        f"name: {name}\n"
+        "stages:\n"
+        f"  - name: {anchor}\n"
+        "    external: true\n"
+        f'    path: "workstreams/{{ws}}/spec/{anchor_filename}"\n'
+        "    upstream: []\n"
+        "  - name: tasks\n"
+        "    template: tasks.template.md\n"
+        "    marker_prefix: SPEC_TASKS\n"
+        "    validator: tasks\n"
+        f"    upstream: [{anchor}]\n"
+    )
+    return f"spec/profiles/{name}.yaml", text
+
+
+def approve_command(ws_id: str, legacy_bundle: int | None = None) -> str:
+    """Команда человеческого approve tasks-спеки — одна на все подсказки."""
+    name = _STAGE_PROFILE_NAMES[legacy_bundle]
+    return (
+        f"spec-runner spec approve tasks --profile {name} "
+        f"--spec-prefix {ws_id}-"
+    )
+
+
+def _check_stage_profile(target_dir: str, rel: str, text: str) -> None:
+    """Профиль в репо-цели отсутствует или совпадает с эталоном — иначе отказ.
+
+    Чужую правку не перезаписываем молча: профиль общий на репо, и
+    расхождение значит, что его кто-то менял намеренно.
+    """
+    path = Path(target_dir) / rel
+    if path.exists() and path.read_text(encoding="utf-8") != text:
+        raise RuntimeError(
+            f"{path} отличается от эталона моста — профиль правили руками; "
+            "верните эталон (или удалите файл, мост положит его заново), "
+            "затем повторите доставку"
+        )
+
+
+def check_approved(
     target_dir: str,
     ws_id: str,
     bundle_dir: str,
     legacy_bundle: int | None = None,
-) -> bool:
-    """Нормализация frontmatter tasks-спеки ПОСЛЕ `spec approve` владельца.
+) -> None:
+    """Штамп владельца на tasks-спеке сделан `spec approve` С профилем.
 
-    Якорь — терминальный узел активного DAG (`_dag_for(legacy_bundle)`,
-    Task 7 плана acceptance-node: `None` и `5` — decomposition (полный DAG
-    либо `_BUNDLE_DAG_LEGACY5`), `3`/`4` — усечённый префикс,
-    behaviour-spec/design соответственно). Не хардкодится второй раз —
-    выводится из DAG, так что смена терминального
-    узла бандла правит DAG в одном месте, не эту функцию. Нормализация
-    возвращает форму активного governance-профиля: traces_to ровно
-    [<anchor>], пин — на ТЕКУЩИЙ blob вмерженного файла анкера (independent
-    от того, что туда дописал/недописал `spec approve` — lite-профиль
-    spec-runner не знает про наш DAG). Строгий run проверяет только
-    status — правка безопасна. Возвращает, менялся ли файл.
+    Проверка, а не нормализация (devtools#386): frontmatter пишет
+    spec-runner, мост его не переписывает. Признаки approve с профилем:
+    `status: approved`, `traces_to` начинается с якоря (spec-runner
+    дописывает к нему найденные в узле id — это его право, не дефект), и
+    `upstream_hashes` ровно `{якорь: blob узла}`. Approve без профиля
+    оставил бы пин доставки, который после правки узла устарел бы молча, —
+    поэтому пин сверяется с текущими байтами узла.
 
-    Состав бандла проверяется В НАЧАЛЕ (`_check_bundle_composition`) —
-    отсутствие файла-анкера (напр., design без флага на легаси-бандле)
-    ловится ТАМ явным RuntimeError с процедурой, не сырым traceback.
+    Состав бандла проверяется В НАЧАЛЕ — отсутствие файла-анкера
+    ловится явным RuntimeError с процедурой, не сырым traceback.
     """
     dag = _dag_for(legacy_bundle)
     _check_bundle_composition(target_dir, bundle_dir, dag)
     anchor_filename = dag[-1][0]
     anchor_node_id = _node_id(anchor_filename)
+    command = approve_command(ws_id, legacy_bundle)
     rel = Path(target_dir) / "spec" / f"{ws_id}-tasks.md"
-    meta, body = split_frontmatter(rel.read_text(encoding="utf-8"))
+    meta, _body = split_frontmatter(rel.read_text(encoding="utf-8"))
     if meta.get("status") != "approved":
         raise RuntimeError(
-            f"{rel.name}: status={meta.get('status')!r} — нормализация идёт "
-            "ПОСЛЕ человеческого `spec approve` (инвариант №4), сначала он"
+            f"{rel.name}: status={meta.get('status')!r} — доставляется "
+            f"штамп человеческого approve (инвариант №4), сначала `{command}`"
         )
     anchor = Path(target_dir) / bundle_dir / anchor_filename
-    pin = blob_sha1(anchor.read_text(encoding="utf-8"))
-    changed = False
-    if meta.get("traces_to") != [anchor_node_id]:
-        meta["traces_to"] = [anchor_node_id]
-        changed = True
-    want = {anchor_node_id: pin}
-    if meta.get("upstream_hashes") != want:
-        meta["upstream_hashes"] = want
-        changed = True
-    if changed:
-        rel.write_text(join_frontmatter(meta, body), encoding="utf-8")
-    return changed
+    want = {anchor_node_id: blob_sha1_bytes(anchor.read_bytes())}
+    traces = meta.get("traces_to")
+    if (
+        not isinstance(traces, list)
+        or not traces
+        or traces[0] != anchor_node_id
+        or meta.get("upstream_hashes") != want
+    ):
+        raise RuntimeError(
+            f"{rel.name}: frontmatter не несёт признаков approve с профилем "
+            f"(traces_to начинается с {anchor_node_id}, upstream_hashes = "
+            f"{want}); повторите `{command}`"
+        )
 
 
 # --- Перенос состояния исполнения в переиздание (§I11) --------------------
@@ -1739,6 +1819,11 @@ def deliver(
     dag = _dag_for(legacy_bundle)
     base = Path(target_dir) / bundle_dir
     _check_bundle_composition(target_dir, bundle_dir, dag)
+    # Stage-профиль (devtools#386) — ДО ветки, как и прочие гарды: отказ
+    # по раскладке или по чужой правке профиля не оставляет target на
+    # ветке доставки. Пишется ниже, тем же коммитом, что и спека.
+    profile_rel, profile_text = stage_profile(ws_id, bundle_dir, legacy_bundle)
+    _check_stage_profile(target_dir, profile_rel, profile_text)
     behaviour = base / "15-behaviour-spec.md"
     # Preflight: та же проверка, что стопит раннер `stopped_preflight`'ом —
     # target-профиль может не декларировать design/acceptance/decomposition
@@ -1909,6 +1994,11 @@ def deliver(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
     commit_paths = [rel]
+    profile_out = Path(target_dir) / profile_rel
+    if not profile_out.exists():
+        profile_out.parent.mkdir(parents=True, exist_ok=True)
+        profile_out.write_text(profile_text, encoding="utf-8")
+        commit_paths.append(profile_rel)
     if s8_verdicts is not None:
         evidence_rel = (
             Path("workstreams")
@@ -1959,10 +2049,12 @@ def deliver(
         "candidate-PR.\n\n"
         + evidence_note
         + "Спека managed: `status: draft` НЕ исполняется при "
-        "strict-governance — approve (перевод в approved) делает человек, "
-        f"затем `spec-runner run --strict --spec-prefix={ws_id}-` в "
-        "репо-владельце; после approve — нормализация frontmatter: "
-        f"`make behaviour-tasks ARGS='--run-id <id> --conform-approve'`."
+        "strict-governance — approve (перевод в approved) делает человек "
+        f"в репо-владельце: `{approve_command(ws_id, legacy_bundle)}` "
+        f"(stage-профиль `{profile_rel}` едет этим же PR), затем approve "
+        "доставляется "
+        "`make behaviour-tasks ARGS='--run-id <id> --deliver-approve'`, "
+        f"исполнение — `spec-runner run --strict --spec-prefix={ws_id}-`."
     )
     return ops.create_draft_pr(
         target_dir,
@@ -2077,9 +2169,9 @@ def _approved_dag_or_refuse(
 
     Гейтируемые ПУТИ КОНТРАКТА контракт называет поимённо: первая
     доставка (`deliver_for_run`), `--supersede` и `--replace-revision`
-    (обе последние входят через `deliver_superseded`). `--conform-approve`
-    сюда НЕ входит — он нормализует frontmatter tasks-спеки и узлов
-    бандла не читает.
+    (обе последние входят через `deliver_superseded`). `--deliver-approve`
+    сюда НЕ входит — он доставляет штамп tasks-спеки и узлов бандла не
+    судит.
 
     Путь контракта и место вызова — РАЗНЫЕ множества, и считать их одним
     числом нельзя (ревью #194): путей три, функций-вызывателей две, а
@@ -3865,23 +3957,25 @@ def deliver_superseded(
     return SupersedeResult("delivered", pr)
 
 
-def deliver_conform(
+def deliver_approve(
     state: RunState,
     ops: Ops,
     legacy_bundle: int | None = None,
 ) -> int:
-    """Нормализация после approve владельца → номер PR (нового или уже
+    """Доставка approve-штампа владельца PR-ом → номер PR (нового или уже
     открытого).
 
-    Глобального dirty-гарда здесь НЕТ намеренно: approve-штамп владельца
-    (`spec approve`) живёт в рабочем дереве незакоммиченным — он и есть
-    груз этого PR. commit_paths берёт только tasks-файл.
+    Штамп пишет `spec approve tasks --profile …` (devtools#386) — мост его
+    только ПРОВЕРЯЕТ (`check_approved`) и доставляет; прежняя нормализация
+    frontmatter (`--conform-approve`) снята: всё, что она доводила, теперь
+    делает spec-runner по stage-профилю.
 
-    Состав бандла проверяется В НАЧАЛЕ функции, ДО `ops.ensure_branch`
-    (Task 7 плана acceptance-node): здесь НЕТ ни dirty-гарда, ни
-    checkout, ни existence-гардов (их отсутствие — намеренный инвариант
-    выше) — отказ по составу не должен оставлять в target созданную
-    approve-ветку.
+    Глобального dirty-гарда здесь НЕТ намеренно: approve-штамп владельца
+    живёт в рабочем дереве незакоммиченным — он и есть груз этого PR.
+    commit_paths берёт только tasks-файл.
+
+    Проверка идёт В НАЧАЛЕ функции, ДО `ops.ensure_branch`: отказ не должен
+    оставлять в target созданную approve-ветку.
 
     Идемпотентность (приёмка PR #117, круги 1–2): при уже открытом PR
     ветки повторный запуск НЕ создаёт второй PR (`gh pr create` упал бы),
@@ -3892,31 +3986,22 @@ def deliver_conform(
     target_dir = state.target_dir
     repo_slug = state.repo_slug
     ws_id = state.ws_id
-    bundle_dir = state.bundle_dir
-    dag = _dag_for(legacy_bundle)
-    _check_bundle_composition(target_dir, bundle_dir, dag)
     # Гейта §I12 здесь НЕТ, и это не упущение. Контракт перечисляет
     # гейтируемые пути поимённо — «первая доставка, `--supersede`,
-    # `--replace-revision`» (§I12, таблица) — и отдельно предупреждает не
-    # путать с `--conform-approve`: тот нормализует frontmatter
-    # TASKS-СПЕКИ по штампу владельца и узлов бандла не читает вовсе.
-    # Гейт судит об одобренности узлов DAG; нормализация спеки к этому
-    # предмета не имеет, а поставленный сюда он запирал бы приведение
-    # спеки в порядок долгом совсем другого артефакта.
-    anchor_node_id = _node_id(dag[-1][0])
-    anchor_filename = dag[-1][0]
+    # `--replace-revision`» (§I12, таблица); доставка штампа TASKS-СПЕКИ
+    # узлов бандла не судит. Допуск по статусу узла проверяет сам
+    # `spec approve` по профилю.
+    check_approved(
+        target_dir, ws_id, state.bundle_dir, legacy_bundle=legacy_bundle
+    )
     branch = f"spec/{ws_id}-tasks-approve"
     existing = ops.find_pr(repo_slug, branch)
     ops.ensure_branch(target_dir, branch)
-    changed = conform_approved(
-        target_dir, ws_id, bundle_dir, legacy_bundle=legacy_bundle
-    )
     rel = f"spec/{ws_id}-tasks.md"
     ops.commit_paths(
         target_dir,
         [rel],
-        f"spec: {ws_id} tasks — approve-штамп владельца + нормализация "
-        "frontmatter (conform-approve)",
+        f"spec: {ws_id} tasks — approve-штамп владельца",
     )
     ops.push_branch(target_dir, branch)
     if existing is not None:
@@ -3925,20 +4010,13 @@ def deliver_conform(
         target_dir,
         repo_slug,
         branch,
-        f"spec: {ws_id} tasks — approve + нормализация frontmatter",
+        f"spec: {ws_id} tasks — approve",
         (
-            f"Approve-штамп владельца для spec/{ws_id}-tasks.md и "
-            "нормализация frontmatter под активный governance-профиль: "
-            f"traces_to ровно [{anchor_node_id}] (якорь — терминальный узел "
-            "_BUNDLE_DAG, либо его легаси-вариант при --legacy-bundle=3|4|5 "
-            "— 3/4 усечённый префикс до behaviour-spec/design, 5 — "
-            "отдельный _BUNDLE_DAG_LEGACY5 до раскатки acceptance-узла; "
-            "lite-профиль spec-runner может дописать/подменить traces — "
-            "других профилей у него нет, upstream-плечо заведено "
-            "отдельно), пин upstream_hashes — на текущий blob вмерженного "
-            f"{bundle_dir}/{anchor_filename}."
-            + ("" if changed else " Файл уже был конформен — PR несёт "
-               "только approve-штамп.")
+            f"Approve-штамп владельца для spec/{ws_id}-tasks.md, сделанный "
+            f"`{approve_command(ws_id, legacy_bundle)}`: допуск по статусу "
+            "узла, traces_to и пин upstream_hashes записал spec-runner по "
+            "stage-профилю; мост проверил, что пин совпадает с текущими "
+            "байтами узла, и frontmatter не переписывал."
         ),
         "",
     )
@@ -3949,9 +4027,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True)
     parser.add_argument(
-        "--conform-approve", action="store_true",
-        help="после `spec approve` владельца: нормализовать frontmatter "
-        "tasks-спеки и доставить approve-штамп PR-ом",
+        "--deliver-approve", action="store_true",
+        help="после `spec approve tasks --profile …` владельца: проверить "
+        "штамп и доставить его PR-ом",
+    )
+    # Снятый флаг (devtools#386) принимается парсером и ОТКАЗЫВАЕТ с
+    # названной причиной — «unrecognized arguments» не сказал бы, куда идти.
+    parser.add_argument(
+        "--conform-approve", action="store_true", help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--legacy-bundle", type=int, choices=(3, 4, 5), default=None,
@@ -4003,9 +4086,15 @@ def main(argv: list[str] | None = None) -> int:
              "требует --reason",
     )
     args = parser.parse_args(argv)
+    if args.conform_approve:
+        parser.error(
+            "--conform-approve снят (devtools#386): frontmatter tasks-спеки "
+            "теперь пишет `spec approve tasks --profile …` сам, мост его не "
+            "нормализует. Доставка штампа — `--deliver-approve`"
+        )
     others = {
         "--supersede": args.supersede,
-        "--conform-approve": args.conform_approve,
+        "--deliver-approve": args.deliver_approve,
         "--abandon-revision": args.abandon_revision is not None,
         "--replace-revision": args.replace_revision is not None,
     }
@@ -4028,14 +4117,14 @@ def main(argv: list[str] | None = None) -> int:
             "--supersede и --abandon-revision — разные действия: "
             "сначала абандоньте ревизию, затем запускайте переиздание"
         )
-    if args.conform_approve and (
+    if args.deliver_approve and (
         args.supersede or args.abandon_revision is not None
     ):
         # Та же мотивировка, доведённая до конца (minor C-6): диспетчер
         # ниже проверяет --abandon-revision, затем --supersede, затем
-        # --conform-approve, и первый сработавший молча съедал остальные.
+        # --deliver-approve, и первый сработавший молча съедал остальные.
         parser.error(
-            "--conform-approve — третье отдельное действие: запускайте "
+            "--deliver-approve — третье отдельное действие: запускайте "
             "его отдельным прогоном, не вместе с --supersede/"
             "--abandon-revision"
         )
@@ -4141,18 +4230,15 @@ def main(argv: list[str] | None = None) -> int:
         if result.kind == "delivered":
             print(f"переизданная tasks-спека доставлена: PR #{result.pr}")
         return 0
-    if args.conform_approve:
+    if args.deliver_approve:
         try:
-            pr = deliver_conform(
+            pr = deliver_approve(
                 state, ops, legacy_bundle=args.legacy_bundle
             )
         except RuntimeError as exc:
             print(f"task_bridge: {exc}")
             return 1
-        print(
-            f"approve-штамп + нормализация доставлены: PR #{pr} "
-            f"({state.repo_slug})"
-        )
+        print(f"approve-штамп доставлен: PR #{pr} ({state.repo_slug})")
         return 0
     # Доставка — только через deliver_for_run (durable reconciliation,
     # кнопка spec-loop): write-ahead op tasks-deliver + поиск уже
