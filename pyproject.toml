@@ -23,7 +23,10 @@ plan-fields = { git = "https://github.com/andrei-shtanakov/dispatcher", rev = "f
 steward = { git = "https://github.com/andrei-shtanakov/steward", rev = "2c71ed770015f6baa00dedc708e8c0bbc5a8e41b" }
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "jsonschema>=4",
+    "pytest>=8",
+]
 # Только для governance-контура (спека §3/§4): steward — content-check API S4,
 # textual — behaviour console (Task 4, интерактивная TUI-ветка). Оба импортируются
 # лениво внутри console.py (textual — в _build_app; console_model, который тянет

@@ -1,0 +1,9 @@
+[Unit]
+Description=R16: hourly catch-up; the runner itself decides run/done/gave-up
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

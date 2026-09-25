@@ -217,7 +217,8 @@ R16 — еженедельная проверка утверждений KB о �
    `launchctl bootout gui/$UID/dev.atp.r16-kb-freshness`, plist удаляется
    из `~/Library/LaunchAgents`. Прогон не идёт, если блокировка
    `_cowork_output/cadence/r16/receipts/.lock` захватывается без ожидания
-   (`flock -n`). Тем же шагом в `_cowork_output/ops/r2-liveness-check.sh`
+   (на macOS нет `flock(1)` — проверка через Python `fcntl`, как в
+   раннере; команда — `deploy/r16/README.md`). Тем же шагом в `_cowork_output/ops/r2-liveness-check.sh`
    выключается блок R16 (§2.4). С этого момента ни один исполнитель не
    активен.
 3. **Снимок.** Каталог квитанций копируется в `/srv/r16/state/receipts/`
@@ -244,7 +245,8 @@ R16 — еженедельная проверка утверждений KB о �
 1. `systemctl disable --now r16-kb-freshness.timer`. Это запрещает только
    **новые** запуски: уже идущий прогон продолжает писать;
 2. дождаться, пока `systemctl is-active r16-kb-freshness.service`
-   вернёт `inactive`, и проверить, что блокировка свободна:
+   покажет, что юнит вышел из `activating`/`active` (после `ok: false`
+   oneshot-юнит остаётся `failed`, а не `inactive`), и проверить, что блокировка свободна:
    `sudo -u r16 flock -n /srv/r16/state/r16.lock true` проходит. Пока
    любое из двух не выполнено, состояние не переносится;
 3. квитанции скопировать обратно на Mac (они новее) тем же способом, что

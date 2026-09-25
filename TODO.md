@@ -2587,6 +2587,19 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       нестандартных раскладок 0. Правка — проверка в `start` раннера /
       spec-loop (и в восстановлении `_bundle_dir_from_pr_files`).
 
+- [ ] R16 runner: несогласованный вывод аудитора и исключение внутри прогона не должны давать «чистую неделю» или ложный `missed` @owner:github:andrei-shtanakov @id:r16-runner-output-integrity @epic:eco.tooling
+      Находки ревью PR #399 (major medium + 2 minor), поведение перенесено из
+      `run.py` дословно (спека §0 п.5), поэтому не чинилось в переносе:
+      (1) `problems()` строит claims только из разобранных verdict-строк и не
+      сверяет их со счётчиками summary — summary `changed: 2` без verdict-строк
+      закроет issue как «все unchanged»; (2) исключение после `decide()=run`
+      не оставляет квитанции — попытка не засчитана (MAX_ATTEMPTS обходится),
+      а следующий цикл пометит этот `missed`; (3) `statuses` — открытый
+      pass-through summary в закрытую схему: новый статус аудитора сделает
+      квитанции невалидными по v1. Правка — несогласованность = `failed`,
+      `try/except` вокруг тела цикла с квитанцией `failed`, фильтр statuses по
+      известному набору.
+
 - [x] ~~Мост выводит `**Scenarios:**` в verify-задачах (inbox devtools#388, slug: verify-task-scenarios-line; from: spec-runner#402)~~ @owner:github:andrei-shtanakov @id:verify-task-scenarios-line @epic:eco.dark-factory — НЕ ДЕЛАЕТСЯ: #388 закрыт not planned 2026-09-25 по замеру
       Доставлено у соседа PR spec-runner#590 (`4d10e5b`), вошло в 4.1.0.
       Рядом с `**Mode:** verify_first` рендер verify-задачи в
@@ -2616,3 +2629,10 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       пользователь `r16`; зона `Asia/Tbilisi` в коде; пункт 5 заявки
       отложен; сторож Mac выключается с названной дырой). Пункт
       закрывается после приёмки развёртывания (§4.4), не после мержа кода.
+      **Код влит:** PR этой ветки — `r16_runner.py`, контракт
+      `contracts/r16-receipt/v1/`, `deploy/r16/`. Пункт ждёт приёмки §4.4
+      владельцем (развёртывание и передача Mac → VPS). Выполненные попытки
+      Mac (`completed`/`failed` без `producer.host`) — история до контракта;
+      `missed` проверяются схемой всегда (README контракта).
+      После мержа — inbox-issue в robin-runtime (чтение квитанций, цикл,
+      Telegram).
