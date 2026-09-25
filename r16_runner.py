@@ -40,25 +40,61 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from typing import IO
 
 HERE = Path(__file__).resolve().parent
-WORKSPACE = HERE.parents[2]
-AUDIT = WORKSPACE / "prograph-vault" / "scripts" / "kb_freshness.py"
-RECEIPTS = HERE / "receipts"
 REPO = "andrei-shtanakov/prograph-vault"
 LABEL = "kb-freshness"
 TITLE = "R16: утверждения KB требуют разбора"
 TRIAGE_DAYS = 7
-REVIEW_PROFILE = Path.home() / ".config" / "review"
 SCHEMA_VERSION = 1
 CHECK_ID = "r16-kb-freshness"
 CYCLE_WEEKDAY = 1  # Tuesday (Monday is 0)
 CYCLE_START = time(9, 30)
 MAX_ATTEMPTS = 3
 FIRST_DETECTED = re.compile(r"<!-- r16 first-detected=(\d{4}-\d{2}-\d{2}) -->")
+VAULT_DIR = "prograph-vault"
+AUDIT_REL = Path("scripts") / "kb_freshness.py"
+SETTINGS = (
+    ("workspace", "R16_WORKSPACE"),
+    ("state_dir", "R16_STATE_DIR"),
+    ("gh_config_dir", "R16_GH_CONFIG_DIR"),
+    ("host_label", "R16_HOST_LABEL"),
+)
+
+
+class ConfigError(Exception):
+    """A setting is missing or wrong: exit 2, no receipt, no attempt spent."""
+
+
+@dataclass(frozen=True)
+class Config:
+    """Where the runner reads and writes; every root comes from outside."""
+
+    workspace: Path
+    state_dir: Path
+    gh_config_dir: Path
+    host_label: str
+
+    @property
+    def vault(self) -> Path:
+        return self.workspace / VAULT_DIR
+
+    @property
+    def audit(self) -> Path:
+        return self.vault / AUDIT_REL
+
+    @property
+    def receipts(self) -> Path:
+        return self.state_dir / "receipts"
+
+    @property
+    def lock(self) -> Path:
+        return self.state_dir / "r16.lock"
 
 
 @dataclass(frozen=True)
@@ -97,47 +133,92 @@ class Delivery:
     error: str | None = field(default=None)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Run the current cycle if it still needs a run; write its receipt."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--dry-run", action="store_true", help="no writes at all")
-    args = parser.parse_args()
-    RECEIPTS.mkdir(exist_ok=True)
-    with (RECEIPTS / ".lock").open("w") as lock:
+    parser.add_argument("--dry-run", action="store_true", help="no receipt, no issue")
+    for attr, name in SETTINGS:
+        parser.add_argument(
+            f"--{attr.replace('_', '-')}", dest=attr, help=f"falls back to ${name}"
+        )
+    args = parser.parse_args(argv)
+    try:
+        cfg = resolve_config(vars(args), os.environ)
+    except ConfigError as exc:
+        print(f"r16: {exc}", file=sys.stderr)
+        return 2
+    # The lock spans the whole run — vault, audit, GitHub delivery, receipt:
+    # decide() guards sequential re-runs, only the lock guards concurrent ones.
+    with open_lock(cfg.lock) as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             print("another run holds the lock")
             return 0
-        return run_cycle(datetime.now().replace(microsecond=0), args.dry_run)
+        return run_cycle(cfg, datetime.now().replace(microsecond=0), args.dry_run)
 
 
-def run_cycle(now: datetime, dry_run: bool) -> int:
+def resolve_config(cli: Mapping[str, object], env: Mapping[str, str]) -> Config:
+    """CLI over environment; every root checked locally before anything runs.
+
+    Only presence is checked here — no network: a dead gh token is GitHub's
+    state, not configuration, and surfaces as `delivery: failed`.
+    """
+    values: dict[str, str] = {}
+    for attr, name in SETTINGS:
+        value = cli.get(attr) or env.get(name)
+        if not value:
+            raise ConfigError(f"--{attr.replace('_', '-')} / ${name} не задан")
+        values[attr] = str(value)
+    cfg = Config(
+        Path(values["workspace"]),
+        Path(values["state_dir"]),
+        Path(values["gh_config_dir"]),
+        values["host_label"],
+    )
+    if not cfg.workspace.is_dir():
+        raise ConfigError(f"нет каталога workspace {cfg.workspace}")
+    if not cfg.receipts.is_dir():
+        raise ConfigError(f"нет каталога квитанций {cfg.receipts}")
+    if not cfg.audit.is_file():
+        raise ConfigError(f"нет аудитора {cfg.audit}")
+    hosts = cfg.gh_config_dir / "hosts.yml"
+    if not (hosts.is_file() and os.access(hosts, os.R_OK)):
+        raise ConfigError(f"профиль gh: нет читаемого {hosts}")
+    return cfg
+
+
+def open_lock(path: Path) -> IO[str]:
+    """The lock file, opened without touching its mode (created 0600 if absent)."""
+    return os.fdopen(os.open(path, os.O_RDWR | os.O_CREAT, 0o600), "r+")
+
+
+def run_cycle(cfg: Config, now: datetime, dry_run: bool) -> int:
     """Decide, mark missed cycles, audit, deliver, write the receipt."""
     cid = cycle_start(now).date().isoformat()
-    existing = load_receipt(cid)
+    existing = load_receipt(cfg.receipts, cid)
     action = "run" if dry_run else decide(existing)
     if action != "run":
         print(f"cycle {cid}: {action}")
         return 0
     if not dry_run:
-        for missed in missed_cycles(latest_cycle(RECEIPTS, before=cid), cid):
-            write_receipt(missed_receipt(missed, now.isoformat()))
-    audit = run_audit()
+        for missed in missed_cycles(latest_cycle(cfg.receipts, before=cid), cid):
+            write_receipt(cfg.receipts, missed_receipt(missed, now.isoformat()))
+    audit = run_audit(cfg)
     found = problems(audit)
     if not audit.completed:
         delivery = Delivery("skipped", None, "audit did not complete")
     elif dry_run:
         delivery = Delivery("dry-run")
     else:
-        delivery = deliver(found, now.date(), last_issue(RECEIPTS))
+        delivery = deliver(cfg, found, now.date(), last_issue(cfg.receipts))
     record = receipt(audit, found, delivery, now.isoformat())
     attempt = (existing or {}).get("attempt", 0) + 1
-    record |= {"cycle_id": cid, "attempt": attempt, "producer": producer()}
+    record |= {"cycle_id": cid, "attempt": attempt, "producer": producer(cfg)}
     print(json.dumps(record, ensure_ascii=False))
     if dry_run:  # a trial run must not look like this cycle's receipt
         return 0 if audit.completed else 1
-    write_receipt(record)
+    write_receipt(cfg.receipts, record)
     return 0 if record["ok"] else 1
 
 
@@ -189,11 +270,10 @@ def missed_receipt(cid: str, noted_at: str) -> dict:
     }
 
 
-def load_receipt(cid: str) -> dict | None:
+def load_receipt(receipts: Path, cid: str) -> dict | None:
     """This cycle's receipt, if any."""
-    path = RECEIPTS / f"{cid}.json"
     try:
-        return json.loads(path.read_text())
+        return json.loads((receipts / f"{cid}.json").read_text())
     except (FileNotFoundError, ValueError):
         return None
 
@@ -204,19 +284,19 @@ def latest_cycle(receipts: Path, before: str) -> str | None:
     return ids[-1] if ids else None
 
 
-def write_receipt(record: dict) -> None:
-    """receipts/<cycle_id>.json, replaced atomically."""
-    path = RECEIPTS / f"{record['cycle_id']}.json"
+def write_receipt(receipts: Path, record: dict) -> None:
+    """<receipts>/<cycle_id>.json, replaced atomically in the same directory."""
+    path = receipts / f"{record['cycle_id']}.json"
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
     tmp.replace(path)
 
 
-def producer() -> dict[str, str | None]:
+def producer(cfg: Config) -> dict[str, str | None]:
     """SHAs of the code that produced the receipt (runner and auditor)."""
     return {
-        "runner": head_sha(WORKSPACE, HERE / "run.py"),
-        "auditor": head_sha(AUDIT.parents[1], AUDIT),
+        "runner": head_sha(HERE, Path(__file__).resolve()),
+        "auditor": head_sha(cfg.vault, cfg.audit),
     }
 
 
@@ -240,10 +320,13 @@ def head_sha(repo: Path, file: Path) -> str | None:
     return f"{sha}+dirty" if sha and dirty else sha
 
 
-def run_audit() -> Audit:
+def run_audit(cfg: Config) -> Audit:
     """Run the published-target audit and parse what it printed."""
     out = subprocess.run(
-        ["uv", "run", str(AUDIT), "--json", "--target", "published"],
+        [
+            "uv", "run", str(cfg.audit), "--json", "--target", "published",
+            "--workspace", str(cfg.workspace),
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -279,27 +362,29 @@ def problems(audit: Audit) -> Problems:
     return Problems(claims, revisions, coverage)
 
 
-def deliver(found: Problems, today: date, known: int | None = None) -> Delivery:
+def deliver(
+    cfg: Config, found: Problems, today: date, known: int | None = None
+) -> Delivery:
     """Create, update or close the single open tracking issue."""
     try:
-        existing = open_issue(known)
+        existing = open_issue(cfg, known)
         if not found:
             if existing is None:
                 return Delivery("not-needed")
             number = existing["number"]
             note = f"Прогон {today}: все утверждения `unchanged`, закрываю."
-            gh("issue", "comment", str(number), "--body", note)
-            gh("issue", "close", str(number))
+            gh(cfg, "issue", "comment", str(number), "--body", note)
+            gh(cfg, "issue", "close", str(number))
             return Delivery("closed", number)
         first = first_detected(existing["body"]) if existing else None
         body = issue_body(found, first or today, today)
         if existing is None:
-            ensure_label()
+            ensure_label(cfg)
             url = gh(
-                "issue", "create", "--title", TITLE, "--label", LABEL, "--body", body
+                cfg, "issue", "create", "--title", TITLE, "--label", LABEL, "--body", body
             )
             return Delivery("created", int(url.rstrip().rsplit("/", 1)[-1]))
-        gh("issue", "edit", str(existing["number"]), "--body", body)
+        gh(cfg, "issue", "edit", str(existing["number"]), "--body", body)
         return Delivery("updated", existing["number"])
     except (subprocess.CalledProcessError, ValueError, KeyError) as exc:
         detail = getattr(exc, "stderr", None) or str(exc)
@@ -322,7 +407,7 @@ def last_issue(receipts: Path) -> int | None:
     return None
 
 
-def open_issue(known: int | None = None) -> dict | None:
+def open_issue(cfg: Config, known: int | None = None) -> dict | None:
     """The open tracking issue, if any: the known number first, then by label.
 
     The label listing comes from an index that lags both ways (a just-created
@@ -330,6 +415,7 @@ def open_issue(known: int | None = None) -> dict | None:
     candidates; each one's state is read directly before it is used.
     """
     listing = gh(
+        cfg,
         "issue",
         "list",
         "--label",
@@ -345,14 +431,14 @@ def open_issue(known: int | None = None) -> dict | None:
     candidates = ([known] if known is not None else []) + listed
     for number in dict.fromkeys(candidates):
         issue = json.loads(
-            gh("issue", "view", str(number), "--json", "number,body,state")
+            gh(cfg, "issue", "view", str(number), "--json", "number,body,state")
         )
         if issue["state"] == "OPEN":
             return issue
     return None
 
 
-def ensure_label() -> None:
+def ensure_label(cfg: Config) -> None:
     """Create the tracking label once; an existing label is fine."""
     subprocess.run(
         [
@@ -367,18 +453,18 @@ def ensure_label() -> None:
             "--description",
             "R16 claim-level freshness: triage needed",
         ],
-        env=gh_env(),
+        env=gh_env(cfg),
         capture_output=True,
         text=True,
         check=False,
     )
 
 
-def gh(*args: str) -> str:
+def gh(cfg: Config, *args: str) -> str:
     """Run gh against the vault repo from the ai-prosto profile."""
     out = subprocess.run(
         ["gh", *args, "-R", REPO],
-        env=gh_env(),
+        env=gh_env(cfg),
         capture_output=True,
         text=True,
         check=True,
@@ -386,9 +472,9 @@ def gh(*args: str) -> str:
     return out.stdout
 
 
-def gh_env() -> dict[str, str]:
-    """Environment that points gh at the reviewer profile."""
-    return os.environ | {"GH_CONFIG_DIR": str(REVIEW_PROFILE)}
+def gh_env(cfg: Config) -> dict[str, str]:
+    """Environment that points gh at the ai-prosto profile."""
+    return os.environ | {"GH_CONFIG_DIR": str(cfg.gh_config_dir)}
 
 
 def first_detected(body: str) -> date | None:

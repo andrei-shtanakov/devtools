@@ -3,13 +3,60 @@
 Run: uv run --frozen pytest tests/test_r16_runner.py
 """
 
+import fcntl
 import json
+import os
 from datetime import date, datetime
 from pathlib import Path
 
 import pytest
 
 import r16_runner as run
+
+ENV_NAMES = {
+    "workspace": "R16_WORKSPACE",
+    "state_dir": "R16_STATE_DIR",
+    "gh_config_dir": "R16_GH_CONFIG_DIR",
+    "host_label": "R16_HOST_LABEL",
+}
+
+
+def layout(root: Path) -> dict[str, str]:
+    """A complete on-disk layout; returns CLI values for resolve_config."""
+    audit = root / "ws" / "prograph-vault" / "scripts" / "kb_freshness.py"
+    audit.parent.mkdir(parents=True)
+    audit.write_text("# auditor stub\n")
+    (root / "state" / "receipts").mkdir(parents=True)
+    (root / "gh").mkdir()
+    (root / "gh" / "hosts.yml").write_text("github.com: {}\n")
+    return {
+        "workspace": str(root / "ws"),
+        "state_dir": str(root / "state"),
+        "gh_config_dir": str(root / "gh"),
+        "host_label": "vps-test",
+    }
+
+
+def cfg_for(root: Path) -> "run.Config":
+    return run.resolve_config(layout(root), {})
+
+
+def argv_for(values: dict[str, str]) -> list[str]:
+    out: list[str] = []
+    for attr, value in values.items():
+        out += [f"--{attr.replace('_', '-')}", value]
+    return out
+
+
+def lock_is_held(path: Path) -> bool:
+    """True when another open file description holds the flock on `path`."""
+    with path.open("r") as probe:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(probe, fcntl.LOCK_UN)
+        return False
 
 TODAY = date(2026, 9, 29)
 
@@ -211,23 +258,126 @@ def test_run_cycle_marks_missed_cycles_and_caps_attempts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End to end over the cycle logic, with audit and delivery stubbed."""
-    monkeypatch.setattr(run, "RECEIPTS", tmp_path)
-    monkeypatch.setattr(run, "producer", lambda: {"runner": "r", "auditor": "a"})
+    cfg = cfg_for(tmp_path)
+    monkeypatch.setattr(run, "producer", lambda _cfg: {"runner": "r", "auditor": "a"})
     monkeypatch.setattr(run, "deliver", lambda *_: run.Delivery("not-needed"))
-    (tmp_path / "2026-09-01.json").write_text(json.dumps({"ok": True, "attempt": 1}))
+    (cfg.receipts / "2026-09-01.json").write_text(
+        json.dumps({"ok": True, "attempt": 1})
+    )
     broken = run.parse_audit("boom\n")
-    monkeypatch.setattr(run, "run_audit", lambda: broken)
+    monkeypatch.setattr(run, "run_audit", lambda _cfg: broken)
     now = datetime(2026, 9, 23, 17, 0)
 
-    codes = [run.run_cycle(now, dry_run=False) for _ in range(4)]
+    codes = [run.run_cycle(cfg, now, dry_run=False) for _ in range(4)]
 
     assert codes == [1, 1, 1, 0]  # three failed attempts, then gave-up quietly
-    current = json.loads((tmp_path / "2026-09-22.json").read_text())
+    current = json.loads((cfg.receipts / "2026-09-22.json").read_text())
     assert (current["attempt"], current["execution"], current["ok"]) == (
         3,
         "failed",
         False,
     )
     for cid in ("2026-09-08", "2026-09-15"):
-        missed = json.loads((tmp_path / f"{cid}.json").read_text())
+        missed = json.loads((cfg.receipts / f"{cid}.json").read_text())
         assert (missed["execution"], missed["ok"]) == ("missed", False)
+
+
+# --- configuration and lock (spec §1.2 п.1, п.6) ------------------------------
+
+
+def test_cli_wins_over_environment(tmp_path: Path) -> None:
+    values = layout(tmp_path)
+    env = {name: "/nowhere" for name in ENV_NAMES.values()}
+    cfg = run.resolve_config(values, env)
+    assert cfg.workspace == Path(values["workspace"])
+    assert cfg.receipts == Path(values["state_dir"]) / "receipts"
+    assert cfg.lock == Path(values["state_dir"]) / "r16.lock"
+
+
+def test_environment_fills_what_cli_leaves_out(tmp_path: Path) -> None:
+    values = layout(tmp_path)
+    env = {ENV_NAMES[k]: v for k, v in values.items()}
+    assert run.resolve_config({}, env).host_label == "vps-test"
+
+
+@pytest.mark.parametrize("missing", [*ENV_NAMES, "hosts.yml", "receipts", "auditor"])
+def test_missing_setting_exits_2_before_lock(
+    tmp_path: Path, missing: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    values = layout(tmp_path)
+    if missing in ENV_NAMES:
+        del values[missing]
+    elif missing == "hosts.yml":
+        (tmp_path / "gh" / "hosts.yml").unlink()
+    elif missing == "receipts":
+        (tmp_path / "state" / "receipts").rmdir()
+    else:
+        (tmp_path / "ws" / "prograph-vault" / "scripts" / "kb_freshness.py").unlink()
+    assert run.main(["--dry-run", *argv_for(values)]) == 2
+    assert not (tmp_path / "state" / "r16.lock").exists()
+    assert "r16:" in capsys.readouterr().err
+
+
+def test_config_check_does_not_touch_the_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Token validity is not a start-up check: no subprocess at all here."""
+
+    def no_subprocess(*_a: object, **_k: object) -> None:
+        raise AssertionError("resolve_config must stay local")
+
+    monkeypatch.setattr(run.subprocess, "run", no_subprocess)
+    cfg_for(tmp_path)
+
+
+def test_lock_is_created_owner_only(tmp_path: Path) -> None:
+    path = tmp_path / "r16.lock"
+    old = os.umask(0)
+    try:
+        with run.open_lock(path):
+            pass
+    finally:
+        os.umask(old)
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_lock_is_held_through_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit and GitHub delivery both run under the lock, not after it."""
+    values = layout(tmp_path)
+    lock = tmp_path / "state" / "r16.lock"
+    seen: list[str] = []
+    clean = json.dumps({"summary": {"unchanged": 1, "with_evidence": 1}})
+
+    def audit(_cfg: "run.Config") -> "run.Audit":
+        seen.append(f"audit:{lock_is_held(lock)}")
+        return run.parse_audit(clean)
+
+    def deliver(*_a: object) -> "run.Delivery":
+        seen.append(f"deliver:{lock_is_held(lock)}")
+        return run.Delivery("not-needed")
+
+    monkeypatch.setattr(run, "run_audit", audit)
+    monkeypatch.setattr(run, "deliver", deliver)
+    monkeypatch.setattr(run, "producer", lambda _cfg: {"runner": "r", "auditor": "a"})
+    assert run.main(argv_for(values)) == 0
+    assert seen == ["audit:True", "deliver:True"]
+
+
+def test_concurrent_run_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = layout(tmp_path)
+    receipts = tmp_path / "state" / "receipts"
+    (receipts / "2026-09-15.json").write_text('{"ok": true, "attempt": 1}\n')
+    before = {p.name: p.stat().st_mtime_ns for p in receipts.iterdir()}
+
+    def forbidden(*_a: object) -> None:
+        raise AssertionError("a second run must not reach the audit")
+
+    monkeypatch.setattr(run, "run_audit", forbidden)
+    with run.open_lock(tmp_path / "state" / "r16.lock") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert run.main(argv_for(values)) == 0
+    assert {p.name: p.stat().st_mtime_ns for p in receipts.iterdir()} == before
