@@ -43,6 +43,7 @@
 | `fleet_report.py` | snapshot-JSON → markdown-отчёт для vault `derived/fleet/` |
 | `recent_changes.py` | темпоральный сенсор: коммиты + незакоммиченное с момента X (`make today`) |
 | `salvage_scan.py` | salvage-скан флота (`make salvage`): orphan worktrees, ветки без PR, unpushed default, stale locks; пустой результат молчит, осознанные исключения помечает `[waived]` (devtools#67) |
+| `r16_runner.py` | еженедельная проверка свежести утверждений KB (R16, devtools#382): аудит `kb_freshness.py --target published` над клонами workspace, квитанция по контракту `contracts/r16-receipt/v1/`, issue `kb-freshness` в prograph-vault от ai-prosto. Исполняется на VPS (`deploy/r16/`), не локально; корни — `--workspace/--state-dir/--gh-config-dir/--host-label` или `R16_*`, зона цикла `Asia/Tbilisi` закреплена |
 | `spec_run_preflight.py` | преflight перед прогоном spec-runner в соседе (`make preflight ARGS='--repo <r>'`): конфиг-по-эталону, insteadOf https, беспрефиксная state-DB, live-smoke-среда как в CI (ретроспектива 2026-09-02, уроки 4–5 devtools#110) |
 | `check-contract-drift.sh` | дрейф вендоренных контрактов |
 | `check-agent-id-conformance.py` | инварианты ADR-ECO-003 |
