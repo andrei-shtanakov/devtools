@@ -379,7 +379,7 @@ def test_similar_label_does_not_block(fleet: Fleet) -> None:
     [
         "feat/merge-pr-guard",
         "spec/ws-42-tasks",
-        # `--conform-approve`: доставка approve-штампа tasks-СПЕКИ. Предмет
+        # `--deliver-approve`: доставка approve-штампа tasks-СПЕКИ. Предмет
         # другой (не узлы бандла), мерж законно агентский — глоб обязан её
         # пропустить, иначе гвард встанет поперёк рабочего пути.
         "spec/ws-42-tasks-approve",
@@ -1049,7 +1049,7 @@ def test_python_half_derives_from_the_same_template() -> None:
 
 
 #: Известные ЗАКОННЫЕ литералы approve-веток в governance/ — не узлы бандла.
-#: `spec/<ws-id>-tasks-approve` (`--conform-approve`) нормализует frontmatter
+#: `spec/<ws-id>-tasks-approve` (`--deliver-approve`) доставляет штамп
 #: TASKS-спеки после `spec approve` владельца; предмет другой, мерж законно
 #: агентский, гвард её намеренно пропускает. Список закрытый: любой НОВЫЙ
 #: литерал обязан быть либо вызовом `approval_branches`, либо осознанным

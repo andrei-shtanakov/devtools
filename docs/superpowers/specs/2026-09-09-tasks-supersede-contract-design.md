@@ -1705,7 +1705,7 @@ frontmatter и тело входят в хеш целиком.
 
 **Контракт команды.** Поверхность — отдельное действие того же моста:
 `--approve-node <node-id>` (с `--run-id`, как всё остальное). Действие
-единственное в прогоне: взаимоисключающе с `--supersede`, `--conform-approve`,
+единственное в прогоне: взаимоисключающе с `--supersede`, `--deliver-approve`,
 `--abandon-revision` и `--replace-revision` — тем же гвардом и по той же
 причине, что уже разводит их между собой (молчаливая победа одного флага
 решала бы за оператора).
@@ -2807,8 +2807,9 @@ DarkFactory (ADR-ECO-011), который в этом флоте являетс�
 каждую штатную ошибку; убрать второй — поверить конфигурации мержащего контура
 на слово.
 
-Не путать с `--conform-approve`: тот нормализует frontmatter **tasks-спеки**
-после `spec approve` владельца и ходит веткой `spec/<ws-id>-tasks-approve`.
+Не путать с `--deliver-approve` (до devtools#386 — `--conform-approve`): тот
+проверяет и доставляет штамп **tasks-спеки** после `spec approve` владельца и
+ходит веткой `spec/<ws-id>-tasks-approve`; нормализации frontmatter больше нет.
 Предмет здесь другой — узлы бандла, и к `approved_content_hash` узлов
 `spec approve` отношения не имеет вовсе.
 
@@ -3114,7 +3115,7 @@ design+acceptance — одной заявкой уровня) + approve tasks-с
 | `--approve-node <id>`, пины разошлись, а upstream честно одобрен по всем четырём условиям | fail-closed с обеими величинами и с переходом: коррекция в репо-владельце возвращает узел в `stale`, дальше обычная заявка. Механика `stale` здесь не ставит — она не знает, правили пин или тело | ≠0 |
 | `--approve-node <id>`, прямой upstream в `draft`/`stale`/`approval_pending` либо `approved` с разошедшимися пинами | fail-closed: топологическая готовность не предъявлена; отказ называет upstream и порядок обхода | ≠0 |
 | `--approve-node <id>`, id вне активного DAG (или передан путь вместо id) | отказ на разборе аргументов с перечнем допустимых node-id; ничего не пишется | ≠0 |
-| `--approve-node <id>` вместе с `--supersede`/`--conform-approve`/`--abandon-revision`/`--replace-revision` | отказ на разборе аргументов: действие в прогоне одно | ≠0 |
+| `--approve-node <id>` вместе с `--supersede`/`--deliver-approve`/`--abandon-revision`/`--replace-revision` | отказ на разборе аргументов: действие в прогоне одно | ≠0 |
 | `--supersede`, у последней доставки не записан `content_anchor` (легаси, в т.ч. запись только с `anchor`) | одноразовый compatibility-случай: ревизия несёт `comparison: unavailable`, переиздание выполняется | 0 |
 | `--replace-revision <N> --reason <текст>`, ревизия `completed`, её PR OPEN, `head` сошёлся, ревью bot-only | намерение `v<N+1>` с `replaces_revision`/`replaces_pr`/`replacement_reason` записано durable; PR ревизии N закрыт механикой; создан PR `v<N+1>`; ветка ревизии N удалена; запись ревизии N дословно прежняя | 0 |
 | `--replace-revision <N>`, `head` PR разошёлся с `head_sha` намерения ревизии N | fail-closed с обоими SHA: PR не закрывается, намерение не пишется, ветка и коммит не создаются | ≠0 |

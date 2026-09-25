@@ -2557,7 +2557,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       в `.github/workflows/fleet-plan-check.yml`, это authority-root: отдельный
       PR, мерж человеком.
 
-- [ ] Мост объявляет repo-local stage-профиль `workstream` и одобряет tasks через `spec approve tasks --profile workstream`, снимая `--conform-approve` (inbox devtools#386, slug: workstream-stage-profile; from: spec-runner#338) @owner:github:andrei-shtanakov @id:workstream-stage-profile @epic:eco.dark-factory
+- [x] Мост объявляет repo-local stage-профиль `workstream` и одобряет tasks через `spec approve tasks --profile workstream`, снимая `--conform-approve` (inbox devtools#386, slug: workstream-stage-profile; from: spec-runner#338) @owner:github:andrei-shtanakov @id:workstream-stage-profile @epic:eco.dark-factory — PR этой ветки
       Доставлено у соседа PR spec-runner#589 (`125ab40`), вошло в 4.1.0.
       Профиль `spec/profiles/workstream.yaml`: `decomposition` — внешняя
       стадия (`external: true`, `path: workstreams/{ws}/spec/30-decomposition.md`),
@@ -2565,13 +2565,41 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `15-behaviour-spec.md` / `20-design.md`. Признак «сделано»: `spec
       approve tasks` с профилем даёт тот же frontmatter, что сегодня
       `--conform-approve`, и `conform_approved` снят.
+      **Сделано:** `deliver` кладёт `spec/profiles/<name>.yaml` тем же
+      коммитом, что и спеку (`workstream` / `-legacy3` / `-legacy4`; путь
+      узла — плейсхолдер `{ws}`, поэтому нестандартный `bundle_dir` —
+      отказ; эталон на месте в коммит не идёт, чужая правка — отказ до
+      ветки). Нормализация снята, доставка штампа осталась:
+      `--deliver-approve` ПРОВЕРЯЕТ штамп (`status: approved`, `traces_to`
+      начинается с якоря, пин = blob текущих байтов узла) и не переписывает
+      его; `--conform-approve` отказывает с названной заменой. Решение
+      владельца 2026-09-25: буквального «тот же frontmatter» нет —
+      spec-runner дописывает к якорю id, найденные в узле (+51 на реальной
+      спеке spec-runner#485), это принято. Живой контракт на spec-runner
+      4.1.0: approve с профилем → проверка проходит; узел правлен + approve
+      без профиля → отказ; тот же узел + approve с профилем → проходит.
 
-- [ ] Мост выводит `**Scenarios:**` в verify-задачах (inbox devtools#388, slug: verify-task-scenarios-line; from: spec-runner#402) @owner:github:andrei-shtanakov @id:verify-task-scenarios-line @epic:eco.dark-factory
+- [ ] Нестандартный `--bundle-dir` отказывает на входе прогона, а не на доставке tasks-спеки @owner:github:andrei-shtanakov @id:bundle-dir-layout-refused-at-start @epic:eco.dark-factory
+      Находка ревью PR #396 (minor, high): stage-профиль выражает путь узла
+      только как `workstreams/{ws}/spec`, поэтому `deliver` отказывает иной
+      раскладке — но уже после S0–S8. Сейчас отказ честный и называет
+      выход (перезапуск с раскладкой по умолчанию); в 16 леджерах
+      нестандартных раскладок 0. Правка — проверка в `start` раннера /
+      spec-loop (и в восстановлении `_bundle_dir_from_pr_files`).
+
+- [x] ~~Мост выводит `**Scenarios:**` в verify-задачах (inbox devtools#388, slug: verify-task-scenarios-line; from: spec-runner#402)~~ @owner:github:andrei-shtanakov @id:verify-task-scenarios-line @epic:eco.dark-factory — НЕ ДЕЛАЕТСЯ: #388 закрыт not planned 2026-09-25 по замеру
       Доставлено у соседа PR spec-runner#590 (`4d10e5b`), вошло в 4.1.0.
       Рядом с `**Mode:** verify_first` рендер verify-задачи в
       `governance/task_bridge.py` печатает сценарии DT (`t.scenarios`),
       формат id `[A-Z]+-\d+[a-z]?` через запятую одной строкой. Поставлять
       вместе с devtools#386 — та же поверхность рендера.
+      **Почему не делается** (решение владельца 2026-09-25): в обеих
+      доставленных verify-задачах флота (spec-runner TASK-003: BEH-23;
+      kapelle TASK-007: BEH-14, BEH-30) id сценариев в файлах группы нет —
+      verify проверяет тесты, написанные ДО спеки. Строка дала бы обеим
+      окончательный отказ на законном входе. Откроем заново, если verify-DT
+      начнут ссылаться на маркированные тесты или проверка получит режим
+      для немаркированной группы.
 
 - [ ] R16 runner выпускается из dev-scratch в devtools и работает на VPS отдельным сервисом (inbox devtools#382, slug: r16-runner-graduation; from: prograph-vault R16, vault#151–#166) @owner:github:andrei-shtanakov @id:r16-runner-graduation @epic:eco.tooling
       Сейчас `_cowork_output/cadence/r16/run.py` под launchd на ноутбуке —

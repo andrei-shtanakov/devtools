@@ -711,8 +711,8 @@ _APPROVE_NODE_HINT = (
 
 _APPROVE_HINT = (
     "следующая человеческая граница — approve tasks-спеки: "
-    "`spec approve tasks` в репо-владельце, затем "
-    "`make behaviour-tasks ARGS='--run-id {run_id} --conform-approve'`"
+    "`{approve}` в репо-владельце (stage-профиль едет tasks-PR), затем "
+    "`make behaviour-tasks ARGS='--run-id {run_id} --deliver-approve'`"
 )
 
 
@@ -731,7 +731,9 @@ def _deliver_phase(state: rs.RunState, ops) -> int:
             print(_APPROVE_NODE_HINT.format(run_id=state.run_id))
         return 1
     print(f"tasks-спека доставлена: PR #{pr} ({state.repo_slug})")
-    print(_APPROVE_HINT.format(run_id=state.run_id))
+    print(_APPROVE_HINT.format(
+        run_id=state.run_id, approve=task_bridge.approve_command(state.ws_id)
+    ))
     return 0
 
 
