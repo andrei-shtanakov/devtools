@@ -4,33 +4,37 @@
 # ///
 """R16 weekly run: audit KB claims against published code (ADR-ECO-009 cadence, Tue).
 
-Catch-up, not a calendar slot (interim, until the runner moves to the VPS —
-devtools graduation): launchd starts it at load and hourly; it runs only when
-the current cycle (Tuesday 09:30 → next Tuesday 09:30) has no successful
-receipt yet, at most MAX_ATTEMPTS times per cycle, one run at a time (lock).
-A laptop that was off for weeks runs the current cycle once and records the
-skipped cycles as `missed` — it does not pretend today's data describe them.
+Graduated from the umbrella's dev scratch (devtools#382); design —
+docs/superpowers/specs/2026-09-25-r16-runner-graduation-design.md. Runs on the
+VPS as r16-kb-freshness.service (deploy/r16/), hourly: it runs only when the
+current cycle (Tuesday 09:30 → next Tuesday 09:30, Asia/Tbilisi, whatever the
+host's zone) has no successful receipt yet, at most MAX_ATTEMPTS times per
+cycle, one run at a time (the lock spans the whole run). Cycles nobody ran are
+recorded as `missed` — today's data do not pretend to describe them.
 
-A stage of its own, not part of the R-2 sweep: it runs even when the sweep does
-not, and the sweep's "proposals only, no GitHub writes" mandate stays intact —
-publishing is this runner's job, from the ai-prosto profile.
+Before the audit the vault clone is brought to origin's default branch and
+proven to be there (branch, HEAD = origin, clean tree); otherwise the attempt
+fails without auditing an unpublished tree.
 
-Every attempt leaves a receipt in receipts/<cycle_id>.json (cycle_id = the
-cycle's Tuesday): schema version, check id, attempt, start/finish, producer
-SHAs, target SHA per repo, coverage, status counts, delivery. Kept apart:
+Every attempt leaves a receipt in <state-dir>/receipts/<cycle_id>.json
+(contracts/r16-receipt/v1): schema version, check id, attempt, start/finish
+with offset, producer (runner and auditor SHAs, host label), target SHA per
+repo, coverage, status counts, delivery. Kept apart:
   execution  completed (the audit printed a summary), failed, or missed
   problems   claims that are not unchanged, revisions that failed to resolve,
              coverage gaps (no evidence at all); a completed run may have them
   delivery   what happened to the single open `kb-freshness` issue: created,
              updated, closed, not-needed, skipped (run failed) or failed
 `ok` in the receipt is true only for a completed run with a delivered result.
-The Tuesday watchdog (ops/r2-liveness-check.sh) reads it.
 
 Triage (owner, one week from the first detection): confirm the change, schedule
 a fix, or accept the limit. Re-runs update the issue but keep the original
 deadline; the issue closes itself once a run finds nothing.
 
-Usage: uv run _cowork_output/cadence/r16/run.py [--dry-run]
+Usage: r16_runner.py [--dry-run] [--workspace DIR] [--state-dir DIR]
+                     [--gh-config-dir DIR] [--host-label NAME]
+Each flag falls back to R16_WORKSPACE / R16_STATE_DIR / R16_GH_CONFIG_DIR /
+R16_HOST_LABEL; a missing one is exit 2 before anything runs.
 """
 
 import argparse
@@ -220,7 +224,13 @@ def run_cycle(cfg: Config, now: datetime, dry_run: bool) -> int:
     elif dry_run:
         delivery = Delivery("dry-run")
     else:
-        delivery = deliver(cfg, found, now.date(), last_issue(cfg.receipts))
+        delivery = deliver(
+            cfg,
+            found,
+            now.date(),
+            last_issue(cfg.receipts),
+            receipt_pointer(cfg, cid),
+        )
     finished = datetime.now(now.tzinfo).replace(microsecond=0)
     record = receipt(audit, found, delivery, now.isoformat(), finished.isoformat())
     attempt = (existing or {}).get("attempt", 0) + 1
@@ -321,11 +331,17 @@ def write_receipt(receipts: Path, record: dict) -> None:
 
 
 def producer(cfg: Config) -> dict[str, str | None]:
-    """SHAs of the code that produced the receipt (runner and auditor)."""
+    """Who produced the receipt: runner and auditor SHAs, and the host label."""
     return {
         "runner": head_sha(HERE, Path(__file__).resolve()),
         "auditor": head_sha(cfg.vault, cfg.audit),
+        "host": cfg.host_label,
     }
+
+
+def receipt_pointer(cfg: Config, cid: str) -> str:
+    """Where the operator finds this cycle's receipt — a pointer, not a public link."""
+    return f"{cfg.host_label}:{cfg.receipts / f'{cid}.json'}"
 
 
 def head_sha(repo: Path, file: Path) -> str | None:
@@ -430,7 +446,11 @@ def problems(audit: Audit) -> Problems:
 
 
 def deliver(
-    cfg: Config, found: Problems, today: date, known: int | None = None
+    cfg: Config,
+    found: Problems,
+    today: date,
+    known: int | None,
+    pointer: str,
 ) -> Delivery:
     """Create, update or close the single open tracking issue."""
     try:
@@ -444,7 +464,7 @@ def deliver(
             gh(cfg, "issue", "close", str(number))
             return Delivery("closed", number)
         first = first_detected(existing["body"]) if existing else None
-        body = issue_body(found, first or today, today)
+        body = issue_body(found, first or today, today, pointer)
         if existing is None:
             ensure_label(cfg)
             url = gh(
@@ -550,7 +570,7 @@ def first_detected(body: str) -> date | None:
     return date.fromisoformat(match.group(1)) if match else None
 
 
-def issue_body(found: Problems, first: date, today: date) -> str:
+def issue_body(found: Problems, first: date, today: date, pointer: str) -> str:
     """Issue text: what to triage, by when, and the evidence."""
     due = first + timedelta(days=TRIAGE_DAYS)
     parts = [
@@ -593,7 +613,7 @@ def issue_body(found: Problems, first: date, today: date) -> str:
         ]
     if found.coverage:
         parts += ["", "## Покрытие", "", *[f"- {c}" for c in found.coverage]]
-    parts += ["", "Квитанции прогонов: `_cowork_output/cadence/r16/receipts/`."]
+    parts += ["", f"Квитанции прогонов: `{pointer}`."]
     return "\n".join(parts) + "\n"
 
 

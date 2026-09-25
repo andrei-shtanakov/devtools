@@ -148,7 +148,10 @@ def test_garbage_output_means_the_run_did_not_complete() -> None:
 
 def test_first_detected_survives_a_rerun() -> None:
     body = run.issue_body(
-        run.Problems([verdict("changed")], [], []), date(2026, 9, 22), TODAY
+        run.Problems([verdict("changed")], [], []),
+        date(2026, 9, 22),
+        TODAY,
+        "host:/p.json",
     )
     assert run.first_detected(body) == date(2026, 9, 22)
     assert "2026-09-29" in body  # the deadline: first detection + 7 days
@@ -160,7 +163,7 @@ def test_first_detected_absent_in_foreign_body() -> None:
 
 def test_issue_body_quotes_the_statement_and_the_triage_choices() -> None:
     found = run.Problems([verdict("changed", "gate")], [], [])
-    body = run.issue_body(found, TODAY, TODAY)
+    body = run.issue_body(found, TODAY, TODAY, "host:/p.json")
     assert "Statement gate." in body
     assert "принять ограничение" in body
     assert "2026-10-06" in body
@@ -562,3 +565,20 @@ def test_unpublished_vault_fails_the_attempt_without_audit(
     assert code == 1
     assert (record["execution"], record["delivery"]["action"]) == ("failed", "skipped")
     assert "HEAD ahead of origin/main" in record["audit_tail"]
+
+
+# --- host label and receipt pointer (spec §1.2 п.4–5) --------------------------
+
+
+def test_producer_names_the_host(tmp_path: Path) -> None:
+    assert run.producer(cfg_for(tmp_path))["host"] == "vps-test"
+
+
+def test_issue_points_at_the_receipt_on_the_host(tmp_path: Path) -> None:
+    cfg = cfg_for(tmp_path)
+    pointer = run.receipt_pointer(cfg, "2026-09-29")
+    assert pointer == f"vps-test:{tmp_path / 'state' / 'receipts' / '2026-09-29.json'}"
+    found = run.Problems([verdict("changed")], [], [])
+    body = run.issue_body(found, TODAY, TODAY, pointer)
+    assert body.rstrip().endswith(f"`{pointer}`.")
+    assert "_cowork_output" not in body
