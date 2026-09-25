@@ -2550,6 +2550,13 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       синтетике, четыре мутации (фильтр назад, фильтр снят, вердикт не
       передан, self→repo-owned) — каждая краснит тест.
 
+- [ ] Job summary `fleet-plan-check` держит ownership-сводку видимой при десятках warnings @owner:github:andrei-shtanakov @id:fleet-plan-check-summary-keeps-notes @epic:eco.tooling
+      Находка ревью PR #395 (minor, medium): summary берёт `tail -40` лога,
+      а чекер печатает notes ДО warnings — 30 `PF-OWNER-REPO-SELF` выталкивают
+      строку `ownership:` за хвост (полный лог остаётся в artifact). Правка —
+      в `.github/workflows/fleet-plan-check.yml`, это authority-root: отдельный
+      PR, мерж человеком.
+
 - [ ] Мост объявляет repo-local stage-профиль `workstream` и одобряет tasks через `spec approve tasks --profile workstream`, снимая `--conform-approve` (inbox devtools#386, slug: workstream-stage-profile; from: spec-runner#338) @owner:github:andrei-shtanakov @id:workstream-stage-profile @epic:eco.dark-factory
       Доставлено у соседа PR spec-runner#589 (`125ab40`), вошло в 4.1.0.
       Профиль `spec/profiles/workstream.yaml`: `decomposition` — внешняя
