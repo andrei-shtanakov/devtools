@@ -124,5 +124,26 @@ def test_pre_contract_rule_does_not_exempt_missed_receipts() -> None:
 
 
 def test_mac_missed_receipt_is_v1_valid() -> None:
-    """The Mac runner's `missed` form (naive noted_at) already satisfies v1."""
-    validate(run.missed_receipt("2026-09-15", "2026-09-23T17:00:00"))
+    """The Mac runner's `missed` form (naive noted_at) already satisfies v1.
+
+    Literal record in the exact shape `_cowork_output/cadence/r16/run.py`
+    `missed_receipt()` wrote — not the current function, which could drift.
+    """
+    validate(
+        {
+            "schema_version": 1,
+            "check_id": "r16-kb-freshness",
+            "cycle_id": "2026-09-15",
+            "attempt": 0,
+            "noted_at": "2026-09-23T17:00:00",
+            "execution": "missed",
+            "revisions": {},
+            "delivery": {
+                "action": "not-run",
+                "issue": None,
+                "issue_url": None,
+                "error": None,
+            },
+            "ok": False,
+        }
+    )
