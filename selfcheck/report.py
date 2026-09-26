@@ -102,6 +102,57 @@ def _probe_rows(doc: dict[str, Any]) -> list[str]:
     return rows
 
 
+def _refs_age(rows: list[dict[str, Any]]) -> str:
+    unknown = [r["name"] for r in rows if not r.get("fetched_at")]
+    if unknown:
+        return f"давность refs неизвестна для: {', '.join(unknown)}"
+    oldest = min(r["fetched_at"] for r in rows) if rows else "—"
+    return f"относительно локальных refs не старше {oldest}"
+
+
+def _fleet_lines(doc: dict[str, Any]) -> list[str]:
+    """Completeness, fleet-only and vendored copies (spec §9.3, §9.6, §9.7)."""
+    run = doc["run"]
+    fleet = doc.get("fleet", {})
+    lines = ["## Флот", ""]
+    if fleet.get("enabled"):
+        surface = run["surface"]
+        rows = surface.get("fleet_repos", [])
+        lines.append(
+            f"{surface['fleet']} относительно манифеста `{run['manifest_path']}` "
+            f"(sha1 `{surface.get('manifest_sha1', '')}`): {len(rows)} репо; "
+            f"{_refs_age(rows)}; не покрыто: корневой зонтик, `~/.claude`"
+        )
+        for repo in run["scope"]:
+            only = fleet.get("fleet_only", {}).get(repo, [])
+            lines += ["", f"fleet-only: {len(only)} ({repo})"]
+            if only:
+                lines += ["", "| узел | источник |", "|---|---|"]
+                lines += [f"| `{o['node']}` | {o['from']} |" for o in only]
+    else:
+        lines.append("fleet-only: — (без --fleet)")
+    vendored = doc.get("vendored", {})
+    rows_v = [
+        (path, d)
+        for repo in run["scope"]
+        for path, decls in vendored.get(repo, {}).items()
+        for d in decls
+    ]
+    if rows_v:
+        lines += [
+            "",
+            "### вендор-копии",
+            "",
+            "| путь | владелец | ref | декларация |",
+            "|---|---|---|---|",
+        ]
+        lines += [
+            f"| {path} | {d['owner']} | {d['ref']} | {d['declaration']} |"
+            for path, d in rows_v
+        ]
+    return [*lines, ""]
+
+
 def render_markdown(doc: dict[str, Any]) -> str:
     """Human report: probes first, then findings by category and rule."""
     run = doc["run"]
@@ -121,6 +172,7 @@ def render_markdown(doc: dict[str, Any]) -> str:
         *_probe_rows(doc),
         "",
     ]
+    lines += _fleet_lines(doc)
     statuses = doc["delta"]["statuses"]
     gone = doc["delta"]["gone"]
     lines += [

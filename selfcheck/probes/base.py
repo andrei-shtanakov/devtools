@@ -12,13 +12,16 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from selfcheck import __version__
 from selfcheck.env import EnvInfo
 from selfcheck.model import Confidence, Finding, Location
 from selfcheck.probes.common import config_hash
 from selfcheck.roles import Role, glob_match, role_of
+
+if TYPE_CHECKING:
+    from selfcheck.fleet.assemble import FleetView
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,7 @@ class RepoTarget:
     sched_dir: Path | None = None
     fleet: str = "absent"
     now: float = 0.0
+    fleet_view: FleetView | None = None  # S2 --fleet (spec §9)
 
 
 @dataclass(frozen=True)

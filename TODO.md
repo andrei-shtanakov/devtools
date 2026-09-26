@@ -2650,8 +2650,8 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 ## selfcheck — самодиагностика devtools и флота (спека 2026-09-25, план 2026-09-26)
 
 - [x] selfcheck S1: самодиагностика devtools — статические пробы, граф использования, дубли, LLM-вызовы, дельта; отчёт-only (спека `docs/superpowers/specs/2026-09-25-selfcheck-design.md`, план `docs/superpowers/plans/2026-09-26-selfcheck-s1.md`; пара — PR #402) @owner:github:andrei-shtanakov @id:selfcheck-s1 @epic:eco.tooling
-- [ ] selfcheck S2: `--fleet` — рёбра из всех репо манифеста, `confirmed` dead становится достижим @owner:github:andrei-shtanakov @id:selfcheck-s2 @epic:eco.tooling
+- [x] selfcheck S2: `--fleet` — рёбра из всех репо манифеста, `confirmed` dead становится достижим @owner:github:andrei-shtanakov @id:selfcheck-s2 @epic:eco.tooling
 - [ ] selfcheck: сузить зону неразрешённого запуска без литерального суффикса — сейчас это «весь каталог вызывающего» (§3.2.3), на devtools зона слишком широкая и прячет dead; отдельно от S2 по решению владельца 2026-09-26 @owner:github:andrei-shtanakov @id:selfcheck-zone-narrow @epic:eco.tooling
-- [ ] selfcheck S3: все репо манифеста — статические пробы по маркерам (cargo-machete, `llm-sites` для TS), межрепные ast-дубли @owner:github:andrei-shtanakov @id:selfcheck-s3 @blocked_by:todo://devtools/selfcheck-s2 @epic:eco.tooling
+- [ ] selfcheck S3: все репо манифеста — статические пробы по маркерам (cargo-machete, `llm-sites` для TS), межрепные ast-дубли @owner:github:andrei-shtanakov @id:selfcheck-s3 @epic:eco.tooling
 - [ ] selfcheck S4: отдельная спека — пробы, исполняющие код цели (clippy, credo, `mix xref`, knip): песочница, материализация зависимостей, проектная канарейка @owner:github:andrei-shtanakov @id:selfcheck-s4-spec @epic:eco.tooling
 - [ ] selfcheck S5: `--judge` — судья без инструментов над кандидатами llm-replaceable и duplicate @owner:github:andrei-shtanakov @id:selfcheck-s5 @blocked_by:todo://devtools/selfcheck-s3 @epic:eco.tooling
