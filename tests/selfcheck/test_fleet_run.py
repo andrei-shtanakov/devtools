@@ -287,3 +287,15 @@ def test_surface_fleet_is_the_worst_over_scope(tmp_path: Path) -> None:
     assert dead(doc)["file:orphan.py"]["confidence"] == "confirmed"
     (partial,) = [f for f in doc["findings"] if f["rule"] == "selfcheck/fleet-partial"]
     assert (partial["owner_repo"], partial["text_key"]) == ("nb", "devtools:stale")
+
+
+def test_fleet_is_not_complete_when_usage_graph_did_not_run(tmp_path: Path) -> None:
+    """Final review M2: without usage-graph the fleet canary never ran, so the
+    report must not claim completeness (§9.6 п.1)."""
+    ws = fleet_ws(tmp_path)
+    argv = args(ws, sched(tmp_path), "--fleet")
+    argv[argv.index("usage-graph")] = "ast-dup"
+    assert main(argv) == 0
+    (doc,) = reports(ws)
+    assert doc["run"]["surface"]["fleet"] == "partial"
+    assert "complete относительно" not in markdown(ws, doc)

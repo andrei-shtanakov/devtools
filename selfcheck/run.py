@@ -173,7 +173,9 @@ def _record_fleet(
 ) -> None:
     assert acc.fleet is not None
     usage = _usage_status(results)
-    ok = usage in (None, ProbeStatus.OK, ProbeStatus.PARTIAL)
+    # the fleet canary runs inside usage-graph: no run (or a failed one) means
+    # the channels were never proven this run — never "complete" (§9.6 п.1)
+    ok = usage in (ProbeStatus.OK, ProbeStatus.PARTIAL)
     acc.fleet.status[repo.name] = view.status() if ok else "partial"
     if usage is ProbeStatus.OK:
         acc.keys[f"fleet@{repo.name}"] = "ok"
@@ -330,7 +332,8 @@ def _fleet_surface(acc: _Run, scope: Sequence[str], manifest_path: Path) -> None
     fleet = acc.fleet
     assert fleet is not None
     statuses = set(fleet.status.values())
-    acc.surface["fleet"] = "partial" if "partial" in statuses else "complete"
+    complete = statuses == {"complete"}
+    acc.surface["fleet"] = "complete" if complete else "partial"
     outside = fleet_names(fleet.manifest, fleet.mrepo, scope)
     rows = [fleet.cache[n] for n in outside if n in fleet.cache]
     acc.surface["fleet_repos"] = surface_repos(FleetView(rows, outside, [], None))
