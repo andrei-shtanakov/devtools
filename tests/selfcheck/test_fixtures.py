@@ -61,7 +61,7 @@ def test_fake_venv_layout(tmp_path: Path) -> None:
 
 def run_tool(tool: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(tool), *args], capture_output=True, text=True, timeout=20
+        [str(tool), *args], capture_output=True, text=True, timeout=20, check=False
     )
 
 

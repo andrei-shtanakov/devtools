@@ -1,0 +1,7 @@
+# selfcheck — allowlist и роли devtools (спека §1.4, §2.4).
+# Каждая запись [[allow]] обязана иметь reason и until; истёкшая — находка.
+
+[[allow]]
+anchor = "file:issue_console.py"
+reason = "неприкасаем по решению владельца: новый TUI — новый файл"
+until = 2027-03-31

@@ -193,7 +193,10 @@ def require_npx_package(spec: str) -> None:
     try:
         ok = (
             subprocess.run(
-                ["npx", "--yes", spec, "--version"], capture_output=True, timeout=180
+                ["npx", "--yes", spec, "--version"],
+                capture_output=True,
+                timeout=180,
+                check=False,
             ).returncode
             == 0
         )

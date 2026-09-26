@@ -53,20 +53,20 @@ def parse_fake(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> ParseRe
 
 
 def spec_for(tool: Path, **overrides: object) -> ProbeSpec:
-    fields: dict[str, object] = dict(
-        name="fake",
-        languages=frozenset({"python"}),
-        input_mode="files",
-        select=lambda t: tuple(p for p in t.corpus if p.endswith(".py")),
-        canary=CANARY,
-        binary=str(tool),
-        version_range=((1, 0), (2, 0)),
-        normal_codes=frozenset({0, 1}),
-        argv=copy_paths,
-        parse=parse_fake,
-        timeout=5,
-        version_timeout=2,
-    )
+    fields: dict[str, object] = {
+        "name": "fake",
+        "languages": frozenset({"python"}),
+        "input_mode": "files",
+        "select": lambda t: tuple(p for p in t.corpus if p.endswith(".py")),
+        "canary": CANARY,
+        "binary": str(tool),
+        "version_range": ((1, 0), (2, 0)),
+        "normal_codes": frozenset({0, 1}),
+        "argv": copy_paths,
+        "parse": parse_fake,
+        "timeout": 5,
+        "version_timeout": 2,
+    }
     fields.update(overrides)
     return ProbeSpec(**fields)  # type: ignore[arg-type]
 
@@ -238,13 +238,13 @@ def test_internal_analyzer_contract(target, tmp_path) -> None:
     def boom(ctx: ProbeCtx) -> ParseResult:
         raise RuntimeError("x")
 
-    base = dict(
-        languages=frozenset({"any"}),
-        input_mode="files",
-        select=lambda t: t.corpus,
-        canary=CANARY,
-        logic_version=1,
-    )
+    base = {
+        "languages": frozenset({"any"}),
+        "input_mode": "files",
+        "select": lambda t: t.corpus,
+        "canary": CANARY,
+        "logic_version": 1,
+    }
     ok = run_probe(ProbeSpec(name="int", analyze=good, **base), target, tmp_path / "w")
     bad = run_probe(
         ProbeSpec(name="int2", analyze=boom, **base), target, tmp_path / "w"
