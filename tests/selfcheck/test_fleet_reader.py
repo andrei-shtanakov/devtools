@@ -149,3 +149,34 @@ def test_inherited_git_environment_is_ignored(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setenv("GIT_WORK_TREE", str(other))
     monkeypatch.setenv("GIT_INDEX_FILE", str(other / ".git" / "index"))
     assert set(read_repo(nb, "nb").texts) == {"real.md"}
+
+
+def test_dangling_origin_head_is_stale(tmp_path: Path) -> None:
+    """Final review I2: origin/HEAD → a ref that no longer exists (upstream
+    renamed its default branch, fetch --prune dropped the old one)."""
+    repo = synced(make_repo(tmp_path / "r", {"a.md": "x\n"}))
+    git(repo, "update-ref", "-d", "refs/remotes/origin/main")
+    assert stale_reasons(repo).stale == ("no-origin-head",)
+
+
+def test_skip_worktree_file_is_unreadable(tmp_path: Path) -> None:
+    """Final review I3: a sparse / skip-worktree file is absent on disk while
+    `git status` stays clean — its text is lost, so the repo is not complete."""
+    repo = synced(make_repo(tmp_path / "r", {"a.md": "x\n", "b.md": "y\n"}))
+    git(repo, "update-index", "--skip-worktree", "b.md")
+    (repo / "b.md").unlink()
+    got = read_repo(repo, "r")
+    assert ("unreadable", "b.md") in got.problems
+    assert got.state is not None and got.state.dirty is False
+
+
+def test_non_utf8_index_path_does_not_crash() -> None:
+    """Final review I4: a Latin-1 path in a neighbour's index (Linux) decodes
+    with surrogates instead of raising UnicodeDecodeError out of the run."""
+    from selfcheck.fleet.reader import parse_entries
+
+    staged = b"100644 " + b"a" * 40 + b" 0\tcaf\xe9.md\0"
+    assert parse_entries(staged, b"x\xff.md\0") == {
+        "caf\udce9.md": "100644",
+        "x\udcff.md": "",
+    }

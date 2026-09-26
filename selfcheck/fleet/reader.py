@@ -97,6 +97,8 @@ def stale_reasons(path: Path) -> RepoState:
     branch = _out(path, "symbolic-ref", "-q", "--short", "HEAD") or None
     origin_head = _out(path, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
     default = origin_head.removeprefix("refs/remotes/origin/") if origin_head else None
+    if default and _out(path, "rev-parse", "-q", "--verify", origin_head or "") is None:
+        default = None  # origin/HEAD points at a ref that no longer exists
     behind = ahead = None
     if default:
         counts = _out(
@@ -125,6 +127,21 @@ def stale_reasons(path: Path) -> RepoState:
     )
 
 
+def parse_entries(staged: bytes, others: bytes) -> dict[str, str]:
+    """rel → git mode ('' for untracked) from ``ls-files -z`` output. Paths
+    decode like the filesystem does (surrogates for non-UTF-8 bytes), so a
+    Latin-1 name in a neighbour's index never raises."""
+    modes: dict[str, str] = {}
+    for record in staged.split(b"\0"):
+        if record:
+            meta, _, rel = record.partition(b"\t")
+            modes[os.fsdecode(rel)] = meta.split()[0].decode()
+    for rel in others.split(b"\0"):
+        if rel:
+            modes.setdefault(os.fsdecode(rel), "")
+    return modes
+
+
 def _entries(path: Path) -> tuple[dict[str, str], str | None]:
     """rel → git mode ('' for untracked), or an ls-files error."""
     staged = _git(path, "ls-files", "-z", "--stage")
@@ -132,15 +149,7 @@ def _entries(path: Path) -> tuple[dict[str, str], str | None]:
     for proc in (staged, others):
         if proc.returncode != 0:
             return {}, proc.stderr.decode(errors="replace").strip()[:200]
-    modes: dict[str, str] = {}
-    for record in staged.stdout.decode().split("\0"):
-        if record:
-            meta, _, rel = record.partition("\t")
-            modes[rel] = meta.split()[0]
-    for rel in others.stdout.decode().split("\0"):
-        if rel:
-            modes.setdefault(rel, "")
-    return modes, None
+    return parse_entries(staged.stdout, others.stdout), None
 
 
 def _inside(target: str, root: str) -> bool:
@@ -169,9 +178,7 @@ def read_repo(path: Path, name: str) -> FleetRepo:
             continue
         try:
             data = full.read_bytes()
-        except FileNotFoundError:  # deleted in the working tree: already "dirty"
-            continue
-        except OSError:
+        except OSError:  # incl. a sparse / skip-worktree file absent on disk
             repo.problems.append(("unreadable", rel))
             continue
         text = decode(data)

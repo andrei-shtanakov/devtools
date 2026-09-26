@@ -177,3 +177,14 @@ def test_unparsed_candidate_fails_closed() -> None:
     assert {"kit/a.sh", "kit/b.sh", "kit/d.sh", "kit/PIN", "lib.sh"} <= res.protected
     assert "kit/c.sh" not in res.protected  # P6 covers it instead
     assert res.members == {} and res.broken is True
+
+
+def test_d_header_mixed_with_member_lines_is_unparsed() -> None:
+    """Final review I1: a PIN with a valid `# VENDORED:` header and A-member
+    lines must not parse as D (its members would be silently dropped)."""
+    with pytest.raises(DeclarationError):
+        parse_declaration("kit/PIN", f"# VENDORED: x @ abcdef1 — p\n{H}  kit/a.sh\n")
+    with pytest.raises(DeclarationError):
+        parse_declaration(
+            "kit/PIN", "# VENDORED: x @ abcdef1 — p\n# SOURCE: s @ 5bfd829\n"
+        )

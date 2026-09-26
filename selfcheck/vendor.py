@@ -84,12 +84,25 @@ def _body(text: str) -> list[str]:
     return [ln.strip() for ln in text.splitlines() if ln.strip()]
 
 
+def _mixed(text: str) -> bool:
+    """Another format's header or member line next to a D header."""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith(("# SOURCE:", "upstream:", "commit:")):
+            return True
+        if _A_MEMBER.match(line) or _B_MEMBER.match(line) or _C_MEMBER.match(line):
+            return True
+    return False
+
+
 def _parse_d(rel: str, text: str) -> Declaration | None:
     for line in text.splitlines()[:HEAD_LINES]:
         if line.startswith("# VENDORED:"):
             m = _D.match(line)
             if m is None:
                 raise DeclarationError(f"{rel}: bad VENDORED header")
+            if _mixed(text):
+                raise DeclarationError(f"{rel}: VENDORED header mixed with members")
             return Declaration(rel, "D", m.group(1), m.group(2), (rel,))
     return None
 
