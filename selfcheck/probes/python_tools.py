@@ -303,6 +303,7 @@ def _radon_parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> Parse
         capture_output=True,
         text=True,
         timeout=900,
+        check=False,
     )
     if mi.returncode != 0:
         raise ValueError(f"radon mi exit {mi.returncode}: {mi.stderr[-300:]}")
