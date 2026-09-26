@@ -1,0 +1,36 @@
+# llm-sites (spec §3.4): candidate LLM call sites; Python argv is completed by
+# the AST evaluator in selfcheck.graph.resolver (e.g. `cmd = [...]; run(cmd)`).
+rules:
+  - id: py-launch
+    languages: [python]
+    severity: INFO
+    message: process launch (checked for a harness binary by selfcheck)
+    pattern-either:
+      - pattern: subprocess.$F($X, ...)
+      - pattern: asyncio.create_subprocess_exec($X, ...)
+  - id: cli-shell
+    languages: [bash]
+    severity: INFO
+    message: harness CLI launch (mechanism A)
+    pattern-regex: (?m)^\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:exec\s+|command\s+)?(?:claude|codex|opencode|aider|qwen|ollama|llama-cli|copilot)\s
+  - id: sdk-python
+    languages: [python]
+    severity: INFO
+    message: LLM SDK call (mechanism B)
+    pattern-either:
+      - pattern: $C.messages.create(...)
+      - pattern: $C.chat.completions.create(...)
+      - pattern: $C.responses.create(...)
+  - id: http-python
+    languages: [python]
+    severity: INFO
+    message: LLM HTTP call (mechanism C)
+    patterns:
+      - pattern-either:
+          - pattern: requests.$M($URL, ...)
+          - pattern: httpx.$M($URL, ...)
+          - pattern: urllib.request.urlopen($URL, ...)
+          - pattern: urlopen($URL, ...)
+      - metavariable-regex:
+          metavariable: $URL
+          regex: (?s).*(/v1/messages|/v1/chat/completions|/api/generate|/completion\b).*
