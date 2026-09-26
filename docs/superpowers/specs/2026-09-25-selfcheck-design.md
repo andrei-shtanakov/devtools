@@ -1,6 +1,6 @@
 # selfcheck: самодиагностика devtools и флота — баги, мёртвое, дубли, заменимые LLM-вызовы
 
-Дата: 2026-09-25. Статус: **converged, rev 5.1** — дизайн согласован с владельцем по
+Дата: 2026-09-25. Статус: **converged, rev 5.2** — дизайн согласован с владельцем по
 секциям в сессии 2026-09-25. rev 2 закрыл раунд 1 локального Codex-ревью,
 rev 3 — раунд 2 (замена механизмов). Раунд 3 снова дал повторы классов; по
 решению владельца 2026-09-26 rev 4 **сужает обещания**, а не наращивает
@@ -16,7 +16,10 @@ rev 3 — раунд 2 (замена механизмов). Раунд 3 сно�
 запуска интерпретатора цели (§1.5); форма входа адаптера `files | roots`
 (§4.1); чистое смещение строк — не `changed` (§2.1). Раунд 5 (адресный):
 converged — 0 blocker/major; два minor (R5-m1 ключи mapping, R5-m2 цена
-отключения `DEP003`) внесены в rev 5.1 без нового раунда.
+отключения `DEP003`) внесены в rev 5.1 без нового раунда. rev 5.2 —
+уточнения, всплывшие при замерах форматов инструментов для плана S1:
+якоря дублей jscpd и cli-overlap (§2.1), совпадение `anchor` в allowlist
+(§2.4), пресет pyrefly (§3.1), уверенность находок линтеров (§2.3).
 Цикл — vault rule `authored/rules/spec-authoring.md`; PR откроется один — на
 пару «спека + план».
 
@@ -264,7 +267,10 @@ Selfcheck зависимостей цели не ставит (§0, вне об�
   `id`, severity и confidence.
 - `anchor` без номеров строк: `file:<path>`, `func:<path>::<qualname>`,
   `make:<path>#<target>`, `skill:<path>`, `workflow:<path>#<job>`,
-  `dup:<exact|structural>:<hash>`, `llm:<path>::<qualname>`. У каждого вида
+  `dup:<exact|structural|text>:<hash>` (`text` — клоны jscpd, хэш
+  нормализованного фрагмента), `dup:cli:<hash>` (хэш отсортированного
+  пересечения флагов `argparse`), `dup:make:<hash>` (хэш нормализованного
+  рецепта), `llm:<path>::<qualname>`. У каждого вида
   якоря есть **определяющий файл** (`<path>`; для `dup` — файлы участников).
 - **Ключ находки** = (`rule`, `owner_repo`, `anchor`, `text_key`).
   `text_key` — sha1 текста строки нарушения после `strip` и схлопывания
@@ -371,11 +377,17 @@ llm-replaceable — low; `usage.unresolved-exec` — low; selfcheck.* — §4.2.
 **llm-replaceable**: без судьи — `candidate`; судья может поднять до
 `likely`, не выше.
 
+**bug / quality / deps от внешних линтеров**: `likely` — утверждение
+инструмента, не проверенное selfcheck; исключения — vulture (dead.symbol,
+выше) и потолок `env-stale` для import-класса (§1.5).
+
 ### 2.4 Allowlist
 
 `devtools/selfcheck.toml`, `[[allow]]` с полями `id` или `anchor`, `reason`,
 `until` — **все обязательны** (запись без них — ошибка загрузки конфига,
-код выхода 4). Истёкший `until` — находка `selfcheck.allow-expired`. Первая
+код выхода 4). `anchor` вида `file:<path>` покрывает все якоря этого файла
+(`file:<path>`, `func:<path>::…`, `llm:<path>::…`); прочие `anchor` —
+точное совпадение. Истёкший `until` — находка `selfcheck.allow-expired`. Первая
 запись — `issue_console.py` (неприкасаем по решению владельца: новый TUI —
 новый файл). Подавленная находка остаётся в JSON в разделе `suppressed`.
 
@@ -386,7 +398,7 @@ llm-replaceable — low; `usage.unresolved-exec` — low; selfcheck.* — §4.2.
 | Проба | Инструмент | Что берём |
 |---|---|---|
 | `ruff` | ruff `--no-cache`, набор `F,B,PL,SIM,ERA,C90,ARG,RET` поверх конфигурации репо, файлы явным списком | bug/quality |
-| `pyrefly` | pyrefly check, окружение по §1.5 | bug |
+| `pyrefly` | pyrefly check, окружение по §1.5; `--preset default`, если у репо нет своей конфигурации pyrefly (`pyrefly.toml` или `[tool.pyrefly]`) — иначе действует пресет `basic`, который молча отключает большинство проверок типов (замер 2026-09-26: `bad-return`, `bad-assignment` не репортятся) | bug |
 | `vulture` | vulture `--min-confidence 60` | dead.symbol |
 | `deptry` | deptry, окружение по §1.5 | deps |
 | `radon` | radon cc/mi | quality: ранг ≥ D |
