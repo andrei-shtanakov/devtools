@@ -127,11 +127,14 @@ def _scan_repo(
     run_dir: Path,
     acc: _Run,
 ) -> None:
+    full = list_corpus(repo.path, config.corpus_exclude)
     corpus = [
-        p
-        for p in list_corpus(repo.path, config.corpus_exclude)
-        if not args.path or any(glob_match(g, p) for g in args.path)
+        p for p in full if not args.path or any(glob_match(g, p) for g in args.path)
     ]
+    if args.path and full and not corpus:
+        acc.warnings.append(
+            f"--path matched no files in {repo.name}: nothing was checked"
+        )
     env = detect_env(repo.path)
     acc.repos[repo.name] = repo_state(repo.path)
     copy = run_dir / "src" / repo.name
@@ -177,7 +180,13 @@ def _scan_repo(
         if r.probe == "usage-graph" and r.extra:
             acc.graph[repo.name] = r.extra.get("graph", {})
             acc.surface.update(r.extra.get("surface", {}))
-        acc.keys[f"{r.probe}@{repo.name}"] = _key(r, env.mode, acc.surface, run_dir)
+        # spec §4.3: for usage-graph the key carries surface.fleet and whether
+        # --sched-dir was given — not the per-file history or the plist list
+        key_surface = {
+            "fleet": acc.surface.get("fleet"),
+            "sched_dir_given": args.sched_dir is not None,
+        }
+        acc.keys[f"{r.probe}@{repo.name}"] = _key(r, env.mode, key_surface, run_dir)
 
 
 def _document(
@@ -239,6 +248,10 @@ def main(
         run_id, run_dir = new_run_dir(args.out, datetime.now(UTC))
     except (ConfigError, OSError) as exc:
         print(f"selfcheck: {exc}", file=sys.stderr)
+        return 4
+    unknown_probes = sorted(set(args.probe) - {s.name for s in registry})
+    if unknown_probes:
+        print(f"selfcheck: unknown --probe {unknown_probes}", file=sys.stderr)
         return 4
     specs = [s for s in registry if not args.probe or s.name in args.probe]
     acc = _Run(

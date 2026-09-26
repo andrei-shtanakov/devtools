@@ -34,6 +34,7 @@ def new_run_dir(
     raise OSError(f"could not allocate a unique run directory in {out_root}")
 
 
+MD_ROWS = 200
 NO_SELECTION: dict[str, list[str]] = {"path": [], "probe": []}
 
 
@@ -141,10 +142,14 @@ def render_markdown(doc: dict[str, Any]) -> str:
             "| правило | уверенность | якорь | мест | статус |",
             "|---|---|---|---|---|",
         ]
-        for f in sorted(items, key=lambda x: (x["rule"], x["anchor"]))[:200]:
+        for f in sorted(items, key=lambda x: (x["rule"], x["anchor"]))[:MD_ROWS]:
             lines.append(
                 f"| {f['rule']} | {f['confidence']} | `{f['anchor']}` | "
                 f"{f['occurrences']} | {statuses.get(f['id'], '—')} |"
+            )
+        if len(items) > MD_ROWS:
+            lines.append(
+                f"\n_показаны {MD_ROWS} из {len(items)} — остальное в report.json_"
             )
         lines.append("")
     lines += [

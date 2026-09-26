@@ -250,3 +250,42 @@ def test_narrowed_run_is_not_a_baseline_and_skips_graph_probes(tmp_path: Path) -
     }
     dead = [f["id"] for f in last["findings"] if f["rule"] == "usage-graph/dead.file"]
     assert dead and all(last["delta"]["statuses"][i] == "persisting" for i in dead)
+
+
+# ---- terminal review of #403 (2026-09-26) ---------------------------------------
+
+
+def test_fixed_dead_is_resolved_even_when_other_files_change(tmp_path: Path) -> None:
+    """The usage-graph comparability key is fleet + presence of --sched-dir only
+    (spec §4.3), not the per-file history: adding a file elsewhere in the same
+    change must not turn a fixed finding into not-rechecked."""
+    from tests.selfcheck.helpers import ago, commit
+
+    ws = workspace(tmp_path)
+    assert main(args(ws, "--probe", "usage-graph")) == 0
+    commit(
+        ws / "devtools",
+        {
+            "Makefile": (
+                'help:\n\t@echo "make go"\ngo: ; @python3 ./live.py\n'
+                "orph: ; @python3 ./orphan.py\n"
+            ),
+            "helper.py": "x = 1\n",
+        },
+        date=ago(1),
+    )
+    assert main(args(ws, "--probe", "usage-graph")) == 0
+    _first, last = reports(ws)
+    gone = {g["anchor"]: g["status"] for g in last["delta"]["gone"]}
+    assert gone.get("file:orphan.py") == "resolved", gone
+
+
+def test_unknown_probe_name_is_a_config_error(tmp_path: Path) -> None:
+    assert main(args(workspace(tmp_path), "--probe", "ruf")) == 4
+
+
+def test_path_matching_nothing_is_a_warning(tmp_path: Path) -> None:
+    ws = workspace(tmp_path)
+    assert main(args(ws, "--probe", "ast-dup", "--path", "nothing/**")) == 0
+    (doc,) = reports(ws)
+    assert any("--path" in w for w in doc["run"]["warnings"])
