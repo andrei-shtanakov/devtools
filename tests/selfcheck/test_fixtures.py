@@ -52,14 +52,17 @@ def test_fake_venv_layout(tmp_path: Path) -> None:
     site = fake_venv(tmp_path, evil_marker=marker)
     assert site.name == "site-packages" and site.parent.name == "python3.12"
     assert (site / "PyYAML-6.0.3.dist-info" / "top_level.txt").read_text().split() == [
-        "_yaml", "yaml"]
+        "_yaml",
+        "yaml",
+    ]
     assert (site / "sitecustomize.py").exists() and (site / "evil.pth").exists()
     assert not marker.exists()
 
 
 def run_tool(tool: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([str(tool), *args], capture_output=True, text=True,
-                          timeout=20)
+    return subprocess.run(
+        [str(tool), *args], capture_output=True, text=True, timeout=20
+    )
 
 
 def test_fake_tool_contract(tmp_path: Path) -> None:
@@ -70,8 +73,14 @@ def test_fake_tool_contract(tmp_path: Path) -> None:
     assert proc.returncode == 1
     assert [i["code"] for i in data["items"]] == ["X", "CAN"]
     assert data["processed"] == []
-    whole = json.loads(run_tool(fake_tool(tmp_path / "b2", unprocessed="b.py"),
-                                "/x/.selfcheck-canary/c.py", "/x/b.py", "/x/a.py").stdout)
+    whole = json.loads(
+        run_tool(
+            fake_tool(tmp_path / "b2", unprocessed="b.py"),
+            "/x/.selfcheck-canary/c.py",
+            "/x/b.py",
+            "/x/a.py",
+        ).stdout
+    )
     assert whole["processed"] == ["/x/.selfcheck-canary/c.py", "/x/a.py"]
 
 
@@ -81,8 +90,9 @@ def test_fake_tool_write_to_read_only_dir(tmp_path: Path) -> None:
     (folder / "a.py").write_text("")
     folder.chmod(0o555)
     try:
-        proc = run_tool(fake_tool(tmp_path / "bin", write_copy=True),
-                        str(folder / "a.py"))
+        proc = run_tool(
+            fake_tool(tmp_path / "bin", write_copy=True), str(folder / "a.py")
+        )
     finally:
         folder.chmod(0o755)
     assert proc.returncode == 2 and "Permission denied" in proc.stderr
@@ -97,8 +107,14 @@ def test_plist_dir(tmp_path: Path) -> None:
 def test_workspace_layout(tmp_path: Path) -> None:
     ws = workspace(tmp_path)
     repo = ws / "devtools"
-    assert {"Makefile", "live.py", "orphan.py", "pyproject.toml",
-            "skills/s/SKILL.md", ".gitignore"} <= tracked(repo)
+    assert {
+        "Makefile",
+        "live.py",
+        "orphan.py",
+        "pyproject.toml",
+        "skills/s/SKILL.md",
+        ".gitignore",
+    } <= tracked(repo)
     assert (ws / "m.toml").read_text().startswith("[tools.devtools]")
     ts = int(git(repo, "log", "-1", "--format=%ct").strip())
     assert (NOW - ts) / 86400 > 60

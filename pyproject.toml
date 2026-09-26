@@ -39,6 +39,16 @@ dev = [
 # включения автономной ветки (§6, §12 п.7), правка одного из двух мест либо
 # уронит резолв, либо тихо выберет одну сторону (финальное ревью M-1).
 governance = ["steward", "textual>=1"]
+selfcheck = [
+    "actionlint-py==1.7.12.25",
+    "deptry==0.25.1",
+    "pyrefly==1.3.1",
+    "radon==6.0.1",
+    "ruff==0.16.9",
+    "shellcheck-py==0.11.0.1",
+    "vulture==2.16",
+    "zizmor==1.30.1",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
