@@ -180,3 +180,22 @@ def test_non_utf8_index_path_does_not_crash() -> None:
         "caf\udce9.md": "100644",
         "x\udcff.md": "",
     }
+
+
+def test_non_utf8_path_is_report_safe(tmp_path: Path, monkeypatch) -> None:
+    """Review of #405: a surrogate-bearing path must not reach the report —
+    json/markdown writing would die with UnicodeEncodeError (exit 1, no JSON)."""
+    import json
+
+    from selfcheck.fleet import reader as reader_module
+
+    repo = synced(make_repo(tmp_path / "r", {"a.md": "x\n"}))
+    monkeypatch.setattr(
+        reader_module,
+        "_entries",
+        lambda path: ({"a.md": "100644", "caf\udce9.md": "100644"}, None),
+    )
+    got = read_repo(repo, "r")
+    text = json.dumps({"problems": got.problems, "texts": sorted(got.texts)})
+    text.encode("utf-8")  # must not raise
+    assert ("unreadable", "caf�.md") in got.problems
