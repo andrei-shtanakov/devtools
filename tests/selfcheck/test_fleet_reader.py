@@ -6,8 +6,8 @@ import os
 from pathlib import Path
 
 import pytest
-from selfcheck.fleet.reader import read_repo, stale_reasons
 
+from selfcheck.fleet.reader import read_repo, stale_reasons
 from tests.selfcheck.helpers import ago, commit, commit_bytes, git, make_repo, synced
 
 
