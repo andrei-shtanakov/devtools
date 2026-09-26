@@ -369,7 +369,7 @@ def main(
         }
     )
     if args.fleet:
-        acc.fleet = _Fleet(manifest, manifest_repo(args.manifest))
+        acc.fleet = _Fleet(manifest, manifest_repo(args.manifest, args.workspace))
     missing = [name for name in wanted if name not in known]
     for name in wanted:
         if name in known:

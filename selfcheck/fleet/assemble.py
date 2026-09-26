@@ -91,9 +91,9 @@ class FleetView:
         return "complete"
 
 
-def manifest_repo(manifest: Path) -> RepoEntry | None:
-    """The git repo holding ``manifest`` — unless it is the root umbrella,
-    recognised by ``_cowork_output/`` (never read by shipped code, §9.2)."""
+def manifest_repo(manifest: Path, workspace: Path) -> RepoEntry | None:
+    """The git repo holding ``manifest`` — unless its root is the workspace
+    root itself: that is the root umbrella, never a fleet repo (§9.2)."""
     proc = subprocess.run(
         ["git", "-C", str(manifest.parent), "rev-parse", "--show-toplevel"],
         capture_output=True,
@@ -103,8 +103,8 @@ def manifest_repo(manifest: Path) -> RepoEntry | None:
     )
     if proc.returncode != 0:
         return None
-    root = Path(proc.stdout.strip())
-    if (root / "_cowork_output").exists():
+    root = Path(proc.stdout.strip()).resolve()
+    if root == workspace.resolve():
         return None
     return RepoEntry(root.name, root, detect_languages(root))
 

@@ -23,7 +23,7 @@ from tests.selfcheck.helpers import commit, fleet_ws, git, make_repo, synced
 
 def _view(ws: Path, run_dir: Path, scope: str = "devtools") -> FleetView:
     info = load_manifest(ws / "umbrella" / "m.toml", ws)
-    mrepo = manifest_repo(ws / "umbrella" / "m.toml")
+    mrepo = manifest_repo(ws / "umbrella" / "m.toml", ws)
     names = fleet_names(info, mrepo, [scope])
     paths = {mrepo.name: mrepo.path} if mrepo else {}
     return load_fleet(ws, names, run_dir, scope_name=scope, paths=paths)
@@ -32,17 +32,19 @@ def _view(ws: Path, run_dir: Path, scope: str = "devtools") -> FleetView:
 def test_composition_includes_manifest_repo(tmp_path: Path) -> None:
     ws = fleet_ws(tmp_path)
     info = load_manifest(ws / "umbrella" / "m.toml", ws)
-    repo = manifest_repo(ws / "umbrella" / "m.toml")
+    repo = manifest_repo(ws / "umbrella" / "m.toml", ws)
     assert repo is not None and repo.name == "umbrella"
     assert fleet_names(info, repo, ["devtools"]) == ("nb", "docs-nb", "umbrella")
     assert fleet_names(info, None, ["devtools", "nb"]) == ("docs-nb",)
 
 
 def test_root_umbrella_is_never_a_fleet_repo(tmp_path: Path) -> None:
-    root = synced(
-        make_repo(tmp_path / "root", {"m.toml": "", "_cowork_output/x.md": "x\n"})
-    )
-    assert manifest_repo(root / "m.toml") is None  # it tracks _cowork_output/
+    """The git repo at the workspace root (the root umbrella) is never a fleet
+    repo — recognised by position, never by naming _cowork_output (GOV-003)."""
+    root = synced(make_repo(tmp_path / "root", {"m.toml": "", "sub/m.toml": ""}))
+    assert manifest_repo(root / "m.toml", root) is None
+    assert manifest_repo(root / "sub" / "m.toml", root) is None
+    assert manifest_repo(root / "m.toml", tmp_path) is not None  # inside a workspace
 
 
 def test_complete_fleet(tmp_path: Path) -> None:
