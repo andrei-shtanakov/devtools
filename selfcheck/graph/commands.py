@@ -164,6 +164,9 @@ def scan_command(cmd: str, base: str, index: Index, *, shell_vars: bool) -> Scan
             if token in _OPTS_WITH_ARG:
                 skip_next = True
                 continue
+            if token == "-":  # program read from stdin: the rest are arguments
+                position = False
+                continue
             if token.startswith("-"):
                 continue
             if "$" in token:

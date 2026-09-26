@@ -180,16 +180,22 @@ def _eval_call(call: ast.Call, s: Scope) -> Value:
     return None
 
 
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
 def _assignments(body: list[ast.stmt]) -> dict[str, ast.expr]:
+    """Simple assignments of this scope only (nested functions/classes excluded)."""
     names: dict[str, ast.expr] = {}
-    for stmt in body:
-        for node in ast.walk(stmt):
-            if (
-                isinstance(node, ast.Assign)
-                and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-            ):
-                names[node.targets[0].id] = node.value
+    stack: list[ast.AST] = list(body)
+    while stack:
+        node = stack.pop(0)
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            names[node.targets[0].id] = node.value
+        stack += [c for c in ast.iter_child_nodes(node) if not isinstance(c, _SCOPES)]
     return names
 
 
@@ -199,6 +205,7 @@ class _Site:
     scope: Scope
     params: tuple[str, ...]
     func: str
+    local: frozenset[str] = frozenset()
 
 
 class _Collector(ast.NodeVisitor):
@@ -211,17 +218,22 @@ class _Collector(ast.NodeVisitor):
         self.scope = Scope(rel, dict(module_names))
         self.params: tuple[str, ...] = ()
         self.func = ""
+        self.local: frozenset[str] = frozenset()
 
     def _enter(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        outer = (self.scope, self.params, self.func)
-        self.scope = Scope(self.rel, {**self.module_names, **_assignments(node.body)})
+        outer = (self.scope, self.params, self.func, self.local)
+        local = _assignments(node.body)
         args = node.args
+        vararg = [args.vararg] if args.vararg else []
         self.params = tuple(
-            a.arg for a in [*args.posonlyargs, *args.args, *args.kwonlyargs]
+            a.arg for a in [*args.posonlyargs, *args.args, *args.kwonlyargs, *vararg]
         )
+        visible = {k: v for k, v in self.module_names.items() if k not in self.params}
+        self.scope = Scope(self.rel, {**visible, **local})
         self.func = node.name
+        self.local = frozenset(local)
         self.generic_visit(node)
-        self.scope, self.params, self.func = outer
+        self.scope, self.params, self.func, self.local = outer
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._enter(node)
@@ -230,7 +242,7 @@ class _Collector(ast.NodeVisitor):
         self._enter(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        self.sites.append(_Site(node, self.scope, self.params, self.func))
+        self.sites.append(_Site(node, self.scope, self.params, self.func, self.local))
         self.generic_visit(node)
 
 
@@ -245,7 +257,7 @@ def _forwarded(site: _Site) -> str | None:
     if (
         isinstance(first, ast.Name)
         and first.id in site.params
-        and first.id not in site.scope.names
+        and first.id not in site.local
     ):
         return first.id
     return None
@@ -339,7 +351,18 @@ def _launch(g: Graph, where: Location, argv: Value, index: Index) -> None:
             _apply(g, where, token, index, "")
 
 
-def _apply(g: Graph, where: Location, cmd: str, index: Index, base: str) -> None:
+_LITERAL_TAIL = re.compile(r"/([\w.-]+)[\"']?\s*$")
+_VAR_NAME = re.compile(r"^[\"']?\$\{?(\w+)")
+
+
+def _apply(
+    g: Graph,
+    where: Location,
+    cmd: str,
+    index: Index,
+    base: str,
+    suffixes: dict[str, str] | None = None,
+) -> None:
     scan = scan_command(cmd.replace(UNKNOWN, "$UNKNOWN"), base, index, shell_vars=True)
     for path in scan.targets:
         g.add(path, EdgeKind.EXEC, where)
@@ -347,6 +370,9 @@ def _apply(g: Graph, where: Location, cmd: str, index: Index, base: str) -> None
         g.mention(f"file:{path}", where.path)
     for token in scan.unresolved:
         suffix = token.rsplit("/", 1)[-1] if "/" in token else ""
+        if not suffix and suffixes:
+            name = _VAR_NAME.match(token)
+            suffix = suffixes.get(name.group(1), "") if name else ""
         _zone(
             g, where, "" if "$" in suffix else suffix.strip("'\""), "unresolved launch"
         )
@@ -413,6 +439,7 @@ def _shell_statements(text: str) -> list[tuple[int, str]]:
 def _shell(g: Graph, rel: str, text: str, index: Index) -> None:
     base = posixpath.dirname(rel)
     known: dict[str, str] = {}
+    suffixes: dict[str, str] = {}  # var → literal file name its value ends with
     for start, logical in _shell_statements(text):
         stripped = logical.strip()
         if not stripped or stripped.startswith("#") or _ARRAY_ASSIGN.match(stripped):
@@ -425,5 +452,9 @@ def _shell(g: Graph, rel: str, text: str, index: Index) -> None:
         ):
             known[match.group(1)] = "."
             continue
+        if match:
+            tail = _LITERAL_TAIL.search(match.group(2))
+            if tail and "$" not in tail.group(1):
+                suffixes[match.group(1)] = tail.group(1)
         expanded = _VAR.sub(lambda m: known.get(m.group(1), m.group(0)), stripped)
-        _apply(g, Location(rel, start), expanded, index, base)
+        _apply(g, Location(rel, start), expanded, index, base, suffixes)

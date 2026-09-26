@@ -234,3 +234,46 @@ def test_shell_non_command_lines_make_no_zones(tmp_path: Path) -> None:
         },
     )
     assert g.zones == [], [(z.caller, sorted(z.members)) for z in g.zones]
+
+
+def test_stdin_program_argument_is_not_a_launch(tmp_path: Path) -> None:
+    g = graph(
+        tmp_path,
+        {
+            "r.sh": "#!/bin/sh\npython3 - \"$manifest\" <<'PYEOF'\nprint(1)\nPYEOF\n",
+            "other.sh": "echo\n",
+        },
+    )
+    assert g.zones == []
+
+
+def test_wrapper_param_shadowing_a_name_assigned_elsewhere(tmp_path: Path) -> None:
+    g = graph(
+        tmp_path,
+        {
+            "tool.py": (
+                "import argparse, subprocess\n\n\ndef sh(args, cwd):\n"
+                "    return subprocess.run(args, cwd=cwd)\n\n\n"
+                "def main():\n    args = argparse.ArgumentParser().parse_args()\n"
+                "    sh(['./x.sh'], '.')\n"
+            ),
+            "x.sh": "echo\n",
+            "other.sh": "echo\n",
+        },
+    )
+    assert g.zones == [] and exec_targets(g) == {"file:x.sh"}
+
+
+def test_shell_variable_suffix_narrows_the_zone(tmp_path: Path) -> None:
+    g = graph(
+        tmp_path,
+        {
+            "a.sh": (
+                '#!/bin/sh\nchk="$upstream/scripts/review/checksum.sh"\n'
+                'out=$(sh "$chk" --list)\n'
+            ),
+            "scripts/review/checksum.sh": "echo\n",
+            "b.sh": "echo\n",
+        },
+    )
+    assert zone_members(g) == {"file:scripts/review/checksum.sh"}

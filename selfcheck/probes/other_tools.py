@@ -256,6 +256,10 @@ def _jscpd_argv(ctx: ProbeCtx) -> list[str]:
         "--silent",
         "--absolute",
         "--no-gitignore",  # the corpus is already git-filtered; the copy may sit in out/
+        "--max-lines",  # jscpd silently skips files above its defaults
+        "1000000",
+        "--max-size",
+        "100mb",
         "--min-lines",
         str(JSCPD_MIN_LINES),
         "--reporters",

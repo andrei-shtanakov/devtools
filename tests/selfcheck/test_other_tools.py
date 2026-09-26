@@ -165,3 +165,9 @@ def test_shellcheck_directive_warning_is_not_a_parse_error(
     source = '#!/bin/sh\n# shellcheck disable=SC2086 reason: x\necho "$1"\n'
     res = run(SHELLCHECK, build({"d.sh": source}), tmp_path)
     assert res.status is ProbeStatus.OK, (res.reason, res.diagnostics)
+
+
+def test_jscpd_processes_large_files(build, tmp_path: Path) -> None:
+    big = "".join(f"value_{i} = {i} * {i}\n" for i in range(1500))
+    res = run(JSCPD, build({"big.py": big, "d.py": DUP}), tmp_path)
+    assert res.status is ProbeStatus.OK, (res.reason, res.coverage.get("unprocessed"))
