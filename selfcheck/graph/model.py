@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import warnings
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -102,3 +104,11 @@ class Graph:
         paths = self.mentions.setdefault(anchor, [])
         if where_path not in paths:
             paths.append(where_path)
+
+
+def parse_python(source: str) -> ast.Module:
+    """``ast.parse`` without SyntaxWarning noise: fleet code is someone else's,
+    its escape sequences are not our finding (S2 acceptance 2026-09-26)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.parse(source)

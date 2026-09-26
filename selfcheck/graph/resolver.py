@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from selfcheck.graph.commands import Index, module_files, module_name, scan_command
-from selfcheck.graph.model import EdgeKind, Graph, NodeKind, Zone
+from selfcheck.graph.model import EdgeKind, Graph, NodeKind, Zone, parse_python
 from selfcheck.model import Location
 from selfcheck.roles import Role
 
@@ -304,7 +304,7 @@ def _wrappers(sites: list[_Site], launchers: Launchers) -> dict[str, int]:
 def argv_at(source: str, rel: str, line: int) -> list[str] | None:
     """Evaluated argv of the launch call starting at ``line`` (for llm-sites)."""
     try:
-        tree = ast.parse(source)
+        tree = parse_python(source)
     except SyntaxError:
         return None
     launchers = launch_names(tree)
@@ -335,7 +335,7 @@ def _modules(
         if not rel.endswith(".py") or roles[rel] not in (Role.SOURCE, Role.CANARY):
             continue
         try:
-            tree = ast.parse(texts[rel])
+            tree = parse_python(texts[rel])
         except SyntaxError:
             continue
         sites = _sites(tree, rel)

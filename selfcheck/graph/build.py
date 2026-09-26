@@ -21,7 +21,7 @@ from selfcheck.graph.commands import (
     module_files,
     scan_command,
 )
-from selfcheck.graph.model import EdgeKind, Graph, Node, NodeKind
+from selfcheck.graph.model import EdgeKind, Graph, Node, NodeKind, parse_python
 from selfcheck.model import Location
 from selfcheck.roles import Role
 
@@ -377,7 +377,7 @@ def _imports(tree: ast.AST, rel: str) -> list[str]:
 
 def _python(g: Graph, rel: str, text: str, index: Index, *, test: bool) -> None:
     try:
-        tree = ast.parse(text)
+        tree = parse_python(text)
     except SyntaxError as exc:
         if not test:
             g.errors.append(f"{rel}: {exc.msg} (line {exc.lineno})")

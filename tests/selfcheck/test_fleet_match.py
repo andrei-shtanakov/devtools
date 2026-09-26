@@ -195,3 +195,19 @@ def test_keys_outside_the_token_class_are_found() -> None:
         "file:a b.sh": ["nb:b.md"],
         "file:запуск.sh": ["nb:a.md"],
     }
+
+
+def test_parsing_neighbour_code_emits_no_syntax_warning(tmp_path: Path) -> None:
+    """Acceptance 2026-09-26: 22 repos of foreign code must not spam stderr with
+    SyntaxWarning ('invalid escape sequence') — it is their code, not a finding."""
+    import warnings
+
+    nb = synced(
+        make_repo(tmp_path / "nb", {"x.py": 'import os\nP = "\\\\`"\nQ = "\\`"\n'})
+    )
+    # "error" would not do: compile() turns an erroring SyntaxWarning into a
+    # SyntaxError, which the builder swallows — record instead
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fleet_edges(read_repo(nb, "nb"), "devtools", frozenset())
+    assert [w for w in caught if issubclass(w.category, SyntaxWarning)] == []
