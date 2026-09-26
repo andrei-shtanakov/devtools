@@ -5,42 +5,81 @@
 
 ## 1. Установка
 
-**Сначала доступ.** `setup.sh` клонирует репо от пользователя `r16` по
-`GIT_BASE`, и без доступа оборвётся на первом `git clone`, не дойдя до
-юнитов и `r16.env` (повторный прогон идемпотентен, но лучше не доводить).
-Поэтому до `setup.sh`: создать пользователя и положить ему ключ с доступом
-на чтение (deploy key или ключ машины) и `known_hosts` для github.com, затем
-проверить `sudo -u r16 git ls-remote "$GIT_BASE/devtools.git" HEAD`.
+Первое развёртывание — 2026-09-26 на `pr0sto.net` (тот же хост, что у Robin,
+вход `admin@`, sudo без пароля). Разделы ниже — как оно прошло на деле.
+
+**Пакет `gh`.** В образе Ubuntu 24.04 его нет, а `setup.sh` без него
+останавливается. Штатного пакета достаточно (2.45):
 
 ```bash
-sudo useradd --system --home-dir /srv/r16 --shell /usr/sbin/nologin r16   # если ещё нет
-# ключ → /srv/r16/.ssh/ (0700, файлы 0600, r16:r16)
-sudo -u r16 git ls-remote git@github.com:andrei-shtanakov/devtools.git HEAD
-sudo GIT_BASE=git@github.com:andrei-shtanakov deploy/r16/setup.sh
-sudo -e /srv/r16/r16.env            # R16_HOST_LABEL=<имя VPS>
+sudo apt-get install -y gh
 ```
 
-Профиль gh ai-prosto:
+**Доступ к GitHub на чтение — по https, без ключа.** Все репо, которые клонирует
+`setup.sh` (devtools, `ai-orchestrators-workspace` и всё из
+`workspace-manifest.toml`), публичные, поэтому `GIT_BASE` —
+`https://github.com/andrei-shtanakov`. Ключ пользователю `r16` не нужен, и
+на сервере не появляется ещё один ключ с доступом к GitHub. Если какой-то репо
+станет приватным, `setup.sh` оборвётся на его `git clone` — тогда нужен
+ssh-ключ для `r16` (`/srv/r16/.ssh/`, 0700/0600) и ssh-`GIT_BASE`.
+
+**`setup.sh` — из временного клона** (постоянную копию в `/srv/r16/devtools`
+скрипт кладёт сам):
 
 ```bash
-sudo install -o r16 -g r16 -m 0600 <hosts.yml ai-prosto> /srv/r16/gh/hosts.yml
+rm -rf /tmp/r16-setup
+git clone -q --depth 1 https://github.com/andrei-shtanakov/devtools /tmp/r16-setup
+sudo GIT_BASE=https://github.com/andrei-shtanakov bash /tmp/r16-setup/deploy/r16/setup.sh
+rm -rf /tmp/r16-setup
+sudo sed -i "s/^R16_HOST_LABEL=.*/R16_HOST_LABEL=pr0sto.net/" /srv/r16/r16.env
+```
+
+Проверка — таблица прав §1.3, 23 клона, `robin` в `r16-readers`, таймер
+`disabled`:
+
+```bash
+sudo stat -c "%U:%G %a %n" /srv/r16 /srv/r16/devtools /srv/r16/workspace \
+  /srv/r16/state /srv/r16/state/r16.lock /srv/r16/state/receipts /srv/r16/gh /srv/r16/r16.env
+sudo ls /srv/r16/workspace | wc -l
+id robin
+systemctl is-enabled r16-kb-freshness.timer
 ```
 
 `setup.sh` таймер **не включает**: смена исполнителя — только передачей (§3).
 
+**Токен gh ai-prosto.** Токен на Mac хранится в Keychain, а не в
+`~/.config/review/hosts.yml`, так что скопировать профиль нельзя. Для
+сервера — **отдельный classic PAT от ai-prosto только со scope
+`public_repo`**: раннеру нужны issue и метка в одном публичном репо
+(prograph-vault), а токен Mac (`repo, workflow, …`) пишет во все репо.
+Fine-grained токен не подходит: он не даёт доступа к чужому личному репо, где
+ai-prosto — коллаборатор. Создаётся под аккаунтом ai-prosto:
+https://github.com/settings/tokens/new → scope только `public_repo`.
+
+`gh auth login --with-token` такой токен **отвергает** (требует `repo` и
+`read:org`), поэтому он пишется в `hosts.yml` напрямую — скрытым вводом, чтобы
+не попасть ни в историю, ни в командную строку. Из своего терминала:
+
+```bash
+ssh -t admin@pr0sto.net "sudo -u r16 bash -c 'umask 077; read -rsp \"token: \" T; echo; printf \"github.com:\n    oauth_token: %s\n    user: ai-prosto\n    git_protocol: https\n\" \"\$T\" > /srv/r16/gh/hosts.yml; echo written'"
+```
+
 ## 2. Проверка до передачи (§2.2 шаг 1)
 
 ```bash
-sudo -u r16 bash -c 'set -a; . /srv/r16/r16.env; set +a;
-  /usr/local/bin/uv run --script /srv/r16/devtools/r16_runner.py --dry-run'
-sudo -u r16 GH_CONFIG_DIR=/srv/r16/gh gh auth status
-sudo -u r16 GH_CONFIG_DIR=/srv/r16/gh gh issue list -R andrei-shtanakov/prograph-vault --label kb-freshness
+sudo -u r16 -H bash -c 'set -a; . /srv/r16/r16.env; set +a; cd /srv/r16/devtools;
+  /usr/local/bin/uv run --script r16_runner.py --dry-run'
+sudo -u r16 env GH_CONFIG_DIR=/srv/r16/gh gh auth status
+sudo -u r16 env GH_CONFIG_DIR=/srv/r16/gh gh issue list -R andrei-shtanakov/prograph-vault --label kb-freshness --state all --limit 3
 ```
 
-Ожидается: пробный прогон печатает квитанцию с `"execution": "completed"` и
-ничего не записывает в `/srv/r16/state/receipts/`; `gh auth status` называет
-ai-prosto. Пробный прогон gh не вызывает — авторизацию проверяют две
-последние команды.
+Ожидается: пробный прогон печатает квитанцию с `"execution": "completed"`,
+`producer.host` из `r16.env`, `delivery.action: dry-run` и ничего не
+записывает в `/srv/r16/state/receipts/`. `gh auth status` называет ai-prosto
+со scope `public_repo`; строка `Missing required token scopes: 'repo',
+'read:org'` ожидаема и работе не мешает. Пробный прогон gh не вызывает —
+чтение проверяет `gh issue list`; **запись** впервые проверяет первая
+настоящая доставка (квитанция покажет `delivery: failed`, если прав мало).
 
 ## 3. Передача Mac → VPS (§2.2 шаги 2–5)
 
@@ -50,7 +89,9 @@ ai-prosto. Пробный прогон gh не вызывает — автори
 
 ```bash
 launchctl bootout gui/$UID/dev.atp.r16-kb-freshness
-rm ~/Library/LaunchAgents/dev.atp.r16-kb-freshness.plist
+# plist — в резерв, не удалять до приёмки: откат возвращает его обратно
+mkdir -p ~/Library/LaunchAgents.disabled
+mv ~/Library/LaunchAgents/dev.atp.r16-kb-freshness.plist ~/Library/LaunchAgents.disabled/
 # на macOS нет flock(1) — проверка тем же fcntl, что у раннера
 python3 -c 'import fcntl,sys; fcntl.flock(open(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)' \
   ~/labs/all_ai_orchestrators/_cowork_output/cadence/r16/receipts/.lock && echo "прогон не идёт"
@@ -62,7 +103,9 @@ python3 -c 'import fcntl,sys; fcntl.flock(open(sys.argv[1]), fcntl.LOCK_EX | fcn
 Снимок (шаг 3) — без прав Mac, затем права явно:
 
 ```bash
-rsync -rt --no-perms --no-owner --no-group   ~/labs/all_ai_orchestrators/_cowork_output/cadence/r16/receipts/   <vps>:/tmp/r16-receipts/
+rsync -rt --no-perms --no-owner --no-group --exclude .lock \
+  ~/labs/all_ai_orchestrators/_cowork_output/cadence/r16/receipts/ \
+  admin@pr0sto.net:/tmp/r16-receipts/
 # на VPS:
 sudo rsync -rt /tmp/r16-receipts/ /srv/r16/state/receipts/
 sudo chown -R r16:r16-readers /srv/r16/state/receipts
@@ -70,8 +113,11 @@ sudo find /srv/r16/state/receipts -type d -exec chmod 2750 {} +
 sudo find /srv/r16/state/receipts -type f -exec chmod 0640 {} +
 ```
 
-Сверка: `cd <receipts> && find . -type f -name '*.json' | sort | xargs shasum -a 256`
-на Mac и `sha256sum` того же списка на VPS — выводы совпадают. Затем:
+Сверка: на Mac `cd <receipts> && find . -type f -name '*.json' | sort | xargs shasum -a 256`,
+на VPS — `sudo sha256sum` тех же файлов **по абсолютным путям**
+(`/srv/r16/state/receipts/…`): `admin` не входит в `r16-readers` и `cd` в
+каталог квитанций ему запрещён — так и задумано. Суммы совпадают. Затем
+удалить `/tmp/r16-receipts` и:
 
 ```bash
 sudo -u robin cat /srv/r16/state/receipts/<последний>.json >/dev/null && echo ok
@@ -87,7 +133,15 @@ sudo -u robin cat /srv/r16/state/receipts/legacy/<файл>.json >/dev/null && e
 
 ```bash
 sudo systemctl enable --now r16-kb-freshness.timer
+# разовый ручной запуск — проверка юнита (пользователь, env, путь к uv); по
+# перенесённой квитанции текущего цикла раннер отвечает `done` и ничего не пишет
+sudo systemctl start r16-kb-freshness.service
+systemctl show r16-kb-freshness.service -p Result -p ExecMainStatus
+sudo journalctl -u r16-kb-freshness.service -n 5 --no-pager -o cat
 ```
+
+Ожидается `Result=success`, `ExecMainStatus=0`, в журнале
+`cycle <текущий>: done`, число файлов квитанций не изменилось.
 
 ## 4. Откат (§2.3)
 
@@ -101,19 +155,32 @@ sudo -u r16 flock -n /srv/r16/state/r16.lock true && echo "блокировка 
 ```
 
 Только после обоих условий: квитанции обратно на Mac тем же способом (без
-прав, со сверкой sha256), затем вернуть plist и
-`launchctl bootstrap gui/$UID ~/Library/LaunchAgents/dev.atp.r16-kb-freshness.plist`.
+прав, со сверкой sha256), затем вернуть plist из `~/Library/LaunchAgents.disabled/` в
+`~/Library/LaunchAgents/` и
+`launchctl bootstrap gui/$UID ~/Library/LaunchAgents/dev.atp.r16-kb-freshness.plist`;
+блок R16 сторожа вернуть из git-истории `_cowork_output/ops/r2-liveness-check.sh`.
 
 ## 5. Приёмка (§4.4)
 
 1. Пробный прогон и `gh auth status` — раздел 2.
 2. Права по таблице §1.3 — `stat -c '%U:%G %a %n'` каждой строки. От `robin`
-   проходят `cat` квитанции верхнего уровня и из `legacy/`; отказывают
-   `ls /srv/r16`, `ls /srv/r16/gh`, `cat /srv/r16/r16.env`,
-   `cat /srv/r16/state/r16.lock`, `ls /srv/r16/workspace`.
+   проходят `cat` квитанции верхнего уровня и из `legacy/`; шесть отказов:
+
+   ```bash
+   for c in "ls /srv/r16" "ls /srv/r16/gh" "cat /srv/r16/r16.env" \
+            "cat /srv/r16/state/r16.lock" "ls /srv/r16/workspace" "ls /srv/r16/state"; do
+     sudo -u robin sh -c "$c" >/dev/null 2>&1 && echo "ДОСТУП: $c" || echo "отказ: $c"
+   done
+   ```
+
+   Ожидается шесть строк `отказ: …`. Robin увидит группу `r16-readers` только
+   после рестарта своих сервисов (`usermod` не меняет группы запущенных
+   процессов).
 3. Передача — раздел 3, со сверкой sha256.
 4. Первая квитанция, записанная на VPS: `"host": "<R16_HOST_LABEL>"` в
-   `producer`, группа `r16-readers`, режим 640.
+   `producer`, группа `r16-readers`, режим 640; если в ней есть issue — его
+   автор ai-prosto (первая проверка записи токеном `public_repo`). После
+   этого — удалить резервный plist на Mac.
 
 ## 6. Обновление кода
 
