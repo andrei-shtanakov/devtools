@@ -295,3 +295,79 @@ def require_probe(
         if REQUIRE_TOOLS:
             pytest.fail(message)
         pytest.skip(message)
+
+
+# ---- S2 fleet fixtures (plan S2, Task 0) ----------------------------------------
+
+
+def synced(repo: Path, branch: str = "main") -> Path:
+    """Put ``repo`` on ``branch`` with ``origin/HEAD`` → it, no network (§9.6)."""
+    git(repo, "branch", "-M", branch)
+    git(repo, "update-ref", f"refs/remotes/origin/{branch}", "HEAD")
+    git(
+        repo,
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        f"refs/remotes/origin/{branch}",
+    )
+    return repo
+
+
+def commit_bytes(repo: Path, files: dict[str, bytes], *, date: str = "") -> None:
+    """Commit raw bytes (binary, UTF-16) — ``commit`` only writes text."""
+    for rel, data in files.items():
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    git(repo, "add", "--", *files, date=date or ago(90))
+    git(repo, "commit", "-q", "-m", "bytes", date=date or ago(90))
+
+
+SCOPE_S2 = {
+    ".gitignore": "out/\n",
+    "pyproject.toml": '[project]\nname = "d"\nversion = "0"\n[tool.ruff]\n',
+    "Makefile": 'help:\n\t@echo "make go"\ngo: ; @python3 ./live.py\n',
+    "live.py": 'if __name__ == "__main__":\n    pass\n',
+    "orphan.py": 'if __name__ == "__main__":\n    pass\n',
+    "check.py": 'if __name__ == "__main__":\n    pass\n',
+    "attest.sh": "#!/bin/sh\necho attest\n",
+    "scripts/review/PIN": (
+        "# SOURCE: steward @ 5bfd829 (master, 2026-09-21; tail of the header\n"
+        "# continues here)\n"
+        + "a" * 64
+        + "  scripts/review/local.sh\n"
+        + "a" * 64
+        + "  scripts/review/prose-paths.env\n"
+    ),
+    "scripts/review/local.sh": "#!/bin/sh\necho kit\n",
+    "scripts/review/prose-paths.env": (
+        "# VENDORED: devtools @ 8cd6456 — contracts/review-scope/v1/prose-paths.env\n"
+        "docs/**\n"
+    ),
+}
+NEIGHBOURS_S2 = {
+    "nb": {
+        ".github/workflows/c.yml": (
+            "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: python3 ws/devtools/check.py\n"
+        ),
+    },
+    "docs-nb": {"TODO.md": "- [ ] run `../devtools/attest.sh maestro 1`\n"},
+}
+
+
+def fleet_ws(
+    tmp: Path,
+    scope_files: dict[str, str] | None = None,
+    neighbours: dict[str, dict[str, str]] | None = None,
+) -> Path:
+    """S2: workspace = synced scope ``devtools`` + synced neighbours + a synced
+    umbrella repo holding the manifest ``umbrella/m.toml`` (§9.2)."""
+    scope = {**SCOPE_S2, **(scope_files or {})}
+    nbs = NEIGHBOURS_S2 if neighbours is None else neighbours
+    synced(make_repo(tmp / "devtools", scope))
+    for name, files in nbs.items():
+        synced(make_repo(tmp / name, files))
+    entries = "".join(f'[tools.{n}]\ngit_dir = "{n}"\n' for n in ["devtools", *nbs])
+    synced(make_repo(tmp / "umbrella", {"m.toml": entries}))
+    return tmp

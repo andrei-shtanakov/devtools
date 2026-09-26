@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import socket
 import subprocess
 import sys
@@ -17,6 +18,16 @@ from selfcheck.config import Config, ConfigError, apply_allowlist, load_config
 from selfcheck.corpus import list_corpus, materialize, release, repo_state
 from selfcheck.delta import SKIPPED_KEY, RunSnapshot, comparability_key, compute_delta
 from selfcheck.env import apply_env_policy, detect_env
+from selfcheck.fleet.assemble import (
+    CANARY_NODE,
+    FleetView,
+    fleet_findings,
+    fleet_names,
+    load_fleet,
+    manifest_repo,
+    surface_repos,
+)
+from selfcheck.fleet.reader import FleetRepo
 from selfcheck.manifest import ManifestInfo, RepoEntry, load_manifest
 from selfcheck.model import Confidence, Finding, Location, aggregate
 from selfcheck.probes.base import (
@@ -59,6 +70,9 @@ def _args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--sched-dir", type=Path, default=None)
     parser.add_argument(
+        "--fleet", action="store_true", help="read every manifest repo (spec §9)"
+    )
+    parser.add_argument(
         "--path", action="append", default=[], help="glob limiting the corpus"
     )
     parser.add_argument(
@@ -91,6 +105,19 @@ class _Run:
     warnings: list[str] = field(default_factory=list)
     surface: dict[str, Any] = field(default_factory=dict)
     selection: dict[str, list[str]] = field(default_factory=dict)
+    vendored: dict[str, dict[str, Any]] = field(default_factory=dict)
+    fleet: _Fleet | None = None
+
+
+@dataclass
+class _Fleet:
+    """What --fleet reads once per run (spec §9.2)."""
+
+    manifest: ManifestInfo
+    mrepo: RepoEntry | None
+    cache: dict[str, FleetRepo] = field(default_factory=dict)
+    status: dict[str, str] = field(default_factory=dict)
+    fleet_only: dict[str, list[dict[str, str]]] = field(default_factory=dict)
 
 
 def _missing_repo(name: str) -> Finding:
@@ -119,6 +146,51 @@ def _key(
     )
 
 
+def _fleet_view(
+    repo: RepoEntry, args: argparse.Namespace, run_dir: Path, acc: _Run
+) -> FleetView | None:
+    fleet = acc.fleet
+    if fleet is None:
+        return None
+    names = fleet_names(fleet.manifest, fleet.mrepo, [repo.name])
+    paths = {fleet.mrepo.name: fleet.mrepo.path} if fleet.mrepo else {}
+    return load_fleet(
+        args.workspace,
+        names,
+        run_dir,
+        scope_name=repo.name,
+        cache=fleet.cache,
+        paths=paths,
+    )
+
+
+def _usage_status(results: Sequence[ProbeResult]) -> ProbeStatus | None:
+    return next((r.status for r in results if r.probe == "usage-graph"), None)
+
+
+def _record_fleet(
+    repo: RepoEntry, view: FleetView, results: Sequence[ProbeResult], acc: _Run
+) -> None:
+    assert acc.fleet is not None
+    usage = _usage_status(results)
+    # the fleet canary runs inside usage-graph: no run (or a failed one) means
+    # the channels were never proven this run — never "complete" (§9.6 п.1)
+    ok = usage in (ProbeStatus.OK, ProbeStatus.PARTIAL)
+    acc.fleet.status[repo.name] = view.status() if ok else "partial"
+    if usage is ProbeStatus.OK:
+        acc.keys[f"fleet@{repo.name}"] = "ok"
+    acc.findings += fleet_findings(view, repo.name)
+    graph = acc.graph.get(repo.name, {})
+    acc.fleet.fleet_only[repo.name] = [
+        {
+            "node": anchor,
+            "from": next(e["from"] for e in node["edges"] if e["kind"] == "fleet"),
+        }
+        for anchor, node in graph.items()
+        if node.get("fleet_only")
+    ]
+
+
 def _scan_repo(
     repo: RepoEntry,
     args: argparse.Namespace,
@@ -137,8 +209,12 @@ def _scan_repo(
         )
     env = detect_env(repo.path)
     acc.repos[repo.name] = repo_state(repo.path)
+    view = _fleet_view(repo, args, run_dir, acc)
+    extra = canary_files(specs)
+    if view is not None:
+        extra[CANARY_NODE] = 'print("selfcheck fleet canary")\n'
     copy = run_dir / "src" / repo.name
-    materialize(repo.path, corpus, copy, canary_files(specs))
+    materialize(repo.path, corpus, copy, extra)
     acc.materialized.append(repo.name)
     acc.keys[f"materialize@{repo.name}"] = "ok"
     try:
@@ -152,8 +228,9 @@ def _scan_repo(
             config.roles,
             config.corpus_exclude,
             args.sched_dir,
-            "absent",
+            view.status() if view is not None else "absent",
             time.time(),
+            fleet_view=view,
         )
         results = [
             ProbeResult(
@@ -179,17 +256,29 @@ def _scan_repo(
         acc.inventory += r.extra.get("inventory", [])
         if r.probe == "usage-graph" and r.extra:
             acc.graph[repo.name] = r.extra.get("graph", {})
+            acc.vendored[repo.name] = r.extra.get("vendored", {})
             acc.surface.update(r.extra.get("surface", {}))
-        # spec §4.3: for usage-graph the key carries surface.fleet and whether
-        # --sched-dir was given — not the per-file history or the plist list
-        key_surface = {
-            "fleet": acc.surface.get("fleet"),
-            "sched_dir_given": args.sched_dir is not None,
-        }
-        acc.keys[f"{r.probe}@{repo.name}"] = _key(r, env.mode, key_surface, run_dir)
+    # spec §4.3: for usage-graph the key carries surface.fleet and whether
+    # --sched-dir was given — not the per-file history or the plist list;
+    # with --fleet also the composition of R's fleet (§9.6)
+    key_surface: dict[str, Any] = {
+        "fleet": view.status() if view is not None else "absent",
+        "sched_dir_given": args.sched_dir is not None,
+    }
+    if view is not None:
+        key_surface["fleet_repos"] = sorted(view.expected)
+    for r in results:
+        key = _key(r, env.mode, key_surface, run_dir)
+        acc.keys[f"{r.probe}@{repo.name}"] = key
+        if r.probe == "usage-graph":
+            # vendor-pin-* findings (rule prefix "selfcheck") follow usage-graph
+            acc.keys[f"selfcheck@{repo.name}"] = key
+    if view is not None:
+        _record_fleet(repo, view, results, acc)
 
 
 def _document(
+    manifest_path: Path,
     run_id: str,
     wanted: list[str],
     manifest: ManifestInfo,
@@ -209,6 +298,7 @@ def _document(
             "selection": acc.selection,
             "repos": acc.repos,
             "surface": acc.surface,
+            "manifest_path": str(manifest_path),
             "manifest": {
                 "entries_read": manifest.entries_read,
                 "repos": [r.name for r in manifest.repos],
@@ -226,10 +316,28 @@ def _document(
         "suppressed": [f.to_json() for f in suppressed],
         "suppressed_no_env": acc.no_env,
         "graph": acc.graph,
+        "vendored": acc.vendored,
+        "fleet": {
+            "enabled": acc.fleet is not None,
+            "fleet_only": acc.fleet.fleet_only if acc.fleet else {},
+        },
         "delta": {"statuses": delta[0], "gone": delta[1]},
         "inventory": {"llm": acc.inventory},
         "snapshot": snapshot.to_json(),
     }
+
+
+def _fleet_surface(acc: _Run, scope: Sequence[str], manifest_path: Path) -> None:
+    """``surface.fleet`` — the worst over scope; rows for U − scope (§9.2, §9.6)."""
+    fleet = acc.fleet
+    assert fleet is not None
+    statuses = set(fleet.status.values())
+    complete = statuses == {"complete"}
+    acc.surface["fleet"] = "complete" if complete else "partial"
+    outside = fleet_names(fleet.manifest, fleet.mrepo, scope)
+    rows = [fleet.cache[n] for n in outside if n in fleet.cache]
+    acc.surface["fleet_repos"] = surface_repos(FleetView(rows, outside, [], None))
+    acc.surface["manifest_sha1"] = hashlib.sha1(manifest_path.read_bytes()).hexdigest()
 
 
 def main(
@@ -260,6 +368,8 @@ def main(
             "sched_dir": str(args.sched_dir) if args.sched_dir else None,
         }
     )
+    if args.fleet:
+        acc.fleet = _Fleet(manifest, manifest_repo(args.manifest, args.workspace))
     missing = [name for name in wanted if name not in known]
     for name in wanted:
         if name in known:
@@ -268,6 +378,8 @@ def main(
             except (OSError, subprocess.CalledProcessError) as exc:
                 print(f"selfcheck: materialize {name}: {exc}", file=sys.stderr)
                 return 4
+    if acc.fleet is not None:
+        _fleet_surface(acc, wanted, args.manifest)
     extra = [*instrument_findings(acc.results), *(_missing_repo(n) for n in missing)]
     allow = apply_allowlist([*acc.findings, *extra], config, datetime.now(UTC).date())
     final = aggregate([*allow.kept, *allow.expired])
@@ -287,7 +399,16 @@ def main(
     base = RunSnapshot.from_json(base_doc["snapshot"]) if base_doc else None
     delta = compute_delta(base, snapshot)
     doc = _document(
-        run_id, wanted, manifest, config, acc, final, allow.suppressed, snapshot, delta
+        args.manifest,
+        run_id,
+        wanted,
+        manifest,
+        config,
+        acc,
+        final,
+        allow.suppressed,
+        snapshot,
+        delta,
     )
     try:
         write_report(run_dir, doc)

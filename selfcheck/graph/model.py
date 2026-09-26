@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import warnings
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -74,6 +76,8 @@ class Graph:
     errors: list[str] = field(default_factory=list)
     plists: list[str] = field(default_factory=list)
     root_texts: dict[str, str] = field(default_factory=dict)
+    # launch targets that resolved to no node of this graph (spec §9.3)
+    external: list[tuple[str, EdgeKind, Location]] = field(default_factory=list)
 
     def incoming(self, anchor: str) -> list[Edge]:
         """Edges pointing at ``anchor``."""
@@ -100,3 +104,11 @@ class Graph:
         paths = self.mentions.setdefault(anchor, [])
         if where_path not in paths:
             paths.append(where_path)
+
+
+def parse_python(source: str) -> ast.Module:
+    """``ast.parse`` without SyntaxWarning noise: fleet code is someone else's,
+    its escape sequences are not our finding (S2 acceptance 2026-09-26)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.parse(source)

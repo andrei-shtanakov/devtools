@@ -85,6 +85,9 @@ def last_commit_ts(repo: Path, rel: str) -> int | None:
 
 def repo_state(repo: Path) -> dict[str, Any]:
     """HEAD and dirtiness without ``git status`` (it may rewrite the index)."""
+    # TODO: diff-index reports stat-only changes (touch, chmod) as dirty; S2 uses
+    # `status --porcelain` with GIT_OPTIONAL_LOCKS=0, which neither lies nor writes
+    # (selfcheck/fleet/reader.py). Kept as is here: it only feeds the report.
     head = _git(repo, "rev-parse", "HEAD").stdout.decode().strip()
     changed = _git(repo, "diff-index", "--quiet", "HEAD", "--", check=False).returncode
     others = _git(repo, "ls-files", "-z", "--others", "--exclude-standard").stdout
