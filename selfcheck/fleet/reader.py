@@ -122,8 +122,9 @@ def stale_reasons(path: Path) -> RepoState:
         reasons.append("ahead")
     if dirty:
         reasons.append("dirty")
+    ordered = tuple(r for r in STALE if r in reasons)
     return RepoState(
-        head, branch, default, behind, ahead, dirty, _fetched_at(path), tuple(reasons)
+        head, branch, default, behind, ahead, dirty, _fetched_at(path), ordered
     )
 
 
@@ -152,6 +153,12 @@ def _entries(path: Path) -> tuple[dict[str, str], str | None]:
     return parse_entries(staged.stdout, others.stdout), None
 
 
+def shown(rel: str) -> str:
+    """A path as reports carry it: surrogates of non-UTF-8 bytes become U+FFFD
+    (the raw ``rel`` is still what opens the file)."""
+    return rel.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+
 def _inside(target: str, root: str) -> bool:
     return target == root or target.startswith(root + os.sep)
 
@@ -170,22 +177,22 @@ def read_repo(path: Path, name: str) -> FleetRepo:
     for rel in sorted(modes):
         full = path / rel
         if modes[rel] == GITLINK:
-            repo.problems.append(("submodule", rel))
+            repo.problems.append(("submodule", shown(rel)))
             continue
         if os.path.islink(full):
             if not _inside(os.path.realpath(full), root):
-                repo.problems.append(("symlink-out", rel))
+                repo.problems.append(("symlink-out", shown(rel)))
             continue
         try:
             data = full.read_bytes()
         except OSError:  # incl. a sparse / skip-worktree file absent on disk
-            repo.problems.append(("unreadable", rel))
+            repo.problems.append(("unreadable", shown(rel)))
             continue
         text = decode(data)
         if text is None:
             repo.binary += 1
         else:
-            repo.texts[rel] = text
+            repo.texts[shown(rel)] = text
     if not repo.texts:
         repo.problems.append(("empty", ""))
     repo.state = stale_reasons(path)
