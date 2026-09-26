@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -258,3 +259,39 @@ def mi_rank_c_source() -> str:
         lines.append(f"        total -= (a | b) & (c ^ d) + {i}")
     lines.append("    return total")
     return "\n".join(lines) + "\n"
+
+
+def require_probe(
+    binary: str,
+    version_args: tuple[str, ...],
+    version_range: tuple[tuple[int, ...], tuple[int, ...]] | None,
+) -> None:
+    """Gate a real-tool test like the probe gates itself: present *and* inside
+    its version range. CI's plain `pytest` sees e.g. the runner's system
+    shellcheck 0.9.0 — that must skip, not fail (it fails only when tools are
+    required, i.e. in the `--group selfcheck` step)."""
+    require_tool(binary)
+    if version_range is None:
+        return
+    path = shutil.which(binary)
+    assert path is not None
+    try:
+        proc = subprocess.run(
+            [path, *version_args],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        proc = None
+    match = re.search(
+        r"(\d+)\.(\d+)(?:\.(\d+))?", (proc.stdout + proc.stderr) if proc else ""
+    )
+    version = tuple(int(g) for g in match.groups() if g is not None) if match else None
+    low, high = version_range
+    if version is None or not low <= version < high:
+        message = f"{binary} version {version} outside [{low}, {high})"
+        if REQUIRE_TOOLS:
+            pytest.fail(message)
+        pytest.skip(message)

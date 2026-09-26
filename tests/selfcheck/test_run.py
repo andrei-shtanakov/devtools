@@ -20,6 +20,7 @@ from selfcheck.run import exit_code, main
 from tests.selfcheck.helpers import (
     plist_dir,
     require_npx_package,
+    require_probe,
     require_tool,
     workspace,
 )
@@ -162,7 +163,7 @@ def test_full_registry_leaves_source_untouched(tmp_path: Path, monkeypatch) -> N
         if spec.name == "jscpd":
             require_npx_package("jscpd@4.3.0")
         elif spec.binary:
-            require_tool(spec.binary)
+            require_probe(spec.binary, spec.version_args, spec.version_range)
     ws = workspace(tmp_path, {"a.py": "import os\n", "run.sh": "#!/bin/sh\necho $1\n"})
     repo = ws / "devtools"
     before = snapshot_hashes(repo)

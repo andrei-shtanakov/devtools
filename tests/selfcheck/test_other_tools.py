@@ -25,7 +25,11 @@ from selfcheck.probes.other_tools import (
     ZIZMOR,
     shell_files,
 )
-from tests.selfcheck.helpers import make_repo, require_npx_package, require_tool
+from tests.selfcheck.helpers import (
+    make_repo,
+    require_npx_package,
+    require_probe,
+)
 
 WORKFLOW = """on: push
 permissions: {}
@@ -66,7 +70,7 @@ def run(spec: ProbeSpec, target: RepoTarget, tmp: Path) -> ProbeResult:
     if spec is JSCPD or spec.name == "jscpd":
         require_npx_package("jscpd@4.3.0")
     else:
-        require_tool(spec.binary or "")
+        require_probe(spec.binary or "", spec.version_args, spec.version_range)
     return run_probe(spec, target, tmp / "run" / "work")
 
 

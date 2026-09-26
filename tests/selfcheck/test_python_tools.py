@@ -26,7 +26,12 @@ from selfcheck.probes.python_tools import (
     RUFF,
     VULTURE,
 )
-from tests.selfcheck.helpers import fake_venv, make_repo, mi_rank_c_source, require_tool
+from tests.selfcheck.helpers import (
+    fake_venv,
+    make_repo,
+    mi_rank_c_source,
+    require_probe,
+)
 
 # [tool.ruff] cuts off any user-level ruff config on the test machine (review r2 m9).
 PYPROJECT = (
@@ -65,7 +70,7 @@ def build(tmp_path: Path):
 
 
 def run(spec: ProbeSpec, target: RepoTarget, tmp: Path) -> ProbeResult:
-    require_tool(spec.binary or "")
+    require_probe(spec.binary or "", spec.version_args, spec.version_range)
     return run_probe(spec, target, tmp / "run" / "work")
 
 
