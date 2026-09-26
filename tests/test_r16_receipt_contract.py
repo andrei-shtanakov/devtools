@@ -9,7 +9,7 @@ import jsonschema
 import pytest
 
 import r16_runner as run
-from tests.test_r16_runner import cfg_for
+from tests.test_r16_runner import cfg_for, summary, verdict
 
 V1 = Path(__file__).resolve().parents[1] / "contracts" / "r16-receipt" / "v1"
 TBILISI = ZoneInfo("Asia/Tbilisi")
@@ -37,14 +37,23 @@ def test_examples_are_valid(name: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("audit_out", "delivery"),
+    ("audit_out", "delivery", "execution"),
     [
-        ('{"summary": {"unchanged": 1, "with_evidence": 1, "notes": 3}}', "not-needed"),
-        ("boom", "not-needed"),
+        (
+            json.dumps(verdict("unchanged")) + "\n" + json.dumps(summary()),
+            "not-needed",
+            "completed",
+        ),
+        ("boom", "not-needed", "failed"),
     ],
+    ids=["completed", "failed"],
 )
 def test_runner_receipts_are_valid(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, audit_out: str, delivery: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_out: str,
+    delivery: str,
+    execution: str,
 ) -> None:
     cfg = cfg_for(tmp_path)
     (cfg.receipts / "2026-09-01.json").write_text('{"ok": true, "attempt": 1}')
@@ -55,6 +64,8 @@ def test_runner_receipts_are_valid(
     run.run_cycle(cfg, datetime(2026, 9, 23, 17, 0, tzinfo=TBILISI), dry_run=False)
     written = sorted(p for p in cfg.receipts.glob("*.json") if p.stem != "2026-09-01")
     assert [p.stem for p in written] == ["2026-09-08", "2026-09-15", "2026-09-22"]
+    current = json.loads((cfg.receipts / "2026-09-22.json").read_text())
+    assert current["execution"] == execution
     for path in written:
         validate(json.loads(path.read_text()))
 
