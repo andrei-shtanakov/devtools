@@ -36,8 +36,7 @@ _OPTS_WITH_ARG = frozenset(
     {"--project", "--group", "--with", "--python", "--directory", "-u", "-C"}
 )
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
-# a launch through a variable: "$x", "${x}", "$x/sub/tool.sh" — not "${C}text"
-_VAR_LAUNCH = re.compile(r"^\$\{?\w+\}?(?:/[\w./-]*)?$")
+UNRESOLVED_DIR = "$CD"  # prefix for a path relative to a non-literal `cd`
 
 
 @dataclass(frozen=True)
@@ -108,12 +107,22 @@ class Scan:
 
 
 def _tokens(cmd: str, shell_vars: bool) -> list[str]:
-    if shell_vars:  # command substitution starts a new command
+    if shell_vars:  # command substitution starts (and closes) a command
         cmd = cmd.replace("$(", " ; ").replace("`", " ; ")
     try:
-        return shlex.split(cmd, comments=True)
+        tokens = shlex.split(cmd, comments=True)
     except ValueError:
-        return cmd.split()
+        tokens = cmd.split()
+    if not shell_vars:
+        return tokens
+    out: list[str] = []
+    for token in tokens:
+        stripped = token.rstrip(")")
+        if stripped:
+            out.append(stripped)
+        if stripped != token:
+            out.append(";")
+    return out
 
 
 def _resolve(token: str, base: str, index: Index) -> str | None:
@@ -134,58 +143,100 @@ def _looks_missing(token: str) -> bool:
     )
 
 
-def scan_command(cmd: str, base: str, index: Index, *, shell_vars: bool) -> Scan:
+@dataclass
+class _State:
+    base: str
+    base_known: bool = True
+    position: bool = True
+    first: bool = True
+    skip_next: bool = False
+    want_module: bool = False
+    want_dir: bool = False
+
+
+def _command_position(
+    token: str, st: _State, index: Index, scan: Scan, shell_vars: bool
+) -> None:
+    """Handle a token while no program has been chosen for this command yet."""
+    if _ASSIGN.match(token) or token in _WRAPPERS:
+        return
+    if token == "cd":
+        st.want_dir = True
+        st.position = False
+        return
+    if token == "-m":
+        st.want_module = True
+        return
+    if token in _OPTS_WITH_ARG:
+        st.skip_next = True
+        return
+    if token == "-":  # program read from stdin: the rest are arguments
+        st.position = False
+        return
+    if token.startswith("-"):
+        return
+    if "$" in token:
+        # fail closed: a program chosen through anything non-literal is a zone
+        if shell_vars and "${{" not in token:
+            scan.unresolved.append(token)
+        st.position = not shell_vars
+        return
+    st.position = False
+    clean = token.strip("'\"")
+    if clean in index.clis:
+        scan.targets.append(index.clis[clean])
+        return
+    hit = _resolve(token, st.base, index)
+    if hit is not None:
+        scan.targets.append(hit)
+    elif not st.base_known and ("/" in clean or clean.startswith(".")):
+        scan.unresolved.append(f"{UNRESOLVED_DIR}/{clean}")
+    elif st.base_known and _looks_missing(token):
+        scan.missing.append(clean)
+
+
+def scan_command(
+    cmd: str,
+    base: str,
+    index: Index,
+    *,
+    shell_vars: bool,
+    base_known: bool = True,
+) -> Scan:
     """Launch targets (command position) vs mentioned files (arguments).
 
-    ``shell_vars``: shell ``$x`` in command position is unresolved (a zone);
-    otherwise ``$(VAR)``/``${{ … }}`` tokens are skipped as configuration.
+    ``shell_vars``: a shell program chosen through ``$…`` is unresolved (a
+    zone); otherwise ``$(VAR)``/``${{ … }}`` tokens are skipped as
+    configuration. A literal ``cd dir`` moves the base for the rest of the
+    line; a non-literal one makes later relative launches unresolved.
     """
     scan = Scan()
-    position, first, skip_next, want_module = True, True, False, False
+    st = _State(base, base_known)
     for raw in _tokens(cmd, shell_vars):
-        token = raw.lstrip("@+-") if first and raw[:1] in "@+-" else raw
-        first = False
-        if skip_next:
-            skip_next = False
+        token = raw.lstrip("@+-") if st.first and raw[:1] in "@+-" else raw
+        st.first = False
+        if st.skip_next:
+            st.skip_next = False
             continue
         if token in _SEPARATORS or token.endswith(";"):
-            position, first = True, True
+            st.position, st.first = True, True
             continue
-        if want_module:
+        if st.want_dir:
+            st.want_dir = False
+            target = token.strip("'\"")
+            if "$" in target or target.startswith(("/", "~")):
+                st.base_known = False
+            else:
+                st.base = posixpath.normpath(posixpath.join(st.base, target))
+            continue
+        if st.want_module:
             scan.targets += module_files(token, index)
-            want_module, position = False, False
+            st.want_module, st.position = False, False
             continue
-        if position:
-            if _ASSIGN.match(token) or token in _WRAPPERS:
-                continue
-            if token == "-m":
-                want_module = True
-                continue
-            if token in _OPTS_WITH_ARG:
-                skip_next = True
-                continue
-            if token == "-":  # program read from stdin: the rest are arguments
-                position = False
-                continue
-            if token.startswith("-"):
-                continue
-            if "$" in token:
-                if shell_vars and _VAR_LAUNCH.match(token.strip("'\"")):
-                    scan.unresolved.append(token)
-                position = not shell_vars
-                continue
-            position = False
-            clean = token.strip("'\"")
-            if clean in index.clis:
-                scan.targets.append(index.clis[clean])
-                continue
-            hit = _resolve(token, base, index)
-            if hit is not None:
-                scan.targets.append(hit)
-            elif _looks_missing(token):
-                scan.missing.append(clean)
+        if st.position:
+            _command_position(token, st, index, scan, shell_vars)
             continue
-        hit = _resolve(token, base, index) if "$" not in token else None
+        hit = _resolve(token, st.base, index) if "$" not in token else None
         if hit is not None and hit not in scan.mentions:
             scan.mentions.append(hit)
     scan.targets = list(dict.fromkeys(scan.targets))

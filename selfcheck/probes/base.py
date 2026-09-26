@@ -60,6 +60,7 @@ class ProbeCtx:
     work: Path
     inputs: tuple[str, ...]
     cwd: Path
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
 
 
 @dataclass
@@ -316,7 +317,7 @@ def run_probe(
         work.mkdir(parents=True)
         canary = [spec.canary.relpath] if spec.input_mode == "files" else []
         cwd = target.copy if spec.cwd == "copy" else work
-        ctx = ProbeCtx(target, work, (*inputs, *canary), cwd)
+        ctx = ProbeCtx(target, work, (*inputs, *canary), cwd, runner)
         result.coverage = {
             "mode": spec.coverage,
             "input_mode": spec.input_mode,
@@ -333,6 +334,9 @@ def run_probe(
         _judge(spec, ctx, result, parsed, inputs)
     except _Stop as stop:
         result.status, result.reason = stop.status, stop.reason
+    except Exception as exc:  # noqa: BLE001 — any adapter/tool failure is this probe's status
+        result.status = ProbeStatus.FAILED
+        result.reason = f"adapter-error: {exc!r}"[:500]
     result.duration = round(time.monotonic() - started, 3)
     return result
 

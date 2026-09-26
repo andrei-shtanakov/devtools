@@ -171,3 +171,17 @@ def test_jscpd_processes_large_files(build, tmp_path: Path) -> None:
     big = "".join(f"value_{i} = {i} * {i}\n" for i in range(1500))
     res = run(JSCPD, build({"big.py": big, "d.py": DUP}), tmp_path)
     assert res.status is ProbeStatus.OK, (res.reason, res.coverage.get("unprocessed"))
+
+
+def test_odd_file_names_keep_probes_ok(build, tmp_path: Path) -> None:
+    """Final review I7: spaces, parentheses and non-ASCII in real probe inputs."""
+    target = build(
+        {
+            ".github/workflows/my flow.yml": WORKFLOW,
+            "pkg/a (copy).py": DUP,
+            "pkg/ю.py": DUP.replace("one", "три"),
+        }
+    )
+    for spec in (ZIZMOR, JSCPD):
+        res = run(spec, target, tmp_path / spec.name)
+        assert res.status is ProbeStatus.OK, (spec.name, res.reason, res.coverage)

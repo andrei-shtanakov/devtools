@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from collections import Counter
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from selfcheck.delta import RunSnapshot
 
 
 def _token() -> str:
@@ -31,25 +34,47 @@ def new_run_dir(
     raise OSError(f"could not allocate a unique run directory in {out_root}")
 
 
-def find_baseline(out_root: Path, current: str) -> dict[str, Any] | None:
-    """Latest previous run with a report, ordered by report write time."""
+NO_SELECTION: dict[str, list[str]] = {"path": [], "probe": []}
+
+
+def find_baseline(
+    out_root: Path, current: str, selection: dict[str, list[str]] | None = None
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Newest previous readable report of the same selection, plus warnings.
+
+    Reports are ordered by write time (two runs in one second differ only by
+    the random suffix). An unreadable or incompatible report is skipped with a
+    warning instead of breaking every later run; a run narrowed by
+    ``--path``/``--probe`` is only a baseline for the same narrowing.
+    """
+    wanted = selection or NO_SELECTION
+    warnings: list[str] = []
     if not out_root.is_dir():
-        return None
+        return None, warnings
     reports = [
         r / "report.json"
         for r in out_root.iterdir()
         if r.name != current and (r / "report.json").is_file()
     ]
-    if not reports:
-        return None
-    latest = max(reports, key=lambda p: p.stat().st_mtime_ns)
-    return json.loads(latest.read_text())
+    for path in sorted(reports, key=lambda p: p.stat().st_mtime_ns, reverse=True):
+        try:
+            doc = json.loads(path.read_text())
+            RunSnapshot.from_json(doc["snapshot"])
+            used = doc["run"].get("selection", NO_SELECTION)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            warnings.append(f"baseline skipped: {path.parent.name}: {exc!r}"[:300])
+            continue
+        if used == wanted:
+            return doc, warnings
+    return None, warnings
 
 
 def write_report(run_dir: Path, doc: dict[str, Any]) -> None:
-    """report.json + report.md."""
-    (run_dir / "report.json").write_text(json.dumps(doc, ensure_ascii=False, indent=2))
+    """report.md, then report.json atomically (a baseline is never half-written)."""
     (run_dir / "report.md").write_text(render_markdown(doc))
+    tmp = run_dir / "report.json.tmp"
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2))
+    os.replace(tmp, run_dir / "report.json")
 
 
 def _coverage(cov: dict[str, Any]) -> str:

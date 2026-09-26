@@ -297,7 +297,7 @@ def _radon_parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> Parse
                     message=f"{block['name']}: complexity {block['complexity']}",
                 )
             )
-    mi = subprocess.run(
+    mi = ctx.runner(
         [str(proc.args[0]), "mi", "-j", "--min", "C", *copy_paths(ctx)],
         cwd=ctx.cwd,
         capture_output=True,

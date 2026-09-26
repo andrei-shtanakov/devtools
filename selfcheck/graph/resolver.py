@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import ast
+import fnmatch
 import posixpath
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from selfcheck.graph.commands import Index, module_files, scan_command
+from selfcheck.graph.commands import Index, module_files, module_name, scan_command
 from selfcheck.graph.model import EdgeKind, Graph, NodeKind, Zone
 from selfcheck.model import Location
 from selfcheck.roles import Role
@@ -121,29 +122,54 @@ def _eval(e: ast.expr, s: Scope) -> Value:
     return None
 
 
-def launch_names(tree: ast.Module) -> frozenset[str]:
-    """Bare names imported from subprocess/os/asyncio (``from subprocess import run``)."""
-    names = {
-        alias.asname or alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module in _LAUNCH_MODULES
-        for alias in node.names
-    }
-    return frozenset(names & RUN_FUNCS | {n for n in names if n in RUN_FUNCS})
+@dataclass(frozen=True)
+class Launchers:
+    """How a module can reach subprocess/os/asyncio launch functions."""
+
+    names: frozenset[str] = frozenset()  # from subprocess import run [as r]
+    modules: frozenset[str] = frozenset(_LAUNCH_MODULES)  # import subprocess as sp
+    star: bool = False  # from subprocess import *
 
 
-def is_launch(call: ast.Call, imported: frozenset[str]) -> bool:
-    """A real process launch: ``subprocess.run(...)``, ``os.system(...)`` or an
-    imported ``run(...)`` — not any function that happens to be called ``run``."""
+def launch_names(tree: ast.Module) -> Launchers:
+    """Collect every way this module can name a launch function."""
+    names: set[str] = set()
+    modules: set[str] = set(_LAUNCH_MODULES)
+    star = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in _LAUNCH_MODULES:
+            for alias in node.names:
+                if alias.name == "*":
+                    star = True
+                elif alias.name in RUN_FUNCS:
+                    names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in _LAUNCH_MODULES:
+                    modules.add(alias.asname or alias.name)
+    return Launchers(frozenset(names), frozenset(modules), star)
+
+
+def is_launch(call: ast.Call, launchers: Launchers) -> bool:
+    """A real process launch — not any function that happens to be called ``run``."""
     func = call.func
     if isinstance(func, ast.Attribute):
         owner = func.value
         return (
             func.attr in RUN_FUNCS
             and isinstance(owner, ast.Name)
-            and owner.id in _LAUNCH_MODULES
+            and owner.id in launchers.modules
         )
-    return isinstance(func, ast.Name) and func.id in imported
+    if not isinstance(func, ast.Name):
+        return False
+    return func.id in launchers.names or (launchers.star and func.id in RUN_FUNCS)
+
+
+def argv_expr(call: ast.Call) -> ast.expr | None:
+    """The argv argument of a launch: first positional or ``args=``."""
+    if call.args:
+        return call.args[0]
+    return next((k.value for k in call.keywords if k.arg == "args"), None)
 
 
 def call_name(call: ast.Call) -> str:
@@ -253,7 +279,7 @@ def _sites(tree: ast.Module, rel: str) -> list[_Site]:
 
 
 def _forwarded(site: _Site) -> str | None:
-    first = site.call.args[0] if site.call.args else None
+    first = argv_expr(site.call)
     if (
         isinstance(first, ast.Name)
         and first.id in site.params
@@ -263,11 +289,11 @@ def _forwarded(site: _Site) -> str | None:
     return None
 
 
-def _wrappers(sites: list[_Site], imported: frozenset[str]) -> dict[str, int]:
-    """Same-module functions passing a parameter straight into a launch."""
+def _wrappers(sites: list[_Site], launchers: Launchers) -> dict[str, int]:
+    """Functions passing a parameter straight into a launch → parameter index."""
     out: dict[str, int] = {}
     for site in sites:
-        param = _forwarded(site) if is_launch(site.call, imported) else None
+        param = _forwarded(site) if is_launch(site.call, launchers) else None
         if param is not None and site.func:
             index = site.params.index(param)
             method = site.params and site.params[0] in ("self", "cls")
@@ -281,13 +307,74 @@ def argv_at(source: str, rel: str, line: int) -> list[str] | None:
         tree = ast.parse(source)
     except SyntaxError:
         return None
-    imported = launch_names(tree)
+    launchers = launch_names(tree)
     for site in _sites(tree, rel):
         call = site.call
-        if call.lineno == line and is_launch(call, imported) and call.args:
-            value = evaluate(call.args[0], site.scope)
+        expr = argv_expr(call)
+        if call.lineno == line and is_launch(call, launchers) and expr is not None:
+            value = evaluate(expr, site.scope)
             return value if isinstance(value, list) else [as_text(value)]
     return None
+
+
+@dataclass
+class _Module:
+    rel: str
+    name: str | None
+    sites: list[_Site]
+    launchers: Launchers
+    wrappers: dict[str, int]
+    tree: ast.Module
+
+
+def _modules(
+    files: Sequence[str], texts: dict[str, str], roles: dict[str, Role]
+) -> list[_Module]:
+    out = []
+    for rel in files:
+        if not rel.endswith(".py") or roles[rel] not in (Role.SOURCE, Role.CANARY):
+            continue
+        try:
+            tree = ast.parse(texts[rel])
+        except SyntaxError:
+            continue
+        sites = _sites(tree, rel)
+        launchers = launch_names(tree)
+        out.append(
+            _Module(
+                rel,
+                module_name(rel),
+                sites,
+                launchers,
+                _wrappers(sites, launchers),
+                tree,
+            )
+        )
+    return out
+
+
+def _imported_wrappers(
+    mod: _Module, by_name: dict[str, dict[str, int]]
+) -> dict[str, int]:
+    """Wrapper functions of other modules, as this module names them."""
+    local: dict[str, int] = dict(mod.wrappers)
+    for node in ast.walk(mod.tree):
+        if isinstance(node, ast.ImportFrom) and node.module in by_name:
+            for alias in node.names:
+                if alias.name in by_name[node.module]:
+                    local[alias.asname or alias.name] = by_name[node.module][alias.name]
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                for func, idx in by_name.get(alias.name, {}).items():
+                    local[f"{alias.asname or alias.name}.{func}"] = idx
+    return local
+
+
+def _callee(call: ast.Call) -> str:
+    func = call.func
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        return f"{func.value.id}.{func.attr}"
+    return func.id if isinstance(func, ast.Name) else ""
 
 
 def add_exec_edges(
@@ -298,29 +385,48 @@ def add_exec_edges(
     index: Index,
 ) -> None:
     """Add exec edges from Python and shell sources; record zones."""
+    modules = _modules(files, texts, roles)
+    by_name = {m.name: m.wrappers for m in modules if m.name and m.wrappers}
+    visible = {m.rel: _imported_wrappers(m, by_name) for m in modules}
+    called: set[tuple[str, str]] = (
+        set()
+    )  # (defining module rel, wrapper) with a call site
+    owner = {(m.name, f): m.rel for m in modules if m.name for f in m.wrappers}
+    for mod in modules:
+        for site in mod.sites:
+            callee = _callee(site.call)
+            if callee not in visible[mod.rel]:
+                continue
+            func = callee.rsplit(".", 1)[-1]
+            defining = mod.rel if func in mod.wrappers and "." not in callee else None
+            for (mname, fname), rel in owner.items():
+                if fname == func and (defining is None or rel == defining):
+                    called.add((rel, fname))
+            if defining:
+                called.add((defining, func))
+    for mod in modules:
+        _python(g, mod, visible[mod.rel], called, index)
     for rel in files:
-        if roles[rel] not in (Role.SOURCE, Role.CANARY):
+        if roles[rel] not in (Role.SOURCE, Role.CANARY) or rel.endswith(".py"):
             continue
         text = texts[rel]
-        if rel.endswith(".py"):
-            _python(g, rel, text, index)
-        elif rel.endswith((".sh", ".bash")) or (
+        if rel.endswith((".sh", ".bash")) or (
             text.startswith("#!") and "sh" in text.splitlines()[0]
         ):
             _shell(g, rel, text, index)
 
 
-def _python(g: Graph, rel: str, text: str, index: Index) -> None:
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return
-    sites = _sites(tree, rel)
-    imported = launch_names(tree)
-    wrappers = _wrappers(sites, imported)
-    for site in sites:
+def _python(
+    g: Graph,
+    mod: _Module,
+    wrappers: dict[str, int],
+    called: set[tuple[str, str]],
+    index: Index,
+) -> None:
+    for site in mod.sites:
         call, name = site.call, call_name(site.call)
-        where = Location(rel, call.lineno)
+        where = Location(mod.rel, call.lineno)
+        expr = argv_expr(call)
         if name in _IMPORT_FUNCS and call.args:
             module = evaluate(call.args[0], site.scope)
             if isinstance(module, str) and UNKNOWN not in module:
@@ -331,12 +437,14 @@ def _python(g: Graph, rel: str, text: str, index: Index) -> None:
         elif name == "getattr" and len(call.args) >= 2:
             if not isinstance(call.args[1], ast.Constant):
                 _zone(g, where, "", "dynamic getattr")
-        elif is_launch(call, imported) and call.args:
-            if site.func in wrappers and _forwarded(site) is not None:
+        elif is_launch(call, mod.launchers) and expr is not None:
+            forwarded = site.func in mod.wrappers and _forwarded(site) is not None
+            if forwarded and (mod.rel, site.func) in called:
                 continue  # resolved at the wrapper's call sites
-            _launch(g, where, evaluate(call.args[0], site.scope), index)
-        elif name in wrappers and len(call.args) > wrappers[name]:
-            _launch(g, where, evaluate(call.args[wrappers[name]], site.scope), index)
+            _launch(g, where, evaluate(expr, site.scope), index)
+        elif _callee(call) in wrappers and len(call.args) > wrappers[_callee(call)]:
+            idx = wrappers[_callee(call)]
+            _launch(g, where, evaluate(call.args[idx], site.scope), index)
 
 
 def _quote(token: str) -> str:
@@ -351,8 +459,16 @@ def _launch(g: Graph, where: Location, argv: Value, index: Index) -> None:
             _apply(g, where, token, index, "")
 
 
-_LITERAL_TAIL = re.compile(r"/([\w.-]+)[\"']?\s*$")
-_VAR_NAME = re.compile(r"^[\"']?\$\{?(\w+)")
+_VAR_REF = re.compile(r"\$\{?\w+\}?")
+_VAR_NAME = re.compile(r"^[\"']?\$\{?(\w+)\}?[\"']?$")
+
+
+def zone_pattern(token: str) -> str:
+    """Name pattern a non-literal launch can reach: literal tail of the last
+    path segment, ``$…`` parts as ``*``; ``""`` when nothing literal is left."""
+    last = token.strip("'\"").rsplit("/", 1)[-1]
+    pattern = _VAR_REF.sub("*", last.replace("$UNKNOWN", "*"))
+    return pattern if pattern.strip("*") else ""
 
 
 def _apply(
@@ -369,19 +485,17 @@ def _apply(
     for path in scan.mentions:
         g.mention(f"file:{path}", where.path)
     for token in scan.unresolved:
-        suffix = token.rsplit("/", 1)[-1] if "/" in token else ""
-        if not suffix and suffixes:
-            name = _VAR_NAME.match(token)
-            suffix = suffixes.get(name.group(1), "") if name else ""
-        _zone(
-            g, where, "" if "$" in suffix else suffix.strip("'\""), "unresolved launch"
-        )
+        pattern = zone_pattern(token)
+        var = _VAR_NAME.match(token)
+        if not pattern and var and suffixes:
+            pattern = suffixes.get(var.group(1), "")
+        _zone(g, where, pattern, "unresolved launch")
 
 
-def _zone(g: Graph, where: Location, suffix: str, reason: str) -> None:
+def _zone(g: Graph, where: Location, pattern: str, reason: str) -> None:
     files = [n for n in g.nodes.values() if n.kind is NodeKind.FILE]
-    if suffix:
-        members = {n.anchor for n in files if n.name == suffix}
+    if pattern:
+        members = {n.anchor for n in files if fnmatch.fnmatchcase(n.name, pattern)}
     else:
         folder = posixpath.dirname(where.path)
         members = {n.anchor for n in files if posixpath.dirname(n.path) == folder}
@@ -408,14 +522,22 @@ def _open_quote(text: str) -> bool:
     return bool(quote)
 
 
+_RUNS_SHELL = re.compile(r"(?:^|[;&|(\s])(?:sh|bash|zsh|dash|ksh)\b[^<]*<<")
+
+
 def _shell_statements(text: str) -> list[tuple[int, str]]:
-    """Logical shell lines: ``\\`` and open quotes joined, heredoc bodies dropped."""
+    """Logical shell lines: ``\\`` and open quotes joined; heredoc bodies are
+    dropped unless the heredoc feeds a shell (then its lines are statements)."""
     out: list[tuple[int, str]] = []
-    buf, start, heredoc = "", 0, None
+    buf, start = "", 0
+    heredoc: str | None = None
+    executes = False
     for number, line in enumerate(text.splitlines(), 1):
         if heredoc is not None:
             if line.strip() == heredoc:
                 heredoc = None
+            elif executes:
+                out.append((number, line))
             continue
         if not buf:
             start = number
@@ -429,6 +551,7 @@ def _shell_statements(text: str) -> list[tuple[int, str]]:
         match = _HEREDOC.search(buf)
         if match:
             heredoc = match.group(1)
+            executes = bool(_RUNS_SHELL.search(buf[: match.start() + 2]))
         out.append((start, buf))
         buf = ""
     if buf:
@@ -436,14 +559,40 @@ def _shell_statements(text: str) -> list[tuple[int, str]]:
     return out
 
 
+_CASE_OPEN = re.compile(r"^case\s.*\bin\s*$")
+_CASE_PATTERN = re.compile(r"^\(?[^()]*?\)\s*")
+
+
+def _assignment_counts(statements: list[tuple[int, str]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for _, stmt in statements:
+        match = _ASSIGN.match(stmt.strip())
+        if match:
+            counts[match.group(1)] = counts.get(match.group(1), 0) + 1
+    return counts
+
+
 def _shell(g: Graph, rel: str, text: str, index: Index) -> None:
     base = posixpath.dirname(rel)
     known: dict[str, str] = {}
-    suffixes: dict[str, str] = {}  # var → literal file name its value ends with
-    for start, logical in _shell_statements(text):
+    suffixes: dict[str, str] = {}  # var → name pattern of its single literal value
+    statements = _shell_statements(text)
+    counts = _assignment_counts(statements)
+    case_depth = 0
+    for start, logical in statements:
         stripped = logical.strip()
         if not stripped or stripped.startswith("#") or _ARRAY_ASSIGN.match(stripped):
             continue
+        if _CASE_OPEN.match(stripped):
+            case_depth += 1
+            continue
+        if stripped.startswith("esac"):
+            case_depth = max(case_depth - 1, 0)
+            continue
+        if case_depth:
+            stripped = _CASE_PATTERN.sub("", stripped, count=1)
+            if not stripped or stripped == ";;":
+                continue
         match = _ASSIGN.match(stripped)
         if (
             match
@@ -452,9 +601,9 @@ def _shell(g: Graph, rel: str, text: str, index: Index) -> None:
         ):
             known[match.group(1)] = "."
             continue
-        if match:
-            tail = _LITERAL_TAIL.search(match.group(2))
-            if tail and "$" not in tail.group(1):
-                suffixes[match.group(1)] = tail.group(1)
+        if match and counts.get(match.group(1)) == 1:
+            pattern = zone_pattern(match.group(2).strip())
+            if pattern and "/" in match.group(2):
+                suffixes[match.group(1)] = pattern
         expanded = _VAR.sub(lambda m: known.get(m.group(1), m.group(0)), stripped)
         _apply(g, Location(rel, start), expanded, index, base, suffixes)

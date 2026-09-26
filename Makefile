@@ -104,4 +104,4 @@ human-merge: ; @sh ./human-merge.sh $(ARGS)
 preflight: ; @uv run --frozen python ./spec_run_preflight.py $(ARGS)
 edge-check:  ; @uv run --frozen python ./edge_check.py $(ARGS)
 selfcheck: ; @uv run --frozen --group selfcheck python -m selfcheck --workspace $(WORKSPACE) --manifest $(MANIFEST) $(ARGS)
-selfcheck-dogfood: ; @SELFCHECK_REQUIRE_TOOLS=1 uv run --frozen --group selfcheck pytest tests/selfcheck -q && uv run --frozen --group selfcheck python -m selfcheck --workspace $(WORKSPACE) --manifest $(MANIFEST) --repo devtools --path 'selfcheck/**' --path 'tests/selfcheck/**' --path Makefile --path pyproject.toml
+selfcheck-dogfood: ; @SELFCHECK_REQUIRE_TOOLS=1 uv run --frozen --group selfcheck pytest tests/selfcheck -q && uv run --frozen --group selfcheck python -m selfcheck --workspace $(WORKSPACE) --manifest $(MANIFEST) --repo devtools --out out/selfcheck-dogfood --path 'selfcheck/**' --path 'tests/selfcheck/**' --path Makefile --path pyproject.toml

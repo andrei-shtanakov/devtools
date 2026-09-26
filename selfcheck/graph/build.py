@@ -29,6 +29,7 @@ _TARGET = re.compile(r"^([A-Za-z0-9_.-]+)\s*:(?![=:])(.*)$")
 _FENCE = re.compile(r"^```\s*([\w-]*)\s*$")
 _RUNBOOK_LANGS = frozenset({"sh", "bash", "console", "shell"})
 _WORD = re.compile(r"[\w./-]+")
+_MAKE_CONDITIONALS = frozenset({"ifeq", "ifneq", "ifdef", "ifndef", "else", "endif"})
 _MAKE_CALL = re.compile(r"(?:\$\(MAKE\)|\bmake)\s+(?:-\S+\s+)*([A-Za-z0-9_.-]+)")
 
 
@@ -163,6 +164,13 @@ def make_recipes(text: str) -> dict[str, list[tuple[int, str]]]:
         if line.startswith("\t") and current is not None:
             recipes[current].append((number, line.strip()))
             continue
+        stripped = line.strip()
+        if current is not None and (
+            not stripped
+            or stripped.startswith("#")
+            or stripped.split(maxsplit=1)[0] in _MAKE_CONDITIONALS
+        ):
+            continue  # comments, blank lines and conditionals keep the recipe open
         match = _TARGET.match(line)
         if match and not line.startswith(".PHONY"):
             current = match.group(1)
@@ -229,10 +237,14 @@ def _run_steps(
     index: Index,
     anchor: str | None,
     texts: dict[str, str],
+    default_dir: str = "",
 ) -> None:
     for step in steps or []:
         if not isinstance(step, dict):
             continue
+        workdir = str(step.get("working-directory") or default_dir)
+        base_known = "${{" not in workdir
+        base = posixpath.normpath(workdir) if workdir and base_known else ""
         uses = str(step.get("uses", ""))
         if uses.startswith("./"):
             for name in ("action.yml", "action.yaml"):
@@ -249,7 +261,9 @@ def _run_steps(
                         texts,
                     )
         for line in str(step.get("run", "")).splitlines():
-            scan = scan_command(line, "", index, shell_vars=False)
+            scan = scan_command(
+                line, base, index, shell_vars=False, base_known=base_known
+            )
             _record(g, scan, EdgeKind.CI, where, anchor)
 
 
@@ -257,11 +271,20 @@ def _workflow(
     g: Graph, rel: str, text: str, index: Index, texts: dict[str, str]
 ) -> None:
     data = _load_yaml(g, rel, text)
+    top_dir = _run_default_dir(data)
     for job, spec in (data.get("jobs") or {}).items():
         anchor = f"workflow:{rel}#{job}"
         g.nodes[anchor] = Node(anchor, NodeKind.WORKFLOW, rel, str(job), root=True)
-        steps = (spec or {}).get("steps") or [] if isinstance(spec, dict) else []
-        _run_steps(g, steps, Location(rel, 1), index, anchor, texts)
+        spec = spec if isinstance(spec, dict) else {}
+        steps = spec.get("steps") or []
+        job_dir = _run_default_dir(spec) or top_dir
+        _run_steps(g, steps, Location(rel, 1), index, anchor, texts, job_dir)
+
+
+def _run_default_dir(data: dict[str, Any]) -> str:
+    defaults = data.get("defaults") or {}
+    run = defaults.get("run") if isinstance(defaults, dict) else None
+    return str(run.get("working-directory") or "") if isinstance(run, dict) else ""
 
 
 def _unit(g: Graph, rel: str, text: str, index: Index) -> None:
@@ -351,11 +374,18 @@ def _python(g: Graph, rel: str, text: str, index: Index, *, test: bool) -> None:
             g.errors.append(f"{rel}: {exc.msg} (line {exc.lineno})")
         return
     kind = EdgeKind.TEST if test else EdgeKind.IMPORT
+    folder = posixpath.dirname(rel)
     for module in _imports(tree, rel):
         path = index.modules.get(module)
         if path is not None:
             for loaded in module_files(module, index):
                 g.add(loaded, kind, Location(rel, 1))
+            continue
+        # a script's own directory is on sys.path: `import helper` next to it
+        sibling = posixpath.join(folder, *module.split("."))
+        for cand in (f"{sibling}.py", f"{sibling}/__init__.py"):
+            if cand in index.files:
+                g.add(cand, kind, Location(rel, 1))
     if test:
         base = posixpath.dirname(rel)
         for node in ast.walk(tree):

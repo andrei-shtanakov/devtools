@@ -213,3 +213,40 @@ def test_cleanup_failure_is_a_warning(tmp_path: Path, monkeypatch) -> None:
     assert main(args(ws, "--probe", "usage-graph")) == 0
     (doc,) = reports(ws)
     assert any(w.startswith("cleanup failed") for w in doc["run"]["warnings"])
+
+
+# ---- final review (2026-09-26) ---------------------------------------------------
+
+
+def test_corrupt_baseline_is_skipped_with_a_warning(tmp_path: Path) -> None:
+    ws = workspace(tmp_path)
+    bad = ws / "out" / "20000101T000000Z-aaaaaa"
+    bad.mkdir(parents=True)
+    (bad / "report.json").write_text('{"schema": 1, "run": {')
+    assert main(args(ws, "--probe", "usage-graph")) == 0
+    doc = next(d for d in reports_all(ws) if d is not None)
+    assert any("baseline" in w for w in doc["run"]["warnings"])
+
+
+def reports_all(ws: Path) -> list[dict | None]:
+    out = []
+    for p in sorted((ws / "out").glob("*/report.json")):
+        try:
+            out.append(json.loads(p.read_text()))
+        except json.JSONDecodeError:
+            out.append(None)
+    return out
+
+
+def test_narrowed_run_is_not_a_baseline_and_skips_graph_probes(tmp_path: Path) -> None:
+    ws = workspace(tmp_path)
+    assert main(args(ws, "--probe", "usage-graph")) == 0
+    narrowed = main(args(ws, "--probe", "usage-graph", "--path", "live.py"))
+    assert narrowed == 0
+    assert main(args(ws, "--probe", "usage-graph")) == 0
+    _first, middle, last = reports(ws)
+    assert {p["probe"]: (p["status"], p["reason"]) for p in middle["probes"]} == {
+        "usage-graph": ("skipped", "narrowed-corpus")
+    }
+    dead = [f["id"] for f in last["findings"] if f["rule"] == "usage-graph/dead.file"]
+    assert dead and all(last["delta"]["statuses"][i] == "persisting" for i in dead)

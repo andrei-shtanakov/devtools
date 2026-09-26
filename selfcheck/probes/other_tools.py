@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import subprocess
+from pathlib import Path
 
 from selfcheck.model import Confidence, Finding, Location, normalize_line
 from selfcheck.probes.base import Canary, ParseResult, ProbeCtx, ProbeSpec, RepoTarget
@@ -171,7 +173,7 @@ ACTIONLINT = ProbeSpec(
 )
 
 _ZIZMOR_SEVERITY = {"High": "high", "Medium": "medium"}
-_ZIZMOR_DONE = re.compile(r"completed (\S+)\s*$")
+_ZIZMOR_DONE = re.compile(r"completed (.+?)\s*$")
 
 
 def _zizmor_parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> ParseResult:
@@ -185,7 +187,14 @@ def _zizmor_parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> Pars
         if "failed to parse input" in line:
             result.diagnostics.append(_ANSI.sub("", line).strip())
     for item in json.loads(proc.stdout or "[]"):
-        loc = next(x for x in item["locations"] if x["symbolic"]["kind"] == "Primary")
+        loc = next(
+            (x for x in item["locations"] if x["symbolic"]["kind"] == "Primary"), None
+        )
+        if loc is None:
+            result.diagnostics.append(
+                f"zizmor: no primary location in {item.get('ident')}"
+            )
+            continue
         local = loc["symbolic"]["key"]["Local"]
         raw = local.get("given_path") or local["verbatim_path"]
         line = loc["concrete"]["location"]["start_point"]["row"] + 1
@@ -268,14 +277,30 @@ def _jscpd_argv(ctx: ProbeCtx) -> list[str]:
         str(ctx.work / "jscpd"),
         "--store-path",
         str(ctx.work / "jscpd-store"),
-        *copy_paths(ctx),
+        str(_jscpd_stage(ctx)),
     ]
+
+
+def _jscpd_stage(ctx: ProbeCtx) -> Path:
+    """Inputs copied into the probe's own directory: jscpd globs file arguments
+    (``a (copy).py`` is lost), but walks a directory argument correctly."""
+    stage = ctx.work / "jscpd-src"
+    for rel in ctx.inputs:
+        target = stage / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ctx.target.copy / rel, target)
+    return stage
+
+
+def _jscpd_rel(ctx: ProbeCtx, raw: str) -> str:
+    stage = (ctx.work / "jscpd-src").resolve()
+    return Path(raw).resolve().relative_to(stage).as_posix()
 
 
 def _jscpd_parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> ParseResult:
     report = json.loads((ctx.work / "jscpd" / "jscpd-report.json").read_text())
     processed = [
-        rel_path(ctx, path)
+        _jscpd_rel(ctx, path)
         for fmt in report["statistics"].get("formats", {}).values()
         for path in fmt.get("sources", {})
     ]
@@ -284,7 +309,7 @@ def _jscpd_parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> Parse
         text = "\n".join(normalize_line(x) for x in dup["fragment"].splitlines())
         digest = hashlib.sha1(text.encode()).hexdigest()[:16]
         members = [
-            (rel_path(ctx, dup[k]["name"]), int(dup[k]["start"]))
+            (_jscpd_rel(ctx, dup[k]["name"]), int(dup[k]["start"]))
             for k in ("firstFile", "secondFile")
         ]
         result.findings.append(

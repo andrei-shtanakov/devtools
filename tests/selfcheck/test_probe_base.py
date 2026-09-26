@@ -294,3 +294,21 @@ def test_instrument_findings() -> None:
         ("selfcheck/probe-partial", "medium"),
         ("selfcheck/probe-unavailable", "medium"),
     }
+
+
+# ---- final review (2026-09-26): no exception from any probe phase escapes ------
+
+
+@pytest.mark.parametrize("phase", ["parse", "expected_files", "runner"])
+def test_any_exception_is_a_probe_status(phase: str, target, tmp_path) -> None:
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError(f"boom in {phase}")
+
+    tool = fake_tool(tmp_path / "b")
+    overrides: dict[str, object] = {"parse": boom} if phase == "parse" else {}
+    if phase == "expected_files":
+        overrides["expected_files"] = boom
+    spec = spec_for(tool, **overrides)
+    runner = boom if phase == "runner" else subprocess.run
+    res = run_probe(spec, target, tmp_path / "run" / "work", which=which, runner=runner)
+    assert res.status is ProbeStatus.FAILED and "boom" in res.reason

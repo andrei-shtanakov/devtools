@@ -32,6 +32,10 @@ from selfcheck.registry import REGISTRY
 from selfcheck.report import find_baseline, new_run_dir, write_report
 from selfcheck.roles import glob_match
 
+# a narrowed corpus (--path) would make these probes report false dead /
+# false DEP002: they need the whole repo
+NARROW_UNSAFE = frozenset({"usage-graph", "deptry"})
+
 
 def exit_code(results: Sequence[ProbeResult]) -> int:
     """0 ok/skipped; 2 failed or partial; 3 only unavailable (spec §4.3)."""
@@ -86,6 +90,7 @@ class _Run:
     materialized: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     surface: dict[str, Any] = field(default_factory=dict)
+    selection: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _missing_repo(name: str) -> Finding:
@@ -147,7 +152,14 @@ def _scan_repo(
             "absent",
             time.time(),
         )
-        results = [run_probe(s, target, run_dir / "work") for s in specs]
+        results = [
+            ProbeResult(
+                s.name, repo.name, ProbeStatus.SKIPPED, "narrowed-corpus", rules=s.rules
+            )
+            if args.path and s.name in NARROW_UNSAFE
+            else run_probe(s, target, run_dir / "work")
+            for s in specs
+        ]
     finally:
         warning = release(copy)
         if warning:
@@ -185,6 +197,7 @@ def _document(
             "run_id": run_id,
             "host": socket.gethostname(),
             "scope": wanted,
+            "selection": acc.selection,
             "repos": acc.repos,
             "surface": acc.surface,
             "manifest": {
@@ -254,7 +267,10 @@ def main(
         sources={n: str(known[n].path) for n in wanted if n in known},
         findings={f.id: f.to_json() for f in final},
     )
-    base_doc = find_baseline(args.out, run_id)
+    selection = {"path": sorted(args.path), "probe": sorted(args.probe)}
+    base_doc, base_warnings = find_baseline(args.out, run_id, selection)
+    acc.warnings += base_warnings
+    acc.selection = selection
     base = RunSnapshot.from_json(base_doc["snapshot"]) if base_doc else None
     delta = compute_delta(base, snapshot)
     doc = _document(
