@@ -19,7 +19,7 @@ allowlist, считает дельту по судьбам файлов и пи�
 6.0.1, shellcheck-py 0.11.0.1, actionlint-py 1.7.12.25, zizmor 1.30.1,
 semgrep 1.178.0; jscpd 4.3.0 через `npx`.
 
-**Spec:** `docs/superpowers/specs/2026-09-25-selfcheck-design.md`, **rev 5.5**.
+**Spec:** `docs/superpowers/specs/2026-09-25-selfcheck-design.md`, **rev 5.6**.
 План — только этап S1 (§7); S2 `--fleet`, S3, S5 `--judge` — отдельные пункты
 TODO; S4 — отдельная спека.
 
@@ -101,7 +101,7 @@ TODO; S4 — отдельная спека.
 | §1.3 | уборка копии; сбой уборки — предупреждение | `test_run::test_cleanup_failure_is_a_warning`; `test_run::test_failed_probe_is_a_finding_and_run_continues` |
 | §1.4 | корпус, роли, `diagnostic-output` без рёбер | `test_corpus::test_corpus_membership`; `test_config_manifest::test_default_roles`, `test_configured_roles_win`; `test_graph_build::test_diagnostic_output_gives_nothing` |
 | §1.5 | режимы окружения, ключи mapping, `DEP003 off`; хуки окружения цели не исполняются | `test_env::*`; `test_python_tools::test_deptry_env_as_data` |
-| §3.1 | pyrefly: `--preset default` без конфигурации, свой пресет при `pyrefly.toml` | `test_python_tools::test_pyrefly_default_preset_catches_bad_return`, `test_pyrefly_configured_repo_keeps_its_preset` |
+| §3.1 | pyrefly: `--preset default` без конфигурации, свой пресет при `pyrefly.toml` | `test_python_tools::test_pyrefly_default_preset_without_own_config`, `test_pyrefly_configured_repo_keeps_its_preset` |
 | §2.2, §2.3 | severity/уверенность линтеров, vulture, дублей, llm | `test_python_tools::test_ruff_reports_repo_violation`, `test_vulture_confidence_scale`; `test_other_tools::test_jscpd_clone_reported_coverage`; `test_dups::test_exact_group_members_carry_qualname`, `test_cli_overlap_parsers_and_make_recipes`; `test_llm::test_candidates` |
 | §2.3 | dead: матрица D1–D12, потолки | `test_graph_classify::test_dead_matrix`, `test_d12_plist_makes_live`, `test_s1_orphan_likely_roots_never_dead` |
 | §2.4 | allowlist: обязательные поля, `file:` покрывает файл, истечение | `test_config_manifest::test_bad_config_raises`, `test_file_anchor_covers_its_file`, `test_expired_entry_becomes_finding` |
@@ -115,7 +115,7 @@ TODO; S4 — отдельная спека.
 | §3.4 | точки A (список и переменная), B (SDK), C (HTTP), D (конфиг); endpoint без вызова — не точка; промпт, невидимый статически, — только инвентарь; порог кандидата | `test_llm::test_candidates`, `test_inventory_mechanisms`, `test_features_and_exclusion` |
 | §4.1 | канарейка = правило + якорь; формы входа; покрытие как набор; jscpd сужает ожидаемые входы | `test_probe_base::test_canary_right_rule_wrong_anchor_is_missed`, `test_reported_coverage_missing_input_is_partial`, `test_no_inputs_and_language_skip` (канарейка не запускается при `skipped`); `test_python_tools::test_deptry_excludes_really_apply`; `test_other_tools::test_jscpd_clone_reported_coverage` |
 | §4.2 | статусы и их условия | `test_probe_base::*`; `test_python_tools::test_vulture_syntax_error_on_stderr_is_partial` |
-| §4.3 | судьбы, Δ1–Δ4, `changed`, `unverified` в `related[]`, ключ сопоставимости (режим окружения, конфиг репо, версия логики и `[roles]`/`[corpus]` собственных анализаторов), судьба находок прибора | `test_delta::*`; `test_probe_base::test_internal_analyzer_contract` |
+| §4.3 | судьбы, Δ1–Δ4, `changed`, `unverified` в `related[]`, ключ сопоставимости (режим окружения, конфиг репо, версия логики и `[roles]`/`[corpus]` собственных анализаторов), судьба находок прибора | `test_delta::*`; `test_probe_base::test_internal_analyzer_contract`; `test_python_tools::test_ruff_repo_config_enters_config_hash` |
 | §4.3 | коды выхода 0/2/3/4 | `test_run::test_exit_codes`, `test_bad_config_and_unknown_repo_exit_4`, `test_report_write_failure_exit_4`, `test_repo_missing_is_finding_and_exit_2` |
 | §7 S1 | приёмка на devtools | Task 14, шаги 6–7 |
 
@@ -138,7 +138,8 @@ TODO; S4 — отдельная спека.
   `diagnostic-output`, `canary`); `glob_match(pattern, path)`;
   `role_of(path, extra=None) -> Role` (настроенные роли раньше дефолтных).
 - `selfcheck.config`: `ConfigError(ValueError)`; `load_config(path) -> Config`
-  (`allow`, `roles: dict[str, tuple[str, ...]]`, `corpus_exclude`, `sha1`);
+  (`allow`, `roles: dict[str, tuple[str, ...]]`, `corpus_exclude`, `sha1`;
+  файла нет — пустой конфиг и `sha1 = sha1(b"")`);
   `apply_allowlist(findings, config, today) -> AllowResult(kept, suppressed,
   expired)`.
 - `selfcheck.manifest.load_manifest(manifest, workspace) -> ManifestInfo(
@@ -189,6 +190,9 @@ TODO; S4 — отдельная спека.
   `radon/mi-<ранг>` (якорь `file:`), `deptry/<код>`.
 - `selfcheck.probes.other_tools`: `SHELLCHECK`, `ACTIONLINT`, `ZIZMOR`,
   `JSCPD`, `OTHER_PROBES`, `shell_files(target)`, `workflow_files(target)`.
+  `JSCPD.select` уже сужен по правилу §4.1 (известный формат, ≥ 5 строк):
+  пустой суженный набор → `skipped: no-inputs`, а не `zero-processed`.
+  `RUFF.config_files ⊇ {"pyproject.toml", "ruff.toml", ".ruff.toml"}`.
 - `selfcheck.graph.model`: `NodeKind` (`file`, `make`, `skill`, `workflow`,
   `cli`, `unit`), `Node(anchor, kind, path, name, root=False,
   executable=False)`, `EdgeKind` (`make`, `ci`, `import`, `exec`, `entry`,
@@ -447,7 +451,7 @@ def workspace(tmp: Path, files: dict[str, str] | None = None, *,
     """Task 14: a workspace with one-repo manifest and a devtools repo."""
     make_repo(tmp / "devtools", {
         ".gitignore": "out/\n",
-        "pyproject.toml": '[project]\nname = "d"\nversion = "0"\n',
+        "pyproject.toml": '[project]\nname = "d"\nversion = "0"\n[tool.ruff]\n',
         **USAGE_FILES, **(files or {})}, date=date)
     (tmp / "m.toml").write_text('[tools.devtools]\ngit_dir = "devtools"\n')
     return tmp
@@ -1217,9 +1221,10 @@ def test_internal_analyzer_contract(target, tmp_path) -> None:
     variants = [RepoTarget("repo", target.source, target.copy, target.languages, target.corpus,
                            target.env, roles=roles, corpus_exclude=exclude)
                 for roles, exclude in [({}, ()), ({"test": ("qa/**",)}, ()), ({}, ("vendor/**",))]]
-    hashes = {run_probe(ProbeSpec(name=f"h{i}", analyze=good, **base), t,
-                        tmp_path / "w").config_hash for i, t in enumerate(variants)}
-    assert len(hashes) == 3
+    same = ProbeSpec(name="h", analyze=good, **base)
+    hashes = [run_probe(same, t, tmp_path / f"w{i}").config_hash
+              for i, t in enumerate([*variants, variants[0]])]
+    assert hashes[0] == hashes[3] and len(set(hashes[:3])) == 3
 
 
 def test_instrument_findings() -> None:
@@ -1284,12 +1289,13 @@ def build(tmp_path: Path):
 
     def _build(files: dict[str, str], *, venv_marker: Path | None = None,
                pyproject: str = PYPROJECT) -> RepoTarget:
-        repo = make_repo(tmp_path / "repo", {"pyproject.toml": pyproject,
-                                             ".gitignore": ".venv/\n", **files})
+        n = len(copies)  # one repo and one copy per call
+        repo = make_repo(tmp_path / f"repo{n}", {"pyproject.toml": pyproject,
+                                                 ".gitignore": ".venv/\n", **files})
         if venv_marker is not None:
             fake_venv(repo, evil_marker=venv_marker)
         corpus = tuple(list_corpus(repo))
-        copy = tmp_path / "run" / "src" / "repo"
+        copy = tmp_path / "run" / "src" / f"repo{n}"
         materialize(repo, corpus, copy, canary_files(PYTHON_PROBES))
         copies.append(copy)
         return RepoTarget("repo", repo, copy, frozenset({"python"}), corpus, detect_env(repo))
@@ -1347,7 +1353,7 @@ def test_vulture_syntax_error_on_stderr_is_partial(build, tmp_path: Path) -> Non
     assert "bad.py" in res.coverage["skipped"]
 
 
-def test_pyrefly_default_preset_catches_bad_return(build, tmp_path: Path) -> None:
+def test_pyrefly_default_preset_without_own_config(build, tmp_path: Path) -> None:
     # bad-assignment is silent under the `basic` preset and is not the canary rule
     res = run(PYREFLY, build({"a.py": 'x: int = "s"\n'}), tmp_path)
     assert "pyrefly/bad-assignment" in {f.rule for f in res.findings}
@@ -1396,6 +1402,15 @@ def test_deptry_excludes_really_apply(build, tmp_path: Path) -> None:
     assert res.coverage["expected_files"] == ["a.py"]
     flagged = {loc.path for f in res.findings for loc in f.locations}
     assert not flagged & {"legacy/x.py", "tests/test_x.py"}
+    # foreign canaries: findings there are subtracted anyway, so pin the traversal itself
+    assert ".selfcheck-canary" in res.argv
+
+
+def test_ruff_repo_config_enters_config_hash(build, tmp_path: Path) -> None:
+    first = run(RUFF, build({"a.py": "x = 1\n", "ruff.toml": '[lint]\nignore = ["E501"]\n'}),
+                tmp_path / "one")
+    second = run(RUFF, build({"a.py": "x = 1\n", "ruff.toml": "[lint]\n"}), tmp_path / "two")
+    assert first.config_hash and first.config_hash != second.config_hash
 
 
 BROKEN = {"ruff": "bad.py", "pyrefly": "bad.py", "vulture": "bad.py", "radon": "bad.py",
@@ -1435,11 +1450,15 @@ def test_canary_rule_disabled_in_registry_is_missed(spec: ProbeSpec, build,
   строка с `Error:` → `unparsable`.
 - radon: `cc -j --min D <файлы>` и `mi -j --min C <файлы>` — два вызова в
   одной пробе (или `argv` на cc, второй вызов через `runner` в `parse`);
-  покрытие `reported` по ключам JSON; синтаксис — `{"<file>": {"error": …}}`
+  покрытие **`declared`** (radon не выводит файлы без блоков выше порога и
+  файлы без функций — замер раунда 3); синтаксис — `{"<file>": {"error": …}}`
   при коде 0 → `skipped`.
 - deptry: форма `roots`, **`cwd = копия`** (спека §1.3, исключение `cwd`):
   `. --config pyproject.toml --json-output <work>/deptry.json --ignore
-  DEP003 --extend-exclude .selfcheck-canary [--package-module-name-map M]`;
+  DEP003 --extend-exclude <каждое из exclude/extend_exclude конфига>
+  --extend-exclude .selfcheck-canary [--package-module-name-map M]` —
+  `--extend-exclude` в CLI **заменяет** `extend_exclude` из `[tool.deptry]`
+  (замер раунда 3), поэтому адаптер склеивает список сам;
   с абсолютным корнем его регулярные исключения (свои и `tests`/`venv`) не
   срабатывают — замер ревью раунда 2; коды 0/1; синтаксис — строка
   `Warning: Skipping processing of <file> because …` → `skipped`;
@@ -2029,6 +2048,8 @@ def test_zone_reported_not_dead_and_id_stable(tmp_path: Path) -> None:
     ids = [{f.id for f in r.findings if f.rule == "usage-graph/unresolved-exec"}
            for r in (first, shifted)]
     assert ids[0] and ids[0] == ids[1]
+    assert {f.severity for f in first.findings
+            if f.rule == "usage-graph/unresolved-exec"} == {"low"}
 
 
 def test_broken_and_stale_roots(tmp_path: Path) -> None:
@@ -2548,7 +2569,9 @@ def test_key_tracks_env_mode_and_repo_config(tmp_path: Path) -> None:
     (("maestro",), {}, "not-rechecked"),
 ])
 def test_gone_instrument_finding(tmp_path: Path, scope, keys, expected) -> None:
-    item = {"id": "p", "probe": "ruff", "anchor": "probe:devtools#ruff",
+    # Finding.probe of an instrument finding is "selfcheck" (rule prefix, §2.1):
+    # the probe under judgement must come from the anchor, not from this field.
+    item = {"id": "p", "probe": "selfcheck", "anchor": "probe:devtools#ruff",
             "owner_repo": "devtools", "occurrences": 1,
             "locations": [{"path": "-", "line": 1}], "related": [],
             "rule": "selfcheck/probe-failed"}
