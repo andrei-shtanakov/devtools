@@ -2587,7 +2587,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       нестандартных раскладок 0. Правка — проверка в `start` раннера /
       spec-loop (и в восстановлении `_bundle_dir_from_pr_files`).
 
-- [ ] R16 runner: несогласованный вывод аудитора и исключение внутри прогона не должны давать «чистую неделю» или ложный `missed` @owner:github:andrei-shtanakov @id:r16-runner-output-integrity @epic:eco.tooling
+- [x] R16 runner: несогласованный вывод аудитора и исключение внутри прогона не должны давать «чистую неделю» или ложный `missed` @owner:github:andrei-shtanakov @id:r16-runner-output-integrity @epic:eco.tooling — PR этой ветки
       Находки ревью PR #399 (major medium + 2 minor), поведение перенесено из
       `run.py` дословно (спека §0 п.5), поэтому не чинилось в переносе:
       (1) `problems()` строит claims только из разобранных verdict-строк и не
@@ -2599,6 +2599,16 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       квитанции невалидными по v1. Правка — несогласованность = `failed`,
       `try/except` вокруг тела цикла с квитанцией `failed`, фильтр statuses по
       известному набору.
+      **Сделано:** `audit_inconsistency` — неизвестный ключ summary,
+      неизвестный статус verdict или расхождение счётчика любого статуса с
+      числом verdict-строк ⇒ попытка `failed`, доставка `skipped`, issue не
+      трогается (замер живого аудитора 2026-09-26: строка на каждое
+      утверждение, счётчики совпадают 9/1/2). Тело попытки в `try/except
+      Exception` ⇒ квитанция `failed` + `delivery: failed` («delivery state
+      unknown»), попытка засчитана, ложного `missed` нет. `statuses` —
+      только `KNOWN_STATUSES` (закреплены за `STATUSES` kb_freshness.py:75).
+      Три старые заготовки тестов были противоречивым выводом (summary без
+      verdict) — исправлены заготовки, не код. 7 мутаций, все пойманы.
 
 - [x] ~~Мост выводит `**Scenarios:**` в verify-задачах (inbox devtools#388, slug: verify-task-scenarios-line; from: spec-runner#402)~~ @owner:github:andrei-shtanakov @id:verify-task-scenarios-line @epic:eco.dark-factory — НЕ ДЕЛАЕТСЯ: #388 закрыт not planned 2026-09-25 по замеру
       Доставлено у соседа PR spec-runner#590 (`4d10e5b`), вошло в 4.1.0.

@@ -360,7 +360,7 @@ def test_lock_is_held_through_delivery(
     values = layout(tmp_path)
     lock = tmp_path / "state" / "r16.lock"
     seen: list[str] = []
-    clean = json.dumps({"summary": {"unchanged": 1, "with_evidence": 1}})
+    clean = lines(verdict("unchanged"), summary())  # consistent: 1 verdict, 1 counted
 
     def audit(_cfg: "run.Config") -> "run.Audit":
         seen.append(f"audit:{lock_is_held(lock)}")
@@ -440,7 +440,7 @@ def test_receipt_timestamps_carry_the_offset(
 ) -> None:
     monkeypatch.setattr(run, "sync_vault", lambda _v: None)
     cfg = cfg_for(tmp_path)
-    clean = json.dumps({"summary": {"unchanged": 1, "with_evidence": 1}})
+    clean = lines(verdict("unchanged"), summary())  # consistent: 1 verdict, 1 counted
     monkeypatch.setattr(run, "producer", lambda _cfg: {"runner": "r", "auditor": "a"})
     monkeypatch.setattr(run, "deliver", lambda *_: run.Delivery("not-needed"))
     monkeypatch.setattr(run, "run_audit", lambda _cfg: run.parse_audit(clean))
