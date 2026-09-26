@@ -33,6 +33,7 @@ class ManifestInfo:
     entries_read: int
     repos: tuple[RepoEntry, ...]
     missing: tuple[str, ...]
+    order: tuple[str, ...] = ()  # every unique git_dir, manifest order (S2 §9.2)
 
 
 def detect_languages(path: Path) -> frozenset[str]:
@@ -65,4 +66,4 @@ def load_manifest(manifest: Path, workspace: Path) -> ManifestInfo:
             repos.append(RepoEntry(git_dir, path, detect_languages(path)))
         else:
             missing.append(git_dir)
-    return ManifestInfo(entries, tuple(repos), tuple(missing))
+    return ManifestInfo(entries, tuple(repos), tuple(missing), tuple(order))
