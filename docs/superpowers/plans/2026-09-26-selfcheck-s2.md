@@ -48,9 +48,11 @@
   - `test_fleet_reader`, `test_fleet_match`, `test_fleet_assemble`,
     `test_fleet_run` падают при сборке на `ModuleNotFoundError:
     selfcheck.fleet`;
-  - `test_vendor` — на `ModuleNotFoundError: selfcheck.vendor`;
-  - `test_fleet_classify` — на `ImportError: fleet_only`;
+  - `test_vendor` и `test_fleet_classify` — на `ModuleNotFoundError:
+    selfcheck.vendor`; `fleet_only` в `classify` тоже отсутствует;
   - `ruff check` и `ruff format --check` по тестам чистые.
+
+  Проверено после раунда 2 ревью пары.
 
   Первый шаг каждой задачи повторяет red-проверку своего модуля.
 
@@ -124,13 +126,13 @@
 |---|---|---|
 | §9.2 | состав: U − {R}, репо манифеста, другие репо `scope`; корневой зонтик исключён | `test_fleet_assemble::test_composition_includes_manifest_repo`, `test_root_umbrella_is_never_a_fleet_repo`; `test_fleet_run::test_other_scope_repos_are_fleet_for_each_other` |
 | §9.2 | чтение: байты, NUL → двоичный, BOM UTF-16/32, имена с пробелами, symlink не читается (realpath), `GIT_*` вычищены | `test_fleet_reader::test_texts_binary_utf16_utf32_and_clean_state`, `test_unreadable_symlink_out_and_submodule`, `test_inherited_git_environment_is_ignored` |
-| §9.2 | флот не зависит от `[corpus] exclude` и `[roles]` `scope` | `test_fleet_run::test_fleet_ignores_scope_corpus_exclude` |
+| §9.2 | флот не зависит от `[corpus] exclude` и `[roles]` `scope` | `test_fleet_run::test_fleet_ignores_scope_corpus_exclude_and_roles` |
 | §9.3 | внешняя цель → `fleet`: `run:`, рецепт, `working-directory`, каждое вхождение сегмента, регистр, компромисс `chrome/`; `$`-токен и проза — не рёбра | `test_fleet_match::test_match_external`, `test_fleet_edges_from_neighbour_sources`, `test_apply_fleet_wires_edges_and_mentions` |
 | §9.3 | `fleet-only`; «fleet-only: N» при `--fleet`, «—» без него | `test_fleet_classify::test_fleet_only_class_and_payload`; `test_fleet_run::test_fleet_end_to_end`, `test_without_fleet_nothing_else_changes` |
-| §9.4 | ключи; граница слова; регистр; перекрывающиеся ключи | `test_fleet_match::test_node_keys`, `test_mention_boundaries`, `test_module_key_boundaries`, `test_overlapping_keys_are_all_found` |
+| §9.4 | ключи; граница слова; регистр; перекрывающиеся ключи; ключи с не-ASCII и пробелом | `test_fleet_match::test_node_keys`, `test_mention_boundaries`, `test_module_key_boundaries`, `test_overlapping_keys_are_all_found`, `test_keys_outside_the_token_class_are_found` |
 | §9.4, §9.8 | любая роль и любое расширение: тест соседа, `.ex`, `zsh`, `"$WS/…"` в `run:`, `python -m` в `justfile`, `TODO.md` → P5 | `test_fleet_run::test_every_text_form_of_a_neighbour_caps_dead`, `test_fleet_end_to_end` |
 | §9.4 | `mentioned-in` ≤ 5 мест плюс счётчик | `test_fleet_classify::test_mentions_capped_at_five_with_a_count` |
-| §9.5 | канарейка: git-репо, каталог на R, своя git-личность; проходит проводку пробы; каждый канал и `stale` ловятся; источник — только файлы канарейки; изоляция | `test_fleet_match::test_canary_passes_through_apply_fleet`, `test_canary_counts_only_its_own_files`; `test_fleet_assemble::test_canary_per_scope_repo`, `test_canary_commit_ignores_the_callers_git_identity`, `test_broken_stale_check_is_a_canary_miss`, `test_complete_fleet`; `test_fleet_run::test_broken_channel_fails_the_probe`, `test_fleet_end_to_end` |
+| §9.5 | канарейка: git-репо, каталог на R, своя git-личность; проходит проводку пробы; каждый канал и `stale` ловятся; источник — только файлы канарейки; изоляция | `test_fleet_match::test_canary_passes_through_apply_fleet`, `test_canary_counts_only_its_own_files`; `test_fleet_assemble::test_canary_per_scope_repo`, `test_canary_commit_ignores_the_callers_git_identity`, `test_canary_commit_survives_gpgsign_and_hooks`, `test_broken_stale_check_is_a_canary_miss`, `test_complete_fleet`; `test_fleet_run::test_broken_channel_fails_the_probe`, `test_fleet_end_to_end` (канарейка не в графе и не в `surface.history`) |
 | §9.6 | причины `missing`, `ls-files`, `empty`, `unreadable`, `symlink-out`, `submodule`, `stale`, `fleet:count` (с evidence); одна находка на (репо, причина) | `test_fleet_reader::*`; `test_fleet_assemble::test_partial_causes_are_findings`, `test_one_finding_per_repo_and_cause`, `test_count_mismatch_is_partial_with_evidence` |
 | §9.6 | `stale`: нет `origin/HEAD`, behind, ahead, не та ветка, detached, dirty; stat-only изменение — не dirty; `fetched_at` | `test_fleet_reader::test_stale_forms`, `test_stat_only_change_is_not_dirty`, `test_stale_is_a_problem_and_fetched_at` |
 | §9.6 | код выхода не меняется, P1 остаётся, `surface.fleet` — худшее по `scope`, судьба `resolved` только при `usage-graph ok` и `--fleet` | `test_fleet_run::test_partial_fleet_keeps_p1_exit_code_and_fates`, `test_surface_fleet_is_the_worst_over_scope`, `test_fleet_fate_without_fleet_is_not_rechecked`, `test_fleet_fate_needs_an_ok_probe` |
@@ -294,7 +296,8 @@ def classify(g, *, repo, surface, ages, now,
 # selfcheck/graph/probe.py
 #   USAGE_GRAPH.logic_version = 2
 #   class FleetCanaryMissed(Exception) — message starts with "fleet-canary:";
-#   raised → usage-graph failed (reason "adapter-error: FleetCanaryMissed('fleet-canary: …')")
+#   raised → usage-graph failed (reason "analyzer-error: FleetCanaryMissed('fleet-canary: …')",
+#   the prefix base._internal gives to an analyzer exception; tests check only "fleet-canary")
 ```
 
 Форматы `report.md` (их проверяют тесты):
@@ -444,8 +447,8 @@ def test_fleet_ws_layout(tmp_path: Path) -> None:
   Expected: 3 passed.
 - [ ] **Step 4:** положить тестовые файлы Task 1–6 из этого плана и
   выполнить `uv run --frozen pytest tests/selfcheck -q -k "fleet or vendor"`.
-  Expected: ошибки сборки ровно на `selfcheck.fleet`, `selfcheck.vendor` и
-  `fleet_only`; `test_fleet_run` падает на `SystemExit: 2`. Файлы Task 1–6
+  Expected: ошибки сборки только `ModuleNotFoundError` на `selfcheck.fleet`
+  (4 файла) и `selfcheck.vendor` (2 файла). Файлы Task 1–6
   **не** коммитить в Task 0: каждая задача коммитит свой тест.
 - [ ] **Step 5:** коммит `test(selfcheck): S2 fleet fixtures`.
 
@@ -863,9 +866,28 @@ def test_canary_counts_only_its_own_files(tmp_path: Path) -> None:
     only_text = build_canary(tmp_path / "t", "devtools", forms=("text",))
     apply_fleet(g, [read_repo(only_text, CANARY_REPO)], "devtools")
     assert canary_misses(g) == ["precise"]
+
+
+def test_keys_outside_the_token_class_are_found() -> None:
+    """Non-ASCII and spaces in a node name: a separate search, same boundaries."""
+    keys = {
+        "file:запуск.sh": node_keys("запуск.sh"),
+        "file:a b.sh": node_keys("a b.sh"),
+    }
+    texts = {
+        "a.md": "run ./запуск.sh now",
+        "b.md": 'run "a b.sh"',
+        "c.md": "xзапуск.sh",
+    }
+    assert find_mentions(keys, texts, "nb") == {
+        "file:a b.sh": ["nb:b.md"],
+        "file:запуск.sh": ["nb:a.md"],
+    }
 ```
 
-- [ ] **Step 2:** прогон. Expected: `ModuleNotFoundError: selfcheck.fleet.match`.
+- [ ] **Step 2:** прогон. Expected: `ModuleNotFoundError` на
+  `selfcheck.fleet.assemble` (импортируется первым) или
+  `selfcheck.fleet.match`.
 - [ ] **Step 3:** реализовать. Затем `uv run --frozen pytest tests/selfcheck -q`
   — набор S1 обязан остаться зелёным: `external` только добавляется.
 - [ ] **Step 4:** Expected: test_fleet_match — all passed; S1 без регрессий.
@@ -1277,7 +1299,8 @@ def test_mentions_capped_at_five_with_a_count(tmp_path: Path) -> None:
     assert {"kind": "mentioned-in-total", "detail": "7"} in dead.evidence
 ```
 
-- [ ] **Step 2:** прогон. Expected: `ImportError: fleet_only`.
+- [ ] **Step 2:** прогон. Expected: после Task 3 модуль `selfcheck.vendor`
+  есть, и сборка падает на `ImportError: fleet_only`.
 - [ ] **Step 3:** реализовать и **поправить один тест S1**:
   `tests/selfcheck/test_graph_classify.py::test_report_graph_payload`
   сравнивает `graph["file:live.py"]` точным равенством. К ожидаемому
@@ -1440,6 +1463,23 @@ def test_count_mismatch_is_partial_with_evidence(tmp_path: Path) -> None:
         "expected": "docs-nb, nb, umbrella",
         "actual": "docs-nb, umbrella",
     }
+
+
+def test_canary_commit_survives_gpgsign_and_hooks(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    hooks = home / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n")
+    (hooks / "pre-commit").chmod(0o755)
+    (home / ".gitconfig").write_text(
+        f"[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /bin/false\n"
+        f"[core]\n\thooksPath = {hooks}\n"
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    root = build_canary(tmp_path / "c", "devtools")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert git(root, "log", "--format=%an").strip() == "selfcheck"
 ```
 
 - [ ] **Step 2:** прогон. Expected: `ModuleNotFoundError: selfcheck.fleet.assemble`.
@@ -1582,6 +1622,7 @@ def test_fleet_end_to_end(tmp_path: Path) -> None:
     assert surface["fleet"] == "complete"
     assert [r["name"] for r in surface["fleet_repos"]] == ["nb", "docs-nb", "umbrella"]
     assert len(surface["manifest_sha1"]) == 40
+    assert not [p for p in surface["history"] if "fleet_canary" in p]  # isolated
     graph = doc["graph"]["devtools"]
     check = graph["file:check.py"]
     assert check["class"] == "live" and check["fleet_only"] is True
@@ -1703,13 +1744,17 @@ def test_every_text_form_of_a_neighbour_caps_dead(tmp_path: Path) -> None:
         assert {"kind": "mentioned-in", "detail": source} in found[anchor]["evidence"]
 
 
-def test_fleet_ignores_scope_corpus_exclude(tmp_path: Path) -> None:
+def test_fleet_ignores_scope_corpus_exclude_and_roles(tmp_path: Path) -> None:
     ws = fleet_ws(tmp_path)
-    (ws / "cfg.toml").write_text('[corpus]\nexclude = ["**/*.md"]\n')
+    (ws / "cfg.toml").write_text(
+        '[corpus]\nexclude = ["**/*.md"]\n[roles]\ndiagnostic-output = [".github/**"]\n'
+    )
     assert main(args(ws, sched(tmp_path), "--fleet", config="cfg.toml")) == 0
     (doc,) = reports(ws)
     attest = dead(doc)["file:attest.sh"]
     assert {"kind": "mentioned-in", "detail": "docs-nb:TODO.md"} in attest["evidence"]
+    # scope [roles] would silence nb's workflow if it leaked into the fleet
+    assert doc["graph"]["devtools"]["file:check.py"]["fleet_only"] is True
 
 
 def test_partial_fleet_keeps_p1_exit_code_and_fates(tmp_path: Path) -> None:
@@ -1867,7 +1912,8 @@ def test_surface_fleet_is_the_worst_over_scope(tmp_path: Path) -> None:
      `vendor.findings`. Канареечные узлы исключены (Task 4).
   5. `ParseResult.skipped` получает пути деклараций с находками, чтобы
      статус был `partial` (§9.7 п.3).
-  6. `extra["graph"] = graph_payload(g, vendor.members)`.
+  6. `extra["graph"] = graph_payload(g, vendor.members)`. Цикл `history`
+     (поверхность S1) пропускает канареечные узлы.
 - **`report.py`.** Раздел «## флот» — форматы из «Интерфейсов»:
   - фраза полноты;
   - строка `fleet-only` и таблица (узел, источник) по каждому репо `scope`;
