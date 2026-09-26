@@ -18,12 +18,16 @@ from selfcheck import __version__
 from selfcheck.env import EnvInfo
 from selfcheck.model import Confidence, Finding, Location
 from selfcheck.probes.common import config_hash
-from selfcheck.roles import Role, role_of
+from selfcheck.roles import Role, glob_match, role_of
 
 
 @dataclass(frozen=True)
 class Canary:
-    """A file with one known finding (rule + anchor), fed with the repo."""
+    """A file with one known finding (rule + anchor), fed with the repo.
+
+    ``expect_anchor`` is a glob (``*`` within a segment): a clone anchor is a
+    hash of the fragment the tool cuts, unknown in advance.
+    """
 
     relpath: str
     content: str
@@ -256,7 +260,8 @@ def _judge(
     canary = [f for f in parsed.findings if _is_canary(f)]
     result.findings = [f for f in parsed.findings if not _is_canary(f)]
     hit = any(
-        f.rule == spec.canary.expect_rule and f.anchor == spec.canary.expect_anchor
+        f.rule == spec.canary.expect_rule
+        and glob_match(spec.canary.expect_anchor, f.anchor)
         for f in canary
     )
     result.canary = "hit" if hit else "missed"
