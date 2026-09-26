@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from selfcheck.graph.model import NON_EXEC, EdgeKind, Graph, NodeKind
 from selfcheck.model import Confidence, Finding, Location, cap, make_text_key
 
+if TYPE_CHECKING:
+    from selfcheck.vendor import Declaration
+
 DAY = 86400.0
 AGE_DAYS = 60
 ROOT_STALE_DAYS = 180
+MENTION_PLACES = 5
 
 
 @dataclass(frozen=True)
@@ -33,13 +38,15 @@ class NodeFacts:
     history: bool
     age_days: float | None
     mentioned: bool
+    vendored: bool = False
+    decl_cap: bool = False
 
 
 def dead_confidence(
     facts: NodeFacts, surface: Surface
 ) -> tuple[Confidence | None, list[str]]:
     """Steps 2 and 3 of spec §2.3: eligibility, then min(base, caps)."""
-    if facts.klass == "live" or facts.root or facts.in_zone:
+    if facts.klass == "live" or facts.root or facts.in_zone or facts.vendored:
         return None, []
     value = Confidence.CONFIRMED if facts.klass == "orphan" else Confidence.CANDIDATE
     caps: list[str] = []
@@ -53,6 +60,8 @@ def dead_confidence(
         caps.append("P4")
     if facts.mentioned:
         caps.append("P5")
+    if facts.decl_cap:
+        caps.append("P6")
     if caps:
         value = cap(value, Confidence.LIKELY)
     return value, caps
@@ -70,8 +79,31 @@ def klass_of(g: Graph, anchor: str) -> str:
     return "orphan"
 
 
-def graph_payload(g: Graph) -> dict[str, dict[str, object]]:
-    """Every node with its class, root flag and evidence edges (spec §0 п.2)."""
+def fleet_only(g: Graph, exclude: frozenset[str] = frozenset()) -> list[str]:
+    """File nodes alive only through ``fleet`` edges (spec §9.3)."""
+    out = []
+    for anchor, node in sorted(g.nodes.items()):
+        if node.kind is not NodeKind.FILE or node.path in exclude:
+            continue
+        kinds = {e.kind for e in g.incoming(anchor)} - NON_EXEC
+        if kinds == {EdgeKind.FLEET}:
+            out.append(anchor)
+    return out
+
+
+def _vendored(decls: list[Declaration]) -> list[dict[str, str]]:
+    return [{"owner": d.owner, "ref": d.ref, "declaration": d.path} for d in decls]
+
+
+def graph_payload(
+    g: Graph,
+    vendored: Mapping[str, list[Declaration]] | None = None,
+    exclude: frozenset[str] = frozenset(),
+) -> dict[str, dict[str, object]]:
+    """Every node with its class, root flag and evidence edges (spec §0 п.2),
+    plus ``fleet_only`` and ``vendored`` (spec §9.3, §9.7)."""
+    only = set(fleet_only(g, exclude))
+    vendored = vendored or {}
     return {
         anchor: {
             "class": klass_of(g, anchor),
@@ -80,9 +112,19 @@ def graph_payload(g: Graph) -> dict[str, dict[str, object]]:
                 {"kind": e.kind.value, "from": f"{e.where.path}:{e.where.line}"}
                 for e in g.incoming(anchor)
             ],
+            "fleet_only": anchor in only,
+            "vendored": _vendored(vendored.get(node.path, [])),
         }
         for anchor, node in sorted(g.nodes.items())
+        if node.path not in exclude
     }
+
+
+def _mention_evidence(places: list[str]) -> list[dict[str, str]]:
+    out = [{"kind": "mentioned-in", "detail": p} for p in places[:MENTION_PLACES]]
+    if len(places) > MENTION_PLACES:
+        out.append({"kind": "mentioned-in-total", "detail": str(len(places))})
+    return out
 
 
 def classify(
@@ -92,12 +134,22 @@ def classify(
     surface: Surface,
     ages: Callable[[str], float | None],
     now: float,
+    protected: frozenset[str] = frozenset(),
+    decl_cap: bool = False,
+    vendored: Mapping[str, list[Declaration]] | None = None,
+    exclude: frozenset[str] = frozenset(),
 ) -> list[Finding]:
-    """All usage-graph findings of one graph."""
+    """All usage-graph findings of one graph.
+
+    ``protected``/``vendored``: paths that never get dead (spec §9.7);
+    ``decl_cap``: cap P6 on every dead of the repo; ``exclude``: paths left
+    out entirely (the fleet canary node, spec §9.5).
+    """
     in_zone = {m for z in g.zones for m in z.members}
+    shielded = protected | frozenset(vendored or {})
     findings: list[Finding] = []
     for anchor, node in sorted(g.nodes.items()):
-        if node.kind is not NodeKind.FILE:
+        if node.kind is not NodeKind.FILE or node.path in exclude:
             continue
         ts = ages(node.path)
         facts = NodeFacts(
@@ -107,6 +159,8 @@ def classify(
             ts is not None,
             (now - ts) / DAY if ts is not None else None,
             bool(g.mentions.get(anchor)),
+            vendored=node.path in shielded,
+            decl_cap=decl_cap,
         )
         value, caps = dead_confidence(facts, surface)
         if value is None:
@@ -124,10 +178,7 @@ def classify(
                 evidence=[
                     {"kind": "class", "detail": facts.klass},
                     *[{"kind": "cap", "detail": c} for c in caps],
-                    *[
-                        {"kind": "mentioned-in", "detail": p}
-                        for p in g.mentions.get(anchor, [])
-                    ],
+                    *_mention_evidence(g.mentions.get(anchor, [])),
                 ],
                 suggestion="удалить или перенести в docs/archive",
             )

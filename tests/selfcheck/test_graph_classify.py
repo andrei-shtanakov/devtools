@@ -144,6 +144,8 @@ def test_report_graph_payload(tmp_path: Path) -> None:
         "class": "live",
         "root": False,
         "edges": [{"kind": "make", "from": "Makefile:3"}],
+        "fleet_only": False,  # S2 payload contract (§9.3)
+        "vendored": [],  # S2 payload contract (§9.7)
     }
     assert graph["file:orphan.py"]["class"] == "orphan"
     assert graph["skill:skills/s/SKILL.md"]["root"] is True
