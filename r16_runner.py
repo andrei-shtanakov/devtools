@@ -44,6 +44,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -64,6 +65,11 @@ CYCLE_START = time(9, 30)
 MAX_ATTEMPTS = 3
 FIRST_DETECTED = re.compile(r"<!-- r16 first-detected=(\d{4}-\d{2}-\d{2}) -->")
 VAULT_DIR = "prograph-vault"
+# Pinned to `STATUSES` of prograph-vault/scripts/kb_freshness.py. Not imported:
+# the runner works over whatever vault clone is present. A status the auditor
+# adds later makes the attempt `failed` with the key named, not a clean week.
+KNOWN_STATUSES = ("unchanged", "changed", "missing", "unverified", "invalid")
+COVERAGE_KEYS = ("notes", "with_evidence", "unparsed_frontmatter")
 DEFAULT_BRANCH = re.compile(r"^ref: refs/heads/(\S+)\tHEAD$", re.MULTILINE)
 AUDIT_REL = Path("scripts") / "kb_freshness.py"
 SETTINGS = (
@@ -76,6 +82,10 @@ SETTINGS = (
 
 class ConfigError(Exception):
     """A setting is missing or wrong: exit 2, no receipt, no attempt spent."""
+
+
+class DeliveryCrash(Exception):
+    """An exception inside delivery: the issue may already have been changed."""
 
 
 @dataclass(frozen=True)
@@ -212,24 +222,25 @@ def run_cycle(cfg: Config, now: datetime, dry_run: bool) -> int:
     if not dry_run:
         for missed in missed_cycles(latest_cycle(cfg.receipts, before=cid), cid):
             write_receipt(cfg.receipts, missed_receipt(missed, now.isoformat()))
-    unpublished = sync_vault(cfg.vault)
-    audit = (
-        Audit([], [], None, f"vault not published: {unpublished}")
-        if unpublished
-        else run_audit(cfg)
-    )
-    found = problems(audit)
-    if not audit.completed:
-        delivery = Delivery("skipped", None, "audit did not complete")
-    elif dry_run:
-        delivery = Delivery("dry-run")
-    else:
-        delivery = deliver(
-            cfg,
-            found,
-            now.date(),
-            last_issue(cfg.receipts),
-            receipt_pointer(cfg, cid),
+    try:
+        audit, found, delivery = run_attempt(cfg, cid, now, dry_run)
+    except Exception as exc:  # noqa: BLE001 — any failure must leave a receipt
+        # Without a receipt the attempt is not counted (MAX_ATTEMPTS bypassed)
+        # and the next cycle would record this one as `missed` — a run that did
+        # happen. Only a crash inside delivery leaves the issue's state unknown;
+        # before it, delivery provably did not start.
+        crash = exc.__cause__ if isinstance(exc, DeliveryCrash) else exc
+        cause = f"{type(crash).__name__}: {crash}"
+        audit = Audit([], [], None, f"runner raised: {cause}")
+        found = Problems([], [], [])
+        delivery = (
+            Delivery(
+                "failed",
+                None,
+                f"runner raised during delivery: {cause}; delivery state unknown",
+            )
+            if isinstance(exc, DeliveryCrash)
+            else Delivery("skipped", None, f"runner raised before delivery: {cause}")
         )
     finished = datetime.now(now.tzinfo).replace(microsecond=0)
     record = receipt(audit, found, delivery, now.isoformat(), finished.isoformat())
@@ -240,6 +251,61 @@ def run_cycle(cfg: Config, now: datetime, dry_run: bool) -> int:
         return 0 if audit.completed else 1
     write_receipt(cfg.receipts, record)
     return 0 if record["ok"] else 1
+
+
+def run_attempt(
+    cfg: Config, cid: str, now: datetime, dry_run: bool
+) -> tuple[Audit, Problems, Delivery]:
+    """One attempt: published vault, audit, consistency, delivery."""
+    unpublished = sync_vault(cfg.vault)
+    audit = (
+        Audit([], [], None, f"vault not published: {unpublished}")
+        if unpublished
+        else run_audit(cfg)
+    )
+    inconsistent = audit_inconsistency(audit)
+    if inconsistent:
+        audit = Audit(
+            [], audit.revisions, None, f"audit output inconsistent: {inconsistent}"
+        )
+    found = problems(audit)
+    if not audit.completed:
+        return audit, found, Delivery("skipped", None, "audit did not complete")
+    if dry_run:
+        return audit, found, Delivery("dry-run")
+    try:
+        delivery = deliver(
+            cfg, found, now.date(), last_issue(cfg.receipts), receipt_pointer(cfg, cid)
+        )
+    except Exception as exc:  # noqa: BLE001 — marks where the crash happened
+        raise DeliveryCrash() from exc
+    return audit, found, delivery
+
+
+def audit_inconsistency(audit: Audit) -> str | None:
+    """Why the auditor's output cannot be trusted, or None.
+
+    Findings are built from the verdict lines alone; a summary that disagrees
+    with them (verdict lines lost, a renamed key, a new status) would otherwise
+    read as a clean week and close the triage issue.
+    """
+    if audit.summary is None:
+        return None
+    unknown = sorted(set(audit.summary) - set(KNOWN_STATUSES) - set(COVERAGE_KEYS))
+    if unknown:
+        return f"unknown summary keys: {', '.join(unknown)}"
+    counts = Counter(str(v.get("status")) for v in audit.verdicts)
+    strange = sorted(set(counts) - set(KNOWN_STATUSES))
+    if strange:
+        return f"unknown verdict statuses: {', '.join(strange)}"
+    diff = [
+        f"{status}: summary {audit.summary.get(status, 0)} vs {counts[status]} verdicts"
+        for status in KNOWN_STATUSES
+        if audit.summary.get(status, 0) != counts[status]
+    ]
+    if diff:
+        return "summary disagrees with verdicts — " + "; ".join(diff)
+    return None
 
 
 def cycle_zone() -> ZoneInfo:
@@ -624,7 +690,6 @@ def receipt(
     completed = audit.completed
     delivered = delivery.action not in ("failed", "skipped")
     summary = audit.summary or {}
-    coverage_keys = ("notes", "with_evidence", "unparsed_frontmatter")
     url = (
         f"https://github.com/{REPO}/issues/{delivery.issue}" if delivery.issue else None
     )
@@ -636,8 +701,8 @@ def receipt(
         "target": "published",
         "execution": "completed" if completed else "failed",
         "revisions": {r["repo"]: r["sha"] or r["error"] for r in audit.revisions},
-        "coverage": {k: summary[k] for k in coverage_keys if k in summary},
-        "statuses": {k: v for k, v in summary.items() if k not in coverage_keys},
+        "coverage": {k: summary[k] for k in COVERAGE_KEYS if k in summary},
+        "statuses": {k: summary[k] for k in KNOWN_STATUSES if k in summary},
         "problems": {
             "claims": len(found.claims),
             "revisions": len(found.revisions),
