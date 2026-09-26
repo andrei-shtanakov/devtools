@@ -113,10 +113,22 @@ def test_unknown_status_is_a_failed_attempt(
 # --- 2. an exception after decide()==run still leaves a receipt ---------------
 
 
-@pytest.mark.parametrize("where", ["sync_vault", "run_audit", "deliver"])
+@pytest.mark.parametrize(
+    ("where", "action", "says"),
+    [
+        ("sync_vault", "skipped", "runner raised before delivery"),
+        ("run_audit", "skipped", "runner raised before delivery"),
+        ("deliver", "failed", "delivery state unknown"),
+    ],
+)
 def test_exception_leaves_a_failed_receipt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+    action: str,
+    says: str,
 ) -> None:
+    """Only a crash inside delivery leaves the issue's state unknown (review #401)."""
     cfg = cfg_for(tmp_path)
     monkeypatch.setattr(run, "sync_vault", lambda _v: None)
     monkeypatch.setattr(run, "run_audit", lambda _cfg: run.parse_audit(LIVE))
@@ -131,9 +143,9 @@ def test_exception_leaves_a_failed_receipt(
     record = json.loads((cfg.receipts / f"{CYCLE}.json").read_text())
     assert code == 1
     assert (record["execution"], record["attempt"], record["ok"]) == ("failed", 1, False)
-    assert record["delivery"]["action"] == "failed"
+    assert record["delivery"]["action"] == action
     assert "RuntimeError: boom" in record["delivery"]["error"]
-    assert "delivery state unknown" in record["delivery"]["error"]
+    assert says in record["delivery"]["error"]
     validate(record)
 
 

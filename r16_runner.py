@@ -84,6 +84,10 @@ class ConfigError(Exception):
     """A setting is missing or wrong: exit 2, no receipt, no attempt spent."""
 
 
+class DeliveryCrash(Exception):
+    """An exception inside delivery: the issue may already have been changed."""
+
+
 @dataclass(frozen=True)
 class Config:
     """Where the runner reads and writes; every root comes from outside."""
@@ -223,14 +227,20 @@ def run_cycle(cfg: Config, now: datetime, dry_run: bool) -> int:
     except Exception as exc:  # noqa: BLE001 — any failure must leave a receipt
         # Without a receipt the attempt is not counted (MAX_ATTEMPTS bypassed)
         # and the next cycle would record this one as `missed` — a run that did
-        # happen. Delivery may have been under way: its state is unknown.
-        cause = f"{type(exc).__name__}: {exc}"
+        # happen. Only a crash inside delivery leaves the issue's state unknown;
+        # before it, delivery provably did not start.
+        crash = exc.__cause__ if isinstance(exc, DeliveryCrash) else exc
+        cause = f"{type(crash).__name__}: {crash}"
         audit = Audit([], [], None, f"runner raised: {cause}")
         found = Problems([], [], [])
-        delivery = Delivery(
-            "failed",
-            None,
-            f"runner raised before the receipt: {cause}; delivery state unknown",
+        delivery = (
+            Delivery(
+                "failed",
+                None,
+                f"runner raised during delivery: {cause}; delivery state unknown",
+            )
+            if isinstance(exc, DeliveryCrash)
+            else Delivery("skipped", None, f"runner raised before delivery: {cause}")
         )
     finished = datetime.now(now.tzinfo).replace(microsecond=0)
     record = receipt(audit, found, delivery, now.isoformat(), finished.isoformat())
@@ -263,9 +273,12 @@ def run_attempt(
         return audit, found, Delivery("skipped", None, "audit did not complete")
     if dry_run:
         return audit, found, Delivery("dry-run")
-    delivery = deliver(
-        cfg, found, now.date(), last_issue(cfg.receipts), receipt_pointer(cfg, cid)
-    )
+    try:
+        delivery = deliver(
+            cfg, found, now.date(), last_issue(cfg.receipts), receipt_pointer(cfg, cid)
+        )
+    except Exception as exc:  # noqa: BLE001 — marks where the crash happened
+        raise DeliveryCrash() from exc
     return audit, found, delivery
 
 
