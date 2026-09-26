@@ -189,7 +189,13 @@ def _parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> ParseResult
     scanned = [rel_path(ctx, p) for p in data.get("paths", {}).get("scanned", [])]
     result = ParseResult([], processed_paths=scanned)
     for err in data.get("errors", []):
-        result.diagnostics.append(str(err.get("message", err.get("type"))))
+        kind = err.get("type")
+        name = kind[0] if isinstance(kind, list) and kind else str(kind)
+        text = f"semgrep {err.get('level')} {name}: {str(err.get('message', ''))[:200]}"
+        # 'warn' (e.g. PartialParsing) still returns results; only 'error' loses a file
+        (result.notes if err.get("level") == "warn" else result.diagnostics).append(
+            text
+        )
     for rel in ctx.inputs:
         if rel.endswith(".py"):
             try:

@@ -138,3 +138,30 @@ def test_canary_rule_disabled_in_registry_is_missed(
     broken = replace(spec, canary=replace(spec.canary, expect_rule="never/rule"))
     res = run(broken, build(CLEAN), tmp_path)
     assert (res.status, res.reason) == (ProbeStatus.FAILED, "canary-missed")
+
+
+# ---- regressions found by the S1 acceptance run on devtools (2026-09-26) --------
+
+
+def test_jscpd_copy_inside_gitignored_dir(tmp_path: Path) -> None:
+    """The real copy lives in devtools/out/ (gitignored): jscpd must not skip it."""
+    require_npx_package("jscpd@4.3.0")
+    outer = make_repo(tmp_path / "outer", {".gitignore": "out/\n"})
+    repo = make_repo(tmp_path / "repo", {"d.py": DUP})
+    corpus = tuple(list_corpus(repo))
+    copy = outer / "out" / "run" / "src" / "repo"
+    materialize(repo, corpus, copy, canary_files(OTHER_PROBES))
+    target = RepoTarget("repo", repo, copy, frozenset(), corpus, EnvInfo("no-env"))
+    try:
+        res = run_probe(JSCPD, target, outer / "out" / "run" / "work")
+    finally:
+        release(copy)
+    assert res.status is ProbeStatus.OK, res.reason
+
+
+def test_shellcheck_directive_warning_is_not_a_parse_error(
+    build, tmp_path: Path
+) -> None:
+    source = '#!/bin/sh\n# shellcheck disable=SC2086 reason: x\necho "$1"\n'
+    res = run(SHELLCHECK, build({"d.sh": source}), tmp_path)
+    assert res.status is ProbeStatus.OK, (res.reason, res.diagnostics)

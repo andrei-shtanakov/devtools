@@ -146,3 +146,38 @@ def test_python_parse_error_is_partial(tmp_path: Path) -> None:
     finally:
         release(copy)
     assert res.status is ProbeStatus.PARTIAL and "bad.py" in res.coverage["skipped"]
+
+
+def test_semgrep_partial_parsing_warning_is_a_note(tmp_path: Path) -> None:
+    """semgrep 'warn' PartialParsing still returns results: not a skipped file."""
+    import json
+    import subprocess
+
+    from selfcheck.llm import _parse
+    from selfcheck.probes.base import ProbeCtx
+
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    (copy / "h.sh").write_text('#!/bin/sh\nclaude -p "hi" --json-schema s.json\n')
+    target = RepoTarget(
+        "repo", tmp_path, copy, frozenset(), ("h.sh",), EnvInfo("no-env")
+    )
+    ctx = ProbeCtx(target, tmp_path, ("h.sh",), tmp_path)
+    payload = {
+        "results": [
+            {"check_id": "cli-shell", "path": str(copy / "h.sh"), "start": {"line": 2}}
+        ],
+        "errors": [
+            {
+                "level": "warn",
+                "type": ["PartialParsing", []],
+                "message": "Syntax error at line h.sh:1",
+            }
+        ],
+        "paths": {"scanned": [str(copy / "h.sh")]},
+    }
+    proc = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+    parsed = _parse(ctx, proc)
+    assert parsed.diagnostics == [] and parsed.skipped == []
+    assert any("PartialParsing" in n for n in parsed.notes)
+    assert [i["path"] for i in parsed.extra["inventory"]] == ["h.sh"]

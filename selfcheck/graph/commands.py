@@ -35,7 +35,9 @@ _WRAPPERS = frozenset(
 _OPTS_WITH_ARG = frozenset(
     {"--project", "--group", "--with", "--python", "--directory", "-u", "-C"}
 )
-_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
+# a launch through a variable: "$x", "${x}", "$x/sub/tool.sh" — not "${C}text"
+_VAR_LAUNCH = re.compile(r"^\$\{?\w+\}?(?:/[\w./-]*)?$")
 
 
 @dataclass(frozen=True)
@@ -165,9 +167,9 @@ def scan_command(cmd: str, base: str, index: Index, *, shell_vars: bool) -> Scan
             if token.startswith("-"):
                 continue
             if "$" in token:
-                if shell_vars and "${{" not in token and not token.startswith("$("):
+                if shell_vars and _VAR_LAUNCH.match(token.strip("'\"")):
                     scan.unresolved.append(token)
-                    position = False
+                position = not shell_vars
                 continue
             position = False
             clean = token.strip("'\"")

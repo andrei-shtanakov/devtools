@@ -32,6 +32,9 @@ RUN_FUNCS = frozenset(
     }
 )
 _IMPORT_FUNCS = frozenset({"import_module", "__import__"})
+_LAUNCH_MODULES = frozenset({"subprocess", "os", "asyncio"})
+_HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?")
+_ARRAY_ASSIGN = re.compile(r"^\s*(?:local\s+|declare\s+-a\s+)?[A-Za-z_]\w*\+?=\(")
 _PASSTHROUGH = frozenset(
     {
         "Path",
@@ -116,6 +119,31 @@ def _eval(e: ast.expr, s: Scope) -> Value:
     if isinstance(e, ast.Call):
         return _eval_call(e, s)
     return None
+
+
+def launch_names(tree: ast.Module) -> frozenset[str]:
+    """Bare names imported from subprocess/os/asyncio (``from subprocess import run``)."""
+    names = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module in _LAUNCH_MODULES
+        for alias in node.names
+    }
+    return frozenset(names & RUN_FUNCS | {n for n in names if n in RUN_FUNCS})
+
+
+def is_launch(call: ast.Call, imported: frozenset[str]) -> bool:
+    """A real process launch: ``subprocess.run(...)``, ``os.system(...)`` or an
+    imported ``run(...)`` — not any function that happens to be called ``run``."""
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        owner = func.value
+        return (
+            func.attr in RUN_FUNCS
+            and isinstance(owner, ast.Name)
+            and owner.id in _LAUNCH_MODULES
+        )
+    return isinstance(func, ast.Name) and func.id in imported
 
 
 def call_name(call: ast.Call) -> str:
@@ -223,11 +251,11 @@ def _forwarded(site: _Site) -> str | None:
     return None
 
 
-def _wrappers(sites: list[_Site]) -> dict[str, int]:
+def _wrappers(sites: list[_Site], imported: frozenset[str]) -> dict[str, int]:
     """Same-module functions passing a parameter straight into a launch."""
     out: dict[str, int] = {}
     for site in sites:
-        param = _forwarded(site) if call_name(site.call) in RUN_FUNCS else None
+        param = _forwarded(site) if is_launch(site.call, imported) else None
         if param is not None and site.func:
             index = site.params.index(param)
             method = site.params and site.params[0] in ("self", "cls")
@@ -241,9 +269,10 @@ def argv_at(source: str, rel: str, line: int) -> list[str] | None:
         tree = ast.parse(source)
     except SyntaxError:
         return None
+    imported = launch_names(tree)
     for site in _sites(tree, rel):
         call = site.call
-        if call.lineno == line and call_name(call) in RUN_FUNCS and call.args:
+        if call.lineno == line and is_launch(call, imported) and call.args:
             value = evaluate(call.args[0], site.scope)
             return value if isinstance(value, list) else [as_text(value)]
     return None
@@ -275,7 +304,8 @@ def _python(g: Graph, rel: str, text: str, index: Index) -> None:
     except SyntaxError:
         return
     sites = _sites(tree, rel)
-    wrappers = _wrappers(sites)
+    imported = launch_names(tree)
+    wrappers = _wrappers(sites, imported)
     for site in sites:
         call, name = site.call, call_name(site.call)
         where = Location(rel, call.lineno)
@@ -289,7 +319,7 @@ def _python(g: Graph, rel: str, text: str, index: Index) -> None:
         elif name == "getattr" and len(call.args) >= 2:
             if not isinstance(call.args[1], ast.Constant):
                 _zone(g, where, "", "dynamic getattr")
-        elif name in RUN_FUNCS and call.args:
+        elif is_launch(call, imported) and call.args:
             if site.func in wrappers and _forwarded(site) is not None:
                 continue  # resolved at the wrapper's call sites
             _launch(g, where, evaluate(call.args[0], site.scope), index)
@@ -333,19 +363,59 @@ def _zone(g: Graph, where: Location, suffix: str, reason: str) -> None:
         g.zones.append(Zone(where, frozenset(members), reason))
 
 
-def _shell(g: Graph, rel: str, text: str, index: Index) -> None:
-    base = posixpath.dirname(rel)
-    known: dict[str, str] = {}
-    buf, start = "", 0
+def _open_quote(text: str) -> bool:
+    """True when ``text`` ends inside a single- or double-quoted string."""
+    quote = ""
+    escaped = False
+    for ch in text:
+        if escaped:
+            escaped = False
+        elif ch == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and not quote:
+            break
+    return bool(quote)
+
+
+def _shell_statements(text: str) -> list[tuple[int, str]]:
+    """Logical shell lines: ``\\`` and open quotes joined, heredoc bodies dropped."""
+    out: list[tuple[int, str]] = []
+    buf, start, heredoc = "", 0, None
     for number, line in enumerate(text.splitlines(), 1):
+        if heredoc is not None:
+            if line.strip() == heredoc:
+                heredoc = None
+            continue
         if not buf:
             start = number
         if line.rstrip().endswith("\\"):
             buf += line.rstrip()[:-1] + " "
             continue
-        logical, buf = buf + line, ""
+        buf += line
+        if _open_quote(buf):
+            buf += "\n"
+            continue
+        match = _HEREDOC.search(buf)
+        if match:
+            heredoc = match.group(1)
+        out.append((start, buf))
+        buf = ""
+    if buf:
+        out.append((start, buf))
+    return out
+
+
+def _shell(g: Graph, rel: str, text: str, index: Index) -> None:
+    base = posixpath.dirname(rel)
+    known: dict[str, str] = {}
+    for start, logical in _shell_statements(text):
         stripped = logical.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped or stripped.startswith("#") or _ARRAY_ASSIGN.match(stripped):
             continue
         match = _ASSIGN.match(stripped)
         if (

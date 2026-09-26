@@ -193,3 +193,44 @@ def test_bash_source_dir_form(tmp_path: Path) -> None:
         },
     )
     assert exec_targets(g) == {"file:lib/z.sh"} and g.zones == []
+
+
+# ---- regressions found by the S1 acceptance run on devtools (2026-09-26) --------
+
+
+def test_non_subprocess_call_named_like_a_launcher_is_not_a_launch(
+    tmp_path: Path,
+) -> None:
+    g = graph(
+        tmp_path,
+        {
+            "check.py": "def review(call, built):\n    raw = call(built.text)\n    return run(raw)\n",
+            "other.py": "x = 1\n",
+        },
+    )
+    assert g.zones == [] and exec_targets(g) == set()
+
+
+def test_shell_non_command_lines_make_no_zones(tmp_path: Path) -> None:
+    g = graph(
+        tmp_path,
+        {
+            "r.sh": (
+                "#!/usr/bin/env bash\n"
+                'issues+=("${C_YLW}dirty: ${dirty}${C_RESET}")\n'
+                'arr=("$x" "$y")\n'
+                'case "$1" in\n'
+                "    $finalize_glob) echo fin ;;\n"
+                '    *" $optional "*) ;;\n'
+                "esac\n"
+                "body=$(cat <<EOF\n"
+                "$pr_info\n"
+                "EOF\n"
+                ")\n"
+                "jq -r '.[] | select(.a)\n"
+                '    | ($r.body // "")\' file\n'
+            ),
+            "tool.sh": "echo\n",
+        },
+    )
+    assert g.zones == [], [(z.caller, sorted(z.members)) for z in g.zones]

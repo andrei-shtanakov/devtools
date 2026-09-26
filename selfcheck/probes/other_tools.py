@@ -18,6 +18,10 @@ JSCPD_MIN_LINES = 5
 _SHEBANG = re.compile(rb"^#!.*\b(sh|bash|dash|ksh)\b")
 _CLONE_SUFFIXES = (".py", ".sh", ".bash", ".js", ".ts", ".yml", ".yaml", ".toml")
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# shellcheck could not parse the file; the same codes about a malformed
+# `# shellcheck` directive (and other SC1xxx, e.g. SC1125) come with an
+# analysis of the file and are ordinary findings
+_PARSE_FATAL = frozenset({1072, 1073})
 
 
 def _is_shell(target: RepoTarget, rel: str) -> bool:
@@ -66,7 +70,7 @@ def _shellcheck_parse(
     result = ParseResult([])
     for item in json.loads(proc.stdout or '{"comments": []}')["comments"]:
         rel = rel_path(ctx, item["file"])
-        if item["level"] == "error" and 1000 <= item["code"] < 1200:
+        if item["code"] in _PARSE_FATAL and "directive" not in item["message"]:
             _skip(result, rel, f"SC{item['code']} {item['message']}")
             continue
         serious = item["level"] in ("error", "warning")
@@ -251,6 +255,7 @@ def _jscpd_argv(ctx: ProbeCtx) -> list[str]:
         f"jscpd@{JSCPD_VERSION}",
         "--silent",
         "--absolute",
+        "--no-gitignore",  # the corpus is already git-filtered; the copy may sit in out/
         "--min-lines",
         str(JSCPD_MIN_LINES),
         "--reporters",
