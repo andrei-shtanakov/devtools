@@ -57,6 +57,7 @@
 | `.claude/skills/fleet-check` | скилл периодической проверки флота |
 | `skills/spec-bridge` | скилл: находка/кластер → tasks.md-спека PR-ом в репо-владелец |
 | `edge_check.py` | смысловая проверка узла бандла против его оснований (`make edge-check ARGS='--edge <id> --bundle <dir> --subject <p> --basis <role>=<p>'`): вход объявлен и передаётся в запросе, ревьюер без инструментов в пустом каталоге, результат несёт вычисленные хэши всего входа и identity правил. Каталог правил — `contracts/edge-check/v1/`. Срез 1 плана `2026-09-21-edge-check-v1.md`; координатор бандла и публикация — срезы 2 и 3 |
+| `selfcheck/` | самодиагностика (`make selfcheck`): статические пробы (ruff, pyrefly, vulture, deptry, radon, shellcheck, actionlint, zizmor, jscpd, semgrep) + собственные (граф использования, ast-дубли, cli-overlap, LLM-вызовы); отчёт `out/selfcheck/<run_id>/report.{json,md}`, только советует. Спека `docs/superpowers/specs/2026-09-25-selfcheck-design.md`; пробы, исполняющие код цели, — отдельная спека S4 |
 
 ## Быстрый старт агента
 

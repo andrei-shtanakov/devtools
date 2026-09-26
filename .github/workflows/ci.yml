@@ -26,3 +26,5 @@ jobs:
           tests/test_governance_bundle_state.py
           -q
       - run: make plan-check-selftest
+      - run: uv sync --frozen --group selfcheck
+      - run: SELFCHECK_REQUIRE_TOOLS=1 uv run --frozen --group selfcheck pytest tests/selfcheck -q

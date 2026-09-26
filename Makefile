@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks accept-pr preflight edge-check
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks accept-pr preflight edge-check selfcheck selfcheck-dogfood
 
 help:
 	@echo "Цели:"
@@ -57,6 +57,8 @@ help:
 	@echo "  make behaviour-tasks ARGS='--run-id … --legacy-bundle=3' — точный состав charter+requirements+behaviour-spec, без design/acceptance/decomposition (WS-SMOKE-001, non-conformant против team-exp); =4 — + design, без acceptance/decomposition; =5 — + decomposition, без acceptance (бандл до раскатки acceptance-узла, decomposition пинует только design); без флага — полный DAG (+ acceptance, decomposition пинует design и acceptance); состав каталога обязан совпасть РОВНО"
 	@echo "  make accept-pr ARGS='--repo <r> --pr <n>' — приёмка integration-PR spec-runner: ревью → чеки → DarkFactory-мерж"
 	@echo "  make preflight ARGS='--repo <r>' — преflight перед прогоном spec-runner: конфиг-эталон / insteadOf / state-DB / live-smoke"
+	@echo "  make selfcheck ARGS='[--repo r] [--sched-dir ~/Library/LaunchAgents]' — самодиагностика: баги, мёртвое, дубли, LLM-вызовы (отчёт в out/selfcheck/)"
+	@echo "  make selfcheck-dogfood — тесты selfcheck с обязательными инструментами + прогон на собственном пакете"
 
 status:      ; @./repos.sh status
 fetch:       ; @./repos.sh fetch
@@ -101,3 +103,5 @@ accept-pr: ; @uv run --frozen python -m governance.accept_pr $(ARGS)
 human-merge: ; @sh ./human-merge.sh $(ARGS)
 preflight: ; @uv run --frozen python ./spec_run_preflight.py $(ARGS)
 edge-check:  ; @uv run --frozen python ./edge_check.py $(ARGS)
+selfcheck: ; @uv run --frozen --group selfcheck python -m selfcheck --workspace $(WORKSPACE) --manifest $(MANIFEST) $(ARGS)
+selfcheck-dogfood: ; @SELFCHECK_REQUIRE_TOOLS=1 uv run --frozen --group selfcheck pytest tests/selfcheck -q && uv run --frozen --group selfcheck python -m selfcheck --workspace $(WORKSPACE) --manifest $(MANIFEST) --repo devtools --out out/selfcheck-dogfood --path 'selfcheck/**' --path 'tests/selfcheck/**' --path Makefile --path pyproject.toml
