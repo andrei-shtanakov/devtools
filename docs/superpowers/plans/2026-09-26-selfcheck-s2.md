@@ -42,15 +42,15 @@
   прозы и теста прав тест. При расхождении теста и спеки права спека: тест
   чинится отдельным коммитом с объяснением.
 - **Ненормативны:** эскизы. Исполнитель доводит тела по TDD.
-- **Red-фаза уже прогнана** (2026-09-26, на файлах этого плана):
+- **Red-фаза уже прогнана** (2026-09-26, на файлах этого плана, после
+  раунда 1 ревью пары):
   - фикстуры Task 0 зелёные (3 passed);
-  - `test_fleet_reader`, `test_fleet_match`, `test_fleet_assemble` падают при
-    сборке на `ModuleNotFoundError: selfcheck.fleet`;
+  - `test_fleet_reader`, `test_fleet_match`, `test_fleet_assemble`,
+    `test_fleet_run` падают при сборке на `ModuleNotFoundError:
+    selfcheck.fleet`;
   - `test_vendor` — на `ModuleNotFoundError: selfcheck.vendor`;
   - `test_fleet_classify` — на `ImportError: fleet_only`;
-  - `test_fleet_run` падает при исполнении: `SystemExit: 2` на неизвестном
-    `--fleet`, а без флага — на отсутствии строки `fleet-only: 0`;
-  - `ruff check --select F,B,E9,PLE` по тестам чистый.
+  - `ruff check` и `ruff format --check` по тестам чистые.
 
   Первый шаг каждой задачи повторяет red-проверку своего модуля.
 
@@ -59,16 +59,31 @@
 - Shipped-код не читает и не резолвит `_cowork_output/` (корневой CLAUDE.md).
   Корневой зонтик во флот не входит (§9.2).
 - Пробы по флоту не запускаются. Репо флота не материализуются. selfcheck
-  ничего не пишет в репо флота. Git по флоту — только чтение с
-  `GIT_OPTIONAL_LOCKS=0`: `ls-files`, `rev-parse`, `symbolic-ref`,
-  `rev-list`, `diff-index`. Сеть не трогается: никаких `fetch`.
-- **Ruling (план):** признак `dirty` (§9.6 п.5, «`git status --porcelain`
-  пуст») вычисляется так же, как `corpus.repo_state` в S1: `diff-index
-  --quiet HEAD` плюс `ls-files --others --exclude-standard`. По смыслу это
-  то же самое — изменения отслеживаемых файлов плюс неотслеживаемые
-  неигнорируемые. Сам `git status` S1 не использует (Global Constraints
-  S1). Цена ошибки: изменение, видимое только `status` (например, смена
-  режима файла при `core.fileMode=false`), не даст `stale`.
+  ничего не пишет в репо флота.
+- Git по флоту — только чтение с `GIT_OPTIONAL_LOCKS=0`: `ls-files`,
+  `rev-parse`, `symbolic-ref`, `rev-list`, `status --porcelain -z`. Сеть не
+  трогается: никаких `fetch`.
+- **Запрещены** `diff-index` (ложный dirty на stat-only изменении),
+  `git diff` и `update-index --refresh` — обе последние пишут индекс даже при
+  `GIT_OPTIONAL_LOCKS=0` (замер ревью пары r1, M2).
+- `dirty` — это ровно `git status --porcelain -z` непуст (§9.6 п.5).
+  Собственный `corpus.repo_state` S1 страдает тем же ложным dirty. Задача 6
+  помечает его комментарием `TODO:`, но не чинит: это поле отчёта S1, вне
+  S2.
+- Окружение каждого вызова git по флоту и для канарейки: из `os.environ`
+  убираются все `GIT_*`, кроме `GIT_OPTIONAL_LOCKS=0`. Унаследованные
+  `GIT_DIR`, `GIT_WORK_TREE` и `GIT_INDEX_FILE` иначе перенаправили бы все
+  чтения.
+- Коммит канарейки добавляет `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`,
+  `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` = selfcheck и
+  `-c commit.gpgsign=false -c core.hooksPath=/dev/null`.
+- Путь `FETCH_HEAD` — `git rev-parse --git-path FETCH_HEAD`: так корректно для
+  worktree и gitfile. «Внутри репо» для symlink'а — сравнение
+  `os.path.realpath` цели с `os.path.realpath` репо (на macOS `/var` —
+  ссылка на `/private/var`).
+- `USAGE_GRAPH.logic_version` = 2: логика меняется и без `--fleet` (роль
+  `vendored-in`, P6, `partial`), а ключ сопоставимости обязан это видеть
+  (§4.3).
 - Флот читается один раз на прогон и кэшируется по имени репо. Флот R — это
   U − {R} (§9.2), где U = уникальные `git_dir` манифеста ∪ {репо
   манифеста}.
@@ -81,21 +96,24 @@
   - коды выхода 0/2/3/4;
   - `ruff format`, `ruff check` и `pyrefly check` зелёные после каждой
     задачи.
-- Текстовый канал — одно объединённое регулярное выражение по всем ключам
-  на репо и один проход по каждому файлу. Не делать «узлы × файлы»: это
-  ≈150 узлов × 3 ключа × 9000 файлов.
+- Текстовый канал — один проход по каждому файлу, без перебора «узлы ×
+  файлы» (≈150 узлов × 3 ключа × 9000 файлов). Перекрывающиеся ключи
+  обязаны находиться все (`test_overlapping_keys_are_all_found`), поэтому
+  одно выражение-альтернатива с `finditer` не годится — алгоритм в эскизе
+  Task 2.
 
 ## Review Focus
 
 1. Имена с пробелами и не-ASCII в корпусе соседа —
-   `test_fleet_reader::test_texts_binary_utf16_and_clean_state`
+   `test_fleet_reader::test_texts_binary_utf16_utf32_and_clean_state`
    (`с пробелом/ю.md`).
 2. Файлы соседа в UTF-16 и latin-1 — тот же тест.
 3. Манифест вне git-репо (как в фикстурах S1) — нет репо манифеста и нет
    «+1» — `test_fleet_assemble::test_composition_includes_manifest_repo`
    (`fleet_names(info, None, …)`).
 4. Два репо в `scope` вызывают друг друга —
-   `test_fleet_run::test_other_scope_repos_are_fleet_for_each_other`.
+   `test_fleet_run::test_other_scope_repos_are_fleet_for_each_other`,
+   `test_surface_fleet_is_the_worst_over_scope`.
 5. Время текстового канала на реальном флоте (≈9000 файлов) — шаг приёмки
    Task 6: прогон `--fleet` на devtools укладывается в 120 с; время пишется
    в заметку приёмки.
@@ -104,22 +122,25 @@
 
 | Спека | Требование | Тест(ы) |
 |---|---|---|
-| §9.2 | состав флота: U − {R}; репо манифеста; другие репо `scope` | `test_fleet_assemble::test_composition_includes_manifest_repo`; `test_fleet_run::test_other_scope_repos_are_fleet_for_each_other` |
-| §9.2 | чтение: `ls-files` без exclude/roles `scope`, байты, NUL → двоичный, BOM UTF-16, symlink не читается | `test_fleet_reader::test_texts_binary_utf16_and_clean_state`, `test_unreadable_symlink_out_and_submodule` |
-| §9.3 | внешняя цель → ребро `fleet`: `run:`, рецепт, `working-directory`, каждое вхождение сегмента, регистр, компромисс `chrome/`, `$`-токен — не ребро, проза — не ребро | `test_fleet_match::test_match_external`, `test_fleet_edges_from_neighbour_sources` |
-| §9.3 | класс `fleet-only`, «fleet-only: N» явно | `test_fleet_classify::test_fleet_only_class_and_payload`; `test_fleet_run::test_fleet_end_to_end`, `test_without_fleet_nothing_changes` |
-| §9.4 | ключи узла; граница слова; регистр; модульные формы | `test_fleet_match::test_node_keys`, `test_mention_boundaries`, `test_module_key_boundaries` |
-| §9.4, §2.3 D14 | упоминание у соседа → P5, dead `likely`, evidence `mentioned-in: <репо>:<файл>` | `test_fleet_classify::test_s2_matrix[D14]`; `test_fleet_run::test_fleet_end_to_end` (`attest.sh`) |
-| §9.5 | канарейка — git-репо через тот же код; каждый канал и `stale` ловятся; попадание только из файла канарейки; изоляция | `test_fleet_assemble::test_canary_*`, `test_real_mention_does_not_satisfy_canary` |
-| §9.6 | условия `complete` 1–5; причины `missing`, `ls-files`, `empty`, `unreadable`, `symlink-out`, `submodule`, `stale`, `fleet:count` | `test_fleet_reader::*`; `test_fleet_assemble::test_partial_causes_are_findings`, `test_count_mismatch_is_partial` |
-| §9.6 | формы `stale`: нет `origin/HEAD`, отставание, опережение, не та ветка, detached, dirty (включая неотслеживаемые) | `test_fleet_reader::test_stale_forms`, `test_stale_is_a_problem_and_fetched_at` |
-| §9.6 | идентичность `fleet-partial`; код выхода не меняется; P1 остаётся; судьба `resolved` | `test_fleet_assemble::test_partial_causes_are_findings`; `test_fleet_run::test_partial_fleet_keeps_p1_and_exit_code` |
-| §9.6, §4.3 | ключ сопоставимости включает состав флота; поверхность `fleet_repos`, `manifest_sha1`, фраза полноты | `test_fleet_run::test_fleet_composition_enters_the_key`, `test_fleet_end_to_end`; `test_fleet_assemble::test_complete_fleet` |
+| §9.2 | состав: U − {R}, репо манифеста, другие репо `scope`; корневой зонтик исключён | `test_fleet_assemble::test_composition_includes_manifest_repo`, `test_root_umbrella_is_never_a_fleet_repo`; `test_fleet_run::test_other_scope_repos_are_fleet_for_each_other` |
+| §9.2 | чтение: байты, NUL → двоичный, BOM UTF-16/32, имена с пробелами, symlink не читается (realpath), `GIT_*` вычищены | `test_fleet_reader::test_texts_binary_utf16_utf32_and_clean_state`, `test_unreadable_symlink_out_and_submodule`, `test_inherited_git_environment_is_ignored` |
+| §9.2 | флот не зависит от `[corpus] exclude` и `[roles]` `scope` | `test_fleet_run::test_fleet_ignores_scope_corpus_exclude` |
+| §9.3 | внешняя цель → `fleet`: `run:`, рецепт, `working-directory`, каждое вхождение сегмента, регистр, компромисс `chrome/`; `$`-токен и проза — не рёбра | `test_fleet_match::test_match_external`, `test_fleet_edges_from_neighbour_sources`, `test_apply_fleet_wires_edges_and_mentions` |
+| §9.3 | `fleet-only`; «fleet-only: N» при `--fleet`, «—» без него | `test_fleet_classify::test_fleet_only_class_and_payload`; `test_fleet_run::test_fleet_end_to_end`, `test_without_fleet_nothing_else_changes` |
+| §9.4 | ключи; граница слова; регистр; перекрывающиеся ключи | `test_fleet_match::test_node_keys`, `test_mention_boundaries`, `test_module_key_boundaries`, `test_overlapping_keys_are_all_found` |
+| §9.4, §9.8 | любая роль и любое расширение: тест соседа, `.ex`, `zsh`, `"$WS/…"` в `run:`, `python -m` в `justfile`, `TODO.md` → P5 | `test_fleet_run::test_every_text_form_of_a_neighbour_caps_dead`, `test_fleet_end_to_end` |
+| §9.4 | `mentioned-in` ≤ 5 мест плюс счётчик | `test_fleet_classify::test_mentions_capped_at_five_with_a_count` |
+| §9.5 | канарейка: git-репо, каталог на R, своя git-личность; проходит проводку пробы; каждый канал и `stale` ловятся; источник — только файлы канарейки; изоляция | `test_fleet_match::test_canary_passes_through_apply_fleet`, `test_canary_counts_only_its_own_files`; `test_fleet_assemble::test_canary_per_scope_repo`, `test_canary_commit_ignores_the_callers_git_identity`, `test_broken_stale_check_is_a_canary_miss`, `test_complete_fleet`; `test_fleet_run::test_broken_channel_fails_the_probe`, `test_fleet_end_to_end` |
+| §9.6 | причины `missing`, `ls-files`, `empty`, `unreadable`, `symlink-out`, `submodule`, `stale`, `fleet:count` (с evidence); одна находка на (репо, причина) | `test_fleet_reader::*`; `test_fleet_assemble::test_partial_causes_are_findings`, `test_one_finding_per_repo_and_cause`, `test_count_mismatch_is_partial_with_evidence` |
+| §9.6 | `stale`: нет `origin/HEAD`, behind, ahead, не та ветка, detached, dirty; stat-only изменение — не dirty; `fetched_at` | `test_fleet_reader::test_stale_forms`, `test_stat_only_change_is_not_dirty`, `test_stale_is_a_problem_and_fetched_at` |
+| §9.6 | код выхода не меняется, P1 остаётся, `surface.fleet` — худшее по `scope`, судьба `resolved` только при `usage-graph ok` и `--fleet` | `test_fleet_run::test_partial_fleet_keeps_p1_exit_code_and_fates`, `test_surface_fleet_is_the_worst_over_scope`, `test_fleet_fate_without_fleet_is_not_rechecked`, `test_fleet_fate_needs_an_ok_probe` |
+| §9.6 | фраза полноты и давность refs (обе ветки); `fleet_repos`, `manifest_sha1`; ключ включает состав | `test_fleet_run::test_fleet_end_to_end`, `test_refs_age_phrase`, `test_fleet_composition_enters_the_key`; `test_fleet_assemble::test_complete_fleet` |
 | §9.7 | кандидаты; форматы A–D; грамматика; неразобранные формы | `test_vendor::test_candidates`, `test_four_formats`, `test_unparsed` |
-| §9.7 | роль, двойная декларация, висячая строка, `tests/` не кандидат | `test_vendor::test_vendor_roles_members_and_double_declaration` |
-| §9.7 | fail-closed: названные пути, сам кандидат, P6, `partial` → код 2 | `test_vendor::test_unparsed_candidate_fails_closed`; `test_fleet_classify::test_classify_protected_and_decl_cap`; `test_fleet_run::test_broken_declaration_is_partial_exit_2_and_p6` |
-| §2.3 | D1 (`confirmed` через `--fleet`), D13–D16, P6 | `test_fleet_classify::test_s2_matrix`; `test_fleet_run::test_fleet_end_to_end` |
-| без `--fleet` | поведение S1 не меняется | `test_fleet_run::test_without_fleet_nothing_changes`; весь набор S1 зелёный |
+| §9.7 | роль, двойная декларация (две строки таблицы), висячая строка, `tests/` не кандидат | `test_vendor::test_vendor_roles_members_and_double_declaration`; `test_fleet_run::test_fleet_end_to_end` |
+| §9.7 | fail-closed: названные пути от корня и от каталога, сам кандидат, P6, `partial` → код 2 (и без `--fleet`) | `test_vendor::test_unparsed_candidate_fails_closed`; `test_fleet_classify::test_classify_protected_and_decl_cap`; `test_fleet_run::test_broken_declaration_is_partial_exit_2_and_p6`, `test_broken_declaration_without_fleet_is_exit_2` |
+| §2.3 | D1 через `--fleet`, D13–D16, P6 | `test_fleet_classify::test_s2_matrix`; `test_fleet_run::test_fleet_end_to_end` |
+| §4.3 | `logic_version` 2 | `test_fleet_run::test_usage_graph_logic_version_bumped` |
+| без `--fleet` | меняется только: роль `vendored-in`, P6 и `partial` по деклараций, поле `vendored`/`fleet_only` в payload, «fleet-only: —», ≤5 мест `mentioned-in`, `logic_version`; остальное — как в S1 | `test_fleet_run::test_without_fleet_nothing_else_changes`, `test_broken_declaration_without_fleet_is_exit_2`; весь набор S1 зелёный (правка одного S1-теста — Task 4) |
 | §9.8 | приёмка на devtools | Task 6, шаги 5–6 |
 
 ## Интерфейсы (нормативно)
@@ -168,8 +189,9 @@ class FleetRepo:
     problems: list[tuple[str, str]] = field(default_factory=list)  # (cause, detail)
     state: RepoState | None = None
 
-def stale_reasons(path: Path) -> tuple[RepoState, tuple[str, ...]]: ...
+def stale_reasons(path: Path) -> RepoState: ...   # the single source of .stale
 def read_repo(path: Path, name: str) -> FleetRepo: ...
+# read_repo calls stale_reasons through the module global (tests patch it)
 
 # selfcheck/fleet/match.py
 def match_external(target: str, scope_name: str, scope_files: frozenset[str]) -> list[str]: ...
@@ -179,18 +201,25 @@ def fleet_edges(repo: FleetRepo, scope_name: str,
 def node_keys(path: str) -> tuple[str, ...]: ...
 def find_mentions(keys: Mapping[str, Sequence[str]], texts: Mapping[str, str],
                   source: str) -> dict[str, list[str]]: ...
-    # anchor → ["<source>:<rel>", …] (sorted, unique)
+    # anchor → ["<source>:<rel>", …] (sorted, unique); overlapping keys all found
+def apply_fleet(g: Graph, repos: Sequence[FleetRepo], scope_name: str) -> None: ...
+    # THE wiring: for every repo, fleet_edges → g.add(path, FLEET, where) and
+    # find_mentions over node_keys of every FILE node of g → g.mention(anchor, src).
+    # Calls match_external / find_mentions through module globals (tests patch them).
 
 # selfcheck/fleet/assemble.py
 CANARY_NODE = ".selfcheck-canary/usage-graph/fleet_canary.py"
-CANARY_DIR = "fleet-canary"
+CANARY_REPO = "fleet-canary"        # repo name = source prefix of canary hits
+CANARY_WORKFLOW = ".github/workflows/c.yml"
+CANARY_NOTES = "notes.md"
 
 @dataclass
 class FleetView:
     repos: list[FleetRepo]
     expected: tuple[str, ...]
-    canary_misses: list[str]
-    def status(self) -> str: ...            # "complete" | "partial"
+    canary_misses: list[str]        # load-time misses: only "stale"
+    canary: FleetRepo | None        # the canary neighbour, never in .repos
+    def status(self) -> str: ...    # "complete" | "partial"
 
 def manifest_repo(manifest: Path) -> RepoEntry | None: ...
 def fleet_names(info: ManifestInfo, mrepo: RepoEntry | None,
@@ -201,8 +230,13 @@ def load_fleet(workspace: Path, names: Sequence[str], run_dir: Path, *,
                paths: Mapping[str, Path] | None = None) -> FleetView: ...
 def build_canary(root: Path, scope_name: str,
                  forms: Sequence[str] = ("precise", "text")) -> Path: ...
-def check_canary(root: Path, scope_name: str) -> list[str]: ...  # subset of ["precise","text","stale"]
+def canary_misses(g: Graph) -> list[str]: ...
+    # after apply_fleet(g, [..., view.canary], R): "precise" unless CANARY_NODE has a
+    # FLEET edge from f"{CANARY_REPO}:{CANARY_WORKFLOW}"; "text" unless its mentions
+    # contain f"{CANARY_REPO}:{CANARY_NOTES}"; order precise, text
 def fleet_findings(view: FleetView, scope_repo: str) -> list[Finding]: ...
+    # one per (repo, cause), locations Location(f"{repo}:{detail}", 1);
+    # fleet:count carries evidence {"kind":"expected"|"actual","detail":"a, b"} (sorted)
 def surface_repos(view: FleetView) -> list[dict[str, Any]]: ...
 
 # selfcheck/vendor.py
@@ -235,23 +269,42 @@ class NodeFacts:
     vendored: bool = False
     decl_cap: bool = False
 def fleet_only(g: Graph) -> list[str]: ...
+def graph_payload(g: Graph, vendored: Mapping[str, list[Declaration]] | None = None
+                  ) -> dict[str, dict[str, object]]: ...
 def classify(g, *, repo, surface, ages, now,
              protected: frozenset[str] = frozenset(),   # paths
              decl_cap: bool = False,
              vendored: Mapping[str, list[Declaration]] | None = None) -> list[Finding]: ...
 # graph_payload: every node also carries "fleet_only": bool and
 # "vendored": [{"owner","ref","declaration"}] (empty list when none)
+# classify evidence: at most 5 {"kind":"mentioned-in"} + {"kind":"mentioned-in-total","detail":"N"} when N > 5
+# canary nodes (role canary) are excluded from graph_payload, fleet_only and findings
 
 # selfcheck/probes/base.py — RepoTarget gains
     fleet_view: FleetView | None = None     # TYPE_CHECKING import only
 
 # selfcheck/run.py
 #   --fleet (store_true)
-#   acc.keys[f"fleet@{repo}"] = "ok"  when --fleet and usage-graph ok
+#   acc.keys[f"fleet@{repo}"] = "ok"  when --fleet and usage-graph ok (NOT partial)
 #   (so delta._instrument_status resolves probe:<repo>#fleet unchanged)
 #   key_surface for usage-graph: {"fleet", "sched_dir_given", "fleet_repos": sorted names}
-#   run.surface: "fleet_repos" and "manifest_sha1" only with --fleet
+#   run.surface: "fleet_repos" and "manifest_sha1" only with --fleet;
+#   surface["fleet"] = worst over scope repos ("partial" < "complete"; "absent" w/o flag)
+
+# selfcheck/graph/probe.py
+#   USAGE_GRAPH.logic_version = 2
+#   class FleetCanaryMissed(Exception) — message starts with "fleet-canary:";
+#   raised → usage-graph failed (reason "adapter-error: FleetCanaryMissed('fleet-canary: …')")
 ```
+
+Форматы `report.md` (их проверяют тесты):
+- `fleet-only: N` при `--fleet`; `fleet-only: — (без --fleet)` без него;
+- фраза полноты содержит `complete относительно манифеста`,
+  `не покрыто: корневой зонтик, \`~/.claude\`` и одну из форм:
+  - `относительно локальных refs не старше <дата>`;
+  - `давность refs неизвестна для: <репо, …>` в порядке `fleet_repos`;
+- таблица «вендор-копии»: строки `| <путь> | <владелец> | <ref> | <декларация> |`,
+  по строке на пару (член, декларация).
 
 Находки S2 (правило → severity, category, anchor, text_key):
 - `selfcheck/fleet-partial` → medium, `selfcheck`, `probe:<scope>#fleet`,
@@ -279,7 +332,12 @@ def synced(repo: Path, branch: str = "main") -> Path:
     """Put ``repo`` on ``branch`` with ``origin/HEAD`` → it, no network (§9.6)."""
     git(repo, "branch", "-M", branch)
     git(repo, "update-ref", f"refs/remotes/origin/{branch}", "HEAD")
-    git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{branch}")
+    git(
+        repo,
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        f"refs/remotes/origin/{branch}",
+    )
     return repo
 
 
@@ -303,9 +361,17 @@ SCOPE_S2 = {
     "attest.sh": "#!/bin/sh\necho attest\n",
     "scripts/review/PIN": (
         "# SOURCE: steward @ 5bfd829 (master, 2026-09-21; tail of the header\n"
-        "# continues here)\n" + "a" * 64 + "  scripts/review/local.sh\n"
+        "# continues here)\n"
+        + "a" * 64
+        + "  scripts/review/local.sh\n"
+        + "a" * 64
+        + "  scripts/review/prose-paths.env\n"
     ),
     "scripts/review/local.sh": "#!/bin/sh\necho kit\n",
+    "scripts/review/prose-paths.env": (
+        "# VENDORED: devtools @ 8cd6456 — contracts/review-scope/v1/prose-paths.env\n"
+        "docs/**\n"
+    ),
 }
 NEIGHBOURS_S2 = {
     "nb": {
@@ -330,9 +396,7 @@ def fleet_ws(
     synced(make_repo(tmp / "devtools", scope))
     for name, files in nbs.items():
         synced(make_repo(tmp / name, files))
-    entries = "".join(
-        f'[tools.{n}]\ngit_dir = "{n}"\n' for n in ["devtools", *nbs]
-    )
+    entries = "".join(f'[tools.{n}]\ngit_dir = "{n}"\n' for n in ["devtools", *nbs])
     synced(make_repo(tmp / "umbrella", {"m.toml": entries}))
     return tmp
 ```
@@ -405,8 +469,8 @@ import os
 from pathlib import Path
 
 import pytest
+from selfcheck.fleet.reader import read_repo, stale_reasons
 
-from selfcheck.fleet.reader import read_repo
 from tests.selfcheck.helpers import ago, commit, commit_bytes, git, make_repo, synced
 
 
@@ -414,7 +478,7 @@ def causes(repo) -> set[str]:
     return {cause for cause, _ in repo.problems}
 
 
-def test_texts_binary_utf16_and_clean_state(tmp_path: Path) -> None:
+def test_texts_binary_utf16_utf32_and_clean_state(tmp_path: Path) -> None:
     repo = synced(
         make_repo(tmp_path / "nb", {"a.md": "run x.sh\n", "с пробелом/ю.md": "y\n"})
     )
@@ -423,14 +487,18 @@ def test_texts_binary_utf16_and_clean_state(tmp_path: Path) -> None:
         {
             "bin.dat": b"\x00\x01\x02",
             "u16.txt": "call x.sh\n".encode("utf-16"),
+            "u32.txt": "call y.sh\n".encode("utf-32"),  # BOM starts like UTF-16LE
             "latin.txt": "caf\xe9 x.sh\n".encode("latin-1"),
         },
     )
     git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
     got = read_repo(repo, "nb")
     assert got.name == "nb" and got.problems == []
-    assert set(got.texts) == {"a.md", "с пробелом/ю.md", "u16.txt", "latin.txt"}
+    assert set(got.texts) == {
+        "a.md", "с пробелом/ю.md", "u16.txt", "u32.txt", "latin.txt",
+    }  # fmt: skip
     assert "call x.sh" in got.texts["u16.txt"]
+    assert "call y.sh" in got.texts["u32.txt"]
     assert "x.sh" in got.texts["latin.txt"]
     assert got.binary == 1
     st = got.state
@@ -460,14 +528,17 @@ def test_empty_when_nothing_textual(tmp_path: Path) -> None:
 def test_unreadable_symlink_out_and_submodule(tmp_path: Path) -> None:
     repo = synced(make_repo(tmp_path / "nb", {"a.md": "x\n", "secret.md": "y\n"}))
     (repo / "inside.md").symlink_to(repo / "a.md")
+    # the same target spelled through /var (macOS: /var → /private/var)
+    spelled = str(repo / "a.md").replace("/private/var/", "/var/", 1)
+    (repo / "inside2.md").symlink_to(spelled)
     (repo / "outside.md").symlink_to("/etc/hosts")
-    git(repo, "add", "inside.md", "outside.md")
+    git(repo, "add", "inside.md", "inside2.md", "outside.md")
     sha = git(repo, "rev-parse", "HEAD").strip()
     git(repo, "update-index", "--add", "--cacheinfo", f"160000,{sha},sub")
     (repo / "sub").mkdir()  # an uninitialised submodule: clean, not dirty
     git(repo, "commit", "-q", "-m", "links", date=ago(90))
     git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-    (repo / "secret.md").chmod(0)
+    (repo / "secret.md").chmod(0)  # git also sees a mode change → dirty
     try:
         got = read_repo(repo, "nb")
     finally:
@@ -476,14 +547,13 @@ def test_unreadable_symlink_out_and_submodule(tmp_path: Path) -> None:
         "unreadable": "secret.md",
         "symlink-out": "outside.md",
         "submodule": "sub",
+        "stale": "dirty",
     }
-    assert "inside.md" not in got.texts  # a symlink is never read (§9.2)
+    assert not {"inside.md", "inside2.md"} & set(got.texts)  # never read (§9.2)
 
 
 def _stale(repo: Path) -> tuple[str, ...]:
-    state = read_repo(repo, repo.name).state
-    assert state is not None
-    return state.stale
+    return stale_reasons(repo).stale
 
 
 def test_stale_forms(tmp_path: Path) -> None:
@@ -511,7 +581,16 @@ def test_stale_forms(tmp_path: Path) -> None:
     dirty = synced(make_repo(tmp_path / "f", {"a.md": "x\n"}))
     (dirty / "untracked.md").write_text("new\n")
     assert _stale(dirty) == ("dirty",)
-    assert read_repo(dirty, "f").state.dirty is True  # type: ignore[union-attr]
+    assert stale_reasons(dirty).dirty is True
+
+
+def test_stat_only_change_is_not_dirty(tmp_path: Path) -> None:
+    """`git status --porcelain` semantics, not `diff-index` (review r1 M2)."""
+    repo = synced(make_repo(tmp_path / "t", {"a.md": "x\n"}))
+    index = (repo / ".git" / "index").read_bytes()
+    os.utime(repo / "a.md", (1_900_000_000, 1_900_000_000))
+    assert _stale(repo) == ()
+    assert (repo / ".git" / "index").read_bytes() == index  # nothing written
 
 
 def test_stale_is_a_problem_and_fetched_at(tmp_path: Path) -> None:
@@ -520,49 +599,64 @@ def test_stale_is_a_problem_and_fetched_at(tmp_path: Path) -> None:
     assert ("stale", "no-origin-head") in got.problems
     assert got.state is not None and got.state.fetched_at is None
     synced(repo)
-    (repo / ".git" / "FETCH_HEAD").write_text("")
+    fetch_head = git(repo, "rev-parse", "--git-path", "FETCH_HEAD").strip()
+    (repo / fetch_head).write_text("")
     state = read_repo(repo, "a").state
     assert state is not None and state.fetched_at is not None
+
+
+def test_inherited_git_environment_is_ignored(tmp_path: Path, monkeypatch) -> None:
+    other = synced(make_repo(tmp_path / "other", {"decoy.md": "decoy\n"}))
+    nb = synced(make_repo(tmp_path / "nb", {"real.md": "real\n"}))
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(other / ".git" / "index"))
+    assert set(read_repo(nb, "nb").texts) == {"real.md"}
 ```
 
 - [ ] **Step 2:** `uv run --frozen pytest tests/selfcheck/test_fleet_reader.py -q`.
   Expected: сборка падает на `ModuleNotFoundError: selfcheck.fleet`.
 - [ ] **Step 3:** реализовать по эскизу.
-- [ ] **Step 4:** тот же прогон. Expected: 5 passed (от root —
+- [ ] **Step 4:** тот же прогон. Expected: 8 passed (от root —
   `test_unreadable…` skipped).
 - [ ] **Step 5:** коммит `feat(selfcheck): fleet repo reader (S2 §9.2, §9.6)`.
 
 **Эскиз.**
+- Все вызовы git идут через одну функцию `_git(path, *args)`:
+  - `env` = `os.environ` без ключей `GIT_*`, плюс `GIT_OPTIONAL_LOCKS=0`;
+  - `check=False`;
+  - `capture_output`.
 - Путь не существует или нет `.git` → `problems=[("missing", "")]`,
   `state=None`.
-- Перечисление — `git ls-files -z --stage` (режим записи) плюс
-  `git ls-files -z --others --exclude-standard`. Ненулевой код любого из них
-  → `("ls-files", stderr[:200])`, дальше не читать.
+- Перечисление — `ls-files -z --stage` (режим записи) плюс
+  `ls-files -z --others --exclude-standard`. Ненулевой код любого из них →
+  `("ls-files", stderr[:200])`, дальше не читать.
 - Режим `160000` → `("submodule", rel)`.
-- Symlink (`os.path.islink`): цель через `os.path.realpath` вне `path` →
-  `("symlink-out", rel)`; внутри — пропуск.
+- Symlink (`os.path.islink`): `os.path.realpath(цель)` не внутри
+  `os.path.realpath(path)` → `("symlink-out", rel)`; внутри — пропуск.
 - Файл читается как `read_bytes()`, `OSError` → `("unreadable", rel)`.
-- BOM `\xff\xfe`/`\xfe\xff` (или UTF-32) → декодирование по BOM. Иначе NUL в
-  первых 8192 байтах → `binary += 1`. Иначе
+- Декодирование. BOM проверяются в таком порядке: сначала UTF-32
+  (`\xff\xfe\x00\x00`, `\x00\x00\xfe\xff`) — его префикс совпадает с
+  UTF-16LE; затем UTF-16 (`\xff\xfe`, `\xfe\xff`); затем UTF-8-BOM.
+  Файл без BOM с NUL в первых 8192 байтах → `binary += 1`. Остальное —
   `decode("utf-8", errors="replace")`.
 - Ни одного текстового файла → `("empty", "")`.
-- `stale_reasons(path)`:
+- `stale_reasons(path) -> RepoState`:
   - `head = rev-parse HEAD`;
   - `branch = symbolic-ref -q --short HEAD` (пусто → detached);
   - `default = symbolic-ref -q refs/remotes/origin/HEAD` → имя ветки;
   - `rev-list --left-right --count HEAD...origin/<default>` → ahead/behind;
-  - `dirty` — как `corpus.repo_state`;
-  - `fetched_at` — mtime `.git/FETCH_HEAD`.
+  - `dirty = bool(status --porcelain -z)`;
+  - `fetched_at` — mtime файла `rev-parse --git-path FETCH_HEAD`
+    (относительный путь — от `path`).
 
-  Причины собираются в порядке `STALE`:
+  Причины в порядке `STALE`:
   - `no-origin-head`, если нет default;
   - иначе `detached` или `not-default-branch`;
   - `behind` / `ahead` при ненулевых счётчиках;
   - `dirty`.
-
-  `read_repo` вызывает `stale_reasons` через глобальное имя модуля: тест
-  канарейки подменяет его. Каждая причина превращается в
-  `("stale", reason)`.
+- `read_repo` вызывает `stale_reasons` через глобальное имя модуля и
+  добавляет `("stale", r)` для каждой причины `state.stale`.
 
 ### Task 2: точный и текстовый каналы
 
@@ -579,7 +673,12 @@ def test_stale_is_a_problem_and_fetched_at(tmp_path: Path) -> None:
 
 **Interfaces:**
 - Consumes: `read_repo`, `FleetRepo` (Task 1).
-- Produces: `match_external`, `fleet_edges`, `node_keys`, `find_mentions`.
+- Produces: `match_external`, `fleet_edges`, `node_keys`, `find_mentions`,
+  `apply_fleet`.
+
+Тест этой задачи импортирует `CANARY_NODE`, `CANARY_REPO`, `build_canary` и
+`canary_misses` из `selfcheck/fleet/assemble.py`. Задача 2 создаёт этот
+модуль с этими четырьмя именами (эскиз — в Task 5), а Task 5 его дополняет.
 
 - [ ] **Step 1: тест:**
 
@@ -591,10 +690,25 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
-from selfcheck.fleet.match import fleet_edges, find_mentions, match_external, node_keys
+from selfcheck.fleet.assemble import (
+    CANARY_NODE,
+    CANARY_REPO,
+    build_canary,
+    canary_misses,
+)
+from selfcheck.fleet.match import (
+    apply_fleet,
+    find_mentions,
+    fleet_edges,
+    match_external,
+    node_keys,
+)
 from selfcheck.fleet.reader import read_repo
-from tests.selfcheck.helpers import make_repo, synced
+
+from selfcheck.graph.build import build_graph
+from selfcheck.graph.model import EdgeKind
+from selfcheck.roles import role_of
+from tests.selfcheck.helpers import make_repo, synced, write
 
 FILES = frozenset({"x.py", "sub/y.sh", "maestro/x.py"})
 
@@ -681,6 +795,74 @@ def test_module_key_boundaries() -> None:
         "t3.py": "g.cx",
     }
     assert find_mentions(keys, texts, "nb") == {"file:g/c.py": ["nb:t1.py", "nb:t2.py"]}
+
+
+def test_overlapping_keys_are_all_found() -> None:
+    """One pass must not drop a key hidden inside a longer one (review r1 M1)."""
+    keys = {
+        "file:a/run.sh": node_keys("a/run.sh"),
+        "file:b/run.sh": node_keys("b/run.sh"),
+    }
+    found = find_mentions(keys, {"ci.yml": "sh ../devtools/a/run.sh"}, "nb")
+    assert found == {"file:a/run.sh": ["nb:ci.yml"], "file:b/run.sh": ["nb:ci.yml"]}
+    keys = {
+        "file:g/c.py": node_keys("g/c.py"),
+        "file:g/c/main.py": node_keys("g/c/main.py"),
+    }
+    found = find_mentions(keys, {"j": "python -m g.c.main"}, "nb")
+    assert found == {"file:g/c.py": ["nb:j"], "file:g/c/main.py": ["nb:j"]}
+
+
+def test_apply_fleet_wires_edges_and_mentions(tmp_path: Path) -> None:
+    scope = tmp_path / "devtools"
+    write(scope, {"check.py": "x = 1\n", "attest.sh": "#!/bin/sh\n"})
+    g = build_graph(
+        ["check.py", "attest.sh"], scope, role_of, repo_name="devtools", sched_dir=None
+    )
+    nb = synced(
+        make_repo(
+            tmp_path / "nb",
+            {
+                "Makefile": "t:\n\tpython3 ../devtools/check.py\n",
+                "TODO.md": "attest.sh\n",
+            },
+        )
+    )
+    apply_fleet(g, [read_repo(nb, "nb")], "devtools")
+    (edge,) = g.incoming("file:check.py")
+    assert (edge.kind, edge.where.path) == (EdgeKind.FLEET, "nb:Makefile")
+    assert g.mentions["file:attest.sh"] == ["nb:TODO.md"]
+
+
+def _canary_graph(tmp_path: Path):
+    root = tmp_path / "scope"
+    write(root, {CANARY_NODE: "x = 1\n"})
+    return build_graph(
+        [CANARY_NODE], root, role_of, repo_name="devtools", sched_dir=None
+    )
+
+
+def test_canary_passes_through_apply_fleet(tmp_path: Path) -> None:
+    g = _canary_graph(tmp_path)
+    canary = read_repo(build_canary(tmp_path / "c", "devtools"), CANARY_REPO)
+    apply_fleet(g, [canary], "devtools")
+    assert canary_misses(g) == []
+
+
+def test_canary_counts_only_its_own_files(tmp_path: Path) -> None:
+    """A real repo mentioning fleet_canary.py, and the bare name inside the
+    canary workflow, do not satisfy the text form (§9.5)."""
+    nb = synced(make_repo(tmp_path / "nb", {"n.md": "fleet_canary.py\n"}))
+    only_precise = build_canary(tmp_path / "c", "devtools", forms=("precise",))
+    g = _canary_graph(tmp_path)
+    apply_fleet(
+        g, [read_repo(nb, "nb"), read_repo(only_precise, CANARY_REPO)], "devtools"
+    )
+    assert canary_misses(g) == ["text"]
+    g = _canary_graph(tmp_path / "2")
+    only_text = build_canary(tmp_path / "t", "devtools", forms=("text",))
+    apply_fleet(g, [read_repo(only_text, CANARY_REPO)], "devtools")
+    assert canary_misses(g) == ["precise"]
 ```
 
 - [ ] **Step 2:** прогон. Expected: `ModuleNotFoundError: selfcheck.fleet.match`.
@@ -706,9 +888,26 @@ def test_module_key_boundaries() -> None:
     where.line))`.
 - **`node_keys`.** `(basename, path, module_name(path))` без `None` и без
   повторов, порядок сохраняется.
-- **`find_mentions`.** Одно выражение `(?<![A-Za-z0-9_-])(?:k1|k2|…)(?![A-Za-z0-9_])`
-  с `re.IGNORECASE`, ключи отсортированы по убыванию длины. Карта
-  `key.lower() → anchors`. Один `finditer` на файл.
+- **`find_mentions`.** Один проход по файлу:
+  - словарь `key.lower() → anchors`, `maxlen` — самый длинный ключ;
+  - по каждому токену `re.finditer(r"[A-Za-z0-9_./-]+", text)` перебрать все
+    подстроки `token[a:b]`, где `a` — начало токена или позиция после `.`/`/`,
+    `b` — конец токена или позиция перед `.`, `/` или `-`, и `b - a <=
+    maxlen`;
+  - найденные в словаре дают упоминание.
+
+  Это ровно граница §9.4: слева не `[A-Za-z0-9_-]`, справа не `[A-Za-z0-9_]`.
+  Ключ с символами вне класса токена (не-ASCII, пробел: `юникод.py`,
+  `with space.sh`) ищется отдельным `re.search` с теми же границами и
+  `re.IGNORECASE`. Таких ключей единицы, и потерять их нельзя: потерянный
+  P5 даёт ложный `confirmed`.
+  Перекрывающиеся ключи находятся все. Сложность — O(длина текста ×
+  возможные позиции разреза).
+- **`apply_fleet`.** Ключи строятся один раз по файловым узлам `g`, затем для
+  каждого репо:
+  - `fleet_edges(repo, scope_name, files)` → `g.add(path, EdgeKind.FLEET,
+    where)`;
+  - `find_mentions(keys, repo.texts, repo.name)` → `g.mention(anchor, src)`.
 
 ### Task 3: вендор-декларации
 
@@ -727,14 +926,14 @@ def test_module_key_boundaries() -> None:
 from __future__ import annotations
 
 import pytest
-
-from selfcheck.roles import role_of
 from selfcheck.vendor import (
     DeclarationError,
     is_candidate,
     parse_declaration,
     vendor_roles,
 )
+
+from selfcheck.roles import role_of
 
 H = "a" * 64
 FORMAT_A = (
@@ -744,7 +943,9 @@ FORMAT_A = (
     f"{H}  scripts/review/local.sh\n"
     f"{H}  .github/codex/review-schema.json\n"
 )
-FORMAT_B = f"{H}  approval-policy.yaml  steward@6a70d15ba586b8c17b41d33705477a42cf8ebfa5\n"
+FORMAT_B = (
+    f"{H}  approval-policy.yaml  steward@6a70d15ba586b8c17b41d33705477a42cf8ebfa5\n"
+)
 FORMAT_C = (
     "upstream: git@github.com:andrei-shtanakov/discovery-toolkit.git\n"
     "commit: ee93092fdfe6195c28c7392d85b41c6b94b9fe0a\n\n"
@@ -783,7 +984,10 @@ FORMAT_D = (
             "C",
             "discovery-toolkit",
             "ee93092fdfe6195c28c7392d85b41c6b94b9fe0a",
-            ("governance/dc/DISCOVERY-BRIEF-CONTRACT.md", "governance/dc/gate_check.py"),
+            (
+                "governance/dc/DISCOVERY-BRIEF-CONTRACT.md",
+                "governance/dc/gate_check.py",
+            ),
         ),
         (
             "scripts/review/prose-paths.env",
@@ -872,9 +1076,13 @@ def test_vendor_roles_members_and_double_declaration() -> None:
 
 def test_unparsed_candidate_fails_closed() -> None:
     texts = {
-        "kit/PIN": f"# SOURCE: s @ 5bfd829\n{H}  kit/a.sh\nbroken line kit/b.sh\n",
+        "kit/PIN": (
+            f"# SOURCE: s @ 5bfd829\n{H}  kit/a.sh\nbroken line kit/b.sh\n"
+            "also d.sh\n"  # named relative to the declaration's directory
+        ),
         "kit/a.sh": "#!/bin/sh\n",
         "kit/b.sh": "#!/bin/sh\n",
+        "kit/d.sh": "#!/bin/sh\n",
         "kit/c.sh": "#!/bin/sh\n",
         "lib.sh": "#!/bin/sh\n# VENDORED: owner@abc\n",
     }
@@ -889,7 +1097,7 @@ def test_unparsed_candidate_fails_closed() -> None:
         if f.rule == "selfcheck/vendor-pin-unparsed"
     )
     # named paths of any line + every candidate itself are protected
-    assert {"kit/a.sh", "kit/b.sh", "kit/PIN", "lib.sh"} <= res.protected
+    assert {"kit/a.sh", "kit/b.sh", "kit/d.sh", "kit/PIN", "lib.sh"} <= res.protected
     assert "kit/c.sh" not in res.protected  # P6 covers it instead
     assert res.members == {} and res.broken is True
 ```
@@ -951,6 +1159,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from selfcheck.vendor import Declaration
 
 from selfcheck.graph.build import build_graph
 from selfcheck.graph.classify import (
@@ -1019,6 +1228,12 @@ def test_fleet_only_class_and_payload(tmp_path: Path) -> None:
     assert node["class"] == "live" and node["fleet_only"] is True
     assert node["edges"] == [{"kind": "fleet", "from": "nb:.github/workflows/c.yml:1"}]
     assert payload["file:both.py"]["fleet_only"] is False
+    assert payload["file:both.py"]["vendored"] == []
+    decl = Declaration("k/PIN", "A", "steward", "5bfd829", ("both.py",))
+    with_decl = graph_payload(g, vendored={"both.py": [decl]})
+    assert with_decl["file:both.py"]["vendored"] == [
+        {"owner": "steward", "ref": "5bfd829", "declaration": "k/PIN"}
+    ]
 
 
 def test_classify_protected_and_decl_cap(tmp_path: Path) -> None:
@@ -1044,11 +1259,31 @@ def test_classify_protected_and_decl_cap(tmp_path: Path) -> None:
     (dead,) = [f for f in capped if f.anchor == "file:orphan.py"]
     assert dead.confidence is L
     assert {"kind": "cap", "detail": "P6"} in dead.evidence
+
+
+def test_mentions_capped_at_five_with_a_count(tmp_path: Path) -> None:
+    g = _graph(tmp_path)
+    for i in range(7):
+        g.mention("file:orphan.py", f"nb:f{i}.md")
+    (dead,) = [
+        f
+        for f in classify(
+            g, repo="devtools", surface=FULL, ages=lambda p: NOW - 90 * 86400, now=NOW
+        )
+        if f.anchor == "file:orphan.py"
+    ]
+    places = [e["detail"] for e in dead.evidence if e["kind"] == "mentioned-in"]
+    assert places == [f"nb:f{i}.md" for i in range(5)]
+    assert {"kind": "mentioned-in-total", "detail": "7"} in dead.evidence
 ```
 
 - [ ] **Step 2:** прогон. Expected: `ImportError: fleet_only`.
-- [ ] **Step 3:** реализовать. Весь `tests/selfcheck` зелёный: матрица S1
-  D1–D12 не меняется, новые поля идут с умолчаниями.
+- [ ] **Step 3:** реализовать и **поправить один тест S1**:
+  `tests/selfcheck/test_graph_classify.py::test_report_graph_payload`
+  сравнивает `graph["file:live.py"]` точным равенством. К ожидаемому
+  словарю добавить `"fleet_only": False, "vendored": []` — это новое поле
+  контракта payload, а не ослабление. Весь `tests/selfcheck` зелёный:
+  матрица D1–D12 не меняется, новые поля `NodeFacts` идут с умолчаниями.
 - [ ] **Step 4:** Expected: all passed.
 - [ ] **Step 5:** коммит `feat(selfcheck): D13–D16, P6, fleet-only (S2 §2.3, §9.3)`.
 
@@ -1058,8 +1293,11 @@ def test_classify_protected_and_decl_cap(tmp_path: Path) -> None:
 - **`classify`.** `vendored = path in protected or path in (vendored or {})`.
 - **`fleet_only(g)`.** Файловые узлы, у которых множество исполняемых
   входящих рёбер непусто и все они `FLEET`.
-- **`graph_payload`.** Добавить `fleet_only` и `vendored` (список словарей
-  из `Declaration`).
+- **`graph_payload(g, vendored=None)`.** Добавить `fleet_only` и `vendored`
+  (список словарей из `Declaration`). Узлы роли `canary` (путь под
+  `.selfcheck-canary/`) исключаются из payload, `fleet_only` и `classify`.
+- **Evidence упоминаний.** Первые 5 мест в порядке `g.mentions`; если мест
+  больше 5 — добавить `{"kind": "mentioned-in-total", "detail": str(N)}`.
 
 ### Task 5: состав флота, полнота, канарейка, находки
 
@@ -1074,35 +1312,36 @@ def test_classify_protected_and_decl_cap(tmp_path: Path) -> None:
 - [ ] **Step 1: тест:**
 
 ```python
-"""S2 Task 5 — fleet composition, completeness, fleet-partial, canary (§9.2, §9.5, §9.6)."""
+"""S2 Task 5 — fleet composition, completeness, fleet-partial, canary repo (§9.2, §9.5, §9.6)."""
 
 from __future__ import annotations
 
 import shutil
 from pathlib import Path
 
-import pytest
-
-from selfcheck.fleet import match, reader
+from selfcheck.fleet import reader
 from selfcheck.fleet.assemble import (
-    CANARY_NODE,
+    CANARY_REPO,
     FleetView,
     build_canary,
-    check_canary,
     fleet_findings,
     fleet_names,
     load_fleet,
     manifest_repo,
     surface_repos,
 )
+from selfcheck.fleet.reader import FleetRepo, RepoState
+
 from selfcheck.manifest import load_manifest
-from tests.selfcheck.helpers import commit, fleet_ws, git
+from tests.selfcheck.helpers import commit, fleet_ws, git, make_repo, synced
 
 
-def _view(ws: Path, run_dir: Path) -> FleetView:
+def _view(ws: Path, run_dir: Path, scope: str = "devtools") -> FleetView:
     info = load_manifest(ws / "umbrella" / "m.toml", ws)
-    names = fleet_names(info, manifest_repo(ws / "umbrella" / "m.toml"), ["devtools"])
-    return load_fleet(ws, names, run_dir, scope_name="devtools")
+    mrepo = manifest_repo(ws / "umbrella" / "m.toml")
+    names = fleet_names(info, mrepo, [scope])
+    paths = {mrepo.name: mrepo.path} if mrepo else {}
+    return load_fleet(ws, names, run_dir, scope_name=scope, paths=paths)
 
 
 def test_composition_includes_manifest_repo(tmp_path: Path) -> None:
@@ -1114,9 +1353,18 @@ def test_composition_includes_manifest_repo(tmp_path: Path) -> None:
     assert fleet_names(info, None, ["devtools", "nb"]) == ("docs-nb",)
 
 
+def test_root_umbrella_is_never_a_fleet_repo(tmp_path: Path) -> None:
+    root = synced(
+        make_repo(tmp_path / "root", {"m.toml": "", "_cowork_output/x.md": "x\n"})
+    )
+    assert manifest_repo(root / "m.toml") is None  # it tracks _cowork_output/
+
+
 def test_complete_fleet(tmp_path: Path) -> None:
     view = _view(fleet_ws(tmp_path), tmp_path / "run")
     assert view.canary_misses == [] and view.status() == "complete"
+    assert view.canary is not None and view.canary.name == CANARY_REPO
+    assert (tmp_path / "run" / "fleet-canary" / "devtools" / ".git").exists()
     assert fleet_findings(view, "devtools") == []
     rows = surface_repos(view)
     assert [r["name"] for r in rows] == ["nb", "docs-nb", "umbrella"]
@@ -1125,6 +1373,32 @@ def test_complete_fleet(tmp_path: Path) -> None:
         "files", "binary", "dirty", "fetched_at",
     }  # fmt: skip
     assert all(r["files"] > 0 for r in rows)
+    assert CANARY_REPO not in [r.name for r in view.repos]  # isolation
+
+
+def test_canary_per_scope_repo(tmp_path: Path) -> None:
+    ws = fleet_ws(tmp_path)
+    _view(ws, tmp_path / "run", "devtools")
+    _view(ws, tmp_path / "run", "nb")  # a second R must not collide (m5)
+    assert (tmp_path / "run" / "fleet-canary" / "nb" / ".git").exists()
+
+
+def test_canary_commit_ignores_the_callers_git_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "intruder")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "intruder")
+    root = build_canary(tmp_path / "c", "devtools")
+    monkeypatch.delenv("GIT_AUTHOR_NAME")
+    monkeypatch.delenv("GIT_COMMITTER_NAME")
+    assert git(root, "log", "--format=%an|%cn").strip() == "selfcheck|selfcheck"
+
+
+def test_broken_stale_check_is_a_canary_miss(tmp_path: Path, monkeypatch) -> None:
+    clean = RepoState("0" * 40, "main", "main", 0, 0, False, None, ())
+    monkeypatch.setattr(reader, "stale_reasons", lambda path: clean)
+    view = _view(fleet_ws(tmp_path), tmp_path / "run")
+    assert view.canary_misses == ["stale"] and view.status() == "partial"
 
 
 def test_partial_causes_are_findings(tmp_path: Path) -> None:
@@ -1145,59 +1419,27 @@ def test_partial_causes_are_findings(tmp_path: Path) -> None:
         )
 
 
-def test_count_mismatch_is_partial(tmp_path: Path) -> None:
+def test_one_finding_per_repo_and_cause(tmp_path: Path) -> None:
+    repo = FleetRepo(
+        "nb", tmp_path, {"a.md": "x"}, 0, [("unreadable", "a"), ("unreadable", "b")]
+    )
+    view = FleetView([repo], ("nb",), [], None)
+    (only,) = fleet_findings(view, "devtools")
+    assert only.text_key == "nb:unreadable"
+    assert [loc.path for loc in only.locations] == ["nb:a", "nb:b"]
+
+
+def test_count_mismatch_is_partial_with_evidence(tmp_path: Path) -> None:
     view = _view(fleet_ws(tmp_path), tmp_path / "run")
     view.repos = [r for r in view.repos if r.name != "nb"]  # composition bug
     assert view.status() == "partial"
-    assert [f.text_key for f in fleet_findings(view, "devtools")] == ["fleet:count"]
-
-
-def test_canary_is_a_git_repo_through_the_same_code(tmp_path: Path) -> None:
-    root = build_canary(tmp_path / "c", "devtools")
-    assert (root / ".git").exists()
-    assert git(root, "log", "--format=%an").strip() == "selfcheck"
-    assert check_canary(root, "devtools") == []
-    assert CANARY_NODE == ".selfcheck-canary/usage-graph/fleet_canary.py"
-
-
-@pytest.mark.parametrize(
-    ("broken", "miss"),
-    [
-        ("match_external", "precise"),
-        ("find_mentions", "text"),
-    ],
-)
-def test_canary_catches_broken_channels(
-    tmp_path: Path, monkeypatch, broken: str, miss: str
-) -> None:
-    root = build_canary(tmp_path / "c", "devtools")
-    if broken == "match_external":
-        monkeypatch.setattr(match, "match_external", lambda *a, **k: [])
-    else:
-        monkeypatch.setattr(match, "find_mentions", lambda *a, **k: {})
-    assert check_canary(root, "devtools") == [miss]
-
-
-def test_canary_catches_broken_stale_check(tmp_path: Path, monkeypatch) -> None:
-    root = build_canary(tmp_path / "c", "devtools")
-    monkeypatch.setattr(reader, "stale_reasons", lambda *a, **k: ())
-    assert check_canary(root, "devtools") == ["stale"]
-
-
-def test_real_mention_does_not_satisfy_canary(tmp_path: Path) -> None:
-    ws = fleet_ws(tmp_path, neighbours={"nb": {"n.md": "fleet_canary.py\n"}})
-    root = build_canary(tmp_path / "c", "devtools", forms=("precise",))
-    assert check_canary(root, "devtools") == ["text"]
-    view = _view(ws, tmp_path / "run")
-    assert view.status() == "complete"  # its own canary is intact
-    view.canary_misses = check_canary(root, "devtools")
-    assert view.status() == "partial"
-
-
-def test_canary_is_isolated_from_the_view(tmp_path: Path) -> None:
-    view = _view(fleet_ws(tmp_path), tmp_path / "run")
-    assert "fleet-canary" not in [r.name for r in view.repos]
-    assert all("fleet_canary" not in rel for r in view.repos for rel in r.texts)
+    (count,) = fleet_findings(view, "devtools")
+    assert count.text_key == "fleet:count"
+    details = {e["kind"]: e["detail"] for e in count.evidence}
+    assert details == {
+        "expected": "docs-nb, nb, umbrella",
+        "actual": "docs-nb, umbrella",
+    }
 ```
 
 - [ ] **Step 2:** прогон. Expected: `ModuleNotFoundError: selfcheck.fleet.assemble`.
@@ -1206,47 +1448,53 @@ def test_canary_is_isolated_from_the_view(tmp_path: Path) -> None:
 - [ ] **Step 5:** коммит `feat(selfcheck): fleet composition, completeness, canary (S2 §9.5–9.6)`.
 
 **Эскиз.**
-- **`manifest_repo`.** `git -C <manifest.parent> rev-parse --show-toplevel`;
-  при ошибке — `None`, иначе `RepoEntry(basename, path, detect_languages(path))`.
+- **`manifest_repo`.** `rev-parse --show-toplevel` от каталога манифеста (с
+  тем же очищенным окружением, что у `reader._git`). При ошибке, **или**
+  если в корне есть `_cowork_output/` (корневой зонтик, §9.2), — `None`.
+  Иначе `RepoEntry(basename, path, detect_languages(path))`.
 - **`fleet_names`.** Уникальные `git_dir` в порядке манифеста — это
   `info.repos` и `info.missing` в порядке чтения. Если метаданных порядка не
   хватает, добавить в `ManifestInfo` кортеж `order`: это ruling
   исполнителя, в ledger. Затем `mrepo.name`, если его ещё нет; минус
   `scope`.
 - **`load_fleet`.**
-  - Путь репо: `paths.get(name)` (репо манифеста), иначе `workspace / name`.
+  - Путь репо: `paths.get(name)`, иначе `workspace / name`.
   - Чтение через `reader.read_repo` с кэшем.
-  - `build_canary(run_dir / CANARY_DIR, scope_name)` и
-    `canary_misses = check_canary(...)`.
+  - `root = build_canary(run_dir / CANARY_REPO / scope_name, scope_name)`,
+    `canary = reader.read_repo(root, CANARY_REPO)`.
+  - `canary_misses = ["stale"]`, если `canary.state.stale !=
+    ("no-origin-head",)`, иначе `[]`.
   - `expected = tuple(names)`.
+
+  Ruling (план): `expected` берётся из того же `fleet_names`. Условие 2 §9.6
+  ловит потерю репо между составом и чтением, а ошибки самого состава
+  закрыты отдельными тестами (`missing`, репо манифеста, корневой зонтик).
+  Цена ошибки: неверно составленный, но полностью прочитанный флот
+  останется незамеченным условием 2.
 - **`status()`.** `complete`, только если:
   - `canary_misses` пуст;
   - `sorted(r.name for r in repos) == sorted(expected)`;
   - ни у одного репо нет `problems`.
-- **`build_canary`.**
-  - `git init`; ветка `main`.
-  - Файл `.github/workflows/c.yml` с
-    `run: python3 <scope>/.selfcheck-canary/usage-graph/fleet_canary.py`,
-    если `"precise" in forms`.
-  - Файл `notes.md` с блоком ```` ```zsh ```` и `fleet_canary.py`, если
-    `"text" in forms`.
-  - Файл `README.md` с «canary», чтобы корпус не был пуст.
-  - Коммит с `-c user.name=selfcheck -c user.email=selfcheck@localhost`.
-- **`check_canary`.**
-  - `repo = reader.read_repo(root, CANARY_DIR)`;
-  - `precise`: `CANARY_NODE` ∈ путей `match.fleet_edges(repo, scope,
-    frozenset({CANARY_NODE}))`;
-  - `text`: `match.find_mentions({"file:"+CANARY_NODE:
-    match.node_keys(CANARY_NODE)}, repo.texts, CANARY_DIR)` непусто, и
-    каждое место начинается с `CANARY_DIR + ":"`;
-  - `stale`: `repo.state.stale == ("no-origin-head",)`;
-  - промахи — в порядке `precise, text, stale`.
-- **`fleet_findings`.** По одной находке на `(repo, cause)`: пути — в
-  `locations` (`Location(f"{repo}:{detail}", 1)`), если `detail` непуст,
-  иначе `Location("workspace-manifest.toml", 1)`. Если счёт не сошёлся —
-  отдельная находка `fleet:count`, в evidence ожидаемый и фактический
-  составы.
-- **`surface_repos`.** Поля из «Интерфейсов»; `files = len(texts)`.
+
+  Промахи каналов канарейки определяет проба, а не `status()` (Task 6).
+- **`build_canary(root, scope, forms)`.**
+  - `git init -b main`.
+  - Если `"precise" in forms` — файл `CANARY_WORKFLOW`: job со step
+    `run: python3 <scope>/.selfcheck-canary/usage-graph/fleet_canary.py`.
+  - Если `"text" in forms` — файл `CANARY_NOTES`: блок ```` ```zsh ```` и
+    строка `fleet_canary.py`.
+  - Всегда файл `README.md` («canary»).
+  - Коммит с окружением из Global Constraints.
+- **`canary_misses(g)`.** По интерфейсу: смотрит только входящие рёбра
+  `FLEET` и `g.mentions` узла `file:` + `CANARY_NODE`, с фильтром по
+  источнику.
+- **`fleet_findings`.** По одной находке на `(repo, cause)`:
+  - `locations` — `Location(f"{repo}:{detail}", 1)` по каждой детали, если
+    детали есть, иначе `Location("workspace-manifest.toml", 1)`;
+  - при несошедшемся счёте — отдельная находка `fleet:count` с evidence
+    `expected` / `actual` (отсортированные имена через `", "`).
+- **`surface_repos`.** Поля из «Интерфейсов»; `files = len(texts)`; порядок
+  — порядок `repos`.
 
 ### Task 6: `--fleet` в оркестраторе, отчёте и пробе; приёмка
 
@@ -1257,6 +1505,7 @@ def test_canary_is_isolated_from_the_view(tmp_path: Path) -> None:
   - `selfcheck/graph/probe.py`;
   - `selfcheck/report.py`;
   - `selfcheck/manifest.py` (если понадобится `order`);
+  - `selfcheck/corpus.py` (только комментарий `TODO:`);
   - `CLAUDE.md` (строка `selfcheck/` — `--fleet`);
   - `TODO.md` (`selfcheck-s2` → `[x]`, `selfcheck-s3` разблокирован);
 - Test: `tests/selfcheck/test_fleet_run.py`.
@@ -1273,16 +1522,28 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+from selfcheck.fleet import match
+
+from selfcheck.graph.probe import USAGE_GRAPH
 from selfcheck.run import main
-from tests.selfcheck.helpers import commit, fleet_ws, git, plist_dir
+from tests.selfcheck.helpers import (
+    NEIGHBOURS_S2,
+    commit,
+    fleet_ws,
+    git,
+    make_repo,
+    plist_dir,
+    synced,
+)
 
 
-def args(ws: Path, sched: Path, *extra: str) -> list[str]:
+def args(ws: Path, sched: Path, *extra: str, config: str = "none.toml") -> list[str]:
     return [
         "--workspace", str(ws),
         "--manifest", str(ws / "umbrella" / "m.toml"),
         "--out", str(ws / "out"),
-        "--config", str(ws / "none.toml"),
+        "--config", str(ws / config),
         "--probe", "usage-graph",
         "--sched-dir", str(sched),
         *extra,
@@ -1296,14 +1557,26 @@ def reports(ws: Path) -> list[dict]:
     return [json.loads((r / "report.json").read_text()) for r in runs]
 
 
+def markdown(ws: Path, doc: dict) -> str:
+    return (ws / "out" / doc["run"]["run_id"] / "report.md").read_text()
+
+
 def dead(doc: dict) -> dict[str, dict]:
     return {f["anchor"]: f for f in doc["findings"] if f["category"] == "dead"}
 
 
+def usage(doc: dict) -> dict:
+    (probe,) = [p for p in doc["probes"] if p["probe"] == "usage-graph"]
+    return probe
+
+
+def sched(tmp: Path) -> Path:
+    return plist_dir(tmp, ["/x/devtools/live.py"])
+
+
 def test_fleet_end_to_end(tmp_path: Path) -> None:
     ws = fleet_ws(tmp_path)
-    sched = plist_dir(tmp_path, ["/x/devtools/live.py"])
-    assert main(args(ws, sched, "--fleet")) == 0
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 0
     (doc,) = reports(ws)
     surface = doc["run"]["surface"]
     assert surface["fleet"] == "complete"
@@ -1314,6 +1587,7 @@ def test_fleet_end_to_end(tmp_path: Path) -> None:
     assert check["class"] == "live" and check["fleet_only"] is True
     assert check["edges"][0]["kind"] == "fleet"
     assert check["edges"][0]["from"].startswith("nb:.github/workflows/c.yml")
+    assert not [a for a in graph if "fleet_canary" in a]  # canary isolated
     found = dead(doc)
     assert found["file:orphan.py"]["confidence"] == "confirmed"  # D1 via --fleet
     attest = found["file:attest.sh"]
@@ -1325,63 +1599,164 @@ def test_fleet_end_to_end(tmp_path: Path) -> None:
         {"owner": "steward", "ref": "5bfd829", "declaration": "scripts/review/PIN"}
     ]
     assert not [f for f in doc["findings"] if f["rule"].startswith("selfcheck/")]
-    md = (ws / "out" / doc["run"]["run_id"] / "report.md").read_text()
+    md = markdown(ws, doc)
     assert "complete относительно манифеста" in md
     assert "не покрыто: корневой зонтик, `~/.claude`" in md
+    assert "давность refs неизвестна для: nb, docs-nb, umbrella" in md
     assert "fleet-only: 1" in md and "check.py" in md
-    assert "вендор-копии" in md and "steward" in md
+    vendored_rows = [
+        line
+        for line in md.splitlines()
+        if line.startswith("| scripts/review/prose-paths.env")
+    ]
+    assert len(vendored_rows) == 2  # member of A and header D: two rows
 
 
-def test_without_fleet_nothing_changes(tmp_path: Path) -> None:
+def test_refs_age_phrase(tmp_path: Path) -> None:
     ws = fleet_ws(tmp_path)
-    sched = plist_dir(tmp_path, ["/x/devtools/live.py"])
-    assert main(args(ws, sched)) == 0
+    for name in ("nb", "docs-nb", "umbrella"):
+        path = git(ws / name, "rev-parse", "--git-path", "FETCH_HEAD").strip()
+        (ws / name / path).write_text("")
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 0
+    (doc,) = reports(ws)
+    assert "относительно локальных refs не старше" in markdown(ws, doc)
+
+
+def test_without_fleet_nothing_else_changes(tmp_path: Path) -> None:
+    ws = fleet_ws(tmp_path)
+    assert main(args(ws, sched(tmp_path))) == 0
     (doc,) = reports(ws)
     assert doc["run"]["surface"]["fleet"] == "absent"
     assert "fleet_repos" not in doc["run"]["surface"]
     assert dead(doc)["file:orphan.py"]["confidence"] == "likely"  # P1
-    assert "fleet-only: 0" in (
-        ws / "out" / doc["run"]["run_id"] / "report.md"
-    ).read_text()
+    assert "fleet-only: — (без --fleet)" in markdown(ws, doc)  # no meaningless 0
 
 
-def test_partial_fleet_keeps_p1_and_exit_code(tmp_path: Path) -> None:
+def test_usage_graph_logic_version_bumped() -> None:
+    """S2 changes usage-graph even without --fleet (vendored-in, P6, partial):
+    the comparability key must change against S1 baselines (§4.3, review r1 M4)."""
+    assert USAGE_GRAPH.logic_version == 2
+
+
+def test_broken_declaration_without_fleet_is_exit_2(tmp_path: Path) -> None:
+    ws = fleet_ws(tmp_path, scope_files={"scripts/review/PIN": "garbage\n"})
+    assert main(args(ws, sched(tmp_path))) == 2
+    (doc,) = reports(ws)
+    assert usage(doc)["status"] == "partial"
+    assert "selfcheck/vendor-pin-unparsed" in {f["rule"] for f in doc["findings"]}
+
+
+def test_broken_declaration_is_partial_exit_2_and_p6(tmp_path: Path) -> None:
+    ws = fleet_ws(tmp_path, scope_files={"scripts/review/PIN": "garbage\n"})
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 2
+    (doc,) = reports(ws)
+    assert usage(doc)["status"] == "partial"
+    orphan = dead(doc)["file:orphan.py"]
+    assert orphan["confidence"] == "likely"
+    assert {"kind": "cap", "detail": "P6"} in orphan["evidence"]
+
+
+@pytest.mark.parametrize("channel", ["match_external", "find_mentions"])
+def test_broken_channel_fails_the_probe(tmp_path: Path, monkeypatch, channel) -> None:
+    ws = fleet_ws(tmp_path)
+    fake = (lambda *a, **k: []) if channel == "match_external" else (lambda *a, **k: {})
+    monkeypatch.setattr(match, channel, fake)
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 2
+    (doc,) = reports(ws)
+    assert usage(doc)["status"] == "failed"
+    assert "fleet-canary" in usage(doc)["reason"]
+    assert "selfcheck/probe-failed" in {f["rule"] for f in doc["findings"]}
+    assert doc["run"]["surface"]["fleet"] == "partial"
+    assert not [f for f in dead(doc).values() if f["confidence"] == "confirmed"]
+
+
+def test_every_text_form_of_a_neighbour_caps_dead(tmp_path: Path) -> None:
+    """§9.4/§9.8: any role, any extension; each form alone yields P5 (review r1 M5)."""
+    scope = {f"t{i}.sh": "#!/bin/sh\n" for i in range(1, 5)}
+    scope["pkg/__init__.py"] = ""
+    scope["pkg/mod.py"] = "x = 1\n"
+    wide = {
+        "tests/test_x.py": "# regression for t1.sh\n",
+        "lib/a.ex": 'System.cmd("t2.sh", [])\n',
+        "notes.md": "```zsh\n./t3.sh\n```\n",
+        ".github/workflows/w.yml": (
+            "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+            '      - run: bash "$WS/devtools/t4.sh"\n'
+        ),
+        "justfile": "go:\n    python -m pkg.mod\n",
+    }
+    ws = fleet_ws(
+        tmp_path, scope_files=scope, neighbours={**NEIGHBOURS_S2, "wide": wide}
+    )
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 0
+    (doc,) = reports(ws)
+    found = dead(doc)
+    expected = {
+        "file:t1.sh": "wide:tests/test_x.py",
+        "file:t2.sh": "wide:lib/a.ex",
+        "file:t3.sh": "wide:notes.md",
+        "file:t4.sh": "wide:.github/workflows/w.yml",
+        "file:pkg/mod.py": "wide:justfile",
+    }
+    for anchor, source in expected.items():
+        assert found[anchor]["confidence"] == "likely", anchor
+        assert {"kind": "mentioned-in", "detail": source} in found[anchor]["evidence"]
+
+
+def test_fleet_ignores_scope_corpus_exclude(tmp_path: Path) -> None:
+    ws = fleet_ws(tmp_path)
+    (ws / "cfg.toml").write_text('[corpus]\nexclude = ["**/*.md"]\n')
+    assert main(args(ws, sched(tmp_path), "--fleet", config="cfg.toml")) == 0
+    (doc,) = reports(ws)
+    attest = dead(doc)["file:attest.sh"]
+    assert {"kind": "mentioned-in", "detail": "docs-nb:TODO.md"} in attest["evidence"]
+
+
+def test_partial_fleet_keeps_p1_exit_code_and_fates(tmp_path: Path) -> None:
     ws = fleet_ws(tmp_path)
     (ws / "nb" / "dirty.md").write_text("x\n")
-    sched = plist_dir(tmp_path, ["/x/devtools/live.py"])
-    assert main(args(ws, sched, "--fleet")) == 0  # fleet-partial: no exit change
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 0  # no exit change
     (doc,) = reports(ws)
     assert doc["run"]["surface"]["fleet"] == "partial"
     assert dead(doc)["file:orphan.py"]["confidence"] == "likely"
     (partial,) = [f for f in doc["findings"] if f["rule"] == "selfcheck/fleet-partial"]
     assert partial["anchor"] == "probe:devtools#fleet"
     (ws / "nb" / "dirty.md").unlink()
-    assert main(args(ws, sched, "--fleet")) == 0
-    _first, last = reports(ws)
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 0
+    last = reports(ws)[-1]
     gone = {g["anchor"]: g["status"] for g in last["delta"]["gone"]}
     assert gone["probe:devtools#fleet"] == "resolved"
 
 
-def test_broken_declaration_is_partial_exit_2_and_p6(tmp_path: Path) -> None:
-    ws = fleet_ws(tmp_path, scope_files={"scripts/review/PIN": "garbage\n"})
-    sched = plist_dir(tmp_path, ["/x/devtools/live.py"])
-    assert main(args(ws, sched, "--fleet")) == 2
-    (doc,) = reports(ws)
-    (probe,) = [p for p in doc["probes"] if p["probe"] == "usage-graph"]
-    assert probe["status"] == "partial"
-    rules = {f["rule"] for f in doc["findings"]}
-    assert "selfcheck/vendor-pin-unparsed" in rules
-    orphan = dead(doc)["file:orphan.py"]
-    assert orphan["confidence"] == "likely"
-    assert {"kind": "cap", "detail": "P6"} in orphan["evidence"]
+def _gone(ws: Path) -> dict[str, str]:
+    return {g["anchor"]: g["status"] for g in reports(ws)[-1]["delta"]["gone"]}
+
+
+def test_fleet_fate_without_fleet_is_not_rechecked(tmp_path: Path) -> None:
+    ws = fleet_ws(tmp_path)
+    (ws / "nb" / "dirty.md").write_text("x\n")
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 0
+    (ws / "nb" / "dirty.md").unlink()
+    assert main(args(ws, sched(tmp_path))) == 0  # the fleet was not read
+    assert _gone(ws)["probe:devtools#fleet"] == "not-rechecked"
+
+
+def test_fleet_fate_needs_an_ok_probe(tmp_path: Path) -> None:
+    ws = fleet_ws(tmp_path)
+    (ws / "nb" / "dirty.md").write_text("x\n")
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 0
+    (ws / "nb" / "dirty.md").unlink()
+    commit(
+        ws / "devtools", {"scripts/review/PIN": "garbage\n"}, date="2026-09-25T00:00:00"
+    )
+    git(ws / "devtools", "update-ref", "refs/remotes/origin/main", "HEAD")
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 2  # usage-graph partial
+    assert _gone(ws)["probe:devtools#fleet"] == "not-rechecked"
 
 
 def test_fleet_composition_enters_the_key(tmp_path: Path) -> None:
-    from tests.selfcheck.helpers import make_repo, synced
-
     ws = fleet_ws(tmp_path)
-    sched = plist_dir(tmp_path, ["/x/devtools/live.py"])
-    assert main(args(ws, sched, "--fleet")) == 0
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 0
     synced(make_repo(ws / "extra", {"e.md": "e\n"}))
     manifest = ws / "umbrella" / "m.toml"
     commit(
@@ -1390,21 +1765,17 @@ def test_fleet_composition_enters_the_key(tmp_path: Path) -> None:
         date="2026-09-25T00:00:00",
     )
     git(ws / "umbrella", "update-ref", "refs/remotes/origin/main", "HEAD")
-    assert main(args(ws, sched, "--fleet")) == 0
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 0
     first, last = reports(ws)
     assert last["run"]["surface"]["fleet"] == "complete"
-
-    def key(doc: dict) -> str:
-        (p,) = [p for p in doc["probes"] if p["probe"] == "usage-graph"]
-        return p["key"]
-
-    assert key(first) != key(last)
+    assert usage(first)["key"] != usage(last)["key"]
 
 
 def test_other_scope_repos_are_fleet_for_each_other(tmp_path: Path) -> None:
     ws = fleet_ws(tmp_path)
-    sched = plist_dir(tmp_path, ["/x/devtools/live.py"])
-    code = main(args(ws, sched, "--fleet", "--repo", "devtools", "--repo", "nb"))
+    code = main(
+        args(ws, sched(tmp_path), "--fleet", "--repo", "devtools", "--repo", "nb")
+    )
     assert code == 0
     (doc,) = reports(ws)
     assert doc["run"]["scope"] == ["devtools", "nb"]
@@ -1413,10 +1784,26 @@ def test_other_scope_repos_are_fleet_for_each_other(tmp_path: Path) -> None:
     check = doc["graph"]["devtools"]["file:check.py"]
     assert check["class"] == "live" and check["fleet_only"] is True  # nb → devtools
     assert "file:check.py" not in dead(doc)
+
+
+def test_surface_fleet_is_the_worst_over_scope(tmp_path: Path) -> None:
+    ws = fleet_ws(tmp_path)
+    (ws / "devtools" / "wip.md").write_text("x\n")  # devtools dirty: stale for nb
+    code = main(
+        args(ws, sched(tmp_path), "--fleet", "--repo", "devtools", "--repo", "nb")
+    )
+    assert code == 0
+    (doc,) = reports(ws)
+    assert doc["run"]["surface"]["fleet"] == "partial"
+    # devtools' own fleet (U − {devtools}) is complete: its dead may be confirmed
+    assert dead(doc)["file:orphan.py"]["confidence"] == "confirmed"
+    (partial,) = [f for f in doc["findings"] if f["rule"] == "selfcheck/fleet-partial"]
+    assert (partial["owner_repo"], partial["text_key"]) == ("nb", "devtools:stale")
 ```
 
-- [ ] **Step 2:** прогон. Expected: `SystemExit: 2` на `--fleet`, а
-  `test_without_fleet…` падает на `fleet-only: 0`.
+- [ ] **Step 2:** прогон. Expected: после Task 1–5 модули есть, поэтому тесты
+  падают на `SystemExit: 2` (неизвестный `--fleet`), а
+  `test_without_fleet…` — на строке `fleet-only: — (без --fleet)`.
 - [ ] **Step 3:** реализовать по эскизу. Затем полный набор:
   `SELFCHECK_REQUIRE_TOOLS=1 uv run --frozen --group selfcheck pytest tests/selfcheck -q`,
   `ruff`, `pyrefly`. Expected: всё зелёное.
@@ -1449,34 +1836,45 @@ def test_other_scope_repos_are_fleet_for_each_other(tmp_path: Path) -> None:
   - Один `cache: dict[str, FleetRepo]`.
   - Для каждого R из `scope`: `view_R = load_fleet(workspace, fleet_names(info,
     mrepo, [R]), run_dir, scope_name=R, cache=cache, paths={mrepo.name:
-    mrepo.path})`, затем `RepoTarget(..., fleet=view_R.status(),
+    mrepo.path} if mrepo else {})`.
+  - Если `--fleet`, материализация R получает ещё `CANARY_NODE` (как
+    `extra_files`) и `RepoTarget(..., fleet=view_R.status(),
     fleet_view=view_R)`.
-  - `surface.fleet` — худшее значение; `fleet_repos = surface_repos` по U −
-    `scope`; находки `fleet_findings(view_R, R)` добавляются к находкам до
-    allowlist.
-  - Ключ `usage-graph`: `key_surface` плюс `fleet_repos`, отсортированные
-    имена `view_R.expected`.
-  - `acc.keys[f"fleet@{R}"] = "ok"`, если `--fleet` и `usage-graph` `ok` или
-    `partial`.
-- **`graph/probe.py`.**
+  - После проб: `fleet_R = "partial"`, если `usage-graph` R не `ok` и не
+    `partial` (промах канарейки → `failed`), иначе `view_R.status()`.
+    `surface.fleet` — худшее по R.
+  - `fleet_repos = surface_repos` по U − `scope` (порядок U).
+  - Находки `fleet_findings(view_R, R)` добавляются до allowlist.
+  - Ключ `usage-graph` R: `key_surface` плюс `fleet_repos`, отсортированные
+    `view_R.expected`.
+  - `acc.keys[f"fleet@{R}"] = "ok"` — только при `--fleet` и `usage-graph`
+    `ok`.
+- **`graph/probe.py`** (`logic_version=2`).
   1. `vendor_roles` по `target.corpus` с текстами из копии → `VendorResult`.
-  2. Граф `scope`.
-  3. Если есть `fleet_view`: `canary_misses` непуст → `raise
-     FleetCanaryMissed(...)` (статус `failed`). Иначе:
-     - по каждому репо `fleet_edges` → `g.add(path, EdgeKind.FLEET, where)`;
-     - `find_mentions` по `node_keys` файловых узлов → `g.mention(anchor, src)`.
+     Работает и без `--fleet`.
+  2. Граф R. При `fleet_view` в список файлов добавляется `CANARY_NODE`.
+  3. Если есть `fleet_view`:
+     - `view.canary_misses` непуст → `raise FleetCanaryMissed("fleet-canary:
+       stale")`;
+     - `match.apply_fleet(g, [*view.repos, view.canary], target.name)` —
+       **один** вызов;
+     - `misses = canary_misses(g)` → непуст → `raise FleetCanaryMissed(
+       "fleet-canary: " + ",".join(misses))`;
+     - затем убрать из `g` рёбра и упоминания с источником `fleet-canary:` у
+       всех узлов, кроме канареечного (изоляция §9.5).
   4. `classify(..., protected=frozenset(vendor.protected),
      decl_cap=vendor.broken, vendored=vendor.members)` плюс
-     `vendor.findings`.
+     `vendor.findings`. Канареечные узлы исключены (Task 4).
   5. `ParseResult.skipped` получает пути деклараций с находками, чтобы
      статус был `partial` (§9.7 п.3).
-- **`report.py`.** Раздел «## флот»:
-  - фраза полноты: «complete относительно манифеста `<путь>` (sha1 `<…>`): N
-    репо; не покрыто: корневой зонтик, `~/.claude`» либо `partial` с
-    причинами; давность refs — по §9.6;
-  - строка `fleet-only: N` и таблица (узел, источник) по каждому репо
-    `scope` — печатается и без `--fleet` (тогда 0);
-  - таблица «вендор-копии» (путь, владелец, ref, декларация).
+  6. `extra["graph"] = graph_payload(g, vendor.members)`.
+- **`report.py`.** Раздел «## флот» — форматы из «Интерфейсов»:
+  - фраза полноты;
+  - строка `fleet-only` и таблица (узел, источник) по каждому репо `scope`;
+  - таблица «вендор-копии».
+- **`corpus.repo_state`** (S1). Добавить комментарий `# TODO: diff-index
+  reports stat-only changes as dirty; use status --porcelain (see S2 plan)`.
+  Поведение не менять.
 
 ## Self-review (выполнен при написании)
 
