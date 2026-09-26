@@ -74,6 +74,8 @@ class Graph:
     errors: list[str] = field(default_factory=list)
     plists: list[str] = field(default_factory=list)
     root_texts: dict[str, str] = field(default_factory=dict)
+    # launch targets that resolved to no node of this graph (spec §9.3)
+    external: list[tuple[str, EdgeKind, Location]] = field(default_factory=list)
 
     def incoming(self, anchor: str) -> list[Edge]:
         """Edges pointing at ``anchor``."""

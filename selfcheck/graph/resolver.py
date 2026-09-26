@@ -484,6 +484,7 @@ def _apply(
         g.add(path, EdgeKind.EXEC, where)
     for path in scan.mentions:
         g.mention(f"file:{path}", where.path)
+    g.external += [(path, EdgeKind.EXEC, where) for path in scan.external]
     for token in scan.unresolved:
         pattern = zone_pattern(token)
         var = _VAR_NAME.match(token)

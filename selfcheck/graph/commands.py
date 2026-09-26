@@ -104,6 +104,9 @@ class Scan:
     mentions: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
     unresolved: list[str] = field(default_factory=list)
+    # literal programs that resolved to no file of this repo, normalised against
+    # the known base — the fleet's "external targets" (spec §9.3)
+    external: list[str] = field(default_factory=list)
 
 
 def _tokens(cmd: str, shell_vars: bool) -> list[str]:
@@ -193,6 +196,9 @@ def _command_position(
         scan.unresolved.append(f"{UNRESOLVED_DIR}/{clean}")
     elif st.base_known and _looks_missing(token):
         scan.missing.append(clean)
+    if hit is None and st.base_known and "$" not in clean:
+        joined = clean if clean.startswith("/") else posixpath.join(st.base, clean)
+        scan.external.append(posixpath.normpath(joined))
 
 
 def scan_command(

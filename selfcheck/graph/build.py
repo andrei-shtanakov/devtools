@@ -7,7 +7,7 @@ import plistlib
 import posixpath
 import re
 import tomllib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -60,9 +60,17 @@ def build_graph(
     *,
     repo_name: str,
     sched_dir: Path | None,
+    texts: Mapping[str, str] | None = None,
 ) -> Graph:
-    """Build the usage graph of one repo (or of one canary set)."""
-    texts = {rel: _read(root, rel) for rel in files}
+    """Build the usage graph of one repo (or of one canary set).
+
+    ``texts`` given: no disk reads (a fleet repo is read by its reader only).
+    """
+    texts = (
+        {rel: texts.get(rel, "") for rel in files}
+        if texts is not None
+        else {rel: _read(root, rel) for rel in files}
+    )
     roles = {rel: role(rel) for rel in files}
     index = build_index(list(files), texts.get("pyproject.toml"))
     g = Graph()
@@ -194,6 +202,7 @@ def _record(
         g.add(path, kind, where)
     for path in scan.mentions:
         g.mention(f"file:{path}", where.path)
+    g.external += [(path, kind, where) for path in scan.external]
     if root_anchor is not None:
         g.broken += [(root_anchor, where, tok) for tok in scan.missing]
 
