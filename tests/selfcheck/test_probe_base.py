@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -68,7 +67,9 @@ def spec_for(tool: Path, **overrides: object) -> ProbeSpec:
         "argv": copy_paths,
         "parse": parse_fake,
         "timeout": 5,
-        "version_timeout": 2,
+        # a first exec of a freshly written fake tool can stall (macOS checks
+        # it); a 2 s version call then timed out in unrelated tests (#425)
+        "version_timeout": 60,
     }
     fields.update(overrides)
     return ProbeSpec(**fields)  # type: ignore[arg-type]
@@ -166,7 +167,8 @@ def test_version_out_of_range_unavailable(target, tmp_path) -> None:
 
 
 def test_version_timeout_fails_without_raising(target, tmp_path) -> None:
-    res = run(spec_for(fake_tool(tmp_path / "b", version_sleep=5)), target, tmp_path)
+    slow = fake_tool(tmp_path / "b", version_sleep=5)
+    res = run(spec_for(slow, version_timeout=2), target, tmp_path)
     assert (res.status, res.reason) == (ProbeStatus.FAILED, "timeout")
 
 
@@ -329,23 +331,25 @@ def test_timeout_kills_the_whole_process_group(target, tmp_path) -> None:
     """#408: npx → node, uvx → semgrep-core — the timed-out tool's children
     must not outlive the probe, and the probe must not wait for them (they
     hold its stdout). A fake tool starts ``sleep`` and hangs; both sleep far
-    longer than the timeout, so a surviving or awaited child shows."""
+    longer than the timeout, so a surviving or awaited child shows. #425: the
+    old Python tool sometimes hit the 2 s *version* timeout (first exec of a
+    fresh script) and the test took that for the run's; now the version call
+    has room and must pass, and the pid is written by rename, never empty."""
     pid_file = tmp_path / "grandchild.pid"
     tool = tmp_path / "hang" / "fake-tool"
     tool.parent.mkdir()
     tool.write_text(
-        f"#!{sys.executable}\n"
-        "import pathlib, subprocess, sys, time\n"
-        "if sys.argv[1:] == ['--version']:\n"
-        "    print('fake 1.2.3'); sys.exit(0)\n"
-        "child = subprocess.Popen(['sleep', '30'])\n"
-        f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n"
-        "time.sleep(30)\n"
+        "#!/bin/sh\n"
+        'if [ "$1" = --version ]; then echo "fake 1.2.3"; exit 0; fi\n'
+        f"sleep 120 & echo $! > {pid_file}.tmp && mv {pid_file}.tmp {pid_file}\n"
+        "sleep 120\n"
     )
     tool.chmod(0o755)
-    res = run(spec_for(tool, timeout=2), target, tmp_path)
+    # the version call has room (spec_for); the timeout below must be the run's
+    res = run(spec_for(tool, timeout=5), target, tmp_path)
     assert (res.status, res.reason) == (ProbeStatus.FAILED, "timeout")
-    assert res.duration < 10  # timeout 2 s + version call, not the 30 s sleep
+    assert res.tool_version == "1.2.3"  # the version call passed: run timed out
+    assert res.duration < 60  # seconds normally; a surviving/awaited child: 120+
     grandchild = int(pid_file.read_text())
     deadline = time.monotonic() + 5
     while _alive(grandchild) and time.monotonic() < deadline:
@@ -369,13 +373,17 @@ def test_any_interruption_kills_the_process_group(tmp_path, monkeypatch) -> None
     def interrupted(self, *a, **k):
         calls["n"] += 1
         if calls["n"] == 1:
+            deadline = time.monotonic() + 5
             while not pid_file.exists():
+                if time.monotonic() > deadline:
+                    raise RuntimeError("the tool never wrote its pid")
                 time.sleep(0.05)
             raise KeyboardInterrupt
         return real(self, *a, **k)
 
     monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
-    script = f"echo $$ > {pid_file}; sleep 30"
+    # write-then-rename: the pid file never exists empty (review of #424, #425)
+    script = f"echo $$ > {pid_file}.tmp && mv {pid_file}.tmp {pid_file}; sleep 30"
     started = time.monotonic()
     with pytest.raises(KeyboardInterrupt):
         run_group(["sh", "-c", script], capture_output=True, text=True, timeout=60)

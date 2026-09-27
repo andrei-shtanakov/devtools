@@ -228,3 +228,39 @@ def test_semgrep_pins_are_reviewed_as_code() -> None:
     patterns = shlex.split(line.partition("=")[2])
     rel = ENV_PATH.relative_to(root).as_posix()
     assert any(fnmatch.fnmatchcase(rel, p) for p in patterns), rel
+
+
+def test_semgrep_pins_cover_the_live_environment() -> None:
+    """#425: ``-c`` constrains, it does not require — a package missing from
+    the pin file floats freely. Every distribution uvx actually installs for
+    SEMGREP must be pinned, at the pinned version."""
+    import json
+    import subprocess
+
+    from selfcheck.llm import ENV_PATH, SEMGREP
+
+    require_tool("uvx")
+
+    def norm(name: str) -> str:
+        return name.lower().replace("_", "-").replace(".", "-")
+
+    pairs = [
+        line.split(";")[0].strip().split("==")
+        for line in ENV_PATH.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    pins = {norm(name): version for name, version in pairs}
+    listing = (
+        "import importlib.metadata as m, json;"
+        "print(json.dumps({d.metadata['Name']: d.version for d in m.distributions()}))"
+    )
+    proc = subprocess.run(
+        ["uvx", "-q", "-c", str(ENV_PATH), "--from", SEMGREP.replace("@", "==")]
+        + ["python", "-c", listing],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=True,
+    )
+    live = {norm(k): v for k, v in json.loads(proc.stdout).items()}
+    assert live and {k: pins.get(k) for k in live} == live

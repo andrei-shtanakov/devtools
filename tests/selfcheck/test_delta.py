@@ -333,10 +333,57 @@ def test_cli_anchor_is_judged_by_pyproject(tmp_path: Path) -> None:
     assert _gone_of(tmp_path / "2", "cli:tool", []) == "resolved: file-removed"
 
 
-def test_allow_anchor_is_resolved(tmp_path: Path) -> None:
+def _allow_gone(tmp: Path, base_config: str, cur_config: str) -> str:
+    base = snap(tmp, findings=[finding("x", "allow:x")])
+    cur = snap(tmp)
+    base.config, cur.config = base_config, cur_config
+    (gone,) = compute_delta(base, cur)[1]
+    return gone["status"]
+
+
+def test_allow_anchor_is_resolved_under_the_same_config(tmp_path: Path) -> None:
     """#407: ``allow:<id>`` (selfcheck/allow-expired) is recomputed from the
     config every run; gone means the entry was renewed or removed."""
-    assert _gone_of(tmp_path, "allow:x", ["a.py"]) == "resolved"
+    assert _allow_gone(tmp_path, "/w/selfcheck.toml", "/w/selfcheck.toml") == (
+        "resolved"
+    )
+
+
+@pytest.mark.parametrize(
+    ("base_config", "cur_config"),
+    [
+        ("/w/selfcheck.toml", "/w/selfckeck.toml"),  # a typo in --config
+        ("/w/selfcheck.toml", ""),  # no config file read this run
+        ("", ""),  # a baseline from before the field
+    ],
+)
+def test_allow_anchor_under_another_config_is_not_rechecked(
+    tmp_path: Path, base_config: str, cur_config: str
+) -> None:
+    """#423: a run that read another (or no) config never looked at the entry —
+    unknown, not green. The sha is deliberately not compared: renewing or
+    removing the entry changes it, and that is how an allow-expired resolves."""
+    assert _allow_gone(tmp_path, base_config, cur_config) == "not-rechecked"
+
+
+def test_every_produced_anchor_kind_is_known_to_the_delta() -> None:
+    """#423: the delta's list of anchor kinds is closed; a kind produced by the
+    package but unknown there would silently become ``not-rechecked``. The set
+    is compared for equality, so a stale kind shows too."""
+    import re
+
+    import selfcheck
+    from selfcheck.delta import FIXED_PATHS, PATH_KINDS, SPECIAL_KINDS
+
+    root = Path(selfcheck.__file__).parent
+    produced = {
+        kind
+        for path in root.rglob("*.py")
+        for kind in re.findall(r'f"([a-z]+):\{', path.read_text())
+    }
+    not_anchors = {"launchd"}  # Location("launchd:<plist>"), graph/build.py
+    known = PATH_KINDS | FIXED_PATHS.keys() | SPECIAL_KINDS
+    assert produced - not_anchors == known
 
 
 def test_unknown_anchor_kind_is_never_file_removed(tmp_path: Path) -> None:
