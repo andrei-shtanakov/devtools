@@ -25,9 +25,12 @@ class AllowEntry:
     until: date
     id: str | None = None
     anchor: str | None = None
+    repo: str | None = None  # limits the entry to one owner_repo (§10.8)
 
     def matches(self, finding: Finding) -> bool:
         """id equality, or anchor equality; ``file:P`` covers anchors of P."""
+        if self.repo is not None and finding.owner_repo != self.repo:
+            return False
         if self.id is not None:
             return finding.id == self.id
         if self.anchor is None:
@@ -76,6 +79,7 @@ def _allow_entry(index: int, raw: dict[str, Any]) -> AllowEntry:
         until=until,
         id=raw.get("id"),
         anchor=raw.get("anchor"),
+        repo=raw.get("repo"),
     )
 
 

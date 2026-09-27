@@ -337,3 +337,13 @@ def test_non_utf8_scope_path_reaches_the_report_as_shown(
     (orphan,) = [f for f in first["findings"] if f["anchor"] == "file:caf\ufffd.py"]
     assert orphan["category"] == "dead"
     assert second["delta"]["statuses"][orphan["id"]] == "persisting"
+
+
+def test_allow_repo_not_in_manifest_is_exit_4(tmp_path: Path) -> None:
+    ws = workspace(tmp_path)
+    cfg = ws / "s.toml"
+    cfg.write_text(
+        '[[allow]]\nanchor = "file:x.py"\nrepo = "nope"\nreason = "r"\n'
+        "until = 2099-01-01\n"
+    )
+    assert main([*args(ws), "--config", str(cfg), "--probe", "ruff"]) == 4

@@ -363,6 +363,11 @@ def main(
         stray = sorted({o.repo for o in config.operator} - set(manifest.order))
         if stray:
             raise ConfigError(f"[[operator]] repo not in manifest: {stray}")
+        stray_allow = sorted(
+            {a.repo for a in config.allow if a.repo} - set(manifest.order)
+        )
+        if stray_allow:
+            raise ConfigError(f"[[allow]] repo not in manifest: {stray_allow}")
         run_id, run_dir = new_run_dir(args.out, datetime.now(UTC))
     except (ConfigError, OSError) as exc:
         print(f"selfcheck: {exc}", file=sys.stderr)
