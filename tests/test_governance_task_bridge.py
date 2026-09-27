@@ -6381,6 +6381,25 @@ def test_supersede_resumes_when_branch_stands_on_base(tmp_path, monkeypatch):
     assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops.calls
 
 
+def test_supersede_v1_completed_without_pr_fails_closed(tmp_path, monkeypatch):
+    """devtools#170: `completed` without a PR number is a broken ledger for the
+    ordinary delivery (it refuses) — and must be for the supersede too: with
+    no number nobody can tell whether the first PR still hangs open, and a
+    second PR would be opened silently."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "anchor": "СТАРЫЙ"}
+    rs.save(state)
+    before = (rs.run_dir("r-recon") / "run.json").read_bytes()
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    with pytest.raises(RuntimeError, match="без номера PR"):
+        tb.deliver_superseded(state, ops)
+    assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
+    assert ops.touched == []
+
+
 def test_supersede_abandons_shifted_revision_and_starts_next(
     tmp_path, monkeypatch
 ):

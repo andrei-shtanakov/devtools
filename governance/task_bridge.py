@@ -2329,11 +2329,7 @@ def deliver_for_run(
     if op.get("status") == "completed":
         pr_done = op.get("pr")
         if pr_done is None:
-            raise RuntimeError(
-                "op tasks-deliver completed, но без номера PR — леджер "
-                f"{state.run_id!r} повреждён или правлен вручную; "
-                "почините op прежде, чем продолжать"
-            )
+            raise _missing_pr(state)
         print(
             f"tasks-спека уже доставлена: PR #{pr_done} "
             f"({state.repo_slug}) — повтор не создаёт PR"
@@ -3281,6 +3277,16 @@ def _reconcile_revision(
     return "continue" if same_base else "abandon_and_next"
 
 
+def _missing_pr(state: RunState) -> RuntimeError:
+    """`completed` без номера PR — повреждённый леджер: одна трактовка для
+    обычной доставки и переиздания (devtools#170)."""
+    return RuntimeError(
+        "op tasks-deliver completed, но без номера PR — леджер "
+        f"{state.run_id!r} повреждён или правлен вручную; "
+        "почините op прежде, чем продолжать"
+    )
+
+
 def _reconcile_v1(state: RunState, ops: Ops, op: dict) -> int | None:
     """§I3 для исторической v1 (`tasks-deliver`) — её PR ещё открыт?
 
@@ -3296,12 +3302,13 @@ def _reconcile_v1(state: RunState, ops: Ops, op: dict) -> int | None:
     Разбирается ровно то, что в записи есть: номер её PR.
 
     Возврат: номер PR, если он ещё OPEN (переиздавать нечего); `None` —
-    доставка закрыта мержем либо номера PR в записи нет (древняя запись:
-    поведение как до supersede).
+    доставка закрыта мержем. Записи без номера PR — отказ, как у обычной
+    доставки: без номера не узнать, не висит ли первый PR открытым, и
+    второй PR заводился бы молча (devtools#170).
     """
     pr = op.get("pr")
     if not isinstance(pr, int):
-        return None
+        raise _missing_pr(state)
     pr_state = ops.pr_facts(state.repo_slug, pr).get("state")
     if pr_state == "MERGED":
         return None
