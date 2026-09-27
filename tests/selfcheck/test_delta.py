@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from selfcheck.delta import Fate, RunSnapshot, comparability_key, compute_delta, fate
+from selfcheck.delta import (
+    SKIPPED_KEY,
+    Fate,
+    RunSnapshot,
+    comparability_key,
+    compute_delta,
+    fate,
+)
 from selfcheck.probes.base import ProbeResult, ProbeStatus
 from selfcheck.probes.common import config_hash
 
@@ -390,3 +397,25 @@ def test_unknown_anchor_kind_is_never_file_removed(tmp_path: Path) -> None:
     """A kind this module does not know has no defining file: unknown, not the
     optimistic ``resolved: file-removed``."""
     assert _gone_of(tmp_path, "zzz:a.py", ["a.py"]) == "not-rechecked"
+
+
+@pytest.mark.parametrize(
+    ("rule", "key", "status"),
+    [
+        ("selfcheck/operator-missing", "k", "resolved"),
+        ("selfcheck/operator-missing", SKIPPED_KEY, "not-rechecked"),
+        ("selfcheck/operator-missing", None, "not-rechecked"),
+        ("selfcheck/probe-failed", SKIPPED_KEY, "resolved"),  # §4.3 as before
+    ],
+)
+def test_instrument_fates(tmp_path: Path, rule: str, key, status: str) -> None:
+    """#415: operator-missing is about a corpus path; only a usage-graph run
+    that actually happened looks at it — skipped under --path is not a
+    recheck. Other instrument findings keep §4.3: ok or skipped resolves."""
+    probe = "usage-graph" if rule.endswith("operator-missing") else "ruff"
+    gone = finding("x", f"probe:devtools#{probe}")
+    gone["rule"] = rule
+    base = snap(tmp_path, findings=[gone])
+    cur = snap(tmp_path, keys={f"{probe}@devtools": key})
+    ((item),) = compute_delta(base, cur)[1]
+    assert item["status"] == status

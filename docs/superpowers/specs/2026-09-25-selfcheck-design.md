@@ -634,7 +634,9 @@ reason = "гейт волн ре-вендора, запускает операт
   `selfcheck/operator-missing` (medium, category `selfcheck`, `anchor`
   `probe:<repo>#usage-graph`, `text_key` — путь; судьба — как у находок
   прибора, по `usage-graph` этого репо, §4.3). Список не может устареть
-  молча.
+  молча. Подсказка различает причину: файла нет на диске — «уберите запись
+  или верните файл»; файл есть, но исключён из корпуса — «уберите
+  исключение или запись» (devtools#415).
 - **Упоминание в документации не заменяет роль.** Таблица инструментов в
   `README.md` или `CLAUDE.md` — ребро `doc`, а не доказательство запуска;
   иначе вернётся та же слепота, только через прозу. Dead класса `doc-only`
@@ -843,7 +845,9 @@ dirty, `surface` (§3.2.4), по пробам — версия, конфиг-х�
 **Находка прибора** (`probe:<repo>#<probe>`: `selfcheck/probe-*`, а также
 `selfcheck/operator-missing` на `probe:<repo>#usage-graph`), которой
 сейчас нет: `resolved`, если репо в `scope` и проба сейчас `ok`/`skipped`;
-иначе `not-rechecked`.
+иначе `not-rechecked`. Исключение — `operator-missing`: её предмет — путь
+корпуса, и `skipped` (usage-graph под `--path`) его не смотрел, поэтому
+`resolved` — только при `ok` (devtools#415).
 
 Статусы дельты: `new`, `persisting`, `changed`, `resolved`,
 `resolved: file-removed`, `not-rechecked`. Критерий `changed` — §2.1
