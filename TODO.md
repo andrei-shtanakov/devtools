@@ -1679,11 +1679,16 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   использовать различимый результат #177). DONE — только с отдельным
   regression/evidence на каждый из четырёх классов.
 
-- [ ] Legacy-v1 хвосты переиздания: fail-closed для completed без PR, честный след reconcile→abandoned перед no-op и обязательная §I8-сверка при постороннем `.md` @owner:github:andrei-shtanakov @trigger:"перед следующим переизданием legacy-v1 воркстрима" @id:tasks-supersede-legacy-debt @epic:eco.dark-factory
+- [x] Legacy-v1 хвосты переиздания: fail-closed для completed без PR, честный след reconcile→abandoned перед no-op и обязательная §I8-сверка при постороннем `.md` @owner:github:andrei-shtanakov @id:tasks-supersede-legacy-debt @epic:eco.dark-factory
   Источники: devtools#170, #171 и #173. Это редкие аварийные входы, а не
   текущий v2-путь с `content_anchor`; до триггера пункт остаётся waiting, но
   не теряется в россыпи GitHub. devtools#169 сюда намеренно не входит:
   дефекта поведения нет, необязательный API-рефакторинг закрыт not planned.
+  Закрыто по решению владельца 2026-09-27, не дожидаясь триггера. По #171 —
+  честное сообщение о брошенной ревизии перед no-op, а не перенос записи
+  `abandoned` (её читает перенос обязательства замены).
+
+- [ ] Барьерный стоп S6 сохраняет S3–S5 и через `resume()`: причина стопа (код 6 — бюджет/stop rule) пишется в состояние, `resume()` её читает и `gate-candidate`/`push`/`ready` не сбрасывает; тест проверяет состояние ПОСЛЕ `resume()` (devtools#276, решение владельца 2026-09-27: гарантия нужна по существу) @owner:github:andrei-shtanakov @id:barrier-stop-ops-survive-resume @epic:eco.dark-factory
 
 - [x] Формулировки и защитные проверки governance-контракта привести к фактическим гарантиям без расширения runtime-механики @owner:github:andrei-shtanakov @id:governance-contract-truth-batch — PR #239 (#182/#185/#195/#237, agent-merge 61e1e2f) + PR #240 (#184, харнесс, мерж человеком 592393b); все пять issues закрыты с evidence
   Источники: devtools#182 (граница blob-anchor), #184 (`merge-pr.sh` — policy

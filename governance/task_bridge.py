@@ -40,7 +40,7 @@ from governance.bundle_dag import (
     # Оба кортежа переэкспортируются намеренно: код моста ходит через
     # `dag_for`, но состав DAG под прежними именами читают его тесты —
     # снять их значило бы спрятать переезд ценой характеризации.
-    BUNDLE_DAG as _BUNDLE_DAG,  # noqa: F401
+    BUNDLE_DAG as _BUNDLE_DAG,
     BUNDLE_DAG_LEGACY5 as _BUNDLE_DAG_LEGACY5,  # noqa: F401
     check_bundle_composition as _check_bundle_composition,
     dag_for as _dag_for,
@@ -2329,11 +2329,7 @@ def deliver_for_run(
     if op.get("status") == "completed":
         pr_done = op.get("pr")
         if pr_done is None:
-            raise RuntimeError(
-                "op tasks-deliver completed, но без номера PR — леджер "
-                f"{state.run_id!r} повреждён или правлен вручную; "
-                "почините op прежде, чем продолжать"
-            )
+            raise _missing_pr(state)
         print(
             f"tasks-спека уже доставлена: PR #{pr_done} "
             f"({state.repo_slug}) — повтор не создаёт PR"
@@ -3122,9 +3118,12 @@ def _previous_dag(
             "из чего; проверьте bundle_dir в run.json и что бандл вмержен "
             "в base_ref"
         )
+    # Состав — по именам известных узлов, как у `check_bundle_composition`:
+    # посторонний README.md не различие состава (devtools#173).
+    known = {fname for fname, _ in _BUNDLE_DAG}
     present = {
         p.name for p in bundle_path.iterdir()
-        if p.is_file() and p.suffix == ".md"
+        if p.is_file() and p.name in known
     }
     matches = [
         _dag_for(v) for v in (None, 3, 4, 5)
@@ -3281,6 +3280,16 @@ def _reconcile_revision(
     return "continue" if same_base else "abandon_and_next"
 
 
+def _missing_pr(state: RunState) -> RuntimeError:
+    """`completed` без номера PR — повреждённый леджер: одна трактовка для
+    обычной доставки и переиздания (devtools#170)."""
+    return RuntimeError(
+        "op tasks-deliver completed, но без номера PR — леджер "
+        f"{state.run_id!r} повреждён или правлен вручную; "
+        "почините op прежде, чем продолжать"
+    )
+
+
 def _reconcile_v1(state: RunState, ops: Ops, op: dict) -> int | None:
     """§I3 для исторической v1 (`tasks-deliver`) — её PR ещё открыт?
 
@@ -3296,12 +3305,13 @@ def _reconcile_v1(state: RunState, ops: Ops, op: dict) -> int | None:
     Разбирается ровно то, что в записи есть: номер её PR.
 
     Возврат: номер PR, если он ещё OPEN (переиздавать нечего); `None` —
-    доставка закрыта мержем либо номера PR в записи нет (древняя запись:
-    поведение как до supersede).
+    доставка закрыта мержем. Записи без номера PR — отказ, как у обычной
+    доставки: без номера не узнать, не висит ли первый PR открытым, и
+    второй PR заводился бы молча (devtools#170).
     """
     pr = op.get("pr")
     if not isinstance(pr, int):
-        return None
+        raise _missing_pr(state)
     pr_state = ops.pr_facts(state.repo_slug, pr).get("state")
     if pr_state == "MERGED":
         return None
@@ -3598,6 +3608,7 @@ def deliver_superseded(
     # явным разбором конфликта I3×I4 — а состояние ещё и
     # самовоспроизводится (каждый следующий запуск плодит ревизию и PR).
     # Терминальны для вызова все исходы, кроме `abandon_and_next`.
+    abandoned_now: tuple[int, str] | None = None
     for n, op in reversed(_revisions(state)):
         status = op.get("status")
         if status not in ("started", "completed"):
@@ -3657,11 +3668,12 @@ def deliver_superseded(
                 f"решите судьбу PR явно: --abandon-revision {n}"
             )
         if decision == "abandon_and_next":
-            _abandon_revision(
-                state, n,
+            reason = (
                 f"base сдвинулся ({op.get('base_sha', '?')[:7]} → "
-                f"{base_sha[:7]}), открытого PR нет",
+                f"{base_sha[:7]}), открытого PR нет"
             )
+            _abandon_revision(state, n, reason)
+            abandoned_now = (n, reason)
             break
         if decision == "return_pr":
             # Окно «PR новой ревизии создан, ветка заменённой ещё жива»:
@@ -3840,6 +3852,15 @@ def deliver_superseded(
         and comparable
         and recorded_content == content
     ):
+        if abandoned_now is not None:
+            # §I5 «Что именно обещает бесследность»: запись `abandoned` —
+            # след реконсиляции этого же вызова, и оператор должен видеть,
+            # что run.json изменён (devtools#171, решение владельца
+            # 2026-09-27 — честное сообщение вместо переноса записи).
+            print(
+                f"ревизия {abandoned_now[0]} брошена реконсиляцией "
+                f"({abandoned_now[1]}) — run.json изменён"
+            )
         print(
             "апстрим не менялся — переиздание не требуется "
             f"(content_anchor {content[:7]})"

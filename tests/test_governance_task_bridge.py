@@ -3962,12 +3962,30 @@ def test_previous_dag_unavailable_when_composition_matches_nothing(
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    (Path(state.target_dir) / state.bundle_dir / "99-alien.md").write_text("x")
+    (Path(state.target_dir) / state.bundle_dir / "10-requirements.md").unlink()
     ops = _ShowFileOps(_spec_text("decomposition"))
     dag, source = tb._previous_dag(
         state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
+
+
+def test_previous_dag_ignores_stray_markdown(tmp_path, monkeypatch) -> None:
+    """devtools#173: a README.md or an author's note next to the nodes used to
+    make the composition match nothing → ``unavailable`` → the §I8 check was
+    skipped silently. The composition is judged by known node names, as
+    `check_bundle_composition` does."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    bundle = Path(state.target_dir) / state.bundle_dir
+    (bundle / "README.md").write_text("о бандле\n")
+    (bundle / "99-alien.md").write_text("x")
+    ops = _ShowFileOps(_spec_text("decomposition"))
+    dag, source = tb._previous_dag(
+        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
+    )
+    assert (dag, source) == (tb._BUNDLE_DAG, "derived_from_spec")
 
 
 def test_previous_dag_refuses_when_bundle_dir_missing(
@@ -6379,6 +6397,49 @@ def test_supersede_resumes_when_branch_stands_on_base(tmp_path, monkeypatch):
     assert len(tb._revisions(saved)) == 1          # v3 не заведена
     assert saved.ops["tasks-deliver-v2"]["status"] == "completed"
     assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops.calls
+
+
+def test_supersede_v1_completed_without_pr_fails_closed(tmp_path, monkeypatch):
+    """devtools#170: `completed` without a PR number is a broken ledger for the
+    ordinary delivery (it refuses) — and must be for the supersede too: with
+    no number nobody can tell whether the first PR still hangs open, and a
+    second PR would be opened silently."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {"status": "completed", "anchor": "СТАРЫЙ"}
+    rs.save(state)
+    before = (rs.run_dir("r-recon") / "run.json").read_bytes()
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    with pytest.raises(RuntimeError, match="без номера PR"):
+        tb.deliver_superseded(state, ops)
+    assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
+    assert ops.touched == []
+
+
+def test_supersede_abandon_then_noop_says_so(tmp_path, monkeypatch, capsys):
+    """devtools#171 (owner's ruling 2026-09-27: an honest message): the
+    reconciliation abandons a shifted v2 without a PR and writes run.json;
+    the upstream did not change, so no revision is due. §I5 allows that
+    trace, but the operator must see it: the output names the abandoned
+    revision before the contract no-op message."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(state, monkeypatch, base_sha="БАЗА-ПОЗАПРОШЛАЯ")
+    state.ops["tasks-deliver"]["content_anchor"] = tb._content_anchor(
+        state.target_dir, state.bundle_dir, None, state.brief
+    )
+    rs.save(state)
+    ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("noop")
+    out = capsys.readouterr().out
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "abandoned"
+    assert "ревизия 2 брошена реконсиляцией" in out
+    assert "run.json изменён" in out
+    assert "апстрим не менялся — переиздание не требуется" in out
 
 
 def test_supersede_abandons_shifted_revision_and_starts_next(
