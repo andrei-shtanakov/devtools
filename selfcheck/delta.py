@@ -12,6 +12,7 @@ from typing import Any
 from selfcheck.probes.base import ProbeResult, ProbeStatus
 
 SKIPPED_KEY = "skipped"
+OPERATOR_MISSING = "selfcheck/operator-missing"
 # anchor kinds whose body starts with the defining file (spec §2.1)
 PATH_KINDS = frozenset({"file", "func", "llm", "make", "skill", "workflow", "unit"})
 # `cli:<name>` comes from [project.scripts] of the repo-root pyproject.toml
@@ -123,16 +124,20 @@ def _changed(old: dict[str, Any], new: dict[str, Any]) -> bool:
     )
 
 
-def _instrument_status(cur: RunSnapshot, anchor: str) -> str:
-    repo, _, probe = anchor.removeprefix("probe:").partition("#")
-    ran = cur.probe_keys.get(f"{probe}@{repo}") is not None
+def _instrument_status(cur: RunSnapshot, item: dict[str, Any]) -> str:
+    repo, _, probe = item["anchor"].removeprefix("probe:").partition("#")
+    key = cur.probe_keys.get(f"{probe}@{repo}")
+    # operator-missing is about a corpus path: a skipped usage-graph (under
+    # --path) never looked at it, so only a run that happened resolves (#415)
+    looked = (SKIPPED_KEY,) if item.get("rule") == OPERATOR_MISSING else ()
+    ran = key is not None and key not in looked
     return "resolved" if repo in cur.scope and ran else "not-rechecked"
 
 
 def _gone_status(base: RunSnapshot, cur: RunSnapshot, item: dict[str, Any]) -> str:
     anchor = item["anchor"]
     if anchor.startswith("probe:"):
-        return _instrument_status(cur, anchor)
+        return _instrument_status(cur, item)
     if anchor.startswith("allow:"):  # recomputed from the config every run —
         # but only a run that read the same config file looked at the entry
         same = cur.config and cur.config == base.config

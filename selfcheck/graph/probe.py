@@ -58,6 +58,9 @@ def _operator(g: Graph, ctx: ProbeCtx) -> list[Finding]:
         if anchor in g.nodes:
             g.nodes[anchor] = dataclasses.replace(g.nodes[anchor], root=True)
         if path not in corpus:
+            # on disk but out of the corpus: the entry is fine, the exclusion
+            # hides the file (#415)
+            excluded = (target.source / path).exists()
             missing.append(
                 Finding(
                     rule="selfcheck/operator-missing",
@@ -68,7 +71,13 @@ def _operator(g: Graph, ctx: ProbeCtx) -> list[Finding]:
                     anchor=f"probe:{target.name}#usage-graph",
                     locations=[Location(path, 1)],
                     text_key=path,
-                    suggestion="уберите запись [[operator]] или верните файл",
+                    suggestion=(
+                        "путь есть на диске, но вне корпуса ([corpus] exclude,"
+                        " .gitignore, symlink): уберите исключение или запись"
+                        " [[operator]]"
+                        if excluded
+                        else "уберите запись [[operator]] или верните файл"
+                    ),
                 )
             )
     return missing
