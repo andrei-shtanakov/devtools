@@ -45,6 +45,9 @@
   docstring «inside an unresolved-launch zone» больше не означает «не
   кандидат в dead». Поправить на «in a zone (a suffix zone exempts, a
   caller-dir zone caps at P7 — never confirmed)»; утверждения не менять.
+  Имя `test_form_is_never_a_false_dead` читать как «никогда не ложный
+  `confirmed`»: формы C1 a и f с rev 5.8 дают dead `likely` с P7 —
+  закрепление этого — в долг вместе с #410, не в этой задаче.
 - **Нормативная правка теста S2:** `tests/selfcheck/test_fleet_run.py::
   test_usage_graph_logic_version_bumped` ждёт `2` → `3` (логика снова
   меняется, §4.3). Это единственный S1/S2-тест, который меняется.
@@ -77,7 +80,7 @@ class NodeFacts:
 # selfcheck/config.py
 @dataclass(frozen=True)
 class OperatorEntry:
-    repo: str      # canonical repo name (manifest git_dir basename)
+    repo: str      # the manifest git_dir, exact; unknown to the manifest → exit 4 (checked in main)
     path: str      # from that repo's root, exact
     reason: str
 @dataclass(frozen=True)
@@ -100,11 +103,13 @@ def _analyzer_config_hash(target) -> str   # material gains "operator": sorted(t
 #   for path in target.operator not in target.corpus:
 #     Finding(rule="selfcheck/operator-missing", category="selfcheck", severity="medium",
 #             confidence=CONFIRMED, owner_repo=repo, anchor=f"probe:{repo}#usage-graph",
-#             locations=[Location(path, 1)], text_key=path)
+#             locations=[Location(path, 1)], text_key=path,
+#             suggestion="уберите запись [[operator]] или верните файл")
 #   (a probe: anchor — its fate follows usage-graph@repo, independent of the --config path)
 
-# selfcheck/run.py — RepoTarget(..., operator=tuple(o.path for o in config.operator
-#                                                    if o.repo == repo.name))
+# selfcheck/run.py — after load_manifest: an [[operator]] repo not in the manifest's
+#   git_dirs → ConfigError → exit 4; then
+#   RepoTarget(..., operator=tuple(o.path for o in config.operator if o.repo == repo.name))
 ```
 
 ## Таблица трассировки
@@ -116,7 +121,7 @@ def _analyzer_config_hash(target) -> str   # material gains "operator": sorted(t
 | §3.2.3 | вид зоны записан; P7 не зависит от `fleet` (`complete` в тесте, но всё равно `likely`); `unresolved-exec` сохраняется | `test_zone_kind_is_recorded`, `test_caller_dir_zone_caps_instead_of_exempting` |
 | §3.2.5, D17 | `[[operator]]` — корень (и в payload) | `test_operator_entry_is_a_root`, `test_run_reads_operator_from_config` |
 | §3.2.5 | действует только на своё `repo` | `test_operator_entries_apply_to_their_repo_only` |
-| §3.2.5 | запись без `repo`/`path`/`reason` → код 4 | `test_operator_config_parsing`, `test_run_reads_operator_from_config` |
+| §3.2.5 | запись без `repo`/`path`/`reason` или с `repo` вне манифеста → код 4 | `test_operator_config_parsing`, `test_run_reads_operator_from_config` |
 | §3.2.5 | запись на несуществующий путь → `selfcheck/operator-missing` | `test_operator_on_a_missing_path_is_a_finding` |
 | §3.2.5 | README не заменяет роль: `doc-only` остаётся `candidate`, подсказка только у `doc-only` | `test_doc_only_dead_hints_at_operator` |
 | §4.3 | `[[operator]]` в конфиг-хэше; `logic_version` 3 | `test_operator_enters_the_analyzer_config_hash`, `test_usage_graph_logic_version_is_3` |
@@ -292,6 +297,7 @@ def test_operator_on_a_missing_path_is_a_finding(tmp_path: Path) -> None:
         "medium",
         "selfcheck",
     )
+    assert missing.suggestion  # says what to do: drop the entry or restore the file
 
 
 def test_doc_only_dead_hints_at_operator(tmp_path: Path) -> None:
@@ -369,6 +375,11 @@ def test_run_reads_operator_from_config(tmp_path: Path) -> None:
     (ws / "bad.toml").write_text('[[operator]]\nrepo = "devtools"\nreason = "r"\n')
     argv[argv.index(str(ws / "sc.toml"))] = str(ws / "bad.toml")
     assert main(argv) == 4
+    (ws / "typo.toml").write_text(
+        '[[operator]]\nrepo = "devtols"\npath = "orphan.py"\nreason = "r"\n'
+    )
+    argv[argv.index(str(ws / "bad.toml"))] = str(ws / "typo.toml")
+    assert main(argv) == 4  # an unknown repo would silently disable the entry
 
 
 def test_operator_entries_apply_to_their_repo_only(tmp_path: Path) -> None:
