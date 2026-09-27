@@ -239,7 +239,7 @@ Source: workstreams/stray-md-disables-i8-for-legacy-v1-20260922/spec/30-decompos
 **Traces to:** [FR-04], [NFR-04]
 
 ### TASK-003: Сдаточный дифф темы
-P2 | 🔍 REVIEW   Est: 0.5d
+P2 | ✅ DONE   Est: 0.5d
 
 Реализовать сценарии BEH-20 (DT-04, группа solo).
 Source: workstreams/stray-md-disables-i8-for-legacy-v1-20260922/spec/30-decomposition.md#DT-04
