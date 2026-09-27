@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -366,24 +367,41 @@ def test_allow_anchor_under_another_config_is_not_rechecked(
     assert _allow_gone(tmp_path, base_config, cur_config) == "not-rechecked"
 
 
+# an anchor literal: f"kind:{…}", f"kind:sub:{…}" or "kind:" + … (#428)
+_ANCHOR_LITERAL = re.compile(r"""f?["']([a-z]+):(?:[a-z]+:)?(?:\{|["']\s*\+)""")
+
+
+def _produced_kinds(root: Path) -> set[str]:
+    return {
+        kind
+        for path in root.rglob("*.py")
+        for kind in _ANCHOR_LITERAL.findall(path.read_text())
+    }
+
+
 def test_every_produced_anchor_kind_is_known_to_the_delta() -> None:
     """#423: the delta's list of anchor kinds is closed; a kind produced by the
     package but unknown there would silently become ``not-rechecked``. The set
     is compared for equality, so a stale kind shows too."""
-    import re
-
     import selfcheck
     from selfcheck.delta import FIXED_PATHS, PATH_KINDS, SPECIAL_KINDS
 
-    root = Path(selfcheck.__file__).parent
-    produced = {
-        kind
-        for path in root.rglob("*.py")
-        for kind in re.findall(r'f"([a-z]+):\{', path.read_text())
-    }
+    produced = _produced_kinds(Path(selfcheck.__file__).parent)
     not_anchors = {"launchd"}  # Location("launchd:<plist>"), graph/build.py
     known = PATH_KINDS | FIXED_PATHS.keys() | SPECIAL_KINDS
     assert produced - not_anchors == known
+
+
+def test_the_kind_scanner_sees_every_anchor_form(tmp_path: Path) -> None:
+    """#428: the guard is planted, not trusted — a sub-kind, a concatenation
+    and single quotes must each be seen on their own."""
+    (tmp_path / "m.py").write_text(
+        'a = f"pin:vendor:{d}"\n'
+        'b = "zzz:" + name\n'
+        "c = f'yyy:{x}'\n"
+        'd = f"cleanup failed: {dest}"\n'  # prose with a colon is no anchor
+    )
+    assert _produced_kinds(tmp_path) == {"pin", "zzz", "yyy"}
 
 
 def test_unknown_anchor_kind_is_never_file_removed(tmp_path: Path) -> None:
