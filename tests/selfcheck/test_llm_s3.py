@@ -133,19 +133,7 @@ FILES = {
 
 @pytest.fixture(scope="module")
 def result(tmp_path_factory: pytest.TempPathFactory) -> ProbeResult:
-    require_tool("uvx")
-    tmp = tmp_path_factory.mktemp("s3llm")
-    repo = make_repo(tmp / "repo", FILES)
-    corpus = tuple(list_corpus(repo))
-    copy = tmp / "run" / "src" / "repo"
-    materialize(repo, corpus, copy, canary_files([LLM_SITES]))
-    target = RepoTarget(
-        "repo", repo, copy, frozenset({"python"}), corpus, EnvInfo("no-env"), now=NOW
-    )
-    try:
-        return run_probe(LLM_SITES, target, tmp / "run" / "work")
-    finally:
-        release(copy)
+    return _probe(tmp_path_factory, FILES)
 
 
 def _rows(result: ProbeResult) -> set[tuple[str, str, str]]:
@@ -233,7 +221,7 @@ def test_code_endpoint(text: str, line: int, hit: bool) -> None:
 
 
 def test_logic_version_bumped() -> None:
-    assert LLM_SITES.logic_version == 3  # + shell default rule (acceptance)
+    assert LLM_SITES.logic_version == 4  # + shell default rule, exact binary (#431)
 
 
 def test_prose_and_trailing_comments_are_not_points(result: ProbeResult) -> None:
@@ -265,6 +253,8 @@ def test_no_syntax_warning_from_fleet_code() -> None:
 SH_DEFAULT = (
     "#!/bin/sh\n"
     'review_cmd="${REVIEW_CMD:-codex exec}"\n'
+    'model="${REVIEW_MODEL:-claude-opus-5}"\n'
+    "# fallback: ${ALT_CMD:-claude -p}\n"
     '$review_cmd --sandbox read-only - < "$work/prompt.txt"\n'
 )
 PY_PROSE = 'DOC = """\n    codex exec --help lists the flags\n"""\n'
@@ -295,6 +285,8 @@ def test_shell_harness_default_expansion_is_a_point(
     res = _probe(tmp_path_factory, {"local.sh": SH_DEFAULT, "doc.py": PY_PROSE})
     rows = {(i["path"], i["line"], i["rule"]) for i in res.extra["inventory"]}
     assert ("local.sh", 2, "harness-resolve-sh") in rows
+    # a model name is not a binary; a comment is not code (review #431)
+    assert not any(p == "local.sh" and ln in (3, 4) for p, ln, _ in rows)
     assert not any(p == "doc.py" for p, _, _ in rows)  # cli-shell: shell files only
 
 

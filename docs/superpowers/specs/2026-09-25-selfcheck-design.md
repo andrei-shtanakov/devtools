@@ -675,9 +675,12 @@ reason = "гейт волн ре-вендора, запускает операт
   `/completion` — Python и TS;
 - D — описания без вызова (каталоги, конфиги) — в инвентарь, не в кандидаты.
 
-Поиск — semgrep-правила `selfcheck/rules/llm.yml` (Python, bash, TS —
-semgrep статичен, поэтому TS не требует S4) плюс AST-досборка аргументов для
-Python. Elixir — вне объёма.
+Поиск — semgrep-правила `selfcheck/rules/llm.yml` (Python, TS, а для shell —
+regex-правила без разбора: bash-парсер semgrep сдаётся на реальных скриптах,
+§10.7; semgrep статичен, поэтому TS не требует S4) плюс AST-досборка
+аргументов для Python. Для shell механика A — это и командная позиция, и
+харнесс как умолчание параметра (`${REVIEW_CMD:-codex exec}`). Elixir — вне
+объёма.
 
 Эвристики кандидата (каждая — отдельный признак в evidence): ответ
 разбирается в enum/bool/фиксированную JSON-схему; промпт — шаблон с
@@ -1671,6 +1674,7 @@ jscpd межрепно не сравнивается (S3 — только ast-д
 |---|---|---|---|
 | `argv-literal` | A | Python, TS | список/кортеж `[$FIRST, $SECOND, …]`: `$FIRST` — строка-харнесс (§3.4) **или** (Python) имя/атрибут вида `…<харнесс>_?(command\|cmd\|bin\|binary\|cli\|path\|exe)`; `$SECOND` — строка-флаг `-x`/`--x…` или `exec`/`run` |
 | `harness-resolve` | A | Python | `os.environ.get(K, "<харнесс>")`, `os.getenv(K, "<харнесс>")`, `shutil.which("<харнесс>")` |
+| `harness-resolve-sh` | A | shell (regex) | умолчание параметра `${VAR:-<харнесс>…}` — имя бинаря целиком (`claude-opus-5` — модель, не бинарь); строка-комментарий не считается (приёмка S3, #431) |
 | `spawn-ts` | A | TS | `spawn`/`spawnSync`/`execFile`/`execa` с литералом-харнессом первым аргументом |
 | `sdk-ts` | B | TS | `new Anthropic(…)`, `new OpenAI(…)`, `$C.messages.create(…)`, `$C.chat.completions.create(…)`, импорт `@anthropic-ai/sdk`, `openai`, `@openai/agents` |
 | `endpoint` | C | Python, TS, shell | строковый литерал с путём `/v1/messages`, `/chat/completions`, `/api/chat`, `/api/generate`, `/completion`, **до которого в литерале нет пробельных символов** (URL, путь, f-строка с подстановкой хоста) |

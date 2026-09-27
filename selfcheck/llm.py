@@ -262,7 +262,9 @@ def _site(ctx: ProbeCtx, rule: str, rel: str, line: int) -> dict[str, Any] | Non
     text = source_text(ctx, rel)
     lines = text.splitlines()
     line_text = lines[line - 1] if 0 < line <= len(lines) else ""
-    if rule in _SHELL_RULES and rel.endswith((".py", *_TS_SUFFIXES)):
+    if rule in _SHELL_RULES and (
+        rel.endswith((".py", *_TS_SUFFIXES)) or line_text.lstrip().startswith("#")
+    ):
         return None
     if rule == "endpoint":
         if rel.endswith(".py"):
@@ -443,7 +445,7 @@ LLM_SITES = ProbeSpec(
     ),
     coverage="reported",
     rules=("A", "B", "C", "D", "candidate:schema|loop", "construction", "sh-default"),
-    logic_version=3,
+    logic_version=4,
     binary="uvx",
     version_args=(*UVX_SEMGREP, "--version"),
     version_range=((1, 178), (1, 179)),
