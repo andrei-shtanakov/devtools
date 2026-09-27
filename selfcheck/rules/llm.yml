@@ -36,6 +36,8 @@ rules:
           regex: (?s).*(/v1/messages|/v1/chat/completions|/api/generate|/completion\b).*
   - id: argv-literal
     languages: [python]
+    paths:
+      include: ["*.py"]
     severity: INFO
     message: harness argv construction (mechanism A)
     patterns:
@@ -50,6 +52,9 @@ rules:
           regex: (?i)^(?:["'](?:claude|codex|opencode|aider|pi|qwen|ollama|llama-cli|copilot)["']|.*(?:claude|codex|opencode|aider|ollama|qwen|copilot)_?(?:command|cmd|bin|binary|cli|path|exe)\b.*)$
   - id: argv-literal-ts
     languages: [js, ts]
+    # no TS parse of extensionless shell scripts (--scan-unknown-extensions)
+    paths:
+      include: ["*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs"]
     severity: INFO
     message: harness argv construction (mechanism A)
     patterns:
@@ -62,6 +67,8 @@ rules:
           regex: ^["'`](?:claude|codex|opencode|aider|pi|qwen|ollama|llama-cli|copilot)["'`]$
   - id: harness-resolve
     languages: [python]
+    paths:
+      include: ["*.py"]
     severity: INFO
     message: harness binary resolution (mechanism A)
     patterns:
@@ -74,6 +81,8 @@ rules:
           regex: ^["'](?:claude|codex|opencode|aider|pi|qwen|ollama|llama-cli|copilot)["']$
   - id: spawn-ts
     languages: [js, ts]
+    paths:
+      include: ["*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs"]
     severity: INFO
     message: harness process launch (mechanism A)
     patterns:
@@ -87,6 +96,8 @@ rules:
           regex: ^["'`](?:claude|codex|opencode|aider|pi|qwen|ollama|llama-cli|copilot)["'`]$
   - id: sdk-ts
     languages: [js, ts]
+    paths:
+      include: ["*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs"]
     severity: INFO
     message: LLM SDK (mechanism B)
     pattern-either:
@@ -100,7 +111,9 @@ rules:
       - pattern: import * as $X from "@anthropic-ai/sdk"
       - pattern: import * as $X from "openai"
   - id: endpoint
-    languages: [python, js, ts, bash]
+    # regex, not a language list: with js/ts listed semgrep parses
+    # extensionless shell scripts as JS (PartialParsing → partial, #424)
+    languages: [regex]
     severity: INFO
     message: LLM endpoint URL (mechanism C)
     pattern-regex: (?:/v1/messages|/chat/completions|/api/chat|/api/generate|/completion)\b
