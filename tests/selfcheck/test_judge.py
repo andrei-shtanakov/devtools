@@ -16,6 +16,7 @@ from selfcheck.judge import (
     JUDGE_VERSION,
     MAX_SLICE,
     SCHEMA,
+    apply_verdicts,
     build_slice,
     cache_key,
     call_judge,
@@ -23,11 +24,14 @@ from selfcheck.judge import (
     is_candidate,
     judge_argv,
     judge_env,
+    judge_status,
     load_cache,
     order_key,
+    run_judge,
     save_cache,
 )
 from selfcheck.model import Confidence, Finding, Location
+from selfcheck.probes.base import ProbeStatus
 from tests.selfcheck.helpers import make_repo
 
 
@@ -301,3 +305,153 @@ def test_cache_write_failure_is_a_warning(tmp_path: Path) -> None:
         assert save_cache(ro / "judge-cache.json", {}) is not None
     finally:
         ro.chmod(0o700)
+
+
+def _counting(verdict: dict | None = None):
+    calls: list[str] = []
+
+    def run(argv, **kw):
+        calls.append(kw["stdin"].read())
+        out = {"structured_output": verdict or GOOD}
+        return subprocess.CompletedProcess(argv, 0, json.dumps(out), "")
+
+    return run, calls
+
+
+def _llm(tmp_path: Path, n: int) -> tuple[list[Finding], dict[str, Path]]:
+    src = _src(tmp_path, {f"m{i}.py": f"x = {i}\n" * 3 for i in range(n)})
+    fs = [
+        _f("llm-sites/replaceable", Confidence.CANDIDATE, path=f"m{i}.py")
+        for i in range(n)
+    ]
+    return fs, src
+
+
+def _claude(_: str) -> str:
+    return "claude"
+
+
+def test_cap_takes_the_first_in_order_and_cache_descends(tmp_path: Path) -> None:
+    src = _src(tmp_path, {"x.py": FUNC})
+    fs = [
+        _f("jscpd/clone", Confidence.LIKELY, line=5, lines=3),
+        _f("llm-sites/replaceable", Confidence.CANDIDATE, line=55),
+        _f("ast-dup/structural", Confidence.CANDIDATE, line=51),
+    ]
+    for f in fs:
+        if f.related:
+            f.related = [
+                {
+                    "owner_repo": "a",
+                    "path": "x.py",
+                    "line": f.locations[0].line,
+                    "member": "m",
+                }
+            ]
+    cache = tmp_path / "judge-cache.json"
+    run, calls = _counting()
+    first = run_judge(fs, src, cache, cap=2, which=_claude, runner=run)
+    order = [f.id for f in sorted(fs, key=order_key)]
+    assert list(first.verdicts) == order[:2]
+    assert [x["id"] for x in first.not_judged] == order[2:]
+    assert (first.calls, first.cached, first.result.status) == (2, 0, ProbeStatus.OK)
+    second = run_judge(fs, src, cache, cap=2, which=_claude, runner=run)
+    assert (second.calls, second.cached, len(second.not_judged)) == (1, 2, 0)
+    assert len(calls) == 3
+
+
+def test_changed_file_or_model_is_a_new_call(tmp_path: Path) -> None:
+    fs, src = _llm(tmp_path, 1)
+    cache = tmp_path / "c.json"
+    run, calls = _counting()
+    run_judge(fs, src, cache, which=_claude, runner=run)
+    run_judge(fs, src, cache, which=_claude, runner=run)
+    assert len(calls) == 1
+    (src["a"] / "m0.py").write_text("x = 99\n")
+    run_judge(fs, src, cache, which=_claude, runner=run)
+    run_judge(fs, src, cache, model="other-model", which=_claude, runner=run)
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize(
+    ("valid", "errors", "status"),
+    [
+        (3, 0, ProbeStatus.OK),
+        (3, 5, ProbeStatus.PARTIAL),
+        (1, 1, ProbeStatus.PARTIAL),
+        (0, 2, ProbeStatus.FAILED),
+        (0, 0, ProbeStatus.OK),
+    ],
+)
+def test_judge_status(valid: int, errors: int, status: ProbeStatus) -> None:
+    assert judge_status(valid, errors) is status
+
+
+def test_cache_hits_plus_missing_source_is_partial(tmp_path: Path) -> None:
+    fs, src = _llm(tmp_path, 3)
+    cache = tmp_path / "c.json"
+    run, _ = _counting()
+    run_judge(fs, src, cache, which=_claude, runner=run)
+    gone = _f("llm-sites/replaceable", Confidence.CANDIDATE, path="gone.py")
+    res = run_judge([*fs, gone], src, cache, which=_claude, runner=run)
+    assert res.cached == 3 and res.calls == 0
+    assert res.verdicts[gone.id]["detail"] == "source-missing"
+    assert res.result.status is ProbeStatus.PARTIAL
+
+
+def test_errors_not_cached_and_all_errors_is_failed(tmp_path: Path) -> None:
+    fs, src = _llm(tmp_path, 2)
+
+    def flaky(argv, **kw):
+        ok = "x = 0" in kw["stdin"].read()
+        out = {"structured_output": GOOD} if ok else {"is_error": True, "result": "x"}
+        return subprocess.CompletedProcess(argv, 0, json.dumps(out), "")
+
+    part = run_judge(fs, src, tmp_path / "c.json", which=_claude, runner=flaky)
+    assert part.result.status is ProbeStatus.PARTIAL
+    assert len(load_cache(tmp_path / "c.json")[0]) == 1
+
+    def broken(argv, **kw):
+        return subprocess.CompletedProcess(argv, 0, "nope", "")
+
+    fs2, src2 = _llm(tmp_path / "b", 2)
+    failed = run_judge(fs2, src2, tmp_path / "d.json", which=_claude, runner=broken)
+    assert failed.result.status is ProbeStatus.FAILED
+
+
+def test_no_binary_is_unavailable_and_cache_still_applies(tmp_path: Path) -> None:
+    fs, src = _llm(tmp_path, 2)
+    cache = tmp_path / "c.json"
+    run, calls = _counting()
+    run_judge(fs[:1], src, cache, which=_claude, runner=run)
+    res = run_judge(fs, src, cache, which=lambda _: None, runner=run)
+    assert res.result.status is ProbeStatus.UNAVAILABLE and len(calls) == 1
+    assert res.cached == 1 and [x["id"] for x in res.not_judged] == [fs[1].id]
+
+
+def test_truncated_is_carried(tmp_path: Path) -> None:
+    src = _src(tmp_path, {"x.py": "x = 1\n" * 40000})
+    f = _f("jscpd/clone", Confidence.LIKELY, line=1, lines=30000)
+    f.related = [{"owner_repo": "a", "path": "x.py", "line": 1, "member": "1"}]
+    run, _ = _counting()
+    res = run_judge([f], src, tmp_path / "c.json", which=_claude, runner=run)
+    assert res.verdicts[f.id]["truncated"] is True
+
+
+def test_apply_never_confirmed_nor_new_id() -> None:
+    cand = _f("llm-sites/replaceable", Confidence.CANDIDATE)
+    keep = _f("jscpd/clone", Confidence.LIKELY, lines=9)
+    confirmed = _f("ast-dup/exact", Confidence.CONFIRMED)
+    ids = (cand.id, keep.id, confirmed.id)
+    apply_verdicts(
+        [cand, keep, confirmed],
+        {
+            cand.id: GOOD,
+            keep.id: {**GOOD, "verdict": "keep", "replacement": "none"},
+            confirmed.id: GOOD,
+        },
+    )
+    assert cand.confidence is Confidence.LIKELY and keep.confidence is Confidence.LIKELY
+    assert confirmed.confidence is Confidence.CONFIRMED  # never lowered
+    assert (cand.id, keep.id, confirmed.id) == ids
+    assert cand.judge and cand.judge["verdict"] == "replace"

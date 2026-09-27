@@ -6,17 +6,20 @@ import ast
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from selfcheck.corpus import raw_path
 from selfcheck.graph.model import parse_python
 from selfcheck.model import Confidence, Finding
-from selfcheck.probes.base import run_group
+from selfcheck.probes.base import ProbeResult, ProbeStatus, run_group
 
 JUDGE_RULES = ("llm-sites", "ast-dup", "cli-overlap", "jscpd")
 _LEVEL = {Confidence.LIKELY: 0, Confidence.CANDIDATE: 1}
@@ -313,3 +316,125 @@ def save_cache(path: Path, cache: Mapping[str, dict]) -> str | None:
     except OSError as exc:
         return f"judge-cache {path.name} not saved: {exc}"
     return None
+
+
+WORKERS = 4
+
+
+@dataclass
+class JudgeRun:
+    """What one judge pass produced (§11.2, §11.6)."""
+
+    verdicts: dict[str, dict]
+    not_judged: list[dict[str, str]]
+    result: ProbeResult
+    warnings: list[str]
+    calls: int = 0
+    cached: int = 0
+    errors: int = 0
+    candidates: int = 0
+
+
+def judge_status(valid: int, errors: int) -> ProbeStatus:
+    """ok / partial (errors and ≥ 1 valid) / failed (errors, none valid) (§11.6)."""
+    if not errors:
+        return ProbeStatus.OK
+    return ProbeStatus.PARTIAL if valid else ProbeStatus.FAILED
+
+
+def _row(status: ProbeStatus, model: str, reason: str) -> ProbeResult:
+    res = ProbeResult("judge", "devtools", status, reason)
+    res.tool_version = f"judge v{JUDGE_VERSION} / {model}"
+    return res
+
+
+def run_judge(
+    findings: list[Finding],
+    sources: Mapping[str, Path],
+    cache_path: Path,
+    *,
+    cap: int = 100,
+    model: str = DEFAULT_MODEL,
+    which: Callable[[str], str | None] = shutil.which,
+    runner: Runner = run_group,
+    workers: int = WORKERS,
+) -> JudgeRun:
+    """Judge candidates in the normative order under ``cap`` new calls (§11)."""
+    cache, warnings = load_cache(cache_path)
+    run = JudgeRun({}, [], _row(ProbeStatus.OK, model, ""), warnings)
+    binary = which("claude")
+    todo: list[tuple[Finding, JudgeSlice, str]] = []
+    for f in sorted((f for f in findings if is_candidate(f)), key=order_key):
+        run.candidates += 1
+        sl = build_slice(f, sources)
+        if sl is None:
+            run.verdicts[f.id] = _error("source-missing")
+            run.errors += 1
+            continue
+        key = cache_key(sl.text, model)
+        if key in cache:
+            entry = {k: v for k, v in cache[key].items() if k != "at"}
+            run.verdicts[f.id] = {
+                **entry,
+                "cached": True,
+                "model": model,
+                "truncated": sl.truncated,
+            }
+            run.cached += 1
+        elif binary is not None and len(todo) < cap:
+            todo.append((f, sl, key))
+        else:
+            run.not_judged.append({"id": f.id, "rule": f.rule})
+    if binary is None:
+        run.result = _row(ProbeStatus.UNAVAILABLE, model, "no claude on PATH")
+        return run
+    stamp = datetime.now(UTC).date().isoformat()
+    pool = ThreadPoolExecutor(max_workers=workers)
+    futures: list[tuple[Finding, JudgeSlice, str, Future[dict[str, str]]]] = []
+    try:
+        futures.extend(
+            (f, sl, key, pool.submit(call_judge, binary, sl.text, model, runner=runner))
+            for f, sl, key in todo
+        )
+        for f, sl, key, fut in futures:
+            out = fut.result()
+            run.verdicts[f.id] = {
+                **out,
+                "cached": False,
+                "model": model,
+                "truncated": sl.truncated,
+            }
+            run.calls += 1
+            if out["verdict"] == "error":
+                run.errors += 1
+                continue
+            cache[key] = {**out, "at": stamp}
+            if warning := save_cache(cache_path, cache):  # keep paid verdicts early
+                run.warnings.append(warning)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+        for _f, _sl, key, fut in futures:
+            if fut.done() and not fut.cancelled() and fut.exception() is None:
+                out = fut.result()
+                if out["verdict"] != "error":
+                    cache.setdefault(key, {**out, "at": stamp})
+        if warning := save_cache(cache_path, cache):  # Ctrl-C keeps finished verdicts
+            run.warnings.append(warning)
+    valid = run.cached + run.calls - (run.errors - _missing(run))
+    run.result = _row(judge_status(valid, run.errors), model, f"{run.errors} errors")
+    return run
+
+
+def _missing(run: JudgeRun) -> int:
+    return sum(1 for v in run.verdicts.values() if v.get("detail") == "source-missing")
+
+
+def apply_verdicts(findings: list[Finding], verdicts: Mapping[str, dict]) -> None:
+    """Only ``judge`` and confidence change; never ``confirmed``, never lowered."""
+    for f in findings:
+        v = verdicts.get(f.id)
+        if v is None:
+            continue
+        f.judge = dict(v)
+        if v["verdict"] == "replace" and f.confidence is Confidence.CANDIDATE:
+            f.confidence = Confidence.LIKELY
