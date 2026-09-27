@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 from collections.abc import Callable, Iterable
@@ -57,6 +59,35 @@ class RepoTarget:
     operator: tuple[str, ...] = ()  # this repo's [[operator]] paths (§3.2.5)
 
 
+def run_group(
+    argv: list[str],
+    *,
+    capture_output: bool = False,
+    timeout: float | None = None,
+    check: bool = False,
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run`` in a session of its own: on timeout, Ctrl-C or any
+    error the whole process group dies, not only the direct child (npx → node,
+    uvx → semgrep-core)."""
+    if capture_output:
+        kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    with subprocess.Popen(argv, start_new_session=True, **kwargs) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except BaseException:  # timeout, Ctrl-C (only we get SIGINT) or any error
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:  # the group is already gone
+                pass
+            proc.communicate()
+            raise
+    done = subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    if check:
+        done.check_returncode()
+    return done
+
+
 @dataclass(frozen=True)
 class ProbeCtx:
     """What one probe invocation works with."""
@@ -65,7 +96,7 @@ class ProbeCtx:
     work: Path
     inputs: tuple[str, ...]
     cwd: Path
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+    runner: Callable[..., subprocess.CompletedProcess[str]] = run_group
 
 
 @dataclass
@@ -299,7 +330,7 @@ def run_probe(
     target: RepoTarget,
     work_root: Path,
     *,
-    runner: Runner = subprocess.run,
+    runner: Runner = run_group,
     which: Which = shutil.which,
 ) -> ProbeResult:
     """Run one probe on one repo and classify the outcome (spec §4.2).

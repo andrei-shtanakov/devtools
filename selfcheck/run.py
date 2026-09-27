@@ -309,7 +309,6 @@ def _document(
     manifest: ManifestInfo,
     config: Config,
     acc: _Run,
-    final: list[Finding],
     suppressed: list[Finding],
     snapshot: RunSnapshot,
     delta: tuple[dict[str, str], list[dict[str, str]]],
@@ -337,7 +336,9 @@ def _document(
             {**r.to_json(), "key": acc.keys.get(f"{r.probe}@{r.repo}")}
             for r in acc.results
         ],
-        "findings": [f.to_json() for f in final],
+        # the snapshot copy carries compute_delta's `unverified` marks (#407);
+        # re-serialising `final` would drop them the day to_json copies lists
+        "findings": list(snapshot.findings.values()),
         "suppressed": [f.to_json() for f in suppressed],
         "suppressed_no_env": acc.no_env,
         "graph": acc.graph,
@@ -458,7 +459,6 @@ def main(
         manifest,
         config,
         acc,
-        final,
         allow.suppressed,
         snapshot,
         delta,
