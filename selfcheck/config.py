@@ -40,6 +40,8 @@ class AllowEntry:
         if not self.anchor.startswith("file:"):
             return False
         path = self.anchor.removeprefix("file:")
+        if finding.anchor == f"llm:{path}":  # a shell site has no qualname (#411)
+            return True
         return any(
             finding.anchor.startswith(f"{kind}:{path}::") for kind in ("func", "llm")
         )

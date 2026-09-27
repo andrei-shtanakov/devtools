@@ -464,7 +464,8 @@ llm-replaceable — low; `usage-graph/unresolved-exec` — low; `selfcheck/*` �
 `until` — **все обязательны** (запись без них — ошибка загрузки конфига,
 код выхода 4); необязательное `repo` ограничивает запись одним репо (rev 5.9,
 §10.8). `anchor` вида `file:<path>` покрывает все якоря этого файла
-(`file:<path>`, `func:<path>::…`, `llm:<path>::…`); прочие `anchor` —
+(`file:<path>`, `func:<path>::…`, `llm:<path>::…` и shell-якорь
+`llm:<path>` без qualname — devtools#411); прочие `anchor` —
 точное совпадение. Истёкший `until` — находка `selfcheck/allow-expired`. Первая
 запись — `issue_console.py` (неприкасаем по решению владельца: новый TUI —
 новый файл). Подавленная находка остаётся в JSON в разделе `suppressed`.

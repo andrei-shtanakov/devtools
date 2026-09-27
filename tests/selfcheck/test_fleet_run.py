@@ -119,7 +119,7 @@ def test_without_fleet_nothing_else_changes(tmp_path: Path) -> None:
 def test_usage_graph_logic_version_bumped() -> None:
     """S2 changes usage-graph even without --fleet (vendored-in, P6, partial):
     the comparability key must change against S1 baselines (§4.3, review r1 M4)."""
-    assert USAGE_GRAPH.logic_version == 4  # format E and Elixir test role (rev 5.9)
+    assert USAGE_GRAPH.logic_version == 5  # BOM-aware reads, make calls (#411)
 
 
 def test_broken_declaration_without_fleet_is_exit_2(tmp_path: Path) -> None:

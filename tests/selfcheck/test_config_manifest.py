@@ -104,15 +104,18 @@ def test_file_anchor_covers_its_file(tmp_path: Path) -> None:
         finding("func:issue_console.py::main"),
         finding("file:issue_console.py"),
         finding("llm:issue_console.py::run"),
+        finding("llm:issue_console.py"),  # a shell site: no `::` (#411)
         finding("func:other.py::f"),
         finding("func:issue_console.pyx::f"),
+        finding("llm:issue_console.pyx"),
     ]
     res = apply_allowlist(items, cfg, date(2026, 9, 26))
     assert [f.anchor for f in res.kept] == [
         "func:other.py::f",
         "func:issue_console.pyx::f",
+        "llm:issue_console.pyx",
     ]
-    assert len(res.suppressed) == 3 and res.expired == []
+    assert len(res.suppressed) == 4 and res.expired == []
 
 
 def test_expired_entry_becomes_finding(tmp_path: Path) -> None:
