@@ -80,3 +80,21 @@ def test_repo_state(tmp_path: Path) -> None:
     assert len(state["head"]) == 40 and state["dirty"] is False
     (clean / "new.py").write_text("")
     assert repo_state(clean)["dirty"] is True
+
+
+def test_non_utf8_name_stays_in_the_corpus(tmp_path: Path, monkeypatch) -> None:
+    """#409: a Latin-1 name from ``ls-files`` (Linux) decodes like the
+    filesystem does — no UnicodeDecodeError (exit 1, no report) — and stays in
+    the corpus: dropping it would drop its references and fake a dead file."""
+    import subprocess
+
+    from selfcheck import corpus
+
+    repo = make_repo(tmp_path / "r", {"a.py": ""})
+    listing = subprocess.CompletedProcess([], 0, b"a.py\0caf\xe9.py\0", b"")
+    monkeypatch.setattr(corpus, "_git", lambda *a, **k: listing)
+    real = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda self: self.name == "caf\udce9.py" or real(self)
+    )
+    assert list_corpus(repo) == ["a.py", "caf\udce9.py"]

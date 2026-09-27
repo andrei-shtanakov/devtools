@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from selfcheck.delta import RunSnapshot
+from selfcheck.fleet.reader import shown
 
 
 def _token() -> str:
@@ -71,10 +72,11 @@ def find_baseline(
 
 
 def write_report(run_dir: Path, doc: dict[str, Any]) -> None:
-    """report.md, then report.json atomically (a baseline is never half-written)."""
-    (run_dir / "report.md").write_text(render_markdown(doc))
+    """report.md, then report.json atomically (a baseline is never half-written).
+    Non-UTF-8 paths arrive as surrogates and are written as U+FFFD (#409)."""
+    (run_dir / "report.md").write_text(shown(render_markdown(doc)))
     tmp = run_dir / "report.json.tmp"
-    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2))
+    tmp.write_text(shown(json.dumps(doc, ensure_ascii=False, indent=2)))
     os.replace(tmp, run_dir / "report.json")
 
 

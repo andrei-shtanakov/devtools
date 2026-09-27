@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -119,11 +120,34 @@ def fleet_names(
     return tuple(n for n in names if n not in scope)
 
 
+def _git_dirs(node: object) -> set[str]:
+    if isinstance(node, dict):
+        found = {node["git_dir"]} if isinstance(node.get("git_dir"), str) else set()
+        return found.union(*(_git_dirs(v) for v in node.values()))
+    if isinstance(node, list):
+        return set().union(*(_git_dirs(v) for v in node))
+    return set()
+
+
+def expected_fleet(
+    manifest: Path, mrepo: RepoEntry | None, scope_name: str
+) -> tuple[str, ...]:
+    """U − {R} recounted from the raw manifest: every ``git_dir`` at any depth,
+    plus the manifest repo. Deliberately shares no code with ``fleet_names`` —
+    §9.6 condition 2 compares the two, so a composition bug cannot vouch for
+    itself (#412)."""
+    universe = _git_dirs(tomllib.loads(manifest.read_text()))
+    if mrepo is not None:
+        universe.add(mrepo.name)
+    return tuple(sorted(universe - {scope_name}))
+
+
 def load_fleet(
     workspace: Path,
     names: Sequence[str],
     run_dir: Path,
     *,
+    expected: Sequence[str],
     scope_name: str,
     cache: dict[str, FleetRepo] | None = None,
     paths: Mapping[str, Path] | None = None,
@@ -139,7 +163,7 @@ def load_fleet(
     root = build_canary(run_dir / CANARY_REPO / scope_name, scope_name)
     canary = reader.read_repo(root, CANARY_REPO)
     stale_ok = canary.state is not None and canary.state.stale == ("no-origin-head",)
-    return FleetView(repos, tuple(names), [] if stale_ok else ["stale"], canary)
+    return FleetView(repos, tuple(expected), [] if stale_ok else ["stale"], canary)
 
 
 def _fleet_finding(

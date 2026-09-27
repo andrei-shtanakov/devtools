@@ -174,6 +174,7 @@ def read_repo(path: Path, name: str) -> FleetRepo:
         repo.problems.append(("ls-files", error))
         return repo
     root = os.path.realpath(path)
+    texts: dict[str, list[str]] = {}
     for rel in sorted(modes):
         full = path / rel
         if modes[rel] == GITLINK:
@@ -192,7 +193,12 @@ def read_repo(path: Path, name: str) -> FleetRepo:
         if text is None:
             repo.binary += 1
         else:
-            repo.texts[shown(rel)] = text
+            texts.setdefault(shown(rel), []).append(text)
+    for key, found in texts.items():
+        if len(found) == 1:
+            repo.texts[key] = found[0]
+        else:  # two raw names, one shown name: keeping either loses mentions
+            repo.problems.append(("unreadable", key))
     if not repo.texts:
         repo.problems.append(("empty", ""))
     repo.state = stale_reasons(path)

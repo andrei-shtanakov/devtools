@@ -10,6 +10,7 @@ from selfcheck.fleet.assemble import (
     CANARY_REPO,
     FleetView,
     build_canary,
+    expected_fleet,
     fleet_findings,
     fleet_names,
     load_fleet,
@@ -17,7 +18,7 @@ from selfcheck.fleet.assemble import (
     surface_repos,
 )
 from selfcheck.fleet.reader import FleetRepo, RepoState
-from selfcheck.manifest import load_manifest
+from selfcheck.manifest import RepoEntry, load_manifest
 from tests.selfcheck.helpers import commit, fleet_ws, git, make_repo, synced
 
 
@@ -26,7 +27,7 @@ def _view(ws: Path, run_dir: Path, scope: str = "devtools") -> FleetView:
     mrepo = manifest_repo(ws / "umbrella" / "m.toml", ws)
     names = fleet_names(info, mrepo, [scope])
     paths = {mrepo.name: mrepo.path} if mrepo else {}
-    return load_fleet(ws, names, run_dir, scope_name=scope, paths=paths)
+    return load_fleet(ws, names, run_dir, expected=names, scope_name=scope, paths=paths)
 
 
 def test_composition_includes_manifest_repo(tmp_path: Path) -> None:
@@ -36,6 +37,35 @@ def test_composition_includes_manifest_repo(tmp_path: Path) -> None:
     assert repo is not None and repo.name == "umbrella"
     assert fleet_names(info, repo, ["devtools"]) == ("nb", "docs-nb", "umbrella")
     assert fleet_names(info, None, ["devtools", "nb"]) == ("docs-nb",)
+
+
+def test_expected_fleet_agrees_with_fleet_names_on_a_sound_manifest(
+    tmp_path: Path,
+) -> None:
+    ws = fleet_ws(tmp_path)
+    manifest = ws / "umbrella" / "m.toml"
+    info = load_manifest(manifest, ws)
+    mrepo = manifest_repo(manifest, ws)
+    for scope in ("devtools", "nb", "umbrella"):
+        assert expected_fleet(manifest, mrepo, scope) == tuple(
+            sorted(fleet_names(info, mrepo, [scope]))
+        )
+
+
+def test_expected_fleet_is_recounted_from_the_raw_manifest(tmp_path: Path) -> None:
+    """#412: every git_dir at any depth, deduped (a member shares its core's
+    git_dir), plus the manifest repo, minus R — no manifest.py code involved."""
+    manifest = tmp_path / "m.toml"
+    manifest.write_text(
+        '[cores.a]\ngit_dir = "a"\n'
+        '[cores.a-member]\ngit_dir = "a"\nmember = true\n'
+        '[apps.b]\ngit_dir = "b"\n'
+        '[future.c]\ngit_dir = "c"\n'
+        '[[tools.list]]\ngit_dir = "d"\n'
+    )
+    assert expected_fleet(manifest, None, "a") == ("b", "c", "d")
+    umbrella = RepoEntry("u", tmp_path, frozenset())
+    assert expected_fleet(manifest, umbrella, "b") == ("a", "c", "d", "u")
 
 
 def test_root_umbrella_is_never_a_fleet_repo(tmp_path: Path) -> None:

@@ -24,11 +24,13 @@ def _git(
 
 
 def list_corpus(repo: Path, exclude: Sequence[str] = ()) -> list[str]:
-    """Tracked + untracked-not-ignored regular files, minus ``exclude``."""
+    """Tracked + untracked-not-ignored regular files, minus ``exclude``. Names
+    decode like the filesystem does (surrogates for non-UTF-8 bytes), so the
+    raw name still opens the file; the report shows it with U+FFFD."""
     raw = _git(
         repo, "ls-files", "-z", "--cached", "--others", "--exclude-standard"
     ).stdout
-    names = sorted({p for p in raw.decode().split("\0") if p})
+    names = sorted({os.fsdecode(p) for p in raw.split(b"\0") if p})
     result: list[str] = []
     for rel in names:
         if any(glob_match(p, rel) for p in exclude):

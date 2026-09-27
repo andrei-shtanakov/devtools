@@ -21,6 +21,7 @@ from selfcheck.env import apply_env_policy, detect_env
 from selfcheck.fleet.assemble import (
     CANARY_NODE,
     FleetView,
+    expected_fleet,
     fleet_findings,
     fleet_names,
     load_fleet,
@@ -158,6 +159,7 @@ def _fleet_view(
         args.workspace,
         names,
         run_dir,
+        expected=expected_fleet(args.manifest, fleet.mrepo, repo.name),
         scope_name=repo.name,
         cache=fleet.cache,
         paths=paths,
