@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -29,6 +30,10 @@ from selfcheck.roles import Role, glob_match, role_of
         ("docs/runbook.txt", Role.DOCUMENTATION),
         ("issue_worker.py", Role.SOURCE),
         ("skills/fleet-check/extra/SKILL.md", Role.DOCUMENTATION),
+        ("test/contracts/vendored_test.exs", Role.TEST),
+        ("apps/a/test/a_test.exs", Role.TEST),
+        ("test/support/fixtures/x.json", Role.TEST),
+        ("lib/kapelle/test_helper.ex", Role.SOURCE),
     ],
 )
 def test_default_roles(path: str, role: Role) -> None:
@@ -144,3 +149,15 @@ def test_manifest_entry_without_git_dir(tmp_path: Path) -> None:
     manifest.write_text("[apps.x]\nrepo_url = 'u'\n")
     with pytest.raises(ConfigError):
         load_manifest(manifest, tmp_path)
+
+
+def test_allow_repo_limits_the_entry(tmp_path: Path) -> None:
+    cfg = tmp_path / "s.toml"
+    cfg.write_text(
+        '[[allow]]\nanchor = "file:x.py"\nrepo = "a"\nreason = "r"\n'
+        "until = 2099-01-01\n"
+    )
+    entry = load_config(cfg).allow[0]
+    mine = Finding("r/x", "quality", "low", Confidence.LIKELY, "a", "file:x.py", [])
+    assert entry.matches(mine)
+    assert not entry.matches(replace(mine, owner_repo="b"))

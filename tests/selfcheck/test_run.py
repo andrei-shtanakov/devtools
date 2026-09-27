@@ -18,6 +18,7 @@ from selfcheck.registry import REGISTRY
 from selfcheck.report import new_run_dir
 from selfcheck.run import exit_code, main
 from tests.selfcheck.helpers import (
+    make_repo,
     plist_dir,
     require_npx_package,
     require_probe,
@@ -337,6 +338,86 @@ def test_non_utf8_scope_path_reaches_the_report_as_shown(
     (orphan,) = [f for f in first["findings"] if f["anchor"] == "file:caf\ufffd.py"]
     assert orphan["category"] == "dead"
     assert second["delta"]["statuses"][orphan["id"]] == "persisting"
+
+
+def test_allow_repo_not_in_manifest_is_exit_4(tmp_path: Path) -> None:
+    ws = workspace(tmp_path)
+    cfg = ws / "s.toml"
+    cfg.write_text(
+        '[[allow]]\nanchor = "file:x.py"\nrepo = "nope"\nreason = "r"\n'
+        "until = 2099-01-01\n"
+    )
+    assert main([*args(ws), "--config", str(cfg), "--probe", "ruff"]) == 4
+
+
+def test_cross_repo_dup_in_one_run(tmp_path: Path) -> None:
+    body = "".join(f"    v{i} = x * {i}\n" for i in range(8))
+    src = f"def helper(x):\n{body}    return x\n"
+    ws = workspace(tmp_path, {"h.py": src})
+    make_repo(
+        tmp_path / "other",
+        {"pyproject.toml": '[project]\nname = "o"\nversion = "0"\n', "g.py": src},
+    )
+    (ws / "m.toml").write_text(
+        '[tools.devtools]\ngit_dir = "devtools"\n[tools.other]\ngit_dir = "other"\n'
+    )
+    main([*args(ws), "--repo", "devtools", "--repo", "other", "--probe", "ast-dup"])
+    doc = reports(ws)[-1]
+    groups = [f for f in doc["findings"] if f["rule"] == "ast-dup/exact"]
+    assert len(groups) == 1
+    assert {r["owner_repo"] for r in groups[0]["related"]} == {"devtools", "other"}
+    assert any("вендор-фильтр не применён" in w for w in doc["run"]["warnings"])
+
+
+def test_all_scans_every_manifest_repo(tmp_path: Path) -> None:
+    ws = workspace(tmp_path)
+    make_repo(tmp_path / "other", {"a.py": "import os\n"})
+    (ws / "m.toml").write_text(
+        '[tools.devtools]\ngit_dir = "devtools"\n[tools.other]\ngit_dir = "other"\n'
+    )
+    code = main([*args(ws), "--all", "--probe", "ruff"])
+    doc = reports(ws)[-1]
+    assert doc["run"]["scope"] == ["devtools", "other"]
+    assert code == run_module.exit_code(
+        [
+            run_module.ProbeResult(
+                p["probe"], p["repo"], run_module.ProbeStatus(p["status"])
+            )
+            for p in doc["probes"]
+        ]
+    )  # the worst over both repos
+    md = next((ws / "out").glob("*/report.md")).read_text()
+    assert "## Репо" in md and "| other |" in md
+
+
+def test_all_with_repo_is_exit_4(tmp_path: Path) -> None:
+    ws = workspace(tmp_path)
+    assert main([*args(ws), "--all", "--repo", "devtools"]) == 4
+
+
+def test_inventory_rows_carry_repo(tmp_path: Path) -> None:
+    require_tool("uvx")
+    ws = workspace(
+        tmp_path, {"c.py": 'import subprocess\nsubprocess.run(["claude", "-p", "x"])\n'}
+    )
+    main([*args(ws), "--probe", "llm-sites"])
+    doc = reports(ws)[-1]
+    assert {r["repo"] for r in doc["inventory"]["llm"]} == {"devtools"}
+
+
+def test_env_search_paths_counts_passed_paths(tmp_path: Path) -> None:
+    """#426 review: run.env.<repo>.search_paths counts editable paths present
+    in the copy — the ones pyrefly gets when it runs (§10.4)."""
+    from tests.selfcheck.helpers import fake_venv
+
+    ws = workspace(tmp_path, {"pkg/m.py": "x = 1\n"})
+    repo = ws / "devtools"
+    site = fake_venv(repo)
+    (site / "_e_pkg.pth").write_text(f"{repo / 'pkg'}\n")
+    (site / "_e_gone.pth").write_text(f"{repo / 'build'}\n")
+    (repo / "build").mkdir()  # untracked, empty: not in the copy
+    main([*args(ws), "--probe", "ruff"])
+    assert reports(ws)[-1]["run"]["env"]["devtools"]["search_paths"] == 1
 
 
 _TWIN = (

@@ -24,6 +24,7 @@ class EnvInfo:
     stale: bool = False
     site_packages: Path | None = None
     python_version: str | None = None
+    search_paths: tuple[str, ...] = ()  # editable .pth paths inside the checkout
 
 
 def detect_env(repo: Path) -> EnvInfo:
@@ -39,7 +40,31 @@ def detect_env(repo: Path) -> EnvInfo:
             version = ".".join(value.strip().split(".")[:2])
     lock = repo / "uv.lock"
     stale = lock.is_file() and lock.stat().st_mtime > cfg.stat().st_mtime
-    return EnvInfo("checkout-venv", stale, sites[0], version)
+    return EnvInfo(
+        "checkout-venv", stale, sites[0], version, editable_paths(repo, sites[0])
+    )
+
+
+def editable_paths(repo: Path, site: Path) -> tuple[str, ...]:
+    """Path lines of ``site/*.pth`` inside ``repo``, relative to it (§10.4).
+
+    Read as text only: ``import`` lines are executable and are skipped; a path
+    outside the checkout is dropped (probes see only the copy)."""
+    root = repo.resolve()
+    found: set[str] = set()
+    for pth in sorted(site.glob("*.pth")):
+        try:
+            lines = pth.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in (ln.strip() for ln in lines):
+            if not line or line.startswith(("#", "import ", "import\t")):
+                continue
+            raw = Path(line)
+            path = (raw if raw.is_absolute() else site / raw).resolve()
+            if path == root or root in path.parents:
+                found.add(path.relative_to(root).as_posix() or ".")
+    return tuple(sorted(found))
 
 
 def canonical_name(name: str) -> str:

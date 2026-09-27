@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import ast
 import copy
+import dataclasses
 import hashlib
 import re
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from selfcheck.graph.build import make_recipes
 from selfcheck.model import Confidence, Finding, Location
@@ -123,64 +126,103 @@ def function_hashes(source: str, path: str) -> list[FuncHash]:
     return result
 
 
-def _dup(
+Member = tuple[str, FuncHash]
+Vendored = Mapping[str, Mapping[str, list[dict[str, str]]]]
+
+
+def _order(member: Member) -> tuple[str, str, int]:
+    return (member[0], member[1].path, member[1].line)
+
+
+def _group(
     rule: str,
     kind: str,
     key: str,
-    members: list[FuncHash],
-    repo: str,
+    members: list[Member],
     confidence: Confidence,
     evidence: list[dict[str, str]],
 ) -> Finding:
-    ordered = sorted(members, key=lambda m: (m.path, m.line))
+    ordered = sorted(members, key=_order)
+    owner = ordered[0][0]
     return Finding(
         rule=rule,
         category="duplicate",
         severity="medium",
         confidence=confidence,
-        owner_repo=repo,
+        owner_repo=owner,
         anchor=f"dup:{kind}:{key[:16]}",
-        locations=[Location(m.path, m.line) for m in ordered],
+        locations=[Location(h.path, h.line) for r, h in ordered if r == owner],
         related=[
-            {"owner_repo": repo, "path": m.path, "line": m.line, "member": m.qualname}
-            for m in ordered
+            {"owner_repo": r, "path": h.path, "line": h.line, "member": h.qualname}
+            for r, h in ordered
         ],
         evidence=evidence,
         suggestion="вынести в общую функцию или модуль",
     )
 
 
-def dup_findings(hashes: list[FuncHash], repo: str) -> list[Finding]:
-    """exact groups → confirmed; structural-only groups → candidate."""
-    by_exact: dict[str, list[FuncHash]] = defaultdict(list)
-    by_struct: dict[str, list[FuncHash]] = defaultdict(list)
-    for item in hashes:
-        by_exact[item.exact].append(item)
-        by_struct[item.structural].append(item)
-    found = [
-        _dup("ast-dup/exact", "exact", key, group, repo, Confidence.CONFIRMED, [])
-        for key, group in by_exact.items()
-        if len(group) >= 2
-    ]
+def _is_vendor_group(members: list[Member], vendored: Vendored) -> bool:
+    """Declared copies plus at most one upstream in the owner repo (§10.6)."""
+    decls = [vendored.get(r, {}).get(h.path, []) for r, h in members]
+    owners = {d["owner"] for ds in decls for d in ds}
+    outside = [r for (r, _), ds in zip(members, decls, strict=True) if not ds]
+    return bool(owners) and len(outside) <= 1 and all(r in owners for r in outside)
+
+
+def group_dups(
+    hashes: Mapping[str, list[FuncHash]], vendored: Vendored | None
+) -> tuple[list[Finding], list[dict[str, Any]]]:
+    """Duplicate groups over every repo of the run; vendor groups aside (§10.6)."""
+    by_exact: dict[str, list[Member]] = defaultdict(list)
+    by_struct: dict[str, list[Member]] = defaultdict(list)
+    for repo, items in hashes.items():
+        for h in items:
+            by_exact[h.exact].append((repo, h))
+            by_struct[h.structural].append((repo, h))
+    found: list[Finding] = []
+    vendor_rows: list[dict[str, Any]] = []
+
+    def emit(finding: Finding, members: list[Member]) -> None:
+        if vendored is not None and _is_vendor_group(members, vendored):
+            vendor_rows.append({"anchor": finding.anchor, "members": finding.related})
+        else:
+            found.append(finding)
+
+    for key, group in by_exact.items():
+        if len(group) >= 2:
+            emit(
+                _group("ast-dup/exact", "exact", key, group, Confidence.CONFIRMED, []),
+                group,
+            )
     for key, group in by_struct.items():
-        if len(group) < 2 or len({g.exact for g in group}) == 1:
+        if len(group) < 2 or len({h.exact for _, h in group}) == 1:
             continue
+        cross = len({r for r, _ in group}) > 1
         evidence = [
-            {"kind": "literals", "detail": f"{g.path}:{g.line}: {list(g.literals)}"}
-            for g in group
+            {
+                "kind": "literals",
+                "detail": f"{r + ':' if cross else ''}{h.path}:{h.line}: "
+                f"{list(h.literals)}",
+            }
+            for r, h in sorted(group, key=_order)
         ]
-        found.append(
-            _dup(
+        emit(
+            _group(
                 "ast-dup/structural",
                 "structural",
                 key,
                 group,
-                repo,
                 Confidence.CANDIDATE,
                 evidence,
-            )
+            ),
+            group,
         )
-    return found
+    return found, vendor_rows
+
+
+def dup_findings(hashes: list[FuncHash], repo: str) -> list[Finding]:
+    """exact groups → confirmed; structural-only groups → candidate (one repo)."""
+    return group_dups({repo: hashes}, None)[0]
 
 
 def _source_py(target: RepoTarget) -> tuple[str, ...]:
@@ -192,11 +234,14 @@ def _source_py(target: RepoTarget) -> tuple[str, ...]:
 
 
 def _ast_dup(ctx: ProbeCtx) -> ParseResult:
+    """Hash every function; only the canary's groups are emitted here — the
+    repo's groups are built by the run over every repo of scope (§10.6)."""
     prefix = ".selfcheck-canary/ast-dup/"
     result = ParseResult([], processed_paths=[])
-    for files in (
-        list(_source_py(ctx.target)),
-        [p for p in ctx.inputs if p.startswith(prefix)],
+    repo_hashes: list[FuncHash] = []
+    for is_canary, files in (
+        (False, list(_source_py(ctx.target))),
+        (True, [p for p in ctx.inputs if p.startswith(prefix)]),
     ):
         hashes: list[FuncHash] = []
         for rel in files:
@@ -208,7 +253,11 @@ def _ast_dup(ctx: ProbeCtx) -> ParseResult:
                 continue
             assert result.processed_paths is not None
             result.processed_paths.append(rel)
-        result.findings += dup_findings(hashes, ctx.target.name)
+        if is_canary:
+            result.findings += dup_findings(hashes, ctx.target.name)
+        else:
+            repo_hashes = hashes
+    result.extra["hashes"] = [dataclasses.asdict(h) for h in repo_hashes]
     return result
 
 
@@ -231,7 +280,7 @@ AST_DUP = ProbeSpec(
     ),
     coverage="reported",
     rules=("exact", "structural", f"min-lines:{MIN_LINES}"),
-    logic_version=1,
+    logic_version=2,
     analyze=_ast_dup,
 )
 

@@ -7,9 +7,17 @@ from pathlib import Path
 import pytest
 
 from selfcheck.corpus import list_corpus, materialize, release
-from selfcheck.dups import AST_DUP, CLI_OVERLAP, dup_findings, function_hashes, overlaps
+from selfcheck.dups import (
+    AST_DUP,
+    CLI_OVERLAP,
+    FuncHash,
+    dup_findings,
+    function_hashes,
+    group_dups,
+    overlaps,
+)
 from selfcheck.env import EnvInfo
-from selfcheck.model import Confidence
+from selfcheck.model import Confidence, finding_id
 from selfcheck.probes.base import (
     ProbeResult,
     ProbeSpec,
@@ -130,7 +138,11 @@ def run(spec: ProbeSpec, tmp: Path, files: dict[str, str]) -> ProbeResult:
 def test_ast_dup_probe(tmp_path: Path) -> None:
     res = run(AST_DUP, tmp_path, {"a.py": func("one"), "b.py": func("two")})
     assert res.status is ProbeStatus.OK and res.canary == "hit"
-    assert [f.rule for f in res.findings] == ["ast-dup/exact"]
+    assert res.findings == []  # the canary group is subtracted by the core
+    hashes = [
+        FuncHash(**{**h, "literals": tuple(h["literals"])}) for h in res.extra["hashes"]
+    ]
+    assert [f.rule for f in group_dups({"repo": hashes}, None)[0]] == ["ast-dup/exact"]
 
 
 PARSER = (
@@ -169,3 +181,100 @@ def test_cli_overlap_parsers_and_make_recipes(tmp_path: Path) -> None:
 def test_parse_error_is_partial(spec: ProbeSpec, tmp_path: Path) -> None:
     res = run(spec, tmp_path, {"a.py": func("one"), "bad.py": "def f(:\n"})
     assert res.status is ProbeStatus.PARTIAL and "bad.py" in res.coverage["skipped"]
+
+
+GOLD_BODY = "".join(f"    v{i} = x * {i}\n" for i in range(8))  # не BODY: имя занято
+GOLD_SBODY = "".join(f"    v{i} = x * {i + 50}\n" for i in range(8))
+
+
+def _fn(path: str, name: str = "f", body: str = GOLD_BODY) -> FuncHash:
+    return function_hashes(f"def {name}(x):\n{body}    return x\n", path)[0]
+
+
+def _s1_golden(hs: list[FuncHash]) -> list[dict]:
+    """The S1 grouping, spelled out independently of ``group_dups``.
+
+    Hash values depend on the interpreter's AST dump (CI runs 3.12, local
+    3.13), so the golden is built from them, not pinned as literals; the
+    structure — owner, anchor kind, member order — is what S1 fixed."""
+    a = hs[0]
+    loc = [{"path": h.path, "line": h.line} for h in hs]
+    rel = [
+        {"owner_repo": "r", "path": h.path, "line": h.line, "member": h.qualname}
+        for h in hs
+    ]
+    exact = f"dup:exact:{a.exact[:16]}"
+    struct = f"dup:structural:{a.structural[:16]}"
+    return [
+        {
+            "id": finding_id("ast-dup/exact", "r", exact, None),
+            "rule": "ast-dup/exact",
+            "owner_repo": "r",
+            "anchor": exact,
+            "locations": loc[:2],
+            "related": rel[:2],
+        },
+        {
+            "id": finding_id("ast-dup/structural", "r", struct, None),
+            "rule": "ast-dup/structural",
+            "owner_repo": "r",
+            "anchor": struct,
+            "locations": loc,
+            "related": rel,
+        },
+    ]
+
+
+KEYS = ("id", "rule", "owner_repo", "anchor", "locations", "related")
+
+
+def test_single_repo_matches_s1_golden() -> None:
+    hs = [_fn("a.py", "f"), _fn("b.py", "g"), _fn("c.py", "h", GOLD_SBODY)]
+    assert hs[0].exact == hs[1].exact != hs[2].exact
+    assert hs[0].structural == hs[2].structural
+    found, vendor = group_dups({"r": hs}, None)
+    got = sorted(({k: f.to_json()[k] for k in KEYS} for f in found), key=str)
+    assert got == sorted(_s1_golden(hs), key=str)
+    assert vendor == []
+
+
+def test_cross_repo_exact_is_one_group() -> None:
+    found, _ = group_dups({"b": [_fn("q.py")], "a": [_fn("p.py")]}, {})
+    (f,) = found
+    assert (f.rule, f.owner_repo) == ("ast-dup/exact", "a")
+    assert [(r["owner_repo"], r["path"]) for r in f.related] == [
+        ("a", "p.py"),
+        ("b", "q.py"),
+    ]
+    assert [loc.path for loc in f.locations] == ["p.py"]
+
+
+def test_cross_repo_group_id_stable_when_repo_drops_out() -> None:
+    b = [_fn("q.py"), _fn("r.py", "g")]
+    both, _ = group_dups({"a": [_fn("p.py")], "b": b}, {})
+    one, _ = group_dups({"b": b}, {})
+    assert [f.id for f in both] == [f.id for f in one]
+
+
+def _decl(owner: str) -> list[dict[str, str]]:
+    return [{"owner": owner, "ref": "abcdef1", "declaration": "x/PIN"}]
+
+
+def test_upstream_plus_declared_copies_is_vendor_group() -> None:
+    hashes = {"up": [_fn("g.py")], "c1": [_fn("v/g.py")], "c2": [_fn("w/g.py")]}
+    vendored = {"c1": {"v/g.py": _decl("up")}, "c2": {"w/g.py": _decl("up")}}
+    found, vendor = group_dups(hashes, vendored)
+    assert found == [] and len(vendor) == 1
+    assert sorted(m["owner_repo"] for m in vendor[0]["members"]) == ["c1", "c2", "up"]
+
+
+def test_undeclared_copy_stays_a_finding() -> None:
+    hashes = {"up": [_fn("g.py")], "c1": [_fn("v/g.py")], "c2": [_fn("w/g.py")]}
+    found, vendor = group_dups(hashes, {"c1": {"v/g.py": _decl("up")}})
+    assert len(found) == 1 and vendor == []
+
+
+def test_upstream_out_of_scope_undeclared_copy_is_a_finding() -> None:
+    hashes = {"c1": [_fn("v/g.py")], "c2": [_fn("w/g.py")]}
+    found, vendor = group_dups(hashes, {"c1": {"v/g.py": _decl("up")}})
+    assert len(found) == 1 and vendor == []

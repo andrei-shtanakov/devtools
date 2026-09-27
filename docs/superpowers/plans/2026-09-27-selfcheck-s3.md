@@ -2071,7 +2071,7 @@ Expected: отчёт выпущен (код 0 или 2). Скрипт сверк
 2. нет `selfcheck/vendor-pin-unparsed`; `vendor-pin-dangling` — только discovery `src/discovery/contract/PINNED.txt`;
 3. строки `inventory.llm` механик A–C покрывают эталон инвентаря 2026-09-02 (таблица «точка → найдена/пропуск» в отчёте приёмки), кроме atp `method/spawners/opencode_shim.py`, `pi_shim.py`;
 4. есть находка `ast-dup/*` с участниками `devtools:tools/check_discovery_vendor.py::verify` и `discovery:tools/check_vendor.py::verify`; группа с `gate_check.py::check` — в `vendor_dups`;
-5. нет `pyrefly/missing-import` с модулями `atp`, `game_envs`, `atp_sdk`;
+5. нет `pyrefly/missing-import` по пакетам, установленным editable (пути `.pth`); прочие — `env-stale`, перечислить;
 6. `cargo-machete` `ok` на arbiter и prograph;
 7. нет `ruff/PLR2004`, `ruff/PLC0415` в репо, чей корневой конфиг их не включает.
 
