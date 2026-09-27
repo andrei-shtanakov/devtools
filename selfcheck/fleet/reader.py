@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from selfcheck.corpus import shown
+
 STALE = ("no-origin-head", "not-default-branch", "detached", "behind", "ahead", "dirty")
 GITLINK = "160000"
 SNIFF = 8192
@@ -153,12 +155,6 @@ def _entries(path: Path) -> tuple[dict[str, str], str | None]:
     return parse_entries(staged.stdout, others.stdout), None
 
 
-def shown(rel: str) -> str:
-    """A path as reports carry it: surrogates of non-UTF-8 bytes become U+FFFD
-    (the raw ``rel`` is still what opens the file)."""
-    return rel.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
-
-
 def _inside(target: str, root: str) -> bool:
     return target == root or target.startswith(root + os.sep)
 
@@ -174,6 +170,7 @@ def read_repo(path: Path, name: str) -> FleetRepo:
         repo.problems.append(("ls-files", error))
         return repo
     root = os.path.realpath(path)
+    texts: dict[str, list[str]] = {}
     for rel in sorted(modes):
         full = path / rel
         if modes[rel] == GITLINK:
@@ -192,7 +189,12 @@ def read_repo(path: Path, name: str) -> FleetRepo:
         if text is None:
             repo.binary += 1
         else:
-            repo.texts[shown(rel)] = text
+            texts.setdefault(shown(rel), []).append(text)
+    for key, found in texts.items():
+        if len(found) == 1:
+            repo.texts[key] = found[0]
+        else:  # two raw names, one shown name: keeping either loses mentions
+            repo.problems.append(("unreadable", key))
     if not repo.texts:
         repo.problems.append(("empty", ""))
     repo.state = stale_reasons(path)

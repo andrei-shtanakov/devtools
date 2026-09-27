@@ -23,20 +23,36 @@ def _git(
     )
 
 
+def shown(rel: str) -> str:
+    """A path as the run carries it: surrogates of non-UTF-8 bytes become
+    U+FFFD (the raw name is still what opens the file)."""
+    return rel.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+
 def list_corpus(repo: Path, exclude: Sequence[str] = ()) -> list[str]:
-    """Tracked + untracked-not-ignored regular files, minus ``exclude``."""
-    raw = _git(
+    """Tracked + untracked-not-ignored regular files, minus ``exclude``, by
+    their shown names (#409): ``materialize`` copies each raw file under that
+    name, so every probe, anchor and finding id sees valid UTF-8 only."""
+    return sorted(corpus_names(repo, exclude))
+
+
+def corpus_names(repo: Path, exclude: Sequence[str] = ()) -> dict[str, str]:
+    """shown name → raw name of the corpus. Two raw names sharing one shown
+    name fail the listing: dropping either would drop its references."""
+    listing = _git(
         repo, "ls-files", "-z", "--cached", "--others", "--exclude-standard"
     ).stdout
-    names = sorted({p for p in raw.decode().split("\0") if p})
-    result: list[str] = []
-    for rel in names:
+    result: dict[str, str] = {}
+    for raw in sorted({os.fsdecode(p) for p in listing.split(b"\0") if p}):
+        rel = shown(raw)
         if any(glob_match(p, rel) for p in exclude):
             continue
-        full = repo / rel
+        full = repo / raw
         if full.is_symlink() or not full.is_file():
             continue
-        result.append(rel)
+        if rel in result:
+            raise OSError(f"non-UTF-8 names collide as {rel!r}: rename one")
+        result[rel] = raw
     return result
 
 
@@ -51,15 +67,17 @@ def _chmod_tree(root: Path, *, writable: bool) -> None:
 def materialize(
     repo: Path, files: Sequence[str], dest: Path, extra_files: Mapping[str, str]
 ) -> None:
-    """Copy ``files`` and canaries into a fresh ``dest``, then make it read-only."""
+    """Copy ``files`` (shown names) and canaries into a fresh ``dest``, then make
+    it read-only. A non-UTF-8 source is copied under its shown name."""
     if not dest.is_absolute() or not repo.is_absolute():
         raise ValueError(f"materialize needs absolute paths: {repo} → {dest}")
+    raw = corpus_names(repo) if any("\ufffd" in rel for rel in files) else {}
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.mkdir()  # never reuse (FileExistsError)
     for rel in files:
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(repo / rel, target)
+        shutil.copy2(repo / raw.get(rel, rel), target)
     for rel, text in extra_files.items():
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -290,3 +290,50 @@ def test_path_matching_nothing_is_a_warning(tmp_path: Path) -> None:
     assert main(args(ws, "--probe", "ast-dup", "--path", "nothing/**")) == 0
     (doc,) = reports(ws)
     assert any("--path" in w for w in doc["run"]["warnings"])
+
+
+def _latin1_name_in_ls_files(monkeypatch) -> None:
+    """``ls-files`` lists ``caf\\xe9.py`` (a Linux name; APFS refuses it): the
+    raw file is served by ``copy2``, everything else is the real repo."""
+    import shutil
+    import subprocess
+
+    from selfcheck import corpus
+
+    real_git, real_copy, real_is_file = corpus._git, shutil.copy2, Path.is_file
+    raw = "caf\udce9.py"
+
+    def git(repo, *a, **k):
+        proc = real_git(repo, *a, **k)
+        if a[:1] == ("ls-files",) and "--cached" in a:
+            return subprocess.CompletedProcess(a, 0, proc.stdout + b"caf\xe9.py\0")
+        return proc
+
+    def copy2(src, dst):
+        if Path(src).name == raw:
+            Path(dst).write_text("print('orphan')\n")
+            return dst
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(corpus, "_git", git)
+    monkeypatch.setattr(corpus.shutil, "copy2", copy2)
+    monkeypatch.setattr(
+        Path, "is_file", lambda self: self.name == raw or real_is_file(self)
+    )
+
+
+def test_non_utf8_scope_path_reaches_the_report_as_shown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#409, review of #419: a non-UTF-8 name is folded to its shown form at the
+    corpus boundary, so an orphan under it becomes an ordinary dead finding —
+    no UnicodeEncodeError in finding_id, a report with U+FFFD, and the same
+    spelling in the next run (no churn in the delta)."""
+    _latin1_name_in_ls_files(monkeypatch)
+    ws = workspace(tmp_path)
+    for _ in range(2):
+        assert main(args(ws, "--probe", "usage-graph", "--sched-dir", str(ws))) == 0
+    first, second = reports(ws)
+    (orphan,) = [f for f in first["findings"] if f["anchor"] == "file:caf\ufffd.py"]
+    assert orphan["category"] == "dead"
+    assert second["delta"]["statuses"][orphan["id"]] == "persisting"

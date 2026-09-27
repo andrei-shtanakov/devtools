@@ -182,20 +182,45 @@ def test_non_utf8_index_path_does_not_crash() -> None:
     }
 
 
-def test_non_utf8_path_is_report_safe(tmp_path: Path, monkeypatch) -> None:
-    """Review of #405: a surrogate-bearing path must not reach the report —
-    json/markdown writing would die with UnicodeEncodeError (exit 1, no JSON)."""
-    import json
-
+def _surrogate_files(monkeypatch, entries: dict[str, bytes]) -> None:
+    """Non-UTF-8 names cannot exist on APFS: feed them through ``_entries`` and
+    serve their bytes from ``read_bytes`` (every other path reads the disk)."""
     from selfcheck.fleet import reader as reader_module
 
-    repo = synced(make_repo(tmp_path / "r", {"a.md": "x\n"}))
+    real = Path.read_bytes
+
+    def read_bytes(self: Path) -> bytes:
+        return entries.get(self.name) or real(self)
+
     monkeypatch.setattr(
         reader_module,
         "_entries",
-        lambda path: ({"a.md": "100644", "caf\udce9.md": "100644"}, None),
+        lambda path: ({"a.md": "100644", **dict.fromkeys(entries, "100644")}, None),
     )
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+
+def test_non_utf8_path_is_report_safe(tmp_path: Path, monkeypatch) -> None:
+    """Review of #405, #409: a surrogate-bearing path must not reach the report —
+    it is written with ensure_ascii=False, where a surrogate dies with
+    UnicodeEncodeError (exit 1, no JSON). Covers ``texts`` keys and problems."""
+    import json
+
+    repo = synced(make_repo(tmp_path / "r", {"a.md": "x\n"}))
+    _surrogate_files(monkeypatch, {"caf\udce9.md": b"run x.sh\n"})
     got = read_repo(repo, "r")
-    text = json.dumps({"problems": got.problems, "texts": sorted(got.texts)})
-    text.encode("utf-8")  # must not raise
-    assert ("unreadable", "caf�.md") in got.problems
+    assert sorted(got.texts) == ["a.md", "caf\ufffd.md"]
+    doc = {"problems": got.problems, "texts": sorted(got.texts)}
+    json.dumps(doc, ensure_ascii=False).encode("utf-8")  # must not raise
+
+
+def test_colliding_shown_names_are_unreadable(tmp_path: Path, monkeypatch) -> None:
+    """#409: two non-UTF-8 names differing only in invalid bytes share one shown
+    name. Keeping either text silently drops the other's mentions while the
+    fleet stays complete — fail closed: the collision is ``unreadable``."""
+    repo = synced(make_repo(tmp_path / "r", {"a.md": "x\n"}))
+    latin1, cp1252 = "caf\udce9.md", "caf\udce8.md"  # ruff F601 merges them
+    _surrogate_files(monkeypatch, {latin1: b"run x.sh\n", cp1252: b"run y.sh\n"})
+    got = read_repo(repo, "r")
+    assert ("unreadable", "caf\ufffd.md") in got.problems
+    assert "caf\ufffd.md" not in got.texts

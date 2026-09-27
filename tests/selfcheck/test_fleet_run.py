@@ -216,6 +216,29 @@ def test_partial_fleet_keeps_p1_exit_code_and_fates(tmp_path: Path) -> None:
     assert gone["probe:devtools#fleet"] == "resolved"
 
 
+def test_composition_bug_is_caught_by_an_independent_count(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#412: §9.6 condition 2 must not compare the fleet list with itself. A
+    ``fleet_names`` that loses a repo is caught against the raw manifest:
+    fleet partial, ``fleet:count`` naming the lost repo, dead capped at P1."""
+    from selfcheck import run
+    from selfcheck.fleet import assemble
+
+    def lossy(*a, **k):
+        return tuple(n for n in assemble.fleet_names(*a, **k) if n != "docs-nb")
+
+    monkeypatch.setattr(run, "fleet_names", lossy)
+    ws = fleet_ws(tmp_path)
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 0
+    (doc,) = reports(ws)
+    assert doc["run"]["surface"]["fleet"] == "partial"
+    assert dead(doc)["file:orphan.py"]["confidence"] == "likely"
+    (count,) = [f for f in doc["findings"] if f.get("text_key") == "fleet:count"]
+    details = {e["kind"]: e["detail"] for e in count["evidence"]}
+    assert details == {"expected": "docs-nb, nb, umbrella", "actual": "nb, umbrella"}
+
+
 def _gone(ws: Path) -> dict[str, str]:
     return {g["anchor"]: g["status"] for g in reports(ws)[-1]["delta"]["gone"]}
 
