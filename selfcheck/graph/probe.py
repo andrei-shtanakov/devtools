@@ -8,6 +8,7 @@ from pathlib import Path
 from selfcheck.corpus import last_commit_ts
 from selfcheck.fleet import match
 from selfcheck.fleet.assemble import CANARY_NODE, CANARY_REPO, canary_misses
+from selfcheck.fleet.reader import decode
 from selfcheck.graph.build import build_graph
 from selfcheck.graph.classify import Surface, classify, graph_payload
 from selfcheck.graph.model import Graph, NodeKind
@@ -25,8 +26,10 @@ class FleetCanaryMissed(Exception):
 
 
 def _read(root: Path, rel: str) -> str:
+    """Text of a corpus file as the fleet reads it: BOM-aware, UTF-16/32
+    included, binary → "" (#411: the locale codec hid a BOM'd declaration)."""
     try:
-        return (root / rel).read_text(errors="replace")
+        return decode((root / rel).read_bytes()) or ""
     except OSError:
         return ""
 

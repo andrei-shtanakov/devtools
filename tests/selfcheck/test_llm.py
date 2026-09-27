@@ -264,3 +264,26 @@ def test_semgrep_pins_cover_the_live_environment() -> None:
     )
     live = {norm(k): v for k, v in json.loads(proc.stdout).items()}
     assert live and {k: pins.get(k) for k in live} == live
+
+
+def test_shell_harness_rule_knows_pi(tmp_path: Path) -> None:
+    """#411: the shell regex of rules/llm.yml lacked ``pi`` (§3.4 A), which its
+    Python part has."""
+    import json
+    import subprocess
+
+    from selfcheck.llm import RULES_PATH, UVX_SEMGREP
+
+    require_tool("uvx")
+    script = tmp_path / "h.sh"
+    script.write_text('#!/bin/sh\npi -p "label this" --json\n')
+    proc = subprocess.run(
+        ["uvx", "-q", *UVX_SEMGREP, "scan", "--config", str(RULES_PATH), "--json"]
+        + ["--metrics", "off", "--disable-version-check", "--quiet", str(script)],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    hits = [r["check_id"] for r in json.loads(proc.stdout)["results"]]
+    assert any(h.endswith("cli-shell") for h in hits), hits

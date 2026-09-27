@@ -12,7 +12,7 @@ rules:
     languages: [bash]
     severity: INFO
     message: harness CLI launch (mechanism A)
-    pattern-regex: (?m)^\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:exec\s+|command\s+)?(?:claude|codex|opencode|aider|qwen|ollama|llama-cli|copilot)\s
+    pattern-regex: (?m)^\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:exec\s+|command\s+)?(?:claude|codex|opencode|aider|pi|qwen|ollama|llama-cli|copilot)\s
   - id: sdk-python
     languages: [python]
     severity: INFO

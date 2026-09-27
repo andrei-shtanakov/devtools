@@ -241,3 +241,27 @@ def test_runbook_console_and_uv_project_and_entry_points(tmp_path: Path) -> None
     assert kinds(g, "file:sub/x.py") == {EdgeKind.RUNBOOK}
     assert kinds(g, "file:pkg/plug.py") == {EdgeKind.ENTRY}
     assert g.zones == []
+
+
+def test_make_calls_skip_options_and_take_every_target(tmp_path: Path) -> None:
+    """#411: ``$(MAKE) -C dir x`` took ``dir`` for a target, ``${MAKE}`` was not
+    seen and ``make a b`` lost ``b``. A ``-C``/``-f`` call reaches the other
+    Makefile's target."""
+    g = graph(
+        tmp_path,
+        {
+            "Makefile": (
+                "all:\n\t$(MAKE) -C sub build\n"
+                "two:\n\tmake -j 4 a b\n"
+                "brace:\n\t${MAKE} VAR=1 c\n"
+                "var:\n\tmake -k $(OPTS) d && echo done\n"
+                "a: ; @true\nb: ; @true\nc: ; @true\nd: ; @true\n"
+            ),
+            "sub/Makefile": "build: ; @true\n",
+        },
+    )
+    for target in ("a", "b", "c", "d"):
+        assert kinds(g, f"make:Makefile#{target}") == {EdgeKind.MAKE}, target
+    assert kinds(g, "make:sub/Makefile#build") == {EdgeKind.MAKE}
+    made = {e.target for e in g.edges if e.target.startswith("make:Makefile#")}
+    assert not made & {"make:Makefile#sub", "make:Makefile#4", "make:Makefile#VAR"}

@@ -30,7 +30,50 @@ _FENCE = re.compile(r"^```\s*([\w-]*)\s*$")
 _RUNBOOK_LANGS = frozenset({"sh", "bash", "console", "shell"})
 _WORD = re.compile(r"[\w./-]+")
 _MAKE_CONDITIONALS = frozenset({"ifeq", "ifneq", "ifdef", "ifndef", "else", "endif"})
-_MAKE_CALL = re.compile(r"(?:\$\(MAKE\)|\bmake)\s+(?:-\S+\s+)*([A-Za-z0-9_.-]+)")
+_MAKE_CALL = re.compile(r"(?:\$\(MAKE\)|\$\{MAKE\}|(?<![\w/.-])make)(?=\s)")
+_MAKE_STOP = re.compile(r"[;&|<>]")
+_MAKE_TARGET = re.compile(r"[A-Za-z0-9_.-]+")
+_MAKE_DIR = ("-C", "--directory")
+_MAKE_FILE = ("-f", "--file", "--makefile")
+_MAKE_VALUED = ("-I", "--include-dir", "-o", "--old-file", "-W", "--what-if")
+
+
+def _make_calls(cmd: str, rel: str) -> list[str]:
+    """``make:`` anchors of every make invocation in a recipe line (#411):
+    options are skipped (their values too), every target counts, and ``-C`` /
+    ``-f`` point the target at the other Makefile. A stray word (``-j 4``)
+    names no target node, and the graph drops edges to unknown anchors."""
+    anchors: list[str] = []
+    for call in _MAKE_CALL.finditer(cmd):
+        tokens = iter(_MAKE_STOP.split(cmd[call.end() :], maxsplit=1)[0].split())
+        directory = makefile = None
+        targets: list[str] = []
+        for tok in tokens:
+            if tok in (*_MAKE_DIR, *_MAKE_FILE, *_MAKE_VALUED):
+                opt, value = tok, next(tokens, "")
+            elif tok.startswith("--") and "=" in tok:
+                opt, _, value = tok.partition("=")
+            elif tok.startswith("-C") and len(tok) > 2:
+                opt, value = "-C", tok[2:]
+            elif tok.startswith("-") or "=" in tok:
+                continue  # a flag or VAR=value
+            else:
+                if _MAKE_TARGET.fullmatch(tok):
+                    targets.append(tok)
+                continue
+            if opt in _MAKE_DIR:
+                directory = value
+            elif opt in _MAKE_FILE:
+                makefile = value
+        where = posixpath.dirname(rel)
+        if directory is not None:
+            where = posixpath.join(where, directory)
+            path = posixpath.join(where, makefile or "Makefile")
+        else:
+            path = posixpath.join(where, makefile) if makefile else rel
+        path = posixpath.normpath(path)
+        anchors += [f"make:{path}#{t}" for t in targets]
+    return anchors
 
 
 def _read(root: Path, rel: str) -> str:
@@ -77,11 +120,13 @@ def build_graph(
     _nodes(g, files, texts, roles)
     _entry_points(g, texts.get("pyproject.toml"), index)
     for rel in files:
+        if _is_makefile(rel, roles[rel]):
+            _make_nodes(g, rel, texts[rel])
+    for rel in files:
         text, kind = texts[rel], roles[rel]
         if kind is Role.DIAGNOSTIC_OUTPUT:
             continue
-        name = posixpath.basename(rel)
-        if kind is Role.SOURCE and (name == "Makefile" or name.endswith(".mk")):
+        if _is_makefile(rel, kind):
             _makefile(g, rel, text, index)
         if rel.startswith(".github/workflows/") and rel.endswith((".yml", ".yaml")):
             _workflow(g, rel, text, index, texts)
@@ -207,8 +252,14 @@ def _record(
         g.broken += [(root_anchor, where, tok) for tok in scan.missing]
 
 
-def _makefile(g: Graph, rel: str, text: str, index: Index) -> None:
-    base = posixpath.dirname(rel)
+def _is_makefile(rel: str, kind: Role) -> bool:
+    name = posixpath.basename(rel)
+    return kind is Role.SOURCE and (name == "Makefile" or name.endswith(".mk"))
+
+
+def _make_nodes(g: Graph, rel: str, text: str) -> None:
+    """Target nodes of one Makefile — all of them before any recipe is read,
+    so ``$(MAKE) -C dir x`` finds ``dir/Makefile#x`` in any order (#411)."""
     recipes = make_recipes(text)
     help_text = " ".join(cmd for _, cmd in recipes.get("help", []))
     for target in recipes:
@@ -218,7 +269,11 @@ def _makefile(g: Graph, rel: str, text: str, index: Index) -> None:
         )
         anchor = f"make:{rel}#{target}"
         g.nodes[anchor] = Node(anchor, NodeKind.MAKE, rel, target, root=root)
-    for target, lines in recipes.items():
+
+
+def _makefile(g: Graph, rel: str, text: str, index: Index) -> None:
+    base = posixpath.dirname(rel)
+    for target, lines in make_recipes(text).items():
         anchor = f"make:{rel}#{target}"
         for number, cmd in lines:
             where = Location(rel, number)
@@ -226,8 +281,8 @@ def _makefile(g: Graph, rel: str, text: str, index: Index) -> None:
             _record(
                 g, scan, EdgeKind.MAKE, where, anchor if g.nodes[anchor].root else None
             )
-            for called in _MAKE_CALL.findall(cmd):
-                g.add_anchor(f"make:{rel}#{called}", EdgeKind.MAKE, where)
+            for called in _make_calls(cmd, rel):
+                g.add_anchor(called, EdgeKind.MAKE, where)
 
 
 def _load_yaml(g: Graph, rel: str, text: str) -> dict[str, Any]:
