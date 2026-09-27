@@ -36,3 +36,76 @@ def test_truncated_category_says_so() -> None:
     }
     text = render_markdown(doc)
     assert "показаны 200 из 205" in text
+
+
+def _doc(scope: list[str], findings: list[dict], probes: list[dict]) -> dict:
+    return {
+        "run": {
+            "run_id": "r",
+            "host": "h",
+            "scope": scope,
+            "surface": {},
+            "env": {},
+            "warnings": [],
+            "manifest": {"entries_read": 2, "repos": scope, "missing": []},
+        },
+        "probes": probes,
+        "findings": findings,
+        "suppressed": [],
+        "suppressed_no_env": {},
+        "delta": {"statuses": {}, "gone": []},
+        "inventory": {
+            "llm": [
+                {
+                    "repo": "b",
+                    "path": "x.py",
+                    "line": 1,
+                    "mechanism": "A",
+                    "candidate": False,
+                    "features": [],
+                }
+            ]
+        },
+    }
+
+
+def _finding(repo: str, anchor: str) -> dict:
+    return {
+        "id": f"sc-{repo}",
+        "rule": "usage-graph/dead.file",
+        "category": "dead",
+        "confidence": "likely",
+        "anchor": anchor,
+        "occurrences": 1,
+        "owner_repo": repo,
+    }
+
+
+def test_multi_repo_rows_are_distinguishable() -> None:
+    doc = _doc(
+        ["a", "b"],
+        [_finding("a", "file:setup.sh"), _finding("b", "file:setup.sh")],
+        [
+            {
+                "probe": "radon",
+                "repo": "b",
+                "status": "partial",
+                "reason": "per-file problems",
+                "exit_code": 0,
+                "tool_version": "6",
+                "canary": "hit",
+                "coverage": {},
+                "findings": 0,
+            }
+        ],
+    )
+    text = render_markdown(doc)
+    assert "| a | usage-graph/dead.file |" in text
+    assert "| b | usage-graph/dead.file |" in text
+    assert "radon:partial (per-file problems)" in text
+    assert "| b | x.py | 1 |" in text
+
+
+def test_single_repo_keeps_s1_layout() -> None:
+    text = render_markdown(_doc(["a"], [_finding("a", "file:x.sh")], []))
+    assert "## Репо" not in text and "| правило | уверенность |" in text

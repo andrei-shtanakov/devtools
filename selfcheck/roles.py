@@ -36,7 +36,13 @@ DEFAULT_ROLES: dict[Role, tuple[str, ...]] = {
         "authored/skills/*/SKILL.md",
         ".claude/commands/*.md",
     ),
-    Role.TEST: ("tests/**", "**/test_*.py", "**/*_test.py"),
+    Role.TEST: (
+        "tests/**",
+        "**/test_*.py",
+        "**/*_test.py",
+        "test/**",
+        "**/*_test.exs",
+    ),
     Role.DOCUMENTATION: ("**/*.md", "docs/**"),
     Role.SOURCE: (),
 }

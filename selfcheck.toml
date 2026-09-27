@@ -3,6 +3,7 @@
 
 [[allow]]
 anchor = "file:issue_console.py"
+repo = "devtools"
 reason = "неприкасаем по решению владельца: новый TUI — новый файл"
 until = 2027-03-31
 

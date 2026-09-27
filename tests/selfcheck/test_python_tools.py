@@ -239,3 +239,77 @@ def test_canary_rule_disabled_in_registry_is_missed(
     broken = replace(spec, canary=replace(spec.canary, expect_rule="never/rule"))
     res = run(broken, build(CLEAN), tmp_path)
     assert (res.status, res.reason) == (ProbeStatus.FAILED, "canary-missed")
+
+
+MAGIC = "def f(x: int) -> bool:\n    import os\n    return x > 42 and bool(os.sep)\n"
+
+
+def _ignored(argv: list[str]) -> list[str]:
+    if "--extend-ignore" not in argv:
+        return []
+    return argv[argv.index("--extend-ignore") + 1].split(",")
+
+
+def test_ruff_extra_set_without_magic_and_lazy_import(build, tmp_path: Path) -> None:
+    res = run(RUFF, build({"a.py": MAGIC}), tmp_path)
+    assert not {f.rule for f in res.findings} & {"ruff/PLR2004", "ruff/PLC0415"}
+    assert _ignored(res.argv) == ["PLR2004", "PLC0415"]
+
+
+@pytest.mark.parametrize(
+    ("tool_ruff", "kept"),
+    [
+        ('[tool.ruff.lint]\nselect = ["E", "PLR2004"]\n', {"PLR2004"}),
+        ('[tool.ruff.lint]\nextend-select = ["PLC0415"]\n', {"PLC0415"}),
+        ('[tool.ruff]\nselect = ["PLR2"]\n', {"PLR2004"}),
+        (
+            '[tool.ruff.lint]\nextend-select = ["PLR2004", "PLC0415"]\n',
+            {"PLR2004", "PLC0415"},
+        ),
+    ],
+)
+def test_repo_that_selects_them_keeps_them(
+    build, tmp_path: Path, tool_ruff: str, kept: set[str]
+) -> None:
+    pyproject = PYPROJECT.replace("[tool.ruff]\n", "") + tool_ruff
+    res = run(RUFF, build({"a.py": MAGIC}, pyproject=pyproject), tmp_path)
+    assert not kept & set(_ignored(res.argv))
+    assert {f"ruff/{c}" for c in kept} <= {f.rule for f in res.findings}
+
+
+def test_ruff_rules_name_the_ignores() -> None:
+    assert RUFF.rules[-2:] == ("-PLR2004", "-PLC0415")
+
+
+def _search_paths(argv: list[str]) -> list[str]:
+    return [argv[i + 1] for i, a in enumerate(argv) if a == "--search-path"]
+
+
+def test_pyrefly_resolves_editable_workspace_member(build, tmp_path: Path) -> None:
+    files = {
+        "packages/core/corelib/__init__.py": "def f() -> int:\n    return 1\n",
+        "app/main.py": "from corelib import f\n\nprint(f())\n",
+    }
+    target = build(files, venv_marker=tmp_path / "marker")
+    site = target.env.site_packages
+    assert site is not None
+    (site / "_editable_core.pth").write_text(f"{target.source / 'packages' / 'core'}\n")
+    target = replace(target, env=detect_env(target.source))
+    res = run(PYREFLY, target, tmp_path)
+    assert "pyrefly/missing-import" not in {f.rule for f in res.findings}
+    assert _search_paths(res.argv) == [str(target.copy / "packages" / "core")]
+
+
+def test_pyrefly_skips_search_path_missing_in_copy(build, tmp_path: Path) -> None:
+    target = build(
+        {"a.py": "x = 1\n", ".gitignore": ".venv/\nbuild/\n"},
+        venv_marker=tmp_path / "m",
+    )
+    (target.source / "build").mkdir()
+    site = target.env.site_packages
+    assert site is not None
+    (site / "_editable_b.pth").write_text(f"{target.source / 'build'}\n")
+    target = replace(target, env=detect_env(target.source))
+    res = run(PYREFLY, target, tmp_path)
+    assert res.status is ProbeStatus.OK, res.reason
+    assert _search_paths(res.argv) == []

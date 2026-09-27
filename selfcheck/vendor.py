@@ -7,7 +7,9 @@ Four declaration formats met in devtools (2026-09-26):
 - B ``PIN`` lines ``<sha256>  <path>  <owner>@<ref>`` (paths from the PIN dir);
 - C ``PINNED*`` with ``upstream: <url>``, ``commit: <ref>`` and ``<path> <sha256>``
   lines (paths from the declaration dir);
-- D a header ``# VENDORED: <owner> @ <ref> — <path>`` inside the file itself.
+- D a header ``# VENDORED: <owner> @ <ref> — <path>`` inside the file itself;
+- E ``key: value`` prose with ``source:``/``repo:`` + a hex ref; members are the
+  declaration's folder (spec §10.5).
 """
 
 from __future__ import annotations
@@ -30,6 +32,11 @@ _B_MEMBER = re.compile(rf"^({_SHA256})\s+(\S+)\s+([\w.-]+)@({_HEX})$")
 _C_MEMBER = re.compile(rf"^(\S+)\s+({_SHA256})$")
 _C_UPSTREAM = re.compile(r"^upstream:\s*(\S+)$")
 _C_COMMIT = re.compile(rf"^commit:\s*({_HEX})$")
+_E_LINE = re.compile(r"^(?:#\s*)?([A-Za-z_]+):\s*(.*)$")
+_E_SOURCE_AT = re.compile(rf"^(\S+?)@({_HEX})\b")
+_E_REF = re.compile(rf"^({_HEX})\b")
+_E_HEADS = ("source", "repo")
+_SHA_ANY = re.compile(_SHA256)
 
 
 class DeclarationError(ValueError):
@@ -45,6 +52,7 @@ class Declaration:
     owner: str
     ref: str
     members: tuple[str, ...]
+    folder: str | None = None  # format E: members are this folder (§10.5)
 
 
 @dataclass
@@ -59,6 +67,8 @@ class VendorResult:
 
 def is_candidate(rel: str, text: str, *, is_node: bool) -> bool:
     """A file that claims to be a declaration (spec §9.7 «Кандидаты»)."""
+    if rel.startswith(".github/"):
+        return False
     base = posixpath.basename(rel).lower()
     if not is_node and (base == "pin" or base.startswith(("pinned", "vendor"))):
         return True
@@ -164,13 +174,61 @@ def _parse_b(rel: str, lines: list[str]) -> Declaration:
     return Declaration(rel, "B", owner, ref, members)
 
 
+def _e_keys(text: str) -> dict[str, list[str]]:
+    keys: dict[str, list[str]] = {}
+    for raw in text.splitlines():
+        m = _E_LINE.match(raw.strip())
+        if m:
+            keys.setdefault(m.group(1).lower(), []).append(m.group(2).strip())
+    return keys
+
+
+def _e_owner_ref(rel: str, keys: dict[str, list[str]]) -> tuple[str, str]:
+    heads = [(k, v) for k in _E_HEADS for v in keys.get(k, [])]
+    if len(heads) != 1:
+        raise DeclarationError(f"{rel}: expected one source/repo line")
+    kind, head = heads[0]
+    at = _E_SOURCE_AT.match(head) if kind == "source" else None
+    if at is not None:
+        return at.group(1), at.group(2)
+    commits = keys.get("commit", [])
+    ref = _E_REF.match(commits[0]) if len(commits) == 1 else None
+    if ref is None:
+        raise DeclarationError(f"{rel}: no hex ref for the folder declaration")
+    token = head.split()[0] if head.split() else ""
+    owner = (
+        posixpath.basename(token.rstrip("/")).removesuffix(".git")
+        if kind == "repo"
+        else token
+    )
+    if not owner:
+        raise DeclarationError(f"{rel}: no owner")
+    return owner, ref.group(1)
+
+
+def _parse_e(rel: str, text: str) -> Declaration | None:
+    keys = _e_keys(text)
+    if not any(k in keys for k in _E_HEADS):
+        return None
+    folder = posixpath.dirname(rel)
+    if not folder:
+        raise DeclarationError(f"{rel}: folder declaration in the repo root")
+    owner, ref = _e_owner_ref(rel, keys)
+    return Declaration(rel, "E", owner, ref, (), folder)
+
+
 def parse_declaration(rel: str, text: str) -> Declaration:
     """Parse one candidate as format D, A, C or B; else DeclarationError."""
     decl = _parse_d(rel, text)
     if decl is not None:
         return decl
     lines = _body(text)
-    return _parse_a(rel, lines) or _parse_c(rel, lines) or _parse_b(rel, lines)
+    return (
+        _parse_a(rel, lines)
+        or _parse_c(rel, lines)
+        or _parse_e(rel, text)
+        or _parse_b(rel, lines)
+    )
 
 
 def _finding(
@@ -185,7 +243,7 @@ def _finding(
         anchor=f"file:{decl}",
         locations=[Location(decl, 1)],
         text_key=key,
-        suggestion="почините декларацию вендоринга (формат A–D, §9.7)",
+        suggestion="почините декларацию вендоринга (формат A–E, §9.7, §10.5)",
     )
 
 
@@ -193,11 +251,54 @@ def _named_paths(rel: str, text: str, corpus: frozenset[str]) -> set[str]:
     folder = posixpath.dirname(rel)
     found: set[str] = set()
     for token in text.split():
+        token = token.rstrip(":,")  # the `sha256 <path>: <sha>` form (r3 R3-1)
         for cand in (token, posixpath.join(folder, token)):
             norm = posixpath.normpath(cand)
             if norm in corpus:
                 found.add(norm)
     return found
+
+
+def _member_line_paths(folder: str, text: str, known: frozenset[str]) -> set[str]:
+    """Corpus paths named on sha256 member lines, from the folder or the root.
+
+    The folder reading wins: a token present in the folder never also names a
+    same-named root file (#426 review)."""
+    found: set[str] = set()
+    for line in text.splitlines():
+        if not _SHA_ANY.search(line):
+            continue
+        for token in line.split():
+            token = token.rstrip(":,")
+            in_folder = posixpath.normpath(posixpath.join(folder, token))
+            from_root = posixpath.normpath(token)
+            if in_folder in known:
+                found.add(in_folder)
+            elif from_root in known:
+                found.add(from_root)
+    return found
+
+
+def _e_members(
+    decl: Declaration, text: str, known: frozenset[str], nodes: frozenset[str]
+) -> tuple[str, ...]:
+    """Folder members (§10.5): non-code files, plus code named on member lines.
+
+    A member line (one carrying a sha256) naming a corpus path outside the
+    folder makes the declaration unparsed; paths in prose do not count."""
+    assert decl.folder is not None
+    prefix = decl.folder + "/"
+    named = _member_line_paths(decl.folder, text, known)
+    outside = sorted(p for p in named if not p.startswith(prefix))
+    if outside:
+        raise DeclarationError(
+            f"{decl.path}: names paths outside its folder: {outside}"
+        )
+    return tuple(
+        p
+        for p in sorted(known)
+        if p.startswith(prefix) and p != decl.path and (p not in nodes or p in named)
+    )
 
 
 def vendor_roles(
@@ -219,13 +320,25 @@ def vendor_roles(
         res.protected.add(rel)
         try:
             decl = parse_declaration(rel, text)
+            members = (
+                _e_members(decl, text, known, node_paths)
+                if decl.folder is not None
+                else decl.members
+            )
         except DeclarationError:
             res.findings.append(
                 _finding(repo, "selfcheck/vendor-pin-unparsed", "high", rel, None)
             )
             res.protected |= _named_paths(rel, text, known)
             continue
-        for member in decl.members:
+        if decl.folder is not None and not members:
+            res.findings.append(
+                _finding(
+                    repo, "selfcheck/vendor-pin-dangling", "medium", rel, decl.folder
+                )
+            )
+            continue
+        for member in members:
             if member in known:
                 res.members.setdefault(member, []).append(decl)
             else:

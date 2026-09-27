@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from selfcheck.anchors import python_anchor
+from selfcheck.graph.model import parse_python
 from selfcheck.graph.resolver import UNKNOWN, argv_at
 from selfcheck.model import Confidence, Finding, Location
 from selfcheck.probes.base import Canary, ParseResult, ProbeCtx, ProbeSpec, RepoTarget
@@ -39,7 +40,42 @@ HARNESSES = frozenset(
         "copilot",
     }
 )
-_MECHANISM = {"py-launch": "A", "cli-shell": "A", "sdk-python": "B", "http-python": "C"}
+MAX_TARGET_BYTES = 1_000_000  # semgrep's default --max-target-bytes (§10.7)
+_MECHANISM = {
+    "py-launch": "A",
+    "cli-shell": "A",
+    "argv-literal": "A",
+    "argv-literal-ts": "A",
+    "harness-resolve": "A",
+    "spawn-ts": "A",
+    "sdk-python": "B",
+    "sdk-ts": "B",
+    "http-python": "C",
+    "endpoint": "C",
+}
+_TS_SUFFIXES = (".ts", ".tsx", ".js", ".mjs", ".cjs")
+_PATHS = r"(?:/v1/messages|/chat/completions|/api/chat|/api/generate|/completion)\b"
+_ENDPOINT = re.compile(rf"^\S*?{_PATHS}")
+# a literal that starts at its quote and has no whitespace before the path
+_QUOTED_ENDPOINT = re.compile(rf"[\"'`][^\s\"'`]*{_PATHS}")
+# shell: also a bare word that is a URL or starts with a variable
+_BARE_ENDPOINT = re.compile(
+    rf"(?:^|[\s=(])(?:[a-z][a-z0-9+.-]*://|\$\{{?\w+\}}?)[^\s\"'`]*{_PATHS}"
+)
+_TS_BLOCK_COMMENT = re.compile(r"/\*.*?\*/")
+_TRAILING_TS = re.compile(r"(?:^|\s)//")
+_TRAILING_SH = re.compile(r"(?:^|\s)#")
+
+
+def _code_endpoint_line(rel: str, line_text: str) -> bool:
+    """TS/shell: an endpoint literal in code, comments cut off (§10.7, review I1)."""
+    if rel.endswith(_TS_SUFFIXES):
+        code = _TRAILING_TS.split(_TS_BLOCK_COMMENT.sub("", line_text), maxsplit=1)[0]
+        return bool(_QUOTED_ENDPOINT.search(code))
+    code = _TRAILING_SH.split(line_text, maxsplit=1)[0]
+    return bool(_QUOTED_ENDPOINT.search(code) or _BARE_ENDPOINT.search(code))
+
+
 _EXCLUDE = re.compile(r"diff|read_text\(|\.read\(\)|git (?:show|diff)")
 _FIXED_KEY = re.compile(r"\[\s*['\"]\w+['\"]\s*\]")
 _HUMAN = re.compile(r"print\(|\.write\(|comment|post")
@@ -79,7 +115,7 @@ def _in_loop(func: ast.AST, line: int) -> bool:
 
 def python_features(source: str, line: int) -> tuple[list[str], bool]:
     """Heuristic features of a Python call site and the exclusion flag."""
-    tree = ast.parse(source)
+    tree = parse_python(source)
     func = _enclosing(tree, line)
     text = source
     if func is not tree:
@@ -104,8 +140,90 @@ def _shell_features(text: str, line_text: str) -> tuple[list[str], bool]:
     return features, "diff" in text or invisible
 
 
+def ts_files(target: RepoTarget) -> tuple[str, ...]:
+    """Corpus TS/JS files except canaries (spec §10.7)."""
+    return tuple(
+        p
+        for p in target.corpus
+        if p.endswith(_TS_SUFFIXES) and role_of(p, target.roles) is not Role.CANARY
+    )
+
+
+def _skipped_nodes(tree: ast.AST) -> set[int]:
+    """Docstrings and the constant pieces of f-strings (checked joined)."""
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            ids |= {id(v) for v in node.values}
+        if isinstance(
+            node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
+        ):
+            body = node.body
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+            ):
+                ids.add(id(body[0].value))
+    return ids
+
+
+def _literal(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            v.value if isinstance(v, ast.Constant) else "{}" for v in node.values
+        )
+    return None
+
+
+def code_endpoint(text: str, line: int) -> bool:
+    """A code string on ``line`` names an endpoint with no whitespace before it."""
+    try:
+        tree = parse_python(text)
+    except SyntaxError:
+        return False
+    skip = _skipped_nodes(tree)
+    for node in ast.walk(tree):
+        value = _literal(node)
+        if value is None or id(node) in skip:
+            continue
+        start = getattr(node, "lineno", 0)
+        end = getattr(node, "end_lineno", None) or start
+        if start <= line <= end and _ENDPOINT.search(value):
+            return True
+    return False
+
+
+def _literal_argv_invisible(text: str, line: int) -> bool:
+    """A literal argv on ``line`` whose non-flag elements after the binary are
+    all non-literal: the prompt is not visible statically (§3.4, §10.7)."""
+    try:
+        tree = parse_python(text)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.List | ast.Tuple) and node.lineno == line:
+            rest = [
+                e
+                for e in node.elts[1:]
+                if not (
+                    isinstance(e, ast.Constant)
+                    and isinstance(e.value, str)
+                    and e.value.startswith("-")
+                )
+            ]
+            return bool(rest) and not any(
+                isinstance(e, ast.Constant | ast.JoinedStr) for e in rest
+            )
+    return False
+
+
 def _select(target: RepoTarget) -> tuple[str, ...]:
-    return tuple(dict.fromkeys((*python_files(target), *shell_files(target))))
+    return tuple(
+        dict.fromkeys((*python_files(target), *shell_files(target), *ts_files(target)))
+    )
 
 
 def _argv(ctx: ProbeCtx) -> list[str]:
@@ -121,7 +239,7 @@ def _argv(ctx: ProbeCtx) -> list[str]:
         "--no-git-ignore",
         "--scan-unknown-extensions",
         "--quiet",
-        *copy_paths(ctx),
+        *[p for p in copy_paths(ctx) if Path(p).stat().st_size <= MAX_TARGET_BYTES],
     ]
 
 
@@ -139,20 +257,41 @@ def _harness_launch(text: str, rel: str, line: int) -> tuple[bool, bool]:
 
 def _site(ctx: ProbeCtx, rule: str, rel: str, line: int) -> dict[str, Any] | None:
     text = source_text(ctx, rel)
+    lines = text.splitlines()
+    line_text = lines[line - 1] if 0 < line <= len(lines) else ""
+    if rule == "endpoint":
+        if rel.endswith(".py"):
+            if not code_endpoint(text, line):
+                return None
+        elif line_text.lstrip().startswith("*") or not _code_endpoint_line(
+            rel, line_text
+        ):
+            return None
+    if rel.endswith(_TS_SUFFIXES):
+        # TS: file-level anchor, inventory only (§10.7, named cost)
+        return {
+            "path": rel,
+            "line": line,
+            "mechanism": _MECHANISM[rule],
+            "rule": rule,
+            "candidate": False,
+            "features": [],
+            "anchor": f"llm:{rel}",
+        }
     if rel.endswith(".py"):
         invisible = False
         if rule == "py-launch":
             is_harness, invisible = _harness_launch(text, rel, line)
             if not is_harness:
                 return None
+        elif rule == "argv-literal":
+            invisible = _literal_argv_invisible(text, line)
         features, excluded = python_features(text, line)
         if invisible:
             features.append("prompt-invisible")
         anchor = python_anchor(text, rel, line)
         anchor = "llm:" + anchor.split(":", 1)[1]
     else:
-        lines = text.splitlines()
-        line_text = lines[line - 1] if 0 < line <= len(lines) else ""
         features, excluded = _shell_features(text, line_text)
         invisible = "prompt-invisible" in features
         anchor = f"llm:{rel}"
@@ -165,6 +304,7 @@ def _site(ctx: ProbeCtx, rule: str, rel: str, line: int) -> dict[str, Any] | Non
         "candidate": bool(strong) and not excluded and not invisible,
         "features": features,
         "anchor": anchor,
+        "excluded": excluded,
     }
 
 
@@ -213,39 +353,59 @@ def _parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> ParseResult
     for rel in ctx.inputs:
         if rel.endswith(".py"):
             try:
-                ast.parse(source_text(ctx, rel))
+                parse_python(source_text(ctx, rel))
             except SyntaxError as exc:
                 result.diagnostics.append(f"{rel}: {exc.msg}")
                 result.skipped.append(rel)
+    big = sorted(
+        r for r in ctx.inputs if (ctx.target.copy / r).stat().st_size > MAX_TARGET_BYTES
+    )
+    if big:
+        result.notes.append(f"larger than {MAX_TARGET_BYTES} bytes, not scanned: {big}")
+        # counted as processed: the skip is named in the note, not a lost input
+        assert result.processed_paths is not None
+        result.processed_paths += big
     inventory: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    by_anchor: dict[str, list[dict[str, Any]]] = {}
     for hit in data["results"]:
         rule = hit["check_id"].rsplit(".", 1)[-1]
         rel = rel_path(ctx, hit["path"])
         if rel in result.skipped or rule not in _MECHANISM:
             continue
         row = _site(ctx, rule, rel, hit["start"]["line"])
-        if row is None:
+        if row is None or (row["path"], row["line"]) in seen:
             continue
+        seen.add((row["path"], row["line"]))
         inventory.append(row)
-        if row["candidate"]:
-            result.findings.append(
-                Finding(
-                    rule="llm-sites/replaceable",
-                    category="llm-replaceable",
-                    severity="low",
-                    confidence=Confidence.CANDIDATE,
-                    owner_repo=ctx.target.name,
-                    anchor=row["anchor"],
-                    locations=[Location(rel, row["line"])],
-                    evidence=[
-                        {"kind": "feature", "detail": f} for f in row["features"]
-                    ],
-                    suggestion="скрипт / правила / дерево решений / малая модель",
-                )
+        by_anchor.setdefault(row["anchor"], []).append(row)
+    # heuristics span the function (§3.4): features of all rows of a point
+    # are pooled; an exclusion or an invisible prompt on any row vetoes it
+    for anchor, rows in by_anchor.items():
+        features = sorted({f for r in rows for f in r["features"]})
+        strong = {"fixed-schema", "loop"} & set(features)
+        veto = "prompt-invisible" in features or any(r.get("excluded") for r in rows)
+        is_candidate = bool(strong) and not veto  # TS rows carry no features
+        for r in rows:
+            r["candidate"] = is_candidate
+        if not is_candidate:
+            continue
+        result.findings.append(
+            Finding(
+                rule="llm-sites/replaceable",
+                category="llm-replaceable",
+                severity="low",
+                confidence=Confidence.CANDIDATE,
+                owner_repo=ctx.target.name,
+                anchor=anchor,
+                locations=[Location(r["path"], r["line"]) for r in rows],
+                evidence=[{"kind": "feature", "detail": f} for f in features],
+                suggestion="скрипт / правила / дерево решений / малая модель",
             )
+        )
     inventory += _configs(ctx)
     result.extra["inventory"] = [
-        {k: v for k, v in r.items() if k != "anchor"}
+        {k: v for k, v in r.items() if k not in ("anchor", "excluded")}
         for r in inventory
         if role_of(r["path"]) is not Role.CANARY
     ]
@@ -277,8 +437,8 @@ LLM_SITES = ProbeSpec(
         "llm:.selfcheck-canary/llm-sites/canary.py::selfcheck_classify",
     ),
     coverage="reported",
-    rules=("A", "B", "C", "D", "candidate:schema|loop"),
-    logic_version=1,
+    rules=("A", "B", "C", "D", "candidate:schema|loop", "construction"),
+    logic_version=2,
     binary="uvx",
     version_args=(*UVX_SEMGREP, "--version"),
     version_range=((1, 178), (1, 179)),

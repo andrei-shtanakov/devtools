@@ -359,4 +359,65 @@ JSCPD = ProbeSpec(
     config_files=(".jscpd.json",),
 )
 
+# ---- cargo-machete (S3, §10.3) --------------------------------------------
+
+_CM_CRATE = re.compile(r"^(\S+) -- (.+Cargo\.toml):$")
+_CM_DEP = re.compile(r"^\s+(\S+)$")
+_CM_CANARY = "selfcheck_canary/cargo_machete/Cargo.toml"
+
+
+def _cm_parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> ParseResult:
+    result = ParseResult([])
+    crate: str | None = None
+    manifest: str | None = None
+    for line in proc.stdout.splitlines():
+        head = _CM_CRATE.match(line)
+        if head:
+            crate, manifest = head.group(1), rel_path(ctx, head.group(2))
+            continue
+        dep = _CM_DEP.match(line)
+        if dep and crate and manifest:
+            result.findings.append(
+                Finding(
+                    rule="cargo-machete/unused-dependency",
+                    category="deps",
+                    severity="low",
+                    confidence=Confidence.LIKELY,
+                    owner_repo=ctx.target.name,
+                    anchor=f"file:{manifest}",
+                    locations=[Location(manifest, 1)],
+                    text_key=f"{crate}:{dep.group(1)}",
+                    suggestion="удалить неиспользуемую зависимость",
+                )
+            )
+    return result
+
+
+def _cm_expected(target: RepoTarget) -> list[str]:
+    return sorted(p for p in target.corpus if p.endswith("Cargo.toml"))
+
+
+CARGO_MACHETE = ProbeSpec(
+    name="cargo-machete",
+    languages=frozenset({"rust"}),
+    input_mode="roots",
+    select=lambda target: (".",),
+    canary=Canary(
+        _CM_CANARY,
+        '[package]\nname = "selfcheck_canary"\nversion = "0.1.0"\n'
+        'edition = "2021"\n[dependencies]\nlibc = "0.2"\n',
+        "cargo-machete/unused-dependency",
+        f"file:{_CM_CANARY}",
+    ),
+    rules=("unused-dependency",),
+    binary="cargo-machete",
+    version_range=((0, 9), (0, 10)),  # measured 0.9.2 (S3 Task 8)
+    normal_codes=frozenset({0, 1}),
+    argv=lambda ctx: [str(ctx.target.copy)],
+    parse=_cm_parse,
+    expected_files=_cm_expected,
+    config_files=("Cargo.toml",),
+)
+
+
 OTHER_PROBES = (SHELLCHECK, ACTIONLINT, ZIZMOR, JSCPD)

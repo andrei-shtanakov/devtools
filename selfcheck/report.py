@@ -132,24 +132,67 @@ def _fleet_lines(doc: dict[str, Any]) -> list[str]:
     else:
         lines.append("fleet-only: — (без --fleet)")
     vendored = doc.get("vendored", {})
+    multi = len(run["scope"]) > 1
     rows_v = [
-        (path, d)
+        (repo, path, d)
         for repo in run["scope"]
         for path, decls in vendored.get(repo, {}).items()
         for d in decls
     ]
     if rows_v:
+        head = "| репо | путь |" if multi else "| путь |"
         lines += [
             "",
             "### вендор-копии",
             "",
-            "| путь | владелец | ref | декларация |",
-            "|---|---|---|---|",
+            f"{head} владелец | ref | декларация |",
+            "|" + "---|" * (5 if multi else 4),
         ]
         lines += [
-            f"| {path} | {d['owner']} | {d['ref']} | {d['declaration']} |"
-            for path, d in rows_v
+            f"{'| ' + repo + ' ' if multi else ''}| {path} | {d['owner']} | "
+            f"{d['ref']} | {d['declaration']} |"
+            for repo, path, d in rows_v
         ]
+    vendor_dups = doc.get("vendor_dups", [])
+    if vendor_dups:
+        lines += ["", f"### вендор-дубли ({len(vendor_dups)})", ""]
+        lines += [
+            f"- `{g['anchor']}`: "
+            + ", ".join(
+                f"{m['owner_repo']}:{m['path']}::{m['member']}" for m in g["members"]
+            )
+            for g in vendor_dups
+        ]
+    return [*lines, ""]
+
+
+def _repo_rows(doc: dict[str, Any]) -> list[str]:
+    """Per-repo summary when the run covers two repos or more (§10.2)."""
+    scope = doc["run"]["scope"]
+    if len(scope) < 2:
+        return []
+    cats = sorted({f["category"] for f in doc["findings"]})
+    lines = [
+        "## Репо",
+        "",
+        "| репо | пробы не ok | dead c/l/cand | " + " | ".join(cats) + " |",
+        "|" + "---|" * (3 + len(cats)),
+    ]
+    for repo in scope:
+        mine = [f for f in doc["findings"] if f.get("owner_repo") == repo]
+        bad = [
+            f"{p['probe']}:{p['status']} ({(p.get('reason') or '')[:60]})"
+            for p in doc["probes"]
+            if p["repo"] == repo and p["status"] not in ("ok", "skipped")
+        ]
+        dead = [
+            f["confidence"] for f in mine if f["rule"].startswith("usage-graph/dead")
+        ]
+        dc = "/".join(str(dead.count(c)) for c in ("confirmed", "likely", "candidate"))
+        counts = " | ".join(
+            str(sum(1 for f in mine if f["category"] == c)) for c in cats
+        )
+        lines.append(f"| {repo} | {', '.join(bad) or '—'} | {dc} | {counts} |")
     return [*lines, ""]
 
 
@@ -157,6 +200,7 @@ def render_markdown(doc: dict[str, Any]) -> str:
     """Human report: probes first, then findings by category and rule."""
     run = doc["run"]
     manifest = run["manifest"]
+    multi = len(run["scope"]) > 1
     lines = [
         f"# selfcheck {run['run_id']}",
         "",
@@ -167,6 +211,7 @@ def render_markdown(doc: dict[str, Any]) -> str:
         ),
         f"Окружение: {run['env']}. Поверхность: {run['surface']}.",
         "",
+        *_repo_rows(doc),
         "## Пробы",
         "",
         *_probe_rows(doc),
@@ -188,15 +233,20 @@ def render_markdown(doc: dict[str, Any]) -> str:
     for f in doc["findings"]:
         by_cat.setdefault(f["category"], []).append(f)
     for category, items in sorted(by_cat.items()):
+        head = "| репо | правило |" if multi else "| правило |"
         lines += [
             f"## {category} ({len(items)})",
             "",
-            "| правило | уверенность | якорь | мест | статус |",
-            "|---|---|---|---|---|",
+            f"{head} уверенность | якорь | мест | статус |",
+            "|" + "---|" * (6 if multi else 5),
         ]
-        for f in sorted(items, key=lambda x: (x["rule"], x["anchor"]))[:MD_ROWS]:
+        ordered = sorted(
+            items, key=lambda x: (x.get("owner_repo", ""), x["rule"], x["anchor"])
+        )
+        for f in ordered[:MD_ROWS]:
+            repo = f"| {f.get('owner_repo', '')} " if multi else ""
             lines.append(
-                f"| {f['rule']} | {f['confidence']} | `{f['anchor']}` | "
+                f"{repo}| {f['rule']} | {f['confidence']} | `{f['anchor']}` | "
                 f"{f['occurrences']} | {statuses.get(f['id'], '—')} |"
             )
         if len(items) > MD_ROWS:
@@ -211,12 +261,16 @@ def render_markdown(doc: dict[str, Any]) -> str:
         "",
         "## Инвентарь LLM-вызовов",
         "",
-        "| путь | строка | механизм | кандидат | признаки |",
-        "|---|---|---|---|---|",
+        (
+            f"{'| репо | путь |' if multi else '| путь |'} строка | механизм | "
+            "кандидат | признаки |"
+        ),
+        "|" + "---|" * (6 if multi else 5),
     ]
     for item in doc["inventory"]["llm"]:
+        repo = f"| {item.get('repo', '')} " if multi else ""
         lines.append(
-            f"| {item['path']} | {item['line']} | {item['mechanism']} | "
+            f"{repo}| {item['path']} | {item['line']} | {item['mechanism']} | "
             f"{'да' if item['candidate'] else 'нет'} | {', '.join(item['features'])} |"
         )
     if run["warnings"]:

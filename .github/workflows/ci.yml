@@ -27,4 +27,6 @@ jobs:
           -q
       - run: make plan-check-selftest
       - run: uv sync --frozen --group selfcheck
+      # selfcheck S3 probe (spec §10.3); version pinned to the registry range
+      - run: cargo install cargo-machete --version 0.9.2 --locked
       - run: SELFCHECK_REQUIRE_TOOLS=1 uv run --frozen --group selfcheck pytest tests/selfcheck -q
