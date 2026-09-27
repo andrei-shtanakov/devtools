@@ -6,7 +6,7 @@ from pathlib import Path
 
 from selfcheck.config import load_config
 from selfcheck.corpus import list_corpus
-from selfcheck.judge import clone_lines, is_candidate, order_key
+from selfcheck.judge import MAX_SLICE, build_slice, clone_lines, is_candidate, order_key
 from selfcheck.model import Confidence, Finding, Location
 from tests.selfcheck.helpers import make_repo
 
@@ -81,3 +81,85 @@ def test_obsidian_plugins_are_out_of_the_corpus(tmp_path: Path) -> None:
     )
     corpus = list_corpus(repo, config.corpus_exclude)
     assert ".obsidian/plugins/p/main.js" not in corpus and "a.md" in corpus
+
+
+FUNC = "".join(f"# pad {i}\n" for i in range(50)) + (
+    "def f(x):\n"
+    + "".join(f"    y{i} = x + {i}\n" for i in range(10))
+    + "    return x\n"
+)  # line k (1-based) of the pad block is "# pad {k-1}"; `def f` is line 51
+
+
+def _src(tmp_path: Path, files: dict[str, str]) -> dict[str, Path]:
+    root = tmp_path / "a"
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    return {"a": root}
+
+
+def test_llm_slice_is_the_line_pm_40(tmp_path: Path) -> None:
+    f = _f("llm-sites/replaceable", Confidence.CANDIDATE, line=55)
+    s = build_slice(f, _src(tmp_path, {"x.py": FUNC}))
+    assert s is not None and not s.truncated
+    assert "# pad 14" in s.text and "# pad 13" not in s.text  # lines 15..95
+    assert "a:x.py lines 15-" in s.text
+
+
+def test_ast_dup_slice_takes_whole_functions(tmp_path: Path) -> None:
+    f = _f("ast-dup/structural", Confidence.CANDIDATE, line=51)
+    f.related = [{"owner_repo": "a", "path": "x.py", "line": 51, "member": "f"}]
+    s = build_slice(f, _src(tmp_path, {"x.py": FUNC}))
+    assert s is not None and "    return x" in s.text and "# pad 45" in s.text
+
+
+def test_jscpd_slice_is_clone_pm_5(tmp_path: Path) -> None:
+    f = _f("jscpd/clone", Confidence.LIKELY, line=20, lines=3)  # clone 20..22
+    f.related = [{"owner_repo": "a", "path": "x.py", "line": 20, "member": "20"}]
+    s = build_slice(f, _src(tmp_path, {"x.py": FUNC}))
+    assert s is not None and "# pad 14" in s.text and "# pad 26" in s.text
+    assert "# pad 13" not in s.text and "# pad 27" not in s.text
+
+
+def test_form_feed_does_not_shift_lines(tmp_path: Path) -> None:
+    text = "L1\x0c\n" + "".join(f"L{i}\n" for i in range(2, 21))  # \f: splitlines
+    f = _f("jscpd/clone", Confidence.LIKELY, line=3, lines=1)  # window 1..8
+    f.related = [{"owner_repo": "a", "path": "x.py", "line": 3, "member": "3"}]
+    s = build_slice(f, _src(tmp_path, {"x.py": text}))
+    assert s is not None and "L8" in s.text and "L9" not in s.text
+
+
+def test_non_utf8_name_is_read_by_raw_path(tmp_path: Path, monkeypatch) -> None:
+    """#420: the finding carries the shown name; the read goes by the raw one
+    (APFS refuses non-UTF-8 names, so the mapping is patched as in test_corpus)."""
+    from selfcheck import judge as judge_module
+
+    src = _src(tmp_path, {"raw_name.py": "y = 2\n"})
+    monkeypatch.setattr(
+        judge_module,
+        "raw_path",
+        lambda root, rel: "raw_name.py" if rel == "n\ufffd.py" else rel,
+    )
+    f = _f("llm-sites/replaceable", Confidence.CANDIDATE, path="n\ufffd.py")
+    s = build_slice(f, src)
+    assert s is not None and "y = 2" in s.text
+
+
+def test_symlink_is_not_read(tmp_path: Path) -> None:
+    src = _src(tmp_path, {"real.py": FUNC})
+    (src["a"] / "link.py").symlink_to(src["a"] / "real.py")
+    f = _f("llm-sites/replaceable", Confidence.CANDIDATE, path="link.py")
+    assert build_slice(f, src) is None
+
+
+def test_missing_file_gives_none(tmp_path: Path) -> None:
+    f = _f("llm-sites/replaceable", Confidence.CANDIDATE, path="gone.py")
+    assert build_slice(f, {"a": tmp_path}) is None
+
+
+def test_huge_slice_is_truncated(tmp_path: Path) -> None:
+    f = _f("jscpd/clone", Confidence.LIKELY, line=1, lines=30000)
+    f.related = [{"owner_repo": "a", "path": "x.py", "line": 1, "member": "1"}]
+    s = build_slice(f, _src(tmp_path, {"x.py": "x = 1\n" * 40000}))
+    assert s is not None and s.truncated
+    assert len(s.text.encode()) <= MAX_SLICE + 32 and s.text.endswith("[truncated]")
