@@ -40,6 +40,7 @@ class NodeFacts:
     mentioned: bool
     vendored: bool = False
     decl_cap: bool = False
+    dir_zone: bool = False
 
 
 def dead_confidence(
@@ -62,6 +63,8 @@ def dead_confidence(
         caps.append("P5")
     if facts.decl_cap:
         caps.append("P6")
+    if facts.dir_zone:
+        caps.append("P7")
     if caps:
         value = cap(value, Confidence.LIKELY)
     return value, caps
@@ -120,6 +123,15 @@ def graph_payload(
     }
 
 
+def _suggestion(klass: str) -> str:
+    if klass == "doc-only":
+        return (
+            "упомянут в документации — если это ручной инструмент, внесите в "
+            "[[operator]] selfcheck.toml; иначе удалить или перенести в docs/archive"
+        )
+    return "удалить или перенести в docs/archive"
+
+
 def _mention_evidence(places: list[str]) -> list[dict[str, str]]:
     out = [{"kind": "mentioned-in", "detail": p} for p in places[:MENTION_PLACES]]
     if len(places) > MENTION_PLACES:
@@ -145,7 +157,8 @@ def classify(
     ``decl_cap``: cap P6 on every dead of the repo; ``exclude``: paths left
     out entirely (the fleet canary node, spec §9.5).
     """
-    in_zone = {m for z in g.zones for m in z.members}
+    in_zone = {m for z in g.zones if z.suffix for m in z.members}
+    dir_zone = {m for z in g.zones if not z.suffix for m in z.members} - in_zone
     shielded = protected | frozenset(vendored or {})
     findings: list[Finding] = []
     for anchor, node in sorted(g.nodes.items()):
@@ -161,6 +174,7 @@ def classify(
             bool(g.mentions.get(anchor)),
             vendored=node.path in shielded,
             decl_cap=decl_cap,
+            dir_zone=anchor in dir_zone,
         )
         value, caps = dead_confidence(facts, surface)
         if value is None:
@@ -180,7 +194,7 @@ def classify(
                     *[{"kind": "cap", "detail": c} for c in caps],
                     *_mention_evidence(g.mentions.get(anchor, [])),
                 ],
-                suggestion="удалить или перенести в docs/archive",
+                suggestion=_suggestion(facts.klass),
             )
         )
     findings += _zones(g, repo)

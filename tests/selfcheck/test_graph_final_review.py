@@ -21,7 +21,8 @@ def graph(tmp: Path, files: dict[str, str]) -> Graph:
 
 
 def protected(g: Graph, anchor: str) -> bool:
-    """Not dead-eligible: live, or inside an unresolved-launch zone."""
+    """Live, or in a zone (a suffix zone exempts, a caller-dir zone caps at P7 —
+    never confirmed)."""
     in_zone = any(anchor in z.members for z in g.zones)
     return klass_of(g, anchor) == "live" or in_zone
 

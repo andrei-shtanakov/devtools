@@ -5,3 +5,16 @@
 anchor = "file:issue_console.py"
 reason = "неприкасаем по решению владельца: новый TUI — новый файл"
 until = 2027-03-31
+
+# Ручные точки входа (спека §3.2.5): инструменты, которые запускает человек.
+# gen_agents_toml.py намеренно не внесён (2026-09-27): кандидат в устаревшие.
+
+[[operator]]
+repo = "devtools"
+path = "attest-vendor.sh"
+reason = "гейт волн ре-вендора; запускает оператор (authority-root, #263)"
+
+[[operator]]
+repo = "devtools"
+path = "discover_models.py"
+reason = "discovery моделей по ADR-ECO-003a; запускает оператор, README"

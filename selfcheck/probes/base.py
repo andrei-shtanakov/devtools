@@ -54,6 +54,7 @@ class RepoTarget:
     fleet: str = "absent"
     now: float = 0.0
     fleet_view: FleetView | None = None  # S2 --fleet (spec §9)
+    operator: tuple[str, ...] = ()  # this repo's [[operator]] paths (§3.2.5)
 
 
 @dataclass(frozen=True)
@@ -244,7 +245,11 @@ def _internal(spec: ProbeSpec, ctx: ProbeCtx, result: ProbeResult) -> ParseResul
 
 
 def _analyzer_config_hash(target: RepoTarget) -> str:
-    material = {"roles": target.roles, "corpus": list(target.corpus_exclude)}
+    material = {
+        "roles": target.roles,
+        "corpus": list(target.corpus_exclude),
+        "operator": sorted(target.operator),
+    }
     return hashlib.sha1(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
 
