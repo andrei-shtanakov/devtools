@@ -97,10 +97,10 @@ git diff master HEAD -- tests/test_governance_bundle_dag.py | grep -c '^-'
 `test_beh01_…` … `test_beh18_…` (BEH-01–18, TASK-001), целиком добавленный
 код вне области DEL-35.
 
-Из восьми хунков в блоке существующих тестов ровно **семь** правят
+Из восьми хунков в блоке существующих тестов все **восемь** правят
 существующие функции; правки исчерпывающе названы:
 
-1. **Механическая распаковка третьей величины `_previous_dag`** — шесть
+1. **Механическая распаковка третьей величины `_previous_dag`** — семь
    мест, одна и та же замена `dag, source = tb._previous_dag(...)` →
    `dag, source, _reason = tb._previous_dag(...)`, без изменения тела,
    входов или ожиданий теста:
@@ -112,7 +112,7 @@ git diff master HEAD -- tests/test_governance_bundle_dag.py | grep -c '^-'
    - `test_previous_dag_legacy_broken_yaml_is_unavailable`
    - `test_previous_dag_legacy_rejects_malformed_traces_to`
 
-   (Седьмое вхождение той же распаковки — в
+   (Восьмое вхождение той же распаковки — в
    `test_previous_dag_unavailable_when_composition_matches_nothing`, см.
    ниже; отдельно не считается восьмым пунктом списка.)
 
