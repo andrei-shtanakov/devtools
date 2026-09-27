@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -12,15 +13,19 @@ from selfcheck.config import load_config
 from selfcheck.corpus import list_corpus
 from selfcheck.judge import (
     DEFAULT_MODEL,
+    JUDGE_VERSION,
     MAX_SLICE,
     SCHEMA,
     build_slice,
+    cache_key,
     call_judge,
     clone_lines,
     is_candidate,
     judge_argv,
     judge_env,
+    load_cache,
     order_key,
+    save_cache,
 )
 from selfcheck.model import Confidence, Finding, Location
 from tests.selfcheck.helpers import make_repo
@@ -261,3 +266,38 @@ def test_call_judge_outcomes(
     assert got["verdict"] == expected
     if expected == "error":
         assert got["detail"]
+
+
+def test_cache_key_follows_slice_and_model() -> None:
+    assert cache_key("a", "m") != cache_key("b", "m")
+    assert cache_key("a", "m") != cache_key("a", "m2")
+    assert cache_key("a", "m") == cache_key("a", "m")
+    assert cache_key("a", "m").startswith(f"v{JUDGE_VERSION}:")
+
+
+def test_cache_roundtrip_bad_entries_and_old_versions(tmp_path: Path) -> None:
+    path = tmp_path / "judge-cache.json"
+    assert load_cache(path) == ({}, [])
+    good_key = cache_key("s", "m")
+    cache = {
+        good_key: {**GOOD, "at": "2026-09-27"},
+        "v0:m:old": {**GOOD, "at": "2026-01-01"},
+        cache_key("t", "m"): {"at": "x"},  # not by schema
+    }
+    assert save_cache(path, cache) is None
+    loaded, warnings = load_cache(path)
+    assert list(loaded) == [good_key] and warnings  # old version dropped, bad skipped
+    path.write_text("{broken")
+    assert load_cache(path)[0] == {} and load_cache(path)[1]
+
+
+def test_cache_write_failure_is_a_warning(tmp_path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        assert save_cache(ro / "judge-cache.json", {}) is not None
+    finally:
+        ro.chmod(0o700)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import subprocess
@@ -256,3 +257,59 @@ def call_judge(
         return _error(str(data.get("result") if isinstance(data, dict) else data))
     verdict = valid_verdict(data.get("structured_output"))
     return verdict if verdict is not None else _error("outside-schema")
+
+
+JUDGE_VERSION = 1  # bump on any prompt/schema change (§11.3)
+
+
+def cache_key(text: str, model: str) -> str:
+    """``v<version>:<model>:<sha256 of the slice>`` (§11.3)."""
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    return f"v{JUDGE_VERSION}:{model}:{digest}"
+
+
+def _current(key: str) -> bool:
+    return key.startswith(f"v{JUDGE_VERSION}:")
+
+
+def load_cache(path: Path) -> tuple[dict[str, dict], list[str]]:
+    """Valid current-version entries; anything else is a warning, never exit 4."""
+    if not path.is_file():
+        return {}, []
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return {}, [f"judge-cache {path.name} unreadable, starting empty: {exc}"]
+    if not isinstance(data, dict):
+        return {}, [f"judge-cache {path.name} is not an object, starting empty"]
+    cache: dict[str, dict] = {}
+    bad = 0
+    for key, entry in data.items():
+        if not _current(key):
+            continue
+        verdict = valid_verdict(
+            {k: v for k, v in entry.items() if k != "at"}
+            if isinstance(entry, dict)
+            else None
+        )
+        if verdict is None:
+            bad += 1
+            continue
+        cache[key] = {**verdict, "at": str(entry.get("at", ""))}
+    warnings = [f"judge-cache: {bad} entries off the schema skipped"] if bad else []
+    return cache, warnings
+
+
+def save_cache(path: Path, cache: Mapping[str, dict]) -> str | None:
+    """Atomic write via a unique temp file; old versions dropped (§11.3)."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        keep = {k: v for k, v in cache.items() if _current(k)}
+        with tempfile.NamedTemporaryFile(
+            "w", dir=path.parent, prefix=".judge-cache-", delete=False
+        ) as tmp:
+            json.dump(keep, tmp, ensure_ascii=False, sort_keys=True)
+        os.replace(tmp.name, path)
+    except OSError as exc:
+        return f"judge-cache {path.name} not saved: {exc}"
+    return None
