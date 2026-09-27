@@ -178,6 +178,6 @@ USAGE_GRAPH = ProbeSpec(
         f"file:{CANARY_DIR}orphan_canary.py",
     ),
     rules=("dead.file", "dead.module", "unresolved-exec", "broken-root", "root-stale"),
-    logic_version=3,
+    logic_version=4,
     analyze=_analyze,
 )

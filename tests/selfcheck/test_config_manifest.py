@@ -29,6 +29,10 @@ from selfcheck.roles import Role, glob_match, role_of
         ("docs/runbook.txt", Role.DOCUMENTATION),
         ("issue_worker.py", Role.SOURCE),
         ("skills/fleet-check/extra/SKILL.md", Role.DOCUMENTATION),
+        ("test/contracts/vendored_test.exs", Role.TEST),
+        ("apps/a/test/a_test.exs", Role.TEST),
+        ("test/support/fixtures/x.json", Role.TEST),
+        ("lib/kapelle/test_helper.ex", Role.SOURCE),
     ],
 )
 def test_default_roles(path: str, role: Role) -> None:

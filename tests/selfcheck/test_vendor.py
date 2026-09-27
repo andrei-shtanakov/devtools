@@ -188,3 +188,171 @@ def test_d_header_mixed_with_member_lines_is_unparsed() -> None:
         parse_declaration(
             "kit/PIN", "# VENDORED: x @ abcdef1 — p\n# SOURCE: s @ 5bfd829\n"
         )
+
+
+FORMAT_E_AT = (
+    "source: impresario@8082e53b743169137f9e8c72c279043c7166ab03 contracts/idea/v1\n"
+    "vendored: 2026-08-16\n"
+    "purpose: consumer copy (design doc §7)\n"
+    f"sha256 fixtures/valid/idea-001.yaml: {H}\n"
+    f"sha256 schema.json: {H}\n"
+)
+FORMAT_E_COMMIT = (
+    "source: impresario contracts/loop-state/v1\n"
+    "commit: a9d11fa75bb101d2919dc9f99e075270de5d7976\n"
+    "vendored: 2026-08-17\n"
+    "note: pinned copy (repo-boundaries vendoring). Do not edit here —\n"
+    "re-vendor from canon and update this header.\n"
+)
+FORMAT_E_REPO = (
+    "repo: github.com/andrei-shtanakov/maestro\n"
+    "commit: 346222e3b\n"
+    "note: schema bytes unchanged vs pinned commit\n"
+)
+FORMAT_E_HASH = (
+    "# VENDORED PINNED COPY — do not hand-edit the files under this directory.\n"
+    "#\n"
+    "# source: devtools@2533ff7b8c3afd74110b3838325bf76ba46ba186 contracts/x/v1\n"
+    "# vendored: 2026-08-18\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("rel", "text", "owner", "ref"),
+    [
+        (
+            "priv/c/idea/v1/PIN",
+            FORMAT_E_AT,
+            "impresario",
+            "8082e53b743169137f9e8c72c279043c7166ab03",
+        ),
+        (
+            "contracts/ls/v1/PINNED.txt",
+            FORMAT_E_COMMIT,
+            "impresario",
+            "a9d11fa75bb101d2919dc9f99e075270de5d7976",
+        ),
+        ("contracts/mv/VENDORED_FROM", FORMAT_E_REPO, "maestro", "346222e3b"),
+        (
+            "core/tests/fx/v1/PIN",
+            FORMAT_E_HASH,
+            "devtools",
+            "2533ff7b8c3afd74110b3838325bf76ba46ba186",
+        ),
+    ],
+)
+def test_format_e(rel: str, text: str, owner: str, ref: str) -> None:
+    decl = parse_declaration(rel, text)
+    folder = rel.rsplit("/", 1)[0]
+    assert (decl.fmt, decl.owner, decl.ref, decl.members, decl.folder) == (
+        "E",
+        owner,
+        ref,
+        (),
+        folder,
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "source: impresario contracts/x/v1\ncommit: main\n",  # ref not hex
+        "source: a@abcdef1 p\nsource: b@abcdef2 q\n",  # two source lines
+        "source: impresario contracts/x/v1\nvendored: 2026-08-17\n",  # no ref
+        "repo: github.com/o/r\n",  # repo without commit
+    ],
+)
+def test_e_unparsed(text: str) -> None:
+    with pytest.raises(DeclarationError):
+        parse_declaration("contracts/x/v1/PINNED.txt", text)
+
+
+def test_uppercase_source_stays_format_a() -> None:
+    with pytest.raises(DeclarationError, match="no members"):
+        parse_declaration("x/PIN", "# SOURCE: steward @ 5bfd829\n")
+
+
+E_TEXTS = {
+    "contracts/ls/v1/PINNED.txt": FORMAT_E_COMMIT,
+    "contracts/ls/v1/schema.json": "{}",
+    "contracts/ls/v1/fixtures/ok.json": "{}",
+    "contracts/ls/v1/helper.py": "def f():\n    return 1\n",
+    "contracts/ls/v2/schema.json": "{}",  # sibling folder: not a member
+    "tools/check.py": "import json\n",
+}
+E_NODES = frozenset({"tools/check.py", "contracts/ls/v1/helper.py"})
+
+
+def test_e_members_are_folder_non_code() -> None:
+    res = vendor_roles("r", sorted(E_TEXTS), E_TEXTS, role_of, E_NODES)
+    assert sorted(res.members) == [
+        "contracts/ls/v1/fixtures/ok.json",
+        "contracts/ls/v1/schema.json",
+    ]
+    assert res.findings == [] and res.broken is False
+
+
+def _with(line: str) -> dict[str, str]:
+    return {**E_TEXTS, "contracts/ls/v1/PINNED.txt": FORMAT_E_COMMIT + line}
+
+
+def test_e_code_member_only_when_named() -> None:
+    texts = _with(f"sha256 helper.py: {H}\n")  # the fleet's `sha256 <path>:` form
+    res = vendor_roles("r", sorted(texts), texts, role_of, E_NODES)
+    assert "contracts/ls/v1/helper.py" in res.members
+
+
+def test_e_prose_does_not_name_code() -> None:
+    texts = _with("note: helper.py is ours\n")
+    res = vendor_roles("r", sorted(texts), texts, role_of, E_NODES)
+    assert "contracts/ls/v1/helper.py" not in res.members
+
+
+@pytest.mark.parametrize(
+    "line", [f"{H}  tools/check.py\n", f"sha256 ../../../tools/check.py: {H}\n"]
+)
+def test_e_member_line_outside_folder_is_unparsed(line: str) -> None:
+    texts = _with(line)
+    res = vendor_roles("r", sorted(texts), texts, role_of, E_NODES)
+    assert [f.rule for f in res.findings] == ["selfcheck/vendor-pin-unparsed"]
+    assert "tools/check.py" in res.protected and res.broken is True
+
+
+def test_e_prose_path_outside_folder_still_parses() -> None:
+    texts = _with("note: consumed by tools/check.py; see TODO.md\n")
+    res = vendor_roles("r", sorted(texts), texts, role_of, E_NODES)
+    assert res.findings == [] and "contracts/ls/v1/schema.json" in res.members
+
+
+def test_e_in_repo_root_is_unparsed_finding() -> None:
+    texts = {"PIN": "source: o@abcdef1 p\n", "a.json": "{}"}
+    res = vendor_roles("r", sorted(texts), texts, role_of, frozenset())
+    assert [f.rule for f in res.findings] == ["selfcheck/vendor-pin-unparsed"]
+    assert res.broken is True
+
+
+def test_e_folder_with_only_unnamed_code_is_dangling() -> None:
+    texts = {
+        "contracts/c/v1/PINNED.txt": FORMAT_E_COMMIT,
+        "contracts/c/v1/local.py": "x = 1\n",
+    }
+    nodes = frozenset({"contracts/c/v1/local.py"})
+    res = vendor_roles("r", sorted(texts), texts, role_of, nodes)
+    assert [(f.rule, f.text_key) for f in res.findings] == [
+        ("selfcheck/vendor-pin-dangling", "contracts/c/v1")
+    ]
+    assert "contracts/c/v1/local.py" not in res.members
+
+
+def test_e_folder_without_members_is_dangling() -> None:
+    texts = {"contracts/gone/v1/PINNED.txt": FORMAT_E_COMMIT, "a.py": "x = 1\n"}
+    res = vendor_roles("r", sorted(texts), texts, role_of, frozenset({"a.py"}))
+    assert [(f.rule, f.text_key) for f in res.findings] == [
+        ("selfcheck/vendor-pin-dangling", "contracts/gone/v1")
+    ]
+    assert res.broken is True
+
+
+@pytest.mark.parametrize("rel", [".github/workflows/vendor-drift.yml", ".github/PIN"])
+def test_github_files_are_not_candidates(rel: str) -> None:
+    assert is_candidate(rel, "name: x\n", is_node=False) is False
