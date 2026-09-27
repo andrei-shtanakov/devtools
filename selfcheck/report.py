@@ -196,6 +196,22 @@ def _repo_rows(doc: dict[str, Any]) -> list[str]:
     return [*lines, ""]
 
 
+# launchd completeness cannot be proven: the report names the plists (§3.2.4)
+_LISTED = frozenset({"plists"})
+
+
+def _surface_line(surface: dict[str, Any]) -> str:
+    """Scalars as they are, the plists by name, other maps and lists as counts
+    (#410): the per-file ``history`` lives in report.json."""
+
+    def shown(key: str, value: Any) -> Any:
+        if key in _LISTED and isinstance(value, list):
+            return ", ".join(map(str, value)) or "—"
+        return len(value) if isinstance(value, dict | list) else value
+
+    return ", ".join(f"{k}: {shown(k, v)}" for k, v in surface.items())
+
+
 def render_markdown(doc: dict[str, Any]) -> str:
     """Human report: probes first, then findings by category and rule."""
     run = doc["run"]
@@ -209,7 +225,7 @@ def render_markdown(doc: dict[str, Any]) -> str:
             f"{manifest['entries_read']}, каталогов {len(manifest['repos'])}, "
             f"отсутствуют: {', '.join(manifest['missing']) or 'нет'}."
         ),
-        f"Окружение: {run['env']}. Поверхность: {run['surface']}.",
+        f"Окружение: {run['env']}. Поверхность: {_surface_line(run['surface'])}.",
         "",
         *_repo_rows(doc),
         "## Пробы",

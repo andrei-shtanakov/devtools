@@ -322,3 +322,54 @@ def test_fleet_is_not_complete_when_usage_graph_did_not_run(tmp_path: Path) -> N
     (doc,) = reports(ws)
     assert doc["run"]["surface"]["fleet"] == "partial"
     assert "complete относительно" not in markdown(ws, doc)
+
+
+def test_canary_setup_failure_names_the_fleet(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """#410: a failed fleet canary (e.g. an old git without ``init -b``) is
+    exit 4 with its own message, not «materialize»."""
+    import subprocess
+
+    from selfcheck.fleet import assemble
+
+    def broken(*a, **k):
+        raise subprocess.CalledProcessError(129, ["git", "init", "-b", "main"])
+
+    monkeypatch.setattr(assemble, "build_canary", broken)
+    ws = fleet_ws(tmp_path)
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 4
+    err = capsys.readouterr().err
+    assert "fleet devtools" in err and "materialize" not in err
+
+
+def test_fleet_canary_is_removed_after_the_run(tmp_path: Path) -> None:
+    """#410: the canary git repo is scratch, like the corpus copy."""
+    ws = fleet_ws(tmp_path)
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 0
+    (doc,) = reports(ws)
+    run_dir = ws / "out" / doc["run"]["run_id"]
+    assert not (run_dir / "fleet-canary").exists()
+
+
+def test_canary_cleanup_failure_is_a_warning(tmp_path: Path, monkeypatch) -> None:
+    """Review of #429: a canary that cannot be removed is a warning in the
+    report, like the corpus copy — not silence (§1.3)."""
+    import shutil
+
+    from selfcheck import corpus
+
+    real = shutil.rmtree
+
+    def stuck(path, *a, **k):
+        if "fleet-canary" in str(path):
+            raise OSError("busy")
+        return real(path, *a, **k)
+
+    monkeypatch.setattr(corpus.shutil, "rmtree", stuck)
+    ws = fleet_ws(tmp_path)
+    assert main(args(ws, sched(tmp_path), "--fleet")) == 0
+    (doc,) = reports(ws)
+    assert any(
+        "cleanup failed" in w and "fleet-canary" in w for w in doc["run"]["warnings"]
+    )
