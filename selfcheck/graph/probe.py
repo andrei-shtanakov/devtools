@@ -80,8 +80,9 @@ def _operator(g: Graph, ctx: ProbeCtx) -> list[Finding]:
                     locations=[Location(path, 1)],
                     text_key=path,
                     suggestion=(
-                        "путь исключён из корпуса ([corpus] exclude, .gitignore,"
-                        " --path): уберите исключение или запись [[operator]]"
+                        "путь есть на диске, но вне корпуса ([corpus] exclude,"
+                        " .gitignore, symlink): уберите исключение или запись"
+                        " [[operator]]"
                         if excluded
                         else "уберите запись [[operator]] или верните файл"
                     ),
