@@ -17,7 +17,7 @@ from selfcheck.dups import (
     overlaps,
 )
 from selfcheck.env import EnvInfo
-from selfcheck.model import Confidence
+from selfcheck.model import Confidence, finding_id
 from selfcheck.probes.base import (
     ProbeResult,
     ProbeSpec,
@@ -191,43 +191,50 @@ def _fn(path: str, name: str = "f", body: str = GOLD_BODY) -> FuncHash:
     return function_hashes(f"def {name}(x):\n{body}    return x\n", path)[0]
 
 
-S1_GOLDEN = [
-    {
-        "id": "sc-a4f4f800",
-        "rule": "ast-dup/exact",
-        "owner_repo": "r",
-        "anchor": "dup:exact:cf9bd0c1e0a973ff",
-        "locations": [{"path": "a.py", "line": 1}, {"path": "b.py", "line": 1}],
-        "related": [
-            {"owner_repo": "r", "path": "a.py", "line": 1, "member": "f"},
-            {"owner_repo": "r", "path": "b.py", "line": 1, "member": "g"},
-        ],
-    },
-    {
-        "id": "sc-e6d0475e",
-        "rule": "ast-dup/structural",
-        "owner_repo": "r",
-        "anchor": "dup:structural:6b7354843b992577",
-        "locations": [
-            {"path": "a.py", "line": 1},
-            {"path": "b.py", "line": 1},
-            {"path": "c.py", "line": 1},
-        ],
-        "related": [
-            {"owner_repo": "r", "path": "a.py", "line": 1, "member": "f"},
-            {"owner_repo": "r", "path": "b.py", "line": 1, "member": "g"},
-            {"owner_repo": "r", "path": "c.py", "line": 1, "member": "h"},
-        ],
-    },
-]
+def _s1_golden(hs: list[FuncHash]) -> list[dict]:
+    """The S1 grouping, spelled out independently of ``group_dups``.
+
+    Hash values depend on the interpreter's AST dump (CI runs 3.12, local
+    3.13), so the golden is built from them, not pinned as literals; the
+    structure — owner, anchor kind, member order — is what S1 fixed."""
+    a = hs[0]
+    loc = [{"path": h.path, "line": h.line} for h in hs]
+    rel = [
+        {"owner_repo": "r", "path": h.path, "line": h.line, "member": h.qualname}
+        for h in hs
+    ]
+    exact = f"dup:exact:{a.exact[:16]}"
+    struct = f"dup:structural:{a.structural[:16]}"
+    return [
+        {
+            "id": finding_id("ast-dup/exact", "r", exact, None),
+            "rule": "ast-dup/exact",
+            "owner_repo": "r",
+            "anchor": exact,
+            "locations": loc[:2],
+            "related": rel[:2],
+        },
+        {
+            "id": finding_id("ast-dup/structural", "r", struct, None),
+            "rule": "ast-dup/structural",
+            "owner_repo": "r",
+            "anchor": struct,
+            "locations": loc,
+            "related": rel,
+        },
+    ]
+
+
 KEYS = ("id", "rule", "owner_repo", "anchor", "locations", "related")
 
 
 def test_single_repo_matches_s1_golden() -> None:
     hs = [_fn("a.py", "f"), _fn("b.py", "g"), _fn("c.py", "h", GOLD_SBODY)]
+    assert hs[0].exact == hs[1].exact != hs[2].exact
+    assert hs[0].structural == hs[2].structural
     found, vendor = group_dups({"r": hs}, None)
     got = sorted(({k: f.to_json()[k] for k in KEYS} for f in found), key=str)
-    assert got == sorted(S1_GOLDEN, key=str)
+    assert got == sorted(_s1_golden(hs), key=str)
     assert vendor == []
 
 
