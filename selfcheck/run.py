@@ -262,7 +262,8 @@ def _scan_repo(
     acc.env[repo.name] = {
         "mode": env.mode,
         "stale": env.stale,
-        # passed to pyrefly = present in the copy, i.e. holding corpus files (§10.4)
+        # editable paths present in the copy (holding corpus files) — what pyrefly
+        # gets when it runs; not a claim that it ran (§10.4, #426 recheck)
         "search_paths": sum(
             1
             for rel in env.search_paths

@@ -406,7 +406,8 @@ def test_inventory_rows_carry_repo(tmp_path: Path) -> None:
 
 
 def test_env_search_paths_counts_passed_paths(tmp_path: Path) -> None:
-    """#426 review: run.env.<repo>.search_paths is what pyrefly got (§10.4)."""
+    """#426 review: run.env.<repo>.search_paths counts editable paths present
+    in the copy — the ones pyrefly gets when it runs (§10.4)."""
     from tests.selfcheck.helpers import fake_venv
 
     ws = workspace(tmp_path, {"pkg/m.py": "x = 1\n"})
