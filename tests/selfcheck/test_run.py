@@ -403,3 +403,17 @@ def test_inventory_rows_carry_repo(tmp_path: Path) -> None:
     main([*args(ws), "--probe", "llm-sites"])
     doc = reports(ws)[-1]
     assert {r["repo"] for r in doc["inventory"]["llm"]} == {"devtools"}
+
+
+def test_env_search_paths_counts_passed_paths(tmp_path: Path) -> None:
+    """#426 review: run.env.<repo>.search_paths is what pyrefly got (§10.4)."""
+    from tests.selfcheck.helpers import fake_venv
+
+    ws = workspace(tmp_path, {"pkg/m.py": "x = 1\n"})
+    repo = ws / "devtools"
+    site = fake_venv(repo)
+    (site / "_e_pkg.pth").write_text(f"{repo / 'pkg'}\n")
+    (site / "_e_gone.pth").write_text(f"{repo / 'build'}\n")
+    (repo / "build").mkdir()  # untracked, empty: not in the copy
+    main([*args(ws), "--probe", "ruff"])
+    assert reports(ws)[-1]["run"]["env"]["devtools"]["search_paths"] == 1

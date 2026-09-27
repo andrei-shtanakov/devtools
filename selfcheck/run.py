@@ -262,7 +262,12 @@ def _scan_repo(
     acc.env[repo.name] = {
         "mode": env.mode,
         "stale": env.stale,
-        "search_paths": len(env.search_paths),
+        # passed to pyrefly = present in the copy, i.e. holding corpus files (§10.4)
+        "search_paths": sum(
+            1
+            for rel in env.search_paths
+            if rel == "." or any(p.startswith(rel + "/") for p in corpus)
+        ),
     }
     acc.corpora[repo.name] = corpus
     for r in results:

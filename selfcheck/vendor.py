@@ -260,17 +260,22 @@ def _named_paths(rel: str, text: str, corpus: frozenset[str]) -> set[str]:
 
 
 def _member_line_paths(folder: str, text: str, known: frozenset[str]) -> set[str]:
-    """Corpus paths named on sha256 member lines, from the root or the folder."""
+    """Corpus paths named on sha256 member lines, from the folder or the root.
+
+    The folder reading wins: a token present in the folder never also names a
+    same-named root file (#426 review)."""
     found: set[str] = set()
     for line in text.splitlines():
         if not _SHA_ANY.search(line):
             continue
         for token in line.split():
             token = token.rstrip(":,")
-            for cand in (token, posixpath.join(folder, token)):
-                norm = posixpath.normpath(cand)
-                if norm in known:
-                    found.add(norm)
+            in_folder = posixpath.normpath(posixpath.join(folder, token))
+            from_root = posixpath.normpath(token)
+            if in_folder in known:
+                found.add(in_folder)
+            elif from_root in known:
+                found.add(from_root)
     return found
 
 

@@ -356,3 +356,11 @@ def test_e_folder_without_members_is_dangling() -> None:
 @pytest.mark.parametrize("rel", [".github/workflows/vendor-drift.yml", ".github/PIN"])
 def test_github_files_are_not_candidates(rel: str) -> None:
     assert is_candidate(rel, "name: x\n", is_node=False) is False
+
+
+def test_e_member_token_prefers_the_folder_reading() -> None:
+    """#426 review: `schema.json` exists both in the folder and at the root."""
+    texts = {**_with(f"sha256 schema.json: {H}\n"), "schema.json": "{}"}
+    res = vendor_roles("r", sorted(texts), texts, role_of, E_NODES)
+    assert res.findings == [] and res.broken is False
+    assert "contracts/ls/v1/schema.json" in res.members
