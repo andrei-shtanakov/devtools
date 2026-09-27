@@ -9,7 +9,10 @@ rules:
       - pattern: subprocess.$F($X, ...)
       - pattern: asyncio.create_subprocess_exec($X, ...)
   - id: cli-shell
-    languages: [bash]
+    # regex, not bash: a bash-language rule makes semgrep parse the file, and
+    # its parser gives up on real scripts (review-pr.sh) → partial since #424;
+    # rows are kept for shell files only (selfcheck.llm._SHELL_RULES)
+    languages: [regex]
     severity: INFO
     message: harness CLI launch (mechanism A)
     pattern-regex: (?m)^\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:exec\s+|command\s+)?(?:claude|codex|opencode|aider|qwen|ollama|llama-cli|copilot)\s
@@ -117,3 +120,8 @@ rules:
     severity: INFO
     message: LLM endpoint URL (mechanism C)
     pattern-regex: (?:/v1/messages|/chat/completions|/api/chat|/api/generate|/completion)\b
+  - id: harness-resolve-sh
+    languages: [regex]
+    severity: INFO
+    message: harness binary as a shell default (mechanism A)
+    pattern-regex: \$\{[A-Za-z_]\w*:?-\s*["']?(?:claude|codex|opencode|aider|pi|qwen|ollama|llama-cli|copilot)\b
