@@ -175,7 +175,21 @@ def _pyrefly_argv(ctx: ProbeCtx) -> list[str]:
         args += ["--site-package-path", str(env.site_packages)]
         if env.python_version:
             args += ["--python-version", env.python_version]
+        args += _pyrefly_search(ctx)[0]
     return args + copy_paths(ctx)
+
+
+def _pyrefly_search(ctx: ProbeCtx) -> tuple[list[str], list[str]]:
+    """``--search-path`` args for editable paths present in the copy (§10.4)."""
+    args: list[str] = []
+    dropped: list[str] = []
+    for rel in ctx.target.env.search_paths:
+        path = ctx.target.copy / rel
+        if path.is_dir():
+            args += ["--search-path", str(path)]
+        else:
+            dropped.append(rel)
+    return args, dropped
 
 
 def _pyrefly_parse(
@@ -201,6 +215,9 @@ def _pyrefly_parse(
                 message=err["concise_description"],
             )
         )
+    dropped = _pyrefly_search(ctx)[1]
+    if dropped:
+        result.notes.append(f"search-path not in copy, not passed: {dropped}")
     return result
 
 

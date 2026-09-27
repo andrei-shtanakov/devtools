@@ -64,3 +64,18 @@ def test_stale_caps_import_class() -> None:
     )
     assert counts == {}
     assert [f.confidence for f in kept] == [Confidence.CANDIDATE, Confidence.LIKELY]
+
+
+def test_editable_paths_are_data(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "packages" / "core").mkdir(parents=True)
+    site = fake_venv(repo)
+    marker = tmp_path / "ran"
+    (site / "_editable_core.pth").write_text(f"{repo / 'packages' / 'core'}\n")
+    (site / "_editable_root.pth").write_text(f"{repo}\n")
+    (site / "outside.pth").write_text(f"{tmp_path / 'elsewhere'}\n")
+    (site / "hook.pth").write_text(f"import os; open({str(marker)!r}, 'w')\n")
+    (site / "rel.pth").write_text("../../../../packages/core\n")
+    env = detect_env(repo)
+    assert env.search_paths == (".", "packages/core")
+    assert not marker.exists()

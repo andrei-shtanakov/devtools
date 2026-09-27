@@ -279,3 +279,37 @@ def test_repo_that_selects_them_keeps_them(
 
 def test_ruff_rules_name_the_ignores() -> None:
     assert RUFF.rules[-2:] == ("-PLR2004", "-PLC0415")
+
+
+def _search_paths(argv: list[str]) -> list[str]:
+    return [argv[i + 1] for i, a in enumerate(argv) if a == "--search-path"]
+
+
+def test_pyrefly_resolves_editable_workspace_member(build, tmp_path: Path) -> None:
+    files = {
+        "packages/core/corelib/__init__.py": "def f() -> int:\n    return 1\n",
+        "app/main.py": "from corelib import f\n\nprint(f())\n",
+    }
+    target = build(files, venv_marker=tmp_path / "marker")
+    site = target.env.site_packages
+    assert site is not None
+    (site / "_editable_core.pth").write_text(f"{target.source / 'packages' / 'core'}\n")
+    target = replace(target, env=detect_env(target.source))
+    res = run(PYREFLY, target, tmp_path)
+    assert "pyrefly/missing-import" not in {f.rule for f in res.findings}
+    assert _search_paths(res.argv) == [str(target.copy / "packages" / "core")]
+
+
+def test_pyrefly_skips_search_path_missing_in_copy(build, tmp_path: Path) -> None:
+    target = build(
+        {"a.py": "x = 1\n", ".gitignore": ".venv/\nbuild/\n"},
+        venv_marker=tmp_path / "m",
+    )
+    (target.source / "build").mkdir()
+    site = target.env.site_packages
+    assert site is not None
+    (site / "_editable_b.pth").write_text(f"{target.source / 'build'}\n")
+    target = replace(target, env=detect_env(target.source))
+    res = run(PYREFLY, target, tmp_path)
+    assert res.status is ProbeStatus.OK, res.reason
+    assert _search_paths(res.argv) == []

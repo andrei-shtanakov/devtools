@@ -253,7 +253,11 @@ def _scan_repo(
     )
     acc.findings += kept
     acc.no_env[repo.name] = counts
-    acc.env[repo.name] = {"mode": env.mode, "stale": env.stale}
+    acc.env[repo.name] = {
+        "mode": env.mode,
+        "stale": env.stale,
+        "search_paths": len(env.search_paths),
+    }
     acc.corpora[repo.name] = corpus
     for r in results:
         acc.inventory += r.extra.get("inventory", [])
