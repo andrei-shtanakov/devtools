@@ -17,6 +17,7 @@ from typing import Any
 from selfcheck.config import Config, ConfigError, apply_allowlist, load_config
 from selfcheck.corpus import list_corpus, materialize, release, repo_state
 from selfcheck.delta import SKIPPED_KEY, RunSnapshot, comparability_key, compute_delta
+from selfcheck.dups import FuncHash, group_dups
 from selfcheck.env import apply_env_policy, detect_env
 from selfcheck.fleet.assemble import (
     CANARY_NODE,
@@ -107,6 +108,8 @@ class _Run:
     surface: dict[str, Any] = field(default_factory=dict)
     selection: dict[str, list[str]] = field(default_factory=dict)
     vendored: dict[str, dict[str, Any]] = field(default_factory=dict)
+    hashes: dict[str, list[FuncHash]] = field(default_factory=dict)
+    vendor_dups: list[dict[str, Any]] = field(default_factory=list)
     fleet: _Fleet | None = None
 
 
@@ -261,6 +264,11 @@ def _scan_repo(
     acc.corpora[repo.name] = corpus
     for r in results:
         acc.inventory += r.extra.get("inventory", [])
+        if r.probe == "ast-dup" and "hashes" in r.extra:
+            acc.hashes[repo.name] = [
+                FuncHash(**{**h, "literals": tuple(h["literals"])})
+                for h in r.extra["hashes"]
+            ]
         if r.probe == "usage-graph" and r.extra:
             acc.graph[repo.name] = r.extra.get("graph", {})
             acc.vendored[repo.name] = r.extra.get("vendored", {})
@@ -324,6 +332,7 @@ def _document(
         "suppressed_no_env": acc.no_env,
         "graph": acc.graph,
         "vendored": acc.vendored,
+        "vendor_dups": acc.vendor_dups,
         "fleet": {
             "enabled": acc.fleet is not None,
             "fleet_only": acc.fleet.fleet_only if acc.fleet else {},
@@ -332,6 +341,17 @@ def _document(
         "inventory": {"llm": acc.inventory},
         "snapshot": snapshot.to_json(),
     }
+
+
+def _cross_repo_dups(acc: _Run) -> None:
+    """Duplicate groups over every scanned repo, vendor groups aside (§10.6)."""
+    have_roles = all(n in acc.vendored for n in acc.hashes)
+    if not have_roles:
+        acc.warnings.append(
+            "ast-dup: вендор-фильтр не применён — нет usage-graph (§10.6)"
+        )
+    dups, acc.vendor_dups = group_dups(acc.hashes, acc.vendored if have_roles else None)
+    acc.findings += dups
 
 
 def _fleet_surface(acc: _Run, scope: Sequence[str], manifest_path: Path) -> None:
@@ -393,6 +413,8 @@ def main(
             except (OSError, subprocess.CalledProcessError) as exc:
                 print(f"selfcheck: materialize {name}: {exc}", file=sys.stderr)
                 return 4
+    if acc.hashes:
+        _cross_repo_dups(acc)
     if acc.fleet is not None:
         _fleet_surface(acc, wanted, args.manifest)
     extra = [*instrument_findings(acc.results), *(_missing_repo(n) for n in missing)]

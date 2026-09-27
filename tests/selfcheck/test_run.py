@@ -18,6 +18,7 @@ from selfcheck.registry import REGISTRY
 from selfcheck.report import new_run_dir
 from selfcheck.run import exit_code, main
 from tests.selfcheck.helpers import (
+    make_repo,
     plist_dir,
     require_npx_package,
     require_probe,
@@ -347,3 +348,22 @@ def test_allow_repo_not_in_manifest_is_exit_4(tmp_path: Path) -> None:
         "until = 2099-01-01\n"
     )
     assert main([*args(ws), "--config", str(cfg), "--probe", "ruff"]) == 4
+
+
+def test_cross_repo_dup_in_one_run(tmp_path: Path) -> None:
+    body = "".join(f"    v{i} = x * {i}\n" for i in range(8))
+    src = f"def helper(x):\n{body}    return x\n"
+    ws = workspace(tmp_path, {"h.py": src})
+    make_repo(
+        tmp_path / "other",
+        {"pyproject.toml": '[project]\nname = "o"\nversion = "0"\n', "g.py": src},
+    )
+    (ws / "m.toml").write_text(
+        '[tools.devtools]\ngit_dir = "devtools"\n[tools.other]\ngit_dir = "other"\n'
+    )
+    main([*args(ws), "--repo", "devtools", "--repo", "other", "--probe", "ast-dup"])
+    doc = reports(ws)[-1]
+    groups = [f for f in doc["findings"] if f["rule"] == "ast-dup/exact"]
+    assert len(groups) == 1
+    assert {r["owner_repo"] for r in groups[0]["related"]} == {"devtools", "other"}
+    assert any("вендор-фильтр не применён" in w for w in doc["run"]["warnings"])

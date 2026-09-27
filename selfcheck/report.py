@@ -150,6 +150,16 @@ def _fleet_lines(doc: dict[str, Any]) -> list[str]:
             f"| {path} | {d['owner']} | {d['ref']} | {d['declaration']} |"
             for path, d in rows_v
         ]
+    vendor_dups = doc.get("vendor_dups", [])
+    if vendor_dups:
+        lines += ["", f"### вендор-дубли ({len(vendor_dups)})", ""]
+        lines += [
+            f"- `{g['anchor']}`: "
+            + ", ".join(
+                f"{m['owner_repo']}:{m['path']}::{m['member']}" for m in g["members"]
+            )
+            for g in vendor_dups
+        ]
     return [*lines, ""]
 
 
