@@ -206,8 +206,8 @@ def test_operator_enters_the_analyzer_config_hash(tmp_path: Path) -> None:
     assert _analyzer_config_hash(target(())) != _analyzer_config_hash(target(("a.sh",)))
 
 
-def test_usage_graph_logic_version_is_4() -> None:
-    assert USAGE_GRAPH.logic_version == 4  # format E and Elixir test role (rev 5.9)
+def test_usage_graph_logic_version_is_5() -> None:
+    assert USAGE_GRAPH.logic_version == 5  # BOM-aware reads, make calls (#411)
 
 
 def test_run_reads_operator_from_config(tmp_path: Path) -> None:

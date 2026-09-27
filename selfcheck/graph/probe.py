@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import dataclasses
-from pathlib import Path
 
 from selfcheck.corpus import last_commit_ts
 from selfcheck.fleet import match
 from selfcheck.fleet.assemble import CANARY_NODE, CANARY_REPO, canary_misses
-from selfcheck.graph.build import build_graph
+from selfcheck.graph.build import build_graph, read_corpus_text
 from selfcheck.graph.classify import Surface, classify, graph_payload
 from selfcheck.graph.model import Graph, NodeKind
 from selfcheck.model import Confidence, Finding, Location
@@ -22,13 +21,6 @@ FLEET_CANARY = frozenset({CANARY_NODE})
 
 class FleetCanaryMissed(Exception):
     """The fleet canary did not come through: the fleet channels are not trusted."""
-
-
-def _read(root: Path, rel: str) -> str:
-    try:
-        return (root / rel).read_text(errors="replace")
-    except OSError:
-        return ""
 
 
 def _isolate(g: Graph) -> None:
@@ -102,7 +94,7 @@ def _analyze(ctx: ProbeCtx) -> ParseResult:
     node_paths = frozenset(
         n.path for n in graph.nodes.values() if n.kind is NodeKind.FILE
     )
-    texts = {rel: _read(target.copy, rel) for rel in corpus}
+    texts = {rel: read_corpus_text(target.copy, rel) for rel in corpus}
     vendor = vendor_roles(target.name, corpus, texts, role, node_paths)
     _apply_fleet(graph, ctx)
     operator_missing = _operator(graph, ctx)
@@ -178,6 +170,6 @@ USAGE_GRAPH = ProbeSpec(
         f"file:{CANARY_DIR}orphan_canary.py",
     ),
     rules=("dead.file", "dead.module", "unresolved-exec", "broken-root", "root-stale"),
-    logic_version=4,
+    logic_version=5,  # BOM-aware corpus reads, make-call parsing (#411)
     analyze=_analyze,
 )
