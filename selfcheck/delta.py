@@ -12,6 +12,10 @@ from typing import Any
 from selfcheck.probes.base import ProbeResult, ProbeStatus
 
 SKIPPED_KEY = "skipped"
+# anchor kinds whose body starts with the defining file (spec §2.1)
+PATH_KINDS = frozenset({"file", "func", "llm", "make", "skill", "workflow", "unit"})
+# `cli:<name>` comes from [project.scripts] of the repo-root pyproject.toml
+FIXED_PATHS = {"cli": "pyproject.toml"}
 
 
 @dataclass
@@ -88,8 +92,13 @@ def fate(cur: RunSnapshot, base: RunSnapshot, repo: str, path: str, probe: str) 
     return Fate.CHECKED
 
 
-def _defining_path(anchor: str) -> str:
-    body = anchor.split(":", 1)[1]
+def _defining_path(anchor: str) -> str | None:
+    """The defining file of a single anchor; None for a kind without one."""
+    kind, _, body = anchor.partition(":")
+    if kind in FIXED_PATHS:
+        return FIXED_PATHS[kind]
+    if kind not in PATH_KINDS:
+        return None
     return body.split("::", 1)[0].split("#", 1)[0]
 
 
@@ -121,6 +130,8 @@ def _gone_status(base: RunSnapshot, cur: RunSnapshot, item: dict[str, Any]) -> s
     anchor = item["anchor"]
     if anchor.startswith("probe:"):
         return _instrument_status(cur, anchor)
+    if anchor.startswith("allow:"):  # recomputed from the config every run
+        return "resolved"
     probe = item["probe"]
     if anchor.startswith("dup:"):
         fates = [
@@ -128,7 +139,10 @@ def _gone_status(base: RunSnapshot, cur: RunSnapshot, item: dict[str, Any]) -> s
             for r in item.get("related", [])
         ]
     else:
-        fates = [fate(cur, base, item["owner_repo"], _defining_path(anchor), probe)]
+        path = _defining_path(anchor)
+        if path is None:
+            return "not-rechecked"
+        fates = [fate(cur, base, item["owner_repo"], path, probe)]
     if fates and all(f is Fate.DELETED for f in fates):
         return "resolved: file-removed"
     if fates and all(f in (Fate.CHECKED, Fate.DELETED) for f in fates):
