@@ -239,7 +239,7 @@ Source: workstreams/stray-md-disables-i8-for-legacy-v1-20260922/spec/30-decompos
 **Traces to:** [FR-04], [NFR-04]
 
 ### TASK-003: Сдаточный дифф темы
-P2 | TODO   Est: 0.5d
+P2 | ✅ DONE   Est: 0.5d
 
 Реализовать сценарии BEH-20 (DT-04, группа solo).
 Source: workstreams/stray-md-disables-i8-for-legacy-v1-20260922/spec/30-decomposition.md#DT-04
@@ -247,9 +247,9 @@ Source: workstreams/stray-md-disables-i8-for-legacy-v1-20260922/spec/30-decompos
 **Depends on:** [TASK-001], [TASK-002]
 
 **Checklist:**
-- [ ] реализовать BEH-20: Объём правки ограничен предметом темы (DEL-34 (document): Итоговый дифф темы зафиксирован целиком вместе с явным утверждением, что в нём нет изменений файлов соседних репозиториев, нет правки §I8-части контракта `docs/superpowers/specs/2026-09-09-tasks-supersede-contract-design.md`, нет переписанных исторических ревизий леджера и нет ни одной временной мутации DT-03.)
-- [ ] DEL-35 (document): Тем же просмотром предъявлена вторая половина: существующие ожидания наборов `tests/test_governance_task_bridge.py` и `tests/test_governance_bundle_dag.py` проходят без правок, кроме прямо относящихся к §I8, и эти правки названы поимённо (механическая распаковка третьей величины `_previous_dag`).
-- [ ] проверка группы: workstreams/stray-md-disables-i8-for-legacy-v1-20260922/evidence/delivery-diff.md (kind: manual) зелёные на BEH-20
+- [x] реализовать BEH-20: Объём правки ограничен предметом темы (DEL-34 (document): Итоговый дифф темы зафиксирован целиком вместе с явным утверждением, что в нём нет изменений файлов соседних репозиториев, нет правки §I8-части контракта `docs/superpowers/specs/2026-09-09-tasks-supersede-contract-design.md`, нет переписанных исторических ревизий леджера и нет ни одной временной мутации DT-03.)
+- [x] DEL-35 (document): Тем же просмотром предъявлена вторая половина: существующие ожидания наборов `tests/test_governance_task_bridge.py` и `tests/test_governance_bundle_dag.py` проходят без правок, кроме прямо относящихся к §I8, и эти правки названы поимённо (механическая распаковка третьей величины `_previous_dag`).
+- [x] проверка группы: workstreams/stray-md-disables-i8-for-legacy-v1-20260922/evidence/delivery-diff.md (kind: manual) зелёные на BEH-20
 
 **Traces to:** [NFR-05], [NFR-01]
 
