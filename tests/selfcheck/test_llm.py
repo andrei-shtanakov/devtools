@@ -148,8 +148,11 @@ def test_python_parse_error_is_partial(tmp_path: Path) -> None:
     assert res.status is ProbeStatus.PARTIAL and "bad.py" in res.coverage["skipped"]
 
 
-def test_semgrep_partial_parsing_warning_is_a_note(tmp_path: Path) -> None:
-    """semgrep 'warn' PartialParsing still returns results: not a skipped file."""
+def test_semgrep_partial_parsing_is_a_per_file_diagnostic(tmp_path: Path) -> None:
+    """#408, owner's ruling 2026-09-27: semgrep 'warn' PartialParsing leaves a
+    span of the file unparsed — a per-file parse diagnostic, so the probe is
+    ``partial`` (§4.2); the results it did return are kept. Other warnings stay
+    notes."""
     import json
     import subprocess
 
@@ -172,12 +175,37 @@ def test_semgrep_partial_parsing_warning_is_a_note(tmp_path: Path) -> None:
                 "level": "warn",
                 "type": ["PartialParsing", []],
                 "message": "Syntax error at line h.sh:1",
-            }
+                "path": str(copy / "h.sh"),
+                "spans": [{"start": {"line": 1}, "end": {"line": 9}}],
+            },
+            {"level": "warn", "type": "OtherWarning", "message": "m"},
         ],
         "paths": {"scanned": [str(copy / "h.sh")]},
     }
     proc = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
     parsed = _parse(ctx, proc)
-    assert parsed.diagnostics == [] and parsed.skipped == []
-    assert any("PartialParsing" in n for n in parsed.notes)
+    assert parsed.diagnostics == ["h.sh: semgrep PartialParsing, lines 1-9 unparsed"]
+    assert parsed.skipped == []
+    assert [n for n in parsed.notes if "PartialParsing" in n] == []
+    assert any("OtherWarning" in n for n in parsed.notes)
     assert [i["path"] for i in parsed.extra["inventory"]] == ["h.sh"]
+
+
+def test_semgrep_environment_is_pinned(monkeypatch) -> None:
+    """#408: ``uvx semgrep@X`` alone resolves transitive deps afresh on each
+    machine; the probe hands uvx a committed ``==`` pin of the whole env, and
+    that pin agrees with SEMGREP."""
+    from selfcheck import llm
+    from selfcheck.llm import ENV_PATH, LLM_SITES, SEMGREP, _argv
+
+    pins = [
+        line.split(";")[0].strip()
+        for line in ENV_PATH.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert pins and all("==" in p for p in pins)
+    assert SEMGREP.replace("@", "==") in pins
+    head = ["-c", str(ENV_PATH), SEMGREP]
+    assert list(LLM_SITES.version_args[:3]) == head
+    monkeypatch.setattr(llm, "copy_paths", lambda ctx: [])
+    assert _argv(ctx=None)[:3] == head  # type: ignore[arg-type]
