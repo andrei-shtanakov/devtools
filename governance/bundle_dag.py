@@ -46,6 +46,27 @@ BUNDLE_DAG_LEGACY5: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+def bundle_composition(bundle: Path) -> set[str]:
+    """Фактический состав каталога бандла — файлы из известного состава узлов.
+
+    Единственный обход каталога по правилу имён (**FR-04**, devtools#173):
+    и `check_bundle_composition`, и вывод состава для §I8 берут отсюда одно
+    и то же множество, а не считают его каждый по-своему — посторонний
+    `.md` (например `README.md`) перестаёт быть различием между ними.
+    Обход строгий: запись обязана быть файлом, каталог с именем узла узлом
+    не считается.
+
+    Чистое наблюдение: ничего не проверяет и ничем не отказывает —
+    существование каталога и его трактовка (отказ, `-1`, `unavailable`)
+    остаются заботой вызывающего, у каждого из них своя.
+    """
+    known = {fname for fname, _ in BUNDLE_DAG}
+    return {
+        p.name for p in bundle.iterdir()
+        if p.is_file() and p.name in known
+    }
+
+
 def node_id(filename: str) -> str:
     """Имя файла бандла → node-id (числовой префикс и `.md` отрезаны)."""
     return filename.rsplit(".", 1)[0].split("-", 1)[1]
@@ -177,11 +198,7 @@ def check_bundle_composition(
             "каталог не исправит"
         )
     declared = {fname for fname, _ in dag}
-    known = {fname for fname, _ in BUNDLE_DAG}
-    actual = {
-        p.name for p in bundle.glob("*.md")
-        if p.name in known
-    }
+    actual = bundle_composition(bundle)
     if mode == "waves":
         return _level_prefix(dag, actual)
     if actual != declared:
