@@ -507,3 +507,27 @@ def test_non_utf8_plist_name_reaches_the_report_as_shown(
     assert doc["run"]["surface"]["plists"] == ["dev.caf�.plist"]
     orphan = doc["graph"]["devtools"]["file:orphan.py"]
     assert {"kind": "sched", "from": "launchd:dev.caf�.plist:1"} in orphan["edges"]
+
+
+@pytest.mark.parametrize("probe", ["usage-graph", "ast-dup"])
+def test_non_utf8_sched_dir_reaches_the_report_as_shown(
+    tmp_path: Path, monkeypatch, probe: str
+) -> None:
+    """Review of #435: the --sched-dir path itself went into surface raw — from
+    usage-graph's surface, and from run's own when usage-graph did not run."""
+    from selfcheck import run as run_module
+
+    ws = workspace(tmp_path)
+    sched_dir = plist_dir(tmp_path, [f"{ws}/devtools/live.py"])
+    weird = Path(str(sched_dir) + "-caf\udce9")
+    real_parse = run_module._args
+
+    def parse(argv):
+        parsed = real_parse(argv)
+        parsed.sched_dir = weird
+        return parsed
+
+    monkeypatch.setattr(run_module, "_args", parse)
+    main(args(ws, "--probe", probe, "--sched-dir", str(sched_dir)))
+    (doc,) = reports(ws)
+    assert doc["run"]["surface"]["sched_dir"].endswith("-caf\ufffd")

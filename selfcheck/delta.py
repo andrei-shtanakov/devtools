@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -85,7 +86,11 @@ def fate(cur: RunSnapshot, base: RunSnapshot, repo: str, path: str, probe: str) 
         return Fate.UNVERIFIED
     in_corpus = path in cur.corpus.get(repo, [])
     source = cur.sources.get(repo)
-    exists = source and (Path(source) / raw_path(Path(source), path)).exists()
+    try:
+        raw = raw_path(Path(source), path) if source else path
+    except (OSError, subprocess.CalledProcessError):  # e.g. a name collision
+        return Fate.UNVERIFIED  # the checkout could not be read: unknown
+    exists = source and (Path(source) / raw).exists()
     if not in_corpus and source and not exists:
         return Fate.DELETED
     if not in_corpus:

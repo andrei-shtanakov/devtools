@@ -407,3 +407,19 @@ def test_fate_looks_for_the_raw_name(tmp_path: Path, monkeypatch) -> None:
         lambda repo, rel: "on-disk.py" if rel == "caf�.py" else rel,
     )
     assert fate(cur, base, "devtools", "caf�.py", "ruff") is Fate.EXCLUDED
+
+
+def test_fate_is_unverified_when_the_raw_name_cannot_be_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Review of #435: a collision found while mapping a baseline's shown name
+    back must not escape compute_delta (it runs outside any try) — unknown."""
+    from selfcheck import delta
+
+    def collide(repo, rel):
+        raise OSError("non-UTF-8 names collide")
+
+    base = snap(tmp_path, corpus={"devtools": ["a.py"]})
+    cur = snap(tmp_path, corpus={"devtools": ["a.py"]})
+    monkeypatch.setattr(delta, "raw_path", collide)
+    assert fate(cur, base, "devtools", "x/caf�.py", "ruff") is Fate.UNVERIFIED

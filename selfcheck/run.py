@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from selfcheck.config import Config, ConfigError, apply_allowlist, load_config
-from selfcheck.corpus import list_corpus, materialize, release, repo_state
+from selfcheck.corpus import list_corpus, materialize, release, repo_state, shown
 from selfcheck.delta import SKIPPED_KEY, RunSnapshot, comparability_key, compute_delta
 from selfcheck.dups import FuncHash, group_dups
 from selfcheck.env import apply_env_policy, detect_env
@@ -432,7 +432,7 @@ def main(
     acc = _Run(
         surface={
             "fleet": "absent",
-            "sched_dir": str(args.sched_dir) if args.sched_dir else None,
+            "sched_dir": shown(str(args.sched_dir)) if args.sched_dir else None,
         }
     )
     if args.fleet:
