@@ -25,8 +25,11 @@
 - **Нормативны:** тест (полный код ниже), «Интерфейсы», Global Constraints,
   таблица трассировки.
 - **Ненормативны:** эскизы.
-- **Red-фаза прогнана** 2026-09-27: сборка падает на `NodeFacts.__init__()
-  got an unexpected keyword argument 'dir_zone'`; ruff чистый.
+- **Red-фаза прогнана** 2026-09-27 (после раунда 1 ревью пары): сборка
+  падает на `NodeFacts.__init__() got an unexpected keyword argument
+  'dir_zone'`; ruff чистый. Ревьюер собрал реализацию по эскизу в
+  scratch-копии: тест проходит, а в наборе S1/S2 падает только
+  `logic_version == 2` (названо выше).
 
 ## Global Constraints
 
@@ -38,10 +41,16 @@
     обоих видов зон;
   - состав зон (граф) не меняется, поэтому тесты S1 на уровне графа
     (`test_graph_resolver`, `test_graph_final_review`) остаются в силе.
-- В `tests/selfcheck/test_graph_final_review.py` у хелпера `alive()`
+- В `tests/selfcheck/test_graph_final_review.py` у хелпера `protected()`
   docstring «inside an unresolved-launch zone» больше не означает «не
-  кандидат в dead». Поправить docstring — «in a zone (a suffix zone exempts,
-  a caller-dir zone caps at P7)» — утверждения тестов не менять.
+  кандидат в dead». Поправить на «in a zone (a suffix zone exempts, a
+  caller-dir zone caps at P7 — never confirmed)»; утверждения не менять.
+- **Нормативная правка теста S2:** `tests/selfcheck/test_fleet_run.py::
+  test_usage_graph_logic_version_bumped` ждёт `2` → `3` (логика снова
+  меняется, §4.3). Это единственный S1/S2-тест, который меняется.
+- `[[operator]]` действует только на своё репо (поле `repo`): запись чужого
+  репо не делает корнем одноимённый файл и не даёт `operator-missing`
+  (ревью пары r1, M1).
 - Всё прочее — как в S1 и S2: абсолютные пути, `ruff`/`pyrefly` зелёные,
   без `_cowork_output`.
 
@@ -61,36 +70,41 @@ class Zone:
 class NodeFacts:
     ...                           # unchanged fields, then
     dir_zone: bool = False        # → cap "P7" (after P5/P6)
-def classify(..., roots: frozenset[str] = frozenset()) -> list[Finding]: ...
-    # roots: paths treated as roots (never dead) — the [[operator]] list
+    # (no new classify parameter: operator roots arrive as Node.root in the graph)
     # in_zone = member of a suffix zone; dir_zone = member of a caller-dir zone only
     # doc-only dead: suggestion mentions "[[operator]]"
 
 # selfcheck/config.py
 @dataclass(frozen=True)
 class OperatorEntry:
-    path: str
+    repo: str      # canonical repo name (manifest git_dir basename)
+    path: str      # from that repo's root, exact
     reason: str
 @dataclass(frozen=True)
 class Config:
     ...
-    operator: tuple[OperatorEntry, ...] = ()   # [[operator]]; missing path|reason → ConfigError
+    operator: tuple[OperatorEntry, ...] = ()   # [[operator]]; missing repo|path|reason → ConfigError
     # Config.sha1 already covers the whole file
 
 # selfcheck/probes/base.py
 class RepoTarget:
     ...
-    operator: tuple[str, ...] = ()
+    operator: tuple[str, ...] = ()   # paths of THIS repo's [[operator]] entries
 def _analyzer_config_hash(target) -> str   # material gains "operator": sorted(target.operator)
+                                           # (paths of this repo; a reason edit is not a new key)
 
 # selfcheck/graph/probe.py — USAGE_GRAPH.logic_version = 3
-#   classify(..., roots=frozenset(target.operator))
+#   operator paths become roots IN THE GRAPH (Node replaced with root=True), so
+#   classify and graph_payload both see them (payload "root": true); file roots
+#   never get root-stale (§3.2.2 applies root-stale to non-file roots only)
 #   for path in target.operator not in target.corpus:
 #     Finding(rule="selfcheck/operator-missing", category="selfcheck", severity="medium",
-#             confidence=CONFIRMED, owner_repo=repo, anchor="file:selfcheck.toml",
-#             locations=[Location("selfcheck.toml", 1)], text_key=path)
+#             confidence=CONFIRMED, owner_repo=repo, anchor=f"probe:{repo}#usage-graph",
+#             locations=[Location(path, 1)], text_key=path)
+#   (a probe: anchor — its fate follows usage-graph@repo, independent of the --config path)
 
-# selfcheck/run.py — RepoTarget(..., operator=tuple(o.path for o in config.operator))
+# selfcheck/run.py — RepoTarget(..., operator=tuple(o.path for o in config.operator
+#                                                    if o.repo == repo.name))
 ```
 
 ## Таблица трассировки
@@ -100,10 +114,11 @@ def _analyzer_config_hash(target) -> str   # material gains "operator": sorted(t
 | §2.3 шаг 2, D10 | суффикс-зона освобождает | `test_p7_matrix[D10]`, `test_caller_dir_zone_caps_instead_of_exempting` (`kit/local.sh`) |
 | §2.3 P7, D10b | зона каталога → dead `likely`, cap P7; P7 сочетается с P5 | `test_p7_matrix[D10b]`, `[P7+P5]`, `test_caller_dir_zone_caps_instead_of_exempting` |
 | §3.2.3 | вид зоны записан; P7 не зависит от `fleet` (`complete` в тесте, но всё равно `likely`); `unresolved-exec` сохраняется | `test_zone_kind_is_recorded`, `test_caller_dir_zone_caps_instead_of_exempting` |
-| §3.2.5, D17 | `[[operator]]` — корень | `test_operator_entry_is_a_root`, `test_run_reads_operator_from_config` |
-| §3.2.5 | запись без `path`/`reason` → код 4 | `test_operator_config_parsing`, `test_run_reads_operator_from_config` |
+| §3.2.5, D17 | `[[operator]]` — корень (и в payload) | `test_operator_entry_is_a_root`, `test_run_reads_operator_from_config` |
+| §3.2.5 | действует только на своё `repo` | `test_operator_entries_apply_to_their_repo_only` |
+| §3.2.5 | запись без `repo`/`path`/`reason` → код 4 | `test_operator_config_parsing`, `test_run_reads_operator_from_config` |
 | §3.2.5 | запись на несуществующий путь → `selfcheck/operator-missing` | `test_operator_on_a_missing_path_is_a_finding` |
-| §3.2.5 | README не заменяет роль: `doc-only` остаётся dead, подсказка в `suggestion` | `test_doc_only_dead_hints_at_operator` |
+| §3.2.5 | README не заменяет роль: `doc-only` остаётся `candidate`, подсказка только у `doc-only` | `test_doc_only_dead_hints_at_operator` |
 | §4.3 | `[[operator]]` в конфиг-хэше; `logic_version` 3 | `test_operator_enters_the_analyzer_config_hash`, `test_usage_graph_logic_version_is_3` |
 | приёмка | на devtools | Task 2 |
 
@@ -116,7 +131,8 @@ def _analyzer_config_hash(target) -> str   # material gains "operator": sorted(t
   получает `suffix=bool(pattern)`), `selfcheck/graph/classify.py`,
   `selfcheck/config.py`, `selfcheck/probes/base.py`,
   `selfcheck/graph/probe.py`, `selfcheck/run.py`,
-  `tests/selfcheck/test_graph_final_review.py` (только docstring);
+  `tests/selfcheck/test_graph_final_review.py` (только docstring),
+  `tests/selfcheck/test_fleet_run.py` (`logic_version` 2 → 3);
 - Test: `tests/selfcheck/test_zone_narrow.py`.
 
 - [ ] **Step 1: тест:**
@@ -146,7 +162,15 @@ from selfcheck.probes.base import (
 )
 from selfcheck.roles import role_of
 from selfcheck.run import main
-from tests.selfcheck.helpers import NOW, ago, make_repo, workspace, write
+from tests.selfcheck.helpers import (
+    NOW,
+    ago,
+    fleet_ws,
+    make_repo,
+    plist_dir,
+    workspace,
+    write,
+)
 
 FULL = Surface("complete", "/sched", [])
 L = Confidence.LIKELY
@@ -252,13 +276,18 @@ def test_operator_entry_is_a_root(tmp_path: Path) -> None:
     files = {"tools/runner.py": RUNNER, "tools/tool.py": SCRIPT, "gen.py": SCRIPT}
     res = usage(tmp_path, files, operator=("tools/tool.py", "gen.py"))
     assert not {"file:tools/tool.py", "file:gen.py"} & set(dead(res))  # D17
+    graph = res.extra["graph"]
+    assert (
+        graph["file:gen.py"]["root"] is True
+    )  # a root everywhere, not only in classify
+    assert not [f for f in res.findings if f.rule == "selfcheck/operator-missing"]
 
 
 def test_operator_on_a_missing_path_is_a_finding(tmp_path: Path) -> None:
     res = usage(tmp_path, {"a.py": SCRIPT}, operator=("gone.sh",))
     (missing,) = [f for f in res.findings if f.rule == "selfcheck/operator-missing"]
     assert (missing.anchor, missing.text_key, missing.severity, missing.category) == (
-        "file:selfcheck.toml",
+        "probe:repo#usage-graph",
         "gone.sh",
         "medium",
         "selfcheck",
@@ -268,22 +297,37 @@ def test_operator_on_a_missing_path_is_a_finding(tmp_path: Path) -> None:
 def test_doc_only_dead_hints_at_operator(tmp_path: Path) -> None:
     res = usage(
         tmp_path,
-        {"README.md": "| `tool.sh` | генератор |\n", "tool.sh": "#!/bin/sh\n"},
+        {
+            "README.md": "| `tool.sh` | генератор |\n",
+            "tool.sh": "#!/bin/sh\n",
+            "orphan.sh": "#!/bin/sh\n",
+        },
     )
-    finding = dead(res)["file:tool.sh"]
+    found = dead(res)
+    finding = found["file:tool.sh"]
     assert {"kind": "class", "detail": "doc-only"} in finding.evidence
+    assert finding.confidence is Confidence.CANDIDATE  # still a candidate (§3.2.5)
     assert "[[operator]]" in finding.suggestion  # a hint, not an exemption
+    assert "[[operator]]" not in found["file:orphan.sh"].suggestion  # only doc-only
 
 
 def test_operator_config_parsing(tmp_path: Path) -> None:
     good = tmp_path / "good.toml"
-    good.write_text('[[operator]]\npath = "a.sh"\nreason = "ручной гейт"\n')
+    good.write_text(
+        '[[operator]]\nrepo = "devtools"\npath = "a.sh"\nreason = "ручной гейт"\n'
+    )
     config = load_config(good)
-    assert [(o.path, o.reason) for o in config.operator] == [("a.sh", "ручной гейт")]
-    bad = tmp_path / "bad.toml"
-    bad.write_text('[[operator]]\npath = "a.sh"\n')
-    with pytest.raises(ConfigError):
-        load_config(bad)
+    assert [(o.repo, o.path, o.reason) for o in config.operator] == [
+        ("devtools", "a.sh", "ручной гейт")
+    ]
+    for body in (
+        '[[operator]]\nrepo = "devtools"\npath = "a.sh"\n',  # no reason
+        '[[operator]]\npath = "a.sh"\nreason = "r"\n',  # no repo
+    ):
+        bad = tmp_path / "bad.toml"
+        bad.write_text(body)
+        with pytest.raises(ConfigError):
+            load_config(bad)
 
 
 def test_operator_enters_the_analyzer_config_hash(tmp_path: Path) -> None:
@@ -308,7 +352,8 @@ def test_usage_graph_logic_version_is_3() -> None:
 def test_run_reads_operator_from_config(tmp_path: Path) -> None:
     ws = workspace(tmp_path)
     (ws / "sc.toml").write_text(
-        '[[operator]]\npath = "orphan.py"\nreason = "запускает человек"\n'
+        '[[operator]]\nrepo = "devtools"\npath = "orphan.py"\n'
+        'reason = "запускает человек"\n'
     )
     argv = [
         "--workspace", str(ws), "--manifest", str(ws / "m.toml"),
@@ -321,9 +366,37 @@ def test_run_reads_operator_from_config(tmp_path: Path) -> None:
     (run,) = list((ws / "out").iterdir())
     doc = json.loads((run / "report.json").read_text())
     assert not [f for f in doc["findings"] if f["anchor"] == "file:orphan.py"]
-    (ws / "bad.toml").write_text('[[operator]]\nreason = "без пути"\n')
+    (ws / "bad.toml").write_text('[[operator]]\nrepo = "devtools"\nreason = "r"\n')
     argv[argv.index(str(ws / "sc.toml"))] = str(ws / "bad.toml")
     assert main(argv) == 4
+
+
+def test_operator_entries_apply_to_their_repo_only(tmp_path: Path) -> None:
+    """Review r1 M1: entries of devtools neither root nor miss in another repo."""
+    import json
+
+    ws = fleet_ws(tmp_path, neighbours={"nb": {"orphan.py": SCRIPT}})
+    (ws / "sc.toml").write_text(
+        '[[operator]]\nrepo = "devtools"\npath = "orphan.py"\nreason = "r"\n'
+        '[[operator]]\nrepo = "devtools"\npath = "attest.sh"\nreason = "r"\n'
+    )
+    argv = [
+        "--workspace", str(ws), "--manifest", str(ws / "umbrella" / "m.toml"),
+        "--out", str(ws / "out"), "--config", str(ws / "sc.toml"),
+        "--probe", "usage-graph", "--sched-dir", str(plist_dir(tmp_path, ["/x"])),
+        "--repo", "devtools", "--repo", "nb",
+    ]  # fmt: skip
+    assert main(argv) == 0
+    (run,) = list((ws / "out").iterdir())
+    doc = json.loads((run / "report.json").read_text())
+    dead_by = {
+        (f["owner_repo"], f["anchor"])
+        for f in doc["findings"]
+        if f["category"] == "dead"
+    }
+    assert ("devtools", "file:orphan.py") not in dead_by  # rooted in its repo
+    assert ("nb", "file:orphan.py") in dead_by  # same name elsewhere: not rooted
+    assert not [f for f in doc["findings"] if f["rule"] == "selfcheck/operator-missing"]
 ```
 
 - [ ] **Step 2:** `uv run --frozen pytest tests/selfcheck/test_zone_narrow.py -q`.
@@ -337,13 +410,15 @@ def test_run_reads_operator_from_config(tmp_path: Path) -> None:
 **Эскиз.**
 - **`classify`.** `suffix_members` — члены зон с `suffix=True`,
   `dir_members` — члены зон с `suffix=False`. У узла `in_zone = anchor in
-  suffix_members`, `dir_zone = anchor in dir_members and not in_zone`, `root
-  = node.root or node.path in roots`.
+  suffix_members`, `dir_zone = anchor in dir_members and not in_zone`.
+- **`graph/probe.py`.** Перед `classify`: для каждого пути из
+  `target.operator`, который есть в графе, `g.nodes[a] =
+  dataclasses.replace(node, root=True)`.
 - **`dead_confidence`.** Если `dir_zone` — добавить `"P7"` после `P5`/`P6`.
 - **`suggestion`.** Для `doc-only`: «упомянут в документации — если это
   ручной инструмент, внесите в `[[operator]]` selfcheck.toml». Иначе прежняя.
-- **`load_config`.** `data.get("operator", [])`: каждой записи нужны `path` и
-  `reason` (иначе `ConfigError(f"[[operator]] #{i}: missing …")`).
+- **`load_config`.** `data.get("operator", [])`: каждой записи нужны `repo`,
+  `path` и `reason` (иначе `ConfigError(f"[[operator]] #{i}: missing …")`).
 
 ### Task 2: devtools `selfcheck.toml` и приёмка
 
@@ -353,10 +428,12 @@ def test_run_reads_operator_from_config(tmp_path: Path) -> None:
 
 ```toml
 [[operator]]
+repo = "devtools"
 path = "attest-vendor.sh"
 reason = "гейт волн ре-вендора; запускает оператор (authority-root, #263)"
 
 [[operator]]
+repo = "devtools"
 path = "discover_models.py"
 reason = "discovery моделей по ADR-ECO-003a; запускает оператор, README"
 ```
@@ -367,8 +444,9 @@ reason = "discovery моделей по ADR-ECO-003a; запускает опе�
 - [ ] **Step 2: приёмка** — `make selfcheck ARGS="--fleet --sched-dir ~/Library/LaunchAgents"`.
   Expected:
   - `attest-vendor.sh` и `discover_models.py` без dead;
-  - `gen_agents_toml.py` — dead класса `doc-only`, `likely` (P5 от runbook во
-    флоте), с подсказкой `[[operator]]` в `suggestion`;
+  - `gen_agents_toml.py` — dead класса `doc-only`, уверенность `candidate`
+    (база `doc-only`; потолки P5 от runbook во флоте и P7 только
+    записываются в evidence), с подсказкой `[[operator]]` в `suggestion`;
   - находки `unresolved-exec` на широких вызывающих сохранены;
   - `selfcheck/operator-missing` = 0;
   - код выхода 0.
