@@ -21,8 +21,10 @@ from selfcheck.roles import Role, role_of
 
 SEMGREP = "semgrep@1.178.0"
 RULES_PATH = Path(__file__).parent / "rules" / "llm.yml"
-# the whole uvx environment pinned `==` (#408); regeneration — in the file
-ENV_PATH = Path(__file__).parent / "rules" / "semgrep-env.txt"
+# the whole uvx environment pinned `==` (#408); regeneration — in the file.
+# The name must match the review-scope CODE_OVERRIDE (`*constraints*.txt`):
+# a pin bump is code, not prose (review of #424)
+ENV_PATH = Path(__file__).parent / "rules" / "semgrep-constraints.txt"
 UVX_SEMGREP = ("-c", str(ENV_PATH), SEMGREP)
 HARNESSES = frozenset(
     {

@@ -354,3 +354,30 @@ def test_timeout_kills_the_whole_process_group(target, tmp_path) -> None:
     if alive:
         os.kill(grandchild, 9)
     assert not alive
+
+
+def test_any_interruption_kills_the_process_group(tmp_path, monkeypatch) -> None:
+    """Review of #424: the tool runs in its own session, so Ctrl-C reaches only
+    Python — a KeyboardInterrupt (or any error) while waiting must take the
+    group down too, not leave the tool running and ``__exit__`` waiting."""
+    from selfcheck.probes.base import run_group
+
+    pid_file = tmp_path / "tool.pid"
+    real = subprocess.Popen.communicate
+    calls = {"n": 0}
+
+    def interrupted(self, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            while not pid_file.exists():
+                time.sleep(0.05)
+            raise KeyboardInterrupt
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    script = f"echo $$ > {pid_file}; sleep 30"
+    started = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        run_group(["sh", "-c", script], capture_output=True, text=True, timeout=60)
+    assert time.monotonic() - started < 10
+    assert not _alive(int(pid_file.read_text()))

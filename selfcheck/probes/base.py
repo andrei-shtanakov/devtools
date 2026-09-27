@@ -67,14 +67,15 @@ def run_group(
     check: bool = False,
     **kwargs: Any,
 ) -> subprocess.CompletedProcess[str]:
-    """``subprocess.run`` in a session of its own: on timeout the whole process
-    group dies, not only the direct child (npx → node, uvx → semgrep-core)."""
+    """``subprocess.run`` in a session of its own: on timeout, Ctrl-C or any
+    error the whole process group dies, not only the direct child (npx → node,
+    uvx → semgrep-core)."""
     if capture_output:
         kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     with subprocess.Popen(argv, start_new_session=True, **kwargs) as proc:
         try:
             out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
+        except BaseException:  # timeout, Ctrl-C (only we get SIGINT) or any error
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:  # the group is already gone

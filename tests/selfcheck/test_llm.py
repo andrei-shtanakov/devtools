@@ -209,3 +209,22 @@ def test_semgrep_environment_is_pinned(monkeypatch) -> None:
     assert list(LLM_SITES.version_args[:3]) == head
     monkeypatch.setattr(llm, "copy_paths", lambda ctx: [])
     assert _argv(ctx=None)[:3] == head  # type: ignore[arg-type]
+
+
+def test_semgrep_pins_are_reviewed_as_code() -> None:
+    """Review of #424: the pin file decides what uvx downloads and runs, so a
+    PR touching only it must not be classified as prose (review-scope
+    contract: CODE_OVERRIDE wins over PROSE's ``*.txt``)."""
+    import fnmatch
+    import shlex
+
+    from selfcheck.llm import ENV_PATH
+
+    root = Path(__file__).resolve().parents[2]
+    contract = root / "contracts" / "review-scope" / "v1" / "prose-paths.env"
+    line = next(
+        x for x in contract.read_text().splitlines() if x.startswith("CODE_OVERRIDE=")
+    )
+    patterns = shlex.split(line.partition("=")[2])
+    rel = ENV_PATH.relative_to(root).as_posix()
+    assert any(fnmatch.fnmatchcase(rel, p) for p in patterns), rel
