@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12+, pytest, semgrep 1.178.0 (`uvx`), pyrefly, ruff 0.16, cargo-machete (системный бинарь, ставит владелец).
 
-**Spec:** `docs/superpowers/specs/2026-09-25-selfcheck-design.md` rev 5.9, §10 (плюс правки §1.1, §1.4, §2.4, §3.1, §3.4, §7, §9.7). Замер — dev-only `../_cowork_output/devtools-selfcheck-s3-measure-2026-09-27.md`. Ревью пары r1 — `../_cowork_output/devtools-selfcheck-s3-pair-review-r1-2026-09-27.md`.
+**Spec:** `docs/superpowers/specs/2026-09-25-selfcheck-design.md` rev 5.9, §10 (плюс правки §1.1, §1.4, §2.4, §3.1, §3.4, §7, §9.7). Замер — dev-only `../_cowork_output/devtools-selfcheck-s3-measure-2026-09-27.md`. Ревью пары r1–r3 — `../_cowork_output/devtools-selfcheck-s3-pair-review-r{1,2,3}-2026-09-27.md` (r3: converged).
 
 ## Global Constraints
 
@@ -232,7 +232,7 @@ def test_github_files_are_not_candidates(rel: str) -> None:
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/selfcheck/test_vendor.py tests/selfcheck/test_config_manifest.py tests/selfcheck/test_zone_narrow.py tests/selfcheck/test_fleet_run.py -q`
-Expected: FAIL — `test_format_e` (`DeclarationError`), `test_e_members_are_folder_non_code`, `test_e_code_member_only_when_named`, `test_e_prose_path_outside_folder_still_parses`, оба `…_dangling`, `test_github_files_are_not_candidates`, новые строки `test_default_roles`, два теста `logic_version` (`3 != 4`). Проходят уже сейчас (двойники): `test_e_unparsed`, `test_uppercase_source_stays_format_a`, `test_e_in_repo_root_is_unparsed_finding`, `test_e_member_line_outside_folder_is_unparsed` (текст не разбирается как B), `test_e_prose_does_not_name_code`.
+Expected: FAIL — `test_format_e` (`DeclarationError`), `test_e_members_are_folder_non_code`, `test_e_code_member_only_when_named`, `test_e_prose_path_outside_folder_still_parses`, оба `…_dangling`, `test_github_files_are_not_candidates`, новые строки `test_default_roles`, два теста `logic_version` (`3 != 4`). `test_e_member_line_outside_folder_is_unparsed[sha256 ../../../tools/check.py: …]` тоже FAIL (защита названного пути не снимает хвостовой `:`). Проходят уже сейчас (двойники): `test_e_unparsed`, `test_uppercase_source_stays_format_a`, `test_e_in_repo_root_is_unparsed_finding`, `test_e_member_line_outside_folder_is_unparsed[<sha256>  tools/check.py]` (текст не разбирается как B), `test_e_prose_does_not_name_code`.
 
 - [ ] **Step 3: Implement**
 
@@ -379,6 +379,8 @@ def _e_members(
         for member in members:
             ...  # прежнее тело цикла по членам (было `for member in decl.members`)
 ```
+
+`_named_paths` (защита при неразобранной декларации, §9.7) — токен без хвостовых `:` и `,`: в цикле `for token in text.split():` первой строкой `token = token.rstrip(":,")` (форма `sha256 <путь>: <sha>`, ревью r3 R3-1).
 
 `_finding` — `suggestion="почините декларацию вендоринга (формат A–E, §9.7, §10.5)"`. `graph/probe.py` — `USAGE_GRAPH` `logic_version=4`.
 
