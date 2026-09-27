@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 from selfcheck.corpus import last_commit_ts
@@ -10,6 +11,7 @@ from selfcheck.fleet.assemble import CANARY_NODE, CANARY_REPO, canary_misses
 from selfcheck.graph.build import build_graph
 from selfcheck.graph.classify import Surface, classify, graph_payload
 from selfcheck.graph.model import Graph, NodeKind
+from selfcheck.model import Confidence, Finding, Location
 from selfcheck.probes.base import Canary, ParseResult, ProbeCtx, ProbeSpec
 from selfcheck.roles import Role, role_of
 from selfcheck.vendor import vendor_roles
@@ -54,6 +56,32 @@ def _apply_fleet(g: Graph, ctx: ProbeCtx) -> None:
     _isolate(g)
 
 
+def _operator(g: Graph, ctx: ProbeCtx) -> list[Finding]:
+    """[[operator]] paths become roots in the graph; a missing one is a finding."""
+    target = ctx.target
+    corpus = set(target.corpus)
+    missing: list[Finding] = []
+    for path in target.operator:
+        anchor = f"file:{path}"
+        if anchor in g.nodes:
+            g.nodes[anchor] = dataclasses.replace(g.nodes[anchor], root=True)
+        if path not in corpus:
+            missing.append(
+                Finding(
+                    rule="selfcheck/operator-missing",
+                    category="selfcheck",
+                    severity="medium",
+                    confidence=Confidence.CONFIRMED,
+                    owner_repo=target.name,
+                    anchor=f"probe:{target.name}#usage-graph",
+                    locations=[Location(path, 1)],
+                    text_key=path,
+                    suggestion="уберите запись [[operator]] или верните файл",
+                )
+            )
+    return missing
+
+
 def _analyze(ctx: ProbeCtx) -> ParseResult:
     target = ctx.target
 
@@ -77,6 +105,7 @@ def _analyze(ctx: ProbeCtx) -> ParseResult:
     texts = {rel: _read(target.copy, rel) for rel in corpus}
     vendor = vendor_roles(target.name, corpus, texts, role, node_paths)
     _apply_fleet(graph, ctx)
+    operator_missing = _operator(graph, ctx)
     for node in graph.nodes.values():
         if node.kind is NodeKind.FILE and node.path not in FLEET_CANARY:
             history[node.path] = ages(node.path) is not None
@@ -96,7 +125,7 @@ def _analyze(ctx: ProbeCtx) -> ParseResult:
         vendored=vendor.members,
         exclude=FLEET_CANARY,
     )
-    findings += vendor.findings
+    findings += vendor.findings + operator_missing
     canary = [p for p in ctx.inputs if p.startswith(CANARY_DIR)]
     canary_graph = build_graph(
         canary,
@@ -149,6 +178,6 @@ USAGE_GRAPH = ProbeSpec(
         f"file:{CANARY_DIR}orphan_canary.py",
     ),
     rules=("dead.file", "dead.module", "unresolved-exec", "broken-root", "root-stale"),
-    logic_version=2,
+    logic_version=3,
     analyze=_analyze,
 )

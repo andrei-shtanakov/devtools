@@ -43,12 +43,22 @@ class AllowEntry:
 
 
 @dataclass(frozen=True)
+class OperatorEntry:
+    """A manual entry point (spec §3.2.5): a root of its repo."""
+
+    repo: str
+    path: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class Config:
     """Parsed selfcheck.toml."""
 
     allow: tuple[AllowEntry, ...] = ()
     roles: dict[str, tuple[str, ...]] = field(default_factory=dict)
     corpus_exclude: tuple[str, ...] = ()
+    operator: tuple[OperatorEntry, ...] = ()
     sha1: str = hashlib.sha1(b"").hexdigest()
 
 
@@ -84,7 +94,17 @@ def load_config(path: Path) -> Config:
         raise ConfigError(f"[roles]: unknown roles {sorted(unknown)}")
     allow = tuple(_allow_entry(i, e) for i, e in enumerate(data.get("allow", [])))
     exclude = tuple(data.get("corpus", {}).get("exclude", []))
-    return Config(allow, roles, exclude, hashlib.sha1(raw).hexdigest())
+    operator = tuple(
+        _operator_entry(i, e) for i, e in enumerate(data.get("operator", []))
+    )
+    return Config(allow, roles, exclude, operator, hashlib.sha1(raw).hexdigest())
+
+
+def _operator_entry(index: int, raw: dict[str, Any]) -> OperatorEntry:
+    missing = [k for k in ("repo", "path", "reason") if not raw.get(k)]
+    if missing:
+        raise ConfigError(f"[[operator]] #{index}: missing {', '.join(missing)}")
+    return OperatorEntry(str(raw["repo"]), str(raw["path"]), str(raw["reason"]))
 
 
 @dataclass

@@ -501,7 +501,7 @@ def _zone(g: Graph, where: Location, pattern: str, reason: str) -> None:
         folder = posixpath.dirname(where.path)
         members = {n.anchor for n in files if posixpath.dirname(n.path) == folder}
     if members:
-        g.zones.append(Zone(where, frozenset(members), reason))
+        g.zones.append(Zone(where, frozenset(members), reason, suffix=bool(pattern)))
 
 
 def _open_quote(text: str) -> bool:

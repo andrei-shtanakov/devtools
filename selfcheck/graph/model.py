@@ -62,6 +62,7 @@ class Zone:
     caller: Location
     members: frozenset[str]
     reason: str
+    suffix: bool = False  # literal-suffix zone exempts; caller-dir zone caps (P7)
 
 
 @dataclass

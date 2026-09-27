@@ -231,6 +231,7 @@ def _scan_repo(
             view.status() if view is not None else "absent",
             time.time(),
             fleet_view=view,
+            operator=tuple(o.path for o in config.operator if o.repo == repo.name),
         )
         results = [
             ProbeResult(
@@ -353,6 +354,9 @@ def main(
         unknown = [r for r in wanted if r not in known and r not in manifest.missing]
         if unknown:
             raise ConfigError(f"repos not in manifest: {unknown}")
+        stray = sorted({o.repo for o in config.operator} - set(manifest.order))
+        if stray:
+            raise ConfigError(f"[[operator]] repo not in manifest: {stray}")
         run_id, run_dir = new_run_dir(args.out, datetime.now(UTC))
     except (ConfigError, OSError) as exc:
         print(f"selfcheck: {exc}", file=sys.stderr)
