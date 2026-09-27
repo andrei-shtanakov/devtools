@@ -1754,8 +1754,11 @@ devtools входит во флот каждого другого репо, и �
    `discovery:tools/check_vendor.py::verify` есть (положительная точка);
    `gate_check.py` (апстрим discovery-toolkit, копии в devtools и discovery по
    декларациям C) — в таблице вендор-дублей, не находка (отрицательная точка);
-5. pyrefly `missing-import` по собственным пакетам atp-platform (`atp`,
-   `game_envs`, `atp_sdk`) — 0 при `checkout-venv`;
+5. pyrefly `missing-import` по собственным пакетам atp-platform, установленным
+   editable (пути `.pth`: `atp.core`, `atp.dashboard`, `game_envs`, `atp_sdk` …), — 0
+   при `checkout-venv`; импорт пакета, которого в `.venv` нет (смоук 2026-09-27:
+   `atp.adapters` — `packages/atp-adapters` не установлен, venv `env-stale`), —
+   честная находка не выше `candidate` (§1.5), перечисляется в отчёте приёмки;
 6. cargo-machete `ok` на arbiter и prograph;
 7. находок `ruff/PLR2004` и `ruff/PLC0415` нет ни в одном репо, где конфиг
    их не включает.
