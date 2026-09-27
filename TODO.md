@@ -1684,6 +1684,14 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   текущий v2-путь с `content_anchor`; до триггера пункт остаётся waiting, но
   не теряется в россыпи GitHub. devtools#169 сюда намеренно не входит:
   дефекта поведения нет, необязательный API-рефакторинг закрыт not planned.
+  2026-09-27: #170 закрыт отдельным PR (fail-closed, как у обычной
+  доставки). #171 и #173 — предметы живых приёмок волн (бандлы
+  `workstreams/i5-traceless-noop-after-abandon-20260923/` и
+  `workstreams/stray-md-disables-i8-for-legacy-v1-20260922/` одобрены) и
+  исполняются конвейером по своим спекам, а не ручной правкой (решение
+  владельца 2026-09-27; ручная попытка — закрытый PR #438).
+
+- [ ] Барьерный стоп S6 сохраняет S3–S5 и через `resume()`: причина стопа (код 6 — бюджет/stop rule) пишется в состояние, `resume()` её читает и `gate-candidate`/`push`/`ready` не сбрасывает; тест проверяет состояние ПОСЛЕ `resume()` (devtools#276, решение владельца 2026-09-27: гарантия нужна по существу) @owner:github:andrei-shtanakov @id:barrier-stop-ops-survive-resume @epic:eco.dark-factory
 
 - [x] Формулировки и защитные проверки governance-контракта привести к фактическим гарантиям без расширения runtime-механики @owner:github:andrei-shtanakov @id:governance-contract-truth-batch — PR #239 (#182/#185/#195/#237, agent-merge 61e1e2f) + PR #240 (#184, харнесс, мерж человеком 592393b); все пять issues закрыты с evidence
   Источники: devtools#182 (граница blob-anchor), #184 (`merge-pr.sh` — policy
