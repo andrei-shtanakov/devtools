@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from selfcheck.corpus import list_corpus, materialize, release
@@ -231,7 +233,7 @@ def test_code_endpoint(text: str, line: int, hit: bool) -> None:
 
 
 def test_logic_version_bumped() -> None:
-    assert LLM_SITES.logic_version == 2
+    assert LLM_SITES.logic_version == 3  # + shell default rule (acceptance)
 
 
 def test_prose_and_trailing_comments_are_not_points(result: ProbeResult) -> None:
@@ -258,3 +260,59 @@ def test_no_syntax_warning_from_fleet_code() -> None:
         code_endpoint(text, 3)
         python_features(text, 3)
     assert not [w for w in caught if issubclass(w.category, SyntaxWarning)]
+
+
+SH_DEFAULT = (
+    "#!/bin/sh\n"
+    'review_cmd="${REVIEW_CMD:-codex exec}"\n'
+    '$review_cmd --sandbox read-only - < "$work/prompt.txt"\n'
+)
+PY_PROSE = 'DOC = """\n    codex exec --help lists the flags\n"""\n'
+
+
+def _probe(
+    tmp_path_factory: pytest.TempPathFactory, files: dict[str, str]
+) -> ProbeResult:
+    require_tool("uvx")
+    tmp = tmp_path_factory.mktemp("s3acc")
+    repo = make_repo(tmp / "repo", files)
+    corpus = tuple(list_corpus(repo))
+    copy = tmp / "run" / "src" / "repo"
+    materialize(repo, corpus, copy, canary_files([LLM_SITES]))
+    target = RepoTarget(
+        "repo", repo, copy, frozenset({"python"}), corpus, EnvInfo("no-env"), now=NOW
+    )
+    try:
+        return run_probe(LLM_SITES, target, tmp / "run" / "work")
+    finally:
+        release(copy)
+
+
+def test_shell_harness_default_expansion_is_a_point(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Acceptance 2026-09-27: review-kit local.sh — `${REVIEW_CMD:-codex exec}`."""
+    res = _probe(tmp_path_factory, {"local.sh": SH_DEFAULT, "doc.py": PY_PROSE})
+    rows = {(i["path"], i["line"], i["rule"]) for i in res.extra["inventory"]}
+    assert ("local.sh", 2, "harness-resolve-sh") in rows
+    assert not any(p == "doc.py" for p, _, _ in rows)  # cli-shell: shell files only
+
+
+def test_unparseable_bash_is_not_partial(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Acceptance 2026-09-27: regex rules must not make semgrep parse bash —
+    review-pr.sh is PartialParsing for semgrep's bash parser (partial since #424)."""
+    text = (Path(__file__).parents[2] / "review-pr.sh").read_text()
+    res = _probe(tmp_path_factory, {"review-pr.sh": text})
+    assert res.status is ProbeStatus.OK, res.diagnostics
+
+
+def test_pure_regex_rules_do_not_parse() -> None:
+    import yaml
+
+    from selfcheck.llm import RULES_PATH
+
+    rules = yaml.safe_load(RULES_PATH.read_text())["rules"]
+    regex_only = [r for r in rules if "pattern-regex" in r]
+    assert regex_only and all(r["languages"] == ["regex"] for r in regex_only)

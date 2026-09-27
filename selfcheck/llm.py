@@ -47,6 +47,7 @@ _MECHANISM = {
     "argv-literal": "A",
     "argv-literal-ts": "A",
     "harness-resolve": "A",
+    "harness-resolve-sh": "A",
     "spawn-ts": "A",
     "sdk-python": "B",
     "sdk-ts": "B",
@@ -54,6 +55,8 @@ _MECHANISM = {
     "endpoint": "C",
 }
 _TS_SUFFIXES = (".ts", ".tsx", ".js", ".mjs", ".cjs")
+# regex rules for shell only: their hits in Python/TS files are not points
+_SHELL_RULES = frozenset({"cli-shell", "harness-resolve-sh"})
 _PATHS = r"(?:/v1/messages|/chat/completions|/api/chat|/api/generate|/completion)\b"
 _ENDPOINT = re.compile(rf"^\S*?{_PATHS}")
 # a literal that starts at its quote and has no whitespace before the path
@@ -259,6 +262,8 @@ def _site(ctx: ProbeCtx, rule: str, rel: str, line: int) -> dict[str, Any] | Non
     text = source_text(ctx, rel)
     lines = text.splitlines()
     line_text = lines[line - 1] if 0 < line <= len(lines) else ""
+    if rule in _SHELL_RULES and rel.endswith((".py", *_TS_SUFFIXES)):
+        return None
     if rule == "endpoint":
         if rel.endswith(".py"):
             if not code_endpoint(text, line):
@@ -437,8 +442,8 @@ LLM_SITES = ProbeSpec(
         "llm:.selfcheck-canary/llm-sites/canary.py::selfcheck_classify",
     ),
     coverage="reported",
-    rules=("A", "B", "C", "D", "candidate:schema|loop", "construction"),
-    logic_version=2,
+    rules=("A", "B", "C", "D", "candidate:schema|loop", "construction", "sh-default"),
+    logic_version=3,
     binary="uvx",
     version_args=(*UVX_SEMGREP, "--version"),
     version_range=((1, 178), (1, 179)),
