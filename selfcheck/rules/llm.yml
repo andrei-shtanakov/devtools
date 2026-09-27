@@ -34,3 +34,73 @@ rules:
       - metavariable-regex:
           metavariable: $URL
           regex: (?s).*(/v1/messages|/v1/chat/completions|/api/generate|/completion\b).*
+  - id: argv-literal
+    languages: [python]
+    severity: INFO
+    message: harness argv construction (mechanism A)
+    patterns:
+      - pattern-either:
+          - pattern: "[$FIRST, $SECOND, ...]"
+          - pattern: "($FIRST, $SECOND, ...)"
+      - metavariable-regex:
+          metavariable: $SECOND
+          regex: ^["'](?:-{1,2}[A-Za-z][\w-]*|exec|run)["']$
+      - metavariable-regex:
+          metavariable: $FIRST
+          regex: (?i)^(?:["'](?:claude|codex|opencode|aider|pi|qwen|ollama|llama-cli|copilot)["']|.*(?:claude|codex|opencode|aider|ollama|qwen|copilot)_?(?:command|cmd|bin|binary|cli|path|exe)\b.*)$
+  - id: argv-literal-ts
+    languages: [js, ts]
+    severity: INFO
+    message: harness argv construction (mechanism A)
+    patterns:
+      - pattern: "[$FIRST, $SECOND, ...]"
+      - metavariable-regex:
+          metavariable: $SECOND
+          regex: ^["'`](?:-{1,2}[A-Za-z][\w-]*|exec|run)["'`]$
+      - metavariable-regex:
+          metavariable: $FIRST
+          regex: ^["'`](?:claude|codex|opencode|aider|pi|qwen|ollama|llama-cli|copilot)["'`]$
+  - id: harness-resolve
+    languages: [python]
+    severity: INFO
+    message: harness binary resolution (mechanism A)
+    patterns:
+      - pattern-either:
+          - pattern: os.environ.get($K, $BIN)
+          - pattern: os.getenv($K, $BIN)
+          - pattern: shutil.which($BIN)
+      - metavariable-regex:
+          metavariable: $BIN
+          regex: ^["'](?:claude|codex|opencode|aider|pi|qwen|ollama|llama-cli|copilot)["']$
+  - id: spawn-ts
+    languages: [js, ts]
+    severity: INFO
+    message: harness process launch (mechanism A)
+    patterns:
+      - pattern-either:
+          - pattern: spawn($BIN, ...)
+          - pattern: spawnSync($BIN, ...)
+          - pattern: execFile($BIN, ...)
+          - pattern: execa($BIN, ...)
+      - metavariable-regex:
+          metavariable: $BIN
+          regex: ^["'`](?:claude|codex|opencode|aider|pi|qwen|ollama|llama-cli|copilot)["'`]$
+  - id: sdk-ts
+    languages: [js, ts]
+    severity: INFO
+    message: LLM SDK (mechanism B)
+    pattern-either:
+      - pattern: new Anthropic(...)
+      - pattern: new OpenAI(...)
+      - pattern: $C.messages.create(...)
+      - pattern: $C.chat.completions.create(...)
+      - pattern: import $X from "@anthropic-ai/sdk"
+      - pattern: import $X from "openai"
+      - pattern: import { $X } from "@openai/agents"
+      - pattern: import * as $X from "@anthropic-ai/sdk"
+      - pattern: import * as $X from "openai"
+  - id: endpoint
+    languages: [python, js, ts, bash]
+    severity: INFO
+    message: LLM endpoint URL (mechanism C)
+    pattern-regex: (?:/v1/messages|/chat/completions|/api/chat|/api/generate|/completion)\b
