@@ -9,26 +9,40 @@ review_model: "sonnet"
 # Каждая задача — в интеграционную ветку и один PR; main не трогается.
 integration_pr: true
 spec_governance: strict
+# Режим объявлен явно (дефолт spec-runner тот же): задачи с проверкой
+# `manual` (эвиденция TASK-002/003) в tdd потребовали бы waiver'ов.
+execution_mode: standard
+# Вердикт ревью задачи — гейт до терминального статуса, а не отчёт
+# (дефолт spec-runner — advisory).
+review_policy: required
 commands:
-  # Без --group governance тесты моста и раннера молча skip — TDD-«красный»
-  # стал бы фиктивным (152 теста без группы не собираются).
+  # Без --group governance тесты моста и раннера молча skip — зелёный
+  # прогон ничего бы не проверил (152 теста без группы не собираются).
   test: "uv run --frozen --group governance pytest -q"
-  # repo-wide ruff красный на master (сотни прежних находок) — лint-гейта
+  # repo-wide ruff красный на master (сотни прежних находок) — lint-гейта
   # у devtools нет и в CI; пустая команда, а не заведомо красный гейт.
   lint: ""
 hooks:
   post_done:
     run_lint: false
-# Оракул и обвязка мержа/ревью агенту не правятся: strict валит попытку
-# до гейтов, если задача тронула эти пути.
+# strict валит попытку до гейтов, если задача тронула эти пути. Состав:
+# весь AUTHORITY_ROOT_PREFIXES (SSOT contracts/authority-root/v1/paths.env,
+# включая модули, которые исполняют merge-pr.sh/human-merge.sh), весь
+# contracts/ и вендор-кит ревью; конфиг прогона; требования бандла (узлы
+# spec/ воркстрима). Сама tasks-спека не заморожена: её статусы пишет
+# исполнитель — её правку агентом ловит ревью PR.
 harness_guard: strict
 harness_files:
   - spec-runner.config.yaml
   - spec/.gitignore
+  - .github
+  - profiles
+  - contracts
   - merge-pr.sh
   - human-merge.sh
   - review-pr.sh
   - attest-vendor.sh
-  - contracts
+  - ssot_env.sh
+  - approval_branches.sh
   - scripts/review
-  - .github
+  - workstreams/stray-md-disables-i8-for-legacy-v1-20260922/spec
