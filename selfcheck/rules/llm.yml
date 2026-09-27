@@ -124,4 +124,5 @@ rules:
     languages: [regex]
     severity: INFO
     message: harness binary as a shell default (mechanism A)
-    pattern-regex: \$\{[A-Za-z_]\w*:?-\s*["']?(?:claude|codex|opencode|aider|pi|qwen|ollama|llama-cli|copilot)\b
+    # the whole binary name: `claude-opus-5` (a model) is not `claude` (#431)
+    pattern-regex: \$\{[A-Za-z_]\w*:?-\s*["']?(?:claude|codex|opencode|aider|pi|qwen|ollama|llama-cli|copilot)(?=["'}\s]|$)

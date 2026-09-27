@@ -43,10 +43,13 @@ SCRIPT = 'if __name__ == "__main__":\n    pass\n'
 
 
 def usage(
-    tmp: Path, files: dict[str, str], operator: tuple[str, ...] = ()
+    tmp: Path,
+    files: dict[str, str],
+    operator: tuple[str, ...] = (),
+    exclude: tuple[str, ...] = (),
 ) -> ProbeResult:
     repo = make_repo(tmp / "repo", files, date=ago(90))
-    corpus = tuple(list_corpus(repo))
+    corpus = tuple(list_corpus(repo, exclude))
     copy = tmp / "run" / "src" / "repo"
     materialize(repo, corpus, copy, canary_files([USAGE_GRAPH]))
     target = RepoTarget(
@@ -152,7 +155,17 @@ def test_operator_on_a_missing_path_is_a_finding(tmp_path: Path) -> None:
         "medium",
         "selfcheck",
     )
-    assert missing.suggestion  # says what to do: drop the entry or restore the file
+    assert "верните файл" in missing.suggestion  # the file is gone from disk
+
+
+def test_operator_on_an_excluded_path_says_so(tmp_path: Path) -> None:
+    """#415: a path excluded from the corpus is not missing from disk —
+    «верните файл» would send the operator looking for a file that is there."""
+    files = {"a.py": SCRIPT, "tools/t.sh": "echo\n"}
+    res = usage(tmp_path, files, operator=("tools/t.sh",), exclude=("tools/**",))
+    (missing,) = [f for f in res.findings if f.rule == "selfcheck/operator-missing"]
+    assert "верните файл" not in missing.suggestion
+    assert "исключ" in missing.suggestion
 
 
 def test_doc_only_dead_hints_at_operator(tmp_path: Path) -> None:

@@ -635,7 +635,9 @@ reason = "гейт волн ре-вендора, запускает операт
   `selfcheck/operator-missing` (medium, category `selfcheck`, `anchor`
   `probe:<repo>#usage-graph`, `text_key` — путь; судьба — как у находок
   прибора, по `usage-graph` этого репо, §4.3). Список не может устареть
-  молча.
+  молча. Подсказка различает причину: файла нет на диске — «уберите запись
+  или верните файл»; файл есть, но исключён из корпуса — «уберите
+  исключение или запись» (devtools#415).
 - **Упоминание в документации не заменяет роль.** Таблица инструментов в
   `README.md` или `CLAUDE.md` — ребро `doc`, а не доказательство запуска;
   иначе вернётся та же слепота, только через прозу. Dead класса `doc-only`
@@ -676,9 +678,12 @@ reason = "гейт волн ре-вендора, запускает операт
   `/completion` — Python и TS;
 - D — описания без вызова (каталоги, конфиги) — в инвентарь, не в кандидаты.
 
-Поиск — semgrep-правила `selfcheck/rules/llm.yml` (Python, bash, TS —
-semgrep статичен, поэтому TS не требует S4) плюс AST-досборка аргументов для
-Python. Elixir — вне объёма.
+Поиск — semgrep-правила `selfcheck/rules/llm.yml` (Python, TS, а для shell —
+regex-правила без разбора: bash-парсер semgrep сдаётся на реальных скриптах,
+§10.7; semgrep статичен, поэтому TS не требует S4) плюс AST-досборка
+аргументов для Python. Для shell механика A — это и командная позиция, и
+харнесс как умолчание параметра (`${REVIEW_CMD:-codex exec}`). Elixir — вне
+объёма.
 
 Эвристики кандидата (каждая — отдельный признак в evidence): ответ
 разбирается в enum/bool/фиксированную JSON-схему; промпт — шаблон с
@@ -844,7 +849,9 @@ dirty, `surface` (§3.2.4), по пробам — версия, конфиг-х�
 **Находка прибора** (`probe:<repo>#<probe>`: `selfcheck/probe-*`, а также
 `selfcheck/operator-missing` на `probe:<repo>#usage-graph`), которой
 сейчас нет: `resolved`, если репо в `scope` и проба сейчас `ok`/`skipped`;
-иначе `not-rechecked`.
+иначе `not-rechecked`. Исключение — `operator-missing`: её предмет — путь
+корпуса, и `skipped` (usage-graph под `--path`) его не смотрел, поэтому
+`resolved` — только при `ok` (devtools#415).
 
 Статусы дельты: `new`, `persisting`, `changed`, `resolved`,
 `resolved: file-removed`, `not-rechecked`. Критерий `changed` — §2.1
@@ -1672,6 +1679,7 @@ jscpd межрепно не сравнивается (S3 — только ast-д
 |---|---|---|---|
 | `argv-literal` | A | Python, TS | список/кортеж `[$FIRST, $SECOND, …]`: `$FIRST` — строка-харнесс (§3.4) **или** (Python) имя/атрибут вида `…<харнесс>_?(command\|cmd\|bin\|binary\|cli\|path\|exe)`; `$SECOND` — строка-флаг `-x`/`--x…` или `exec`/`run` |
 | `harness-resolve` | A | Python | `os.environ.get(K, "<харнесс>")`, `os.getenv(K, "<харнесс>")`, `shutil.which("<харнесс>")` |
+| `harness-resolve-sh` | A | shell (regex) | умолчание параметра `${VAR:-<харнесс>…}` — имя бинаря целиком (`claude-opus-5` — модель, не бинарь); строка-комментарий не считается (приёмка S3, #431) |
 | `spawn-ts` | A | TS | `spawn`/`spawnSync`/`execFile`/`execa` с литералом-харнессом первым аргументом |
 | `sdk-ts` | B | TS | `new Anthropic(…)`, `new OpenAI(…)`, `$C.messages.create(…)`, `$C.chat.completions.create(…)`, импорт `@anthropic-ai/sdk`, `openai`, `@openai/agents` |
 | `endpoint` | C | Python, TS, shell | строковый литерал с путём `/v1/messages`, `/chat/completions`, `/api/chat`, `/api/generate`, `/completion`, **до которого в литерале нет пробельных символов** (URL, путь, f-строка с подстановкой хоста) |

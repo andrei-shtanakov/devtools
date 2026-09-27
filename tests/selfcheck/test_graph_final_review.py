@@ -9,22 +9,15 @@ from pathlib import Path
 import pytest
 
 from selfcheck.graph.build import build_graph
-from selfcheck.graph.classify import klass_of
+from selfcheck.graph.classify import Surface, classify
 from selfcheck.graph.model import Graph
 from selfcheck.roles import role_of
-from tests.selfcheck.helpers import write
+from tests.selfcheck.helpers import NOW, write
 
 
 def graph(tmp: Path, files: dict[str, str]) -> Graph:
     write(tmp, files)
     return build_graph(sorted(files), tmp, role_of, repo_name="r", sched_dir=None)
-
-
-def protected(g: Graph, anchor: str) -> bool:
-    """Live, or in a zone (a suffix zone exempts, a caller-dir zone caps at P7 —
-    never confirmed)."""
-    in_zone = any(anchor in z.members for z in g.zones)
-    return klass_of(g, anchor) == "live" or in_zone
 
 
 C1_FORMS = {
@@ -159,14 +152,48 @@ C1_FORMS = {
 }
 
 
+def _dead(g: Graph, anchor: str) -> tuple[str, list[str]] | None:
+    """(confidence, caps) of the dead finding on ``anchor`` where ``confirmed``
+    is reachable: full fleet, --sched-dir given, old history (spec §2.3 D1)."""
+    found = classify(
+        g,
+        repo="r",
+        surface=Surface("complete", "/sched", []),
+        ages=lambda _path: NOW - 90 * 86400,
+        now=NOW,
+    )
+    hits = [
+        (f.confidence.value, [e["detail"] for e in f.evidence if e["kind"] == "cap"])
+        for f in found
+        if f.anchor == anchor and f.category == "dead"
+    ]
+    return hits[0] if hits else None
+
+
+# a caller-dir zone caps its members at P7 instead of exempting them (rev 5.8)
+DIR_ZONE_FORMS = {"a-var-then-param", "f-reassigned-variable"}
+
+
 @pytest.mark.parametrize("form", sorted(C1_FORMS))
 def test_form_is_never_a_false_dead(form: str, tmp_path: Path) -> None:
+    """#415, review of #432: every form but the caller-dir zones is live or
+    suffix-zoned — no dead finding of any confidence (P5 would turn a lost
+    edge into a green ``likely``); forms a and f are dead ``likely`` capped
+    at exactly P7 — never ``confirmed``."""
     files, anchor = C1_FORMS[form]
     g = graph(tmp_path, files)
-    assert protected(g, anchor), (
+    expected = ("likely", ["P7"]) if form in DIR_ZONE_FORMS else None
+    assert _dead(g, anchor) == expected, (
         form,
         [(z.caller, sorted(z.members)) for z in g.zones],
     )
+
+
+def test_confirmed_is_reachable_under_the_same_conditions(tmp_path: Path) -> None:
+    """The baseline half: without it «never confirmed» holds for an empty
+    classifier too."""
+    g = graph(tmp_path, {"Makefile": "all: ; @true\n", "lonely.sh": "echo\n"})
+    assert _dead(g, "file:lonely.sh") == ("confirmed", [])
 
 
 def test_cd_and_working_directory_are_not_broken_roots(tmp_path: Path) -> None:
