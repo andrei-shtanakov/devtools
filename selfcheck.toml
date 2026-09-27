@@ -7,7 +7,6 @@ reason = "неприкасаем по решению владельца: нов�
 until = 2027-03-31
 
 # Ручные точки входа (спека §3.2.5): инструменты, которые запускает человек.
-# gen_agents_toml.py намеренно не внесён (2026-09-27): кандидат в устаревшие.
 
 [[operator]]
 repo = "devtools"
@@ -18,3 +17,8 @@ reason = "гейт волн ре-вендора; запускает операт
 repo = "devtools"
 path = "discover_models.py"
 reason = "discovery моделей по ADR-ECO-003a; запускает оператор, README"
+
+[[operator]]
+repo = "devtools"
+path = "gen_agents_toml.py"
+reason = "ручной засев cost/duration из benchmark_runs при добавлении агента; единственный источник этих чисел, назван в add-new-agent-runbook.md; scaffold ключей — arbiter/scripts/gen_agents_scaffold.py"
