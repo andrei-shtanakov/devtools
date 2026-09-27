@@ -4,53 +4,50 @@
 
 **Goal:** один прогон `make selfcheck ARGS='--all --fleet'` по всем репо манифеста с честными статусами: формат вендор-деклараций E, `llm-sites` по месту построения запуска, editable-пути для pyrefly, межрепные ast-дубли без вендор-групп, ruff без `PLR2004`/`PLC0415`, cargo-machete, allowlist по репо.
 
-**Architecture:** правки внутри существующих модулей `selfcheck/` (vendor, roles, env, python_tools, llm + правила semgrep, dups, config, run, report) и одна новая проба `cargo-machete` в `other_tools.py`. Межрепная стадия дублей — функция в `dups.py`, вызываемая `run.main` после цикла по репо. Новых пакетов и зависимостей нет.
+**Architecture:** правки внутри существующих модулей `selfcheck/` (vendor, roles, env, python_tools, llm + правила semgrep, dups, config, run, report) и одна новая проба `cargo-machete` в `other_tools.py`. Межрепная стадия дублей — функция `group_dups` в `dups.py`, её зовёт `run.main` после цикла по репо. Новых пакетов и зависимостей нет.
 
 **Tech Stack:** Python 3.12+, pytest, semgrep 1.178.0 (`uvx`), pyrefly, ruff 0.16, cargo-machete (системный бинарь, ставит владелец).
 
-**Spec:** `docs/superpowers/specs/2026-09-25-selfcheck-design.md` rev 5.9, §10 (плюс правки §1.1, §1.4, §2.4, §3.1, §3.4, §7, §9.7). Замер — dev-only `../_cowork_output/devtools-selfcheck-s3-measure-2026-09-27.md`.
+**Spec:** `docs/superpowers/specs/2026-09-25-selfcheck-design.md` rev 5.9, §10 (плюс правки §1.1, §1.4, §2.4, §3.1, §3.4, §7, §9.7). Замер — dev-only `../_cowork_output/devtools-selfcheck-s3-measure-2026-09-27.md`. Ревью пары r1 — `../_cowork_output/devtools-selfcheck-s3-pair-review-r1-2026-09-27.md`.
 
 ## Global Constraints
 
 - Пробы S1–S3 не исполняют код цели; `executes_target_code = false` у всех, включая cargo-machete (§1.2).
 - Окружение цели — только данные: `.pth` читаются как текст, строки `import …` не исполняются и никуда не передаются (§1.5, §10.4).
-- Пробы получают только путь к read-only копии (§1.3); путь из `.pth` вне checkout цели не передаётся.
-- `logic_version` собственного анализатора повышается при изменении логики (§4.3): `llm-sites` 1 → 2, `ast-dup` 1 → 2, `usage-graph` 3 → 4 (формат E и роли).
-- `PLR2004`, `PLC0415` не приходят из добавочного набора ruff, если конфиг репо их не включает явно (§10.3).
-- Формат E: ровно одна строка `source:`/`repo:`; ref `[0-9a-f]{7,40}`; E в корне репо — неразобран; члены — все файлы корпуса в каталоге декларации и ниже, кроме неё самой; каталог без других файлов — `vendor-pin-dangling`, `text_key` = каталог (§10.5).
-- Файлы под `.github/` — не кандидаты в декларации (§10.5).
-- Роль `test` дополняется `test/**`, `**/*_test.exs` (§10.5).
-- Вендор-группа дублей: не больше одного участника вне `vendored-in` → не находка, строка «вендор-дубли» (§10.6).
-- `llm-sites` `$SECOND` у `argv-literal` — обязательно флаг `-x`/`--x…` или `exec`/`run` (§10.7).
-- `endpoint`: до пути в литерале нет пробельных символов; для Python — строка кода, не docstring и не комментарий (§10.7).
-- `[[allow]] repo` — точное совпадение с `git_dir`, неизвестный — код 4 (§10.8).
-- `--all` и `--repo` несовместимы — код 4 (§10.2).
-- `uv run`, не pip; `uv run pytest`, `uv run pyrefly check`, `uv run ruff check`/`format` по `selfcheck/` и `tests/selfcheck/` после каждой задачи; строка ≤ 88.
+- Пробы получают только путь к read-only копии (§1.3); путь из `.pth` вне checkout или отсутствующий в копии не передаётся.
+- `logic_version` повышается (§4.3): `llm-sites` 1 → 2, `ast-dup` 1 → 2, `usage-graph` 3 → 4.
+- Формат E (§10.5): ровно одна строка `source:`/`repo:`; ref `[0-9a-f]{7,40}`; E в корне репо — неразобран; строка (кроме `source:`/`repo:`), называющая путь корпуса вне каталога E, — неразобран; члены — файлы корпуса каталога и ниже, **не узлы графа**, кроме самой декларации; узел — член, только если E называет его путь (от каталога); каталог без членов — `vendor-pin-dangling`, `text_key` = каталог.
+- Файлы под `.github/` — не кандидаты в декларации; роль `test` дополняется `test/**`, `**/*_test.exs` (§10.5).
+- Вендор-группа дублей (§10.6): есть участник `vendored-in`, вне роли ≤ 1 участника, и он в репо — владельце из деклараций копий группы.
+- При одном репо `id`, `owner_repo`, `anchor`, `locations`, `related` дублей совпадают с эталоном S1 (Task 6).
+- `llm-sites` (§10.7): `$SECOND` у `argv-literal` — флаг `-x`/`--x…` или `exec`/`run`; `endpoint` без пробела до пути; Python — строка кода целиком (не docstring, не кусок f-строки); TS — якорь `llm:<path>`, только инвентарь; файлы > 1 000 000 байт не передаются.
+- `PLR2004`, `PLC0415` не приходят из добавочного набора ruff, если корневой конфиг репо их не включает (§10.3).
+- `[[allow]] repo` — точное совпадение с `git_dir`, неизвестный — код 4 (§10.8); `--all` с `--repo` — код 4 (§10.2).
+- Живая приёмка §10.9 — после мержа, на master devtools с чистым деревом.
+- `uv run`, не pip; после каждой задачи `uv run pytest tests/selfcheck -q`, `uv run ruff format`/`check`, `uv run pyrefly check`; строка ≤ 88.
 
 ## Review Focus
 
-1. **Формат E снимает dead слишком широко.** Декларация E в каталоге с чужим кодом делает весь каталог `vendored-in`. Ожидание: E только в подкаталоге (корень — неразобран), и роль получает только корпус этого каталога. Тест — Task 1 (`test_e_in_repo_root_is_unparsed`, `test_e_members_are_folder_corpus`).
-2. **`endpoint` ловит прозу.** Строка-текст с путём эндпоинта (`"see /v1/messages"`) или docstring. Ожидание: не точка. Тесты — Task 5 (двойники в `test_llm_s3.py`) и существующий `test_inventory_mechanisms` (e.py).
-3. **Межрепная группа ломает идентичность S1.** При одном репо в `scope` `id`, `owner_repo`, `locations` дублей обязаны совпасть с S1. Тест — Task 6 (`test_single_repo_groups_match_s1`).
-4. **`.pth` с исполняемой строкой или путём наружу.** Ожидание: не исполнена, не передана; путь вне checkout не передан. Тест — Task 3.
-5. **`--extend-ignore` отменяет правило, которое репо включило само.** Ожидание: при явном `select`/`extend-select` с `PLR2004` флаг не передаётся. Тест — Task 2.
+1. **Формат E снимает dead.** Код рядом с E без упоминания обязан остаться узлом без роли (Task 1 `test_e_members_are_folder_non_code`, `test_e_code_member_only_when_named`).
+2. **E теряет копии вне каталога.** Строка с путём вне каталога — неразобрана (Task 1 `test_e_naming_outside_folder_is_unparsed`).
+3. **Межрепная группа ломает идентичность S1.** Эталонные значения сняты текущим кодом до рефакторинга (Task 6 `test_single_repo_matches_s1_golden`).
+4. **`.pth` без каталога в копии роняет pyrefly.** Такой путь не передаётся (Task 3 `test_pyrefly_skips_search_path_missing_in_copy`).
+5. **`endpoint` ловит прозу.** Текст с путём, docstring, комментарий, кусок f-строки — не точка (Task 5 двойники; S1 `test_inventory_mechanisms` с `e.py`).
 
 ---
 
 ### Task 1: формат E, кандидаты вне `.github/`, роль `test` для Elixir
 
 **Files:**
-- Modify: `selfcheck/vendor.py` (формат E, `.github/`, пустой каталог)
-- Modify: `selfcheck/roles.py:40` (`Role.TEST` паттерны)
-- Modify: `selfcheck/graph/probe.py` (`logic_version=4`)
-- Test: `tests/selfcheck/test_vendor.py`, `tests/selfcheck/test_config_manifest.py`
+- Modify: `selfcheck/vendor.py`, `selfcheck/roles.py:40`, `selfcheck/graph/probe.py` (`logic_version=4`)
+- Test: `tests/selfcheck/test_vendor.py`, `tests/selfcheck/test_config_manifest.py`, `tests/selfcheck/test_zone_narrow.py:209-210`, `tests/selfcheck/test_fleet_run.py:119-122`
 
 **Interfaces:**
-- Produces: `Declaration(path, fmt, owner, ref, members, folder: str | None = None)` — для E `members=()` и `folder` = каталог декларации; `vendor_roles(...)` раскрывает членов E по корпусу. `is_candidate(rel, text, *, is_node)` возвращает `False` для `.github/**`.
+- Produces: `Declaration(path, fmt, owner, ref, members, folder: str | None = None)`; для E `members=()` и `folder` — каталог. `vendor_roles(repo, corpus, texts, role, node_paths)` раскрывает членов E по корпусу. `is_candidate` — `False` для `.github/**`.
 
 - [ ] **Step 1: Write the failing tests**
 
-В `tests/selfcheck/test_vendor.py` дописать:
+В `tests/selfcheck/test_vendor.py` (импорты `vendor_roles`, `role_of` уже есть):
 
 ```python
 FORMAT_E_AT = (
@@ -83,20 +80,36 @@ FORMAT_E_HASH = (
 @pytest.mark.parametrize(
     ("rel", "text", "owner", "ref"),
     [
-        ("priv/c/idea/v1/PIN", FORMAT_E_AT, "impresario",
-         "8082e53b743169137f9e8c72c279043c7166ab03"),
-        ("contracts/ls/v1/PINNED.txt", FORMAT_E_COMMIT, "impresario",
-         "a9d11fa75bb101d2919dc9f99e075270de5d7976"),
+        (
+            "priv/c/idea/v1/PIN",
+            FORMAT_E_AT,
+            "impresario",
+            "8082e53b743169137f9e8c72c279043c7166ab03",
+        ),
+        (
+            "contracts/ls/v1/PINNED.txt",
+            FORMAT_E_COMMIT,
+            "impresario",
+            "a9d11fa75bb101d2919dc9f99e075270de5d7976",
+        ),
         ("contracts/mv/VENDORED_FROM", FORMAT_E_REPO, "maestro", "346222e3b"),
-        ("core/tests/fx/v1/PIN", FORMAT_E_HASH, "devtools",
-         "2533ff7b8c3afd74110b3838325bf76ba46ba186"),
+        (
+            "core/tests/fx/v1/PIN",
+            FORMAT_E_HASH,
+            "devtools",
+            "2533ff7b8c3afd74110b3838325bf76ba46ba186",
+        ),
     ],
 )
 def test_format_e(rel: str, text: str, owner: str, ref: str) -> None:
     decl = parse_declaration(rel, text)
     folder = rel.rsplit("/", 1)[0]
     assert (decl.fmt, decl.owner, decl.ref, decl.members, decl.folder) == (
-        "E", owner, ref, (), folder
+        "E",
+        owner,
+        ref,
+        (),
+        folder,
     )
 
 
@@ -114,27 +127,24 @@ def test_e_unparsed(text: str) -> None:
         parse_declaration("contracts/x/v1/PINNED.txt", text)
 
 
-def test_e_in_repo_root_is_unparsed() -> None:
-    with pytest.raises(DeclarationError):
-        parse_declaration("PIN", "source: o@abcdef1 p\n")
-
-
 def test_uppercase_source_stays_format_a() -> None:
-    with pytest.raises(DeclarationError):  # A without member lines
+    with pytest.raises(DeclarationError, match="no members"):
         parse_declaration("x/PIN", "# SOURCE: steward @ 5bfd829\n")
 
 
-def test_e_members_are_folder_corpus() -> None:
-    texts = {
-        "contracts/ls/v1/PINNED.txt": FORMAT_E_COMMIT,
-        "contracts/ls/v1/schema.json": "{}",
-        "contracts/ls/v1/fixtures/ok.json": "{}",
-        "contracts/ls/v2/schema.json": "{}",  # sibling folder: not a member
-        "tools/check.py": "import json\n",
-    }
-    res = vendor_roles(
-        "r", sorted(texts), texts, role_of, frozenset({"tools/check.py"})
-    )
+E_TEXTS = {
+    "contracts/ls/v1/PINNED.txt": FORMAT_E_COMMIT,
+    "contracts/ls/v1/schema.json": "{}",
+    "contracts/ls/v1/fixtures/ok.json": "{}",
+    "contracts/ls/v1/helper.py": "def f():\n    return 1\n",
+    "contracts/ls/v2/schema.json": "{}",  # sibling folder: not a member
+    "tools/check.py": "import json\n",
+}
+E_NODES = frozenset({"tools/check.py", "contracts/ls/v1/helper.py"})
+
+
+def test_e_members_are_folder_non_code() -> None:
+    res = vendor_roles("r", sorted(E_TEXTS), E_TEXTS, role_of, E_NODES)
     assert sorted(res.members) == [
         "contracts/ls/v1/fixtures/ok.json",
         "contracts/ls/v1/schema.json",
@@ -142,7 +152,33 @@ def test_e_members_are_folder_corpus() -> None:
     assert res.findings == [] and res.broken is False
 
 
-def test_e_folder_without_files_is_dangling() -> None:
+def test_e_code_member_only_when_named() -> None:
+    texts = {
+        **E_TEXTS,
+        "contracts/ls/v1/PINNED.txt": FORMAT_E_COMMIT + "files: helper.py\n",
+    }
+    res = vendor_roles("r", sorted(texts), texts, role_of, E_NODES)
+    assert "contracts/ls/v1/helper.py" in res.members
+
+
+def test_e_naming_outside_folder_is_unparsed() -> None:
+    texts = {
+        **E_TEXTS,
+        "contracts/ls/v1/PINNED.txt": FORMAT_E_COMMIT + "also: tools/check.py\n",
+    }
+    res = vendor_roles("r", sorted(texts), texts, role_of, E_NODES)
+    assert [f.rule for f in res.findings] == ["selfcheck/vendor-pin-unparsed"]
+    assert "tools/check.py" in res.protected and res.broken is True
+
+
+def test_e_in_repo_root_is_unparsed_finding() -> None:
+    texts = {"PIN": "source: o@abcdef1 p\n", "a.json": "{}"}
+    res = vendor_roles("r", sorted(texts), texts, role_of, frozenset())
+    assert [f.rule for f in res.findings] == ["selfcheck/vendor-pin-unparsed"]
+    assert res.broken is True
+
+
+def test_e_folder_without_members_is_dangling() -> None:
     texts = {"contracts/gone/v1/PINNED.txt": FORMAT_E_COMMIT, "a.py": "x = 1\n"}
     res = vendor_roles("r", sorted(texts), texts, role_of, frozenset({"a.py"}))
     assert [(f.rule, f.text_key) for f in res.findings] == [
@@ -151,14 +187,12 @@ def test_e_folder_without_files_is_dangling() -> None:
     assert res.broken is True
 
 
-@pytest.mark.parametrize(
-    "rel", [".github/workflows/vendor-drift.yml", ".github/PIN"]
-)
+@pytest.mark.parametrize("rel", [".github/workflows/vendor-drift.yml", ".github/PIN"])
 def test_github_files_are_not_candidates(rel: str) -> None:
     assert is_candidate(rel, "name: x\n", is_node=False) is False
 ```
 
-В `tests/selfcheck/test_config_manifest.py` — в параметризацию `test_default_roles` добавить строки:
+В `tests/selfcheck/test_config_manifest.py` — в параметризацию `test_default_roles`:
 
 ```python
         ("test/contracts/vendored_test.exs", Role.TEST),
@@ -167,14 +201,16 @@ def test_github_files_are_not_candidates(rel: str) -> None:
         ("lib/kapelle/test_helper.ex", Role.SOURCE),
 ```
 
+`tests/selfcheck/test_zone_narrow.py:209` — переименовать в `test_usage_graph_logic_version_is_4`, `== 4`; `tests/selfcheck/test_fleet_run.py:122` — `== 4  # format E and Elixir test role (rev 5.9)`.
+
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/selfcheck/test_vendor.py tests/selfcheck/test_config_manifest.py -q`
-Expected: FAIL — `test_format_e` (`DeclarationError: not a declaration`), `test_e_members_are_folder_corpus`, `test_e_folder_without_files_is_dangling`, `test_github_files_are_not_candidates`, новые строки `test_default_roles`; `test_e_unparsed`, `test_e_in_repo_root_is_unparsed`, `test_uppercase_source_stays_format_a` проходят уже сейчас (двойники — ok).
+Run: `uv run pytest tests/selfcheck/test_vendor.py tests/selfcheck/test_config_manifest.py tests/selfcheck/test_zone_narrow.py tests/selfcheck/test_fleet_run.py -q`
+Expected: FAIL — `test_format_e` (`DeclarationError`), `test_e_members_are_folder_non_code`, `test_e_code_member_only_when_named`, `test_e_naming_outside_folder_is_unparsed`, `test_e_folder_without_members_is_dangling`, `test_github_files_are_not_candidates`, новые строки `test_default_roles`, два теста `logic_version` (`3 != 4`). `test_e_unparsed`, `test_uppercase_source_stays_format_a`, `test_e_in_repo_root_is_unparsed_finding` проходят уже сейчас (двойники).
 
 - [ ] **Step 3: Implement**
 
-`selfcheck/roles.py` — строка `Role.TEST`:
+`selfcheck/roles.py`:
 
 ```python
     Role.TEST: (
@@ -186,24 +222,23 @@ Expected: FAIL — `test_format_e` (`DeclarationError: not a declaration`), `tes
     ),
 ```
 
-`selfcheck/vendor.py` — docstring модуля дополнить строкой про E; добавить:
+`selfcheck/vendor.py` — в docstring модуля строка «- E ``key: value`` prose with ``source:``/``repo:`` + a hex ref; members are the declaration's folder (spec §10.5).»; константы:
 
 ```python
 _E_LINE = re.compile(r"^(?:#\s*)?([A-Za-z_]+):\s*(.*)$")
 _E_SOURCE_AT = re.compile(rf"^(\S+?)@({_HEX})\b")
 _E_REF = re.compile(rf"^({_HEX})\b")
+_E_HEADS = ("source", "repo")
 ```
 
-`Declaration` — поле `folder: str | None = None`.
-
-`is_candidate` — первой строкой:
+`Declaration` — поле `folder: str | None = None`. `is_candidate` — первые строки:
 
 ```python
     if rel.startswith(".github/"):
         return False
 ```
 
-Новый разбор (вызывается после C, до B):
+Разбор E:
 
 ```python
 def _e_keys(text: str) -> dict[str, list[str]]:
@@ -215,68 +250,108 @@ def _e_keys(text: str) -> dict[str, list[str]]:
     return keys
 
 
+def _e_owner_ref(rel: str, keys: dict[str, list[str]]) -> tuple[str, str]:
+    heads = [(k, v) for k in _E_HEADS for v in keys.get(k, [])]
+    if len(heads) != 1:
+        raise DeclarationError(f"{rel}: expected one source/repo line")
+    kind, head = heads[0]
+    at = _E_SOURCE_AT.match(head) if kind == "source" else None
+    if at is not None:
+        return at.group(1), at.group(2)
+    commits = keys.get("commit", [])
+    ref = _E_REF.match(commits[0]) if len(commits) == 1 else None
+    if ref is None:
+        raise DeclarationError(f"{rel}: no hex ref for the folder declaration")
+    token = head.split()[0] if head.split() else ""
+    owner = (
+        posixpath.basename(token.rstrip("/")).removesuffix(".git")
+        if kind == "repo"
+        else token
+    )
+    if not owner:
+        raise DeclarationError(f"{rel}: no owner")
+    return owner, ref.group(1)
+
+
 def _parse_e(rel: str, text: str) -> Declaration | None:
     keys = _e_keys(text)
-    heads = keys.get("source", []) + keys.get("repo", [])
-    if not heads:
+    if not any(k in keys for k in _E_HEADS):
         return None
     folder = posixpath.dirname(rel)
     if not folder:
         raise DeclarationError(f"{rel}: folder declaration in the repo root")
-    if len(heads) != 1:
-        raise DeclarationError(f"{rel}: more than one source/repo line")
-    commits = keys.get("commit", [])
-    head = heads[0]
-    at = _E_SOURCE_AT.match(head) if "source" in keys else None
-    if at is not None:
-        owner, ref = at.group(1), at.group(2)
-    else:
-        if len(commits) != 1 or not _E_REF.match(commits[0]):
-            raise DeclarationError(f"{rel}: no hex ref for the folder declaration")
-        ref = _E_REF.match(commits[0]).group(1)  # type: ignore[union-attr]
-        token = head.split()[0] if head.split() else ""
-        owner = (
-            posixpath.basename(token.rstrip("/")).removesuffix(".git")
-            if "repo" in keys
-            else token
-        )
-    if not owner:
-        raise DeclarationError(f"{rel}: no owner")
+    owner, ref = _e_owner_ref(rel, keys)
     return Declaration(rel, "E", owner, ref, (), folder)
 ```
 
-`parse_declaration` — `return _parse_a(...) or _parse_c(...) or _parse_e(rel, text) or _parse_b(...)`.
+`parse_declaration`: `return _parse_a(rel, lines) or _parse_c(rel, lines) or _parse_e(rel, text) or _parse_b(rel, lines)`.
 
-`vendor_roles` — после успешного разбора:
+Члены E:
 
 ```python
-        members = decl.members
-        if decl.folder is not None:
-            prefix = decl.folder + "/"
-            members = tuple(p for p in sorted(known) if p.startswith(prefix) and p != rel)
-            if not members:
-                res.findings.append(
-                    _finding(
-                        repo, "selfcheck/vendor-pin-dangling", "medium", rel,
-                        decl.folder,
-                    )
-                )
-                continue
-        for member in members:
-            ...  # прежний цикл, итерирует members вместо decl.members
+def _e_members(
+    decl: Declaration, text: str, known: frozenset[str], nodes: frozenset[str]
+) -> tuple[str, ...]:
+    """Folder members (§10.5): non-code files, plus code named from the folder.
+
+    A line naming a corpus path outside the folder (bar the upstream path on
+    ``source:``/``repo:``) makes the declaration unparsed."""
+    assert decl.folder is not None
+    prefix = decl.folder + "/"
+    body = "\n".join(
+        ln
+        for ln in text.splitlines()
+        if not (m := _E_LINE.match(ln.strip())) or m.group(1).lower() not in _E_HEADS
+    )
+    named = _named_paths(decl.path, body, known)
+    outside = sorted(p for p in named if not p.startswith(prefix))
+    if outside:
+        raise DeclarationError(f"{decl.path}: names paths outside its folder: {outside}")
+    return tuple(
+        p
+        for p in sorted(known)
+        if p.startswith(prefix) and p != decl.path and (p not in nodes or p in named)
+    )
 ```
 
-`_finding(... suggestion=...)` — «(формат A–E, §9.7, §10.5)». `graph/probe.py` — `USAGE_GRAPH` `logic_version=4`.
+В цикле `vendor_roles` разбор и раскрытие E — в одном `try`:
+
+```python
+        try:
+            decl = parse_declaration(rel, text)
+            members = (
+                _e_members(decl, text, known, node_paths)
+                if decl.folder is not None
+                else decl.members
+            )
+        except DeclarationError:
+            res.findings.append(
+                _finding(repo, "selfcheck/vendor-pin-unparsed", "high", rel, None)
+            )
+            res.protected |= _named_paths(rel, text, known)
+            continue
+        if decl.folder is not None and not members:
+            res.findings.append(
+                _finding(
+                    repo, "selfcheck/vendor-pin-dangling", "medium", rel, decl.folder
+                )
+            )
+            continue
+        for member in members:
+            ...  # прежнее тело цикла по членам (было `for member in decl.members`)
+```
+
+`_finding` — `suggestion="почините декларацию вендоринга (формат A–E, §9.7, §10.5)"`. `graph/probe.py` — `USAGE_GRAPH` `logic_version=4`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/selfcheck -q`
-Expected: PASS целиком (прежние `test_four_formats`, `test_unparsed`, `test_candidates` зелёные — ни один их вход не содержит `source:`/`repo:` в нижнем регистре).
+Expected: PASS целиком (прежние `test_four_formats`, `test_unparsed`, `test_candidates` зелёные: ни один их вход не содержит `source:`/`repo:` в нижнем регистре).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add selfcheck/vendor.py selfcheck/roles.py selfcheck/graph/probe.py tests/selfcheck/test_vendor.py tests/selfcheck/test_config_manifest.py
+git add selfcheck/vendor.py selfcheck/roles.py selfcheck/graph/probe.py tests/selfcheck/test_vendor.py tests/selfcheck/test_config_manifest.py tests/selfcheck/test_zone_narrow.py tests/selfcheck/test_fleet_run.py
 git commit -m "feat(selfcheck): вендор-декларации формата E, .github вне кандидатов, роль test для Elixir (§10.5)"
 ```
 
@@ -297,25 +372,37 @@ git commit -m "feat(selfcheck): вендор-декларации формата
 MAGIC = "def f(x: int) -> bool:\n    import os\n    return x > 42 and bool(os.sep)\n"
 
 
+def _ignored(argv: list[str]) -> list[str]:
+    if "--extend-ignore" not in argv:
+        return []
+    return argv[argv.index("--extend-ignore") + 1].split(",")
+
+
 def test_ruff_extra_set_without_magic_and_lazy_import(build, tmp_path: Path) -> None:
     res = run(RUFF, build({"a.py": MAGIC}), tmp_path)
-    rules = {f.rule for f in res.findings}
-    assert not rules & {"ruff/PLR2004", "ruff/PLC0415"}
-    assert "--extend-ignore" in res.argv
+    assert not {f.rule for f in res.findings} & {"ruff/PLR2004", "ruff/PLC0415"}
+    assert _ignored(res.argv) == ["PLR2004", "PLC0415"]
 
 
 @pytest.mark.parametrize(
-    "tool_ruff",
+    ("tool_ruff", "kept"),
     [
-        '[tool.ruff.lint]\nselect = ["E", "PLR2004"]\n',
-        '[tool.ruff.lint]\nextend-select = ["PLC0415"]\n',
-        '[tool.ruff]\nselect = ["PLR2"]\n',
+        ('[tool.ruff.lint]\nselect = ["E", "PLR2004"]\n', {"PLR2004"}),
+        ('[tool.ruff.lint]\nextend-select = ["PLC0415"]\n', {"PLC0415"}),
+        ('[tool.ruff]\nselect = ["PLR2"]\n', {"PLR2004"}),
+        (
+            '[tool.ruff.lint]\nextend-select = ["PLR2004", "PLC0415"]\n',
+            {"PLR2004", "PLC0415"},
+        ),
     ],
 )
-def test_repo_that_selects_them_keeps_them(build, tmp_path: Path, tool_ruff: str) -> None:
+def test_repo_that_selects_them_keeps_them(
+    build, tmp_path: Path, tool_ruff: str, kept: set[str]
+) -> None:
     pyproject = PYPROJECT.replace("[tool.ruff]\n", "") + tool_ruff
     res = run(RUFF, build({"a.py": MAGIC}, pyproject=pyproject), tmp_path)
-    assert "--extend-ignore" not in res.argv
+    assert not kept & set(_ignored(res.argv))
+    assert {f"ruff/{c}" for c in kept} <= {f.rule for f in res.findings}
 
 
 def test_ruff_rules_name_the_ignores() -> None:
@@ -325,28 +412,31 @@ def test_ruff_rules_name_the_ignores() -> None:
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/selfcheck/test_python_tools.py -q -k "magic or selects_them or name_the_ignores"`
-Expected: FAIL — `ruff/PLR2004` в находках; `--extend-ignore` нет в argv; `rules` без `-PLR2004`.
+Expected: FAIL — `ruff/PLR2004` в находках первого теста и `_ignored(...) == []`; `rules` без `-PLR2004`. `test_repo_that_selects_them_keeps_them` проходит уже сейчас (двойник: без флага правило и так приходит).
 
 - [ ] **Step 3: Implement**
 
 ```python
 RUFF_IGNORE = ("PLR2004", "PLC0415")
-# prefixes that only come from our own extra set (§10.3)
+# prefixes that come only from our own extra set (§10.3)
 _OURS = frozenset({"ALL", "PL", "PLR", "PLC"})
 
 
 def _repo_selects(ctx: ProbeCtx, code: str) -> bool:
-    """The repo config selects ``code`` itself (a code or a prefix but ours)."""
+    """A root config of the repo selects ``code`` itself (code or own prefix).
+
+    Nested per-package configs are not read — a named cost (§10.3)."""
     for name in ("ruff.toml", ".ruff.toml", "pyproject.toml"):
         data = _toml(ctx, name)
         root = (
             data.get("tool", {}).get("ruff", {}) if name == "pyproject.toml" else data
         )
+        lint = root.get("lint", {})
         chosen = [
             *root.get("select", []),
             *root.get("extend-select", []),
-            *root.get("lint", {}).get("select", []),
-            *root.get("lint", {}).get("extend-select", []),
+            *lint.get("select", []),
+            *lint.get("extend-select", []),
         ]
         if any(c not in _OURS and code.startswith(c) for c in chosen):
             return True
@@ -362,6 +452,7 @@ def _ruff_argv(ctx: ProbeCtx) -> list[str]:
         "json",
         "--extend-select",
         ",".join(RUFF_SELECT),
+        # hidden in `ruff check --help` 0.16.9 but accepted (review r1 P13)
         *(["--extend-ignore", ",".join(ignore)] if ignore else []),
         *copy_paths(ctx),
     ]
@@ -386,13 +477,11 @@ git commit -m "feat(selfcheck): ruff без PLR2004/PLC0415 в добавочн�
 ### Task 3: editable-пути `.pth` → pyrefly `--search-path`
 
 **Files:**
-- Modify: `selfcheck/env.py` (`EnvInfo.search_paths`, `editable_paths`)
-- Modify: `selfcheck/probes/python_tools.py:131-151` (`_pyrefly_argv`)
-- Modify: `selfcheck/run.py:254` (`acc.env[...]["search_paths"]`)
+- Modify: `selfcheck/env.py`, `selfcheck/probes/python_tools.py:131-180`, `selfcheck/run.py:254`
 - Test: `tests/selfcheck/test_env.py`, `tests/selfcheck/test_python_tools.py`
 
 **Interfaces:**
-- Produces: `EnvInfo.search_paths: tuple[str, ...] = ()` — пути **относительно корня checkout** (`"."` — сам корень); `editable_paths(repo: Path, site: Path) -> tuple[str, ...]`.
+- Produces: `EnvInfo.search_paths: tuple[str, ...] = ()` — пути относительно корня checkout (`"."` — сам корень); `editable_paths(repo: Path, site: Path) -> tuple[str, ...]`; `_pyrefly_search(ctx) -> tuple[list[str], list[str]]` — (аргументы, пропущенные пути).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -417,6 +506,10 @@ def test_editable_paths_are_data(tmp_path: Path) -> None:
 `tests/selfcheck/test_python_tools.py`:
 
 ```python
+def _search_paths(argv: list[str]) -> list[str]:
+    return [argv[i + 1] for i, a in enumerate(argv) if a == "--search-path"]
+
+
 def test_pyrefly_resolves_editable_workspace_member(build, tmp_path: Path) -> None:
     files = {
         "packages/core/corelib/__init__.py": "def f() -> int:\n    return 1\n",
@@ -431,15 +524,27 @@ def test_pyrefly_resolves_editable_workspace_member(build, tmp_path: Path) -> No
     target = replace(target, env=detect_env(target.source))
     res = run(PYREFLY, target, tmp_path)
     assert "pyrefly/missing-import" not in {f.rule for f in res.findings}
-    i = res.argv.index("--search-path")
-    assert res.argv[i + 1] == str(target.copy / "packages" / "core")
-    assert str(target.source) not in " ".join(res.argv)
+    assert _search_paths(res.argv) == [str(target.copy / "packages" / "core")]
+
+
+def test_pyrefly_skips_search_path_missing_in_copy(build, tmp_path: Path) -> None:
+    target = build({"a.py": "x = 1\n", ".gitignore": ".venv/\nbuild/\n"})
+    (target.source / "build").mkdir()
+    site = target.env.site_packages
+    assert site is not None
+    (site / "_editable_b.pth").write_text(f"{target.source / 'build'}\n")
+    target = replace(target, env=detect_env(target.source))
+    res = run(PYREFLY, target, tmp_path)
+    assert res.status is ProbeStatus.OK, res.reason
+    assert _search_paths(res.argv) == []
 ```
+
+(у `build` в этом тесте `.venv` не создаётся без `venv_marker` — передать `venv_marker=tmp_path / "m"`; переданный `.gitignore` перекрывает фикстурный.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/selfcheck/test_env.py tests/selfcheck/test_python_tools.py -q -k "editable"`
-Expected: FAIL — `AttributeError: 'EnvInfo' object has no attribute 'search_paths'`.
+Run: `uv run pytest tests/selfcheck/test_env.py tests/selfcheck/test_python_tools.py -q -k "editable or missing_in_copy"`
+Expected: FAIL — `AttributeError: 'EnvInfo' object has no attribute 'search_paths'` (первые два); третий проходит уже сейчас (двойник: пути не передаются вовсе).
 
 - [ ] **Step 3: Implement**
 
@@ -448,7 +553,12 @@ Expected: FAIL — `AttributeError: 'EnvInfo' object has no attribute 'search_pa
 ```python
 @dataclass(frozen=True)
 class EnvInfo:
-    ...
+    """How pyrefly/deptry see the target's third-party packages."""
+
+    mode: Literal["checkout-venv", "no-env"]
+    stale: bool = False
+    site_packages: Path | None = None
+    python_version: str | None = None
     search_paths: tuple[str, ...] = ()  # editable .pth paths inside the checkout
 
 
@@ -467,29 +577,59 @@ def editable_paths(repo: Path, site: Path) -> tuple[str, ...]:
         for line in (ln.strip() for ln in lines):
             if not line or line.startswith(("#", "import ", "import\t")):
                 continue
-            path = (site / line).resolve() if not Path(line).is_absolute() else Path(
-                line
-            ).resolve()
+            raw = Path(line)
+            path = (raw if raw.is_absolute() else site / raw).resolve()
             if path == root or root in path.parents:
                 found.add(path.relative_to(root).as_posix() or ".")
     return tuple(sorted(found))
 ```
 
-`detect_env` — `return EnvInfo("checkout-venv", stale, sites[0], version, editable_paths(repo, sites[0]))`.
-
-`_pyrefly_argv` — внутри ветки `checkout-venv`:
+`detect_env` — последняя строка:
 
 ```python
-        for rel in env.search_paths:
-            args += ["--search-path", str(ctx.target.copy / rel)]
+    return EnvInfo(
+        "checkout-venv", stale, sites[0], version, editable_paths(repo, sites[0])
+    )
 ```
 
-`run.py` — `acc.env[repo.name] = {"mode": env.mode, "stale": env.stale, "search_paths": len(env.search_paths)}`.
+`python_tools.py`:
+
+```python
+def _pyrefly_search(ctx: ProbeCtx) -> tuple[list[str], list[str]]:
+    """``--search-path`` args for editable paths present in the copy (§10.4)."""
+    args: list[str] = []
+    dropped: list[str] = []
+    for rel in ctx.target.env.search_paths:
+        path = ctx.target.copy / rel
+        if path.is_dir():
+            args += ["--search-path", str(path)]
+        else:
+            dropped.append(rel)
+    return args, dropped
+```
+
+`_pyrefly_argv` — в ветке `checkout-venv` после `--python-version`: `args += _pyrefly_search(ctx)[0]`. `_pyrefly_parse` — перед `return result`:
+
+```python
+    dropped = _pyrefly_search(ctx)[1]
+    if dropped:
+        result.notes.append(f"search-path not in copy, not passed: {dropped}")
+```
+
+`run.py:254`:
+
+```python
+    acc.env[repo.name] = {
+        "mode": env.mode,
+        "stale": env.stale,
+        "search_paths": len(env.search_paths),
+    }
+```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/selfcheck -q`
-Expected: PASS целиком; `test_pyrefly_*` и `test_deptry_env_as_data` зелёные (evil `.pth` фикстуры — строка `import`, пропущена).
+Expected: PASS целиком; `test_deptry_env_as_data` зелёный (evil `.pth` фикстуры — строка `import`, пропущена).
 
 - [ ] **Step 5: Commit**
 
@@ -503,9 +643,7 @@ git commit -m "feat(selfcheck): editable-пути .pth как данные → p
 ### Task 4: `[[allow]] repo`
 
 **Files:**
-- Modify: `selfcheck/config.py:21-80` (`AllowEntry.repo`)
-- Modify: `selfcheck/run.py:359-362` (проверка `repo` по манифесту)
-- Modify: `selfcheck.toml` (`repo = "devtools"` у `issue_console.py`)
+- Modify: `selfcheck/config.py`, `selfcheck/run.py` (проверка рядом с `[[operator]]`), `selfcheck.toml`
 - Test: `tests/selfcheck/test_config_manifest.py`, `tests/selfcheck/test_run.py`
 
 **Interfaces:**
@@ -513,7 +651,7 @@ git commit -m "feat(selfcheck): editable-пути .pth как данные → p
 
 - [ ] **Step 1: Write the failing tests**
 
-`tests/selfcheck/test_config_manifest.py`:
+`tests/selfcheck/test_config_manifest.py` (импорты `from dataclasses import replace`, `from selfcheck.model import Confidence, Finding` — добавить, если нет):
 
 ```python
 def test_allow_repo_limits_the_entry(tmp_path: Path) -> None:
@@ -524,8 +662,8 @@ def test_allow_repo_limits_the_entry(tmp_path: Path) -> None:
     )
     entry = load_config(cfg).allow[0]
     mine = Finding("r/x", "quality", "low", Confidence.LIKELY, "a", "file:x.py", [])
-    other = replace(mine, owner_repo="b")
-    assert entry.matches(mine) and not entry.matches(other)
+    assert entry.matches(mine)
+    assert not entry.matches(replace(mine, owner_repo="b"))
 ```
 
 `tests/selfcheck/test_run.py`:
@@ -533,7 +671,7 @@ def test_allow_repo_limits_the_entry(tmp_path: Path) -> None:
 ```python
 def test_allow_repo_not_in_manifest_is_exit_4(tmp_path: Path) -> None:
     ws = workspace(tmp_path)
-    cfg = tmp_path / "s.toml"
+    cfg = ws / "s.toml"
     cfg.write_text(
         '[[allow]]\nanchor = "file:x.py"\nrepo = "nope"\nreason = "r"\n'
         "until = 2099-01-01\n"
@@ -541,23 +679,21 @@ def test_allow_repo_not_in_manifest_is_exit_4(tmp_path: Path) -> None:
     assert main([*args(ws), "--config", str(cfg), "--probe", "ruff"]) == 4
 ```
 
-(в `test_config_manifest.py` импортировать `from dataclasses import replace`, `Finding`, `Confidence`, если их нет; `args` в `test_run.py` уже есть.)
-
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/selfcheck/test_config_manifest.py tests/selfcheck/test_run.py -q -k "allow_repo"`
-Expected: FAIL — `other` совпал (поле игнорируется); код выхода не 4.
+Expected: FAIL — запись совпала с находкой репо `b`; код выхода не 4.
 
 - [ ] **Step 3: Implement**
 
-`AllowEntry` — поле `repo: str | None = None`; в `matches` первой строкой:
+`AllowEntry` — поле `repo: str | None = None`; `matches` — первые строки:
 
 ```python
         if self.repo is not None and finding.owner_repo != self.repo:
             return False
 ```
 
-`_allow_entry` — `repo=raw.get("repo")`. `run.main` — рядом с проверкой `[[operator]]`:
+`_allow_entry` — `repo=raw.get("repo")`. `run.main` — сразу после проверки `stray` для `[[operator]]`:
 
 ```python
         stray_allow = sorted(
@@ -567,7 +703,7 @@ Expected: FAIL — `other` совпал (поле игнорируется); к�
             raise ConfigError(f"[[allow]] repo not in manifest: {stray_allow}")
 ```
 
-`selfcheck.toml` — в запись `issue_console.py` добавить `repo = "devtools"`.
+`selfcheck.toml` — в запись `issue_console.py` строка `repo = "devtools"`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -586,15 +722,16 @@ git commit -m "feat(selfcheck): [[allow]] repo — запись действуе
 ### Task 5: `llm-sites` — место построения запуска, TS
 
 **Files:**
-- Modify: `selfcheck/rules/llm.yml`
-- Modify: `selfcheck/llm.py` (`_MECHANISM`, `_select`, `_site`, `_parse`, `logic_version=2`)
+- Modify: `selfcheck/rules/llm.yml`, `selfcheck/llm.py`
 - Test: `tests/selfcheck/test_llm_s3.py` (новый)
 
 **Interfaces:**
-- Consumes: `python_files`, `shell_files` (как в S1).
-- Produces: `ts_files(target) -> tuple[str, ...]`; `code_endpoint(text: str, line: int) -> bool`.
+- Consumes: `python_files`, `shell_files`.
+- Produces: `ts_files(target) -> tuple[str, ...]`; `code_endpoint(text: str, line: int) -> bool`; `MAX_TARGET_BYTES = 1_000_000`.
 
 - [ ] **Step 1: Write the failing tests**
+
+Сначала сверить, где `run_probe` кладёт `ParseResult.notes` в `ProbeResult` (`probes/base.py`): тест `test_big_file_named_in_notes` ниже читает `result.coverage["notes"]`; если заметки лежат в другом поле — тест пишется на него до запуска Step 2.
 
 `tests/selfcheck/test_llm_s3.py`:
 
@@ -603,73 +740,102 @@ git commit -m "feat(selfcheck): [[allow]] repo — запись действуе
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from selfcheck.corpus import list_corpus, materialize, release
 from selfcheck.env import EnvInfo
-from selfcheck.llm import LLM_SITES, code_endpoint
-from selfcheck.probes.base import ProbeResult, ProbeStatus, RepoTarget, canary_files, run_probe
+from selfcheck.llm import LLM_SITES, MAX_TARGET_BYTES, code_endpoint
+from selfcheck.probes.base import (
+    ProbeResult,
+    ProbeStatus,
+    RepoTarget,
+    canary_files,
+    run_probe,
+)
 from tests.selfcheck.helpers import NOW, make_repo, require_tool
 
-SPAWNER = '''def argv(model, prompt):
-    return ["claude", "--model", model, "-p", prompt]
-'''
-CONFIGURED = '''def run(config, prompt, runner):
-    return runner([config.claude_command, "-p", prompt])
-'''
-PRIVATE_CMD = '''class D:
-    def cmd(self, prompt):
-        return [self._claude_command, "--print", "-p", prompt]
-'''
-RESOLVE = '''import os
-import shutil
-
-BIN = os.environ.get("CLAUDE_BIN", "claude")
-
-
-def find():
-    return shutil.which("codex")
-'''
-URL_F = '''def url(host):
-    return f"{host.rstrip('/')}/v1/chat/completions"
-'''
-URL_OLLAMA = '''def url(host):
-    return host + "/api/chat"
-'''
-DOC_URL = '''"""Calls the HTTP `/api/chat` endpoint of ollama."""
-
-
-def f():
-    # POST http://localhost:11434/api/chat
-    return "see /v1/messages for details"
-'''
-NOT_ARGV = '''NAMES = {"codex_cli": "codex", "claude_code": "claude"}
-BACKENDS = ("codex", "disp")
-
-
-def add(parser):
-    parser.add_argument("--author", choices=["codex", "disp"], default="codex")
-'''
-TS_SPAWN = 'import { spawn } from "node:child_process";\nexport const go = (p: string) => spawn("claude", ["-p", p]);\n'
+SPAWNER = (
+    "def argv(model, prompt):\n"
+    '    return ["claude", "--model", model, "-p", prompt]\n'
+)
+TUPLE = 'def argv(prompt):\n    return ("codex", "exec", prompt)\n'
+CONFIGURED = (
+    "def run(config, prompt, runner):\n"
+    '    return runner([config.claude_command, "-p", prompt])\n'
+)
+PRIVATE_CMD = (
+    "class D:\n    def cmd(self, prompt):\n"
+    '        return [self._claude_command, "--print", "-p", prompt]\n'
+)
+RESOLVE = (
+    "import os\nimport shutil\n\n"
+    'BIN = os.environ.get("CLAUDE_BIN", "claude")\n'
+    'ALT = os.getenv("OPENCODE_BIN", "opencode")\n\n\n'
+    'def find():\n    return shutil.which("codex")\n'
+)
+URL_F = "def url(host):\n    return f\"{host.rstrip('/')}/v1/chat/completions\"\n"
+URL_OLLAMA = 'def url(host):\n    return host + "/api/chat"\n'
+DOC_URL = (
+    '"""Calls the HTTP `/api/chat` endpoint of ollama."""\n\n\n'
+    "def f(base):\n"
+    "    # POST http://localhost:11434/api/chat\n"
+    '    note = "see /v1/messages for details"\n'
+    '    return note + f"see the docs at {base}/v1/messages for details"\n'
+)
+NOT_ARGV = (
+    'NAMES = {"codex_cli": "codex", "claude_code": "claude"}\n'
+    'BACKENDS = ("codex", "disp")\n\n\n'
+    "def add(parser):\n"
+    '    parser.add_argument("--author", choices=["codex", "disp"], default="codex")\n'
+)
+SHELL_URL = (
+    "#!/bin/sh\n"
+    "curl -s http://localhost:11434/api/generate -d '{}'\n"
+    "# curl http://h/api/chat\n"
+)
+TS_SPAWN = (
+    'import { spawn } from "node:child_process";\n'
+    'export const go = (p: string) => spawn("claude", ["-p", p]);\n'
+)
 TS_ARGV = 'export const argv = (p: string) => ["codex", "exec", p];\n'
-TS_SDK = 'import OpenAI from "openai";\nexport const c = new OpenAI();\n'
+TS_SDK_OPENAI = 'import OpenAI from "openai";\nexport const c = new OpenAI();\n'
+TS_SDK_ANTHROPIC = (
+    'import Anthropic from "@anthropic-ai/sdk";\n'
+    "export const a = new Anthropic();\n"
+    'export const r = (x: any) => x.messages.create({ model: "m" });\n'
+)
+TS_AGENTS = 'import { Agent, run } from "@openai/agents";\nexport { Agent, run };\n'
 TS_URL = "export const u = (h: string) => `${h}/v1/chat/completions`;\n"
 TS_COMMENT = "// fetch(`${h}/v1/chat/completions`)\nexport const x = 1;\n"
+BIG_JS = "// bundle\n" + "x" * MAX_TARGET_BYTES + '\nspawn("claude", ["-p", q]);\n'
+
+FILES = {
+    "spawner.py": SPAWNER,
+    "tuple.py": TUPLE,
+    "configured.py": CONFIGURED,
+    "private.py": PRIVATE_CMD,
+    "resolve.py": RESOLVE,
+    "url_f.py": URL_F,
+    "url_ollama.py": URL_OLLAMA,
+    "doc_url.py": DOC_URL,
+    "not_argv.py": NOT_ARGV,
+    "fetch.sh": SHELL_URL,
+    "spawn.ts": TS_SPAWN,
+    "argv.ts": TS_ARGV,
+    "sdk_openai.ts": TS_SDK_OPENAI,
+    "sdk_anthropic.ts": TS_SDK_ANTHROPIC,
+    "agents.ts": TS_AGENTS,
+    "url.ts": TS_URL,
+    "comment.ts": TS_COMMENT,
+    "big.js": BIG_JS,
+}
 
 
 @pytest.fixture(scope="module")
 def result(tmp_path_factory: pytest.TempPathFactory) -> ProbeResult:
     require_tool("uvx")
     tmp = tmp_path_factory.mktemp("s3llm")
-    files = {
-        "spawner.py": SPAWNER, "configured.py": CONFIGURED, "private.py": PRIVATE_CMD,
-        "resolve.py": RESOLVE, "url_f.py": URL_F, "url_ollama.py": URL_OLLAMA,
-        "doc_url.py": DOC_URL, "not_argv.py": NOT_ARGV, "spawn.ts": TS_SPAWN,
-        "argv.ts": TS_ARGV, "sdk.ts": TS_SDK, "url.ts": TS_URL, "comment.ts": TS_COMMENT,
-    }
-    repo = make_repo(tmp / "repo", files)
+    repo = make_repo(tmp / "repo", FILES)
     corpus = tuple(list_corpus(repo))
     copy = tmp / "run" / "src" / "repo"
     materialize(repo, corpus, copy, canary_files([LLM_SITES]))
@@ -690,25 +856,53 @@ def _rows(result: ProbeResult) -> set[tuple[str, str, str]]:
     ("path", "mechanism", "rule"),
     [
         ("spawner.py", "A", "argv-literal"),
+        ("tuple.py", "A", "argv-literal"),
         ("configured.py", "A", "argv-literal"),
         ("private.py", "A", "argv-literal"),
         ("resolve.py", "A", "harness-resolve"),
         ("url_f.py", "C", "endpoint"),
         ("url_ollama.py", "C", "endpoint"),
+        ("fetch.sh", "C", "endpoint"),
         ("spawn.ts", "A", "spawn-ts"),
         ("argv.ts", "A", "argv-literal-ts"),
-        ("sdk.ts", "B", "sdk-ts"),
+        ("sdk_openai.ts", "B", "sdk-ts"),
+        ("sdk_anthropic.ts", "B", "sdk-ts"),
+        ("agents.ts", "B", "sdk-ts"),
         ("url.ts", "C", "endpoint"),
     ],
 )
-def test_each_rule_fires(result: ProbeResult, path: str, mechanism: str, rule: str) -> None:
+def test_each_rule_fires(
+    result: ProbeResult, path: str, mechanism: str, rule: str
+) -> None:
     assert result.status is ProbeStatus.OK and result.canary == "hit"
     assert (path, mechanism, rule) in _rows(result)
 
 
-@pytest.mark.parametrize("path", ["doc_url.py", "not_argv.py", "comment.ts"])
+def test_resolve_counts_getenv_and_which(result: ProbeResult) -> None:
+    lines = {
+        i["line"] for i in result.extra["inventory"] if i["path"] == "resolve.py"
+    }
+    assert lines == {4, 5, 9}
+
+
+@pytest.mark.parametrize("path", ["doc_url.py", "not_argv.py", "comment.ts", "big.js"])
 def test_negative_twins(result: ProbeResult, path: str) -> None:
     assert not any(r[0] == path for r in _rows(result))
+
+
+def test_shell_comment_url_is_not_a_point(result: ProbeResult) -> None:
+    lines = {i["line"] for i in result.extra["inventory"] if i["path"] == "fetch.sh"}
+    assert lines == {2}
+
+
+def test_big_file_named_in_notes(result: ProbeResult) -> None:
+    assert any("big.js" in n for n in result.coverage.get("notes", []))
+
+
+def test_ts_is_inventory_only(result: ProbeResult) -> None:
+    ts = [i for i in result.extra["inventory"] if i["path"].endswith(".ts")]
+    assert ts and not any(i["candidate"] or i["features"] for i in ts)
+    assert not any(f.anchor.endswith(".ts") for f in result.findings)
 
 
 def test_rows_deduplicated(result: ProbeResult) -> None:
@@ -721,9 +915,10 @@ def test_rows_deduplicated(result: ProbeResult) -> None:
     [
         (URL_F, 2, True),
         (URL_OLLAMA, 2, True),
-        (DOC_URL, 1, False),
-        (DOC_URL, 5, False),
-        (DOC_URL, 6, False),
+        (DOC_URL, 1, False),  # docstring
+        (DOC_URL, 5, False),  # comment
+        (DOC_URL, 6, False),  # prose with whitespace before the path
+        (DOC_URL, 7, False),  # constant piece of an f-string
     ],
 )
 def test_code_endpoint(text: str, line: int, hit: bool) -> None:
@@ -737,11 +932,11 @@ def test_logic_version_bumped() -> None:
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/selfcheck/test_llm_s3.py -q`
-Expected: FAIL — `ImportError: cannot import name 'code_endpoint'`.
+Expected: FAIL — `ImportError: cannot import name 'MAX_TARGET_BYTES'`.
 
 - [ ] **Step 3: Implement**
 
-`selfcheck/rules/llm.yml` — дописать (регекс харнессов — тот же список, что `HARNESSES` в `llm.py`):
+`selfcheck/rules/llm.yml` — дописать (список харнессов совпадает с `HARNESSES`):
 
 ```yaml
   - id: argv-literal
@@ -817,19 +1012,24 @@ Expected: FAIL — `ImportError: cannot import name 'code_endpoint'`.
 `selfcheck/llm.py`:
 
 ```python
+MAX_TARGET_BYTES = 1_000_000  # semgrep's default --max-target-bytes (§10.7)
 _MECHANISM = {
-    "py-launch": "A", "cli-shell": "A", "argv-literal": "A", "argv-literal-ts": "A",
-    "harness-resolve": "A", "spawn-ts": "A", "sdk-python": "B", "sdk-ts": "B",
-    "http-python": "C", "endpoint": "C",
+    "py-launch": "A",
+    "cli-shell": "A",
+    "argv-literal": "A",
+    "argv-literal-ts": "A",
+    "harness-resolve": "A",
+    "spawn-ts": "A",
+    "sdk-python": "B",
+    "sdk-ts": "B",
+    "http-python": "C",
+    "endpoint": "C",
 }
 _TS_SUFFIXES = (".ts", ".tsx", ".js", ".mjs", ".cjs")
-_ENDPOINT = re.compile(
-    r"^\S*?(?:/v1/messages|/chat/completions|/api/chat|/api/generate|/completion)\b"
-)
-_QUOTED_ENDPOINT = re.compile(
-    r"[\"'`][^\"'`\s]*(?:/v1/messages|/chat/completions|/api/chat|/api/generate"
-    r"|/completion)\b"
-)
+_PATHS = r"(?:/v1/messages|/chat/completions|/api/chat|/api/generate|/completion)\b"
+_ENDPOINT = re.compile(rf"^\S*?{_PATHS}")
+# a word with no whitespace before the path: quoted, `=`-assigned or bare (shell)
+_WORD_ENDPOINT = re.compile(rf"(?:^|[\s\"'`=(])[^\s\"'`]*{_PATHS}")
 
 
 def ts_files(target: RepoTarget) -> tuple[str, ...]:
@@ -841,15 +1041,20 @@ def ts_files(target: RepoTarget) -> tuple[str, ...]:
     )
 
 
-def _docstrings(tree: ast.AST) -> set[int]:
+def _skipped_nodes(tree: ast.AST) -> set[int]:
+    """Docstrings and the constant pieces of f-strings (checked joined)."""
     ids: set[int] = set()
     for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            ids |= {id(v) for v in node.values}
         if isinstance(
             node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
         ):
             body = node.body
-            if body and isinstance(body[0], ast.Expr) and isinstance(
-                body[0].value, ast.Constant
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
             ):
                 ids.add(id(body[0].value))
     return ids
@@ -871,22 +1076,49 @@ def code_endpoint(text: str, line: int) -> bool:
         tree = ast.parse(text)
     except SyntaxError:
         return False
-    skip = _docstrings(tree)
+    skip = _skipped_nodes(tree)
     for node in ast.walk(tree):
         value = _literal(node)
         if value is None or id(node) in skip:
             continue
-        if node.lineno <= line <= (node.end_lineno or node.lineno):  # type: ignore[attr-defined]
-            if _ENDPOINT.search(value):
-                return True
+        start = getattr(node, "lineno", 0)
+        end = getattr(node, "end_lineno", None) or start
+        if start <= line <= end and _ENDPOINT.search(value):
+            return True
     return False
 ```
 
-`_select` — `tuple(dict.fromkeys((*python_files(target), *shell_files(target), *ts_files(target))))`.
-
-`_site` — в начале:
+`_select`:
 
 ```python
+def _select(target: RepoTarget) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys((*python_files(target), *shell_files(target), *ts_files(target)))
+    )
+```
+
+`_argv` — вместо `*copy_paths(ctx)`:
+
+```python
+        *[p for p in copy_paths(ctx) if Path(p).stat().st_size <= MAX_TARGET_BYTES],
+```
+
+`_parse` — сразу после создания `result`:
+
+```python
+    big = sorted(
+        r for r in ctx.inputs if (ctx.target.copy / r).stat().st_size > MAX_TARGET_BYTES
+    )
+    if big:
+        result.notes.append(f"larger than {MAX_TARGET_BYTES} bytes, not scanned: {big}")
+        # counted as processed: the skip is named in the note, not a lost input
+        result.processed_paths = [*(result.processed_paths or []), *big]
+```
+
+`_site` — новое начало (прежние Python- и shell-ветки ниже сохраняются; shell-ветка берёт уже вычисленный `line_text`):
+
+```python
+def _site(ctx: ProbeCtx, rule: str, rel: str, line: int) -> dict[str, Any] | None:
     text = source_text(ctx, rel)
     lines = text.splitlines()
     line_text = lines[line - 1] if 0 < line <= len(lines) else ""
@@ -895,12 +1127,24 @@ def code_endpoint(text: str, line: int) -> bool:
             if not code_endpoint(text, line):
                 return None
         elif line_text.lstrip().startswith(("#", "//", "*")) or not (
-            _QUOTED_ENDPOINT.search(line_text)
+            _WORD_ENDPOINT.search(line_text)
         ):
             return None
+    if rel.endswith(_TS_SUFFIXES):
+        # TS: file-level anchor, inventory only (§10.7, named cost)
+        return {
+            "path": rel,
+            "line": line,
+            "mechanism": _MECHANISM[rule],
+            "rule": rule,
+            "candidate": False,
+            "features": [],
+            "anchor": f"llm:{rel}",
+        }
+    ...  # прежнее тело: `if rel.endswith(".py"): …` / `else:` shell с этим line_text
 ```
 
-и заменить ветку `else:` (не-Python) так, чтобы использовать уже вычисленный `line_text`; якорь для TS — `llm:{rel}`, как у shell. В `_parse` — дедупликация: перед `inventory.append(row)`:
+`_parse` — дедупликация строк инвентаря: `seen: set[tuple[str, int]] = set()` перед циклом по `data["results"]`, внутри сразу после `if row is None: continue`:
 
 ```python
         if (row["path"], row["line"]) in seen:
@@ -908,7 +1152,7 @@ def code_endpoint(text: str, line: int) -> bool:
         seen.add((row["path"], row["line"]))
 ```
 
-(`seen: set[tuple[str, int]] = set()` перед циклом). `LLM_SITES.logic_version = 2`; `rules=("A", "B", "C", "D", "candidate:schema|loop", "construction")`.
+`LLM_SITES` — `logic_version=2`, `rules=("A", "B", "C", "D", "candidate:schema|loop", "construction")`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -927,77 +1171,138 @@ git commit -m "feat(selfcheck): llm-sites — место построения з
 ### Task 6: межрепные ast-дубли и вендор-группы
 
 **Files:**
-- Modify: `selfcheck/dups.py:126-235` (`FuncHash` в данных пробы; `group_dups`)
-- Modify: `selfcheck/run.py` (`_Run.hashes`, `_Run.vendor_dups`, вызов после цикла)
-- Modify: `selfcheck/report.py` (таблица «Вендор-дубли»)
+- Modify: `selfcheck/dups.py:126-235`, `selfcheck/run.py`, `selfcheck/report.py`
 - Test: `tests/selfcheck/test_dups.py`, `tests/selfcheck/test_run.py`
 
 **Interfaces:**
-- Consumes: `acc.vendored[repo]` — `{path: [...]}` из `usage-graph` (§9.7).
-- Produces: `group_dups(hashes: Mapping[str, list[FuncHash]], vendored: Mapping[str, Collection[str]] | None) -> tuple[list[Finding], list[dict[str, Any]]]` — находки и строки вендор-дублей; `ast-dup` пишет `extra["hashes"] = [asdict(h) …]` и возвращает только находки канарейки.
+- Consumes: `acc.vendored[repo]` — `{path: [{"owner", "ref", "declaration"}, …]}` из `usage-graph` (§9.7).
+- Produces: `group_dups(hashes: Mapping[str, list[FuncHash]], vendored: Mapping[str, Mapping[str, list[dict[str, str]]]] | None) -> tuple[list[Finding], list[dict[str, Any]]]`; `dup_findings(hashes, repo)` = `group_dups({repo: hashes}, None)[0]`; `ast-dup` пишет `extra["hashes"]` и выпускает только группы канарейки.
 
 - [ ] **Step 1: Write the failing tests**
 
-`tests/selfcheck/test_dups.py`:
+`tests/selfcheck/test_dups.py` (эталон снят кодом S1 до рефакторинга, 2026-09-27):
 
 ```python
-from selfcheck.dups import FuncHash, dup_findings, group_dups
+from selfcheck.dups import FuncHash, group_dups
 
 BODY = "".join(f"    v{i} = x * {i}\n" for i in range(8))
+SBODY = "".join(f"    v{i} = x * {i + 50}\n" for i in range(8))
 
 
-def _h(path: str, name: str = "f") -> FuncHash:
-    return function_hashes(f"def {name}(x):\n{BODY}    return x\n", path)[0]
+def _fn(path: str, name: str = "f", body: str = BODY) -> FuncHash:
+    return function_hashes(f"def {name}(x):\n{body}    return x\n", path)[0]
 
 
-def test_cross_repo_exact_is_one_group() -> None:
-    found, vendor = group_dups({"b": [_h("q.py")], "a": [_h("p.py")]}, {})
-    (f,) = found
-    assert (f.rule, f.owner_repo, f.confidence.value) == ("ast-dup/exact", "a", "confirmed")
-    assert [(r["owner_repo"], r["path"]) for r in f.related] == [("a", "p.py"), ("b", "q.py")]
-    assert [loc.path for loc in f.locations] == ["p.py"]
+S1_GOLDEN = [
+    {
+        "id": "sc-a4f4f800",
+        "rule": "ast-dup/exact",
+        "owner_repo": "r",
+        "anchor": "dup:exact:cf9bd0c1e0a973ff",
+        "locations": [{"path": "a.py", "line": 1}, {"path": "b.py", "line": 1}],
+        "related": [
+            {"owner_repo": "r", "path": "a.py", "line": 1, "member": "f"},
+            {"owner_repo": "r", "path": "b.py", "line": 1, "member": "g"},
+        ],
+    },
+    {
+        "id": "sc-e6d0475e",
+        "rule": "ast-dup/structural",
+        "owner_repo": "r",
+        "anchor": "dup:structural:6b7354843b992577",
+        "locations": [
+            {"path": "a.py", "line": 1},
+            {"path": "b.py", "line": 1},
+            {"path": "c.py", "line": 1},
+        ],
+        "related": [
+            {"owner_repo": "r", "path": "a.py", "line": 1, "member": "f"},
+            {"owner_repo": "r", "path": "b.py", "line": 1, "member": "g"},
+            {"owner_repo": "r", "path": "c.py", "line": 1, "member": "h"},
+        ],
+    },
+]
+KEYS = ("id", "rule", "owner_repo", "anchor", "locations", "related")
+
+
+def test_single_repo_matches_s1_golden() -> None:
+    hs = [_fn("a.py", "f"), _fn("b.py", "g"), _fn("c.py", "h", SBODY)]
+    found, vendor = group_dups({"r": hs}, None)
+    got = sorted(({k: f.to_json()[k] for k in KEYS} for f in found), key=str)
+    assert got == sorted(S1_GOLDEN, key=str)
     assert vendor == []
 
 
+def test_cross_repo_exact_is_one_group() -> None:
+    found, _ = group_dups({"b": [_fn("q.py")], "a": [_fn("p.py")]}, {})
+    (f,) = found
+    assert (f.rule, f.owner_repo) == ("ast-dup/exact", "a")
+    assert [(r["owner_repo"], r["path"]) for r in f.related] == [
+        ("a", "p.py"),
+        ("b", "q.py"),
+    ]
+    assert [loc.path for loc in f.locations] == ["p.py"]
+
+
+def test_cross_repo_group_id_stable_when_repo_drops_out() -> None:
+    b = [_fn("q.py"), _fn("r.py", "g")]
+    both, _ = group_dups({"a": [_fn("p.py")], "b": b}, {})
+    one, _ = group_dups({"b": b}, {})
+    assert [f.id for f in both] == [f.id for f in one]
+
+
+def _decl(owner: str) -> list[dict[str, str]]:
+    return [{"owner": owner, "ref": "abcdef1", "declaration": "x/PIN"}]
+
+
 def test_upstream_plus_declared_copies_is_vendor_group() -> None:
-    hashes = {"up": [_h("g.py")], "c1": [_h("v/g.py")], "c2": [_h("w/g.py")]}
-    found, vendor = group_dups(hashes, {"c1": {"v/g.py"}, "c2": {"w/g.py"}})
+    hashes = {"up": [_fn("g.py")], "c1": [_fn("v/g.py")], "c2": [_fn("w/g.py")]}
+    vendored = {"c1": {"v/g.py": _decl("up")}, "c2": {"w/g.py": _decl("up")}}
+    found, vendor = group_dups(hashes, vendored)
     assert found == [] and len(vendor) == 1
     assert sorted(m["owner_repo"] for m in vendor[0]["members"]) == ["c1", "c2", "up"]
 
 
-def test_undeclared_copies_stay_a_finding() -> None:
-    hashes = {"up": [_h("g.py")], "c1": [_h("v/g.py")], "c2": [_h("w/g.py")]}
-    found, vendor = group_dups(hashes, {"c1": {"v/g.py"}})
+def test_undeclared_copy_stays_a_finding() -> None:
+    hashes = {"up": [_fn("g.py")], "c1": [_fn("v/g.py")], "c2": [_fn("w/g.py")]}
+    found, vendor = group_dups(hashes, {"c1": {"v/g.py": _decl("up")}})
     assert len(found) == 1 and vendor == []
 
 
-def test_single_repo_groups_match_s1() -> None:
-    hs = [_h("a.py", "f"), _h("b.py", "g")]
-    found, _ = group_dups({"r": hs}, None)
-    assert [x.to_json() for x in found] == [x.to_json() for x in dup_findings(hs, "r")]
+def test_upstream_out_of_scope_undeclared_copy_is_a_finding() -> None:
+    hashes = {"c1": [_fn("v/g.py")], "c2": [_fn("w/g.py")]}
+    found, vendor = group_dups(hashes, {"c1": {"v/g.py": _decl("up")}})
+    assert len(found) == 1 and vendor == []
 ```
 
-`test_ast_dup_probe` в том же файле меняется (проба больше не выпускает группы репо — их выпускает прогон):
+`test_ast_dup_probe` в том же файле меняется (группы репо выпускает прогон, не проба):
 
 ```python
 def test_ast_dup_probe(tmp_path: Path) -> None:
     res = run(AST_DUP, tmp_path, {"a.py": func("one"), "b.py": func("two")})
     assert res.status is ProbeStatus.OK and res.canary == "hit"
-    assert res.findings == []  # only the canary group, subtracted by the core
-    hashes = [FuncHash(**{**h, "literals": tuple(h["literals"])}) for h in res.extra["hashes"]]
-    assert [f.rule for f in group_dups({"repo": hashes}, None)[0]] == ["ast-dup/exact"]
+    assert res.findings == []  # the canary group is subtracted by the core
+    hashes = [
+        FuncHash(**{**h, "literals": tuple(h["literals"])})
+        for h in res.extra["hashes"]
+    ]
+    assert [f.rule for f in group_dups({"repo": hashes}, None)[0]] == [
+        "ast-dup/exact"
+    ]
 ```
 
-`tests/selfcheck/test_run.py` — двухрепный прогон (использовать `make_repo` из helpers и манифест с двумя `[tools.*]`):
+`tests/selfcheck/test_run.py` (`make_repo` — импорт из helpers):
 
 ```python
 def test_cross_repo_dup_in_one_run(tmp_path: Path) -> None:
     body = "".join(f"    v{i} = x * {i}\n" for i in range(8))
     src = f"def helper(x):\n{body}    return x\n"
     ws = workspace(tmp_path, {"h.py": src})
-    make_repo(tmp_path / "other", {"pyproject.toml": '[project]\nname = "o"\nversion = "0"\n', "g.py": src})
-    (tmp_path / "m.toml").write_text(
+    make_repo(
+        tmp_path / "other",
+        {"pyproject.toml": '[project]\nname = "o"\nversion = "0"\n', "g.py": src},
+    )
+    (ws / "m.toml").write_text(
         '[tools.devtools]\ngit_dir = "devtools"\n[tools.other]\ngit_dir = "other"\n'
     )
     main([*args(ws), "--repo", "devtools", "--repo", "other", "--probe", "ast-dup"])
@@ -1005,25 +1310,36 @@ def test_cross_repo_dup_in_one_run(tmp_path: Path) -> None:
     groups = [f for f in doc["findings"] if f["rule"] == "ast-dup/exact"]
     assert len(groups) == 1
     assert {r["owner_repo"] for r in groups[0]["related"]} == {"devtools", "other"}
+    assert any("вендор-фильтр не применён" in w for w in doc["run"]["warnings"])
 ```
-
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/selfcheck/test_dups.py tests/selfcheck/test_run.py -q -k "cross_repo or vendor_group or undeclared or match_s1"`
+Run: `uv run pytest tests/selfcheck/test_dups.py tests/selfcheck/test_run.py -q`
 Expected: FAIL — `ImportError: cannot import name 'group_dups'`.
 
 - [ ] **Step 3: Implement**
 
-`dups.py`:
+`dups.py` (импорты `dataclasses`, `from collections.abc import Mapping`, `from typing import Any`) — вместо `_dup` и тела `dup_findings`:
 
 ```python
-def _owner_key(member: tuple[str, FuncHash]) -> tuple[str, str, int]:
+Member = tuple[str, FuncHash]
+Vendored = Mapping[str, Mapping[str, list[dict[str, str]]]]
+
+
+def _order(member: Member) -> tuple[str, str, int]:
     return (member[0], member[1].path, member[1].line)
 
 
-def _group(rule, kind, key, members, confidence, evidence) -> Finding:
-    ordered = sorted(members, key=_owner_key)
+def _group(
+    rule: str,
+    kind: str,
+    key: str,
+    members: list[Member],
+    confidence: Confidence,
+    evidence: list[dict[str, str]],
+) -> Finding:
+    ordered = sorted(members, key=_order)
     owner = ordered[0][0]
     return Finding(
         rule=rule,
@@ -1042,13 +1358,20 @@ def _group(rule, kind, key, members, confidence, evidence) -> Finding:
     )
 
 
+def _is_vendor_group(members: list[Member], vendored: Vendored) -> bool:
+    """Declared copies plus at most one upstream in the owner repo (§10.6)."""
+    decls = [vendored.get(r, {}).get(h.path, []) for r, h in members]
+    owners = {d["owner"] for ds in decls for d in ds}
+    outside = [r for (r, _), ds in zip(members, decls, strict=True) if not ds]
+    return bool(owners) and len(outside) <= 1 and all(r in owners for r in outside)
+
+
 def group_dups(
-    hashes: Mapping[str, list[FuncHash]],
-    vendored: Mapping[str, Collection[str]] | None,
+    hashes: Mapping[str, list[FuncHash]], vendored: Vendored | None
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
     """Duplicate groups over every repo of the run; vendor groups aside (§10.6)."""
-    by_exact: dict[str, list[tuple[str, FuncHash]]] = defaultdict(list)
-    by_struct: dict[str, list[tuple[str, FuncHash]]] = defaultdict(list)
+    by_exact: dict[str, list[Member]] = defaultdict(list)
+    by_struct: dict[str, list[Member]] = defaultdict(list)
     for repo, items in hashes.items():
         for h in items:
             by_exact[h.exact].append((repo, h))
@@ -1056,20 +1379,18 @@ def group_dups(
     found: list[Finding] = []
     vendor_rows: list[dict[str, Any]] = []
 
-    def outside(members: list[tuple[str, FuncHash]]) -> int:
-        if vendored is None:
-            return len(members)
-        return sum(1 for r, h in members if h.path not in vendored.get(r, ()))
-
-    def emit(finding: Finding, members: list[tuple[str, FuncHash]]) -> None:
-        if vendored is not None and outside(members) <= 1:
+    def emit(finding: Finding, members: list[Member]) -> None:
+        if vendored is not None and _is_vendor_group(members, vendored):
             vendor_rows.append({"anchor": finding.anchor, "members": finding.related})
         else:
             found.append(finding)
 
     for key, group in by_exact.items():
         if len(group) >= 2:
-            emit(_group("ast-dup/exact", "exact", key, group, Confidence.CONFIRMED, []), group)
+            emit(
+                _group("ast-dup/exact", "exact", key, group, Confidence.CONFIRMED, []),
+                group,
+            )
     for key, group in by_struct.items():
         if len(group) < 2 or len({h.exact for _, h in group}) == 1:
             continue
@@ -1080,32 +1401,68 @@ def group_dups(
                 "detail": f"{r + ':' if cross else ''}{h.path}:{h.line}: "
                 f"{list(h.literals)}",
             }
-            for r, h in sorted(group, key=_owner_key)
+            for r, h in sorted(group, key=_order)
         ]
         emit(
-            _group("ast-dup/structural", "structural", key, group, Confidence.CANDIDATE, evidence),
+            _group(
+                "ast-dup/structural",
+                "structural",
+                key,
+                group,
+                Confidence.CANDIDATE,
+                evidence,
+            ),
             group,
         )
     return found, vendor_rows
+
+
+def dup_findings(hashes: list[FuncHash], repo: str) -> list[Finding]:
+    """exact groups → confirmed; structural-only groups → candidate (one repo)."""
+    return group_dups({repo: hashes}, None)[0]
 ```
 
-`dup_findings(hashes, repo)` — тонкая обёртка `return group_dups({repo: hashes}, None)[0]` (канарейка и S1-тесты идут через неё; вывод при одном репо побайтно прежний: префикс репо в `evidence` только у межрепной группы; сортировка участников по `(repo, path, line)` при одном репо совпадает с прежней `(path, line)`). Прежние `_dup` и тело `dup_findings` удаляются.
+`_ast_dup` — файлы репо копят `repo_hashes`, `dup_findings` по ним не зовётся; канарейка — как было (`result.findings += dup_findings(canary_hashes, ctx.target.name)`); в конце `result.extra["hashes"] = [dataclasses.asdict(h) for h in repo_hashes]`. `AST_DUP.logic_version = 2`.
 
-`_ast_dup` — для файлов репо копить `hashes`, **не** звать `dup_findings`; для канарейки — как было. `result.extra["hashes"] = [dataclasses.asdict(h) for h in hashes]`. `AST_DUP.logic_version = 2`.
+`run.py`: `_Run` — `hashes: dict[str, list[FuncHash]] = field(default_factory=dict)`, `vendor_dups: list[dict[str, Any]] = field(default_factory=list)`. `_scan_repo`, в цикле по `results`:
 
-`run.py`: в `_Run` — `hashes: dict[str, list[FuncHash]]`, `vendor_dups: list[dict[str, Any]]`; в `_scan_repo` для `r.probe == "ast-dup"` — `acc.hashes[repo.name] = [FuncHash(**h) for h in r.extra.get("hashes", [])]` (поле `literals` — кортеж: `FuncHash(**{**h, "literals": tuple(h["literals"])})`). В `main` после цикла по репо:
+```python
+        if r.probe == "ast-dup" and "hashes" in r.extra:
+            acc.hashes[repo.name] = [
+                FuncHash(**{**h, "literals": tuple(h["literals"])})
+                for h in r.extra["hashes"]
+            ]
+```
+
+`main` — после цикла по репо, до `_fleet_surface`:
 
 ```python
     if acc.hashes:
         have_roles = all(n in acc.vendored for n in acc.hashes)
-        vendored = {n: set(v) for n, v in acc.vendored.items()} if have_roles else None
         if not have_roles:
-            acc.warnings.append("ast-dup: вендор-фильтр не применён — нет usage-graph (§10.6)")
-        dups, acc.vendor_dups = group_dups(acc.hashes, vendored)
+            acc.warnings.append(
+                "ast-dup: вендор-фильтр не применён — нет usage-graph (§10.6)"
+            )
+        dups, acc.vendor_dups = group_dups(
+            acc.hashes, acc.vendored if have_roles else None
+        )
         acc.findings += dups
 ```
 
-`_document` — `"vendor_dups": acc.vendor_dups`. `report.py` — после таблицы вендор-копий: `## Вендор-дубли (N)` со строками `- <anchor>: repo:path::member, …`, при N = 0 раздел не печатается.
+`_document` — ключ `"vendor_dups": acc.vendor_dups`. `report.py` — в конце `_fleet_lines` перед `return`:
+
+```python
+    vendor_dups = doc.get("vendor_dups", [])
+    if vendor_dups:
+        lines += ["", f"### вендор-дубли ({len(vendor_dups)})", ""]
+        lines += [
+            f"- `{g['anchor']}`: "
+            + ", ".join(
+                f"{m['owner_repo']}:{m['path']}::{m['member']}" for m in g["members"]
+            )
+            for g in vendor_dups
+        ]
+```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1121,29 +1478,32 @@ git commit -m "feat(selfcheck): межрепные ast-дубли одной г�
 
 ---
 
-### Task 7: `--all`, сводная таблица по репо, репо в инвентаре
+### Task 7: `--all`, сводная таблица, колонка репо, репо в инвентаре
 
 **Files:**
-- Modify: `selfcheck/run.py` (`--all`, `wanted`, `repo` в строках инвентаря)
-- Modify: `selfcheck/report.py` (`_repo_rows`, раздел «## Репо»)
-- Modify: `Makefile:60` (help)
+- Modify: `selfcheck/run.py`, `selfcheck/report.py`, `Makefile:60`
 - Test: `tests/selfcheck/test_run.py`, `tests/selfcheck/test_report.py`
 
 **Interfaces:**
-- Produces: `--all` (store_true); `inventory.llm[*].repo`; `render_markdown` печатает «## Репо» при `len(scope) > 1`.
+- Produces: `--all`; `inventory.llm[*].repo`; при `len(scope) > 1` — раздел «## Репо» и колонка `репо` у находок, инвентаря и вендор-копий.
 
 - [ ] **Step 1: Write the failing tests**
+
+`tests/selfcheck/test_run.py`:
 
 ```python
 def test_all_scans_every_manifest_repo(tmp_path: Path) -> None:
     ws = workspace(tmp_path)
-    make_repo(tmp_path / "other", {"a.sh": "#!/bin/sh\necho hi\n"})
-    (tmp_path / "m.toml").write_text(
+    make_repo(tmp_path / "other", {"a.py": "import os\n"})
+    (ws / "m.toml").write_text(
         '[tools.devtools]\ngit_dir = "devtools"\n[tools.other]\ngit_dir = "other"\n'
     )
-    main([*args(ws), "--all", "--probe", "shellcheck"])
+    code = main([*args(ws), "--all", "--probe", "ruff"])
     doc = reports(ws)[-1]
     assert doc["run"]["scope"] == ["devtools", "other"]
+    assert code == run_module.exit_code(
+        [run_module.ProbeResult(p["probe"], p["repo"], run_module.ProbeStatus(p["status"])) for p in doc["probes"]]
+    )  # the worst over both repos
     md = next((ws / "out").glob("*/report.md")).read_text()
     assert "## Репо" in md and "| other |" in md
 
@@ -1154,22 +1514,96 @@ def test_all_with_repo_is_exit_4(tmp_path: Path) -> None:
 
 
 def test_inventory_rows_carry_repo(tmp_path: Path) -> None:
-    ws = workspace(tmp_path, {"c.py": 'import subprocess\nsubprocess.run(["claude", "-p", "x"])\n'})
+    require_tool("uvx")
+    ws = workspace(
+        tmp_path, {"c.py": 'import subprocess\nsubprocess.run(["claude", "-p", "x"])\n'}
+    )
     main([*args(ws), "--probe", "llm-sites"])
     doc = reports(ws)[-1]
     assert {r["repo"] for r in doc["inventory"]["llm"]} == {"devtools"}
 ```
 
-(`llm-sites`-тест гейтится `require_tool("uvx")`; shellcheck — `require_probe("shellcheck", …)` как в соседних тестах.)
+(`run_module.ProbeResult`/`ProbeStatus` — реэкспорт через `selfcheck.run`, импортированный в файле как `run_module`; ruff гейтится как в соседних тестах.)
+
+`tests/selfcheck/test_report.py`:
+
+```python
+def _doc(scope: list[str], findings: list[dict], probes: list[dict]) -> dict:
+    return {
+        "run": {
+            "run_id": "r",
+            "host": "h",
+            "scope": scope,
+            "surface": {},
+            "env": {},
+            "warnings": [],
+            "manifest": {"entries_read": 2, "repos": scope, "missing": []},
+        },
+        "probes": probes,
+        "findings": findings,
+        "suppressed": [],
+        "suppressed_no_env": {},
+        "delta": {"statuses": {}, "gone": []},
+        "inventory": {
+            "llm": [
+                {
+                    "repo": "b",
+                    "path": "x.py",
+                    "line": 1,
+                    "mechanism": "A",
+                    "candidate": False,
+                    "features": [],
+                }
+            ]
+        },
+    }
+
+
+def _finding(repo: str, anchor: str) -> dict:
+    return {
+        "id": f"sc-{repo}",
+        "rule": "usage-graph/dead.file",
+        "category": "dead",
+        "confidence": "likely",
+        "anchor": anchor,
+        "occurrences": 1,
+        "owner_repo": repo,
+    }
+
+
+def test_multi_repo_rows_are_distinguishable() -> None:
+    doc = _doc(
+        ["a", "b"],
+        [_finding("a", "file:setup.sh"), _finding("b", "file:setup.sh")],
+        [
+            {
+                "probe": "radon",
+                "repo": "b",
+                "status": "partial",
+                "reason": "per-file problems",
+            }
+        ],
+    )
+    text = render_markdown(doc)
+    assert "| a | usage-graph/dead.file |" in text
+    assert "| b | usage-graph/dead.file |" in text
+    assert "radon:partial (per-file problems)" in text
+    assert "| b | x.py | 1 |" in text
+
+
+def test_single_repo_keeps_s1_layout() -> None:
+    text = render_markdown(_doc(["a"], [_finding("a", "file:x.sh")], []))
+    assert "## Репо" not in text and "| правило | уверенность |" in text
+```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/selfcheck/test_run.py -q -k "all_ or carry_repo"`
-Expected: FAIL — `unrecognized arguments: --all`; `KeyError: 'repo'`.
+Run: `uv run pytest tests/selfcheck/test_run.py tests/selfcheck/test_report.py -q -k "all_ or carry_repo or distinguishable or s1_layout"`
+Expected: FAIL — `unrecognized arguments: --all` (код 2 от argparse, `SystemExit`); `KeyError: 'repo'`; нет «## Репо» и колонки. `test_single_repo_keeps_s1_layout` проходит уже сейчас.
 
 - [ ] **Step 3: Implement**
 
-`_args` — `parser.add_argument("--all", action="store_true", help="every manifest repo (spec §10.2)")`. `main`:
+`run.py` — `_args`: `parser.add_argument("--all", action="store_true", help="every manifest repo (spec §10.2)")`; `main`:
 
 ```python
         if args.all and args.repo:
@@ -1187,44 +1621,70 @@ Expected: FAIL — `unrecognized arguments: --all`; `KeyError: 'repo'`.
 
 ```python
 def _repo_rows(doc: dict[str, Any]) -> list[str]:
-    """One row per scope repo: probes not ok/skipped, findings by category (§10.2)."""
+    """Per-repo summary when the run covers two repos or more (§10.2)."""
     scope = doc["run"]["scope"]
     if len(scope) < 2:
         return []
+    cats = sorted({f["category"] for f in doc["findings"]})
     lines = [
-        "## Репо", "",
-        "| репо | пробы не ok | находок | dead c/l/cand | duplicate | llm |",
-        "|---|---|---|---|---|---|",
+        "## Репо",
+        "",
+        "| репо | пробы не ok | dead c/l/cand | " + " | ".join(cats) + " |",
+        "|" + "---|" * (3 + len(cats)),
     ]
     for repo in scope:
-        mine = [f for f in doc["findings"] if f["owner_repo"] == repo]
+        mine = [f for f in doc["findings"] if f.get("owner_repo") == repo]
         bad = [
-            f"{p['probe']}:{p['status']}"
+            f"{p['probe']}:{p['status']} ({p.get('reason', '')[:60]})"
             for p in doc["probes"]
             if p["repo"] == repo and p["status"] not in ("ok", "skipped")
         ]
-        dead = [f["confidence"] for f in mine if f["rule"].startswith("usage-graph/dead")]
+        dead = [
+            f["confidence"] for f in mine if f["rule"].startswith("usage-graph/dead")
+        ]
         dc = "/".join(str(dead.count(c)) for c in ("confirmed", "likely", "candidate"))
-        dup = sum(1 for f in mine if f["category"] == "duplicate")
-        llm = sum(1 for f in mine if f["category"] == "llm-replaceable")
-        lines.append(
-            f"| {repo} | {', '.join(bad) or '—'} | {len(mine)} | {dc} | {dup} | {llm} |"
+        counts = " | ".join(
+            str(sum(1 for f in mine if f["category"] == c)) for c in cats
         )
+        lines.append(f"| {repo} | {', '.join(bad) or '—'} | {dc} | {counts} |")
     return [*lines, ""]
 ```
 
-`render_markdown` — вставить `lines += _repo_rows(doc)` перед «## Пробы». `Makefile` help — `ARGS='[--repo r | --all] …'`.
+`render_markdown`: `multi = len(run["scope"]) > 1`; перед `"## Пробы"` — `*_repo_rows(doc),`; таблица категорий:
+
+```python
+        head = "| репо | правило |" if multi else "| правило |"
+        lines += [
+            f"## {category} ({len(items)})",
+            "",
+            f"{head} уверенность | якорь | мест | статус |",
+            "|" + "---|" * (6 if multi else 5),
+        ]
+        ordered = sorted(
+            items, key=lambda x: (x.get("owner_repo", ""), x["rule"], x["anchor"])
+        )
+        for f in ordered[:MD_ROWS]:
+            repo = f"| {f.get('owner_repo', '')} " if multi else ""
+            lines.append(
+                f"{repo}| {f['rule']} | {f['confidence']} | `{f['anchor']}` | "
+                f"{f['occurrences']} | {statuses.get(f['id'], '—')} |"
+            )
+```
+
+Инвентарь: при `multi` заголовок `| репо | путь | строка | механизм | кандидат | признаки |` и строки `| {item.get('repo', '')} | {item['path']} | …`. Вендор-копии в `_fleet_lines`: `rows_v` несёт `repo`; при `len(run["scope"]) > 1` — колонка `репо` первой.
+
+`Makefile:60` — `ARGS='[--repo r | --all] [--sched-dir ~/Library/LaunchAgents]'`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/selfcheck -q`
-Expected: PASS целиком.
+Expected: PASS целиком (`test_truncated_category_says_so` — один репо, прежний формат).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add selfcheck/run.py selfcheck/report.py Makefile tests/selfcheck/test_run.py tests/selfcheck/test_report.py
-git commit -m "feat(selfcheck): --all по всем репо манифеста, сводная таблица, репо в инвентаре (§10.2)"
+git commit -m "feat(selfcheck): --all по всем репо манифеста, сводная таблица, колонка репо (§10.2)"
 ```
 
 ---
@@ -1232,44 +1692,70 @@ git commit -m "feat(selfcheck): --all по всем репо манифеста,
 ### Task 8: проба `cargo-machete`
 
 **Files:**
-- Modify: `selfcheck/probes/other_tools.py` (новая `CARGO_MACHETE`)
-- Modify: `selfcheck/registry.py` (регистрация)
-- Test: `tests/selfcheck/test_other_tools.py`
+- Modify: `selfcheck/probes/other_tools.py`, `selfcheck/registry.py`
+- Test: `tests/selfcheck/test_other_tools.py`, `tests/selfcheck/test_registry.py`
 
 **Interfaces:**
-- Produces: `CARGO_MACHETE: ProbeSpec` (`languages={"rust"}`, `input_mode="roots"`, `binary="cargo-machete"`).
+- Produces: `CARGO_MACHETE: ProbeSpec` (`languages={"rust"}`, `input_mode="roots"`, `binary="cargo-machete"`), в `REGISTRY` сразу после `*OTHER_PROBES`, **не** в `OTHER_PROBES` (иначе `test_other_tools.py::test_clean_repo_ok_on_read_only_copy`, параметризованный по `OTHER_PROBES`, получит `skipped: language`).
 
 - [ ] **Step 1: Замер закреплённой версии (стоп-точка)**
 
 Run: `cargo-machete --version`
-Expected: печатает версию. **Если бинаря нет — стоп и вопрос владельцу** (установка — `cargo install cargo-machete`, §10.3); задачу не исполнять вслепую.
+Expected: печатает версию. **Если бинаря нет — стоп и вопрос владельцу** (`cargo install cargo-machete`, §10.3); задачу не исполнять вслепую.
 
-Затем на минимальном крейте (скрытый и не скрытый каталоги):
+Затем на трёх раскладках:
 
 ```bash
-T=$(mktemp -d); mkdir -p $T/.hid/c/src $T/vis/c/src
-for d in .hid vis; do
-  printf '[package]\nname = "c"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nlibc = "0.2"\n' > $T/$d/c/Cargo.toml
-  echo 'pub fn f() {}' > $T/$d/c/src/lib.rs
-done
-cargo-machete $T; echo "rc=$?"
+T=$(mktemp -d)
+crate() {  # $1 dir, $2 name, $3 with src (1/0)
+  mkdir -p "$1"
+  printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nlibc = "0.2"\n' "$2" > "$1/Cargo.toml"
+  [ "$3" = 1 ] && mkdir -p "$1/src" && echo 'pub fn f() {}' > "$1/src/lib.rs"
+}
+crate "$T/a/vis" vis 1; crate "$T/a/.hid" hid 1
+printf 'ign/\n' > "$T/a/.gitignore"; crate "$T/a/ign" ign 1
+mkdir -p "$T/b"; printf '[workspace]\nmembers = ["m"]\n' > "$T/b/Cargo.toml"
+crate "$T/b/m" m 1; crate "$T/b/selfcheck_canary/cargo_machete" canary 0
+for d in a b; do cargo-machete "$T/$d"; echo "rc=$?"; done
 ```
 
-Expected: rc 1 и в выводе `libc` для `vis/c/Cargo.toml`; видно, обходит ли инструмент `.hid`. Зафиксировать в ledger: точную версию (диапазон `version_range` = [версия, следующая минорная)), формат строк, rc при «нет находок» (ожидается 0) и при находках (1), обход скрытых. Если формат отличается от разбора ниже — ruling и правка регекса до Step 2.
+Expected: rc 1 при находках, 0 без них. Записать в ledger: точную версию (`version_range` = [версия, следующая минорная)); формат строк вывода; найдена ли канарейка **без `src/`** внутри workspace, где она не член; обходятся ли скрытые и gitignored каталоги (в копии `.gitignore` репо есть как файл). Если формат расходится с `_CM_CRATE`/`_CM_DEP` или канарейка без `src/` не находится — ruling и правка до Step 2 (без `src/` — сначала проверить канарейку с `[lib]\npath = "Cargo.toml"`; не годится — расширить `Canary` вторым файлом отдельным ruling'ом).
 
 - [ ] **Step 2: Write the failing tests**
 
+`tests/selfcheck/test_other_tools.py` (импорты — дополнить по факту файла):
+
 ```python
+from selfcheck.probes.other_tools import CARGO_MACHETE
+
 RUST_OK = {
-    "Cargo.toml": '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\n',
+    "Cargo.toml": (
+        '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\n'
+    ),
     "src/lib.rs": "pub fn f() {}\n",
 }
 
 
+def _run_rust(files: dict[str, str], tmp: Path) -> ProbeResult:
+    require_probe(
+        "cargo-machete", CARGO_MACHETE.version_args, CARGO_MACHETE.version_range
+    )
+    repo = make_repo(tmp / "repo", files)
+    corpus = tuple(list_corpus(repo))
+    copy = tmp / "run" / "src" / "repo"
+    materialize(repo, corpus, copy, canary_files([CARGO_MACHETE]))
+    target = RepoTarget(
+        "repo", repo, copy, frozenset({"rust"}), corpus, EnvInfo("no-env"), now=NOW
+    )
+    try:
+        return run_probe(CARGO_MACHETE, target, tmp / "run" / "work")
+    finally:
+        release(copy)
+
+
 def test_cargo_machete_unused_dependency(tmp_path: Path) -> None:
-    require_probe("cargo-machete", CARGO_MACHETE.version_args, CARGO_MACHETE.version_range)
     files = {**RUST_OK, "Cargo.toml": RUST_OK["Cargo.toml"] + 'libc = "0.2"\n'}
-    res = _run(CARGO_MACHETE, files, tmp_path)  # хелпер файла: make_repo → copy → run_probe
+    res = _run_rust(files, tmp_path)
     assert res.status is ProbeStatus.OK and res.canary == "hit"
     assert [(f.rule, f.text_key, f.category) for f in res.findings] == [
         ("cargo-machete/unused-dependency", "a:libc", "deps")
@@ -1277,25 +1763,38 @@ def test_cargo_machete_unused_dependency(tmp_path: Path) -> None:
 
 
 def test_cargo_machete_clean_repo_ok(tmp_path: Path) -> None:
-    require_probe("cargo-machete", CARGO_MACHETE.version_args, CARGO_MACHETE.version_range)
-    res = _run(CARGO_MACHETE, RUST_OK, tmp_path)
+    res = _run_rust(RUST_OK, tmp_path)
     assert res.status is ProbeStatus.OK and res.findings == []
 
 
-def test_cargo_machete_is_static() -> None:
+def test_cargo_machete_without_binary_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))  # no cargo-machete on PATH
+    repo = make_repo(tmp_path / "repo", RUST_OK)
+    corpus = tuple(list_corpus(repo))
+    target = RepoTarget(
+        "repo", repo, repo, frozenset({"rust"}), corpus, EnvInfo("no-env"), now=NOW
+    )
+    res = run_probe(CARGO_MACHETE, target, tmp_path / "work")
+    assert res.status is ProbeStatus.UNAVAILABLE
+
+
+def test_cargo_machete_is_static_and_sees_cargo_config() -> None:
     assert CARGO_MACHETE.executes_target_code is False
+    assert "Cargo.toml" in CARGO_MACHETE.config_files
 ```
 
-(`_run` — хелпер в `test_other_tools.py` по образцу фикстуры `build` из `test_python_tools.py`: `make_repo` → `list_corpus` → `materialize(..., canary_files([CARGO_MACHETE]))` → `RepoTarget(..., frozenset({"rust"}), ...)` → `run_probe` → `release`.)
+`tests/selfcheck/test_registry.py` — в `EXPECTED` добавить `"cargo-machete"`.
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `uv run pytest tests/selfcheck/test_other_tools.py -q -k cargo`
+Run: `uv run pytest tests/selfcheck/test_other_tools.py tests/selfcheck/test_registry.py -q -k "cargo or registry"`
 Expected: FAIL — `ImportError: cannot import name 'CARGO_MACHETE'`.
 
 - [ ] **Step 4: Implement**
 
-Разбор — по замеру Step 1; исходный вариант (текстовый вывод 0.x: строка `<crate> -- <path>/Cargo.toml:` и далее строки зависимостей с отступом):
+`other_tools.py` (регексы — по замеру Step 1; исходный вариант для текстового вывода 0.x):
 
 ```python
 _CM_CRATE = re.compile(r"^(\S+) -- (.+Cargo\.toml):$")
@@ -1305,7 +1804,8 @@ _CM_CANARY = "selfcheck_canary/cargo_machete/Cargo.toml"
 
 def _cm_parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> ParseResult:
     result = ParseResult([])
-    crate, manifest = None, None
+    crate: str | None = None
+    manifest: str | None = None
     for line in proc.stdout.splitlines():
         head = _CM_CRATE.match(line)
         if head:
@@ -1329,6 +1829,10 @@ def _cm_parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> ParseRes
     return result
 
 
+def _cm_expected(target: RepoTarget) -> list[str]:
+    return sorted(p for p in target.corpus if p.endswith("Cargo.toml"))
+
+
 CARGO_MACHETE = ProbeSpec(
     name="cargo-machete",
     languages=frozenset({"rust"}),
@@ -1336,8 +1840,8 @@ CARGO_MACHETE = ProbeSpec(
     select=lambda target: (".",),
     canary=Canary(
         _CM_CANARY,
-        '[package]\nname = "selfcheck_canary"\nversion = "0.1.0"\nedition = "2021"\n'
-        '[dependencies]\nlibc = "0.2"\n',
+        '[package]\nname = "selfcheck_canary"\nversion = "0.1.0"\n'
+        'edition = "2021"\n[dependencies]\nlibc = "0.2"\n',
         "cargo-machete/unused-dependency",
         f"file:{_CM_CANARY}",
     ),
@@ -1347,15 +1851,17 @@ CARGO_MACHETE = ProbeSpec(
     normal_codes=frozenset({0, 1}),
     argv=lambda ctx: [str(ctx.target.copy)],
     parse=_cm_parse,
+    expected_files=_cm_expected,
+    config_files=("Cargo.toml",),
 )
 ```
 
-Канарейке нужен `src/lib.rs`: `Canary` несёт один файл — если cargo-machete без `src/` не разбирает крейт (замер Step 1), канарейка переходит на `[lib] path = "Cargo.toml"`-трюк или на расширение `canary_files` вторым файлом; решение — ruling. `registry.py` — добавить `CARGO_MACHETE` в `REGISTRY` после `JSCPD`. `tests/selfcheck/test_registry.py` — если он перечисляет пробы, дополнить.
+`registry.py` — импорт `CARGO_MACHETE`, в `REGISTRY` сразу после `*OTHER_PROBES`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `uv run pytest tests/selfcheck -q`
-Expected: PASS целиком.
+Run: `uv run pytest tests/selfcheck -q && SELFCHECK_REQUIRE_TOOLS=1 uv run pytest tests/selfcheck -q -k cargo`
+Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -1366,40 +1872,42 @@ git commit -m "feat(selfcheck): проба cargo-machete для Rust-репо (�
 
 ---
 
-### Task 9: документация и приёмка на живых данных
+### Task 9: документация, проверки, приёмка после мержа
 
 **Files:**
-- Modify: `CLAUDE.md` (строка `selfcheck/` в таблице инструментов), `README.md` (если описывает selfcheck), `TODO.md:2655` (`[x]` после приёмки)
-- Create: `../_cowork_output/devtools-selfcheck-s3-acceptance-<дата>.md` (dev-only, не коммитится в devtools)
+- Modify: `CLAUDE.md` (строка `selfcheck/`)
+- Create (dev-only, вне devtools): `../_cowork_output/devtools-selfcheck-s3-acceptance-<дата>.md`
 
-- [ ] **Step 1: Документация**
+- [ ] **Step 1: Документация и коммит**
 
-`CLAUDE.md` — в строку `selfcheck/` дописать: «`ARGS=--all` (S3) — все репо манифеста одним прогоном: формат вендор-деклараций E («весь каталог»), `llm-sites` по месту построения запуска, межрепные ast-дубли без вендор-групп, cargo-machete для Rust».
-
-- [ ] **Step 2: Полный набор проверок**
-
-Run: `uv run ruff format --check selfcheck tests/selfcheck && uv run ruff check selfcheck tests/selfcheck && uv run pyrefly check && make selfcheck-dogfood`
-Expected: всё зелёное.
-
-- [ ] **Step 3: Приёмка §10.9 на живых данных**
-
-Run: `./repos.sh pull && make selfcheck ARGS='--all --fleet'`
-Expected: отчёт выпущен (код 0 или 2). Скрипт сверки (в scratchpad, не коммитится) проверяет пункты 1–7 §10.9 по `report.json`:
-1. `run.scope` = все 22 репо; `surface.fleet == "complete"`;
-2. нет `selfcheck/vendor-pin-unparsed`; `vendor-pin-dangling` — только discovery `src/discovery/contract/PINNED.txt`;
-3. строки `inventory.llm` механик A–C покрывают эталон инвентаря 2026-09-02 (список точек — таблица в отчёте приёмки), кроме atp `method/spawners/opencode_shim.py`, `pi_shim.py`;
-4. находка `ast-dup/*` с участниками `devtools:tools/check_discovery_vendor.py::verify` и `discovery:tools/check_vendor.py::verify` есть; группа с `gate_check.py::check` — в `vendor_dups`, не в `findings`;
-5. нет `pyrefly/missing-import` с модулями `atp`, `game_envs`, `atp_sdk`;
-6. `cargo-machete` `ok` на arbiter и prograph;
-7. нет `ruff/PLR2004`, `ruff/PLC0415` в репо, чей конфиг их не включает.
-
-Результат — отчёт приёмки в `_cowork_output/` с таблицей эталона (точка → найдена/пропуск) и перечнем `partial` по разбору файлов.
-
-- [ ] **Step 4: TODO и коммит**
-
-`TODO.md` — `- [x] selfcheck S3: …`.
+`CLAUDE.md` — в строку `selfcheck/` дописать: «`ARGS=--all` (S3) — все репо манифеста одним прогоном: вендор-декларации формата E («весь каталог»), `llm-sites` по месту построения запуска, межрепные ast-дубли без вендор-групп, cargo-machete для Rust; живая приёмка — на master с чистым деревом».
 
 ```bash
-git add CLAUDE.md README.md TODO.md
-git commit -m "docs(selfcheck): S3 --all — CLAUDE.md, TODO"
+git add CLAUDE.md
+git commit -m "docs(selfcheck): S3 --all в CLAUDE.md"
 ```
+
+- [ ] **Step 2: Полный набор проверок ветки**
+
+Run: `uv run ruff format --check selfcheck tests/selfcheck && uv run ruff check selfcheck tests/selfcheck && uv run pyrefly check && make selfcheck-dogfood && git status --porcelain`
+Expected: всё зелёное, `git status --porcelain` пуст.
+
+- [ ] **Step 3: Приёмка §10.9 на живых данных — после мержа**
+
+На master devtools (после `git pull --ff-only`, чистое дерево):
+
+Run: `./repos.sh pull && make selfcheck ARGS='--all --fleet'`
+Expected: отчёт выпущен (код 0 или 2). Скрипт сверки (scratchpad, не коммитится) проверяет §10.9 п. 1–7 по `report.json`:
+1. `run.scope` — все 22 репо; `surface.fleet == "complete"`;
+2. нет `selfcheck/vendor-pin-unparsed`; `vendor-pin-dangling` — только discovery `src/discovery/contract/PINNED.txt`;
+3. строки `inventory.llm` механик A–C покрывают эталон инвентаря 2026-09-02 (таблица «точка → найдена/пропуск» в отчёте приёмки), кроме atp `method/spawners/opencode_shim.py`, `pi_shim.py`;
+4. есть находка `ast-dup/*` с участниками `devtools:tools/check_discovery_vendor.py::verify` и `discovery:tools/check_vendor.py::verify`; группа с `gate_check.py::check` — в `vendor_dups`;
+5. нет `pyrefly/missing-import` с модулями `atp`, `game_envs`, `atp_sdk`;
+6. `cargo-machete` `ok` на arbiter и prograph;
+7. нет `ruff/PLR2004`, `ruff/PLC0415` в репо, чей корневой конфиг их не включает.
+
+Результат — отчёт приёмки в `_cowork_output/` с перечнем `partial` по разбору файлов.
+
+- [ ] **Step 4: TODO**
+
+Отдельным маленьким PR после приёмки: `TODO.md` — `- [x] selfcheck S3: …` со ссылкой на отчёт приёмки.
