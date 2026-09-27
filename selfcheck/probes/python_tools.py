@@ -18,6 +18,9 @@ from selfcheck.roles import Role, role_of
 
 PY = frozenset({"python"})
 RUFF_SELECT = ("F", "B", "PL", "SIM", "ERA", "C90", "ARG", "RET")
+RUFF_IGNORE = ("PLR2004", "PLC0415")
+# prefixes that come only from our own extra set (§10.3)
+_OURS = frozenset({"ALL", "PL", "PLR", "PLC"})
 _BUG_PREFIXES = ("F", "B", "PLE")
 
 
@@ -43,7 +46,29 @@ def _toml(ctx: ProbeCtx, name: str) -> dict[str, Any]:
 # ---- ruff -----------------------------------------------------------------
 
 
+def _repo_selects(ctx: ProbeCtx, code: str) -> bool:
+    """A root config of the repo selects ``code`` itself (code or own prefix).
+
+    Nested per-package configs are not read — a named cost (§10.3)."""
+    for name in ("ruff.toml", ".ruff.toml", "pyproject.toml"):
+        data = _toml(ctx, name)
+        root = (
+            data.get("tool", {}).get("ruff", {}) if name == "pyproject.toml" else data
+        )
+        lint = root.get("lint", {})
+        chosen = [
+            *root.get("select", []),
+            *root.get("extend-select", []),
+            *lint.get("select", []),
+            *lint.get("extend-select", []),
+        ]
+        if any(c not in _OURS and code.startswith(c) for c in chosen):
+            return True
+    return False
+
+
 def _ruff_argv(ctx: ProbeCtx) -> list[str]:
+    ignore = [c for c in RUFF_IGNORE if not _repo_selects(ctx, c)]
     return [
         "check",
         "--no-cache",
@@ -51,6 +76,8 @@ def _ruff_argv(ctx: ProbeCtx) -> list[str]:
         "json",
         "--extend-select",
         ",".join(RUFF_SELECT),
+        # hidden in `ruff check --help` 0.16.9 but accepted (review r1 P13)
+        *(["--extend-ignore", ",".join(ignore)] if ignore else []),
         *copy_paths(ctx),
     ]
 
@@ -109,7 +136,7 @@ RUFF = ProbeSpec(
         "ruff/F401",
         "file:.selfcheck-canary/ruff/canary.py",
     ),
-    rules=RUFF_SELECT,
+    rules=(*RUFF_SELECT, *(f"-{c}" for c in RUFF_IGNORE)),
     binary="ruff",
     version_range=((0, 16), (0, 17)),
     normal_codes=frozenset({0, 1}),

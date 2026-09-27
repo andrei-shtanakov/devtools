@@ -239,3 +239,43 @@ def test_canary_rule_disabled_in_registry_is_missed(
     broken = replace(spec, canary=replace(spec.canary, expect_rule="never/rule"))
     res = run(broken, build(CLEAN), tmp_path)
     assert (res.status, res.reason) == (ProbeStatus.FAILED, "canary-missed")
+
+
+MAGIC = "def f(x: int) -> bool:\n    import os\n    return x > 42 and bool(os.sep)\n"
+
+
+def _ignored(argv: list[str]) -> list[str]:
+    if "--extend-ignore" not in argv:
+        return []
+    return argv[argv.index("--extend-ignore") + 1].split(",")
+
+
+def test_ruff_extra_set_without_magic_and_lazy_import(build, tmp_path: Path) -> None:
+    res = run(RUFF, build({"a.py": MAGIC}), tmp_path)
+    assert not {f.rule for f in res.findings} & {"ruff/PLR2004", "ruff/PLC0415"}
+    assert _ignored(res.argv) == ["PLR2004", "PLC0415"]
+
+
+@pytest.mark.parametrize(
+    ("tool_ruff", "kept"),
+    [
+        ('[tool.ruff.lint]\nselect = ["E", "PLR2004"]\n', {"PLR2004"}),
+        ('[tool.ruff.lint]\nextend-select = ["PLC0415"]\n', {"PLC0415"}),
+        ('[tool.ruff]\nselect = ["PLR2"]\n', {"PLR2004"}),
+        (
+            '[tool.ruff.lint]\nextend-select = ["PLR2004", "PLC0415"]\n',
+            {"PLR2004", "PLC0415"},
+        ),
+    ],
+)
+def test_repo_that_selects_them_keeps_them(
+    build, tmp_path: Path, tool_ruff: str, kept: set[str]
+) -> None:
+    pyproject = PYPROJECT.replace("[tool.ruff]\n", "") + tool_ruff
+    res = run(RUFF, build({"a.py": MAGIC}, pyproject=pyproject), tmp_path)
+    assert not kept & set(_ignored(res.argv))
+    assert {f"ruff/{c}" for c in kept} <= {f.rule for f in res.findings}
+
+
+def test_ruff_rules_name_the_ignores() -> None:
+    assert RUFF.rules[-2:] == ("-PLR2004", "-PLC0415")
