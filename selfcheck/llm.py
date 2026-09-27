@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from selfcheck.anchors import python_anchor
+from selfcheck.graph.model import parse_python
 from selfcheck.graph.resolver import UNKNOWN, argv_at
 from selfcheck.model import Confidence, Finding, Location
 from selfcheck.probes.base import Canary, ParseResult, ProbeCtx, ProbeSpec, RepoTarget
@@ -50,8 +51,26 @@ _MECHANISM = {
 _TS_SUFFIXES = (".ts", ".tsx", ".js", ".mjs", ".cjs")
 _PATHS = r"(?:/v1/messages|/chat/completions|/api/chat|/api/generate|/completion)\b"
 _ENDPOINT = re.compile(rf"^\S*?{_PATHS}")
-# a word with no whitespace before the path: quoted, `=`-assigned or bare (shell)
-_WORD_ENDPOINT = re.compile(rf"(?:^|[\s\"'`=(])[^\s\"'`]*{_PATHS}")
+# a literal that starts at its quote and has no whitespace before the path
+_QUOTED_ENDPOINT = re.compile(rf"[\"'`][^\s\"'`]*{_PATHS}")
+# shell: also a bare word that is a URL or starts with a variable
+_BARE_ENDPOINT = re.compile(
+    rf"(?:^|[\s=(])(?:[a-z][a-z0-9+.-]*://|\$\{{?\w+\}}?)[^\s\"'`]*{_PATHS}"
+)
+_TS_BLOCK_COMMENT = re.compile(r"/\*.*?\*/")
+_TRAILING_TS = re.compile(r"(?:^|\s)//")
+_TRAILING_SH = re.compile(r"(?:^|\s)#")
+
+
+def _code_endpoint_line(rel: str, line_text: str) -> bool:
+    """TS/shell: an endpoint literal in code, comments cut off (§10.7, review I1)."""
+    if rel.endswith(_TS_SUFFIXES):
+        code = _TRAILING_TS.split(_TS_BLOCK_COMMENT.sub("", line_text), maxsplit=1)[0]
+        return bool(_QUOTED_ENDPOINT.search(code))
+    code = _TRAILING_SH.split(line_text, maxsplit=1)[0]
+    return bool(_QUOTED_ENDPOINT.search(code) or _BARE_ENDPOINT.search(code))
+
+
 _EXCLUDE = re.compile(r"diff|read_text\(|\.read\(\)|git (?:show|diff)")
 _FIXED_KEY = re.compile(r"\[\s*['\"]\w+['\"]\s*\]")
 _HUMAN = re.compile(r"print\(|\.write\(|comment|post")
@@ -91,7 +110,7 @@ def _in_loop(func: ast.AST, line: int) -> bool:
 
 def python_features(source: str, line: int) -> tuple[list[str], bool]:
     """Heuristic features of a Python call site and the exclusion flag."""
-    tree = ast.parse(source)
+    tree = parse_python(source)
     func = _enclosing(tree, line)
     text = source
     if func is not tree:
@@ -157,7 +176,7 @@ def _literal(node: ast.AST) -> str | None:
 def code_endpoint(text: str, line: int) -> bool:
     """A code string on ``line`` names an endpoint with no whitespace before it."""
     try:
-        tree = ast.parse(text)
+        tree = parse_python(text)
     except SyntaxError:
         return False
     skip = _skipped_nodes(tree)
@@ -176,7 +195,7 @@ def _literal_argv_invisible(text: str, line: int) -> bool:
     """A literal argv on ``line`` whose non-flag elements after the binary are
     all non-literal: the prompt is not visible statically (§3.4, §10.7)."""
     try:
-        tree = ast.parse(text)
+        tree = parse_python(text)
     except SyntaxError:
         return False
     for node in ast.walk(tree):
@@ -239,8 +258,8 @@ def _site(ctx: ProbeCtx, rule: str, rel: str, line: int) -> dict[str, Any] | Non
         if rel.endswith(".py"):
             if not code_endpoint(text, line):
                 return None
-        elif line_text.lstrip().startswith(("#", "//", "*")) or not (
-            _WORD_ENDPOINT.search(line_text)
+        elif line_text.lstrip().startswith("*") or not _code_endpoint_line(
+            rel, line_text
         ):
             return None
     if rel.endswith(_TS_SUFFIXES):
@@ -280,6 +299,7 @@ def _site(ctx: ProbeCtx, rule: str, rel: str, line: int) -> dict[str, Any] | Non
         "candidate": bool(strong) and not excluded and not invisible,
         "features": features,
         "anchor": anchor,
+        "excluded": excluded,
     }
 
 
@@ -319,7 +339,7 @@ def _parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> ParseResult
     for rel in ctx.inputs:
         if rel.endswith(".py"):
             try:
-                ast.parse(source_text(ctx, rel))
+                parse_python(source_text(ctx, rel))
             except SyntaxError as exc:
                 result.diagnostics.append(f"{rel}: {exc.msg}")
                 result.skipped.append(rel)
@@ -345,11 +365,17 @@ def _parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> ParseResult
         seen.add((row["path"], row["line"]))
         inventory.append(row)
         by_anchor.setdefault(row["anchor"], []).append(row)
-    # a point is a candidate only if every one of its rows is (§10.7)
+    # heuristics span the function (§3.4): features of all rows of a point
+    # are pooled; an exclusion or an invisible prompt on any row vetoes it
     for anchor, rows in by_anchor.items():
-        if not all(r["candidate"] for r in rows):
-            continue
         features = sorted({f for r in rows for f in r["features"]})
+        strong = {"fixed-schema", "loop"} & set(features)
+        veto = "prompt-invisible" in features or any(r.get("excluded") for r in rows)
+        is_candidate = bool(strong) and not veto  # TS rows carry no features
+        for r in rows:
+            r["candidate"] = is_candidate
+        if not is_candidate:
+            continue
         result.findings.append(
             Finding(
                 rule="llm-sites/replaceable",
@@ -365,7 +391,7 @@ def _parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> ParseResult
         )
     inventory += _configs(ctx)
     result.extra["inventory"] = [
-        {k: v for k, v in r.items() if k != "anchor"}
+        {k: v for k, v in r.items() if k not in ("anchor", "excluded")}
         for r in inventory
         if role_of(r["path"]) is not Role.CANARY
     ]

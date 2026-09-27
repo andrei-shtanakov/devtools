@@ -81,7 +81,31 @@ SPLIT = (
 TS_STAR = 'import * as sdk from "@anthropic-ai/sdk";\nexport default sdk;\n'
 BIG_JS = "// bundle\n" + "x" * MAX_TARGET_BYTES + '\nspawn("claude", ["-p", q]);\n'
 
+PROSE_TS = (
+    'export const m = "see /v1/messages for x";\n'
+    "export const n = 1; /* fetch(`${h}/v1/chat/completions`) */\n"
+)
+PROSE_SH = (
+    "#!/bin/sh\n"
+    'echo "see /v1/messages for x"\n'
+    "echo hi # curl http://h/api/chat\n"
+    'curl "$HOST/v1/chat/completions"\n'
+)
+LOOP_OUTSIDE = (
+    "import subprocess\n\n\n"
+    "def label(items):\n"
+    '    cmd = ["claude", "-p", "label the next item"]\n'
+    "    out = []\n"
+    "    for item in items:\n"
+    "        raw = subprocess.run(cmd, input=item, capture_output=True).stdout\n"
+    "        out.append(raw)\n"
+    "    return out\n"
+)
+
 FILES = {
+    "prose.ts": PROSE_TS,
+    "prose.sh": PROSE_SH,
+    "loop_outside.py": LOOP_OUTSIDE,
     "spawner.py": SPAWNER,
     "tuple.py": TUPLE,
     "configured.py": CONFIGURED,
@@ -208,3 +232,29 @@ def test_code_endpoint(text: str, line: int, hit: bool) -> None:
 
 def test_logic_version_bumped() -> None:
     assert LLM_SITES.logic_version == 2
+
+
+def test_prose_and_trailing_comments_are_not_points(result: ProbeResult) -> None:
+    """Final review I1: TS/shell prose and trailing comments (§10.7)."""
+    assert not any(r[0] == "prose.ts" for r in _rows(result))
+    lines = {i["line"] for i in result.extra["inventory"] if i["path"] == "prose.sh"}
+    assert lines == {4}  # only the quoted URL built from $HOST
+
+
+def test_candidate_heuristics_span_the_function(result: ProbeResult) -> None:
+    """Final review I2: argv built before the loop, launched inside it (§3.4)."""
+    assert any(f.anchor == "llm:loop_outside.py::label" for f in result.findings)
+
+
+def test_no_syntax_warning_from_fleet_code() -> None:
+    """Final smoke: someone else's escape sequences are not our output."""
+    import warnings
+
+    from selfcheck.llm import python_features
+
+    text = 'def f(host):\n    p = "\\`x"\n    return f"{host}/v1/messages"\n'
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        code_endpoint(text, 3)
+        python_features(text, 3)
+    assert not [w for w in caught if issubclass(w.category, SyntaxWarning)]
