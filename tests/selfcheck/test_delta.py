@@ -300,3 +300,46 @@ def test_gone_instrument_finding(tmp_path: Path, scope, keys, expected) -> None:
 def test_fate_values(tmp_path: Path) -> None:
     base = snap(tmp_path)
     assert fate(base, base, "devtools", "a.py", "ruff") is Fate.CHECKED
+
+
+def _gone_of(tmp: Path, anchor: str, corpus: list[str]) -> str:
+    tmp.mkdir(exist_ok=True)
+    base = snap(tmp, corpus={"devtools": corpus}, findings=[finding("x", anchor)])
+    cur = snap(tmp, corpus={"devtools": corpus})
+    (gone,) = compute_delta(base, cur)[1]
+    return gone["status"]
+
+
+@pytest.mark.parametrize(
+    "anchor",
+    [
+        "file:a.py",
+        "func:a.py::f",
+        "llm:a.py::f",
+        "make:a.py#t",
+        "skill:a.py",
+        "workflow:a.py#job",
+        "unit:a.py",
+    ],
+)
+def test_path_anchor_kinds_are_judged_by_their_file(tmp_path: Path, anchor) -> None:
+    assert _gone_of(tmp_path, anchor, ["a.py"]) == "resolved"
+
+
+def test_cli_anchor_is_judged_by_pyproject(tmp_path: Path) -> None:
+    """#407: ``cli:<name>`` is defined in ``[project.scripts]`` of the repo's
+    pyproject.toml — its name is not a path, so it must not be ``file-removed``."""
+    assert _gone_of(tmp_path / "1", "cli:tool", ["pyproject.toml"]) == "resolved"
+    assert _gone_of(tmp_path / "2", "cli:tool", []) == "resolved: file-removed"
+
+
+def test_allow_anchor_is_resolved(tmp_path: Path) -> None:
+    """#407: ``allow:<id>`` (selfcheck/allow-expired) is recomputed from the
+    config every run; gone means the entry was renewed or removed."""
+    assert _gone_of(tmp_path, "allow:x", ["a.py"]) == "resolved"
+
+
+def test_unknown_anchor_kind_is_never_file_removed(tmp_path: Path) -> None:
+    """A kind this module does not know has no defining file: unknown, not the
+    optimistic ``resolved: file-removed``."""
+    assert _gone_of(tmp_path, "zzz:a.py", ["a.py"]) == "not-rechecked"
