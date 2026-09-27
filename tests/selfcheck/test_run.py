@@ -337,3 +337,30 @@ def test_non_utf8_scope_path_reaches_the_report_as_shown(
     (orphan,) = [f for f in first["findings"] if f["anchor"] == "file:caf\ufffd.py"]
     assert orphan["category"] == "dead"
     assert second["delta"]["statuses"][orphan["id"]] == "persisting"
+
+
+_TWIN = (
+    "def twin(items):\n"
+    "    total = 0\n"
+    "    for item in items:\n"
+    "        if item > 2:\n"
+    "            total += item * 3\n"
+    "        else:\n"
+    "            total -= item\n"
+    "    return total\n"
+)
+
+
+def test_unverified_participant_reaches_the_report(tmp_path: Path) -> None:
+    """#407: a baseline dup participant whose fate is outside {checked,
+    deleted} is marked ``unverified`` in ``related[]`` (spec §4.3) — in the
+    report.json the reader sees, not only in the snapshot."""
+    ws = workspace(tmp_path, {n: _TWIN for n in ("a.py", "b.py", "c.py")})
+    assert main(args(ws, "--probe", "ast-dup")) in (0, 2)
+    (ws / "none.toml").write_text('[corpus]\nexclude = ["c.py"]\n')
+    assert main(args(ws, "--probe", "ast-dup")) in (0, 2)
+    _first, last = reports(ws)
+    (dup,) = [f for f in last["findings"] if f["anchor"].startswith("dup:exact:")]
+    assert last["delta"]["statuses"][dup["id"]] == "changed"
+    marked = [r["path"] for r in dup["related"] if r.get("unverified")]
+    assert marked == ["c.py"]
