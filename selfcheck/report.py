@@ -153,6 +153,15 @@ def _fleet_lines(doc: dict[str, Any]) -> list[str]:
     return [*lines, ""]
 
 
+def _surface_line(surface: dict[str, Any]) -> str:
+    """Scalars as they are, maps and lists as counts (#410): the per-file
+    ``history`` and the plists live in report.json."""
+    return ", ".join(
+        f"{k}: {len(v) if isinstance(v, dict | list) else v}"
+        for k, v in surface.items()
+    )
+
+
 def render_markdown(doc: dict[str, Any]) -> str:
     """Human report: probes first, then findings by category and rule."""
     run = doc["run"]
@@ -165,7 +174,7 @@ def render_markdown(doc: dict[str, Any]) -> str:
             f"{manifest['entries_read']}, каталогов {len(manifest['repos'])}, "
             f"отсутствуют: {', '.join(manifest['missing']) or 'нет'}."
         ),
-        f"Окружение: {run['env']}. Поверхность: {run['surface']}.",
+        f"Окружение: {run['env']}. Поверхность: {_surface_line(run['surface'])}.",
         "",
         "## Пробы",
         "",

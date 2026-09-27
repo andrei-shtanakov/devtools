@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import shutil
 import socket
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from selfcheck.delta import SKIPPED_KEY, RunSnapshot, comparability_key, compute
 from selfcheck.env import apply_env_policy, detect_env
 from selfcheck.fleet.assemble import (
     CANARY_NODE,
+    CANARY_REPO,
     FleetView,
     expected_fleet,
     fleet_findings,
@@ -147,6 +149,10 @@ def _key(
     )
 
 
+class FleetSetupError(Exception):
+    """Building the fleet canary or reading the fleet failed (exit 4)."""
+
+
 def _fleet_view(
     repo: RepoEntry, args: argparse.Namespace, run_dir: Path, acc: _Run
 ) -> FleetView | None:
@@ -205,13 +211,17 @@ def _scan_repo(
     corpus = [
         p for p in full if not args.path or any(glob_match(g, p) for g in args.path)
     ]
-    if args.path and full and not corpus:
-        acc.warnings.append(
-            f"--path matched no files in {repo.name}: nothing was checked"
-        )
+    acc.warnings += [
+        f"--path {g!r} matched no files in {repo.name}"
+        for g in args.path
+        if not any(glob_match(g, p) for p in full)
+    ]
     env = detect_env(repo.path)
     acc.repos[repo.name] = repo_state(repo.path)
-    view = _fleet_view(repo, args, run_dir, acc)
+    try:
+        view = _fleet_view(repo, args, run_dir, acc)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise FleetSetupError(f"fleet {repo.name}: {exc}") from exc
     extra = canary_files(specs)
     if view is not None:
         extra[CANARY_NODE] = 'print("selfcheck fleet canary")\n'
@@ -247,6 +257,8 @@ def _scan_repo(
         warning = release(copy)
         if warning:
             acc.warnings.append(warning)
+        if view is not None:  # the canary repo is scratch, like the copy (#410)
+            shutil.rmtree(run_dir / CANARY_REPO, ignore_errors=True)
     acc.results += results
     kept, counts = apply_env_policy(
         aggregate(f for r in results for f in r.findings), env
@@ -383,6 +395,9 @@ def main(
         if name in known:
             try:
                 _scan_repo(known[name], args, config, specs, run_dir, acc)
+            except FleetSetupError as exc:
+                print(f"selfcheck: {exc}", file=sys.stderr)
+                return 4
             except (OSError, subprocess.CalledProcessError) as exc:
                 print(f"selfcheck: materialize {name}: {exc}", file=sys.stderr)
                 return 4

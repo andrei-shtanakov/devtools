@@ -390,3 +390,12 @@ def test_allow_expired_fate_follows_the_config_read(
     assert any(f["anchor"] == "allow:file:gone.py" for f in first["findings"])
     gone = {g["anchor"]: g["status"] for g in last["delta"]["gone"]}
     assert gone.get("allow:file:gone.py") == status
+
+
+def test_each_dead_path_glob_is_a_warning(tmp_path: Path) -> None:
+    """#410: one dead ``--path`` glob among live ones used to stay silent."""
+    ws = workspace(tmp_path)
+    main(args(ws, "--probe", "ast-dup", "--path", "*.py", "--path", "nope/**"))
+    (doc,) = reports(ws)
+    warnings = [w for w in doc["run"]["warnings"] if "--path" in w]
+    assert warnings == ["--path 'nope/**' matched no files in devtools"]
