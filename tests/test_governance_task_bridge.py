@@ -4780,6 +4780,34 @@ def test_beh13_reasons_are_distinguishable_and_do_not_claim_a_change(
         assert "изменил" not in reason, label
 
 
+# Признак ФАКТА, который называет причина каждой ветки U-1…U-5, — основа
+# слова, а не его буква (DEL-23): U-1 — вариант состава, U-2 — отсутствие в
+# base, U-3 — frontmatter, U-4 — пустое поле, U-5 — несовпавший якорь.
+_OWN_REASON = {
+    "U-1": "вариант",
+    "U-2": "base",
+    "U-3": "frontmatter",
+    "U-4": "пуст",
+    "U-5": "якорь",
+}
+
+
+def test_beh13_each_input_reads_its_own_reason(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """DEL-17, ревью integration-PR #443: попарная различность не ловит
+    перестановку причин между ветками — «верная строка с чужой причиной»
+    (FR-06). Каждый вход обязан нести признак СВОЕЙ причины и ни одного
+    признака чужой."""
+    outputs = _unavailable_inputs(tmp_path, monkeypatch, capsys)
+    for label, out in outputs.items():
+        line = next(l for l in out.splitlines() if _SKIP_I8_PREFIX in l)
+        reason = line.split(_SKIP_I8_PREFIX, 1)[1]
+        assert _OWN_REASON[label] in reason, (label, reason)
+        others = [m for k, m in _OWN_REASON.items() if k != label]
+        assert not [m for m in others if m in reason], (label, reason)
+
+
 def test_beh14_historical_v1_without_dag_reaches_i8(
     tmp_path, monkeypatch, capsys
 ) -> None:
