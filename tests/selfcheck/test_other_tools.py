@@ -19,6 +19,7 @@ from selfcheck.probes.base import (
 )
 from selfcheck.probes.other_tools import (
     ACTIONLINT,
+    CARGO_MACHETE,
     JSCPD,
     OTHER_PROBES,
     SHELLCHECK,
@@ -26,6 +27,7 @@ from selfcheck.probes.other_tools import (
     shell_files,
 )
 from tests.selfcheck.helpers import (
+    NOW,
     make_repo,
     require_npx_package,
     require_probe,
@@ -189,3 +191,60 @@ def test_odd_file_names_keep_probes_ok(build, tmp_path: Path) -> None:
     for spec in (ZIZMOR, JSCPD):
         res = run(spec, target, tmp_path / spec.name)
         assert res.status is ProbeStatus.OK, (spec.name, res.reason, res.coverage)
+
+
+RUST_OK = {
+    "Cargo.toml": (
+        '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\n'
+    ),
+    "src/lib.rs": "pub fn f() {}\n",
+}
+
+
+def _run_rust(files: dict[str, str], tmp: Path) -> ProbeResult:
+    require_probe(
+        "cargo-machete", CARGO_MACHETE.version_args, CARGO_MACHETE.version_range
+    )
+    repo = make_repo(tmp / "repo", files)
+    corpus = tuple(list_corpus(repo))
+    copy = tmp / "run" / "src" / "repo"
+    materialize(repo, corpus, copy, canary_files([CARGO_MACHETE]))
+    target = RepoTarget(
+        "repo", repo, copy, frozenset({"rust"}), corpus, EnvInfo("no-env"), now=NOW
+    )
+    try:
+        return run_probe(CARGO_MACHETE, target, tmp / "run" / "work")
+    finally:
+        release(copy)
+
+
+def test_cargo_machete_unused_dependency(tmp_path: Path) -> None:
+    files = {**RUST_OK, "Cargo.toml": RUST_OK["Cargo.toml"] + 'libc = "0.2"\n'}
+    res = _run_rust(files, tmp_path)
+    assert res.status is ProbeStatus.OK and res.canary == "hit"
+    assert [(f.rule, f.text_key, f.category) for f in res.findings] == [
+        ("cargo-machete/unused-dependency", "a:libc", "deps")
+    ]
+
+
+def test_cargo_machete_clean_repo_ok(tmp_path: Path) -> None:
+    res = _run_rust(RUST_OK, tmp_path)
+    assert res.status is ProbeStatus.OK and res.findings == []
+
+
+def test_cargo_machete_without_binary_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repo(tmp_path / "repo", RUST_OK)
+    corpus = tuple(list_corpus(repo))
+    monkeypatch.setenv("PATH", str(tmp_path))  # after git ran: no cargo-machete
+    target = RepoTarget(
+        "repo", repo, repo, frozenset({"rust"}), corpus, EnvInfo("no-env"), now=NOW
+    )
+    res = run_probe(CARGO_MACHETE, target, tmp_path / "work")
+    assert res.status is ProbeStatus.UNAVAILABLE
+
+
+def test_cargo_machete_is_static_and_sees_cargo_config() -> None:
+    assert CARGO_MACHETE.executes_target_code is False
+    assert "Cargo.toml" in CARGO_MACHETE.config_files

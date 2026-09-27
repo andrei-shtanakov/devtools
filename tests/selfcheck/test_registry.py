@@ -19,6 +19,7 @@ EXPECTED = {
     "ast-dup",
     "cli-overlap",
     "llm-sites",
+    "cargo-machete",
 }
 
 
