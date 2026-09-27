@@ -255,12 +255,13 @@ def test_make_calls_skip_options_and_take_every_target(tmp_path: Path) -> None:
                 "two:\n\tmake -j 4 a b\n"
                 "brace:\n\t${MAKE} VAR=1 c\n"
                 "var:\n\tmake -k $(OPTS) d && echo done\n"
-                "a: ; @true\nb: ; @true\nc: ; @true\nd: ; @true\n"
+                'quoted:\n\t@$(MAKE) MSG="hello world" e\n'
+                "a: ; @true\nb: ; @true\nc: ; @true\nd: ; @true\ne: ; @true\n"
             ),
             "sub/Makefile": "build: ; @true\n",
         },
     )
-    for target in ("a", "b", "c", "d"):
+    for target in ("a", "b", "c", "d", "e"):
         assert kinds(g, f"make:Makefile#{target}") == {EdgeKind.MAKE}, target
     assert kinds(g, "make:sub/Makefile#build") == {EdgeKind.MAKE}
     made = {e.target for e in g.edges if e.target.startswith("make:Makefile#")}

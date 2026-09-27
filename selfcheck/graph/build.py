@@ -6,6 +6,7 @@ import ast
 import plistlib
 import posixpath
 import re
+import shlex
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -39,6 +40,15 @@ _MAKE_FILE = ("-f", "--file", "--makefile")
 _MAKE_VALUED = ("-I", "--include-dir", "-o", "--old-file", "-W", "--what-if")
 
 
+def _words(tail: str) -> list[str]:
+    """Shell words: a quoted value (``MSG="a b"``) stays one token; an
+    unbalanced quote (the rest of an ``echo "…``) falls back to spaces."""
+    try:
+        return shlex.split(tail)
+    except ValueError:
+        return tail.split()
+
+
 def _make_calls(cmd: str, rel: str) -> list[str]:
     """``make:`` anchors of every make invocation in a recipe line (#411):
     options are skipped (their values too), every target counts, and ``-C`` /
@@ -46,7 +56,7 @@ def _make_calls(cmd: str, rel: str) -> list[str]:
     names no target node, and the graph drops edges to unknown anchors."""
     anchors: list[str] = []
     for call in _MAKE_CALL.finditer(cmd):
-        tokens = iter(_MAKE_STOP.split(cmd[call.end() :], maxsplit=1)[0].split())
+        tokens = iter(_words(_MAKE_STOP.split(cmd[call.end() :], maxsplit=1)[0]))
         directory = makefile = None
         targets: list[str] = []
         for tok in tokens:
