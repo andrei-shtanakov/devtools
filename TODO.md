@@ -1691,6 +1691,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   исполняются конвейером по своим спекам, а не ручной правкой (решение
   владельца 2026-09-27; ручная попытка — закрытый PR #438).
 
+- [ ] Исполнить одобренную tasks-спеку stray-md-disables-i8-for-legacy-v1-20260922 (devtools#173) spec-runner'ом на самом devtools: трекаемый `spec-runner.config.yaml` (integration_pr, spec_governance strict, harness_guard strict, тесты с `--group governance`), затем `run --strict`, integration-PR через ревью-контур и `make accept-pr` (решение владельца 2026-09-27) @owner:github:andrei-shtanakov @id:stray-md-tasks-run @epic:eco.dark-factory
 - [ ] Барьерный стоп S6 сохраняет S3–S5 и через `resume()`: причина стопа (код 6 — бюджет/stop rule) пишется в состояние, `resume()` её читает и `gate-candidate`/`push`/`ready` не сбрасывает; тест проверяет состояние ПОСЛЕ `resume()` (devtools#276, решение владельца 2026-09-27: гарантия нужна по существу) @owner:github:andrei-shtanakov @id:barrier-stop-ops-survive-resume @epic:eco.dark-factory
 
 - [x] Формулировки и защитные проверки governance-контракта привести к фактическим гарантиям без расширения runtime-механики @owner:github:andrei-shtanakov @id:governance-contract-truth-batch — PR #239 (#182/#185/#195/#237, agent-merge 61e1e2f) + PR #240 (#184, харнесс, мерж человеком 592393b); все пять issues закрыты с evidence

@@ -8,3 +8,6 @@ out/
 
 # выход gen_agents_toml.py (--out по умолчанию): вставляется в arbiter agents.toml руками
 agents.generated.toml
+
+# Журналы сессий spec-runner (пишутся в корень при каждом прогоне) — не коммитятся.
+/logs/
