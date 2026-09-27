@@ -241,3 +241,58 @@ def test_runbook_console_and_uv_project_and_entry_points(tmp_path: Path) -> None
     assert kinds(g, "file:sub/x.py") == {EdgeKind.RUNBOOK}
     assert kinds(g, "file:pkg/plug.py") == {EdgeKind.ENTRY}
     assert g.zones == []
+
+
+def test_make_calls_skip_options_and_take_every_target(tmp_path: Path) -> None:
+    """#411: ``$(MAKE) -C dir x`` took ``dir`` for a target, ``${MAKE}`` was not
+    seen and ``make a b`` lost ``b``. A ``-C``/``-f`` call reaches the other
+    Makefile's target."""
+    g = graph(
+        tmp_path,
+        {
+            "Makefile": (
+                "all:\n\t$(MAKE) -C sub build\n"
+                "two:\n\tmake -j 4 a b\n"
+                "brace:\n\t${MAKE} VAR=1 c\n"
+                "var:\n\tmake -k $(OPTS) d && echo done\n"
+                'quoted:\n\t@$(MAKE) MSG="hello world" e\n'
+                "a: ; @true\nb: ; @true\nc: ; @true\nd: ; @true\ne: ; @true\n"
+            ),
+            "sub/Makefile": "build: ; @true\n",
+        },
+    )
+    for target in ("a", "b", "c", "d", "e"):
+        assert kinds(g, f"make:Makefile#{target}") == {EdgeKind.MAKE}, target
+    assert kinds(g, "make:sub/Makefile#build") == {EdgeKind.MAKE}
+    made = {e.target for e in g.edges if e.target.startswith("make:Makefile#")}
+    assert not made & {"make:Makefile#sub", "make:Makefile#4", "make:Makefile#VAR"}
+
+
+def test_prose_after_make_is_not_a_call(tmp_path: Path) -> None:
+    """Review of #430: a help line ``echo "make x — run selfcheck"`` named the
+    existing target ``selfcheck``; the words after the first prose token are
+    not targets."""
+    g = graph(
+        tmp_path,
+        {
+            "Makefile": (
+                'help:\n\t@echo "  make dogfood — selfcheck on its own package"\n'
+                "dogfood: ; @true\nselfcheck: ; @true\n"
+            ),
+        },
+    )
+    assert kinds(g, "make:Makefile#dogfood") == {EdgeKind.MAKE}
+    assert kinds(g, "make:Makefile#selfcheck") == set()
+
+
+def test_graph_reads_a_bom_script_like_the_fleet(tmp_path: Path) -> None:
+    """Review of #430: the graph read the corpus in the locale codec while the
+    vendor check used decode(); a UTF-16 script's launch was lost."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "run.sh").write_bytes("#!/bin/sh\n./tool.py\n".encode("utf-16"))
+    (root / "tool.py").write_text("print(1)\n")
+    g = build_graph(
+        ["run.sh", "tool.py"], root, role_of, repo_name="repo", sched_dir=None
+    )
+    assert g.incoming("file:tool.py")
