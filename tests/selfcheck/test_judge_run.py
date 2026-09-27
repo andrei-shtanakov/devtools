@@ -254,3 +254,21 @@ def test_replace_and_unsure_are_shown_with_the_replacement() -> None:
     text = render_markdown(doc)
     assert "### Судья: заменить" in text and "| merge |" in text and "why 1" in text
     assert "### Судья: не уверен" in text and "why 2" in text
+
+
+def test_judge_instrument_finding_obeys_the_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#442 review: `probe:devtools#judge` is suppressible like any probe row."""
+    require_tool("uvx")
+    ws = workspace(tmp_path, {"c.py": CLASSIFY})
+    _use(monkeypatch, fake_claude(tmp_path, "not json"))
+    cfg = ws / "allow.toml"
+    cfg.write_text(
+        '[[allow]]\nanchor = "probe:devtools#judge"\nrepo = "devtools"\n'
+        'reason = "no claude on this runner"\nuntil = 2099-01-01\n'
+    )
+    main([*args(ws), "--config", str(cfg), "--probe", "llm-sites", "--judge"])
+    doc = reports(ws)[-1]
+    assert not any(f["anchor"] == "probe:devtools#judge" for f in doc["findings"])
+    assert any(f["anchor"] == "probe:devtools#judge" for f in doc["suppressed"])

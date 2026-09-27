@@ -6,6 +6,7 @@ import ast
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -122,6 +123,13 @@ def _parts(f: Finding) -> list[tuple[str, str, int]]:
     return [(f.owner_repo, loc.path, loc.line) for loc in f.locations[:1]]
 
 
+def _fence(body: str) -> str:
+    """A fence longer than any backtick run in ``body``: the fragment cannot
+    close it early and leak its tail into the prompt (#442, edge_check #291)."""
+    longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
+    return "`" * max(3, longest + 1)
+
+
 def build_slice(f: Finding, sources: Mapping[str, Path]) -> JudgeSlice | None:
     """Serialised judge input (§11.5); ``None`` when a source file is missing."""
     head = LLM_PROMPT if f.category == "llm-replaceable" else DUP_PROMPT
@@ -133,7 +141,7 @@ def build_slice(f: Finding, sources: Mapping[str, Path]) -> JudgeSlice | None:
             return None
         a, b = _span(lines, line, f.rule, clone_lines(f))
         body = "\n".join(lines[a - 1 : b])
-        fence = "`" * 3
+        fence = _fence(body)
         blocks.append(f"## {repo}:{rel} lines {a}-{b}\n{fence}\n{body}\n{fence}")
     text = "\n".join(blocks)
     raw = text.encode()

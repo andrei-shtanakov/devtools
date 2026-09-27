@@ -390,8 +390,13 @@ def _run_judge_pass(
     args: argparse.Namespace,
     known: dict[str, RepoEntry],
     acc: _Run,
-) -> list[Finding]:
-    """The judge over the final findings; its status is a probe row (§11.6)."""
+    config: Config,
+) -> tuple[list[Finding], list[Finding]]:
+    """The judge over the final findings; its status is a probe row (§11.6).
+
+    Its instrument finding goes through the allowlist like any probe row's
+    (#442 review); only kept/suppressed are taken — expired-entry findings
+    were already emitted by the main allowlist pass."""
     jr = run_judge(
         final,
         {name: entry.path for name, entry in known.items()},
@@ -413,7 +418,10 @@ def _run_judge_pass(
         "candidates": jr.candidates,
         "not_judged": jr.not_judged,
     }
-    return aggregate([*final, *instrument_findings([jr.result])])
+    allow = apply_allowlist(
+        instrument_findings([jr.result]), config, datetime.now(UTC).date()
+    )
+    return aggregate([*final, *allow.kept]), allow.suppressed
 
 
 def _fleet_surface(acc: _Run, scope: Sequence[str], manifest_path: Path) -> None:
@@ -493,7 +501,8 @@ def main(
     allow = apply_allowlist([*acc.findings, *extra], config, datetime.now(UTC).date())
     final = aggregate([*allow.kept, *allow.expired])
     if args.judge:
-        final = _run_judge_pass(final, args, known, acc)
+        final, judge_suppressed = _run_judge_pass(final, args, known, acc, config)
+        allow.suppressed.extend(judge_suppressed)
     snapshot = RunSnapshot(
         run_id=run_id,
         scope=wanted,
