@@ -364,3 +364,29 @@ def test_unverified_participant_reaches_the_report(tmp_path: Path) -> None:
     assert last["delta"]["statuses"][dup["id"]] == "changed"
     marked = [r["path"] for r in dup["related"] if r.get("unverified")]
     assert marked == ["c.py"]
+
+
+_EXPIRED = '[[allow]]\nanchor = "file:gone.py"\nreason = "r"\nuntil = 2020-01-01\n'
+
+
+@pytest.mark.parametrize(
+    ("second", "status"),
+    [("selfcheck.toml", "resolved"), ("selfckeck.toml", "not-rechecked")],
+)
+def test_allow_expired_fate_follows_the_config_read(
+    tmp_path: Path, second: str, status: str
+) -> None:
+    """#423: an allow-expired gone because the entry was removed from the same
+    config is ``resolved``; gone because this run read another path (a typo
+    loads an empty config silently) is ``not-rechecked``."""
+    ws = workspace(tmp_path)
+    (ws / "selfcheck.toml").write_text(_EXPIRED)
+    probe = ["--probe", "usage-graph", "--sched-dir", str(ws)]
+    # argparse keeps the last --config
+    main(args(ws, *probe, "--config", str(ws / "selfcheck.toml")))
+    (ws / "selfcheck.toml").write_text("")  # the entry is removed
+    main(args(ws, *probe, "--config", str(ws / second)))
+    first, last = reports(ws)
+    assert any(f["anchor"] == "allow:file:gone.py" for f in first["findings"])
+    gone = {g["anchor"]: g["status"] for g in last["delta"]["gone"]}
+    assert gone.get("allow:file:gone.py") == status

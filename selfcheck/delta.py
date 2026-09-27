@@ -16,6 +16,8 @@ SKIPPED_KEY = "skipped"
 PATH_KINDS = frozenset({"file", "func", "llm", "make", "skill", "workflow", "unit"})
 # `cli:<name>` comes from [project.scripts] of the repo-root pyproject.toml
 FIXED_PATHS = {"cli": "pyproject.toml"}
+# judged without a defining file: instrument, duplicate participants, config
+SPECIAL_KINDS = frozenset({"probe", "dup", "allow"})
 
 
 @dataclass
@@ -29,6 +31,7 @@ class RunSnapshot:
     corpus: dict[str, list[str]]
     sources: dict[str, str]
     findings: dict[str, dict[str, Any]]
+    config: str = ""  # path of the config file this run read; "" — none (#423)
 
     def to_json(self) -> dict[str, Any]:
         """Serialise for report.json."""
@@ -130,8 +133,10 @@ def _gone_status(base: RunSnapshot, cur: RunSnapshot, item: dict[str, Any]) -> s
     anchor = item["anchor"]
     if anchor.startswith("probe:"):
         return _instrument_status(cur, anchor)
-    if anchor.startswith("allow:"):  # recomputed from the config every run
-        return "resolved"
+    if anchor.startswith("allow:"):  # recomputed from the config every run —
+        # but only a run that read the same config file looked at the entry
+        same = cur.config and cur.config == base.config
+        return "resolved" if same else "not-rechecked"
     probe = item["probe"]
     if anchor.startswith("dup:"):
         fates = [

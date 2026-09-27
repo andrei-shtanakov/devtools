@@ -350,6 +350,7 @@ def main(
     """Run S1 and write the report; exit codes as in spec §4.3."""
     args = _args(argv)
     try:
+        config_read = str(args.config) if args.config.is_file() else ""
         config = load_config(args.config)
         manifest = load_manifest(args.manifest, args.workspace)
         wanted = list(dict.fromkeys(args.repo or ["devtools"]))
@@ -398,6 +399,7 @@ def main(
         corpus=acc.corpora,
         sources={n: str(known[n].path) for n in wanted if n in known},
         findings={f.id: f.to_json() for f in final},
+        config=config_read,
     )
     selection = {"path": sorted(args.path), "probe": sorted(args.probe)}
     base_doc, base_warnings = find_baseline(args.out, run_id, selection)
