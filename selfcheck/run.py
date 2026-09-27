@@ -31,6 +31,7 @@ from selfcheck.fleet.assemble import (
     surface_repos,
 )
 from selfcheck.fleet.reader import FleetRepo
+from selfcheck.judge import DEFAULT_MODEL, JUDGE_VERSION, apply_verdicts, run_judge
 from selfcheck.manifest import ManifestInfo, RepoEntry, load_manifest
 from selfcheck.model import Confidence, Finding, Location, aggregate
 from selfcheck.probes.base import (
@@ -84,6 +85,9 @@ def _args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--probe", action="append", default=[], help="run only these probes"
     )
+    parser.add_argument("--judge", action="store_true", help="LLM judge (spec §5, §11)")
+    parser.add_argument("--judge-max", type=int, default=100)
+    parser.add_argument("--judge-model", default=DEFAULT_MODEL)
     parser.add_argument("--out", type=Path, default=Path("out/selfcheck"))
     parser.add_argument("--config", type=Path, default=Path("selfcheck.toml"))
     args = parser.parse_args(argv)
@@ -115,6 +119,7 @@ class _Run:
     hashes: dict[str, list[FuncHash]] = field(default_factory=dict)
     vendor_dups: list[dict[str, Any]] = field(default_factory=list)
     fleet: _Fleet | None = None
+    judge: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -358,6 +363,7 @@ def _document(
         "graph": acc.graph,
         "vendored": acc.vendored,
         "vendor_dups": acc.vendor_dups,
+        "judge": acc.judge,
         "fleet": {
             "enabled": acc.fleet is not None,
             "fleet_only": acc.fleet.fleet_only if acc.fleet else {},
@@ -377,6 +383,37 @@ def _cross_repo_dups(acc: _Run) -> None:
         )
     dups, acc.vendor_dups = group_dups(acc.hashes, acc.vendored if have_roles else None)
     acc.findings += dups
+
+
+def _run_judge_pass(
+    final: list[Finding],
+    args: argparse.Namespace,
+    known: dict[str, RepoEntry],
+    acc: _Run,
+) -> list[Finding]:
+    """The judge over the final findings; its status is a probe row (§11.6)."""
+    jr = run_judge(
+        final,
+        {name: entry.path for name, entry in known.items()},
+        args.out / "judge-cache.json",
+        cap=args.judge_max,
+        model=args.judge_model,
+    )
+    apply_verdicts(final, jr.verdicts)
+    acc.results.append(jr.result)
+    ok = jr.result.status is ProbeStatus.OK
+    key = f"judge v{JUDGE_VERSION} / {args.judge_model}"
+    acc.keys["judge@devtools"] = key if ok else None
+    acc.warnings += jr.warnings
+    acc.judge = {
+        "model": args.judge_model,
+        "calls": jr.calls,
+        "cached": jr.cached,
+        "errors": jr.errors,
+        "candidates": jr.candidates,
+        "not_judged": jr.not_judged,
+    }
+    return aggregate([*final, *instrument_findings([jr.result])])
 
 
 def _fleet_surface(acc: _Run, scope: Sequence[str], manifest_path: Path) -> None:
@@ -455,6 +492,8 @@ def main(
     extra = [*instrument_findings(acc.results), *(_missing_repo(n) for n in missing)]
     allow = apply_allowlist([*acc.findings, *extra], config, datetime.now(UTC).date())
     final = aggregate([*allow.kept, *allow.expired])
+    if args.judge:
+        final = _run_judge_pass(final, args, known, acc)
     snapshot = RunSnapshot(
         run_id=run_id,
         scope=wanted,

@@ -237,7 +237,7 @@ def test_run_reads_operator_from_config(tmp_path: Path) -> None:
     assert main(argv) == 0
     import json
 
-    (run,) = list((ws / "out").iterdir())
+    (run,) = [p for p in (ws / "out").iterdir() if p.is_dir()]
     doc = json.loads((run / "report.json").read_text())
     assert not [f for f in doc["findings"] if f["anchor"] == "file:orphan.py"]
     (ws / "bad.toml").write_text('[[operator]]\nrepo = "devtools"\nreason = "r"\n')
@@ -266,7 +266,7 @@ def test_operator_entries_apply_to_their_repo_only(tmp_path: Path) -> None:
         "--repo", "devtools", "--repo", "nb",
     ]  # fmt: skip
     assert main(argv) == 0
-    (run,) = list((ws / "out").iterdir())
+    (run,) = [p for p in (ws / "out").iterdir() if p.is_dir()]
     doc = json.loads((run / "report.json").read_text())
     dead_by = {
         (f["owner_repo"], f["anchor"])

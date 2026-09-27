@@ -35,7 +35,8 @@ def args(ws: Path, sched: Path, *extra: str, config: str = "none.toml") -> list[
 
 def reports(ws: Path) -> list[dict]:
     runs = sorted(
-        (ws / "out").iterdir(), key=lambda p: (p / "report.json").stat().st_mtime_ns
+        (p for p in (ws / "out").iterdir() if p.is_dir()),
+        key=lambda p: (p / "report.json").stat().st_mtime_ns,
     )
     return [json.loads((r / "report.json").read_text()) for r in runs]
 
