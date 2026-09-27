@@ -219,7 +219,6 @@ def _judge_lines(doc: dict[str, Any]) -> list[str]:
         return []
     judged = [f for f in doc["findings"] if f.get("judge")]
     valid = [f for f in judged if f["judge"].get("verdict") != "error"]
-    keep = [f for f in valid if f["judge"]["verdict"] == "keep"]
     lines = [
         "## Судья",
         "",
@@ -229,20 +228,28 @@ def _judge_lines(doc: dict[str, Any]) -> list[str]:
             f"не судились {len(j['not_judged'])} из {j['candidates']} кандидатов"
         ),
     ]
-    if keep:
+    for title, verdict in (
+        ("Судья: заменить", "replace"),
+        ("Судья: оставить", "keep"),
+        ("Судья: не уверен", "unsure"),
+    ):
+        rows = [f for f in valid if f["judge"]["verdict"] == verdict]
+        if not rows:
+            continue
         lines += [
             "",
-            "### Судья: оставить",
+            f"### {title} ({len(rows)})",
             "",
-            "| правило | якорь | обоснование |",
-            "|---|---|---|",
+            "| репо | правило | якорь | замена | обоснование |",
+            "|---|---|---|---|---|",
         ]
-        lines += [
-            f"| {f['rule']} | `{f['anchor']}` | "
-            + f["judge"].get("rationale", "")[:160].replace("|", "/").replace("\n", " ")
-            + " |"
-            for f in keep[:MD_ROWS]
-        ]
+        for f in rows[:MD_ROWS]:
+            why = f["judge"].get("rationale", "")[:160]
+            why = why.replace("|", "/").replace("\r", " ").replace("\n", " ")
+            lines.append(
+                f"| {f.get('owner_repo', '')} | {f['rule']} | `{f['anchor']}` | "
+                f"{f['judge'].get('replacement', '')} | {why} |"
+            )
     if j["not_judged"]:
         by_rule = dict(Counter(x["rule"] for x in j["not_judged"]))
         lines += ["", f"не судились по правилам: {by_rule}; первые 20:"]

@@ -254,7 +254,7 @@ def call_judge(
         return _error("output-too-large")
     try:
         data = json.loads(proc.stdout)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):  # deep nesting is not a JSONDecodeError
         return _error(f"unparsable (rc {proc.returncode})")
     if not isinstance(data, dict) or data.get("is_error"):
         return _error(str(data.get("result") if isinstance(data, dict) else data))

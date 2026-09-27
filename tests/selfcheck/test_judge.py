@@ -455,3 +455,17 @@ def test_apply_never_confirmed_nor_new_id() -> None:
     assert confirmed.confidence is Confidence.CONFIRMED  # never lowered
     assert (cand.id, keep.id, confirmed.id) == ids
     assert cand.judge and cand.judge["verdict"] == "replace"
+
+
+def test_deeply_nested_reply_is_an_error_not_a_crash() -> None:
+    """Final review M8: json.loads RecursionError must not escape the adapter."""
+    deep = "[" * 30000 + "]" * 30000  # under the 64 KiB output cap
+    got = call_judge(
+        "claude",
+        "slice",
+        DEFAULT_MODEL,
+        runner=_runner(deep),
+        platform="darwin",
+        environ=ENV,
+    )
+    assert got["verdict"] == "error"

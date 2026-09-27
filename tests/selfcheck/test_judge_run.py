@@ -204,3 +204,53 @@ def test_broken_cache_is_a_warning_not_exit_4(ws: Path) -> None:
     (ws / "out" / "judge-cache.json").write_text("{broken")
     assert main([*args(ws), "--probe", "llm-sites", "--judge"]) in (0, 2)
     assert any("judge-cache" in w for w in reports(ws)[-1]["run"]["warnings"])
+
+
+def test_replace_and_unsure_are_shown_with_the_replacement() -> None:
+    """Final review I1: a reader of report.md sees what the judge proposes."""
+    from selfcheck.report import render_markdown
+
+    def finding(i: int, verdict: str, replacement: str) -> dict:
+        return {
+            "id": f"sc-{i:08d}",
+            "rule": "jscpd/clone",
+            "category": "duplicate",
+            "confidence": "likely",
+            "anchor": f"dup:text:{i}",
+            "occurrences": 1,
+            "owner_repo": "a",
+            "judge": {
+                "verdict": verdict,
+                "replacement": replacement,
+                "rationale": f"why {i}",
+            },
+        }
+
+    doc = {
+        "run": {
+            "run_id": "r",
+            "host": "h",
+            "scope": ["a"],
+            "surface": {},
+            "env": {},
+            "warnings": [],
+            "manifest": {"entries_read": 1, "repos": ["a"], "missing": []},
+        },
+        "probes": [],
+        "findings": [finding(1, "replace", "merge"), finding(2, "unsure", "none")],
+        "suppressed": [],
+        "suppressed_no_env": {},
+        "delta": {"statuses": {}, "gone": []},
+        "inventory": {"llm": []},
+        "judge": {
+            "model": "m",
+            "calls": 2,
+            "cached": 0,
+            "errors": 0,
+            "candidates": 2,
+            "not_judged": [],
+        },
+    }
+    text = render_markdown(doc)
+    assert "### Судья: заменить" in text and "| merge |" in text and "why 1" in text
+    assert "### Судья: не уверен" in text and "why 2" in text
