@@ -221,7 +221,7 @@ Source: workstreams/stray-md-disables-i8-for-legacy-v1-20260922/spec/30-decompos
 **Traces to:** [FR-01], [NFR-01], [FR-03], [NFR-03], [FR-05], [FR-04], [FR-02], [FR-06], [FR-07], [FR-08], [NFR-02]
 
 ### TASK-002: Мутационная чувствительность набора и её эвиденция
-P2 | 🔄 IN_PROGRESS   Est: 0.5d
+P2 | ✅ DONE   Est: 0.5d
 
 Реализовать сценарии BEH-08, BEH-19 (DT-03, группа solo).
 Source: workstreams/stray-md-disables-i8-for-legacy-v1-20260922/spec/30-decomposition.md#DT-03
