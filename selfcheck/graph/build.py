@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from selfcheck.fleet.reader import decode
 from selfcheck.graph import resolver
 from selfcheck.graph.commands import (
     Index,
@@ -55,12 +56,13 @@ def _make_calls(cmd: str, rel: str) -> list[str]:
                 opt, _, value = tok.partition("=")
             elif tok.startswith("-C") and len(tok) > 2:
                 opt, value = "-C", tok[2:]
-            elif tok.startswith("-") or "=" in tok:
-                continue  # a flag or VAR=value
-            else:
-                if _MAKE_TARGET.fullmatch(tok):
-                    targets.append(tok)
+            elif tok.startswith("-") or "=" in tok or "$" in tok:
+                continue  # a flag, VAR=value or a variable reference
+            elif _MAKE_TARGET.fullmatch(tok):
+                targets.append(tok)
                 continue
+            else:
+                break  # prose (`echo "make x — …"`): no more targets
             if opt in _MAKE_DIR:
                 directory = value
             elif opt in _MAKE_FILE:
@@ -76,9 +78,11 @@ def _make_calls(cmd: str, rel: str) -> list[str]:
     return anchors
 
 
-def _read(root: Path, rel: str) -> str:
+def read_corpus_text(root: Path, rel: str) -> str:
+    """Text of a corpus file as the fleet reads it: BOM-aware, UTF-16/32
+    included, binary → "" (#411: the locale codec hid a BOM'd header)."""
     try:
-        return (root / rel).read_text(errors="replace")
+        return decode((root / rel).read_bytes()) or ""
     except OSError:
         return ""
 
@@ -112,7 +116,7 @@ def build_graph(
     texts = (
         {rel: texts.get(rel, "") for rel in files}
         if texts is not None
-        else {rel: _read(root, rel) for rel in files}
+        else {rel: read_corpus_text(root, rel) for rel in files}
     )
     roles = {rel: role(rel) for rel in files}
     index = build_index(list(files), texts.get("pyproject.toml"))

@@ -371,11 +371,12 @@ def test_e_member_token_prefers_the_folder_reading() -> None:
 @pytest.mark.parametrize("codec", ["utf-8-sig", "utf-16"])
 def test_declaration_with_bom_is_a_candidate(tmp_path: Path, codec: str) -> None:
     """#411: the graph probe read the corpus in the locale encoding, so a BOM
-    (or UTF-16) hid ``# VENDORED:`` from the header check."""
-    from selfcheck.graph.probe import _read
+    (or UTF-16) hid ``# VENDORED:`` from the header check — and the graph
+    read it the same way, so both now share one reader."""
+    from selfcheck.graph.build import read_corpus_text
 
     head = "# VENDORED: devtools @ 8cd6456 — contracts/x.env\n"
     (tmp_path / "x.sh").write_bytes(head.encode(codec))
-    text = _read(tmp_path, "x.sh")
+    text = read_corpus_text(tmp_path, "x.sh")
     assert text.startswith("# VENDORED:")
     assert is_candidate("x.sh", text, is_node=True)
