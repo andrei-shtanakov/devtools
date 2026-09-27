@@ -62,7 +62,9 @@ from selfcheck.config import load_config
 from selfcheck.corpus import list_corpus
 from selfcheck.judge import clone_lines, is_candidate, order_key
 from selfcheck.model import Confidence, Finding, Location
-from tests.selfcheck.helpers import make_repo
+import os
+
+from tests.selfcheck.helpers import git, make_repo
 
 
 def _f(
@@ -259,11 +261,29 @@ def test_jscpd_slice_is_clone_pm_5(tmp_path: Path) -> None:
 
 
 def test_form_feed_does_not_shift_lines(tmp_path: Path) -> None:
-    text = "a = 1\x0c\nb = 2\nc = 3\n"  # \f splits under str.splitlines()
-    f = _f("jscpd/clone", Confidence.LIKELY, line=3, lines=1)
+    text = "L1\x0c\n" + "".join(f"L{i}\n" for i in range(2, 21))  # \f: splitlines
+    f = _f("jscpd/clone", Confidence.LIKELY, line=3, lines=1)  # window 1..8
     f.related = [{"owner_repo": "a", "path": "x.py", "line": 3, "member": "3"}]
     s = build_slice(f, _src(tmp_path, {"x.py": text}))
-    assert s is not None and "lines 1-4" in s.text
+    assert s is not None and "L8" in s.text and "L9" not in s.text
+
+
+def test_non_utf8_name_is_read_by_raw_path(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path / "a", {"ok.py": "x = 1\n"})
+    with open(os.fsencode(repo) + b"/n\xff.py", "wb") as fh:
+        fh.write(b"y = 2\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "non-utf8 name")
+    f = _f("llm-sites/replaceable", Confidence.CANDIDATE, path="n\ufffd.py")
+    s = build_slice(f, {"a": repo})
+    assert s is not None and "y = 2" in s.text
+
+
+def test_symlink_is_not_read(tmp_path: Path) -> None:
+    src = _src(tmp_path, {"real.py": FUNC})
+    (src["a"] / "link.py").symlink_to(src["a"] / "real.py")
+    f = _f("llm-sites/replaceable", Confidence.CANDIDATE, path="link.py")
+    assert build_slice(f, src) is None
 
 
 def test_missing_file_gives_none(tmp_path: Path) -> None:
@@ -288,6 +308,7 @@ Expected: FAIL — `ImportError: cannot import name 'MAX_SLICE'`.
 
 ```python
 import ast
+import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -329,10 +350,10 @@ def _lines(sources: Mapping[str, Path], repo: str, rel: str) -> list[str] | None
         return None
     try:
         path = root / raw_path(root, rel)
-        if not path.is_file():
+        if path.is_symlink() or not path.is_file():  # no symlinks (§1.3)
             return None
         return path.read_bytes().decode(errors="replace").split("\n")
-    except OSError:
+    except (OSError, subprocess.CalledProcessError):  # raw_path runs git
         return None
 
 
@@ -610,7 +631,7 @@ def call_judge(
                 )
     except subprocess.TimeoutExpired:
         return _error("timeout")
-    except Exception as exc:  # the adapter never kills the run (review r1 P6)
+    except Exception as exc:  # noqa: BLE001 — the adapter never kills the run (r1 P6)
         return _error(f"adapter: {exc!r}")
     if len(proc.stdout.encode()) > MAX_OUTPUT:
         return _error("output-too-large")
@@ -679,6 +700,8 @@ def test_cache_roundtrip_bad_entries_and_old_versions(tmp_path: Path) -> None:
 
 
 def test_cache_write_failure_is_a_warning(tmp_path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
     ro = tmp_path / "ro"
     ro.mkdir()
     ro.chmod(0o500)
@@ -1011,11 +1034,12 @@ def run_judge(
         return run
     stamp = datetime.now(UTC).date().isoformat()
     pool = ThreadPoolExecutor(max_workers=workers)
+    futures: list[tuple[Finding, JudgeSlice, str, Future[dict[str, str]]]] = []
     try:
-        futures: list[tuple[Finding, JudgeSlice, str, Future[dict[str, str]]]] = [
+        futures.extend(
             (f, sl, key, pool.submit(call_judge, binary, sl.text, model, runner=runner))
             for f, sl, key in todo
-        ]
+        )
         for f, sl, key, fut in futures:
             out = fut.result()
             run.verdicts[f.id] = {
@@ -1029,7 +1053,14 @@ def run_judge(
             if warning := save_cache(cache_path, cache):  # keep paid verdicts early
                 run.warnings.append(warning)
     finally:
-        pool.shutdown(wait=True, cancel_futures=True)
+        pool.shutdown(wait=False, cancel_futures=True)
+        for _f, _sl, key, fut in futures:
+            if fut.done() and not fut.cancelled() and fut.exception() is None:
+                out = fut.result()
+                if out["verdict"] != "error":
+                    cache.setdefault(key, {**out, "at": stamp})
+        if warning := save_cache(cache_path, cache):  # Ctrl-C keeps finished verdicts
+            run.warnings.append(warning)
     valid = run.cached + run.calls - (run.errors - _missing(run))
     run.result = _row(
         judge_status(valid, run.errors), model, f"{run.errors} errors"
@@ -1052,7 +1083,7 @@ def apply_verdicts(findings: list[Finding], verdicts: Mapping[str, dict]) -> Non
             f.confidence = Confidence.LIKELY
 ```
 
-(`valid` — число валидных вердиктов: из кэша плюс новые вызовы без ошибки; ошибки новых вызовов = `errors − source-missing`. `save_cache` после каждого валидного вердикта — прерванный прогон сохраняет оплаченное; `cancel_futures=True` в `finally` — Ctrl-C не запускает оставшиеся вызовы.)
+(`valid` — число валидных вердиктов: из кэша плюс новые вызовы без ошибки; ошибки новых вызовов = `errors − source-missing`. `save_cache` после каждого валидного вердикта и ещё раз в `finally` с вердиктами уже завершённых вызовов — Ctrl-C их не теряет; `cancel_futures=True` — не начатые вызовы не запускаются; уже запущенные дорабатывают (SIGINT получает только главный поток, §11.4).)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1100,7 +1131,7 @@ import pytest
 
 from selfcheck import judge as judge_module
 from selfcheck.run import main
-from tests.selfcheck.helpers import require_tool, workspace
+from tests.selfcheck.helpers import make_repo, require_tool, workspace
 from tests.selfcheck.test_run import args, reports
 
 CLASSIFY = (
@@ -1198,6 +1229,59 @@ def test_judge_error_exit_2_then_resolves(
     assert {"anchor": "probe:devtools#judge", "status": "resolved"}.items() <= next(
         g for g in gone if g["anchor"] == "probe:devtools#judge"
     ).items()
+
+
+def test_judge_finding_resolves_outside_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§11.6: the judge is run-level — an ok --judge run resolves it even when
+    devtools is not in scope (mutation guard for delta `run_level`)."""
+    require_tool("uvx")
+    ws = workspace(tmp_path, {"c.py": CLASSIFY})
+    make_repo(tmp_path / "other", {"o.py": "x = 1\n"})
+    (ws / "m.toml").write_text(
+        '[tools.devtools]\ngit_dir = "devtools"\n[tools.other]\ngit_dir = "other"\n'
+    )
+    _use(monkeypatch, fake_claude(tmp_path, "not json"))
+    assert main([*args(ws), "--probe", "llm-sites", "--judge"]) == 2
+    good = tmp_path / "good"
+    good.mkdir()
+    _use(monkeypatch, fake_claude(good, GOOD))
+    main([*args(ws), "--repo", "other", "--probe", "llm-sites", "--judge"])
+    gone = {g["anchor"]: g["status"] for g in reports(ws)[-1]["delta"]["gone"]}
+    assert gone["probe:devtools#judge"] == "resolved"
+
+
+def test_keep_is_shown_under_keep_not_in_its_category() -> None:
+    from selfcheck.report import render_markdown
+
+    keep = {
+        "id": "sc-keep0001",
+        "rule": "jscpd/clone",
+        "category": "duplicate",
+        "confidence": "likely",
+        "anchor": "dup:text:keepme",
+        "occurrences": 1,
+        "owner_repo": "a",
+        "judge": {"verdict": "keep", "replacement": "none", "rationale": "on purpose"},
+    }
+    doc = {
+        "run": {
+            "run_id": "r", "host": "h", "scope": ["a"], "surface": {}, "env": {},
+            "warnings": [], "manifest": {"entries_read": 1, "repos": ["a"], "missing": []},
+        },
+        "probes": [],
+        "findings": [keep],
+        "suppressed": [],
+        "suppressed_no_env": {},
+        "delta": {"statuses": {}, "gone": []},
+        "inventory": {"llm": []},
+        "judge": {"model": "m", "calls": 1, "cached": 0, "errors": 0, "candidates": 1,
+                  "not_judged": []},
+    }
+    text = render_markdown(doc)
+    assert "### Судья: оставить" in text and "on purpose" in text
+    assert "## duplicate" not in text
 
 
 def test_missing_claude_is_unavailable_exit_3(
