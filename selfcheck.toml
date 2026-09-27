@@ -17,11 +17,3 @@ reason = "гейт волн ре-вендора; запускает операт
 repo = "devtools"
 path = "discover_models.py"
 reason = "discovery моделей по ADR-ECO-003a; запускает оператор, README"
-
-# gen_agents_toml.py: первая настоящая dead-находка selfcheck (приёмка #414)
-# разобрана и снята решением владельца 2026-09-27 (PR #416) — инструмент жив,
-# редкий ручной. Обоснование — план zone-narrow, запись «Пересмотрено владельцем».
-[[operator]]
-repo = "devtools"
-path = "gen_agents_toml.py"
-reason = "ручной засев cost/duration из benchmark_runs при добавлении агента; единственный источник этих чисел, назван в prograph-vault/derived/contracts/add-new-agent-runbook.md; scaffold ключей — arbiter/scripts/gen_agents_scaffold.py"
