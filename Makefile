@@ -57,7 +57,7 @@ help:
 	@echo "  make behaviour-tasks ARGS='--run-id … --legacy-bundle=3' — точный состав charter+requirements+behaviour-spec, без design/acceptance/decomposition (WS-SMOKE-001, non-conformant против team-exp); =4 — + design, без acceptance/decomposition; =5 — + decomposition, без acceptance (бандл до раскатки acceptance-узла, decomposition пинует только design); без флага — полный DAG (+ acceptance, decomposition пинует design и acceptance); состав каталога обязан совпасть РОВНО"
 	@echo "  make accept-pr ARGS='--repo <r> --pr <n>' — приёмка integration-PR spec-runner: ревью → чеки → DarkFactory-мерж"
 	@echo "  make preflight ARGS='--repo <r>' — преflight перед прогоном spec-runner: конфиг-эталон / insteadOf / state-DB / live-smoke"
-	@echo "  make selfcheck ARGS='[--repo r] [--sched-dir ~/Library/LaunchAgents]' — самодиагностика: баги, мёртвое, дубли, LLM-вызовы (отчёт в out/selfcheck/)"
+	@echo "  make selfcheck ARGS='[--repo r | --all] [--sched-dir ~/Library/LaunchAgents]' — самодиагностика: баги, мёртвое, дубли, LLM-вызовы (отчёт в out/selfcheck/)"
 	@echo "  make selfcheck-dogfood — тесты selfcheck с обязательными инструментами + прогон на собственном пакете"
 
 status:      ; @./repos.sh status

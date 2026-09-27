@@ -367,3 +367,39 @@ def test_cross_repo_dup_in_one_run(tmp_path: Path) -> None:
     assert len(groups) == 1
     assert {r["owner_repo"] for r in groups[0]["related"]} == {"devtools", "other"}
     assert any("вендор-фильтр не применён" in w for w in doc["run"]["warnings"])
+
+
+def test_all_scans_every_manifest_repo(tmp_path: Path) -> None:
+    ws = workspace(tmp_path)
+    make_repo(tmp_path / "other", {"a.py": "import os\n"})
+    (ws / "m.toml").write_text(
+        '[tools.devtools]\ngit_dir = "devtools"\n[tools.other]\ngit_dir = "other"\n'
+    )
+    code = main([*args(ws), "--all", "--probe", "ruff"])
+    doc = reports(ws)[-1]
+    assert doc["run"]["scope"] == ["devtools", "other"]
+    assert code == run_module.exit_code(
+        [
+            run_module.ProbeResult(
+                p["probe"], p["repo"], run_module.ProbeStatus(p["status"])
+            )
+            for p in doc["probes"]
+        ]
+    )  # the worst over both repos
+    md = next((ws / "out").glob("*/report.md")).read_text()
+    assert "## Репо" in md and "| other |" in md
+
+
+def test_all_with_repo_is_exit_4(tmp_path: Path) -> None:
+    ws = workspace(tmp_path)
+    assert main([*args(ws), "--all", "--repo", "devtools"]) == 4
+
+
+def test_inventory_rows_carry_repo(tmp_path: Path) -> None:
+    require_tool("uvx")
+    ws = workspace(
+        tmp_path, {"c.py": 'import subprocess\nsubprocess.run(["claude", "-p", "x"])\n'}
+    )
+    main([*args(ws), "--probe", "llm-sites"])
+    doc = reports(ws)[-1]
+    assert {r["repo"] for r in doc["inventory"]["llm"]} == {"devtools"}

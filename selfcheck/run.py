@@ -70,6 +70,9 @@ def _args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--repo", action="append", default=[], help="git_dir to scan (default devtools)"
     )
+    parser.add_argument(
+        "--all", action="store_true", help="every manifest repo (spec §10.2)"
+    )
     parser.add_argument("--sched-dir", type=Path, default=None)
     parser.add_argument(
         "--fleet", action="store_true", help="read every manifest repo (spec §9)"
@@ -263,7 +266,9 @@ def _scan_repo(
     }
     acc.corpora[repo.name] = corpus
     for r in results:
-        acc.inventory += r.extra.get("inventory", [])
+        acc.inventory += [
+            {**row, "repo": repo.name} for row in r.extra.get("inventory", [])
+        ]
         if r.probe == "ast-dup" and "hashes" in r.extra:
             acc.hashes[repo.name] = [
                 FuncHash(**{**h, "literals": tuple(h["literals"])})
@@ -375,7 +380,13 @@ def main(
     try:
         config = load_config(args.config)
         manifest = load_manifest(args.manifest, args.workspace)
-        wanted = list(dict.fromkeys(args.repo or ["devtools"]))
+        if args.all and args.repo:
+            raise ConfigError("--all and --repo are mutually exclusive")
+        wanted = (
+            list(manifest.order)
+            if args.all
+            else list(dict.fromkeys(args.repo or ["devtools"]))
+        )
         known = {r.name: r for r in manifest.repos}
         unknown = [r for r in wanted if r not in known and r not in manifest.missing]
         if unknown:
