@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from selfcheck.corpus import shown
+
 STALE = ("no-origin-head", "not-default-branch", "detached", "behind", "ahead", "dirty")
 GITLINK = "160000"
 SNIFF = 8192
@@ -151,12 +153,6 @@ def _entries(path: Path) -> tuple[dict[str, str], str | None]:
         if proc.returncode != 0:
             return {}, proc.stderr.decode(errors="replace").strip()[:200]
     return parse_entries(staged.stdout, others.stdout), None
-
-
-def shown(rel: str) -> str:
-    """A path as reports carry it: surrogates of non-UTF-8 bytes become U+FFFD
-    (the raw ``rel`` is still what opens the file)."""
-    return rel.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
 def _inside(target: str, root: str) -> bool:

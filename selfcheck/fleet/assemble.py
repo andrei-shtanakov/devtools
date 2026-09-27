@@ -135,7 +135,8 @@ def expected_fleet(
     """U − {R} recounted from the raw manifest: every ``git_dir`` at any depth,
     plus the manifest repo. Deliberately shares no code with ``fleet_names`` —
     §9.6 condition 2 compares the two, so a composition bug cannot vouch for
-    itself (#412)."""
+    itself (#412). A ``git_dir`` outside the sections ``load_manifest`` reads
+    lands here on purpose: that repo is never read, so the fleet is partial."""
     universe = _git_dirs(tomllib.loads(manifest.read_text()))
     if mrepo is not None:
         universe.add(mrepo.name)
