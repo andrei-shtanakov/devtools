@@ -263,3 +263,20 @@ def test_operator_entries_apply_to_their_repo_only(tmp_path: Path) -> None:
     assert ("devtools", "file:orphan.py") not in dead_by  # rooted in its repo
     assert ("nb", "file:orphan.py") in dead_by  # same name elsewhere: not rooted
     assert not [f for f in doc["findings"] if f["rule"] == "selfcheck/operator-missing"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '[operator]\nrepo = "devtools"\npath = "a.sh"\nreason = "r"\n',  # single brackets
+        'operator = "a.sh"\n',
+        '[allow]\nanchor = "file:x"\nreason = "r"\nuntil = 2027-01-01\n',
+        "operator = [1, 2]\n",
+    ],
+)
+def test_malformed_tables_are_config_errors(tmp_path: Path, body: str) -> None:
+    """Final review m1: a typo in table syntax is exit 4, not a traceback."""
+    bad = tmp_path / "bad.toml"
+    bad.write_text(body)
+    with pytest.raises(ConfigError):
+        load_config(bad)

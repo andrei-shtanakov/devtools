@@ -92,12 +92,20 @@ def load_config(path: Path) -> Config:
     unknown = set(roles) - ROLE_NAMES
     if unknown:
         raise ConfigError(f"[roles]: unknown roles {sorted(unknown)}")
-    allow = tuple(_allow_entry(i, e) for i, e in enumerate(data.get("allow", [])))
+    allow = tuple(_allow_entry(i, e) for i, e in enumerate(_tables(data, "allow")))
     exclude = tuple(data.get("corpus", {}).get("exclude", []))
     operator = tuple(
-        _operator_entry(i, e) for i, e in enumerate(data.get("operator", []))
+        _operator_entry(i, e) for i, e in enumerate(_tables(data, "operator"))
     )
     return Config(allow, roles, exclude, operator, hashlib.sha1(raw).hexdigest())
+
+
+def _tables(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """``[[key]]`` entries; any other shape (``[key]``, a scalar) is exit 4."""
+    raw = data.get(key, [])
+    if not isinstance(raw, list) or not all(isinstance(e, dict) for e in raw):
+        raise ConfigError(f"{key}: expected an array of tables [[{key}]]")
+    return raw
 
 
 def _operator_entry(index: int, raw: dict[str, Any]) -> OperatorEntry:
