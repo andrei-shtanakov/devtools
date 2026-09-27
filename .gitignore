@@ -5,3 +5,6 @@ out/
 .venv/
 .superpowers/
 .aider*
+
+# выход gen_agents_toml.py (--out по умолчанию): вставляется в arbiter agents.toml руками
+agents.generated.toml

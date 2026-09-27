@@ -452,6 +452,18 @@ reason = "discovery моделей по ADR-ECO-003a; запускает опе�
   `gen_agents_toml.py` **не** вносится (решение 2026-09-27: последняя работа
   по существу — 10.07, выход заменён каталогом ADR-ECO-003). Если он заброшен,
   это первая настоящая находка selfcheck, и прятать её ролью не надо.
+
+  > **Пересмотрено владельцем 2026-09-27 после разбора находки (PR #416):**
+  > скрипт не заброшен, и посылка «выход заменён каталогом» неверна.
+  > arbiter читает `config/agents.toml` в рантайме (`arbiter-mcp/src/config.rs`),
+  > политика роутинга по ADR-ECO-003 остаётся в нём. Каталог заменил только
+  > scaffold ключей (`arbiter/scripts/gen_agents_scaffold.py`, ADR-ECO-003 #5),
+  > который оставляет `# TODO(policy)` вместо чисел. Засев `cost_per_hour` и
+  > `avg_duration_min` из `benchmark_runs` делает только этот скрипт, и его
+  > называет `prograph-vault/derived/contracts/add-new-agent-runbook.md`.
+  > Находка отработала как задумано — её разобрали, а не спрятали, — и
+  > скрипт внесён в `[[operator]]`. Приёмка Step 2 ниже выполнена до
+  > пересмотра (#414) и описывает состояние на тот момент.
 - [ ] **Step 2: приёмка** — `make selfcheck ARGS="--fleet --sched-dir ~/Library/LaunchAgents"`.
   Expected:
   - `attest-vendor.sh` и `discover_models.py` без dead;
