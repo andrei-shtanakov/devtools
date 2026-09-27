@@ -21,6 +21,11 @@ from selfcheck.roles import Role, role_of
 
 SEMGREP = "semgrep@1.178.0"
 RULES_PATH = Path(__file__).parent / "rules" / "llm.yml"
+# the whole uvx environment pinned `==` (#408); regeneration — in the file.
+# The name must match the review-scope CODE_OVERRIDE (`*constraints*.txt`):
+# a pin bump is code, not prose (review of #424)
+ENV_PATH = Path(__file__).parent / "rules" / "semgrep-constraints.txt"
+UVX_SEMGREP = ("-c", str(ENV_PATH), SEMGREP)
 HARNESSES = frozenset(
     {
         "claude",
@@ -105,7 +110,7 @@ def _select(target: RepoTarget) -> tuple[str, ...]:
 
 def _argv(ctx: ProbeCtx) -> list[str]:
     return [
-        SEMGREP,
+        *UVX_SEMGREP,
         "scan",
         "--config",
         str(RULES_PATH),
@@ -184,6 +189,13 @@ def _configs(ctx: ProbeCtx) -> list[dict[str, Any]]:
     return rows
 
 
+def _unparsed(ctx: ProbeCtx, err: dict[str, Any]) -> str:
+    """``<file>: … lines a-b unparsed`` for a PartialParsing error."""
+    spans = [f"{s['start']['line']}-{s['end']['line']}" for s in err.get("spans", [])]
+    where = rel_path(ctx, err["path"]) if err.get("path") else "?"
+    return f"{where}: semgrep PartialParsing, lines {', '.join(spans) or '?'} unparsed"
+
+
 def _parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> ParseResult:
     data = json.loads(proc.stdout)
     scanned = [rel_path(ctx, p) for p in data.get("paths", {}).get("scanned", [])]
@@ -192,10 +204,12 @@ def _parse(ctx: ProbeCtx, proc: subprocess.CompletedProcess[str]) -> ParseResult
         kind = err.get("type")
         name = kind[0] if isinstance(kind, list) and kind else str(kind)
         text = f"semgrep {err.get('level')} {name}: {str(err.get('message', ''))[:200]}"
-        # 'warn' (e.g. PartialParsing) still returns results; only 'error' loses a file
-        (result.notes if err.get("level") == "warn" else result.diagnostics).append(
-            text
-        )
+        if name == "PartialParsing":  # a span is unparsed: partial (§4.2, #408)
+            result.diagnostics.append(_unparsed(ctx, err))
+        else:
+            (result.notes if err.get("level") == "warn" else result.diagnostics).append(
+                text
+            )
     for rel in ctx.inputs:
         if rel.endswith(".py"):
             try:
@@ -266,7 +280,7 @@ LLM_SITES = ProbeSpec(
     rules=("A", "B", "C", "D", "candidate:schema|loop"),
     logic_version=1,
     binary="uvx",
-    version_args=(SEMGREP, "--version"),
+    version_args=(*UVX_SEMGREP, "--version"),
     version_range=((1, 178), (1, 179)),
     version_timeout=600,
     normal_codes=frozenset({0}),

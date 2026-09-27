@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -312,3 +315,69 @@ def test_any_exception_is_a_probe_status(phase: str, target, tmp_path) -> None:
     runner = boom if phase == "runner" else subprocess.run
     res = run_probe(spec, target, tmp_path / "run" / "work", which=which, runner=runner)
     assert res.status is ProbeStatus.FAILED and "boom" in res.reason
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_timeout_kills_the_whole_process_group(target, tmp_path) -> None:
+    """#408: npx → node, uvx → semgrep-core — the timed-out tool's children
+    must not outlive the probe, and the probe must not wait for them (they
+    hold its stdout). A fake tool starts ``sleep`` and hangs; both sleep far
+    longer than the timeout, so a surviving or awaited child shows."""
+    pid_file = tmp_path / "grandchild.pid"
+    tool = tmp_path / "hang" / "fake-tool"
+    tool.parent.mkdir()
+    tool.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib, subprocess, sys, time\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('fake 1.2.3'); sys.exit(0)\n"
+        "child = subprocess.Popen(['sleep', '30'])\n"
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n"
+        "time.sleep(30)\n"
+    )
+    tool.chmod(0o755)
+    res = run(spec_for(tool, timeout=2), target, tmp_path)
+    assert (res.status, res.reason) == (ProbeStatus.FAILED, "timeout")
+    assert res.duration < 10  # timeout 2 s + version call, not the 30 s sleep
+    grandchild = int(pid_file.read_text())
+    deadline = time.monotonic() + 5
+    while _alive(grandchild) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    alive = _alive(grandchild)
+    if alive:
+        os.kill(grandchild, 9)
+    assert not alive
+
+
+def test_any_interruption_kills_the_process_group(tmp_path, monkeypatch) -> None:
+    """Review of #424: the tool runs in its own session, so Ctrl-C reaches only
+    Python — a KeyboardInterrupt (or any error) while waiting must take the
+    group down too, not leave the tool running and ``__exit__`` waiting."""
+    from selfcheck.probes.base import run_group
+
+    pid_file = tmp_path / "tool.pid"
+    real = subprocess.Popen.communicate
+    calls = {"n": 0}
+
+    def interrupted(self, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            while not pid_file.exists():
+                time.sleep(0.05)
+            raise KeyboardInterrupt
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    script = f"echo $$ > {pid_file}; sleep 30"
+    started = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        run_group(["sh", "-c", script], capture_output=True, text=True, timeout=60)
+    assert time.monotonic() - started < 10
+    assert not _alive(int(pid_file.read_text()))
