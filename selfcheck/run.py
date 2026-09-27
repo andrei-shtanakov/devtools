@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import shutil
 import socket
 import subprocess
 import sys
@@ -264,7 +263,9 @@ def _scan_repo(
         if warning:
             acc.warnings.append(warning)
         if view is not None:  # the canary repo is scratch, like the copy (#410)
-            shutil.rmtree(run_dir / CANARY_REPO, ignore_errors=True)
+            warning = release(run_dir / CANARY_REPO)
+            if warning:
+                acc.warnings.append(warning)
     acc.results += results
     kept, counts = apply_env_policy(
         aggregate(f for r in results for f in r.findings), env
