@@ -3926,7 +3926,7 @@ def test_previous_dag_from_revision_record(tmp_path, monkeypatch) -> None:
 
     state = _recon_state(tmp_path, monkeypatch)
     prev = {"dag": [list(x) for x in tb._BUNDLE_DAG]}
-    dag, source = tb._previous_dag(
+    dag, source, _reason = tb._previous_dag(
         state, _ShowFileOps(None), prev, state.target_dir, state.bundle_dir,
         _BASE_SHA,
     )
@@ -3944,7 +3944,7 @@ def test_previous_dag_derived_from_bundle_composition(
 
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps(_spec_text("decomposition"))
-    dag, source = tb._previous_dag(
+    dag, source, _reason = tb._previous_dag(
         state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
     )
     assert source == "derived_from_spec"
@@ -3959,12 +3959,22 @@ def test_previous_dag_derived_from_bundle_composition(
 def test_previous_dag_unavailable_when_composition_matches_nothing(
     tmp_path, monkeypatch
 ) -> None:
+    """Состав, отфильтрованный по известным именам, не сходится ни с одним
+    вариантом `_dag_for` → `(None, "unavailable")`.
+
+    До правки devtools#173 этот тест клал СЮДА посторонний `99-alien.md`:
+    состав до фильтрации по известным именам совпадал со всеми `.md`
+    каталога, и посторонний файл ломал точное равенство — это и был сам
+    дефект (FR-01), а не сценарий «состав не сошёлся». Теперь посторонний
+    файл фильтруется и матчинг не трогает (см. BEH-01/BEH-02); настоящее
+    «не сошлось» — недостающий узел, который не даёт совпасть НИ с одним
+    из четырёх известных вариантов (полный, префиксы 3/4, `LEGACY5`)."""
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    (Path(state.target_dir) / state.bundle_dir / "99-alien.md").write_text("x")
+    (Path(state.target_dir) / state.bundle_dir / "15-behaviour-spec.md").unlink()
     ops = _ShowFileOps(_spec_text("decomposition"))
-    dag, source = tb._previous_dag(
+    dag, source, _reason = tb._previous_dag(
         state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
@@ -4007,7 +4017,7 @@ def test_previous_dag_legacy_requires_delivered_spec(
 
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps(None)
-    dag, source = tb._previous_dag(
+    dag, source, _reason = tb._previous_dag(
         state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
@@ -4022,7 +4032,7 @@ def test_previous_dag_legacy_rejects_anchor_mismatch(
 
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps(_spec_text("behaviour-spec"))
-    dag, source = tb._previous_dag(
+    dag, source, _reason = tb._previous_dag(
         state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
@@ -4036,7 +4046,7 @@ def test_previous_dag_legacy_unparsable_frontmatter(
 
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps("no frontmatter here\n")
-    dag, source = tb._previous_dag(
+    dag, source, _reason = tb._previous_dag(
         state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
@@ -4054,7 +4064,7 @@ def test_previous_dag_legacy_broken_yaml_is_unavailable(
 
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps("---\nspec_stage: tasks\ntraces_to: [a, b\n---\n\nx\n")
-    dag, source = tb._previous_dag(
+    dag, source, _reason = tb._previous_dag(
         state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
@@ -4076,7 +4086,7 @@ def test_previous_dag_legacy_rejects_malformed_traces_to(
     empty_list = "---\nspec_stage: tasks\ntraces_to: []\n---\n\nbody\n"
     for text in (not_a_list, empty_list):
         ops = _ShowFileOps(text)
-        dag, source = tb._previous_dag(
+        dag, source, _reason = tb._previous_dag(
             state, ops, {"pr": 5}, state.target_dir, state.bundle_dir,
             _BASE_SHA,
         )
@@ -4436,6 +4446,441 @@ class _SupersedeOps(_ProvOps):
     def show_file_for_carry(self, target_dir, ref, path):
         self.calls.append(("show_file_for_carry", ref, path))
         return self.show_file(target_dir, ref, path)
+
+
+# --- §I8 наблюдаемое поведение переиздания (BEH-01..18, devtools#173) -----
+#
+# `_previous_dag` изолированно проверен выше; здесь — наблюдаемое поведение
+# ЦЕЛОГО `deliver_superseded`, которое сценарии и требуют (BEH-01 прямо:
+# «сценарий читает вывод переиздания, а не промежуточный результат вывода
+# состава»). Каталог бандла в каждом сценарии — настоящий каталог на диске
+# (создан `_target`), посторонний файл — настоящий файл (**NFR-02**).
+
+
+_SKIP_I8_PREFIX = "сверка §I8 не производилась (comparison: unavailable): "
+_REFUSAL_I8 = "это не переиздание, а другая доставка"
+_REFUSAL_COMPOSITION = "доавторьте"
+
+
+def _add_file(name: str, text: str = "# заметка автора\n"):
+    def _mutate(bundle: Path) -> None:
+        (bundle / name).write_text(text, encoding="utf-8")
+    return _mutate
+
+
+def _remove_file(name: str):
+    def _mutate(bundle: Path) -> None:
+        (bundle / name).unlink()
+    return _mutate
+
+
+def _combine(*mutators):
+    def _mutate(bundle: Path) -> None:
+        for mutator in mutators:
+            mutator(bundle)
+    return _mutate
+
+
+def _i8_refused(result: object) -> bool:
+    return isinstance(result, RuntimeError) and _REFUSAL_I8 in str(result)
+
+
+def _deliver_over_bundle(
+    root: Path, monkeypatch, capsys, *,
+    mutate_bundle=None,
+    op: dict | None = None,
+    ops_factory=None,
+) -> tuple[object, str]:
+    """Прогоняет `deliver_superseded` над легаси-v1 доставкой (без записи
+    `dag`, если не передано в `op`) и возвращает (`SupersedeResult` либо
+    пойманное `RuntimeError`, объединённый вывод прогона) — то самое
+    наблюдаемое, которое сравнивают сценарии, а не внутреннее состояние.
+
+    Вывод — stdout И stderr вместе (Q-04/красный дизайн): поток печати
+    слова — решение реализации, не предмет сценариев, и тест не должен
+    закрепляться на одном потоке."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(root, monkeypatch)
+    _ledger_with_delivery(state, **(op or {}))
+    if mutate_bundle is not None:
+        mutate_bundle(Path(state.target_dir) / state.bundle_dir)
+    capsys.readouterr()
+    ops = ops_factory() if ops_factory else _SupersedeOps(prs=[_MERGED_PR])
+    try:
+        result: object = tb.deliver_superseded(state, ops)
+    except RuntimeError as exc:
+        result = exc
+    captured = capsys.readouterr()
+    return result, captured.out + captured.err
+
+
+class _SpecTextOps(_SupersedeOps):
+    """`_SupersedeOps` с настраиваемым ответом на доставленную tasks-спеку
+    в base — ветки U-2…U-5 (§I8) расходятся не составом каталога, а тем,
+    что показывает `show_file` по спеке, а не по бандлу."""
+
+    def __init__(self, spec_text: str | None, **kw) -> None:
+        super().__init__(**kw)
+        self._spec_text_override = spec_text
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        if (ref, path) == ("base-sha-1", _SPEC_REL):
+            self.calls.append(("show_file", ref, path))
+            return self._spec_text_override
+        return super().show_file(target_dir, ref, path)
+
+
+def _unavailable_inputs(
+    tmp_path: Path, monkeypatch, capsys
+) -> dict[str, str]:
+    """Пять входов, по одному на каждую ветку `unavailable` по существу
+    (**U-1**…**U-5**, общие допущения behaviour-spec) — каждый в своём
+    каталоге; возвращает вывод каждого прогона."""
+    outputs: dict[str, str] = {}
+
+    # U-1: состав каталога (после фильтрации по известным именам) не
+    # сходится ни с одним из четырёх известных вариантов DAG.
+    _, out = _deliver_over_bundle(
+        tmp_path / "u1", monkeypatch, capsys,
+        mutate_bundle=_remove_file("15-behaviour-spec.md"),
+    )
+    outputs["U-1"] = out
+
+    # U-2: доставленной tasks-спеки нет в base.
+    _, out = _deliver_over_bundle(
+        tmp_path / "u2", monkeypatch, capsys,
+        ops_factory=lambda: _SpecTextOps(None, prs=[_MERGED_PR]),
+    )
+    outputs["U-2"] = out
+
+    # U-3: frontmatter доставленной tasks-спеки не разбирается.
+    _, out = _deliver_over_bundle(
+        tmp_path / "u3", monkeypatch, capsys,
+        ops_factory=lambda: _SpecTextOps(
+            "no frontmatter here\n", prs=[_MERGED_PR],
+        ),
+    )
+    outputs["U-3"] = out
+
+    # U-4: traces_to пуст (форма, отвергаемая наравне с «не список»).
+    _, out = _deliver_over_bundle(
+        tmp_path / "u4", monkeypatch, capsys,
+        ops_factory=lambda: _SpecTextOps(
+            "---\nspec_stage: tasks\ntraces_to: []\n---\n\nbody\n",
+            prs=[_MERGED_PR],
+        ),
+    )
+    outputs["U-4"] = out
+
+    # U-5: якорь traces_to не совпал с терминальным узлом кандидата.
+    _, out = _deliver_over_bundle(
+        tmp_path / "u5", monkeypatch, capsys,
+        ops_factory=lambda: _SpecTextOps(
+            _spec_text("behaviour-spec"), prs=[_MERGED_PR],
+        ),
+    )
+    outputs["U-5"] = out
+
+    return outputs
+
+
+def test_beh01_stray_readme_does_not_change_supersede_outcome(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from governance import task_bridge as tb
+
+    plain_result, plain_out = _deliver_over_bundle(
+        tmp_path / "plain", monkeypatch, capsys,
+    )
+    readme_result, readme_out = _deliver_over_bundle(
+        tmp_path / "readme", monkeypatch, capsys,
+        mutate_bundle=_add_file("README.md"),
+    )
+    assert plain_result == readme_result == tb.SupersedeResult(
+        "delivered", 77
+    )
+    assert _SKIP_I8_PREFIX not in plain_out
+    assert _SKIP_I8_PREFIX not in readme_out
+
+
+def test_beh02_author_note_shaped_like_a_node_does_not_change_outcome(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Как BEH-01, но посторонний файл — не `README.md`, а `40-notes.md`:
+    числовой префикс, дефис, `.md` — по форме неотличим от узла. Граница
+    объявлена по принадлежности имени известному составу, а не по «похоже
+    на служебное» — правка, опознающая посторонний файл по форме имени,
+    прошла бы BEH-01 и обязана провалить этот сценарий."""
+    from governance import task_bridge as tb
+
+    plain_result, plain_out = _deliver_over_bundle(
+        tmp_path / "plain", monkeypatch, capsys,
+    )
+    notes_result, notes_out = _deliver_over_bundle(
+        tmp_path / "notes", monkeypatch, capsys,
+        mutate_bundle=_add_file("40-notes.md"),
+    )
+    assert plain_result == notes_result == tb.SupersedeResult(
+        "delivered", 77
+    )
+    assert _SKIP_I8_PREFIX not in plain_out
+    assert _SKIP_I8_PREFIX not in notes_out
+
+
+def test_beh03_i8_check_runs_and_passes_with_stray_file(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from governance import task_bridge as tb
+
+    result, out = _deliver_over_bundle(
+        tmp_path, monkeypatch, capsys, mutate_bundle=_add_file("README.md"),
+    )
+    assert result == tb.SupersedeResult("delivered", 77)
+    assert _REFUSAL_I8 not in out
+    assert _SKIP_I8_PREFIX not in out
+
+
+def test_beh04_real_mismatch_still_refuses_with_and_without_stray_file(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    plain_result, _ = _deliver_over_bundle(
+        tmp_path / "plain", monkeypatch, capsys,
+        mutate_bundle=_remove_file("25-acceptance.md"),
+    )
+    stray_result, _ = _deliver_over_bundle(
+        tmp_path / "stray", monkeypatch, capsys,
+        mutate_bundle=_combine(
+            _remove_file("25-acceptance.md"), _add_file("README.md"),
+        ),
+    )
+    for result in (plain_result, stray_result):
+        assert isinstance(result, RuntimeError)
+        assert _REFUSAL_I8 in str(result)
+
+
+def test_beh05_refusal_is_attributed_to_i8_not_composition_check(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    result, out = _deliver_over_bundle(
+        tmp_path, monkeypatch, capsys,
+        mutate_bundle=_remove_file("25-acceptance.md"),
+    )
+    assert isinstance(result, RuntimeError)
+    assert _REFUSAL_I8 in str(result)
+    assert _REFUSAL_COMPOSITION not in str(result)
+    assert _REFUSAL_COMPOSITION not in out
+
+
+def test_beh06_no_skip_word_on_either_settled_outcome(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """И прошедшая (BEH-03), и отказавшая (BEH-04) сверка — на обоих путях
+    состоявшейся сверки §I8 слова о пропуске нет ни разу, ни с посторонним
+    файлом в каталоге, ни без него."""
+    _, passed_plain = _deliver_over_bundle(
+        tmp_path / "p-plain", monkeypatch, capsys,
+    )
+    _, passed_stray = _deliver_over_bundle(
+        tmp_path / "p-stray", monkeypatch, capsys,
+        mutate_bundle=_add_file("README.md"),
+    )
+    _, failed_plain = _deliver_over_bundle(
+        tmp_path / "f-plain", monkeypatch, capsys,
+        mutate_bundle=_remove_file("25-acceptance.md"),
+    )
+    _, failed_stray = _deliver_over_bundle(
+        tmp_path / "f-stray", monkeypatch, capsys,
+        mutate_bundle=_combine(
+            _remove_file("25-acceptance.md"), _add_file("README.md"),
+        ),
+    )
+    for out in (passed_plain, passed_stray, failed_plain, failed_stray):
+        assert _SKIP_I8_PREFIX not in out
+
+
+def test_beh09_each_unavailable_branch_prints_word_with_reason(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    outputs = _unavailable_inputs(tmp_path, monkeypatch, capsys)
+    for label, out in outputs.items():
+        assert _SKIP_I8_PREFIX in out, label
+        line = next(l for l in out.splitlines() if _SKIP_I8_PREFIX in l)
+        reason = line.split(_SKIP_I8_PREFIX, 1)[1].strip()
+        assert reason, label
+
+
+def test_beh10_skip_does_not_claim_composition_matched(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Ни одна из пяти строк не утверждает и не подразумевает совпадения:
+    отрицательное «не совпал» (о выводе, не о доставке) сценарии U-1/U-5
+    используют по рекомендации дизайна и им не запрещено — запрещено
+    именно УТВЕРЖДЕНИЕ совпадения, поэтому граница — по «совпал/совпадает»
+    БЕЗ предшествующего отрицания."""
+    outputs = _unavailable_inputs(tmp_path, monkeypatch, capsys)
+    for label, out in outputs.items():
+        line = next(l for l in out.splitlines() if _SKIP_I8_PREFIX in l)
+        assert "состав не изменился" not in line, label
+        assert re.search(r"(?<!не )совпа", line) is None, label
+
+
+def test_beh11_word_present_iff_comparison_was_cancelled(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from governance import task_bridge as tb
+
+    unavailable_outputs = _unavailable_inputs(
+        tmp_path / "u", monkeypatch, capsys,
+    )
+    for label, out in unavailable_outputs.items():
+        assert _SKIP_I8_PREFIX in out, label
+
+    # previous_delivery (v2, записанный `dag`, совпавший с активным).
+    _, v2_out = _deliver_over_bundle(
+        tmp_path / "v2", monkeypatch, capsys,
+        op={"dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG], "anchor": "X"},
+    )
+    assert _SKIP_I8_PREFIX not in v2_out
+
+    # derived_from_spec: совпавший состав (BEH-01) и разошедшийся (BEH-04).
+    _, matched_out = _deliver_over_bundle(
+        tmp_path / "matched", monkeypatch, capsys,
+    )
+    assert _SKIP_I8_PREFIX not in matched_out
+    _, mismatched_out = _deliver_over_bundle(
+        tmp_path / "mismatched", monkeypatch, capsys,
+        mutate_bundle=_remove_file("25-acceptance.md"),
+    )
+    assert _SKIP_I8_PREFIX not in mismatched_out
+
+
+def test_beh12_word_names_check_state_and_reason(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    outputs = _unavailable_inputs(tmp_path, monkeypatch, capsys)
+    for label, out in outputs.items():
+        line = next(l for l in out.splitlines() if _SKIP_I8_PREFIX in l)
+        assert "§I8" in line, label
+        assert "comparison: unavailable" in line, label
+        reason = line.split(_SKIP_I8_PREFIX, 1)[1].strip()
+        assert reason, label
+
+
+def test_beh13_reasons_are_distinguishable_and_do_not_claim_a_change(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    outputs = _unavailable_inputs(tmp_path, monkeypatch, capsys)
+    reasons: dict[str, str] = {}
+    for label, out in outputs.items():
+        line = next(l for l in out.splitlines() if _SKIP_I8_PREFIX in l)
+        reasons[label] = line.split(_SKIP_I8_PREFIX, 1)[1].strip()
+    assert len(set(reasons.values())) == len(reasons)
+    for label, reason in reasons.items():
+        assert "изменил" not in reason, label
+
+
+def test_beh14_historical_v1_without_dag_reaches_i8(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """FR-07: ревизия без поля `dag` (легаси-v1) сама по себе не отказ и
+    не слово — доходит до §I8, как и до правки; слово печатается по исходу
+    вывода состава (BEH-11), а не по эпохе записи."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _ledger_with_delivery(state)
+    assert "dag" not in rs.load(state.run_id).ops["tasks-deliver"]
+    capsys.readouterr()
+    result = tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert result == tb.SupersedeResult("delivered", 77)
+    assert _SKIP_I8_PREFIX not in out
+
+
+def test_beh15_v2_verdict_is_not_moved_by_catalog_contents(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Путь v2 (записанный `dag`) отвечает по условию `if recorded: return
+    ...` — коротким замыканием ДО того, как функция вообще трогает каталог
+    бандла. Содержимое каталога поэтому структурно не может сдвинуть
+    вердикт §I8; сценарий предъявляет это тремя вариантами каталога —
+    совпадающим, с посторонним файлом и с недостающим узлом, — ни один из
+    которых не даёт отказ §I8 (регрессионное основание —
+    `test_supersede_dag_mismatch_fails_closed`, NFR-01: тот же путь v2,
+    записанный `dag`, даёт отказ §I8 РОВНО когда он расходится с активным,
+    независимо от каталога)."""
+    from governance import task_bridge as tb
+
+    op = {"dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG], "anchor": "X"}
+    matching, _ = _deliver_over_bundle(
+        tmp_path / "match", monkeypatch, capsys, op=op,
+    )
+    stray, _ = _deliver_over_bundle(
+        tmp_path / "stray", monkeypatch, capsys, op=op,
+        mutate_bundle=_add_file("README.md"),
+    )
+    missing, _ = _deliver_over_bundle(
+        tmp_path / "missing", monkeypatch, capsys, op=op,
+        mutate_bundle=_remove_file("25-acceptance.md"),
+    )
+    for result in (matching, stray, missing):
+        assert not _i8_refused(result)
+
+
+def test_beh16_missing_bundle_dir_is_still_a_distinct_refusal(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """FR-08: отсутствие самого каталога бандла остаётся прежним отказом
+    (называет `bundle_dir`, `target_dir`, base), не `unavailable` и не
+    слово о пропуске — «каталога нет» отличимо от «в каталоге нет узлов»."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _ledger_with_delivery(state)
+    shutil.rmtree(Path(state.target_dir) / state.bundle_dir)
+    capsys.readouterr()
+    with pytest.raises(RuntimeError) as exc:
+        tb.deliver_superseded(state, _SupersedeOps(prs=[_MERGED_PR]))
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    message = str(exc.value)
+    assert state.bundle_dir in message
+    assert state.target_dir in message
+    assert "base" in message
+    assert _SKIP_I8_PREFIX not in out
+    assert "unavailable" not in message
+    assert "состав бандла" not in message
+
+
+def test_beh18_hermetic_and_uses_real_directories(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """NFR-02: набор не обращается к сети; каталог бандла — настоящий
+    каталог на диске, посторонний файл — настоящий файл (не подменённый
+    обход)."""
+    import socket
+
+    from governance import task_bridge as tb
+
+    def _no_network(*a, **kw):
+        raise AssertionError("сетевой вызов внутри теста §I8")
+
+    monkeypatch.setattr(socket.socket, "connect", _no_network)
+    monkeypatch.setattr(socket, "create_connection", _no_network)
+
+    root = tmp_path / "hermetic"
+    bundle = root / "alpha/workstreams/WS-alpha-7/spec"
+    result, out = _deliver_over_bundle(
+        root, monkeypatch, capsys, mutate_bundle=_add_file("README.md"),
+    )
+    assert (bundle / "README.md").is_file()
+    assert (bundle / "00-charter.md").is_file()
+    assert result == tb.SupersedeResult("delivered", 77)
+    assert _SKIP_I8_PREFIX not in out
+
 
 
 def test_supersede_result_refuses_inconsistent_kind() -> None:
