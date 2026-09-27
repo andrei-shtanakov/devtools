@@ -42,6 +42,7 @@ from governance.bundle_dag import (
     # снять их значило бы спрятать переезд ценой характеризации.
     BUNDLE_DAG as _BUNDLE_DAG,  # noqa: F401
     BUNDLE_DAG_LEGACY5 as _BUNDLE_DAG_LEGACY5,  # noqa: F401
+    bundle_composition as _bundle_composition,
     check_bundle_composition as _check_bundle_composition,
     dag_for as _dag_for,
     node_id as _node_id,
@@ -3084,8 +3085,13 @@ def _previous_dag(
     target_dir: str,
     bundle_dir: str,
     base_sha: str,
-) -> tuple[tuple[tuple[str, tuple[str, ...]], ...] | None, str]:
-    """DAG предыдущей доставки + откуда он взят (§I8 спеки).
+) -> tuple[tuple[tuple[str, tuple[str, ...]], ...] | None, str, str]:
+    """DAG предыдущей доставки + откуда он взят + причина отказа (§I8 спеки).
+
+    Третья величина — причина, по которой состав остался неустановленным.
+    Она непуста тогда и только тогда, когда источник — `"unavailable"`:
+    каждая ветвь `unavailable` отдаёт её тем же `return`, которым отдаёт
+    исход и источник, а не соседняя функция, выводящая её заново (devtools#173).
 
     Запись `dag` в ревизии фиксирует ВЫБОР, не доказательство; для
     легаси-v1 состав выводится ИЗ ДВУХ источников — состава каталога
@@ -3109,7 +3115,9 @@ def _previous_dag(
     """
     recorded = prev_op.get("dag")
     if recorded:
-        return tuple((f, tuple(u)) for f, u in recorded), "previous_delivery"
+        return (
+            tuple((f, tuple(u)) for f, u in recorded), "previous_delivery", "",
+        )
     bundle_path = Path(target_dir) / bundle_dir
     if not bundle_path.is_dir():
         raise RuntimeError(
@@ -3118,29 +3126,46 @@ def _previous_dag(
             "из чего; проверьте bundle_dir в run.json и что бандл вмержен "
             "в base_ref"
         )
-    present = {
-        p.name for p in bundle_path.iterdir()
-        if p.is_file() and p.suffix == ".md"
-    }
+    present = _bundle_composition(bundle_path)
     matches = [
         _dag_for(v) for v in (None, 3, 4, 5)
         if {f for f, _ in _dag_for(v)} == present
     ]
-    if len(matches) != 1:
-        return None, "unavailable"
-    text = ops.show_file(target_dir, base_sha, f"spec/{state.ws_id}-tasks.md")
+    if not matches:
+        return (
+            None, "unavailable",
+            "состав каталога бандла не совпал ни с одним известным "
+            "вариантом DAG",
+        )
+    spec_rel = f"spec/{state.ws_id}-tasks.md"
+    text = ops.show_file(target_dir, base_sha, spec_rel)
     if text is None:
-        return None, "unavailable"
+        return (
+            None, "unavailable",
+            f"доставленной tasks-спеки нет в base по пути {spec_rel}",
+        )
     try:
         meta, _ = split_frontmatter(text)
     except ValueError:
-        return None, "unavailable"
+        return (
+            None, "unavailable",
+            f"frontmatter доставленной tasks-спеки {spec_rel} не разобран",
+        )
     traces = meta.get("traces_to")
     if not isinstance(traces, list) or not traces:
-        return None, "unavailable"
+        return (
+            None, "unavailable",
+            f"поле traces_to доставленной tasks-спеки {spec_rel} пусто "
+            "или не список",
+        )
     if traces[0] != _node_id(matches[0][-1][0]):
-        return None, "unavailable"
-    return matches[0], "derived_from_spec"
+        return (
+            None, "unavailable",
+            f"якорь traces_to доставленной tasks-спеки {spec_rel} не "
+            "совпал с терминальным узлом состава, выведенного из каталога "
+            "бандла",
+        )
+    return matches[0], "derived_from_spec", ""
 
 
 def _require_resumable_epoch(n: int, op: dict) -> None:
@@ -3816,9 +3841,14 @@ def deliver_superseded(
             )
             return SupersedeResult("returned", v1_pr)
 
-    dag, dag_source = _previous_dag(
+    dag, dag_source, dag_reason = _previous_dag(
         state, ops, prev_op, state.target_dir, state.bundle_dir, base_sha,
     )
+    if dag is None:
+        # Единственная точка печати (Механика п. 4): привязана к тому же
+        # исходу, которым сверка §I8 отменяется — рядом с условием отказа
+        # ниже и до §I5, формой §I5 (`comparison: unavailable`, devtools#173).
+        print(f"сверка §I8 не производилась (comparison: unavailable): {dag_reason}")
     if dag is not None and dag != active:
         raise RuntimeError(
             "состав активного DAG отличается от предыдущей доставки — "

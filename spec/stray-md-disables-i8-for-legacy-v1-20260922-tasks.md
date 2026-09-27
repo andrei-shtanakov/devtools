@@ -182,7 +182,7 @@ BEH-07 (имя, добавленное в единственный источн�
 - **AC-19** (manual): Объём правки ограничен предметом темы
 
 ### TASK-001: Единое правило имён, слово о пропуске и сценарии §I8
-P2 | TODO   Est: 0.5d
+P2 | 🔄 IN_PROGRESS   Est: 0.5d
 
 Реализовать сценарии BEH-01, BEH-02, BEH-03, BEH-04, BEH-05, BEH-06, BEH-07, BEH-09, BEH-10, BEH-11, BEH-12, BEH-13, BEH-14, BEH-15, BEH-16, BEH-17, BEH-18 (DT-01, группа solo).
 Source: workstreams/stray-md-disables-i8-for-legacy-v1-20260922/spec/30-decomposition.md#DT-01
