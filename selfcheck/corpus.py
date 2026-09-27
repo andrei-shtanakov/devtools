@@ -95,9 +95,19 @@ def release(dest: Path) -> str | None:
     return None
 
 
+def raw_path(repo: Path, rel: str) -> str:
+    """The on-disk name of the shown corpus path ``rel`` (#420): a read of the
+    source checkout must use it. Only a U+FFFD name needs the lookup."""
+    if "\ufffd" not in rel:
+        return rel
+    return corpus_names(repo).get(rel, rel)
+
+
 def last_commit_ts(repo: Path, rel: str) -> int | None:
-    """Unix time of the last commit touching ``rel``; None if never committed."""
-    out = _git(repo, "log", "-1", "--format=%ct", "--", rel).stdout.strip()
+    """Unix time of the last commit touching ``rel`` (a shown corpus path);
+    None if never committed."""
+    raw = raw_path(repo, rel)
+    out = _git(repo, "log", "-1", "--format=%ct", "--", raw).stdout.strip()
     return int(out) if out else None
 
 

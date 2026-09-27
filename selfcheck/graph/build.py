@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from selfcheck.corpus import shown
 from selfcheck.fleet.reader import decode
 from selfcheck.graph import resolver
 from selfcheck.graph.commands import (
@@ -394,12 +395,13 @@ def _launchd(g: Graph, sched_dir: Path, repo_name: str, index: Index) -> None:
             with plist.open("rb") as handle:
                 data = plistlib.load(handle)
         except (OSError, plistlib.InvalidFileException) as exc:
-            g.errors.append(f"{plist}: {exc}")
+            g.errors.append(shown(f"{plist}: {exc}"))
             continue
-        g.plists.append(plist.name)
+        name = shown(plist.name)  # a Linux name may be non-UTF-8 (#420)
+        g.plists.append(name)
         args = [str(data.get("Program", ""))]
         args += [str(a) for a in data.get("ProgramArguments", [])]
-        where = Location(f"launchd:{plist.name}", 1)
+        where = Location(f"launchd:{name}", 1)
         cwd: str | None = None
         for chunk in re.split(r"&&|;", " ".join(args)):
             words = chunk.split()

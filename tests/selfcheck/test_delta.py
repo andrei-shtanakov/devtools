@@ -390,3 +390,20 @@ def test_unknown_anchor_kind_is_never_file_removed(tmp_path: Path) -> None:
     """A kind this module does not know has no defining file: unknown, not the
     optimistic ``resolved: file-removed``."""
     assert _gone_of(tmp_path, "zzz:a.py", ["a.py"]) == "not-rechecked"
+
+
+def test_fate_looks_for_the_raw_name(tmp_path: Path, monkeypatch) -> None:
+    """#420: a non-UTF-8 file excluded from the corpus still exists under its
+    raw name; looking for the shown name made it `deleted` →
+    ``resolved: file-removed``."""
+    from selfcheck import delta
+
+    base = snap(tmp_path, corpus={"devtools": ["a.py"]})
+    cur = snap(tmp_path, corpus={"devtools": ["a.py"]})
+    (tmp_path / "devtools" / "on-disk.py").write_text("")
+    monkeypatch.setattr(
+        delta,
+        "raw_path",
+        lambda repo, rel: "on-disk.py" if rel == "caf�.py" else rel,
+    )
+    assert fate(cur, base, "devtools", "caf�.py", "ruff") is Fate.EXCLUDED

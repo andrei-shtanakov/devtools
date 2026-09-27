@@ -9,6 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from selfcheck.corpus import raw_path
 from selfcheck.probes.base import ProbeResult, ProbeStatus
 
 SKIPPED_KEY = "skipped"
@@ -84,7 +85,8 @@ def fate(cur: RunSnapshot, base: RunSnapshot, repo: str, path: str, probe: str) 
         return Fate.UNVERIFIED
     in_corpus = path in cur.corpus.get(repo, [])
     source = cur.sources.get(repo)
-    if not in_corpus and source and not (Path(source) / path).exists():
+    exists = source and (Path(source) / raw_path(Path(source), path)).exists()
+    if not in_corpus and source and not exists:
         return Fate.DELETED
     if not in_corpus:
         return Fate.EXCLUDED

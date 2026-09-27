@@ -117,3 +117,38 @@ def test_colliding_shown_names_fail_the_listing(tmp_path: Path, monkeypatch) -> 
     _ls_files(monkeypatch, b"caf\xe9.py\0caf\xe8.py\0", {latin1, cp1252})
     with pytest.raises(OSError, match="collide"):
         list_corpus(repo)
+
+
+def test_raw_path_maps_a_shown_name_back(tmp_path: Path, monkeypatch) -> None:
+    """#420: reads of the source checkout (git log, existence) need the raw
+    name; the corpus carries the shown one."""
+    from selfcheck.corpus import raw_path
+
+    repo = make_repo(tmp_path / "r", {"a.py": ""})
+    _ls_files(monkeypatch, b"a.py\0caf\xe9.py\0", {"caf\udce9.py"})
+    assert raw_path(repo, "caf\ufffd.py") == "caf\udce9.py"
+    assert raw_path(repo, "a.py") == "a.py"
+
+
+def test_history_is_read_by_the_raw_name(tmp_path: Path, monkeypatch) -> None:
+    """#420: ``git log -- caf\ufffd.py`` finds nothing — a committed file got
+    ``history: false`` and a false cap P3."""
+    import subprocess
+
+    from selfcheck import corpus
+
+    asked: list[str] = []
+
+    def git(repo, *a, **k):
+        if a[0] == "ls-files":
+            return subprocess.CompletedProcess(a, 0, b"caf\xe9.py\0", b"")
+        asked.append(a[-1])
+        return subprocess.CompletedProcess(a, 0, b"1700000000\n", b"")
+
+    monkeypatch.setattr(corpus, "_git", git)
+    real = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda self: self.name == "caf\udce9.py" or real(self)
+    )
+    assert corpus.last_commit_ts(tmp_path, "caf\ufffd.py") == 1700000000
+    assert asked == ["caf\udce9.py"]
