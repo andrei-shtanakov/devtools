@@ -16,11 +16,11 @@
 - Окружение цели — только данные: `.pth` читаются как текст, строки `import …` не исполняются и никуда не передаются (§1.5, §10.4).
 - Пробы получают только путь к read-only копии (§1.3); путь из `.pth` вне checkout или отсутствующий в копии не передаётся.
 - `logic_version` повышается (§4.3): `llm-sites` 1 → 2, `ast-dup` 1 → 2, `usage-graph` 3 → 4.
-- Формат E (§10.5): ровно одна строка `source:`/`repo:`; ref `[0-9a-f]{7,40}`; E в корне репо — неразобран; строка (кроме `source:`/`repo:`), называющая путь корпуса вне каталога E, — неразобран; члены — файлы корпуса каталога и ниже, **не узлы графа**, кроме самой декларации; узел — член, только если E называет его путь (от каталога); каталог без членов — `vendor-pin-dangling`, `text_key` = каталог.
+- Формат E (§10.5): ровно одна строка `source:`/`repo:`; ref `[0-9a-f]{7,40}`; E в корне репо — неразобран; строка-член (с sha256) с путём корпуса вне каталога E — неразобран, пути в прозе не считаются; члены — файлы корпуса каталога и ниже, **не узлы графа**, кроме самой декларации; узел — член, только если назван строкой-членом; нет членов — `vendor-pin-dangling`, `text_key` = каталог.
 - Файлы под `.github/` — не кандидаты в декларации; роль `test` дополняется `test/**`, `**/*_test.exs` (§10.5).
 - Вендор-группа дублей (§10.6): есть участник `vendored-in`, вне роли ≤ 1 участника, и он в репо — владельце из деклараций копий группы.
 - При одном репо `id`, `owner_repo`, `anchor`, `locations`, `related` дублей совпадают с эталоном S1 (Task 6).
-- `llm-sites` (§10.7): `$SECOND` у `argv-literal` — флаг `-x`/`--x…` или `exec`/`run`; `endpoint` без пробела до пути; Python — строка кода целиком (не docstring, не кусок f-строки); TS — якорь `llm:<path>`, только инвентарь; файлы > 1 000 000 байт не передаются.
+- `llm-sites` (§10.7): точка — кандидат, только если кандидат каждая её строка; `argv-literal` считает невидимость промпта как `py-launch`; `$SECOND` у `argv-literal` — флаг `-x`/`--x…` или `exec`/`run`; `endpoint` без пробела до пути; Python — строка кода целиком (не docstring, не кусок f-строки); TS — якорь `llm:<path>`, только инвентарь; файлы > 1 000 000 байт не передаются.
 - `PLR2004`, `PLC0415` не приходят из добавочного набора ruff, если корневой конфиг репо их не включает (§10.3).
 - `[[allow]] repo` — точное совпадение с `git_dir`, неизвестный — код 4 (§10.8); `--all` с `--repo` — код 4 (§10.2).
 - Живая приёмка §10.9 — после мержа, на master devtools с чистым деревом.
@@ -29,7 +29,7 @@
 ## Review Focus
 
 1. **Формат E снимает dead.** Код рядом с E без упоминания обязан остаться узлом без роли (Task 1 `test_e_members_are_folder_non_code`, `test_e_code_member_only_when_named`).
-2. **E теряет копии вне каталога.** Строка с путём вне каталога — неразобрана (Task 1 `test_e_naming_outside_folder_is_unparsed`).
+2. **E теряет копии вне каталога.** Строка-член с путём вне каталога — неразобрана; проза с путём — нет (Task 1 `test_e_member_line_outside_folder_is_unparsed`, `test_e_prose_path_outside_folder_still_parses`).
 3. **Межрепная группа ломает идентичность S1.** Эталонные значения сняты текущим кодом до рефакторинга (Task 6 `test_single_repo_matches_s1_golden`).
 4. **`.pth` без каталога в копии роняет pyrefly.** Такой путь не передаётся (Task 3 `test_pyrefly_skips_search_path_missing_in_copy`).
 5. **`endpoint` ловит прозу.** Текст с путём, docstring, комментарий, кусок f-строки — не точка (Task 5 двойники; S1 `test_inventory_mechanisms` с `e.py`).
@@ -152,23 +152,36 @@ def test_e_members_are_folder_non_code() -> None:
     assert res.findings == [] and res.broken is False
 
 
+def _with(line: str) -> dict[str, str]:
+    return {**E_TEXTS, "contracts/ls/v1/PINNED.txt": FORMAT_E_COMMIT + line}
+
+
 def test_e_code_member_only_when_named() -> None:
-    texts = {
-        **E_TEXTS,
-        "contracts/ls/v1/PINNED.txt": FORMAT_E_COMMIT + "files: helper.py\n",
-    }
+    texts = _with(f"sha256 helper.py: {H}\n")  # the fleet's `sha256 <path>:` form
     res = vendor_roles("r", sorted(texts), texts, role_of, E_NODES)
     assert "contracts/ls/v1/helper.py" in res.members
 
 
-def test_e_naming_outside_folder_is_unparsed() -> None:
-    texts = {
-        **E_TEXTS,
-        "contracts/ls/v1/PINNED.txt": FORMAT_E_COMMIT + "also: tools/check.py\n",
-    }
+def test_e_prose_does_not_name_code() -> None:
+    texts = _with("note: helper.py is ours\n")
+    res = vendor_roles("r", sorted(texts), texts, role_of, E_NODES)
+    assert "contracts/ls/v1/helper.py" not in res.members
+
+
+@pytest.mark.parametrize(
+    "line", [f"{H}  tools/check.py\n", f"sha256 ../../../tools/check.py: {H}\n"]
+)
+def test_e_member_line_outside_folder_is_unparsed(line: str) -> None:
+    texts = _with(line)
     res = vendor_roles("r", sorted(texts), texts, role_of, E_NODES)
     assert [f.rule for f in res.findings] == ["selfcheck/vendor-pin-unparsed"]
     assert "tools/check.py" in res.protected and res.broken is True
+
+
+def test_e_prose_path_outside_folder_still_parses() -> None:
+    texts = _with("note: consumed by tools/check.py; see TODO.md\n")
+    res = vendor_roles("r", sorted(texts), texts, role_of, E_NODES)
+    assert res.findings == [] and "contracts/ls/v1/schema.json" in res.members
 
 
 def test_e_in_repo_root_is_unparsed_finding() -> None:
@@ -176,6 +189,19 @@ def test_e_in_repo_root_is_unparsed_finding() -> None:
     res = vendor_roles("r", sorted(texts), texts, role_of, frozenset())
     assert [f.rule for f in res.findings] == ["selfcheck/vendor-pin-unparsed"]
     assert res.broken is True
+
+
+def test_e_folder_with_only_unnamed_code_is_dangling() -> None:
+    texts = {
+        "contracts/c/v1/PINNED.txt": FORMAT_E_COMMIT,
+        "contracts/c/v1/local.py": "x = 1\n",
+    }
+    nodes = frozenset({"contracts/c/v1/local.py"})
+    res = vendor_roles("r", sorted(texts), texts, role_of, nodes)
+    assert [(f.rule, f.text_key) for f in res.findings] == [
+        ("selfcheck/vendor-pin-dangling", "contracts/c/v1")
+    ]
+    assert "contracts/c/v1/local.py" not in res.members
 
 
 def test_e_folder_without_members_is_dangling() -> None:
@@ -206,7 +232,7 @@ def test_github_files_are_not_candidates(rel: str) -> None:
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/selfcheck/test_vendor.py tests/selfcheck/test_config_manifest.py tests/selfcheck/test_zone_narrow.py tests/selfcheck/test_fleet_run.py -q`
-Expected: FAIL — `test_format_e` (`DeclarationError`), `test_e_members_are_folder_non_code`, `test_e_code_member_only_when_named`, `test_e_naming_outside_folder_is_unparsed`, `test_e_folder_without_members_is_dangling`, `test_github_files_are_not_candidates`, новые строки `test_default_roles`, два теста `logic_version` (`3 != 4`). `test_e_unparsed`, `test_uppercase_source_stays_format_a`, `test_e_in_repo_root_is_unparsed_finding` проходят уже сейчас (двойники).
+Expected: FAIL — `test_format_e` (`DeclarationError`), `test_e_members_are_folder_non_code`, `test_e_code_member_only_when_named`, `test_e_prose_path_outside_folder_still_parses`, оба `…_dangling`, `test_github_files_are_not_candidates`, новые строки `test_default_roles`, два теста `logic_version` (`3 != 4`). Проходят уже сейчас (двойники): `test_e_unparsed`, `test_uppercase_source_stays_format_a`, `test_e_in_repo_root_is_unparsed_finding`, `test_e_member_line_outside_folder_is_unparsed` (текст не разбирается как B), `test_e_prose_does_not_name_code`.
 
 - [ ] **Step 3: Implement**
 
@@ -289,21 +315,34 @@ def _parse_e(rel: str, text: str) -> Declaration | None:
 Члены E:
 
 ```python
+_SHA_ANY = re.compile(_SHA256)
+
+
+def _member_line_paths(folder: str, text: str, known: frozenset[str]) -> set[str]:
+    """Corpus paths named on sha256 member lines, from the root or the folder."""
+    found: set[str] = set()
+    for line in text.splitlines():
+        if not _SHA_ANY.search(line):
+            continue
+        for token in line.split():
+            token = token.rstrip(":,")
+            for cand in (token, posixpath.join(folder, token)):
+                norm = posixpath.normpath(cand)
+                if norm in known:
+                    found.add(norm)
+    return found
+
+
 def _e_members(
     decl: Declaration, text: str, known: frozenset[str], nodes: frozenset[str]
 ) -> tuple[str, ...]:
-    """Folder members (§10.5): non-code files, plus code named from the folder.
+    """Folder members (§10.5): non-code files, plus code named on member lines.
 
-    A line naming a corpus path outside the folder (bar the upstream path on
-    ``source:``/``repo:``) makes the declaration unparsed."""
+    A member line (one carrying a sha256) naming a corpus path outside the
+    folder makes the declaration unparsed; paths in prose do not count."""
     assert decl.folder is not None
     prefix = decl.folder + "/"
-    body = "\n".join(
-        ln
-        for ln in text.splitlines()
-        if not (m := _E_LINE.match(ln.strip())) or m.group(1).lower() not in _E_HEADS
-    )
-    named = _named_paths(decl.path, body, known)
+    named = _member_line_paths(decl.folder, text, known)
     outside = sorted(p for p in named if not p.startswith(prefix))
     if outside:
         raise DeclarationError(f"{decl.path}: names paths outside its folder: {outside}")
@@ -544,7 +583,7 @@ def test_pyrefly_skips_search_path_missing_in_copy(build, tmp_path: Path) -> Non
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/selfcheck/test_env.py tests/selfcheck/test_python_tools.py -q -k "editable or missing_in_copy"`
-Expected: FAIL — `AttributeError: 'EnvInfo' object has no attribute 'search_paths'` (первые два); третий проходит уже сейчас (двойник: пути не передаются вовсе).
+Expected: FAIL — `test_editable_paths_are_data` (`AttributeError: … 'search_paths'`), `test_pyrefly_resolves_editable_workspace_member` (на утверждении `missing-import`); третий проходит уже сейчас (двойник: пути не передаются вовсе).
 
 - [ ] **Step 3: Implement**
 
@@ -807,6 +846,17 @@ TS_SDK_ANTHROPIC = (
 TS_AGENTS = 'import { Agent, run } from "@openai/agents";\nexport { Agent, run };\n'
 TS_URL = "export const u = (h: string) => `${h}/v1/chat/completions`;\n"
 TS_COMMENT = "// fetch(`${h}/v1/chat/completions`)\nexport const x = 1;\n"
+SPLIT = (
+    "import json\nimport subprocess\n\n\n"
+    "def go(items, prompt):\n"
+    "    out = []\n"
+    "    for item in items:\n"
+    '        cmd = ["claude", "-p", prompt]\n'
+    "        raw = subprocess.run(cmd, capture_output=True, text=True).stdout\n"
+    '        out.append(json.loads(raw)["label"])\n'
+    "    return out\n"
+)
+TS_STAR = 'import * as sdk from "@anthropic-ai/sdk";\nexport default sdk;\n'
 BIG_JS = "// bundle\n" + "x" * MAX_TARGET_BYTES + '\nspawn("claude", ["-p", q]);\n'
 
 FILES = {
@@ -828,6 +878,8 @@ FILES = {
     "url.ts": TS_URL,
     "comment.ts": TS_COMMENT,
     "big.js": BIG_JS,
+    "split.py": SPLIT,
+    "star.ts": TS_STAR,
 }
 
 
@@ -868,7 +920,9 @@ def _rows(result: ProbeResult) -> set[tuple[str, str, str]]:
         ("sdk_openai.ts", "B", "sdk-ts"),
         ("sdk_anthropic.ts", "B", "sdk-ts"),
         ("agents.ts", "B", "sdk-ts"),
+        ("star.ts", "B", "sdk-ts"),
         ("url.ts", "C", "endpoint"),
+        ("split.py", "A", "argv-literal"),
     ],
 )
 def test_each_rule_fires(
@@ -903,6 +957,13 @@ def test_ts_is_inventory_only(result: ProbeResult) -> None:
     ts = [i for i in result.extra["inventory"] if i["path"].endswith(".ts")]
     assert ts and not any(i["candidate"] or i["features"] for i in ts)
     assert not any(f.anchor.endswith(".ts") for f in result.findings)
+
+
+def test_point_is_candidate_only_if_every_row_is(result: ProbeResult) -> None:
+    # the prompt comes from a parameter: invisible on both the list and the launch
+    assert not any(f.anchor == "llm:split.py::go" for f in result.findings)
+    rows = [i for i in result.extra["inventory"] if i["path"] == "split.py"]
+    assert rows and not any(i["candidate"] for i in rows)
 
 
 def test_rows_deduplicated(result: ProbeResult) -> None:
@@ -1001,7 +1062,9 @@ Expected: FAIL — `ImportError: cannot import name 'MAX_TARGET_BYTES'`.
       - pattern: $C.chat.completions.create(...)
       - pattern: import $X from "@anthropic-ai/sdk"
       - pattern: import $X from "openai"
-      - pattern: import { $...X } from "@openai/agents"
+      - pattern: import { $X } from "@openai/agents"
+      - pattern: import * as $X from "@anthropic-ai/sdk"
+      - pattern: import * as $X from "openai"
   - id: endpoint
     languages: [python, js, ts, bash]
     severity: INFO
@@ -1144,13 +1207,72 @@ def _site(ctx: ProbeCtx, rule: str, rel: str, line: int) -> dict[str, Any] | Non
     ...  # прежнее тело: `if rel.endswith(".py"): …` / `else:` shell с этим line_text
 ```
 
-`_parse` — дедупликация строк инвентаря: `seen: set[tuple[str, int]] = set()` перед циклом по `data["results"]`, внутри сразу после `if row is None: continue`:
+Python-ветка `_site` — невидимость промпта у `argv-literal` (рядом с веткой `py-launch`):
 
 ```python
-        if (row["path"], row["line"]) in seen:
+        if rule == "py-launch":
+            ...  # как было
+        elif rule == "argv-literal":
+            invisible = _literal_argv_invisible(text, line)
+```
+
+```python
+def _literal_argv_invisible(text: str, line: int) -> bool:
+    """A literal argv on ``line`` whose non-flag elements after the binary are
+    all non-literal: the prompt is not visible statically (§3.4, §10.7)."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.List | ast.Tuple) and node.lineno == line:
+            rest = [
+                e
+                for e in node.elts[1:]
+                if not (
+                    isinstance(e, ast.Constant)
+                    and isinstance(e.value, str)
+                    and e.value.startswith("-")
+                )
+            ]
+            return bool(rest) and not any(
+                isinstance(e, ast.Constant | ast.JoinedStr) for e in rest
+            )
+    return False
+```
+
+`_parse` — строки инвентаря дедуплицируются, находки выпускаются **после** цикла по якорю, только если кандидат каждая строка якоря. Цикл по `data["results"]` больше не создаёт `Finding`; вместо этого:
+
+```python
+    seen: set[tuple[str, int]] = set()
+    by_anchor: dict[str, list[dict[str, Any]]] = {}
+    for hit in data["results"]:
+        ...  # rule, rel, row как было
+        if row is None or (row["path"], row["line"]) in seen:
             continue
         seen.add((row["path"], row["line"]))
+        inventory.append(row)
+        by_anchor.setdefault(row["anchor"], []).append(row)
+    for anchor, rows in by_anchor.items():
+        if not all(r["candidate"] for r in rows):
+            continue
+        features = sorted({f for r in rows for f in r["features"]})
+        result.findings.append(
+            Finding(
+                rule="llm-sites/replaceable",
+                category="llm-replaceable",
+                severity="low",
+                confidence=Confidence.CANDIDATE,
+                owner_repo=ctx.target.name,
+                anchor=anchor,
+                locations=[Location(r["path"], r["line"]) for r in rows],
+                evidence=[{"kind": "feature", "detail": f} for f in features],
+                suggestion="скрипт / правила / дерево решений / малая модель",
+            )
+        )
 ```
+
+(S1 `test_candidates` сохраняет ожидания: у `c.py::classify` и `b.py::tag` каждая строка — кандидат.)
 
 `LLM_SITES` — `logic_version=2`, `rules=("A", "B", "C", "D", "candidate:schema|loop", "construction")`.
 
@@ -1185,11 +1307,11 @@ git commit -m "feat(selfcheck): llm-sites — место построения з
 ```python
 from selfcheck.dups import FuncHash, group_dups
 
-BODY = "".join(f"    v{i} = x * {i}\n" for i in range(8))
-SBODY = "".join(f"    v{i} = x * {i + 50}\n" for i in range(8))
+GOLD_BODY = "".join(f"    v{i} = x * {i}\n" for i in range(8))  # не BODY: имя занято
+GOLD_SBODY = "".join(f"    v{i} = x * {i + 50}\n" for i in range(8))
 
 
-def _fn(path: str, name: str = "f", body: str = BODY) -> FuncHash:
+def _fn(path: str, name: str = "f", body: str = GOLD_BODY) -> FuncHash:
     return function_hashes(f"def {name}(x):\n{body}    return x\n", path)[0]
 
 
@@ -1226,7 +1348,7 @@ KEYS = ("id", "rule", "owner_repo", "anchor", "locations", "related")
 
 
 def test_single_repo_matches_s1_golden() -> None:
-    hs = [_fn("a.py", "f"), _fn("b.py", "g"), _fn("c.py", "h", SBODY)]
+    hs = [_fn("a.py", "f"), _fn("b.py", "g"), _fn("c.py", "h", GOLD_SBODY)]
     found, vendor = group_dups({"r": hs}, None)
     got = sorted(({k: f.to_json()[k] for k in KEYS} for f in found), key=str)
     assert got == sorted(S1_GOLDEN, key=str)
@@ -1581,6 +1703,11 @@ def test_multi_repo_rows_are_distinguishable() -> None:
                 "repo": "b",
                 "status": "partial",
                 "reason": "per-file problems",
+                "exit_code": 0,
+                "tool_version": "6",
+                "canary": "hit",
+                "coverage": {},
+                "findings": 0,
             }
         ],
     )
@@ -1671,7 +1798,47 @@ def _repo_rows(doc: dict[str, Any]) -> list[str]:
             )
 ```
 
-Инвентарь: при `multi` заголовок `| репо | путь | строка | механизм | кандидат | признаки |` и строки `| {item.get('repo', '')} | {item['path']} | …`. Вендор-копии в `_fleet_lines`: `rows_v` несёт `repo`; при `len(run["scope"]) > 1` — колонка `репо` первой.
+Инвентарь:
+
+```python
+    inv_head = "| репо | путь |" if multi else "| путь |"
+    lines += [
+        f"{inv_head} строка | механизм | кандидат | признаки |",
+        "|" + "---|" * (6 if multi else 5),
+    ]
+    for item in doc["inventory"]["llm"]:
+        repo = f"| {item.get('repo', '')} " if multi else ""
+        lines.append(
+            f"{repo}| {item['path']} | {item['line']} | {item['mechanism']} | "
+            f"{'да' if item['candidate'] else 'нет'} | {', '.join(item['features'])} |"
+        )
+```
+
+Вендор-копии в `_fleet_lines`:
+
+```python
+    multi = len(run["scope"]) > 1
+    rows_v = [
+        (repo, path, d)
+        for repo in run["scope"]
+        for path, decls in vendored.get(repo, {}).items()
+        for d in decls
+    ]
+    if rows_v:
+        head = "| репо | путь |" if multi else "| путь |"
+        lines += [
+            "",
+            "### вендор-копии",
+            "",
+            f"{head} владелец | ref | декларация |",
+            "|" + "---|" * (5 if multi else 4),
+        ]
+        lines += [
+            f"{'| ' + repo + ' ' if multi else ''}| {path} | {d['owner']} | "
+            f"{d['ref']} | {d['declaration']} |"
+            for repo, path, d in rows_v
+        ]
+```
 
 `Makefile:60` — `ARGS='[--repo r | --all] [--sched-dir ~/Library/LaunchAgents]'`.
 
@@ -1770,9 +1937,9 @@ def test_cargo_machete_clean_repo_ok(tmp_path: Path) -> None:
 def test_cargo_machete_without_binary_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("PATH", str(tmp_path))  # no cargo-machete on PATH
     repo = make_repo(tmp_path / "repo", RUST_OK)
     corpus = tuple(list_corpus(repo))
+    monkeypatch.setenv("PATH", str(tmp_path))  # after git ran: no cargo-machete
     target = RepoTarget(
         "repo", repo, repo, frozenset({"rust"}), corpus, EnvInfo("no-env"), now=NOW
     )
