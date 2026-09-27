@@ -480,3 +480,54 @@ def test_each_dead_path_glob_is_a_warning(tmp_path: Path) -> None:
     (doc,) = reports(ws)
     warnings = [w for w in doc["run"]["warnings"] if "--path" in w]
     assert warnings == ["--path 'nope/**' matched no files in devtools"]
+
+
+def test_non_utf8_plist_name_reaches_the_report_as_shown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#420: a --sched-dir plist named in Latin-1 (Linux) reached the report as
+    surrogates and killed report.json with UnicodeEncodeError (not OSError).
+    The plist is listed and cited by its shown name."""
+    ws = workspace(tmp_path)
+    sched_dir = plist_dir(tmp_path, [f"{ws}/devtools/orphan.py"])
+    real_file = sched_dir / "dev.atp.x.plist"
+    raw = sched_dir / "dev.caf\udce9.plist"
+    real_glob, real_open = Path.glob, Path.open
+
+    def glob(self, pattern, *a, **k):
+        return iter([raw]) if self == sched_dir else real_glob(self, pattern, *a, **k)
+
+    def open_(self, *a, **k):
+        return real_open(real_file if self == raw else self, *a, **k)
+
+    monkeypatch.setattr(Path, "glob", glob)
+    monkeypatch.setattr(Path, "open", open_)
+    main(args(ws, "--probe", "usage-graph", "--sched-dir", str(sched_dir)))
+    (doc,) = reports(ws)
+    assert doc["run"]["surface"]["plists"] == ["dev.caf�.plist"]
+    orphan = doc["graph"]["devtools"]["file:orphan.py"]
+    assert {"kind": "sched", "from": "launchd:dev.caf�.plist:1"} in orphan["edges"]
+
+
+@pytest.mark.parametrize("probe", ["usage-graph", "ast-dup"])
+def test_non_utf8_sched_dir_reaches_the_report_as_shown(
+    tmp_path: Path, monkeypatch, probe: str
+) -> None:
+    """Review of #435: the --sched-dir path itself went into surface raw — from
+    usage-graph's surface, and from run's own when usage-graph did not run."""
+    from selfcheck import run as run_module
+
+    ws = workspace(tmp_path)
+    sched_dir = plist_dir(tmp_path, [f"{ws}/devtools/live.py"])
+    weird = Path(str(sched_dir) + "-caf\udce9")
+    real_parse = run_module._args
+
+    def parse(argv):
+        parsed = real_parse(argv)
+        parsed.sched_dir = weird
+        return parsed
+
+    monkeypatch.setattr(run_module, "_args", parse)
+    main(args(ws, "--probe", probe, "--sched-dir", str(sched_dir)))
+    (doc,) = reports(ws)
+    assert doc["run"]["surface"]["sched_dir"].endswith("-caf\ufffd")

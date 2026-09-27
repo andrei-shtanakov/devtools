@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from selfcheck.corpus import last_commit_ts
+from selfcheck.corpus import last_commit_ts, shown
 from selfcheck.fleet import match
 from selfcheck.fleet.assemble import CANARY_NODE, CANARY_REPO, canary_misses
 from selfcheck.graph.build import build_graph, read_corpus_text
@@ -112,7 +112,7 @@ def _analyze(ctx: ProbeCtx) -> ParseResult:
             history[node.path] = ages(node.path) is not None
     surface = Surface(
         target.fleet,
-        str(target.sched_dir) if target.sched_dir else None,
+        shown(str(target.sched_dir)) if target.sched_dir else None,
         list(graph.plists),
     )
     findings = classify(
