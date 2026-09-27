@@ -2,11 +2,26 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from selfcheck.config import load_config
 from selfcheck.corpus import list_corpus
-from selfcheck.judge import MAX_SLICE, build_slice, clone_lines, is_candidate, order_key
+from selfcheck.judge import (
+    DEFAULT_MODEL,
+    MAX_SLICE,
+    SCHEMA,
+    build_slice,
+    call_judge,
+    clone_lines,
+    is_candidate,
+    judge_argv,
+    judge_env,
+    order_key,
+)
 from selfcheck.model import Confidence, Finding, Location
 from tests.selfcheck.helpers import make_repo
 
@@ -163,3 +178,86 @@ def test_huge_slice_is_truncated(tmp_path: Path) -> None:
     s = build_slice(f, _src(tmp_path, {"x.py": "x = 1\n" * 40000}))
     assert s is not None and s.truncated
     assert len(s.text.encode()) <= MAX_SLICE + 32 and s.text.endswith("[truncated]")
+
+
+ENV = {
+    "PATH": "/bin",
+    "HOME": "/h",
+    "USER": "u",
+    "LOGNAME": "u",
+    "GH_TOKEN": "secret",
+    "REVIEW_MODEL": "x",
+    "CLAUDE_CODE_OAUTH_TOKEN": "t",
+    "ANTHROPIC_API_KEY": "k",
+}
+GOOD = {"rationale": "r", "verdict": "replace", "replacement": "merge"}
+
+
+@pytest.mark.parametrize(
+    ("platform", "keys"),
+    [
+        ("darwin", {"PATH", "HOME", "USER"}),
+        ("linux", {"PATH", "HOME", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}),
+    ],
+)
+def test_env_allowlist_per_platform(platform: str, keys: set[str]) -> None:
+    assert set(judge_env(platform, ENV)) == keys
+
+
+def test_argv_is_tool_less_and_pinned() -> None:
+    argv = judge_argv("claude", DEFAULT_MODEL)
+    for flag in ("--restricted", "--strict-mcp-config", "--no-session-persistence"):
+        assert flag in argv
+    assert argv[argv.index("--tools") + 1] == ""
+    assert argv[argv.index("--model") + 1] == DEFAULT_MODEL
+    assert json.loads(argv[argv.index("--json-schema") + 1]) == SCHEMA
+    assert next(iter(SCHEMA["properties"])) == "rationale"
+
+
+def _runner(stdout: str = "", code: int = 0, exc: BaseException | None = None):
+    def run(argv, **kw):
+        assert kw["stdin"].read() == "slice"  # the slice comes on stdin, as a file
+        if exc is not None:
+            raise exc
+        return subprocess.CompletedProcess(argv, code, stdout, "")
+
+    return run
+
+
+@pytest.mark.parametrize(
+    ("stdout", "code", "exc", "expected"),
+    [
+        (
+            json.dumps({"is_error": False, "structured_output": GOOD}),
+            0,
+            None,
+            "replace",
+        ),
+        (json.dumps({"is_error": True, "result": "Not logged in"}), 1, None, "error"),
+        (
+            json.dumps({"structured_output": {**GOOD, "verdict": "maybe"}}),
+            0,
+            None,
+            "error",
+        ),
+        (json.dumps({"structured_output": {**GOOD, "id": "sc-x"}}), 0, None, "error"),
+        ("not json", 0, None, "error"),
+        ("x" * (64 * 1024 + 1), 0, None, "error"),
+        ("", 0, subprocess.TimeoutExpired(["claude"], 120), "error"),
+        ("", 0, ValueError("boom"), "error"),
+    ],
+)
+def test_call_judge_outcomes(
+    stdout: str, code: int, exc: BaseException | None, expected: str
+) -> None:
+    got = call_judge(
+        "claude",
+        "slice",
+        DEFAULT_MODEL,
+        runner=_runner(stdout, code, exc),
+        platform="darwin",
+        environ=ENV,
+    )
+    assert got["verdict"] == expected
+    if expected == "error":
+        assert got["detail"]

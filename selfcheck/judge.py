@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import ast
+import json
+import os
 import subprocess
-from collections.abc import Mapping
+import sys
+import tempfile
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from selfcheck.corpus import raw_path
 from selfcheck.graph.model import parse_python
 from selfcheck.model import Confidence, Finding
+from selfcheck.probes.base import run_group
 
 JUDGE_RULES = ("llm-sites", "ast-dup", "cli-overlap", "jscpd")
 _LEVEL = {Confidence.LIKELY: 0, Confidence.CANDIDATE: 1}
@@ -131,3 +136,123 @@ def build_slice(f: Finding, sources: Mapping[str, Path]) -> JudgeSlice | None:
     if len(raw) <= MAX_SLICE:
         return JudgeSlice(text, False)
     return JudgeSlice(raw[:MAX_SLICE].decode(errors="ignore") + "\n[truncated]", True)
+
+
+DEFAULT_MODEL = "claude-opus-5-5"
+TIMEOUT = 120
+MAX_OUTPUT = 64 * 1024
+SCHEMA: dict = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["rationale", "verdict", "replacement"],
+    "properties": {
+        "rationale": {"type": "string"},
+        "verdict": {"enum": ["replace", "keep", "unsure"]},
+        "replacement": {
+            "enum": [
+                "regex",
+                "rules",
+                "decision-tree",
+                "embedding-classifier",
+                "small-model",
+                "merge",
+                "none",
+            ]
+        },
+    },
+}
+_ENV_BASE = ("PATH", "HOME")
+_ENV_PLATFORM = {
+    "darwin": ("USER",),  # keychain lookup (§11.4)
+    "linux": ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
+}
+Runner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def judge_env(platform: str, environ: Mapping[str, str]) -> dict[str, str]:
+    """The allowlisted environment of the judge process (§11.4)."""
+    keys = (*_ENV_BASE, *_ENV_PLATFORM.get(platform, ()))
+    return {k: environ[k] for k in keys if k in environ}
+
+
+def judge_argv(binary: str, model: str) -> list[str]:
+    """Tool-less, stdin-only claude invocation (§5)."""
+    return [
+        binary,
+        "-p",
+        "--output-format",
+        "json",
+        "--json-schema",
+        json.dumps(SCHEMA),
+        "--model",
+        model,
+        "--restricted",
+        "--strict-mcp-config",
+        "--no-session-persistence",
+        "--permission-prompts",
+        "none",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "0.2",
+    ]
+
+
+def _error(detail: str) -> dict[str, str]:
+    return {"verdict": "error", "detail": detail[:200]}
+
+
+def valid_verdict(out: object) -> dict[str, str] | None:
+    """The verdict fields when ``out`` matches SCHEMA exactly, else None."""
+    if not isinstance(out, dict) or set(out) != set(SCHEMA["required"]):
+        return None
+    props = SCHEMA["properties"]
+    if out["verdict"] not in props["verdict"]["enum"]:
+        return None
+    if out["replacement"] not in props["replacement"]["enum"]:
+        return None
+    if not isinstance(out["rationale"], str):
+        return None
+    return {k: str(out[k]) for k in SCHEMA["required"]}
+
+
+def call_judge(
+    binary: str,
+    text: str,
+    model: str,
+    *,
+    runner: Runner = run_group,
+    platform: str = sys.platform,
+    environ: Mapping[str, str] = os.environ,
+) -> dict[str, str]:
+    """One judge call; any failure is ``{"verdict": "error"}`` (§5, §11.4)."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="selfcheck-judge-") as cwd:
+            stdin_path = Path(cwd) / "stdin.txt"
+            stdin_path.write_text(text, encoding="utf-8")
+            with stdin_path.open(encoding="utf-8") as stdin:
+                proc = runner(
+                    judge_argv(binary, model),
+                    stdin=stdin,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=cwd,
+                    env=judge_env(platform, environ),
+                    timeout=TIMEOUT,
+                )
+    except subprocess.TimeoutExpired:
+        return _error("timeout")
+    except Exception as exc:  # noqa: BLE001 — the adapter never kills the run (r1 P6)
+        return _error(f"adapter: {exc!r}")
+    if len(proc.stdout.encode()) > MAX_OUTPUT:
+        return _error("output-too-large")
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return _error(f"unparsable (rc {proc.returncode})")
+    if not isinstance(data, dict) or data.get("is_error"):
+        return _error(str(data.get("result") if isinstance(data, dict) else data))
+    verdict = valid_verdict(data.get("structured_output"))
+    return verdict if verdict is not None else _error("outside-schema")
