@@ -107,6 +107,8 @@ def _lines(sources: Mapping[str, Path], repo: str, rel: str) -> list[str] | None
 
 
 _MAKE_TARGET = re.compile(r"^[^\t#\s][^=]*?:(?!=)")
+# make keeps a recipe open across conditionals too (#453)
+_MAKE_CONDITIONAL = re.compile(r"^\s*(ifeq|ifneq|ifdef|ifndef|else|endif)\b")
 _MAKE_CLIMB = 12
 
 
@@ -124,13 +126,20 @@ def _make_target(lines: list[str], line: int) -> int:
         text = lines[k - 1]
         if _MAKE_TARGET.match(text):
             return k
-        if not (text.startswith(("\t", "#")) or not text.strip()):
+        if not (
+            text.startswith(("\t", "#"))
+            or not text.strip()
+            or _MAKE_CONDITIONAL.match(text)
+        ):
             break
         k -= 1
     return line
 
 
 def _span(lines: list[str], line: int, rule: str, clone: int) -> tuple[int, int]:
+    # A finding line past the file must not take the run down (#453): the
+    # numbers come from the same file, but an adapter must not crash on them.
+    line = min(max(line, 1), max(len(lines), 1))
     if rule.startswith("llm-sites"):
         return max(1, line - LLM_CONTEXT), min(len(lines), line + LLM_CONTEXT)
     if rule == "cli-overlap/make-recipe":
@@ -354,6 +363,7 @@ def load_cache(path: Path) -> tuple[dict[str, dict], list[str]]:
 
 def save_cache(path: Path, cache: Mapping[str, dict]) -> str | None:
     """Atomic write via a unique temp file; old versions dropped (§11.3)."""
+    name: str | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         keep = {k: v for k, v in cache.items() if _current(k)}
@@ -361,18 +371,14 @@ def save_cache(path: Path, cache: Mapping[str, dict]) -> str | None:
             "w", dir=path.parent, prefix=".judge-cache-", delete=False
         ) as tmp:
             name = tmp.name
-            try:
-                json.dump(keep, tmp, ensure_ascii=False, sort_keys=True)
-            except OSError:
-                tmp.close()
-                Path(name).unlink(missing_ok=True)  # no stray temp (#444, #452)
-                raise
-        try:
-            os.replace(name, path)
-        except OSError:
-            Path(name).unlink(missing_ok=True)
-            raise
+            json.dump(keep, tmp, ensure_ascii=False, sort_keys=True)
+        os.replace(name, path)
     except OSError as exc:
+        # One cleanup for the whole sequence: the error can surface in
+        # json.dump, at flush/close on leaving `with`, or in os.replace
+        # (#444, #452, #453) — none may leave a stray temp.
+        if name is not None:
+            Path(name).unlink(missing_ok=True)
         return f"judge-cache {path.name} not saved: {exc}"
     return None
 

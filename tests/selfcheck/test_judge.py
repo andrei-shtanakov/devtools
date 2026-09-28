@@ -576,3 +576,54 @@ def test_failed_write_leaves_no_temp(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(judge_module.json, "dump", boom)
     assert save_cache(tmp_path / "judge-cache.json", {}) is not None
     assert not list(tmp_path.glob(".judge-cache-*"))
+
+
+def test_failed_close_leaves_no_temp(tmp_path: Path, monkeypatch) -> None:
+    """#453.1: the write error surfaces at flush/close, not inside json.dump
+    (ENOSPC on the buffer flush) — still no stray temp file."""
+    import tempfile as tempfile_module
+
+    from selfcheck import judge as judge_module
+
+    real = tempfile_module.NamedTemporaryFile
+
+    class _FailingClose:
+        def __init__(self, *a, **kw):
+            self._tmp = real(*a, **kw)
+            self.name = self._tmp.name
+
+        def write(self, data):
+            return self._tmp.write(data)
+
+        def close(self):
+            self._tmp.close()
+            raise OSError(28, "No space left on device")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+
+    monkeypatch.setattr(judge_module.tempfile, "NamedTemporaryFile", _FailingClose)
+    assert save_cache(tmp_path / "judge-cache.json", {}) is not None
+    assert not list(tmp_path.glob(".judge-cache-*"))
+
+
+def test_make_recipe_climbs_over_conditionals(tmp_path: Path) -> None:
+    """#453.2: make keeps a recipe open across ifeq/else/endif — the slice
+    still starts at the target line."""
+    text = "build:\nifeq ($(X),1)\n\techo a\nelse\n\techo b\nendif\n"
+    f = _f("cli-overlap/make-recipe", Confidence.CANDIDATE, path="Makefile", line=5)
+    f.related = [{"owner_repo": "a", "path": "Makefile", "line": 5, "member": "build"}]
+    s = build_slice(f, _src(tmp_path, {"Makefile": text}))
+    assert s is not None and "lines 1-" in s.text
+
+
+def test_finding_line_past_the_end_does_not_crash(tmp_path: Path) -> None:
+    """#453.3: a line number beyond the file must not take the run down."""
+    text = "build:\n\techo a\n"
+    f = _f("cli-overlap/make-recipe", Confidence.CANDIDATE, path="Makefile", line=50)
+    f.related = [{"owner_repo": "a", "path": "Makefile", "line": 50, "member": "build"}]
+    s = build_slice(f, _src(tmp_path, {"Makefile": text}))
+    assert s is not None
