@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -2679,6 +2680,10 @@ class Replacement(NamedTuple):
 
     revision: int
     reason: str
+    #: `--owner-confirm` (спека 2026-09-28 §8): замену отклонённой первой
+    #: доставки подтверждает владелец, когда гейт «закрыл человек» не
+    #: установил этого по фактам форджи. Осмыслен только для N = 1.
+    owner_confirm: bool = False
 
 
 def _check_replacement_target(
@@ -2733,6 +2738,11 @@ def _check_replacement_target(
     предложение снято, а именно это замена и делает. Это же — ручной
     выход оператора из отказа: закрыть #N руками с объяснением и
     повторить переход.
+
+    PR ПЕРВОЙ доставки (N = 1, спека 2026-09-28) в OPEN отказывает всегда
+    и называет только ручной выход: head у её записи нет, и сверять
+    идентичность нечем. Обычно такой PR ловит валидация хода либо проверка
+    переоткрытия (§5); сюда он доходит, переоткрытый внутри вызова.
     """
     pr_state = facts.get("state")
     if pr_state == "MERGED":
@@ -2750,6 +2760,17 @@ def _check_replacement_target(
         )
     if pr_state != "OPEN":
         return
+    if not head_sha and pr == (state.ops.get(_V1_KEY) or {}).get("pr"):
+        # N = 1 (спека 2026-09-28 §4.1 п.2): у первой доставки head_sha
+        # не бывает по построению, и её открытый PR механика не закрывает
+        # никогда — выход только ручной. Сюда доходит PR v1, переоткрытый
+        # между валидацией и шагом закрытия.
+        raise RuntimeError(
+            f"PR #{pr} первой доставки открыт — механика его не закрывает: "
+            "идентичность предложения первой доставки не проверить (её "
+            "запись не несёт head). Закройте PR сами, с объяснением, и "
+            "повторите --supersede"
+        )
     if not head_sha:
         raise RuntimeError(
             f"замена PR #{pr}: в записи ревизии нет head_sha — "
@@ -2805,19 +2826,17 @@ def _validate_replacement(
     ревизии; связь направлена вперёд, запись заменяемой ревизии не
     трогается (§I4).
 
-    Историческая v1 (`tasks-deliver`) заменяться НЕ может, и это не
-    экономия: у её записи нет ни `branch`, ни `head_sha` — ни
-    идентичность предложения проверить, ни ветку удалить. Если её PR
-    дефектен, воркстрим не доставил ещё ничего, и разбирается это
-    обычной доставкой, а не переизданием.
+    Историческая v1 (`tasks-deliver`) заменяется ТОЛЬКО отклонённой —
+    PR закрыт без мержа (спека 2026-09-28 §4, `_validate_v1_replacement`):
+    у её записи нет ни `branch`, ни `head_sha`, поэтому открытый PR v1
+    механика не закрывает (идентичность предложения не проверить), а
+    вмерженный чинится обычным `--supersede`.
     """
     n = replace.revision
-    if n < 2:
-        raise RuntimeError(
-            "заменять можно только ревизию переиздания (N ≥ 2): у первой "
-            "доставки нет ни ветки, ни head_sha — идентичность её "
-            "предложения не проверить"
-        )
+    if n == 1:
+        return _validate_v1_replacement(state, ops, replace)
+    if n < 1:
+        raise RuntimeError(f"ревизии {n} не бывает — заменять нечего")
     op = state.ops.get(f"{_REVISION_PREFIX}{n}")
     if op is None:
         raise RuntimeError(f"ревизии {n} нет в леджере — заменять нечего")
@@ -2834,21 +2853,7 @@ def _validate_replacement(
             "незавершённая ревизия его ещё не сделала. Её выход — "
             f"--abandon-revision {n}"
         )
-    later = [
-        m for m, later_op in _revisions(state)
-        if m > n and later_op.get("replaces_revision") != n
-    ]
-    if later:
-        # Замена середины истории породила бы ДВЕ конкурирующие цепочки
-        # forward-ссылок: у §I3 не осталось бы однозначного ответа, чьё
-        # закрытие ожидаемо. Исключение — ревизии, которые эту же замену
-        # уже ведут: с ними повтор `--replace-revision N` продолжает
-        # начатое, а не начинает вторую цепочку.
-        raise RuntimeError(
-            f"ревизия {n} не последняя в леджере (после неё: "
-            f"{', '.join(str(m) for m in later)}) — заменять середину "
-            "истории нельзя; адресуйте замену последней ревизии"
-        )
+    _require_last_in_history(state, n)
     pr, branch = op.get("pr"), op.get("branch")
     if not isinstance(pr, int) or not branch:
         raise RuntimeError(
@@ -2871,6 +2876,206 @@ def _validate_replacement(
         "replaces_head_sha": op.get("head_sha"),
         "replacement_reason": replace.reason,
     }
+
+
+def _require_last_in_history(state: RunState, n: int) -> None:
+    """Заменяемая ревизия обязана быть последней в истории (§I10).
+
+    Замена середины истории породила бы ДВЕ конкурирующие цепочки
+    forward-ссылок: у §I3 не осталось бы однозначного ответа, чьё
+    закрытие ожидаемо. Исключение — ревизии, которые эту же замену уже
+    ведут: с ними повтор `--replace-revision N` продолжает начатое, а не
+    начинает вторую цепочку.
+    """
+    later = _later_revisions(state, n)
+    if later:
+        raise RuntimeError(
+            f"ревизия {n} не последняя в леджере (после неё: "
+            f"{', '.join(str(m) for m in later)}) — заменять середину "
+            "истории нельзя; адресуйте замену последней ревизии"
+        )
+
+
+def _later_revisions(state: RunState, n: int) -> list[int]:
+    """Ревизии после `n`, которые НЕ ведут замену `n`."""
+    return [
+        m for m, op in _revisions(state)
+        if m > n and op.get("replaces_revision") != n
+    ]
+
+
+def _latest_v1_replacement(state: RunState) -> tuple[int, dict] | None:
+    """Новейшая запись, объявившая замену первой доставки; None — нет."""
+    found = [
+        (m, op) for m, op in _revisions(state)
+        if op.get("replaces_revision") == 1
+    ]
+    return found[-1] if found else None
+
+
+def _validate_v1_replacement(
+    state: RunState, ops: Ops, replace: Replacement
+) -> dict:
+    """Замена ОТКЛОНЁННОЙ первой доставки (спека 2026-09-28 §4.1).
+
+    Все проверки — до единого эффекта. Порядок: леджер (без сети) →
+    состояние PR v1 по фордже → факты закрытия одним запросом → гейт
+    «закрыл человек» (Q-1, §8). Возврат — поля намерения §4.2;
+    `replaces_branch: None` — у v1 ветки нет, и шаг удаления ветки
+    выходит рано сам.
+
+    Повтор при уже записанной, но `started` замене — пустой словарь:
+    намерение durable, цикл реконсиляции доигрывает её, и гейт Q-1 повтор
+    не держит (подтверждение владельца уже в намерении).
+    """
+    op = state.ops.get(_V1_KEY) or {}
+    if op.get("status") != "completed":
+        raise RuntimeError(
+            f"первая доставка в статусе {op.get('status')!r} — заменяется "
+            "только завершённая; незавершённую разбирает обычная доставка "
+            "(без --supersede)"
+        )
+    pr = op.get("pr")
+    if not isinstance(pr, int):
+        raise _missing_pr(state)
+    _require_last_in_history(state, 1)
+    prior = _latest_v1_replacement(state)
+    if prior is not None and prior[1].get("status") == "started":
+        return {}
+    try:
+        facts = ops.pr_facts(state.repo_slug, pr)
+    except (subprocess.CalledProcessError, OSError, ValueError) as exc:
+        # Обёртка — на месте хода, а не в `RealOps`: у `pr_facts` десятки
+        # вызовов в `governance/`, и менять их поведение этот ход не вправе.
+        raise RuntimeError(
+            f"замена первой доставки: факты PR #{pr} не получены ({exc}) — "
+            "состояние предложения неизвестно, замена не начата"
+        ) from exc
+    pr_state = facts.get("state")
+    if pr_state == "MERGED":
+        raise RuntimeError(
+            f"PR #{pr} первой доставки вмержен — вмерженное предложение не "
+            "отзывается: оно уже часть base. Дефектная вмерженная доставка "
+            "чинится обычным --supersede: он ничего не отзывает, а добавляет"
+        )
+    if pr_state == "OPEN":
+        raise RuntimeError(
+            f"PR #{pr} первой доставки открыт — механика его не закрывает: "
+            "идентичность предложения первой доставки не проверить (её "
+            "запись не несёт head). Закройте PR сами, с объяснением, и "
+            "повторите --replace-revision 1"
+        )
+    if pr_state != "CLOSED":
+        raise RuntimeError(
+            f"PR #{pr} первой доставки в состоянии {pr_state!r} — замена "
+            "допустима только для закрытого без мержа; fail-closed"
+        )
+    return {
+        "replaces_revision": 1,
+        "replaces_pr": pr,
+        "replaces_branch": None,
+        "replacement_reason": replace.reason,
+        **_closed_by_human_or_confirmed(state, ops, pr, replace.owner_confirm),
+    }
+
+
+def _closed_by_human_or_confirmed(
+    state: RunState, ops: Ops, pr: int, owner_confirm: bool
+) -> dict:
+    """Факты закрытия PR v1 и гейт «закрыл человек» (Q-1(а), спека §8).
+
+    Факт форджи CLOSED не доказывает «отклонил человек»: GitHub закрывает
+    PR сам при удалении head-ветки, и PR мог закрыть агент. Гейт
+    отказывает, если последнее закрытие совершила учётка агента либо ему
+    непосредственно предшествует удаление ветки тем же актором. Учётка
+    агента — из профиля (`ops.agent_login`), не из кода; не определить —
+    отказ.
+
+    Выход — `--owner-confirm` из-под НЕ-агентской учётки: пишется
+    `replacement_confirmed_by` рядом с `replaces_closed_by`. Это
+    defense-in-depth, не граница: агентская сессия под профилем владельца
+    даёт актора-владельца; правило наблюдаемо в журнале.
+    """
+    closure = ops.pr_closure(state.repo_slug, pr)
+    if closure is None or closure.get("state") != "CLOSED":
+        raise RuntimeError(
+            f"факт закрытия PR #{pr} первой доставки не установлен (последнее "
+            "событие — не закрытие, timeline пуст либо запрос не удался) — "
+            "fail-closed"
+        )
+    agent = ops.agent_login()
+    if not agent:
+        raise RuntimeError(
+            "учётку агента не определить (профиль REVIEW_GH_CONFIG_DIR, "
+            "`gh api user`) — гейт «закрыл человек» не проверить; fail-closed"
+        )
+    closed_by = closure["closed_by"]
+    fields = {
+        "replaces_closed_by": closed_by,
+        "replaces_closed_at": closure["closed_at"],
+    }
+    if owner_confirm:
+        caller = ops.caller_login()
+        if not caller:
+            raise RuntimeError(
+                "вызывающую учётку не определить (`gh api user`) — "
+                "подтверждение владельца не записать; fail-closed"
+            )
+        if caller == agent:
+            raise RuntimeError(
+                f"--owner-confirm из-под учётки агента ({agent}) — "
+                "подтверждение владельца даёт только не-агентская учётка"
+            )
+        return {**fields, "replacement_confirmed_by": caller}
+    if closed_by == agent or closure.get("head_deleted_first") is True:
+        cause = (
+            f"закрыл учётка агента {agent}" if closed_by == agent
+            else f"закрытию предшествует удаление ветки ({closed_by})"
+        )
+        raise RuntimeError(
+            f"PR #{pr} первой доставки: {cause} — «отклонил человек» по "
+            "фактам форджи не установлено. Если закрытие — решение "
+            "владельца, повторите ход с --owner-confirm из-под его учётки"
+        )
+    return fields
+
+
+def _v1_replacement_repeat(
+    state: RunState, ops: Ops
+) -> SupersedeResult | None:
+    """Явный `--replace-revision 1` при уже записанной замене (§4.4).
+
+    Живая завершённая замена M (PR открыт либо вмержен) — объяснение и
+    возврат её PR, новая ревизия не заводится; PR замены закрыт — отказ с
+    подсказкой `--replace-revision M`. `started` (доигрывается циклом) и
+    брошенная (обязательство перенимает следующая ревизия) — None.
+    Ревизия, которую замена v1 не ведёт, после v1 — тоже None: отказ
+    «замена середины истории» называет валидация.
+    """
+    prior = _latest_v1_replacement(state)
+    if prior is None or _later_revisions(state, 1):
+        return None
+    m, op = prior
+    if op.get("status") != "completed":
+        return None
+    pr = op.get("pr")
+    if not isinstance(pr, int):
+        raise RuntimeError(
+            f"ревизия {m} (замена первой доставки) completed без номера PR — "
+            "леджер повреждён; почините запись прежде, чем продолжать"
+        )
+    pr_state = ops.pr_facts(state.repo_slug, pr).get("state")
+    if pr_state not in ("OPEN", "MERGED"):
+        raise RuntimeError(
+            f"первая доставка заменена ревизией {m}, но её PR #{pr} закрыт "
+            f"без мержа (state={pr_state!r}) — заменяйте её: --supersede "
+            f"--replace-revision {m} --reason …"
+        )
+    print(
+        f"первая доставка уже заменена ревизией {m} (PR #{pr}) — "
+        f"{pr_state}; новая ревизия не заводится"
+    )
+    return SupersedeResult("returned", pr)
 
 
 def _pending_replacement(
@@ -3688,6 +3893,10 @@ def deliver_superseded(
     # тронут. На повторе (намерение уже durable) её результат не нужен —
     # шаги замены читаются из намерения, — но проверка всё равно уместна:
     # вмешаться в заменяемый PR могли и между заходами.
+    if replace is not None and replace.revision == 1:
+        repeated = _v1_replacement_repeat(state, ops)
+        if repeated is not None:
+            return repeated
     replace_fields = (
         _validate_replacement(state, ops, replace) if replace else {}
     )
@@ -4251,7 +4460,17 @@ def main(argv: list[str] | None = None) -> int:
              "незамерженное предложение названной ревизии — новая "
              "ревизия несёт replaces_revision/replaces_pr, PR "
              "отозванной закрывается механикой, её ветка удаляется; "
-             "требует --reason",
+             "требует --reason. N = 1 — только отклонённая первая "
+             "доставка (PR закрыт без мержа): новая ревизия доставляется "
+             "из состояния «успешной доставки нет» (supersedes: null, "
+             "version: 1)",
+    )
+    parser.add_argument(
+        "--owner-confirm", action="store_true",
+        help="только с --replace-revision 1: владелец подтверждает, что "
+             "первую доставку отклонил он, когда по фактам форджи этого не "
+             "установить (закрыла учётка агента либо удаление ветки); "
+             "вызывающая учётка пишется в replacement_confirmed_by",
     )
     args = parser.parse_args(argv)
     if args.conform_approve:
@@ -4322,6 +4541,22 @@ def main(argv: list[str] | None = None) -> int:
             "--replace-revision осмыслен только с --supersede: замена "
             "снимает старое предложение и доставляет новое одним переходом"
         )
+    if args.owner_confirm and args.replace_revision != 1:
+        # Гейт «закрыл человек» стоит только у замены первой доставки
+        # (спека 2026-09-28 §8); в остальных переходах флаг ничего бы не
+        # подтверждал, и молча съесть его — выполнить не то, что просили.
+        parser.error(
+            "--owner-confirm осмыслен только с --replace-revision 1: он "
+            "подтверждает отклонение первой доставки владельцем"
+        )
+    if args.replace_revision == 1 and not (args.reason or "").strip():
+        # Отдельный текст правила N = 1: причина — единственный след того,
+        # почему первая доставка отклонена (журнал `replacement_reason`).
+        parser.error(
+            "--replace-revision 1 требует непустой --reason: причина "
+            "отклонения первой доставки уходит в журнал ревизии "
+            "(replacement_reason)"
+        )
     if args.replace_revision is not None and not args.reason:
         # Причина обязательна (требование владельца): она уходит в
         # леджер полем `replacement_reason` и в комментарий закрываемого
@@ -4384,7 +4619,10 @@ def main(argv: list[str] | None = None) -> int:
             result = deliver_superseded(
                 state, ops, legacy_bundle=args.legacy_bundle,
                 replace=(
-                    Replacement(args.replace_revision, args.reason)
+                    Replacement(
+                        args.replace_revision, args.reason,
+                        args.owner_confirm,
+                    )
                     if args.replace_revision is not None else None
                 ),
             )
