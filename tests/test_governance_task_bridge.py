@@ -11581,3 +11581,543 @@ def test_v1_merged_does_not_hold_an_ordinary_reissue(tmp_path, monkeypatch):
     )
     assert "tasks-deliver-v5" not in state.ops
     assert state.ops["tasks-deliver-v4"]["status"] == "completed"
+
+
+# --- i5-traceless-noop-after-abandon-20260923 · TASK-001 -------------------
+#
+# No-op §I5 после броска ревизии (реконсиляция §I3 → `abandon_and_next`)
+# сегодня лжёт: печатает «апстрим не менялся ... вызов бесследен», хотя
+# этим же вызовом durable-записан `run.json` со `status: abandoned`. Тема
+# правит вывод (М-1/М-2/М-3), делает хвост `_debt_notice` условным (М-4) и
+# переписывает докстринги `SupersedeResult`/`deliver_superseded` (М-5).
+# Сценарии ниже — BEH-01…BEH-05, BEH-07…BEH-10, BEH-12…BEH-17, BEH-19…
+# BEH-21 из `workstreams/i5-traceless-noop-after-abandon-20260923/spec/
+# 15-behaviour-spec.md`; мутационный контроль (BEH-06, BEH-11) и замер
+# герметичности (BEH-18) — предмет TASK-002/TASK-003, не здесь.
+
+#: Общие допущения (15-behaviour-spec.md): «утверждение бесследности» —
+#: закрытый перечень подстрок, пинованный здесь константой. Пополнение —
+#: правка допущения, а не догадка сценария.
+_TRACELESS_WORDS = ("бесследен", "ничего не изменилось")
+
+#: Design М-5: две подстроки докстринга, пинованные дизайном, не тестом.
+_S_FORBIDDEN_DOC = "run.json не тр"
+_S_REQUIRED_DOC = "реконсиляции §I3"
+
+
+def _abandon_then_noop_state(
+    tmp_path: Path, monkeypatch, before_content=None, **over,
+):
+    """Путь З: `started`-ревизия на сдвинувшемся base, апстрим не менялся.
+
+    `_seed_revision` заводит v2 `started` со сдвинутым `base_sha` (реальная
+    база стаба — `"base-sha-1"`), а `content_anchor` записи v1
+    подставляется РАВНЫМ вычисленному по текущему бандлу — так, что после
+    того, как реконсиляция §I3 бросит v2 (`abandon_and_next`), §I5 найдёт
+    апстрим неизменным и вернёт `noop`. v1-запись по умолчанию
+    `content_anchor` не несёт вовсе (`_seed_revision`), что заодно даёт
+    третий вход BEH-21 «без `content_anchor`» без единой правки фикстуры.
+
+    `before_content` (если дан) правит `state` — например, портит discovery
+    source (`_corrupt_discovery_source`) — ДО вычисления `content_anchor`:
+    иначе порча, случившаяся ПОСЛЕ, изменила бы сам анкор (он несёт байты
+    `00-discovery/brief.md`) и путь З стал бы недостижим тем же вызовом,
+    которым слепая зона §I5 и проверяется.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    over.setdefault("base_sha", "БАЗА-ПОЗАПРОШЛАЯ")
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(state, monkeypatch, **over)
+    state = rs.load("r-recon")
+    if before_content is not None:
+        before_content(state)
+    content = tb._content_anchor(
+        state.target_dir, state.bundle_dir, None, state.brief
+    )
+    state.ops["tasks-deliver"]["content_anchor"] = content
+    rs.save(state)
+    return rs.load("r-recon")
+
+
+def _corrupt_discovery_source(state) -> None:
+    """Класс `forbidden`: discovery source расходится с intake descriptor.
+
+    Тот же вход, что и `test_gate_refusal_on_changed_discovery_source_is_not_retryable`
+    выше: источник переписан, а `state.brief` продолжает нести старый пин.
+    """
+    source = Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"changed source\n")
+    state.brief = {
+        "frame": "customer",
+        "primary": "00-discovery/brief.md",
+        "requirements_source": "00-discovery/brief.md",
+        "source_paths": ["00-discovery/brief.md"],
+        "source_blobs": {"discovery-brief": "0" * 40},
+    }
+
+
+def _normalized_doc(obj) -> str:
+    """`__doc__`, нормализованный по контракту М-5: пробелы склеены в один,
+    обратные кавычки сняты — проверка идёт не по сырому тексту (design
+    20-design.md §М-5)."""
+    doc = obj.__doc__ or ""
+    return " ".join(doc.replace("`", "").split())
+
+
+def test_supersede_noop_after_abandon_names_both_facts(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-01: no-op после броска называет оба факта — порознь.
+
+    Ни один из двух не выводится читателем из умолчания другого: каждый
+    факт утверждается своим assert'ом.
+    """
+    from governance import task_bridge as tb
+
+    state = _abandon_then_noop_state(tmp_path, monkeypatch)
+    result = tb.deliver_superseded(
+        state, _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    )
+    assert result == tb.SupersedeResult("noop")
+
+    out = capsys.readouterr().out
+    assert "апстрим не менялся — переиздание не требуется" in out
+    assert "ревизия 2 брошена этим вызовом" in out
+
+
+def test_supersede_noop_after_abandon_output_has_no_traceless_words(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-02: на пути З слова «бесследен» в выводе нет — читан ЦЕЛИКОМ.
+
+    Основная строка no-op'а остаётся: её сохранность — предмет BEH-01, а
+    в закрытый перечень она не входит.
+    """
+    from governance import task_bridge as tb
+
+    state = _abandon_then_noop_state(tmp_path, monkeypatch)
+    assert tb.deliver_superseded(
+        state, _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+
+    out = capsys.readouterr().out
+    for word in _TRACELESS_WORDS:
+        assert word not in out, f"запрещённая подстрока {word!r} вернулась"
+    assert "апстрим не менялся — переиздание не требуется" in out
+
+
+def test_cli_supersede_path_b_is_traceless_and_rc0(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-03/BEH-04: путь Б — байты `run.json` неизменны, CLI RC 0, и в
+    выводе нет ни слова о броске.
+
+    Леджер — настоящий файл на диске (снят до/после вызова, не через
+    подменённый `save`); тот же вход, что и сегодняшнее предъявление
+    `test_supersede_right_after_delivery_is_traceless_noop`, но СКВОЗЬ CLI.
+    """
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    assert tb.deliver_for_run(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
+    before = (rs.run_dir("r-recon") / "run.json").read_bytes()
+    capsys.readouterr()
+
+    ops = _SupersedeOps(prs=[_MERGED_PR])
+    monkeypatch.setattr(tb, "RealOps", lambda: ops)
+    assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
+
+    assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
+    out = capsys.readouterr().out
+    assert "брошена" not in out, "слова о броске на пути Б быть не должно"
+
+
+def test_supersede_noop_outputs_differ_between_path_z_and_path_b(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-05: негативный контроль — вывод пути З отличается от пути Б,
+    и это утверждает ОДИН сценарий, сопоставляя оба вывода между собой."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    _recon_state(tmp_path / "b", monkeypatch)
+    assert tb.deliver_for_run(
+        rs.load("r-recon"), _SupersedeOps(prs=[_MERGED_PR])
+    ) == 77
+    capsys.readouterr()
+    assert tb.deliver_superseded(
+        rs.load("r-recon"), _SupersedeOps(prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+    out_b = capsys.readouterr().out
+
+    state_z = _abandon_then_noop_state(tmp_path / "z", monkeypatch)
+    assert tb.deliver_superseded(
+        state_z, _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+    out_z = capsys.readouterr().out
+
+    assert out_b != out_z
+
+
+def test_supersede_noop_after_abandon_forbidden_branch_keeps_debt_facts(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-07: ветка `forbidden` на пути З называет прежние факты о долге
+    без слова «бесследен» — приписка остаётся диагностикой, а не исчезает.
+    """
+    from governance import task_bridge as tb
+
+    state = _abandon_then_noop_state(
+        tmp_path, monkeypatch, before_content=_corrupt_discovery_source,
+    )
+
+    assert tb.deliver_superseded(
+        state, _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+
+    out = capsys.readouterr().out
+    assert "расходится с intake descriptor" in out
+    assert "новый workstream/run" in out
+    assert "бесследен" not in out
+
+
+def test_supersede_noop_after_abandon_unresolved_branch_keeps_reason(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-08: ветка `unresolved` на пути З — то же, самостоятельным
+    сценарием: правка одного из двух мест обязана оставить второй красным.
+    """
+    from governance import task_bridge as tb
+
+    state = _abandon_then_noop_state(tmp_path, monkeypatch)
+
+    class _BlindBundle(_RevisionPrOps):
+        def show_file(self, target_dir, ref, path):
+            if path.startswith(f"{state.bundle_dir}/"):
+                self.calls.append(("show_file", ref, path))
+                return None
+            return super().show_file(target_dir, ref, path)
+
+    ops = _BlindBundle(pr=None, prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("noop")
+
+    out = capsys.readouterr().out
+    assert "долг активного DAG установить не удалось" in out
+    assert "бесследен" not in out
+
+
+def test_supersede_noop_path_b_forbidden_branch_keeps_traceless_word(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-09 (вариант `forbidden`): на пути Б приписка прежняя ЦЕЛИКОМ,
+    включая утверждение бесследности — там оно верно."""
+    from governance import task_bridge as tb
+
+    # Порча — ДО вычисления content_anchor (тот же довод, что и в
+    # `_abandon_then_noop_state`): иначе анкор до/после разошёлся бы, и
+    # путь Б стал бы недостижим тем же вызовом.
+    state = _recon_state(tmp_path, monkeypatch)
+    assert tb.deliver_for_run(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
+    from governance import run_state as rs
+
+    state = rs.load("r-recon")
+    _corrupt_discovery_source(state)
+    content = tb._content_anchor(
+        state.target_dir, state.bundle_dir, None, state.brief
+    )
+    state.ops["tasks-deliver"]["content_anchor"] = content
+    rs.save(state)
+    capsys.readouterr()
+
+    assert tb.deliver_superseded(
+        rs.load("r-recon"), _SupersedeOps(prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+
+    out = capsys.readouterr().out
+    assert "расходится с intake descriptor" in out
+    assert "и вызов бесследен" in out
+
+
+def test_supersede_noop_path_b_unresolved_branch_keeps_traceless_word(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-09 (вариант `unresolved`): то же для второй диагностической
+    ветки — обе остаются прежними на пути Б."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    assert tb.deliver_for_run(state, _SupersedeOps(prs=[_MERGED_PR])) == 77
+    capsys.readouterr()
+
+    class _BlindBase(_SupersedeOps):
+        def show_file(self, target_dir, ref, path):
+            if path.startswith(f"{state.bundle_dir}/"):
+                self.calls.append(("show_file", ref, path))
+                return None
+            return super().show_file(target_dir, ref, path)
+
+    ops = _BlindBase(prs=[_MERGED_PR])
+    assert tb.deliver_superseded(
+        rs.load("r-recon"), ops
+    ) == tb.SupersedeResult("noop")
+
+    out = capsys.readouterr().out
+    assert "долг активного DAG установить не удалось" in out
+    assert "и вызов бесследен" in out
+
+
+def test_supersede_result_docstring_is_honest_about_noop() -> None:
+    """BEH-10 (`SupersedeResult`): **S-запр** отсутствует, **S-обяз**
+    присутствует — по нормализованному `__doc__`."""
+    from governance import task_bridge as tb
+
+    doc = _normalized_doc(tb.SupersedeResult)
+    assert _S_FORBIDDEN_DOC not in doc
+    assert _S_REQUIRED_DOC in doc
+
+
+def test_deliver_superseded_docstring_is_honest_about_noop() -> None:
+    """BEH-10 (`deliver_superseded`): то же — обе единицы, а не одна."""
+    from governance import task_bridge as tb
+
+    doc = _normalized_doc(tb.deliver_superseded)
+    assert _S_FORBIDDEN_DOC not in doc
+    assert _S_REQUIRED_DOC in doc
+
+
+def test_supersede_delivery_after_abandon_has_no_abandon_word_in_output(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-12: анкер разошёлся — поток уходит на доставку, вывод прежний:
+    своей строки тема туда не добавляет."""
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(state, monkeypatch, base_sha="БАЗА-ПОЗАПРОШЛАЯ")
+    capsys.readouterr()
+
+    ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
+
+    out = capsys.readouterr().out
+    assert "брошена этим вызовом" not in out
+
+
+def test_supersede_other_reconciliation_outcomes_have_no_abandon_word(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-13: `return_pr`, `complete` и `continue` не печатают слово о
+    броске — зеркало **NFR-01** со стороны реконсиляции."""
+    from governance import task_bridge as tb
+
+    # return_pr: §I3 «completed | OPEN».
+    state = _recon_state(tmp_path / "return-pr", monkeypatch)
+    _seed_revision(
+        state, monkeypatch, status="completed", pr=9, head_sha="h",
+        anchor="ANCHOR-V2",
+    )
+    capsys.readouterr()
+    ops = _RevisionPrOps(pr=9, pr_state="OPEN", prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "returned", 9
+    )
+    assert "брошена этим вызовом" not in capsys.readouterr().out
+
+    # complete: §I3 «started | MERGED».
+    state = _recon_state(tmp_path / "complete", monkeypatch)
+    _seed_revision(state, monkeypatch, head_sha="h")
+    capsys.readouterr()
+    ops = _RevisionPrOps(
+        pr=7, pr_state="MERGED", prs=[_MERGED_PR], local_head="ДВИНУЛИ-СНАРУЖИ",
+    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "returned", 7
+    )
+    assert "брошена этим вызовом" not in capsys.readouterr().out
+
+    # continue: §I3 «started | нет PR, ветка стоит на base».
+    state = _recon_state(tmp_path / "continue", monkeypatch)
+    _seed_revision(state, monkeypatch)
+    capsys.readouterr()
+    ops = _RevisionPrOps(pr=None, local_head="base-sha-1", prs=[_MERGED_PR])
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
+    assert "брошена этим вызовом" not in capsys.readouterr().out
+
+
+def test_supersede_abandon_word_matches_recorded_reason(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-14: слово о броске называет ревизию и ТУ ЖЕ причину, что в
+    `run.json` — сравнение с прочитанным полем, а не с литералом теста."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _abandon_then_noop_state(tmp_path, monkeypatch)
+    assert tb.deliver_superseded(
+        state, _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+
+    out = capsys.readouterr().out
+    reason = rs.load("r-recon").ops["tasks-deliver-v2"]["reason"]
+    assert "ревизия 2 брошена этим вызовом" in out
+    assert reason in out
+
+
+def test_supersede_noop_after_abandon_outcome_and_rc_unchanged(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-15: прямой вызов возвращает `SupersedeResult("noop")`, тот же
+    вход через CLI даёт RC 0 — новое сообщение осталось диагностикой."""
+    from governance import task_bridge as tb
+
+    direct_state = _abandon_then_noop_state(tmp_path / "direct", monkeypatch)
+    assert tb.deliver_superseded(
+        direct_state, _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+
+    _abandon_then_noop_state(tmp_path / "cli", monkeypatch)
+    ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    monkeypatch.setattr(tb, "RealOps", lambda: ops)
+    assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
+
+
+def test_abandoned_revision_status_persists_on_both_i5_outcomes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BEH-17: ревизия без PR остаётся `abandoned` на ОБОИХ исходах §I5 —
+    анкер совпал (no-op) и анкер разошёлся (доставка)."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    matched = _abandon_then_noop_state(tmp_path / "matched", monkeypatch)
+    assert tb.deliver_superseded(
+        matched, _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "abandoned"
+
+    state = _recon_state(tmp_path / "diverged", monkeypatch)
+    _seed_revision(state, monkeypatch, base_sha="БАЗА-ПОЗАПРОШЛАЯ")
+    assert tb.deliver_superseded(
+        state, _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("delivered", 77)
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "abandoned"
+
+
+def test_abandoned_record_key_set_matches_pre_reform_shape(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BEH-19: множество ключей записи `abandoned` не разошлось ни в одну
+    сторону — `_abandon_revision` не тронут (граница **NFR-03**), значит
+    запись несёт ровно ключи намерения плюс `reason`, добавленный им же."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _abandon_then_noop_state(tmp_path, monkeypatch)
+    intent_keys = set(_revision_intent(state, "x").keys())
+
+    assert tb.deliver_superseded(
+        state, _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+
+    v2 = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert set(v2.keys()) == intent_keys | {"reason"}
+    assert v2["status"] == "abandoned"
+
+
+def test_supersede_reconciles_historical_record_without_base_sha_field(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BEH-20: запись `started`, сделанная ДО появления `base_sha`, всё
+    ещё реконсилируется прежним путём и даёт прежнее решение
+    (`abandon_and_next`) — как запись со сдвинувшимся `base_sha`."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    _seed_revision(state, monkeypatch)
+    saved = rs.load("r-recon")
+    del saved.ops["tasks-deliver-v2"]["base_sha"]
+    rs.save(saved)
+
+    ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    assert tb.deliver_superseded(
+        rs.load("r-recon"), ops
+    ) == tb.SupersedeResult("delivered", 77)
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "abandoned"
+
+
+def test_supersede_noop_after_abandon_tolerates_missing_reason_field(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BEH-21 (вход 1/3, без `reason`): причина никогда не читается из
+    записи — она берётся из пары текущего вызова (М-1), поэтому запись,
+    которая «reason» отродясь не несла, no-op не роняет."""
+    from governance import task_bridge as tb
+
+    state = _abandon_then_noop_state(tmp_path, monkeypatch)
+    assert "reason" not in state.ops["tasks-deliver-v2"]
+
+    assert tb.deliver_superseded(
+        state, _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+
+
+def test_supersede_noop_after_abandon_tolerates_missing_base_sha_field(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-21 (вход 2/3, без `base_sha`): честная подстановка `'?'`
+    (`op.get("base_sha", "?")`) — не исключение — держит и слово о броске,
+    и исход `noop`/RC 0."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    _abandon_then_noop_state(tmp_path, monkeypatch)
+    saved = rs.load("r-recon")
+    del saved.ops["tasks-deliver-v2"]["base_sha"]
+    rs.save(saved)
+
+    assert tb.deliver_superseded(
+        rs.load("r-recon"), _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+    out = capsys.readouterr().out
+    assert "ревизия 2 брошена этим вызовом" in out
+    assert "'?'" in out or "?" in out
+
+
+def test_supersede_noop_after_abandon_tolerates_missing_content_anchor_field(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """BEH-21 (вход 3/3, без `content_anchor` на v2): путь З достигается
+    равенством анкеров ПО ЗАПИСИ ПРЕДЫДУЩЕЙ ревизии (v1), а не по полю v2
+    — оно там и не заводится (`_revision_intent`), что и проверяется здесь
+    явно, а не подразумевается."""
+    from governance import task_bridge as tb
+
+    state = _abandon_then_noop_state(tmp_path, monkeypatch)
+    assert "content_anchor" not in state.ops["tasks-deliver-v2"]
+
+    assert tb.deliver_superseded(
+        state, _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+
+
+def test_cli_supersede_noop_after_abandon_is_rc0(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BEH-15/BEH-21 через CLI: неполные исторические записи не роняют
+    `main` — RC 0, без трассировки."""
+    from governance import task_bridge as tb
+
+    _abandon_then_noop_state(tmp_path, monkeypatch)
+    ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
+    monkeypatch.setattr(tb, "RealOps", lambda: ops)
+    assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
