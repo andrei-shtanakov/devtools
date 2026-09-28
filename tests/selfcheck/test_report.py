@@ -127,3 +127,128 @@ def test_header_carries_surface_counts_not_maps() -> None:
     assert "f7.py" not in header and "history: 300" in header
     assert "plists: a.plist, b.plist" in header
     assert "fleet: absent" in header and "sched_dir: /s" in header
+
+
+def _lintcov(repo: str, lang: str, s4: bool) -> dict:
+    evidence = [{"kind": "workflows", "detail": "нет"}]
+    if s4:
+        evidence.append({"kind": "s4-return", "detail": "x"})
+    return {
+        "id": f"sc-{repo}{lang}",
+        "rule": "lint-coverage/missing",
+        "category": "ci",
+        "confidence": "likely",
+        "anchor": "file:Cargo.toml",
+        "owner_repo": repo,
+        "text_key": lang,
+        "occurrences": 1,
+        "evidence": evidence,
+    }
+
+
+def _lc_probe(repo: str, status: str) -> dict:
+    return {
+        "probe": "lint-coverage",
+        "repo": repo,
+        "status": status,
+        "reason": "",
+        "exit_code": None,
+        "tool_version": None,
+        "canary": None,
+        "coverage": {},
+        "findings": 0,
+    }
+
+
+def test_s4_return_condition_is_named_when_met() -> None:
+    doc = _doc(
+        ["a", "b"],
+        [_lintcov("a", "rust", True), _lintcov("b", "python", False)],
+        [_lc_probe("a", "ok"), _lc_probe("b", "ok")],
+    )
+    text = render_markdown(doc)
+    assert "S4: условие возврата выполнено — a (rust)" in text
+
+
+def test_s4_return_condition_not_met() -> None:
+    doc = _doc(
+        ["a", "b"],
+        [_lintcov("b", "python", False)],
+        [_lc_probe("a", "ok"), _lc_probe("b", "skipped")],
+    )
+    assert "S4: условие возврата не выполнено" in render_markdown(doc)
+
+
+def test_s4_return_condition_unknown_when_probe_failed() -> None:
+    doc = _doc(["a"], [], [_lc_probe("a", "failed")])
+    assert "S4: условие возврата не установлено — lint-coverage: a" in (
+        render_markdown(doc)
+    )
+
+
+def test_no_s4_line_without_the_probe() -> None:
+    assert "S4:" not in render_markdown(_doc(["a"], [], []))
+
+
+def test_s4_not_measured_outside_the_whole_manifest() -> None:
+    """#462 review: a one-repo run saw no rust/elixir/ts repo — «no gaps» there
+    would print the unmeasured as green."""
+    doc = _doc(["a"], [], [_lc_probe("a", "ok")])
+    doc["run"]["manifest"]["repos"] = ["a", "b"]
+    text = render_markdown(doc)
+    assert "S4: условие возврата не измерено — вне прогона: b" in text
+    assert "не выполнено" not in text
+
+
+def test_s4_not_measured_when_manifest_repos_are_missing() -> None:
+    doc = _doc(["a"], [], [_lc_probe("a", "ok")])
+    doc["run"]["manifest"]["missing"] = ["c"]
+    assert "S4: условие возврата не измерено — вне прогона: c" in (render_markdown(doc))
+
+
+# S4 line forms (#462 review round 2: «measured» is a probe row, not scope):
+# (scope, manifest repos, missing, probe rows) → expected state.
+S4_FORMS = [
+    # --all, a manifest dir missing: in scope, never scanned
+    (["a", "p"], ["a"], ["p"], [("a", "ok", "")], "не измерено — вне прогона: p"),
+    # --all --path: every row narrowed
+    (
+        ["a"],
+        ["a"],
+        [],
+        [("a", "skipped", "narrowed-corpus")],
+        "не измерено — вне прогона: a",
+    ),
+    # a repo without languages is measured: nothing to lint there
+    (
+        ["a", "v"],
+        ["a", "v"],
+        [],
+        [("a", "ok", ""), ("v", "skipped", "no-inputs")],
+        "не выполнено",
+    ),
+    # one-repo run
+    (["a"], ["a", "b"], [], [("a", "ok", "")], "не измерено — вне прогона: b"),
+    # failed beats unmeasured
+    (
+        ["a"],
+        ["a", "b"],
+        [],
+        [("a", "failed", "x")],
+        "не установлено — lint-coverage: a",
+    ),
+]
+
+
+def test_s4_line_forms() -> None:
+    for scope, repos, missing_, rows, expected in S4_FORMS:
+        doc = _doc(scope, [], [])
+        doc["probes"] = [
+            {**_lc_probe(r, status), "reason": reason} for r, status, reason in rows
+        ]
+        doc["run"]["manifest"]["repos"] = repos
+        doc["run"]["manifest"]["missing"] = missing_
+        assert f"S4: условие возврата {expected}" in render_markdown(doc), (
+            scope,
+            rows,
+        )

@@ -48,8 +48,9 @@ from selfcheck.report import find_baseline, new_run_dir, write_report
 from selfcheck.roles import glob_match
 
 # a narrowed corpus (--path) would make these probes report false dead /
-# false DEP002: they need the whole repo
-NARROW_UNSAFE = frozenset({"usage-graph", "deptry"})
+# false DEP002 / a false «no linter in CI» (workflows outside the corpus):
+# they need the whole repo
+NARROW_UNSAFE = frozenset({"usage-graph", "deptry", "lint-coverage"})
 
 
 def exit_code(results: Sequence[ProbeResult]) -> int:

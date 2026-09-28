@@ -257,6 +257,41 @@ def _judge_lines(doc: dict[str, Any]) -> list[str]:
     return [*lines, ""]
 
 
+def _s4_lines(doc: dict[str, Any]) -> list[str]:
+    """S4 return condition from lint-coverage (owner decision 2026-09-28): an
+    open gap in a language whose linting executes target code."""
+    rows = [p for p in doc["probes"] if p["probe"] == "lint-coverage"]
+    if not rows:
+        return []
+    gaps = sorted(
+        f"{f['owner_repo']} ({f['text_key']})"
+        for f in doc["findings"]
+        if f["rule"] == "lint-coverage/missing"
+        and any(e["kind"] == "s4-return" for e in f.get("evidence", []))
+    )
+    bad = sorted(p["repo"] for p in rows if p["status"] not in ("ok", "skipped"))
+    # measured = a probe row that looked at the repo (#462 review, round 2):
+    # scope membership is not measurement — a missing dir is in --all scope,
+    # and a narrowed-corpus skip read nothing
+    measured = {
+        p["repo"]
+        for p in rows
+        if p["status"] == "ok"
+        or (p["status"] == "skipped" and p["reason"] != "narrowed-corpus")
+    }
+    manifest = doc["run"]["manifest"]
+    outside = sorted({*manifest["repos"], *manifest["missing"]} - measured - set(bad))
+    if gaps:
+        line = f"S4: условие возврата выполнено — {', '.join(gaps)}"
+    elif bad:
+        line = f"S4: условие возврата не установлено — lint-coverage: {', '.join(bad)}"
+    elif outside:  # «no gaps» is a claim about the whole fleet (#462 review)
+        line = f"S4: условие возврата не измерено — вне прогона: {', '.join(outside)}"
+    else:
+        line = "S4: условие возврата не выполнено (открытых дыр rust/elixir/ts нет)"
+    return [line, ""]
+
+
 def render_markdown(doc: dict[str, Any]) -> str:
     """Human report: probes first, then findings by category and rule."""
     run = doc["run"]
@@ -277,6 +312,7 @@ def render_markdown(doc: dict[str, Any]) -> str:
         "",
         *_probe_rows(doc),
         "",
+        *_s4_lines(doc),
     ]
     lines += _fleet_lines(doc)
     statuses = doc["delta"]["statuses"]

@@ -7,6 +7,22 @@ repo = "devtools"
 reason = "неприкасаем по решению владельца: новый TUI — новый файл"
 until = 2027-03-31
 
+# lint-coverage (спека §12): дыра, закрытая issue владельцу, гасится здесь —
+# «владелец закрыл через issue» (решение 2026-09-28). Снять запись, когда
+# линтер встанет в CI: иначе протухшая запись спрячет новую дыру того же id.
+
+[[allow]]
+id = "sc-9d716a39"  # lint-coverage/missing prograph rust
+repo = "prograph"
+reason = "issue владельцу: prograph#59"
+until = 2026-12-31
+
+[[allow]]
+id = "sc-0a727ef8"  # lint-coverage/missing devtools python
+repo = "devtools"
+reason = "issue владельцу: devtools#461"
+until = 2026-12-31
+
 # Артефакты сборки и вендор-бандлы — вне корпуса (спека §11.2): иначе как самые
 # крупные клоны jscpd они займут потолок судьи первыми (замер S5 2026-09-27).
 [corpus]
