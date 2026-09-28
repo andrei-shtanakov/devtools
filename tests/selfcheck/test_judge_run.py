@@ -123,7 +123,7 @@ def test_judge_finding_resolves_outside_scope(
     devtools is not in scope (mutation guard for delta `run_level`)."""
     require_tool("uvx")
     ws = workspace(tmp_path, {"c.py": CLASSIFY})
-    make_repo(tmp_path / "other", {"o.py": "x = 1\n"})
+    make_repo(tmp_path / "other", {"o.py": CLASSIFY})  # something to judge (M2)
     (ws / "m.toml").write_text(
         '[tools.devtools]\ngit_dir = "devtools"\n[tools.other]\ngit_dir = "other"\n'
     )
@@ -272,3 +272,24 @@ def test_judge_instrument_finding_obeys_the_allowlist(
     doc = reports(ws)[-1]
     assert not any(f["anchor"] == "probe:devtools#judge" for f in doc["findings"])
     assert any(f["anchor"] == "probe:devtools#judge" for f in doc["suppressed"])
+
+
+def test_ok_run_without_attempts_does_not_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """devtools#444 M2: `ok` with nothing judged proves nothing about a failure."""
+    require_tool("uvx")
+    ws = workspace(tmp_path, {"c.py": CLASSIFY})
+    _use(monkeypatch, fake_claude(tmp_path, "not json"))
+    assert main([*args(ws), "--probe", "llm-sites", "--judge"]) == 2
+    good = tmp_path / "good"
+    good.mkdir()
+    _use(monkeypatch, fake_claude(good, GOOD))
+    main([*args(ws), "--probe", "llm-sites", "--judge", "--judge-max", "0"])
+    gone = {g["anchor"]: g["status"] for g in reports(ws)[-1]["delta"]["gone"]}
+    assert gone["probe:devtools#judge"] == "not-rechecked"
+
+
+def test_negative_judge_max_is_refused(ws: Path) -> None:
+    with pytest.raises(SystemExit):
+        main([*args(ws), "--judge", "--judge-max", "-1"])

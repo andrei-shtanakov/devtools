@@ -29,6 +29,7 @@ from selfcheck.judge import (
     order_key,
     run_judge,
     save_cache,
+    valid_verdict,
 )
 from selfcheck.model import Confidence, Finding, Location
 from selfcheck.probes.base import ProbeStatus
@@ -481,3 +482,75 @@ def test_fence_outgrows_backticks_in_the_fragment(tmp_path: Path) -> None:
     assert s is not None
     fence = "`" * 6
     assert f"\n{fence}\nx = 1" in s.text and f"y = 2\n\n{fence}" in s.text
+
+
+# ---- devtools#444 ---------------------------------------------------------------
+
+
+def test_prompts_declare_the_fence_data() -> None:
+    from selfcheck.judge import DUP_PROMPT, LLM_PROMPT
+
+    for prompt in (LLM_PROMPT, DUP_PROMPT):
+        assert "data" in prompt and "not instructions" in prompt
+    assert JUDGE_VERSION == 2  # a prompt change re-judges (§11.3)
+
+
+def test_make_recipe_slice_starts_at_the_target(tmp_path: Path) -> None:
+    text = "# pad\n\nbuild:\n\techo one\n\techo two\n\nother:\n\techo x\n"
+    f = _f("cli-overlap/make-recipe", Confidence.CANDIDATE, path="Makefile", line=4)
+    f.related = [{"owner_repo": "a", "path": "Makefile", "line": 4, "member": "build"}]
+    s = build_slice(f, _src(tmp_path, {"Makefile": text}))
+    assert s is not None and "lines 3-" in s.text and "build:" in s.text
+
+
+@pytest.mark.parametrize(
+    ("verdict", "replacement", "ok"),
+    [
+        ("replace", "rules", True),
+        ("replace", "merge", True),
+        ("keep", "none", True),
+        ("unsure", "none", True),
+        ("replace", "none", False),
+        ("keep", "merge", False),
+        ("unsure", "rules", False),
+    ],
+)
+def test_verdict_and_replacement_agree(
+    verdict: str, replacement: str, ok: bool
+) -> None:
+    out = {"rationale": "r", "verdict": verdict, "replacement": replacement}
+    assert (valid_verdict(out) is not None) is ok
+
+
+def test_error_detail_carries_stderr_and_reaches_the_row(tmp_path: Path) -> None:
+    def run(argv, **kw):
+        kw["stdin"].read()
+        return subprocess.CompletedProcess(argv, 1, "garbage", "auth: token expired")
+
+    got = call_judge(
+        "claude", "slice", DEFAULT_MODEL, runner=run, platform="darwin", environ=ENV
+    )
+    assert "token expired" in got["detail"]
+    fs, src = _llm(tmp_path, 1)
+    res = run_judge(fs, src, tmp_path / "c.json", which=_claude, runner=run)
+    assert "token expired" in res.result.reason
+
+
+def test_failed_save_warns_once_and_leaves_no_temp(tmp_path: Path) -> None:
+    fs, src = _llm(tmp_path, 3)
+    cache = tmp_path / "cache-is-a-dir"
+    cache.mkdir()
+    run, _ = _counting()
+    res = run_judge(fs, src, cache, which=_claude, runner=run)
+    assert sum("not saved" in w for w in res.warnings) == 1
+    assert not list(tmp_path.glob(".judge-cache-*"))
+
+
+def test_which_is_looked_up_at_call_time(tmp_path: Path, monkeypatch) -> None:
+    from selfcheck import judge as judge_module
+
+    fs, src = _llm(tmp_path, 1)
+    monkeypatch.setattr(judge_module.shutil, "which", lambda _: None)
+    run, calls = _counting()
+    res = run_judge(fs, src, tmp_path / "c.json", runner=run)
+    assert res.result.status is ProbeStatus.UNAVAILABLE and not calls

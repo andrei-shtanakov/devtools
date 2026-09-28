@@ -62,6 +62,13 @@ def exit_code(results: Sequence[ProbeResult]) -> int:
     return 0
 
 
+def _non_negative(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return value
+
+
 def _args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="selfcheck",
@@ -86,7 +93,7 @@ def _args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--probe", action="append", default=[], help="run only these probes"
     )
     parser.add_argument("--judge", action="store_true", help="LLM judge (spec §5, §11)")
-    parser.add_argument("--judge-max", type=int, default=100)
+    parser.add_argument("--judge-max", type=_non_negative, default=100)
     parser.add_argument("--judge-model", default=DEFAULT_MODEL)
     parser.add_argument("--out", type=Path, default=Path("out/selfcheck"))
     parser.add_argument("--config", type=Path, default=Path("selfcheck.toml"))
@@ -408,7 +415,9 @@ def _run_judge_pass(
     acc.results.append(jr.result)
     ok = jr.result.status is ProbeStatus.OK
     key = f"judge v{JUDGE_VERSION} / {args.judge_model}"
-    acc.keys["judge@devtools"] = key if ok else None
+    # ok proves something only if something was judged (#444 M2)
+    judged = jr.calls + jr.cached > 0
+    acc.keys["judge@devtools"] = key if ok and judged else None
     acc.warnings += jr.warnings
     acc.judge = {
         "model": args.judge_model,
