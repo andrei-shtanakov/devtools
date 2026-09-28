@@ -246,6 +246,10 @@ def _external(
         shown = ".".join(map(str, version)) if version else "unknown"
         raise _Stop(ProbeStatus.UNAVAILABLE, f"version {shown} outside [{low}, {high})")
     result.tool_version = ".".join(map(str, version))
+    if spec.logic_version:
+        # Своя постобработка вывода (llm-sites) — версия логики входит в
+        # ключ так же, как у собственных анализаторов (ревью #466).
+        result.tool_version += f"/logic {spec.logic_version}"
     result.argv = [binary, *spec.argv(ctx)]
     try:
         proc = runner(

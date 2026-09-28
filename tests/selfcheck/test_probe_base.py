@@ -417,3 +417,21 @@ def test_llm_sites_declares_its_rule_files() -> None:
     from selfcheck.llm import ENV_PATH, LLM_SITES, RULES_PATH
 
     assert set(LLM_SITES.own_files) == {RULES_PATH, ENV_PATH}
+
+
+def test_external_logic_version_enters_the_key(target, tmp_path) -> None:
+    """У внешней пробы с собственной постобработкой (llm-sites) подъём
+    `logic_version` обязан менять ключ сопоставимости (ревью #466): иначе
+    правка эвристик разбора давала бы тот же ложный `resolved`, что #433."""
+    from selfcheck.delta import comparability_key
+
+    tool = fake_tool(tmp_path / "b")
+    keys, versions = [], []
+    for n in (4, 5):
+        res = run(spec_for(tool, logic_version=n), target, tmp_path / f"l{n}")
+        versions.append(res.tool_version)
+        keys.append(
+            comparability_key(res, env_mode="no-env", surface=None, run_dir="/nowhere")
+        )
+    assert versions == ["1.2.3/logic 4", "1.2.3/logic 5"]
+    assert keys[0] != keys[1]
