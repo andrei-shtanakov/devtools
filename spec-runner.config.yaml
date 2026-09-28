@@ -18,10 +18,16 @@ review_policy: required
 commands:
   # Без --group governance тесты моста и раннера молча skip — зелёный
   # прогон ничего бы не проверил (152 теста без группы не собираются).
-  test: "uv run --frozen --group governance pytest -q"
+  # Форма `--group=governance` одним токеном: spec-runner 4.1.0 ищет
+  # исполняемое, пропуская флаги, но не их значения, и в
+  # `--group governance` принял бы за раннер `governance`.
+  test: "uv run --frozen --group=governance pytest -q"
   # repo-wide ruff красный на master (сотни прежних находок) — lint-гейта
   # у devtools нет и в CI; пустая команда, а не заведомо красный гейт.
   lint: ""
+# verify_first-задачи (TASK-003 #171) требуют адаптер тестов явно:
+# вывод по test_command раннер делает только там, где ошибиться нельзя.
+tdd_runner: pytest
 hooks:
   post_done:
     run_lint: false
