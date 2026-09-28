@@ -528,10 +528,10 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
     )
     assert (target / profile_rel).read_text(encoding="utf-8") == profile_text
     assert task_bridge.approve_command("WS-alpha-7") in ops.pr_body
-    # Пин tasks-спеки — blob decomposition ПОСЛЕ штампа (иначе протух бы в
-    # том же PR): decomposition — терминальный узел _BUNDLE_DAG (Task 7).
+    # decomposition — терминальный узел _BUNDLE_DAG (Task 7): его блоб —
+    # то, что мост пинал бы, если бы пинал.
     from governance.stale_adapter import blob_sha1
-    stamped_blob = blob_sha1(
+    anchor_blob = blob_sha1(
         (target / "workstreams/WS-alpha-7/spec/30-decomposition.md")
         .read_text(encoding="utf-8")
     )
@@ -539,7 +539,10 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
         spec.read_text(encoding="utf-8")
     )
     assert meta["traces_to"] == ["decomposition"]
-    assert meta["upstream_hashes"] == {"decomposition": stamped_blob}
+    # Черновик пина НЕ несёт (devtools#467, DEC-008): пин — подпись
+    # одобрения, его ставит `spec approve --profile`, не мост.
+    assert "upstream_hashes" not in meta
+    assert anchor_blob not in spec.read_text(encoding="utf-8")
     # секция резолюций сгенерирована из фикстурного 20-design.md, не
     # рукописным текстом (Task 5, Step 1в)
     spec_text = spec.read_text()
@@ -1141,7 +1144,7 @@ def test_deliver_legacy_bundle_writes_spec_anchored_on_behaviour(
     spec = target / "spec/WS-alpha-7-tasks.md"
     meta, _ = task_bridge.split_frontmatter(spec.read_text(encoding="utf-8"))
     assert meta["traces_to"] == ["behaviour-spec"]
-    assert "design" not in meta["upstream_hashes"]
+    assert "upstream_hashes" not in meta  # пин ставит approve (#467)
     # Коммит несёт РОВНО tasks-спеку: файлы бандла в diff доставки не
     # входят вовсе (§I7). Это наблюдаемое следствие, по которому
     # снаружи видно, что одобренность доставка проверяет, а не создаёт.
@@ -1177,12 +1180,10 @@ def test_deliver_legacy_bundle_4_writes_spec_anchored_on_design(
     продакшн затронет первыми): зеркало
     `test_deliver_legacy_bundle_writes_spec_anchored_on_behaviour` для
     `legacy_bundle=4` — 4-узловой бандл с design, анкер — design (не
-    behaviour-spec), пин — blob фактического (уже проштампованного)
-    20-design.md, секция резолюций присутствует (design несёт Q-*),
+    behaviour-spec), пина в черновике нет (его ставит approve, #467),
+    секция резолюций присутствует (design несёт Q-*),
     DT-провенанса нет — легаси-путь идёт через `render_tasks`, не
     `render_tasks_dt`."""
-    from governance.stale_adapter import blob_sha1
-
     target = _target_legacy_4(tmp_path)
     ops = _StubOps()
     pr = task_bridge.deliver(
@@ -1201,10 +1202,7 @@ def test_deliver_legacy_bundle_4_writes_spec_anchored_on_design(
         spec.read_text(encoding="utf-8")
     )
     assert meta["traces_to"] == ["design"]
-    stamped_design = (
-        target / "workstreams/WS-alpha-7/spec/20-design.md"
-    ).read_text(encoding="utf-8")
-    assert meta["upstream_hashes"] == {"design": blob_sha1(stamped_design)}
+    assert "upstream_hashes" not in meta  # пин ставит approve (#467)
     text = spec.read_text()
     assert "## Решения открытых вопросов (уровень design)" in text
     assert "(DT-" not in text
@@ -1331,6 +1329,22 @@ def test_check_approved_refuses_foreign_first_trace(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(RuntimeError, match="traces_to начинается"):
+        task_bridge.check_approved(
+            str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
+        )
+
+
+def test_check_approved_refuses_approved_without_pin(tmp_path: Path) -> None:
+    """Approve без профиля над черновиком без пина (#467) пина не ставит —
+    отказ называет команду с профилем, а не пропускает штамп."""
+    target = _target(tmp_path)
+    _stamped_tasks(target)
+    rel = target / "spec/WS-alpha-7-tasks.md"
+    text = rel.read_text(encoding="utf-8")
+    cut = re.sub(r"upstream_hashes:\n  decomposition: [0-9a-f]+\n", "", text)
+    assert cut != text
+    rel.write_text(cut, encoding="utf-8")
+    with pytest.raises(RuntimeError, match="spec approve tasks --profile"):
         task_bridge.check_approved(
             str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
         )
@@ -2405,6 +2419,24 @@ def test_render_dt_frontmatter_traces_decomposition_from_birth() -> None:
     meta, _body = task_bridge.split_frontmatter(text)
     assert meta["traces_to"] == ["decomposition"]
     assert meta["upstream_hashes"] == {"decomposition": "cd" * 20}
+
+
+def test_render_dt_without_pin_omits_upstream_hashes() -> None:
+    """`anchor_blob=None` — черновик без пина (#467): ключа нет вовсе, а
+    не пустое отображение (DEC-008: «absent, never empty»)."""
+    text = task_bridge.render_tasks_dt(
+        ws_id="WS-alpha-7",
+        subject="s",
+        bundle_path="workstreams/WS-alpha-7/spec/30-decomposition.md",
+        scenarios=[],
+        dt_tasks=[],
+        generated_at="2026-09-28T00:00:00+04:00",
+        anchor_blob=None,
+    )
+    meta, _ = task_bridge.split_frontmatter(text)
+    assert meta["traces_to"] == ["decomposition"]
+    assert "upstream_hashes" not in meta
+    assert "upstream_hashes" not in text
 
 
 VERIFY_DT_MD = """\
@@ -9353,6 +9385,10 @@ def test_supersede_preserves_execution_state_of_unchanged_tasks(
     assert "- [ ]" not in text
     # Переиздание всё же состоялось: version вырос, а не «файл прежний»
     assert "version: 2" in text
+    # Пин ПЕРЕНЕСЁН из доставленной ревизии, новые байты узла не пинуются
+    # (#467, DEC-008): фикстурный пин v1 намеренно не равен блобу узла.
+    meta, _ = split_frontmatter(text)
+    assert meta["upstream_hashes"] == {"decomposition": "b" * 40}
     # `tasks_blob` §I3.1 посчитан по ФАКТИЧЕСКИМ байтам файла — иначе
     # возобновление не опознало бы собственный коммит
     from governance.stale_adapter import blob_sha1
@@ -10629,6 +10665,11 @@ def _assert_nsd_delivery(state, ops, out, n: int) -> dict:
     assert saved["dag_source"] == "none"
     assert saved["comparison"] == "unavailable"
     assert _spec_version(state) == 1
+    # Прежней доставки в base нет — переносить нечего, пина нет (#467).
+    meta, _ = split_frontmatter(
+        (Path(state.target_dir) / _SPEC_REL).read_text(encoding="utf-8")
+    )
+    assert "upstream_hashes" not in meta
     assert _NSD_WORD in out
     commits = [c for c in ops.calls if c[0] == "commit_paths"]
     assert commits and _EVIDENCE_REL in commits[-1][1]
@@ -12127,3 +12168,24 @@ def test_cli_supersede_noop_after_abandon_is_rc0(
     ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
     monkeypatch.setattr(tb, "RealOps", lambda: ops)
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("carry_from", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("нет frontmatter\n", None),
+        ("---\nspec_stage: tasks\n---\n", None),
+        ("---\nupstream_hashes: abc\n---\n", None),
+        ("---\nupstream_hashes:\n  design: " + "a" * 40 + "\n---\n", None),
+        ("---\nupstream_hashes:\n  decomposition: " + "b" * 40 + "\n---\n",
+         "b" * 40),
+    ],
+    ids=["none", "empty", "unreadable", "no-pin", "not-mapping",
+         "foreign-key", "carried"],
+)
+def test_carried_pin_takes_only_the_anchor_pin(carry_from, expected) -> None:
+    """Переносится только пин ТЕКУЩЕГО анкера (#467): пин по чужому ключу
+    был бы пином не прямого upstream (DEC-008, GC-STALE-KEY)."""
+    assert task_bridge._carried_pin(carry_from, "decomposition") == expected

@@ -328,7 +328,7 @@ def _render_header(
     ws_id: str,
     subject: str,
     generated_at: str,
-    anchor_blob: str,
+    anchor_blob: str | None,
     anchor_node_id: str,
     version: int = 1,
 ) -> list[str]:
@@ -339,15 +339,24 @@ def _render_header(
     рендера держат байт-в-байт поведение `render_tasks`.
 
     Форма активного governance-профиля сразу при рождении (урок 1
-    ретроспективы): traces_to/upstream_hashes переживают `spec approve`
-    (он мержит traces к существующим), а с stage-профилем (devtools#386)
-    approve сам перепинивает узел — нормализации после него нет.
+    ретроспективы): traces_to переживает `spec approve` (он мержит traces
+    к существующим), а пин `upstream_hashes` с stage-профилем (devtools#386)
+    ставит сам approve — нормализации после него нет.
 
     `version` (Task 7 плана supersede): номер ревизии tasks-спеки —
     `1` у первой доставки, `_previous_tasks_version(state) + 1` у
     переиздания (`deliver_superseded`). Дефолт `1` сохраняет прежний
     захардкоженный текст для всех вызовов без явного значения.
+
+    `anchor_blob=None` — черновик без пина (devtools#467, DEC-008 у
+    spec-runner): пин — подпись одобрения, его пишет `spec approve
+    --profile`, а не мост. Ключа тогда нет вовсе («absent, never empty»).
     """
+    pin = (
+        ["upstream_hashes:", f"  {anchor_node_id}: {anchor_blob}"]
+        if anchor_blob is not None
+        else []
+    )
     return [
         "---",
         "spec_stage: tasks",
@@ -363,8 +372,7 @@ def _render_header(
         'approved_by: ""',
         "traces_to:",
         f"- {anchor_node_id}",
-        "upstream_hashes:",
-        f"  {anchor_node_id}: {anchor_blob}",
+        *pin,
         "---",
         "",
         f"## Milestone 1: {subject}",
@@ -417,7 +425,7 @@ def render_tasks(
     bundle_path: str,
     scenarios: list[Scenario],
     generated_at: str,
-    design_blob: str,
+    design_blob: str | None,
     design_text: str = "",
     anchor_node_id: str = _ANCHOR_NODE_ID,
     version: int = 1,
@@ -713,7 +721,7 @@ def render_tasks_dt(
     scenarios: list[Scenario],
     dt_tasks: list[decomposition_guard.DtTask],
     generated_at: str,
-    anchor_blob: str,
+    anchor_blob: str | None,
     design_text: str = "",
     acceptance_text: str = "",
     version: int = 1,
@@ -1340,9 +1348,10 @@ def _prospective_anchor(
     теневой копии; предсказывать больше нечего.
 
     Отметки эпохи В ЗНАЧЕНИИ у этой величины НЕТ, и это не асимметрия с
-    `content_anchor`, а разница предметов: тот же блоб уходит ПИНОМ в
-    саму tasks-спеку (`upstream_hashes`), и префикс в нём испортил бы
-    артефакт, который читает spec-runner. Смысл величины тоже сменился со
+    `content_anchor`, а разница предметов: тот же блоб становится ПИНОМ
+    tasks-спеки (`upstream_hashes`, его ставит `spec approve --profile`, не
+    мост — devtools#467), и префикс в нём испортил бы артефакт, который
+    читает spec-runner. Смысл величины тоже сменился со
     штампом (был блоб проштампованного узла, стал блоб узла в base),
     поэтому эпоха у неё распознаётся ГВАРДОМ — по полям намерения, а не по
     форме значения (`_require_resumable_epoch`).
@@ -1455,11 +1464,12 @@ def check_approved(
     Чем именно approve сделан, проверка НЕ различает — во frontmatter нет
     поля, называющего профиль. Различать и не нужно: пин = текущие байты
     значит, что узел не менялся с момента пина, а `status` узла лежит в
-    тех же байтах. Approve с профилем пинует байты, чей допуск проверил
-    spec-runner; approve без профиля оставляет пин доставки — байты, чью
-    одобренность проверил гейт §I12 при доставке. Правка узла после пина
-    в обоих случаях ловится расхождением, и отказ называет команду с
-    профилем.
+    тех же байтах. Пин ставит только approve с профилем — байты, чей
+    допуск проверил spec-runner. Черновик своего пина не несёт
+    (devtools#467): у первой доставки его нет вовсе, у переиздания —
+    прежний пин доставленной ревизии. Approve без профиля пин не ставит, и
+    отсутствие либо расхождение пина называет команду с профилем; правка
+    узла после пина ловится тем же расхождением.
 
     Состав бандла проверяется В НАЧАЛЕ — отсутствие файла-анкера
     ловится явным RuntimeError с процедурой, не сырым traceback.
@@ -1706,6 +1716,30 @@ def _carry_execution_state_with_report(
     )
 
 
+def _carried_pin(carry_from: str | None, anchor_node_id: str) -> str | None:
+    """Пин анкера из доставленной tasks-спеки, либо None.
+
+    DEC-008 spec-runner: пин ставит только одобрение этой стадии, и
+    переиздание не освежает его «за спиной» — расхождение прежнего пина с
+    новыми байтами и есть сигнал stale-каскада до approve. Пин по чужому
+    ключу (прежний анкер другого режима) не переносится: он был бы пином
+    не прямого upstream.
+    """
+    if not carry_from:
+        return None
+    try:
+        meta, _ = split_frontmatter(carry_from)
+    except ValueError:
+        # Нечитаемая прежняя спека — переносить нечего; её разбирает §I8
+        # (ветки unavailable), доставке она не помеха.
+        return None
+    pins = meta.get("upstream_hashes")
+    if not isinstance(pins, dict):
+        return None
+    pin = pins.get(anchor_node_id)
+    return pin if isinstance(pin, str) and pin else None
+
+
 def deliver(
     target_dir: str,
     repo_slug: str,
@@ -1933,6 +1967,10 @@ def deliver(
     anchor_node_id = _node_id(dag[-1][0])
     anchor_text = (base / dag[-1][0]).read_text(encoding="utf-8")
     design_blob = blob_sha1(anchor_text)
+    # Пин ЧЕРНОВИКА — не блоб анкера (devtools#467): переиздание несёт
+    # пин доставленной ревизии, первая доставка — никакого. Блоб анкера
+    # остаётся фактом доставки (леджер, §I3.1), в спеку он не идёт.
+    draft_pin = _carried_pin(carry_from, anchor_node_id)
     design_text = (
         (base / "20-design.md").read_text(encoding="utf-8")
         if any(_node_id(fname) == "design" for fname, _ in dag)
@@ -1980,7 +2018,7 @@ def deliver(
             scenarios=scenarios,
             dt_tasks=dt_tasks,
             generated_at=stamp,
-            anchor_blob=design_blob,
+            anchor_blob=draft_pin,
             design_text=design_text,
             acceptance_text=acceptance_text,
             version=version,
@@ -1994,7 +2032,7 @@ def deliver(
             bundle_path=f"{bundle_dir}/15-behaviour-spec.md",
             scenarios=scenarios,
             generated_at=stamp,
-            design_blob=design_blob,
+            design_blob=draft_pin,
             design_text=design_text,
             anchor_node_id=anchor_node_id,
             version=version,
