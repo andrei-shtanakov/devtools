@@ -554,3 +554,25 @@ def test_which_is_looked_up_at_call_time(tmp_path: Path, monkeypatch) -> None:
     run, calls = _counting()
     res = run_judge(fs, src, tmp_path / "c.json", runner=run)
     assert res.result.status is ProbeStatus.UNAVAILABLE and not calls
+
+
+def test_make_one_line_recipe_starts_at_its_own_target(tmp_path: Path) -> None:
+    """#452 review: `target: ; cmd` records the target line itself — the slice
+    must not climb into the previous target's recipe."""
+    text = "help:\n\t@echo a\n\t@echo b\n\nlint: ; ruff check .\ntest: ; pytest\n"
+    f = _f("cli-overlap/make-recipe", Confidence.CANDIDATE, path="Makefile", line=5)
+    f.related = [{"owner_repo": "a", "path": "Makefile", "line": 5, "member": "lint"}]
+    s = build_slice(f, _src(tmp_path, {"Makefile": text}))
+    assert s is not None and "lines 5-" in s.text and "@echo a" not in s.text
+
+
+def test_failed_write_leaves_no_temp(tmp_path: Path, monkeypatch) -> None:
+    """#452 review: an OSError from json.dump (ENOSPC) must not leave a temp file."""
+    from selfcheck import judge as judge_module
+
+    def boom(*a, **kw):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(judge_module.json, "dump", boom)
+    assert save_cache(tmp_path / "judge-cache.json", {}) is not None
+    assert not list(tmp_path.glob(".judge-cache-*"))

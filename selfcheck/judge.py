@@ -106,12 +106,28 @@ def _lines(sources: Mapping[str, Path], repo: str, rel: str) -> list[str] | None
         return None
 
 
+_MAKE_TARGET = re.compile(r"^[^\t#\s][^=]*?:(?!=)")
+_MAKE_CLIMB = 12
+
+
 def _make_target(lines: list[str], line: int) -> int:
-    """The target line above a recipe's first command (#444 M3)."""
+    """The target line of a recipe (#444 M3, #452).
+
+    ``target: ; cmd`` records the target line itself — keep it. Otherwise the
+    line is the first command: climb over commands, comments and blank lines
+    (make keeps the recipe open across them) to the target line, bounded, and
+    fall back to ``line`` if no target is found."""
+    if _MAKE_TARGET.match(lines[line - 1]):
+        return line
     k = line - 1
-    while k >= 1 and (lines[k - 1].startswith("\t") or not lines[k - 1].strip()):
+    while k >= max(1, line - _MAKE_CLIMB):
+        text = lines[k - 1]
+        if _MAKE_TARGET.match(text):
+            return k
+        if not (text.startswith(("\t", "#")) or not text.strip()):
+            break
         k -= 1
-    return k if k >= 1 else line
+    return line
 
 
 def _span(lines: list[str], line: int, rule: str, clone: int) -> tuple[int, int]:
@@ -344,11 +360,17 @@ def save_cache(path: Path, cache: Mapping[str, dict]) -> str | None:
         with tempfile.NamedTemporaryFile(
             "w", dir=path.parent, prefix=".judge-cache-", delete=False
         ) as tmp:
-            json.dump(keep, tmp, ensure_ascii=False, sort_keys=True)
+            name = tmp.name
+            try:
+                json.dump(keep, tmp, ensure_ascii=False, sort_keys=True)
+            except OSError:
+                tmp.close()
+                Path(name).unlink(missing_ok=True)  # no stray temp (#444, #452)
+                raise
         try:
-            os.replace(tmp.name, path)
+            os.replace(name, path)
         except OSError:
-            Path(tmp.name).unlink(missing_ok=True)  # no stray temp files (#444 M1)
+            Path(name).unlink(missing_ok=True)
             raise
     except OSError as exc:
         return f"judge-cache {path.name} not saved: {exc}"
