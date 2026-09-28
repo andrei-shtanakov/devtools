@@ -1695,6 +1695,11 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   Выполнено 2026-09-27: конфиг PR #441, прогон `completed=3 failed=0`, integration-PR #443 → `ae075cc`; devtools#173 закрыт.
 - [x] edge-check волны не переоплачивает рёбра с неизменным ключом D9 и последним PASS: повтор после ERROR/FAIL одного ребра (`stopped_review` → `resume` → `run_level`) перепроверяет только рёбра без действующего PASS по ключу (спека edge-check D10/D11 §6.2); отрицательные двойники — новый ключ, ERROR, последний FAIL, правка бандла (devtools#445; предшественник devtools#276 закрыт — S6 удалён в S13, `f42c00b`) @owner:github:andrei-shtanakov @id:edge-reuse-by-result-key @epic:eco.dark-factory
   Сделано по месту (без бандла, решение владельца 2026-09-28): `run_check` получил хук `lookup` до вызова модели, координатор переиспользует действующую попытку ключа с PASS; проба `run_level` — 1 вызов модели вместо 2.
+- [ ] Переиспользование PASS edge-check — только при совпадении хэша файла результата с записью координатора в леджере (devtools#469 п.1, решение владельца 2026-09-28) @owner:github:andrei-shtanakov @id:edge-reuse-hash-binding @epic:eco.dark-factory
+  Закрывает слепую подсадку в свой и чужой прогон без маркера «прогон активен» и без ложных срабатываний параллельных прогонов. Не граница: сужает атаку до согласованной подделки двух артефактов. Трипвайр #470 остаётся.
+- [ ] Песочница авторского агента — настоящая граница записи (devtools#469 п.2): Seatbelt/`sandbox-exec` на macOS с записью только в рабочий каталог узла, контейнер/отдельный uid на VPS; оформить tasks-спекой, не инкрементом @owner:github:andrei-shtanakov @id:author-agent-sandbox @epic:eco.dark-factory
+  Исполнители spec-runner — зона соседа: spec-runner#600.
+
 - [x] Черновик tasks-спеки не несёт нового пина `upstream_hashes` (inbox devtools#467, slug: tasks-draft-pin-vs-dec-008; from: spec-runner#426) @owner:github:andrei-shtanakov @id:tasks-draft-pin-vs-dec-008 @epic:eco.dark-factory — PR этой ветки
   Решение владельца 2026-09-28 — вариант 1 (DEC-008 не трогаем): первая доставка и NSD — без пина, переиздание переносит пин доставленной ревизии, пин ставит только `spec approve --profile`. Предпроверка на спеке #171: черновик без пина — `spec-runner validate` 0/0, approve с профилем сам пинует текущий блоб, steward стейл-проверкой черновики не смотрит.
 

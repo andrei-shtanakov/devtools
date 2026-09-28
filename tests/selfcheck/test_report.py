@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from selfcheck.report import render_markdown
 
 
@@ -217,7 +219,15 @@ S4_FORMS = [
         ["a"],
         [],
         [("a", "skipped", "narrowed-corpus")],
-        "не измерено — вне прогона: a",
+        "не измерено — сужено --path: a",
+    ),
+    # narrowed and absent together: each named by its own reason (#464)
+    (
+        ["a", "p"],
+        ["a", "b"],
+        ["p"],
+        [("a", "skipped", "narrowed-corpus")],
+        "не измерено — сужено --path: a; вне прогона: b, p",
     ),
     # a repo without languages is measured: nothing to lint there
     (
@@ -240,15 +250,73 @@ S4_FORMS = [
 ]
 
 
-def test_s4_line_forms() -> None:
-    for scope, repos, missing_, rows, expected in S4_FORMS:
-        doc = _doc(scope, [], [])
-        doc["probes"] = [
-            {**_lc_probe(r, status), "reason": reason} for r, status, reason in rows
-        ]
-        doc["run"]["manifest"]["repos"] = repos
-        doc["run"]["manifest"]["missing"] = missing_
-        assert f"S4: условие возврата {expected}" in render_markdown(doc), (
-            scope,
-            rows,
-        )
+@pytest.mark.parametrize(
+    ("scope", "repos", "missing_", "rows", "expected"),
+    S4_FORMS,
+    ids=[
+        "missing-dir",
+        "narrowed",
+        "narrowed-and-absent",
+        "no-languages",
+        "one-repo",
+        "failed-beats-unmeasured",
+    ],
+)
+def test_s4_line_forms(scope, repos, missing_, rows, expected) -> None:
+    doc = _doc(scope, [], [])
+    doc["probes"] = [
+        {**_lc_probe(r, status), "reason": reason} for r, status, reason in rows
+    ]
+    doc["run"]["manifest"]["repos"] = repos
+    doc["run"]["manifest"]["missing"] = missing_
+    assert f"S4: условие возврата {expected}" in render_markdown(doc)
+
+
+def test_ast_dup_probe_row_points_to_groups_not_zero() -> None:
+    """#437.3: группы ast-dup выпускает прогон, а не проба — строка пробы не
+    утверждает «0 находок», число групп названо под таблицей."""
+    probe = {**_lc_probe("a", "ok"), "probe": "ast-dup"}
+    groups = [
+        {
+            **_finding("a", f"dup:{i}"),
+            "id": f"g{i}",
+            "rule": "ast-dup/exact",
+            "category": "duplicate",
+        }
+        for i in range(2)
+    ]
+    text = render_markdown(_doc(["a"], groups, [probe]))
+    row = next(line for line in text.splitlines() if line.startswith("| ast-dup |"))
+    assert row.rstrip().endswith("| группы ↓ |")
+    assert "ast-dup: групп дублей — 2" in text
+
+
+def test_all_scope_table_shows_every_repo_within_the_cap() -> None:
+    """#437.4: под --all таблица ограничена MD_ROWS, но показывает каждое
+    репо, а не первые по алфавиту."""
+    from selfcheck.report import MD_ROWS
+
+    findings = [
+        {**_finding(repo, f"f{i}"), "id": f"{repo}-{i}"}
+        for repo in ("a", "b", "c")
+        for i in range(MD_ROWS)
+    ]
+    text = render_markdown(_doc(["a", "b", "c"], findings, []))
+    rows = [
+        line
+        for line in text.splitlines()
+        if line.startswith("| ") and "usage-graph/dead.file" in line
+    ]
+    assert len(rows) == MD_ROWS
+    assert {row.split("|")[1].strip() for row in rows} == {"a", "b", "c"}
+
+
+def test_ast_dup_group_count_names_a_narrowed_corpus() -> None:
+    """Ревью #471: под --path хэшируется срез каждого репо — число групп
+    не выдаётся за утверждение о прогоне целиком."""
+    probe = {**_lc_probe("a", "ok"), "probe": "ast-dup"}
+    doc = _doc(["a"], [], [probe])
+    doc["run"]["selection"] = {"path": ["scripts/**"], "probe": []}
+    text = render_markdown(doc)
+    line = next(x for x in text.splitlines() if x.startswith("ast-dup: групп"))
+    assert "сужен --path" in line and "scripts/**" in line

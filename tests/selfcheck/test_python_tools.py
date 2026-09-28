@@ -313,3 +313,8 @@ def test_pyrefly_skips_search_path_missing_in_copy(build, tmp_path: Path) -> Non
     res = run(PYREFLY, target, tmp_path)
     assert res.status is ProbeStatus.OK, res.reason
     assert _search_paths(res.argv) == []
+    # #437.7: the drop is said, not silent — the note names the path
+    notes = res.coverage["notes"]
+    assert any(
+        n.startswith("search-path not in copy") and "build" in n for n in notes
+    ), notes
