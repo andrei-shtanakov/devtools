@@ -179,6 +179,6 @@ USAGE_GRAPH = ProbeSpec(
         f"file:{CANARY_DIR}orphan_canary.py",
     ),
     rules=("dead.file", "dead.module", "unresolved-exec", "broken-root", "root-stale"),
-    logic_version=5,  # BOM-aware corpus reads, make-call parsing (#411)
+    logic_version=6,  # + vendor parse: B with `# repo:`, `source: o@main` (#437)
     analyze=_analyze,
 )

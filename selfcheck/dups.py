@@ -280,7 +280,8 @@ AST_DUP = ProbeSpec(
     ),
     coverage="reported",
     rules=("exact", "structural", f"min-lines:{MIN_LINES}"),
-    logic_version=2,
+    # 3: vendor-declaration parsing decides vendor groups (#437, review #473)
+    logic_version=3,
     analyze=_ast_dup,
 )
 

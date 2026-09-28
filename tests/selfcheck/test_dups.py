@@ -278,3 +278,12 @@ def test_upstream_out_of_scope_undeclared_copy_is_a_finding() -> None:
     hashes = {"c1": [_fn("v/g.py")], "c2": [_fn("w/g.py")]}
     found, vendor = group_dups(hashes, {"c1": {"v/g.py": _decl("up")}})
     assert len(found) == 1 and vendor == []
+
+
+def test_ast_dup_logic_version_follows_vendor_parsing() -> None:
+    """Ревью #473: разбор вендор-деклараций решает, какие межрепные группы
+    вендорные (`_is_vendor_group`) — его правка обязана менять ключ ast-dup,
+    иначе исчезнувшие группы читались бы `resolved`."""
+    from selfcheck.dups import AST_DUP
+
+    assert AST_DUP.logic_version == 3  # + vendor parse (#437)

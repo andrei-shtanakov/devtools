@@ -70,6 +70,18 @@ _TRAILING_TS = re.compile(r"(?:^|\s)//")
 _TRAILING_SH = re.compile(r"(?:^|\s)#")
 
 
+def _rule_regex(rule_id: str) -> re.Pattern[str]:
+    """The rule's `pattern-regex` from rules/llm.yml — one source for the
+    predicate semgrep already applied (no second copy to drift)."""
+    text = RULES_PATH.read_text(encoding="utf-8")
+    block = text.split(f"- id: {rule_id}\n", 1)[1]
+    return re.compile(re.search(r"^\s*pattern-regex:\s*(.+)$", block, re.MULTILINE)[1])
+
+
+# a trailing shell comment is not code: `cmd # ${A:-claude}` (#437.8)
+_HARNESS_DEFAULT_SH = _rule_regex("harness-resolve-sh")
+
+
 def _code_endpoint_line(rel: str, line_text: str) -> bool:
     """TS/shell: an endpoint literal in code, comments cut off (§10.7, review I1)."""
     if rel.endswith(_TS_SUFFIXES):
@@ -266,6 +278,10 @@ def _site(ctx: ProbeCtx, rule: str, rel: str, line: int) -> dict[str, Any] | Non
         rel.endswith((".py", *_TS_SUFFIXES)) or line_text.lstrip().startswith("#")
     ):
         return None
+    if rule == "harness-resolve-sh" and not _HARNESS_DEFAULT_SH.search(
+        _TRAILING_SH.split(line_text, maxsplit=1)[0]
+    ):
+        return None
     if rule == "endpoint":
         if rel.endswith(".py"):
             if not code_endpoint(text, line):
@@ -445,7 +461,7 @@ LLM_SITES = ProbeSpec(
     ),
     coverage="reported",
     rules=("A", "B", "C", "D", "candidate:schema|loop", "construction", "sh-default"),
-    logic_version=4,
+    logic_version=5,  # + trailing shell comment is not code (#437.8)
     binary="uvx",
     version_args=(*UVX_SEMGREP, "--version"),
     version_range=((1, 178), (1, 179)),

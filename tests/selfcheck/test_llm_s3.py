@@ -221,7 +221,7 @@ def test_code_endpoint(text: str, line: int, hit: bool) -> None:
 
 
 def test_logic_version_bumped() -> None:
-    assert LLM_SITES.logic_version == 4  # + shell default rule, exact binary (#431)
+    assert LLM_SITES.logic_version == 5  # + trailing shell comment (#437.8)
 
 
 def test_prose_and_trailing_comments_are_not_points(result: ProbeResult) -> None:
@@ -256,6 +256,7 @@ SH_DEFAULT = (
     'model="${REVIEW_MODEL:-claude-opus-5}"\n'
     "# fallback: ${ALT_CMD:-claude -p}\n"
     '$review_cmd --sandbox read-only - < "$work/prompt.txt"\n'
+    "echo ok # ${ALT_CMD:-claude}\n"
 )
 PY_PROSE = 'DOC = """\n    codex exec --help lists the flags\n"""\n'
 
@@ -287,6 +288,8 @@ def test_shell_harness_default_expansion_is_a_point(
     assert ("local.sh", 2, "harness-resolve-sh") in rows
     # a model name is not a binary; a comment is not code (review #431)
     assert not any(p == "local.sh" and ln in (3, 4) for p, ln, _ in rows)
+    # a trailing comment is not code either (#437.8)
+    assert not any(p == "local.sh" and ln == 6 for p, ln, _ in rows)
     assert not any(p == "doc.py" for p, _, _ in rows)  # cli-shell: shell files only
 
 
