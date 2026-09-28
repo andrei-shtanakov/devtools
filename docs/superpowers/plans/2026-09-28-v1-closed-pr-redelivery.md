@@ -132,7 +132,7 @@ approval_facts, accept_pr, approve_node — проверить pyrefly по ка
 
 ### Task 6: Живая приёмка на devtools#171 (оператор + владелец)
 
-- [ ] Ход на прогоне `i5-traceless-noop-after-abandon-20260923-3e0ea3`
+- [x] Ход на прогоне `i5-traceless-noop-after-abandon-20260923-3e0ea3`
   (PR #373) → tasks-PR → терминальное ревью → approve владельца → прогон
   spec-runner по схеме #173 (клон `.worktrees/devtools-run`; путь бандла #171
   в `harness_files` — PR-ом) → integration-PR → приёмка.
