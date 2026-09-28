@@ -532,3 +532,15 @@ def test_non_utf8_sched_dir_reaches_the_report_as_shown(
     main(args(ws, "--probe", probe, "--sched-dir", str(sched_dir)))
     (doc,) = reports(ws)
     assert doc["run"]["surface"]["sched_dir"].endswith("-caf\ufffd")
+
+
+def test_narrowed_run_skips_lint_coverage(tmp_path: Path) -> None:
+    """#462 review: under --path the workflows are outside the corpus, so the
+    probe would claim «no linter» in a repo that has one."""
+    ws = workspace(tmp_path)
+    narrowed = args(ws, "--probe", "lint-coverage", "--path", "pyproject.toml")
+    assert main(narrowed) == 0
+    [report] = reports(ws)
+    assert {p["probe"]: (p["status"], p["reason"]) for p in report["probes"]} == {
+        "lint-coverage": ("skipped", "narrowed-corpus")
+    }

@@ -188,3 +188,19 @@ def test_s4_return_condition_unknown_when_probe_failed() -> None:
 
 def test_no_s4_line_without_the_probe() -> None:
     assert "S4:" not in render_markdown(_doc(["a"], [], []))
+
+
+def test_s4_not_measured_outside_the_whole_manifest() -> None:
+    """#462 review: a one-repo run saw no rust/elixir/ts repo — «no gaps» there
+    would print the unmeasured as green."""
+    doc = _doc(["a"], [], [_lc_probe("a", "ok")])
+    doc["run"]["manifest"]["repos"] = ["a", "b"]
+    text = render_markdown(doc)
+    assert "S4: условие возврата не измерено — вне прогона: b" in text
+    assert "не выполнено" not in text
+
+
+def test_s4_not_measured_when_manifest_repos_are_missing() -> None:
+    doc = _doc(["a"], [], [_lc_probe("a", "ok")])
+    doc["run"]["manifest"]["missing"] = ["c"]
+    assert "S4: условие возврата не измерено — вне прогона: c" in (render_markdown(doc))

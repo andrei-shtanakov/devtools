@@ -12,45 +12,9 @@ until = 2027-03-31
 # линтер встанет в CI: иначе протухшая запись спрячет новую дыру того же id.
 
 [[allow]]
-id = "sc-d58e9b82"  # lint-coverage/missing deployer python
-repo = "deployer"
-reason = "issue владельцу: deployer#108"
-until = 2026-12-31
-
-[[allow]]
-id = "sc-cdaeba0f"  # lint-coverage/missing prograph python
-repo = "prograph"
-reason = "issue владельцу: prograph#60"
-until = 2026-12-31
-
-[[allow]]
 id = "sc-9d716a39"  # lint-coverage/missing prograph rust
 repo = "prograph"
 reason = "issue владельцу: prograph#59"
-until = 2026-12-31
-
-[[allow]]
-id = "sc-cba4c9c2"  # lint-coverage/missing github-checker python
-repo = "github-checker"
-reason = "issue владельцу: github-checker#46"
-until = 2026-12-31
-
-[[allow]]
-id = "sc-92703358"  # lint-coverage/missing impresario python
-repo = "impresario"
-reason = "issue владельцу: impresario#55"
-until = 2026-12-31
-
-[[allow]]
-id = "sc-6790a7ef"  # lint-coverage/missing disputatio python
-repo = "disputatio"
-reason = "issue владельцу: disputatio#155"
-until = 2026-12-31
-
-[[allow]]
-id = "sc-a88f27d1"  # lint-coverage/missing discovery-toolkit python
-repo = "discovery-toolkit"
-reason = "issue владельцу: discovery-toolkit#24"
 until = 2026-12-31
 
 [[allow]]

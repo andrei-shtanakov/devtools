@@ -270,10 +270,16 @@ def _s4_lines(doc: dict[str, Any]) -> list[str]:
         and any(e["kind"] == "s4-return" for e in f.get("evidence", []))
     )
     bad = sorted(p["repo"] for p in rows if p["status"] not in ("ok", "skipped"))
+    manifest = doc["run"]["manifest"]
+    outside = sorted(
+        {*manifest["repos"], *manifest["missing"]} - set(doc["run"]["scope"])
+    )
     if gaps:
         line = f"S4: условие возврата выполнено — {', '.join(gaps)}"
     elif bad:
         line = f"S4: условие возврата не установлено — lint-coverage: {', '.join(bad)}"
+    elif outside:  # «no gaps» is a claim about the whole fleet (#462 review)
+        line = f"S4: условие возврата не измерено — вне прогона: {', '.join(outside)}"
     else:
         line = "S4: условие возврата не выполнено (открытых дыр rust/elixir/ts нет)"
     return [line, ""]

@@ -2033,7 +2033,13 @@ workflow'ы. Для rust/elixir/ts — дополнительно evidence `s4-r
   языки): S4 снова на повестке;
 - **не установлено** — `lint-coverage` не `ok`/`skipped` хотя бы в одном репо и
   открытых `s4-return` нет;
-- **не выполнено** — иначе.
+- **не измерено** — открытых `s4-return` нет, но прогон не покрыл весь манифест
+  (однорепный `make selfcheck`, отсутствующие каталоги): «дыр нет» — утверждение
+  обо всём флоте, и по части флота его печатать нельзя (ревью #462);
+- **не выполнено** — иначе, то есть только при прогоне по всему манифесту (`--all`).
+
+Под `--path` проба `skipped: narrowed-corpus` (в `NARROW_UNSAFE`, как usage-graph
+и deptry): workflow'ы и обёртки вне суженного корпуса дали бы ложное «линтера нет».
 
 Python на условие не влияет: его ruff selfcheck гоняет статически сам.
 Открытый вопрос на момент возврата: какая песочница есть на VPS (Linux; на Mac
@@ -2044,5 +2050,7 @@ Python на условие не влияет: его ruff selfcheck гоняет
 Rust: prograph (prograph#59). Elixir, TypeScript: дыр нет. Python — 7 репо с
 CI-шаблоном волны 2026-09-01 (`uv sync` + `pytest`): deployer#108, prograph#60,
 github-checker#46, impresario#55, disputatio#155, discovery-toolkit#24 и сам
-devtools (devtools#461: ruff из `uv.lock` даёт 329 нарушений).
+devtools (devtools#461: ruff из `uv.lock` даёт 329 нарушений). Шесть соседей закрыли дыру в тот же день (deployer#109, prograph#61,
+github-checker#47, impresario#56, disputatio#156, discovery-toolkit#25) — их
+`[[allow]]` сняты; погашены остаются prograph (rust, #59) и devtools (#461).
 
