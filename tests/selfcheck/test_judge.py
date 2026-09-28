@@ -576,3 +576,110 @@ def test_failed_write_leaves_no_temp(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(judge_module.json, "dump", boom)
     assert save_cache(tmp_path / "judge-cache.json", {}) is not None
     assert not list(tmp_path.glob(".judge-cache-*"))
+
+
+def test_failed_close_leaves_no_temp(tmp_path: Path, monkeypatch) -> None:
+    """#453.1: the write error surfaces at flush/close, not inside json.dump
+    (ENOSPC on the buffer flush) — still no stray temp file."""
+    import tempfile as tempfile_module
+
+    from selfcheck import judge as judge_module
+
+    real = tempfile_module.NamedTemporaryFile
+
+    class _FailingClose:
+        def __init__(self, *a, **kw):
+            self._tmp = real(*a, **kw)
+            self.name = self._tmp.name
+
+        def write(self, data):
+            return self._tmp.write(data)
+
+        def close(self):
+            self._tmp.close()
+            raise OSError(28, "No space left on device")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+
+    monkeypatch.setattr(judge_module.tempfile, "NamedTemporaryFile", _FailingClose)
+    assert save_cache(tmp_path / "judge-cache.json", {}) is not None
+    assert not list(tmp_path.glob(".judge-cache-*"))
+
+
+def test_make_recipe_climbs_over_conditionals(tmp_path: Path) -> None:
+    """#453.2: make keeps a recipe open across ifeq/else/endif — the slice
+    still starts at the target line."""
+    text = "build:\nifeq ($(X),1)\n\techo a\nelse\n\techo b\nendif\n"
+    f = _f("cli-overlap/make-recipe", Confidence.CANDIDATE, path="Makefile", line=5)
+    f.related = [{"owner_repo": "a", "path": "Makefile", "line": 5, "member": "build"}]
+    s = build_slice(f, _src(tmp_path, {"Makefile": text}))
+    assert s is not None and "lines 1-" in s.text
+
+
+def test_finding_line_past_the_end_does_not_crash(tmp_path: Path) -> None:
+    """#453.3: a line number beyond the file must not take the run down."""
+    text = "build:\n\techo a\n"
+    f = _f("cli-overlap/make-recipe", Confidence.CANDIDATE, path="Makefile", line=50)
+    f.related = [{"owner_repo": "a", "path": "Makefile", "line": 50, "member": "build"}]
+    s = build_slice(f, _src(tmp_path, {"Makefile": text}))
+    assert s is not None
+
+
+def test_encode_error_is_a_warning_and_leaves_no_temp(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Ревью #472: UnicodeEncodeError (ValueError, не OSError) при записи —
+    тоже предупреждение без temp, не падение прогона (§11.3)."""
+    from selfcheck import judge as judge_module
+
+    def boom(*a, **kw):
+        raise UnicodeEncodeError("ascii", "я", 0, 1, "ordinal not in range")
+
+    monkeypatch.setattr(judge_module.json, "dump", boom)
+    assert save_cache(tmp_path / "judge-cache.json", {}) is not None
+    assert not list(tmp_path.glob(".judge-cache-*"))
+
+
+def test_cache_is_written_as_utf8_under_ascii_locale(tmp_path: Path) -> None:
+    """Кодировка кэша не зависит от локали процесса (launchd/cron без LANG):
+    процесс с ASCII-локалью (UTF-8-режим и коэрция C-локали выключены)."""
+    import os
+    import sys
+
+    path = tmp_path / "judge-cache.json"
+    script = (
+        "import locale, sys\n"
+        "from pathlib import Path\n"
+        "from selfcheck.judge import DEFAULT_MODEL, cache_key, load_cache, save_cache\n"
+        "assert locale.getpreferredencoding(False) != 'UTF-8'\n"
+        "key = cache_key('slice', DEFAULT_MODEL)\n"
+        # the non-ASCII value only at run time: a Cyrillic literal in `-c`
+        # itself cannot even be decoded from argv under C locale on Linux
+        "entry = {'rationale': '\\u0434\\u0443\\u0431\\u043b\\u044c', "
+        "'verdict': 'keep', 'replacement': 'none'}\n"
+        "print(save_cache(Path(sys.argv[1]), {key: entry}))\n"
+        "cache, warnings = load_cache(Path(sys.argv[1]))\n"
+        "print(len(cache), warnings)\n"
+    )
+    env = {
+        **os.environ,
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PYTHONUTF8": "0",
+        "PYTHONCOERCECLOCALE": "0",
+    }
+    done = subprocess.run(
+        [sys.executable, "-c", script, str(path)],
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr.decode(errors="replace")
+    # written AND read back: a cache silently dropped on read would make
+    # every cron run re-judge (and pay) from scratch
+    assert done.stdout.decode().split("\n")[:2] == ["None", "1 []"]
+    assert "дубль" in path.read_bytes().decode("utf-8")
