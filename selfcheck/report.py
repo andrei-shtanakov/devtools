@@ -86,6 +86,26 @@ def _coverage(cov: dict[str, Any]) -> str:
     return f"{cov.get('mode', '-')}/{cov.get('input_mode', '-')} {shown}/{count}"
 
 
+def _fair_head(items: list[dict[str, Any]], cap: int) -> list[dict[str, Any]]:
+    """First `cap` rows taken round-robin across repos, shown in the usual
+    (repo, rule, anchor) order: under --all a plain head of the sorted list
+    showed only the alphabetically first repos (#437.4)."""
+    by_repo: dict[str, list[dict[str, Any]]] = {}
+    for item in sorted(items, key=_row_key):
+        by_repo.setdefault(item.get("owner_repo", ""), []).append(item)
+    queues = list(by_repo.values())
+    picked: list[dict[str, Any]] = []
+    depth = 0
+    while len(picked) < cap and any(depth < len(q) for q in queues):
+        picked += [q[depth] for q in queues if depth < len(q)][: cap - len(picked)]
+        depth += 1
+    return sorted(picked, key=_row_key)
+
+
+def _row_key(item: dict[str, Any]) -> tuple[str, str, str]:
+    return (item.get("owner_repo", ""), item["rule"], item["anchor"])
+
+
 def _probe_rows(doc: dict[str, Any]) -> list[str]:
     rows = [
         "| проба | репо | статус | причина | версия | код | канарейка | покрытие | находок |",
@@ -97,9 +117,24 @@ def _probe_rows(doc: dict[str, Any]) -> list[str]:
         rows.append(
             f"| {p['probe']} | {p['repo']} | {p['status']} | {reason} | "
             f"{p['tool_version'] or '—'} | {code} | {p['canary'] or '—'} | "
-            f"{_coverage(p['coverage'])} | {p['findings']} |"
+            f"{_coverage(p['coverage'])} | {_probe_findings(p)} |"
         )
+    groups = sum(1 for f in doc["findings"] if f["rule"].startswith("ast-dup/"))
+    if any(p["probe"] == "ast-dup" for p in doc["probes"]):
+        rows += [
+            "",
+            (
+                f"ast-dup: групп дублей — {groups} (выпускает прогон по всем "
+                "репо вместе, а не проба на репо; см. «Находки»)"
+            ),
+        ]
     return rows
+
+
+def _probe_findings(p: dict[str, Any]) -> str:
+    # #437.3: groups span repos and come from the run — a per-repo «0» here
+    # would be a false claim
+    return "группы ↓" if p["probe"] == "ast-dup" else str(p["findings"])
 
 
 def _refs_age(rows: list[dict[str, Any]]) -> str:
@@ -279,14 +314,28 @@ def _s4_lines(doc: dict[str, Any]) -> list[str]:
         if p["status"] == "ok"
         or (p["status"] == "skipped" and p["reason"] != "narrowed-corpus")
     }
+    narrowed = sorted(
+        p["repo"]
+        for p in rows
+        if p["status"] == "skipped" and p["reason"] == "narrowed-corpus"
+    )
     manifest = doc["run"]["manifest"]
-    outside = sorted({*manifest["repos"], *manifest["missing"]} - measured - set(bad))
+    # «вне прогона» — только то, что не сканировалось вовсе; суженные
+    # --path сканировались и называются своей причиной (#464)
+    outside = sorted(
+        {*manifest["repos"], *manifest["missing"]} - measured - set(narrowed)
+    )
+    unmeasured = "; ".join(
+        f"{why}: {', '.join(names)}"
+        for why, names in (("сужено --path", narrowed), ("вне прогона", outside))
+        if names
+    )
     if gaps:
         line = f"S4: условие возврата выполнено — {', '.join(gaps)}"
     elif bad:
         line = f"S4: условие возврата не установлено — lint-coverage: {', '.join(bad)}"
-    elif outside:  # «no gaps» is a claim about the whole fleet (#462 review)
-        line = f"S4: условие возврата не измерено — вне прогона: {', '.join(outside)}"
+    elif unmeasured:  # «no gaps» is a claim about the whole fleet (#462 review)
+        line = f"S4: условие возврата не измерено — {unmeasured}"
     else:
         line = "S4: условие возврата не выполнено (открытых дыр rust/elixir/ts нет)"
     return [line, ""]
@@ -343,10 +392,7 @@ def render_markdown(doc: dict[str, Any]) -> str:
             f"{head} уверенность | якорь | мест | статус |",
             "|" + "---|" * (6 if multi else 5),
         ]
-        ordered = sorted(
-            items, key=lambda x: (x.get("owner_repo", ""), x["rule"], x["anchor"])
-        )
-        for f in ordered[:MD_ROWS]:
+        for f in _fair_head(items, MD_ROWS):
             repo = f"| {f.get('owner_repo', '')} " if multi else ""
             lines.append(
                 f"{repo}| {f['rule']} | {f['confidence']} | `{f['anchor']}` | "
