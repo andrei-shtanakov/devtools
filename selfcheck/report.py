@@ -270,10 +270,17 @@ def _s4_lines(doc: dict[str, Any]) -> list[str]:
         and any(e["kind"] == "s4-return" for e in f.get("evidence", []))
     )
     bad = sorted(p["repo"] for p in rows if p["status"] not in ("ok", "skipped"))
+    # measured = a probe row that looked at the repo (#462 review, round 2):
+    # scope membership is not measurement — a missing dir is in --all scope,
+    # and a narrowed-corpus skip read nothing
+    measured = {
+        p["repo"]
+        for p in rows
+        if p["status"] == "ok"
+        or (p["status"] == "skipped" and p["reason"] != "narrowed-corpus")
+    }
     manifest = doc["run"]["manifest"]
-    outside = sorted(
-        {*manifest["repos"], *manifest["missing"]} - set(doc["run"]["scope"])
-    )
+    outside = sorted({*manifest["repos"], *manifest["missing"]} - measured - set(bad))
     if gaps:
         line = f"S4: условие возврата выполнено — {', '.join(gaps)}"
     elif bad:

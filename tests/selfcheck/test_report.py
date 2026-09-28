@@ -204,3 +204,51 @@ def test_s4_not_measured_when_manifest_repos_are_missing() -> None:
     doc = _doc(["a"], [], [_lc_probe("a", "ok")])
     doc["run"]["manifest"]["missing"] = ["c"]
     assert "S4: условие возврата не измерено — вне прогона: c" in (render_markdown(doc))
+
+
+# S4 line forms (#462 review round 2: «measured» is a probe row, not scope):
+# (scope, manifest repos, missing, probe rows) → expected state.
+S4_FORMS = [
+    # --all, a manifest dir missing: in scope, never scanned
+    (["a", "p"], ["a"], ["p"], [("a", "ok", "")], "не измерено — вне прогона: p"),
+    # --all --path: every row narrowed
+    (
+        ["a"],
+        ["a"],
+        [],
+        [("a", "skipped", "narrowed-corpus")],
+        "не измерено — вне прогона: a",
+    ),
+    # a repo without languages is measured: nothing to lint there
+    (
+        ["a", "v"],
+        ["a", "v"],
+        [],
+        [("a", "ok", ""), ("v", "skipped", "no-inputs")],
+        "не выполнено",
+    ),
+    # one-repo run
+    (["a"], ["a", "b"], [], [("a", "ok", "")], "не измерено — вне прогона: b"),
+    # failed beats unmeasured
+    (
+        ["a"],
+        ["a", "b"],
+        [],
+        [("a", "failed", "x")],
+        "не установлено — lint-coverage: a",
+    ),
+]
+
+
+def test_s4_line_forms() -> None:
+    for scope, repos, missing_, rows, expected in S4_FORMS:
+        doc = _doc(scope, [], [])
+        doc["probes"] = [
+            {**_lc_probe(r, status), "reason": reason} for r, status, reason in rows
+        ]
+        doc["run"]["manifest"]["repos"] = repos
+        doc["run"]["manifest"]["missing"] = missing_
+        assert f"S4: условие возврата {expected}" in render_markdown(doc), (
+            scope,
+            rows,
+        )
