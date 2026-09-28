@@ -399,3 +399,29 @@ def test_reuse_falls_back_to_a_check_when_the_edge_file_moved_on(
     call, seen = _counting({})
     co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=call)
     assert _CUSTOMER[1] in seen
+
+
+def test_reuse_requires_the_same_reviewer(tmp_path: Path, runs_root: Path) -> None:
+    """Ревью #447: model/effort не входят в ключ D9, но меняют проверку —
+    повтор с другим ревьюером не получает PASS прежнего."""
+    state = _state(tmp_path, _W1_FILES, _ENGINEER)
+    run_dir = tmp_path / "run"
+    co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=_fake_call({}))
+    call, seen = _counting({})
+    co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=call, effort="high")
+    assert sorted(seen) == sorted([_CUSTOMER[1], _ENGINEER_EDGE[1]])
+
+
+def test_unreadable_edge_file_is_a_recheck_not_a_crash(
+    tmp_path: Path, runs_root: Path,
+) -> None:
+    """Ревью #447: файл ребра пишется неатомарно; оборванная запись —
+    повод проверить ребро, а не необработанный JSONDecodeError."""
+    state = _state(tmp_path, _W1_FILES, _ENGINEER)
+    run_dir = tmp_path / "run"
+    co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=_fake_call({}))
+    path = run_dir / "edge-check/w1" / f"{_CUSTOMER[0]}--{_CUSTOMER[1]}.json"
+    path.write_text(path.read_text()[:40])
+    call, seen = _counting({})
+    result = co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=call)
+    assert seen == [_CUSTOMER[1]] and result.verdict == "PASS"

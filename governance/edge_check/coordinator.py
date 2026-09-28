@@ -180,15 +180,18 @@ def run_level(
 def _reusable(effective: dict[str, dict], path: Path) -> dict | None:
     """Прошлая запись ребра, годная к переиспользованию (devtools#445).
 
-    Файл ребра хранит последнюю попытку РЕБРА; годна она, только если это
-    действующая попытка своего ключа (D10: последняя завершённая) и та
-    завершилась `PASS`. Иначе — `None`, и ребро проверяется: FAIL и ERROR
-    повторяются, исторический PASS не ищется, перезаписанный файл не
-    выдаётся за результат чужого ключа.
+    Файл ребра хранит последнюю попытку РЕБРА (не ключа); годна она, только
+    если это действующая попытка своего ключа (D10: последняя завершённая) и
+    та завершилась `PASS`. Иначе — `None`, и ребро проверяется: FAIL и ERROR
+    повторяются, перезаписанный файл не выдаётся за результат чужого ключа,
+    нечитаемый (оборванная запись) — повод проверить, а не упасть.
     """
-    if not path.is_file():
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return None
-    record = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(record, dict):
+        return None
     entry = effective.get(record.get("result_key", ""))
     if entry is None or entry.get("attempt_id") != record.get("attempt_id"):
         return None
@@ -289,7 +292,12 @@ def _check_edge(
     def lookup(fresh: dict) -> dict | None:
         # Ключ D9 входа, посчитанного сейчас, против ключа прошлой записи:
         # правка subject или основания меняет хэш — переиспользования нет.
+        # model/effort в ключ D9 не входят, но меняют проверку (ревью #447):
+        # результат другого ревьюера за этот не выдаётся.
         if prior is None:
+            return None
+        reviewer = prior.get("reviewer") or {}
+        if (reviewer.get("model"), reviewer.get("effort")) != (model, effort):
             return None
         key = result_key(
             fresh["subject"], fresh["bases"], fresh["absence"],
