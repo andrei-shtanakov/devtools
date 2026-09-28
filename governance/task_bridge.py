@@ -328,7 +328,7 @@ def _render_header(
     ws_id: str,
     subject: str,
     generated_at: str,
-    anchor_blob: str,
+    anchor_blob: str | None,
     anchor_node_id: str,
     version: int = 1,
 ) -> list[str]:
@@ -339,15 +339,24 @@ def _render_header(
     рендера держат байт-в-байт поведение `render_tasks`.
 
     Форма активного governance-профиля сразу при рождении (урок 1
-    ретроспективы): traces_to/upstream_hashes переживают `spec approve`
-    (он мержит traces к существующим), а с stage-профилем (devtools#386)
-    approve сам перепинивает узел — нормализации после него нет.
+    ретроспективы): traces_to переживает `spec approve` (он мержит traces
+    к существующим), а пин `upstream_hashes` с stage-профилем (devtools#386)
+    ставит сам approve — нормализации после него нет.
 
     `version` (Task 7 плана supersede): номер ревизии tasks-спеки —
     `1` у первой доставки, `_previous_tasks_version(state) + 1` у
     переиздания (`deliver_superseded`). Дефолт `1` сохраняет прежний
     захардкоженный текст для всех вызовов без явного значения.
+
+    `anchor_blob=None` — черновик без пина (devtools#467, DEC-008 у
+    spec-runner): пин — подпись одобрения, его пишет `spec approve
+    --profile`, а не мост. Ключа тогда нет вовсе («absent, never empty»).
     """
+    pin = (
+        ["upstream_hashes:", f"  {anchor_node_id}: {anchor_blob}"]
+        if anchor_blob is not None
+        else []
+    )
     return [
         "---",
         "spec_stage: tasks",
@@ -363,8 +372,7 @@ def _render_header(
         'approved_by: ""',
         "traces_to:",
         f"- {anchor_node_id}",
-        "upstream_hashes:",
-        f"  {anchor_node_id}: {anchor_blob}",
+        *pin,
         "---",
         "",
         f"## Milestone 1: {subject}",
@@ -417,7 +425,7 @@ def render_tasks(
     bundle_path: str,
     scenarios: list[Scenario],
     generated_at: str,
-    design_blob: str,
+    design_blob: str | None,
     design_text: str = "",
     anchor_node_id: str = _ANCHOR_NODE_ID,
     version: int = 1,
@@ -713,7 +721,7 @@ def render_tasks_dt(
     scenarios: list[Scenario],
     dt_tasks: list[decomposition_guard.DtTask],
     generated_at: str,
-    anchor_blob: str,
+    anchor_blob: str | None,
     design_text: str = "",
     acceptance_text: str = "",
     version: int = 1,
@@ -1340,9 +1348,10 @@ def _prospective_anchor(
     теневой копии; предсказывать больше нечего.
 
     Отметки эпохи В ЗНАЧЕНИИ у этой величины НЕТ, и это не асимметрия с
-    `content_anchor`, а разница предметов: тот же блоб уходит ПИНОМ в
-    саму tasks-спеку (`upstream_hashes`), и префикс в нём испортил бы
-    артефакт, который читает spec-runner. Смысл величины тоже сменился со
+    `content_anchor`, а разница предметов: тот же блоб становится ПИНОМ
+    tasks-спеки (`upstream_hashes`, его ставит `spec approve --profile`, не
+    мост — devtools#467), и префикс в нём испортил бы артефакт, который
+    читает spec-runner. Смысл величины тоже сменился со
     штампом (был блоб проштампованного узла, стал блоб узла в base),
     поэтому эпоха у неё распознаётся ГВАРДОМ — по полям намерения, а не по
     форме значения (`_require_resumable_epoch`).
@@ -1455,11 +1464,12 @@ def check_approved(
     Чем именно approve сделан, проверка НЕ различает — во frontmatter нет
     поля, называющего профиль. Различать и не нужно: пин = текущие байты
     значит, что узел не менялся с момента пина, а `status` узла лежит в
-    тех же байтах. Approve с профилем пинует байты, чей допуск проверил
-    spec-runner; approve без профиля оставляет пин доставки — байты, чью
-    одобренность проверил гейт §I12 при доставке. Правка узла после пина
-    в обоих случаях ловится расхождением, и отказ называет команду с
-    профилем.
+    тех же байтах. Пин ставит только approve с профилем — байты, чей
+    допуск проверил spec-runner. Черновик своего пина не несёт
+    (devtools#467): у первой доставки его нет вовсе, у переиздания —
+    прежний пин доставленной ревизии. Approve без профиля пин не ставит, и
+    отсутствие либо расхождение пина называет команду с профилем; правка
+    узла после пина ловится тем же расхождением.
 
     Состав бандла проверяется В НАЧАЛЕ — отсутствие файла-анкера
     ловится явным RuntimeError с процедурой, не сырым traceback.
@@ -1706,6 +1716,30 @@ def _carry_execution_state_with_report(
     )
 
 
+def _carried_pin(carry_from: str | None, anchor_node_id: str) -> str | None:
+    """Пин анкера из доставленной tasks-спеки, либо None.
+
+    DEC-008 spec-runner: пин ставит только одобрение этой стадии, и
+    переиздание не освежает его «за спиной» — расхождение прежнего пина с
+    новыми байтами и есть сигнал stale-каскада до approve. Пин по чужому
+    ключу (прежний анкер другого режима) не переносится: он был бы пином
+    не прямого upstream.
+    """
+    if not carry_from:
+        return None
+    try:
+        meta, _ = split_frontmatter(carry_from)
+    except ValueError:
+        # Нечитаемая прежняя спека — переносить нечего; её разбирает §I8
+        # (ветки unavailable), доставке она не помеха.
+        return None
+    pins = meta.get("upstream_hashes")
+    if not isinstance(pins, dict):
+        return None
+    pin = pins.get(anchor_node_id)
+    return pin if isinstance(pin, str) and pin else None
+
+
 def deliver(
     target_dir: str,
     repo_slug: str,
@@ -1734,10 +1768,13 @@ def deliver(
     случайного состояния чекаута.
 
     Порядок «чтение анкера → рендер tasks» прежний по смыслу, хотя штампа
-    в нём больше нет: пин обязан считаться с тех байтов, что лежат в base
-    к моменту доставки. Раньше между ними стоял штамп
-    меняет байты терминального узла активного DAG, и пин, взятый до
-    штампа, протух бы в том же PR (@id:spec-bridge-approve-conformance).
+    в нём больше нет: блоб анкера — факт доставки (леджер, §I3.1) и обязан
+    считаться с тех байтов, что лежат в base к моменту доставки. В пин
+    спеки он не идёт: пин черновика — перенесённый из доставленной
+    ревизии либо никакой, новый ставит `spec approve --profile`
+    (devtools#467). Раньше между чтением и рендером стоял штамп, менявший
+    байты терминального узла активного DAG
+    (@id:spec-bridge-approve-conformance).
 
     `legacy_bundle` (Task 7 плана acceptance-node) выбирает активный DAG
     через `_dag_for`: `None` — полный (якорь decomposition, два upstream-
@@ -1783,9 +1820,11 @@ def deliver(
     переиздание воркстрима, где часть задач уже выполнена, возвращало все
     `✅ DONE` в `TODO`, а все `- [x]` — в `- [ ]` (живой дефект
     spec-runner#409): state DB помнит успешные задачи, файл больше нет, и
-    следующий прогон встаёт на `state_spec_mismatch`. `deliver_for_run`
-    аргумента не передаёт (спеки в base ещё нет — переносить нечего), и
-    обычная доставка байт-в-байт прежняя.
+    следующий прогон встаёт на `state_spec_mismatch`. Из тех же байтов
+    берётся и пин черновика (`_carried_pin`, devtools#467): переиздание
+    несёт пин доставленной ревизии, а не новые байты анкера.
+    `deliver_for_run` аргумента не передаёт (спеки в base ещё нет —
+    переносить нечего), и черновик первой доставки идёт без пина.
 
     `report_carry` отличает supersede с подтверждённо отсутствующей
     базовой спекой от обычной v1-доставки: первый случай пишет
@@ -1802,7 +1841,8 @@ def deliver(
       ПРИНЯТЬ его» недостижима — восстановлению не с чем сравнивать блоб.
     - `after_commit` вызывается РОВНО между `commit_paths` и
       `push_branch` с `head_sha` и `anchor_blob` (фактический блоб
-      терминального узла, тот же, что ушёл в пин спеки). §I3 требует
+      терминального узла в base — факт леджера §I3.1; в пин спеки он не
+      идёт, devtools#467). §I3 требует
       durable-записи `head_sha` до push: падение между коммитом и push
       иначе оставляет ревизию без единственного факта, по которому её
       опознают в ветке.
@@ -1933,6 +1973,10 @@ def deliver(
     anchor_node_id = _node_id(dag[-1][0])
     anchor_text = (base / dag[-1][0]).read_text(encoding="utf-8")
     design_blob = blob_sha1(anchor_text)
+    # Пин ЧЕРНОВИКА — не блоб анкера (devtools#467): переиздание несёт
+    # пин доставленной ревизии, первая доставка — никакого. Блоб анкера
+    # остаётся фактом доставки (леджер, §I3.1), в спеку он не идёт.
+    draft_pin = _carried_pin(carry_from, anchor_node_id)
     design_text = (
         (base / "20-design.md").read_text(encoding="utf-8")
         if any(_node_id(fname) == "design" for fname, _ in dag)
@@ -1980,7 +2024,7 @@ def deliver(
             scenarios=scenarios,
             dt_tasks=dt_tasks,
             generated_at=stamp,
-            anchor_blob=design_blob,
+            anchor_blob=draft_pin,
             design_text=design_text,
             acceptance_text=acceptance_text,
             version=version,
@@ -1994,7 +2038,7 @@ def deliver(
             bundle_path=f"{bundle_dir}/15-behaviour-spec.md",
             scenarios=scenarios,
             generated_at=stamp,
-            design_blob=design_blob,
+            design_blob=draft_pin,
             design_text=design_text,
             anchor_node_id=anchor_node_id,
             version=version,
@@ -2057,7 +2101,7 @@ def deliver(
     if after_commit is not None:
         # Между коммитом и push (§I3): падение здесь оставляет коммит
         # опознаваемым. `anchor_blob` — ФАКТИЧЕСКИЙ блоб терминального
-        # узла, тот же, что ушёл в пин спеки.
+        # узла в base; пином спеки он не является (devtools#467).
         after_commit({
             "head_sha": ops.rev_parse(target_dir, "HEAD"),
             "anchor_blob": design_blob,
@@ -3571,8 +3615,9 @@ def _require_resumable_epoch(n: int, op: dict) -> None:
     Распознаватель назвал сам §I4, и процедуру тоже — свернуть ревизию
     явно и запустить переиздание заново.
 
-    Отметки в значении здесь быть не может: тот же блоб уходит пином в
-    tasks-спеку, и префикс испортил бы артефакт.
+    Отметки в значении здесь быть не может: тот же блоб становится пином
+    tasks-спеки на `spec approve --profile` (devtools#467), и префикс
+    испортил бы артефакт.
     """
     epoch_fields = [f for f in ("approval_pr", "signed_nodes") if f in op]
     if not epoch_fields:
