@@ -8265,7 +8265,122 @@ def test_edge_tripwire_disp_removes_node_and_pipeline(
     slug = seen[0][0]
     assert not (tmp_path / ".disputatio/pipelines" / slug).exists()
     assert not list((tmp_path / "workstreams").rglob("15-behaviour-spec.md"))
+    # Не удалено, а перенесено в карантин прогона — улика сохранена.
+    evidence = next(rs.run_dir("r-plant-disp2").glob("tampered-*"))
+    assert sorted(p.name for p in evidence.iterdir()) == [
+        "15-behaviour-spec.md", slug,
+    ]
 
     runner.resume("r-plant-disp2", ops)
     assert len(seen) == 2
     assert seen[1][1] is False  # свежий run, не resume подозрительного
+
+
+def test_edge_tripwire_moves_changed_wave_sibling(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Ревью #470: вызов design (W4) заодно кладёт 25-acceptance.md — сосед
+    того же уровня снимается вместе с узлом и на resume авторится заново."""
+    done: list[str] = []
+
+    class _Sibling(FakeOps):
+        def author(self, target_dir, kind, subject, bundle_dir,
+                   brief_context=None):
+            rc = super().author(target_dir, kind, subject, bundle_dir,
+                                brief_context=brief_context)
+            if kind == "design" and not done:
+                done.append(kind)
+                bundle = Path(target_dir) / bundle_dir
+                (bundle / "25-acceptance.md").write_text(
+                    "подсаженный сосед\n", encoding="utf-8"
+                )
+                _plant_pass("r-plant-sib", 5, "decomposition")
+            return rc
+
+    ops = _Sibling()
+    state = _drive_waves_to(tmp_path, "r-plant-sib", ops, monkeypatch, 4)
+    assert state.status == "stopped_author"
+    bundle = Path(state.target_dir) / state.bundle_dir
+    assert not (bundle / "25-acceptance.md").exists()
+    evidence = next(rs.run_dir(state.run_id).glob("tampered-*"))
+    assert sorted(p.name for p in evidence.iterdir()) == [
+        "20-design.md", "25-acceptance.md",
+    ]
+    before = ops.authored.count("acceptance")
+    runner.resume("r-plant-sib", ops)
+    assert ops.authored.count("acceptance") == before + 1
+
+
+def test_edge_tripwire_records_stop_before_moving(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Ревью #470: сбой переноса не оставляет прогон в `running` — статус
+    записан до разрушительных действий, неснятое названо в причине."""
+    import shutil as _shutil
+
+    class _Plant(FakeOps):
+        def author(self, target_dir, kind, subject, bundle_dir,
+                   brief_context=None):
+            rc = super().author(target_dir, kind, subject, bundle_dir,
+                                brief_context=brief_context)
+            if kind == "charter":
+                _plant_pass("r-plant-fail", 2, "requirements")
+                monkeypatch.setattr(
+                    _shutil, "move",
+                    lambda *a, **k: (_ for _ in ()).throw(OSError("занято")),
+                )
+            return rc
+
+    state = _drive_waves_to(tmp_path, "r-plant-fail", _Plant(), monkeypatch, 1)
+    assert rs.load("r-plant-fail").status == "stopped_author"
+    reason = (rs.run_dir(state.run_id) / "stop-reason.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "НЕ снято" in reason and "00-charter.md" in reason
+
+
+def test_edge_tripwire_status_survives_unexpected_failure(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Непойманный сбой посреди обработки подсадки: на диске прогон уже
+    `stopped_author`, а не `running` (resume из `running` пошёл бы дальше)."""
+    import shutil as _shutil
+
+    class _Plant(FakeOps):
+        def author(self, target_dir, kind, subject, bundle_dir,
+                   brief_context=None):
+            rc = super().author(target_dir, kind, subject, bundle_dir,
+                                brief_context=brief_context)
+            if kind == "charter":
+                _plant_pass("r-plant-boom", 2, "requirements")
+                monkeypatch.setattr(
+                    _shutil, "move",
+                    lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+                )
+            return rc
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _drive_waves_to(tmp_path, "r-plant-boom", _Plant(), monkeypatch, 1)
+    assert rs.load("r-plant-boom").status == "stopped_author"
+
+
+def test_edge_tripwire_keeps_unchanged_wave_sibling(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Снимается только сосед, изменившийся за окно вызова: неизменный
+    (узел, авторенный раньше) остаётся — лишняя переавторизация платная."""
+    state = _drive_waves_to(tmp_path, "r-plant-keep", FakeOps(), monkeypatch, 1)
+    stable = tmp_path / "stable.md"
+    touched = tmp_path / "touched.md"
+    stable.write_text("был до вызова\n", encoding="utf-8")
+    touched.write_text("был до вызова\n", encoding="utf-8")
+
+    def call() -> int:
+        touched.write_text("переписан пойманным\n", encoding="utf-8")
+        _plant_pass("r-plant-keep", 2, "requirements")
+        return 0
+
+    suspect = runner._Suspect(own=(), wave=(stable, touched))
+    assert runner._guard_edge_results(state, FakeOps(), suspect, call) is None
+    assert stable.read_text(encoding="utf-8") == "был до вызова\n"
+    assert not touched.exists()

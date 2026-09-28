@@ -26,6 +26,7 @@ import shlex
 import shutil
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -2284,6 +2285,10 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 state.status = "stopped_preflight"
                 save(state)
                 return False
+    wave_targets = tuple(
+        Path(state.target_dir) / state.bundle_dir / name
+        for _, _, name in _author_steps_for(state)
+    )
     for key, kind, filename in _author_steps_for(state):
         if kind == "behaviour-spec" and state.brief is not None:
             descriptor = state.brief
@@ -2400,7 +2405,9 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                     f"{state.subject}: узлы до disp-авторинга",
                 )
             exit_code = _guard_edge_results(
-                state, ops, (target, pipeline_dir), ops.author_disp,
+                state, ops, _Suspect((target, pipeline_dir), wave_targets,
+                                     _disp_anchor_hint(state)),
+                ops.author_disp,
                 state.target_dir, task, config_path, slug, resume=resume,
             )
             if exit_code is None:
@@ -2426,7 +2433,8 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 "charter", "requirements",
             ):
                 exit_code = _guard_edge_results(
-                    state, ops, (target,), ops.author, *author_args,
+                    state, ops, _Suspect((target,), wave_targets),
+                    ops.author, *author_args,
                     brief_context=state.brief,
                 )
             else:
@@ -2434,7 +2442,8 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 # particular, third-party test/fake Ops implementations with
                 # the pre-E1 signature remain valid for no-brief runs.
                 exit_code = _guard_edge_results(
-                    state, ops, (target,), ops.author, *author_args
+                    state, ops, _Suspect((target,), wave_targets),
+                    ops.author, *author_args,
                 )
             if exit_code is None:
                 return False
@@ -2444,6 +2453,36 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
             return False
         op_complete(state, key, skipped=False, exit=exit_code)
     return True
+
+
+@dataclass(frozen=True)
+class _Suspect:
+    """Что снимается, если вызов агента пойман на подсадке (ревью #470).
+
+    `own` — вывод самого вызова (файл узла, у disp — и каталог пайплайна):
+    снимается всегда. `wave` — файлы узлов волны: снимается тот, что
+    появился или изменился за окно вызова (сосед того же уровня, design и
+    acceptance в W4), иначе skip-ветка приняла бы его на resume как готовый.
+    `hint` — ручной шаг, который раннер проверить не может.
+    """
+
+    own: tuple[Path, ...]
+    wave: tuple[Path, ...] = ()
+    hint: str = ""
+
+
+def _disp_anchor_hint(state: RunState) -> str:
+    anchor = _pinned_disp_anchor_dir(state)
+    return (
+        f" Если disp откажет по журналу целостности анкера — уберите {anchor} "
+        "и повторите resume." if anchor is not None else ""
+    )
+
+
+def _file_fingerprint(path: Path) -> str | None:
+    if path.is_symlink() or path.is_dir():
+        return f"non-file:{os.readlink(path) if path.is_symlink() else 'dir'}"
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
 
 def _edge_results_snapshot(state: RunState) -> dict[str, str] | None:
@@ -2465,7 +2504,7 @@ def _edge_results_snapshot(state: RunState) -> dict[str, str] | None:
 def _guard_edge_results(
     state: RunState,
     ops: Ops,
-    suspect: tuple[Path, ...],
+    suspect: _Suspect,
     call: Callable[..., int],
     *args: Any,
     **kwargs: Any,
@@ -2480,20 +2519,26 @@ def _guard_edge_results(
     Реакция: каталог уходит в карантин `edge-check.tampered-<UTC>` (его
     координатор не читает — путь `edge-check` точный, не glob), и
     переиспользовать подсаженное нечего: рёбра проверяются заново, платно.
-    Вывод этого вызова тоже под подозрением: `suspect` (файл узла, у disp —
-    ещё и каталог пайплайна) снимается, иначе skip-ветка приняла бы файл
-    как готовый узел (ревью #470). Прогон — `stopped_author`, resume
-    авторит узел заново. Возврат `None` — стоп уже зафиксирован.
+    Вывод этого вызова тоже под подозрением (`_Suspect`): он переносится
+    в карантин прогона `tampered-<UTC>`, иначе skip-ветка приняла бы файл
+    как готовый узел (ревью #470). Статус `stopped_author` пишется до
+    переноса; resume авторит узел заново. Возврат `None` — стоп уже
+    зафиксирован.
 
     Defense-in-depth, НЕ граница: агент с правом записи куда угодно
     подделает и чужой прогон (не наблюдается), и то, что пишется между
     вызовами; граница — песочница агента (devtools#469).
     """
     before = _edge_results_snapshot(state)
+    wave_before = {path: _file_fingerprint(path) for path in suspect.wave}
     exit_code = call(*args, **kwargs)
     after = _edge_results_snapshot(state)
     if after == before:
         return exit_code
+    # Статус — ПЕРВЫМ (инвариант `_stop_with_comment`): любой сбой ниже не
+    # должен оставить прогон в `running` без записи о подсадке.
+    state.status = "stopped_author"
+    save(state)
     old, new = before or {}, after or {}
     changed = sorted(
         path for path in old.keys() | new.keys() if old.get(path) != new.get(path)
@@ -2507,23 +2552,39 @@ def _guard_edge_results(
     quarantine = root.with_name(f"edge-check.tampered-{stamp}")
     if root.exists():
         root.rename(quarantine)
-    removed = []
-    for path in suspect:
-        if path.is_dir():
-            shutil.rmtree(path)
-        elif path.exists():
-            path.unlink()
-        else:
+    # Вывод вызова — в карантин прогона, не удалением: это улика того, что
+    # сделал пойманный агент, и вне дерева цели (коммит бандла её не видит).
+    evidence = run_dir(state.run_id) / f"tampered-{stamp}"
+    changed_wave = [
+        path for path in suspect.wave
+        if path not in suspect.own and _file_fingerprint(path) != wave_before[path]
+    ]
+    moved, failed = [], []
+    for path in (*suspect.own, *changed_wave):
+        if not (path.exists() or path.is_symlink()):
             continue
-        removed.append(str(path))
+        try:
+            evidence.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), str(evidence / path.name))
+            moved.append(str(path))
+        except OSError as exc:
+            failed.append(f"{path} ({exc})")
+    outcome = (
+        f"Вывод вызова перенесён в {evidence.name}: {', '.join(moved)}"
+        if moved else "Вывод вызова снимать нечего"
+    )
+    if failed:
+        outcome += (
+            f". НЕ снято (уберите руками до resume, иначе узел примется "
+            f"как готовый): {', '.join(failed)}"
+        )
     _stop_with_comment(
         state, ops, "stopped_author",
         "результаты edge-check изменены во время вызова авторского агента "
         f"(devtools#448): {', '.join(changed)}. Каталог перенесён в "
         f"{quarantine.name} — подсаженное не переиспользуется, рёбра будут "
-        "проверены заново. Вывод вызова снят: "
-        f"{', '.join(removed) or 'нечего снимать'}; resume авторит узел "
-        "заново.",
+        f"проверены заново. {outcome}; resume авторит узел заново."
+        f"{suspect.hint}",
     )
     return None
 
