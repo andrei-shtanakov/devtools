@@ -183,6 +183,15 @@ class Ops(RealOps):
             "statusCheckRollup": self.forge.next_checks(),
         }
 
+    def pr_closure(self, repo_slug: str, pr: int) -> dict | None:
+        return None  # факты закрытия (§I10 для v1) этому стенду не нужны
+
+    def agent_login(self) -> str | None:
+        return None
+
+    def caller_login(self) -> str | None:
+        return None
+
     def create_pr(
         self,
         target_dir: str,

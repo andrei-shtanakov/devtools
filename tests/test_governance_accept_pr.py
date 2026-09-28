@@ -66,6 +66,15 @@ class _Ops:
         return self.facts_seq.pop(0) if len(self.facts_seq) > 1 \
             else self.facts_seq[0]
 
+    def pr_closure(self, repo_slug: str, pr: int) -> dict | None:
+        return None  # факты закрытия (§I10 для v1) этому стенду не нужны
+
+    def agent_login(self) -> str | None:
+        return None
+
+    def caller_login(self) -> str | None:
+        return None
+
     def remote_branch_head_fact(self, repo_slug: str, branch: str):
         self.calls.append(("remote_branch_head_fact", branch))
         if self.live_tip_absent:

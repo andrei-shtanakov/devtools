@@ -247,6 +247,15 @@ class _RecoveryOps:
             "headRefOid": "a" * 40,
         }
 
+    def pr_closure(self, repo_slug: str, pr: int) -> dict | None:
+        return None  # факты закрытия (§I10 для v1) этому стенду не нужны
+
+    def agent_login(self) -> str | None:
+        return None
+
+    def caller_login(self) -> str | None:
+        return None
+
     def pr_files(self, repo_slug, pr):
         return self.files
 
@@ -1179,6 +1188,15 @@ class _WaveRecoveryOps:
             "state": self.states.get(pr, "MERGED"), "baseRefName": "master",
             "headRefOid": "b" * 40,
         }
+
+    def pr_closure(self, repo_slug: str, pr: int) -> dict | None:
+        return None  # факты закрытия (§I10 для v1) этому стенду не нужны
+
+    def agent_login(self) -> str | None:
+        return None
+
+    def caller_login(self) -> str | None:
+        return None
 
     def pr_files(self, repo_slug, pr):
         return []

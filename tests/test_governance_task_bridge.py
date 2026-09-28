@@ -456,6 +456,25 @@ class _StubOps:
         candidate = Path(target_dir) / path
         return candidate.read_bytes() if candidate.is_file() else None
 
+    #: Факты закрытия и учётки (§I10 для v1, спека 2026-09-28 §4.1/§8):
+    #: дефолт — «не установлено» у закрытия, агент и вызывающий различны.
+    #: Тесты хода N = 1 задают их явно.
+    closure: dict | None = None
+    agent: str | None = "ai-prosto"
+    caller: str | None = "andrei-shtanakov"
+
+    def pr_closure(self, repo_slug: str, pr: int) -> dict | None:
+        self.calls.append(("pr_closure", pr))
+        return None if self.closure is None else dict(self.closure)
+
+    def agent_login(self) -> str | None:
+        self.calls.append(("agent_login",))
+        return self.agent
+
+    def caller_login(self) -> str | None:
+        self.calls.append(("caller_login",))
+        return self.caller
+
 
 def _target(tmp_path: Path) -> Path:
     target = tmp_path / "alpha"
