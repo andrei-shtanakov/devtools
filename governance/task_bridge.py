@@ -1163,8 +1163,22 @@ def _comparable_anchors(recorded: object, current: str) -> bool:
     return _canon_epoch(recorded) == _canon_epoch(current)
 
 
-def _debt_notice(state: RunState, ops: Ops, legacy_bundle: int | None) -> str:
+def _debt_notice(
+    state: RunState,
+    ops: Ops,
+    legacy_bundle: int | None,
+    *,
+    traceless: bool = True,
+) -> str:
     """Перечень долговых узлов для сообщения бесследного no-op'а (§I5).
+
+    `traceless` (keyword-only, по умолчанию `True` — сегодняшнее
+    поведение без правки вызывающих) называет, вправе ли диагностические
+    ветки (`forbidden`, `unresolved`) утверждать бесследность вызова:
+    `False` — когда §I5-блок уже знает, что этим же вызовом брошена
+    ревизия (записан `run.json`), и утверждение было бы ложью. Ветки
+    `debts` и пустая параметр не видят: утверждения бесследности они не
+    несут.
 
     Контракт требует, чтобы no-op долговые узлы **назвал**: оператор
     обязан узнать о долге тогда, когда спрашивает про переиздание, а не в
@@ -1199,18 +1213,21 @@ def _debt_notice(state: RunState, ops: Ops, legacy_bundle: int | None) -> str:
     Пустая строка — «сказать нечего»: DAG честно одобрен целиком.
     """
     verdict = read_dag_state(state, ops, _dag_for(legacy_bundle))
+    # Один производитель хвоста вместо двух дословных копий (Q-05):
+    # правка одной ветки больше не может молча разойтись со второй.
+    tail = "Переиздание это не затронуло — апстрим не менялся" + (
+        ", и вызов бесследен" if traceless else ""
+    )
     if verdict.forbidden:
         return (
             "discovery source активного DAG расходится с intake descriptor: "
             f"{verdict.forbidden}. Восстановите исходные source bytes либо "
-            "создайте новый workstream/run с другим ws-id. Переиздание это "
-            "не затронуло — апстрим не менялся, и вызов бесследен"
+            f"создайте новый workstream/run с другим ws-id. {tail}"
         )
     if verdict.unresolved:
         return (
             "долг активного DAG установить не удалось: "
-            f"{verdict.unresolved}. Переиздание это не затронуло — "
-            "апстрим не менялся, и вызов бесследен"
+            f"{verdict.unresolved}. {tail}"
         )
     if not verdict.debts:
         return ""
@@ -3895,8 +3912,9 @@ class SupersedeResult:
     - `delivered` — доставка выполнена ЭТИМ вызовом (новая ревизия либо
       достройка прерванной), `pr` — её номер;
     - `returned` — вернули существующий PR (§I3), ничего не создано;
-    - `noop` — бесследный no-op §I5: апстрим не менялся, `run.json` не
-      тронут, PR нет.
+    - `noop` — бесследный no-op §I5: апстрим не менялся, PR нет, своих
+      записей вызов не делает (кроме, возможно, записи реконсиляции §I3
+      в этом же вызове — её называет вывод).
     """
 
     kind: Literal["delivered", "returned", "noop"]
@@ -3999,8 +4017,9 @@ def deliver_superseded(
     Возврат — `SupersedeResult`: `kind="delivered"` (доставка выполнена
     этим вызовом), `kind="returned"` (вернули существующий PR — исходы
     реконсиляции §I3, включая PR первой доставки) либо `kind="noop"` —
-    бесследный no-op §I5: апстрим не менялся с прошлой доставки,
-    run.json не трогается.
+    бесследный no-op §I5: апстрим не менялся с прошлой доставки, своих
+    записей вызов не делает (кроме, возможно, записи реконсиляции §I3 в
+    этом же вызове — её называет вывод).
 
     `replace` — явный replace-переход (§I10): незамерженное предложение
     названной ревизии снимается со стола и заменяется новым. Порядок
@@ -4068,6 +4087,10 @@ def deliver_superseded(
     # явным разбором конфликта I3×I4 — а состояние ещё и
     # самовоспроизводится (каждый следующий запуск плодит ревизию и PR).
     # Терминальны для вызова все исходы, кроме `abandon_and_next`.
+    # Пара «номер, причина» брошенной этим вызовом ревизии — для §I5-блока
+    # ниже (Q-03): объявлена и инициализирована `None` ДО цикла, чтобы не
+    # опираться на подтекающие переменные цикла (`n`, `op` после `break`).
+    abandoned: tuple[int, str] | None = None
     for n, op in reversed(_revisions(state)):
         status = op.get("status")
         if status not in ("started", "completed"):
@@ -4127,11 +4150,12 @@ def deliver_superseded(
                 f"решите судьбу PR явно: --abandon-revision {n}"
             )
         if decision == "abandon_and_next":
-            _abandon_revision(
-                state, n,
+            reason = (
                 f"base сдвинулся ({op.get('base_sha', '?')[:7]} → "
-                f"{base_sha[:7]}), открытого PR нет",
+                f"{base_sha[:7]}), открытого PR нет"
             )
+            _abandon_revision(state, n, reason)
+            abandoned = (n, reason)
             break
         if decision == "return_pr":
             # Окно «PR новой ревизии создан, ветка заменённой ещё жива»:
@@ -4329,7 +4353,15 @@ def deliver_superseded(
             "апстрим не менялся — переиздание не требуется "
             f"(content_anchor {content[:7]})"
         )
-        notice = _debt_notice(state, ops, legacy_bundle)
+        if abandoned is not None:
+            n_abandoned, abandon_reason = abandoned
+            print(
+                f"ревизия {n_abandoned} брошена этим вызовом: "
+                f"{abandon_reason}"
+            )
+        notice = _debt_notice(
+            state, ops, legacy_bundle, traceless=abandoned is None,
+        )
         if notice:
             print(notice)
         return SupersedeResult("noop")
