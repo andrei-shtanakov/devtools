@@ -2272,6 +2272,26 @@ def _approved_dag_or_refuse(
     return judged
 
 
+def _s8_verdicts(state: RunState) -> bytes:
+    """S8 evidence прогона — байты, которые уйдут в tasks-PR; нет — отказ.
+
+    S8 завершился раньше доставки и перенёс обязательный verdict-файл из
+    transient `.steward/` в durable ledger прогона. Читается ДО
+    write-ahead записи и любых delivery-эффектов: потерянный локальный
+    артефакт не должен породить tasks-PR без обещанного evidence. Общий
+    для первой доставки (`deliver_for_run`), доставки из NSD и
+    возобновления NSD-ревизии — ревизия из NSD первой дойдёт до base.
+    """
+    verdicts_path = run_dir(state.run_id) / "s8-gate-verdicts.jsonl"
+    try:
+        return verdicts_path.read_bytes()
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"S8 verdicts прогона недоступны: {verdicts_path} — "
+            "доставка не начата"
+        ) from exc
+
+
 def deliver_for_run(
     state: RunState,
     ops: Ops,
@@ -2409,18 +2429,7 @@ def deliver_for_run(
     # работы («сгенерировать DAG → одобрить узлы топологически →
     # deliver_for_run»), а не регресс.
     judged_base = _approved_dag_or_refuse(state, ops, legacy_bundle)
-    # S8 завершился раньше доставки и перенёс обязательный verdict-файл
-    # из transient `.steward/` в durable ledger прогона. Читаем его ДО
-    # write-ahead op и любых delivery-эффектов: потерянный локальный
-    # артефакт не должен породить tasks-PR без обещанного evidence.
-    verdicts_path = run_dir(state.run_id) / "s8-gate-verdicts.jsonl"
-    try:
-        s8_verdicts = verdicts_path.read_bytes()
-    except (OSError, ValueError) as exc:
-        raise RuntimeError(
-            f"S8 verdicts прогона недоступны: {verdicts_path} — "
-            "доставка не начата"
-        ) from exc
+    s8_verdicts = _s8_verdicts(state)
     op_start(state, "tasks-deliver")
     pr = deliver(
         target_dir=state.target_dir,
@@ -2905,6 +2914,11 @@ def _pending_replacement(
             key: op[key] for key in (
                 "replaces_revision", "replaces_pr", "replaces_branch",
                 "replaces_head_sha", "replacement_reason",
+                # Факты закрытия отклонённой первой доставки (§I10 для v1)
+                # едут вместе с обязательством: иначе следующая ревизия
+                # теряет «кто закрыл и кто подтвердил замену».
+                "replaces_closed_by", "replaces_closed_at",
+                "replacement_confirmed_by",
             ) if key in op
         }
     return {}
@@ -3541,6 +3555,60 @@ class SupersedeResult:
             )
 
 
+#: Причина отменённых сверок §I8/§I5 в состоянии NSD — одна формулировка.
+_NSD_REASON = "предыдущей успешной доставки нет"
+
+
+def _require_no_successful_delivery(
+    state: RunState,
+    ops: Ops,
+    skip: int | None,
+    discharged: frozenset[int],
+    base_sha: str,
+) -> None:
+    """Предикат NSD (спека 2026-09-28 §3) — иначе прежний отказ.
+
+    Вызывается там, где `_last_delivery` вернула `None` (п.2 предиката —
+    следствие п.1, проверяется как утверждение, не как вход):
+
+    1. в леджере есть хотя бы одна запись доставки в статусе `completed`,
+       и КАЖДАЯ такая запись отозвана (`_replaced_revisions`) либо
+       заменяется этим вызовом (`skip`); при этом `tasks-deliver` не
+       `started` — упавшую первую доставку, у которой PR `spec/<ws>-tasks`
+       мог быть создан, разбирает `deliver_for_run`, а NSD открыл бы рядом
+       `spec/<ws>-tasks-v<N>`. Пустой леджер — прежний отказ;
+    3. спеки `spec/<ws-id>-tasks.md` в base нет — строгим
+       `show_file_for_carry`, который отличает «доказанно нет» от
+       упавшего чтения (исключение уходит наверх как отказ). Без этой
+       проверки `supersedes: null` затёр бы доставленную спеку без
+       переноса §I11.
+    """
+    v1 = state.ops.get(_V1_KEY) or {}
+    completed = [
+        n for n, op in (
+            [(1, v1)] + _revisions(state)
+        ) if op.get("status") == "completed"
+    ]
+    revoked = _replaced_revisions(state, discharged) | {skip}
+    if (
+        not completed
+        or not set(completed) <= revoked
+        or v1.get("status") == "started"
+    ):
+        raise RuntimeError(
+            "доставок ещё не было — переиздавать нечего; обычная доставка "
+            "идёт без --supersede"
+        )
+    assert _last_delivery(state, skip, discharged) is None
+    rel = f"spec/{state.ws_id}-tasks.md"
+    if ops.show_file_for_carry(state.target_dir, base_sha, rel) is not None:
+        raise RuntimeError(
+            f"спека в base есть ({rel} на {base_sha[:7]}), а доставки в "
+            "леджере нет — леджер и base расходятся; переиздание "
+            "fail-closed: разберите расхождение вручную"
+        )
+
+
 def deliver_superseded(
     state: RunState,
     ops: Ops,
@@ -3747,6 +3815,9 @@ def deliver_superseded(
         # Бросает на чужом коммите/ветке и на «head_sha записан, ветки в
         # клоне нет» (там опознавать нечем, а переиздание затёрло бы SHA).
         _recover_commit(state, ops, n, op)
+        # NSD-ревизия несёт S8 evidence (§3 спеки 2026-09-28): путь
+        # возобновления до предиката не доходит, признак — в намерении.
+        resumed_s8 = _s8_verdicts(state) if op.get("nsd") else None
         # §I7: состав подписываемых узлов берётся ИЗ НАМЕРЕНИЯ, а не
         # пересчитывается. Проспективный anchor ревизии посчитан с ним же,
         # и разойдись они — доставка упёрлась бы в гард §I2 на собственном
@@ -3785,6 +3856,7 @@ def deliver_superseded(
             after_commit=_commit_facts_cb(
                 state, ops, n, op["prospective_anchor"]
             ),
+            s8_verdicts=resumed_s8,
         )
         _print_carry_report(state, n)
         # head_sha уже записан колбэком durable — между коммитом и push.
@@ -3816,34 +3888,40 @@ def deliver_superseded(
 
     # ПОСЛЕ реконсиляции (дефект 3 ревью Task 7): она может перевести
     # `started` → `completed`, и тогда предыдущая доставка — именно та.
-    prev = _last_delivery(
-        state, skip=replace_fields.get("replaces_revision"),
-        discharged=discharged,
-    )
-    if prev is None:
-        raise RuntimeError(
-            "доставок ещё не было — переиздавать нечего; обычная доставка "
-            "идёт без --supersede"
+    skip = replace_fields.get("replaces_revision")
+    prev = _last_delivery(state, skip=skip, discharged=discharged)
+    # Успешной доставки нет (NSD, спека 2026-09-28 §3) — свойство ЛЕДЖЕРА,
+    # а не хода: особый путь, включённый ходом, работал бы на один заход
+    # (брошенная ревизия-замена либо закрытый PR замены возвращали бы
+    # воркстрим в тупик «доставок ещё не было»).
+    nsd = prev is None
+    if nsd:
+        _require_no_successful_delivery(state, ops, skip, discharged, base_sha)
+        prev_n, prev_op = None, {}
+        # §I8 не производится: сверять не с чем. Слово той же формы, что
+        # у отменённой сверки (#443), `dag_source: "none"`.
+        dag, dag_source, dag_reason = None, "none", _NSD_REASON
+    else:
+        prev_n, prev_op = prev
+        if prev_n == 1:
+            # §I3 строка 1 для исторической v1: цикл выше её не видит
+            # (`_revisions` собирает только `tasks-deliver-v<N>`), и без
+            # этой ветки состояние «первая доставка ещё висит открытым PR»
+            # проваливалось в `_previous_tasks_version` и отказывало
+            # сообщением про версию — RC 1 вместо контрактных RC 0 +
+            # возврат PR, и диагностика уводила оператора не туда (major
+            # C-1).
+            v1_pr = _reconcile_v1(state, ops, prev_op)
+            if v1_pr is not None:
+                print(
+                    f"первая доставка уже открыта PR #{v1_pr} — "
+                    "переиздавать нечего, пока он не вмержен; новая "
+                    "ревизия не заводится"
+                )
+                return SupersedeResult("returned", v1_pr)
+        dag, dag_source, dag_reason = _previous_dag(
+            state, ops, prev_op, state.target_dir, state.bundle_dir, base_sha,
         )
-    prev_n, prev_op = prev
-    if prev_n == 1:
-        # §I3 строка 1 для исторической v1: цикл выше её не видит
-        # (`_revisions` собирает только `tasks-deliver-v<N>`), и без этой
-        # ветки состояние «первая доставка ещё висит открытым PR»
-        # проваливалось в `_previous_tasks_version` и отказывало
-        # сообщением про версию — RC 1 вместо контрактных RC 0 + возврат
-        # PR, и диагностика уводила оператора не туда (major C-1).
-        v1_pr = _reconcile_v1(state, ops, prev_op)
-        if v1_pr is not None:
-            print(
-                f"первая доставка уже открыта PR #{v1_pr} — переиздавать "
-                "нечего, пока он не вмержен; новая ревизия не заводится"
-            )
-            return SupersedeResult("returned", v1_pr)
-
-    dag, dag_source, dag_reason = _previous_dag(
-        state, ops, prev_op, state.target_dir, state.bundle_dir, base_sha,
-    )
     if dag is None:
         # Единственная точка печати (Механика п. 4): привязана к тому же
         # исходу, которым сверка §I8 отменяется — рядом с условием отказа
@@ -3896,7 +3974,10 @@ def deliver_superseded(
         # сверить не с чем.
         print(
             "сверка §I5 не производилась (comparison: unavailable): "
-            + _incomparable_reason(recorded_content, content)
+            + (
+                _NSD_REASON if nsd
+                else _incomparable_reason(recorded_content, content)
+            )
         )
 
     # Гейт §I12 — ПОСЛЕ §I5 и до записи ревизии: там, где доставки не
@@ -3912,13 +3993,20 @@ def deliver_superseded(
     # владельца 2026-09-11): долг гасится одобрением DAG, а не тем, что
     # сравнение не удалось.
     judged_base = _approved_dag_or_refuse(state, ops, legacy_bundle)
+    # Ревизия из NSD — первая, которая дойдёт до base, и обязана нести
+    # обещанное S8 evidence, как первая доставка (`deliver_for_run`).
+    # Читается ДО намерения: нет файла — отказ без единой записи.
+    s8_verdicts = _s8_verdicts(state) if nsd else None
 
     prospective = _prospective_anchor(
         state.target_dir, state.bundle_dir, legacy_bundle
     )
     n = _next_revision(state)
     generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
-    version = _previous_tasks_version(state) + 1
+    # §I6: версия считается от спеки в base. В NSD её там нет (проверено
+    # предикатом) — версия 1, хоть номер отозванного предложения и
+    # повторяется: два предложения различают ревизия и `replaces_*`.
+    version = 1 if nsd else _previous_tasks_version(state) + 1
     branch = f"spec/{state.ws_id}-tasks-v{n}"
     intent = {
         "branch": branch,
@@ -3946,6 +4034,10 @@ def deliver_superseded(
         # неизвестного» не одно и то же.
         **replace_fields,
     }
+    if nsd:
+        # Признак для пути возобновления (`continue`): он сам зовёт
+        # `deliver` и до предиката не доходит, а S8 передать обязан.
+        intent["nsd"] = True
     if not comparable:
         # §6 спеки: сверка была невозможна — фиксируем это В ЖУРНАЛЕ.
         # Случая два, и оба дают ОДИН исход: величины нет вовсе либо она
@@ -3981,13 +4073,15 @@ def deliver_superseded(
         # Переиздают ровно те воркстримы, что уже в работе: состояние
         # исполнения переносится из ДОСТАВЛЕННОЙ спеки в base (тот же
         # источник, что у `_previous_dag`), не из рабочего дерева и не из
-        # HEAD — base зафиксирован `base_sha` намерения.
-        carry_from=ops.show_file_for_carry(
+        # HEAD — base зафиксирован `base_sha` намерения. В NSD спеки в
+        # base нет (доказано предикатом) — переносить нечего.
+        carry_from=None if nsd else ops.show_file_for_carry(
             state.target_dir, base_sha, f"spec/{state.ws_id}-tasks.md"
         ),
         report_carry=True,
         before_commit=_tasks_blob_cb(state, n),
         after_commit=_commit_facts_cb(state, ops, n, prospective),
+        s8_verdicts=s8_verdicts,
     )
     _print_carry_report(state, n)
     # head_sha здесь НЕ пишется: он уже записан колбэком durable — между

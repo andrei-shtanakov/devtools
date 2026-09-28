@@ -10498,3 +10498,342 @@ def test_multiline_statement_refusal_names_its_real_cause() -> None:
     serialized = "\n".join(rendered_block)
     with pytest.raises(RuntimeError, match="несколько строк"):
         task_bridge._assert_delivers_after_carry([task], serialized)
+
+
+# --- Успешной доставки нет (NSD): замена отклонённой первой доставки ------
+#
+# Спека 2026-09-28 (rev 3.2). Живой случай: владелец закрыл tasks-PR первой
+# доставки (#373) без мержа ради подрезки очереди. Пост-состояние, в
+# котором ход застаёт воркстрим: спеки `spec/<ws>-tasks.md` НЕТ ни в base,
+# ни в дереве (PR не вмержен). Дефолтный `_SupersedeOps` отвечает, что
+# спека v1 в base есть, — это не то пост-состояние, поэтому у NSD свой стаб.
+
+_V1_PR = 373
+_OWNER = "andrei-shtanakov"
+_OWNER_CLOSURE = {
+    "state": "CLOSED", "closed_by": _OWNER,
+    "closed_at": "2026-09-23T09:44:23Z", "head_deleted_first": False,
+}
+_NSD_WORD = (
+    "сверка §I8 не производилась (comparison: unavailable): предыдущей "
+    "успешной доставки нет"
+)
+_EVIDENCE_REL = "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl"
+
+
+class _NsdOps(_ReplaceOps):
+    """Спеки в base нет; PR v1 закрыт владельцем (порядок #373).
+
+    `spec_in_base` — ответ строгого чтения спеки в base (None — доказанно
+    нет); `base_read_fails` — чтение упало. `failing_prs` — `pr_facts`
+    этих номеров бросает, как `RealOps` на упавшем `gh`.
+    """
+
+    def __init__(self, *, v1_state="CLOSED", spec_in_base=None,
+                 base_read_fails=False, failing_prs=(), closure=None,
+                 facts_by_pr=None, branch_prs=None, **kw):
+        super().__init__(
+            facts_by_pr={_V1_PR: {"state": v1_state}, **(facts_by_pr or {})},
+            branch_prs={_REPLACED_BRANCH: None, **(branch_prs or {})},
+            **kw,
+        )
+        self.spec_in_base = spec_in_base
+        self.base_read_fails = base_read_fails
+        self.failing_prs = set(failing_prs)
+        self.closure = dict(_OWNER_CLOSURE) if closure is None else closure
+
+    def pr_facts(self, repo_slug, pr):
+        if pr in self.failing_prs:
+            self.calls.append(("pr_facts", pr))
+            raise subprocess.CalledProcessError(1, ["gh", "pr", "view"])
+        return super().pr_facts(repo_slug, pr)
+
+    def show_file(self, target_dir, ref, path):
+        self.calls.append(("show_file", ref, path))
+        if path == _SPEC_REL:
+            return self.spec_in_base
+        return _bundle_from_tree(target_dir, path)
+
+    def show_file_for_carry(self, target_dir, ref, path):
+        self.calls.append(("show_file_for_carry", ref, path))
+        if self.base_read_fails:
+            raise RuntimeError(f"show_file_for_carry: {ref}: boom")
+        return self.spec_in_base if path == _SPEC_REL else None
+
+
+def _nsd_state(tmp_path, monkeypatch, **v1):
+    """v1 `completed` с PR #373; спеки нет ни в base, ни в дереве."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    (Path(state.target_dir) / _SPEC_REL).unlink()
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": _V1_PR, "anchor": "АНКЕР-v1",
+        "content_anchor": tb._content_anchor(
+            state.target_dir, state.bundle_dir, None
+        ),
+        **v1,
+    }
+    rs.save(state)
+    return state
+
+
+def _v1_replacement(n=2, status="abandoned", **over) -> dict:
+    """Запись ревизии-замены v1 (форма §4.2 спеки)."""
+    op = {
+        "status": status, "revision": n,
+        "branch": f"spec/WS-alpha-7-tasks-v{n}", "base_sha": "base-sha-1",
+        "head_sha": None, "tasks_version": 1, "supersedes": None,
+        "nsd": True, "dag_source": "none",
+        "replaces_revision": 1, "replaces_pr": _V1_PR,
+        "replaces_branch": None,
+        "replacement_reason": "очередь неисполненных спек растёт",
+        "replaces_closed_by": _OWNER,
+        "replaces_closed_at": "2026-09-23T09:44:23Z",
+    }
+    if status == "abandoned":
+        op["reason"] = "base сдвинулся, открытого PR нет"
+    op.update(over)
+    return op
+
+
+def _seed_ops(state, **ops) -> None:
+    from governance import run_state as rs
+
+    state.ops.update(ops)
+    rs.save(state)
+
+
+def _spec_version(state) -> int:
+    meta, _ = split_frontmatter(
+        (Path(state.target_dir) / _SPEC_REL).read_text(encoding="utf-8")
+    )
+    return meta["version"]
+
+
+def _assert_nsd_delivery(state, ops, out, n: int) -> dict:
+    """Общая часть исхода NSD-доставки: поля, слово §I8, S8 в PR."""
+    from governance import run_state as rs
+
+    saved = rs.load("r-recon").ops[f"tasks-deliver-v{n}"]
+    assert saved["status"] == "completed"
+    assert saved["supersedes"] is None
+    assert saved["tasks_version"] == 1
+    assert saved["nsd"] is True
+    assert saved["dag_source"] == "none"
+    assert saved["comparison"] == "unavailable"
+    assert _spec_version(state) == 1
+    assert _NSD_WORD in out
+    commits = [c for c in ops.calls if c[0] == "commit_paths"]
+    assert commits and _EVIDENCE_REL in commits[-1][1]
+    assert "S8 verdicts" in ops.pr_body
+    assert not any(c[0] == "close_pr" for c in ops.calls)
+    return saved
+
+
+def test_nsd_carried_obligation_delivers_with_no_successful_delivery(
+    tmp_path, monkeypatch, capsys
+):
+    """Ревизия-замена v1 брошена → следующий `--supersede` доставляет в NSD.
+
+    Предикат вычисляется из ЛЕДЖЕРА, а не из хода: единственная доставка
+    (v1) отозвана неразряженной записью, значит успешной доставки нет, и
+    прежний отказ «доставок ещё не было» был бы тупиком."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch)
+    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement()})
+    v1_before = dict(rs.load("r-recon").ops["tasks-deliver"])
+    ops = _NsdOps(prs=[_MERGED_PR])
+    capsys.readouterr()
+
+    result = tb.deliver_superseded(state, ops)
+
+    assert result == tb.SupersedeResult("delivered", 77)
+    saved = _assert_nsd_delivery(state, ops, capsys.readouterr().out, 3)
+    # Перенятое обязательство несёт факты закрытия (§4.4).
+    assert saved["replaces_revision"] == 1
+    assert saved["replaces_pr"] == _V1_PR
+    assert saved["replaces_branch"] is None
+    assert saved["replaces_closed_by"] == _OWNER
+    assert saved["replaces_closed_at"] == "2026-09-23T09:44:23Z"
+    assert rs.load("r-recon").ops["tasks-deliver"] == v1_before
+
+
+def test_nsd_refuses_when_spec_is_in_base(tmp_path, monkeypatch):
+    """Спека в base есть, а доставки в леджере нет — расхождение, отказ.
+
+    Без проверки `supersedes: null` затёр бы доставленную спеку без
+    переноса §I11."""
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch)
+    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement()})
+    before = _ledger_bytes()
+    ops = _NsdOps(prs=[_MERGED_PR], spec_in_base=_spec_text("decomposition"))
+
+    with pytest.raises(RuntimeError, match="леджер и base расходятся"):
+        tb.deliver_superseded(state, ops)
+
+    assert _effects(ops) == []
+    assert _ledger_bytes() == before
+    assert ("show_file_for_carry", "base-sha-1", _SPEC_REL) in ops.calls
+
+
+def test_nsd_refuses_when_base_read_fails(tmp_path, monkeypatch):
+    """Упавшее чтение base — отказ, а не «спеки нет»."""
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch)
+    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement()})
+    before = _ledger_bytes()
+    ops = _NsdOps(prs=[_MERGED_PR], base_read_fails=True)
+
+    with pytest.raises(RuntimeError, match="boom") as exc:
+        tb.deliver_superseded(state, ops)
+
+    assert "спеки в base нет" not in str(exc.value)
+    assert _effects(ops) == []
+    assert _ledger_bytes() == before
+
+
+def test_nsd_refuses_without_s8_verdicts_before_effects(tmp_path, monkeypatch):
+    """Ревизия из NSD первой дойдёт до base и обязана нести evidence."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch)
+    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement()})
+    (rs.run_dir(state.run_id) / "s8-gate-verdicts.jsonl").unlink()
+    before = _ledger_bytes()
+    ops = _NsdOps(prs=[_MERGED_PR])
+
+    with pytest.raises(RuntimeError, match="S8 verdicts"):
+        tb.deliver_superseded(state, ops)
+
+    assert _effects(ops) == []
+    assert _ledger_bytes() == before
+
+
+def test_nsd_needs_a_completed_delivery_empty_ledger_keeps_old_refusal(
+    tmp_path, monkeypatch
+):
+    """П.1 предиката: пустой леджер — прежний отказ, NSD не включается."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch)
+    del state.ops["tasks-deliver"]
+    rs.save(state)
+    ops = _NsdOps(prs=[_MERGED_PR])
+
+    with pytest.raises(RuntimeError, match="доставок ещё не было"):
+        tb.deliver_superseded(state, ops)
+    assert _effects(ops) == []
+
+
+def test_nsd_is_off_while_first_delivery_is_started(tmp_path, monkeypatch):
+    """П.1 предиката: `tasks-deliver: started` разбирает `deliver_for_run`.
+
+    Все завершённые записи отозваны (v2 заменяется этим вызовом), но у
+    первой доставки мог быть создан PR `spec/<ws>-tasks` — NSD открыл бы
+    рядом `spec/<ws>-tasks-v3`. Отказ прежний."""
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch, status="started", pr=None)
+    _seed_ops(state, **{"tasks-deliver-v2": {
+        "status": "completed", "revision": 2, "pr": 409,
+        "branch": "spec/WS-alpha-7-tasks-v2", "head_sha": "h2",
+        "base_sha": "base-sha-1", "supersedes": 1,
+    }})
+    ops = _NsdOps(prs=[_MERGED_PR], facts_by_pr={409: {"state": "CLOSED"}})
+    before = _ledger_bytes()
+
+    with pytest.raises(RuntimeError, match="доставок ещё не было"):
+        tb.deliver_superseded(
+            state, ops, replace=tb.Replacement(2, "PR v2 отклонён")
+        )
+    assert _effects(ops) == []
+    assert _ledger_bytes() == before
+
+
+def test_nsd_closed_replacement_pr_is_replaced_again_in_nsd(
+    tmp_path, monkeypatch, capsys
+):
+    """PR ревизии-замены тоже закрыт владельцем → `--replace-revision M`.
+
+    Цепочка: v1 отозвана v2, v2 заменяется этим вызовом — успешной
+    доставки снова нет, и ревизия 3 доставляется в NSD."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch)
+    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
+        status="completed", pr=409, head_sha="h2",
+    )})
+    ops = _NsdOps(prs=[_MERGED_PR], facts_by_pr={409: {"state": "CLOSED"}})
+    capsys.readouterr()
+
+    result = tb.deliver_superseded(
+        state, ops, replace=tb.Replacement(2, "PR v2 тоже отклонён")
+    )
+
+    assert result == tb.SupersedeResult("delivered", 77)
+    saved = _assert_nsd_delivery(state, ops, capsys.readouterr().out, 3)
+    assert saved["replaces_revision"] == 2
+    assert saved["replaces_pr"] == 409
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "completed"
+
+
+def test_nsd_resume_of_started_revision_passes_s8(tmp_path, monkeypatch):
+    """Повтор при `started` NSD-ревизии (путь `continue`) передаёт S8.
+
+    Путь возобновления сам зовёт `deliver` и до предиката не доходит —
+    признак NSD читается из намерения (`nsd: true`)."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch)
+    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
+        status="started",
+        prospective_anchor=tb._prospective_anchor(
+            state.target_dir, state.bundle_dir, None
+        ),
+        content_anchor="К", tasks_blob=None, comparison="unavailable",
+        dag=[[f, list(u)] for f, u in tb._BUNDLE_DAG],
+        expected_generated_at="2026-09-28T10:00:00+00:00",
+    )})
+    ops = _NsdOps(prs=[_MERGED_PR])
+
+    result = tb.deliver_superseded(state, ops)
+
+    assert result == tb.SupersedeResult("delivered", 77)
+    assert "tasks-deliver-v3" not in rs.load("r-recon").ops
+    commits = [c for c in ops.calls if c[0] == "commit_paths"]
+    assert commits and _EVIDENCE_REL in commits[-1][1]
+    assert _spec_version(state) == 1
+
+
+def test_nsd_resume_without_s8_refuses_before_effects(tmp_path, monkeypatch):
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch)
+    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
+        status="started",
+        prospective_anchor=tb._prospective_anchor(
+            state.target_dir, state.bundle_dir, None
+        ),
+        dag=[[f, list(u)] for f, u in tb._BUNDLE_DAG],
+        expected_generated_at="2026-09-28T10:00:00+00:00",
+    )})
+    (rs.run_dir(state.run_id) / "s8-gate-verdicts.jsonl").unlink()
+    before = _ledger_bytes()
+    ops = _NsdOps(prs=[_MERGED_PR])
+
+    with pytest.raises(RuntimeError, match="S8 verdicts"):
+        tb.deliver_superseded(state, ops)
+    assert _effects(ops) == []
+    assert _ledger_bytes() == before
