@@ -53,6 +53,19 @@ _REPO_FILE_QUERY = (
     "... on Blob{text isBinary isTruncated}}}}}}}"
 )
 
+#: Факты закрытия PR (спека 2026-09-28 §4.1 п.3): ОДИН запрос несёт и
+#: `state`, и хвост timeline — атомарно. REST `issues/<n>/events` отвергнут:
+#: страницы по 30 от старых к новым и нет атомарности с `state`.
+_PR_CLOSURE_QUERY = (
+    "query($o:String!,$n:String!,$p:Int!){"
+    "repository(owner:$o,name:$n){pullRequest(number:$p){state closedAt "
+    "timelineItems(itemTypes:[CLOSED_EVENT,REOPENED_EVENT,"
+    "HEAD_REF_DELETED_EVENT],last:3){nodes{__typename "
+    "... on ClosedEvent{actor{login} createdAt} "
+    "... on ReopenedEvent{actor{login} createdAt} "
+    "... on HeadRefDeletedEvent{actor{login} createdAt}}}}}}"
+)
+
 #: Логин ревью-контура по умолчанию — канон `review-pr.sh:66`.
 REVIEW_LOGIN_DEFAULT = "ai-prosto"
 
@@ -173,6 +186,12 @@ class Ops(Protocol):
     ) -> bool: ...
 
     def pr_facts(self, repo_slug: str, pr: int) -> dict: ...
+
+    def pr_closure(self, repo_slug: str, pr: int) -> dict | None: ...
+
+    def agent_login(self) -> str | None: ...
+
+    def caller_login(self) -> str | None: ...
 
     def pr_files(self, repo_slug: str, pr: int) -> list[str]: ...
 
@@ -302,6 +321,72 @@ class Ops(Protocol):
 _HARNESS_ENV_KEYS = (
     "AUTHOR_HARNESS", "AUTHOR_MODEL", "REVIEW_HARNESS", "REVIEW_MODEL",
 )
+
+
+def _closure_event(node: object) -> tuple[str, str, str] | None:
+    """(тип, актор, время) события timeline; None — форма не та."""
+    if not isinstance(node, dict):
+        return None
+    actor = node.get("actor")
+    login = actor.get("login") if isinstance(actor, dict) else None
+    kind, at = node.get("__typename"), node.get("createdAt")
+    if not all(isinstance(v, str) and v for v in (kind, login, at)):
+        return None
+    return kind, login, at
+
+
+def _closure_from_timeline(state: object, nodes: object) -> dict | None:
+    """Факты закрытия из хвоста timeline; None — факт не установлен.
+
+    Последнее из Closed/Reopened обязано быть `ClosedEvent`, иначе PR
+    переоткрыт (или закрытия в хвосте нет) — None. Событие без актора
+    (удалённая учётка) тоже None: «кто закрыл» — предмет гейта, и
+    неизвестное значение читается fail-closed.
+
+    `head_deleted_first` — признак закрытия удалением ветки (спека §8):
+    соседнее с закрытием `HeadRefDeletedEvent` того же актора раньше или
+    в ту же секунду. GitHub пишет оба события одним действием, и их
+    порядок внутри секунды не гарантирован — поэтому смотрится и сосед
+    после, но только при равном времени.
+    """
+    if not isinstance(nodes, list) or not isinstance(state, str):
+        return None
+    events = [_closure_event(node) for node in nodes]
+    if any(event is None for event in events):
+        return None
+    typed = [event for event in events if event is not None]
+    marks = [
+        i for i, (kind, _, _) in enumerate(typed)
+        if kind in ("ClosedEvent", "ReopenedEvent")
+    ]
+    if not marks or typed[marks[-1]][0] != "ClosedEvent":
+        return None
+    i = marks[-1]
+    _, closed_by, closed_at = typed[i]
+    head_deleted_first = any(
+        typed[j][0] == "HeadRefDeletedEvent" and typed[j][1] == closed_by
+        and (typed[j][2] <= closed_at if j < i else typed[j][2] == closed_at)
+        for j in (i - 1, i + 1) if 0 <= j < len(typed)
+    )
+    return {
+        "state": state,
+        "closed_by": closed_by,
+        "closed_at": closed_at,
+        "head_deleted_first": head_deleted_first,
+    }
+
+
+def _gh_user_login(env: dict[str, str] | None) -> str | None:
+    """`gh api user --jq .login` в данном окружении; None — не узнать."""
+    try:
+        done = subprocess.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True, text=True, env=env, check=False,
+        )
+    except OSError:
+        return None
+    login = done.stdout.strip()
+    return login if done.returncode == 0 and login else None
 
 
 def _harness_env_values() -> dict[str, str]:
@@ -1186,6 +1271,45 @@ class RealOps:
             capture_output=True, text=True, check=True,
         )
         return json.loads(done.stdout)
+
+    def pr_closure(self, repo_slug: str, pr: int) -> dict | None:
+        """Кто и когда закрыл PR — `{state, closed_by, closed_at,
+        head_deleted_first}`; None — факт не установлен (fail-closed).
+
+        Один GraphQL-запрос (`_PR_CLOSURE_QUERY`): `state` и хвост
+        timeline приходят одним ответом. Разбор — `_closure_from_timeline`.
+        """
+        owner, name = repo_slug.split("/", 1)
+        repository = self._graphql_repository(
+            _PR_CLOSURE_QUERY, o=owner, n=name, p=str(pr),
+        )
+        if repository is None:
+            return None
+        pull = repository.get("pullRequest")
+        if not isinstance(pull, dict):
+            return None
+        items = pull.get("timelineItems")
+        nodes = items.get("nodes") if isinstance(items, dict) else None
+        return _closure_from_timeline(pull.get("state"), nodes)
+
+    def agent_login(self) -> str | None:
+        """Учётка агента — `gh api user` под его профилем; None — не узнать.
+
+        Профиль — `REVIEW_GH_CONFIG_DIR` (по умолчанию `~/.config/review`),
+        тот же источник, что у `merge-pr.sh`: учётка агента берётся из
+        конфигурации, а не из кода. Профиля нет — None без вызова `gh`
+        (иначе `gh` ответил бы логином основного профиля).
+        """
+        profile = Path(
+            os.environ.get("REVIEW_GH_CONFIG_DIR") or REVIEW_GH_CONFIG_DIR
+        )
+        if not profile.is_dir():
+            return None
+        return _gh_user_login({**os.environ, "GH_CONFIG_DIR": str(profile)})
+
+    def caller_login(self) -> str | None:
+        """Вызывающая учётка — `gh api user` под профилем вызова как есть."""
+        return _gh_user_login(None)
 
     def pr_files(self, repo_slug: str, pr: int) -> list[str]:
         """Список путей файлов PR."""

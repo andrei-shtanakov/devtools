@@ -46,6 +46,15 @@ class _StubOps:
     def pr_facts(self, repo_slug: str, pr: int):
         return self._answer("pr_facts", repo_slug, pr)
 
+    def pr_closure(self, repo_slug: str, pr: int) -> dict | None:
+        return None  # факты закрытия (§I10 для v1) этому стенду не нужны
+
+    def agent_login(self) -> str | None:
+        return None
+
+    def caller_login(self) -> str | None:
+        return None
+
     def show_file(self, target_dir: str, ref: str, path: str):
         return self._answer("show_file", target_dir, ref, path)
 

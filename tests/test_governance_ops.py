@@ -1949,3 +1949,191 @@ def test_discovery_reply_is_synthetic_on_bad_stdout(monkeypatch, tmp_path):
     _capture(monkeypatch, returncode=0, stdout="garbage")
     reply = RealOps().discovery_status("s-9", str(tmp_path))
     assert reply.code == 1
+
+
+# --- pr_closure / agent_login / caller_login (§I10 для v1, спека
+# 2026-09-28 §4.1 п.3 и §8) ------------------------------------------------
+
+
+def _closure_payload(nodes, state="CLOSED", closed_at="2026-09-23T09:44:23Z"):
+    return json.dumps({"data": {"repository": {"pullRequest": {
+        "state": state, "closedAt": closed_at,
+        "timelineItems": {"nodes": nodes},
+    }}}})
+
+
+def _event(kind, login, at):
+    return {"__typename": kind, "actor": {"login": login}, "createdAt": at}
+
+
+def test_pr_closure_is_one_graphql_query_with_three_item_types(monkeypatch):
+    """Один запрос: timeline и `state` — из одного ответа (атомарность)."""
+    calls = _install_fake_run(monkeypatch, stdout=_closure_payload([
+        _event("ClosedEvent", "andrei-shtanakov", "2026-09-23T09:44:23Z"),
+    ]))
+
+    RealOps().pr_closure(REPO_SLUG, 373)
+
+    assert len(calls) == 1
+    argv = calls[0].argv
+    assert argv[:3] == ["gh", "api", "graphql"]
+    query = argv[argv.index("-f") + 1]
+    assert (
+        "timelineItems(itemTypes:[CLOSED_EVENT,REOPENED_EVENT,"
+        "HEAD_REF_DELETED_EVENT],last:3)"
+    ) in query
+    assert "state" in query and "closedAt" in query
+    assert "p=373" in argv
+
+
+def test_pr_closure_order_of_373_passes_the_branch_deletion_signal(
+    monkeypatch,
+):
+    """Порядок #373: закрыл владелец, ветку удалил ПОЗЖЕ — не сигнал."""
+    _install_fake_run(monkeypatch, stdout=_closure_payload([
+        _event("ClosedEvent", "andrei-shtanakov", "2026-09-23T09:44:23Z"),
+        _event(
+            "HeadRefDeletedEvent", "andrei-shtanakov", "2026-09-23T10:46:55Z"
+        ),
+    ]))
+
+    assert RealOps().pr_closure(REPO_SLUG, 373) == {
+        "state": "CLOSED",
+        "closed_by": "andrei-shtanakov",
+        "closed_at": "2026-09-23T09:44:23Z",
+        "head_deleted_first": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "nodes",
+    [
+        [
+            _event("HeadRefDeletedEvent", "bot", "2026-09-23T09:44:20Z"),
+            _event("ClosedEvent", "bot", "2026-09-23T09:44:23Z"),
+        ],
+        [
+            _event("ClosedEvent", "bot", "2026-09-23T09:44:23Z"),
+            _event("HeadRefDeletedEvent", "bot", "2026-09-23T09:44:23Z"),
+        ],
+    ],
+    ids=["deleted-before", "deleted-same-second-after"],
+)
+def test_pr_closure_flags_closing_by_branch_deletion(nodes, monkeypatch):
+    """Удаление ветки тем же актором раньше или в ту же секунду — сигнал."""
+    _install_fake_run(monkeypatch, stdout=_closure_payload(nodes))
+
+    facts = RealOps().pr_closure(REPO_SLUG, 373)
+
+    assert facts is not None and facts["head_deleted_first"] is True
+
+
+def test_pr_closure_deletion_by_another_actor_is_not_the_signal(monkeypatch):
+    _install_fake_run(monkeypatch, stdout=_closure_payload([
+        _event("HeadRefDeletedEvent", "bot", "2026-09-23T09:44:20Z"),
+        _event("ClosedEvent", "andrei-shtanakov", "2026-09-23T09:44:23Z"),
+    ]))
+
+    facts = RealOps().pr_closure(REPO_SLUG, 373)
+
+    assert facts is not None and facts["head_deleted_first"] is False
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"stdout": _closure_payload([])},
+        {"stdout": _closure_payload([
+            _event("ClosedEvent", "a", "2026-09-23T09:44:23Z"),
+            _event("ReopenedEvent", "a", "2026-09-23T09:50:00Z"),
+        ], state="OPEN")},
+        {"stdout": _closure_payload([
+            _event("HeadRefDeletedEvent", "a", "2026-09-23T09:44:23Z"),
+        ])},
+        {"stdout": _closure_payload([
+            {"__typename": "ClosedEvent", "actor": None,
+             "createdAt": "2026-09-23T09:44:23Z"},
+        ])},
+        {"returncode": 1, "stderr": "rate limited"},
+        {"stdout": "not json"},
+    ],
+    ids=[
+        "empty", "last-is-reopened", "no-close-event", "actor-unknown",
+        "request-failed", "broken-json",
+    ],
+)
+def test_pr_closure_unknown_or_reopened_is_none(kw, monkeypatch):
+    """Факт закрытия не установлен — None, вызывающий читает fail-closed."""
+    _install_fake_run(monkeypatch, **kw)
+
+    assert RealOps().pr_closure(REPO_SLUG, 373) is None
+
+
+def test_agent_login_asks_github_under_the_agent_profile(monkeypatch, tmp_path):
+    """Учётка агента — из профиля (`REVIEW_GH_CONFIG_DIR`), не из кода."""
+    monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", str(tmp_path))
+    calls = _install_fake_run(monkeypatch, stdout="ai-prosto\n")
+
+    assert RealOps().agent_login() == "ai-prosto"
+    assert calls[0].argv == ["gh", "api", "user", "--jq", ".login"]
+    assert calls[0].kwargs["env"]["GH_CONFIG_DIR"] == str(tmp_path)
+
+
+def test_agent_login_defaults_to_the_review_profile(monkeypatch):
+    monkeypatch.delenv("REVIEW_GH_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(ops_mod.Path, "is_dir", lambda self: True)
+    calls = _install_fake_run(monkeypatch, stdout="ai-prosto\n")
+
+    assert RealOps().agent_login() == "ai-prosto"
+    assert calls[0].kwargs["env"]["GH_CONFIG_DIR"] == str(
+        Path.home() / ".config" / "review"
+    )
+
+
+def test_agent_login_without_profile_is_none_and_asks_nothing(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", str(tmp_path / "нет"))
+    calls = _install_fake_run(monkeypatch, stdout="ai-prosto\n")
+
+    assert RealOps().agent_login() is None
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"returncode": 1, "stderr": "not logged in"},
+        {"returncode": 1, "stdout": "stale-login\n"},
+        {"stdout": "\n"},
+    ],
+    ids=["gh-failed", "failed-with-stdout", "empty-login"],
+)
+def test_logins_unknown_are_none(kw, monkeypatch, tmp_path):
+    monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", str(tmp_path))
+    _install_fake_run(monkeypatch, **kw)
+
+    assert RealOps().agent_login() is None
+    assert RealOps().caller_login() is None
+
+
+def test_caller_login_uses_the_callers_own_profile(monkeypatch):
+    """Вызывающая учётка — окружение вызова как есть, без подмены профиля."""
+    monkeypatch.delenv("GH_CONFIG_DIR", raising=False)
+    calls = _install_fake_run(monkeypatch, stdout="andrei-shtanakov\n")
+
+    assert RealOps().caller_login() == "andrei-shtanakov"
+    assert calls[0].argv == ["gh", "api", "user", "--jq", ".login"]
+    assert "GH_CONFIG_DIR" not in (calls[0].kwargs.get("env") or {})
+
+
+def test_logins_survive_missing_gh_binary(monkeypatch, tmp_path):
+    monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", str(tmp_path))
+
+    def _no_gh(argv, **kwargs):
+        raise FileNotFoundError("gh")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", _no_gh)
+
+    assert RealOps().agent_login() is None
+    assert RealOps().caller_login() is None

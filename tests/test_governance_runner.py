@@ -282,6 +282,15 @@ class FakeOps:
         self.calls.append(("pr_facts", pr))
         return self.facts
 
+    def pr_closure(self, repo_slug: str, pr: int) -> dict | None:
+        return None  # факты закрытия (§I10 для v1) этому стенду не нужны
+
+    def agent_login(self) -> str | None:
+        return None
+
+    def caller_login(self) -> str | None:
+        return None
+
     def pr_files(self, repo_slug: str, pr: int) -> list[str]:
         self.calls.append(("pr_files", pr))
         return self.files
