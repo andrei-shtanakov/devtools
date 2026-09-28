@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from selfcheck import __version__
 from selfcheck.env import EnvInfo
 from selfcheck.model import Confidence, Finding, Location
-from selfcheck.probes.common import config_hash
+from selfcheck.probes.common import config_hash, own_files_hash
 from selfcheck.roles import Role, glob_match, role_of
 
 if TYPE_CHECKING:
@@ -192,6 +192,9 @@ class ProbeSpec:
     config_suppresses: Callable[[ProbeCtx], bool] = _never
     expected_files: Callable[[RepoTarget], list[str]] | None = None
     config_files: tuple[str, ...] = ()
+    # Файлы правил/пинов самого selfcheck (не цели), чьё СОДЕРЖИМОЕ входит
+    # в конфиг-хэш: путь в argv правку правил не выдаёт (#433, §4.3).
+    own_files: tuple[Path, ...] = ()
     timeout: int = 900
 
 
@@ -370,6 +373,8 @@ def run_probe(
             parsed = _internal(spec, ctx, result)
         else:
             result.config_hash = config_hash(target.copy, spec.config_files)
+            if spec.own_files:
+                result.config_hash = own_files_hash(result.config_hash, spec.own_files)
             parsed = _external(spec, ctx, result, runner, which)
         _judge(spec, ctx, result, parsed, inputs)
     except _Stop as stop:

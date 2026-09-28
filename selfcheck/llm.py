@@ -453,4 +453,5 @@ LLM_SITES = ProbeSpec(
     normal_codes=frozenset({0}),
     argv=_argv,
     parse=_parse,
+    own_files=(RULES_PATH, ENV_PATH),
 )

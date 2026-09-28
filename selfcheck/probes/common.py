@@ -74,3 +74,16 @@ def config_hash(copy: Path, names: tuple[str, ...]) -> str:
         if path.is_file():
             digest.update(name.encode() + b"\0" + path.read_bytes())
     return digest.hexdigest()
+
+
+def own_files_hash(target_hash: str, paths: tuple[Path, ...]) -> str:
+    """sha1 over the target's config hash and selfcheck's own rule files.
+
+    Content, not path: the path in argv stays the same when a rule is
+    edited (#433). An absent file is hashed as absent, not skipped.
+    """
+    digest = hashlib.sha1(target_hash.encode())
+    for path in paths:
+        body = path.read_bytes() if path.is_file() else b"\0absent"
+        digest.update(b"\0" + path.name.encode() + b"\0" + body)
+    return digest.hexdigest()
