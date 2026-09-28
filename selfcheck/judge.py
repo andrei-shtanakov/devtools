@@ -338,7 +338,7 @@ def load_cache(path: Path) -> tuple[dict[str, dict], list[str]]:
     if not path.is_file():
         return {}, []
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return {}, [f"judge-cache {path.name} unreadable, starting empty: {exc}"]
     if not isinstance(data, dict):
@@ -368,15 +368,20 @@ def save_cache(path: Path, cache: Mapping[str, dict]) -> str | None:
         path.parent.mkdir(parents=True, exist_ok=True)
         keep = {k: v for k, v in cache.items() if _current(k)}
         with tempfile.NamedTemporaryFile(
-            "w", dir=path.parent, prefix=".judge-cache-", delete=False
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=".judge-cache-",
+            delete=False,
         ) as tmp:
             name = tmp.name
             json.dump(keep, tmp, ensure_ascii=False, sort_keys=True)
         os.replace(name, path)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         # One cleanup for the whole sequence: the error can surface in
         # json.dump, at flush/close on leaving `with`, or in os.replace
-        # (#444, #452, #453) — none may leave a stray temp.
+        # (#444, #452, #453) — none may leave a stray temp. ValueError covers
+        # an encode error: a write failure is a warning, not a crash (§11.3).
         if name is not None:
             Path(name).unlink(missing_ok=True)
         return f"judge-cache {path.name} not saved: {exc}"

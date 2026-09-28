@@ -627,3 +627,56 @@ def test_finding_line_past_the_end_does_not_crash(tmp_path: Path) -> None:
     f.related = [{"owner_repo": "a", "path": "Makefile", "line": 50, "member": "build"}]
     s = build_slice(f, _src(tmp_path, {"Makefile": text}))
     assert s is not None
+
+
+def test_encode_error_is_a_warning_and_leaves_no_temp(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Ревью #472: UnicodeEncodeError (ValueError, не OSError) при записи —
+    тоже предупреждение без temp, не падение прогона (§11.3)."""
+    from selfcheck import judge as judge_module
+
+    def boom(*a, **kw):
+        raise UnicodeEncodeError("ascii", "я", 0, 1, "ordinal not in range")
+
+    monkeypatch.setattr(judge_module.json, "dump", boom)
+    assert save_cache(tmp_path / "judge-cache.json", {}) is not None
+    assert not list(tmp_path.glob(".judge-cache-*"))
+
+
+def test_cache_is_written_as_utf8_under_ascii_locale(tmp_path: Path) -> None:
+    """Кодировка кэша не зависит от локали процесса (launchd/cron без LANG):
+    процесс с ASCII-локалью (UTF-8-режим и коэрция C-локали выключены)."""
+    import os
+    import sys
+
+    path = tmp_path / "judge-cache.json"
+    script = (
+        "import locale, sys\n"
+        "from pathlib import Path\n"
+        "from selfcheck.judge import DEFAULT_MODEL, cache_key, load_cache, save_cache\n"
+        "assert locale.getpreferredencoding(False) != 'UTF-8'\n"
+        "key = cache_key('slice', DEFAULT_MODEL)\n"
+        "entry = {'rationale': 'дубль', 'verdict': 'keep', 'replacement': 'none'}\n"
+        "print(save_cache(Path(sys.argv[1]), {key: entry}))\n"
+        "cache, warnings = load_cache(Path(sys.argv[1]))\n"
+        "print(len(cache), warnings)\n"
+    )
+    env = {
+        **os.environ,
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PYTHONUTF8": "0",
+        "PYTHONCOERCECLOCALE": "0",
+    }
+    done = subprocess.run(
+        [sys.executable, "-c", script, str(path)],
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr.decode(errors="replace")
+    # written AND read back: a cache silently dropped on read would make
+    # every cron run re-judge (and pay) from scratch
+    assert done.stdout.decode().split("\n")[:2] == ["None", "1 []"]
+    assert "дубль" in path.read_bytes().decode("utf-8")
