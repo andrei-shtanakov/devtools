@@ -127,3 +127,64 @@ def test_header_carries_surface_counts_not_maps() -> None:
     assert "f7.py" not in header and "history: 300" in header
     assert "plists: a.plist, b.plist" in header
     assert "fleet: absent" in header and "sched_dir: /s" in header
+
+
+def _lintcov(repo: str, lang: str, s4: bool) -> dict:
+    evidence = [{"kind": "workflows", "detail": "нет"}]
+    if s4:
+        evidence.append({"kind": "s4-return", "detail": "x"})
+    return {
+        "id": f"sc-{repo}{lang}",
+        "rule": "lint-coverage/missing",
+        "category": "ci",
+        "confidence": "likely",
+        "anchor": "file:Cargo.toml",
+        "owner_repo": repo,
+        "text_key": lang,
+        "occurrences": 1,
+        "evidence": evidence,
+    }
+
+
+def _lc_probe(repo: str, status: str) -> dict:
+    return {
+        "probe": "lint-coverage",
+        "repo": repo,
+        "status": status,
+        "reason": "",
+        "exit_code": None,
+        "tool_version": None,
+        "canary": None,
+        "coverage": {},
+        "findings": 0,
+    }
+
+
+def test_s4_return_condition_is_named_when_met() -> None:
+    doc = _doc(
+        ["a", "b"],
+        [_lintcov("a", "rust", True), _lintcov("b", "python", False)],
+        [_lc_probe("a", "ok"), _lc_probe("b", "ok")],
+    )
+    text = render_markdown(doc)
+    assert "S4: условие возврата выполнено — a (rust)" in text
+
+
+def test_s4_return_condition_not_met() -> None:
+    doc = _doc(
+        ["a", "b"],
+        [_lintcov("b", "python", False)],
+        [_lc_probe("a", "ok"), _lc_probe("b", "skipped")],
+    )
+    assert "S4: условие возврата не выполнено" in render_markdown(doc)
+
+
+def test_s4_return_condition_unknown_when_probe_failed() -> None:
+    doc = _doc(["a"], [], [_lc_probe("a", "failed")])
+    assert "S4: условие возврата не установлено — lint-coverage: a" in (
+        render_markdown(doc)
+    )
+
+
+def test_no_s4_line_without_the_probe() -> None:
+    assert "S4:" not in render_markdown(_doc(["a"], [], []))

@@ -1,9 +1,10 @@
-"""All S1–S3 probes, in report order."""
+"""All selfcheck probes, in report order."""
 
 from __future__ import annotations
 
 from selfcheck.dups import AST_DUP, CLI_OVERLAP
 from selfcheck.graph.probe import USAGE_GRAPH
+from selfcheck.lintcov import LINT_COVERAGE
 from selfcheck.llm import LLM_SITES
 from selfcheck.probes.base import ProbeSpec
 from selfcheck.probes.other_tools import CARGO_MACHETE, OTHER_PROBES
@@ -17,4 +18,5 @@ REGISTRY: tuple[ProbeSpec, ...] = (
     AST_DUP,
     CLI_OVERLAP,
     LLM_SITES,
+    LINT_COVERAGE,
 )

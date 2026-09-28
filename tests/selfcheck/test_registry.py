@@ -20,6 +20,7 @@ EXPECTED = {
     "cli-overlap",
     "llm-sites",
     "cargo-machete",
+    "lint-coverage",
 }
 
 
