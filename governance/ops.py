@@ -381,7 +381,7 @@ def _gh_user_login(env: dict[str, str] | None) -> str | None:
     try:
         done = subprocess.run(
             ["gh", "api", "user", "--jq", ".login"],
-            capture_output=True, text=True, env=env,
+            capture_output=True, text=True, env=env, check=False,
         )
     except OSError:
         return None

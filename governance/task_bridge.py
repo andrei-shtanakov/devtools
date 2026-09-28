@@ -2352,6 +2352,11 @@ def deliver_for_run(
         pr_done = op.get("pr")
         if pr_done is None:
             raise _missing_pr(state)
+        # §5 спеки 2026-09-28: при неразряженной замене v1 её закрытый PR
+        # не возвращается — до раннего возврата, гейт §I12 ниже не мешает.
+        replacement_pr = _v1_replacement_answer(state, ops, pr_done)
+        if replacement_pr is not None:
+            return replacement_pr
         print(
             f"tasks-спека уже доставлена: PR #{pr_done} "
             f"({state.repo_slug}) — повтор не создаёт PR"
@@ -3040,6 +3045,14 @@ def _closed_by_human_or_confirmed(
     return fields
 
 
+def _revision_without_pr(n: int) -> RuntimeError:
+    """`completed` ревизии без номера PR — повреждённый леджер (#170)."""
+    return RuntimeError(
+        f"ревизия {n} completed без номера PR — леджер повреждён; "
+        "почините запись прежде, чем продолжать"
+    )
+
+
 def _v1_replacement_repeat(
     state: RunState, ops: Ops
 ) -> SupersedeResult | None:
@@ -3060,10 +3073,7 @@ def _v1_replacement_repeat(
         return None
     pr = op.get("pr")
     if not isinstance(pr, int):
-        raise RuntimeError(
-            f"ревизия {m} (замена первой доставки) completed без номера PR — "
-            "леджер повреждён; почините запись прежде, чем продолжать"
-        )
+        raise _revision_without_pr(m)
     pr_state = ops.pr_facts(state.repo_slug, pr).get("state")
     if pr_state not in ("OPEN", "MERGED"):
         raise RuntimeError(
@@ -3076,6 +3086,137 @@ def _v1_replacement_repeat(
         f"{pr_state}; новая ревизия не заводится"
     )
     return SupersedeResult("returned", pr)
+
+
+def _v1_replacement_of_pr(state: RunState) -> tuple[int, int] | None:
+    """(PR v1, M) — первая доставка заменена записью M; None — не заменена.
+
+    Сверяется ПАРА (ревизия 1, её PR), как у `_replaced_by`. Сети не
+    касается: без записи о замене v1 обе проверки гонки (§5) молчат
+    бесплатно.
+    """
+    pr = (state.ops.get(_V1_KEY) or {}).get("pr")
+    prior = _latest_v1_replacement(state)
+    if (
+        not isinstance(pr, int)
+        or prior is None
+        or prior[1].get("replaces_pr") != pr
+    ):
+        return None
+    return pr, prior[0]
+
+
+def _v1_reopened(pr: int, m: int) -> RuntimeError:
+    """Одна формулировка отказа «PR v1 переоткрыт» для обоих мест (§5)."""
+    return RuntimeError(
+        f"PR #{pr} первой доставки переоткрыт после замены ревизией {m} — "
+        "на одну спеку два открытых предложения. Закройте его либо решите "
+        f"судьбу ревизии {m} явно (--abandon-revision {m} / "
+        f"--replace-revision {m}); fail-closed"
+    )
+
+
+def _check_v1_after_replacement(state: RunState, ops: Ops) -> None:
+    """Гонка с переоткрытием на `--supersede` (спека 2026-09-28 §5).
+
+    Стоит ДО цикла реконсиляции: он сам отдаёт PR живой ревизии-замены с
+    кодом 0 (`return_pr`), и проверка после него была бы недостижима.
+
+    - PR v1 OPEN — fail-closed: два открытых предложения на одну спеку;
+    - PR v1 MERGED, а NSD-ревизия ЖИВА (`started`, либо `completed` с
+      открытым PR) — fail-closed с процедурой: в base уже лежит спека v1,
+      а живая ревизия несёт `supersedes: null` и `version: 1` —
+      гарантированный конфликт add/add того же пути. Брошенная ревизия и
+      ревизия с закрытым PR живыми не считаются: иначе названная
+      процедура не снимала бы отказ. После разрядки отзыва
+      (`_discharged_replacements`) v1 снова доставка, и дальше идёт
+      обычное переиздание.
+    """
+    replaced = _v1_replacement_of_pr(state)
+    if replaced is None:
+        return
+    pr, m = replaced
+    pr_state = ops.pr_facts(state.repo_slug, pr).get("state")
+    if pr_state == "OPEN":
+        raise _v1_reopened(pr, m)
+    if pr_state != "MERGED":
+        return
+    for n, op in reversed(_revisions(state)):
+        if not op.get("nsd"):
+            continue
+        status, rev_pr = op.get("status"), op.get("pr")
+        if status == "started":
+            procedure = (
+                f"--abandon-revision {n} --reason …, затем --supersede"
+            )
+        elif (
+            status == "completed"
+            and isinstance(rev_pr, int)
+            and ops.pr_facts(state.repo_slug, rev_pr).get("state") == "OPEN"
+        ):
+            procedure = (
+                f"закройте PR #{rev_pr}, затем --supersede "
+                f"--replace-revision {n} --reason …"
+            )
+        else:
+            continue
+        raise RuntimeError(
+            f"PR #{pr} первой доставки вмержен после замены, а ревизия {n} "
+            "жива и несёт supersedes: null / version: 1 — в base уже лежит "
+            "спека первой доставки, конфликт add/add того же пути "
+            f"гарантирован. Процедура: {procedure}; после неё первая "
+            "доставка снова считается доставкой, и дальше идёт обычное "
+            "переиздание"
+        )
+
+
+def _v1_replacement_answer(state: RunState, ops: Ops, pr: int) -> int | None:
+    """`deliver_for_run` после замены v1 (спека 2026-09-28 §5).
+
+    Закрытый PR первой доставки при неразряженной замене НЕ
+    возвращается: вернуть его значит назвать доставкой предложение,
+    которое леджер объявил снятым. Ответ — по последней неброшенной
+    ревизии: `completed` с открытым/вмерженным PR — её PR со строкой о
+    замене (RC 0, `spec-loop` не запирается); `started` либо все брошены —
+    «доиграйте `--supersede`»; PR закрыт — подсказка `--replace-revision`.
+    PR v1 переоткрыт — тот же отказ, что у `--supersede`. Вмержен — отзыв
+    разряжен, v1 снова доставка: None, прежний ответ.
+    """
+    replaced = _v1_replacement_of_pr(state)
+    if replaced is None or replaced[0] != pr:
+        return None
+    m = replaced[1]
+    pr_state = ops.pr_facts(state.repo_slug, pr).get("state")
+    if pr_state == "MERGED":
+        return None
+    if pr_state == "OPEN":
+        raise _v1_reopened(pr, m)
+    live = [
+        (n, op) for n, op in _revisions(state)
+        if op.get("status") != "abandoned"
+    ]
+    if not live or live[-1][1].get("status") != "completed":
+        which = f"ревизия {live[-1][0]}" if live else "ревизия-замена брошена"
+        raise RuntimeError(
+            f"первая доставка (PR #{pr}) заменена, но замена не доведена "
+            f"({which}) — доиграйте --supersede"
+        )
+    n, op = live[-1]
+    rev_pr = op.get("pr")
+    if not isinstance(rev_pr, int):
+        raise _revision_without_pr(n)
+    rev_state = ops.pr_facts(state.repo_slug, rev_pr).get("state")
+    if rev_state not in ("OPEN", "MERGED"):
+        raise RuntimeError(
+            f"первая доставка заменена ревизией {n}, но её PR #{rev_pr} "
+            f"закрыт без мержа (state={rev_state!r}) — --supersede "
+            f"--replace-revision {n} --reason …"
+        )
+    print(
+        f"первая доставка заменена ревизией {n} — PR #{rev_pr} "
+        f"({rev_state}); повтор не создаёт PR"
+    )
+    return rev_pr
 
 
 def _pending_replacement(
@@ -3865,6 +4006,14 @@ def deliver_superseded(
     `content_anchor` подписи не видит по построению (§I2). Сработай §I5
     первым, замена стала бы недостижима ровно в том классе случаев, ради
     которого заведена.
+
+    Успешной доставки нет (NSD, спека 2026-09-28 §3): все завершённые
+    доставки отозваны — например, отклонённая первая доставка заменена
+    ходом `--replace-revision 1`. Тогда ревизия доставляется без сверок
+    §I5/§I8 (`comparison: unavailable`), с `supersedes: null`,
+    `version: 1` и S8 evidence; предикат читается из леджера и работает
+    на любой цепочке замен и отказов. Гонка с переоткрытием PR первой
+    доставки (§5) проверяется до цикла реконсиляции.
     """
     if state.status != "completed":
         raise RuntimeError(
@@ -3893,6 +4042,9 @@ def deliver_superseded(
     # тронут. На повторе (намерение уже durable) её результат не нужен —
     # шаги замены читаются из намерения, — но проверка всё равно уместна:
     # вмешаться в заменяемый PR могли и между заходами.
+    # Гонка с переоткрытием (§5 спеки 2026-09-28) — до цикла
+    # реконсиляции и до ответа на повтор замены: только чтение.
+    _check_v1_after_replacement(state, ops)
     if replace is not None and replace.revision == 1:
         repeated = _v1_replacement_repeat(state, ops)
         if repeated is not None:

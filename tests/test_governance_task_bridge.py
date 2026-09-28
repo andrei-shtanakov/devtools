@@ -11237,3 +11237,244 @@ def test_v1_reopened_inside_the_call_is_not_closed_by_the_mechanics(
     assert "нет head_sha" not in str(exc.value)
     assert _effects(ops) == []
     assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "started"
+
+
+# --- Гонка с переоткрытием (§5) -------------------------------------------
+
+
+def _started_nsd_revision(state, n=2, **over) -> dict:
+    from governance import task_bridge as tb
+
+    return _v1_replacement(
+        n=n, status="started",
+        prospective_anchor=tb._prospective_anchor(
+            state.target_dir, state.bundle_dir, None
+        ),
+        dag=[[f, list(u)] for f, u in tb._BUNDLE_DAG],
+        expected_generated_at="2026-09-28T10:00:00+00:00",
+        **over,
+    )
+
+
+#: Спека вмерженной первой доставки: якорь decomposition, `version: 1`.
+_V1_SPEC_IN_BASE = _spec_text("decomposition").replace(
+    "spec_stage: tasks\n", "spec_stage: tasks\nversion: 1\n"
+)
+
+
+def _v1_merged_base(state) -> None:
+    """PR v1 вмержен: спека v1 лежит в base (и в дереве после pull)."""
+    path = Path(state.target_dir) / _SPEC_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_V1_SPEC_IN_BASE, encoding="utf-8")
+
+
+def test_supersede_refuses_when_v1_reopened_after_replacement(
+    tmp_path, monkeypatch
+):
+    """M `completed` с открытым PR, а PR v1 переоткрыт — отказ, а не
+    `returned M`: на одну спеку два открытых предложения."""
+    state = _nsd_state(tmp_path, monkeypatch)
+    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
+        status="completed", pr=409, head_sha="h2",
+    )})
+    ops = _NsdOps(
+        prs=[_MERGED_PR], v1_state="OPEN",
+        facts_by_pr={409: {"state": "OPEN", "headRefOid": "h2"}},
+        branch_prs={"spec/WS-alpha-7-tasks-v2": 409},
+    )
+    text = _refuses_without_effect(
+        state, ops, "переоткрыт после замены ревизией 2",
+        replace=None,
+    )
+    assert "PR #373" in text
+
+
+def test_supersede_refuses_when_v1_reopened_while_replacement_started(
+    tmp_path, monkeypatch
+):
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch)
+    _seed_ops(state, **{"tasks-deliver-v2": _started_nsd_revision(state)})
+    ops = _NsdOps(prs=[_MERGED_PR], v1_state="OPEN")
+    before = _ledger_bytes()
+
+    with pytest.raises(RuntimeError, match="переоткрыт после замены"):
+        tb.deliver_superseded(state, ops)
+    assert _effects(ops) == []
+    assert _ledger_bytes() == before
+
+
+def test_v1_merged_after_replacement_with_started_m_names_the_procedure(
+    tmp_path, monkeypatch
+):
+    """v1 вмержен, M `started` — отказ с процедурой; ПОСЛЕ её выполнения
+    (`--abandon-revision M`) следующий ход проходит обычным переизданием
+    от v1: брошенная M проверку не держит."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch, content_anchor="СОДЕРЖАНИЕ-ДО")
+    _v1_merged_base(state)
+    _seed_ops(state, **{"tasks-deliver-v2": _started_nsd_revision(state)})
+    ops = _NsdOps(
+        prs=[_MERGED_PR], v1_state="MERGED",
+        spec_in_base=_V1_SPEC_IN_BASE,
+    )
+    before = _ledger_bytes()
+
+    with pytest.raises(RuntimeError, match="--abandon-revision 2") as exc:
+        tb.deliver_superseded(state, ops)
+    assert "add/add" in str(exc.value)
+    assert _effects(ops) == []
+    assert _ledger_bytes() == before
+
+    tb._abandon_revision(state, 2, "v1 вмержен после замены")
+    ops = _NsdOps(
+        prs=[_MERGED_PR], v1_state="MERGED",
+        spec_in_base=_V1_SPEC_IN_BASE,
+    )
+    result = tb.deliver_superseded(state, ops)
+
+    assert result == tb.SupersedeResult("delivered", 77)
+    saved = rs.load("r-recon").ops["tasks-deliver-v3"]
+    assert saved["supersedes"] == 1
+    assert "nsd" not in saved
+    assert "replaces_revision" not in saved
+
+
+def test_v1_merged_after_replacement_with_open_m_names_the_procedure(
+    tmp_path, monkeypatch
+):
+    """v1 вмержен, PR M открыт — отказ с процедурой «закройте PR M, затем
+    --replace-revision M»; после неё ход проходит (M с закрытым PR проверку
+    не держит), и переиздание идёт от v1."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch, content_anchor="СОДЕРЖАНИЕ-ДО")
+    _v1_merged_base(state)
+    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
+        status="completed", pr=409, head_sha="h2",
+    )})
+
+    def _ops(m_state):
+        return _NsdOps(
+            prs=[_MERGED_PR], v1_state="MERGED",
+            spec_in_base=_V1_SPEC_IN_BASE,
+            facts_by_pr={409: {"state": m_state, "headRefOid": "h2"}},
+            branch_prs={"spec/WS-alpha-7-tasks-v2": 409},
+        )
+
+    ops = _ops("OPEN")
+    before = _ledger_bytes()
+    with pytest.raises(RuntimeError, match="--replace-revision 2") as exc:
+        tb.deliver_superseded(state, ops)
+    assert "PR #409" in str(exc.value)
+    assert _effects(ops) == []
+    assert _ledger_bytes() == before
+
+    result = tb.deliver_superseded(
+        state, _ops("CLOSED"),
+        replace=tb.Replacement(2, "M закрыта: v1 вмержен"),
+    )
+
+    assert result == tb.SupersedeResult("delivered", 77)
+    saved = rs.load("r-recon").ops["tasks-deliver-v3"]
+    assert saved["supersedes"] == 1
+    assert saved["replaces_revision"] == 2
+    assert saved["tasks_version"] == 2
+
+
+def _deliver_for_run_after_replacement(state, ops, capsys):
+    from governance import task_bridge as tb
+
+    capsys.readouterr()
+    try:
+        result: object = tb.deliver_for_run(state, ops)
+    except RuntimeError as exc:
+        result = exc
+    out = capsys.readouterr().out
+    assert f"доставлена: PR #{_V1_PR}" not in out
+    assert result != _V1_PR
+    return result, out
+
+
+@pytest.mark.parametrize("m_state", ["OPEN", "MERGED"])
+def test_deliver_for_run_after_v1_replacement_returns_the_replacement(
+    m_state, tmp_path, monkeypatch, capsys
+):
+    """`deliver_for_run` (и `spec-loop`) после замены v1: закрытый PR v1 не
+    возвращается — возвращается PR M со строкой о замене, RC 0."""
+    state = _nsd_state(tmp_path, monkeypatch)
+    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
+        status="completed", pr=409, head_sha="h2",
+    )})
+    ops = _NsdOps(prs=[_MERGED_PR], facts_by_pr={409: {"state": m_state}})
+    before = _ledger_bytes()
+
+    result, out = _deliver_for_run_after_replacement(state, ops, capsys)
+
+    assert result == 409
+    assert "первая доставка заменена ревизией 2" in out
+    assert _effects(ops) == []
+    assert _ledger_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "seed, m_state, needle",
+    [
+        ("started", None, "доиграйте --supersede"),
+        ("abandoned", None, "доиграйте --supersede"),
+        ("completed", "CLOSED", "--replace-revision 2"),
+        ("completed-v1-reopened", "OPEN", "переоткрыт после замены"),
+    ],
+    ids=["m-started", "m-abandoned", "m-pr-closed", "v1-reopened"],
+)
+def test_deliver_for_run_after_v1_replacement_refusals(
+    seed, m_state, needle, tmp_path, monkeypatch, capsys
+):
+    state = _nsd_state(tmp_path, monkeypatch)
+    if seed == "started":
+        op = _started_nsd_revision(state)
+    elif seed == "abandoned":
+        op = _v1_replacement()
+    else:
+        op = _v1_replacement(status="completed", pr=409, head_sha="h2")
+    _seed_ops(state, **{"tasks-deliver-v2": op})
+    ops = _NsdOps(
+        prs=[_MERGED_PR],
+        v1_state="OPEN" if seed == "completed-v1-reopened" else "CLOSED",
+        facts_by_pr={409: {"state": m_state}} if m_state else None,
+    )
+    before = _ledger_bytes()
+
+    result, _ = _deliver_for_run_after_replacement(state, ops, capsys)
+
+    assert isinstance(result, RuntimeError) and needle in str(result)
+    assert _effects(ops) == []
+    assert _ledger_bytes() == before
+
+
+def test_deliver_for_run_v1_merged_after_replacement_is_the_delivery(
+    tmp_path, monkeypatch, capsys
+):
+    """Отзыв разряжен (PR v1 вмержен): v1 снова доставка — прежний ответ."""
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch)
+    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement()})
+    ops = _NsdOps(prs=[_MERGED_PR], v1_state="MERGED")
+
+    assert tb.deliver_for_run(state, ops) == _V1_PR
+
+
+def test_replace_v1_does_not_bypass_the_approval_gate(tmp_path, monkeypatch):
+    """Ход переиздаёт только tasks-спеку: бандл правлен после одобрения —
+    отказ гейта §I12, без единой записи (§6 спеки 2026-09-28)."""
+    state = _nsd_state(tmp_path, monkeypatch)
+    _unapprove(state)
+    _refuses_without_effect(
+        state, _NsdOps(prs=[_MERGED_PR]), "не одобрен целиком",
+    )
