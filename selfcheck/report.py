@@ -212,6 +212,51 @@ def _surface_line(surface: dict[str, Any]) -> str:
     return ", ".join(f"{k}: {shown(k, v)}" for k, v in surface.items())
 
 
+def _judge_lines(doc: dict[str, Any]) -> list[str]:
+    """Judge summary, the «keep» section and what was not judged (§11.2, §11.6)."""
+    j = doc.get("judge") or {}
+    if not j:
+        return []
+    judged = [f for f in doc["findings"] if f.get("judge")]
+    valid = [f for f in judged if f["judge"].get("verdict") != "error"]
+    lines = [
+        "## Судья",
+        "",
+        (
+            f"модель {j['model']}: вердиктов {len(valid)} (из кэша {j['cached']}, "
+            f"новых вызовов {j['calls']}, ошибок {j['errors']}); "
+            f"не судились {len(j['not_judged'])} из {j['candidates']} кандидатов"
+        ),
+    ]
+    for title, verdict in (
+        ("Судья: заменить", "replace"),
+        ("Судья: оставить", "keep"),
+        ("Судья: не уверен", "unsure"),
+    ):
+        rows = [f for f in valid if f["judge"]["verdict"] == verdict]
+        if not rows:
+            continue
+        lines += [
+            "",
+            f"### {title} ({len(rows)})",
+            "",
+            "| репо | правило | якорь | замена | обоснование |",
+            "|---|---|---|---|---|",
+        ]
+        for f in rows[:MD_ROWS]:
+            why = f["judge"].get("rationale", "")[:160]
+            why = why.replace("|", "/").replace("\r", " ").replace("\n", " ")
+            lines.append(
+                f"| {f.get('owner_repo', '')} | {f['rule']} | `{f['anchor']}` | "
+                f"{f['judge'].get('replacement', '')} | {why} |"
+            )
+    if j["not_judged"]:
+        by_rule = dict(Counter(x["rule"] for x in j["not_judged"]))
+        lines += ["", f"не судились по правилам: {by_rule}; первые 20:"]
+        lines += [f"- {x['rule']} `{x['id']}`" for x in j["not_judged"][:20]]
+    return [*lines, ""]
+
+
 def render_markdown(doc: dict[str, Any]) -> str:
     """Human report: probes first, then findings by category and rule."""
     run = doc["run"]
@@ -248,7 +293,13 @@ def render_markdown(doc: dict[str, Any]) -> str:
     by_cat: dict[str, list[dict[str, Any]]] = {}
     for f in doc["findings"]:
         by_cat.setdefault(f["category"], []).append(f)
-    for category, items in sorted(by_cat.items()):
+    for category, all_items in sorted(by_cat.items()):
+        # a judge `keep` is shown under «Судья: оставить», not here (§11.6)
+        items = [
+            f for f in all_items if (f.get("judge") or {}).get("verdict") != "keep"
+        ]
+        if not items:
+            continue
         head = "| репо | правило |" if multi else "| правило |"
         lines += [
             f"## {category} ({len(items)})",
@@ -270,6 +321,7 @@ def render_markdown(doc: dict[str, Any]) -> str:
                 f"\n_показаны {MD_ROWS} из {len(items)} — остальное в report.json_"
             )
         lines.append("")
+    lines += _judge_lines(doc)
     lines += [
         "## Подавлено",
         "",

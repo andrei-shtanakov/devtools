@@ -138,7 +138,8 @@ def _instrument_status(cur: RunSnapshot, item: dict[str, Any]) -> str:
     # --path) never looked at it, so only a run that happened resolves (#415)
     looked = (SKIPPED_KEY,) if item.get("rule") == OPERATOR_MISSING else ()
     ran = key is not None and key not in looked
-    return "resolved" if repo in cur.scope and ran else "not-rechecked"
+    run_level = probe == "judge"  # not about a repo of the scope (§11.6)
+    return "resolved" if (run_level or repo in cur.scope) and ran else "not-rechecked"
 
 
 def _gone_status(base: RunSnapshot, cur: RunSnapshot, item: dict[str, Any]) -> str:
