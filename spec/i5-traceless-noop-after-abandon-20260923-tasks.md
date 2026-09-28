@@ -234,7 +234,7 @@ Acceptance **FR-03** (BEH-02 + мутационный контроль BEH-06), 
 - **AC-20** (metric): Утверждающих путей с ложной бесследностью не осталось
 
 ### TASK-001: Правдивый вывод no-op'а, условный хвост приписки и обе докстринговые редакции
-P2 | TODO   Est: 0.5d
+P2 | 🔄 IN_PROGRESS   Est: 0.5d
 
 Реализовать сценарии BEH-01, BEH-02, BEH-03, BEH-04, BEH-05, BEH-07, BEH-08, BEH-09, BEH-10, BEH-12, BEH-13, BEH-14, BEH-15, BEH-16, BEH-17, BEH-19, BEH-20, BEH-21 (DT-01, группа solo).
 Source: workstreams/i5-traceless-noop-after-abandon-20260923/spec/30-decomposition.md#DT-01
