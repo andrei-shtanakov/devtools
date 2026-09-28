@@ -277,7 +277,7 @@ Source: workstreams/i5-traceless-noop-after-abandon-20260923/spec/30-decompositi
 **Traces to:** [FR-01], [FR-06], [FR-04], [FR-02], [NFR-05], [FR-03], [FR-05], [NFR-01], [FR-07], [FR-08], [NFR-03], [NFR-04]
 
 ### TASK-002: Мутационная чувствительность набора и её эвиденция
-P2 | ✅ DONE   Est: 0.5d
+P2 | 🔍 REVIEW   Est: 0.5d
 
 Реализовать сценарии BEH-06, BEH-11 (DT-02, группа evidence).
 Source: workstreams/i5-traceless-noop-after-abandon-20260923/spec/30-decomposition.md#DT-02
