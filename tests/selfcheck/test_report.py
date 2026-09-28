@@ -309,3 +309,14 @@ def test_all_scope_table_shows_every_repo_within_the_cap() -> None:
     ]
     assert len(rows) == MD_ROWS
     assert {row.split("|")[1].strip() for row in rows} == {"a", "b", "c"}
+
+
+def test_ast_dup_group_count_names_a_narrowed_corpus() -> None:
+    """Ревью #471: под --path хэшируется срез каждого репо — число групп
+    не выдаётся за утверждение о прогоне целиком."""
+    probe = {**_lc_probe("a", "ok"), "probe": "ast-dup"}
+    doc = _doc(["a"], [], [probe])
+    doc["run"]["selection"] = {"path": ["scripts/**"], "probe": []}
+    text = render_markdown(doc)
+    line = next(x for x in text.splitlines() if x.startswith("ast-dup: групп"))
+    assert "сужен --path" in line and "scripts/**" in line

@@ -120,12 +120,18 @@ def _probe_rows(doc: dict[str, Any]) -> list[str]:
             f"{_coverage(p['coverage'])} | {_probe_findings(p)} |"
         )
     groups = sum(1 for f in doc["findings"] if f["rule"].startswith("ast-dup/"))
+    paths = doc["run"].get("selection", NO_SELECTION)["path"]
+    # under --path each repo is hashed as a slice: the count is about the
+    # slice, not the run (#471 review)
+    narrowed = (
+        f" — корпус сужен --path {', '.join(paths)}, число о срезе" if paths else ""
+    )
     if any(p["probe"] == "ast-dup" for p in doc["probes"]):
         rows += [
             "",
             (
                 f"ast-dup: групп дублей — {groups} (выпускает прогон по всем "
-                "репо вместе, а не проба на репо; см. «Находки»)"
+                f"репо вместе, а не проба на репо; см. «Находки»){narrowed}"
             ),
         ]
     return rows
