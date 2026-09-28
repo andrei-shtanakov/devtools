@@ -11782,7 +11782,10 @@ def test_supersede_noop_after_abandon_forbidden_branch_keeps_debt_facts(
     out = capsys.readouterr().out
     assert "расходится с intake descriptor" in out
     assert "новый workstream/run" in out
-    assert "бесследен" not in out
+    # Весь перечень, а не одно слово (ревью #463): приписка непуста только
+    # здесь, на входе BEH-02 она пуста по построению.
+    for word in _TRACELESS_WORDS:
+        assert word not in out, f"запрещённая подстрока {word!r} вернулась"
 
 
 def test_supersede_noop_after_abandon_unresolved_branch_keeps_reason(
@@ -11807,7 +11810,10 @@ def test_supersede_noop_after_abandon_unresolved_branch_keeps_reason(
 
     out = capsys.readouterr().out
     assert "долг активного DAG установить не удалось" in out
-    assert "бесследен" not in out
+    # Весь перечень, а не одно слово (ревью #463): приписка непуста только
+    # здесь, на входе BEH-02 она пуста по построению.
+    for word in _TRACELESS_WORDS:
+        assert word not in out, f"запрещённая подстрока {word!r} вернулась"
 
 
 def test_supersede_noop_path_b_forbidden_branch_keeps_traceless_word(
