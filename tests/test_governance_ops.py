@@ -2102,8 +2102,12 @@ def test_agent_login_without_profile_is_none_and_asks_nothing(
 
 @pytest.mark.parametrize(
     "kw",
-    [{"returncode": 1, "stderr": "not logged in"}, {"stdout": "\n"}],
-    ids=["gh-failed", "empty-login"],
+    [
+        {"returncode": 1, "stderr": "not logged in"},
+        {"returncode": 1, "stdout": "stale-login\n"},
+        {"stdout": "\n"},
+    ],
+    ids=["gh-failed", "failed-with-stdout", "empty-login"],
 )
 def test_logins_unknown_are_none(kw, monkeypatch, tmp_path):
     monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", str(tmp_path))

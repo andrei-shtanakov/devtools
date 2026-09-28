@@ -11187,7 +11187,10 @@ def test_cli_owner_confirm_only_with_replace_of_v1(capsys):
         with pytest.raises(SystemExit) as exc:
             tb.main(["--run-id", "r", *argv])
         assert exc.value.code == 2
-        assert "--owner-confirm" in capsys.readouterr().err
+        assert (
+            "--owner-confirm осмыслен только с --replace-revision 1"
+            in capsys.readouterr().err
+        )
 
 
 def test_cli_owner_confirm_reaches_implementation(tmp_path, monkeypatch):
@@ -11478,3 +11481,84 @@ def test_replace_v1_does_not_bypass_the_approval_gate(tmp_path, monkeypatch):
     _refuses_without_effect(
         state, _NsdOps(prs=[_MERGED_PR]), "не одобрен целиком",
     )
+
+
+# --- Дополнения по итогам мутаций (фикстуры, на которых свойство было
+# ненаблюдаемо) -------------------------------------------------------------
+
+
+def test_carried_obligation_keeps_owner_confirmation(tmp_path, monkeypatch):
+    """«Закрыл X, замену подтвердил Y» едет вместе с обязательством."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch)
+    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
+        replaces_closed_by="ai-prosto", replacement_confirmed_by=_OWNER,
+    )})
+
+    assert tb.deliver_superseded(
+        state, _NsdOps(prs=[_MERGED_PR])
+    ).kind == "delivered"
+    saved = rs.load("r-recon").ops["tasks-deliver-v3"]
+    assert saved["replacement_confirmed_by"] == _OWNER
+    assert saved["replaces_closed_by"] == "ai-prosto"
+
+
+@pytest.mark.parametrize("v1_state", [None, "UNKNOWN"])
+def test_replace_v1_requires_closed_state_exactly(
+    v1_state, tmp_path, monkeypatch
+):
+    """Не MERGED и не OPEN ещё не значит CLOSED — неизвестное fail-closed."""
+    state = _nsd_state(tmp_path, monkeypatch)
+    _refuses_without_effect(
+        state, _NsdOps(prs=[_MERGED_PR], v1_state=v1_state), "fail-closed",
+    )
+
+
+def test_replace_v1_after_replaced_replacement_is_middle_of_history(
+    tmp_path, monkeypatch
+):
+    """v2 заменила v1, v3 заменила v2: `--replace-revision 1` — замена
+    середины истории, а не подсказка про уже заменённую v2."""
+    state = _nsd_state(tmp_path, monkeypatch)
+    _seed_ops(state, **{
+        "tasks-deliver-v2": _v1_replacement(
+            status="completed", pr=409, head_sha="h2",
+        ),
+        "tasks-deliver-v3": _v1_replacement(
+            n=3, status="started", replaces_revision=2, replaces_pr=409,
+        ),
+    })
+    ops = _NsdOps(prs=[_MERGED_PR], facts_by_pr={409: {"state": "CLOSED"}})
+    text = _refuses_without_effect(state, ops, "ревизия 1 не последняя")
+    assert "--replace-revision 2" not in text
+
+
+def test_v1_merged_does_not_hold_an_ordinary_reissue(tmp_path, monkeypatch):
+    """После процедуры §5 обычное переиздание от v1 (не NSD) само упало —
+    его возобновление проверка гонки не держит: живой считается только
+    NSD-ревизия, несущая `supersedes: null`."""
+    from governance import task_bridge as tb
+
+    state = _nsd_state(tmp_path, monkeypatch, content_anchor="СОДЕРЖАНИЕ-ДО")
+    _v1_merged_base(state)
+    # n = 4: ветка v3 в `_ReplaceOps` занята отозванной ревизией фикстуры.
+    ordinary = _started_nsd_revision(state, n=4)
+    for key in ("nsd", "replaces_revision", "replaces_pr", "replaces_branch",
+                "replacement_reason", "replaces_closed_by",
+                "replaces_closed_at"):
+        ordinary.pop(key)
+    _seed_ops(state, **{
+        "tasks-deliver-v2": _v1_replacement(),
+        "tasks-deliver-v4": {**ordinary, "supersedes": 1, "tasks_version": 2},
+    })
+    ops = _NsdOps(
+        prs=[_MERGED_PR], v1_state="MERGED", spec_in_base=_V1_SPEC_IN_BASE,
+    )
+
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
+    assert "tasks-deliver-v5" not in state.ops
+    assert state.ops["tasks-deliver-v4"]["status"] == "completed"
