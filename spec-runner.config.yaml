@@ -46,3 +46,4 @@ harness_files:
   - approval_branches.sh
   - scripts/review
   - workstreams/stray-md-disables-i8-for-legacy-v1-20260922/spec
+  - workstreams/i5-traceless-noop-after-abandon-20260923/spec
