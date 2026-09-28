@@ -8067,3 +8067,137 @@ def test_resume_refusal_of_a_legacy_run_leaves_the_ledger_byte_identical(
     assert sorted(p.name for p in rs.run_dir("r-s13-traceless").iterdir()) == (
         listing_before
     ), "отказ не создал ни файла находок, ни артефакта"
+
+
+# --- devtools#448: трипвайр edge-check вокруг вызова авторского агента ---
+
+def _plant_pass(run_id: str, wave: int, node: str) -> Path:
+    """Подсадка ПЕРЕИСПОЛЬЗУЕМОГО PASS: файл ребра + строка леджера с тем
+    же ключом и попыткой — ровно то, что `_reusable` принимает (D10)."""
+    from governance.edge_check import coordinator as co
+
+    root = rs.run_dir(run_id) / "edge-check"
+    path = root / f"w{wave}" / f"{node}--planted.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {"result_key": "k-planted", "attempt_id": "a-planted",
+              "verdict": "PASS", "node": node, "edge": "planted"}
+    path.write_text(json.dumps(record), encoding="utf-8")
+    with (root / co.LEDGER_NAME).open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"key": "k-planted", "attempt_id": "a-planted",
+                             "verdict": "PASS"}) + "\n")
+    # Предусловие: подсадка действительно переиспользуема — иначе тест
+    # проверял бы карантин того, что и так ничего не подавляло.
+    assert co._reusable(co.effective_results(rs.run_dir(run_id)), path)
+    return path
+
+
+class _EdgeWritingOps(FakeOps):
+    """Стенд пишет результат ребра на диск, как боевой координатор."""
+
+    def edge_check_level(self, state, run_dir: Path, wave: int, profile_path: Path):
+        result = super().edge_check_level(state, run_dir, wave, profile_path)
+        out = run_dir / "edge-check" / f"w{wave}"
+        out.mkdir(parents=True, exist_ok=True)
+        for (node, edge), record in result.records.items():
+            (out / f"{node}--{edge}.json").write_text(
+                json.dumps({**record, "node": node, "edge": edge}),
+                encoding="utf-8",
+            )
+        return result
+
+
+def _assert_tamper_stop(state, planted: Path) -> None:
+    run = rs.run_dir(state.run_id)
+    assert state.status == "stopped_author"
+    assert not (run / "edge-check").exists()
+    quarantined = list(run.glob("edge-check.tampered-*"))
+    assert len(quarantined) == 1
+    reason = (run / "stop-reason.txt").read_text(encoding="utf-8")
+    assert str(planted.relative_to(run / "edge-check")) in reason
+    # Карантин недостижим для чтения координатора (ни по какому пути):
+    from governance.edge_check import coordinator as co
+
+    assert co.effective_results(run) == {}
+    assert co._reusable(co.effective_results(run), run / "edge-check"
+                        / planted.relative_to(run / "edge-check")) is None
+    assert co.load_level_records(run, 2) == {}
+
+
+def test_edge_tripwire_catches_result_created_for_future_wave(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Подсадка ЗАРАНЕЕ: до вызова `edge-check/` нет вовсе, после — есть
+    PASS для непроверенной волны. «Каталога нет» — тоже состояние."""
+    planted: list[Path] = []
+
+    class _Plant(FakeOps):
+        def author(self, target_dir, kind, subject, bundle_dir,
+                   brief_context=None):
+            rc = super().author(target_dir, kind, subject, bundle_dir,
+                                brief_context=brief_context)
+            if kind == "charter":
+                assert not (rs.run_dir("r-plant-new") / "edge-check").exists()
+                planted.append(_plant_pass("r-plant-new", 2, "requirements"))
+            return rc
+
+    state = _drive_waves_to(tmp_path, "r-plant-new", _Plant(), monkeypatch, 1)
+    _assert_tamper_stop(state, planted[0])
+
+
+def test_edge_tripwire_catches_overwrite_of_existing_result(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Перезапись: результат W1 уже лежит (записан стендом координатора),
+    авторинг W2 подменяет его своим PASS."""
+    planted: list[Path] = []
+
+    class _Overwrite(_EdgeWritingOps):
+        def author(self, target_dir, kind, subject, bundle_dir,
+                   brief_context=None):
+            rc = super().author(target_dir, kind, subject, bundle_dir,
+                                brief_context=brief_context)
+            if kind == "requirements":
+                w1 = rs.run_dir("r-plant-over") / "edge-check/w1"
+                real = min(w1.glob("*.json"))
+                forged = {**json.loads(real.read_text(encoding="utf-8")),
+                          "forged": True}
+                real.write_text(json.dumps(forged), encoding="utf-8")
+                planted.append(real)
+            return rc
+
+    state = _drive_waves_to(tmp_path, "r-plant-over", _Overwrite(),
+                            monkeypatch, 2)
+    _assert_tamper_stop(state, planted[0])
+
+
+def test_edge_tripwire_covers_disp_author(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Второй вызов агента (`author_disp`) под тем же гвардом."""
+    planted: list[Path] = []
+
+    class _DispPlant(_EdgeWritingOps):
+        def author_disp(self, target_dir, task, config_path, slug,
+                        resume=False):
+            rc = super().author_disp(target_dir, task, config_path, slug,
+                                     resume=resume)
+            planted.append(_plant_pass("r-plant-disp", 4, "design"))
+            return rc
+
+    state = _drive_waves_to(tmp_path, "r-plant-disp", _DispPlant(),
+                            monkeypatch, 3, author_backend="disp",
+                            target_dir=str(tmp_path))
+    _assert_tamper_stop(state, planted[0])
+
+
+def test_edge_tripwire_quiet_without_planting(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Базовая половина: координатор сам пишет результаты между вызовами
+    агента — это не подсадка, прогон идёт дальше, карантина нет."""
+    state = _drive_waves_to(tmp_path, "r-no-plant", _EdgeWritingOps(),
+                            monkeypatch, 3)
+    run = rs.run_dir(state.run_id)
+    assert state.status != "stopped_author"
+    assert list((run / "edge-check/w2").glob("*.json"))
+    assert not list(run.glob("edge-check.tampered-*"))
