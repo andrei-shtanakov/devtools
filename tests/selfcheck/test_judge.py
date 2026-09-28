@@ -657,7 +657,10 @@ def test_cache_is_written_as_utf8_under_ascii_locale(tmp_path: Path) -> None:
         "from selfcheck.judge import DEFAULT_MODEL, cache_key, load_cache, save_cache\n"
         "assert locale.getpreferredencoding(False) != 'UTF-8'\n"
         "key = cache_key('slice', DEFAULT_MODEL)\n"
-        "entry = {'rationale': 'дубль', 'verdict': 'keep', 'replacement': 'none'}\n"
+        # the non-ASCII value only at run time: a Cyrillic literal in `-c`
+        # itself cannot even be decoded from argv under C locale on Linux
+        "entry = {'rationale': '\\u0434\\u0443\\u0431\\u043b\\u044c', "
+        "'verdict': 'keep', 'replacement': 'none'}\n"
         "print(save_cache(Path(sys.argv[1]), {key: entry}))\n"
         "cache, warnings = load_cache(Path(sys.argv[1]))\n"
         "print(len(cache), warnings)\n"
