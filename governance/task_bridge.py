@@ -2947,15 +2947,7 @@ def _validate_v1_replacement(
     prior = _latest_v1_replacement(state)
     if prior is not None and prior[1].get("status") == "started":
         return {}
-    try:
-        facts = ops.pr_facts(state.repo_slug, pr)
-    except (subprocess.CalledProcessError, OSError, ValueError) as exc:
-        # Обёртка — на месте хода, а не в `RealOps`: у `pr_facts` десятки
-        # вызовов в `governance/`, и менять их поведение этот ход не вправе.
-        raise RuntimeError(
-            f"замена первой доставки: факты PR #{pr} не получены ({exc}) — "
-            "состояние предложения неизвестно, замена не начата"
-        ) from exc
+    facts = _replacement_pr_facts(state, ops, pr)
     pr_state = facts.get("state")
     if pr_state == "MERGED":
         raise RuntimeError(
@@ -3074,7 +3066,7 @@ def _v1_replacement_repeat(
     pr = op.get("pr")
     if not isinstance(pr, int):
         raise _revision_without_pr(m)
-    pr_state = ops.pr_facts(state.repo_slug, pr).get("state")
+    pr_state = _replacement_pr_facts(state, ops, pr).get("state")
     if pr_state not in ("OPEN", "MERGED"):
         raise RuntimeError(
             f"первая доставка заменена ревизией {m}, но её PR #{pr} закрыт "
@@ -3086,6 +3078,22 @@ def _v1_replacement_repeat(
         f"{pr_state}; новая ревизия не заводится"
     )
     return SupersedeResult("returned", pr)
+
+
+def _replacement_pr_facts(state: RunState, ops: Ops, pr: int) -> dict:
+    """Факты PR для хода замены v1; сбой чтения — отказ, не трейсбек.
+
+    Обёртка — на месте хода, а не в `RealOps`: у `pr_facts` десятки
+    вызовов в `governance/`, и менять их поведение этот ход не вправе.
+    Покрывает все вызовы хода — и первый заход, и пути повтора/гонок §5.
+    """
+    try:
+        return ops.pr_facts(state.repo_slug, pr)
+    except (subprocess.CalledProcessError, OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"замена первой доставки: факты PR #{pr} не получены ({exc}) — "
+            "состояние предложения неизвестно, ход остановлен без эффектов"
+        ) from exc
 
 
 def _v1_replacement_of_pr(state: RunState) -> tuple[int, int] | None:
@@ -3136,7 +3144,7 @@ def _check_v1_after_replacement(state: RunState, ops: Ops) -> None:
     if replaced is None:
         return
     pr, m = replaced
-    pr_state = ops.pr_facts(state.repo_slug, pr).get("state")
+    pr_state = _replacement_pr_facts(state, ops, pr).get("state")
     if pr_state == "OPEN":
         raise _v1_reopened(pr, m)
     if pr_state != "MERGED":
@@ -3152,7 +3160,8 @@ def _check_v1_after_replacement(state: RunState, ops: Ops) -> None:
         elif (
             status == "completed"
             and isinstance(rev_pr, int)
-            and ops.pr_facts(state.repo_slug, rev_pr).get("state") == "OPEN"
+            and _replacement_pr_facts(state, ops, rev_pr).get("state")
+            == "OPEN"
         ):
             procedure = (
                 f"закройте PR #{rev_pr}, затем --supersede "
@@ -3186,7 +3195,7 @@ def _v1_replacement_answer(state: RunState, ops: Ops, pr: int) -> int | None:
     if replaced is None or replaced[0] != pr:
         return None
     m = replaced[1]
-    pr_state = ops.pr_facts(state.repo_slug, pr).get("state")
+    pr_state = _replacement_pr_facts(state, ops, pr).get("state")
     if pr_state == "MERGED":
         return None
     if pr_state == "OPEN":
@@ -3205,7 +3214,7 @@ def _v1_replacement_answer(state: RunState, ops: Ops, pr: int) -> int | None:
     rev_pr = op.get("pr")
     if not isinstance(rev_pr, int):
         raise _revision_without_pr(n)
-    rev_state = ops.pr_facts(state.repo_slug, rev_pr).get("state")
+    rev_state = _replacement_pr_facts(state, ops, rev_pr).get("state")
     if rev_state not in ("OPEN", "MERGED"):
         raise RuntimeError(
             f"первая доставка заменена ревизией {n}, но её PR #{rev_pr} "

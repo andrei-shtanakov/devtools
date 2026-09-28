@@ -10936,6 +10936,25 @@ def test_replace_v1_pr_facts_failure_is_a_diagnosis_not_a_traceback(
     assert "факты" in text
 
 
+@pytest.mark.parametrize("status", ["started", "abandoned", "completed"])
+def test_replace_v1_repeat_pr_facts_failure_is_a_diagnosis(
+    status, tmp_path, monkeypatch
+):
+    """Путь повтора: замена уже начата, `pr_facts` PR v1 падает — отказ
+    с диагностикой, а не трейсбек (ревью #455: обёртка была только на
+    первом заходе, а `_check_v1_after_replacement` стоит раньше)."""
+    state = _nsd_state(tmp_path, monkeypatch)
+    extra = {"pr": 77} if status == "completed" else {}
+    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
+        status=status, **extra,
+    )})
+    text = _refuses_without_effect(
+        state, _NsdOps(prs=[_MERGED_PR], failing_prs=[_V1_PR]),
+        f"PR #{_V1_PR}",
+    )
+    assert "факты" in text
+
+
 def test_replace_v1_without_pr_is_missing_pr(tmp_path, monkeypatch):
     state = _nsd_state(tmp_path, monkeypatch, pr=None)
     _refuses_without_effect(
