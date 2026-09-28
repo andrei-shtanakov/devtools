@@ -294,3 +294,134 @@ def test_level_without_nodes_is_a_config_error(tmp_path: Path, runs_root: Path) 
     state = _state(tmp_path, {}, None)
     with pytest.raises(EdgeCheckError, match="no_edges|уровня"):
         co.run_level(state, _Ops({}), tmp_path / "run", 9, PROFILE, call=_fake_call({}))
+
+
+# --- devtools#445: результат по ключу D9 не переоплачивается -----------------
+
+_ENGINEER = {
+    "frame": "engineer", "primary": "00-discovery/engineer-brief.md",
+    "requirements_source": "00-discovery/brief.md",
+    "source_paths": ["00-discovery/engineer-brief.md", "00-discovery/brief.md"],
+    "source_blobs": {"discovery-brief": "x", "discovery-customer": "y"},
+}
+_W1_FILES = {
+    "00-charter.md": "G-1\n", "00-discovery/brief.md": "customer\n",
+    "00-discovery/engineer-brief.md": "engineer\n",
+}
+_CUSTOMER = ("charter", "charter-vs-customer-brief")
+_ENGINEER_EDGE = ("charter", "charter-vs-engineer-brief")
+
+
+def _counting(verdicts: dict[str, str]):
+    """`_fake_call`, который запоминает, какие рёбра дошли до модели."""
+    inner = _fake_call(verdicts)
+    seen: list[str] = []
+
+    def call(prompt: str) -> str:
+        for eid in (_CUSTOMER[1], _ENGINEER_EDGE[1]):
+            if r.load_rules(eid, CONTRACTS).items[0].text in prompt:
+                seen.append(eid)
+        return inner(prompt)
+
+    return call, seen
+
+
+def _ledger(run_dir: Path) -> list[dict]:
+    path = run_dir / "edge-check/ledger.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def test_repeat_after_error_does_not_repay_an_unchanged_pass_edge(
+    tmp_path: Path, runs_root: Path,
+) -> None:
+    """devtools#445: ERROR на одном ребре → повтор. Ребро с тем же ключом D9
+    и последней завершённой попыткой PASS проверено (D10, §6.2): модель его
+    больше не видит, запись — та же попытка, новой строки леджера нет."""
+    state = _state(tmp_path, _W1_FILES, _ENGINEER)
+    run_dir = tmp_path / "run"
+    first = co.run_level(
+        state, _Ops({}), run_dir, 1, PROFILE,
+        call=_fake_call({_ENGINEER_EDGE[1]: "RAISE"}),
+    )
+    assert first.records[_CUSTOMER]["verdict"] == "PASS"
+    assert first.records[_ENGINEER_EDGE]["verdict"] == "ERROR"
+    call, seen = _counting({})
+    second = co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=call)
+    assert seen == [_ENGINEER_EDGE[1]]  # ERROR допускает повтор; PASS — нет
+    assert second.verdict == "PASS"
+    kept = second.records[_CUSTOMER]
+    assert kept["attempt_id"] == first.records[_CUSTOMER]["attempt_id"]
+    assert kept["result_key"] == first.records[_CUSTOMER]["result_key"]
+    assert [e["edge"] for e in _ledger(run_dir)] == [
+        _CUSTOMER[1], _ENGINEER_EDGE[1], _ENGINEER_EDGE[1],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("first_verdicts", "change", "expected"),
+    [
+        # последняя завершённая попытка ключа — FAIL: это ребро повторяется
+        # (D10 запрещает искать исторический PASS); соседнее PASS — нет
+        ({_CUSTOMER[1]: "FAIL"}, None, [_CUSTOMER[1]]),
+        # правка subject человеком в стопе — новый ключ, перепроверка
+        ({}, ("00-charter.md", "G-1 правка\n"), [_CUSTOMER[1], _ENGINEER_EDGE[1]]),
+        # правка основания — новый ключ только у этого ребра
+        ({}, ("00-discovery/engineer-brief.md", "другой\n"), [_ENGINEER_EDGE[1]]),
+    ],
+)
+def test_reuse_only_under_the_same_key_and_a_last_pass(
+    tmp_path: Path, runs_root: Path, first_verdicts, change, expected,
+) -> None:
+    state = _state(tmp_path, _W1_FILES, _ENGINEER)
+    run_dir = tmp_path / "run"
+    co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=_fake_call(first_verdicts))
+    if change is not None:
+        rel, text = change
+        (Path(state.target_dir) / "spec" / rel).write_text(text, encoding="utf-8")
+    call, seen = _counting({})
+    co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=call)
+    assert sorted(seen) == sorted(expected)
+
+
+def test_reuse_falls_back_to_a_check_when_the_edge_file_moved_on(
+    tmp_path: Path, runs_root: Path,
+) -> None:
+    """Файл ребра хранит ПОСЛЕДНЮЮ попытку ребра, а не ключа: если он
+    перезаписан другой попыткой, переиспользовать нечего — проверка, а не
+    чужая запись под старым ключом."""
+    state = _state(tmp_path, _W1_FILES, _ENGINEER)
+    run_dir = tmp_path / "run"
+    co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=_fake_call({}))
+    path = run_dir / "edge-check/w1" / f"{_CUSTOMER[0]}--{_CUSTOMER[1]}.json"
+    record = json.loads(path.read_text())
+    record["attempt_id"] = "перезаписано другой попыткой"
+    path.write_text(json.dumps(record))
+    call, seen = _counting({})
+    co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=call)
+    assert _CUSTOMER[1] in seen
+
+
+def test_reuse_requires_the_same_reviewer(tmp_path: Path, runs_root: Path) -> None:
+    """Ревью #447: model/effort не входят в ключ D9, но меняют проверку —
+    повтор с другим ревьюером не получает PASS прежнего."""
+    state = _state(tmp_path, _W1_FILES, _ENGINEER)
+    run_dir = tmp_path / "run"
+    co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=_fake_call({}))
+    call, seen = _counting({})
+    co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=call, effort="high")
+    assert sorted(seen) == sorted([_CUSTOMER[1], _ENGINEER_EDGE[1]])
+
+
+def test_unreadable_edge_file_is_a_recheck_not_a_crash(
+    tmp_path: Path, runs_root: Path,
+) -> None:
+    """Ревью #447: файл ребра пишется неатомарно; оборванная запись —
+    повод проверить ребро, а не необработанный JSONDecodeError."""
+    state = _state(tmp_path, _W1_FILES, _ENGINEER)
+    run_dir = tmp_path / "run"
+    co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=_fake_call({}))
+    path = run_dir / "edge-check/w1" / f"{_CUSTOMER[0]}--{_CUSTOMER[1]}.json"
+    path.write_text(path.read_text()[:40])
+    call, seen = _counting({})
+    result = co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=call)
+    assert seen == [_CUSTOMER[1]] and result.verdict == "PASS"
