@@ -47,24 +47,30 @@ def _toml(ctx: ProbeCtx, name: str) -> dict[str, Any]:
 
 
 def _repo_selects(ctx: ProbeCtx, code: str) -> bool:
-    """A root config of the repo selects ``code`` itself (code or own prefix).
+    """The root config ruff uses selects ``code`` itself (code or own prefix).
 
-    Nested per-package configs are not read — a named cost (§10.3)."""
-    for name in ("ruff.toml", ".ruff.toml", "pyproject.toml"):
-        data = _toml(ctx, name)
-        root = (
-            data.get("tool", {}).get("ruff", {}) if name == "pyproject.toml" else data
-        )
-        lint = root.get("lint", {})
-        chosen = [
-            *root.get("select", []),
-            *root.get("extend-select", []),
-            *lint.get("select", []),
-            *lint.get("extend-select", []),
-        ]
-        if any(c not in _OURS and code.startswith(c) for c in chosen):
-            return True
-    return False
+    Ruff reads ONE root config — `.ruff.toml`, then `ruff.toml`, then a
+    `pyproject.toml` that has `[tool.ruff]` (#437.6). Nested per-package
+    configs are not read — a named cost (§10.3)."""
+    root = _ruff_config(ctx)
+    if root is None:
+        return False
+    lint = root.get("lint", {})
+    chosen = [
+        *root.get("select", []),
+        *root.get("extend-select", []),
+        *lint.get("select", []),
+        *lint.get("extend-select", []),
+    ]
+    return any(c not in _OURS and code.startswith(c) for c in chosen)
+
+
+def _ruff_config(ctx: ProbeCtx) -> dict[str, Any] | None:
+    for name in (".ruff.toml", "ruff.toml"):
+        if (ctx.target.copy / name).is_file():
+            return _toml(ctx, name)
+    tool = _toml(ctx, "pyproject.toml").get("tool", {})
+    return tool.get("ruff")
 
 
 def _ruff_argv(ctx: ProbeCtx) -> list[str]:

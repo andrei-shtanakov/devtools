@@ -73,6 +73,10 @@ def _allow_entry(index: int, raw: dict[str, Any]) -> AllowEntry:
         missing.append("id|anchor")
     if missing:
         raise ConfigError(f"[[allow]] #{index}: missing {', '.join(missing)}")
+    if "repo" in raw and not (isinstance(raw["repo"], str) and raw["repo"]):
+        # an empty repo limits the entry to no repo at all — inert, not a
+        # wildcard (#437.5); omit the key to match every repo
+        raise ConfigError(f"[[allow]] #{index}: repo must be a non-empty string")
     until = raw["until"]
     if not isinstance(until, date):
         raise ConfigError(f"[[allow]] #{index}: until must be a TOML date")

@@ -164,3 +164,14 @@ def test_allow_repo_limits_the_entry(tmp_path: Path) -> None:
     mine = Finding("r/x", "quality", "low", Confidence.LIKELY, "a", "file:x.py", [])
     assert entry.matches(mine)
     assert not entry.matches(replace(mine, owner_repo="b"))
+
+
+def test_allow_empty_repo_is_rejected(tmp_path: Path) -> None:
+    """#437.5: `repo = ""` limited the entry to no repo at all — silently
+    inert. A config error (exit 4), not a no-op."""
+    cfg = tmp_path / "s.toml"
+    cfg.write_text(
+        '[[allow]]\nanchor = "file:x.py"\nrepo = ""\nreason = "r"\nuntil = 2099-01-01\n'
+    )
+    with pytest.raises(ConfigError, match="repo"):
+        load_config(cfg)

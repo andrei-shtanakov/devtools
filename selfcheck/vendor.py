@@ -174,6 +174,11 @@ def _parse_b(rel: str, lines: list[str]) -> Declaration:
     return Declaration(rel, "B", owner, ref, members)
 
 
+def _all_b(lines: list[str]) -> bool:
+    rows = [ln for ln in lines if not ln.startswith("#")]
+    return bool(rows) and all(_B_MEMBER.match(ln) for ln in rows)
+
+
 def _e_keys(text: str) -> dict[str, list[str]]:
     keys: dict[str, list[str]] = {}
     for raw in text.splitlines():
@@ -199,7 +204,8 @@ def _e_owner_ref(rel: str, keys: dict[str, list[str]]) -> tuple[str, str]:
     owner = (
         posixpath.basename(token.rstrip("/")).removesuffix(".git")
         if kind == "repo"
-        else token
+        # `source: o@main` + `commit:` — the owner is before `@` (#437.2)
+        else token.split("@", 1)[0]
     )
     if not owner:
         raise DeclarationError(f"{rel}: no owner")
@@ -226,6 +232,9 @@ def parse_declaration(rel: str, text: str) -> Declaration:
     return (
         _parse_a(rel, lines)
         or _parse_c(rel, lines)
+        # B before E when every non-comment line is a B member: a `# repo:`
+        # comment in a B PIN is not an E key line (#437.1)
+        or (_parse_b(rel, lines) if _all_b(lines) else None)
         or _parse_e(rel, text)
         or _parse_b(rel, lines)
     )

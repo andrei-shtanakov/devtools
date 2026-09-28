@@ -318,3 +318,16 @@ def test_pyrefly_skips_search_path_missing_in_copy(build, tmp_path: Path) -> Non
     assert any(
         n.startswith("search-path not in copy") and "build" in n for n in notes
     ), notes
+
+
+def test_repo_selects_reads_the_config_ruff_uses(build, tmp_path: Path) -> None:
+    """#437.6: ruff reads ONE config (.ruff.toml > ruff.toml > pyproject's
+    [tool.ruff]); a select in a config ruff ignores does not keep the rule."""
+    pyproject = PYPROJECT.replace("[tool.ruff]\n", "") + (
+        '[tool.ruff.lint]\nselect = ["E", "PLR2004"]\n'
+    )
+    target = build(
+        {"a.py": MAGIC, "ruff.toml": '[lint]\nselect = ["E"]\n'}, pyproject=pyproject
+    )
+    res = run(RUFF, target, tmp_path)
+    assert "PLR2004" in _ignored(res.argv)

@@ -380,3 +380,26 @@ def test_declaration_with_bom_is_a_candidate(tmp_path: Path, codec: str) -> None
     text = read_corpus_text(tmp_path, "x.sh")
     assert text.startswith("# VENDORED:")
     assert is_candidate("x.sh", text, is_node=True)
+
+
+def test_format_b_with_repo_comment_stays_b() -> None:
+    """#437.1: a `# repo:` comment in a B-format PIN must not turn it into
+    format E (where it would fail as a folder declaration without a ref)."""
+    text = "# repo: devtools\n" + "a" * 64 + "  x.py  devtools@abc1234\n"
+    decl = parse_declaration("lib/PIN", text)
+    assert (decl.fmt, decl.owner, decl.ref, decl.members) == (
+        "B",
+        "devtools",
+        "abc1234",
+        ("lib/x.py",),
+    )
+
+
+def test_format_e_source_with_branch_takes_owner_before_at() -> None:
+    """#437.2: `source: o@main` + `commit: <hex>` — the owner is `o`, not
+    `o@main`; the ref comes from `commit:`."""
+    ref = "a9d11fa75bb101d2919dc9f99e075270de5d7976"
+    decl = parse_declaration(
+        "contracts/x/v1/PIN", f"source: impresario@main\ncommit: {ref}\n"
+    )
+    assert (decl.fmt, decl.owner, decl.ref) == ("E", "impresario", ref)
