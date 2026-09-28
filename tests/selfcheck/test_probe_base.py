@@ -25,7 +25,7 @@ from selfcheck.probes.base import (
     instrument_findings,
     run_probe,
 )
-from selfcheck.probes.common import copy_paths, line_finding, rel_path
+from selfcheck.probes.common import config_hash, copy_paths, line_finding, rel_path
 from tests.selfcheck.helpers import fake_tool, make_repo
 
 CANARY = Canary(
@@ -389,3 +389,49 @@ def test_any_interruption_kills_the_process_group(tmp_path, monkeypatch) -> None
         run_group(["sh", "-c", script], capture_output=True, text=True, timeout=60)
     assert time.monotonic() - started < 10
     assert not _alive(int(pid_file.read_text()))
+
+
+def test_own_files_content_enters_config_hash(target, tmp_path) -> None:
+    """Правка собственного файла правил пробы меняет ключ (#433): иначе
+    исчезнувшая находка читалась бы `resolved`, хотя код репо не менялся."""
+    tool = fake_tool(tmp_path / "b")
+    rules = tmp_path / "rules.yml"
+    hashes = []
+    for i, text in enumerate(("rule: a\n", "rule: a\n", "rule: b\n")):
+        rules.write_text(text)
+        spec = spec_for(tool, own_files=(rules,))
+        hashes.append(run(spec, target, tmp_path / f"o{i}").config_hash)
+    assert hashes[0] == hashes[1]
+    assert hashes[1] != hashes[2]
+
+
+def test_without_own_files_config_hash_is_unchanged(target, tmp_path) -> None:
+    """Пробы без собственных файлов сохраняют прежний хэш побайтово —
+    история их дельты не рвётся."""
+    spec = spec_for(fake_tool(tmp_path / "b"), config_files=("ruff.toml",))
+    res = run(spec, target, tmp_path)
+    assert res.config_hash == config_hash(target.copy, ("ruff.toml",))
+
+
+def test_llm_sites_declares_its_rule_files() -> None:
+    from selfcheck.llm import ENV_PATH, LLM_SITES, RULES_PATH
+
+    assert set(LLM_SITES.own_files) == {RULES_PATH, ENV_PATH}
+
+
+def test_external_logic_version_enters_the_key(target, tmp_path) -> None:
+    """У внешней пробы с собственной постобработкой (llm-sites) подъём
+    `logic_version` обязан менять ключ сопоставимости (ревью #466): иначе
+    правка эвристик разбора давала бы тот же ложный `resolved`, что #433."""
+    from selfcheck.delta import comparability_key
+
+    tool = fake_tool(tmp_path / "b")
+    keys, versions = [], []
+    for n in (4, 5):
+        res = run(spec_for(tool, logic_version=n), target, tmp_path / f"l{n}")
+        versions.append(res.tool_version)
+        keys.append(
+            comparability_key(res, env_mode="no-env", surface=None, run_dir="/nowhere")
+        )
+    assert versions == ["1.2.3/logic 4", "1.2.3/logic 5"]
+    assert keys[0] != keys[1]
