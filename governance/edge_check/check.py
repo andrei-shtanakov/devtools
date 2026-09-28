@@ -46,6 +46,7 @@ def run_check(
     effort: str | None = None,
     timeout: int = 600,
     call: Callable[[str], str] | None = None,
+    lookup: Callable[[dict], dict | None] | None = None,
 ) -> dict:
     """Провести одну проверку ребра и вернуть запись результата (спека §4.3).
 
@@ -54,6 +55,11 @@ def run_check(
     Параметр `call` — публичный, и контракт не зависит от того, что именно
     он бросает: сбой вызова ревьюера любого типа тоже даёт `ERROR` (код
     `reviewer_failed`), как и сбой разбора его ответа (код `invalid_response`).
+
+    `lookup` — действующий результат по ключу D9 (devtools#445): зовётся,
+    когда вход ребра уже посчитан (subject, основания, отсутствия,
+    `check_identity`), но модель ещё не вызвана. Вернул запись — она и есть
+    результат, без нового вызова и без новой попытки.
     """
     started = _now()
     attempt_id = uuid.uuid4().hex
@@ -111,6 +117,11 @@ def run_check(
     record["absence"] = [
         {"path": a.path, "rule_id": a.rule_id} for a in prepared.absences
     ]
+
+    if lookup is not None:
+        reused = lookup(record)
+        if reused is not None:
+            return reused
 
     if not prepared.applicable:
         ids = ", ".join(a.rule_id for a in prepared.absences)
