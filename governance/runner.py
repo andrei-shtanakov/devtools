@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -2399,7 +2400,7 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                     f"{state.subject}: узлы до disp-авторинга",
                 )
             exit_code = _guard_edge_results(
-                state, ops, ops.author_disp,
+                state, ops, (target, pipeline_dir), ops.author_disp,
                 state.target_dir, task, config_path, slug, resume=resume,
             )
             if exit_code is None:
@@ -2425,7 +2426,7 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 "charter", "requirements",
             ):
                 exit_code = _guard_edge_results(
-                    state, ops, ops.author, *author_args,
+                    state, ops, (target,), ops.author, *author_args,
                     brief_context=state.brief,
                 )
             else:
@@ -2433,7 +2434,7 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 # particular, third-party test/fake Ops implementations with
                 # the pre-E1 signature remain valid for no-brief runs.
                 exit_code = _guard_edge_results(
-                    state, ops, ops.author, *author_args
+                    state, ops, (target,), ops.author, *author_args
                 )
             if exit_code is None:
                 return False
@@ -2464,6 +2465,7 @@ def _edge_results_snapshot(state: RunState) -> dict[str, str] | None:
 def _guard_edge_results(
     state: RunState,
     ops: Ops,
+    suspect: tuple[Path, ...],
     call: Callable[..., int],
     *args: Any,
     **kwargs: Any,
@@ -2478,8 +2480,10 @@ def _guard_edge_results(
     Реакция: каталог уходит в карантин `edge-check.tampered-<UTC>` (его
     координатор не читает — путь `edge-check` точный, не glob), и
     переиспользовать подсаженное нечего: рёбра проверяются заново, платно.
-    Прогон — `stopped_author`: вывод этого вызова тоже под подозрением,
-    resume переавторит узел. Возврат `None` — стоп уже зафиксирован.
+    Вывод этого вызова тоже под подозрением: `suspect` (файл узла, у disp —
+    ещё и каталог пайплайна) снимается, иначе skip-ветка приняла бы файл
+    как готовый узел (ревью #470). Прогон — `stopped_author`, resume
+    авторит узел заново. Возврат `None` — стоп уже зафиксирован.
 
     Defense-in-depth, НЕ граница: агент с правом записи куда угодно
     подделает и чужой прогон (не наблюдается), и то, что пишется между
@@ -2503,12 +2507,23 @@ def _guard_edge_results(
     quarantine = root.with_name(f"edge-check.tampered-{stamp}")
     if root.exists():
         root.rename(quarantine)
+    removed = []
+    for path in suspect:
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+        else:
+            continue
+        removed.append(str(path))
     _stop_with_comment(
         state, ops, "stopped_author",
         "результаты edge-check изменены во время вызова авторского агента "
         f"(devtools#448): {', '.join(changed)}. Каталог перенесён в "
         f"{quarantine.name} — подсаженное не переиспользуется, рёбра будут "
-        "проверены заново. resume переавторит узел.",
+        "проверены заново. Вывод вызова снят: "
+        f"{', '.join(removed) or 'нечего снимать'}; resume авторит узел "
+        "заново.",
     )
     return None
 

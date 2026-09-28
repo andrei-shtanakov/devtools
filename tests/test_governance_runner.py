@@ -8201,3 +8201,71 @@ def test_edge_tripwire_quiet_without_planting(
     assert state.status != "stopped_author"
     assert list((run / "edge-check/w2").glob("*.json"))
     assert not list(run.glob("edge-check.tampered-*"))
+
+
+def test_edge_tripwire_resume_reauthors_the_suspect_node(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """Ревью #470 (major): файл узла, написанный пойманным агентом, не
+    принимается на resume как готовый — узел авторится заново."""
+    planted: list[Path] = []
+
+    class _PlantOnce(FakeOps):
+        def author(self, target_dir, kind, subject, bundle_dir,
+                   brief_context=None):
+            rc = super().author(target_dir, kind, subject, bundle_dir,
+                                brief_context=brief_context)
+            if kind == "charter" and not planted:
+                planted.append(_plant_pass("r-plant-resume", 2, "requirements"))
+            return rc
+
+    ops = _PlantOnce()
+    state = _drive_waves_to(tmp_path, "r-plant-resume", ops, monkeypatch, 1)
+    _assert_tamper_stop(state, planted[0])
+    node = Path(state.target_dir) / state.bundle_dir / "00-charter.md"
+    assert not node.exists()  # вывод пойманного вызова снят
+    assert "00-charter.md" in (
+        rs.run_dir(state.run_id) / "stop-reason.txt"
+    ).read_text(encoding="utf-8")
+
+    state = runner.resume("r-plant-resume", ops)
+    assert ops.authored.count("charter") == 2
+    assert state.ops["author-charter"].get("skipped") is not True
+    assert state.status != "stopped_author"
+
+
+def test_edge_tripwire_disp_removes_node_and_pipeline(
+    tmp_path: Path, runs_root, monkeypatch,
+) -> None:
+    """disp: снимаются И файл узла, И каталог пайплайна — иначе операторский
+    выход «файл без каталога принимается как есть» вернул бы ту же дыру."""
+    seen: list[tuple[str, bool]] = []
+
+    class _DispPlantOnce(_EdgeWritingOps):
+        def author_disp(self, target_dir, task, config_path, slug,
+                        resume=False):
+            rc = super().author_disp(target_dir, task, config_path, slug,
+                                     resume=resume)
+            seen.append((slug, resume))
+            if len(seen) == 1:
+                root = Path(target_dir)
+                (root / ".disputatio/pipelines" / slug).mkdir(parents=True)
+                spec = root / "workstreams"
+                node = next(spec.rglob("10-requirements.md")).with_name(
+                    "15-behaviour-spec.md"
+                )
+                node.write_text("подозрительный черновик\n", encoding="utf-8")
+                _plant_pass("r-plant-disp2", 4, "design")
+            return rc
+
+    ops = _DispPlantOnce()
+    state = _drive_waves_to(tmp_path, "r-plant-disp2", ops, monkeypatch, 3,
+                            author_backend="disp", target_dir=str(tmp_path))
+    assert state.status == "stopped_author"
+    slug = seen[0][0]
+    assert not (tmp_path / ".disputatio/pipelines" / slug).exists()
+    assert not list((tmp_path / "workstreams").rglob("15-behaviour-spec.md"))
+
+    runner.resume("r-plant-disp2", ops)
+    assert len(seen) == 2
+    assert seen[1][1] is False  # свежий run, не resume подозрительного
