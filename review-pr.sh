@@ -742,6 +742,27 @@ lr_known=0
 # каждом прогоне — лишний round-trip и расход rate limit. lr_fetch_ok=1
 # означает «запрос состоялся», а не «разбор успешен» — второй потребитель
 # сам решает, что делать с сырым JSON.
+# Строгий разбор маркера вердикта — граница доверия: на нём держатся и stop
+# rule, и наследование вердикта по отпечатку. Одна программа на оба места —
+# копии расходились бы (дубль нашёл selfcheck --judge, 2026-09-28). Кандидат —
+# ПОСЛЕДНЕЕ ревью $login с префиксом маркера; валиден только если маркер ровно
+# один, в полном формате head/fp и состояние APPROVED или CHANGES_REQUESTED.
+# Вывод: "STATE HEAD FP" | "none none none" | "miss miss miss".
+# \$login, \$r, \$n, \$ms — переменные jq, не shell: кавычки одинарные намеренно.
+# shellcheck disable=SC2016
+STRICT_MARKER_JQ='([ .[][]
+   | select(.user.login == $login)
+   | select(((.body // "") | index("<!-- codex-terminal-review ")) != null)
+ ] | last) as $r
+    | if $r == null then "none none none"
+      else
+        (($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) as $n
+        | (($r.body // "") | [match("<!-- codex-terminal-review head=([0-9a-f]{40}) fp=([0-9a-f]{64}) -->")]) as $ms
+        | if $n == 1 and ($ms | length) == 1
+             and ($r.state == "APPROVED" or $r.state == "CHANGES_REQUESTED")
+          then $r.state + " " + $ms[0].captures[0].string + " " + $ms[0].captures[1].string
+          else "miss miss miss" end
+      end'
 lr_json=""
 lr_fetch_ok=0
 # Запрос идёт на КАЖДОМ прогоне, а не только при дедупе: stop rule обязан знать
@@ -759,20 +780,9 @@ if command -v jq >/dev/null 2>&1; then
     if lr_json=$(gh_r api --paginate "repos/$slug/pulls/$pr/reviews" \
         2> "$work/lastreview.err"); then
         lr_fetch_ok=1
-        if lr_line=$(printf '%s' "$lr_json" | jq -rs \
-            '([ .[][]
-               | select(.user.login == "'"$REVIEW_LOGIN"'")
-               | select(((.body // "") | index("<!-- codex-terminal-review ")) != null)
-             ] | last) as $r
-                | if $r == null then "none none none"
-                  else
-                    (($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) as $n
-                    | (($r.body // "") | [match("<!-- codex-terminal-review head=([0-9a-f]{40}) fp=([0-9a-f]{64}) -->")]) as $ms
-                    | if $n == 1 and ($ms | length) == 1
-                         and ($r.state == "APPROVED" or $r.state == "CHANGES_REQUESTED")
-                      then $r.state + " " + $ms[0].captures[0].string + " " + $ms[0].captures[1].string
-                      else "miss miss miss" end
-                  end' 2> "$work/lastreview.err") \
+        if lr_line=$(printf '%s' "$lr_json" \
+            | jq -rs --arg login "$REVIEW_LOGIN" "$STRICT_MARKER_JQ" \
+            2> "$work/lastreview.err") \
             && lr_delivered_state=$(printf '%s' "$lr_json" | jq -rs \
             '([ .[][]
                | select(.user.login == "'"$REVIEW_LOGIN"'")
@@ -1267,20 +1277,9 @@ if [ -n "$fp" ] && [ "$fresh" -eq 0 ]; then
     # уже отменило. Повреждённый, задублированный и DISMISSED кандидат остаётся
     # miss, поиск назад НЕ ведётся. Не-кандидаты (scope-аттестации, любые ревью
     # $REVIEW_LOGIN без префикса) на результат не влияют.
-    elif ! candidate=$(printf '%s' "$lr_json" | jq -rs \
-        '([ .[][]
-           | select(.user.login == "'"$REVIEW_LOGIN"'")
-           | select(((.body // "") | index("<!-- codex-terminal-review ")) != null)
-         ] | last) as $r
-            | if $r == null then "none none none"
-              else
-                (($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) as $n
-                | (($r.body // "") | [match("<!-- codex-terminal-review head=([0-9a-f]{40}) fp=([0-9a-f]{64}) -->")]) as $ms
-                | if $n == 1 and ($ms | length) == 1
-                     and ($r.state == "APPROVED" or $r.state == "CHANGES_REQUESTED")
-                  then $r.state + " " + $ms[0].captures[0].string + " " + $ms[0].captures[1].string
-                  else "miss miss miss" end
-              end' 2> "$work/reviews.err"); then
+    elif ! candidate=$(printf '%s' "$lr_json" \
+        | jq -rs --arg login "$REVIEW_LOGIN" "$STRICT_MARKER_JQ" \
+        2> "$work/reviews.err"); then
         cat "$work/reviews.err" >&2
         echo "ЗАМЕТКА: прошлые ревью не распарсились (jq) — дедуп пропущен," \
             "идёт полный прогон." >&2
