@@ -2670,6 +2670,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `missed` проверяются схемой всегда (README контракта).
       После мержа — inbox-issue в robin-runtime (чтение квитанций, цикл,
       Telegram).
+  - [ ] Приёмка §4.4 п.4: первая квитанция VPS `2026-09-29.json` (вт после 09:30 Тбилиси) — владелец/группа `r16`, режим 640, `producer.host` = VPS, статус ok, доставка issue `kb-freshness` в prograph-vault от ai-prosto (первая запись токеном `public_repo`), схема `contracts/r16-receipt/v1/`. Затем: удалить резервный plist в `~/Library/LaunchAgents.disabled/`, закрыть #382, отметить пункт.
 
 ## selfcheck — самодиагностика devtools и флота (спека 2026-09-25, план 2026-09-26)
 
