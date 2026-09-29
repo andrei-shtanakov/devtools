@@ -379,6 +379,59 @@ def test_commit_paths_force_paths_defeat_target_gitignore(tmp_path):
     assert ops.blob_in_commit(str(repo), "HEAD", glob_rel) is not None
 
 
+def _ignored_repo(tmp_path, gitignore: str):
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / ".gitignore").write_text(gitignore, encoding="utf-8")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "init")
+    return repo
+
+
+def test_commit_paths_explicit_ignored_file_is_committed_d1(tmp_path):
+    """devtools#479 D1: доставка называет профиль стадии под ignore-правилом
+    spec-runner (`/spec/*` + `!/spec/*-tasks.md`) явным путём. Явный `git add`
+    игнорируемого файла падал rc 1 (CalledProcessError, tasks-файл оставался
+    застейдженным); вызывающий назвал файл намеренно — он попадает в коммит."""
+    repo = _ignored_repo(tmp_path, "/spec/*\n!/spec/*-tasks.md\n")
+    (repo / "spec" / "profiles").mkdir(parents=True)
+    (repo / "spec" / "ws-tasks.md").write_text("# tasks\n", encoding="utf-8")
+    (repo / "spec" / "profiles" / "stage.yaml").write_text("stage: x\n", encoding="utf-8")
+    RealOps().commit_paths(
+        str(repo), ["spec/ws-tasks.md", "spec/profiles/stage.yaml"], "deliver"
+    )
+    for rel in ("spec/ws-tasks.md", "spec/profiles/stage.yaml"):
+        assert _git(repo, "rev-parse", f"HEAD:{rel}").returncode == 0, rel
+    assert _git(repo, "status", "--porcelain").stdout.strip() == ""
+
+
+def test_commit_paths_ignored_file_in_both_lists_d2(tmp_path):
+    """devtools#479 D2: approve_node кладёт source-слой и в paths, и в
+    force_paths; обычный add игнорируемого файла падал раньше add -f."""
+    repo = _ignored_repo(tmp_path, "spec/*\n!spec/*.md\n")
+    (repo / "spec" / "00-discovery").mkdir(parents=True)
+    src = "spec/00-discovery/brief.json"
+    (repo / src).write_text("{}\n", encoding="utf-8")
+    (repo / "spec" / "00-charter.md").write_text("# c\n", encoding="utf-8")
+    RealOps().commit_paths(
+        str(repo), ["spec/00-charter.md", src], "sync", force_paths=(src,)
+    )
+    assert _git(repo, "rev-parse", f"HEAD:{src}").returncode == 0
+
+
+def test_commit_paths_ignored_directory_still_fails_loud(tmp_path):
+    """Явный игнорируемый КАТАЛОГ не форсится целиком (это притянуло бы всё
+    игнорируемое внутри) — отказ остаётся громким."""
+    repo = _ignored_repo(tmp_path, "build/\n")
+    (repo / "build").mkdir()
+    (repo / "build" / "x.bin").write_text("x", encoding="utf-8")
+    with pytest.raises(subprocess.CalledProcessError):
+        RealOps().commit_paths(str(repo), ["build"], "nope")
+
+
 def test_commit_paths_empty_index_does_not_commit(monkeypatch):
     calls = _install_fake_run(monkeypatch, returncode=0)  # diff --cached: clean
     ops = RealOps()
@@ -2212,3 +2265,14 @@ def test_agent_env_carries_the_reviewer_model_transport():
     from governance.edge_check import reviewer
 
     assert set(reviewer._ENV_ALLOWLIST) <= ops_mod.AGENT_ENV_NAMES
+
+
+def test_commit_paths_ignored_file_with_glob_metachars(tmp_path):
+    """Имя с `[` (engineer-ref, ревью #220) под ignore-правилом — тоже
+    распознаётся игнорируемым и форсится буквально."""
+    repo = _ignored_repo(tmp_path, "spec/*\n!spec/*.md\n")
+    (repo / "spec").mkdir()
+    rel = "spec/notes[v2].json"
+    (repo / rel).write_text("{}\n", encoding="utf-8")
+    RealOps().commit_paths(str(repo), [rel], "glob")
+    assert _git(repo, "rev-parse", f"HEAD:{rel}").returncode == 0

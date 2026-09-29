@@ -1957,6 +1957,21 @@ class RealOps:
             ["brief", "--session", session_id, "--out", out_path], cwd
         )
 
+    @staticmethod
+    def _ignored_files(target_dir: str, paths: list[str]) -> list[str]:
+        """Явные пути-ФАЙЛЫ, которые ignore-правила цели исключают."""
+        files = [p for p in paths if (Path(target_dir) / p).is_file()]
+        if not files:
+            return []
+        done = subprocess.run(
+            ["git", "check-ignore", "--stdin", "-z"],
+            cwd=target_dir, input="\0".join(files) + "\0",
+            capture_output=True, text=True, check=False,
+        )
+        if done.returncode not in (0, 1):  # 1 — «ничего не игнорируется»
+            raise RuntimeError(f"git check-ignore: {done.stderr.strip()}")
+        return [p for p in done.stdout.split("\0") if p]
+
     def commit_paths(
         self, target_dir: str, paths: list[str], message: str,
         force_paths: tuple[str, ...] = (),
@@ -1976,7 +1991,16 @@ class RealOps:
         `git add -- <bundle_dir>` молча пропустил оба source-файла — бандл
         уехал PR-ом без источника, на который пинуется charter.
         """
-        subprocess.run(["git", "add", "--", *paths], cwd=target_dir, check=True)
+        # devtools#479 (D1/D2): явно названный ФАЙЛ под ignore-правилом цели
+        # вызывающий назвал намеренно (профиль стадии доставки, source-слой,
+        # evidence) — он уходит в `add -f`, а не роняет обычный `add` rc 1.
+        # Каталоги не форсятся: `add -f <dir>` притянул бы всё игнорируемое
+        # внутри, и такой отказ остаётся громким.
+        ignored = self._ignored_files(target_dir, paths)
+        plain = [p for p in paths if p not in ignored]
+        force_paths = tuple(dict.fromkeys([*force_paths, *ignored]))
+        if plain:
+            subprocess.run(["git", "add", "--", *plain], cwd=target_dir, check=True)
         if force_paths:
             # `--literal-pathspecs`: имя source-файла приходит из traces_to
             # engineer-брифа и может нести `[`, `*`, `?` — без literal git
