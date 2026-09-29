@@ -4,7 +4,7 @@
 
 **Goal:** Срез 1 §7.1 спеки: charter схемы 2 с кодом и `plan_item`, реестр кодов, словарь приоритетов и сироты, квалифицированный токен, строка `**Scenarios:**` в мосте, команда `criteria-close` (измерение через spec-runner, сверка, файл закрытия агентским PR) и гейт `[x]` в CI devtools.
 
-**Architecture:** Чистые модули в `governance/`: `charter_guard` (грамматика charter + реестр), `criteria_tokens` (владение токеном по AST), `criteria_graph` (граф BEH/AC, приоритеты, сироты, вывод AC), `criteria_check` (сверка ответа spec-runner по §5.3), `closure_gate` (правило `[x]`). Оркестрация — `criteria_close.py` поверх существующего `Ops` (create_pr/review/merge). Всё, что зависит от spec-runner, закрыто флагом `RELEASED` вендоренного `min-spec-runner.env` и честно отвечает `not-applicable: spec-runner-version`, пока spec-runner#603 не выпущен.
+**Architecture:** Чистые модули в `governance/`: `charter_guard` (грамматика charter + реестр), `criteria_tokens` (владение токеном по AST), `criteria_graph` (граф BEH/AC, приоритеты, сироты, вывод AC), `criteria_check` (сверка ответа spec-runner по §5.3), `closure_gate` (правило `[x]`). Оркестрация — `criteria_close.py` поверх существующего `Ops` (create_pr/review/merge). Всё, что зависит от spec-runner, открывается только при **доступном оракуле**: контракт вендорен (есть `PIN`, манифест сходится — отдельного флага нет) и `spec-runner --version` на машине ≥ `min-spec-runner.env`; иначе честно `not-applicable: spec-runner-version`, пока spec-runner#603 не выпущен.
 
 **Tech Stack:** Python 3.12+, stdlib `ast`/`re`/`tomllib`/`json`, `jsonschema` (уже в зависимостях), pytest; uv.
 
@@ -31,6 +31,12 @@
 3. Токен в теле вложенной функции-хелпера внутри теста или в docstring класса-не-теста → не засчитывается тесту → тест в Task 3.
 4. `TODO.md` с `[x]`-пунктом, на который ссылается charter схемы 2 из **другого** воркстрима с тем же `@id` дважды (два charter на один пункт) → гейт проверяет оба файла закрытия → тест в Task 9.
 5. Повторный `criteria-close` на том же содержимом после `blocked` → отказ «ключ измерен», без нового вызова spec-runner → тест в Task 8.
+
+## Исполнение (решение владельца 2026-09-29)
+
+- Отдельный worktree: `git -C /Users/Andrei_Shtanakov/labs/all_ai_orchestrators/devtools worktree add ../devtools-oracle-slice1 -b feat/bundle-oracle-slice1 spec/bundle-criteria-oracle` — не основной чекаут `devtools/` (ловушка общего чекаута с параллельными сессиями).
+- Tasks 1–6 — нативно, TDD. После Tasks 7–8 — **отдельный свежий ревьюер (opus) на дифф 7–8** до Task 9: `runner.py` — самый нагруженный файл (S13, волны, #445). Затем сквозная проверка ветки в конце.
+- Зависимости: 2 после 1 (нет прямой, но общий фикстурный бандл); 5 после 1 и 4; 6 после 2 и 3; 7 после 1; 8 после 4, 5, 6, 7; 9 после 1 и 4; 10 последним.
 
 ---
 
@@ -796,10 +802,11 @@ git commit -m "feat(governance): criteria_tokens — квалифицирова�
 **Interfaces:**
 - Produces:
   - `CONTRACT_DIR = Path(__file__).resolve().parent.parent / "contracts/criteria-closure/v1"`
-  - `@dataclass(frozen=True) class MinVersion: version: str; released: bool`
+  - `@dataclass(frozen=True) class MinVersion: version: str`
   - `read_min_version(path: Path = CONTRACT_DIR / "min-spec-runner.env") -> MinVersion`
-  - `oracle_available(installed: str | None, minimum: MinVersion) -> bool`
-  - `integrity_findings(contract_dir: Path = CONTRACT_DIR) -> list[str]` — пока `released: false`, отсутствие схем и `manifest.json` — ожидаемое состояние (пусто); при `released: true` требуются `PIN`, `manifest.json` и совпадение sha256 каждого файла манифеста.
+  - `vendored(contract_dir: Path = CONTRACT_DIR) -> bool` — «выпущено» выводится: есть `PIN` и `integrity_findings` пуст (отдельного флага нет — рассогласоваться нечему)
+  - `oracle_available(installed: str | None, minimum: MinVersion, *, is_vendored: bool) -> bool`
+  - `integrity_findings(contract_dir: Path = CONTRACT_DIR) -> list[str]` — нет `PIN` → пусто (контракт ещё не вендорен — ожидаемое состояние); `PIN` есть → требуется `manifest.json` и совпадение sha256 каждого его файла.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -813,32 +820,39 @@ import json
 from governance import criteria_contract as cc
 
 
-def test_unreleased_contract_is_consistent_and_unavailable(tmp_path):
-    (tmp_path / "min-spec-runner.env").write_text("MIN_SPEC_RUNNER_VERSION=0.0.0\nRELEASED=false\n")
+def write_min(d, v="4.3.0"):
+    (d / "min-spec-runner.env").write_text(f"MIN_SPEC_RUNNER_VERSION={v}\n")
+
+
+def test_not_vendored_means_unavailable(tmp_path):
+    write_min(tmp_path)
     mv = cc.read_min_version(tmp_path / "min-spec-runner.env")
-    assert mv == cc.MinVersion("0.0.0", False)
-    assert not cc.oracle_available("9.9.9", mv)
+    assert mv == cc.MinVersion("4.3.0")
     assert cc.integrity_findings(tmp_path) == []
+    assert not cc.vendored(tmp_path)
+    assert not cc.oracle_available("9.9.9", mv, is_vendored=False)
 
 
-def test_released_requires_version_and_manifest(tmp_path):
-    (tmp_path / "min-spec-runner.env").write_text("MIN_SPEC_RUNNER_VERSION=4.3.0\nRELEASED=true\n")
-    mv = cc.read_min_version(tmp_path / "min-spec-runner.env")
-    assert cc.oracle_available("4.3.0", mv) and cc.oracle_available("4.10.1", mv)
-    assert not cc.oracle_available("4.2.9", mv) and not cc.oracle_available(None, mv)
-    assert cc.integrity_findings(tmp_path) != []  # нет PIN/manifest
+def test_vendored_requires_matching_manifest(tmp_path):
+    write_min(tmp_path)
     schema = tmp_path / "response.schema.json"
     schema.write_text("{}")
     (tmp_path / "PIN").write_text("SOURCE: spec-runner @ abc1234\n")
+    assert cc.integrity_findings(tmp_path) != [] and not cc.vendored(tmp_path)  # нет manifest
     (tmp_path / "manifest.json").write_text(json.dumps(
         {"response.schema.json": hashlib.sha256(b"{}").hexdigest()}))
-    assert cc.integrity_findings(tmp_path) == []
+    assert cc.integrity_findings(tmp_path) == [] and cc.vendored(tmp_path)
+    mv = cc.read_min_version(tmp_path / "min-spec-runner.env")
+    assert cc.oracle_available("4.3.0", mv, is_vendored=True)
+    assert cc.oracle_available("4.10.1", mv, is_vendored=True)
+    assert not cc.oracle_available("4.2.9", mv, is_vendored=True)
+    assert not cc.oracle_available(None, mv, is_vendored=True)
     schema.write_text("{ }")
-    assert cc.integrity_findings(tmp_path) != []
+    assert cc.integrity_findings(tmp_path) != [] and not cc.vendored(tmp_path)
 
 
-def test_shipped_contract_is_unreleased():
-    assert cc.read_min_version().released is False
+def test_shipped_contract_is_not_vendored_yet():
+    assert not cc.vendored()
     assert cc.integrity_findings() == []
 ```
 
@@ -853,11 +867,10 @@ Expected: FAIL — модуль отсутствует.
 
 ```
 # Минимальная версия spec-runner с `verify --criteria` (spec-runner#603).
-# RELEASED=false — spec-runner ещё не выпустил контракт: devtools отвечает
-# not-applicable: spec-runner-version, гейт [x] пропускает с предупреждением.
-# Переключение в true — отдельный PR вместе со схемами, PIN и manifest.json.
+# «Выпущено» не флаг: оракул доступен, когда здесь лежат PIN и сходящийся
+# manifest.json (вендоринг схем — отдельный PR); до того devtools отвечает
+# not-applicable: spec-runner-version. Значение ниже уточняется тем же PR.
 MIN_SPEC_RUNNER_VERSION=0.0.0
-RELEASED=false
 ```
 
 `contracts/criteria-closure/v1/README.md`: три абзаца — владелец схемы (spec-runner, заявка #603), что лежит здесь до и после выпуска, две гарантии (целостность — `integrity_findings` в CI; дрейф — отдельная проверка по ref из `PIN`, в CI отсутствие входа — ошибка, локально — `not-checked`).
@@ -865,7 +878,11 @@ RELEASED=false
 `governance/criteria_contract.py`:
 
 ```python
-"""criteria_contract — вендоренная копия criteria-closure/v1 (спека §5.4)."""
+"""criteria_contract — вендоренная копия criteria-closure/v1 (спека §5.4).
+
+«Выпущено» выводится из данных: есть PIN и манифест сходится. Отдельного
+флага нет — рассогласоваться нечему.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -879,53 +896,46 @@ CONTRACT_DIR = Path(__file__).resolve().parent.parent / "contracts/criteria-clos
 @dataclass(frozen=True)
 class MinVersion:
     version: str
-    released: bool
-
-
-def _env(path: Path) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, _, value = line.partition("=")
-            out[key.strip()] = value.strip()
-    return out
 
 
 def read_min_version(path: Path = CONTRACT_DIR / "min-spec-runner.env") -> MinVersion:
-    env = _env(path)
-    return MinVersion(env["MIN_SPEC_RUNNER_VERSION"], env.get("RELEASED") == "true")
-
-
-def _parts(version: str) -> tuple[int, ...]:
-    return tuple(int(p) for p in version.split(".") if p.isdigit())
-
-
-def oracle_available(installed: str | None, minimum: MinVersion) -> bool:
-    """Оракул доступен: контракт выпущен и установленный spec-runner не ниже."""
-    if not minimum.released or installed is None:
-        return False
-    return _parts(installed) >= _parts(minimum.version)
+    for line in path.read_text().splitlines():
+        key, _, value = line.strip().partition("=")
+        if key == "MIN_SPEC_RUNNER_VERSION":
+            return MinVersion(value.strip())
+    raise ValueError(f"{path}: нет MIN_SPEC_RUNNER_VERSION")
 
 
 def integrity_findings(contract_dir: Path = CONTRACT_DIR) -> list[str]:
-    """Целостность копии: до выпуска — пусто; после — PIN, manifest, sha256."""
-    if not read_min_version(contract_dir / "min-spec-runner.env").released:
+    """Нет PIN — не вендорен (пусто); есть — manifest.json и sha256 сходятся."""
+    if not (contract_dir / "PIN").exists():
         return []
+    manifest_path = contract_dir / "manifest.json"
+    if not manifest_path.exists():
+        return ["criteria-closure/v1: есть PIN, но нет manifest.json"]
     out: list[str] = []
-    for required in ("PIN", "manifest.json"):
-        if not (contract_dir / required).exists():
-            out.append(f"criteria-closure/v1: нет {required} при RELEASED=true")
-    if out:
-        return out
-    manifest = json.loads((contract_dir / "manifest.json").read_text())
-    for name, digest in sorted(manifest.items()):
+    for name, digest in sorted(json.loads(manifest_path.read_text()).items()):
         path = contract_dir / name
         if not path.exists():
             out.append(f"criteria-closure/v1: {name} из manifest отсутствует")
         elif hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             out.append(f"criteria-closure/v1: {name} не совпал с manifest")
     return out
+
+
+def vendored(contract_dir: Path = CONTRACT_DIR) -> bool:
+    return (contract_dir / "PIN").exists() and not integrity_findings(contract_dir)
+
+
+def _parts(version: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in version.split(".") if p.isdigit())
+
+
+def oracle_available(installed: str | None, minimum: MinVersion, *, is_vendored: bool) -> bool:
+    """Оракул доступен: контракт вендорен и spec-runner машины не ниже."""
+    if not is_vendored or installed is None:
+        return False
+    return _parts(installed) >= _parts(minimum.version)
 ```
 
 - [ ] **Step 4: Run the tests**
@@ -937,7 +947,7 @@ Expected: PASS.
 
 ```bash
 git add contracts/criteria-closure governance/criteria_contract.py tests/test_governance_criteria_contract.py
-git commit -m "feat(contracts): criteria-closure/v1 — минимальная версия spec-runner (RELEASED=false) и целостность"
+git commit -m "feat(contracts): criteria-closure/v1 — минимальная версия spec-runner, вендоринг выводится из PIN"
 ```
 
 ---
@@ -949,8 +959,8 @@ git commit -m "feat(contracts): criteria-closure/v1 — минимальная �
 - Test: `tests/test_governance_task_bridge.py` (новые тесты в конец)
 
 **Interfaces:**
-- Consumes: `charter_guard.read_charter(text) -> Charter`, `criteria_contract.read_min_version() -> MinVersion`, `criteria_contract.oracle_available(installed, minimum) -> bool`.
-- Produces: keyword-only параметр `render_tasks_dt(..., scenarios_code: str | None = None)`; при `scenarios_code` задача получает строку `**Scenarios:** ENC:BEH-01, ENC:BEH-02` сразу перед `**Traces to:**`. Вызывающий (`deliver`-путь моста) передаёт `scenarios_code=charter.code`, только если charter схемы 2 **и** `oracle_available(spec_runner_version(), read_min_version())`; иначе `None` (сегодня всегда `None` — `RELEASED=false`).
+- Consumes: `charter_guard.read_charter(text) -> Charter`, `criteria_contract.read_min_version() -> MinVersion`, `criteria_contract.oracle_available(installed, minimum, *, is_vendored) -> bool`, `criteria_contract.vendored() -> bool`.
+- Produces: keyword-only параметр `render_tasks_dt(..., scenarios_code: str | None = None)`; при `scenarios_code` задача получает строку `**Scenarios:** ENC:BEH-01, ENC:BEH-02` сразу перед `**Traces to:**`. Вызывающий (`deliver`-путь моста) передаёт `scenarios_code=charter.code`, только если charter схемы 2 **и** `oracle_available(spec_runner_version(), read_min_version(), is_vendored=vendored())`; иначе `None` (сегодня всегда `None` — контракт не вендорен).
 - Produces: `spec_runner_version() -> str | None` в `task_bridge.py` — `spec-runner --version` (subprocess, таймаут 30 с), первая строка вида `\d+\.\d+\.\d+`; нет бинаря/ошибка — `None`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1016,7 +1026,10 @@ def spec_runner_version() -> str | None:
     scenarios_code = (
         charter.code
         if charter.schema == 2
-        and criteria_contract.oracle_available(spec_runner_version(), criteria_contract.read_min_version())
+        and criteria_contract.oracle_available(
+            spec_runner_version(), criteria_contract.read_min_version(),
+            is_vendored=criteria_contract.vendored(),
+        )
         else None
     )
 ```
@@ -1385,8 +1398,8 @@ git commit -m "feat(runner): charter схемы 2 — code и plan_item при �
 **Interfaces:**
 - Consumes: `run_state.load(run_id) -> RunState`, `runner._verified_result_sha(state) -> str | None`, `charter_guard.read_charter`, `criteria_graph.build_graph/test_behs`, `criteria_check.expected_definitions/validate_response/outcome`, `criteria_contract.read_min_version/oracle_available`, `task_bridge.spec_runner_version`, `spec_runner_contract.target_selector_policy`, `Ops.create_pr/review/merge/find_pr/push_branch/commit_paths/ensure_branch/head_sha`.
 - Produces:
-  - `decide_not_applicable(charter: Charter, selector_policy, installed: str | None, minimum: MinVersion) -> str | None` (`schema-1` · `language` · `spec-runner-version` · `None`)
-  - `render_closure(outcome_or_na, *, ws_id, code, bundle_pin, product_sha, response_sha: str | None) -> str` — текст `90-acceptance-closure.md` с frontmatter `closure`, `not_applicable_reason`, `human_pending`, `bundle_pin`, `product_sha`, счётчики и таблица
+  - `decide_not_applicable(charter: Charter, selector_policy, installed: str | None, minimum: MinVersion, *, is_vendored: bool) -> str | None` (`schema-1` · `language` · `spec-runner-version` · `None`)
+  - `render_closure(outcome_or_na, *, ws_id, code, bundle_pin, product_sha, response_sha: str | None, spec_runner_version: str | None, host: str) -> str` — текст `90-acceptance-closure.md` с frontmatter `closure`, `not_applicable_reason`, `human_pending`, `spec_runner_version`, `host`, `bundle_pin`, `product_sha`, счётчики и таблица
   - `run(run_id: str, ops: Ops, *, product_sha: str | None = None) -> int` — 0 = файл закрытия опубликован (любой `closure`), 2 = отказ шага (невалидный ответ, нет пина), 6 = ключ уже измерен
   - Состояние: `out/criteria-close/<run_id>/state.json` — `{"measured": {"<bundle_pin>:<content_sha>": "<closure>"}, "pending": {...write-ahead...}}`
 
@@ -1400,26 +1413,27 @@ from governance import charter_guard as cg
 from governance import criteria_close as cc
 from governance import criteria_contract as ctr
 
-UNREL = ctr.MinVersion("0.0.0", False)
-REL = ctr.MinVersion("4.3.0", True)
+MIN = ctr.MinVersion("4.3.0")
 
 
 def test_not_applicable_order():
     ch1 = cg.Charter(1, None, None)
     ch2 = cg.Charter(2, "ENC", "todo://devtools/x")
-    assert cc.decide_not_applicable(ch1, None, "9.9.9", REL) == "schema-1"
+    assert cc.decide_not_applicable(ch1, None, "9.9.9", MIN, is_vendored=True) == "schema-1"
     exunit = type("P", (), {"name": "exunit"})()
-    assert cc.decide_not_applicable(ch2, exunit, "9.9.9", REL) == "language"
-    assert cc.decide_not_applicable(ch2, None, "9.9.9", UNREL) == "spec-runner-version"
-    assert cc.decide_not_applicable(ch2, None, "4.2.0", REL) == "spec-runner-version"
-    assert cc.decide_not_applicable(ch2, None, "4.3.0", REL) is None
+    assert cc.decide_not_applicable(ch2, exunit, "9.9.9", MIN, is_vendored=True) == "language"
+    assert cc.decide_not_applicable(ch2, None, "9.9.9", MIN, is_vendored=False) == "spec-runner-version"
+    assert cc.decide_not_applicable(ch2, None, "4.2.0", MIN, is_vendored=True) == "spec-runner-version"
+    assert cc.decide_not_applicable(ch2, None, "4.3.0", MIN, is_vendored=True) is None
 
 
-def test_closure_file_frontmatter_for_not_applicable():
-    text = cc.render_closure("schema-1", ws_id="ws", code=None, bundle_pin="p" * 40,
-                             product_sha="s" * 40, response_sha=None)
-    assert "closure: not-applicable" in text and "not_applicable_reason: schema-1" in text
-    assert "оракул не применим" in text
+def test_closure_file_frontmatter_records_version_and_host():
+    text = cc.render_closure("spec-runner-version", ws_id="ws", code=None, bundle_pin="p" * 40,
+                             product_sha="s" * 40, response_sha=None,
+                             spec_runner_version="4.2.0", host="pr0sto.net")
+    assert "closure: not-applicable" in text and "not_applicable_reason: spec-runner-version" in text
+    assert "spec_runner_version: 4.2.0" in text and "host: pr0sto.net" in text
+    assert "Оракул не применим" in text
 
 
 def test_remeasure_same_key_is_refused(tmp_path, monkeypatch):
@@ -1459,6 +1473,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import socket
 import sys
 from pathlib import Path
 
@@ -1470,13 +1485,13 @@ STATE_ROOT = Path(__file__).resolve().parent.parent / "out" / "criteria-close"
 CLOSURE_NAME = "90-acceptance-closure.md"
 
 
-def decide_not_applicable(charter, selector_policy, installed, minimum) -> str | None:
-    """Порядок: схема 1 → язык → версия spec-runner."""
+def decide_not_applicable(charter, selector_policy, installed, minimum, *, is_vendored) -> str | None:
+    """Порядок: схема 1 → язык → доступность оракула (вендоринг и версия машины)."""
     if charter.schema != 2:
         return "schema-1"
     if selector_policy is not None and selector_policy.name != "pytest":
         return "language"
-    if not criteria_contract.oracle_available(installed, minimum):
+    if not criteria_contract.oracle_available(installed, minimum, is_vendored=is_vendored):
         return "spec-runner-version"
     return None
 
@@ -1508,7 +1523,8 @@ def _record_measured(run_id: str, key: str, closure: str) -> None:
     _save(run_id, data)
 
 
-def render_closure(result, *, ws_id, code, bundle_pin, product_sha, response_sha) -> str:
+def render_closure(result, *, ws_id, code, bundle_pin, product_sha, response_sha,
+                   spec_runner_version, host) -> str:
     """Текст файла закрытия; result — Outcome или строка причины not-applicable."""
     if isinstance(result, str):
         head = {"closure": "not-applicable", "not_applicable_reason": result, "human_pending": 0}
@@ -1526,7 +1542,8 @@ def render_closure(result, *, ws_id, code, bundle_pin, product_sha, response_sha
         ]
     meta = "\n".join(f"{k}: {v}" for k, v in head.items())
     ident = [f"workstream: {ws_id}", f"code: {code or '-'}", f"bundle_pin: {bundle_pin}",
-             f"product_sha: {product_sha}", f"response_sha256: {response_sha or '-'}"]
+             f"product_sha: {product_sha}", f"response_sha256: {response_sha or '-'}",
+             f"spec_runner_version: {spec_runner_version or '-'}", f"host: {host}"]
     return f"---\n{meta}\n" + "\n".join(ident) + "\n---\n# Закрытие воркстрима\n\n" + "\n".join(body) + "\n"
 
 
@@ -1567,13 +1584,17 @@ def run(run_id: str, ops: Ops, *, product_sha: str | None = None) -> int:
     bundle = Path(state.target_dir) / state.bundle_dir
     charter = charter_guard.read_charter((bundle / "00-charter.md").read_text(encoding="utf-8"))
     product_sha = product_sha or ops.head_sha(state.target_dir, "HEAD")
+    installed = task_bridge.spec_runner_version()
+    host = socket.gethostname()
     na = decide_not_applicable(
         charter, spec_runner_contract.target_selector_policy(state.target_dir),
-        task_bridge.spec_runner_version(), criteria_contract.read_min_version(),
+        installed, criteria_contract.read_min_version(),
+        is_vendored=criteria_contract.vendored(),
     )
     if na is not None:
         text = render_closure(na, ws_id=state.ws_id, code=charter.code,
-                              bundle_pin=bundle_pin, product_sha=product_sha, response_sha=None)
+                              bundle_pin=bundle_pin, product_sha=product_sha, response_sha=None,
+                              spec_runner_version=installed, host=host)
         return _publish(state, ops, text, "not-applicable")
     return _measure_and_publish(state, ops, charter, bundle, bundle_pin, product_sha)
 ```
@@ -1583,7 +1604,7 @@ def run(run_id: str, ops: Ops, *, product_sha: str | None = None) -> int:
 2. `content_sha` = sha256 по отсортированным (путь, байты) всех `*.py` под `tests/` и продуктовыми корнями (продуктовые корни — из ответа недоступны до вызова, поэтому ключ сначала по `tests/` + всем отслеживаемым `*.py` вне `tests/`; ruling: это надмножество продуктовых корней — строже, не слабее); `key = f"{bundle_pin}:{content_sha}"`; `_already_measured` → вернуть 6 с сообщением «ключ измерен (§3.1 G6): доработайте продукт»;
 3. запрос §5.1 → файл в `STATE_ROOT/run_id/request.json`; `code, out = ops.criteria_verify(state.target_dir, request_path)`; код 2/иной → 2 (повтор), код 3 → `closure: blocked`;
 4. `response = json.loads(out)` (ошибка → 2); `expected` через `criteria_check.expected_definitions` по `tests/**/*.py`; `function_lines` — по AST продуктовых корней из ответа; `lock_sha` — sha256 `uv.lock`; `problems = criteria_check.validate_response(...)` → непусто: печать и 2;
-5. `beh_status = {b["id"].split(":")[1]: b["status"] for b in response["beh"]}`; `result = criteria_check.outcome(graph, beh_status)`; `_record_measured(run_id, key, result.closure)`; `_publish(...)`.
+5. `beh_status = {b["id"].split(":")[1]: b["status"] for b in response["beh"]}`; `result = criteria_check.outcome(graph, beh_status)`; `_record_measured(run_id, key, result.closure)`; `render_closure(result, …, spec_runner_version=installed, host=host)`; `_publish(...)`.
 
 `RealOps.criteria_verify`: `subprocess.run(["spec-runner", "verify", "--criteria", "--request", request_path, "--json"], cwd=target_dir, capture_output=True, text=True)` → `(returncode, stdout)`.
 
@@ -1617,9 +1638,9 @@ git commit -m "feat(governance): criteria-close — закрытие воркс�
 - Modify: `.github/workflows/ci.yml` (шаги `charter_guard` и `closure_gate`) — **в отдельном PR после мержа Tasks 1–8**: трогает `.github/`, мержит человек
 
 **Interfaces:**
-- Consumes: `charter_guard.read_charter/PLAN_ITEM_RE`, `criteria_contract.read_min_version`, `task_bridge.spec_runner_version`, `governance.frontmatter.split_frontmatter`.
+- Consumes: `charter_guard.read_charter/PLAN_ITEM_RE`, `criteria_contract.vendored`, `governance.frontmatter.split_frontmatter`.
 - Produces:
-  - `gate_findings(repo: Path, *, minimum: MinVersion, installed: str | None) -> tuple[list[str], list[str]]` → (ошибки, предупреждения)
+  - `gate_findings(repo: Path, *, is_vendored: bool) -> tuple[list[str], list[str]]` → (ошибки, предупреждения). Гейт CI не зависит от spec-runner машины: блокировка `not-applicable: spec-runner-version` — по данным репо (контракт вендорен), версия и `host` из файла закрытия печатаются в предупреждении/ошибке.
   - CLI `python -m governance.closure_gate --repo .` → exit 1 при ошибках; предупреждения печатаются со счётчиком.
 
 - [ ] **Step 1: Write the failing tests (таблица §7.1)**
@@ -1633,9 +1654,7 @@ from pathlib import Path
 import pytest
 
 from governance import closure_gate as g
-from governance.criteria_contract import MinVersion
 
-UNREL, REL = MinVersion("0.0.0", False), MinVersion("4.3.0", True)
 CH2 = "---\nschema: 2\ncode: {code}\nplan_item: todo://repo/{item}\n---\n"
 
 
@@ -1650,34 +1669,42 @@ def make(tmp_path: Path, *, done: bool, closure: str | None, item="oracle", ws="
     return repo
 
 
-@pytest.mark.parametrize("closure,minimum,installed,red", [
-    (None, UNREL, None, True),
-    ("closure: blocked", UNREL, None, True),
-    ("closure: traced\nhuman_pending: 0", UNREL, None, False),
-    ("closure: not-applicable\nnot_applicable_reason: schema-1", REL, "4.3.0", False),
-    ("closure: not-applicable\nnot_applicable_reason: spec-runner-version", UNREL, None, False),
-    ("closure: not-applicable\nnot_applicable_reason: spec-runner-version", REL, "4.3.0", True),
+NA_SR = "closure: not-applicable\nnot_applicable_reason: spec-runner-version\nspec_runner_version: 4.2.0\nhost: mac"
+
+
+@pytest.mark.parametrize("closure,is_vendored,red", [
+    (None, False, True),
+    ("closure: blocked", False, True),
+    ("closure: traced\nhuman_pending: 0", False, False),
+    ("closure: not-applicable\nnot_applicable_reason: schema-1", True, False),
+    (NA_SR, False, False),
+    (NA_SR, True, True),
 ])
-def test_gate_table(tmp_path, closure, minimum, installed, red):
-    errors, _ = g.gate_findings(make(tmp_path, done=True, closure=closure), minimum=minimum, installed=installed)
+def test_gate_table(tmp_path, closure, is_vendored, red):
+    errors, _ = g.gate_findings(make(tmp_path, done=True, closure=closure), is_vendored=is_vendored)
     assert bool(errors) is red
 
 
+def test_na_version_error_names_version_and_host(tmp_path):
+    errors, _ = g.gate_findings(make(tmp_path, done=True, closure=NA_SR), is_vendored=True)
+    assert any("4.2.0" in e and "mac" in e for e in errors)
+
+
 def test_open_item_is_not_checked(tmp_path):
-    errors, _ = g.gate_findings(make(tmp_path, done=False, closure=None), minimum=UNREL, installed=None)
+    errors, _ = g.gate_findings(make(tmp_path, done=False, closure=None), is_vendored=False)
     assert errors == []
 
 
-def test_warnings_visible_for_na_and_human_pending(tmp_path):
+def test_warnings_visible_for_human_pending(tmp_path):
     _, warns = g.gate_findings(make(tmp_path, done=True, closure="closure: traced\nhuman_pending: 2"),
-                               minimum=UNREL, installed=None)
+                               is_vendored=False)
     assert any("human" in w for w in warns)
 
 
 def test_two_charters_same_item_both_checked(tmp_path):
     repo = make(tmp_path, done=True, closure="closure: traced\nhuman_pending: 0")
     make(tmp_path, done=True, closure=None, ws="ws-b", code="ABC")
-    errors, _ = g.gate_findings(repo, minimum=UNREL, installed=None)
+    errors, _ = g.gate_findings(repo, is_vendored=False)
     assert any("ws-b" in e for e in errors)
 ```
 
@@ -1703,14 +1730,13 @@ import re
 import sys
 from pathlib import Path
 
-from governance import charter_guard, criteria_contract, task_bridge
-from governance.criteria_contract import MinVersion
+from governance import charter_guard, criteria_contract
 from governance.frontmatter import split_frontmatter
 
 _DONE = re.compile(r"^\s*- \[x\].*?@id:([A-Za-z0-9_.-]+)", re.M)
 
 
-def gate_findings(repo: Path, *, minimum: MinVersion, installed: str | None) -> tuple[list[str], list[str]]:
+def gate_findings(repo: Path, *, is_vendored: bool) -> tuple[list[str], list[str]]:
     todo = repo / "TODO.md"
     done = set(_DONE.findall(todo.read_text())) if todo.exists() else set()
     errors: list[str] = []
@@ -1736,8 +1762,9 @@ def gate_findings(repo: Path, *, minimum: MinVersion, installed: str | None) -> 
                 warns.append(f"{ws}: human_pending={meta['human_pending']} — подпись в срезе 2")
         elif state == "not-applicable":
             reason = meta.get("not_applicable_reason")
-            if reason == "spec-runner-version" and criteria_contract.oracle_available(installed, minimum):
-                errors.append(f"{ws}: not-applicable spec-runner-version при доступном оракуле — перегнать закрытие")
+            where = f"spec-runner {meta.get('spec_runner_version', '-')} на {meta.get('host', '-')}"
+            if reason == "spec-runner-version" and is_vendored:
+                errors.append(f"{ws}: not-applicable spec-runner-version ({where}) при вендоренном контракте — перегнать закрытие на машине с spec-runner ≥ min")
             else:
                 warns.append(f"{ws}: оракул не применим ({reason})")
         else:
@@ -1749,11 +1776,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="closure_gate")
     parser.add_argument("--repo", type=Path, default=Path("."))
     args = parser.parse_args(argv)
-    errors, warns = gate_findings(
-        args.repo.resolve(),
-        minimum=criteria_contract.read_min_version(),
-        installed=task_bridge.spec_runner_version(),
-    )
+    errors, warns = gate_findings(args.repo.resolve(), is_vendored=criteria_contract.vendored())
     for w in warns:
         print(f"closure_gate: warning: {w}")
     if warns:
@@ -1813,4 +1836,4 @@ git commit -m "docs: оракул бандла — срез 1 в CLAUDE.md и TO
 
 ## Приёмка среза 1 (не часть исполнения плана)
 
-Срез 1 закрыт только живым прогоном на spec-runner ≥ X (после spec-runner#603 и PR, переключающего `RELEASED=true` со схемами/PIN/manifest): пункты 1–4 спеки §8.4 и красный гейт `[x]` при `closure: blocked`. До этого код может быть влит, но пункт `@id:bundle-oracle-slice1` не закрывается.
+Срез 1 закрыт только живым прогоном на spec-runner ≥ X (после spec-runner#603 и PR, вендорящего схемы, `PIN` и `manifest.json`): пункты 1–4 спеки §8.4 и красный гейт `[x]` при `closure: blocked`. До этого код может быть влит, но пункт `@id:bundle-oracle-slice1` не закрывается.
