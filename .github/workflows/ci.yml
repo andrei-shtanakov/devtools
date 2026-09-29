@@ -68,3 +68,12 @@ jobs:
           from governance.criteria_contract import CONTRACT_DIR, drift_findings as f;
           e, n = f(CONTRACT_DIR, Path('spec-runner-upstream'), ci=True);
           print(*e, *n, sep='\n'); sys.exit(1 if e else 0)"
+      # Общие фикстуры владения (devtools#491): своя копия со своим PIN; у
+      # производителя лежат в tests/fixtures/, а не в contracts/ (ревью #500).
+      - name: criteria-closure/v1 ownership fixtures drift
+        run: >
+          uv run --frozen python -c "import sys; from pathlib import Path;
+          from governance.criteria_contract import CONTRACT_DIR, drift_findings as f;
+          e, n = f(CONTRACT_DIR / 'fixtures/ownership', Path('spec-runner-upstream'), ci=True,
+          upstream_path='tests/fixtures/criteria-closure/v1/ownership');
+          print(*e, *n, sep='\n'); sys.exit(1 if e else 0)"
