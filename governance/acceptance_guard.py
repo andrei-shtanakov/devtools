@@ -135,10 +135,10 @@ def _parse_requirements(req_text: str) -> tuple[dict[str, str], list[str]]:
                 "входное множество недостоверно"
             )
             continue
-        if pr.group(1) not in ("Must", "Should"):
+        if pr.group(1) not in ("Must", "Should", "Could", "Won't"):
             findings.append(
                 f"{rid}: значение **Priority**: {pr.group(1)} вне "
-                "словаря Must|Should — входное множество недостоверно"
+                "словаря Must|Should|Could|Won't — входное множество недостоверно"
             )
             continue
         priorities[rid] = pr.group(1)

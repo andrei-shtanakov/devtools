@@ -55,7 +55,9 @@ _FR_ID_RE = re.compile(r"^####\s+((?:FR|NFR)-\d+[a-z]?):", re.M)
 _PRIORITY_RE = re.compile(r"^\*\*Priority\*\*:\s*(\S+)", re.M)
 
 
-def _acceptance_body(req_text: str, req_pin: str, beh_pin: str) -> str:
+def _acceptance_body(
+    req_text: str, req_pin: str, beh_pin: str, beh_text: str = ""
+) -> str:
     """25-acceptance.md валидный наперёд для S4-гардов acceptance (Task 6,
     `governance/acceptance_guard.py`): два пина upstream по ФАКТИЧЕСКОМУ
     содержимому requirements/behaviour-spec (паттерн design), один
@@ -80,6 +82,11 @@ def _acceptance_body(req_text: str, req_pin: str, beh_pin: str) -> str:
         "" if must_id is not None
         else "Must-требований во входном наборе нет\n\n"
     )
+    # Спека оракула §1.7: каждый BEH входит в scenarios не-Won't AC —
+    # фикстура перечисляет BEH фактического behaviour-spec (реальные
+    # бандлы правило выполняют: 0 сирот из 236 BEH).
+    beh_ids = re.findall(r"^####\s+(BEH-\d+[a-z]?):", beh_text, re.M)
+    scenarios = f"scenarios: [{', '.join(beh_ids)}]\n" if beh_ids else ""
     return (
         "---\n"
         "spec_stage: acceptance\n"
@@ -94,6 +101,7 @@ def _acceptance_body(req_text: str, req_pin: str, beh_pin: str) -> str:
         f"{declaration}"
         "#### AC-01: x · verification: manual\n"
         f"traces: [{trace_id}]\n"
+        f"{scenarios}"
         "Наблюдаемый признак: человек видит x.\n\n"
         "## Инварианты покрытия\n\nMust-требования покрыты хотя бы одним AC.\n\n"
         "## Порог приёмки\n\nAC-01 обязателен к выполнению.\n\n"
@@ -392,7 +400,11 @@ class FakeOps:
             req_pin = _blob_of_acc("10-requirements.md")
             beh_pin = _blob_of_acc("15-behaviour-spec.md")
             path.write_text(
-                _acceptance_body(req_text, req_pin, beh_pin),
+                _acceptance_body(
+                    req_text, req_pin, beh_pin,
+                    (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+                    if (bundle / "15-behaviour-spec.md").exists() else "",
+                ),
                 encoding="utf-8",
             )
             return 0
@@ -1618,7 +1630,7 @@ def _repin_bundle(bundle_dir: Path) -> None:
         (bundle_dir / "20-design.md").read_text(encoding="utf-8")
     )
     (bundle_dir / "25-acceptance.md").write_text(
-        _acceptance_body(req_text, req_pin, beh_pin), encoding="utf-8",
+        _acceptance_body(req_text, req_pin, beh_pin, beh_text), encoding="utf-8",
     )
     acceptance_pin = blob_sha1(
         (bundle_dir / "25-acceptance.md").read_text(encoding="utf-8")
@@ -5013,7 +5025,11 @@ def test_gate_stops_when_decomposition_missing_from_bundle(
     # тест проверял бы не свой предмет. Прежний путь гейтил весь бандл
     # одним проходом и до acceptance в этой фикстуре просто не доходил.
     (bundle_dir / "25-acceptance.md").write_text(
-        _acceptance_body(_DEFAULT_REQUIREMENTS_BODY, req_pin, beh_pin),
+        _acceptance_body(
+            _DEFAULT_REQUIREMENTS_BODY, req_pin, beh_pin,
+            (bundle_dir / "15-behaviour-spec.md").read_text(encoding="utf-8")
+            if (bundle_dir / "15-behaviour-spec.md").exists() else "",
+        ),
         encoding="utf-8",
     )
     # base несёт approved-узлы: предмет — ОТСУТСТВИЕ файла в
@@ -5740,7 +5756,7 @@ def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
                 path = Path(target_dir) / bundle_dir / "10-requirements.md"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(
-                    "#### FR-01: x\n**Priority**: Should\n", encoding="utf-8"
+                    "#### FR-01: x\n**Priority**: Won't\n", encoding="utf-8"
                 )
                 return 0
             if kind == "acceptance":
@@ -5861,6 +5877,49 @@ def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root, monkeypatch) 
     ).read_text()
     assert "GC-AC-COVERAGE" in findings and "FR-01" in findings
     assert f"candidate-{state.wave}" not in state.ops
+
+
+def _orphan_ops_class(beh_extra: str):
+    class _Ops(FakeOps):
+        def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
+            if kind == "requirements":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                path = Path(target_dir) / bundle_dir / "10-requirements.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#### FR-01: x\n**Priority**: Must\n", encoding="utf-8")
+                return 0
+            rc = super().author(target_dir, kind, subject, bundle_dir, brief_context)
+            if kind == "behaviour-spec":
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.write_text(path.read_text(encoding="utf-8") + beh_extra, encoding="utf-8")
+            if kind == "acceptance":  # сирота: BEH-99 не попадает ни в один AC
+                path = Path(target_dir) / bundle_dir / "25-acceptance.md"
+                text = path.read_text(encoding="utf-8")
+                path.write_text(
+                    text.replace(", BEH-99", "").replace("BEH-99, ", "").replace("[BEH-99]", "[]"),
+                    encoding="utf-8",
+                )
+            return rc
+
+    return _Ops
+
+
+_ORPHAN_BEH = (
+    "\n#### BEH-99: orphan\n`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: unit` `owner: qa` `target: tests/t.py`\n"
+)
+
+
+def test_gate_orphan_beh_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
+    """GC-ORPHAN (спека оракула §1.7): Must-BEH вне scenarios всех не-Won't AC —
+    стоп гейта рядом с GC-AC-COVERAGE; при --reopen 15 тот же блок исполняется
+    заново над новым 15 и прежним 25."""
+    ops = _orphan_ops_class(_ORPHAN_BEH)(facts=GREEN_PR_FACTS)
+    state = _drive_waves_to(tmp_path, "r-orphan", ops, monkeypatch, 4)
+    assert state.status == "stopped_gate"
+    findings = (runner.run_dir("r-orphan") / "gate-findings.txt").read_text()
+    assert "error GC-ORPHAN: BEH-99" in findings
 
 
 def test_gate_warning_survives_a_later_fatal_in_the_same_gate_call(

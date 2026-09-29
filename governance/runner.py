@@ -37,6 +37,7 @@ from governance import (
     brief_input,
     bundle_dag,
     bundle_inputs,
+    criteria_graph,
     decomposition_guard,
     design_guard,
 )
@@ -3131,12 +3132,22 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # required — читать его было бы TOCTOU.
     acc_path = node_paths["acceptance"]
     if req_path.exists() and beh_path.exists() and acc_path.exists():
+        req_text = req_path.read_text(encoding="utf-8")
+        beh_text = beh_path.read_text(encoding="utf-8")
+        acc_text = acc_path.read_text(encoding="utf-8")
         ac_cov = [
             f"error GC-AC-COVERAGE: {finding}"
             for finding in acceptance_guard.coverage_findings(
-                req_path.read_text(encoding="utf-8"),
-                beh_path.read_text(encoding="utf-8"),
-                acc_path.read_text(encoding="utf-8"),
+                req_text, beh_text, acc_text
+            )
+        ]
+        # Сироты (спека оракула §1.7): каждый не-Won't BEH входит в
+        # scenarios хотя бы одного не-Won't AC. Блок исполняется и после
+        # --reopen 15 — над новым 15 и прежним 25.
+        ac_cov += [
+            f"error GC-ORPHAN: {finding}"
+            for finding in criteria_graph.orphan_findings(
+                criteria_graph.build_graph(req_text, beh_text, acc_text)
             )
         ]
         if ac_cov:
