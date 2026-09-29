@@ -2652,7 +2652,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       начнут ссылаться на маркированные тесты или проверка получит режим
       для немаркированной группы.
 
-- [ ] R16 runner выпускается из dev-scratch в devtools и работает на VPS отдельным сервисом (inbox devtools#382, slug: r16-runner-graduation; from: prograph-vault R16, vault#151–#166) @owner:github:andrei-shtanakov @id:r16-runner-graduation @epic:eco.tooling
+- [x] R16 runner выпускается из dev-scratch в devtools и работает на VPS отдельным сервисом (inbox devtools#382, slug: r16-runner-graduation; from: prograph-vault R16, vault#151–#166) @owner:github:andrei-shtanakov @id:r16-runner-graduation @epic:eco.tooling
       Сейчас `_cowork_output/cadence/r16/run.py` под launchd на ноутбуке —
       пропущенные вторники. Acceptance (из заявки): код в devtools без
       чтения `_cowork_output/`, логика как есть (циклы, `decide`, `missed`,
@@ -2674,7 +2674,8 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `missed` проверяются схемой всегда (README контракта).
       После мержа — inbox-issue в robin-runtime (чтение квитанций, цикл,
       Telegram).
-  - [ ] Приёмка §4.4 п.4: первая квитанция VPS `2026-09-29.json` (вт после 09:30 Тбилиси) — владелец/группа `r16`, режим 640, `producer.host` = VPS, статус ok, доставка issue `kb-freshness` в prograph-vault от ai-prosto (первая запись токеном `public_repo`), схема `contracts/r16-receipt/v1/`. Затем: удалить резервный plist в `~/Library/LaunchAgents.disabled/`, закрыть #382, отметить пункт. @owner:github:andrei-shtanakov @id:r16-first-vps-receipt @epic:eco.tooling
+  - [x] Приёмка §4.4 п.4: первая квитанция VPS `2026-09-29.json` (вт после 09:30 Тбилиси) — владелец/группа `r16`, режим 640, `producer.host` = VPS, статус ok, доставка issue `kb-freshness` в prograph-vault от ai-prosto (первая запись токеном `public_repo`), схема `contracts/r16-receipt/v1/`. Затем: удалить резервный plist в `~/Library/LaunchAgents.disabled/`, закрыть #382, отметить пункт. @owner:github:andrei-shtanakov @id:r16-first-vps-receipt @epic:eco.tooling
+    Пройдено 2026-09-29: `/srv/r16/state/receipts/2026-09-29.json` — `r16:r16-readers` 640 (по `deploy/r16/README.md`), `execution: completed`, `ok: true`, `producer.host: pr0sto.net`, доставка `created` → prograph-vault#169 от ai-prosto с лейблом `kb-freshness` (первая запись токеном `public_repo`), схема `contracts/r16-receipt/v1/schema.json` — 0 ошибок. Резервный plist `dev.atp.r16-kb-freshness` удалён. Дедуп issue на этом цикле не проверялся (issue первое) — проявится на следующем.
 
 ## selfcheck — самодиагностика devtools и флота (спека 2026-09-25, план 2026-09-26)
 
