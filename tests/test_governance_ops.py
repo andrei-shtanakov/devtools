@@ -2390,3 +2390,19 @@ def test_author_claude_token_reads_the_named_keychain_item(
         "security", "find-generic-password", "-s",
         ops_mod.AUTHOR_CLAUDE_TOKEN_ITEM, "-w",
     ]
+
+
+def test_claude_isolation_keeps_operator_secrets_out(monkeypatch):
+    """Сквозная проверка на claude-пути (ревью #489): окружение оператора с
+    секретами обнулено и собрано заново; в вызов уходит allowlist + ДВА ключа
+    изоляции, и токен — из связки, не унаследованный."""
+    _operator_env(monkeypatch)
+    monkeypatch.setenv("AUTHOR_HARNESS", "claude")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "inherited-token")
+    seen = _claude_calls(monkeypatch)
+    RealOps().author("/t", "requirements", "s", "ws/spec")
+    env = seen[0]["env"]
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok-from-keychain"
+    rest = {k: v for k, v in env.items()
+            if k not in {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}}
+    assert rest == _AGENT_ENV

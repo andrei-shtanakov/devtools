@@ -2546,8 +2546,14 @@ def _file_fingerprint(path: Path) -> str | None:
 #: ложный стоп на каждом прогоне приучил бы трипвайр отключать.
 _CLAUDE_WATCH_FILES = (
     "settings.json", "settings.local.json", "CLAUDE.md", "keybindings.json",
+    # plugins/ — только реестр того, что установлено и включено; cache/,
+    # marketplaces/, data/, synced/ пишут живые сессии (ревью #489). Подмена
+    # кода УЖЕ установленного плагина в cache/ не наблюдается — закроет
+    # песочница (§9).
+    "plugins/installed_plugins.json", "plugins/known_marketplaces.json",
+    "plugins/config.json", "plugins/blocklist.json",
 )
-_CLAUDE_WATCH_DIRS = ("hooks", "plugins", "skills", "commands", "agents")
+_CLAUDE_WATCH_DIRS = ("hooks", "skills", "commands", "agents")
 #: В репо, где работает агент: хук, исполняемый в сессии или при коммите.
 #: Остальные репо воркспейса вне наблюдения до песочницы (§9).
 _REPO_WATCH = (".claude", ".mcp.json", ".git/hooks")
@@ -2580,6 +2586,31 @@ def _hook_scripts(claude_home: Path) -> list[Path]:
     return scripts
 
 
+def _mcp_servers_digest(path: Path) -> str:
+    """sha256 канонического JSON поддеревьев mcpServers; `unreadable`.
+
+    Отсутствие файла — то же, что файл без MCP-серверов: создание
+    ~/.claude.json без mcpServers ничего не подсаживает."""
+    try:
+        data = (
+            json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        )
+        projects = data.get("projects") or {}
+        servers = {
+            "user": data.get("mcpServers"),
+            "projects": {
+                name: entry.get("mcpServers")
+                for name, entry in sorted(projects.items())
+                if isinstance(entry, dict) and entry.get("mcpServers")
+            },
+        }
+    except (OSError, ValueError, AttributeError):
+        return "unreadable"
+    return hashlib.sha256(
+        json.dumps(servers, sort_keys=True).encode()
+    ).hexdigest()
+
+
 def _claude_home() -> Path:
     """~/.claude оператора — точка подмены для тестов (герметичность)."""
     return Path.home() / ".claude"
@@ -2594,7 +2625,14 @@ def _config_surface_snapshot(state: RunState) -> dict[str, str]:
         *(Path(state.target_dir) / rel for rel in _REPO_WATCH),
         *_hook_scripts(claude_home),
     ]
-    snapshot: dict[str, str] = {}
+    snapshot: dict[str, str] = {
+        # ~/.claude.json сессии пишут постоянно — наблюдаются только его
+        # mcpServers (user-scope и по проектам): подсаженный MCP-сервер
+        # стартует в следующей сессии оператора (ревью #489)
+        "~/.claude.json#mcpServers": _mcp_servers_digest(
+            claude_home.parent / ".claude.json"
+        ),
+    }
     for root in roots:
         files = sorted(root.rglob("*")) if root.is_dir() else [root]
         present = [f for f in files if f.is_file()]

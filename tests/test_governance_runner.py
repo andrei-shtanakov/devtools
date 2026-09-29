@@ -8563,9 +8563,14 @@ def _plant_config(tmp_path, monkeypatch, run_id: str, plant) -> object:
         (lambda t, h: (t / ".mcp.json").write_text("{}"), ".mcp.json"),
         (lambda t, h: (t / ".claude").mkdir(exist_ok=True) or
             (t / ".claude/settings.json").write_text("{}"), ".claude/settings.json"),
+        (lambda t, h: (h / ".claude/plugins").mkdir(exist_ok=True) or
+            (h / ".claude/plugins/installed_plugins.json").write_text('{"x": 1}'),
+         "installed_plugins.json"),
+        (lambda t, h: (h / ".claude.json").write_text(json.dumps(
+            {"mcpServers": {"evil": {"command": "/tmp/evil"}}})), ".claude.json"),
     ],
     ids=["home-settings", "home-hook", "home-claude-md", "repo-git-hook",
-         "repo-mcp", "repo-claude-settings"],
+         "repo-mcp", "repo-claude-settings", "plugin-registry", "user-mcp"],
 )
 def test_config_surface_plant_stops_the_run(
     tmp_path, runs_root, monkeypatch, where, named
@@ -8588,6 +8593,11 @@ def test_config_surface_ignores_claude_state_dirs(tmp_path, runs_root, monkeypat
         (h / ".claude/projects/p/memory.md").write_text("m")
         (h / ".claude/todos").mkdir()
         (h / ".claude/todos/t.json").write_text("[]")
+        # кэш плагинов пишут живые сессии (ревью #489) — не наблюдается
+        (h / ".claude/plugins/cache/p").mkdir(parents=True)
+        (h / ".claude/plugins/cache/p/index.js").write_text("x")
+        # ~/.claude.json сессии пишут постоянно; наблюдаются только mcpServers
+        (h / ".claude.json").write_text(json.dumps({"numStartups": 42}))
 
     state = _plant_config(tmp_path, monkeypatch, "r-cfg-state", state_writes)
     assert state.status != "stopped_author"
