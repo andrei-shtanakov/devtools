@@ -196,8 +196,9 @@ def test_bundle_read_at_pin_not_worktree(tmp_path, monkeypatch):
     тоже не читается: граф строится из git-объектов пина."""
     state, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
-    nodes = cc._bundle_at_pin(state, pin)
     (target / "workstreams/ws/spec/15-behaviour-spec.md").write_text("")
+    _git(target, "commit", "-qam", "после пина")  # и дерево, и HEAD уже другие
+    nodes = cc._bundle_at_pin(state, pin)
     assert nodes["15-behaviour-spec.md"] == BEH
 
 
@@ -343,3 +344,30 @@ def test_same_content_on_another_machine_refused(tmp_path, monkeypatch):
     ops2 = _ops((0, json.dumps(_response(target, pin))))
     assert cc.run("run-1", ops2, product_sha=_git(target, "rev-parse", "HEAD")) == 6
     assert not any(c[0] == "criteria_verify" for c in ops2.calls)
+
+
+
+def test_republish_after_pr_closed_adopts_existing_branch(tmp_path, monkeypatch):
+    """Ревью #482: PR закрытия закрыт (или create_pr упал после push) — повтор
+    не пушит новый коммит в ту же ветку (non-fast-forward навсегда), а
+    переиспользует существующую ветку и создаёт PR заново."""
+    state, target, pin = _env(tmp_path, monkeypatch, charter=CH1)
+    ops = _ops()
+    ops.review_exit = 1
+    assert cc.run("run-1", ops) == 2
+    ops.existing_prs.clear()  # PR закрыт оператором: find_pr открытых — пусто
+    ops.review_exit = 0
+    assert cc.run("run-1", ops) == 0
+    assert ops.merged
+
+
+def test_bad_roots_refused_before_hashing(tmp_path, monkeypatch):
+    """Ревью #482: корни ответа проверяются до обхода файлов — «/» не
+    обходит файловую систему, а даёт отказ шага."""
+    state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    called = []
+    monkeypatch.setattr(cc, "_content_sha", lambda *a: called.append(a) or "x")
+    resp = _response(target, pin, product_roots=["/"])
+    assert cc.run("run-1", _ops((0, json.dumps(resp)))) == 2
+    assert not any("/" in a[1] for a in called if len(a) > 1)

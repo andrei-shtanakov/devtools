@@ -200,6 +200,23 @@ def _push_closure(state, branch: str, text: str, closure: str) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _adopt_branch(state, branch: str, text: str) -> bool:
+    """True — ветка ключа уже на origin и несёт ровно этот файл закрытия."""
+    ref = f"refs/heads/{branch}"
+    if not _git(state.target_dir, "ls-remote", "--exit-code", "origin", ref).stdout.strip():
+        return False
+    if _git(state.target_dir, "fetch", "--quiet", "origin", f"+{ref}:refs/criteria-close/{branch}").returncode:
+        raise CloseError(f"fetch {branch} не удался")
+    shown = _git(state.target_dir, "show",
+                 f"refs/criteria-close/{branch}:{state.bundle_dir}/{CLOSURE_NAME}")
+    if shown.returncode != 0 or shown.stdout != text:
+        raise CloseError(
+            f"ветка {branch} на origin несёт другой файл закрытия — удалите её "
+            f"(`git push origin --delete {branch}`) и повторите"
+        )
+    return True
+
+
 def _publish(state, ops: Ops, run_id: str, key: str, text: str, closure: str) -> int:
     """Идемпотентная публикация под ключом: ветка несёт ключ, устаревшие PR
     закрываются, повтор после сбоя дожимает тот же текст (I1, I2)."""
@@ -213,7 +230,11 @@ def _publish(state, ops: Ops, run_id: str, key: str, text: str, closure: str) ->
             _record(run_id, other_key, closed=True)
     pr = ops.find_pr(state.repo_slug, branch)
     if pr is None:
-        _push_closure(state, branch, text, closure)
+        # Ветка уже на origin (PR закрыт или create_pr упал после push) —
+        # усыновить её при совпадении содержимого, а не пушить новый коммит
+        # (non-fast-forward запер бы ключ навсегда; ревью #482).
+        if not _adopt_branch(state, branch, text):
+            _push_closure(state, branch, text, closure)
         pr = ops.create_pr(
             state.target_dir, state.repo_slug, branch,
             f"criteria-close: {state.ws_id} — {closure}",
@@ -367,6 +388,10 @@ def _measure(state, ops: Ops, run_id: str, charter, nodes: dict[str, str], bundl
         print(f"criteria-close: отказ шага — {why}")
         return 2
     roots = [str(r) for r in response.get("product_roots") or []]
+    bad_roots = criteria_check.roots_findings(roots) if roots else []
+    if bad_roots:  # до любого обхода файлов по корням (ревью #482)
+        print("criteria-close: ответ spec-runner отвергнут:\n  " + "\n  ".join(bad_roots))
+        return 2
     lock = root / "uv.lock"
     expected = criteria_check.expected_definitions(_py_files(root, "tests"), charter.code, tests)
     problems = criteria_check.validate_response(

@@ -25,6 +25,10 @@ def test_code_run_commits_on_fresh_base_of_wave2(tmp_path, monkeypatch):
     subprocess.run(["git", "init", "-q", "--bare", "-b", "master", str(origin)], check=True)
     target = tmp_path / "alpha"
     subprocess.run(["git", "clone", "-q", str(origin), str(target)], check=True, capture_output=True)
+    # репо-локальная identity: RealOps.commit_paths коммитит без -c user.*, а в
+    # CI глобального ~/.gitconfig нет (ревью #482); прецедент — test_governance_ops.
+    _git(target, "config", "user.email", "t@t")
+    _git(target, "config", "user.name", "t")
     (target / "README.md").write_text("x\n")
     _git(target, "checkout", "-q", "-b", "master")
     _git(target, "add", ".")
