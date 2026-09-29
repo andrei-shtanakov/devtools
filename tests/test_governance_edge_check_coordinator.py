@@ -425,3 +425,28 @@ def test_unreadable_edge_file_is_a_recheck_not_a_crash(
     call, seen = _counting({})
     result = co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=call)
     assert seen == [_CUSTOMER[1]] and result.verdict == "PASS"
+
+
+def test_blind_edge_file_without_ledger_line_is_rechecked(
+    tmp_path: Path, runs_root: Path,
+) -> None:
+    """devtools#469: слепая подсадка — файл ребра с годной на вид PASS-записью
+    (даже с верным ключом D9), но без строки леджера — не переиспользуется.
+    Переиспользование требует ДВУХ согласованных артефактов: файла и строки
+    `ledger.jsonl` с тем же ключом и попыткой (D10). Выше этого локальная
+    защита не растёт — всё, что пишет раннер, может записать и агент; граница
+    — песочница агента (TODO author-agent-sandbox)."""
+    state = _state(tmp_path, _W1_FILES, _ENGINEER)
+    run_dir = tmp_path / "run"
+    co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=_fake_call({}))
+    # Леджер ОСТАЁТСЯ со строками других рёбер — вырезана только строка
+    # ключа этого ребра: проверяется сравнение по ключу, а не досрочный
+    # выход «леджера нет» (ревью #478).
+    ledger = run_dir / "edge-check" / co.LEDGER_NAME
+    lines = ledger.read_text(encoding="utf-8").splitlines(keepends=True)
+    kept = [ln for ln in lines if json.loads(ln)["edge"] != _CUSTOMER[1]]
+    assert kept and len(kept) < len(lines)
+    ledger.write_text("".join(kept), encoding="utf-8")
+    call, seen = _counting({})
+    co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=call)
+    assert seen == [_CUSTOMER[1]]  # соседнее ребро с согласованной парой — переиспользовано
