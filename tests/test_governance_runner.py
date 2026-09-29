@@ -19,11 +19,9 @@ from governance import (
     brief_input,
     bundle_dag,
     bundle_state,
-    merge_gate,
     runner,
     task_bridge,
 )
-from governance import ops as ops_mod
 from governance import interview as iv
 from governance import run_state as rs
 from governance.stale_adapter import blob_sha1, blob_sha1_bytes
@@ -1784,7 +1782,6 @@ def _drive_waves_to(
     последней», чтобы вызывающему не приходилось писать отдельный флаг
     для того же самого цикла.
     """
-    from governance import approval_ledger as al
 
     _fake_wave_adapters(monkeypatch, ops)
     state = runner.start(**_waves_kwargs(tmp_path, run_id, ops, **over))
@@ -1986,10 +1983,6 @@ def test_resume_after_death_between_create_issue_and_op_complete_reuses_issue(
     `remediation-issue` + `find_issue`-реконсиляция: issue уже существует
     (найден по `slug:`-префиксу тела) → берётся его номер, второй не
     создаётся."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -2740,10 +2733,6 @@ def test_gate_seam_required_absent_blocks_without_mock(
 def test_s8_findings_include_gate_check_output(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES,
         s8_exit=1, s8_output="error GC-BEH-TRACE: BEH-01 не трейсит ничего\n",
@@ -2966,10 +2955,6 @@ def test_resume_after_cleanup_from_stopped_dirty_proceeds(
 def test_start_blocked_by_merged_unverified_without_green_child(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -2988,10 +2973,6 @@ def test_start_blocked_by_merged_unverified_without_green_child(
 def test_start_unblocked_after_verify_child_completes(
     tmp_path: Path, runs_root, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(
         review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1,
     )
@@ -4109,7 +4090,7 @@ def test_gate_stops_when_design_node_missing_from_bundle(
         profile="profiles/team-exp.yaml", run_id=run_id,
     )
     state.wave = 5
-    state.branch = f"spec/WS-1-behaviour-w5"
+    state.branch = "spec/WS-1-behaviour-w5"
     state.ops = {
         "branch-5": {"status": "completed"},
         "author-charter": {"status": "completed", "skipped": True},
@@ -4661,10 +4642,6 @@ def test_start_preflight_silent_on_six_node_profile(
     `_start_kwargs`, T1; acceptance добавлен Task 1 плана acceptance-node)
     ⇒ preflight молчит, прогон доходит до мержа как прежде — регрессия
     отсутствует."""
-    monkeypatch.setattr(
-        runner, "load_safety",
-        lambda actor="ai-prosto": merge_gate.Safety(True, "agent"),
-    )
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
 
     state = _drive_waves_to(tmp_path, "r-preflight-ok", ops, monkeypatch, 6)
@@ -5025,7 +5002,7 @@ def test_gate_stops_when_decomposition_missing_from_bundle(
         profile="profiles/team-exp.yaml", run_id=run_id,
     )
     state.wave = 5
-    state.branch = f"spec/WS-1-behaviour-w5"
+    state.branch = "spec/WS-1-behaviour-w5"
     state.ops = {
         "branch-5": {"status": "completed"},
         "author-charter": {"status": "completed", "skipped": True},
@@ -5491,7 +5468,7 @@ def test_gate_stops_when_acceptance_missing_from_bundle(
         profile="profiles/team-exp.yaml", run_id=run_id,
     )
     state.wave = 5
-    state.branch = f"spec/WS-1-behaviour-w5"
+    state.branch = "spec/WS-1-behaviour-w5"
     state.ops = {
         "branch-5": {"status": "completed"},
         "author-charter": {"status": "completed", "skipped": True},
@@ -7399,8 +7376,6 @@ def _fake_approve_node_full(monkeypatch, ops: FakeOps):
         record = state.ops.get(f"candidate-{state.wave}") or {}
         key = record.get("request")
         if key is None or state.ops[key].get("status") == al.STATUS_COMPLETED:
-            live = [al.request_key(*n) for n, op in al.live_requests(state)
-                    if node not in op["nodes"] and op["wave"] == 1]
             step = bundle_dag.levels(bundle_dag.BUNDLE_DAG)[node]
             existing = al.live_request_for_step(state, 1, step)
             if existing is not None:

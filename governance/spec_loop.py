@@ -57,7 +57,6 @@ import re
 import shlex
 import subprocess
 import sys
-import tempfile
 import tomllib
 from dataclasses import dataclass
 from datetime import date

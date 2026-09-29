@@ -17,12 +17,6 @@ repo = "prograph"
 reason = "issue владельцу: prograph#59"
 until = 2026-12-31
 
-[[allow]]
-id = "sc-0a727ef8"  # lint-coverage/missing devtools python
-repo = "devtools"
-reason = "issue владельцу: devtools#461"
-until = 2026-12-31
-
 # Артефакты сборки и вендор-бандлы — вне корпуса (спека §11.2): иначе как самые
 # крупные клоны jscpd они займут потолок судьи первыми (замер S5 2026-09-27).
 [corpus]

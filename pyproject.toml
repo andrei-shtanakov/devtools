@@ -57,4 +57,15 @@ pythonpath = ["."]
 [tool.ruff]
 # Вендоренные фикстуры criteria-closure/v1: байты — это кейсы (синтаксическая
 # ошибка, NUL, CRLF); ни линтовать, ни форматировать.
-extend-exclude = ["contracts/criteria-closure/v1/fixtures"]
+# Вендоренные копии (побайтово под manifest) не правятся линтером: discovery-
+# contract (discovery-toolkit) — правка ломает test_discovery_vendor.
+extend-exclude = [
+    "contracts/criteria-closure/v1/fixtures",
+    "governance/discovery_contract",
+]
+
+[tool.ruff.lint]
+# Базовый набор, который держит CI (devtools#461, ступень 1): правила ruff 0.16
+# по умолчанию шире (замер 28.09 — 329 нарушений). Расширять волнами, каждая —
+# вместе с чисткой, чтобы CI не краснел на старом долге.
+select = ["E4", "E7", "E9", "F"]

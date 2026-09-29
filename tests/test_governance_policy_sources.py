@@ -8,8 +8,8 @@ import pytest
 
 yaml = pytest.importorskip("yaml")
 
-from governance.merge_gate import Authority, Safety
-from governance.policy_sources import (
+from governance.merge_gate import Authority, Safety  # noqa: E402 — после importorskip
+from governance.policy_sources import (  # noqa: E402
     build_authority,
     ecosystem_authority,
     load_safety,

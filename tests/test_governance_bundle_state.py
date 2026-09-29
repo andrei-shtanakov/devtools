@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("steward")
 
-from governance.bundle_state import BundleState, NodeState, candidate_state
+from governance.bundle_state import BundleState, candidate_state
 from governance.stale_adapter import blob_sha1
 from tests.governance_fixtures.bundles import (
     BEHAVIOUR_NO_UPSTREAM_MD,

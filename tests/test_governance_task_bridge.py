@@ -4756,7 +4756,7 @@ def test_beh09_each_unavailable_branch_prints_word_with_reason(
     outputs = _unavailable_inputs(tmp_path, monkeypatch, capsys)
     for label, out in outputs.items():
         assert _SKIP_I8_PREFIX in out, label
-        line = next(l for l in out.splitlines() if _SKIP_I8_PREFIX in l)
+        line = next(ln for ln in out.splitlines() if _SKIP_I8_PREFIX in ln)
         reason = line.split(_SKIP_I8_PREFIX, 1)[1].strip()
         assert reason, label
 
@@ -4771,7 +4771,7 @@ def test_beh10_skip_does_not_claim_composition_matched(
     БЕЗ предшествующего отрицания."""
     outputs = _unavailable_inputs(tmp_path, monkeypatch, capsys)
     for label, out in outputs.items():
-        line = next(l for l in out.splitlines() if _SKIP_I8_PREFIX in l)
+        line = next(ln for ln in out.splitlines() if _SKIP_I8_PREFIX in ln)
         assert "состав не изменился" not in line, label
         assert re.search(r"(?<!не )совпа", line) is None, label
 
@@ -4811,7 +4811,7 @@ def test_beh12_word_names_check_state_and_reason(
 ) -> None:
     outputs = _unavailable_inputs(tmp_path, monkeypatch, capsys)
     for label, out in outputs.items():
-        line = next(l for l in out.splitlines() if _SKIP_I8_PREFIX in l)
+        line = next(ln for ln in out.splitlines() if _SKIP_I8_PREFIX in ln)
         assert "§I8" in line, label
         assert "comparison: unavailable" in line, label
         reason = line.split(_SKIP_I8_PREFIX, 1)[1].strip()
@@ -4824,7 +4824,7 @@ def test_beh13_reasons_are_distinguishable_and_do_not_claim_a_change(
     outputs = _unavailable_inputs(tmp_path, monkeypatch, capsys)
     reasons: dict[str, str] = {}
     for label, out in outputs.items():
-        line = next(l for l in out.splitlines() if _SKIP_I8_PREFIX in l)
+        line = next(ln for ln in out.splitlines() if _SKIP_I8_PREFIX in ln)
         reasons[label] = line.split(_SKIP_I8_PREFIX, 1)[1].strip()
     assert len(set(reasons.values())) == len(reasons)
     for label, reason in reasons.items():
@@ -4852,7 +4852,7 @@ def test_beh13_each_input_reads_its_own_reason(
     признака чужой."""
     outputs = _unavailable_inputs(tmp_path, monkeypatch, capsys)
     for label, out in outputs.items():
-        line = next(l for l in out.splitlines() if _SKIP_I8_PREFIX in l)
+        line = next(ln for ln in out.splitlines() if _SKIP_I8_PREFIX in ln)
         reason = line.split(_SKIP_I8_PREFIX, 1)[1]
         assert _OWN_REASON[label] in reason, (label, reason)
         others = [m for k, m in _OWN_REASON.items() if k != label]

@@ -1138,7 +1138,6 @@ def test_invalid_file_does_not_fall_through_to_github_inheritance(
         _review("CHANGES_REQUESTED", fp_fleet.head_sha, FP)
     )
     calls_after_dry = len(_kit_calls(fp_fleet))
-    gh_after_dry = len(fp_fleet.gh_calls())
     live = fp_fleet.run(
         "demo",
         "7",
