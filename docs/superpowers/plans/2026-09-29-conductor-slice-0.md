@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-29-conductor-design.md` (rev 10). Срез 0 — §11: §2, §3 (без модели), §4, §5.2–5.3 как выдача, §7.1–7.2, таймер на уровне 0, `roadmap.toml` в зонтике.
 
-**План rev 3** — по кругу 2 ревью пары (7 major, 1 minor): одобрение PR на head SHA через GraphQL и выбор actor мержа по `Мерж: человек`/authority-root; ошибки вспомогательных чтений делают граф `partial`; начало ожидания — `git blame` строки пункта; `focus.epic` проверяется на тип; вопросы владельцу — по причине ожидания; `plan` ограничен `roadmap.autonomy`; `record` возвращает 4 при `RM-INVALID`. **Rev 2** — по кругу 1 ревью пары (1 blocker, 13 major, 1 minor). Листинги кода перед отдачей на ревью извлечены во временный каталог, прогнаны тестами, ruff и pyrefly на окружении devtools и живым прогоном на флоте (только чтение) — см. «Проверка плана исполнением» в конце. Живой прогон изменил два решения: обнаружение GitHub — только открытые (окно закрытых упиралось в потолок поиска), ожидание прозаического `@trigger` — `wait_condition`, не вопрос владельцу.
+**План rev 4** — по кругу 3 ревью пары (3 major, 2 minor), класс fail-closed закрыт механизмом: каждое обязательное чтение и каждое усечение (соседние версии пути, неизвестный репо в `exists:`, список файлов и ревью PR) регистрируется в источнике `history`; CI и одобрение PR — об одном head SHA, иначе чтение PR — сбой; манифест читается с `origin` зонтика и входит в источники с SHA; `GR-ORPHAN-REQUEST` для inbox без `from:` и с неизвестным репо, `GR-SLUG-MATCH` для склейки без `@source-ref`; вопрос `GR-SHIPPED-OPEN` — только в фокусе; `status` печатает те же вопросы, что снимок. **Rev 3** — по кругу 2 ревью пары (7 major, 1 minor): одобрение PR на head SHA через GraphQL и выбор actor мержа по `Мерж: человек`/authority-root; ошибки вспомогательных чтений делают граф `partial`; начало ожидания — `git blame` строки пункта; `focus.epic` проверяется на тип; вопросы владельцу — по причине ожидания; `plan` ограничен `roadmap.autonomy`; `record` возвращает 4 при `RM-INVALID`. **Rev 2** — по кругу 1 ревью пары (1 blocker, 13 major, 1 minor). Листинги кода перед отдачей на ревью извлечены во временный каталог, прогнаны тестами, ruff и pyrefly на окружении devtools и живым прогоном на флоте (только чтение) — см. «Проверка плана исполнением» в конце. Живой прогон изменил два решения: обнаружение GitHub — только открытые (окно закрытых упиралось в потолок поиска), ожидание прозаического `@trigger` — `wait_condition`, не вопрос владельцу.
 
 ## Global Constraints
 
@@ -165,6 +165,7 @@ class Node:
     body: str = ""
     labels: tuple[str, ...] = ()
     url: str = ""
+    source_ref: str | None = None
 
     def owner(self) -> dict[str, Any] | None:
         """owner_ref как словарь (хранится кортежем ради хэшируемости)."""
@@ -561,10 +562,10 @@ git commit -m "feat(conductor): разбор и валидация roadmap.toml 
 - Produces:
   - `RepoTodo(repo, text, sha, state, detail="")`
   - `Inputs` (поля ниже), `save_inputs(inputs, path)`, `load_inputs(path) -> Inputs`, `INPUTS_VERSION = 1`
-  - GhRecord (dict): `repo` (канонический ключ), `number`, `is_pr`, `title`, `body`, `state` (`open|closed`), `state_reason` (`completed|not_planned|None`), `merged`, `author`, `labels`, `updated_at`, `url`, `comments: [{author, body, created_at}]`, `closing_refs: ["<github-name>#N"]`, для PR — `head_sha`, `review_decision`, `ci` (`green|red|pending|unknown`), `approved_at_head`, `files`, `files_complete`
+  - GhRecord (dict): `repo` (канонический ключ), `number`, `is_pr`, `title`, `body`, `state` (`open|closed`), `state_reason` (`completed|not_planned|None`), `merged`, `author`, `labels`, `updated_at`, `url`, `comments: [{author, body, created_at}]`, `closing_refs: ["<github-name>#N"]`, для PR — `head_sha`, `review_decision`, `ci` (`green|red|pending|unknown`), `approved_at_head`, `files`, `complete`
   - `UMBRELLA`, `FleetRepo(key, git_dir, github_name)`, `fleet_repos(manifest_text) -> list[FleetRepo]`, `github_owner(manifest_text) -> str`, `manifest_index(manifest_text) -> plan_fields.ManifestIndex`
 
-Поля `Inputs`: `captured_at, host, owner, manifest_text, todos, gh_records, gh_state, gh_detail, roadmap_text, roadmap_state, roadmap_source, roadmap_sha, epics, epics_state, epics_detail, repo_names` (GitHub-имя → ключ), `movement` (node_id → ISO последнего коммита с `@id`), `wait_since` (`"<src>|<raw_ref>"` → ISO первого коммита, добавившего `@blocked_by:<raw_ref>`), `history` (`todo://r/id` → SHA коммита, где `@id` был, для отсутствующих предпосылок), `trigger_facts` (текст `exists:…` → `{"exists": bool|None, "sha": str|None, "siblings": [имена]}`), `epics_sha`, `aux_state`/`aux_detail` (ошибки вспомогательных чтений: история, факты, политики репо), `human_merge_repos` (репо со строкой `Мерж: человек` в CLAUDE.md на origin), `authority_prefixes` (из собственного `contracts/authority-root/v1/paths.env` devtools).
+Поля `Inputs`: `captured_at, host, owner, manifest_text, todos, gh_records, gh_state, gh_detail, roadmap_text, roadmap_state, roadmap_source, roadmap_sha, epics, epics_state, epics_detail, repo_names` (GitHub-имя → ключ), `movement` (node_id → ISO последнего коммита с `@id`), `wait_since` (`"<src>|<raw_ref>"` → ISO первого коммита, добавившего `@blocked_by:<raw_ref>`), `history` (`todo://r/id` → SHA коммита, где `@id` был, для отсутствующих предпосылок), `trigger_facts` (текст `exists:…` → `{"exists": bool|None, "sha": str|None, "siblings": [имена]}`), `epics_sha`, `aux_state`/`aux_detail` (ошибки вспомогательных чтений: история, факты, политики репо), `human_merge_repos` (репо со строкой `Мерж: человек` в CLAUDE.md на origin), `authority_prefixes` (из собственного `contracts/authority-root/v1/paths.env` devtools), `manifest_source` (`origin` | `file:<path>`), `manifest_sha`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -695,6 +696,8 @@ class Inputs:
     aux_detail: str = ""
     human_merge_repos: list[str] = field(default_factory=list)
     authority_prefixes: list[str] = field(default_factory=list)
+    manifest_source: str = "file"
+    manifest_sha: str | None = None
 
 
 def save_inputs(inputs: Inputs, path: Path) -> None:
@@ -1071,7 +1074,9 @@ def path_fact(repo_dir: Path, path: str) -> dict[str, Any]:
         parent = "/".join(parts[:versioned])
         tree = f"{ref}:{parent}" if parent else ref
         code, names, _ = git(repo_dir, "ls-tree", "--name-only", tree)
-        siblings = [posixpath.basename(n) for n in names.split()] if code == 0 else []
+        if code != 0:
+            return {"exists": None, "sha": sha, "siblings": []}
+        siblings = [posixpath.basename(n) for n in names.split()]
     return {"exists": bool(listed.strip()), "sha": sha, "siblings": siblings}
 ```
 
@@ -1095,7 +1100,7 @@ git commit -m "feat(conductor): git-источник с origin/<default>, ист
 - Create: `conductor/sources_gh.py`, `tests/conductor/test_sources_gh.py`
 
 **Interfaces:**
-- Produces: `Runner = Callable[[list[str]], tuple[int, str, str]]`; `run_gh(args)`; `ci_state(rollup) -> "green"|"red"|"pending"|"unknown"`; `discover(owner, fleet_names: set[str], runner) -> (hits: list[(name, number, is_pr)], state, detail)` — только открытые; `fetch_record(owner, name, number, is_pr, runner) -> dict | None` (без поля `repo`; для PR — дополнительный GraphQL-запрос: `approved_at_head` — есть `APPROVED` на коммит, равный `headRefOid`, и нет `CHANGES_REQUESTED`; `files`, `files_complete`); `GhResult(records, state, detail)`; `collect_gh(owner, names_to_keys, extra_refs, runner, max_hops=3) -> GhResult`, где `extra_refs(records) -> set[(key, number)]`.
+- Produces: `Runner = Callable[[list[str]], tuple[int, str, str]]`; `run_gh(args)`; `ci_state(rollup) -> "green"|"red"|"pending"|"unknown"`; `discover(owner, fleet_names: set[str], runner) -> (hits: list[(name, number, is_pr)], state, detail)` — только открытые; `fetch_record(owner, name, number, is_pr, runner) -> dict | None` (без поля `repo`; для PR — дополнительный GraphQL-запрос: `approved_at_head` — есть `APPROVED` на коммит, равный `headRefOid`, и нет `CHANGES_REQUESTED`; `files`; `complete` — списки файлов и ревью не усечены; `headRefOid` GraphQL ≠ `headRefOid` из `pr view` → `None`, т.е. сбой чтения); `GhResult(records, state, detail)`; `collect_gh(owner, names_to_keys, extra_refs, runner, max_hops=3) -> GhResult`, где `extra_refs(records) -> set[(key, number)]`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1172,7 +1177,8 @@ PR_EXTRA = json.dumps(
                 "pullRequest": {
                     "headRefOid": "abc",
                     "latestReviews": {
-                        "nodes": [{"state": "APPROVED", "commit": {"oid": "old"}}]
+                        "totalCount": 1,
+                        "nodes": [{"state": "APPROVED", "commit": {"oid": "old"}}],
                     },
                     "files": {"totalCount": 1, "nodes": [{"path": ".github/x.yml"}]},
                 }
@@ -1228,9 +1234,22 @@ def test_collects_pr_ci_and_follows_refs() -> None:
     by_number = {r["number"]: r for r in result.records}
     assert by_number[2]["ci"] == "green" and by_number[2]["head_sha"] == "abc"
     assert by_number[2]["approved_at_head"] is False  # одобрен старый SHA
-    assert by_number[2]["files"] == [".github/x.yml"] and by_number[2]["files_complete"]
+    assert by_number[2]["files"] == [".github/x.yml"] and by_number[2]["complete"]
     assert by_number[2]["closing_refs"] == ["a#1"]
     assert by_number[1]["labels"] == ["inbox"] and by_number[1]["repo"] == "a"
+
+
+def test_head_moved_between_reads_is_error() -> None:
+    moved = PR_EXTRA.replace('"headRefOid": "abc"', '"headRefOid": "new"')
+    run = fake(
+        {
+            OPEN: (0, json.dumps([_page([("a", 2, True)])]), ""),
+            "pr view 2 -R own/a": (0, PR, ""),
+            "api graphql": (0, moved, ""),
+            "api --paginate --slurp repos/own/a/issues/2/comments": (0, COMMENTS, ""),
+        }
+    )
+    assert collect_gh("own", {"a": "a"}, lambda _: set(), run).state == "error"
 
 
 def test_ci_state_table() -> None:
@@ -1287,7 +1306,8 @@ PR_FIELDS = (
 PR_EXTRA = (
     "query($o:String!,$n:String!,$k:Int!){repository(owner:$o,name:$n)"
     "{pullRequest(number:$k){headRefOid latestReviews(first:50)"
-    "{nodes{state commit{oid}}} files(first:100){totalCount nodes{path}}}}}"
+    "{totalCount nodes{state commit{oid}}}"
+    " files(first:100){totalCount nodes{path}}}}}"
 )
 RED = {
     "FAILURE",
@@ -1441,9 +1461,11 @@ def _pr_extra(
     ) and not any(r["state"] == "CHANGES_REQUESTED" for r in reviews)
     files = [f["path"] for f in pr["files"]["nodes"]]
     return {
+        "extra_head": head,
         "approved_at_head": approved,
         "files": files,
-        "files_complete": pr["files"]["totalCount"] <= len(files),
+        "complete": pr["files"]["totalCount"] <= len(files)
+        and pr["latestReviews"]["totalCount"] <= len(reviews),
     }
 
 
@@ -1479,7 +1501,9 @@ def fetch_record(
     }
     if is_pr:
         extra = _pr_extra(owner, name, number, runner)
-        if extra is None:
+        # CI (из pr view) и одобрение (из GraphQL) — об одном и том же SHA,
+        # иначе готовность к мержу не доказана: чтение считается сбоем.
+        if extra is None or extra.pop("extra_head") != raw.get("headRefOid"):
             return None
         record.update(
             head_sha=raw.get("headRefOid"),
@@ -1530,7 +1554,7 @@ def collect_gh(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run --frozen pytest tests/conductor/test_sources_gh.py -q`
-Expected: PASS (6 passed)
+Expected: PASS (7 passed)
 
 - [ ] **Step 5: Commit**
 
@@ -1632,7 +1656,7 @@ def record(repo: str, number: int, **fields: Any) -> dict[str, Any]:
             ci="unknown",
             approved_at_head=False,
             files=[],
-            files_complete=True,
+            complete=True,
         )
     base.update(fields)
     return base
@@ -1731,6 +1755,27 @@ def test_inbox_glue_from_edge_backticks_crlf_and_orphan() -> None:
     assert g.members(target) == {target, "arbiter#104"}
     assert g.epic_of("arbiter#104") == "eco.focus1"
     assert "GR-ORPHAN-REQUEST" in {f.code for f in g.findings}
+    assert "GR-SLUG-MATCH" in {f.code for f in g.findings}
+
+
+def test_orphan_forms_and_source_ref_link() -> None:
+    g = build_graph(
+        inputs(
+            {"arbiter": "- [ ] t @owner:TBD @id:t @source-ref:arbiter#1\n"},
+            [
+                record(
+                    "arbiter", 1, body="slug: t\nfrom: deployer\n", labels=["inbox"]
+                ),
+                record("arbiter", 2, body="slug: q\n", labels=["inbox"]),
+                record("arbiter", 3, body="slug: q\nfrom: ghost#x\n", labels=["inbox"]),
+            ],
+        )
+    )
+    by = {(f.code, f.subject) for f in g.findings}
+    assert ("GR-ORPHAN-REQUEST", "arbiter#2") in by
+    assert ("GR-ORPHAN-REQUEST", "arbiter#3") in by
+    assert ("GR-ORPHAN-REQUEST", "arbiter#1") not in by  # report без пункта
+    assert ("GR-SLUG-MATCH", "arbiter#1") not in by  # связь через @source-ref
 
 
 def test_pr_implements_mentions_and_github_name_normalization() -> None:
@@ -1902,6 +1947,7 @@ def _item_nodes(snapshot: dict[str, Any]) -> dict[str, Node]:
             epic=raw.get("epic"),
             owner_ref=tuple(sorted(owner.items())) if owner else None,
             trigger=raw.get("trigger"),
+            source_ref=(raw.get("freshness") or {}).get("source_ref"),
         )
     return nodes
 
@@ -1970,26 +2016,50 @@ def _gh_edges(
             for m in PR_ITEM_RE.findall(rec.get("body", ""))
         ]
     if "inbox" in rec.get("labels", []):
-        slug = field_value(rec["body"], "slug")
-        if slug and item_id(rec["repo"], slug) in nodes:
-            edges.append(
-                Edge(me, item_id(rec["repo"], slug), "accepted_as", "inbox:slug")
-            )
-        sender = field_value(rec["body"], "from") or ""
-        repo, _, waiting = sender.partition("#")
-        if waiting and repo in norm:
-            waiter = item_id(norm[repo], waiting)
-            if waiter in nodes:
-                edges.append(Edge(waiter, me, "depends_on", "inbox:from"))
-            else:
-                findings.append(
-                    Finding(
-                        "GR-ORPHAN-REQUEST",
-                        "warning",
-                        me,
-                        f"from: {sender} — ждущего пункта нет",
-                    )
+        edges += _inbox_edges(rec, me, nodes, norm, findings)
+    return edges
+
+
+def _inbox_edges(
+    rec: dict[str, Any],
+    me: str,
+    nodes: dict[str, Node],
+    norm: dict[str, str],
+    findings: list[Finding],
+) -> list[Edge]:
+    """Наследие ADR-ECO-006: склейка по slug (D2), ожидание отправителя по from."""
+    edges: list[Edge] = []
+    slug = field_value(rec["body"], "slug")
+    target = item_id(rec["repo"], slug) if slug else None
+    if target is not None and target in nodes:
+        edges.append(Edge(me, target, "accepted_as", "inbox:slug"))
+        own = {
+            f"{name}#{rec['number']}"
+            for name, key in norm.items()
+            if key == rec["repo"]
+        }
+        if nodes[target].source_ref not in own:
+            findings.append(
+                Finding(
+                    "GR-SLUG-MATCH",
+                    "info",
+                    me,
+                    f"{target}: принят по slug без @source-ref",
                 )
+            )
+    sender = field_value(rec["body"], "from") or ""
+    repo, _, waiting = sender.partition("#")
+    orphan = None
+    if not sender:
+        orphan = "нет from:"
+    elif repo not in norm:
+        orphan = f"from: {sender} — неизвестный репо"
+    elif waiting and item_id(norm[repo], waiting) not in nodes:
+        orphan = f"from: {sender} — ждущего пункта нет"
+    elif waiting:
+        edges.append(Edge(item_id(norm[repo], waiting), me, "depends_on", "inbox:from"))
+    if orphan is not None:
+        findings.append(Finding("GR-ORPHAN-REQUEST", "warning", me, orphan))
     return edges
 
 
@@ -2038,6 +2108,7 @@ def _sources(inputs: Inputs) -> list[Source]:
         ),
         Source("epics", inputs.epics_state, inputs.epics_detail, inputs.epics_sha),
         Source("history", inputs.aux_state, inputs.aux_detail),
+        Source("manifest", "read", inputs.manifest_source, inputs.manifest_sha),
     ]
     return sources
 
@@ -2081,7 +2152,7 @@ def build_graph(inputs: Inputs) -> Graph:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run --frozen pytest tests/conductor/test_graph.py -q`
-Expected: PASS (6 passed)
+Expected: PASS (7 passed)
 
 - [ ] **Step 5: Commit**
 
@@ -3205,7 +3276,7 @@ def test_pr_table() -> None:
                 is_pr=True,
                 ci="green",
                 approved_at_head=True,
-                files_complete=False,
+                complete=False,
             ),
         ],
         authority_prefixes=["merge-pr.sh", ".github/"],
@@ -3375,7 +3446,7 @@ def _pr_need(graph: Graph, node_id: str, inputs: Inputs) -> tuple[str, str]:
     touches = any(f.startswith(p) for f in files for p in inputs.authority_prefixes)
     if graph.nodes[node_id].repo in inputs.human_merge_repos or touches:
         return "merge", "owner"
-    if not rec.get("files_complete") or not inputs.authority_prefixes:
+    if not rec.get("complete") or not inputs.authority_prefixes:
         return "merge", "merge-contour?"
     return "merge", "merge-contour"
 
@@ -3560,10 +3631,14 @@ def test_questions_by_reason() -> None:
         {
             "a": "- [ ] g @owner:github:own @id:goal @epic:eco.focus1 "
             "@blocked_by:todo://b/gone\n"
-            "- [x] s @owner:TBD @id:shipped\n",
+            "- [x] s @owner:TBD @id:shipped @epic:eco.focus1\n"
+            "- [x] z @owner:TBD @id:bgshipped @epic:eco.bg\n",
             "b": "- [ ] y @owner:TBD @id:y\n",
         },
-        records=[record("a", 1, body="slug: shipped\n", labels=["inbox"])],
+        records=[
+            record("a", 1, body="slug: shipped\n", labels=["inbox"]),
+            record("a", 2, body="slug: bgshipped\n", labels=["inbox"]),
+        ],
         history={"todo://b/gone": "deadbeef"},
     )
     got = {(q["subject"], q["reason"]): q for q in snap["owner_questions"]}
@@ -3571,6 +3646,8 @@ def test_questions_by_reason() -> None:
     assert cancelled["options"] == ["drop-wait", "replace", "keep"]
     assert "todo://b/gone" in cancelled["evidence"]
     assert got[("a#1", "GR-SHIPPED-OPEN")]["options"] == ["close", "keep"]
+    assert ("a#2", "GR-SHIPPED-OPEN") not in got  # фон: находка есть, вопроса нет
+    assert "GR-SHIPPED-OPEN" in {f["code"] for f in snap["findings"]}
 
 
 def test_plan_ceiling_respects_roadmap_autonomy() -> None:
@@ -3777,7 +3854,7 @@ def _question(
     }
 
 
-def _questions(result: Result) -> list[dict[str, Any]]:
+def owner_questions(result: Result) -> list[dict[str, Any]]:
     """Вопрос по причине: у ожидания — своя, у делегируемости — своя (§5.7)."""
     out = []
     for a in result.assessments.values():
@@ -3796,7 +3873,8 @@ def _questions(result: Result) -> list[dict[str, Any]]:
             reason = a.block_reason or "unknown-wait"
             out.append(_question(a.node_id, reason, reason, *DELEGATE))
     for f in result.findings:
-        if f.code == "GR-SHIPPED-OPEN":
+        epic = result.graph.epic_of(f.subject)
+        if f.code == "GR-SHIPPED-OPEN" and result.roadmap.focus_of(epic) is not None:
             out.append(_question(f.subject, f.code, f.detail, *SHIPPED))
     return sorted(out, key=lambda q: (q["subject"], q["reason"]))
 
@@ -3856,7 +3934,7 @@ def to_snapshot(
     result: Result, inputs: Inputs, run_id: str, previous: dict[str, Any] | None
 ) -> dict[str, Any]:
     """Снимок по контракту conductor-snapshot/v1."""
-    questions = _questions(result)
+    questions = owner_questions(result)
     graph = result.graph
     return {
         "contract": "conductor-snapshot/v1",
@@ -3918,7 +3996,7 @@ git commit -m "feat(conductor): конвейер, снимок conductor-snapsho
 
 **Interfaces:**
 - Consumes: Tasks 2–11
-- Produces: `read_epics(root) -> (dict, state, detail, sha)`; `read_authority_prefixes() -> list[str] | None`; `collect(root, manifest_text, roadmap_path, do_fetch, runner, host, now) -> Inputs`; `render_status(result, top=15)`, `render_why(result, node_id)`, `render_plan(result)`; `main(argv=None) -> int`.
+- Produces: `read_epics(root) -> (dict, state, detail, sha)`; `read_authority_prefixes() -> list[str] | None`; `collect(root, manifest_text, manifest_origin, roadmap_path, do_fetch, runner, host, now)`; CLI читает манифест с `origin` зонтика, файл — только по явному `--manifest`; `collect(root, manifest_text, roadmap_path, do_fetch, runner, host, now) -> Inputs`; `render_status(result, top=15)`, `render_why(result, node_id)`, `render_plan(result)`; `main(argv=None) -> int`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3992,6 +4070,7 @@ def test_collect_marks_missing_sources(tmp_path: Path) -> None:
     inp = collect(
         tmp_path,
         manifest,
+        ("file", None),
         None,
         False,
         lambda _: (1, "", "offline"),
@@ -4037,6 +4116,7 @@ def test_collect_history_reversed_tags_and_human_merge(tmp_path: Path) -> None:
     inp = collect(
         tmp_path,
         manifest,
+        ("file", None),
         None,
         False,
         lambda _: (1, "", "offline"),
@@ -4116,6 +4196,18 @@ def test_invalid_roadmap_exit_4_for_every_command(tmp_path: Path) -> None:
     assert main(["status", "--replay", str(rep)]) == 4
     assert main(["record", str(tmp_path / "rec"), "--replay", str(rep)]) == 4
     assert (tmp_path / "rec" / "inputs.json").is_file()
+
+
+def test_status_prints_reason_specific_questions(tmp_path: Path, capsys) -> None:
+    todos = {
+        "a": "- [ ] g @owner:github:own @id:goal @epic:eco.focus1 "
+        "@blocked_by:todo://b/gone\n",
+        "b": "- [ ] y @owner:TBD @id:y\n",
+    }
+    rep = _replay(tmp_path, todos, history={"todo://b/gone": "deadbeef"})
+    assert main(["status", "--replay", str(rep)]) == 0
+    out = capsys.readouterr().out
+    assert "вопросы владельцу: 1" in out and "cancelled — drop-wait" in out
 
 
 def test_gh_error_still_exit_0(tmp_path: Path, capsys) -> None:
@@ -4297,11 +4389,15 @@ def _trigger_facts(
     facts: dict[str, dict[str, Any]] = {}
     for todo in todos:
         for text in TRIGGER_RE.findall(todo.text or ""):
-            if (m := EXISTS_RE.match(text)) and m.group(1) in repos:
-                fact = path_fact(root / repos[m.group(1)].git_dir, m.group(2))
-                if fact["exists"] is None:
-                    errors.append(f"факт не прочитан: {text}")
-                facts[text] = fact
+            if not (m := EXISTS_RE.match(text)):
+                continue
+            if m.group(1) not in repos:
+                errors.append(f"exists: неизвестный репо в {text}")
+                continue
+            fact = path_fact(root / repos[m.group(1)].git_dir, m.group(2))
+            if fact["exists"] is None:
+                errors.append(f"факт не прочитан: {text}")
+            facts[text] = fact
     return facts
 
 
@@ -4337,6 +4433,7 @@ def _roadmap(
 def collect(
     root: Path,
     manifest_text: str,
+    manifest_origin: tuple[str, str | None],
     roadmap_path: Path | None,
     do_fetch: bool,
     runner: Runner,
@@ -4373,6 +4470,11 @@ def collect(
     prefixes = read_authority_prefixes()
     if prefixes is None:
         hist.errors.append(f"нет {AUTHORITY_ROOT_ENV}")
+    hist.errors += [
+        f"{r['repo']}!{r['number']}: список файлов или ревью усечён"
+        for r in gh.records
+        if r["is_pr"] and not r.get("complete")
+    ]
     return Inputs(
         captured_at=now,
         host=host,
@@ -4399,6 +4501,8 @@ def collect(
         aux_detail="; ".join(hist.errors[:5]),
         human_merge_repos=human,
         authority_prefixes=prefixes or [],
+        manifest_source=manifest_origin[0],
+        manifest_sha=manifest_origin[1],
     )
 ```
 
@@ -4408,7 +4512,7 @@ def collect(
 
 from __future__ import annotations
 
-from conductor.snapshot import Result
+from conductor.snapshot import Result, owner_questions
 
 
 def _header(result: Result) -> list[str]:
@@ -4437,10 +4541,12 @@ def render_status(result: Result, top: int = 15) -> str:
     stale = sum(w.reason == "stale" for w in result.waits)
     done = sum(w.verdict == "satisfied" for w in result.waits)
     lines.append(f"ожидания: выполнено {done}, застой {stale}")
-    questions = [a for a in result.assessments.values() if a.ask_owner]
+    questions = owner_questions(result)
     lines.append(f"вопросы владельцу: {len(questions)}")
     lines += [
-        f"  {a.node_id}: {a.block_reason or 'unknown-wait'}" for a in questions[:top]
+        f"  Q-{q['question_id']} {q['subject']}: {q['reason']} — "
+        f"{' / '.join(q['options'])}"
+        for q in questions[:top]
     ]
     return "\n".join(lines)
 
@@ -4495,10 +4601,12 @@ from typing import Any
 
 from conductor.collect import collect
 from conductor.inputs import Inputs, RepoTodo, load_inputs, save_inputs
+from conductor.manifest import UMBRELLA
 from conductor.render import render_plan, render_status, render_why
 from conductor.roadmap import parse_roadmap
 from conductor.snapshot import evaluate, to_snapshot
 from conductor.sources_gh import run_gh
+from conductor.sources_git import read_file_at_origin
 
 EXIT_OK, EXIT_ARGS, EXIT_NO_SOURCE, EXIT_CONFIG = 0, 2, 3, 4
 COMMANDS = ("status", "why", "plan", "run", "record")
@@ -4526,15 +4634,26 @@ def _now() -> str:
 def _inputs(args: argparse.Namespace) -> Inputs | None:
     if args.replay is not None:
         return load_inputs(args.replay)
-    manifest = args.manifest or (
-        args.root / "ai-orchestrators-workspace" / "workspace-manifest.toml"
-    )
-    if not manifest.is_file():
-        print(f"нет манифеста {manifest}", file=sys.stderr)
-        return None
+    if args.manifest is not None:
+        if not args.manifest.is_file():
+            print(f"нет манифеста {args.manifest}", file=sys.stderr)
+            return None
+        text: str | None = args.manifest.read_text(encoding="utf-8")
+        origin: tuple[str, str | None] = (f"file:{args.manifest}", None)
+    else:
+        # Как и TODO: манифест — с опубликованной ветки зонтика (I6).
+        umbrella = args.root / UMBRELLA
+        text, sha, state, detail = read_file_at_origin(
+            umbrella, "workspace-manifest.toml"
+        )
+        if state != "read" or text is None:
+            print(f"манифест не прочитан: {detail}", file=sys.stderr)
+            return None
+        origin = ("origin", sha)
     return collect(
         args.root,
-        manifest.read_text(encoding="utf-8"),
+        text,
+        origin,
         args.roadmap,
         not args.no_fetch,
         run_gh,
@@ -4931,8 +5050,8 @@ Expected: видны ожидания `spec-runner#603` / `steward#190` с ве�
 
 Перед ревью листинги кода извлечены из этого файла скриптом (блоки после строки вида `` `путь`: ``; для `conductor/__main__.py` — последний, итоговый) во временный каталог вне репо, в раскладке devtools. Результат на 2026-09-29:
 
-- `pytest tests/conductor` на `.venv` devtools — **76 passed** (rev 3);
+- `pytest tests/conductor` на `.venv` devtools — **79 passed** (rev 4);
 - `ruff check` и `ruff format --check` с `pyproject.toml` devtools — чисто (листинги в плане — уже отформатированный вывод ruff);
 - `pyrefly check conductor` — 0 errors; `shellcheck deploy/conductor/setup.sh` — чисто; `python -m conductor --selftest` — ok.
 
-**Живой прогон на флоте** (`record --no-fetch --roadmap <черновик Task 15>`, только чтение): граф `complete`, 875 узлов, 133 ребра; первая позиция очереди — `spec-runner#603` с `why` = `rank 1 (eco.dark-factory) via todo://devtools/bundle-oracle-slice1 → spec-runner#603; unblocks 3`; циклов нет; `GR-WEAK-EDGE` 64, `GR-ORPHAN-REQUEST` 6, `GR-DANGLING-WAIT` 2; вопросов владельцу 9 (`decision-signal` 5, `owner-tbd` 3, `unknown-wait` 1). Прогон изменил план в двух местах: (1) поиск закрытых за 30 дней вернул 1310 > 1000 — граф был бы `partial` всегда, поэтому обнаружение — только открытые, закрытые приходят дочитыванием; (2) 30 из 38 вопросов владельцу были ожиданиями прозаического `@trigger` — теперь это `wait_condition` без вопроса. Повторный живой прогон после rev 3 (2 мин 37 с на Mac, без `fetch`): граф `complete`, вспомогательные чтения без ошибок, `wait_since` у 46 ожиданий (по `git blame`); из 12 открытых PR один (`atp-platform!322`) одобрен на head SHA с зелёным CI → `merge`/`merge-contour`, остальные — `review`; вопросы владельцу 9 (`decision-signal` 5, `owner-tbd` 3, `missing` 1 — с вариантами «снять ожидание / завести запрос»). Замечание для Task 15: веха-черновик `todo://devtools/bundle-docs-as-oracle` на момент прогона уже закрыта — владельцу стоит выбрать живую веху.
+**Живой прогон на флоте** (`record --no-fetch --roadmap <черновик Task 15>`, только чтение): граф `complete`, 875 узлов, 133 ребра; первая позиция очереди — `spec-runner#603` с `why` = `rank 1 (eco.dark-factory) via todo://devtools/bundle-oracle-slice1 → spec-runner#603; unblocks 3`; циклов нет; `GR-WEAK-EDGE` 64, `GR-ORPHAN-REQUEST` 6, `GR-DANGLING-WAIT` 2; вопросов владельцу 9 (`decision-signal` 5, `owner-tbd` 3, `unknown-wait` 1). Прогон изменил план в двух местах: (1) поиск закрытых за 30 дней вернул 1310 > 1000 — граф был бы `partial` всегда, поэтому обнаружение — только открытые, закрытые приходят дочитыванием; (2) 30 из 38 вопросов владельцу были ожиданиями прозаического `@trigger` — теперь это `wait_condition` без вопроса. Повторный живой прогон после rev 3 (2 мин 37 с на Mac, без `fetch`): граф `complete`, вспомогательные чтения без ошибок, `wait_since` у 46 ожиданий (по `git blame`); из 12 открытых PR один (`atp-platform!322`) одобрен на head SHA с зелёным CI → `merge`/`merge-contour`, остальные — `review`; вопросы владельцу 9 (`decision-signal` 5, `owner-tbd` 3, `missing` 1 — с вариантами «снять ожидание / завести запрос»). Прогон после rev 4: манифест и реестр эпиков — с `origin` зонтика (SHA `34d96ee`), все источники `read`, граф `complete`; `GR-ORPHAN-REQUEST` 20, `GR-SLUG-MATCH` 18 (наследие inbox), вопросов владельцу 9, в `status` — с `Q-<id>` и вариантами по причине. Замечание для Task 15: веха-черновик `todo://devtools/bundle-docs-as-oracle` на момент прогона уже закрыта — владельцу стоит выбрать живую веху.
