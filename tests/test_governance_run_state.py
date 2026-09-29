@@ -131,7 +131,8 @@ def test_new_run_carries_interview_state_and_old_ledgers_load(runs_root) -> None
     assert rs.load("r-int").interview == {"session_id": None, "frame": "customer"}
     # старый run.json без поля читается через default
     raw = (rs.run_dir("r-int") / "run.json").read_text(encoding="utf-8")
-    data = json.loads(raw); del data["interview"]
+    data = json.loads(raw)
+    del data["interview"]
     (rs.run_dir("r-int") / "run.json").write_text(json.dumps(data), encoding="utf-8")
     assert rs.load("r-int").interview is None
 

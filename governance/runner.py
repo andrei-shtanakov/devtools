@@ -49,17 +49,14 @@ from governance.edge_check import coordinator as edge_coordinator
 from governance.edge_check import publish as edge_publish
 from governance.edge_check.rules import EdgeCheckError
 from governance.frontmatter import split_frontmatter
-from governance.merge_gate import PrFacts, decide
+from governance.merge_gate import PrFacts
 from governance.facts import Outcome
 from governance.stale_adapter import blob_sha1
 from governance.ops import (
-    _AUTHOR_DSL, ENGINEER_BLOCKED, REVIEW_BARRIER_EXIT, REVIEW_BARRIER_STOP,
-    Ops, RealOps, disp_agent,
+    _AUTHOR_DSL, ENGINEER_BLOCKED, Ops, RealOps, disp_agent,
 )
 from governance.policy_sources import (
     PREFLIGHT_PROCEDURE_HINT,
-    build_authority,
-    load_safety,
     target_profile_declares,
     verify_wave_profile_dir,
     wave_profile_dir,

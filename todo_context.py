@@ -940,13 +940,19 @@ def build_pack(root: Path, manifest_path: Path, registry_path: Path, repo: str,
     item = read_item(snapshot, node_id, checkouts)
     directory = checkouts.get(item["repo"])
     sources = [Source("item", "read")]
-    epic, src = read_epic(registry_path, item["epic"]); sources.append(src)
-    body, src = read_body(directory, item); sources.append(src)
-    graph, src = read_graph(snapshot, node_id, unread); sources.append(src)
+    epic, src = read_epic(registry_path, item["epic"])
+    sources.append(src)
+    body, src = read_body(directory, item)
+    sources.append(src)
+    graph, src = read_graph(snapshot, node_id, unread)
+    sources.append(src)
     plan_risks = deleted_dependency_report(snapshot, checkouts, node_id, unread)
-    docs, src = read_docs(directory, item); sources.append(src)
-    rules, src = read_rules(directory); sources.append(src)
-    origin, src = read_origin_issue(item, owner); sources.append(src)
+    docs, src = read_docs(directory, item)
+    sources.append(src)
+    rules, src = read_rules(directory)
+    sources.append(src)
+    origin, src = read_origin_issue(item, owner)
+    sources.append(src)
     return {
         "node_id": node_id,
         "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1094,8 +1100,8 @@ def render(pack: dict[str, Any]) -> str:
             f"(slug: `{origin['slug']}`)")
         if not origin.get("exact", True):
             add("")
-            add(f"⚠ слаг совпал подстрокой, не токеном (как в `inbox`), поэтому "
-                f"требованием не считается — контекст")
+            add("⚠ слаг совпал подстрокой, не токеном (как в `inbox`), поэтому "
+                "требованием не считается — контекст")
         if origin.get("rival_issues"):
             others = ", ".join(f"#{n}" for n in origin["rival_issues"])
             add("")

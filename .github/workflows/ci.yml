@@ -31,6 +31,8 @@ jobs:
           GOVERNANCE_REQUIRED: "1"
       - run: make plan-check-selftest
       - run: uv sync --frozen --group selfcheck
+      # ruff по набору из pyproject ([tool.ruff.lint], devtools#461 ступень 1)
+      - run: uv run --frozen --group selfcheck ruff check .
       # selfcheck S3 probe (spec §10.3); version pinned to the registry range
       - run: cargo install cargo-machete --version 0.9.2 --locked
       - run: SELFCHECK_REQUIRE_TOOLS=1 uv run --frozen --group selfcheck pytest tests/selfcheck -q

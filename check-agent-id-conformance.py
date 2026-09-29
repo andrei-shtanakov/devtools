@@ -173,7 +173,6 @@ def main() -> int:
 
     catalog = tomllib.loads(ssot.read_text())
     models: dict[str, dict[str, object]] = catalog.get("models", {})
-    harnesses: dict[str, dict[str, object]] = catalog.get("harnesses", {})
     agents: list[dict[str, object]] = catalog.get("agents", [])
 
     failures: list[str] = []
@@ -264,7 +263,7 @@ def main() -> int:
         failures.append("[5] enrollment references missing/retired models:")
         failures.extend(f"      {m}" for m in bad_models)
     else:
-        oks.append(f"[5] all enrolled models declared and not retired")
+        oks.append("[5] all enrolled models declared and not retired")
 
     for line in oks:
         print(f"✓ {line}")

@@ -632,7 +632,7 @@ def test_repeat_finds_run_without_date_and_resumes(
 def test_resume_completed_delivers_and_stops_at_approve(
     runs_root, tmp_path, monkeypatch, capsys
 ) -> None:
-    state = _mk_run(
+    _mk_run(
         "r-w", "S", status="waiting_human_merge",
         target_dir=str(tmp_path / "alpha"),
     )
@@ -718,7 +718,7 @@ def test_non_continuable_statuses_report_without_calls(
 def test_resume_landing_on_stopped_reports_nonzero(
     runs_root, tmp_path, monkeypatch, capsys
 ) -> None:
-    state = _mk_run(
+    _mk_run(
         "r-w2", "S", status="waiting_human_merge",
         target_dir=str(tmp_path / "alpha"),
     )
