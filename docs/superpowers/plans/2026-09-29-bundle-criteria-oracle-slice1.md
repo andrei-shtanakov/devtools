@@ -36,7 +36,7 @@
 
 - Отдельный worktree: `git -C /Users/Andrei_Shtanakov/labs/all_ai_orchestrators/devtools worktree add ../devtools-oracle-slice1 -b feat/bundle-oracle-slice1 spec/bundle-criteria-oracle` — не основной чекаут `devtools/` (ловушка общего чекаута с параллельными сессиями).
 - Tasks 1–6 — нативно, TDD. После Tasks 7–8 — **отдельный свежий ревьюер (opus) на дифф 7–8** до Task 9: `runner.py` — самый нагруженный файл (S13, волны, #445). Затем сквозная проверка ветки в конце.
-- Зависимости: 2 после 1 (нет прямой, но общий фикстурный бандл); 5 после 1 и 4; 6 после 2 и 3; 7 после 1; 8 после 4, 5, 6, 7; 9 после 1 и 4; 10 последним.
+- Зависимости: 2 после 1 (общий фикстурный бандл); 5 после 1 и 4; 6 после 2 и 3; 7 после 1 и 2 (оба правят `runner.py` и `tests/test_governance_runner.py`); 8 после 4, 5, 6, 7; 9 после 1, 4 и 8 (тест гейта читает настоящий файл из `render_closure`); 10 последним.
 
 ---
 
@@ -47,7 +47,7 @@
 - Test: `tests/test_governance_charter_guard.py`
 
 **Interfaces:**
-- Consumes: `governance.frontmatter.split_frontmatter(text) -> (dict, str)`.
+- Consumes: `governance.frontmatter.split_frontmatter(text) -> (dict, str)`, `governance.frontmatter.update_frontmatter(text, updates) -> str`.
 - Produces:
   - `CODE_RE: re.Pattern`, `PLAN_ITEM_RE: re.Pattern` (`^todo://([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$`)
   - `@dataclass(frozen=True) class Charter: schema: int; code: str | None; plan_item: str | None`
@@ -92,6 +92,12 @@ def test_bad_code_shape(code):
     ch = cg.Charter(schema=2, code=code, plan_item="todo://devtools/x")
     out = cg.charter_findings(ch, ws_id="ws-a", registry={code: {"workstream": "ws-a"}}, todo_ids={"x"}, repo="devtools")
     assert any("CODE" in f or "code" in f for f in out)
+
+
+def test_code_outside_registry():
+    ch = cg.read_charter(CH2)
+    out = cg.charter_findings(ch, ws_id="ws-a", registry={}, todo_ids={"oracle"}, repo="devtools")
+    assert any("не зарегистрирован" in f for f in out)
 
 
 def test_code_must_be_registered_to_this_workstream():
@@ -396,7 +402,15 @@ BEH = """#### BEH-01: one
 - **checked_by**: `status: waived` `kind: unit` `owner: qa` `target: tests/t.py`
 
 #### BEH-04: four
+`traces: [FR-01]`
+- **checked_by**: `status: planned` `kind: unit` `owner: qa` `target: tests/t.py`
+
+#### BEH-05: five
 `traces: []`
+- **checked_by**: `status: planned` `kind: unit` `owner: qa` `target: tests/t.py`
+
+#### BEH-06: six
+`traces: [FR-01]`
 - **checked_by**: `status: planned` `kind: unit` `owner: qa` `target: tests/t.py`
 """
 ACC = """#### AC-01: a · verification: test
@@ -419,21 +433,25 @@ def test_priority_is_max_of_traces_and_empty_trace_is_error():
     g = cgr.build_graph(REQ, BEH, ACC)
     assert g.behs["BEH-02"].priority == "Must"
     assert g.behs["BEH-03"].priority == "Won't"
-    assert g.behs["BEH-04"].priority is None
-    assert any("BEH-04" in e for e in g.errors)
+    assert g.behs["BEH-05"].priority is None
+    assert any("BEH-05" in e for e in g.errors)
 
 
 def test_waived_wins_over_executable_kind():
     g = cgr.build_graph(REQ, BEH, ACC)
     assert g.behs["BEH-03"].waived
-    assert [b.id for b in cgr.test_behs(g)] == ["BEH-01", "BEH-04"]
+    assert [b.id for b in cgr.test_behs(g)] == ["BEH-01", "BEH-04", "BEH-05", "BEH-06"]
 
 
 def test_orphans_both_forms():
     g = cgr.build_graph(REQ, BEH, ACC)
     orphans = cgr.orphan_findings(g)
-    # BEH-04 only in a Won't-AC (AC-02 traces FR-03) → orphan; BEH-03 is Won't itself → not an orphan
+    # форма 1: Must-BEH-04 только в Won't-AC (AC-02 трассирует FR-03) → сирота
+    assert g.behs["BEH-04"].priority == "Must"
     assert any("BEH-04" in f for f in orphans)
+    # форма 2: BEH-06 вне всех AC → сирота
+    assert any("BEH-06" in f for f in orphans)
+    # BEH-03 сам Won't → не сирота
     assert not any("BEH-03" in f for f in orphans)
     assert not any("BEH-01" in f for f in orphans)
 
@@ -602,19 +620,35 @@ def derive_ac(ac: Ac, graph: Graph, beh_status: dict[str, str]) -> str:
 
 Ruling-заметка: `test_behs` имя начинается с `test_` — pytest может принять его за тест при импорте в тестовый модуль. В тестах импортировать модуль целиком (`from governance import criteria_graph as cgr`), как выше, а не имя функции.
 
-В `governance/runner.py` рядом с вызовом `acceptance_guard.coverage_findings(` (около строки 2982) добавить к тем же находкам сирот — по тем же трём текстам, что уже прочитаны там:
+В `governance/runner.py` (блок «Гард Must-покрытия acceptance», около строк 2978–2995) тексты сейчас читаются инлайн внутри вызова, а находки копятся в `ac_cov`. Прочитать тексты один раз и добавить сирот в тот же список, до `if ac_cov:`:
 
 ```python
-            graph = criteria_graph.build_graph(req_text, beh_text, acc_text)
-            for finding in criteria_graph.orphan_findings(graph):
-                findings.append(f"error GC-ORPHAN: {finding}")
+    acc_path = node_paths["acceptance"]
+    if req_path.exists() and beh_path.exists() and acc_path.exists():
+        req_text = req_path.read_text(encoding="utf-8")
+        beh_text = beh_path.read_text(encoding="utf-8")
+        acc_text = acc_path.read_text(encoding="utf-8")
+        ac_cov = [
+            f"error GC-AC-COVERAGE: {finding}"
+            for finding in acceptance_guard.coverage_findings(req_text, beh_text, acc_text)
+        ]
+        ac_cov += [
+            f"error GC-ORPHAN: {finding}"
+            for finding in criteria_graph.orphan_findings(
+                criteria_graph.build_graph(req_text, beh_text, acc_text)
+            )
+        ]
+        if ac_cov:
+            ...  # без изменений: gate-findings.txt, stopped_gate
 ```
 
-(имена `req_text`/`beh_text`/`acc_text`/`findings` — те, что использует окружающий код у строки 2982; сверить при правке; импорт `from governance import criteria_graph` в шапке runner.py). Гейт выполняется при каждом прохождении волны W4 и далее — в том числе после `--reopen` 15, потому что reopen ведёт нижестоящие уровни через переодобрение.
+Импорт `from governance import criteria_graph` в шапке runner.py. Гейт выполняется при каждом прохождении волны W4 и далее — в том числе после `--reopen` 15: reopen ведёт нижестоящие уровни через переодобрение, и этот блок исполняется заново над новым 15 и прежним 25.
+
+Тест раннера (в `tests/test_governance_runner.py`, по образцу ближайшего теста с `GC-AC-COVERAGE` — grep `GC-AC-COVERAGE`): тот же стенд, но 15-behaviour-spec добавляет `BEH-99` с трассой на Must-FR и без AC → `state.status == "stopped_gate"` и в `gate-findings.txt` строка `error GC-ORPHAN: BEH-99`. Второй тест — сценарий reopen: 25 не меняется, 15 переписан с новым BEH → тот же стоп.
 
 - [ ] **Step 4: Run the tests**
 
-Run: `uv run pytest tests/test_governance_criteria_graph.py tests/test_governance_acceptance_guard.py tests/test_governance_runner.py -q`
+Run: `uv run pytest tests/test_governance_criteria_graph.py tests/test_governance_acceptance_guard.py tests/test_governance_runner.py -q -k "graph or acceptance or ORPHAN or orphan"` затем без `-k`
 Expected: PASS. Если тест `acceptance_guard` ожидал находку на `Could` — обновить его ожидание на новый словарь (это намеренное изменение спеки §1.5).
 
 - [ ] **Step 5: Commit**
@@ -684,6 +718,11 @@ class TestGroup:
 @decorator  # ENC:BEH-04 decorator line counts
 def test_decorated():
     pass
+
+@pytest.mark.parametrize("x", [1, 2])
+def test_param(x):
+    # ENC:BEH-05 one definition, every collected param selector
+    assert x
 '''
 
 
@@ -694,6 +733,7 @@ def test_ownership_table():
     assert got["TestGroup.test_red_neighbour"] == {"ENC:BEH-02"}
     assert got["TestGroup.test_green"] == {"ENC:BEH-02", "ENC:BEH-03"}
     assert got["test_decorated"] == {"ENC:BEH-04"}
+    assert got["test_param"] == {"ENC:BEH-05"}
     assert "helper" not in got
     assert all("ENC:BEH-09" not in v for v in got.values())
 ```
@@ -807,6 +847,7 @@ git commit -m "feat(governance): criteria_tokens — квалифицирова�
   - `vendored(contract_dir: Path = CONTRACT_DIR) -> bool` — «выпущено» выводится: есть `PIN` и `integrity_findings` пуст (отдельного флага нет — рассогласоваться нечему)
   - `oracle_available(installed: str | None, minimum: MinVersion, *, is_vendored: bool) -> bool`
   - `integrity_findings(contract_dir: Path = CONTRACT_DIR) -> list[str]` — нет `PIN` → пусто (контракт ещё не вендорен — ожидаемое состояние); `PIN` есть → требуется `manifest.json` и совпадение sha256 каждого его файла.
+  - `drift_findings(contract_dir: Path, upstream: Path | None, *, ci: bool) -> tuple[list[str], list[str]]` → (ошибки, заметки): не вендорен → пусто; `PIN` = `SOURCE: spec-runner @ <sha>`; каждый файл манифеста сверяется с `git -C <upstream> show <sha>:contracts/criteria-closure/v1/<name>`; `upstream` нет/не git → при `ci` ошибка, локально заметка `not-checked`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -849,6 +890,50 @@ def test_vendored_requires_matching_manifest(tmp_path):
     assert not cc.oracle_available(None, mv, is_vendored=True)
     schema.write_text("{ }")
     assert cc.integrity_findings(tmp_path) != [] and not cc.vendored(tmp_path)
+
+
+def _upstream(tmp_path, content: bytes) -> tuple[Path, str]:
+    import subprocess
+    up = tmp_path / "up"
+    d = up / "contracts/criteria-closure/v1"
+    d.mkdir(parents=True)
+    (d / "response.schema.json").write_bytes(content)
+    subprocess.run(["git", "init", "-q", str(up)], check=True)
+    subprocess.run(["git", "-C", str(up), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(up), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "x"], check=True)
+    sha = subprocess.run(["git", "-C", str(up), "rev-parse", "HEAD"], capture_output=True,
+                         text=True, check=True).stdout.strip()
+    return up, sha
+
+
+def _vendor(d, sha, content: bytes):
+    write_min(d)
+    (d / "response.schema.json").write_bytes(content)
+    (d / "PIN").write_text(f"SOURCE: spec-runner @ {sha}\n")
+    (d / "manifest.json").write_text(json.dumps(
+        {"response.schema.json": hashlib.sha256(content).hexdigest()}))
+
+
+def test_drift_against_pinned_upstream(tmp_path):
+    up, sha = _upstream(tmp_path, b"{}")
+    vend = tmp_path / "v"
+    vend.mkdir()
+    _vendor(vend, sha, b"{}")
+    assert cc.drift_findings(vend, up, ci=True) == ([], [])
+    _vendor(vend, sha, b'{"x": 1}')
+    errors, _ = cc.drift_findings(vend, up, ci=True)
+    assert errors
+
+
+def test_drift_missing_upstream_is_error_in_ci_note_locally(tmp_path):
+    vend = tmp_path / "v"
+    vend.mkdir()
+    _vendor(vend, "a" * 40, b"{}")
+    errors, _ = cc.drift_findings(vend, None, ci=True)
+    assert errors
+    errors, notes = cc.drift_findings(vend, None, ci=False)
+    assert errors == [] and any("not-checked" in n for n in notes)
 
 
 def test_shipped_contract_is_not_vendored_yet():
@@ -929,6 +1014,30 @@ def vendored(contract_dir: Path = CONTRACT_DIR) -> bool:
 
 def _parts(version: str) -> tuple[int, ...]:
     return tuple(int(p) for p in version.split(".") if p.isdigit())
+
+
+def drift_findings(contract_dir: Path, upstream: Path | None, *, ci: bool) -> tuple[list[str], list[str]]:
+    """Дрейф копии от апстрима по ref из PIN (вторая гарантия вендоринга)."""
+    import subprocess
+
+    if not (contract_dir / "PIN").exists():
+        return [], []
+    sha = (contract_dir / "PIN").read_text().split("@")[-1].strip()
+    if upstream is None or not (upstream / ".git").exists():
+        msg = "criteria-closure/v1: апстрим spec-runner недоступен"
+        return ([msg], []) if ci else ([], [f"{msg} — not-checked"])
+    errors: list[str] = []
+    manifest = json.loads((contract_dir / "manifest.json").read_text())
+    for name in sorted(manifest):
+        proc = subprocess.run(
+            ["git", "-C", str(upstream), "show", f"{sha}:contracts/criteria-closure/v1/{name}"],
+            capture_output=True,
+        )
+        if proc.returncode != 0:
+            errors.append(f"criteria-closure/v1: {name} нет в апстриме @ {sha[:7]}")
+        elif proc.stdout != (contract_dir / name).read_bytes():
+            errors.append(f"criteria-closure/v1: {name} разошёлся с апстримом @ {sha[:7]}")
+    return errors, []
 
 
 def oracle_available(installed: str | None, minimum: MinVersion, *, is_vendored: bool) -> bool:
@@ -1055,13 +1164,14 @@ git commit -m "feat(task_bridge): строка **Scenarios:** с квалифи�
 - Test: `tests/test_governance_criteria_check.py`
 
 **Interfaces:**
-- Consumes: `criteria_graph.Graph/test_behs/derive_ac`, `criteria_tokens.definition_tokens`.
+- Consumes: `criteria_graph.Graph/build_graph/test_behs/derive_ac/orphan_findings`, `criteria_tokens.definition_tokens`, `jsonschema` (уже зависимость).
 - Produces:
   - `REASONS = {"unconfirmed": {"no-test","no-product-execution","subprocess-only","not-passed","nondeterministic"}, "error": {"io","runner"}}`
   - `expected_definitions(test_files: dict[str, str], code: str, beh_ids: list[str]) -> dict[str, set[tuple[str, str]]]` — BEH → {(файл, qualname)} по байтам devtools
   - `validate_response(request: dict, response: dict, *, expected: dict[str, set[tuple[str, str]]], function_lines: dict[str, set[int]], lock_sha: str, content_sha: str) -> list[str]` — пусто = валиден; иначе причины отказа шага (§5.3)
   - `@dataclass(frozen=True) class Outcome: closure: str; beh_status: dict[str, str]; ac_status: dict[str, str]; stop_reasons: list[str]; report_rows: list[str]`
-  - `outcome(graph: Graph, beh_status: dict[str, str]) -> Outcome` — таблица §3.3
+  - `outcome(graph: Graph, beh_status: dict[str, str]) -> Outcome` — таблица §3.3 + стоп по Must-AC с производным `unconfirmed`/`error` (Must-AC может ссылаться на Should-BEH — без этого он прошёл бы без стопа)
+  - `parse_response(code: int, stdout: str, schema: dict | None) -> tuple[dict | None, str | None]` → (ответ, причина отказа): код ∉ {0, 3} → отказ; пустой stdout/не JSON → отказ; при вендоренной схеме — `jsonschema.validate`, нарушение → отказ
 
 - [ ] **Step 1: Write the failing tests (отрицательная таблица §5.3 + исход)**
 
@@ -1136,9 +1246,57 @@ def mutate(fn):
     ("lock mismatch", lambda r: r["environment"].update(lock_sha256="X")),
     ("content mismatch", lambda r: r.update(content_sha256="X")),
     ("error with beh", lambda r: r.update(error="collection")),
+    ("not_applicable with beh", lambda r: r.update(not_applicable="language")),
+    ("foreign bundle_pin", lambda r: r.update(bundle_pin="x" * 40)),
+    ("foreign code", lambda r: r.update(code="XYZ")),
+    ("no product_roots", lambda r: r.pop("product_roots")),
+    ("no content_sha256", lambda r: r.pop("content_sha256")),
+    ("error without reason", lambda r: r["beh"][0].update(status="error", selectors=[])),
 ])
 def test_negative_table(name, fn):
     assert check(mutate(fn)) != [], name
+
+
+PARAM_SRC = "@pytest.mark.parametrize('x', [1, 2])\ndef test_a(x):\n    # ENC:BEH-01\n    assert x\n"
+
+
+def test_parametrized_selectors_share_one_definition():
+    expected = ck.expected_definitions({"tests/t.py": PARAM_SRC}, "ENC", ["BEH-01"])
+    assert expected == {"BEH-01": {("tests/t.py", "test_a")}}
+
+
+@pytest.mark.parametrize("code,stdout,why", [
+    (0, "", "пуст"),
+    (0, "not json", "JSON"),
+    (2, "{}", "код"),
+    (99, "{}", "код"),
+])
+def test_parse_response_refusals(code, stdout, why):
+    resp, reason = ck.parse_response(code, stdout, None)
+    assert resp is None and why in reason
+
+
+def test_parse_response_schema_violation():
+    schema = {"type": "object", "required": ["beh"]}
+    resp, reason = ck.parse_response(0, "{}", schema)
+    assert resp is None and "схем" in reason
+    resp, reason = ck.parse_response(0, '{"beh": []}', schema)
+    assert resp == {"beh": []} and reason is None
+
+
+def test_orphan_blocks_closure():
+    beh = BEH + "\n#### BEH-03: c\n`traces: [FR-01]`\n- **checked_by**: `status: planned` `kind: unit` `owner: qa` `target: t`\n"
+    g = cgr.build_graph(REQ, beh, ACC)
+    out = ck.outcome(g, {"BEH-01": "traced", "BEH-02": "traced", "BEH-03": "traced"})
+    assert out.closure == "blocked" and any("BEH-03" in r for r in out.stop_reasons)
+
+
+def test_must_ac_over_should_beh_stops():
+    acc = "#### AC-01: a · verification: test\ntraces: [FR-01]\nscenarios: [BEH-01, BEH-02]\n\n#### AC-02: b · verification: test\ntraces: [FR-02]\nscenarios: [BEH-02]\n"
+    g = cgr.build_graph(REQ, BEH, acc)
+    out = ck.outcome(g, {"BEH-01": "traced", "BEH-02": "unconfirmed"})
+    assert out.ac_status["AC-01"] == "unconfirmed"
+    assert out.closure == "blocked" and any("AC-01" in r for r in out.stop_reasons)
 
 
 def test_outcome_must_unconfirmed_stops_should_reports():
@@ -1282,7 +1440,32 @@ def outcome(graph: cgr.Graph, beh_status: dict[str, str]) -> Outcome:
         else:
             rows.append(line)
     acs = {a.id: cgr.derive_ac(a, graph, beh_status) for a in graph.acs.values()}
+    for a in graph.acs.values():
+        if a.priority == "Must" and acs[a.id] in ("unconfirmed", "error"):
+            stops.append(f"{a.id} (Must): {acs[a.id]}")
     return Outcome("blocked" if stops else "traced", dict(beh_status), acs, stops, rows)
+
+
+def parse_response(code: int, stdout: str, schema: dict | None) -> tuple[dict | None, str | None]:
+    """Первая линия отказа §5.3: код, пустота, JSON, схема (если вендорена)."""
+    import json
+
+    import jsonschema
+
+    if code not in (0, 3):
+        return None, f"код выхода {code} вне договорённых 0/3"
+    if not stdout.strip():
+        return None, "ответ пуст"
+    try:
+        resp = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        return None, f"ответ не JSON: {exc}"
+    if schema is not None:
+        try:
+            jsonschema.validate(resp, schema)
+        except jsonschema.ValidationError as exc:
+            return None, f"ответ не по схеме: {exc.message}"
+    return resp, None
 ```
 
 `function_lines` строит вызывающий (Task 8) по своим байтам на `product_sha`: для каждого файла продуктовых корней — множество номеров строк, лежащих внутри тел `FunctionDef`/`AsyncFunctionDef` (от `body[0].lineno` до `end_lineno`), не на модульном уровне и не в телах классов вне методов (G0 rev 8).
@@ -1396,7 +1579,7 @@ git commit -m "feat(runner): charter схемы 2 — code и plan_item при �
 - Test: `tests/test_governance_criteria_close.py`
 
 **Interfaces:**
-- Consumes: `run_state.load(run_id) -> RunState`, `runner._verified_result_sha(state) -> str | None`, `charter_guard.read_charter`, `criteria_graph.build_graph/test_behs`, `criteria_check.expected_definitions/validate_response/outcome`, `criteria_contract.read_min_version/oracle_available`, `task_bridge.spec_runner_version`, `spec_runner_contract.target_selector_policy`, `Ops.create_pr/review/merge/find_pr/push_branch/commit_paths/ensure_branch/head_sha`.
+- Consumes: `run_state.load(run_id) -> RunState`, `runner._verified_result_sha(state) -> str | None`, `charter_guard.read_charter`, `criteria_graph.build_graph/test_behs`, `criteria_check.expected_definitions/validate_response/outcome/parse_response`, `criteria_contract.read_min_version/oracle_available/vendored`, `governance.frontmatter.join_frontmatter`, `task_bridge.spec_runner_version`, `spec_runner_contract.target_selector_policy`, `Ops.create_pr/review/merge/find_pr/push_branch/commit_paths/ensure_branch/head_sha`.
 - Produces:
   - `decide_not_applicable(charter: Charter, selector_policy, installed: str | None, minimum: MinVersion, *, is_vendored: bool) -> str | None` (`schema-1` · `language` · `spec-runner-version` · `None`)
   - `render_closure(outcome_or_na, *, ws_id, code, bundle_pin, product_sha, response_sha: str | None, spec_runner_version: str | None, host: str) -> str` — текст `90-acceptance-closure.md` с frontmatter `closure`, `not_applicable_reason`, `human_pending`, `spec_runner_version`, `host`, `bundle_pin`, `product_sha`, счётчики и таблица
@@ -1432,7 +1615,9 @@ def test_closure_file_frontmatter_records_version_and_host():
                              product_sha="s" * 40, response_sha=None,
                              spec_runner_version="4.2.0", host="pr0sto.net")
     assert "closure: not-applicable" in text and "not_applicable_reason: spec-runner-version" in text
-    assert "spec_runner_version: 4.2.0" in text and "host: pr0sto.net" in text
+    meta, _ = split_frontmatter(text)  # разбирается — нет голых «-»
+    assert meta["spec_runner_version"] == "4.2.0" and meta["host"] == "pr0sto.net"
+    assert meta["code"] is None and meta["response_sha256"] is None
     assert "Оракул не применим" in text
 
 
@@ -1446,11 +1631,13 @@ def test_remeasure_same_key_is_refused(tmp_path, monkeypatch):
 def test_run_publishes_not_applicable_closure_for_schema1(<FakeOps-based fixture: completed run state with schema-1 bundle>):
     rc = cc.run("run-1", ops)
     assert rc == 0
-    assert ops.created_prs and "90-acceptance-closure.md" in ops.committed_paths[-1][0]
-    assert ops.reviews and ops.merges  # аттестация + агентский мерж
+    assert ops.existing_prs  # PR создан (FakeOps.create_pr пишет existing_prs)
+    assert any("90-acceptance-closure.md" in p for p in ops.committed[-1][1])
+    assert any(c[0] == "review" for c in ops.calls)  # scope-аттестация
+    assert ops.merged  # агентский мерж
 ```
 
-(Фикстура для последнего теста — по образцу `FakeOps` в `tests/test_governance_runner.py`: подкласс с записью вызовов `create_pr`, `commit_paths`, `review`, `merge`; `run_state` подменяется `monkeypatch.setattr(cc.run_state, "load", lambda rid: state)`, `runner._verified_result_sha` — `lambda s: "p"*40`.)
+(Фикстура для последнего теста — `FakeOps` из `tests/test_governance_runner.py` как есть: он уже пишет `existing_prs` (create_pr), `committed` (commit_paths), `calls` с `("review", pr)` и `merged`; поле `reviews` у него — другое (возврат `pr_reviews`), не использовать; `run_state` подменяется `monkeypatch.setattr(cc.run_state, "load", lambda rid: state)`, `runner._verified_result_sha` — `lambda s: "p"*40`.)
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -1479,6 +1666,7 @@ from pathlib import Path
 
 from governance import charter_guard, criteria_check, criteria_contract, criteria_graph
 from governance import run_state, runner, spec_runner_contract, task_bridge
+from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.ops import Ops, RealOps
 
 STATE_ROOT = Path(__file__).resolve().parent.parent / "out" / "criteria-close"
@@ -1525,26 +1713,29 @@ def _record_measured(run_id: str, key: str, closure: str) -> None:
 
 def render_closure(result, *, ws_id, code, bundle_pin, product_sha, response_sha,
                    spec_runner_version, host) -> str:
-    """Текст файла закрытия; result — Outcome или строка причины not-applicable."""
+    """Текст файла закрытия; result — Outcome или строка причины not-applicable.
+
+    Frontmatter пишется `join_frontmatter` (yaml.safe_dump): отсутствующее
+    значение — YAML null, не голый `-` (его не разберёт split_frontmatter).
+    """
+    meta: dict = {"workstream": ws_id, "code": code, "bundle_pin": bundle_pin,
+                  "product_sha": product_sha, "response_sha256": response_sha,
+                  "spec_runner_version": spec_runner_version, "host": host}
     if isinstance(result, str):
-        head = {"closure": "not-applicable", "not_applicable_reason": result, "human_pending": 0}
+        meta.update(closure="not-applicable", not_applicable_reason=result, human_pending=0)
         body = [f"Оракул не применим: `{result}` (спека §3.6). Приёмки по критериям нет."]
     else:
         human = sum(1 for s in result.ac_status.values() if s == "human")
         traced = sum(1 for s in result.beh_status.values() if s == "traced")
-        head = {"closure": result.closure, "human_pending": human}
+        meta.update(closure=result.closure, human_pending=human)
         body = [
             f"Прослежено {traced} из {len(result.beh_status)} test-критериев; ждут человека {human}.",
             "`traced` не утверждает способность теста упасть (спека §4.1).",
-            "", "## Стоп", *[f"- {r}" for r in result.stop_reasons] or ["- нет"],
-            "", "## Отчёт", *[f"- {r}" for r in result.report_rows] or ["- нет"],
+            "", "## Стоп", *([f"- {r}" for r in result.stop_reasons] or ["- нет"]),
+            "", "## Отчёт", *([f"- {r}" for r in result.report_rows] or ["- нет"]),
             "", "## AC", *[f"- {k}: {v}" for k, v in sorted(result.ac_status.items())],
         ]
-    meta = "\n".join(f"{k}: {v}" for k, v in head.items())
-    ident = [f"workstream: {ws_id}", f"code: {code or '-'}", f"bundle_pin: {bundle_pin}",
-             f"product_sha: {product_sha}", f"response_sha256: {response_sha or '-'}",
-             f"spec_runner_version: {spec_runner_version or '-'}", f"host: {host}"]
-    return f"---\n{meta}\n" + "\n".join(ident) + "\n---\n# Закрытие воркстрима\n\n" + "\n".join(body) + "\n"
+    return join_frontmatter(meta, "# Закрытие воркстрима\n\n" + "\n".join(body) + "\n")
 
 
 def _publish(state, ops: Ops, text: str, closure: str) -> int:
@@ -1602,8 +1793,8 @@ def run(run_id: str, ops: Ops, *, product_sha: str | None = None) -> int:
 `_measure_and_publish` (тот же файл) — до выпуска spec-runner недостижим, но реализуется целиком и покрывается тестом с подменённым `ops.criteria_verify`:
 1. `graph = criteria_graph.build_graph(<10>, <15>, <25>)` по текстам узлов бандла;
 2. `content_sha` = sha256 по отсортированным (путь, байты) всех `*.py` под `tests/` и продуктовыми корнями (продуктовые корни — из ответа недоступны до вызова, поэтому ключ сначала по `tests/` + всем отслеживаемым `*.py` вне `tests/`; ruling: это надмножество продуктовых корней — строже, не слабее); `key = f"{bundle_pin}:{content_sha}"`; `_already_measured` → вернуть 6 с сообщением «ключ измерен (§3.1 G6): доработайте продукт»;
-3. запрос §5.1 → файл в `STATE_ROOT/run_id/request.json`; `code, out = ops.criteria_verify(state.target_dir, request_path)`; код 2/иной → 2 (повтор), код 3 → `closure: blocked`;
-4. `response = json.loads(out)` (ошибка → 2); `expected` через `criteria_check.expected_definitions` по `tests/**/*.py`; `function_lines` — по AST продуктовых корней из ответа; `lock_sha` — sha256 `uv.lock`; `problems = criteria_check.validate_response(...)` → непусто: печать и 2;
+3. запрос §5.1 → файл в `STATE_ROOT/run_id/request.json`; `code, out = ops.criteria_verify(state.target_dir, request_path)`;
+4. `response, why = criteria_check.parse_response(code, out, schema)` (`schema` — `response.schema.json` вендоренного контракта или `None`); `why` → печать и 2 (повтор); ответ с `error` уровня ответа (код 3) → `closure: blocked`; `expected` через `criteria_check.expected_definitions` по `tests/**/*.py`; `function_lines` — по AST продуктовых корней из ответа; `lock_sha` — sha256 `uv.lock`; `problems = criteria_check.validate_response(...)` → непусто: печать и 2;
 5. `beh_status = {b["id"].split(":")[1]: b["status"] for b in response["beh"]}`; `result = criteria_check.outcome(graph, beh_status)`; `_record_measured(run_id, key, result.closure)`; `render_closure(result, …, spec_runner_version=installed, host=host)`; `_publish(...)`.
 
 `RealOps.criteria_verify`: `subprocess.run(["spec-runner", "verify", "--criteria", "--request", request_path, "--json"], cwd=target_dir, capture_output=True, text=True)` → `(returncode, stdout)`.
@@ -1685,9 +1876,28 @@ def test_gate_table(tmp_path, closure, is_vendored, red):
     assert bool(errors) is red
 
 
-def test_na_version_error_names_version_and_host(tmp_path):
+def test_na_version_names_version_and_host_in_error_and_warning(tmp_path):
     errors, _ = g.gate_findings(make(tmp_path, done=True, closure=NA_SR), is_vendored=True)
     assert any("4.2.0" in e and "mac" in e for e in errors)
+    _, warns = g.gate_findings(make(tmp_path, done=True, closure=NA_SR), is_vendored=False)
+    assert any("4.2.0" in w and "mac" in w for w in warns)
+
+
+def test_language_is_green_with_visible_warning(tmp_path):
+    na = "closure: not-applicable\nnot_applicable_reason: language"
+    errors, warns = g.gate_findings(make(tmp_path, done=True, closure=na), is_vendored=True)
+    assert errors == [] and any("language" in w for w in warns)
+
+
+def test_gate_reads_a_real_rendered_closure(tmp_path):
+    from governance import criteria_close
+    repo = make(tmp_path, done=True, closure=None)
+    text = criteria_close.render_closure(
+        "spec-runner-version", ws_id="ws-a", code=None, bundle_pin="p" * 40,
+        product_sha="s" * 40, response_sha=None, spec_runner_version=None, host="mac")
+    (repo / "workstreams/ws-a/spec/90-acceptance-closure.md").write_text(text)
+    errors, warns = g.gate_findings(repo, is_vendored=False)
+    assert errors == [] and warns
 
 
 def test_open_item_is_not_checked(tmp_path):
@@ -1762,9 +1972,11 @@ def gate_findings(repo: Path, *, is_vendored: bool) -> tuple[list[str], list[str
                 warns.append(f"{ws}: human_pending={meta['human_pending']} — подпись в срезе 2")
         elif state == "not-applicable":
             reason = meta.get("not_applicable_reason")
-            where = f"spec-runner {meta.get('spec_runner_version', '-')} на {meta.get('host', '-')}"
+            where = f"spec-runner {meta.get('spec_runner_version')} на {meta.get('host')}"
             if reason == "spec-runner-version" and is_vendored:
                 errors.append(f"{ws}: not-applicable spec-runner-version ({where}) при вендоренном контракте — перегнать закрытие на машине с spec-runner ≥ min")
+            elif reason == "spec-runner-version":
+                warns.append(f"{ws}: оракул не применим (spec-runner-version, {where})")
             else:
                 warns.append(f"{ws}: оракул не применим ({reason})")
         else:
@@ -1808,9 +2020,12 @@ git commit -m "feat(governance): closure_gate — [x] пункта плана т
       - run: uv run --frozen python -m governance.charter_guard --repo . --base "origin/${{ github.base_ref || 'master' }}"
       - run: uv run --frozen python -m governance.closure_gate --repo .
       - run: uv run --frozen python -c "import sys; from governance.criteria_contract import integrity_findings as f; r=f(); print(*r, sep='\n'); sys.exit(1 if r else 0)"
+      - uses: actions/checkout@<тот же SHA, что у первого checkout в ci.yml>
+        with: { repository: andrei-shtanakov/spec-runner, path: spec-runner-upstream, fetch-depth: 0 }
+      - run: uv run --frozen python -c "import sys; from pathlib import Path; from governance.criteria_contract import CONTRACT_DIR, drift_findings as f; e,n=f(CONTRACT_DIR, Path('spec-runner-upstream'), ci=True); print(*e, *n, sep='\n'); sys.exit(1 if e else 0)"
 ```
 
-(у `actions/checkout` для `--base` нужен `fetch-depth: 0` или явный `git fetch origin <base>` — добавить шаг `git fetch --depth=1 origin "${{ github.base_ref || 'master' }}"` перед `charter_guard`). PR помечается к человеческому мержу (трогает `.github/`).
+(checkout апстрима spec-runner — вторая гарантия вендоринга, дрейф; пока контракт не вендорен, шаг пуст. У `actions/checkout` для `--base` нужен `fetch-depth: 0` или явный `git fetch origin <base>` — добавить шаг `git fetch --depth=1 origin "${{ github.base_ref || 'master' }}"` перед `charter_guard`). PR помечается к человеческому мержу (трогает `.github/`).
 
 ---
 
