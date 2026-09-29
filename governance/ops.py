@@ -1171,11 +1171,20 @@ class RealOps:
         )
         if listing.returncode != 0:
             raise RuntimeError(f"gh pr list: {listing.stderr.strip()}")
-        cand = re.compile(r"^spec/(.+)-approve-1-\d+-\d+$")
+        from governance import approval_branches
+
+        # Форма candidate — из SSOT веток одобрения, не литералом.
+        pattern = re.escape(approval_branches.candidate_template())
+        for name, group in (("ws_id", r"(?P<ws_id>.+)"), ("wave", r"(?P<wave>\d+)"),
+                            ("step", r"\d+"), ("attempt", r"\d+")):
+            pattern = pattern.replace(re.escape("{" + name + "}"), group)
+        cand = re.compile(f"^{pattern}$")
         for pr in json.loads(listing.stdout or "[]"):
-            m = cand.match(pr.get("headRefName", ""))
-            if m and m.group(1) != own_ws:
-                refs.append(pr["headRefName"])
+            head = pr.get("headRefName", "")
+            m = cand.match(head)
+            if (m and not approval_branches.is_finalize(head)
+                    and m.group("wave") == "1" and m.group("ws_id") != own_ws):
+                refs.append(head)
         for ref in refs:
             local = fetch(ref)
             for path, ch in charter_guard.charters_at(Path(target_dir), local).items():
