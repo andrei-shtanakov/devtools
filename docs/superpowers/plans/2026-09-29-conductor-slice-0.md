@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-29-conductor-design.md` (rev 10). Срез 0 — §11: §2, §3 (без модели), §4, §5.2–5.3 как выдача, §7.1–7.2, таймер на уровне 0, `roadmap.toml` в зонтике.
 
-**План rev 4** — по кругу 3 ревью пары (3 major, 2 minor), класс fail-closed закрыт механизмом: каждое обязательное чтение и каждое усечение (соседние версии пути, неизвестный репо в `exists:`, список файлов и ревью PR) регистрируется в источнике `history`; CI и одобрение PR — об одном head SHA, иначе чтение PR — сбой; манифест читается с `origin` зонтика и входит в источники с SHA; `GR-ORPHAN-REQUEST` для inbox без `from:` и с неизвестным репо, `GR-SLUG-MATCH` для склейки без `@source-ref`; вопрос `GR-SHIPPED-OPEN` — только в фокусе; `status` печатает те же вопросы, что снимок. **Rev 3** — по кругу 2 ревью пары (7 major, 1 minor): одобрение PR на head SHA через GraphQL и выбор actor мержа по `Мерж: человек`/authority-root; ошибки вспомогательных чтений делают граф `partial`; начало ожидания — `git blame` строки пункта; `focus.epic` проверяется на тип; вопросы владельцу — по причине ожидания; `plan` ограничен `roadmap.autonomy`; `record` возвращает 4 при `RM-INVALID`. **Rev 2** — по кругу 1 ревью пары (1 blocker, 13 major, 1 minor). Листинги кода перед отдачей на ревью извлечены во временный каталог, прогнаны тестами, ruff и pyrefly на окружении devtools и живым прогоном на флоте (только чтение) — см. «Проверка плана исполнением» в конце. Живой прогон изменил два решения: обнаружение GitHub — только открытые (окно закрытых упиралось в потолок поиска), ожидание прозаического `@trigger` — `wait_condition`, не вопрос владельцу.
+**План rev 5** — по кругу 4 ревью пары (1 major, 2 minor): манифест читается **после** `fetch` зонтика (`read_manifest`; сбой fetch — деградация в `history`, не отказ), иначе свежий состав флота не проверен; вопрос по находке `GR-SHIPPED-OPEN` задаётся по унаследованному рангу (`rank_of`); `GR-SLUG-MATCH` для наследия inbox — информационная находка без вопроса: slug и есть связь принятия по ADR-ECO-006 D2 (спека §6.4), а живой прогон показал 8 вопросов-шумов «подтвердите принятие» — отступление от minor-замечания круга 4 названо в спеке §3.3.4. **Rev 4** — по кругу 3 ревью пары (3 major, 2 minor), класс fail-closed закрыт механизмом: каждое обязательное чтение и каждое усечение (соседние версии пути, неизвестный репо в `exists:`, список файлов и ревью PR) регистрируется в источнике `history`; CI и одобрение PR — об одном head SHA, иначе чтение PR — сбой; манифест читается с `origin` зонтика и входит в источники с SHA; `GR-ORPHAN-REQUEST` для inbox без `from:` и с неизвестным репо, `GR-SLUG-MATCH` для склейки без `@source-ref`; вопрос `GR-SHIPPED-OPEN` — только в фокусе; `status` печатает те же вопросы, что снимок. **Rev 3** — по кругу 2 ревью пары (7 major, 1 minor): одобрение PR на head SHA через GraphQL и выбор actor мержа по `Мерж: человек`/authority-root; ошибки вспомогательных чтений делают граф `partial`; начало ожидания — `git blame` строки пункта; `focus.epic` проверяется на тип; вопросы владельцу — по причине ожидания; `plan` ограничен `roadmap.autonomy`; `record` возвращает 4 при `RM-INVALID`. **Rev 2** — по кругу 1 ревью пары (1 blocker, 13 major, 1 minor). Листинги кода перед отдачей на ревью извлечены во временный каталог, прогнаны тестами, ruff и pyrefly на окружении devtools и живым прогоном на флоте (только чтение) — см. «Проверка плана исполнением» в конце. Живой прогон изменил два решения: обнаружение GitHub — только открытые (окно закрытых упиралось в потолок поиска), ожидание прозаического `@trigger` — `wait_condition`, не вопрос владельцу.
 
 ## Global Constraints
 
@@ -2838,7 +2838,7 @@ git commit -m "feat(conductor): готовность, циклы, находки
 
 **Interfaces:**
 - Consumes: Tasks 2, 6, 7, 8
-- Produces: `QueueEntry(node_id, rank, via_focus, own_focus, klass, on_goal_path, unblocks, oldest_wait_days, why)`; `build_queue(graph, waits, roadmap, now)` (кандидаты §4.1, порядок §4.3); `build_attention(graph, waits, roadmap, now)` (узлы `attention_nodes`, тот же ключ).
+- Produces: `QueueEntry(node_id, rank, via_focus, own_focus, klass, on_goal_path, unblocks, oldest_wait_days, why)`; `build_queue(graph, waits, roadmap, now)` (кандидаты §4.1, порядок §4.3); `build_attention(graph, waits, roadmap, now)` (узлы `attention_nodes`, тот же ключ); `rank_of(graph, roadmap, node_id) -> int | None` (ранг с наследованием — для вопросов по находкам).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3058,6 +3058,19 @@ def _entry(
         oldest,
         why,
     )
+
+
+def rank_of(graph: Graph, roadmap: Roadmap, node_id: str) -> int | None:
+    """Ранг узла работы с наследованием (§4.2); None — не связан с фокусом."""
+    if not roadmap.valid:
+        return None
+    rev = _reverse(dependency_adjacency(graph))
+    ranks = [
+        f.rank
+        for other in _walk(graph.resolve(node_id), rev)
+        if (f := roadmap.focus_of(graph.epic_of(other))) is not None
+    ]
+    return min(ranks, default=None)
 
 
 def _key(e: QueueEntry) -> tuple[bool, int, bool, int, int, str]:
@@ -3647,6 +3660,25 @@ def test_questions_by_reason() -> None:
     assert "todo://b/gone" in cancelled["evidence"]
     assert got[("a#1", "GR-SHIPPED-OPEN")]["options"] == ["close", "keep"]
     assert ("a#2", "GR-SHIPPED-OPEN") not in got  # фон: находка есть, вопроса нет
+
+
+def test_finding_questions_follow_inherited_rank() -> None:
+    snap = _snap(
+        {
+            "a": "- [ ] g @owner:github:own @id:goal @epic:eco.focus1 "
+            "@blocked_by:todo://b/pre\n",
+            "b": "- [x] p @owner:TBD @id:pre @epic:eco.bg\n"
+            "- [ ] m @owner:TBD @id:m @epic:eco.focus2\n",
+        },
+        records=[
+            record("b", 1, body="slug: pre\n", labels=["inbox"]),
+            record("b", 2, body="slug: m\nfrom: a#goal\n", labels=["inbox"]),
+        ],
+    )
+    got = {(q["subject"], q["reason"]) for q in snap["owner_questions"]}
+    assert ("b#1", "GR-SHIPPED-OPEN") in got  # фон, но ранг 1 через веху
+    assert ("b#2", "GR-SLUG-MATCH") not in got  # наследие: slug — связь по D2
+    assert "GR-SLUG-MATCH" in {f["code"] for f in snap["findings"]}
     assert "GR-SHIPPED-OPEN" in {f["code"] for f in snap["findings"]}
 
 
@@ -3753,7 +3785,7 @@ from conductor.graph import Graph, build_graph
 from conductor.inputs import Inputs
 from conductor.model import Finding
 from conductor.policy import Assessment, assess
-from conductor.rank import QueueEntry, build_attention, build_queue
+from conductor.rank import QueueEntry, build_attention, build_queue, rank_of
 from conductor.roadmap import Roadmap, parse_roadmap
 from conductor.waits import Wait, evaluate_waits
 
@@ -3779,7 +3811,13 @@ WAIT_QUESTIONS = {
         ("accept-version", "keep"),
     ),
 }
-SHIPPED = ("похоже отгружено: закрыть issue?", ("close", "keep"))
+# Вопрос по находке — только там, где решать нечего кроме владельца. Для
+# наследия inbox совпадение slug И ЕСТЬ связь принятия (ADR-ECO-006 D2, спека
+# §6.4): GR-SLUG-MATCH остаётся информационной находкой — живой замер
+# 2026-09-29 дал бы 8 вопросов «подтвердите принятие» на каждый legacy inbox.
+FINDING_QUESTIONS = {
+    "GR-SHIPPED-OPEN": ("похоже отгружено: закрыть issue?", ("close", "keep")),
+}
 
 
 @dataclass
@@ -3873,9 +3911,13 @@ def owner_questions(result: Result) -> list[dict[str, Any]]:
             reason = a.block_reason or "unknown-wait"
             out.append(_question(a.node_id, reason, reason, *DELEGATE))
     for f in result.findings:
-        epic = result.graph.epic_of(f.subject)
-        if f.code == "GR-SHIPPED-OPEN" and result.roadmap.focus_of(epic) is not None:
-            out.append(_question(f.subject, f.code, f.detail, *SHIPPED))
+        if f.code not in FINDING_QUESTIONS:
+            continue
+        # то же правило ранга, что у позиций (§5.7 rev 10), с наследованием
+        if rank_of(result.graph, result.roadmap, f.subject) is not None:
+            out.append(
+                _question(f.subject, f.code, f.detail, *FINDING_QUESTIONS[f.code])
+            )
     return sorted(out, key=lambda q: (q["subject"], q["reason"]))
 
 
@@ -3977,7 +4019,7 @@ def to_snapshot(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run --frozen pytest tests/conductor/test_snapshot.py -q`
-Expected: PASS (7 passed)
+Expected: PASS (8 passed)
 
 - [ ] **Step 5: Commit**
 
@@ -3996,7 +4038,7 @@ git commit -m "feat(conductor): конвейер, снимок conductor-snapsho
 
 **Interfaces:**
 - Consumes: Tasks 2–11
-- Produces: `read_epics(root) -> (dict, state, detail, sha)`; `read_authority_prefixes() -> list[str] | None`; `collect(root, manifest_text, manifest_origin, roadmap_path, do_fetch, runner, host, now)`; CLI читает манифест с `origin` зонтика, файл — только по явному `--manifest`; `collect(root, manifest_text, roadmap_path, do_fetch, runner, host, now) -> Inputs`; `render_status(result, top=15)`, `render_why(result, node_id)`, `render_plan(result)`; `main(argv=None) -> int`.
+- Produces: `read_epics(root) -> (dict, state, detail, sha)`; `read_manifest(root, do_fetch) -> (text | None, origin, errors)` — fetch зонтика до чтения; `read_authority_prefixes() -> list[str] | None`; `collect(root, manifest_text, manifest_origin, roadmap_path, do_fetch, runner, host, now, prior_errors=None)`; CLI читает манифест через `read_manifest`, файл — только по явному `--manifest`; `collect(root, manifest_text, roadmap_path, do_fetch, runner, host, now) -> Inputs`; `render_status(result, top=15)`, `render_why(result, node_id)`, `render_plan(result)`; `main(argv=None) -> int`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4005,7 +4047,7 @@ git commit -m "feat(conductor): конвейер, снимок conductor-snapsho
 import subprocess
 from pathlib import Path
 
-from conductor.collect import collect, read_epics
+from conductor.collect import collect, read_epics, read_manifest
 from conductor.manifest import UMBRELLA
 
 
@@ -4127,6 +4169,35 @@ def test_collect_history_reversed_tags_and_human_merge(tmp_path: Path) -> None:
     assert inp.history["todo://b/gone"]
     assert inp.human_merge_repos == ["a"]
     assert inp.authority_prefixes and inp.aux_state == "read"
+
+
+def test_manifest_is_read_after_umbrella_fetch(tmp_path: Path) -> None:
+    old = '[cores.a]\nrepo_url = "git@github.com:own/a.git"\ngit_dir = "a"\n'
+    _repo(tmp_path / UMBRELLA, {"workspace-manifest.toml": old})
+    up = tmp_path / (UMBRELLA + "-up")
+    new = old + '[cores.b]\nrepo_url = "git@github.com:own/b.git"\ngit_dir = "b"\n'
+    (up / "workspace-manifest.toml").write_text(new, encoding="utf-8")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(up),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qam",
+            "add b",
+        ],
+        check=True,
+    )
+    assert read_manifest(tmp_path, do_fetch=False)[0] == old
+    text, origin, errors = read_manifest(tmp_path, do_fetch=True)
+    assert (text, origin[0], errors) == (new, "origin", [])
+    subprocess.run(["rm", "-rf", str(up)], check=True)
+    text, _, errors = read_manifest(tmp_path, do_fetch=True)
+    assert text == new and errors and "fetch" in errors[0]  # деградация, не отказ
 ```
 
 `tests/conductor/test_cli.py`:
@@ -4268,6 +4339,7 @@ from conductor.sources_git import (
     GitError,
     default_ref,
     ever_had,
+    fetch,
     last_commit_mentioning,
     line_since,
     path_fact,
@@ -4307,6 +4379,28 @@ def read_epics(
     if errors:
         return {}, "error", "; ".join(errors), sha
     return {k: dict(v) for k, v in registry.epics.items()}, "read", "", sha
+
+
+def read_manifest(
+    root: Path, do_fetch: bool
+) -> tuple[str | None, tuple[str, str | None], list[str]]:
+    """Манифест с origin зонтика; fetch — ДО чтения, иначе состав флота устарел.
+
+    Сбой fetch — деградация (ошибка в источнике history), а не отказ: читается
+    последний известный origin, и граф будет partial.
+    """
+    umbrella = root / UMBRELLA
+    errors: list[str] = []
+    if (
+        do_fetch
+        and (umbrella / ".git").exists()
+        and (problem := fetch(umbrella)) is not None
+    ):
+        errors.append(f"{UMBRELLA}: fetch: {problem}")
+    text, sha, state, detail = read_file_at_origin(umbrella, "workspace-manifest.toml")
+    if state != "read":
+        return None, ("origin", sha), [f"манифест не прочитан: {detail}"]
+    return text, ("origin", sha), errors
 
 
 def read_authority_prefixes() -> list[str] | None:
@@ -4439,6 +4533,7 @@ def collect(
     runner: Runner,
     host: str,
     now: str,
+    prior_errors: list[str] | None = None,
 ) -> Inputs:
     """Прочитать флот; сбои — состояния источников, не исключения."""
     repos = {r.key: r for r in fleet_repos(manifest_text)}
@@ -4464,6 +4559,7 @@ def collect(
         manifest_index(manifest_text),
     )
     hist = _History(root, repos)
+    hist.errors += prior_errors or []
     hist.collect(snapshot, {t.repo for t in todos if t.state == "read"})
     facts = _trigger_facts(root, repos, todos, hist.errors)
     human = _human_merge(root, repos, hist.errors)
@@ -4599,14 +4695,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from conductor.collect import collect
+from conductor.collect import collect, read_manifest
 from conductor.inputs import Inputs, RepoTodo, load_inputs, save_inputs
-from conductor.manifest import UMBRELLA
 from conductor.render import render_plan, render_status, render_why
 from conductor.roadmap import parse_roadmap
 from conductor.snapshot import evaluate, to_snapshot
 from conductor.sources_gh import run_gh
-from conductor.sources_git import read_file_at_origin
 
 EXIT_OK, EXIT_ARGS, EXIT_NO_SOURCE, EXIT_CONFIG = 0, 2, 3, 4
 COMMANDS = ("status", "why", "plan", "run", "record")
@@ -4634,6 +4728,7 @@ def _now() -> str:
 def _inputs(args: argparse.Namespace) -> Inputs | None:
     if args.replay is not None:
         return load_inputs(args.replay)
+    errors: list[str] = []
     if args.manifest is not None:
         if not args.manifest.is_file():
             print(f"нет манифеста {args.manifest}", file=sys.stderr)
@@ -4641,15 +4736,10 @@ def _inputs(args: argparse.Namespace) -> Inputs | None:
         text: str | None = args.manifest.read_text(encoding="utf-8")
         origin: tuple[str, str | None] = (f"file:{args.manifest}", None)
     else:
-        # Как и TODO: манифест — с опубликованной ветки зонтика (I6).
-        umbrella = args.root / UMBRELLA
-        text, sha, state, detail = read_file_at_origin(
-            umbrella, "workspace-manifest.toml"
-        )
-        if state != "read" or text is None:
-            print(f"манифест не прочитан: {detail}", file=sys.stderr)
-            return None
-        origin = ("origin", sha)
+        text, origin, errors = read_manifest(args.root, not args.no_fetch)
+    if text is None:
+        print("; ".join(errors), file=sys.stderr)
+        return None
     return collect(
         args.root,
         text,
@@ -4659,6 +4749,7 @@ def _inputs(args: argparse.Namespace) -> Inputs | None:
         run_gh,
         socket.gethostname(),
         _now(),
+        errors,
     )
 
 
@@ -5050,7 +5141,7 @@ Expected: видны ожидания `spec-runner#603` / `steward#190` с ве�
 
 Перед ревью листинги кода извлечены из этого файла скриптом (блоки после строки вида `` `путь`: ``; для `conductor/__main__.py` — последний, итоговый) во временный каталог вне репо, в раскладке devtools. Результат на 2026-09-29:
 
-- `pytest tests/conductor` на `.venv` devtools — **79 passed** (rev 4);
+- `pytest tests/conductor` на `.venv` devtools — **81 passed** (rev 5);
 - `ruff check` и `ruff format --check` с `pyproject.toml` devtools — чисто (листинги в плане — уже отформатированный вывод ruff);
 - `pyrefly check conductor` — 0 errors; `shellcheck deploy/conductor/setup.sh` — чисто; `python -m conductor --selftest` — ok.
 
