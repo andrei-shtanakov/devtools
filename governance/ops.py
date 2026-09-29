@@ -175,6 +175,8 @@ class Ops(Protocol):
 
     def mark_ready(self, repo_slug: str, pr: int) -> None: ...
 
+    def criteria_verify(self, target_dir: str, request_path: str) -> tuple[int, str]: ...
+
     def review(self, repo_name: str, pr: int) -> int: ...
 
     def review_fresh(self, repo_name: str, pr: int) -> int: ...
@@ -1135,6 +1137,17 @@ class RealOps:
                         }
                     )
         return found
+
+    def criteria_verify(self, target_dir: str, request_path: str) -> tuple[int, str]:
+        """`spec-runner verify --criteria` (контракт criteria-closure/v1, §5.1)."""
+        try:
+            proc = subprocess.run(
+                ["spec-runner", "verify", "--criteria", "--request", request_path, "--json"],
+                cwd=target_dir, capture_output=True, text=True, check=False,
+            )
+        except OSError as exc:
+            return 127, str(exc)
+        return proc.returncode, proc.stdout
 
     def create_pr(
         self,

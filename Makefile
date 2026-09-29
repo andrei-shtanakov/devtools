@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks accept-pr preflight edge-check selfcheck selfcheck-dogfood
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks accept-pr preflight edge-check selfcheck selfcheck-dogfood criteria-close
 
 help:
 	@echo "Цели:"
@@ -48,6 +48,7 @@ help:
 	@echo "  make arch-freshness       — локальная диагностика drift/freshness арх-evidence (вахта — CI steward)"
 	@echo "  make arch-freshness-read  — читатель локального статуса: просрочка ⇒ unknown (exit 2)"
 	@echo "  make behaviour-run ARGS=… — governance runner CLI: start|resume|verify|status (uv + группа governance)"
+	@echo "  make criteria-close ARGS='--run <id> [--product-sha <sha>]' — закрытие воркстрима по оракулу бандла (срез 1: файл закрытия агентским PR; флага обхода нет)"
 	@echo "  make spec-loop SUBJECT='…' REPO=… — операторская кнопка: start → мерж бандла (человек) → одобрение узлов (человек, --approve-node) → повтор той же команды → deliver tasks-спеки → approve (человек); merge-authority жёстко human, неоднозначности — fail-closed (--run-id/--ws-id через ARGS)"
 	@echo "  make spec-loop … ARGS='--legacy' — ОТКАЗ с названной причиной (S13, 2026-09-23): прежний путь бандл-PR удалён из исполнения; --waves принимается и ничего не меняет; исторические леджеры читаются как прежде (make behaviour-console)"
 	@echo "  make spec-loop ARGS='--need --frame customer --stakeholder <role>' — стадия Need вместо готового --brief: запускает discovery-интервью, прогон паркуется в waiting_interview и печатает команду ответа стейкхолдеру; ответьте вне spec-loop и повторите ту же команду с --run-id <id> (engineer-фрейм отказан до discovery#49)"
@@ -72,6 +73,7 @@ catalog-fixtures: ; @python3 ./check-catalog-fixtures.py --check
 graph-drift: ; @python3 ./check-graph-registry-drift.py
 plan-check:  ; @uv run --frozen python ./check-plan-fields.py --root $(WORKSPACE) --manifest $(MANIFEST)
 plan-check-selftest: ; @uv run --frozen python ./check-plan-fields.py --selftest
+criteria-close: ; @uv run --frozen python -m governance.criteria_close $(ARGS)
 plan-check-fixture:  ; @uv run --frozen pytest tests/test_plan_check_fixture.py -q
 inbox:       ; @uv run --frozen python ./inbox.py --root ..
 issues:      ; @uv run --frozen python ./issue_console.py --root $(WORKSPACE)
