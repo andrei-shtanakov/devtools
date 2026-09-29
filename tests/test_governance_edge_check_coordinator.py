@@ -439,7 +439,14 @@ def test_blind_edge_file_without_ledger_line_is_rechecked(
     state = _state(tmp_path, _W1_FILES, _ENGINEER)
     run_dir = tmp_path / "run"
     co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=_fake_call({}))
-    (run_dir / "edge-check" / co.LEDGER_NAME).unlink()
+    # Леджер ОСТАЁТСЯ со строками других рёбер — вырезана только строка
+    # ключа этого ребра: проверяется сравнение по ключу, а не досрочный
+    # выход «леджера нет» (ревью #478).
+    ledger = run_dir / "edge-check" / co.LEDGER_NAME
+    lines = ledger.read_text(encoding="utf-8").splitlines(keepends=True)
+    kept = [ln for ln in lines if json.loads(ln)["edge"] != _CUSTOMER[1]]
+    assert kept and len(kept) < len(lines)
+    ledger.write_text("".join(kept), encoding="utf-8")
     call, seen = _counting({})
     co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=call)
-    assert sorted(seen) == sorted([_CUSTOMER[1], _ENGINEER_EDGE[1]])
+    assert seen == [_CUSTOMER[1]]  # соседнее ребро с согласованной парой — переиспользовано
