@@ -67,3 +67,18 @@ def test_drift_against_upstream_checkout():
     assert errors == [], errors
     if notes:
         pytest.skip(notes[0])
+
+
+def test_fixtures_stay_out_of_the_selfcheck_corpus():
+    """Байты фикстур заведомо не парсятся (NUL, синтаксис): в корпусе
+    самодиагностики они роняли бы пробы ast-dup, cli-overlap, usage-graph."""
+    import tomllib
+
+    from selfcheck.corpus import list_corpus
+
+    root = cc.CONTRACT_DIR.parents[2]
+    config = tomllib.loads((root / "selfcheck.toml").read_text(encoding="utf-8"))
+    corpus = list_corpus(root, config["corpus"]["exclude"])
+    assert not [
+        p for p in corpus if p.startswith("contracts/criteria-closure/v1/fixtures/")
+    ]
