@@ -9,6 +9,7 @@ stdout/stderr/returncode. Живых `git`/`gh`/`codex`/`gate-check` вызов�
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -2137,3 +2138,77 @@ def test_logins_survive_missing_gh_binary(monkeypatch, tmp_path):
 
     assert RealOps().agent_login() is None
     assert RealOps().caller_login() is None
+
+
+# --- devtools#469 / дизайн песочницы §3: env авторского агента — allowlist ---
+
+_OPERATOR_ENV = {
+    "PATH": "/usr/bin", "HOME": "/h", "USER": "u", "LOGNAME": "u",
+    "SHELL": "/bin/zsh", "LANG": "C.UTF-8", "TERM": "xterm", "TMPDIR": "/t/",
+    "LC_ALL": "C.UTF-8", "XDG_STATE_HOME": "/h/.state",
+    "ANTHROPIC_API_KEY": "own-model-key",
+    # чужая XDG_-переменная — префиксом не проходит (ревью #483)
+    "XDG_SESSION_SECRET": "x",
+    # то, что агенту попадать НЕ должно (F12 дизайна)
+    "GH_TOKEN": "x", "GITHUB_TOKEN": "x", "GH_CONFIG_DIR": "/h/.config/review",
+    "OPENAI_API_KEY": "x", "MS_CLIENT_SECRET": "x",
+    "SPEC_RUNNER_TELEGRAM_TOKEN": "x", "CLAUDECODE": "1",
+    "CLAUDE_CODE_MESSAGING_TOKEN": "x", "AUTHOR_HARNESS": "claude",
+}
+_AGENT_ENV = {
+    k: v for k, v in _OPERATOR_ENV.items()
+    if k in {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM",
+             "TMPDIR", "LC_ALL", "XDG_STATE_HOME", "ANTHROPIC_API_KEY"}
+}
+
+
+def _operator_env(monkeypatch) -> None:
+    for name in list(os.environ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in _OPERATOR_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
+
+
+def test_author_gets_only_the_allowlisted_env(monkeypatch):
+    """Секреты сессии оператора авторскому агенту не наследуются: env
+    вызова РАВЕН allowlist-подмножеству (равенство, не поиск трёх имён)."""
+    _operator_env(monkeypatch)
+    calls = _install_fake_run(monkeypatch)
+    RealOps().author("/t", "requirements", "s", "ws/spec")
+    assert calls[0].kwargs["env"] == _AGENT_ENV
+
+
+def test_author_disp_gets_only_the_allowlisted_env(monkeypatch):
+    """disp и агенты внутри него наследуют env процесса disp — тот же
+    allowlist."""
+    _operator_env(monkeypatch)
+    calls = _install_fake_run(monkeypatch)
+    RealOps().author_disp("/t", "task", "/cfg.toml", "beh-x")
+    assert calls[0].kwargs["env"] == _AGENT_ENV
+
+
+def test_agent_env_names_are_pinned():
+    """Перечень пинуется литералом (ревью #483): расширение allowlist'а —
+    осознанная правка теста с обоснованием, а не тихое добавление."""
+    assert ops_mod.AGENT_ENV_NAMES == {
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TMPDIR", "LANG",
+        "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+        "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_MODEL", "MAX_THINKING_TOKENS", "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "AWS_REGION",
+        "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+        "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID", "HTTPS_PROXY",
+        "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
+    }
+    assert ops_mod.AGENT_ENV_PREFIXES == ("LC_",)
+    assert "OPENAI_API_KEY" not in ops_mod.AGENT_ENV_NAMES
+
+
+def test_agent_env_carries_the_reviewer_model_transport():
+    """Транспорт модели авторского агента не отстаёт от ревьюера edge-check:
+    иначе на машине с прокси/CA или env-учёткой авторинг падал бы, а
+    ревью — нет."""
+    from governance.edge_check import reviewer
+
+    assert set(reviewer._ENV_ALLOWLIST) <= ops_mod.AGENT_ENV_NAMES
