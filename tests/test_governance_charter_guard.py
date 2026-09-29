@@ -135,3 +135,19 @@ def test_repo_findings_refuses_deleted_charter(tmp_path):
     _git(repo, "commit", "-qm", "rm")
     out = cg.repo_findings(repo, "HEAD~1")
     assert any("удал" in f or "перенес" in f for f in out)
+
+
+@pytest.mark.parametrize("base", ["0" * 40, "deadbeef" * 5, ""])
+def test_unresolvable_base_is_a_finding_not_silence(tmp_path, base):
+    """Ревью #484: база, которую не прочитать, — стоп, а не «в базе нет
+    charter'ов» (иначе удаление надгробия и смена кода проходят зелёными)."""
+    repo = tmp_path / "devtools"
+    repo.mkdir()
+    (repo / "TODO.md").write_text("- [ ] a @id:oracle\n")
+    _git(repo, "init", "-q", "-b", "master")
+    _write(repo, "ws-a", ch2())
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "ws-a")
+    out = cg.repo_findings(repo, base)
+    assert any("баз" in f for f in out)
+    assert cg.main(["--repo", str(repo), "--base", base]) == 1
