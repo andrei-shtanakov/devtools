@@ -53,3 +53,8 @@ selfcheck = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+# Вендоренные фикстуры criteria-closure/v1: байты — это кейсы (синтаксическая
+# ошибка, NUL, CRLF); ни линтовать, ни форматировать.
+extend-exclude = ["contracts/criteria-closure/v1/fixtures"]

@@ -3,6 +3,7 @@
 «Выпущено» выводится из данных: есть PIN и манифест сходится. Отдельного
 флага нет — рассогласоваться нечему.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -51,8 +52,18 @@ def _parts(version: str) -> tuple[int, ...]:
     return tuple(int(p) for p in version.split(".") if p.isdigit())
 
 
-def drift_findings(contract_dir: Path, upstream: Path | None, *, ci: bool) -> tuple[list[str], list[str]]:
-    """Дрейф копии от апстрима по ref из PIN (вторая гарантия вендоринга)."""
+def drift_findings(
+    contract_dir: Path,
+    upstream: Path | None,
+    *,
+    ci: bool,
+    upstream_path: str = "contracts/criteria-closure/v1",
+) -> tuple[list[str], list[str]]:
+    """Дрейф копии от апстрима по ref из PIN (вторая гарантия вендоринга).
+
+    `upstream_path` — где копия лежит у производителя: схемы — в
+    `contracts/…`, общие фикстуры владения — в `tests/fixtures/…`.
+    """
     import subprocess
 
     if not (contract_dir / "PIN").exists():
@@ -65,17 +76,22 @@ def drift_findings(contract_dir: Path, upstream: Path | None, *, ci: bool) -> tu
     manifest = json.loads((contract_dir / "manifest.json").read_text())
     for name in sorted(manifest):
         proc = subprocess.run(
-            ["git", "-C", str(upstream), "show", f"{sha}:contracts/criteria-closure/v1/{name}"],
+            ["git", "-C", str(upstream), "show", f"{sha}:{upstream_path}/{name}"],
             capture_output=True,
+            check=False,
         )
         if proc.returncode != 0:
             errors.append(f"criteria-closure/v1: {name} нет в апстриме @ {sha[:7]}")
         elif proc.stdout != (contract_dir / name).read_bytes():
-            errors.append(f"criteria-closure/v1: {name} разошёлся с апстримом @ {sha[:7]}")
+            errors.append(
+                f"criteria-closure/v1: {name} разошёлся с апстримом @ {sha[:7]}"
+            )
     return errors, []
 
 
-def oracle_available(installed: str | None, minimum: MinVersion, *, is_vendored: bool) -> bool:
+def oracle_available(
+    installed: str | None, minimum: MinVersion, *, is_vendored: bool
+) -> bool:
     """Оракул доступен: контракт вендорен и spec-runner машины не ниже."""
     if not is_vendored or installed is None:
         return False
