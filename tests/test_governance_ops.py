@@ -28,6 +28,16 @@ _EXPECTED_REMOTE_BRANCH_HEAD_QUERY = (
 )
 
 
+_REAL_AUTHOR_CLAUDE_TOKEN = ops_mod._author_claude_token
+
+
+@pytest.fixture(autouse=True)
+def _no_real_keychain(monkeypatch):
+    """Тесты не ходят в настоящую связку ключей: токен claude — тестовый;
+    сценарий «элемента нет» подменяет его сам."""
+    monkeypatch.setattr(ops_mod, "_author_claude_token", lambda: "test-token")
+
+
 class RecordedCall:
     """Один перехваченный вызов ``subprocess.run`` — argv и остальные kwargs."""
 
@@ -2206,7 +2216,7 @@ _OPERATOR_ENV = {
     "GH_TOKEN": "x", "GITHUB_TOKEN": "x", "GH_CONFIG_DIR": "/h/.config/review",
     "OPENAI_API_KEY": "x", "MS_CLIENT_SECRET": "x",
     "SPEC_RUNNER_TELEGRAM_TOKEN": "x", "CLAUDECODE": "1",
-    "CLAUDE_CODE_MESSAGING_TOKEN": "x", "AUTHOR_HARNESS": "claude",
+    "CLAUDE_CODE_MESSAGING_TOKEN": "x", "AUTHOR_HARNESS": "codex",
 }
 _AGENT_ENV = {
     k: v for k, v in _OPERATOR_ENV.items()
@@ -2276,3 +2286,107 @@ def test_commit_paths_ignored_file_with_glob_metachars(tmp_path):
     (repo / rel).write_text("{}\n", encoding="utf-8")
     RealOps().commit_paths(str(repo), [rel], "glob")
     assert _git(repo, "rev-parse", f"HEAD:{rel}").returncode == 0
+
+
+# --- дизайн песочницы §8 (S1): изоляция конфигурации claude на вызов ---
+
+def _claude_calls(monkeypatch, *, token="tok-from-keychain"):
+    """Фейк subprocess.run, который во время вызова агента фиксирует
+    settings.json изолированного каталога (после вызова его уже нет)."""
+    seen: list[dict] = []
+
+    def fake_run(argv, **kwargs):
+        env = kwargs.get("env") or {}
+        cfg = env.get("CLAUDE_CONFIG_DIR")
+        seen.append({
+            "argv": list(argv), "env": env,
+            "settings": (Path(cfg) / "settings.json").read_text()
+            if cfg and (Path(cfg) / "settings.json").is_file() else None,
+        })
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(ops_mod, "_author_claude_token", lambda: token)
+    return seen
+
+
+def test_claude_author_gets_isolated_config_and_keychain_token(
+    tmp_path, monkeypatch
+):
+    """S1: без своего CLAUDE_CONFIG_DIR агент грузит плагины/хуки оператора
+    и пишет состояние в ~/.claude. Каталог вызова — со своим settings.json,
+    токен — из элемента связки, после вызова каталог удалён."""
+    _harness_file(tmp_path, monkeypatch, AUTHOR_HARNESS="claude")
+    seen = _claude_calls(monkeypatch)
+    RealOps().author(str(tmp_path), "requirements", "s", "ws/spec")
+    env = seen[0]["env"]
+    cfg = Path(env["CLAUDE_CONFIG_DIR"])
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok-from-keychain"
+    assert json.loads(seen[0]["settings"]) == {
+        "permissions": {"defaultMode": "bypassPermissions"}
+    }
+    assert cfg != Path.home() / ".claude"
+    assert not cfg.exists()  # удалён в finally
+    rest = {k: v for k, v in env.items()
+            if k not in {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}}
+    assert rest == ops_mod.agent_env()  # остальное — прежний allowlist
+
+
+def test_codex_author_is_not_touched_by_claude_isolation(tmp_path, monkeypatch):
+    _harness_file(tmp_path, monkeypatch, AUTHOR_HARNESS="codex")
+    seen = _claude_calls(monkeypatch)
+    RealOps().author(str(tmp_path), "requirements", "s", "ws/spec")
+    assert "CLAUDE_CONFIG_DIR" not in seen[0]["env"]
+
+
+def test_claude_author_without_keychain_token_refuses(tmp_path, monkeypatch, capsys):
+    """Нет элемента связки — отказ с причиной (код 2), агент не запущен:
+    запуска «без изоляции» не существует."""
+    _harness_file(tmp_path, monkeypatch, AUTHOR_HARNESS="claude")
+    seen = _claude_calls(monkeypatch)
+
+    def missing():
+        raise ops_mod.AgentIsolationError("нет элемента связки")
+
+    monkeypatch.setattr(ops_mod, "_author_claude_token", missing)
+    assert RealOps().author(str(tmp_path), "requirements", "s", "ws/spec") == 2
+    assert seen == []
+    assert "нет элемента связки" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("author", "review", "isolated"),
+    [("claude", "codex", True), ("codex", "claude", True), ("codex", "codex", False)],
+)
+def test_disp_isolates_claude_config_when_any_role_is_claude(
+    tmp_path, monkeypatch, author, review, isolated
+):
+    _harness_file(tmp_path, monkeypatch, AUTHOR_HARNESS=author, AUTHOR_MODEL="m",
+                  REVIEW_HARNESS=review, REVIEW_MODEL="m")
+    seen = _claude_calls(monkeypatch)
+    RealOps().author_disp(str(tmp_path), "task", "/cfg.toml", "beh-x")
+    assert ("CLAUDE_CONFIG_DIR" in seen[0]["env"]) is isolated
+
+
+@pytest.mark.parametrize(
+    ("rc", "stdout", "ok"),
+    [(0, "tok\n", True), (44, "", False), (0, "  \n", False)],
+    ids=["found", "missing-item", "empty-value"],
+)
+def test_author_claude_token_reads_the_named_keychain_item(
+    monkeypatch, rc, stdout, ok
+):
+    """Сама функция чтения (автофикстура её подменяет): спрашивает именно
+    элемент AUTHOR_CLAUDE_TOKEN_ITEM, отсутствие и пустое значение —
+    AgentIsolationError, а не пустой токен в env агента."""
+    monkeypatch.setattr(ops_mod, "_author_claude_token", _REAL_AUTHOR_CLAUDE_TOKEN)
+    calls = _install_fake_run(monkeypatch, returncode=rc, stdout=stdout)
+    if ok:
+        assert ops_mod._author_claude_token() == "tok"
+    else:
+        with pytest.raises(ops_mod.AgentIsolationError):
+            ops_mod._author_claude_token()
+    assert calls[0].argv == [
+        "security", "find-generic-password", "-s",
+        ops_mod.AUTHOR_CLAUDE_TOKEN_ITEM, "-w",
+    ]
