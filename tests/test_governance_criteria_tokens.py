@@ -153,3 +153,34 @@ def test_syntax_error_and_nul_raise():
         except (SyntaxError, ValueError):
             continue
         raise AssertionError(f"не отказал: {src!r}")
+
+
+# Ветки составных операторов, которых нет в общих фикстурах (ownership/):
+# pytest собирает определение из except/finally/match как атрибут модуля.
+BRANCHES = '''
+try:
+    import json
+except ImportError:
+    def test_in_except():
+        # ENC:BEH-01
+        pass
+finally:
+    def test_in_finally():
+        # ENC:BEH-02
+        pass
+
+match 1:
+    case 1:
+        def test_in_case():
+            # ENC:BEH-03
+            pass
+'''
+
+
+def test_definitions_in_except_finally_and_match_are_indexed():
+    got = {o.qualname: o.tokens for o in ct.owned_definitions(BRANCHES)}
+    assert got == {
+        "test_in_except": ("ENC:BEH-01",),
+        "test_in_finally": ("ENC:BEH-02",),
+        "test_in_case": ("ENC:BEH-03",),
+    }

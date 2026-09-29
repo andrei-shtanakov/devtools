@@ -86,3 +86,101 @@ def test_drift_missing_upstream_is_error_in_ci_note_locally(tmp_path):
 def test_shipped_contract_is_not_vendored_yet():
     assert not cc.vendored()
     assert cc.integrity_findings() == []
+
+
+# Вложенная вендоренная копия со своим PIN (фикстуры владения, devtools#491):
+# CI зовёт integrity_findings()/drift_findings(CONTRACT_DIR, …) по корню — они
+# обязаны спуститься в неё, даже когда PIN корня (схемы) ещё нет.
+NESTED = "fixtures/ownership"
+UP_PATH = "tests/fixtures/criteria-closure/v1/ownership"
+
+
+def _nested_upstream(tmp_path, content: bytes) -> tuple[Path, str]:
+    import subprocess
+    up = tmp_path / "up"
+    d = up / UP_PATH
+    d.mkdir(parents=True)
+    (d / "01_case.py").write_bytes(content)
+    subprocess.run(["git", "init", "-q", str(up)], check=True)
+    subprocess.run(["git", "-C", str(up), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(up), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "x"], check=True)
+    sha = subprocess.run(["git", "-C", str(up), "rev-parse", "HEAD"], capture_output=True,
+                         text=True, check=True).stdout.strip()
+    return up, sha
+
+
+def _vendor_nested(root, sha, content: bytes, *, upstream_path: str | None = UP_PATH):
+    root.mkdir(parents=True, exist_ok=True)
+    write_min(root)
+    d = root / NESTED
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "01_case.py").write_bytes(content)
+    pin = f"SOURCE: spec-runner @ {sha}\n"
+    if upstream_path is not None:
+        pin += f"UPSTREAM_PATH: {upstream_path}\n"
+    (d / "PIN").write_text(pin)
+    (d / "manifest.json").write_text(json.dumps(
+        {"01_case.py": hashlib.sha256(content).hexdigest()}))
+
+
+def test_nested_copy_integrity_is_checked_from_root(tmp_path):
+    _vendor_nested(tmp_path, "a" * 40, b"x")
+    assert cc.integrity_findings(tmp_path) == []
+    assert not cc.vendored(tmp_path)  # вложенная копия схемы не вендорит
+    (tmp_path / NESTED / "01_case.py").write_bytes(b"y")
+    found = cc.integrity_findings(tmp_path)
+    assert found and all(f"{NESTED}/01_case.py" in f for f in found)
+
+
+def test_nested_copy_drift_uses_upstream_path_from_pin(tmp_path):
+    up, sha = _nested_upstream(tmp_path, b"x")
+    vend = tmp_path / "v"
+    _vendor_nested(vend, sha, b"x")
+    assert cc.drift_findings(vend, up, ci=True) == ([], [])
+    _vendor_nested(vend, sha, b"y")
+    errors, _ = cc.drift_findings(vend, up, ci=True)
+    assert errors and all(f"{NESTED}/01_case.py" in e for e in errors)
+
+
+def test_nested_copy_without_upstream_is_error_in_ci(tmp_path):
+    _vendor_nested(tmp_path, "a" * 40, b"x")
+    errors, _ = cc.drift_findings(tmp_path, None, ci=True)
+    assert errors
+    errors, notes = cc.drift_findings(tmp_path, None, ci=False)
+    assert errors == [] and any("not-checked" in n for n in notes)
+
+
+def test_nested_pin_without_upstream_path_is_refused(tmp_path):
+    up, sha = _nested_upstream(tmp_path, b"x")
+    vend = tmp_path / "v"
+    _vendor_nested(vend, sha, b"x", upstream_path=None)
+    errors, _ = cc.drift_findings(vend, up, ci=True)
+    assert errors and any("UPSTREAM_PATH" in e for e in errors)
+
+
+def test_shipped_nested_copies_are_intact():
+    nested = [p.parent for p in cc.CONTRACT_DIR.rglob("PIN") if p.parent != cc.CONTRACT_DIR]
+    assert nested  # фикстуры владения вендорены
+    assert cc.integrity_findings() == []
+
+
+def test_pin_without_parsable_sha_is_refused_not_read_from_index(tmp_path):
+    up, sha = _nested_upstream(tmp_path, b"x")
+    vend = tmp_path / "v"
+    _vendor_nested(vend, sha, b"x")
+    pin = vend / NESTED / "PIN"
+    for text in (f"# SOURCE: spec-runner @ {sha}\n", "SOURCE: spec-runner @ \n", ""):
+        pin.write_text(text + f"UPSTREAM_PATH: {UP_PATH}\n")
+        errors, _ = cc.drift_findings(vend, up, ci=True)
+        assert errors and any("SOURCE" in e for e in errors), text
+
+
+def test_broken_nested_copy_does_not_switch_the_oracle_off(tmp_path):
+    root_content = b"{}"
+    _vendor(tmp_path, "a" * 40, root_content)  # корень вендорен
+    _vendor_nested(tmp_path, "a" * 40, b"x")
+    assert cc.vendored(tmp_path)
+    (tmp_path / NESTED / "01_case.py").write_bytes(b"y")
+    assert cc.integrity_findings(tmp_path)  # поломка видна гейту CI
+    assert cc.vendored(tmp_path)  # но оракул выключает только корень
