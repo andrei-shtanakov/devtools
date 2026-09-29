@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-29-conductor-design.md` (rev 10). Срез 0 — §11: §2, §3 (без модели), §4, §5.2–5.3 как выдача, §7.1–7.2, таймер на уровне 0, `roadmap.toml` в зонтике.
 
-**План rev 2** — по кругу 1 ревью пары (1 blocker, 13 major, 1 minor). Листинги кода перед отдачей на ревью извлечены во временный каталог, прогнаны тестами, ruff и pyrefly на окружении devtools и живым прогоном на флоте (только чтение) — см. «Проверка плана исполнением» в конце. Живой прогон изменил два решения: обнаружение GitHub — только открытые (окно закрытых упиралось в потолок поиска), ожидание прозаического `@trigger` — `wait_condition`, не вопрос владельцу.
+**План rev 3** — по кругу 2 ревью пары (7 major, 1 minor): одобрение PR на head SHA через GraphQL и выбор actor мержа по `Мерж: человек`/authority-root; ошибки вспомогательных чтений делают граф `partial`; начало ожидания — `git blame` строки пункта; `focus.epic` проверяется на тип; вопросы владельцу — по причине ожидания; `plan` ограничен `roadmap.autonomy`; `record` возвращает 4 при `RM-INVALID`. **Rev 2** — по кругу 1 ревью пары (1 blocker, 13 major, 1 minor). Листинги кода перед отдачей на ревью извлечены во временный каталог, прогнаны тестами, ruff и pyrefly на окружении devtools и живым прогоном на флоте (только чтение) — см. «Проверка плана исполнением» в конце. Живой прогон изменил два решения: обнаружение GitHub — только открытые (окно закрытых упиралось в потолок поиска), ожидание прозаического `@trigger` — `wait_condition`, не вопрос владельцу.
 
 ## Global Constraints
 
@@ -20,6 +20,7 @@
 - `partial` при любом непрочитанном источнике (TODO, GitHub, роадмап, реестр эпиков), неполном поиске или недогруженной ссылке (I6).
 - `_cowork_output/` не читается никогда (I9).
 - Модель не вызывается: проза `@trigger` → `unknown`; структурные формы — `date>=YYYY-MM-DD`, `exists:<repo>:<path>` (§3.4 rev 10).
+- Потолок уровня: `0` при `partial` или `RM-INVALID`, иначе `min(--level, roadmap.autonomy)`; `plan` — симуляция управляющего писателя (личность хоста не проверяется, потому что `plan` не пишет), `run` в срезе 0 всегда 0.
 - Коды выхода: 0 — выполнено; 2 — аргументы CLI; 3 — не собран ни один источник или нет манифеста; 4 — `RM-INVALID` для любой команды, `run` при этом пишет снимок (§7.2 rev 10).
 - Вопрос владельцу — только по позиции с рангом (§5.7 rev 10).
 - Делегируемость в срезе 0 никогда не `yes`: путь authority-root не проверяется до среза 3, поэтому лучший исход — `unverified`, действие `launch?` (§5.2, I5).
@@ -315,6 +316,8 @@ def test_invalid_cases() -> None:
             'writer_since = "2026-09-29T12:00:00Z"\nparked = 5',
         ),
         GOOD.replace('[[focus]]\nepic = "eco.dark-factory"', "focus = 3\n[x]"),
+        GOOD.replace('epic = "eco.dark-factory"', 'epic = ["eco.dark-factory"]'),
+        GOOD.replace('epic = "eco.dark-factory"', "epic = { x = 1 }"),
         "not = [toml",
         None,
     ]
@@ -453,7 +456,11 @@ def _focus(
     result: list[Focus] = []
     for rank, entry in enumerate(raw, start=1):
         epic = entry.get("epic") if isinstance(entry, dict) else None
-        if not isinstance(entry, dict) or epic not in epics:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(epic, str)
+            or epic not in epics
+        ):
             errors.append(_invalid(f"focus #{rank}: неизвестный эпик {epic!r}"))
             continue
         status = epics[epic].get("status")
@@ -554,10 +561,10 @@ git commit -m "feat(conductor): разбор и валидация roadmap.toml 
 - Produces:
   - `RepoTodo(repo, text, sha, state, detail="")`
   - `Inputs` (поля ниже), `save_inputs(inputs, path)`, `load_inputs(path) -> Inputs`, `INPUTS_VERSION = 1`
-  - GhRecord (dict): `repo` (канонический ключ), `number`, `is_pr`, `title`, `body`, `state` (`open|closed`), `state_reason` (`completed|not_planned|None`), `merged`, `author`, `labels`, `updated_at`, `url`, `comments: [{author, body, created_at}]`, `closing_refs: ["<github-name>#N"]`, для PR — `head_sha`, `review_decision`, `ci` (`green|red|pending|unknown`)
+  - GhRecord (dict): `repo` (канонический ключ), `number`, `is_pr`, `title`, `body`, `state` (`open|closed`), `state_reason` (`completed|not_planned|None`), `merged`, `author`, `labels`, `updated_at`, `url`, `comments: [{author, body, created_at}]`, `closing_refs: ["<github-name>#N"]`, для PR — `head_sha`, `review_decision`, `ci` (`green|red|pending|unknown`), `approved_at_head`, `files`, `files_complete`
   - `UMBRELLA`, `FleetRepo(key, git_dir, github_name)`, `fleet_repos(manifest_text) -> list[FleetRepo]`, `github_owner(manifest_text) -> str`, `manifest_index(manifest_text) -> plan_fields.ManifestIndex`
 
-Поля `Inputs`: `captured_at, host, owner, manifest_text, todos, gh_records, gh_state, gh_detail, roadmap_text, roadmap_state, roadmap_source, roadmap_sha, epics, epics_state, epics_detail, repo_names` (GitHub-имя → ключ), `movement` (node_id → ISO последнего коммита с `@id`), `wait_since` (`"<src>|<raw_ref>"` → ISO первого коммита, добавившего `@blocked_by:<raw_ref>`), `history` (`todo://r/id` → SHA коммита, где `@id` был, для отсутствующих предпосылок), `trigger_facts` (текст `exists:…` → `{"exists": bool|None, "sha": str|None, "siblings": [имена]}`).
+Поля `Inputs`: `captured_at, host, owner, manifest_text, todos, gh_records, gh_state, gh_detail, roadmap_text, roadmap_state, roadmap_source, roadmap_sha, epics, epics_state, epics_detail, repo_names` (GitHub-имя → ключ), `movement` (node_id → ISO последнего коммита с `@id`), `wait_since` (`"<src>|<raw_ref>"` → ISO первого коммита, добавившего `@blocked_by:<raw_ref>`), `history` (`todo://r/id` → SHA коммита, где `@id` был, для отсутствующих предпосылок), `trigger_facts` (текст `exists:…` → `{"exists": bool|None, "sha": str|None, "siblings": [имена]}`), `epics_sha`, `aux_state`/`aux_detail` (ошибки вспомогательных чтений: история, факты, политики репо), `human_merge_repos` (репо со строкой `Мерж: человек` в CLAUDE.md на origin), `authority_prefixes` (из собственного `contracts/authority-root/v1/paths.env` devtools).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -683,6 +690,11 @@ class Inputs:
     wait_since: dict[str, str] = field(default_factory=dict)
     history: dict[str, str] = field(default_factory=dict)
     trigger_facts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    epics_sha: str | None = None
+    aux_state: SourceState = "read"
+    aux_detail: str = ""
+    human_merge_repos: list[str] = field(default_factory=list)
+    authority_prefixes: list[str] = field(default_factory=list)
 
 
 def save_inputs(inputs: Inputs, path: Path) -> None:
@@ -797,7 +809,7 @@ git commit -m "feat(conductor): формат входов, манифест из
 
 **Interfaces:**
 - Consumes: `RepoTodo`, `FleetRepo`
-- Produces: `git(repo_dir, *args) -> tuple[int, str, str]` (таймаут → 124, OSError → 127); `default_ref(repo_dir) -> str | None`; `fetch(repo_dir) -> str | None`; `read_file_at_origin(repo_dir, path) -> (text, sha, state, detail)`; `read_todo(repo, root, do_fetch) -> RepoTodo`; `last_commit_mentioning(repo_dir, ref, token) -> str | None`; `first_commit_adding(repo_dir, ref, text, path="TODO.md") -> str | None`; `ever_had(repo_dir, ref, text, path="TODO.md") -> str | None` (SHA); `path_fact(repo_dir, path) -> {"exists", "sha", "siblings"}`.
+- Produces: `git(repo_dir, *args) -> tuple[int, str, str]` (таймаут → 124, OSError → 127); `GitError`; `default_ref(repo_dir) -> str | None`; `fetch(repo_dir) -> str | None`; `read_file_at_origin(repo_dir, path) -> (text, sha, state, detail)`; `read_todo(repo, root, do_fetch) -> RepoTodo`; `last_commit_mentioning(repo_dir, ref, token) -> str | None` (сбой — `GitError`); `line_since(repo_dir, ref, line, path="TODO.md") -> str` (`git blame` строки; сбой — `GitError`); `ever_had(repo_dir, ref, text, path="TODO.md") -> str | None` (SHA; сбой — `GitError`); `path_fact(repo_dir, path) -> {"exists", "sha", "siblings"}` (`exists=None` — ошибка чтения).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -890,7 +902,9 @@ def test_history_helpers(tmp_path: Path) -> None:
     ref = "origin/master"
     assert sg.last_commit_mentioning(clone, ref, "@id:x")
     assert sg.last_commit_mentioning(clone, ref, "@id:nope") is None
-    assert sg.first_commit_adding(clone, ref, "@blocked_by:todo://b/c")
+    assert sg.line_since(clone, ref, 1).endswith("Z")
+    with pytest.raises(sg.GitError):
+        sg.ever_had(clone, "origin/nope", "@id:a")
     assert sg.ever_had(clone, ref, "@id:a")
     assert sg.ever_had(clone, ref, "@id:zzz") is None
     fact = sg.path_fact(clone, "contracts/v1/x.json")
@@ -917,6 +931,7 @@ from __future__ import annotations
 
 import posixpath
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -999,31 +1014,43 @@ def read_todo(repo: FleetRepo, root: Path, do_fetch: bool) -> RepoTodo:
     return RepoTodo(repo.key, text, sha, state, detail)
 
 
+class GitError(Exception):
+    """git не ответил: результат неизвестен, а не «события не было» (I6)."""
+
+
+def _checked(repo_dir: Path, *args: str) -> str:
+    code, out, err = git(repo_dir, *args)
+    if code != 0:
+        raise GitError(f"{repo_dir.name}: git {args[0]}: {err.strip() or code}")
+    return out
+
+
 def last_commit_mentioning(repo_dir: Path, ref: str, token: str) -> str | None:
-    """ISO-дата последнего коммита на ref с token в сообщении."""
-    code, out, _ = git(
-        repo_dir, "log", "-1", "--format=%cI", "-F", f"--grep={token}", ref
-    )
-    return (out.strip() or None) if code == 0 else None
+    """ISO-дата последнего коммита на ref с token в сообщении; сбой — GitError."""
+    out = _checked(repo_dir, "log", "-1", "--format=%cI", "-F", f"--grep={token}", ref)
+    return out.strip() or None
 
 
-def first_commit_adding(
-    repo_dir: Path, ref: str, text: str, path: str = "TODO.md"
-) -> str | None:
-    """ISO-дата первого коммита, где в path появился text (начало ожидания)."""
-    code, out, _ = git(
-        repo_dir, "log", "--reverse", "--format=%cI", "-S", text, ref, "--", path
+def line_since(repo_dir: Path, ref: str, line: int, path: str = "TODO.md") -> str:
+    """ISO-дата коммита, последним менявшего строку line (git blame).
+
+    Нижняя граница начала текущего ожидания конкретного пункта: правка строки
+    «молодит» ожидание — это безопасная сторона (меньше ложных пинков).
+    """
+    out = _checked(
+        repo_dir, "blame", "--porcelain", "-L", f"{line},{line}", ref, "--", path
     )
-    lines = out.split() if code == 0 else []
-    return lines[0] if lines else None
+    for row in out.splitlines():
+        if row.startswith("committer-time "):
+            stamp = datetime.fromtimestamp(int(row.split()[1]), UTC)
+            return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+    raise GitError(f"{repo_dir.name}: blame без committer-time")
 
 
 def ever_had(repo_dir: Path, ref: str, text: str, path: str = "TODO.md") -> str | None:
-    """SHA последнего коммита, менявшего вхождения text в path, или None."""
-    code, out, _ = git(
-        repo_dir, "log", "-1", "--format=%H", "-S", text, ref, "--", path
-    )
-    return (out.strip() or None) if code == 0 else None
+    """SHA последнего коммита, менявшего вхождения text в path; сбой — GitError."""
+    out = _checked(repo_dir, "log", "-1", "--format=%H", "-S", text, ref, "--", path)
+    return out.strip() or None
 
 
 def path_fact(repo_dir: Path, path: str) -> dict[str, Any]:
@@ -1068,7 +1095,7 @@ git commit -m "feat(conductor): git-источник с origin/<default>, ист
 - Create: `conductor/sources_gh.py`, `tests/conductor/test_sources_gh.py`
 
 **Interfaces:**
-- Produces: `Runner = Callable[[list[str]], tuple[int, str, str]]`; `run_gh(args)`; `ci_state(rollup) -> "green"|"red"|"pending"|"unknown"`; `discover(owner, fleet_names: set[str], runner) -> (hits: list[(name, number, is_pr)], state, detail)` — только открытые; `fetch_record(owner, name, number, is_pr, runner) -> dict | None` (без поля `repo`); `GhResult(records, state, detail)`; `collect_gh(owner, names_to_keys, extra_refs, runner, max_hops=3) -> GhResult`, где `extra_refs(records) -> set[(key, number)]`.
+- Produces: `Runner = Callable[[list[str]], tuple[int, str, str]]`; `run_gh(args)`; `ci_state(rollup) -> "green"|"red"|"pending"|"unknown"`; `discover(owner, fleet_names: set[str], runner) -> (hits: list[(name, number, is_pr)], state, detail)` — только открытые; `fetch_record(owner, name, number, is_pr, runner) -> dict | None` (без поля `repo`; для PR — дополнительный GraphQL-запрос: `approved_at_head` — есть `APPROVED` на коммит, равный `headRefOid`, и нет `CHANGES_REQUESTED`; `files`, `files_complete`); `GhResult(records, state, detail)`; `collect_gh(owner, names_to_keys, extra_refs, runner, max_hops=3) -> GhResult`, где `extra_refs(records) -> set[(key, number)]`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1138,6 +1165,21 @@ PR = json.dumps(
         "statusCheckRollup": [{"__typename": "CheckRun", "conclusion": "SUCCESS"}],
     }
 )
+PR_EXTRA = json.dumps(
+    {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "headRefOid": "abc",
+                    "latestReviews": {
+                        "nodes": [{"state": "APPROVED", "commit": {"oid": "old"}}]
+                    },
+                    "files": {"totalCount": 1, "nodes": [{"path": ".github/x.yml"}]},
+                }
+            }
+        }
+    }
+)
 COMMENTS = json.dumps(
     [[{"user": {"login": "u"}, "body": "c", "created_at": "2026-09-28T00:00:00Z"}]]
 )
@@ -1175,6 +1217,7 @@ def test_collects_pr_ci_and_follows_refs() -> None:
         {
             OPEN: (0, json.dumps([_page([("a", 2, True)])]), ""),
             "pr view 2 -R own/a": (0, PR, ""),
+            "api graphql": (0, PR_EXTRA, ""),
             "issue view 1 -R own/a": (0, ISSUE, ""),
             "api --paginate --slurp repos/own/a/issues/2/comments": (0, COMMENTS, ""),
             "api --paginate --slurp repos/own/a/issues/1/comments": (0, COMMENTS, ""),
@@ -1184,6 +1227,8 @@ def test_collects_pr_ci_and_follows_refs() -> None:
     assert result.state == "read"
     by_number = {r["number"]: r for r in result.records}
     assert by_number[2]["ci"] == "green" and by_number[2]["head_sha"] == "abc"
+    assert by_number[2]["approved_at_head"] is False  # одобрен старый SHA
+    assert by_number[2]["files"] == [".github/x.yml"] and by_number[2]["files_complete"]
     assert by_number[2]["closing_refs"] == ["a#1"]
     assert by_number[1]["labels"] == ["inbox"] and by_number[1]["repo"] == "a"
 
@@ -1238,6 +1283,11 @@ ISSUE_FIELDS = "title,body,state,stateReason,author,labels,updatedAt,url"
 PR_FIELDS = (
     "title,body,state,mergedAt,author,labels,updatedAt,url,"
     "closingIssuesReferences,headRefOid,reviewDecision,statusCheckRollup"
+)
+PR_EXTRA = (
+    "query($o:String!,$n:String!,$k:Int!){repository(owner:$o,name:$n)"
+    "{pullRequest(number:$k){headRefOid latestReviews(first:50)"
+    "{nodes{state commit{oid}}} files(first:100){totalCount nodes{path}}}}}"
 )
 RED = {
     "FAILURE",
@@ -1362,6 +1412,41 @@ def _comments(
     ]
 
 
+def _pr_extra(
+    owner: str, name: str, number: int, runner: Runner
+) -> dict[str, Any] | None:
+    """Одобрение именно head SHA и изменённые файлы (gh pr view их не отдаёт)."""
+    code, out, _ = runner(
+        [
+            "api",
+            "graphql",
+            "-f",
+            f"query={PR_EXTRA}",
+            "-f",
+            f"o={owner}",
+            "-f",
+            f"n={name}",
+            "-F",
+            f"k={number}",
+        ]
+    )
+    if code != 0:
+        return None
+    pr = json.loads(out)["data"]["repository"]["pullRequest"]
+    head = pr["headRefOid"]
+    reviews = pr["latestReviews"]["nodes"]
+    approved = any(
+        r["state"] == "APPROVED" and (r.get("commit") or {}).get("oid") == head
+        for r in reviews
+    ) and not any(r["state"] == "CHANGES_REQUESTED" for r in reviews)
+    files = [f["path"] for f in pr["files"]["nodes"]]
+    return {
+        "approved_at_head": approved,
+        "files": files,
+        "files_complete": pr["files"]["totalCount"] <= len(files),
+    }
+
+
 def fetch_record(
     owner: str, name: str, number: int, is_pr: bool, runner: Runner
 ) -> dict[str, Any] | None:
@@ -1393,10 +1478,14 @@ def fetch_record(
         ],
     }
     if is_pr:
+        extra = _pr_extra(owner, name, number, runner)
+        if extra is None:
+            return None
         record.update(
             head_sha=raw.get("headRefOid"),
             review_decision=raw.get("reviewDecision"),
             ci=ci_state(raw.get("statusCheckRollup")),
+            **extra,
         )
     return record
 
@@ -1537,7 +1626,14 @@ def record(repo: str, number: int, **fields: Any) -> dict[str, Any]:
         "closing_refs": [],
     }
     if fields.get("is_pr"):
-        base.update(head_sha="h", review_decision="REVIEW_REQUIRED", ci="unknown")
+        base.update(
+            head_sha="h",
+            review_decision="REVIEW_REQUIRED",
+            ci="unknown",
+            approved_at_head=False,
+            files=[],
+            files_complete=True,
+        )
     base.update(fields)
     return base
 
@@ -1687,6 +1783,7 @@ def test_any_unread_source_makes_graph_partial() -> None:
     assert build_graph(inputs(todos, gh_state="error")).partial
     assert build_graph(inputs(todos, epics_state="error")).partial
     assert build_graph(inputs(todos, roadmap_state="error")).partial
+    assert build_graph(inputs(todos, aux_state="error")).partial
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1939,7 +2036,8 @@ def _sources(inputs: Inputs) -> list[Source]:
         Source(
             "roadmap", inputs.roadmap_state, inputs.roadmap_source, inputs.roadmap_sha
         ),
-        Source("epics", inputs.epics_state, inputs.epics_detail),
+        Source("epics", inputs.epics_state, inputs.epics_detail, inputs.epics_sha),
+        Source("history", inputs.aux_state, inputs.aux_detail),
     ]
     return sources
 
@@ -2110,6 +2208,10 @@ def test_stale_needs_old_wait_and_no_movement() -> None:
     assert busy.reason == "open"
     unknown = _one(_w(todos, wait_since=old_wait), "todo://a/x")
     assert unknown.reason == "open"
+    no_since = _one(
+        _w(todos, movement={"todo://b/y": "2026-09-01T00:00:00Z"}), "todo://a/x"
+    )
+    assert no_since.reason == "open"
 
 
 def test_triggers() -> None:
@@ -2265,7 +2367,8 @@ def _dependency_wait(
         stale = (
             moved is not None
             and _days(now, moved) >= stale_days
-            and (since is None or _days(now, since) >= stale_days)
+            and since is not None
+            and _days(now, since) >= stale_days
         )
         return Wait(
             consumer,
@@ -3084,18 +3187,41 @@ def test_pr_table() -> None:
         {},
         [
             record("a", 1, is_pr=True, ci="red"),
-            record("a", 2, is_pr=True, ci="green", review_decision="REVIEW_REQUIRED"),
-            record("a", 3, is_pr=True, ci="pending", review_decision="APPROVED"),
-            record("a", 4, is_pr=True, ci="green", review_decision="APPROVED"),
+            record("a", 2, is_pr=True, ci="green", review_decision="APPROVED"),
+            record("a", 3, is_pr=True, ci="pending", approved_at_head=True),
+            record("a", 4, is_pr=True, ci="green", approved_at_head=True),
+            record(
+                "a",
+                5,
+                is_pr=True,
+                ci="green",
+                approved_at_head=True,
+                files=["merge-pr.sh"],
+            ),
+            record("b", 6, is_pr=True, ci="green", approved_at_head=True),
+            record(
+                "a",
+                7,
+                is_pr=True,
+                ci="green",
+                approved_at_head=True,
+                files_complete=False,
+            ),
         ],
+        authority_prefixes=["merge-pr.sh", ".github/"],
+        human_merge_repos=["b"],
     )
-    assert [(a[f"a!{n}"].need, a[f"a!{n}"].actor) for n in (1, 2, 3, 4)] == [
-        ("fix_pr", "own"),
-        ("review", "review-loop"),
-        ("wait_ci", "ci"),
-        ("merge", "merge-contour"),
-    ]
-    assert all(a[f"a!{n}"].action in ("—", "pr_nudge") for n in (1, 2, 3, 4))
+    got = {n: (a[n].need, a[n].actor) for n in a}
+    assert got == {
+        "a!1": ("fix_pr", "own"),
+        "a!2": ("review", "review-loop"),  # одобрен не head SHA
+        "a!3": ("wait_ci", "ci"),
+        "a!4": ("merge", "merge-contour"),
+        "a!5": ("merge", "owner"),  # authority-root
+        "b!6": ("merge", "owner"),  # «Мерж: человек»
+        "a!7": ("merge", "merge-contour?"),  # список файлов неполон
+    }
+    assert all(x.action in ("—", "pr_nudge") for x in a.values())
 
 
 def test_questions_only_for_ranked() -> None:
@@ -3236,18 +3362,27 @@ def delegable(
     return "unverified", "authority-root"
 
 
-def _pr_need(graph: Graph, node_id: str) -> tuple[str, str]:
+def _pr_need(graph: Graph, node_id: str, inputs: Inputs) -> tuple[str, str]:
+    """§5.2: CI и одобрение именно head SHA; мерж человеку — по политике."""
     rec = graph.records.get(node_id, {})
     if rec.get("ci") == "red":
         return "fix_pr", rec.get("author") or "author"
-    if rec.get("review_decision") != "APPROVED":
+    if not rec.get("approved_at_head"):
         return "review", "review-loop"
-    if rec.get("ci") == "green":
-        return "merge", "merge-contour"
-    return "wait_ci", "ci"
+    if rec.get("ci") != "green":
+        return "wait_ci", "ci"
+    files = rec.get("files", [])
+    touches = any(f.startswith(p) for f in files for p in inputs.authority_prefixes)
+    if graph.nodes[node_id].repo in inputs.human_merge_repos or touches:
+        return "merge", "owner"
+    if not rec.get("files_complete") or not inputs.authority_prefixes:
+        return "merge", "merge-contour?"
+    return "merge", "merge-contour"
 
 
-def _need(entry: QueueEntry, graph: Graph, waits: list[Wait]) -> tuple[str, str]:
+def _need(
+    entry: QueueEntry, graph: Graph, waits: list[Wait], inputs: Inputs
+) -> tuple[str, str]:
     node = graph.nodes[entry.node_id]
     unknown = [w for w in waits_of(waits, entry.node_id) if w.verdict == "unknown"]
     if any(w.reason not in CONDITION_REASONS for w in unknown):
@@ -3255,7 +3390,7 @@ def _need(entry: QueueEntry, graph: Graph, waits: list[Wait]) -> tuple[str, str]
     if unknown:
         return "wait_condition", "condition"
     if node.kind == "pr":
-        return _pr_need(graph, entry.node_id)
+        return _pr_need(graph, entry.node_id, inputs)
     if node.kind == "issue":
         if "inbox" in node.labels:
             return "intake", "conductor"
@@ -3312,7 +3447,7 @@ def assess(
 ) -> Assessment:
     """Позиция → уровень, actor/need, делегируемость, действие (не исполняется)."""
     level = position_level(entry, roadmap, run_level)
-    need, actor = _need(entry, graph, waits)
+    need, actor = _need(entry, graph, waits, inputs)
     verdict: Delegable = "unverified"
     reason: str | None = None
     if need == "implement":
@@ -3367,7 +3502,7 @@ import jsonschema
 import pytest
 
 from conductor.snapshot import SCHEMA_PATH, evaluate, question_id, to_snapshot
-from tests.conductor.fixtures import inputs
+from tests.conductor.fixtures import ROADMAP, inputs, record
 
 SCHEMA = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
@@ -3420,9 +3555,37 @@ def test_schema_rejects_node_without_work_state() -> None:
         jsonschema.validate(snap, SCHEMA)
 
 
+def test_questions_by_reason() -> None:
+    snap = _snap(
+        {
+            "a": "- [ ] g @owner:github:own @id:goal @epic:eco.focus1 "
+            "@blocked_by:todo://b/gone\n"
+            "- [x] s @owner:TBD @id:shipped\n",
+            "b": "- [ ] y @owner:TBD @id:y\n",
+        },
+        records=[record("a", 1, body="slug: shipped\n", labels=["inbox"])],
+        history={"todo://b/gone": "deadbeef"},
+    )
+    got = {(q["subject"], q["reason"]): q for q in snap["owner_questions"]}
+    cancelled = got[("todo://a/goal", "cancelled")]
+    assert cancelled["options"] == ["drop-wait", "replace", "keep"]
+    assert "todo://b/gone" in cancelled["evidence"]
+    assert got[("a#1", "GR-SHIPPED-OPEN")]["options"] == ["close", "keep"]
+
+
+def test_plan_ceiling_respects_roadmap_autonomy() -> None:
+    rm = ROADMAP.replace('epic = "eco.focus1"', 'epic = "eco.focus1"\nautonomy = 3')
+    inp = inputs(
+        {"a": "- [ ] x @owner:github:own @id:x @epic:eco.focus1\n"}, roadmap=rm
+    )
+    result = evaluate(inp, 3)
+    assert result.run_level == 0
+    assert all(a.action == "—" for a in result.assessments.values())
+
+
 def test_question_id_depends_on_options_order() -> None:
-    a = question_id("decide", "todo://a/x", "ev", ("delegate", "keep"))
-    b = question_id("decide", "todo://a/x", "ev", ("keep", "delegate"))
+    a = question_id("owner-tbd", "todo://a/x", "ev", ("delegate", "keep"))
+    b = question_id("owner-tbd", "todo://a/x", "ev", ("keep", "delegate"))
     assert a != b and len(a) == 8
 ```
 
@@ -3524,7 +3687,22 @@ SCHEMA_PATH = (
     / "v1"
     / "schema.json"
 )
-OWNER_OPTIONS = ("delegate", "keep")
+DELEGATE = ("делегировать агенту?", ("delegate", "keep"))
+WAIT_QUESTIONS = {
+    "cancelled": (
+        "предпосылка отменена: снять ожидание или найти замену?",
+        ("drop-wait", "replace", "keep"),
+    ),
+    "missing": (
+        "предпосылки нет ни в одном TODO: снять ожидание или завести запрос?",
+        ("drop-wait", "request", "keep"),
+    ),
+    "version_mismatch": (
+        "вышла другая версия, чем ждали: принять её?",
+        ("accept-version", "keep"),
+    ),
+}
+SHIPPED = ("похоже отгружено: закрыть issue?", ("close", "keep"))
 
 
 @dataclass
@@ -3551,7 +3729,11 @@ def evaluate(inputs: Inputs, run_level: int) -> Result:
         graph, inputs, inputs.captured_at, roadmap.limits["stale_after_days"]
     )
     cycles = find_cycles(dependency_adjacency(graph))
-    level = 0 if graph.partial or not roadmap.valid else run_level
+    # §2.4: потолок прогона. plan — симуляция управляющего писателя: личность
+    # хоста не проверяется (plan не пишет), но роадмап ограничивает всегда.
+    level = (
+        0 if graph.partial or not roadmap.valid else min(run_level, roadmap.autonomy)
+    )
     queue = build_queue(graph, waits, roadmap, inputs.captured_at)
     attention = build_attention(graph, waits, roadmap, inputs.captured_at)
     assessments = {
@@ -3581,23 +3763,42 @@ def question_id(
     return hashlib.sha256(raw).hexdigest()[:8]
 
 
+def _question(
+    subject: str, reason: str, evidence: str, text: str, options: tuple[str, ...]
+) -> dict[str, Any]:
+    return {
+        "question_id": question_id(reason, subject, evidence, options),
+        "subject": subject,
+        "reason": reason,
+        "evidence": evidence,
+        "question": f"{subject}: {text}",
+        "options": list(options),
+        "default": "keep",
+    }
+
+
 def _questions(result: Result) -> list[dict[str, Any]]:
+    """Вопрос по причине: у ожидания — своя, у делегируемости — своя (§5.7)."""
     out = []
     for a in result.assessments.values():
         if not a.ask_owner:
             continue
-        reason = a.block_reason or "unknown-wait"
-        out.append(
-            {
-                "question_id": question_id("decide", a.node_id, reason, OWNER_OPTIONS),
-                "subject": a.node_id,
-                "reason": reason,
-                "question": f"{a.node_id}: {reason} — делегировать агенту?",
-                "options": list(OWNER_OPTIONS),
-                "default": "keep",
-            }
-        )
-    return sorted(out, key=lambda q: q["subject"])
+        waits = [
+            w
+            for w in result.waits
+            if w.consumer == a.node_id and w.reason in WAIT_QUESTIONS
+        ]
+        for w in waits:
+            text, options = WAIT_QUESTIONS[w.reason]
+            evidence = f"{w.prereq}|{w.evidence}"
+            out.append(_question(a.node_id, w.reason, evidence, text, options))
+        if not waits:
+            reason = a.block_reason or "unknown-wait"
+            out.append(_question(a.node_id, reason, reason, *DELEGATE))
+    for f in result.findings:
+        if f.code == "GR-SHIPPED-OPEN":
+            out.append(_question(f.subject, f.code, f.detail, *SHIPPED))
+    return sorted(out, key=lambda q: (q["subject"], q["reason"]))
 
 
 def _metrics(result: Result, questions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3698,7 +3899,7 @@ def to_snapshot(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run --frozen pytest tests/conductor/test_snapshot.py -q`
-Expected: PASS (5 passed)
+Expected: PASS (7 passed)
 
 - [ ] **Step 5: Commit**
 
@@ -3717,7 +3918,7 @@ git commit -m "feat(conductor): конвейер, снимок conductor-snapsho
 
 **Interfaces:**
 - Consumes: Tasks 2–11
-- Produces: `read_epics(root) -> (dict, state, detail)`; `collect(root, manifest_text, roadmap_path, do_fetch, runner, host, now) -> Inputs`; `render_status(result, top=15)`, `render_why(result, node_id)`, `render_plan(result)`; `main(argv=None) -> int`.
+- Produces: `read_epics(root) -> (dict, state, detail, sha)`; `read_authority_prefixes() -> list[str] | None`; `collect(root, manifest_text, roadmap_path, do_fetch, runner, host, now) -> Inputs`; `render_status(result, top=15)`, `render_why(result, node_id)`, `render_plan(result)`; `main(argv=None) -> int`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3779,7 +3980,8 @@ def test_read_epics_ok(tmp_path: Path) -> None:
             )
         },
     )
-    epics, state, detail = read_epics(tmp_path)
+    epics, state, detail, sha = read_epics(tmp_path)
+    assert sha
     assert state == "read", detail
     assert epics["eco.tooling"]["status"] == "active"
 
@@ -3799,6 +4001,52 @@ def test_collect_marks_missing_sources(tmp_path: Path) -> None:
     assert {t.repo: t.state for t in inp.todos} == {"a": "read", UMBRELLA: "error"}
     assert (inp.gh_state, inp.roadmap_state, inp.epics_state) == ("error",) * 3
     assert inp.manifest_text == manifest
+
+
+def test_collect_history_reversed_tags_and_human_merge(tmp_path: Path) -> None:
+    manifest = (
+        '[cores.a]\nrepo_url = "git@github.com:own/a.git"\ngit_dir = "a"\n'
+        '[cores.b]\nrepo_url = "git@github.com:own/b.git"\ngit_dir = "b"\n'
+    )
+    _repo(
+        tmp_path / "a",
+        {
+            "TODO.md": "- [ ] x @blocked_by:todo://b/gone @owner:TBD @id:x\n",
+            "CLAUDE.md": "## Git\n- Мерж: человек\n",
+        },
+    )
+    up = tmp_path / "b-up"
+    _repo(tmp_path / "b", {"TODO.md": "- [ ] g @owner:TBD @id:gone\n"})
+    (up / "TODO.md").write_text("- [ ] other @owner:TBD @id:other\n")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(up),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qam",
+            "drop",
+        ],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(tmp_path / "b"), "fetch", "-q"], check=True)
+    inp = collect(
+        tmp_path,
+        manifest,
+        None,
+        False,
+        lambda _: (1, "", "offline"),
+        "h",
+        "2026-09-29T12:00:00Z",
+    )
+    assert inp.wait_since["todo://a/x|todo://b/gone"].endswith("Z")
+    assert inp.history["todo://b/gone"]
+    assert inp.human_merge_repos == ["a"]
+    assert inp.authority_prefixes and inp.aux_state == "read"
 ```
 
 `tests/conductor/test_cli.py`:
@@ -3808,7 +4056,7 @@ from pathlib import Path
 
 from conductor.__main__ import main
 from conductor.inputs import save_inputs
-from tests.conductor.fixtures import inputs
+from tests.conductor.fixtures import ROADMAP, inputs
 
 TODOS = {
     "a": "- [ ] g @owner:github:own @id:goal @epic:eco.focus1 @blocked_by:todo://b/b\n",
@@ -3833,6 +4081,9 @@ def test_status_why_plan_from_replay_without_manifest_file(
     out = capsys.readouterr().out
     assert "todo://a/goal" in out and "need=decide" in out
     assert main(["plan", "--level", "3", "--replay", str(rep)]) == 0
+    assert "план на уровне 0" in capsys.readouterr().out  # autonomy = 0
+    rep3 = _replay(tmp_path, roadmap=ROADMAP.replace("autonomy = 0", "autonomy = 3"))
+    assert main(["plan", "--level", "3", "--replay", str(rep3)]) == 0
     assert "план на уровне 3" in capsys.readouterr().out
 
 
@@ -3863,6 +4114,8 @@ def test_invalid_roadmap_exit_4_for_every_command(tmp_path: Path) -> None:
     assert main(["run", "--replay", str(rep), "--out", str(out)]) == 4
     assert (next(out.iterdir()) / "snapshot.json").is_file()
     assert main(["status", "--replay", str(rep)]) == 4
+    assert main(["record", str(tmp_path / "rec"), "--replay", str(rep)]) == 4
+    assert (tmp_path / "rec" / "inputs.json").is_file()
 
 
 def test_gh_error_still_exit_0(tmp_path: Path, capsys) -> None:
@@ -3894,7 +4147,9 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'conductor.collect'`
 ```python
 """Сбор Inputs из git и GitHub — единственное место ввода-вывода чтения.
 
-Сбой любого источника становится его состоянием, а не исключением (I6).
+Сбой любого источника становится его состоянием, а не исключением (I6):
+ошибки вспомогательных чтений (история, факты путей, политики репо) копятся в
+источнике `history`, и граф с ними — partial.
 """
 
 from __future__ import annotations
@@ -3908,36 +4163,48 @@ import plan_fields as pf
 
 from conductor.graph import referenced_issues
 from conductor.inputs import Inputs, RepoTodo
-from conductor.manifest import UMBRELLA, FleetRepo, fleet_repos, github_owner
+from conductor.manifest import (
+    UMBRELLA,
+    FleetRepo,
+    fleet_repos,
+    github_owner,
+    manifest_index,
+)
 from conductor.model import SourceState
 from conductor.sources_gh import Runner, collect_gh
 from conductor.sources_git import (
+    GitError,
     default_ref,
     ever_had,
-    first_commit_adding,
     last_commit_mentioning,
+    line_since,
     path_fact,
     read_file_at_origin,
     read_todo,
 )
 from conductor.waits import EXISTS_RE
 
-ID_RE = re.compile(r"@id:([a-z0-9][a-z0-9._-]{0,63})")
-BLOCKED_RE = re.compile(
-    r"@id:([a-z0-9][a-z0-9._-]{0,63})[^\n]*?"
-    r"@blocked_by:(\S+)"
-)
 TRIGGER_RE = re.compile(r'@trigger:"([^"]*)"')
+HUMAN_MERGE_RE = re.compile(r"(?m)^\s*(?:[-*]\s*)?Мерж:\s*человек\s*$")
+AUTHORITY_ROOT_ENV = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "authority-root"
+    / "v1"
+    / "paths.env"
+)
 
 
-def read_epics(root: Path) -> tuple[dict[str, dict[str, Any]], SourceState, str]:
+def read_epics(
+    root: Path,
+) -> tuple[dict[str, dict[str, Any]], SourceState, str, str | None]:
     """epics.toml зонтика с origin/<default>; ошибки реестра → error."""
     umbrella = root / UMBRELLA
     if not (umbrella / ".git").exists():
-        return {}, "error", f"нет клона {umbrella}"
-    text, _, state, detail = read_file_at_origin(umbrella, "epics.toml")
+        return {}, "error", f"нет клона {umbrella}", None
+    text, sha, state, detail = read_file_at_origin(umbrella, "epics.toml")
     if state != "read" or text is None:
-        return {}, "error", detail
+        return {}, "error", detail, sha
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "epics.toml"
         path.write_text(text, encoding="utf-8")
@@ -3946,54 +4213,113 @@ def read_epics(root: Path) -> tuple[dict[str, dict[str, Any]], SourceState, str]
         d["message"] for d in registry.diagnostics if d.get("severity") == "error"
     ]
     if errors:
-        return {}, "error", "; ".join(errors)
-    return {k: dict(v) for k, v in registry.epics.items()}, "read", ""
+        return {}, "error", "; ".join(errors), sha
+    return {k: dict(v) for k, v in registry.epics.items()}, "read", "", sha
 
 
-def _history(
-    root: Path, repos: dict[str, FleetRepo], todos: list[RepoTodo]
-) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
-    """movement (@id в коммитах), wait_since, history отсутствующих пунктов."""
-    texts = {t.repo: t.text or "" for t in todos}
-    movement: dict[str, str] = {}
-    since: dict[str, str] = {}
-    history: dict[str, str] = {}
-    for todo in todos:
-        if todo.state != "read":
-            continue
-        repo_dir = root / repos[todo.repo].git_dir
-        ref = default_ref(repo_dir)
+def read_authority_prefixes() -> list[str] | None:
+    """Префиксы authority-root из собственного контракта devtools."""
+    if not AUTHORITY_ROOT_ENV.is_file():
+        return None
+    for line in AUTHORITY_ROOT_ENV.read_text(encoding="utf-8").splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "AUTHORITY_ROOT_PREFIXES":
+            return value.split()
+    return None
+
+
+class _History:
+    """movement, wait_since, history и ошибки вспомогательных чтений."""
+
+    def __init__(self, root: Path, repos: dict[str, FleetRepo]) -> None:
+        self.root, self.repos = root, repos
+        self.movement: dict[str, str] = {}
+        self.since: dict[str, str] = {}
+        self.history: dict[str, str] = {}
+        self.errors: list[str] = []
+        self._refs: dict[str, str | None] = {}
+
+    def ref(self, repo: str) -> tuple[Path, str | None]:
+        repo_dir = self.root / self.repos[repo].git_dir
+        if repo not in self._refs:
+            self._refs[repo] = default_ref(repo_dir)
+        return repo_dir, self._refs[repo]
+
+    def collect(self, snapshot: dict[str, Any], readable: set[str]) -> None:
+        nodes = {n["node_id"]: n for n in snapshot["nodes"]}
+        for node in nodes.values():
+            if node["declared_status"] == "open" and node["repo"] in readable:
+                self._movement(node)
+        for ref in snapshot["references"]:
+            if ref["kind"] == "blocked_by" and ref["provenance"]["repo"] in readable:
+                self._wait(ref, nodes)
+
+    def _movement(self, node: dict[str, Any]) -> None:
+        repo_dir, ref = self.ref(node["repo"])
         if ref is None:
-            continue
-        for item in sorted(set(ID_RE.findall(texts[todo.repo]))):
-            if when := last_commit_mentioning(repo_dir, ref, f"@id:{item}"):
-                movement[f"todo://{todo.repo}/{item}"] = when
-        for item, raw in BLOCKED_RE.findall(texts[todo.repo]):
-            if when := first_commit_adding(repo_dir, ref, f"@blocked_by:{raw}"):
-                since[f"todo://{todo.repo}/{item}|{raw}"] = when
-            if not raw.startswith("todo://"):
-                continue
-            repo, _, target = raw.removeprefix("todo://").partition("/")
-            if repo not in repos or f"@id:{target}" in texts.get(repo, ""):
-                continue
-            target_dir = root / repos[repo].git_dir
-            target_ref = default_ref(target_dir)
-            if target_ref and (
-                sha := ever_had(target_dir, target_ref, f"@id:{target}")
-            ):
-                history[raw] = sha
-    return movement, since, history
+            return
+        try:
+            when = last_commit_mentioning(repo_dir, ref, f"@id:{node['id']}")
+        except GitError as exc:
+            self.errors.append(str(exc))
+            return
+        if when:
+            self.movement[node["node_id"]] = when
+
+    def _wait(self, ref: dict[str, Any], nodes: dict[str, Any]) -> None:
+        repo_dir, git_ref = self.ref(ref["provenance"]["repo"])
+        raw = ref.get("raw_ref") or ""
+        try:
+            if git_ref is not None:
+                line = ref["provenance"]["line"]
+                self.since[f"{ref['source_node_id']}|{raw}"] = line_since(
+                    repo_dir, git_ref, line
+                )
+            if ref.get("resolved_target") is None and raw.startswith("todo://"):
+                self._history(raw, nodes)
+        except GitError as exc:
+            self.errors.append(str(exc))
+
+    def _history(self, raw: str, nodes: dict[str, Any]) -> None:
+        repo, _, target = raw.removeprefix("todo://").partition("/")
+        if repo not in self.repos or raw in nodes:
+            return
+        repo_dir, git_ref = self.ref(repo)
+        if git_ref is not None and (
+            sha := ever_had(repo_dir, git_ref, f"@id:{target}")
+        ):
+            self.history[raw] = sha
 
 
 def _trigger_facts(
-    root: Path, repos: dict[str, FleetRepo], todos: list[RepoTodo]
+    root: Path, repos: dict[str, FleetRepo], todos: list[RepoTodo], errors: list[str]
 ) -> dict[str, dict[str, Any]]:
     facts: dict[str, dict[str, Any]] = {}
     for todo in todos:
         for text in TRIGGER_RE.findall(todo.text or ""):
             if (m := EXISTS_RE.match(text)) and m.group(1) in repos:
-                facts[text] = path_fact(root / repos[m.group(1)].git_dir, m.group(2))
+                fact = path_fact(root / repos[m.group(1)].git_dir, m.group(2))
+                if fact["exists"] is None:
+                    errors.append(f"факт не прочитан: {text}")
+                facts[text] = fact
     return facts
+
+
+def _human_merge(
+    root: Path, repos: dict[str, FleetRepo], errors: list[str]
+) -> list[str]:
+    """Репо с объявленной строкой `Мерж: человек` в CLAUDE.md на origin."""
+    found = []
+    for repo in repos.values():
+        repo_dir = root / repo.git_dir
+        if not (repo_dir / ".git").exists():
+            continue
+        text, _, state, detail = read_file_at_origin(repo_dir, "CLAUDE.md")
+        if state == "error":
+            errors.append(f"{repo.key}: CLAUDE.md: {detail}")
+        elif text is not None and HUMAN_MERGE_RE.search(text):
+            found.append(repo.key)
+    return sorted(found)
 
 
 def _roadmap(
@@ -4027,8 +4353,26 @@ def collect(
         owner, names, lambda recs: referenced_issues(recs, todos, norm), runner
     )
     rm_text, rm_sha, rm_state, rm_source = _roadmap(root, roadmap_path)
-    epics, epics_state, epics_detail = read_epics(root)
-    movement, wait_since, history = _history(root, repos, todos)
+    epics, epics_state, epics_detail, epics_sha = read_epics(root)
+    snapshot = pf.parse_fleet(
+        [
+            pf.RepoInput(
+                t.repo,
+                todo_text=t.text or "",
+                commit=t.sha,
+                available=t.state in ("read", "absent"),
+            )
+            for t in todos
+        ],
+        manifest_index(manifest_text),
+    )
+    hist = _History(root, repos)
+    hist.collect(snapshot, {t.repo for t in todos if t.state == "read"})
+    facts = _trigger_facts(root, repos, todos, hist.errors)
+    human = _human_merge(root, repos, hist.errors)
+    prefixes = read_authority_prefixes()
+    if prefixes is None:
+        hist.errors.append(f"нет {AUTHORITY_ROOT_ENV}")
     return Inputs(
         captured_at=now,
         host=host,
@@ -4046,10 +4390,15 @@ def collect(
         epics_state=epics_state,
         epics_detail=epics_detail,
         repo_names=names,
-        movement=movement,
-        wait_since=wait_since,
-        history=history,
-        trigger_facts=_trigger_facts(root, repos, todos),
+        movement=hist.movement,
+        wait_since=hist.since,
+        history=hist.history,
+        trigger_facts=facts,
+        epics_sha=epics_sha,
+        aux_state="error" if hist.errors else "read",
+        aux_detail="; ".join(hist.errors[:5]),
+        human_merge_repos=human,
+        authority_prefixes=prefixes or [],
     )
 ```
 
@@ -4147,6 +4496,7 @@ from typing import Any
 from conductor.collect import collect
 from conductor.inputs import Inputs, RepoTodo, load_inputs, save_inputs
 from conductor.render import render_plan, render_status, render_why
+from conductor.roadmap import parse_roadmap
 from conductor.snapshot import evaluate, to_snapshot
 from conductor.sources_gh import run_gh
 
@@ -4262,7 +4612,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_NO_SOURCE
     if args.command == "record":
         save_inputs(inputs, Path(args.target) / "inputs.json")
-        return EXIT_OK
+        valid = parse_roadmap(inputs.roadmap_text, inputs.epics).valid
+        return EXIT_OK if valid else EXIT_CONFIG
     if args.command == "run":
         return _run(args, inputs)
     result = evaluate(inputs, args.level if args.command == "plan" else 0)
@@ -4580,8 +4931,8 @@ Expected: видны ожидания `spec-runner#603` / `steward#190` с ве�
 
 Перед ревью листинги кода извлечены из этого файла скриптом (блоки после строки вида `` `путь`: ``; для `conductor/__main__.py` — последний, итоговый) во временный каталог вне репо, в раскладке devtools. Результат на 2026-09-29:
 
-- `pytest tests/conductor` на `.venv` devtools — **73 passed**;
+- `pytest tests/conductor` на `.venv` devtools — **76 passed** (rev 3);
 - `ruff check` и `ruff format --check` с `pyproject.toml` devtools — чисто (листинги в плане — уже отформатированный вывод ruff);
 - `pyrefly check conductor` — 0 errors; `shellcheck deploy/conductor/setup.sh` — чисто; `python -m conductor --selftest` — ok.
 
-**Живой прогон на флоте** (`record --no-fetch --roadmap <черновик Task 15>`, только чтение): граф `complete`, 875 узлов, 133 ребра; первая позиция очереди — `spec-runner#603` с `why` = `rank 1 (eco.dark-factory) via todo://devtools/bundle-oracle-slice1 → spec-runner#603; unblocks 3`; циклов нет; `GR-WEAK-EDGE` 64, `GR-ORPHAN-REQUEST` 6, `GR-DANGLING-WAIT` 2; вопросов владельцу 9 (`decision-signal` 5, `owner-tbd` 3, `unknown-wait` 1). Прогон изменил план в двух местах: (1) поиск закрытых за 30 дней вернул 1310 > 1000 — граф был бы `partial` всегда, поэтому обнаружение — только открытые, закрытые приходят дочитыванием; (2) 30 из 38 вопросов владельцу были ожиданиями прозаического `@trigger` — теперь это `wait_condition` без вопроса. Замечание для Task 15: веха-черновик `todo://devtools/bundle-docs-as-oracle` на момент прогона уже закрыта — владельцу стоит выбрать живую веху.
+**Живой прогон на флоте** (`record --no-fetch --roadmap <черновик Task 15>`, только чтение): граф `complete`, 875 узлов, 133 ребра; первая позиция очереди — `spec-runner#603` с `why` = `rank 1 (eco.dark-factory) via todo://devtools/bundle-oracle-slice1 → spec-runner#603; unblocks 3`; циклов нет; `GR-WEAK-EDGE` 64, `GR-ORPHAN-REQUEST` 6, `GR-DANGLING-WAIT` 2; вопросов владельцу 9 (`decision-signal` 5, `owner-tbd` 3, `unknown-wait` 1). Прогон изменил план в двух местах: (1) поиск закрытых за 30 дней вернул 1310 > 1000 — граф был бы `partial` всегда, поэтому обнаружение — только открытые, закрытые приходят дочитыванием; (2) 30 из 38 вопросов владельцу были ожиданиями прозаического `@trigger` — теперь это `wait_condition` без вопроса. Повторный живой прогон после rev 3 (2 мин 37 с на Mac, без `fetch`): граф `complete`, вспомогательные чтения без ошибок, `wait_since` у 46 ожиданий (по `git blame`); из 12 открытых PR один (`atp-platform!322`) одобрен на head SHA с зелёным CI → `merge`/`merge-contour`, остальные — `review`; вопросы владельцу 9 (`decision-signal` 5, `owner-tbd` 3, `missing` 1 — с вариантами «снять ожидание / завести запрос»). Замечание для Task 15: веха-черновик `todo://devtools/bundle-docs-as-oracle` на момент прогона уже закрыта — владельцу стоит выбрать живую веху.
