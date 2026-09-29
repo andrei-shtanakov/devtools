@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
@@ -516,6 +517,71 @@ def agent_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
         for name, value in source.items()
         if name in AGENT_ENV_NAMES or name.startswith(AGENT_ENV_PREFIXES)
     }
+
+
+#: Элемент связки ключей с долгоживущим токеном claude для авторских вызовов
+#: (дизайн песочницы §3, §8/S1). Раннер читает его сам; агент получает
+#: токен только через env вызова — не из унаследованного окружения.
+AUTHOR_CLAUDE_TOKEN_ITEM = "devtools-author-claude-oauth"
+#: settings.json изолированного каталога конфигурации: разрешения — как у
+#: `--dangerously-skip-permissions` авторского вызова (disputatio-адаптер
+#: флагов разрешений не передаёт и опирался на ~/.claude оператора, §8/S3).
+_ISOLATED_CLAUDE_SETTINGS = '{"permissions": {"defaultMode": "bypassPermissions"}}\n'
+
+
+class AgentIsolationError(RuntimeError):
+    """Изоляцию авторского агента обеспечить нельзя — вызов не делается."""
+
+
+def _author_claude_token() -> str:
+    """Токен из связки ключей; нет элемента — AgentIsolationError."""
+    done = subprocess.run(
+        ["security", "find-generic-password", "-s", AUTHOR_CLAUDE_TOKEN_ITEM, "-w"],
+        capture_output=True, text=True, check=False,
+    )
+    token = done.stdout.strip()
+    if done.returncode != 0 or not token:
+        raise AgentIsolationError(
+            f"нет элемента связки ключей {AUTHOR_CLAUDE_TOKEN_ITEM!r} с токеном "
+            "claude (создайте `claude setup-token` + `security "
+            "add-generic-password` в отдельном терминале) — авторский вызов "
+            "claude без изоляции конфигурации не делается"
+        )
+    return token
+
+
+@contextlib.contextmanager
+def claude_isolation(env: dict[str, str]):
+    """env вызова claude со СВОИМ каталогом конфигурации (§8/S1).
+
+    Без него агент грузит плагины и хуки оператора из ~/.claude и пишет
+    туда своё состояние (session-env со скриптом хука, shell-snapshots…).
+    Каталог — временный на вызов, удаляется в finally. Преднамеренную запись
+    в ~/.claude по абсолютному пути это НЕ предотвращает — её ловит трипвайр
+    раннера, а закроет песочница.
+    """
+    token = _author_claude_token()
+    config_dir = tempfile.mkdtemp(prefix="devtools-claude-config-")
+    try:
+        (Path(config_dir) / "settings.json").write_text(
+            _ISOLATED_CLAUDE_SETTINGS, encoding="utf-8"
+        )
+        yield {**env, "CLAUDE_CONFIG_DIR": config_dir,
+               "CLAUDE_CODE_OAUTH_TOKEN": token}
+    finally:
+        shutil.rmtree(config_dir, ignore_errors=True)
+
+
+def _run_agent(argv: list[str], cwd: str, *, claude: bool) -> int:
+    """Запуск авторского агента: env — allowlist, у claude — изоляция."""
+    if not claude:
+        return subprocess.run(argv, cwd=cwd, env=agent_env()).returncode
+    try:
+        with claude_isolation(agent_env()) as env:
+            return subprocess.run(argv, cwd=cwd, env=env).returncode
+    except AgentIsolationError as exc:
+        print(f"author: {exc}")
+        return 2
 
 
 def _author_argv(prompt: str) -> list[str]:
@@ -1858,8 +1924,9 @@ class RealOps:
         except ValueError as exc:
             print(f"author: {exc}")
             return 2
-        done = subprocess.run(argv, cwd=target_dir, env=agent_env())
-        return done.returncode
+        return _run_agent(
+            argv, target_dir, claude=_harness_for("AUTHOR")[0] == "claude"
+        )
 
     def author_disp(
         self, target_dir: str, task: str, config_path: str, slug: str,
@@ -1914,8 +1981,9 @@ class RealOps:
             argv += ["--task", task]
         argv += ["--slug", slug, "--config", config_path, "--root", target_dir]
         # агенты внутри disp наследуют env процесса disp — тот же allowlist
-        done = subprocess.run(argv, cwd=target_dir, env=agent_env())
-        return done.returncode
+        # и та же изоляция конфигурации, если хоть одна роль — claude
+        claude = any(_harness_for(p)[0] == "claude" for p in ("AUTHOR", "REVIEW"))
+        return _run_agent(argv, target_dir, claude=claude)
 
     def _discovery(self, args: list[str], cwd: str) -> _interview.DiscoveryReply:
         """Один вызов discovery CLI соседа + проверка границы (спека §6).

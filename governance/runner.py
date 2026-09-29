@@ -2539,6 +2539,113 @@ def _file_fingerprint(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
 
+#: Конфиг-поверхность под наблюдением трипвайра (дизайн песочницы §9) —
+#: allowlist: только то, что исполняется или меняет поведение сессий
+#: оператора. ~/.claude/projects/, todos/, shell-snapshots/, история и прочее
+#: состояние НЕ наблюдаются: их пишут параллельные интерактивные сессии, и
+#: ложный стоп на каждом прогоне приучил бы трипвайр отключать.
+_CLAUDE_WATCH_FILES = (
+    "settings.json", "settings.local.json", "CLAUDE.md", "keybindings.json",
+    # plugins/ — только реестр того, что установлено и включено; cache/,
+    # marketplaces/, data/, synced/ пишут живые сессии (ревью #489). Подмена
+    # кода УЖЕ установленного плагина в cache/ не наблюдается — закроет
+    # песочница (§9).
+    "plugins/installed_plugins.json", "plugins/known_marketplaces.json",
+    "plugins/config.json", "plugins/blocklist.json",
+)
+_CLAUDE_WATCH_DIRS = ("hooks", "skills", "commands", "agents")
+#: В репо, где работает агент: хук, исполняемый в сессии или при коммите.
+#: Остальные репо воркспейса вне наблюдения до песочницы (§9).
+_REPO_WATCH = (".claude", ".mcp.json", ".git/hooks")
+
+
+def _hook_scripts(claude_home: Path) -> list[Path]:
+    """Файлы, на которые ссылаются хуки settings*.json (первый токен команды
+    — абсолютный путь): подмена скрипта хука исполнится так же, как хук."""
+    scripts: list[Path] = []
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            hooks = json.loads((claude_home / name).read_text(encoding="utf-8")).get(
+                "hooks", {}
+            )
+            commands = [
+                h.get("command", "")
+                for matchers in hooks.values() for m in matchers
+                for h in m.get("hooks", [])
+            ]
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue  # сам settings*.json под наблюдением — его правка видна
+        for command in commands:
+            try:
+                head = shlex.split(command)[0] if command.strip() else ""
+            except ValueError:
+                continue
+            path = Path(os.path.expanduser(head))
+            if path.is_absolute() and path.is_file():
+                scripts.append(path)
+    return scripts
+
+
+def _mcp_servers_digest(path: Path) -> str:
+    """sha256 канонического JSON поддеревьев mcpServers; `unreadable`.
+
+    Отсутствие файла — то же, что файл без MCP-серверов: создание
+    ~/.claude.json без mcpServers ничего не подсаживает."""
+    try:
+        data = (
+            json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        )
+        projects = data.get("projects") or {}
+        servers = {
+            "user": data.get("mcpServers"),
+            "projects": {
+                name: entry.get("mcpServers")
+                for name, entry in sorted(projects.items())
+                if isinstance(entry, dict) and entry.get("mcpServers")
+            },
+        }
+    except (OSError, ValueError, AttributeError):
+        return "unreadable"
+    return hashlib.sha256(
+        json.dumps(servers, sort_keys=True).encode()
+    ).hexdigest()
+
+
+def _claude_home() -> Path:
+    """~/.claude оператора — точка подмены для тестов (герметичность)."""
+    return Path.home() / ".claude"
+
+
+def _config_surface_snapshot(state: RunState) -> dict[str, str]:
+    """sha256 наблюдаемой конфиг-поверхности; отсутствие корня — тоже
+    состояние (подсадка создаёт файл, которого не было)."""
+    claude_home = _claude_home()
+    roots = [
+        *(claude_home / name for name in (*_CLAUDE_WATCH_FILES, *_CLAUDE_WATCH_DIRS)),
+        *(Path(state.target_dir) / rel for rel in _REPO_WATCH),
+        *_hook_scripts(claude_home),
+    ]
+    snapshot: dict[str, str] = {
+        # ~/.claude.json сессии пишут постоянно — наблюдаются только его
+        # mcpServers (user-scope и по проектам): подсаженный MCP-сервер
+        # стартует в следующей сессии оператора (ревью #489)
+        "~/.claude.json#mcpServers": _mcp_servers_digest(
+            claude_home.parent / ".claude.json"
+        ),
+    }
+    for root in roots:
+        files = sorted(root.rglob("*")) if root.is_dir() else [root]
+        present = [f for f in files if f.is_file()]
+        if not present and not root.exists():
+            snapshot[str(root)] = "absent"
+        for path in present:
+            try:
+                snapshot[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                snapshot[str(path)] = "unreadable"
+    return snapshot
+
+
 def _edge_results_snapshot(state: RunState) -> dict[str, str] | None:
     """sha256 каждого файла `edge-check/` прогона; `None` — каталога нет.
 
@@ -2584,27 +2691,34 @@ def _guard_edge_results(
     вызовами; граница — песочница агента (devtools#469).
     """
     before = _edge_results_snapshot(state)
+    config_before = _config_surface_snapshot(state)
     wave_before = {path: _file_fingerprint(path) for path in suspect.wave}
     exit_code = call(*args, **kwargs)
     after = _edge_results_snapshot(state)
-    if after == before:
+    config_after = _config_surface_snapshot(state)
+    config_changed = sorted(
+        path for path in config_before.keys() | config_after.keys()
+        if config_before.get(path) != config_after.get(path)
+    )
+    if after == before and not config_changed:
         return exit_code
     # Статус — ПЕРВЫМ (инвариант `_stop_with_comment`): любой сбой ниже не
     # должен оставить прогон в `running` без записи о подсадке.
     state.status = "stopped_author"
     save(state)
+    edge_changed = after != before
     old, new = before or {}, after or {}
     changed = sorted(
         path for path in old.keys() | new.keys() if old.get(path) != new.get(path)
     )
-    if before is None:
+    if edge_changed and before is None:
         changed.insert(0, "(каталог edge-check появился во время вызова)")
-    elif after is None:
+    elif edge_changed and after is None:
         changed.insert(0, "(каталог edge-check исчез во время вызова)")
     root = run_dir(state.run_id) / "edge-check"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     quarantine = root.with_name(f"edge-check.tampered-{stamp}")
-    if root.exists():
+    if edge_changed and root.exists():
         root.rename(quarantine)
     # Вывод вызова — в карантин прогона, не удалением: это улика того, что
     # сделал пойманный агент, и вне дерева цели (коммит бандла её не видит).
@@ -2632,12 +2746,24 @@ def _guard_edge_results(
             f". НЕ снято (уберите руками до resume, иначе узел примется "
             f"как готовый): {', '.join(failed)}"
         )
+    findings = []
+    if edge_changed:
+        findings.append(
+            "результаты edge-check изменены во время вызова авторского агента "
+            f"(devtools#448): {', '.join(changed)}. Каталог перенесён в "
+            f"{quarantine.name} — подсаженное не переиспользуется, рёбра будут "
+            "проверены заново."
+        )
+    if config_changed:
+        findings.append(
+            "конфиг-поверхность изменена во время вызова авторского агента "
+            f"(дизайн песочницы §9): {', '.join(config_changed)}. НЕ "
+            "откатывается автоматически — это файлы оператора: проверьте их до "
+            "следующей интерактивной сессии и следующего коммита."
+        )
     _stop_with_comment(
         state, ops, "stopped_author",
-        "результаты edge-check изменены во время вызова авторского агента "
-        f"(devtools#448): {', '.join(changed)}. Каталог перенесён в "
-        f"{quarantine.name} — подсаженное не переиспользуется, рёбра будут "
-        f"проверены заново. {outcome}; resume авторит узел заново."
+        f"{' '.join(findings)} {outcome}; resume авторит узел заново."
         f"{suspect.hint}",
     )
     return None
