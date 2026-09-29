@@ -237,9 +237,9 @@ def test_same_content_new_response_refused(tmp_path, monkeypatch):
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
     assert cc.run("run-1", ops) == 0
-    # тот же пин и содержимое: повтор берёт опубликованный результат без вызова
+    # тот же пин и содержимое, результат опубликован: 6 без вызова (G6, ревью I-4)
     calls = sum(1 for c in ops.calls if c[0] == "criteria_verify")
-    assert cc.run("run-1", ops) == 0
+    assert cc.run("run-1", ops) == 6
     assert sum(1 for c in ops.calls if c[0] == "criteria_verify") == calls
 
 
@@ -292,3 +292,54 @@ def _no_real_verify(monkeypatch):
     """Страховка: реальный spec-runner в тестах не зовётся."""
     monkeypatch.setattr(cc.RealOps, "criteria_verify",
                         lambda *a: (_ for _ in ()).throw(AssertionError("real verify")))
+
+
+
+def test_package_local_tests_not_counted_as_product(tmp_path, monkeypatch):
+    """I-2: тесты внутри продуктового корня (pkg/tests/...) — не продукт."""
+    root = tmp_path / "r"
+    (root / "pkg/tests").mkdir(parents=True)
+    (root / "pkg/m.py").write_text("def f():\n    return 1\n")
+    (root / "pkg/tests/test_m.py").write_text("def test_m():\n    assert 1\n")
+    (root / "pkg/conftest.py").write_text("def fx():\n    return 1\n")
+    lines = cc._function_lines(root, ["pkg"])
+    assert "pkg/m.py" in lines
+    assert "pkg/tests/test_m.py" not in lines and "pkg/conftest.py" not in lines
+
+
+def test_response_level_error_publish_failure_is_retried_not_burned(tmp_path, monkeypatch):
+    """I-3: ответ-ошибка без product_roots: ключ — по содержимому, не по stdout;
+    сбой публикации → повтор публикует тот же текст, не 6."""
+    state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    err = _response(target, pin)
+    err.pop("beh")
+    err.pop("product_roots")
+    err["error"] = "collection"
+    ops = _ops((3, json.dumps(err)))
+    ops.review_exit = 1
+    assert cc.run("run-1", ops) == 2
+    ops.review_exit = 0
+    err["error"] = "collection-again"  # другой stdout того же содержимого
+    ops2 = _ops((3, json.dumps(err)))
+    ops2.existing_prs = ops.existing_prs
+    assert cc.run("run-1", ops2) == 0
+    assert not any(c[0] == "criteria_verify" for c in ops2.calls)  # не перемер
+
+
+def test_same_content_on_another_machine_refused(tmp_path, monkeypatch):
+    """I-4: защита от переброса видна в git — frontmatter закрытия на default
+    несёт content_key; чистый out/ (другая машина) не даёт перемерить."""
+    state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
+    assert cc.run("run-1", ops) == 0
+    # «слить» закрытие в default, как сделал бы мерж
+    branch = next(c[1] for c in ops.calls if c[0] == "create_pr")
+    _git(target, "fetch", "-q", "origin", branch)
+    _git(target, "merge", "-q", "--ff-only", f"origin/{branch}")
+    _git(target, "push", "-q", "origin", "master")
+    monkeypatch.setattr(cc, "STATE_ROOT", tmp_path / "other-machine")
+    ops2 = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops2, product_sha=_git(target, "rev-parse", "HEAD")) == 6
+    assert not any(c[0] == "criteria_verify" for c in ops2.calls)

@@ -37,8 +37,10 @@ def roots_findings(roots: object) -> list[str]:
         return ["product_roots пуст или не список"]
     out: list[str] = []
     for r in roots:
-        parts = str(r).replace("\\", "/").split("/")
-        if str(r).startswith("/") or ".." in parts:
+        parts = [p for p in str(r).replace("\\", "/").split("/") if p not in ("", ".")]
+        if not parts:
+            out.append(f"product_root {r!r} — корень репо (включает тесты)")
+        elif str(r).startswith("/") or ".." in parts:
             out.append(f"product_root {r!r} вне репо")
         elif parts[0] in ("tests", "test") or "tests" in parts:
             out.append(f"product_root {r!r} — тестовый путь")
@@ -98,6 +100,9 @@ def validate_response(
             continue
         else:
             out.append(f"{bid}: статус {status!r} вне словаря")
+            continue
+        if not b.get("selectors"):
+            out.append(f"{bid}: traced без единого селектора")
             continue
         defs = {(s["definition"]["file"], s["definition"]["qualname"]) for s in b.get("selectors", [])}
         if defs != expected.get(bid, set()):

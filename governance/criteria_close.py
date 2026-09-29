@@ -35,7 +35,7 @@ from governance import (
     spec_runner_contract,
     task_bridge,
 )
-from governance.frontmatter import join_frontmatter
+from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.ops import Ops, RealOps
 
 STATE_ROOT = Path(__file__).resolve().parent.parent / "out" / "criteria-close"
@@ -136,7 +136,8 @@ def _verify_product(state, product_sha: str | None) -> str:
 
 
 def render_closure(result, *, ws_id, code, bundle_pin, product_sha, response_sha,
-                   spec_runner_version, host) -> str:
+                   spec_runner_version, host, content_key: str | None = None,
+                   product_roots: list[str] | None = None) -> str:
     """Текст файла закрытия; result — Outcome или строка причины not-applicable.
 
     Frontmatter пишется `join_frontmatter` (yaml.safe_dump): отсутствующее
@@ -144,7 +145,10 @@ def render_closure(result, *, ws_id, code, bundle_pin, product_sha, response_sha
     """
     meta: dict = {"workstream": ws_id, "code": code, "bundle_pin": bundle_pin,
                   "product_sha": product_sha, "response_sha256": response_sha,
-                  "spec_runner_version": spec_runner_version, "host": host}
+                  "spec_runner_version": spec_runner_version, "host": host,
+                  # Защита от переброса видна в git (ревью I-4): ключ содержимого
+                  # и корни, по которым он посчитан, — в файле закрытия.
+                  "content_key": content_key, "product_roots": product_roots}
     if isinstance(result, str):
         meta.update(closure="not-applicable", not_applicable_reason=result, human_pending=0)
         body = [f"Оракул не применим: `{result}` (спека §3.6). Приёмки по критериям нет."]
@@ -253,11 +257,22 @@ def _content_sha(root: Path, subdirs: list[str]) -> str:
     return h.hexdigest()
 
 
+def _is_test_file(path: str) -> bool:
+    parts = path.split("/")
+    name = parts[-1]
+    return (
+        "tests" in parts[:-1] or "test" in parts[:-1] or name == "conftest.py"
+        or name.startswith("test_") or name.endswith("_test.py")
+    )
+
+
 def _function_lines(root: Path, roots: list[str]) -> dict[str, set[int]]:
     """Строки внутри тел функций/методов продуктовых корней (G0 rev 8)."""
     out: dict[str, set[int]] = {}
     for r in roots:
         for path, src in _py_files(root, r).items():
+            if _is_test_file(path):
+                continue  # тесты внутри продуктового корня — не продукт (ревью I-2)
             lines: set[int] = set()
             try:
                 tree = ast.parse(src)
@@ -279,16 +294,61 @@ def _key(pin: str, root: Path, roots: list[str]) -> str:
     return f"{pin}:{_content_sha(root, [*roots, 'tests'])}"
 
 
+def _tree_key(pin: str, root: Path) -> str:
+    """Ключ без известных корней (ответ-ошибка): все отслеживаемые *.py —
+    надмножество; по содержимому, не по stdout ответа (ревью I-3)."""
+    files = _git(root, "ls-files", "-z", "--", "*.py").stdout.split("\0")
+    h = hashlib.sha256()
+    for rel in sorted(f for f in files if f):
+        h.update(rel.encode())
+        h.update(b"\0")
+        h.update((root / rel).read_bytes())
+    return f"{pin}:tree:{h.hexdigest()}"
+
+
+def _remote_closure(state) -> dict | None:
+    """Frontmatter файла закрытия на origin/<base> — защита, видимая любой машине."""
+    base = state.base_ref or "master"
+    proc = _git(state.target_dir, "show", f"origin/{base}:{state.bundle_dir}/{CLOSURE_NAME}")
+    if proc.returncode != 0:
+        return None
+    try:
+        meta, _ = split_frontmatter(proc.stdout)
+    except ValueError:
+        return None
+    return meta
+
+
+def _known(run_id: str, keys: list[str]) -> tuple[str, dict] | None:
+    for k in keys:
+        e = _entry(run_id, k)
+        if e and e.get("text"):
+            return k, e
+    return None
+
+
 def _measure(state, ops: Ops, run_id: str, charter, nodes: dict[str, str], bundle_pin: str,
              product_sha: str, installed: str | None, host: str) -> tuple[str, str, str] | int:
     """→ (ключ, closure, текст) или код выхода (2 — отказ шага, 6 — ключ измерен)."""
     root = Path(state.target_dir)
+    remote = _remote_closure(state)
+    cands = [_tree_key(bundle_pin, root)]
     prev_roots = _load(run_id).get("roots")
-    if prev_roots:  # ключ известен до вызова — повтор на том же содержимом без вызова
-        pre = _key(bundle_pin, root, prev_roots)
-        entry = _entry(run_id, pre)
-        if entry and entry.get("text"):
-            return pre, entry["closure"], entry["text"]
+    if prev_roots:
+        cands.insert(0, _key(bundle_pin, root, prev_roots))
+    if remote and remote.get("bundle_pin") == bundle_pin and remote.get("product_roots"):
+        cands.insert(0, _key(bundle_pin, root, list(remote["product_roots"])))
+    known = _known(run_id, cands)
+    if known is not None:  # то же содержимое: без нового вызова spec-runner
+        k, e = known
+        if e.get("merged"):
+            print("criteria-close: это содержимое уже измерено и опубликовано — §3.1 G6")
+            return 6
+        return k, e["closure"], e["text"]
+    if remote and remote.get("content_key") in cands:
+        print("criteria-close: закрытие этого содержимого уже в default-ветке — §3.1 G6: "
+              "доработайте продукт")
+        return 6
     graph = criteria_graph.build_graph(
         nodes["10-requirements.md"], nodes["15-behaviour-spec.md"], nodes["25-acceptance.md"]
     )
@@ -329,16 +389,17 @@ def _measure(state, ops: Ops, run_id: str, charter, nodes: dict[str, str], bundl
         beh_status = {b["id"].split(":", 1)[1]: b["status"] for b in response["beh"]}
         result = criteria_check.outcome(graph, beh_status)
         closure = result.closure
-    key = _key(bundle_pin, root, roots) if roots else f"{bundle_pin}:{hashlib.sha256(out.encode()).hexdigest()}"
-    entry = _entry(run_id, key)
-    if entry and entry.get("text"):
-        print(f"criteria-close: ключ измерен ({entry.get('closure')}) — §3.1 G6: новый результат "
-              "того же содержимого не публикуется; доработайте продукт")
+    key = _key(bundle_pin, root, roots) if roots else _tree_key(bundle_pin, root)
+    known = _known(run_id, [key])
+    if known is not None:
+        print(f"criteria-close: ключ измерен ({known[1].get('closure')}) — §3.1 G6: новый "
+              "результат того же содержимого не публикуется; доработайте продукт")
         return 6
     text = render_closure(result, ws_id=state.ws_id, code=charter.code, bundle_pin=bundle_pin,
                           product_sha=product_sha,
                           response_sha=hashlib.sha256(out.encode()).hexdigest(),
-                          spec_runner_version=installed, host=host)
+                          spec_runner_version=installed, host=host,
+                          content_key=key, product_roots=roots or None)
     data = _load(run_id)
     if roots:
         data["roots"] = roots

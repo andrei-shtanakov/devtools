@@ -142,3 +142,20 @@ def test_product_roots_that_are_not_product_are_refused(roots):
     """Ревью среза 1, I4: корни — чужая цифра; тестовые, абсолютные, с `..` и
     пустые — отказ, иначе тело теста засчитывалось бы исполнением продукта."""
     assert check(mutate(lambda r: r.update(product_roots=roots))) != []
+
+
+def test_traced_without_selectors_refused_even_when_no_test_expected():
+    """Финальное ревью I-1: пустые селекторы == пустое ожидаемое не делают
+    `traced` правдой — `traced` требует хотя бы одного селектора."""
+    expected = ck.expected_definitions({"tests/t.py": "def test_x():\n    assert 1\n"}, "ENC",
+                                       ["BEH-01", "BEH-02"])
+    resp = mutate(lambda r: r["beh"][0].update(selectors=[]))
+    problems = ck.validate_response(REQUEST, resp, expected=expected,
+                                    function_lines={"pkg/m.py": {5, 6}}, lock_sha="L", content_sha="C")
+    assert any("BEH-01" in p for p in problems)
+
+
+@pytest.mark.parametrize("roots", [["."], [""], ["./"]])
+def test_repo_root_as_product_root_refused(roots):
+    """I-2: корень `.` включает тесты — их тела засчитывались бы продуктом."""
+    assert check(mutate(lambda r: r.update(product_roots=roots))) != []

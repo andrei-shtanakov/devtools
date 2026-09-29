@@ -77,3 +77,12 @@ def test_two_charters_same_item_both_checked(tmp_path):
     make(tmp_path, done=True, closure=None, ws="ws-b", code="ABC")
     errors, _ = g.gate_findings(repo, is_vendored=False)
     assert any("ws-b" in e for e in errors)
+
+
+@pytest.mark.parametrize("mark", ["- [X]", "* [x]", "* [X]"])
+def test_done_forms_match_plan_fields(tmp_path, mark):
+    """I-5: гейт видит `[x]` в тех же формах, что check-plan-fields."""
+    repo = make(tmp_path, done=True, closure=None)
+    (repo / "TODO.md").write_text(f"{mark} пункт @id:oracle\n")
+    errors, _ = g.gate_findings(repo, is_vendored=False)
+    assert errors
