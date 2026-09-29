@@ -68,14 +68,28 @@ def _copy_integrity(contract_dir: Path, copy: Path) -> list[str]:
     manifest_path = copy / "manifest.json"
     if not manifest_path.exists():
         return [f"{_where(contract_dir, copy)} есть PIN, но нет manifest.json"]
-    out: list[str] = []
-    for name, digest in sorted(json.loads(manifest_path.read_text()).items()):
+    manifest = json.loads(manifest_path.read_text())
+    out = [
+        f"{_where(contract_dir, copy, name)} лежит в копии, но не в manifest"
+        for name in _unlisted(contract_dir, copy, manifest)
+    ]
+    for name, digest in sorted(manifest.items()):
         path = copy / name
         if not path.exists():
             out.append(f"{_where(contract_dir, copy, name)} из manifest отсутствует")
         elif hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             out.append(f"{_where(contract_dir, copy, name)} не совпал с manifest")
     return out
+
+
+def _unlisted(contract_dir: Path, copy: Path, manifest: dict) -> list[str]:
+    """Файлы вложенной копии вне manifest: иначе строка, убранная из
+    манифеста, выводит файл из-под обеих гарантий. Корень не проверяется —
+    рядом с вендоренными лежат свои файлы (README.md, min-spec-runner.env)."""
+    if copy == contract_dir:
+        return []
+    names = {p.name for p in copy.iterdir() if p.is_file()} - {"PIN", "manifest.json"}
+    return sorted(names - set(manifest))
 
 
 def vendored(contract_dir: Path = CONTRACT_DIR) -> bool:
@@ -123,6 +137,11 @@ def _copy_drift(contract_dir: Path, copy: Path, upstream: Path) -> list[str]:
     manifest_path = copy / "manifest.json"
     if not manifest_path.exists():
         return [f"{_where(contract_dir, copy)} есть PIN, но нет manifest.json"]
+    probe = ["git", "-C", str(upstream), "cat-file", "-e", f"{sha}^{{commit}}"]
+    if subprocess.run(probe, capture_output=True, check=False).returncode != 0:
+        return [
+            f"{_where(contract_dir, copy, 'PIN')} ревизия {sha[:7]} недоступна в апстриме"
+        ]
     errors: list[str] = []
     for name in sorted(json.loads(manifest_path.read_text())):
         proc = subprocess.run(

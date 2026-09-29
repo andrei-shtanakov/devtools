@@ -72,3 +72,18 @@ def test_git_does_not_normalise_them():
         cwd=ROOT,
     ).stdout
     assert out.strip().endswith(": text: unset"), out
+
+
+def test_fixtures_are_outside_the_selfcheck_corpus():
+    # 16/17 не разбираются по замыслу кейса: в корпусе они сделали бы каждый
+    # python-зонд самодиагностики PARTIAL (ревью #497, круг 3).
+    from selfcheck.config import load_config
+    from selfcheck.corpus import list_corpus
+
+    repo = cc.CONTRACT_DIR.parents[2]
+    exclude = load_config(repo / "selfcheck.toml").corpus_exclude
+    corpus = list_corpus(repo, exclude)
+    assert not [
+        p for p in corpus if p.startswith("contracts/criteria-closure/v1/fixtures/")
+    ]
+    assert "governance/criteria_contract.py" in corpus  # исключение не шире нужного

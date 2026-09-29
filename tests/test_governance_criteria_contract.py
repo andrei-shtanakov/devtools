@@ -1,4 +1,5 @@
 """criteria_contract: min-spec-runner.env и целостность вендоренной копии."""
+
 from __future__ import annotations
 
 import hashlib
@@ -26,9 +27,12 @@ def test_vendored_requires_matching_manifest(tmp_path):
     schema = tmp_path / "response.schema.json"
     schema.write_text("{}")
     (tmp_path / "PIN").write_text("SOURCE: spec-runner @ abc1234\n")
-    assert cc.integrity_findings(tmp_path) != [] and not cc.vendored(tmp_path)  # нет manifest
-    (tmp_path / "manifest.json").write_text(json.dumps(
-        {"response.schema.json": hashlib.sha256(b"{}").hexdigest()}))
+    assert cc.integrity_findings(tmp_path) != [] and not cc.vendored(
+        tmp_path
+    )  # нет manifest
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"response.schema.json": hashlib.sha256(b"{}").hexdigest()})
+    )
     assert cc.integrity_findings(tmp_path) == [] and cc.vendored(tmp_path)
     mv = cc.read_min_version(tmp_path / "min-spec-runner.env")
     assert cc.oracle_available("4.3.0", mv, is_vendored=True)
@@ -41,16 +45,34 @@ def test_vendored_requires_matching_manifest(tmp_path):
 
 def _upstream(tmp_path, content: bytes) -> tuple[Path, str]:
     import subprocess
+
     up = tmp_path / "up"
     d = up / "contracts/criteria-closure/v1"
     d.mkdir(parents=True)
     (d / "response.schema.json").write_bytes(content)
     subprocess.run(["git", "init", "-q", str(up)], check=True)
     subprocess.run(["git", "-C", str(up), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(up), "-c", "user.email=t@t", "-c", "user.name=t",
-                    "commit", "-qm", "x"], check=True)
-    sha = subprocess.run(["git", "-C", str(up), "rev-parse", "HEAD"], capture_output=True,
-                         text=True, check=True).stdout.strip()
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(up),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "x",
+        ],
+        check=True,
+    )
+    sha = subprocess.run(
+        ["git", "-C", str(up), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
     return up, sha
 
 
@@ -58,8 +80,9 @@ def _vendor(d, sha, content: bytes):
     write_min(d)
     (d / "response.schema.json").write_bytes(content)
     (d / "PIN").write_text(f"SOURCE: spec-runner @ {sha}\n")
-    (d / "manifest.json").write_text(json.dumps(
-        {"response.schema.json": hashlib.sha256(content).hexdigest()}))
+    (d / "manifest.json").write_text(
+        json.dumps({"response.schema.json": hashlib.sha256(content).hexdigest()})
+    )
 
 
 def test_drift_against_pinned_upstream(tmp_path):
@@ -97,16 +120,34 @@ UP_PATH = "tests/fixtures/criteria-closure/v1/ownership"
 
 def _nested_upstream(tmp_path, content: bytes) -> tuple[Path, str]:
     import subprocess
+
     up = tmp_path / "up"
     d = up / UP_PATH
     d.mkdir(parents=True)
     (d / "01_case.py").write_bytes(content)
     subprocess.run(["git", "init", "-q", str(up)], check=True)
     subprocess.run(["git", "-C", str(up), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(up), "-c", "user.email=t@t", "-c", "user.name=t",
-                    "commit", "-qm", "x"], check=True)
-    sha = subprocess.run(["git", "-C", str(up), "rev-parse", "HEAD"], capture_output=True,
-                         text=True, check=True).stdout.strip()
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(up),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "x",
+        ],
+        check=True,
+    )
+    sha = subprocess.run(
+        ["git", "-C", str(up), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
     return up, sha
 
 
@@ -120,8 +161,9 @@ def _vendor_nested(root, sha, content: bytes, *, upstream_path: str | None = UP_
     if upstream_path is not None:
         pin += f"UPSTREAM_PATH: {upstream_path}\n"
     (d / "PIN").write_text(pin)
-    (d / "manifest.json").write_text(json.dumps(
-        {"01_case.py": hashlib.sha256(content).hexdigest()}))
+    (d / "manifest.json").write_text(
+        json.dumps({"01_case.py": hashlib.sha256(content).hexdigest()})
+    )
 
 
 def test_nested_copy_integrity_is_checked_from_root(tmp_path):
@@ -160,7 +202,9 @@ def test_nested_pin_without_upstream_path_is_refused(tmp_path):
 
 
 def test_shipped_nested_copies_are_intact():
-    nested = [p.parent for p in cc.CONTRACT_DIR.rglob("PIN") if p.parent != cc.CONTRACT_DIR]
+    nested = [
+        p.parent for p in cc.CONTRACT_DIR.rglob("PIN") if p.parent != cc.CONTRACT_DIR
+    ]
     assert nested  # фикстуры владения вендорены
     assert cc.integrity_findings() == []
 
@@ -184,3 +228,18 @@ def test_broken_nested_copy_does_not_switch_the_oracle_off(tmp_path):
     (tmp_path / NESTED / "01_case.py").write_bytes(b"y")
     assert cc.integrity_findings(tmp_path)  # поломка видна гейту CI
     assert cc.vendored(tmp_path)  # но оракул выключает только корень
+
+
+def test_file_in_copy_but_not_in_manifest_is_a_finding(tmp_path):
+    _vendor_nested(tmp_path, "a" * 40, b"x")
+    (tmp_path / NESTED / "02_extra.py").write_bytes(b"z")
+    found = cc.integrity_findings(tmp_path)
+    assert found and any(f"{NESTED}/02_extra.py" in f for f in found)
+
+
+def test_unreachable_revision_is_one_finding_not_per_file(tmp_path):
+    up, _ = _nested_upstream(tmp_path, b"x")
+    vend = tmp_path / "v"
+    _vendor_nested(vend, "b" * 40, b"x")
+    errors, _ = cc.drift_findings(vend, up, ci=True)
+    assert len(errors) == 1 and "ревизи" in errors[0]
