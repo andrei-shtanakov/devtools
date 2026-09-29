@@ -140,3 +140,11 @@ def test_repo_findings_registry_removal_against_base(tmp_path):
         "не зарегистрирован" in f for f in out
     )
     assert cg.main(["--repo", str(repo), "--base", "HEAD"]) == 1
+
+
+def test_charter_without_frontmatter_is_schema1_and_stampable():
+    plain = "# Charter\n\nтело\n"
+    assert cg.read_charter(plain).schema == 1
+    stamped = cg.stamp_charter(plain, code="ENC", plan_item="todo://devtools/x")
+    assert cg.read_charter(stamped) == cg.Charter(2, "ENC", "todo://devtools/x")
+    assert "тело" in stamped

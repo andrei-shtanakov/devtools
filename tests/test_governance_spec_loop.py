@@ -1405,3 +1405,30 @@ def test_ledger_without_authoring_field_still_reads_as_legacy(
         "branch": None, "pr": None, "head": None, "remediated_by": None,
     }), encoding="utf-8")
     assert rs.load(run_id).authoring == "legacy"
+
+
+def test_new_run_passes_code_and_plan_item(runs_root, tmp_path, monkeypatch) -> None:
+    """Спека оракула §1.1: --code/--plan-item рождают charter схемы 2."""
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main([
+        "--subject", "Fleet Inbox", "--repo", "alpha",
+        "--code", "ENC", "--plan-item", "todo://alpha/oracle",
+    ])
+    assert rc == 0
+    kwargs = env.calls[0][1]
+    assert (kwargs["code"], kwargs["plan_item"]) == ("ENC", "todo://alpha/oracle")
+
+
+@pytest.mark.parametrize("extra", [
+    ["--code", "enc", "--plan-item", "todo://alpha/oracle"],
+    ["--code", "ENC", "--plan-item", "alpha#oracle"],
+    ["--code", "ENC"],
+    ["--plan-item", "todo://alpha/oracle"],
+])
+def test_bad_code_or_plan_item_refuses_before_runner(
+    runs_root, tmp_path, monkeypatch, extra
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha", *extra])
+    assert rc == 1
+    assert env.calls == []

@@ -15,7 +15,11 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from governance.frontmatter import split_frontmatter, update_frontmatter
+from governance.frontmatter import (
+    join_frontmatter,
+    split_frontmatter,
+    update_frontmatter,
+)
 
 CODE_RE = re.compile(r"^[A-Z]{2,6}$")
 PLAN_ITEM_RE = re.compile(r"^todo://([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$")
@@ -31,8 +35,11 @@ class Charter:
 
 
 def read_charter(text: str) -> Charter:
-    """Charter из frontmatter; без `schema` — схема 1."""
-    meta, _ = split_frontmatter(text)
+    """Charter из frontmatter; без `schema` (или без frontmatter) — схема 1."""
+    try:
+        meta, _ = split_frontmatter(text)
+    except ValueError:
+        return Charter(schema=1, code=None, plan_item=None)
     schema = meta.get("schema", 1)
     return Charter(
         schema=int(schema) if str(schema).isdigit() else 0,
@@ -115,6 +122,11 @@ def code_change_findings(base: Charter | None, head: Charter) -> list[str]:
 
 def stamp_charter(text: str, *, code: str, plan_item: str) -> str:
     """Вписать схему 2 в авторский charter (раннер, после авторинга)."""
+    updates = {"schema": 2, "code": code, "plan_item": plan_item}
+    try:
+        split_frontmatter(text)
+    except ValueError:
+        return join_frontmatter(updates, text)
     return update_frontmatter(text, {"schema": 2, "code": code, "plan_item": plan_item})
 
 

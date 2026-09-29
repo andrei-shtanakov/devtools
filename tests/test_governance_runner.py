@@ -8443,3 +8443,39 @@ def test_edge_tripwire_keeps_unchanged_wave_sibling(
     assert runner._guard_edge_results(state, FakeOps(), suspect, call) is None
     assert stable.read_text(encoding="utf-8") == "был до вызова\n"
     assert not touched.exists()
+
+
+def test_authoring_stamps_schema2_charter_and_registers_code(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """Спека оракула §1.1–1.2: прогон с code/plan_item рождает charter схемы
+    2 и запись в реестре кодов; реестр коммитится вместе с бандлом."""
+    from governance import charter_guard
+
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    _fake_wave_adapters(monkeypatch, ops)
+    state = runner.start(**_waves_kwargs(
+        tmp_path, "r-schema2", ops, code="ENC", plan_item="todo://alpha/oracle",
+    ))
+    charter = (Path(state.target_dir) / state.bundle_dir / "00-charter.md").read_text()
+    assert charter_guard.read_charter(charter) == charter_guard.Charter(
+        2, "ENC", "todo://alpha/oracle"
+    )
+    reg = charter_guard.load_registry(
+        (Path(state.target_dir) / charter_guard.REGISTRY_PATH).read_text()
+    )
+    assert reg["ENC"]["workstream"] == state.ws_id
+    assert any(charter_guard.REGISTRY_PATH in paths for _, paths, _ in ops.committed)
+
+
+def test_authoring_without_code_keeps_schema1(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    from governance import charter_guard
+
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    _fake_wave_adapters(monkeypatch, ops)
+    state = runner.start(**_waves_kwargs(tmp_path, "r-schema1", ops))
+    charter = (Path(state.target_dir) / state.bundle_dir / "00-charter.md").read_text()
+    assert charter_guard.read_charter(charter).schema == 1
+    assert not (Path(state.target_dir) / charter_guard.REGISTRY_PATH).exists()

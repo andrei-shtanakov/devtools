@@ -37,6 +37,7 @@ from governance import (
     brief_input,
     bundle_dag,
     bundle_inputs,
+    charter_guard,
     criteria_graph,
     decomposition_guard,
     design_guard,
@@ -334,6 +335,8 @@ def start(
     interview_spec: iv.InterviewSpec | None = None,
     allow_legacy_dt: bool = False,
     authoring: str = "waves",
+    code: str | None = None,
+    plan_item: str | None = None,
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
@@ -416,6 +419,8 @@ def start(
         interview=interview_spec.as_state() if interview_spec else None,
         allow_legacy_dt=allow_legacy_dt,
         authoring=authoring,
+        code=code,
+        plan_item=plan_item,
     )
     save(state)
     return advance(state, ops)
@@ -2452,7 +2457,44 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
             state.status = "stopped_author"
             save(state)
             return False
+        if kind == "charter" and state.code and state.plan_item:
+            if not _stamp_charter_schema2(state, ops, target):
+                return False
         op_complete(state, key, skipped=False, exit=exit_code)
+    return True
+
+
+def _stamp_charter_schema2(state: RunState, ops: Ops, charter_path: Path) -> bool:
+    """Спека оракула §1.1–1.2: charter схемы 2 и резерв кода в реестре.
+
+    `approved` в реестре — дата штампа (резервирование кода); неизменность
+    держит `charter_guard` на каждом PR. Занятый код — стоп с причиной.
+    """
+    assert state.code is not None and state.plan_item is not None
+    charter_path.write_text(
+        charter_guard.stamp_charter(
+            charter_path.read_text(encoding="utf-8"),
+            code=state.code, plan_item=state.plan_item,
+        ),
+        encoding="utf-8",
+    )
+    registry = Path(state.target_dir) / charter_guard.REGISTRY_PATH
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    current = registry.read_text(encoding="utf-8") if registry.exists() else ""
+    reg = charter_guard.load_registry(current)
+    if state.code in reg and reg[state.code].get("workstream") == state.ws_id:
+        return True
+    try:
+        registry.write_text(
+            charter_guard.register_code(
+                current, code=state.code, ws_id=state.ws_id,
+                approved=datetime.now().date().isoformat(),
+            ),
+            encoding="utf-8",
+        )
+    except ValueError as exc:
+        _stop_with_comment(state, ops, "stopped_preflight", f"code {state.code}: {exc}")
+        return False
     return True
 
 
@@ -2637,8 +2679,11 @@ def _commit_bundle(state: RunState, ops: Ops, subject_line: str) -> None:
         force = tuple(
             f"{state.bundle_dir}/{rel}" for rel in state.brief["source_paths"]
         )
+    paths = [state.bundle_dir]
+    if state.code:  # реестр кодов коммитится вместе с charter схемы 2
+        paths.append(charter_guard.REGISTRY_PATH)
     ops.commit_paths(
-        state.target_dir, [state.bundle_dir], message, force_paths=force,
+        state.target_dir, paths, message, force_paths=force,
     )
 
 
