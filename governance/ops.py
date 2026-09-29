@@ -463,14 +463,42 @@ def disp_agent(role: str) -> tuple[str, str]:
 #: `docs/superpowers/specs/2026-09-29-author-agent-sandbox-design.md` §3,
 #: F12): env вызова собирается allowlist'ом, а не наследуется — в сессии
 #: оператора десяток секретов (API-ключи, GH_TOKEN, токены ботов), и
-#: наследование отдавало их каждому агенту. Набор замерен вживую
-#: 2026-09-29: claude (связка ключей), codex (`~/.codex/auth.json`) и
-#: `uv run … disp` с ним работают. Секретов в перечне нет по построению —
-#: только пути, имя пользователя, локаль и терминал.
-AGENT_ENV_NAMES = frozenset(
-    {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR"}
-)
-AGENT_ENV_PREFIXES = ("LC_", "XDG_")
+#: наследование отдавало их каждому агенту. Замерено вживую 2026-09-29:
+#: claude (связка ключей), codex (`~/.codex/auth.json`) и `uv run … disp`
+#: с базовой частью работают. Каждое имя — с обоснованием:
+AGENT_ENV_NAMES = frozenset({
+    # базовое: поиск бинарей, домашний каталог (конфиги харнессов)
+    "PATH", "HOME",
+    # без USER claude считает себя незалогиненным (замер I3, reviewer.py);
+    # LOGNAME — POSIX-имя входа, запасной источник у git/getpass
+    "USER", "LOGNAME",
+    # codex исполняет команды через оболочку пользователя, Bash-инструмент
+    # claude тоже берёт её из SHELL; TERM — режим вывода CLI
+    "SHELL", "TERM",
+    # свой TMPDIR харнесса; кодировка вывода (LC_* — префиксом ниже)
+    "TMPDIR", "LANG",
+    # базы XDG — пути, не секреты (кэш uv для disp и т.п.); поимённо, не
+    # префиксом: будущая XDG_-переменная сама к агенту не попадёт
+    "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+    # транспорт модели claude — тот же набор, что у ревьюера edge-check
+    # (`edge_check/reviewer.py`): учётка модели и облака — СВОИ учётные данные
+    # агента (дизайн §3: видимость своей модельной учётки принята для v1);
+    # CLAUDE_CODE_OAUTH_TOKEN до среза песочницы — унаследованный, в срезе —
+    # из отдельного элемента связки ключей (§3)
+    "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_MODEL", "MAX_THINKING_TOKENS", "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "AWS_REGION",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID",
+    # корпоративные сети: без прокси/CA транспорт до модели не достучится
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE",
+    "NODE_EXTRA_CA_CERTS",
+})
+# OPENAI_API_KEY НАМЕРЕННО вне перечня: codex аутентифицируется через
+# `~/.codex/auth.json` (вход ChatGPT), а ключ из env переключил бы его на
+# оплату API — молча, при том что ключ в сессии оператора выставлен.
+#: LC_* — семейство POSIX-локали (LC_ALL, LC_CTYPE, …): только имена локалей.
+AGENT_ENV_PREFIXES = ("LC_",)
 
 
 def agent_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
