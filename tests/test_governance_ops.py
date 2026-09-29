@@ -9,6 +9,7 @@ stdout/stderr/returncode. Живых `git`/`gh`/`codex`/`gate-check` вызов�
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -2137,3 +2138,48 @@ def test_logins_survive_missing_gh_binary(monkeypatch, tmp_path):
 
     assert RealOps().agent_login() is None
     assert RealOps().caller_login() is None
+
+
+# --- devtools#469 / дизайн песочницы §3: env авторского агента — allowlist ---
+
+_OPERATOR_ENV = {
+    "PATH": "/usr/bin", "HOME": "/h", "USER": "u", "LOGNAME": "u",
+    "SHELL": "/bin/zsh", "LANG": "C.UTF-8", "TERM": "xterm", "TMPDIR": "/t/",
+    "LC_ALL": "C.UTF-8", "XDG_STATE_HOME": "/h/.state",
+    # то, что агенту попадать НЕ должно (F12 дизайна)
+    "GH_TOKEN": "x", "GITHUB_TOKEN": "x", "GH_CONFIG_DIR": "/h/.config/review",
+    "OPENAI_API_KEY": "x", "MS_CLIENT_SECRET": "x",
+    "SPEC_RUNNER_TELEGRAM_TOKEN": "x", "CLAUDECODE": "1",
+    "CLAUDE_CODE_MESSAGING_TOKEN": "x", "AUTHOR_HARNESS": "claude",
+}
+_AGENT_ENV = {
+    k: v for k, v in _OPERATOR_ENV.items()
+    if k in {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM",
+             "TMPDIR", "LC_ALL", "XDG_STATE_HOME"}
+}
+
+
+def _operator_env(monkeypatch) -> None:
+    for name in list(os.environ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in _OPERATOR_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
+
+
+def test_author_gets_only_the_allowlisted_env(monkeypatch):
+    """Секреты сессии оператора авторскому агенту не наследуются: env
+    вызова РАВЕН allowlist-подмножеству (равенство, не поиск трёх имён)."""
+    _operator_env(monkeypatch)
+    calls = _install_fake_run(monkeypatch)
+    RealOps().author("/t", "requirements", "s", "ws/spec")
+    assert calls[0].kwargs["env"] == _AGENT_ENV
+
+
+def test_author_disp_gets_only_the_allowlisted_env(monkeypatch):
+    """disp и агенты внутри него наследуют env процесса disp — тот же
+    allowlist."""
+    _operator_env(monkeypatch)
+    calls = _install_fake_run(monkeypatch)
+    RealOps().author_disp("/t", "task", "/cfg.toml", "beh-x")
+    assert calls[0].kwargs["env"] == _AGENT_ENV

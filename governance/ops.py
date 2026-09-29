@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
@@ -456,6 +457,31 @@ def disp_agent(role: str) -> tuple[str, str]:
             )
         model = "claude-opus-5"
     return _DISP_ADAPTERS[harness], model
+
+
+#: Переменные окружения, которые получает авторский агент (дизайн песочницы
+#: `docs/superpowers/specs/2026-09-29-author-agent-sandbox-design.md` §3,
+#: F12): env вызова собирается allowlist'ом, а не наследуется — в сессии
+#: оператора десяток секретов (API-ключи, GH_TOKEN, токены ботов), и
+#: наследование отдавало их каждому агенту. Набор замерен вживую
+#: 2026-09-29: claude (связка ключей), codex (`~/.codex/auth.json`) и
+#: `uv run … disp` с ним работают. Секретов в перечне нет по построению —
+#: только пути, имя пользователя, локаль и терминал.
+AGENT_ENV_NAMES = frozenset(
+    {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR"}
+)
+AGENT_ENV_PREFIXES = ("LC_", "XDG_")
+
+
+def agent_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Окружение авторского агента — allowlist из `environ` (по умолчанию
+    текущего процесса); всё прочее, включая секреты, не передаётся."""
+    source = os.environ if environ is None else environ
+    return {
+        name: value
+        for name, value in source.items()
+        if name in AGENT_ENV_NAMES or name.startswith(AGENT_ENV_PREFIXES)
+    }
 
 
 def _author_argv(prompt: str) -> list[str]:
@@ -1736,7 +1762,7 @@ class RealOps:
         except ValueError as exc:
             print(f"author: {exc}")
             return 2
-        done = subprocess.run(argv, cwd=target_dir)
+        done = subprocess.run(argv, cwd=target_dir, env=agent_env())
         return done.returncode
 
     def author_disp(
@@ -1791,7 +1817,8 @@ class RealOps:
         if not resume:
             argv += ["--task", task]
         argv += ["--slug", slug, "--config", config_path, "--root", target_dir]
-        done = subprocess.run(argv, cwd=target_dir)
+        # агенты внутри disp наследуют env процесса disp — тот же allowlist
+        done = subprocess.run(argv, cwd=target_dir, env=agent_env())
         return done.returncode
 
     def _discovery(self, args: list[str], cwd: str) -> _interview.DiscoveryReply:
