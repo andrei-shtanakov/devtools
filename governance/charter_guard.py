@@ -185,7 +185,15 @@ def _ws(path: str) -> str:
 
 
 def repo_findings(repo: Path, base_ref: str | None) -> list[str]:
-    """Все находки по репо на рабочем дереве против base (если задана)."""
+    """Все находки по репо на рабочем дереве против base (если задана).
+
+    Заданная, но нерезолвящаяся база — находка (fail-closed, ревью #484):
+    «базу не прочитать» ≠ «в базе нет charter'ов».
+    """
+    if base_ref is not None and (
+        not base_ref or _git(repo, "cat-file", "-e", f"{base_ref}^{{commit}}").returncode
+    ):
+        return [f"база {base_ref!r} не резолвится в коммит — сверка с базой невозможна"]
     todo = repo / "TODO.md"
     todo_ids = set(_TODO_ID_RE.findall(todo.read_text())) if todo.exists() else set()
     head = {

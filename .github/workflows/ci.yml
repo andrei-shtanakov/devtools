@@ -30,3 +30,41 @@ jobs:
       # selfcheck S3 probe (spec §10.3); version pinned to the registry range
       - run: cargo install cargo-machete --version 0.9.2 --locked
       - run: SELFCHECK_REQUIRE_TOOLS=1 uv run --frozen --group selfcheck pytest tests/selfcheck -q
+
+  # Оракул бандла, срез 1 (спека docs/superpowers/specs/2026-09-28-bundle-
+  # criteria-oracle-design.md §1.2, §5.4, §7.1): charter схемы 2 (реестр кодов =
+  # charter'ы, порядок влития — first-parent, поэтому полная история), гейт [x]
+  # пункта плана, целостность и дрейф вендоренного criteria-closure/v1.
+  oracle-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - run: uv python install 3.12
+      - run: uv sync --frozen
+      - name: charter_guard
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: uv run --frozen python -m governance.charter_guard --repo . --base "$BASE_SHA"
+      - name: closure_gate
+        run: uv run --frozen python -m governance.closure_gate --repo .
+      - name: criteria-closure/v1 integrity
+        run: >
+          uv run --frozen python -c "import sys;
+          from governance.criteria_contract import integrity_findings as f;
+          r = f(); print(*r, sep='\n'); sys.exit(1 if r else 0)"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: andrei-shtanakov/spec-runner
+          path: spec-runner-upstream
+          fetch-depth: 0
+          persist-credentials: false
+      - name: criteria-closure/v1 drift
+        run: >
+          uv run --frozen python -c "import sys; from pathlib import Path;
+          from governance.criteria_contract import CONTRACT_DIR, drift_findings as f;
+          e, n = f(CONTRACT_DIR, Path('spec-runner-upstream'), ci=True);
+          print(*e, *n, sep='\n'); sys.exit(1 if e else 0)"
