@@ -55,7 +55,9 @@ _FR_ID_RE = re.compile(r"^####\s+((?:FR|NFR)-\d+[a-z]?):", re.M)
 _PRIORITY_RE = re.compile(r"^\*\*Priority\*\*:\s*(\S+)", re.M)
 
 
-def _acceptance_body(req_text: str, req_pin: str, beh_pin: str) -> str:
+def _acceptance_body(
+    req_text: str, req_pin: str, beh_pin: str, beh_text: str = ""
+) -> str:
     """25-acceptance.md валидный наперёд для S4-гардов acceptance (Task 6,
     `governance/acceptance_guard.py`): два пина upstream по ФАКТИЧЕСКОМУ
     содержимому requirements/behaviour-spec (паттерн design), один
@@ -80,6 +82,11 @@ def _acceptance_body(req_text: str, req_pin: str, beh_pin: str) -> str:
         "" if must_id is not None
         else "Must-требований во входном наборе нет\n\n"
     )
+    # Спека оракула §1.7: каждый BEH входит в scenarios не-Won't AC —
+    # фикстура перечисляет BEH фактического behaviour-spec (реальные
+    # бандлы правило выполняют: 0 сирот из 236 BEH).
+    beh_ids = re.findall(r"^####\s+(BEH-\d+[a-z]?):", beh_text, re.M)
+    scenarios = f"scenarios: [{', '.join(beh_ids)}]\n" if beh_ids else ""
     return (
         "---\n"
         "spec_stage: acceptance\n"
@@ -94,6 +101,7 @@ def _acceptance_body(req_text: str, req_pin: str, beh_pin: str) -> str:
         f"{declaration}"
         "#### AC-01: x · verification: manual\n"
         f"traces: [{trace_id}]\n"
+        f"{scenarios}"
         "Наблюдаемый признак: человек видит x.\n\n"
         "## Инварианты покрытия\n\nMust-требования покрыты хотя бы одним AC.\n\n"
         "## Порог приёмки\n\nAC-01 обязателен к выполнению.\n\n"
@@ -127,6 +135,7 @@ class FakeOps:
     delete_branch_ok: bool = True
     existing_prs: dict[str, int] = field(default_factory=dict)
     review_exit: int = 0
+    codes_elsewhere: dict[str, str] = field(default_factory=dict)
     review_fresh_exit: int = 0
     review_body: str | None = None
     existing_files: set[str] = field(default_factory=set)
@@ -278,6 +287,12 @@ class FakeOps:
         self.calls.append(("review", pr))
         return self.review_exit
 
+    def charter_codes_elsewhere(
+        self, target_dir: str, repo_slug: str, base_ref: str, own_ws: str
+    ) -> dict[str, str]:
+        self.calls.append(("charter_codes_elsewhere", base_ref, own_ws))
+        return dict(self.codes_elsewhere)
+
     def pr_facts(self, repo_slug: str, pr: int) -> dict:
         self.calls.append(("pr_facts", pr))
         return self.facts
@@ -392,7 +407,11 @@ class FakeOps:
             req_pin = _blob_of_acc("10-requirements.md")
             beh_pin = _blob_of_acc("15-behaviour-spec.md")
             path.write_text(
-                _acceptance_body(req_text, req_pin, beh_pin),
+                _acceptance_body(
+                    req_text, req_pin, beh_pin,
+                    (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8")
+                    if (bundle / "15-behaviour-spec.md").exists() else "",
+                ),
                 encoding="utf-8",
             )
             return 0
@@ -1618,7 +1637,7 @@ def _repin_bundle(bundle_dir: Path) -> None:
         (bundle_dir / "20-design.md").read_text(encoding="utf-8")
     )
     (bundle_dir / "25-acceptance.md").write_text(
-        _acceptance_body(req_text, req_pin, beh_pin), encoding="utf-8",
+        _acceptance_body(req_text, req_pin, beh_pin, beh_text), encoding="utf-8",
     )
     acceptance_pin = blob_sha1(
         (bundle_dir / "25-acceptance.md").read_text(encoding="utf-8")
@@ -5013,7 +5032,11 @@ def test_gate_stops_when_decomposition_missing_from_bundle(
     # тест проверял бы не свой предмет. Прежний путь гейтил весь бандл
     # одним проходом и до acceptance в этой фикстуре просто не доходил.
     (bundle_dir / "25-acceptance.md").write_text(
-        _acceptance_body(_DEFAULT_REQUIREMENTS_BODY, req_pin, beh_pin),
+        _acceptance_body(
+            _DEFAULT_REQUIREMENTS_BODY, req_pin, beh_pin,
+            (bundle_dir / "15-behaviour-spec.md").read_text(encoding="utf-8")
+            if (bundle_dir / "15-behaviour-spec.md").exists() else "",
+        ),
         encoding="utf-8",
     )
     # base несёт approved-узлы: предмет — ОТСУТСТВИЕ файла в
@@ -5740,7 +5763,7 @@ def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
                 path = Path(target_dir) / bundle_dir / "10-requirements.md"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(
-                    "#### FR-01: x\n**Priority**: Should\n", encoding="utf-8"
+                    "#### FR-01: x\n**Priority**: Won't\n", encoding="utf-8"
                 )
                 return 0
             if kind == "acceptance":
@@ -5861,6 +5884,49 @@ def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root, monkeypatch) 
     ).read_text()
     assert "GC-AC-COVERAGE" in findings and "FR-01" in findings
     assert f"candidate-{state.wave}" not in state.ops
+
+
+def _orphan_ops_class(beh_extra: str):
+    class _Ops(FakeOps):
+        def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
+            if kind == "requirements":
+                self.calls.append(("author", kind))
+                self.authored.append(kind)
+                path = Path(target_dir) / bundle_dir / "10-requirements.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#### FR-01: x\n**Priority**: Must\n", encoding="utf-8")
+                return 0
+            rc = super().author(target_dir, kind, subject, bundle_dir, brief_context)
+            if kind == "behaviour-spec":
+                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
+                path.write_text(path.read_text(encoding="utf-8") + beh_extra, encoding="utf-8")
+            if kind == "acceptance":  # сирота: BEH-99 не попадает ни в один AC
+                path = Path(target_dir) / bundle_dir / "25-acceptance.md"
+                text = path.read_text(encoding="utf-8")
+                path.write_text(
+                    text.replace(", BEH-99", "").replace("BEH-99, ", "").replace("[BEH-99]", "[]"),
+                    encoding="utf-8",
+                )
+            return rc
+
+    return _Ops
+
+
+_ORPHAN_BEH = (
+    "\n#### BEH-99: orphan\n`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: unit` `owner: qa` `target: tests/t.py`\n"
+)
+
+
+def test_gate_orphan_beh_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
+    """GC-ORPHAN (спека оракула §1.7): Must-BEH вне scenarios всех не-Won't AC —
+    стоп гейта рядом с GC-AC-COVERAGE; при --reopen 15 тот же блок исполняется
+    заново над новым 15 и прежним 25."""
+    ops = _orphan_ops_class(_ORPHAN_BEH)(facts=GREEN_PR_FACTS)
+    state = _drive_waves_to(tmp_path, "r-orphan", ops, monkeypatch, 4)
+    assert state.status == "stopped_gate"
+    findings = (runner.run_dir("r-orphan") / "gate-findings.txt").read_text()
+    assert "error GC-ORPHAN: BEH-99" in findings
 
 
 def test_gate_warning_survives_a_later_fatal_in_the_same_gate_call(
@@ -8384,3 +8450,70 @@ def test_edge_tripwire_keeps_unchanged_wave_sibling(
     assert runner._guard_edge_results(state, FakeOps(), suspect, call) is None
     assert stable.read_text(encoding="utf-8") == "был до вызова\n"
     assert not touched.exists()
+
+
+def test_authoring_stamps_schema2_charter(tmp_path: Path, runs_root, monkeypatch) -> None:
+    """Спека оракула §1.1–1.2 (rev 10): прогон с code/plan_item рождает charter
+    схемы 2; отдельного реестра нет — коммитится только бандл."""
+    from governance import charter_guard
+
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    _fake_wave_adapters(monkeypatch, ops)
+    state = runner.start(**_waves_kwargs(
+        tmp_path, "r-schema2", ops, code="ENC", plan_item="todo://alpha/oracle",
+    ))
+    charter = (Path(state.target_dir) / state.bundle_dir / "00-charter.md").read_text()
+    assert charter_guard.read_charter(charter) == charter_guard.Charter(
+        2, "ENC", "todo://alpha/oracle"
+    )
+    assert all(paths == [state.bundle_dir] for _, paths, _ in ops.committed)
+    assert any(c[0] == "charter_codes_elsewhere" for c in ops.calls)
+
+
+def test_authoring_code_taken_elsewhere_stops_before_stamp(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    from governance import charter_guard
+
+    ops = FakeOps(facts=GREEN_PR_FACTS, codes_elsewhere={"ENC": "ws-other"})
+    _fake_wave_adapters(monkeypatch, ops)
+    state = runner.start(**_waves_kwargs(
+        tmp_path, "r-taken", ops, code="ENC", plan_item="todo://alpha/oracle",
+    ))
+    assert state.status == "stopped_preflight"
+    charter = (Path(state.target_dir) / state.bundle_dir / "00-charter.md").read_text()
+    assert charter_guard.read_charter(charter).schema == 1
+
+
+def test_resume_skip_path_stamps_existing_charter(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """I3: charter уже на диске (падение между авторингом и штампом) — resume
+    штампует его, а не принимает схемой 1."""
+    from governance import charter_guard
+
+    kwargs = _waves_kwargs(
+        tmp_path, "r-skip", FakeOps(facts=GREEN_PR_FACTS),
+        code="ENC", plan_item="todo://alpha/oracle",
+    )
+    bundle = Path(kwargs["target_dir"]) / kwargs["bundle_dir"]
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "00-charter.md").write_text("---\nspec_stage: charter\n---\n# C\n")
+    ops = kwargs["ops"]
+    _fake_wave_adapters(monkeypatch, ops)
+    state = runner.start(**kwargs)
+    charter = (Path(state.target_dir) / state.bundle_dir / "00-charter.md").read_text()
+    assert charter_guard.read_charter(charter).code == "ENC"
+
+
+def test_authoring_without_code_keeps_schema1(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    from governance import charter_guard
+
+    ops = FakeOps(facts=GREEN_PR_FACTS)
+    _fake_wave_adapters(monkeypatch, ops)
+    state = runner.start(**_waves_kwargs(tmp_path, "r-schema1", ops))
+    charter = (Path(state.target_dir) / state.bundle_dir / "00-charter.md").read_text()
+    assert charter_guard.read_charter(charter).schema == 1
+    assert not any(c[0] == "charter_codes_elsewhere" for c in ops.calls)

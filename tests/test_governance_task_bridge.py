@@ -12189,3 +12189,33 @@ def test_carried_pin_takes_only_the_anchor_pin(carry_from, expected) -> None:
     """Переносится только пин ТЕКУЩЕГО анкера (#467): пин по чужому ключу
     был бы пином не прямого upstream (DEC-008, GC-STALE-KEY)."""
     assert task_bridge._carried_pin(carry_from, "decomposition") == expected
+
+
+def _render_two_dt(**extra):
+    scenarios = task_bridge.parse_behaviour(DT_BEHAVIOUR_MD)
+    dt_tasks, _ = decomposition_guard.parse_dt_tasks(DT_TWO_MD)
+    return task_bridge.render_tasks_dt(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="workstreams/WS-x-1/spec/30-decomposition.md",
+        scenarios=scenarios,
+        dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00",
+        anchor_blob="ab" * 20,
+        **extra,
+    )
+
+
+def test_scenarios_line_rendered_only_with_code() -> None:
+    """Спека оракула §2.1: квалифицированные ID сценариев задачи — машинной
+    строкой перед **Traces to:**; без кода (контракт не вендорен) строки нет."""
+    text = _render_two_dt(scenarios_code="ENC")
+    task1 = text.split("### TASK-002")[0]
+    assert "**Scenarios:** ENC:BEH-01, ENC:BEH-02" in task1
+    assert task1.index("**Scenarios:**") < task1.index("**Traces to:**")
+    assert "**Scenarios:**" not in _render_two_dt()
+
+
+def test_spec_runner_version_absent_binary(monkeypatch) -> None:
+    monkeypatch.setenv("PATH", "")
+    assert task_bridge.spec_runner_version() is None

@@ -65,7 +65,7 @@ from pathlib import Path
 
 from governance import approval_branches
 from governance import approval_ledger as al
-from governance import brief_input, bundle_dag, run_state as rs
+from governance import brief_input, bundle_dag, charter_guard, run_state as rs
 from governance import runner, task_bridge
 from governance import interview as iv
 from governance import ops as ops_mod
@@ -128,6 +128,19 @@ def _wave_branch_grammar(ws_id: str | None, slug: str) -> tuple[str, re.Pattern]
     else:
         prefix = head.partition("{ws_id}")[0] + f"{slug}-"
     return prefix, re.compile(pattern)
+
+
+def _oracle_args_error(code: str | None, plan_item: str | None) -> str | None:
+    """--code/--plan-item: оба или ни одного, по грамматике charter_guard."""
+    if code is None and plan_item is None:
+        return None
+    if code is None or plan_item is None:
+        return "--code и --plan-item задаются вместе (charter схемы 2)"
+    if not charter_guard.CODE_RE.match(code):
+        return f"--code {code!r} не соответствует CODE ^[A-Z]{{2,6}}$"
+    if not charter_guard.PLAN_ITEM_RE.match(plan_item):
+        return f"--plan-item {plan_item!r} не plan_item todo://<repo>/<id>"
+    return None
 
 
 class SpecLoopError(RuntimeError):
@@ -890,9 +903,23 @@ def main(argv: list[str] | None = None) -> int:
         "парсером и отказывает с причиной: оператор обязан прочитать "
         "«путь удалён», а не `unrecognized arguments`",
     )
+    parser.add_argument(
+        "--code",
+        help="код воркстрима ^[A-Z]{2,6}$ — charter схемы 2 (спека оракула "
+        "§1.1); задаётся вместе с --plan-item",
+    )
+    parser.add_argument(
+        "--plan-item",
+        help="пункт плана todo://<repo>/<id> — charter схемы 2; вместе с --code",
+    )
     # --merge-authority НАМЕРЕННО отсутствует: кнопка всегда передаёт
     # "human" (решение владельца 2026-09-07) — argparse отвергнет попытку.
     args = parser.parse_args(argv)
+    oracle_error = _oracle_args_error(args.code, args.plan_item)
+    if oracle_error is not None:
+        # Отказ ДО любых побочных эффектов — как у --legacy ниже.
+        print(f"spec-loop: {oracle_error}")
+        return 1
     if args.legacy:
         # Отказ ДО любых побочных эффектов: ни леджера, ни git, ни
         # evidence. Тот же текст, что у стража `resume` (S13, спека §4):
@@ -1174,6 +1201,8 @@ def main(argv: list[str] | None = None) -> int:
             brief_source=supplied_brief,
             interview_spec=interview_spec,
             authoring="legacy" if args.legacy else "waves",
+            code=args.code,
+            plan_item=args.plan_item,
         )
         print(f"статус прогона: {started.status}")
         if started.status == "waiting_interview":

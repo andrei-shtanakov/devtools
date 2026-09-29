@@ -37,6 +37,8 @@ from governance import (
     brief_input,
     bundle_dag,
     bundle_inputs,
+    charter_guard,
+    criteria_graph,
     decomposition_guard,
     design_guard,
 )
@@ -333,6 +335,8 @@ def start(
     interview_spec: iv.InterviewSpec | None = None,
     allow_legacy_dt: bool = False,
     authoring: str = "waves",
+    code: str | None = None,
+    plan_item: str | None = None,
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
@@ -415,6 +419,8 @@ def start(
         interview=interview_spec.as_state() if interview_spec else None,
         allow_legacy_dt=allow_legacy_dt,
         authoring=authoring,
+        code=code,
+        plan_item=plan_item,
     )
     save(state)
     return advance(state, ops)
@@ -2358,6 +2364,12 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
             save(state)
             return False
         if target.exists() and not (started_here and pipeline_dir.is_dir()):
+            # Штамп схемы 2 идемпотентен и стоит и на пути resume (ревью
+            # среза 1, I3): падение между авторингом и штампом иначе оставляло
+            # charter схемы 1 молча.
+            if kind == "charter" and state.code and state.plan_item:
+                if not _stamp_charter_schema2(state, ops, target):
+                    return False
             op_complete(state, key, skipped=True)
             continue
         _ensure_started(state, key)
@@ -2451,7 +2463,49 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
             state.status = "stopped_author"
             save(state)
             return False
+        if kind == "charter" and state.code and state.plan_item:
+            if not _stamp_charter_schema2(state, ops, target):
+                return False
         op_complete(state, key, skipped=False, exit=exit_code)
+    return True
+
+
+def _stamp_charter_schema2(state: RunState, ops: Ops, charter_path: Path) -> bool:
+    """Спека оракула §1.1–1.2 (rev 10): charter схемы 2 — сам реестр кода.
+
+    До штампа — профилактика коллизии (решение владельца 2026-09-29): код не
+    должен быть занят charter'ом на живой верхушке default-ветки или в
+    открытом candidate W1 другого воркстрима. Занят — стоп с причиной, charter
+    не штампуется. Штамп идемпотентен (resume).
+    """
+    assert state.code is not None and state.plan_item is not None
+    try:
+        taken = ops.charter_codes_elsewhere(
+            state.target_dir, state.repo_slug, state.base_ref or "master", state.ws_id
+        )
+    except RuntimeError as exc:
+        _stop_with_comment(
+            state, ops, "stopped_preflight",
+            f"профилактика коллизии кода недоступна: {exc} — повторите resume",
+        )
+        return False
+    if state.code in taken:
+        _stop_with_comment(
+            state, ops, "stopped_preflight",
+            f"code {state.code} уже занят воркстримом {taken[state.code]} "
+            "(живая верхушка default-ветки или открытый candidate W1) — "
+            "выберите другой --code для нового прогона",
+        )
+        return False
+    try:
+        stamped = charter_guard.stamp_charter(
+            charter_path.read_text(encoding="utf-8"),
+            code=state.code, plan_item=state.plan_item,
+        )
+    except ValueError as exc:
+        _stop_with_comment(state, ops, "stopped_author", f"charter: {exc}")
+        return False
+    charter_path.write_text(stamped, encoding="utf-8")
     return True
 
 
@@ -3131,12 +3185,22 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # required — читать его было бы TOCTOU.
     acc_path = node_paths["acceptance"]
     if req_path.exists() and beh_path.exists() and acc_path.exists():
+        req_text = req_path.read_text(encoding="utf-8")
+        beh_text = beh_path.read_text(encoding="utf-8")
+        acc_text = acc_path.read_text(encoding="utf-8")
         ac_cov = [
             f"error GC-AC-COVERAGE: {finding}"
             for finding in acceptance_guard.coverage_findings(
-                req_path.read_text(encoding="utf-8"),
-                beh_path.read_text(encoding="utf-8"),
-                acc_path.read_text(encoding="utf-8"),
+                req_text, beh_text, acc_text
+            )
+        ]
+        # Сироты (спека оракула §1.7): каждый не-Won't BEH входит в
+        # scenarios хотя бы одного не-Won't AC. Блок исполняется и после
+        # --reopen 15 — над новым 15 и прежним 25.
+        ac_cov += [
+            f"error GC-ORPHAN: {finding}"
+            for finding in criteria_graph.orphan_findings(
+                criteria_graph.build_graph(req_text, beh_text, acc_text)
             )
         ]
         if ac_cov:

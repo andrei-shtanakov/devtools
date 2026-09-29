@@ -132,6 +132,10 @@ class RunState:
     # Номер текущей волны (1-based, `wave = level + 1`) в режиме waves;
     # `0` — не волновой режим. `runner.start` в waves ставит `wave = 1`.
     wave: int = 0
+    # Спека оракула §1.1: код воркстрима и пункт плана для charter схемы 2.
+    # None — прогон без оракула (схема 1); старые run.json читаются по дефолту.
+    code: str | None = None
+    plan_item: str | None = None
 
 
 _ALLOWED_AUTHORING = ("legacy", "waves")
@@ -189,6 +193,8 @@ def new_run(
     interview: dict | None = None,
     allow_legacy_dt: bool = False,
     authoring: str = "legacy",
+    code: str | None = None,
+    plan_item: str | None = None,
 ) -> RunState:
     """Новый прогон (S0). `run_id` подаётся снаружи (вызывающая сторона)."""
     validate_merge_authority(merge_authority)
@@ -217,6 +223,8 @@ def new_run(
         authoring=authoring,
         # Волны 1-based (S1): прогон начинается с W1; legacy — 0.
         wave=1 if authoring == "waves" else 0,
+        code=code,
+        plan_item=plan_item,
     )
 
 

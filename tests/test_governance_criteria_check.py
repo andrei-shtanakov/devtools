@@ -1,0 +1,161 @@
+"""criteria_check: сверка ответа (§5.3) и исход (§3.3)."""
+from __future__ import annotations
+
+import copy
+
+import pytest
+
+from governance import criteria_check as ck
+from governance import criteria_graph as cgr
+
+REQ = "#### FR-01: A\n**Priority**: Must\n\n#### FR-02: B\n**Priority**: Should\n"
+BEH = (
+    "#### BEH-01: a\n`traces: [FR-01]`\n- **checked_by**: `status: planned` `kind: unit` `owner: qa` `target: t`\n\n"
+    "#### BEH-02: b\n`traces: [FR-02]`\n- **checked_by**: `status: planned` `kind: unit` `owner: qa` `target: t`\n"
+)
+ACC = "#### AC-01: a · verification: test\ntraces: [FR-01]\nscenarios: [BEH-01]\n\n#### AC-02: b · verification: test\ntraces: [FR-02]\nscenarios: [BEH-02]\n"
+TEST_SRC = "def test_a():\n    # ENC:BEH-01\n    assert 1\n\ndef test_b():\n    # ENC:BEH-02\n    assert 1\n"
+
+REQUEST = {"protocol": 1, "owner_repo": "devtools", "workstream": "ws", "code": "ENC",
+           "bundle_pin": "p" * 40, "product_sha": "s" * 40,
+           "test_criteria": [{"id": "ENC:BEH-01", "verify_task": False}, {"id": "ENC:BEH-02", "verify_task": False}]}
+
+
+def sel(qn, lines=(5,)):
+    return {"node_id": f"tests/t.py::{qn}", "definition": {"file": "tests/t.py", "qualname": qn},
+            "runs": [{"phase": "call", "outcome": "passed"}, {"phase": "call", "outcome": "passed"}],
+            "product_lines": [{"file": "pkg/m.py", "line": n} for n in lines], "subprocess": False}
+
+
+GOOD = {**{k: REQUEST[k] for k in ("protocol", "owner_repo", "workstream", "code", "bundle_pin", "product_sha")},
+        "product_roots": ["pkg"], "environment": {"lock_sha256": "L", "python": "3.12", "pytest_plugins": []},
+        "content_sha256": "C",
+        "beh": [{"id": "ENC:BEH-01", "status": "traced", "selectors": [sel("test_a")]},
+                {"id": "ENC:BEH-02", "status": "traced", "selectors": [sel("test_b")]}]}
+
+
+def check(resp):
+    expected = ck.expected_definitions({"tests/t.py": TEST_SRC}, "ENC", ["BEH-01", "BEH-02"])
+    return ck.validate_response(REQUEST, resp, expected=expected,
+                                function_lines={"pkg/m.py": {5, 6}}, lock_sha="L", content_sha="C")
+
+
+def test_good_response_is_valid():
+    assert check(GOOD) == []
+
+
+def mutate(fn):
+    r = copy.deepcopy(GOOD)
+    fn(r)
+    return r
+
+
+@pytest.mark.parametrize("name,fn", [
+    ("foreign product_sha", lambda r: r.update(product_sha="x" * 40)),
+    ("missing BEH", lambda r: r["beh"].pop()),
+    ("extra BEH", lambda r: r["beh"].append({"id": "ENC:BEH-09", "status": "traced", "selectors": [sel("test_a")]})),
+    ("duplicate BEH", lambda r: r["beh"].append(copy.deepcopy(r["beh"][0]))),
+    ("no environment", lambda r: r.pop("environment")),
+    ("traced one run", lambda r: r["beh"][0]["selectors"][0]["runs"].pop()),
+    ("traced not passed", lambda r: r["beh"][0]["selectors"][0]["runs"][1].update(outcome="failed")),
+    ("traced zero body lines", lambda r: r["beh"][0]["selectors"][0].update(product_lines=[])),
+    ("traced module-level line", lambda r: r["beh"][0]["selectors"][0].update(product_lines=[{"file": "pkg/m.py", "line": 1}])),
+    ("traced subprocess-only", lambda r: r["beh"][0]["selectors"][0].update(subprocess=True, product_lines=[])),
+    ("traced with reason", lambda r: r["beh"][0].update(reason="no-test")),
+    ("unconfirmed without reason", lambda r: r["beh"][0].update(status="unconfirmed")),
+    ("selector without token", lambda r: r["beh"][0]["selectors"].__setitem__(0, sel("test_b"))),
+    ("incomplete definitions", lambda r: r["beh"][0].update(selectors=[])),
+    ("lock mismatch", lambda r: r["environment"].update(lock_sha256="X")),
+    ("content mismatch", lambda r: r.update(content_sha256="X")),
+    ("error with beh", lambda r: r.update(error="collection")),
+    ("not_applicable with beh", lambda r: r.update(not_applicable="language")),
+    ("foreign bundle_pin", lambda r: r.update(bundle_pin="x" * 40)),
+    ("foreign code", lambda r: r.update(code="XYZ")),
+    ("no product_roots", lambda r: r.pop("product_roots")),
+    ("no content_sha256", lambda r: r.pop("content_sha256")),
+    ("error without reason", lambda r: r["beh"][0].update(status="error", selectors=[])),
+])
+def test_negative_table(name, fn):
+    assert check(mutate(fn)) != [], name
+
+
+PARAM_SRC = "@pytest.mark.parametrize('x', [1, 2])\ndef test_a(x):\n    # ENC:BEH-01\n    assert x\n"
+
+
+def test_parametrized_selectors_share_one_definition():
+    expected = ck.expected_definitions({"tests/t.py": PARAM_SRC}, "ENC", ["BEH-01"])
+    assert expected == {"BEH-01": {("tests/t.py", "test_a")}}
+
+
+@pytest.mark.parametrize("code,stdout,why", [
+    (0, "", "пуст"),
+    (0, "not json", "JSON"),
+    (2, "{}", "код"),
+    (99, "{}", "код"),
+])
+def test_parse_response_refusals(code, stdout, why):
+    resp, reason = ck.parse_response(code, stdout, None)
+    assert resp is None and why in reason
+
+
+def test_parse_response_schema_violation():
+    schema = {"type": "object", "required": ["beh"]}
+    resp, reason = ck.parse_response(0, "{}", schema)
+    assert resp is None and "схем" in reason
+    resp, reason = ck.parse_response(0, '{"beh": []}', schema)
+    assert resp == {"beh": []} and reason is None
+
+
+def test_orphan_blocks_closure():
+    beh = BEH + "\n#### BEH-03: c\n`traces: [FR-01]`\n- **checked_by**: `status: planned` `kind: unit` `owner: qa` `target: t`\n"
+    g = cgr.build_graph(REQ, beh, ACC)
+    out = ck.outcome(g, {"BEH-01": "traced", "BEH-02": "traced", "BEH-03": "traced"})
+    assert out.closure == "blocked" and any("BEH-03" in r for r in out.stop_reasons)
+
+
+def test_must_ac_over_should_beh_stops():
+    acc = "#### AC-01: a · verification: test\ntraces: [FR-01]\nscenarios: [BEH-01, BEH-02]\n\n#### AC-02: b · verification: test\ntraces: [FR-02]\nscenarios: [BEH-02]\n"
+    g = cgr.build_graph(REQ, BEH, acc)
+    out = ck.outcome(g, {"BEH-01": "traced", "BEH-02": "unconfirmed"})
+    assert out.ac_status["AC-01"] == "unconfirmed"
+    assert out.closure == "blocked" and any("AC-01" in r for r in out.stop_reasons)
+
+
+def test_outcome_must_unconfirmed_stops_should_reports():
+    g = cgr.build_graph(REQ, BEH, ACC)
+    ok = ck.outcome(g, {"BEH-01": "traced", "BEH-02": "unconfirmed"})
+    assert ok.closure == "traced" and ok.stop_reasons == []
+    assert any("BEH-02" in r for r in ok.report_rows)
+    stop = ck.outcome(g, {"BEH-01": "unconfirmed", "BEH-02": "traced"})
+    assert stop.closure == "blocked" and any("BEH-01" in r for r in stop.stop_reasons)
+    err = ck.outcome(g, {"BEH-01": "traced", "BEH-02": "error"})
+    assert err.closure == "blocked"
+
+
+def test_graph_errors_block():
+    g = cgr.build_graph(REQ, BEH.replace("`traces: [FR-02]`", "`traces: []`"), ACC)
+    assert ck.outcome(g, {"BEH-01": "traced", "BEH-02": "traced"}).closure == "blocked"
+
+
+@pytest.mark.parametrize("roots", [["tests"], ["tests/unit"], ["/abs"], ["../x"], ["pkg/../tests"], []])
+def test_product_roots_that_are_not_product_are_refused(roots):
+    """Ревью среза 1, I4: корни — чужая цифра; тестовые, абсолютные, с `..` и
+    пустые — отказ, иначе тело теста засчитывалось бы исполнением продукта."""
+    assert check(mutate(lambda r: r.update(product_roots=roots))) != []
+
+
+def test_traced_without_selectors_refused_even_when_no_test_expected():
+    """Финальное ревью I-1: пустые селекторы == пустое ожидаемое не делают
+    `traced` правдой — `traced` требует хотя бы одного селектора."""
+    expected = ck.expected_definitions({"tests/t.py": "def test_x():\n    assert 1\n"}, "ENC",
+                                       ["BEH-01", "BEH-02"])
+    resp = mutate(lambda r: r["beh"][0].update(selectors=[]))
+    problems = ck.validate_response(REQUEST, resp, expected=expected,
+                                    function_lines={"pkg/m.py": {5, 6}}, lock_sha="L", content_sha="C")
+    assert any("BEH-01" in p for p in problems)
+
+
+@pytest.mark.parametrize("roots", [["."], [""], ["./"]])
+def test_repo_root_as_product_root_refused(roots):
+    """I-2: корень `.` включает тесты — их тела засчитывались бы продуктом."""
+    assert check(mutate(lambda r: r.update(product_roots=roots))) != []

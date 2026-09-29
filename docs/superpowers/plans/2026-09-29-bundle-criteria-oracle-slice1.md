@@ -14,7 +14,7 @@
 
 - Токен: `(?<![A-Za-z0-9_])<CODE>:<ID>(?![A-Za-z0-9_])`, `CODE` = `^[A-Z]{2,6}$`.
 - Charter схемы 2: frontmatter `schema: 2`, `code: <CODE>`, `plan_item: todo://<repo>/<id>` — оба поля обязательны; `code` неизменяем.
-- Реестр `workstreams/codes.toml` только растёт; ключ = код, поля `workstream`, `approved`.
+- Реестр кодов — сами charter'ы схемы 2 (спека §1.2 rev 10): удаление/перенос charter'а схемы 2 запрещены; коллизия — нарушитель позже влитый по first-parent; смена кода — только нарушителем.
 - Словарь приоритетов один: `Must | Should | Could | Won't`; приоритет — максимум по `traces`; пустая/неразрешимая трасса — ошибка.
 - Сирота: BEH (кроме Won't) не входит в `scenarios` ни одного не-Won't AC.
 - Статусы test-BEH: `traced` · `unconfirmed` (`no-test`, `no-product-execution`, `subprocess-only`, `not-passed`, `nondeterministic`) · `error` (`io`, `runner`); исход §3.3: Must `unconfirmed`/`error` — стоп; Should/Could `unconfirmed` — строка отчёта, `error` — стоп.
@@ -40,314 +40,31 @@
 
 ---
 
-### Task 1: `charter_guard` — грамматика charter схемы 2 и реестр кодов
+### Task 1: `charter_guard` — charter схемы 2 как реестр кодов
+
+> **Редакция после ревью задач 7–8 (rev 10 спеки, решение владельца 2026-09-29).**
+> Исходная редакция задачи вводила файл `workstreams/codes.toml`; он не
+> доезжал до default-ветки (candidate переносит только узлы) — снят. Код
+> модуля — `governance/charter_guard.py` (коммит `1a8db90`), тесты —
+> `tests/test_governance_charter_guard.py`. Ниже — действующий контракт.
 
 **Files:**
 - Create: `governance/charter_guard.py`
 - Test: `tests/test_governance_charter_guard.py`
 
-**Interfaces:**
-- Consumes: `governance.frontmatter.split_frontmatter(text) -> (dict, str)`, `governance.frontmatter.update_frontmatter(text, updates) -> str`.
-- Produces:
-  - `CODE_RE: re.Pattern`, `PLAN_ITEM_RE: re.Pattern` (`^todo://([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$`)
-  - `@dataclass(frozen=True) class Charter: schema: int; code: str | None; plan_item: str | None`
-  - `read_charter(text: str) -> Charter`
-  - `charter_findings(charter: Charter, *, ws_id: str, registry: dict, todo_ids: set[str], repo: str) -> list[str]`
-  - `registry_findings(base: dict, head: dict) -> list[str]`
-  - `load_registry(text: str) -> dict` (tomllib; повторный ключ → `ValueError`)
-  - `code_change_findings(base: Charter | None, head: Charter) -> list[str]`
-  - `stamp_charter(text: str, *, code: str, plan_item: str) -> str`
-  - `register_code(registry_text: str, *, code: str, ws_id: str, approved: str) -> str`
-  - CLI `python -m governance.charter_guard --repo <dir> --base <ref>` → exit 1 при находках.
+**Interfaces (Produces):**
+- `CODE_RE`, `PLAN_ITEM_RE`, `CHARTER_GLOB = "workstreams/*/spec/00-charter.md"`
+- `@dataclass(frozen=True) class Charter: schema: int; code: str | None; plan_item: str | None; malformed: bool = False`
+- `read_charter(text) -> Charter` — нет frontmatter → схема 1; frontmatter не разбирается → `malformed` (находка, не схема 1)
+- `charter_findings(charter, *, ws_id, todo_ids, repo) -> list[str]` — грамматика §1.1, `plan_item` в TODO.md своего репо
+- `collision_findings(charters: dict[ws, Charter], *, order: dict[ws, int]) -> list[str]` — нарушитель = позже влитый (не влитый — всегда)
+- `deletion_findings(base: dict[path, Charter], head: dict[path, Charter]) -> list[str]` — удаление/перенос схемы 2 запрещены
+- `code_change_findings(base, head, *, violator_in_base: bool) -> list[str]` — смена кода только нарушителем
+- `stamp_charter(text, *, code, plan_item) -> str` — идемпотентно; битый frontmatter → `ValueError`
+- `charters_at(repo, ref) -> dict[path, Charter]` (git-объекты), `merge_order(repo, ref, paths) -> dict[path, int]` (`rev-list --first-parent`)
+- `repo_findings(repo, base_ref) -> list[str]`, CLI `python -m governance.charter_guard --repo . --base <ref>` → exit 1 при находках
 
-- [ ] **Step 1: Write the failing tests**
-
-```python
-"""charter_guard: charter схемы 2 и реестр кодов (спека §1.1–1.2)."""
-from __future__ import annotations
-
-import pytest
-
-from governance import charter_guard as cg
-
-CH2 = "---\nschema: 2\ncode: ENC\nplan_item: todo://devtools/oracle\n---\n# Charter\n"
-CH1 = "---\nspec_stage: charter\n---\n# Charter\n"
-REG = '[ENC]\nworkstream = "ws-a"\napproved = 2026-09-21\n'
-
-
-def test_schema1_charter_has_no_findings():
-    ch = cg.read_charter(CH1)
-    assert ch.schema == 1
-    assert cg.charter_findings(ch, ws_id="ws-a", registry={}, todo_ids=set(), repo="devtools") == []
-
-
-def test_schema2_requires_code_and_plan_item():
-    ch = cg.read_charter("---\nschema: 2\n---\n")
-    out = cg.charter_findings(ch, ws_id="ws-a", registry={}, todo_ids=set(), repo="devtools")
-    assert any("code" in f for f in out) and any("plan_item" in f for f in out)
-
-
-@pytest.mark.parametrize("code", ["E", "ENCODERS", "enc", "EN1"])
-def test_bad_code_shape(code):
-    ch = cg.Charter(schema=2, code=code, plan_item="todo://devtools/x")
-    out = cg.charter_findings(ch, ws_id="ws-a", registry={code: {"workstream": "ws-a"}}, todo_ids={"x"}, repo="devtools")
-    assert any("CODE" in f or "code" in f for f in out)
-
-
-def test_code_outside_registry():
-    ch = cg.read_charter(CH2)
-    out = cg.charter_findings(ch, ws_id="ws-a", registry={}, todo_ids={"oracle"}, repo="devtools")
-    assert any("не зарегистрирован" in f for f in out)
-
-
-def test_code_must_be_registered_to_this_workstream():
-    ch = cg.read_charter(CH2)
-    reg = cg.load_registry('[ENC]\nworkstream = "other"\napproved = 2026-09-21\n')
-    out = cg.charter_findings(ch, ws_id="ws-a", registry=reg, todo_ids={"oracle"}, repo="devtools")
-    assert any("other" in f for f in out)
-
-
-def test_plan_item_must_exist_in_own_repo_todo():
-    ch = cg.read_charter(CH2)
-    reg = cg.load_registry(REG)
-    assert cg.charter_findings(ch, ws_id="ws-a", registry=reg, todo_ids={"oracle"}, repo="devtools") == []
-    out = cg.charter_findings(ch, ws_id="ws-a", registry=reg, todo_ids=set(), repo="devtools")
-    assert any("oracle" in f for f in out)
-    ch_foreign = cg.Charter(schema=2, code="ENC", plan_item="todo://spec-runner/oracle")
-    out = cg.charter_findings(ch_foreign, ws_id="ws-a", registry=reg, todo_ids={"oracle"}, repo="devtools")
-    assert any("spec-runner" in f for f in out)
-
-
-def test_registry_only_grows():
-    base = cg.load_registry(REG)
-    assert cg.registry_findings(base, cg.load_registry("")) != []  # удаление
-    moved = cg.load_registry('[ENC]\nworkstream = "ws-b"\napproved = 2026-09-21\n')
-    assert cg.registry_findings(base, moved) != []  # переназначение
-    grown = cg.load_registry(REG + '[ABC]\nworkstream = "ws-c"\napproved = 2026-09-29\n')
-    assert cg.registry_findings(base, grown) == []
-
-
-def test_duplicate_key_is_a_parse_error():
-    with pytest.raises(ValueError):
-        cg.load_registry(REG + REG)
-
-
-def test_code_is_immutable():
-    base = cg.read_charter(CH2)
-    head = cg.read_charter(CH2.replace("ENC", "ENX"))
-    assert cg.code_change_findings(base, head) != []
-    assert cg.code_change_findings(None, head) == []
-    assert cg.code_change_findings(base, base) == []
-
-
-def test_stamp_and_register_roundtrip():
-    stamped = cg.stamp_charter(CH1, code="ENC", plan_item="todo://devtools/oracle")
-    ch = cg.read_charter(stamped)
-    assert (ch.schema, ch.code, ch.plan_item) == (2, "ENC", "todo://devtools/oracle")
-    reg_text = cg.register_code("", code="ENC", ws_id="ws-a", approved="2026-09-29")
-    assert cg.load_registry(reg_text)["ENC"]["workstream"] == "ws-a"
-    with pytest.raises(ValueError):
-        cg.register_code(reg_text, code="ENC", ws_id="ws-b", approved="2026-09-29")
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `uv run pytest tests/test_governance_charter_guard.py -q`
-Expected: FAIL — `ModuleNotFoundError: governance.charter_guard`.
-
-- [ ] **Step 3: Implement**
-
-```python
-"""charter_guard — грамматика charter схемы 2 и реестр кодов воркстримов.
-
-Спека `docs/superpowers/specs/2026-09-28-bundle-criteria-oracle-design.md`
-§1.1–1.2. Реестр только растёт: код закрытого воркстрима не достаётся новому
-вместе с его тестами. Историю git не читаем — CI делает checkout depth 1.
-"""
-from __future__ import annotations
-
-import argparse
-import re
-import subprocess
-import sys
-import tomllib
-from dataclasses import dataclass
-from pathlib import Path
-
-from governance.frontmatter import split_frontmatter, update_frontmatter
-
-CODE_RE = re.compile(r"^[A-Z]{2,6}$")
-PLAN_ITEM_RE = re.compile(r"^todo://([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$")
-REGISTRY_PATH = "workstreams/codes.toml"
-_TODO_ID_RE = re.compile(r"@id:([A-Za-z0-9_.-]+)")
-
-
-@dataclass(frozen=True)
-class Charter:
-    schema: int
-    code: str | None
-    plan_item: str | None
-
-
-def read_charter(text: str) -> Charter:
-    """Charter из frontmatter; без `schema` — схема 1."""
-    meta, _ = split_frontmatter(text)
-    schema = meta.get("schema", 1)
-    return Charter(
-        schema=int(schema) if str(schema).isdigit() else 0,
-        code=meta.get("code"),
-        plan_item=meta.get("plan_item"),
-    )
-
-
-def load_registry(text: str) -> dict:
-    """Реестр кодов; повторный ключ — ошибка разбора TOML (ValueError)."""
-    try:
-        return tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
-        raise ValueError(f"{REGISTRY_PATH}: {exc}") from exc
-
-
-def charter_findings(
-    charter: Charter, *, ws_id: str, registry: dict, todo_ids: set[str], repo: str
-) -> list[str]:
-    """Находки по charter одного воркстрима; схема 1 — без находок."""
-    if charter.schema == 1:
-        return []
-    if charter.schema != 2:
-        return [f"{ws_id}: schema {charter.schema} вне словаря 1|2"]
-    out: list[str] = []
-    if not charter.code:
-        out.append(f"{ws_id}: схема 2 требует code")
-    elif not CODE_RE.match(str(charter.code)):
-        out.append(f"{ws_id}: code {charter.code!r} не соответствует CODE ^[A-Z]{{2,6}}$")
-    else:
-        entry = registry.get(charter.code)
-        if entry is None:
-            out.append(f"{ws_id}: code {charter.code} не зарегистрирован в {REGISTRY_PATH}")
-        elif entry.get("workstream") != ws_id:
-            out.append(
-                f"{ws_id}: code {charter.code} зарегистрирован за {entry.get('workstream')}"
-            )
-    if not charter.plan_item:
-        out.append(f"{ws_id}: схема 2 требует plan_item")
-    else:
-        m = PLAN_ITEM_RE.match(str(charter.plan_item))
-        if m is None:
-            out.append(f"{ws_id}: plan_item {charter.plan_item!r} не todo://<repo>/<id>")
-        elif m.group(1) != repo:
-            out.append(f"{ws_id}: plan_item указывает на чужой репо {m.group(1)}")
-        elif m.group(2) not in todo_ids:
-            out.append(f"{ws_id}: пункт @id:{m.group(2)} не найден в TODO.md")
-    return out
-
-
-def registry_findings(base: dict, head: dict) -> list[str]:
-    """Реестр только растёт: ключи базы остаются с тем же воркстримом."""
-    out: list[str] = []
-    for code, entry in base.items():
-        now = head.get(code)
-        if now is None:
-            out.append(f"{REGISTRY_PATH}: код {code} удалён (реестр только растёт)")
-        elif now.get("workstream") != entry.get("workstream"):
-            out.append(
-                f"{REGISTRY_PATH}: код {code} переназначен "
-                f"{entry.get('workstream')} → {now.get('workstream')}"
-            )
-    return out
-
-
-def code_change_findings(base: Charter | None, head: Charter) -> list[str]:
-    """Код неизменяем, в том числе при --reopen charter."""
-    if base is None or base.schema != 2 or head.schema != 2:
-        return []
-    if base.code != head.code:
-        return [f"code неизменяем: {base.code} → {head.code}"]
-    return []
-
-
-def stamp_charter(text: str, *, code: str, plan_item: str) -> str:
-    """Вписать схему 2 в авторский charter (раннер, после авторинга)."""
-    return update_frontmatter(text, {"schema": 2, "code": code, "plan_item": plan_item})
-
-
-def register_code(registry_text: str, *, code: str, ws_id: str, approved: str) -> str:
-    """Дописать код в реестр; занятый код — ValueError."""
-    if not CODE_RE.match(code):
-        raise ValueError(f"code {code!r} не соответствует ^[A-Z]{{2,6}}$")
-    reg = load_registry(registry_text)
-    if code in reg:
-        raise ValueError(f"code {code} уже занят воркстримом {reg[code].get('workstream')}")
-    block = f'[{code}]\nworkstream = "{ws_id}"\napproved = {approved}\n'
-    sep = "" if not registry_text or registry_text.endswith("\n") else "\n"
-    return f"{registry_text}{sep}{block}"
-
-
-def _git_show(repo: Path, ref: str, path: str) -> str | None:
-    proc = subprocess.run(
-        ["git", "-C", str(repo), "show", f"{ref}:{path}"],
-        capture_output=True, text=True,
-    )
-    return proc.stdout if proc.returncode == 0 else None
-
-
-def repo_findings(repo: Path, base_ref: str | None) -> list[str]:
-    """Все находки по репо: charter'ы схемы 2, реестр, неизменяемость кода."""
-    reg_text = (repo / REGISTRY_PATH).read_text() if (repo / REGISTRY_PATH).exists() else ""
-    try:
-        registry = load_registry(reg_text)
-    except ValueError as exc:
-        return [str(exc)]
-    todo = repo / "TODO.md"
-    todo_ids = set(_TODO_ID_RE.findall(todo.read_text())) if todo.exists() else set()
-    out: list[str] = []
-    for charter_path in sorted(repo.glob("workstreams/*/spec/00-charter.md")):
-        ws_id = charter_path.parent.parent.name
-        head = read_charter(charter_path.read_text())
-        out += charter_findings(head, ws_id=ws_id, registry=registry, todo_ids=todo_ids, repo=repo.name)
-        if base_ref:
-            rel = charter_path.relative_to(repo).as_posix()
-            base_text = _git_show(repo, base_ref, rel)
-            out += code_change_findings(read_charter(base_text) if base_text else None, head)
-    if base_ref:
-        base_reg = _git_show(repo, base_ref, REGISTRY_PATH)
-        if base_reg:
-            out += registry_findings(load_registry(base_reg), registry)
-    return out
-
-
-def main(argv: list[str] | None = None) -> int:
-    """CLI: exit 1 при находках (PR и push в default)."""
-    parser = argparse.ArgumentParser(prog="charter_guard")
-    parser.add_argument("--repo", type=Path, default=Path("."))
-    parser.add_argument("--base", default=None)
-    args = parser.parse_args(argv)
-    findings = repo_findings(args.repo.resolve(), args.base)
-    for f in findings:
-        print(f"charter_guard: {f}")
-    return 1 if findings else 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-```
-
-Ruling-заметка для исполнителя: имя репо берётся как имя каталога (`repo.name`) — канон «имя каталога после `git clone`» (CLAUDE.md воркспейса).
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `uv run pytest tests/test_governance_charter_guard.py -q`
-Expected: PASS (все).
-
-- [ ] **Step 5: Add a repo-level test and commit**
-
-Добавить в тот же файл тест `repo_findings` на временном git-репо (фикстура `tmp_path`, `git init`, два коммита: база с `[ENC]`, голова без него → находка «удалён»). Затем:
-
-```bash
-uv run pytest tests/test_governance_charter_guard.py -q
-git add governance/charter_guard.py tests/test_governance_charter_guard.py
-git commit -m "feat(governance): charter_guard — charter схемы 2 и реестр кодов"
-```
+**Тесты (все в `tests/test_governance_charter_guard.py`):** схема 1 без находок; без frontmatter — схема 1, битый — находка; схема 2 требует code и plan_item; форма CODE; plan_item в своём TODO.md; коллизия — нарушитель позже влитый; коллизия с не влитым — нарушитель он; удаление и перенос схемы 2 — отказ, схема 1 — нет; код неизменяем, кроме нарушителя; штамп идемпотентен и отказывает на битом; `repo_findings` на настоящем git: порядок по first-parent и отказ на удалённом charter.
 
 ---
 
@@ -1493,8 +1210,8 @@ git commit -m "feat(governance): criteria_check — сверка ответа §
 - Test: `tests/test_governance_runner.py`, `tests/test_governance_spec_loop.py`
 
 **Interfaces:**
-- Consumes: `charter_guard.stamp_charter`, `charter_guard.register_code`, `charter_guard.REGISTRY_PATH`.
-- Produces: новый прогон с `code`+`plan_item` рождает charter схемы 2 и запись в `workstreams/codes.toml`, оба пути коммитятся вместе с бандлом. Прогон без них — прежнее поведение (схема 1), чтобы живые и исторические прогоны не ломались.
+- Consumes: `charter_guard.stamp_charter`; `Ops.charter_codes_elsewhere(target_dir, repo_slug, base_ref, own_ws) -> dict[code, ws]` (профилактика коллизии: живая верхушка default + открытые candidate W1).
+- Produces: новый прогон с `code`+`plan_item` рождает charter схемы 2 (штамп и на пути resume, идемпотентно); код, занятый на живой верхушке или в открытом W1, — `stopped_preflight` до штампа; недоступность факта — тоже стоп. Реестра-файла нет, коммитится только бандл. **Редакция после ревью 7–8** — код в коммите `1a8db90`; регрессия на настоящем git — `tests/test_governance_waves_realgit.py`. Прогон без них — прежнее поведение (схема 1), чтобы живые и исторические прогоны не ломались.
 
 - [ ] **Step 1: Write the failing tests**
 
