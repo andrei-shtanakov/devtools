@@ -2364,6 +2364,12 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
             save(state)
             return False
         if target.exists() and not (started_here and pipeline_dir.is_dir()):
+            # Штамп схемы 2 идемпотентен и стоит и на пути resume (ревью
+            # среза 1, I3): падение между авторингом и штампом иначе оставляло
+            # charter схемы 1 молча.
+            if kind == "charter" and state.code and state.plan_item:
+                if not _stamp_charter_schema2(state, ops, target):
+                    return False
             op_complete(state, key, skipped=True)
             continue
         _ensure_started(state, key)
@@ -2465,36 +2471,41 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
 
 
 def _stamp_charter_schema2(state: RunState, ops: Ops, charter_path: Path) -> bool:
-    """Спека оракула §1.1–1.2: charter схемы 2 и резерв кода в реестре.
+    """Спека оракула §1.1–1.2 (rev 10): charter схемы 2 — сам реестр кода.
 
-    `approved` в реестре — дата штампа (резервирование кода); неизменность
-    держит `charter_guard` на каждом PR. Занятый код — стоп с причиной.
+    До штампа — профилактика коллизии (решение владельца 2026-09-29): код не
+    должен быть занят charter'ом на живой верхушке default-ветки или в
+    открытом candidate W1 другого воркстрима. Занят — стоп с причиной, charter
+    не штампуется. Штамп идемпотентен (resume).
     """
     assert state.code is not None and state.plan_item is not None
-    charter_path.write_text(
-        charter_guard.stamp_charter(
+    try:
+        taken = ops.charter_codes_elsewhere(
+            state.target_dir, state.repo_slug, state.base_ref or "master", state.ws_id
+        )
+    except RuntimeError as exc:
+        _stop_with_comment(
+            state, ops, "stopped_preflight",
+            f"профилактика коллизии кода недоступна: {exc} — повторите resume",
+        )
+        return False
+    if state.code in taken:
+        _stop_with_comment(
+            state, ops, "stopped_preflight",
+            f"code {state.code} уже занят воркстримом {taken[state.code]} "
+            "(живая верхушка default-ветки или открытый candidate W1) — "
+            "выберите другой --code для нового прогона",
+        )
+        return False
+    try:
+        stamped = charter_guard.stamp_charter(
             charter_path.read_text(encoding="utf-8"),
             code=state.code, plan_item=state.plan_item,
-        ),
-        encoding="utf-8",
-    )
-    registry = Path(state.target_dir) / charter_guard.REGISTRY_PATH
-    registry.parent.mkdir(parents=True, exist_ok=True)
-    current = registry.read_text(encoding="utf-8") if registry.exists() else ""
-    reg = charter_guard.load_registry(current)
-    if state.code in reg and reg[state.code].get("workstream") == state.ws_id:
-        return True
-    try:
-        registry.write_text(
-            charter_guard.register_code(
-                current, code=state.code, ws_id=state.ws_id,
-                approved=datetime.now().date().isoformat(),
-            ),
-            encoding="utf-8",
         )
     except ValueError as exc:
-        _stop_with_comment(state, ops, "stopped_preflight", f"code {state.code}: {exc}")
+        _stop_with_comment(state, ops, "stopped_author", f"charter: {exc}")
         return False
+    charter_path.write_text(stamped, encoding="utf-8")
     return True
 
 
@@ -2679,11 +2690,8 @@ def _commit_bundle(state: RunState, ops: Ops, subject_line: str) -> None:
         force = tuple(
             f"{state.bundle_dir}/{rel}" for rel in state.brief["source_paths"]
         )
-    paths = [state.bundle_dir]
-    if state.code:  # реестр кодов коммитится вместе с charter схемы 2
-        paths.append(charter_guard.REGISTRY_PATH)
     ops.commit_paths(
-        state.target_dir, paths, message, force_paths=force,
+        state.target_dir, [state.bundle_dir], message, force_paths=force,
     )
 
 

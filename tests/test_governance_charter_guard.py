@@ -1,6 +1,8 @@
-"""charter_guard: charter схемы 2 и реестр кодов (спека §1.1–1.2)."""
+"""charter_guard: charter схемы 2 — сам реестр кодов (спека §1.1–1.2, rev 10)."""
 
 from __future__ import annotations
+
+import subprocess
 
 import pytest
 
@@ -8,143 +10,128 @@ from governance import charter_guard as cg
 
 CH2 = "---\nschema: 2\ncode: ENC\nplan_item: todo://devtools/oracle\n---\n# Charter\n"
 CH1 = "---\nspec_stage: charter\n---\n# Charter\n"
-REG = '[ENC]\nworkstream = "ws-a"\napproved = 2026-09-21\n'
+
+
+def ch2(code="ENC", item="oracle"):
+    return f"---\nschema: 2\ncode: {code}\nplan_item: todo://devtools/{item}\n---\n# C\n"
 
 
 def test_schema1_charter_has_no_findings():
     ch = cg.read_charter(CH1)
     assert ch.schema == 1
-    assert (
-        cg.charter_findings(
-            ch, ws_id="ws-a", registry={}, todo_ids=set(), repo="devtools"
-        )
-        == []
-    )
+    assert cg.charter_findings(ch, ws_id="ws-a", todo_ids=set(), repo="devtools") == []
+
+
+def test_no_frontmatter_is_schema1_malformed_is_not():
+    assert cg.read_charter("# Charter\n\nтело\n").schema == 1
+    broken = cg.read_charter("---\nschema: 2\ncode: [unclosed\n---\n# C\n")
+    assert broken.malformed
+    out = cg.charter_findings(broken, ws_id="ws-a", todo_ids=set(), repo="devtools")
+    assert any("frontmatter" in f for f in out)
 
 
 def test_schema2_requires_code_and_plan_item():
     ch = cg.read_charter("---\nschema: 2\n---\n")
-    out = cg.charter_findings(
-        ch, ws_id="ws-a", registry={}, todo_ids=set(), repo="devtools"
-    )
+    out = cg.charter_findings(ch, ws_id="ws-a", todo_ids=set(), repo="devtools")
     assert any("code" in f for f in out) and any("plan_item" in f for f in out)
 
 
 @pytest.mark.parametrize("code", ["E", "ENCODERS", "enc", "EN1"])
 def test_bad_code_shape(code):
     ch = cg.Charter(schema=2, code=code, plan_item="todo://devtools/x")
-    out = cg.charter_findings(
-        ch,
-        ws_id="ws-a",
-        registry={code: {"workstream": "ws-a"}},
-        todo_ids={"x"},
-        repo="devtools",
-    )
-    assert any("CODE" in f or "code" in f for f in out)
-
-
-def test_code_outside_registry():
-    ch = cg.read_charter(CH2)
-    out = cg.charter_findings(
-        ch, ws_id="ws-a", registry={}, todo_ids={"oracle"}, repo="devtools"
-    )
-    assert any("не зарегистрирован" in f for f in out)
-
-
-def test_code_must_be_registered_to_this_workstream():
-    ch = cg.read_charter(CH2)
-    reg = cg.load_registry('[ENC]\nworkstream = "other"\napproved = 2026-09-21\n')
-    out = cg.charter_findings(
-        ch, ws_id="ws-a", registry=reg, todo_ids={"oracle"}, repo="devtools"
-    )
-    assert any("other" in f for f in out)
+    out = cg.charter_findings(ch, ws_id="ws-a", todo_ids={"x"}, repo="devtools")
+    assert any("CODE" in f for f in out)
 
 
 def test_plan_item_must_exist_in_own_repo_todo():
     ch = cg.read_charter(CH2)
-    reg = cg.load_registry(REG)
-    assert (
-        cg.charter_findings(
-            ch, ws_id="ws-a", registry=reg, todo_ids={"oracle"}, repo="devtools"
-        )
-        == []
-    )
-    out = cg.charter_findings(
-        ch, ws_id="ws-a", registry=reg, todo_ids=set(), repo="devtools"
-    )
+    assert cg.charter_findings(ch, ws_id="ws-a", todo_ids={"oracle"}, repo="devtools") == []
+    out = cg.charter_findings(ch, ws_id="ws-a", todo_ids=set(), repo="devtools")
     assert any("oracle" in f for f in out)
-    ch_foreign = cg.Charter(schema=2, code="ENC", plan_item="todo://spec-runner/oracle")
-    out = cg.charter_findings(
-        ch_foreign, ws_id="ws-a", registry=reg, todo_ids={"oracle"}, repo="devtools"
-    )
+    foreign = cg.Charter(2, "ENC", "todo://spec-runner/oracle")
+    out = cg.charter_findings(foreign, ws_id="ws-a", todo_ids={"oracle"}, repo="devtools")
     assert any("spec-runner" in f for f in out)
 
 
-def test_registry_only_grows():
-    base = cg.load_registry(REG)
-    assert cg.registry_findings(base, cg.load_registry("")) != []  # удаление
-    moved = cg.load_registry('[ENC]\nworkstream = "ws-b"\napproved = 2026-09-21\n')
-    assert cg.registry_findings(base, moved) != []  # переназначение
-    grown = cg.load_registry(
-        REG + '[ABC]\nworkstream = "ws-c"\napproved = 2026-09-29\n'
-    )
-    assert cg.registry_findings(base, grown) == []
+def test_collision_violator_is_the_later_merged():
+    charters = {"ws-a": cg.read_charter(ch2()), "ws-b": cg.read_charter(ch2())}
+    out = cg.collision_findings(charters, order={"ws-a": 0, "ws-b": 1})
+    assert len(out) == 1 and "ws-b" in out[0] and "ws-a" in out[0]
 
 
-def test_duplicate_key_is_a_parse_error():
-    with pytest.raises(ValueError):
-        cg.load_registry(REG + REG)
+def test_collision_with_unmerged_charter_blames_the_unmerged():
+    charters = {"ws-a": cg.read_charter(ch2()), "ws-new": cg.read_charter(ch2())}
+    out = cg.collision_findings(charters, order={"ws-a": 0})
+    assert len(out) == 1 and out[0].startswith("ws-new")
 
 
-def test_code_is_immutable():
-    base = cg.read_charter(CH2)
-    head = cg.read_charter(CH2.replace("ENC", "ENX"))
-    assert cg.code_change_findings(base, head) != []
-    assert cg.code_change_findings(None, head) == []
-    assert cg.code_change_findings(base, base) == []
+def test_deleting_or_moving_a_schema2_charter_is_refused():
+    base = {"workstreams/ws-a/spec/00-charter.md": cg.read_charter(CH2)}
+    assert cg.deletion_findings(base, {}) != []
+    moved = {"workstreams/ws-renamed/spec/00-charter.md": cg.read_charter(CH2)}
+    assert cg.deletion_findings(base, moved) != []
+    assert cg.deletion_findings(base, base) == []
+    base1 = {"workstreams/ws-a/spec/00-charter.md": cg.read_charter(CH1)}
+    assert cg.deletion_findings(base1, {}) == []  # схема 1 — не надгробие
 
 
-def test_stamp_and_register_roundtrip():
+def test_code_is_immutable_except_as_collision_violator():
+    base, head = cg.read_charter(ch2("ENC")), cg.read_charter(ch2("ENX"))
+    assert cg.code_change_findings(base, head, violator_in_base=False) != []
+    assert cg.code_change_findings(base, head, violator_in_base=True) == []
+    assert cg.code_change_findings(None, head, violator_in_base=False) == []
+    assert cg.code_change_findings(base, base, violator_in_base=False) == []
+
+
+def test_stamp_idempotent_and_refuses_malformed():
     stamped = cg.stamp_charter(CH1, code="ENC", plan_item="todo://devtools/oracle")
-    ch = cg.read_charter(stamped)
-    assert (ch.schema, ch.code, ch.plan_item) == (2, "ENC", "todo://devtools/oracle")
-    reg_text = cg.register_code("", code="ENC", ws_id="ws-a", approved="2026-09-29")
-    assert cg.load_registry(reg_text)["ENC"]["workstream"] == "ws-a"
+    assert cg.read_charter(stamped) == cg.Charter(2, "ENC", "todo://devtools/oracle")
+    assert cg.stamp_charter(stamped, code="ENC", plan_item="todo://devtools/oracle") == stamped
+    plain = cg.stamp_charter("# C\n\nтело\n", code="ENC", plan_item="todo://devtools/x")
+    assert cg.read_charter(plain).code == "ENC" and "тело" in plain
     with pytest.raises(ValueError):
-        cg.register_code(reg_text, code="ENC", ws_id="ws-b", approved="2026-09-29")
+        cg.stamp_charter("---\ncode: [unclosed\n---\n", code="ENC", plan_item="todo://devtools/x")
 
 
 def _git(repo, *args):
-    import subprocess
-
     subprocess.run(
         ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
-        check=True,
-        capture_output=True,
+        check=True, capture_output=True,
     )
 
 
-def test_repo_findings_registry_removal_against_base(tmp_path):
+def _write(repo, ws, text):
+    d = repo / f"workstreams/{ws}/spec"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "00-charter.md").write_text(text)
+
+
+def test_repo_findings_order_from_first_parent_history(tmp_path):
     repo = tmp_path / "devtools"
-    (repo / "workstreams/ws-a/spec").mkdir(parents=True)
-    (repo / "workstreams/ws-a/spec/00-charter.md").write_text(CH2)
-    (repo / "workstreams/codes.toml").write_text(REG)
-    (repo / "TODO.md").write_text("- [ ] пункт @id:oracle\n")
-    _git(repo, "init", "-q")
+    repo.mkdir()
+    (repo / "TODO.md").write_text("- [ ] a @id:oracle\n- [ ] b @id:other\n")
+    _git(repo, "init", "-q", "-b", "master")
+    _write(repo, "ws-a", ch2())
     _git(repo, "add", ".")
-    _git(repo, "commit", "-qm", "base")
+    _git(repo, "commit", "-qm", "ws-a")
     assert cg.repo_findings(repo, "HEAD") == []
-    (repo / "workstreams/codes.toml").write_text("")
-    out = cg.repo_findings(repo, "HEAD")
-    assert any("удалён" in f for f in out) and any(
-        "не зарегистрирован" in f for f in out
-    )
-    assert cg.main(["--repo", str(repo), "--base", "HEAD"]) == 1
+    _write(repo, "ws-b", ch2(item="other"))
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "ws-b")
+    out = cg.repo_findings(repo, "HEAD~1")
+    assert len(out) == 1 and out[0].startswith("ws-b")
+    assert cg.main(["--repo", str(repo), "--base", "HEAD~1"]) == 1
 
 
-def test_charter_without_frontmatter_is_schema1_and_stampable():
-    plain = "# Charter\n\nтело\n"
-    assert cg.read_charter(plain).schema == 1
-    stamped = cg.stamp_charter(plain, code="ENC", plan_item="todo://devtools/x")
-    assert cg.read_charter(stamped) == cg.Charter(2, "ENC", "todo://devtools/x")
-    assert "тело" in stamped
+def test_repo_findings_refuses_deleted_charter(tmp_path):
+    repo = tmp_path / "devtools"
+    repo.mkdir()
+    (repo / "TODO.md").write_text("- [ ] a @id:oracle\n")
+    _git(repo, "init", "-q", "-b", "master")
+    _write(repo, "ws-a", ch2())
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "ws-a")
+    _git(repo, "rm", "-q", "-r", "workstreams/ws-a")
+    _git(repo, "commit", "-qm", "rm")
+    out = cg.repo_findings(repo, "HEAD~1")
+    assert any("удал" in f or "перенес" in f for f in out)

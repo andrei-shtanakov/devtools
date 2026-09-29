@@ -135,3 +135,10 @@ def test_outcome_must_unconfirmed_stops_should_reports():
 def test_graph_errors_block():
     g = cgr.build_graph(REQ, BEH.replace("`traces: [FR-02]`", "`traces: []`"), ACC)
     assert ck.outcome(g, {"BEH-01": "traced", "BEH-02": "traced"}).closure == "blocked"
+
+
+@pytest.mark.parametrize("roots", [["tests"], ["tests/unit"], ["/abs"], ["../x"], ["pkg/../tests"], []])
+def test_product_roots_that_are_not_product_are_refused(roots):
+    """Ревью среза 1, I4: корни — чужая цифра; тестовые, абсолютные, с `..` и
+    пустые — отказ, иначе тело теста засчитывалось бы исполнением продукта."""
+    assert check(mutate(lambda r: r.update(product_roots=roots))) != []

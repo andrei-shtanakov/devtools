@@ -177,6 +177,10 @@ class Ops(Protocol):
 
     def criteria_verify(self, target_dir: str, request_path: str) -> tuple[int, str]: ...
 
+    def charter_codes_elsewhere(
+        self, target_dir: str, repo_slug: str, base_ref: str, own_ws: str
+    ) -> dict[str, str]: ...
+
     def review(self, repo_name: str, pr: int) -> int: ...
 
     def review_fresh(self, repo_name: str, pr: int) -> int: ...
@@ -1137,6 +1141,48 @@ class RealOps:
                         }
                     )
         return found
+
+    def charter_codes_elsewhere(
+        self, target_dir: str, repo_slug: str, base_ref: str, own_ws: str
+    ) -> dict[str, str]:
+        """code → воркстрим: charter'ы схемы 2 на живой верхушке `base_ref` и в
+        открытых candidate W1 других воркстримов (профилактика коллизии,
+        спека оракула §1.2). Недоступный факт — RuntimeError (fail-closed).
+        """
+        from governance import charter_guard
+
+        def fetch(ref: str) -> str:
+            local = f"refs/criteria-codes/{ref}"
+            done = subprocess.run(
+                ["git", "-C", target_dir, "fetch", "--quiet", "origin",
+                 f"+refs/heads/{ref}:{local}"],
+                capture_output=True, text=True, check=False,
+            )
+            if done.returncode != 0:
+                raise RuntimeError(f"fetch {ref}: {done.stderr.strip()}")
+            return local
+
+        out: dict[str, str] = {}
+        refs = [base_ref]
+        listing = subprocess.run(
+            ["gh", "pr", "list", "-R", repo_slug, "--state", "open",
+             "--limit", "500", "--json", "headRefName"],
+            capture_output=True, text=True, check=False,
+        )
+        if listing.returncode != 0:
+            raise RuntimeError(f"gh pr list: {listing.stderr.strip()}")
+        cand = re.compile(r"^spec/(.+)-approve-1-\d+-\d+$")
+        for pr in json.loads(listing.stdout or "[]"):
+            m = cand.match(pr.get("headRefName", ""))
+            if m and m.group(1) != own_ws:
+                refs.append(pr["headRefName"])
+        for ref in refs:
+            local = fetch(ref)
+            for path, ch in charter_guard.charters_at(Path(target_dir), local).items():
+                ws = Path(path).parent.parent.name
+                if ch.schema == 2 and ch.code and ws != own_ws:
+                    out.setdefault(str(ch.code), ws)
+        return out
 
     def criteria_verify(self, target_dir: str, request_path: str) -> tuple[int, str]:
         """`spec-runner verify --criteria` (контракт criteria-closure/v1, §5.1)."""

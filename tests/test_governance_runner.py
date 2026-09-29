@@ -135,6 +135,7 @@ class FakeOps:
     delete_branch_ok: bool = True
     existing_prs: dict[str, int] = field(default_factory=dict)
     review_exit: int = 0
+    codes_elsewhere: dict[str, str] = field(default_factory=dict)
     review_fresh_exit: int = 0
     review_body: str | None = None
     existing_files: set[str] = field(default_factory=set)
@@ -285,6 +286,12 @@ class FakeOps:
     def review(self, repo_name: str, pr: int) -> int:
         self.calls.append(("review", pr))
         return self.review_exit
+
+    def charter_codes_elsewhere(
+        self, target_dir: str, repo_slug: str, base_ref: str, own_ws: str
+    ) -> dict[str, str]:
+        self.calls.append(("charter_codes_elsewhere", base_ref, own_ws))
+        return dict(self.codes_elsewhere)
 
     def pr_facts(self, repo_slug: str, pr: int) -> dict:
         self.calls.append(("pr_facts", pr))
@@ -8445,11 +8452,9 @@ def test_edge_tripwire_keeps_unchanged_wave_sibling(
     assert not touched.exists()
 
 
-def test_authoring_stamps_schema2_charter_and_registers_code(
-    tmp_path: Path, runs_root, monkeypatch
-) -> None:
-    """Спека оракула §1.1–1.2: прогон с code/plan_item рождает charter схемы
-    2 и запись в реестре кодов; реестр коммитится вместе с бандлом."""
+def test_authoring_stamps_schema2_charter(tmp_path: Path, runs_root, monkeypatch) -> None:
+    """Спека оракула §1.1–1.2 (rev 10): прогон с code/plan_item рождает charter
+    схемы 2; отдельного реестра нет — коммитится только бандл."""
     from governance import charter_guard
 
     ops = FakeOps(facts=GREEN_PR_FACTS)
@@ -8461,11 +8466,44 @@ def test_authoring_stamps_schema2_charter_and_registers_code(
     assert charter_guard.read_charter(charter) == charter_guard.Charter(
         2, "ENC", "todo://alpha/oracle"
     )
-    reg = charter_guard.load_registry(
-        (Path(state.target_dir) / charter_guard.REGISTRY_PATH).read_text()
+    assert all(paths == [state.bundle_dir] for _, paths, _ in ops.committed)
+    assert any(c[0] == "charter_codes_elsewhere" for c in ops.calls)
+
+
+def test_authoring_code_taken_elsewhere_stops_before_stamp(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    from governance import charter_guard
+
+    ops = FakeOps(facts=GREEN_PR_FACTS, codes_elsewhere={"ENC": "ws-other"})
+    _fake_wave_adapters(monkeypatch, ops)
+    state = runner.start(**_waves_kwargs(
+        tmp_path, "r-taken", ops, code="ENC", plan_item="todo://alpha/oracle",
+    ))
+    assert state.status == "stopped_preflight"
+    charter = (Path(state.target_dir) / state.bundle_dir / "00-charter.md").read_text()
+    assert charter_guard.read_charter(charter).schema == 1
+
+
+def test_resume_skip_path_stamps_existing_charter(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """I3: charter уже на диске (падение между авторингом и штампом) — resume
+    штампует его, а не принимает схемой 1."""
+    from governance import charter_guard
+
+    kwargs = _waves_kwargs(
+        tmp_path, "r-skip", FakeOps(facts=GREEN_PR_FACTS),
+        code="ENC", plan_item="todo://alpha/oracle",
     )
-    assert reg["ENC"]["workstream"] == state.ws_id
-    assert any(charter_guard.REGISTRY_PATH in paths for _, paths, _ in ops.committed)
+    bundle = Path(kwargs["target_dir"]) / kwargs["bundle_dir"]
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "00-charter.md").write_text("---\nspec_stage: charter\n---\n# C\n")
+    ops = kwargs["ops"]
+    _fake_wave_adapters(monkeypatch, ops)
+    state = runner.start(**kwargs)
+    charter = (Path(state.target_dir) / state.bundle_dir / "00-charter.md").read_text()
+    assert charter_guard.read_charter(charter).code == "ENC"
 
 
 def test_authoring_without_code_keeps_schema1(
@@ -8478,4 +8516,4 @@ def test_authoring_without_code_keeps_schema1(
     state = runner.start(**_waves_kwargs(tmp_path, "r-schema1", ops))
     charter = (Path(state.target_dir) / state.bundle_dir / "00-charter.md").read_text()
     assert charter_guard.read_charter(charter).schema == 1
-    assert not (Path(state.target_dir) / charter_guard.REGISTRY_PATH).exists()
+    assert not any(c[0] == "charter_codes_elsewhere" for c in ops.calls)

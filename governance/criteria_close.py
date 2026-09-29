@@ -5,15 +5,24 @@
 (создаёт учётка оператора, scope-аттестация ai-prosto, мерж merge-pr.sh).
 Ревизий, подписи и штампа нет — это срез 2. Флага обхода стопа нет и быть
 не должно (спека §3.3).
+
+Идентичность измерения (ревью среза 1, C2): бандл читается по пину из
+git-объектов; продукт — только чистый чекаут ровно на `product_sha`, который
+предок живой default-ветки. Публикация — из временного worktree от
+`origin/<base>`: чекаут оператора не трогается (I2).
 """
+
 from __future__ import annotations
 
 import argparse
 import ast
 import hashlib
 import json
+import shutil
 import socket
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from governance import (
@@ -31,6 +40,11 @@ from governance.ops import Ops, RealOps
 
 STATE_ROOT = Path(__file__).resolve().parent.parent / "out" / "criteria-close"
 CLOSURE_NAME = "90-acceptance-closure.md"
+_NODES = ("00-charter.md", "10-requirements.md", "15-behaviour-spec.md", "25-acceptance.md")
+
+
+class CloseError(RuntimeError):
+    """Отказ шага с названной причиной (код 2)."""
 
 
 def decide_not_applicable(charter, selector_policy, installed, minimum, *, is_vendored) -> str | None:
@@ -44,13 +58,18 @@ def decide_not_applicable(charter, selector_policy, installed, minimum, *, is_ve
     return None
 
 
+# ---- состояние: измерено и опубликовано -------------------------------------
+
+
 def _state_path(run_id: str) -> Path:
     return STATE_ROOT / run_id / "state.json"
 
 
 def _load(run_id: str) -> dict:
     p = _state_path(run_id)
-    return json.loads(p.read_text()) if p.exists() else {"measured": {}}
+    data = json.loads(p.read_text()) if p.exists() else {}
+    data.setdefault("measured", {})
+    return data
 
 
 def _save(run_id: str, data: dict) -> None:
@@ -61,14 +80,59 @@ def _save(run_id: str, data: dict) -> None:
     tmp.replace(p)
 
 
-def _already_measured(run_id: str, key: str) -> str | None:
+def _entry(run_id: str, key: str) -> dict | None:
     return _load(run_id)["measured"].get(key)
 
 
-def _record_measured(run_id: str, key: str, closure: str) -> None:
+def _record(run_id: str, key: str, **fields) -> None:
     data = _load(run_id)
-    data["measured"][key] = closure
+    data["measured"].setdefault(key, {}).update(fields)
     _save(run_id, data)
+
+
+# ---- git ----------------------------------------------------------------------
+
+
+def _git(repo: str | Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=False
+    )
+
+
+def _show(repo: str, ref: str, path: str) -> str:
+    proc = _git(repo, "show", f"{ref}:{path}")
+    if proc.returncode != 0:
+        raise CloseError(f"{path} недоступен на {ref[:12]}: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def _bundle_at_pin(state, pin: str) -> dict[str, str]:
+    """Узлы замыкания по пину из git-объектов (§3.1), не из рабочего дерева."""
+    return {n: _show(state.target_dir, pin, f"{state.bundle_dir}/{n}") for n in _NODES}
+
+
+def _verify_product(state, product_sha: str | None) -> str:
+    """Чистое дерево, HEAD == product_sha, product_sha — предок origin/<base>."""
+    base = state.base_ref or "master"
+    if _git(state.target_dir, "fetch", "--quiet", "origin", base).returncode != 0:
+        raise CloseError(f"fetch origin {base} не удался")
+    tip = _git(state.target_dir, "rev-parse", f"origin/{base}").stdout.strip()
+    sha = product_sha or tip
+    full = _git(state.target_dir, "rev-parse", "--verify", f"{sha}^{{commit}}")
+    if full.returncode != 0:
+        raise CloseError(f"product_sha {sha} не коммит")
+    sha = full.stdout.strip()
+    if _git(state.target_dir, "merge-base", "--is-ancestor", sha, tip).returncode != 0:
+        raise CloseError(f"product_sha {sha[:12]} не предок origin/{base}")
+    if _git(state.target_dir, "status", "--porcelain").stdout.strip():
+        raise CloseError("рабочее дерево не чистое — измерение невоспроизводимо")
+    head = _git(state.target_dir, "rev-parse", "HEAD").stdout.strip()
+    if head != sha:
+        raise CloseError(f"HEAD {head[:12]} ≠ product_sha {sha[:12]} — выполните checkout")
+    return sha
+
+
+# ---- рендер ---------------------------------------------------------------------
 
 
 def render_closure(result, *, ws_id, code, bundle_pin, product_sha, response_sha,
@@ -98,53 +162,73 @@ def render_closure(result, *, ws_id, code, bundle_pin, product_sha, response_sha
     return join_frontmatter(meta, "# Закрытие воркстрима\n\n" + "\n".join(body) + "\n")
 
 
-def _publish(state, ops: Ops, text: str, closure: str) -> int:
-    """Агентский PR файла закрытия: write-ahead ветки, аттестация, мерж."""
-    rel = f"{state.bundle_dir}/{CLOSURE_NAME}"
-    branch = f"criteria-close/{state.ws_id}"
-    existing = ops.find_pr(state.repo_slug, branch)
-    if existing is None:
-        ops.ensure_branch(state.target_dir, branch)
-        (Path(state.target_dir) / rel).write_text(text, encoding="utf-8")
-        ops.commit_paths(state.target_dir, [rel], f"criteria-close: {state.ws_id} — {closure}")
-        ops.push_branch(state.target_dir, branch)
-        pr = ops.create_pr(state.target_dir, state.repo_slug, branch,
-                           f"criteria-close: {state.ws_id} — {closure}",
-                           f"Файл закрытия воркстрима (срез 1 оракула). closure: {closure}.",
-                           "criteria-close")
-    else:
-        pr = existing
+# ---- публикация -----------------------------------------------------------------
+
+
+def _branch(state, key: str) -> str:
+    return f"criteria-close/{state.ws_id}-{hashlib.sha256(key.encode()).hexdigest()[:10]}"
+
+
+def _push_closure(state, branch: str, text: str, closure: str) -> None:
+    """Коммит файла закрытия во временном worktree от origin/<base>."""
+    base = state.base_ref or "master"
+    tmp = Path(tempfile.mkdtemp(prefix="criteria-close-"))
+    wt = tmp / "wt"
+    try:
+        if _git(state.target_dir, "worktree", "add", "--detach", str(wt), f"origin/{base}").returncode:
+            raise CloseError("git worktree add не удался")
+        target = wt / state.bundle_dir / CLOSURE_NAME
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        rel = f"{state.bundle_dir}/{CLOSURE_NAME}"
+        steps = [
+            ("add", "--", rel),
+            ("-c", "user.name=criteria-close", "-c", "user.email=criteria-close@local",
+             "commit", "-q", "-m", f"criteria-close: {state.ws_id} — {closure}"),
+            ("push", "--quiet", "origin", f"HEAD:refs/heads/{branch}"),
+        ]
+        for args in steps:
+            proc = _git(wt, *args)
+            if proc.returncode != 0:
+                raise CloseError(f"git {args[0]}: {proc.stderr.strip()}")
+    finally:
+        _git(state.target_dir, "worktree", "remove", "--force", str(wt))
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _publish(state, ops: Ops, run_id: str, key: str, text: str, closure: str) -> int:
+    """Идемпотентная публикация под ключом: ветка несёт ключ, устаревшие PR
+    закрываются, повтор после сбоя дожимает тот же текст (I1, I2)."""
+    entry = _entry(run_id, key) or {}
+    if entry.get("merged"):
+        return 0
+    branch = _branch(state, key)
+    for other_key, other in _load(run_id)["measured"].items():
+        if other_key != key and other.get("pr") and not other.get("merged") and not other.get("closed"):
+            ops.close_pr(state.repo_slug, other["pr"], f"устарело: новое измерение {branch}")
+            _record(run_id, other_key, closed=True)
+    pr = ops.find_pr(state.repo_slug, branch)
+    if pr is None:
+        _push_closure(state, branch, text, closure)
+        pr = ops.create_pr(
+            state.target_dir, state.repo_slug, branch,
+            f"criteria-close: {state.ws_id} — {closure}",
+            f"Файл закрытия воркстрима (срез 1 оракула). closure: {closure}.",
+            "criteria-close",
+        )
+    _record(run_id, key, pr=pr, branch=branch)
     if ops.review(state.repo, pr) != 0:
         return 2
-    head = ops.head_sha(state.target_dir, branch)
-    return 0 if ops.merge(state.repo, pr, head) == 0 else 2
+    head = _git(state.target_dir, "ls-remote", "origin", f"refs/heads/{branch}").stdout.split()
+    if not head:
+        raise CloseError(f"ветка {branch} не найдена на origin")
+    if ops.merge(state.repo, pr, head[0]) != 0:
+        return 2
+    _record(run_id, key, merged=True)
+    return 0
 
-def run(run_id: str, ops: Ops, *, product_sha: str | None = None) -> int:
-    state = run_state.load(run_id)
-    if state.status != "completed":
-        print(f"criteria-close: прогон {run_id} в статусе {state.status!r}, нужен completed")
-        return 2
-    bundle_pin = runner._verified_result_sha(state)
-    if bundle_pin is None:
-        print("criteria-close: у прогона нет идентичности результата (finalize) — пин неизвестен")
-        return 2
-    bundle = Path(state.target_dir) / state.bundle_dir
-    charter = charter_guard.read_charter((bundle / "00-charter.md").read_text(encoding="utf-8"))
-    product_sha = product_sha or ops.head_sha(state.target_dir, "HEAD")
-    installed = task_bridge.spec_runner_version()
-    host = socket.gethostname()
-    na = decide_not_applicable(
-        charter, spec_runner_contract.target_selector_policy(state.target_dir),
-        installed, criteria_contract.read_min_version(),
-        is_vendored=criteria_contract.vendored(),
-    )
-    if na is not None:
-        text = render_closure(na, ws_id=state.ws_id, code=charter.code,
-                              bundle_pin=bundle_pin, product_sha=product_sha, response_sha=None,
-                              spec_runner_version=installed, host=host)
-        return _publish(state, ops, text, "not-applicable")
-    return _measure_and_publish(state, ops, charter, bundle, bundle_pin, product_sha,
-                                installed, host)
+
+# ---- измерение --------------------------------------------------------------------
 
 
 def _py_files(root: Path, sub: str) -> dict[str, str]:
@@ -157,19 +241,10 @@ def _py_files(root: Path, sub: str) -> dict[str, str]:
     }
 
 
-def _content_sha(root: Path, subdirs: list[str] | None = None) -> str:
-    """sha256 по отсортированным (путь, байты) *.py.
-
-    `subdirs=None` — все *.py репо: ключ запрета повторного измерения (§3.1
-    G6) до ответа, когда продуктовые корни ещё неизвестны (надмножество —
-    строже). С `subdirs` — продуктовые корни ответа + tests: независимый
-    пересчёт `content_sha256` ответа (§5.3), итог производителя не принимается.
-    """
-    bases = [root] if subdirs is None else [root / s for s in subdirs]
-    files = sorted({
-        p for b in bases if b.exists() for p in b.rglob("*.py")
-        if not any(part.startswith(".") for part in p.relative_to(root).parts)
-    })
+def _content_sha(root: Path, subdirs: list[str]) -> str:
+    """sha256 по отсортированным (путь, байты) *.py продуктовых корней и тестов
+    — ключ измерения §3.1 G6 и независимый пересчёт `content_sha256` (§5.3)."""
+    files = sorted({p for s in subdirs if (root / s).exists() for p in (root / s).rglob("*.py")})
     h = hashlib.sha256()
     for p in files:
         h.update(p.relative_to(root).as_posix().encode())
@@ -200,27 +275,30 @@ def _schema() -> dict | None:
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def _measure_and_publish(state, ops: Ops, charter, bundle: Path, bundle_pin: str,
-                         product_sha: str, installed: str | None, host: str) -> int:
-    """Измерение → сверка → исход → файл закрытия (спека §3.1–3.3, §5)."""
+def _key(pin: str, root: Path, roots: list[str]) -> str:
+    return f"{pin}:{_content_sha(root, [*roots, 'tests'])}"
+
+
+def _measure(state, ops: Ops, run_id: str, charter, nodes: dict[str, str], bundle_pin: str,
+             product_sha: str, installed: str | None, host: str) -> tuple[str, str, str] | int:
+    """→ (ключ, closure, текст) или код выхода (2 — отказ шага, 6 — ключ измерен)."""
     root = Path(state.target_dir)
+    prev_roots = _load(run_id).get("roots")
+    if prev_roots:  # ключ известен до вызова — повтор на том же содержимом без вызова
+        pre = _key(bundle_pin, root, prev_roots)
+        entry = _entry(run_id, pre)
+        if entry and entry.get("text"):
+            return pre, entry["closure"], entry["text"]
     graph = criteria_graph.build_graph(
-        (bundle / "10-requirements.md").read_text(encoding="utf-8"),
-        (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8"),
-        (bundle / "25-acceptance.md").read_text(encoding="utf-8"),
+        nodes["10-requirements.md"], nodes["15-behaviour-spec.md"], nodes["25-acceptance.md"]
     )
-    key = f"{bundle_pin}:{_content_sha(root)}"
-    prior = _already_measured(state.run_id, key)
-    if prior is not None:
-        print(f"criteria-close: ключ измерен ({prior}) — §3.1 G6: доработайте продукт")
-        return 6
     tests = [b.id for b in criteria_graph.test_behs(graph)]
     request = {
         "protocol": 1, "owner_repo": state.repo, "workstream": state.ws_id,
         "code": charter.code, "bundle_pin": bundle_pin, "product_sha": product_sha,
         "test_criteria": [{"id": f"{charter.code}:{b}", "verify_task": False} for b in tests],
     }
-    req_path = STATE_ROOT / state.run_id / "request.json"
+    req_path = STATE_ROOT / run_id / "request.json"
     req_path.parent.mkdir(parents=True, exist_ok=True)
     req_path.write_text(json.dumps(request, indent=2))
     code, out = ops.criteria_verify(state.target_dir, str(req_path))
@@ -228,29 +306,86 @@ def _measure_and_publish(state, ops: Ops, charter, bundle: Path, bundle_pin: str
     if response is None:
         print(f"criteria-close: отказ шага — {why}")
         return 2
-    if response.get("error") is not None:
+    roots = [str(r) for r in response.get("product_roots") or []]
+    lock = root / "uv.lock"
+    expected = criteria_check.expected_definitions(_py_files(root, "tests"), charter.code, tests)
+    problems = criteria_check.validate_response(
+        request, response, expected=expected,
+        function_lines=_function_lines(root, roots) if not criteria_check.roots_findings(roots) else {},
+        lock_sha=hashlib.sha256(lock.read_bytes()).hexdigest() if lock.exists() else "",
+        content_sha=_content_sha(root, [*roots, "tests"]) if roots else "",
+    )
+    if problems:
+        print("criteria-close: ответ spec-runner отвергнут:\n  " + "\n  ".join(problems))
+        return 2
+    if response.get("not_applicable") is not None:
+        result: object = str(response["not_applicable"])
+        closure = "not-applicable"
+    elif response.get("error") is not None:
         result = criteria_check.Outcome(
             "blocked", {}, {}, [f"ошибка уровня ответа: {response['error']}"], [])
+        closure = "blocked"
     else:
-        expected = criteria_check.expected_definitions(_py_files(root, "tests"), charter.code, tests)
-        lock = root / "uv.lock"
-        problems = criteria_check.validate_response(
-            request, response, expected=expected,
-            function_lines=_function_lines(root, list(response.get("product_roots", []))),
-            lock_sha=hashlib.sha256(lock.read_bytes()).hexdigest() if lock.exists() else "",
-            content_sha=_content_sha(root, [*response.get("product_roots", []), "tests"]),
-        )
-        if problems:
-            print("criteria-close: ответ spec-runner отвергнут:\n  " + "\n  ".join(problems))
-            return 2
         beh_status = {b["id"].split(":", 1)[1]: b["status"] for b in response["beh"]}
         result = criteria_check.outcome(graph, beh_status)
-    _record_measured(state.run_id, key, result.closure)
+        closure = result.closure
+    key = _key(bundle_pin, root, roots) if roots else f"{bundle_pin}:{hashlib.sha256(out.encode()).hexdigest()}"
+    entry = _entry(run_id, key)
+    if entry and entry.get("text"):
+        print(f"criteria-close: ключ измерен ({entry.get('closure')}) — §3.1 G6: новый результат "
+              "того же содержимого не публикуется; доработайте продукт")
+        return 6
     text = render_closure(result, ws_id=state.ws_id, code=charter.code, bundle_pin=bundle_pin,
                           product_sha=product_sha,
                           response_sha=hashlib.sha256(out.encode()).hexdigest(),
                           spec_runner_version=installed, host=host)
-    return _publish(state, ops, text, result.closure)
+    data = _load(run_id)
+    if roots:
+        data["roots"] = roots
+    data["measured"][key] = {"closure": closure, "text": text}
+    _save(run_id, data)
+    return key, closure, text
+
+
+def run(run_id: str, ops: Ops, *, product_sha: str | None = None) -> int:
+    """0 — файл закрытия опубликован; 2 — отказ шага; 6 — ключ измерен."""
+    state = run_state.load(run_id)
+    if state.status != "completed":
+        print(f"criteria-close: прогон {run_id} в статусе {state.status!r}, нужен completed")
+        return 2
+    bundle_pin = runner._verified_result_sha(state)
+    if bundle_pin is None:
+        print("criteria-close: у прогона нет идентичности результата (finalize) — пин неизвестен")
+        return 2
+    try:
+        nodes = _bundle_at_pin(state, bundle_pin)
+        charter = charter_guard.read_charter(nodes["00-charter.md"])
+        if charter.malformed:
+            raise CloseError("frontmatter charter не разбирается")
+        sha = _verify_product(state, product_sha)
+        installed = task_bridge.spec_runner_version()
+        host = socket.gethostname()
+        na = decide_not_applicable(
+            charter, spec_runner_contract.target_selector_policy(state.target_dir),
+            installed, criteria_contract.read_min_version(),
+            is_vendored=criteria_contract.vendored(),
+        )
+        if na is not None:
+            key = f"{bundle_pin}:{sha}:na:{na}:{installed}"
+            entry = _entry(run_id, key)
+            text = entry["text"] if entry and entry.get("text") else render_closure(
+                na, ws_id=state.ws_id, code=charter.code, bundle_pin=bundle_pin,
+                product_sha=sha, response_sha=None, spec_runner_version=installed, host=host)
+            _record(run_id, key, closure="not-applicable", text=text)
+            return _publish(state, ops, run_id, key, text, "not-applicable")
+        measured = _measure(state, ops, run_id, charter, nodes, bundle_pin, sha, installed, host)
+        if isinstance(measured, int):
+            return measured
+        key, closure, text = measured
+        return _publish(state, ops, run_id, key, text, closure)
+    except CloseError as exc:
+        print(f"criteria-close: отказ шага — {exc}")
+        return 2
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -31,6 +31,20 @@ def expected_definitions(
     return out
 
 
+def roots_findings(roots: object) -> list[str]:
+    """Продуктовые корни ответа — не доверенная цифра (ревью среза 1, I4)."""
+    if not isinstance(roots, list) or not roots:
+        return ["product_roots пуст или не список"]
+    out: list[str] = []
+    for r in roots:
+        parts = str(r).replace("\\", "/").split("/")
+        if str(r).startswith("/") or ".." in parts:
+            out.append(f"product_root {r!r} вне репо")
+        elif parts[0] in ("tests", "test") or "tests" in parts:
+            out.append(f"product_root {r!r} — тестовый путь")
+    return out
+
+
 def _traced_selector_findings(bid: str, s: dict, function_lines: dict[str, set[int]]) -> list[str]:
     out: list[str] = []
     runs = [r for r in s.get("runs", []) if r.get("phase") == "call"]
@@ -60,6 +74,7 @@ def validate_response(
     for key in _LEVEL:
         if key not in response:
             out.append(f"нет поля {key}")
+    out += roots_findings(response.get("product_roots"))
     env = response.get("environment") or {}
     if env.get("lock_sha256") != lock_sha:
         out.append("sha256 lock не совпал")
