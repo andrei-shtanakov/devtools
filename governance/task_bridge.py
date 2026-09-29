@@ -26,7 +26,13 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple
 
-from governance import acceptance_guard, decomposition_guard, design_guard
+from governance import (
+    acceptance_guard,
+    charter_guard,
+    criteria_contract,
+    decomposition_guard,
+    design_guard,
+)
 from governance.approve_node import (
     approve_node,
     read_dag_state,
@@ -714,6 +720,41 @@ def _control_patch(ws_id: str, task_number: int) -> str:
     return f"spec/negative-controls/{ws_id}/TASK-{task_number:03d}.patch"
 
 
+_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
+
+
+def spec_runner_version() -> str | None:
+    """Версия установленного spec-runner или None (нет бинаря/ошибка).
+
+    Свойство машины (спека оракула §7.1): закрытие пишет её вместе с host.
+    """
+    try:
+        proc = subprocess.run(
+            ["spec-runner", "--version"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = _VERSION_RE.search(proc.stdout + proc.stderr)
+    return m.group(1) if proc.returncode == 0 and m else None
+
+
+def _scenarios_code(bundle: Path) -> str | None:
+    """Код воркстрима для строки **Scenarios:** — только charter схемы 2 и
+    доступный оракул (контракт вендорен, spec-runner машины ≥ min, §2.1)."""
+    charter_path = bundle / "00-charter.md"
+    if not charter_path.exists():
+        return None
+    charter = charter_guard.read_charter(charter_path.read_text(encoding="utf-8"))
+    if charter.schema != 2 or not criteria_contract.oracle_available(
+        spec_runner_version(),
+        criteria_contract.read_min_version(),
+        is_vendored=criteria_contract.vendored(),
+    ):
+        return None
+    return charter.code
+
+
 def render_tasks_dt(
     ws_id: str,
     subject: str,
@@ -725,6 +766,7 @@ def render_tasks_dt(
     design_text: str = "",
     acceptance_text: str = "",
     version: int = 1,
+    scenarios_code: str | None = None,
 ) -> str:
     """tasks.md из решённой декомпозиции: 1 DT = 1 задача.
 
@@ -1026,6 +1068,16 @@ def render_tasks_dt(
             # `[FR-02], [FR-03]`) — парсер task.py требует `]` сразу после
             # id, общая скобка молча роняла traces_to у многоссылочных
             # задач (major ревью PR spec-runner#369, круг 2).
+            # Спека оракула §2.1: квалифицированные ID сценариев — машинной
+            # строкой; только при доступном оракуле (вызывающий передаёт код).
+            *(
+                [
+                    "**Scenarios:** "
+                    + ", ".join(f"{scenarios_code}:{g.beh_id}" for g in group)
+                ]
+                if scenarios_code
+                else []
+            ),
             (
                 "**Traces to:** "
                 + ", ".join(f"[{ref}]" for ref in traces)
@@ -2028,6 +2080,7 @@ def deliver(
             design_text=design_text,
             acceptance_text=acceptance_text,
             version=version,
+            scenarios_code=_scenarios_code(base),
         )
         projected = dt_tasks
     else:
