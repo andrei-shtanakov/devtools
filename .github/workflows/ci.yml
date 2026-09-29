@@ -17,14 +17,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
       - run: uv python install 3.12
-      - run: uv sync --frozen
-      - run: uv run --frozen pytest -q
-      - run: >
-          uv run --frozen --group governance pytest
-          tests/test_governance_steward_surface.py
-          tests/test_governance_stale_adapter.py
-          tests/test_governance_bundle_state.py
-          -q
+      # Весь tests/ под группой governance: ручной список модулей со steward
+      # терял новые (devtools#493 — раннер не исполнялся с 30.08).
+      # GOVERNANCE_REQUIRED=1 роняет прогон на скипе по steward (tests/conftest.py).
+      - run: uv sync --frozen --group governance
+      - run: uv run --frozen --group governance pytest -q
+        env:
+          GOVERNANCE_REQUIRED: "1"
       - run: make plan-check-selftest
       - run: uv sync --frozen --group selfcheck
       # selfcheck S3 probe (spec §10.3); version pinned to the registry range
