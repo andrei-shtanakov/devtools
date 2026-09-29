@@ -1,0 +1,3 @@
+# criteria-closure/v1 ownership fixtures: the bytes are the cases (CRLF, lone CR,
+# BOM, NUL, form feed) — never normalize (spec-runner ships the same attribute).
+contracts/criteria-closure/v1/fixtures/** -text

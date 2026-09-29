@@ -13,3 +13,14 @@ spec-runner#603). devtools — потребитель: спека
 Две гарантии вендоринга: **целостность** — `integrity_findings()` локально в
 CI без соседа; **дрейф** — `drift_findings()` против апстрима по ref из `PIN`
 (в CI отсутствие апстрима — ошибка, локально — `not-checked`).
+
+## `fixtures/ownership/` — общие фикстуры владения токеном
+
+Отдельная вендоренная копия со **своими** `PIN` и `manifest.json` (апстрим —
+`tests/fixtures/criteria-closure/v1/ownership/` spec-runner, дизайн #603 §6.3,
+devtools#491). Корневого `PIN` она не создаёт: схемы v1 ещё не заморожены, и
+`vendored()` остаётся False. Байты — это кейсы (CRLF, одиночный CR, BOM, NUL,
+form feed): `-text` в `.gitattributes`, исключены из ruff. Проверка —
+`tests/test_governance_ownership_fixtures.py`: все `owned` совпадают с
+`expected.json`, целостность по manifest, дрейф против соседнего чекаута
+spec-runner (нет чекаута — `not-checked`).
