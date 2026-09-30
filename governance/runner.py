@@ -1574,6 +1574,15 @@ def _stop_with_comment(state: RunState, ops: Ops, status: str, body: str) -> Non
     print(f"_stop_with_comment ({status!r}): {body}")
 
 
+def _interview_of(state: RunState) -> dict:
+    """Координаты интервью прогона; без них стадия Need не запускалась."""
+    if state.interview is None:
+        raise RuntimeError(
+            f"run {state.run_id}: стадия Need вызвана без координат интервью"
+        )
+    return state.interview
+
+
 def _interview_stop(state: RunState, reason: str) -> bool:
     """Персистентный стоп стадии Need; координаты и session_id не трогаются."""
     print(f"_step_interview: {reason}")
@@ -1590,11 +1599,9 @@ def _print_answer_hint(state: RunState, reply: iv.DiscoveryReply) -> None:
         f"{action.get('question_text', '')}"
     )
     print("ответьте вне spec-loop и повторите команду:")
+    interview = _interview_of(state)
     print(
-        "  "
-        + iv.answer_command(
-            state.interview["session_id"], state.interview["stakeholder_role"]
-        )
+        "  " + iv.answer_command(interview["session_id"], interview["stakeholder_role"])
     )
 
 
@@ -1602,6 +1609,8 @@ def _upstream_path(state: RunState, spec: iv.InterviewSpec) -> str | None:
     """Путь upstream-blob'а для engineer-фрейма; `None` для остальных."""
     if spec.frame != "engineer":
         return None
+    if spec.traces_to is None:
+        raise ValueError("engineer-фрейм без traces_to: upstream-blob не найти")
     return str(run_dir(state.run_id) / "brief-input" / "00-discovery" / spec.traces_to)
 
 
@@ -1620,7 +1629,7 @@ def _interview_poll(
     (discovery `cli.py:266-288`) и выдаёт тот же следующий вопрос —
     поэтому run не может зависнуть, застряв между двумя опросами.
     """
-    session_id = state.interview["session_id"]
+    session_id = _interview_of(state)["session_id"]
     if op_status(state, INTERVIEW_BRIEF) != "new":
         return _interview_publish(state, ops, spec, cwd)
     reply = ops.discovery_status(session_id, cwd)
@@ -1648,7 +1657,7 @@ def _interview_after_reply(
     остаётся записанной — печатается подсказка восстановить ЕЁ ЖЕ, а не
     начинать новую.
     """
-    session_id = state.interview["session_id"]
+    session_id = _interview_of(state)["session_id"]
     findings_file = run_dir(state.run_id) / INTERVIEW_FINDINGS
     reason = reply.envelope.get("operation", {}).get("reason", "")
     if reply.code == 20:
@@ -1704,7 +1713,7 @@ def _interview_publish(
     tmp НЕ переименовывается. Реконсиляционное окно Task 8 вставляется
     сразу после `_ensure_started` ниже.
     """
-    session_id = state.interview["session_id"]
+    session_id = _interview_of(state)["session_id"]
     out_dir = run_dir(state.run_id) / "brief-input" / "00-discovery"
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp = out_dir / ".brief.tmp"
@@ -1735,7 +1744,9 @@ def _interview_publish(
     os.replace(tmp, final)
     source = brief_input.inspect_brief(final)  # дескриптор — по durable-пути
     state.brief = source.as_state()
-    state.interview["completed_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+    _interview_of(state)["completed_at"] = datetime.now(UTC).isoformat(
+        timespec="seconds"
+    )
     state.status = "running"
     op_complete(state, INTERVIEW_BRIEF, brief_blob=dict(source.source_blobs))
     return True
@@ -1758,7 +1769,7 @@ def _interview_reconcile_published(
     """
     probe = final.with_name(".brief.reconcile.tmp")
     probe.unlink(missing_ok=True)
-    reply = ops.discovery_brief(state.interview["session_id"], str(probe), cwd)
+    reply = ops.discovery_brief(_interview_of(state)["session_id"], str(probe), cwd)
     try:
         if reply.code != 0:
             return _interview_stop(
@@ -1788,7 +1799,9 @@ def _interview_reconcile_published(
     except brief_input.BriefInputError as exc:
         return _interview_stop(state, f"recovery: inspect_brief: {exc}")
     state.brief = source.as_state()
-    state.interview["completed_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+    _interview_of(state)["completed_at"] = datetime.now(UTC).isoformat(
+        timespec="seconds"
+    )
     state.status = "running"
     op_complete(
         state, INTERVIEW_BRIEF, brief_blob=dict(source.source_blobs), reconciled=True
@@ -2844,7 +2857,8 @@ def _commit_bundle(state: RunState, ops: Ops, subject_line: str) -> None:
         # репо-цели (`workstreams/*/spec/*` + `!*.md`) его не пускают —
         # добавляем поштучно с `-f`; S3 ниже сверяет, что он в HEAD.
         force = tuple(
-            f"{state.bundle_dir}/{rel}" for rel in state.brief["source_paths"]
+            f"{state.bundle_dir}/{rel}"
+            for rel in brief_input.descriptor_source_paths(state.brief, required=True)
         )
     ops.commit_paths(
         state.target_dir,
@@ -2866,13 +2880,18 @@ def _source_layer_committed(state: RunState, ops: Ops) -> bool:
     head = ops.rev_parse(state.target_dir, "HEAD")
     if head is None:
         return _brief_stop(state, "HEAD не резолвится после коммита S3")
-    paths = list(state.brief["source_paths"])
-    blobs = list(state.brief["source_blobs"].values())
+    try:
+        paths = brief_input.descriptor_source_paths(state.brief, required=True)
+        blobs = list(
+            brief_input.descriptor_source_blobs(state.brief, required=True).values()
+        )
+    except ValueError as exc:  # неполный дескриптор — не «источников нет»
+        return _brief_stop(state, str(exc))
     if len(paths) != len(blobs):
         return _brief_stop(
             state, "descriptor brief: source_paths и source_blobs разной длины"
         )
-    for rel, expected in zip(paths, blobs):
+    for rel, expected in zip(paths, blobs, strict=True):
         full = f"{state.bundle_dir}/{rel}"
         actual = ops.blob_in_commit(state.target_dir, head, full)
         if actual != expected:

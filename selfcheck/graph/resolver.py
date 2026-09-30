@@ -399,7 +399,7 @@ def add_exec_edges(
                 continue
             func = callee.rsplit(".", 1)[-1]
             defining = mod.rel if func in mod.wrappers and "." not in callee else None
-            for (mname, fname), rel in owner.items():
+            for (_mname, fname), rel in owner.items():
                 if fname == func and (defining is None or rel == defining):
                     called.add((rel, fname))
             if defining:

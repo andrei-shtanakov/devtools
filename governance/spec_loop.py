@@ -341,34 +341,6 @@ def find_runs(repo: str, subject: str) -> list[rs.RunState]:
     return matches
 
 
-def _bundle_dir_from_pr_files(files: list[str]) -> str:
-    """Единственный каталог, содержащий полный шестиузловой бандл PR.
-
-    Не подставляем современный дефолт молча: исходный запуск мог передать
-    ``--bundle-dir``. Список файлов PR — durable-факт, позволяющий вернуть
-    точное значение даже для такого запуска.
-    """
-    by_parent: dict[str, set[str]] = {}
-    for raw in files:
-        path = Path(raw)
-        if path.name in _BUNDLE_FILENAMES and str(path.parent) not in (
-            "",
-            ".",
-        ):
-            by_parent.setdefault(str(path.parent), set()).add(path.name)
-    complete = sorted(
-        parent for parent, names in by_parent.items() if names == _BUNDLE_FILENAMES
-    )
-    if len(complete) != 1:
-        detail = complete if complete else "нет полного шестиузлового каталога"
-        raise SpecLoopError(
-            "bundle-dir не восстанавливается из файлов bundle-PR: "
-            f"{detail!r}; нужен ровно один каталог с "
-            f"{sorted(_BUNDLE_FILENAMES)!r}"
-        )
-    return complete[0]
-
-
 def _remote_branch_pattern(subject: str, ws_id: str | None) -> tuple[str, re.Pattern]:
     """Префикс запроса и точная грамматика bundle-ветки восстановления."""
     if ws_id is not None:
@@ -1130,52 +1102,50 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "действие": f"продолжение ({state.status})",
             }
-        else:
-            ws_id = args.ws_id or ws_id_for(args.subject, date.today())
-            rs.validate_id_component(ws_id, label="ws_id")
-            collisions = []
-            for rid in rs.all_run_ids():
-                try:
-                    if rs.load(rid).ws_id == ws_id:
-                        collisions.append(rid)
-                except Exception:  # noqa: BLE001, S112
-                    # Нечитаемые леджеры уже отвергнуты/пропущены
-                    # find_runs выше (пустые трупы runner'а — штатны).
-                    continue
-            if collisions:
-                raise SpecLoopError(
-                    f"ws-id {ws_id!r} уже занят прогонами "
-                    f"{collisions!r} с другой парой (repo, subject) — "
-                    "задайте --ws-id"
-                )
-            # run-id материализуется ДО таблицы разрешённых значений.
-            run_id = f"{ws_id}-{os.urandom(3).hex()}"
-            bundle_dir = args.bundle_dir or f"workstreams/{ws_id}/spec"
-            values = {
-                "subject": args.subject,
-                "repo": args.repo,
-                "repo-slug": entry.repo_slug,
-                "ws-id": ws_id,
-                "run-id": run_id,
-                "target-dir": target_dir,
-                "bundle-dir": bundle_dir,
-                "profile": args.profile,
-                "brief-frame": (supplied_brief.frame if supplied_brief else "нет"),
-                "brief-source": (
-                    list(supplied_brief.source_paths) if supplied_brief else "нет"
-                ),
-                "need-frame": (interview_spec.frame if interview_spec else "нет"),
-                "stakeholder": (
-                    interview_spec.stakeholder_role if interview_spec else "нет"
-                ),
-                "merge-authority": "human (жёстко, без override)",
-                "authoring": "legacy" if args.legacy else "waves",
-                "действие": "start (новый прогон)",
-            }
-
-        _print_values(values)
-        if state is not None:
+            _print_values(values)
             return _dispatch(state, ops)
+        ws_id = args.ws_id or ws_id_for(args.subject, date.today())
+        rs.validate_id_component(ws_id, label="ws_id")
+        collisions = []
+        for rid in rs.all_run_ids():
+            try:
+                if rs.load(rid).ws_id == ws_id:
+                    collisions.append(rid)
+            except Exception:  # noqa: BLE001, S112
+                # Нечитаемые леджеры уже отвергнуты/пропущены
+                # find_runs выше (пустые трупы runner'а — штатны).
+                continue
+        if collisions:
+            raise SpecLoopError(
+                f"ws-id {ws_id!r} уже занят прогонами "
+                f"{collisions!r} с другой парой (repo, subject) — "
+                "задайте --ws-id"
+            )
+        # run-id материализуется ДО таблицы разрешённых значений.
+        run_id = f"{ws_id}-{os.urandom(3).hex()}"
+        bundle_dir = args.bundle_dir or f"workstreams/{ws_id}/spec"
+        values = {
+            "subject": args.subject,
+            "repo": args.repo,
+            "repo-slug": entry.repo_slug,
+            "ws-id": ws_id,
+            "run-id": run_id,
+            "target-dir": target_dir,
+            "bundle-dir": bundle_dir,
+            "profile": args.profile,
+            "brief-frame": (supplied_brief.frame if supplied_brief else "нет"),
+            "brief-source": (
+                list(supplied_brief.source_paths) if supplied_brief else "нет"
+            ),
+            "need-frame": (interview_spec.frame if interview_spec else "нет"),
+            "stakeholder": (
+                interview_spec.stakeholder_role if interview_spec else "нет"
+            ),
+            "merge-authority": "human (жёстко, без override)",
+            "authoring": "legacy" if args.legacy else "waves",
+            "действие": "start (новый прогон)",
+        }
+        _print_values(values)
         started = runner.start(
             subject=args.subject,
             repo=args.repo,

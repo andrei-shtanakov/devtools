@@ -174,7 +174,7 @@ def graph_pairs(db_path: Path) -> set[Pair]:
         contract_key = dict(
             con.execute("SELECT id, COALESCE(declared_id, content_hash) FROM contracts")
         )
-        for kind, fk, fid, tk, tid in rows:
+        for _kind, fk, fid, tk, tid in rows:
             if fk == "project" and tk == "project":
                 a, b = name.get(fid), name.get(tid)
                 if a and b and a != b:

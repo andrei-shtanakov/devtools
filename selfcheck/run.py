@@ -303,7 +303,14 @@ def _scan_repo(
         ]
         if r.probe == "ast-dup" and "hashes" in r.extra:
             acc.hashes[repo.name] = [
-                FuncHash(**{**h, "literals": tuple(h["literals"])})
+                FuncHash(
+                    path=h["path"],
+                    qualname=h["qualname"],
+                    line=h["line"],
+                    exact=h["exact"],
+                    structural=h["structural"],
+                    literals=tuple(h["literals"]),
+                )
                 for h in r.extra["hashes"]
             ]
         if r.probe == "usage-graph" and r.extra:
