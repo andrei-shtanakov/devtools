@@ -25,6 +25,7 @@ def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         cwd=REPO,
+        check=False,
     )
 
 
@@ -114,6 +115,7 @@ def test_make_edge_check_target_runs_under_uv(tmp_path: Path) -> None:
         text=True,
         cwd=REPO,
         env=env,
+        check=False,
     )
     assert got.returncode == 2, got.stderr
     assert "ModuleNotFoundError" not in got.stderr
@@ -207,6 +209,7 @@ def _run_with_fake_claude(
         text=True,
         cwd=REPO,
         env=env,
+        check=False,
     )
 
 

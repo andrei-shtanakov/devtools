@@ -98,7 +98,9 @@ def iso(dt: datetime) -> str:
 def sh(args: list[str], cwd: Path, timeout: int = 60) -> tuple[int, bytes, str]:
     """(код, stdout-байты, stderr-текст); отсутствие бинаря/таймаут — код -1."""
     try:
-        proc = subprocess.run(args, cwd=cwd, capture_output=True, timeout=timeout)
+        proc = subprocess.run(
+            args, cwd=cwd, capture_output=True, timeout=timeout, check=False
+        )
         return proc.returncode, proc.stdout, proc.stderr.decode(errors="replace")
     except (FileNotFoundError, subprocess.TimeoutExpired) as err:
         return -1, b"", str(err)

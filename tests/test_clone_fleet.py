@@ -54,6 +54,7 @@ def _run(manifest: Path, root: Path, *extra: str) -> tuple[int, str]:
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     return proc.returncode, proc.stdout + proc.stderr
 

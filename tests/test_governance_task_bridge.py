@@ -2128,6 +2128,7 @@ def _run_spec_runner_probe(argv: list[str], **kwargs):
         argv,
         timeout=_SPEC_RUNNER_PROBE_TIMEOUT,
         **kwargs,
+        check=False,
     )
 
 

@@ -38,6 +38,7 @@ def git(repo: Path, *args: str) -> str:
         capture_output=True,
         text=True,
         timeout=30,
+        check=False,
     )
     if result.returncode != 0:
         raise GitError(
@@ -61,6 +62,7 @@ def _head_exists(repo: Path) -> bool:
         capture_output=True,
         text=True,
         timeout=30,
+        check=False,
     )
     if result.returncode == 0:
         return True

@@ -1129,6 +1129,7 @@ def test_labels_are_read_without_the_optional_operator(
         input=payload,
         capture_output=True,
         text=True,
+        check=False,
     )
     assert (done.returncode == 0) is expect_rc_zero, (
         f"{why}: rc={done.returncode}, stderr={done.stderr.strip()}"

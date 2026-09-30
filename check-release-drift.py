@@ -55,7 +55,9 @@ SEV_ORDER = {"info": 0, "warn": 1, "error": 2}
 
 def sh(args: list[str], cwd: Path) -> tuple[int, str]:
     try:
-        p = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=15)
+        p = subprocess.run(
+            args, cwd=cwd, capture_output=True, text=True, timeout=15, check=False
+        )
         return p.returncode, p.stdout.strip()
     except FileNotFoundError:
         return 127, ""  # нет git

@@ -36,6 +36,7 @@ def git(cwd: Path, *args: str, at_time: datetime | None = None) -> str:
             ["git", "-C", str(cwd), "log", "-1", "--format=%cI"],
             capture_output=True,
             text=True,
+            check=False,
         ).returncode
         if code == 0:
             last_output = subprocess.run(

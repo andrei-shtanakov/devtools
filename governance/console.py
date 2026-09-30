@@ -66,7 +66,10 @@ def _tmux_launch(session: str, root: Path, make_args: str) -> str:
     """
     target = f"={session}"
     exists = subprocess.run(
-        ["tmux", "has-session", "-t", target], capture_output=True, text=True
+        ["tmux", "has-session", "-t", target],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if exists.returncode == 0:
         return f"exists: tmux attach -t {target}"
@@ -79,6 +82,7 @@ def _tmux_launch(session: str, root: Path, make_args: str) -> str:
         ["tmux", "new-session", "-d", "-s", session, "-c", str(root), shell_cmd],
         capture_output=True,
         text=True,
+        check=False,
     )
     if done.returncode:
         raise RuntimeError(done.stderr.strip() or "tmux failed")

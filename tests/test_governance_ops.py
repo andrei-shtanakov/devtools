@@ -394,6 +394,7 @@ def _git(repo, *args):
         ["git", "-C", str(repo), *args],
         capture_output=True,
         text=True,
+        check=False,
     )
 
 
@@ -1710,6 +1711,7 @@ def test_prs_containing_commit_jq_really_normalizes_rest_payload(
         input=json.dumps(_REST_COMMIT_PULLS_PAYLOAD),
         capture_output=True,
         text=True,
+        check=False,
     )
 
     assert done.returncode == 0, done.stderr

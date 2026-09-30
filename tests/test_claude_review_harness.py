@@ -99,6 +99,7 @@ def _resolve(
         capture_output=True,
         text=True,
         env=env,
+        check=False,
     )
     assert res.returncode == expect_rc, res.stderr
     return res.stdout.strip() if expect_rc == 0 else res.stderr.strip()
@@ -171,6 +172,7 @@ def test_resolution_unknown_harness_is_config_error(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         env=env,
+        check=False,
     )
     assert res.returncode == 2
     assert "gemini" in res.stderr

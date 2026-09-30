@@ -110,6 +110,7 @@ def run_codex(batch: list[dict]) -> list[dict]:
                 capture_output=True,
                 text=True,
                 timeout=300,
+                check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise ClassifyError(str(exc)) from exc

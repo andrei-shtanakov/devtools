@@ -20,6 +20,7 @@ def test_wrapper_selftest_passes() -> None:
         [sys.executable, str(SCRIPT), "--selftest"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     assert "selftest OK" in result.stdout
@@ -31,6 +32,7 @@ def test_wrapper_reports_missing_workspace_cleanly() -> None:
         [sys.executable, str(SCRIPT), "--root", "/no/such/workspace/here"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 1
     assert "no such workspace directory" in result.stderr

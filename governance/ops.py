@@ -595,10 +595,10 @@ def claude_isolation(env: dict[str, str]):
 def _run_agent(argv: list[str], cwd: str, *, claude: bool) -> int:
     """Запуск авторского агента: env — allowlist, у claude — изоляция."""
     if not claude:
-        return subprocess.run(argv, cwd=cwd, env=agent_env()).returncode
+        return subprocess.run(argv, cwd=cwd, env=agent_env(), check=False).returncode
     try:
         with claude_isolation(agent_env()) as env:
-            return subprocess.run(argv, cwd=cwd, env=env).returncode
+            return subprocess.run(argv, cwd=cwd, env=env, check=False).returncode
     except AgentIsolationError as exc:
         print(f"author: {exc}")
         return 2
@@ -920,6 +920,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         flag = [] if exists.returncode == 0 else ["-c"]
         subprocess.run(["git", "switch", *flag, branch], cwd=target_dir, check=True)
@@ -969,6 +970,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if fetch.returncode != 0:
             raise RuntimeError(
@@ -980,6 +982,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if switch.returncode != 0:
             raise RuntimeError(
@@ -991,6 +994,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if actual.returncode != 0 or not actual.stdout.strip():
             raise RuntimeError(
@@ -1025,6 +1029,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if fetch.returncode != 0:
             raise RuntimeError(
@@ -1036,6 +1041,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if base.returncode != 0 or not base.stdout.strip():
             raise RuntimeError(
@@ -1047,6 +1053,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if diff.returncode != 0:
             raise RuntimeError(
@@ -1084,6 +1091,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode != 0:
             raise RuntimeError(
@@ -1104,6 +1112,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if switch.returncode != 0:
             raise RuntimeError(
@@ -1115,6 +1124,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if pull.returncode != 0:
             raise RuntimeError(
@@ -1143,6 +1153,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         return done.returncode == 0
 
@@ -1166,6 +1177,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode != 0:
             raise RuntimeError(
@@ -1187,6 +1199,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode == 0:
             return True
@@ -1224,6 +1237,7 @@ class RealOps:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode != 0:
             raise RuntimeError(
@@ -1278,6 +1292,7 @@ class RealOps:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode != 0:
             raise RuntimeError(
@@ -1518,6 +1533,7 @@ class RealOps:
         done = subprocess.run(
             ["sh", str(DEVTOOLS_ROOT / "review-pr.sh"), repo_name, str(pr)],
             cwd=DEVTOOLS_ROOT,
+            check=False,
         )
         return done.returncode
 
@@ -1531,6 +1547,7 @@ class RealOps:
         done = subprocess.run(
             ["sh", str(DEVTOOLS_ROOT / "review-pr.sh"), repo_name, str(pr), "--fresh"],
             cwd=DEVTOOLS_ROOT,
+            check=False,
         )
         return done.returncode
 
@@ -1555,6 +1572,7 @@ class RealOps:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode != 0:
             return None
@@ -1568,6 +1586,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         return done.returncode == 0
 
@@ -1692,6 +1711,7 @@ class RealOps:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode != 0:
             return None
@@ -1734,6 +1754,7 @@ class RealOps:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode != 0:
             return None
@@ -1774,6 +1795,7 @@ class RealOps:
             capture_output=True,
             text=True,
             env=env,
+            check=False,
         )
         if done.returncode != 0:
             print(f"publish_review: rc={done.returncode}: {done.stderr.strip()}")
@@ -1797,6 +1819,7 @@ class RealOps:
             env=env,
             capture_output=True,
             text=True,
+            check=False,
         )
         return done.returncode == 0
 
@@ -1825,6 +1848,7 @@ class RealOps:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode != 0:
             detail = done.stderr.strip() or f"gh api rc={done.returncode}"
@@ -1858,7 +1882,7 @@ class RealOps:
         argv = ["gh", "api", "graphql", "-f", f"query={query}"]
         for key, value in variables.items():
             argv += ["-F", f"{key}={value}"]
-        done = subprocess.run(argv, capture_output=True, text=True)
+        done = subprocess.run(argv, capture_output=True, text=True, check=False)
         if done.returncode != 0:
             return None
         try:
@@ -1942,6 +1966,7 @@ class RealOps:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         oid = done.stdout.strip()
         if done.returncode == 0 and oid:
@@ -1970,6 +1995,7 @@ class RealOps:
             env=env,
             capture_output=True,
             text=True,
+            check=False,
         )
         return done.returncode == 0
 
@@ -1986,6 +2012,7 @@ class RealOps:
             ["git", "-C", target_dir, "branch", "-D", branch],
             capture_output=True,
             text=True,
+            check=False,
         )
         return done.returncode == 0
 
@@ -2024,7 +2051,7 @@ class RealOps:
         ]
         if base:
             argv += ["--expect-base", base]
-        done = subprocess.run(argv, cwd=DEVTOOLS_ROOT)
+        done = subprocess.run(argv, cwd=DEVTOOLS_ROOT, check=False)
         # КОД, а не bool: у обвязки коды разведены по смыслу (3 — гвард,
         # PR остаётся человеку; 4 — форджа отклонила), и вызывающий обязан
         # их различать. Схлопнув в bool, `accept-pr` объявлял «база уехала»
@@ -2179,7 +2206,9 @@ class RealOps:
             "discovery",
             *args,
         ]
-        done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
+        done = subprocess.run(
+            argv, cwd=cwd, capture_output=True, text=True, check=False
+        )
         return _interview.parse_reply(done.returncode, done.stdout, done.stderr)
 
     def discovery_start(
@@ -2274,6 +2303,7 @@ class RealOps:
         clean = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
             cwd=target_dir,
+            check=False,
         )
         if clean.returncode == 0:
             return
@@ -2303,6 +2333,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         output = done.stdout + done.stderr
         return done.returncode, output
@@ -2345,6 +2376,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         return done.returncode, done.stdout + done.stderr
 
@@ -2412,6 +2444,7 @@ class RealOps:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode != 0:
             raise RuntimeError(
@@ -2442,6 +2475,7 @@ class RealOps:
             ["git", "-C", target_dir, "log", "-1", "--format=%H", "--", rel_path],
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode != 0:
             raise RuntimeError(
@@ -2486,6 +2520,7 @@ class RealOps:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode != 0:
             raise RuntimeError(
@@ -2518,6 +2553,7 @@ class RealOps:
             ["git", "-C", target_dir, "rev-parse", "--verify", "--quiet", ref],
             capture_output=True,
             text=True,
+            check=False,
         )
         return done.stdout.strip() or None
 
@@ -2527,6 +2563,7 @@ class RealOps:
             ["git", "-C", target_dir, "rev-parse", f"{sha}:{rel_path}"],
             capture_output=True,
             text=True,
+            check=False,
         )
         return done.stdout.strip() if done.returncode == 0 else None
 
@@ -2536,6 +2573,7 @@ class RealOps:
             ["git", "-C", target_dir, "rev-parse", "--verify", "--quiet", f"{sha}^1"],
             capture_output=True,
             text=True,
+            check=False,
         )
         return done.stdout.strip() or None
 
@@ -2550,6 +2588,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         return done.stdout if done.returncode == 0 else None
 
@@ -2561,6 +2600,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode != 0:
             return None
@@ -2572,6 +2612,7 @@ class RealOps:
             ["git", "show", f"{ref}:{path}"],
             cwd=target_dir,
             capture_output=True,
+            check=False,
         )
         return done.stdout if done.returncode == 0 else None
 
@@ -2587,6 +2628,7 @@ class RealOps:
                 "Accept: application/vnd.github.raw+json",
             ],
             capture_output=True,
+            check=False,
         )
         return done.stdout if done.returncode == 0 else None
 
@@ -2597,6 +2639,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if resolved.returncode != 0 or not resolved.stdout.strip():
             detail = resolved.stderr.strip() or "ревизия не найдена"
@@ -2607,6 +2650,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if listed.returncode != 0:
             detail = listed.stderr.strip() or "git ls-tree failed"
@@ -2619,6 +2663,7 @@ class RealOps:
             cwd=target_dir,
             capture_output=True,
             text=True,
+            check=False,
         )
         if done.returncode != 0:
             detail = done.stderr.strip() or "git show failed"
