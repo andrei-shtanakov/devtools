@@ -42,16 +42,16 @@ def runs_root(tmp_path: Path, monkeypatch):
 
 
 def _mk(run_id: str, **overrides) -> rs.RunState:
-    kwargs = dict(
-        subject="тест",
-        repo="alpha",
-        repo_slug="owner/alpha",
-        ws_id="WS-T1",
-        target_dir="/tmp/alpha",
-        bundle_dir="workstreams/WS-T1/spec",
-        profile="profiles/team-exp.yaml",
-        run_id=run_id,
-    )
+    kwargs = {
+        "subject": "тест",
+        "repo": "alpha",
+        "repo_slug": "owner/alpha",
+        "ws_id": "WS-T1",
+        "target_dir": "/tmp/alpha",
+        "bundle_dir": "workstreams/WS-T1/spec",
+        "profile": "profiles/team-exp.yaml",
+        "run_id": run_id,
+    }
     kwargs.update(overrides)
     s = rs.new_run(**kwargs)
     rs.save(s)

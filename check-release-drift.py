@@ -63,7 +63,7 @@ def sh(args: list[str], cwd: Path) -> tuple[int, str]:
         return 127, ""  # нет git
     except subprocess.TimeoutExpired:
         return 124, ""
-    except Exception:
+    except (OSError, ValueError):
         return 1, ""
 
 
@@ -90,7 +90,7 @@ def pyproject_version(pp: Path) -> str | None:
         return None
     try:
         data = tomllib.loads(pp.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         return None
     return (data.get("project") or {}).get("version")
 
@@ -241,7 +241,7 @@ def main() -> int:
     ws = Path(args.workspace).resolve()
     try:
         manifest = tomllib.loads(Path(args.manifest).read_text(encoding="utf-8"))
-    except Exception as e:
+    except (OSError, ValueError) as e:
         print(f"FATAL: манифест не прочитан: {e}", file=sys.stderr)
         return 2
 

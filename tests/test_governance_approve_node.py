@@ -1400,7 +1400,7 @@ def test_repeat_over_open_candidate_waits_and_creates_nothing(
     world: World,
 ) -> None:
     approve(world, "charter")
-    key, op = only_request(world)
+    key, _op = only_request(world)
     outcome = approve(world, "charter")
     assert "ждём мержа" in outcome.message
     assert len(world.forge.prs) == 1
@@ -1559,7 +1559,7 @@ def test_phase1_refuses_bytes_other_than_the_request_carried(
     обязано быть механическим, а не выводимым из рассуждения.
     """
     approve(world, "charter")
-    key, op = only_request(world)
+    key, _op = only_request(world)
     world.state.ops[key].update(
         head_sha=None, candidate_pr=None, content_hashes={"charter": "beef" * 10}
     )
@@ -2205,7 +2205,7 @@ def test_invalidated_request_recovers_end_to_end(world: World) -> None:
 def test_reopened_pr_of_a_terminal_request_refuses(world: World) -> None:
     """Терминальная запись против форджи — расхождение решает человек."""
     approve(world, "charter")
-    key, op = only_request(world)
+    _key, op = only_request(world)
     merge_pr(world, op["candidate_pr"], login=AGENT)
     with pytest.raises(RuntimeError, match="invalidated"):
         approve(world, "charter")
@@ -2697,7 +2697,7 @@ def test_candidate_pins_the_policy_version(world: World) -> None:
     """Фаза 1 закрепляет версию политики тем же write-ahead, что намерение,
     и называет её в теле candidate (его читает human-merge.sh)."""
     approve(world, "charter")
-    key, op = only_request(world)
+    _key, op = only_request(world)
     assert op["policy"]["sha"] == "p" * 40
     assert op["policy"]["fingerprint"] == "v1:31bf16586b6cfbb69a29b23d8850bfe57931d99b"
     body = world.forge.prs[op["candidate_pr"]]["body"]
@@ -2817,7 +2817,7 @@ def test_join_reads_policy_under_the_live_request_pin(world: World) -> None:
         drive_to_approved(world, node)
     world.sync()
     approve(world, "design")
-    ((nums, op),) = al.live_requests(world.state)
+    ((nums, _op),) = al.live_requests(world.state)
     key = al.request_key(*nums)
     world.forge.policy_sha = POLICY_SHA_2
     world.forge.policy_files[POLICY_SHA_2] = f"AUTHORIZED_APPROVER_ACCOUNTS={HUMAN}\n"
