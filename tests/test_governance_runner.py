@@ -9324,3 +9324,23 @@ def test_upstream_path_engineer_frame_needs_traces_to() -> None:
     with pytest.raises(ValueError, match="traces_to"):
         runner._upstream_path(state, spec)
     assert runner._upstream_path(state, _need_spec()) is None
+
+
+@pytest.mark.parametrize(
+    "brief",
+    [{}, {"source_paths": []}, {"source_blobs": {}}],
+)
+def test_source_layer_guard_stops_on_incomplete_descriptor(monkeypatch, brief) -> None:
+    """Ревью #530 (major): дескриптор без source_paths/source_blobs не должен
+    давать зелёный S3 — гвард останавливает шаг, ничего не сверив."""
+    from types import SimpleNamespace
+
+    stops: list[str] = []
+    monkeypatch.setattr(
+        runner, "_brief_stop", lambda state, msg: stops.append(msg) or False
+    )
+    state = SimpleNamespace(brief=brief, target_dir="t", bundle_dir="b", run_id="r")
+    ops = SimpleNamespace(rev_parse=lambda *a: "h", blob_in_commit=lambda *a: None)
+
+    assert runner._source_layer_committed(state, ops) is False
+    assert stops and "отсутствует" in stops[0]

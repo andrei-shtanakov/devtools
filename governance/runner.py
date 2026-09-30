@@ -2858,7 +2858,7 @@ def _commit_bundle(state: RunState, ops: Ops, subject_line: str) -> None:
         # добавляем поштучно с `-f`; S3 ниже сверяет, что он в HEAD.
         force = tuple(
             f"{state.bundle_dir}/{rel}"
-            for rel in brief_input.descriptor_source_paths(state.brief)
+            for rel in brief_input.descriptor_source_paths(state.brief, required=True)
         )
     ops.commit_paths(
         state.target_dir,
@@ -2880,8 +2880,13 @@ def _source_layer_committed(state: RunState, ops: Ops) -> bool:
     head = ops.rev_parse(state.target_dir, "HEAD")
     if head is None:
         return _brief_stop(state, "HEAD не резолвится после коммита S3")
-    paths = brief_input.descriptor_source_paths(state.brief)
-    blobs = list(brief_input.descriptor_source_blobs(state.brief).values())
+    try:
+        paths = brief_input.descriptor_source_paths(state.brief, required=True)
+        blobs = list(
+            brief_input.descriptor_source_blobs(state.brief, required=True).values()
+        )
+    except ValueError as exc:  # неполный дескриптор — не «источников нет»
+        return _brief_stop(state, str(exc))
     if len(paths) != len(blobs):
         return _brief_stop(
             state, "descriptor brief: source_paths и source_blobs разной длины"

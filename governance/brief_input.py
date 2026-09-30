@@ -13,20 +13,32 @@ from governance.stale_adapter import blob_sha1_bytes
 PRIMARY_REL = "00-discovery/brief.md"
 
 
-def descriptor_source_paths(descriptor: dict[str, object]) -> list[str]:
-    """`source_paths` дескриптора: список строк; неверная форма — ошибка."""
+def descriptor_source_paths(
+    descriptor: dict[str, object], *, required: bool = False
+) -> list[str]:
+    """`source_paths` дескриптора: список строк; неверная форма — ошибка.
+
+    `required=True` — для fail-closed гвардов: отсутствующий ключ есть
+    неустановленный факт, а не «источников нет» (ревью #530)."""
     raw = descriptor.get("source_paths")
     if raw is None:
+        if required:
+            raise ValueError("brief descriptor: source_paths отсутствует")
         return []
     if not isinstance(raw, list) or not all(isinstance(p, str) for p in raw):
         raise ValueError("brief descriptor: source_paths не список строк")
     return list(raw)
 
 
-def descriptor_source_blobs(descriptor: dict[str, object]) -> dict[str, str]:
-    """`source_blobs` дескриптора: имя → blob; неверная форма — ошибка."""
+def descriptor_source_blobs(
+    descriptor: dict[str, object], *, required: bool = False
+) -> dict[str, str]:
+    """`source_blobs` дескриптора: имя → blob; неверная форма — ошибка;
+    `required=True` — отсутствующий ключ тоже ошибка (см. выше)."""
     raw = descriptor.get("source_blobs")
     if raw is None:
+        if required:
+            raise ValueError("brief descriptor: source_blobs отсутствует")
         return {}
     if not isinstance(raw, dict) or not all(
         isinstance(k, str) and isinstance(v, str) for k, v in raw.items()

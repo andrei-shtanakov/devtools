@@ -366,3 +366,13 @@ def test_descriptor_source_blobs_narrows_shape() -> None:
     for bad in ({"a": 1}, ["a"]):
         with pytest.raises(ValueError, match="source_blobs"):
             brief_input.descriptor_source_blobs({"source_blobs": bad})
+
+
+@pytest.mark.parametrize(
+    "fn", [brief_input.descriptor_source_paths, brief_input.descriptor_source_blobs]
+)
+def test_required_missing_key_is_an_error(fn) -> None:
+    """Ревью #530: для fail-closed гвардов «ключа нет» — неустановленный факт,
+    а не «источников нет»; до сужения типов это был KeyError."""
+    with pytest.raises(ValueError, match="отсутствует"):
+        fn({}, required=True)

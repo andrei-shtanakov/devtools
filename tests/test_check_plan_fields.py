@@ -33,7 +33,15 @@ def test_diagnostic_without_repo_provenance_is_tolerated(
 ) -> None:
     from plan_fields import ManifestIndex, RepoInput
 
-    orphan = {"code": "PF-ID-MISSING", "message": "no repo", "provenance": {}}
+    # line — int, repo нет: диагностика проходит ветку stray_tag_line
+    # (подсказка по TODO репо) с пустым ключом и попадает в отчёт, а ключа
+    # (repo, line) без repo в by_item нет (прочие записи maestro — от других
+    # проверок, например грамматики @owner)
+    orphan = {
+        "code": "PF-ID-MISSING",
+        "message": "no repo",
+        "provenance": {"line": 1},
+    }
     monkeypatch.setattr(plan_check, "check_fleet", lambda snapshot: [orphan])
     report = plan_check.Report()
     by_item = plan_check.resolve_graph(
@@ -41,4 +49,6 @@ def test_diagnostic_without_repo_provenance_is_tolerated(
         ManifestIndex(frozenset({"maestro"}), {}),
         report,
     )
-    assert all(isinstance(repo, str) for repo, _ in by_item)
+    assert all(isinstance(repo, str) and repo for repo, _ in by_item)
+    assert not any(line == 1 and repo in ("", None) for repo, line in by_item)
+    assert any("no repo" in line for line in [*report.errors, *report.warnings])
