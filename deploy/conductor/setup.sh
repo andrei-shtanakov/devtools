@@ -17,6 +17,16 @@ apt-get update -q
 apt-get install -y -q git python3 util-linux
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 command -v gh >/dev/null || { echo ">>> install gh (https://cli.github.com) and re-run"; exit 1; }
+# >>> gh-version-check
+# conductor pages GitHub with `gh api --paginate --slurp` (gh >= 2.48); Ubuntu's
+# packaged gh is older and the run would stay `partial` forever.
+GH_MIN="2.48.0"
+GH_VER="$(gh --version | head -n 1 | awk '{print $3}')"
+if [ "$(printf '%s\n%s\n' "$GH_MIN" "$GH_VER" | sort -V | head -n 1)" != "$GH_MIN" ]; then
+    echo ">>> gh $GH_VER < $GH_MIN: install gh from https://cli.github.com/packages and re-run"
+    exit 1
+fi
+# <<< gh-version-check
 
 id conductor &>/dev/null || useradd --system --home-dir "$HOME_DIR" --shell /usr/sbin/nologin conductor
 install -d -o conductor -g conductor -m 0750 "$HOME_DIR"
@@ -37,4 +47,4 @@ done
 
 install -m 0644 "$HERE/conductor.service" "$HERE/conductor.timer" "$UNIT_DIR/"
 systemctl daemon-reload
-echo ">>> next: sudo -u conductor env GH_CONFIG_DIR=$HOME_DIR/gh gh auth login (read-only token), then README"
+echo ">>> next: read-only token into $HOME_DIR/gh/hosts.yml (deploy/conductor/README.md, step 2)"
