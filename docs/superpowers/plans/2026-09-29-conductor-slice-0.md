@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-29-conductor-design.md` (rev 11). Срез 0 — §11: §2, §3 (без модели), §4, §5.2–5.3 как выдача, §7.1–7.2, таймер на уровне 0, `roadmap.toml` в зонтике.
 
-**План rev 7** — по ручному разбору верха очереди и девяти вопросов на живом прогоне с `fetch` 2026-09-30 (спека rev 11): 0 из 9 вопросов требовали решения владельца, а настоящий следующий шаг к вехе (драфт планов `spec-runner!620`) в очереди не был виден. Исправлено механизмами, не поштучно: одна канонизация концов рёбер, включая ссылку репо на собственный пункт прежним именем (plan-fields её не резолвит) и `repo#N` на номер PR; legacy-заявка без метки `inbox` распознаётся только по протоколу целиком; `from:` закрытого `completed` запроса — история, ожидание по `from:` — на самом запросе; ранг PR — по `implements`, упоминание в заголовке — подсказка без ранга; три блока `status` (веха / сигнал / сводка бэклога, `status <repo>` раскрывает); вопрос владельцу — по положительному критерию, признак решения и отсутствие `@owner` — пометки позиции; `last_line_change_at` вместо «начала ожидания», неизвестный возраст — `None`. Регрессия — шаг 3b Task 12. После ребейза на `origin/master` (2026-09-30, +11 коммитов: `pyproject.toml`, ruff в CI, общий `tests/conftest.py`) листинги перепроверены в свежем дереве devtools; по итоговому отзыву рецензента добавлены осторожная формулировка позиции вехи с подсказкой и строка «вне фокуса: PR, готовые к рассмотрению мержа» (сценарии 55–56). Адресный круг Codex по дельте (3 major, 2 minor — все подтверждены контрпримерами) закрыт механизмами: подсказка запрещает запуск и вопрос о делегировании; заявка без метки — только однозначные поля вне кода, цитат и комментариев; один экстрактор ссылок, строгие и слабые (голые `#N` открытых PR — один проход без требования полноты: строгое дочитывание голых номеров на живом прогоне дало `partial`); якоря и URL — не ссылки; `unblocks` PR — объединение потребителей (сценарии 57–60). **План rev 6 — pair converged** (круг 5: новых blocker/major нет; единственный minor — алиас `make conductor` обходил `read_manifest` — исправлен). **Rev 5** — по кругу 4 ревью пары (1 major, 2 minor): манифест читается **после** `fetch` зонтика (`read_manifest`; сбой fetch — деградация в `history`, не отказ), иначе свежий состав флота не проверен; вопрос по находке `GR-SHIPPED-OPEN` задаётся по унаследованному рангу (`rank_of`); `GR-SLUG-MATCH` для наследия inbox — информационная находка без вопроса: slug и есть связь принятия по ADR-ECO-006 D2 (спека §6.4), а живой прогон показал 8 вопросов-шумов «подтвердите принятие» — отступление от minor-замечания круга 4 названо в спеке §3.3.4. **Rev 4** — по кругу 3 ревью пары (3 major, 2 minor), класс fail-closed закрыт механизмом: каждое обязательное чтение и каждое усечение (соседние версии пути, неизвестный репо в `exists:`, список файлов и ревью PR) регистрируется в источнике `history`; CI и одобрение PR — об одном head SHA, иначе чтение PR — сбой; манифест читается с `origin` зонтика и входит в источники с SHA; `GR-ORPHAN-REQUEST` для inbox без `from:` и с неизвестным репо, `GR-SLUG-MATCH` для склейки без `@source-ref`; вопрос `GR-SHIPPED-OPEN` — только в фокусе; `status` печатает те же вопросы, что снимок. **Rev 3** — по кругу 2 ревью пары (7 major, 1 minor): одобрение PR на head SHA через GraphQL и выбор actor мержа по `Мерж: человек`/authority-root; ошибки вспомогательных чтений делают граф `partial`; начало ожидания — `git blame` строки пункта; `focus.epic` проверяется на тип; вопросы владельцу — по причине ожидания; `plan` ограничен `roadmap.autonomy`; `record` возвращает 4 при `RM-INVALID`. **Rev 2** — по кругу 1 ревью пары (1 blocker, 13 major, 1 minor). Листинги кода перед отдачей на ревью извлечены во временный каталог, прогнаны тестами, ruff и pyrefly на окружении devtools и живым прогоном на флоте (только чтение) — см. «Проверка плана исполнением» в конце. Живой прогон изменил два решения: обнаружение GitHub — только открытые (окно закрытых упиралось в потолок поиска), ожидание прозаического `@trigger` — `wait_condition`, не вопрос владельцу.
+**План rev 7** — по ручному разбору верха очереди и девяти вопросов на живом прогоне с `fetch` 2026-09-30 (спека rev 11): 0 из 9 вопросов требовали решения владельца, а настоящий следующий шаг к вехе (драфт планов `spec-runner!620`) в очереди не был виден. Исправлено механизмами, не поштучно: одна канонизация концов рёбер, включая ссылку репо на собственный пункт прежним именем (plan-fields её не резолвит) и `repo#N` на номер PR; legacy-заявка без метки `inbox` распознаётся только по протоколу целиком; `from:` закрытого `completed` запроса — история, ожидание по `from:` — на самом запросе; ранг PR — по `implements`, упоминание в заголовке — подсказка без ранга; три блока `status` (веха / сигнал / сводка бэклога, `status <repo>` раскрывает); вопрос владельцу — по положительному критерию, признак решения и отсутствие `@owner` — пометки позиции; `last_line_change_at` вместо «начала ожидания», неизвестный возраст — `None`. Регрессия — шаг 3b Task 12. После ребейза на `origin/master` (2026-09-30, +11 коммитов: `pyproject.toml`, ruff в CI, общий `tests/conftest.py`) листинги перепроверены в свежем дереве devtools; по итоговому отзыву рецензента добавлены осторожная формулировка позиции вехи с подсказкой и строка «вне фокуса: PR, готовые к рассмотрению мержа» (сценарии 55–56). Адресный круг Codex по дельте (3 major, 2 minor — все подтверждены контрпримерами) закрыт механизмами: подсказка запрещает запуск и вопрос о делегировании; заявка без метки — только однозначные поля вне кода, цитат и комментариев; один экстрактор ссылок, строгие и слабые (голые `#N` открытых PR — один проход без требования полноты: строгое дочитывание голых номеров на живом прогоне дало `partial`); якоря и URL — не ссылки; `unblocks` PR — объединение потребителей (сценарии 57–60). Перепроверка Codex закрыла 3 из 5 и нашла ещё один major; два незакрытых оказались перебором форм Markdown — механизм заменён: заявка без метки — только шапка тела (первые две непустые строки), голые `#N` — только из заголовков PR; слабые записи не участвуют в проверке полноты (`truncated_prs`). **План rev 6 — pair converged** (круг 5: новых blocker/major нет; единственный minor — алиас `make conductor` обходил `read_manifest` — исправлен). **Rev 5** — по кругу 4 ревью пары (1 major, 2 minor): манифест читается **после** `fetch` зонтика (`read_manifest`; сбой fetch — деградация в `history`, не отказ), иначе свежий состав флота не проверен; вопрос по находке `GR-SHIPPED-OPEN` задаётся по унаследованному рангу (`rank_of`); `GR-SLUG-MATCH` для наследия inbox — информационная находка без вопроса: slug и есть связь принятия по ADR-ECO-006 D2 (спека §6.4), а живой прогон показал 8 вопросов-шумов «подтвердите принятие» — отступление от minor-замечания круга 4 названо в спеке §3.3.4. **Rev 4** — по кругу 3 ревью пары (3 major, 2 minor), класс fail-closed закрыт механизмом: каждое обязательное чтение и каждое усечение (соседние версии пути, неизвестный репо в `exists:`, список файлов и ревью PR) регистрируется в источнике `history`; CI и одобрение PR — об одном head SHA, иначе чтение PR — сбой; манифест читается с `origin` зонтика и входит в источники с SHA; `GR-ORPHAN-REQUEST` для inbox без `from:` и с неизвестным репо, `GR-SLUG-MATCH` для склейки без `@source-ref`; вопрос `GR-SHIPPED-OPEN` — только в фокусе; `status` печатает те же вопросы, что снимок. **Rev 3** — по кругу 2 ревью пары (7 major, 1 minor): одобрение PR на head SHA через GraphQL и выбор actor мержа по `Мерж: человек`/authority-root; ошибки вспомогательных чтений делают граф `partial`; начало ожидания — `git blame` строки пункта; `focus.epic` проверяется на тип; вопросы владельцу — по причине ожидания; `plan` ограничен `roadmap.autonomy`; `record` возвращает 4 при `RM-INVALID`. **Rev 2** — по кругу 1 ревью пары (1 blocker, 13 major, 1 minor). Листинги кода перед отдачей на ревью извлечены во временный каталог, прогнаны тестами, ruff и pyrefly на окружении devtools и живым прогоном на флоте (только чтение) — см. «Проверка плана исполнением» в конце. Живой прогон изменил два решения: обнаружение GitHub — только открытые (окно закрытых упиралось в потолок поиска), ожидание прозаического `@trigger` — `wait_condition`, не вопрос владельцу.
 
 ## Global Constraints
 
@@ -1570,7 +1570,8 @@ def _weak_pass(
         if record is None:
             missed += 1
             continue
-        record["repo"] = names_to_keys.get(name, name)
+        # слабая запись: её полнота (файлы/ревью PR) не требуется
+        record.update(repo=names_to_keys.get(name, name), weak=True)
         records[(name, number)] = record
     return missed
 
@@ -1642,7 +1643,7 @@ git commit -m "feat(conductor): GitHub-источник с проверкой п
   - `build_graph(inputs: Inputs) -> Graph` (индекс — из `inputs.manifest_text`)
   - `field_value(body, name) -> str | None`
   - `normalizer(inputs) -> dict[str, str]` — GitHub-имя и ключ → ключ
-  - `referenced_issues(records, todos, norm) -> set[(key, number)]` — строгие цели дочитывания; `local_refs(records, norm)` — слабые (голые `#N` открытых PR, §3.1 rev 11)
+  - `referenced_issues(records, todos, norm) -> set[(key, number)]` — строгие цели дочитывания; `local_refs(records, norm)` — слабые (голые `#N` в заголовках открытых PR, §3.1 rev 11)
 - Test fixtures (`tests/conductor/fixtures.py`): `REPOS`, `EPICS`, `ROADMAP`, `MANIFEST_TEXT`, `record(repo, number, **fields)`, `inputs(todos, records=(), roadmap=ROADMAP, epics=None, movement=None, gh_state="read", **extra)`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1946,10 +1947,6 @@ FROM_RE = re.compile(r"^([a-z0-9][a-z0-9-]*)(?:#([a-z0-9][a-z0-9._-]{0,63}))?(?:
 FROM_ORIGIN = "inbox:from"
 # адреса ссылок и якоря: `](#3)`, URL — не ссылки на issue
 LINK_RE = re.compile(r"\]\([^)]*\)|https?://\S+")
-# не проза протокола: блоки кода, HTML-комментарии, цитаты, код отступом
-NON_PROSE_RE = re.compile(
-    r"```.*?```|~~~.*?~~~|<!--.*?-->|^(?:>|    |\t).*?$", re.S | re.M
-)
 
 
 @dataclass
@@ -2122,32 +2119,44 @@ def _gh_edges(
         ]
     if "inbox" in rec.get("labels", []):
         edges += _inbox_edges(rec, me, nodes, norm, findings)
-    elif _legacy_protocol(rec, nodes, norm):
+    elif (header := _legacy_protocol(rec, nodes, norm)) is not None:
         findings.append(Finding("GR-INBOX-NO-LABEL", "info", me, "нет метки inbox"))
-        edges += _inbox_edges(rec, me, nodes, norm, findings)
+        edges += _inbox_edges(rec, me, nodes, norm, findings, header)
     return edges
+
+
+def _protocol_header(body: str) -> tuple[str, str] | None:
+    """Шапка заявки ADR-ECO-006: первые две непустые строки — `slug:` и
+    `from:` (в любом порядке). Пример протокола внутри текста шапкой не
+    бывает — разбирать Markdown не нужно."""
+    lines = [ln.strip() for ln in body.replace("\r", "").splitlines() if ln.strip()]
+    fields = dict(
+        m.groups()
+        for ln in lines[:2]
+        if (m := re.fullmatch(r"(slug|from):\s*(.+)", ln)) is not None
+    )
+    if set(fields) != {"slug", "from"}:
+        return None
+    return fields["slug"].strip("`'\" "), fields["from"].strip("`'\" ")
 
 
 def _legacy_protocol(
     rec: dict[str, Any], nodes: dict[str, Node], norm: dict[str, str]
-) -> bool:
-    """Заявка без метки — только распознанный протокол целиком (§3.3 rev 11):
-    slug по грамматике @id, from: с известного репо, пункт @id = slug есть."""
-    if rec["is_pr"]:
-        return False
-    prose = NON_PROSE_RE.sub("", rec.get("body", "").replace("\r", ""))
-    slugs = re.findall(r"(?im)^slug:\s*(.+?)\s*$", prose)
-    senders = re.findall(r"(?im)^from:\s*(.+?)\s*$", prose)
-    if len(slugs) != 1 or len(senders) != 1:
-        return False  # пример в коде, цитате или конфликт полей — не заявка
-    slug = slugs[0].strip("`'\" ")
-    sender = FROM_RE.match(senders[0].strip("`'\" "))
-    return (
+) -> tuple[str, str] | None:
+    """Заявка без метки — только шапка протокола целиком (§3.3 rev 11): slug по
+    грамматике @id, from: с известного репо, пункт @id = slug есть."""
+    header = None if rec["is_pr"] else _protocol_header(rec.get("body", ""))
+    if header is None:
+        return None
+    slug, sender = header
+    match = FROM_RE.match(sender)
+    known = (
         ID_RE.fullmatch(slug) is not None
-        and sender is not None
-        and sender.group(1) in norm
+        and match is not None
+        and match.group(1) in norm
         and item_id(rec["repo"], slug) in nodes
     )
+    return header if known else None
 
 
 def _inbox_edges(
@@ -2156,10 +2165,12 @@ def _inbox_edges(
     nodes: dict[str, Node],
     norm: dict[str, str],
     findings: list[Finding],
+    header: tuple[str, str] | None = None,
 ) -> list[Edge]:
-    """Наследие ADR-ECO-006: склейка по slug (D2), ожидание отправителя по from."""
+    """Наследие ADR-ECO-006: склейка по slug (D2), ожидание отправителя по from.
+    header — поля распознанной шапки заявки без метки (иначе — из тела)."""
     edges: list[Edge] = []
-    slug = field_value(rec["body"], "slug")
+    slug = header[0] if header else field_value(rec["body"], "slug")
     target = item_id(rec["repo"], slug) if slug else None
     if target is not None and target in nodes:
         edges.append(Edge(me, target, "accepted_as", "inbox:slug"))
@@ -2177,7 +2188,7 @@ def _inbox_edges(
                     f"{target}: принят по slug без @source-ref",
                 )
             )
-    sender = field_value(rec["body"], "from") or ""
+    sender = header[1] if header else field_value(rec["body"], "from") or ""
     match = FROM_RE.match(sender)
     repo, waiting = (match.group(1), match.group(2)) if match else ("", None)
     orphan = None
@@ -2203,12 +2214,13 @@ def _text_of(rec: dict[str, Any]) -> str:
 def _issue_refs(
     rec: dict[str, Any], norm: dict[str, str]
 ) -> tuple[set[tuple[str, int]], set[tuple[str, int]]]:
-    """Один экстрактор для рёбер и дочитывания: (repo#N, голые #N своего репо —
-    «docs(#603): …»); адреса ссылок и якоря (`](#3)`, URL) — не ссылки."""
+    """Один экстрактор для рёбер и дочитывания: (repo#N, голые #N своего репо).
+    Голые номера — только из заголовка («docs(#603): …»): в теле это якоря,
+    ссылочные ссылки Markdown и номера чужих репо; заголовок их не содержит."""
     text = _text_of(rec)
     qualified = {(norm[r], int(n)) for r, n in REF_RE.findall(text) if r in norm}
-    local = {(rec["repo"], int(n)) for n in SELF_REF_RE.findall(LINK_RE.sub("", text))}
-    return qualified, local
+    title = LINK_RE.sub("", rec.get("title", ""))
+    return qualified, {(rec["repo"], int(n)) for n in SELF_REF_RE.findall(title)}
 
 
 def _mentions(
@@ -2250,7 +2262,7 @@ def referenced_issues(
 def local_refs(
     records: list[dict[str, Any]], norm: dict[str, str]
 ) -> set[tuple[str, int]]:
-    """Слабые ссылки: голые #N своего репо в открытых PR — питают только
+    """Слабые ссылки: голые #N своего репо в заголовках открытых PR — питают только
     подсказки §4.4, поэтому дочитываются без требования полноты (§3.1)."""
     return {
         ref
@@ -4848,6 +4860,15 @@ def _roadmap(
     return text, sha, state, "origin"
 
 
+def truncated_prs(records: list[dict[str, Any]]) -> list[str]:
+    """Усечённые PR — сбой полноты; слабые записи (§3.1) не в счёт."""
+    return [
+        f"{r['repo']}!{r['number']}: список файлов или ревью усечён"
+        for r in records
+        if r["is_pr"] and not r.get("complete") and not r.get("weak")
+    ]
+
+
 def collect(
     root: Path,
     manifest_text: str,
@@ -4894,11 +4915,7 @@ def collect(
     prefixes = read_authority_prefixes()
     if prefixes is None:
         hist.errors.append(f"нет {AUTHORITY_ROOT_ENV}")
-    hist.errors += [
-        f"{r['repo']}!{r['number']}: список файлов или ревью усечён"
-        for r in gh.records
-        if r["is_pr"] and not r.get("complete")
-    ]
+    hist.errors += truncated_prs(gh.records)
     return Inputs(
         captured_at=now,
         host=host,
@@ -5493,6 +5510,28 @@ def test_protocol_inside_code_comment_or_conflict_is_not_a_request() -> None:
         assert result.cycles == [], body
 
 
+def test_protocol_must_be_the_body_header() -> None:
+    todos = {
+        "a": "- [ ] g @owner:github:own @id:goal\n",
+        "b": "- [ ] y @owner:github:own @id:y @blocked_by:todo://a/goal\n"
+        "- [ ] z @owner:github:own @id:z\n",
+    }
+    example_first = f"{FENCE}yaml\nslug: y\nfrom: a#goal\n{FENCE}\nslug: z\nfrom: c\n"
+    for body in (example_first, f"{FENCE}\nslug: y\nfrom: a#goal\n"):
+        result = evaluate(inputs(todos, [record("b", 5, body=body)]), 0)
+        assert result.graph.resolve("b#5") == "b#5" and result.cycles == [], body
+    header = evaluate(inputs(todos, [record("b", 5, body="from: c\nslug: z\n")]), 0)
+    assert header.graph.resolve("b#5") == "todo://b/z"
+
+
+def test_truncated_weak_pr_does_not_break_completeness() -> None:
+    from conductor.collect import truncated_prs
+
+    weak = record("b", 3, is_pr=True, complete=False, weak=True)
+    strong = record("b", 4, is_pr=True, complete=False)
+    assert truncated_prs([weak, strong]) == ["b!4: список файлов или ревью усечён"]
+
+
 def test_local_refs_of_open_prs_are_weak_fetch_targets() -> None:
     from conductor.graph import local_refs, normalizer, referenced_issues
 
@@ -5503,9 +5542,11 @@ def test_local_refs_of_open_prs_are_weak_fetch_targets() -> None:
 
 
 def test_link_targets_and_urls_are_not_local_refs() -> None:
-    for body in ("[section](#3)", "см. https://example.org/?#3"):
+    for body in ("[section](#3)", "см. https://example.org/?#3", "[s][x]\n\n[x]: #3"):
         g = _graph({}, [record("b", 5, is_pr=True, body=body)])
         assert not [e for e in g.edges if e.dst == "b#3"], body
+    title = _graph({}, [record("b", 5, is_pr=True, title="см. https://x.org/?#3")])
+    assert not [e for e in title.edges if e.dst == "b#3"]
 
 
 def test_adding_implements_never_lowers_unblocks() -> None:
@@ -5828,7 +5869,7 @@ Expected: ожидание вехи ведёт к пункту производ�
 
 Перед ревью листинги кода извлечены из этого файла скриптом (блоки после строки вида `` `путь`: ``; для `conductor/__main__.py` — последний, итоговый) во временный каталог вне репо, в раскладке devtools. Результат на 2026-09-29:
 
-- `pytest tests/conductor` — **103 passed** (после адресного круга; до него 97) в свежем дереве devtools после ребейза на `origin/master` 2026-09-30 (`git archive HEAD` + листинги, `uv sync --frozen`, общий `tests/conftest.py` в силе; ruff check/format по настройкам master и pyrefly — чисто; 95 — rev 7 до ребейза; 81 — rev 5); мутационная проверка правок rev 7 — 12 из 12 откатов ловятся тестами (первый заход дал 3 живучих: фикстура маскировала дефект канонизации — plan-fields резолвит прежнее имя из чужого репо, но не ссылку репо на собственный пункт; тест переписан под живую форму);
+- `pytest tests/conductor` — **105 passed** (после адресного круга и перепроверки; до них 97) в свежем дереве devtools после ребейза на `origin/master` 2026-09-30 (`git archive HEAD` + листинги, `uv sync --frozen`, общий `tests/conftest.py` в силе; ruff check/format по настройкам master и pyrefly — чисто; 95 — rev 7 до ребейза; 81 — rev 5); мутационная проверка правок rev 7 — 12 из 12 откатов ловятся тестами (первый заход дал 3 живучих: фикстура маскировала дефект канонизации — plan-fields резолвит прежнее имя из чужого репо, но не ссылку репо на собственный пункт; тест переписан под живую форму);
 - `ruff check` и `ruff format --check` с `pyproject.toml` devtools — чисто (листинги в плане — уже отформатированный вывод ruff);
 - `pyrefly check conductor` — 0 errors; `shellcheck deploy/conductor/setup.sh` — чисто; `python -m conductor --selftest` — ok.
 
@@ -5837,3 +5878,5 @@ Expected: ожидание вехи ведёт к пункту производ�
 **Разбор 2026-09-30 (rev 7).** Прогон с `fetch` (5 мин 3 с на Mac, граф `complete`, манифест с `origin`), веха `bundle-oracle-slice1`. До правок: верх очереди — `spec-runner#603 [triage → owner]` (заявка уже принята и в работе) и 14 пунктов deployer без сигнала по алфавиту; 9 вопросов — 0 решений владельца. После правок (повторный прогон с `fetch`): блок «продвижение вехи» — `todo://spec-runner/criteria-closure-verify [implement → spec-runner]` и подсказка `spec-runner!620 упоминает …` (одобрение планов B2 — настоящий следующий шаг по TODO производителя); «другие действия фокуса» — 4 позиции ранга 3 с сигналом (разблокируют 1–3 узла); бэклог — сводкой; циклов нет; вопросов 0 — прежние 9 стали пометками (`decision-signal`, `owner-tbd`), ожиданием условия или исчезли после канонизации (`missing` был ссылкой прежним именем). Наблюдение для владельца plan-fields: ссылку репо на собственный пункт прежним именем он не резолвит (`resolved_target = None`), conductor это компенсирует канонизацией.
 
 **Адресный круг по дельте (2026-09-30).** Codex, задание — контрпримеры к новым правилам без пересмотра дизайна: 3 major (подсказка не запрещала `launch?` и вопрос о делегировании; пример протокола в блоке кода давал склейку и ложный `GR-CYCLE`; голые `#N` не участвовали в дочитывании), 2 minor (`](#3)` и URL как ссылки; `unblocks` уменьшался от добавления `@id`). Все воспроизведены и закрыты; откаты шести правок ловятся тестами. Первое исправление п.3 (голые `#N` в строгом дочитывании) живой прогон опроверг: `partial` из-за несуществующего `ai-orchestrators-workspace#52` и 37 записей вместо 77 — отсюда деление на строгие и слабые ссылки. Итоговый прогон с `fetch`: 7 мин 17 с, граф `complete`, 83 записи (6 — слабые), блок вехи — `criteria-closure-verify` с осторожной формулировкой и предварительным шагом `spec-runner!620`, «вне фокуса» — `atp-platform!322`, вопросов 0, циклов нет.
+
+**Перепроверка исправлений (2026-09-30).** Codex: закрыты подсказка/запуск, дочитывание локальных `#N`, `unblocks`; не закрыты пример протокола в тексте (незакрытое и вложенное ограждение, перечитывание сырого тела) и ссылочные ссылки Markdown `[x]: #3`; новый major — усечённый слабо дочитанный PR делал граф `partial`. Два незакрытых — перебор форм Markdown, поэтому механизм заменён, а не расширен: заявка без метки — только шапка тела; голые `#N` — только из заголовков PR; слабые записи вне проверки полноты. 105 passed, откаты правок ловятся тестами (кроме эквивалентного: поля шапки и первое вхождение в теле совпадают по построению). Финальный прогон с `fetch`: 6 мин 4 с, граф `complete`, 86 записей, вспомогательные чтения без ошибок; блок вехи — `criteria-closure-verify` с предварительным шагом `spec-runner!620`; «вне фокуса» — `atp-platform!322`; вопросов 0, циклов нет.
