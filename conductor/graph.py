@@ -386,7 +386,10 @@ def _mentions(
 def referenced_issues(
     records: list[dict[str, Any]], todos: list[RepoTodo], norm: dict[str, str]
 ) -> set[tuple[str, int]]:
-    """Все repo#N из TODO, тел, комментариев и closing_refs — в ключах."""
+    """Строгие цели дочитывания — только структурные ссылки: @blocked_by TODO и
+    closing_refs PR. Упоминания в телах на готовность не влияют (§3.1): их
+    строгое дочитывание тянуло цепочку закрытых issue без конца (замер
+    2026-09-30 — «ссылки не сошлись за 3 шага», вечный partial)."""
     refs: set[tuple[str, int]] = set()
     for todo in todos:
         refs |= {
@@ -395,7 +398,6 @@ def referenced_issues(
             if r in norm
         }
     for rec in records:
-        refs |= _issue_refs(rec, norm)[0]
         refs |= {
             (norm[r], int(n))
             for r, n in REF_RE.findall(" ".join(rec.get("closing_refs", [])))
@@ -413,8 +415,15 @@ def local_refs(
         ref
         for rec in records
         if rec["is_pr"] and rec["state"] == "open"
-        for ref in _issue_refs(rec, norm)[1]
+        for ref in _title_refs(rec, norm)
     }
+
+
+def _title_refs(rec: dict[str, Any], norm: dict[str, str]) -> set[tuple[str, int]]:
+    """repo#N и голые #N заголовка — цели подсказок («docs(spec-runner#603)»)."""
+    title = LINK_RE.sub("", rec.get("title", ""))
+    qualified = {(norm[r], int(n)) for r, n in REF_RE.findall(title) if r in norm}
+    return qualified | {(rec["repo"], int(n)) for n in SELF_REF_RE.findall(title)}
 
 
 def _sources(inputs: Inputs) -> list[Source]:

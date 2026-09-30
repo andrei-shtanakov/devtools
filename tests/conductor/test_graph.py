@@ -114,10 +114,26 @@ def test_field_value_strips_quotes() -> None:
 
 
 def test_referenced_issues_normalizes() -> None:
-    inp = inputs({"a": "- [ ] z @owner:TBD @id:z @blocked_by:b#3\n"})
-    recs = [record("a", 1, body="see prograph-vault#4", closing_refs=["c#5"])]
+    inp = inputs({"a": "- [ ] z @owner:TBD @id:z @blocked_by:prograph-vault#3\n"})
+    recs = [record("a", 1, closing_refs=["prograph-vault#5"])]
     got = referenced_issues(recs, inp.todos, normalizer(inp))
-    assert {("b", 3), ("ecosystem-kb", 4), ("c", 5)} <= got
+    assert {("ecosystem-kb", 3), ("ecosystem-kb", 5)} <= got
+
+
+def test_body_mentions_are_not_strong_fetch_targets() -> None:
+    # живой прогон 2026-09-30: упоминания в телах закрытых issue тянут цепочку
+    # дочитывания глубже трёх шагов → вечный partial; на готовность они не
+    # влияют (§3.1) — строго дочитываются только структурные ссылки
+    from conductor.graph import local_refs
+
+    inp = inputs({})
+    recs = [
+        record("a", 1, state="closed", body="see b#4"),
+        record("a", 2, is_pr=True, title="docs(b#6): plan", body="see b#7"),
+    ]
+    norm = normalizer(inp)
+    assert referenced_issues(recs, inp.todos, norm) == set()
+    assert local_refs(recs, norm) == {("b", 6)}
 
 
 def test_any_unread_source_makes_graph_partial() -> None:
