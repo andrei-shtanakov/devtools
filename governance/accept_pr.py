@@ -367,6 +367,7 @@ def _accept_on_head(
         )
         tip_unknown = tip is not None and not tip.established
         tip_absent = tip is not None and tip.outcome is Outcome.ABSENT
+        tip_detail = tip.detail if tip is not None else None
         if head_now and head_now != head:
             # Код 5 общий для обоих пинов, а процедуры разные: у головы
             # заново нужны и чеки. Сказать здесь «голова не менялась» (текст
@@ -399,14 +400,14 @@ def _accept_on_head(
         elif tip_unknown:
             print(
                 "accept-pr: мерж не выполнен — пин разошёлся (код 5), а "
-                f"верхушка базы не установлена ({tip.detail}): сказать, "
+                f"верхушка базы не установлена ({tip_detail}): сказать, "
                 "двигалась ли база, нечем. Повторите приёмку, когда GitHub "
                 "отвечает."
             )
         elif tip_absent:
             print(
                 "accept-pr: мерж не выполнен — пин разошёлся (код 5), а "
-                f"ветки нет: origin/{base_branch} ({tip.detail}). Судить о "
+                f"ветки нет: origin/{base_branch} ({tip_detail}). Судить о "
                 "движении базы нечего — её больше нет; PR остаётся человеку."
             )
         else:

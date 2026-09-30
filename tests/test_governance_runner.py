@@ -9310,3 +9310,17 @@ def test_config_surface_watches_scripts_that_hooks_reference(
     assert state.status == "stopped_author"
     reason = (rs.run_dir(state.run_id) / "stop-reason.txt").read_text(encoding="utf-8")
     assert "hook.sh" in reason
+
+
+def test_interview_of_without_coordinates_is_an_explicit_error() -> None:
+    state = SimpleNamespace(run_id="r-no-need", interview=None)
+    with pytest.raises(RuntimeError, match="r-no-need"):
+        runner._interview_of(state)
+
+
+def test_upstream_path_engineer_frame_needs_traces_to() -> None:
+    state = SimpleNamespace(run_id="r-eng")
+    spec = _need_spec(frame="engineer", traces_to=None)
+    with pytest.raises(ValueError, match="traces_to"):
+        runner._upstream_path(state, spec)
+    assert runner._upstream_path(state, _need_spec()) is None

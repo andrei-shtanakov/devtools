@@ -55,7 +55,7 @@ Source: selfcheck 2026-09-30, vulture (решение владельца 2026-09
 **Touches:** governance/ops.py, governance/spec_loop.py, governance/bundle_state.py, tests/test_governance_runner.py, tests/test_governance_accept_pr.py, tests/test_governance_task_bridge.py, tests/test_governance_spec_loop.py, tests/test_governance_bundle_state.py
 
 ### TASK-002: Optional без сужения — явная проверка вместо неявного инварианта
-P2 | ⏸️ BLOCKED   Est: 4h
+P2 | 🔄 IN_PROGRESS   Est: 4h
 
 pyrefly видит обращение к значению с типом `X | None` без проверки. Где
 инвариант гарантирован потоком — сделать его явным (`assert x is not None,

@@ -1102,52 +1102,50 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "действие": f"продолжение ({state.status})",
             }
-        else:
-            ws_id = args.ws_id or ws_id_for(args.subject, date.today())
-            rs.validate_id_component(ws_id, label="ws_id")
-            collisions = []
-            for rid in rs.all_run_ids():
-                try:
-                    if rs.load(rid).ws_id == ws_id:
-                        collisions.append(rid)
-                except Exception:  # noqa: BLE001, S112
-                    # Нечитаемые леджеры уже отвергнуты/пропущены
-                    # find_runs выше (пустые трупы runner'а — штатны).
-                    continue
-            if collisions:
-                raise SpecLoopError(
-                    f"ws-id {ws_id!r} уже занят прогонами "
-                    f"{collisions!r} с другой парой (repo, subject) — "
-                    "задайте --ws-id"
-                )
-            # run-id материализуется ДО таблицы разрешённых значений.
-            run_id = f"{ws_id}-{os.urandom(3).hex()}"
-            bundle_dir = args.bundle_dir or f"workstreams/{ws_id}/spec"
-            values = {
-                "subject": args.subject,
-                "repo": args.repo,
-                "repo-slug": entry.repo_slug,
-                "ws-id": ws_id,
-                "run-id": run_id,
-                "target-dir": target_dir,
-                "bundle-dir": bundle_dir,
-                "profile": args.profile,
-                "brief-frame": (supplied_brief.frame if supplied_brief else "нет"),
-                "brief-source": (
-                    list(supplied_brief.source_paths) if supplied_brief else "нет"
-                ),
-                "need-frame": (interview_spec.frame if interview_spec else "нет"),
-                "stakeholder": (
-                    interview_spec.stakeholder_role if interview_spec else "нет"
-                ),
-                "merge-authority": "human (жёстко, без override)",
-                "authoring": "legacy" if args.legacy else "waves",
-                "действие": "start (новый прогон)",
-            }
-
-        _print_values(values)
-        if state is not None:
+            _print_values(values)
             return _dispatch(state, ops)
+        ws_id = args.ws_id or ws_id_for(args.subject, date.today())
+        rs.validate_id_component(ws_id, label="ws_id")
+        collisions = []
+        for rid in rs.all_run_ids():
+            try:
+                if rs.load(rid).ws_id == ws_id:
+                    collisions.append(rid)
+            except Exception:  # noqa: BLE001, S112
+                # Нечитаемые леджеры уже отвергнуты/пропущены
+                # find_runs выше (пустые трупы runner'а — штатны).
+                continue
+        if collisions:
+            raise SpecLoopError(
+                f"ws-id {ws_id!r} уже занят прогонами "
+                f"{collisions!r} с другой парой (repo, subject) — "
+                "задайте --ws-id"
+            )
+        # run-id материализуется ДО таблицы разрешённых значений.
+        run_id = f"{ws_id}-{os.urandom(3).hex()}"
+        bundle_dir = args.bundle_dir or f"workstreams/{ws_id}/spec"
+        values = {
+            "subject": args.subject,
+            "repo": args.repo,
+            "repo-slug": entry.repo_slug,
+            "ws-id": ws_id,
+            "run-id": run_id,
+            "target-dir": target_dir,
+            "bundle-dir": bundle_dir,
+            "profile": args.profile,
+            "brief-frame": (supplied_brief.frame if supplied_brief else "нет"),
+            "brief-source": (
+                list(supplied_brief.source_paths) if supplied_brief else "нет"
+            ),
+            "need-frame": (interview_spec.frame if interview_spec else "нет"),
+            "stakeholder": (
+                interview_spec.stakeholder_role if interview_spec else "нет"
+            ),
+            "merge-authority": "human (жёстко, без override)",
+            "authoring": "legacy" if args.legacy else "waves",
+            "действие": "start (новый прогон)",
+        }
+        _print_values(values)
         started = runner.start(
             subject=args.subject,
             repo=args.repo,

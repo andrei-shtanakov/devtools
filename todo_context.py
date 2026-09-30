@@ -163,6 +163,16 @@ class ContextError(Exception):
     """The item cannot be located; nothing partial is worth printing."""
 
 
+def _require_pf() -> Any:
+    """The shared parser module, or an error naming the env that provides it."""
+    if _pf is None:
+        raise ContextError(
+            "plan_fields is not importable — run through the pinned env:\n"
+            "  uv run --frozen python todo_context.py ..."
+        )
+    return _pf
+
+
 # ─────────────────────────── fleet discovery ───────────────────────────
 
 
@@ -194,14 +204,15 @@ def build_inputs(
     duplicated rather than imported because that script's name has a dash and is
     not importable; the *semantics* are not duplicated.
     """
-    on_disk = _pf.checkout_map(root, index)
+    pf = _require_pf()
+    on_disk = pf.checkout_map(root, index)
     inputs: list[Any] = []
     checkouts: dict[str, Path] = {}
     unread: list[str] = []
     for repo in sorted(set(index.canonical_keys) | set(on_disk)):
         directory = on_disk.get(repo)
         if directory is None:
-            inputs.append(_pf.RepoInput(repo, available=False))
+            inputs.append(pf.RepoInput(repo, available=False))
             unread.append(repo)
             continue
         checkouts[repo] = directory
@@ -211,7 +222,7 @@ def build_inputs(
             if todo.is_file()
             else None
         )
-        inputs.append(_pf.RepoInput(repo, todo_text=text, available=True))
+        inputs.append(pf.RepoInput(repo, todo_text=text, available=True))
     return inputs, checkouts, unread
 
 
@@ -220,22 +231,18 @@ def fleet_snapshot(
 ) -> tuple[dict[str, Any], dict[str, Path], list[str], Any]:
     """The snapshot, where each repo lives, which repos could not be read, and the
     manifest index — the one authority on how a repo may be spelled."""
-    if _pf is None:  # pragma: no cover - environment guard
-        raise ContextError(
-            "plan_fields is not importable — run through the pinned env:\n"
-            "  uv run --frozen python todo_context.py ..."
-        )
+    pf = _require_pf()
     if not manifest_path.is_file():
         raise ContextError(f"no workspace manifest at {manifest_path}")
     try:
-        index = _pf.manifest_index(manifest_path)
+        index = pf.manifest_index(manifest_path)
         inputs, checkouts, unread = build_inputs(root, index)
-    except _pf.AmbiguousIdentityError as exc:
+    except pf.AmbiguousIdentityError as exc:
         # Same answer `check-plan-fields.py` gives, and in BOTH places it can be
         # raised: `checkout_map` decides identity too. A workspace holding two
         # checkouts of one repo has no correct answer — a traceback is not one.
         raise ContextError(f"cannot resolve repo identity: {exc}") from exc
-    return _pf.parse_fleet(inputs, index), checkouts, unread, index
+    return pf.parse_fleet(inputs, index), checkouts, unread, index
 
 
 # ─────────────────────────── the sources ───────────────────────────
@@ -259,7 +266,7 @@ def read_item(
     directory = checkouts.get(repo)
     if directory is not None and (directory / "TODO.md").is_file():
         text = (directory / "TODO.md").read_text(encoding="utf-8", errors="ignore")
-        for item in _pf.scrape_items(text):
+        for item in _require_pf().scrape_items(text):
             if item.item_id == node["id"]:
                 section, source_line = item.section, item.raw_text
                 break
@@ -370,7 +377,7 @@ def read_graph(
     (ревью PR #125, круг 7).
     """
     by_id = {n["node_id"]: n for n in snapshot["nodes"]}
-    findings = list(snapshot["diagnostics"]) + _pf.check_fleet(snapshot)
+    findings = list(snapshot["diagnostics"]) + _require_pf().check_fleet(snapshot)
 
     def describe(other_id: str) -> dict[str, Any]:
         other = by_id.get(other_id)
@@ -621,7 +628,7 @@ def read_docs(
             }
         )
     hits, error = git_grep(directory, item["id"])
-    if error is not None:
+    if hits is None or error is not None:
         return ({"named": resolved, "mentions": []}, Source("docs", "error", error))
     ref = item_ref_re(item["id"])
     read: dict[str, list[str]] = {}
@@ -750,7 +757,7 @@ def _cached_item(
         lines: list[str] = []
         if todo is not None and todo.is_file():
             text = todo.read_text(encoding="utf-8", errors="ignore")
-            by_id = {it.item_id: it for it in _pf.scrape_items(text)}
+            by_id = {it.item_id: it for it in _require_pf().scrape_items(text)}
             lines = text.splitlines()
         scraped[repo] = {"items": by_id, "lines": lines}
     hit = scraped[repo]["items"].get(node["id"])

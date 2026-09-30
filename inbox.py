@@ -33,6 +33,7 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 try:
@@ -224,7 +225,9 @@ def search_inbox(owner: str) -> list[dict] | None:
     return parse_search_output(done.stdout)
 
 
-def render(issues: list[dict], repos: dict[str, Path | None]) -> tuple[list[str], int]:
+def render(
+    issues: list[dict], repos: Mapping[str, Path | None]
+) -> tuple[list[str], int]:
     """Format issues as lines, and count the ones still awaiting a decision.
 
     `repos` maps lowercased canonical repo name to its TODO.md, as
