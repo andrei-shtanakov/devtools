@@ -100,8 +100,10 @@ def checklist_body(
 ) -> str:
     lines = [
         f"<!-- {EDGE_MARKER} head={head} -->",
-        f"Edge-check волны W{state.wave} прогона `{state.run_id}`: "
-        f"{level_verdict(records)}.",
+        (
+            f"Edge-check волны W{state.wave} прогона `{state.run_id}`: "
+            f"{level_verdict(records)}."
+        ),
         "",
         "| узел | ребро | вердикт | check_identity | subject sha256 |",
         "|---|---|---|---|---|",
@@ -114,11 +116,15 @@ def checklist_body(
         )
     lines += [
         "",
-        f"Evidence: `{evidence_dir(state)}/<node>--<edge>.json` — по файлу на "
-        "ребро; действующие результаты — леджер прогона (D12).",
-        "Это одобрение публикует результат edge-check (D16) и снимает правило "
-        "одобряющего ревью; подписью узла оно НЕ является — подпись создаёт "
-        "мерж candidate человеком из allowlist.",
+        (
+            f"Evidence: `{evidence_dir(state)}/<node>--<edge>.json` — по файлу на "
+            "ребро; действующие результаты — леджер прогона (D12)."
+        ),
+        (
+            "Это одобрение публикует результат edge-check (D16) и снимает правило "
+            "одобряющего ревью; подписью узла оно НЕ является — подпись создаёт "
+            "мерж candidate человеком из allowlist."
+        ),
     ]
     return "\n".join(lines)
 

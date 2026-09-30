@@ -120,10 +120,14 @@ def test_deleted_dependency_needs_action_pair_and_ignores_meta_rule(tmp_path):
                 "- [ ] Документировать scripts/harness/claude-review @id:mention",
                 "      Обычное совместное упоминание пути.",
                 "- [ ] Удалить claude-review @id:remove",
-                "- [ ] Проверка правила: пункт не должен опираться на удаляемый путь "
-                "@id:meta [waived]",
-                "      Мета-пункт описывает, как строить scripts/harness/claude-review "
-                "и удалить его.",
+                (
+                    "- [ ] Проверка правила: пункт не должен опираться на удаляемый путь "
+                    "@id:meta [waived]"
+                ),
+                (
+                    "      Мета-пункт описывает, как строить scripts/harness/claude-review "
+                    "и удалить его."
+                ),
             ]
         )
         + "\n",

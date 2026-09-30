@@ -120,8 +120,10 @@ def test_merges_from_operator_profile_with_head_pin(fleet: Fleet) -> None:
     res = fleet.run()
     assert res.returncode == 0, res.stderr
     assert fleet.merge_calls() == [
-        "GH_CONFIG_DIR= gh api -X PUT repos/andrei-shtanakov/demo/pulls/7/merge "
-        f"-f merge_method=merge -f sha={HEAD_SHA}"
+        (
+            "GH_CONFIG_DIR= gh api -X PUT repos/andrei-shtanakov/demo/pulls/7/merge "
+            f"-f merge_method=merge -f sha={HEAD_SHA}"
+        )
     ]
     assert f"от {HUMAN}" in res.stdout
 
@@ -132,9 +134,11 @@ def test_explicit_human_profile_is_passed_through(fleet: Fleet, tmp_path: Path) 
     res = fleet.run("--squash", HUMAN_GH_CONFIG_DIR=str(profile))
     assert res.returncode == 0, res.stderr
     assert fleet.merge_calls() == [
-        f"GH_CONFIG_DIR={profile} gh api -X PUT "
-        "repos/andrei-shtanakov/demo/pulls/7/merge "
-        f"-f merge_method=squash -f sha={HEAD_SHA}"
+        (
+            f"GH_CONFIG_DIR={profile} gh api -X PUT "
+            "repos/andrei-shtanakov/demo/pulls/7/merge "
+            f"-f merge_method=squash -f sha={HEAD_SHA}"
+        )
     ]
 
 

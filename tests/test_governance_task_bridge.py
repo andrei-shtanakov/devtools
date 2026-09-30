@@ -2194,9 +2194,11 @@ def _parse_with_spec_runner(text: str):
         [
             str(interpreter),
             "-c",
-            "from spec_runner.task import parse_tasks\n"
-            "from spec_runner.config import ExecutorConfig\n"
-            "assert hasattr(ExecutorConfig, 'resolve_waiver')\n",
+            (
+                "from spec_runner.task import parse_tasks\n"
+                "from spec_runner.config import ExecutorConfig\n"
+                "assert hasattr(ExecutorConfig, 'resolve_waiver')\n"
+            ),
         ],
         capture_output=True,
     )
@@ -2310,9 +2312,11 @@ def _probe_spec_runner_selector_dictionary():
         [
             str(interpreter),
             "-c",
-            "from spec_runner.tdd_runners import ADAPTERS, parse_group_element\n"
-            "assert all(hasattr(a, 'supports_file_targets') "
-            "for a in ADAPTERS.values())\n",
+            (
+                "from spec_runner.tdd_runners import ADAPTERS, parse_group_element\n"
+                "assert all(hasattr(a, 'supports_file_targets') "
+                "for a in ADAPTERS.values())\n"
+            ),
         ],
         capture_output=True,
     )

@@ -190,11 +190,15 @@ def refusal(pack: dict[str, Any]) -> str:
     """Why `execute` was refused, in the pack's own words."""
     completeness = pack.get("completeness") or {}
     lines = [
-        f"todo-worker: execute запрещён — grade `{completeness.get('grade')}`: "
-        f"{completeness.get('reason')}",
-        "Требование для этого пункта не написано: ни тела под пунктом, ни "
-        "design-дока, ни исходного issue. Запуск с записью на такой основе — "
-        "импровизация, поэтому это отказ, а не тихий откат в plan.",
+        (
+            f"todo-worker: execute запрещён — grade `{completeness.get('grade')}`: "
+            f"{completeness.get('reason')}"
+        ),
+        (
+            "Требование для этого пункта не написано: ни тела под пунктом, ни "
+            "design-дока, ни исходного issue. Запуск с записью на такой основе — "
+            "импровизация, поэтому это отказ, а не тихий откат в plan."
+        ),
     ]
     unknown = completeness.get("unknown_sources") or []
     if unknown:
