@@ -3898,10 +3898,6 @@ class _ProvOps(_StubOps):
         self.calls.append(("prs_containing_commit", sha))
         return list(self.prs_by_sha.get(sha, self.prs))
 
-    def pr_files(self, repo_slug, pr):
-        self.calls.append(("pr_files", pr))
-        return list(self.files_by_pr.get(pr, self.files))
-
     def find_pr(self, repo_slug, branch, *, any_state=False):
         self.calls.append(("find_pr", branch))
         return self.branch_prs.get(branch)
@@ -5131,7 +5127,7 @@ def test_supersede_equal_content_anchor_is_traceless_noop(tmp_path, monkeypatch)
     # поиска correction-PR, «последним, кто трогал анкер» оказывался
     # штамп-коммит нашего же tasks-PR — на нём дефект и стоял.
     assert ops.touched == []
-    assert not [c for c in ops.calls if c[0] in ("prs_containing_commit", "pr_files")]
+    assert not [c for c in ops.calls if c[0] == "prs_containing_commit"]
     # `pr_facts` по PR первой доставки (#5) — это §I3, не §I7; предмет
     # утверждения — что фактов correction-PR (#403) никто не спрашивал.
     assert ("pr_facts", 403) not in ops.calls
@@ -5649,7 +5645,7 @@ def test_supersede_right_after_delivery_is_traceless_noop(tmp_path, monkeypatch)
     # трогал анкер» после доставки становится штамп-коммит нашего же
     # tasks-PR, и порядок обязан не давать принять его за correction.
     assert ops.touched == []
-    assert not [c for c in ops.calls if c[0] in ("prs_containing_commit", "pr_files")]
+    assert not [c for c in ops.calls if c[0] == "prs_containing_commit"]
     assert ("pr_facts", 403) not in ops.calls
 
 

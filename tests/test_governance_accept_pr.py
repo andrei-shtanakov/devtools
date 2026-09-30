@@ -82,10 +82,6 @@ class _Ops:
             return facts.unavailable(f"head origin/{branch}: стенд")
         return facts.Fact(facts.Outcome.FOUND, self.live_tip)
 
-    def pr_files(self, repo_slug: str, pr: int) -> list[str]:
-        self.calls.append(("pr_files",))
-        return self.files
-
     def merge(self, repo_name: str, pr: int, sha: str, base: str | None = None) -> int:
         self.calls.append(("merge", pr, sha))
         self.merge_args = (repo_name, pr, sha, base)

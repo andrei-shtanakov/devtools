@@ -341,34 +341,6 @@ def find_runs(repo: str, subject: str) -> list[rs.RunState]:
     return matches
 
 
-def _bundle_dir_from_pr_files(files: list[str]) -> str:
-    """Единственный каталог, содержащий полный шестиузловой бандл PR.
-
-    Не подставляем современный дефолт молча: исходный запуск мог передать
-    ``--bundle-dir``. Список файлов PR — durable-факт, позволяющий вернуть
-    точное значение даже для такого запуска.
-    """
-    by_parent: dict[str, set[str]] = {}
-    for raw in files:
-        path = Path(raw)
-        if path.name in _BUNDLE_FILENAMES and str(path.parent) not in (
-            "",
-            ".",
-        ):
-            by_parent.setdefault(str(path.parent), set()).add(path.name)
-    complete = sorted(
-        parent for parent, names in by_parent.items() if names == _BUNDLE_FILENAMES
-    )
-    if len(complete) != 1:
-        detail = complete if complete else "нет полного шестиузлового каталога"
-        raise SpecLoopError(
-            "bundle-dir не восстанавливается из файлов bundle-PR: "
-            f"{detail!r}; нужен ровно один каталог с "
-            f"{sorted(_BUNDLE_FILENAMES)!r}"
-        )
-    return complete[0]
-
-
 def _remote_branch_pattern(subject: str, ws_id: str | None) -> tuple[str, re.Pattern]:
     """Префикс запроса и точная грамматика bundle-ветки восстановления."""
     if ws_id is not None:

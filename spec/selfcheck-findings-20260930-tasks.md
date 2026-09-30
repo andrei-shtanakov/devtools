@@ -37,20 +37,20 @@ ruff (T3; включение правил в CI — отдельным PR опе
   всему `tests/`, не только рядом).
 
 ### TASK-001: Удалить мёртвый код — Ops-методы без вызовов, функция и поле без читателя
-P2 | TODO   Est: 2h
+P2 | ✅ DONE   Est: 2h
 
 Продакшен-код не вызывает эти методы и функцию и не читает поле; остались
 только их тестовые двойники.
 Source: selfcheck 2026-09-30, vulture (решение владельца 2026-09-30: T1)
 
 **Checklist:**
-- [ ] `governance/ops.py`: удалить `Ops.mark_ready` (sc-1e1172cc), `Ops.review_fresh` (sc-2a6fb65a), `Ops.pr_files` (sc-9906d4c7) из протокола и их реализации `RealOps.mark_ready` (sc-30251235), `RealOps.review_fresh` (sc-f9b6832d), `RealOps.pr_files` (sc-18baa439); перед удалением подтвердить поиском по всему репо (включая `getattr` и строковые имена), что продакшен-вызовов нет
-- [ ] обновить упоминание `mark_ready` в docstring `governance/ops.py` (≈ строка 1520), чтобы текст не ссылался на удалённый метод
-- [ ] тестовые двойники: удалить одноимённые методы у фейков (`tests/test_governance_runner.py`, `tests/test_governance_accept_pr.py`, `tests/test_governance_task_bridge.py`); проверки вида «`pr_files` не вызывался» (`test_governance_task_bridge.py` ≈ 5134, 5652) переписать так, чтобы они по-прежнему что-то утверждали (например, оставить только `prs_containing_commit`), а не стали пустыми
-- [ ] `governance/spec_loop.py`: удалить `_bundle_dir_from_pr_files` (sc-b30abbdb) вместе с его тестами, если есть
-- [ ] `governance/bundle_state.py`: удалить поле `BundleState.trace_matrix` (sc-0ffff1a5), вызов `build_trace_matrix` и его импорт — поле никто не читает; поправить все места, где `BundleState` конструируется (прод и тесты); `tests/test_governance_steward_surface.py` (поверхность steward) не трогать
-- [ ] свежий прогон `make selfcheck ARGS='--probe vulture'`: перечисленных id нет
-- [ ] полный набор тестов зелёный в обоих режимах
+- [x] `governance/ops.py`: удалить `Ops.mark_ready` (sc-1e1172cc), `Ops.review_fresh` (sc-2a6fb65a), `Ops.pr_files` (sc-9906d4c7) из протокола и их реализации `RealOps.mark_ready` (sc-30251235), `RealOps.review_fresh` (sc-f9b6832d), `RealOps.pr_files` (sc-18baa439); перед удалением подтвердить поиском по всему репо (включая `getattr` и строковые имена), что продакшен-вызовов нет
+- [x] обновить упоминание `mark_ready` в docstring `governance/ops.py` (≈ строка 1520), чтобы текст не ссылался на удалённый метод
+- [x] тестовые двойники: удалить одноимённые методы у фейков (`tests/test_governance_runner.py`, `tests/test_governance_accept_pr.py`, `tests/test_governance_task_bridge.py`); проверки вида «`pr_files` не вызывался» (`test_governance_task_bridge.py` ≈ 5134, 5652) переписать так, чтобы они по-прежнему что-то утверждали (например, оставить только `prs_containing_commit`), а не стали пустыми
+- [x] `governance/spec_loop.py`: удалить `_bundle_dir_from_pr_files` (sc-b30abbdb) вместе с его тестами, если есть
+- [x] `governance/bundle_state.py`: удалить поле `BundleState.trace_matrix` (sc-0ffff1a5), вызов `build_trace_matrix` и его импорт — поле никто не читает; поправить все места, где `BundleState` конструируется (прод и тесты); `tests/test_governance_steward_surface.py` (поверхность steward) не трогать
+- [x] свежий прогон `make selfcheck ARGS='--probe vulture'`: перечисленных id нет
+- [x] полный набор тестов зелёный в обоих режимах
 
 **Touches:** governance/ops.py, governance/spec_loop.py, governance/bundle_state.py, tests/test_governance_runner.py, tests/test_governance_accept_pr.py, tests/test_governance_task_bridge.py, tests/test_governance_spec_loop.py, tests/test_governance_bundle_state.py
 

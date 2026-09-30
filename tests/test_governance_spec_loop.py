@@ -252,9 +252,6 @@ class _RecoveryOps:
     def caller_login(self) -> str | None:
         return None
 
-    def pr_files(self, repo_slug, pr):
-        return self.files
-
     def checkout_and_pull(self, target_dir, branch):
         self.checkouts.append((target_dir, branch))
 
@@ -1263,9 +1260,6 @@ class _WaveRecoveryOps:
 
     def caller_login(self) -> str | None:
         return None
-
-    def pr_files(self, repo_slug, pr):
-        return []
 
 
 def _wave_pr(
