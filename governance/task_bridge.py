@@ -390,10 +390,12 @@ def _render_header(
         "",
         f"## Milestone 1: {subject}",
         "",
-        f"Сгенерировано task_bridge из behaviour-spec бандла {ws_id} "
-        "(шаг 3 плана развития конвейера; группировка задач — по "
-        "Feature-секциям). Draft: исполнение только после человеческого "
-        "approve.",
+        (
+            f"Сгенерировано task_bridge из behaviour-spec бандла {ws_id} "
+            "(шаг 3 плана развития конвейера; группировка задач — по "
+            "Feature-секциям). Draft: исполнение только после человеческого "
+            "approve."
+        ),
         "",
     ]
 
@@ -835,8 +837,10 @@ def render_tasks_dt(
             f"### TASK-{idx:03d}: {t.title}",
             "P2 | TODO   Est: 0.5d",
             "",
-            f"{action} сценарии {', '.join(beh_ids)} ({t.dt_id}, "
-            f"группа {t.parallel_group}).",
+            (
+                f"{action} сценарии {', '.join(beh_ids)} ({t.dt_id}, "
+                f"группа {t.parallel_group})."
+            ),
             f"Source: {bundle_path}#{t.dt_id}",
         ]
         if t.type == "verify":
@@ -1021,7 +1025,9 @@ def render_tasks_dt(
         # прокси, от которого отказывается §3b, применённый с другой
         # стороны. Гвард уже отверг `covered_by`, называющий чужой
         # сценарий, поэтому здесь остаётся только разложить объявленное.
-        def _deliverable_text(d: decomposition_guard.Deliverable) -> str:
+        def _deliverable_text(
+            d: decomposition_guard.Deliverable, t: decomposition_guard.DtTask = t
+        ) -> str:
             """Текст обязательства в чек-листе — один на обе формы пункта.
 
             У повтора (§3b.6) он говорит, что от исполнителя требуется:
@@ -3620,9 +3626,11 @@ def _previous_dag(
         return (
             None,
             "unavailable",
-            f"якорь traces_to доставленной tasks-спеки {spec_rel} не "
-            "совпал с терминальным узлом состава, выведенного из каталога "
-            "бандла",
+            (
+                f"якорь traces_to доставленной tasks-спеки {spec_rel} не "
+                "совпал с терминальным узлом состава, выведенного из каталога "
+                "бандла"
+            ),
         )
     return matches[0], "derived_from_spec", ""
 

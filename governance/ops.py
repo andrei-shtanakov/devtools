@@ -1607,9 +1607,11 @@ class RealOps:
                 "-R",
                 repo_slug,
                 "--json",
-                "mergeable,mergeStateStatus,statusCheckRollup,isDraft,"
-                "headRefOid,baseRefOid,baseRefName,state,mergedAt,"
-                "mergedBy,mergeCommit",
+                (
+                    "mergeable,mergeStateStatus,statusCheckRollup,isDraft,"
+                    "headRefOid,baseRefOid,baseRefName,state,mergedAt,"
+                    "mergedBy,mergeCommit"
+                ),
             ],
             capture_output=True,
             text=True,
@@ -2512,11 +2514,13 @@ class RealOps:
                 f"repos/{repo_slug}/commits/{sha}/pulls",
                 "--paginate",
                 "--jq",
-                "[.[] | {number, "
-                'state: (if .merged_at then "MERGED" '
-                "else (.state | ascii_upcase) end), "
-                "baseRefName: .base.ref, mergedAt: .merged_at, "
-                "mergeCommit: .merge_commit_sha}]",
+                (
+                    "[.[] | {number, "
+                    'state: (if .merged_at then "MERGED" '
+                    "else (.state | ascii_upcase) end), "
+                    "baseRefName: .base.ref, mergedAt: .merged_at, "
+                    "mergeCommit: .merge_commit_sha}]"
+                ),
             ],
             capture_output=True,
             text=True,
@@ -2622,8 +2626,10 @@ class RealOps:
             [
                 "gh",
                 "api",
-                f"repos/{repo_slug}/contents/{quote(path, safe='/')}"
-                f"?ref={quote(ref, safe='')}",
+                (
+                    f"repos/{repo_slug}/contents/{quote(path, safe='/')}"
+                    f"?ref={quote(ref, safe='')}"
+                ),
                 "-H",
                 "Accept: application/vnd.github.raw+json",
             ],

@@ -145,8 +145,10 @@ WAIVER_CONDITIONS: dict[str, tuple[str, ...]] = {
         "поведение уже доставлено зависимостями задачи",
         "задача добавляет отсутствующее characterisation/acceptance-покрытие",
         "честный baseline RED невозможен",
-        "новый тест имеет negative control, доказывающий, что он краснеет "
-        "при нарушении свойства",
+        (
+            "новый тест имеет negative control, доказывающий, что он краснеет "
+            "при нарушении свойства"
+        ),
         "baseline-sha зафиксирован фактический на старте задачи",
     ),
 }
@@ -253,9 +255,11 @@ def _control_field(block: str, dt_id: str) -> tuple[str | None, list[str], bool]
         return (
             None,
             [
-                f"{dt_id}: поле negative_control объявлено, но не разобрано — "
-                "ожидается `negative_control: <селектор>`: один токен без "
-                "пробелов, без ` :: `"
+                (
+                    f"{dt_id}: поле negative_control объявлено, но не разобрано — "
+                    "ожидается `negative_control: <селектор>`: один токен без "
+                    "пробелов, без ` :: `"
+                )
             ],
             True,
         )
@@ -1108,8 +1112,10 @@ def _parse_delivers(dt_id: str, block: str) -> tuple[list[str], list[Deliverable
         # съедала бы его.
         return (
             [
-                f"{dt_id}: ключ delivers объявлен дважды ({keys}) — "
-                f"разбирается только первый, объявленное ниже невидимо"
+                (
+                    f"{dt_id}: ключ delivers объявлен дважды ({keys}) — "
+                    f"разбирается только первый, объявленное ниже невидимо"
+                )
             ],
             [],
         )
@@ -1117,9 +1123,11 @@ def _parse_delivers(dt_id: str, block: str) -> tuple[list[str], list[Deliverable
     if region is None:
         return (
             [
-                f"{dt_id}: поле delivers отсутствует (dt_contract_version: 2 "
-                f"требует его у каждого DT; `delivers: []` — законное "
-                f"утверждение «объявленных результатов нет»)"
+                (
+                    f"{dt_id}: поле delivers отсутствует (dt_contract_version: 2 "
+                    f"требует его у каждого DT; `delivers: []` — законное "
+                    f"утверждение «объявленных результатов нет»)"
+                )
             ],
             [],
         )
@@ -1133,8 +1141,10 @@ def _parse_delivers(dt_id: str, block: str) -> tuple[list[str], list[Deliverable
         # приём, что у `verifies` (round 13 ревью PR #161).
         return (
             [
-                f"{dt_id}: поле delivers объявлено, но пусто — ожидается "
-                f"список записей либо явный `delivers: []`"
+                (
+                    f"{dt_id}: поле delivers объявлено, но пусто — ожидается "
+                    f"список записей либо явный `delivers: []`"
+                )
             ],
             [],
         )
@@ -1397,16 +1407,20 @@ def dt_contract_findings(
             return (
                 [],
                 [
-                    "decomposition: dt_contract_version не объявлена — старый "
-                    "формат по явному разрешению оператора; ГАРАНТИЯ ПЕРЕНОСА "
-                    "deliverables ОТСУТСТВУЕТ"
+                    (
+                        "decomposition: dt_contract_version не объявлена — старый "
+                        "формат по явному разрешению оператора; ГАРАНТИЯ ПЕРЕНОСА "
+                        "deliverables ОТСУТСТВУЕТ"
+                    )
                 ],
             )
         return (
             [
-                "decomposition: требуется версия контракта "
-                "(`dt_contract_version` во frontmatter); отсутствие поля режим "
-                "совместимости НЕ включает — его включает оператор"
+                (
+                    "decomposition: требуется версия контракта "
+                    "(`dt_contract_version` во frontmatter); отсутствие поля режим "
+                    "совместимости НЕ включает — его включает оператор"
+                )
             ],
             [],
         )
@@ -1415,9 +1429,11 @@ def dt_contract_findings(
     if version not in _DT_CONTRACT_VERSIONS:
         return (
             [
-                f"decomposition: неизвестная dt_contract_version {version!r} "
-                f"(поддержана: {', '.join(_DT_CONTRACT_VERSIONS)}); режим "
-                f"совместимости неизвестную версию не маскирует"
+                (
+                    f"decomposition: неизвестная dt_contract_version {version!r} "
+                    f"(поддержана: {', '.join(_DT_CONTRACT_VERSIONS)}); режим "
+                    f"совместимости неизвестную версию не маскирует"
+                )
             ],
             [],
         )

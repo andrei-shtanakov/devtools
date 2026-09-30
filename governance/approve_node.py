@@ -1474,17 +1474,21 @@ def _candidate_body(state: RunState, op: dict, debt: na.NodeDebt | None) -> str:
     lines = [
         f"Предложение об одобрении узлов бандла {state.ws_id} (§I12).",
         "",
-        "**Мерж этого PR И ЕСТЬ акт одобрения**: подпись узла берётся из "
-        f"`mergedBy`/`mergedAt` этого мержа, поэтому мержит его человек из "
-        f"{_policy_ref(op)}. Агентский мерж подписи не создаёт "
-        "и приведёт к отказу финализации.",
+        (
+            "**Мерж этого PR И ЕСТЬ акт одобрения**: подпись узла берётся из "
+            f"`mergedBy`/`mergedAt` этого мержа, поэтому мержит его человек из "
+            f"{_policy_ref(op)}. Агентский мерж подписи не создаёт "
+            "и приведёт к отказу финализации."
+        ),
         "",
         f"Узлы: {', '.join(op['nodes'])}.",
         f"run-id: {state.run_id}",
-        "Изменено: `status → approval_pending`, `version + 1`, пины с "
-        "фактических байтов upstream в base, `approved_content_hash` с "
-        "собственных байтов узла, плюс рекурсивный каскад `stale` вниз по "
-        "DAG. Подпись НЕ записана — акта ещё не было.",
+        (
+            "Изменено: `status → approval_pending`, `version + 1`, пины с "
+            "фактических байтов upstream в base, `approved_content_hash` с "
+            "собственных байтов узла, плюс рекурсивный каскад `stale` вниз по "
+            "DAG. Подпись НЕ записана — акта ещё не было."
+        ),
     ]
     policy = op.get("policy") or {}
     if policy:
@@ -2587,13 +2591,17 @@ def _finalize_body(state: RunState, op: dict, nodes: list[str]) -> str:
             f"Конверт подписи узлов бандла {state.ws_id} (§I12, фаза 3).",
             "",
             f"Узлы: {', '.join(nodes)}.",
-            "Изменено РОВНО три поля на узел: `status: approval_pending → "
-            "approved`, `approved_by`, `approved_at`. Ни тела, ни пинов, ни "
-            "`approved_content_hash`, ни `version` этот PR не касается.",
+            (
+                "Изменено РОВНО три поля на узел: `status: approval_pending → "
+                "approved`, `approved_by`, `approved_at`. Ни тела, ни пинов, ни "
+                "`approved_content_hash`, ни `version` этот PR не касается."
+            ),
             "",
-            f"Подпись взята у мержа candidate-PR #{op['candidate_pr']}: "
-            f"`approved_by = {op['merged_by']}`, `approved_at = "
-            f"{op['merged_at']}`. Этот PR подпись не создаёт, а лишь "
-            "записывает уже состоявшуюся.",
+            (
+                f"Подпись взята у мержа candidate-PR #{op['candidate_pr']}: "
+                f"`approved_by = {op['merged_by']}`, `approved_at = "
+                f"{op['merged_at']}`. Этот PR подпись не создаёт, а лишь "
+                "записывает уже состоявшуюся."
+            ),
         ]
     )

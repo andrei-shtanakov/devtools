@@ -200,9 +200,11 @@ def test_ordinary_pr_merges_with_exact_command(fleet: Fleet) -> None:
     res = fleet.run(GH_STUB_HEADREF="feat/ordinary")
     assert res.returncode == 0, res.stderr
     assert fleet.merge_calls() == [
-        f"GH_CONFIG_DIR={fleet.profile_dir} gh api -X PUT "
-        "repos/andrei-shtanakov/demo/pulls/7/merge "
-        f"-f merge_method=squash -f sha={HEAD_SHA}"
+        (
+            f"GH_CONFIG_DIR={fleet.profile_dir} gh api -X PUT "
+            "repos/andrei-shtanakov/demo/pulls/7/merge "
+            f"-f merge_method=squash -f sha={HEAD_SHA}"
+        )
     ]
 
 
@@ -217,13 +219,17 @@ def test_strategy_reaches_api_and_branch_deleted_separately(
     res = fleet.run("--merge", "--delete-branch", GH_STUB_HEADREF="feat/ordinary")
     assert res.returncode == 0, res.stderr
     assert fleet.merge_calls() == [
-        f"GH_CONFIG_DIR={fleet.profile_dir} gh api -X PUT "
-        "repos/andrei-shtanakov/demo/pulls/7/merge "
-        f"-f merge_method=merge -f sha={HEAD_SHA}"
+        (
+            f"GH_CONFIG_DIR={fleet.profile_dir} gh api -X PUT "
+            "repos/andrei-shtanakov/demo/pulls/7/merge "
+            f"-f merge_method=merge -f sha={HEAD_SHA}"
+        )
     ]
     assert fleet.delete_calls() == [
-        f"GH_CONFIG_DIR={fleet.profile_dir} gh api -X DELETE "
-        "repos/andrei-shtanakov/demo/git/refs/heads/feat/ordinary"
+        (
+            f"GH_CONFIG_DIR={fleet.profile_dir} gh api -X DELETE "
+            "repos/andrei-shtanakov/demo/git/refs/heads/feat/ordinary"
+        )
     ]
 
 
