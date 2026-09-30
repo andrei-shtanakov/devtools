@@ -395,16 +395,38 @@ def _key(pin: str, root: Path, roots: list[str]) -> str:
     return f"{pin}:{_content_sha(root, [*roots, 'tests'])}"
 
 
-def _tree_key(pin: str, root: Path) -> str:
-    """Ключ без известных корней (ответ-ошибка): все отслеживаемые *.py —
-    надмножество; по содержимому, не по stdout ответа (ревью I-3)."""
-    files = _git(root, "ls-files", "-z", "--", "*.py").stdout.split("\0")
+# Не-.py файлы, решающие исход измерения: ответ-ошибку (`lock-not-current`,
+# `product-roots-*`, `environment-selection-invalid`) чинят именно их правкой.
+# Прочие не-.py (README, доки) в ключ не входят — иначе любая правка текста
+# покупала бы перемер, то есть второй шанс флаки-тесту (§3.1 G6; devtools#515).
+_MEASUREMENT_CONFIG = frozenset(
+    {
+        "uv.lock",
+        "pyproject.toml",
+        "pytest.ini",
+        "tox.ini",
+        "setup.cfg",
+        "spec-runner.config.yaml",
+        "spec/executor.config.yaml",
+    }
+)
+
+
+def _tree_key(pin: str, root: Path, product_sha: str) -> str:
+    """Ключ без известных корней (ответ-ошибка): отслеживаемые *.py и файлы
+    `_MEASUREMENT_CONFIG` из дерева `product_sha` — надмножество; по git-объектам
+    (id blob = хеш содержимого), не по рабочему дереву и не по stdout ответа."""
+    listed = _git(root, "ls-tree", "-r", "-z", product_sha)
+    if listed.returncode != 0:
+        raise CloseError(f"ls-tree {product_sha[:12]}: {listed.stderr.strip()}")
     h = hashlib.sha256()
-    for rel in sorted(f for f in files if f):
-        h.update(rel.encode())
-        h.update(b"\0")
-        h.update((root / rel).read_bytes())
-    return f"{pin}:tree:{h.hexdigest()}"
+    for entry in sorted(e for e in listed.stdout.split("\0") if e):
+        meta, _, rel = entry.partition("\t")
+        if rel.endswith(".py") or rel in _MEASUREMENT_CONFIG:
+            h.update(rel.encode())
+            h.update(b"\0")
+            h.update(meta.split()[-1].encode())
+    return f"{pin}:tree2:{h.hexdigest()}"
 
 
 def _remote_closure(state) -> dict | None:
@@ -444,7 +466,7 @@ def _measure(
     """→ (ключ, closure, текст) или код выхода (2 — отказ шага, 6 — ключ измерен)."""
     root = Path(state.target_dir)
     remote = _remote_closure(state)
-    cands = [_tree_key(bundle_pin, root)]
+    cands = [_tree_key(bundle_pin, root, product_sha)]
     prev_roots = _load(run_id).get("roots")
     if prev_roots:
         cands.insert(0, _key(bundle_pin, root, prev_roots))
@@ -532,7 +554,11 @@ def _measure(
         beh_status = {b["id"].split(":", 1)[1]: b["status"] for b in response["beh"]}
         result = criteria_check.outcome(graph, beh_status)
         closure = result.closure
-    key = _key(bundle_pin, root, roots) if roots else _tree_key(bundle_pin, root)
+    key = (
+        _key(bundle_pin, root, roots)
+        if roots
+        else _tree_key(bundle_pin, root, product_sha)
+    )
     known = _known(run_id, [key])
     if known is not None:
         print(
