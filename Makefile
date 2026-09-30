@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks accept-pr preflight edge-check selfcheck selfcheck-dogfood criteria-close
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks accept-pr preflight edge-check selfcheck selfcheck-dogfood criteria-close conductor
 
 help:
 	@echo "Цели:"
@@ -105,5 +105,6 @@ accept-pr: ; @uv run --frozen python -m governance.accept_pr $(ARGS)
 human-merge: ; @sh ./human-merge.sh $(ARGS)
 preflight: ; @uv run --frozen python ./spec_run_preflight.py $(ARGS)
 edge-check:  ; @uv run --frozen python ./edge_check.py $(ARGS)
+conductor: ; @uv run --frozen python -m conductor $(ARGS) --root $(WORKSPACE)
 selfcheck: ; @uv run --frozen --group selfcheck python -m selfcheck --workspace $(WORKSPACE) --manifest $(MANIFEST) $(ARGS)
 selfcheck-dogfood: ; @SELFCHECK_REQUIRE_TOOLS=1 uv run --frozen --group selfcheck pytest tests/selfcheck -q && uv run --frozen --group selfcheck python -m selfcheck --workspace $(WORKSPACE) --manifest $(MANIFEST) --repo devtools --out out/selfcheck-dogfood --path 'selfcheck/**' --path 'tests/selfcheck/**' --path Makefile --path pyproject.toml
