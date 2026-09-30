@@ -95,6 +95,10 @@ select = [
     # (#461).
     "RUF059", "RUF022", "C408",
     "BLE001", "S112",
+    # находки selfcheck 2026-09-30 (TASK-003 spec-runner): мелкие баги
+    # исправлены по месту — zip со strict= по построению длин, raise … from,
+    # переменные цикла; класс не должен вернуться
+    "B905", "B904", "B007", "PLW2901",
 ]
 
 [tool.ruff.lint.per-file-ignores]
