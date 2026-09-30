@@ -9181,10 +9181,12 @@ def _executed(text: str, task_id: str) -> str:
     for line in text.split("\n"):
         if line.startswith("### TASK-"):
             inside = line.startswith(f"### {task_id}:")
+            out.append(line)
         elif inside:
-            line = line.replace("| TODO", "| ✅ DONE")
-            line = line.replace("- [ ] ", "- [x] ")
-        out.append(line)
+            done = line.replace("| TODO", "| ✅ DONE")
+            out.append(done.replace("- [ ] ", "- [x] "))
+        else:
+            out.append(line)
     return "\n".join(out)
 
 

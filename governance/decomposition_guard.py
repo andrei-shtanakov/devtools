@@ -564,8 +564,8 @@ def _parse_beh_binding_records(
         end = heads[idx + 1].start() if idx + 1 < len(heads) else len(text)
         block = text[match.start() : end]
         checked = None
-        for checked in _BEH_CHECKED_RE.finditer(block):
-            pass
+        for found in _BEH_CHECKED_RE.finditer(block):
+            checked = found
         if checked is None:
             result[match.group(1)] = (None, None, None)
         else:
@@ -950,7 +950,7 @@ def graph_findings(
             # круга 4): правило стоков действует только на задачу,
             # сводящую две и более чужих группы
             continue
-        for g, deps in by_group.items():
+        for g in by_group:
             sinks = {
                 member for member in groups[g] if not (dependents[member] & groups[g])
             }

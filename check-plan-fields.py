@@ -98,7 +98,8 @@ except ImportError:  # pragma: no cover - exercised by humans, not the suite
         "The other devtools scripts stay stdlib/Python 3.11; only this one moved "
         "(ADR-ECO-005 PF-7).\n"
     )
-    raise SystemExit(2)
+    # исходный ImportError — шум: причина и лекарство уже в сообщении выше
+    raise SystemExit(2) from None
 
 # devtools severity policy — a thin projection of the package's stable codes.
 # A canonical stale (stable @id identity) is the only build-failing error; every
