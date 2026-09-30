@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-29-conductor-design.md` (rev 11). Срез 0 — §11: §2, §3 (без модели), §4, §5.2–5.3 как выдача, §7.1–7.2, таймер на уровне 0, `roadmap.toml` в зонтике.
 
-**План rev 7** — по ручному разбору верха очереди и девяти вопросов на живом прогоне с `fetch` 2026-09-30 (спека rev 11): 0 из 9 вопросов требовали решения владельца, а настоящий следующий шаг к вехе (драфт планов `spec-runner!620`) в очереди не был виден. Исправлено механизмами, не поштучно: одна канонизация концов рёбер, включая ссылку репо на собственный пункт прежним именем (plan-fields её не резолвит) и `repo#N` на номер PR; legacy-заявка без метки `inbox` распознаётся только по протоколу целиком; `from:` закрытого `completed` запроса — история, ожидание по `from:` — на самом запросе; ранг PR — по `implements`, упоминание в заголовке — подсказка без ранга; три блока `status` (веха / сигнал / сводка бэклога, `status <repo>` раскрывает); вопрос владельцу — по положительному критерию, признак решения и отсутствие `@owner` — пометки позиции; `last_line_change_at` вместо «начала ожидания», неизвестный возраст — `None`. Регрессия — шаг 3b Task 12. **План rev 6 — pair converged** (круг 5: новых blocker/major нет; единственный minor — алиас `make conductor` обходил `read_manifest` — исправлен). **Rev 5** — по кругу 4 ревью пары (1 major, 2 minor): манифест читается **после** `fetch` зонтика (`read_manifest`; сбой fetch — деградация в `history`, не отказ), иначе свежий состав флота не проверен; вопрос по находке `GR-SHIPPED-OPEN` задаётся по унаследованному рангу (`rank_of`); `GR-SLUG-MATCH` для наследия inbox — информационная находка без вопроса: slug и есть связь принятия по ADR-ECO-006 D2 (спека §6.4), а живой прогон показал 8 вопросов-шумов «подтвердите принятие» — отступление от minor-замечания круга 4 названо в спеке §3.3.4. **Rev 4** — по кругу 3 ревью пары (3 major, 2 minor), класс fail-closed закрыт механизмом: каждое обязательное чтение и каждое усечение (соседние версии пути, неизвестный репо в `exists:`, список файлов и ревью PR) регистрируется в источнике `history`; CI и одобрение PR — об одном head SHA, иначе чтение PR — сбой; манифест читается с `origin` зонтика и входит в источники с SHA; `GR-ORPHAN-REQUEST` для inbox без `from:` и с неизвестным репо, `GR-SLUG-MATCH` для склейки без `@source-ref`; вопрос `GR-SHIPPED-OPEN` — только в фокусе; `status` печатает те же вопросы, что снимок. **Rev 3** — по кругу 2 ревью пары (7 major, 1 minor): одобрение PR на head SHA через GraphQL и выбор actor мержа по `Мерж: человек`/authority-root; ошибки вспомогательных чтений делают граф `partial`; начало ожидания — `git blame` строки пункта; `focus.epic` проверяется на тип; вопросы владельцу — по причине ожидания; `plan` ограничен `roadmap.autonomy`; `record` возвращает 4 при `RM-INVALID`. **Rev 2** — по кругу 1 ревью пары (1 blocker, 13 major, 1 minor). Листинги кода перед отдачей на ревью извлечены во временный каталог, прогнаны тестами, ruff и pyrefly на окружении devtools и живым прогоном на флоте (только чтение) — см. «Проверка плана исполнением» в конце. Живой прогон изменил два решения: обнаружение GitHub — только открытые (окно закрытых упиралось в потолок поиска), ожидание прозаического `@trigger` — `wait_condition`, не вопрос владельцу.
+**План rev 7** — по ручному разбору верха очереди и девяти вопросов на живом прогоне с `fetch` 2026-09-30 (спека rev 11): 0 из 9 вопросов требовали решения владельца, а настоящий следующий шаг к вехе (драфт планов `spec-runner!620`) в очереди не был виден. Исправлено механизмами, не поштучно: одна канонизация концов рёбер, включая ссылку репо на собственный пункт прежним именем (plan-fields её не резолвит) и `repo#N` на номер PR; legacy-заявка без метки `inbox` распознаётся только по протоколу целиком; `from:` закрытого `completed` запроса — история, ожидание по `from:` — на самом запросе; ранг PR — по `implements`, упоминание в заголовке — подсказка без ранга; три блока `status` (веха / сигнал / сводка бэклога, `status <repo>` раскрывает); вопрос владельцу — по положительному критерию, признак решения и отсутствие `@owner` — пометки позиции; `last_line_change_at` вместо «начала ожидания», неизвестный возраст — `None`. Регрессия — шаг 3b Task 12. После ребейза на `origin/master` (2026-09-30, +11 коммитов: `pyproject.toml`, ruff в CI, общий `tests/conftest.py`) листинги перепроверены в свежем дереве devtools; по итоговому отзыву рецензента добавлены осторожная формулировка позиции вехи с подсказкой и строка «вне фокуса: PR, готовые к рассмотрению мержа» (сценарии 55–56). **План rev 6 — pair converged** (круг 5: новых blocker/major нет; единственный minor — алиас `make conductor` обходил `read_manifest` — исправлен). **Rev 5** — по кругу 4 ревью пары (1 major, 2 minor): манифест читается **после** `fetch` зонтика (`read_manifest`; сбой fetch — деградация в `history`, не отказ), иначе свежий состав флота не проверен; вопрос по находке `GR-SHIPPED-OPEN` задаётся по унаследованному рангу (`rank_of`); `GR-SLUG-MATCH` для наследия inbox — информационная находка без вопроса: slug и есть связь принятия по ADR-ECO-006 D2 (спека §6.4), а живой прогон показал 8 вопросов-шумов «подтвердите принятие» — отступление от minor-замечания круга 4 названо в спеке §3.3.4. **Rev 4** — по кругу 3 ревью пары (3 major, 2 minor), класс fail-closed закрыт механизмом: каждое обязательное чтение и каждое усечение (соседние версии пути, неизвестный репо в `exists:`, список файлов и ревью PR) регистрируется в источнике `history`; CI и одобрение PR — об одном head SHA, иначе чтение PR — сбой; манифест читается с `origin` зонтика и входит в источники с SHA; `GR-ORPHAN-REQUEST` для inbox без `from:` и с неизвестным репо, `GR-SLUG-MATCH` для склейки без `@source-ref`; вопрос `GR-SHIPPED-OPEN` — только в фокусе; `status` печатает те же вопросы, что снимок. **Rev 3** — по кругу 2 ревью пары (7 major, 1 minor): одобрение PR на head SHA через GraphQL и выбор actor мержа по `Мерж: человек`/authority-root; ошибки вспомогательных чтений делают граф `partial`; начало ожидания — `git blame` строки пункта; `focus.epic` проверяется на тип; вопросы владельцу — по причине ожидания; `plan` ограничен `roadmap.autonomy`; `record` возвращает 4 при `RM-INVALID`. **Rev 2** — по кругу 1 ревью пары (1 blocker, 13 major, 1 minor). Листинги кода перед отдачей на ревью извлечены во временный каталог, прогнаны тестами, ruff и pyrefly на окружении devtools и живым прогоном на флоте (только чтение) — см. «Проверка плана исполнением» в конце. Живой прогон изменил два решения: обнаружение GitHub — только открытые (окно закрытых упиралось в потолок поиска), ожидание прозаического `@trigger` — `wait_condition`, не вопрос владельцу.
 
 ## Global Constraints
 
@@ -4871,12 +4871,22 @@ def render_status(result: Result, top: int = 15, repo: str | None = None) -> str
         return "\n".join(lines)
     goals = [f.goal for f in result.roadmap.focus if f.goal]
     lines.append("продвижение вехи (" + ", ".join(goals) + "):")
+    shown: set[str] = set()
     for e in (e for e in entries if result.blocks[e.node_id] == "goal"):
         lines += _position(result, e)
+        prs = [h.pr for h in result.hints if h.target == e.node_id]
+        if prs and result.assessments[e.node_id].need == "implement":
+            shown.add(e.node_id)
+            lines.append(
+                "       реализация — следующий вид работы; готовность к запуску не "
+                "подтверждена; возможный предварительный шаг — рассмотрение "
+                + ", ".join(prs)
+            )
     lines += [
         f"  возможный следующий шаг: {h.pr} упоминает {h.target} — связь не "
         "подтверждена (оформить: Closes / @id: в теле PR / @blocked_by пункта)"
         for h in result.hints
+        if h.target not in shown
     ]
     lines.append("другие действия фокуса:")
     for e in [e for e in entries if result.blocks[e.node_id] == "signal"][:top]:
@@ -4885,6 +4895,16 @@ def render_status(result: Result, top: int = 15, repo: str | None = None) -> str
     lines += _backlog(
         result, [e for e in entries if result.blocks[e.node_id] == "backlog"]
     )
+    # дешёвое действие — не приоритет и не разрешение на мерж: ранг не растёт
+    ready = [
+        e.node_id
+        for e in result.queue
+        if e.rank is None and result.assessments[e.node_id].need == "merge"
+    ]
+    if ready:
+        lines.append(
+            "вне фокуса: PR, готовые к рассмотрению мержа: " + ", ".join(ready)
+        )
     lines += ["цикл: " + " → ".join(c) for c in result.cycles]
     stale = sum(w.reason == "stale" for w in result.waits)
     done = sum(w.verdict == "satisfied" for w in result.waits)
@@ -5251,6 +5271,29 @@ def test_mentioning_pr_is_a_hint_without_rank() -> None:
     assert "возможный следующий шаг: b!5 упоминает b#3" in render_status(result)
 
 
+def test_goal_item_with_hint_is_not_called_ready_to_launch() -> None:
+    goal = {
+        "a": "- [ ] g @owner:github:own @id:goal @epic:eco.focus1 "
+        "@blocked_by:todo://b/work\n",
+        "b": "- [ ] w @owner:github:own @id:work\n",
+    }
+    plan_pr = record("b", 5, is_pr=True, title="docs: plan for todo://b/work")
+    text = render_status(evaluate(inputs(goal, [plan_pr]), 0))
+    assert "готовность к запуску не подтверждена" in text
+    assert "рассмотрение b!5" in text
+    assert "возможный следующий шаг: b!5" not in text
+
+
+def test_approved_pr_outside_focus_is_one_compact_line() -> None:
+    ready = record(
+        "c", 8, is_pr=True, approved_at_head=True, ci="green", files=["x.py"]
+    )
+    result = evaluate(inputs({}, [ready]), 0)
+    entry = next(e for e in result.queue if e.node_id == "c!8")
+    assert entry.rank is None and result.blocks["c!8"] == "backlog"
+    assert "вне фокуса: PR, готовые к рассмотрению мержа: c!8" in render_status(result)
+
+
 # 53 — блоки выдачи: сворачивание не выбрасывает позиции
 
 
@@ -5592,7 +5635,7 @@ Expected: ожидание вехи ведёт к пункту производ�
 
 Перед ревью листинги кода извлечены из этого файла скриптом (блоки после строки вида `` `путь`: ``; для `conductor/__main__.py` — последний, итоговый) во временный каталог вне репо, в раскладке devtools. Результат на 2026-09-29:
 
-- `pytest tests/conductor` на `.venv` devtools — **95 passed** (rev 7; 81 — rev 5); мутационная проверка правок rev 7 — 12 из 12 откатов ловятся тестами (первый заход дал 3 живучих: фикстура маскировала дефект канонизации — plan-fields резолвит прежнее имя из чужого репо, но не ссылку репо на собственный пункт; тест переписан под живую форму);
+- `pytest tests/conductor` — **97 passed** в свежем дереве devtools после ребейза на `origin/master` 2026-09-30 (`git archive HEAD` + листинги, `uv sync --frozen`, общий `tests/conftest.py` в силе; ruff check/format по настройкам master и pyrefly — чисто; 95 — rev 7 до ребейза; 81 — rev 5); мутационная проверка правок rev 7 — 12 из 12 откатов ловятся тестами (первый заход дал 3 живучих: фикстура маскировала дефект канонизации — plan-fields резолвит прежнее имя из чужого репо, но не ссылку репо на собственный пункт; тест переписан под живую форму);
 - `ruff check` и `ruff format --check` с `pyproject.toml` devtools — чисто (листинги в плане — уже отформатированный вывод ruff);
 - `pyrefly check conductor` — 0 errors; `shellcheck deploy/conductor/setup.sh` — чисто; `python -m conductor --selftest` — ok.
 
