@@ -8,9 +8,9 @@
 
 **Tech Stack:** Python ≥ 3.12 (uv-окружение devtools), пакет `plan-fields` (пин в `pyproject.toml`), stdlib, `gh` и `git` как внешние процессы, pytest, jsonschema (dev-группа).
 
-**Spec:** `docs/superpowers/specs/2026-09-29-conductor-design.md` (rev 10). Срез 0 — §11: §2, §3 (без модели), §4, §5.2–5.3 как выдача, §7.1–7.2, таймер на уровне 0, `roadmap.toml` в зонтике.
+**Spec:** `docs/superpowers/specs/2026-09-29-conductor-design.md` (rev 11). Срез 0 — §11: §2, §3 (без модели), §4, §5.2–5.3 как выдача, §7.1–7.2, таймер на уровне 0, `roadmap.toml` в зонтике.
 
-**План rev 6 — pair converged** (круг 5: новых blocker/major нет; единственный minor — алиас `make conductor` обходил `read_manifest` — исправлен). **Rev 5** — по кругу 4 ревью пары (1 major, 2 minor): манифест читается **после** `fetch` зонтика (`read_manifest`; сбой fetch — деградация в `history`, не отказ), иначе свежий состав флота не проверен; вопрос по находке `GR-SHIPPED-OPEN` задаётся по унаследованному рангу (`rank_of`); `GR-SLUG-MATCH` для наследия inbox — информационная находка без вопроса: slug и есть связь принятия по ADR-ECO-006 D2 (спека §6.4), а живой прогон показал 8 вопросов-шумов «подтвердите принятие» — отступление от minor-замечания круга 4 названо в спеке §3.3.4. **Rev 4** — по кругу 3 ревью пары (3 major, 2 minor), класс fail-closed закрыт механизмом: каждое обязательное чтение и каждое усечение (соседние версии пути, неизвестный репо в `exists:`, список файлов и ревью PR) регистрируется в источнике `history`; CI и одобрение PR — об одном head SHA, иначе чтение PR — сбой; манифест читается с `origin` зонтика и входит в источники с SHA; `GR-ORPHAN-REQUEST` для inbox без `from:` и с неизвестным репо, `GR-SLUG-MATCH` для склейки без `@source-ref`; вопрос `GR-SHIPPED-OPEN` — только в фокусе; `status` печатает те же вопросы, что снимок. **Rev 3** — по кругу 2 ревью пары (7 major, 1 minor): одобрение PR на head SHA через GraphQL и выбор actor мержа по `Мерж: человек`/authority-root; ошибки вспомогательных чтений делают граф `partial`; начало ожидания — `git blame` строки пункта; `focus.epic` проверяется на тип; вопросы владельцу — по причине ожидания; `plan` ограничен `roadmap.autonomy`; `record` возвращает 4 при `RM-INVALID`. **Rev 2** — по кругу 1 ревью пары (1 blocker, 13 major, 1 minor). Листинги кода перед отдачей на ревью извлечены во временный каталог, прогнаны тестами, ruff и pyrefly на окружении devtools и живым прогоном на флоте (только чтение) — см. «Проверка плана исполнением» в конце. Живой прогон изменил два решения: обнаружение GitHub — только открытые (окно закрытых упиралось в потолок поиска), ожидание прозаического `@trigger` — `wait_condition`, не вопрос владельцу.
+**План rev 7** — по ручному разбору верха очереди и девяти вопросов на живом прогоне с `fetch` 2026-09-30 (спека rev 11): 0 из 9 вопросов требовали решения владельца, а настоящий следующий шаг к вехе (драфт планов `spec-runner!620`) в очереди не был виден. Исправлено механизмами, не поштучно: одна канонизация концов рёбер, включая ссылку репо на собственный пункт прежним именем (plan-fields её не резолвит) и `repo#N` на номер PR; legacy-заявка без метки `inbox` распознаётся только по протоколу целиком; `from:` закрытого `completed` запроса — история, ожидание по `from:` — на самом запросе; ранг PR — по `implements`, упоминание в заголовке — подсказка без ранга; три блока `status` (веха / сигнал / сводка бэклога, `status <repo>` раскрывает); вопрос владельцу — по положительному критерию, признак решения и отсутствие `@owner` — пометки позиции; `last_line_change_at` вместо «начала ожидания», неизвестный возраст — `None`. Регрессия — шаг 3b Task 12. **План rev 6 — pair converged** (круг 5: новых blocker/major нет; единственный minor — алиас `make conductor` обходил `read_manifest` — исправлен). **Rev 5** — по кругу 4 ревью пары (1 major, 2 minor): манифест читается **после** `fetch` зонтика (`read_manifest`; сбой fetch — деградация в `history`, не отказ), иначе свежий состав флота не проверен; вопрос по находке `GR-SHIPPED-OPEN` задаётся по унаследованному рангу (`rank_of`); `GR-SLUG-MATCH` для наследия inbox — информационная находка без вопроса: slug и есть связь принятия по ADR-ECO-006 D2 (спека §6.4), а живой прогон показал 8 вопросов-шумов «подтвердите принятие» — отступление от minor-замечания круга 4 названо в спеке §3.3.4. **Rev 4** — по кругу 3 ревью пары (3 major, 2 minor), класс fail-closed закрыт механизмом: каждое обязательное чтение и каждое усечение (соседние версии пути, неизвестный репо в `exists:`, список файлов и ревью PR) регистрируется в источнике `history`; CI и одобрение PR — об одном head SHA, иначе чтение PR — сбой; манифест читается с `origin` зонтика и входит в источники с SHA; `GR-ORPHAN-REQUEST` для inbox без `from:` и с неизвестным репо, `GR-SLUG-MATCH` для склейки без `@source-ref`; вопрос `GR-SHIPPED-OPEN` — только в фокусе; `status` печатает те же вопросы, что снимок. **Rev 3** — по кругу 2 ревью пары (7 major, 1 minor): одобрение PR на head SHA через GraphQL и выбор actor мержа по `Мерж: человек`/authority-root; ошибки вспомогательных чтений делают граф `partial`; начало ожидания — `git blame` строки пункта; `focus.epic` проверяется на тип; вопросы владельцу — по причине ожидания; `plan` ограничен `roadmap.autonomy`; `record` возвращает 4 при `RM-INVALID`. **Rev 2** — по кругу 1 ревью пары (1 blocker, 13 major, 1 minor). Листинги кода перед отдачей на ревью извлечены во временный каталог, прогнаны тестами, ruff и pyrefly на окружении devtools и живым прогоном на флоте (только чтение) — см. «Проверка плана исполнением» в конце. Живой прогон изменил два решения: обнаружение GitHub — только открытые (окно закрытых упиралось в потолок поиска), ожидание прозаического `@trigger` — `wait_condition`, не вопрос владельцу.
 
 ## Global Constraints
 
@@ -22,10 +22,11 @@
 - Модель не вызывается: проза `@trigger` → `unknown`; структурные формы — `date>=YYYY-MM-DD`, `exists:<repo>:<path>` (§3.4 rev 10).
 - Потолок уровня: `0` при `partial` или `RM-INVALID`, иначе `min(--level, roadmap.autonomy)`; `plan` — симуляция управляющего писателя (личность хоста не проверяется, потому что `plan` не пишет), `run` в срезе 0 всегда 0.
 - Коды выхода: 0 — выполнено; 2 — аргументы CLI; 3 — не собран ни один источник или нет манифеста; 4 — `RM-INVALID` для любой команды, `run` при этом пишет снимок (§7.2 rev 10).
-- Вопрос владельцу — только по позиции с рангом (§5.7 rev 10).
+- Вопрос владельцу — только по позиции с рангом (§5.7 rev 10) и только по положительному критерию: незавершённый выбор, который нельзя разрешить из документов, и ответ меняет следующий шаг (§5.7 rev 11). Вердикт делегируемости `no` — причина позиции, вопросом становится только на уровне запуска.
+- Выдача `status` — три блока (§4.4 rev 11); сворачивание — только представление, снимок хранит все позиции с полем `block`.
 - Делегируемость в срезе 0 никогда не `yes`: путь authority-root не проверяется до среза 3, поэтому лучший исход — `unverified`, действие `launch?` (§5.2, I5).
 - Python ≥ 3.12, запуск через `uv run --frozen`; строки ≤ 88; type hints; ruff и pyrefly чистые.
-- Имена репо — канонические ключи манифеста плюс зонтик `ai-orchestrators-workspace`; GitHub-имена (`prograph-vault`) нормализуются к ключам (`ecosystem-kb`) на всех концах рёбер (§3.1).
+- Имена репо — канонические ключи манифеста плюс зонтик `ai-orchestrators-workspace`; GitHub-имена и прежние имена (`prograph-vault`) нормализуются к ключам (`ecosystem-kb`) одной таблицей на всех концах рёбер, включая `todo://` в TODO и ссылки репо на собственные пункты (§3.1 rev 11).
 
 **Отступление от §12 спеки, названное явно:** CLI — `conductor/__main__.py` (`python -m conductor`): файл `conductor.py` и пакет `conductor/` в корне devtools конфликтуют при импорте. Паттерн тот же, что у `selfcheck/`.
 
@@ -1573,7 +1574,7 @@ git commit -m "feat(conductor): GitHub-источник с проверкой п
 **Interfaces:**
 - Consumes: Tasks 1, 3; `plan_fields.parse_fleet`, `plan_fields.RepoInput`
 - Produces:
-  - `Graph(nodes, edges, canon, records, todo_sha, sources, findings, partial)`; методы `resolve(node_id) -> str`, `members(node_id) -> set[str]`, `out(node_id, type)`, `into(node_id, type)`, `epic_of(node_id) -> str | None`
+  - `Graph(nodes, edges, canon, records, todo_sha, sources, findings, partial)`; методы `resolve(node_id) -> str`, `members(node_id) -> set[str]`, `target(edge) -> str` (конец ребра в графе работ: закрытый запрос по `from:` — сам запрос), `out(node_id, type)`, `into(node_id, type)`, `epic_of(node_id) -> str | None`; `FROM_ORIGIN`
   - `build_graph(inputs: Inputs) -> Graph` (индекс — из `inputs.manifest_text`)
   - `field_value(body, name) -> str | None`
   - `normalizer(inputs) -> dict[str, str]` — GitHub-имя и ключ → ключ
@@ -1842,10 +1843,11 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'conductor.graph'`
 ```python
 """Единый граф: узлы TODO/issue/PR, типизированные рёбра, склейка (§3.1–3.2).
 
-Все концы рёбер — канонические ключи манифеста: GitHub-имя (`prograph-vault`)
-нормализуется к ключу (`ecosystem-kb`). Склейка accepted_as делает issue и
-пункт одним узлом работы: resolve() даёт представителя (пункт), members() —
-всё множество.
+Все концы рёбер — канонические ключи манифеста: GitHub-имя и прежнее имя
+(`prograph-vault`) нормализуются к ключу (`ecosystem-kb`) одной таблицей для
+всех источников; `repo#N` на номер PR — узел `repo!N` (§3.1 rev 11). Склейка
+accepted_as делает issue и пункт одним узлом работы: resolve() даёт
+представителя (пункт), members() — всё множество.
 """
 
 from __future__ import annotations
@@ -1872,8 +1874,12 @@ from conductor.model import (
 REF_RE = re.compile(r"(?<![\w/.-])([a-z0-9][a-z0-9-]*)#(\d+)\b")
 TODO_REF_RE = re.compile(r"todo://([a-z0-9][a-z0-9-]*)/([a-z0-9][a-z0-9._-]{0,63})")
 TODO_URI_RE = re.compile(r"^todo://[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9._-]{0,63}$")
+SELF_REF_RE = re.compile(r"(?<![\w/#.-])#(\d+)\b")
 LEGACY_ISSUE_RE = re.compile(r"^([a-z0-9][a-z0-9-]*)#(\d+)$")
 PR_ITEM_RE = re.compile(r"@id:([a-z0-9][a-z0-9._-]{0,63})")
+ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+FROM_RE = re.compile(r"^([a-z0-9][a-z0-9-]*)(?:#([a-z0-9][a-z0-9._-]{0,63}))?(?:\s|$)")
+FROM_ORIGIN = "inbox:from"
 
 
 @dataclass
@@ -1906,6 +1912,14 @@ class Graph:
         """Входящие рёбра типа kind."""
         return [e for e in self.edges if e.dst == node_id and e.type == kind]
 
+    def target(self, edge: Edge) -> str:
+        """Конец ребра в графе работ: открытый запрос — его склеенный пункт
+        (цикл и ранг идут через работу), закрытый по from: — сам запрос."""
+        node = self.nodes.get(edge.dst)
+        if edge.origin == FROM_ORIGIN and node is not None and not node.is_open:
+            return edge.dst
+        return self.resolve(edge.dst)
+
     def epic_of(self, node_id: str) -> str | None:
         """Эпик узла работы (у принятого issue — эпик пункта)."""
         node = self.nodes.get(self.resolve(node_id))
@@ -1932,6 +1946,21 @@ def _norm_ref(ref: str, norm: dict[str, str]) -> str | None:
     return None
 
 
+def _canon_uri(uri: str, norm: dict[str, str]) -> str:
+    """todo://<имя>/<id> → todo://<ключ>/<id>; незнакомое имя — как есть."""
+    if match := TODO_REF_RE.fullmatch(uri):
+        return item_id(norm.get(match.group(1), match.group(1)), match.group(2))
+    return uri
+
+
+def _pr_aware(node_id: str, nodes: dict[str, Node]) -> str:
+    """repo#N, который на деле PR, — узел repo!N (один ряд номеров GitHub)."""
+    repo, sep, number = node_id.partition("#")
+    if sep and node_id not in nodes and (pr := f"{repo}!{number}") in nodes:
+        return pr
+    return node_id
+
+
 def _item_nodes(snapshot: dict[str, Any]) -> dict[str, Node]:
     nodes: dict[str, Node] = {}
     for raw in snapshot["nodes"]:
@@ -1952,9 +1981,10 @@ def _item_nodes(snapshot: dict[str, Any]) -> dict[str, Node]:
     return nodes
 
 
-def _todo_edges(snapshot: dict[str, Any]) -> list[Edge]:
+def _todo_edges(snapshot: dict[str, Any], norm: dict[str, str]) -> list[Edge]:
     """depends_on из references: plan-fields не строит edges на несуществующий
-    пункт (resolved_target = None), а висячее ожидание должно остаться видимым."""
+    пункт (resolved_target = None), а висячее ожидание должно остаться видимым.
+    Концы канонизируются; исходная запись — в origin."""
     edges: list[Edge] = []
     for ref in snapshot["references"]:
         if ref["kind"] != "blocked_by":
@@ -1962,11 +1992,16 @@ def _todo_edges(snapshot: dict[str, Any]) -> list[Edge]:
         raw = ref.get("raw_ref") or ""
         target = ref.get("resolved_target") or (raw if TODO_URI_RE.match(raw) else None)
         legacy = ref.get("legacy_blocker_ref") or ""
-        if target is None and (match := LEGACY_ISSUE_RE.match(legacy)):
-            target = issue_id(match.group(1), int(match.group(2)))
+        if target is None and LEGACY_ISSUE_RE.match(legacy):
+            target = _norm_ref(legacy, norm) or legacy
         if target is not None:
             edges.append(
-                Edge(ref["source_node_id"], target, "depends_on", f"todo:{raw}")
+                Edge(
+                    ref["source_node_id"],
+                    _canon_uri(target, norm),
+                    "depends_on",
+                    f"todo:{raw}",
+                )
             )
     return edges
 
@@ -2017,7 +2052,27 @@ def _gh_edges(
         ]
     if "inbox" in rec.get("labels", []):
         edges += _inbox_edges(rec, me, nodes, norm, findings)
+    elif _legacy_protocol(rec, nodes, norm):
+        findings.append(Finding("GR-INBOX-NO-LABEL", "info", me, "нет метки inbox"))
+        edges += _inbox_edges(rec, me, nodes, norm, findings)
     return edges
+
+
+def _legacy_protocol(
+    rec: dict[str, Any], nodes: dict[str, Node], norm: dict[str, str]
+) -> bool:
+    """Заявка без метки — только распознанный протокол целиком (§3.3 rev 11):
+    slug по грамматике @id, from: с известного репо, пункт @id = slug есть."""
+    if rec["is_pr"]:
+        return False
+    slug = field_value(rec.get("body", ""), "slug") or ""
+    sender = FROM_RE.match(field_value(rec.get("body", ""), "from") or "")
+    return (
+        ID_RE.fullmatch(slug) is not None
+        and sender is not None
+        and sender.group(1) in norm
+        and item_id(rec["repo"], slug) in nodes
+    )
 
 
 def _inbox_edges(
@@ -2048,7 +2103,8 @@ def _inbox_edges(
                 )
             )
     sender = field_value(rec["body"], "from") or ""
-    repo, _, waiting = sender.partition("#")
+    match = FROM_RE.match(sender)
+    repo, waiting = (match.group(1), match.group(2)) if match else ("", None)
     orphan = None
     if not sender:
         orphan = "нет from:"
@@ -2056,8 +2112,9 @@ def _inbox_edges(
         orphan = f"from: {sender} — неизвестный репо"
     elif waiting and item_id(norm[repo], waiting) not in nodes:
         orphan = f"from: {sender} — ждущего пункта нет"
-    elif waiting:
-        edges.append(Edge(item_id(norm[repo], waiting), me, "depends_on", "inbox:from"))
+    elif waiting and nodes[me].closed_as != "completed":
+        # закрытый как completed запрос ответил: ребро — история, не ожидание
+        edges.append(Edge(item_id(norm[repo], waiting), me, "depends_on", FROM_ORIGIN))
     if orphan is not None:
         findings.append(Finding("GR-ORPHAN-REQUEST", "warning", me, orphan))
     return edges
@@ -2065,7 +2122,7 @@ def _inbox_edges(
 
 def _text_of(rec: dict[str, Any]) -> str:
     comments = "\n".join(c["body"] for c in rec.get("comments", []))
-    return rec.get("body", "") + "\n" + comments
+    return "\n".join((rec.get("title", ""), rec.get("body", ""), comments))
 
 
 def _mentions(
@@ -2074,6 +2131,8 @@ def _mentions(
     me = _gh_id(rec)
     text = _text_of(rec)
     targets = {issue_id(norm[r], int(n)) for r, n in REF_RE.findall(text) if r in norm}
+    # «(#603)» в заголовке — ссылка своего репо (docs(#603): …)
+    targets |= {issue_id(rec["repo"], int(n)) for n in SELF_REF_RE.findall(text)}
     targets |= {item_id(norm[r], i) for r, i in TODO_REF_RE.findall(text) if r in norm}
     return [
         Edge(me, t, "mentions", "body")
@@ -2127,15 +2186,17 @@ def build_graph(inputs: Inputs) -> Graph:
     snapshot = pf.parse_fleet(repo_inputs, manifest_index(inputs.manifest_text))
     norm = normalizer(inputs)
     nodes = _item_nodes(snapshot)
-    edges = _todo_edges(snapshot)
+    edges = _todo_edges(snapshot, norm)
     findings: list[Finding] = []
     records = {_gh_id(rec): rec for rec in inputs.gh_records}
     nodes.update({node_id: _gh_node(rec) for node_id, rec in records.items()})
     for rec in inputs.gh_records:
         edges += _gh_edges(rec, nodes, norm, findings)
+    edges = [Edge(e.src, _pr_aware(e.dst, nodes), e.type, e.origin) for e in edges]
     strong = {(e.src, e.dst) for e in edges}
     for rec in inputs.gh_records:
         edges += _mentions(rec, strong, norm)
+    edges = [Edge(e.src, _pr_aware(e.dst, nodes), e.type, e.origin) for e in edges]
     sources = _sources(inputs)
     return Graph(
         nodes=nodes,
@@ -2170,7 +2231,7 @@ git commit -m "feat(conductor): единый граф — рёбра, склей
 
 **Interfaces:**
 - Consumes: `Graph` (6), `Inputs` (3)
-- Produces: `prereq_state(graph, inputs, prereq_id) -> "done"|"cancelled"|"open"|"missing"`; `Wait(consumer, prereq, verdict, reason, evidence, since, moved)`; `evaluate_waits(graph, inputs, now, stale_after_days) -> list[Wait]`; `waits_of(waits, consumer)`; `last_movement(graph, inputs, node_id) -> str | None`; `DATE_RE`, `EXISTS_RE`.
+- Produces: `prereq_state(graph, inputs, prereq_id) -> "done"|"cancelled"|"open"|"missing"`; `Wait(consumer, prereq, verdict, reason, evidence, last_line_change_at, moved)`; `evaluate_waits(graph, inputs, now, stale_after_days) -> list[Wait]`; `waits_of(waits, consumer)`; `last_movement(graph, inputs, node_id) -> str | None`; `DATE_RE`, `EXISTS_RE`.
 
 Семантика (§3.4): потребитель и предпосылка — через `graph.resolve`; `cancelled` — отсутствующий пункт с `@id` в истории TODO (`inputs.history`), issue `not_planned`, PR без мержа; `stale` — `pending`, последнее движение предпосылки (коммит с `@id`, `updated_at` и комментарии её тредов, `updated_at` открытых PR, реализующих любой её член) старше порога **и** само ожидание не моложе порога; неизвестная дата движения — не застой (ложный пинок хуже пропущенного).
 
@@ -2346,8 +2407,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from conductor.graph import Graph
+from conductor.graph import FROM_ORIGIN, Graph
 from conductor.inputs import Inputs
+from conductor.model import Edge
 
 PrereqState = Literal["done", "cancelled", "open", "missing"]
 Verdict = Literal["satisfied", "pending", "unknown"]
@@ -2358,14 +2420,18 @@ VERSION_RE = re.compile(r"^v(\d+)$")
 
 @dataclass(frozen=True)
 class Wait:
-    """Ожидание consumer → prereq (prereq=None — условие @trigger)."""
+    """Ожидание consumer → prereq (prereq=None — условие @trigger).
+
+    last_line_change_at — дата последней правки строки ожидания (git blame):
+    приближение возраста, не момент начала ожидания (§3.4 rev 11).
+    """
 
     consumer: str
     prereq: str | None
     verdict: Verdict
     reason: str
     evidence: str
-    since: str | None
+    last_line_change_at: str | None
     moved: str | None
 
 
@@ -2414,15 +2480,16 @@ def _evidence(graph: Graph, prereq_id: str) -> str:
 def _dependency_wait(
     graph: Graph,
     inputs: Inputs,
-    src: str,
-    dst: str,
+    edge: Edge,
     raw: str,
     now: str,
     stale_days: int,
 ) -> Wait:
-    consumer, prereq = graph.resolve(src), graph.resolve(dst)
+    # ожидание по from: — ожидание самого запроса, не склеенного пункта (§3.4)
+    consumer = graph.resolve(edge.src)
+    prereq = edge.dst if edge.origin == FROM_ORIGIN else graph.resolve(edge.dst)
     state = prereq_state(graph, inputs, prereq)
-    since = inputs.wait_since.get(f"{src}|{raw}")
+    since = inputs.wait_since.get(f"{edge.src}|{raw}")
     moved = last_movement(graph, inputs, prereq)
     if state == "done":
         return Wait(
@@ -2504,9 +2571,7 @@ def evaluate_waits(
             if edge.origin.startswith("todo:")
             else edge.dst
         )
-        wait = _dependency_wait(
-            graph, inputs, edge.src, edge.dst, raw, now, stale_after_days
-        )
+        wait = _dependency_wait(graph, inputs, edge, raw, now, stale_after_days)
         waits.setdefault((wait.consumer, wait.prereq), wait)
     for node in graph.nodes.values():
         if node.kind == "item" and node.is_open and node.trigger:
@@ -2694,7 +2759,7 @@ def dependency_adjacency(graph: Graph) -> dict[str, set[str]]:
     adj: dict[str, set[str]] = {}
     for e in graph.edges:
         if e.type == "depends_on":
-            src, dst = graph.resolve(e.src), graph.resolve(e.dst)
+            src, dst = graph.resolve(e.src), graph.target(e)
             adj.setdefault(src, set()).add(dst)
             adj.setdefault(dst, set())
     return adj
@@ -2838,7 +2903,7 @@ git commit -m "feat(conductor): готовность, циклы, находки
 
 **Interfaces:**
 - Consumes: Tasks 2, 6, 7, 8
-- Produces: `QueueEntry(node_id, rank, via_focus, own_focus, klass, on_goal_path, unblocks, oldest_wait_days, why)`; `build_queue(graph, waits, roadmap, now)` (кандидаты §4.1, порядок §4.3); `build_attention(graph, waits, roadmap, now)` (узлы `attention_nodes`, тот же ключ); `rank_of(graph, roadmap, node_id) -> int | None` (ранг с наследованием — для вопросов по находкам).
+- Produces: `QueueEntry(node_id, rank, via_focus, own_focus, klass, on_goal_path, unblocks, line_age_days: int | None, why)`; `Hint(pr, target, goal)`; `goal_paths(graph, roadmap)`, `build_hints(graph, roadmap)` (§4.4); `build_queue(graph, waits, roadmap, now)` (кандидаты §4.1, порядок §4.3); `build_attention(graph, waits, roadmap, now)` (узлы `attention_nodes`, тот же ключ); `rank_of(graph, roadmap, node_id) -> int | None` (ранг с наследованием — для вопросов по находкам).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2939,7 +3004,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'conductor.rank'`
 
 `conductor/rank.py`:
 ```python
-"""Протекание приоритета, ключ сортировки, объяснение (спека §4)."""
+"""Протекание приоритета, ключ сортировки, объяснение, подсказки (спека §4)."""
 
 from __future__ import annotations
 
@@ -2961,7 +3026,11 @@ from conductor.waits import Wait
 
 @dataclass(frozen=True)
 class QueueEntry:
-    """Позиция очереди: via_focus — источник ранга, own_focus — свой фокус."""
+    """Позиция очереди: via_focus — источник ранга, own_focus — свой фокус.
+
+    line_age_days — по дате строки ожидания (приближение, §3.4 rev 11);
+    None — возраст неизвестен.
+    """
 
     node_id: str
     rank: int | None
@@ -2970,8 +3039,17 @@ class QueueEntry:
     klass: str
     on_goal_path: bool
     unblocks: int
-    oldest_wait_days: int
+    line_age_days: int | None
     why: str
+
+
+@dataclass(frozen=True)
+class Hint:
+    """Подсказка §4.4: PR упоминает узел пути к вехе — связь не подтверждена."""
+
+    pr: str
+    target: str
+    goal: str
 
 
 def _reverse(adj: dict[str, set[str]]) -> dict[str, set[str]]:
@@ -2982,10 +3060,10 @@ def _reverse(adj: dict[str, set[str]]) -> dict[str, set[str]]:
     return rev
 
 
-def _walk(start: str, rev: dict[str, set[str]]) -> dict[str, str | None]:
-    """BFS по зависящим: узел → родитель на пути от start."""
-    parent: dict[str, str | None] = {start: None}
-    queue = deque([start])
+def _walk(starts: list[str], rev: dict[str, set[str]]) -> dict[str, str | None]:
+    """BFS по зависящим: узел → родитель на пути от одного из starts."""
+    parent: dict[str, str | None] = dict.fromkeys(starts)
+    queue = deque(starts)
     while queue:
         node = queue.popleft()
         for up in sorted(rev.get(node, ())):
@@ -3002,11 +3080,19 @@ def _chain(parent: dict[str, str | None], end: str) -> str:
     return " → ".join(path)
 
 
-def _days(now: str, since: str | None) -> int:
-    if since is None:
-        return 0
+def _days(now: str, since: str) -> int:
     delta = datetime.fromisoformat(now) - datetime.fromisoformat(since)
     return max(delta.days, 0)
+
+
+def _starts(node_id: str, graph: Graph) -> list[str]:
+    """Откуда течёт ранг: сам узел; у PR — ещё узлы, которые он реализует."""
+    if graph.nodes[node_id].kind != "pr":
+        return [node_id]
+    return [
+        node_id,
+        *sorted({graph.resolve(e.dst) for e in graph.out(node_id, "implements")}),
+    ]
 
 
 def _entry(
@@ -3017,7 +3103,8 @@ def _entry(
     rev: dict[str, set[str]],
     now: str,
 ) -> QueueEntry:
-    parent = _walk(node_id, rev)
+    starts = _starts(node_id, graph)
+    parent = _walk(starts, rev)
     best: tuple[int, str] | None = None
     if roadmap.valid:
         for other in parent:
@@ -3027,8 +3114,13 @@ def _entry(
     epic = graph.epic_of(node_id)
     own = roadmap.focus_of(epic) if roadmap.valid else None
     klass = roadmap.klass(epic) if roadmap.valid else "background"
-    oldest = max((_days(now, w.since) for w in waits if w.prereq == node_id), default=0)
-    unblocks = len(parent) - 1
+    dated = [
+        _days(now, w.last_line_change_at)
+        for w in waits
+        if w.prereq == node_id and w.last_line_change_at is not None
+    ]
+    age = max(dated) if dated else None
+    unblocks = len(parent) - len(starts)
     if best is None:
         return QueueEntry(
             node_id,
@@ -3038,7 +3130,7 @@ def _entry(
             klass,
             False,
             unblocks,
-            oldest,
+            age,
             "без ранга: не связан с фокусом",
         )
     rank, source = best
@@ -3055,7 +3147,7 @@ def _entry(
         klass,
         on_goal,
         unblocks,
-        oldest,
+        age,
         why,
     )
 
@@ -3067,7 +3159,7 @@ def rank_of(graph: Graph, roadmap: Roadmap, node_id: str) -> int | None:
     rev = _reverse(dependency_adjacency(graph))
     ranks = [
         f.rank
-        for other in _walk(graph.resolve(node_id), rev)
+        for other in _walk([graph.resolve(node_id)], rev)
         if (f := roadmap.focus_of(graph.epic_of(other))) is not None
     ]
     return min(ranks, default=None)
@@ -3079,9 +3171,49 @@ def _key(e: QueueEntry) -> tuple[bool, int, bool, int, int, str]:
         e.rank or 0,
         not e.on_goal_path,
         -e.unblocks,
-        -e.oldest_wait_days,
+        -(e.line_age_days or 0),
         e.node_id,
     )
+
+
+def goal_paths(graph: Graph, roadmap: Roadmap) -> dict[str, set[str]]:
+    """Веха → она сама и все её транзитивные предпосылки (узлы работы)."""
+    if not roadmap.valid:
+        return {}
+    adj = dependency_adjacency(graph)
+    paths: dict[str, set[str]] = {}
+    for focus in roadmap.focus:
+        if focus.goal is None or focus.goal not in graph.nodes:
+            continue
+        seen, stack = set(), [graph.resolve(focus.goal)]
+        while stack:
+            node = stack.pop()
+            if node not in seen:
+                seen.add(node)
+                stack.extend(adj.get(node, ()))
+        paths[focus.goal] = seen
+    return paths
+
+
+def build_hints(graph: Graph, roadmap: Roadmap) -> list[Hint]:
+    """Открытый PR того же репо упоминает узел пути — подсказка, не ребро."""
+    hints = set()
+    for goal, path in goal_paths(graph, roadmap).items():
+        for e in graph.edges:
+            pr = graph.nodes.get(e.src)
+            target = graph.resolve(e.dst)
+            if (
+                e.type == "mentions"
+                and pr is not None
+                and pr.kind == "pr"
+                and pr.is_open
+                and target in path
+                and (node := graph.nodes.get(target)) is not None
+                and node.is_open
+                and pr.repo == (graph.nodes.get(e.dst) or pr).repo
+            ):
+                hints.add(Hint(e.src, target, goal))
+    return sorted(hints, key=lambda h: (h.goal, h.target, h.pr))
 
 
 def build_queue(
@@ -3202,21 +3334,34 @@ def test_own_focus_autonomy_caps_inherited_rank() -> None:
     assert got.level == 0 and got.action == "—"
 
 
+SIGNALS = {
+    "a": "- [ ] x @owner:TBD @id:x @epic:eco.focus1\n"
+    "- [ ] подпись формы @owner:github:own @id:y "
+    "@epic:eco.focus1\n"
+    "- [ ] z @owner:github:someone @id:z @epic:eco.focus1\n"
+    "- [ ] n @owner:github:own @id:n @epic:eco.unknown\n"
+}
+
+
 def test_owner_and_decision_signals() -> None:
-    a = _assess(
-        {
-            "a": "- [ ] x @owner:TBD @id:x @epic:eco.focus1\n"
-            "- [ ] подпись формы @owner:github:own @id:y "
-            "@epic:eco.focus1\n"
-            "- [ ] z @owner:github:someone @id:z @epic:eco.focus1\n"
-            "- [ ] n @owner:github:own @id:n @epic:eco.unknown\n"
-        }
-    )
+    a = _assess(SIGNALS)
     assert a["todo://a/x"].block_reason == "owner-tbd"
     assert a["todo://a/y"].block_reason == "decision-signal"
     assert a["todo://a/z"].block_reason == "foreign-owner"
     assert a["todo://a/n"].block_reason == "epic-unknown"
-    assert all(a[n].need == "decide" for n in a)
+    # вопрос — только где ответ меняет шаг: кандидат фокуса на уровне запуска
+    assert {n for n in a if a[n].need == "decide"} == {
+        "todo://a/x",
+        "todo://a/y",
+        "todo://a/z",
+    }
+    assert a["todo://a/n"].need == "implement" and not a["todo://a/n"].ask_owner
+
+
+def test_signals_below_launch_level_are_flags_not_questions() -> None:
+    a = _assess(SIGNALS, level=0)
+    assert all(v.need == "implement" and not v.ask_owner for v in a.values())
+    assert all(v.delegable == "no" and v.action == "—" for v in a.values())
 
 
 def test_decision_signal_in_glued_request_text() -> None:
@@ -3354,7 +3499,9 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'conductor.policy'`
 
 В срезе 0 результат только показывается. Путь authority-root из контекст-пака
 (§5.2) подключается в срезе 3, поэтому лучший вердикт делегируемости здесь —
-unverified, а действие — `launch?`, не `launch`.
+unverified, а действие — `launch?`, не `launch`. Вердикт `no` — причина
+позиции; вопросом (`decide`) он становится только там, где ответ меняет
+следующий шаг: позиция уже может получить запуск (§5.7 rev 11).
 """
 
 from __future__ import annotations
@@ -3434,6 +3581,7 @@ def delegable(
     if any(w in text for w in DECISION_WORDS) or any(
         p in text for p in DECISION_PATH_PREFIXES
     ):
+        # сигнал, не доказательство: блокирует запуск, вопросом не становится
         return "no", "decision-signal"
     status = inputs.epics.get(node.epic or "", {}).get("status")
     if status is None:
@@ -3492,7 +3640,17 @@ def _stale(
     node = graph.nodes[entry.node_id]
     return (
         node.kind == "pr"
-        and entry.oldest_wait_days >= roadmap.limits["stale_after_days"]
+        and entry.line_age_days is not None
+        and entry.line_age_days >= roadmap.limits["stale_after_days"]
+    )
+
+
+def _may_launch(entry: QueueEntry, roadmap: Roadmap, level: int) -> bool:
+    """Позиция может получить запуск: уровень 3 и класс его допускает (§5.3)."""
+    via = roadmap.focus_of(entry.via_focus)
+    return level >= 3 and (
+        entry.klass == "focus"
+        or (entry.klass == "background" and via is not None and via.pull_prerequisites)
     )
 
 
@@ -3512,11 +3670,7 @@ def _action(
         return "request_intake" if level >= 2 else "owner_queue"
     if need in ("review", "wait_ci", "merge", "fix_pr"):
         return "pr_nudge" if stale else "—"
-    via = roadmap.focus_of(entry.via_focus)
-    may_launch = entry.klass == "focus" or (
-        entry.klass == "background" and via is not None and via.pull_prerequisites
-    )
-    if need == "implement" and level >= 3 and may_launch and verdict != "no":
+    if need == "implement" and _may_launch(entry, roadmap, level) and verdict != "no":
         return "launch" if verdict == "yes" else "launch?"
     return "nudge" if stale else "—"
 
@@ -3536,7 +3690,7 @@ def assess(
     reason: str | None = None
     if need == "implement":
         verdict, reason = delegable(entry.node_id, graph, inputs)
-        if verdict == "no":
+        if verdict == "no" and _may_launch(entry, roadmap, level):
             need, actor = "decide", "owner"
     action = _action(
         need, level, entry, roadmap, verdict, _stale(entry, graph, waits, roadmap)
@@ -3574,7 +3728,7 @@ git commit -m "feat(conductor): политика как выдача — уро�
 
 **Interfaces:**
 - Consumes: всё ядро, `Inputs`
-- Produces: `Result(graph, waits, queue, attention, assessments: dict[str, Assessment], findings, roadmap, cycles, run_level, graph_state)`; `evaluate(inputs, run_level) -> Result`; `question_id(kind, subject, evidence, options) -> str`; `to_snapshot(result, inputs, run_id, previous) -> dict`; `SCHEMA_PATH`.
+- Produces: `Result(graph, waits, queue, attention, assessments: dict[str, Assessment], findings, roadmap, cycles, run_level, graph_state, blocks: dict[str, str], hints)`; `block_of(entry, assessment, stale) -> "goal"|"signal"|"backlog"`; `evaluate(inputs, run_level) -> Result`; `question_id(kind, subject, evidence, options) -> str`; `to_snapshot(result, inputs, run_id, previous) -> dict`; `SCHEMA_PATH`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3607,8 +3761,9 @@ def test_snapshot_matches_schema_and_carries_work_state() -> None:
     assert snap["graph_state"] == "complete" and snap["run_level"] == 0
     node = next(n for n in snap["nodes"] if n["node_id"] == "todo://a/x")
     assert node["work_state"] == "idle"
-    assert snap["metrics"]["owner_questions"] == 1
-    assert snap["metrics"]["decide_unranked"] == 1
+    # нет @owner на уровне 0 — пометка позиции, не вопрос (§5.7 rev 11)
+    assert snap["metrics"]["owner_questions"] == 0
+    assert snap["metrics"]["position_flags"] == {"owner-tbd": 2}
 
 
 def test_attention_reaches_owner_questions() -> None:
@@ -3713,7 +3868,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'conductor.snapshot'`
   "type": "object",
   "required": ["contract", "host", "run_id", "started_at", "writer", "roadmap",
                "run_level", "sources", "graph_state", "nodes", "edges", "waits",
-               "queue", "attention", "cycles", "findings", "actions",
+               "queue", "attention", "hints", "cycles", "findings", "actions",
                "owner_questions", "metrics", "changes_since_previous"],
   "properties": {
     "contract": {"const": "conductor-snapshot/v1"},
@@ -3739,10 +3894,12 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'conductor.snapshot'`
                                         "implements", "mentions"]}}}},
     "waits": {"type": "array", "items": {"type": "object",
       "required": ["consumer", "prereq", "verdict", "reason", "evidence",
-                   "since", "moved"],
+                   "last_line_change_at", "moved"],
       "properties": {"verdict": {"enum": ["satisfied", "pending", "unknown"]}}}},
     "queue": {"$ref": "#/$defs/positions"},
     "attention": {"$ref": "#/$defs/positions"},
+    "hints": {"type": "array", "items": {"type": "object",
+      "required": ["pr", "target", "goal"]}},
     "cycles": {"type": "array", "items": {"type": "array",
                                           "items": {"type": "string"}}},
     "findings": {"type": "array", "items": {"type": "object",
@@ -3754,15 +3911,17 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'conductor.snapshot'`
     "metrics": {"type": "object", "required": [
       "waits_satisfied", "waits_pending", "waits_stale", "waits_unknown",
       "actions_available", "actions_executed", "owner_questions",
-      "owner_questions_by_reason", "decide_unranked", "partial"]},
+      "owner_questions_by_reason", "decide_unranked", "position_flags",
+      "partial"]},
     "changes_since_previous": {"type": "object", "required": ["first_run"]}
   },
   "$defs": {
     "positions": {"type": "array", "items": {"type": "object",
       "required": ["node_id", "rank", "via_focus", "own_focus", "klass", "why",
-                   "actor", "need", "level", "delegable", "block_reason",
-                   "action", "ask_owner"],
-      "properties": {"delegable": {"enum": ["yes", "no", "unverified"]}}}}
+                   "block", "line_age_days", "actor", "need", "level",
+                   "delegable", "block_reason", "action", "ask_owner"],
+      "properties": {"delegable": {"enum": ["yes", "no", "unverified"]},
+                     "block": {"enum": ["goal", "signal", "backlog"]}}}}
   }
 }
 ```
@@ -3785,7 +3944,14 @@ from conductor.graph import Graph, build_graph
 from conductor.inputs import Inputs
 from conductor.model import Finding
 from conductor.policy import Assessment, assess
-from conductor.rank import QueueEntry, build_attention, build_queue, rank_of
+from conductor.rank import (
+    Hint,
+    QueueEntry,
+    build_attention,
+    build_hints,
+    build_queue,
+    rank_of,
+)
 from conductor.roadmap import Roadmap, parse_roadmap
 from conductor.waits import Wait, evaluate_waits
 
@@ -3818,6 +3984,7 @@ WAIT_QUESTIONS = {
 FINDING_QUESTIONS = {
     "GR-SHIPPED-OPEN": ("похоже отгружено: закрыть issue?", ("close", "keep")),
 }
+PR_NEEDS = frozenset({"review", "wait_ci", "merge", "fix_pr"})
 
 
 @dataclass
@@ -3834,6 +4001,23 @@ class Result:
     cycles: list[list[str]]
     run_level: int
     graph_state: str
+    blocks: dict[str, str]
+    hints: list[Hint]
+
+
+def block_of(entry: QueueEntry, a: Assessment, stale: set[str]) -> str:
+    """§4.4: goal — путь к вехе; signal — ранг и подтверждённый сигнал."""
+    if entry.rank is None:
+        return "backlog"
+    if entry.on_goal_path:
+        return "goal"
+    signal = (
+        entry.unblocks > 0
+        or entry.node_id in stale
+        or a.need in PR_NEEDS
+        or a.ask_owner
+    )
+    return "signal" if signal else "backlog"
 
 
 def evaluate(inputs: Inputs, run_level: int) -> Result:
@@ -3856,6 +4040,7 @@ def evaluate(inputs: Inputs, run_level: int) -> Result:
         for e in queue + attention
     }
     found = list(roadmap.findings) + graph_findings(graph, waits, cycles, roadmap)
+    stale = {w.prereq for w in waits if w.reason == "stale" and w.prereq}
     return Result(
         graph,
         waits,
@@ -3867,6 +4052,11 @@ def evaluate(inputs: Inputs, run_level: int) -> Result:
         cycles,
         level,
         "partial" if graph.partial else "complete",
+        {
+            e.node_id: block_of(e, assessments[e.node_id], stale)
+            for e in queue + attention
+        },
+        build_hints(graph, roadmap),
     )
 
 
@@ -3936,6 +4126,14 @@ def _metrics(result: Result, questions: list[dict[str, Any]]) -> dict[str, Any]:
         "decide_unranked": sum(
             a.need == "decide" and not a.ask_owner for a in assessed
         ),
+        # пометки позиций (признак решения, нет @owner, …) — не вопросы (§5.7)
+        "position_flags": dict(
+            Counter(
+                a.block_reason
+                for a in assessed
+                if a.block_reason not in (None, "authority-root") and not a.ask_owner
+            )
+        ),
         "partial": result.graph_state == "partial",
     }
 
@@ -3960,6 +4158,7 @@ def _positions(entries: list[QueueEntry], result: Result) -> list[dict[str, Any]
         out.append(
             {
                 **asdict(e),
+                "block": result.blocks[e.node_id],
                 "actor": a.actor,
                 "need": a.need,
                 "level": a.level,
@@ -4000,6 +4199,7 @@ def to_snapshot(
         "waits": [asdict(w) for w in result.waits],
         "queue": _positions(result.queue, result),
         "attention": _positions(result.attention, result),
+        "hints": [asdict(h) for h in result.hints],
         "cycles": result.cycles,
         "findings": [asdict(f) for f in result.findings],
         "actions": {
@@ -4230,7 +4430,7 @@ def test_status_why_plan_from_replay_without_manifest_file(
     assert "todo://b/b" in out and "вопросы владельцу" in out
     assert main(["why", "todo://b/b", "--replay", str(rep)]) == 0
     out = capsys.readouterr().out
-    assert "todo://a/goal" in out and "need=decide" in out
+    assert "todo://a/goal" in out and "need=implement" in out
     assert main(["plan", "--level", "3", "--replay", str(rep)]) == 0
     assert "план на уровне 0" in capsys.readouterr().out  # autonomy = 0
     rep3 = _replay(tmp_path, roadmap=ROADMAP.replace("autonomy = 0", "autonomy = 3"))
@@ -4608,7 +4808,19 @@ def collect(
 
 from __future__ import annotations
 
+from collections import Counter
+
+from conductor.rank import QueueEntry
 from conductor.snapshot import Result, owner_questions
+
+FLAGS = {
+    "owner-tbd": "кандидат на делегирование: нет @owner, полномочия не проверены",
+    "decision-signal": "возможно, требуется решение",
+    "foreign-owner": "чужой владелец",
+    "epic-unknown": "эпик неизвестен",
+    "epic-not-active": "эпик не active",
+    "out-of-loop": "репо вне контура",
+}
 
 
 def _header(result: Result) -> list[str]:
@@ -4620,19 +4832,59 @@ def _header(result: Result) -> list[str]:
     return lines
 
 
-def render_status(result: Result, top: int = 15) -> str:
-    """Фокусы, очередь, внимание, циклы, ожидания, вопросы владельцу."""
+def _position(result: Result, e: QueueEntry) -> list[str]:
+    a = result.assessments[e.node_id]
+    flag = FLAGS.get(a.block_reason or "")
+    age = "" if e.line_age_days is None else f"; строка ожидания ≈{e.line_age_days} дн."
+    head = f"  {e.rank or '-'}  {e.node_id}  [{a.need} → {a.actor}]"
+    return [head + (f"  ({flag})" if flag else ""), f"       {e.why}{age}"]
+
+
+def _repo(node_id: str) -> str:
+    return node_id.removeprefix("todo://").split("/")[0].split("#")[0].split("!")[0]
+
+
+def _backlog(result: Result, entries: list[QueueEntry]) -> list[str]:
+    """Сводка блока 3: по фокусу и репо; условия — отдельным счётом."""
+    groups: dict[str, Counter[str]] = {}
+    for e in entries:
+        label = f"фокус {e.rank} ({e.via_focus})" if e.rank else "без ранга"
+        need = result.assessments[e.node_id].need
+        repo = _repo(e.node_id) + (" [условие]" if need == "wait_condition" else "")
+        groups.setdefault(label, Counter())[repo] += 1
+    return [
+        f"  {label}: " + ", ".join(f"{r} {n}" for r, n in sorted(c.items()))
+        for label, c in sorted(groups.items(), key=lambda kv: kv[0] == "без ранга")
+    ]
+
+
+def render_status(result: Result, top: int = 15, repo: str | None = None) -> str:
+    """Три блока §4.4, циклы, ожидания, вопросы; repo — раскрыть одно репо."""
     lines = _header(result)
     lines.append("фокусы: " + ", ".join(f.epic for f in result.roadmap.focus))
-    for title, entries in (
-        ("очередь", result.queue),
-        ("нужны решения или условия", result.attention),
-    ):
-        lines.append(f"{title}:")
-        for e in entries[:top]:
-            a = result.assessments[e.node_id]
-            lines.append(f"  {e.rank or '-'}  {e.node_id}  [{a.need} → {a.actor}]")
-            lines.append(f"       {e.why}")
+    entries = result.queue + result.attention
+    if repo is not None:
+        lines.append(f"все позиции {repo}:")
+        for e in (e for e in entries if _repo(e.node_id) == repo):
+            lines += _position(result, e)
+            lines.append(f"       блок: {result.blocks[e.node_id]}")
+        return "\n".join(lines)
+    goals = [f.goal for f in result.roadmap.focus if f.goal]
+    lines.append("продвижение вехи (" + ", ".join(goals) + "):")
+    for e in (e for e in entries if result.blocks[e.node_id] == "goal"):
+        lines += _position(result, e)
+    lines += [
+        f"  возможный следующий шаг: {h.pr} упоминает {h.target} — связь не "
+        "подтверждена (оформить: Closes / @id: в теле PR / @blocked_by пункта)"
+        for h in result.hints
+    ]
+    lines.append("другие действия фокуса:")
+    for e in [e for e in entries if result.blocks[e.node_id] == "signal"][:top]:
+        lines += _position(result, e)
+    lines.append("остальной бэклог (status <repo> — раскрыть):")
+    lines += _backlog(
+        result, [e for e in entries if result.blocks[e.node_id] == "backlog"]
+    )
     lines += ["цикл: " + " → ".join(c) for c in result.cycles]
     stale = sum(w.reason == "stale" for w in result.waits)
     done = sum(w.verdict == "satisfied" for w in result.waits)
@@ -4828,7 +5080,7 @@ def main(argv: list[str] | None = None) -> int:
         return _run(args, inputs)
     result = evaluate(inputs, args.level if args.command == "plan" else 0)
     if args.command == "status":
-        print(render_status(result))
+        print(render_status(result, repo=args.target))
     elif args.command == "why":
         print(render_why(result, args.target))
     else:
@@ -4839,6 +5091,205 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     sys.exit(main())
 ```
+
+- [ ] **Step 3b: Регрессия ручного разбора 2026-09-30 (спека §10, сценарии 48–54)**
+
+Каждый тест ловит откат своей правки (проверено мутациями: 12 из 12 убиты). Живые формы: `spec-runner#603` без метки `inbox` и с прозой в `from:`; закрытый `devtools#491`, чей `from:` держал ложное ожидание; ссылка `ecosystem-kb` на собственный пункт прежним именем; драфт `spec-runner!620` с `(#603)` в заголовке.
+
+`tests/conductor/test_regression_r11.py`:
+```python
+"""Регрессия ручного разбора очереди 2026-09-30 (спека §10, сценарии 48–54)."""
+
+from conductor.analysis import dependency_adjacency, find_cycles
+from conductor.graph import build_graph
+from conductor.render import render_status
+from conductor.snapshot import evaluate, owner_questions, to_snapshot
+from conductor.waits import evaluate_waits
+from tests.conductor.fixtures import inputs, record
+
+NOW = "2026-09-29T12:00:00Z"
+PRODUCER = {"b": "- [ ] y @owner:github:own @id:y @epic:eco.focus1\n"}
+
+
+def _graph(todos, records):
+    return build_graph(inputs(todos, records))
+
+
+def _codes(graph):
+    return {f.code for f in graph.findings}
+
+
+# 48 — заявка без метки: только распознанный протокол целиком
+
+
+def test_unlabelled_request_with_prose_after_sender_repo_is_glued() -> None:
+    body = "slug: y\nfrom: a (DarkFactory E, «оракул»)\n"
+    g = _graph(PRODUCER, [record("b", 5, body=body)])
+    assert g.resolve("b#5") == "todo://b/y"
+    assert "GR-INBOX-NO-LABEL" in _codes(g)
+
+
+def test_unlabelled_request_sender_item_waits_on_the_request() -> None:
+    todos = {**PRODUCER, "a": "- [ ] x @owner:github:own @id:x\n"}
+    g = _graph(todos, [record("b", 5, body="slug: y\nfrom: a#x\n")])
+    assert any(
+        (e.src, e.dst, e.type) == ("todo://a/x", "b#5", "depends_on") for e in g.edges
+    )
+
+
+def test_partial_protocol_is_not_a_request() -> None:
+    for body in (
+        "slug: y\n",
+        "slug: y\nfrom: zzz\n",
+        "slug: nope\nfrom: a\n",
+        "slug: Y Y\nfrom: a\n",
+    ):
+        g = _graph(PRODUCER, [record("b", 5, body=body)])
+        assert g.resolve("b#5") == "b#5", body
+        assert "GR-INBOX-NO-LABEL" not in _codes(g), body
+
+
+# 49 — from: закрытого запроса — история, а не ожидание
+
+PING = {
+    "a": "- [ ] x @owner:github:own @id:x\n",
+    "b": "- [ ] y @owner:github:own @id:y @blocked_by:todo://a/x\n",
+}
+
+
+def _request(**fields):
+    return record("b", 5, body="slug: y\nfrom: a#x\n", labels=["inbox"], **fields)
+
+
+def _cycles_and_waits(req):
+    inp = inputs(PING, [req])
+    g = build_graph(inp)
+    waits = evaluate_waits(g, inp, NOW, 3)
+    return find_cycles(dependency_adjacency(g)), [
+        w for w in waits if w.consumer == "todo://a/x"
+    ]
+
+
+def test_closed_completed_request_leaves_no_wait_and_no_cycle() -> None:
+    cycles, waits = _cycles_and_waits(
+        _request(state="closed", state_reason="completed")
+    )
+    assert cycles == [] and waits == []
+
+
+def test_open_request_is_a_live_wait_and_the_cycle_is_real() -> None:
+    cycles, waits = _cycles_and_waits(_request())
+    assert cycles == [["todo://a/x", "todo://b/y"]]
+    assert [(w.prereq, w.verdict) for w in waits] == [("b#5", "pending")]
+
+
+def test_declined_request_is_a_cancelled_prerequisite() -> None:
+    cycles, waits = _cycles_and_waits(
+        _request(state="closed", state_reason="not_planned")
+    )
+    assert cycles == []
+    assert [(w.prereq, w.verdict, w.reason) for w in waits] == [
+        ("b#5", "unknown", "cancelled")
+    ]
+
+
+# 50 — одна канонизация концов рёбер
+
+
+def test_old_repo_name_in_own_blocked_by_resolves_to_canonical_item() -> None:
+    # живая форма: репо ссылается на свой же пункт прежним именем —
+    # plan-fields такую ссылку не резолвит (resolved_target = None)
+    todos = {
+        "ecosystem-kb": "- [ ] g @owner:github:own @id:g @epic:eco.focus1 "
+        "@blocked_by:todo://prograph-vault/z\n"
+        "- [ ] z @owner:github:own @id:z\n",
+    }
+    result = evaluate(inputs(todos), 0)
+    wait = next(w for w in result.waits if w.consumer == "todo://ecosystem-kb/g")
+    assert (wait.prereq, wait.reason) == ("todo://ecosystem-kb/z", "open")
+    assert owner_questions(result) == []
+
+
+def test_blocked_by_issue_number_that_is_a_pr_points_to_the_pr() -> None:
+    todos = {"a": "- [ ] g @owner:github:own @id:goal @blocked_by:b#7\n"}
+    g = _graph(todos, [record("b", 7, is_pr=True)])
+    assert any(e.dst == "b!7" and e.type == "depends_on" for e in g.edges)
+
+
+def test_mention_of_issue_number_that_is_a_pr_points_to_the_pr() -> None:
+    g = _graph({}, [record("b", 7, is_pr=True), record("a", 1, body="см. b#7")])
+    assert any(e.dst == "b!7" and e.type == "mentions" for e in g.edges)
+
+
+# 51 — ранг PR только по implements; упоминание — подсказка
+
+GOAL = {"a": "- [ ] g @owner:github:own @id:goal @epic:eco.focus1 @blocked_by:b#3\n"}
+
+
+def test_closing_pr_inherits_rank_and_goal_path() -> None:
+    result = evaluate(
+        inputs(
+            GOAL, [record("b", 3), record("b", 4, is_pr=True, closing_refs=["b#3"])]
+        ),
+        0,
+    )
+    entry = next(e for e in result.queue if e.node_id == "b!4")
+    assert (entry.rank, entry.on_goal_path, result.blocks["b!4"]) == (1, True, "goal")
+    assert result.hints == []
+
+
+def test_mentioning_pr_is_a_hint_without_rank() -> None:
+    records = [
+        record("b", 3),
+        record("b", 9),
+        record("b", 5, is_pr=True, title="docs(#3): plan"),
+        record("b", 6, is_pr=True, title="docs(#9): other"),
+    ]
+    result = evaluate(inputs(GOAL, records), 0)
+    assert [(h.pr, h.target) for h in result.hints] == [("b!5", "b#3")]
+    assert next(e for e in result.queue if e.node_id == "b!5").rank is None
+    assert "возможный следующий шаг: b!5 упоминает b#3" in render_status(result)
+
+
+# 53 — блоки выдачи: сворачивание не выбрасывает позиции
+
+
+def test_goal_step_outranks_old_unsignalled_focus_item() -> None:
+    todos = {
+        "a": "- [ ] g @owner:github:own @id:goal @epic:eco.focus1 "
+        "@blocked_by:todo://b/step\n",
+        "b": "- [ ] s @owner:github:own @id:step\n",
+        "c": "- [ ] o @owner:github:own @id:old @epic:eco.focus1\n"
+        "- [ ] p @owner:github:own @id:other @epic:eco.focus1\n",
+    }
+    inp = inputs(todos)
+    result = evaluate(inp, 0)
+    assert result.blocks["todo://b/step"] == "goal"
+    assert result.blocks["todo://c/old"] == "backlog"
+    text = render_status(result)
+    assert text.index("todo://b/step") < text.index("остальной бэклог")
+    assert "фокус 1 (eco.focus1): c 2" in text
+    assert "todo://c/old" in render_status(result, repo="c")
+    snap = to_snapshot(result, inp, "run-1", None)
+    assert {p["node_id"] for p in snap["queue"]} >= {"todo://c/old", "todo://c/other"}
+
+
+# 54 — нет даты строки → возраст неизвестен, а не 0
+
+
+def test_unknown_line_age_is_not_zero() -> None:
+    todos = {
+        "a": "- [ ] x @owner:github:own @id:x @epic:eco.focus1\n",
+        "b": "- [ ] y @owner:github:own @id:y @blocked_by:todo://a/x\n",
+    }
+    result = evaluate(inputs(todos), 0)
+    entry = next(e for e in result.queue if e.node_id == "todo://a/x")
+    assert entry.line_age_days is None
+    assert "≈" not in render_status(result)
+```
+
+Run: `uv run --frozen pytest tests/conductor/test_regression_r11.py -q`
+Expected: PASS
 
 - [ ] **Step 4: Run tests and linters**
 
@@ -5070,14 +5521,14 @@ git commit -m "docs(conductor): скилл, строка инструменто�
 # roadmap.toml — порядок работ. Владелец: Andrei. Порядок [[focus]] = приоритет.
 # Схема и семантика: devtools/docs/superpowers/specs/2026-09-29-conductor-design.md §2.
 schema_version = 1
-updated      = "2026-09-29"
+updated      = "2026-09-30"
 autonomy     = 0
 writer_host  = "vps-conductor"
 writer_since = "2026-09-29T00:00:00Z"
 
 [[focus]]
 epic = "eco.dark-factory"
-goal = "todo://devtools/bundle-docs-as-oracle"
+goal = "todo://devtools/bundle-oracle-slice1"
 
 [[focus]]
 epic = "eco.tooling"
@@ -5085,7 +5536,7 @@ epic = "eco.tooling"
 [[focus]]
 epic = "eco.governance-plane"
 ```
-`writer_host` — фактический `hostname` VPS из Task 13 (README, шаг 5); впишите его до коммита.
+`writer_host` — фактический `hostname` VPS из Task 13 (README, шаг 5); впишите его до коммита. Веха — открытый пункт на момент коммита: проверить `grep -n '@id:bundle-oracle-slice1' ../devtools/TODO.md` (строка `- [ ]`); закрыт — владелец выбирает следующую (прежний черновик `bundle-docs-as-oracle` к 2026-09-29 был уже закрыт).
 
 - [ ] **Step 2: Проверить разбором conductor**
 
@@ -5107,26 +5558,26 @@ gh pr create -R andrei-shtanakov/ai-orchestrators-workspace --fill
 
 ### Task 16: Живая приёмка — replay на сохранённых входах
 
-Приёмка среза 0 по спеке §10: верх очереди совпадает с приоритетами владельца и показывает ранее невидимые цепочки.
+Приёмка среза 0 по спеке §10: верх очереди совпадает с приоритетами владельца и показывает ранее невидимые цепочки. Финальная запись — **с `fetch`** (как у таймера): без него `complete` значит полноту лишь относительно локальных remote-tracking refs и не проверяет порядок «fetch зонтика → манифест».
 
 - [ ] **Step 1: Записать входы флота**
 
-Run: `make conductor ARGS="record out/conductor/replays/$(date +%F)"`
-Expected: `out/conductor/replays/<дата>/inputs.json`; код 0
+Run: `make conductor ARGS="record out/conductor/replays/$(date +%F)"` (без `--no-fetch`; на Mac — около 5 мин)
+Expected: `out/conductor/replays/<дата>/inputs.json`; код 0; источник `manifest` — `origin`
 
 - [ ] **Step 2: Разбор без сети**
 
 Run: `uv run --frozen python -m conductor status --replay out/conductor/replays/$(date +%F)/inputs.json`
-Expected: `граф: complete` (иначе — перечень непрочитанных источников, починить до приёмки); очередь с `why`; блок «нужны решения»; число вопросов владельцу
+Expected: `граф: complete` (иначе — перечень непрочитанных источников, починить до приёмки); блоки «продвижение вехи», «другие действия фокуса», сводка бэклога; число вопросов владельцу
 
 - [ ] **Step 3: Проверить известную цепочку**
 
-Run: `uv run --frozen python -m conductor why todo://devtools/bundle-docs-as-oracle --replay out/conductor/replays/$(date +%F)/inputs.json`
-Expected: видны ожидания `spec-runner#603` / `steward#190` с вердиктами и `need/actor` узлов; пара `devtools#491` ↔ `spec-runner#603` — `цикл:` в `status`, если обе стороны оформлены структурно, иначе `GR-WEAK-EDGE` в снимке
+Run: `uv run --frozen python -m conductor why todo://devtools/bundle-oracle-slice1 --replay out/conductor/replays/$(date +%F)/inputs.json`
+Expected: ожидание вехи ведёт к пункту производителя (`spec-runner#603` склеен с `todo://spec-runner/criteria-closure-verify`), `todo://steward/bundle-oracle-parsers` — `satisfied`; закрытый `devtools#491` ожидания не создаёт, цикла нет. На 2026-09-30 блок «продвижение вехи» называл `criteria-closure-verify` и подсказку `spec-runner!620` — состояние на день приёмки может быть другим; проверяется, что блок называет **настоящий** следующий шаг (сверка вручную по TODO производителя).
 
 - [ ] **Step 4: Разбор с владельцем**
 
-Показать владельцу первые 15 позиций `status`, блок «нужны решения» и `metrics` снимка `run`. Записать итог в TODO.md (пункт `conductor-slice-0`): совпадает ли верх очереди с приоритетами, какие цепочки новые, сколько вопросов и по каким причинам (`owner_questions_by_reason`), сколько `decide_unranked`. Несовпадение — находка для роадмапа или ранжирования, а не повод закрывать пункт.
+Показать владельцу блоки `status`, вопросы и `metrics` снимка `run`. Ручной разбор: для каждой позиции блоков 1–2 и каждого вопроса — требуется ли решение владельца, достаточно ли доказательств, какое действие разблокирует ответ; для каждой пометки (`position_flags`) — не должна ли она быть вопросом. Записать итог в TODO.md (пункт `conductor-slice-0`): совпадает ли верх с приоритетами, какие цепочки новые, вопросы и пометки по причинам. Несовпадение — находка для роадмапа или ранжирования, а не повод закрывать пункт.
 
 ---
 
@@ -5134,15 +5585,17 @@ Expected: видны ожидания `spec-runner#603` / `steward#190` с ве�
 
 1. **Покрытие спеки (срез 0, §11):** §2 — Task 2 (+`RM-GOAL-MISSING` в Task 8); §3.1 — Tasks 3–6, 12; §3.2 — Task 6; §3.3 — Task 8; §3.4 (структурные `date>=`/`exists:`, `version_mismatch`, `cancelled` по истории, застой по началу ожидания и движению) — Tasks 4, 7, 12; §3.5 (`in_review`/`idle` по членам склейки) — Task 8; §4 — Task 9; §5.2–5.3 как выдача, PR-таблица с `wait_ci`, вопросы только с рангом — Task 10; §7.1 и показатели §10 — Task 11; §7.2 — Task 12; таймер — Task 13; роадмап в зонтике — Task 15; replay-приёмка — Task 16. Вне среза 0: запросы §6 (кроме наследия inbox), записи §5.1/§5.4–5.10, App §8, публикация §7.4, authority-root (Task 10 выдаёт `unverified`/`launch?`).
 2. **Плейсхолдеры:** нет; флаги `clone_fleet.py` сверены по `--help`; ребро на несуществующий пункт — из `references` (сверено на `plan-fields`); полнота поиска — REST `search/issues` (`gh search --json` теряет `incomplete_results`).
-3. **Согласованность типов:** `Graph.resolve/members/epic_of`, `Wait(…, since, moved)`, `QueueEntry(… via_focus, own_focus …)`, `Assessment(… delegable, …, ask_owner)`, `Result(… attention, assessments: dict …)` — одни имена во всех задачах.
+3. **Согласованность типов:** `Graph.resolve/members/target/epic_of`, `Wait(…, last_line_change_at, moved)`, `QueueEntry(…, line_age_days, why)`, `Result(…, blocks, hints)`, `QueueEntry(… via_focus, own_focus …)`, `Assessment(… delegable, …, ask_owner)`, `Result(… attention, assessments: dict …)` — одни имена во всех задачах.
 4. **Review Focus:** п.1–2 — Task 4; п.3 — Tasks 5, 6, 12; п.4 — Task 6; п.5 — Task 8.
 
 ## Проверка плана исполнением
 
 Перед ревью листинги кода извлечены из этого файла скриптом (блоки после строки вида `` `путь`: ``; для `conductor/__main__.py` — последний, итоговый) во временный каталог вне репо, в раскладке devtools. Результат на 2026-09-29:
 
-- `pytest tests/conductor` на `.venv` devtools — **81 passed** (rev 5);
+- `pytest tests/conductor` на `.venv` devtools — **95 passed** (rev 7; 81 — rev 5); мутационная проверка правок rev 7 — 12 из 12 откатов ловятся тестами (первый заход дал 3 живучих: фикстура маскировала дефект канонизации — plan-fields резолвит прежнее имя из чужого репо, но не ссылку репо на собственный пункт; тест переписан под живую форму);
 - `ruff check` и `ruff format --check` с `pyproject.toml` devtools — чисто (листинги в плане — уже отформатированный вывод ruff);
 - `pyrefly check conductor` — 0 errors; `shellcheck deploy/conductor/setup.sh` — чисто; `python -m conductor --selftest` — ok.
 
 **Живой прогон на флоте** (`record --no-fetch --roadmap <черновик Task 15>`, только чтение): граф `complete`, 875 узлов, 133 ребра; первая позиция очереди — `spec-runner#603` с `why` = `rank 1 (eco.dark-factory) via todo://devtools/bundle-oracle-slice1 → spec-runner#603; unblocks 3`; циклов нет; `GR-WEAK-EDGE` 64, `GR-ORPHAN-REQUEST` 6, `GR-DANGLING-WAIT` 2; вопросов владельцу 9 (`decision-signal` 5, `owner-tbd` 3, `unknown-wait` 1). Прогон изменил план в двух местах: (1) поиск закрытых за 30 дней вернул 1310 > 1000 — граф был бы `partial` всегда, поэтому обнаружение — только открытые, закрытые приходят дочитыванием; (2) 30 из 38 вопросов владельцу были ожиданиями прозаического `@trigger` — теперь это `wait_condition` без вопроса. Повторный живой прогон после rev 3 (2 мин 37 с на Mac, без `fetch`): граф `complete`, вспомогательные чтения без ошибок, `wait_since` у 46 ожиданий (по `git blame`); из 12 открытых PR один (`atp-platform!322`) одобрен на head SHA с зелёным CI → `merge`/`merge-contour`, остальные — `review`; вопросы владельцу 9 (`decision-signal` 5, `owner-tbd` 3, `missing` 1 — с вариантами «снять ожидание / завести запрос»). Прогон после rev 4: манифест и реестр эпиков — с `origin` зонтика (SHA `34d96ee`), все источники `read`, граф `complete`; `GR-ORPHAN-REQUEST` 20, `GR-SLUG-MATCH` 18 (наследие inbox), вопросов владельцу 9, в `status` — с `Q-<id>` и вариантами по причине. Замечание для Task 15: веха-черновик `todo://devtools/bundle-docs-as-oracle` на момент прогона уже закрыта — владельцу стоит выбрать живую веху.
+
+**Разбор 2026-09-30 (rev 7).** Прогон с `fetch` (5 мин 3 с на Mac, граф `complete`, манифест с `origin`), веха `bundle-oracle-slice1`. До правок: верх очереди — `spec-runner#603 [triage → owner]` (заявка уже принята и в работе) и 14 пунктов deployer без сигнала по алфавиту; 9 вопросов — 0 решений владельца. После правок (повторный прогон с `fetch`): блок «продвижение вехи» — `todo://spec-runner/criteria-closure-verify [implement → spec-runner]` и подсказка `spec-runner!620 упоминает …` (одобрение планов B2 — настоящий следующий шаг по TODO производителя); «другие действия фокуса» — 4 позиции ранга 3 с сигналом (разблокируют 1–3 узла); бэклог — сводкой; циклов нет; вопросов 0 — прежние 9 стали пометками (`decision-signal`, `owner-tbd`), ожиданием условия или исчезли после канонизации (`missing` был ссылкой прежним именем). Наблюдение для владельца plan-fields: ссылку репо на собственный пункт прежним именем он не резолвит (`resolved_target = None`), conductor это компенсирует канонизацией.
