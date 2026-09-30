@@ -62,14 +62,14 @@ pythonpath = ["."]
 extend-exclude = [
     "contracts/criteria-closure/v1/fixtures",
     "governance/discovery_contract",
-    # Рабочий TUI владельца — не правится (указание 2026-08-30); байты до #504.
-    "issue_console.py",
 ]
 
 [tool.ruff.format]
 # Формат — только для кода. ruff 0.16 форматирует и код в markdown, а .md здесь —
 # записи (планы, спеки, evidence прогонов): их байты не переписываются (#461).
-exclude = ["**/*.md"]
+# issue_console.py — рабочий TUI владельца, не правится (указание 2026-08-30):
+# форматтер его не трогает (байты до #504), линтер — см. per-file-ignores.
+exclude = ["**/*.md", "issue_console.py"]
 
 [tool.ruff.lint]
 # Базовый набор, который держит CI (devtools#461, ступень 1): правила ruff 0.16
@@ -80,3 +80,9 @@ select = [
     # ступень 3, волна 1 — механические, с чисткой (#461)
     "I", "UP", "FURB167",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# Базовый набор (E4/E7/E9/F) issue_console.py охраняет, как прежде; правила
+# волн, требующие переписать его байты, — нет. Новая волна добавляет сюда
+# свои коды, если файл их нарушает (#461, ревью #506).
+"issue_console.py" = ["I", "UP", "FURB167"]
