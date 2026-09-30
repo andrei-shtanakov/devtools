@@ -22,7 +22,8 @@ command -v gh >/dev/null || { echo ">>> install gh (https://cli.github.com) and 
 # packaged gh is older and the run would stay `partial` forever.
 GH_MIN="2.48.0"
 GH_VER="$(gh --version | head -n 1 | awk '{print $3}')"
-if [ "$(printf '%s\n%s\n' "$GH_MIN" "$GH_VER" | sort -V | head -n 1)" != "$GH_MIN" ]; then
+if ! [[ "$GH_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || [ "$(printf '%s\n%s\n' "$GH_MIN" "$GH_VER" | sort -V | head -n 1)" != "$GH_MIN" ]; then
     echo ">>> gh $GH_VER < $GH_MIN: install gh from https://cli.github.com/packages and re-run"
     exit 1
 fi

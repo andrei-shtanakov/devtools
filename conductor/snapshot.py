@@ -34,6 +34,10 @@ SCHEMA_PATH = (
 )
 DELEGATE = ("делегировать агенту?", ("delegate", "keep"))
 WAIT_QUESTIONS = {
+    "closed_unknown": (
+        "закрыт без причины: считать выполненным или отменённым?",
+        ("treat-done", "treat-cancelled", "keep"),
+    ),
     "cancelled": (
         "предпосылка отменена: снять ожидание или найти замену?",
         ("drop-wait", "replace", "keep"),
@@ -100,8 +104,13 @@ def evaluate(inputs: Inputs, run_level: int) -> Result:
     cycles = find_cycles(dependency_adjacency(graph))
     # §2.4: потолок прогона. plan — симуляция управляющего писателя: личность
     # хоста не проверяется (plan не пишет), но роадмап ограничивает всегда.
+    # §2.1/§2.4: полномочия даёт только роадмап с origin зонтика — локальный
+    # файл (`--roadmap`) проверяет разбор и порядок, но уровень держит 0
+    trusted = inputs.roadmap_source == "origin"
     level = (
-        0 if graph.partial or not roadmap.valid else min(run_level, roadmap.autonomy)
+        min(run_level, roadmap.autonomy)
+        if trusted and not graph.partial and roadmap.valid
+        else 0
     )
     queue = build_queue(graph, waits, roadmap, inputs.captured_at)
     attention = build_attention(graph, waits, roadmap, inputs.captured_at)

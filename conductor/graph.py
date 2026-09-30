@@ -217,7 +217,8 @@ def _gh_node(rec: dict[str, Any]) -> Node:
     elif rec["is_pr"]:
         closed_as = "merged" if rec["merged"] else "unmerged"
     else:
-        closed_as = rec.get("state_reason") or "completed"
+        # пустая причина не доказывает ни выполнения, ни отмены (§3.4)
+        closed_as = rec.get("state_reason") or None
     return Node(
         _gh_id(rec),
         "pr" if rec["is_pr"] else "issue",
@@ -491,12 +492,12 @@ def build_graph(inputs: Inputs) -> Graph:
         partial=any(s.state in ("error", "not_queried") for s in sources),
         unread_repos=unread,
         gh_read=inputs.gh_state == "read",
-        pending_requests=_pending_requests(solid, nodes),
+        pending_requests=_pending_requests(solid, nodes, norm),
     )
 
 
 def _pending_requests(
-    records: list[dict[str, Any]], nodes: dict[str, Node]
+    records: list[dict[str, Any]], nodes: dict[str, Node], norm: dict[str, str]
 ) -> dict[str, str]:
     """Открытая заявка (метка inbox или шапка) на пункт, которого ещё нет:
     ожидание этого пункта — рукопожатие в процессе, а не «предпосылки нет»."""
@@ -505,7 +506,9 @@ def _pending_requests(
         if rec["is_pr"] or rec["state"] != "open":
             continue
         header = _protocol_header(rec.get("body", ""))
-        slug = header[0] if header else None
+        sender = FROM_RE.match(header[1]) if header else None
+        # шапка с неизвестным отправителем — не заявка (как у _legacy_protocol)
+        slug = header[0] if sender is not None and sender.group(1) in norm else None
         if slug is None and "inbox" in rec.get("labels", []):
             slug = field_value(rec.get("body", ""), "slug")
         target = item_id(rec["repo"], slug) if slug else None

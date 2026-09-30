@@ -12,7 +12,14 @@ from conductor.inputs import Inputs
 from conductor.model import Edge
 
 PrereqState = Literal[
-    "done", "cancelled", "open", "missing", "unread", "unresolvable", "request_open"
+    "done",
+    "cancelled",
+    "open",
+    "missing",
+    "unread",
+    "unresolvable",
+    "request_open",
+    "closed_unknown",
 ]
 Verdict = Literal["satisfied", "pending", "unknown"]
 DATE_RE = re.compile(r"^date>=(\d{4}-\d{2}-\d{2})$")
@@ -58,6 +65,8 @@ def prereq_state(graph: Graph, inputs: Inputs, prereq_id: str) -> PrereqState:
         return "cancelled" if inputs.history.get(prereq_id) else "missing"
     if node.is_open:
         return "open"
+    if node.closed_as is None:
+        return "closed_unknown"
     return "done" if node.closed_as in ("completed", "merged") else "cancelled"
 
 
