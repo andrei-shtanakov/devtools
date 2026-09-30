@@ -175,3 +175,109 @@ def test_allow_empty_repo_is_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigError, match="repo"):
         load_config(cfg)
+
+
+def _at(rule: str, *paths: str) -> Finding:
+    return Finding(
+        rule=rule,
+        category="quality",
+        severity="low",
+        confidence=Confidence.LIKELY,
+        owner_repo="devtools",
+        anchor=f"file:{paths[0]}",
+        locations=[Location(p, 1) for p in paths],
+    )
+
+
+def test_class_entry_matches_rule_glob_and_every_location(tmp_path: Path) -> None:
+    """A class entry (`rule` + `path` globs) silences a whole noise class —
+    e.g. ARG in tests — but a finding with any location outside `path`
+    (a clone spanning tests and code) stays: it is not wholly in the class."""
+    cfg = load_config(
+        cfg_file(
+            tmp_path,
+            '[[allow]]\nrule = "ruff/ARG*"\npath = "tests/**"\n'
+            'reason = "pytest fixtures"\nuntil = 2027-01-01\n',
+        )
+    )
+    items = [
+        _at("ruff/ARG001", "tests/test_a.py"),
+        _at("ruff/ARG002", "tests/sub/test_b.py"),
+        _at("ruff/ARG001", "governance/a.py"),
+        _at("ruff/B905", "tests/test_a.py"),
+        _at("ruff/ARG001", "tests/test_a.py", "governance/a.py"),
+    ]
+    res = apply_allowlist(items, cfg, date(2026, 9, 30))
+    assert [(f.rule, len(f.locations)) for f in res.suppressed] == [
+        ("ruff/ARG001", 1),
+        ("ruff/ARG002", 1),
+    ]
+    assert len(res.kept) == 3
+
+
+def test_class_entry_without_path_covers_every_file(tmp_path: Path) -> None:
+    cfg = load_config(
+        cfg_file(
+            tmp_path,
+            '[[allow]]\nrule = "radon/*"\nreason = "complexity is a metric"\n'
+            "until = 2027-01-01\n",
+        )
+    )
+    res = apply_allowlist(
+        [_at("radon/cc-D", "a.py"), _at("ruff/C901", "a.py")], cfg, date(2026, 9, 30)
+    )
+    assert [f.rule for f in res.suppressed] == ["radon/cc-D"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # path alone would be a file anchor under another name — say which rules
+        '[[allow]]\npath = "tests/**"\nreason = "r"\nuntil = 2027-01-01\n',
+        # one form per entry: mixing makes the match ambiguous
+        '[[allow]]\nid = "sc-1"\nrule = "ruff/*"\nreason = "r"\nuntil = 2027-01-01\n',
+        (
+            '[[allow]]\nanchor = "file:x.py"\nrule = "ruff/*"\nreason = "r"\n'
+            "until = 2027-01-01\n"
+        ),
+    ],
+)
+def test_class_entry_shape_errors(tmp_path: Path, body: str) -> None:
+    with pytest.raises(ConfigError):
+        load_config(cfg_file(tmp_path, body))
+
+
+def test_expired_class_entry_names_its_class(tmp_path: Path) -> None:
+    cfg = load_config(
+        cfg_file(
+            tmp_path,
+            '[[allow]]\nrule = "ruff/ARG*"\npath = "tests/**"\nreason = "r"\n'
+            "until = 2026-01-01\n",
+        )
+    )
+    res = apply_allowlist([], cfg, date(2026, 9, 30))
+    assert [f.anchor for f in res.expired] == ["allow:rule=ruff/ARG*@tests/**"]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        'rule = "ruff/ARG*"\npath = ""',  # inert: `\Z` matches no real path
+        'rule = ""\npath = "tests/**"',
+        'rule = "ruff/ARG*"\npath = ["tests/**"]',  # a traceback, not exit 4
+        "rule = 123",
+        # review #519 recheck: the same class for the point forms — a non-string
+        # anchor crashed matching, a non-string id matched nothing silently
+        "anchor = 123",
+        "id = 123",
+    ],
+)
+def test_class_entry_fields_must_be_non_empty_strings(
+    tmp_path: Path, fields: str
+) -> None:
+    """Review #519: an empty `path` made the entry silently inert (like
+    `repo = ""`, #437.5); a non-string one crashed the run outside the
+    ConfigError guard. Both are load errors (exit 4)."""
+    body = f'[[allow]]\n{fields}\nreason = "r"\nuntil = 2027-01-01\n'
+    with pytest.raises(ConfigError, match="rule|path|anchor|id"):
+        load_config(cfg_file(tmp_path, body))

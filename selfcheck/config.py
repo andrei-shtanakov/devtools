@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from selfcheck.model import Confidence, Finding, Location
-from selfcheck.roles import ROLE_NAMES
+from selfcheck.roles import ROLE_NAMES, glob_match
 
 
 class ConfigError(ValueError):
@@ -26,11 +26,31 @@ class AllowEntry:
     id: str | None = None
     anchor: str | None = None
     repo: str | None = None  # limits the entry to one owner_repo (§10.8)
+    # class form: a noise class, not one finding — `rule` glob over the rule
+    # name, optional `path` glob that EVERY location must match (a clone
+    # spanning tests and code is not wholly in a tests-only class)
+    rule: str | None = None
+    path: str | None = None
+
+    @property
+    def label(self) -> str:
+        """What the entry names — the tail of its `allow:` anchor."""
+        if self.rule is not None:
+            return f"rule={self.rule}" + (f"@{self.path}" if self.path else "")
+        return str(self.id or self.anchor)
 
     def matches(self, finding: Finding) -> bool:
-        """id equality, or anchor equality; ``file:P`` covers anchors of P."""
+        """id equality, anchor equality (``file:P`` covers anchors of P), or
+        the class form: rule glob plus, if set, a path glob on every location."""
         if self.repo is not None and finding.owner_repo != self.repo:
             return False
+        if self.rule is not None:
+            if not glob_match(self.rule, finding.rule):
+                return False
+            if self.path is None:
+                return True
+            paths = [loc.path for loc in finding.locations]
+            return bool(paths) and all(glob_match(self.path, p) for p in paths)
         if self.id is not None:
             return finding.id == self.id
         if self.anchor is None:
@@ -69,10 +89,21 @@ class Config:
 
 def _allow_entry(index: int, raw: dict[str, Any]) -> AllowEntry:
     missing = [k for k in ("reason", "until") if not raw.get(k)]
-    if not (raw.get("id") or raw.get("anchor")):
-        missing.append("id|anchor")
+    forms = [k for k in ("id", "anchor", "rule") if raw.get(k)]
+    if not forms:
+        missing.append("id|anchor|rule")
     if missing:
         raise ConfigError(f"[[allow]] #{index}: missing {', '.join(missing)}")
+    if len(forms) > 1:
+        raise ConfigError(f"[[allow]] #{index}: one of id|anchor|rule, got {forms}")
+    for key in ("id", "anchor", "rule", "path"):
+        # every matched field is a non-empty string: an empty one matches
+        # nothing — inert, like `repo = ""` (#437.5); a non-string one would
+        # crash matching outside exit 4 or silently match nothing (review #519)
+        if key in raw and not (isinstance(raw[key], str) and raw[key]):
+            raise ConfigError(f"[[allow]] #{index}: {key} must be a non-empty string")
+    if raw.get("path") and not raw.get("rule"):
+        raise ConfigError(f"[[allow]] #{index}: path needs rule (the class form)")
     if "repo" in raw and not (isinstance(raw["repo"], str) and raw["repo"]):
         # an empty repo limits the entry to no repo at all — inert, not a
         # wildcard (#437.5); omit the key to match every repo
@@ -86,6 +117,8 @@ def _allow_entry(index: int, raw: dict[str, Any]) -> AllowEntry:
         id=raw.get("id"),
         anchor=raw.get("anchor"),
         repo=raw.get("repo"),
+        rule=raw.get("rule"),
+        path=raw.get("path"),
     )
 
 
@@ -151,7 +184,7 @@ def apply_allowlist(
             severity="medium",
             confidence=Confidence.CONFIRMED,
             owner_repo="devtools",
-            anchor=f"allow:{a.id or a.anchor}",
+            anchor=f"allow:{a.label}",
             locations=[Location("selfcheck.toml", 1)],
             evidence=[{"kind": "until", "detail": a.until.isoformat()}],
             suggestion="продлить с новой причиной или удалить запись",
