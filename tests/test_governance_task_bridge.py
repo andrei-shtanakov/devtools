@@ -6616,7 +6616,7 @@ def _seed_revision(state, monkeypatch, **over):
     # База переиздания — бандл, проштампованный вмерженной доставкой v1
     # (идемпотентно, если вызывающий уже привёл её в это состояние).
     _stamp_base_as_previous_delivery(state)
-    by, at = _pr_signature(403)
+    _by, _at = _pr_signature(403)
     prospective = tb._prospective_anchor(state.target_dir, state.bundle_dir, None)
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     state.ops["tasks-deliver-v2"] = _revision_intent(state, prospective, **over)
@@ -8339,7 +8339,7 @@ def _v4_intent(state, **kw) -> dict:
     """
     from governance import task_bridge as tb
 
-    by, at = _pr_signature(403)
+    _by, _at = _pr_signature(403)
     return {
         "status": "started",
         "revision": 4,

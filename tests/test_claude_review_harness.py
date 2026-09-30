@@ -232,7 +232,7 @@ def _kit_env(log: Path) -> dict[str, str]:
 
 
 def test_new_kit_default_is_codex_via_kit_env(tmp_path: Path) -> None:
-    fleet_root, log = _new_kit_fleet(tmp_path)
+    _fleet_root, log = _new_kit_fleet(tmp_path)
     cmd = _resolve(tmp_path, repo="demo", env_extra={"HARNESS_KIT_LOG": str(log)})
     assert cmd == "codex exec"
     env = _kit_env(log)
@@ -263,7 +263,7 @@ def test_new_kit_claude_config_goes_through_kit_not_shim(tmp_path: Path) -> None
 
 
 def test_new_kit_cli_flags_beat_env_and_config(tmp_path: Path) -> None:
-    fleet_root, log = _new_kit_fleet(tmp_path)
+    _fleet_root, log = _new_kit_fleet(tmp_path)
     cmd = _resolve(
         tmp_path,
         repo="demo",
@@ -285,7 +285,7 @@ def test_new_kit_harness_flag_without_model_does_not_inherit_env_model(
     """Модель привязана к слою: `--harness codex` при REVIEW_MODEL=claude-opus-5
     в окружении обязан дать `codex exec`, а не `codex exec -m claude-opus-5`
     (и не пустую REVIEW_MODEL, которую кит отверг бы кодом 2)."""
-    fleet_root, log = _new_kit_fleet(tmp_path)
+    _fleet_root, log = _new_kit_fleet(tmp_path)
     cmd = _resolve(
         tmp_path,
         repo="demo",
@@ -301,7 +301,7 @@ def test_new_kit_harness_flag_without_model_does_not_inherit_env_model(
 
 
 def test_new_kit_external_review_cmd_wins_without_flags(tmp_path: Path) -> None:
-    fleet_root, log = _new_kit_fleet(tmp_path)
+    _fleet_root, log = _new_kit_fleet(tmp_path)
     cmd = _resolve(
         tmp_path,
         repo="demo",
@@ -318,7 +318,7 @@ def test_new_kit_external_review_cmd_wins_without_flags(tmp_path: Path) -> None:
 def test_new_kit_refusal_is_propagated_not_guessed(tmp_path: Path) -> None:
     """Кит отказал (код 2, например адаптера harness-claude нет) —
     review-pr.sh передаёт отказ и не подставляет строку ревьюера сам."""
-    fleet_root, log = _new_kit_fleet(tmp_path)
+    _fleet_root, log = _new_kit_fleet(tmp_path)
     err = _resolve(
         tmp_path,
         repo="demo",
@@ -366,7 +366,7 @@ def test_new_kit_probe_honours_absolute_review_kit_dir(tmp_path: Path) -> None:
     """Абсолютный REVIEW_KIT_DIR (как в прогоне через resolve_from_source)
     зонд берёт как есть — не склеивает с чекаутом и не уходит молча в ветку
     старого кита."""
-    fleet_root, log = _new_kit_fleet(tmp_path)
+    _fleet_root, log = _new_kit_fleet(tmp_path)
     elsewhere = tmp_path / "kit-elsewhere"
     elsewhere.mkdir()
     local_sh = elsewhere / "local.sh"

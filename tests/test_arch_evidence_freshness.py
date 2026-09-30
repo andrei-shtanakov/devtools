@@ -329,7 +329,7 @@ def test_escalation_creates_issue_with_dedup_key_and_adr006_fields(
 
     monkeypatch.setattr(sensor, "_gh", fake_gh)
     monkeypatch.setattr(sensor, "steward_repo_slug", lambda p: "o/steward")
-    code, status_path = _run(sensor, ws, tmp_path, "--escalate")
+    _code, status_path = _run(sensor, ws, tmp_path, "--escalate")
     esc = json.loads(status_path.read_text())["escalations"]
     assert esc == [
         {

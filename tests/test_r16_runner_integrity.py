@@ -74,7 +74,7 @@ def test_live_shape_is_consistent_and_completes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert run.audit_inconsistency(run.parse_audit(LIVE)) is None
-    code, record, calls = run_once(tmp_path, monkeypatch, LIVE)
+    _code, record, calls = run_once(tmp_path, monkeypatch, LIVE)
     assert (record["execution"], calls) == ("completed", ["deliver"])
     validate(record)
 

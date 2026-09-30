@@ -212,7 +212,7 @@ def _closure_on_origin(target, ops):
 def test_schema1_publishes_not_applicable_without_touching_checkout(
     tmp_path, monkeypatch
 ):
-    state, target, pin = _env(tmp_path, monkeypatch, charter=CH1)
+    _state, target, _pin = _env(tmp_path, monkeypatch, charter=CH1)
     ops = _ops()
     assert cc.run("run-1", ops) == 0
     assert (
@@ -225,7 +225,7 @@ def test_schema1_publishes_not_applicable_without_touching_checkout(
 
 
 def test_traced_measurement_published(tmp_path, monkeypatch):
-    state, target, pin = _env(tmp_path, monkeypatch)
+    _state, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin))))
     assert cc.run("run-1", ops) == 0
@@ -242,7 +242,7 @@ def test_dirty_tree_refused(tmp_path, monkeypatch):
 
 
 def test_head_not_product_sha_refused(tmp_path, monkeypatch):
-    state, target, pin = _env(tmp_path, monkeypatch)
+    _state, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     (target / "x.txt").write_text("x")
     _git(target, "add", ".")
@@ -253,7 +253,7 @@ def test_head_not_product_sha_refused(tmp_path, monkeypatch):
 
 
 def test_product_sha_not_on_default_refused(tmp_path, monkeypatch):
-    state, target, pin = _env(tmp_path, monkeypatch)
+    _state, target, _pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     _git(target, "checkout", "-q", "-b", "side")
     (target / "x.txt").write_text("x")
@@ -280,7 +280,7 @@ def test_bundle_read_at_pin_not_worktree(tmp_path, monkeypatch):
 def test_publish_failure_does_not_burn_result(tmp_path, monkeypatch):
     """I1: ревью упало после измерения — повтор публикует тот же текст без
     нового вызова spec-runner, а не отвечает «ключ измерен»."""
-    state, target, pin = _env(tmp_path, monkeypatch)
+    _state, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin))))
     ops.review_exit = 1
@@ -295,7 +295,7 @@ def test_publish_failure_does_not_burn_result(tmp_path, monkeypatch):
 def test_new_measurement_closes_stale_pr(tmp_path, monkeypatch):
     """I2: n/a-закрытие, потом оракул стал доступен — старый PR закрывается,
     новый несёт новое содержимое."""
-    state, target, pin = _env(tmp_path, monkeypatch)
+    _state, target, pin = _env(tmp_path, monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin))))
     ops.review_exit = 1
     monkeypatch.setattr(cc.task_bridge, "spec_runner_version", lambda: None)
@@ -309,7 +309,7 @@ def test_new_measurement_closes_stale_pr(tmp_path, monkeypatch):
 
 def test_same_content_new_response_refused(tmp_path, monkeypatch):
     """I6/G6: тот же ключ (корни + тесты) — новый ответ не публикуется."""
-    state, target, pin = _env(tmp_path, monkeypatch)
+    _state, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
     assert cc.run("run-1", ops) == 0
@@ -320,7 +320,7 @@ def test_same_content_new_response_refused(tmp_path, monkeypatch):
 
 
 def test_unrelated_py_edit_does_not_reopen_key(tmp_path, monkeypatch):
-    state, target, pin = _env(tmp_path, monkeypatch)
+    _state, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
     assert cc.run("run-1", ops) == 0
@@ -334,7 +334,7 @@ def test_unrelated_py_edit_does_not_reopen_key(tmp_path, monkeypatch):
 def test_response_level_not_applicable_and_foreign_error(tmp_path, monkeypatch):
     """I5: not_applicable ответа — закрытие not-applicable; error с чужим
     эхом — отказ шага, не blocked."""
-    state, target, pin = _env(tmp_path, monkeypatch)
+    _state, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     na = _response(target, pin)
     na.pop("beh")
@@ -344,7 +344,7 @@ def test_response_level_not_applicable_and_foreign_error(tmp_path, monkeypatch):
     meta, _ = split_frontmatter(_closure_on_origin(target, ops))
     assert meta["closure"] == "not-applicable"
 
-    state, target, pin = _env(tmp_path / "b", monkeypatch)
+    _state, target, pin = _env(tmp_path / "b", monkeypatch)
     _oracle_on(monkeypatch)
     err = _response(target, pin, bundle_pin="x" * 40)
     err.pop("beh")
@@ -358,7 +358,7 @@ def test_malformed_charter_refused(tmp_path, monkeypatch):
 
 
 def test_run_refuses_incomplete_run(tmp_path, monkeypatch):
-    state, target, pin = _env(tmp_path, monkeypatch)
+    state, _target, _pin = _env(tmp_path, monkeypatch)
     state.status = "waiting_human_merge"
     assert cc.run("run-1", _ops()) == 2
 
@@ -390,7 +390,7 @@ def test_response_level_error_publish_failure_is_retried_not_burned(
 ):
     """I-3: ответ-ошибка без product_roots: ключ — по содержимому, не по stdout;
     сбой публикации → повтор публикует тот же текст, не 6."""
-    state, target, pin = _env(tmp_path, monkeypatch)
+    _state, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     err = _response(target, pin)
     err.pop("beh")
@@ -410,7 +410,7 @@ def test_response_level_error_publish_failure_is_retried_not_burned(
 def test_same_content_on_another_machine_refused(tmp_path, monkeypatch):
     """I-4: защита от переброса видна в git — frontmatter закрытия на default
     несёт content_key; чистый out/ (другая машина) не даёт перемерить."""
-    state, target, pin = _env(tmp_path, monkeypatch)
+    _state, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
     assert cc.run("run-1", ops) == 0
@@ -429,7 +429,7 @@ def test_republish_after_pr_closed_adopts_existing_branch(tmp_path, monkeypatch)
     """Ревью #482: PR закрытия закрыт (или create_pr упал после push) — повтор
     не пушит новый коммит в ту же ветку (non-fast-forward навсегда), а
     переиспользует существующую ветку и создаёт PR заново."""
-    state, target, pin = _env(tmp_path, monkeypatch, charter=CH1)
+    _state, _target, _pin = _env(tmp_path, monkeypatch, charter=CH1)
     ops = _ops()
     ops.review_exit = 1
     assert cc.run("run-1", ops) == 2
@@ -442,7 +442,7 @@ def test_republish_after_pr_closed_adopts_existing_branch(tmp_path, monkeypatch)
 def test_bad_roots_refused_before_hashing(tmp_path, monkeypatch):
     """Ревью #482: корни ответа проверяются до обхода файлов — «/» не
     обходит файловую систему, а даёт отказ шага."""
-    state, target, pin = _env(tmp_path, monkeypatch)
+    _state, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     called = []
     monkeypatch.setattr(cc, "_content_sha", lambda *a: called.append(a) or "x")

@@ -2939,7 +2939,7 @@ def test_gate_seam_required_absent_blocks_without_mock(
         "отказ обязан назвать ИМЕННО отсутствующий required-узел: " + absent_text
     )
 
-    present, present_ops = _run_to_gate("r-gate-seam-present", with_charter=True)
+    _present, present_ops = _run_to_gate("r-gate-seam-present", with_charter=True)
     present_file = rs.run_dir("r-gate-seam-present") / "gate-findings.txt"
     present_text = (
         present_file.read_text(encoding="utf-8") if present_file.exists() else ""

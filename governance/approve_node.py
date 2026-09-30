@@ -414,7 +414,7 @@ def _propose(
     _close_obsolete_wave(state, nodes, fingerprint)
     wave = _wave_for(state, nodes, fingerprint)
     if joined is not None:
-        nums, op = joined
+        nums, _op = joined
         key = al.request_key(*nums)
         al.extend_request(state, key, node_id, self_hash, upstream_blobs)
     else:
