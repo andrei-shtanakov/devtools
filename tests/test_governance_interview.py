@@ -73,13 +73,13 @@ def test_synthetic_envelope_has_protocol_shape() -> None:
 
 
 def _spec(**over):
-    base = dict(
-        frame="customer",
-        stakeholder_role="product owner",
-        target="owner/alpha",
-        traces_to=None,
-        upstream_blob=None,
-    )
+    base = {
+        "frame": "customer",
+        "stakeholder_role": "product owner",
+        "target": "owner/alpha",
+        "traces_to": None,
+        "upstream_blob": None,
+    }
     base.update(over)
     return interview.InterviewSpec(**base)
 

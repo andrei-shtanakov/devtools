@@ -648,23 +648,23 @@ _LEGACY_HISTORY = "legacy"
 def _start_kwargs(tmp_path: Path, run_id: str, ops: FakeOps, **overrides):
     target_dir = tmp_path / f"target-{run_id}"
     target_dir.mkdir(exist_ok=True)
-    kwargs = dict(
-        subject="тестовый функционал",
-        repo="alpha",
-        repo_slug="owner/alpha",
-        ws_id="WS-1",
-        target_dir=str(target_dir),
-        bundle_dir=BUNDLE_DIR,
-        profile="profiles/team-exp.yaml",
-        run_id=run_id,
-        ops=ops,
+    kwargs = {
+        "subject": "тестовый функционал",
+        "repo": "alpha",
+        "repo_slug": "owner/alpha",
+        "ws_id": "WS-1",
+        "target_dir": str(target_dir),
+        "bundle_dir": BUNDLE_DIR,
+        "profile": "profiles/team-exp.yaml",
+        "run_id": run_id,
+        "ops": ops,
         # Дефолт прогона — волновой (PR #375), и тесты обязаны ехать тем же
         # режимом, что продукт. Явный `authoring="legacy"` у теста — это НЕ
         # настройка, а РАЗМЕТКА: «этот тест исполняет удаляемый путь». Task 3
         # удаляет ровно тех, кто её несёт, и проверить это можно грепом, а не
         # памятью (спека §6, исход «удаление»).
-        authoring="waves",
-    )
+        "authoring": "waves",
+    }
     kwargs.update(overrides)
     # Без материализации файла preflight (Task 8) стопил бы статусом
     # `stopped_preflight` ВСЕ существующие start()-тесты этого модуля —
@@ -711,13 +711,13 @@ def _reply(code: int, **over) -> iv.DiscoveryReply:
 
 
 def _need_spec(**over) -> iv.InterviewSpec:
-    base = dict(
-        frame="customer",
-        stakeholder_role="po",
-        target="owner/alpha",
-        traces_to=None,
-        upstream_blob=None,
-    )
+    base = {
+        "frame": "customer",
+        "stakeholder_role": "po",
+        "target": "owner/alpha",
+        "traces_to": None,
+        "upstream_blob": None,
+    }
     base.update(over)
     return iv.InterviewSpec(**base)
 
@@ -1922,17 +1922,17 @@ def _wave_run_at_s8(
     """
     target_dir = tmp_path / f"target-{run_id}"
     target_dir.mkdir(exist_ok=True)
-    kwargs = dict(
-        subject="тестовый функционал",
-        repo="alpha",
-        repo_slug="owner/alpha",
-        ws_id="WS-1",
-        target_dir=str(target_dir),
-        bundle_dir=BUNDLE_DIR,
-        profile="profiles/team-exp.yaml",
-        run_id=run_id,
-        authoring="waves",
-    )
+    kwargs = {
+        "subject": "тестовый функционал",
+        "repo": "alpha",
+        "repo_slug": "owner/alpha",
+        "ws_id": "WS-1",
+        "target_dir": str(target_dir),
+        "bundle_dir": BUNDLE_DIR,
+        "profile": "profiles/team-exp.yaml",
+        "run_id": run_id,
+        "authoring": "waves",
+    }
     kwargs.update(over)
     state = rs.new_run(**kwargs)
     state.wave = 5
@@ -2631,17 +2631,17 @@ def test_start_rejects_explicit_traversal_run_id(tmp_path: Path, runs_root) -> N
     отказ через `run_dir()` (единая точка валидации, `_reserve_run_id`)."""
     target_dir = tmp_path / "target-traversal"
     target_dir.mkdir()
-    kwargs = dict(
-        subject="s",
-        repo="alpha",
-        repo_slug="owner/alpha",
-        ws_id="WS-1",
-        target_dir=str(target_dir),
-        bundle_dir=BUNDLE_DIR,
-        profile="profiles/team-exp.yaml",
-        run_id="../../outside",
-        ops=FakeOps(),
-    )
+    kwargs = {
+        "subject": "s",
+        "repo": "alpha",
+        "repo_slug": "owner/alpha",
+        "ws_id": "WS-1",
+        "target_dir": str(target_dir),
+        "bundle_dir": BUNDLE_DIR,
+        "profile": "profiles/team-exp.yaml",
+        "run_id": "../../outside",
+        "ops": FakeOps(),
+    }
     with pytest.raises(ValueError):
         runner.start(**kwargs)
 
