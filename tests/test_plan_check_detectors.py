@@ -364,11 +364,13 @@ def test_a_backticked_tag_is_prose_not_a_stray_tag(plan_check) -> None:
     """Тег в бэктиках — цитата, а не уехавший тег: тела пунктов цитируют чужие
     `@id` постоянно, и локатор указал бы на прозу как на причину."""
     todo = (
-        "- [ ] сделать штуку @owner:o\n"
-        "      см. `@id:another-item` в соседнем плане\n"
+        "- [ ] сделать штуку @owner:o\n      см. `@id:another-item` в соседнем плане\n"
     )
-    hit = [w for w in _warnings_for(plan_check, _repo("maestro", todo))
-           if "PF-ID-MISSING" in w]
+    hit = [
+        w
+        for w in _warnings_for(plan_check, _repo("maestro", todo))
+        if "PF-ID-MISSING" in w
+    ]
     assert hit, "сам пункт без @id — находка остаётся"
     assert "stray tag" not in hit[0], hit[0]
 
@@ -380,15 +382,19 @@ def test_a_body_mentioning_other_ids_stays_silent(plan_check) -> None:
         "- [ ] сделать штуку @owner:o @id:own-id\n"
         "      это про @id:another-item и @blocked_by:maestro#third\n"
     )
-    assert not [w for w in _warnings_for(plan_check, _repo("maestro", todo))
-                if "PF-ID-MISSING" in w]
+    assert not [
+        w
+        for w in _warnings_for(plan_check, _repo("maestro", todo))
+        if "PF-ID-MISSING" in w
+    ]
 
 
 def test_an_item_without_a_stray_tag_is_still_surfaced(plan_check) -> None:
     """Находка про отсутствие `@id`, а не про уехавший тег: локатора нет,
     сообщение остаётся."""
     warnings = _warnings_for(
-        plan_check, _repo("maestro", "- [ ] сделать штуку @owner:o\n      просто проза\n")
+        plan_check,
+        _repo("maestro", "- [ ] сделать штуку @owner:o\n      просто проза\n"),
     )
     hit = [w for w in warnings if "PF-ID-MISSING" in w]
     assert hit and "stray tag" not in hit[0], hit

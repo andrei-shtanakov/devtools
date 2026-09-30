@@ -46,10 +46,12 @@ def test_model_id_absent_is_honest_none() -> None:
 
 def test_model_id_read_from_envelope() -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
-    envelope = json.dumps({
-        "model": "claude-opus-5-20260101",
-        "structured_output": {"criteria": _all_pass(rs), "findings": []},
-    })
+    envelope = json.dumps(
+        {
+            "model": "claude-opus-5-20260101",
+            "structured_output": {"criteria": _all_pass(rs), "findings": []},
+        }
+    )
     out = resp.parse_response(envelope, rs, _prepared())
     assert out.model_id == "claude-opus-5-20260101"
 
@@ -64,8 +66,15 @@ def test_missing_criterion_is_error() -> None:
 
 def test_finding_outside_input_is_error() -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
-    bad = [{"rule_id": "R1", "class": "major", "path": "20-design.md",
-            "lines": [1, 2], "statement": "x"}]
+    bad = [
+        {
+            "rule_id": "R1",
+            "class": "major",
+            "path": "20-design.md",
+            "lines": [1, 2],
+            "statement": "x",
+        }
+    ]
     with pytest.raises(r.EdgeCheckError) as exc:
         resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
     assert exc.value.code == "finding_outside_input"
@@ -73,8 +82,15 @@ def test_finding_outside_input_is_error() -> None:
 
 def test_line_range_beyond_file_is_error() -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
-    bad = [{"rule_id": "R1", "class": "major", "path": "15-behaviour-spec.md",
-            "lines": [1, 99], "statement": "x"}]
+    bad = [
+        {
+            "rule_id": "R1",
+            "class": "major",
+            "path": "15-behaviour-spec.md",
+            "lines": [1, 99],
+            "statement": "x",
+        }
+    ]
     with pytest.raises(r.EdgeCheckError) as exc:
         resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
     assert exc.value.code == "invalid_line_range"
@@ -82,8 +98,15 @@ def test_line_range_beyond_file_is_error() -> None:
 
 def test_unknown_finding_class_is_error() -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
-    bad = [{"rule_id": "R1", "class": "catastrophic", "path": "15-behaviour-spec.md",
-            "lines": [1, 1], "statement": "x"}]
+    bad = [
+        {
+            "rule_id": "R1",
+            "class": "catastrophic",
+            "path": "15-behaviour-spec.md",
+            "lines": [1, 1],
+            "statement": "x",
+        }
+    ]
     with pytest.raises(r.EdgeCheckError) as exc:
         resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
     assert exc.value.code == "invalid_finding_class"
@@ -125,8 +148,15 @@ def test_criterion_not_dict_raw_error() -> None:
 
 def test_lines_not_int_raw_error() -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
-    bad = [{"rule_id": "R1", "class": "major", "path": "15-behaviour-spec.md",
-            "lines": [1, "a"], "statement": "x"}]
+    bad = [
+        {
+            "rule_id": "R1",
+            "class": "major",
+            "path": "15-behaviour-spec.md",
+            "lines": [1, "a"],
+            "statement": "x",
+        }
+    ]
     with pytest.raises(r.EdgeCheckError) as exc:
         resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
     assert exc.value.code == "invalid_line_range"
@@ -141,8 +171,15 @@ def test_final_newline_line_counting() -> None:
     text = "BEH-01\nBEH-02\nBEH-03\n"
     f = i.InputFile("subject", "15-behaviour-spec.md", "aa", len(text), text)
     prep = i.PreparedInput((f,), (), True)
-    bad = [{"rule_id": "R1", "class": "major", "path": "15-behaviour-spec.md",
-            "lines": [1, 4], "statement": "x"}]
+    bad = [
+        {
+            "rule_id": "R1",
+            "class": "major",
+            "path": "15-behaviour-spec.md",
+            "lines": [1, 4],
+            "statement": "x",
+        }
+    ]
     with pytest.raises(r.EdgeCheckError) as exc:
         resp.parse_response(_envelope(_all_pass(rs), bad), rs, prep)
     assert exc.value.code == "invalid_line_range"
@@ -154,11 +191,16 @@ def test_no_final_newline_line_counting() -> None:
     text = "BEH-01\nBEH-02\nBEH-03"
     f = i.InputFile("subject", "15-behaviour-spec.md", "aa", len(text), text)
     prep = i.PreparedInput((f,), (), True)
-    good = [{"rule_id": "R1", "class": "major", "path": "15-behaviour-spec.md",
-             "lines": [1, 3], "statement": "x"}]
-    out = resp.parse_response(
-        _envelope(_all_pass(rs), good), rs, prep
-    )
+    good = [
+        {
+            "rule_id": "R1",
+            "class": "major",
+            "path": "15-behaviour-spec.md",
+            "lines": [1, 3],
+            "statement": "x",
+        }
+    ]
+    out = resp.parse_response(_envelope(_all_pass(rs), good), rs, prep)
     assert len(out.findings) == 1
 
 
@@ -167,8 +209,7 @@ def test_no_final_newline_line_counting() -> None:
 
 def test_unknown_criterion_id_is_error() -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
-    bad = _all_pass(rs) + [{"id": "ZZZ-NOTREAL", "status": "pass",
-                            "reason": "ок"}]
+    bad = _all_pass(rs) + [{"id": "ZZZ-NOTREAL", "status": "pass", "reason": "ок"}]
     with pytest.raises(r.EdgeCheckError) as exc:
         resp.parse_response(_envelope(bad, []), rs, _prepared())
     assert exc.value.code == "criteria_malformed"
@@ -188,9 +229,15 @@ def test_duplicate_criterion_id_is_error() -> None:
 
 def test_invalid_finding_rule_id() -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
-    bad = [{"rule_id": "UNKNOWN-RULE", "class": "major",
-            "path": "15-behaviour-spec.md", "lines": [1, 1],
-            "statement": "x"}]
+    bad = [
+        {
+            "rule_id": "UNKNOWN-RULE",
+            "class": "major",
+            "path": "15-behaviour-spec.md",
+            "lines": [1, 1],
+            "statement": "x",
+        }
+    ]
     with pytest.raises(r.EdgeCheckError) as exc:
         resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
     assert exc.value.code == "invalid_finding_rule"
@@ -201,8 +248,15 @@ def test_invalid_finding_rule_id() -> None:
 
 def test_lines_too_short_raw_error() -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
-    bad = [{"rule_id": "R1", "class": "major", "path": "15-behaviour-spec.md",
-            "lines": [1], "statement": "x"}]
+    bad = [
+        {
+            "rule_id": "R1",
+            "class": "major",
+            "path": "15-behaviour-spec.md",
+            "lines": [1],
+            "statement": "x",
+        }
+    ]
     with pytest.raises(r.EdgeCheckError) as exc:
         resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
     assert exc.value.code == "invalid_line_range"
@@ -210,8 +264,15 @@ def test_lines_too_short_raw_error() -> None:
 
 def test_lines_empty_raw_error() -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
-    bad = [{"rule_id": "R1", "class": "major", "path": "15-behaviour-spec.md",
-            "lines": [], "statement": "x"}]
+    bad = [
+        {
+            "rule_id": "R1",
+            "class": "major",
+            "path": "15-behaviour-spec.md",
+            "lines": [],
+            "statement": "x",
+        }
+    ]
     with pytest.raises(r.EdgeCheckError) as exc:
         resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
     assert exc.value.code == "invalid_line_range"
@@ -219,8 +280,15 @@ def test_lines_empty_raw_error() -> None:
 
 def test_lines_as_string_silent_error() -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
-    bad = [{"rule_id": "R1", "class": "major", "path": "15-behaviour-spec.md",
-            "lines": "12", "statement": "x"}]
+    bad = [
+        {
+            "rule_id": "R1",
+            "class": "major",
+            "path": "15-behaviour-spec.md",
+            "lines": "12",
+            "statement": "x",
+        }
+    ]
     with pytest.raises(r.EdgeCheckError) as exc:
         resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
     assert exc.value.code == "invalid_line_range"
@@ -228,8 +296,15 @@ def test_lines_as_string_silent_error() -> None:
 
 def test_lines_too_long_silent_error() -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
-    bad = [{"rule_id": "R1", "class": "major", "path": "15-behaviour-spec.md",
-            "lines": [1, 2, 3], "statement": "x"}]
+    bad = [
+        {
+            "rule_id": "R1",
+            "class": "major",
+            "path": "15-behaviour-spec.md",
+            "lines": [1, 2, 3],
+            "statement": "x",
+        }
+    ]
     with pytest.raises(r.EdgeCheckError) as exc:
         resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
     assert exc.value.code == "invalid_line_range"

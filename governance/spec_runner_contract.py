@@ -73,9 +73,7 @@ def target_selector_policy(target_dir: str | Path) -> SelectorPolicy | None:
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
-        raise ValueError(
-            f"{path}: конфиг spec-runner не читается ({exc})"
-        ) from exc
+        raise ValueError(f"{path}: конфиг spec-runner не читается ({exc})") from exc
     if not isinstance(data, dict):
         raise ValueError(f"{path}: корень конфига spec-runner не mapping")
     raw = data.get("executor", data)

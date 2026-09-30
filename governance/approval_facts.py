@@ -133,9 +133,7 @@ def disposition(facts: dict) -> Fact[Disposition]:
     if state == "MERGED":
         return Fact(Outcome.FOUND, Disposition.MERGED, "PR вмержен")
     if state == "CLOSED":
-        return Fact(
-            Outcome.FOUND, Disposition.CLOSED_UNMERGED, "PR закрыт без мержа"
-        )
+        return Fact(Outcome.FOUND, Disposition.CLOSED_UNMERGED, "PR закрыт без мержа")
     if state == "OPEN":
         return Fact(Outcome.FOUND, Disposition.OPEN, "PR открыт")
     return unavailable(f"состояние PR не прочитано: state={state!r}")
@@ -340,16 +338,17 @@ def policy_snapshot(ops: Ops, *, pinned_sha: str | None) -> PolicyFact:
     content = ops.repo_file_fact(repo, sha, path)
     if content.outcome is Outcome.UNAVAILABLE:
         return unavailable(
-            f"содержимое политики {repo}@{sha}:{path} не прочитано: "
-            f"{content.detail}"
+            f"содержимое политики {repo}@{sha}:{path} не прочитано: {content.detail}"
         )
     if content.outcome is Outcome.ABSENT or not isinstance(content.value, str):
         return _forbidden(POLICY_REFUSAL_ABSENT, f"в версии {sha} нет {path}")
     lines = ssot_env.definition_lines(content.value, APPROVER_ALLOWLIST_ENV)
     if len(lines) != 1 or not lines[0]:
         reason = (
-            "ключ отсутствует" if not lines
-            else "дубль ключа" if len(lines) > 1
+            "ключ отсутствует"
+            if not lines
+            else "дубль ключа"
+            if len(lines) > 1
             else "пустое значение"
         )
         return _forbidden(
@@ -429,9 +428,7 @@ def authorized_signature(
 # --- Факт: байты узла в base --------------------------------------------
 
 
-def read_blob_text(
-    ops: Ops, target_dir: str, ref: str, path: str
-) -> Fact[str]:
+def read_blob_text(ops: Ops, target_dir: str, ref: str, path: str) -> Fact[str]:
     """Текст файла в ревизии: `FOUND` либо `UNAVAILABLE` — и НИКОГДА `ABSENT`.
 
     `ops.show_file` отдаёт `None` и когда ревизии нет, и когда файла в ней
@@ -461,9 +458,7 @@ def read_blob_text(
     return Fact(Outcome.FOUND, text, f"{ref}:{path} прочитан")
 
 
-def read_blob_bytes(
-    ops: Ops, target_dir: str, ref: str, path: str
-) -> Fact[bytes]:
+def read_blob_bytes(ops: Ops, target_dir: str, ref: str, path: str) -> Fact[bytes]:
     """Exact bytes in a revision, with the same fail-closed outcome model."""
     try:
         data = ops.show_file_bytes(target_dir, ref, path)
@@ -480,9 +475,7 @@ def read_blob_bytes(
 # --- Факт: закрытие PR подтверждено --------------------------------------
 
 
-def confirm_closed(
-    ops: Ops, repo_slug: str, pr: int, comment: str
-) -> Fact[int]:
+def confirm_closed(ops: Ops, repo_slug: str, pr: int, comment: str) -> Fact[int]:
     """Закрытие PR: `FOUND` подтверждено либо `UNAVAILABLE`.
 
     `ops.close_pr` отдаёт `False` и при отсутствии прав, и когда PR уже

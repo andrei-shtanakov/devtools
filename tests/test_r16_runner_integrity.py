@@ -22,7 +22,9 @@ CYCLE = "2026-09-22"
 
 def summary_record(**counts: int) -> dict:
     """A summary line as kb_freshness --json prints it: five statuses + coverage."""
-    base = dict.fromkeys(("unchanged", "changed", "missing", "unverified", "invalid"), 0)
+    base = dict.fromkeys(
+        ("unchanged", "changed", "missing", "unverified", "invalid"), 0
+    )
     base |= {"notes": 214, "with_evidence": 4, "unparsed_frontmatter": 5}
     return {"summary": base | counts}
 
@@ -142,7 +144,11 @@ def test_exception_leaves_a_failed_receipt(
     code = run.run_cycle(cfg, NOW, dry_run=False)
     record = json.loads((cfg.receipts / f"{CYCLE}.json").read_text())
     assert code == 1
-    assert (record["execution"], record["attempt"], record["ok"]) == ("failed", 1, False)
+    assert (record["execution"], record["attempt"], record["ok"]) == (
+        "failed",
+        1,
+        False,
+    )
     assert record["delivery"]["action"] == action
     assert "RuntimeError: boom" in record["delivery"]["error"]
     assert says in record["delivery"]["error"]

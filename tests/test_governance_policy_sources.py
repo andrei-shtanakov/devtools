@@ -131,7 +131,8 @@ def test_wave_profile_is_a_level_prefix_of_the_target_profile(
 
 
 def test_wave_profile_pins_source_bytes_read_before_copy(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     """Исходник, изменившийся между чтением и записью копии, не подменяет
     пин: копия и manifest строятся из одних и тех же байтов (R1)."""
@@ -163,8 +164,12 @@ def test_wave_profile_last_wave_equals_source_artifacts(tmp_path: Path) -> None:
     # Уровни считаются по upstream ПРОФИЛЯ: делегат `tasks` (уровень 5)
     # отсекается, шесть узлов бандла — все.
     assert [a["id"] for a in data["artifacts"]] == [
-        "charter", "requirements", "behaviour-spec", "design",
-        "acceptance", "decomposition",
+        "charter",
+        "requirements",
+        "behaviour-spec",
+        "design",
+        "acceptance",
+        "decomposition",
     ]
     assert data["profile"] == "team-exp" and data["solo_auto_approve"] is True
     assert ps.wave_profile_dir(str(target), _PROFILE, 5, tmp_path / "run") == projected
@@ -175,6 +180,8 @@ def testprofile_levels_refuse_cycle_or_unknown_upstream() -> None:
     from governance import policy_sources as ps
 
     with pytest.raises(RuntimeError, match="цикл|неизвестный"):
-        ps.profile_levels([{"id": "a", "upstream": ["b"]}, {"id": "b", "upstream": ["a"]}])
+        ps.profile_levels(
+            [{"id": "a", "upstream": ["b"]}, {"id": "b", "upstream": ["a"]}]
+        )
     with pytest.raises(RuntimeError, match="цикл|неизвестный"):
         ps.profile_levels([{"id": "a", "upstream": ["zzz"]}])

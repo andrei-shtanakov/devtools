@@ -140,9 +140,7 @@ def coverage_findings(req_text: str, design_text: str) -> list[str]:
     """
     questions = parse_requirements_questions(req_text)
     resolutions = parse_design_resolutions(design_text)
-    architects_qs = [
-        qid for qid, role in questions.items() if role == _ARCHITECTS_ROLE
-    ]
+    architects_qs = [qid for qid, role in questions.items() if role == _ARCHITECTS_ROLE]
 
     findings: list[str] = []
 
@@ -165,7 +163,9 @@ def coverage_findings(req_text: str, design_text: str) -> list[str]:
         seen[match.group(1)] = seen.get(match.group(1), 0) + 1
     for qid, count in seen.items():
         if count > 1:
-            findings.append(f"{qid}: объявлен {count} раза в design (ожидается ровно один)")
+            findings.append(
+                f"{qid}: объявлен {count} раза в design (ожидается ровно один)"
+            )
     # 3. deferred без reason: — по ВСЕМ резолюциям design, включая Q вне
     #    входного набора (иначе рендер получает justification None).
     for qid, (state, reason) in resolutions.items():

@@ -88,7 +88,8 @@ def update_frontmatter(text: str, updates: Mapping[str, object]) -> str:
     assert sep, "split_frontmatter уже проверил разделитель"
     lines = head.split("\n")
     starts = [
-        (i, m.group(1).strip()) for i, line in enumerate(lines)
+        (i, m.group(1).strip())
+        for i, line in enumerate(lines)
         if (m := _TOP_KEY_RE.match(line))
     ]
     boundaries = sorted(
@@ -102,7 +103,9 @@ def update_frontmatter(text: str, updates: Mapping[str, object]) -> str:
 
     def render(key: str) -> list[str]:
         dumped = yaml.safe_dump(
-            {key: updates[key]}, sort_keys=False, allow_unicode=True,
+            {key: updates[key]},
+            sort_keys=False,
+            allow_unicode=True,
             default_flow_style=False,
         )
         return dumped.rstrip("\n").split("\n")

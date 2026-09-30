@@ -77,7 +77,8 @@ def _tmux_launch(session: str, root: Path, make_args: str) -> str:
     )
     done = subprocess.run(
         ["tmux", "new-session", "-d", "-s", session, "-c", str(root), shell_cmd],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if done.returncode:
         raise RuntimeError(done.stderr.strip() or "tmux failed")
@@ -259,7 +260,11 @@ def _build_app(rows: tuple[cm.RunRow, ...], root: Path):
             table.add_columns("run_id", "ws_id", "repo", "status", "step", "pr")
             for row in self._rows:
                 table.add_row(
-                    row.run_id, row.ws_id, row.repo, row.status, row.step,
+                    row.run_id,
+                    row.ws_id,
+                    row.repo,
+                    row.status,
+                    row.step,
                     "" if row.pr is None else str(row.pr),
                     key=row.run_id,
                 )
@@ -312,9 +317,7 @@ def _build_app(rows: tuple[cm.RunRow, ...], root: Path):
                 return
             parent_run_id, child_run_id = plan
             try:
-                self._set_status(
-                    launch_verify(parent_run_id, child_run_id, self._root)
-                )
+                self._set_status(launch_verify(parent_run_id, child_run_id, self._root))
             except (RuntimeError, FileNotFoundError) as exc:
                 self._set_status(f"error: {exc}")
 
@@ -329,18 +332,22 @@ def _run_tui(rows: tuple[cm.RunRow, ...], root: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--json", action="store_true",
+        "--json",
+        action="store_true",
         help="печать list_runs как JSON, без TUI (без импорта textual)",
     )
     parser.add_argument(
-        "--run-id", default=None,
+        "--run-id",
+        default=None,
         help=(
             "деталь одного прогона (detail_to_json(run_detail(<id>))), "
             "без TUI; сочетается с --json ради единообразия вызова"
         ),
     )
     parser.add_argument(
-        "--root", type=Path, default=DEVTOOLS_ROOT,
+        "--root",
+        type=Path,
+        default=DEVTOOLS_ROOT,
         help="корень devtools для tmux -c (cwd resume/verify)",
     )
     args = parser.parse_args(argv)

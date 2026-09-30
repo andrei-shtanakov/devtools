@@ -13,7 +13,9 @@ CH1 = "---\nspec_stage: charter\n---\n# Charter\n"
 
 
 def ch2(code="ENC", item="oracle"):
-    return f"---\nschema: 2\ncode: {code}\nplan_item: todo://devtools/{item}\n---\n# C\n"
+    return (
+        f"---\nschema: 2\ncode: {code}\nplan_item: todo://devtools/{item}\n---\n# C\n"
+    )
 
 
 def test_schema1_charter_has_no_findings():
@@ -45,11 +47,16 @@ def test_bad_code_shape(code):
 
 def test_plan_item_must_exist_in_own_repo_todo():
     ch = cg.read_charter(CH2)
-    assert cg.charter_findings(ch, ws_id="ws-a", todo_ids={"oracle"}, repo="devtools") == []
+    assert (
+        cg.charter_findings(ch, ws_id="ws-a", todo_ids={"oracle"}, repo="devtools")
+        == []
+    )
     out = cg.charter_findings(ch, ws_id="ws-a", todo_ids=set(), repo="devtools")
     assert any("oracle" in f for f in out)
     foreign = cg.Charter(2, "ENC", "todo://spec-runner/oracle")
-    out = cg.charter_findings(foreign, ws_id="ws-a", todo_ids={"oracle"}, repo="devtools")
+    out = cg.charter_findings(
+        foreign, ws_id="ws-a", todo_ids={"oracle"}, repo="devtools"
+    )
     assert any("spec-runner" in f for f in out)
 
 
@@ -86,17 +93,23 @@ def test_code_is_immutable_except_as_collision_violator():
 def test_stamp_idempotent_and_refuses_malformed():
     stamped = cg.stamp_charter(CH1, code="ENC", plan_item="todo://devtools/oracle")
     assert cg.read_charter(stamped) == cg.Charter(2, "ENC", "todo://devtools/oracle")
-    assert cg.stamp_charter(stamped, code="ENC", plan_item="todo://devtools/oracle") == stamped
+    assert (
+        cg.stamp_charter(stamped, code="ENC", plan_item="todo://devtools/oracle")
+        == stamped
+    )
     plain = cg.stamp_charter("# C\n\nтело\n", code="ENC", plan_item="todo://devtools/x")
     assert cg.read_charter(plain).code == "ENC" and "тело" in plain
     with pytest.raises(ValueError):
-        cg.stamp_charter("---\ncode: [unclosed\n---\n", code="ENC", plan_item="todo://devtools/x")
+        cg.stamp_charter(
+            "---\ncode: [unclosed\n---\n", code="ENC", plan_item="todo://devtools/x"
+        )
 
 
 def _git(repo, *args):
     subprocess.run(
         ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
 
 

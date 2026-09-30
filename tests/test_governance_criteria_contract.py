@@ -1,4 +1,5 @@
 """criteria_contract: min-spec-runner.env и целостность вендоренной копии."""
+
 from __future__ import annotations
 
 import hashlib
@@ -26,9 +27,12 @@ def test_vendored_requires_matching_manifest(tmp_path):
     schema = tmp_path / "response.schema.json"
     schema.write_text("{}")
     (tmp_path / "PIN").write_text("SOURCE: spec-runner @ abc1234\n")
-    assert cc.integrity_findings(tmp_path) != [] and not cc.vendored(tmp_path)  # нет manifest
-    (tmp_path / "manifest.json").write_text(json.dumps(
-        {"response.schema.json": hashlib.sha256(b"{}").hexdigest()}))
+    assert cc.integrity_findings(tmp_path) != [] and not cc.vendored(
+        tmp_path
+    )  # нет manifest
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"response.schema.json": hashlib.sha256(b"{}").hexdigest()})
+    )
     assert cc.integrity_findings(tmp_path) == [] and cc.vendored(tmp_path)
     mv = cc.read_min_version(tmp_path / "min-spec-runner.env")
     assert cc.oracle_available("4.3.0", mv, is_vendored=True)
@@ -41,16 +45,34 @@ def test_vendored_requires_matching_manifest(tmp_path):
 
 def _upstream(tmp_path, content: bytes) -> tuple[Path, str]:
     import subprocess
+
     up = tmp_path / "up"
     d = up / "contracts/criteria-closure/v1"
     d.mkdir(parents=True)
     (d / "response.schema.json").write_bytes(content)
     subprocess.run(["git", "init", "-q", str(up)], check=True)
     subprocess.run(["git", "-C", str(up), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(up), "-c", "user.email=t@t", "-c", "user.name=t",
-                    "commit", "-qm", "x"], check=True)
-    sha = subprocess.run(["git", "-C", str(up), "rev-parse", "HEAD"], capture_output=True,
-                         text=True, check=True).stdout.strip()
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(up),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "x",
+        ],
+        check=True,
+    )
+    sha = subprocess.run(
+        ["git", "-C", str(up), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
     return up, sha
 
 
@@ -58,8 +80,9 @@ def _vendor(d, sha, content: bytes):
     write_min(d)
     (d / "response.schema.json").write_bytes(content)
     (d / "PIN").write_text(f"SOURCE: spec-runner @ {sha}\n")
-    (d / "manifest.json").write_text(json.dumps(
-        {"response.schema.json": hashlib.sha256(content).hexdigest()}))
+    (d / "manifest.json").write_text(
+        json.dumps({"response.schema.json": hashlib.sha256(content).hexdigest()})
+    )
 
 
 def test_drift_against_pinned_upstream(tmp_path):

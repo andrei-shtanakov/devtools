@@ -94,10 +94,21 @@ def run_codex(batch: list[dict]) -> list[dict]:
         schema.write_text(json.dumps(SCHEMA))
         try:
             done = subprocess.run(
-                ["codex", "exec", "--ephemeral", "--output-schema", str(schema),
-                 "--output-last-message", str(answer), "--sandbox", "read-only",
-                 prompt],
-                capture_output=True, text=True, timeout=300,
+                [
+                    "codex",
+                    "exec",
+                    "--ephemeral",
+                    "--output-schema",
+                    str(schema),
+                    "--output-last-message",
+                    str(answer),
+                    "--sandbox",
+                    "read-only",
+                    prompt,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise ClassifyError(str(exc)) from exc
@@ -137,8 +148,10 @@ def refine(
             missing.append(issue)
     if not missing:
         return result
-    batch = [{"repo": x.repo, "number": x.number, "title": x.title,
-              "body": x.body[:2000]} for x in missing]
+    batch = [
+        {"repo": x.repo, "number": x.number, "title": x.title, "body": x.body[:2000]}
+        for x in missing
+    ]
     try:
         answers = run(batch)
     except ClassifyError:
@@ -146,7 +159,7 @@ def refine(
     by_key = {f"{x.repo}#{x.number}": x for x in missing}
     for item in answers:
         try:
-            issue = by_key[f'{item["repo"]}#{int(item["number"])}']
+            issue = by_key[f"{item['repo']}#{int(item['number'])}"]
             kind, confidence = str(item["kind"]), float(item["confidence"])
         except (KeyError, TypeError, ValueError):
             continue

@@ -155,7 +155,15 @@ def run_level(
         path = out_dir / f"{edge.node}--{edge.edge_id}.json"
         prior = _reusable(effective, path)
         record = _check_edge(
-            state, ops, edge, out_dir, contracts_dir, model, effort, timeout, call,
+            state,
+            ops,
+            edge,
+            out_dir,
+            contracts_dir,
+            model,
+            effort,
+            timeout,
+            call,
             prior,
         )
         if prior is not None and record is prior:
@@ -164,7 +172,9 @@ def run_level(
         record["node"] = edge.node
         record["wave"] = wave
         record["result_key"] = result_key(
-            record["subject"], record["bases"], record["absence"],
+            record["subject"],
+            record["bases"],
+            record["absence"],
             record["check_identity"],
         )
         path.write_text(
@@ -173,7 +183,9 @@ def run_level(
         _append_ledger(run_dir, record, path)
         records[(edge.node, edge.edge_id)] = record
     verdicts = {r["verdict"] for r in records.values()}
-    verdict = "ERROR" if "ERROR" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
+    verdict = (
+        "ERROR" if "ERROR" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
+    )
     return LevelResult(records, verdict, _EXIT[verdict])
 
 
@@ -282,13 +294,15 @@ def _check_edge(
                     edge, "unknown_node", f"основания {source!r} нет в DAG"
                 )
             text = ops.show_file(
-                state.target_dir, state.base_ref or "master",
+                state.target_dir,
+                state.base_ref or "master",
                 f"{state.bundle_dir}/{rel}",
             )
             if text is not None:
                 (input_dir / rel).parent.mkdir(parents=True, exist_ok=True)
                 (input_dir / rel).write_text(text, encoding="utf-8")
         bases.append((role, input_dir / rel))
+
     def lookup(fresh: dict) -> dict | None:
         # Ключ D9 входа, посчитанного сейчас, против ключа прошлой записи:
         # правка subject или основания меняет хэш — переиспользования нет.
@@ -300,15 +314,24 @@ def _check_edge(
         if (reviewer.get("model"), reviewer.get("effort")) != (model, effort):
             return None
         key = result_key(
-            fresh["subject"], fresh["bases"], fresh["absence"],
+            fresh["subject"],
+            fresh["bases"],
+            fresh["absence"],
             fresh["check_identity"],
         )
         return prior if key == prior.get("result_key") else None
 
     return run_check(
-        edge.edge_id, input_dir, [input_dir / subject_rel], bases,
-        contracts_dir=contracts_dir, model=model, effort=effort,
-        timeout=timeout, call=call, lookup=lookup,
+        edge.edge_id,
+        input_dir,
+        [input_dir / subject_rel],
+        bases,
+        contracts_dir=contracts_dir,
+        model=model,
+        effort=effort,
+        timeout=timeout,
+        call=call,
+        lookup=lookup,
     )
 
 

@@ -125,9 +125,7 @@ def run_check(
 
     if not prepared.applicable:
         ids = ", ".join(a.rule_id for a in prepared.absences)
-        return finish(
-            "N/A", reason=f"основание отсутствует, разрешено правилом {ids}"
-        )
+        return finish("N/A", reason=f"основание отсутствует, разрешено правилом {ids}")
 
     try:
         built = prompt_mod.build_prompt(ruleset, prepared)

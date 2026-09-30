@@ -44,7 +44,9 @@ def evidence_dir(state: RunState) -> str:
     return f"{parent}/evidence/edge-check" if parent else "evidence/edge-check"
 
 
-def evidence_files(state: RunState, records: dict[tuple[str, str], dict]) -> dict[str, bytes]:
+def evidence_files(
+    state: RunState, records: dict[tuple[str, str], dict]
+) -> dict[str, bytes]:
     """Путь в репо → байты evidence, по файлу на ребро (`<node>--<edge>.json`)."""
     root = evidence_dir(state)
     return {
@@ -80,7 +82,8 @@ def surface_violations(
     if "charter" in op["nodes"]:
         prefixes.append(f"{state.bundle_dir}/00-discovery/")
     return sorted(
-        path for path in changed
+        path
+        for path in changed
         if path not in allowed and not any(path.startswith(p) for p in prefixes)
     )
 
@@ -92,7 +95,9 @@ def level_verdict(records: dict[tuple[str, str], dict]) -> str:
     return "FAIL" if "FAIL" in verdicts else "PASS"
 
 
-def checklist_body(state: RunState, head: str, records: dict[tuple[str, str], dict]) -> str:
+def checklist_body(
+    state: RunState, head: str, records: dict[tuple[str, str], dict]
+) -> str:
     lines = [
         f"<!-- {EDGE_MARKER} head={head} -->",
         f"Edge-check волны W{state.wave} прогона `{state.run_id}`: "
@@ -171,10 +176,7 @@ def publish_wave(
         remote = an.pr_head(state, ops, existing)
         if remote != head:
             ops.fetch_branch(state.target_dir, op["branch"])
-            ours = (
-                ops.is_ancestor(state.target_dir, remote, head)
-                if remote else False
-            )
+            ours = ops.is_ancestor(state.target_dir, remote, head) if remote else False
             if ours is None:
                 return CODE_UNRESOLVED
             if not ours:
@@ -189,8 +191,7 @@ def publish_wave(
         ops.commit_paths(
             state.target_dir,
             list(files),
-            f"evidence: edge-check волны W{state.wave} для заявки {key} "
-            "(fleet-agent)",
+            f"evidence: edge-check волны W{state.wave} для заявки {key} (fleet-agent)",
             force_paths=tuple(files),
         )
         new_head = ops.rev_parse(state.target_dir, "HEAD")

@@ -4,6 +4,7 @@
 его клон prograph внутри workspace, и steward с вендоренными копиями + PIN +
 evidence-парой WS-005. Все времена задаются снаружи — реальных часов здесь нет.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -33,12 +34,15 @@ def git(cwd: Path, *args: str, at_time: datetime | None = None) -> str:
         # For commit commands without explicit time, try to use last commit time + 1 sec
         code = subprocess.run(
             ["git", "-C", str(cwd), "log", "-1", "--format=%cI"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         ).returncode
         if code == 0:
             last_output = subprocess.run(
                 ["git", "-C", str(cwd), "log", "-1", "--format=%cI"],
-                capture_output=True, text=True, check=False,
+                capture_output=True,
+                text=True,
+                check=False,
             ).stdout.strip()
             if last_output:
                 try:
@@ -55,7 +59,10 @@ def git(cwd: Path, *args: str, at_time: datetime | None = None) -> str:
         env["GIT_COMMITTER_DATE"] = iso_time
     proc = subprocess.run(
         ["git", "-C", str(cwd), *args],
-        capture_output=True, text=True, check=True, env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
     )
     return proc.stdout.strip()
 
@@ -69,20 +76,18 @@ def _init_repo(path: Path) -> None:
 
 @dataclass
 class Workspace:
-    root: Path      # workspace: содержит prograph/ и steward/
+    root: Path  # workspace: содержит prograph/ и steward/
     prograph: Path  # локальный клон canon
     steward: Path
-    seed: Path      # upstream-рабочий клон (для правок «на GitHub»)
-    canon: Path     # bare-репо, играет origin
+    seed: Path  # upstream-рабочий клон (для правок «на GitHub»)
+    canon: Path  # bare-репо, играет origin
 
 
 def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def make_workspace(
-    tmp: Path, *, now: datetime, report_age_hours: int = 1
-) -> Workspace:
+def make_workspace(tmp: Path, *, now: datetime, report_age_hours: int = 1) -> Workspace:
     root = tmp / "ws"
     root.mkdir()
 
@@ -121,13 +126,27 @@ def make_workspace(
     evidence.mkdir(parents=True)
     (evidence / "intended-graph.yaml").write_text("components: []\n")
     report_time = now - timedelta(hours=report_age_hours)
-    (evidence / "conformance-report.json").write_text(json.dumps({
-        "schema": "conformance-report/v1",
-        "generated_at": _iso(report_time),
-        "snapshot": {"indexed_at": _iso(report_time), "id": 1, "complete": True},
-    }))
+    (evidence / "conformance-report.json").write_text(
+        json.dumps(
+            {
+                "schema": "conformance-report/v1",
+                "generated_at": _iso(report_time),
+                "snapshot": {
+                    "indexed_at": _iso(report_time),
+                    "id": 1,
+                    "complete": True,
+                },
+            }
+        )
+    )
     git(steward, "add", "-A")
-    git(steward, "commit", "-m", "vendored contracts + WS-005 evidence", at_time=report_time)
+    git(
+        steward,
+        "commit",
+        "-m",
+        "vendored contracts + WS-005 evidence",
+        at_time=report_time,
+    )
     return Workspace(root, prograph, steward, seed, canon)
 
 

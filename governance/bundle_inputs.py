@@ -13,9 +13,7 @@ from governance.run_state import RunState
 from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 
 
-def _filename(
-    dag: tuple[tuple[str, tuple[str, ...]], ...], node: str
-) -> str:
+def _filename(dag: tuple[tuple[str, tuple[str, ...]], ...], node: str) -> str:
     for filename, _upstreams in dag:
         if bundle_dag.node_id(filename) == node:
             return filename
@@ -73,9 +71,8 @@ def _source_inputs(state: RunState, node: str) -> Fact[dict[str, str]]:
             return unavailable(
                 f"brief descriptor несёт непереносимый source path {path!r}"
             )
-    if (
-        (frame == "customer" and requirements_source != primary)
-        or (frame == "engineer" and requirements_source == primary)
+    if (frame == "customer" and requirements_source != primary) or (
+        frame == "engineer" and requirements_source == primary
     ):
         return unavailable(
             "brief descriptor расходится между frame и requirements_source"
@@ -104,8 +101,7 @@ def direct_blobs(
     if source_fact.outcome is not Outcome.FOUND or source_fact.value is None:
         return Fact(source_fact.outcome, None, source_fact.detail)
     named_paths = {
-        upstream: _filename(dag, upstream)
-        for upstream in _upstreams(dag, node)
+        upstream: _filename(dag, upstream) for upstream in _upstreams(dag, node)
     }
     named_paths.update(source_fact.value)
     source_names = set(source_fact.value)
@@ -129,20 +125,13 @@ def direct_blobs(
             except (OSError, UnicodeError) as exc:
                 return unavailable(f"байты {bundle_path} в worktree: {exc}")
         elif name in source_names:
-            bytes_fact = af.read_blob_bytes(
-                ops, state.target_dir, ref, bundle_path
-            )
-            if (
-                bytes_fact.outcome is not Outcome.FOUND
-                or bytes_fact.value is None
-            ):
+            bytes_fact = af.read_blob_bytes(ops, state.target_dir, ref, bundle_path)
+            if bytes_fact.outcome is not Outcome.FOUND or bytes_fact.value is None:
                 return Fact(bytes_fact.outcome, None, bytes_fact.detail)
             actual[name] = blob_sha1_bytes(bytes_fact.value)
             continue
         else:
-            fact = af.read_blob_text(
-                ops, state.target_dir, ref, bundle_path
-            )
+            fact = af.read_blob_text(ops, state.target_dir, ref, bundle_path)
             if fact.outcome is not Outcome.FOUND or fact.value is None:
                 return Fact(fact.outcome, None, fact.detail)
             text = fact.value

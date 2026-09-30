@@ -78,13 +78,17 @@ def charter_findings(
     if not charter.code:
         out.append(f"{ws_id}: схема 2 требует code")
     elif not CODE_RE.match(str(charter.code)):
-        out.append(f"{ws_id}: code {charter.code!r} не соответствует CODE ^[A-Z]{{2,6}}$")
+        out.append(
+            f"{ws_id}: code {charter.code!r} не соответствует CODE ^[A-Z]{{2,6}}$"
+        )
     if not charter.plan_item:
         out.append(f"{ws_id}: схема 2 требует plan_item")
     else:
         m = PLAN_ITEM_RE.match(str(charter.plan_item))
         if m is None:
-            out.append(f"{ws_id}: plan_item {charter.plan_item!r} не todo://<repo>/<id>")
+            out.append(
+                f"{ws_id}: plan_item {charter.plan_item!r} не todo://<repo>/<id>"
+            )
         elif m.group(1) != repo:
             out.append(f"{ws_id}: plan_item указывает на чужой репо {m.group(1)}")
         elif m.group(2) not in todo_ids:
@@ -92,7 +96,9 @@ def charter_findings(
     return out
 
 
-def collision_findings(charters: dict[str, Charter], *, order: dict[str, int]) -> list[str]:
+def collision_findings(
+    charters: dict[str, Charter], *, order: dict[str, int]
+) -> list[str]:
     """Один код у двух charter'ов: нарушитель — позже влитый по first-parent.
 
     `order` — позиция влития charter'а в first-parent истории (меньше —
@@ -191,7 +197,8 @@ def repo_findings(repo: Path, base_ref: str | None) -> list[str]:
     «базу не прочитать» ≠ «в базе нет charter'ов».
     """
     if base_ref is not None and (
-        not base_ref or _git(repo, "cat-file", "-e", f"{base_ref}^{{commit}}").returncode
+        not base_ref
+        or _git(repo, "cat-file", "-e", f"{base_ref}^{{commit}}").returncode
     ):
         return [f"база {base_ref!r} не резолвится в коммит — сверка с базой невозможна"]
     todo = repo / "TODO.md"
@@ -216,7 +223,10 @@ def repo_findings(repo: Path, base_ref: str | None) -> list[str]:
             f.split(":", 1)[0]
             for f in collision_findings(
                 {_ws(p): c for p, c in base.items()},
-                order={_ws(p): i for p, i in merge_order(repo, base_ref, list(base)).items()},
+                order={
+                    _ws(p): i
+                    for p, i in merge_order(repo, base_ref, list(base)).items()
+                },
             )
         }
         for path, ch in head.items():

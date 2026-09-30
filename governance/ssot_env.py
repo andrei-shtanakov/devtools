@@ -39,7 +39,7 @@ def definition_lines(text: str, key: str) -> list[str]:
         if not stripped or stripped.startswith("#"):
             continue
         if stripped.startswith(prefix):
-            found.append(stripped[len(prefix):].strip())
+            found.append(stripped[len(prefix) :].strip())
     return found
 
 

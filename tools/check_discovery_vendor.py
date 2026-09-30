@@ -117,9 +117,7 @@ def github_head_fetch(commit: str, rel: str) -> bytes | None:
         if not isinstance(branch, str) or not branch:
             return None
         commit_url = COMMITS_API.format(ref=urllib.parse.quote(branch))
-        commit_request = urllib.request.Request(
-            commit_url, headers=_auth_headers()
-        )
+        commit_request = urllib.request.Request(commit_url, headers=_auth_headers())
         with urllib.request.urlopen(commit_request, timeout=20) as response:
             return json.load(response)["sha"].encode("utf-8")
     except (urllib.error.URLError, TimeoutError, KeyError, ValueError, TypeError):

@@ -459,7 +459,9 @@ def sync_vault(vault: Path) -> str | None:
     if git_out(vault, "pull", "--ff-only", "--quiet", "origin", branch) is None:
         return f"pull --ff-only origin {branch} failed"
     head = (git_out(vault, "rev-parse", "HEAD") or "").strip()
-    remote = (git_out(vault, "rev-parse", f"refs/remotes/origin/{branch}") or "").strip()
+    remote = (
+        git_out(vault, "rev-parse", f"refs/remotes/origin/{branch}") or ""
+    ).strip()
     if not head or head != remote:
         return f"HEAD {head[:12]} is not origin/{branch} {remote[:12]}"
     dirty = git_out(vault, "status", "--porcelain", "--untracked-files=all")
@@ -473,8 +475,14 @@ def run_audit(cfg: Config) -> Audit:
     """Run the published-target audit and parse what it printed."""
     out = subprocess.run(
         [
-            "uv", "run", str(cfg.audit), "--json", "--target", "published",
-            "--workspace", str(cfg.workspace),
+            "uv",
+            "run",
+            str(cfg.audit),
+            "--json",
+            "--target",
+            "published",
+            "--workspace",
+            str(cfg.workspace),
         ],
         capture_output=True,
         text=True,
@@ -534,7 +542,15 @@ def deliver(
         if existing is None:
             ensure_label(cfg)
             url = gh(
-                cfg, "issue", "create", "--title", TITLE, "--label", LABEL, "--body", body
+                cfg,
+                "issue",
+                "create",
+                "--title",
+                TITLE,
+                "--label",
+                LABEL,
+                "--body",
+                body,
             )
             return Delivery("created", int(url.rstrip().rsplit("/", 1)[-1]))
         gh(cfg, "issue", "edit", str(existing["number"]), "--body", body)

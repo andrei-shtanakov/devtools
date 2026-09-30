@@ -28,8 +28,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bundle", required=True, type=Path)
     parser.add_argument("--subject", required=True, action="append", type=Path)
     parser.add_argument("--basis", required=True, action="append")
-    parser.add_argument("--contracts", type=Path,
-                        default=Path(__file__).parent / "contracts/edge-check/v1")
+    parser.add_argument(
+        "--contracts",
+        type=Path,
+        default=Path(__file__).parent / "contracts/edge-check/v1",
+    )
     parser.add_argument("--model", default="claude-opus-5")
     parser.add_argument("--effort")
     parser.add_argument("--timeout", type=int, default=600)
@@ -46,9 +49,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         record = run_check(
-            args.edge, args.bundle, args.subject, bases,
-            contracts_dir=args.contracts, model=args.model,
-            effort=args.effort, timeout=args.timeout,
+            args.edge,
+            args.bundle,
+            args.subject,
+            bases,
+            contracts_dir=args.contracts,
+            model=args.model,
+            effort=args.effort,
+            timeout=args.timeout,
         )
         # Печать — ДО записи в файл (находка I6): сбой `--out` не должен
         # прятать уже посчитанный результат состоявшегося вызова.
@@ -58,8 +66,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 args.out.write_text(text + "\n", encoding="utf-8")
             except OSError as exc:
-                print(f"edge-check: не удалось записать --out: {exc}",
-                      file=sys.stderr)
+                print(f"edge-check: не удалось записать --out: {exc}", file=sys.stderr)
                 return 2
         return _EXIT[record["verdict"]]
     except EdgeCheckError as exc:  # только конфигурация: каталог правил/ребро
@@ -67,8 +74,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except Exception as exc:  # noqa: BLE001 — последний рубеж (находка C2):
         # сломанный прибор не должен выдавать себя за код 1 (FAIL)
-        print(f"edge-check: неожиданный сбой ({type(exc).__name__}): {exc}",
-              file=sys.stderr)
+        print(
+            f"edge-check: неожиданный сбой ({type(exc).__name__}): {exc}",
+            file=sys.stderr,
+        )
         return 3
 
 

@@ -5,7 +5,10 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from .arch_freshness_fixtures import (
-    EVIDENCE_DIR, git, make_workspace, upstream_change,
+    EVIDENCE_DIR,
+    git,
+    make_workspace,
+    upstream_change,
 )
 
 NOW = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
@@ -19,9 +22,7 @@ def test_fixture_builds_polyrepo_workspace(tmp_path):
         (ws.steward / EVIDENCE_DIR / "conformance-report.json").read_text()
     )
     assert report["snapshot"]["indexed_at"] == "2026-08-04T11:00:00Z"
-    upstream_change(
-        ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "mutate"
-    )
+    upstream_change(ws, "contracts/intended-graph/v1/schema.json", b"{}\n", "mutate")
     # canon получил новый коммит, локальный клон — ещё нет
     assert git(ws.seed, "rev-parse", "HEAD") != git(ws.prograph, "rev-parse", "HEAD")
 
@@ -49,9 +50,12 @@ def test_resolve_upstream_reports_moving_default_branch(sensor, tmp_path):
     # видит именно canon-HEAD, а не отставший локальный чекаут
     assert up["head_sha"] == git(ws.seed, "rev-parse", "HEAD")
     assert up["default_branch"] == "master"
-    assert sensor.upstream_bytes(
-        ws.prograph, up["head_sha"], "contracts/intended-graph/v1/schema.json"
-    ) == b"{}\n"
+    assert (
+        sensor.upstream_bytes(
+            ws.prograph, up["head_sha"], "contracts/intended-graph/v1/schema.json"
+        )
+        == b"{}\n"
+    )
     assert sensor.upstream_ls(
         ws.prograph, up["head_sha"], "contracts/intended-graph/v1"
     ) == ["schema.json"]
@@ -60,6 +64,7 @@ def test_resolve_upstream_reports_moving_default_branch(sensor, tmp_path):
 def test_resolve_upstream_unavailable_when_remote_gone(sensor, tmp_path):
     ws = make_workspace(tmp_path, now=NOW)
     import shutil
+
     shutil.rmtree(ws.canon)
     up, finding = sensor.resolve_upstream(ws.prograph)
     assert up is None
@@ -149,10 +154,17 @@ def test_evidence_stale_when_manifest_dirty(sensor, tmp_path):
 
 def _run(sensor, ws, tmp_path, *extra):
     status = tmp_path / "status.json"
-    code = sensor.main([
-        "--workspace", str(ws.root), "--status-file", str(status),
-        "--now", "2026-08-04T12:00:00Z", *extra,
-    ])
+    code = sensor.main(
+        [
+            "--workspace",
+            str(ws.root),
+            "--status-file",
+            str(status),
+            "--now",
+            "2026-08-04T12:00:00Z",
+            *extra,
+        ]
+    )
     return code, status
 
 
@@ -184,6 +196,7 @@ def test_drift_run_exits_1_with_drift_status(sensor, tmp_path):
 def test_unavailable_never_reads_as_clean(sensor, tmp_path):
     ws = make_workspace(tmp_path, now=NOW)
     import shutil
+
     shutil.rmtree(ws.canon)
     code, status_path = _run(sensor, ws, tmp_path)
     assert code == 1
@@ -195,12 +208,20 @@ def test_crash_exits_4_and_leaves_status_untouched(sensor, tmp_path, monkeypatch
     status = tmp_path / "status.json"
     status.write_text('{"prior": true}')
     monkeypatch.setattr(
-        sensor, "resolve_upstream",
-        lambda *_: (_ for _ in ()).throw(RuntimeError("boom")))
-    code = sensor.main([
-        "--workspace", str(ws.root), "--status-file", str(status),
-        "--now", "2026-08-04T12:00:00Z",
-    ])
+        sensor,
+        "resolve_upstream",
+        lambda *_: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    code = sensor.main(
+        [
+            "--workspace",
+            str(ws.root),
+            "--status-file",
+            str(status),
+            "--now",
+            "2026-08-04T12:00:00Z",
+        ]
+    )
     assert code == 4
     assert json.loads(status.read_text()) == {"prior": True}  # не перезаписан
 
@@ -246,14 +267,18 @@ def test_reader_unknown_when_status_file_next_expected_at_not_string(
 ):
     """next_expected_at as number triggers AttributeError in parse_iso.replace()."""
     status_path = tmp_path / "status.json"
-    status_path.write_text(json.dumps({
-        "schema": sensor.STATUS_SCHEMA,
-        "next_expected_at": 12345,  # not a string
-        "status": "clean",
-        "completed_at": "2026-08-04T12:00:00Z",
-        "host": "test",
-        "classes": [],
-    }))
+    status_path.write_text(
+        json.dumps(
+            {
+                "schema": sensor.STATUS_SCHEMA,
+                "next_expected_at": 12345,  # not a string
+                "status": "clean",
+                "completed_at": "2026-08-04T12:00:00Z",
+                "host": "test",
+                "classes": [],
+            }
+        )
+    )
     assert sensor.read_status(status_path, NOW) == 2
     out = capsys.readouterr().out
     assert "unknown" in out and "не разбирается" in out
@@ -262,11 +287,15 @@ def test_reader_unknown_when_status_file_next_expected_at_not_string(
 def test_reader_unknown_when_status_file_foreign_schema(sensor, tmp_path, capsys):
     """Foreign schema is caught before next_expected_at parsing."""
     status_path = tmp_path / "status.json"
-    status_path.write_text(json.dumps({
-        "schema": "other/v1",
-        "next_expected_at": "2026-08-05T00:00:00Z",
-        "status": "clean",
-    }))
+    status_path.write_text(
+        json.dumps(
+            {
+                "schema": "other/v1",
+                "next_expected_at": "2026-08-05T00:00:00Z",
+                "status": "clean",
+            }
+        )
+    )
     assert sensor.read_status(status_path, NOW) == 2
     out = capsys.readouterr().out
     assert "unknown" in out and "чужая схема" in out
@@ -302,8 +331,13 @@ def test_escalation_creates_issue_with_dedup_key_and_adr006_fields(
     monkeypatch.setattr(sensor, "steward_repo_slug", lambda p: "o/steward")
     code, status_path = _run(sensor, ws, tmp_path, "--escalate")
     esc = json.loads(status_path.read_text())["escalations"]
-    assert esc == [{"class": "drift", "action": "created",
-                    "detail": "https://github.com/o/steward/issues/7"}]
+    assert esc == [
+        {
+            "class": "drift",
+            "action": "created",
+            "detail": "https://github.com/o/steward/issues/7",
+        }
+    ]
     create = next(a for a in calls if a[:2] == ["issue", "create"])
     title = create[create.index("--title") + 1]
     body = create[create.index("--body") + 1]
@@ -318,11 +352,15 @@ def test_escalation_dedup_skips_when_open_issue_exists(sensor, tmp_path, monkeyp
 
     def fake_gh(args):
         if args[:2] == ["issue", "list"]:
-            return 0, json.dumps([{
-                "number": 5,
-                "title": "arch-evidence-freshness-watch:drift — старое",
-                "url": "https://github.com/o/steward/issues/5",
-            }])
+            return 0, json.dumps(
+                [
+                    {
+                        "number": 5,
+                        "title": "arch-evidence-freshness-watch:drift — старое",
+                        "url": "https://github.com/o/steward/issues/5",
+                    }
+                ]
+            )
         raise AssertionError("create не должен вызываться")
 
     monkeypatch.setattr(sensor, "_gh", fake_gh)

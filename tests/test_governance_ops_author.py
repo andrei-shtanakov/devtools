@@ -46,9 +46,7 @@ def test_decomposition_dsl_declares_the_delivers_contract():
         "frontmatter (required): spec_stage: decomposition, "
         "dt_contract_version: 2, status: draft" in dsl
     ), dsl
-    assert (
-        "`delivers:` (REQUIRED under dt_contract_version: 2" in dsl
-    ), dsl
+    assert "`delivers:` (REQUIRED under dt_contract_version: 2" in dsl, dsl
     for needle in ("id: DEL-NN", "statement:", "sources:", "covered_by:"):
         assert needle in dsl, needle
 

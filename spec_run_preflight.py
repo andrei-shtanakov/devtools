@@ -55,7 +55,10 @@ _CONFIG_NAME = "spec-runner.config.yaml"
 # Ключи, чьё объявление в эталоне делает их обязательными в рабочем
 # конфиге: именно их отсутствие валило tdd-evidence в бою (урок 4).
 _CRITICAL_KEYS = (
-    "execution_mode", "tdd_runner", "review_policy", "harness_files",
+    "execution_mode",
+    "tdd_runner",
+    "review_policy",
+    "harness_files",
 )
 # Ключ БЕЗ кавычек: в argv subprocess нет шелла, который бы их снял;
 # кавычки в ключе делают lookup вечно пустым (пойман живым прогоном
@@ -126,21 +129,27 @@ def check_config_etalon(target: Path) -> list[Finding]:
         return []
     config = target / _CONFIG_NAME
     if not config.is_file():
-        return [Finding(
-            "config-etalon", "FAIL",
-            f"у репо есть эталон ({', '.join(markers)}), а {_CONFIG_NAME} "
-            "отсутствует — собери конфиг ОТ ЭТАЛОНА, не голым "
-            "`spec-runner config --preset` (урок 4 devtools#110)",
-        )]
+        return [
+            Finding(
+                "config-etalon",
+                "FAIL",
+                f"у репо есть эталон ({', '.join(markers)}), а {_CONFIG_NAME} "
+                "отсутствует — собери конфиг ОТ ЭТАЛОНА, не голым "
+                "`spec-runner config --preset` (урок 4 devtools#110)",
+            )
+        ]
     example = target / _ETALON_MARKERS[0]
     if not example.is_file():
         return []
     if yaml is None:
-        return [Finding(
-            "config-etalon", "FAIL",
-            "PyYAML недоступен — сверка с эталоном невозможна; запускай "
-            "через `make preflight` (uv-окружение devtools)",
-        )]
+        return [
+            Finding(
+                "config-etalon",
+                "FAIL",
+                "PyYAML недоступен — сверка с эталоном невозможна; запускай "
+                "через `make preflight` (uv-окружение devtools)",
+            )
+        ]
     try:
         etalon_data = yaml.safe_load(example.read_text(encoding="utf-8"))
         config_data = yaml.safe_load(config.read_text(encoding="utf-8"))
@@ -148,11 +157,14 @@ def check_config_etalon(target: Path) -> list[Finding]:
         # Нечитаемый файл (битый UTF-8, права) — та же судьба, что битый
         # YAML: структурированный FAIL, не traceback (приёмка PR #115,
         # круг 8, minor).
-        return [Finding(
-            "config-etalon", "FAIL",
-            f"эталон или {_CONFIG_NAME} не читается/не парсится ({exc}) — "
-            "сверка невозможна, готовность заявить нельзя",
-        )]
+        return [
+            Finding(
+                "config-etalon",
+                "FAIL",
+                f"эталон или {_CONFIG_NAME} не читается/не парсится ({exc}) — "
+                "сверка невозможна, готовность заявить нельзя",
+            )
+        ]
     required = _critical_paths(etalon_data)
     missing: list[str] = []
     mismatched: list[str] = []
@@ -186,28 +198,35 @@ def check_config_etalon(target: Path) -> list[Finding]:
         parts.append(f"нет ключей: {', '.join(missing)}")
     if mismatched:
         parts.append(f"расходятся значения: {'; '.join(mismatched)}")
-    return [Finding(
-        "config-etalon", "FAIL",
-        f"{_CONFIG_NAME} не соответствует эталону — {'; '.join(parts)} — "
-        "конфиг без TDD-цепочки эталона валит tdd-evidence "
-        f"(урок 4 devtools#110); пересобери от {_ETALON_MARKERS[0]}",
-    )]
+    return [
+        Finding(
+            "config-etalon",
+            "FAIL",
+            f"{_CONFIG_NAME} не соответствует эталону — {'; '.join(parts)} — "
+            "конфиг без TDD-цепочки эталона валит tdd-evidence "
+            f"(урок 4 devtools#110); пересобери от {_ETALON_MARKERS[0]}",
+        )
+    ]
 
 
 def check_insteadof(target: Path) -> list[Finding]:
     """Класс ssh-зависаний: пуши раннера обязаны идти HTTPS."""
     done = subprocess.run(
         ["git", "-C", str(target), "config", "--get", _INSTEADOF_KEY],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if done.returncode == 0 and done.stdout.strip() == _INSTEADOF_VALUE:
         return []
-    return [Finding(
-        "insteadof-https", "FAIL",
-        "ssh-пуш раннера зависал на git-receive-pack часами "
-        f"(класс 2026-09-02); выполни: git -C {target} config "
-        f'url."https://github.com/".insteadOf "{_INSTEADOF_VALUE}"',
-    )]
+    return [
+        Finding(
+            "insteadof-https",
+            "FAIL",
+            "ssh-пуш раннера зависал на git-receive-pack часами "
+            f"(класс 2026-09-02); выполни: git -C {target} config "
+            f'url."https://github.com/".insteadOf "{_INSTEADOF_VALUE}"',
+        )
+    ]
 
 
 def check_prefixless_db(target: Path) -> list[Finding]:
@@ -232,21 +251,27 @@ def check_prefixless_db(target: Path) -> list[Finding]:
             if prefixless.stat().st_size == 0
             else "НЕ пустая — разберись, чья она, прежде чем удалять"
         )
-        findings.append(Finding(
-            "prefixless-db", "FAIL",
-            f"{prefixless} лежит рядом с префиксными "
-            f"({', '.join(p.name for p in prefixed)}) — tdd-evidence "
-            f"упадёт на «неоднозначной state db» (spec-runner#337); {hint}",
-        ))
+        findings.append(
+            Finding(
+                "prefixless-db",
+                "FAIL",
+                f"{prefixless} лежит рядом с префиксными "
+                f"({', '.join(p.name for p in prefixed)}) — tdd-evidence "
+                f"упадёт на «неоднозначной state db» (spec-runner#337); {hint}",
+            )
+        )
     if len(prefixed) > 1:
-        findings.append(Finding(
-            "prefixless-db", "FAIL",
-            f"{len(prefixed)} префиксных state-DB "
-            f"({', '.join(p.name for p in prefixed)}) — blocking-плагины "
-            "не могут резолвить активный прогон (боевой стоп WS-65, "
-            "spec-runner#339); заархивируй DB завершённых workstream'ов: "
-            f"mkdir -p {spec}/.executor-archive && mv <завершённые> туда",
-        ))
+        findings.append(
+            Finding(
+                "prefixless-db",
+                "FAIL",
+                f"{len(prefixed)} префиксных state-DB "
+                f"({', '.join(p.name for p in prefixed)}) — blocking-плагины "
+                "не могут резолвить активный прогон (боевой стоп WS-65, "
+                "spec-runner#339); заархивируй DB завершённых workstream'ов: "
+                f"mkdir -p {spec}/.executor-archive && mv <завершённые> туда",
+            )
+        )
     return findings
 
 
@@ -256,13 +281,16 @@ def check_live_smoke_env(target: Path) -> list[Finding]:
     if not scripts:
         return []
     names = ", ".join(f"scripts/{s.name}" for s in scripts)
-    return [Finding(
-        "live-smoke-env", "WARN",
-        f"у репо есть pinned-install шаги ({names}) — выполни их (и "
-        "экспорты, которые они печатают) В ТЕРМИНАЛЕ ПРОГОНА до запуска "
-        "раннера, иначе попытки сгорят о локально-красный live-smoke "
-        "(урок 5 devtools#110: 3 попытки, $2.82)",
-    )]
+    return [
+        Finding(
+            "live-smoke-env",
+            "WARN",
+            f"у репо есть pinned-install шаги ({names}) — выполни их (и "
+            "экспорты, которые они печатают) В ТЕРМИНАЛЕ ПРОГОНА до запуска "
+            "раннера, иначе попытки сгорят о локально-красный live-smoke "
+            "(урок 5 devtools#110: 3 попытки, $2.82)",
+        )
+    ]
 
 
 def check_dirty_tree(target: Path) -> list[Finding]:
@@ -273,23 +301,30 @@ def check_dirty_tree(target: Path) -> list[Finding]:
     """
     done = subprocess.run(
         ["git", "-C", str(target), "status", "--porcelain"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if done.returncode != 0:
-        return [Finding(
-            "dirty-tree", "FAIL",
-            f"git status в {target} не удался "
-            f"(rc={done.returncode}: {done.stderr.strip()}) — состояние "
-            "дерева неопределимо, готовность заявить нельзя",
-        )]
+        return [
+            Finding(
+                "dirty-tree",
+                "FAIL",
+                f"git status в {target} не удался "
+                f"(rc={done.returncode}: {done.stderr.strip()}) — состояние "
+                "дерева неопределимо, готовность заявить нельзя",
+            )
+        ]
     if not done.stdout.strip():
         return []
     lines = done.stdout.strip().splitlines()
-    return [Finding(
-        "dirty-tree", "WARN",
-        f"в клоне {len(lines)} незакоммиченных путей — коммиты раннера "
-        "лягут рядом с ними",
-    )]
+    return [
+        Finding(
+            "dirty-tree",
+            "WARN",
+            f"в клоне {len(lines)} незакоммиченных путей — коммиты раннера "
+            "лягут рядом с ними",
+        )
+    ]
 
 
 def preflight(target: Path) -> list[Finding]:
@@ -308,7 +343,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="имя репо (dispatcher)")
     parser.add_argument(
-        "--workspace", default=str(Path(__file__).resolve().parent.parent),
+        "--workspace",
+        default=str(Path(__file__).resolve().parent.parent),
     )
     args = parser.parse_args(argv)
     target = Path(args.workspace) / args.repo

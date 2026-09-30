@@ -74,8 +74,7 @@ def candidate_state(profile_path: Path, bundle_dir: Path) -> BundleState:
     supplemental_blobs: dict[str, str] = {}
     if (bundle_dir / brief_input.PRIMARY_REL).is_file():
         supplemental_blobs = dict(
-            brief_input.inspect_brief(bundle_dir / brief_input.PRIMARY_REL)
-            .source_blobs
+            brief_input.inspect_brief(bundle_dir / brief_input.PRIMARY_REL).source_blobs
         )
     stale = check_stale(artifacts, supplemental_blobs)
 
@@ -153,10 +152,7 @@ def candidate_state(profile_path: Path, bundle_dir: Path) -> BundleState:
     )
 
     error_count = sum(
-        1
-        for fs in per_node.values()
-        for f in fs
-        if f.startswith("error")
+        1 for fs in per_node.values() for f in fs if f.startswith("error")
     )
     matrix = build_trace_matrix(graph, artifacts)
     return BundleState(

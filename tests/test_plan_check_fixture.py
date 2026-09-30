@@ -33,6 +33,7 @@ def plan_check():
     spec.loader.exec_module(module)
     return module
 
+
 MANIFEST = (
     'schema_version = "0.3.0"\n'
     '[cores.alpha]\ngit_dir = "alpha"\n'
@@ -71,9 +72,7 @@ def _run(ws: Path) -> tuple[int, str]:
 
 
 def test_fixture_clean_workspace_exits_0(tmp_path):
-    ws = _make_workspace(
-        tmp_path, "- [ ] base item @owner:github:x @id:base-item\n"
-    )
+    ws = _make_workspace(tmp_path, "- [ ] base item @owner:github:x @id:base-item\n")
     code, out = _run(ws)
     assert code == 0, out
     # с запятой и пробелом: голое "0 error(s)" матчилось бы и в "10 error(s)"
@@ -81,9 +80,7 @@ def test_fixture_clean_workspace_exits_0(tmp_path):
 
 
 def test_fixture_stale_blocker_exits_1_with_pf_blocker_stale(tmp_path):
-    ws = _make_workspace(
-        tmp_path, "- [x] base item @owner:github:x @id:base-item\n"
-    )
+    ws = _make_workspace(tmp_path, "- [x] base item @owner:github:x @id:base-item\n")
     code, out = _run(ws)
     assert code == 1, out
     assert "PF-BLOCKER-STALE" in out
@@ -97,7 +94,7 @@ def test_reporting_splits_ownership_movement_and_full_matrix(tmp_path):
     (ws / "alpha" / "TODO.md").write_text(
         "- [x] delivered @owner:github:x @id:delivered\n"
         "- [ ] target @owner:github:x @id:target\n"
-        "- [ ] trigger @owner:github:x @trigger:\"release\" @id:trigger\n"
+        '- [ ] trigger @owner:github:x @trigger:"release" @id:trigger\n'
         "- [ ] repo task @owner:repo:alpha @id:repo-task\n"
         "- [ ] tbd wait @owner:TBD @blocked_by:todo://alpha/target @id:tbd\n"
         "- [ ] no owner @blocked_by:todo://alpha/delivered @id:no-owner\n"
@@ -120,7 +117,9 @@ def test_reporting_splits_ownership_movement_and_full_matrix(tmp_path):
     matrix_lines = [line for line in out.splitlines() if "ownership×movement" in line]
     assert len(matrix_lines) == 7
     assert "missing: actionable=0" in out
-    assert "stale-condition=1" in next(line for line in matrix_lines if "missing:" in line)
+    assert "stale-condition=1" in next(
+        line for line in matrix_lines if "missing:" in line
+    )
 
 
 def test_reporting_reuses_the_graph_analysis(plan_check, monkeypatch):
@@ -140,7 +139,7 @@ def test_reporting_reuses_the_graph_analysis(plan_check, monkeypatch):
     monkeypatch.setattr(plan_check, "check_legacy_fleet", counted_legacy)
     inputs = [
         plan_check.RepoInput(
-            "demo", "- [ ] work @owner:github:x @trigger:\"go\" @id:work\n"
+            "demo", '- [ ] work @owner:github:x @trigger:"go" @id:work\n'
         )
     ]
     index = plan_check.ManifestIndex(frozenset({"demo"}), {})

@@ -53,7 +53,11 @@ from governance.merge_gate import PrFacts
 from governance.facts import Outcome
 from governance.stale_adapter import blob_sha1
 from governance.ops import (
-    _AUTHOR_DSL, ENGINEER_BLOCKED, Ops, RealOps, disp_agent,
+    _AUTHOR_DSL,
+    ENGINEER_BLOCKED,
+    Ops,
+    RealOps,
+    disp_agent,
 )
 from governance.policy_sources import (
     PREFLIGHT_PROCEDURE_HINT,
@@ -208,9 +212,7 @@ def _blocking_merged_unverified(ws_id: str) -> str | None:
     return None
 
 
-def _belongs_to_cycle(
-    state: RunState, states: dict[str, RunState]
-) -> str | None:
+def _belongs_to_cycle(state: RunState, states: dict[str, RunState]) -> str | None:
     """Корень цикла верификации, которому принадлежит `state`, или `None`.
 
     Предикат ПОЛНЫЙ и fail-closed (§5a). Он не совпадает с допуском §2a:
@@ -702,7 +704,12 @@ _BUNDLE_EDIT_RESET_OPS: tuple[str, ...] = (
     # review-refute — лимит «одна авто-попытка опровержения file-missing на
     # ревью-цикл» (спека §7): новый цикл (правка бандла/resume) получает
     # свежую попытку вместе со свежим review.
-    "commit", "gate-candidate", "push", "ready", "review", "review-refute",
+    "commit",
+    "gate-candidate",
+    "push",
+    "ready",
+    "review",
+    "review-refute",
 )
 
 # Статус stopped_* -> op'ы, которые reconciliation обязан сбросить в pending
@@ -965,7 +972,9 @@ def _resume_wave(state: RunState, ops: Ops) -> RunState | None:
     op = state.ops.get(request)
     if op is None:
         _stop_with_comment(
-            state, ops, "stopped_review",
+            state,
+            ops,
+            "stopped_review",
             f"волна {state.wave}: заявка {request} записана в "
             f"{wave_key(state, 'candidate')}, но в леджере её нет — "
             "восстановить нечем",
@@ -976,7 +985,9 @@ def _resume_wave(state: RunState, ops: Ops) -> RunState | None:
         return _next_wave(state, ops)
     if status in al.TERMINAL_STATUSES:
         _stop_with_comment(
-            state, ops, "stopped_stale",
+            state,
+            ops,
+            "stopped_stale",
             f"волна {state.wave}: заявка {request} терминальна ({status}: "
             f"{op.get('reason')!r}) — новый candidate заводится через "
             "--reopen <node>",
@@ -1024,14 +1035,18 @@ def _finalize_wave(state: RunState, ops: Ops, request: str) -> RunState:
             op_now = state.ops.get(request) or {}
             if op_now.get("status") in al.TERMINAL_STATUSES:
                 _stop_with_comment(
-                    state, ops, "stopped_stale",
+                    state,
+                    ops,
+                    "stopped_stale",
                     f"волна {state.wave}: заявка {request} — "
                     f"{op_now.get('status')}: {exc}. Новый candidate — "
                     "через --reopen <node>",
                 )
             else:
                 _stop_with_comment(
-                    state, ops, "stopped_review",
+                    state,
+                    ops,
+                    "stopped_review",
                     f"волна {state.wave}: finalize заявки {request} не "
                     f"продвинулся — {exc}",
                 )
@@ -1056,7 +1071,9 @@ def _finalize_wave(state: RunState, ops: Ops, request: str) -> RunState:
         op_complete(state, att_key, finalize_pr=finalize_pr, review_exit=rc)
         if rc != 0:
             _wave_pause(
-                state, ops, finalize_pr,
+                state,
+                ops,
+                finalize_pr,
                 f"Волна {state.wave}: finalize-PR #{finalize_pr} остаётся "
                 f"человеку — review-pr.sh вернул {rc} (аттестация не "
                 "опубликована). После мержа — resume.",
@@ -1068,16 +1085,16 @@ def _finalize_wave(state: RunState, ops: Ops, request: str) -> RunState:
     if op["status"] == al.STATUS_COMPLETED:
         return _next_wave(state, ops)
     _wave_pause(
-        state, ops, finalize_pr,
+        state,
+        ops,
+        finalize_pr,
         f"Волна {state.wave}: finalize-PR #{finalize_pr} не вмержен агентом "
         "(см. причину в выводе approve-node) — мерж человеком, затем resume.",
     )
     return state
 
 
-def reopen(
-    run_id: str, node: str, ops: Ops, *, manual: bool = False
-) -> RunState:
+def reopen(run_id: str, node: str, ops: Ops, *, manual: bool = False) -> RunState:
     """`--reopen <node>` (S11, D2/D3): явное переоткрытие одобренного узла.
 
     `state.wave` = уровень узла + 1; ветка волны — НОВЫМ именем
@@ -1112,8 +1129,7 @@ def reopen(
         )
     if op_status(state, "merge") == "completed":
         raise ValueError(
-            "прогон прошёл последнюю волну — переоткрытие узла делается "
-            "новым прогоном"
+            "прогон прошёл последнюю волну — переоткрытие узла делается новым прогоном"
         )
     if ops.is_dirty(state.target_dir):
         print(f"reopen: target_dir {state.target_dir!r} грязный — не начато")
@@ -1123,7 +1139,9 @@ def reopen(
     state.wave = levels[node] + 1
     count = (state.ops.get(f"reopen-{state.wave}") or {}).get("count", 0) + 1
     state.ops[f"reopen-{state.wave}"] = {
-        "status": "completed", "count": count, "node": node,
+        "status": "completed",
+        "count": count,
+        "node": node,
     }
     # Op'ы переоткрытой волны И ВСЕХ выше снимаются (ревью #346, major 2):
     # каскад переведёт нижние узлы в `stale`, и каждая их волна обязана
@@ -1134,8 +1152,14 @@ def reopen(
     total = bundle_dag.wave_count(dag)
     for wave in range(state.wave, total + 1):
         for base_key in (
-            "branch", "materialize-brief", "commit", "gate-candidate", "edge",
-            "push", "candidate", "finalize",
+            "branch",
+            "materialize-brief",
+            "commit",
+            "gate-candidate",
+            "edge",
+            "push",
+            "candidate",
+            "finalize",
         ):
             state.ops.pop(f"{base_key}-{wave}", None)
     filename = ""
@@ -1150,7 +1174,10 @@ def reopen(
     ops.switch_to(state.target_dir, state.branch, base)
     (Path(state.target_dir) / state.bundle_dir / filename).unlink(missing_ok=True)
     op_complete(
-        state, wave_key(state, "branch"), branch=state.branch, mode="author",
+        state,
+        wave_key(state, "branch"),
+        branch=state.branch,
+        mode="author",
         reopen=count,
     )
     if manual:
@@ -1257,7 +1284,9 @@ def _reconcile_pr_merged_out_of_band(state: RunState, ops: Ops) -> bool:
     # `advance()` по `merge completed`, которое эту проверку обходит.
     if ops.is_dirty(state.target_dir):
         _stop_with_comment(
-            state, ops, state.status,
+            state,
+            ops,
+            state.status,
             "PR уже смержен вручную, но в target_dir остались "
             "незакоммиченные правки бандла — переход на S8 (переключение "
             "дерева на базовую ветку) потерял бы их молча либо отказал бы "
@@ -1319,9 +1348,7 @@ def _next_verify_run_id(parent_run_id: str) -> str:
     return f"{parent_run_id}-v{attempt}"
 
 
-def verify(
-    parent_run_id: str, ops: Ops, run_id: str | None = None
-) -> RunState:
+def verify(parent_run_id: str, ops: Ops, run_id: str | None = None) -> RunState:
     """Дочерний verification-run для `merged_unverified`-родителя (спека §5).
 
     Новый ``RunState`` с теми же координатами (repo/ws_id/target_dir/
@@ -1367,9 +1394,7 @@ def verify(
         )
     active_child = _active_verify_child(parent_run_id)
     if active_child is not None:
-        raise ValueError(
-            f"verify уже идёт: {active_child} (resume или дождитесь)"
-        )
+        raise ValueError(f"verify уже идёт: {active_child} (resume или дождитесь)")
     # devtools#384, D1: основание `merge=completed` у потомка — ПЕРЕНОС
     # доказанного факта, не допущение. Если у родителя мерж не доказан,
     # переносить нечего. Проверка здесь, в группе входных, — до
@@ -1434,8 +1459,12 @@ def verify(
     # что мерж доказан. `source` называет родительский op поимённо —
     # запись ссылается, а не сочиняет.
     op_complete(
-        child, "merge", merged=True, source=parent_run_id,
-        pr=parent.pr, head=parent.head,
+        child,
+        "merge",
+        merged=True,
+        source=parent_run_id,
+        pr=parent.pr,
+        head=parent.head,
     )
     _step_s8(child, ops)
     return child
@@ -1562,7 +1591,8 @@ def _print_answer_hint(state: RunState, reply: iv.DiscoveryReply) -> None:
     )
     print("ответьте вне spec-loop и повторите команду:")
     print(
-        "  " + iv.answer_command(
+        "  "
+        + iv.answer_command(
             state.interview["session_id"], state.interview["stakeholder_role"]
         )
     )
@@ -1572,9 +1602,7 @@ def _upstream_path(state: RunState, spec: iv.InterviewSpec) -> str | None:
     """Путь upstream-blob'а для engineer-фрейма; `None` для остальных."""
     if spec.frame != "engineer":
         return None
-    return str(
-        run_dir(state.run_id) / "brief-input" / "00-discovery" / spec.traces_to
-    )
+    return str(run_dir(state.run_id) / "brief-input" / "00-discovery" / spec.traces_to)
 
 
 def _interview_poll(
@@ -1625,9 +1653,7 @@ def _interview_after_reply(
     reason = reply.envelope.get("operation", {}).get("reason", "")
     if reply.code == 20:
         if reply.envelope["next_action"].get("session_id") != session_id:
-            return _interview_stop(
-                state, "next_action.session_id ≠ записанной сессии"
-            )
+            return _interview_stop(state, "next_action.session_id ≠ записанной сессии")
         state.ops.pop(INTERVIEW_BRIEF, None)
         state.status = "waiting_interview"
         save(state)
@@ -1814,9 +1840,7 @@ def attach_session(run_id: str, session_id: str, ops: Ops) -> RunState:
         try:
             probe_text = probe.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
-            raise ValueError(
-                f"рендер сессии {session_id} нечитаем: {exc}"
-            ) from exc
+            raise ValueError(f"рендер сессии {session_id} нечитаем: {exc}") from exc
         findings = iv.attach_findings(probe_text, spec)
     finally:
         probe.unlink(missing_ok=True)
@@ -1869,8 +1893,11 @@ def _step_interview(state: RunState, ops: Ops) -> bool:
         if spec.frame == "engineer" and spec.upstream_blob is None:
             return _interview_stop(state, ENGINEER_BLOCKED)
         reply = ops.discovery_start(
-            spec.frame, spec.target, spec.traces_to,
-            _upstream_path(state, spec), cwd,
+            spec.frame,
+            spec.target,
+            spec.traces_to,
+            _upstream_path(state, spec),
+            cwd,
         )
         if reply.code != 20:
             return _interview_stop(
@@ -1899,6 +1926,7 @@ def _step_branch(state: RunState, ops: Ops) -> bool:
     проверка просто повторяется.
     """
     return _step_wave_branch(state, ops)
+
 
 def _step_wave_branch(state: RunState, ops: Ops) -> bool:
     """S1 волны (S9): ветка волны ОТ СВЕЖЕГО BASE, не от текущего HEAD.
@@ -1985,9 +2013,7 @@ def _step_materialize_brief(state: RunState, ops: Ops) -> bool:
 
     _ensure_started(state, key)
     try:
-        brief_input.materialize(
-            source, Path(state.target_dir), state.bundle_dir
-        )
+        brief_input.materialize(source, Path(state.target_dir), state.bundle_dir)
         destination = brief_input.inspect_materialized(
             Path(state.target_dir), state.bundle_dir
         )
@@ -2105,13 +2131,12 @@ def _write_disp_doc_config(
         "[pipeline.checklists.doc.items]",
     ]
     # TOML-экранирование: текст DSL несёт кавычки (`{requirements: "<hash>"}`).
-    lines += [
-        f'{key} = "{_toml_str(text)}"' for key, text in _DOC_CHECKLIST.items()
-    ]
+    lines += [f'{key} = "{_toml_str(text)}"' for key, text in _DOC_CHECKLIST.items()]
     for role in ("author", "reviewer"):
         adapter, model = disp_agent(role)
         lines += [
-            "", f"[agents.{role}]",
+            "",
+            f"[agents.{role}]",
             f'adapter = "{_toml_str(adapter)}"',
             f'model = "{_toml_str(model)}"',
         ]
@@ -2145,9 +2170,7 @@ def _disp_anchor_dir(state: RunState) -> Path | None:
     target = Path(state.target_dir).expanduser().resolve()
     candidates = [run_dir(state.run_id) / "disp-anchors"]
     xdg = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
-    candidates.append(
-        Path(xdg) / "devtools" / "disp-anchors" / state.run_id
-    )
+    candidates.append(Path(xdg) / "devtools" / "disp-anchors" / state.run_id)
     for candidate in candidates:
         # Пинуется и уходит в конфиг КАНОНИЗИРОВАННЫЙ путь (ревью #242,
         # круг 5): относительный или `~`-`XDG_STATE_HOME` прошёл бы наш
@@ -2262,7 +2285,9 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     reason = _upstream_ready(state, ops, _wave_dag(), _wave_level(state))
     if reason is not None:
         _stop_with_comment(
-            state, ops, "stopped_stale",
+            state,
+            ops,
+            "stopped_stale",
             f"волна {state.wave}: авторинг уровня {_wave_level(state)} "
             f"невозможен — {reason}. Переодобрите нижние уровни "
             "(resume ведёт их по уровням) и повторите resume",
@@ -2277,9 +2302,7 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
     )
     if authoring_pending:
         for node in ("design", "acceptance", "decomposition"):
-            if not target_profile_declares(
-                state.target_dir, state.profile, node
-            ):
+            if not target_profile_declares(state.target_dir, state.profile, node):
                 print(
                     f"_step_authoring: {state.target_dir}/{state.profile} "
                     f"не декларирует узел {node!r} — "
@@ -2297,9 +2320,7 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
             descriptor = state.brief
             source_rel = descriptor.get("requirements_source")
             if not isinstance(source_rel, str):
-                return _brief_stop(
-                    state, "run.json не несёт requirements_source"
-                )
+                return _brief_stop(state, "run.json не несёт requirements_source")
             bundle = Path(state.target_dir) / state.bundle_dir
             try:
                 source_text = (bundle / source_rel).read_text(encoding="utf-8")
@@ -2307,35 +2328,27 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                     encoding="utf-8"
                 )
             except (OSError, UnicodeError) as exc:
-                return _brief_stop(
-                    state, f"source/requirements не читаются: {exc}"
-                )
-            findings = brief_input.requirements_findings(
-                source_text, requirements_text
-            )
+                return _brief_stop(state, f"source/requirements не читаются: {exc}")
+            findings = brief_input.requirements_findings(source_text, requirements_text)
             if findings:
                 (run_dir(state.run_id) / "brief-findings.txt").write_text(
                     "\n".join(
-                        f"error GC-BRIEF-COVERAGE: {finding}"
-                        for finding in findings
-                    ) + "\n",
+                        f"error GC-BRIEF-COVERAGE: {finding}" for finding in findings
+                    )
+                    + "\n",
                     encoding="utf-8",
                 )
                 state.status = "stopped_author"
                 save(state)
                 return False
-            (run_dir(state.run_id) / "brief-findings.txt").unlink(
-                missing_ok=True
-            )
+            (run_dir(state.run_id) / "brief-findings.txt").unlink(missing_ok=True)
         if op_status(state, key) == "completed":
             continue
         target = Path(state.target_dir) / state.bundle_dir / filename
         disp_node = kind == "behaviour-spec" and state.author_backend == "disp"
         started_here = disp_node and bool(state.disp_slug)
         slug = state.disp_slug or (_disp_doc_slug(state) if disp_node else "")
-        pipeline_dir = (
-            Path(state.target_dir) / ".disputatio" / "pipelines" / slug
-        )
+        pipeline_dir = Path(state.target_dir) / ".disputatio" / "pipelines" / slug
         # Черновик, который написал НАЧАТЫЙ этим прогоном пайплайн соседа, —
         # не готовый узел (ревью #242): пока каталог пайплайна жив, retry
         # идёт в `resume`, а не глотает черновик как `skipped`. Признак
@@ -2385,9 +2398,7 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 save(state)
                 return False
             try:
-                config_path = _write_disp_doc_config(
-                    state, bundle_path, anchor_dir
-                )
+                config_path = _write_disp_doc_config(state, bundle_path, anchor_dir)
             except ValueError as exc:
                 # Харнесс-слой не даёт adapter/model для disp (например codex
                 # без модели) — стоп с причиной до вызова соседа.
@@ -2409,15 +2420,23 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 # spec-runner#480: без этого disp вернул 2). Перед `resume`
                 # не коммитим: черновик узла живого пайплайна — не наш.
                 _commit_bundle(
-                    state, ops,
+                    state,
+                    ops,
                     f"docs(governance): behaviour bundle {state.ws_id} — "
                     f"{state.subject}: узлы до disp-авторинга",
                 )
             exit_code = _guard_edge_results(
-                state, ops, _Suspect((target, pipeline_dir), wave_targets,
-                                     _disp_anchor_hint(state)),
+                state,
+                ops,
+                _Suspect(
+                    (target, pipeline_dir), wave_targets, _disp_anchor_hint(state)
+                ),
                 ops.author_disp,
-                state.target_dir, task, config_path, slug, resume=resume,
+                state.target_dir,
+                task,
+                config_path,
+                slug,
+                resume=resume,
             )
             if exit_code is None:
                 return False
@@ -2435,15 +2454,17 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                     "пайплайне отказывает (PipelineNotResumable)"
                 )
         else:
-            author_args = (
-                state.target_dir, kind, state.subject, state.bundle_dir
-            )
+            author_args = (state.target_dir, kind, state.subject, state.bundle_dir)
             if state.brief is not None and kind in (
-                "charter", "requirements",
+                "charter",
+                "requirements",
             ):
                 exit_code = _guard_edge_results(
-                    state, ops, _Suspect((target,), wave_targets),
-                    ops.author, *author_args,
+                    state,
+                    ops,
+                    _Suspect((target,), wave_targets),
+                    ops.author,
+                    *author_args,
                     brief_context=state.brief,
                 )
             else:
@@ -2451,8 +2472,11 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                 # particular, third-party test/fake Ops implementations with
                 # the pre-E1 signature remain valid for no-brief runs.
                 exit_code = _guard_edge_results(
-                    state, ops, _Suspect((target,), wave_targets),
-                    ops.author, *author_args,
+                    state,
+                    ops,
+                    _Suspect((target,), wave_targets),
+                    ops.author,
+                    *author_args,
                 )
             if exit_code is None:
                 return False
@@ -2482,13 +2506,17 @@ def _stamp_charter_schema2(state: RunState, ops: Ops, charter_path: Path) -> boo
         )
     except RuntimeError as exc:
         _stop_with_comment(
-            state, ops, "stopped_preflight",
+            state,
+            ops,
+            "stopped_preflight",
             f"профилактика коллизии кода недоступна: {exc} — повторите resume",
         )
         return False
     if state.code in taken:
         _stop_with_comment(
-            state, ops, "stopped_preflight",
+            state,
+            ops,
+            "stopped_preflight",
             f"code {state.code} уже занят воркстримом {taken[state.code]} "
             "(живая верхушка default-ветки или открытый candidate W1) — "
             "выберите другой --code для нового прогона",
@@ -2497,7 +2525,8 @@ def _stamp_charter_schema2(state: RunState, ops: Ops, charter_path: Path) -> boo
     try:
         stamped = charter_guard.stamp_charter(
             charter_path.read_text(encoding="utf-8"),
-            code=state.code, plan_item=state.plan_item,
+            code=state.code,
+            plan_item=state.plan_item,
         )
     except ValueError as exc:
         _stop_with_comment(state, ops, "stopped_author", f"charter: {exc}")
@@ -2526,7 +2555,9 @@ def _disp_anchor_hint(state: RunState) -> str:
     anchor = _pinned_disp_anchor_dir(state)
     return (
         f" Если disp откажет по журналу целостности анкера — уберите {anchor} "
-        "и повторите resume." if anchor is not None else ""
+        "и повторите resume."
+        if anchor is not None
+        else ""
     )
 
 
@@ -2542,13 +2573,18 @@ def _file_fingerprint(path: Path) -> str | None:
 #: состояние НЕ наблюдаются: их пишут параллельные интерактивные сессии, и
 #: ложный стоп на каждом прогоне приучил бы трипвайр отключать.
 _CLAUDE_WATCH_FILES = (
-    "settings.json", "settings.local.json", "CLAUDE.md", "keybindings.json",
+    "settings.json",
+    "settings.local.json",
+    "CLAUDE.md",
+    "keybindings.json",
     # plugins/ — только реестр того, что установлено и включено; cache/,
     # marketplaces/, data/, synced/ пишут живые сессии (ревью #489). Подмена
     # кода УЖЕ установленного плагина в cache/ не наблюдается — закроет
     # песочница (§9).
-    "plugins/installed_plugins.json", "plugins/known_marketplaces.json",
-    "plugins/config.json", "plugins/blocklist.json",
+    "plugins/installed_plugins.json",
+    "plugins/known_marketplaces.json",
+    "plugins/config.json",
+    "plugins/blocklist.json",
 )
 _CLAUDE_WATCH_DIRS = ("hooks", "skills", "commands", "agents")
 #: В репо, где работает агент: хук, исполняемый в сессии или при коммите.
@@ -2567,7 +2603,8 @@ def _hook_scripts(claude_home: Path) -> list[Path]:
             )
             commands = [
                 h.get("command", "")
-                for matchers in hooks.values() for m in matchers
+                for matchers in hooks.values()
+                for m in matchers
                 for h in m.get("hooks", [])
             ]
         except (OSError, ValueError, AttributeError, TypeError):
@@ -2589,9 +2626,7 @@ def _mcp_servers_digest(path: Path) -> str:
     Отсутствие файла — то же, что файл без MCP-серверов: создание
     ~/.claude.json без mcpServers ничего не подсаживает."""
     try:
-        data = (
-            json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        )
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         projects = data.get("projects") or {}
         servers = {
             "user": data.get("mcpServers"),
@@ -2603,9 +2638,7 @@ def _mcp_servers_digest(path: Path) -> str:
         }
     except (OSError, ValueError, AttributeError):
         return "unreadable"
-    return hashlib.sha256(
-        json.dumps(servers, sort_keys=True).encode()
-    ).hexdigest()
+    return hashlib.sha256(json.dumps(servers, sort_keys=True).encode()).hexdigest()
 
 
 def _claude_home() -> Path:
@@ -2694,7 +2727,8 @@ def _guard_edge_results(
     after = _edge_results_snapshot(state)
     config_after = _config_surface_snapshot(state)
     config_changed = sorted(
-        path for path in config_before.keys() | config_after.keys()
+        path
+        for path in config_before.keys() | config_after.keys()
         if config_before.get(path) != config_after.get(path)
     )
     if after == before and not config_changed:
@@ -2721,7 +2755,8 @@ def _guard_edge_results(
     # сделал пойманный агент, и вне дерева цели (коммит бандла её не видит).
     evidence = run_dir(state.run_id) / f"tampered-{stamp}"
     changed_wave = [
-        path for path in suspect.wave
+        path
+        for path in suspect.wave
         if path not in suspect.own and _file_fingerprint(path) != wave_before[path]
     ]
     moved, failed = [], []
@@ -2736,7 +2771,8 @@ def _guard_edge_results(
             failed.append(f"{path} ({exc})")
     outcome = (
         f"Вывод вызова перенесён в {evidence.name}: {', '.join(moved)}"
-        if moved else "Вывод вызова снимать нечего"
+        if moved
+        else "Вывод вызова снимать нечего"
     )
     if failed:
         outcome += (
@@ -2759,9 +2795,10 @@ def _guard_edge_results(
             "следующей интерактивной сессии и следующего коммита."
         )
     _stop_with_comment(
-        state, ops, "stopped_author",
-        f"{' '.join(findings)} {outcome}; resume авторит узел заново."
-        f"{suspect.hint}",
+        state,
+        ops,
+        "stopped_author",
+        f"{' '.join(findings)} {outcome}; resume авторит узел заново.{suspect.hint}",
     )
     return None
 
@@ -2784,7 +2821,8 @@ def _step_commit(state: RunState, ops: Ops) -> bool:
         return True
     _ensure_started(state, key)
     _commit_bundle(
-        state, ops,
+        state,
+        ops,
         f"docs(governance): behaviour bundle {state.ws_id} — {state.subject}"
         + f" (волна {state.wave})",
     )
@@ -2802,8 +2840,7 @@ def _commit_bundle(state: RunState, ops: Ops, subject_line: str) -> None:
     пустой индекс — не ошибка (`RealOps.commit_paths`).
     """
     message = (
-        f"{subject_line}\n\n"
-        "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+        f"{subject_line}\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
     )
     force: tuple[str, ...] = ()
     if state.brief is not None:
@@ -2814,7 +2851,10 @@ def _commit_bundle(state: RunState, ops: Ops, subject_line: str) -> None:
             f"{state.bundle_dir}/{rel}" for rel in state.brief["source_paths"]
         )
     ops.commit_paths(
-        state.target_dir, [state.bundle_dir], message, force_paths=force,
+        state.target_dir,
+        [state.bundle_dir],
+        message,
+        force_paths=force,
     )
 
 
@@ -2872,14 +2912,15 @@ def _upstream_pin(front: str, upstream: str) -> str | None:
         pin = re.search(rf"\b{upstream}:\s*[\"']?([0-9a-f]{{40}})", inline)
         return pin.group(1) if pin else None
     block: list[str] = []
-    for line in front[match.end():].lstrip("\n").splitlines():
+    for line in front[match.end() :].lstrip("\n").splitlines():
         if line.startswith((" ", "\t")):
             block.append(line)
         else:
             break
     pin = re.search(
         rf"^\s+{upstream}:\s*[\"']?([0-9a-f]{{40}})",
-        "\n".join(block), re.M,
+        "\n".join(block),
+        re.M,
     )
     return pin.group(1) if pin else None
 
@@ -2942,9 +2983,10 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         return False
     # Волны (S5): локальная полнота — по уровням ≤ wave−1, иначе гард
     # останавливал бы каждую волну до W4 за отсутствующий design.
-    in_scope = (
-        {bundle_dag.node_id(f) for f, _ in bundle_dag.dag_upto(_wave_dag(), _wave_level(state))}
-    )
+    in_scope = {
+        bundle_dag.node_id(f)
+        for f, _ in bundle_dag.dag_upto(_wave_dag(), _wave_level(state))
+    }
     # Гард отсутствия design/decomposition (спека Task 4, обобщено Task 6):
     # required-узел — локальный (не через bundle_state.candidate_state — та
     # остаётся у консоли, runner без импорта steward). MINOR-1 финального
@@ -2994,7 +3036,8 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         front = _frontmatter(path.read_text(encoding="utf-8"))
         declares = re.search(
             rf"^\s*-\s+{upstream}\s*$|traces_to:.*\b{upstream}\b",
-            front, re.M,
+            front,
+            re.M,
         )
         if not declares:
             # required=True (оба ребра design — MAJOR-1, финальное ревью):
@@ -3085,7 +3128,9 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     for fname, pattern, label, expected_form in (
         ("10-requirements.md", r"^#### FR-\d", "FR-требований", "#### FR-NN:"),
         (
-            "15-behaviour-spec.md", r"^#### BEH-\d", "BEH-сценариев",
+            "15-behaviour-spec.md",
+            r"^#### BEH-\d",
+            "BEH-сценариев",
             "#### BEH-NN:",
         ),
         (
@@ -3187,9 +3232,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         # авторитетный источник «гейт стоп/прошёл»).
         warnings = [
             f"warning GC-DT-GRAPH: {f}"
-            for f in decomposition_guard.non_fatal_findings(
-                beh_text, decomp_text
-            )
+            for f in decomposition_guard.non_fatal_findings(beh_text, decomp_text)
         ]
         try:
             selector_policy = target_selector_policy(state.target_dir)
@@ -3201,10 +3244,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
                 decomp_text,
                 selector_policy=selector_policy,
             )
-        graph = [
-            f"error GC-DT-GRAPH: {finding}"
-            for finding in graph_findings
-        ]
+        graph = [f"error GC-DT-GRAPH: {finding}" for finding in graph_findings]
         if graph:
             (run_dir(state.run_id) / "gate-findings.txt").write_text(
                 "\n".join(warnings + graph) + "\n", encoding="utf-8"
@@ -3268,14 +3308,10 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         bundle_root = Path(state.target_dir) / state.bundle_dir
         declared_paths = {
             node: bundle_root / filename
-            for node, filename in bundle_dag.node_filenames(
-                bundle_dag.dag_for(None)
-            )
+            for node, filename in bundle_dag.node_filenames(bundle_dag.dag_for(None))
         }
         node_index = {
-            node: decomposition_guard.node_id_counts(
-                path.read_text(encoding="utf-8")
-            )
+            node: decomposition_guard.node_id_counts(path.read_text(encoding="utf-8"))
             for node, path in declared_paths.items()
             if path.exists()
         }
@@ -3284,12 +3320,8 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
             node_index=node_index,
             allow_legacy_dt=state.allow_legacy_dt,
         )
-        warnings.extend(
-            f"warning GC-DT-CONTRACT: {finding}" for finding in dt_warnings
-        )
-        contract = [
-            f"error GC-DT-CONTRACT: {finding}" for finding in dt_errors
-        ]
+        warnings.extend(f"warning GC-DT-CONTRACT: {finding}" for finding in dt_warnings)
+        contract = [f"error GC-DT-CONTRACT: {finding}" for finding in dt_errors]
         if contract:
             (run_dir(state.run_id) / "gate-findings.txt").write_text(
                 "\n".join(warnings + contract) + "\n", encoding="utf-8"
@@ -3378,7 +3410,9 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
     verdict = getattr(result, "verdict", "ERROR")
     if verdict == "PASS":
         op_complete(
-            state, key, verdict=verdict,
+            state,
+            key,
+            verdict=verdict,
             edges={f"{n}--{e}": r["verdict"] for (n, e), r in records.items()},
         )
         return True
@@ -3398,8 +3432,7 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
             )
         if record["verdict"] == "FAIL" and not record.get("findings"):
             lines.append(
-                f"error EDGE-CHECK({node}/{edge}): FAIL по статусу пунктов "
-                "без находок"
+                f"error EDGE-CHECK({node}/{edge}): FAIL по статусу пунктов без находок"
             )
     findings_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     state.status = "stopped_review"
@@ -3451,7 +3484,9 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
             outcome = an.approve_node(state, ops, node)
             if outcome.request is None:
                 _stop_with_comment(
-                    state, ops, "stopped_stale",
+                    state,
+                    ops,
+                    "stopped_stale",
                     f"волна {state.wave}: {outcome.message}",
                 )
                 return False
@@ -3461,14 +3496,14 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
         source_sha = ops.rev_parse(state.target_dir, state.branch)
         if source_sha is None:
             _stop_with_comment(
-                state, ops, "stopped_review",
+                state,
+                ops,
+                "stopped_review",
                 f"волна {state.wave}: ветка {state.branch} не разрешается в "
                 "коммит — candidate не собран",
             )
             return False
-        outcome = an.propose_from_source(
-            state, ops, nodes, source_sha, push=False
-        )
+        outcome = an.propose_from_source(state, ops, nodes, source_sha, push=False)
         op_start(state, key, request=outcome.request, source_sha=source_sha)
     request = state.ops[key]["request"]
     records = edge_coordinator.load_level_records(run_dir(state.run_id), state.wave)
@@ -3476,7 +3511,9 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
         code = edge_publish.publish_wave(state, ops, request, records)
     except RuntimeError as exc:
         _stop_with_comment(
-            state, ops, "stopped_review",
+            state,
+            ops,
+            "stopped_review",
             f"волна {state.wave}: публикация candidate заявки {request} не "
             f"состоялась — {exc}",
         )
@@ -3491,21 +3528,27 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
             "записанной заявкой (чужой push) — разберитесь с PR вручную",
         }.get(code, f"код {code}")
         _stop_with_comment(
-            state, ops, "stopped_review",
-            f"волна {state.wave}: candidate заявки {request} не опубликован — "
-            f"{reason}",
+            state,
+            ops,
+            "stopped_review",
+            f"волна {state.wave}: candidate заявки {request} не опубликован — {reason}",
         )
         return False
     pr = state.ops[request]["candidate_pr"]
     facts = ops.pr_facts(state.repo_slug, pr)
     state.base_ref = facts.get("baseRefName") or "master"
     op_complete(
-        state, key, request=request, candidate_pr=pr,
+        state,
+        key,
+        request=request,
+        candidate_pr=pr,
         source_sha=state.ops[key].get("source_sha"),
         reapprove=bool(state.ops[key].get("reapprove", False)),
     )
     _wave_pause(
-        state, ops, pr,
+        state,
+        ops,
+        pr,
         f"Волна {state.wave}/{bundle_dag.wave_count(_wave_dag())} прогона "
         f"`{state.run_id}`: candidate-PR #{pr} над узлами "
         f"{', '.join(state.ops[request]['nodes'])} ждёт человеческого мержа "
@@ -3801,7 +3844,9 @@ def main(argv: list[str] | None = None) -> int:
     start_p.add_argument("--profile", default="profiles/team-exp.yaml")
     start_p.add_argument("--merge-authority", default=None, choices=["human"])
     start_p.add_argument(
-        "--author-backend", default="codex", choices=["codex", "disp"],
+        "--author-backend",
+        default="codex",
+        choices=["codex", "disp"],
     )
     # Обе формы заведены с самого начала (BooleanOptionalAction) — и
     # именно поэтому флип дефолта срезом 3 не осиротил ни одной уже
@@ -3818,7 +3863,9 @@ def main(argv: list[str] | None = None) -> int:
         "--run-id", default=None, help="дефолт <ws-id>-<3 случайных байта hex>"
     )
     start_p.add_argument(
-        "--authoring", default="waves", choices=["waves"],
+        "--authoring",
+        default="waves",
+        choices=["waves"],
         help="waves — единственный режим (S13, 2026-09-23): узлы бандла "
         "одобряются волнами по уровням DAG, каждая волна своим "
         "candidate-PR. Флаг оставлен принимаемым — он в скриптах и "
@@ -3835,7 +3882,8 @@ def main(argv: list[str] | None = None) -> int:
     reopen_p.add_argument("--run-id", required=True)
     reopen_p.add_argument("--node", required=True, metavar="NODE-ID")
     reopen_p.add_argument(
-        "--manual", action="store_true",
+        "--manual",
+        action="store_true",
         help="не авторить заново: stopped_author, файл узла кладёт оператор",
     )
 
@@ -3844,7 +3892,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     verify_p.add_argument("--parent", required=True, help="run_id родителя")
     verify_p.add_argument(
-        "--run-id", default=None,
+        "--run-id",
+        default=None,
         help="run_id потомка; по умолчанию детерминированный "
         "<parent>-v<N> (round 5) — сериализует конкурентные verify",
     )
@@ -3896,4 +3945,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

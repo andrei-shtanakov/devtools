@@ -88,9 +88,7 @@ def test_good_bundle_is_clean(tmp_path: Path) -> None:
     bundle = make_bundle(tmp_path, behaviour_ok=True)
     artifacts, collect_findings = collect_bundle(graph, bundle)
     beh_findings = check_behaviour_spec(graph, artifacts)
-    errors = [
-        f for f in [*collect_findings, *beh_findings] if f.severity == "error"
-    ]
+    errors = [f for f in [*collect_findings, *beh_findings] if f.severity == "error"]
     assert errors == []
 
 

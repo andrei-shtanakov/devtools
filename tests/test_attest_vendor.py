@@ -90,7 +90,11 @@ esac
 
 def _git(*args: str, cwd: Path) -> str:
     res = subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     return res.stdout.strip()
 
@@ -231,13 +235,15 @@ class Fleet:
         for origin in (self.demo_origin, self.steward_origin):
             subprocess.run(
                 ["git", "init", "--bare", "-b", "master", str(origin)],
-                check=True, capture_output=True,
+                check=True,
+                capture_output=True,
             )
 
         # --- steward: настоящий клон апстрима, а не голый git init -------
         subprocess.run(
             ["git", "clone", "-q", str(self.steward_origin), str(self.steward)],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         _git("config", "user.email", "t@example.com", cwd=self.steward)
         _git("config", "user.name", "t", cwd=self.steward)
@@ -270,12 +276,16 @@ class Fleet:
 
         subprocess.run(
             ["git", "clone", "-q", str(self.demo_origin), str(self.repo)],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         gh_url = "git@github.com:andrei-shtanakov/demo.git"
         _git("remote", "set-url", "origin", gh_url, cwd=self.repo)
         _git(
-            "config", f"url.{self.demo_origin}.insteadOf", gh_url, cwd=self.repo,
+            "config",
+            f"url.{self.demo_origin}.insteadOf",
+            gh_url,
+            cwd=self.repo,
         )
 
         self.stub_bin.mkdir()
@@ -304,7 +314,10 @@ class Fleet:
         checksum.chmod(checksum.stat().st_mode | stat.S_IXUSR)
 
     def _write_pin(
-        self, root: Path, upstream_sha: str, members: tuple[str, ...] = KIT_MEMBERS,
+        self,
+        root: Path,
+        upstream_sha: str,
+        members: tuple[str, ...] = KIT_MEMBERS,
     ) -> None:
         pin = root / "scripts" / "review" / "PIN"
         pin.parent.mkdir(parents=True, exist_ok=True)
@@ -319,7 +332,12 @@ class Fleet:
         _git("commit", "-m", "tamper", cwd=self.seed)
         self.head_sha = _git("rev-parse", "HEAD", cwd=self.seed)
         _git(
-            "push", "-q", "-f", "origin", "HEAD:refs/pull/7/head", cwd=self.seed,
+            "push",
+            "-q",
+            "-f",
+            "origin",
+            "HEAD:refs/pull/7/head",
+            cwd=self.seed,
         )
 
     def env(self, **extra: str) -> dict[str, str]:
@@ -455,7 +473,9 @@ def test_optional_member_fully_vendored_reports_full_count(fleet: Fleet) -> None
     (fleet.seed / OPTIONAL_MEMBER).write_text("harness\n")
     (fleet.seed / OPTIONAL_MEMBER).chmod(0o755)
     fleet._write_pin(
-        fleet.seed, new_upstream_sha, members=(*KIT_MEMBERS, OPTIONAL_MEMBER),
+        fleet.seed,
+        new_upstream_sha,
+        members=(*KIT_MEMBERS, OPTIONAL_MEMBER),
     )
     fleet.push_head()
 
@@ -519,9 +539,9 @@ def test_narrowed_inventory_attack_is_caught(fleet: Fleet) -> None:
     pin = fleet.seed / "scripts" / "review" / "PIN"
     lines = pin.read_text().splitlines()
     kept = [
-        line for line in lines
-        if line.startswith("#")
-        or line.endswith((KIT_MEMBERS[0], KIT_MEMBERS[2]))
+        line
+        for line in lines
+        if line.startswith("#") or line.endswith((KIT_MEMBERS[0], KIT_MEMBERS[2]))
     ]
     pin.write_text("\n".join(kept) + "\n")
     fleet.push_head()
@@ -553,8 +573,7 @@ def test_hostile_checksum_sh_in_head_is_ignored_apstream_enforced(
     pin = fleet.seed / "scripts" / "review" / "PIN"
     lines = pin.read_text().splitlines()
     kept = [
-        line for line in lines
-        if line.startswith("#") or line.endswith(KIT_MEMBERS[0])
+        line for line in lines if line.startswith("#") or line.endswith(KIT_MEMBERS[0])
     ]
     kept.append(f"{_sha256(fleet.seed / KIT_MEMBERS[2])}  {KIT_MEMBERS[2]}")
     pin.write_text("\n".join(kept) + "\n")
@@ -595,8 +614,9 @@ def test_single_byte_diff_is_caught(fleet: Fleet) -> None:
 
 def test_file_mode_mismatch_is_caught(fleet: Fleet) -> None:
     member_path = fleet.seed / KIT_MEMBERS[1]
-    member_path.chmod(member_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
-                       | stat.S_IXOTH)
+    member_path.chmod(
+        member_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    )
     fleet.push_head()
 
     res = fleet.run("demo", "7", GH_STUB_HEADOID=fleet.head_sha)
@@ -738,7 +758,7 @@ def test_stale_source_line_accepted_when_content_matches_current_upstream(
     assert res.returncode == 0, res.stderr
     body = fleet.body_out.read_text()
     assert fleet.upstream_sha in body  # провенанс — как заявлено (устарел)
-    assert v2_sha in body              # но сверено с сегодняшним апстримом
+    assert v2_sha in body  # но сверено с сегодняшним апстримом
 
 
 def test_unrelated_steward_commit_does_not_break_unchanged_pr(fleet: Fleet) -> None:
@@ -867,9 +887,9 @@ def test_dry_run_still_enforces_checks(fleet: Fleet) -> None:
     pin = fleet.seed / "scripts" / "review" / "PIN"
     lines = pin.read_text().splitlines()
     kept = [
-        line for line in lines
-        if line.startswith("#")
-        or line.endswith((KIT_MEMBERS[0], KIT_MEMBERS[2]))
+        line
+        for line in lines
+        if line.startswith("#") or line.endswith((KIT_MEMBERS[0], KIT_MEMBERS[2]))
     ]
     pin.write_text("\n".join(kept) + "\n")
     fleet.push_head()
@@ -885,7 +905,8 @@ def test_dry_run_still_enforces_checks(fleet: Fleet) -> None:
 def test_missing_source_line_is_config_error(fleet: Fleet) -> None:
     pin = fleet.seed / "scripts" / "review" / "PIN"
     lines = [
-        line for line in pin.read_text().splitlines()
+        line
+        for line in pin.read_text().splitlines()
         if not line.startswith("# SOURCE:")
     ]
     pin.write_text("\n".join(lines) + "\n")

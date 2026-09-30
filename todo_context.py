@@ -183,8 +183,9 @@ def default_registry(root: Path) -> Path:
     return root / "ai-orchestrators-workspace" / "epics.toml"
 
 
-def build_inputs(root: Path,
-                 index: Any) -> tuple[list[Any], dict[str, Path], list[str]]:
+def build_inputs(
+    root: Path, index: Any
+) -> tuple[list[Any], dict[str, Path], list[str]]:
     """One `RepoInput` per manifest repo, frozen from disk.
 
     Deliberately a thin loop over the package's `checkout_map`: locating and
@@ -205,8 +206,11 @@ def build_inputs(root: Path,
             continue
         checkouts[repo] = directory
         todo = directory / "TODO.md"
-        text = todo.read_text(encoding="utf-8", errors="ignore") \
-            if todo.is_file() else None
+        text = (
+            todo.read_text(encoding="utf-8", errors="ignore")
+            if todo.is_file()
+            else None
+        )
         inputs.append(_pf.RepoInput(repo, todo_text=text, available=True))
     return inputs, checkouts, unread
 
@@ -237,8 +241,9 @@ def fleet_snapshot(
 # ─────────────────────────── the sources ───────────────────────────
 
 
-def read_item(snapshot: dict[str, Any], node_id: str,
-              checkouts: dict[str, Path]) -> dict[str, Any]:
+def read_item(
+    snapshot: dict[str, Any], node_id: str, checkouts: dict[str, Path]
+) -> dict[str, Any]:
     """The node itself, plus its verbatim source line and section heading.
 
     `epic`/`defect` are read from the canonical fields when the pinned parser
@@ -277,8 +282,9 @@ def read_item(snapshot: dict[str, Any], node_id: str,
     }
 
 
-def read_epic(registry_path: Path,
-              epic_id: str | None) -> tuple[dict[str, Any] | None, Source]:
+def read_epic(
+    registry_path: Path, epic_id: str | None
+) -> tuple[dict[str, Any] | None, Source]:
     """The epic's own `goal`/`notes` — the closest thing to a written intent.
 
     `load_registry` is used when the pinned parser has it (it validates the file
@@ -310,8 +316,9 @@ def read_epic(registry_path: Path,
         # `error` put a successfully read source into `unknown_sources`, under a
         # note saying it "was not read" — the module's own rule, inverted
         # (ревью PR #125, круг 4). `error` stays for "could not read".
-        return None, Source("epic", "absent",
-                            f"{epic_id} is not in the registry (EP-UNKNOWN)")
+        return None, Source(
+            "epic", "absent", f"{epic_id} is not in the registry (EP-UNKNOWN)"
+        )
     program_id = epic_id.split(".", 1)[0]
     program = programs.get(program_id, {})
     block = {
@@ -329,13 +336,17 @@ def read_epic(registry_path: Path,
             "notes": program.get("notes"),
         },
     }
-    detail = None if validated else (
-        "read without schema validation (pinned parser has no load_registry)")
+    detail = (
+        None
+        if validated
+        else ("read without schema validation (pinned parser has no load_registry)")
+    )
     return block, Source("epic", "read", detail)
 
 
-def read_graph(snapshot: dict[str, Any], node_id: str,
-               unread: list[str] | None = None) -> tuple[dict[str, Any], Source]:
+def read_graph(
+    snapshot: dict[str, Any], node_id: str, unread: list[str] | None = None
+) -> tuple[dict[str, Any], Source]:
     """What this item waits on, what waits on it, and what is wrong with that.
 
     Edge semantics, staleness and the diagnostics all come from the package
@@ -370,15 +381,24 @@ def read_graph(snapshot: dict[str, Any], node_id: str,
             "repo": other["repo"] if other else None,
         }
 
-    blocked_by = [describe(e["target_node_id"]) for e in snapshot["edges"]
-                  if e["source_node_id"] == node_id and e["kind"] == "blocked_by"]
-    blocks = [describe(e["source_node_id"]) for e in snapshot["edges"]
-              if e["target_node_id"] == node_id and e["kind"] == "blocked_by"]
-    unresolved = [r.get("raw_ref") for r in snapshot.get("references", [])
-                  if r.get("source_node_id") == node_id
-                  and not r.get("resolved_target")]
-    mine = [d for d in findings
-            if node_id in (d.get("subject_uri"), d.get("related_uri"))]
+    blocked_by = [
+        describe(e["target_node_id"])
+        for e in snapshot["edges"]
+        if e["source_node_id"] == node_id and e["kind"] == "blocked_by"
+    ]
+    blocks = [
+        describe(e["source_node_id"])
+        for e in snapshot["edges"]
+        if e["target_node_id"] == node_id and e["kind"] == "blocked_by"
+    ]
+    unresolved = [
+        r.get("raw_ref")
+        for r in snapshot.get("references", [])
+        if r.get("source_node_id") == node_id and not r.get("resolved_target")
+    ]
+    mine = [
+        d for d in findings if node_id in (d.get("subject_uri"), d.get("related_uri"))
+    ]
     repo = node_id.removeprefix("todo://").split("/", 1)[0]
     item_id = node_id.rsplit("/", 1)[-1]
     legacy: list[dict[str, Any]] = []
@@ -389,26 +409,40 @@ def read_graph(snapshot: dict[str, Any], node_id: str,
         target_repo, _, slug = raw.partition("#")
         if target_repo.lower() != repo.lower():
             continue
-        legacy.append({"raw_ref": raw, "from": ref.get("source_node_id"),
-                       "names_this_item": slug == item_id})
+        legacy.append(
+            {
+                "raw_ref": raw,
+                "from": ref.get("source_node_id"),
+                "names_this_item": slug == item_id,
+            }
+        )
     block = {
         "blocked_by": blocked_by,
         "blocks": blocks,
         "legacy_waits": legacy,
         "unread_repos": sorted(unread or []),
         "unresolved_refs": [u for u in unresolved if u],
-        "diagnostics": [{"code": d["code"], "severity": d["severity"],
-                         "message": d["message"]} for d in mine],
+        "diagnostics": [
+            {"code": d["code"], "severity": d["severity"], "message": d["message"]}
+            for d in mine
+        ],
     }
     notes = []
     if unread:
-        notes.append(f"{len(unread)} репо флота не склонированы здесь: "
-                     f"{', '.join(sorted(unread))}")
+        notes.append(
+            f"{len(unread)} репо флота не склонированы здесь: "
+            f"{', '.join(sorted(unread))}"
+        )
     if legacy:
-        notes.append(f"переходные ожидания к `{repo}` ({len(legacy)}) ребром "
-                     f"не становятся — в срезе рёбер их нет")
-    detail = None if not notes else (
-        "обратная сторона (кто ждёт этот пункт) неполна: " + "; ".join(notes))
+        notes.append(
+            f"переходные ожидания к `{repo}` ({len(legacy)}) ребром "
+            f"не становятся — в срезе рёбер их нет"
+        )
+    detail = (
+        None
+        if not notes
+        else ("обратная сторона (кто ждёт этот пункт) неполна: " + "; ".join(notes))
+    )
     return block, Source("graph", "read", detail)
 
 
@@ -427,8 +461,10 @@ def named_doc_sources(item: dict[str, Any]) -> list[tuple[str, str]]:
     """
     seen: list[tuple[str, str]] = []
     known: set[str] = set()
-    for where, text in (("line", item.get("source_line")),
-                        ("section", item.get("section"))):
+    for where, text in (
+        ("line", item.get("source_line")),
+        ("section", item.get("section")),
+    ):
         for match in _DOC_PATH_RE.finditer(text or ""):
             path = match.group(1)
             if path not in known:
@@ -437,20 +473,33 @@ def named_doc_sources(item: dict[str, Any]) -> list[tuple[str, str]]:
     return seen
 
 
-def git_grep(directory: Path,
-             needle: str) -> tuple[list[dict[str, Any]] | None, str | None]:
+def git_grep(
+    directory: Path, needle: str
+) -> tuple[list[dict[str, Any]] | None, str | None]:
     """`git grep` for a literal string, excluding TODO.md. `None` = could not run.
 
     `git grep` rather than a walk: it honours `.gitignore`, so a vendored
     `.venv` cannot flood the pack, and it is the repo's own idea of its files.
     """
-    cmd = ["git", "-C", str(directory), "grep", "-nI", "--fixed-strings", "--",
-           needle, "--", ".", ":(exclude)TODO.md"]
+    cmd = [
+        "git",
+        "-C",
+        str(directory),
+        "grep",
+        "-nI",
+        "--fixed-strings",
+        "--",
+        needle,
+        "--",
+        ".",
+        ":(exclude)TODO.md",
+    ]
     try:
         # errors="replace": a sibling repo holding one non-UTF-8 file must not
         # crash the pack — `docs: error` is an answer, a traceback is not
-        done = subprocess.run(cmd, capture_output=True, text=True,
-                              errors="replace", timeout=_GIT_TIMEOUT)
+        done = subprocess.run(
+            cmd, capture_output=True, text=True, errors="replace", timeout=_GIT_TIMEOUT
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, f"git grep failed: {exc}"
     if done.returncode not in (0, 1):  # 1 = no match, a legitimate answer
@@ -461,8 +510,9 @@ def git_grep(directory: Path,
         line_no, _, text = rest.partition(":")
         # `full` is classified, `text` is displayed: a canonical reference past
         # the display cap must still count (ревью PR #125, круг 2)
-        hits.append({"path": path, "line": line_no,
-                     "text": text.strip()[:300], "full": text})
+        hits.append(
+            {"path": path, "line": line_no, "text": text.strip()[:300], "full": text}
+        )
     return hits, None
 
 
@@ -487,8 +537,12 @@ def mention_states_a_requirement(lines: list[str], line_no: int) -> bool:
     # climb to the line that OWNS this one: a reference three lines into a
     # checklist item is still inside that item (behaviour-console.md:156-159)
     owner = index
-    while owner > 0 and lines[owner - 1].strip() and not _ITEM_START_RE.match(
-            lines[owner]) and not _HEADING_START_RE.match(lines[owner]):
+    while (
+        owner > 0
+        and lines[owner - 1].strip()
+        and not _ITEM_START_RE.match(lines[owner])
+        and not _HEADING_START_RE.match(lines[owner])
+    ):
         owner -= 1
     if _ITEM_START_RE.match(lines[owner]):
         return False  # a step in a plan, not a spec of the item
@@ -524,8 +578,9 @@ def item_ref_re(item_id: str) -> re.Pattern[str]:
     return re.compile(rf"(?:(?:@id:|todo://[\w.-]+/){esc}{_ID_TAIL}|`{esc}`)")
 
 
-def read_docs(directory: Path | None,
-              item: dict[str, Any]) -> tuple[dict[str, Any], Source]:
+def read_docs(
+    directory: Path | None, item: dict[str, Any]
+) -> tuple[dict[str, Any], Source]:
     """Design docs for this item: paths it names, plus every mention of its `@id`.
 
     Mentions are collected from the whole repo but each one is marked `doc`:
@@ -541,15 +596,25 @@ def read_docs(directory: Path | None,
     if directory is None:
         # `named` keeps the shape of the success path: an error state must
         # degrade honestly, not blow up grade/render (ревью PR #125, круг 2)
-        unresolved = [{"path": rel, "exists": False, "bytes": None, "named_in": where}
-                      for rel, where in named]
-        return ({"named": unresolved, "mentions": []},
-                Source("docs", "error", "repo is not checked out here"))
+        unresolved = [
+            {"path": rel, "exists": False, "bytes": None, "named_in": where}
+            for rel, where in named
+        ]
+        return (
+            {"named": unresolved, "mentions": []},
+            Source("docs", "error", "repo is not checked out here"),
+        )
     resolved = []
     for rel, where in named:
         path = directory / rel
-        resolved.append({"path": rel, "exists": path.is_file(), "named_in": where,
-                         "bytes": path.stat().st_size if path.is_file() else None})
+        resolved.append(
+            {
+                "path": rel,
+                "exists": path.is_file(),
+                "named_in": where,
+                "bytes": path.stat().st_size if path.is_file() else None,
+            }
+        )
     hits, error = git_grep(directory, item["id"])
     if error is not None:
         return ({"named": resolved, "mentions": []}, Source("docs", "error", error))
@@ -560,10 +625,14 @@ def read_docs(directory: Path | None,
         marked = is_doc_mention(path) and ref.search(full) is not None
         if marked and path not in read:
             file = directory / path
-            read[path] = (file.read_text(encoding="utf-8", errors="replace")
-                          .splitlines() if file.is_file() else [])
+            read[path] = (
+                file.read_text(encoding="utf-8", errors="replace").splitlines()
+                if file.is_file()
+                else []
+            )
         hit["doc"] = marked and mention_states_a_requirement(
-            read.get(path, []), int(hit["line"]) if hit["line"].isdigit() else 0)
+            read.get(path, []), int(hit["line"]) if hit["line"].isdigit() else 0
+        )
     # classify first, then cut for display, and keep every reference: the cut is
     # about what is READABLE, never about what was found
     refs = [h for h in hits if h["doc"]]
@@ -572,23 +641,33 @@ def read_docs(directory: Path | None,
     cut = len(hits) - len(shown)
     cut_refs = max(0, len(refs) - _GREP_CAP)
     hard = len(hits) >= _GREP_HARD_CAP
-    block = {"named": resolved, "mentions": shown, "hidden_mentions": cut,
-             "hidden_references": cut_refs, "grep_capped": hard}
+    block = {
+        "named": resolved,
+        "mentions": shown,
+        "hidden_mentions": cut,
+        "hidden_references": cut_refs,
+        "grep_capped": hard,
+    }
     have = any(d["exists"] for d in resolved) or bool(hits)
     detail = None if have else f"no file names @id:{item['id']}"
     if hard:
-        detail = (f"выдача git grep обрезана на {_GREP_HARD_CAP} строках — "
-                  f"часть упоминаний не классифицирована")
+        detail = (
+            f"выдача git grep обрезана на {_GREP_HARD_CAP} строках — "
+            f"часть упоминаний не классифицирована"
+        )
     elif cut_refs:
-        detail = (f"{cut} упоминаний не показаны, среди них {cut_refs} ссылок "
-                  f"на пункт — печать обрезана на {_GREP_CAP}")
+        detail = (
+            f"{cut} упоминаний не показаны, среди них {cut_refs} ссылок "
+            f"на пункт — печать обрезана на {_GREP_CAP}"
+        )
     elif cut:
         detail = f"{cut} упоминаний не показаны (ссылки на пункт показаны все)"
     return block, Source("docs", "read" if have else "absent", detail)
 
 
-def read_body(directory: Path | None, item: dict[str, Any],
-              cached_lines: list[str] | None = None) -> tuple[dict[str, Any], Source]:
+def read_body(
+    directory: Path | None, item: dict[str, Any], cached_lines: list[str] | None = None
+) -> tuple[dict[str, Any], Source]:
     """The item's indented continuation lines — the body the parser cannot see.
 
     `plan_fields` reads items line by line and stops at the first line: that is a
@@ -603,8 +682,10 @@ def read_body(directory: Path | None, item: dict[str, Any],
     and nothing about it flows back into the graph or the tags.
     """
     if directory is None:
-        return ({"text": None, "lines": 0},
-                Source("body", "error", "repo is not checked out here"))
+        return (
+            {"text": None, "lines": 0},
+            Source("body", "error", "repo is not checked out here"),
+        )
     todo = directory / "TODO.md"
     if cached_lines is not None:
         # Строки уже прочитаны вызывающим: обход всех узлов флота читал и
@@ -612,17 +693,21 @@ def read_body(directory: Path | None, item: dict[str, Any],
         lines = cached_lines
     else:
         if not todo.is_file():
-            return ({"text": None, "lines": 0},
-                    Source("body", "error", "repo keeps no TODO.md"))
+            return (
+                {"text": None, "lines": 0},
+                Source("body", "error", "repo keeps no TODO.md"),
+            )
         lines = todo.read_text(encoding="utf-8", errors="ignore").splitlines()
     start = (item.get("line") or 0) - 1
     if not 0 <= start < len(lines):
-        return ({"text": None, "lines": 0},
-                Source("body", "error", "item line is out of range"))
+        return (
+            {"text": None, "lines": 0},
+            Source("body", "error", "item line is out of range"),
+        )
     match = _ITEM_START_RE.match(lines[start])
     indent = len(match.group(1)) if match else 0
     collected: list[str] = []
-    for raw in lines[start + 1:]:
+    for raw in lines[start + 1 :]:
         if not raw.strip():
             collected.append("")
             continue
@@ -635,15 +720,22 @@ def read_body(directory: Path | None, item: dict[str, Any],
         collected.pop()
     text = "\n".join(collected).strip()
     if not text:
-        return ({"text": None, "lines": 0},
-                Source("body", "absent", "no continuation lines under the item"))
-    return ({"text": text, "lines": len([x for x in collected if x])},
-            Source("body", "read"))
+        return (
+            {"text": None, "lines": 0},
+            Source("body", "absent", "no continuation lines under the item"),
+        )
+    return (
+        {"text": text, "lines": len([x for x in collected if x])},
+        Source("body", "read"),
+    )
 
 
-def _cached_item(snapshot: dict[str, Any], node: dict[str, Any],
-                 checkouts: dict[str, Path],
-                 scraped: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _cached_item(
+    snapshot: dict[str, Any],
+    node: dict[str, Any],
+    checkouts: dict[str, Path],
+    scraped: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
     """`read_item` for a whole snapshot, reading each repo's TODO.md once."""
     repo = node["repo"]
     if repo not in scraped:
@@ -657,14 +749,16 @@ def _cached_item(snapshot: dict[str, Any], node: dict[str, Any],
             lines = text.splitlines()
         scraped[repo] = {"items": by_id, "lines": lines}
     hit = scraped[repo]["items"].get(node["id"])
-    return {"repo": repo, "id": node["id"],
-            "source_line": hit.raw_text if hit is not None else None,
-            "section": hit.section if hit is not None else None,
-            "line": node.get("provenance", {}).get("line")}
+    return {
+        "repo": repo,
+        "id": node["id"],
+        "source_line": hit.raw_text if hit is not None else None,
+        "section": hit.section if hit is not None else None,
+        "line": node.get("provenance", {}).get("line"),
+    }
 
 
-def _states_intent(text: str, entity: re.Pattern[str],
-                   verb: re.Pattern[str]) -> bool:
+def _states_intent(text: str, entity: re.Pattern[str], verb: re.Pattern[str]) -> bool:
     """Verb and entity must be ONE local claim, not two unrelated paragraphs.
 
     Мета-пункт, описывающий САМО правило, глушится не угадыванием по словам, а
@@ -683,17 +777,19 @@ def _states_intent(text: str, entity: re.Pattern[str],
         # отрицание, и утверждение («не удаляем сейчас, но удалим после»),
         # и суд по первому терял второе (ревью PR #140, круг 3).
         for hit in verb.finditer(line):
-            prefix = line[max(0, hit.start() - 12):hit.start()].lower()
+            prefix = line[max(0, hit.start() - 12) : hit.start()].lower()
             # Граница обязательна: «в плане», «вполне» кончаются на «не».
             if not re.search(r"(?:^|[^\w-])(?:не|без)\s*$", prefix):
                 return True
     return False
 
 
-def deleted_dependency_report(snapshot: dict[str, Any],
-                              checkouts: dict[str, Path],
-                              focus_node_id: str | None = None,
-                              unread: list[str] | None = None) -> dict[str, Any]:
+def deleted_dependency_report(
+    snapshot: dict[str, Any],
+    checkouts: dict[str, Path],
+    focus_node_id: str | None = None,
+    unread: list[str] | None = None,
+) -> dict[str, Any]:
     """Measure open item pairs where one builds on a path another removes.
 
     `unread` names manifest repos with no checkout here. Their plans were never
@@ -710,14 +806,21 @@ def deleted_dependency_report(snapshot: dict[str, Any],
             continue
         item = _cached_item(snapshot, node, checkouts, scraped)
         cached = scraped[node["repo"]]["lines"]
-        body, source = read_body(checkouts.get(item["repo"]), item,
-                                 cached if cached else None)
+        body, source = read_body(
+            checkouts.get(item["repo"]), item, cached if cached else None
+        )
         if source.state == "error":
             continue
         body_text = body.get("text") or ""
         text = "\n".join(filter(None, (item.get("source_line"), body_text)))
-        items.append({"node_id": node["node_id"], "body": body_text, "text": text,
-                      "line": item.get("source_line") or ""})
+        items.append(
+            {
+                "node_id": node["node_id"],
+                "body": body_text,
+                "text": text,
+                "line": item.get("source_line") or "",
+            }
+        )
 
     findings: list[dict[str, Any]] = []
     for support in items:
@@ -741,34 +844,48 @@ def deleted_dependency_report(snapshot: dict[str, Any],
             # предложения, поэтому она продолжает сущность только когда за ней
             # идёт что-то именное. Иначе путь в конце фразы не матчился вовсе
             # (тест агента был прав, код — нет; ревью PR #140, круг 2).
-            entity = re.compile(
-                rf"(?<![\w.-])(?:{alternatives})(?![\w-])(?!\.[\w-])")
+            entity = re.compile(rf"(?<![\w.-])(?:{alternatives})(?![\w-])(?!\.[\w-])")
             if not _states_intent(support["text"], entity, _SUPPORT_RE):
                 continue
             for remover in items:
                 if remover["node_id"] == support["node_id"]:
                     continue
-                if (not _states_intent(remover["text"], entity, _REMOVE_RE)
-                        or _WAIVED_RE.search(remover["line"])):
+                if not _states_intent(
+                    remover["text"], entity, _REMOVE_RE
+                ) or _WAIVED_RE.search(remover["line"]):
                     continue
-                findings.append({"code": "TODO-DELETED-DEPENDENCY",
-                                 "severity": "warning",
-                                 "supporting_item": support["node_id"],
-                                 "removing_item": remover["node_id"],
-                                 "entity": path})
-    unique = {(f["supporting_item"], f["removing_item"], f["entity"]): f
-              for f in findings}
+                findings.append(
+                    {
+                        "code": "TODO-DELETED-DEPENDENCY",
+                        "severity": "warning",
+                        "supporting_item": support["node_id"],
+                        "removing_item": remover["node_id"],
+                        "entity": path,
+                    }
+                )
+    unique = {
+        (f["supporting_item"], f["removing_item"], f["entity"]): f for f in findings
+    }
     all_findings = [unique[key] for key in sorted(unique)]
-    focused = ([f for f in all_findings if focus_node_id in
-                (f["supporting_item"], f["removing_item"])]
-               if focus_node_id else all_findings)
+    focused = (
+        [
+            f
+            for f in all_findings
+            if focus_node_id in (f["supporting_item"], f["removing_item"])
+        ]
+        if focus_node_id
+        else all_findings
+    )
     # Пара — это (опирающийся, удаляющий): один и тот же конфликт, названный
     # двумя путями, оставался бы одним конфликтом, а счёт ради которого пункт и
     # заводился — завышался (ревью PR #140, круг 4).
     pairs = {(f["supporting_item"], f["removing_item"]) for f in all_findings}
-    return {"fleet_pair_count": len(pairs), "findings": focused,
-            "unread_repos": sorted(unread or []),
-            "waiver": "поставьте [waived] или [waived: причина] на строку пункта"}
+    return {
+        "fleet_pair_count": len(pairs),
+        "findings": focused,
+        "unread_repos": sorted(unread or []),
+        "waiver": "поставьте [waived] или [waived: причина] на строку пункта",
+    }
 
 
 def read_rules(directory: Path | None) -> tuple[list[dict[str, Any]], Source]:
@@ -782,15 +899,24 @@ def read_rules(directory: Path | None) -> tuple[list[dict[str, Any]], Source]:
             continue
         raw = path.read_bytes()
         # decode AFTER the cut, ignoring a codepoint split by it
-        out.append({"path": name, "bytes": len(raw),
-                    "truncated": len(raw) > _RULES_CAP,
-                    "text": raw[:_RULES_CAP].decode("utf-8", errors="ignore")})
-    return out, Source("rules", "read" if out else "absent",
-                       None if out else "repo keeps no CLAUDE.md/AGENTS.md")
+        out.append(
+            {
+                "path": name,
+                "bytes": len(raw),
+                "truncated": len(raw) > _RULES_CAP,
+                "text": raw[:_RULES_CAP].decode("utf-8", errors="ignore"),
+            }
+        )
+    return out, Source(
+        "rules",
+        "read" if out else "absent",
+        None if out else "repo keeps no CLAUDE.md/AGENTS.md",
+    )
 
 
-def match_origin_issue(issues: list[dict[str, Any]],
-                       item: dict[str, Any]) -> dict[str, Any] | None:
+def match_origin_issue(
+    issues: list[dict[str, Any]], item: dict[str, Any]
+) -> dict[str, Any] | None:
     """The inbox issue this item accepted, by the same rule `inbox.py` accepts with.
 
     ADR-ECO-006 D9: acceptance is *derived* — an issue's `slug:` appearing on a
@@ -818,14 +944,16 @@ def match_origin_issue(issues: list[dict[str, Any]],
             continue  # another repo's request; see the docstring
         slug = inbox.parse_field(issue.get("body") or "", "slug")
         if slug and slug in line:  # inbox.is_accepted's rule, not a second one
-            found.append({
-                "repo": (issue.get("repository") or {}).get("name"),
-                "number": issue.get("number"),
-                "title": issue.get("title"),
-                "slug": slug,
-                "body": issue.get("body"),
-                "exact": slug_re(slug).search(line) is not None,
-            })
+            found.append(
+                {
+                    "repo": (issue.get("repository") or {}).get("name"),
+                    "number": issue.get("number"),
+                    "title": issue.get("title"),
+                    "slug": slug,
+                    "body": issue.get("body"),
+                    "exact": slug_re(slug).search(line) is not None,
+                }
+            )
     if not found:
         return None
     # Several open requests can pair with one line. Which one states the
@@ -856,8 +984,9 @@ def slug_re(slug: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![a-z0-9._-]){re.escape(slug)}{_ID_TAIL}")
 
 
-def read_origin_issue(item: dict[str, Any],
-                      owner: str | None) -> tuple[dict[str, Any] | None, Source]:
+def read_origin_issue(
+    item: dict[str, Any], owner: str | None
+) -> tuple[dict[str, Any] | None, Source]:
     """The originating inbox issue, when asked for. Never guessed offline."""
     if owner is None:
         return None, Source("origin_issue", "not_queried", "pass --issues to ask gh")
@@ -868,18 +997,22 @@ def read_origin_issue(item: dict[str, Any],
         return None, Source("origin_issue", "error", "gh unavailable or failed")
     found = match_origin_issue(issues, item)
     if found is None:
-        return None, Source("origin_issue", "absent",
-                            "no open inbox issue whose slug is on this line")
+        return None, Source(
+            "origin_issue", "absent", "no open inbox issue whose slug is on this line"
+        )
     return found, Source("origin_issue", "read")
 
 
 # ─────────────────────────── the verdict ───────────────────────────
 
 
-def grade(sources: list[Source], body: dict[str, Any],
-          origin: dict[str, Any] | None,
-          docs: dict[str, Any] | None = None,
-          epic: dict[str, Any] | None = None) -> dict[str, Any]:
+def grade(
+    sources: list[Source],
+    body: dict[str, Any],
+    origin: dict[str, Any] | None,
+    docs: dict[str, Any] | None = None,
+    epic: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """How much context was actually assembled, and whether `execute` may run.
 
     The floor for `execute` is a WRITTEN requirement — a design doc or the
@@ -899,22 +1032,28 @@ def grade(sources: list[Source], body: dict[str, Any],
     # an epic whose goal is empty is not "the stream's goal is known" either:
     # same presence-is-not-evidence rule, applied before it was reported
     has_epic_goal = bool((epic or {}).get("goal") or (epic or {}).get("notes"))
-    has_doc = (any((d.get("bytes") or 0) >= _DOC_SUBSTANTIAL
-                   for d in docs.get("named", [])
-                   if d.get("exists") and d.get("named_in", "line") == "line")
-               or any(m.get("doc") for m in docs.get("mentions", [])))
+    has_doc = any(
+        (d.get("bytes") or 0) >= _DOC_SUBSTANTIAL
+        for d in docs.get("named", [])
+        if d.get("exists") and d.get("named_in", "line") == "line"
+    ) or any(m.get("doc") for m in docs.get("mentions", []))
     origin = origin or {}
-    has_issue = (len(origin.get("body") or "") >= _ISSUE_SUBSTANTIAL
-                 and origin.get("exact", True)
-                 and not origin.get("rival_issues"))
+    has_issue = (
+        len(origin.get("body") or "") >= _ISSUE_SUBSTANTIAL
+        and origin.get("exact", True)
+        and not origin.get("rival_issues")
+    )
     has_body = len(body.get("text") or "") >= _BODY_SUBSTANTIAL
-    unknowns = sorted(s for s, state in states.items()
-                      if state in ("not_queried", "error"))
+    unknowns = sorted(
+        s for s, state in states.items() if state in ("not_queried", "error")
+    )
     if has_doc or has_issue or has_body:
         level, why = "rich", "a written requirement was found"
     elif has_epic_goal:
-        level, why = "thin", (
-            "only the epic's goal — no written requirement for THIS item")
+        level, why = (
+            "thin",
+            ("only the epic's goal — no written requirement for THIS item"),
+        )
     else:
         level, why = "bare", "nothing beyond the item line itself"
     return {
@@ -922,13 +1061,23 @@ def grade(sources: list[Source], body: dict[str, Any],
         "reason": why,
         "execute_allowed": level == "rich",
         "unknown_sources": unknowns,
-        "note": ("sources listed in unknown_sources were not read; their "
-                 "emptiness above is not evidence of absence") if unknowns else None,
+        "note": (
+            "sources listed in unknown_sources were not read; their "
+            "emptiness above is not evidence of absence"
+        )
+        if unknowns
+        else None,
     }
 
 
-def build_pack(root: Path, manifest_path: Path, registry_path: Path, repo: str,
-               item_id: str, owner: str | None = None) -> dict[str, Any]:
+def build_pack(
+    root: Path,
+    manifest_path: Path,
+    registry_path: Path,
+    repo: str,
+    item_id: str,
+    owner: str | None = None,
+) -> dict[str, Any]:
     """Assemble the whole context pack for one item."""
     snapshot, checkouts, unread, index = fleet_snapshot(root, manifest_path)
     # `parse_fleet` keys nodes by the canonical name, so a legitimate spelling —
@@ -984,12 +1133,16 @@ def render(pack: dict[str, Any]) -> str:
     add("")
     add(f"**{item['title']}**")
     add("")
-    add(f"- repo: `{item['repo']}` · status: `{item['status']}` · "
-        f"{item['path']}:{item['line']}")
+    add(
+        f"- repo: `{item['repo']}` · status: `{item['status']}` · "
+        f"{item['path']}:{item['line']}"
+    )
     if item["section"]:
         add(f"- section: {item['section']}")
-    add(f"- epic: `{item['epic'] or '—'}` · defect: `{item['defect'] or '—'}` · "
-        f"owner: `{item['owner'] or '—'}`")
+    add(
+        f"- epic: `{item['epic'] or '—'}` · defect: `{item['defect'] or '—'}` · "
+        f"owner: `{item['owner'] or '—'}`"
+    )
     if item["trigger"]:
         add(f"- trigger: {item['trigger']}")
     if item["source_line"]:
@@ -1011,8 +1164,10 @@ def render(pack: dict[str, Any]) -> str:
         add("_нет_ (см. sources ниже)")
     else:
         program = epic["program"]
-        add(f"`{epic['id']}` — {epic['title']} · status `{epic['status']}` · "
-            f"программа `{program['id']}` ({program['kind']})")
+        add(
+            f"`{epic['id']}` — {epic['title']} · status `{epic['status']}` · "
+            f"программа `{program['id']}` ({program['kind']})"
+        )
         if epic["goal"]:
             add("")
             add(f"**Цель потока:** {epic['goal']}")
@@ -1023,17 +1178,28 @@ def render(pack: dict[str, Any]) -> str:
     graph = pack["graph"]
     add("")
     add("## Graph")
-    if not any((graph["blocked_by"], graph["blocks"],
-                graph["unresolved_refs"], graph["diagnostics"])):
+    if not any(
+        (
+            graph["blocked_by"],
+            graph["blocks"],
+            graph["unresolved_refs"],
+            graph["diagnostics"],
+        )
+    ):
         add("нет рёбер и диагностик")
     if graph.get("unread_repos"):
-        add(f"- ⚠ не склонированы здесь, их ожидания не видны: "
-            f"{', '.join(graph['unread_repos'])}")
+        add(
+            f"- ⚠ не склонированы здесь, их ожидания не видны: "
+            f"{', '.join(graph['unread_repos'])}"
+        )
     for wait in graph.get("legacy_waits", []):
-        mark = (" — слаг совпадает с `@id` этого пункта"
-                if wait["names_this_item"] else "")
-        add(f"- ⚠ переходное ожидание `{wait['raw_ref']}` от `{wait['from']}` "
-            f"ребром не стало{mark}")
+        mark = (
+            " — слаг совпадает с `@id` этого пункта" if wait["names_this_item"] else ""
+        )
+        add(
+            f"- ⚠ переходное ожидание `{wait['raw_ref']}` от `{wait['from']}` "
+            f"ребром не стало{mark}"
+        )
     for edge in graph["blocked_by"]:
         add(f"- ждёт: `{edge['node_id']}` [{edge['status']}] {edge['title'] or ''}")
     for edge in graph["blocks"]:
@@ -1054,16 +1220,21 @@ def render(pack: dict[str, Any]) -> str:
         add("- не измерено: в паке нет поля `plan_risks`")
     else:
         unread = risks.get("unread_repos") or []
-        tail = (f" (по прочитанным репо; не склонированы здесь: "
-                f"{', '.join(unread)})" if unread else "")
+        tail = (
+            f" (по прочитанным репо; не склонированы здесь: {', '.join(unread)})"
+            if unread
+            else ""
+        )
         add(f"- потенциальных пар во флоте: {risks['fleet_pair_count']}{tail}")
         if not risks["findings"]:
             add("- для этого пункта не найдено")
         for finding in risks["findings"]:
-            add(f"- [{finding['severity']}] {finding['code']}: "
+            add(
+                f"- [{finding['severity']}] {finding['code']}: "
                 f"`{finding['supporting_item']}` опирается на "
                 f"`{finding['entity']}`, который удаляет "
-                f"`{finding['removing_item']}`")
+                f"`{finding['removing_item']}`"
+            )
         if risks["findings"]:
             add(f"- осознанное исключение: {risks['waiver']}")
 
@@ -1072,9 +1243,11 @@ def render(pack: dict[str, Any]) -> str:
     add("## Docs")
     for doc in docs["named"]:
         mark = "" if doc["exists"] else " — ФАЙЛ НЕ НАЙДЕН"
-        where = ("названо в строке пункта"
-                 if doc.get("named_in", "line") == "line"
-                 else "названо в заголовке секции (контекст секции, не пункта)")
+        where = (
+            "названо в строке пункта"
+            if doc.get("named_in", "line") == "line"
+            else "названо в заголовке секции (контекст секции, не пункта)"
+        )
         add(f"- {where}: `{doc['path']}`{mark}")
     grouped: dict[str, int] = {}
     refs: set[str] = set()
@@ -1089,24 +1262,33 @@ def render(pack: dict[str, Any]) -> str:
     if not docs["named"] and not grouped:
         add("ничего не найдено")
     if docs.get("hidden_mentions"):
-        tail = (f", среди них {docs['hidden_references']} ссылок на пункт"
-                if docs.get("hidden_references") else " (все ссылки — выше)")
+        tail = (
+            f", среди них {docs['hidden_references']} ссылок на пункт"
+            if docs.get("hidden_references")
+            else " (все ссылки — выше)"
+        )
         add(f"- ещё {docs['hidden_mentions']} упоминаний не показаны{tail}")
 
     if pack["origin_issue"]:
         origin = pack["origin_issue"]
         add("")
-        add(f"## Origin issue — {origin['repo']}#{origin['number']} "
-            f"(slug: `{origin['slug']}`)")
+        add(
+            f"## Origin issue — {origin['repo']}#{origin['number']} "
+            f"(slug: `{origin['slug']}`)"
+        )
         if not origin.get("exact", True):
             add("")
-            add("⚠ слаг совпал подстрокой, не токеном (как в `inbox`), поэтому "
-                "требованием не считается — контекст")
+            add(
+                "⚠ слаг совпал подстрокой, не токеном (как в `inbox`), поэтому "
+                "требованием не считается — контекст"
+            )
         if origin.get("rival_issues"):
             others = ", ".join(f"#{n}" for n in origin["rival_issues"])
             add("")
-            add(f"⚠ с этой строкой пары также образуют {others} — какой из них "
-                f"ставит задачу, неизвестно; требованием не считается")
+            add(
+                f"⚠ с этой строкой пары также образуют {others} — какой из них "
+                f"ставит задачу, неизвестно; требованием не считается"
+            )
         add("")
         add(origin["title"] or "")
         if origin["body"]:
@@ -1121,8 +1303,7 @@ def render(pack: dict[str, Any]) -> str:
             # fence is thousands of bytes and would bury the item. Say where it
             # is, so "(обрезано)" stops describing invisible text (круг 3).
             cut = f", инлайн обрезан до {_RULES_CAP} байт" if rule["truncated"] else ""
-            add(f"- `{rule['path']}` — {rule['bytes']} байт{cut}; "
-                f"текст — в `--json`")
+            add(f"- `{rule['path']}` — {rule['bytes']} байт{cut}; текст — в `--json`")
 
     completeness = pack["completeness"]
     add("")
@@ -1158,10 +1339,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", default=None, help="workspace root")
     parser.add_argument("--manifest", default=None)
     parser.add_argument("--registry", default=None, help="epics.toml")
-    parser.add_argument("--issues", nargs="?", const="", default=None,
-                        metavar="OWNER",
-                        help="ask gh for the originating inbox issue "
-                             "(owner defaults to inbox.DEFAULT_OWNER)")
+    parser.add_argument(
+        "--issues",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="OWNER",
+        help="ask gh for the originating inbox issue "
+        "(owner defaults to inbox.DEFAULT_OWNER)",
+    )
     parser.add_argument("--json", action="store_true", help="machine-readable pack")
     args = parser.parse_args(argv)
 
@@ -1177,7 +1363,9 @@ def main(argv: list[str] | None = None) -> int:
             root,
             Path(args.manifest) if args.manifest else default_manifest(root),
             Path(args.registry) if args.registry else default_registry(root),
-            repo, item_id, owner=args.issues,
+            repo,
+            item_id,
+            owner=args.issues,
         )
     except ContextError as exc:
         print(f"todo-context: {exc}", file=sys.stderr)

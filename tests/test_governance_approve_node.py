@@ -58,7 +58,9 @@ NODES: dict[str, tuple[str, ...]] = {
 def _git(where: Path, *args: str) -> str:
     done = subprocess.run(
         ["git", "-C", str(where), *args],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return done.stdout.strip()
 
@@ -73,7 +75,9 @@ def _show(where: Path, spec: str) -> str:
     """
     done = subprocess.run(
         ["git", "-C", str(where), "show", spec],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return done.stdout
 
@@ -136,9 +140,11 @@ class Forge:
         default_factory=lambda: [{"name": "test", "conclusion": "SUCCESS"}]
     )
     policy_sha: str | None = "p" * 40
-    policy_files: dict[str, str] = field(default_factory=lambda: {
-        "p" * 40: f"AUTHORIZED_APPROVER_ACCOUNTS={HUMAN}\n",
-    })
+    policy_files: dict[str, str] = field(
+        default_factory=lambda: {
+            "p" * 40: f"AUTHORIZED_APPROVER_ACCOUNTS={HUMAN}\n",
+        }
+    )
 
     def next_checks(self) -> list[dict]:
         """Текущий снимок проверок."""
@@ -147,7 +153,8 @@ class Forge:
     def head_of(self, branch: str) -> str | None:
         done = subprocess.run(
             ["git", "-C", str(self.origin), "rev-parse", f"refs/heads/{branch}"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         return done.stdout.strip() if done.returncode == 0 else None
 
@@ -206,8 +213,12 @@ class Ops(RealOps):
         self.forge.next_number += 1
         number = self.forge.next_number
         self.forge.prs[number] = {
-            "branch": branch, "title": title, "body": body,
-            "label": label, "draft": draft, "state": "OPEN",
+            "branch": branch,
+            "title": title,
+            "body": body,
+            "label": label,
+            "draft": draft,
+            "state": "OPEN",
         }
         return number
 
@@ -220,9 +231,16 @@ class Ops(RealOps):
 
     def delete_remote_branch(self, repo_slug: str, branch: str) -> bool:
         done = subprocess.run(
-            ["git", "-C", str(self.forge.origin), "update-ref", "-d",
-             f"refs/heads/{branch}"],
-            capture_output=True, text=True,
+            [
+                "git",
+                "-C",
+                str(self.forge.origin),
+                "update-ref",
+                "-d",
+                f"refs/heads/{branch}",
+            ],
+            capture_output=True,
+            text=True,
         )
         return done.returncode == 0
 
@@ -273,13 +291,13 @@ class Ops(RealOps):
 
     def latest_review_body(self, repo_slug: str, pr: int) -> str | None:
         bodies = [
-            r.get("body") for r in self.forge.reviews.get(pr, []) if r.get("login") == AGENT
+            r.get("body")
+            for r in self.forge.reviews.get(pr, [])
+            if r.get("login") == AGENT
         ]
         return bodies[-1] if bodies else None
 
-    def merge(
-        self, repo_name: str, pr: int, sha: str, base: str | None = None
-    ) -> int:
+    def merge(self, repo_name: str, pr: int, sha: str, base: str | None = None) -> int:
         """Агентский мерж — зеркало гвардов `merge-pr.sh`, не сети.
 
         Лейбл `human-merge-required` и уехавшая голова отказывают так же,
@@ -345,9 +363,7 @@ def waves_world(tmp_path: Path, monkeypatch) -> World:
 
     Волновой прогон (спека sequential-node-approval) начинается с base без
     единого узла: W1 приносит charter своим candidate."""
-    return _make_world(
-        tmp_path, monkeypatch, seed_nodes=False, authoring="waves"
-    )
+    return _make_world(tmp_path, monkeypatch, seed_nodes=False, authoring="waves")
 
 
 def _make_world(
@@ -379,9 +395,7 @@ def _make_world(
     target = tmp_path / "target"
     human = tmp_path / "human"
     for clone in (target, human):
-        subprocess.run(
-            ["git", "clone", "-q", str(origin), str(clone)], check=True
-        )
+        subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
         _git(clone, "config", "user.email", "t@e.st")
         _git(clone, "config", "user.name", "test")
 
@@ -418,8 +432,13 @@ def _merge_into_origin(forge: Forge, pr: int, *, login: str, when: str) -> str:
     _git(clone, "switch", "-q", "master")
     _git(clone, "reset", "-q", "--hard", "origin/master")
     _git(
-        clone, "merge", "-q", "--no-ff", f"origin/{rec['branch']}",
-        "-m", f"Merge pull request #{pr}",
+        clone,
+        "merge",
+        "-q",
+        "--no-ff",
+        f"origin/{rec['branch']}",
+        "-m",
+        f"Merge pull request #{pr}",
     )
     sha = _git(clone, "rev-parse", "HEAD")
     _git(clone, "push", "-q", "origin", "master")
@@ -435,9 +454,7 @@ def _merge_into_origin(forge: Forge, pr: int, *, login: str, when: str) -> str:
 def approve(
     world: World, node: str, *, legacy_bundle: int | None = None
 ) -> an.ApprovalOutcome:
-    return an.approve_node(
-        world.state, world.ops, node, legacy_bundle=legacy_bundle
-    )
+    return an.approve_node(world.state, world.ops, node, legacy_bundle=legacy_bundle)
 
 
 def drive_to_approved(
@@ -495,7 +512,7 @@ def declare_human_merge(world: World) -> None:
 
 
 def only_request(world: World) -> tuple[str, dict]:
-    (nums, op), = al.requests(world.state)
+    ((nums, op),) = al.requests(world.state)
     return al.request_key(*nums), op
 
 
@@ -552,15 +569,11 @@ def test_phase1_writes_four_values_and_no_signature(world: World) -> None:
     drive_to_approved(world, "charter")
     approve(world, "requirements")
     key, op = _request_over(world, "requirements")
-    branch_text = _show(
-        world.target, f"{op['branch']}:{BUNDLE}/10-requirements.md"
-    )
+    branch_text = _show(world.target, f"{op['branch']}:{BUNDLE}/10-requirements.md")
     meta, _ = split_frontmatter(branch_text)
     assert meta["status"] == na.STATUS_APPROVAL_PENDING
     assert meta["version"] == 2
-    assert meta["upstream_hashes"] == {
-        "charter": _blob(world, "00-charter.md")
-    }
+    assert meta["upstream_hashes"] == {"charter": _blob(world, "00-charter.md")}
     assert meta[na.SELF_HASH_KEY] == na.self_hash(branch_text)
     assert not meta["approved_by"] and not meta["approved_at"]
     assert op["content_hashes"]["requirements"] == meta[na.SELF_HASH_KEY]
@@ -573,18 +586,14 @@ def test_brief_source_pin_survives_candidate_and_finalize(world: World) -> None:
     first = approve(world, "charter")
     assert first.request is not None
     op = world.state.ops[first.request]
-    assert op["upstream_pins"]["charter"] == {
-        "discovery-brief": source_blob
-    }
-    candidate_text = _show(
-        world.target, f"{op['branch']}:{BUNDLE}/00-charter.md"
-    )
+    assert op["upstream_pins"]["charter"] == {"discovery-brief": source_blob}
+    candidate_text = _show(world.target, f"{op['branch']}:{BUNDLE}/00-charter.md")
     assert split_frontmatter(candidate_text)[0]["upstream_hashes"] == {
         "discovery-brief": source_blob
     }
 
     merge_pr(world, op["candidate_pr"])
-    approve(world, "charter")   # конверт + агентский мерж finalize
+    approve(world, "charter")  # конверт + агентский мерж finalize
     world.sync()
 
     assert world.base_meta("00-charter.md")["upstream_hashes"] == {
@@ -593,9 +602,10 @@ def test_brief_source_pin_survives_candidate_and_finalize(world: World) -> None:
     resolved = bundle_inputs.direct_blobs(
         world.state, world.ops, bundle_dag.BUNDLE_DAG, "charter", "master"
     )
-    assert na.node_debt(
-        "charter", world.base_text("00-charter.md"), resolved.value or {}
-    ) is None
+    assert (
+        na.node_debt("charter", world.base_text("00-charter.md"), resolved.value or {})
+        is None
+    )
 
 
 def test_candidate_snapshot_rejects_source_changed_at_head(world: World) -> None:
@@ -608,9 +618,12 @@ def test_candidate_snapshot_rejects_source_changed_at_head(world: World) -> None
     _git(world.target, "commit", "-qm", "mutate source")
     changed_head = _git(world.target, "rev-parse", "HEAD")
 
-    assert an._snapshot_is_published(
-        world.state, world.ops, bundle_dag.BUNDLE_DAG, op, changed_head
-    ) is False
+    assert (
+        an._snapshot_is_published(
+            world.state, world.ops, bundle_dag.BUNDLE_DAG, op, changed_head
+        )
+        is False
+    )
 
 
 def test_candidate_snapshot_rejects_removed_source_pin(world: World) -> None:
@@ -625,9 +638,12 @@ def test_candidate_snapshot_rejects_removed_source_pin(world: World) -> None:
     _git(world.target, "commit", "-qm", "remove source pin")
     changed_head = _git(world.target, "rev-parse", "HEAD")
 
-    assert an._snapshot_is_published(
-        world.state, world.ops, bundle_dag.BUNDLE_DAG, op, changed_head
-    ) is False
+    assert (
+        an._snapshot_is_published(
+            world.state, world.ops, bundle_dag.BUNDLE_DAG, op, changed_head
+        )
+        is False
+    )
 
 
 def test_candidate_pr_is_ready_and_labelled_at_creation(world: World) -> None:
@@ -658,17 +674,15 @@ def test_cascade_is_recursive_and_sweeps_pending_too(world: World) -> None:
     approve(world, "design")
     merge_pr(world, _request_over(world, "design")[1]["candidate_pr"])
     world.sync()
-    assert world.base_meta("20-design.md")["status"] == (
-        na.STATUS_APPROVAL_PENDING
-    )
+    assert world.base_meta("20-design.md")["status"] == (na.STATUS_APPROVAL_PENDING)
     _mutate_body(world, "00-charter.md", "Правленый чартер.")
     approve(world, "charter")
     _, op = _request_over(world, "charter")
     branch = op["branch"]
     after = {
-        fname: split_frontmatter(
-            _show(world.target, f"{branch}:{BUNDLE}/{fname}")
-        )[0]["status"]
+        fname: split_frontmatter(_show(world.target, f"{branch}:{BUNDLE}/{fname}"))[0][
+            "status"
+        ]
         for fname in NODES
     }
     assert after["00-charter.md"] == na.STATUS_APPROVAL_PENDING
@@ -748,22 +762,23 @@ def test_two_nodes_of_one_level_share_one_candidate(world: World) -> None:
     assert len(world.forge.prs) == 7, "второго PR на шаг не заведено"
     branch = op["branch"]
     for fname in ("20-design.md", "25-acceptance.md"):
-        meta, _ = split_frontmatter(
-            _show(world.target, f"{branch}:{BUNDLE}/{fname}")
-        )
+        meta, _ = split_frontmatter(_show(world.target, f"{branch}:{BUNDLE}/{fname}"))
         assert meta["status"] == na.STATUS_APPROVAL_PENDING, fname
     merge_pr(world, op["candidate_pr"])
-    approve(world, "design")   # конверт + агентский мерж finalize
+    approve(world, "design")  # конверт + агентский мерж finalize
     world.sync()
     for node, fname in (("design", "20-design.md"), ("acceptance", "25-acceptance.md")):
-        assert na.node_debt(
-            node,
-            world.base_text(fname),
-            {
-                "requirements": _blob(world, "10-requirements.md"),
-                "behaviour-spec": _blob(world, "15-behaviour-spec.md"),
-            },
-        ) is None, node
+        assert (
+            na.node_debt(
+                node,
+                world.base_text(fname),
+                {
+                    "requirements": _blob(world, "10-requirements.md"),
+                    "behaviour-spec": _blob(world, "15-behaviour-spec.md"),
+                },
+            )
+            is None
+        ), node
 
 
 def test_unknown_node_id_lists_the_allowed_ones(world: World) -> None:
@@ -824,9 +839,7 @@ def test_merged_candidate_is_not_joined_but_starts_a_new_attempt(
         "requirements": _blob(world, "10-requirements.md"),
         "behaviour-spec": _blob(world, "15-behaviour-spec.md"),
     }
-    for node, fname in (
-        ("design", "20-design.md"), ("acceptance", "25-acceptance.md")
-    ):
+    for node, fname in (("design", "20-design.md"), ("acceptance", "25-acceptance.md")):
         assert na.node_debt(node, world.base_text(fname), upstreams) is None
 
 
@@ -897,16 +910,14 @@ def test_resume_republishes_a_joined_node_that_never_reached_the_pr(
 
     # Выход есть и он обычный: заявка доводится до конца обоими узлами.
     merge_pr(world, pr)
-    approve(world, "design")   # конверт + агентский мерж finalize
+    approve(world, "design")  # конверт + агентский мерж finalize
     world.sync()
     assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
     upstreams = {
         "requirements": _blob(world, "10-requirements.md"),
         "behaviour-spec": _blob(world, "15-behaviour-spec.md"),
     }
-    for node, fname in (
-        ("design", "20-design.md"), ("acceptance", "25-acceptance.md")
-    ):
+    for node, fname in (("design", "20-design.md"), ("acceptance", "25-acceptance.md")):
         assert na.node_debt(node, world.base_text(fname), upstreams) is None
 
 
@@ -954,7 +965,9 @@ def test_completed_needs_the_envelope_in_base_not_a_merged_pr(
     finalize = world.state.ops[key]["finalize_pr"]
     # Форджа говорит «вмержен», а конверта в base нет.
     world.forge.prs[finalize].update(
-        state="MERGED", mergedBy={"login": HUMAN}, mergedAt=MERGED_AT,
+        state="MERGED",
+        mergedBy={"login": HUMAN},
+        mergedAt=MERGED_AT,
         mergeCommit={"oid": _stray_commit(world)},
     )
 
@@ -994,15 +1007,13 @@ def test_join_to_a_request_without_a_commit_carries_both_nodes(
     for fname in ("20-design.md", "25-acceptance.md"):
         assert fname in published, f"{fname} не вынесен"
     merge_pr(world, joined["candidate_pr"])
-    approve(world, "design")   # конверт + агентский мерж finalize
+    approve(world, "design")  # конверт + агентский мерж finalize
     world.sync()
     upstreams = {
         "requirements": _blob(world, "10-requirements.md"),
         "behaviour-spec": _blob(world, "15-behaviour-spec.md"),
     }
-    for node, fname in (
-        ("design", "20-design.md"), ("acceptance", "25-acceptance.md")
-    ):
+    for node, fname in (("design", "20-design.md"), ("acceptance", "25-acceptance.md")):
         assert na.node_debt(node, world.base_text(fname), upstreams) is None
 
 
@@ -1107,12 +1118,10 @@ def test_pending_upstream_diagnostics_names_the_awaited_pr(
         expected = op["candidate_pr"]
     else:
         merge_pr(world, op["candidate_pr"])
-        approve(world, "requirements")   # конверт вынесен, в base ещё pending
+        approve(world, "requirements")  # конверт вынесен, в base ещё pending
         expected = world.state.ops[key]["finalize_pr"]
         assert expected != op["candidate_pr"]
-    assert (
-        world.forge.prs[expected]["state"] == "OPEN"
-    ), "ждут именно этого PR"
+    assert world.forge.prs[expected]["state"] == "OPEN", "ждут именно этого PR"
 
     with pytest.raises(RuntimeError) as failure:
         approve(world, "behaviour-spec")
@@ -1374,13 +1383,15 @@ def test_pr_with_a_different_head_is_not_adopted(world: World) -> None:
     говорит, где смотреть; идентичность устанавливает запись.
     """
     world.forge.prs[500] = {
-        "branch": "master", "title": "чужой", "body": "",
-        "label": "", "draft": False, "state": "OPEN",
+        "branch": "master",
+        "title": "чужой",
+        "body": "",
+        "label": "",
+        "draft": False,
+        "state": "OPEN",
     }
     with pytest.raises(RuntimeError, match="чужая работа"):
-        an._adopt_or_create_pr(
-            world.state, world.ops, "master", "dead" * 10, "t", "b"
-        )
+        an._adopt_or_create_pr(world.state, world.ops, "master", "dead" * 10, "t", "b")
     assert len(world.forge.prs) == 1, "второго PR не создано"
 
 
@@ -1440,7 +1451,7 @@ def test_finalize_writes_only_the_envelope(world: World) -> None:
     merge_pr(world, op["candidate_pr"])
     world.sync()  # снимок берётся с ФАКТИЧЕСКОГО base, а не с протухшего клона
     before = split_frontmatter(world.base_text("10-requirements.md"))
-    approve(world, "requirements")   # конверт + агентский мерж finalize
+    approve(world, "requirements")  # конверт + агентский мерж finalize
     assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
     world.sync()
     after_text = world.base_text("10-requirements.md")
@@ -1453,11 +1464,14 @@ def test_finalize_writes_only_the_envelope(world: World) -> None:
     assert after_meta["upstream_hashes"] == before[0]["upstream_hashes"]
     assert after_meta[na.SELF_HASH_KEY] == before[0][na.SELF_HASH_KEY]
     assert after_body == before[1]
-    assert na.node_debt(
-        "requirements",
-        after_text,
-        {"charter": _blob(world, "00-charter.md")},
-    ) is None
+    assert (
+        na.node_debt(
+            "requirements",
+            after_text,
+            {"charter": _blob(world, "00-charter.md")},
+        )
+        is None
+    )
 
 
 def test_agent_merge_invalidates_and_names_the_allowlist(
@@ -1472,9 +1486,9 @@ def test_agent_merge_invalidates_and_names_the_allowlist(
     record = world.state.ops[key]
     assert record["status"] == al.STATUS_INVALIDATED
     assert AGENT in record["reason"]
-    assert world.base_meta("00-charter.md")["status"] == (
-        na.STATUS_APPROVAL_PENDING
-    ), "конверт не поставлен"
+    assert world.base_meta("00-charter.md")["status"] == (na.STATUS_APPROVAL_PENDING), (
+        "конверт не поставлен"
+    )
 
 
 def test_body_edited_after_the_merge_invalidates(world: World) -> None:
@@ -1604,8 +1618,8 @@ def test_merge_identity_diverged_on_resume_invalidates(
     with pytest.raises(RuntimeError, match="факт не установлен"):
         approve(world, "charter")  # факты мержа ещё не записаны
     world.forge.mute.clear()
-    approve(world, "charter")      # записаны, финализирующий PR создан
-    world.state.ops[key]["finalize_pr"] = None   # крэш-окно до записи номера
+    approve(world, "charter")  # записаны, финализирующий PR создан
+    world.state.ops[key]["finalize_pr"] = None  # крэш-окно до записи номера
     rs.save(world.state)
     world.forge.prs[op["candidate_pr"]][field] = {
         "mergedBy": {"login": "someone-else"},
@@ -1655,9 +1669,7 @@ def test_closed_finalize_pr_invalidates(world: World) -> None:
     "what",
     ["pr_facts", "show_file", "is_ancestor", "merge_event"],
 )
-def test_unresolved_fact_never_buries_the_request(
-    world: World, what: str
-) -> None:
+def test_unresolved_fact_never_buries_the_request(world: World, what: str) -> None:
     """Неустановленный факт — отказ с сохранением ЖИВОЙ заявки.
 
     По источнику неизвестности на каждую сверку фазы 3: факты PR (номер и
@@ -1708,9 +1720,7 @@ def test_authorization_decision_is_recorded_with_the_policy(
     )
 
 
-def test_policy_change_does_not_reauthorize_the_past(
-    world: World, monkeypatch
-) -> None:
+def test_policy_change_does_not_reauthorize_the_past(world: World, monkeypatch) -> None:
     """Фаза 3 сверяет ЦЕЛОСТНОСТЬ решения, а не применяет allowlist заново.
 
     Список сужается до пустого между записью решения и финализацией — то
@@ -1722,12 +1732,12 @@ def test_policy_change_does_not_reauthorize_the_past(
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
-    approve(world, "charter")                    # решение записано
-    world.state.ops[key]["finalize_pr"] = None   # крэш-окно до записи номера
+    approve(world, "charter")  # решение записано
+    world.state.ops[key]["finalize_pr"] = None  # крэш-окно до записи номера
     rs.save(world.state)
-    world.forge.mute.add("policy_version")       # фаза 3 источник не читает
+    world.forge.mute.add("policy_version")  # фаза 3 источник не читает
 
-    approve(world, "charter")                    # возобновление
+    approve(world, "charter")  # возобновление
     assert world.state.ops[key]["finalize_pr"] is not None
     assert al.is_live(world.state.ops[key])
     merge_pr(world, world.state.ops[key]["finalize_pr"])
@@ -1814,8 +1824,14 @@ def test_approve_node_never_writes_completed(world: World) -> None:
     Поэтому `completed` пишет реконсиляция после сошедшегося гейта, а не
     этот путь.
     """
-    for node in ("charter", "requirements", "behaviour-spec", "design",
-                 "acceptance", "decomposition"):
+    for node in (
+        "charter",
+        "requirements",
+        "behaviour-spec",
+        "design",
+        "acceptance",
+        "decomposition",
+    ):
         drive_to_approved(world, node)
     record = rs.load("r-approve").ops["approve-wave-1"]
     assert record["status"] == al.WAVE_OPEN, (
@@ -1824,9 +1840,7 @@ def test_approve_node_never_writes_completed(world: World) -> None:
 
 
 def _dag_state(world: World, legacy: int | None = None) -> an.DagState:
-    return an.read_dag_state(
-        world.state, world.ops, bundle_dag.dag_for(legacy)
-    )
+    return an.read_dag_state(world.state, world.ops, bundle_dag.dag_for(legacy))
 
 
 def _reconcile(world: World, legacy: int | None = None) -> str | None:
@@ -1850,9 +1864,7 @@ def test_reconciliation_needs_evidence_not_a_reason_to_recompute() -> None:
     сеть, применить предикат заново или вывести одобренность по-своему.
     Проверка внутри была бы слабее — её можно обойти, забыв позвать.
     """
-    params = inspect.signature(
-        an.reconcile_wave_after_approved_dag
-    ).parameters
+    params = inspect.signature(an.reconcile_wave_after_approved_dag).parameters
     assert list(params) == ["state", "approved"]
     assert params["approved"].annotation in ("ApprovedDag", an.ApprovedDag)
 
@@ -1866,8 +1878,14 @@ def test_gate_predicate_yields_evidence_only_when_it_converges(
     строгий предикат от сломанного: долг у узла → долги названы,
     неустановленный факт → третий исход, всё одобрено → свидетельство.
     """
-    for node in ("charter", "requirements", "behaviour-spec", "design",
-                 "acceptance", "decomposition"):
+    for node in (
+        "charter",
+        "requirements",
+        "behaviour-spec",
+        "design",
+        "acceptance",
+        "decomposition",
+    ):
         drive_to_approved(world, node)
     _push_edit(world, "30-decomposition.md", body="Долг у терминального узла.")
     in_debt = _dag_state(world)
@@ -1885,9 +1903,7 @@ def test_gate_predicate_yields_evidence_only_when_it_converges(
     green = _dag_state(world)
     assert green.evidence is not None
     assert green.debts == () and not green.unresolved
-    assert green.evidence.nodes == bundle_dag.composition(
-        bundle_dag.dag_for(None)
-    )
+    assert green.evidence.nodes == bundle_dag.composition(bundle_dag.dag_for(None))
 
 
 def test_predicate_sees_nodes_outside_the_terminal_closure(
@@ -1926,13 +1942,17 @@ def test_predicate_sees_nodes_outside_the_terminal_closure(
 
 def test_matching_intent_completes_the_wave(world: World) -> None:
     """Совпадение состава свидетельства с intent → `completed`."""
-    for node in ("charter", "requirements", "behaviour-spec", "design",
-                 "acceptance", "decomposition"):
+    for node in (
+        "charter",
+        "requirements",
+        "behaviour-spec",
+        "design",
+        "acceptance",
+        "decomposition",
+    ):
         drive_to_approved(world, node)
     assert _reconcile(world) == al.WAVE_COMPLETED
-    assert rs.load("r-approve").ops["approve-wave-1"]["status"] == (
-        al.WAVE_COMPLETED
-    )
+    assert rs.load("r-approve").ops["approve-wave-1"]["status"] == (al.WAVE_COMPLETED)
 
 
 def test_diverged_intent_makes_the_wave_obsolete(world: World) -> None:
@@ -1941,8 +1961,14 @@ def test_diverged_intent_makes_the_wave_obsolete(world: World) -> None:
     Проход по составу, которого больше нет, нечем завершить: остаток
     волны не «заброшен», а обессмыслен.
     """
-    for node in ("charter", "requirements", "behaviour-spec", "design",
-                 "acceptance", "decomposition"):
+    for node in (
+        "charter",
+        "requirements",
+        "behaviour-spec",
+        "design",
+        "acceptance",
+        "decomposition",
+    ):
         drive_to_approved(world, node)
     intent = rs.load("r-approve").ops["approve-wave-1"]["intent"]
 
@@ -1959,13 +1985,17 @@ def test_diverged_intent_makes_the_wave_obsolete(world: World) -> None:
 
 
 @pytest.mark.parametrize("outcome", [al.WAVE_COMPLETED, al.WAVE_OBSOLETE])
-def test_repeat_after_either_outcome_is_a_noop(
-    world: World, outcome: str
-) -> None:
+def test_repeat_after_either_outcome_is_a_noop(world: World, outcome: str) -> None:
     """Повтор после ОБОИХ исходов не пишет ничего — на этом стоит
     право вызывающего повторить доставку после падения."""
-    for node in ("charter", "requirements", "behaviour-spec", "design",
-                 "acceptance", "decomposition"):
+    for node in (
+        "charter",
+        "requirements",
+        "behaviour-spec",
+        "design",
+        "acceptance",
+        "decomposition",
+    ):
         drive_to_approved(world, node)
     if outcome == al.WAVE_OBSOLETE:
         assert _reconcile(world, 3) == al.WAVE_OBSOLETE
@@ -2019,8 +2049,14 @@ def test_wave_fate_is_durable_and_not_recomputed(world: World) -> None:
     закрытие «раскрылось» бы обратно, и новый проход унаследовал бы номер
     прежнего.
     """
-    for node in ("charter", "requirements", "behaviour-spec", "design",
-                 "acceptance", "decomposition"):
+    for node in (
+        "charter",
+        "requirements",
+        "behaviour-spec",
+        "design",
+        "acceptance",
+        "decomposition",
+    ):
         drive_to_approved(world, node)
     assert _reconcile(world) == al.WAVE_COMPLETED
 
@@ -2156,7 +2192,7 @@ def test_invalidated_request_recovers_end_to_end(world: World) -> None:
     assert live["branch"] != dead["branch"]
 
     merge_pr(world, live["candidate_pr"])
-    approve(world, "charter")   # конверт + агентский мерж finalize
+    approve(world, "charter")  # конверт + агентский мерж finalize
     outcome = approve(world, "charter")
     world.sync()
 
@@ -2239,7 +2275,7 @@ def _request_over(world: World, node: str) -> tuple[str, dict]:
 
 
 def _live_request(world: World) -> tuple[str, dict]:
-    (nums, op), = al.live_requests(world.state)
+    ((nums, op),) = al.live_requests(world.state)
     return al.request_key(*nums), op
 
 
@@ -2383,9 +2419,7 @@ def test_wave_status_is_not_readable_by_delivery() -> None:
     for path in sorted(package.glob("*.py")):
         if path.name in _WAVE_READERS:
             continue
-        for lineno, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), 1
-        ):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             stripped = line.strip()
             if stripped.startswith("#"):
                 continue
@@ -2393,8 +2427,7 @@ def test_wave_status_is_not_readable_by_delivery() -> None:
                 if name in stripped:
                     offenders.append(f"{path.name}:{lineno}: {stripped}")
     assert not offenders, (
-        "запись волны читается вне разрешённых модулей:\n"
-        + "\n".join(offenders)
+        "запись волны читается вне разрешённых модулей:\n" + "\n".join(offenders)
     )
 
 
@@ -2425,9 +2458,7 @@ def _calls_reachable_from(entry: str) -> set[str]:
     """
     tree = ast.parse(Path(an.__file__).read_text(encoding="utf-8"))
     bodies = {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef)
+        node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
     }
     seen: set[str] = set()
     reached: set[str] = set()
@@ -2477,7 +2508,8 @@ def test_the_proposal_path_does_resolve_it() -> None:
     """
     assert _calls_reachable_from("_propose") & _RESOLVER
     assert _RESOLVER <= (
-        _calls_reachable_from("_propose") | _calls_reachable_from("approve_node")
+        _calls_reachable_from("_propose")
+        | _calls_reachable_from("approve_node")
         | {"read_dag_state"}
     )
 
@@ -2575,7 +2607,8 @@ def test_repo_human_policy_labels_finalize_and_waits(world: World) -> None:
 def test_safety_unknown_routes_finalize_to_human(world: World, monkeypatch) -> None:
     """Ось safety (срез steward) читается fail-closed: unknown = человек."""
     monkeypatch.setattr(
-        an, "load_safety",
+        an,
+        "load_safety",
         lambda: mg.Safety(agent_merge_allowed=None, actor_class="unknown"),
     )
     approve(world, "charter")
@@ -2604,8 +2637,7 @@ def _seed_authored_charter(world: World) -> None:
         "---\n"
         "node: charter\n"
         "status: draft\n"
-        "version: 1\n"
-        + "\n".join(AUTHORED_FRONTMATTER_LINES) + "\n"
+        "version: 1\n" + "\n".join(AUTHORED_FRONTMATTER_LINES) + "\n"
         "approved_by: ''\n"
         "approved_at: ''\n"
         "---\n"
@@ -2784,7 +2816,7 @@ def test_join_reads_policy_under_the_live_request_pin(world: World) -> None:
         drive_to_approved(world, node)
     world.sync()
     approve(world, "design")
-    (nums, op), = al.live_requests(world.state)
+    ((nums, op),) = al.live_requests(world.state)
     key = al.request_key(*nums)
     world.forge.policy_sha = POLICY_SHA_2
     world.forge.policy_files[POLICY_SHA_2] = f"AUTHORIZED_APPROVER_ACCOUNTS={HUMAN}\n"
@@ -2798,7 +2830,7 @@ def test_agent_merge_refusal_leaves_finalize_to_human(world: World) -> None:
     """Отказ обвязки — не ошибка: PR без лейбла остаётся человеку, заявка
     жива; повторный вызов пробует агентский мерж снова (ревью #233), а
     человеческий мерж завершает заявку."""
-    world.forge.agent_merge_rc = 4          # форджа отклонила — не транзиент
+    world.forge.agent_merge_rc = 4  # форджа отклонила — не транзиент
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
@@ -2976,12 +3008,14 @@ def test_repeat_call_restores_missing_envelope_object_by_fetch(
     _git(world.target, "switch", "-q", "master")
     _git(world.target, "branch", "-q", "-D", rec["finalize_branch"])
     _git(
-        world.target, "update-ref", "-d",
+        world.target,
+        "update-ref",
+        "-d",
         f"refs/remotes/origin/{rec['finalize_branch']}",
     )
     _git(world.target, "reflog", "expire", "--expire=now", "--all")
     _git(world.target, "gc", "-q", "--prune=now")
-    gone = f"{rec['finalize_head_sha']}^{{commit}}"   # голый sha не проверяет объект
+    gone = f"{rec['finalize_head_sha']}^{{commit}}"  # голый sha не проверяет объект
     assert world.ops.rev_parse(str(world.target), gone) is None
     approve(world, "charter")
     assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
@@ -2992,13 +3026,15 @@ def test_finalize_merge_policy_axes(tmp_path: Path, monkeypatch) -> None:
     объявление прогона (`merge_authority`) на finalize НЕ влияет."""
     assert an.finalize_merge_policy(str(tmp_path))[0] == "agent"
     monkeypatch.setattr(
-        an, "load_safety",
+        an,
+        "load_safety",
         lambda: mg.Safety(agent_merge_allowed=False, actor_class="agent"),
     )
     who, why = an.finalize_merge_policy(str(tmp_path))
     assert (who, "safety" in why) == ("human", True)
     monkeypatch.setattr(
-        an, "load_safety",
+        an,
+        "load_safety",
         lambda: mg.Safety(agent_merge_allowed=True, actor_class="human"),
     )
     assert an.finalize_merge_policy(str(tmp_path))[0] == "human"
@@ -3016,7 +3052,8 @@ def test_malformed_envelope_is_not_merged_by_agent(world: World, monkeypatch) ->
     merge_pr(world, op["candidate_pr"])
     real_update = an.update_frontmatter
     monkeypatch.setattr(
-        an, "update_frontmatter",
+        an,
+        "update_frontmatter",
         lambda text, updates: real_update(text, updates) + "лишняя строка\n",
     )
     outcome = approve(world, "charter")
@@ -3033,14 +3070,15 @@ def test_envelope_form_defect_names_each_deviation(world: World) -> None:
     approve(world, "charter")
     key, op = only_request(world)
     merge_pr(world, op["candidate_pr"])
-    world.forge.agent_merge_rc = 4          # конверт остаётся веткой
+    world.forge.agent_merge_rc = 4  # конверт остаётся веткой
     approve(world, "charter")
     rec = world.state.ops[key]
     head = rec["finalize_head_sha"]
     dag = bundle_dag.BUNDLE_DAG
-    assert an._envelope_form_defect(
-        world.state, world.ops, dag, rec, ["charter"], head
-    ) is None
+    assert (
+        an._envelope_form_defect(world.state, world.ops, dag, rec, ["charter"], head)
+        is None
+    )
     wrong_sig = dict(rec, merged_by="someone-else")
     defect = an._envelope_form_defect(
         world.state, world.ops, dag, wrong_sig, ["charter"], head
@@ -3166,9 +3204,12 @@ def test_w2_pins_the_approved_charter_from_base(waves_world: World) -> None:
     resolved = bundle_inputs.direct_blobs(
         w.state, w.ops, bundle_dag.BUNDLE_DAG, "requirements", "master"
     )
-    assert na.node_debt(
-        "requirements", w.base_text("10-requirements.md"), resolved.value or {}
-    ) is None
+    assert (
+        na.node_debt(
+            "requirements", w.base_text("10-requirements.md"), resolved.value or {}
+        )
+        is None
+    )
 
 
 def test_w1_candidate_carries_the_discovery_source_layer(
@@ -3178,10 +3219,14 @@ def test_w1_candidate_carries_the_discovery_source_layer(
     пин — по его байтам, и после мержа base содержит источник."""
     w = waves_world
     source = "discovery source\n"
-    sha = authored_branch(w, 1, {
-        "00-charter.md": _node_text("charter"),
-        "00-discovery/brief.md": source,
-    })
+    sha = authored_branch(
+        w,
+        1,
+        {
+            "00-charter.md": _node_text("charter"),
+            "00-discovery/brief.md": source,
+        },
+    )
     blob = _git(w.target, "rev-parse", f"{sha}:{BUNDLE}/00-discovery/brief.md")
     w.state.brief = {
         "frame": "customer",
@@ -3200,9 +3245,7 @@ def test_w1_candidate_carries_the_discovery_source_layer(
     merge_pr(w, op["candidate_pr"])
     an.approve_node(w.state, w.ops, "charter")
     w.sync()
-    assert w.base_meta("00-charter.md")["upstream_hashes"] == {
-        "discovery-brief": blob
-    }
+    assert w.base_meta("00-charter.md")["upstream_hashes"] == {"discovery-brief": blob}
     assert w.state.ops[key]["status"] == al.STATUS_COMPLETED
 
 
@@ -3221,16 +3264,22 @@ def test_composition_prefix_rule_accepts_reopen_and_stale_reapproval(
     before = w.base_text("15-behaviour-spec.md")
 
     sha = authored_branch(
-        w, 2, {"10-requirements.md": _node_text("requirements", body="v2")},
+        w,
+        2,
+        {"10-requirements.md": _node_text("requirements", body="v2")},
         reopen=1,
     )
     outcome = an.propose_from_source(w.state, w.ops, ["requirements"], sha)
     key, op = _request_over(w, "requirements")
     assert outcome.request == key and op["source_sha"] == sha
     branch = op["branch"]
-    req = split_frontmatter(_show(w.target, f"origin/{branch}:{BUNDLE}/10-requirements.md"))[0]
+    req = split_frontmatter(
+        _show(w.target, f"origin/{branch}:{BUNDLE}/10-requirements.md")
+    )[0]
     assert req["version"] == 3, "max(version в base, version в source) + 1"
-    stale = split_frontmatter(_show(w.target, f"origin/{branch}:{BUNDLE}/15-behaviour-spec.md"))[0]
+    stale = split_frontmatter(
+        _show(w.target, f"origin/{branch}:{BUNDLE}/15-behaviour-spec.md")
+    )[0]
     assert stale["status"] == na.STATUS_STALE
     merge_pr(w, op["candidate_pr"])
     an.approve_node(w.state, w.ops, "requirements")
@@ -3251,8 +3300,10 @@ def test_composition_prefix_rule_accepts_reopen_and_stale_reapproval(
     an.approve_node(w.state, w.ops, "behaviour-spec")
     w.sync()
     assert w.base_meta("15-behaviour-spec.md")["status"] == na.STATUS_APPROVED
-    assert split_frontmatter(w.base_text("15-behaviour-spec.md"))[1] == \
-        split_frontmatter(before)[1]
+    assert (
+        split_frontmatter(w.base_text("15-behaviour-spec.md"))[1]
+        == split_frontmatter(before)[1]
+    )
 
 
 def test_missing_lower_nodes_keep_read_dag_state_unresolved(
@@ -3282,10 +3333,14 @@ def test_wave_refuses_dependent_levels_in_one_candidate(
     waves_world: World,
 ) -> None:
     w = waves_world
-    sha = authored_branch(w, 1, {
-        "00-charter.md": _node_text("charter"),
-        "10-requirements.md": _node_text("requirements"),
-    })
+    sha = authored_branch(
+        w,
+        1,
+        {
+            "00-charter.md": _node_text("charter"),
+            "10-requirements.md": _node_text("requirements"),
+        },
+    )
     with pytest.raises(RuntimeError, match="зависимые уровни"):
         an.propose_from_source(w.state, w.ops, ["charter", "requirements"], sha)
     assert al.requests(w.state) == []
@@ -3297,7 +3352,9 @@ def test_wave_refuses_reopened_pr_of_a_terminal_request(
     w = waves_world
     key = drive_wave(w, 1, {"00-charter.md": _node_text("charter")})
     w.forge.prs[w.state.ops[key]["candidate_pr"]]["state"] = "OPEN"
-    sha = authored_branch(w, 1, {"00-charter.md": _node_text("charter", body="v2")}, reopen=1)
+    sha = authored_branch(
+        w, 1, {"00-charter.md": _node_text("charter", body="v2")}, reopen=1
+    )
     with pytest.raises(RuntimeError, match="переоткрыт"):
         an.propose_from_source(w.state, w.ops, ["charter"], sha)
     assert len(al.requests(w.state)) == 1
@@ -3338,9 +3395,7 @@ def test_wave_with_push_deferred_commits_but_creates_no_pr(
     записанной голове."""
     w = waves_world
     sha = authored_branch(w, 1, {"00-charter.md": _node_text("charter")})
-    outcome = an.propose_from_source(
-        w.state, w.ops, ["charter"], sha, push=False
-    )
+    outcome = an.propose_from_source(w.state, w.ops, ["charter"], sha, push=False)
     key, op = only_request(w)
     assert outcome.request == key and op["head_sha"] and op["candidate_pr"] is None
     assert w.forge.prs == {} and w.forge.head_of(op["branch"]) is None
@@ -3364,17 +3419,31 @@ def test_legacy_mode_still_requires_the_full_composition(world: World) -> None:
 
 
 def _wave_records(head_note: str = "") -> dict[tuple[str, str], dict]:
-    base = {"check_identity": "abc123" * 10, "subject": [{"role": "subject",
-            "path": "00-charter.md", "sha256": "f" * 64}], "findings": [],
-            "absence": [], "bases": [], "node": "charter", "wave": 1}
+    base = {
+        "check_identity": "abc123" * 10,
+        "subject": [{"role": "subject", "path": "00-charter.md", "sha256": "f" * 64}],
+        "findings": [],
+        "absence": [],
+        "bases": [],
+        "node": "charter",
+        "wave": 1,
+    }
     return {
         ("charter", "charter-vs-customer-brief"): {
-            **base, "edge": "charter-vs-customer-brief", "verdict": "PASS",
+            **base,
+            "edge": "charter-vs-customer-brief",
+            "verdict": "PASS",
         },
         ("charter", "charter-vs-engineer-brief"): {
-            **base, "edge": "charter-vs-engineer-brief", "verdict": "N/A",
-            "absence": [{"path": "00-discovery/engineer-brief.absent",
-                         "rule_id": "R0-no-engineer-brief"}],
+            **base,
+            "edge": "charter-vs-engineer-brief",
+            "verdict": "N/A",
+            "absence": [
+                {
+                    "path": "00-discovery/engineer-brief.absent",
+                    "rule_id": "R0-no-engineer-brief",
+                }
+            ],
         },
     }
 
@@ -3393,17 +3462,22 @@ def test_publish_wave_adds_evidence_creates_pr_and_approving_review(
     outcome = an.propose_from_source(w.state, w.ops, ["charter"], sha, push=False)
     key = outcome.request
     snapshot_head = w.state.ops[key]["head_sha"]
-    w.forge.default_reviews = []          # свежий candidate: ревью нет
+    w.forge.default_reviews = []  # свежий candidate: ревью нет
     assert pub.publish_wave(w.state, w.ops, key, _wave_records()) == 0
     op = w.state.ops[key]
     assert op["head_sha"] != snapshot_head, "head_sha перезаписан на evidence-коммит"
     assert w.forge.head_of(op["branch"]) == op["head_sha"]
-    files = _git(w.target, "show", "--name-only", "--format=", op["head_sha"]).splitlines()
+    files = _git(
+        w.target, "show", "--name-only", "--format=", op["head_sha"]
+    ).splitlines()
     assert sorted(files) == [
         "evidence/edge-check/charter--charter-vs-customer-brief.json",
         "evidence/edge-check/charter--charter-vs-engineer-brief.json",
     ]
-    evidence = _show(w.target, f"{op['head_sha']}:evidence/edge-check/charter--charter-vs-customer-brief.json")
+    evidence = _show(
+        w.target,
+        f"{op['head_sha']}:evidence/edge-check/charter--charter-vs-customer-brief.json",
+    )
     assert '"verdict": "PASS"' in evidence
     pr = op["candidate_pr"]
     assert pr in w.forge.prs and w.forge.prs[pr]["label"] == an.HUMAN_MERGE_LABEL
@@ -3423,7 +3497,9 @@ def test_publish_wave_adds_evidence_creates_pr_and_approving_review(
     an.approve_node(w.state, w.ops, "charter")
     w.sync()
     assert w.base_meta("00-charter.md")["status"] == na.STATUS_APPROVED
-    assert (w.target / "evidence/edge-check/charter--charter-vs-customer-brief.json").exists()
+    assert (
+        w.target / "evidence/edge-check/charter--charter-vs-customer-brief.json"
+    ).exists()
 
 
 def test_publish_wave_refuses_paths_outside_the_surface(waves_world: World) -> None:
@@ -3485,7 +3561,10 @@ _WAVE_FILES = (
     {"00-charter.md": _node_text("charter")},
     {"10-requirements.md": _node_text("requirements")},
     {"15-behaviour-spec.md": _node_text("behaviour-spec")},
-    {"20-design.md": _node_text("design"), "25-acceptance.md": _node_text("acceptance")},
+    {
+        "20-design.md": _node_text("design"),
+        "25-acceptance.md": _node_text("acceptance"),
+    },
     {"30-decomposition.md": _node_text("decomposition")},
 )
 
@@ -3498,7 +3577,8 @@ def test_five_waves_five_human_merges_give_an_approved_dag(
     w = waves_world
     keys = [drive_wave(w, wave, files) for wave, files in enumerate(_WAVE_FILES, 1)]
     human_merges = [
-        pr for pr, rec in w.forge.prs.items()
+        pr
+        for pr, rec in w.forge.prs.items()
         if rec["state"] == "MERGED" and rec["mergedBy"]["login"] == HUMAN
     ]
     assert len(human_merges) == 5
@@ -3506,13 +3586,17 @@ def test_five_waves_five_human_merges_give_an_approved_dag(
     dag_state = an.read_dag_state(w.state, w.ops, bundle_dag.BUNDLE_DAG)
     assert dag_state.evidence is not None and not dag_state.debts
     assert dag_state.evidence.nodes == bundle_dag.composition(bundle_dag.BUNDLE_DAG)
-    assert bundle_dag.check_bundle_composition(
-        str(w.target), BUNDLE, bundle_dag.BUNDLE_DAG
-    ) == 4, "полный состав — и legacy-режим проверки состава принимает base"
+    assert (
+        bundle_dag.check_bundle_composition(
+            str(w.target), BUNDLE, bundle_dag.BUNDLE_DAG
+        )
+        == 4
+    ), "полный состав — и legacy-режим проверки состава принимает base"
 
 
 def test_wave_finalize_resumes_from_await_finalize_merge(
-    waves_world: World, monkeypatch,
+    waves_world: World,
+    monkeypatch,
 ) -> None:
     """(а′) падение после `record_merge`: finalize-PR открыт, заявка на
     шаге AWAIT_FINALIZE_MERGE — `runner._finalize_wave` находит её по
@@ -3523,8 +3607,12 @@ def test_wave_finalize_resumes_from_await_finalize_merge(
     monkeypatch.setattr(rs, "RUNS_ROOT", Path(w.state.target_dir).parent / "runs")
     sha = authored_branch(w, 1, {"00-charter.md": _node_text("charter")})
     key = an.propose_from_source(w.state, w.ops, ["charter"], sha).request
-    rs.op_complete(w.state, "candidate-1", request=key,
-                   candidate_pr=w.state.ops[key]["candidate_pr"])
+    rs.op_complete(
+        w.state,
+        "candidate-1",
+        request=key,
+        candidate_pr=w.state.ops[key]["candidate_pr"],
+    )
     w.state.status = "waiting_human_merge"
     rs.save(w.state)
     merge_pr(w, w.state.ops[key]["candidate_pr"])
@@ -3569,21 +3657,25 @@ def test_reopen_makes_a_new_branch_name_and_stale_is_reapproved_by_levels(
     )
     _git(w.target, "add", "-A")
     _git(w.target, "commit", "-qm", "reauthor requirements")
-    _git(w.target, "push", "-q", "-u", "origin", stopped.branch)   # без non-ff
+    _git(w.target, "push", "-q", "-u", "origin", stopped.branch)  # без non-ff
     sha = _git(w.target, "rev-parse", "HEAD")
     _git(w.target, "switch", "-q", "master")
     w.state = rs.load(w.state.run_id)
     outcome = an.propose_from_source(w.state, w.ops, ["requirements"], sha)
     op = w.state.ops[outcome.request]
-    stale = split_frontmatter(_show(w.target, f"origin/{op['branch']}:{BUNDLE}/15-behaviour-spec.md"))[0]
+    stale = split_frontmatter(
+        _show(w.target, f"origin/{op['branch']}:{BUNDLE}/15-behaviour-spec.md")
+    )[0]
     assert stale["status"] == na.STATUS_STALE
     merge_pr(w, op["candidate_pr"])
     an.approve_node(w.state, w.ops, "requirements")
     w.sync()
-    assert an.stale_below_top_level(w.state, w.ops, bundle_dag.BUNDLE_DAG) == ["behaviour-spec"]
+    assert an.stale_below_top_level(w.state, w.ops, bundle_dag.BUNDLE_DAG) == [
+        "behaviour-spec"
+    ]
     assert "Требования v2." in w.base_text("10-requirements.md")
 
-    second = an.approve_node(w.state, w.ops, "behaviour-spec")   # без source_sha
+    second = an.approve_node(w.state, w.ops, "behaviour-spec")  # без source_sha
     op2 = w.state.ops[second.request]
     assert op2["source_sha"] is None
     merge_pr(w, op2["candidate_pr"])
@@ -3632,7 +3724,9 @@ def test_propose_from_source_resumes_its_own_live_request(
     published = an.propose_from_source(w.state, w.ops, ["charter"], sha)
     assert published.request == first.request
     assert w.state.ops[first.request]["candidate_pr"] in w.forge.prs
-    other = authored_branch(w, 1, {"00-charter.md": _node_text("charter", body="v2")}, reopen=1)
+    other = authored_branch(
+        w, 1, {"00-charter.md": _node_text("charter", body="v2")}, reopen=1
+    )
     with pytest.raises(RuntimeError, match="живая заявка"):
         an.propose_from_source(w.state, w.ops, ["charter"], other)
 
@@ -3668,7 +3762,8 @@ def test_finalize_merge_waits_until_required_checks_finish(
     key, _ = _finalize_ready(world)
     world.forge.checks = _PENDING_CHECK
     monkeypatch.setattr(
-        an, "_SLEEP",
+        an,
+        "_SLEEP",
         lambda seconds: world.forge.__setattr__("checks", _GREEN_CHECKS),
     )
     approve(world, "charter")
@@ -3676,8 +3771,7 @@ def test_finalize_merge_waits_until_required_checks_finish(
         "finalize обязан смержиться сам, без вмешательства оператора"
     )
     assert len(world.forge.merge_calls) == 1, (
-        "мерж пробуется один раз — на зелёных проверках, а не на каждом "
-        "опросе"
+        "мерж пробуется один раз — на зелёных проверках, а не на каждом опросе"
     )
 
 

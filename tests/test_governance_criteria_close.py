@@ -16,8 +16,10 @@ from governance.frontmatter import split_frontmatter
 
 MIN = ctr.MinVersion("4.3.0")
 REQ = "#### FR-01: A\n**Priority**: Must\n"
-BEH = ("#### BEH-01: a\n`traces: [FR-01]`\n"
-       "- **checked_by**: `status: planned` `kind: unit` `owner: qa` `target: tests/test_a.py`\n")
+BEH = (
+    "#### BEH-01: a\n`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: unit` `owner: qa` `target: tests/test_a.py`\n"
+)
 ACC = "#### AC-01: a · verification: test\ntraces: [FR-01]\nscenarios: [BEH-01]\n"
 CH2 = "---\nschema: 2\ncode: ENC\nplan_item: todo://alpha/oracle\n---\n# C\n"
 CH1 = "---\nspec_stage: charter\n---\n# C\n"
@@ -26,20 +28,42 @@ CH1 = "---\nspec_stage: charter\n---\n# C\n"
 def test_not_applicable_order():
     ch1 = cg.Charter(1, None, None)
     ch2 = cg.Charter(2, "ENC", "todo://devtools/x")
-    assert cc.decide_not_applicable(ch1, None, "9.9.9", MIN, is_vendored=True) == "schema-1"
+    assert (
+        cc.decide_not_applicable(ch1, None, "9.9.9", MIN, is_vendored=True)
+        == "schema-1"
+    )
     exunit = type("P", (), {"name": "exunit"})()
-    assert cc.decide_not_applicable(ch2, exunit, "9.9.9", MIN, is_vendored=True) == "language"
-    assert cc.decide_not_applicable(ch2, None, "9.9.9", MIN, is_vendored=False) == "spec-runner-version"
-    assert cc.decide_not_applicable(ch2, None, "4.2.0", MIN, is_vendored=True) == "spec-runner-version"
+    assert (
+        cc.decide_not_applicable(ch2, exunit, "9.9.9", MIN, is_vendored=True)
+        == "language"
+    )
+    assert (
+        cc.decide_not_applicable(ch2, None, "9.9.9", MIN, is_vendored=False)
+        == "spec-runner-version"
+    )
+    assert (
+        cc.decide_not_applicable(ch2, None, "4.2.0", MIN, is_vendored=True)
+        == "spec-runner-version"
+    )
     assert cc.decide_not_applicable(ch2, None, "4.3.0", MIN, is_vendored=True) is None
 
 
 def test_closure_file_frontmatter_records_version_and_host():
-    text = cc.render_closure("spec-runner-version", ws_id="ws", code=None, bundle_pin="p" * 40,
-                             product_sha="s" * 40, response_sha=None,
-                             spec_runner_version="4.2.0", host="pr0sto.net")
+    text = cc.render_closure(
+        "spec-runner-version",
+        ws_id="ws",
+        code=None,
+        bundle_pin="p" * 40,
+        product_sha="s" * 40,
+        response_sha=None,
+        spec_runner_version="4.2.0",
+        host="pr0sto.net",
+    )
     meta, _ = split_frontmatter(text)
-    assert meta["closure"] == "not-applicable" and meta["not_applicable_reason"] == "spec-runner-version"
+    assert (
+        meta["closure"] == "not-applicable"
+        and meta["not_applicable_reason"] == "spec-runner-version"
+    )
     assert meta["spec_runner_version"] == "4.2.0" and meta["host"] == "pr0sto.net"
     assert meta["code"] is None and meta["response_sha256"] is None
 
@@ -47,7 +71,9 @@ def test_closure_file_frontmatter_records_version_and_host():
 def _git(repo, *args):
     return subprocess.run(
         ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
 
 
@@ -55,7 +81,9 @@ def _ops(verify=(0, "")):
     from tests.test_governance_runner import FakeOps
 
     class _Ops(FakeOps):
-        def create_pr(self, target_dir, repo_slug, branch, title, body, label, *, draft=False):
+        def create_pr(
+            self, target_dir, repo_slug, branch, title, body, label, *, draft=False
+        ):
             self.calls.append(("create_pr", branch, label))
             number = 100 + len(self.existing_prs)
             self.existing_prs[branch] = number
@@ -76,18 +104,30 @@ def _env(tmp_path, monkeypatch, charter=CH2, dirty=False):
     from governance import run_state as rs
 
     origin = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "-q", "--bare", "-b", "master", str(origin)], check=True)
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "master", str(origin)], check=True
+    )
     target = tmp_path / "alpha"
-    subprocess.run(["git", "clone", "-q", str(origin), str(target)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", "-q", str(origin), str(target)],
+        check=True,
+        capture_output=True,
+    )
     bundle = target / "workstreams/ws/spec"
     bundle.mkdir(parents=True)
-    for name, text in (("00-charter.md", charter), ("10-requirements.md", REQ),
-                       ("15-behaviour-spec.md", BEH), ("25-acceptance.md", ACC)):
+    for name, text in (
+        ("00-charter.md", charter),
+        ("10-requirements.md", REQ),
+        ("15-behaviour-spec.md", BEH),
+        ("25-acceptance.md", ACC),
+    ):
         (bundle / name).write_text(text)
     (target / "pkg").mkdir()
     (target / "pkg/m.py").write_text("def f():\n    return 1\n")
     (target / "tests").mkdir()
-    (target / "tests/test_a.py").write_text("def test_a():\n    # ENC:BEH-01\n    assert 1\n")
+    (target / "tests/test_a.py").write_text(
+        "def test_a():\n    # ENC:BEH-01\n    assert 1\n"
+    )
     (target / "uv.lock").write_text("lock\n")
     _git(target, "checkout", "-q", "-b", "master")
     _git(target, "add", ".")
@@ -97,9 +137,15 @@ def _env(tmp_path, monkeypatch, charter=CH2, dirty=False):
     if dirty:
         (target / "pkg/m.py").write_text("def f():\n    return 2\n")
     state = rs.new_run(
-        subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="ws",
-        target_dir=str(target), bundle_dir="workstreams/ws/spec",
-        profile="profiles/team-exp.yaml", run_id="run-1", authoring="waves",
+        subject="s",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="ws",
+        target_dir=str(target),
+        bundle_dir="workstreams/ws/spec",
+        profile="profiles/team-exp.yaml",
+        run_id="run-1",
+        authoring="waves",
     )
     state.status = "completed"
     state.base_ref = "master"
@@ -116,33 +162,62 @@ def _oracle_on(monkeypatch):
 
 
 def _response(target, pin, status="traced", **over):
-    sel = {"node_id": "tests/test_a.py::test_a",
-           "definition": {"file": "tests/test_a.py", "qualname": "test_a"},
-           "runs": [{"phase": "call", "outcome": "passed"}] * 2,
-           "product_lines": [{"file": "pkg/m.py", "line": 2}], "subprocess": False}
-    beh = {"id": "ENC:BEH-01", "status": status, "selectors": [sel] if status == "traced" else []}
+    sel = {
+        "node_id": "tests/test_a.py::test_a",
+        "definition": {"file": "tests/test_a.py", "qualname": "test_a"},
+        "runs": [{"phase": "call", "outcome": "passed"}] * 2,
+        "product_lines": [{"file": "pkg/m.py", "line": 2}],
+        "subprocess": False,
+    }
+    beh = {
+        "id": "ENC:BEH-01",
+        "status": status,
+        "selectors": [sel] if status == "traced" else [],
+    }
     if status != "traced":
         beh["reason"] = "no-test"
-    resp = {"protocol": 1, "owner_repo": "alpha", "workstream": "ws", "code": "ENC",
-            "bundle_pin": pin, "product_sha": pin, "product_roots": ["pkg"],
-            "environment": {"lock_sha256": hashlib.sha256(b"lock\n").hexdigest(),
-                            "python": "3.12", "pytest_plugins": []},
-            "content_sha256": cc._content_sha(Path(target), ["pkg", "tests"]), "beh": [beh]}
+    resp = {
+        "protocol": 1,
+        "owner_repo": "alpha",
+        "workstream": "ws",
+        "code": "ENC",
+        "bundle_pin": pin,
+        "product_sha": pin,
+        "product_roots": ["pkg"],
+        "environment": {
+            "lock_sha256": hashlib.sha256(b"lock\n").hexdigest(),
+            "python": "3.12",
+            "pytest_plugins": [],
+        },
+        "content_sha256": cc._content_sha(Path(target), ["pkg", "tests"]),
+        "beh": [beh],
+    }
     resp.update(over)
     return resp
 
 
 def _closure_on_origin(target, ops):
     branch = next(c[1] for c in ops.calls if c[0] == "create_pr")
-    return _git(target, "show", f"origin/{branch}:workstreams/ws/spec/90-acceptance-closure.md") \
-        if not _git(target, "fetch", "-q", "origin", branch) else None
+    return (
+        _git(
+            target,
+            "show",
+            f"origin/{branch}:workstreams/ws/spec/90-acceptance-closure.md",
+        )
+        if not _git(target, "fetch", "-q", "origin", branch)
+        else None
+    )
 
 
-def test_schema1_publishes_not_applicable_without_touching_checkout(tmp_path, monkeypatch):
+def test_schema1_publishes_not_applicable_without_touching_checkout(
+    tmp_path, monkeypatch
+):
     state, target, pin = _env(tmp_path, monkeypatch, charter=CH1)
     ops = _ops()
     assert cc.run("run-1", ops) == 0
-    assert _git(target, "rev-parse", "--abbrev-ref", "HEAD") == "master"  # чекаут не тронут
+    assert (
+        _git(target, "rev-parse", "--abbrev-ref", "HEAD") == "master"
+    )  # чекаут не тронут
     assert not (target / "workstreams/ws/spec/90-acceptance-closure.md").exists()
     meta, _ = split_frontmatter(_closure_on_origin(target, ops))
     assert meta["not_applicable_reason"] == "schema-1"
@@ -291,9 +366,11 @@ def test_run_refuses_incomplete_run(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_real_verify(monkeypatch):
     """Страховка: реальный spec-runner в тестах не зовётся."""
-    monkeypatch.setattr(cc.RealOps, "criteria_verify",
-                        lambda *a: (_ for _ in ()).throw(AssertionError("real verify")))
-
+    monkeypatch.setattr(
+        cc.RealOps,
+        "criteria_verify",
+        lambda *a: (_ for _ in ()).throw(AssertionError("real verify")),
+    )
 
 
 def test_package_local_tests_not_counted_as_product(tmp_path, monkeypatch):
@@ -308,7 +385,9 @@ def test_package_local_tests_not_counted_as_product(tmp_path, monkeypatch):
     assert "pkg/tests/test_m.py" not in lines and "pkg/conftest.py" not in lines
 
 
-def test_response_level_error_publish_failure_is_retried_not_burned(tmp_path, monkeypatch):
+def test_response_level_error_publish_failure_is_retried_not_burned(
+    tmp_path, monkeypatch
+):
     """I-3: ответ-ошибка без product_roots: ключ — по содержимому, не по stdout;
     сбой публикации → повтор публикует тот же текст, не 6."""
     state, target, pin = _env(tmp_path, monkeypatch)
@@ -344,7 +423,6 @@ def test_same_content_on_another_machine_refused(tmp_path, monkeypatch):
     ops2 = _ops((0, json.dumps(_response(target, pin))))
     assert cc.run("run-1", ops2, product_sha=_git(target, "rev-parse", "HEAD")) == 6
     assert not any(c[0] == "criteria_verify" for c in ops2.calls)
-
 
 
 def test_republish_after_pr_closed_adopts_existing_branch(tmp_path, monkeypatch):

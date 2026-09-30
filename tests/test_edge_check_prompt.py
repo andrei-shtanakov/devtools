@@ -13,9 +13,7 @@ CONTRACTS = Path("contracts/edge-check/v1")
 
 #: Тот же формат маркера, что собирает `_data_marker` — используем ЕГО
 #: собственный префикс, чтобы тест не разъехался с реализацией по опечатке.
-_MARKER_RE = re.compile(
-    rf"<<<{p._DATA_MARKER_PREFIX}:([0-9a-f]+):(BEGIN|END)>>>"
-)
+_MARKER_RE = re.compile(rf"<<<{p._DATA_MARKER_PREFIX}:([0-9a-f]+):(BEGIN|END)>>>")
 
 
 def _prepared(text: str = "BEH-01\n") -> i.PreparedInput:

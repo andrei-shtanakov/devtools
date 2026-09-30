@@ -63,6 +63,7 @@ def lock_is_held(path: Path) -> bool:
         fcntl.flock(probe, fcntl.LOCK_UN)
         return False
 
+
 TODAY = date(2026, 9, 29)
 
 
@@ -174,7 +175,13 @@ def test_receipt_separates_run_problems_and_delivery() -> None:
         lines(verdict("changed"), revision(), summary(unchanged=0, changed=1))
     )
     delivery = run.Delivery("updated", 42, None)
-    receipt = run.receipt(audit, run.problems(audit), delivery, "2026-09-29T09:30:00", "2026-09-29T09:31:00+04:00")
+    receipt = run.receipt(
+        audit,
+        run.problems(audit),
+        delivery,
+        "2026-09-29T09:30:00",
+        "2026-09-29T09:31:00+04:00",
+    )
     assert receipt["delivery"]["issue_url"].endswith("/issues/42")
     assert receipt["coverage"] == {
         "notes": 10,
@@ -197,9 +204,7 @@ def test_failed_delivery_makes_the_receipt_not_ok() -> None:
 
 def test_failed_run_makes_the_receipt_not_ok() -> None:
     audit = run.parse_audit("boom\n")
-    receipt = run.receipt(
-        audit, run.problems(audit), run.Delivery("skipped"), "t", "t"
-    )
+    receipt = run.receipt(audit, run.problems(audit), run.Delivery("skipped"), "t", "t")
     assert (receipt["execution"], receipt["ok"]) == ("failed", False)
 
 
@@ -222,10 +227,22 @@ def test_no_receipts_no_known_issue(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("now", "start"),
     [
-        (datetime(2026, 9, 22, 9, 30, tzinfo=TBILISI), datetime(2026, 9, 22, 9, 30, tzinfo=TBILISI)),  # on the dot
-        (datetime(2026, 9, 22, 9, 29, tzinfo=TBILISI), datetime(2026, 9, 15, 9, 30, tzinfo=TBILISI)),  # just before
-        (datetime(2026, 9, 23, 17, 0, tzinfo=TBILISI), datetime(2026, 9, 22, 9, 30, tzinfo=TBILISI)),  # Wednesday
-        (datetime(2026, 9, 28, 23, 0, tzinfo=TBILISI), datetime(2026, 9, 22, 9, 30, tzinfo=TBILISI)),  # Monday
+        (
+            datetime(2026, 9, 22, 9, 30, tzinfo=TBILISI),
+            datetime(2026, 9, 22, 9, 30, tzinfo=TBILISI),
+        ),  # on the dot
+        (
+            datetime(2026, 9, 22, 9, 29, tzinfo=TBILISI),
+            datetime(2026, 9, 15, 9, 30, tzinfo=TBILISI),
+        ),  # just before
+        (
+            datetime(2026, 9, 23, 17, 0, tzinfo=TBILISI),
+            datetime(2026, 9, 22, 9, 30, tzinfo=TBILISI),
+        ),  # Wednesday
+        (
+            datetime(2026, 9, 28, 23, 0, tzinfo=TBILISI),
+            datetime(2026, 9, 22, 9, 30, tzinfo=TBILISI),
+        ),  # Monday
     ],
 )
 def test_cycle_starts_on_tuesday_morning(now: datetime, start: datetime) -> None:
@@ -411,8 +428,14 @@ def utc_system(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.parametrize(
     ("utc", "start"),
     [
-        (datetime(2026, 9, 22, 5, 30, tzinfo=timezone.utc), "2026-09-22T09:30:00+04:00"),
-        (datetime(2026, 9, 22, 5, 29, tzinfo=timezone.utc), "2026-09-15T09:30:00+04:00"),
+        (
+            datetime(2026, 9, 22, 5, 30, tzinfo=timezone.utc),
+            "2026-09-22T09:30:00+04:00",
+        ),
+        (
+            datetime(2026, 9, 22, 5, 29, tzinfo=timezone.utc),
+            "2026-09-15T09:30:00+04:00",
+        ),
     ],
 )
 def test_cycle_is_tbilisi_under_utc_system_zone(

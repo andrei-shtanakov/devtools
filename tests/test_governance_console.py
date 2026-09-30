@@ -42,9 +42,14 @@ def runs_root(tmp_path: Path, monkeypatch):
 
 def _mk(run_id: str, **overrides) -> rs.RunState:
     kwargs = dict(
-        subject="тест", repo="alpha", repo_slug="owner/alpha", ws_id="WS-T1",
-        target_dir="/tmp/alpha", bundle_dir="workstreams/WS-T1/spec",
-        profile="profiles/team-exp.yaml", run_id=run_id,
+        subject="тест",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-T1",
+        target_dir="/tmp/alpha",
+        bundle_dir="workstreams/WS-T1/spec",
+        profile="profiles/team-exp.yaml",
+        run_id=run_id,
     )
     kwargs.update(overrides)
     s = rs.new_run(**kwargs)
@@ -116,7 +121,9 @@ def test_plain_path_no_runs_says_so(runs_root, no_textual, capsys) -> None:
 
 @requires_console_model
 def test_run_id_flag_prints_detail_json_without_textual(
-    runs_root, no_textual, capsys,
+    runs_root,
+    no_textual,
+    capsys,
 ) -> None:
     """`--run-id <id>` печатает `detail_to_json(run_detail(<id>))` и не
     заходит в TUI-ветку — README документирует именно это (C-1), а
@@ -151,7 +158,12 @@ def test_launch_resume_starts_new_session(tmp_path: Path, monkeypatch) -> None:
 
     new_session_call = next(c for c in calls if c[:2] == ["tmux", "new-session"])
     assert new_session_call[:6] == [
-        "tmux", "new-session", "-d", "-s", "beh-r-0001", "-c",
+        "tmux",
+        "new-session",
+        "-d",
+        "-s",
+        "beh-r-0001",
+        "-c",
     ]
     assert new_session_call[6] == str(tmp_path)
     shell_cmd = new_session_call[7]
@@ -226,9 +238,7 @@ def test_launch_resume_uses_exact_target_not_prefix(
     assert has_session_call[-1] == "=beh-r-1"
 
 
-def test_launch_resume_raises_on_tmux_failure(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_launch_resume_raises_on_tmux_failure(tmp_path: Path, monkeypatch) -> None:
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["tmux", "has-session"]:
             return SimpleNamespace(returncode=1, stdout="", stderr="")
@@ -330,8 +340,13 @@ def _row(status: str, run_id: str = "r-0001") -> "cm.RunRow":
     # поле потомка, указывающее на родителя) — фикс-ревью бага, где
     # action_verify_selected путал их местами.
     return cm.RunRow(
-        run_id=run_id, ws_id="WS-T1", repo="alpha", status=status,
-        step="—", pr=None, remediated_by=None,
+        run_id=run_id,
+        ws_id="WS-T1",
+        repo="alpha",
+        status=status,
+        step="—",
+        pr=None,
+        remediated_by=None,
     )
 
 

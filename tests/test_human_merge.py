@@ -59,12 +59,21 @@ class Fleet:
         self.repo.mkdir(parents=True)
         subprocess.run(
             ["git", "init", "-q", "-b", "master", str(self.repo)],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
-            ["git", "-C", str(self.repo), "remote", "add", "origin",
-             "git@github.com:andrei-shtanakov/demo.git"],
-            check=True, capture_output=True,
+            [
+                "git",
+                "-C",
+                str(self.repo),
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:andrei-shtanakov/demo.git",
+            ],
+            check=True,
+            capture_output=True,
         )
         self.stub_bin.mkdir()
         gh = self.stub_bin / "gh"
@@ -87,7 +96,10 @@ class Fleet:
     def run(self, *args: str, **env_extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["sh", str(SCRIPT), "demo", "7", *args],
-            env=self.env(**env_extra), capture_output=True, text=True, check=False,
+            env=self.env(**env_extra),
+            capture_output=True,
+            text=True,
+            check=False,
         )
 
     def calls(self) -> list[str]:
@@ -167,11 +179,14 @@ def test_body_without_policy_line_is_refused(fleet: Fleet) -> None:
 def test_finalize_pr_without_pin_is_judged_by_current_version(fleet: Fleet) -> None:
     """Finalize-PR под «Мерж: человек» пина не несёт — и не обязан: логин
     судится по актуальной версии политики (major ревью PR #344)."""
-    res = fleet.run(GH_STUB_HEADREF="spec/WS-T1-approve-1-0-1-final", GH_STUB_BODY="без пина")
+    res = fleet.run(
+        GH_STUB_HEADREF="spec/WS-T1-approve-1-0-1-final", GH_STUB_BODY="без пина"
+    )
     assert res.returncode == 0, res.stderr
     assert "/merge" in fleet.gh_log.read_text()
     res = fleet.run(
-        GH_STUB_HEADREF="spec/WS-T1-approve-1-0-1-final", GH_STUB_BODY="без пина",
+        GH_STUB_HEADREF="spec/WS-T1-approve-1-0-1-final",
+        GH_STUB_BODY="без пина",
         GH_STUB_POLICY_ACCOUNTS="someone-else",
     )
     assert res.returncode == 3, res.stderr
@@ -188,7 +203,10 @@ def test_missing_head_ref_refuses_before_pin_classification(fleet: Fleet) -> Non
 
 
 def test_non_approval_branch_needs_no_pin(fleet: Fleet) -> None:
-    res = fleet.run(GH_STUB_HEADREF="feat/anything", GH_STUB_BODY="обычный PR с лейблом human-merge-required")
+    res = fleet.run(
+        GH_STUB_HEADREF="feat/anything",
+        GH_STUB_BODY="обычный PR с лейблом human-merge-required",
+    )
     assert res.returncode == 0, res.stderr
 
 
@@ -208,8 +226,11 @@ def test_head_pin_mismatch_refuses(fleet: Fleet) -> None:
 
 @pytest.mark.parametrize(
     ("env_key", "value"),
-    [("GH_STUB_STATE", "MERGED"), ("GH_STUB_MERGESTATE", "DIRTY"),
-     ("GH_STUB_MERGESTATE", "")],
+    [
+        ("GH_STUB_STATE", "MERGED"),
+        ("GH_STUB_MERGESTATE", "DIRTY"),
+        ("GH_STUB_MERGESTATE", ""),
+    ],
 )
 def test_pr_not_mergeable_refuses(fleet: Fleet, env_key: str, value: str) -> None:
     res = fleet.run(**{env_key: value})
@@ -245,12 +266,18 @@ def test_profile_failure_is_code_2(fleet: Fleet) -> None:
 
 def test_unknown_repo_and_bad_args(fleet: Fleet) -> None:
     res = subprocess.run(
-        ["sh", str(SCRIPT), "nope", "7"], env=fleet.env(),
-        capture_output=True, text=True, check=False,
+        ["sh", str(SCRIPT), "nope", "7"],
+        env=fleet.env(),
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert res.returncode == 2
     res = subprocess.run(
-        ["sh", str(SCRIPT), "demo", "x7"], env=fleet.env(),
-        capture_output=True, text=True, check=False,
+        ["sh", str(SCRIPT), "demo", "x7"],
+        env=fleet.env(),
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert res.returncode == 2

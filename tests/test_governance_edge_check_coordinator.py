@@ -44,7 +44,8 @@ def test_catalogs_of_the_wave_edges_load_and_are_distinct() -> None:
     loaded = {eid: r.load_rules(eid, CONTRACTS) for eid in NEW_EDGES}
     assert loaded["requirements-vs-charter"].basis_roles == ("charter",)
     assert loaded["design-vs-requirements-behaviour"].basis_roles == (
-        "requirements", "behaviour-spec",
+        "requirements",
+        "behaviour-spec",
     )
     assert loaded["decomposition-vs-design-acceptance"].subject_role == "decomposition"
     assert loaded["charter-vs-customer-brief"].applicability == ()
@@ -62,7 +63,8 @@ def test_edges_for_level_follow_the_profile_upstream() -> None:
         ("acceptance", "acceptance-vs-requirements-behaviour"),
     ]
     assert level3[0].bases == {
-        "requirements": "requirements", "behaviour-spec": "behaviour-spec",
+        "requirements": "requirements",
+        "behaviour-spec": "behaviour-spec",
     }
     assert [(e.node, e.edge_id) for e in co.edges_for_level(arts, 0)] == [
         ("charter", "charter-vs-customer-brief"),
@@ -92,21 +94,32 @@ def _answer(edge_id: str, verdicts: dict[str, str]) -> str:
     wanted = verdicts.get(edge_id, "PASS")
     findings = []
     if wanted == "FAIL":
-        findings = [{
-            "rule_id": ruleset.items[0].id, "class": "major",
-            "path": FILES[ruleset.subject_role], "lines": [1, 1],
-            "statement": "не покрыто",
-        }]
-    return json.dumps({"structured_output": {
-        "criteria": [{"id": it.id, "status": "pass", "reason": "ок"}
-                     for it in ruleset.items],
-        "findings": findings,
-    }})
+        findings = [
+            {
+                "rule_id": ruleset.items[0].id,
+                "class": "major",
+                "path": FILES[ruleset.subject_role],
+                "lines": [1, 1],
+                "statement": "не покрыто",
+            }
+        ]
+    return json.dumps(
+        {
+            "structured_output": {
+                "criteria": [
+                    {"id": it.id, "status": "pass", "reason": "ок"}
+                    for it in ruleset.items
+                ],
+                "findings": findings,
+            }
+        }
+    )
 
 
 def _fake_call(verdicts: dict[str, str]):
     """`call` координатора: ребро узнаётся по тексту его первого пункта —
     промпт перечисляет пункты набора дословно."""
+
     def call(prompt: str) -> str:
         for eid in (*NEW_EDGES, "behaviour-vs-requirements"):
             if r.load_rules(eid, CONTRACTS).items[0].text in prompt:
@@ -114,18 +127,27 @@ def _fake_call(verdicts: dict[str, str]):
                     raise RuntimeError("ревьюер недоступен")
                 return _answer(eid, verdicts)
         raise AssertionError("ребро в промпте не опознано")
+
     return call
 
 
-def _state(tmp_path: Path, wave_files: dict[str, str], brief: dict | None) -> rs.RunState:
+def _state(
+    tmp_path: Path, wave_files: dict[str, str], brief: dict | None
+) -> rs.RunState:
     target = tmp_path / "target"
     for rel, text in wave_files.items():
         path = target / "spec" / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     state = rs.new_run(
-        subject="s", repo="r", repo_slug="o/r", ws_id="WS", target_dir=str(target),
-        bundle_dir="spec", profile="profiles/team-exp.yaml", run_id="r-edge",
+        subject="s",
+        repo="r",
+        repo_slug="o/r",
+        ws_id="WS",
+        target_dir=str(target),
+        bundle_dir="spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-edge",
         authoring="waves",
     )
     state.base_ref = "master"
@@ -144,14 +166,20 @@ def runs_root(tmp_path: Path, monkeypatch) -> Path:
 
 
 def test_run_level_writes_a_file_per_edge_and_reads_bases_from_base(
-    tmp_path: Path, runs_root: Path,
+    tmp_path: Path,
+    runs_root: Path,
 ) -> None:
-    state = _state(tmp_path, {
-        "20-design.md": "D-1\n", "25-acceptance.md": "AC-1\n",
-        # В дереве волны лежат и upstream (ветка от base) — но координатор
-        # обязан читать основания из BASE, не отсюда.
-        "10-requirements.md": "worktree copy\n",
-    }, brief=None)
+    state = _state(
+        tmp_path,
+        {
+            "20-design.md": "D-1\n",
+            "25-acceptance.md": "AC-1\n",
+            # В дереве волны лежат и upstream (ветка от base) — но координатор
+            # обязан читать основания из BASE, не отсюда.
+            "10-requirements.md": "worktree copy\n",
+        },
+        brief=None,
+    )
     ops = _Ops(_base("requirements", "behaviour-spec"))
     run_dir = tmp_path / "run"
     result = co.run_level(state, ops, run_dir, 4, PROFILE, call=_fake_call({}))
@@ -165,29 +193,50 @@ def test_run_level_writes_a_file_per_edge_and_reads_bases_from_base(
         "acceptance--acceptance-vs-requirements-behaviour.json",
         "design--design-vs-requirements-behaviour.json",
     ]
-    record = json.loads((out / "design--design-vs-requirements-behaviour.json").read_text())
+    record = json.loads(
+        (out / "design--design-vs-requirements-behaviour.json").read_text()
+    )
     assert record["node"] == "design" and record["wave"] == 4
     assert {b["role"] for b in record["bases"]} == {"requirements", "behaviour-spec"}
     assert ("master", "spec/10-requirements.md") in ops.reads
     req = next(b for b in record["bases"] if b["role"] == "requirements")
     import hashlib
+
     assert req["sha256"] == hashlib.sha256(b"requirements approved\n").hexdigest()
     assert len(co.effective_results(run_dir)) == 2
 
 
 def test_run_level_fail_and_error_codes(tmp_path: Path, runs_root: Path) -> None:
-    state = _state(tmp_path, {"20-design.md": "D-1\n", "25-acceptance.md": "AC-1\n"}, None)
+    state = _state(
+        tmp_path, {"20-design.md": "D-1\n", "25-acceptance.md": "AC-1\n"}, None
+    )
     ops = _Ops(_base("requirements", "behaviour-spec"))
     failed = co.run_level(
-        state, ops, tmp_path / "run-fail", 4, PROFILE,
+        state,
+        ops,
+        tmp_path / "run-fail",
+        4,
+        PROFILE,
         call=_fake_call({"design-vs-requirements-behaviour": "FAIL"}),
     )
     assert failed.verdict == "FAIL" and failed.exit_code == 1
-    assert failed.records[("design", "design-vs-requirements-behaviour")]["verdict"] == "FAIL"
-    assert failed.records[("acceptance", "acceptance-vs-requirements-behaviour")]["verdict"] == "PASS"
+    assert (
+        failed.records[("design", "design-vs-requirements-behaviour")]["verdict"]
+        == "FAIL"
+    )
+    assert (
+        failed.records[("acceptance", "acceptance-vs-requirements-behaviour")][
+            "verdict"
+        ]
+        == "PASS"
+    )
 
     errored = co.run_level(
-        state, ops, tmp_path / "run-err", 4, PROFILE,
+        state,
+        ops,
+        tmp_path / "run-err",
+        4,
+        PROFILE,
         call=_fake_call({"acceptance-vs-requirements-behaviour": "RAISE"}),
     )
     assert errored.verdict == "ERROR" and errored.exit_code == 3
@@ -196,7 +245,11 @@ def test_run_level_fail_and_error_codes(tmp_path: Path, runs_root: Path) -> None
 
     # Основание отсутствует в base — ERROR, не N/A (обязательное).
     missing = co.run_level(
-        state, _Ops(_base("requirements")), tmp_path / "run-miss", 4, PROFILE,
+        state,
+        _Ops(_base("requirements")),
+        tmp_path / "run-miss",
+        4,
+        PROFILE,
         call=_fake_call({}),
     )
     assert missing.verdict == "ERROR"
@@ -206,54 +259,83 @@ def test_run_level_fail_and_error_codes(tmp_path: Path, runs_root: Path) -> None
 
 
 def test_w1_charter_has_two_edges_customer_mandatory_engineer_optional(
-    tmp_path: Path, runs_root: Path,
+    tmp_path: Path,
+    runs_root: Path,
 ) -> None:
     customer = {
-        "frame": "customer", "primary": "00-discovery/brief.md",
+        "frame": "customer",
+        "primary": "00-discovery/brief.md",
         "requirements_source": "00-discovery/brief.md",
-        "source_paths": ["00-discovery/brief.md"], "source_blobs": {"discovery-brief": "x"},
+        "source_paths": ["00-discovery/brief.md"],
+        "source_blobs": {"discovery-brief": "x"},
     }
-    state = _state(tmp_path, {
-        "00-charter.md": "G-1\n", "00-discovery/brief.md": "customer brief\n",
-    }, customer)
-    result = co.run_level(state, _Ops({}), tmp_path / "run", 1, PROFILE, call=_fake_call({}))
+    state = _state(
+        tmp_path,
+        {
+            "00-charter.md": "G-1\n",
+            "00-discovery/brief.md": "customer brief\n",
+        },
+        customer,
+    )
+    result = co.run_level(
+        state, _Ops({}), tmp_path / "run", 1, PROFILE, call=_fake_call({})
+    )
     assert result.verdict == "PASS" and result.exit_code == 0
     assert result.records[("charter", "charter-vs-customer-brief")]["verdict"] == "PASS"
     na = result.records[("charter", "charter-vs-engineer-brief")]
-    assert na["verdict"] == "N/A" and na["absence"][0]["rule_id"] == "R0-no-engineer-brief"
+    assert (
+        na["verdict"] == "N/A" and na["absence"][0]["rule_id"] == "R0-no-engineer-brief"
+    )
     assert sorted(p.name for p in (tmp_path / "run/edge-check/w1").glob("*.json")) == [
         "charter--charter-vs-customer-brief.json",
         "charter--charter-vs-engineer-brief.json",
     ]
 
     failed = co.run_level(
-        state, _Ops({}), tmp_path / "run2", 1, PROFILE,
+        state,
+        _Ops({}),
+        tmp_path / "run2",
+        1,
+        PROFILE,
         call=_fake_call({"charter-vs-customer-brief": "FAIL"}),
     )
     assert failed.verdict == "FAIL" and len(failed.records) == 2
 
     # Без брифа вовсе: customer-brief обязателен — ERROR.
     state.brief = None
-    bare = co.run_level(state, _Ops({}), tmp_path / "run3", 1, PROFILE, call=_fake_call({}))
+    bare = co.run_level(
+        state, _Ops({}), tmp_path / "run3", 1, PROFILE, call=_fake_call({})
+    )
     assert bare.verdict == "ERROR"
-    assert bare.records[("charter", "charter-vs-customer-brief")]["error_code"] == \
-        "missing_mandatory_input"
+    assert (
+        bare.records[("charter", "charter-vs-customer-brief")]["error_code"]
+        == "missing_mandatory_input"
+    )
 
 
 def test_engineer_frame_checks_charter_against_both_briefs(
-    tmp_path: Path, runs_root: Path,
+    tmp_path: Path,
+    runs_root: Path,
 ) -> None:
     engineer = {
-        "frame": "engineer", "primary": "00-discovery/engineer-brief.md",
+        "frame": "engineer",
+        "primary": "00-discovery/engineer-brief.md",
         "requirements_source": "00-discovery/brief.md",
         "source_paths": ["00-discovery/engineer-brief.md", "00-discovery/brief.md"],
         "source_blobs": {"discovery-brief": "x", "discovery-customer": "y"},
     }
-    state = _state(tmp_path, {
-        "00-charter.md": "G-1\n", "00-discovery/brief.md": "customer\n",
-        "00-discovery/engineer-brief.md": "engineer\n",
-    }, engineer)
-    result = co.run_level(state, _Ops({}), tmp_path / "run", 1, PROFILE, call=_fake_call({}))
+    state = _state(
+        tmp_path,
+        {
+            "00-charter.md": "G-1\n",
+            "00-discovery/brief.md": "customer\n",
+            "00-discovery/engineer-brief.md": "engineer\n",
+        },
+        engineer,
+    )
+    result = co.run_level(
+        state, _Ops({}), tmp_path / "run", 1, PROFILE, call=_fake_call({})
+    )
     assert {k: v["verdict"] for k, v in result.records.items()} == {
         ("charter", "charter-vs-customer-brief"): "PASS",
         ("charter", "charter-vs-engineer-brief"): "PASS",
@@ -261,7 +343,8 @@ def test_engineer_frame_checks_charter_against_both_briefs(
 
 
 def test_repeated_run_is_a_new_attempt_and_the_last_one_is_effective(
-    tmp_path: Path, runs_root: Path,
+    tmp_path: Path,
+    runs_root: Path,
 ) -> None:
     """D9/D10: неизменные входы → тот же ключ, новый `attempt_id`; действующий
     результат — последняя завершённая попытка (ERROR → PASS после повтора)."""
@@ -269,7 +352,11 @@ def test_repeated_run_is_a_new_attempt_and_the_last_one_is_effective(
     ops = _Ops(_base("requirements"))
     run_dir = tmp_path / "run"
     first = co.run_level(
-        state, ops, run_dir, 3, PROFILE,
+        state,
+        ops,
+        run_dir,
+        3,
+        PROFILE,
         call=_fake_call({"behaviour-vs-requirements": "RAISE"}),
     )
     second = co.run_level(state, ops, run_dir, 3, PROFILE, call=_fake_call({}))
@@ -283,7 +370,11 @@ def test_repeated_run_is_a_new_attempt_and_the_last_one_is_effective(
     assert effective[b["result_key"]]["verdict"] == "PASS"
     # Изменение основания меняет ключ (§6.2): прежний PASS не находится.
     third = co.run_level(
-        state, _Ops({"spec/10-requirements.md": "changed\n"}), run_dir, 3, PROFILE,
+        state,
+        _Ops({"spec/10-requirements.md": "changed\n"}),
+        run_dir,
+        3,
+        PROFILE,
         call=_fake_call({}),
     )
     c = third.records[("behaviour-spec", "behaviour-vs-requirements")]
@@ -299,13 +390,15 @@ def test_level_without_nodes_is_a_config_error(tmp_path: Path, runs_root: Path) 
 # --- devtools#445: результат по ключу D9 не переоплачивается -----------------
 
 _ENGINEER = {
-    "frame": "engineer", "primary": "00-discovery/engineer-brief.md",
+    "frame": "engineer",
+    "primary": "00-discovery/engineer-brief.md",
     "requirements_source": "00-discovery/brief.md",
     "source_paths": ["00-discovery/engineer-brief.md", "00-discovery/brief.md"],
     "source_blobs": {"discovery-brief": "x", "discovery-customer": "y"},
 }
 _W1_FILES = {
-    "00-charter.md": "G-1\n", "00-discovery/brief.md": "customer\n",
+    "00-charter.md": "G-1\n",
+    "00-discovery/brief.md": "customer\n",
     "00-discovery/engineer-brief.md": "engineer\n",
 }
 _CUSTOMER = ("charter", "charter-vs-customer-brief")
@@ -332,7 +425,8 @@ def _ledger(run_dir: Path) -> list[dict]:
 
 
 def test_repeat_after_error_does_not_repay_an_unchanged_pass_edge(
-    tmp_path: Path, runs_root: Path,
+    tmp_path: Path,
+    runs_root: Path,
 ) -> None:
     """devtools#445: ERROR на одном ребре → повтор. Ребро с тем же ключом D9
     и последней завершённой попыткой PASS проверено (D10, §6.2): модель его
@@ -340,7 +434,11 @@ def test_repeat_after_error_does_not_repay_an_unchanged_pass_edge(
     state = _state(tmp_path, _W1_FILES, _ENGINEER)
     run_dir = tmp_path / "run"
     first = co.run_level(
-        state, _Ops({}), run_dir, 1, PROFILE,
+        state,
+        _Ops({}),
+        run_dir,
+        1,
+        PROFILE,
         call=_fake_call({_ENGINEER_EDGE[1]: "RAISE"}),
     )
     assert first.records[_CUSTOMER]["verdict"] == "PASS"
@@ -353,7 +451,9 @@ def test_repeat_after_error_does_not_repay_an_unchanged_pass_edge(
     assert kept["attempt_id"] == first.records[_CUSTOMER]["attempt_id"]
     assert kept["result_key"] == first.records[_CUSTOMER]["result_key"]
     assert [e["edge"] for e in _ledger(run_dir)] == [
-        _CUSTOMER[1], _ENGINEER_EDGE[1], _ENGINEER_EDGE[1],
+        _CUSTOMER[1],
+        _ENGINEER_EDGE[1],
+        _ENGINEER_EDGE[1],
     ]
 
 
@@ -370,7 +470,11 @@ def test_repeat_after_error_does_not_repay_an_unchanged_pass_edge(
     ],
 )
 def test_reuse_only_under_the_same_key_and_a_last_pass(
-    tmp_path: Path, runs_root: Path, first_verdicts, change, expected,
+    tmp_path: Path,
+    runs_root: Path,
+    first_verdicts,
+    change,
+    expected,
 ) -> None:
     state = _state(tmp_path, _W1_FILES, _ENGINEER)
     run_dir = tmp_path / "run"
@@ -384,7 +488,8 @@ def test_reuse_only_under_the_same_key_and_a_last_pass(
 
 
 def test_reuse_falls_back_to_a_check_when_the_edge_file_moved_on(
-    tmp_path: Path, runs_root: Path,
+    tmp_path: Path,
+    runs_root: Path,
 ) -> None:
     """Файл ребра хранит ПОСЛЕДНЮЮ попытку ребра, а не ключа: если он
     перезаписан другой попыткой, переиспользовать нечего — проверка, а не
@@ -413,7 +518,8 @@ def test_reuse_requires_the_same_reviewer(tmp_path: Path, runs_root: Path) -> No
 
 
 def test_unreadable_edge_file_is_a_recheck_not_a_crash(
-    tmp_path: Path, runs_root: Path,
+    tmp_path: Path,
+    runs_root: Path,
 ) -> None:
     """Ревью #447: файл ребра пишется неатомарно; оборванная запись —
     повод проверить ребро, а не необработанный JSONDecodeError."""
@@ -428,7 +534,8 @@ def test_unreadable_edge_file_is_a_recheck_not_a_crash(
 
 
 def test_blind_edge_file_without_ledger_line_is_rechecked(
-    tmp_path: Path, runs_root: Path,
+    tmp_path: Path,
+    runs_root: Path,
 ) -> None:
     """devtools#469: слепая подсадка — файл ребра с годной на вид PASS-записью
     (даже с верным ключом D9), но без строки леджера — не переиспользуется.
@@ -449,4 +556,6 @@ def test_blind_edge_file_without_ledger_line_is_rechecked(
     ledger.write_text("".join(kept), encoding="utf-8")
     call, seen = _counting({})
     co.run_level(state, _Ops({}), run_dir, 1, PROFILE, call=call)
-    assert seen == [_CUSTOMER[1]]  # соседнее ребро с согласованной парой — переиспользовано
+    assert seen == [
+        _CUSTOMER[1]
+    ]  # соседнее ребро с согласованной парой — переиспользовано

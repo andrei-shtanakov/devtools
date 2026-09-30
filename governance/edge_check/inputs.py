@@ -75,9 +75,7 @@ def _read(role: str, path: Path, bundle_dir: Path) -> InputFile:
     return InputFile(role, rel, hashlib.sha256(data).hexdigest(), len(data), text)
 
 
-def _validate_basis_roles(
-    ruleset: RuleSet, bases: list[tuple[str, Path]]
-) -> None:
+def _validate_basis_roles(ruleset: RuleSet, bases: list[tuple[str, Path]]) -> None:
     """Роли переданных оснований обязаны совпасть с `ruleset.basis_roles`
     (находка I1): без этого посторонняя или пропущенная роль тихо
     проходит, и запись `PASS` утверждает проверку сочетания, которое не
@@ -87,8 +85,7 @@ def _validate_basis_roles(
     if dup:
         raise EdgeCheckError(
             "basis_role_mismatch",
-            f"{ruleset.edge_id}: роль основания продублирована: "
-            f"{', '.join(dup)}",
+            f"{ruleset.edge_id}: роль основания продублирована: {', '.join(dup)}",
         )
     expected, got_set = set(ruleset.basis_roles), set(got)
     if got_set != expected:

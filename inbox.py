@@ -193,12 +193,19 @@ def search_inbox(owner: str) -> list[dict] | None:
     from inventing a lower cap of its own.
     """
     cmd = [
-        "gh", "search", "issues",
-        "--owner", owner,
-        "--label", LABEL,
-        "--state", "open",
-        "--limit", str(SEARCH_LIMIT),
-        "--json", "repository,number,title,body",
+        "gh",
+        "search",
+        "issues",
+        "--owner",
+        owner,
+        "--label",
+        LABEL,
+        "--state",
+        "open",
+        "--limit",
+        str(SEARCH_LIMIT),
+        "--json",
+        "repository,number,title,body",
     ]
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -304,9 +311,9 @@ def _selftest() -> int:
     assert parse_field(body, "from") == "arbiter#crossover-gate", "from not parsed"
     assert parse_field("no fields here", "slug") is None, "absent field must be None"
     # A mention inside prose is not a field: the field is a line of its own.
-    assert (
-        parse_field("see slug: x in the docs", "slug") is None
-    ), "inline mention read as field"
+    assert parse_field("see slug: x in the docs", "slug") is None, (
+        "inline mention read as field"
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         todo = Path(tmp) / "TODO.md"
@@ -378,9 +385,9 @@ def _selftest() -> int:
         )
         assert pending == 0, "planless repo must not count as pending"
         assert "НЕЛЬЗЯ ПРИНЯТЬ" in lines[0], "planless repo reported as acceptable"
-        assert (
-            "не склонирован" not in lines[0]
-        ), "planless repo still reported as not cloned"
+        assert "не склонирован" not in lines[0], (
+            "planless repo still reported as not cloned"
+        )
 
         # And the two must not be confusable in the other direction either.
         lines, _ = render([issue(6, "slug: x\n", repo="absent")], planless)

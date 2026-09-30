@@ -67,8 +67,12 @@ ARROW_RE = re.compile(
 )
 OWNERS_RE = re.compile(r"owners?:\s*([^.;]+)")
 CONSUMERS_RE = re.compile(r"consumers?:\s*([^.;]+)")
-PLUS_RE = re.compile(r"(?<![\w.-])([A-Za-z0-9_][A-Za-z0-9_.-]*)\s*\+\s*([A-Za-z0-9_][A-Za-z0-9_.-]*)")
-COVERED_RE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_.-]*) internal sub-package graph \(([^)]+)\)")
+PLUS_RE = re.compile(
+    r"(?<![\w.-])([A-Za-z0-9_][A-Za-z0-9_.-]*)\s*\+\s*([A-Za-z0-9_][A-Za-z0-9_.-]*)"
+)
+COVERED_RE = re.compile(
+    r"([A-Za-z0-9_][A-Za-z0-9_.-]*) internal sub-package graph \(([^)]+)\)"
+)
 NOT_CONNECTED_RE = re.compile(r"Not yet connected \(0 graph edges\):\**\s*([^.]+)")
 
 Pair = frozenset  # of two project names
@@ -100,7 +104,9 @@ def parse_registry(md: str) -> tuple[set[Pair], list[set[str]], set[str]]:
     """Return (pairs, covered-groups, projects-declared-unconnected)."""
     lines = md.splitlines()
     try:
-        start = next(i for i, ln in enumerate(lines) if ln.startswith("## Integration map"))
+        start = next(
+            i for i, ln in enumerate(lines) if ln.startswith("## Integration map")
+        )
     except StopIteration:
         sys.exit(f"error: no '## Integration map' section in {REGISTRY_REL}")
     section: list[str] = []
@@ -246,12 +252,18 @@ def main() -> int:
 
     findings = 0
 
-    undetected = sorted(tuple(sorted(p)) for p in reg_pairs - g_pairs if not allowed(p, rules))
+    undetected = sorted(
+        tuple(sorted(p)) for p in reg_pairs - g_pairs if not allowed(p, rules)
+    )
     if undetected:
         findings += len(undetected)
-        print(f"UNDETECTED — in the integration map, no graph edge ({len(undetected)}):")
+        print(
+            f"UNDETECTED — in the integration map, no graph edge ({len(undetected)}):"
+        )
         for a, b in undetected:
-            print(f"  {a} ↔ {b}    (candidate for a declared edge or an allowlist entry)")
+            print(
+                f"  {a} ↔ {b}    (candidate for a declared edge or an allowlist entry)"
+            )
 
     def documented(pair: Pair) -> bool:
         return pair in reg_pairs or any(pair <= grp for grp in covered_groups)
@@ -261,7 +273,9 @@ def main() -> int:
     )
     if undocumented:
         findings += len(undocumented)
-        print(f"UNDOCUMENTED — graph edge missing from the integration map ({len(undocumented)}):")
+        print(
+            f"UNDOCUMENTED — graph edge missing from the integration map ({len(undocumented)}):"
+        )
         for a, b in undocumented:
             print(f"  {a} ↔ {b}    (update {REGISTRY_REL})")
 
@@ -269,13 +283,17 @@ def main() -> int:
     stale = sorted(reg_unconnected & connected)
     if stale:
         findings += len(stale)
-        print(f"STALE CLAIM — listed as 'not yet connected' but has edges ({len(stale)}):")
+        print(
+            f"STALE CLAIM — listed as 'not yet connected' but has edges ({len(stale)}):"
+        )
         for n in stale:
             partners = sorted({m for p in g_pairs if n in p for m in p if m != n})
             print(f"  {n} ↔ {', '.join(partners)}")
 
     if findings:
-        print(f"\n{findings} finding(s). Known-acceptable pairs go to {ALLOWLIST.name} with a reason.")
+        print(
+            f"\n{findings} finding(s). Known-acceptable pairs go to {ALLOWLIST.name} with a reason."
+        )
         return 1
     print(
         f"OK: integration map and graph agree "

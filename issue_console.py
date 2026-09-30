@@ -63,17 +63,14 @@ def launch_behaviour(issue: Issue, root: Path) -> str:
     """
     if not issue.internal:
         raise RuntimeError(
-            "external initiator — сперва человеческий triage, "
-            "конвейер не стартует"
+            "external initiator — сперва человеческий triage, конвейер не стартует"
         )
     repo_path = resolve_clone(discover_repos(root), issue.owner, issue.repo)
     if repo_path is None:
-        raise RuntimeError(
-            f"local clone for {issue.owner}/{issue.repo} not found"
-        )
-    session = re.sub(
-        r"[^a-zA-Z0-9_-]", "-", f"beh-issue-{issue.repo}-{issue.number}"
-    )[:80]
+        raise RuntimeError(f"local clone for {issue.owner}/{issue.repo} not found")
+    session = re.sub(r"[^a-zA-Z0-9_-]", "-", f"beh-issue-{issue.repo}-{issue.number}")[
+        :80
+    ]
     target = f"={session}"
     exists = subprocess.run(
         ["tmux", "has-session", "-t", target], capture_output=True, text=True
@@ -81,21 +78,40 @@ def launch_behaviour(issue: Issue, root: Path) -> str:
     if exists.returncode == 0:
         return f"exists: tmux attach -t {target}"
     cmd = [
-        "uv", "run", "--frozen", "--group", "governance",
-        "python", "-m", "governance.runner", "start",
-        "--subject", f"{issue.title} ({issue.key})",
-        "--repo", issue.repo,
-        "--repo-slug", f"{issue.owner}/{issue.repo}",
-        "--ws-id", f"WS-{issue.repo}-{issue.number}",
-        "--target-dir", str(repo_path),
+        "uv",
+        "run",
+        "--frozen",
+        "--group",
+        "governance",
+        "python",
+        "-m",
+        "governance.runner",
+        "start",
+        "--subject",
+        f"{issue.title} ({issue.key})",
+        "--repo",
+        issue.repo,
+        "--repo-slug",
+        f"{issue.owner}/{issue.repo}",
+        "--ws-id",
+        f"WS-{issue.repo}-{issue.number}",
+        "--target-dir",
+        str(repo_path),
     ]
-    shell_cmd = (
-        " ".join(shlex.quote(part) for part in cmd) + "; exec ${SHELL:-/bin/sh}"
-    )
+    shell_cmd = " ".join(shlex.quote(part) for part in cmd) + "; exec ${SHELL:-/bin/sh}"
     done = subprocess.run(
-        ["tmux", "new-session", "-d", "-s", session,
-         "-c", str(DEVTOOLS_ROOT), shell_cmd],
-        capture_output=True, text=True,
+        [
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "-c",
+            str(DEVTOOLS_ROOT),
+            shell_cmd,
+        ],
+        capture_output=True,
+        text=True,
     )
     if done.returncode:
         raise RuntimeError(done.stderr.strip() or "tmux failed")
@@ -139,14 +155,11 @@ def classify(title: str, body: str, labels: tuple[str, ...]) -> str:
     label_text = " ".join(labels).lower()
     text = f"{label_text} {title} {body[:2000]}".lower()
     scores = {
-        kind: sum(word in text for word in words)
-        for kind, words in KIND_WORDS.items()
+        kind: sum(word in text for word in words) for kind, words in KIND_WORDS.items()
     }
     best = max(scores, key=scores.get)
     winners = [
-        kind
-        for kind, score in scores.items()
-        if score == scores[best] and score > 0
+        kind for kind, score in scores.items() if score == scores[best] and score > 0
     ]
     return winners[0] if len(winners) == 1 else "unknown"
 
@@ -164,22 +177,19 @@ def discover_repos(root: Path) -> dict[str, Path]:
             continue
         done = subprocess.run(
             ["git", "-C", str(child), "remote", "get-url", "origin"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         key = child.name
         if done.returncode == 0:
-            match = re.search(
-                r"[:/]([^/:]+)/([^/]+?)(?:\.git)?$", done.stdout.strip()
-            )
+            match = re.search(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?$", done.stdout.strip())
             if match:
                 key = f"{match.group(1)}/{match.group(2)}"
         result[key.lower()] = child
     return result
 
 
-def resolve_clone(
-    repos: dict[str, Path], owner: str, repo: str
-) -> Path | None:
+def resolve_clone(repos: dict[str, Path], owner: str, repo: str) -> Path | None:
     """Клон для issue: сперва полный slug, затем bare-имя (клон без origin)."""
     return repos.get(f"{owner}/{repo}".lower()) or repos.get(repo.lower())
 
@@ -199,9 +209,7 @@ def _acceptance(body: str, repo_path: Path | None) -> str:
         return "unverifiable"
     items = scrape_items(todo.read_text(errors="ignore"))
     return (
-        "accepted"
-        if any(slug in item.raw_text for item in items)
-        else "not-accepted"
+        "accepted" if any(slug in item.raw_text for item in items) else "not-accepted"
     )
 
 
@@ -213,15 +221,11 @@ def parse_issues(
     for item in raw:
         repo_obj = item.get("repository") or {}
         author_obj = item.get("author") or {}
-        repo = str(
-            repo_obj.get("name") or repo_obj.get("nameWithOwner") or "?"
-        ).split("/")[-1]
+        repo = str(repo_obj.get("name") or repo_obj.get("nameWithOwner") or "?").split(
+            "/"
+        )[-1]
         name_with_owner = str(repo_obj.get("nameWithOwner") or "")
-        owner = (
-            name_with_owner.split("/")[0]
-            if "/" in name_with_owner
-            else "?"
-        )
+        owner = name_with_owner.split("/")[0] if "/" in name_with_owner else "?"
         clone = resolve_clone(repos, owner, repo)
         if clone is None:
             continue  # спека: таблица — только флот с локальным клоном
@@ -229,26 +233,24 @@ def parse_issues(
         labels = tuple(str(x.get("name", "")) for x in item.get("labels") or [])
         body = str(item.get("body") or "")
         inbox = "inbox" in labels
-        issues.append(Issue(
-            repo=repo,
-            number=int(item["number"]),
-            title=str(item.get("title") or ""),
-            body=body,
-            author=author,
-            created_at=str(item.get("createdAt") or ""),
-            updated_at=str(item.get("updatedAt") or ""),
-            url=str(item.get("url") or ""),
-            labels=labels,
-            inbox=inbox,
-            accepted=(
-                "n/a"
-                if not inbox
-                else _acceptance(body, clone)
-            ),
-            kind=classify(str(item.get("title") or ""), body, labels),
-            internal=author.lower() in internal,
-            owner=owner,
-        ))
+        issues.append(
+            Issue(
+                repo=repo,
+                number=int(item["number"]),
+                title=str(item.get("title") or ""),
+                body=body,
+                author=author,
+                created_at=str(item.get("createdAt") or ""),
+                updated_at=str(item.get("updatedAt") or ""),
+                url=str(item.get("url") or ""),
+                labels=labels,
+                inbox=inbox,
+                accepted=("n/a" if not inbox else _acceptance(body, clone)),
+                kind=classify(str(item.get("title") or ""), body, labels),
+                internal=author.lower() in internal,
+                owner=owner,
+            )
+        )
     return issues
 
 
@@ -286,7 +288,7 @@ def fetch_issues(owner: str) -> list[dict[str, Any]]:
 
 
 def sort_issues(issues: list[Issue], mode: str) -> list[Issue]:
-    """"date" — новые сверху; "repo"/"author" — тем же вторичным ключом
+    """ "date" — новые сверху; "repo"/"author" — тем же вторичным ключом
     внутри группы (стабильная сортировка сохраняет порядок по дате)."""
     by_date = sorted(issues, key=lambda x: x.created_at, reverse=True)
     if mode == "repo":
@@ -306,10 +308,7 @@ def group_key(issue: Issue, mode: str) -> str:
 
 def apply_kinds(issues: list[Issue], kinds: dict[str, str]) -> list[Issue]:
     """Заменить kind у issue.key из kinds; остальные issues не трогать."""
-    return [
-        replace(x, kind=kinds[x.key]) if x.key in kinds else x
-        for x in issues
-    ]
+    return [replace(x, kind=kinds[x.key]) if x.key in kinds else x for x in issues]
 
 
 def launch(issue: Issue, root: Path, mode: str) -> str:
@@ -328,30 +327,39 @@ def launch(issue: Issue, root: Path, mode: str) -> str:
         return f"exists: tmux attach -t {target}"
     worker = Path(__file__).with_name("issue_worker.py")
     cmd = [
-        sys.executable, str(worker),
-        "--repo", issue.repo,
-        "--owner", issue.owner,
-        "--number", str(issue.number),
-        "--author", issue.author,
-        "--kind", issue.kind,
-        "--mode", mode,
-        "--url", issue.url,
-        "--internal", "yes" if issue.internal else "no",
-        "--output-root", str(OUT_ROOT),
+        sys.executable,
+        str(worker),
+        "--repo",
+        issue.repo,
+        "--owner",
+        issue.owner,
+        "--number",
+        str(issue.number),
+        "--author",
+        issue.author,
+        "--kind",
+        issue.kind,
+        "--mode",
+        mode,
+        "--url",
+        issue.url,
+        "--internal",
+        "yes" if issue.internal else "no",
+        "--output-root",
+        str(OUT_ROOT),
     ]
     shell_cmd = " ".join(shlex.quote(part) for part in cmd) + "; exec ${SHELL:-/bin/sh}"
     done = subprocess.run(
         ["tmux", "new-session", "-d", "-s", session, "-c", str(repo_path), shell_cmd],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if done.returncode:
         raise RuntimeError(done.stderr.strip() or "tmux failed")
     return f"started {session}"
 
 
-def _build_rows(
-    ordered: list[Issue], mode_group: str
-) -> list[tuple[str, Issue | str]]:
+def _build_rows(ordered: list[Issue], mode_group: str) -> list[tuple[str, Issue | str]]:
     """Строки экрана: группа-заголовки (кроме mode_group == "date") + issues.
 
     Заголовок занимает отдельную строку экрана; курсор по заголовкам не ходит.
@@ -386,9 +394,7 @@ def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         group_label = (
-            f"sort: {mode_group}"
-            if mode_group == "date"
-            else f"group: {mode_group}"
+            f"sort: {mode_group}" if mode_group == "date" else f"group: {mode_group}"
         )
         header = (
             f"Issues: {len(ordered)}  selected: {len(selected)}  mode: {mode}  "
@@ -398,7 +404,7 @@ def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:
         visible = max(1, h - 2)
         offset = max(0, cursor_row - visible + 1)
         for screen_row, (kind, payload) in enumerate(
-            rows[offset:offset + visible], start=1
+            rows[offset : offset + visible], start=1
         ):
             if kind == "header":
                 stdscr.addnstr(screen_row, 0, f"── {payload} ──", w - 1)
@@ -415,7 +421,10 @@ def run_tui(stdscr: Any, issues: list[Issue], root: Path) -> None:
                 f"{issue.title}"
             )
             stdscr.addnstr(
-                screen_row, 0, line, w - 1,
+                screen_row,
+                0,
+                line,
+                w - 1,
                 curses.A_REVERSE if offset + screen_row - 1 == cursor_row else 0,
             )
         stdscr.addnstr(h - 1, 0, status, w - 1)

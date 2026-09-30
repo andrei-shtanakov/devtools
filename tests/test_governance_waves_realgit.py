@@ -13,7 +13,9 @@ from governance.ops import RealOps
 def _git(repo, *args):
     return subprocess.run(
         ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
 
 
@@ -22,9 +24,15 @@ def test_code_run_commits_on_fresh_base_of_wave2(tmp_path, monkeypatch):
     только узел (как approve_node._sync_branch_to_snapshot); W2 ветвится от
     свежей base и коммитит бандл — git add не падает, код charter'а — в base."""
     origin = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "-q", "--bare", "-b", "master", str(origin)], check=True)
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "master", str(origin)], check=True
+    )
     target = tmp_path / "alpha"
-    subprocess.run(["git", "clone", "-q", str(origin), str(target)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", "-q", str(origin), str(target)],
+        check=True,
+        capture_output=True,
+    )
     # репо-локальная identity: RealOps.commit_paths коммитит без -c user.*, а в
     # CI глобального ~/.gitconfig нет (ревью #482); прецедент — test_governance_ops.
     _git(target, "config", "user.email", "t@t")
@@ -36,9 +44,17 @@ def test_code_run_commits_on_fresh_base_of_wave2(tmp_path, monkeypatch):
     _git(target, "push", "-q", "origin", "master")
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     state = rs.new_run(
-        subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="ws",
-        target_dir=str(target), bundle_dir="workstreams/ws/spec",
-        profile="p", run_id="r", authoring="waves", code="ENC", plan_item="todo://alpha/x",
+        subject="s",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="ws",
+        target_dir=str(target),
+        bundle_dir="workstreams/ws/spec",
+        profile="p",
+        run_id="r",
+        authoring="waves",
+        code="ENC",
+        plan_item="todo://alpha/x",
     )
     ops = RealOps()
     bundle = target / state.bundle_dir
@@ -46,7 +62,8 @@ def test_code_run_commits_on_fresh_base_of_wave2(tmp_path, monkeypatch):
     _git(target, "switch", "-q", "-c", "spec/ws-w1")
     bundle.mkdir(parents=True)
     (bundle / "00-charter.md").write_text(
-        charter_guard.stamp_charter("# C\n", code="ENC", plan_item="todo://alpha/x"))
+        charter_guard.stamp_charter("# C\n", code="ENC", plan_item="todo://alpha/x")
+    )
     runner._commit_bundle(state, ops, "w1")
     # candidate: в base едет только узел
     _git(target, "switch", "-q", "master")
@@ -57,6 +74,10 @@ def test_code_run_commits_on_fresh_base_of_wave2(tmp_path, monkeypatch):
     _git(target, "switch", "-q", "-c", "spec/ws-w2", "origin/master")
     (bundle / "10-requirements.md").write_text("#### FR-01: a\n**Priority**: Must\n")
     runner._commit_bundle(state, ops, "w2")
-    assert "10-requirements.md" in _git(target, "show", "--name-only", "--format=", "HEAD")
-    base_charter = _git(target, "show", f"origin/master:{state.bundle_dir}/00-charter.md")
+    assert "10-requirements.md" in _git(
+        target, "show", "--name-only", "--format=", "HEAD"
+    )
+    base_charter = _git(
+        target, "show", f"origin/master:{state.bundle_dir}/00-charter.md"
+    )
     assert charter_guard.read_charter(base_charter).code == "ENC"

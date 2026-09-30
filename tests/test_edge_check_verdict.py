@@ -47,9 +47,18 @@ def _run(tmp_path: Path, findings: list[dict]) -> dict:
 
 
 def test_blocking_finding_gives_fail(tmp_path: Path) -> None:
-    out = _run(tmp_path, [{"rule_id": "R2", "class": "major",
-                           "path": "15-behaviour-spec.md", "lines": [1, 1],
-                           "statement": "вводит обязательство сверх требований"}])
+    out = _run(
+        tmp_path,
+        [
+            {
+                "rule_id": "R2",
+                "class": "major",
+                "path": "15-behaviour-spec.md",
+                "lines": [1, 1],
+                "statement": "вводит обязательство сверх требований",
+            }
+        ],
+    )
     assert out["verdict"] == "FAIL"
 
 
@@ -58,9 +67,7 @@ def test_failed_criterion_without_findings_gives_fail(tmp_path: Path) -> None:
     единой находки (сегодня покрыт только путь через блокирующий класс)."""
     b = _bundle(tmp_path)
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
-    criteria = [
-        {"id": it.id, "status": "pass", "reason": "ок"} for it in rs.items
-    ]
+    criteria = [{"id": it.id, "status": "pass", "reason": "ок"} for it in rs.items]
     criteria[0]["status"] = "fail"
     criteria[0]["reason"] = "входа недостаточно"
     answer = json.dumps({"structured_output": {"criteria": criteria, "findings": []}})
@@ -78,9 +85,18 @@ def test_failed_criterion_without_findings_gives_fail(tmp_path: Path) -> None:
 
 
 def test_advisory_only_gives_pass_and_keeps_findings(tmp_path: Path) -> None:
-    out = _run(tmp_path, [{"rule_id": "R4", "class": "minor",
-                           "path": "15-behaviour-spec.md", "lines": [1, 1],
-                           "statement": "формулировка двусмысленна"}])
+    out = _run(
+        tmp_path,
+        [
+            {
+                "rule_id": "R4",
+                "class": "minor",
+                "path": "15-behaviour-spec.md",
+                "lines": [1, 1],
+                "statement": "формулировка двусмысленна",
+            }
+        ],
+    )
     assert out["verdict"] == "PASS"
     assert len(out["findings"]) == 1
 
@@ -194,23 +210,27 @@ def test_real_path_records_env_passthrough_harness_version_and_model_id(
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
 
     monkeypatch.setattr(reviewer_mod, "reviewer_env", lambda: {"PATH": "/usr/bin"})
-    monkeypatch.setattr(
-        reviewer_mod, "harness_version", lambda: "2.1.0 (Claude Code)"
-    )
+    monkeypatch.setattr(reviewer_mod, "harness_version", lambda: "2.1.0 (Claude Code)")
 
     def fake_run_reviewer(  # noqa: ANN001, ANN202
-        text, argv, workdir, timeout, env=None,
+        text,
+        argv,
+        workdir,
+        timeout,
+        env=None,
     ):
-        return json.dumps({
-            "model": "claude-opus-5-20260101",
-            "structured_output": {
-                "criteria": [
-                    {"id": it.id, "status": "pass", "reason": "ок"}
-                    for it in rs.items
-                ],
-                "findings": [],
-            },
-        })
+        return json.dumps(
+            {
+                "model": "claude-opus-5-20260101",
+                "structured_output": {
+                    "criteria": [
+                        {"id": it.id, "status": "pass", "reason": "ок"}
+                        for it in rs.items
+                    ],
+                    "findings": [],
+                },
+            }
+        )
 
     monkeypatch.setattr(reviewer_mod, "run_reviewer", fake_run_reviewer)
 
@@ -240,18 +260,24 @@ def test_real_path_workdir_is_outside_the_workspace(
     seen: list[Path] = []
 
     def fake_run_reviewer(  # noqa: ANN001, ANN202
-        text, argv, workdir, timeout, env=None,
+        text,
+        argv,
+        workdir,
+        timeout,
+        env=None,
     ):
         seen.append(workdir)
-        return json.dumps({
-            "structured_output": {
-                "criteria": [
-                    {"id": it.id, "status": "pass", "reason": "ок"}
-                    for it in rs.items
-                ],
-                "findings": [],
-            },
-        })
+        return json.dumps(
+            {
+                "structured_output": {
+                    "criteria": [
+                        {"id": it.id, "status": "pass", "reason": "ок"}
+                        for it in rs.items
+                    ],
+                    "findings": [],
+                },
+            }
+        )
 
     monkeypatch.setattr(reviewer_mod, "run_reviewer", fake_run_reviewer)
 

@@ -96,7 +96,7 @@ def _block_list_field(block: str, name: str) -> tuple[str, ...] | None:
     # splitlines() всегда пустая строка-остаток заголовка, отбрасываем её.
     item_indent: str | None = None
     after_blank = False
-    for line in block[m.end():].splitlines()[1:]:
+    for line in block[m.end() :].splitlines()[1:]:
         item = _LIST_ITEM_RE.match(line)
         if item is None:
             # Пустая строка список НЕ обрывает (round 14 ревью PR #161,
@@ -157,9 +157,7 @@ WAIVER_CLASSES = tuple(WAIVER_CONDITIONS)
 #: — тот же, что в заголовке DT. Одной строкой, а не двумя ключами,
 #: намеренно: два ключа делали бы достижимым состояние «класс без
 #: санкции», а здесь строка либо разбирается целиком, либо это находка.
-_WAIVER_RE = re.compile(
-    r"^tdd_waiver:\s*(\S+)\s*·\s*sanction:\s*(\S+)\s*$", re.M
-)
+_WAIVER_RE = re.compile(r"^tdd_waiver:\s*(\S+)\s*·\s*sanction:\s*(\S+)\s*$", re.M)
 _WAIVER_KEY_RE = re.compile(r"^tdd_waiver:", re.M)
 
 #: Негативный контроль (devtools#336, spec-runner#428): селектор теста,
@@ -244,16 +242,21 @@ def _control_field(block: str, dt_id: str) -> tuple[str | None, list[str], bool]
         return None, [], False
     matches = _CONTROL_RE.findall(block)
     if keys > 1:
-        return None, [
-            f"{dt_id}: negative_control объявлен {keys} раза "
-            "(ожидается ровно один)"
-        ], True
+        return (
+            None,
+            [f"{dt_id}: negative_control объявлен {keys} раза (ожидается ровно один)"],
+            True,
+        )
     if keys != len(matches):
-        return None, [
-            f"{dt_id}: поле negative_control объявлено, но не разобрано — "
-            "ожидается `negative_control: <селектор>`: один токен без "
-            "пробелов, без ` :: `"
-        ], True
+        return (
+            None,
+            [
+                f"{dt_id}: поле negative_control объявлено, но не разобрано — "
+                "ожидается `negative_control: <селектор>`: один токен без "
+                "пробелов, без ` :: `"
+            ],
+            True,
+        )
     return matches[0], [], True
 
 
@@ -303,7 +306,10 @@ class DtTask:
 
 
 def _waiver_field(
-    block: str, dt_id: str, dt_type: str, depends_on: tuple[str, ...],
+    block: str,
+    dt_id: str,
+    dt_type: str,
+    depends_on: tuple[str, ...],
 ) -> tuple[DtWaiver | None, list[str]]:
     """Объявление TDD-waiver'а либо находки — fail-closed в обе стороны.
 
@@ -353,8 +359,7 @@ def _waiver_field(
     keys = len(_WAIVER_KEY_RE.findall(block))
     if keys > 1:
         findings.append(
-            f"{dt_id}: tdd_waiver объявлен {keys} раза "
-            "(ожидается ровно один)"
+            f"{dt_id}: tdd_waiver объявлен {keys} раза (ожидается ровно один)"
         )
         return None, findings
     if keys != len(matches):
@@ -415,7 +420,9 @@ def _waiver_field(
     if findings or selector is None:
         return None, findings
     return DtWaiver(
-        node_class=node_class, sanction=sanction, control_selector=selector,
+        node_class=node_class,
+        sanction=sanction,
+        control_selector=selector,
     ), findings
 
 
@@ -501,22 +508,26 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
         # до моста не доезжает по другому пути: гейт останавливает
         # прогон на ошибках `GC-DT-CONTRACT` раньше доставки.
         _, delivers = _parse_delivers(dt_id, block)
-        waiver, waiver_findings = _waiver_field(block, dt_id, dt_type,
-                                                depends_on or ())
+        waiver, waiver_findings = _waiver_field(block, dt_id, dt_type, depends_on or ())
         findings += waiver_findings
-        tasks.append(DtTask(
-            dt_id=dt_id, title=m.group(2), type=dt_type,
-            owner=m.group(4), scenarios=scenarios or (),
-            depends_on=depends_on or (), delivered_by=delivered_by,
-            parallel_group=group_m.group(1) if group_m else "",
-            verifies=verifies, waiver=waiver,
-            delivers=tuple(delivers),
-        ))
+        tasks.append(
+            DtTask(
+                dt_id=dt_id,
+                title=m.group(2),
+                type=dt_type,
+                owner=m.group(4),
+                scenarios=scenarios or (),
+                depends_on=depends_on or (),
+                delivered_by=delivered_by,
+                parallel_group=group_m.group(1) if group_m else "",
+                verifies=verifies,
+                waiver=waiver,
+                delivers=tuple(delivers),
+            )
+        )
     for dt_id, count in seen.items():
         if count > 1:
-            findings.append(
-                f"{dt_id}: объявлен {count} раза (ожидается ровно один)"
-            )
+            findings.append(f"{dt_id}: объявлен {count} раза (ожидается ровно один)")
     return tasks, findings
 
 
@@ -582,9 +593,7 @@ def _parse_beh_bindings(text: str) -> dict[str, tuple[str | None, str | None]]:
     }
 
 
-def _transitive_deps(
-    start: str, edges: dict[str, tuple[str, ...]]
-) -> set[str]:
+def _transitive_deps(start: str, edges: dict[str, tuple[str, ...]]) -> set[str]:
     seen: set[str] = set()
     stack = list(edges.get(start, ()))
     while stack:
@@ -609,9 +618,7 @@ def _orphan_verifies_findings(
     селектор прогона, которого ни одна задача не создаёт.
     """
     findings: list[str] = []
-    owned_files = {
-        target for target, _kind in bindings.values() if target is not None
-    }
+    owned_files = {target for target, _kind in bindings.values() if target is not None}
     for t in tasks:
         for f in t.verifies:
             # Срез `::`-селектора ПЕРЕД сверкой (round 10 ревью PR #161,
@@ -631,9 +638,7 @@ def _orphan_verifies_findings(
     return findings
 
 
-def non_fatal_findings(
-    behaviour_text: str, decomposition_text: str
-) -> list[str]:
+def non_fatal_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
     """Non-fatal находки формы про `verifies` (round 7 ревью PR #161,
     минор, контракт владельца) — единственная точка их вычисления, и
     единственный потребитель — `governance.runner._step_gate`: показывает
@@ -689,8 +694,7 @@ def graph_findings(
     tasks, findings = parse_dt_tasks(decomposition_text)
     records = _parse_beh_binding_records(behaviour_text)
     bindings = {
-        beh_id: (target, kind)
-        for beh_id, (target, kind, _declared) in records.items()
+        beh_id: (target, kind) for beh_id, (target, kind, _declared) in records.items()
     }
     ids = {t.dt_id for t in tasks}
     edges = {t.dt_id: t.depends_on for t in tasks}
@@ -741,9 +745,7 @@ def graph_findings(
         if not owners:
             findings.append(f"{beh}: не покрыт ни одной DT-задачей")
         elif len(owners) > 1:
-            findings.append(
-                f"{beh}: покрыт дважды и более ({', '.join(owners)})"
-            )
+            findings.append(f"{beh}: покрыт дважды и более ({', '.join(owners)})")
 
     # single-owner тест-файла — БЕЗ исключения для verifies (round 4 ревью
     # PR #161, finding 3: узкое per-task исключение round 2/3, `target in
@@ -782,12 +784,15 @@ def graph_findings(
     for t in tasks:
         if t.waiver is None:
             continue
-        own_files = sorted({
-            target for target, kind in (
-                bindings.get(beh, (None, None)) for beh in t.scenarios
-            )
-            if target is not None and kind != "manual"
-        })
+        own_files = sorted(
+            {
+                target
+                for target, kind in (
+                    bindings.get(beh, (None, None)) for beh in t.scenarios
+                )
+                if target is not None and kind != "manual"
+            }
+        )
         control_file = t.waiver.control_selector.split("::", 1)[0]
         if control_file not in own_files:
             findings.append(
@@ -807,8 +812,7 @@ def graph_findings(
         if target is not None:
             kinds_by_file.setdefault(target, set()).add(kind)
     manual_only = {
-        target for target, kinds in kinds_by_file.items()
-        if kinds == {"manual"}
+        target for target, kinds in kinds_by_file.items() if kinds == {"manual"}
     }
     owned_files = set(kinds_by_file)
     for t in tasks:
@@ -817,11 +821,7 @@ def graph_findings(
         runnable_targets: list[str] = []
         for beh in t.scenarios:
             _target, kind, declared = records.get(beh, (None, None, None))
-            if (
-                declared
-                and kind != "manual"
-                and declared not in runnable_targets
-            ):
+            if declared and kind != "manual" and declared not in runnable_targets:
                 runnable_targets.append(declared)
         for declared in t.verifies:
             target = declared.split("::", 1)[0]
@@ -851,9 +851,7 @@ def graph_findings(
     for t in tasks:
         if t.type == "verify":
             if not t.delivered_by:
-                findings.append(
-                    f"{t.dt_id}: type: verify без delivered_by"
-                )
+                findings.append(f"{t.dt_id}: type: verify без delivered_by")
             else:
                 closure = _transitive_deps(t.dt_id, edges)
                 outside = [d for d in t.delivered_by if d not in closure]
@@ -864,9 +862,7 @@ def graph_findings(
                         "замыкания depends_on"
                     )
         elif t.delivered_by:
-            findings.append(
-                f"{t.dt_id}: delivered_by запрещён при type: implement"
-            )
+            findings.append(f"{t.dt_id}: delivered_by запрещён при type: implement")
 
     # verifies обязан ссылаться на файлы, чей владелец (checked_by, тот же
     # file_owner, что и single-owner выше) — в ТРАНЗИТИВНОМ ЗАМЫКАНИИ
@@ -933,19 +929,14 @@ def graph_findings(
             if dep in dependents:
                 dependents[dep].add(t.dt_id)
     for t in tasks:
-        foreign = {
-            dep for dep in t.depends_on
-            if dep in ids
-        }
+        foreign = {dep for dep in t.depends_on if dep in ids}
         by_group: dict[str, set[str]] = {}
         own_key = _group_key(t)
         # рёбра, обоснованные delivered_by, из правила стоков исключены
         # (verify точечно за проверяемым — §3 спеки, minor круга 2)
         foreign -= set(t.delivered_by)
         for dep in foreign:
-            dep_group = next(
-                g for g, members in groups.items() if dep in members
-            )
+            dep_group = next(g for g, members in groups.items() if dep in members)
             if dep_group != own_key:
                 by_group.setdefault(dep_group, set()).add(dep)
         if len(by_group) < 2:
@@ -955,8 +946,7 @@ def graph_findings(
             continue
         for g, deps in by_group.items():
             sinks = {
-                member for member in groups[g]
-                if not (dependents[member] & groups[g])
+                member for member in groups[g] if not (dependents[member] & groups[g])
             }
             missing = sinks - set(t.depends_on)
             if missing:
@@ -1052,7 +1042,7 @@ def _delivers_region(block: str) -> str | None:
         if not line.startswith("delivers:"):
             continue
         region = [line]
-        for nxt in lines[i + 1:]:
+        for nxt in lines[i + 1 :]:
             if nxt.strip() and not nxt.startswith((" ", "\t")):
                 break
             region.append(nxt)
@@ -1095,10 +1085,7 @@ def node_id_counts(text: str) -> dict[str, int]:
     return counts
 
 
-
-def _parse_delivers(
-    dt_id: str, block: str
-) -> tuple[list[str], list[Deliverable]]:
+def _parse_delivers(dt_id: str, block: str) -> tuple[list[str], list[Deliverable]]:
     """Находки формы `delivers` одного DT и разобранные записи.
 
     ОДИН разбор на обоих потребителей — гвард и мост. Второй разбор того
@@ -1117,13 +1104,23 @@ def _parse_delivers(
         # для этого класса (`tdd_waiver`). Регион берётся по первому
         # совпадению, поэтому строка-заглушка выше настоящего блока молча
         # съедала бы его.
-        return ([f"{dt_id}: ключ delivers объявлен дважды ({keys}) — "
-                 f"разбирается только первый, объявленное ниже невидимо"], [])
+        return (
+            [
+                f"{dt_id}: ключ delivers объявлен дважды ({keys}) — "
+                f"разбирается только первый, объявленное ниже невидимо"
+            ],
+            [],
+        )
     region = _delivers_region(block)
     if region is None:
-        return ([f"{dt_id}: поле delivers отсутствует (dt_contract_version: 2 "
-                 f"требует его у каждого DT; `delivers: []` — законное "
-                 f"утверждение «объявленных результатов нет»)"], [])
+        return (
+            [
+                f"{dt_id}: поле delivers отсутствует (dt_contract_version: 2 "
+                f"требует его у каждого DT; `delivers: []` — законное "
+                f"утверждение «объявленных результатов нет»)"
+            ],
+            [],
+        )
     try:
         parsed = yaml.safe_load(region)
     except yaml.YAMLError as exc:
@@ -1132,8 +1129,13 @@ def _parse_delivers(
     if items is None:
         # Ключ есть, значения нет — находка формы, а не «поля нет»: тот же
         # приём, что у `verifies` (round 13 ревью PR #161).
-        return ([f"{dt_id}: поле delivers объявлено, но пусто — ожидается "
-                 f"список записей либо явный `delivers: []`"], [])
+        return (
+            [
+                f"{dt_id}: поле delivers объявлено, но пусто — ожидается "
+                f"список записей либо явный `delivers: []`"
+            ],
+            [],
+        )
     if items == []:
         return ([], [])
     if not isinstance(items, list):
@@ -1147,16 +1149,15 @@ def _parse_delivers(
     for pos, item in enumerate(items, start=1):
         where = f"{dt_id}: delivers[{pos}]"
         if not isinstance(item, dict):
-            findings.append(f"{where}: ожидается запись с полями id/kind/"
-                            f"statement/sources")
+            findings.append(
+                f"{where}: ожидается запись с полями id/kind/statement/sources"
+            )
             continue
         for field in ("id", "kind", "statement", "sources"):
             if not item.get(field):
                 findings.append(f"{where}: поле {field} отсутствует или пусто")
         del_id = item.get("id")
-        if isinstance(del_id, str) and del_id and not _DELIVERABLE_ID_RE.match(
-            del_id
-        ):
+        if isinstance(del_id, str) and del_id and not _DELIVERABLE_ID_RE.match(del_id):
             findings.append(
                 f"{where}: id {del_id!r} не соответствует контрактной форме "
                 f"`DEL-NN`; по ней результат опознаётся в чек-листе, и id "
@@ -1326,9 +1327,7 @@ def _restates_findings(
                 continue
             where = f"{dt_id}: delivers {record.id} restates {target}"
             if target not in owner_of:
-                findings.append(
-                    f"{where} — такого результата в бандле нет"
-                )
+                findings.append(f"{where} — такого результата в бандле нет")
                 continue
             owner = owner_of[target]
             if owner == dt_id:
@@ -1393,24 +1392,33 @@ def dt_contract_findings(
         return ([f"decomposition: frontmatter не разобран: {exc}"], [])
     if "dt_contract_version" not in meta:
         if allow_legacy_dt:
-            return ([], [
-                "decomposition: dt_contract_version не объявлена — старый "
-                "формат по явному разрешению оператора; ГАРАНТИЯ ПЕРЕНОСА "
-                "deliverables ОТСУТСТВУЕТ"
-            ])
-        return ([
-            "decomposition: требуется версия контракта "
-            "(`dt_contract_version` во frontmatter); отсутствие поля режим "
-            "совместимости НЕ включает — его включает оператор"
-        ], [])
+            return (
+                [],
+                [
+                    "decomposition: dt_contract_version не объявлена — старый "
+                    "формат по явному разрешению оператора; ГАРАНТИЯ ПЕРЕНОСА "
+                    "deliverables ОТСУТСТВУЕТ"
+                ],
+            )
+        return (
+            [
+                "decomposition: требуется версия контракта "
+                "(`dt_contract_version` во frontmatter); отсутствие поля режим "
+                "совместимости НЕ включает — его включает оператор"
+            ],
+            [],
+        )
     raw = meta["dt_contract_version"]
     version = "" if raw is None else str(raw)
     if version not in _DT_CONTRACT_VERSIONS:
-        return ([
-            f"decomposition: неизвестная dt_contract_version {version!r} "
-            f"(поддержана: {', '.join(_DT_CONTRACT_VERSIONS)}); режим "
-            f"совместимости неизвестную версию не маскирует"
-        ], [])
+        return (
+            [
+                f"decomposition: неизвестная dt_contract_version {version!r} "
+                f"(поддержана: {', '.join(_DT_CONTRACT_VERSIONS)}); режим "
+                f"совместимости неизвестную версию не маскирует"
+            ],
+            [],
+        )
     errors: list[str] = []
     seen: dict[str, str] = {}
     records_of: dict[str, list[Deliverable]] = {}

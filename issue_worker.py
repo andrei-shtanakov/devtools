@@ -54,21 +54,37 @@ def effective_execute(mode: str, internal: bool) -> bool:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--repo", required=True)
-    p.add_argument("--owner", required=True,
-                   help="owner репо issue — gh резолвит по slug, не по cwd")
+    p.add_argument(
+        "--owner",
+        required=True,
+        help="owner репо issue — gh резолвит по slug, не по cwd",
+    )
     p.add_argument("--number", required=True, type=int)
     p.add_argument("--author", required=True)
     p.add_argument("--kind", required=True)
     p.add_argument("--mode", choices=("plan", "execute"), default="plan")
     p.add_argument("--internal", choices=("yes", "no"), required=True)
-    p.add_argument("--output-root", required=True, type=Path,
-                   help="абсолютный devtools/out (результат не в целевом репо)")
+    p.add_argument(
+        "--output-root",
+        required=True,
+        type=Path,
+        help="абсолютный devtools/out (результат не в целевом репо)",
+    )
     p.add_argument("--url", default="")
     args = p.parse_args()
     issue = subprocess.run(
-        ["gh", "issue", "view", str(args.number),
-         "--repo", f"{args.owner}/{args.repo}",
-         "--json", "title,body,author,labels,url"], capture_output=True, text=True,
+        [
+            "gh",
+            "issue",
+            "view",
+            str(args.number),
+            "--repo",
+            f"{args.owner}/{args.repo}",
+            "--json",
+            "title,body,author,labels,url",
+        ],
+        capture_output=True,
+        text=True,
     )
     if issue.returncode:
         print(issue.stderr.strip())
@@ -78,19 +94,20 @@ def main() -> int:
     execute = effective_execute(args.mode, internal)
     decision = policy_decision(internal)
     instructions = (
-        "Implement the issue in the current repository. Update TODO.md when "
-        "its existing contract calls for it. Run relevant tests. Do not "
-        "commit, push, open a PR, or merge."
-    ) if execute else (
-        "Read and analyze only. Do not edit files or execute mutating "
-        "commands."
+        (
+            "Implement the issue in the current repository. Update TODO.md when "
+            "its existing contract calls for it. Run relevant tests. Do not "
+            "commit, push, open a PR, or merge."
+        )
+        if execute
+        else ("Read and analyze only. Do not edit files or execute mutating commands.")
     )
     prompt = f"""You are the worker for GitHub issue {args.repo}#{args.number}.
 The initiator is {args.author}; the deterministic preliminary kind is {args.kind}.
 Issue data: {json.dumps(payload, ensure_ascii=False)}
 
 Acceptance policy is decided by code, not by you: decision={decision}
-(initiator is {'internal' if internal else 'external'}). Keep that decision in
+(initiator is {"internal" if internal else "external"}). Keep that decision in
 your structured result; you may return needs_human instead only when the issue
 data is too incomplete to analyze.
 {instructions}
@@ -102,9 +119,18 @@ Return only the structured result required by the supplied JSON schema.
         schema = Path(tmp) / "schema.json"
         raw = Path(tmp) / "raw-result.json"
         schema.write_text(json.dumps(SCHEMA))
-        cmd = ["codex", "exec", "--ephemeral", "--output-schema", str(schema),
-               "--output-last-message", str(raw), "--sandbox",
-               "workspace-write" if execute else "read-only", prompt]
+        cmd = [
+            "codex",
+            "exec",
+            "--ephemeral",
+            "--output-schema",
+            str(schema),
+            "--output-last-message",
+            str(raw),
+            "--sandbox",
+            "workspace-write" if execute else "read-only",
+            prompt,
+        ]
         try:
             done = subprocess.run(cmd)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -117,8 +143,9 @@ Return only the structured result required by the supplied JSON schema.
         except (OSError, ValueError) as exc:
             print(f"issue-worker: невалидный результат codex: {exc}")
             return 3
-    final.write_text(json.dumps(enforce_policy(result, decision),
-                                ensure_ascii=False, indent=2))
+    final.write_text(
+        json.dumps(enforce_policy(result, decision), ensure_ascii=False, indent=2)
+    )
     print(f"\nStructured result: {final}")
     return 0
 

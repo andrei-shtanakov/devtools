@@ -50,7 +50,12 @@ def test_setup_sets_the_permission_table() -> None:
 
 def test_env_example_names_every_setting() -> None:
     env = (DEPLOY / "env.example").read_text()
-    for name in ("R16_WORKSPACE", "R16_STATE_DIR", "R16_GH_CONFIG_DIR", "R16_HOST_LABEL"):
+    for name in (
+        "R16_WORKSPACE",
+        "R16_STATE_DIR",
+        "R16_GH_CONFIG_DIR",
+        "R16_HOST_LABEL",
+    ):
         assert f"{name}=" in env
 
 
@@ -67,7 +72,7 @@ def readme() -> str:
 def test_rollback_waits_for_activating_not_for_inactive() -> None:
     """After ok:false the oneshot unit is `failed`, never `inactive` (final review I2)."""
     text = readme()
-    assert '= inactive ]' not in text
+    assert "= inactive ]" not in text
     assert "is-active -q r16-kb-freshness.service" in text
 
 

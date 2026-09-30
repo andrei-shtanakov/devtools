@@ -45,9 +45,7 @@ def _node(
     считает проекция: round-trip разбора и сборки обязан быть частью того,
     что проверяется.
     """
-    pin_lines = "".join(
-        f"  {up}: {blob}\n" for up, blob in (pins or {}).items()
-    )
+    pin_lines = "".join(f"  {up}: {blob}\n" for up, blob in (pins or {}).items())
     upstream = f"upstream_hashes:\n{pin_lines}" if pin_lines else ""
     empty = "''"
     return (
@@ -148,9 +146,7 @@ def test_self_hash_and_i2_canonization_answer_different_questions(
         return tb._canonical_dag_hash(str(root), bundle, dag)
 
     assert canon("approved") != canon("stale")
-    assert na.self_hash(_node(status="approved")) == na.self_hash(
-        _node(status="stale")
-    )
+    assert na.self_hash(_node(status="approved")) == na.self_hash(_node(status="stale"))
 
 
 # --- Каскад: кого он метит, а на ком обрывается -------------------------
@@ -223,9 +219,7 @@ def test_every_debt_status_is_named_with_its_own_meaning(
 
 def test_empty_signature_is_not_a_signature() -> None:
     """`approved_by: ""` заводит шаблон бандла — это «не подписано»."""
-    node = _sign_own_bytes(
-        _node(approved_by="", approved_at="", pins=_honest_pins())
-    )
+    node = _sign_own_bytes(_node(approved_by="", approved_at="", pins=_honest_pins()))
     debt = na.node_debt("design", node, _honest_pins())
     assert debt is not None and "без подписи" in debt.reason
 
@@ -302,9 +296,7 @@ def test_pending_procedure_depends_on_the_ledger_not_on_the_node() -> None:
     node = _sign_own_bytes(
         _node(status=na.STATUS_APPROVAL_PENDING, pins=_honest_pins())
     )
-    waiting = na.node_debt(
-        "design", node, _honest_pins(), awaiting_merge_pr=407
-    )
+    waiting = na.node_debt("design", node, _honest_pins(), awaiting_merge_pr=407)
     orphaned = na.node_debt("design", node, _honest_pins())
     assert waiting is not None and orphaned is not None
     assert "#407" in waiting.procedure

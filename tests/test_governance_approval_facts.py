@@ -244,14 +244,14 @@ SHA_A, SHA_B = "a" * 40, "b" * 40
 class PolicyOps:
     """Фейк форджи политики: версия по пути и тексты по SHA."""
 
-    version: Fact = field(
-        default_factory=lambda: Fact(Outcome.FOUND, SHA_A, "")
+    version: Fact = field(default_factory=lambda: Fact(Outcome.FOUND, SHA_A, ""))
+    files: dict[str, Fact] = field(
+        default_factory=lambda: {
+            SHA_A: Fact(
+                Outcome.FOUND, "AUTHORIZED_APPROVER_ACCOUNTS=andrei-shtanakov\n", ""
+            ),
+        }
     )
-    files: dict[str, Fact] = field(default_factory=lambda: {
-        SHA_A: Fact(
-            Outcome.FOUND, "AUTHORIZED_APPROVER_ACCOUNTS=andrei-shtanakov\n", ""
-        ),
-    })
     calls: list[tuple] = field(default_factory=list)
 
     def policy_version_fact(self, repo, branch, path):
@@ -306,9 +306,11 @@ def test_empty_after_parsing_is_forbidden_not_found(monkeypatch) -> None:
     """`= , ,` проходит read_key, но даёт пустое множество — это «подписать
     не может никто», FORBIDDEN(empty), а не FOUND с пустым accounts."""
     monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
-    ops = PolicyOps(files={
-        SHA_A: Fact(Outcome.FOUND, "AUTHORIZED_APPROVER_ACCOUNTS= , ,\n", ""),
-    })
+    ops = PolicyOps(
+        files={
+            SHA_A: Fact(Outcome.FOUND, "AUTHORIZED_APPROVER_ACCOUNTS= , ,\n", ""),
+        }
+    )
     fact = af.policy_snapshot(ops, pinned_sha=None)
     assert fact.outcome is Outcome.FORBIDDEN
     assert isinstance(fact.value, af.PolicyRefusal)
@@ -373,9 +375,7 @@ def test_unconfirmed_close_is_unavailable_but_confirmed_is_a_fact() -> None:
     confirmed = af.confirm_closed(_StubOps(close_pr=True), "o/r", 407, "текст")
     assert confirmed.outcome is Outcome.FOUND
 
-    unconfirmed = af.confirm_closed(
-        _StubOps(close_pr=False), "o/r", 407, "текст"
-    )
+    unconfirmed = af.confirm_closed(_StubOps(close_pr=False), "o/r", 407, "текст")
     assert unconfirmed.outcome is Outcome.UNAVAILABLE
     assert "#177" in unconfirmed.detail
 

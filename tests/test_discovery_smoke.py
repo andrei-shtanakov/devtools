@@ -4,6 +4,7 @@
 tests/test_discovery_smoke.py
 Без переменной — skip: обычный pytest от соседа не зависит.
 """
+
 from __future__ import annotations
 
 import os
@@ -36,27 +37,35 @@ _ANSWERS = {
     },
     "jobs": {
         "text": "когда прогон готов, хочу подтвердить приёмку одной командой",
-        "entries": [{
-            "id": "J-01",
-            "body": "когда прогон готов, хочу подтвердить приёмку одной командой",
-        }],
+        "entries": [
+            {
+                "id": "J-01",
+                "body": "когда прогон готов, хочу подтвердить приёмку одной командой",
+            }
+        ],
     },
     "functions": {
         "text": "нужна одна кнопка приёмки",
-        "entries": [{
-            "id": "FR-01", "body": "одна команда запускает приёмку прогона",
-            "Priority": "Must",
-            "Acceptance": "прогон стартует одной командой и печатает статус",
-            "traces": ["G-01", "J-01"],
-        }],
+        "entries": [
+            {
+                "id": "FR-01",
+                "body": "одна команда запускает приёмку прогона",
+                "Priority": "Must",
+                "Acceptance": "прогон стартует одной командой и печатает статус",
+                "traces": ["G-01", "J-01"],
+            }
+        ],
     },
     "nfr": {
         "text": "приёмка не должна занимать больше минуты",
-        "entries": [{
-            "id": "NFR-01", "body": "приёмка отвечает не дольше минуты",
-            "Acceptance": "команда завершается за 60 секунд на типовом прогоне",
-            "traces": ["G-01"],
-        }],
+        "entries": [
+            {
+                "id": "NFR-01",
+                "body": "приёмка отвечает не дольше минуты",
+                "Acceptance": "команда завершается за 60 секунд на типовом прогоне",
+                "traces": ["G-01"],
+            }
+        ],
     },
     "constraints": {
         "text": "бюджет и сроки фиксированы текущим релизом",
@@ -64,10 +73,13 @@ _ANSWERS = {
     },
     "success_metrics": {
         "text": "метрика — доля прогонов, принятых одной командой",
-        "entries": [{
-            "id": "M-01", "body": "доля прогонов, принятых одной командой, растёт",
-            "traces": ["G-01"],
-        }],
+        "entries": [
+            {
+                "id": "M-01",
+                "body": "доля прогонов, принятых одной командой, растёт",
+                "traces": ["G-01"],
+            }
+        ],
     },
     "out_of_scope": {
         "text": "вне scope — ручной разбор логов",
@@ -87,14 +99,18 @@ def test_real_discovery_customer_loop(tmp_path: Path, monkeypatch) -> None:
     reply = ops.discovery_start("customer", "owner/smoke", None, None, cwd)
     assert reply.code == 20, reply
     session = reply.envelope["next_action"]["session_id"]
-    for _ in range(60):   # цикл по ВСЕМУ банку вопросов фрейма
+    for _ in range(60):  # цикл по ВСЕМУ банку вопросов фрейма
         action = reply.envelope["next_action"]
         answer = tmp_path / "answer.yaml"
-        answer.write_text(yaml.safe_dump(_answer_for(action.get("coverage_key", "")),
-                                         allow_unicode=True), encoding="utf-8")
+        answer.write_text(
+            yaml.safe_dump(
+                _answer_for(action.get("coverage_key", "")), allow_unicode=True
+            ),
+            encoding="utf-8",
+        )
         answer_reply = ops._discovery(
-            ["answer", "--session", session, "--role", "po",
-             "--file", str(answer)], cwd,
+            ["answer", "--session", session, "--role", "po", "--file", str(answer)],
+            cwd,
         )
         assert answer_reply.code in (0, 20, 10, 11), answer_reply
         reply = ops.discovery_status(session, cwd)

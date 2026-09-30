@@ -688,8 +688,7 @@ def _canonical_line(diag: dict, hint: int | None = None) -> str | None:
     if code.startswith("PF-OWNER-") and code != "PF-OWNER-REPO-SELF":
         return None
     if code == "PF-ID-MISSING" and hint is not None:
-        return (f"{diag['message']}; stray tag on continuation line {hint} "
-                f"[{code}]")
+        return f"{diag['message']}; stray tag on continuation line {hint} [{code}]"
     if code == "PF-OWNER-REPO-SELF":
         # The package message names the repo, not the item: 27 of them in one
         # repo would read as one line repeated.

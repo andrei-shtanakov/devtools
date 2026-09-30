@@ -15,9 +15,7 @@ REQ = (
     "- **Q-03 · owner_role: architects · blocking: false.** Как?\n"
     "- **Q-05 · owner_role: product · blocking: false.** Продукт.\n"
 )
-DSN_OK = (
-    "#### Q-03 · owner_role: architects · resolution: resolved\nтекст\n"
-)
+DSN_OK = "#### Q-03 · owner_role: architects · resolution: resolved\nтекст\n"
 DSN_DEF = (
     "#### Q-03 · owner_role: architects · resolution: deferred\n"
     "reason: ждём steward#147\n"
@@ -191,9 +189,7 @@ def test_deferred_without_reason_outside_input_set_is_a_finding() -> None:
         "Открытых архитектурных вопросов нет (входной набор пуст)\n\n"
         "#### Q-07 · owner_role: architects · resolution: deferred\n"
     )
-    assert any(
-        "Q-07" in f and "reason" in f for f in coverage_findings(req, design)
-    )
+    assert any("Q-07" in f and "reason" in f for f in coverage_findings(req, design))
 
 
 def test_duplicate_design_q_blocks_are_a_finding() -> None:
@@ -203,9 +199,7 @@ def test_duplicate_design_q_blocks_are_a_finding() -> None:
         "#### Q-03 · owner_role: architects · resolution: deferred\n\n"
         "#### Q-03 · owner_role: architects · resolution: resolved\nтекст\n"
     )
-    assert any(
-        "Q-03" in f and "раза" in f for f in coverage_findings(REQ, dup)
-    )
+    assert any("Q-03" in f and "раза" in f for f in coverage_findings(REQ, dup))
 
 
 def test_near_miss_requirements_bullet_is_a_finding() -> None:

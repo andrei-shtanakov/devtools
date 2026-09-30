@@ -22,24 +22,44 @@ def _bundle(tmp_path: Path) -> Path:
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(REPO / "edge_check.py"), *args],
-        capture_output=True, text=True, cwd=REPO,
+        capture_output=True,
+        text=True,
+        cwd=REPO,
     )
 
 
 def test_bad_basis_syntax_is_exit_2(tmp_path: Path) -> None:
     b = _bundle(tmp_path)
-    got = _run(["--edge", "behaviour-vs-requirements", "--bundle", str(b),
-                "--subject", str(b / "15-behaviour-spec.md"),
-                "--basis", "requirements-without-equals"])
+    got = _run(
+        [
+            "--edge",
+            "behaviour-vs-requirements",
+            "--bundle",
+            str(b),
+            "--subject",
+            str(b / "15-behaviour-spec.md"),
+            "--basis",
+            "requirements-without-equals",
+        ]
+    )
     assert got.returncode == 2
     assert "role=path" in got.stderr
 
 
 def test_missing_mandatory_input_is_exit_3_and_prints_record(tmp_path: Path) -> None:
     b = _bundle(tmp_path)
-    got = _run(["--edge", "behaviour-vs-requirements", "--bundle", str(b),
-                "--subject", str(b / "15-behaviour-spec.md"),
-                "--basis", f"requirements={b / 'nope.md'}"])
+    got = _run(
+        [
+            "--edge",
+            "behaviour-vs-requirements",
+            "--bundle",
+            str(b),
+            "--subject",
+            str(b / "15-behaviour-spec.md"),
+            "--basis",
+            f"requirements={b / 'nope.md'}",
+        ]
+    )
     assert got.returncode == 3
     record = json.loads(got.stdout)
     assert record["verdict"] == "ERROR"
@@ -48,9 +68,18 @@ def test_missing_mandatory_input_is_exit_3_and_prints_record(tmp_path: Path) -> 
 
 def test_unknown_edge_is_exit_2(tmp_path: Path) -> None:
     b = _bundle(tmp_path)
-    got = _run(["--edge", "no-such-edge", "--bundle", str(b),
-                "--subject", str(b / "15-behaviour-spec.md"),
-                "--basis", f"requirements={b / '10-requirements.md'}"])
+    got = _run(
+        [
+            "--edge",
+            "no-such-edge",
+            "--bundle",
+            str(b),
+            "--subject",
+            str(b / "15-behaviour-spec.md"),
+            "--basis",
+            f"requirements={b / '10-requirements.md'}",
+        ]
+    )
     assert got.returncode == 2
     assert "no-such-edge" in got.stderr
 
@@ -71,11 +100,20 @@ def test_make_edge_check_target_runs_under_uv(tmp_path: Path) -> None:
     )
     env.pop("VIRTUAL_ENV", None)
     got = subprocess.run(
-        ["make", "edge-check",
-         "ARGS=--edge no-such-edge --bundle " + str(b)
-         + " --subject " + str(b / "15-behaviour-spec.md")
-         + " --basis requirements=" + str(b / "10-requirements.md")],
-        capture_output=True, text=True, cwd=REPO, env=env,
+        [
+            "make",
+            "edge-check",
+            "ARGS=--edge no-such-edge --bundle "
+            + str(b)
+            + " --subject "
+            + str(b / "15-behaviour-spec.md")
+            + " --basis requirements="
+            + str(b / "10-requirements.md"),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+        env=env,
     )
     assert got.returncode == 2, got.stderr
     assert "ModuleNotFoundError" not in got.stderr
@@ -85,10 +123,20 @@ def test_out_write_failure_does_not_lose_the_finished_record(tmp_path: Path) -> 
     """I6: сбой записи `--out` не должен прятать уже посчитанный результат."""
     b = _bundle(tmp_path)
     bad_out = tmp_path / "no-such-dir" / "record.json"
-    got = _run(["--edge", "behaviour-vs-requirements", "--bundle", str(b),
-                "--subject", str(b / "15-behaviour-spec.md"),
-                "--basis", f"requirements={b / 'nope.md'}",
-                "--out", str(bad_out)])
+    got = _run(
+        [
+            "--edge",
+            "behaviour-vs-requirements",
+            "--bundle",
+            str(b),
+            "--subject",
+            str(b / "15-behaviour-spec.md"),
+            "--basis",
+            f"requirements={b / 'nope.md'}",
+            "--out",
+            str(bad_out),
+        ]
+    )
     assert got.returncode == 2
     record = json.loads(got.stdout)
     assert record["verdict"] == "ERROR"
@@ -108,9 +156,16 @@ def test_unexpected_exception_is_exit_3_not_1(
     monkeypatch.setattr(edge_check, "run_check", boom)
     b = _bundle(tmp_path)
     got = edge_check.main(
-        ["--edge", "behaviour-vs-requirements", "--bundle", str(b),
-         "--subject", str(b / "15-behaviour-spec.md"),
-         "--basis", f"requirements={b / '10-requirements.md'}"]
+        [
+            "--edge",
+            "behaviour-vs-requirements",
+            "--bundle",
+            str(b),
+            "--subject",
+            str(b / "15-behaviour-spec.md"),
+            "--basis",
+            f"requirements={b / '10-requirements.md'}",
+        ]
     )
     assert got == 3
 
@@ -122,21 +177,20 @@ def _fake_claude(bin_dir: Path, findings: list[dict]) -> None:
     """Заглушка `claude`: читает stdin (промпт) и печатает фиксированный
     envelope — без сети и без реальной модели."""
     bin_dir.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({
-        "structured_output": {
-            "criteria": [
-                {"id": rid, "status": "pass", "reason": "ок"}
-                for rid in ("R1", "R2", "R3", "R4")
-            ],
-            "findings": findings,
+    payload = json.dumps(
+        {
+            "structured_output": {
+                "criteria": [
+                    {"id": rid, "status": "pass", "reason": "ок"}
+                    for rid in ("R1", "R2", "R3", "R4")
+                ],
+                "findings": findings,
+            }
         }
-    })
+    )
     script = bin_dir / "claude"
     script.write_text(
-        "#!/usr/bin/env python3\n"
-        "import sys\n"
-        "sys.stdin.read()\n"
-        f"print({payload!r})\n",
+        f"#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\nprint({payload!r})\n",
         encoding="utf-8",
     )
     script.chmod(0o755)
@@ -149,7 +203,10 @@ def _run_with_fake_claude(
     env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
     return subprocess.run(
         [sys.executable, str(REPO / "edge_check.py"), *args],
-        capture_output=True, text=True, cwd=REPO, env=env,
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+        env=env,
     )
 
 
@@ -159,9 +216,16 @@ def test_end_to_end_pass_is_exit_0(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin-pass"
     _fake_claude(bin_dir, findings=[])
     got = _run_with_fake_claude(
-        ["--edge", "behaviour-vs-requirements", "--bundle", str(b),
-         "--subject", str(b / "15-behaviour-spec.md"),
-         "--basis", f"requirements={b / '10-requirements.md'}"],
+        [
+            "--edge",
+            "behaviour-vs-requirements",
+            "--bundle",
+            str(b),
+            "--subject",
+            str(b / "15-behaviour-spec.md"),
+            "--basis",
+            f"requirements={b / '10-requirements.md'}",
+        ],
         bin_dir,
     )
     assert got.returncode == 0, got.stderr
@@ -173,14 +237,29 @@ def test_end_to_end_blocking_finding_is_exit_1(tmp_path: Path) -> None:
     """§9.1: та же цепочка, но с блокирующей находкой — код 1."""
     b = _bundle(tmp_path)
     bin_dir = tmp_path / "bin-fail"
-    _fake_claude(bin_dir, findings=[
-        {"rule_id": "R2", "class": "major", "path": "15-behaviour-spec.md",
-         "lines": [1, 1], "statement": "вводит лишнее обязательство"},
-    ])
+    _fake_claude(
+        bin_dir,
+        findings=[
+            {
+                "rule_id": "R2",
+                "class": "major",
+                "path": "15-behaviour-spec.md",
+                "lines": [1, 1],
+                "statement": "вводит лишнее обязательство",
+            },
+        ],
+    )
     got = _run_with_fake_claude(
-        ["--edge", "behaviour-vs-requirements", "--bundle", str(b),
-         "--subject", str(b / "15-behaviour-spec.md"),
-         "--basis", f"requirements={b / '10-requirements.md'}"],
+        [
+            "--edge",
+            "behaviour-vs-requirements",
+            "--bundle",
+            str(b),
+            "--subject",
+            str(b / "15-behaviour-spec.md"),
+            "--basis",
+            f"requirements={b / '10-requirements.md'}",
+        ],
         bin_dir,
     )
     assert got.returncode == 1, got.stderr

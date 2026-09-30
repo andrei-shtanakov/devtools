@@ -173,14 +173,10 @@ APPROVE_PROCEDURE = "--approve-node <node-id> в топологическом п
 #: Процедура для узла с миграционным долгом. Особого режима, отдельного
 #: флага и массовой миграции по флоту контракт не заводит: долг
 #: предъявляется тем же гейтом и гасится теми же вызовами.
-MIGRATION_PROCEDURE = (
-    f"{APPROVE_PROCEDURE} — переодобрение погасит миграционный долг"
-)
+MIGRATION_PROCEDURE = f"{APPROVE_PROCEDURE} — переодобрение погасит миграционный долг"
 
 
-def debt_procedure(
-    status: object, *, awaiting_merge_pr: int | None = None
-) -> str:
+def debt_procedure(status: object, *, awaiting_merge_pr: int | None = None) -> str:
     """Что делать оператору с узлом в долговом статусе.
 
     `awaiting_merge_pr` приходит ИЗ ЛЕДЖЕРА и перебивает статус, а не
@@ -195,10 +191,7 @@ def debt_procedure(
     механикой): процедура та же, что у `draft`.
     """
     if awaiting_merge_pr is not None:
-        return (
-            f"мерж PR #{awaiting_merge_pr} учёткой из "
-            "authorized_approver_accounts"
-        )
+        return f"мерж PR #{awaiting_merge_pr} учёткой из authorized_approver_accounts"
     return APPROVE_PROCEDURE
 
 
@@ -243,8 +236,7 @@ def node_debt(
             node_id,
             status,
             DEBT_UNKNOWN_STATUS,
-            "статус не известен контракту "
-            f"(допустимы {', '.join(KNOWN_STATUSES)})",
+            f"статус не известен контракту (допустимы {', '.join(KNOWN_STATUSES)})",
             APPROVE_PROCEDURE,
         )
     if status != STATUS_APPROVED:
@@ -266,8 +258,7 @@ def node_debt(
     pins = meta.get("upstream_hashes")
     pins = dict(pins) if isinstance(pins, dict) else {}
     diverged = [
-        f"{upstream}: ожидался {pins.get(upstream) or 'нет пина'}, "
-        f"фактически {blob}"
+        f"{upstream}: ожидался {pins.get(upstream) or 'нет пина'}, фактически {blob}"
         for upstream, blob in sorted(upstream_blobs.items())
         if pins.get(upstream) != blob
     ]

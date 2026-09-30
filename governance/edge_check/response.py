@@ -40,9 +40,7 @@ class Response:
     model_id: str | None = None
 
 
-def parse_response(
-    raw: str, ruleset: RuleSet, prepared: PreparedInput
-) -> Response:
+def parse_response(raw: str, ruleset: RuleSet, prepared: PreparedInput) -> Response:
     try:
         envelope = json.loads(raw)
         payload = envelope.get("structured_output", envelope)
@@ -57,9 +55,7 @@ def parse_response(
 
     try:
         criteria = tuple(
-            Criterion(
-                str(c["id"]), str(c["status"]), str(c.get("reason", ""))
-            )
+            Criterion(str(c["id"]), str(c["status"]), str(c.get("reason", "")))
             for c in criteria_raw
         )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -115,14 +111,12 @@ def parse_response(
             if not isinstance(lines, (list, tuple)):
                 raise EdgeCheckError(
                     "invalid_line_range",
-                    f"диапазон должен быть списком, получен "
-                    f"{type(lines).__name__}",
+                    f"диапазон должен быть списком, получен {type(lines).__name__}",
                 )
             if len(lines) != 2:
                 raise EdgeCheckError(
                     "invalid_line_range",
-                    f"диапазон должен содержать 2 элемента, получено "
-                    f"{len(lines)}",
+                    f"диапазон должен содержать 2 элемента, получено {len(lines)}",
                 )
 
             for i, elem in enumerate(lines):

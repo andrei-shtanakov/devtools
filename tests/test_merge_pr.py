@@ -137,7 +137,12 @@ class Fleet:
         )
         subprocess.run(
             [
-                "git", "-C", str(self.repo), "remote", "add", "origin",
+                "git",
+                "-C",
+                str(self.repo),
+                "remote",
+                "add",
+                "origin",
                 "git@github.com:andrei-shtanakov/demo.git",
             ],
             check=True,
@@ -179,10 +184,7 @@ class Fleet:
         return [ln for ln in self.gh_calls().splitlines() if "/merge" in ln]
 
     def delete_calls(self) -> list[str]:
-        return [
-            ln for ln in self.gh_calls().splitlines()
-            if "/git/refs/heads/" in ln
-        ]
+        return [ln for ln in self.gh_calls().splitlines() if "/git/refs/heads/" in ln]
 
 
 @pytest.fixture()
@@ -276,9 +278,7 @@ def test_candidate_branch_blocks_merge(fleet: Fleet) -> None:
 def test_candidate_guard_survives_wave_numbering(fleet: Fleet) -> None:
     """Дописывание номеров волны/шага/заявки не выводит имя из-под гварда."""
     for wave, step, attempt in ((1, 1, 1), (12, 7, 3), (0, 0, 0)):
-        branch = approval_branches.candidate_branch(
-            "ws-42", wave, step, attempt
-        )
+        branch = approval_branches.candidate_branch("ws-42", wave, step, attempt)
         res = fleet.run(GH_STUB_HEADREF=branch)
         assert res.returncode == 3, f"{branch}: {res.stderr}"
     assert fleet.merge_calls() == []
@@ -473,9 +473,7 @@ def test_merge_goes_from_agent_profile(fleet: Fleet) -> None:
     """Мерж уходит от профиля ai-prosto: `merged_by` — различитель."""
     res = fleet.run(GH_STUB_HEADREF="feat/ordinary")
     assert res.returncode == 0, res.stderr
-    assert fleet.merge_calls()[0].startswith(
-        f"GH_CONFIG_DIR={fleet.profile_dir} "
-    )
+    assert fleet.merge_calls()[0].startswith(f"GH_CONFIG_DIR={fleet.profile_dir} ")
 
 
 # --- голова уехала после проверки ------------------------------------------
@@ -545,7 +543,8 @@ def test_expect_base_compares_with_live_tip_not_pr_snapshot(fleet: Fleet) -> Non
     не двигает при мержах в master. Пин базы вердикта сверяется с ЖИВОЙ
     верхушкой origin/<base>; устаревший снимок мерж не блокирует."""
     res = fleet.run(
-        "--expect-base", BASE_SHA,
+        "--expect-base",
+        BASE_SHA,
         GH_STUB_HEADREF="feat/ordinary",
         GH_STUB_BASEOID="b" * 40,  # снимок форджи отстал от верхушки
         GH_STUB_LIVE_TIP=BASE_SHA,
@@ -559,7 +558,8 @@ def test_expect_base_mismatch_with_live_tip_names_both(fleet: Fleet) -> None:
     """Верхушка ушла вперёд после вердикта — отказ, даже если снимок форджи
     совпадает с пином (baseRefOid не двигается без update-branch)."""
     res = fleet.run(
-        "--expect-base", BASE_SHA,
+        "--expect-base",
+        BASE_SHA,
         GH_STUB_HEADREF="feat/ordinary",
         GH_STUB_BASEOID=BASE_SHA,
         GH_STUB_LIVE_TIP="a" * 40,
@@ -573,7 +573,8 @@ def test_expect_base_mismatch_with_live_tip_names_both(fleet: Fleet) -> None:
 def test_live_tip_unavailable_does_not_merge(fleet: Fleet) -> None:
     """Не прочитанная верхушка — не «совпала»: fail-closed, как у прочих фактов."""
     res = fleet.run(
-        "--expect-base", BASE_SHA,
+        "--expect-base",
+        BASE_SHA,
         GH_STUB_HEADREF="feat/ordinary",
         GH_STUB_REF_FAIL="1",
     )
@@ -598,9 +599,7 @@ def test_unpinned_base_is_stated_not_implied(fleet: Fleet) -> None:
 
 
 @pytest.mark.parametrize("state", ["BEHIND", "DIRTY"])
-def test_forge_reported_stale_base_does_not_merge(
-    fleet: Fleet, state: str
-) -> None:
+def test_forge_reported_stale_base_does_not_merge(fleet: Fleet, state: str) -> None:
     """Мнение форджи про базу называется в отказе поимённо."""
     res = fleet.run(GH_STUB_HEADREF="feat/ordinary", GH_STUB_MERGESTATE=state)
     assert res.returncode == 3, res.stdout
@@ -626,8 +625,15 @@ def test_allowlisted_merge_state_merges(fleet: Fleet, state: str) -> None:
     # значение, которого GitHub ещё не придумал: гвард, код 3. UNKNOWN —
     # «форджа ещё не посчитала»; пусто/null — факт не разобран: факт НЕ
     # УСТАНОВЛЕН, код 2 — вызывающий вправе повторить (ревью #233).
-    [("BEHIND", 3), ("DIRTY", 3), ("DRAFT", 3), ("NEW_ENUM_VALUE", 3),
-     ("UNKNOWN", 2), ("", 2), ("null", 2)],
+    [
+        ("BEHIND", 3),
+        ("DIRTY", 3),
+        ("DRAFT", 3),
+        ("NEW_ENUM_VALUE", 3),
+        ("UNKNOWN", 2),
+        ("", 2),
+        ("null", 2),
+    ],
 )
 def test_non_allowlisted_merge_state_does_not_merge(
     fleet: Fleet, state: str, code: int
@@ -719,9 +725,7 @@ def test_vendored_kit_is_the_named_exception_and_still_merges(
 
 def test_authority_prefix_match_is_literal(fleet: Fleet) -> None:
     """`.github/` — литеральный префикс, а не regexp: `xgithub/` не он."""
-    res = fleet.run(
-        GH_STUB_HEADREF="feat/ordinary", GH_STUB_FILES="xgithub/ci.yml"
-    )
+    res = fleet.run(GH_STUB_HEADREF="feat/ordinary", GH_STUB_FILES="xgithub/ci.yml")
     assert res.returncode == 0, res.stderr
     assert len(fleet.merge_calls()) == 1
 
@@ -803,9 +807,7 @@ def test_compare_response_without_files_does_not_merge(fleet: Fleet) -> None:
     Поэтому фильтр — `.files[]`, без `?`: с `?` jq молча отдал бы пусто, и
     неизвестность снова открыла бы дверь.
     """
-    res = fleet.run(
-        GH_STUB_HEADREF="feat/ordinary", GH_STUB_COMPARE_NO_FILES="1"
-    )
+    res = fleet.run(GH_STUB_HEADREF="feat/ordinary", GH_STUB_COMPARE_NO_FILES="1")
     assert res.returncode == 2, res.stdout
     assert "состав диффа неизвестен" in res.stderr
     assert fleet.merge_calls() == []
@@ -880,9 +882,7 @@ def test_fork_pr_without_delete_flag_merges(fleet: Fleet) -> None:
 
 
 @pytest.mark.parametrize("value", ["", "null", "yes", "1"])
-def test_non_boolean_cross_repository_does_not_merge(
-    fleet: Fleet, value: str
-) -> None:
+def test_non_boolean_cross_repository_does_not_merge(fleet: Fleet, value: str) -> None:
     """Булев факт обязан быть булевым — иначе он не разобран."""
     res = fleet.run(GH_STUB_CROSSREPO=value, GH_STUB_HEADREF="feat/x")
     assert res.returncode == 2, res.stdout
@@ -915,7 +915,9 @@ def test_shell_and_python_derive_the_same_globs(fleet: Fleet) -> None:
 #: Контракт §I12 — источник схемы имён; SSOT-шаблон обязан ей соответствовать.
 CONTRACT = (
     Path(__file__).resolve().parent.parent
-    / "docs" / "superpowers" / "specs"
+    / "docs"
+    / "superpowers"
+    / "specs"
     / "2026-09-09-tasks-supersede-contract-design.md"
 )
 #: Якоря маркированных пунктов, несущих схему. Смена формулировки уронит тест
@@ -959,8 +961,7 @@ def test_ssot_template_matches_the_contract_scheme() -> None:
         _scheme_from_contract(_CANDIDATE_ANCHOR)
     )
     assert _skeleton(
-        approval_branches.candidate_template()
-        + approval_branches.finalize_suffix()
+        approval_branches.candidate_template() + approval_branches.finalize_suffix()
     ) == _skeleton(_scheme_from_contract(_FINALIZE_ANCHOR))
 
 
@@ -977,9 +978,7 @@ def test_authority_root_has_one_definition() -> None:
     for path in sorted(package.glob("*.py")):
         if path.name == "authority_root.py":
             continue
-        for lineno, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), 1
-        ):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             stripped = line.strip()
             if stripped.startswith("#"):
                 continue
@@ -1001,9 +1000,9 @@ def test_shell_reads_authority_ssot_and_hardcodes_nothing() -> None:
     # которые она читает, и её собственное имя. Всё остальное в тексте
     # означало бы второе определение перечня — теперь ещё и через язык.
     own = {
-        "contracts/authority-root/",   # SSOT, который скрипт читает
+        "contracts/authority-root/",  # SSOT, который скрипт читает
         "contracts/approval-branches/",  # SSOT имён, который он читает
-        "merge-pr.sh",                 # он сам: usage, шапка, диагностика
+        "merge-pr.sh",  # он сам: usage, шапка, диагностика
         # Подключаемые модули — собственные входы обвязки (`. "$script_dir/…"`),
         # сами authority-root и харнесс-пути (blocker ревью PR #344).
         "ssot_env.sh",
@@ -1070,9 +1069,7 @@ def test_no_second_definition_of_approval_branch_names() -> None:
     for path in sorted(package.glob("*.py")):
         if path.name == "approval_branches.py":
             continue
-        for lineno, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), 1
-        ):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             stripped = line.strip()
             if stripped.startswith("#") or "spec/" not in stripped:
                 continue
@@ -1129,7 +1126,9 @@ def test_labels_are_read_without_the_optional_operator(
         pytest.skip("jq не установлен")
     done = subprocess.run(
         ["jq", "-r", _labels_jq_expression()],
-        input=payload, capture_output=True, text=True,
+        input=payload,
+        capture_output=True,
+        text=True,
     )
     assert (done.returncode == 0) is expect_rc_zero, (
         f"{why}: rc={done.returncode}, stderr={done.stderr.strip()}"
