@@ -2706,4 +2706,4 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 своя пара спека-среза/план.
 
 - [ ] conductor: единый граф ожиданий флота, активная проверка ожиданий, порядок работ по `roadmap.toml`, действия по уровням автономии 0–3, узел межрепных запросов @owner:github:andrei-shtanakov @id:conductor @epic:eco.tooling
-- [ ] conductor срез 0 — советчик: граф, ожидания, порядок, `status/why/plan/run`, снимок, таймер уровня 0; приёмка — replay на сохранённых входах, верх очереди совпадает с приоритетами владельца @owner:github:andrei-shtanakov @id:conductor-slice-0 @epic:eco.tooling
+- [x] conductor срез 0 — советчик: граф, ожидания, порядок, `status/why/plan/run`, снимок, таймер уровня 0; приёмка — replay на сохранённых входах, верх очереди совпадает с приоритетами владельца — принят владельцем 2026-09-30: код #509 (+ #513), роадмап зонтик#47, приёмка на Mac и VPS vmi3423913 (граф complete), верх очереди совпал с приоритетами (вёл к spec-runner#620, влит); долг minor — #511, зонтик#48 @owner:github:andrei-shtanakov @id:conductor-slice-0 @epic:eco.tooling
