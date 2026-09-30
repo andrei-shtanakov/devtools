@@ -79,7 +79,7 @@ def parse_design_resolutions(text: str) -> dict[str, tuple[str, str | None]]:
         # уровня 1–3), не только на следующем Q: иначе у последнего
         # вопроса «## Механика» и весь хвост документа читались бы как
         # его содержимое (major PR-ревью #145).
-        section = re.search(r"^#{1,3}\s", block, re.M)
+        section = re.search(r"^#{1,3}\s", block, re.MULTILINE)
         if section is not None:
             block = block[: section.start()]
         reason_match = _REASON_RE.search(block)
@@ -116,7 +116,7 @@ def parse_design_resolution_bodies(text: str) -> dict[str, str]:
         qid = match.group(1)
         block_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
         block = text[match.end() : block_end]
-        section = re.search(r"^#{1,3}\s", block, re.M)
+        section = re.search(r"^#{1,3}\s", block, re.MULTILINE)
         if section is not None:
             block = block[: section.start()]
         lines = block.splitlines()
@@ -149,7 +149,7 @@ def coverage_findings(req_text: str, design_text: str) -> list[str]:
     # распознанным множеством):
     # 1. near-miss буллет requirements: похож на Q, но мимо строгой
     #    грамматики — входное множество недостоверно, молчать нельзя.
-    for miss in re.finditer(r"^-\s+\*\*(Q-\d+)", req_text, re.M):
+    for miss in re.finditer(r"^-\s+\*\*(Q-\d+)", req_text, re.MULTILINE):
         qid = miss.group(1)
         if qid not in questions:
             findings.append(
@@ -173,7 +173,10 @@ def coverage_findings(req_text: str, design_text: str) -> list[str]:
             findings.append(f"{qid}: resolution: deferred без строки reason:")
 
     if not architects_qs:
-        if re.search(rf"^{re.escape(_EMPTY_DECLARATION)}", design_text, re.M) is None:
+        if (
+            re.search(rf"^{re.escape(_EMPTY_DECLARATION)}", design_text, re.MULTILINE)
+            is None
+        ):
             findings.append(
                 "design: входной набор архитектурных вопросов пуст, но "
                 f"строка-декларация «{_EMPTY_DECLARATION}» отсутствует"

@@ -26,8 +26,7 @@ import pytest
 from governance import approval_facts as af
 from governance import approval_ledger as al
 from governance import approve_node as an
-from governance import bundle_dag
-from governance import bundle_inputs
+from governance import bundle_dag, bundle_inputs
 from governance import merge_gate as mg
 from governance import node_approval as na
 from governance import run_state as rs

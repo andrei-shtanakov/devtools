@@ -17,7 +17,7 @@ from governance import charter_guard, criteria_contract
 from governance.frontmatter import split_frontmatter
 
 # Формы `[x]` — как у check-plan-fields (`_CHECKBOX_LINE_RE`): `-`/`*`, `x`/`X`.
-_DONE = re.compile(r"^\s*[-*] \[[xX]\] .*?@id:([A-Za-z0-9_.-]+)", re.M)
+_DONE = re.compile(r"^\s*[-*] \[[xX]\] .*?@id:([A-Za-z0-9_.-]+)", re.MULTILINE)
 
 
 def gate_findings(repo: Path, *, is_vendored: bool) -> tuple[list[str], list[str]]:

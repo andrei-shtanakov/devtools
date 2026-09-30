@@ -11,19 +11,19 @@ from dataclasses import dataclass
 _AC_HEAD_RE = re.compile(
     r"^####\s+(AC-\d+[a-z]?):\s*(.+?)\s*·\s*verification:\s*"
     r"(test|manual|metric)\s*$",
-    re.M,
+    re.MULTILINE,
 )
 # NEAR ловит любую AC-подобную шапку (уроки PR #145/#148): неизвестная
 # форма id/строки — находка формы, не молчание.
-_AC_NEAR_RE = re.compile(r"^####\s+(AC-[^\s:]*)", re.M)
-_SECTION_RE = re.compile(r"^#{1,3}\s", re.M)
+_AC_NEAR_RE = re.compile(r"^####\s+(AC-[^\s:]*)", re.MULTILINE)
+_SECTION_RE = re.compile(r"^#{1,3}\s", re.MULTILINE)
 
 #: Дословная декларация пустого набора Must (§3 спеки).
 EMPTY_MUST_DECLARATION = "Must-требований во входном наборе нет"
 
 
 def _list_field(block: str, name: str) -> tuple[str, ...] | None:
-    m = re.search(rf"^{name}:\s*\[([^\]]*)\]\s*$", block, re.M)
+    m = re.search(rf"^{name}:\s*\[([^\]]*)\]\s*$", block, re.MULTILINE)
     if m is None:
         return None
     inner = m.group(1).strip()
@@ -98,10 +98,10 @@ def parse_ac_criteria(text: str) -> tuple[list[AcCriterion], list[str]]:
     return crits, findings
 
 
-_REQ_HEAD_RE = re.compile(r"^####\s+((?:FR|NFR)-\d+[a-z]?):", re.M)
-_REQ_NEAR_RE = re.compile(r"^#{2,6}\s+((?:FR|NFR)-[^\s:]*)", re.M)
-_PRIORITY_RE = re.compile(r"^\*\*Priority\*\*:\s*(\S+)", re.M)
-_BEH_ID_RE = re.compile(r"^####\s+(BEH-\d+[a-z]?):", re.M)
+_REQ_HEAD_RE = re.compile(r"^####\s+((?:FR|NFR)-\d+[a-z]?):", re.MULTILINE)
+_REQ_NEAR_RE = re.compile(r"^#{2,6}\s+((?:FR|NFR)-[^\s:]*)", re.MULTILINE)
+_PRIORITY_RE = re.compile(r"^\*\*Priority\*\*:\s*(\S+)", re.MULTILINE)
+_BEH_ID_RE = re.compile(r"^####\s+(BEH-\d+[a-z]?):", re.MULTILINE)
 
 
 def _parse_requirements(req_text: str) -> tuple[dict[str, str], list[str]]:
@@ -181,7 +181,9 @@ def coverage_findings(req_text: str, beh_text: str, acc_text: str) -> list[str]:
         covered.update(c.traces)
     must = [rid for rid, pr in priorities.items() if pr == "Must"]
     if not must:
-        declared = re.search(rf"^{re.escape(EMPTY_MUST_DECLARATION)}", acc_text, re.M)
+        declared = re.search(
+            rf"^{re.escape(EMPTY_MUST_DECLARATION)}", acc_text, re.MULTILINE
+        )
         if declared is None:
             findings.append(
                 "acceptance: множество Must-требований пусто, но "

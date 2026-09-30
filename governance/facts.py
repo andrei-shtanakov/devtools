@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Generic, TypeVar
-
-T = TypeVar("T")
 
 
 class Outcome(Enum):
@@ -28,7 +25,7 @@ ESTABLISHED = (Outcome.FOUND, Outcome.ABSENT, Outcome.FORBIDDEN)
 
 
 @dataclass(frozen=True)
-class Fact(Generic[T]):
+class Fact[T]:
     """Исход чтения одного факта плюс значение и человеческий повод.
 
     `detail` — часть контракта наблюдаемости: вызывающий обязан назвать,
@@ -45,6 +42,6 @@ class Fact(Generic[T]):
         return self.outcome in ESTABLISHED
 
 
-def unavailable(detail: str) -> Fact[T]:
+def unavailable[T](detail: str) -> Fact[T]:
     """Исход «установить не удалось»."""
     return Fact(Outcome.UNAVAILABLE, None, detail)

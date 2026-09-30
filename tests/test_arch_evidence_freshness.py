@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .arch_freshness_fixtures import (
     EVIDENCE_DIR,
@@ -11,7 +11,7 @@ from .arch_freshness_fixtures import (
     upstream_change,
 )
 
-NOW = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
 
 
 def test_fixture_builds_polyrepo_workspace(tmp_path):

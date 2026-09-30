@@ -160,13 +160,14 @@ def test_every_module_sourced_by_the_merge_scripts_is_protected() -> None:
     выйти из-под authority-root и харнесс-гварда: иначе агент менял бы
     логику гвардов своим PR (blocker ревью PR #344)."""
     import re
+
     from governance import accept_pr
 
     root = Path(__file__).resolve().parent.parent
     sourced: set[str] = set()
     for script in ("merge-pr.sh", "human-merge.sh"):
         text = (root / script).read_text(encoding="utf-8")
-        sourced |= set(re.findall(r'^\. "\$script_dir/([^"]+)"', text, re.M))
+        sourced |= set(re.findall(r'^\. "\$script_dir/([^"]+)"', text, re.MULTILINE))
     assert sourced == {"ssot_env.sh", "approval_branches.sh"}, sourced
     for module in sourced:
         assert module in authority_root.prefixes(), module

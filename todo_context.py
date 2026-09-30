@@ -131,18 +131,18 @@ _PATH_RE = re.compile(r"(?<![\w.-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+(?<![.,:;
 #: `[waived: …]`, как в `salvage_scan`, — поэтому голая подстрока `[waived]`
 #: её не приняла бы, и задокументированный выход не сработал бы
 #: (ревью PR #140, круг 3).
-_WAIVED_RE = re.compile(r"\[waived\b", re.I)
+_WAIVED_RE = re.compile(r"\[waived\b", re.IGNORECASE)
 #: Опора и удаление — намерение, а не просто соседство пути: без глагола любой
 #: пункт, упомянувший файл, стал бы стороной пары.
 _SUPPORT_RE = re.compile(
     r"\b(?:стро\w*|созда\w*|обобщ\w*|использу\w*|использова\w*|опира\w*"
     r"|основа\w*|поверх|build\w*|creat\w*|generaliz\w*|use[sd]?|using"
     r"|depend\w*|based)\b",
-    re.I,
+    re.IGNORECASE,
 )
 _REMOVE_RE = re.compile(
     r"\b(?:удал\w*|снес\w*|убра\w*|remove|delete|drop|retire)\w*\b",
-    re.I,
+    re.IGNORECASE,
 )
 
 

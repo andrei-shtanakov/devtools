@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from governance import brief_input, interview as iv
+from governance import brief_input
+from governance import interview as iv
 from governance.ops import RealOps
 
 pytestmark = pytest.mark.skipif(

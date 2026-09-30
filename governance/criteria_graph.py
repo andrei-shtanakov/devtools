@@ -14,9 +14,9 @@ from governance import acceptance_guard as ag
 
 PRIORITIES = ("Must", "Should", "Could", "Won't")
 EXEC_KINDS = frozenset({"unit", "integration", "contract", "e2e", "atp"})
-_BEH_HEAD = re.compile(r"^####\s+(BEH-\d+[a-z]?):", re.M)
+_BEH_HEAD = re.compile(r"^####\s+(BEH-\d+[a-z]?):", re.MULTILINE)
 _TRACES = re.compile(r"`traces:\s*\[([^\]]*)\]`")
-_CHECKED = re.compile(r"\*\*checked_by\*\*:(.*)$", re.M)
+_CHECKED = re.compile(r"\*\*checked_by\*\*:(.*)$", re.MULTILINE)
 _FIELD = re.compile(r"`(\w+):\s*([^`]*)`")
 
 

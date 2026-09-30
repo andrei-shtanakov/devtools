@@ -9,7 +9,7 @@ from __future__ import annotations
 import tempfile
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from governance.edge_check import inputs as inputs_mod
@@ -32,7 +32,7 @@ def decide(ruleset: rules_mod.RuleSet, response: response_mod.Response) -> str:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def run_check(

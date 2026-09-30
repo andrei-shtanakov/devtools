@@ -5953,7 +5953,7 @@ def test_blind_zones_guard_catches_every_grammatical_form(form: str) -> None:
     Каждая основа проверяется своей формой, и ни одна из них в перечне
     прежней редакции не стояла (кроме контрольной «единственный»).
     """
-    spiked = "По §I5 слепых зон {}.".format(form)
+    spiked = f"По §I5 слепых зон {form}."
     assert _blind_zone_offenders(spiked, "синтетика"), (
         f"форма {form!r} не поймана — основа покрывает не весь класс слов"
     )
@@ -5977,7 +5977,7 @@ def test_blind_zones_guard_actually_looks_at_every_target() -> None:
     Нарушитель сажается именно в КОНЕЦ: пропуск, если он вернётся,
     съедает хвост файла, а не голову.
     """
-    violator = "До no-op'а §I5 доходит {} класс долга.".format(_COUNT_SAMPLE)
+    violator = f"До no-op'а §I5 доходит {_COUNT_SAMPLE} класс долга."
     for path in _blind_zone_targets():
         text = path.read_text(encoding="utf-8")
         assert not _blind_zone_offenders(text, path.name), (
@@ -6001,7 +6001,7 @@ def test_blind_zones_guard_judges_every_match_not_the_leftmost() -> None:
     """
     spiked = (
         "Долговой узел двигает апстрим, и по §I5 к no-op'у доходит "
-        "{} класс долга.".format(_COUNT_SAMPLE)
+        f"{_COUNT_SAMPLE} класс долга."
     )
     assert _blind_zone_offenders(spiked, "синтетика"), (
         "прощённое левое совпадение спрятало нарушителя правее в том же окне"
@@ -6019,7 +6019,7 @@ def test_blind_zones_guard_forgives_the_count_not_the_whole_span() -> None:
     («движущий» — «движ»): на слове с основой, которой в перечне уже нет,
     мутант «сверять со всем спаном» выживал — свойство было ненаблюдаемо.
     """
-    spiked = "По §I5 до no-op'а доходит {} движущий класс.".format(_COUNT_SAMPLE)
+    spiked = f"По §I5 до no-op'а доходит {_COUNT_SAMPLE} движущий класс."
     assert _blind_zone_offenders(spiked, "синтетика"), (
         "промежуточное слово простило счёт рядом с именем зоны"
     )
@@ -6200,7 +6200,7 @@ def test_delivered_content_anchor_preserves_exact_source_from_pr_head(
     state = _recon_state(tmp_path, monkeypatch)
     source = Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
     source.parent.mkdir(parents=True, exist_ok=True)
-    data = "точный source из head\n".encode("utf-8")
+    data = "точный source из head\n".encode()
     source.write_bytes(data)
     state.brief = {"source_paths": ["00-discovery/brief.md"]}
 
