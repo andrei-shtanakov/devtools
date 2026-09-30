@@ -79,20 +79,20 @@ Source: selfcheck 2026-09-30, pyrefly (решение владельца 2026-09
 **Touches:** governance/runner.py, todo_context.py, governance/accept_pr.py, inbox.py, check-plan-fields.py, check-arch-evidence-freshness.py, governance/spec_loop.py, tests/test_governance_runner.py, tests/test_todo_context.py, tests/test_governance_accept_pr.py, tests/test_inbox.py, tests/test_check_plan_fields.py, tests/test_arch_evidence_freshness.py, tests/test_governance_spec_loop.py
 
 ### TASK-003: Мелкие баги ruff — zip без strict, raise без from, неиспользуемые переменные цикла
-P3 | 🔄 IN_PROGRESS   Est: 2h
+P3 | ✅ DONE   Est: 2h
 
 Эти правила вне набора CI (`[tool.ruff.lint] select`); чинятся по месту, а
 после — правило добавляется в `select`, чтобы класс не вернулся.
 Source: selfcheck 2026-09-30, ruff (решение владельца 2026-09-30: T3)
 
 **Checklist:**
-- [ ] `B905` `zip()` без `strict=`: `governance/runner.py:2875` (sc-9e685662), `governance/task_bridge.py:1681` (sc-d29b43d6), `recent_changes.py:105` (sc-8b657e73), `salvage_scan.py:407, 409, 410` (sc-bfc2cbdf, sc-b02c2242, sc-6d397148) — для каждого места выяснить, гарантировано ли равенство длин построением: да → `strict=True`; нет, и усечение задумано → `strict=False` с комментарием почему
-- [ ] `B904` `raise` в `except` без `from`: `check-plan-fields.py:101` (sc-17875ae9), `inbox.py:50` (sc-9ead2ff4) — `from exc` (или `from None`, если исходная ошибка шум — с комментарием)
-- [ ] `B007` переменная цикла не используется: `check-graph-registry-drift.py:177` (sc-fc740822), `governance/decomposition_guard.py:567, 953` (sc-7771e734, sc-b962027f), `selfcheck/graph/resolver.py:402` (sc-7da8536b) — префикс `_` или итерация по нужной части
-- [ ] `PLW2901` переменная цикла перезаписана в теле: `governance/design_guard.py:53` (sc-7bc83f35), `selfcheck/graph/build.py:357` (sc-b81488cc), `selfcheck/vendor.py:263, 281` (sc-1748378e, sc-129fae77) — новое имя для преобразованного значения
-- [ ] `pyproject.toml` НЕ трогать (`harness_guard: strict`): включение `B905`/`B904`/`B007`/`PLW2901` в `select` делает оператор отдельным PR после задачи; здесь — только чтобы `uv run --frozen --group=selfcheck ruff check . --select B905,B904,B007,PLW2901` (вне `issue_console.py` и `governance/discovery_contract/`) был чист
-- [ ] `uv run --frozen --group=selfcheck ruff check .` и `ruff format --check .` чисто
-- [ ] полный набор тестов зелёный в обоих режимах
+- [x] `B905` `zip()` без `strict=`: `governance/runner.py:2875` (sc-9e685662), `governance/task_bridge.py:1681` (sc-d29b43d6), `recent_changes.py:105` (sc-8b657e73), `salvage_scan.py:407, 409, 410` (sc-bfc2cbdf, sc-b02c2242, sc-6d397148) — для каждого места выяснить, гарантировано ли равенство длин построением: да → `strict=True`; нет, и усечение задумано → `strict=False` с комментарием почему
+- [x] `B904` `raise` в `except` без `from`: `check-plan-fields.py:101` (sc-17875ae9), `inbox.py:50` (sc-9ead2ff4) — `from exc` (или `from None`, если исходная ошибка шум — с комментарием)
+- [x] `B007` переменная цикла не используется: `check-graph-registry-drift.py:177` (sc-fc740822), `governance/decomposition_guard.py:567, 953` (sc-7771e734, sc-b962027f), `selfcheck/graph/resolver.py:402` (sc-7da8536b) — префикс `_` или итерация по нужной части
+- [x] `PLW2901` переменная цикла перезаписана в теле: `governance/design_guard.py:53` (sc-7bc83f35), `selfcheck/graph/build.py:357` (sc-b81488cc), `selfcheck/vendor.py:263, 281` (sc-1748378e, sc-129fae77) — новое имя для преобразованного значения
+- [x] `pyproject.toml` НЕ трогать (`harness_guard: strict`): включение `B905`/`B904`/`B007`/`PLW2901` в `select` делает оператор отдельным PR после задачи; здесь — только чтобы `uv run --frozen --group=selfcheck ruff check . --select B905,B904,B007,PLW2901` (вне `issue_console.py` и `governance/discovery_contract/`) был чист
+- [x] `uv run --frozen --group=selfcheck ruff check .` и `ruff format --check .` чисто
+- [x] полный набор тестов зелёный в обоих режимах
 
 **Touches:** governance/runner.py, governance/task_bridge.py, recent_changes.py, salvage_scan.py, check-plan-fields.py, inbox.py, check-graph-registry-drift.py, governance/decomposition_guard.py, selfcheck/graph/resolver.py, governance/design_guard.py, selfcheck/graph/build.py, selfcheck/vendor.py
 
