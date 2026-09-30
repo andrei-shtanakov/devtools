@@ -351,10 +351,10 @@ def _workflow(
 ) -> None:
     data = _load_yaml(g, rel, text)
     top_dir = _run_default_dir(data)
-    for job, spec in (data.get("jobs") or {}).items():
+    for job, job_raw in (data.get("jobs") or {}).items():
         anchor = f"workflow:{rel}#{job}"
         g.nodes[anchor] = Node(anchor, NodeKind.WORKFLOW, rel, str(job), root=True)
-        spec = spec if isinstance(spec, dict) else {}
+        spec = job_raw if isinstance(job_raw, dict) else {}
         steps = spec.get("steps") or []
         job_dir = _run_default_dir(spec) or top_dir
         _run_steps(g, steps, Location(rel, 1), index, anchor, texts, job_dir)

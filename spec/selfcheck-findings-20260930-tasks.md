@@ -79,7 +79,7 @@ Source: selfcheck 2026-09-30, pyrefly (решение владельца 2026-09
 **Touches:** governance/runner.py, todo_context.py, governance/accept_pr.py, inbox.py, check-plan-fields.py, check-arch-evidence-freshness.py, governance/spec_loop.py, tests/test_governance_runner.py, tests/test_todo_context.py, tests/test_governance_accept_pr.py, tests/test_inbox.py, tests/test_check_plan_fields.py, tests/test_arch_evidence_freshness.py, tests/test_governance_spec_loop.py
 
 ### TASK-003: Мелкие баги ruff — zip без strict, raise без from, неиспользуемые переменные цикла
-P3 | TODO   Est: 2h
+P3 | 🔄 IN_PROGRESS   Est: 2h
 
 Эти правила вне набора CI (`[tool.ruff.lint] select`); чинятся по месту, а
 после — правило добавляется в `select`, чтобы класс не вернулся.

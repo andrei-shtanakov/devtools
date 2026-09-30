@@ -105,6 +105,8 @@ def recent_changes(root: Path, since: str = "midnight") -> list[dict]:
                             zip(
                                 ("sha", "date", "author", "subject"),
                                 c.split(FIELD_SEP, 3),
+                                # усечение задумано: короткая строка даёт меньше полей
+                                strict=False,
                             )
                         )
                         for c in commits

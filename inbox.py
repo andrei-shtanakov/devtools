@@ -47,7 +47,8 @@ except ImportError:  # pragma: no cover - exercised by humans, not the suite
         "One implementation of the plan-fields contract, shared with\n"
         "check-plan-fields.py (ADR-ECO-005 PF-7) — never a private regex here.\n"
     )
-    raise SystemExit(2)
+    # исходный ImportError — шум: причина и лекарство уже в сообщении выше
+    raise SystemExit(2) from None
 
 DEFAULT_OWNER = "andrei-shtanakov"
 LABEL = "inbox"

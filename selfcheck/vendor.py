@@ -259,8 +259,8 @@ def _finding(
 def _named_paths(rel: str, text: str, corpus: frozenset[str]) -> set[str]:
     folder = posixpath.dirname(rel)
     found: set[str] = set()
-    for token in text.split():
-        token = token.rstrip(":,")  # the `sha256 <path>: <sha>` form (r3 R3-1)
+    for raw in text.split():
+        token = raw.rstrip(":,")  # the `sha256 <path>: <sha>` form (r3 R3-1)
         for cand in (token, posixpath.join(folder, token)):
             norm = posixpath.normpath(cand)
             if norm in corpus:
@@ -277,8 +277,8 @@ def _member_line_paths(folder: str, text: str, known: frozenset[str]) -> set[str
     for line in text.splitlines():
         if not _SHA_ANY.search(line):
             continue
-        for token in line.split():
-            token = token.rstrip(":,")
+        for raw in line.split():
+            token = raw.rstrip(":,")
             in_folder = posixpath.normpath(posixpath.join(folder, token))
             from_root = posixpath.normpath(token)
             if in_folder in known:

@@ -2872,7 +2872,7 @@ def _source_layer_committed(state: RunState, ops: Ops) -> bool:
         return _brief_stop(
             state, "descriptor brief: source_paths и source_blobs разной длины"
         )
-    for rel, expected in zip(paths, blobs):
+    for rel, expected in zip(paths, blobs, strict=True):
         full = f"{state.bundle_dir}/{rel}"
         actual = ops.blob_in_commit(state.target_dir, head, full)
         if actual != expected:

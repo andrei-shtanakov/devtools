@@ -1678,7 +1678,7 @@ def _delivered_state(delivered: str) -> _DeliveredState:
     blocks = [_state_free(b) for b in bodies]
     single = _unique(blocks)
     status_by_block = {}
-    for block, body in zip(blocks, bodies):
+    for block, body in zip(blocks, bodies, strict=True):
         if block not in single:
             continue
         found = _task_meta(body)

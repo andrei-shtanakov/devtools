@@ -404,10 +404,14 @@ def render_table(findings: list[Finding], *, host: str) -> str:
     """Таблица «репо · класс · объект · возраст» с host-строкой (инвариант 5)."""
     header = ("репо", "класс", "объект", "возраст")
     rows = [(f.repo, f.klass, f.obj, humanize_age(f.age_seconds)) for f in findings]
-    widths = [max(len(cell) for cell in column) for column in zip(header, *rows)]
+    widths = [
+        max(len(cell) for cell in column) for column in zip(header, *rows, strict=True)
+    ]
     lines = [f"# salvage-scan · host={host}"]
-    for row, finding in zip([header, *rows], [None, *findings]):
-        line = "  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip()
+    for row, finding in zip([header, *rows], [None, *findings], strict=True):
+        line = "  ".join(
+            cell.ljust(w) for cell, w in zip(row, widths, strict=True)
+        ).rstrip()
         if finding is not None and finding.waived:
             line += f"  [waived: {finding.waived}]"
         lines.append(line)
