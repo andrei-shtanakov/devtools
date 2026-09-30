@@ -257,3 +257,23 @@ def test_expired_class_entry_names_its_class(tmp_path: Path) -> None:
     )
     res = apply_allowlist([], cfg, date(2026, 9, 30))
     assert [f.anchor for f in res.expired] == ["allow:rule=ruff/ARG*@tests/**"]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        'rule = "ruff/ARG*"\npath = ""',  # inert: `\Z` matches no real path
+        'rule = ""\npath = "tests/**"',
+        'rule = "ruff/ARG*"\npath = ["tests/**"]',  # a traceback, not exit 4
+        "rule = 123",
+    ],
+)
+def test_class_entry_fields_must_be_non_empty_strings(
+    tmp_path: Path, fields: str
+) -> None:
+    """Review #519: an empty `path` made the entry silently inert (like
+    `repo = ""`, #437.5); a non-string one crashed the run outside the
+    ConfigError guard. Both are load errors (exit 4)."""
+    body = f'[[allow]]\n{fields}\nreason = "r"\nuntil = 2027-01-01\n'
+    with pytest.raises(ConfigError, match="rule|path"):
+        load_config(cfg_file(tmp_path, body))

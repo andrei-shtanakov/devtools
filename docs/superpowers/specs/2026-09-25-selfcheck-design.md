@@ -323,7 +323,7 @@ Selfcheck зависимостей цели не ставит (§0, вне об�
   пересечения флагов `argparse`), `dup:make:<hash>` (хэш нормализованного
   рецепта), `llm:<path>::<qualname>`, `unit:<path>` (systemd-юнит),
   `cli:<name>` (скрипт из `[project.scripts]`),
-  `allow:<id|anchor>` (`selfcheck/allow-expired`, §2.4). У каждого вида
+  `allow:<id|anchor|rule=<rule>[@<path>]>` (`selfcheck/allow-expired`, §2.4). У каждого вида
   якоря, кроме находок прибора и `allow:`, есть **определяющий файл**:
   `<path>`; для `dup` — файлы участников; для `cli` — `pyproject.toml` корня
   репо. Перечень видов закрыт: дельта знает каждый, тест сверяет его с

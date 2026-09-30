@@ -96,6 +96,11 @@ def _allow_entry(index: int, raw: dict[str, Any]) -> AllowEntry:
         raise ConfigError(f"[[allow]] #{index}: missing {', '.join(missing)}")
     if len(forms) > 1:
         raise ConfigError(f"[[allow]] #{index}: one of id|anchor|rule, got {forms}")
+    for key in ("rule", "path"):
+        # an empty glob matches no real path — inert, like `repo = ""`
+        # (#437.5); a non-string one would crash matching outside exit 4
+        if key in raw and not (isinstance(raw[key], str) and raw[key]):
+            raise ConfigError(f"[[allow]] #{index}: {key} must be a non-empty string")
     if raw.get("path") and not raw.get("rule"):
         raise ConfigError(f"[[allow]] #{index}: path needs rule (the class form)")
     if "repo" in raw and not (isinstance(raw["repo"], str) and raw["repo"]):
