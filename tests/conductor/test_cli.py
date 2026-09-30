@@ -93,3 +93,47 @@ def test_bad_args_exit_2() -> None:
 
 def test_selftest() -> None:
     assert main(["--selftest"]) == 0
+
+
+# ревью рубежа 3 (2026-09-30)
+
+
+def test_corrupt_previous_snapshot_does_not_stop_the_run(tmp_path: Path) -> None:
+    out = tmp_path / "runs"
+    (out / "2026-01-01T000000Z").mkdir(parents=True)
+    (out / "2026-01-01T000000Z" / "snapshot.json").write_text("{", encoding="utf-8")
+    rep = _replay(tmp_path)
+    assert main(["run", "--replay", str(rep), "--out", str(out)]) == 0
+    written = json.loads(
+        next(p for p in out.glob("2026-09-29*/snapshot.json")).read_text("utf-8")
+    )
+    assert written["changes_since_previous"] == {"first_run": True}
+    assert not list(out.rglob("*.tmp"))
+
+
+def test_old_runs_are_pruned(tmp_path: Path) -> None:
+    from conductor.__main__ import KEEP_RUNS
+
+    out = tmp_path / "runs"
+    for k in range(KEEP_RUNS + 5):
+        run = out / f"2026-01-01T{k:06d}Z"
+        run.mkdir(parents=True)
+        (run / "snapshot.json").write_text("{}", encoding="utf-8")
+    assert main(["run", "--replay", str(_replay(tmp_path)), "--out", str(out)]) == 0
+    assert len([d for d in out.iterdir() if d.is_dir()]) == KEEP_RUNS
+
+
+def test_replay_honours_an_explicit_roadmap(tmp_path: Path) -> None:
+    draft = tmp_path / "roadmap.toml"
+    draft.write_text("schema_version = 99\n", encoding="utf-8")
+    rep = _replay(tmp_path)
+    assert main(["status", "--replay", str(rep), "--roadmap", str(draft)]) == 4
+
+
+def test_why_canonicalizes_old_names_and_refuses_unknown_nodes(
+    tmp_path: Path, capsys
+) -> None:
+    rep = _replay(tmp_path, {"ecosystem-kb": "- [ ] z @owner:github:own @id:z\n"})
+    assert main(["why", "todo://prograph-vault/z", "--replay", str(rep)]) == 0
+    assert capsys.readouterr().out.startswith("todo://ecosystem-kb/z")
+    assert main(["why", "todo://a/typo", "--replay", str(rep)]) == 2

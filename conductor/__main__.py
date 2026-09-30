@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import socket
 import sys
 from datetime import UTC, datetime
@@ -11,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from conductor.collect import collect, read_manifest
+from conductor.graph import canonical_id, normalizer
 from conductor.inputs import Inputs, RepoTodo, load_inputs, save_inputs
 from conductor.render import render_plan, render_status, render_why
 from conductor.roadmap import parse_roadmap
@@ -19,6 +22,8 @@ from conductor.sources_gh import run_gh
 
 EXIT_OK, EXIT_ARGS, EXIT_NO_SOURCE, EXIT_CONFIG = 0, 2, 3, 4
 COMMANDS = ("status", "why", "plan", "run", "record")
+# ежечасный таймер: неделя прогонов (~3 МБ каждый) — не растить диск общего VPS
+KEEP_RUNS = 168
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -42,7 +47,16 @@ def _now() -> str:
 
 def _inputs(args: argparse.Namespace) -> Inputs | None:
     if args.replay is not None:
-        return load_inputs(args.replay)
+        replayed = load_inputs(args.replay)
+        if args.roadmap is not None:  # черновик роадмапа проверяется на записи
+            present = args.roadmap.is_file()
+            replayed.roadmap_text = (
+                args.roadmap.read_text(encoding="utf-8") if present else None
+            )
+            replayed.roadmap_state = "read" if present else "absent"
+            replayed.roadmap_source = f"file:{args.roadmap}"
+            replayed.roadmap_sha = None
+        return replayed
     errors: list[str] = []
     if args.manifest is not None:
         if not args.manifest.is_file():
@@ -68,15 +82,26 @@ def _inputs(args: argparse.Namespace) -> Inputs | None:
     )
 
 
+def _runs(out: Path) -> list[Path]:
+    if not out.is_dir():
+        return []
+    return sorted(d for d in out.iterdir() if (d / "snapshot.json").is_file())
+
+
 def _previous(out: Path) -> dict[str, Any] | None:
-    runs = (
-        sorted(d for d in out.glob("*") if (d / "snapshot.json").is_file())
-        if out.is_dir()
-        else []
-    )
-    if not runs:
-        return None
-    return json.loads((runs[-1] / "snapshot.json").read_text(encoding="utf-8"))
+    """Последний читаемый снимок; битый пропускается — он только для отчёта (I7)."""
+    for run in reversed(_runs(out)):
+        try:
+            return json.loads((run / "snapshot.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _run(args: argparse.Namespace, inputs: Inputs) -> int:
@@ -85,10 +110,12 @@ def _run(args: argparse.Namespace, inputs: Inputs) -> int:
     snap = to_snapshot(result, inputs, run_id, _previous(args.out))
     run_dir = args.out / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "snapshot.json").write_text(
-        json.dumps(snap, ensure_ascii=False, indent=1), encoding="utf-8"
-    )
     save_inputs(inputs, run_dir / "inputs.json")
+    _write_atomic(
+        run_dir / "snapshot.json", json.dumps(snap, ensure_ascii=False, indent=1)
+    )
+    for old in _runs(args.out)[:-KEEP_RUNS]:
+        shutil.rmtree(old, ignore_errors=True)
     print(render_status(result))
     return EXIT_OK if result.roadmap.valid else EXIT_CONFIG
 
@@ -145,7 +172,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         print(render_status(result, repo=args.target))
     elif args.command == "why":
-        print(render_why(result, args.target))
+        node = canonical_id(args.target, normalizer(inputs))
+        if result.graph.resolve(node) not in result.graph.nodes:
+            print(f"узел не найден: {args.target}", file=sys.stderr)
+            return EXIT_ARGS
+        print(render_why(result, node))
     else:
         print(render_plan(result))
     return EXIT_OK if result.roadmap.valid else EXIT_CONFIG

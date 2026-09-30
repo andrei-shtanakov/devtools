@@ -99,6 +99,11 @@ def read_todo(repo: FleetRepo, root: Path, do_fetch: bool) -> RepoTodo:
         return RepoTodo(repo.key, None, None, "error", f"нет клона {repo_dir}")
     if do_fetch and (problem := fetch(repo_dir)) is not None:
         return RepoTodo(repo.key, None, None, "error", problem)
+    code, shallow, err = git(repo_dir, "rev-parse", "--is-shallow-repository")
+    if code != 0 or shallow.strip() != "false":
+        # у мелкого клона blame, движение и история удалений неверны (I6)
+        detail = err.strip() or "мелкий клон: история неполна (fetch --unshallow)"
+        return RepoTodo(repo.key, None, None, "error", detail)
     text, sha, state, detail = read_file_at_origin(repo_dir, "TODO.md")
     return RepoTodo(repo.key, text, sha, state, detail)
 

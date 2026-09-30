@@ -136,3 +136,18 @@ def test_invalid_utf8_todo_is_read_not_a_crash(tmp_path: Path) -> None:
     assert sg.fetch(clone) is None
     text, _, state, _ = sg.read_file_at_origin(clone, "TODO.md")
     assert state == "read" and text is not None and "@id:a" in text
+
+
+def test_shallow_clone_is_a_read_error(tmp_path: Path) -> None:
+    # рубеж 3 C1: у мелкого клона blame/движение/история удалений неверны
+    up = tmp_path / "up"
+    _clone(tmp_path, {"TODO.md": "- [ ] a @id:a\n"})
+    (up / "TODO.md").write_text("- [ ] a @id:a\n- [ ] b @id:b\n", encoding="utf-8")
+    _git(up, "commit", "-q", "-am", "second")
+    shallow = tmp_path / "sh"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{up}", str(shallow)],
+        check=True,
+    )
+    todo = sg.read_todo(FleetRepo("sh", "sh", "sh"), tmp_path, False)
+    assert todo.state == "error" and "мелкий клон" in todo.detail

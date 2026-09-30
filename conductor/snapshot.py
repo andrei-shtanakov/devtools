@@ -213,7 +213,12 @@ def _metrics(result: Result, questions: list[dict[str, Any]]) -> dict[str, Any]:
 def _changes(result: Result, previous: dict[str, Any] | None) -> dict[str, Any]:
     if previous is None:
         return {"first_run": True}
-    before = {(w["consumer"], w["prereq"]): w["verdict"] for w in previous["waits"]}
+    # прошлый снимок — только для отчёта (I7): чужая форма не роняет прогон
+    before = {
+        (w.get("consumer"), w.get("prereq")): w.get("verdict")
+        for w in previous.get("waits", [])
+        if isinstance(w, dict)
+    }
     newly = [
         f"{w.consumer} ← {w.prereq}"
         for w in result.waits

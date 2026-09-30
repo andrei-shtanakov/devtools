@@ -97,3 +97,15 @@ def test_sent_request_not_yet_accepted_is_pending() -> None:
     assert (wait.verdict, wait.reason) == ("pending", "request_open")
     assert owner_questions(result) == []
     assert "GR-DANGLING-WAIT" not in _codes(result)
+
+
+# рубеж 3 I5: ожидание заявки в пути даёт ранг самой заявке
+
+
+def test_open_request_on_goal_path_is_ranked_and_visible() -> None:
+    todos = {"a": GOAL + "@blocked_by:todo://b/need\n"}
+    # from: без ждущего пункта — ранг может прийти только через @blocked_by
+    request = record("b", 5, body="slug: need\nfrom: a\n", labels=["inbox"])
+    result = evaluate(inputs(todos, [request]), 0)
+    entry = next(e for e in result.queue if e.node_id == "b#5")
+    assert entry.rank == 1 and result.blocks["b#5"] == "goal"

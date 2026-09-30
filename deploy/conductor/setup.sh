@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # One-time VPS bring-up for conductor slice 0 (level 0, read-only). Idempotent.
 # Run as root from a devtools checkout:
-#   sudo GIT_BASE=git@github.com:<owner> deploy/conductor/setup.sh
+#   sudo GIT_BASE=https://github.com/<owner> deploy/conductor/setup.sh
+# Clones over https without a key (like deploy/r16) and with FULL history:
+# blame, movement and deletion history are wrong on a shallow clone.
 # Installs units but does NOT enable the timer: that is the owner's step in
 # deploy/conductor/README.md.
 set -euo pipefail
 
 HOME_DIR=/srv/conductor
 UNIT_DIR=/etc/systemd/system
-GIT_BASE="${GIT_BASE:?set GIT_BASE, e.g. git@github.com:your-org}"
+GIT_BASE="${GIT_BASE:?set GIT_BASE, e.g. https://github.com/your-org}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 apt-get update -q
@@ -26,7 +28,12 @@ install -d -o conductor -g conductor -m 0750 "$HOME_DIR/state" "$HOME_DIR/state/
 WS="$HOME_DIR/workspace"
 [ -d "$WS/ai-orchestrators-workspace/.git" ] || sudo -u conductor git clone -q "$GIT_BASE/ai-orchestrators-workspace.git" "$WS/ai-orchestrators-workspace"
 sudo -u conductor env HOME="$HOME_DIR" python3 "$HOME_DIR/devtools/clone_fleet.py" \
-    --manifest "$WS/ai-orchestrators-workspace/workspace-manifest.toml" --root "$WS"
+    --manifest "$WS/ai-orchestrators-workspace/workspace-manifest.toml" --root "$WS" --https
+for repo in "$WS"/*/; do
+    if [ "$(sudo -u conductor git -C "$repo" rev-parse --is-shallow-repository)" = true ]; then
+        sudo -u conductor git -C "$repo" fetch -q --unshallow
+    fi
+done
 
 install -m 0644 "$HERE/conductor.service" "$HERE/conductor.timer" "$UNIT_DIR/"
 systemctl daemon-reload

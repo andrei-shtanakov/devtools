@@ -93,6 +93,9 @@ class Graph:
         node = self.nodes.get(edge.dst)
         if edge.origin == FROM_ORIGIN and node is not None and not node.is_open:
             return edge.dst
+        if node is None and edge.dst in self.pending_requests:
+            # пункта ещё нет, заявка на него в пути: ранг и цикл идут через неё
+            return self.pending_requests[edge.dst]
         return self.resolve(edge.dst)
 
     def epic_of(self, node_id: str) -> str | None:
@@ -119,6 +122,17 @@ def _norm_ref(ref: str, norm: dict[str, str]) -> str | None:
     if repo in norm and number.isdigit():
         return issue_id(norm[repo], int(number))
     return None
+
+
+def canonical_id(node_id: str, norm: dict[str, str]) -> str:
+    """Идентификатор узла из ввода человека — в канонических ключах."""
+    if node_id.startswith("todo://"):
+        return _canon_uri(node_id, norm)
+    for sep in ("#", "!"):
+        repo, found, number = node_id.partition(sep)
+        if found and repo in norm:
+            return f"{norm[repo]}{sep}{number}"
+    return node_id
 
 
 def _canon_uri(uri: str, norm: dict[str, str]) -> str:
