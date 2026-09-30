@@ -37,9 +37,12 @@ from conductor.sources_git import (
     read_todo,
 )
 from conductor.waits import EXISTS_RE
+from governance.policy_sources import _HUMAN_LINE
 
 TRIGGER_RE = re.compile(r'@trigger:"([^"]*)"')
-HUMAN_MERGE_RE = re.compile(r"(?m)^\s*(?:[-*]\s*)?Мерж:\s*человек\s*$")
+# Один предикат на флот: тот же, что у гейта политики (governance), — иначе
+# conductor мог бы назвать мержером агента там, где гейт читает human.
+HUMAN_MERGE_RE = _HUMAN_LINE
 AUTHORITY_ROOT_ENV = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -206,7 +209,11 @@ def _roadmap(
     root: Path, roadmap_path: Path | None
 ) -> tuple[str | None, str | None, SourceState, str]:
     if roadmap_path is not None:
-        return roadmap_path.read_text(encoding="utf-8"), None, "read", str(roadmap_path)
+        source = f"file:{roadmap_path}"
+        try:
+            return roadmap_path.read_text(encoding="utf-8"), None, "read", source
+        except OSError as exc:  # нет файла, каталог, права — состояние, не падение
+            return None, None, "error", f"{source}: {exc.strerror or exc}"
     umbrella = root / UMBRELLA
     if not (umbrella / ".git").exists():
         return None, None, "error", "origin"

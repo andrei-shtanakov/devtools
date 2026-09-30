@@ -225,7 +225,8 @@ def build_queue(
     rev = _reverse(adj)
     entries = []
     for node_id, node in graph.nodes.items():
-        if node_id in graph.canon or node_id in in_cycle or not node.is_open:
+        weak = (graph.records.get(node_id) or {}).get("weak")
+        if node_id in graph.canon or node_id in in_cycle or not node.is_open or weak:
             continue
         if node.kind != "pr" and (
             not is_ready(node_id, graph, waits) or work_state(node_id, graph) != "idle"

@@ -5,7 +5,7 @@ DEPLOY = Path(__file__).resolve().parents[2] / "deploy" / "conductor"
 
 def test_service_runs_level_0_under_flock() -> None:
     unit = (DEPLOY / "conductor.service").read_text(encoding="utf-8")
-    assert "flock -n /srv/conductor/state/conductor.lock" in unit
+    assert "flock -n -E 0 /srv/conductor/state/conductor.lock" in unit
     assert "-m conductor run" in unit and "--level" not in unit
     assert "User=conductor" in unit and "TimeoutStartSec=55min" in unit
 
