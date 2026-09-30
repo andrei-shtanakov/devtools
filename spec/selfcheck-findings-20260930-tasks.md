@@ -3,13 +3,13 @@ traces_to:
 - design
 spec_stage: tasks
 status: approved
-version: 2
+version: 3
 generated_by: claude-session
 generated_at: '2026-09-30T18:00:00+04:00'
 source_prompt_version: ''
 validation: warn
 approved_by: andrei-shtanakov
-approved_at: '2026-09-30T13:51:38Z'
+approved_at: '2026-09-30T14:54:53Z'
 owner_role: stream-owner
 ---
 
