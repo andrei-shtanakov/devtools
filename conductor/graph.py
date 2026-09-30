@@ -272,11 +272,11 @@ def _protocol_header(body: str) -> tuple[str, str] | None:
     `from:` (в любом порядке). Пример протокола внутри текста шапкой не
     бывает — разбирать Markdown не нужно."""
     lines = [ln.strip() for ln in body.replace("\r", "").splitlines() if ln.strip()]
-    fields = dict(
-        m.groups()
+    fields = {
+        m.group(1): m.group(2)
         for ln in lines[:2]
         if (m := re.fullmatch(r"(slug|from):\s*(.+)", ln)) is not None
-    )
+    }
     if set(fields) != {"slug", "from"}:
         return None
     return fields["slug"].strip("`'\" "), fields["from"].strip("`'\" ")

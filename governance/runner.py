@@ -2857,7 +2857,8 @@ def _commit_bundle(state: RunState, ops: Ops, subject_line: str) -> None:
         # репо-цели (`workstreams/*/spec/*` + `!*.md`) его не пускают —
         # добавляем поштучно с `-f`; S3 ниже сверяет, что он в HEAD.
         force = tuple(
-            f"{state.bundle_dir}/{rel}" for rel in state.brief["source_paths"]
+            f"{state.bundle_dir}/{rel}"
+            for rel in brief_input.descriptor_source_paths(state.brief)
         )
     ops.commit_paths(
         state.target_dir,
@@ -2879,8 +2880,8 @@ def _source_layer_committed(state: RunState, ops: Ops) -> bool:
     head = ops.rev_parse(state.target_dir, "HEAD")
     if head is None:
         return _brief_stop(state, "HEAD не резолвится после коммита S3")
-    paths = list(state.brief["source_paths"])
-    blobs = list(state.brief["source_blobs"].values())
+    paths = brief_input.descriptor_source_paths(state.brief)
+    blobs = list(brief_input.descriptor_source_blobs(state.brief).values())
     if len(paths) != len(blobs):
         return _brief_stop(
             state, "descriptor brief: source_paths и source_blobs разной длины"

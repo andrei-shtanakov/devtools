@@ -13,6 +13,22 @@ from governance.stale_adapter import blob_sha1_bytes
 PRIMARY_REL = "00-discovery/brief.md"
 
 
+def descriptor_source_paths(descriptor: dict[str, object]) -> list[str]:
+    """`source_paths` дескриптора: список строк; иная форма — пусто."""
+    raw = descriptor.get("source_paths")
+    if not isinstance(raw, list):
+        return []
+    return [path for path in raw if isinstance(path, str)]
+
+
+def descriptor_source_blobs(descriptor: dict[str, object]) -> dict[str, str]:
+    """`source_blobs` дескриптора: имя → blob; иная форма — пусто."""
+    raw = descriptor.get("source_blobs")
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
+
+
 class BriefInputError(RuntimeError):
     """The discovery source cannot safely open a governance run."""
 

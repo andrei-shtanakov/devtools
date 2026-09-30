@@ -345,3 +345,22 @@ def test_requirements_findings_rejects_duplicate_source_id() -> None:
     findings = brief_input.requirements_findings(duplicated, _requirements())
 
     assert any("discovery source объявляет id 2 раза" in item for item in findings)
+
+
+def test_descriptor_source_paths_narrows_shape() -> None:
+    assert brief_input.descriptor_source_paths({"source_paths": ["a", "b"]}) == [
+        "a",
+        "b",
+    ]
+    assert brief_input.descriptor_source_paths({"source_paths": ["a", 1]}) == ["a"]
+    assert brief_input.descriptor_source_paths({"source_paths": "a"}) == []
+    assert brief_input.descriptor_source_paths({}) == []
+
+
+def test_descriptor_source_blobs_narrows_shape() -> None:
+    assert brief_input.descriptor_source_blobs({"source_blobs": {"a": "x"}}) == {
+        "a": "x"
+    }
+    assert brief_input.descriptor_source_blobs({"source_blobs": {"a": 1}}) == {}
+    assert brief_input.descriptor_source_blobs({"source_blobs": ["a"]}) == {}
+    assert brief_input.descriptor_source_blobs({}) == {}

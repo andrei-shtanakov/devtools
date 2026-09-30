@@ -24,6 +24,7 @@ from typing import Protocol
 from urllib.parse import quote
 
 from governance import interview as _interview
+from governance.brief_input import descriptor_source_blobs, descriptor_source_paths
 from governance.decomposition_guard import DELIVERABLE_KINDS
 from governance.facts import Fact, Outcome, unavailable
 
@@ -328,7 +329,9 @@ def _closure_event(node: object) -> tuple[str, str, str] | None:
     actor = node.get("actor")
     login = actor.get("login") if isinstance(actor, dict) else None
     kind, at = node.get("__typename"), node.get("createdAt")
-    if not all(isinstance(v, str) and v for v in (kind, login, at)):
+    if not (isinstance(kind, str) and isinstance(login, str) and isinstance(at, str)):
+        return None
+    if not (kind and login and at):
         return None
     return kind, login, at
 
@@ -2045,8 +2048,8 @@ class RealOps:
         target_file = _AUTHOR_FILENAMES.get(kind, "")
         source_guidance = ""
         if brief_context is not None and kind in ("charter", "requirements"):
-            paths = brief_context.get("source_paths", [])
-            blobs = brief_context.get("source_blobs", {})
+            paths = descriptor_source_paths(brief_context)
+            blobs = descriptor_source_blobs(brief_context)
             requirements_source = brief_context.get("requirements_source")
             repo_paths = [f"{bundle_dir}/{path}" for path in paths]
             source_guidance = (

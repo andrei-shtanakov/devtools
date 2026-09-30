@@ -75,7 +75,10 @@ def _rule_regex(rule_id: str) -> re.Pattern[str]:
     predicate semgrep already applied (no second copy to drift)."""
     text = RULES_PATH.read_text(encoding="utf-8")
     block = text.split(f"- id: {rule_id}\n", 1)[1]
-    return re.compile(re.search(r"^\s*pattern-regex:\s*(.+)$", block, re.MULTILINE)[1])
+    match = re.search(r"^\s*pattern-regex:\s*(.+)$", block, re.MULTILINE)
+    if match is None:
+        raise ValueError(f"rule {rule_id} has no pattern-regex in {RULES_PATH}")
+    return re.compile(match[1])
 
 
 # a trailing shell comment is not code: `cmd # ${A:-claude}` (#437.8)
@@ -188,7 +191,10 @@ def _literal(node: ast.AST) -> str | None:
         return node.value
     if isinstance(node, ast.JoinedStr):
         return "".join(
-            v.value if isinstance(v, ast.Constant) else "{}" for v in node.values
+            v.value
+            if isinstance(v, ast.Constant) and isinstance(v.value, str)
+            else "{}"
+            for v in node.values
         )
     return None
 
