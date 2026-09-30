@@ -21,7 +21,7 @@ ARG/pyrefly/jscpd/vulture, колбэки textual, намеренные glob) п
 классовыми записями `selfcheck.toml` (спека selfcheck §2.4, отдельный PR), а
 .github-гигиена (zizmor) ушла отдельным PR с человеческим мержем. Здесь —
 реальный слой: мёртвый код (T1), Optional без сужения (T2), мелкие баги
-ruff (T3), остальной pyrefly в продакшен-коде (T4).
+ruff (T3; включение правил в CI — отдельным PR оператора), остальной pyrefly в продакшен-коде (T4).
 
 Общие правила для всех задач:
 - поведение не меняется, кроме явно названного в задаче; каждое место — свой
@@ -90,11 +90,11 @@ Source: selfcheck 2026-09-30, ruff (решение владельца 2026-09-30
 - [ ] `B904` `raise` в `except` без `from`: `check-plan-fields.py:101` (sc-17875ae9), `inbox.py:50` (sc-9ead2ff4) — `from exc` (или `from None`, если исходная ошибка шум — с комментарием)
 - [ ] `B007` переменная цикла не используется: `check-graph-registry-drift.py:177` (sc-fc740822), `governance/decomposition_guard.py:567, 953` (sc-7771e734, sc-b962027f), `selfcheck/graph/resolver.py:402` (sc-7da8536b) — префикс `_` или итерация по нужной части
 - [ ] `PLW2901` переменная цикла перезаписана в теле: `governance/design_guard.py:53` (sc-7bc83f35), `selfcheck/graph/build.py:357` (sc-b81488cc), `selfcheck/vendor.py:263, 281` (sc-1748378e, sc-129fae77) — новое имя для преобразованного значения
-- [ ] `pyproject.toml` `[tool.ruff.lint] select` += `B905`, `B904`, `B007`, `PLW2901` с комментарием волны (стиль #461); `issue_console.py` — в его `per-file-ignores` только те из них, что он нарушает (`git diff --quiet -- issue_console.py`)
+- [ ] `pyproject.toml` НЕ трогать (`harness_guard: strict`): включение `B905`/`B904`/`B007`/`PLW2901` в `select` делает оператор отдельным PR после задачи; здесь — только чтобы `uv run --frozen --group=selfcheck ruff check . --select B905,B904,B007,PLW2901` (вне `issue_console.py` и `governance/discovery_contract/`) был чист
 - [ ] `uv run --frozen --group=selfcheck ruff check .` и `ruff format --check .` чисто
 - [ ] полный набор тестов зелёный в обоих режимах
 
-**Touches:** governance/runner.py, governance/task_bridge.py, recent_changes.py, salvage_scan.py, check-plan-fields.py, inbox.py, check-graph-registry-drift.py, governance/decomposition_guard.py, selfcheck/graph/resolver.py, governance/design_guard.py, selfcheck/graph/build.py, selfcheck/vendor.py, pyproject.toml
+**Touches:** governance/runner.py, governance/task_bridge.py, recent_changes.py, salvage_scan.py, check-plan-fields.py, inbox.py, check-graph-registry-drift.py, governance/decomposition_guard.py, selfcheck/graph/resolver.py, governance/design_guard.py, selfcheck/graph/build.py, selfcheck/vendor.py
 
 ### TASK-004: Остальной pyrefly в продакшен-коде — типизация или настоящая ошибка
 P3 | TODO   Est: 3h
