@@ -97,7 +97,7 @@ Source: selfcheck 2026-09-30, ruff (решение владельца 2026-09-30
 **Touches:** governance/runner.py, governance/task_bridge.py, recent_changes.py, salvage_scan.py, check-plan-fields.py, inbox.py, check-graph-registry-drift.py, governance/decomposition_guard.py, selfcheck/graph/resolver.py, governance/design_guard.py, selfcheck/graph/build.py, selfcheck/vendor.py
 
 ### TASK-004: Остальной pyrefly в продакшен-коде — типизация или настоящая ошибка
-P3 | 🔍 REVIEW   Est: 3h
+P3 | ✅ DONE   Est: 3h
 
 Каждое место разобрать: если тип неточен (значение из JSON/TOML типизировано
 как `object`) — сузить проверкой формы данных с ошибкой на неверной форме;
@@ -105,14 +105,14 @@ P3 | 🔍 REVIEW   Est: 3h
 Source: selfcheck 2026-09-30, pyrefly (решение владельца 2026-09-30: T4)
 
 **Checklist:**
-- [ ] `governance/runner.py` 2847, 2869, 2870 (sc-9158d1d2, sc-6d419a81, sc-3e6da40e): `object` итерируется/`.values()` — сузить форму данных
-- [ ] `governance/approve_node.py:1269` (sc-604f66b9), `governance/ops.py:2097` (sc-5e75e2db), `governance/bundle_inputs.py:140` (sc-8644fa09): `object` не итерируем / без `.items()` — сузить
-- [ ] `governance/ops.py:339` (sc-d86f21ed): возвращается кортеж с `| None` при объявленном `tuple[str, str, str] | None` — либо проверить все три значения и вернуть `None`, либо исправить аннотацию, если `None` внутри кортежа допустим (решение — по вызывающим)
-- [ ] `conductor/graph.py:275` (sc-0b320f5e): `dict(...)` из генератора кортежей неизвестной длины — явные пары ключ-значение
-- [ ] `selfcheck/llm.py:78, 190` (sc-e537caf4, sc-b63fbe0b) и `selfcheck/run.py:306` (sc-27fd589b): `None` subscriptable, `str.join` над неоднородными значениями, распаковка kwargs неверного типа — сузить / привести явно
-- [ ] свежий прогон `make selfcheck ARGS='--probe pyrefly'`: перечисленных id нет
-- [ ] `uv run --frozen --group=selfcheck pytest tests/selfcheck -q` зелёный (для правок в `selfcheck/`)
-- [ ] полный набор тестов зелёный в обоих режимах
+- [x] `governance/runner.py` 2847, 2869, 2870 (sc-9158d1d2, sc-6d419a81, sc-3e6da40e): `object` итерируется/`.values()` — сузить форму данных
+- [x] `governance/approve_node.py:1269` (sc-604f66b9), `governance/ops.py:2097` (sc-5e75e2db), `governance/bundle_inputs.py:140` (sc-8644fa09): `object` не итерируем / без `.items()` — сузить
+- [x] `governance/ops.py:339` (sc-d86f21ed): возвращается кортеж с `| None` при объявленном `tuple[str, str, str] | None` — либо проверить все три значения и вернуть `None`, либо исправить аннотацию, если `None` внутри кортежа допустим (решение — по вызывающим)
+- [x] `conductor/graph.py:275` (sc-0b320f5e): `dict(...)` из генератора кортежей неизвестной длины — явные пары ключ-значение
+- [x] `selfcheck/llm.py:78, 190` (sc-e537caf4, sc-b63fbe0b) и `selfcheck/run.py:306` (sc-27fd589b): `None` subscriptable, `str.join` над неоднородными значениями, распаковка kwargs неверного типа — сузить / привести явно
+- [x] свежий прогон `make selfcheck ARGS='--probe pyrefly'`: перечисленных id нет
+- [x] `uv run --frozen --group=selfcheck pytest tests/selfcheck -q` зелёный (для правок в `selfcheck/`)
+- [x] полный набор тестов зелёный в обоих режимах
 
 **Depends on:** [TASK-002]
 
