@@ -501,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
             args.next_expected_hours,
             args.escalate,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 — last resort: crash → exit 4, not a verdict
         traceback.print_exc()
         return 4
 

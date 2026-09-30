@@ -319,7 +319,7 @@ def find_runs(repo: str, subject: str) -> list[rs.RunState]:
     for run_id in rs.all_run_ids():
         try:
             state = rs.load(run_id)
-        except Exception:
+        except Exception:  # noqa: BLE001 — any load failure = broken ledger
             raw = (rs.run_dir(run_id) / "run.json").read_text(encoding="utf-8")
             if not raw.strip():
                 # Пустой run.json — штатный труп runner'а (падение между
@@ -1138,7 +1138,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     if rs.load(rid).ws_id == ws_id:
                         collisions.append(rid)
-                except Exception:
+                except Exception:  # noqa: BLE001, S112
                     # Нечитаемые леджеры уже отвергнуты/пропущены
                     # find_runs выше (пустые трупы runner'а — штатны).
                     continue
