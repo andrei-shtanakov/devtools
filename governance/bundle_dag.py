@@ -61,10 +61,7 @@ def bundle_composition(bundle: Path) -> set[str]:
     остаются заботой вызывающего, у каждого из них своя.
     """
     known = {fname for fname, _ in BUNDLE_DAG}
-    return {
-        p.name for p in bundle.iterdir()
-        if p.is_file() and p.name in known
-    }
+    return {p.name for p in bundle.iterdir() if p.is_file() and p.name in known}
 
 
 def node_id(filename: str) -> str:
@@ -122,9 +119,7 @@ def dag_upto(
 
     `level < 0` — пустой префикс (бандла ещё нет)."""
     lv = levels(dag)
-    return tuple(
-        (fname, ups) for fname, ups in dag if lv[node_id(fname)] <= level
-    )
+    return tuple((fname, ups) for fname, ups in dag if lv[node_id(fname)] <= level)
 
 
 # Якорный узел моста — терминальный узел DAG (decomposition). Выводится из
@@ -155,9 +150,7 @@ def dag_for(
         return BUNDLE_DAG_LEGACY5
     if legacy_bundle in (3, 4):
         return BUNDLE_DAG[:legacy_bundle]
-    raise ValueError(
-        f"legacy_bundle: ожидается 3, 4 или 5, получено {legacy_bundle!r}"
-    )
+    raise ValueError(f"legacy_bundle: ожидается 3, 4 или 5, получено {legacy_bundle!r}")
 
 
 def check_bundle_composition(

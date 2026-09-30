@@ -151,9 +151,7 @@ def _worktree_blocks(porcelain: str) -> list[dict[str, str]]:
 
 
 def _worktree_admin_age(repo: Path, wt_path: str, now: float) -> float | None:
-    common = Path(
-        git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    )
+    common = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
     admin = common / "worktrees" / Path(wt_path).name
     if not admin.exists():
         return None
@@ -251,9 +249,7 @@ def scan_branches(
         if pr_heads is not None and name in pr_heads:
             continue
         obj = name if pr_heads is not None else f"{name} (PR state unknown)"
-        findings.append(
-            Finding(repo.name, "branch-no-pr", obj, now - int(stamp))
-        )
+        findings.append(Finding(repo.name, "branch-no-pr", obj, now - int(stamp)))
     return findings
 
 
@@ -348,14 +344,9 @@ def _waiver_reason(finding: Finding, waivers: list[Waiver]) -> str | None:
     return None
 
 
-def apply_waivers(
-    findings: list[Finding], waivers: list[Waiver]
-) -> list[Finding]:
+def apply_waivers(findings: list[Finding], waivers: list[Waiver]) -> list[Finding]:
     """Пометить известные осознанные исключения — не скрывая находку."""
-    return [
-        dataclasses.replace(f, waived=_waiver_reason(f, waivers))
-        for f in findings
-    ]
+    return [dataclasses.replace(f, waived=_waiver_reason(f, waivers)) for f in findings]
 
 
 # ── GitHub: open-PR heads ───────────────────────────────────────────────
@@ -412,14 +403,8 @@ def humanize_age(seconds: float | None) -> str:
 def render_table(findings: list[Finding], *, host: str) -> str:
     """Таблица «репо · класс · объект · возраст» с host-строкой (инвариант 5)."""
     header = ("репо", "класс", "объект", "возраст")
-    rows = [
-        (f.repo, f.klass, f.obj, humanize_age(f.age_seconds))
-        for f in findings
-    ]
-    widths = [
-        max(len(cell) for cell in column)
-        for column in zip(header, *rows)
-    ]
+    rows = [(f.repo, f.klass, f.obj, humanize_age(f.age_seconds)) for f in findings]
+    widths = [max(len(cell) for cell in column) for column in zip(header, *rows)]
     lines = [f"# salvage-scan · host={host}"]
     for row, finding in zip([header, *rows], [None, *findings]):
         line = "  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip()
@@ -458,8 +443,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         repos = manifest_set(manifest)
     except (OSError, tomllib.TOMLDecodeError) as err:
-        print(f"salvage-scan: манифест не прочитан/не разобран: {err}",
-              file=sys.stderr)
+        print(f"salvage-scan: манифест не прочитан/не разобран: {err}", file=sys.stderr)
         return 2
 
     now = time()

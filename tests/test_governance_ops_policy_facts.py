@@ -33,8 +33,16 @@ def _gh(monkeypatch, payload: dict | None, rc: int = 0) -> list[list[str]]:
 
 
 def test_version_found_is_last_commit_touching_the_path(monkeypatch) -> None:
-    calls = _gh(monkeypatch, {"data": {"repository": {"ref": {"target": {
-        "history": {"nodes": [{"oid": SHA}]}}}}}})
+    calls = _gh(
+        monkeypatch,
+        {
+            "data": {
+                "repository": {
+                    "ref": {"target": {"history": {"nodes": [{"oid": SHA}]}}}
+                }
+            }
+        },
+    )
     fact = RealOps().policy_version_fact(REPO, BRANCH, PATH)
     assert fact.outcome is Outcome.FOUND and fact.value == SHA
     assert "-F" in calls[0] and f"p={PATH}" in calls[0], "история — ПО ПУТИ"
@@ -44,8 +52,10 @@ def test_version_found_is_last_commit_touching_the_path(monkeypatch) -> None:
 def test_version_absent_when_branch_missing_or_history_empty(monkeypatch) -> None:
     _gh(monkeypatch, {"data": {"repository": {"ref": None}}})
     assert RealOps().policy_version_fact(REPO, BRANCH, PATH).outcome is Outcome.ABSENT
-    _gh(monkeypatch, {"data": {"repository": {"ref": {"target": {
-        "history": {"nodes": []}}}}}})
+    _gh(
+        monkeypatch,
+        {"data": {"repository": {"ref": {"target": {"history": {"nodes": []}}}}}},
+    )
     assert RealOps().policy_version_fact(REPO, BRANCH, PATH).outcome is Outcome.ABSENT
 
 
@@ -60,8 +70,24 @@ def test_version_unavailable_on_rc_or_odd_shape(monkeypatch) -> None:
 
 
 def test_file_found_absent_unavailable(monkeypatch) -> None:
-    calls = _gh(monkeypatch, {"data": {"repository": {"object": {"file": {"object": {
-        "text": "K=v\n", "isBinary": False, "isTruncated": False}}}}}})
+    calls = _gh(
+        monkeypatch,
+        {
+            "data": {
+                "repository": {
+                    "object": {
+                        "file": {
+                            "object": {
+                                "text": "K=v\n",
+                                "isBinary": False,
+                                "isTruncated": False,
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    )
     fact = RealOps().repo_file_fact(REPO, SHA, PATH)
     assert fact.outcome is Outcome.FOUND and fact.value == "K=v\n"
     assert f"s={SHA}" in calls[0]
@@ -69,8 +95,24 @@ def test_file_found_absent_unavailable(monkeypatch) -> None:
     assert RealOps().repo_file_fact(REPO, SHA, PATH).outcome is Outcome.ABSENT
     _gh(monkeypatch, {"data": {"repository": {"object": {"file": None}}}})
     assert RealOps().repo_file_fact(REPO, SHA, PATH).outcome is Outcome.ABSENT
-    _gh(monkeypatch, {"data": {"repository": {"object": {"file": {"object": {
-        "text": None, "isBinary": True, "isTruncated": False}}}}}})
+    _gh(
+        monkeypatch,
+        {
+            "data": {
+                "repository": {
+                    "object": {
+                        "file": {
+                            "object": {
+                                "text": None,
+                                "isBinary": True,
+                                "isTruncated": False,
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    )
     assert RealOps().repo_file_fact(REPO, SHA, PATH).outcome is Outcome.UNAVAILABLE
     _gh(monkeypatch, None, rc=1)
     assert RealOps().repo_file_fact(REPO, SHA, PATH).outcome is Outcome.UNAVAILABLE

@@ -43,8 +43,13 @@ from collections.abc import Callable
 from governance.facts import Outcome
 from governance import authority_root
 from governance.ops import (
-    DEVTOOLS_ROOT, REVIEW_BARRIER_EXIT, REVIEW_BARRIER_STOP, Ops, RealOps,
+    DEVTOOLS_ROOT,
+    REVIEW_BARRIER_EXIT,
+    REVIEW_BARRIER_STOP,
+    Ops,
+    RealOps,
 )
+
 # Исполняемый ревью-harness целевого репо: review-pr.sh запускает
 # scripts/review/local.sh из локального дерева, которое материализация
 # переключает на head PR (приёмка PR #113, blocker) — PR, правящий эти
@@ -124,9 +129,7 @@ def _checks_state(pr_facts: dict) -> str:
     checks = pr_facts.get("statusCheckRollup") or []
     if not checks:
         return "pending"
-    states = [
-        (c.get("conclusion") or c.get("status") or "").upper() for c in checks
-    ]
+    states = [(c.get("conclusion") or c.get("status") or "").upper() for c in checks]
     if any(s in _PENDING for s in states):
         return "pending"
     if all(s in _GREEN for s in states):
@@ -199,8 +202,15 @@ def accept(
         return 1
     try:
         return _accept_on_head(
-            repo, repo_slug, pr, ops, head0,
-            target_dir, base_branch, sleep, poll_limit,
+            repo,
+            repo_slug,
+            pr,
+            ops,
+            head0,
+            target_dir,
+            base_branch,
+            sleep,
+            poll_limit,
         )
     except RuntimeError as exc:
         print(f"accept-pr: {exc} — стоп")
@@ -236,10 +246,7 @@ def _accept_on_head(
     # (приёмка PR #113, круг 4). Пин мержа обязан называть ту базу, от
     # которой посчитан гард, иначе «пин базы вердикта» — фикция.
     base0, changed = ops.changed_paths(target_dir, base_branch)
-    harness = [
-        f for f in changed
-        if any(f.startswith(p) for p in _HARNESS_PREFIXES)
-    ]
+    harness = [f for f in changed if any(f.startswith(p) for p in _HARNESS_PREFIXES)]
     if harness:
         print(
             "accept-pr: дифф правит ревью-harness "
@@ -278,9 +285,9 @@ def _accept_on_head(
     # UNKNOWN-mergeability тоже ждём (приёмка PR #109, круг 2): GitHub
     # вычисляет её асинхронно, и «не CONFLICTING» не значит «можно» —
     # fail-closed, мерж только на явном MERGEABLE.
-    while (
-        _checks_state(facts) == "pending"
-        or facts.get("mergeable") not in ("MERGEABLE", "CONFLICTING")
+    while _checks_state(facts) == "pending" or facts.get("mergeable") not in (
+        "MERGEABLE",
+        "CONFLICTING",
     ):
         polls += 1
         if polls > poll_limit:
@@ -349,15 +356,14 @@ def _accept_on_head(
         # верхушки (devtools#223). Неустановленный факт — не «не двигалась».
         tip = (
             ops.remote_branch_head_fact(repo_slug, base_branch)
-            if merge_code == 5 else None
+            if merge_code == 5
+            else None
         )
         # Пригоден для «двигалась/не двигалась» ТОЛЬКО FOUND: ABSENT —
         # установленный факт, но факт об отсутствии ветки, не о её
         # неподвижности (devtools#237).
         base_now = (
-            tip.value
-            if tip is not None and tip.outcome is Outcome.FOUND
-            else None
+            tip.value if tip is not None and tip.outcome is Outcome.FOUND else None
         )
         tip_unknown = tip is not None and not tip.established
         tip_absent = tip is not None and tip.outcome is Outcome.ABSENT
@@ -442,11 +448,10 @@ def main(argv: list[str] | None = None) -> int:
     target_dir = str(DEVTOOLS_ROOT.parent / args.repo)
     origin = subprocess.run(
         ["git", "-C", target_dir, "remote", "get-url", "origin"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
-    checkout_slug = (
-        _origin_slug(origin.stdout) if origin.returncode == 0 else None
-    )
+    checkout_slug = _origin_slug(origin.stdout) if origin.returncode == 0 else None
     if checkout_slug != repo_slug:
         print(
             f"accept-pr: origin локального чекаута ../{args.repo} = "

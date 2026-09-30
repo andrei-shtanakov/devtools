@@ -3,6 +3,7 @@
 Итоги производителя и статусы AC не принимаются: devtools пересчитывает по
 своим байтам (полнота определений, тела функций, lock, content).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -11,7 +12,13 @@ from governance import criteria_graph as cgr
 from governance import criteria_tokens as ct
 
 REASONS = {
-    "unconfirmed": {"no-test", "no-product-execution", "subprocess-only", "not-passed", "nondeterministic"},
+    "unconfirmed": {
+        "no-test",
+        "no-product-execution",
+        "subprocess-only",
+        "not-passed",
+        "nondeterministic",
+    },
     "error": {"io", "runner"},
 }
 _ECHO = ("protocol", "owner_repo", "workstream", "code", "bundle_pin", "product_sha")
@@ -47,22 +54,37 @@ def roots_findings(roots: object) -> list[str]:
     return out
 
 
-def _traced_selector_findings(bid: str, s: dict, function_lines: dict[str, set[int]]) -> list[str]:
+def _traced_selector_findings(
+    bid: str, s: dict, function_lines: dict[str, set[int]]
+) -> list[str]:
     out: list[str] = []
     runs = [r for r in s.get("runs", []) if r.get("phase") == "call"]
     if len(runs) < 2 or any(r.get("outcome") != "passed" for r in runs):
         out.append(f"{bid}: traced без двух passed в фазе call ({s.get('node_id')})")
-    body = [p for p in s.get("product_lines", []) if p.get("line") in function_lines.get(p.get("file"), set())]
+    body = [
+        p
+        for p in s.get("product_lines", [])
+        if p.get("line") in function_lines.get(p.get("file"), set())
+    ]
     if not body:
-        out.append(f"{bid}: traced без исполненных строк тел функций продукта ({s.get('node_id')})")
+        out.append(
+            f"{bid}: traced без исполненных строк тел функций продукта ({s.get('node_id')})"
+        )
     if s.get("subprocess") and not body:
-        out.append(f"{bid}: traced при исполнении только в подпроцессе ({s.get('node_id')})")
+        out.append(
+            f"{bid}: traced при исполнении только в подпроцессе ({s.get('node_id')})"
+        )
     return out
 
 
 def validate_response(
-    request: dict, response: dict, *, expected: dict[str, set[tuple[str, str]]],
-    function_lines: dict[str, set[int]], lock_sha: str, content_sha: str,
+    request: dict,
+    response: dict,
+    *,
+    expected: dict[str, set[tuple[str, str]]],
+    function_lines: dict[str, set[int]],
+    lock_sha: str,
+    content_sha: str,
 ) -> list[str]:
     """Пусто — ответ валиден; иначе причины отказа шага."""
     out: list[str] = []
@@ -104,9 +126,14 @@ def validate_response(
         if not b.get("selectors"):
             out.append(f"{bid}: traced без единого селектора")
             continue
-        defs = {(s["definition"]["file"], s["definition"]["qualname"]) for s in b.get("selectors", [])}
+        defs = {
+            (s["definition"]["file"], s["definition"]["qualname"])
+            for s in b.get("selectors", [])
+        }
         if defs != expected.get(bid, set()):
-            out.append(f"{bid}: определения селекторов {sorted(defs)} ≠ определениям с токеном {code}:{bid}")
+            out.append(
+                f"{bid}: определения селекторов {sorted(defs)} ≠ определениям с токеном {code}:{bid}"
+            )
         for s in b.get("selectors", []):
             out += _traced_selector_findings(bid, s, function_lines)
     return out
@@ -123,7 +150,9 @@ class Outcome:
 
 def outcome(graph: cgr.Graph, beh_status: dict[str, str]) -> Outcome:
     """Таблица §3.3: Must unconfirmed/error и любой error — стоп."""
-    stops = [f"граф: {e}" for e in graph.errors] + [f"сирота: {o}" for o in cgr.orphan_findings(graph)]
+    stops = [f"граф: {e}" for e in graph.errors] + [
+        f"сирота: {o}" for o in cgr.orphan_findings(graph)
+    ]
     rows: list[str] = []
     for beh in cgr.test_behs(graph):
         st = beh_status.get(beh.id, "error")
@@ -141,7 +170,9 @@ def outcome(graph: cgr.Graph, beh_status: dict[str, str]) -> Outcome:
     return Outcome("blocked" if stops else "traced", dict(beh_status), acs, stops, rows)
 
 
-def parse_response(code: int, stdout: str, schema: dict | None) -> tuple[dict | None, str | None]:
+def parse_response(
+    code: int, stdout: str, schema: dict | None
+) -> tuple[dict | None, str | None]:
     """Первая линия отказа §5.3: код, пустота, JSON, схема (если вендорена)."""
     import json
 

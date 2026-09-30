@@ -132,9 +132,7 @@ def test_customer_path_trace_is_rejected_before_materialization(
     notes.write_text("context\n", encoding="utf-8")
     path = _write(
         tmp_path / "brief.md",
-        customer_brief().replace(
-            "traces_to: []", "traces_to: [notes/context.md]"
-        ),
+        customer_brief().replace("traces_to: []", "traces_to: [notes/context.md]"),
     )
 
     with pytest.raises(brief_input.BriefInputError, match="путевыми"):
@@ -149,9 +147,7 @@ def test_customer_scalar_path_trace_is_rejected_before_materialization(
     notes.write_text("context\n", encoding="utf-8")
     path = _write(
         tmp_path / "brief.md",
-        customer_brief().replace(
-            "traces_to: []", "traces_to: notes/context.md"
-        ),
+        customer_brief().replace("traces_to: []", "traces_to: notes/context.md"),
     )
 
     with pytest.raises(brief_input.BriefInputError, match="путевыми"):
@@ -168,9 +164,11 @@ def test_invalid_customer_is_rejected_with_gate_id(tmp_path: Path) -> None:
 def test_consistent_gate_failed_customer_is_rejected_at_admission(
     tmp_path: Path,
 ) -> None:
-    text = customer_brief().replace(
-        "  functions: covered", "  functions: missing"
-    ).replace("  gate_passed: true", "  gate_passed: false")
+    text = (
+        customer_brief()
+        .replace("  functions: covered", "  functions: missing")
+        .replace("  gate_passed: true", "  gate_passed: false")
+    )
     path = _write(tmp_path / "brief.md", text)
 
     with pytest.raises(brief_input.BriefInputError, match="admission"):
@@ -178,14 +176,14 @@ def test_consistent_gate_failed_customer_is_rejected_at_admission(
 
 
 def test_blocking_question_is_rejected_at_admission(tmp_path: Path) -> None:
-    text = customer_brief().replace(
-        "  gate_passed: true", "  gate_passed: false"
-    ).replace("blocking_open_questions: 0", "blocking_open_questions: 1")
+    text = (
+        customer_brief()
+        .replace("  gate_passed: true", "  gate_passed: false")
+        .replace("blocking_open_questions: 0", "blocking_open_questions: 1")
+    )
     path = _write(tmp_path / "brief.md", text)
 
-    with pytest.raises(
-        brief_input.BriefInputError, match="blocking_open_questions"
-    ):
+    with pytest.raises(brief_input.BriefInputError, match="blocking_open_questions"):
         brief_input.inspect_brief(path)
 
 
@@ -193,9 +191,7 @@ def test_engineer_resolves_one_approved_customer(tmp_path: Path) -> None:
     customer = _write(
         tmp_path / "sources/customer.md", customer_brief(status="approved")
     )
-    engineer = _write(
-        tmp_path / "engineer.md", engineer_brief("sources/customer.md")
-    )
+    engineer = _write(tmp_path / "engineer.md", engineer_brief("sources/customer.md"))
 
     source = brief_input.inspect_brief(engineer)
 
@@ -262,9 +258,7 @@ def test_materialize_preserves_bytes_and_is_reinspectable(tmp_path: Path) -> Non
     customer = _write(
         source_root / "nested/customer.md", customer_brief(status="approved")
     )
-    engineer = _write(
-        source_root / "engineer.md", engineer_brief("nested/customer.md")
-    )
+    engineer = _write(source_root / "engineer.md", engineer_brief("nested/customer.md"))
     source = brief_input.inspect_brief(engineer)
     target = tmp_path / "target"
 
@@ -274,9 +268,7 @@ def test_materialize_preserves_bytes_and_is_reinspectable(tmp_path: Path) -> Non
     customer_out = target / "workstreams/ws/spec" / source.requirements_rel
     assert primary_out.read_bytes() == engineer.read_bytes()
     assert customer_out.read_bytes() == customer.read_bytes()
-    restored = brief_input.inspect_materialized(
-        target, "workstreams/ws/spec"
-    )
+    restored = brief_input.inspect_materialized(target, "workstreams/ws/spec")
     assert restored.as_state() == source.as_state()
 
 
@@ -298,9 +290,10 @@ def test_materialized_tamper_is_detected(tmp_path: Path) -> None:
         customer_brief().replace("Goal", "Changed"), encoding="utf-8"
     )
 
-    assert brief_input.inspect_materialized(
-        target, "workstreams/ws/spec"
-    ).as_state() != source.as_state()
+    assert (
+        brief_input.inspect_materialized(target, "workstreams/ws/spec").as_state()
+        != source.as_state()
+    )
 
 
 def _requirements() -> str:
@@ -314,30 +307,35 @@ def _requirements() -> str:
 
 
 def test_requirements_findings_accepts_exact_source_coverage() -> None:
-    assert brief_input.requirements_findings(
-        customer_brief(), _requirements()
-    ) == []
+    assert brief_input.requirements_findings(customer_brief(), _requirements()) == []
 
 
 @pytest.mark.parametrize(
     ("requirements", "needle"),
     [
-        (_requirements().replace("#### NFR-01: Safety\n**Priority**: Should\n", ""),
-         "NFR-01: в requirements найдено 0"),
-        (_requirements() + "\n#### FR-01: Duplicate\n**Priority**: Must\n",
-         "FR-01: в requirements найдено 2"),
-        (_requirements().replace("**Priority**: Must", "**Priority**: Should"),
-         "source Priority Must понижен"),
-        (_requirements().replace("#### FR-01:", "### FR-01:"),
-         "не соответствует машинной грамматике"),
+        (
+            _requirements().replace("#### NFR-01: Safety\n**Priority**: Should\n", ""),
+            "NFR-01: в requirements найдено 0",
+        ),
+        (
+            _requirements() + "\n#### FR-01: Duplicate\n**Priority**: Must\n",
+            "FR-01: в requirements найдено 2",
+        ),
+        (
+            _requirements().replace("**Priority**: Must", "**Priority**: Should"),
+            "source Priority Must понижен",
+        ),
+        (
+            _requirements().replace("#### FR-01:", "### FR-01:"),
+            "не соответствует машинной грамматике",
+        ),
     ],
 )
 def test_requirements_findings_named_failures(
-    requirements: str, needle: str,
+    requirements: str,
+    needle: str,
 ) -> None:
-    findings = brief_input.requirements_findings(
-        customer_brief(), requirements
-    )
+    findings = brief_input.requirements_findings(customer_brief(), requirements)
     assert any(needle in finding for finding in findings)
 
 

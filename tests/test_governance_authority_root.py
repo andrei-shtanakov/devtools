@@ -104,9 +104,7 @@ def test_missing_ssot_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     Пустой кортеж означал бы «authority-root путей нет», то есть снятие
     защиты молчанием.
     """
-    monkeypatch.setattr(
-        authority_root, "PATHS_FILE", Path("/no/such/paths.env")
-    )
+    monkeypatch.setattr(authority_root, "PATHS_FILE", Path("/no/such/paths.env"))
     with pytest.raises(RuntimeError, match="недоступен"):
         authority_root.prefixes()
 
@@ -133,17 +131,14 @@ def test_authority_root_rejects_duplicate_key(
     """
     broken = tmp_path / "paths.env"
     broken.write_text(
-        "AUTHORITY_ROOT_PREFIXES=.github/\n"
-        "AUTHORITY_ROOT_PREFIXES=profiles/\n"
+        "AUTHORITY_ROOT_PREFIXES=.github/\nAUTHORITY_ROOT_PREFIXES=profiles/\n"
     )
     monkeypatch.setattr(authority_root, "PATHS_FILE", broken)
     with pytest.raises(RuntimeError, match="определён 2 раз"):
         authority_root.prefixes()
 
 
-def test_missing_key_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_missing_key_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     broken = tmp_path / "paths.env"
     broken.write_text("SOMETHING_ELSE=x\n")
     monkeypatch.setattr(authority_root, "PATHS_FILE", broken)
@@ -166,6 +161,7 @@ def test_every_module_sourced_by_the_merge_scripts_is_protected() -> None:
     логику гвардов своим PR (blocker ревью PR #344)."""
     import re
     from governance import accept_pr
+
     root = Path(__file__).resolve().parent.parent
     sourced: set[str] = set()
     for script in ("merge-pr.sh", "human-merge.sh"):

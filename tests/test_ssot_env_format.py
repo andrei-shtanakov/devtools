@@ -88,7 +88,10 @@ def _shell_read(path: Path, tmp_path: Path) -> str | None:
     )
     res = subprocess.run(
         ["sh", str(SCRIPT), "--print-globs"],
-        env=env, capture_output=True, text=True, check=False,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if res.returncode != 0:
         return None
@@ -111,9 +114,7 @@ def test_both_halves_agree(
     # Второй ключ — валидный и ПЕРВОЙ строкой: зонд shell-половины требует
     # оба, а случай «без завершающего перевода строки» обязан остаться
     # последней строкой файла. Python читает только KEY, ему он безразличен.
-    path.write_text(
-        f"APPROVAL_FINALIZE_SUFFIX=-final\n{content}", encoding="utf-8"
-    )
+    path.write_text(f"APPROVAL_FINALIZE_SUFFIX=-final\n{content}", encoding="utf-8")
 
     from_python = _python_read(path)
     from_shell = _shell_read(path, tmp_path)

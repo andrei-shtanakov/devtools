@@ -244,9 +244,7 @@ def save(state: RunState) -> None:
     target_dir = run_dir(state.run_id)
     target_dir.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(asdict(state), ensure_ascii=False, indent=2, sort_keys=True)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=target_dir, prefix=".run.json.", suffix=".tmp"
-    )
+    fd, tmp_name = tempfile.mkstemp(dir=target_dir, prefix=".run.json.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(payload)

@@ -1,4 +1,5 @@
 """criteria_graph: словарь приоритетов, приоритет по трассам, сироты, вывод AC."""
+
 from __future__ import annotations
 
 from governance import acceptance_guard as ag
@@ -87,7 +88,12 @@ def test_derive_ac_table():
     g2 = cgr.build_graph(REQ, BEH.replace("`kind: manual`", "`kind: unit`"), ACC)
     ac2 = g2.acs["AC-01"]
     assert cgr.derive_ac(ac2, g2, {"BEH-01": "traced", "BEH-02": "traced"}) == "traced"
-    assert cgr.derive_ac(ac2, g2, {"BEH-01": "traced", "BEH-02": "unconfirmed"}) == "unconfirmed"
-    assert cgr.derive_ac(ac2, g2, {"BEH-01": "error", "BEH-02": "unconfirmed"}) == "error"
+    assert (
+        cgr.derive_ac(ac2, g2, {"BEH-01": "traced", "BEH-02": "unconfirmed"})
+        == "unconfirmed"
+    )
+    assert (
+        cgr.derive_ac(ac2, g2, {"BEH-01": "error", "BEH-02": "unconfirmed"}) == "error"
+    )
     manual = cgr.Ac("AC-09", "manual", ("FR-01",), (), "Must")
     assert cgr.derive_ac(manual, g2, {}) == "human"

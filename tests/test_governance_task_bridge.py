@@ -58,9 +58,8 @@ def _approve_bundle(target: Path, legacy_bundle: int | None = None) -> None:
             meta["upstream_hashes"] = {u: blobs[u] for u in upstreams}
         meta[node_approval.SELF_HASH_KEY] = node_approval.self_hash(text)
         path.write_text(join_frontmatter(meta, body), encoding="utf-8")
-        blobs[task_bridge._node_id(fname)] = blob_sha1(
-            path.read_text(encoding="utf-8")
-        )
+        blobs[task_bridge._node_id(fname)] = blob_sha1(path.read_text(encoding="utf-8"))
+
 
 BEHAVIOUR_MD = """\
 ---
@@ -286,20 +285,13 @@ def test_render_tasks_structure() -> None:
     assert "## Milestone 1: Наблюдаемость (alpha#7)" in text
     assert "### TASK-001: Просмотр списка" in text
     assert "### TASK-002: Пустое состояние" in text
-    assert (
-        "Source: workstreams/WS-alpha-7/spec/15-behaviour-spec.md#BEH-01"
-        in text
-    )
+    assert "Source: workstreams/WS-alpha-7/spec/15-behaviour-spec.md#BEH-01" in text
     assert "**Traces to:** [FR-01], [NFR-02]" in text
     # последний чеклист-пункт каждой задачи — проверка, не действие
     assert (
-        "проверка группы: tests/test_x.py (kind: integration) "
-        "зелёные на BEH-01" in text
+        "проверка группы: tests/test_x.py (kind: integration) зелёные на BEH-01" in text
     )
-    assert (
-        "проверка группы: tests/test_y.py (kind: e2e) зелёные на BEH-02"
-        in text
-    )
+    assert "проверка группы: tests/test_y.py (kind: e2e) зелёные на BEH-02" in text
     # чеклист с колонки 0 (отступ молча игнорируется парсером spec-runner)
     for line in text.splitlines():
         if "[ ]" in line:
@@ -336,7 +328,9 @@ def test_render_resolutions_section_bare_heading_falls_back_to_one_liner() -> No
     assert "- **Q-01:** resolved" in lines
 
 
-def test_render_resolutions_section_fallback_bullet_has_blank_line_before_next_entry() -> None:
+def test_render_resolutions_section_fallback_bullet_has_blank_line_before_next_entry() -> (
+    None
+):
     """Минор ревью PR #160: fallback-буллет (голый заголовок Q-01, без
     завершающей пустой строки) склеивал шапку следующей записи (Q-02) в
     свой markdown-абзац — ленивое продолжение списка CommonMark/GitHub."""
@@ -388,9 +382,7 @@ class _StubOps:
     def ensure_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("ensure_branch", branch))
 
-    def commit_paths(
-        self, target_dir: str, paths: list[str], message: str
-    ) -> None:
+    def commit_paths(self, target_dir: str, paths: list[str], message: str) -> None:
         self.calls.append(("commit_paths", tuple(paths)))
         self.committed = True
 
@@ -450,9 +442,7 @@ class _StubOps:
         """
         return _bundle_from_tree(target_dir, path)
 
-    def show_file_bytes(
-        self, target_dir: str, ref: str, path: str
-    ) -> bytes | None:
+    def show_file_bytes(self, target_dir: str, ref: str, path: str) -> bytes | None:
         candidate = Path(target_dir) / path
         return candidate.read_bytes() if candidate.is_file() else None
 
@@ -513,9 +503,7 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
     # входят вовсе (§I7). Это наблюдаемое следствие, по которому
     # снаружи видно, что одобренность доставка проверяет, а не создаёт.
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
-    assert commit[1] == (
-        "spec/WS-alpha-7-tasks.md", "spec/profiles/workstream.yaml"
-    )
+    assert commit[1] == ("spec/WS-alpha-7-tasks.md", "spec/profiles/workstream.yaml")
     assert ("push_branch", "spec/WS-alpha-7-tasks") in ops.calls
     assert "draft" in ops.pr_body.lower()
     # Тело PR обещает ровно то, что PR делает: файлы бандла он не трогает.
@@ -531,13 +519,13 @@ def test_deliver_writes_spec_and_opens_pr(tmp_path: Path) -> None:
     # decomposition — терминальный узел _BUNDLE_DAG (Task 7): его блоб —
     # то, что мост пинал бы, если бы пинал.
     from governance.stale_adapter import blob_sha1
+
     anchor_blob = blob_sha1(
-        (target / "workstreams/WS-alpha-7/spec/30-decomposition.md")
-        .read_text(encoding="utf-8")
+        (target / "workstreams/WS-alpha-7/spec/30-decomposition.md").read_text(
+            encoding="utf-8"
+        )
     )
-    meta, _body = task_bridge.split_frontmatter(
-        spec.read_text(encoding="utf-8")
-    )
+    meta, _body = task_bridge.split_frontmatter(spec.read_text(encoding="utf-8"))
     assert meta["traces_to"] == ["decomposition"]
     # Черновик пина НЕ несёт (devtools#467, DEC-008): пин — подпись
     # одобрения, его ставит `spec approve --profile`, не мост.
@@ -581,9 +569,7 @@ def test_deliver_keeps_identical_stage_profile_out_of_commit(
     """Профиль общий на репо: вторая доставка в тот же репо находит эталон
     на месте и в коммит его не берёт — диф tasks-PR остаётся прозой."""
     target = _target(tmp_path)
-    rel, text = task_bridge.stage_profile(
-        "WS-alpha-7", "workstreams/WS-alpha-7/spec"
-    )
+    rel, text = task_bridge.stage_profile("WS-alpha-7", "workstreams/WS-alpha-7/spec")
     (target / rel).parent.mkdir(parents=True)
     (target / rel).write_text(text, encoding="utf-8")
     ops = _StubOps()
@@ -598,9 +584,7 @@ def test_deliver_refuses_hand_edited_stage_profile_before_branch(
     """Чужую правку общего профиля мост не перезаписывает молча — и отказ
     приходит ДО ветки доставки, как у прочих гардов."""
     target = _target(tmp_path)
-    rel, text = task_bridge.stage_profile(
-        "WS-alpha-7", "workstreams/WS-alpha-7/spec"
-    )
+    rel, text = task_bridge.stage_profile("WS-alpha-7", "workstreams/WS-alpha-7/spec")
     (target / rel).parent.mkdir(parents=True)
     (target / rel).write_text(text + "# правка\n", encoding="utf-8")
     ops = _StubOps()
@@ -616,31 +600,33 @@ def test_deliver_commits_s8_evidence_with_tasks(tmp_path: Path) -> None:
     ops = _StubOps()
     verdicts = b'{"schema":"gate-verdicts/v1","result":"pass"}\n'
 
-    assert task_bridge.deliver(
-        target_dir=str(target),
-        repo_slug="owner/alpha",
-        ws_id="WS-alpha-7",
-        subject="Наблюдаемость (alpha#7)",
-        bundle_dir="workstreams/WS-alpha-7/spec",
-        base_ref="master",
-        ops=ops,
-        s8_verdicts=verdicts,
-    ) == 77
-
-    evidence = (
-        target
-        / "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl"
+    assert (
+        task_bridge.deliver(
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="Наблюдаемость (alpha#7)",
+            bundle_dir="workstreams/WS-alpha-7/spec",
+            base_ref="master",
+            ops=ops,
+            s8_verdicts=verdicts,
+        )
+        == 77
     )
+
+    evidence = target / "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl"
     assert evidence.read_bytes() == verdicts
     commits = [call for call in ops.calls if call[0] == "commit_paths"]
-    assert commits == [(
-        "commit_paths",
+    assert commits == [
         (
-            "spec/WS-alpha-7-tasks.md",
-            "spec/profiles/workstream.yaml",
-            "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl",
-        ),
-    )]
+            "commit_paths",
+            (
+                "spec/WS-alpha-7-tasks.md",
+                "spec/profiles/workstream.yaml",
+                "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl",
+            ),
+        )
+    ]
     assert sum(call[0] == "create_draft_pr" for call in ops.calls) == 1
     assert "отдельного evidence-PR нет" in ops.pr_body
 
@@ -714,10 +700,13 @@ def test_deliver_existing_wrong_bundle_dir_names_path_and_base(
 
     with pytest.raises(RuntimeError, match="состав бандла") as failure:
         task_bridge.deliver(
-            target_dir=str(target), repo_slug="owner/alpha",
-            ws_id="WS-alpha-7", subject="s",
+            target_dir=str(target),
+            repo_slug="owner/alpha",
+            ws_id="WS-alpha-7",
+            subject="s",
             bundle_dir="workstreams/WS-alpha-7/spec",
-            base_ref="master", ops=_StubOps(),
+            base_ref="master",
+            ops=_StubOps(),
         )
     message = str(failure.value)
     assert "bundle_dir" in message
@@ -809,7 +798,9 @@ def test_render_groups_by_feature_sections() -> None:
     на секцию, полный перечень BEH внутри, секции независимы."""
     scenarios = task_bridge.parse_behaviour(FEATURED_MD)
     assert [s.feature for s in scenarios] == [
-        "Каркас", "Каркас", "Безопасность",
+        "Каркас",
+        "Каркас",
+        "Безопасность",
     ]
     text = task_bridge.render_tasks(
         ws_id="WS-x-1",
@@ -897,9 +888,7 @@ def test_feature_wave_fans_out_from_shared_featureless_prefix() -> None:
         task_bridge.Scenario(
             "BEH-03", "CLI", (), "unit", "tests/cli.py", feature="CLI"
         ),
-        task_bridge.Scenario(
-            "BEH-04", "Итог", (), "unit", "tests/all.py"
-        ),
+        task_bridge.Scenario("BEH-04", "Итог", (), "unit", "tests/all.py"),
     ]
     text = task_bridge.render_tasks(
         "WS-x-1",
@@ -922,7 +911,9 @@ def test_feature_wave_fans_out_from_shared_featureless_prefix() -> None:
 def test_plain_heading_closes_feature_section() -> None:
     """Обычный `##`-заголовок завершает Feature (приёмка PR #100, minor):
     сценарий под ним — отдельная задача 1:1, не хвост предыдущей группы."""
-    md = FEATURED_MD + """\
+    md = (
+        FEATURED_MD
+        + """\
 
 ## Особые случаи
 
@@ -931,6 +922,7 @@ def test_plain_heading_closes_feature_section() -> None:
 - **checked_by**: `status: planned` `kind: manual` `owner: qa` \
 `target: docs/manual.md`
 """
+    )
     scenarios = task_bridge.parse_behaviour(md)
     assert scenarios[-1].feature is None
     text = task_bridge.render_tasks(
@@ -950,9 +942,7 @@ def test_plain_heading_closes_feature_section() -> None:
 def test_split_join_frontmatter_roundtrip() -> None:
     meta, body = task_bridge.split_frontmatter(REQUIREMENTS_MD)
     assert meta["spec_stage"] == "requirements"
-    assert meta["upstream_hashes"] == {
-        "charter": "ab" + "0" * 38
-    }
+    assert meta["upstream_hashes"] == {"charter": "ab" + "0" * 38}
     assert body.startswith("# Requirements")
     rejoined = task_bridge.join_frontmatter(meta, body)
     meta2, body2 = task_bridge.split_frontmatter(rejoined)
@@ -983,9 +973,7 @@ def test_prospective_anchor_writes_nothing(tmp_path: Path) -> None:
     target = _target(tmp_path)
     anchor_file = target / "workstreams/WS-alpha-7/spec/30-decomposition.md"
     before = blob_sha1(anchor_file.read_text(encoding="utf-8"))
-    task_bridge._prospective_anchor(
-        str(target), "workstreams/WS-alpha-7/spec", None
-    )
+    task_bridge._prospective_anchor(str(target), "workstreams/WS-alpha-7/spec", None)
     after = blob_sha1(anchor_file.read_text(encoding="utf-8"))
     assert before == after
 
@@ -1001,10 +989,12 @@ def test_bundle_dag_has_acceptance_and_two_pin_decomposition() -> None:
     Объединяет прежний `test_bundle_dag_terminates_at_decomposition`
     (декомпозиция теперь пинует не только design)."""
     assert (
-        "25-acceptance.md", ("requirements", "behaviour-spec"),
+        "25-acceptance.md",
+        ("requirements", "behaviour-spec"),
     ) in task_bridge._BUNDLE_DAG
     assert task_bridge._BUNDLE_DAG[-1] == (
-        "30-decomposition.md", ("design", "acceptance"),
+        "30-decomposition.md",
+        ("design", "acceptance"),
     )
     assert task_bridge._ANCHOR_NODE_ID == "decomposition"
 
@@ -1025,8 +1015,11 @@ def test_dag_for_5_is_the_old_five_node_variant_not_a_slice() -> None:
     бы состав без 30-decomposition.md — не тот легаси-каталог)."""
     dag5 = task_bridge._dag_for(5)
     assert [f for f, _ in dag5] == [
-        "00-charter.md", "10-requirements.md", "15-behaviour-spec.md",
-        "20-design.md", "30-decomposition.md",
+        "00-charter.md",
+        "10-requirements.md",
+        "15-behaviour-spec.md",
+        "20-design.md",
+        "30-decomposition.md",
     ]
     # решённая ДО acceptance-эры декомпозиция пинует только design
     assert dag5[-1] == ("30-decomposition.md", ("design",))
@@ -1073,7 +1066,9 @@ def test_check_approved_legacy_anchors_on_behaviour_spec(
     _stamped_tasks(target, "15-behaviour-spec.md", extra=["BEH-01"])
     before = (target / "spec/WS-alpha-7-tasks.md").read_bytes()
     task_bridge.check_approved(
-        str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec",
+        str(target),
+        "WS-alpha-7",
+        "workstreams/WS-alpha-7/spec",
         legacy_bundle=3,
     )
     assert (target / "spec/WS-alpha-7-tasks.md").read_bytes() == before
@@ -1093,7 +1088,9 @@ def test_check_approved_legacy_bundle_without_flag_refuses(
     )
     with pytest.raises(RuntimeError) as exc_info:
         task_bridge.check_approved(
-            str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec",
+            str(target),
+            "WS-alpha-7",
+            "workstreams/WS-alpha-7/spec",
         )
     message = str(exc_info.value)
     assert "20-design.md" in message
@@ -1150,7 +1147,8 @@ def test_deliver_legacy_bundle_writes_spec_anchored_on_behaviour(
     # снаружи видно, что одобренность доставка проверяет, а не создаёт.
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
     assert commit[1] == (
-        "spec/WS-alpha-7-tasks.md", "spec/profiles/workstream-legacy3.yaml"
+        "spec/WS-alpha-7-tasks.md",
+        "spec/profiles/workstream-legacy3.yaml",
     )
     # секция резолюций design не рендерится вовсе — легаси-бандл design
     # текста не несёт
@@ -1198,9 +1196,7 @@ def test_deliver_legacy_bundle_4_writes_spec_anchored_on_design(
     )
     assert pr == 77
     spec = target / "spec/WS-alpha-7-tasks.md"
-    meta, _body = task_bridge.split_frontmatter(
-        spec.read_text(encoding="utf-8")
-    )
+    meta, _body = task_bridge.split_frontmatter(spec.read_text(encoding="utf-8"))
     assert meta["traces_to"] == ["design"]
     assert "upstream_hashes" not in meta  # пин ставит approve (#467)
     text = spec.read_text()
@@ -1276,9 +1272,7 @@ def _stamped_tasks(
         encoding="utf-8",
     )
     if with_profile:
-        legacy = {"15-behaviour-spec.md": 3, "20-design.md": 4}.get(
-            anchor_filename
-        )
+        legacy = {"15-behaviour-spec.md": 3, "20-design.md": 4}.get(anchor_filename)
         rel, text = task_bridge.stage_profile(
             "WS-alpha-7", "workstreams/WS-alpha-7/spec", legacy
         )
@@ -1294,9 +1288,7 @@ def test_check_approved_accepts_spec_runner_stamp_unchanged(
     target = _target(tmp_path)
     _stamped_tasks(target, extra=["AC-01", "BEH-01", "DT-01"])
     before = (target / "spec/WS-alpha-7-tasks.md").read_bytes()
-    task_bridge.check_approved(
-        str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
-    )
+    task_bridge.check_approved(str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec")
     assert (target / "spec/WS-alpha-7-tasks.md").read_bytes() == before
 
 
@@ -1310,8 +1302,7 @@ def test_check_approved_refuses_stale_pin(tmp_path: Path) -> None:
             str(target), "WS-alpha-7", "workstreams/WS-alpha-7/spec"
         )
     assert (
-        "spec-runner spec approve tasks --profile workstream "
-        "--spec-prefix WS-alpha-7-"
+        "spec-runner spec approve tasks --profile workstream --spec-prefix WS-alpha-7-"
     ) in str(exc_info.value)
 
 
@@ -1372,9 +1363,13 @@ def _approve_state(target: Path, monkeypatch):
 
     monkeypatch.setattr(rs, "RUNS_ROOT", target.parent / "runs")
     state = rs.new_run(
-        subject="s", repo="alpha", repo_slug="owner/alpha",
-        ws_id="WS-alpha-7", target_dir=str(target),
-        bundle_dir="workstreams/WS-alpha-7/spec", profile=None,
+        subject="s",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        target_dir=str(target),
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        profile=None,
         run_id="r-approve",
     )
     state.status = "completed"
@@ -1402,9 +1397,7 @@ def test_deliver_approve_opens_pr(tmp_path: Path, monkeypatch) -> None:
     pr = task_bridge.deliver_approve(_approve_state(target, monkeypatch), ops)
     assert pr == 77
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
-    assert commit[1] == (
-        "spec/WS-alpha-7-tasks.md", "spec/profiles/workstream.yaml"
-    )
+    assert commit[1] == ("spec/WS-alpha-7-tasks.md", "spec/profiles/workstream.yaml")
     assert ("push_branch", "spec/WS-alpha-7-tasks-approve") in ops.calls
     # Тело PR говорит то, что установлено, — не «записал spec-runner».
     assert "совпадает с текущими байтами узла" in ops.pr_body
@@ -1424,9 +1417,7 @@ def test_deliver_approve_lays_missing_profile_and_names_next_step(
         task_bridge.deliver_approve(state, ops)
     assert task_bridge.approve_command("WS-alpha-7") in str(exc_info.value)
     assert not ops.calls
-    rel, text = task_bridge.stage_profile(
-        "WS-alpha-7", "workstreams/WS-alpha-7/spec"
-    )
+    rel, text = task_bridge.stage_profile("WS-alpha-7", "workstreams/WS-alpha-7/spec")
     assert (target / rel).read_text(encoding="utf-8") == text
 
     assert task_bridge.deliver_approve(state, ops) == 77
@@ -1434,9 +1425,7 @@ def test_deliver_approve_lays_missing_profile_and_names_next_step(
     assert rel in commit[1]
 
 
-def test_deliver_approve_rerun_updates_existing_pr(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_deliver_approve_rerun_updates_existing_pr(tmp_path: Path, monkeypatch) -> None:
     """Приёмка PR #117, круги 1–2: при открытом PR ветки второй PR не
     создаётся, но свежий незакоммиченный approve-штамп ДОСТАВЛЯЕТСЯ —
     коммит и push идут в ту же ветку, а байты штампа не переписаны."""
@@ -1451,9 +1440,7 @@ def test_deliver_approve_rerun_updates_existing_pr(
     assert (target / "spec/WS-alpha-7-tasks.md").read_bytes() == before
 
 
-def test_deliver_approve_runs_over_unapproved_dag(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_deliver_approve_runs_over_unapproved_dag(tmp_path: Path, monkeypatch) -> None:
     """Гейт §I12 на `--deliver-approve` НЕ стоит (минор ревью #191, круг 2).
 
     Контракт перечисляет гейтируемые пути поимённо — первая доставка,
@@ -1472,8 +1459,7 @@ def test_deliver_approve_runs_over_unapproved_dag(
         path = bundle / fname
         meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
         meta["status"] = "draft"
-        for key in ("approved_by", "approved_at",
-                    node_approval.SELF_HASH_KEY):
+        for key in ("approved_by", "approved_at", node_approval.SELF_HASH_KEY):
             meta.pop(key, None)
         path.write_text(join_frontmatter(meta, body), encoding="utf-8")
     _stamped_tasks(target)
@@ -1575,9 +1561,7 @@ def test_stage_profile_declares_anchor_as_external_upstream(
     }
     assert tasks["name"] == "tasks"
     assert tasks["upstream"] == [anchor]
-    assert f"--profile {name} " in task_bridge.approve_command(
-        "WS-alpha-7", legacy
-    )
+    assert f"--profile {name} " in task_bridge.approve_command("WS-alpha-7", legacy)
 
 
 def test_stage_profile_refuses_non_default_bundle_dir() -> None:
@@ -1644,13 +1628,16 @@ def test_nonconsecutive_same_file_merges_into_owner_task() -> None:
     тест-файл): НЕсмежная группа с тем же файлом вливается в задачу
     первого вхождения — иначе поздняя задача не выполнит RED-фазу из-за
     byte-lock ранней (класс TASK-014/015 WS-57)."""
-    md = SAME_FILE_MD + """\
+    md = (
+        SAME_FILE_MD
+        + """\
 
 #### BEH-05: Снова про ханки
 `traces: [FR-04]`
 - **checked_by**: `status: planned` `kind: atp` `owner: qa` \
 `target: tests/core/test_osc.py::test_again`
 """
+    )
     scenarios = task_bridge.parse_behaviour(md)
     text = task_bridge.render_tasks(
         ws_id="WS-x-1",
@@ -1933,22 +1920,22 @@ def test_waived_dt_renders_standard_mode_and_carries_all_conditions() -> None:
     assert "**Mode:**" not in plain, "санкция адресна, а не на воркстрим"
 
     item = next(
-        line for line in waived.splitlines()
-        if line.startswith("- [ ] TDD-waiver")
+        line for line in waived.splitlines() if line.startswith("- [ ] TDD-waiver")
     )
     assert "класс characterisation" in item
     assert "санкция batch-approve-2026-09-09" in item
-    printed = {
-        part.strip() for part in
-        item.split("условия класса:", 1)[1].split(";")
-    }
-    assert printed == set(
-        decomposition_guard.WAIVER_CONDITIONS["characterisation"]
-    )
-    assert len([
-        line for line in waived.splitlines()
-        if line.startswith("- [ ] TDD-waiver")
-    ]) == 1, "waiver принимается целиком — пункт один, а не пять"
+    printed = {part.strip() for part in item.split("условия класса:", 1)[1].split(";")}
+    assert printed == set(decomposition_guard.WAIVER_CONDITIONS["characterisation"])
+    assert (
+        len(
+            [
+                line
+                for line in waived.splitlines()
+                if line.startswith("- [ ] TDD-waiver")
+            ]
+        )
+        == 1
+    ), "waiver принимается целиком — пункт один, а не пять"
 
 
 DT_TWO_WAIVED_MD = """\
@@ -2008,8 +1995,7 @@ def test_waiver_items_of_one_batch_sanction_survive_supersede() -> None:
         anchor_blob="ab" * 20,
     )
     items = [
-        line for line in rendered.splitlines()
-        if line.startswith("- [ ] TDD-waiver")
+        line for line in rendered.splitlines() if line.startswith("- [ ] TDD-waiver")
     ]
     assert len(items) == 2
     assert len(set(items)) == 2, "пункты двух DT побайтово совпали"
@@ -2046,10 +2032,12 @@ def test_waived_task_carries_the_machine_readable_marker() -> None:
     )
     # Ровно одна строка маркера, и ни одной у задачи без санкции: маркер
     # адресен так же, как режим.
-    assert len([
-        line for line in waived.splitlines()
-        if line.startswith("**TDD-waiver:**")
-    ]) == 1
+    assert (
+        len(
+            [line for line in waived.splitlines() if line.startswith("**TDD-waiver:**")]
+        )
+        == 1
+    )
     assert "**TDD-waiver:**" not in plain
 
 
@@ -2077,15 +2065,20 @@ def test_waived_task_carries_negative_control_marker_and_obligation() -> None:
         " :: tests/test_c.py::test_third_survives_mutant"
     )
     assert marker in waived
-    assert len([
-        line for line in waived.splitlines()
-        if line.startswith("**Negative-control:**")
-    ]) == 1
+    assert (
+        len(
+            [
+                line
+                for line in waived.splitlines()
+                if line.startswith("**Negative-control:**")
+            ]
+        )
+        == 1
+    )
     assert "**Negative-control:**" not in plain
 
     item = next(
-        line for line in waived.splitlines()
-        if line.startswith("- [ ] TDD-waiver")
+        line for line in waived.splitlines() if line.startswith("- [ ] TDD-waiver")
     )
     head = item.split("условия класса:", 1)[0]
     assert "spec/negative-controls/WS-x-1/TASK-002.patch" in head
@@ -2097,16 +2090,16 @@ def test_waived_task_carries_negative_control_marker_and_obligation() -> None:
 #: файлом в их дереве, — сосед read-only, и тест не вправе в нём ничего
 #: создавать.
 _SPEC_RUNNER_PROBE = (
-    'import json, sys\n'
-    'from pathlib import Path\n'
-    'from spec_runner.task import parse_tasks\n'
-    'from spec_runner.config import ExecutorConfig\n'
-    'tasks = {t.id: t for t in parse_tasks(Path(sys.argv[1]))}\n'
+    "import json, sys\n"
+    "from pathlib import Path\n"
+    "from spec_runner.task import parse_tasks\n"
+    "from spec_runner.config import ExecutorConfig\n"
+    "tasks = {t.id: t for t in parse_tasks(Path(sys.argv[1]))}\n"
     "config = ExecutorConfig(project_root=Path('.'), execution_mode='tdd')\n"
-    'out = {}\n'
-    'for tid, task in tasks.items():\n'
-    '    applied = config.resolve_waiver(task)\n'
-    '    out[tid] = {\n'
+    "out = {}\n"
+    "for tid, task in tasks.items():\n"
+    "    applied = config.resolve_waiver(task)\n"
+    "    out[tid] = {\n"
     "        'mode': task.execution_mode,\n"
     "        'raw': task.tdd_waiver,\n"
     "        'class': applied.node_class if applied else None,\n"
@@ -2116,8 +2109,8 @@ _SPEC_RUNNER_PROBE = (
     "            if getattr(task, 'negative_control', None) else None\n"
     "        ),\n"
     "        'control_error': getattr(task, 'negative_control_error', None),\n"
-    '    }\n'
-    'print(json.dumps(out))\n'
+    "    }\n"
+    "print(json.dumps(out))\n"
 )
 
 _SPEC_RUNNER_PROBE_ENV = "DEVTOOLS_LIVE_SPEC_RUNNER_PROBE"
@@ -2157,10 +2150,7 @@ def test_spec_runner_probe_wrapper_sets_hard_timeout(monkeypatch) -> None:
         return completed
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert (
-        _run_spec_runner_probe(["neighbour-python", "-c", "pass"])
-        is completed
-    )
+    assert _run_spec_runner_probe(["neighbour-python", "-c", "pass"]) is completed
     assert captured["timeout"] == _SPEC_RUNNER_PROBE_TIMEOUT
 
 
@@ -2311,11 +2301,7 @@ def _probe_spec_runner_selector_dictionary():
     import tempfile
 
     interpreter = (
-        Path(__file__).resolve().parents[2]
-        / "spec-runner"
-        / ".venv"
-        / "bin"
-        / "python"
+        Path(__file__).resolve().parents[2] / "spec-runner" / ".venv" / "bin" / "python"
     )
     if not interpreter.exists():
         return None
@@ -2345,8 +2331,7 @@ def _probe_spec_runner_selector_dictionary():
             text=True,
         )
     assert done.returncode == 0, (
-        "spec-runner selector dictionary probe failed:\n"
-        + (done.stderr or "")[-2000:]
+        "spec-runner selector dictionary probe failed:\n" + (done.stderr or "")[-2000:]
     )
     return json.loads(done.stdout)
 
@@ -2367,9 +2352,7 @@ def test_vendored_selector_policy_matches_spec_runner_dictionary() -> None:
 
     assert set(SELECTOR_POLICIES) == set(observed)
     for name, policy in SELECTOR_POLICIES.items():
-        assert observed[name]["supports_file_targets"] is (
-            policy.supports_file_targets
-        )
+        assert observed[name]["supports_file_targets"] is (policy.supports_file_targets)
     assert observed["pytest"]["forms"] == {
         "test_file": {"accepted": True, "code": None, "locator": "FileTarget"},
         "directory": {"accepted": False, "code": "directory", "locator": None},
@@ -2396,9 +2379,7 @@ def test_waived_task_points_its_source_at_the_declaration() -> None:
     и «источник есть» зеленели бы по отдельности при разорванной связи.
     """
     waived = _render_waived().split("### TASK-002:")[1]
-    assert (
-        "Source: workstreams/WS-x-1/spec/30-decomposition.md#DT-02" in waived
-    )
+    assert "Source: workstreams/WS-x-1/spec/30-decomposition.md#DT-02" in waived
     assert "**Mode:** standard" in waived
 
 
@@ -2503,17 +2484,18 @@ def test_verify_dt_renders_union_of_checked_by_and_verifies() -> None:
     dt_tasks, findings = decomposition_guard.parse_dt_tasks(dt)
     assert findings == []
     text = task_bridge.render_tasks_dt(
-        ws_id="WS-x-1", subject="s", bundle_path="b/30-decomposition.md",
-        scenarios=scenarios, dt_tasks=dt_tasks,
-        generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/30-decomposition.md",
+        scenarios=scenarios,
+        dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00",
+        anchor_blob="ab" * 20,
     )
     # tests/test_a.py — собственная checked_by-цель BEH-01 (DT_BEHAVIOUR_MD)
     # — ОБЯЗАНА присутствовать, идёт ПЕРВОЙ; verifies — следом, в порядке
     # объявления, с дедупом повторного tests/test_z.py.
-    assert (
-        "**Verifies:** tests/test_a.py, tests/test_z.py, tests/test_y.py"
-        in text
-    )
+    assert "**Verifies:** tests/test_a.py, tests/test_z.py, tests/test_y.py" in text
 
 
 def test_verify_dt_union_dedups_by_full_selector_not_by_file() -> None:
@@ -2541,9 +2523,13 @@ def test_verify_dt_union_dedups_by_full_selector_not_by_file() -> None:
     dt_tasks, findings = decomposition_guard.parse_dt_tasks(dt)
     assert findings == []
     text = task_bridge.render_tasks_dt(
-        ws_id="WS-x-1", subject="s", bundle_path="b/30-decomposition.md",
-        scenarios=scenarios, dt_tasks=dt_tasks,
-        generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/30-decomposition.md",
+        scenarios=scenarios,
+        dt_tasks=dt_tasks,
+        generated_at="2026-09-05T12:00:00",
+        anchor_blob="ab" * 20,
     )
     assert (
         "**Verifies:** tests/test_a.py::test_five, tests/test_a.py, "
@@ -2570,19 +2556,18 @@ def test_verify_dt_union_keeps_both_selectors_of_own_scenarios_sharing_a_file() 
         "scenarios: [BEH-01, BEH-02]\ndepends_on: []\n"
         "delivered_by: []\nparallel_group: solo\n"
     )
-    dt_tasks_verify, findings_verify = decomposition_guard.parse_dt_tasks(
-        dt_verify
-    )
+    dt_tasks_verify, findings_verify = decomposition_guard.parse_dt_tasks(dt_verify)
     assert findings_verify == []
     text = task_bridge.render_tasks_dt(
-        ws_id="WS-x-1", subject="s", bundle_path="b/30-decomposition.md",
-        scenarios=scenarios, dt_tasks=dt_tasks_verify,
-        generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/30-decomposition.md",
+        scenarios=scenarios,
+        dt_tasks=dt_tasks_verify,
+        generated_at="2026-09-05T12:00:00",
+        anchor_blob="ab" * 20,
     )
-    assert (
-        "**Verifies:** tests/test_shared.py::t1, tests/test_shared.py::t2"
-        in text
-    )
+    assert "**Verifies:** tests/test_shared.py::t1, tests/test_shared.py::t2" in text
 
 
 def test_verify_dt_excludes_manual_checked_by_targets_from_declared_group() -> None:
@@ -2638,14 +2623,18 @@ def test_verify_dt_without_checked_by_targets_refuses() -> None:
     dt_tasks, _ = decomposition_guard.parse_dt_tasks(dt)
     with pytest.raises(RuntimeError, match="нечего прогонять"):
         task_bridge.render_tasks_dt(
-            ws_id="WS-x-1", subject="s",
+            ws_id="WS-x-1",
+            subject="s",
             bundle_path="b/30-decomposition.md",
-            scenarios=scenarios, dt_tasks=dt_tasks,
-            generated_at="2026-09-05T12:00:00", anchor_blob="ab" * 20,
+            scenarios=scenarios,
+            dt_tasks=dt_tasks,
+            generated_at="2026-09-05T12:00:00",
+            anchor_blob="ab" * 20,
         )
 
 
-DECOMPOSITION_SHARED_FILE_MD = """\
+DECOMPOSITION_SHARED_FILE_MD = (
+    """\
 ---
 spec_stage: decomposition
 status: draft
@@ -2653,7 +2642,9 @@ version: 1
 owner_role: tech-lead
 traces_to: [design]
 upstream_hashes:
-  design: """ + "12" * 20 + """
+  design: """
+    + "12" * 20
+    + """
 ---
 ## Задачи
 
@@ -2667,6 +2658,7 @@ scenarios: [BEH-02]
 depends_on: []
 parallel_group: solo
 """
+)
 
 SHARED_FILE_BEHAVIOUR_MD = """\
 ---
@@ -2701,9 +2693,7 @@ def test_dt_path_skips_merge_featureless(tmp_path: Path) -> None:
     (bundle / "15-behaviour-spec.md").write_text(SHARED_FILE_BEHAVIOUR_MD)
     (bundle / "20-design.md").write_text(DESIGN_MD)
     (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
-    (bundle / "30-decomposition.md").write_text(
-        DECOMPOSITION_SHARED_FILE_MD
-    )
+    (bundle / "30-decomposition.md").write_text(DECOMPOSITION_SHARED_FILE_MD)
     ops = _StubOps()
     with pytest.raises(RuntimeError) as exc_info:
         task_bridge.deliver(
@@ -2719,12 +2709,11 @@ def test_dt_path_skips_merge_featureless(tmp_path: Path) -> None:
     assert "single-owner" in message
     assert "tests/test_shared.py" in message
     assert not any(c[0] == "ensure_branch" for c in ops.calls)
-    assert (
-        bundle / "30-decomposition.md"
-    ).read_text() == DECOMPOSITION_SHARED_FILE_MD
+    assert (bundle / "30-decomposition.md").read_text() == DECOMPOSITION_SHARED_FILE_MD
 
 
-DECOMPOSITION_VERIFY_MD = """\
+DECOMPOSITION_VERIFY_MD = (
+    """\
 ---
 spec_stage: decomposition
 status: draft
@@ -2732,7 +2721,9 @@ version: 1
 owner_role: tech-lead
 traces_to: [design]
 upstream_hashes:
-  design: """ + "12" * 20 + """
+  design: """
+    + "12" * 20
+    + """
 ---
 ## Задачи
 
@@ -2748,6 +2739,7 @@ delivered_by: [DT-01]
 parallel_group: solo
 verifies: [tests/test_y.py]
 """
+)
 
 
 def test_deliver_verify_dt_now_delivers(
@@ -2823,7 +2815,8 @@ def test_deliver_does_not_check_verifies_path_existence_on_disk(
 # легаси-вход, что fatal-находка формы (round 1) отказывала бы на
 # graph_findings ДО рендера, делая заявленный checked_by-fallback
 # render_tasks_dt недостижимым.
-DECOMPOSITION_VERIFY_LEGACY_MD = """\
+DECOMPOSITION_VERIFY_LEGACY_MD = (
+    """\
 ---
 spec_stage: decomposition
 status: draft
@@ -2831,7 +2824,9 @@ version: 1
 owner_role: tech-lead
 traces_to: [design]
 upstream_hashes:
-  design: """ + "12" * 20 + """
+  design: """
+    + "12" * 20
+    + """
 ---
 ## Задачи
 
@@ -2846,6 +2841,7 @@ depends_on: [DT-01]
 delivered_by: [DT-01]
 parallel_group: solo
 """
+)
 
 
 def test_deliver_legacy_verify_dt_without_verifies_still_delivers(
@@ -2867,9 +2863,7 @@ def test_deliver_legacy_verify_dt_without_verifies_still_delivers(
     (bundle / "15-behaviour-spec.md").write_text(BEHAVIOUR_MD)
     (bundle / "20-design.md").write_text(DESIGN_MD)
     (bundle / "25-acceptance.md").write_text(ACCEPTANCE_MD)
-    (bundle / "30-decomposition.md").write_text(
-        DECOMPOSITION_VERIFY_LEGACY_MD
-    )
+    (bundle / "30-decomposition.md").write_text(DECOMPOSITION_VERIFY_LEGACY_MD)
     ops = _StubOps()
     pr = task_bridge.deliver(
         target_dir=str(target),
@@ -2888,9 +2882,7 @@ def test_deliver_legacy_verify_dt_without_verifies_still_delivers(
     assert "**Verifies:** tests/test_y.py" in spec_text
 
 
-def _target_legacy_5(
-    tmp_path: Path, behaviour_md: str, decomposition_md: str
-) -> Path:
+def _target_legacy_5(tmp_path: Path, behaviour_md: str, decomposition_md: str) -> Path:
     """Бандл из пяти узлов (00/10/15/20/30) — эра ДО раскатки
     acceptance-узла: соседний репо уже несёт design и decomposition, но
     acceptance ещё не раскатан (Task 7 плана acceptance-node)."""
@@ -2912,7 +2904,9 @@ def test_legacy_5_invalid_dt_graph_refuses(tmp_path: Path) -> None:
     `test_dt_path_skips_merge_featureless`) отказывает RuntimeError из
     `graph_findings` ДО создания ветки."""
     target = _target_legacy_5(
-        tmp_path, SHARED_FILE_BEHAVIOUR_MD, DECOMPOSITION_SHARED_FILE_MD,
+        tmp_path,
+        SHARED_FILE_BEHAVIOUR_MD,
+        DECOMPOSITION_SHARED_FILE_MD,
     )
     ops = _StubOps()
     with pytest.raises(RuntimeError) as exc_info:
@@ -2959,9 +2953,7 @@ def test_legacy_5_goes_dt_path_with_graph_validation(tmp_path: Path) -> None:
     # входят вовсе (§I7). Это наблюдаемое следствие, по которому
     # снаружи видно, что одобренность доставка проверяет, а не создаёт.
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
-    assert commit[1] == (
-        "spec/WS-alpha-7-tasks.md", "spec/profiles/workstream.yaml"
-    )
+    assert commit[1] == ("spec/WS-alpha-7-tasks.md", "spec/profiles/workstream.yaml")
 
 
 def test_deliver_refuses_bare_file_target_for_exunit_before_branch(
@@ -3012,8 +3004,7 @@ def test_deliver_full_dag_renders_via_render_tasks_dt(tmp_path: Path) -> None:
     text = (target / "spec/WS-alpha-7-tasks.md").read_text()
     assert "### TASK-001: Реализация" in text
     assert "(DT-01, группа solo)" in text
-    assert "Source: workstreams/WS-alpha-7/spec/30-decomposition.md#DT-01" \
-        in text
+    assert "Source: workstreams/WS-alpha-7/spec/30-decomposition.md#DT-01" in text
 
 
 def test_parse_behaviour_reads_letter_suffixed_beh_id() -> None:
@@ -3038,7 +3029,10 @@ def test_tasks_frontmatter_carries_owner_role() -> None:
     from governance.task_bridge import _render_header
 
     lines = _render_header(
-        "WS-X", "s", "2026-01-01T00:00:00Z", "0" * 40,
+        "WS-X",
+        "s",
+        "2026-01-01T00:00:00Z",
+        "0" * 40,
         anchor_node_id="decomposition",
     )
     assert "owner_role: stream-owner" in lines
@@ -3056,8 +3050,12 @@ def test_traces_to_renders_each_ref_in_own_brackets() -> None:
         "`target: tests/test_a.py::test_x`\n"
     )
     text = task_bridge.render_tasks(
-        "WS-X", "s", "b/15-behaviour-spec.md", scenarios,
-        "2026-01-01T00:00:00Z", "0" * 40,
+        "WS-X",
+        "s",
+        "b/15-behaviour-spec.md",
+        scenarios,
+        "2026-01-01T00:00:00Z",
+        "0" * 40,
     )
     assert "**Traces to:** [FR-02], [FR-03]" in text
     refs = re.findall(r"\[([A-Z]+-\d+)\]", text.split("**Traces to:**")[1])
@@ -3237,8 +3235,13 @@ def _unapprove(state, fname: str = "00-charter.md") -> None:
 #: `run.json` и к тому, что появляется в форджe, а git-чекаут контракт
 #: прямо называет не-эффектом.
 _EFFECT_CALLS = (
-    "ensure_branch", "commit_paths", "push_branch", "create_draft_pr",
-    "create_pr", "merge", "close_pr",
+    "ensure_branch",
+    "commit_paths",
+    "push_branch",
+    "create_draft_pr",
+    "create_pr",
+    "merge",
+    "close_pr",
 )
 
 
@@ -3274,9 +3277,7 @@ def test_gate_refusal_on_debt_leaves_the_ledger_byte_identical(
     assert not _effects(ops), "ни одного delivery-эффекта"
 
 
-def test_gate_refusal_on_unresolved_is_not_a_debt(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_gate_refusal_on_unresolved_is_not_a_debt(tmp_path: Path, monkeypatch) -> None:
     """Неустановленный состав — отдельный исход, а не долг.
 
     Слипнись они, `UNAVAILABLE` начал бы закрывать дверь, которую
@@ -3304,7 +3305,8 @@ def test_gate_refusal_on_unresolved_is_not_a_debt(
 
 
 def test_gate_refusal_on_changed_discovery_source_is_not_retryable(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     from governance import run_state as rs
 
@@ -3352,9 +3354,7 @@ def test_wave_fate_is_recorded_before_any_delivery_effect(
 
     state = _recon_state(tmp_path, monkeypatch)
     nodes = bundle_dag.composition(task_bridge._dag_for(None))
-    al.open_wave_record(
-        state, 1, nodes, bundle_dag.composition_fingerprint(nodes)
-    )
+    al.open_wave_record(state, 1, nodes, bundle_dag.composition_fingerprint(nodes))
     ops = _ReconOps()
     trace: list[str] = []
     ops.calls = trace  # type: ignore[assignment]
@@ -3371,10 +3371,11 @@ def test_wave_fate_is_recorded_before_any_delivery_effect(
 
     closed = trace.index("wave:completed")
     effects = [
-        i for i, call in enumerate(trace)
+        i
+        for i, call in enumerate(trace)
         if not isinstance(call, str)
-        and call[0] in ("ensure_branch", "commit_paths", "push_branch",
-                        "create_draft_pr")
+        and call[0]
+        in ("ensure_branch", "commit_paths", "push_branch", "create_draft_pr")
     ]
     assert effects, "эффекты вообще были"
     assert closed < min(effects), "волна закрыта раньше первого эффекта"
@@ -3400,14 +3401,15 @@ def test_deliver_for_run_write_ahead_op_and_completion(
     assert (
         Path(state.target_dir)
         / "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl"
-    ).read_text(encoding="utf-8") == (
-        '{"schema":"gate-verdicts/v1","result":"pass"}\n'
-    )
-    assert ("commit_paths", (
-        "spec/WS-alpha-7-tasks.md",
-        "spec/profiles/workstream.yaml",
-        "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl",
-    )) in ops.calls
+    ).read_text(encoding="utf-8") == ('{"schema":"gate-verdicts/v1","result":"pass"}\n')
+    assert (
+        "commit_paths",
+        (
+            "spec/WS-alpha-7-tasks.md",
+            "spec/profiles/workstream.yaml",
+            "workstreams/WS-alpha-7/evidence/s8-gate-verdicts.jsonl",
+        ),
+    ) in ops.calls
     # Повтор: op completed → ни одного нового ЭФФЕКТА. База при этом
     # освежается — шорткат стоит после pull'а, и это не эффект: без
     # свежего клона повтор судил бы протухшее состояние.
@@ -3443,9 +3445,7 @@ def test_deliver_for_run_adopts_existing_pr_by_branch(
     принимается как доставка, новый PR не создаётся."""
     from governance import run_state as rs
 
-    state = _recon_state(
-        tmp_path, monkeypatch, op={"status": "started"}
-    )
+    state = _recon_state(tmp_path, monkeypatch, op={"status": "started"})
     ops = _ReconOps(existing_pr=91)
     assert task_bridge.deliver_for_run(state, ops) == 91
     assert ("find_pr", "spec/WS-alpha-7-tasks") in ops.calls
@@ -3505,9 +3505,7 @@ def test_deliver_for_run_closed_unmerged_pr_fails_closed(
         task_bridge.deliver_for_run(state, _ClosedOps())
 
 
-def test_deliver_for_run_records_anchor_of_stamp(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_deliver_for_run_records_anchor_of_stamp(tmp_path: Path, monkeypatch) -> None:
     """Новая v1 сохраняет `pr`, `anchor` (§I2) и `content_anchor` (§I5).
 
     Без `content_anchor` сверка §I5 у первого переиздания невозможна, и
@@ -3523,16 +3521,16 @@ def test_deliver_for_run_records_anchor_of_stamp(
     # способом, каким его посчитает переиздание (§I2). Подпись — та, что
     # `_ReconOps.pr_facts` отдаёт для бандл-PR: другой штамп дал бы другие
     # байты анкера, и совпадение ничего бы не значило.
-    expected = task_bridge._prospective_anchor(
-        state.target_dir, state.bundle_dir, None
-    )
+    expected = task_bridge._prospective_anchor(state.target_dir, state.bundle_dir, None)
     # А вот `content_anchor` от подписи не зависит вовсе — считается без неё.
     expected_content = task_bridge._content_anchor(
         state.target_dir, state.bundle_dir, None
     )
     assert task_bridge.deliver_for_run(state, _ReconOps()) == 77
     assert rs.load("r-recon").ops["tasks-deliver"] == {
-        "status": "completed", "pr": 77, "anchor": expected,
+        "status": "completed",
+        "pr": 77,
+        "anchor": expected,
         "content_anchor": expected_content,
     }
 
@@ -3572,9 +3570,7 @@ def test_deliver_for_run_reconciled_pr_records_anchor_from_head(
             self.asked.append((sha, rel_path))
             return "блоб-анкера-из-PR"
 
-        def show_file(
-            self, target_dir: str, ref: str, path: str
-        ) -> str | None:
+        def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
             # head-коммит PR-а несёт то же дерево бандла, что и рабочее:
             # состав узлов реалистичен, а аргументы сверяются — спросив
             # не тот ref, прод получил бы None и молча ушёл в §6.
@@ -3590,9 +3586,7 @@ def test_deliver_for_run_reconciled_pr_records_anchor_from_head(
         state.target_dir, state.bundle_dir, None
     )
     assert task_bridge.deliver_for_run(state, ops) == 91
-    assert ops.asked == [
-        ("head-91", "workstreams/WS-alpha-7/spec/30-decomposition.md")
-    ]
+    assert ops.asked == [("head-91", "workstreams/WS-alpha-7/spec/30-decomposition.md")]
     # Реконсиляция читает бандл в ГОЛОВЕ PR — там лежит доставленное
     # содержание. Гейт на этом пути не работает вовсе: доставки не будет,
     # защищать нечего, а отказ по сегодняшнему состоянию отменил бы
@@ -3602,7 +3596,9 @@ def test_deliver_for_run_reconciled_pr_records_anchor_from_head(
         for fname, _ in task_bridge._BUNDLE_DAG
     ]
     assert rs.load("r-recon").ops["tasks-deliver"] == {
-        "status": "completed", "pr": 91, "anchor": "блоб-анкера-из-PR",
+        "status": "completed",
+        "pr": 91,
+        "anchor": "блоб-анкера-из-PR",
         "content_anchor": expected_content,
     }
 
@@ -3622,7 +3618,9 @@ def test_deliver_for_run_reconciled_pr_without_head_stays_open(
     op = task_bridge.deliver_for_run(state, _ReconOps(existing_pr=91))
     assert op == 91
     assert rs.load("r-recon").ops["tasks-deliver"] == {
-        "status": "completed", "pr": 91, "anchor": None,
+        "status": "completed",
+        "pr": 91,
+        "anchor": None,
         "content_anchor": None,
     }
 
@@ -3660,9 +3658,7 @@ def test_last_delivery_prefers_highest_revision(tmp_path, monkeypatch):
     # deliver_for_run тестов) — дефолт _recon_state оставляет ops пустым,
     # и трогать этот дефолт нельзя: три соседних deliver_for_run теста
     # полагаются на «свежий», ещё не completed op.
-    state = _recon_state(
-        tmp_path, monkeypatch, op={"status": "completed", "pr": 5}
-    )
+    state = _recon_state(tmp_path, monkeypatch, op={"status": "completed", "pr": 5})
     n, op = tb._last_delivery(state)
     assert (n, op["pr"]) == (1, 5)
     tb._complete_revision(state, 2, pr=10, anchor="a")
@@ -3677,9 +3673,7 @@ def test_last_delivery_prefers_highest_revision(tmp_path, monkeypatch):
     assert (n3, op3["pr"]) == (3, 11)
 
 
-def test_last_delivery_prefers_highest_completed_over_abandoned(
-    tmp_path, monkeypatch
-):
+def test_last_delivery_prefers_highest_completed_over_abandoned(tmp_path, monkeypatch):
     """Старшая ЗАВЕРШЁННАЯ, а не старшая вообще: v4 брошена, доставка — v3.
 
     Штатный след операторского выхода `--abandon-revision N`: над
@@ -3690,9 +3684,7 @@ def test_last_delivery_prefers_highest_completed_over_abandoned(
     from governance import task_bridge as tb
 
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
-    state = _recon_state(
-        tmp_path, monkeypatch, op={"status": "completed", "pr": 5}
-    )
+    state = _recon_state(tmp_path, monkeypatch, op={"status": "completed", "pr": 5})
     tb._complete_revision(state, 2, pr=10, anchor="a")
     tb._complete_revision(state, 3, pr=11, anchor="b")
     tb._start_revision(state, 4, {"branch": "b4", "base_sha": "s"})
@@ -3711,9 +3703,7 @@ def test_last_delivery_skips_started(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
-    state = _recon_state(
-        tmp_path, monkeypatch, op={"status": "completed", "pr": 5}
-    )
+    state = _recon_state(tmp_path, monkeypatch, op={"status": "completed", "pr": 5})
     tb._start_revision(state, 2, {"branch": "b", "base_sha": "s"})
     n, op = tb._last_delivery(state)
     assert (n, op["pr"]) == (1, 5)
@@ -3741,17 +3731,21 @@ def test_start_revision_records_full_intent(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     state = _recon_state(tmp_path, monkeypatch)
-    tb._start_revision(state, 2, {
-        "branch": "spec/WS-alpha-7-tasks-v2",
-        "base_sha": "deadbeef",
-        "prospective_anchor": "anchor2",
-        "tasks_version": 3,
-        "dag": ["00-charter.md"],
-        "dag_source": "previous_delivery",
-        "supersedes": 1,
-        "expected_generated_at": "2026-09-09T10:00:00+03:00",
-        "tasks_blob": "blob2",
-    })
+    tb._start_revision(
+        state,
+        2,
+        {
+            "branch": "spec/WS-alpha-7-tasks-v2",
+            "base_sha": "deadbeef",
+            "prospective_anchor": "anchor2",
+            "tasks_version": 3,
+            "dag": ["00-charter.md"],
+            "dag_source": "previous_delivery",
+            "supersedes": 1,
+            "expected_generated_at": "2026-09-09T10:00:00+03:00",
+            "tasks_blob": "blob2",
+        },
+    )
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["status"] == "started"
     assert saved["revision"] == 2
@@ -3802,9 +3796,7 @@ def test_completed_v1_op_is_never_rewritten(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
-    state = _recon_state(
-        tmp_path, monkeypatch, op={"status": "completed", "pr": 5}
-    )
+    state = _recon_state(tmp_path, monkeypatch, op={"status": "completed", "pr": 5})
     before = dict(state.ops["tasks-deliver"])
     tb._complete_revision(state, 2, pr=10, anchor="a")
     assert rs.load("r-recon").ops["tasks-deliver"] == before
@@ -3836,10 +3828,12 @@ def _pr_signature(pr: int) -> tuple[str, str]:
 
 
 _FULL_FACTS = {
-    "state": "MERGED", "baseRefName": "master",
+    "state": "MERGED",
+    "baseRefName": "master",
     # Значения — только маркер «поле есть»: конкретную подпись
     # `_ProvOps.pr_facts` подставляет по НОМЕРУ PR (`_pr_signature`).
-    "mergedAt": "-", "mergedBy": {"login": "-"},
+    "mergedAt": "-",
+    "mergedBy": {"login": "-"},
 }
 
 
@@ -3856,9 +3850,17 @@ class _ProvOps(_StubOps):
     различении.
     """
 
-    def __init__(self, commit="c1", prs=None, files=None, facts=None,
-                 commits=None, prs_by_sha=None, files_by_pr=None,
-                 branch_prs=None):
+    def __init__(
+        self,
+        commit="c1",
+        prs=None,
+        files=None,
+        facts=None,
+        commits=None,
+        prs_by_sha=None,
+        files_by_pr=None,
+        branch_prs=None,
+    ):
         super().__init__()
         self.commit, self.prs = commit, (prs if prs is not None else [])
         # Точечные переопределения скаляров: путь → SHA, SHA → список PR,
@@ -3916,8 +3918,11 @@ class _ProvOps(_StubOps):
 
 
 _MERGED_PR = {
-    "number": 403, "state": "MERGED", "baseRefName": "master",
-    "mergedAt": "2026-09-09T05:00:00Z", "mergedBy": "andrei-shtanakov",
+    "number": 403,
+    "state": "MERGED",
+    "baseRefName": "master",
+    "mergedAt": "2026-09-09T05:00:00Z",
+    "mergedBy": "andrei-shtanakov",
     "mergeCommit": "c1",
 }
 
@@ -3964,12 +3969,7 @@ class _ShowFileOps:
 
 
 def _spec_text(traces_to: str) -> str:
-    return (
-        "---\n"
-        "spec_stage: tasks\n"
-        f"traces_to:\n- {traces_to}\n"
-        "---\n\nbody\n"
-    )
+    return f"---\nspec_stage: tasks\ntraces_to:\n- {traces_to}\n---\n\nbody\n"
 
 
 def test_previous_dag_from_revision_record(tmp_path, monkeypatch) -> None:
@@ -3978,16 +3978,18 @@ def test_previous_dag_from_revision_record(tmp_path, monkeypatch) -> None:
     state = _recon_state(tmp_path, monkeypatch)
     prev = {"dag": [list(x) for x in tb._BUNDLE_DAG]}
     dag, source, _reason = tb._previous_dag(
-        state, _ShowFileOps(None), prev, state.target_dir, state.bundle_dir,
+        state,
+        _ShowFileOps(None),
+        prev,
+        state.target_dir,
+        state.bundle_dir,
         _BASE_SHA,
     )
     assert source == "previous_delivery"
     assert dag == tb._BUNDLE_DAG
 
 
-def test_previous_dag_derived_from_bundle_composition(
-    tmp_path, monkeypatch
-) -> None:
+def test_previous_dag_derived_from_bundle_composition(tmp_path, monkeypatch) -> None:
     """Легаси-v1 без записи dag: состав каталога совпадает ровно с одним
     вариантом _dag_for, И traces_to доставленной спеки указывает на его
     якорь."""
@@ -3996,7 +3998,12 @@ def test_previous_dag_derived_from_bundle_composition(
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps(_spec_text("decomposition"))
     dag, source, _reason = tb._previous_dag(
-        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
+        state,
+        ops,
+        {"pr": 5},
+        state.target_dir,
+        state.bundle_dir,
+        _BASE_SHA,
     )
     assert source == "derived_from_spec"
     assert dag == tb._BUNDLE_DAG
@@ -4026,14 +4033,17 @@ def test_previous_dag_unavailable_when_composition_matches_nothing(
     (Path(state.target_dir) / state.bundle_dir / "15-behaviour-spec.md").unlink()
     ops = _ShowFileOps(_spec_text("decomposition"))
     dag, source, _reason = tb._previous_dag(
-        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
+        state,
+        ops,
+        {"pr": 5},
+        state.target_dir,
+        state.bundle_dir,
+        _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
 
 
-def test_previous_dag_refuses_when_bundle_dir_missing(
-    tmp_path, monkeypatch
-) -> None:
+def test_previous_dag_refuses_when_bundle_dir_missing(tmp_path, monkeypatch) -> None:
     """Каталога бандла нет — отказ с путём, а не сырой FileNotFoundError.
 
     Ветка вывода состава исполняется для ЛЮБОЙ сегодняшней v1
@@ -4051,17 +4061,19 @@ def test_previous_dag_refuses_when_bundle_dir_missing(
     ops = _ShowFileOps(_spec_text("decomposition"))
     with pytest.raises(RuntimeError, match="каталога бандла") as exc:
         tb._previous_dag(
-            state, ops, {"pr": 5}, state.target_dir, state.bundle_dir,
+            state,
+            ops,
+            {"pr": 5},
+            state.target_dir,
+            state.bundle_dir,
             _BASE_SHA,
         )
     assert state.bundle_dir in str(exc.value)
-    assert "run.json" in str(exc.value)          # процедура, не только факт
-    assert ops.calls == []                       # до чтения спеки не дошло
+    assert "run.json" in str(exc.value)  # процедура, не только факт
+    assert ops.calls == []  # до чтения спеки не дошло
 
 
-def test_previous_dag_legacy_requires_delivered_spec(
-    tmp_path, monkeypatch
-) -> None:
+def test_previous_dag_legacy_requires_delivered_spec(tmp_path, monkeypatch) -> None:
     """Спеки в base нет (show_file -> None) → (None, "unavailable"),
     хотя состав каталога совпал ровно с одним вариантом."""
     from governance import task_bridge as tb
@@ -4069,14 +4081,17 @@ def test_previous_dag_legacy_requires_delivered_spec(
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps(None)
     dag, source, _reason = tb._previous_dag(
-        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
+        state,
+        ops,
+        {"pr": 5},
+        state.target_dir,
+        state.bundle_dir,
+        _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
 
 
-def test_previous_dag_legacy_rejects_anchor_mismatch(
-    tmp_path, monkeypatch
-) -> None:
+def test_previous_dag_legacy_rejects_anchor_mismatch(tmp_path, monkeypatch) -> None:
     """Состав каталога дал 6-узловой вариант (якорь decomposition), а
     traces_to доставленной спеки — behaviour-spec → (None, "unavailable")."""
     from governance import task_bridge as tb
@@ -4084,28 +4099,34 @@ def test_previous_dag_legacy_rejects_anchor_mismatch(
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps(_spec_text("behaviour-spec"))
     dag, source, _reason = tb._previous_dag(
-        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
+        state,
+        ops,
+        {"pr": 5},
+        state.target_dir,
+        state.bundle_dir,
+        _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
 
 
-def test_previous_dag_legacy_unparsable_frontmatter(
-    tmp_path, monkeypatch
-) -> None:
+def test_previous_dag_legacy_unparsable_frontmatter(tmp_path, monkeypatch) -> None:
     """show_file вернул текст без frontmatter → (None, "unavailable")."""
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps("no frontmatter here\n")
     dag, source, _reason = tb._previous_dag(
-        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
+        state,
+        ops,
+        {"pr": 5},
+        state.target_dir,
+        state.bundle_dir,
+        _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
 
 
-def test_previous_dag_legacy_broken_yaml_is_unavailable(
-    tmp_path, monkeypatch
-) -> None:
+def test_previous_dag_legacy_broken_yaml_is_unavailable(tmp_path, monkeypatch) -> None:
     """Разделители целы, YAML битый → §6-путь `(None, "unavailable")`.
 
     Соседний тест подаёт текст БЕЗ frontmatter (ValueError-ветка); сбой
@@ -4116,14 +4137,17 @@ def test_previous_dag_legacy_broken_yaml_is_unavailable(
     state = _recon_state(tmp_path, monkeypatch)
     ops = _ShowFileOps("---\nspec_stage: tasks\ntraces_to: [a, b\n---\n\nx\n")
     dag, source, _reason = tb._previous_dag(
-        state, ops, {"pr": 5}, state.target_dir, state.bundle_dir, _BASE_SHA,
+        state,
+        ops,
+        {"pr": 5},
+        state.target_dir,
+        state.bundle_dir,
+        _BASE_SHA,
     )
     assert (dag, source) == (None, "unavailable")
 
 
-def test_previous_dag_legacy_rejects_malformed_traces_to(
-    tmp_path, monkeypatch
-) -> None:
+def test_previous_dag_legacy_rejects_malformed_traces_to(tmp_path, monkeypatch) -> None:
     """traces_to не список (строка вместо списка) и traces_to — пустой
     список: обе формы дают (None, "unavailable"), а не «совпало» — состав
     каталога один совпадает ровно с одним вариантом (_target — полный
@@ -4131,14 +4155,16 @@ def test_previous_dag_legacy_rejects_malformed_traces_to(
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    not_a_list = (
-        "---\nspec_stage: tasks\ntraces_to: decomposition\n---\n\nbody\n"
-    )
+    not_a_list = "---\nspec_stage: tasks\ntraces_to: decomposition\n---\n\nbody\n"
     empty_list = "---\nspec_stage: tasks\ntraces_to: []\n---\n\nbody\n"
     for text in (not_a_list, empty_list):
         ops = _ShowFileOps(text)
         dag, source, _reason = tb._previous_dag(
-            state, ops, {"pr": 5}, state.target_dir, state.bundle_dir,
+            state,
+            ops,
+            {"pr": 5},
+            state.target_dir,
+            state.bundle_dir,
             _BASE_SHA,
         )
         assert (dag, source) == (None, "unavailable")
@@ -4156,8 +4182,12 @@ def test_reconcile_completed_open_pr_returns_it():
     `test_supersede_returns_existing_pr_when_revision_completed`."""
     from governance import task_bridge as tb
 
-    op = {"status": "completed", "pr": 42, "base_sha": "s",
-          "branch": "spec/WS-alpha-7-tasks-v2"}
+    op = {
+        "status": "completed",
+        "pr": 42,
+        "base_sha": "s",
+        "branch": "spec/WS-alpha-7-tasks-v2",
+    }
     facts = {"state": "OPEN", "headRefOid": "h"}
     assert tb._reconcile_revision(2, op, "s", 42, facts) == "return_pr"
 
@@ -4168,21 +4198,29 @@ def test_reconcile_started_merged_pr_completes():
     Строка §I3, до фикс-круга 1 не покрытая ни одним тестом (major #1)."""
     from governance import task_bridge as tb
 
-    op = {"status": "started", "base_sha": "s", "head_sha": "h",
-          "branch": "spec/WS-alpha-7-tasks-v2"}
+    op = {
+        "status": "started",
+        "base_sha": "s",
+        "head_sha": "h",
+        "branch": "spec/WS-alpha-7-tasks-v2",
+    }
     facts = {"state": "MERGED", "headRefOid": "h"}
     assert tb._reconcile_revision(2, op, "s", 7, facts) == "complete"
 
 
 def test_reconcile_completed_closed_unmerged_fails_closed():
-    """"любое" состояние ревизии в таблице §I3 включает completed.
+    """ "любое" состояние ревизии в таблице §I3 включает completed.
 
     PR закрыт без мержа отказывает и после успешной доставки, не только
     для started (фикс-круг 1, добавление #3)."""
     from governance import task_bridge as tb
 
-    op = {"status": "completed", "pr": 42, "base_sha": "s",
-          "branch": "spec/WS-alpha-7-tasks-v2"}
+    op = {
+        "status": "completed",
+        "pr": 42,
+        "base_sha": "s",
+        "branch": "spec/WS-alpha-7-tasks-v2",
+    }
     with pytest.raises(RuntimeError, match="отклонена"):
         tb._reconcile_revision(2, op, "s", 42, {"state": "CLOSED"})
 
@@ -4194,8 +4232,13 @@ def test_reconcile_completed_identity_mismatch_fails_closed():
     половина)."""
     from governance import task_bridge as tb
 
-    op = {"status": "completed", "pr": 42, "base_sha": "s",
-          "head_sha": "mine", "branch": "spec/WS-alpha-7-tasks-v2"}
+    op = {
+        "status": "completed",
+        "pr": 42,
+        "base_sha": "s",
+        "head_sha": "mine",
+        "branch": "spec/WS-alpha-7-tasks-v2",
+    }
     facts = {"state": "OPEN", "headRefOid": "someone-else"}
     with pytest.raises(RuntimeError, match="идентичность"):
         tb._reconcile_revision(2, op, "s", 42, facts)
@@ -4204,8 +4247,13 @@ def test_reconcile_completed_identity_mismatch_fails_closed():
 def test_reconcile_started_open_pr_same_base_continues():
     from governance import task_bridge as tb
 
-    op = {"status": "started", "base_sha": "s", "head_sha": "h",
-          "tasks_blob": "b", "branch": "spec/WS-alpha-7-tasks-v2"}
+    op = {
+        "status": "started",
+        "base_sha": "s",
+        "head_sha": "h",
+        "tasks_blob": "b",
+        "branch": "spec/WS-alpha-7-tasks-v2",
+    }
     facts = {"state": "OPEN", "headRefOid": "h"}
     assert tb._reconcile_revision(2, op, "s", 7, facts) == "continue"
 
@@ -4213,8 +4261,7 @@ def test_reconcile_started_open_pr_same_base_continues():
 def test_reconcile_started_open_pr_shifted_base_fails_closed():
     from governance import task_bridge as tb
 
-    op = {"status": "started", "base_sha": "old", "head_sha": "h",
-          "branch": "b"}
+    op = {"status": "started", "base_sha": "old", "head_sha": "h", "branch": "b"}
     facts = {"state": "OPEN", "headRefOid": "h"}
     with pytest.raises(RuntimeError, match="--abandon-revision"):
         tb._reconcile_revision(2, op, "new", 7, facts)
@@ -4231,8 +4278,7 @@ def test_reconcile_closed_unmerged_fails_closed():
 def test_reconcile_identity_mismatch_fails_closed():
     from governance import task_bridge as tb
 
-    op = {"status": "started", "base_sha": "s", "head_sha": "mine",
-          "branch": "b"}
+    op = {"status": "started", "base_sha": "s", "head_sha": "mine", "branch": "b"}
     facts = {"state": "OPEN", "headRefOid": "someone-else"}
     with pytest.raises(RuntimeError, match="идентичность"):
         tb._reconcile_revision(2, op, "s", 7, facts)
@@ -4251,8 +4297,7 @@ def test_reconcile_missing_head_ref_oid_fails_closed():
     """
     from governance import task_bridge as tb
 
-    op = {"status": "started", "base_sha": "s", "head_sha": "mine",
-          "branch": "b"}
+    op = {"status": "started", "base_sha": "s", "head_sha": "mine", "branch": "b"}
     with pytest.raises(RuntimeError, match="идентичность не проверить"):
         tb._reconcile_revision(2, op, "s", 7, {"state": "MERGED"})
 
@@ -4280,8 +4325,12 @@ def test_recover_commit_accepts_matching_local_commit(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    op = {"head_sha": None, "base_sha": "base1", "tasks_blob": "blob1",
-          "branch": "spec/WS-alpha-7-tasks-v2"}
+    op = {
+        "head_sha": None,
+        "base_sha": "base1",
+        "tasks_blob": "blob1",
+        "branch": "spec/WS-alpha-7-tasks-v2",
+    }
 
     class _Ops(_ReconOps):
         def rev_parse(self, target_dir, ref):
@@ -4298,9 +4347,7 @@ def test_recover_commit_accepts_matching_local_commit(tmp_path, monkeypatch):
     assert tb._recover_commit(state, _Ops(), 2, op) is None
 
 
-def test_recover_commit_branch_at_base_means_no_commit_yet(
-    tmp_path, monkeypatch
-):
+def test_recover_commit_branch_at_base_means_no_commit_yet(tmp_path, monkeypatch):
     """§I3.1 «null | подходящего коммита нет»: ветка стоит на base.
 
     `deliver` создаёт ветку (`ensure_branch` от HEAD = base) ЗАДОЛГО до
@@ -4311,8 +4358,12 @@ def test_recover_commit_branch_at_base_means_no_commit_yet(
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    op = {"head_sha": None, "base_sha": "base1", "tasks_blob": None,
-          "branch": "spec/WS-alpha-7-tasks-v2"}
+    op = {
+        "head_sha": None,
+        "base_sha": "base1",
+        "tasks_blob": None,
+        "branch": "spec/WS-alpha-7-tasks-v2",
+    }
 
     class _Ops(_ReconOps):
         def rev_parse(self, target_dir, ref):
@@ -4328,9 +4379,7 @@ def test_recover_commit_branch_at_base_means_no_commit_yet(
     assert tb._recover_commit(state, _Ops(), 2, op) is None
 
 
-def test_recover_commit_branch_at_base_after_blob_written(
-    tmp_path, monkeypatch
-):
+def test_recover_commit_branch_at_base_after_blob_written(tmp_path, monkeypatch):
     """То же окно, но `tasks_blob` уже записан хуком `before_commit`.
 
     Различитель «коммита ещё нет» — ветка на `base_sha`, а не пустой
@@ -4339,8 +4388,12 @@ def test_recover_commit_branch_at_base_after_blob_written(
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    op = {"head_sha": None, "base_sha": "base1", "tasks_blob": "blob1",
-          "branch": "spec/WS-alpha-7-tasks-v2"}
+    op = {
+        "head_sha": None,
+        "base_sha": "base1",
+        "tasks_blob": "blob1",
+        "branch": "spec/WS-alpha-7-tasks-v2",
+    }
 
     class _Ops(_ReconOps):
         def rev_parse(self, target_dir, ref):
@@ -4365,8 +4418,11 @@ def test_recover_commit_moved_branch_message_claims_only_local_head(
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    op = {"head_sha": "наш-коммит", "base_sha": "base1",
-          "branch": "spec/WS-alpha-7-tasks-v2"}
+    op = {
+        "head_sha": "наш-коммит",
+        "base_sha": "base1",
+        "branch": "spec/WS-alpha-7-tasks-v2",
+    }
 
     class _Ops(_ReconOps):
         def rev_parse(self, target_dir, ref):
@@ -4393,12 +4449,15 @@ def test_recover_commit_refuses_recorded_head_without_local_branch(
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    op = {"head_sha": "запушенный-коммит", "base_sha": "base1",
-          "branch": "spec/WS-alpha-7-tasks-v2"}
+    op = {
+        "head_sha": "запушенный-коммит",
+        "base_sha": "base1",
+        "branch": "spec/WS-alpha-7-tasks-v2",
+    }
 
     class _Ops(_ReconOps):
         def rev_parse(self, target_dir, ref):
-            return None          # ветки ревизии в этом клоне нет
+            return None  # ветки ревизии в этом клоне нет
 
     with pytest.raises(RuntimeError, match="в этом клоне нет") as exc:
         tb._recover_commit(state, _Ops(), 2, op)
@@ -4409,8 +4468,12 @@ def test_recover_commit_refuses_foreign_commit(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    op = {"head_sha": None, "base_sha": "base1", "tasks_blob": "blob1",
-          "branch": "spec/WS-alpha-7-tasks-v2"}
+    op = {
+        "head_sha": None,
+        "base_sha": "base1",
+        "tasks_blob": "blob1",
+        "branch": "spec/WS-alpha-7-tasks-v2",
+    }
 
     class _Ops(_ReconOps):
         def rev_parse(self, target_dir, ref):
@@ -4426,9 +4489,7 @@ def test_recover_commit_refuses_foreign_commit(tmp_path, monkeypatch):
         tb._recover_commit(state, _Ops(), 2, op)
 
 
-def test_recover_commit_refuses_right_parent_wrong_blob(
-    tmp_path, monkeypatch
-):
+def test_recover_commit_refuses_right_parent_wrong_blob(tmp_path, monkeypatch):
     """Вторая половина сверки идентичности §I3.1: родитель ТОТ, блоб чужой.
 
     Соседний тест ломает только родителя, и пока это был единственный
@@ -4442,18 +4503,22 @@ def test_recover_commit_refuses_right_parent_wrong_blob(
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    op = {"head_sha": None, "base_sha": "base1", "tasks_blob": "blob1",
-          "branch": "spec/WS-alpha-7-tasks-v2"}
+    op = {
+        "head_sha": None,
+        "base_sha": "base1",
+        "tasks_blob": "blob1",
+        "branch": "spec/WS-alpha-7-tasks-v2",
+    }
 
     class _Ops(_ReconOps):
         def rev_parse(self, target_dir, ref):
             return "commitX" if "tasks-v2" in ref else None
 
         def commit_parent(self, target_dir, sha):
-            return "base1"          # родитель СОВПАЛ с намерением
+            return "base1"  # родитель СОВПАЛ с намерением
 
         def blob_in_commit(self, target_dir, sha, rel_path):
-            return "blobX"          # а содержимое спеки — чужое
+            return "blobX"  # а содержимое спеки — чужое
 
     with pytest.raises(RuntimeError, match="чужой коммит"):
         tb._recover_commit(state, _Ops(), 2, op)
@@ -4516,12 +4581,14 @@ _REFUSAL_COMPOSITION = "доавторьте"
 def _add_file(name: str, text: str = "# заметка автора\n"):
     def _mutate(bundle: Path) -> None:
         (bundle / name).write_text(text, encoding="utf-8")
+
     return _mutate
 
 
 def _remove_file(name: str):
     def _mutate(bundle: Path) -> None:
         (bundle / name).unlink()
+
     return _mutate
 
 
@@ -4529,6 +4596,7 @@ def _combine(*mutators):
     def _mutate(bundle: Path) -> None:
         for mutator in mutators:
             mutator(bundle)
+
     return _mutate
 
 
@@ -4537,7 +4605,10 @@ def _i8_refused(result: object) -> bool:
 
 
 def _deliver_over_bundle(
-    root: Path, monkeypatch, capsys, *,
+    root: Path,
+    monkeypatch,
+    capsys,
+    *,
     mutate_bundle=None,
     op: dict | None = None,
     ops_factory=None,
@@ -4582,9 +4653,7 @@ class _SpecTextOps(_SupersedeOps):
         return super().show_file(target_dir, ref, path)
 
 
-def _unavailable_inputs(
-    tmp_path: Path, monkeypatch, capsys
-) -> dict[str, str]:
+def _unavailable_inputs(tmp_path: Path, monkeypatch, capsys) -> dict[str, str]:
     """Пять входов, по одному на каждую ветку `unavailable` по существу
     (**U-1**…**U-5**, общие допущения behaviour-spec) — каждый в своём
     каталоге; возвращает вывод каждого прогона."""
@@ -4593,30 +4662,39 @@ def _unavailable_inputs(
     # U-1: состав каталога (после фильтрации по известным именам) не
     # сходится ни с одним из четырёх известных вариантов DAG.
     _, out = _deliver_over_bundle(
-        tmp_path / "u1", monkeypatch, capsys,
+        tmp_path / "u1",
+        monkeypatch,
+        capsys,
         mutate_bundle=_remove_file("15-behaviour-spec.md"),
     )
     outputs["U-1"] = out
 
     # U-2: доставленной tasks-спеки нет в base.
     _, out = _deliver_over_bundle(
-        tmp_path / "u2", monkeypatch, capsys,
+        tmp_path / "u2",
+        monkeypatch,
+        capsys,
         ops_factory=lambda: _SpecTextOps(None, prs=[_MERGED_PR]),
     )
     outputs["U-2"] = out
 
     # U-3: frontmatter доставленной tasks-спеки не разбирается.
     _, out = _deliver_over_bundle(
-        tmp_path / "u3", monkeypatch, capsys,
+        tmp_path / "u3",
+        monkeypatch,
+        capsys,
         ops_factory=lambda: _SpecTextOps(
-            "no frontmatter here\n", prs=[_MERGED_PR],
+            "no frontmatter here\n",
+            prs=[_MERGED_PR],
         ),
     )
     outputs["U-3"] = out
 
     # U-4: traces_to пуст (форма, отвергаемая наравне с «не список»).
     _, out = _deliver_over_bundle(
-        tmp_path / "u4", monkeypatch, capsys,
+        tmp_path / "u4",
+        monkeypatch,
+        capsys,
         ops_factory=lambda: _SpecTextOps(
             "---\nspec_stage: tasks\ntraces_to: []\n---\n\nbody\n",
             prs=[_MERGED_PR],
@@ -4626,9 +4704,12 @@ def _unavailable_inputs(
 
     # U-5: якорь traces_to не совпал с терминальным узлом кандидата.
     _, out = _deliver_over_bundle(
-        tmp_path / "u5", monkeypatch, capsys,
+        tmp_path / "u5",
+        monkeypatch,
+        capsys,
         ops_factory=lambda: _SpecTextOps(
-            _spec_text("behaviour-spec"), prs=[_MERGED_PR],
+            _spec_text("behaviour-spec"),
+            prs=[_MERGED_PR],
         ),
     )
     outputs["U-5"] = out
@@ -4642,15 +4723,17 @@ def test_beh01_stray_readme_does_not_change_supersede_outcome(
     from governance import task_bridge as tb
 
     plain_result, plain_out = _deliver_over_bundle(
-        tmp_path / "plain", monkeypatch, capsys,
+        tmp_path / "plain",
+        monkeypatch,
+        capsys,
     )
     readme_result, readme_out = _deliver_over_bundle(
-        tmp_path / "readme", monkeypatch, capsys,
+        tmp_path / "readme",
+        monkeypatch,
+        capsys,
         mutate_bundle=_add_file("README.md"),
     )
-    assert plain_result == readme_result == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert plain_result == readme_result == tb.SupersedeResult("delivered", 77)
     assert _SKIP_I8_PREFIX not in plain_out
     assert _SKIP_I8_PREFIX not in readme_out
 
@@ -4666,15 +4749,17 @@ def test_beh02_author_note_shaped_like_a_node_does_not_change_outcome(
     from governance import task_bridge as tb
 
     plain_result, plain_out = _deliver_over_bundle(
-        tmp_path / "plain", monkeypatch, capsys,
+        tmp_path / "plain",
+        monkeypatch,
+        capsys,
     )
     notes_result, notes_out = _deliver_over_bundle(
-        tmp_path / "notes", monkeypatch, capsys,
+        tmp_path / "notes",
+        monkeypatch,
+        capsys,
         mutate_bundle=_add_file("40-notes.md"),
     )
-    assert plain_result == notes_result == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert plain_result == notes_result == tb.SupersedeResult("delivered", 77)
     assert _SKIP_I8_PREFIX not in plain_out
     assert _SKIP_I8_PREFIX not in notes_out
 
@@ -4685,7 +4770,10 @@ def test_beh03_i8_check_runs_and_passes_with_stray_file(
     from governance import task_bridge as tb
 
     result, out = _deliver_over_bundle(
-        tmp_path, monkeypatch, capsys, mutate_bundle=_add_file("README.md"),
+        tmp_path,
+        monkeypatch,
+        capsys,
+        mutate_bundle=_add_file("README.md"),
     )
     assert result == tb.SupersedeResult("delivered", 77)
     assert _REFUSAL_I8 not in out
@@ -4696,13 +4784,18 @@ def test_beh04_real_mismatch_still_refuses_with_and_without_stray_file(
     tmp_path, monkeypatch, capsys
 ) -> None:
     plain_result, _ = _deliver_over_bundle(
-        tmp_path / "plain", monkeypatch, capsys,
+        tmp_path / "plain",
+        monkeypatch,
+        capsys,
         mutate_bundle=_remove_file("25-acceptance.md"),
     )
     stray_result, _ = _deliver_over_bundle(
-        tmp_path / "stray", monkeypatch, capsys,
+        tmp_path / "stray",
+        monkeypatch,
+        capsys,
         mutate_bundle=_combine(
-            _remove_file("25-acceptance.md"), _add_file("README.md"),
+            _remove_file("25-acceptance.md"),
+            _add_file("README.md"),
         ),
     )
     for result in (plain_result, stray_result):
@@ -4714,7 +4807,9 @@ def test_beh05_refusal_is_attributed_to_i8_not_composition_check(
     tmp_path, monkeypatch, capsys
 ) -> None:
     result, out = _deliver_over_bundle(
-        tmp_path, monkeypatch, capsys,
+        tmp_path,
+        monkeypatch,
+        capsys,
         mutate_bundle=_remove_file("25-acceptance.md"),
     )
     assert isinstance(result, RuntimeError)
@@ -4730,20 +4825,29 @@ def test_beh06_no_skip_word_on_either_settled_outcome(
     состоявшейся сверки §I8 слова о пропуске нет ни разу, ни с посторонним
     файлом в каталоге, ни без него."""
     _, passed_plain = _deliver_over_bundle(
-        tmp_path / "p-plain", monkeypatch, capsys,
+        tmp_path / "p-plain",
+        monkeypatch,
+        capsys,
     )
     _, passed_stray = _deliver_over_bundle(
-        tmp_path / "p-stray", monkeypatch, capsys,
+        tmp_path / "p-stray",
+        monkeypatch,
+        capsys,
         mutate_bundle=_add_file("README.md"),
     )
     _, failed_plain = _deliver_over_bundle(
-        tmp_path / "f-plain", monkeypatch, capsys,
+        tmp_path / "f-plain",
+        monkeypatch,
+        capsys,
         mutate_bundle=_remove_file("25-acceptance.md"),
     )
     _, failed_stray = _deliver_over_bundle(
-        tmp_path / "f-stray", monkeypatch, capsys,
+        tmp_path / "f-stray",
+        monkeypatch,
+        capsys,
         mutate_bundle=_combine(
-            _remove_file("25-acceptance.md"), _add_file("README.md"),
+            _remove_file("25-acceptance.md"),
+            _add_file("README.md"),
         ),
     )
     for out in (passed_plain, passed_stray, failed_plain, failed_stray):
@@ -4782,33 +4886,39 @@ def test_beh11_word_present_iff_comparison_was_cancelled(
     from governance import task_bridge as tb
 
     unavailable_outputs = _unavailable_inputs(
-        tmp_path / "u", monkeypatch, capsys,
+        tmp_path / "u",
+        monkeypatch,
+        capsys,
     )
     for label, out in unavailable_outputs.items():
         assert _SKIP_I8_PREFIX in out, label
 
     # previous_delivery (v2, записанный `dag`, совпавший с активным).
     _, v2_out = _deliver_over_bundle(
-        tmp_path / "v2", monkeypatch, capsys,
+        tmp_path / "v2",
+        monkeypatch,
+        capsys,
         op={"dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG], "anchor": "X"},
     )
     assert _SKIP_I8_PREFIX not in v2_out
 
     # derived_from_spec: совпавший состав (BEH-01) и разошедшийся (BEH-04).
     _, matched_out = _deliver_over_bundle(
-        tmp_path / "matched", monkeypatch, capsys,
+        tmp_path / "matched",
+        monkeypatch,
+        capsys,
     )
     assert _SKIP_I8_PREFIX not in matched_out
     _, mismatched_out = _deliver_over_bundle(
-        tmp_path / "mismatched", monkeypatch, capsys,
+        tmp_path / "mismatched",
+        monkeypatch,
+        capsys,
         mutate_bundle=_remove_file("25-acceptance.md"),
     )
     assert _SKIP_I8_PREFIX not in mismatched_out
 
 
-def test_beh12_word_names_check_state_and_reason(
-    tmp_path, monkeypatch, capsys
-) -> None:
+def test_beh12_word_names_check_state_and_reason(tmp_path, monkeypatch, capsys) -> None:
     outputs = _unavailable_inputs(tmp_path, monkeypatch, capsys)
     for label, out in outputs.items():
         line = next(ln for ln in out.splitlines() if _SKIP_I8_PREFIX in ln)
@@ -4843,9 +4953,7 @@ _OWN_REASON = {
 }
 
 
-def test_beh13_each_input_reads_its_own_reason(
-    tmp_path, monkeypatch, capsys
-) -> None:
+def test_beh13_each_input_reads_its_own_reason(tmp_path, monkeypatch, capsys) -> None:
     """DEL-17, ревью integration-PR #443: попарная различность не ловит
     перестановку причин между ветками — «верная строка с чужой причиной»
     (FR-06). Каждый вход обязан нести признак СВОЕЙ причины и ни одного
@@ -4895,14 +5003,23 @@ def test_beh15_v2_verdict_is_not_moved_by_catalog_contents(
 
     op = {"dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG], "anchor": "X"}
     matching, _ = _deliver_over_bundle(
-        tmp_path / "match", monkeypatch, capsys, op=op,
+        tmp_path / "match",
+        monkeypatch,
+        capsys,
+        op=op,
     )
     stray, _ = _deliver_over_bundle(
-        tmp_path / "stray", monkeypatch, capsys, op=op,
+        tmp_path / "stray",
+        monkeypatch,
+        capsys,
+        op=op,
         mutate_bundle=_add_file("README.md"),
     )
     missing, _ = _deliver_over_bundle(
-        tmp_path / "missing", monkeypatch, capsys, op=op,
+        tmp_path / "missing",
+        monkeypatch,
+        capsys,
+        op=op,
         mutate_bundle=_remove_file("25-acceptance.md"),
     )
     for result in (matching, stray, missing):
@@ -4953,13 +5070,15 @@ def test_beh18_hermetic_and_uses_real_directories(
     root = tmp_path / "hermetic"
     bundle = root / "alpha/workstreams/WS-alpha-7/spec"
     result, out = _deliver_over_bundle(
-        root, monkeypatch, capsys, mutate_bundle=_add_file("README.md"),
+        root,
+        monkeypatch,
+        capsys,
+        mutate_bundle=_add_file("README.md"),
     )
     assert (bundle / "README.md").is_file()
     assert (bundle / "00-charter.md").is_file()
     assert result == tb.SupersedeResult("delivered", 77)
     assert _SKIP_I8_PREFIX not in out
-
 
 
 def test_supersede_result_refuses_inconsistent_kind() -> None:
@@ -4976,9 +5095,7 @@ def test_supersede_result_refuses_inconsistent_kind() -> None:
         tb.SupersedeResult("noop", 5)
 
 
-def test_supersede_equal_content_anchor_is_traceless_noop(
-    tmp_path, monkeypatch
-):
+def test_supersede_equal_content_anchor_is_traceless_noop(tmp_path, monkeypatch):
     """Равный `content_anchor`: RC-успех, run.json побайтово прежний.
 
     Сверка §I5 идёт по `content_anchor` — signature-free хэшу DAG, а не по
@@ -4992,7 +5109,9 @@ def test_supersede_equal_content_anchor_is_traceless_noop(
     state = _recon_state(tmp_path, monkeypatch)
     content = tb._content_anchor(state.target_dir, state.bundle_dir, None)
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 5, "anchor": "БЛОБ-ДОСТАВКИ-v1",
+        "status": "completed",
+        "pr": 5,
+        "anchor": "БЛОБ-ДОСТАВКИ-v1",
         "content_anchor": content,
     }
     rs.save(state)
@@ -5007,44 +5126,41 @@ def test_supersede_equal_content_anchor_is_traceless_noop(
     # поиска correction-PR, «последним, кто трогал анкер» оказывался
     # штамп-коммит нашего же tasks-PR — на нём дефект и стоял.
     assert ops.touched == []
-    assert not [c for c in ops.calls if c[0] in (
-        "prs_containing_commit", "pr_files"
-    )]
+    assert not [c for c in ops.calls if c[0] in ("prs_containing_commit", "pr_files")]
     # `pr_facts` по PR первой доставки (#5) — это §I3, не §I7; предмет
     # утверждения — что фактов correction-PR (#403) никто не спрашивал.
     assert ("pr_facts", 403) not in ops.calls
 
 
-def test_supersede_changed_anchor_opens_new_branch_and_pr(
-    tmp_path, monkeypatch
-):
+def test_supersede_changed_anchor_opens_new_branch_and_pr(tmp_path, monkeypatch):
     from governance import run_state as rs
     from governance import task_bridge as tb
     from governance.stale_adapter import blob_sha1
 
     state = _supersede_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
+    state.ops["tasks-deliver"] = {
+        "status": "completed",
+        "pr": 5,
+        "anchor": "СТАРЫЙ-ДРУГОЙ",
+    }
     rs.save(state)
     ops = _SupersedeOps(prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("delivered", 77)
     assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops.calls
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["status"] == "completed"
     assert saved["supersedes"] == 1
     # Поля записи, а не только PR и ветка (minor ревью Task 7, B10):
     # незаполненные head_sha/tasks_blob раньше не ловились ничем.
-    delivered = (
-        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
-    ).read_text(encoding="utf-8")
-    assert saved["head_sha"] == "commit-sha-1"   # SHA коммита, не базы
+    delivered = (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").read_text(
+        encoding="utf-8"
+    )
+    assert saved["head_sha"] == "commit-sha-1"  # SHA коммита, не базы
     assert saved["tasks_blob"] == blob_sha1(delivered)
     assert saved["tasks_version"] == 2
     assert saved["prospective_anchor"] == saved["anchor"]
     assert saved["dag_source"] == "derived_from_spec"
-    assert rs.load("r-recon").ops["tasks-deliver"]["pr"] == 5   # v1 цела
+    assert rs.load("r-recon").ops["tasks-deliver"]["pr"] == 5  # v1 цела
 
 
 # --- §I7 на РЕАЛЬНОМ состоянии base: бандл уже проштампован ---------------
@@ -5060,9 +5176,7 @@ _PREV_MERGER = "prev-bundle-merger"
 _PREV_MERGED_AT = "2026-09-01T00:00:00Z"
 
 
-def _stamp_base_as_previous_delivery(
-    state, legacy_bundle: int | None = None
-) -> None:
+def _stamp_base_as_previous_delivery(state, legacy_bundle: int | None = None) -> None:
     """Бандл в base после прошлой доставки: узлы честно одобрены.
 
     Имя осталось от эпохи штампа; штампует теперь не доставка, а человек
@@ -5072,9 +5186,7 @@ def _stamp_base_as_previous_delivery(
     _approve_bundle(Path(state.target_dir), legacy_bundle)
 
 
-def _apply_correction_to_anchor(
-    state, anchor: str = "30-decomposition.md"
-) -> None:
+def _apply_correction_to_anchor(state, anchor: str = "30-decomposition.md") -> None:
     """Correction правит ТЕЛО анкера, затем человек узел ПЕРЕОДОБРЯЕТ.
 
     Второй шаг обязателен, и это следствие катовера: правка тела
@@ -5101,9 +5213,7 @@ def _anchor_meta(state, anchor: str = "30-decomposition.md") -> dict:
     from governance import task_bridge as tb
 
     meta, _ = tb.split_frontmatter(
-        (Path(state.target_dir) / state.bundle_dir / anchor).read_text(
-            encoding="utf-8"
-        )
+        (Path(state.target_dir) / state.bundle_dir / anchor).read_text(encoding="utf-8")
     )
     return meta
 
@@ -5115,8 +5225,11 @@ def _supersede_over_stamped_base(tmp_path, monkeypatch):
     state = _recon_state(tmp_path, monkeypatch)
     _stamp_base_as_previous_delivery(state)
     _apply_correction_to_anchor(state)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
+    state.ops["tasks-deliver"] = {
+        "status": "completed",
+        "pr": 5,
+        "anchor": "СТАРЫЙ-ДРУГОЙ",
+    }
     rs.save(state)
     return state, _SupersedeOps(prs=[_MERGED_PR])
 
@@ -5135,9 +5248,7 @@ def test_supersede_restamp_keeps_node_version(tmp_path, monkeypatch):
     assert _anchor_meta(state)["version"] == before
 
 
-def test_supersede_refreshes_base_before_reading_facts(
-    tmp_path, monkeypatch
-):
+def test_supersede_refreshes_base_before_reading_facts(tmp_path, monkeypatch):
     """Первый шаг порядка — синхронизация base, и её видно по фактам.
 
     `_previous_tasks_version` читает рабочее дерево НАПРЯМУЮ ровно потому,
@@ -5154,8 +5265,7 @@ def test_supersede_refreshes_base_before_reading_facts(
     from governance import task_bridge as tb
 
     state = _supersede_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     rs.save(state)
 
     class _RefreshingOps(_SupersedeOps):
@@ -5167,13 +5277,11 @@ def test_supersede_refreshes_base_before_reading_facts(
             )
 
     ops = _RefreshingOps(prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("delivered", 77)
     assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_version"] == 8
-    text = (
-        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
-    ).read_text(encoding="utf-8")
+    text = (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").read_text(
+        encoding="utf-8"
+    )
     assert "version: 8" in text
 
 
@@ -5185,8 +5293,7 @@ def test_supersede_version_is_monotonic(tmp_path, monkeypatch):
     (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").write_text(
         "---\nspec_stage: tasks\nversion: 4\n---\n", encoding="utf-8"
     )
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     ops = _SupersedeOps(prs=[_MERGED_PR])
     tb.deliver_superseded(state, ops)
     text = (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").read_text()
@@ -5199,7 +5306,9 @@ def test_supersede_dag_mismatch_fails_closed(tmp_path, monkeypatch):
 
     state = _recon_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ",
+        "status": "completed",
+        "pr": 5,
+        "anchor": "СТАРЫЙ",
         "dag": [["00-charter.md", []], ["10-requirements.md", ["charter"]]],
     }
     rs.save(state)
@@ -5230,9 +5339,7 @@ def _v1_anchor_of_current_tree(state):
     """
     from governance import task_bridge as tb
 
-    return tb._prospective_anchor(
-        state.target_dir, state.bundle_dir, None
-    )
+    return tb._prospective_anchor(state.target_dir, state.bundle_dir, None)
 
 
 @pytest.mark.parametrize(
@@ -5240,9 +5347,7 @@ def _v1_anchor_of_current_tree(state):
     [{}, {"content_anchor": None}, "anchor-без-content"],
     ids=["ключа-нет", "content-anchor-null", "старый-anchor-не-в-счёт"],
 )
-def test_supersede_unavailable_without_content_anchor(
-    v1_extra, tmp_path, monkeypatch
-):
+def test_supersede_unavailable_without_content_anchor(v1_extra, tmp_path, monkeypatch):
     """§6: сверять не с чем — «ключа нет», `null` и запись СТАРОГО образца.
 
     Легаси-леджер ключа не несёт вовсе; новая реконсиляция может честно
@@ -5260,7 +5365,8 @@ def test_supersede_unavailable_without_content_anchor(
     state = _supersede_state(tmp_path, monkeypatch)
     extra = (
         {"anchor": _v1_anchor_of_current_tree(state)}
-        if isinstance(v1_extra, str) else v1_extra
+        if isinstance(v1_extra, str)
+        else v1_extra
     )
     state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, **extra}
     rs.save(state)
@@ -5293,9 +5399,7 @@ def _bundle_bytes(state) -> dict:
     from governance import task_bridge as tb
 
     base = Path(state.target_dir) / state.bundle_dir
-    return {
-        fname: (base / fname).read_bytes() for fname, _ in tb._dag_for(None)
-    }
+    return {fname: (base / fname).read_bytes() for fname, _ in tb._dag_for(None)}
 
 
 def test_legacy_v1_with_migration_debt_refuses_at_the_gate(
@@ -5327,7 +5431,8 @@ def test_legacy_v1_with_migration_debt_refuses_at_the_gate(
     state = _supersede_state(tmp_path, monkeypatch)
     _migration_debt(state)
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 5,
+        "status": "completed",
+        "pr": 5,
         # величина эпохи v1: голый хэш, без префикса
         "content_anchor": "0" * 40,
     }
@@ -5366,7 +5471,9 @@ def test_legacy_v1_after_full_approval_delivers_once_and_writes_v2(
 
     state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 5, "content_anchor": "0" * 40,
+        "status": "completed",
+        "pr": 5,
+        "content_anchor": "0" * 40,
     }
     rs.save(state)
 
@@ -5418,7 +5525,9 @@ def test_forgotten_legacy_flag_refuses_by_composition_not_by_the_gate(
     # проходит и вызов доходит до `_content_anchor` — того места, где
     # раньше вылетал сырой FileNotFoundError.
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ",
+        "status": "completed",
+        "pr": 5,
+        "anchor": "СТАРЫЙ",
         "dag": [[f, list(u)] for f, u in tb._dag_for(None)],
     }
     rs.save(state)
@@ -5481,20 +5590,23 @@ def test_supersede_legacy_bundle_drives_the_whole_path(tmp_path, monkeypatch):
     # переиздания оставляет вмерженный tasks-PR доставки v1.
     _stamp_base_as_previous_delivery(state, legacy_bundle=5)
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ",
+        "status": "completed",
+        "pr": 5,
+        "anchor": "СТАРЫЙ",
     }
     rs.save(state)
     ops = _SupersedeOps(prs=[_MERGED_PR])
 
-    assert tb.deliver_superseded(
-        state, ops, legacy_bundle=5
-    ) == tb.SupersedeResult("delivered", 77)
+    assert tb.deliver_superseded(state, ops, legacy_bundle=5) == tb.SupersedeResult(
+        "delivered", 77
+    )
 
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["dag"] == [[f, list(u)] for f, u in tb._BUNDLE_DAG_LEGACY5]
     assert saved["dag_source"] == "derived_from_spec"
     asked = [
-        c[2] for c in ops.calls
+        c[2]
+        for c in ops.calls
         if c[0] == "show_file" and c[2].startswith(f"{state.bundle_dir}/")
     ]
     assert asked == [
@@ -5502,9 +5614,7 @@ def test_supersede_legacy_bundle_drives_the_whole_path(tmp_path, monkeypatch):
     ], "гейт §I12 читал ровно узлы легаси-эры"
 
 
-def test_supersede_right_after_delivery_is_traceless_noop(
-    tmp_path, monkeypatch
-):
+def test_supersede_right_after_delivery_is_traceless_noop(tmp_path, monkeypatch):
     """Первый `--supersede` сразу после обычной доставки — бесследный no-op.
 
     Сквозной случай §I5, ради которого v1 и обязана писать
@@ -5534,9 +5644,7 @@ def test_supersede_right_after_delivery_is_traceless_noop(
     # трогал анкер» после доставки становится штамп-коммит нашего же
     # tasks-PR, и порядок обязан не давать принять его за correction.
     assert ops.touched == []
-    assert not [c for c in ops.calls if c[0] in (
-        "prs_containing_commit", "pr_files"
-    )]
+    assert not [c for c in ops.calls if c[0] in ("prs_containing_commit", "pr_files")]
     assert ("pr_facts", 403) not in ops.calls
 
 
@@ -5551,7 +5659,8 @@ def _debt_nodes(out: str) -> set[str]:
     head = next(i for i, s in enumerate(lines) if s.startswith("в активном DAG"))
     return {
         s.removeprefix("- ").split(":", 1)[0]
-        for s in lines[head + 1:] if s.startswith("- ")
+        for s in lines[head + 1 :]
+        if s.startswith("- ")
     }
 
 
@@ -5575,8 +5684,7 @@ def _erase_signature(state, fname: str = "00-charter.md") -> str:
     path.write_text(join_frontmatter(meta, body), encoding="utf-8")
     node = task_bridge._node_id(fname)
     return {node} | {
-        task_bridge._node_id(f)
-        for f, ups in task_bridge._dag_for(None) if node in ups
+        task_bridge._node_id(f) for f, ups in task_bridge._dag_for(None) if node in ups
     }
 
 
@@ -5612,9 +5720,7 @@ def test_traceless_noop_names_the_debt_nodes(tmp_path, monkeypatch, capsys):
     before = _ledger_bytes()
 
     ops = _SupersedeOps(prs=[_MERGED_PR])
-    assert tb.deliver_superseded(
-        rs.load("r-recon"), ops
-    ) == tb.SupersedeResult("noop")
+    assert tb.deliver_superseded(rs.load("r-recon"), ops) == tb.SupersedeResult("noop")
 
     out = capsys.readouterr().out
     assert "апстрим не менялся" in out
@@ -5683,9 +5789,7 @@ def test_noop_survives_unreadable_base_without_becoming_a_refusal(
             return super().show_file(target_dir, ref, path)
 
     ops = _BlindBase(prs=[_MERGED_PR])
-    assert tb.deliver_superseded(
-        rs.load("r-recon"), ops
-    ) == tb.SupersedeResult("noop")
+    assert tb.deliver_superseded(rs.load("r-recon"), ops) == tb.SupersedeResult("noop")
 
     out = capsys.readouterr().out
     assert "апстрим не менялся" in out
@@ -5746,7 +5850,8 @@ _ZONE_NOUN = r"(?:\bкласс\w*|\bзон\w*|\bдолг\w*)"
 def _blind_zone_targets() -> list[Path]:
     root = Path(__file__).resolve().parents[1]
     return [
-        root / "docs/superpowers/specs"
+        root
+        / "docs/superpowers/specs"
         / "2026-09-09-tasks-supersede-contract-design.md",
         root / "governance/task_bridge.py",
         Path(__file__).resolve(),
@@ -5783,8 +5888,8 @@ def _blind_zone_offenders(text: str, name: str) -> list[str]:
                 inside = False
             else:
                 continue
-        window = "\n".join(lines[max(0, i - 2):i + 1])
-        near = "\n".join(lines[max(0, i - 3):i + 2])
+        window = "\n".join(lines[max(0, i - 2) : i + 1])
+        near = "\n".join(lines[max(0, i - 3) : i + 2])
         if not subject.search(near):
             continue
         # КАЖДОЕ совпадение окна, не первое (devtools#195, дыра 1): прощённое
@@ -5824,14 +5929,11 @@ def test_blind_zones_composition_is_stated_in_exactly_one_place() -> None:
     offenders = [
         line
         for path in _blind_zone_targets()
-        for line in _blind_zone_offenders(
-            path.read_text(encoding="utf-8"), path.name
-        )
+        for line in _blind_zone_offenders(path.read_text(encoding="utf-8"), path.name)
     ]
     assert not offenders, (
         "состав слепых зон §I5 пересказан вне единственного места — "
-        "замените пересказ ссылкой и именем класса:\n"
-        + "\n".join(offenders)
+        "замените пересказ ссылкой и именем класса:\n" + "\n".join(offenders)
     )
 
 
@@ -5917,9 +6019,7 @@ def test_blind_zones_guard_forgives_the_count_not_the_whole_span() -> None:
     («движущий» — «движ»): на слове с основой, которой в перечне уже нет,
     мутант «сверять со всем спаном» выживал — свойство было ненаблюдаемо.
     """
-    spiked = "По §I5 до no-op'а доходит {} движущий класс.".format(
-        _COUNT_SAMPLE
-    )
+    spiked = "По §I5 до no-op'а доходит {} движущий класс.".format(_COUNT_SAMPLE)
     assert _blind_zone_offenders(spiked, "синтетика"), (
         "промежуточное слово простило счёт рядом с именем зоны"
     )
@@ -5960,10 +6060,7 @@ def _apply_correction_to_node(state, node: str) -> None:
 def _node_bytes(state) -> dict[str, bytes]:
     """Байты всех узлов бандла — для побайтовой сверки «узел не тронут»."""
     base = Path(state.target_dir) / state.bundle_dir
-    return {
-        fname: (base / fname).read_bytes()
-        for fname, _ in task_bridge._BUNDLE_DAG
-    }
+    return {fname: (base / fname).read_bytes() for fname, _ in task_bridge._BUNDLE_DAG}
 
 
 def test_pr_facts_stub_differs_per_pr(tmp_path, monkeypatch) -> None:
@@ -5979,7 +6076,7 @@ def test_pr_facts_stub_differs_per_pr(tmp_path, monkeypatch) -> None:
     correction = ops.pr_facts("owner/alpha", 403)
     assert bundle["mergedBy"] != correction["mergedBy"]
     assert bundle["mergedAt"] != correction["mergedAt"]
-    assert state.pr == 5      # фикстура: бандл-PR — именно #5
+    assert state.pr == 5  # фикстура: бандл-PR — именно #5
 
 
 def _unapprove_file(path: Path) -> None:
@@ -6060,14 +6157,13 @@ def test_content_anchor_names_missing_discovery_source(tmp_path: Path) -> None:
 
 
 def test_delivered_content_anchor_requires_source_from_pr_head(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    source = (
-        Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
-    )
+    source = Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("present only in current base\n", encoding="utf-8")
     state.brief = {"source_paths": ["00-discovery/brief.md"]}
@@ -6088,21 +6184,21 @@ def test_delivered_content_anchor_requires_source_from_pr_head(
 
     ops = MissingHeadSource()
 
-    assert tb._delivered_content_anchor(
-        state, ops, {"headRefOid": "delivered-head"}, None
-    ) is None
+    assert (
+        tb._delivered_content_anchor(state, ops, {"headRefOid": "delivered-head"}, None)
+        is None
+    )
     assert source.exists(), "current base source exists but must not be used"
 
 
 def test_delivered_content_anchor_preserves_exact_source_from_pr_head(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    source = (
-        Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
-    )
+    source = Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
     source.parent.mkdir(parents=True, exist_ok=True)
     data = "точный source из head\n".encode("utf-8")
     source.write_bytes(data)
@@ -6116,38 +6212,33 @@ def test_delivered_content_anchor_preserves_exact_source_from_pr_head(
 
     assert tb._delivered_content_anchor(
         state, HeadBytes(), {"headRefOid": "delivered-head"}, None
-    ) == tb._content_anchor(
-        state.target_dir, state.bundle_dir, None, state.brief
-    )
+    ) == tb._content_anchor(state.target_dir, state.bundle_dir, None, state.brief)
 
 
 def test_supersede_is_noop_when_bundle_and_source_are_unchanged(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     from governance import run_state as rs
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    source = (
-        Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
-    )
+    source = Path(state.target_dir) / state.bundle_dir / "00-discovery/brief.md"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("unchanged source\n", encoding="utf-8")
     state.brief = {"source_paths": ["00-discovery/brief.md"]}
     _stamp_base_as_previous_delivery(state)
-    content = tb._content_anchor(
-        state.target_dir, state.bundle_dir, None, state.brief
-    )
+    content = tb._content_anchor(state.target_dir, state.bundle_dir, None, state.brief)
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 5, "anchor": "old",
+        "status": "completed",
+        "pr": 5,
+        "anchor": "old",
         "content_anchor": content,
     }
     rs.save(state)
     before = (rs.run_dir(state.run_id) / "run.json").read_bytes()
 
-    assert tb.deliver_superseded(state, _SupersedeOps()) == tb.SupersedeResult(
-        "noop"
-    )
+    assert tb.deliver_superseded(state, _SupersedeOps()) == tb.SupersedeResult("noop")
     assert (rs.run_dir(state.run_id) / "run.json").read_bytes() == before
 
 
@@ -6181,9 +6272,7 @@ def test_content_anchor_does_not_leak_signature_through_pins(
         if upstreams:
             meta["upstream_hashes"] = {u: blobs[u] for u in upstreams}
             path.write_text(join_frontmatter(meta, body), encoding="utf-8")
-        blobs[task_bridge._node_id(fname)] = blob_sha1(
-            path.read_text(encoding="utf-8")
-        )
+        blobs[task_bridge._node_id(fname)] = blob_sha1(path.read_text(encoding="utf-8"))
 
     # Перепиновка действительно доехала донизу — иначе сверять нечего.
     anchor_meta, _ = split_frontmatter(
@@ -6245,7 +6334,7 @@ def test_anchor_carries_its_canonization_epoch(tmp_path: Path) -> None:
     assert current.startswith("v2:")
 
     assert task_bridge._comparable_anchors(current, current)
-    legacy = current.split(":", 1)[1]          # запись эпохи без отметки
+    legacy = current.split(":", 1)[1]  # запись эпохи без отметки
     assert not task_bridge._comparable_anchors(legacy, current)
     assert not task_bridge._comparable_anchors(None, current)
 
@@ -6271,9 +6360,7 @@ def test_content_anchor_changes_with_node_body(tmp_path, monkeypatch) -> None:
     _stamp_base_as_previous_delivery(state)
     before = tb._content_anchor(state.target_dir, state.bundle_dir, None)
     _apply_correction_to_node(state, "10-requirements.md")
-    assert tb._content_anchor(
-        state.target_dir, state.bundle_dir, None
-    ) != before
+    assert tb._content_anchor(state.target_dir, state.bundle_dir, None) != before
 
 
 # --- §I7 на ПЕРЕХОДЕ статуса (devtools#172) -------------------------------
@@ -6297,9 +6384,7 @@ def _set_node(target: str, fname: str, **over) -> None:
             meta.pop(key, None)
         else:
             meta[key] = value
-    path.write_text(
-        task_bridge.join_frontmatter(meta, body), encoding="utf-8"
-    )
+    path.write_text(task_bridge.join_frontmatter(meta, body), encoding="utf-8")
 
 
 def _meta(target: str, fname: str) -> dict:
@@ -6340,20 +6425,16 @@ def test_supersede_fail_closed_leaves_no_branch_commit_or_ledger_entry(
     # остался в долгу — переодобрить его человек не успел.
     _apply_correction_to_anchor(state)
     _set_node(state.target_dir, "00-charter.md", status="draft")
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     rs.save(state)
     before = _ledger_bytes()
     ops = _SupersedeOps(prs=[_MERGED_PR])
 
     with pytest.raises(RuntimeError, match="не одобрен целиком") as failure:
         tb.deliver_superseded(state, ops)
-    assert "00-charter.md" in str(failure.value) or "charter" in str(
-        failure.value
-    )
+    assert "00-charter.md" in str(failure.value) or "charter" in str(failure.value)
     assert not any(
-        call[0] in ("ensure_branch", "commit_paths", "push_branch",
-                    "create_draft_pr")
+        call[0] in ("ensure_branch", "commit_paths", "push_branch", "create_draft_pr")
         for call in ops.calls
     )
     assert _ledger_bytes() == before, "леджер побайтово прежний"
@@ -6381,10 +6462,10 @@ def test_supersede_noop_reachable_with_draft_node_outside_signed_nodes(
     # проспективном штампе он дал бы fail-closed.
     _set_node(state.target_dir, "00-charter.md", status="draft")
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 5, "anchor": "БЛОБ-ДОСТАВКИ-v1",
-        "content_anchor": tb._content_anchor(
-            state.target_dir, state.bundle_dir, None
-        ),
+        "status": "completed",
+        "pr": 5,
+        "anchor": "БЛОБ-ДОСТАВКИ-v1",
+        "content_anchor": tb._content_anchor(state.target_dir, state.bundle_dir, None),
     }
     rs.save(state)
     before = (rs.run_dir("r-recon") / "run.json").read_bytes()
@@ -6405,9 +6486,7 @@ _V1_STAMP_SHA = "c-v1-stamp"
 _V1_TASKS_PR = {**_MERGED_PR, "number": 5, "mergeCommit": _V1_STAMP_SHA}
 
 
-def _supersede_with_correction_touching_requirements(
-    tmp_path, monkeypatch, **ops_kw
-):
+def _supersede_with_correction_touching_requirements(tmp_path, monkeypatch, **ops_kw):
     """v1 доставлена и вмержена; correction-PR правит ТОЛЬКО requirements.
 
     Боевая форма входа, которой у фикстуры не было: correction анкера НЕ
@@ -6426,7 +6505,9 @@ def _supersede_with_correction_touching_requirements(
     v1_content = tb._content_anchor(state.target_dir, state.bundle_dir, None)
     _apply_correction_to_node(state, "10-requirements.md")
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 5, "anchor": "БЛОБ-ДОСТАВКИ-v1",
+        "status": "completed",
+        "pr": 5,
+        "anchor": "БЛОБ-ДОСТАВКИ-v1",
         "content_anchor": v1_content,
     }
     rs.save(state)
@@ -6436,7 +6517,8 @@ def _supersede_with_correction_touching_requirements(
         "commit": _V1_STAMP_SHA,
         "commits": {_REQUIREMENTS_REL: _CORRECTION_SHA},
         "prs_by_sha": {
-            _CORRECTION_SHA: [_MERGED_PR], _V1_STAMP_SHA: [_V1_TASKS_PR],
+            _CORRECTION_SHA: [_MERGED_PR],
+            _V1_STAMP_SHA: [_V1_TASKS_PR],
         },
         "files": [_REQUIREMENTS_REL],
         "files_by_pr": {5: [f"{state.bundle_dir}/{f}" for f, _ in tb._BUNDLE_DAG]},
@@ -6455,9 +6537,7 @@ def test_supersede_after_merged_revision_is_noop_again(tmp_path, monkeypatch):
     from governance import run_state as rs
     from governance import task_bridge as tb
 
-    state, ops = _supersede_with_correction_touching_requirements(
-        tmp_path, monkeypatch
-    )
+    state, ops = _supersede_with_correction_touching_requirements(tmp_path, monkeypatch)
     assert tb.deliver_superseded(state, ops).kind == "delivered"
     # Рабочее дерево = то, что доставила и вмержила v2 (её штамп в base).
     state = rs.load("r-recon")
@@ -6475,8 +6555,7 @@ class _RevisionPrOps(_SupersedeOps):
     correction-PR (провенанс, номер из `_MERGED_PR`) и PR ревизии
     (идентичность — state + headRefOid)."""
 
-    def __init__(self, pr=None, pr_state="OPEN", head="h", local_head=None,
-                 **kw):
+    def __init__(self, pr=None, pr_state="OPEN", head="h", local_head=None, **kw):
         super().__init__(**kw)
         self.pr, self.pr_state, self.head = pr, pr_state, head
         # Локальный head ВЕТКИ ревизии (не HEAD базы): им управляет
@@ -6533,37 +6612,32 @@ def _seed_revision(state, monkeypatch, **over):
     # (идемпотентно, если вызывающий уже привёл её в это состояние).
     _stamp_base_as_previous_delivery(state)
     by, at = _pr_signature(403)
-    prospective = tb._prospective_anchor(
-        state.target_dir, state.bundle_dir, None
-    )
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
-    state.ops["tasks-deliver-v2"] = _revision_intent(
-        state, prospective, **over
-    )
+    prospective = tb._prospective_anchor(state.target_dir, state.bundle_dir, None)
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver-v2"] = _revision_intent(state, prospective, **over)
     rs.save(state)
     return prospective
 
 
-def test_supersede_returns_existing_pr_when_revision_completed(
-    tmp_path, monkeypatch
-):
+def test_supersede_returns_existing_pr_when_revision_completed(tmp_path, monkeypatch):
     """§I3 «completed | OPEN»: вернуть PR ревизии, v<N+1> НЕ создаётся."""
     from governance import run_state as rs
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(
-        state, monkeypatch, status="completed", pr=9, head_sha="h",
+        state,
+        monkeypatch,
+        status="completed",
+        pr=9,
+        head_sha="h",
         anchor="ANCHOR-V2",
     )
     before = dict(rs.load("r-recon").ops["tasks-deliver-v2"])
     ops = _RevisionPrOps(pr=9, pr_state="OPEN", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "returned", 9
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("returned", 9)
     saved = rs.load("r-recon")
-    assert len(tb._revisions(saved)) == 1          # v3 не заведена
+    assert len(tb._revisions(saved)) == 1  # v3 не заведена
     # §I4: завершённая запись не перезаписывается — ни один байт.
     assert saved.ops["tasks-deliver-v2"] == before
     assert not any(c[0] == "ensure_branch" for c in ops.calls)
@@ -6572,9 +6646,7 @@ def test_supersede_returns_existing_pr_when_revision_completed(
     assert ("find_pr", "spec/WS-alpha-7-tasks-v2") in ops.calls
 
 
-def test_supersede_after_merged_revision_starts_next_one(
-    tmp_path, monkeypatch
-):
+def test_supersede_after_merged_revision_starts_next_one(tmp_path, monkeypatch):
     """§I3 «completed | MERGED»: реконсилировать нечего, дальше решает §I5.
 
     Обратная сторона предыдущего теста: если бы завершённую ревизию с
@@ -6585,18 +6657,20 @@ def test_supersede_after_merged_revision_starts_next_one(
 
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(
-        state, monkeypatch, status="completed", pr=9, head_sha="h",
+        state,
+        monkeypatch,
+        status="completed",
+        pr=9,
+        head_sha="h",
         anchor="СТАРЫЙ-V2",
     )
     ops = _RevisionPrOps(pr=9, pr_state="MERGED", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("delivered", 77)
     saved = rs.load("r-recon")
     assert [n for n, _ in tb._revisions(saved)] == [2, 3]
     assert saved.ops["tasks-deliver-v3"]["supersedes"] == 2
     assert ("ensure_branch", "spec/WS-alpha-7-tasks-v3") in ops.calls
-    assert saved.ops["tasks-deliver-v2"]["pr"] == 9          # v2 цела
+    assert saved.ops["tasks-deliver-v2"]["pr"] == 9  # v2 цела
 
 
 def test_supersede_asks_github_once_per_revision(tmp_path, monkeypatch):
@@ -6609,13 +6683,15 @@ def test_supersede_asks_github_once_per_revision(tmp_path, monkeypatch):
 
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(
-        state, monkeypatch, status="completed", pr=9, head_sha="h",
+        state,
+        monkeypatch,
+        status="completed",
+        pr=9,
+        head_sha="h",
         anchor="ANCHOR-V2",
     )
     ops = _RevisionPrOps(pr=9, pr_state="OPEN", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "returned", 9
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("returned", 9)
     assert ops.calls.count(("find_pr", "spec/WS-alpha-7-tasks-v2")) == 1
     assert ops.calls.count(("pr_facts", 9)) == 1
 
@@ -6632,16 +6708,13 @@ def test_supersede_returns_open_pr_of_first_delivery(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     rs.save(state)
     before = (rs.run_dir("r-recon") / "run.json").read_bytes()
     ops = _RevisionPrOps(pr=5, pr_state="OPEN", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "returned", 5
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("returned", 5)
     saved = rs.load("r-recon")
-    assert tb._revisions(saved) == []              # v2 не заведена
+    assert tb._revisions(saved) == []  # v2 не заведена
     assert not any(c[0] == "ensure_branch" for c in ops.calls)
     # Как и no-op §I5: решение принято, леджер не тронут.
     assert (rs.run_dir("r-recon") / "run.json").read_bytes() == before
@@ -6655,8 +6728,7 @@ def test_supersede_refuses_when_first_delivery_pr_closed_unmerged(
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     rs.save(state)
     ops = _RevisionPrOps(pr=5, pr_state="CLOSED", prs=[_MERGED_PR])
     with pytest.raises(RuntimeError, match="закрыт без мержа"):
@@ -6676,9 +6748,14 @@ def test_supersede_ignores_first_delivery_pr_when_revision_is_last(
 
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(
-        state, monkeypatch, status="completed", pr=9, head_sha="h",
+        state,
+        monkeypatch,
+        status="completed",
+        pr=9,
+        head_sha="h",
         anchor="СТАРЫЙ-V2",
     )
+
     # PR ревизии (9) вмержен, PR v1 (5) — закрыт без мержа.
     class _Ops(_RevisionPrOps):
         def pr_facts(self, repo_slug, pr):
@@ -6687,15 +6764,11 @@ def test_supersede_ignores_first_delivery_pr_when_revision_is_last(
             return super().pr_facts(repo_slug, pr)
 
     ops = _Ops(pr=9, pr_state="MERGED", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("delivered", 77)
     assert [n for n, _ in tb._revisions(rs.load("r-recon"))] == [2, 3]
 
 
-def test_supersede_completes_started_revision_with_merged_pr(
-    tmp_path, monkeypatch
-):
+def test_supersede_completes_started_revision_with_merged_pr(tmp_path, monkeypatch):
     """§I3 «started | MERGED»: op завершается этим PR, новой ревизии нет.
 
     Идентичность здесь сверяется по `headRefOid` PR (это делает
@@ -6706,11 +6779,10 @@ def test_supersede_completes_started_revision_with_merged_pr(
 
     state = _recon_state(tmp_path, monkeypatch)
     prospective = _seed_revision(state, monkeypatch, head_sha="h")
-    ops = _RevisionPrOps(pr=7, pr_state="MERGED", prs=[_MERGED_PR],
-                         local_head="ДВИНУЛИ-СНАРУЖИ")
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "returned", 7
+    ops = _RevisionPrOps(
+        pr=7, pr_state="MERGED", prs=[_MERGED_PR], local_head="ДВИНУЛИ-СНАРУЖИ"
     )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("returned", 7)
     saved = rs.load("r-recon")
     assert len(tb._revisions(saved)) == 1
     rev = saved.ops["tasks-deliver-v2"]
@@ -6719,9 +6791,7 @@ def test_supersede_completes_started_revision_with_merged_pr(
     assert not any(c[0] == "create_draft_pr" for c in ops.calls)
 
 
-def test_supersede_resumes_started_revision_with_open_pr(
-    tmp_path, monkeypatch
-):
+def test_supersede_resumes_started_revision_with_open_pr(tmp_path, monkeypatch):
     """§I3 «started | OPEN, base совпал»: ревизия завершается ЭТИМ PR,
     второй PR не создаётся."""
     from governance import run_state as rs
@@ -6730,9 +6800,7 @@ def test_supersede_resumes_started_revision_with_open_pr(
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(state, monkeypatch, head_sha="h")
     ops = _RevisionPrOps(pr=7, pr_state="OPEN", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "returned", 7
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("returned", 7)
     saved = rs.load("r-recon")
     assert len(tb._revisions(saved)) == 1
     assert saved.ops["tasks-deliver-v2"]["status"] == "completed"
@@ -6758,19 +6826,19 @@ def test_supersede_resumes_started_revision_with_open_pr_moved_branch(
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(state, monkeypatch, head_sha="h")
     ops = _RevisionPrOps(
-        pr=7, pr_state="OPEN", head="h", local_head="чужой-коммит",
+        pr=7,
+        pr_state="OPEN",
+        head="h",
+        local_head="чужой-коммит",
         prs=[_MERGED_PR],
     )
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "returned", 7
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("returned", 7)
     saved = rs.load("r-recon")
-    assert len(tb._revisions(saved)) == 1          # v3 не заведена
+    assert len(tb._revisions(saved)) == 1  # v3 не заведена
     assert saved.ops["tasks-deliver-v2"]["status"] == "completed"
     assert saved.ops["tasks-deliver-v2"]["pr"] == 7
     assert not any(
-        c[0] in ("ensure_branch", "commit_paths", "push_branch",
-                 "create_draft_pr")
+        c[0] in ("ensure_branch", "commit_paths", "push_branch", "create_draft_pr")
         for c in ops.calls
     )
 
@@ -6784,24 +6852,20 @@ def test_supersede_resumes_started_revision_without_pr(tmp_path, monkeypatch):
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(state, monkeypatch)
     ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("delivered", 77)
     saved = rs.load("r-recon")
-    assert len(tb._revisions(saved)) == 1          # v3 не заведена
+    assert len(tb._revisions(saved)) == 1  # v3 не заведена
     assert saved.ops["tasks-deliver-v2"]["status"] == "completed"
     assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops.calls
     # Байты — из намерения, не из текущего времени и не из свежего счётчика.
-    text = (
-        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
-    ).read_text(encoding="utf-8")
+    text = (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").read_text(
+        encoding="utf-8"
+    )
     assert 'generated_at: "2026-09-09T10:00:00+03:00"' in text
     assert "version: 3" in text
 
 
-def test_supersede_refuses_resume_when_branch_missing_locally(
-    tmp_path, monkeypatch
-):
+def test_supersede_refuses_resume_when_branch_missing_locally(tmp_path, monkeypatch):
     """Прод-путь §I3.1 «head_sha записан, ветки в клоне нет, PR-а нет».
 
     Дырой этого места была не диагностика, а ЗАПИСЬ ЖУРНАЛА: доставка
@@ -6823,18 +6887,15 @@ def test_supersede_refuses_resume_when_branch_missing_locally(
     with pytest.raises(RuntimeError, match="--abandon-revision 2"):
         tb.deliver_superseded(state, ops)
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
-    assert saved["head_sha"] == "запушенный-коммит"   # durable-факт цел
+    assert saved["head_sha"] == "запушенный-коммит"  # durable-факт цел
     assert saved["status"] == "started"
     assert not any(
-        c[0] in ("ensure_branch", "commit_paths", "push_branch",
-                 "create_draft_pr")
+        c[0] in ("ensure_branch", "commit_paths", "push_branch", "create_draft_pr")
         for c in ops.calls
     )
 
 
-def test_supersede_refuses_merged_pr_without_recorded_head_sha(
-    tmp_path, monkeypatch
-):
+def test_supersede_refuses_merged_pr_without_recorded_head_sha(tmp_path, monkeypatch):
     """`head_sha` пуст, а PR ВМЕРЖЕН — присвоить его нельзя.
 
     `_reconcile_revision` при пустом `head_sha` сверку `headRefOid`
@@ -6852,9 +6913,7 @@ def test_supersede_refuses_merged_pr_without_recorded_head_sha(
     assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "started"
 
 
-def test_supersede_refuses_open_pr_without_recorded_head_sha(
-    tmp_path, monkeypatch
-):
+def test_supersede_refuses_open_pr_without_recorded_head_sha(tmp_path, monkeypatch):
     """То же для возобновления: PR открыт, `head_sha` пуст — не наш PR."""
     from governance import run_state as rs
     from governance import task_bridge as tb
@@ -6896,11 +6955,9 @@ def test_supersede_resumes_when_branch_stands_on_base(tmp_path, monkeypatch):
     # local_head == base_sha намерения: ровно то, что оставляет
     # `ensure_branch`, создающая ветку от текущего HEAD.
     ops = _RevisionPrOps(pr=None, local_head="base-sha-1", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("delivered", 77)
     saved = rs.load("r-recon")
-    assert len(tb._revisions(saved)) == 1          # v3 не заведена
+    assert len(tb._revisions(saved)) == 1  # v3 не заведена
     assert saved.ops["tasks-deliver-v2"]["status"] == "completed"
     assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops.calls
 
@@ -6924,9 +6981,7 @@ def test_supersede_v1_completed_without_pr_fails_closed(tmp_path, monkeypatch):
     assert ops.touched == []
 
 
-def test_supersede_abandons_shifted_revision_and_starts_next(
-    tmp_path, monkeypatch
-):
+def test_supersede_abandons_shifted_revision_and_starts_next(tmp_path, monkeypatch):
     """§I3 «started | нет PR | base сдвинулся» — СКВОЗЬ `deliver_superseded`.
 
     Соседний `test_reconcile_started_no_pr_shifted_base_abandons` проверяет
@@ -6945,9 +7000,7 @@ def test_supersede_abandons_shifted_revision_and_starts_next(
     # base намерения — позапрошлый: апстрим уехал, пока ревизия лежала.
     _seed_revision(state, monkeypatch, base_sha="БАЗА-ПОЗАПРОШЛАЯ")
     ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("delivered", 77)
     saved = rs.load("r-recon")
     v2 = saved.ops["tasks-deliver-v2"]
     assert v2["status"] == "abandoned"
@@ -6975,12 +7028,13 @@ def test_supersede_skips_abandoned_revision(tmp_path, monkeypatch):
 
     state = _recon_state(tmp_path, monkeypatch)
     _seed_revision(
-        state, monkeypatch, status="abandoned", reason="оператор закрыл PR",
+        state,
+        monkeypatch,
+        status="abandoned",
+        reason="оператор закрыл PR",
     )
     ops = _RevisionPrOps(pr=999, pr_state="OPEN", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("delivered", 77)
     saved = rs.load("r-recon")
     assert [n for n, _ in tb._revisions(saved)] == [2, 3]
     assert saved.ops["tasks-deliver-v2"]["status"] == "abandoned"
@@ -6995,9 +7049,14 @@ def test_supersede_refuses_resume_with_different_dag(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    _seed_revision(state, monkeypatch, dag=[
-        ["00-charter.md", []], ["10-requirements.md", ["charter"]],
-    ])
+    _seed_revision(
+        state,
+        monkeypatch,
+        dag=[
+            ["00-charter.md", []],
+            ["10-requirements.md", ["charter"]],
+        ],
+    )
     with pytest.raises(RuntimeError, match="другим составом DAG"):
         tb.deliver_superseded(state, _RevisionPrOps(pr=None, prs=[_MERGED_PR]))
 
@@ -7012,8 +7071,7 @@ def test_supersede_records_commit_facts_before_push(tmp_path, monkeypatch):
     from governance.stale_adapter import blob_sha1
 
     state = _supersede_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     rs.save(state)
 
     class _WatchPush(_SupersedeOps):
@@ -7029,9 +7087,9 @@ def test_supersede_records_commit_facts_before_push(tmp_path, monkeypatch):
 
     ops = _WatchPush(prs=[_MERGED_PR])
     tb.deliver_superseded(state, ops)
-    delivered = (
-        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
-    ).read_text(encoding="utf-8")
+    delivered = (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").read_text(
+        encoding="utf-8"
+    )
     assert ops.at_push and ops.at_push[0] is not None
     assert ops.at_push[0]["head_sha"] == "commit-sha-1"
     assert ops.at_push[0]["tasks_blob"] == blob_sha1(delivered)
@@ -7049,8 +7107,7 @@ def test_supersede_records_tasks_blob_before_commit(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _supersede_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     rs.save(state)
 
     class _DieAfterCommit(_SupersedeOps):
@@ -7096,11 +7153,11 @@ def test_supersede_fails_when_actual_anchor_differs(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _supersede_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     rs.save(state)
     monkeypatch.setattr(
-        tb, "_prospective_anchor",
+        tb,
+        "_prospective_anchor",
         lambda *a, **kw: "0000000ложный-проспективный-штамп",
     )
     ops = _SupersedeOps(prs=[_MERGED_PR])
@@ -7117,8 +7174,7 @@ def test_supersede_write_ahead_survives_delivery_failure(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _supersede_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     rs.save(state)
 
     class _FailingPr(_SupersedeOps):
@@ -7144,8 +7200,7 @@ def test_supersede_base_sha_unknown_fails_closed(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     rs.save(state)
 
     class _NoHead(_SupersedeOps):
@@ -7165,9 +7220,7 @@ def test_previous_tasks_version_missing_spec_refuses(tmp_path, monkeypatch):
         tb._previous_tasks_version(state)
 
 
-def test_previous_tasks_version_unparsable_frontmatter_refuses(
-    tmp_path, monkeypatch
-):
+def test_previous_tasks_version_unparsable_frontmatter_refuses(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
@@ -7220,8 +7273,7 @@ def test_supersede_dirty_target_refuses(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
 
     class _DirtyOps(_SupersedeOps):
         def is_dirty(self, target_dir):
@@ -7258,9 +7310,7 @@ def test_cli_supersede_calls_deliver_superseded(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(tb, "RealOps", lambda: object())
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
     assert called["args"] == ("r-recon", None, None)
-    assert "переизданная tasks-спека доставлена: PR #77" in (
-        capsys.readouterr().out
-    )
+    assert "переизданная tasks-спека доставлена: PR #77" in (capsys.readouterr().out)
 
 
 def test_cli_supersede_passes_flags_through(tmp_path, monkeypatch, capsys):
@@ -7286,10 +7336,18 @@ def test_cli_supersede_passes_flags_through(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(tb, "deliver_superseded", _fake)
     monkeypatch.setattr(tb, "RealOps", lambda: object())
-    assert tb.main([
-        "--run-id", "r-recon", "--supersede",
-        "--legacy-bundle", "5",
-    ]) == 0
+    assert (
+        tb.main(
+            [
+                "--run-id",
+                "r-recon",
+                "--supersede",
+                "--legacy-bundle",
+                "5",
+            ]
+        )
+        == 0
+    )
     assert called["args"] == ("r-recon", 5, None)
 
 
@@ -7300,9 +7358,11 @@ def test_cli_supersede_noop_is_success(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     _recon_state(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        tb, "deliver_superseded",
-        lambda s, o, legacy_bundle=None, approval_pr=None, replace=None:
-            tb.SupersedeResult("noop"),
+        tb,
+        "deliver_superseded",
+        lambda s, o, legacy_bundle=None, approval_pr=None, replace=None: (
+            tb.SupersedeResult("noop")
+        ),
     )
     monkeypatch.setattr(tb, "RealOps", lambda: object())
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
@@ -7331,8 +7391,7 @@ def test_cli_supersede_returned_pr_is_not_announced_as_delivered(
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     rs.save(state)
     ops = _RevisionPrOps(pr=5, pr_state="OPEN", prs=[_MERGED_PR])
     monkeypatch.setattr(tb, "RealOps", lambda: ops)
@@ -7354,21 +7413,20 @@ def test_cli_supersede_delivery_is_announced(tmp_path, monkeypatch, capsys):
     from governance import task_bridge as tb
 
     state = _supersede_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
+    state.ops["tasks-deliver"] = {
+        "status": "completed",
+        "pr": 5,
+        "anchor": "СТАРЫЙ-ДРУГОЙ",
+    }
     rs.save(state)
     ops = _SupersedeOps(prs=[_MERGED_PR])
     monkeypatch.setattr(tb, "RealOps", lambda: ops)
     assert tb.main(["--run-id", "r-recon", "--supersede"]) == 0
-    assert "переизданная tasks-спека доставлена: PR #77" in (
-        capsys.readouterr().out
-    )
+    assert "переизданная tasks-спека доставлена: PR #77" in (capsys.readouterr().out)
     assert ("ensure_branch", "spec/WS-alpha-7-tasks-v2") in ops.calls
 
 
-def test_cli_supersede_missing_bundle_dir_is_diagnosed(
-    tmp_path, monkeypatch, capsys
-):
+def test_cli_supersede_missing_bundle_dir_is_diagnosed(tmp_path, monkeypatch, capsys):
     """Тот же отказ СКВОЗЬ `main`: RC 1 и диагностика, не трейсбек.
 
     Проверяется граница, на которой находка и видна оператору: `main`
@@ -7379,8 +7437,7 @@ def test_cli_supersede_missing_bundle_dir_is_diagnosed(
     from governance import task_bridge as tb
 
     state = _recon_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     rs.save(state)
     shutil.rmtree(Path(state.target_dir) / state.bundle_dir)
     ops = _RevisionPrOps(pr=5, pr_state="MERGED", prs=[_MERGED_PR])
@@ -7396,10 +7453,19 @@ def test_cli_abandon_revision_marks_and_returns_zero(tmp_path, monkeypatch):
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     state = _recon_state(tmp_path, monkeypatch)
     tb._start_revision(state, 2, {"branch": "b", "base_sha": "s"})
-    assert tb.main([
-        "--run-id", "r-recon", "--abandon-revision", "2",
-        "--reason", "PR закрыт вручную",
-    ]) == 0
+    assert (
+        tb.main(
+            [
+                "--run-id",
+                "r-recon",
+                "--abandon-revision",
+                "2",
+                "--reason",
+                "PR закрыт вручную",
+            ]
+        )
+        == 0
+    )
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["status"] == "abandoned"
     # Причина оператора доходит ДО леджера (F-10, мутация M65): она
@@ -7419,17 +7485,21 @@ def test_cli_abandon_revision_unknown_number_fails_gracefully(
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     _recon_state(tmp_path, monkeypatch)
     monkeypatch.setattr(tb, "RealOps", lambda: object())
-    rc = tb.main([
-        "--run-id", "r-recon", "--abandon-revision", "9",
-        "--reason", "промах пальцем",
-    ])
+    rc = tb.main(
+        [
+            "--run-id",
+            "r-recon",
+            "--abandon-revision",
+            "9",
+            "--reason",
+            "промах пальцем",
+        ]
+    )
     assert rc == 1
     assert "нечего абандонить" in capsys.readouterr().out
 
 
-def test_cli_abandon_revision_completed_fails_gracefully(
-    tmp_path, monkeypatch, capsys
-):
+def test_cli_abandon_revision_completed_fails_gracefully(tmp_path, monkeypatch, capsys):
     """§I4: завершённая запись не мутируется — отказ, а не трейсбек."""
     from governance import run_state as rs
     from governance import task_bridge as tb
@@ -7438,19 +7508,23 @@ def test_cli_abandon_revision_completed_fails_gracefully(
     state = _recon_state(tmp_path, monkeypatch)
     tb._complete_revision(state, 2, pr=10, anchor="a")
     monkeypatch.setattr(tb, "RealOps", lambda: object())
-    rc = tb.main([
-        "--run-id", "r-recon", "--abandon-revision", "2",
-        "--reason", "передумал",
-    ])
+    rc = tb.main(
+        [
+            "--run-id",
+            "r-recon",
+            "--abandon-revision",
+            "2",
+            "--reason",
+            "передумал",
+        ]
+    )
     assert rc == 1
     assert "завершена" in capsys.readouterr().out
     # Запись цела: отказ не тронул её ни на байт.
     assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "completed"
 
 
-def test_cli_supersede_with_abandon_revision_refuses(
-    tmp_path, monkeypatch, capsys
-):
+def test_cli_supersede_with_abandon_revision_refuses(tmp_path, monkeypatch, capsys):
     """Два действия в одном прогоне — fail-closed, а не выбор за оператора.
 
     `--reason` передан: отказ обязан быть ИМЕННО про сочетание флагов, а
@@ -7458,10 +7532,17 @@ def test_cli_supersede_with_abandon_revision_refuses(
     from governance import task_bridge as tb
 
     with pytest.raises(SystemExit) as exc:
-        tb.main([
-            "--run-id", "r", "--supersede",
-            "--abandon-revision", "2", "--reason", "почему бы и нет",
-        ])
+        tb.main(
+            [
+                "--run-id",
+                "r",
+                "--supersede",
+                "--abandon-revision",
+                "2",
+                "--reason",
+                "почему бы и нет",
+            ]
+        )
     assert exc.value.code == 2
     assert "разные действия" in capsys.readouterr().err
 
@@ -7550,7 +7631,8 @@ class _ReplaceOps(_SupersedeOps):
         # `pr is None` и проходит мимо заменяемой ревизии сам — предмет
         # проверки исчезал бы вместе с фикстурой.
         kw["branch_prs"] = {
-            _REPLACED_BRANCH: _REPLACED_PR, **(kw.get("branch_prs") or {}),
+            _REPLACED_BRANCH: _REPLACED_PR,
+            **(kw.get("branch_prs") or {}),
         }
         super().__init__(**kw)
         # Факты ПОНОМЕРНО: заменяемый PR по умолчанию открыт, факты PR
@@ -7559,7 +7641,8 @@ class _ReplaceOps(_SupersedeOps):
         # correction-PR обязан быть вмерженным в тех же тестах.
         self.facts_by_pr = {
             _REPLACED_PR: {
-                "state": replaced_state, "headRefOid": replaced_head,
+                "state": replaced_state,
+                "headRefOid": replaced_head,
             },
             **(facts_by_pr or {}),
         }
@@ -7645,15 +7728,23 @@ def _replace_state(tmp_path, monkeypatch, **rev3):
     state = _supersede_state(tmp_path, monkeypatch)
     content = tb._content_anchor(state.target_dir, state.bundle_dir, None)
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 5, "anchor": "АНКЕР-v1",
+        "status": "completed",
+        "pr": 5,
+        "anchor": "АНКЕР-v1",
         "content_anchor": content,
     }
     state.ops["tasks-deliver-v3"] = {
-        "status": "completed", "revision": 3, "pr": _REPLACED_PR,
-        "branch": _REPLACED_BRANCH, "base_sha": "base-sha-1",
-        "head_sha": _REPLACED_HEAD, "anchor": "АНКЕР-v3",
-        "prospective_anchor": "АНКЕР-v3", "content_anchor": content,
-        "tasks_version": 2, "approval_pr": 403,
+        "status": "completed",
+        "revision": 3,
+        "pr": _REPLACED_PR,
+        "branch": _REPLACED_BRANCH,
+        "base_sha": "base-sha-1",
+        "head_sha": _REPLACED_HEAD,
+        "anchor": "АНКЕР-v3",
+        "prospective_anchor": "АНКЕР-v3",
+        "content_anchor": content,
+        "tasks_version": 2,
+        "approval_pr": 403,
         "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
         "supersedes": 1,
         **rev3,
@@ -7668,9 +7759,7 @@ def _replace(revision=3, reason="дефектные подписи штампа 
     return tb.Replacement(revision, reason)
 
 
-def test_replace_delivers_v4_closes_pr_and_drops_branch(
-    tmp_path, monkeypatch
-):
+def test_replace_delivers_v4_closes_pr_and_drops_branch(tmp_path, monkeypatch):
     """Успешная замена целиком: три поля, закрытый #408, удалённая ветка.
 
     `supersedes: 1`, а не 3 — заменяемая ревизия НЕ доставленная
@@ -7691,18 +7780,14 @@ def test_replace_delivers_v4_closes_pr_and_drops_branch(
     assert saved["status"] == "completed"
     assert saved["replaces_revision"] == 3
     assert saved["replaces_pr"] == _REPLACED_PR
-    assert saved["replacement_reason"] == (
-        "дефектные подписи штампа (devtools#172)"
-    )
+    assert saved["replacement_reason"] == ("дефектные подписи штампа (devtools#172)")
     assert saved["supersedes"] == 1
     assert [pr for pr, _ in ops.closed] == [_REPLACED_PR]
     # Ссылка снимается в ОБЕИХ половинах — origin и клон.
     assert ops.deleted == [_REPLACED_BRANCH]
     assert ops.deleted_local == [_REPLACED_BRANCH]
     # Ревизия 3 неприкосновенна (§I4): связь направлена вперёд.
-    assert rs.load("r-recon").ops["tasks-deliver-v3"] == state.ops[
-        "tasks-deliver-v3"
-    ]
+    assert rs.load("r-recon").ops["tasks-deliver-v3"] == state.ops["tasks-deliver-v3"]
 
 
 def test_replace_closes_pr_before_creating_the_new_one(tmp_path, monkeypatch):
@@ -7720,14 +7805,10 @@ def test_replace_closes_pr_before_creating_the_new_one(tmp_path, monkeypatch):
 
     names = [c[0] for c in ops.calls]
     assert names.index("close_pr") < names.index("create_draft_pr")
-    assert names.index("create_draft_pr") < names.index(
-        "delete_remote_branch"
-    )
+    assert names.index("create_draft_pr") < names.index("delete_remote_branch")
 
 
-def test_replace_is_the_only_exit_from_the_defective_pr(
-    tmp_path, monkeypatch
-):
+def test_replace_is_the_only_exit_from_the_defective_pr(tmp_path, monkeypatch):
     """Оба тупика контракта на одном входе — и выход из обоих.
 
     Тупик §I3 («оставить»): голый `--supersede` возвращает ТОТ ЖЕ #408 на
@@ -7743,14 +7824,21 @@ def test_replace_is_the_only_exit_from_the_defective_pr(
     ) == tb.SupersedeResult("returned", _REPLACED_PR)
 
     assert tb.deliver_superseded(
-        state, _ReplaceOps(prs=[_MERGED_PR], branch_prs={
-            _REPLACED_BRANCH: None,
-        })
+        state,
+        _ReplaceOps(
+            prs=[_MERGED_PR],
+            branch_prs={
+                _REPLACED_BRANCH: None,
+            },
+        ),
     ) == tb.SupersedeResult("noop")
 
-    assert tb.deliver_superseded(
-        state, _ReplaceOps(prs=[_MERGED_PR]), replace=_replace()
-    ).kind == "delivered"
+    assert (
+        tb.deliver_superseded(
+            state, _ReplaceOps(prs=[_MERGED_PR]), replace=_replace()
+        ).kind
+        == "delivered"
+    )
 
 
 def test_replace_refuses_when_head_diverged(tmp_path, monkeypatch):
@@ -7786,9 +7874,7 @@ def test_replace_refuses_on_human_review(tmp_path, monkeypatch):
     assert ops.closed == []
 
 
-def test_replace_refuses_on_review_from_the_review_contour_too(
-    tmp_path, monkeypatch
-):
+def test_replace_refuses_on_review_from_the_review_contour_too(tmp_path, monkeypatch):
     """Ревью ai-prosto блокирует замену наравне с человеческим.
 
     Решение владельца 2026-09-09: review — уже созданный аудитный
@@ -7811,9 +7897,7 @@ def test_replace_refuses_on_review_from_the_review_contour_too(
     assert ops.closed == []
 
 
-def test_replace_review_block_ignores_review_login_env(
-    tmp_path, monkeypatch
-):
+def test_replace_review_block_ignores_review_login_env(tmp_path, monkeypatch):
     """`REVIEW_LOGIN` на блокировку не влияет — две роли одной учётки.
 
     Пока привилегия читалась из него, смена учётки ревью-контура молча
@@ -7851,24 +7935,27 @@ def test_review_allowlist_is_empty_by_default(monkeypatch):
     assert tb._review_allowlist() == frozenset()
 
 
-def test_explicit_allowlist_unblocks_only_the_named_login(
-    tmp_path, monkeypatch
-):
+def test_explicit_allowlist_unblocks_only_the_named_login(tmp_path, monkeypatch):
     """Явная настройка — рабочая точка, а не заглушка на будущее."""
     from governance import task_bridge as tb
 
     monkeypatch.setenv(tb._REVIEW_ALLOWLIST_ENV, "ai-prosto, other-bot")
     state = _replace_state(tmp_path, monkeypatch)
 
-    assert tb.deliver_superseded(
-        state,
-        _ReplaceOps(
-            prs=[_MERGED_PR],
-            reviews=[{"login": "ai-prosto", "state": "APPROVED"},
-                     {"login": "other-bot", "state": "COMMENTED"}],
-        ),
-        replace=_replace(),
-    ).kind == "delivered"
+    assert (
+        tb.deliver_superseded(
+            state,
+            _ReplaceOps(
+                prs=[_MERGED_PR],
+                reviews=[
+                    {"login": "ai-prosto", "state": "APPROVED"},
+                    {"login": "other-bot", "state": "COMMENTED"},
+                ],
+            ),
+            replace=_replace(),
+        ).kind
+        == "delivered"
+    )
 
 
 def test_pending_review_is_a_draft_not_a_verdict(tmp_path, monkeypatch):
@@ -7884,14 +7971,10 @@ def test_pending_review_is_a_draft_not_a_verdict(tmp_path, monkeypatch):
         reviews=[{"login": "andrei-shtanakov", "state": "PENDING"}],
     )
 
-    assert tb.deliver_superseded(
-        state, ops, replace=_replace()
-    ).kind == "delivered"
+    assert tb.deliver_superseded(state, ops, replace=_replace()).kind == "delivered"
 
 
-def test_red_checks_and_plain_comments_do_not_block_replacement(
-    tmp_path, monkeypatch
-):
+def test_red_checks_and_plain_comments_do_not_block_replacement(tmp_path, monkeypatch):
     """Красный CI и обычные комментарии замену НЕ удерживают.
 
     Граница проведена по сущностям форджи, а не по автору: блокирующие
@@ -7904,23 +7987,27 @@ def test_red_checks_and_plain_comments_do_not_block_replacement(
 
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(
-        prs=[_MERGED_PR], reviews=[], threads=False,
-        facts_by_pr={_REPLACED_PR: {
-            "state": "OPEN", "headRefOid": _REPLACED_HEAD,
-            "statusCheckRollup": [{"conclusion": "FAILURE"}],
-            "mergeStateStatus": "DIRTY",
-        }},
+        prs=[_MERGED_PR],
+        reviews=[],
+        threads=False,
+        facts_by_pr={
+            _REPLACED_PR: {
+                "state": "OPEN",
+                "headRefOid": _REPLACED_HEAD,
+                "statusCheckRollup": [{"conclusion": "FAILURE"}],
+                "mergeStateStatus": "DIRTY",
+            }
+        },
     )
 
-    assert tb.deliver_superseded(
-        state, ops, replace=_replace()
-    ).kind == "delivered"
+    assert tb.deliver_superseded(state, ops, replace=_replace()).kind == "delivered"
     # Сигналов вмешательства спрошено РОВНО два вида (каждый дважды:
     # валидация и повторная сверка перед закрытием — окно между ними
     # реально). Ни `statusCheckRollup`, ни комментарии в их числе нет.
     asked = {c[0] for c in ops.calls}
     assert asked & {"pr_reviews", "unresolved_threads"} == {
-        "pr_reviews", "unresolved_threads",
+        "pr_reviews",
+        "unresolved_threads",
     }
     # Позитивный двойник к `("pr_reviews", _REPLACED_PR) not in ops.calls`
     # соседнего теста: он утверждает ОТСУТСТВИЕ кортежа, и без пары
@@ -7942,9 +8029,7 @@ def test_red_checks_and_plain_comments_do_not_block_replacement(
     ],
     ids=["open-thread", "threads-unknown", "reviews-unknown"],
 )
-def test_replace_fails_closed_on_threads_and_unknowns(
-    kw, match, tmp_path, monkeypatch
-):
+def test_replace_fails_closed_on_threads_and_unknowns(kw, match, tmp_path, monkeypatch):
     """Непогашенный тред и любое «узнать не удалось» — fail-closed.
 
     `None` от `unresolved_threads`/`pr_reviews` значит «сигнал не
@@ -7989,9 +8074,7 @@ def test_replace_accepts_pr_closed_by_operator(tmp_path, monkeypatch):
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="CLOSED")
 
-    assert tb.deliver_superseded(
-        state, ops, replace=_replace()
-    ).kind == "delivered"
+    assert tb.deliver_superseded(state, ops, replace=_replace()).kind == "delivered"
     assert ops.closed == []
     assert ops.deleted == [_REPLACED_BRANCH]
     # Раньше тест утверждал только это удаление — и оно было БЕЗУСЛОВНЫМ.
@@ -8002,9 +8085,7 @@ def test_replace_accepts_pr_closed_by_operator(tmp_path, monkeypatch):
     assert ("rev_parse", _REPLACED_BRANCH) in ops.calls
 
 
-def test_replace_refuses_v1_and_unfinished_and_missing(
-    tmp_path, monkeypatch
-):
+def test_replace_refuses_v1_and_unfinished_and_missing(tmp_path, monkeypatch):
     """Что заменять НЕЛЬЗЯ: v1 в середине истории, незавершённую ревизию,
     отсутствующую.
 
@@ -8027,7 +8108,9 @@ def test_replace_refuses_v1_and_unfinished_and_missing(
         tb.deliver_superseded(state, ops, replace=_replace(revision=9))
 
     state.ops["tasks-deliver-v2"] = {
-        "status": "abandoned", "revision": 2, "reason": "base сдвинулся",
+        "status": "abandoned",
+        "revision": 2,
+        "reason": "base сдвинулся",
     }
     rs.save(state)
     with pytest.raises(RuntimeError, match="брошена"):
@@ -8060,9 +8143,11 @@ def _abandoned_replacement(replaces_pr=_REPLACED_PR) -> dict:
     доставка не дошла) плюс сдвинувшийся base дают ровно `abandoned`.
     """
     return {
-        "status": "abandoned", "revision": 4,
+        "status": "abandoned",
+        "revision": 4,
         "reason": "base сдвинулся, открытого PR нет",
-        "replaces_revision": 3, "replaces_pr": replaces_pr,
+        "replaces_revision": 3,
+        "replaces_pr": replaces_pr,
         "replaces_branch": _REPLACED_BRANCH,
         "replaces_head_sha": _REPLACED_HEAD,
         "replacement_reason": "дефектные подписи",
@@ -8083,12 +8168,14 @@ def test_i3_does_not_fail_closed_on_replaced_revision(tmp_path, monkeypatch):
     # v1 доставила ДРУГОЕ содержание: иначе вызов кончился бы бесследным
     # no-op §I5 и о §I3 не сказал бы ничего.
     state.ops["tasks-deliver"] = {
-        **state.ops["tasks-deliver"], "content_anchor": "СОДЕРЖАНИЕ-ДО",
+        **state.ops["tasks-deliver"],
+        "content_anchor": "СОДЕРЖАНИЕ-ДО",
     }
     state.ops["tasks-deliver-v4"] = _abandoned_replacement()
     rs.save(state)
     ops = _ReplaceOps(
-        prs=[_MERGED_PR], replaced_state="CLOSED",
+        prs=[_MERGED_PR],
+        replaced_state="CLOSED",
         branch_prs={_REPLACED_BRANCH: _REPLACED_PR},
     )
 
@@ -8100,9 +8187,7 @@ def test_i3_does_not_fail_closed_on_replaced_revision(tmp_path, monkeypatch):
     assert saved["tasks-deliver-v3"] == state.ops["tasks-deliver-v3"]
 
 
-def test_i3_still_fails_closed_on_closed_pr_without_forward_link(
-    tmp_path, monkeypatch
-):
+def test_i3_still_fails_closed_on_closed_pr_without_forward_link(tmp_path, monkeypatch):
     """Тот же закрытый PR БЕЗ forward-ссылки — по-прежнему fail-closed.
 
     Исключение §I10 узкое: ожидаемым закрытие объявляет только запись,
@@ -8112,7 +8197,8 @@ def test_i3_still_fails_closed_on_closed_pr_without_forward_link(
 
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(
-        prs=[_MERGED_PR], replaced_state="CLOSED",
+        prs=[_MERGED_PR],
+        replaced_state="CLOSED",
         branch_prs={_REPLACED_BRANCH: _REPLACED_PR},
     )
 
@@ -8132,7 +8218,8 @@ def test_i3_forward_link_requires_matching_pr_number(tmp_path, monkeypatch):
     state.ops["tasks-deliver-v4"] = _abandoned_replacement(replaces_pr=999)
     rs.save(state)
     ops = _ReplaceOps(
-        prs=[_MERGED_PR], replaced_state="CLOSED",
+        prs=[_MERGED_PR],
+        replaced_state="CLOSED",
         branch_prs={_REPLACED_BRANCH: _REPLACED_PR},
     )
 
@@ -8140,9 +8227,7 @@ def test_i3_forward_link_requires_matching_pr_number(tmp_path, monkeypatch):
         tb.deliver_superseded(state, ops)
 
 
-def test_supersedes_skips_replaced_revision_on_later_reissue(
-    tmp_path, monkeypatch
-):
+def test_supersedes_skips_replaced_revision_on_later_reissue(tmp_path, monkeypatch):
     """Заменённая ревизия не считается доставкой и в СЛЕДУЮЩИХ заходах.
 
     Иначе `supersedes`/§I5/§I8 сверялись бы с содержанием, которого в base
@@ -8152,18 +8237,25 @@ def test_supersedes_skips_replaced_revision_on_later_reissue(
 
     state = _replace_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver-v4"] = {
-        "status": "completed", "revision": 4, "pr": 77,
-        "replaces_revision": 3, "replaces_pr": _REPLACED_PR,
+        "status": "completed",
+        "revision": 4,
+        "pr": 77,
+        "replaces_revision": 3,
+        "replaces_pr": _REPLACED_PR,
     }
     rs.save(state)
 
     assert tb._last_delivery(rs.load("r-recon")) == (
-        4, rs.load("r-recon").ops["tasks-deliver-v4"]
+        4,
+        rs.load("r-recon").ops["tasks-deliver-v4"],
     )
     del state.ops["tasks-deliver-v4"]
     state.ops["tasks-deliver-v4"] = {
-        "status": "abandoned", "revision": 4, "reason": "р",
-        "replaces_revision": 3, "replaces_pr": _REPLACED_PR,
+        "status": "abandoned",
+        "revision": 4,
+        "reason": "р",
+        "replaces_revision": 3,
+        "replaces_pr": _REPLACED_PR,
     }
     rs.save(state)
     # v4 брошена, v3 заменена — предыдущая доставка это v1, а не v3.
@@ -8183,7 +8275,8 @@ def test_forward_link_is_status_agnostic(tmp_path, monkeypatch):
     state = _replace_state(tmp_path, monkeypatch)
     for status in ("started", "completed", "abandoned"):
         state.ops["tasks-deliver-v4"] = {
-            **_abandoned_replacement(), "status": status,
+            **_abandoned_replacement(),
+            "status": status,
         }
         rs.save(state)
         loaded = rs.load("r-recon")
@@ -8191,10 +8284,17 @@ def test_forward_link_is_status_agnostic(tmp_path, monkeypatch):
         # Отозванная ревизия не считается доставкой ни при каком статусе
         # отзыва: её байтов в base нет.
         assert tb._last_delivery(loaded)[0] != 3
-        assert tb._reconcile_revision(
-            3, loaded.ops["tasks-deliver-v3"], "base-sha-1", _REPLACED_PR,
-            {"state": "CLOSED"}, replaced=True,
-        ) == "replaced"
+        assert (
+            tb._reconcile_revision(
+                3,
+                loaded.ops["tasks-deliver-v3"],
+                "base-sha-1",
+                _REPLACED_PR,
+                {"state": "CLOSED"},
+                replaced=True,
+            )
+            == "replaced"
+        )
 
 
 def test_replacement_may_repeat_version_and_content_of_the_revoked(
@@ -8214,9 +8314,7 @@ def test_replacement_may_repeat_version_and_content_of_the_revoked(
     revoked = dict(state.ops["tasks-deliver-v3"])
     ops = _ReplaceOps(prs=[_MERGED_PR])
 
-    assert tb.deliver_superseded(
-        state, ops, replace=_replace()
-    ).kind == "delivered"
+    assert tb.deliver_superseded(state, ops, replace=_replace()).kind == "delivered"
 
     saved = rs.load("r-recon").ops["tasks-deliver-v4"]
     assert saved["tasks_version"] == revoked["tasks_version"] == 2
@@ -8238,20 +8336,23 @@ def _v4_intent(state, **kw) -> dict:
 
     by, at = _pr_signature(403)
     return {
-        "status": "started", "revision": 4,
-        "branch": "spec/WS-alpha-7-tasks-v4", "base_sha": "base-sha-1",
-        "head_sha": None, "tasks_blob": None,
+        "status": "started",
+        "revision": 4,
+        "branch": "spec/WS-alpha-7-tasks-v4",
+        "base_sha": "base-sha-1",
+        "head_sha": None,
+        "tasks_blob": None,
         "prospective_anchor": tb._prospective_anchor(
             state.target_dir, state.bundle_dir, None
         ),
-        "content_anchor": tb._content_anchor(
-            state.target_dir, state.bundle_dir, None
-        ),
+        "content_anchor": tb._content_anchor(state.target_dir, state.bundle_dir, None),
         "tasks_version": 2,
         "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
-        "dag_source": "derived_from_spec", "supersedes": 1,
+        "dag_source": "derived_from_spec",
+        "supersedes": 1,
         "expected_generated_at": "2026-09-09T10:00:00+00:00",
-        "replaces_revision": 3, "replaces_pr": _REPLACED_PR,
+        "replaces_revision": 3,
+        "replaces_pr": _REPLACED_PR,
         "replaces_branch": _REPLACED_BRANCH,
         "replaces_head_sha": _REPLACED_HEAD,
         "replacement_reason": "дефектные подписи",
@@ -8280,9 +8381,7 @@ def test_window_a_intent_written_pr_still_open(tmp_path, monkeypatch):
     state = _window_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(prs=[_MERGED_PR])
 
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("delivered", 77)
     assert [pr for pr, _ in ops.closed] == [_REPLACED_PR]
     assert ops.deleted == [_REPLACED_BRANCH]
     saved = rs.load("r-recon").ops
@@ -8303,7 +8402,7 @@ def test_window_b_pr_closed_no_pr_anywhere(tmp_path, monkeypatch):
     ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="CLOSED")
 
     assert tb.deliver_superseded(state, ops).kind == "delivered"
-    assert ops.closed == []          # шаг состоялся раньше — no-op
+    assert ops.closed == []  # шаг состоялся раньше — no-op
     assert ops.deleted == [_REPLACED_BRANCH]
     saved = rs.load("r-recon").ops
     assert saved["tasks-deliver-v4"]["pr"] == 77
@@ -8321,14 +8420,13 @@ def test_window_c_pr_created_branch_alive(tmp_path, monkeypatch):
 
     state = _window_state(tmp_path, monkeypatch, head_sha="commit-sha-1")
     ops = _ReplaceOps(
-        prs=[_MERGED_PR], replaced_state="CLOSED",
+        prs=[_MERGED_PR],
+        replaced_state="CLOSED",
         branch_prs={"spec/WS-alpha-7-tasks-v4": 77},
         facts_by_pr={77: {"state": "OPEN", "headRefOid": "commit-sha-1"}},
     )
 
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "returned", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("returned", 77)
     assert ops.deleted == [_REPLACED_BRANCH]
     # ГЛАВНОЕ утверждение окна C: доставка не переигрывается. Сравнение с
     # кортежем было вакуумным — `deliver` передаёт label "", четвёртого
@@ -8340,9 +8438,7 @@ def test_window_c_pr_created_branch_alive(tmp_path, monkeypatch):
     assert "tasks-deliver-v5" not in saved
 
 
-def test_window_c_completed_revision_still_drops_branch(
-    tmp_path, monkeypatch
-):
+def test_window_c_completed_revision_still_drops_branch(tmp_path, monkeypatch):
     """То же окно, но ревизия уже `completed`: хвост доводится и тогда.
 
     Падение между `_complete_revision` и удалением ветки оставляет
@@ -8352,18 +8448,20 @@ def test_window_c_completed_revision_still_drops_branch(
     from governance import task_bridge as tb
 
     state = _window_state(
-        tmp_path, monkeypatch, status="completed", pr=77,
+        tmp_path,
+        monkeypatch,
+        status="completed",
+        pr=77,
         head_sha="commit-sha-1",
     )
     ops = _ReplaceOps(
-        prs=[_MERGED_PR], replaced_state="CLOSED",
+        prs=[_MERGED_PR],
+        replaced_state="CLOSED",
         branch_prs={"spec/WS-alpha-7-tasks-v4": 77},
         facts_by_pr={77: {"state": "OPEN", "headRefOid": "commit-sha-1"}},
     )
 
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "returned", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("returned", 77)
     assert ops.deleted == [_REPLACED_BRANCH]
     assert "tasks-deliver-v5" not in rs.load("r-recon").ops
 
@@ -8386,9 +8484,7 @@ def test_replace_refuses_when_a_later_revision_is_not_this_replacement(
         tb.deliver_superseded(state, ops, replace=_replace())
 
 
-def test_repeat_with_the_flag_continues_the_same_revision(
-    tmp_path, monkeypatch
-):
+def test_repeat_with_the_flag_continues_the_same_revision(tmp_path, monkeypatch):
     """Повтор с тем же флагом продолжает ревизию замены, а не заводит v5.
 
     Гвард «замена только последней ревизии» не смеет ловить собственный
@@ -8440,7 +8536,8 @@ def test_abandoned_replacement_hands_its_obligation_to_the_next_revision(
 
     state = _replace_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {
-        **state.ops["tasks-deliver"], "content_anchor": "СОДЕРЖАНИЕ-ДО",
+        **state.ops["tasks-deliver"],
+        "content_anchor": "СОДЕРЖАНИЕ-ДО",
     }
     state.ops["tasks-deliver-v4"] = _abandoned_replacement()
     rs.save(state)
@@ -8455,9 +8552,7 @@ def test_abandoned_replacement_hands_its_obligation_to_the_next_revision(
     assert ops.deleted == [_REPLACED_BRANCH]
 
 
-def test_obligation_survives_abandon_inside_the_same_call(
-    tmp_path, monkeypatch
-):
+def test_obligation_survives_abandon_inside_the_same_call(tmp_path, monkeypatch):
     """Ревизия-замена брошена ПРЯМО В ЭТОМ вызове — обязательство живо.
 
     Соседний тест про перенос пред-засевает `abandoned` и потому этот
@@ -8484,17 +8579,13 @@ def test_obligation_survives_abandon_inside_the_same_call(
     assert saved["tasks-deliver-v4"]["status"] == "abandoned"
     assert saved["tasks-deliver-v5"]["replaces_revision"] == 3
     assert saved["tasks-deliver-v5"]["replaces_pr"] == _REPLACED_PR
-    assert saved["tasks-deliver-v5"]["replacement_reason"] == (
-        "дефектные подписи"
-    )
+    assert saved["tasks-deliver-v5"]["replacement_reason"] == ("дефектные подписи")
     # Обязательство не просто записано — оно ИСПОЛНЕНО.
     assert [pr for pr, _ in ops.closed] == [_REPLACED_PR]
     assert ops.deleted == [_REPLACED_BRANCH]
 
 
-def test_revoked_revision_with_open_pr_is_never_returned(
-    tmp_path, monkeypatch
-):
+def test_revoked_revision_with_open_pr_is_never_returned(tmp_path, monkeypatch):
     """Отозванная ревизия при OPEN выбывает из разбора, а не возвращается.
 
     Иначе механика печатает «ревизия 3 уже доставлена — PR #408» при
@@ -8507,7 +8598,8 @@ def test_revoked_revision_with_open_pr_is_never_returned(
 
     state = _replace_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {
-        **state.ops["tasks-deliver"], "content_anchor": "СОДЕРЖАНИЕ-ДО",
+        **state.ops["tasks-deliver"],
+        "content_anchor": "СОДЕРЖАНИЕ-ДО",
     }
     state.ops["tasks-deliver-v4"] = _abandoned_replacement()
     rs.save(state)
@@ -8532,25 +8624,40 @@ def test_reconcile_replaced_covers_open_but_not_merged(tmp_path, monkeypatch):
     безусловным «вмерженное не заменяется»."""
     from governance import task_bridge as tb
 
-    op = {"status": "completed", "branch": _REPLACED_BRANCH,
-          "base_sha": "base-sha-1", "head_sha": _REPLACED_HEAD,
-          "pr": _REPLACED_PR}
+    op = {
+        "status": "completed",
+        "branch": _REPLACED_BRANCH,
+        "base_sha": "base-sha-1",
+        "head_sha": _REPLACED_HEAD,
+        "pr": _REPLACED_PR,
+    }
 
     for state_name in ("OPEN", "CLOSED"):
-        assert tb._reconcile_revision(
-            3, op, "base-sha-1", _REPLACED_PR,
-            {"state": state_name, "headRefOid": _REPLACED_HEAD},
+        assert (
+            tb._reconcile_revision(
+                3,
+                op,
+                "base-sha-1",
+                _REPLACED_PR,
+                {"state": state_name, "headRefOid": _REPLACED_HEAD},
+                replaced=True,
+            )
+            == "replaced"
+        )
+    assert (
+        tb._reconcile_revision(
+            3,
+            op,
+            "base-sha-1",
+            _REPLACED_PR,
+            {"state": "MERGED", "headRefOid": _REPLACED_HEAD},
             replaced=True,
-        ) == "replaced"
-    assert tb._reconcile_revision(
-        3, op, "base-sha-1", _REPLACED_PR,
-        {"state": "MERGED", "headRefOid": _REPLACED_HEAD}, replaced=True,
-    ) == "return_pr"
+        )
+        == "return_pr"
+    )
 
 
-def test_obligation_is_discharged_when_revoked_pr_gets_merged(
-    tmp_path, monkeypatch
-):
+def test_obligation_is_discharged_when_revoked_pr_gets_merged(tmp_path, monkeypatch):
     """Перенятое обязательство + ВМЕРЖЕННЫЙ отозванный PR = разрядка.
 
     Сочетание, которого не строил ни один тест: MERGED и перенос были
@@ -8573,7 +8680,8 @@ def test_obligation_is_discharged_when_revoked_pr_gets_merged(
     # v3 доставила ДРУГОЕ содержание: иначе §I5 закончил бы вызов
     # бесследным no-op и о разрядке тест не сказал бы ничего.
     state.ops["tasks-deliver-v3"] = {
-        **state.ops["tasks-deliver-v3"], "content_anchor": "СОДЕРЖАНИЕ-v3",
+        **state.ops["tasks-deliver-v3"],
+        "content_anchor": "СОДЕРЖАНИЕ-v3",
     }
     state.ops["tasks-deliver-v4"] = _abandoned_replacement()
     rs.save(state)
@@ -8591,9 +8699,7 @@ def test_obligation_is_discharged_when_revoked_pr_gets_merged(
     assert saved["supersedes"] == 3
 
 
-def test_merged_revoked_pr_mid_flight_names_the_way_out(
-    tmp_path, monkeypatch
-):
+def test_merged_revoked_pr_mid_flight_names_the_way_out(tmp_path, monkeypatch):
     """Мерж отозванного PR в полёте — отказ ОДИН раз и с процедурой.
 
     Намерение ревизии уже durable, её anchor'ы и версия посчитаны на
@@ -8631,9 +8737,7 @@ def test_discharge_costs_nothing_without_revocations_in_the_ledger(
     # А при отзыве в леджере — ровно один запрос на отозванный PR.
     state.ops["tasks-deliver-v4"] = _abandoned_replacement()
     assert tb._discharged_replacements(state, ops) == frozenset()
-    assert [c for c in ops.calls if c[0] == "pr_facts"] == [
-        ("pr_facts", _REPLACED_PR)
-    ]
+    assert [c for c in ops.calls if c[0] == "pr_facts"] == [("pr_facts", _REPLACED_PR)]
 
 
 @pytest.mark.parametrize(
@@ -8669,9 +8773,9 @@ def test_branch_delete_failure_is_visible_but_does_not_undo_delivery(
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
 
-    assert tb.deliver_superseded(
-        state, ops, replace=_replace()
-    ) == tb.SupersedeResult("delivered", 77)
+    assert tb.deliver_superseded(state, ops, replace=_replace()) == tb.SupersedeResult(
+        "delivered", 77
+    )
 
     assert ops.deleted == deleted
     assert ops.deleted_local == deleted_local
@@ -8712,15 +8816,17 @@ def test_branch_disappearing_during_delete_is_a_completed_cleanup(
 
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
-    answers = iter([
-        Fact(Outcome.FOUND, _REPLACED_HEAD, "ветка найдена"),
-        Fact(Outcome.ABSENT, None, "ветка исчезла"),
-    ])
+    answers = iter(
+        [
+            Fact(Outcome.FOUND, _REPLACED_HEAD, "ветка найдена"),
+            Fact(Outcome.ABSENT, None, "ветка исчезла"),
+        ]
+    )
     setattr(ops, lookup_name, lambda first, second: next(answers))
 
-    assert tb.deliver_superseded(
-        state, ops, replace=_replace()
-    ) == tb.SupersedeResult("delivered", 77)
+    assert tb.deliver_superseded(state, ops, replace=_replace()) == tb.SupersedeResult(
+        "delivered", 77
+    )
 
     out = capsys.readouterr().out
     assert _REPLACED_BRANCH in out
@@ -8746,15 +8852,17 @@ def test_branch_replaced_during_failed_delete_is_not_touched(
 
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
-    answers = iter([
-        Fact(Outcome.FOUND, _REPLACED_HEAD, "ветка найдена"),
-        Fact(Outcome.FOUND, "ЧУЖОЙ-SHA", "ветка переиспользована"),
-    ])
+    answers = iter(
+        [
+            Fact(Outcome.FOUND, _REPLACED_HEAD, "ветка найдена"),
+            Fact(Outcome.FOUND, "ЧУЖОЙ-SHA", "ветка переиспользована"),
+        ]
+    )
     setattr(ops, lookup_name, lambda first, second: next(answers))
 
-    assert tb.deliver_superseded(
-        state, ops, replace=_replace()
-    ) == tb.SupersedeResult("delivered", 77)
+    assert tb.deliver_superseded(state, ops, replace=_replace()) == tb.SupersedeResult(
+        "delivered", 77
+    )
 
     out = capsys.readouterr().out
     assert f"({where}) оставлена после неудачного удаления" in out
@@ -8779,15 +8887,17 @@ def test_branch_state_unavailable_after_failed_delete_is_not_success(
 
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
-    answers = iter([
-        Fact(Outcome.FOUND, _REPLACED_HEAD, "ветка найдена"),
-        unavailable("состояние недоступно"),
-    ])
+    answers = iter(
+        [
+            Fact(Outcome.FOUND, _REPLACED_HEAD, "ветка найдена"),
+            unavailable("состояние недоступно"),
+        ]
+    )
     setattr(ops, lookup_name, lambda first, second: next(answers))
 
-    assert tb.deliver_superseded(
-        state, ops, replace=_replace()
-    ) == tb.SupersedeResult("delivered", 77)
+    assert tb.deliver_superseded(state, ops, replace=_replace()) == tb.SupersedeResult(
+        "delivered", 77
+    )
 
     out = capsys.readouterr().out
     assert f"ветка {_REPLACED_BRANCH} ({where}) не удалена" in out
@@ -8818,9 +8928,9 @@ def test_branch_state_unavailable_before_delete_skips_the_effect(
         lambda first, second: unavailable("состояние недоступно"),
     )
 
-    assert tb.deliver_superseded(
-        state, ops, replace=_replace()
-    ) == tb.SupersedeResult("delivered", 77)
+    assert tb.deliver_superseded(state, ops, replace=_replace()) == tb.SupersedeResult(
+        "delivered", 77
+    )
 
     assert not any(call[0] == delete_call for call in ops.calls)
     out = capsys.readouterr().out
@@ -8858,9 +8968,7 @@ def test_branch_is_dropped_only_where_head_matches_the_revoked_revision(
     state = _replace_state(tmp_path, monkeypatch)
     ops = _ReplaceOps(prs=[_MERGED_PR], **kw)
 
-    assert tb.deliver_superseded(
-        state, ops, replace=_replace()
-    ).kind == "delivered"
+    assert tb.deliver_superseded(state, ops, replace=_replace()).kind == "delivered"
 
     assert ops.deleted == deleted
     assert ops.deleted_local == deleted_local
@@ -8882,7 +8990,9 @@ def test_branch_is_kept_when_intent_carries_no_head_of_the_revoked(
     from governance import task_bridge as tb
 
     state = _window_state(
-        tmp_path, monkeypatch, replaces_head_sha=None,
+        tmp_path,
+        monkeypatch,
+        replaces_head_sha=None,
     )
     ops = _ReplaceOps(prs=[_MERGED_PR], replaced_state="CLOSED")
 
@@ -8910,17 +9020,17 @@ def test_cli_replace_requires_reason_and_supersede(capsys):
     assert "--reason" in capsys.readouterr().err
 
     with pytest.raises(SystemExit):
-        tb.main(["--run-id", "r", "--replace-revision", "3",
-                 "--reason", "р"])
+        tb.main(["--run-id", "r", "--replace-revision", "3", "--reason", "р"])
     assert "--replace-revision" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
     "argv, needle",
     [
-        (["--replace-revision", "3", "--abandon-revision", "2",
-          "--reason", "р"],
-         "--replace-revision и --abandon-revision"),
+        (
+            ["--replace-revision", "3", "--abandon-revision", "2", "--reason", "р"],
+            "--replace-revision и --abandon-revision",
+        ),
         (["--supersede", "--reason", "р"], "--reason осмыслен только"),
     ],
     ids=["with-abandon", "reason-without-transition"],
@@ -8953,10 +9063,19 @@ def test_cli_shared_reason_lands_in_the_field_of_its_transition(
     rs.save(state)
     monkeypatch.setattr(tb, "RealOps", lambda: object())
 
-    assert tb.main([
-        "--run-id", "r-recon", "--abandon-revision", "2",
-        "--reason", "причина абандона",
-    ]) == 0
+    assert (
+        tb.main(
+            [
+                "--run-id",
+                "r-recon",
+                "--abandon-revision",
+                "2",
+                "--reason",
+                "причина абандона",
+            ]
+        )
+        == 0
+    )
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["reason"] == "причина абандона"
     assert "replacement_reason" not in saved
@@ -8980,10 +9099,20 @@ def test_cli_replace_reaches_implementation(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(tb, "deliver_superseded", _fake)
     monkeypatch.setattr(tb, "RealOps", lambda: object())
-    assert tb.main([
-        "--run-id", "r-recon", "--supersede",
-        "--replace-revision", "3", "--reason", "дефект подписи",
-    ]) == 0
+    assert (
+        tb.main(
+            [
+                "--run-id",
+                "r-recon",
+                "--supersede",
+                "--replace-revision",
+                "3",
+                "--reason",
+                "дефект подписи",
+            ]
+        )
+        == 0
+    )
     assert called["replace"] == tb.Replacement(3, "дефект подписи")
 
 
@@ -9003,8 +9132,11 @@ def _sc(beh_id: str, title: str, target: str = "tests/test_x.py"):
     from governance.task_bridge import Scenario
 
     return Scenario(
-        beh_id=beh_id, title=title, traces=("FR-01",),
-        checked_kind="integration", checked_target=target,
+        beh_id=beh_id,
+        title=title,
+        traces=("FR-01",),
+        checked_kind="integration",
+        checked_target=target,
     )
 
 
@@ -9012,8 +9144,13 @@ def _dt(dt_id: str, title: str, scenarios: tuple[str, ...], depends=()):
     from governance.decomposition_guard import DtTask
 
     return DtTask(
-        dt_id=dt_id, title=title, type="implement", owner="dev",
-        scenarios=scenarios, depends_on=tuple(depends), delivered_by=(),
+        dt_id=dt_id,
+        title=title,
+        type="implement",
+        owner="dev",
+        scenarios=scenarios,
+        depends_on=tuple(depends),
+        delivered_by=(),
         parallel_group="solo",
     )
 
@@ -9022,11 +9159,14 @@ def _render(dt_tasks, scenarios, version: int = 1) -> str:
     from governance import task_bridge as tb
 
     return tb.render_tasks_dt(
-        ws_id="WS-alpha-7", subject="s",
+        ws_id="WS-alpha-7",
+        subject="s",
         bundle_path="workstreams/WS-alpha-7/spec/30-decomposition.md",
-        scenarios=scenarios, dt_tasks=dt_tasks,
+        scenarios=scenarios,
+        dt_tasks=dt_tasks,
         generated_at="2026-09-02T06:07:39+03:00",
-        anchor_blob="a" * 40, version=version,
+        anchor_blob="a" * 40,
+        version=version,
     )
 
 
@@ -9070,7 +9210,7 @@ def test_carry_preserves_status_and_marks_of_unchanged_task() -> None:
 
     delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001")
     fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
-    assert "| ✅ DONE" not in fresh          # рендер состояния не знает
+    assert "| ✅ DONE" not in fresh  # рендер состояния не знает
     report = tb._carry_execution_state_with_report(fresh, delivered)
     carried = report.text
 
@@ -9084,9 +9224,7 @@ def test_carry_preserves_status_and_marks_of_unchanged_task() -> None:
     assert "P2 | TODO   Est: 0.5d" in todo
     assert "- [x]" not in todo
     # Кроме маркеров состояния байты рендера не тронуты
-    assert carried.replace("✅ DONE", "TODO").replace(
-        "- [x]", "- [ ]"
-    ) == fresh
+    assert carried.replace("✅ DONE", "TODO").replace("- [x]", "- [ ]") == fresh
 
 
 def test_carry_skips_task_whose_body_changed() -> None:
@@ -9140,8 +9278,7 @@ def test_carry_leaves_new_task_clean() -> None:
     scenarios = [_sc("BEH-00", "Новый сценарий"), *_CARRY_SCENARIOS]
     grown = [_dt("DT-00", "Новая задача", ("BEH-00",)), *_CARRY_DT]
     body = _task_body(
-        tb._carry_execution_state(_render(grown, scenarios, version=2),
-                                  delivered),
+        tb._carry_execution_state(_render(grown, scenarios, version=2), delivered),
         "TASK-001",
     )
     assert "#DT-00" in body
@@ -9162,8 +9299,10 @@ def test_carry_renumbering_does_not_move_status_to_a_foreign_task() -> None:
 
     delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-002")
     scenarios = [
-        _CARRY_SCENARIOS[0], _CARRY_SCENARIOS[1],
-        _sc("BEH-99", "Вставленная в середину"), _CARRY_SCENARIOS[2],
+        _CARRY_SCENARIOS[0],
+        _CARRY_SCENARIOS[1],
+        _sc("BEH-99", "Вставленная в середину"),
+        _CARRY_SCENARIOS[2],
     ]
     shifted = [
         _CARRY_DT[0],
@@ -9174,7 +9313,7 @@ def test_carry_renumbering_does_not_move_status_to_a_foreign_task() -> None:
     carried = tb._carry_execution_state(fresh, delivered)
 
     inserted = _task_body(carried, "TASK-002")
-    assert "#DT-99" in inserted            # именно вставленная задача
+    assert "#DT-99" in inserted  # именно вставленная задача
     assert "| ✅ DONE" not in inserted
     assert "- [x]" not in inserted
     # У DT-02 сдвинулись номер в заголовке и в `Depends on` — блок не
@@ -9210,9 +9349,7 @@ def test_carry_ignores_duplicate_block_in_delivered_spec() -> None:
     block = _task_body(delivered, "TASK-001")
     doubled = delivered.replace(block, block + block, 1)
     fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
-    body = _task_body(
-        tb._carry_execution_state(fresh, doubled), "TASK-001"
-    )
+    body = _task_body(tb._carry_execution_state(fresh, doubled), "TASK-001")
     assert "| ✅ DONE" not in body
     assert "- [x]" not in body
 
@@ -9225,9 +9362,9 @@ def test_carry_normalizes_meta_line_instead_of_dropping_it() -> None:
     строке, — задача с переставленным приоритетом сохраняла бы `DONE`."""
     from governance import task_bridge as tb
 
-    delivered = _executed(
-        _render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001"
-    ).replace("P2 | ✅ DONE   Est: 0.5d", "P0 | ✅ DONE   Est: 3d")
+    delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001").replace(
+        "P2 | ✅ DONE   Est: 0.5d", "P0 | ✅ DONE   Est: 3d"
+    )
     fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
     body = _task_body(tb._carry_execution_state(fresh, delivered), "TASK-001")
     assert "| ✅ DONE" not in body
@@ -9256,8 +9393,9 @@ def test_carry_skips_checklist_text_repeated_in_delivered_spec() -> None:
     from governance import task_bridge as tb
 
     delivered = _twin_item(
-        _executed(_executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001"),
-                  "TASK-002")
+        _executed(
+            _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001"), "TASK-002"
+        )
     )
     fresh = _twin_item(_render(_CARRY_DT, _CARRY_SCENARIOS, version=2))
     report = tb._carry_execution_state_with_report(fresh, delivered)
@@ -9295,13 +9433,9 @@ def test_carry_report_ignores_checked_lines_outside_task_blocks() -> None:
     from governance import task_bridge as tb
 
     fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
-    delivered = _executed(
-        _render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001"
-    )
+    delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001")
     outside = "- [x] решение из design, не execution-checklist\n"
-    report = tb._carry_execution_state_with_report(
-        outside + fresh, outside + delivered
-    )
+    report = tb._carry_execution_state_with_report(outside + fresh, outside + delivered)
 
     assert report.carried_checked_items == report.total_checked_items == 3
 
@@ -9323,14 +9457,16 @@ def _delivered_v1(state, executed: str = "TASK-001") -> str:
     )
     return _executed(
         tb.render_tasks_dt(
-            ws_id=state.ws_id, subject=state.subject,
+            ws_id=state.ws_id,
+            subject=state.subject,
             bundle_path=f"{state.bundle_dir}/30-decomposition.md",
             scenarios=tb.parse_behaviour(
                 (base / "15-behaviour-spec.md").read_text(encoding="utf-8")
             ),
             dt_tasks=dt_tasks,
             generated_at="2026-09-01T00:00:00+03:00",
-            anchor_blob="b" * 40, version=1,
+            anchor_blob="b" * 40,
+            version=1,
         ),
         executed,
     )
@@ -9369,16 +9505,17 @@ def test_supersede_preserves_execution_state_of_unchanged_tasks(
     from governance import task_bridge as tb
 
     state = _supersede_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
+    state.ops["tasks-deliver"] = {
+        "status": "completed",
+        "pr": 5,
+        "anchor": "СТАРЫЙ-ДРУГОЙ",
+    }
     rs.save(state)
     ops = _CarryOps(prs=[_MERGED_PR], delivered=_delivered_v1(state))
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("delivered", 77)
+    text = (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").read_text(
+        encoding="utf-8"
     )
-    text = (
-        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
-    ).read_text(encoding="utf-8")
     assert "P2 | ✅ DONE   Est: 0.5d" in text
     assert "- [x] реализовать BEH-01: Просмотр списка" in text
     assert "- [x] реализовать BEH-02: Пустое состояние" in text
@@ -9392,9 +9529,8 @@ def test_supersede_preserves_execution_state_of_unchanged_tasks(
     # `tasks_blob` §I3.1 посчитан по ФАКТИЧЕСКИМ байтам файла — иначе
     # возобновление не опознало бы собственный коммит
     from governance.stale_adapter import blob_sha1
-    assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_blob"] == (
-        blob_sha1(text)
-    )
+
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_blob"] == (blob_sha1(text))
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["carry"] == {
         "matched_tasks": 1,
@@ -9418,7 +9554,9 @@ def test_supersede_reports_zero_when_base_tasks_file_is_absent(
 
     state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ-ДРУГОЙ",
+        "status": "completed",
+        "pr": 5,
+        "anchor": "СТАРЫЙ-ДРУГОЙ",
         "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
     }
     rs.save(state)
@@ -9438,9 +9576,7 @@ def test_supersede_reports_zero_when_base_tasks_file_is_absent(
     )
 
 
-def test_supersede_refuses_when_base_tasks_file_cannot_be_read(
-    tmp_path, monkeypatch
-):
+def test_supersede_refuses_when_base_tasks_file_cannot_be_read(tmp_path, monkeypatch):
     """Сбой Git не превращается в чистую спеку с TODO."""
     from governance import run_state as rs
     from governance import task_bridge as tb
@@ -9453,7 +9589,9 @@ def test_supersede_refuses_when_base_tasks_file_cannot_be_read(
 
     state = _supersede_state(tmp_path, monkeypatch)
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ-ДРУГОЙ",
+        "status": "completed",
+        "pr": 5,
+        "anchor": "СТАРЫЙ-ДРУГОЙ",
         "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
     }
     rs.save(state)
@@ -9461,9 +9599,7 @@ def test_supersede_refuses_when_base_tasks_file_cannot_be_read(
 
     with pytest.raises(RuntimeError, match="git show failed"):
         tb.deliver_superseded(state, ops)
-    assert not any(
-        call[0] in {"commit_paths", "create_draft_pr"} for call in ops.calls
-    )
+    assert not any(call[0] in {"commit_paths", "create_draft_pr"} for call in ops.calls)
 
 
 def test_supersede_carry_source_is_base_not_worktree(tmp_path, monkeypatch):
@@ -9482,7 +9618,9 @@ def test_supersede_carry_source_is_base_not_worktree(tmp_path, monkeypatch):
         _delivered_v1(state), encoding="utf-8"
     )
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": 5, "anchor": "СТАРЫЙ-ДРУГОЙ",
+        "status": "completed",
+        "pr": 5,
+        "anchor": "СТАРЫЙ-ДРУГОЙ",
         # dag из записи: `_previous_dag` не пойдёт в show_file, и
         # единственный его вызов останется тот, что делает перенос
         "dag": [[f, list(u)] for f, u in tb._BUNDLE_DAG],
@@ -9490,9 +9628,9 @@ def test_supersede_carry_source_is_base_not_worktree(tmp_path, monkeypatch):
     rs.save(state)
     ops = _CarryOps(prs=[_MERGED_PR], delivered="")
     assert tb.deliver_superseded(state, ops).kind == "delivered"
-    text = (
-        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
-    ).read_text(encoding="utf-8")
+    text = (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").read_text(
+        encoding="utf-8"
+    )
     assert "✅" not in text and "- [x]" not in text
     assert ("show_file", "base-sha-1", _SPEC_REL) in ops.calls
 
@@ -9533,9 +9671,9 @@ def test_deliver_for_run_carries_nothing(tmp_path, monkeypatch):
         ops.delivered, encoding="utf-8"
     )
     assert tb.deliver_for_run(state, ops) == 77
-    text = (
-        Path(state.target_dir) / "spec/WS-alpha-7-tasks.md"
-    ).read_text(encoding="utf-8")
+    text = (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").read_text(
+        encoding="utf-8"
+    )
     assert "✅" not in text and "- [x]" not in text
     # За СПЕКОЙ в base доставка не ходит — переносить нечего. Узлы бандла
     # она читает, и это другой поход: его делает гейт §I12, проверяя
@@ -9555,8 +9693,11 @@ def test_supersede_resume_reproduces_the_same_bytes(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _supersede_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ-ДРУГОЙ"}
+    state.ops["tasks-deliver"] = {
+        "status": "completed",
+        "pr": 5,
+        "anchor": "СТАРЫЙ-ДРУГОЙ",
+    }
     rs.save(state)
     delivered = _delivered_v1(state)
     first = _CarryOps(prs=[_MERGED_PR], delivered=delivered)
@@ -9568,16 +9709,17 @@ def test_supersede_resume_reproduces_the_same_bytes(tmp_path, monkeypatch):
 
     # Возврат в состояние «намерение durable, PR ещё не создан»
     saved.ops["tasks-deliver-v2"].update(
-        status="started", pr=None, head_sha=None, tasks_blob=None,
+        status="started",
+        pr=None,
+        head_sha=None,
+        tasks_blob=None,
     )
     rs.save(saved)
     spec.write_text("затёрто\n", encoding="utf-8")
     again = _CarryOps(prs=[_MERGED_PR], delivered=delivered)
     assert tb.deliver_superseded(saved, again).kind == "delivered"
     assert spec.read_bytes() == bytes_first
-    assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_blob"] == (
-        blob_first
-    )
+    assert rs.load("r-recon").ops["tasks-deliver-v2"]["tasks_blob"] == (blob_first)
     assert ("show_file", "base-sha-1", _SPEC_REL) in again.calls
     assert ("show_file_for_carry", "base-sha-1", _SPEC_REL) in again.calls
 
@@ -9612,7 +9754,8 @@ def _composition_bundle(tmp_path: Path, *names: str) -> str:
 
 def _composition(target: str, legacy_bundle: int | None) -> None:
     task_bridge._check_bundle_composition(
-        target, "workstreams/WS-alpha-7/spec",
+        target,
+        "workstreams/WS-alpha-7/spec",
         task_bridge._dag_for(legacy_bundle),
     )
 
@@ -9626,8 +9769,12 @@ def test_legacy_5_exact_composition(tmp_path: Path) -> None:
     отказывает уже на `=5` (запрет «по самому длинному существующему», §4).
     """
     target = _composition_bundle(
-        tmp_path, "00-charter.md", "10-requirements.md",
-        "15-behaviour-spec.md", "20-design.md", "30-decomposition.md",
+        tmp_path,
+        "00-charter.md",
+        "10-requirements.md",
+        "15-behaviour-spec.md",
+        "20-design.md",
+        "30-decomposition.md",
     )
     _composition(target, 5)
 
@@ -9649,8 +9796,11 @@ def test_legacy_5_exact_composition(tmp_path: Path) -> None:
 def test_legacy_bundle_exact_composition(tmp_path: Path) -> None:
     """Каталог из 4 узлов: точно `=4`, а `=3` и полный DAG отказывают."""
     target = _composition_bundle(
-        tmp_path, "00-charter.md", "10-requirements.md",
-        "15-behaviour-spec.md", "20-design.md",
+        tmp_path,
+        "00-charter.md",
+        "10-requirements.md",
+        "15-behaviour-spec.md",
+        "20-design.md",
     )
     _composition(target, 4)
 
@@ -9670,7 +9820,9 @@ def test_composition_without_design_refuses_without_legacy_flag(
     гварда оператор получал бы трейсбек.
     """
     target = _composition_bundle(
-        tmp_path, "00-charter.md", "10-requirements.md",
+        tmp_path,
+        "00-charter.md",
+        "10-requirements.md",
         "15-behaviour-spec.md",
     )
     _composition(target, 3)
@@ -9699,14 +9851,14 @@ def test_composition_missing_directory_is_not_an_empty_bundle(
 def test_prospective_anchor_guards_composition_itself(tmp_path: Path) -> None:
     """#181: якорь не полагается на порядок внешнего caller'а."""
     target = _composition_bundle(
-        tmp_path, "00-charter.md", "10-requirements.md",
+        tmp_path,
+        "00-charter.md",
+        "10-requirements.md",
         "15-behaviour-spec.md",
     )
 
     with pytest.raises(RuntimeError) as failure:
-        task_bridge._prospective_anchor(
-            target, "workstreams/WS-alpha-7/spec"
-        )
+        task_bridge._prospective_anchor(target, "workstreams/WS-alpha-7/spec")
     message = str(failure.value)
     assert "20-design.md" in message
     assert "--legacy-bundle=3|4|5" in message
@@ -9779,9 +9931,7 @@ def test_gate_judges_base_not_the_worktree(tmp_path: Path, monkeypatch) -> None:
     assert not _effects(ops)
 
 
-def test_stale_clone_is_refreshed_before_the_gate(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_stale_clone_is_refreshed_before_the_gate(tmp_path: Path, monkeypatch) -> None:
     """Протухший клон освежается ДО суда, а не после него.
 
     Сценарий major'а: подпись финализации уже в удалённом base, а в клоне
@@ -9793,7 +9943,7 @@ def test_stale_clone_is_refreshed_before_the_gate(
     fresh = _base_snapshot(Path(state.target_dir))
     stale = dict(fresh)
     meta, body = split_frontmatter(stale["00-charter.md"])
-    meta["status"] = "draft"          # клон отстал: одобрения ещё не видно
+    meta["status"] = "draft"  # клон отстал: одобрения ещё не видно
     stale["00-charter.md"] = join_frontmatter(meta, body)
 
     ops = _SplitOps(stale, on_pull=fresh)
@@ -9854,16 +10004,17 @@ def test_stamp_epoch_intent_refuses_before_any_effect(
     from governance import run_state as rs
 
     state = _supersede_state(tmp_path, monkeypatch)
-    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5,
-                                  "anchor": "СТАРЫЙ"}
+    state.ops["tasks-deliver"] = {"status": "completed", "pr": 5, "anchor": "СТАРЫЙ"}
     state.ops["tasks-deliver-v2"] = {
-        "status": "started", "revision": 2,
+        "status": "started",
+        "revision": 2,
         "branch": "spec/WS-alpha-7-tasks-v2",
         "base_sha": "base-sha-1",
         "prospective_anchor": "блоб-эпохи-штампа",
-        "approval_pr": 403,                  # ← признак прежней эпохи
+        "approval_pr": 403,  # ← признак прежней эпохи
         "signed_nodes": ["decomposition"],
-        "tasks_version": 2, "head_sha": None,
+        "tasks_version": 2,
+        "head_sha": None,
     }
     rs.save(state)
     before = _ledger_bytes()
@@ -9942,9 +10093,9 @@ def test_bridge_still_delivers_a_versionless_bundle(tmp_path: Path) -> None:
     )
 
     assert pr == 77
-    assert "### TASK-001: Реализация" in (
-        target / "spec/WS-alpha-7-tasks.md"
-    ).read_text()
+    assert (
+        "### TASK-001: Реализация" in (target / "spec/WS-alpha-7-tasks.md").read_text()
+    )
 
 
 # ── срез 2 #282: проекция delivers в задачу и чек-лист ──
@@ -9995,9 +10146,7 @@ def test_delivers_metaline_lists_every_declared_id() -> None:
     """
     rendered = _render_delivers()
 
-    (line,) = [
-        ln for ln in rendered.splitlines() if ln.startswith("**Delivers:**")
-    ]
+    (line,) = [ln for ln in rendered.splitlines() if ln.startswith("**Delivers:**")]
     ids = {part.strip() for part in line.removeprefix("**Delivers:**").split(",")}
     assert ids == {"DEL-01", "DEL-02"}, line
 
@@ -10016,8 +10165,7 @@ def test_deliverable_without_cover_becomes_its_own_checklist_item() -> None:
     assert "ядро отвергает пустой ввод" in items[0], items[0]
 
 
-def test_covered_deliverable_annotates_the_existing_item_without_a_duplicate(
-) -> None:
+def test_covered_deliverable_annotates_the_existing_item_without_a_duplicate() -> None:
     """DT-04 (§3b.5): перенос без дубля, доказанный ЯВНОЙ связью.
 
     Отсутствие дубля доказывается тем, что DEL-02 стоит НА пункте BEH-02,
@@ -10027,9 +10175,7 @@ def test_covered_deliverable_annotates_the_existing_item_without_a_duplicate(
     """
     rendered = _render_delivers()
 
-    own_items = [
-        ln for ln in rendered.splitlines() if ln.startswith("- [ ] DEL-02")
-    ]
+    own_items = [ln for ln in rendered.splitlines() if ln.startswith("- [ ] DEL-02")]
     assert own_items == [], own_items
     beh_items = [
         ln for ln in rendered.splitlines() if ln.startswith("- [ ] реализовать BEH-02")
@@ -10178,8 +10324,7 @@ def test_post_carry_check_catches_a_dropped_item() -> None:
     """
     text = _render_delivers()
     broken = "\n".join(
-        ln for ln in text.splitlines()
-        if not ln.startswith("- [ ] DEL-01 (")
+        ln for ln in text.splitlines() if not ln.startswith("- [ ] DEL-01 (")
     )
 
     with pytest.raises(RuntimeError, match="DEL-01"):
@@ -10273,14 +10418,13 @@ def test_delivery_refuses_when_the_carry_writer_drops_a_deliverable(
         return dataclasses.replace(
             result,
             text="\n".join(
-                ln for ln in result.text.splitlines()
+                ln
+                for ln in result.text.splitlines()
                 if not ln.startswith("- [ ] DEL-01 (")
             ),
         )
 
-    monkeypatch.setattr(
-        task_bridge, "_carry_execution_state_with_report", _dropping
-    )
+    monkeypatch.setattr(task_bridge, "_carry_execution_state_with_report", _dropping)
 
     with pytest.raises(RuntimeError, match="DEL-01"):
         task_bridge.deliver(
@@ -10327,8 +10471,7 @@ def test_post_carry_check_accepts_a_checked_covering_item() -> None:
     """
     text = _render_delivers()
     beh_item = next(
-        ln for ln in text.splitlines()
-        if ln.startswith("- [ ] реализовать BEH-02")
+        ln for ln in text.splitlines() if ln.startswith("- [ ] реализовать BEH-02")
     )
     delivered = text.replace(beh_item, beh_item.replace("- [ ]", "- [x]", 1), 1)
     carried = task_bridge._carry_execution_state(text, delivered)
@@ -10351,14 +10494,21 @@ def test_projection_check_counts_by_the_declared_id_not_by_a_prefix() -> None:
     пункты по ОБЪЯВЛЕННОМУ id.
     """
     task = decomposition_guard.DtTask(
-        dt_id="DT-01", title="Ядро", type="implement", owner="dev",
-        scenarios=("BEH-01",), depends_on=(), delivered_by=(),
+        dt_id="DT-01",
+        title="Ядро",
+        type="implement",
+        owner="dev",
+        scenarios=("BEH-01",),
+        depends_on=(),
+        delivered_by=(),
         parallel_group="core",
         delivers=(
             decomposition_guard.Deliverable(
-                id="OUT-01", kind="capability",
+                id="OUT-01",
+                kind="capability",
                 statement="ядро отвергает пустой ввод",
-                sources=("acceptance#AC-07",), covered_by=None,
+                sources=("acceptance#AC-07",),
+                covered_by=None,
             ),
         ),
     )
@@ -10452,9 +10602,7 @@ def test_restated_item_does_not_claim_the_work_is_done() -> None:
     """
     rendered = _render_restates()
 
-    (item,) = [
-        ln for ln in rendered.splitlines() if ln.startswith("- [ ] DEL-12")
-    ]
+    (item,) = [ln for ln in rendered.splitlines() if ln.startswith("- [ ] DEL-12")]
     lowered = item.lower()
     for claim in ("уже сделано", "уже реализован", "выполнено"):
         assert claim not in lowered, item
@@ -10469,9 +10617,7 @@ def test_first_task_keeps_its_own_obligation_unmarked() -> None:
     """
     rendered = _render_restates()
 
-    (item,) = [
-        ln for ln in rendered.splitlines() if ln.startswith("- [ ] DEL-01")
-    ]
+    (item,) = [ln for ln in rendered.splitlines() if ln.startswith("- [ ] DEL-01")]
     assert "проверить" not in item, item
     assert item.endswith("retention_days ограничен 7-365"), item
 
@@ -10492,8 +10638,7 @@ def test_restated_and_covered_obligation_rides_the_scenario_item() -> None:
     own = [ln for ln in rendered.splitlines() if ln.startswith("- [ ] DEL-12")]
     assert own == [], own
     (beh_item,) = [
-        ln for ln in rendered.splitlines()
-        if ln.startswith("- [ ] реализовать BEH-02")
+        ln for ln in rendered.splitlines() if ln.startswith("- [ ] реализовать BEH-02")
     ]
     assert "DEL-12" in beh_item and "проверить" in beh_item, beh_item
     assert "DEL-01" in beh_item and "TASK-001" in beh_item, beh_item
@@ -10510,14 +10655,21 @@ def test_multiline_statement_refusal_names_its_real_cause() -> None:
     сюда дойдёт.
     """
     task = decomposition_guard.DtTask(
-        dt_id="DT-01", title="Ядро", type="implement", owner="dev",
-        scenarios=("BEH-01",), depends_on=(), delivered_by=(),
+        dt_id="DT-01",
+        title="Ядро",
+        type="implement",
+        owner="dev",
+        scenarios=("BEH-01",),
+        depends_on=(),
+        delivered_by=(),
         parallel_group="core",
         delivers=(
             decomposition_guard.Deliverable(
-                id="DEL-01", kind="capability",
+                id="DEL-01",
+                kind="capability",
                 statement="первая строка\nвторая строка",
-                sources=("acceptance#AC-07",), covered_by=None,
+                sources=("acceptance#AC-07",),
+                covered_by=None,
             ),
         ),
     )
@@ -10552,8 +10704,10 @@ def test_multiline_statement_refusal_names_its_real_cause() -> None:
 _V1_PR = 373
 _OWNER = "andrei-shtanakov"
 _OWNER_CLOSURE = {
-    "state": "CLOSED", "closed_by": _OWNER,
-    "closed_at": "2026-09-23T09:44:23Z", "head_deleted_first": False,
+    "state": "CLOSED",
+    "closed_by": _OWNER,
+    "closed_at": "2026-09-23T09:44:23Z",
+    "head_deleted_first": False,
 }
 _NSD_WORD = (
     "сверка §I8 не производилась (comparison: unavailable): предыдущей "
@@ -10570,9 +10724,18 @@ class _NsdOps(_ReplaceOps):
     этих номеров бросает, как `RealOps` на упавшем `gh`.
     """
 
-    def __init__(self, *, v1_state="CLOSED", spec_in_base=None,
-                 base_read_fails=False, failing_prs=(), closure=None,
-                 facts_by_pr=None, branch_prs=None, **kw):
+    def __init__(
+        self,
+        *,
+        v1_state="CLOSED",
+        spec_in_base=None,
+        base_read_fails=False,
+        failing_prs=(),
+        closure=None,
+        facts_by_pr=None,
+        branch_prs=None,
+        **kw,
+    ):
         super().__init__(
             facts_by_pr={_V1_PR: {"state": v1_state}, **(facts_by_pr or {})},
             branch_prs={_REPLACED_BRANCH: None, **(branch_prs or {})},
@@ -10610,10 +10773,10 @@ def _nsd_state(tmp_path, monkeypatch, **v1):
     state = _recon_state(tmp_path, monkeypatch)
     (Path(state.target_dir) / _SPEC_REL).unlink()
     state.ops["tasks-deliver"] = {
-        "status": "completed", "pr": _V1_PR, "anchor": "АНКЕР-v1",
-        "content_anchor": tb._content_anchor(
-            state.target_dir, state.bundle_dir, None
-        ),
+        "status": "completed",
+        "pr": _V1_PR,
+        "anchor": "АНКЕР-v1",
+        "content_anchor": tb._content_anchor(state.target_dir, state.bundle_dir, None),
         **v1,
     }
     rs.save(state)
@@ -10623,11 +10786,17 @@ def _nsd_state(tmp_path, monkeypatch, **v1):
 def _v1_replacement(n=2, status="abandoned", **over) -> dict:
     """Запись ревизии-замены v1 (форма §4.2 спеки)."""
     op = {
-        "status": status, "revision": n,
-        "branch": f"spec/WS-alpha-7-tasks-v{n}", "base_sha": "base-sha-1",
-        "head_sha": None, "tasks_version": 1, "supersedes": None,
-        "nsd": True, "dag_source": "none",
-        "replaces_revision": 1, "replaces_pr": _V1_PR,
+        "status": status,
+        "revision": n,
+        "branch": f"spec/WS-alpha-7-tasks-v{n}",
+        "base_sha": "base-sha-1",
+        "head_sha": None,
+        "tasks_version": 1,
+        "supersedes": None,
+        "nsd": True,
+        "dag_source": "none",
+        "replaces_revision": 1,
+        "replaces_pr": _V1_PR,
         "replaces_branch": None,
         "replacement_reason": "очередь неисполненных спек растёт",
         "replaces_closed_by": _OWNER,
@@ -10789,18 +10958,25 @@ def test_nsd_is_off_while_first_delivery_is_started(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _nsd_state(tmp_path, monkeypatch, status="started", pr=None)
-    _seed_ops(state, **{"tasks-deliver-v2": {
-        "status": "completed", "revision": 2, "pr": 409,
-        "branch": "spec/WS-alpha-7-tasks-v2", "head_sha": "h2",
-        "base_sha": "base-sha-1", "supersedes": 1,
-    }})
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": {
+                "status": "completed",
+                "revision": 2,
+                "pr": 409,
+                "branch": "spec/WS-alpha-7-tasks-v2",
+                "head_sha": "h2",
+                "base_sha": "base-sha-1",
+                "supersedes": 1,
+            }
+        },
+    )
     ops = _NsdOps(prs=[_MERGED_PR], facts_by_pr={409: {"state": "CLOSED"}})
     before = _ledger_bytes()
 
     with pytest.raises(RuntimeError, match="доставок ещё не было"):
-        tb.deliver_superseded(
-            state, ops, replace=tb.Replacement(2, "PR v2 отклонён")
-        )
+        tb.deliver_superseded(state, ops, replace=tb.Replacement(2, "PR v2 отклонён"))
     assert _effects(ops) == []
     assert _ledger_bytes() == before
 
@@ -10816,9 +10992,16 @@ def test_nsd_closed_replacement_pr_is_replaced_again_in_nsd(
     from governance import task_bridge as tb
 
     state = _nsd_state(tmp_path, monkeypatch)
-    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
-        status="completed", pr=409, head_sha="h2",
-    )})
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": _v1_replacement(
+                status="completed",
+                pr=409,
+                head_sha="h2",
+            )
+        },
+    )
     ops = _NsdOps(prs=[_MERGED_PR], facts_by_pr={409: {"state": "CLOSED"}})
     capsys.readouterr()
 
@@ -10842,15 +11025,22 @@ def test_nsd_resume_of_started_revision_passes_s8(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _nsd_state(tmp_path, monkeypatch)
-    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
-        status="started",
-        prospective_anchor=tb._prospective_anchor(
-            state.target_dir, state.bundle_dir, None
-        ),
-        content_anchor="К", tasks_blob=None, comparison="unavailable",
-        dag=[[f, list(u)] for f, u in tb._BUNDLE_DAG],
-        expected_generated_at="2026-09-28T10:00:00+00:00",
-    )})
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": _v1_replacement(
+                status="started",
+                prospective_anchor=tb._prospective_anchor(
+                    state.target_dir, state.bundle_dir, None
+                ),
+                content_anchor="К",
+                tasks_blob=None,
+                comparison="unavailable",
+                dag=[[f, list(u)] for f, u in tb._BUNDLE_DAG],
+                expected_generated_at="2026-09-28T10:00:00+00:00",
+            )
+        },
+    )
     ops = _NsdOps(prs=[_MERGED_PR])
 
     result = tb.deliver_superseded(state, ops)
@@ -10867,14 +11057,19 @@ def test_nsd_resume_without_s8_refuses_before_effects(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _nsd_state(tmp_path, monkeypatch)
-    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
-        status="started",
-        prospective_anchor=tb._prospective_anchor(
-            state.target_dir, state.bundle_dir, None
-        ),
-        dag=[[f, list(u)] for f, u in tb._BUNDLE_DAG],
-        expected_generated_at="2026-09-28T10:00:00+00:00",
-    )})
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": _v1_replacement(
+                status="started",
+                prospective_anchor=tb._prospective_anchor(
+                    state.target_dir, state.bundle_dir, None
+                ),
+                dag=[[f, list(u)] for f, u in tb._BUNDLE_DAG],
+                expected_generated_at="2026-09-28T10:00:00+00:00",
+            )
+        },
+    )
     (rs.run_dir(state.run_id) / "s8-gate-verdicts.jsonl").unlink()
     before = _ledger_bytes()
     ops = _NsdOps(prs=[_MERGED_PR])
@@ -10887,9 +11082,7 @@ def test_nsd_resume_without_s8_refuses_before_effects(tmp_path, monkeypatch):
 
 # --- Ход N = 1: `--supersede --replace-revision 1 --reason …` (§4) --------
 
-_QUEUE_REASON = (
-    "очередь неисполненных спек растёт быстрее, чем исполняется"
-)
+_QUEUE_REASON = "очередь неисполненных спек растёт быстрее, чем исполняется"
 
 
 def _replace_v1(owner_confirm=False, reason=_QUEUE_REASON):
@@ -10910,9 +11103,7 @@ def _refuses_without_effect(state, ops, match, replace=None):
     return str(exc.value)
 
 
-def test_replace_v1_closed_by_owner_delivers_in_nsd(
-    tmp_path, monkeypatch, capsys
-):
+def test_replace_v1_closed_by_owner_delivers_in_nsd(tmp_path, monkeypatch, capsys):
     """ОСНОВНОЙ СЦЕНАРИЙ (#373-подобный): владелец закрыл PR первой
     доставки ради подрезки очереди; причина задана → ревизия-замена с
     полями §4.2, доставка в NSD, v1 побайтово прежняя.
@@ -10931,12 +11122,21 @@ def test_replace_v1_closed_by_owner_delivers_in_nsd(
 
     assert result == tb.SupersedeResult("delivered", 77)
     saved = _assert_nsd_delivery(state, ops, capsys.readouterr().out, 2)
-    assert {k: saved[k] for k in (
-        "replaces_revision", "replaces_pr", "replaces_branch",
-        "replacement_reason", "replaces_closed_by", "replaces_closed_at",
-    )} == {
-        "replaces_revision": 1, "replaces_pr": _V1_PR,
-        "replaces_branch": None, "replacement_reason": _QUEUE_REASON,
+    assert {
+        k: saved[k]
+        for k in (
+            "replaces_revision",
+            "replaces_pr",
+            "replaces_branch",
+            "replacement_reason",
+            "replaces_closed_by",
+            "replaces_closed_at",
+        )
+    } == {
+        "replaces_revision": 1,
+        "replaces_pr": _V1_PR,
+        "replaces_branch": None,
+        "replacement_reason": _QUEUE_REASON,
         "replaces_closed_by": _OWNER,
         "replaces_closed_at": "2026-09-23T09:44:23Z",
     }
@@ -10950,7 +11150,9 @@ def test_replace_v1_merged_refuses_with_supersede_hint(tmp_path, monkeypatch):
     """Вмерженная первая доставка не заменяется — чинится `--supersede`."""
     state = _nsd_state(tmp_path, monkeypatch)
     text = _refuses_without_effect(
-        state, _NsdOps(prs=[_MERGED_PR], v1_state="MERGED"), "вмержен",
+        state,
+        _NsdOps(prs=[_MERGED_PR], v1_state="MERGED"),
+        "вмержен",
     )
     assert "--supersede" in text
     assert "N ≥ 2" not in text
@@ -10960,7 +11162,8 @@ def test_replace_v1_open_refuses_with_manual_exit(tmp_path, monkeypatch):
     """Открытый PR v1 механикой не закрывается: ручной выход оператора."""
     state = _nsd_state(tmp_path, monkeypatch)
     text = _refuses_without_effect(
-        state, _NsdOps(prs=[_MERGED_PR], v1_state="OPEN"),
+        state,
+        _NsdOps(prs=[_MERGED_PR], v1_state="OPEN"),
         "[Зз]акройте PR сами, с объяснением, и повторите",
     )
     assert "head_sha" not in text
@@ -10971,7 +11174,8 @@ def test_replace_v1_pr_facts_failure_is_a_diagnosis_not_a_traceback(
 ):
     state = _nsd_state(tmp_path, monkeypatch)
     text = _refuses_without_effect(
-        state, _NsdOps(prs=[_MERGED_PR], failing_prs=[_V1_PR]),
+        state,
+        _NsdOps(prs=[_MERGED_PR], failing_prs=[_V1_PR]),
         f"PR #{_V1_PR}",
     )
     assert "факты" in text
@@ -10986,11 +11190,18 @@ def test_replace_v1_repeat_pr_facts_failure_is_a_diagnosis(
     первом заходе, а `_check_v1_after_replacement` стоит раньше)."""
     state = _nsd_state(tmp_path, monkeypatch)
     extra = {"pr": 77} if status == "completed" else {}
-    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
-        status=status, **extra,
-    )})
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": _v1_replacement(
+                status=status,
+                **extra,
+            )
+        },
+    )
     text = _refuses_without_effect(
-        state, _NsdOps(prs=[_MERGED_PR], failing_prs=[_V1_PR]),
+        state,
+        _NsdOps(prs=[_MERGED_PR], failing_prs=[_V1_PR]),
         f"PR #{_V1_PR}",
     )
     assert "факты" in text
@@ -10999,14 +11210,18 @@ def test_replace_v1_repeat_pr_facts_failure_is_a_diagnosis(
 def test_replace_v1_without_pr_is_missing_pr(tmp_path, monkeypatch):
     state = _nsd_state(tmp_path, monkeypatch, pr=None)
     _refuses_without_effect(
-        state, _NsdOps(prs=[_MERGED_PR]), "без номера PR",
+        state,
+        _NsdOps(prs=[_MERGED_PR]),
+        "без номера PR",
     )
 
 
 def test_replace_v1_refuses_unfinished_first_delivery(tmp_path, monkeypatch):
     state = _nsd_state(tmp_path, monkeypatch, status="started")
     _refuses_without_effect(
-        state, _NsdOps(prs=[_MERGED_PR]), "первая доставка",
+        state,
+        _NsdOps(prs=[_MERGED_PR]),
+        "первая доставка",
     )
 
 
@@ -11015,9 +11230,7 @@ def test_replace_v1_refuses_unfinished_first_delivery(tmp_path, monkeypatch):
     [None, {**_OWNER_CLOSURE, "state": "OPEN"}],
     ids=["reopened-or-empty", "state-moved"],
 )
-def test_replace_v1_unknown_closure_fails_closed(
-    closure, tmp_path, monkeypatch
-):
+def test_replace_v1_unknown_closure_fails_closed(closure, tmp_path, monkeypatch):
     """Последний timeline — `ReopenedEvent` / пусто / запрос упал → отказ."""
     state = _nsd_state(tmp_path, monkeypatch)
     ops = _NsdOps(prs=[_MERGED_PR])
@@ -11033,9 +11246,7 @@ def test_replace_v1_unknown_closure_fails_closed(
     ],
     ids=["closed-by-agent", "closed-by-branch-deletion"],
 )
-def test_replace_v1_gate_refuses_mechanical_closing(
-    closure, tmp_path, monkeypatch
-):
+def test_replace_v1_gate_refuses_mechanical_closing(closure, tmp_path, monkeypatch):
     """Q-1(а): закрыл агент либо закрытию предшествует удаление ветки."""
     state = _nsd_state(tmp_path, monkeypatch)
     ops = _NsdOps(prs=[_MERGED_PR], closure=closure)
@@ -11061,9 +11272,7 @@ def test_replace_v1_owner_confirm_passes_the_gate_and_is_recorded(
     state = _nsd_state(tmp_path, monkeypatch)
     ops = _NsdOps(prs=[_MERGED_PR], closure=closure)
 
-    result = tb.deliver_superseded(
-        state, ops, replace=_replace_v1(owner_confirm=True)
-    )
+    result = tb.deliver_superseded(state, ops, replace=_replace_v1(owner_confirm=True))
 
     assert result.kind == "delivered"
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
@@ -11080,34 +11289,38 @@ def test_replace_v1_owner_confirm_without_tripped_gate_only_records(
     state = _nsd_state(tmp_path, monkeypatch)
     ops = _NsdOps(prs=[_MERGED_PR])
 
-    assert tb.deliver_superseded(
-        state, ops, replace=_replace_v1(owner_confirm=True)
-    ).kind == "delivered"
+    assert (
+        tb.deliver_superseded(state, ops, replace=_replace_v1(owner_confirm=True)).kind
+        == "delivered"
+    )
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
     assert saved["replacement_confirmed_by"] == _OWNER
 
 
-def test_replace_v1_owner_confirm_under_agent_account_refuses(
-    tmp_path, monkeypatch
-):
+def test_replace_v1_owner_confirm_under_agent_account_refuses(tmp_path, monkeypatch):
     state = _nsd_state(tmp_path, monkeypatch)
     ops = _NsdOps(
-        prs=[_MERGED_PR], closure={**_OWNER_CLOSURE, "closed_by": "ai-prosto"},
+        prs=[_MERGED_PR],
+        closure={**_OWNER_CLOSURE, "closed_by": "ai-prosto"},
     )
     ops.caller = "ai-prosto"
     _refuses_without_effect(
-        state, ops, "учётк", replace=_replace_v1(owner_confirm=True),
+        state,
+        ops,
+        "учётк",
+        replace=_replace_v1(owner_confirm=True),
     )
 
 
-def test_replace_v1_owner_confirm_with_unknown_caller_refuses(
-    tmp_path, monkeypatch
-):
+def test_replace_v1_owner_confirm_with_unknown_caller_refuses(tmp_path, monkeypatch):
     state = _nsd_state(tmp_path, monkeypatch)
     ops = _NsdOps(prs=[_MERGED_PR])
     ops.caller = None
     _refuses_without_effect(
-        state, ops, "fail-closed", replace=_replace_v1(owner_confirm=True),
+        state,
+        ops,
+        "fail-closed",
+        replace=_replace_v1(owner_confirm=True),
     )
 
 
@@ -11120,7 +11333,10 @@ def test_replace_v1_unknown_agent_account_fails_closed(
     ops = _NsdOps(prs=[_MERGED_PR])
     ops.agent = None
     _refuses_without_effect(
-        state, ops, "учётк.* агента", replace=_replace_v1(owner_confirm),
+        state,
+        ops,
+        "учётк.* агента",
+        replace=_replace_v1(owner_confirm),
     )
 
 
@@ -11133,17 +11349,24 @@ def test_replace_v1_repeat_while_replacement_started_continues_it(
     from governance import task_bridge as tb
 
     state = _nsd_state(tmp_path, monkeypatch)
-    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
-        status="started",
-        prospective_anchor=tb._prospective_anchor(
-            state.target_dir, state.bundle_dir, None
-        ),
-        dag=[[f, list(u)] for f, u in tb._BUNDLE_DAG],
-        expected_generated_at="2026-09-28T10:00:00+00:00",
-        replaces_closed_by="ai-prosto", replacement_confirmed_by=_OWNER,
-    )})
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": _v1_replacement(
+                status="started",
+                prospective_anchor=tb._prospective_anchor(
+                    state.target_dir, state.bundle_dir, None
+                ),
+                dag=[[f, list(u)] for f, u in tb._BUNDLE_DAG],
+                expected_generated_at="2026-09-28T10:00:00+00:00",
+                replaces_closed_by="ai-prosto",
+                replacement_confirmed_by=_OWNER,
+            )
+        },
+    )
     ops = _NsdOps(
-        prs=[_MERGED_PR], closure={**_OWNER_CLOSURE, "closed_by": "ai-prosto"},
+        prs=[_MERGED_PR],
+        closure={**_OWNER_CLOSURE, "closed_by": "ai-prosto"},
     )
 
     result = tb.deliver_superseded(state, ops, replace=_replace_v1())
@@ -11164,9 +11387,16 @@ def test_replace_v1_repeat_after_live_replacement_explains(
     from governance import task_bridge as tb
 
     state = _nsd_state(tmp_path, monkeypatch)
-    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
-        status="completed", pr=409, head_sha="h2",
-    )})
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": _v1_replacement(
+                status="completed",
+                pr=409,
+                head_sha="h2",
+            )
+        },
+    )
     ops = _NsdOps(prs=[_MERGED_PR], facts_by_pr={409: {"state": m_state}})
     before = _ledger_bytes()
     capsys.readouterr()
@@ -11175,8 +11405,7 @@ def test_replace_v1_repeat_after_live_replacement_explains(
 
     assert result == tb.SupersedeResult("returned", 409)
     assert (
-        "первая доставка уже заменена ревизией 2 (PR #409)"
-        in capsys.readouterr().out
+        "первая доставка уже заменена ревизией 2 (PR #409)" in capsys.readouterr().out
     )
     assert _effects(ops) == []
     assert _ledger_bytes() == before
@@ -11186,9 +11415,16 @@ def test_replace_v1_repeat_after_closed_replacement_names_its_revision(
     tmp_path, monkeypatch
 ):
     state = _nsd_state(tmp_path, monkeypatch)
-    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
-        status="completed", pr=409, head_sha="h2",
-    )})
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": _v1_replacement(
+                status="completed",
+                pr=409,
+                head_sha="h2",
+            )
+        },
+    )
     ops = _NsdOps(prs=[_MERGED_PR], facts_by_pr={409: {"state": "CLOSED"}})
     _refuses_without_effect(state, ops, "--replace-revision 2")
 
@@ -11204,9 +11440,7 @@ def test_replace_v1_repeat_after_abandoned_replacement_continues_obligation(
     _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement()})
     ops = _NsdOps(prs=[_MERGED_PR])
 
-    assert tb.deliver_superseded(
-        state, ops, replace=_replace_v1()
-    ).kind == "delivered"
+    assert tb.deliver_superseded(state, ops, replace=_replace_v1()).kind == "delivered"
     saved = rs.load("r-recon").ops["tasks-deliver-v3"]
     assert saved["replaces_revision"] == 1
     assert saved["replaces_pr"] == _V1_PR
@@ -11217,7 +11451,9 @@ def test_replace_v1_refuses_when_v1_is_not_the_last(tmp_path, monkeypatch):
     """«Замена середины истории» — прежнее правило, теперь и для N = 1."""
     state = _replace_state(tmp_path, monkeypatch)
     text = _refuses_without_effect(
-        state, _ReplaceOps(prs=[_MERGED_PR]), "не последняя",
+        state,
+        _ReplaceOps(prs=[_MERGED_PR]),
+        "не последняя",
     )
     assert "N ≥ 2" not in text
 
@@ -11241,8 +11477,7 @@ def test_cli_owner_confirm_only_with_replace_of_v1(capsys):
 
     for argv in (
         ["--supersede", "--owner-confirm"],
-        ["--supersede", "--replace-revision", "3", "--reason", "р",
-         "--owner-confirm"],
+        ["--supersede", "--replace-revision", "3", "--reason", "р", "--owner-confirm"],
     ):
         with pytest.raises(SystemExit) as exc:
             tb.main(["--run-id", "r", *argv])
@@ -11267,10 +11502,21 @@ def test_cli_owner_confirm_reaches_implementation(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tb, "deliver_superseded", _fake)
     monkeypatch.setattr(tb, "RealOps", lambda: object())
-    assert tb.main([
-        "--run-id", "r-recon", "--supersede", "--replace-revision", "1",
-        "--reason", "очередь", "--owner-confirm",
-    ]) == 0
+    assert (
+        tb.main(
+            [
+                "--run-id",
+                "r-recon",
+                "--supersede",
+                "--replace-revision",
+                "1",
+                "--reason",
+                "очередь",
+                "--owner-confirm",
+            ]
+        )
+        == 0
+    )
     assert called["replace"] == tb.Replacement(1, "очередь", True)
 
 
@@ -11309,7 +11555,8 @@ def _started_nsd_revision(state, n=2, **over) -> dict:
     from governance import task_bridge as tb
 
     return _v1_replacement(
-        n=n, status="started",
+        n=n,
+        status="started",
         prospective_anchor=tb._prospective_anchor(
             state.target_dir, state.bundle_dir, None
         ),
@@ -11332,22 +11579,30 @@ def _v1_merged_base(state) -> None:
     path.write_text(_V1_SPEC_IN_BASE, encoding="utf-8")
 
 
-def test_supersede_refuses_when_v1_reopened_after_replacement(
-    tmp_path, monkeypatch
-):
+def test_supersede_refuses_when_v1_reopened_after_replacement(tmp_path, monkeypatch):
     """M `completed` с открытым PR, а PR v1 переоткрыт — отказ, а не
     `returned M`: на одну спеку два открытых предложения."""
     state = _nsd_state(tmp_path, monkeypatch)
-    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
-        status="completed", pr=409, head_sha="h2",
-    )})
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": _v1_replacement(
+                status="completed",
+                pr=409,
+                head_sha="h2",
+            )
+        },
+    )
     ops = _NsdOps(
-        prs=[_MERGED_PR], v1_state="OPEN",
+        prs=[_MERGED_PR],
+        v1_state="OPEN",
         facts_by_pr={409: {"state": "OPEN", "headRefOid": "h2"}},
         branch_prs={"spec/WS-alpha-7-tasks-v2": 409},
     )
     text = _refuses_without_effect(
-        state, ops, "переоткрыт после замены ревизией 2",
+        state,
+        ops,
+        "переоткрыт после замены ревизией 2",
         replace=None,
     )
     assert "PR #373" in text
@@ -11382,7 +11637,8 @@ def test_v1_merged_after_replacement_with_started_m_names_the_procedure(
     _v1_merged_base(state)
     _seed_ops(state, **{"tasks-deliver-v2": _started_nsd_revision(state)})
     ops = _NsdOps(
-        prs=[_MERGED_PR], v1_state="MERGED",
+        prs=[_MERGED_PR],
+        v1_state="MERGED",
         spec_in_base=_V1_SPEC_IN_BASE,
     )
     before = _ledger_bytes()
@@ -11395,7 +11651,8 @@ def test_v1_merged_after_replacement_with_started_m_names_the_procedure(
 
     tb._abandon_revision(state, 2, "v1 вмержен после замены")
     ops = _NsdOps(
-        prs=[_MERGED_PR], v1_state="MERGED",
+        prs=[_MERGED_PR],
+        v1_state="MERGED",
         spec_in_base=_V1_SPEC_IN_BASE,
     )
     result = tb.deliver_superseded(state, ops)
@@ -11418,13 +11675,21 @@ def test_v1_merged_after_replacement_with_open_m_names_the_procedure(
 
     state = _nsd_state(tmp_path, monkeypatch, content_anchor="СОДЕРЖАНИЕ-ДО")
     _v1_merged_base(state)
-    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
-        status="completed", pr=409, head_sha="h2",
-    )})
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": _v1_replacement(
+                status="completed",
+                pr=409,
+                head_sha="h2",
+            )
+        },
+    )
 
     def _ops(m_state):
         return _NsdOps(
-            prs=[_MERGED_PR], v1_state="MERGED",
+            prs=[_MERGED_PR],
+            v1_state="MERGED",
             spec_in_base=_V1_SPEC_IN_BASE,
             facts_by_pr={409: {"state": m_state, "headRefOid": "h2"}},
             branch_prs={"spec/WS-alpha-7-tasks-v2": 409},
@@ -11439,7 +11704,8 @@ def test_v1_merged_after_replacement_with_open_m_names_the_procedure(
     assert _ledger_bytes() == before
 
     result = tb.deliver_superseded(
-        state, _ops("CLOSED"),
+        state,
+        _ops("CLOSED"),
         replace=tb.Replacement(2, "M закрыта: v1 вмержен"),
     )
 
@@ -11471,9 +11737,16 @@ def test_deliver_for_run_after_v1_replacement_returns_the_replacement(
     """`deliver_for_run` (и `spec-loop`) после замены v1: закрытый PR v1 не
     возвращается — возвращается PR M со строкой о замене, RC 0."""
     state = _nsd_state(tmp_path, monkeypatch)
-    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
-        status="completed", pr=409, head_sha="h2",
-    )})
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": _v1_replacement(
+                status="completed",
+                pr=409,
+                head_sha="h2",
+            )
+        },
+    )
     ops = _NsdOps(prs=[_MERGED_PR], facts_by_pr={409: {"state": m_state}})
     before = _ledger_bytes()
 
@@ -11539,7 +11812,9 @@ def test_replace_v1_does_not_bypass_the_approval_gate(tmp_path, monkeypatch):
     state = _nsd_state(tmp_path, monkeypatch)
     _unapprove(state)
     _refuses_without_effect(
-        state, _NsdOps(prs=[_MERGED_PR]), "не одобрен целиком",
+        state,
+        _NsdOps(prs=[_MERGED_PR]),
+        "не одобрен целиком",
     )
 
 
@@ -11553,26 +11828,30 @@ def test_carried_obligation_keeps_owner_confirmation(tmp_path, monkeypatch):
     from governance import task_bridge as tb
 
     state = _nsd_state(tmp_path, monkeypatch)
-    _seed_ops(state, **{"tasks-deliver-v2": _v1_replacement(
-        replaces_closed_by="ai-prosto", replacement_confirmed_by=_OWNER,
-    )})
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": _v1_replacement(
+                replaces_closed_by="ai-prosto",
+                replacement_confirmed_by=_OWNER,
+            )
+        },
+    )
 
-    assert tb.deliver_superseded(
-        state, _NsdOps(prs=[_MERGED_PR])
-    ).kind == "delivered"
+    assert tb.deliver_superseded(state, _NsdOps(prs=[_MERGED_PR])).kind == "delivered"
     saved = rs.load("r-recon").ops["tasks-deliver-v3"]
     assert saved["replacement_confirmed_by"] == _OWNER
     assert saved["replaces_closed_by"] == "ai-prosto"
 
 
 @pytest.mark.parametrize("v1_state", [None, "UNKNOWN"])
-def test_replace_v1_requires_closed_state_exactly(
-    v1_state, tmp_path, monkeypatch
-):
+def test_replace_v1_requires_closed_state_exactly(v1_state, tmp_path, monkeypatch):
     """Не MERGED и не OPEN ещё не значит CLOSED — неизвестное fail-closed."""
     state = _nsd_state(tmp_path, monkeypatch)
     _refuses_without_effect(
-        state, _NsdOps(prs=[_MERGED_PR], v1_state=v1_state), "fail-closed",
+        state,
+        _NsdOps(prs=[_MERGED_PR], v1_state=v1_state),
+        "fail-closed",
     )
 
 
@@ -11582,14 +11861,22 @@ def test_replace_v1_after_replaced_replacement_is_middle_of_history(
     """v2 заменила v1, v3 заменила v2: `--replace-revision 1` — замена
     середины истории, а не подсказка про уже заменённую v2."""
     state = _nsd_state(tmp_path, monkeypatch)
-    _seed_ops(state, **{
-        "tasks-deliver-v2": _v1_replacement(
-            status="completed", pr=409, head_sha="h2",
-        ),
-        "tasks-deliver-v3": _v1_replacement(
-            n=3, status="started", replaces_revision=2, replaces_pr=409,
-        ),
-    })
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": _v1_replacement(
+                status="completed",
+                pr=409,
+                head_sha="h2",
+            ),
+            "tasks-deliver-v3": _v1_replacement(
+                n=3,
+                status="started",
+                replaces_revision=2,
+                replaces_pr=409,
+            ),
+        },
+    )
     ops = _NsdOps(prs=[_MERGED_PR], facts_by_pr={409: {"state": "CLOSED"}})
     text = _refuses_without_effect(state, ops, "ревизия 1 не последняя")
     assert "--replace-revision 2" not in text
@@ -11605,21 +11892,30 @@ def test_v1_merged_does_not_hold_an_ordinary_reissue(tmp_path, monkeypatch):
     _v1_merged_base(state)
     # n = 4: ветка v3 в `_ReplaceOps` занята отозванной ревизией фикстуры.
     ordinary = _started_nsd_revision(state, n=4)
-    for key in ("nsd", "replaces_revision", "replaces_pr", "replaces_branch",
-                "replacement_reason", "replaces_closed_by",
-                "replaces_closed_at"):
+    for key in (
+        "nsd",
+        "replaces_revision",
+        "replaces_pr",
+        "replaces_branch",
+        "replacement_reason",
+        "replaces_closed_by",
+        "replaces_closed_at",
+    ):
         ordinary.pop(key)
-    _seed_ops(state, **{
-        "tasks-deliver-v2": _v1_replacement(),
-        "tasks-deliver-v4": {**ordinary, "supersedes": 1, "tasks_version": 2},
-    })
+    _seed_ops(
+        state,
+        **{
+            "tasks-deliver-v2": _v1_replacement(),
+            "tasks-deliver-v4": {**ordinary, "supersedes": 1, "tasks_version": 2},
+        },
+    )
     ops = _NsdOps(
-        prs=[_MERGED_PR], v1_state="MERGED", spec_in_base=_V1_SPEC_IN_BASE,
+        prs=[_MERGED_PR],
+        v1_state="MERGED",
+        spec_in_base=_V1_SPEC_IN_BASE,
     )
 
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("delivered", 77)
     assert "tasks-deliver-v5" not in state.ops
     assert state.ops["tasks-deliver-v4"]["status"] == "completed"
 
@@ -11647,7 +11943,10 @@ _S_REQUIRED_DOC = "реконсиляции §I3"
 
 
 def _abandon_then_noop_state(
-    tmp_path: Path, monkeypatch, before_content=None, **over,
+    tmp_path: Path,
+    monkeypatch,
+    before_content=None,
+    **over,
 ):
     """Путь З: `started`-ревизия на сдвинувшемся base, апстрим не менялся.
 
@@ -11674,9 +11973,7 @@ def _abandon_then_noop_state(
     state = rs.load("r-recon")
     if before_content is not None:
         before_content(state)
-    content = tb._content_anchor(
-        state.target_dir, state.bundle_dir, None, state.brief
-    )
+    content = tb._content_anchor(state.target_dir, state.bundle_dir, None, state.brief)
     state.ops["tasks-deliver"]["content_anchor"] = content
     rs.save(state)
     return rs.load("r-recon")
@@ -11719,9 +12016,7 @@ def test_supersede_noop_after_abandon_names_both_facts(
     from governance import task_bridge as tb
 
     state = _abandon_then_noop_state(tmp_path, monkeypatch)
-    result = tb.deliver_superseded(
-        state, _RevisionPrOps(pr=None, prs=[_MERGED_PR])
-    )
+    result = tb.deliver_superseded(state, _RevisionPrOps(pr=None, prs=[_MERGED_PR]))
     assert result == tb.SupersedeResult("noop")
 
     out = capsys.readouterr().out
@@ -11786,9 +12081,7 @@ def test_supersede_noop_outputs_differ_between_path_z_and_path_b(
     from governance import task_bridge as tb
 
     _recon_state(tmp_path / "b", monkeypatch)
-    assert tb.deliver_for_run(
-        rs.load("r-recon"), _SupersedeOps(prs=[_MERGED_PR])
-    ) == 77
+    assert tb.deliver_for_run(rs.load("r-recon"), _SupersedeOps(prs=[_MERGED_PR])) == 77
     capsys.readouterr()
     assert tb.deliver_superseded(
         rs.load("r-recon"), _SupersedeOps(prs=[_MERGED_PR])
@@ -11813,7 +12106,9 @@ def test_supersede_noop_after_abandon_forbidden_branch_keeps_debt_facts(
     from governance import task_bridge as tb
 
     state = _abandon_then_noop_state(
-        tmp_path, monkeypatch, before_content=_corrupt_discovery_source,
+        tmp_path,
+        monkeypatch,
+        before_content=_corrupt_discovery_source,
     )
 
     assert tb.deliver_superseded(
@@ -11873,9 +12168,7 @@ def test_supersede_noop_path_b_forbidden_branch_keeps_traceless_word(
 
     state = rs.load("r-recon")
     _corrupt_discovery_source(state)
-    content = tb._content_anchor(
-        state.target_dir, state.bundle_dir, None, state.brief
-    )
+    content = tb._content_anchor(state.target_dir, state.bundle_dir, None, state.brief)
     state.ops["tasks-deliver"]["content_anchor"] = content
     rs.save(state)
     capsys.readouterr()
@@ -11909,9 +12202,7 @@ def test_supersede_noop_path_b_unresolved_branch_keeps_traceless_word(
             return super().show_file(target_dir, ref, path)
 
     ops = _BlindBase(prs=[_MERGED_PR])
-    assert tb.deliver_superseded(
-        rs.load("r-recon"), ops
-    ) == tb.SupersedeResult("noop")
+    assert tb.deliver_superseded(rs.load("r-recon"), ops) == tb.SupersedeResult("noop")
 
     out = capsys.readouterr().out
     assert "долг активного DAG установить не удалось" in out
@@ -11949,9 +12240,7 @@ def test_supersede_delivery_after_abandon_has_no_abandon_word_in_output(
     capsys.readouterr()
 
     ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("delivered", 77)
 
     out = capsys.readouterr().out
     assert "брошена этим вызовом" not in out
@@ -11967,14 +12256,16 @@ def test_supersede_other_reconciliation_outcomes_have_no_abandon_word(
     # return_pr: §I3 «completed | OPEN».
     state = _recon_state(tmp_path / "return-pr", monkeypatch)
     _seed_revision(
-        state, monkeypatch, status="completed", pr=9, head_sha="h",
+        state,
+        monkeypatch,
+        status="completed",
+        pr=9,
+        head_sha="h",
         anchor="ANCHOR-V2",
     )
     capsys.readouterr()
     ops = _RevisionPrOps(pr=9, pr_state="OPEN", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "returned", 9
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("returned", 9)
     assert "брошена этим вызовом" not in capsys.readouterr().out
 
     # complete: §I3 «started | MERGED».
@@ -11982,11 +12273,12 @@ def test_supersede_other_reconciliation_outcomes_have_no_abandon_word(
     _seed_revision(state, monkeypatch, head_sha="h")
     capsys.readouterr()
     ops = _RevisionPrOps(
-        pr=7, pr_state="MERGED", prs=[_MERGED_PR], local_head="ДВИНУЛИ-СНАРУЖИ",
+        pr=7,
+        pr_state="MERGED",
+        prs=[_MERGED_PR],
+        local_head="ДВИНУЛИ-СНАРУЖИ",
     )
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "returned", 7
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("returned", 7)
     assert "брошена этим вызовом" not in capsys.readouterr().out
 
     # continue: §I3 «started | нет PR, ветка стоит на base».
@@ -11994,9 +12286,7 @@ def test_supersede_other_reconciliation_outcomes_have_no_abandon_word(
     _seed_revision(state, monkeypatch)
     capsys.readouterr()
     ops = _RevisionPrOps(pr=None, local_head="base-sha-1", prs=[_MERGED_PR])
-    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult(
-        "delivered", 77
-    )
+    assert tb.deliver_superseded(state, ops) == tb.SupersedeResult("delivered", 77)
     assert "брошена этим вызовом" not in capsys.readouterr().out
 
 
@@ -12096,9 +12386,9 @@ def test_supersede_reconciles_historical_record_without_base_sha_field(
     rs.save(saved)
 
     ops = _RevisionPrOps(pr=None, prs=[_MERGED_PR])
-    assert tb.deliver_superseded(
-        rs.load("r-recon"), ops
-    ) == tb.SupersedeResult("delivered", 77)
+    assert tb.deliver_superseded(rs.load("r-recon"), ops) == tb.SupersedeResult(
+        "delivered", 77
+    )
     assert rs.load("r-recon").ops["tasks-deliver-v2"]["status"] == "abandoned"
 
 
@@ -12157,9 +12447,7 @@ def test_supersede_noop_after_abandon_tolerates_missing_content_anchor_field(
     ) == tb.SupersedeResult("noop")
 
 
-def test_cli_supersede_noop_after_abandon_is_rc0(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_cli_supersede_noop_after_abandon_is_rc0(tmp_path: Path, monkeypatch) -> None:
     """BEH-15/BEH-21 через CLI: неполные исторические записи не роняют
     `main` — RC 0, без трассировки."""
     from governance import task_bridge as tb
@@ -12179,11 +12467,17 @@ def test_cli_supersede_noop_after_abandon_is_rc0(
         ("---\nspec_stage: tasks\n---\n", None),
         ("---\nupstream_hashes: abc\n---\n", None),
         ("---\nupstream_hashes:\n  design: " + "a" * 40 + "\n---\n", None),
-        ("---\nupstream_hashes:\n  decomposition: " + "b" * 40 + "\n---\n",
-         "b" * 40),
+        ("---\nupstream_hashes:\n  decomposition: " + "b" * 40 + "\n---\n", "b" * 40),
     ],
-    ids=["none", "empty", "unreadable", "no-pin", "not-mapping",
-         "foreign-key", "carried"],
+    ids=[
+        "none",
+        "empty",
+        "unreadable",
+        "no-pin",
+        "not-mapping",
+        "foreign-key",
+        "carried",
+    ],
 )
 def test_carried_pin_takes_only_the_anchor_pin(carry_from, expected) -> None:
     """Переносится только пин ТЕКУЩЕГО анкера (#467): пин по чужому ключу

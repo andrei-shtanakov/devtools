@@ -67,22 +67,17 @@ def _gate(path: Path, text: str) -> gate_check.Brief:
     errors = [finding for finding in findings if finding.level == "error"]
     if errors:
         rendered = "\n".join(
-            f"- {finding.rule} [{finding.ref}]: {finding.message}"
-            for finding in errors
+            f"- {finding.rule} [{finding.ref}]: {finding.message}" for finding in errors
         )
         raise BriefInputError(f"discovery gate отказал для {path}:\n{rendered}")
     parsed = gate_check.parse_brief(text)
     if parsed is None:  # defensive: GC-01 above should already have refused
         raise BriefInputError(f"discovery-brief {path} не разобран после gate pass")
     coverage = parsed.meta.get("coverage")
-    gate_passed = (
-        coverage.get("gate_passed") if isinstance(coverage, dict) else None
-    )
+    gate_passed = coverage.get("gate_passed") if isinstance(coverage, dict) else None
     blocking = parsed.meta.get("blocking_open_questions")
     blocking_clear = (
-        isinstance(blocking, int)
-        and not isinstance(blocking, bool)
-        and blocking == 0
+        isinstance(blocking, int) and not isinstance(blocking, bool) and blocking == 0
     )
     if gate_passed is not True or not blocking_clear:
         raise BriefInputError(
@@ -144,9 +139,7 @@ def _reject_customer_path_traces(meta: dict[str, object]) -> None:
     raw_traces = meta.get("traces_to") or []
     traces = [raw_traces] if isinstance(raw_traces, str) else raw_traces
     if isinstance(traces, list) and any(
-        isinstance(ref, str)
-        and ref.endswith(".md")
-        and not ref.startswith("[[")
+        isinstance(ref, str) and ref.endswith(".md") and not ref.startswith("[[")
         for ref in traces
     ):
         raise BriefInputError(
@@ -218,9 +211,7 @@ def inspect_brief(path: Path) -> BriefSource:
 
 
 def _current_blobs(source: BriefSource) -> dict[str, str]:
-    found = {
-        "discovery-brief": blob_sha1_bytes(_read_bytes(source.primary_input))
-    }
+    found = {"discovery-brief": blob_sha1_bytes(_read_bytes(source.primary_input))}
     if source.frame == "engineer":
         found["discovery-customer"] = blob_sha1_bytes(
             _read_bytes(source.requirements_input)
@@ -274,10 +265,10 @@ def _downstream_requirements(
     parsed: dict[str, list[str | None]] = {}
     for index, head in enumerate(heads):
         end = heads[index + 1].start() if index + 1 < len(heads) else len(text)
-        block = text[head.end():end]
+        block = text[head.end() : end]
         section = _SECTION_RE.search(block)
         if section is not None:
-            block = block[:section.start()]
+            block = block[: section.start()]
         priority = _PRIORITY_RE.search(block)
         parsed.setdefault(head.group(1), []).append(
             priority.group(1) if priority is not None else None

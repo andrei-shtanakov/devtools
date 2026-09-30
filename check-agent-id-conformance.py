@@ -82,7 +82,7 @@ def maestro_spawner_agent_types(spawners_dir: Path) -> set[str]:
     it is naturally excluded.
     """
     pattern = re.compile(
-        r'def agent_type\(self\)\s*->\s*str:\s*'
+        r"def agent_type\(self\)\s*->\s*str:\s*"
         r'(?:"""[^"]*"""\s*)?'  # optional one-line docstring
         r'return\s+"([a-z_]+)"',
         re.S,
@@ -182,9 +182,7 @@ def main() -> int:
         return f"{row['harness']}@{row['model']}"
 
     routable_ids = [agent_id(a) for a in agents if a.get("routable")]
-    routable_harnesses = {
-        str(a["harness"]) for a in agents if a.get("routable")
-    }
+    routable_harnesses = {str(a["harness"]) for a in agents if a.get("routable")}
 
     # --- Check 1: routable agent_id ↔ arbiter agents.toml section ---
     if arbiter_toml.exists():

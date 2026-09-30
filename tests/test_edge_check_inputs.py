@@ -31,9 +31,7 @@ def test_hash_is_computed_over_the_prepared_copy(tmp_path: Path) -> None:
     )
     subject = next(f for f in prepared.files if f.role == "subject")
     # sha256 ровно того текста, что уедет в запрос
-    assert (
-        subject.sha256 == hashlib.sha256(subject.text.encode("utf-8")).hexdigest()
-    )
+    assert subject.sha256 == hashlib.sha256(subject.text.encode("utf-8")).hexdigest()
     assert subject.path == "15-behaviour-spec.md"
     assert prepared.applicable is True
 
@@ -50,7 +48,9 @@ def test_hash_matches_raw_file_bytes_not_universal_newlines(tmp_path: Path) -> N
     (b / "15-behaviour-spec.md").write_bytes(raw)
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
     prepared = i.prepare_input(
-        rs, b, [b / "15-behaviour-spec.md"],
+        rs,
+        b,
+        [b / "15-behaviour-spec.md"],
         [("requirements", b / "10-requirements.md")],
     )
     subject = next(f for f in prepared.files if f.role == "subject")
@@ -65,12 +65,17 @@ def test_hash_matches_independently_computed_sha256(tmp_path: Path) -> None:
     content = (b / "15-behaviour-spec.md").read_text(encoding="utf-8")
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
     prepared = i.prepare_input(
-        rs, b, [b / "15-behaviour-spec.md"],
+        rs,
+        b,
+        [b / "15-behaviour-spec.md"],
         [("requirements", b / "10-requirements.md")],
     )
     subject = next(f for f in prepared.files if f.role == "subject")
     expect = subprocess.run(
-        ["shasum", "-a", "256"], input=content, capture_output=True, text=True,
+        ["shasum", "-a", "256"],
+        input=content,
+        capture_output=True,
+        text=True,
         check=True,
     ).stdout.split()[0]
     assert subject.sha256 == expect
@@ -148,8 +153,12 @@ def test_duplicate_basis_role_is_rejected(tmp_path: Path) -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
     with pytest.raises(r.EdgeCheckError) as exc:
         i.prepare_input(
-            rs, b, [b / "15-behaviour-spec.md"],
-            [("requirements", b / "10-requirements.md"),
-             ("requirements", b / "10-requirements.md")],
+            rs,
+            b,
+            [b / "15-behaviour-spec.md"],
+            [
+                ("requirements", b / "10-requirements.md"),
+                ("requirements", b / "10-requirements.md"),
+            ],
         )
     assert exc.value.code == "basis_role_mismatch"

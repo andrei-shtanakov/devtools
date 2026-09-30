@@ -14,8 +14,7 @@ def _unknown(number: int = 1) -> object:
 
 
 def _answer(number: int = 1, kind: str = "fix", confidence: float = 0.9) -> dict:
-    return {"repo": "alpha", "number": number, "kind": kind,
-            "confidence": confidence}
+    return {"repo": "alpha", "number": number, "kind": kind, "confidence": confidence}
 
 
 def test_new_issue_calls_ai_and_caches(tmp_path: Path) -> None:
@@ -41,7 +40,8 @@ def test_unchanged_updated_at_is_cache_hit(tmp_path: Path) -> None:
         raise AssertionError("AI не должен вызываться при cache hit")
 
     assert issue_classify.refine([_unknown()], cache, run=fail_run) == {
-        "alpha#1": "fix"}
+        "alpha#1": "fix"
+    }
 
 
 def test_changed_updated_at_reclassifies(tmp_path: Path) -> None:
@@ -53,8 +53,8 @@ def test_changed_updated_at_reclassifies(tmp_path: Path) -> None:
 
 def test_low_confidence_stays_unknown(tmp_path: Path) -> None:
     kinds = issue_classify.refine(
-        [_unknown()], tmp_path / "c.json",
-        run=lambda b: [_answer(confidence=0.5)])
+        [_unknown()], tmp_path / "c.json", run=lambda b: [_answer(confidence=0.5)]
+    )
     assert kinds == {}
 
 
@@ -94,8 +94,9 @@ def test_refine_survives_codex_launch_failure(tmp_path: Path, monkeypatch) -> No
         raise FileNotFoundError("codex")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert issue_classify.refine(
-        [_unknown()], cache, run=issue_classify.run_codex) == {}
+    assert (
+        issue_classify.refine([_unknown()], cache, run=issue_classify.run_codex) == {}
+    )
 
 
 def test_kinds_match_issue_console() -> None:
@@ -104,8 +105,8 @@ def test_kinds_match_issue_console() -> None:
 
 def test_confidence_threshold_is_inclusive(tmp_path: Path) -> None:
     kinds = issue_classify.refine(
-        [_unknown()], tmp_path / "c.json",
-        run=lambda b: [_answer(confidence=0.75)])
+        [_unknown()], tmp_path / "c.json", run=lambda b: [_answer(confidence=0.75)]
+    )
     assert kinds == {"alpha#1": "fix"}
 
 

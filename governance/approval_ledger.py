@@ -98,7 +98,7 @@ def requests(state: RunState) -> list[tuple[tuple[int, int, int], dict]]:
     for key, op in state.ops.items():
         if not key.startswith(REQUEST_PREFIX):
             continue
-        parts = key[len(REQUEST_PREFIX):].split("-")
+        parts = key[len(REQUEST_PREFIX) :].split("-")
         if len(parts) != 3 or not all(p.isdigit() for p in parts):
             continue
         found.append(((int(parts[0]), int(parts[1]), int(parts[2])), op))
@@ -176,8 +176,7 @@ def live_request_for_step(
         (nums, op)
         for nums, op in live_requests(state)
         if nums[:2] == (wave, step)
-        and next_step(op)
-        in (Step.CREATE_CANDIDATE, Step.AWAIT_CANDIDATE_MERGE)
+        and next_step(op) in (Step.CREATE_CANDIDATE, Step.AWAIT_CANDIDATE_MERGE)
     ]
     return max(joinable, key=lambda item: item[0]) if joinable else None
 
@@ -204,7 +203,7 @@ def wave_records(state: RunState) -> dict[int, dict]:
     for key, op in state.ops.items():
         if not key.startswith(WAVE_PREFIX):
             continue
-        suffix = key[len(WAVE_PREFIX):]
+        suffix = key[len(WAVE_PREFIX) :]
         if suffix.isdigit():
             found[int(suffix)] = op
     return found
@@ -317,8 +316,7 @@ def open_wave(state: RunState) -> int | None:
     ]
     if len(open_) > 1:
         raise RuntimeError(
-            f"открытых волн больше одной: {sorted(open_)} — леджер прогона "
-            "противоречив"
+            f"открытых волн больше одной: {sorted(open_)} — леджер прогона противоречив"
         )
     return open_[0] if open_ else None
 
@@ -350,9 +348,7 @@ def next_attempt(state: RunState, wave: int, step: int) -> int:
     открыть нельзя, живая есть) и на том же уровне, и без `A` её ветка
     называлась бы ровно как ветка похороненной.
     """
-    recorded = [
-        nums[2] for nums, _ in requests(state) if nums[:2] == (wave, step)
-    ]
+    recorded = [nums[2] for nums, _ in requests(state) if nums[:2] == (wave, step)]
     return max(recorded) + 1 if recorded else 1
 
 
@@ -408,9 +404,7 @@ def start_request(
         # base. Фиксируется write-ahead: снимок заявки без источника
         # нельзя ни привести к ветке, ни сверить на повторе.
         "source_sha": source_sha,
-        "branch": approval_branches.candidate_branch(
-            ws_id, wave, step, attempt
-        ),
+        "branch": approval_branches.candidate_branch(ws_id, wave, step, attempt),
         "finalize_branch": approval_branches.finalize_branch(
             ws_id, wave, step, attempt
         ),
@@ -596,6 +590,4 @@ def invalidate_request(
     а не в памяти оператора — тот же довод, что у `replacement_reason`
     в §I10.
     """
-    _update(
-        state, key, status=STATUS_INVALIDATED, reason=reason, invalidated_by=by
-    )
+    _update(state, key, status=STATUS_INVALIDATED, reason=reason, invalidated_by=by)

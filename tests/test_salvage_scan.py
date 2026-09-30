@@ -324,9 +324,7 @@ def test_gc_pid_with_alive_process_is_not_reported(tmp_path: Path) -> None:
 
 def test_waiver_marks_finding_but_keeps_it(tmp_path: Path) -> None:
     finding = Finding("prograph-vault", "unpushed-default", "main: 2", 60.0)
-    waivers = [
-        ("prograph-vault", "unpushed-default", "", "ждёт dispatcher#199")
-    ]
+    waivers = [("prograph-vault", "unpushed-default", "", "ждёт dispatcher#199")]
     marked = apply_waivers([finding], waivers)
     assert len(marked) == 1
     assert marked[0].waived == "ждёт dispatcher#199"
@@ -334,20 +332,14 @@ def test_waiver_marks_finding_but_keeps_it(tmp_path: Path) -> None:
 
 def test_waiver_for_other_class_does_not_apply(tmp_path: Path) -> None:
     finding = Finding("prograph-vault", "stale-lock", "index.lock", 60.0)
-    waivers = [
-        ("prograph-vault", "unpushed-default", "", "ждёт dispatcher#199")
-    ]
+    waivers = [("prograph-vault", "unpushed-default", "", "ждёт dispatcher#199")]
     assert apply_waivers([finding], waivers)[0].waived is None
 
 
 def test_waiver_object_prefix_narrows_the_match(tmp_path: Path) -> None:
     """Waiver на конкретную ветку не гасит остальные находки того же класса."""
-    waivers = [
-        ("prograph-vault", "branch-no-pr", "derived-snapshots", "by design")
-    ]
-    delivery = Finding(
-        "prograph-vault", "branch-no-pr", "derived-snapshots", 60.0
-    )
+    waivers = [("prograph-vault", "branch-no-pr", "derived-snapshots", "by design")]
+    delivery = Finding("prograph-vault", "branch-no-pr", "derived-snapshots", 60.0)
     other = Finding("prograph-vault", "branch-no-pr", "feature-x", 60.0)
     marked = apply_waivers([delivery, other], waivers)
     assert marked[0].waived == "by design"
@@ -404,9 +396,7 @@ def _workspace_with_manifest(tmp_path: Path) -> tuple[Path, Path]:
     ws.mkdir()
     repo = make_cloned_repo(ws, "alpha")
     manifest = tmp_path / "manifest.toml"
-    manifest.write_text(
-        '[tools.alpha]\nrepo_url = "file:///x"\ngit_dir = "alpha"\n'
-    )
+    manifest.write_text('[tools.alpha]\nrepo_url = "file:///x"\ngit_dir = "alpha"\n')
     return ws, repo
 
 

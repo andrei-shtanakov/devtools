@@ -84,7 +84,8 @@ def test_env_outside_allowlist_does_not_reach_subprocess(
     empty = tmp_path / "empty"
     empty.mkdir()
     argv = [
-        sys.executable, "-c",
+        sys.executable,
+        "-c",
         "import json, os, sys; print(json.dumps(dict(os.environ)))",
     ]
     out = rv.run_reviewer("prompt", argv, empty, timeout=5)
@@ -108,7 +109,8 @@ def test_run_reviewer_uses_explicit_env_when_given(tmp_path: Path) -> None:
     empty = tmp_path / "empty"
     empty.mkdir()
     argv = [
-        sys.executable, "-c",
+        sys.executable,
+        "-c",
         "import json, os, sys; print(json.dumps(dict(os.environ)))",
     ]
     custom_env = {"PATH": os.environ.get("PATH", ""), "EDGE_CHECK_MARKER": "тут"}

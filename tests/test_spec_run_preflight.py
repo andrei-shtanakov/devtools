@@ -22,8 +22,14 @@ def _set_insteadof(repo: Path) -> None:
     # Ключ без кавычек — как настоящая настройка из CLAUDE.md, сделанная
     # в шелле (шелл снимает кавычки; в argv их быть не должно).
     subprocess.run(
-        ["git", "-C", str(repo), "config",
-         "url.https://github.com/.insteadOf", "git@github.com:"],
+        [
+            "git",
+            "-C",
+            str(repo),
+            "config",
+            "url.https://github.com/.insteadOf",
+            "git@github.com:",
+        ],
         check=True,
     )
 
@@ -209,7 +215,7 @@ def test_quoted_yaml_keys_are_recognized(tmp_path: Path) -> None:
     кавычный эталон не должен опустошать required."""
     repo = _git_repo(tmp_path / "r")
     (repo / "spec-runner.config.example.yaml").write_text(
-        '"execution_mode": tdd\n\'tdd_runner\': pytest\n'
+        "\"execution_mode\": tdd\n'tdd_runner': pytest\n"
     )
     (repo / "spec-runner.config.yaml").write_text("model: sonnet\n")
     findings = pf.check_config_etalon(repo)
@@ -222,9 +228,7 @@ def test_unparseable_etalon_is_fail_closed(tmp_path: Path) -> None:
     """Битый YAML эталона — не «требований нет», а FAIL: сверка
     невозможна, готовность не заявляется."""
     repo = _git_repo(tmp_path / "r")
-    (repo / "spec-runner.config.example.yaml").write_text(
-        "\"execution_mode': tdd\n"
-    )
+    (repo / "spec-runner.config.example.yaml").write_text("\"execution_mode': tdd\n")
     (repo / "spec-runner.config.yaml").write_text("model: sonnet\n")
     findings = pf.check_config_etalon(repo)
     assert _levels(findings, "config-etalon") == ["FAIL"]
@@ -286,9 +290,7 @@ def test_dropped_harness_files_items_fail(tmp_path: Path) -> None:
     (repo / "spec-runner.config.example.yaml").write_text(
         "harness_files:\n  - a.py\n  - b.py\n"
     )
-    (repo / "spec-runner.config.yaml").write_text(
-        "harness_files:\n  - a.py\n"
-    )
+    (repo / "spec-runner.config.yaml").write_text("harness_files:\n  - a.py\n")
     findings = pf.check_config_etalon(repo)
     assert _levels(findings, "config-etalon") == ["FAIL"]
     assert "b.py" in findings[0].detail
@@ -298,9 +300,7 @@ def test_dropped_harness_files_items_fail(tmp_path: Path) -> None:
 def test_extra_harness_files_items_are_fine(tmp_path: Path) -> None:
     """Дополнительные элементы в конфиге — усиление guard, не FAIL."""
     repo = _git_repo(tmp_path / "r")
-    (repo / "spec-runner.config.example.yaml").write_text(
-        "harness_files:\n  - a.py\n"
-    )
+    (repo / "spec-runner.config.example.yaml").write_text("harness_files:\n  - a.py\n")
     (repo / "spec-runner.config.yaml").write_text(
         "harness_files:\n  - a.py\n  - extra.py\n"
     )
@@ -312,9 +312,7 @@ def test_inline_flow_list_form_is_parsed(tmp_path: Path) -> None:
     (repo / "spec-runner.config.example.yaml").write_text(
         "harness_files: [a.py, b.py]\n"
     )
-    (repo / "spec-runner.config.yaml").write_text(
-        "harness_files: []\n"
-    )
+    (repo / "spec-runner.config.yaml").write_text("harness_files: []\n")
     findings = pf.check_config_etalon(repo)
     assert _levels(findings, "config-etalon") == ["FAIL"]
     assert "a.py" in findings[0].detail and "b.py" in findings[0].detail
@@ -325,9 +323,7 @@ def test_matching_values_with_comment_and_quotes_pass(tmp_path: Path) -> None:
     (repo / "spec-runner.config.example.yaml").write_text(
         "review_policy: required  # обязательное ревью\n"
     )
-    (repo / "spec-runner.config.yaml").write_text(
-        'review_policy: "required"\n'
-    )
+    (repo / "spec-runner.config.yaml").write_text('review_policy: "required"\n')
     assert pf.check_config_etalon(repo) == []
 
 
@@ -336,9 +332,7 @@ def test_empty_scalar_value_of_critical_key_fails(tmp_path: Path) -> None:
     режим так же, как отсутствие ключа — для скалярного в эталоне ключа
     это FAIL, а не соответствие."""
     repo = _git_repo(tmp_path / "r")
-    (repo / "spec-runner.config.example.yaml").write_text(
-        "execution_mode: tdd\n"
-    )
+    (repo / "spec-runner.config.example.yaml").write_text("execution_mode: tdd\n")
     (repo / "spec-runner.config.yaml").write_text("execution_mode:\n")
     findings = pf.check_config_etalon(repo)
     assert _levels(findings, "config-etalon") == ["FAIL"]
@@ -350,10 +344,7 @@ def test_comment_inside_block_list_does_not_end_it(tmp_path: Path) -> None:
     sequence — валидный YAML и не завершает список эталона."""
     repo = _git_repo(tmp_path / "r")
     (repo / "spec-runner.config.example.yaml").write_text(
-        "harness_files:\n"
-        "  # обязательные guard-файлы\n"
-        "\n"
-        "  - a.py\n"
+        "harness_files:\n  # обязательные guard-файлы\n\n  - a.py\n"
     )
     (repo / "spec-runner.config.yaml").write_text("harness_files: []\n")
     findings = pf.check_config_etalon(repo)
@@ -365,9 +356,7 @@ def test_undecodable_config_is_fail_closed(tmp_path: Path) -> None:
     """Приёмка PR #115, круг 8 (minor): битый UTF-8 в конфиге — тот же
     структурированный FAIL, что и битый YAML, а не traceback."""
     repo = _git_repo(tmp_path / "r")
-    (repo / "spec-runner.config.example.yaml").write_text(
-        "execution_mode: tdd\n"
-    )
+    (repo / "spec-runner.config.example.yaml").write_text("execution_mode: tdd\n")
     (repo / "spec-runner.config.yaml").write_bytes(b"\xff\xfe broken")
     findings = pf.check_config_etalon(repo)
     assert _levels(findings, "config-etalon") == ["FAIL"]
@@ -393,7 +382,5 @@ def test_archived_db_is_invisible(tmp_path: Path) -> None:
     spec = repo / "spec"
     (spec / ".executor-archive").mkdir(parents=True)
     (spec / ".executor-WS-a-1-state.db").write_bytes(b"data")
-    (spec / ".executor-archive" / ".executor-WS-old-9-state.db").write_bytes(
-        b"data"
-    )
+    (spec / ".executor-archive" / ".executor-WS-old-9-state.db").write_bytes(b"data")
     assert pf.check_prefixless_db(repo) == []

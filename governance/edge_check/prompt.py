@@ -120,9 +120,7 @@ def build_prompt(
     for item in ruleset.items:
         parts.append(f"- {item.id}: {item.text}")
     parts += ["", "## Классы находок", ""]
-    parts.append(
-        "Допустимые: " + ", ".join(sorted(ruleset.severity.known()))
-    )
+    parts.append("Допустимые: " + ", ".join(sorted(ruleset.severity.known())))
     # Пояснение размечает формат маркера словом-плейсхолдером, а не
     # реальным токеном: иначе строка сама складывалась бы в пару
     # BEGIN…END с пустым содержимым между ними и путала бы разбор границ
@@ -150,9 +148,7 @@ def build_prompt(
             "",
         ]
     for a in prepared.absences:
-        parts.append(
-            f"Отсутствует (разрешено правилом {a.rule_id}): {a.path}"
-        )
+        parts.append(f"Отсутствует (разрешено правилом {a.rule_id}): {a.path}")
     text = "\n".join(parts)
 
     size = len(text.encode("utf-8"))

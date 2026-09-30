@@ -18,9 +18,14 @@ def runs_root(tmp_path: Path, monkeypatch):
 
 def _mk(runs_root) -> rs.RunState:
     s = rs.new_run(
-        subject="тестовый функционал", repo="alpha", repo_slug="owner/alpha",
-        ws_id="WS-T1", target_dir="/tmp/alpha", bundle_dir="workstreams/WS-T1/spec",
-        profile="profiles/team-exp.yaml", run_id="r-0001",
+        subject="тестовый функционал",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-T1",
+        target_dir="/tmp/alpha",
+        bundle_dir="workstreams/WS-T1/spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-0001",
     )
     rs.save(s)
     return s
@@ -42,10 +47,15 @@ def test_roundtrip_brief_descriptor_without_machine_paths(runs_root) -> None:
         "source_blobs": {"discovery-brief": "a" * 40},
     }
     state = rs.new_run(
-        subject="brief input", repo="alpha", repo_slug="owner/alpha",
-        ws_id="WS-BRIEF", target_dir="/tmp/alpha",
-        bundle_dir="workstreams/WS-BRIEF/spec", profile="profiles/team-exp.yaml",
-        run_id="r-brief", brief=descriptor,
+        subject="brief input",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-BRIEF",
+        target_dir="/tmp/alpha",
+        bundle_dir="workstreams/WS-BRIEF/spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-brief",
+        brief=descriptor,
     )
     rs.save(state)
 
@@ -90,19 +100,29 @@ def test_atomic_no_partial_file(runs_root) -> None:
 
 def test_run_override_only_tightens(runs_root) -> None:
     with pytest.raises(ValueError):
-        rs.new_run(subject="s", repo="a", repo_slug="o/a", ws_id="w",
-                   target_dir="/t", bundle_dir="b", profile="p",
-                   run_id="r-2", merge_authority="agent")
+        rs.new_run(
+            subject="s",
+            repo="a",
+            repo_slug="o/a",
+            ws_id="w",
+            target_dir="/t",
+            bundle_dir="b",
+            profile="p",
+            run_id="r-2",
+            merge_authority="agent",
+        )
 
 
 # --- Круг 12: run_id — одно-компонентная валидация, без traversal ----------
 
 
 @pytest.mark.parametrize(
-    "bad_run_id", ["../../x", "/abs", "a/b", "..", "", ".hidden"],
+    "bad_run_id",
+    ["../../x", "/abs", "a/b", "..", "", ".hidden"],
 )
 def test_run_dir_rejects_path_traversal_and_absolute(
-    runs_root, bad_run_id: str,
+    runs_root,
+    bad_run_id: str,
 ) -> None:
     """Круг 12 (codex-major): без валидации `--run-id ../../outside` или
     абсолютный путь писал `run.json` ВНЕ `RUNS_ROOT`."""
@@ -122,9 +142,14 @@ def test_validate_id_component_accepts_and_rejects(runs_root) -> None:
 
 def test_new_run_carries_interview_state_and_old_ledgers_load(runs_root) -> None:
     st = rs.new_run(
-        subject="s", repo="alpha", repo_slug="o/alpha", ws_id="WS-1",
-        target_dir="/tmp/x", bundle_dir="spec",
-        profile="profiles/team-exp.yaml", run_id="r-int",
+        subject="s",
+        repo="alpha",
+        repo_slug="o/alpha",
+        ws_id="WS-1",
+        target_dir="/tmp/x",
+        bundle_dir="spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-int",
         interview={"session_id": None, "frame": "customer"},
     )
     rs.save(st)
@@ -139,9 +164,14 @@ def test_new_run_carries_interview_state_and_old_ledgers_load(runs_root) -> None
 
 def test_run_state_defaults_to_legacy_authoring(tmp_path: Path, runs_root) -> None:
     state = rs.new_run(
-        subject="s", repo="r", repo_slug="o/r", ws_id="WS",
-        target_dir=str(tmp_path), bundle_dir="spec",
-        profile="profiles/team-exp.yaml", run_id="r-1",
+        subject="s",
+        repo="r",
+        repo_slug="o/r",
+        ws_id="WS",
+        target_dir=str(tmp_path),
+        bundle_dir="spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-1",
     )
     assert state.authoring == "legacy" and state.wave == 0  # 0 — не волны
     rs.save(state)
@@ -150,9 +180,15 @@ def test_run_state_defaults_to_legacy_authoring(tmp_path: Path, runs_root) -> No
 
 def test_waves_authoring_is_persisted(tmp_path: Path, runs_root) -> None:
     state = rs.new_run(
-        subject="s", repo="r", repo_slug="o/r", ws_id="WS",
-        target_dir=str(tmp_path), bundle_dir="spec",
-        profile="profiles/team-exp.yaml", run_id="r-2", authoring="waves",
+        subject="s",
+        repo="r",
+        repo_slug="o/r",
+        ws_id="WS",
+        target_dir=str(tmp_path),
+        bundle_dir="spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-2",
+        authoring="waves",
     )
     rs.save(state)
     assert rs.load("r-2").authoring == "waves"

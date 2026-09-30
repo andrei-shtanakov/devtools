@@ -82,8 +82,13 @@ def test_merge_goes_through_the_wrapper_not_gh(monkeypatch):
     assert len(calls) == 1
     call = calls[0]
     assert call.argv == [
-        "sh", str(ops_mod.DEVTOOLS_ROOT / "merge-pr.sh"), "devtools", "42",
-        "--merge", "--expect-head", "deadbeef",
+        "sh",
+        str(ops_mod.DEVTOOLS_ROOT / "merge-pr.sh"),
+        "devtools",
+        "42",
+        "--merge",
+        "--expect-head",
+        "deadbeef",
     ]
     assert call.kwargs["cwd"] == ops_mod.DEVTOOLS_ROOT
     assert "gh" not in call.argv
@@ -126,7 +131,10 @@ def test_review_command_cwd_and_passthrough_returncode(monkeypatch):
     assert result == 3
     call = calls[0]
     assert call.argv == [
-        "sh", str(ops_mod.DEVTOOLS_ROOT / "review-pr.sh"), "devtools", "7",
+        "sh",
+        str(ops_mod.DEVTOOLS_ROOT / "review-pr.sh"),
+        "devtools",
+        "7",
     ]
     assert call.kwargs["cwd"] == ops_mod.DEVTOOLS_ROOT
 
@@ -161,7 +169,9 @@ def test_find_pr_valid_empty_list_returns_none(monkeypatch):
 
 def test_find_pr_valid_list_returns_number(monkeypatch):
     _install_fake_run(
-        monkeypatch, returncode=0, stdout=json.dumps([{"number": 42}]),
+        monkeypatch,
+        returncode=0,
+        stdout=json.dumps([{"number": 42}]),
     )
     ops = RealOps()
 
@@ -172,32 +182,46 @@ def test_find_pr_valid_list_returns_number(monkeypatch):
 
 def test_prs_by_head_prefix_paginates_all_states_and_filters(monkeypatch):
     payload = [
-        {"data": {"repository": {"pullRequests": {"nodes": [
-            {
-                "number": 41,
-                "title": "new",
-                "body": "body",
-                "headRefName": "spec/fleet-20260901-behaviour",
-            },
-            {
-                "number": 40,
-                "title": "other",
-                "body": "body",
-                "headRefName": "unrelated",
-            },
-        ]}}}},
-        {"data": {"repository": {"pullRequests": {"nodes": [
-            {
-                "number": 12,
-                "title": "old",
-                "body": "body",
-                "headRefName": "spec/fleet-20260801-behaviour",
-            },
-        ]}}}},
+        {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "nodes": [
+                            {
+                                "number": 41,
+                                "title": "new",
+                                "body": "body",
+                                "headRefName": "spec/fleet-20260901-behaviour",
+                            },
+                            {
+                                "number": 40,
+                                "title": "other",
+                                "body": "body",
+                                "headRefName": "unrelated",
+                            },
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "nodes": [
+                            {
+                                "number": 12,
+                                "title": "old",
+                                "body": "body",
+                                "headRefName": "spec/fleet-20260801-behaviour",
+                            },
+                        ]
+                    }
+                }
+            }
+        },
     ]
-    calls = _install_fake_run(
-        monkeypatch, returncode=0, stdout=json.dumps(payload)
-    )
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout=json.dumps(payload))
     ops = RealOps()
 
     result = ops.prs_by_head_prefix(REPO_SLUG, "spec/fleet-")
@@ -232,7 +256,12 @@ def test_create_draft_pr_command_has_required_label_and_parses_number(
     ops = RealOps()
 
     number = ops.create_draft_pr(
-        "/tmp/devtools", REPO_SLUG, "feat/x", "title", "body", "",
+        "/tmp/devtools",
+        REPO_SLUG,
+        "feat/x",
+        "title",
+        "body",
+        "",
     )
 
     assert number == 42
@@ -263,7 +292,10 @@ def test_gate_check_s8_command_matches_real_cli(monkeypatch):
     assert result == (0, "ok\n")
     call = calls[0]
     assert call.argv[-4:] == [
-        "/tmp/devtools/spec", "--profile", "lite", "--emit-verdicts",
+        "/tmp/devtools/spec",
+        "--profile",
+        "lite",
+        "--emit-verdicts",
     ]
     assert call.argv[0].endswith("gate-check")
     assert call.kwargs["cwd"] == "/tmp/devtools"
@@ -273,7 +305,10 @@ def test_gate_check_s8_command_matches_real_cli(monkeypatch):
 def test_gate_check_s8_returns_combined_output_on_failure(monkeypatch):
     """M-2: findings текста, не только код возврата — идёт в леджер и issue."""
     calls = _install_fake_run(
-        monkeypatch, returncode=1, stdout="GC-X: bad\n", stderr="warn\n",
+        monkeypatch,
+        returncode=1,
+        stdout="GC-X: bad\n",
+        stderr="warn\n",
     )
     ops = RealOps()
 
@@ -293,17 +328,23 @@ def test_commit_paths_adds_only_given_paths_and_commits_with_message(monkeypatch
     ops = RealOps()
 
     ops.commit_paths(
-        "/tmp/devtools", ["workstreams/WS-1/spec"],
+        "/tmp/devtools",
+        ["workstreams/WS-1/spec"],
         "docs(governance): x\n\nCo-Authored-By: y",
     )
 
     assert [c.argv[:2] for c in calls] == [
-        ["git", "add"], ["git", "diff"], ["git", "commit"],
+        ["git", "add"],
+        ["git", "diff"],
+        ["git", "commit"],
     ]
     assert calls[0].argv == ["git", "add", "--", "workstreams/WS-1/spec"]
     assert calls[0].kwargs["cwd"] == "/tmp/devtools"
     assert calls[2].argv == [
-        "git", "commit", "-m", "docs(governance): x\n\nCo-Authored-By: y",
+        "git",
+        "commit",
+        "-m",
+        "docs(governance): x\n\nCo-Authored-By: y",
     ]
     assert calls[2].kwargs["check"] is True
 
@@ -324,17 +365,25 @@ def test_commit_paths_force_adds_source_files_after_plain_add(monkeypatch):
     ops = RealOps()
 
     ops.commit_paths(
-        "/tmp/devtools", ["workstreams/WS-1/spec"], "message",
+        "/tmp/devtools",
+        ["workstreams/WS-1/spec"],
+        "message",
         force_paths=("workstreams/WS-1/spec/00-discovery/brief.md",),
     )
 
     assert [c.argv[:3] for c in calls] == [
-        ["git", "add", "--"], ["git", "--literal-pathspecs", "add"],
-        ["git", "diff", "--cached"], ["git", "commit", "-m"],
+        ["git", "add", "--"],
+        ["git", "--literal-pathspecs", "add"],
+        ["git", "diff", "--cached"],
+        ["git", "commit", "-m"],
     ]
     assert calls[0].argv == ["git", "add", "--", "workstreams/WS-1/spec"]
     assert calls[1].argv == [
-        "git", "--literal-pathspecs", "add", "-f", "--",
+        "git",
+        "--literal-pathspecs",
+        "add",
+        "-f",
+        "--",
         "workstreams/WS-1/spec/00-discovery/brief.md",
     ]
     assert calls[1].kwargs["check"] is True
@@ -342,7 +391,9 @@ def test_commit_paths_force_adds_source_files_after_plain_add(monkeypatch):
 
 def _git(repo, *args):
     return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True,
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
     )
 
 
@@ -375,11 +426,16 @@ def test_commit_paths_force_paths_defeat_target_gitignore(tmp_path):
     ops = RealOps()
 
     ops.commit_paths(str(repo), ["workstreams/WS-1/spec"], "without force")
-    assert _git(repo, "rev-parse", "HEAD:workstreams/WS-1/spec/00-charter.md").returncode == 0
+    assert (
+        _git(repo, "rev-parse", "HEAD:workstreams/WS-1/spec/00-charter.md").returncode
+        == 0
+    )
     assert _git(repo, "rev-parse", f"HEAD:{rel}").returncode != 0  # контроль
 
     ops.commit_paths(
-        str(repo), ["workstreams/WS-1/spec"], "with force",
+        str(repo),
+        ["workstreams/WS-1/spec"],
+        "with force",
         force_paths=(rel, glob_rel),
     )
     shown = _git(repo, "rev-parse", f"HEAD:{rel}")
@@ -409,7 +465,9 @@ def test_commit_paths_explicit_ignored_file_is_committed_d1(tmp_path):
     repo = _ignored_repo(tmp_path, "/spec/*\n!/spec/*-tasks.md\n")
     (repo / "spec" / "profiles").mkdir(parents=True)
     (repo / "spec" / "ws-tasks.md").write_text("# tasks\n", encoding="utf-8")
-    (repo / "spec" / "profiles" / "stage.yaml").write_text("stage: x\n", encoding="utf-8")
+    (repo / "spec" / "profiles" / "stage.yaml").write_text(
+        "stage: x\n", encoding="utf-8"
+    )
     RealOps().commit_paths(
         str(repo), ["spec/ws-tasks.md", "spec/profiles/stage.yaml"], "deliver"
     )
@@ -466,18 +524,27 @@ def test_disp_agent_maps_harness_layer_to_disputatio_adapter(tmp_path, monkeypat
     """Адаптер disp — из того же харнесс-слоя, что авторинг/ревью
     (harness.env): claude → claude_code, codex → codex; author из AUTHOR_*,
     reviewer из REVIEW_*."""
-    _harness_file(tmp_path, monkeypatch, AUTHOR_HARNESS="claude",
-                  AUTHOR_MODEL="claude-opus-5", REVIEW_HARNESS="codex",
-                  REVIEW_MODEL="gpt-5-codex")
+    _harness_file(
+        tmp_path,
+        monkeypatch,
+        AUTHOR_HARNESS="claude",
+        AUTHOR_MODEL="claude-opus-5",
+        REVIEW_HARNESS="codex",
+        REVIEW_MODEL="gpt-5-codex",
+    )
     assert ops_mod.disp_agent("author") == ("claude_code", "claude-opus-5")
     assert ops_mod.disp_agent("reviewer") == ("codex", "gpt-5-codex")
 
 
-def test_disp_agent_defaults_claude_model_and_refuses_codex_without_model(tmp_path, monkeypatch):
-    _harness_file(tmp_path, monkeypatch, AUTHOR_HARNESS="claude", REVIEW_HARNESS="codex")
+def test_disp_agent_defaults_claude_model_and_refuses_codex_without_model(
+    tmp_path, monkeypatch
+):
+    _harness_file(
+        tmp_path, monkeypatch, AUTHOR_HARNESS="claude", REVIEW_HARNESS="codex"
+    )
     assert ops_mod.disp_agent("author") == ("claude_code", "claude-opus-5")
     with pytest.raises(ValueError):
-        ops_mod.disp_agent("reviewer")   # disp требует model, у codex дефолта нет
+        ops_mod.disp_agent("reviewer")  # disp требует model, у codex дефолта нет
 
 
 def test_disp_agent_env_overrides_file(tmp_path, monkeypatch):
@@ -498,7 +565,11 @@ def test_author_command_and_prompt_contains_fields(monkeypatch):
     assert result == 0
     call = calls[0]
     assert call.argv[:5] == [
-        "codex", "exec", "--ephemeral", "--sandbox", "workspace-write",
+        "codex",
+        "exec",
+        "--ephemeral",
+        "--sandbox",
+        "workspace-write",
     ]
     prompt = call.argv[5]
     assert "adr" in prompt
@@ -568,7 +639,8 @@ def test_author_prompt_adds_brief_context_only_to_charter_and_requirements(
         "primary": "00-discovery/brief.md",
         "requirements_source": "00-discovery/customer.md",
         "source_paths": [
-            "00-discovery/brief.md", "00-discovery/customer.md",
+            "00-discovery/brief.md",
+            "00-discovery/customer.md",
         ],
         "source_blobs": {
             "discovery-brief": "a" * 40,
@@ -615,12 +687,21 @@ def test_author_disp_runs_the_document_pipeline_kind(monkeypatch):
     call = calls[0]
     expected_project = str(ops_mod.DEVTOOLS_ROOT.parent / "disputatio")
     assert call.argv == [
-        "uv", "run", "--project", expected_project,
-        "disp", "pipeline", "run",
-        "--task", "subject='x' bundle=spec/15.md",
-        "--slug", "beh-ws-42",
-        "--config", "/tmp/runs/r1/disp-doc.toml",
-        "--root", "/tmp/devtools",
+        "uv",
+        "run",
+        "--project",
+        expected_project,
+        "disp",
+        "pipeline",
+        "run",
+        "--task",
+        "subject='x' bundle=spec/15.md",
+        "--slug",
+        "beh-ws-42",
+        "--config",
+        "/tmp/runs/r1/disp-doc.toml",
+        "--root",
+        "/tmp/devtools",
     ]
     assert call.kwargs["cwd"] == "/tmp/devtools"
 
@@ -686,9 +767,7 @@ def test_unresolved_threads_true_when_open_thread_present(monkeypatch):
             }
         }
     }
-    calls = _install_fake_run(
-        monkeypatch, returncode=0, stdout=json.dumps(payload)
-    )
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout=json.dumps(payload))
     ops = RealOps()
 
     result = ops.unresolved_threads(REPO_SLUG, 42)
@@ -878,9 +957,7 @@ def test_checkout_and_pull_switch_failure_raises_runtime_error(monkeypatch):
     _install_fake_run(monkeypatch, returncode=1, stderr="unknown branch")
     ops = RealOps()
 
-    with pytest.raises(
-        RuntimeError, match="git switch master rc=1: unknown branch"
-    ):
+    with pytest.raises(RuntimeError, match="git switch master rc=1: unknown branch"):
         ops.checkout_and_pull("/tmp/devtools", "master")
 
 
@@ -895,9 +972,7 @@ def test_checkout_and_pull_pull_failure_raises_runtime_error(monkeypatch):
     monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
     ops = RealOps()
 
-    with pytest.raises(
-        RuntimeError, match="git pull --ff-only rc=1: diverged"
-    ):
+    with pytest.raises(RuntimeError, match="git pull --ff-only rc=1: diverged"):
         ops.checkout_and_pull("/tmp/devtools", "master")
     assert len(calls_seen) == 2  # switch ran, then pull failed
 
@@ -923,7 +998,9 @@ def test_push_branch_failure_raises_runtime_error(monkeypatch):
     («ветка на remote ушла вперёд локальной») уходил оператору сырым
     трейсбеком, и текст git'а — единственная диагностика — терялся."""
     _install_fake_run(
-        monkeypatch, returncode=1, stderr="! [rejected] (non-fast-forward)",
+        monkeypatch,
+        returncode=1,
+        stderr="! [rejected] (non-fast-forward)",
     )
 
     with pytest.raises(RuntimeError, match="non-fast-forward") as exc:
@@ -950,17 +1027,28 @@ def test_current_branch_detached_returns_none(monkeypatch):
 
 def test_materialize_pr_head_fetch_then_detach(monkeypatch):
     calls = _install_fake_run(
-        monkeypatch, returncode=0, stdout="cafe" * 10 + "\n",
+        monkeypatch,
+        returncode=0,
+        stdout="cafe" * 10 + "\n",
     )
     ops = RealOps()
-    assert ops.materialize_pr_head(
-        "/tmp/kapelle", 59, "cafe" * 10,
-    ) == "cafe" * 10
+    assert (
+        ops.materialize_pr_head(
+            "/tmp/kapelle",
+            59,
+            "cafe" * 10,
+        )
+        == "cafe" * 10
+    )
     assert calls[0].argv == ["git", "fetch", "origin", "pull/59/head"]
     # --no-overwrite-ignore (приёмка PR #113, круг 5): голый switch молча
     # перезаписал бы ignored-файл оператора версией из PR.
     assert calls[1].argv == [
-        "git", "switch", "--no-overwrite-ignore", "--detach", "cafe" * 10,
+        "git",
+        "switch",
+        "--no-overwrite-ignore",
+        "--detach",
+        "cafe" * 10,
     ]
     assert calls[2].argv == ["git", "rev-parse", "HEAD"]
     assert all(c.kwargs["cwd"] == "/tmp/kapelle" for c in calls)
@@ -996,7 +1084,9 @@ def test_materialize_pr_head_rev_parse_failure_raises(monkeypatch):
     monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="rev-parse HEAD"):
         RealOps().materialize_pr_head(
-            "/tmp/kapelle", 59, "cafe" * 10,
+            "/tmp/kapelle",
+            59,
+            "cafe" * 10,
         )
 
 
@@ -1028,9 +1118,10 @@ def test_create_pr_is_ready_by_default_and_draft_on_demand(monkeypatch):
         monkeypatch, returncode=0, stdout="https://github.com/o/r/pull/77\n"
     )
     ops = RealOps()
-    assert ops.create_pr(
-        "/tmp/x", REPO_SLUG, "spec/b", "t", "b", "human-merge-required"
-    ) == 77
+    assert (
+        ops.create_pr("/tmp/x", REPO_SLUG, "spec/b", "t", "b", "human-merge-required")
+        == 77
+    )
     ready = calls[0].argv
     assert "--draft" not in ready
     assert ready[ready.index("--label") + 1] == "human-merge-required"
@@ -1044,9 +1135,7 @@ def test_create_pr_is_ready_by_default_and_draft_on_demand(monkeypatch):
 @pytest.mark.parametrize(
     ("returncode", "expected"), [(0, True), (1, False), (128, None)]
 )
-def test_is_ancestor_keeps_no_from_do_not_know_apart(
-    monkeypatch, returncode, expected
-):
+def test_is_ancestor_keeps_no_from_do_not_know_apart(monkeypatch, returncode, expected):
     """`merge-base --is-ancestor`: «нет» и «не знаю» — РАЗНЫЕ ответы.
 
     Свернув их в `False`, сверка фазы 3 (§I12) хоронила бы заявку по
@@ -1075,9 +1164,7 @@ def test_pr_facts_requests_the_whole_merge_event(monkeypatch):
 
 
 def test_changed_paths_fetch_base_then_three_dot_diff(monkeypatch):
-    calls = _install_fake_run(
-        monkeypatch, returncode=0, stdout="lib/a.py\nlib/b.py\n"
-    )
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="lib/a.py\nlib/b.py\n")
     ops = RealOps()
     base, paths = ops.changed_paths("/tmp/kapelle", "master")
     assert calls[0].argv == ["git", "fetch", "origin", "master"]
@@ -1088,7 +1175,10 @@ def test_changed_paths_fetch_base_then_three_dot_diff(monkeypatch):
     # обязан назвать базу, от которой посчитан гард путей.
     assert calls[1].argv == ["git", "rev-parse", "FETCH_HEAD"]
     assert calls[2].argv == [
-        "git", "diff", "--name-only", "FETCH_HEAD...HEAD",
+        "git",
+        "diff",
+        "--name-only",
+        "FETCH_HEAD...HEAD",
     ]
     assert all(c.kwargs["cwd"] == "/tmp/kapelle" for c in calls)
     assert paths == ["lib/a.py", "lib/b.py"]
@@ -1175,9 +1265,7 @@ def test_collect_gate_verdicts_moves_file_and_prunes_empty_dir(tmp_path):
 def test_collect_gate_verdicts_keeps_nonempty_steward_dir(tmp_path):
     target = tmp_path / "target"
     (target / ".steward").mkdir(parents=True)
-    (target / ".steward" / "gate_verdicts.jsonl").write_text(
-        "{}\n", encoding="utf-8"
-    )
+    (target / ".steward" / "gate_verdicts.jsonl").write_text("{}\n", encoding="utf-8")
     (target / ".steward" / "other.txt").write_text("x", encoding="utf-8")
     dest = tmp_path / "dest.jsonl"
     ops = RealOps()
@@ -1191,10 +1279,7 @@ def test_collect_gate_verdicts_absent_returns_false(tmp_path):
     target.mkdir()
     ops = RealOps()
 
-    assert (
-        ops.collect_gate_verdicts(str(target), str(tmp_path / "d.jsonl"))
-        is False
-    )
+    assert ops.collect_gate_verdicts(str(target), str(tmp_path / "d.jsonl")) is False
     assert not (tmp_path / "d.jsonl").exists()
 
 
@@ -1215,7 +1300,8 @@ def test_author_config_flips_to_claude(monkeypatch, tmp_path):
     пресетом spec-runner (skip-permissions — авторинг пишет бандл и считает
     git hash-object), изоляция от MCP/сессий оператора."""
     _author_hermetic(
-        monkeypatch, tmp_path,
+        monkeypatch,
+        tmp_path,
         "AUTHOR_HARNESS=claude\nAUTHOR_MODEL=claude-opus-5\n",
     )
     calls = _install_fake_run(monkeypatch, returncode=0)
@@ -1224,8 +1310,11 @@ def test_author_config_flips_to_claude(monkeypatch, tmp_path):
     assert ops.author("/t", "charter", "s", "ws/spec") == 0
     argv = calls[0].argv
     assert argv[:4] == ["claude", "-p", "--model", "claude-opus-5"]
-    for flag in ("--dangerously-skip-permissions",
-                 "--no-session-persistence", "--strict-mcp-config"):
+    for flag in (
+        "--dangerously-skip-permissions",
+        "--no-session-persistence",
+        "--strict-mcp-config",
+    ):
         assert flag in argv
     assert "ws/spec/00-charter.md" in argv[-1]  # промпт — последним
 
@@ -1242,7 +1331,8 @@ def test_author_env_harness_ignores_config_model(monkeypatch, tmp_path):
     """Урок ревью PR #121: харнесс со слоя env не наследует модель слоя
     конфига — codex не получит claude-модель."""
     _author_hermetic(
-        monkeypatch, tmp_path,
+        monkeypatch,
+        tmp_path,
         "AUTHOR_HARNESS=claude\nAUTHOR_MODEL=claude-opus-5\n",
     )
     monkeypatch.setenv("AUTHOR_HARNESS", "codex")
@@ -1250,15 +1340,17 @@ def test_author_env_harness_ignores_config_model(monkeypatch, tmp_path):
     RealOps().author("/t", "charter", "s", "ws/spec")
     argv = calls[0].argv
     assert argv[:5] == [
-        "codex", "exec", "--ephemeral", "--sandbox", "workspace-write",
+        "codex",
+        "exec",
+        "--ephemeral",
+        "--sandbox",
+        "workspace-write",
     ]
     assert "-m" not in argv
 
 
 def test_author_config_accepts_export_prefix(monkeypatch, tmp_path):
-    _author_hermetic(
-        monkeypatch, tmp_path, "  export AUTHOR_HARNESS=claude\n"
-    )
+    _author_hermetic(monkeypatch, tmp_path, "  export AUTHOR_HARNESS=claude\n")
     calls = _install_fake_run(monkeypatch, returncode=0)
     RealOps().author("/t", "charter", "s", "ws/spec")
     assert calls[0].argv[0] == "claude"
@@ -1266,7 +1358,8 @@ def test_author_config_accepts_export_prefix(monkeypatch, tmp_path):
 
 def test_author_codex_model_from_config(monkeypatch, tmp_path):
     _author_hermetic(
-        monkeypatch, tmp_path,
+        monkeypatch,
+        tmp_path,
         "AUTHOR_HARNESS=codex\nAUTHOR_MODEL=gpt-5.5\n",
     )
     calls = _install_fake_run(monkeypatch, returncode=0)
@@ -1295,11 +1388,19 @@ def test_author_dsl_covers_decomposition() -> None:
     assert _AUTHOR_FILENAMES["decomposition"] == "30-decomposition.md"
     dsl = _AUTHOR_DSL["decomposition"]
     for token in (
-        "spec_stage: decomposition", "owner_role: tech-lead",
-        "traces_to: [design, acceptance]", "#### DT-NN:", "type: implement|verify",
-        "scenarios:", "depends_on:", "delivered_by:", "parallel_group:",
-        "topological declaration order", "tdd_waiver:",
-        "AT MOST ONCE per DT", "only on type: implement",
+        "spec_stage: decomposition",
+        "owner_role: tech-lead",
+        "traces_to: [design, acceptance]",
+        "#### DT-NN:",
+        "type: implement|verify",
+        "scenarios:",
+        "depends_on:",
+        "delivered_by:",
+        "parallel_group:",
+        "topological declaration order",
+        "tdd_waiver:",
+        "AT MOST ONCE per DT",
+        "only on type: implement",
         "only on a DT that HAS depends_on",
         # Major ревью PR #161, finding 1: `verifies:` — обязательное
         # структурное поле type: verify (owner ruling DT-14 multi-file
@@ -1353,15 +1454,10 @@ def test_author_dsl_decomposition_explains_verifies_field() -> None:
     assert "FORBIDDEN for type: implement" in verifies_tail[:400]
     assert "checked_by" in verifies_tail[:400]
     assert "ownership always beats observation" in verifies_tail[:1200]
-    assert "NO exemption from the single-owner invariant" in (
-        verifies_tail[:1200]
-    )
+    assert "NO exemption from the single-owner invariant" in (verifies_tail[:1200])
     assert "NOT also this same task's own checked_by target" not in dsl
     assert "FATAL graph invariant" in verifies_tail[:1600]
-    assert (
-        "transitive closure of THIS task's OWN depends_on"
-        in verifies_tail[:1900]
-    )
+    assert "transitive closure of THIS task's OWN depends_on" in verifies_tail[:1900]
     assert "NON-fatal form recommendation" in verifies_tail[:2200]
     assert "does NOT stop delivery on its own" in verifies_tail[:2400]
 
@@ -1372,10 +1468,13 @@ def test_author_dsl_covers_acceptance() -> None:
     assert _AUTHOR_FILENAMES["acceptance"] == "25-acceptance.md"
     dsl = _AUTHOR_DSL["acceptance"]
     for token in (
-        "spec_stage: acceptance", "owner_role: qa",
+        "spec_stage: acceptance",
+        "owner_role: qa",
         "traces_to: [requirements, behaviour-spec]",
-        "#### AC-NN:", "verification: test|manual|metric",
-        "traces:", "scenarios:",
+        "#### AC-NN:",
+        "verification: test|manual|metric",
+        "traces:",
+        "scenarios:",
         "Must-требований во входном наборе нет",
     ):
         assert token in dsl
@@ -1405,8 +1504,11 @@ def test_ops_protocol_declares_provenance_primitives() -> None:
     from governance.ops import Ops
 
     for name in (
-        "last_commit_touching", "prs_containing_commit",
-        "rev_parse", "blob_in_commit", "commit_parent",
+        "last_commit_touching",
+        "prs_containing_commit",
+        "rev_parse",
+        "blob_in_commit",
+        "commit_parent",
     ):
         assert hasattr(Ops, name), name
 
@@ -1428,19 +1530,31 @@ def test_last_commit_touching_returns_sha_when_history_exists(monkeypatch):
     result = ops.last_commit_touching("/tmp/devtools", "spec/x.md")
 
     assert result == "abc123"
-    assert calls[0].argv == ["git", "-C", "/tmp/devtools", "rev-parse",
-                              "--verify", "--quiet", "HEAD"]
+    assert calls[0].argv == [
+        "git",
+        "-C",
+        "/tmp/devtools",
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "HEAD",
+    ]
     assert calls[1].argv == [
-        "git", "-C", "/tmp/devtools", "log", "-1", "--format=%H",
-        "--", "spec/x.md",
+        "git",
+        "-C",
+        "/tmp/devtools",
+        "log",
+        "-1",
+        "--format=%H",
+        "--",
+        "spec/x.md",
     ]
 
 
 def test_last_commit_touching_never_touched_returns_none(monkeypatch):
     def fake_run(argv, **kwargs):
         if "rev-parse" in argv:
-            return subprocess.CompletedProcess(argv, 0, stdout="head\n",
-                                                 stderr="")
+            return subprocess.CompletedProcess(argv, 0, stdout="head\n", stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
@@ -1452,8 +1566,7 @@ def test_last_commit_touching_never_touched_returns_none(monkeypatch):
 def test_last_commit_touching_log_failure_raises_runtime_error(monkeypatch):
     def fake_run(argv, **kwargs):
         if "rev-parse" in argv:
-            return subprocess.CompletedProcess(argv, 0, stdout="head\n",
-                                                 stderr="")
+            return subprocess.CompletedProcess(argv, 0, stdout="head\n", stderr="")
         return subprocess.CompletedProcess(argv, 128, stdout="", stderr="boom")
 
     monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
@@ -1501,11 +1614,18 @@ _REST_COMMIT_PULLS_PAYLOAD = [
 
 def test_prs_containing_commit_command_and_normalization(monkeypatch):
     payload = [
-        {"number": 42, "state": "MERGED", "baseRefName": "master",
-         "mergedAt": "2026-09-01T00:00:00Z", "mergeCommit": "deadbeef"},
+        {
+            "number": 42,
+            "state": "MERGED",
+            "baseRefName": "master",
+            "mergedAt": "2026-09-01T00:00:00Z",
+            "mergeCommit": "deadbeef",
+        },
     ]
     calls = _install_fake_run(
-        monkeypatch, returncode=0, stdout=json.dumps(payload),
+        monkeypatch,
+        returncode=0,
+        stdout=json.dumps(payload),
     )
     ops = RealOps()
 
@@ -1513,8 +1633,12 @@ def test_prs_containing_commit_command_and_normalization(monkeypatch):
 
     assert result == payload
     assert calls[0].argv == [
-        "gh", "api", f"repos/{REPO_SLUG}/commits/deadbeef/pulls",
-        "--paginate", "--jq", _PRS_CONTAINING_COMMIT_JQ,
+        "gh",
+        "api",
+        f"repos/{REPO_SLUG}/commits/deadbeef/pulls",
+        "--paginate",
+        "--jq",
+        _PRS_CONTAINING_COMMIT_JQ,
     ]
 
 
@@ -1529,17 +1653,33 @@ def test_prs_containing_commit_collects_every_page(monkeypatch):
     stdout нужно как ПОСЛЕДОВАТЕЛЬНОСТЬ JSON-документов: `json.loads`
     целиком на такой выдаче падал бы «invalid JSON».
     """
-    page1 = [{"number": 42, "state": "MERGED", "baseRefName": "master",
-              "mergedAt": "2026-09-01T00:00:00Z", "mergeCommit": "aaa"}]
-    page2 = [{"number": 43, "state": "MERGED", "baseRefName": "master",
-              "mergedAt": "2026-09-02T00:00:00Z", "mergeCommit": "bbb"}]
+    page1 = [
+        {
+            "number": 42,
+            "state": "MERGED",
+            "baseRefName": "master",
+            "mergedAt": "2026-09-01T00:00:00Z",
+            "mergeCommit": "aaa",
+        }
+    ]
+    page2 = [
+        {
+            "number": 43,
+            "state": "MERGED",
+            "baseRefName": "master",
+            "mergedAt": "2026-09-02T00:00:00Z",
+            "mergeCommit": "bbb",
+        }
+    ]
     _install_fake_run(
-        monkeypatch, returncode=0,
+        monkeypatch,
+        returncode=0,
         stdout=f"{json.dumps(page1)}\n{json.dumps(page2)}\n[]\n",
     )
 
     assert RealOps().prs_containing_commit(REPO_SLUG, "deadbeef") == [
-        *page1, *page2,
+        *page1,
+        *page2,
     ]
 
 
@@ -1568,15 +1708,26 @@ def test_prs_containing_commit_jq_really_normalizes_rest_payload(
     done = subprocess.run(
         [jq_bin, "-c", jq_expr],
         input=json.dumps(_REST_COMMIT_PULLS_PAYLOAD),
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
 
     assert done.returncode == 0, done.stderr
     assert json.loads(done.stdout) == [
-        {"number": 42, "state": "MERGED", "baseRefName": "master",
-         "mergedAt": "2026-09-01T00:00:00Z", "mergeCommit": "deadbeef"},
-        {"number": 43, "state": "OPEN", "baseRefName": "master",
-         "mergedAt": None, "mergeCommit": None},
+        {
+            "number": 42,
+            "state": "MERGED",
+            "baseRefName": "master",
+            "mergedAt": "2026-09-01T00:00:00Z",
+            "mergeCommit": "deadbeef",
+        },
+        {
+            "number": 43,
+            "state": "OPEN",
+            "baseRefName": "master",
+            "mergedAt": None,
+            "mergeCommit": None,
+        },
     ]
 
 
@@ -1611,7 +1762,12 @@ def test_rev_parse_returns_sha(monkeypatch):
 
     assert result == "cafe1234"
     assert calls[0].argv == [
-        "git", "-C", "/tmp/devtools", "rev-parse", "--verify", "--quiet",
+        "git",
+        "-C",
+        "/tmp/devtools",
+        "rev-parse",
+        "--verify",
+        "--quiet",
         "HEAD",
     ]
 
@@ -1631,7 +1787,11 @@ def test_blob_in_commit_returns_hash(monkeypatch):
 
     assert result == "blobsha"
     assert calls[0].argv == [
-        "git", "-C", "/tmp/devtools", "rev-parse", "deadbeef:spec/x.md",
+        "git",
+        "-C",
+        "/tmp/devtools",
+        "rev-parse",
+        "deadbeef:spec/x.md",
     ]
 
 
@@ -1651,15 +1811,26 @@ def test_show_file_returns_content_at_ref(tmp_path) -> None:
     (spec_dir / "x.md").write_text("hello\n")
     real_subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
     real_subprocess.run(
-        ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c",
-         "user.name=t", "commit", "-q", "-m", "c"],
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "c",
+        ],
         check=True,
     )
 
     assert RealOps().show_file(str(tmp_path), "HEAD", "spec/x.md") == "hello\n"
-    assert RealOps().show_file_for_carry(
-        str(tmp_path), "HEAD", "spec/x.md"
-    ) == "hello\n"
+    assert (
+        RealOps().show_file_for_carry(str(tmp_path), "HEAD", "spec/x.md") == "hello\n"
+    )
 
 
 def test_show_file_bytes_preserves_crlf_at_ref(tmp_path) -> None:
@@ -1675,27 +1846,40 @@ def test_show_file_bytes_preserves_crlf_at_ref(tmp_path) -> None:
         check=True,
     )
     real_subprocess.run(
-        ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c",
-         "user.name=t", "commit", "-q", "-m", "c"],
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "c",
+        ],
         check=True,
     )
 
-    assert RealOps().show_file_bytes(
-        str(tmp_path), "HEAD", "spec/x.md"
-    ) == data
+    assert RealOps().show_file_bytes(str(tmp_path), "HEAD", "spec/x.md") == data
 
 
 def test_show_repo_file_bytes_uses_forge_raw_endpoint(monkeypatch) -> None:
     calls = _install_fake_run(monkeypatch, stdout=b"exact\nbytes\n")
 
-    assert RealOps().show_repo_file_bytes(
-        "owner/repo", "a" * 40, "workstreams/ws/spec/brief.md"
-    ) == b"exact\nbytes\n"
+    assert (
+        RealOps().show_repo_file_bytes(
+            "owner/repo", "a" * 40, "workstreams/ws/spec/brief.md"
+        )
+        == b"exact\nbytes\n"
+    )
     assert calls[0].argv == [
-        "gh", "api",
-        "repos/owner/repo/contents/workstreams/ws/spec/brief.md?ref="
-        + "a" * 40,
-        "-H", "Accept: application/vnd.github.raw+json",
+        "gh",
+        "api",
+        "repos/owner/repo/contents/workstreams/ws/spec/brief.md?ref=" + "a" * 40,
+        "-H",
+        "Accept: application/vnd.github.raw+json",
     ]
 
 
@@ -1712,14 +1896,24 @@ def test_show_file_for_carry_distinguishes_absent_path(tmp_path) -> None:
 
     real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     real_subprocess.run(
-        ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c",
-         "user.name=t", "commit", "--allow-empty", "-q", "-m", "c"],
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "c",
+        ],
         check=True,
     )
 
-    assert RealOps().show_file_for_carry(
-        str(tmp_path), "HEAD", "spec/nope.md"
-    ) is None
+    assert RealOps().show_file_for_carry(str(tmp_path), "HEAD", "spec/nope.md") is None
 
 
 def test_show_file_for_carry_raises_when_revision_is_unavailable(tmp_path) -> None:
@@ -1728,9 +1922,7 @@ def test_show_file_for_carry_raises_when_revision_is_unavailable(tmp_path) -> No
     real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
 
     with pytest.raises(RuntimeError, match="missing-ref"):
-        RealOps().show_file_for_carry(
-            str(tmp_path), "missing-ref", "spec/x.md"
-        )
+        RealOps().show_file_for_carry(str(tmp_path), "missing-ref", "spec/x.md")
 
 
 def test_commit_parent_returns_sha(monkeypatch):
@@ -1741,7 +1933,12 @@ def test_commit_parent_returns_sha(monkeypatch):
 
     assert result == "parentsha"
     assert calls[0].argv == [
-        "git", "-C", "/tmp/devtools", "rev-parse", "--verify", "--quiet",
+        "git",
+        "-C",
+        "/tmp/devtools",
+        "rev-parse",
+        "--verify",
+        "--quiet",
         "deadbeef^1",
     ]
 
@@ -1764,9 +1961,10 @@ def test_pr_reviews_projects_login_and_state_line_by_line(monkeypatch):
     `prs_containing_commit`; поток объектов его не требует.
     """
     calls = _install_fake_run(
-        monkeypatch, returncode=0,
+        monkeypatch,
+        returncode=0,
         stdout='{"login":"ai-prosto","state":"APPROVED"}\n'
-               '{"login":"andrei-shtanakov","state":"COMMENTED"}\n',
+        '{"login":"andrei-shtanakov","state":"COMMENTED"}\n',
     )
     ops = RealOps()
 
@@ -1777,15 +1975,21 @@ def test_pr_reviews_projects_login_and_state_line_by_line(monkeypatch):
         {"login": "andrei-shtanakov", "state": "COMMENTED"},
     ]
     assert calls[0].argv == [
-        "gh", "api", f"repos/{REPO_SLUG}/pulls/408/reviews", "--paginate",
-        "--jq", ".[] | {login: .user.login, state: .state}",
+        "gh",
+        "api",
+        f"repos/{REPO_SLUG}/pulls/408/reviews",
+        "--paginate",
+        "--jq",
+        ".[] | {login: .user.login, state: .state}",
     ]
 
 
 @pytest.mark.parametrize(
     "kw",
-    [{"returncode": 1, "stderr": "rate limited"},
-     {"returncode": 0, "stdout": "not json\n"}],
+    [
+        {"returncode": 1, "stderr": "rate limited"},
+        {"returncode": 0, "stdout": "not json\n"},
+    ],
     ids=["request-failed", "broken-json"],
 )
 def test_pr_reviews_unknown_is_none_not_empty(kw, monkeypatch):
@@ -1809,7 +2013,14 @@ def test_close_pr_runs_under_review_profile_with_comment(monkeypatch):
 
     assert RealOps().close_pr(REPO_SLUG, 408, "причина") is True
     assert calls[0].argv == [
-        "gh", "pr", "close", "408", "-R", REPO_SLUG, "--comment", "причина",
+        "gh",
+        "pr",
+        "close",
+        "408",
+        "-R",
+        REPO_SLUG,
+        "--comment",
+        "причина",
     ]
     assert calls[0].kwargs["env"]["GH_CONFIG_DIR"] == str(
         Path.home() / ".config" / "review"
@@ -1828,7 +2039,10 @@ def test_delete_remote_branch_targets_refs_heads(monkeypatch):
 
     assert RealOps().delete_remote_branch(REPO_SLUG, "spec/x-tasks-v3") is True
     assert calls[0].argv == [
-        "gh", "api", "-X", "DELETE",
+        "gh",
+        "api",
+        "-X",
+        "DELETE",
         f"repos/{REPO_SLUG}/git/refs/heads/spec/x-tasks-v3",
     ]
     assert calls[0].kwargs["env"]["GH_CONFIG_DIR"] == str(
@@ -1860,7 +2074,12 @@ def test_delete_local_branch_force_deletes_in_the_clone(monkeypatch):
 
     assert RealOps().delete_local_branch("/tmp/clone", "spec/x-v3") is True
     assert calls[0].argv == [
-        "git", "-C", "/tmp/clone", "branch", "-D", "spec/x-v3",
+        "git",
+        "-C",
+        "/tmp/clone",
+        "branch",
+        "-D",
+        "spec/x-v3",
     ]
 
 
@@ -1871,9 +2090,9 @@ def test_delete_local_branch_missing_is_false_not_raise(monkeypatch):
 
 
 def test_remote_branch_head_fact_distinguishes_found_and_absent(monkeypatch):
-    found = json.dumps({
-        "data": {"repository": {"ref": {"target": {"oid": "deadbeef"}}}}
-    })
+    found = json.dumps(
+        {"data": {"repository": {"ref": {"target": {"oid": "deadbeef"}}}}}
+    )
     calls = _install_fake_run(monkeypatch, stdout=found)
 
     fact = RealOps().remote_branch_head_fact(REPO_SLUG, "spec/x-v3")
@@ -1943,7 +2162,12 @@ def test_local_branch_head_fact_distinguishes_all_outcomes(
     assert fact.outcome is outcome
     assert fact.value == value
     assert calls[0].argv == [
-        "git", "-C", "/tmp/clone", "rev-parse", "--verify", "--quiet",
+        "git",
+        "-C",
+        "/tmp/clone",
+        "rev-parse",
+        "--verify",
+        "--quiet",
         "refs/heads/spec/x-v3",
     ]
 
@@ -1952,12 +2176,23 @@ def test_local_branch_head_fact_distinguishes_all_outcomes(
 def _capture(monkeypatch, returncode=20, stdout=None):
     """Фейк subprocess.run для discovery CLI вызовов."""
     from types import SimpleNamespace
+
     seen: list[dict] = []
-    payload = stdout if stdout is not None else json.dumps({
-        "lifecycle": "awaiting_input", "gate": "unknown", "readiness": "unknown",
-        "next_action": {"session_id": "s-9", "question_id": "Q-01"},
-        "findings": [], "readiness_findings": [],
-        "operation": {"status": "ok", "reason": ""}})
+    payload = (
+        stdout
+        if stdout is not None
+        else json.dumps(
+            {
+                "lifecycle": "awaiting_input",
+                "gate": "unknown",
+                "readiness": "unknown",
+                "next_action": {"session_id": "s-9", "question_id": "Q-01"},
+                "findings": [],
+                "readiness_findings": [],
+                "operation": {"status": "ok", "reason": ""},
+            }
+        )
+    )
 
     def fake_run(argv, **kwargs):
         seen.append({"argv": list(argv), **kwargs})
@@ -1971,10 +2206,20 @@ def test_discovery_start_argv_and_boundary(monkeypatch, tmp_path):
     seen = _capture(monkeypatch)
     reply = RealOps().discovery_start("customer", "o/alpha", None, None, str(tmp_path))
     argv = seen[0]["argv"]
-    assert argv[:5] == ["uv", "run", "--frozen", "--project",
-                        str(ops_mod.DEVTOOLS_ROOT.parent / "discovery")]
+    assert argv[:5] == [
+        "uv",
+        "run",
+        "--frozen",
+        "--project",
+        str(ops_mod.DEVTOOLS_ROOT.parent / "discovery"),
+    ]
     assert argv[5:] == [
-        "discovery", "start", "--frame", "customer", "--target", "o/alpha",
+        "discovery",
+        "start",
+        "--frame",
+        "customer",
+        "--target",
+        "o/alpha",
     ]
     assert seen[0]["cwd"] == str(tmp_path)
     assert seen[0]["capture_output"] is True and seen[0]["text"] is True
@@ -1990,23 +2235,43 @@ def test_discovery_start_engineer_traces_to_argv(monkeypatch, tmp_path):
 def test_discovery_start_refuses_upstream_until_inbox(monkeypatch, tmp_path):
     seen = _capture(monkeypatch)
     reply = RealOps().discovery_start(
-        "engineer", "o/alpha", "customer.md",
-        str(tmp_path / "customer.md"), str(tmp_path),
+        "engineer",
+        "o/alpha",
+        "customer.md",
+        str(tmp_path / "customer.md"),
+        str(tmp_path),
     )
     assert seen == []  # сосед не вызван
     assert reply.code == 1 and "discovery#49" in reply.envelope["operation"]["reason"]
 
 
 def test_discovery_status_and_brief_argv(monkeypatch, tmp_path):
-    seen = _capture(monkeypatch, returncode=0, stdout=json.dumps({
-        "lifecycle": "complete", "gate": "pass", "readiness": "ready",
-        "next_action": {}, "findings": [], "readiness_findings": [],
-        "operation": {"status": "ok", "reason": ""}}))
+    seen = _capture(
+        monkeypatch,
+        returncode=0,
+        stdout=json.dumps(
+            {
+                "lifecycle": "complete",
+                "gate": "pass",
+                "readiness": "ready",
+                "next_action": {},
+                "findings": [],
+                "readiness_findings": [],
+                "operation": {"status": "ok", "reason": ""},
+            }
+        ),
+    )
     RealOps().discovery_status("s-9", str(tmp_path))
     RealOps().discovery_brief("s-9", str(tmp_path / "out.md"), str(tmp_path))
     assert seen[0]["argv"][5:] == ["discovery", "status", "--session", "s-9"]
-    assert seen[1]["argv"][5:] == ["discovery", "brief", "--session", "s-9",
-                                   "--out", str(tmp_path / "out.md")]
+    assert seen[1]["argv"][5:] == [
+        "discovery",
+        "brief",
+        "--session",
+        "s-9",
+        "--out",
+        str(tmp_path / "out.md"),
+    ]
 
 
 def test_discovery_reply_is_synthetic_on_bad_stdout(monkeypatch, tmp_path):
@@ -2020,10 +2285,19 @@ def test_discovery_reply_is_synthetic_on_bad_stdout(monkeypatch, tmp_path):
 
 
 def _closure_payload(nodes, state="CLOSED", closed_at="2026-09-23T09:44:23Z"):
-    return json.dumps({"data": {"repository": {"pullRequest": {
-        "state": state, "closedAt": closed_at,
-        "timelineItems": {"nodes": nodes},
-    }}}})
+    return json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "state": state,
+                        "closedAt": closed_at,
+                        "timelineItems": {"nodes": nodes},
+                    }
+                }
+            }
+        }
+    )
 
 
 def _event(kind, login, at):
@@ -2032,9 +2306,14 @@ def _event(kind, login, at):
 
 def test_pr_closure_is_one_graphql_query_with_three_item_types(monkeypatch):
     """Один запрос: timeline и `state` — из одного ответа (атомарность)."""
-    calls = _install_fake_run(monkeypatch, stdout=_closure_payload([
-        _event("ClosedEvent", "andrei-shtanakov", "2026-09-23T09:44:23Z"),
-    ]))
+    calls = _install_fake_run(
+        monkeypatch,
+        stdout=_closure_payload(
+            [
+                _event("ClosedEvent", "andrei-shtanakov", "2026-09-23T09:44:23Z"),
+            ]
+        ),
+    )
 
     RealOps().pr_closure(REPO_SLUG, 373)
 
@@ -2054,12 +2333,17 @@ def test_pr_closure_order_of_373_passes_the_branch_deletion_signal(
     monkeypatch,
 ):
     """Порядок #373: закрыл владелец, ветку удалил ПОЗЖЕ — не сигнал."""
-    _install_fake_run(monkeypatch, stdout=_closure_payload([
-        _event("ClosedEvent", "andrei-shtanakov", "2026-09-23T09:44:23Z"),
-        _event(
-            "HeadRefDeletedEvent", "andrei-shtanakov", "2026-09-23T10:46:55Z"
+    _install_fake_run(
+        monkeypatch,
+        stdout=_closure_payload(
+            [
+                _event("ClosedEvent", "andrei-shtanakov", "2026-09-23T09:44:23Z"),
+                _event(
+                    "HeadRefDeletedEvent", "andrei-shtanakov", "2026-09-23T10:46:55Z"
+                ),
+            ]
         ),
-    ]))
+    )
 
     assert RealOps().pr_closure(REPO_SLUG, 373) == {
         "state": "CLOSED",
@@ -2093,10 +2377,15 @@ def test_pr_closure_flags_closing_by_branch_deletion(nodes, monkeypatch):
 
 
 def test_pr_closure_deletion_by_another_actor_is_not_the_signal(monkeypatch):
-    _install_fake_run(monkeypatch, stdout=_closure_payload([
-        _event("HeadRefDeletedEvent", "bot", "2026-09-23T09:44:20Z"),
-        _event("ClosedEvent", "andrei-shtanakov", "2026-09-23T09:44:23Z"),
-    ]))
+    _install_fake_run(
+        monkeypatch,
+        stdout=_closure_payload(
+            [
+                _event("HeadRefDeletedEvent", "bot", "2026-09-23T09:44:20Z"),
+                _event("ClosedEvent", "andrei-shtanakov", "2026-09-23T09:44:23Z"),
+            ]
+        ),
+    )
 
     facts = RealOps().pr_closure(REPO_SLUG, 373)
 
@@ -2107,23 +2396,43 @@ def test_pr_closure_deletion_by_another_actor_is_not_the_signal(monkeypatch):
     "kw",
     [
         {"stdout": _closure_payload([])},
-        {"stdout": _closure_payload([
-            _event("ClosedEvent", "a", "2026-09-23T09:44:23Z"),
-            _event("ReopenedEvent", "a", "2026-09-23T09:50:00Z"),
-        ], state="OPEN")},
-        {"stdout": _closure_payload([
-            _event("HeadRefDeletedEvent", "a", "2026-09-23T09:44:23Z"),
-        ])},
-        {"stdout": _closure_payload([
-            {"__typename": "ClosedEvent", "actor": None,
-             "createdAt": "2026-09-23T09:44:23Z"},
-        ])},
+        {
+            "stdout": _closure_payload(
+                [
+                    _event("ClosedEvent", "a", "2026-09-23T09:44:23Z"),
+                    _event("ReopenedEvent", "a", "2026-09-23T09:50:00Z"),
+                ],
+                state="OPEN",
+            )
+        },
+        {
+            "stdout": _closure_payload(
+                [
+                    _event("HeadRefDeletedEvent", "a", "2026-09-23T09:44:23Z"),
+                ]
+            )
+        },
+        {
+            "stdout": _closure_payload(
+                [
+                    {
+                        "__typename": "ClosedEvent",
+                        "actor": None,
+                        "createdAt": "2026-09-23T09:44:23Z",
+                    },
+                ]
+            )
+        },
         {"returncode": 1, "stderr": "rate limited"},
         {"stdout": "not json"},
     ],
     ids=[
-        "empty", "last-is-reopened", "no-close-event", "actor-unknown",
-        "request-failed", "broken-json",
+        "empty",
+        "last-is-reopened",
+        "no-close-event",
+        "actor-unknown",
+        "request-failed",
+        "broken-json",
     ],
 )
 def test_pr_closure_unknown_or_reopened_is_none(kw, monkeypatch):
@@ -2154,9 +2463,7 @@ def test_agent_login_defaults_to_the_review_profile(monkeypatch):
     )
 
 
-def test_agent_login_without_profile_is_none_and_asks_nothing(
-    monkeypatch, tmp_path
-):
+def test_agent_login_without_profile_is_none_and_asks_nothing(monkeypatch, tmp_path):
     monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", str(tmp_path / "нет"))
     calls = _install_fake_run(monkeypatch, stdout="ai-prosto\n")
 
@@ -2206,22 +2513,47 @@ def test_logins_survive_missing_gh_binary(monkeypatch, tmp_path):
 # --- devtools#469 / дизайн песочницы §3: env авторского агента — allowlist ---
 
 _OPERATOR_ENV = {
-    "PATH": "/usr/bin", "HOME": "/h", "USER": "u", "LOGNAME": "u",
-    "SHELL": "/bin/zsh", "LANG": "C.UTF-8", "TERM": "xterm", "TMPDIR": "/t/",
-    "LC_ALL": "C.UTF-8", "XDG_STATE_HOME": "/h/.state",
+    "PATH": "/usr/bin",
+    "HOME": "/h",
+    "USER": "u",
+    "LOGNAME": "u",
+    "SHELL": "/bin/zsh",
+    "LANG": "C.UTF-8",
+    "TERM": "xterm",
+    "TMPDIR": "/t/",
+    "LC_ALL": "C.UTF-8",
+    "XDG_STATE_HOME": "/h/.state",
     "ANTHROPIC_API_KEY": "own-model-key",
     # чужая XDG_-переменная — префиксом не проходит (ревью #483)
     "XDG_SESSION_SECRET": "x",
     # то, что агенту попадать НЕ должно (F12 дизайна)
-    "GH_TOKEN": "x", "GITHUB_TOKEN": "x", "GH_CONFIG_DIR": "/h/.config/review",
-    "OPENAI_API_KEY": "x", "MS_CLIENT_SECRET": "x",
-    "SPEC_RUNNER_TELEGRAM_TOKEN": "x", "CLAUDECODE": "1",
-    "CLAUDE_CODE_MESSAGING_TOKEN": "x", "AUTHOR_HARNESS": "codex",
+    "GH_TOKEN": "x",
+    "GITHUB_TOKEN": "x",
+    "GH_CONFIG_DIR": "/h/.config/review",
+    "OPENAI_API_KEY": "x",
+    "MS_CLIENT_SECRET": "x",
+    "SPEC_RUNNER_TELEGRAM_TOKEN": "x",
+    "CLAUDECODE": "1",
+    "CLAUDE_CODE_MESSAGING_TOKEN": "x",
+    "AUTHOR_HARNESS": "codex",
 }
 _AGENT_ENV = {
-    k: v for k, v in _OPERATOR_ENV.items()
-    if k in {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM",
-             "TMPDIR", "LC_ALL", "XDG_STATE_HOME", "ANTHROPIC_API_KEY"}
+    k: v
+    for k, v in _OPERATOR_ENV.items()
+    if k
+    in {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "TERM",
+        "TMPDIR",
+        "LC_ALL",
+        "XDG_STATE_HOME",
+        "ANTHROPIC_API_KEY",
+    }
 }
 
 
@@ -2255,14 +2587,37 @@ def test_agent_env_names_are_pinned():
     """Перечень пинуется литералом (ревью #483): расширение allowlist'а —
     осознанная правка теста с обоснованием, а не тихое добавление."""
     assert ops_mod.AGENT_ENV_NAMES == {
-        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TMPDIR", "LANG",
-        "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
-        "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_MODEL", "MAX_THINKING_TOKENS", "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "AWS_REGION",
-        "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-        "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID", "HTTPS_PROXY",
-        "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TERM",
+        "TMPDIR",
+        "LANG",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_MODEL",
+        "MAX_THINKING_TOKENS",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "AWS_REGION",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "CLOUD_ML_REGION",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "SSL_CERT_FILE",
+        "NODE_EXTRA_CA_CERTS",
     }
     assert ops_mod.AGENT_ENV_PREFIXES == ("LC_",)
     assert "OPENAI_API_KEY" not in ops_mod.AGENT_ENV_NAMES
@@ -2290,6 +2645,7 @@ def test_commit_paths_ignored_file_with_glob_metachars(tmp_path):
 
 # --- дизайн песочницы §8 (S1): изоляция конфигурации claude на вызов ---
 
+
 def _claude_calls(monkeypatch, *, token="tok-from-keychain"):
     """Фейк subprocess.run, который во время вызова агента фиксирует
     settings.json изолированного каталога (после вызова его уже нет)."""
@@ -2298,11 +2654,15 @@ def _claude_calls(monkeypatch, *, token="tok-from-keychain"):
     def fake_run(argv, **kwargs):
         env = kwargs.get("env") or {}
         cfg = env.get("CLAUDE_CONFIG_DIR")
-        seen.append({
-            "argv": list(argv), "env": env,
-            "settings": (Path(cfg) / "settings.json").read_text()
-            if cfg and (Path(cfg) / "settings.json").is_file() else None,
-        })
+        seen.append(
+            {
+                "argv": list(argv),
+                "env": env,
+                "settings": (Path(cfg) / "settings.json").read_text()
+                if cfg and (Path(cfg) / "settings.json").is_file()
+                else None,
+            }
+        )
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
@@ -2310,9 +2670,7 @@ def _claude_calls(monkeypatch, *, token="tok-from-keychain"):
     return seen
 
 
-def test_claude_author_gets_isolated_config_and_keychain_token(
-    tmp_path, monkeypatch
-):
+def test_claude_author_gets_isolated_config_and_keychain_token(tmp_path, monkeypatch):
     """S1: без своего CLAUDE_CONFIG_DIR агент грузит плагины/хуки оператора
     и пишет состояние в ~/.claude. Каталог вызова — со своим settings.json,
     токен — из элемента связки, после вызова каталог удалён."""
@@ -2327,8 +2685,11 @@ def test_claude_author_gets_isolated_config_and_keychain_token(
     }
     assert cfg != Path.home() / ".claude"
     assert not cfg.exists()  # удалён в finally
-    rest = {k: v for k, v in env.items()
-            if k not in {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}}
+    rest = {
+        k: v
+        for k, v in env.items()
+        if k not in {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}
+    }
     assert rest == ops_mod.agent_env()  # остальное — прежний allowlist
 
 
@@ -2361,8 +2722,14 @@ def test_claude_author_without_keychain_token_refuses(tmp_path, monkeypatch, cap
 def test_disp_isolates_claude_config_when_any_role_is_claude(
     tmp_path, monkeypatch, author, review, isolated
 ):
-    _harness_file(tmp_path, monkeypatch, AUTHOR_HARNESS=author, AUTHOR_MODEL="m",
-                  REVIEW_HARNESS=review, REVIEW_MODEL="m")
+    _harness_file(
+        tmp_path,
+        monkeypatch,
+        AUTHOR_HARNESS=author,
+        AUTHOR_MODEL="m",
+        REVIEW_HARNESS=review,
+        REVIEW_MODEL="m",
+    )
     seen = _claude_calls(monkeypatch)
     RealOps().author_disp(str(tmp_path), "task", "/cfg.toml", "beh-x")
     assert ("CLAUDE_CONFIG_DIR" in seen[0]["env"]) is isolated
@@ -2373,9 +2740,7 @@ def test_disp_isolates_claude_config_when_any_role_is_claude(
     [(0, "tok\n", True), (44, "", False), (0, "  \n", False)],
     ids=["found", "missing-item", "empty-value"],
 )
-def test_author_claude_token_reads_the_named_keychain_item(
-    monkeypatch, rc, stdout, ok
-):
+def test_author_claude_token_reads_the_named_keychain_item(monkeypatch, rc, stdout, ok):
     """Сама функция чтения (автофикстура её подменяет): спрашивает именно
     элемент AUTHOR_CLAUDE_TOKEN_ITEM, отсутствие и пустое значение —
     AgentIsolationError, а не пустой токен в env агента."""
@@ -2387,8 +2752,11 @@ def test_author_claude_token_reads_the_named_keychain_item(
         with pytest.raises(ops_mod.AgentIsolationError):
             ops_mod._author_claude_token()
     assert calls[0].argv == [
-        "security", "find-generic-password", "-s",
-        ops_mod.AUTHOR_CLAUDE_TOKEN_ITEM, "-w",
+        "security",
+        "find-generic-password",
+        "-s",
+        ops_mod.AUTHOR_CLAUDE_TOKEN_ITEM,
+        "-w",
     ]
 
 
@@ -2403,6 +2771,9 @@ def test_claude_isolation_keeps_operator_secrets_out(monkeypatch):
     RealOps().author("/t", "requirements", "s", "ws/spec")
     env = seen[0]["env"]
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok-from-keychain"
-    rest = {k: v for k, v in env.items()
-            if k not in {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}}
+    rest = {
+        k: v
+        for k, v in env.items()
+        if k not in {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}
+    }
     assert rest == _AGENT_ENV

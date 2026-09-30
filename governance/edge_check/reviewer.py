@@ -82,14 +82,18 @@ def reviewer_argv(model: str, schema_path: Path, effort: str | None) -> list[str
         argv += ["--effort", effort]
     return [
         *argv,
-        "--json-schema", schema_text,
-        "--output-format", "json",
+        "--json-schema",
+        schema_text,
+        "--output-format",
+        "json",
         "--restricted",
         "--safe-mode",
         "--strict-mcp-config",
         "--no-session-persistence",
-        "--permission-prompts", "none",
-        "--tools", "",
+        "--permission-prompts",
+        "none",
+        "--tools",
+        "",
     ]
 
 

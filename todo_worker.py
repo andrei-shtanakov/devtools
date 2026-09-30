@@ -57,8 +57,13 @@ SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
-    "required": ["outcome", "summary", "next_step", "changed_files",
-                 "todo_line_update"],
+    "required": [
+        "outcome",
+        "summary",
+        "next_step",
+        "changed_files",
+        "todo_line_update",
+    ],
     "properties": {
         "outcome": {"enum": ["done", "blocked", "needs_human"]},
         "summary": {"type": "string"},
@@ -73,8 +78,9 @@ SCHEMA = {
 #: slash would write the result outside `out/`.
 _ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 
-_NO_PUBLISH = ("Do not commit, push, open a PR, or merge — none of those phases "
-               "exist here.")
+_NO_PUBLISH = (
+    "Do not commit, push, open a PR, or merge — none of those phases exist here."
+)
 
 _GIT_TIMEOUT = 20
 
@@ -100,7 +106,8 @@ def require_id(value: Any) -> str:
     if not isinstance(value, str) or _ID_RE.fullmatch(value) is None:
         raise WorkerError(
             f"недопустимый идентификатор {value!r}: грамматика "
-            f"[a-z0-9][a-z0-9._-]{{0,63}} (ADR-ECO-005 PF-2B)")
+            f"[a-z0-9][a-z0-9._-]{{0,63}} (ADR-ECO-005 PF-2B)"
+        )
     return value
 
 
@@ -118,7 +125,8 @@ def require_pack(pack: Any) -> dict[str, Any]:
     if missing:
         raise WorkerError(
             f"pack неполон, нет полей: {', '.join(missing)} — соберите его "
-            f"`todo_context.py --json`, а не вручную")
+            f"`todo_context.py --json`, а не вручную"
+        )
     # Presence was not enough: a hand-edited pack can carry the right keys with
     # the wrong types, and the traceback just moved one line down (ревью #126).
     wrong = []
@@ -154,7 +162,8 @@ def require_checkout(pack: dict[str, Any]) -> Path:
     if not raw:
         raise WorkerError(
             "в паке нет пути к чекауту целевого репо — запускать харнесс негде. "
-            "Пересоберите пак `todo_context.py --json` (поле `checkout`)")
+            "Пересоберите пак `todo_context.py --json` (поле `checkout`)"
+        )
     directory = Path(raw)
     if not (directory / ".git").exists():
         raise WorkerError(f"чекаут {directory} не похож на git-репо — не запускаю")
@@ -191,7 +200,8 @@ def refusal(pack: dict[str, Any]) -> str:
     if unknown:
         lines.append(
             f"Источники, которые НЕ прочитаны: {', '.join(unknown)} — их пустота "
-            f"не доказывает отсутствие требования. `--issues` спросит gh.")
+            f"не доказывает отсутствие требования. `--issues` спросит gh."
+        )
     lines.append("Запустите `--mode plan`, чтобы прочитать и предложить.")
     return "\n".join(lines)
 
@@ -210,7 +220,8 @@ def enforce_mode(result: dict[str, Any], execute: bool) -> dict[str, Any]:
     result["outcome"] = "needs_human"
     result["summary"] = (
         "[todo-worker] отчёт заявлял правки файлов в режиме plan, где харнесс "
-        "работал read-only — заявка снята. " + str(result.get("summary") or ""))
+        "работал read-only — заявка снята. " + str(result.get("summary") or "")
+    )
     return result
 
 
@@ -229,20 +240,27 @@ def render_rules(rules: list[dict[str, Any]]) -> str:
     for rule in rules:
         cut = " (обрезан)" if rule.get("truncated") else ""
         blocks.append(f"--- {rule.get('path')}{cut} ---\n{rule.get('text') or ''}")
-    return ("\n\nThe rules of the repository you are working in — its scope "
-            "fence, obey it:\n\n" + "\n\n".join(blocks))
+    return (
+        "\n\nThe rules of the repository you are working in — its scope "
+        "fence, obey it:\n\n" + "\n\n".join(blocks)
+    )
 
 
-def build_prompt(rendered_pack: str, execute: bool,
-                 rules: list[dict[str, Any]] | None = None) -> str:
+def build_prompt(
+    rendered_pack: str, execute: bool, rules: list[dict[str, Any]] | None = None
+) -> str:
     """The pack as the whole context, plus what this mode may do with it."""
     instructions = (
-        f"Implement the item in the current repository. Run the relevant tests. "
-        f"Update `TODO.md` only where its existing contract calls for it. "
-        f"{_NO_PUBLISH}"
-    ) if execute else (
-        "Read and analyze only. Do not edit files or execute mutating commands. "
-        "Propose what should be done and what stands in the way."
+        (
+            f"Implement the item in the current repository. Run the relevant tests. "
+            f"Update `TODO.md` only where its existing contract calls for it. "
+            f"{_NO_PUBLISH}"
+        )
+        if execute
+        else (
+            "Read and analyze only. Do not edit files or execute mutating commands. "
+            "Propose what should be done and what stands in the way."
+        )
     )
     return f"""You are the worker for one plan item of this fleet.
 
@@ -276,7 +294,9 @@ def load_pack(args: argparse.Namespace) -> dict[str, Any]:
         root,
         Path(args.manifest) if args.manifest else tc.default_manifest(root),
         Path(args.registry) if args.registry else tc.default_registry(root),
-        repo, item_id, owner=args.issues,
+        repo,
+        item_id,
+        owner=args.issues,
     )
 
 
@@ -289,25 +309,34 @@ def require_clean_tree(checkout: Path) -> None:
     фактура находок», ретроспектива 2026-09-02).
     """
     try:
-        done = subprocess.run(["git", "-C", str(checkout), "status", "--porcelain"],
-                              capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+        done = subprocess.run(
+            ["git", "-C", str(checkout), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT,
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         raise WorkerError(f"не удалось проверить дерево {checkout}: {exc}") from exc
     if done.returncode:
         raise WorkerError(
             f"git status в {checkout} не отработал: "
-            f"{(done.stderr.strip().splitlines() or ['?'])[-1]}")
+            f"{(done.stderr.strip().splitlines() or ['?'])[-1]}"
+        )
     dirty = done.stdout.strip()
     if dirty:
         lines = dirty.splitlines()
         listed = "\n".join(f"  {line}" for line in lines[:_DIRTY_SHOWN])
         # naming the cut is the same rule `todo_context` keeps for its own
         # capped output: a silent cut reads as a complete list (ревью PR #127)
-        rest = (f"\n  … ещё {len(lines) - _DIRTY_SHOWN} файлов"
-                if len(lines) > _DIRTY_SHOWN else "")
+        rest = (
+            f"\n  … ещё {len(lines) - _DIRTY_SHOWN} файлов"
+            if len(lines) > _DIRTY_SHOWN
+            else ""
+        )
         raise WorkerError(
             f"дерево {checkout} грязное — правки прогона было бы не отличить от "
-            f"ваших, а `changed_files` стал бы непроверяемым:\n{listed}{rest}")
+            f"ваших, а `changed_files` стал бы непроверяемым:\n{listed}{rest}"
+        )
 
 
 def run_harness(prompt: str, execute: bool, cwd: Path) -> dict[str, Any]:
@@ -317,9 +346,18 @@ def run_harness(prompt: str, execute: bool, cwd: Path) -> dict[str, Any]:
         schema = Path(tmp) / "schema.json"
         raw = Path(tmp) / "raw-result.json"
         schema.write_text(json.dumps(SCHEMA))
-        cmd = ["codex", "exec", "--ephemeral", "--output-schema", str(schema),
-               "--output-last-message", str(raw), "--sandbox",
-               "workspace-write" if execute else "read-only", prompt]
+        cmd = [
+            "codex",
+            "exec",
+            "--ephemeral",
+            "--output-schema",
+            str(schema),
+            "--output-last-message",
+            str(raw),
+            "--sandbox",
+            "workspace-write" if execute else "read-only",
+            prompt,
+        ]
         try:
             done = subprocess.run(cmd, cwd=cwd)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -333,7 +371,8 @@ def run_harness(prompt: str, execute: bool, cwd: Path) -> dict[str, Any]:
         if not isinstance(result, dict):
             raise HarnessError(
                 f"результат codex не объект, а {type(result).__name__} — "
-                f"структурированный ответ не получен")
+                f"структурированный ответ не получен"
+            )
         return result
 
 
@@ -347,18 +386,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--id", dest="item_id")
     parser.add_argument("--pack", help="готовый JSON-пак вместо сборки")
     parser.add_argument("--mode", choices=("plan", "execute"), default="plan")
-    parser.add_argument("--output-root", type=Path,
-                        default=Path(__file__).resolve().parent / "out",
-                        help="куда писать результат; не целевой репо")
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path(__file__).resolve().parent / "out",
+        help="куда писать результат; не целевой репо",
+    )
     parser.add_argument("--root", default=None, help="workspace root")
     parser.add_argument("--manifest", default=None)
     parser.add_argument("--registry", default=None, help="epics.toml")
-    parser.add_argument("--issues", nargs="?", const="", default=None,
-                        metavar="OWNER",
-                        help="спросить gh об исходном inbox-issue "
-                             "(owner по умолчанию — inbox.DEFAULT_OWNER)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="показать промпт и решение гейта, не звать харнесс")
+    parser.add_argument(
+        "--issues",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="OWNER",
+        help="спросить gh об исходном inbox-issue "
+        "(owner по умолчанию — inbox.DEFAULT_OWNER)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="показать промпт и решение гейта, не звать харнесс",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -378,9 +428,11 @@ def main(argv: list[str] | None = None) -> int:
         if execute:
             require_clean_tree(checkout)
         if args.dry_run:
-            print(f"=== dry-run: режим {args.mode}, sandbox "
-                  f"{'workspace-write' if execute else 'read-only'}, "
-                  f"cwd {checkout} ===")
+            print(
+                f"=== dry-run: режим {args.mode}, sandbox "
+                f"{'workspace-write' if execute else 'read-only'}, "
+                f"cwd {checkout} ==="
+            )
             print(prompt)
             return 0
         result = enforce_mode(run_harness(prompt, execute, checkout), execute)
@@ -393,8 +445,7 @@ def main(argv: list[str] | None = None) -> int:
 
     final = result_path(args.output_root, repo, item_id)
     final.parent.mkdir(parents=True, exist_ok=True)
-    final.write_text(json.dumps(result, ensure_ascii=False, indent=2),
-                     encoding="utf-8")
+    final.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nStructured result: {final}")
     return 0
 

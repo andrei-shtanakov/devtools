@@ -20,24 +20,23 @@ def test_identity_changes_when_items_are_reordered(tmp_path: Path) -> None:
     lines = src.splitlines(keepends=True)
 
     # Найти индекс начала блока R1 и R2
-    r1_idx = next(i for i, ln in enumerate(lines)
-                  if ln.strip().startswith("- id: R1"))
-    r2_idx = next(i for i, ln in enumerate(lines)
-                  if ln.strip().startswith("- id: R2"))
+    r1_idx = next(i for i, ln in enumerate(lines) if ln.strip().startswith("- id: R1"))
+    r2_idx = next(i for i, ln in enumerate(lines) if ln.strip().startswith("- id: R2"))
 
     # Найти конец блока R1 (строка перед R2, но без самой R2)
     r1_end = r2_idx
     # Найти конец блока R2 (первая строка на уровне секции, не пункта)
-    r2_end = next((i for i in range(r2_idx + 1, len(lines))
-                   if lines[i][0] not in (' ', '\t')),
-                  len(lines))
+    r2_end = next(
+        (i for i in range(r2_idx + 1, len(lines)) if lines[i][0] not in (" ", "\t")),
+        len(lines),
+    )
 
     # Извлечь блоки пунктов целиком
     block_r1 = lines[r1_idx:r1_end]
     block_r2 = lines[r2_idx:r2_end]
 
     # Поменять местами: R2 идёт на место R1, R1 идёт на место R2
-    new_lines = (lines[:r1_idx] + block_r2 + block_r1 + lines[r2_end:])
+    new_lines = lines[:r1_idx] + block_r2 + block_r1 + lines[r2_end:]
 
     (swapped_dir / "behaviour-vs-requirements.yaml").write_text(
         "".join(new_lines), encoding="utf-8"
@@ -177,5 +176,3 @@ def test_identity_changes_when_prompt_template_version_changes(
     monkeypatch.setattr(p, "PROMPT_TEMPLATE_VERSION", p.PROMPT_TEMPLATE_VERSION + 1)
     bumped = r.load_rules("behaviour-vs-requirements", CONTRACTS)
     assert baseline.identity != bumped.identity
-
-

@@ -22,8 +22,10 @@ def test_parse_two_criteria() -> None:
     assert findings == []
     assert [c.ac_id for c in crits] == ["AC-01", "AC-02"]
     assert crits[0] == AcCriterion(
-        ac_id="AC-01", title="Прогон первым действием",
-        verification="test", traces=("FR-01", "NFR-01"),
+        ac_id="AC-01",
+        title="Прогон первым действием",
+        verification="test",
+        traces=("FR-01", "NFR-01"),
         scenarios=("BEH-01",),
     )
     assert crits[1].scenarios == ()
@@ -43,27 +45,19 @@ def test_unknown_suffix_form_is_a_finding() -> None:
 
 
 def test_duplicate_ac_id_is_a_finding() -> None:
-    dup = AC_OK + (
-        "\n#### AC-01: Дубль · verification: manual\ntraces: [FR-01]\n"
-    )
+    dup = AC_OK + ("\n#### AC-01: Дубль · verification: manual\ntraces: [FR-01]\n")
     _crits, findings = parse_ac_criteria(dup)
     assert any("AC-01" in f and "раза" in f for f in findings)
 
 
 def test_test_verification_requires_scenarios() -> None:
-    bad = (
-        "#### AC-05: Тестовый без сценариев · verification: test\n"
-        "traces: [FR-01]\n"
-    )
+    bad = "#### AC-05: Тестовый без сценариев · verification: test\ntraces: [FR-01]\n"
     _crits, findings = parse_ac_criteria(bad)
     assert any("AC-05" in f and "scenarios" in f for f in findings)
 
 
 def test_empty_traces_is_a_finding() -> None:
-    bad = (
-        "#### AC-06: Без трасс · verification: manual\n"
-        "traces: []\n"
-    )
+    bad = "#### AC-06: Без трасс · verification: manual\ntraces: []\n"
     _crits, findings = parse_ac_criteria(bad)
     assert any("AC-06" in f and "traces" in f for f in findings)
 
@@ -89,6 +83,7 @@ BEH = "#### BEH-01: Один\nтекст\n\n#### BEH-02: Два\nтекст\n"
 
 def test_clean_coverage() -> None:
     from governance.acceptance_guard import coverage_findings
+
     acc = (
         "#### AC-01: Функция · verification: test\n"
         "traces: [FR-01]\nscenarios: [BEH-01]\nпроза\n\n"
@@ -100,6 +95,7 @@ def test_clean_coverage() -> None:
 
 def test_uncovered_must_fr_and_nfr_are_findings() -> None:
     from governance.acceptance_guard import coverage_findings
+
     acc = (
         "#### AC-01: Только FR · verification: test\n"
         "traces: [FR-01]\nscenarios: [BEH-01]\n"
@@ -111,6 +107,7 @@ def test_uncovered_must_fr_and_nfr_are_findings() -> None:
 
 def test_unknown_references_are_findings() -> None:
     from governance.acceptance_guard import coverage_findings
+
     acc = (
         "#### AC-01: Битые ссылки · verification: test\n"
         "traces: [FR-01, FR-99]\nscenarios: [BEH-01, BEH-99]\n"
@@ -122,12 +119,11 @@ def test_unknown_references_are_findings() -> None:
 
 def test_near_miss_requirement_priority_is_a_finding() -> None:
     from governance.acceptance_guard import coverage_findings
+
     req = "#### FR-01: Без приоритета\nпроза без строки Priority\n"
     acc = "#### AC-01: X · verification: manual\ntraces: [FR-01]\n"
     findings = coverage_findings(req, BEH, acc)
-    assert any(
-        "FR-01" in f and "недостоверн" in f for f in findings
-    )
+    assert any("FR-01" in f and "недостоверн" in f for f in findings)
 
 
 def test_out_of_vocabulary_priority_value_is_a_finding() -> None:
@@ -136,12 +132,11 @@ def test_out_of_vocabulary_priority_value_is_a_finding() -> None:
     промах грамматики становится находкой «недостоверн», а не тихим
     зелёным при непокрытом требовании."""
     from governance.acceptance_guard import coverage_findings
+
     req = "#### FR-01: Строчный приоритет\n**Priority**: must\nтекст\n"
     acc = "#### AC-01: X · verification: manual\ntraces: []\n"
     findings = coverage_findings(req, BEH, acc)
-    assert any(
-        "FR-01" in f and "недостоверн" in f for f in findings
-    )
+    assert any("FR-01" in f and "недостоверн" in f for f in findings)
     # Непокрытое FR-01 не должно тихо зеленеть: раз значение вне словаря,
     # оно не попадает в Must и не даёт "не покрыт" находку — единственная
     # находка про недостоверность входного множества.
@@ -150,13 +145,10 @@ def test_out_of_vocabulary_priority_value_is_a_finding() -> None:
 
 def test_empty_must_set_needs_declaration() -> None:
     from governance.acceptance_guard import coverage_findings
+
     req = "#### FR-01: Только Should\n**Priority**: Should\nтекст\n"
-    acc_without = (
-        "#### AC-01: X · verification: manual\ntraces: [FR-01]\n"
-    )
-    assert any(
-        "деклара" in f for f in coverage_findings(req, BEH, acc_without)
-    )
+    acc_without = "#### AC-01: X · verification: manual\ntraces: [FR-01]\n"
+    assert any("деклара" in f for f in coverage_findings(req, BEH, acc_without))
     acc_with = acc_without + "\nMust-требований во входном наборе нет\n"
     assert coverage_findings(req, BEH, acc_with) == []
 
@@ -167,6 +159,7 @@ def test_requirement_block_does_not_absorb_priority_past_section() -> None:
     границей секции (напр., шаблон-приложение). Зеркалит
     `test_block_ends_at_next_section` для parse_ac_criteria."""
     from governance.acceptance_guard import coverage_findings
+
     req = (
         "#### FR-01: Покрыто\n**Priority**: Must\nпроза\n\n"
         "#### NFR-01: Бюджет прогона\nпроза без строки Priority\n\n"
@@ -175,9 +168,7 @@ def test_requirement_block_does_not_absorb_priority_past_section() -> None:
     )
     acc = "#### AC-01: x · verification: manual\ntraces: [FR-01]\nпроза\n"
     findings = coverage_findings(req, BEH, acc)
-    assert any(
-        "NFR-01" in f and "недостоверн" in f for f in findings
-    )
+    assert any("NFR-01" in f and "недостоверн" in f for f in findings)
 
 
 def test_empty_must_declaration_prose_mention_is_not_the_declaration() -> None:
@@ -185,6 +176,7 @@ def test_empty_must_declaration_prose_mention_is_not_the_declaration() -> None:
     должно засчитываться как декларация — якорь по началу строки, не
     substring-проверка."""
     from governance.acceptance_guard import coverage_findings
+
     req = "#### FR-01: Только Should\n**Priority**: Should\nтекст\n"
     acc_prose = (
         "#### AC-01: X · verification: manual\ntraces: [FR-01]\n\n"
@@ -204,15 +196,14 @@ def test_duplicate_requirement_id_is_a_finding() -> None:
     """Дубль FR/NFR-id не должен молча выпадать из Must («последний
     выигрывает») — зеркалит дубль-находку AC-id (parse_ac_criteria)."""
     from governance.acceptance_guard import coverage_findings
+
     req = (
         "#### FR-05: Первое\n**Priority**: Must\nтекст\n\n"
         "#### FR-05: Дубль\n**Priority**: Should\nтекст\n"
     )
     acc = "#### AC-01: X · verification: manual\ntraces: []\n"
     findings = coverage_findings(req, BEH, acc)
-    assert any(
-        "FR-05" in f and "объявлен 2 раза" in f for f in findings
-    )
+    assert any("FR-05" in f and "объявлен 2 раза" in f for f in findings)
 
 
 def test_requirement_near_miss_at_other_heading_level_is_a_finding() -> None:
@@ -220,9 +211,8 @@ def test_requirement_near_miss_at_other_heading_level_is_a_finding() -> None:
     грамматики и молча сжимает Must — но должен быть виден NEAR-регексу
     как находка недостоверности, а не тихим зелёным."""
     from governance.acceptance_guard import coverage_findings
+
     req = "### NFR-02: Бюджет\n**Priority**: Must\nтекст\n"
     acc = "#### AC-01: X · verification: manual\ntraces: []\n"
     findings = coverage_findings(req, BEH, acc)
-    assert any(
-        "NFR-02" in f and "недостоверн" in f for f in findings
-    )
+    assert any("NFR-02" in f and "недостоверн" in f for f in findings)

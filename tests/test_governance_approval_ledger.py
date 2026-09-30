@@ -55,7 +55,8 @@ def _merge(state: rs.RunState, key: str, login: str = "andrei-shtanakov") -> Non
         key,
         MergeEvent(login, "2026-09-10T08:00:00Z", "commit-1"),
         Authorization(
-            login, "v1:deadbeef",
+            login,
+            "v1:deadbeef",
             "github:o/p@" + "a" * 40 + ":policy/approvers.env",
         ),
     )
@@ -248,9 +249,7 @@ def test_attempts_are_counted_per_step(state: rs.RunState) -> None:
 
 
 def _open_wave(state: rs.RunState, wave: int, *nodes: str) -> None:
-    al.open_wave_record(
-        state, wave, nodes, bd.composition_fingerprint(nodes)
-    )
+    al.open_wave_record(state, wave, nodes, bd.composition_fingerprint(nodes))
 
 
 def test_wave_outlives_the_death_of_all_its_requests(
@@ -391,13 +390,32 @@ def test_request_pins_policy_snapshot_write_ahead(state: rs.RunState) -> None:
     заявки (спека approval-policy §4.3); без аргумента — заявка старого
     формата (`None`), которую фаза 2 объявит invalidated (§4.6)."""
     key = al.start_request(
-        state, WS_ID, 1, 0, 1, ["charter"], {"charter": "h"}, {"charter": {}},
-        policy={"repo": "o/p", "ref": "main", "path": "policy/approvers.env",
-                "sha": "a" * 40, "fingerprint": "v1:x"},
+        state,
+        WS_ID,
+        1,
+        0,
+        1,
+        ["charter"],
+        {"charter": "h"},
+        {"charter": {}},
+        policy={
+            "repo": "o/p",
+            "ref": "main",
+            "path": "policy/approvers.env",
+            "sha": "a" * 40,
+            "fingerprint": "v1:x",
+        },
     )
     assert rs.load(state.run_id).ops[key]["policy"]["sha"] == "a" * 40
     legacy = al.start_request(
-        state, WS_ID, 1, 0, 2, ["charter"], {"charter": "h"}, {"charter": {}},
+        state,
+        WS_ID,
+        1,
+        0,
+        2,
+        ["charter"],
+        {"charter": "h"},
+        {"charter": {}},
     )
     assert rs.load(state.run_id).ops[legacy]["policy"] is None
 
@@ -406,11 +424,25 @@ def test_request_records_source_sha(state: rs.RunState) -> None:
     """Источник байтов узла заявки волны — коммит ветки волны (спека
     sequential-node-approval S2/S4); без аргумента — байты из base."""
     key = al.start_request(
-        state, WS_ID, 1, 0, 1, ["charter"], {"charter": "h"}, {"charter": {}},
+        state,
+        WS_ID,
+        1,
+        0,
+        1,
+        ["charter"],
+        {"charter": "h"},
+        {"charter": {}},
         source_sha="c" * 40,
     )
     assert rs.load(state.run_id).ops[key]["source_sha"] == "c" * 40
     plain = al.start_request(
-        state, WS_ID, 1, 0, 2, ["charter"], {"charter": "h"}, {"charter": {}},
+        state,
+        WS_ID,
+        1,
+        0,
+        2,
+        ["charter"],
+        {"charter": "h"},
+        {"charter": {}},
     )
     assert rs.load(state.run_id).ops[plain]["source_sha"] is None

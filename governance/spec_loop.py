@@ -93,9 +93,7 @@ _RUN_BODY_RE = re.compile(
 )
 #: Строка `run-id:` в теле candidate-PR волны (S2, m3): восстановление
 #: S13 находит прогон по ней.
-_WAVE_RUN_ID_RE = re.compile(
-    r"^run-id: (?P<run_id>[A-Za-z0-9][A-Za-z0-9._-]*)$", re.M
-)
+_WAVE_RUN_ID_RE = re.compile(r"^run-id: (?P<run_id>[A-Za-z0-9][A-Za-z0-9._-]*)$", re.M)
 
 
 def _wave_branch_grammar(ws_id: str | None, slug: str) -> tuple[str, re.Pattern]:
@@ -109,18 +107,20 @@ def _wave_branch_grammar(ws_id: str | None, slug: str) -> tuple[str, re.Pattern]
     """
     template = approval_branches.candidate_template()
     suffix = approval_branches.finalize_suffix()
-    ws_group = (
-        re.escape(ws_id) if ws_id is not None else rf"{re.escape(slug)}-\d{{8}}"
-    )
+    ws_group = re.escape(ws_id) if ws_id is not None else rf"{re.escape(slug)}-\d{{8}}"
     groups = {
         "ws_id": f"(?P<ws_id>{ws_group})",
         "wave": r"(?P<wave>\d+)",
         "step": r"(?P<step>\d+)",
         "attempt": r"(?P<attempt>\d+)",
     }
-    pattern = "^" + re.sub(
-        r"\\\{([A-Za-z_]+)\\\}", lambda m: groups[m.group(1)], re.escape(template)
-    ) + f"(?P<final>{re.escape(suffix)})?$"
+    pattern = (
+        "^"
+        + re.sub(
+            r"\\\{([A-Za-z_]+)\\\}", lambda m: groups[m.group(1)], re.escape(template)
+        )
+        + f"(?P<final>{re.escape(suffix)})?$"
+    )
     head, _wave_placeholder, _ = template.partition("{wave}")
     if ws_id is not None:
         prefix = head.format(ws_id=ws_id)
@@ -165,8 +165,7 @@ def slug_from_subject(subject: str) -> str:
     slug = slug[:_SLUG_MAX].rstrip("-")
     if not slug:
         raise SpecLoopError(
-            f"из subject {subject!r} не выводится ASCII-слаг — задайте "
-            "--ws-id явно"
+            f"из subject {subject!r} не выводится ASCII-слаг — задайте --ws-id явно"
         )
     return slug
 
@@ -278,9 +277,7 @@ def build_interview_spec(args, repo_slug: str) -> iv.InterviewSpec | None:
     if not args.need:
         if given:
             flags = [f"--{g.replace('_', '-')}" for g in given]
-            raise SpecLoopError(
-                f"флаги {flags} существуют только вместе с --need"
-            )
+            raise SpecLoopError(f"флаги {flags} существуют только вместе с --need")
         return None
     if args.brief:
         raise SpecLoopError("--need и --brief взаимоисключающи")
@@ -289,9 +286,7 @@ def build_interview_spec(args, repo_slug: str) -> iv.InterviewSpec | None:
     if not args.stakeholder:
         raise SpecLoopError(STAKEHOLDER_RULE)
     if args.new_run and (args.run_id or args.session):
-        raise SpecLoopError(
-            "--new-run взаимоисключающ с --run-id и --session"
-        )
+        raise SpecLoopError("--new-run взаимоисключающ с --run-id и --session")
     if args.new_run and not args.ws_id:
         raise SpecLoopError("--new-run требует --ws-id <fresh-id>")
     if args.frame == "customer":
@@ -317,9 +312,7 @@ def find_runs(repo: str, subject: str) -> list[rs.RunState]:
         try:
             state = rs.load(run_id)
         except Exception:
-            raw = (rs.run_dir(run_id) / "run.json").read_text(
-                encoding="utf-8"
-            )
+            raw = (rs.run_dir(run_id) / "run.json").read_text(encoding="utf-8")
             if not raw.strip():
                 # Пустой run.json — штатный труп runner'а (падение между
                 # _reserve_run_id и save; см. _next_verify_run_id) — не
@@ -351,17 +344,15 @@ def _bundle_dir_from_pr_files(files: list[str]) -> str:
     for raw in files:
         path = Path(raw)
         if path.name in _BUNDLE_FILENAMES and str(path.parent) not in (
-            "", ".",
+            "",
+            ".",
         ):
             by_parent.setdefault(str(path.parent), set()).add(path.name)
     complete = sorted(
-        parent for parent, names in by_parent.items()
-        if names == _BUNDLE_FILENAMES
+        parent for parent, names in by_parent.items() if names == _BUNDLE_FILENAMES
     )
     if len(complete) != 1:
-        detail = (
-            complete if complete else "нет полного шестиузлового каталога"
-        )
+        detail = complete if complete else "нет полного шестиузлового каталога"
         raise SpecLoopError(
             "bundle-dir не восстанавливается из файлов bundle-PR: "
             f"{detail!r}; нужен ровно один каталог с "
@@ -370,9 +361,7 @@ def _bundle_dir_from_pr_files(files: list[str]) -> str:
     return complete[0]
 
 
-def _remote_branch_pattern(
-    subject: str, ws_id: str | None
-) -> tuple[str, re.Pattern]:
+def _remote_branch_pattern(subject: str, ws_id: str | None) -> tuple[str, re.Pattern]:
     """Префикс запроса и точная грамматика bundle-ветки восстановления."""
     if ws_id is not None:
         try:
@@ -383,9 +372,7 @@ def _remote_branch_pattern(
         return branch, re.compile(rf"^{re.escape(branch)}$")
     slug = slug_from_subject(subject)
     prefix = f"spec/{slug}-"
-    return prefix, re.compile(
-        rf"^{re.escape(prefix)}(?P<started>\d{{8}})-behaviour$"
-    )
+    return prefix, re.compile(rf"^{re.escape(prefix)}(?P<started>\d{{8}})-behaviour$")
 
 
 def recover_wave_run_from_github(
@@ -420,9 +407,7 @@ def recover_wave_run_from_github(
             rs.validate_id_component(requested_ws_id, label="ws_id")
         except ValueError as exc:
             raise SpecLoopError(str(exc)) from exc
-    prefix, grammar = _wave_branch_grammar(
-        requested_ws_id, slug_from_subject(subject)
-    )
+    prefix, grammar = _wave_branch_grammar(requested_ws_id, slug_from_subject(subject))
     try:
         discovered = ops.prs_by_head_prefix(repo_slug, prefix)
     except RuntimeError as exc:
@@ -439,8 +424,12 @@ def recover_wave_run_from_github(
         if match is None:
             continue
         ws_id = match.group("ws_id")
-        key = (ws_id, int(match.group("wave")), int(match.group("step")),
-               int(match.group("attempt")))
+        key = (
+            ws_id,
+            int(match.group("wave")),
+            int(match.group("step")),
+            int(match.group("attempt")),
+        )
         kind = "final" if match.group("final") else "candidate"
         triples.setdefault(key, {"candidate": [], "final": []})[kind].append(item)
     if not triples:
@@ -458,9 +447,7 @@ def recover_wave_run_from_github(
             try:
                 facts_of[number] = ops.pr_facts(repo_slug, number)
             except Exception as exc:
-                raise SpecLoopError(
-                    f"факты PR #{number} недоступны: {exc}"
-                ) from exc
+                raise SpecLoopError(f"факты PR #{number} недоступны: {exc}") from exc
         return facts_of[number]
 
     merged: dict[tuple[str, int, int, int], tuple[dict, dict]] = {}
@@ -516,7 +503,9 @@ def recover_wave_run_from_github(
         if raw.strip():
             existing = rs.load(run_id)
             if (existing.repo, existing.subject, existing.ws_id) != (
-                repo, subject, ws_id,
+                repo,
+                subject,
+                ws_id,
             ):
                 raise SpecLoopError(
                     f"run-id {run_id!r} из candidate-PR занят другим локальным "
@@ -526,14 +515,19 @@ def recover_wave_run_from_github(
     last_cand, _ = merged[max(merged)]
     base_ref = _facts(last_cand["number"]).get("baseRefName")
     if not isinstance(base_ref, str) or not base_ref:
-        raise SpecLoopError(
-            f"candidate-PR #{last_cand['number']} не несёт baseRefName"
-        )
+        raise SpecLoopError(f"candidate-PR #{last_cand['number']} не несёт baseRefName")
     bundle_dir = requested_bundle_dir or f"workstreams/{ws_id}/spec"
     state = rs.new_run(
-        subject=subject, repo=repo, repo_slug=repo_slug, ws_id=ws_id,
-        target_dir=target_dir, bundle_dir=bundle_dir, profile=profile,
-        run_id=run_id, merge_authority="human", author_backend=author_backend,
+        subject=subject,
+        repo=repo,
+        repo_slug=repo_slug,
+        ws_id=ws_id,
+        target_dir=target_dir,
+        bundle_dir=bundle_dir,
+        profile=profile,
+        run_id=run_id,
+        merge_authority="human",
+        author_backend=author_backend,
         authoring="waves",
     )
     state.wave = last_step + 1
@@ -541,17 +535,27 @@ def recover_wave_run_from_github(
     for (_ws, wave, step, attempt), (cand, final) in merged.items():
         key = al.request_key(wave, step, attempt)
         state.ops[key] = {
-            "status": al.STATUS_COMPLETED, "wave": wave, "step": step,
-            "attempt": attempt, "nodes": [], "candidate_pr": cand["number"],
-            "finalize_pr": final["number"], "recovered": "github",
+            "status": al.STATUS_COMPLETED,
+            "wave": wave,
+            "step": step,
+            "attempt": attempt,
+            "nodes": [],
+            "candidate_pr": cand["number"],
+            "finalize_pr": final["number"],
+            "recovered": "github",
         }
         state.ops[f"candidate-{step + 1}"] = {
-            "status": "completed", "request": key, "candidate_pr": cand["number"],
+            "status": "completed",
+            "request": key,
+            "candidate_pr": cand["number"],
         }
     state.status = "waiting_human_merge"
     state.ops["ledger-recovery"] = {
-        "status": "completed", "source": "github", "kind": "waves",
-        "last_candidate_pr": last_cand["number"], "profile": profile,
+        "status": "completed",
+        "source": "github",
+        "kind": "waves",
+        "last_candidate_pr": last_cand["number"],
+        "profile": profile,
         "profile_source": "current-invocation-not-github",
     }
     rs.save(state)
@@ -607,9 +611,7 @@ def recover_run_from_github(
         head = item.get("head")
         branch = head.get("ref") if isinstance(head, dict) else None
         if not isinstance(branch, str):
-            raise SpecLoopError(
-                f"GitHub вернул PR без head.ref: {item!r}"
-            )
+            raise SpecLoopError(f"GitHub вернул PR без head.ref: {item!r}")
         match = pattern.fullmatch(branch)
         if match is None:
             continue
@@ -628,11 +630,10 @@ def recover_run_from_github(
             "задайте --ws-id"
             if requested_ws_id is None and len(distinct_ws_ids) > 1
             else "одна head-ветка соответствует нескольким PR; "
-                 "восстановите ledger вручную"
+            "восстановите ledger вручную"
         )
         raise SpecLoopError(
-            f"несколько bundle-PR подходят для восстановления: {rendered}; "
-            f"{hint}"
+            f"несколько bundle-PR подходят для восстановления: {rendered}; {hint}"
         )
 
     item, ws_id = candidates[0]
@@ -641,9 +642,7 @@ def recover_run_from_github(
     body = item.get("body")
     branch = item["head"]["ref"]
     if not isinstance(number, int):
-        raise SpecLoopError(
-            f"bundle-PR по ветке {branch!r} не несёт числовой number"
-        )
+        raise SpecLoopError(f"bundle-PR по ветке {branch!r} не несёт числовой number")
     expected_title = f"{subject} — behaviour bundle {ws_id}"
     if title != expected_title:
         raise SpecLoopError(
@@ -743,9 +742,11 @@ def _deliver_phase(state: rs.RunState, ops) -> int:
             print(_APPROVE_NODE_HINT.format(run_id=state.run_id))
         return 1
     print(f"tasks-спека доставлена: PR #{pr} ({state.repo_slug})")
-    print(_APPROVE_HINT.format(
-        run_id=state.run_id, approve=task_bridge.approve_command(state.ws_id)
-    ))
+    print(
+        _APPROVE_HINT.format(
+            run_id=state.run_id, approve=task_bridge.approve_command(state.ws_id)
+        )
+    )
     return 0
 
 
@@ -776,10 +777,7 @@ def _report_interview_stop(state: rs.RunState) -> int:
         return 1
     findings_path = rs.run_dir(state.run_id) / runner.INTERVIEW_FINDINGS
     if findings_path.exists():
-        print(
-            f"spec-loop: findings: {findings_path} — ответьте и "
-            "повторите команду"
-        )
+        print(f"spec-loop: findings: {findings_path} — ответьте и повторите команду")
         return 1
     print(
         "spec-loop: стоп стадии Need: см. причину выше; "
@@ -868,36 +866,34 @@ def main(argv: list[str] | None = None) -> int:
         "--brief", help="gate-passed discovery-brief для нового прогона"
     )
     parser.add_argument(
-        "--need", action="store_true",
-        help="стадия Need: интервью discovery из прогона (E2)"
+        "--need",
+        action="store_true",
+        help="стадия Need: интервью discovery из прогона (E2)",
     )
     parser.add_argument("--frame", choices=["customer", "engineer"])
     parser.add_argument(
         "--stakeholder", help="роль реального стейкхолдера (декларация)"
     )
+    parser.add_argument("--traces-to", help="approved customer-brief для engineer")
+    parser.add_argument("--session", help="recovery: присоединить сессию discovery")
     parser.add_argument(
-        "--traces-to", help="approved customer-brief для engineer"
-    )
-    parser.add_argument(
-        "--session", help="recovery: присоединить сессию discovery"
-    )
-    parser.add_argument(
-        "--new-run", action="store_true",
-        help="новый прогон при существующем (только до S1), требует --ws-id"
+        "--new-run",
+        action="store_true",
+        help="новый прогон при существующем (только до S1), требует --ws-id",
     )
     parser.add_argument("--profile", default="profiles/team-exp.yaml")
-    parser.add_argument(
-        "--author-backend", choices=["codex", "disp"], default="codex"
-    )
+    parser.add_argument("--author-backend", choices=["codex", "disp"], default="codex")
     parser.add_argument("--target-dir", help="override деривации из манифеста")
     parser.add_argument(
-        "--waves", action="store_true",
+        "--waves",
+        action="store_true",
         help="волновой авторинг — ДЕФОЛТ с 2026-09-23 (S13, две живых "
         "приёмки). Флаг принимается и дальше: он в доках, Makefile и "
         "операторских скриптах, и отказ по нему стоил бы больше, чем no-op",
     )
     parser.add_argument(
-        "--legacy", action="store_true",
+        "--legacy",
+        action="store_true",
         help="УДАЛЁН (S13, решение владельца 2026-09-23). Флаг принимается "
         "парсером и отказывает с причиной: оператор обязан прочитать "
         "«путь удалён», а не `unrecognized arguments`",
@@ -972,17 +968,15 @@ def main(argv: list[str] | None = None) -> int:
             # плодить рядом с ним второй workstream с тем же (repo,
             # subject) запрещено (ruling 4, controller Task 10).
             past_s1 = [
-                st for st in matches
+                st
+                for st in matches
                 if st.status not in ("waiting_interview", "stopped_interview")
             ]
             if past_s1:
                 raise SpecLoopError(
                     "--new-run запрещён: прогон(ы) с этими (repo, subject) "
                     "уже достигли S1: "
-                    + ", ".join(
-                        f"--run-id {st.run_id} [{st.status}]"
-                        for st in past_s1
-                    )
+                    + ", ".join(f"--run-id {st.run_id} [{st.status}]" for st in past_s1)
                 )
             for st in matches:
                 print(
@@ -998,10 +992,7 @@ def main(argv: list[str] | None = None) -> int:
                     "— выберите явно через --run-id:"
                 )
                 for st in matches:
-                    print(
-                        f"  --run-id {st.run_id}  [{st.status}] "
-                        f"ws={st.ws_id}"
-                    )
+                    print(f"  --run-id {st.run_id}  [{st.status}] ws={st.ws_id}")
                 return 1
             state = matches[0] if matches else None
 
@@ -1019,9 +1010,7 @@ def main(argv: list[str] | None = None) -> int:
             if state is not None
             else args.target_dir or str(WORKSPACE_ROOT / entry.repo)
         )
-        self_check_slug = (
-            state.repo_slug if state is not None else entry.repo_slug
-        )
+        self_check_slug = state.repo_slug if state is not None else entry.repo_slug
         origin_slug = repo_slug_from_url(_origin_url(target_dir))
         if origin_slug != self_check_slug:
             raise SpecLoopError(
@@ -1082,7 +1071,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             recorded = iv.InterviewSpec.from_state(state.interview)
             if (recorded.frame, recorded.stakeholder_role, recorded.traces_to) != (
-                interview_spec.frame, interview_spec.stakeholder_role,
+                interview_spec.frame,
+                interview_spec.stakeholder_role,
                 interview_spec.traces_to,
             ):
                 raise SpecLoopError(
@@ -1118,9 +1108,7 @@ def main(argv: list[str] | None = None) -> int:
                 "target-dir": state.target_dir,
                 "bundle-dir": state.bundle_dir,
                 "profile": state.profile,
-                "brief-frame": (
-                    state.brief.get("frame") if state.brief else "нет"
-                ),
+                "brief-frame": (state.brief.get("frame") if state.brief else "нет"),
                 "brief-source": (
                     state.brief.get("source_paths") if state.brief else "нет"
                 ),
@@ -1129,7 +1117,8 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "stakeholder": (
                     state.interview.get("stakeholder_role")
-                    if state.interview else "нет"
+                    if state.interview
+                    else "нет"
                 ),
                 "действие": f"продолжение ({state.status})",
             }
@@ -1163,19 +1152,13 @@ def main(argv: list[str] | None = None) -> int:
                 "target-dir": target_dir,
                 "bundle-dir": bundle_dir,
                 "profile": args.profile,
-                "brief-frame": (
-                    supplied_brief.frame if supplied_brief else "нет"
-                ),
+                "brief-frame": (supplied_brief.frame if supplied_brief else "нет"),
                 "brief-source": (
-                    list(supplied_brief.source_paths)
-                    if supplied_brief else "нет"
+                    list(supplied_brief.source_paths) if supplied_brief else "нет"
                 ),
-                "need-frame": (
-                    interview_spec.frame if interview_spec else "нет"
-                ),
+                "need-frame": (interview_spec.frame if interview_spec else "нет"),
                 "stakeholder": (
-                    interview_spec.stakeholder_role
-                    if interview_spec else "нет"
+                    interview_spec.stakeholder_role if interview_spec else "нет"
                 ),
                 "merge-authority": "human (жёстко, без override)",
                 "authoring": "legacy" if args.legacy else "waves",

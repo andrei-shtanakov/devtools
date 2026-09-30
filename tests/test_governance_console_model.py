@@ -27,9 +27,14 @@ def runs_root(tmp_path: Path, monkeypatch):
 
 def _mk(run_id: str, **overrides) -> rs.RunState:
     kwargs = dict(
-        subject="тест", repo="alpha", repo_slug="owner/alpha", ws_id="WS-T1",
-        target_dir="/tmp/alpha", bundle_dir="workstreams/WS-T1/spec",
-        profile="profiles/team-exp.yaml", run_id=run_id,
+        subject="тест",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-T1",
+        target_dir="/tmp/alpha",
+        bundle_dir="workstreams/WS-T1/spec",
+        profile="profiles/team-exp.yaml",
+        run_id=run_id,
     )
     kwargs.update(overrides)
     s = rs.new_run(**kwargs)
@@ -104,11 +109,24 @@ def test_run_detail_with_findings_and_verdict(runs_root) -> None:
     # порядок пайплайна сохранён
     keys = [k for k, _ in detail.ops]
     assert keys == [
-        "branch", "author-charter", "author-requirements", "author-behaviour",
-        "author-design", "author-acceptance", "author-decomposition",
-        "commit", "gate-candidate",
-        "push", "pr", "ready", "review", "verdict", "merge", "sync-default",
-        "gate-authoritative", "remediation-issue",
+        "branch",
+        "author-charter",
+        "author-requirements",
+        "author-behaviour",
+        "author-design",
+        "author-acceptance",
+        "author-decomposition",
+        "commit",
+        "gate-candidate",
+        "push",
+        "pr",
+        "ready",
+        "review",
+        "verdict",
+        "merge",
+        "sync-default",
+        "gate-authoritative",
+        "remediation-issue",
     ]
     assert "GC-1: bad" in detail.findings
     assert "GC-2: also bad" in detail.findings
@@ -200,10 +218,7 @@ def test_pipeline_keys_cover_every_author_step_in_order() -> None:
     # ошибочно вставленный ПОСЛЕ `commit` (порядок совпал бы по составу, но
     # консоль показывала бы «ещё авторится» уже после коммита) — последний
     # author-шаг обязан идти строго до `commit`.
-    assert (
-        cm.PIPELINE_KEYS.index(author_keys[-1])
-        < cm.PIPELINE_KEYS.index("commit")
-    )
+    assert cm.PIPELINE_KEYS.index(author_keys[-1]) < cm.PIPELINE_KEYS.index("commit")
 
 
 def test_step_stopped_author_on_author_design(runs_root) -> None:
@@ -245,9 +260,7 @@ def test_bundle_summary_on_fixtures(tmp_path: Path) -> None:
 def test_bundle_summary_nonexistent_path_is_error_not_exception(
     tmp_path: Path,
 ) -> None:
-    result = cm.bundle_summary(
-        str(tmp_path / "nope"), "profiles/missing.yaml", "spec"
-    )
+    result = cm.bundle_summary(str(tmp_path / "nope"), "profiles/missing.yaml", "spec")
     assert len(result) == 1
     node_id, status = result[0]
     assert node_id == "error"
@@ -279,13 +292,28 @@ def test_detail_to_json_roundtrips(runs_root) -> None:
 
 def test_wave_run_pipeline_keys_and_step(runs_root) -> None:
     s = rs.new_run(
-        subject="s", repo="alpha", repo_slug="o/alpha", ws_id="WS-W",
-        target_dir="/tmp/alpha", bundle_dir="spec",
-        profile="profiles/team-exp.yaml", run_id="r-waves", authoring="waves",
+        subject="s",
+        repo="alpha",
+        repo_slug="o/alpha",
+        ws_id="WS-W",
+        target_dir="/tmp/alpha",
+        bundle_dir="spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-waves",
+        authoring="waves",
     )
     s.wave = 2
-    for key in ("branch-1", "author-charter", "commit-1", "gate-candidate-1",
-                "edge-1", "push-1", "candidate-1", "finalize-1", "branch-2"):
+    for key in (
+        "branch-1",
+        "author-charter",
+        "commit-1",
+        "gate-candidate-1",
+        "edge-1",
+        "push-1",
+        "candidate-1",
+        "finalize-1",
+        "branch-2",
+    ):
         rs.op_start(s, key)
         rs.op_complete(s, key)
     s.ops["approve-1-1-1"] = {"status": "started", "candidate_pr": 640}
@@ -295,7 +323,12 @@ def test_wave_run_pipeline_keys_and_step(runs_root) -> None:
     assert keys[:4] == ("branch-1", "materialize-brief-1", "author-charter", "commit-1")
     assert "edge-1" in keys and "edge-2" in keys and "author-requirements" in keys
     assert keys.index("author-requirements") > keys.index("finalize-1")
-    assert keys[-4:] == ("merge", "sync-default", "gate-authoritative", "remediation-issue")
+    assert keys[-4:] == (
+        "merge",
+        "sync-default",
+        "gate-authoritative",
+        "remediation-issue",
+    )
     assert "pr" not in keys and "review" not in keys
     row = next(r for r in cm.list_runs() if r.run_id == "r-waves")
     assert row.step == "author-requirements" and row.wave == 2

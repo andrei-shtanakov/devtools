@@ -77,7 +77,10 @@ def test_multiple_blockers_on_one_item_all_survive() -> None:
         for d in _new()
         if d.source_repo == "proctor" and d.source_line == 5
     }
-    assert multi == {("done", "PF-BLOCKER-STALE"), ("missingslug", "PF-BLOCKER-DANGLING")}
+    assert multi == {
+        ("done", "PF-BLOCKER-STALE"),
+        ("missingslug", "PF-BLOCKER-DANGLING"),
+    }
 
 
 def test_canonical_maestro_proctor_edge_resolves_exactly_once() -> None:

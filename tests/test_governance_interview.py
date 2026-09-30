@@ -11,10 +11,17 @@ from governance import interview
 
 def _envelope(**over):
     base = {
-        "lifecycle": "awaiting_input", "gate": "unknown", "readiness": "unknown",
-        "next_action": {"session_id": "s-1", "question_id": "Q-01",
-                        "coverage_key": "goals", "question_text": "?"},
-        "findings": [], "readiness_findings": [],
+        "lifecycle": "awaiting_input",
+        "gate": "unknown",
+        "readiness": "unknown",
+        "next_action": {
+            "session_id": "s-1",
+            "question_id": "Q-01",
+            "coverage_key": "goals",
+            "question_text": "?",
+        },
+        "findings": [],
+        "readiness_findings": [],
         "operation": {"status": "ok", "reason": ""},
     }
     base.update(over)
@@ -66,19 +73,32 @@ def test_synthetic_envelope_has_protocol_shape() -> None:
 
 
 def _spec(**over):
-    base = dict(frame="customer", stakeholder_role="product owner",
-                target="owner/alpha", traces_to=None, upstream_blob=None)
+    base = dict(
+        frame="customer",
+        stakeholder_role="product owner",
+        target="owner/alpha",
+        traces_to=None,
+        upstream_blob=None,
+    )
     base.update(over)
     return interview.InterviewSpec(**base)
 
 
 def _brief(frame="customer", target="owner/alpha", roles=(), traces=()):
-    meta = {"interview": {"frame": frame,
-                          "sessions": [{"participant_role": r} for r in roles]},
-            "traces_to": list(traces), "status": "draft"}
+    meta = {
+        "interview": {
+            "frame": frame,
+            "sessions": [{"participant_role": r} for r in roles],
+        },
+        "traces_to": list(traces),
+        "status": "draft",
+    }
     return (
-        "---\n" + yaml.safe_dump(meta, allow_unicode=True) + "---\n\n"
-        + interview.h1_line(target, frame) + "\n\n## Goals\n"
+        "---\n"
+        + yaml.safe_dump(meta, allow_unicode=True)
+        + "---\n\n"
+        + interview.h1_line(target, frame)
+        + "\n\n## Goals\n"
     )
 
 
@@ -100,9 +120,12 @@ def test_attach_accepts_empty_or_exact_role_set() -> None:
     assert interview.attach_findings(_brief(roles=("product owner",)), spec) == []
     # тот же участник дважды в списке недопустим по построению рендера, но
     # множество ролей ⊆ {stakeholder} — критерий по контракту, не по рендеру
-    assert interview.attach_findings(
-        _brief(roles=("product owner", "product owner")), spec
-    ) == []
+    assert (
+        interview.attach_findings(
+            _brief(roles=("product owner", "product owner")), spec
+        )
+        == []
+    )
 
 
 def test_attach_rejects_foreign_or_extra_role() -> None:
@@ -129,12 +152,18 @@ def test_brief_coordinates_ignore_roles() -> None:
 
 def test_engineer_traces_must_equal_recorded_ref() -> None:
     spec = _spec(frame="engineer", traces_to="customer.md")
+    assert (
+        interview.brief_coordinate_findings(
+            _brief(frame="engineer", traces=("customer.md",)), spec
+        )
+        == []
+    )
     assert interview.brief_coordinate_findings(
-        _brief(frame="engineer", traces=("customer.md",)), spec) == []
+        _brief(frame="engineer", traces=("other.md",)), spec
+    )
     assert interview.brief_coordinate_findings(
-        _brief(frame="engineer", traces=("other.md",)), spec)
-    assert interview.brief_coordinate_findings(
-        _brief(frame="engineer", traces=()), spec)
+        _brief(frame="engineer", traces=()), spec
+    )
 
 
 def test_as_state_carries_pins_and_no_session() -> None:

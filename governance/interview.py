@@ -6,6 +6,7 @@
 synthetic envelope формы протокола. Это проверка согласованности границы,
 НЕ второй вычислитель `protocol.exit_code` соседа.
 """
+
 from __future__ import annotations
 
 import json
@@ -18,8 +19,13 @@ import yaml
 
 KNOWN_CODES: tuple[int, ...] = (0, 1, 2, 10, 11, 20)
 REQUIRED_FIELDS: tuple[str, ...] = (
-    "lifecycle", "gate", "readiness", "next_action",
-    "findings", "readiness_findings", "operation",
+    "lifecycle",
+    "gate",
+    "readiness",
+    "next_action",
+    "findings",
+    "readiness_findings",
+    "operation",
 )
 SYNTHETIC_REASON_PREFIX = "граница discovery:"
 
@@ -36,8 +42,12 @@ class DiscoveryReply:
 def synthetic_envelope(reason: str) -> dict:
     """Канонический envelope синтетического кода 1 (форма протокола)."""
     return {
-        "lifecycle": "unknown", "gate": "unknown", "readiness": "unknown",
-        "next_action": {}, "findings": [], "readiness_findings": [],
+        "lifecycle": "unknown",
+        "gate": "unknown",
+        "readiness": "unknown",
+        "next_action": {},
+        "findings": [],
+        "readiness_findings": [],
         "operation": {
             "status": "unknown",
             "reason": f"{SYNTHETIC_REASON_PREFIX} {reason}",
@@ -70,9 +80,7 @@ def parse_reply(returncode: int, stdout: str, stderr: str) -> DiscoveryReply:
         ):
             return DiscoveryReply(
                 1,
-                synthetic_envelope(
-                    "код 20 без next_action.session_id/question_id"
-                ),
+                synthetic_envelope("код 20 без next_action.session_id/question_id"),
                 stderr,
             )
     return DiscoveryReply(returncode, envelope, stderr)
@@ -108,8 +116,10 @@ class InterviewSpec:
     @classmethod
     def from_state(cls, st: dict) -> "InterviewSpec":
         return cls(
-            frame=st["frame"], stakeholder_role=st["stakeholder_role"],
-            target=st["target"], traces_to=st.get("traces_to"),
+            frame=st["frame"],
+            stakeholder_role=st["stakeholder_role"],
+            target=st["target"],
+            traces_to=st.get("traces_to"),
             upstream_blob=st.get("upstream_blob"),
         )
 
@@ -121,19 +131,37 @@ def h1_line(target: str, frame: str) -> str:
 
 def answer_command(session_id: str, role: str, answer_file: str = "answer.yaml") -> str:
     """Точная команда ответа стейкхолдера (D1); shell-safe."""
-    return " ".join([
-        "discovery", "answer", "--session", shlex.quote(session_id),
-        "--role", shlex.quote(role), "--file", shlex.quote(answer_file),
-    ])
+    return " ".join(
+        [
+            "discovery",
+            "answer",
+            "--session",
+            shlex.quote(session_id),
+            "--role",
+            shlex.quote(role),
+            "--file",
+            shlex.quote(answer_file),
+        ]
+    )
 
 
 def supersede_template(session_id: str, role: str) -> str:
     """Шаблон повторного ответа при 10/11: question_id подставляет человек."""
-    return " ".join([
-        "discovery", "answer", "--session", shlex.quote(session_id),
-        "--role", shlex.quote(role), "--question", "<QUESTION_ID>",
-        "--supersede", "--file", shlex.quote("answer.yaml"),
-    ])
+    return " ".join(
+        [
+            "discovery",
+            "answer",
+            "--session",
+            shlex.quote(session_id),
+            "--role",
+            shlex.quote(role),
+            "--question",
+            "<QUESTION_ID>",
+            "--supersede",
+            "--file",
+            shlex.quote("answer.yaml"),
+        ]
+    )
 
 
 def _parse_brief(text: str) -> tuple[dict, str | None]:
@@ -162,8 +190,11 @@ def brief_coordinate_findings(brief_text: str, spec: InterviewSpec) -> list[str]
     expected_h1 = h1_line(spec.target, spec.frame)
     if h1 != expected_h1:
         findings.append(f"H1 {h1!r} ≠ {expected_h1!r}")
-    frame = (meta.get("interview") or {}).get("frame") if isinstance(
-        meta.get("interview"), dict) else None
+    frame = (
+        (meta.get("interview") or {}).get("frame")
+        if isinstance(meta.get("interview"), dict)
+        else None
+    )
     if frame != spec.frame:
         findings.append(f"interview.frame {frame!r} ≠ {spec.frame!r}")
     paths = [t for t in _traces(meta) if _is_path_ref(t)]
@@ -179,9 +210,7 @@ def attach_findings(brief_text: str, spec: InterviewSpec) -> list[str]:
     findings = brief_coordinate_findings(brief_text, spec)
     meta, _ = _parse_brief(brief_text)
     sessions = (meta.get("interview") or {}).get("sessions") or []
-    roles = {
-        s.get("participant_role") for s in sessions if isinstance(s, dict)
-    }
+    roles = {s.get("participant_role") for s in sessions if isinstance(s, dict)}
     if not roles <= {spec.stakeholder_role}:
         findings.append(
             f"роли участников {sorted(r for r in roles if r)!r} ⊄ "

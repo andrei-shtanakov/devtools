@@ -55,7 +55,7 @@ def test_tools_section_is_walked(drift, tmp_path, monkeypatch, capsys) -> None:
     поломке обхода (ревью PR #139)."""
     manifest = tmp_path / "m.toml"
     manifest.write_text(
-        '''schema_version = "1"
+        """schema_version = "1"
 [tools.robin-toolkit]
 package_name = "robin-toolkit"
 repo_url = "git@github.com:o/robin-toolkit.git"
@@ -64,18 +64,29 @@ pyproject_path = "robin-toolkit/pyproject.toml"
 tag_pattern = "v*"
 install = "git-sha"
 publish = "none"
-''', encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
     _repo(tmp_path, "robin-toolkit")
     monkeypatch.setattr(
-        sys, "argv",
-        ["check-release-drift.py", "--workspace", str(tmp_path),
-         "--manifest", str(manifest), "--json"],
+        sys,
+        "argv",
+        [
+            "check-release-drift.py",
+            "--workspace",
+            str(tmp_path),
+            "--manifest",
+            str(manifest),
+            "--json",
+        ],
     )
     drift.main()
     import json as _json
+
     payload = _json.loads(capsys.readouterr().out)
-    kinds = {f["kind"] for f in payload["findings"]
-             if f["component"] == "robin-toolkit"}
+    kinds = {
+        f["kind"] for f in payload["findings"] if f["component"] == "robin-toolkit"
+    }
     assert kinds, f"секция [tools.*] не обойдена: {payload}"
     assert "irreproducible" in kinds, f"пин без sha не пойман: {kinds}"
 
@@ -85,8 +96,9 @@ def test_a_pin_without_sha_is_an_error(drift, tmp_path) -> None:
     у ядра."""
     _repo(tmp_path, "robin-toolkit")
     found = drift.check_component("robin-toolkit", _tool(sha=""), tmp_path)
-    assert any(x["kind"] == "irreproducible" and x["severity"] == "error"
-               for x in found), found
+    assert any(
+        x["kind"] == "irreproducible" and x["severity"] == "error" for x in found
+    ), found
 
 
 def test_apps_keep_the_warning_when_pyproject_disappears(drift, tmp_path) -> None:
@@ -116,7 +128,8 @@ def test_a_publishing_component_without_pyproject_still_warns(drift, tmp_path) -
     по-прежнему предупреждение, а не тишина."""
     _repo(tmp_path, "robin-toolkit")
     found = drift.check_component(
-        "core", _tool(publish="pypi", install="pypi"), tmp_path, "cores")
+        "core", _tool(publish="pypi", install="pypi"), tmp_path, "cores"
+    )
     vers = [x for x in found if x["kind"] == "no_pyproject_version"]
     assert vers and vers[0]["severity"] == "warn", vers
 
@@ -127,6 +140,7 @@ def test_a_publishing_tool_keeps_the_warning(drift, tmp_path) -> None:
     tools (ревью PR #139, круг 2)."""
     _repo(tmp_path, "robin-toolkit")
     found = drift.check_component(
-        "robin-toolkit", _tool(publish="pypi"), tmp_path, "tools")
+        "robin-toolkit", _tool(publish="pypi"), tmp_path, "tools"
+    )
     vers = [x for x in found if x["kind"] == "no_pyproject_version"]
     assert vers and vers[0]["severity"] == "warn", vers

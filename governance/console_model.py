@@ -43,7 +43,9 @@ PIPELINE_KEYS: tuple[str, ...] = (
 # есть (спека Task 3): gate-candidate пишет `gate-findings.txt`,
 # authoritative-гейт S8 — `s8-findings.txt`.
 _FINDINGS_FILES: tuple[str, ...] = (
-    "brief-findings.txt", "gate-findings.txt", "s8-findings.txt",
+    "brief-findings.txt",
+    "gate-findings.txt",
+    "s8-findings.txt",
 )
 
 # Ключи, которые наступают при обычном продвижении прогона до его конца.
@@ -68,7 +70,10 @@ _TERMINAL_STATUSES: tuple[str, ...] = ("completed", "merged_unverified")
 
 # Хвост пайплайна после авторинга/публикации — общий для обоих режимов.
 _TAIL_KEYS: tuple[str, ...] = (
-    "merge", "sync-default", "gate-authoritative", "remediation-issue",
+    "merge",
+    "sync-default",
+    "gate-authoritative",
+    "remediation-issue",
 )
 _AUTHOR_KEY_OF = {
     "charter": "author-charter",
@@ -94,12 +99,14 @@ def pipeline_keys(state: rs.RunState) -> tuple[str, ...]:
     keys: list[str] = []
     for wave in range(1, max(state.wave, 1) + 1):
         keys += [f"branch-{wave}", f"materialize-brief-{wave}"]
+        keys += [_AUTHOR_KEY_OF[node] for node in levels if levels[node] == wave - 1]
         keys += [
-            _AUTHOR_KEY_OF[node] for node in levels if levels[node] == wave - 1
-        ]
-        keys += [
-            f"commit-{wave}", f"gate-candidate-{wave}", f"edge-{wave}",
-            f"push-{wave}", f"candidate-{wave}", f"finalize-{wave}",
+            f"commit-{wave}",
+            f"gate-candidate-{wave}",
+            f"edge-{wave}",
+            f"push-{wave}",
+            f"candidate-{wave}",
+            f"finalize-{wave}",
         ]
     return tuple(keys) + _TAIL_KEYS
 
@@ -112,7 +119,8 @@ def required_step_keys(state: rs.RunState) -> tuple[str, ...]:
     conditional = {"remediation-issue"}
     if state.authoring == "waves":
         conditional |= {
-            key for key in pipeline_keys(state)
+            key
+            for key in pipeline_keys(state)
             if key.startswith(("push-", "finalize-"))
         }
     return tuple(k for k in pipeline_keys(state) if k not in conditional)
@@ -187,8 +195,13 @@ def _wave_pr(state: rs.RunState) -> int | None:
 
 def _corrupt_row(run_id: str) -> RunRow:
     return RunRow(
-        run_id=run_id, ws_id="", repo="", status="corrupt", step="—",
-        pr=None, remediated_by=None,
+        run_id=run_id,
+        ws_id="",
+        repo="",
+        status="corrupt",
+        step="—",
+        pr=None,
+        remediated_by=None,
     )
 
 
@@ -220,7 +233,8 @@ def run_detail(run_id: str) -> RunDetail:
     """Детальная карточка прогона: ops в порядке пайплайна, findings, verdict."""
     state = rs.load(run_id)
     visible_keys = tuple(
-        key for key in pipeline_keys(state)
+        key
+        for key in pipeline_keys(state)
         if not key.startswith("materialize-brief") or state.brief is not None
     )
     ops = tuple((key, _op_status_of(state.ops, key)) for key in visible_keys)

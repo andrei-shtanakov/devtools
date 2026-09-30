@@ -25,10 +25,7 @@ import yaml
 from governance.merge_gate import Authority, Safety
 
 CONTRACT_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "contracts"
-    / "steward-actor-policy"
-    / "v1"
+    Path(__file__).resolve().parent.parent / "contracts" / "steward-actor-policy" / "v1"
 )
 _HUMAN_LINE = re.compile(r"(?m)^\s*[-*]?\s*Мерж:\s*человек\b")
 
@@ -150,8 +147,7 @@ def profile_levels(artifacts: list[dict]) -> dict[str, int]:
         ready = [i for i in pending if all(u in lv for u in by_id[i])]
         if not ready:
             raise RuntimeError(
-                "профиль: цикл или неизвестный upstream среди "
-                f"{sorted(pending)}"
+                f"профиль: цикл или неизвестный upstream среди {sorted(pending)}"
             )
         for i in ready:
             lv[i] = 1 + max((lv[u] for u in by_id[i]), default=-1)
@@ -167,9 +163,7 @@ def _truncate_profile(source: bytes, level: int) -> bytes:
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True).encode("utf-8")
 
 
-def wave_profile_dir(
-    target_dir: str, profile: str, wave: int, run_dir: Path
-) -> Path:
+def wave_profile_dir(target_dir: str, profile: str, wave: int, run_dir: Path) -> Path:
     """Копия каталога профиля target'а, усечённая до волны `wave`.
 
     Компромисс S5: gate-check steward'а судит бандл по профилю, а у волны
@@ -235,9 +229,10 @@ def verify_wave_profile_dir(
             bad.append(name)
         elif name == profile_name:
             src = (Path(target_dir) / Path(profile).parent / name).read_bytes()
-            if (
-                hashlib.sha256(src).hexdigest() != digest
-                or copy.read_bytes() != _truncate_profile(src, level)
+            if hashlib.sha256(
+                src
+            ).hexdigest() != digest or copy.read_bytes() != _truncate_profile(
+                src, level
             ):
                 bad.append(name)
         elif hashlib.sha256(copy.read_bytes()).hexdigest() != digest:

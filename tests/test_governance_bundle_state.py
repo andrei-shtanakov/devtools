@@ -200,9 +200,7 @@ traces_to: []
 
     state = candidate_state(profile, bundle)
 
-    charter_state = next(
-        node for node in state.nodes if node.node_id == "charter"
-    )
+    charter_state = next(node for node in state.nodes if node.node_id == "charter")
     assert charter_state.status == "candidate_valid"
     assert not any("discovery-brief" in finding for finding in charter_state.findings)
 
@@ -331,16 +329,10 @@ def test_no_git_facts_are_used(tmp_path: Path, monkeypatch) -> None:
     def boom(*a, **k):  # noqa: ANN002, ANN003
         raise AssertionError("candidate_state не должен трогать git-facts")
 
-    monkeypatch.setattr(
-        "steward.gatecheck.git_facts.LiveGitFacts.__init__", boom
-    )
-    monkeypatch.setattr(
-        "steward.gatecheck.git_facts.InjectedGitFacts.__init__", boom
-    )
+    monkeypatch.setattr("steward.gatecheck.git_facts.LiveGitFacts.__init__", boom)
+    monkeypatch.setattr("steward.gatecheck.git_facts.InjectedGitFacts.__init__", boom)
     monkeypatch.setattr("steward.gatecheck.checks.run_checks", boom)
-    monkeypatch.setattr(
-        "governance.bundle_state.run_checks", boom, raising=False
-    )
+    monkeypatch.setattr("governance.bundle_state.run_checks", boom, raising=False)
     profile = make_profile(tmp_path)
     bundle = make_bundle(tmp_path, behaviour_ok=True)
     assert candidate_state(profile, bundle).error_count == 0

@@ -20,17 +20,13 @@ SCRIPT = Path(__file__).resolve().parents[1] / "clone_fleet.py"
 
 
 def _git(cwd: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(cwd), *args], check=True, capture_output=True
-    )
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
 
 
 def _make_remote(tmp: Path, name: str) -> Path:
     repo = tmp / "remotes" / name
     repo.mkdir(parents=True)
-    subprocess.run(
-        ["git", "init", "-q", "-b", "master", str(repo)], check=True
-    )
+    subprocess.run(["git", "init", "-q", "-b", "master", str(repo)], check=True)
     _git(repo, "config", "user.email", "fixture@test")
     _git(repo, "config", "user.name", "fixture")
     (repo / "TODO.md").write_text(f"- [ ] item @owner:github:x @id:{name}-item\n")
@@ -47,9 +43,17 @@ def _manifest(tmp: Path, body: str) -> Path:
 
 def _run(manifest: Path, root: Path, *extra: str) -> tuple[int, str]:
     proc = subprocess.run(
-        [sys.executable, str(SCRIPT), "--manifest", str(manifest),
-         "--root", str(root), *extra],
-        capture_output=True, text=True,
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--manifest",
+            str(manifest),
+            "--root",
+            str(root),
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
     )
     return proc.returncode, proc.stdout + proc.stderr
 
@@ -57,12 +61,15 @@ def _run(manifest: Path, root: Path, *extra: str) -> tuple[int, str]:
 def test_clones_manifest_set_with_git_dir_dedup(tmp_path):
     alpha = _make_remote(tmp_path, "alpha")
     beta = _make_remote(tmp_path, "beta")
-    manifest = _manifest(tmp_path, (
-        f'[cores.alpha]\nrepo_url = "{alpha}"\ngit_dir = "alpha"\n'
-        # member делит git_dir с alpha — клонится ровно один раз
-        f'[cores.alpha-sdk]\nrepo_url = "{alpha}"\ngit_dir = "alpha"\n'
-        f'[apps.beta]\nrepo_url = "{beta}"\ngit_dir = "beta"\n'
-    ))
+    manifest = _manifest(
+        tmp_path,
+        (
+            f'[cores.alpha]\nrepo_url = "{alpha}"\ngit_dir = "alpha"\n'
+            # member делит git_dir с alpha — клонится ровно один раз
+            f'[cores.alpha-sdk]\nrepo_url = "{alpha}"\ngit_dir = "alpha"\n'
+            f'[apps.beta]\nrepo_url = "{beta}"\ngit_dir = "beta"\n'
+        ),
+    )
     root = tmp_path / "ws"
     code, out = _run(manifest, root)
     assert code == 0, out
@@ -88,11 +95,14 @@ def test_existing_checkout_is_skipped_not_overwritten(tmp_path):
 
 def test_unreachable_remote_fails_loud_after_trying_all(tmp_path):
     beta = _make_remote(tmp_path, "beta")
-    manifest = _manifest(tmp_path, (
-        f'[cores.ghost]\nrepo_url = "{tmp_path / "remotes" / "ghost"}"\n'
-        'git_dir = "ghost"\n'
-        f'[apps.beta]\nrepo_url = "{beta}"\ngit_dir = "beta"\n'
-    ))
+    manifest = _manifest(
+        tmp_path,
+        (
+            f'[cores.ghost]\nrepo_url = "{tmp_path / "remotes" / "ghost"}"\n'
+            'git_dir = "ghost"\n'
+            f'[apps.beta]\nrepo_url = "{beta}"\ngit_dir = "beta"\n'
+        ),
+    )
     root = tmp_path / "ws"
     code, out = _run(manifest, root)
     assert code == 3, out

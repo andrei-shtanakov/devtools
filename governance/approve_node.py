@@ -189,13 +189,10 @@ def _base_text(ops: Ops, state: RunState, fname: str) -> str:
 
 def _source_text(ops: Ops, state: RunState, source_sha: str, fname: str) -> str:
     """Байты файла бандла в коммите ветки волны `source_sha` (S2)."""
-    fact = af.read_blob_text(
-        ops, state.target_dir, source_sha, _rel(state, fname)
-    )
+    fact = af.read_blob_text(ops, state.target_dir, source_sha, _rel(state, fname))
     if fact.outcome is not Outcome.FOUND or fact.value is None:
         raise _unresolved(
-            f"байты {fname} в коммите ветки волны {source_sha[:8]} — "
-            f"{fact.detail}"
+            f"байты {fname} в коммите ветки волны {source_sha[:8]} — {fact.detail}"
         )
     return fact.value
 
@@ -275,7 +272,11 @@ def _source_upstream_blobs(
     if _upstreams(dag, node):
         return _base_upstream_blobs(ops, state, dag, node)
     return _upstream_blobs_at(
-        ops, state, dag, node, source_sha,
+        ops,
+        state,
+        dag,
+        node,
+        source_sha,
         f"коммите ветки волны {source_sha[:8]}",
     )
 
@@ -379,9 +380,7 @@ def _propose(
         # candidate-PR, ни инкремента `version` — иначе сменился бы блоб
         # узла, его downstream уехал бы в `stale`, и каждый лишний вызов
         # плодил бы долг одобрения на ровном месте.
-        return ApprovalOutcome(
-            f"{node_id}: честно одобрен — одобрять нечего (no-op)"
-        )
+        return ApprovalOutcome(f"{node_id}: честно одобрен — одобрять нечего (no-op)")
     if debt.kind in (na.DEBT_PINS, na.DEBT_UNKNOWN_STATUS):
         # Пункт 6: молчаливая перепиновка здесь означала бы ровно то
         # действие, которым spec-runner#410 сделал ложное утверждение
@@ -520,9 +519,7 @@ def read_dag_state(
             return DagState(None, unresolved=fact.detail)
         texts[bundle_dag.node_id(fname)] = fact.value
     debts: list[na.NodeDebt] = []
-    known_texts = {
-        _filename(dag, node): text for node, text in texts.items()
-    }
+    known_texts = {_filename(dag, node): text for node, text in texts.items()}
     for fname, _ups in dag:
         node = bundle_dag.node_id(fname)
         inputs = bundle_inputs.direct_blobs(
@@ -548,9 +545,7 @@ def read_dag_state(
     if debts:
         return DagState(None, debts=tuple(debts))
     nodes = bundle_dag.composition(dag)
-    return DagState(
-        ApprovedDag(nodes, bundle_dag.composition_fingerprint(nodes))
-    )
+    return DagState(ApprovedDag(nodes, bundle_dag.composition_fingerprint(nodes)))
 
 
 def _intent_of(record: dict, wave: int) -> tuple[list[str], str]:
@@ -776,10 +771,9 @@ def _same_live_request(
 ) -> str | None:
     """Ключ живой заявки РОВНО над `node_ids` из `source_sha`, если есть."""
     for nums, op in al.live_requests(state):
-        if (
-            op.get("source_sha") == source_sha
-            and sorted(op.get("nodes") or ()) == sorted(node_ids)
-        ):
+        if op.get("source_sha") == source_sha and sorted(
+            op.get("nodes") or ()
+        ) == sorted(node_ids):
             return al.request_key(*nums)
     return None
 
@@ -816,9 +810,7 @@ def _close_obsolete_wave(
     )
 
 
-def _wave_for(
-    state: RunState, nodes: tuple[str, ...], fingerprint: str
-) -> int:
+def _wave_for(state: RunState, nodes: tuple[str, ...], fingerprint: str) -> int:
     """Волна для этого вызова: продолжить открытую либо начать проход.
 
     Ничего не закрывает — только выбирает. Открытость читается по ЗАПИСИ
@@ -853,7 +845,7 @@ def _join_target(
         return None
     _, recorded = _intent_of(al.wave_records(state)[wave], wave)
     if recorded != fingerprint:
-        return None          # `_close_obsolete_wave` закроет её как obsolete
+        return None  # `_close_obsolete_wave` закроет её как obsolete
     joined = al.live_request_for_step(state, wave, step)
     if joined is None or not _still_accumulating(state, ops, joined[1]):
         return None
@@ -983,9 +975,7 @@ def _require_upstream_ready(
         )
 
 
-def _require_no_reopened_pr(
-    state: RunState, ops: Ops, node_id: str
-) -> None:
+def _require_no_reopened_pr(state: RunState, ops: Ops, node_id: str) -> None:
     """PR терминализированной заявки над этим узлом не переоткрыт (§I12).
 
     Терминальная запись говорит одно, форджа другое, и разрешать это
@@ -1051,9 +1041,7 @@ def _invalidate_downstream(
         key = al.request_key(*nums)
         if key == by_key:
             continue
-        doomed_now = al.is_live(op) and bool(
-            set(op.get("nodes") or ()) & closure
-        )
+        doomed_now = al.is_live(op) and bool(set(op.get("nodes") or ()) & closure)
         already_ours = op.get("invalidated_by") == by_key
         if not doomed_now and not already_ours:
             continue
@@ -1075,9 +1063,7 @@ def _invalidate_downstream(
                 ops.delete_remote_branch(state.repo_slug, branch)
 
 
-def _close_if_open(
-    state: RunState, ops: Ops, pr: int, key: str, reason: str
-) -> None:
+def _close_if_open(state: RunState, ops: Ops, pr: int, key: str, reason: str) -> None:
     """Закрыть PR снятой заявки, если он открыт; иначе — ничего.
 
     Состояние спрашивается ПЕРВЫМ, и это не оптимизация: `close_pr` по уже
@@ -1108,8 +1094,7 @@ def _close_if_open(
         ops,
         state.repo_slug,
         pr,
-        f"Предложение снято (§I12). Причина из журнала заявки {key}: "
-        f"{reason}",
+        f"Предложение снято (§I12). Причина из журнала заявки {key}: {reason}",
     )
     if not closed.established:
         raise _unresolved(
@@ -1472,8 +1457,7 @@ def _publish_candidate(
             ops,
             op["branch"],
             op["head_sha"],
-            f"spec: {state.ws_id} — одобрение узлов "
-            f"{', '.join(op['nodes'])} (§I12)",
+            f"spec: {state.ws_id} — одобрение узлов {', '.join(op['nodes'])} (§I12)",
             _candidate_body(state, op, debt),
         )
         al.record_candidate_pr(state, key, pr)
@@ -1695,9 +1679,7 @@ def _settle_requests_outside_dag(
     known = {bundle_dag.node_id(fname) for fname, _ in dag}
     for nums, op in al.requests(state):
         key = al.request_key(*nums)
-        missing = [
-            node for node in (op.get("nodes") or ()) if node not in known
-        ]
+        missing = [node for node in (op.get("nodes") or ()) if node not in known]
         doomed_now = al.is_live(op) and bool(missing)
         already_ours = op.get("invalidated_by") == _OUTSIDE_DAG
         if not doomed_now and not already_ours:
@@ -1781,7 +1763,6 @@ def _close_buried_proposals(state: RunState, ops: Ops, key: str) -> None:
             _close_if_open(state, ops, pr, key, reason)
 
 
-
 def _reconcile_candidate(
     state: RunState,
     ops: Ops,
@@ -1807,9 +1788,7 @@ def _reconcile_candidate(
     # «коммит наш», а не «всё вынесенное опубликовано», и узел, дошедший
     # до снимка, но не до коммита, при сверке по голове остался бы вне PR
     # навсегда.
-    published = _snapshot_is_published(
-        state, ops, dag, op, facts.get("headRefOid")
-    )
+    published = _snapshot_is_published(state, ops, dag, op, facts.get("headRefOid"))
     if published is None:
         raise _unresolved(
             f"состав предложения в голове PR #{pr} — объект недоступен "
@@ -1879,7 +1858,8 @@ def _reconcile_candidate(
     pinned = op.get("policy")
     if not pinned:
         al.invalidate_request(
-            state, key,
+            state,
+            key,
             "заявка не закрепила версию политики (старый формат, §4.6)",
         )
         raise RuntimeError(
@@ -1927,9 +1907,7 @@ def _reconcile_candidate(
     return _finalize(state, ops, dag, state.ops[key], key, facts)
 
 
-def _record_finalize_identity(
-    state: RunState, ops: Ops, key: str, pr: int
-) -> None:
+def _record_finalize_identity(state: RunState, ops: Ops, key: str, pr: int) -> None:
     """SHA мержа finalize у форджи — в заявку, ДО её завершения (#392).
 
     Источник тот же, что у candidate (`af.merge_event`, fail-closed на
@@ -1942,15 +1920,11 @@ def _record_finalize_identity(
     """
     fact = af.merge_event(_pr_facts(state, ops, pr))
     if fact.outcome is not Outcome.FOUND or fact.value is None:
-        raise _unresolved(
-            f"SHA мержа finalize-PR #{pr} — {fact.detail}"
-        )
+        raise _unresolved(f"SHA мержа finalize-PR #{pr} — {fact.detail}")
     al.record_finalize_merge_commit(state, key, fact.value.commit)
 
 
-def _ensure_finalize_identity(
-    state: RunState, ops: Ops, key: str, op: dict
-) -> None:
+def _ensure_finalize_identity(state: RunState, ops: Ops, key: str, op: dict) -> None:
     """Идентичность результата ПЕРЕД завершением заявки — на ЛЮБОМ пути.
 
     Ревью #393 (блокирующее): путь «конверт уже в base» завершал заявку
@@ -2102,9 +2076,7 @@ def _finalize(
     хуже: оно ничего не доказывает и стоит запроса.
     """
     pr = op["candidate_pr"]
-    event = af.merge_event(
-        facts if facts is not None else _pr_facts(state, ops, pr)
-    )
+    event = af.merge_event(facts if facts is not None else _pr_facts(state, ops, pr))
     if event.outcome is not Outcome.FOUND:
         raise _unresolved(f"акт мержа candidate-PR #{pr} — {event.detail}")
     merged = event.value
@@ -2143,9 +2115,7 @@ def _finalize(
             f"заявка {key} не несёт целого решения об авторизации своего "
             "мержа — invalidated; восстановление: новый candidate"
         )
-    in_base = ops.is_ancestor(
-        state.target_dir, op["merge_commit"], _base_ref(state)
-    )
+    in_base = ops.is_ancestor(state.target_dir, op["merge_commit"], _base_ref(state))
     if in_base is None:
         raise _unresolved(
             f"есть ли merge-коммит {op['merge_commit'][:8]} в истории "
@@ -2307,15 +2277,11 @@ def _publish_envelope(
         )
         head = ops.rev_parse(state.target_dir, "HEAD")
         if head is None:
-            raise RuntimeError(
-                "коммит конверта не состоялся: HEAD не разрешается"
-            )
+            raise RuntimeError("коммит конверта не состоялся: HEAD не разрешается")
         al.record_finalize_head_sha(state, key, head)
     else:
         _switch_to_request_branch(state, ops, branch, head)
-        changed = [
-            _rel(state, _filename(dag, node)) for node in nodes
-        ]
+        changed = [_rel(state, _filename(dag, node)) for node in nodes]
     ops.push_branch(state.target_dir, branch)
     # ADR-ECO-011 D5: финализирующий PR подписи не создаёт — по умолчанию
     # его мержит агент в этом же вызове; лейбл «человеку» — только по
@@ -2327,8 +2293,7 @@ def _publish_envelope(
         ops,
         branch,
         finalize_head,
-        f"spec: {state.ws_id} — подпись узлов {', '.join(nodes)} (§I12, "
-        "конверт)",
+        f"spec: {state.ws_id} — подпись узлов {', '.join(nodes)} (§I12, конверт)",
         _finalize_body(state, state.ops[key], nodes),
         HUMAN_MERGE_LABEL if who == "human" else "",
     )
@@ -2340,9 +2305,7 @@ def _publish_envelope(
         # путём не мержится вовсе: для accept-pr/S7 она обычный PR с ревью.
         # Отказ — не ошибка: PR остаётся человеку, заявка жива, следующий
         # вызов пробует агентский мерж снова.
-        reason = _try_agent_merge(
-            state, ops, dag, op, nodes, pr, finalize_head
-        )
+        reason = _try_agent_merge(state, ops, dag, op, nodes, pr, finalize_head)
         if reason is None:
             return _reconcile_finalize(state, ops, dag, state.ops[key], key)
         tail = (
@@ -2416,9 +2379,7 @@ class MergeRefusal:
     human_merge_helps: bool
 
 
-def _missing_approving_review(
-    state: RunState, ops: Ops, pr: int
-) -> str | None:
+def _missing_approving_review(state: RunState, ops: Ops, pr: int) -> str | None:
     """Есть ли у finalize-PR действующее одобряющее ревью? None — есть.
 
     Правило репозитория требует одного одобряющего ревью, а автор PR —

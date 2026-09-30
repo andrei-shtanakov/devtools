@@ -34,6 +34,11 @@ def test_team_exp_profile_loads_via_real_steward_and_orders_nodes():
     roles = load_roles_catalog(profile.parent / "roles.yaml")
     graph = load_profile(profile, roles)
     assert graph.topo_order() == [
-        "charter", "requirements", "behaviour-spec", "design",
-        "acceptance", "decomposition", "tasks",
+        "charter",
+        "requirements",
+        "behaviour-spec",
+        "design",
+        "acceptance",
+        "decomposition",
+        "tasks",
     ]

@@ -82,9 +82,7 @@ def test_acceptance_not_accepted(tmp_path: Path) -> None:
 
 def test_acceptance_unverifiable_without_slug(tmp_path: Path) -> None:
     root = _fleet(tmp_path)
-    issue = issue_console.parse_issues(
-        [_raw(body="просто текст")], root, {"owner"}
-    )[0]
+    issue = issue_console.parse_issues([_raw(body="просто текст")], root, {"owner"})[0]
     assert issue.accepted == "unverifiable"
 
 
@@ -96,16 +94,12 @@ def test_acceptance_unverifiable_without_todo(tmp_path: Path) -> None:
 
 def test_acceptance_na_for_non_inbox(tmp_path: Path) -> None:
     root = _fleet(tmp_path)
-    issue = issue_console.parse_issues(
-        [_raw(labels=("research",))], root, {"owner"}
-    )[0]
+    issue = issue_console.parse_issues([_raw(labels=("research",))], root, {"owner"})[0]
     assert issue.accepted == "n/a"
 
 
 def test_acceptance_ignores_slug_in_prose(tmp_path: Path) -> None:
-    root = _fleet(
-        tmp_path, todo="в прозе упомянут slug-one, но пункта нет\n"
-    )
+    root = _fleet(tmp_path, todo="в прозе упомянут slug-one, но пункта нет\n")
     issue = issue_console.parse_issues([_raw()], root, {"owner"})[0]
     assert issue.accepted == "not-accepted"
 
@@ -141,7 +135,7 @@ def test_fetch_warns_when_search_limit_reached(monkeypatch, capsys) -> None:
 
 def test_fetch_no_warning_below_limit(monkeypatch, capsys) -> None:
     def fake_run(cmd, **kwargs):
-        return SimpleNamespace(returncode=0, stdout="[{\"number\": 1}]", stderr="")
+        return SimpleNamespace(returncode=0, stdout='[{"number": 1}]', stderr="")
 
     monkeypatch.setattr(issue_console.subprocess, "run", fake_run)
     assert len(issue_console.fetch_issues("owner")) == 1
@@ -150,8 +144,13 @@ def test_fetch_no_warning_below_limit(monkeypatch, capsys) -> None:
 
 def test_fleet_filter_drops_repos_without_clone(tmp_path: Path) -> None:
     root = _fleet(tmp_path)  # clone exists only for alpha
-    raw = [_raw(), {**_raw(repo="ghost"), "repository": {
-        "name": "ghost", "nameWithOwner": "owner/ghost"}}]
+    raw = [
+        _raw(),
+        {
+            **_raw(repo="ghost"),
+            "repository": {"name": "ghost", "nameWithOwner": "owner/ghost"},
+        },
+    ]
     issues = issue_console.parse_issues(raw, root, {"owner"})
     assert [x.repo for x in issues] == ["alpha"]
 
@@ -233,9 +232,7 @@ def test_launch_skips_existing_tmux_session(tmp_path: Path, monkeypatch) -> None
     assert not any(c[:2] == ["tmux", "new-session"] for c in calls)
 
 
-def test_launch_uses_exact_tmux_target_not_prefix(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_launch_uses_exact_tmux_target_not_prefix(tmp_path: Path, monkeypatch) -> None:
     """has-session без точного совпадения не должен молчаливо блокировать
 
     запуск, даже когда существует сессия с именем-надмножеством (например,
@@ -296,8 +293,15 @@ def test_discover_repos_keys_by_owner_slug(tmp_path: Path) -> None:
     clone.mkdir()
     sp.run(["git", "init", "-q", str(clone)], check=True)
     sp.run(
-        ["git", "-C", str(clone), "remote", "add", "origin",
-         "git@github.com:Fork-Owner/Foo.git"],
+        [
+            "git",
+            "-C",
+            str(clone),
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:Fork-Owner/Foo.git",
+        ],
         check=True,
     )
     repos = issue_console.discover_repos(tmp_path)
@@ -331,14 +335,24 @@ def test_classify_ai_flag_wires_refine(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(issue_console.issue_classify, "refine", fake_refine)
     import json as _json
+
     fixture = tmp_path / "issues.json"
     fixture.write_text(_json.dumps(raw))
     monkeypatch.setattr(
         "sys.argv",
-        ["issue_console.py", "--root", str(root), "--input", str(fixture),
-         "--json", "--classify-ai"])
+        [
+            "issue_console.py",
+            "--root",
+            str(root),
+            "--input",
+            str(fixture),
+            "--json",
+            "--classify-ai",
+        ],
+    )
     import io
     import contextlib
+
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         assert issue_console.main() == 0
@@ -358,14 +372,16 @@ def test_json_offline_without_classify_ai_skips_refine(
 
     monkeypatch.setattr(issue_console.issue_classify, "refine", fail_refine)
     import json as _json
+
     fixture = tmp_path / "issues.json"
     fixture.write_text(_json.dumps(raw))
     monkeypatch.setattr(
         "sys.argv",
-        ["issue_console.py", "--root", str(root), "--input", str(fixture),
-         "--json"])
+        ["issue_console.py", "--root", str(root), "--input", str(fixture), "--json"],
+    )
     import io
     import contextlib
+
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         assert issue_console.main() == 0
@@ -381,12 +397,13 @@ def test_main_returns_2_when_plan_fields_unavailable(
     raw = [_raw()]
     monkeypatch.setattr(issue_console, "scrape_items", None)
     import json as _json
+
     fixture = tmp_path / "issues.json"
     fixture.write_text(_json.dumps(raw))
     monkeypatch.setattr(
         "sys.argv",
-        ["issue_console.py", "--root", str(root), "--input", str(fixture),
-         "--json"])
+        ["issue_console.py", "--root", str(root), "--input", str(fixture), "--json"],
+    )
     assert issue_console.main() == 2
 
 
@@ -396,9 +413,7 @@ def _replace_issue(**overrides) -> issue_console.Issue:
     return replace(_issue(), **overrides)
 
 
-def test_launch_behaviour_builds_runner_command(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_launch_behaviour_builds_runner_command(tmp_path: Path, monkeypatch) -> None:
     root = _fleet(tmp_path)
     calls: list[tuple[list[str], dict]] = []
 
@@ -411,9 +426,7 @@ def test_launch_behaviour_builds_runner_command(
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(issue_console.subprocess, "run", fake_run)
-    status = issue_console.launch_behaviour(
-        _issue(repo="alpha", number=7), root
-    )
+    status = issue_console.launch_behaviour(_issue(repo="alpha", number=7), root)
     assert status == "started beh-issue-alpha-7"
     has_session = next(c for c, _ in calls if c[:2] == ["tmux", "has-session"])
     assert has_session[-1] == "=beh-issue-alpha-7"
@@ -427,15 +440,13 @@ def test_launch_behaviour_builds_runner_command(
     assert "governance.runner" in shell_cmd
     assert "start" in shell_cmd
     assert "--subject" in shell_cmd
-    assert "alpha#7" in shell_cmd          # subject несёт ссылку на issue
+    assert "alpha#7" in shell_cmd  # subject несёт ссылку на issue
     assert "--ws-id WS-alpha-7" in shell_cmd
     assert "--repo-slug owner/alpha" in shell_cmd
     assert str(root / "alpha") in shell_cmd  # target-dir — локальный клон
 
 
-def test_launch_behaviour_existing_session_hint(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_launch_behaviour_existing_session_hint(tmp_path: Path, monkeypatch) -> None:
     root = _fleet(tmp_path)
     calls: list[list[str]] = []
 
@@ -448,9 +459,7 @@ def test_launch_behaviour_existing_session_hint(
         raise AssertionError(f"неожиданная команда: {cmd}")
 
     monkeypatch.setattr(issue_console.subprocess, "run", fake_run)
-    status = issue_console.launch_behaviour(
-        _issue(repo="alpha", number=7), root
-    )
+    status = issue_console.launch_behaviour(_issue(repo="alpha", number=7), root)
     assert status == "exists: tmux attach -t =beh-issue-alpha-7"
     assert not any(c[:2] == ["tmux", "new-session"] for c in calls)
 
@@ -470,9 +479,7 @@ def test_launch_behaviour_rejects_external_initiator(
     import pytest
 
     with pytest.raises(RuntimeError, match="external"):
-        issue_console.launch_behaviour(
-            _replace_issue(internal=False), root
-        )
+        issue_console.launch_behaviour(_replace_issue(internal=False), root)
 
 
 def test_launch_behaviour_missing_clone(tmp_path: Path, monkeypatch) -> None:
@@ -483,6 +490,4 @@ def test_launch_behaviour_missing_clone(tmp_path: Path, monkeypatch) -> None:
     import pytest
 
     with pytest.raises(RuntimeError, match="clone"):
-        issue_console.launch_behaviour(
-            _issue(repo="ghost", number=1), tmp_path
-        )
+        issue_console.launch_behaviour(_issue(repo="ghost", number=1), tmp_path)

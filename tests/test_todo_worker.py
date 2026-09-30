@@ -53,9 +53,12 @@ def test_refusal_names_the_reason_and_the_unread_sources():
     """The operator did not assemble this context, so «нельзя» without «почему»
     would send them to read the pack by hand — issue_worker's `--internal` they
     type themselves, this they do not."""
-    pack = _pack(grade="thin", execute=False,
-                 reason="only the epic's goal — no written requirement",
-                 unknown_sources=["docs", "origin_issue"])
+    pack = _pack(
+        grade="thin",
+        execute=False,
+        reason="only the epic's goal — no written requirement",
+        unknown_sources=["docs", "origin_issue"],
+    )
     text = tw.refusal(pack)
     assert "thin" in text
     assert "only the epic's goal" in text
@@ -73,24 +76,39 @@ def test_refusal_is_silent_about_sources_when_everything_was_read():
 def test_plan_mode_strips_changed_files_the_model_claims():
     """`plan` runs the harness read-only, so a claim of changed files is false
     by construction. issue_worker pins `decision` for the same reason."""
-    result = {"outcome": "done", "summary": "s", "next_step": "n",
-              "changed_files": ["a.py", "b.py"], "todo_line_update": ""}
+    result = {
+        "outcome": "done",
+        "summary": "s",
+        "next_step": "n",
+        "changed_files": ["a.py", "b.py"],
+        "todo_line_update": "",
+    }
     fixed = tw.enforce_mode(dict(result), execute=False)
     assert fixed["changed_files"] == []
     assert fixed["outcome"] == "needs_human", "ложный отчёт о правках — не done"
 
 
 def test_execute_mode_keeps_the_reported_files():
-    result = {"outcome": "done", "summary": "s", "next_step": "n",
-              "changed_files": ["a.py"], "todo_line_update": ""}
+    result = {
+        "outcome": "done",
+        "summary": "s",
+        "next_step": "n",
+        "changed_files": ["a.py"],
+        "todo_line_update": "",
+    }
     fixed = tw.enforce_mode(dict(result), execute=True)
     assert fixed["changed_files"] == ["a.py"]
     assert fixed["outcome"] == "done"
 
 
 def test_plan_mode_leaves_an_honest_result_alone():
-    result = {"outcome": "blocked", "summary": "s", "next_step": "n",
-              "changed_files": [], "todo_line_update": ""}
+    result = {
+        "outcome": "blocked",
+        "summary": "s",
+        "next_step": "n",
+        "changed_files": [],
+        "todo_line_update": "",
+    }
     assert tw.enforce_mode(dict(result), execute=False) == result
 
 
@@ -148,15 +166,25 @@ def test_plan_prompt_forbids_editing_at_all():
 def test_refused_execute_exits_four_and_says_why(tmp_path, capsys):
     """Exit 4: 2 and 3 keep the meanings `issue_worker` gave them."""
     pack = tmp_path / "pack.json"
-    pack.write_text(__import__("json").dumps(
-        {"node_id": "todo://devtools/x",
-         "item": {"repo": "devtools", "id": "x"},
-         "completeness": {"grade": "thin", "reason": "only the epic's goal",
-                          "execute_allowed": False,
-                          "unknown_sources": ["origin_issue"], "note": None}}),
-        encoding="utf-8")
-    code = tw.main(["--pack", str(pack), "--mode", "execute",
-                    "--output-root", str(tmp_path)])
+    pack.write_text(
+        __import__("json").dumps(
+            {
+                "node_id": "todo://devtools/x",
+                "item": {"repo": "devtools", "id": "x"},
+                "completeness": {
+                    "grade": "thin",
+                    "reason": "only the epic's goal",
+                    "execute_allowed": False,
+                    "unknown_sources": ["origin_issue"],
+                    "note": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    code = tw.main(
+        ["--pack", str(pack), "--mode", "execute", "--output-root", str(tmp_path)]
+    )
     assert code == 4
     assert "execute запрещён" in capsys.readouterr().err
 
@@ -171,26 +199,68 @@ def test_dry_run_shows_the_prompt_without_calling_the_harness(tmp_path, capsys):
     там, где реальный запуск откажет, — враньё."""
     import json as _json
     import subprocess
+
     checkout = tmp_path / "devtools"
     checkout.mkdir()
     subprocess.run(["git", "init", "-q", str(checkout)], check=True)
     pack = tmp_path / "pack.json"
-    pack.write_text(_json.dumps(
-        {"node_id": "todo://devtools/x", "checkout": str(checkout),
-         "item": {"node_id": "todo://devtools/x",
-                  "repo": "devtools", "id": "x", "title": "t", "status": "open",
-                  "epic": None, "defect": None, "owner": None, "trigger": None,
-                  "section": None, "path": "TODO.md", "line": 1,
-                  "source_line": None, "tags": {}},
-         "body": {"text": None, "lines": 0}, "epic": None,
-         "graph": {"blocked_by": [], "blocks": [], "unresolved_refs": [],
-                   "diagnostics": [], "unread_repos": [], "legacy_waits": []},
-         "docs": {"named": [], "mentions": []}, "rules": [], "origin_issue": None,
-         "sources": [{"source": "item", "state": "read", "detail": None}],
-         "completeness": {"grade": "rich", "reason": "r", "execute_allowed": True,
-                          "unknown_sources": [], "note": None}}), encoding="utf-8")
-    code = tw.main(["--pack", str(pack), "--mode", "execute", "--dry-run",
-                    "--output-root", str(tmp_path)])
+    pack.write_text(
+        _json.dumps(
+            {
+                "node_id": "todo://devtools/x",
+                "checkout": str(checkout),
+                "item": {
+                    "node_id": "todo://devtools/x",
+                    "repo": "devtools",
+                    "id": "x",
+                    "title": "t",
+                    "status": "open",
+                    "epic": None,
+                    "defect": None,
+                    "owner": None,
+                    "trigger": None,
+                    "section": None,
+                    "path": "TODO.md",
+                    "line": 1,
+                    "source_line": None,
+                    "tags": {},
+                },
+                "body": {"text": None, "lines": 0},
+                "epic": None,
+                "graph": {
+                    "blocked_by": [],
+                    "blocks": [],
+                    "unresolved_refs": [],
+                    "diagnostics": [],
+                    "unread_repos": [],
+                    "legacy_waits": [],
+                },
+                "docs": {"named": [], "mentions": []},
+                "rules": [],
+                "origin_issue": None,
+                "sources": [{"source": "item", "state": "read", "detail": None}],
+                "completeness": {
+                    "grade": "rich",
+                    "reason": "r",
+                    "execute_allowed": True,
+                    "unknown_sources": [],
+                    "note": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    code = tw.main(
+        [
+            "--pack",
+            str(pack),
+            "--mode",
+            "execute",
+            "--dry-run",
+            "--output-root",
+            str(tmp_path),
+        ]
+    )
     out = capsys.readouterr().out
     assert code == 0
     assert "sandbox workspace-write" in out
@@ -203,9 +273,11 @@ def test_a_truncated_pack_is_an_answer_not_a_traceback(tmp_path, capsys):
     """`--pack` names a file the operator supplies: a hand-edited or half-written
     one is ordinary input, and `render` would have raised a raw KeyError."""
     import json as _json
+
     pack = tmp_path / "pack.json"
-    pack.write_text(_json.dumps({"item": {"repo": "devtools", "id": "x"}}),
-                    encoding="utf-8")
+    pack.write_text(
+        _json.dumps({"item": {"repo": "devtools", "id": "x"}}), encoding="utf-8"
+    )
     assert tw.main(["--pack", str(pack), "--output-root", str(tmp_path)]) == 2
     err = capsys.readouterr().err
     assert "pack неполон" in err and "node_id" in err
@@ -231,11 +303,24 @@ def test_id_grammar_refuses_a_value_that_is_not_a_string():
 
 def test_a_pack_with_a_numeric_id_exits_two(tmp_path, capsys):
     import json as _json
+
     pack = tmp_path / "pack.json"
-    pack.write_text(_json.dumps(
-        {"node_id": "todo://devtools/1", "item": {"repo": "devtools", "id": 1},
-         "completeness": {"grade": "rich", "reason": "r", "execute_allowed": True,
-                          "unknown_sources": [], "note": None}}), encoding="utf-8")
+    pack.write_text(
+        _json.dumps(
+            {
+                "node_id": "todo://devtools/1",
+                "item": {"repo": "devtools", "id": 1},
+                "completeness": {
+                    "grade": "rich",
+                    "reason": "r",
+                    "execute_allowed": True,
+                    "unknown_sources": [],
+                    "note": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     assert tw.main(["--pack", str(pack), "--output-root", str(tmp_path)]) == 2
     assert "недопустимый идентификатор" in capsys.readouterr().err
 
@@ -275,12 +360,14 @@ def test_repo_spelling_is_normalised_by_the_contract_not_refused_here():
     """`todo_context` resolves `Maestro` deliberately; refusing it here would
     undo that and read as "нет такого пункта" for an item that is right there."""
     import inspect
+
     source = inspect.getsource(tw.load_pack)
     assert "require_id(repo)" not in source, "сырое имя репо не санитайзится"
 
 
-def test_a_non_object_harness_result_is_an_answer_not_a_traceback(tmp_path,
-                                                                  monkeypatch):
+def test_a_non_object_harness_result_is_an_answer_not_a_traceback(
+    tmp_path, monkeypatch
+):
     """The author made `--pack` degrade honestly; the harness envelope is the
     same kind of untrusted input."""
     import subprocess as sp
@@ -311,8 +398,14 @@ def test_prompt_carries_the_repo_rules_it_claims_to_carry():
     """The prompt named «the repo's own rules» while `render` deliberately keeps
     their text in `--json` — so an execute run edited a neighbour's tree without
     ever seeing its scope fence."""
-    rules = [{"path": "CLAUDE.md", "bytes": 400, "truncated": False,
-              "text": "READ-ONLY к соседним репо. Прямые коммиты в master запрещены."}]
+    rules = [
+        {
+            "path": "CLAUDE.md",
+            "bytes": 400,
+            "truncated": False,
+            "text": "READ-ONLY к соседним репо. Прямые коммиты в master запрещены.",
+        }
+    ]
     prompt = tw.build_prompt("# todo://maestro/x", execute=True, rules=rules)
     assert "READ-ONLY к соседним репо" in prompt
     assert "CLAUDE.md" in prompt
@@ -322,8 +415,13 @@ def test_prompt_says_plainly_when_there_are_no_rules_to_carry():
     """Проверяется РАЗЛИЧИТЕЛЬ, а не литерал: прежняя версия ассертила строку,
     которой в модуле уже не было, и покраснеть не могла ни при какой правке."""
     fence = "scope fence"
-    with_rules = tw.build_prompt("# x", execute=True, rules=[
-        {"path": "CLAUDE.md", "bytes": 10, "truncated": False, "text": "правило"}])
+    with_rules = tw.build_prompt(
+        "# x",
+        execute=True,
+        rules=[
+            {"path": "CLAUDE.md", "bytes": 10, "truncated": False, "text": "правило"}
+        ],
+    )
     without = tw.build_prompt("# x", execute=True, rules=[])
     assert fence in with_rules, "тест обязан ловить и наличие тоже"
     assert fence not in without, "пустой список правил ничего не обещает"
@@ -331,8 +429,9 @@ def test_prompt_says_plainly_when_there_are_no_rules_to_carry():
 
 
 def test_prompt_marks_a_truncated_fence_as_truncated():
-    rules = [{"path": "CLAUDE.md", "bytes": 34000, "truncated": True,
-              "text": "первые байты"}]
+    rules = [
+        {"path": "CLAUDE.md", "bytes": 34000, "truncated": True, "text": "первые байты"}
+    ]
     prompt = tw.build_prompt("# x", execute=True, rules=rules)
     assert "обрезан" in prompt, "агент должен знать, что видит не весь fence"
 
@@ -342,10 +441,18 @@ def test_require_pack_checks_the_types_of_the_fields_it_uses():
     guard checked presence only, so the traceback just moved one line down."""
     for pack in (
         {"node_id": "n", "item": {"repo": "r", "id": "i"}, "completeness": "rich"},
-        {"node_id": "n", "item": {"repo": "r", "id": "i"}, "completeness": [1],
-         "checkout": "/tmp/x"},
-        {"node_id": "n", "item": {"repo": "r", "id": "i"}, "completeness": {},
-         "checkout": 42},
+        {
+            "node_id": "n",
+            "item": {"repo": "r", "id": "i"},
+            "completeness": [1],
+            "checkout": "/tmp/x",
+        },
+        {
+            "node_id": "n",
+            "item": {"repo": "r", "id": "i"},
+            "completeness": {},
+            "checkout": 42,
+        },
     ):
         try:
             tw.require_pack(pack)
@@ -355,9 +462,12 @@ def test_require_pack_checks_the_types_of_the_fields_it_uses():
 
 
 def test_require_pack_accepts_the_shape_todo_context_produces():
-    pack = {"node_id": "todo://devtools/x", "checkout": "/tmp/devtools",
-            "item": {"repo": "devtools", "id": "x"},
-            "completeness": {"grade": "rich", "execute_allowed": True}}
+    pack = {
+        "node_id": "todo://devtools/x",
+        "checkout": "/tmp/devtools",
+        "item": {"repo": "devtools", "id": "x"},
+        "completeness": {"grade": "rich", "execute_allowed": True},
+    }
     assert tw.require_pack(pack) is pack
 
 
@@ -366,6 +476,7 @@ def test_execute_refuses_a_dirty_target_tree(tmp_path):
     indistinguishable, and `changed_files` stops being checkable — the same
     lesson `accept-pr` already paid for."""
     import subprocess
+
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     (tmp_path / "tracked.txt").write_text("a\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
@@ -381,11 +492,25 @@ def test_execute_refuses_a_dirty_target_tree(tmp_path):
 
 def test_a_clean_tree_passes(tmp_path):
     import subprocess
+
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     (tmp_path / "tracked.txt").write_text("a\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.email=t@e",
-                    "-c", "user.name=t", "commit", "-qm", "x"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.email=t@e",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "x",
+        ],
+        check=True,
+    )
     assert tw.require_clean_tree(tmp_path) is None
 
 
@@ -393,26 +518,61 @@ def test_plan_mode_does_not_care_about_a_dirty_tree(tmp_path, capsys):
     """`plan` runs read-only: a dirty tree cannot be confused with its work."""
     import json as _json
     import subprocess
+
     checkout = tmp_path / "repo"
     checkout.mkdir()
     subprocess.run(["git", "init", "-q", str(checkout)], check=True)
     (checkout / "dirty.txt").write_text("x\n", encoding="utf-8")
     pack = tmp_path / "pack.json"
-    pack.write_text(_json.dumps(
-        {"node_id": "todo://devtools/x", "checkout": str(checkout),
-         "item": {"node_id": "todo://devtools/x", "repo": "devtools", "id": "x",
-                  "title": "t", "status": "open", "epic": None, "defect": None,
-                  "owner": None, "trigger": None, "section": None,
-                  "path": "TODO.md", "line": 1, "source_line": None, "tags": {}},
-         "body": {"text": None, "lines": 0}, "epic": None,
-         "graph": {"blocked_by": [], "blocks": [], "unresolved_refs": [],
-                   "diagnostics": [], "unread_repos": [], "legacy_waits": []},
-         "docs": {"named": [], "mentions": []}, "rules": [], "origin_issue": None,
-         "sources": [{"source": "item", "state": "read", "detail": None}],
-         "completeness": {"grade": "rich", "reason": "r", "execute_allowed": True,
-                          "unknown_sources": [], "note": None}}), encoding="utf-8")
-    assert tw.main(["--pack", str(pack), "--dry-run",
-                    "--output-root", str(tmp_path)]) == 0
+    pack.write_text(
+        _json.dumps(
+            {
+                "node_id": "todo://devtools/x",
+                "checkout": str(checkout),
+                "item": {
+                    "node_id": "todo://devtools/x",
+                    "repo": "devtools",
+                    "id": "x",
+                    "title": "t",
+                    "status": "open",
+                    "epic": None,
+                    "defect": None,
+                    "owner": None,
+                    "trigger": None,
+                    "section": None,
+                    "path": "TODO.md",
+                    "line": 1,
+                    "source_line": None,
+                    "tags": {},
+                },
+                "body": {"text": None, "lines": 0},
+                "epic": None,
+                "graph": {
+                    "blocked_by": [],
+                    "blocks": [],
+                    "unresolved_refs": [],
+                    "diagnostics": [],
+                    "unread_repos": [],
+                    "legacy_waits": [],
+                },
+                "docs": {"named": [], "mentions": []},
+                "rules": [],
+                "origin_issue": None,
+                "sources": [{"source": "item", "state": "read", "detail": None}],
+                "completeness": {
+                    "grade": "rich",
+                    "reason": "r",
+                    "execute_allowed": True,
+                    "unknown_sources": [],
+                    "note": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        tw.main(["--pack", str(pack), "--dry-run", "--output-root", str(tmp_path)]) == 0
+    )
 
 
 # ─────────── регрессии круга 1 ревью PR #127 ───────────
@@ -420,6 +580,7 @@ def test_plan_mode_does_not_care_about_a_dirty_tree(tmp_path, capsys):
 
 def _dirty_repo(tmp_path, files: int = 1):
     import subprocess
+
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     for i in range(files):
         (tmp_path / f"f{i}.txt").write_text("x\n", encoding="utf-8")
@@ -428,20 +589,54 @@ def _dirty_repo(tmp_path, files: int = 1):
 
 def _pack_file(tmp_path, checkout):
     import json as _json
+
     pack = tmp_path / "pack.json"
-    pack.write_text(_json.dumps(
-        {"node_id": "todo://devtools/x", "checkout": str(checkout),
-         "item": {"node_id": "todo://devtools/x", "repo": "devtools", "id": "x",
-                  "title": "t", "status": "open", "epic": None, "defect": None,
-                  "owner": None, "trigger": None, "section": None,
-                  "path": "TODO.md", "line": 1, "source_line": None, "tags": {}},
-         "body": {"text": None, "lines": 0}, "epic": None,
-         "graph": {"blocked_by": [], "blocks": [], "unresolved_refs": [],
-                   "diagnostics": [], "unread_repos": [], "legacy_waits": []},
-         "docs": {"named": [], "mentions": []}, "rules": [], "origin_issue": None,
-         "sources": [{"source": "item", "state": "read", "detail": None}],
-         "completeness": {"grade": "rich", "reason": "r", "execute_allowed": True,
-                          "unknown_sources": [], "note": None}}), encoding="utf-8")
+    pack.write_text(
+        _json.dumps(
+            {
+                "node_id": "todo://devtools/x",
+                "checkout": str(checkout),
+                "item": {
+                    "node_id": "todo://devtools/x",
+                    "repo": "devtools",
+                    "id": "x",
+                    "title": "t",
+                    "status": "open",
+                    "epic": None,
+                    "defect": None,
+                    "owner": None,
+                    "trigger": None,
+                    "section": None,
+                    "path": "TODO.md",
+                    "line": 1,
+                    "source_line": None,
+                    "tags": {},
+                },
+                "body": {"text": None, "lines": 0},
+                "epic": None,
+                "graph": {
+                    "blocked_by": [],
+                    "blocks": [],
+                    "unresolved_refs": [],
+                    "diagnostics": [],
+                    "unread_repos": [],
+                    "legacy_waits": [],
+                },
+                "docs": {"named": [], "mentions": []},
+                "rules": [],
+                "origin_issue": None,
+                "sources": [{"source": "item", "state": "read", "detail": None}],
+                "completeness": {
+                    "grade": "rich",
+                    "reason": "r",
+                    "execute_allowed": True,
+                    "unknown_sources": [],
+                    "note": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     return pack
 
 
@@ -450,8 +645,17 @@ def test_main_refuses_execute_over_a_dirty_tree(tmp_path, capsys):
     from `main` left the suite green."""
     checkout = _dirty_repo(tmp_path / "repo")
     pack = _pack_file(tmp_path, checkout)
-    code = tw.main(["--pack", str(pack), "--mode", "execute", "--dry-run",
-                    "--output-root", str(tmp_path)])
+    code = tw.main(
+        [
+            "--pack",
+            str(pack),
+            "--mode",
+            "execute",
+            "--dry-run",
+            "--output-root",
+            str(tmp_path),
+        ]
+    )
     assert code == 2
     assert "грязное" in capsys.readouterr().err
 
@@ -459,8 +663,9 @@ def test_main_refuses_execute_over_a_dirty_tree(tmp_path, capsys):
 def test_main_lets_plan_through_over_a_dirty_tree(tmp_path):
     checkout = _dirty_repo(tmp_path / "repo")
     pack = _pack_file(tmp_path, checkout)
-    assert tw.main(["--pack", str(pack), "--dry-run",
-                    "--output-root", str(tmp_path)]) == 0
+    assert (
+        tw.main(["--pack", str(pack), "--dry-run", "--output-root", str(tmp_path)]) == 0
+    )
 
 
 def test_the_dirty_list_is_cut_and_says_how_many_it_did_not_show(tmp_path):
@@ -498,8 +703,12 @@ def test_require_pack_checks_the_elements_of_rules_not_just_the_list():
     the field instead of "pack не рендерится, нет поля …". PR #127 claimed
     otherwise in two places; #129 fixed the code comment and left this one
     (Copilot, PR #127; corrected in #130)."""
-    pack = {"node_id": "n", "item": {"repo": "r", "id": "i"},
-            "completeness": {}, "rules": ["CLAUDE.md"]}
+    pack = {
+        "node_id": "n",
+        "item": {"repo": "r", "id": "i"},
+        "completeness": {},
+        "rules": ["CLAUDE.md"],
+    }
     try:
         tw.require_pack(pack)
     except tw.WorkerError as exc:
@@ -509,6 +718,10 @@ def test_require_pack_checks_the_elements_of_rules_not_just_the_list():
 
 
 def test_require_pack_accepts_well_formed_rules():
-    pack = {"node_id": "n", "item": {"repo": "r", "id": "i"}, "completeness": {},
-            "rules": [{"path": "CLAUDE.md", "text": "x", "truncated": False}]}
+    pack = {
+        "node_id": "n",
+        "item": {"repo": "r", "id": "i"},
+        "completeness": {},
+        "rules": [{"path": "CLAUDE.md", "text": "x", "truncated": False}],
+    }
     assert tw.require_pack(pack) is pack

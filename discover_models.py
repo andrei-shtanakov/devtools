@@ -34,6 +34,7 @@ Usage:
     python3 discover_models.py --catalog /path/agents-catalog.toml --out /tmp/out
     python3 discover_models.py --selftest
 """
+
 from __future__ import annotations
 
 import argparse
@@ -41,7 +42,7 @@ import json
 import sys
 from dataclasses import dataclass, field
 
-try:                       # 3.11+ stdlib
+try:  # 3.11+ stdlib
     import tomllib
 except ModuleNotFoundError:  # 3.10 fallback (pip install tomli)
     import tomli as tomllib
@@ -100,8 +101,11 @@ def load_observed(path: Path) -> dict[str, list[str]]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     # допускаем обёртку {"observed": {...}, "_meta": ...} или плоский dict
     obs = raw.get("observed", raw) if isinstance(raw, dict) else {}
-    return {str(v): [str(m) for m in ids] for v, ids in obs.items()
-            if v not in {"_meta", "observed"}}
+    return {
+        str(v): [str(m) for m in ids]
+        for v, ids in obs.items()
+        if v not in {"_meta", "observed"}
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -119,13 +123,16 @@ def known_ids_for_vendor(models: dict[str, CatalogModel], vendor: str) -> set[st
 
 @dataclass
 class Diff:
-    new: dict[str, list[str]] = field(default_factory=dict)          # vendor -> new ids
+    new: dict[str, list[str]] = field(default_factory=dict)  # vendor -> new ids
     deprecation_candidates: dict[str, list[str]] = field(default_factory=dict)
-    unchecked_vendors: list[str] = field(default_factory=list)       # в каталоге, но не в observed
+    unchecked_vendors: list[str] = field(
+        default_factory=list
+    )  # в каталоге, но не в observed
 
 
-def compute_diff(models: dict[str, CatalogModel],
-                 observed: dict[str, list[str]]) -> Diff:
+def compute_diff(
+    models: dict[str, CatalogModel], observed: dict[str, list[str]]
+) -> Diff:
     diff = Diff()
 
     # 1. Новые модели: observed-id, которого нет среди id/алиасов каталога.
@@ -151,7 +158,9 @@ def compute_diff(models: dict[str, CatalogModel],
             diff.deprecation_candidates.setdefault(m.vendor, []).append(m.model_id)
 
     # 3. Вендоры каталога, которых нет в observed вовсе — не проверены.
-    catalog_vendors = {m.vendor for m in models.values() if m.vendor in CHECKABLE_VENDORS}
+    catalog_vendors = {
+        m.vendor for m in models.values() if m.vendor in CHECKABLE_VENDORS
+    }
     diff.unchecked_vendors = sorted(catalog_vendors - observed_vendors)
     return diff
 
@@ -195,12 +204,16 @@ def render_report(diff: Diff, catalog_path: Path, observed_path: Path | None) ->
         "",
     ]
     if n_new:
-        lines.append(f"1. Найдено новых моделей: {n_new}. Нужен PR на Plane 1 каталога "
-                     "(блок ниже).")
+        lines.append(
+            f"1. Найдено новых моделей: {n_new}. Нужен PR на Plane 1 каталога "
+            "(блок ниже)."
+        )
     else:
         lines.append("1. Новых моделей нет — Plane 1 каталога актуален.")
-    lines.append("2. Discovery трогает только существование модели. Промоушн в "
-                 "роутинг — отдельный benchmark-gated гейт (не здесь).")
+    lines.append(
+        "2. Discovery трогает только существование модели. Промоушн в "
+        "роутинг — отдельный benchmark-gated гейт (не здесь)."
+    )
     lines.append("")
 
     lines.append("## Новые модели (кандидаты на добавление в Plane 1)")
@@ -216,8 +229,10 @@ def render_report(diff: Diff, catalog_path: Path, observed_path: Path | None) ->
 
     lines.append("## Кандидаты на deprecation (⚠️ требуют ручной проверки доступности)")
     lines.append("")
-    lines.append("> «Пропал из меню/листа» ≠ «снят с API». Не ретайрить без проверки "
-                 "`--model`/API (ADR-ECO-003a).")
+    lines.append(
+        "> «Пропал из меню/листа» ≠ «снят с API». Не ретайрить без проверки "
+        "`--model`/API (ADR-ECO-003a)."
+    )
     lines.append("")
     if diff.deprecation_candidates:
         lines += ["| Vendor | Model id |", "|---|---|"]
@@ -236,7 +251,9 @@ def render_report(diff: Diff, catalog_path: Path, observed_path: Path | None) ->
 
     lines.append("## Следующие шаги (ADR-ECO-003a)")
     lines.append("")
-    lines.append("1. Ревью TOML-патча ниже → PR на Plane 1 (модель `active`, НЕ routable).")
+    lines.append(
+        "1. Ревью TOML-патча ниже → PR на Plane 1 (модель `active`, НЕ routable)."
+    )
     lines.append("2. pipe-check нового `agent_id` на пиннованном golden-`suite_id`.")
     lines.append("3. A/B vs предшественница по `rank_score` → человеческий гейт.")
     lines.append("4. Отдельный PR: флип в routable (Plane 2).")
@@ -257,18 +274,22 @@ def render_report(diff: Diff, catalog_path: Path, observed_path: Path | None) ->
 # --------------------------------------------------------------------------- #
 def _selftest() -> int:
     models = {
-        "claude-sonnet-4-6": CatalogModel("claude-sonnet-4-6", "anthropic", "active", []),
+        "claude-sonnet-4-6": CatalogModel(
+            "claude-sonnet-4-6", "anthropic", "active", []
+        ),
         "gpt-5.5": CatalogModel("gpt-5.5", "openai", "active", []),
         "old-mini": CatalogModel("old-mini", "openai", "active", ["gpt-old"]),
     }
     observed = {
         "anthropic": ["claude-sonnet-4-6", "claude-sonnet-5"],  # sonnet-5 = новая
-        "openai": ["gpt-5.5"],                                   # old-mini пропал
-        "meta": ["llama3.2:1b"],                                 # не checkable
+        "openai": ["gpt-5.5"],  # old-mini пропал
+        "meta": ["llama3.2:1b"],  # не checkable
     }
     d = compute_diff(models, observed)
     assert d.new == {"anthropic": ["claude-sonnet-5"]}, d.new
-    assert d.deprecation_candidates == {"openai": ["old-mini"]}, d.deprecation_candidates
+    assert d.deprecation_candidates == {"openai": ["old-mini"]}, (
+        d.deprecation_candidates
+    )
     # alias-хит не должен ложно-срабатывать:
     observed2 = {"openai": ["gpt-old", "gpt-5.5"]}
     d2 = compute_diff(models, observed2)
@@ -288,11 +309,17 @@ def _selftest() -> int:
 
 # --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Discovery-нотификатор моделей (ADR-ECO-003a)")
+    ap = argparse.ArgumentParser(
+        description="Discovery-нотификатор моделей (ADR-ECO-003a)"
+    )
     ap.add_argument("--catalog", type=Path, help="путь к agents-catalog.toml")
     ap.add_argument("--observed", type=Path, help="JSON-манифест {vendor: [model_id]}")
-    ap.add_argument("--out", type=Path, help="папка для отчёта и патча (по умолч. рядом)")
-    ap.add_argument("--selftest", action="store_true", help="прогнать встроенные проверки")
+    ap.add_argument(
+        "--out", type=Path, help="папка для отчёта и патча (по умолч. рядом)"
+    )
+    ap.add_argument(
+        "--selftest", action="store_true", help="прогнать встроенные проверки"
+    )
     args = ap.parse_args(argv)
 
     if args.selftest:
@@ -304,8 +331,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: каталог не найден: {catalog_path}", file=sys.stderr)
         return 1
     if not args.observed or not args.observed.is_file():
-        print("ERROR: нужен --observed <manifest.json> (офлайн-источник provider-моделей)",
-              file=sys.stderr)
+        print(
+            "ERROR: нужен --observed <manifest.json> (офлайн-источник provider-моделей)",
+            file=sys.stderr,
+        )
         return 1
 
     try:
@@ -321,11 +350,15 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = args.out or here
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "discovery-report.md").write_text(report, encoding="utf-8")
-    (out_dir / "catalog-plane1.patch.toml").write_text(render_toml_patch(diff), encoding="utf-8")
+    (out_dir / "catalog-plane1.patch.toml").write_text(
+        render_toml_patch(diff), encoding="utf-8"
+    )
 
     n_new = sum(len(v) for v in diff.new.values())
-    print(f"[discovery] catalog={catalog_path.name} new_models={n_new} "
-          f"deprecation_candidates={sum(len(v) for v in diff.deprecation_candidates.values())}")
+    print(
+        f"[discovery] catalog={catalog_path.name} new_models={n_new} "
+        f"deprecation_candidates={sum(len(v) for v in diff.deprecation_candidates.values())}"
+    )
     print(f"[discovery] отчёт: {out_dir / 'discovery-report.md'}")
     return 2 if n_new else 0
 

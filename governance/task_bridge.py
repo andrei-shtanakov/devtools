@@ -38,6 +38,7 @@ from governance.approve_node import (
     read_dag_state,
     reconcile_wave_after_approved_dag,
 )
+
 # Состав DAG живёт в `bundle_dag` (переезд ради §I12: механика одобрения
 # спрашивает его, а импортировать мост нельзя — мост УЖЕ потребитель
 # гейта, и цикл был бы настоящим). Алиасы сохраняют прежние имена,
@@ -76,9 +77,7 @@ from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 _BEH_HEADER = re.compile(r"^####\s+(BEH-\d+[a-z]?):\s*(.+?)\s*$")
 _FEATURE_HEADER = re.compile(r"^##\s+Feature:\s*(.+?)\s*$")
 _TRACES = re.compile(r"`traces:\s*\[([^\]]*)\]`")
-_CHECKED = re.compile(
-    r"\*\*checked_by\*\*.*?`kind:\s*(\S+?)`.*?`target:\s*(\S+?)`"
-)
+_CHECKED = re.compile(r"\*\*checked_by\*\*.*?`kind:\s*(\S+?)`.*?`target:\s*(\S+?)`")
 
 
 @dataclass(frozen=True)
@@ -169,9 +168,7 @@ def parse_behaviour(text: str) -> list[Scenario]:
 def _target_files(scenarios: list[Scenario]) -> set[str]:
     """Файлы checked_by-целей группы (pytest-селектор `::…` отброшен)."""
     return {
-        sc.checked_target.split("::", 1)[0]
-        for sc in scenarios
-        if sc.checked_target
+        sc.checked_target.split("::", 1)[0] for sc in scenarios if sc.checked_target
     }
 
 
@@ -323,9 +320,7 @@ def _render_acceptance_section(acceptance_text: str) -> list[str]:
     if not crits:
         return []
     lines = ["## Критерии приёмки (уровень acceptance)", ""]
-    lines += [
-        f"- **{c.ac_id}** ({c.verification}): {c.title}" for c in crits
-    ]
+    lines += [f"- **{c.ac_id}** ({c.verification}): {c.title}" for c in crits]
     lines.append("")
     return lines
 
@@ -418,9 +413,7 @@ def _legacy_group_dependencies(
             dependencies.append(tuple(feature_tails.values()))
             feature_tails.clear()
         else:
-            dependencies.append(
-                (serial_tail,) if serial_tail is not None else ()
-            )
+            dependencies.append((serial_tail,) if serial_tail is not None else ())
         serial_tail = index
     return dependencies
 
@@ -462,7 +455,11 @@ def render_tasks(
     знает, только про то, ЧТО именно является якорем.
     """
     lines = _render_header(
-        ws_id, subject, generated_at, design_blob, anchor_node_id,
+        ws_id,
+        subject,
+        generated_at,
+        design_blob,
+        anchor_node_id,
         version=version,
     )
     lines += _render_resolutions_section(design_text)
@@ -490,8 +487,7 @@ def render_tasks(
                 if pair not in bindings:
                     bindings.append(pair)
         check = (
-            f"проверка группы: {', '.join(bindings)} зелёные на "
-            f"{', '.join(beh_ids)}"
+            f"проверка группы: {', '.join(bindings)} зелёные на {', '.join(beh_ids)}"
             if bindings
             else f"проверка группы {', '.join(beh_ids)} определена и зелёная"
         )
@@ -508,9 +504,7 @@ def render_tasks(
             refs = ", ".join(f"[TASK-{dep:03d}]" for dep in dependencies)
             lines.append(f"**Depends on:** {refs}")
         lines += ["", "**Checklist:**"]
-        lines += [
-            f"- [ ] реализовать {g.beh_id}: {g.title}" for g in group
-        ]
+        lines += [f"- [ ] реализовать {g.beh_id}: {g.title}" for g in group]
         lines += [
             f"- [ ] {check}",
             "",
@@ -519,8 +513,7 @@ def render_tasks(
             # id, общая скобка молча роняла traces_to у многоссылочных
             # задач (major ревью PR spec-runner#369, круг 2).
             (
-                "**Traces to:** "
-                + ", ".join(f"[{ref}]" for ref in traces)
+                "**Traces to:** " + ", ".join(f"[{ref}]" for ref in traces)
                 if traces
                 else ""
             ),
@@ -620,7 +613,8 @@ def _assert_delivers_projected(
             # Саму эту форму отвергает гвард, раньше и по существу.
             multiline = next(
                 (
-                    d for d in task.delivers
+                    d
+                    for d in task.delivers
                     if d.id == item_id and "\n" in d.statement.strip()
                 ),
                 None,
@@ -641,9 +635,11 @@ def _assert_delivers_projected(
     # Это объявленная ссылка, а не посторонний результат, — иначе сверка
     # отвергала бы ровно ту форму, которую сама же требует напечатать.
     referenced = {d.restates for d in task.delivers if d.restates}
-    stray = {
-        found for ln in items for found in _DELIVERS_ID_RE.findall(ln)
-    } - set(declared) - referenced
+    stray = (
+        {found for ln in items for found in _DELIVERS_ID_RE.findall(ln)}
+        - set(declared)
+        - referenced
+    )
     if stray:
         raise RuntimeError(
             f"{task.dt_id}: в чек-листе есть результаты, не объявленные в "
@@ -731,7 +727,10 @@ def spec_runner_version() -> str | None:
     try:
         proc = subprocess.run(
             ["spec-runner", "--version"],
-            capture_output=True, text=True, timeout=30, check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -793,7 +792,11 @@ def render_tasks_dt(
     # что и всё остальное, — второго источника у связи нет.
     owner_of_del = {d.id: task.dt_id for task in dt_tasks for d in task.delivers}
     lines = _render_header(
-        ws_id, subject, generated_at, anchor_blob, anchor_node_id="decomposition",
+        ws_id,
+        subject,
+        generated_at,
+        anchor_blob,
+        anchor_node_id="decomposition",
         version=version,
     )
     lines += _render_resolutions_section(design_text)
@@ -809,8 +812,7 @@ def render_tasks_dt(
                 if pair not in bindings:
                     bindings.append(pair)
         check = (
-            f"проверка группы: {', '.join(bindings)} зелёные на "
-            f"{', '.join(beh_ids)}"
+            f"проверка группы: {', '.join(bindings)} зелёные на {', '.join(beh_ids)}"
             if bindings
             else f"проверка группы {', '.join(beh_ids)} определена и зелёная"
         )
@@ -918,8 +920,7 @@ def render_tasks_dt(
             # построением, как и у `Mode`; появись у tasks-спеки второй
             # писатель, его пришлось бы держать уже проверкой.
             lines.append(
-                f"**TDD-waiver:** {t.waiver.node_class} "
-                f"· sanction: {t.waiver.sanction}"
+                f"**TDD-waiver:** {t.waiver.node_class} · sanction: {t.waiver.sanction}"
             )
             # Негативный контроль (devtools#336): spec-runner ≥ 3.0.0
             # (#428) отказывает waived-задаче без этой строки до первого
@@ -951,9 +952,7 @@ def render_tasks_dt(
             # Строка и пункты порождаются из ОДНОГО набора `t.delivers` —
             # два обхода одного объявления разошлись бы молча, и разойтись
             # могли бы как раз на потерянном результате.
-            lines.append(
-                "**Delivers:** " + ", ".join(d.id for d in t.delivers)
-            )
+            lines.append("**Delivers:** " + ", ".join(d.id for d in t.delivers))
         if t.depends_on:
             # Та же пер-ссылочная форма, что у Traces to: TASK_REF
             # spec-runner требует ] сразу после id (minor ревью PR #149)
@@ -975,9 +974,7 @@ def render_tasks_dt(
             #
             # Текст условий берётся из словаря классов гварда дословно:
             # вторая их редакция в рендере разошлась бы с бандлом молча.
-            conditions = decomposition_guard.WAIVER_CONDITIONS[
-                t.waiver.node_class
-            ]
+            conditions = decomposition_guard.WAIVER_CONDITIONS[t.waiver.node_class]
             # `dt_id` в тексте — НЕ украшение (минор ревью #197).
             # Batch-санкция по замыслу покрывает несколько DT, поэтому
             # класс и санкция у них совпадают, и без id пункты выходили
@@ -1005,6 +1002,7 @@ def render_tasks_dt(
                 "подтвердить ВСЕ условия класса: " + "; ".join(conditions)
             )
         item_verb = "проверить" if t.type == "verify" else "реализовать"
+
         # Связь объявлена, а не угадана: аннотация садится на пункт
         # сценария, названного в `covered_by`. Совпадение пути или
         # похожего текста таким объявлением не является — это тот же
@@ -1054,9 +1052,7 @@ def render_tasks_dt(
         # похожими формулировками выходили бы неразличимы, а §I11
         # переносит состояние по ТЕКСТУ пункта.
         lines += [
-            f"- [ ] {_deliverable_text(d)}"
-            for d in t.delivers
-            if not d.covered_by
+            f"- [ ] {_deliverable_text(d)}" for d in t.delivers if not d.covered_by
         ]
         traces = []
         for g in group:
@@ -1079,8 +1075,7 @@ def render_tasks_dt(
                 else []
             ),
             (
-                "**Traces to:** "
-                + ", ".join(f"[{ref}]" for ref in traces)
+                "**Traces to:** " + ", ".join(f"[{ref}]" for ref in traces)
                 if traces
                 else ""
             ),
@@ -1154,9 +1149,7 @@ def _canonical_dag_hash(
     lines: list[str] = []
     base = Path(target_dir) / bundle_dir
     for fname, upstream_ids in dag:
-        meta, body = split_frontmatter(
-            (base / fname).read_text(encoding="utf-8")
-        )
+        meta, body = split_frontmatter((base / fname).read_text(encoding="utf-8"))
         for key in _CANON_CUT_KEYS:
             meta.pop(key, None)
         if upstream_ids:
@@ -1285,10 +1278,7 @@ def _debt_notice(
             f"создайте новый workstream/run с другим ws-id. {tail}"
         )
     if verdict.unresolved:
-        return (
-            "долг активного DAG установить не удалось: "
-            f"{verdict.unresolved}. {tail}"
-        )
+        return f"долг активного DAG установить не удалось: {verdict.unresolved}. {tail}"
     if not verdict.debts:
         return ""
     return "\n".join(
@@ -1381,9 +1371,7 @@ def _content_anchor(
                     f"brief descriptor несёт непереносимый source path {path!r}"
                 )
         source_paths = tuple(raw_paths)
-    return _canonical_dag_hash(
-        target_dir, bundle_dir, dag, source_paths
-    )
+    return _canonical_dag_hash(target_dir, bundle_dir, dag, source_paths)
 
 
 def _prospective_anchor(
@@ -1478,10 +1466,7 @@ def stage_profile(
 def approve_command(ws_id: str, legacy_bundle: int | None = None) -> str:
     """Команда человеческого approve tasks-спеки — одна на все подсказки."""
     name = _STAGE_PROFILE_NAMES[legacy_bundle]
-    return (
-        f"spec-runner spec approve tasks --profile {name} "
-        f"--spec-prefix {ws_id}-"
-    )
+    return f"spec-runner spec approve tasks --profile {name} --spec-prefix {ws_id}-"
 
 
 def _check_stage_profile(target_dir: str, rel: str, text: str) -> None:
@@ -1631,11 +1616,7 @@ def _state_free(body: list[str]) -> str:
     found = _task_meta(out)
     if found is not None:
         i, m = found
-        out[i] = (
-            out[i][: m.start("status")]
-            + _CANON_STATUS
-            + out[i][m.end("status"):]
-        )
+        out[i] = out[i][: m.start("status")] + _CANON_STATUS + out[i][m.end("status") :]
     for i, line in enumerate(out):
         c = _CHECKLIST_RE.match(line)
         if c:
@@ -1683,9 +1664,7 @@ def _delivered_state(delivered: str) -> _DeliveredState:
         if block not in single:
             continue
         found = _task_meta(body)
-        status_by_block[block] = (
-            found[1].group("status") if found else _CANON_STATUS
-        )
+        status_by_block[block] = found[1].group("status") if found else _CANON_STATUS
     marked = {
         c.group("text")
         for start, stop in _task_bounds(lines)
@@ -1730,9 +1709,7 @@ class _CarryResult:
     total_checked_items: int
 
 
-def _carry_execution_state_with_report(
-    text: str, delivered: str
-) -> _CarryResult:
+def _carry_execution_state_with_report(text: str, delivered: str) -> _CarryResult:
     """То же правило §I11 плюс счётчик сопоставленных блоков."""
     prev = _delivered_state(delivered)
     delivered_lines = delivered.split("\n")
@@ -1740,8 +1717,7 @@ def _carry_execution_state_with_report(
         1
         for start, stop in _task_bounds(delivered_lines)
         for line in delivered_lines[start:stop]
-        if (item := _CHECKLIST_RE.match(line)) is not None
-        and item.group("mark") != " "
+        if (item := _CHECKLIST_RE.match(line)) is not None and item.group("mark") != " "
     )
     lines = text.split("\n")
     bounds = _task_bounds(lines)
@@ -1755,9 +1731,7 @@ def _carry_execution_state_with_report(
         if was is not None and found is not None:
             matched += 1
             i, m = found
-            body[i] = (
-                body[i][: m.start("status")] + was + body[i][m.end("status"):]
-            )
+            body[i] = body[i][: m.start("status")] + was + body[i][m.end("status") :]
         for i, line in enumerate(body):
             c = _CHECKLIST_RE.match(line)
             if c is not None and c.group("text") in carryable:
@@ -1974,9 +1948,7 @@ def deliver(
     # (старая эра до раскатки acceptance-узла) и обязан идти DT-путём с той
     # же валидацией графа.
     if any(_node_id(fname) == "decomposition" for fname, _ in dag):
-        decomposition_pre = (
-            base / "30-decomposition.md"
-        ).read_text(encoding="utf-8")
+        decomposition_pre = (base / "30-decomposition.md").read_text(encoding="utf-8")
         behaviour_pre = behaviour.read_text(encoding="utf-8")
         try:
             selector_policy = target_selector_policy(target_dir)
@@ -2048,9 +2020,7 @@ def deliver(
     # пишет tz-aware `approved_at` на approve, и сравнение naive/aware
     # штампов неопределено (devtools#157 — живая аномалия «approve раньше
     # генерации» в kapelle).
-    stamp = generated_at or datetime.now().astimezone().isoformat(
-        timespec="seconds"
-    )
+    stamp = generated_at or datetime.now().astimezone().isoformat(timespec="seconds")
     if any(_node_id(fname) == "decomposition" for fname, _ in dag):
         # DT-путь (Task 8 плана decomposition-node, обобщено Task 7 плана
         # acceptance-node на `--legacy-bundle=5`): состав задач решён
@@ -2066,9 +2036,7 @@ def deliver(
         # (ниже): между рендером и записанным файлом лежит ещё один
         # писатель, и «строка была отрендерена» про записанный файл не
         # утверждает ничего.
-        dt_tasks, _form_findings = decomposition_guard.parse_dt_tasks(
-            anchor_text
-        )
+        dt_tasks, _form_findings = decomposition_guard.parse_dt_tasks(anchor_text)
         text = render_tasks_dt(
             ws_id=ws_id,
             subject=subject,
@@ -2126,10 +2094,7 @@ def deliver(
         commit_paths.append(profile_rel)
     if s8_verdicts is not None:
         evidence_rel = (
-            Path("workstreams")
-            / ws_id
-            / "evidence"
-            / "s8-gate-verdicts.jsonl"
+            Path("workstreams") / ws_id / "evidence" / "s8-gate-verdicts.jsonl"
         ).as_posix()
         evidence_out = Path(target_dir) / evidence_rel
         evidence_out.parent.mkdir(parents=True, exist_ok=True)
@@ -2155,10 +2120,12 @@ def deliver(
         # Между коммитом и push (§I3): падение здесь оставляет коммит
         # опознаваемым. `anchor_blob` — ФАКТИЧЕСКИЙ блоб терминального
         # узла в base; пином спеки он не является (devtools#467).
-        after_commit({
-            "head_sha": ops.rev_parse(target_dir, "HEAD"),
-            "anchor_blob": design_blob,
-        })
+        after_commit(
+            {
+                "head_sha": ops.rev_parse(target_dir, "HEAD"),
+                "anchor_blob": design_blob,
+            }
+        )
     ops.push_branch(target_dir, branch)
     evidence_note = (
         "S8 verdicts этого же цикла приложены в evidence тем же коммитом; "
@@ -2254,14 +2221,10 @@ def _delivered_content_anchor(
         shadow = Path(tmp) / "target"
         (shadow / state.bundle_dir).mkdir(parents=True)
         for fname, _ in dag:
-            text = ops.show_file(
-                state.target_dir, head, f"{state.bundle_dir}/{fname}"
-            )
+            text = ops.show_file(state.target_dir, head, f"{state.bundle_dir}/{fname}")
             if text is None:
                 return None
-            (shadow / state.bundle_dir / fname).write_text(
-                text, encoding="utf-8"
-            )
+            (shadow / state.bundle_dir / fname).write_text(text, encoding="utf-8")
         if state.brief is not None:
             source_paths = state.brief.get("source_paths")
             if not isinstance(source_paths, list) or not all(
@@ -2402,8 +2365,7 @@ def _s8_verdicts(state: RunState) -> bytes:
         return verdicts_path.read_bytes()
     except (OSError, ValueError) as exc:
         raise RuntimeError(
-            f"S8 verdicts прогона недоступны: {verdicts_path} — "
-            "доставка не начата"
+            f"S8 verdicts прогона недоступны: {verdicts_path} — доставка не начата"
         ) from exc
 
 
@@ -2496,10 +2458,10 @@ def deliver_for_run(
                 "поверх отклонённой не выполняется"
             )
         op_complete(
-            state, "tasks-deliver", pr=existing,
-            anchor=_delivered_anchor(
-                state, ops, existing_facts, legacy_bundle
-            ),
+            state,
+            "tasks-deliver",
+            pr=existing,
+            anchor=_delivered_anchor(state, ops, existing_facts, legacy_bundle),
             content_anchor=_delivered_content_anchor(
                 state, ops, existing_facts, legacy_bundle
             ),
@@ -2566,7 +2528,10 @@ def deliver_for_run(
         s8_verdicts=s8_verdicts,
     )
     op_complete(
-        state, "tasks-deliver", pr=pr, anchor=stamped.get("anchor"),
+        state,
+        "tasks-deliver",
+        pr=pr,
+        anchor=stamped.get("anchor"),
         content_anchor=stamped.get("content_anchor"),
     )
     return pr
@@ -2584,7 +2549,7 @@ def _revisions(state: RunState) -> list[tuple[int, dict]]:
     for key, op in state.ops.items():
         if not key.startswith(_REVISION_PREFIX):
             continue
-        suffix = key[len(_REVISION_PREFIX):]
+        suffix = key[len(_REVISION_PREFIX) :]
         if suffix.isdigit():
             found.append((int(suffix), op))
     return sorted(found)
@@ -2611,13 +2576,15 @@ def _discharged_replacements(state: RunState, ops: Ops) -> frozenset[int]:
     бесследным и подавно: это чтение, `run.json` оно не трогает.
     """
     revoked = {
-        op["replaces_pr"] for _, op in _revisions(state)
+        op["replaces_pr"]
+        for _, op in _revisions(state)
         if isinstance(op.get("replaces_pr"), int)
     }
     if not revoked:
         return frozenset()
     return frozenset(
-        pr for pr in sorted(revoked)
+        pr
+        for pr in sorted(revoked)
         if ops.pr_facts(state.repo_slug, pr).get("state") == "MERGED"
     )
 
@@ -2638,7 +2605,8 @@ def _replaced_revisions(
     `supersedes` следующего переиздания обязан указывать именно на неё.
     """
     return {
-        op["replaces_revision"] for m, op in _revisions(state)
+        op["replaces_revision"]
+        for m, op in _revisions(state)
         if isinstance(op.get("replaces_revision"), int)
         and op["replaces_revision"] < m
         and op.get("replaces_pr") not in discharged
@@ -2656,11 +2624,7 @@ def _replaced_by(state: RunState, n: int, pr: int | None) -> int | None:
     if pr is None:
         return None
     for m, op in _revisions(state):
-        if (
-            m > n
-            and op.get("replaces_revision") == n
-            and op.get("replaces_pr") == pr
-        ):
+        if m > n and op.get("replaces_revision") == n and op.get("replaces_pr") == pr:
             return m
     return None
 
@@ -2716,7 +2680,10 @@ def _next_revision(state: RunState) -> int:
 def _start_revision(state: RunState, n: int, intent: dict) -> None:
     """Write-ahead намерения ревизии (§I4): пишется ДО единого эффекта."""
     state.ops[f"{_REVISION_PREFIX}{n}"] = {
-        "status": "started", "revision": n, "head_sha": None, **intent,
+        "status": "started",
+        "revision": n,
+        "head_sha": None,
+        **intent,
     }
     save(state)
 
@@ -2724,7 +2691,8 @@ def _start_revision(state: RunState, n: int, intent: dict) -> None:
 def _complete_revision(state: RunState, n: int, **result: object) -> None:
     state.ops[f"{_REVISION_PREFIX}{n}"] = {
         **state.ops.get(f"{_REVISION_PREFIX}{n}", {"revision": n}),
-        "status": "completed", **result,
+        "status": "completed",
+        **result,
     }
     save(state)
 
@@ -2755,9 +2723,7 @@ def _abandon_revision(state: RunState, n: int, reason: str) -> None:
             if status == "completed"
             else f"уже брошена (причина: {op.get('reason')!r})"
         )
-        raise RuntimeError(
-            f"ревизия {n} {detail} — терминальная запись не мутируется"
-        )
+        raise RuntimeError(f"ревизия {n} {detail} — терминальная запись не мутируется")
     state.ops[key] = {**op, "status": "abandoned", "reason": reason}
     save(state)
 
@@ -2914,10 +2880,13 @@ def _check_replacement_target(
             "нет» утверждать не из чего, fail-closed"
         )
     allowed = _review_allowlist()
-    blocking = sorted({
-        str(r.get("login")) for r in reviews
-        if r.get("state") != "PENDING" and r.get("login") not in allowed
-    })
+    blocking = sorted(
+        {
+            str(r.get("login"))
+            for r in reviews
+            if r.get("state") != "PENDING" and r.get("login") not in allowed
+        }
+    )
     if blocking:
         raise RuntimeError(
             f"замена PR #{pr}: на нём есть submitted review "
@@ -2935,9 +2904,7 @@ def _check_replacement_target(
         )
 
 
-def _validate_replacement(
-    state: RunState, ops: Ops, replace: Replacement
-) -> dict:
+def _validate_replacement(state: RunState, ops: Ops, replace: Replacement) -> dict:
     """Проверки заменяемой ревизии ДО единого эффекта → поля намерения.
 
     Порядок владельца начинается именно этим: «validate v3/#408 →
@@ -2980,7 +2947,10 @@ def _validate_replacement(
             f"branch={branch!r}) — заменять нечего"
         )
     _check_replacement_target(
-        state, ops, pr, op.get("head_sha"),
+        state,
+        ops,
+        pr,
+        op.get("head_sha"),
         ops.pr_facts(state.repo_slug, pr),
     )
     return {
@@ -3018,23 +2988,17 @@ def _require_last_in_history(state: RunState, n: int) -> None:
 def _later_revisions(state: RunState, n: int) -> list[int]:
     """Ревизии после `n`, которые НЕ ведут замену `n`."""
     return [
-        m for m, op in _revisions(state)
-        if m > n and op.get("replaces_revision") != n
+        m for m, op in _revisions(state) if m > n and op.get("replaces_revision") != n
     ]
 
 
 def _latest_v1_replacement(state: RunState) -> tuple[int, dict] | None:
     """Новейшая запись, объявившая замену первой доставки; None — нет."""
-    found = [
-        (m, op) for m, op in _revisions(state)
-        if op.get("replaces_revision") == 1
-    ]
+    found = [(m, op) for m, op in _revisions(state) if op.get("replaces_revision") == 1]
     return found[-1] if found else None
 
 
-def _validate_v1_replacement(
-    state: RunState, ops: Ops, replace: Replacement
-) -> dict:
+def _validate_v1_replacement(state: RunState, ops: Ops, replace: Replacement) -> dict:
     """Замена ОТКЛОНЁННОЙ первой доставки (спека 2026-09-28 §4.1).
 
     Все проверки — до единого эффекта. Порядок: леджер (без сети) →
@@ -3140,7 +3104,8 @@ def _closed_by_human_or_confirmed(
         return {**fields, "replacement_confirmed_by": caller}
     if closed_by == agent or closure.get("head_deleted_first") is True:
         cause = (
-            f"закрыл учётка агента {agent}" if closed_by == agent
+            f"закрыл учётка агента {agent}"
+            if closed_by == agent
             else f"закрытию предшествует удаление ветки ({closed_by})"
         )
         raise RuntimeError(
@@ -3159,9 +3124,7 @@ def _revision_without_pr(n: int) -> RuntimeError:
     )
 
 
-def _v1_replacement_repeat(
-    state: RunState, ops: Ops
-) -> SupersedeResult | None:
+def _v1_replacement_repeat(state: RunState, ops: Ops) -> SupersedeResult | None:
     """Явный `--replace-revision 1` при уже записанной замене (§4.4).
 
     Живая завершённая замена M (PR открыт либо вмержен) — объяснение и
@@ -3219,11 +3182,7 @@ def _v1_replacement_of_pr(state: RunState) -> tuple[int, int] | None:
     """
     pr = (state.ops.get(_V1_KEY) or {}).get("pr")
     prior = _latest_v1_replacement(state)
-    if (
-        not isinstance(pr, int)
-        or prior is None
-        or prior[1].get("replaces_pr") != pr
-    ):
+    if not isinstance(pr, int) or prior is None or prior[1].get("replaces_pr") != pr:
         return None
     return pr, prior[0]
 
@@ -3268,14 +3227,11 @@ def _check_v1_after_replacement(state: RunState, ops: Ops) -> None:
             continue
         status, rev_pr = op.get("status"), op.get("pr")
         if status == "started":
-            procedure = (
-                f"--abandon-revision {n} --reason …, затем --supersede"
-            )
+            procedure = f"--abandon-revision {n} --reason …, затем --supersede"
         elif (
             status == "completed"
             and isinstance(rev_pr, int)
-            and _replacement_pr_facts(state, ops, rev_pr).get("state")
-            == "OPEN"
+            and _replacement_pr_facts(state, ops, rev_pr).get("state") == "OPEN"
         ):
             procedure = (
                 f"закройте PR #{rev_pr}, затем --supersede "
@@ -3314,10 +3270,7 @@ def _v1_replacement_answer(state: RunState, ops: Ops, pr: int) -> int | None:
         return None
     if pr_state == "OPEN":
         raise _v1_reopened(pr, m)
-    live = [
-        (n, op) for n, op in _revisions(state)
-        if op.get("status") != "abandoned"
-    ]
+    live = [(n, op) for n, op in _revisions(state) if op.get("status") != "abandoned"]
     if not live or live[-1][1].get("status") != "completed":
         which = f"ревизия {live[-1][0]}" if live else "ревизия-замена брошена"
         raise RuntimeError(
@@ -3380,15 +3333,21 @@ def _pending_replacement(
             )
             return {}
         return {
-            key: op[key] for key in (
-                "replaces_revision", "replaces_pr", "replaces_branch",
-                "replaces_head_sha", "replacement_reason",
+            key: op[key]
+            for key in (
+                "replaces_revision",
+                "replaces_pr",
+                "replaces_branch",
+                "replaces_head_sha",
+                "replacement_reason",
                 # Факты закрытия отклонённой первой доставки (§I10 для v1)
                 # едут вместе с обязательством: иначе следующая ревизия
                 # теряет «кто закрыл и кто подтвердил замену».
-                "replaces_closed_by", "replaces_closed_at",
+                "replaces_closed_by",
+                "replaces_closed_at",
                 "replacement_confirmed_by",
-            ) if key in op
+            )
+            if key in op
         }
     return {}
 
@@ -3411,11 +3370,15 @@ def _replacement_close(state: RunState, ops: Ops, op: dict) -> None:
         return
     facts = ops.pr_facts(state.repo_slug, pr)
     _check_replacement_target(
-        state, ops, pr, op.get("replaces_head_sha"), facts,
+        state,
+        ops,
+        pr,
+        op.get("replaces_head_sha"),
+        facts,
         pending_revision=op.get("revision"),
     )
     if facts.get("state") != "OPEN":
-        return          # уже закрыт: шаг состоялся раньше (или оператором)
+        return  # уже закрыт: шаг состоялся раньше (или оператором)
     reason = op.get("replacement_reason", "")
     body = (
         f"Закрыт механикой replace-перехода `task_bridge` прогона "
@@ -3502,7 +3465,7 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
             )
             continue
         if before.outcome is Outcome.ABSENT:
-            continue          # ссылки нет — шаг по этой половине состоялся
+            continue  # ссылки нет — шаг по этой половине состоялся
         actual = before.value
         if before.outcome is not Outcome.FOUND or not isinstance(actual, str):
             print(
@@ -3555,10 +3518,7 @@ def _replacement_cleanup(state: RunState, ops: Ops, op: dict) -> None:
             "удалите её вручную"
         )
     if removed:
-        print(
-            f"ветка заменённой ревизии удалена ({', '.join(removed)}): "
-            f"{branch}"
-        )
+        print(f"ветка заменённой ревизии удалена ({', '.join(removed)}): {branch}")
 
 
 def _previous_dag(
@@ -3599,7 +3559,9 @@ def _previous_dag(
     recorded = prev_op.get("dag")
     if recorded:
         return (
-            tuple((f, tuple(u)) for f, u in recorded), "previous_delivery", "",
+            tuple((f, tuple(u)) for f, u in recorded),
+            "previous_delivery",
+            "",
         )
     bundle_path = Path(target_dir) / bundle_dir
     if not bundle_path.is_dir():
@@ -3611,39 +3573,41 @@ def _previous_dag(
         )
     present = _bundle_composition(bundle_path)
     matches = [
-        _dag_for(v) for v in (None, 3, 4, 5)
-        if {f for f, _ in _dag_for(v)} == present
+        _dag_for(v) for v in (None, 3, 4, 5) if {f for f, _ in _dag_for(v)} == present
     ]
     if not matches:
         return (
-            None, "unavailable",
-            "состав каталога бандла не совпал ни с одним известным "
-            "вариантом DAG",
+            None,
+            "unavailable",
+            "состав каталога бандла не совпал ни с одним известным вариантом DAG",
         )
     spec_rel = f"spec/{state.ws_id}-tasks.md"
     text = ops.show_file(target_dir, base_sha, spec_rel)
     if text is None:
         return (
-            None, "unavailable",
+            None,
+            "unavailable",
             f"доставленной tasks-спеки нет в base по пути {spec_rel}",
         )
     try:
         meta, _ = split_frontmatter(text)
     except ValueError:
         return (
-            None, "unavailable",
+            None,
+            "unavailable",
             f"frontmatter доставленной tasks-спеки {spec_rel} не разобран",
         )
     traces = meta.get("traces_to")
     if not isinstance(traces, list) or not traces:
         return (
-            None, "unavailable",
-            f"поле traces_to доставленной tasks-спеки {spec_rel} пусто "
-            "или не список",
+            None,
+            "unavailable",
+            f"поле traces_to доставленной tasks-спеки {spec_rel} пусто или не список",
         )
     if traces[0] != _node_id(matches[0][-1][0]):
         return (
-            None, "unavailable",
+            None,
+            "unavailable",
             f"якорь traces_to доставленной tasks-спеки {spec_rel} не "
             "совпал с терминальным узлом состава, выведенного из каталога "
             "бандла",
@@ -3682,7 +3646,7 @@ def _require_resumable_epoch(n: int, op: dict) -> None:
         "они не могут. Возобновлять такое намерение нельзя: продолжить "
         "значит доставить штамп, которого контракт больше не разрешает, а "
         "не продолжить — разойтись с записанным anchor'ом. Процедура: "
-        f"--abandon-revision {n} --reason \"намерение эпохи штампа\", "
+        f'--abandon-revision {n} --reason "намерение эпохи штампа", '
         "затем обычный --supersede"
     )
 
@@ -3916,8 +3880,7 @@ def _previous_tasks_version(state: RunState) -> int:
     rel = Path(state.target_dir) / "spec" / f"{state.ws_id}-tasks.md"
     if not rel.exists():
         raise RuntimeError(
-            f"{rel} не найден на базе — версию предыдущей доставки взять "
-            "неоткуда"
+            f"{rel} не найден на базе — версию предыдущей доставки взять неоткуда"
         )
     try:
         meta, _ = split_frontmatter(rel.read_text(encoding="utf-8"))
@@ -4056,16 +4019,12 @@ def _require_no_successful_delivery(
     """
     v1 = state.ops.get(_V1_KEY) or {}
     completed = [
-        n for n, op in (
-            [(1, v1)] + _revisions(state)
-        ) if op.get("status") == "completed"
+        n
+        for n, op in ([(1, v1)] + _revisions(state))
+        if op.get("status") == "completed"
     ]
     revoked = _replaced_revisions(state, discharged) | {skip}
-    if (
-        not completed
-        or not set(completed) <= revoked
-        or v1.get("status") == "started"
-    ):
+    if not completed or not set(completed) <= revoked or v1.get("status") == "started":
         raise RuntimeError(
             "доставок ещё не было — переиздавать нечего; обычная доставка "
             "идёт без --supersede"
@@ -4143,8 +4102,7 @@ def deliver_superseded(
     """
     if state.status != "completed":
         raise RuntimeError(
-            f"run {state.run_id!r} в статусе {state.status!r}, нужен "
-            "'completed'"
+            f"run {state.run_id!r} в статусе {state.status!r}, нужен 'completed'"
         )
     if ops.is_dirty(state.target_dir):
         raise RuntimeError(
@@ -4175,9 +4133,7 @@ def deliver_superseded(
         repeated = _v1_replacement_repeat(state, ops)
         if repeated is not None:
             return repeated
-    replace_fields = (
-        _validate_replacement(state, ops, replace) if replace else {}
-    )
+    replace_fields = _validate_replacement(state, ops, replace) if replace else {}
 
     # Незавершённая ревизия реконсилируется ДО любых новых эффектов, и её
     # решение исполняется ЦЕЛИКОМ: игнорировать "continue"/"complete"/
@@ -4192,7 +4148,7 @@ def deliver_superseded(
     for n, op in reversed(_revisions(state)):
         status = op.get("status")
         if status not in ("started", "completed"):
-            continue          # abandoned — терминальна, смотрим предыдущую
+            continue  # abandoned — терминальна, смотрим предыдущую
         if status == "started":
             _require_resumable_epoch(n, op)
         if replace is not None and n == replace.revision:
@@ -4207,12 +4163,11 @@ def deliver_superseded(
         # имя перехода возвращает, а номер PR нужен и вызывающему.
         pr = (
             ops.find_pr(state.repo_slug, op["branch"], any_state=True)
-            if op.get("branch") else None
+            if op.get("branch")
+            else None
         )
         facts = ops.pr_facts(state.repo_slug, pr) if pr is not None else {}
-        if status == "completed" and (
-            pr is None or facts.get("state") == "MERGED"
-        ):
+        if status == "completed" and (pr is None or facts.get("state") == "MERGED"):
             # §I3 «completed | MERGED»: доставка состоялась, переиздание
             # решается ТОЛЬКО по §I5 — реконсилировать нечего. Остальные
             # состояния PR завершённой ревизии (OPEN → вернуть его;
@@ -4224,7 +4179,11 @@ def deliver_superseded(
                 _replacement_cleanup(state, ops, op)
             break
         decision = _reconcile_revision(
-            n, op, base_sha, pr, facts,
+            n,
+            op,
+            base_sha,
+            pr,
+            facts,
             replaced=_replaced_by(state, n, pr) is not None,
         )
         if decision == "replaced":
@@ -4260,16 +4219,16 @@ def deliver_superseded(
             # хвост замены доводится и на возврате существующего PR, иначе
             # он не доводился бы никогда — этот исход терминален.
             _replacement_cleanup(state, ops, op)
-            print(
-                f"ревизия {n} уже доставлена — PR #{pr}; новая ревизия не "
-                "заводится"
-            )
+            print(f"ревизия {n} уже доставлена — PR #{pr}; новая ревизия не заводится")
             return SupersedeResult("returned", pr)
         if decision == "complete":
             _complete_revision(
-                state, n, pr=pr, anchor=op["prospective_anchor"],
+                state,
+                n,
+                pr=pr,
+                anchor=op["prospective_anchor"],
                 content_anchor=op.get("content_anchor"),
-                head_sha=op["head_sha"],   # непуст по гварду выше
+                head_sha=op["head_sha"],  # непуст по гварду выше
             )
             _replacement_cleanup(state, ops, op)
             # Доставка состоялась; нужно ли ещё одно переиздание — решает
@@ -4293,9 +4252,12 @@ def deliver_superseded(
             # §I3 «started | PR OPEN | идентичность сошлась», которая
             # обещает возврат существующего PR.
             _complete_revision(
-                state, n, pr=pr, anchor=op["prospective_anchor"],
+                state,
+                n,
+                pr=pr,
+                anchor=op["prospective_anchor"],
                 content_anchor=op.get("content_anchor"),
-                head_sha=op["head_sha"],   # непуст по гварду выше
+                head_sha=op["head_sha"],  # непуст по гварду выше
             )
             _replacement_cleanup(state, ops, op)
             print(f"ревизия {n} доставлена ранее — PR #{pr}")
@@ -4345,15 +4307,16 @@ def deliver_superseded(
             ),
             report_carry=True,
             before_commit=_tasks_blob_cb(state, n),
-            after_commit=_commit_facts_cb(
-                state, ops, n, op["prospective_anchor"]
-            ),
+            after_commit=_commit_facts_cb(state, ops, n, op["prospective_anchor"]),
             s8_verdicts=resumed_s8,
         )
         _print_carry_report(state, n)
         # head_sha уже записан колбэком durable — между коммитом и push.
         _complete_revision(
-            state, n, pr=pr, anchor=op["prospective_anchor"],
+            state,
+            n,
+            pr=pr,
+            anchor=op["prospective_anchor"],
             content_anchor=op.get("content_anchor"),
         )
         _replacement_cleanup(state, ops, op)
@@ -4412,7 +4375,12 @@ def deliver_superseded(
                 )
                 return SupersedeResult("returned", v1_pr)
         dag, dag_source, dag_reason = _previous_dag(
-            state, ops, prev_op, state.target_dir, state.bundle_dir, base_sha,
+            state,
+            ops,
+            prev_op,
+            state.target_dir,
+            state.bundle_dir,
+            base_sha,
         )
     if dag is None:
         # Единственная точка печати (Механика п. 4): привязана к тому же
@@ -4443,9 +4411,7 @@ def deliver_superseded(
         # брошенной ревизии-замены, и тогда флага в этом запуске нет — а
         # no-op молча испарил бы обязательство при RC 0, оставив
         # отозванный PR открытым, а его ветку живой.
-        not replace_fields
-        and comparable
-        and recorded_content == content
+        not replace_fields and comparable and recorded_content == content
     ):
         print(
             "апстрим не менялся — переиздание не требуется "
@@ -4453,12 +4419,12 @@ def deliver_superseded(
         )
         if abandoned is not None:
             n_abandoned, abandon_reason = abandoned
-            print(
-                f"ревизия {n_abandoned} брошена этим вызовом: "
-                f"{abandon_reason}"
-            )
+            print(f"ревизия {n_abandoned} брошена этим вызовом: {abandon_reason}")
         notice = _debt_notice(
-            state, ops, legacy_bundle, traceless=abandoned is None,
+            state,
+            ops,
+            legacy_bundle,
+            traceless=abandoned is None,
         )
         if notice:
             print(notice)
@@ -4474,10 +4440,7 @@ def deliver_superseded(
         # сверить не с чем.
         print(
             "сверка §I5 не производилась (comparison: unavailable): "
-            + (
-                _NSD_REASON if nsd
-                else _incomparable_reason(recorded_content, content)
-            )
+            + (_NSD_REASON if nsd else _incomparable_reason(recorded_content, content))
         )
 
     # Гейт §I12 — ПОСЛЕ §I5 и до записи ревизии: там, где доставки не
@@ -4498,9 +4461,7 @@ def deliver_superseded(
     # Читается ДО намерения: нет файла — отказ без единой записи.
     s8_verdicts = _s8_verdicts(state) if nsd else None
 
-    prospective = _prospective_anchor(
-        state.target_dir, state.bundle_dir, legacy_bundle
-    )
+    prospective = _prospective_anchor(state.target_dir, state.bundle_dir, legacy_bundle)
     n = _next_revision(state)
     generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
     # §I6: версия считается от спеки в base. В NSD её там нет (проверено
@@ -4575,7 +4536,9 @@ def deliver_superseded(
         # источник, что у `_previous_dag`), не из рабочего дерева и не из
         # HEAD — base зафиксирован `base_sha` намерения. В NSD спеки в
         # base нет (доказано предикатом) — переносить нечего.
-        carry_from=None if nsd else ops.show_file_for_carry(
+        carry_from=None
+        if nsd
+        else ops.show_file_for_carry(
             state.target_dir, base_sha, f"spec/{state.ws_id}-tasks.md"
         ),
         report_carry=True,
@@ -4586,9 +4549,7 @@ def deliver_superseded(
     _print_carry_report(state, n)
     # head_sha здесь НЕ пишется: он уже записан колбэком durable — между
     # коммитом и push (§I3), а не после создания PR.
-    _complete_revision(
-        state, n, pr=pr, anchor=prospective, content_anchor=content
-    )
+    _complete_revision(state, n, pr=pr, anchor=prospective, content_anchor=content)
     # Последний шаг порядка владельца: ветка заменённой ревизии удаляется
     # только теперь — намерение durable, заменяемый PR закрыт, новый PR
     # создан. Всё, что раньше, оставило бы ошибочный артефакт без ветки
@@ -4635,16 +4596,12 @@ def deliver_approve(
     # `spec approve` по профилю.
     # Состав — первым, как у всех путей: иначе забытый/лишний
     # --legacy-bundle положил бы эталон ЧУЖОГО режима и назвал не ту причину.
-    _check_bundle_composition(
-        target_dir, state.bundle_dir, _dag_for(legacy_bundle)
-    )
+    _check_bundle_composition(target_dir, state.bundle_dir, _dag_for(legacy_bundle))
     # Спека, доставленная ДО devtools#386, пришла без профиля — и
     # `spec approve --profile` в таком репо запустить нечем. Мост кладёт
     # эталон сам (тот же, что положила бы доставка) и называет следующий
     # шаг; профиль уезжает этим же approve-PR.
-    profile_rel, profile_text = stage_profile(
-        ws_id, state.bundle_dir, legacy_bundle
-    )
+    profile_rel, profile_text = stage_profile(ws_id, state.bundle_dir, legacy_bundle)
     _check_stage_profile(target_dir, profile_rel, profile_text)
     profile_path = Path(target_dir) / profile_rel
     if not profile_path.exists():
@@ -4656,9 +4613,7 @@ def deliver_approve(
             f"`{approve_command(ws_id, legacy_bundle)}` и повторите "
             "--deliver-approve: профиль уедет этим же PR"
         )
-    check_approved(
-        target_dir, ws_id, state.bundle_dir, legacy_bundle=legacy_bundle
-    )
+    check_approved(target_dir, ws_id, state.bundle_dir, legacy_bundle=legacy_bundle)
     branch = f"spec/{ws_id}-tasks-approve"
     existing = ops.find_pr(repo_slug, branch)
     ops.ensure_branch(target_dir, branch)
@@ -4695,17 +4650,23 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True)
     parser.add_argument(
-        "--deliver-approve", action="store_true",
+        "--deliver-approve",
+        action="store_true",
         help="после `spec approve tasks --profile …` владельца: проверить "
         "штамп и доставить его PR-ом",
     )
     # Снятый флаг (devtools#386) принимается парсером и ОТКАЗЫВАЕТ с
     # названной причиной — «unrecognized arguments» не сказал бы, куда идти.
     parser.add_argument(
-        "--conform-approve", action="store_true", help=argparse.SUPPRESS,
+        "--conform-approve",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--legacy-bundle", type=int, choices=(3, 4, 5), default=None,
+        "--legacy-bundle",
+        type=int,
+        choices=(3, 4, 5),
+        default=None,
         help="точный фактический состав легаси-бандла: 3 — "
         "charter+requirements+behaviour-spec (без design/acceptance/"
         "decomposition); 4 — + design (без acceptance/decomposition); "
@@ -4716,52 +4677,61 @@ def main(argv: list[str] | None = None) -> int:
         "лишний либо недостающий узел отказывает",
     )
     parser.add_argument(
-        "--approve-node", default=None, metavar="NODE-ID",
+        "--approve-node",
+        default=None,
+        metavar="NODE-ID",
         help="одобрение узла бандла — человеческий акт (§I12): вынести "
-             "узел активного DAG на одобрение candidate-PR-ом, а после "
-             "мержа этого PR человеком записать подпись финализирующим "
-             "PR-ом. Принимается ТОЛЬКО node-id активного DAG (не путь): "
-             "approve есть акт о позиции в графе, а не о файле на диске. "
-             "Повтор над честно одобренным узлом — бесследный no-op; "
-             "approved-узел с разошедшимися пинами — отказ",
+        "узел активного DAG на одобрение candidate-PR-ом, а после "
+        "мержа этого PR человеком записать подпись финализирующим "
+        "PR-ом. Принимается ТОЛЬКО node-id активного DAG (не путь): "
+        "approve есть акт о позиции в графе, а не о файле на диске. "
+        "Повтор над честно одобренным узлом — бесследный no-op; "
+        "approved-узел с разошедшимися пинами — отказ",
     )
     parser.add_argument(
-        "--supersede", action="store_true",
+        "--supersede",
+        action="store_true",
         help="переиздать tasks-спеку после correction'а апстрима: новая "
-             "ветка spec/<ws-id>-tasks-v<N>, новый PR, отдельная ревизия в "
-             "леджере; неизменившееся содержание апстрима "
-             "(content_anchor) — успешный no-op без изменений",
+        "ветка spec/<ws-id>-tasks-v<N>, новый PR, отдельная ревизия в "
+        "леджере; неизменившееся содержание апстрима "
+        "(content_anchor) — успешный no-op без изменений",
     )
     parser.add_argument(
-        "--abandon-revision", type=int, default=None,
+        "--abandon-revision",
+        type=int,
+        default=None,
         help="перевести незавершённую ревизию переиздания в терминальный "
-             "abandoned (требует --reason)",
+        "abandoned (требует --reason)",
     )
     parser.add_argument(
-        "--reason", default=None,
+        "--reason",
+        default=None,
         help="причина решения для --abandon-revision либо "
-             "--replace-revision; флаг ОДИН на оба перехода, потому что "
-             "они взаимоисключающи (гвард ниже) — двусмысленности нет, а "
-             "в леджер причина ложится своим полем каждого перехода "
-             "(reason / replacement_reason)",
+        "--replace-revision; флаг ОДИН на оба перехода, потому что "
+        "они взаимоисключающи (гвард ниже) — двусмысленности нет, а "
+        "в леджер причина ложится своим полем каждого перехода "
+        "(reason / replacement_reason)",
     )
     parser.add_argument(
-        "--replace-revision", type=int, default=None,
+        "--replace-revision",
+        type=int,
+        default=None,
         help="явный replace-переход (только с --supersede): отозвать "
-             "незамерженное предложение названной ревизии — новая "
-             "ревизия несёт replaces_revision/replaces_pr, PR "
-             "отозванной закрывается механикой, её ветка удаляется; "
-             "требует --reason. N = 1 — только отклонённая первая "
-             "доставка (PR закрыт без мержа): новая ревизия доставляется "
-             "из состояния «успешной доставки нет» (supersedes: null, "
-             "version: 1)",
+        "незамерженное предложение названной ревизии — новая "
+        "ревизия несёт replaces_revision/replaces_pr, PR "
+        "отозванной закрывается механикой, её ветка удаляется; "
+        "требует --reason. N = 1 — только отклонённая первая "
+        "доставка (PR закрыт без мержа): новая ревизия доставляется "
+        "из состояния «успешной доставки нет» (supersedes: null, "
+        "version: 1)",
     )
     parser.add_argument(
-        "--owner-confirm", action="store_true",
+        "--owner-confirm",
+        action="store_true",
         help="только с --replace-revision 1: владелец подтверждает, что "
-             "первую доставку отклонил он, когда по фактам форджи этого не "
-             "установить (закрыла учётка агента либо удаление ветки); "
-             "вызывающая учётка пишется в replacement_confirmed_by",
+        "первую доставку отклонил он, когда по фактам форджи этого не "
+        "установить (закрыла учётка агента либо удаление ветки); "
+        "вызывающая учётка пишется в replacement_confirmed_by",
     )
     args = parser.parse_args(argv)
     if args.conform_approve:
@@ -4795,9 +4765,7 @@ def main(argv: list[str] | None = None) -> int:
             "--supersede и --abandon-revision — разные действия: "
             "сначала абандоньте ревизию, затем запускайте переиздание"
         )
-    if args.deliver_approve and (
-        args.supersede or args.abandon_revision is not None
-    ):
+    if args.deliver_approve and (args.supersede or args.abandon_revision is not None):
         # Та же мотивировка, доведённая до конца (minor C-6): диспетчер
         # ниже проверяет --abandon-revision, затем --supersede, затем
         # --deliver-approve, и первый сработавший молча съедал остальные.
@@ -4806,10 +4774,7 @@ def main(argv: list[str] | None = None) -> int:
             "его отдельным прогоном, не вместе с --supersede/"
             "--abandon-revision"
         )
-    if (
-        args.replace_revision is not None
-        and args.abandon_revision is not None
-    ):
+    if args.replace_revision is not None and args.abandon_revision is not None:
         # Та же мотивировка, что у пар выше: абандон и замена — разные
         # переходы над разными ревизиями, и молчаливая победа одного
         # решала бы за оператора, что он имел в виду. Гвард стоит ВЫШЕ
@@ -4885,7 +4850,9 @@ def main(argv: list[str] | None = None) -> int:
         # сообщает о себе сама, не проверяем никем (§I12).
         try:
             outcome = approve_node(
-                state, ops, args.approve_node,
+                state,
+                ops,
+                args.approve_node,
                 legacy_bundle=args.legacy_bundle,
             )
         except RuntimeError as exc:
@@ -4908,13 +4875,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.supersede:
         try:
             result = deliver_superseded(
-                state, ops, legacy_bundle=args.legacy_bundle,
+                state,
+                ops,
+                legacy_bundle=args.legacy_bundle,
                 replace=(
                     Replacement(
-                        args.replace_revision, args.reason,
+                        args.replace_revision,
+                        args.reason,
                         args.owner_confirm,
                     )
-                    if args.replace_revision is not None else None
+                    if args.replace_revision is not None
+                    else None
                 ),
             )
         except RuntimeError as exc:
@@ -4929,9 +4900,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.deliver_approve:
         try:
-            pr = deliver_approve(
-                state, ops, legacy_bundle=args.legacy_bundle
-            )
+            pr = deliver_approve(state, ops, legacy_bundle=args.legacy_bundle)
         except RuntimeError as exc:
             print(f"task_bridge: {exc}")
             return 1

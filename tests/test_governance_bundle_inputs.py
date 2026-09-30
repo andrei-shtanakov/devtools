@@ -19,9 +19,7 @@ class ShowOps:
         self.calls.append((ref, path))
         return self.values.get((ref, path))
 
-    def show_file_bytes(
-        self, target_dir: str, ref: str, path: str
-    ) -> bytes | None:
+    def show_file_bytes(self, target_dir: str, ref: str, path: str) -> bytes | None:
         self.calls.append((ref, path))
         value = self.values.get((ref, path))
         return value.encode("utf-8") if value is not None else None
@@ -29,9 +27,15 @@ class ShowOps:
 
 def _state(tmp_path: Path, *, brief=None) -> rs.RunState:
     return rs.new_run(
-        subject="s", repo="alpha", repo_slug="owner/alpha", ws_id="WS-1",
-        target_dir=str(tmp_path), bundle_dir="workstreams/WS-1/spec",
-        profile="profiles/team-exp.yaml", run_id="r-inputs", brief=brief,
+        subject="s",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-1",
+        target_dir=str(tmp_path),
+        bundle_dir="workstreams/WS-1/spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-inputs",
+        brief=brief,
     )
 
 
@@ -54,7 +58,11 @@ def test_known_texts_avoid_duplicate_ref_read(tmp_path: Path) -> None:
     ops = ShowOps({})
 
     fact = bundle_inputs.direct_blobs(
-        state, ops, bundle_dag.BUNDLE_DAG, "requirements", "base",
+        state,
+        ops,
+        bundle_dag.BUNDLE_DAG,
+        "requirements",
+        "base",
         known_texts={"00-charter.md": "cached charter"},
     )
 
@@ -125,8 +133,11 @@ def test_changed_source_is_forbidden_not_replaced_by_descriptor(
     rel = f"{state.bundle_dir}/{brief_input.PRIMARY_REL}"
 
     fact = bundle_inputs.direct_blobs(
-        state, ShowOps({("base", rel): "changed"}),
-        bundle_dag.BUNDLE_DAG, "charter", "base",
+        state,
+        ShowOps({("base", rel): "changed"}),
+        bundle_dag.BUNDLE_DAG,
+        "charter",
+        "base",
     )
 
     assert fact.outcome is Outcome.FORBIDDEN
@@ -167,8 +178,11 @@ def test_missing_source_is_unavailable(tmp_path: Path) -> None:
         "source_blobs": {"discovery-brief": "a" * 40},
     }
     fact = bundle_inputs.direct_blobs(
-        _state(tmp_path, brief=descriptor), ShowOps({}),
-        bundle_dag.BUNDLE_DAG, "charter", "base",
+        _state(tmp_path, brief=descriptor),
+        ShowOps({}),
+        bundle_dag.BUNDLE_DAG,
+        "charter",
+        "base",
     )
 
     assert fact.outcome is Outcome.UNAVAILABLE
@@ -184,8 +198,11 @@ def test_corrupt_descriptor_cannot_escape_bundle(tmp_path: Path) -> None:
     }
 
     fact = bundle_inputs.direct_blobs(
-        _state(tmp_path, brief=descriptor), ShowOps({}),
-        bundle_dag.BUNDLE_DAG, "charter", None,
+        _state(tmp_path, brief=descriptor),
+        ShowOps({}),
+        bundle_dag.BUNDLE_DAG,
+        "charter",
+        None,
     )
 
     assert fact.outcome is Outcome.UNAVAILABLE

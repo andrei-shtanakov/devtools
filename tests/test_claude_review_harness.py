@@ -169,7 +169,9 @@ def test_resolution_unknown_harness_is_config_error(tmp_path: Path) -> None:
     env.pop("REVIEW_MODEL", None)
     res = subprocess.run(
         ["sh", str(REVIEW_PR), "dummy", "1", "--print-review-cmd"],
-        capture_output=True, text=True, env=env,
+        capture_output=True,
+        text=True,
+        env=env,
     )
     assert res.returncode == 2
     assert "gemini" in res.stderr
@@ -266,7 +268,11 @@ def test_new_kit_cli_flags_beat_env_and_config(tmp_path: Path) -> None:
         repo="demo",
         argv=["--harness", "claude", "--model", "claude-sonnet-4-6"],
         cfg="REVIEW_HARNESS=codex\n",
-        env_extra={"REVIEW_HARNESS": "codex", "REVIEW_MODEL": "gpt-5.5", "HARNESS_KIT_LOG": str(log)},
+        env_extra={
+            "REVIEW_HARNESS": "codex",
+            "REVIEW_MODEL": "gpt-5.5",
+            "HARNESS_KIT_LOG": str(log),
+        },
     )
     assert cmd == "harness-claude --model claude-sonnet-4-6"
     assert _kit_env(log)["REVIEW_MODEL"] == "claude-sonnet-4-6"
@@ -283,7 +289,11 @@ def test_new_kit_harness_flag_without_model_does_not_inherit_env_model(
         tmp_path,
         repo="demo",
         argv=["--harness", "codex"],
-        env_extra={"REVIEW_HARNESS": "claude", "REVIEW_MODEL": "claude-opus-5", "HARNESS_KIT_LOG": str(log)},
+        env_extra={
+            "REVIEW_HARNESS": "claude",
+            "REVIEW_MODEL": "claude-opus-5",
+            "HARNESS_KIT_LOG": str(log),
+        },
     )
     assert cmd == "codex exec"
     assert _kit_env(log)["REVIEW_MODEL"] == "<unset>"
@@ -295,7 +305,10 @@ def test_new_kit_external_review_cmd_wins_without_flags(tmp_path: Path) -> None:
         tmp_path,
         repo="demo",
         cfg="REVIEW_HARNESS=claude\n",
-        env_extra={"REVIEW_CMD": "codex exec --model спец", "HARNESS_KIT_LOG": str(log)},
+        env_extra={
+            "REVIEW_CMD": "codex exec --model спец",
+            "HARNESS_KIT_LOG": str(log),
+        },
     )
     assert cmd == "codex exec --model спец"
     assert not log.exists(), "с внешним REVIEW_CMD кит для строки не зовётся"
@@ -329,7 +342,10 @@ def test_old_kit_codex_still_works(tmp_path: Path) -> None:
     как раньше, REVIEW_CMD только при заданной модели."""
     _old_kit_fleet(tmp_path)
     assert _resolve(tmp_path, cfg="REVIEW_HARNESS=codex\n") == "codex exec"
-    assert _resolve(tmp_path, argv=["--harness", "codex", "--model", "gpt-5.5"]) == "codex exec -m gpt-5.5"
+    assert (
+        _resolve(tmp_path, argv=["--harness", "codex", "--model", "gpt-5.5"])
+        == "codex exec -m gpt-5.5"
+    )
 
 
 def test_old_kit_claude_is_refused_not_shimmed(tmp_path: Path) -> None:

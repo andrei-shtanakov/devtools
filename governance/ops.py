@@ -97,7 +97,7 @@ REVIEW_BARRIER_EXIT = 6
 REVIEW_BARRIER_STOP = (
     "Барьер ревью: бюджет исчерпан либо stop rule (последнее ревью — "
     "approve). Требуется решение владельца. Для осознанного продолжения "
-    "запустите вручную с --budget-override \"<причина>\"; точная причина — "
+    'запустите вручную с --budget-override "<причина>"; точная причина — '
     "в stderr ручного прогона."
 )
 
@@ -121,9 +121,7 @@ class Ops(Protocol):
 
     def current_branch(self, target_dir: str) -> str | None: ...
 
-    def materialize_pr_head(
-        self, target_dir: str, pr: int, sha: str
-    ) -> str: ...
+    def materialize_pr_head(self, target_dir: str, pr: int, sha: str) -> str: ...
 
     def changed_paths(
         self, target_dir: str, base_branch: str
@@ -137,21 +135,15 @@ class Ops(Protocol):
 
     def fetch_branch(self, target_dir: str, branch: str) -> bool: ...
 
-    def switch_to(
-        self, target_dir: str, branch: str, start_point: str
-    ) -> None: ...
+    def switch_to(self, target_dir: str, branch: str, start_point: str) -> None: ...
 
-    def is_ancestor(
-        self, target_dir: str, sha: str, ref: str
-    ) -> bool | None: ...
+    def is_ancestor(self, target_dir: str, sha: str, ref: str) -> bool | None: ...
 
     def find_pr(
         self, repo_slug: str, branch: str, *, any_state: bool = False
     ) -> int | None: ...
 
-    def prs_by_head_prefix(
-        self, repo_slug: str, branch_prefix: str
-    ) -> list[dict]: ...
+    def prs_by_head_prefix(self, repo_slug: str, branch_prefix: str) -> list[dict]: ...
 
     def create_pr(
         self,
@@ -177,7 +169,9 @@ class Ops(Protocol):
 
     def mark_ready(self, repo_slug: str, pr: int) -> None: ...
 
-    def criteria_verify(self, target_dir: str, request_path: str) -> tuple[int, str]: ...
+    def criteria_verify(
+        self, target_dir: str, request_path: str
+    ) -> tuple[int, str]: ...
 
     def charter_codes_elsewhere(
         self, target_dir: str, repo_slug: str, base_ref: str, own_ws: str
@@ -189,9 +183,7 @@ class Ops(Protocol):
 
     def latest_review_body(self, repo_slug: str, pr: int) -> str | None: ...
 
-    def file_exists_at(
-        self, target_dir: str, head: str, path: str
-    ) -> bool: ...
+    def file_exists_at(self, target_dir: str, head: str, path: str) -> bool: ...
 
     def pr_facts(self, repo_slug: str, pr: int) -> dict: ...
 
@@ -217,13 +209,9 @@ class Ops(Protocol):
 
     def close_pr(self, repo_slug: str, pr: int, comment: str) -> bool: ...
 
-    def remote_branch_head_fact(
-        self, repo_slug: str, branch: str
-    ) -> Fact[str]: ...
+    def remote_branch_head_fact(self, repo_slug: str, branch: str) -> Fact[str]: ...
 
-    def local_branch_head_fact(
-        self, target_dir: str, branch: str
-    ) -> Fact[str]: ...
+    def local_branch_head_fact(self, target_dir: str, branch: str) -> Fact[str]: ...
 
     def policy_version_fact(
         self, repo_slug: str, branch: str, path: str
@@ -247,13 +235,21 @@ class Ops(Protocol):
     ) -> int: ...
 
     def author_disp(
-        self, target_dir: str, task: str, config_path: str, slug: str,
+        self,
+        target_dir: str,
+        task: str,
+        config_path: str,
+        slug: str,
         resume: bool = False,
     ) -> int: ...
 
     def discovery_start(
-        self, frame: str, target: str, traces_to: str | None,
-        upstream_path: str | None, cwd: str,
+        self,
+        frame: str,
+        target: str,
+        traces_to: str | None,
+        upstream_path: str | None,
+        cwd: str,
     ) -> _interview.DiscoveryReply: ...
 
     def discovery_status(
@@ -265,7 +261,10 @@ class Ops(Protocol):
     ) -> _interview.DiscoveryReply: ...
 
     def commit_paths(
-        self, target_dir: str, paths: list[str], message: str,
+        self,
+        target_dir: str,
+        paths: list[str],
+        message: str,
         force_paths: tuple[str, ...] = (),
     ) -> None: ...
 
@@ -287,13 +286,9 @@ class Ops(Protocol):
 
     def find_issue(self, repo_slug: str, body_prefix: str) -> int | None: ...
 
-    def last_commit_touching(
-        self, target_dir: str, rel_path: str
-    ) -> str | None: ...
+    def last_commit_touching(self, target_dir: str, rel_path: str) -> str | None: ...
 
-    def prs_containing_commit(
-        self, repo_slug: str, sha: str
-    ) -> list[dict]: ...
+    def prs_containing_commit(self, repo_slug: str, sha: str) -> list[dict]: ...
 
     def rev_parse(self, target_dir: str, ref: str) -> str | None: ...
 
@@ -307,9 +302,7 @@ class Ops(Protocol):
 
     def commit_files(self, target_dir: str, sha: str) -> list[str] | None: ...
 
-    def show_file_bytes(
-        self, target_dir: str, ref: str, path: str
-    ) -> bytes | None: ...
+    def show_file_bytes(self, target_dir: str, ref: str, path: str) -> bytes | None: ...
 
     def show_repo_file_bytes(
         self, repo_slug: str, ref: str, path: str
@@ -327,7 +320,10 @@ class Ops(Protocol):
 # модель слоя ниже. Файл ПАРСИТСЯ (KEY=VALUE, export/отступы терпимы),
 # не исполняется.
 _HARNESS_ENV_KEYS = (
-    "AUTHOR_HARNESS", "AUTHOR_MODEL", "REVIEW_HARNESS", "REVIEW_MODEL",
+    "AUTHOR_HARNESS",
+    "AUTHOR_MODEL",
+    "REVIEW_HARNESS",
+    "REVIEW_MODEL",
 )
 
 
@@ -364,7 +360,8 @@ def _closure_from_timeline(state: object, nodes: object) -> dict | None:
         return None
     typed = [event for event in events if event is not None]
     marks = [
-        i for i, (kind, _, _) in enumerate(typed)
+        i
+        for i, (kind, _, _) in enumerate(typed)
         if kind in ("ClosedEvent", "ReopenedEvent")
     ]
     if not marks or typed[marks[-1]][0] != "ClosedEvent":
@@ -372,9 +369,11 @@ def _closure_from_timeline(state: object, nodes: object) -> dict | None:
     i = marks[-1]
     _, closed_by, closed_at = typed[i]
     head_deleted_first = any(
-        typed[j][0] == "HeadRefDeletedEvent" and typed[j][1] == closed_by
+        typed[j][0] == "HeadRefDeletedEvent"
+        and typed[j][1] == closed_by
         and (typed[j][2] <= closed_at if j < i else typed[j][2] == closed_at)
-        for j in (i - 1, i + 1) if 0 <= j < len(typed)
+        for j in (i - 1, i + 1)
+        if 0 <= j < len(typed)
     )
     return {
         "state": state,
@@ -389,7 +388,10 @@ def _gh_user_login(env: dict[str, str] | None) -> str | None:
     try:
         done = subprocess.run(
             ["gh", "api", "user", "--jq", ".login"],
-            capture_output=True, text=True, env=env, check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
         )
     except OSError:
         return None
@@ -411,10 +413,10 @@ def _harness_env_values() -> dict[str, str]:
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if line.startswith("export "):
-            line = line[len("export "):].lstrip()
+            line = line[len("export ") :].lstrip()
         for key in _HARNESS_ENV_KEYS:
             if line.startswith(f"{key}="):
-                values[key] = line[len(key) + 1:]
+                values[key] = line[len(key) + 1 :]
     return values
 
 
@@ -431,9 +433,7 @@ def _harness_for(prefix: str) -> tuple[str, str]:
     if env_harness:
         model = os.environ.get(f"{prefix}_MODEL", "")
     else:
-        model = os.environ.get(f"{prefix}_MODEL", "") or cfg.get(
-            f"{prefix}_MODEL", ""
-        )
+        model = os.environ.get(f"{prefix}_MODEL", "") or cfg.get(f"{prefix}_MODEL", "")
     return harness, model
 
 
@@ -453,9 +453,7 @@ def disp_agent(role: str) -> tuple[str, str]:
     prefix = {"author": "AUTHOR", "reviewer": "REVIEW"}[role]
     harness, model = _harness_for(prefix)
     if harness not in _DISP_ADAPTERS:
-        raise ValueError(
-            f"неизвестный {prefix}_HARNESS: {harness!r} (claude|codex)"
-        )
+        raise ValueError(f"неизвестный {prefix}_HARNESS: {harness!r} (claude|codex)")
     if not model:
         if harness != "claude":
             raise ValueError(
@@ -473,34 +471,55 @@ def disp_agent(role: str) -> tuple[str, str]:
 #: наследование отдавало их каждому агенту. Замерено вживую 2026-09-29:
 #: claude (связка ключей), codex (`~/.codex/auth.json`) и `uv run … disp`
 #: с базовой частью работают. Каждое имя — с обоснованием:
-AGENT_ENV_NAMES = frozenset({
-    # базовое: поиск бинарей, домашний каталог (конфиги харнессов)
-    "PATH", "HOME",
-    # без USER claude считает себя незалогиненным (замер I3, reviewer.py);
-    # LOGNAME — POSIX-имя входа, запасной источник у git/getpass
-    "USER", "LOGNAME",
-    # codex исполняет команды через оболочку пользователя, Bash-инструмент
-    # claude тоже берёт её из SHELL; TERM — режим вывода CLI
-    "SHELL", "TERM",
-    # свой TMPDIR харнесса; кодировка вывода (LC_* — префиксом ниже)
-    "TMPDIR", "LANG",
-    # базы XDG — пути, не секреты (кэш uv для disp и т.п.); поимённо, не
-    # префиксом: будущая XDG_-переменная сама к агенту не попадёт
-    "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
-    # транспорт модели claude — тот же набор, что у ревьюера edge-check
-    # (`edge_check/reviewer.py`): учётка модели и облака — СВОИ учётные данные
-    # агента (дизайн §3: видимость своей модельной учётки принята для v1);
-    # CLAUDE_CODE_OAUTH_TOKEN до среза песочницы — унаследованный, в срезе —
-    # из отдельного элемента связки ключей (§3)
-    "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_MODEL", "MAX_THINKING_TOKENS", "CLAUDE_CODE_OAUTH_TOKEN",
-    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "AWS_REGION",
-    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-    "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID",
-    # корпоративные сети: без прокси/CA транспорт до модели не достучится
-    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE",
-    "NODE_EXTRA_CA_CERTS",
-})
+AGENT_ENV_NAMES = frozenset(
+    {
+        # базовое: поиск бинарей, домашний каталог (конфиги харнессов)
+        "PATH",
+        "HOME",
+        # без USER claude считает себя незалогиненным (замер I3, reviewer.py);
+        # LOGNAME — POSIX-имя входа, запасной источник у git/getpass
+        "USER",
+        "LOGNAME",
+        # codex исполняет команды через оболочку пользователя, Bash-инструмент
+        # claude тоже берёт её из SHELL; TERM — режим вывода CLI
+        "SHELL",
+        "TERM",
+        # свой TMPDIR харнесса; кодировка вывода (LC_* — префиксом ниже)
+        "TMPDIR",
+        "LANG",
+        # базы XDG — пути, не секреты (кэш uv для disp и т.п.); поимённо, не
+        # префиксом: будущая XDG_-переменная сама к агенту не попадёт
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        # транспорт модели claude — тот же набор, что у ревьюера edge-check
+        # (`edge_check/reviewer.py`): учётка модели и облака — СВОИ учётные данные
+        # агента (дизайн §3: видимость своей модельной учётки принята для v1);
+        # CLAUDE_CODE_OAUTH_TOKEN до среза песочницы — унаследованный, в срезе —
+        # из отдельного элемента связки ключей (§3)
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_MODEL",
+        "MAX_THINKING_TOKENS",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "AWS_REGION",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "CLOUD_ML_REGION",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        # корпоративные сети: без прокси/CA транспорт до модели не достучится
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "SSL_CERT_FILE",
+        "NODE_EXTRA_CA_CERTS",
+    }
+)
 # OPENAI_API_KEY НАМЕРЕННО вне перечня: codex аутентифицируется через
 # `~/.codex/auth.json` (вход ChatGPT), а ключ из env переключил бы его на
 # оплату API — молча, при том что ключ в сессии оператора выставлен.
@@ -537,7 +556,9 @@ def _author_claude_token() -> str:
     """Токен из связки ключей; нет элемента — AgentIsolationError."""
     done = subprocess.run(
         ["security", "find-generic-password", "-s", AUTHOR_CLAUDE_TOKEN_ITEM, "-w"],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     token = done.stdout.strip()
     if done.returncode != 0 or not token:
@@ -566,8 +587,7 @@ def claude_isolation(env: dict[str, str]):
         (Path(config_dir) / "settings.json").write_text(
             _ISOLATED_CLAUDE_SETTINGS, encoding="utf-8"
         )
-        yield {**env, "CLAUDE_CONFIG_DIR": config_dir,
-               "CLAUDE_CODE_OAUTH_TOKEN": token}
+        yield {**env, "CLAUDE_CONFIG_DIR": config_dir, "CLAUDE_CODE_OAUTH_TOKEN": token}
     finally:
         shutil.rmtree(config_dir, ignore_errors=True)
 
@@ -597,20 +617,21 @@ def _author_argv(prompt: str) -> list[str]:
     harness, model = _harness_for("AUTHOR")
     if harness == "claude":
         return [
-            "claude", "-p", "--model", model or "claude-opus-5",
+            "claude",
+            "-p",
+            "--model",
+            model or "claude-opus-5",
             "--dangerously-skip-permissions",
-            "--no-session-persistence", "--strict-mcp-config",
+            "--no-session-persistence",
+            "--strict-mcp-config",
             prompt,
         ]
     if harness == "codex":
-        argv = ["codex", "exec", "--ephemeral",
-                "--sandbox", "workspace-write"]
+        argv = ["codex", "exec", "--ephemeral", "--sandbox", "workspace-write"]
         if model:
             argv += ["-m", model]
         return [*argv, prompt]
-    raise ValueError(
-        f"неизвестный AUTHOR_HARNESS: {harness!r} (claude|codex)"
-    )
+    raise ValueError(f"неизвестный AUTHOR_HARNESS: {harness!r} (claude|codex)")
 
 
 # Канонические имена файлов бандла (зеркало runner._AUTHOR_STEPS) и DSL-правила
@@ -650,7 +671,7 @@ _AUTHOR_DSL = {
     "requirements": (
         "YAML frontmatter (required): spec_stage: requirements, status: "
         "draft, owner_role: product, traces_to: [charter], upstream_hashes: "
-        "{charter: \"<hash>\"} where <hash> is the output of "
+        '{charter: "<hash>"} where <hash> is the output of '
         "`git hash-object <bundle_dir>/00-charter.md`. Every functional "
         "requirement MUST be a heading `#### FR-NN: <title>` followed by a "
         "`**Priority**: Must` (or Should) line. Non-functional requirements "
@@ -664,7 +685,7 @@ _AUTHOR_DSL = {
     "behaviour-spec": (
         "YAML frontmatter (required): spec_stage: behaviour-spec, status: "
         "draft, owner_role: product, traces_to: [requirements], "
-        "upstream_hashes: {requirements: \"<hash>\"} where <hash> is the "
+        'upstream_hashes: {requirements: "<hash>"} where <hash> is the '
         "output of `git hash-object <bundle_dir>/10-requirements.md`. Every "
         "scenario MUST be a heading `#### BEH-NN: <title>` and contain a "
         "line `` `traces: [FR-NN, ...]` `` (ids must exist in requirements) "
@@ -676,8 +697,8 @@ _AUTHOR_DSL = {
     "design": (
         "YAML frontmatter (required): spec_stage: design, status: draft, "
         "owner_role: architects, traces_to: [requirements, behaviour-spec], "
-        "upstream_hashes: {requirements: \"<hash10>\", behaviour-spec: "
-        "\"<hash15>\"} where <hash10> and <hash15> are the outputs of "
+        'upstream_hashes: {requirements: "<hash10>", behaviour-spec: '
+        '"<hash15>"} where <hash10> and <hash15> are the outputs of '
         "`git hash-object <bundle_dir>/10-requirements.md` and "
         "`git hash-object <bundle_dir>/15-behaviour-spec.md` respectively. "
         "The document MUST contain these sections: Резолюции открытых "
@@ -707,8 +728,8 @@ _AUTHOR_DSL = {
     "acceptance": (
         "YAML frontmatter (required): spec_stage: acceptance, "
         "status: draft, owner_role: qa, traces_to: [requirements, "
-        "behaviour-spec], upstream_hashes: {requirements: \"<hash10>\", "
-        "behaviour-spec: \"<hash15>\"} where <hash10> and <hash15> are "
+        'behaviour-spec], upstream_hashes: {requirements: "<hash10>", '
+        'behaviour-spec: "<hash15>"} where <hash10> and <hash15> are '
         "the outputs of `git hash-object <bundle_dir>/10-requirements.md` "
         "and `git hash-object <bundle_dir>/15-behaviour-spec.md`. "
         "The document MUST contain these sections: Критерии приёмки, "
@@ -741,7 +762,7 @@ _AUTHOR_DSL = {
         "YAML frontmatter (required): spec_stage: decomposition, "
         "dt_contract_version: 2, "
         "status: draft, owner_role: tech-lead, traces_to: [design, acceptance], "
-        "upstream_hashes: {design: \"<hash20>\", acceptance: \"<hash25>\"} where "
+        'upstream_hashes: {design: "<hash20>", acceptance: "<hash25>"} where '
         "<hash20> and <hash25> are the outputs of `git hash-object "
         "<bundle_dir>/20-design.md` and `git hash-object "
         "<bundle_dir>/25-acceptance.md`. "
@@ -767,7 +788,7 @@ _AUTHOR_DSL = {
         f"`kind: <one of {_KINDS_ALT}>` (CLOSED "
         f"vocabulary: {_KINDS_LIST}; "
         "an open one would make the kind any word the author found "
-        "fitting), `statement: \"<observable result>\"` and "
+        'fitting), `statement: "<observable result>"` and '
         "`sources: [<node>#<id>, …]`. The statement MUST describe an "
         "OBSERVABLE RESULT, not an action of yours and not the mere "
         "existence of a file: `id` and `kind` let others refer to the "
@@ -896,7 +917,9 @@ class RealOps:
         """Переключиться на branch, создав её, если ещё нет."""
         exists = subprocess.run(
             ["git", "rev-parse", "--verify", branch],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         flag = [] if exists.returncode == 0 else ["-c"]
         subprocess.run(["git", "switch", *flag, branch], cwd=target_dir, check=True)
@@ -911,7 +934,10 @@ class RealOps:
         """
         done = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=target_dir, capture_output=True, text=True, check=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return bool(done.stdout.strip())
 
@@ -919,7 +945,10 @@ class RealOps:
         """Имя текущей ветки в target_dir; None — detached HEAD."""
         done = subprocess.run(
             ["git", "branch", "--show-current"],
-            cwd=target_dir, capture_output=True, text=True, check=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return done.stdout.strip() or None
 
@@ -937,7 +966,9 @@ class RealOps:
         """
         fetch = subprocess.run(
             ["git", "fetch", "origin", f"pull/{pr}/head"],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if fetch.returncode != 0:
             raise RuntimeError(
@@ -946,7 +977,9 @@ class RealOps:
             )
         switch = subprocess.run(
             ["git", "switch", "--no-overwrite-ignore", "--detach", sha],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if switch.returncode != 0:
             raise RuntimeError(
@@ -955,7 +988,9 @@ class RealOps:
             )
         actual = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if actual.returncode != 0 or not actual.stdout.strip():
             raise RuntimeError(
@@ -964,9 +999,7 @@ class RealOps:
             )
         return actual.stdout.strip()
 
-    def changed_paths(
-        self, target_dir: str, base_branch: str
-    ) -> tuple[str, list[str]]:
+    def changed_paths(self, target_dir: str, base_branch: str) -> tuple[str, list[str]]:
         """База вердикта и пути, изменённые HEAD относительно неё.
 
         Гард путей accept-pr обязан быть привязан к МАТЕРИАЛИЗОВАННОМУ
@@ -989,7 +1022,9 @@ class RealOps:
         """
         fetch = subprocess.run(
             ["git", "fetch", "origin", base_branch],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if fetch.returncode != 0:
             raise RuntimeError(
@@ -998,7 +1033,9 @@ class RealOps:
             )
         base = subprocess.run(
             ["git", "rev-parse", "FETCH_HEAD"],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if base.returncode != 0 or not base.stdout.strip():
             raise RuntimeError(
@@ -1007,7 +1044,9 @@ class RealOps:
             )
         diff = subprocess.run(
             ["git", "diff", "--name-only", "FETCH_HEAD...HEAD"],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if diff.returncode != 0:
             raise RuntimeError(
@@ -1023,7 +1062,10 @@ class RealOps:
         """SHA головы branch в target_dir."""
         done = subprocess.run(
             ["git", "rev-parse", branch],
-            cwd=target_dir, capture_output=True, text=True, check=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return done.stdout.strip()
 
@@ -1039,7 +1081,9 @@ class RealOps:
         """
         done = subprocess.run(
             ["git", "push", "-u", "origin", branch],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if done.returncode != 0:
             raise RuntimeError(
@@ -1057,7 +1101,9 @@ class RealOps:
         """
         switch = subprocess.run(
             ["git", "switch", branch],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if switch.returncode != 0:
             raise RuntimeError(
@@ -1066,7 +1112,9 @@ class RealOps:
             )
         pull = subprocess.run(
             ["git", "pull", "--ff-only"],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if pull.returncode != 0:
             raise RuntimeError(
@@ -1092,7 +1140,9 @@ class RealOps:
         """
         done = subprocess.run(
             ["git", "fetch", "origin", branch],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         return done.returncode == 0
 
@@ -1113,7 +1163,9 @@ class RealOps:
         """
         done = subprocess.run(
             ["git", "switch", "-C", branch, start_point],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if done.returncode != 0:
             raise RuntimeError(
@@ -1132,7 +1184,9 @@ class RealOps:
         """
         done = subprocess.run(
             ["git", "merge-base", "--is-ancestor", sha, ref],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if done.returncode == 0:
             return True
@@ -1155,9 +1209,21 @@ class RealOps:
         и не открывала второй PR на ту же ветку.
         """
         done = subprocess.run(
-            ["gh", "pr", "list", "-R", repo_slug, "--head", branch,
-             "--state", "all" if any_state else "open", "--json", "number"],
-            capture_output=True, text=True,
+            [
+                "gh",
+                "pr",
+                "list",
+                "-R",
+                repo_slug,
+                "--head",
+                branch,
+                "--state",
+                "all" if any_state else "open",
+                "--json",
+                "number",
+            ],
+            capture_output=True,
+            text=True,
         )
         if done.returncode != 0:
             raise RuntimeError(
@@ -1171,9 +1237,7 @@ class RealOps:
             raise RuntimeError(f"find_pr: unexpected JSON shape: {done.stdout!r}")
         return found[0]["number"] if found else None
 
-    def prs_by_head_prefix(
-        self, repo_slug: str, branch_prefix: str
-    ) -> list[dict]:
+    def prs_by_head_prefix(self, repo_slug: str, branch_prefix: str) -> list[dict]:
         """Все PR, чья head-ветка начинается с ``branch_prefix``.
 
         Восстановление spec-loop не имеет локального леджера, поэтому
@@ -1200,9 +1264,17 @@ class RealOps:
         )
         done = subprocess.run(
             [
-                "gh", "api", "graphql", "--paginate", "--slurp",
-                "-f", f"query={query}", "-f", f"owner={owner}",
-                "-f", f"name={name}",
+                "gh",
+                "api",
+                "graphql",
+                "--paginate",
+                "--slurp",
+                "-f",
+                f"query={query}",
+                "-f",
+                f"owner={owner}",
+                "-f",
+                f"name={name}",
             ],
             capture_output=True,
             text=True,
@@ -1222,8 +1294,7 @@ class RealOps:
             isinstance(page, dict) for page in pages
         ):
             raise RuntimeError(
-                "prs_by_head_prefix: unexpected paginated JSON shape: "
-                f"{done.stdout!r}"
+                f"prs_by_head_prefix: unexpected paginated JSON shape: {done.stdout!r}"
             )
         found: list[dict] = []
         for page in pages:
@@ -1231,25 +1302,21 @@ class RealOps:
                 items = page["data"]["repository"]["pullRequests"]["nodes"]
             except (KeyError, TypeError) as exc:
                 raise RuntimeError(
-                    "prs_by_head_prefix: PR nodes отсутствуют: "
-                    f"{page!r}"
+                    f"prs_by_head_prefix: PR nodes отсутствуют: {page!r}"
                 ) from exc
             if not isinstance(items, list):
                 raise RuntimeError(
-                    "prs_by_head_prefix: unexpected PR nodes: "
-                    f"{items!r}"
+                    f"prs_by_head_prefix: unexpected PR nodes: {items!r}"
                 )
             for item in items:
                 if not isinstance(item, dict):
                     raise RuntimeError(
-                        "prs_by_head_prefix: unexpected PR JSON item: "
-                        f"{item!r}"
+                        f"prs_by_head_prefix: unexpected PR JSON item: {item!r}"
                     )
                 head_ref = item.get("headRefName")
                 if not isinstance(head_ref, str):
                     raise RuntimeError(
-                        "prs_by_head_prefix: PR без headRefName: "
-                        f"{item!r}"
+                        f"prs_by_head_prefix: PR без headRefName: {item!r}"
                     )
                 if head_ref.startswith(branch_prefix):
                     found.append(
@@ -1274,9 +1341,18 @@ class RealOps:
         def fetch(ref: str) -> str:
             local = f"refs/criteria-codes/{ref}"
             done = subprocess.run(
-                ["git", "-C", target_dir, "fetch", "--quiet", "origin",
-                 f"+refs/heads/{ref}:{local}"],
-                capture_output=True, text=True, check=False,
+                [
+                    "git",
+                    "-C",
+                    target_dir,
+                    "fetch",
+                    "--quiet",
+                    "origin",
+                    f"+refs/heads/{ref}:{local}",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
             )
             if done.returncode != 0:
                 raise RuntimeError(f"fetch {ref}: {done.stderr.strip()}")
@@ -1285,9 +1361,22 @@ class RealOps:
         out: dict[str, str] = {}
         refs = [base_ref]
         listing = subprocess.run(
-            ["gh", "pr", "list", "-R", repo_slug, "--state", "open",
-             "--limit", "500", "--json", "headRefName"],
-            capture_output=True, text=True, check=False,
+            [
+                "gh",
+                "pr",
+                "list",
+                "-R",
+                repo_slug,
+                "--state",
+                "open",
+                "--limit",
+                "500",
+                "--json",
+                "headRefName",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if listing.returncode != 0:
             raise RuntimeError(f"gh pr list: {listing.stderr.strip()}")
@@ -1295,15 +1384,23 @@ class RealOps:
 
         # Форма candidate — из SSOT веток одобрения, не литералом.
         pattern = re.escape(approval_branches.candidate_template())
-        for name, group in (("ws_id", r"(?P<ws_id>.+)"), ("wave", r"(?P<wave>\d+)"),
-                            ("step", r"\d+"), ("attempt", r"\d+")):
+        for name, group in (
+            ("ws_id", r"(?P<ws_id>.+)"),
+            ("wave", r"(?P<wave>\d+)"),
+            ("step", r"\d+"),
+            ("attempt", r"\d+"),
+        ):
             pattern = pattern.replace(re.escape("{" + name + "}"), group)
         cand = re.compile(f"^{pattern}$")
         for pr in json.loads(listing.stdout or "[]"):
             head = pr.get("headRefName", "")
             m = cand.match(head)
-            if (m and not approval_branches.is_finalize(head)
-                    and m.group("wave") == "1" and m.group("ws_id") != own_ws):
+            if (
+                m
+                and not approval_branches.is_finalize(head)
+                and m.group("wave") == "1"
+                and m.group("ws_id") != own_ws
+            ):
                 refs.append(head)
         for ref in refs:
             local = fetch(ref)
@@ -1317,8 +1414,18 @@ class RealOps:
         """`spec-runner verify --criteria` (контракт criteria-closure/v1, §5.1)."""
         try:
             proc = subprocess.run(
-                ["spec-runner", "verify", "--criteria", "--request", request_path, "--json"],
-                cwd=target_dir, capture_output=True, text=True, check=False,
+                [
+                    "spec-runner",
+                    "verify",
+                    "--criteria",
+                    "--request",
+                    request_path,
+                    "--json",
+                ],
+                cwd=target_dir,
+                capture_output=True,
+                text=True,
+                check=False,
             )
         except OSError as exc:
             return 127, str(exc)
@@ -1357,10 +1464,25 @@ class RealOps:
         draft_args = ["--draft"] if draft else []
         label_args = ["--label", label] if label else []
         done = subprocess.run(
-            ["gh", "pr", "create", *draft_args, "-R", repo_slug,
-             "--head", branch, "--title", title, "--body", body,
-             *label_args],
-            cwd=target_dir, capture_output=True, text=True, check=True,
+            [
+                "gh",
+                "pr",
+                "create",
+                *draft_args,
+                "-R",
+                repo_slug,
+                "--head",
+                branch,
+                "--title",
+                title,
+                "--body",
+                body,
+                *label_args,
+            ],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         match = _PR_URL_RE.search(done.stdout)
         if not match:
@@ -1407,8 +1529,7 @@ class RealOps:
         наследуемого, отпечаток вычисляется и публикуется как обычно.
         """
         done = subprocess.run(
-            ["sh", str(DEVTOOLS_ROOT / "review-pr.sh"), repo_name, str(pr),
-             "--fresh"],
+            ["sh", str(DEVTOOLS_ROOT / "review-pr.sh"), repo_name, str(pr), "--fresh"],
             cwd=DEVTOOLS_ROOT,
         )
         return done.returncode
@@ -1425,10 +1546,15 @@ class RealOps:
         """
         login = review_login()
         done = subprocess.run(
-            ["gh", "api", f"repos/{repo_slug}/pulls/{pr}/reviews",
-             "--jq",
-             f'[.[] | select(.user.login == "{login}")] | last | .body'],
-            capture_output=True, text=True,
+            [
+                "gh",
+                "api",
+                f"repos/{repo_slug}/pulls/{pr}/reviews",
+                "--jq",
+                f'[.[] | select(.user.login == "{login}")] | last | .body',
+            ],
+            capture_output=True,
+            text=True,
         )
         if done.returncode != 0:
             return None
@@ -1439,7 +1565,9 @@ class RealOps:
         """`git cat-file -e <head>:<path>` — файл существует в этой ревизии."""
         done = subprocess.run(
             ["git", "cat-file", "-e", f"{head}:{path}"],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         return done.returncode == 0
 
@@ -1452,11 +1580,21 @@ class RealOps:
         источником того же факта и мог бы разойтись с первым по времени.
         """
         done = subprocess.run(
-            ["gh", "pr", "view", str(pr), "-R", repo_slug, "--json",
-             "mergeable,mergeStateStatus,statusCheckRollup,isDraft,"
-             "headRefOid,baseRefOid,baseRefName,state,mergedAt,"
-             "mergedBy,mergeCommit"],
-            capture_output=True, text=True, check=True,
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr),
+                "-R",
+                repo_slug,
+                "--json",
+                "mergeable,mergeStateStatus,statusCheckRollup,isDraft,"
+                "headRefOid,baseRefOid,baseRefName,state,mergedAt,"
+                "mergedBy,mergeCommit",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return json.loads(done.stdout)
 
@@ -1469,7 +1607,10 @@ class RealOps:
         """
         owner, name = repo_slug.split("/", 1)
         repository = self._graphql_repository(
-            _PR_CLOSURE_QUERY, o=owner, n=name, p=str(pr),
+            _PR_CLOSURE_QUERY,
+            o=owner,
+            n=name,
+            p=str(pr),
         )
         if repository is None:
             return None
@@ -1488,9 +1629,7 @@ class RealOps:
         конфигурации, а не из кода. Профиля нет — None без вызова `gh`
         (иначе `gh` ответил бы логином основного профиля).
         """
-        profile = Path(
-            os.environ.get("REVIEW_GH_CONFIG_DIR") or REVIEW_GH_CONFIG_DIR
-        )
+        profile = Path(os.environ.get("REVIEW_GH_CONFIG_DIR") or REVIEW_GH_CONFIG_DIR)
         if not profile.is_dir():
             return None
         return _gh_user_login({**os.environ, "GH_CONFIG_DIR": str(profile)})
@@ -1502,9 +1641,21 @@ class RealOps:
     def pr_files(self, repo_slug: str, pr: int) -> list[str]:
         """Список путей файлов PR."""
         done = subprocess.run(
-            ["gh", "pr", "view", str(pr), "-R", repo_slug,
-             "--json", "files", "--jq", ".files[].path"],
-            capture_output=True, text=True, check=True,
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr),
+                "-R",
+                repo_slug,
+                "--json",
+                "files",
+                "--jq",
+                ".files[].path",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return [line for line in done.stdout.splitlines() if line]
 
@@ -1526,9 +1677,21 @@ class RealOps:
             "{pageInfo{hasNextPage}nodes{isResolved}}}}}"
         )
         done = subprocess.run(
-            ["gh", "api", "graphql", "-f", f"query={query}",
-             "-F", f"o={owner}", "-F", f"n={name}", "-F", f"p={pr}"],
-            capture_output=True, text=True,
+            [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"o={owner}",
+                "-F",
+                f"n={name}",
+                "-F",
+                f"p={pr}",
+            ],
+            capture_output=True,
+            text=True,
         )
         if done.returncode != 0:
             return None
@@ -1561,10 +1724,16 @@ class RealOps:
         нечем.
         """
         done = subprocess.run(
-            ["gh", "api", f"repos/{repo_slug}/pulls/{pr}/reviews",
-             "--paginate", "--jq",
-             ".[] | {login: .user.login, state: .state}"],
-            capture_output=True, text=True,
+            [
+                "gh",
+                "api",
+                f"repos/{repo_slug}/pulls/{pr}/reviews",
+                "--paginate",
+                "--jq",
+                ".[] | {login: .user.login, state: .state}",
+            ],
+            capture_output=True,
+            text=True,
         )
         if done.returncode != 0:
             return None
@@ -1593,9 +1762,18 @@ class RealOps:
             raise ValueError(f"тело ревью без маркера {marker!r}")
         env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
         done = subprocess.run(
-            ["gh", "api", f"repos/{repo_slug}/pulls/{pr}/reviews",
-             "-f", f"event={event}", "-f", f"body={body}"],
-            capture_output=True, text=True, env=env,
+            [
+                "gh",
+                "api",
+                f"repos/{repo_slug}/pulls/{pr}/reviews",
+                "-f",
+                f"event={event}",
+                "-f",
+                f"body={body}",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
         )
         if done.returncode != 0:
             print(f"publish_review: rc={done.returncode}: {done.stderr.strip()}")
@@ -1615,15 +1793,14 @@ class RealOps:
         """
         env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
         done = subprocess.run(
-            ["gh", "pr", "close", str(pr), "-R", repo_slug,
-             "--comment", comment],
-            env=env, capture_output=True, text=True,
+            ["gh", "pr", "close", str(pr), "-R", repo_slug, "--comment", comment],
+            env=env,
+            capture_output=True,
+            text=True,
         )
         return done.returncode == 0
 
-    def remote_branch_head_fact(
-        self, repo_slug: str, branch: str
-    ) -> Fact[str]:
+    def remote_branch_head_fact(self, repo_slug: str, branch: str) -> Fact[str]:
         """Head удалённой ветки: FOUND / ABSENT / UNAVAILABLE.
 
         REST 404 не отличает отсутствующий ref от скрытого/недоступного репо.
@@ -1634,53 +1811,44 @@ class RealOps:
         owner, name = repo_slug.split("/", 1)
         done = subprocess.run(
             [
-                "gh", "api", "graphql", "-f",
+                "gh",
+                "api",
+                "graphql",
+                "-f",
                 f"query={_REMOTE_BRANCH_HEAD_QUERY}",
-                "-F", f"o={owner}", "-F", f"n={name}",
-                "-F", f"q=refs/heads/{branch}",
+                "-F",
+                f"o={owner}",
+                "-F",
+                f"n={name}",
+                "-F",
+                f"q=refs/heads/{branch}",
             ],
             capture_output=True,
             text=True,
         )
         if done.returncode != 0:
             detail = done.stderr.strip() or f"gh api rc={done.returncode}"
-            return unavailable(
-                f"head origin/{branch}: запрос не удался ({detail})"
-            )
+            return unavailable(f"head origin/{branch}: запрос не удался ({detail})")
         try:
             repository = json.loads(done.stdout)["data"]["repository"]
         except (json.JSONDecodeError, KeyError, TypeError) as exc:
-            return unavailable(
-                f"head origin/{branch}: неожиданный ответ ({exc})"
-            )
+            return unavailable(f"head origin/{branch}: неожиданный ответ ({exc})")
         if not isinstance(repository, dict):
-            return unavailable(
-                f"head origin/{branch}: репозиторий не прочитан"
-            )
+            return unavailable(f"head origin/{branch}: репозиторий не прочитан")
         if "ref" not in repository:
-            return unavailable(
-                f"head origin/{branch}: в ответе нет поля ref"
-            )
+            return unavailable(f"head origin/{branch}: в ответе нет поля ref")
         ref = repository["ref"]
         if ref is None:
-            return Fact(
-                Outcome.ABSENT, None, f"ветки origin/{branch} нет"
-            )
+            return Fact(Outcome.ABSENT, None, f"ветки origin/{branch} нет")
         try:
             oid = ref["target"]["oid"]
         except (KeyError, TypeError):
-            return unavailable(
-                f"head origin/{branch}: неожиданная форма ref"
-            )
+            return unavailable(f"head origin/{branch}: неожиданная форма ref")
         if not isinstance(oid, str) or not oid:
             return unavailable(f"head origin/{branch}: пустой SHA")
-        return Fact(
-            Outcome.FOUND, oid, f"ветка origin/{branch} стоит на {oid}"
-        )
+        return Fact(Outcome.FOUND, oid, f"ветка origin/{branch} стоит на {oid}")
 
-    def _graphql_repository(
-        self, query: str, **variables: str
-    ) -> dict | None:
+    def _graphql_repository(self, query: str, **variables: str) -> dict | None:
         """`data.repository` ответа GraphQL либо None на ЛЮБОЙ сбой.
 
         `-F` для всех переменных, как у `remote_branch_head_fact`: строки
@@ -1699,9 +1867,7 @@ class RealOps:
             return None
         return repository if isinstance(repository, dict) else None
 
-    def policy_version_fact(
-        self, repo_slug: str, branch: str, path: str
-    ) -> Fact[str]:
+    def policy_version_fact(self, repo_slug: str, branch: str, path: str) -> Fact[str]:
         """SHA последнего коммита `branch`, тронувшего `path` (спека S5).
 
         `ref: null` — ветки нет (ABSENT); пустая история — файла по пути
@@ -1710,8 +1876,11 @@ class RealOps:
         """
         owner, name = repo_slug.split("/", 1)
         repository = self._graphql_repository(
-            _POLICY_VERSION_QUERY, o=owner, n=name,
-            q=f"refs/heads/{branch}", p=path,
+            _POLICY_VERSION_QUERY,
+            o=owner,
+            n=name,
+            q=f"refs/heads/{branch}",
+            p=path,
         )
         what = f"версия {repo_slug}:{path}@{branch}"
         if repository is None or "ref" not in repository:
@@ -1727,7 +1896,8 @@ class RealOps:
             return unavailable(f"{what}: неожиданная форма истории")
         if not nodes:
             return Fact(
-                Outcome.ABSENT, None,
+                Outcome.ABSENT,
+                None,
                 f"{path} в {repo_slug}@{branch} никогда не было",
             )
         oid = nodes[0].get("oid") if isinstance(nodes[0], dict) else None
@@ -1752,37 +1922,32 @@ class RealOps:
             return Fact(Outcome.ABSENT, None, f"в {repo_slug}@{sha} нет {path}")
         blob = entry.get("object") if isinstance(entry, dict) else None
         text = blob.get("text") if isinstance(blob, dict) else None
-        if (
-            not isinstance(text, str)
-            or (
-                isinstance(blob, dict)
-                and (blob.get("isBinary") or blob.get("isTruncated"))
-            )
+        if not isinstance(text, str) or (
+            isinstance(blob, dict) and (blob.get("isBinary") or blob.get("isTruncated"))
         ):
             return unavailable(f"{what}: содержимое не прочитано")
         return Fact(Outcome.FOUND, text, f"{path}@{sha} прочитан")
 
-    def local_branch_head_fact(
-        self, target_dir: str, branch: str
-    ) -> Fact[str]:
+    def local_branch_head_fact(self, target_dir: str, branch: str) -> Fact[str]:
         """Head локальной ветки: FOUND / ABSENT / UNAVAILABLE."""
         done = subprocess.run(
             [
-                "git", "-C", target_dir, "rev-parse", "--verify",
-                "--quiet", f"refs/heads/{branch}",
+                "git",
+                "-C",
+                target_dir,
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                f"refs/heads/{branch}",
             ],
             capture_output=True,
             text=True,
         )
         oid = done.stdout.strip()
         if done.returncode == 0 and oid:
-            return Fact(
-                Outcome.FOUND, oid, f"локальная ветка {branch} стоит на {oid}"
-            )
+            return Fact(Outcome.FOUND, oid, f"локальная ветка {branch} стоит на {oid}")
         if done.returncode == 1 and not oid:
-            return Fact(
-                Outcome.ABSENT, None, f"локальной ветки {branch} нет"
-            )
+            return Fact(Outcome.ABSENT, None, f"локальной ветки {branch} нет")
         detail = done.stderr.strip() or f"git rev-parse rc={done.returncode}"
         return unavailable(
             f"head локальной ветки {branch}: чтение не удалось ({detail})"
@@ -1801,9 +1966,10 @@ class RealOps:
         """
         env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
         done = subprocess.run(
-            ["gh", "api", "-X", "DELETE",
-             f"repos/{repo_slug}/git/refs/heads/{branch}"],
-            env=env, capture_output=True, text=True,
+            ["gh", "api", "-X", "DELETE", f"repos/{repo_slug}/git/refs/heads/{branch}"],
+            env=env,
+            capture_output=True,
+            text=True,
         )
         return done.returncode == 0
 
@@ -1818,13 +1984,12 @@ class RealOps:
         """
         done = subprocess.run(
             ["git", "-C", target_dir, "branch", "-D", branch],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         return done.returncode == 0
 
-    def merge(
-        self, repo_name: str, pr: int, sha: str, base: str | None = None
-    ) -> int:
+    def merge(self, repo_name: str, pr: int, sha: str, base: str | None = None) -> int:
         """Мерж через `merge-pr.sh` — единственный путь агентского мержа.
 
         Единственный — как правило и defense-in-depth, не как security
@@ -1849,8 +2014,13 @@ class RealOps:
         здесь больше не собирается: сверка логина живёт в одном месте.
         """
         argv = [
-            "sh", str(DEVTOOLS_ROOT / "merge-pr.sh"), repo_name, str(pr),
-            "--merge", "--expect-head", sha,
+            "sh",
+            str(DEVTOOLS_ROOT / "merge-pr.sh"),
+            repo_name,
+            str(pr),
+            "--merge",
+            "--expect-head",
+            sha,
         ]
         if base:
             argv += ["--expect-base", base]
@@ -1929,7 +2099,11 @@ class RealOps:
         )
 
     def author_disp(
-        self, target_dir: str, task: str, config_path: str, slug: str,
+        self,
+        target_dir: str,
+        task: str,
+        config_path: str,
+        slug: str,
         resume: bool = False,
     ) -> int:
         """Вид пайплайна `document` — opt-in авторинг-бэкенд behaviour-spec узла.
@@ -1973,9 +2147,13 @@ class RealOps:
         и держать его рядом с прогоном честнее, чем в чужом репозитории.
         """
         argv = [
-            "uv", "run", "--project",
+            "uv",
+            "run",
+            "--project",
             str(DEVTOOLS_ROOT.parent / "disputatio"),
-            "disp", "pipeline", "resume" if resume else "run",
+            "disp",
+            "pipeline",
+            "resume" if resume else "run",
         ]
         if not resume:
             argv += ["--task", task]
@@ -1993,15 +2171,24 @@ class RealOps:
         сохраняется для диагностики, но в контракт не входит.
         """
         argv = [
-            "uv", "run", "--frozen", "--project",
-            str(DEVTOOLS_ROOT.parent / "discovery"), "discovery", *args,
+            "uv",
+            "run",
+            "--frozen",
+            "--project",
+            str(DEVTOOLS_ROOT.parent / "discovery"),
+            "discovery",
+            *args,
         ]
         done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
         return _interview.parse_reply(done.returncode, done.stdout, done.stderr)
 
     def discovery_start(
-        self, frame: str, target: str, traces_to: str | None,
-        upstream_path: str | None, cwd: str,
+        self,
+        frame: str,
+        target: str,
+        traces_to: str | None,
+        upstream_path: str | None,
+        cwd: str,
     ) -> _interview.DiscoveryReply:
         """`discovery start`. `upstream_path` — durable-копия из run_dir; до
         discovery#49 сосед upstream не принимает — отказ ДО вызова, тем же
@@ -2033,15 +2220,21 @@ class RealOps:
             return []
         done = subprocess.run(
             ["git", "check-ignore", "--stdin", "-z"],
-            cwd=target_dir, input="\0".join(files) + "\0",
-            capture_output=True, text=True, check=False,
+            cwd=target_dir,
+            input="\0".join(files) + "\0",
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if done.returncode not in (0, 1):  # 1 — «ничего не игнорируется»
             raise RuntimeError(f"git check-ignore: {done.stderr.strip()}")
         return [p for p in done.stdout.split("\0") if p]
 
     def commit_paths(
-        self, target_dir: str, paths: list[str], message: str,
+        self,
+        target_dir: str,
+        paths: list[str],
+        message: str,
         force_paths: tuple[str, ...] = (),
     ) -> None:
         """`git add -- <paths>` (явный список, не `-A`) + коммит.
@@ -2075,10 +2268,12 @@ class RealOps:
             # прочёл бы их как glob и не нашёл бы файл (ревью #220).
             subprocess.run(
                 ["git", "--literal-pathspecs", "add", "-f", "--", *force_paths],
-                cwd=target_dir, check=True,
+                cwd=target_dir,
+                check=True,
             )
         clean = subprocess.run(
-            ["git", "diff", "--cached", "--quiet"], cwd=target_dir,
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=target_dir,
         )
         if clean.returncode == 0:
             return
@@ -2105,7 +2300,9 @@ class RealOps:
         cmd = str(exe) if exe.exists() else "gate-check"
         done = subprocess.run(
             [cmd, bundle_dir, "--profile", profile, "--emit-verdicts"],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         output = done.stdout + done.stderr
         return done.returncode, output
@@ -2145,7 +2342,9 @@ class RealOps:
         cmd = str(exe) if exe.exists() else "gate-check"
         done = subprocess.run(
             [cmd, "--candidate", bundle_dir, "--profile", profile],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         return done.returncode, done.stdout + done.stderr
 
@@ -2166,9 +2365,22 @@ class RealOps:
     def create_issue(self, repo_slug: str, title: str, body: str) -> int:
         """gh issue create -R <slug> --label inbox; номер из URL stdout."""
         done = subprocess.run(
-            ["gh", "issue", "create", "-R", repo_slug, "--label", "inbox",
-             "--title", title, "--body", body],
-            capture_output=True, text=True, check=True,
+            [
+                "gh",
+                "issue",
+                "create",
+                "-R",
+                repo_slug,
+                "--label",
+                "inbox",
+                "--title",
+                title,
+                "--body",
+                body,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
         )
         match = _ISSUE_URL_RE.search(done.stdout)
         if not match:
@@ -2185,14 +2397,25 @@ class RealOps:
         должна читаться как «issue нет» и плодить дубликат.
         """
         done = subprocess.run(
-            ["gh", "issue", "list", "-R", repo_slug, "--label", "inbox",
-             "--state", "open", "--json", "number,body"],
-            capture_output=True, text=True,
+            [
+                "gh",
+                "issue",
+                "list",
+                "-R",
+                repo_slug,
+                "--label",
+                "inbox",
+                "--state",
+                "open",
+                "--json",
+                "number,body",
+            ],
+            capture_output=True,
+            text=True,
         )
         if done.returncode != 0:
             raise RuntimeError(
-                f"find_issue: gh issue list rc={done.returncode}: "
-                f"{done.stderr.strip()}"
+                f"find_issue: gh issue list rc={done.returncode}: {done.stderr.strip()}"
             )
         try:
             found = json.loads(done.stdout)
@@ -2217,7 +2440,8 @@ class RealOps:
             return None
         done = subprocess.run(
             ["git", "-C", target_dir, "log", "-1", "--format=%H", "--", rel_path],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if done.returncode != 0:
             raise RuntimeError(
@@ -2248,14 +2472,20 @@ class RealOps:
         одного (проверено живым `gh` на трёхстраничной выдаче).
         """
         done = subprocess.run(
-            ["gh", "api", f"repos/{repo_slug}/commits/{sha}/pulls",
-             "--paginate",
-             "--jq", "[.[] | {number, "
-                     "state: (if .merged_at then \"MERGED\" "
-                     "else (.state | ascii_upcase) end), "
-                     "baseRefName: .base.ref, mergedAt: .merged_at, "
-                     "mergeCommit: .merge_commit_sha}]"],
-            capture_output=True, text=True,
+            [
+                "gh",
+                "api",
+                f"repos/{repo_slug}/commits/{sha}/pulls",
+                "--paginate",
+                "--jq",
+                "[.[] | {number, "
+                'state: (if .merged_at then "MERGED" '
+                "else (.state | ascii_upcase) end), "
+                "baseRefName: .base.ref, mergedAt: .merged_at, "
+                "mergeCommit: .merge_commit_sha}]",
+            ],
+            capture_output=True,
+            text=True,
         )
         if done.returncode != 0:
             raise RuntimeError(
@@ -2278,8 +2508,7 @@ class RealOps:
                 ) from exc
             if not isinstance(page, list):
                 raise RuntimeError(
-                    f"prs_containing_commit: unexpected JSON shape: "
-                    f"{done.stdout!r}"
+                    f"prs_containing_commit: unexpected JSON shape: {done.stdout!r}"
                 )
             found.extend(page)
 
@@ -2287,26 +2516,26 @@ class RealOps:
         """SHA ссылки; None — ссылки нет (нормальный случай, не сбой)."""
         done = subprocess.run(
             ["git", "-C", target_dir, "rev-parse", "--verify", "--quiet", ref],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         return done.stdout.strip() or None
 
-    def blob_in_commit(
-        self, target_dir: str, sha: str, rel_path: str
-    ) -> str | None:
+    def blob_in_commit(self, target_dir: str, sha: str, rel_path: str) -> str | None:
         """blob-хеш файла в коммите; None — файла в нём нет."""
         done = subprocess.run(
             ["git", "-C", target_dir, "rev-parse", f"{sha}:{rel_path}"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         return done.stdout.strip() if done.returncode == 0 else None
 
     def commit_parent(self, target_dir: str, sha: str) -> str | None:
         """SHA первого родителя; None — корневой коммит либо нет коммита."""
         done = subprocess.run(
-            ["git", "-C", target_dir, "rev-parse", "--verify", "--quiet",
-             f"{sha}^1"],
-            capture_output=True, text=True,
+            ["git", "-C", target_dir, "rev-parse", "--verify", "--quiet", f"{sha}^1"],
+            capture_output=True,
+            text=True,
         )
         return done.stdout.strip() or None
 
@@ -2318,7 +2547,9 @@ class RealOps:
         """
         done = subprocess.run(
             ["git", "show", f"{ref}:{path}"],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         return done.stdout if done.returncode == 0 else None
 
@@ -2327,15 +2558,15 @@ class RealOps:
         ревизии нет (fail-closed у вызывающего)."""
         done = subprocess.run(
             ["git", "show", "--name-only", "--format=", sha],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if done.returncode != 0:
             return None
         return [ln for ln in done.stdout.splitlines() if ln]
 
-    def show_file_bytes(
-        self, target_dir: str, ref: str, path: str
-    ) -> bytes | None:
+    def show_file_bytes(self, target_dir: str, ref: str, path: str) -> bytes | None:
         """`git show <ref>:<path>` as exact bytes, or None."""
         done = subprocess.run(
             ["git", "show", f"{ref}:{path}"],
@@ -2344,28 +2575,28 @@ class RealOps:
         )
         return done.stdout if done.returncode == 0 else None
 
-    def show_repo_file_bytes(
-        self, repo_slug: str, ref: str, path: str
-    ) -> bytes | None:
+    def show_repo_file_bytes(self, repo_slug: str, ref: str, path: str) -> bytes | None:
         """Read exact repository bytes through the durable forge API."""
         done = subprocess.run(
             [
-                "gh", "api",
+                "gh",
+                "api",
                 f"repos/{repo_slug}/contents/{quote(path, safe='/')}"
                 f"?ref={quote(ref, safe='')}",
-                "-H", "Accept: application/vnd.github.raw+json",
+                "-H",
+                "Accept: application/vnd.github.raw+json",
             ],
             capture_output=True,
         )
         return done.stdout if done.returncode == 0 else None
 
-    def show_file_for_carry(
-        self, target_dir: str, ref: str, path: str
-    ) -> str | None:
+    def show_file_for_carry(self, target_dir: str, ref: str, path: str) -> str | None:
         """Строгое чтение §I11: текст / доказанно нет / исключение."""
         resolved = subprocess.run(
             ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if resolved.returncode != 0 or not resolved.stdout.strip():
             detail = resolved.stderr.strip() or "ревизия не найдена"
@@ -2373,7 +2604,9 @@ class RealOps:
 
         listed = subprocess.run(
             ["git", "ls-tree", "-z", "--name-only", ref, "--", path],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if listed.returncode != 0:
             detail = listed.stderr.strip() or "git ls-tree failed"
@@ -2383,7 +2616,9 @@ class RealOps:
 
         done = subprocess.run(
             ["git", "show", f"{ref}:{path}"],
-            cwd=target_dir, capture_output=True, text=True,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
         )
         if done.returncode != 0:
             detail = done.stderr.strip() or "git show failed"

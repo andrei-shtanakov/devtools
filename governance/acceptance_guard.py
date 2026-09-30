@@ -83,15 +83,18 @@ def parse_ac_criteria(text: str) -> tuple[list[AcCriterion], list[str]]:
                 f"{ac_id}: verification: test без непустого scenarios — "
                 "тестовый критерий обязан называть свои сценарии"
             )
-        crits.append(AcCriterion(
-            ac_id=ac_id, title=m.group(2), verification=m.group(3),
-            traces=traces or (), scenarios=scenarios,
-        ))
+        crits.append(
+            AcCriterion(
+                ac_id=ac_id,
+                title=m.group(2),
+                verification=m.group(3),
+                traces=traces or (),
+                scenarios=scenarios,
+            )
+        )
     for ac_id, count in seen.items():
         if count > 1:
-            findings.append(
-                f"{ac_id}: объявлен {count} раза (ожидается ровно один)"
-            )
+            findings.append(f"{ac_id}: объявлен {count} раза (ожидается ровно один)")
     return crits, findings
 
 
@@ -144,9 +147,7 @@ def _parse_requirements(req_text: str) -> tuple[dict[str, str], list[str]]:
         priorities[rid] = pr.group(1)
     for rid, count in seen.items():
         if count > 1:
-            findings.append(
-                f"{rid}: объявлен {count} раза (ожидается ровно один)"
-            )
+            findings.append(f"{rid}: объявлен {count} раза (ожидается ровно один)")
     return priorities, findings
 
 
@@ -154,9 +155,7 @@ def _parse_beh_ids(beh_text: str) -> set[str]:
     return {m.group(1) for m in _BEH_ID_RE.finditer(beh_text)}
 
 
-def coverage_findings(
-    req_text: str, beh_text: str, acc_text: str
-) -> list[str]:
+def coverage_findings(req_text: str, beh_text: str, acc_text: str) -> list[str]:
     """Инварианты §3 спеки: Must-покрытие FR/NFR + ссылочная целостность.
 
     Findings накапливаются (гейт показывает всё сразу); пустой список —
@@ -170,9 +169,7 @@ def coverage_findings(
     for c in crits:
         for ref in c.traces:
             if ref not in priorities:
-                findings.append(
-                    f"{c.ac_id}: ссылка на несуществующее требование {ref}"
-                )
+                findings.append(f"{c.ac_id}: ссылка на несуществующее требование {ref}")
         for beh in c.scenarios:
             if beh not in beh_ids:
                 findings.append(
@@ -184,9 +181,7 @@ def coverage_findings(
         covered.update(c.traces)
     must = [rid for rid, pr in priorities.items() if pr == "Must"]
     if not must:
-        declared = re.search(
-            rf"^{re.escape(EMPTY_MUST_DECLARATION)}", acc_text, re.M
-        )
+        declared = re.search(rf"^{re.escape(EMPTY_MUST_DECLARATION)}", acc_text, re.M)
         if declared is None:
             findings.append(
                 "acceptance: множество Must-требований пусто, но "
@@ -195,7 +190,5 @@ def coverage_findings(
         return findings
     for rid in must:
         if rid not in covered:
-            findings.append(
-                f"{rid}: Must-требование не покрыто ни одним AC"
-            )
+            findings.append(f"{rid}: Must-требование не покрыто ни одним AC")
     return findings

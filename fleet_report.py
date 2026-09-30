@@ -129,8 +129,12 @@ def render(snapshot: dict[str, Any]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=None, help="snapshot JSON (default: stdin)")
-    parser.add_argument("--out", type=Path, default=None, help="файл или каталог (default: stdout)")
+    parser.add_argument(
+        "--input", type=Path, default=None, help="snapshot JSON (default: stdin)"
+    )
+    parser.add_argument(
+        "--out", type=Path, default=None, help="файл или каталог (default: stdout)"
+    )
     args = parser.parse_args()
 
     raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()

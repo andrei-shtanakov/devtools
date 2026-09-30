@@ -18,15 +18,20 @@ DAG = bundle_dag.BUNDLE_DAG
 
 def test_levels_match_dag_topology() -> None:
     assert bundle_dag.levels(DAG) == {
-        "charter": 0, "requirements": 1, "behaviour-spec": 2,
-        "design": 3, "acceptance": 3, "decomposition": 4,
+        "charter": 0,
+        "requirements": 1,
+        "behaviour-spec": 2,
+        "design": 3,
+        "acceptance": 3,
+        "decomposition": 4,
     }
     assert bundle_dag.wave_count(DAG) == 5
 
 
 def test_dag_upto_is_a_level_prefix() -> None:
     assert [f for f, _ in bundle_dag.dag_upto(DAG, 1)] == [
-        "00-charter.md", "10-requirements.md",
+        "00-charter.md",
+        "10-requirements.md",
     ]
     assert bundle_dag.dag_upto(DAG, -1) == ()
     assert bundle_dag.dag_upto(DAG, 4) == DAG
@@ -108,13 +113,22 @@ def test_new_node_name_moves_both_composition_boundaries(
             (bundle / "README.md").write_text("x", encoding="utf-8")
 
         # Граница 1: проверка состава признаёт узел, не отказывает «лишним».
-        assert bundle_dag.check_bundle_composition(
-            str(tmp_path), bundle.name, extra_dag,
-        ) == bundle_dag.wave_count(extra_dag) - 1
+        assert (
+            bundle_dag.check_bundle_composition(
+                str(tmp_path),
+                bundle.name,
+                extra_dag,
+            )
+            == bundle_dag.wave_count(extra_dag) - 1
+        )
 
         # Граница 2: вывод состава для §I8 признаёт тот же узел.
         dag, source, reason = tb._previous_dag(
-            _FakeState(), _FakeOps(), {}, str(tmp_path), bundle.name,
+            _FakeState(),
+            _FakeOps(),
+            {},
+            str(tmp_path),
+            bundle.name,
             "base-sha",
         )
         assert (dag, source, reason) == (extra_dag, "derived_from_spec", "")

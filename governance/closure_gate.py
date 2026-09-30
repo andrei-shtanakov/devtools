@@ -5,6 +5,7 @@ plan_item todo://<repo>/X → рядом обязан лежать 90-acceptance
 в состоянии blocked. Гейт живёт в CI репо-владельца; check-plan-fields.py
 (сенсор без CI) может показывать то же только как предупреждение.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -42,18 +43,26 @@ def gate_findings(repo: Path, *, is_vendored: bool) -> tuple[list[str], list[str
             errors.append(f"@id:{m.group(2)} [x], но закрытие {ws} — blocked")
         elif state == "traced":
             if int(meta.get("human_pending", 0)) > 0:
-                warns.append(f"{ws}: human_pending={meta['human_pending']} — подпись в срезе 2")
+                warns.append(
+                    f"{ws}: human_pending={meta['human_pending']} — подпись в срезе 2"
+                )
         elif state == "not-applicable":
             reason = meta.get("not_applicable_reason")
-            where = f"spec-runner {meta.get('spec_runner_version')} на {meta.get('host')}"
+            where = (
+                f"spec-runner {meta.get('spec_runner_version')} на {meta.get('host')}"
+            )
             if reason == "spec-runner-version" and is_vendored:
-                errors.append(f"{ws}: not-applicable spec-runner-version ({where}) при вендоренном контракте — перегнать закрытие на машине с spec-runner ≥ min")
+                errors.append(
+                    f"{ws}: not-applicable spec-runner-version ({where}) при вендоренном контракте — перегнать закрытие на машине с spec-runner ≥ min"
+                )
             elif reason == "spec-runner-version":
                 warns.append(f"{ws}: оракул не применим (spec-runner-version, {where})")
             else:
                 warns.append(f"{ws}: оракул не применим ({reason})")
         else:
-            errors.append(f"{ws}: closure {state!r} вне словаря traced|blocked|not-applicable")
+            errors.append(
+                f"{ws}: closure {state!r} вне словаря traced|blocked|not-applicable"
+            )
     return errors, warns
 
 
@@ -61,7 +70,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="closure_gate")
     parser.add_argument("--repo", type=Path, default=Path("."))
     args = parser.parse_args(argv)
-    errors, warns = gate_findings(args.repo.resolve(), is_vendored=criteria_contract.vendored())
+    errors, warns = gate_findings(
+        args.repo.resolve(), is_vendored=criteria_contract.vendored()
+    )
     for w in warns:
         print(f"closure_gate: warning: {w}")
     if warns:

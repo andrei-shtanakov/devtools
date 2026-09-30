@@ -24,6 +24,7 @@
     ./check-release-drift.py --workspace .. --json      # для dispatcher (стабильный контракт)
     ./check-release-drift.py --workspace .. --strict     # warn тоже валит gate
 """
+
 from __future__ import annotations
 
 import argparse
@@ -35,10 +36,19 @@ from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # 3.10 fallback (pip install tomli) — как в devtools/discover_models.py
+except (
+    ModuleNotFoundError
+):  # 3.10 fallback (pip install tomli) — как в devtools/discover_models.py
     import tomli as tomllib
 
-REQUIRED = ("package_name", "repo_url", "git_dir", "pyproject_path", "tag_pattern", "install")
+REQUIRED = (
+    "package_name",
+    "repo_url",
+    "git_dir",
+    "pyproject_path",
+    "tag_pattern",
+    "install",
+)
 INSTALL_KINDS = {"pypi", "git-tag", "git-sha"}
 SEV_ORDER = {"info": 0, "warn": 1, "error": 2}
 
@@ -48,7 +58,7 @@ def sh(args: list[str], cwd: Path) -> tuple[int, str]:
         p = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=15)
         return p.returncode, p.stdout.strip()
     except FileNotFoundError:
-        return 127, ""          # нет git
+        return 127, ""  # нет git
     except subprocess.TimeoutExpired:
         return 124, ""
     except Exception:
@@ -101,10 +111,18 @@ def check_component(cid: str, meta: dict, ws: Path, section: str = "") -> list[d
         return f  # дальше проверять нечего
     install = meta["install"]
     if install not in INSTALL_KINDS:
-        add("schema_install", "error", f"install={install!r} вне {sorted(INSTALL_KINDS)}")
+        add(
+            "schema_install",
+            "error",
+            f"install={install!r} вне {sorted(INSTALL_KINDS)}",
+        )
     # 1. воспроизводимость: никакого HEAD
     if install == "git-sha" and not meta.get("sha"):
-        add("irreproducible", "error", "install=git-sha без sha — плавающий HEAD запрещён")
+        add(
+            "irreproducible",
+            "error",
+            "install=git-sha без sha — плавающий HEAD запрещён",
+        )
     if install == "git-tag" and meta.get("tag", "-") in ("-", None):
         add("irreproducible", "error", "install=git-tag, но tag отсутствует")
 
@@ -114,15 +132,28 @@ def check_component(cid: str, meta: dict, ws: Path, section: str = "") -> list[d
 
     # Манифест-only (репо на диске НЕ нужен): tag ↔ lock_version согласованность.
     # git-sha имеет '+g<sha>' в lock_version и осознанно пропускается.
-    if lock_ver and "+g" not in lock_ver and mtag not in ("-", None) and norm(mtag) != lock_ver:
+    if (
+        lock_ver
+        and "+g" not in lock_ver
+        and mtag not in ("-", None)
+        and norm(mtag) != lock_ver
+    ):
         sev = "error" if publish == "pypi" else "warn"
-        add("tag_lock_mismatch", sev, f"manifest tag {mtag} (={norm(mtag)}) != lock_version {lock_ver}")
+        add(
+            "tag_lock_mismatch",
+            sev,
+            f"manifest tag {mtag} (={norm(mtag)}) != lock_version {lock_ver}",
+        )
 
     git_dir = ws / meta["git_dir"]
     pp = ws / meta["pyproject_path"]
 
     if not (git_dir / ".git").exists():
-        add("no_repo_on_disk", "info", f"{meta['git_dir']} без .git — проверки по диску пропущены")
+        add(
+            "no_repo_on_disk",
+            "info",
+            f"{meta['git_dir']} без .git — проверки по диску пропущены",
+        )
         return f
 
     disk_ver = pyproject_version(pp)
@@ -135,21 +166,29 @@ def check_component(cid: str, meta: dict, ws: Path, section: str = "") -> list[d
         # Критерий узкий НАМЕРЕННО: `publish == "none"` сюда не годится, им
         # помечены все 15 apps — настоящие Python-пакеты, у которых пропавший
         # pyproject обязан оставаться предупреждением (ревью PR #139).
-        expected_missing = (section == "tools" and publish != "pypi"
-                            and not pp.exists())
-        add("no_pyproject_version", "info" if expected_missing else "warn",
-            f"не прочитал version из {meta['pyproject_path']}")
+        expected_missing = section == "tools" and publish != "pypi" and not pp.exists()
+        add(
+            "no_pyproject_version",
+            "info" if expected_missing else "warn",
+            f"не прочитал version из {meta['pyproject_path']}",
+        )
     tag = latest_matching_tag(git_dir, meta["tag_pattern"])
 
     # 2. manifest_stale: lock_version расходится с pyproject
     if lock_ver and disk_ver and "+g" not in lock_ver and lock_ver != disk_ver:
-        add("manifest_stale", "warn", f"lock_version={lock_ver} != pyproject={disk_ver}")
+        add(
+            "manifest_stale", "warn", f"lock_version={lock_ver} != pyproject={disk_ver}"
+        )
 
     # 3. tag_behind: version на диске обгоняет последний tag
     if disk_ver and tag != "-" and norm(tag) != disk_ver:
         sev = "error" if publish == "pypi" else "warn"
         kind = "unreleased" if publish == "pypi" else "tag_behind"
-        add(kind, sev, f"pyproject={disk_ver} != tag {tag} ({'ядро не нарезано' if sev=='error' else 'релиз отстал'})")
+        add(
+            kind,
+            sev,
+            f"pyproject={disk_ver} != tag {tag} ({'ядро не нарезано' if sev == 'error' else 'релиз отстал'})",
+        )
 
     # 4. tag_missing: манифест ссылается на tag, которого нет под pattern
     if mtag not in ("-", None):
@@ -163,14 +202,21 @@ def check_component(cid: str, meta: dict, ws: Path, section: str = "") -> list[d
         if rc == 0 and tag_commit:
             s = meta["sha"]
             if not (tag_commit.startswith(s) or s.startswith(tag_commit[: len(s)])):
-                add("sha_tag_mismatch", "warn", f"sha {s} != commit тега {mtag} ({tag_commit[:12]})")
+                add(
+                    "sha_tag_mismatch",
+                    "warn",
+                    f"sha {s} != commit тега {mtag} ({tag_commit[:12]})",
+                )
 
     # 5. branch drift
     mbranch = meta.get("branch")
     if mbranch:
         cur = current_branch(git_dir)
-        add("branch_nondefault", "warn",
-            f"репо на фичевой ветке {mbranch!r} (сейчас {cur!r}) — sha не с релизной ветки")
+        add(
+            "branch_nondefault",
+            "warn",
+            f"репо на фичевой ветке {mbranch!r} (сейчас {cur!r}) — sha не с релизной ветки",
+        )
 
     return f
 
@@ -205,8 +251,11 @@ def main() -> int:
     # kapelle) не проверял никто, и это было незаметно, потому что детектор до
     # секции не доходил — запрос prograph-vault, devtools#105.
     comps.update(manifest.get("tools", {}))
-    section_of = {cid: sect for sect in ("cores", "apps", "tools")
-                  for cid in manifest.get(sect, {})}
+    section_of = {
+        cid: sect
+        for sect in ("cores", "apps", "tools")
+        for cid in manifest.get(sect, {})
+    }
     if not comps:
         print("FATAL: в манифесте нет [cores.*]/[apps.*]/[tools.*]", file=sys.stderr)
         return 2
@@ -220,21 +269,34 @@ def main() -> int:
     n_warn = sum(1 for x in findings if x["severity"] == "warn")
 
     if args.json:
-        print(json.dumps({
-            "schema_version": manifest.get("schema_version"),
-            "generated": manifest.get("generated"),
-            "counts": {"error": n_err, "warn": n_warn,
-                       "info": len(findings) - n_err - n_warn},
-            "findings": findings,
-        }, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {
+                    "schema_version": manifest.get("schema_version"),
+                    "generated": manifest.get("generated"),
+                    "counts": {
+                        "error": n_err,
+                        "warn": n_warn,
+                        "info": len(findings) - n_err - n_warn,
+                    },
+                    "findings": findings,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     else:
         if not findings:
             print("release-drift: OK — расхождений нет")
         else:
-            print(f"release-drift: error={n_err} warn={n_warn} "
-                  f"info={len(findings)-n_err-n_warn}\n")
+            print(
+                f"release-drift: error={n_err} warn={n_warn} "
+                f"info={len(findings) - n_err - n_warn}\n"
+            )
             for x in findings:
-                print(f"  [{x['severity']:<5}] {x['kind']:<18} {x['component']:<18} {x['detail']}")
+                print(
+                    f"  [{x['severity']:<5}] {x['kind']:<18} {x['component']:<18} {x['detail']}"
+                )
 
     if n_err:
         return 2

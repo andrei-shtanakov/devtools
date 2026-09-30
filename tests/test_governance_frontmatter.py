@@ -91,11 +91,11 @@ def test_duplicate_key_falls_back_to_canonical_render() -> None:
 def test_multiline_authored_value_is_replaced_whole() -> None:
     """Диапазон ключа — до следующего ключа верхнего уровня: блочный список
     заменяется целиком, а не первой строкой."""
-    text = (
-        "---\nnode: x\ntraces_to:\n- a\n- b\nstatus: draft\n---\n\nТ\n"
-    )
+    text = "---\nnode: x\ntraces_to:\n- a\n- b\nstatus: draft\n---\n\nТ\n"
     out = update_frontmatter(text, {"traces_to": ["c"]})
     assert split_frontmatter(out)[0] == {
-        "node": "x", "traces_to": ["c"], "status": "draft",
+        "node": "x",
+        "traces_to": ["c"],
+        "status": "draft",
     }
     assert "- a" not in out and "- b" not in out

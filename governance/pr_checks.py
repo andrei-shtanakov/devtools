@@ -49,7 +49,8 @@ def failing_names(pr_facts: dict) -> str:
     читателя искать, какая именно, а имя ведёт прямо в её журнал.
     """
     names = [
-        name for name, state in _states(pr_facts)
+        name
+        for name, state in _states(pr_facts)
         if state not in _GREEN and state not in _PENDING
     ]
     return ", ".join(names) if names else "имя не установлено"

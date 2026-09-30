@@ -23,8 +23,7 @@ def test_real_copy_matches_manifest_and_gate_is_importable() -> None:
 
 def test_manifest_cannot_drop_expected_file(tmp_path, monkeypatch) -> None:
     (tmp_path / "PINNED.txt").write_text(
-        "commit: " + "a" * 40 + "\n"
-        "DISCOVERY-BRIEF-CONTRACT.md " + "0" * 64 + "\n",
+        "commit: " + "a" * 40 + "\nDISCOVERY-BRIEF-CONTRACT.md " + "0" * 64 + "\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(vendor, "CONTRACT", tmp_path)
@@ -66,9 +65,9 @@ def test_provenance_unreachable_is_unknown_not_ok() -> None:
 
 
 def test_provenance_mismatch_fails() -> None:
-    assert vendor.verify(
-        "provenance", fetch=lambda *_: b"not-upstream"
-    ).status == "failed"
+    assert (
+        vendor.verify("provenance", fetch=lambda *_: b"not-upstream").status == "failed"
+    )
 
 
 def test_drift_equal_moved_and_unavailable() -> None:

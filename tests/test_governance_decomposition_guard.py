@@ -35,9 +35,14 @@ def test_parse_two_tasks() -> None:
     assert findings == []
     assert [t.dt_id for t in tasks] == ["DT-01", "DT-02"]
     assert tasks[0] == DtTask(
-        dt_id="DT-01", title="Парсер", type="implement", owner="dev",
-        scenarios=("BEH-01", "BEH-02"), depends_on=(),
-        delivered_by=(), parallel_group="core",
+        dt_id="DT-01",
+        title="Парсер",
+        type="implement",
+        owner="dev",
+        scenarios=("BEH-01", "BEH-02"),
+        depends_on=(),
+        delivered_by=(),
+        parallel_group="core",
     )
     assert tasks[1].delivered_by == ("DT-01",)
     assert tasks[1].verifies == ("tests/test_a.py",)
@@ -79,9 +84,7 @@ def _waived(
         f"depends_on: {depends}\n"
         + ("delivered_by: [DT-01]\n" if dt_type == "verify" else "")
         + "parallel_group: regression\n"
-        f"{line}\n"
-        + (f"{control}\n" if control is not None else "")
-        + "Проза.\n"
+        f"{line}\n" + (f"{control}\n" if control is not None else "") + "Проза.\n"
     )
 
 
@@ -95,9 +98,9 @@ def test_waiver_of_unknown_class_is_refused() -> None:
     _, findings = parse_dt_tasks(
         _waived("tdd_waiver: потому-что-так-быстрее · sanction: я-решил")
     )
-    assert any(
-        "DT-02" in f and "класс" in f for f in findings
-    ), f"класс не назван причиной отказа: {findings}"
+    assert any("DT-02" in f and "класс" in f for f in findings), (
+        f"класс не назван причиной отказа: {findings}"
+    )
 
 
 def test_waiver_without_dependencies_is_refused() -> None:
@@ -108,9 +111,9 @@ def test_waiver_without_dependencies_is_refused() -> None:
     waiver там, где честный RED как раз возможен.
     """
     _, findings = parse_dt_tasks(_waived(depends="[]"))
-    assert any(
-        "DT-02" in f and "зависим" in f for f in findings
-    ), f"отсутствие зависимостей не названо: {findings}"
+    assert any("DT-02" in f and "зависим" in f for f in findings), (
+        f"отсутствие зависимостей не названо: {findings}"
+    )
 
 
 def test_waiver_on_verify_task_is_refused() -> None:
@@ -121,9 +124,9 @@ def test_waiver_on_verify_task_is_refused() -> None:
     решал бы порядок строк в рендере.
     """
     _, findings = parse_dt_tasks(_waived(dt_type="verify"))
-    assert any(
-        "DT-02" in f and "verify" in f for f in findings
-    ), f"waiver у verify-задачи принят: {findings}"
+    assert any("DT-02" in f and "verify" in f for f in findings), (
+        f"waiver у verify-задачи принят: {findings}"
+    )
 
 
 def test_malformed_waiver_key_is_a_finding_not_silence() -> None:
@@ -135,9 +138,9 @@ def test_malformed_waiver_key_is_a_finding_not_silence() -> None:
     останов, ради которого проекция заводится.
     """
     _, findings = parse_dt_tasks(_waived("tdd_waiver: characterisation"))
-    assert any(
-        "DT-02" in f and "tdd_waiver" in f for f in findings
-    ), f"битая форма проглочена молча: {findings}"
+    assert any("DT-02" in f and "tdd_waiver" in f for f in findings), (
+        f"битая форма проглочена молча: {findings}"
+    )
 
 
 def test_waiver_declared_twice_is_a_finding() -> None:
@@ -147,9 +150,9 @@ def test_waiver_declared_twice_is_a_finding() -> None:
         "tdd_waiver: characterisation · sanction: batch-approve-2026-09-09"
     )
     _, findings = parse_dt_tasks(_waived(line))
-    assert any(
-        "DT-02" in f and "tdd_waiver" in f for f in findings
-    ), f"второе объявление принято: {findings}"
+    assert any("DT-02" in f and "tdd_waiver" in f for f in findings), (
+        f"второе объявление принято: {findings}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -164,8 +167,13 @@ def test_waiver_declared_twice_is_a_finding() -> None:
         "spec-runner#abc",
     ],
     ids=[
-        "свободный-текст", "без-даты", "несуществующая-дата",
-        "не-ISO", "без-номера", "без-репо", "номер-не-число",
+        "свободный-текст",
+        "без-даты",
+        "несуществующая-дата",
+        "не-ISO",
+        "без-номера",
+        "без-репо",
+        "номер-не-число",
     ],
 )
 def test_sanction_outside_the_closed_grammar_is_refused(sanction: str) -> None:
@@ -180,9 +188,9 @@ def test_sanction_outside_the_closed_grammar_is_refused(sanction: str) -> None:
     _, findings = parse_dt_tasks(
         _waived(f"tdd_waiver: characterisation · sanction: {sanction}")
     )
-    assert any(
-        "DT-02" in f and "sanction" in f for f in findings
-    ), f"санкция {sanction!r} принята: {findings}"
+    assert any("DT-02" in f and "sanction" in f for f in findings), (
+        f"санкция {sanction!r} принята: {findings}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -217,9 +225,9 @@ def test_broken_waiver_line_next_to_a_valid_one_is_a_finding() -> None:
         "tdd_waiver: characterisation · sanction: batch-approve-2026-09-09"
     )
     tasks, findings = parse_dt_tasks(_waived(line))
-    assert any(
-        "DT-02" in f and "tdd_waiver" in f for f in findings
-    ), f"битая строка рядом с валидной проглочена: {findings}"
+    assert any("DT-02" in f and "tdd_waiver" in f for f in findings), (
+        f"битая строка рядом с валидной проглочена: {findings}"
+    )
     assert tasks[1].waiver is None, "объявление с потерей не действует"
 
 
@@ -244,7 +252,11 @@ def test_all_waiver_findings_are_reported_at_once() -> None:
     assert len(mine) == 5, f"названы не все причины: {findings}"
     joined = "\n".join(mine)
     for expected in (
-        "класс", "sanction", "verify", "зависим", "negative_control",
+        "класс",
+        "sanction",
+        "verify",
+        "зависим",
+        "negative_control",
     ):
         assert expected in joined, f"причина {expected!r} не названа"
 
@@ -259,9 +271,9 @@ def test_waiver_without_negative_control_is_refused() -> None:
     запускается никогда — и выглядела бы при этом запускаемой.
     """
     _, findings = parse_dt_tasks(_waived(control=None))
-    assert any(
-        "DT-02" in f and "negative_control" in f for f in findings
-    ), f"waiver без контроля принят: {findings}"
+    assert any("DT-02" in f and "negative_control" in f for f in findings), (
+        f"waiver без контроля принят: {findings}"
+    )
 
 
 def test_negative_control_without_waiver_is_refused() -> None:
@@ -272,16 +284,18 @@ def test_negative_control_without_waiver_is_refused() -> None:
     """
     _, findings = parse_dt_tasks(_waived(line="", control=CONTROL_LINE))
     assert any(
-        "DT-02" in f and "negative_control" in f and "tdd_waiver" in f
-        for f in findings
+        "DT-02" in f and "negative_control" in f and "tdd_waiver" in f for f in findings
     ), f"контроль без waiver'а принят: {findings}"
 
 
-@pytest.mark.parametrize("control", [
-    "negative_control:",
-    "negative_control: tests/test_a.py::test_two :: лишнее",
-    "negative_control: tests/test a.py::test_two",
-])
+@pytest.mark.parametrize(
+    "control",
+    [
+        "negative_control:",
+        "negative_control: tests/test_a.py::test_two :: лишнее",
+        "negative_control: tests/test a.py::test_two",
+    ],
+)
 def test_malformed_negative_control_is_a_finding(control: str) -> None:
     """Ключ есть, форма не разобрана — находка, а не «поля нет».
 
@@ -290,18 +304,15 @@ def test_malformed_negative_control_is_a_finding(control: str) -> None:
     деление, а пробел в пути — селектор, которого никто не писал.
     """
     _, findings = parse_dt_tasks(_waived(control=control))
-    assert any(
-        "DT-02" in f and "negative_control" in f for f in findings
-    ), f"битая форма проглочена молча: {findings!r}"
+    assert any("DT-02" in f and "negative_control" in f for f in findings), (
+        f"битая форма проглочена молча: {findings!r}"
+    )
 
 
 def test_negative_control_declared_twice_is_a_finding() -> None:
-    _, findings = parse_dt_tasks(
-        _waived(control=f"{CONTROL_LINE}\n{CONTROL_LINE}")
-    )
+    _, findings = parse_dt_tasks(_waived(control=f"{CONTROL_LINE}\n{CONTROL_LINE}"))
     assert any(
-        "DT-02" in f and "negative_control" in f and "2" in f
-        for f in findings
+        "DT-02" in f and "negative_control" in f and "2" in f for f in findings
     ), f"дубль ключа не назван: {findings}"
 
 
@@ -341,8 +352,10 @@ def test_near_miss_heading_is_a_finding() -> None:
 
 
 def test_duplicate_dt_id_is_a_finding() -> None:
-    dup = DT_OK + "\n#### DT-01: Дубль · type: implement · owner: dev\n" \
+    dup = (
+        DT_OK + "\n#### DT-01: Дубль · type: implement · owner: dev\n"
         "scenarios: [BEH-04]\ndepends_on: []\nparallel_group: solo\n"
+    )
     _tasks, findings = parse_dt_tasks(dup)
     assert any("DT-01" in f and "раза" in f for f in findings)
 
@@ -381,6 +394,7 @@ BEH = (
 
 def test_clean_graph_no_findings() -> None:
     from governance.decomposition_guard import graph_findings
+
     dt = (
         "#### DT-01: A · type: implement · owner: dev\n"
         "scenarios: [BEH-01, BEH-02]\ndepends_on: []\n"
@@ -400,6 +414,7 @@ def test_negative_control_outside_own_checked_by_files_is_refused() -> None:
     связь, а не догадка по пути.
     """
     from governance.decomposition_guard import graph_findings
+
     own = (
         "#### DT-01: A · type: implement · owner: dev\n"
         "scenarios: [BEH-01, BEH-02]\ndepends_on: []\n"
@@ -423,6 +438,7 @@ def test_negative_control_outside_own_checked_by_files_is_refused() -> None:
 
 def test_uncovered_and_double_covered_beh() -> None:
     from governance.decomposition_guard import graph_findings
+
     dt = (
         "#### DT-01: A · type: implement · owner: dev\n"
         "scenarios: [BEH-01, BEH-03]\ndepends_on: []\n"
@@ -437,6 +453,7 @@ def test_uncovered_and_double_covered_beh() -> None:
 
 def test_cycle_is_a_finding() -> None:
     from governance.decomposition_guard import graph_findings
+
     dt = (
         "#### DT-01: A · type: implement · owner: dev\n"
         "scenarios: [BEH-01, BEH-02]\ndepends_on: [DT-02]\n"
@@ -454,6 +471,7 @@ def test_forward_reference_in_depends_on_is_a_finding() -> None:
     уже на входе). DT-02 объявлен нормально (BEH-02, BEH-03 покрыты
     сюръективно), DT-01 ссылается на него раньше своего объявления."""
     from governance.decomposition_guard import graph_findings
+
     dt = (
         "#### DT-01: A · type: implement · owner: dev\n"
         "scenarios: [BEH-01]\ndepends_on: [DT-02]\n"
@@ -464,8 +482,7 @@ def test_forward_reference_in_depends_on_is_a_finding() -> None:
     )
     findings = graph_findings(BEH, dt)
     assert any(
-        "DT-01" in f and "DT-02" in f and "ниже по документу" in f
-        for f in findings
+        "DT-01" in f and "DT-02" in f and "ниже по документу" in f for f in findings
     )
 
 
@@ -473,6 +490,7 @@ def test_backward_reference_in_depends_on_is_not_a_finding() -> None:
     """Обратная сторона: DT-02 depends_on DT-01, объявленный ВЫШЕ —
     штатный топологический порядок, никакой находки про порядок."""
     from governance.decomposition_guard import graph_findings
+
     dt = (
         "#### DT-01: A · type: implement · owner: dev\n"
         "scenarios: [BEH-01, BEH-02]\ndepends_on: []\n"
@@ -486,6 +504,7 @@ def test_backward_reference_in_depends_on_is_not_a_finding() -> None:
 
 def test_verify_requires_delivered_by_and_closure() -> None:
     from governance.decomposition_guard import graph_findings
+
     # verify без delivered_by
     dt1 = (
         "#### DT-01: A · type: implement · owner: dev\n"
@@ -494,33 +513,29 @@ def test_verify_requires_delivered_by_and_closure() -> None:
         "#### DT-02: V · type: verify · owner: qa\n"
         "scenarios: [BEH-03]\ndepends_on: [DT-01]\nparallel_group: core\n"
     )
-    assert any(
-        "DT-02" in f and "delivered_by" in f for f in graph_findings(BEH, dt1)
-    )
+    assert any("DT-02" in f and "delivered_by" in f for f in graph_findings(BEH, dt1))
     # delivered_by вне транзитивного замыкания depends_on
     dt2 = dt1.replace(
         "depends_on: [DT-01]\nparallel_group: core\n",
         "depends_on: []\ndelivered_by: [DT-01]\nparallel_group: core\n",
     )
-    assert any(
-        "DT-02" in f and "замыкан" in f for f in graph_findings(BEH, dt2)
-    )
+    assert any("DT-02" in f and "замыкан" in f for f in graph_findings(BEH, dt2))
 
 
 def test_delivered_by_forbidden_for_implement() -> None:
     from governance.decomposition_guard import graph_findings
+
     dt = (
         "#### DT-01: A · type: implement · owner: dev\n"
         "scenarios: [BEH-01, BEH-02, BEH-03]\ndepends_on: []\n"
         "delivered_by: [DT-01]\nparallel_group: core\n"
     )
-    assert any(
-        "DT-01" in f and "запрещ" in f for f in graph_findings(BEH, dt)
-    )
+    assert any("DT-01" in f and "запрещ" in f for f in graph_findings(BEH, dt))
 
 
 def test_single_owner_of_test_file() -> None:
     from governance.decomposition_guard import graph_findings
+
     # BEH-01 и BEH-02 живут в одном tests/test_a.py, но в разных DT
     dt = (
         "#### DT-01: A · type: implement · owner: dev\n"
@@ -530,13 +545,13 @@ def test_single_owner_of_test_file() -> None:
         "scenarios: [BEH-02]\ndepends_on: []\nparallel_group: side\n"
     )
     assert any(
-        "tests/test_a.py" in f and "single-owner" in f
-        for f in graph_findings(BEH, dt)
+        "tests/test_a.py" in f and "single-owner" in f for f in graph_findings(BEH, dt)
     )
 
 
 def test_unknown_references_are_findings() -> None:
     from governance.decomposition_guard import graph_findings
+
     dt = (
         "#### DT-01: A · type: implement · owner: dev\n"
         "scenarios: [BEH-01, BEH-02, BEH-03, BEH-99]\n"
@@ -554,6 +569,7 @@ def test_solo_tasks_are_independent_singleton_groups() -> None:
     tests/test_a.py и потому обязаны быть в ОДНОЙ DT — иначе тест
     закраснел бы на собственном single-owner-инварианте, круг 2)."""
     from governance.decomposition_guard import graph_findings
+
     beh4 = BEH + (
         "\n#### BEH-04: Четыре\n**checked_by** `kind: e2e` "
         "`target: tests/test_c.py::test_four`\n"
@@ -574,6 +590,7 @@ def test_delivered_by_edge_exempt_from_sinks_rule() -> None:
     """Minor круга 2: verify c depends_on=[DT-01] и delivered_by=[DT-01]
     в чужую группу с двумя стоками — НЕ находка про стоки."""
     from governance.decomposition_guard import graph_findings
+
     beh4 = BEH + (
         "\n#### BEH-04: Четыре\n**checked_by** `kind: e2e` "
         "`target: tests/test_c.py::test_four`\n"
@@ -596,6 +613,7 @@ def test_point_edge_into_single_foreign_group_is_legitimate() -> None:
     находка; требовать все стоки значило бы навязать искусственную
     сериализацию (мотивирующий дефект §1)."""
     from governance.decomposition_guard import graph_findings
+
     beh4 = BEH + (
         "\n#### BEH-04: Четыре\n**checked_by** `kind: e2e` "
         "`target: tests/test_c.py::test_four`\n"
@@ -616,6 +634,7 @@ def test_cross_group_dependency_must_cover_all_sinks() -> None:
     """Машинное правило «сводные за хвостами групп» (карта файлов плана):
     ребро в чужую группу обязывает зависеть от ВСЕХ её стоков."""
     from governance.decomposition_guard import graph_findings
+
     beh4 = BEH + (
         "\n#### BEH-04: Четыре\n**checked_by** `kind: e2e` "
         "`target: tests/test_c.py::test_four`\n"
@@ -633,9 +652,7 @@ def test_cross_group_dependency_must_cover_all_sinks() -> None:
         "scenarios: [BEH-04]\ndepends_on: [DT-01, DT-03]\n"
         "parallel_group: solo\n"
     )
-    assert any(
-        "DT-04" in f and "DT-02" in f for f in graph_findings(beh4, dt)
-    )
+    assert any("DT-04" in f and "DT-02" in f for f in graph_findings(beh4, dt))
 
 
 def test_waiver_conditions_match_the_contract() -> None:
@@ -681,8 +698,7 @@ def test_waiver_conditions_match_the_contract() -> None:
     )
     items = [
         " ".join(m.group(1).split())
-        for m in re.finditer(r"^\d+\. (.+?)(?=^\d+\. |\Z)", listing,
-                             re.M | re.S)
+        for m in re.finditer(r"^\d+\. (.+?)(?=^\d+\. |\Z)", listing, re.M | re.S)
     ]
     assert len(items) == 5, f"перечень условий разобран не целиком: {items}"
     normalized = [i.rstrip(";.").strip() for i in items]
@@ -711,10 +727,7 @@ def test_beh_binding_grammar_matches_task_bridge() -> None:
     assert {sc.beh_id for sc in scenarios} == set(bindings)
     for sc in scenarios:
         target, kind = bindings[sc.beh_id]
-        expected = (
-            sc.checked_target.split("::", 1)[0]
-            if sc.checked_target else None
-        )
+        expected = sc.checked_target.split("::", 1)[0] if sc.checked_target else None
         assert target == expected
         assert kind == (sc.checked_kind if sc.checked_target else None)
 
@@ -723,6 +736,7 @@ def test_letter_suffixed_beh_is_parsed_and_covered() -> None:
     """PR #148: BEH-18a — валидный id (вставки раундов ревью); гард
     видит его во входном наборе, откат [a-z]? в _BEH_HEAD_RE краснит."""
     from governance.decomposition_guard import graph_findings
+
     beh = (
         "#### BEH-18: Обычный\n**checked_by** `kind: integration` "
         "`target: tests/test_a.py::test_x`\n\n"
@@ -804,7 +818,8 @@ def test_verifies_block_form_preserves_selector_entries() -> None:
     tasks, findings = parse_dt_tasks(dt)
     assert findings == []
     assert tasks[0].verifies == (
-        "tests/test_a.py::test_one", "tests/test_b.py::test_two",
+        "tests/test_a.py::test_one",
+        "tests/test_b.py::test_two",
     )
 
 
@@ -842,8 +857,7 @@ def test_verifies_empty_block_form_is_a_finding() -> None:
     )
     tasks, findings = parse_dt_tasks(dt)
     assert any(
-        "DT-14" in f and "verifies" in f and "не разобран" in f
-        for f in findings
+        "DT-14" in f and "verifies" in f and "не разобран" in f for f in findings
     )
     assert tasks[0].verifies == ()
 
@@ -987,14 +1001,10 @@ def test_verify_group_underivable_is_a_fatal_finding() -> None:
         "delivered_by: [DT-01]\nparallel_group: solo\n"
     )
     findings = graph_findings(beh, dt)
-    assert any(
-        "DT-14" in f and "группа наблюдения не выводится" in f
-        for f in findings
-    )
+    assert any("DT-14" in f and "группа наблюдения не выводится" in f for f in findings)
     # Больше НЕ дублируется в non-fatal канале — единственный вывод, fatal.
     assert not any(
-        "группа наблюдения не выводится" in f
-        for f in non_fatal_findings(beh, dt)
+        "группа наблюдения не выводится" in f for f in non_fatal_findings(beh, dt)
     )
 
 
@@ -1047,23 +1057,17 @@ def test_file_target_obeys_resolved_adapter_capability() -> None:
         "delivered_by: [DT-01]\nparallel_group: solo\n"
     )
 
-    assert graph_findings(
-        beh, dt, selector_policy=SELECTOR_POLICIES["pytest"]
-    ) == []
-    findings = graph_findings(
-        beh, dt, selector_policy=SELECTOR_POLICIES["exunit"]
-    )
+    assert graph_findings(beh, dt, selector_policy=SELECTOR_POLICIES["pytest"]) == []
+    findings = graph_findings(beh, dt, selector_policy=SELECTOR_POLICIES["exunit"])
     assert any(
-        "DT-02" in finding
-        and "exunit" in finding
-        and "path:line" in finding
+        "DT-02" in finding and "exunit" in finding and "path:line" in finding
         for finding in findings
     )
 
     selected = beh.replace("test/check_test.exs`", "test/check_test.exs:12`")
-    assert graph_findings(
-        selected, dt, selector_policy=SELECTOR_POLICIES["exunit"]
-    ) == []
+    assert (
+        graph_findings(selected, dt, selector_policy=SELECTOR_POLICIES["exunit"]) == []
+    )
 
 
 def test_orphan_verifies_target_is_non_fatal_finding() -> None:
@@ -1090,14 +1094,14 @@ def test_orphan_verifies_target_is_non_fatal_finding() -> None:
     )
     warnings = non_fatal_findings(beh, dt)
     assert any(
-        "DT-14" in f and "tests/test_typo.py" in f
+        "DT-14" in f
+        and "tests/test_typo.py" in f
         and "опечатка либо осиротевший путь" in f
         for f in warnings
     )
     fatal = graph_findings(beh, dt)
     assert any(
-        "DT-14" in finding
-        and "группа наблюдения не выводится" in finding
+        "DT-14" in finding and "группа наблюдения не выводится" in finding
         for finding in fatal
     )
 
@@ -1131,8 +1135,7 @@ def test_verifies_target_owner_outside_depends_on_closure_is_a_finding() -> None
     )
     findings = graph_findings(beh, dt)
     assert any(
-        "DT-03" in f and "tests/test_a.py" in f and "DT-01" in f
-        and "замыкания" in f
+        "DT-03" in f and "tests/test_a.py" in f and "DT-01" in f and "замыкания" in f
         for f in findings
     )
 
@@ -1170,14 +1173,15 @@ def test_verifies_selector_form_does_not_bypass_closure_invariant() -> None:
     findings = graph_findings(beh, dt)
     # closure-инвариант ловит владельца ВНЕ замыкания — как для голого пути.
     assert any(
-        "DT-03" in f and "tests/test_a.py::test_one" in f and "DT-01" in f
+        "DT-03" in f
+        and "tests/test_a.py::test_one" in f
+        and "DT-01" in f
         and "замыкания" in f
         for f in findings
     )
     # НЕ ложная находка «опечатка» — путь реально принадлежит DT-01.
     assert not any(
-        "опечатка либо осиротевший путь" in f
-        for f in non_fatal_findings(beh, dt)
+        "опечатка либо осиротевший путь" in f for f in non_fatal_findings(beh, dt)
     )
 
 
@@ -1235,12 +1239,12 @@ def test_verifies_on_implement_is_a_finding() -> None:
         "verifies:\n  - tests/test_a.py\n"
     )
     _tasks, findings = parse_dt_tasks(dt)
-    assert any(
-        "DT-01" in f and "verifies" in f and "запрещ" in f for f in findings
-    )
+    assert any("DT-01" in f and "verifies" in f and "запрещ" in f for f in findings)
 
 
-def test_single_owner_fires_even_when_own_checked_by_target_is_in_own_verifies() -> None:
+def test_single_owner_fires_even_when_own_checked_by_target_is_in_own_verifies() -> (
+    None
+):
     """Major ревью PR #161, round 4 finding 3 (корректирует round-2/3
     решение — прежний тест ошибочно ожидал здесь отсутствие находки):
     DT-01 (implement) владеет tests/test_a.py через BEH-01; DT-14 (verify)
@@ -1266,12 +1270,12 @@ def test_single_owner_fires_even_when_own_checked_by_target_is_in_own_verifies()
         "verifies:\n  - tests/test_a.py\n"
     )
     findings = graph_findings(beh, dt)
-    assert any(
-        "tests/test_a.py" in f and "single-owner" in f for f in findings
-    )
+    assert any("tests/test_a.py" in f and "single-owner" in f for f in findings)
 
 
-def test_single_owner_still_conflicts_between_implement_dts_despite_unrelated_verifies() -> None:
+def test_single_owner_still_conflicts_between_implement_dts_despite_unrelated_verifies() -> (
+    None
+):
     """Major ревью PR #161, finding 4 (регресс на баг из ORIGINAL FIX 1):
     verifies какой-то ДРУГОЙ (verify) задачи, перечисляющий файл, НЕ
     отменяет single-owner между ДВУМЯ implement-задачами, реально
@@ -1299,15 +1303,14 @@ def test_single_owner_still_conflicts_between_implement_dts_despite_unrelated_ve
         "verifies:\n  - tests/test_a.py\n"
     )
     findings = graph_findings(beh, dt)
-    assert any(
-        "tests/test_a.py" in f and "single-owner" in f for f in findings
-    )
+    assert any("tests/test_a.py" in f and "single-owner" in f for f in findings)
 
 
 def test_unknown_beh_suffix_form_is_a_form_finding() -> None:
     """Major ревью PR #148: BEH-18A/BEH-18ab (форма вне [a-z]?) обязаны
     давать находку формы, а не молча склеиваться с предыдущим блоком."""
     from governance.decomposition_guard import graph_findings
+
     beh = (
         "#### BEH-18: Обычный\n**checked_by** `kind: integration` "
         "`target: tests/test_a.py::test_x`\n\n"
@@ -1343,23 +1346,27 @@ _DT_V2 = (
     "delivers:\n"
     "  - id: DEL-01\n"
     "    kind: capability\n"
-    "    statement: \"парсер отвергает дубль ключа\"\n"
+    '    statement: "парсер отвергает дубль ключа"\n'
     "    sources:\n"
-    "      - \"acceptance#AC-07\"\n"
+    '      - "acceptance#AC-07"\n'
     "Проза предмета.\n"
 )
 
 
 def test_missing_version_without_compat_is_an_error() -> None:
     """Забытое поле — отказ, а не молчаливый легаси-режим."""
-    errors, warnings = dt_contract_findings(_NO_FM + DT_OK, allow_legacy_dt=False, node_index=_INDEX)
+    errors, warnings = dt_contract_findings(
+        _NO_FM + DT_OK, allow_legacy_dt=False, node_index=_INDEX
+    )
     assert any("версия" in e.lower() for e in errors), errors
     assert warnings == []
 
 
 def test_missing_version_with_compat_is_legacy_with_diagnostic() -> None:
     """Режим включает ОПЕРАТОР параметром, а не отсутствие поля."""
-    errors, warnings = dt_contract_findings(_NO_FM + DT_OK, allow_legacy_dt=True, node_index=_INDEX)
+    errors, warnings = dt_contract_findings(
+        _NO_FM + DT_OK, allow_legacy_dt=True, node_index=_INDEX
+    )
     assert errors == []
     # Регистр не пинуем: предмет проверки — что диагностика есть и
     # называет отсутствие гарантии, а не её типографика.
@@ -1371,13 +1378,15 @@ def test_v2_is_checked_regardless_of_the_compat_switch() -> None:
     for allow in (False, True):
         errors, warnings = dt_contract_findings(
             _V2_FM + _DT_V2, allow_legacy_dt=allow, node_index=_INDEX
-    )
+        )
         assert errors == [], (allow, errors)
         assert warnings == [], (allow, warnings)
 
 
 def test_v2_requires_delivers_on_every_dt() -> None:
-    errors, _ = dt_contract_findings(_V2_FM + DT_OK, allow_legacy_dt=True, node_index=_INDEX)
+    errors, _ = dt_contract_findings(
+        _V2_FM + DT_OK, allow_legacy_dt=True, node_index=_INDEX
+    )
     assert any("DT-01" in e and "delivers" in e for e in errors), errors
 
 
@@ -1404,13 +1413,17 @@ def test_unknown_or_malformed_version_is_an_error_compat_does_not_mask(
     стало бы способом обойти любой будущий контракт."""
     fm = f"---\nspec_stage: decomposition\ndt_contract_version: {version}\n---\n"
     for allow in (False, True):
-        errors, _ = dt_contract_findings(fm + DT_OK, allow_legacy_dt=allow, node_index=_INDEX)
+        errors, _ = dt_contract_findings(
+            fm + DT_OK, allow_legacy_dt=allow, node_index=_INDEX
+        )
         # Причина названа, а не просто «ошибки есть»: мутант, пропускающий
         # неизвестную версию при включённой совместимости, ВЫЖИЛ на прежней
         # редакции — прогон краснел от постороннего «delivers отсутствует»,
         # и тест подтверждал существование чужой находки.
         assert any("неизвестная dt_contract_version" in e for e in errors), (
-            version, allow, errors
+            version,
+            allow,
+            errors,
         )
 
 
@@ -1420,8 +1433,8 @@ def test_unknown_or_malformed_version_is_an_error_compat_does_not_mask(
         # Отступы включены в вырезаемую строку намеренно: без них
         # .replace склеивает остаток с соседней строкой и ломает YAML —
         # тест падал бы на разборе, а не на отсутствии поля.
-        ("    statement: \"парсер отвергает дубль ключа\"\n", "statement"),
-        ("      - \"acceptance#AC-07\"\n", "sources"),
+        ('    statement: "парсер отвергает дубль ключа"\n', "statement"),
+        ('      - "acceptance#AC-07"\n', "sources"),
         ("    kind: capability\n", "kind"),
     ],
 )
@@ -1436,10 +1449,10 @@ def test_v2_delivers_form_requires_every_field(broken: str, expect: str) -> None
 
 def test_v2_delivers_rejects_duplicate_ids() -> None:
     """`id` обеспечивает связь; дубль сделал бы связь неоднозначной."""
-    doubled = _DT_V2 + _DT_V2.replace("DT-01", "DT-02").replace(
-        "Парсер", "Второй"
+    doubled = _DT_V2 + _DT_V2.replace("DT-01", "DT-02").replace("Парсер", "Второй")
+    errors, _ = dt_contract_findings(
+        _V2_FM + doubled, allow_legacy_dt=False, node_index=_INDEX
     )
-    errors, _ = dt_contract_findings(_V2_FM + doubled, allow_legacy_dt=False, node_index=_INDEX)
     assert any("DEL-01" in e for e in errors), errors
 
 
@@ -1447,7 +1460,9 @@ def test_v2_source_must_be_addressed_not_a_heading() -> None:
     """Номера строк и текст заголовка идентификаторами не считаются
     (спека §3b.2): и то и другое меняется при редактуре."""
     bad = _DT_V2.replace('"acceptance#AC-07"', '"25-acceptance.md:41"')
-    errors, _ = dt_contract_findings(_V2_FM + bad, allow_legacy_dt=False, node_index=_INDEX)
+    errors, _ = dt_contract_findings(
+        _V2_FM + bad, allow_legacy_dt=False, node_index=_INDEX
+    )
     assert any("sources" in e for e in errors), errors
 
 
@@ -1461,16 +1476,18 @@ def test_v2_delivers_rejects_duplicate_ids_inside_one_dt() -> None:
     котором она нужнее всего.
     """
     doubled = _DT_V2.replace(
-        "      - \"acceptance#AC-07\"\n",
-        "      - \"acceptance#AC-07\"\n"
+        '      - "acceptance#AC-07"\n',
+        '      - "acceptance#AC-07"\n'
         "  - id: DEL-01\n"
         "    kind: capability\n"
-        "    statement: \"второе обязательство\"\n"
+        '    statement: "второе обязательство"\n'
         "    sources:\n"
-        "      - \"acceptance#AC-08\"\n",
+        '      - "acceptance#AC-08"\n',
         1,
     )
-    errors, _ = dt_contract_findings(_V2_FM + doubled, allow_legacy_dt=False, node_index=_INDEX)
+    errors, _ = dt_contract_findings(
+        _V2_FM + doubled, allow_legacy_dt=False, node_index=_INDEX
+    )
     assert any("DEL-01" in e for e in errors), errors
 
 
@@ -1483,7 +1500,9 @@ def test_v2_rejects_a_second_delivers_key_in_the_same_dt() -> None:
     числа разборов (как у `tdd_waiver`).
     """
     text = _DT_V2.replace("delivers:\n", "delivers: []\ndelivers:\n", 1)
-    errors, _ = dt_contract_findings(_V2_FM + text, allow_legacy_dt=False, node_index=_INDEX)
+    errors, _ = dt_contract_findings(
+        _V2_FM + text, allow_legacy_dt=False, node_index=_INDEX
+    )
     assert any("delivers" in e and "дважды" in e for e in errors), errors
 
 
@@ -1492,7 +1511,9 @@ def test_v2_kind_is_a_closed_vocabulary(kind: str) -> None:
     """Открытый словарь превратил бы машинную классификацию в свободный
     текст — тот же провал, от которого репо закрылось `WAIVER_CLASSES`."""
     text = _DT_V2.replace("kind: capability", f"kind: {kind}", 1)
-    errors, _ = dt_contract_findings(_V2_FM + text, allow_legacy_dt=False, node_index=_INDEX)
+    errors, _ = dt_contract_findings(
+        _V2_FM + text, allow_legacy_dt=False, node_index=_INDEX
+    )
     assert any("kind" in e for e in errors), (kind, errors)
 
 
@@ -1504,7 +1525,9 @@ def test_v2_accepts_every_declared_kind() -> None:
     """
     for kind in DELIVERABLE_KINDS:
         text = _DT_V2.replace("kind: capability", f"kind: {kind}", 1)
-        errors, _ = dt_contract_findings(_V2_FM + text, allow_legacy_dt=False, node_index=_INDEX)
+        errors, _ = dt_contract_findings(
+            _V2_FM + text, allow_legacy_dt=False, node_index=_INDEX
+        )
         assert errors == [], (kind, errors)
 
 
@@ -1538,9 +1561,9 @@ _DT_V2_COVERED = (
     "delivers:\n"
     "  - id: DEL-01\n"
     "    kind: capability\n"
-    "    statement: \"парсер отвергает дубль ключа\"\n"
+    '    statement: "парсер отвергает дубль ключа"\n'
     "    sources:\n"
-    "      - \"acceptance#AC-07\"\n"
+    '      - "acceptance#AC-07"\n'
     "    covered_by: BEH-01\n"
     "Проза предмета.\n"
 )
@@ -1580,9 +1603,9 @@ def test_node_ids_extracts_both_heading_forms() -> None:
     знающий одну, молча отдал бы пустой индекс для другого узла, и КАЖДАЯ
     ссылка на него стала бы «пункт не найден».
     """
-    assert node_id_counts(
-        "#### AC-07: отказ без actor · verification: test\n"
-    ) == {"AC-07": 1}
+    assert node_id_counts("#### AC-07: отказ без actor · verification: test\n") == {
+        "AC-07": 1
+    }
     assert node_id_counts(
         "#### Q-03 · owner_role: architects · resolution: resolved\n"
     ) == {"Q-03": 1}
@@ -1658,9 +1681,9 @@ _DT_RESTATES = (
     "delivers:\n"
     "  - id: DEL-01\n"
     "    kind: capability\n"
-    "    statement: \"retention_days ограничен 7-365\"\n"
+    '    statement: "retention_days ограничен 7-365"\n'
     "    sources:\n"
-    "      - \"acceptance#AC-07\"\n"
+    '      - "acceptance#AC-07"\n'
     "Проза.\n"
     "\n"
     "#### DT-12: Отчёты · type: implement · owner: dev\n"
@@ -1670,9 +1693,9 @@ _DT_RESTATES = (
     "delivers:\n"
     "  - id: DEL-12\n"
     "    kind: capability\n"
-    "    statement: \"retention_days ограничен 7-365\"\n"
+    '    statement: "retention_days ограничен 7-365"\n'
     "    sources:\n"
-    "      - \"acceptance#AC-07\"\n"
+    '      - "acceptance#AC-07"\n'
     "    restates: DEL-01\n"
     "Проза.\n"
 )
@@ -1684,9 +1707,7 @@ def test_restates_pointing_at_a_dependency_is_accepted() -> None:
     Без неё «гвард отвергает битый restates» удовлетворялось бы и гвардом,
     отвергающим любой.
     """
-    errors, warnings = dt_contract_findings(
-        _V2_FM + _DT_RESTATES, node_index=_INDEX
-    )
+    errors, warnings = dt_contract_findings(_V2_FM + _DT_RESTATES, node_index=_INDEX)
 
     assert errors == [], errors
     assert warnings == [], warnings
@@ -1752,9 +1773,9 @@ def test_chain_of_restates_is_an_error() -> None:
         "delivers:\n"
         "  - id: DEL-20\n"
         "    kind: capability\n"
-        "    statement: \"retention_days ограничен 7-365\"\n"
+        '    statement: "retention_days ограничен 7-365"\n'
         "    sources:\n"
-        "      - \"acceptance#AC-07\"\n"
+        '      - "acceptance#AC-07"\n'
         "    restates: DEL-12\n"
         "Проза.\n"
     )
@@ -1821,9 +1842,7 @@ def test_sources_pointing_at_a_charter_item_resolves() -> None:
     """
     text = _V2_FM + _DT_V2.replace('"acceptance#AC-07"', '"charter#CON-01"')
 
-    errors, _ = dt_contract_findings(
-        text, node_index={"charter": {"CON-01": 1}}
-    )
+    errors, _ = dt_contract_findings(text, node_index={"charter": {"CON-01": 1}})
 
     assert errors == []
 
@@ -1836,9 +1855,7 @@ def test_missing_charter_item_names_the_item_not_the_node() -> None:
     """
     text = _V2_FM + _DT_V2.replace('"acceptance#AC-07"', '"charter#CON-99"')
 
-    errors, _ = dt_contract_findings(
-        text, node_index={"charter": {"CON-01": 1}}
-    )
+    errors, _ = dt_contract_findings(text, node_index={"charter": {"CON-01": 1}})
 
     assert len(errors) == 1, errors
     assert "CON-99" in errors[0] and "пункт" in errors[0], errors
@@ -1854,9 +1871,7 @@ def test_sources_pointing_at_a_twice_defined_item_is_ambiguous() -> None:
     """
     text = _V2_FM + _DT_V2.replace('"acceptance#AC-07"', '"charter#CON-01"')
 
-    errors, _ = dt_contract_findings(
-        text, node_index={"charter": {"CON-01": 2}}
-    )
+    errors, _ = dt_contract_findings(text, node_index={"charter": {"CON-01": 2}})
 
     assert len(errors) == 1, errors
     assert "CON-01" in errors[0], errors

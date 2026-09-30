@@ -9,17 +9,30 @@ def test_policy_decision_is_deterministic() -> None:
 
 
 def test_enforce_policy_blocks_llm_flip() -> None:
-    flipped = {"decision": "accept", "kind": "fix", "summary": "s",
-               "todo": "t", "next_step": "n", "changed_files": []}
+    flipped = {
+        "decision": "accept",
+        "kind": "fix",
+        "summary": "s",
+        "todo": "t",
+        "next_step": "n",
+        "changed_files": [],
+    }
     fixed = issue_worker.enforce_policy(dict(flipped), "reject")
     assert fixed["decision"] == "reject"
 
 
 def test_enforce_policy_allows_needs_human() -> None:
-    result = {"decision": "needs_human", "kind": "fix", "summary": "s",
-              "todo": "t", "next_step": "n", "changed_files": []}
+    result = {
+        "decision": "needs_human",
+        "kind": "fix",
+        "summary": "s",
+        "todo": "t",
+        "next_step": "n",
+        "changed_files": [],
+    }
     assert issue_worker.enforce_policy(dict(result), "accept")["decision"] == (
-        "needs_human")
+        "needs_human"
+    )
 
 
 def test_result_path_layout(tmp_path: Path) -> None:
@@ -35,7 +48,10 @@ def test_external_execute_degrades_to_read_only() -> None:
 
 def test_schema_keeps_decision_enum() -> None:
     assert issue_worker.SCHEMA["properties"]["decision"]["enum"] == [
-        "accept", "reject", "needs_human"]
+        "accept",
+        "reject",
+        "needs_human",
+    ]
 
 
 def test_gh_view_uses_full_repo_slug(monkeypatch, tmp_path: Path) -> None:
@@ -54,9 +70,23 @@ def test_gh_view_uses_full_repo_slug(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(issue_worker.subprocess, "run", fake_run)
     monkeypatch.setattr(
         "sys.argv",
-        ["issue_worker.py", "--repo", "alpha", "--owner", "owner",
-         "--number", "7", "--author", "a", "--kind", "fix",
-         "--internal", "yes", "--output-root", str(tmp_path)],
+        [
+            "issue_worker.py",
+            "--repo",
+            "alpha",
+            "--owner",
+            "owner",
+            "--number",
+            "7",
+            "--author",
+            "a",
+            "--kind",
+            "fix",
+            "--internal",
+            "yes",
+            "--output-root",
+            str(tmp_path),
+        ],
     )
     assert issue_worker.main() == 2
     gh_cmd = captured[0]
@@ -71,6 +101,7 @@ def test_missing_codex_binary_is_clean_exit(monkeypatch, tmp_path: Path) -> None
     def fake_run(cmd, **kwargs):
         calls["n"] += 1
         if cmd[0] == "gh":
+
             class R:
                 returncode = 0
                 stdout = "{}"
@@ -82,9 +113,23 @@ def test_missing_codex_binary_is_clean_exit(monkeypatch, tmp_path: Path) -> None
     monkeypatch.setattr(issue_worker.subprocess, "run", fake_run)
     monkeypatch.setattr(
         "sys.argv",
-        ["issue_worker.py", "--repo", "alpha", "--owner", "owner",
-         "--number", "7", "--author", "a", "--kind", "fix",
-         "--internal", "yes", "--output-root", str(tmp_path)],
+        [
+            "issue_worker.py",
+            "--repo",
+            "alpha",
+            "--owner",
+            "owner",
+            "--number",
+            "7",
+            "--author",
+            "a",
+            "--kind",
+            "fix",
+            "--internal",
+            "yes",
+            "--output-root",
+            str(tmp_path),
+        ],
     )
     assert issue_worker.main() == 3
     assert calls["n"] == 2
