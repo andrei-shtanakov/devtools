@@ -350,8 +350,8 @@ def test_classify_ai_flag_wires_refine(tmp_path: Path, monkeypatch) -> None:
             "--classify-ai",
         ],
     )
-    import io
     import contextlib
+    import io
 
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
@@ -379,8 +379,8 @@ def test_json_offline_without_classify_ai_skips_refine(
         "sys.argv",
         ["issue_console.py", "--root", str(root), "--input", str(fixture), "--json"],
     )
-    import io
     import contextlib
+    import io
 
     out = io.StringIO()
     with contextlib.redirect_stdout(out):

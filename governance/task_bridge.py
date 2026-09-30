@@ -45,18 +45,30 @@ from governance.approve_node import (
 # поэтому ни один вызов ниже и ни один тест не знают о переезде.
 from governance.bundle_dag import (
     ANCHOR_NODE_ID as _ANCHOR_NODE_ID,
+)
+from governance.bundle_dag import (
     # Оба кортежа переэкспортируются намеренно: код моста ходит через
     # `dag_for`, но состав DAG под прежними именами читают его тесты —
     # снять их значило бы спрятать переезд ценой характеризации.
     BUNDLE_DAG as _BUNDLE_DAG,  # noqa: F401
+)
+from governance.bundle_dag import (
     BUNDLE_DAG_LEGACY5 as _BUNDLE_DAG_LEGACY5,  # noqa: F401
+)
+from governance.bundle_dag import (
     bundle_composition as _bundle_composition,
+)
+from governance.bundle_dag import (
     check_bundle_composition as _check_bundle_composition,
+)
+from governance.bundle_dag import (
     dag_for as _dag_for,
+)
+from governance.bundle_dag import (
     node_id as _node_id,
 )
-from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.facts import Outcome
+from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.ops import Ops, RealOps
 from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_declares
 from governance.run_state import (

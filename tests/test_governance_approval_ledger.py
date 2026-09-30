@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from governance import approval_branches, approval_ledger as al
+from governance import approval_branches
+from governance import approval_ledger as al
 from governance import bundle_dag as bd
 from governance import run_state as rs
 from governance.approval_facts import Authorization, MergeEvent

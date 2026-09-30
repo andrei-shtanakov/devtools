@@ -9,6 +9,7 @@ once, and multiple blockers on one item must all survive.
 from __future__ import annotations
 
 from plan_fields import ManifestIndex, RepoInput, check_legacy_fleet, parse_fleet
+
 from tests.legacy_oracle import flagged as oracle_flagged
 
 # --- a frozen fleet: one text per repo (None = cloned, no TODO) ---------------

@@ -13,10 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from governance import run_state as rs
-from governance import spec_loop
-from governance import brief_input
+from governance import brief_input, spec_loop
 from governance import interview as iv
+from governance import run_state as rs
 
 
 @pytest.fixture()

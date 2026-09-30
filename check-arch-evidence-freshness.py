@@ -39,7 +39,7 @@ import subprocess
 import sys
 import traceback
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 SENSOR_VERSION = "0.1.0"
@@ -87,12 +87,12 @@ def parse_pin(text: str) -> dict[str, str]:
 def parse_iso(s: str) -> datetime:
     dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def sh(args: list[str], cwd: Path, timeout: int = 60) -> tuple[int, bytes, str]:
@@ -487,7 +487,7 @@ def main(argv: list[str] | None = None) -> int:
         "--read", action="store_true", help="режим читателя: unknown при просрочке"
     )
     args = parser.parse_args(argv)
-    now = parse_iso(args.now) if args.now else datetime.now(timezone.utc)
+    now = parse_iso(args.now) if args.now else datetime.now(UTC)
     if args.read:
         return read_status(args.status_file, now)
     try:

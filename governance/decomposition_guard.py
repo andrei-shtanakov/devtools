@@ -6,9 +6,9 @@ git/ФС/steward; переиспользуются S4-гейтом (runner) и �
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
-from collections.abc import Mapping
 from typing import NamedTuple
 
 import yaml
@@ -42,16 +42,16 @@ _VERIFY_GROUP_UNDERIVABLE_MARKER = "группа наблюдения не вы�
 _DT_HEAD_RE = re.compile(
     r"^####\s+(DT-\d+):\s*(.+?)\s*·\s*type:\s*(implement|verify)"
     r"\s*·\s*owner:\s*(\S+)\s*$",
-    re.M,
+    re.MULTILINE,
 )
 # near-miss: начинается как DT-заголовок, но строгую грамматику не прошёл;
 # широкая форма id ([^\s:]*) — суффиксный мусор (DT-3a) тоже находка
-_DT_NEAR_RE = re.compile(r"^####\s+(DT-[^\s:]*)", re.M)
-_SECTION_RE = re.compile(r"^#{1,3}\s", re.M)
+_DT_NEAR_RE = re.compile(r"^####\s+(DT-[^\s:]*)", re.MULTILINE)
+_SECTION_RE = re.compile(r"^#{1,3}\s", re.MULTILINE)
 
 
 def _list_field(block: str, name: str) -> tuple[str, ...] | None:
-    m = re.search(rf"^{name}:\s*\[([^\]]*)\]\s*$", block, re.M)
+    m = re.search(rf"^{name}:\s*\[([^\]]*)\]\s*$", block, re.MULTILINE)
     if m is None:
         return None
     inner = m.group(1).strip()
@@ -88,7 +88,7 @@ def _block_list_field(block: str, name: str) -> tuple[str, ...] | None:
     не разобрано» (находка формы) — раньше оба случая молча сливались в
     один пустой кортеж.
     """
-    m = re.search(rf"^{name}:\s*$", block, re.M)
+    m = re.search(rf"^{name}:\s*$", block, re.MULTILINE)
     if m is None:
         return None
     items: list[str] = []
@@ -127,7 +127,7 @@ def _block_list_field(block: str, name: str) -> tuple[str, ...] | None:
 # список, инлайн-список, что угодно) — используется ТОЛЬКО чтобы отличить
 # «поля нет вовсе» (легаси, молчание — не находка) от «поле объявлено, но
 # не разобрано ни одной принятой формой» (round 13, major — находка формы).
-_VERIFIES_KEY_RE = re.compile(r"^verifies:", re.M)
+_VERIFIES_KEY_RE = re.compile(r"^verifies:", re.MULTILINE)
 
 
 #: Классы TDD-waiver'а — ЗАКРЫТЫЙ словарь (спека decomposition-node §3a).
@@ -157,8 +157,10 @@ WAIVER_CLASSES = tuple(WAIVER_CONDITIONS)
 #: — тот же, что в заголовке DT. Одной строкой, а не двумя ключами,
 #: намеренно: два ключа делали бы достижимым состояние «класс без
 #: санкции», а здесь строка либо разбирается целиком, либо это находка.
-_WAIVER_RE = re.compile(r"^tdd_waiver:\s*(\S+)\s*·\s*sanction:\s*(\S+)\s*$", re.M)
-_WAIVER_KEY_RE = re.compile(r"^tdd_waiver:", re.M)
+_WAIVER_RE = re.compile(
+    r"^tdd_waiver:\s*(\S+)\s*·\s*sanction:\s*(\S+)\s*$", re.MULTILINE
+)
+_WAIVER_KEY_RE = re.compile(r"^tdd_waiver:", re.MULTILINE)
 
 #: Негативный контроль (devtools#336, spec-runner#428): селектор теста,
 #: который ОБЯЗАН покраснеть под патчем, ломающим проверяемое свойство.
@@ -170,8 +172,8 @@ _WAIVER_KEY_RE = re.compile(r"^tdd_waiver:", re.M)
 #: `[ \t]*`, а не `\s*`: в многострочном режиме `\s*` перешагивает перенос
 #: строки и берёт селектором ПЕРВОЕ слово следующей строки — пустое
 #: значение читалось бы как валидное.
-_CONTROL_RE = re.compile(r"^negative_control:[ \t]*(\S+)[ \t]*$", re.M)
-_CONTROL_KEY_RE = re.compile(r"^negative_control:", re.M)
+_CONTROL_RE = re.compile(r"^negative_control:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+_CONTROL_KEY_RE = re.compile(r"^negative_control:", re.MULTILINE)
 
 #: Санкция — ЗАКРЫТАЯ грамматика, а не свободный текст: иначе поле есть
 #: украшение, и `sanction: потому-что-можно` прошло бы наравне с
@@ -477,7 +479,7 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
             )
         verifies = verifies_parsed or ()
         dt_type = m.group(3)
-        group_m = re.search(r"^parallel_group:\s*(\S+)\s*$", block, re.M)
+        group_m = re.search(r"^parallel_group:\s*(\S+)\s*$", block, re.MULTILINE)
         if scenarios is None or not scenarios:
             findings.append(f"{dt_id}: строка scenarios отсутствует или пуста")
         if depends_on is None:
@@ -540,8 +542,8 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
 # неизвестная форма id — находка формы, не молчание; узкий NEAR с \b
 # был слеп к суффиксам вне [a-z]? — тот же fail-open, что и до фикса
 # (major ревью PR #148).
-_BEH_HEAD_RE = re.compile(r"^####\s+(BEH-\d+[a-z]?):\s*\S", re.M)
-_BEH_NEAR_RE = re.compile(r"^####\s+(BEH-[^\s:]*)", re.M)
+_BEH_HEAD_RE = re.compile(r"^####\s+(BEH-\d+[a-z]?):\s*\S", re.MULTILINE)
+_BEH_NEAR_RE = re.compile(r"^####\s+(BEH-[^\s:]*)", re.MULTILINE)
 _BEH_CHECKED_RE = re.compile(
     r"\*\*checked_by\*\*.*?`kind:\s*(\S+?)`.*?`target:\s*(\S+?)`"
 )
@@ -967,7 +969,7 @@ _DT_CONTRACT_VERSIONS = ("2",)
 #: редактуре, а ссылка обязана её переживать.
 _SOURCE_REF_RE = re.compile(r"^[a-z][a-z0-9-]*#[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-_DELIVERS_KEY_RE = re.compile(r"^delivers:", re.M)
+_DELIVERS_KEY_RE = re.compile(r"^delivers:", re.MULTILINE)
 
 #: Контрактная форма id результата поставки (спека §3b.3 — «задача
 #: сохраняет ссылку на `DEL-NN`»). Проверяется ЗДЕСЬ, потому что гвард
@@ -1061,7 +1063,7 @@ def _delivers_region(block: str) -> str | None:
 #: отделён от id пробелом, который `\s` уже покрывает. Перечисление его
 #: отдельно выглядело бы проверкой, которой нет — мутация, снявшая эту
 #: ветку, выжила бы, потому что предикат от неё не зависит.
-_NODE_ID_RE = re.compile(r"^####\s+([A-Z][A-Z0-9]*-\d+[a-z]?)(?=[\s:]|$)", re.M)
+_NODE_ID_RE = re.compile(r"^####\s+([A-Z][A-Z0-9]*-\d+[a-z]?)(?=[\s:]|$)", re.MULTILINE)
 
 
 def node_id_counts(text: str) -> dict[str, int]:

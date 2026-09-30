@@ -8,11 +8,11 @@ import json
 import os
 import subprocess as sp
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
-from zoneinfo import ZoneInfo
 
 import r16_runner as run
 
@@ -429,11 +429,11 @@ def utc_system(monkeypatch: pytest.MonkeyPatch):
     ("utc", "start"),
     [
         (
-            datetime(2026, 9, 22, 5, 30, tzinfo=timezone.utc),
+            datetime(2026, 9, 22, 5, 30, tzinfo=UTC),
             "2026-09-22T09:30:00+04:00",
         ),
         (
-            datetime(2026, 9, 22, 5, 29, tzinfo=timezone.utc),
+            datetime(2026, 9, 22, 5, 29, tzinfo=UTC),
             "2026-09-15T09:30:00+04:00",
         ),
     ],

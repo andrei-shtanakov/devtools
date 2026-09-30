@@ -27,7 +27,7 @@ import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,10 +48,9 @@ from governance import interview as iv
 from governance.edge_check import coordinator as edge_coordinator
 from governance.edge_check import publish as edge_publish
 from governance.edge_check.rules import EdgeCheckError
+from governance.facts import Outcome
 from governance.frontmatter import split_frontmatter
 from governance.merge_gate import PrFacts
-from governance.facts import Outcome
-from governance.stale_adapter import blob_sha1
 from governance.ops import (
     _AUTHOR_DSL,
     ENGINEER_BLOCKED,
@@ -81,6 +80,7 @@ from governance.run_state import (
     validate_merge_authority,
 )
 from governance.spec_runner_contract import target_selector_policy
+from governance.stale_adapter import blob_sha1
 
 _ROLLUP_GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 
@@ -1735,9 +1735,7 @@ def _interview_publish(
     os.replace(tmp, final)
     source = brief_input.inspect_brief(final)  # дескриптор — по durable-пути
     state.brief = source.as_state()
-    state.interview["completed_at"] = datetime.now(timezone.utc).isoformat(
-        timespec="seconds"
-    )
+    state.interview["completed_at"] = datetime.now(UTC).isoformat(timespec="seconds")
     state.status = "running"
     op_complete(state, INTERVIEW_BRIEF, brief_blob=dict(source.source_blobs))
     return True
@@ -1790,9 +1788,7 @@ def _interview_reconcile_published(
     except brief_input.BriefInputError as exc:
         return _interview_stop(state, f"recovery: inspect_brief: {exc}")
     state.brief = source.as_state()
-    state.interview["completed_at"] = datetime.now(timezone.utc).isoformat(
-        timespec="seconds"
-    )
+    state.interview["completed_at"] = datetime.now(UTC).isoformat(timespec="seconds")
     state.status = "running"
     op_complete(
         state, INTERVIEW_BRIEF, brief_blob=dict(source.source_blobs), reconciled=True
@@ -2747,7 +2743,7 @@ def _guard_edge_results(
     elif edge_changed and after is None:
         changed.insert(0, "(каталог edge-check исчез во время вызова)")
     root = run_dir(state.run_id) / "edge-check"
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     quarantine = root.with_name(f"edge-check.tampered-{stamp}")
     if edge_changed and root.exists():
         root.rename(quarantine)
@@ -2891,7 +2887,7 @@ def _source_layer_committed(state: RunState, ops: Ops) -> bool:
 
 def _frontmatter(text: str) -> str:
     """YAML-frontmatter между первыми двумя `---`-строками (или пусто)."""
-    match = re.match(r"^---\n(.*?)\n---", text, re.S)
+    match = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
     return match.group(1) if match else ""
 
 
@@ -2904,7 +2900,7 @@ def _upstream_pin(front: str, upstream: str) -> str | None:
     frontmatter» принимал одноимённый ПОСТОРОННИЙ верхнеуровневый ключ за
     пин — fail-open). Пустой mapping → None → GC-UNPINNED у вызывающего.
     """
-    match = re.search(r"^upstream_hashes:(.*)$", front, re.M)
+    match = re.search(r"^upstream_hashes:(.*)$", front, re.MULTILINE)
     if not match:
         return None
     inline = match.group(1).strip()
@@ -2920,7 +2916,7 @@ def _upstream_pin(front: str, upstream: str) -> str | None:
     pin = re.search(
         rf"^\s+{upstream}:\s*[\"']?([0-9a-f]{{40}})",
         "\n".join(block),
-        re.M,
+        re.MULTILINE,
     )
     return pin.group(1) if pin else None
 
@@ -3037,7 +3033,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         declares = re.search(
             rf"^\s*-\s+{upstream}\s*$|traces_to:.*\b{upstream}\b",
             front,
-            re.M,
+            re.MULTILINE,
         )
         if not declares:
             # required=True (оба ребра design — MAJOR-1, финальное ревью):
@@ -3092,7 +3088,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
                     rf"^\s*-\s+{re.escape(source_name)}\s*$|"
                     rf"traces_to:.*\b{re.escape(source_name)}\b",
                     front,
-                    re.M,
+                    re.MULTILINE,
                 )
                 if not declares:
                     local_findings.append(
@@ -3154,7 +3150,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     ):
         path = Path(state.target_dir) / state.bundle_dir / fname
         if path.exists() and not re.search(
-            pattern, path.read_text(encoding="utf-8"), re.M
+            pattern, path.read_text(encoding="utf-8"), re.MULTILINE
         ):
             dsl_empty.append(
                 f"error GC-DSL-EMPTY(prospective): {fname} — 0 распознаваемых "

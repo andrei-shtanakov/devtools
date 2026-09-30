@@ -40,8 +40,8 @@ import subprocess
 import time
 from collections.abc import Callable
 
-from governance.facts import Outcome
 from governance import authority_root
+from governance.facts import Outcome
 from governance.ops import (
     DEVTOOLS_ROOT,
     REVIEW_BARRIER_EXIT,

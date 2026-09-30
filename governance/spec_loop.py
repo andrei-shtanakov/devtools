@@ -62,12 +62,18 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from governance import approval_branches
+from governance import (
+    approval_branches,
+    brief_input,
+    bundle_dag,
+    charter_guard,
+    runner,
+    task_bridge,
+)
 from governance import approval_ledger as al
-from governance import brief_input, bundle_dag, charter_guard, run_state as rs
-from governance import runner, task_bridge
 from governance import interview as iv
 from governance import ops as ops_mod
+from governance import run_state as rs
 from governance.ops import DEVTOOLS_ROOT, RealOps
 
 WORKSPACE_ROOT = DEVTOOLS_ROOT.parent
@@ -93,7 +99,9 @@ _RUN_BODY_RE = re.compile(
 )
 #: Строка `run-id:` в теле candidate-PR волны (S2, m3): восстановление
 #: S13 находит прогон по ней.
-_WAVE_RUN_ID_RE = re.compile(r"^run-id: (?P<run_id>[A-Za-z0-9][A-Za-z0-9._-]*)$", re.M)
+_WAVE_RUN_ID_RE = re.compile(
+    r"^run-id: (?P<run_id>[A-Za-z0-9][A-Za-z0-9._-]*)$", re.MULTILINE
+)
 
 
 def _wave_branch_grammar(ws_id: str | None, slug: str) -> tuple[str, re.Pattern]:

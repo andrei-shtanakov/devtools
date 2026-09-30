@@ -13,7 +13,7 @@ import json
 import re
 import shlex
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import yaml
 
@@ -87,7 +87,7 @@ def parse_reply(returncode: int, stdout: str, stderr: str) -> DiscoveryReply:
 
 
 BRIEF_REL = "brief-input/00-discovery/brief.md"
-_FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+_FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -109,12 +109,12 @@ class InterviewSpec:
             "traces_to": self.traces_to,
             "upstream_blob": self.upstream_blob,
             "brief_rel": BRIEF_REL,
-            "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "started_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "completed_at": None,
         }
 
     @classmethod
-    def from_state(cls, st: dict) -> "InterviewSpec":
+    def from_state(cls, st: dict) -> InterviewSpec:
         return cls(
             frame=st["frame"],
             stakeholder_role=st["stakeholder_role"],

@@ -46,12 +46,11 @@ from pathlib import Path
 
 from governance import approval_facts as af
 from governance import approval_ledger as al
-from governance import bundle_dag, bundle_inputs
+from governance import bundle_dag, bundle_inputs, pr_checks
 from governance import node_approval as na
 from governance.approval_facts import Disposition, Outcome
 from governance.frontmatter import split_frontmatter, update_frontmatter
 from governance.ops import Ops
-from governance import pr_checks
 from governance.policy_sources import build_authority, load_safety
 from governance.run_state import RunState
 

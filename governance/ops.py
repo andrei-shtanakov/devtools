@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
 
+from governance import interview as _interview
 from governance.decomposition_guard import DELIVERABLE_KINDS
 from governance.facts import Fact, Outcome, unavailable
-from governance import interview as _interview
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
 ENGINEER_BLOCKED = "engineer-маршрут ждёт discovery#49 (приём upstream при start)"
