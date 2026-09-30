@@ -1,13 +1,16 @@
 ---
+traces_to:
+- design
 spec_stage: tasks
-status: draft
-owner_role: stream-owner
-version: 1
+status: approved
+version: 2
 generated_by: claude-session
-generated_at: "2026-09-30T18:00:00+04:00"
-source_prompt_version: ""
-validation: ""
-approved_by: ""
+generated_at: '2026-09-30T18:00:00+04:00'
+source_prompt_version: ''
+validation: warn
+approved_by: andrei-shtanakov
+approved_at: '2026-09-30T13:51:38Z'
+owner_role: stream-owner
 ---
 
 ## Milestone 1: находки selfcheck по devtools — реальный слой (прогон 2026-09-30)
