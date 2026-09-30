@@ -266,6 +266,10 @@ def test_expired_class_entry_names_its_class(tmp_path: Path) -> None:
         'rule = ""\npath = "tests/**"',
         'rule = "ruff/ARG*"\npath = ["tests/**"]',  # a traceback, not exit 4
         "rule = 123",
+        # review #519 recheck: the same class for the point forms — a non-string
+        # anchor crashed matching, a non-string id matched nothing silently
+        "anchor = 123",
+        "id = 123",
     ],
 )
 def test_class_entry_fields_must_be_non_empty_strings(
@@ -275,5 +279,5 @@ def test_class_entry_fields_must_be_non_empty_strings(
     `repo = ""`, #437.5); a non-string one crashed the run outside the
     ConfigError guard. Both are load errors (exit 4)."""
     body = f'[[allow]]\n{fields}\nreason = "r"\nuntil = 2027-01-01\n'
-    with pytest.raises(ConfigError, match="rule|path"):
+    with pytest.raises(ConfigError, match="rule|path|anchor|id"):
         load_config(cfg_file(tmp_path, body))
