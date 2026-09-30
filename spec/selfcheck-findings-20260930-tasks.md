@@ -55,7 +55,7 @@ Source: selfcheck 2026-09-30, vulture (решение владельца 2026-09
 **Touches:** governance/ops.py, governance/spec_loop.py, governance/bundle_state.py, tests/test_governance_runner.py, tests/test_governance_accept_pr.py, tests/test_governance_task_bridge.py, tests/test_governance_spec_loop.py, tests/test_governance_bundle_state.py
 
 ### TASK-002: Optional без сужения — явная проверка вместо неявного инварианта
-P2 | 🔄 IN_PROGRESS   Est: 4h
+P2 | ✅ DONE   Est: 4h
 
 pyrefly видит обращение к значению с типом `X | None` без проверки. Где
 инвариант гарантирован потоком — сделать его явным (`assert x is not None,
@@ -66,15 +66,15 @@ pyrefly видит обращение к значению с типом `X | Non
 Source: selfcheck 2026-09-30, pyrefly (решение владельца 2026-09-30: T2)
 
 **Checklist:**
-- [ ] `governance/runner.py` 1596, 1605, 1623, 1651, 1707, 1738, 1761, 1791 (sc-1b02ec57, sc-2277f58d, sc-0c3a6ee3, sc-2a1343ef, sc-2782520d, sc-59d3fe76, sc-07f3f36a, sc-2d337fe9): `state.interview`/путь с типом `| None` — сузить один раз на входе функции, а не в каждой строке
-- [ ] `todo_context.py` 197, 204, 214, 262, 373, 753 (sc-ba566fba, sc-c9b7837a, sc-5be61753, sc-5da7b0b6, sc-a29a9f7e, sc-a103940a): модуль, импортируемый как необязательный (`None` при отсутствии), используется без проверки — проверка с понятной ошибкой «нужна группа/пакет X»; 628, 643, 644, 646, 648 (sc-575ab789, sc-343eddcf, sc-c6098c3d, sc-3a5bf8eb, sc-6e5e71f4): список `| None` — сузить
-- [ ] `governance/accept_pr.py` 402, 409 (sc-4626f709, sc-c131971e): `.detail` у `None`
-- [ ] `inbox.py` 359, 363, 367, 371, 375 (sc-2ae71bc5, sc-cd47da30, sc-43bf319b, sc-ace44377, sc-fed021c1): `dict[str, Path]` против параметра `dict[str, Path | None]` — поправить аннотацию `render` (`Mapping[str, Path | None]` ковариантен по значению), а не приводить аргумент
-- [ ] `check-plan-fields.py` 624, 631 (sc-6a7df261, sc-abf2831d) и `check-arch-evidence-freshness.py` 443 (sc-92ddae1d): ключ/аргумент `| None` — сузить
-- [ ] `governance/spec_loop.py` 1183, 1185, 1187 (sc-ffb471ba, sc-8a07d0b7, sc-c2be1633): `ws_id`/`bundle_dir`/`run_id` «may be uninitialized» — ложное по потоку (ветка с `state is not None` делает `return` раньше); перестроить так, чтобы это было видно статически (инициализация до ветвления или вынос), без изменения поведения
-- [ ] на каждую ветку `None`, которая после правки стала реально достижимой ошибкой, — тест (для `inbox.py` и `check-plan-fields.py` тестов ещё нет: `tests/test_inbox.py`, `tests/test_check_plan_fields.py` — новые файлы)
-- [ ] свежий прогон `make selfcheck ARGS='--probe pyrefly'`: перечисленных id нет
-- [ ] полный набор тестов зелёный в обоих режимах
+- [x] `governance/runner.py` 1596, 1605, 1623, 1651, 1707, 1738, 1761, 1791 (sc-1b02ec57, sc-2277f58d, sc-0c3a6ee3, sc-2a1343ef, sc-2782520d, sc-59d3fe76, sc-07f3f36a, sc-2d337fe9): `state.interview`/путь с типом `| None` — сузить один раз на входе функции, а не в каждой строке
+- [x] `todo_context.py` 197, 204, 214, 262, 373, 753 (sc-ba566fba, sc-c9b7837a, sc-5be61753, sc-5da7b0b6, sc-a29a9f7e, sc-a103940a): модуль, импортируемый как необязательный (`None` при отсутствии), используется без проверки — проверка с понятной ошибкой «нужна группа/пакет X»; 628, 643, 644, 646, 648 (sc-575ab789, sc-343eddcf, sc-c6098c3d, sc-3a5bf8eb, sc-6e5e71f4): список `| None` — сузить
+- [x] `governance/accept_pr.py` 402, 409 (sc-4626f709, sc-c131971e): `.detail` у `None`
+- [x] `inbox.py` 359, 363, 367, 371, 375 (sc-2ae71bc5, sc-cd47da30, sc-43bf319b, sc-ace44377, sc-fed021c1): `dict[str, Path]` против параметра `dict[str, Path | None]` — поправить аннотацию `render` (`Mapping[str, Path | None]` ковариантен по значению), а не приводить аргумент
+- [x] `check-plan-fields.py` 624, 631 (sc-6a7df261, sc-abf2831d) и `check-arch-evidence-freshness.py` 443 (sc-92ddae1d): ключ/аргумент `| None` — сузить
+- [x] `governance/spec_loop.py` 1183, 1185, 1187 (sc-ffb471ba, sc-8a07d0b7, sc-c2be1633): `ws_id`/`bundle_dir`/`run_id` «may be uninitialized» — ложное по потоку (ветка с `state is not None` делает `return` раньше); перестроить так, чтобы это было видно статически (инициализация до ветвления или вынос), без изменения поведения
+- [x] на каждую ветку `None`, которая после правки стала реально достижимой ошибкой, — тест (для `inbox.py` и `check-plan-fields.py` тестов ещё нет: `tests/test_inbox.py`, `tests/test_check_plan_fields.py` — новые файлы)
+- [x] свежий прогон `make selfcheck ARGS='--probe pyrefly'`: перечисленных id нет
+- [x] полный набор тестов зелёный в обоих режимах
 
 **Touches:** governance/runner.py, todo_context.py, governance/accept_pr.py, inbox.py, check-plan-fields.py, check-arch-evidence-freshness.py, governance/spec_loop.py, tests/test_governance_runner.py, tests/test_todo_context.py, tests/test_governance_accept_pr.py, tests/test_inbox.py, tests/test_check_plan_fields.py, tests/test_arch_evidence_freshness.py, tests/test_governance_spec_loop.py
 
