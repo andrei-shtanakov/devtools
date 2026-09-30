@@ -314,6 +314,7 @@ def require_clean_tree(checkout: Path) -> None:
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise WorkerError(f"не удалось проверить дерево {checkout}: {exc}") from exc
@@ -359,7 +360,7 @@ def run_harness(prompt: str, execute: bool, cwd: Path) -> dict[str, Any]:
             prompt,
         ]
         try:
-            done = subprocess.run(cmd, cwd=cwd)
+            done = subprocess.run(cmd, cwd=cwd, check=False)
         except (OSError, subprocess.SubprocessError) as exc:
             raise HarnessError(f"не удалось запустить codex: {exc}") from exc
         if done.returncode:

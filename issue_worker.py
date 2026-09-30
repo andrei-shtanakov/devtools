@@ -85,6 +85,7 @@ def main() -> int:
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     if issue.returncode:
         print(issue.stderr.strip())
@@ -132,7 +133,7 @@ Return only the structured result required by the supplied JSON schema.
             prompt,
         ]
         try:
-            done = subprocess.run(cmd)
+            done = subprocess.run(cmd, check=False)
         except (OSError, subprocess.SubprocessError) as exc:
             print(f"issue-worker: не удалось запустить codex: {exc}")
             return 3

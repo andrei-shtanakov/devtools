@@ -154,6 +154,7 @@ class Forge:
             ["git", "-C", str(self.origin), "rev-parse", f"refs/heads/{branch}"],
             capture_output=True,
             text=True,
+            check=False,
         )
         return done.stdout.strip() if done.returncode == 0 else None
 
@@ -240,6 +241,7 @@ class Ops(RealOps):
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         return done.returncode == 0
 

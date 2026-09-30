@@ -107,6 +107,7 @@ def harness_version(binary: str = "claude") -> str | None:
             text=True,
             timeout=10,
             env=reviewer_env(),
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -142,6 +143,7 @@ def run_reviewer(
             cwd=workdir,
             timeout=timeout,
             env=env if env is not None else reviewer_env(),
+            check=False,
         )
     except subprocess.TimeoutExpired as exc:
         raise EdgeCheckError("timeout", f"ревьюер не ответил за {timeout} с") from exc

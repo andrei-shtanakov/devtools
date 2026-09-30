@@ -498,7 +498,12 @@ def git_grep(
         # errors="replace": a sibling repo holding one non-UTF-8 file must not
         # crash the pack — `docs: error` is an answer, a traceback is not
         done = subprocess.run(
-            cmd, capture_output=True, text=True, errors="replace", timeout=_GIT_TIMEOUT
+            cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=_GIT_TIMEOUT,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, f"git grep failed: {exc}"

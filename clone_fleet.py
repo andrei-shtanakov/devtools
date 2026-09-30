@@ -71,6 +71,7 @@ def clone_fleet(manifest: Path, root: Path, *, https: bool, depth: int) -> int:
             ["git", "clone", "--quiet", "--depth", str(depth), url, str(target)],
             capture_output=True,
             text=True,
+            check=False,
         )
         if proc.returncode != 0:
             failed.append(git_dir)

@@ -208,7 +208,9 @@ def search_inbox(owner: str) -> list[dict] | None:
         "repository,number,title,body",
     ]
     try:
-        done = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        done = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60, check=False
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"inbox: gh unavailable ({exc}); skipping", file=sys.stderr)
         return None

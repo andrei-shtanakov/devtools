@@ -215,6 +215,7 @@ def check_insteadof(target: Path) -> list[Finding]:
         ["git", "-C", str(target), "config", "--get", _INSTEADOF_KEY],
         capture_output=True,
         text=True,
+        check=False,
     )
     if done.returncode == 0 and done.stdout.strip() == _INSTEADOF_VALUE:
         return []
@@ -303,6 +304,7 @@ def check_dirty_tree(target: Path) -> list[Finding]:
         ["git", "-C", str(target), "status", "--porcelain"],
         capture_output=True,
         text=True,
+        check=False,
     )
     if done.returncode != 0:
         return [

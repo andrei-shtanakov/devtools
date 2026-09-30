@@ -375,7 +375,7 @@ def test_a_non_object_harness_result_is_an_answer_not_a_traceback(
     class _Done:
         returncode = 0
 
-    def fake_run(cmd, cwd=None):
+    def fake_run(cmd, cwd=None, **kwargs):
         Path(cmd[cmd.index("--output-last-message") + 1]).write_text("[1, 2]")
         return _Done()
 

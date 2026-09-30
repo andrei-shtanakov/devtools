@@ -450,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         ["git", "-C", target_dir, "remote", "get-url", "origin"],
         capture_output=True,
         text=True,
+        check=False,
     )
     checkout_slug = _origin_slug(origin.stdout) if origin.returncode == 0 else None
     if checkout_slug != repo_slug:
