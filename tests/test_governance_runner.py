@@ -133,7 +133,6 @@ class FakeOps:
     existing_prs: dict[str, int] = field(default_factory=dict)
     review_exit: int = 0
     codes_elsewhere: dict[str, str] = field(default_factory=dict)
-    review_fresh_exit: int = 0
     review_body: str | None = None
     existing_files: set[str] = field(default_factory=set)
     ignored_paths: set[str] = field(default_factory=set)
@@ -290,9 +289,6 @@ class FakeOps:
         self.existing_prs[branch] = number
         return number
 
-    def mark_ready(self, repo_slug: str, pr: int) -> None:
-        self.calls.append(("mark_ready", pr))
-
     def review(self, repo_name: str, pr: int) -> int:
         self.calls.append(("review", pr))
         return self.review_exit
@@ -315,10 +311,6 @@ class FakeOps:
 
     def caller_login(self) -> str | None:
         return None
-
-    def pr_files(self, repo_slug: str, pr: int) -> list[str]:
-        self.calls.append(("pr_files", pr))
-        return self.files
 
     def unresolved_threads(self, repo_slug: str, pr: int) -> bool | None:
         self.calls.append(("unresolved_threads", pr))
@@ -501,10 +493,6 @@ class FakeOps:
         self.author_disp_calls.append((target_dir, task, config_path, slug))
         self.author_disp_resume.append(resume)
         return self.author_disp_exit
-
-    def review_fresh(self, repo_name: str, pr: int) -> int:
-        self.calls.append(("review_fresh", pr))
-        return self.review_fresh_exit
 
     def latest_review_body(self, repo_slug: str, pr: int) -> str | None:
         self.calls.append(("latest_review_body", pr))
@@ -1671,7 +1659,7 @@ def test_real_candidate_gate_accepts_materialized_brief_source(
 
 
 def _green_bundle(profile, bundle) -> bundle_state.BundleState:
-    return bundle_state.BundleState((), 0, None, (), ())
+    return bundle_state.BundleState((), 0, (), ())
 
 
 def _repin_bundle(bundle_dir: Path) -> None:

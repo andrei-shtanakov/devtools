@@ -41,7 +41,6 @@ from typing import Any
 
 from steward.gatecheck.behaviour import check_behaviour_spec
 from steward.gatecheck.checks import collect_bundle
-from steward.gatecheck.trace_matrix import build_trace_matrix
 from steward.graph import SpecGraph, load_profile
 from steward.roles import load_roles_catalog
 
@@ -60,7 +59,6 @@ class NodeState:
 class BundleState:
     nodes: tuple[NodeState, ...]
     error_count: int
-    trace_matrix: dict[str, Any] | None
     required_absent: tuple[str, ...]
     bundle_findings: tuple[str, ...]
 
@@ -154,9 +152,8 @@ def candidate_state(profile_path: Path, bundle_dir: Path) -> BundleState:
     error_count = sum(
         1 for fs in per_node.values() for f in fs if f.startswith("error")
     )
-    matrix = build_trace_matrix(graph, artifacts)
     return BundleState(
-        tuple(nodes), error_count, matrix, tuple(required_absent), bundle_findings
+        tuple(nodes), error_count, tuple(required_absent), bundle_findings
     )
 
 

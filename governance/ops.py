@@ -167,8 +167,6 @@ class Ops(Protocol):
         label: str,
     ) -> int: ...
 
-    def mark_ready(self, repo_slug: str, pr: int) -> None: ...
-
     def criteria_verify(
         self, target_dir: str, request_path: str
     ) -> tuple[int, str]: ...
@@ -178,8 +176,6 @@ class Ops(Protocol):
     ) -> dict[str, str]: ...
 
     def review(self, repo_name: str, pr: int) -> int: ...
-
-    def review_fresh(self, repo_name: str, pr: int) -> int: ...
 
     def latest_review_body(self, repo_slug: str, pr: int) -> str | None: ...
 
@@ -192,8 +188,6 @@ class Ops(Protocol):
     def agent_login(self) -> str | None: ...
 
     def caller_login(self) -> str | None: ...
-
-    def pr_files(self, repo_slug: str, pr: int) -> list[str]: ...
 
     def unresolved_threads(self, repo_slug: str, pr: int) -> bool | None: ...
 
@@ -1516,36 +1510,17 @@ class RealOps:
         """`create_pr` с `draft=True` — форма, которой пользуется раннер.
 
         Имя остаётся, потому что оно называет ДРУГОЙ процесс, а не другую
-        реализацию: draft-PR раннера ждёт ревью и снимается с draft'а
-        `mark_ready`, approval-PR §I12 создаётся сразу обычным. Тело у обоих
-        одно.
+        реализацию: draft-PR раннера ждёт ревью, approval-PR §I12 создаётся
+        сразу обычным. Тело у обоих одно.
         """
         return self.create_pr(
             target_dir, repo_slug, branch, title, body, label, draft=True
         )
 
-    def mark_ready(self, repo_slug: str, pr: int) -> None:
-        """gh pr ready — снять draft-статус."""
-        subprocess.run(["gh", "pr", "ready", str(pr), "-R", repo_slug], check=True)
-
     def review(self, repo_name: str, pr: int) -> int:
         """Прогон review-pr.sh из корня devtools; возврат = returncode как есть."""
         done = subprocess.run(
             ["sh", str(DEVTOOLS_ROOT / "review-pr.sh"), repo_name, str(pr)],
-            cwd=DEVTOOLS_ROOT,
-            check=False,
-        )
-        return done.returncode
-
-    def review_fresh(self, repo_name: str, pr: int) -> int:
-        """review-pr.sh --fresh — обход fp-наследования (авто-опровержение S6).
-
-        Без --fresh пере-прогон по неизменному входу унаследовал бы тот же
-        красный вердикт по отпечатку; --fresh обходит только поиск
-        наследуемого, отпечаток вычисляется и публикуется как обычно.
-        """
-        done = subprocess.run(
-            ["sh", str(DEVTOOLS_ROOT / "review-pr.sh"), repo_name, str(pr), "--fresh"],
             cwd=DEVTOOLS_ROOT,
             check=False,
         )
@@ -1658,27 +1633,6 @@ class RealOps:
     def caller_login(self) -> str | None:
         """Вызывающая учётка — `gh api user` под профилем вызова как есть."""
         return _gh_user_login(None)
-
-    def pr_files(self, repo_slug: str, pr: int) -> list[str]:
-        """Список путей файлов PR."""
-        done = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "view",
-                str(pr),
-                "-R",
-                repo_slug,
-                "--json",
-                "files",
-                "--jq",
-                ".files[].path",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return [line for line in done.stdout.splitlines() if line]
 
     def unresolved_threads(self, repo_slug: str, pr: int) -> bool | None:
         """Есть ли непогашенный review thread; None = не смогли узнать.
