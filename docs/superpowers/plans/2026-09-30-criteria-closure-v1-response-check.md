@@ -25,10 +25,11 @@
 ## Review Focus
 
 1. Повторяемая ошибка без конца (`clone-failed` на не-UTF-8 пути, `collection-failed` при `-p no:xdist` до B2b) — `criteria-close` на exit 2 отказывает шагу и **не** записывает ключ; оператор видит вид и `detail`, а не молчаливый цикл. Тест: Task 7, `test_retryable_error_is_step_failure_without_key`.
-2. Владелец токена лежит в `skipped`/`ignored` файле, его тест `deselected` или файл вне `test_items` и `collection_excluded` (вне `testpaths`) — BEH не получает `traced`, даже если другой селектор traced. Тест: Task 5, `test_excluded_owner_blocks_traced` (три формы + вне testpaths).
+2. Владелец токена лежит в `skipped`/`ignored` файле, его тест (или один параметр) `deselected` или файл вне `test_items` и `collection_excluded` (вне `testpaths`) — BEH не получает `traced`, даже если другой селектор traced. Владельцы ищутся по всем отслеживаемым `.py` на `product_sha`, не по `test_files` ответа. Тесты: Task 5 `test_excluded_owner_blocks_traced`, `test_partially_deselected_parametrized_blocks_traced`; Task 7 `test_owner_missing_from_test_files_blocks_through_close` (через `criteria_close`, без ручного `owners_map`).
 3. Параметризованный тест потерял один `node_id` при том же определении — отказ полноты, а не traced. Тест: Task 5, `test_lost_parametrized_node_id_refused`.
 4. pytest собрал определение из другой ветки `if/else` (другая `line`) — определение-владелец не собрано ⇒ BEH не traced. Тест: Task 5, `test_definition_from_other_branch_is_not_owner`.
 5. Второй прогон пустой (нет строк продукта), первый полный — селектор не traced (объединение по прогонам запрещено §3.7). Тест: Task 4, `test_empty_second_run_is_not_traced`.
+6. Прогон собрал не тот тест (пусто, чужой, лишний `node_id`) — отказ, а не traced; продукт, пересекающийся с тестами, — отказ (§3.4). Тесты: Task 6 `test_run_must_collect_exactly_its_selector`, `test_product_overlapping_tests_is_refused`.
 
 ---
 
@@ -369,7 +370,8 @@ git commit -m "criteria_check: v1 error-kind table, response branch vs exit code
   - `read_declaration(tree: Tree) -> Declaration` где `Declaration(roots: tuple[str, ...], groups: tuple[str, ...] | None, extras: tuple[str, ...])` (нормализовано и отсортировано);
   - `resolve_roots(tree, roots) -> tuple[str, ...]` — отслеживаемые обычные `.py` под корнями, отсортировано;
   - `content_sha256(tree, decl, lock_sha256, test_files, excluded_paths) -> str` по §6.1;
-  - `function_body_lines(tree, files) -> dict[str, set[int]]`.
+  - `function_body_lines(tree, files) -> dict[str, set[int]]`;
+  - `tracked_py(tree) -> tuple[str, ...]` — все отслеживаемые обычные `.py` на `product_sha` (кандидаты во владельцы токена независимо от инвентаря ответа).
 
 - [ ] **Step 1: Падающие тесты на настоящем git-репо во временном каталоге**
 
@@ -443,6 +445,11 @@ def test_content_sha256_matches_design_6_1(tmp_path):
     want = hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":"),
                                      ensure_ascii=True).encode("ascii")).hexdigest()
     assert got == want
+
+
+def test_tracked_py_lists_every_regular_py(tmp_path):
+    tree = _repo(tmp_path, {"pkg/a.py": "", "tests/skip/test_s.py": "", "notes.txt": ""})
+    assert cp.tracked_py(tree) == ("pkg/a.py", "tests/skip/test_s.py")
 
 
 def test_function_body_lines(tmp_path):
@@ -619,6 +626,13 @@ def content_sha256(
     }
     text = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(text.encode("ascii")).hexdigest()
+
+
+def tracked_py(tree: Tree) -> tuple[str, ...]:
+    """Все отслеживаемые обычные .py — владельцев токена ищем по ним, а не по
+    test_files ответа: исключённый или невидимый сбору файл тоже владелец."""
+    return tuple(sorted(p for p, (mode, _) in tree.entries().items()
+                        if mode.startswith("100") and p.endswith(".py")))
 
 
 def function_body_lines(tree: Tree, files: list[str]) -> dict[str, set[int]]:
@@ -880,6 +894,17 @@ def test_excluded_owner_blocks_traced(excluded):
     assert "BEH-01" in ch.excluded_owner_behs(resp, o)
 
 
+def test_partially_deselected_parametrized_blocks_traced():
+    """Один параметр собран, другой снят с отбора — у определения тот же
+    (file, qualname, line); собранный сосед не прячет исключение."""
+    o = ch.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
+    dropped = {"how": "deselected", "node_id": "tests/test_a.py::test_a[2]",
+               "definition": {"file": "tests/test_a.py", "qualname": "test_a", "line": 1}}
+    resp = answer([item("tests/test_a.py::test_a[1]")], [item("tests/test_a.py::test_a[1]")],
+                  [dropped])
+    assert "BEH-01" in ch.excluded_owner_behs(resp, o)
+
+
 def test_owner_outside_testpaths_blocks_traced():
     o = ch.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
     assert "BEH-01" in ch.excluded_owner_behs(answer([], []), o)
@@ -943,16 +968,21 @@ def excluded_owner_behs(
     out: dict[str, str] = {}
     for bid, defs in owners_map.items():
         for d in sorted(defs):
-            if d in collected:
-                continue
-            why = "владелец не собран (вне test_items и collection_excluded)"
+            # явные исключения — ДО проверки «собран»: снятый с отбора параметр
+            # не прячется за собранным соседом того же определения
+            why = None
             for e in excluded:
                 if e["how"] in ("skipped", "ignored") and _covers(e["path"], d[0]):
                     why = f"владелец в исключённом ({e['how']}) {e['path']}"
                 elif e["how"] == "deselected" and e["definition"] and _def(e) == d:
                     why = f"тест владельца снят с отбора ({e['node_id']})"
-            out[bid] = f"{d[0]}::{d[1]}@{d[2]}: {why}"
-            break
+                if why:
+                    break
+            if why is None and d not in collected:
+                why = "владелец не собран (вне test_items и collection_excluded)"
+            if why is not None:
+                out[bid] = f"{d[0]}::{d[1]}@{d[2]}: {why}"
+                break
     return out
 ```
 
@@ -1027,6 +1057,26 @@ def ok_request():
     return golden_answer()["request"]
 
 
+@pytest.mark.parametrize(("run_idx", "collected"), [
+    (0, []), (1, []), (0, ["tests/test_mod.py::test_other"]),
+    (1, ["tests/test_mod.py::test_run", "tests/test_mod.py::test_other"]),
+])
+def test_run_must_collect_exactly_its_selector(run_idx, collected):
+    resp = golden_answer()
+    resp["beh"][0]["selectors"][0]["runs"][run_idx]["collected"] = collected
+    got = ch.validate_answer(ok_request(), resp, **ok_args(resp))
+    assert any("собрал" in p for p in got.problems), got.problems
+
+
+def test_product_overlapping_tests_is_refused():
+    resp = golden_answer()
+    args = ok_args(resp)
+    args["resolved_files"] = ("pkg/__init__.py", "pkg/mod.py", "tests/test_mod.py")
+    resp["product_roots"]["files"] = list(args["resolved_files"])
+    got = ch.validate_answer(ok_request(), resp, **args)
+    assert any("пересекается с тестами" in p for p in got.problems)
+
+
 def test_excluded_owner_downgrades_traced():
     resp = golden_answer()
     args = ok_args(resp)
@@ -1084,6 +1134,10 @@ def validate_answer(
     got = sorted(b["id"] for b in response["beh"])
     if got != want:
         return Checked([*out, f"множество BEH {got} ≠ запросу {want}"], {})
+    tests_side = set(response["test_files"]) | {i["definition"]["file"] for i in response["test_items"]}
+    overlap = sorted(set(resolved_files) & tests_side)
+    if overlap:  # §3.4 product-roots-overlap-tests: исполнение теста ≠ исполнение продукта
+        out.append(f"продукт пересекается с тестами: {overlap}")
     out += completeness_findings(response, owners_map)
     status: dict[str, str] = {}
     for b in response["beh"]:
@@ -1093,6 +1147,10 @@ def validate_answer(
             for i, r in enumerate(s["runs"]):
                 if r["result"] != "complete":
                     continue
+                if r["collected"] != [s["node_id"]]:
+                    out.append(
+                        f"{bid}: прогон {i + 1} собрал {r['collected']} вместо [{s['node_id']}]"
+                    )
                 if run_outcome(r["phases"]) != r["outcome"]:
                     out.append(f"{bid}: outcome прогона {i + 1} ≠ фазам ({s['node_id']})")
                 if sum(len(p["lines"]) for p in r["product_lines"]) != r["product_line_count"]:
@@ -1180,6 +1238,18 @@ def test_exit_code_contradicting_kind_is_refused(tmp_path, monkeypatch):
     assert cc.run("run-1", _ops((2, json.dumps(err)))) == 2
 
 
+def test_owner_missing_from_test_files_blocks_through_close(tmp_path, monkeypatch):
+    """Интеграция пробела 1: BEH-01 traced по tests/test_a.py, но второй
+    владелец токена лежит в tests/extra/test_b.py, которого нет ни в
+    test_files, ни в test_items (вне testpaths) — закрытие blocked (Must)."""
+    _, target, pin = _env(tmp_path, monkeypatch,
+                          extra={"tests/extra/test_b.py": "def test_b():\n    # ENC:BEH-01\n    assert 1\n"})
+    _oracle_on(monkeypatch)
+    assert cc.run("run-1", _ops((0, json.dumps(_response(target, pin))))) == 0
+    meta, _ = split_frontmatter(_closure_on_origin(target, _ops()))
+    assert meta["closure"] == "blocked"
+
+
 def test_same_content_second_measure_is_g6(tmp_path, monkeypatch):
     _, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
@@ -1201,7 +1271,7 @@ def _request(target, pin):
             "test_criteria": [{"id": "ENC:BEH-01", "verify_task": False}]}
 ```
 
-(Существующий `_oracle_on` поправить: `task_bridge.spec_runner_version` → `"4.5.0"` — в эталоне `spec_runner_version: "4.5.0"`, а `validate_answer` сверяет его с установленной; `read_min_version` → `MinVersion("4.5.0")`. `_response` переписать под v1: взять `answer.json`, подставить `request = _request(target, pin)`, корни `pkg` фикстуры, `lock_sha256` от `uv.lock` фикстуры и `content_sha256`, посчитанный `criteria_product.content_sha256` на `Tree(target, pin)`.)
+(`_env` получает параметр `extra: dict[str, str] | None` — дополнительные файлы целевого репо до коммита `product_sha`. Существующий `_oracle_on` поправить: `task_bridge.spec_runner_version` → `"4.5.0"` — в эталоне `spec_runner_version: "4.5.0"`, а `validate_answer` сверяет его с установленной; `read_min_version` → `MinVersion("4.5.0")`. `_response` переписать под v1: взять `answer.json`, подставить `request = _request(target, pin)`, корни `pkg` фикстуры, `lock_sha256` от `uv.lock` фикстуры и `content_sha256`, посчитанный `criteria_product.content_sha256` на `Tree(target, pin)`.)
 
 - [ ] **Step 2: Прогнать — падают.**
 
@@ -1239,9 +1309,11 @@ Run: `uv run --frozen --group governance pytest tests/test_governance_criteria_c
         except criteria_product.ProductError as exc:
             print(f"criteria-close: ответ spec-runner отвергнут — {exc}")
             return 2
+        # владельцы — по всем отслеживаемым .py вне продукта, не по инвентарю
+        # ответа: skipped/ignored/вне testpaths файлы в test_files не попадают
         sources = {
             p: (tree.blob(p) or b"").decode("utf-8", errors="replace")
-            for p in resp["test_files"] if p.endswith(".py")
+            for p in criteria_product.tracked_py(tree) if p not in files
         }
         checked = criteria_check.validate_answer(
             request, resp,
@@ -1311,6 +1383,6 @@ git commit -m "criteria_close: v1 request slug, exit 0/2/3 branches, G6 key by a
 - [ ] **Step 3: Commit**
 
 ```bash
-git add TODO.md contracts/criteria-closure/v1/README.md
+git add TODO.md contracts/criteria-closure/v1/README.md docs/superpowers/specs/2026-09-28-bundle-criteria-oracle-design.md
 git commit -m "todo: criteria-closure v1 consumer done; oracle pending until spec-runner verify --criteria"
 ```
