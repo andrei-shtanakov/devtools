@@ -54,6 +54,10 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         # что-либо доказывать, а PR ре-вендора останутся агентски
         # мержимыми по этому же исключению.
         "attest-vendor.sh",
+        # Порядок работ conductor в зонтике (ai-orchestrators-workspace#48):
+        # `autonomy` — полномочия агента-оркестратора; merge-pr.sh читает этот
+        # перечень и на PR зонтика, так что поднять их агентским мержем нельзя.
+        "roadmap.toml",
     }
 
 
@@ -172,3 +176,8 @@ def test_every_module_sourced_by_the_merge_scripts_is_protected() -> None:
     for module in sourced:
         assert module in authority_root.prefixes(), module
         assert module in accept_pr._HARNESS_PREFIXES, module
+
+
+def test_roadmap_is_authority_root() -> None:
+    """ai-orchestrators-workspace#48: правку `roadmap.toml` мержит человек."""
+    assert authority_root.touched(["roadmap.toml", "README.md"]) == ["roadmap.toml"]
