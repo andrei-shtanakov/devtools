@@ -47,7 +47,7 @@ def _upstream(tmp_path, content: bytes) -> tuple[Path, str]:
     import subprocess
 
     up = tmp_path / "up"
-    d = up / "contracts/criteria-closure/v1"
+    d = up / "schemas/criteria-closure/v1"
     d.mkdir(parents=True)
     (d / "response.schema.json").write_bytes(content)
     subprocess.run(["git", "init", "-q", str(up)], check=True)
@@ -106,6 +106,34 @@ def test_drift_missing_upstream_is_error_in_ci_note_locally(tmp_path):
     assert errors == [] and any("not-checked" in n for n in notes)
 
 
-def test_shipped_contract_is_not_vendored_yet():
-    assert not cc.vendored()
+def test_vendored_copy_is_consistent():
     assert cc.integrity_findings() == []
+    assert cc.vendored()
+
+
+def test_responses_copy_is_consistent():
+    assert cc.integrity_findings(cc.RESPONSES_DIR) == []
+
+
+def test_pending_min_version_keeps_oracle_unavailable():
+    """Схемы вендорены, но команды verify --criteria ещё нет (B2b):
+    оракул недоступен при любом установленном spec-runner."""
+    minimum = cc.read_min_version()
+    assert minimum.version is None
+    assert not cc.oracle_available("99.0.0", minimum, is_vendored=True)
+
+
+def test_numeric_min_version_gates_as_before(tmp_path):
+    env = tmp_path / "min.env"
+    env.write_text("MIN_SPEC_RUNNER_VERSION=4.5.0\n")
+    m = cc.read_min_version(env)
+    assert cc.oracle_available("4.5.0", m, is_vendored=True)
+    assert not cc.oracle_available("4.4.9", m, is_vendored=True)
+
+
+def test_drift_reads_schemas_from_schemas_dir():
+    """Апстрим держит схемы в schemas/criteria-closure/v1, не в contracts/."""
+    import inspect
+
+    sig = inspect.signature(cc.drift_findings)
+    assert sig.parameters["upstream_path"].default == "schemas/criteria-closure/v1"
