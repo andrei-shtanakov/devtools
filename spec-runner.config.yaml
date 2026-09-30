@@ -43,7 +43,8 @@ hooks:
     lint_blocking: true
 # strict валит попытку до гейтов, если задача тронула эти пути. Состав:
 # весь AUTHORITY_ROOT_PREFIXES (SSOT contracts/authority-root/v1/paths.env,
-# включая модули, которые исполняют merge-pr.sh/human-merge.sh), весь
+# включая модули, которые исполняют merge-pr.sh/human-merge.sh; `roadmap.toml`
+# живёт только в зонтике — в devtools такого пути нет), весь
 # contracts/ и вендор-кит ревью; конфиг прогона; требования бандла (узлы
 # spec/ воркстрима). Сама tasks-спека не заморожена: её статусы пишет
 # исполнитель — её правку агентом ловит ревью PR.
