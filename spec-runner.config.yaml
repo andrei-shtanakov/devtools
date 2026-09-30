@@ -22,15 +22,21 @@ commands:
   # исполняемое, пропуская флаги, но не их значения, и в
   # `--group governance` принял бы за раннер `governance`.
   test: "uv run --frozen --group=governance pytest -q"
-  # repo-wide ruff красный на master (сотни прежних находок) — lint-гейта
-  # у devtools нет и в CI; пустая команда, а не заведомо красный гейт.
-  lint: ""
+  # Те же команды, что держит CI (ci.yml, test-job): ruff зелёный на master
+  # с #461. Группа selfcheck — там пинован ruff; без неё `uv run ruff` его не
+  # найдёт. lint_fix и format объявлены явно: иначе post-done цепочка
+  # spec-runner подставит свой дефолт `uv run ruff check . --fix` (без
+  # группы), а RED-проход откажет файлу, который format_check не пропустит.
+  lint: "uv run --frozen --group selfcheck ruff check ."
+  lint_fix: "uv run --frozen --group selfcheck ruff check . --fix"
+  format_check: "uv run --frozen --group selfcheck ruff format --check ."
+  format: "uv run --frozen --group selfcheck ruff format ."
 # verify_first-задачи (TASK-003 #171) требуют адаптер тестов явно:
 # вывод по test_command раннер делает только там, где ошибиться нельзя.
 tdd_runner: pytest
 hooks:
   post_done:
-    run_lint: false
+    run_lint: true
 # strict валит попытку до гейтов, если задача тронула эти пути. Состав:
 # весь AUTHORITY_ROOT_PREFIXES (SSOT contracts/authority-root/v1/paths.env,
 # включая модули, которые исполняют merge-pr.sh/human-merge.sh), весь
