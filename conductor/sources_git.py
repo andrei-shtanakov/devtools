@@ -26,6 +26,8 @@ def git(repo_dir: Path, *args: str) -> tuple[int, str, str]:
             ["git", "-C", str(repo_dir), *args],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",  # битые байты — текст с заменой, не падение
             timeout=GIT_TIMEOUT,
             check=False,
         )
@@ -53,9 +55,19 @@ def default_ref(repo_dir: Path) -> str | None:
 
 
 def fetch(repo_dir: Path) -> str | None:
-    """git fetch origin; None — успех, иначе текст ошибки."""
-    code, _, err = git(repo_dir, "fetch", "-q", "origin")
-    return None if code == 0 else (err.strip() or f"fetch exit {code}")
+    """git fetch --prune + origin/HEAD с сервера; None — успех, иначе ошибка.
+
+    Без --prune и set-head переименованная ветка по умолчанию читалась бы
+    со старого origin/master как `read` — несвежие данные под видом свежих.
+    """
+    for args in (
+        ("fetch", "-q", "--prune", "origin"),
+        ("remote", "set-head", "origin", "--auto"),
+    ):
+        code, _, err = git(repo_dir, *args)
+        if code != 0:
+            return err.strip() or f"{args[0]} exit {code}"
+    return None
 
 
 def read_file_at_origin(
@@ -102,9 +114,17 @@ def _checked(repo_dir: Path, *args: str) -> str:
     return out
 
 
+def _bounded(token: str) -> str:
+    """ERE: token целиком — `@id:foo` не совпадает с `@id:foo-bar`."""
+    escaped = "".join(f"[{c}]" if c in ".-" else c for c in token)
+    return f"{escaped}([^a-z0-9._-]|$)"
+
+
 def last_commit_mentioning(repo_dir: Path, ref: str, token: str) -> str | None:
     """ISO-дата последнего коммита на ref с token в сообщении; сбой — GitError."""
-    out = _checked(repo_dir, "log", "-1", "--format=%cI", "-F", f"--grep={token}", ref)
+    out = _checked(
+        repo_dir, "log", "-1", "--format=%cI", "-E", f"--grep={_bounded(token)}", ref
+    )
     return out.strip() or None
 
 
@@ -126,7 +146,9 @@ def line_since(repo_dir: Path, ref: str, line: int, path: str = "TODO.md") -> st
 
 def ever_had(repo_dir: Path, ref: str, text: str, path: str = "TODO.md") -> str | None:
     """SHA последнего коммита, менявшего вхождения text в path; сбой — GitError."""
-    out = _checked(repo_dir, "log", "-1", "--format=%H", "-S", text, ref, "--", path)
+    out = _checked(
+        repo_dir, "log", "-1", "--format=%H", "-G", _bounded(text), ref, "--", path
+    )
     return out.strip() or None
 
 
@@ -144,8 +166,14 @@ def path_fact(repo_dir: Path, path: str) -> dict[str, Any]:
         (i for i, p in enumerate(parts) if p[:1] == "v" and p[1:].isdigit()), None
     )
     siblings: list[str] = []
+    parent = "/".join(parts[:versioned]) if versioned is not None else ""
+    if versioned is not None and parent:
+        code, present, _ = git(repo_dir, "ls-tree", "--name-only", ref, "--", parent)
+        if code != 0:
+            return {"exists": None, "sha": sha, "siblings": []}
+        if not present.strip():  # каталога ещё нет — путь ожидаемо отсутствует
+            return {"exists": False, "sha": sha, "siblings": []}
     if versioned is not None:
-        parent = "/".join(parts[:versioned])
         tree = f"{ref}:{parent}" if parent else ref
         code, names, _ = git(repo_dir, "ls-tree", "--name-only", tree)
         if code != 0:

@@ -93,3 +93,46 @@ def test_history_helpers(tmp_path: Path) -> None:
     fact = sg.path_fact(clone, "contracts/v1/x.json")
     assert fact["exists"] is False and "v2" in fact["siblings"]
     assert sg.path_fact(clone, "contracts/v2/x.json")["exists"] is True
+
+
+# ревью рубежа 1 (2026-09-30)
+
+
+def test_path_fact_missing_parent_is_absent_not_error(tmp_path: Path) -> None:
+    clone = _clone(tmp_path, {"README": "x\n"})
+    fact = sg.path_fact(clone, "contracts/bar/v1/schema.json")
+    assert (fact["exists"], fact["siblings"]) == (False, [])
+
+
+def test_fetch_follows_renamed_default_branch(tmp_path: Path) -> None:
+    clone = _clone(tmp_path, {"TODO.md": "- [ ] a @id:a\n"})
+    up = tmp_path / "up"
+    _git(up, "branch", "-m", "master", "main")
+    (up / "TODO.md").write_text("- [x] a @id:a\n", encoding="utf-8")
+    _git(up, "commit", "-q", "-am", "done")
+    assert sg.fetch(clone) is None
+    text, _, state, _ = sg.read_file_at_origin(clone, "TODO.md")
+    assert (state, text) == ("read", "- [x] a @id:a\n")
+
+
+def test_id_tokens_do_not_match_longer_ids(tmp_path: Path) -> None:
+    clone = _clone(
+        tmp_path, {"TODO.md": "- [ ] b @id:foo-bar\n"}, msg="work @id:foo-bar"
+    )
+    ref = sg.default_ref(clone)
+    assert ref is not None
+    assert sg.last_commit_mentioning(clone, ref, "@id:foo") is None
+    assert sg.last_commit_mentioning(clone, ref, "@id:foo-bar") is not None
+    assert sg.ever_had(clone, ref, "@id:foo") is None
+    assert sg.ever_had(clone, ref, "@id:foo-bar") is not None
+
+
+def test_invalid_utf8_todo_is_read_not_a_crash(tmp_path: Path) -> None:
+    clone = _clone(tmp_path, {"README": "x\n"})
+    up = tmp_path / "up"
+    (up / "TODO.md").write_bytes(b"- [ ] a @id:a \xff\n")
+    _git(up, "add", "-A")
+    _git(up, "commit", "-q", "-m", "bad bytes")
+    assert sg.fetch(clone) is None
+    text, _, state, _ = sg.read_file_at_origin(clone, "TODO.md")
+    assert state == "read" and text is not None and "@id:a" in text
