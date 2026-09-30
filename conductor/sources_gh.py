@@ -86,6 +86,14 @@ def ci_state(rollup: list[dict[str, Any]] | None) -> str:
     return "green" if all(s in GREEN for s in states) else "pending"
 
 
+def _json(out: str | None, default: str = "null") -> Any:
+    """JSON ответа gh; битый ответ при коде 0 — None (сбой чтения, не падение)."""
+    try:
+        return json.loads(out or default)
+    except ValueError:
+        return None
+
+
 def _search(
     owner: str, qualifier: str, runner: Runner
 ) -> tuple[list[dict[str, Any]] | None, str]:
@@ -105,7 +113,9 @@ def _search(
     )
     if code != 0:
         return None, err.strip() or f"gh api exit {code}"
-    pages = json.loads(out or "[]")
+    pages = _json(out, "[]")
+    if not isinstance(pages, list):
+        return None, f"поиск «{qualifier}»: битый ответ"
     items = [item for page in pages for item in page.get("items", [])]
     total = pages[0].get("total_count", 0) if pages else 0
     if any(page.get("incomplete_results") for page in pages):
@@ -141,7 +151,8 @@ def _comments(
             f"repos/{owner}/{name}/issues/{number}/comments",
         ]
     )
-    if code != 0:
+    pages = _json(out, "[]") if code == 0 else None
+    if not isinstance(pages, list):
         return None
     return [
         {
@@ -149,7 +160,7 @@ def _comments(
             "body": c.get("body") or "",
             "created_at": c.get("created_at", ""),
         }
-        for page in json.loads(out or "[]")
+        for page in pages
         for c in page
     ]
 
@@ -172,9 +183,12 @@ def _pr_extra(
             f"k={number}",
         ]
     )
-    if code != 0:
+    try:
+        pr = _json(out)["data"]["repository"]["pullRequest"] if code == 0 else None
+    except (KeyError, TypeError):
+        pr = None
+    if not isinstance(pr, dict) or "headRefOid" not in pr:
         return None
-    pr = json.loads(out)["data"]["repository"]["pullRequest"]
     head = pr["headRefOid"]
     reviews = pr["latestReviews"]["nodes"]
     approved = any(
@@ -199,10 +213,14 @@ def fetch_record(
     code, out, _ = runner(
         [kind, "view", str(number), "-R", f"{owner}/{name}", "--json", fields]
     )
-    comments = _comments(owner, name, number, runner) if code == 0 else None
+    raw = _json(out) if code == 0 else None
+    # `gh issue view` отвечает и на номер PR (url …/pull/N): такую запись
+    # читаем как PR, иначе закрытый без мержа PR выглядел бы выполненным issue
+    if not isinstance(raw, dict) or (not is_pr and "/pull/" in raw.get("url", "")):
+        return None
+    comments = _comments(owner, name, number, runner)
     if comments is None:
         return None
-    raw = json.loads(out)
     record: dict[str, Any] = {
         "number": number,
         "is_pr": is_pr,
@@ -281,24 +299,34 @@ def collect_gh(
     key_to_name = {key: name for name, key in names_to_keys.items()}
     records: dict[tuple[str, int], dict[str, Any]] = {}
     queue = {(name, number): is_pr for name, number, is_pr in hits}
+    failed: set[tuple[str, int]] = set()
     for _ in range(max_hops + 1):
         for (name, number), is_pr in sorted(queue.items()):
             record = fetch_record(owner, name, number, is_pr, runner)
             if record is None and not is_pr:
                 record = fetch_record(owner, name, number, True, runner)
             if record is None:
-                return GhResult(
-                    list(records.values()), "error", f"не дочитан {name}#{number}"
-                )
+                failed.add((name, number))  # остальные ссылки всё равно читаем
+                continue
             record["repo"] = names_to_keys.get(name, name)
             records[(name, number)] = record
         wanted = {
             (key_to_name.get(key, key), number)
             for key, number in extra_refs(list(records.values()))
         }
-        queue = {ref: False for ref in wanted - set(records) if ref[0] in names_to_keys}
+        queue = {
+            ref: False
+            for ref in wanted - set(records) - failed
+            if ref[0] in names_to_keys
+        }
         if not queue:
             missed = _weak_pass(owner, names_to_keys, records, weak_refs, runner)
+            if failed:
+                names = ", ".join(f"{n}#{k}" for n, k in sorted(failed)[:10])
+                more = f" и ещё {len(failed) - 10}" if len(failed) > 10 else ""
+                return GhResult(
+                    list(records.values()), "error", f"не дочитан {names}{more}"
+                )
             detail = f"слабых ссылок не дочитано: {missed}" if missed else ""
             return GhResult(list(records.values()), "read", detail)
     return GhResult(

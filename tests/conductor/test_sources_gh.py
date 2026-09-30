@@ -205,3 +205,49 @@ def test_strong_requirement_wins_when_ref_is_also_weak() -> None:
     )
     # недочитанная строгая ссылка — сбой источника, слабая её не прикрывает
     assert both.state == "error" and "не дочитан a#1" in both.detail
+
+
+# ревью рубежа 1 (2026-09-30)
+
+BASE = {
+    OPEN: (0, json.dumps([_page([("a", 2, True)])]), ""),
+    "pr view 2 -R own/a": (0, PR, ""),
+    "api graphql": (0, PR_EXTRA, ""),
+    "api --paginate --slurp repos/own/a/issues/2/comments": (0, COMMENTS, ""),
+}
+
+
+def test_one_failed_ref_does_not_drop_the_others() -> None:
+    run = fake(
+        {
+            **BASE,
+            "issue view 3 -R own/a": (0, ISSUE, ""),
+            "api --paginate --slurp repos/own/a/issues/3/comments": (0, COMMENTS, ""),
+        }
+    )
+    result = collect_gh("own", {"a": "a"}, lambda _: {("a", 1), ("a", 3)}, run)
+    assert result.state == "error" and "a#1" in result.detail
+    assert {r["number"] for r in result.records} == {2, 3}
+
+
+def test_issue_view_of_a_pr_number_is_read_as_the_pr() -> None:
+    as_issue = json.loads(ISSUE) | {"state": "MERGED", "url": "https://x/pull/5"}
+    run = fake(
+        {
+            **BASE,
+            "issue view 5 -R own/a": (0, json.dumps(as_issue), ""),
+            "pr view 5 -R own/a": (0, PR, ""),
+            "api --paginate --slurp repos/own/a/issues/5/comments": (0, COMMENTS, ""),
+        }
+    )
+    result = collect_gh("own", {"a": "a"}, lambda _: {("a", 5)}, run)
+    five = next(r for r in result.records if r["number"] == 5)
+    assert result.state == "read" and five["is_pr"] is True
+
+
+def test_malformed_json_is_a_read_failure_not_a_crash() -> None:
+    run = fake({**BASE, "issue view 1 -R own/a": (0, "{not json", "")})
+    result = collect_gh("own", {"a": "a"}, lambda _: {("a", 1)}, run)
+    assert result.state == "error" and "a#1" in result.detail
+    broken = fake({**BASE, "api graphql": (0, '{"data": {}}', "")})
+    assert collect_gh("own", {"a": "a"}, lambda _: set(), broken).state == "error"
