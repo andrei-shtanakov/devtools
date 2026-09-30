@@ -19,6 +19,7 @@
 - Ничего из ответа не принимается на веру, что можно пересчитать по байтам на `product_sha`: `product_roots.declared/files`, `environment.groups/extras`, `lock_sha256`, `content_sha256`, `outcome` прогона, статусы селектора и BEH.
 - Байты продукта читаются из git-объектов `product_sha` (`git show`, `git ls-tree`), не из рабочего дерева.
 - `owner_repo` в запросе — всегда `owner/name` (`state.repo_slug`).
+- Владельцы токена — определения по парсеру §1.4 во **всех** отслеживаемых `.py` на `product_sha` вне файлов продукта. Именованная граница (fail-closed): не-тестовая функция с токеном (помощник, скрипт) тоже «владелец»; раз pytest её не собрал, BEH не получает `traced` — токен надо убрать из не-теста.
 - `issue_console.py` и `governance/discovery_contract/**` не трогать; `.github/` не трогать (иначе мерж человеком).
 - Полный набор тестов зелёный в обоих режимах: `uv run --frozen pytest -q` и `GOVERNANCE_REQUIRED=1 uv run --frozen --group governance pytest -q`; `uv run --frozen --group=selfcheck ruff check .` и `ruff format --check .` чисто.
 
