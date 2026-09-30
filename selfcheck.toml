@@ -17,6 +17,148 @@ repo = "prograph"
 reason = "issue владельцу: prograph#59"
 until = 2026-12-31
 
+# Классы шума devtools (решение владельца 2026-09-30, разбор прогона
+# 20260930T123348Z): классовая форма — `rule` (glob) и `path` (glob, которому
+# обязано соответствовать КАЖДОЕ место находки). Подавленное остаётся в
+# report.json → `suppressed`; снять запись — вернуть класс в отчёт.
+
+# Сложность — метрика, а не дефект; CI её не держит.
+[[allow]]
+rule = "radon/*"
+repo = "devtools"
+reason = "сложность — метрика, не дефект (решение владельца 2026-09-30)"
+until = 2027-09-30
+
+[[allow]]
+rule = "ruff/C901"
+repo = "devtools"
+reason = "сложность — метрика, не дефект (решение владельца 2026-09-30)"
+until = 2027-09-30
+
+[[allow]]
+rule = "ruff/PLR09*"
+repo = "devtools"
+reason = "сложность/число аргументов — метрика, не дефект (решение владельца 2026-09-30)"
+until = 2027-09-30
+
+# Тесты: фикстуры pytest (ARG), тестовые двойники (pyrefly), шаблонные тела (jscpd).
+[[allow]]
+rule = "ruff/ARG*"
+path = "tests/**"
+repo = "devtools"
+reason = "фикстуры pytest — аргументы, которые тело не читает"
+until = 2027-09-30
+
+[[allow]]
+rule = "pyrefly/*"
+path = "tests/**"
+repo = "devtools"
+reason = "тестовые двойники (FakeOps вместо Ops) — структурная подмена"
+until = 2027-09-30
+
+[[allow]]
+rule = "jscpd/*"
+path = "tests/**"
+repo = "devtools"
+reason = "повторяющиеся тела тестов; клон, задевающий код, не глушится"
+until = 2027-09-30
+
+[[allow]]
+rule = "vulture/*"
+path = "tests/**"
+repo = "devtools"
+reason = "хуки, фикстуры и тесты pytest находит по имени — vulture их вызовов не видит"
+until = 2027-09-30
+
+# Точечные: вендор, фреймворк, намеренное.
+[[allow]]
+rule = "pyrefly/*"
+path = "governance/discovery_contract/**"
+repo = "devtools"
+reason = "вендоренная копия discovery-toolkit (PINNED.txt) — правится у владельца"
+until = 2027-09-30
+
+[[allow]]
+rule = "vulture/*"
+path = "governance/console.py"
+repo = "devtools"
+reason = "колбэки textual (compose, on_mount, BINDINGS…) вызывает фреймворк по имени"
+until = 2027-09-30
+
+[[allow]]
+rule = "deptry/DEP004"
+path = "governance/bundle_state.py"
+repo = "devtools"
+reason = "steward/jsonschema/textual — необязательные группы: модули импортируются без них"
+until = 2027-09-30
+
+[[allow]]
+rule = "deptry/DEP004"
+path = "governance/criteria_check.py"
+repo = "devtools"
+reason = "steward/jsonschema/textual — необязательные группы: модули импортируются без них"
+until = 2027-09-30
+
+[[allow]]
+rule = "deptry/DEP004"
+path = "governance/console.py"
+repo = "devtools"
+reason = "steward/jsonschema/textual — необязательные группы: модули импортируются без них"
+until = 2027-09-30
+
+[[allow]]
+rule = "shellcheck/SC2254"
+path = "human-merge.sh"
+repo = "devtools"
+reason = "glob в case-шаблоне намеренный (head_ref против candidate/finalize-глобов)"
+until = 2027-09-30
+
+[[allow]]
+rule = "shellcheck/SC2254"
+path = "scripts/review/local.sh"
+repo = "devtools"
+reason = "glob в case-шаблоне намеренный (head_ref против candidate/finalize-глобов)"
+until = 2027-09-30
+
+[[allow]]
+rule = "shellcheck/SC1125"
+path = "review-pr.sh"
+repo = "devtools"
+reason = "хвост «— пояснение» у disable-директивы: код отключён, пояснение читает человек"
+until = 2027-09-30
+
+[[allow]]
+rule = "shellcheck/SC2148"
+path = "ssot_env.sh"
+repo = "devtools"
+reason = "ssot_env.sh/approval_branches.sh — подключаются через source, shebang не нужен"
+until = 2027-09-30
+
+[[allow]]
+rule = "shellcheck/SC2148"
+path = "approval_branches.sh"
+repo = "devtools"
+reason = "ssot_env.sh/approval_branches.sh — подключаются через source, shebang не нужен"
+until = 2027-09-30
+
+[[allow]]
+id = "sc-3b4aec74"  # vulture: SOURCE_REVISION, governance/spec_runner_contract.py
+repo = "devtools"
+reason = "провенанс вендоренной таблицы раннеров spec-runner — читает человек при ре-вендоре"
+until = 2027-09-30
+
+[[allow]]
+id = "sc-d9a47c1e"  # vulture: Roadmap.writer_host, conductor/roadmap.py
+repo = "devtools"
+reason = "поле схемы roadmap.toml (conductor §2.2): разбирается из файла, потребитель — следующие срезы"
+until = 2027-03-31
+
+[[allow]]
+id = "sc-75ba29b9"  # vulture: Roadmap.writer_since, conductor/roadmap.py
+repo = "devtools"
+reason = "поле схемы roadmap.toml (conductor §2.2): разбирается из файла, потребитель — следующие срезы"
+until = 2027-03-31
+
 # Артефакты сборки и вендор-бандлы — вне корпуса (спека §11.2): иначе как самые
 # крупные клоны jscpd они займут потолок судьи первыми (замер S5 2026-09-27).
 [corpus]
@@ -35,3 +177,8 @@ reason = "гейт волн ре-вендора; запускает операт
 repo = "devtools"
 path = "discover_models.py"
 reason = "discovery моделей по ADR-ECO-003a; запускает оператор, README"
+
+[[operator]]
+repo = "devtools"
+path = "deploy/conductor/setup.sh"
+reason = "разовая установка conductor на VPS; запускает оператор (как deploy/r16/setup.sh)"
