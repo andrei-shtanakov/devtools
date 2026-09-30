@@ -1,0 +1,15 @@
+[Unit]
+Description=conductor: fleet advisor, level 0 (devtools python -m conductor run)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=conductor
+Group=conductor
+UMask=0027
+# run_timeout_min (спека §2.1): зависший git/gh не держит замок вечно.
+TimeoutStartSec=55min
+Environment=GH_CONFIG_DIR=/srv/conductor/gh
+WorkingDirectory=/srv/conductor/devtools
+ExecStart=/usr/bin/flock -n /srv/conductor/state/conductor.lock /usr/local/bin/uv run --frozen python -m conductor run --root /srv/conductor/workspace --out /srv/conductor/state/runs

@@ -1,0 +1,9 @@
+[Unit]
+Description=conductor: hourly advisor run
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
