@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-import re
 from typing import Literal
 
 from governance.discovery_contract import gate_check
@@ -243,10 +243,10 @@ def inspect_materialized(target_dir: Path, bundle_dir: str) -> BriefSource:
     return inspect_brief(target_dir / bundle_dir / PRIMARY_REL)
 
 
-_REQ_HEAD_RE = re.compile(r"^####\s+((?:FR|NFR)-\d+[a-z]?):", re.M)
-_REQ_NEAR_RE = re.compile(r"^#{2,6}\s+((?:FR|NFR)-[^\s:]*)", re.M)
-_SECTION_RE = re.compile(r"^#{1,3}\s", re.M)
-_PRIORITY_RE = re.compile(r"^\*\*Priority\*\*:\s*(\S+)", re.M)
+_REQ_HEAD_RE = re.compile(r"^####\s+((?:FR|NFR)-\d+[a-z]?):", re.MULTILINE)
+_REQ_NEAR_RE = re.compile(r"^#{2,6}\s+((?:FR|NFR)-[^\s:]*)", re.MULTILINE)
+_SECTION_RE = re.compile(r"^#{1,3}\s", re.MULTILINE)
+_PRIORITY_RE = re.compile(r"^\*\*Priority\*\*:\s*(\S+)", re.MULTILINE)
 
 
 def _downstream_requirements(

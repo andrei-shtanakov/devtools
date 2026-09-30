@@ -85,7 +85,7 @@ def maestro_spawner_agent_types(spawners_dir: Path) -> set[str]:
         r"def agent_type\(self\)\s*->\s*str:\s*"
         r'(?:"""[^"]*"""\s*)?'  # optional one-line docstring
         r'return\s+"([a-z_]+)"',
-        re.S,
+        re.DOTALL,
     )
     types: set[str] = set()
     for py in sorted(spawners_dir.glob("*.py")):

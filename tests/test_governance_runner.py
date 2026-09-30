@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
-from types import SimpleNamespace
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -47,8 +47,8 @@ GREEN_BUNDLE_FILES = [f"{BUNDLE_DIR}/15-behaviour-spec.md"]
 _DEFAULT_REQUIREMENTS_BODY = "#### FR-01: x\n**Priority**: Must\n"
 _DEFAULT_BEHAVIOUR_BODY = "#### BEH-01: x\n`traces: [FR-01]`\n- **checked_by**: x\n"
 
-_FR_ID_RE = re.compile(r"^####\s+((?:FR|NFR)-\d+[a-z]?):", re.M)
-_PRIORITY_RE = re.compile(r"^\*\*Priority\*\*:\s*(\S+)", re.M)
+_FR_ID_RE = re.compile(r"^####\s+((?:FR|NFR)-\d+[a-z]?):", re.MULTILINE)
+_PRIORITY_RE = re.compile(r"^\*\*Priority\*\*:\s*(\S+)", re.MULTILINE)
 
 
 def _acceptance_body(
@@ -80,7 +80,7 @@ def _acceptance_body(
     # Спека оракула §1.7: каждый BEH входит в scenarios не-Won't AC —
     # фикстура перечисляет BEH фактического behaviour-spec (реальные
     # бандлы правило выполняют: 0 сирот из 236 BEH).
-    beh_ids = re.findall(r"^####\s+(BEH-\d+[a-z]?):", beh_text, re.M)
+    beh_ids = re.findall(r"^####\s+(BEH-\d+[a-z]?):", beh_text, re.MULTILINE)
     scenarios = f"scenarios: [{', '.join(beh_ids)}]\n" if beh_ids else ""
     return (
         "---\n"
@@ -1712,7 +1712,7 @@ def _repin_bundle(bundle_dir: Path) -> None:
     acceptance_pin = blob_sha1(
         (bundle_dir / "25-acceptance.md").read_text(encoding="utf-8")
     )
-    beh_ids = re.findall(r"^####\s+(BEH-\d+):", beh_text, re.M)
+    beh_ids = re.findall(r"^####\s+(BEH-\d+):", beh_text, re.MULTILINE)
     (bundle_dir / "30-decomposition.md").write_text(
         "---\n"
         "spec_stage: decomposition\n"
@@ -3763,6 +3763,7 @@ def test_disp_doc_checklist_carries_the_dsl_frontmatter_and_pin(
     того же `_AUTHOR_DSL`, что и промпт авторинга: одно место, не пересказ.
     """
     import tomllib
+
     from governance.ops import _AUTHOR_DSL
 
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)

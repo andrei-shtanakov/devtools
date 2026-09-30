@@ -5,8 +5,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 
 from governance import approval_facts as af
-from governance import brief_input
-from governance import bundle_dag
+from governance import brief_input, bundle_dag
 from governance.facts import Fact, Outcome, unavailable
 from governance.ops import Ops
 from governance.run_state import RunState

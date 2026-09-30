@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from governance import brief_input, bundle_dag, bundle_inputs
-from governance.facts import Outcome
 from governance import run_state as rs
+from governance.facts import Outcome
 from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 
 
@@ -146,7 +146,7 @@ def test_changed_source_is_forbidden_not_replaced_by_descriptor(
 
 
 def test_source_blob_hashes_exact_utf8_bytes(tmp_path: Path) -> None:
-    data = "точные source bytes\n".encode("utf-8")
+    data = "точные source bytes\n".encode()
     descriptor = {
         "frame": "customer",
         "primary": brief_input.PRIMARY_REL,

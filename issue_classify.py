@@ -13,8 +13,9 @@ import json
 import os
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 CONFIDENCE_THRESHOLD = 0.75
 # Намеренно продублировано из issue_console.KINDS: обратный импорт создал бы

@@ -93,7 +93,7 @@ def discover_repos(root: Path) -> dict[str, Path | None]:
     return found
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _item_texts(todo: Path) -> tuple[str, ...]:
     """Raw text of every checkbox item in `todo`, read and scraped once per run.
 

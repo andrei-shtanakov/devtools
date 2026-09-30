@@ -13,7 +13,6 @@ import stat
 import subprocess
 from pathlib import Path
 
-
 DEVTOOLS = Path(__file__).resolve().parent.parent
 REVIEW_PR = DEVTOOLS / "review-pr.sh"
 # --- review-pr.sh: резолюция харнесса ---------------------------------------

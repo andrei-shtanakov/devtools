@@ -8,6 +8,7 @@
 """
 
 from __future__ import annotations
+
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -335,7 +336,7 @@ def test_launch_verify_without_run_id_omits_run_id_arg(
 # --- verify_plan: parent = выбранный merged_unverified ряд, свежий child --
 
 
-def _row(status: str, run_id: str = "r-0001") -> "cm.RunRow":
+def _row(status: str, run_id: str = "r-0001") -> cm.RunRow:
     # `remediated_by` у `merged_unverified`-родителя всегда `None` (это
     # поле потомка, указывающее на родителя) — фикс-ревью бага, где
     # action_verify_selected путал их местами.

@@ -698,7 +698,9 @@ def test_waiver_conditions_match_the_contract() -> None:
     )
     items = [
         " ".join(m.group(1).split())
-        for m in re.finditer(r"^\d+\. (.+?)(?=^\d+\. |\Z)", listing, re.M | re.S)
+        for m in re.finditer(
+            r"^\d+\. (.+?)(?=^\d+\. |\Z)", listing, re.MULTILINE | re.DOTALL
+        )
     ]
     assert len(items) == 5, f"перечень условий разобран не целиком: {items}"
     normalized = [i.rstrip(";.").strip() for i in items]
