@@ -14,19 +14,25 @@ PRIMARY_REL = "00-discovery/brief.md"
 
 
 def descriptor_source_paths(descriptor: dict[str, object]) -> list[str]:
-    """`source_paths` дескриптора: список строк; иная форма — пусто."""
+    """`source_paths` дескриптора: список строк; неверная форма — ошибка."""
     raw = descriptor.get("source_paths")
-    if not isinstance(raw, list):
+    if raw is None:
         return []
-    return [path for path in raw if isinstance(path, str)]
+    if not isinstance(raw, list) or not all(isinstance(p, str) for p in raw):
+        raise ValueError("brief descriptor: source_paths не список строк")
+    return list(raw)
 
 
 def descriptor_source_blobs(descriptor: dict[str, object]) -> dict[str, str]:
-    """`source_blobs` дескриптора: имя → blob; иная форма — пусто."""
+    """`source_blobs` дескриптора: имя → blob; неверная форма — ошибка."""
     raw = descriptor.get("source_blobs")
-    if not isinstance(raw, dict):
+    if raw is None:
         return {}
-    return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
+    if not isinstance(raw, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in raw.items()
+    ):
+        raise ValueError("brief descriptor: source_blobs не словарь строк")
+    return dict(raw)
 
 
 class BriefInputError(RuntimeError):

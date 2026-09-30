@@ -97,7 +97,7 @@ Source: selfcheck 2026-09-30, ruff (решение владельца 2026-09-30
 **Touches:** governance/runner.py, governance/task_bridge.py, recent_changes.py, salvage_scan.py, check-plan-fields.py, inbox.py, check-graph-registry-drift.py, governance/decomposition_guard.py, selfcheck/graph/resolver.py, governance/design_guard.py, selfcheck/graph/build.py, selfcheck/vendor.py
 
 ### TASK-004: Остальной pyrefly в продакшен-коде — типизация или настоящая ошибка
-P3 | 🔄 IN_PROGRESS   Est: 3h
+P3 | 🔍 REVIEW   Est: 3h
 
 Каждое место разобрать: если тип неточен (значение из JSON/TOML типизировано
 как `object`) — сузить проверкой формы данных с ошибкой на неверной форме;
