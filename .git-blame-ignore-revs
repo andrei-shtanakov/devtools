@@ -1,0 +1,6 @@
+# Механические коммиты, которые `git blame` пропускает:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# (GitHub читает файл сам.)
+
+# ruff format по коду — devtools#461 ступень 2, PR #504
+b9b6e04877ea3b77df2433b20d031269f8bbe051
