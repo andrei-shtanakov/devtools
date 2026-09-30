@@ -449,3 +449,34 @@ def test_bad_roots_refused_before_hashing(tmp_path, monkeypatch):
     resp = _response(target, pin, product_roots=["/"])
     assert cc.run("run-1", _ops((0, json.dumps(resp)))) == 2
     assert not any("/" in a[1] for a in called if len(a) > 1)
+
+
+def _commit(target, path, text):
+    (Path(target) / path).parent.mkdir(parents=True, exist_ok=True)
+    (Path(target) / path).write_text(text)
+    _git(target, "add", path)
+    _git(target, "commit", "-qm", f"edit {path}")
+    return _git(target, "rev-parse", "HEAD")
+
+
+def test_error_key_sees_config_files_at_product_sha(tmp_path, monkeypatch):
+    """devtools#515: ответ-ошибку чинят правкой не-.py (lock, pyproject, конфиг
+    критериев) — ключ обязан измениться, иначе перемерить нельзя (G6)."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    root = Path(target)
+    keys = [cc._tree_key(pin, root, pin)]
+    for path in ("uv.lock", "pyproject.toml", "spec-runner.config.yaml"):
+        sha = _commit(target, path, f"{path} v2\n")
+        keys.append(cc._tree_key(pin, root, sha))
+    assert len(set(keys)) == len(keys)
+    # README решения об измерении не меняет: второго шанса флаки-тесту нет
+    sha = _commit(target, "README.md", "docs\n")
+    assert cc._tree_key(pin, root, sha) == keys[-1]
+
+
+def test_error_key_reads_product_sha_not_worktree(tmp_path, monkeypatch):
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    root = Path(target)
+    before = cc._tree_key(pin, root, pin)
+    (root / "uv.lock").write_text("edited, not committed\n")
+    assert cc._tree_key(pin, root, pin) == before
