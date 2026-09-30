@@ -33,7 +33,9 @@ DECISION_PATH_PREFIXES = ("prograph-vault/authored/decisions/", ".github/")
 OUT_OF_LOOP_REPOS = frozenset({"sdd-framework"})
 # Неизвестно лишь условие, которое срез 0 не умеет вычислить: это ожидание,
 # а не решение владельца (§5.2 rev 10) — вопроса нет.
-CONDITION_REASONS = frozenset({"prose_trigger", "fact_unread"})
+CONDITION_REASONS = frozenset(
+    {"prose_trigger", "fact_unread", "unread", "unresolvable"}
+)
 Delegable = Literal["yes", "no", "unverified"]
 
 

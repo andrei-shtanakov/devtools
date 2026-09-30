@@ -7,11 +7,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from conductor.graph import FROM_ORIGIN, Graph
+from conductor.graph import FROM_ORIGIN, UNRESOLVED, Graph
 from conductor.inputs import Inputs
 from conductor.model import Edge
 
-PrereqState = Literal["done", "cancelled", "open", "missing"]
+PrereqState = Literal[
+    "done", "cancelled", "open", "missing", "unread", "unresolvable", "request_open"
+]
 Verdict = Literal["satisfied", "pending", "unknown"]
 DATE_RE = re.compile(r"^date>=(\d{4}-\d{2}-\d{2})$")
 EXISTS_RE = re.compile(r"^exists:([a-z0-9][a-z0-9-]*):(\S+)$")
@@ -47,6 +49,12 @@ def prereq_state(graph: Graph, inputs: Inputs, prereq_id: str) -> PrereqState:
     """Таблица §3.4 для представителя узла работы."""
     node = graph.nodes.get(prereq_id)
     if node is None:
+        if prereq_id.startswith(UNRESOLVED):
+            return "unresolvable"
+        if graph.source_unread(prereq_id):
+            return "unread"  # не прочитано — не «нет»: вопроса не будет
+        if prereq_id in graph.pending_requests:
+            return "request_open"
         return "cancelled" if inputs.history.get(prereq_id) else "missing"
     if node.is_open:
         return "open"
@@ -117,6 +125,9 @@ def _dependency_wait(
             since,
             moved,
         )
+    if state == "request_open":  # заявка отправлена, пункт ещё не заведён
+        evidence = graph.pending_requests[prereq]
+        return Wait(consumer, prereq, "pending", state, evidence, since, moved)
     return Wait(consumer, prereq, "unknown", state, prereq, since, moved)
 
 

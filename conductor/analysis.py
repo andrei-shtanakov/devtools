@@ -18,7 +18,9 @@ def dependency_adjacency(graph: Graph) -> dict[str, set[str]]:
     """depends_on по представителям узлов работы: узел → предпосылки."""
     adj: dict[str, set[str]] = {}
     for e in graph.edges:
-        if e.type == "depends_on":
+        consumer = graph.nodes.get(graph.resolve(e.src))
+        # закрытый потребитель не ждёт: ни цикла, ни ранга через него
+        if e.type == "depends_on" and (consumer is None or consumer.is_open):
             src, dst = graph.resolve(e.src), graph.target(e)
             adj.setdefault(src, set()).add(dst)
             adj.setdefault(dst, set())

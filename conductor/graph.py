@@ -32,6 +32,9 @@ REF_RE = re.compile(r"(?<![\w/.-])([a-z0-9][a-z0-9-]*)#(\d+)\b")
 TODO_REF_RE = re.compile(r"todo://([a-z0-9][a-z0-9-]*)/([a-z0-9][a-z0-9._-]{0,63})")
 TODO_URI_RE = re.compile(r"^todo://[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9._-]{0,63}$")
 SELF_REF_RE = re.compile(r"(?<![\w/#.-])#(\d+)\b")
+LEGACY_SLUG_RE = re.compile(r"^([a-z0-9][a-z0-9-]*)#([a-z0-9][a-z0-9._-]{0,63})$")
+# конец ребра для @blocked_by, который не распознан: ожидание остаётся видимым
+UNRESOLVED = "unresolved:"
 LEGACY_ISSUE_RE = re.compile(r"^([a-z0-9][a-z0-9-]*)#(\d+)$")
 PR_ITEM_RE = re.compile(r"@id:([a-z0-9][a-z0-9._-]{0,63})")
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -55,6 +58,17 @@ class Graph:
     sources: list[Source] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     partial: bool = False
+    # репо, чей TODO не прочитан, и прочитан ли GitHub: «не прочитано» ≠ «нет»
+    unread_repos: frozenset[str] = frozenset()
+    gh_read: bool = True
+    # открытая заявка на ещё не заведённый пункт: todo://<repo>/<slug> → issue
+    pending_requests: dict[str, str] = field(default_factory=dict)
+
+    def source_unread(self, node_id: str) -> bool:
+        """Источник узла не прочитан — отсутствие узла ничего не доказывает."""
+        if node_id.startswith("todo://"):
+            return node_id.removeprefix("todo://").split("/")[0] in self.unread_repos
+        return not self.gh_read
 
     def resolve(self, node_id: str) -> str:
         """Представитель узла работы (пункт для принятого issue)."""
@@ -142,9 +156,12 @@ def _item_nodes(snapshot: dict[str, Any]) -> dict[str, Node]:
     return nodes
 
 
-def _todo_edges(snapshot: dict[str, Any], norm: dict[str, str]) -> list[Edge]:
+def _todo_edges(
+    snapshot: dict[str, Any], norm: dict[str, str], findings: list[Finding]
+) -> list[Edge]:
     """depends_on из references: plan-fields не строит edges на несуществующий
     пункт (resolved_target = None), а висячее ожидание должно остаться видимым.
+    Каждый @blocked_by даёт ребро: нераспознанный — на UNRESOLVED с находкой.
     Концы канонизируются; исходная запись — в origin."""
     edges: list[Edge] = []
     for ref in snapshot["references"]:
@@ -155,6 +172,15 @@ def _todo_edges(snapshot: dict[str, Any], norm: dict[str, str]) -> list[Edge]:
         legacy = ref.get("legacy_blocker_ref") or ""
         if target is None and LEGACY_ISSUE_RE.match(legacy):
             target = _norm_ref(legacy, norm) or legacy
+        elif target is None and (slug := LEGACY_SLUG_RE.match(legacy or raw)):
+            target = item_id(norm.get(slug.group(1), slug.group(1)), slug.group(2))
+        elif target is None:
+            target = UNRESOLVED + raw
+            findings.append(
+                Finding(
+                    "GR-BLOCKER-UNRESOLVABLE", "warning", ref["source_node_id"], raw
+                )
+            )
         if target is not None:
             edges.append(
                 Edge(
@@ -198,6 +224,7 @@ def _gh_edges(
     nodes: dict[str, Node],
     norm: dict[str, str],
     findings: list[Finding],
+    unread: frozenset[str] = frozenset(),
 ) -> list[Edge]:
     me = _gh_id(rec)
     edges: list[Edge] = []
@@ -212,10 +239,10 @@ def _gh_edges(
             for m in PR_ITEM_RE.findall(rec.get("body", ""))
         ]
     if "inbox" in rec.get("labels", []):
-        edges += _inbox_edges(rec, me, nodes, norm, findings)
+        edges += _inbox_edges(rec, me, nodes, norm, findings, unread=unread)
     elif (header := _legacy_protocol(rec, nodes, norm)) is not None:
         findings.append(Finding("GR-INBOX-NO-LABEL", "info", me, "нет метки inbox"))
-        edges += _inbox_edges(rec, me, nodes, norm, findings, header)
+        edges += _inbox_edges(rec, me, nodes, norm, findings, header, unread)
     elif field_value(rec.get("body", ""), "slug") and field_value(
         rec.get("body", ""), "from"
     ):
@@ -267,6 +294,7 @@ def _inbox_edges(
     norm: dict[str, str],
     findings: list[Finding],
     header: tuple[str, str] | None = None,
+    unread: frozenset[str] = frozenset(),
 ) -> list[Edge]:
     """Наследие ADR-ECO-006: склейка по slug (D2), ожидание отправителя по from.
     header — поля распознанной шапки заявки без метки (иначе — из тела)."""
@@ -298,7 +326,9 @@ def _inbox_edges(
     elif repo not in norm:
         orphan = f"from: {sender} — неизвестный репо"
     elif waiting and item_id(norm[repo], waiting) not in nodes:
-        orphan = f"from: {sender} — ждущего пункта нет"
+        # TODO отправителя не прочитан — отсутствие пункта ничего не доказывает
+        if norm[repo] not in unread:
+            orphan = f"from: {sender} — ждущего пункта нет"
     elif waiting and nodes[me].closed_as != "completed":
         # закрытый как completed запрос ответил: ребро — история, не ожидание
         edges.append(Edge(item_id(norm[repo], waiting), me, "depends_on", FROM_ORIGIN))
@@ -401,15 +431,18 @@ def build_graph(inputs: Inputs) -> Graph:
     snapshot = pf.parse_fleet(repo_inputs, manifest_index(inputs.manifest_text))
     norm = normalizer(inputs)
     nodes = _item_nodes(snapshot)
-    edges = _todo_edges(snapshot, norm)
     findings: list[Finding] = []
+    edges = _todo_edges(snapshot, norm, findings)
+    unread = frozenset(
+        t.repo for t in inputs.todos if t.state not in ("read", "absent")
+    )
     records = {_gh_id(rec): rec for rec in inputs.gh_records}
     nodes.update({node_id: _gh_node(rec) for node_id, rec in records.items()})
     # слабо дочитанные записи (§3.1) — только узлы и склейка для подсказок:
     # ни ожиданий, ни implements, ни находок — готовность они не подтверждают
     solid = [rec for rec in inputs.gh_records if not rec.get("weak")]
     for rec in solid:
-        edges += _gh_edges(rec, nodes, norm, findings)
+        edges += _gh_edges(rec, nodes, norm, findings, unread)
     hint_canon = {
         e.src: e.dst
         for rec in inputs.gh_records
@@ -433,4 +466,26 @@ def build_graph(inputs: Inputs) -> Graph:
         sources=sources,
         findings=findings,
         partial=any(s.state in ("error", "not_queried") for s in sources),
+        unread_repos=unread,
+        gh_read=inputs.gh_state == "read",
+        pending_requests=_pending_requests(solid, nodes),
     )
+
+
+def _pending_requests(
+    records: list[dict[str, Any]], nodes: dict[str, Node]
+) -> dict[str, str]:
+    """Открытая заявка (метка inbox или шапка) на пункт, которого ещё нет:
+    ожидание этого пункта — рукопожатие в процессе, а не «предпосылки нет»."""
+    pending: dict[str, str] = {}
+    for rec in records:
+        if rec["is_pr"] or rec["state"] != "open":
+            continue
+        header = _protocol_header(rec.get("body", ""))
+        slug = header[0] if header else None
+        if slug is None and "inbox" in rec.get("labels", []):
+            slug = field_value(rec.get("body", ""), "slug")
+        target = item_id(rec["repo"], slug) if slug else None
+        if target is not None and target not in nodes:
+            pending[target] = _gh_id(rec)
+    return pending
