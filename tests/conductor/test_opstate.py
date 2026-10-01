@@ -92,6 +92,8 @@ def test_recover_refuses_with_init_or_empty(tmp_path: Path) -> None:
         lambda d: (d / "failures.json").unlink(),
         lambda d: (d / "quarantine.json").write_text("{"),
         lambda d: (d / "attempts.jsonl").write_text('x\n{"t": "header"}\n'),
+        lambda d: (d / "attempts.jsonl").write_text(""),  # пустой (ревью #538)
+        lambda d: (d / "attempts.jsonl").write_text('{"t": "hea'),  # обрыв 1-й строки
         lambda d: (d / "failures.json").write_text(
             json.dumps({"generation": 9, "series": {}})
         ),

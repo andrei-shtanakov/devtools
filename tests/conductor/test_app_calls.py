@@ -132,3 +132,22 @@ def test_first_init_host_is_clean(tmp_path: Path) -> None:
     init_host(tmp_path, 1, 2, T0)
     calls, _ = AppCalls.open(tmp_path, 1, 2, T0)
     assert calls is not None and calls.rows == [] and calls.blocked_until() is None
+
+
+def test_truncated_tail_repair_failure_is_rate_state_lost(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Ревью #538: починка оборванного хвоста не записалась (диск, read-only) —
+    деградация RATE-STATE-LOST, как при утрате журнала, а не исключение."""
+    import conductor.app_calls as app_calls
+
+    calls = _calls(tmp_path)
+    calls.begin("create", T0)
+    with open(journal_path(tmp_path, 1, 2), "a", encoding="utf-8") as fh:
+        fh.write('{"t": "be')
+
+    def boom(*_: object) -> None:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(app_calls, "write_atomic", boom)
+    assert AppCalls.open(tmp_path, 1, 2, T0) == (None, "RATE-STATE-LOST")

@@ -22,7 +22,8 @@ FILES = [ATTEMPTS, FAILURES, QUARANTINE_FILE]
 QUARANTINE = timedelta(minutes=65)
 RETRY_DELAY = timedelta(minutes=60)
 OPEN = frozenset({"in_flight", "uncertain"})
-STATE_ERRORS = (OSError, ValueError, KeyError, TypeError)
+# IndexError: пустой или оборванный на первой строке attempts.jsonl (нет заголовка)
+STATE_ERRORS = (OSError, ValueError, KeyError, TypeError, IndexError)
 
 
 def iso(dt: datetime) -> str:

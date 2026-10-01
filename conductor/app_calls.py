@@ -134,9 +134,12 @@ class AppCalls:
                 return None, "RATE-STATE-LOST"
         rows = read.rows
         if read.truncated_tail:
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, UTC)
-            rows = [*rows, {"t": "orphan", "at": iso(mtime)}]
-            write_atomic(path, _dump(rows))
+            try:  # починка хвоста не удалась — как утрата журнала (ревью #538)
+                mtime = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+                rows = [*rows, {"t": "orphan", "at": iso(mtime)}]
+                write_atomic(path, _dump(rows))
+            except OSError:
+                return None, "RATE-STATE-LOST"
         return cls(path, rows), None
 
     @classmethod
