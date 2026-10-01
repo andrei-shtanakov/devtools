@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from governance import criteria_graph as cgr
 from governance import criteria_tokens as ct
@@ -170,25 +171,82 @@ def outcome(graph: cgr.Graph, beh_status: dict[str, str]) -> Outcome:
     return Outcome("blocked" if stops else "traced", dict(beh_status), acs, stops, rows)
 
 
+# Дизайн производителя §3.2: вид фиксирует retryable и код выхода. Своя
+# таблица, а не чтение схемы: код выхода против вида сверяем сами.
+ERROR_KINDS: dict[str, tuple[bool, int]] = {
+    **dict.fromkeys(
+        (
+            "request-invalid",
+            "owner-repo-mismatch",
+            "product-sha-absent",
+            "clone-failed",
+            "environment-sync-failed",
+            "unsupported-runtime",
+            "collection-config-outside-checkout",
+            "collection-failed",
+            "timeout",
+        ),
+        (True, 2),
+    ),
+    **dict.fromkeys(
+        (
+            "lock-not-current",
+            "environment-selection-invalid",
+            "collection-error",
+            "collection-mutated-checkout",
+            "product-roots-undeclared",
+            "product-roots-empty",
+            "product-roots-invalid",
+            "product-roots-no-python",
+            "product-roots-overlap-tests",
+            "definition-unresolved",
+            "selector-absent",
+            "distributed-execution",
+        ),
+        (False, 3),
+    ),
+}
+
+
+@dataclass(frozen=True)
+class Parsed:
+    response: dict
+    branch: Literal["answer", "error"]
+    retryable: bool
+
+
 def parse_response(
     code: int, stdout: str, schema: dict | None
-) -> tuple[dict | None, str | None]:
-    """Первая линия отказа §5.3: код, пустота, JSON, схема (если вендорена)."""
+) -> tuple[Parsed | None, str | None]:
+    """Первая линия отказа §5.3: код, JSON, схема, ветка против кода выхода."""
     import json
 
     import jsonschema
 
-    if code not in (0, 3):
-        return None, f"код выхода {code} вне договорённых 0/3"
+    if code not in (0, 2, 3):
+        return None, f"код выхода {code} вне 0/2/3"
+    if schema is None:
+        return None, "схема ответа не вендорена"
     if not stdout.strip():
         return None, "ответ пуст"
     try:
         resp = json.loads(stdout)
     except json.JSONDecodeError as exc:
         return None, f"ответ не JSON: {exc}"
-    if schema is not None:
-        try:
-            jsonschema.validate(resp, schema)
-        except jsonschema.ValidationError as exc:
-            return None, f"ответ не по схеме: {exc.message}"
-    return resp, None
+    try:
+        jsonschema.validate(resp, schema)
+    except jsonschema.ValidationError as exc:
+        return None, f"ответ не по схеме: {exc.message}"
+    if "not_applicable" in resp:
+        return None, "not_applicable в v1 не выпускается (дизайн §4)"
+    if "error" in resp:
+        if code == 0:
+            return None, "код выхода 0 при ошибке"
+        kind = resp["error"]["kind"]
+        retry, want = ERROR_KINDS[kind]
+        if code != want:
+            return None, f"вид {kind} требует код {want}, получен {code}"
+        return Parsed(resp, "error", retry), None
+    if code != 0:
+        return None, f"код выхода {code} при ответе"
+    return Parsed(resp, "answer", False), None

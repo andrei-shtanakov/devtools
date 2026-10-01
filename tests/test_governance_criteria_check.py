@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 
 from governance import criteria_check as ck
+from governance import criteria_contract as cc
 from governance import criteria_graph as cgr
+
+SCHEMA = json.loads((cc.CONTRACT_DIR / "response.schema.json").read_text())
+
+
+def golden(name: str) -> str:
+    return (cc.RESPONSES_DIR / f"{name}.json").read_text()
+
 
 REQ = "#### FR-01: A\n**Priority**: Must\n\n#### FR-02: B\n**Priority**: Should\n"
 BEH = (
@@ -160,26 +169,48 @@ def test_parametrized_selectors_share_one_definition():
     assert expected == {"BEH-01": {("tests/t.py", "test_a")}}
 
 
+def test_error_kinds_cover_schema_enum():
+    enum = SCHEMA["definitions"]["error_kind"]["enum"]
+    retryable = set(SCHEMA["definitions"]["retryable_kinds"]["enum"])
+    assert set(ck.ERROR_KINDS) == set(enum)
+    for kind, (retry, exit_code) in ck.ERROR_KINDS.items():
+        assert retry == (kind in retryable)
+        assert exit_code == (2 if retry else 3)
+
+
 @pytest.mark.parametrize(
-    "code,stdout,why",
+    ("code", "name", "branch", "retryable"),
     [
-        (0, "", "пуст"),
-        (0, "not json", "JSON"),
-        (2, "{}", "код"),
-        (99, "{}", "код"),
+        (0, "answer", "answer", False),
+        (3, "error-blocked", "error", False),
+        (2, "error-retryable", "error", True),
     ],
 )
-def test_parse_response_refusals(code, stdout, why):
-    resp, reason = ck.parse_response(code, stdout, None)
-    assert resp is None and why in reason
+def test_goldens_parse(code, name, branch, retryable):
+    parsed, why = ck.parse_response(code, golden(name), SCHEMA)
+    assert why is None
+    assert (parsed.branch, parsed.retryable) == (branch, retryable)
 
 
-def test_parse_response_schema_violation():
-    schema = {"type": "object", "required": ["beh"]}
-    resp, reason = ck.parse_response(0, "{}", schema)
-    assert resp is None and "схем" in reason
-    resp, reason = ck.parse_response(0, '{"beh": []}', schema)
-    assert resp == {"beh": []} and reason is None
+@pytest.mark.parametrize(
+    ("code", "name", "why"),
+    [
+        (2, "answer", "код выхода 2 при ответе"),
+        (0, "error-blocked", "код выхода 0 при ошибке"),
+        (2, "error-blocked", "вид product-roots-undeclared требует код 3"),
+        (3, "error-retryable", "вид product-sha-absent требует код 2"),
+        (0, "not-applicable", "not_applicable в v1 не выпускается"),
+        (1, "answer", "код выхода 1 вне 0/2/3"),
+    ],
+)
+def test_branch_and_exit_must_agree(code, name, why):
+    parsed, got = ck.parse_response(code, golden(name), SCHEMA)
+    assert parsed is None and why in got
+
+
+def test_schema_is_required():
+    parsed, why = ck.parse_response(0, golden("answer"), None)
+    assert parsed is None and "схема" in why
 
 
 def test_orphan_blocks_closure():
