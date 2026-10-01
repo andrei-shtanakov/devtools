@@ -108,6 +108,16 @@ def test_root_backslash_is_not_rewritten_and_refused(tmp_path):
         cp.resolve_roots(tree, decl.roots)
 
 
+def test_root_pathspec_magic_prefix_refused(tmp_path):
+    # A root starting with ":" is git pathspec magic (":(top)", ":!x"), not a
+    # path — refused regardless of whether a file literally named that way is
+    # tracked, exactly like the producer's _normalise_root.
+    cfg = 'criteria:\n  product_roots: [":weird.py"]\n'
+    tree = _repo(tmp_path, {"spec-runner.config.yaml": cfg, ":weird.py": ""})
+    with pytest.raises(cp.ProductError):
+        cp.read_declaration(tree)
+
+
 def test_resolve_roots_tracked_py_only(tmp_path):
     tree = _repo(
         tmp_path,

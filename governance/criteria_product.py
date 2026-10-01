@@ -114,6 +114,8 @@ def _norm_root(raw: object) -> str:
     stripped = raw.strip()
     if stripped.startswith("/"):
         raise ProductError(f"product_root {raw!r}: абсолютный путь")
+    if stripped.startswith(":"):
+        raise ProductError(f"product_root {raw!r}: git pathspec magic, не путь")
     # POSIX separators only — a backslash is part of the name, not rewritten,
     # so it fails later as "not tracked at product_sha" like the producer.
     parts = [p for p in stripped.split("/") if p not in ("", ".")]
