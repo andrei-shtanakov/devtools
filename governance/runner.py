@@ -24,6 +24,7 @@ import os
 import re
 import shlex
 import shutil
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,6 +42,7 @@ from governance import (
     criteria_graph,
     decomposition_guard,
     design_guard,
+    halt_gate,
 )
 from governance import approval_ledger as al
 from governance import approve_node as an
@@ -3838,6 +3840,35 @@ _STEPS = (
 )
 
 
+#: Проверка стопа (D2); тесты подменяют, как `_SLEEP`.
+_HALT_GATE: Callable[[str], str | None] = halt_gate.refusal
+
+
+def _halt_refusal(args: argparse.Namespace) -> str | None:
+    """Отказ стоп-крана для команды, начинающей НОВУЮ работу, иначе None.
+
+    start / verify (дочерний прогон) / reopen (снова открывает одобренное) —
+    новая работа; resume продолжает допущенный прогон, он дорабатывает
+    (спека плоскости управления §6.1), а его мерж остановит сама форджа и
+    merge-pr.sh.
+    """
+    if args.command == "start":
+        slug = args.repo_slug
+    elif args.command == "verify":
+        slug = load(args.parent).repo_slug
+    elif args.command == "reopen":
+        slug = load(args.run_id).repo_slug
+    else:
+        return None
+    return _HALT_GATE(slug)
+
+
+def _refuse_halted(message: str) -> int:
+    """D2: новая работа не начинается под стопом; код — как у merge-pr.sh."""
+    print(message, file=sys.stderr)
+    return halt_gate.EXIT_HALTED
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI: `python -m governance.runner start|resume|verify|status ...`.
 
@@ -3932,6 +3963,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.run_id is None:
             validate_id_component(args.ws_id, label="ws_id")
         run_id = args.run_id or f"{args.ws_id}-{os.urandom(3).hex()}"
+        if (halted := _halt_refusal(args)) is not None:
+            return _refuse_halted(halted)
         state = start(
             subject=args.subject,
             repo=args.repo,
@@ -3950,8 +3983,12 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "resume":
         state = resume(args.run_id, ops)
     elif args.command == "reopen":
+        if (halted := _halt_refusal(args)) is not None:
+            return _refuse_halted(halted)
         state = reopen(args.run_id, args.node, ops, manual=args.manual)
     else:
+        if (halted := _halt_refusal(args)) is not None:
+            return _refuse_halted(halted)
         state = verify(args.parent, ops, args.run_id)
 
     _print_status(state)
