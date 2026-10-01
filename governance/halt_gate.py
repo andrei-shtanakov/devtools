@@ -10,8 +10,13 @@ enforcement набора правил `darkfactory-halt`, видимый ток�
   dispatcher, а не обход);
 - `active`, дубликат имени, иное enforcement, любое непрочитанное → отказ.
 
-Только stdlib: модуль зовёт и `merge-pr.sh` (`python3 -m governance.halt_gate
-<owner/name>`, профиль — переданный GH_CONFIG_DIR), и раннер.
+Только stdlib и никаких импортов из дерева: `merge-pr.sh` исполняет ЭТОТ
+ФАЙЛ изолированно — `python3 -I governance/halt_gate.py <owner/name>`, профиль
+— переданный GH_CONFIG_DIR (безопасность вызова держится на `-I`: без
+PYTHONPATH и user site, без каталогов дерева в sys.path). Раннер импортирует
+модуль обычным образом. Коды выхода: 0 — пускать, 6 — стоп (включён, дубликат,
+иное enforcement), 2 — стоп не прочитан (повтор уместен, как у прочих
+неустановленных фактов merge-pr.sh).
 """
 
 from __future__ import annotations
@@ -24,16 +29,27 @@ from typing import Any
 HALT_RULESET = "darkfactory-halt"
 #: Код выхода «стоп-кран»: тот же, что у merge-pr.sh (6).
 EXIT_HALTED = 6
+#: Стоп не прочитан: факт не установлен, повтор уместен (код 2 merge-pr.sh).
+EXIT_UNREAD = 2
 
 Decision = tuple[bool, str, str]
 
 
 class HaltedError(ValueError):
-    """Отказ стоп-крана: новая работа не начинается (код выхода 6).
+    """Отказ стоп-крана: новая работа не начинается.
 
     ValueError — как прочие отказы допуска раннера (`start` бросает их до
     `_reserve_run_id`), чтобы любой вызывающий, ловящий отказы, ловил и этот.
+    `unread` — стоп не прочитан (код 2), иначе стоп действует (код 6).
     """
+
+    def __init__(self, message: str, *, unread: bool = False) -> None:
+        super().__init__(message)
+        self.unread = unread
+
+    @property
+    def exit_code(self) -> int:
+        return EXIT_UNREAD if self.unread else EXIT_HALTED
 
 
 def decide(
@@ -57,7 +73,8 @@ def decide(
     return False, "refuse_enforcement", f"halt enforcement {enforcement!r}"
 
 
-def _gh_json(*args: str) -> Any | None:
+def _gh(*args: str) -> str | None:
+    """stdout of `gh api …`, or None when the call failed."""
     try:
         done = subprocess.run(
             ["gh", "api", *args],
@@ -68,26 +85,44 @@ def _gh_json(*args: str) -> Any | None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if done.returncode != 0:
+    return done.stdout if done.returncode == 0 else None
+
+
+def _gh_json(*args: str) -> Any | None:
+    out = _gh(*args)
+    if out is None:
         return None
     try:
-        return json.loads(done.stdout)
+        return json.loads(out)
     except json.JSONDecodeError:
+        return None
+
+
+def _listing(slug: str) -> list[dict[str, Any]] | None:
+    """Every ruleset as `{id, name}`, or None when unread.
+
+    `--paginate` with gh's built-in `--jq`, one JSON line per ruleset —
+    not `--slurp`, which needs a recent gh: an old gh on the merge path would
+    have read as "unknown" on every repo (review devtools#531).
+    """
+    out = _gh(
+        "--paginate",
+        f"repos/{slug}/rulesets?includes_parents=false",
+        "--jq",
+        ".[] | [.id, .name] | @json",
+    )
+    if out is None:
+        return None
+    try:
+        pairs = [json.loads(line) for line in out.splitlines() if line.strip()]
+        return [{"id": rid, "name": name} for rid, name in pairs]
+    except (json.JSONDecodeError, TypeError, ValueError):
         return None
 
 
 def check(slug: str) -> Decision:
     """Прочитать стоп репо *slug* (`owner/name`) и решить. Не бросает."""
-    pages = _gh_json(
-        "--paginate", "--slurp", f"repos/{slug}/rulesets?includes_parents=false"
-    )
-    listing: list[dict[str, Any]] | None
-    try:
-        listing = (
-            [dict(r) for page in pages for r in page] if pages is not None else None
-        )
-    except (TypeError, ValueError):
-        listing = None
+    listing = _listing(slug)
     detail = None
     if listing is not None:
         named = [r for r in listing if r.get("name") == HALT_RULESET]
@@ -97,21 +132,27 @@ def check(slug: str) -> Decision:
     return decide(listing, detail)
 
 
-def refusal(slug: str) -> str | None:
-    """None — пускать; иначе текст отказа с кодом."""
+def refusal(slug: str) -> HaltedError | None:
+    """None — пускать; иначе отказ (с признаком «не прочитан»)."""
     admit, code, reason = check(slug)
-    return None if admit else f"стоп-кран DarkFactory ({code}): {reason}"
+    if admit:
+        return None
+    return HaltedError(
+        f"стоп-кран DarkFactory ({code}): {reason}", unread=code == "refuse_unknown"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
-    """`python3 -m governance.halt_gate owner/name` → 0 пускать, 6 отказ."""
+    """`python3 -I governance/halt_gate.py owner/name` → 0 / 6 / 2."""
     args = sys.argv[1:] if argv is None else argv
     if len(args) != 1 or "/" not in args[0]:
-        print("usage: python3 -m governance.halt_gate <owner/name>", file=sys.stderr)
+        print("usage: python3 -I governance/halt_gate.py <owner/name>", file=sys.stderr)
         return 2
     admit, code, reason = check(args[0])
     print(f"{code}: {reason}")
-    return 0 if admit else EXIT_HALTED
+    if admit:
+        return 0
+    return EXIT_UNREAD if code == "refuse_unknown" else EXIT_HALTED
 
 
 if __name__ == "__main__":

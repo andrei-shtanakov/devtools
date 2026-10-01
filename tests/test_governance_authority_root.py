@@ -39,6 +39,9 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         "approval_branches.sh",
         # Стоп-кран: merge-pr.sh исполняет его из дерева (ревью devtools#531).
         "governance/halt_gate.py",
+        # Оракул правила стоп-крана: агент поправил бы векторы под свою
+        # реализацию (ревью devtools#531, второй прогон).
+        "contracts/halt-admission/",
         # Правило области ревью (devtools#271): решает, дойдёт ли диф до
         # модели вообще. Агентски смерженная правка `PROSE` сняла бы
         # ревью-гейт со всех последующих PR.

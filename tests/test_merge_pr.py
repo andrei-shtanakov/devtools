@@ -39,12 +39,13 @@ GH_STUB = """#!/usr/bin/env bash
 echo "GH_CONFIG_DIR=${GH_CONFIG_DIR:-} gh $*" >> "$GH_STUB_LOG"
 case "$*" in
   *"rulesets?"*)
-    # Стоп-кран (D2): листинг наборов правил. По умолчанию — не взведено
-    # (`missing` → пускать), чтобы прежние кейсы шли как раньше.
+    # Стоп-кран (D2): листинг наборов правил, как его печатает `--jq` —
+    # строка JSON на набор. По умолчанию — не взведено (`missing` →
+    # пускать), чтобы прежние кейсы шли как раньше.
     case "${GH_STUB_HALT:-missing}" in
       fail) echo "gh: HTTP 502" >&2; exit 1 ;;
-      missing) echo '[[]]' ;;
-      *) echo '[[{"id":7,"name":"darkfactory-halt"}]]' ;;
+      missing) : ;;
+      *) echo '[1,"Default Branch Restriction"]'; echo '[7,"darkfactory-halt"]' ;;
     esac ;;
   *"/rulesets/"*)
     case "${GH_STUB_HALT:-}" in
@@ -1196,14 +1197,15 @@ def test_guard_inputs_are_authority_root() -> None:
 # --- стоп-кран (D2, contracts/halt-admission/v1) ---------------------------
 
 
-@pytest.mark.parametrize("halt", ["on", "fail", "detailfail"])
-def test_a_halt_that_is_on_or_unreadable_refuses_with_code_6(
-    fleet: Fleet, halt: str
+@pytest.mark.parametrize(("halt", "code"), [("on", 6), ("fail", 2), ("detailfail", 2)])
+def test_a_halt_that_is_on_or_unreadable_refuses(
+    fleet: Fleet, halt: str, code: int
 ) -> None:
-    """Включён или не читается — отказ кодом 6, и ни факты PR, ни merge API
+    """Включён — код 6; не читается — код 2 (факт не установлен, повтор
+    уместен; ревью devtools#531). В обоих случаях ни факты PR, ни merge API
     не тронуты: стоп проверяется сразу после профиля."""
     res = fleet.run(GH_STUB_HALT=halt)
-    assert res.returncode == 6, res.stderr
+    assert res.returncode == code, res.stderr
     assert "стоп-кран" in res.stderr
     assert fleet.merge_calls() == []
     assert "headRefName" not in fleet.gh_calls()

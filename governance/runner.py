@@ -3846,7 +3846,7 @@ _STEPS = (
 
 
 #: Проверка стопа (D2); тесты подменяют, как `_SLEEP` (conftest — «пускать»).
-_HALT_GATE: Callable[[str], str | None] = halt_gate.refusal
+_HALT_GATE: Callable[[str], halt_gate.HaltedError | None] = halt_gate.refusal
 
 
 def _refuse_if_halted(repo_slug: str) -> None:
@@ -3860,16 +3860,16 @@ def _refuse_if_halted(repo_slug: str) -> None:
     """
     refusal = _HALT_GATE(repo_slug)
     if refusal is not None:
-        raise halt_gate.HaltedError(refusal)
+        raise refusal
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
         return _main(argv)
     except halt_gate.HaltedError as err:
-        # Код — как у merge-pr.sh: стоп-кран, повтор после снятия стопа.
+        # Коды — как у merge-pr.sh: 6 стоп действует, 2 стоп не прочитан.
         print(err, file=sys.stderr)
-        return halt_gate.EXIT_HALTED
+        return err.exit_code
 
 
 def _main(argv: list[str] | None = None) -> int:
