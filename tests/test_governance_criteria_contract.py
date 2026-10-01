@@ -145,12 +145,17 @@ def test_responses_drift_against_upstream_checkout():
         pytest.skip(notes[0])
 
 
-def test_pending_min_version_keeps_oracle_unavailable():
-    """Схемы вендорены, но команды verify --criteria ещё нет (B2b):
-    оракул недоступен при любом установленном spec-runner."""
+def test_released_min_version_enables_oracle_from_4_5_0():
+    """spec-runner v4.5.0 (release X, B2b — `verify --criteria`) опубликовал
+    min-spec-runner.env; копия вендорит его байты: оракул доступен при 4.5.0+
+    и недоступен ниже."""
     minimum = cc.read_min_version()
-    assert minimum.version is None
-    assert not cc.oracle_available("99.0.0", minimum, is_vendored=True)
+    assert minimum.version == "4.5.0"
+    assert cc.oracle_available("4.5.0", minimum, is_vendored=True)
+    assert not cc.oracle_available("4.4.9", minimum, is_vendored=True)
+    assert "min-spec-runner.env" in json.loads(
+        (cc.CONTRACT_DIR / "manifest.json").read_text()
+    )
 
 
 def test_numeric_min_version_gates_as_before(tmp_path):

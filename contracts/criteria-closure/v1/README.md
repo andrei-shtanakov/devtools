@@ -4,18 +4,18 @@
 spec-runner#603). devtools — потребитель: спека
 `docs/superpowers/specs/2026-09-28-bundle-criteria-oracle-design.md` §4–§5.
 
-Схемы запроса/ответа v1 и эталоны ответов вендорены @ `3a1b9aa` (B2a):
-рядом с `min-spec-runner.env` лежат `PIN` (`SOURCE: spec-runner @ <sha>`),
-`request.schema.json`, `response.schema.json` и `manifest.json` с их sha256 —
-манифест сходится, `governance/criteria_contract.vendored()` возвращает
-`True`. Но оракул **остаётся недоступным**: `MIN_SPEC_RUNNER_VERSION=pending`
-в `min-spec-runner.env` — команды `verify --criteria` ещё нет (B2b,
-spec-runner#603). `oracle_available()` держит это отдельно от `vendored()`:
-`read_min_version()` возвращает `MinVersion(None)` для `pending`, и при
-`minimum.version is None` оракул недоступен независимо от установленной
-версии spec-runner. `criteria-close` отвечает `not-applicable:
-spec-runner-version`, пока число не выставит PR, вендорящий
-`min-spec-runner.env` производителя.
+Схемы запроса/ответа v1, эталоны ответов и `min-spec-runner.env`
+вендорены @ spec-runner **v4.5.0** (`1de715c`, release X: B2a — схемы, B2b —
+`verify --criteria`; схемы и эталоны побайтно те же, что в B2a @ `3a1b9aa`).
+`PIN` (`SOURCE: spec-runner @ <sha>`) и `manifest.json` (sha256 обеих схем и
+`min-spec-runner.env`) сходятся — `vendored()` возвращает `True`;
+`MIN_SPEC_RUNNER_VERSION=4.5.0` — байты производителя, не наша правка.
+**Оракул доступен**, когда установленный spec-runner не ниже 4.5.0
+(`oracle_available()`); ниже — `criteria-close` отвечает `not-applicable:
+spec-runner-version`. `closure_gate` в CI (spec-runner не установлен)
+считает оракул выпущенным по вендорингу и числовой минимальной версии.
+Значение `pending` в `min-spec-runner.env` (до релиза) `read_min_version()`
+по-прежнему читает как «команда не выпущена».
 
 Эталонные ответы — отдельная вендоренная копия `fixtures/responses/` со
 своими `PIN`/`manifest.json` (апстрим — `tests/fixtures/criteria-closure/v1/responses/`
