@@ -30,3 +30,27 @@
    используется только для отчёта; писать начнёт срез 1).
 
 Обновление кода: `sudo -u conductor git -C /srv/conductor/devtools pull --ff-only`.
+
+## Срез 1 — запись (шаги владельца)
+
+1. Создать GitHub App и ключ (права — `docs/conductor/acceptance/sandbox.md`, п. 2),
+   положить ключ в `/srv/conductor/keys/conductor.pem` (`conductor:conductor`, `0600`).
+2. Пройти приёмку в песочнице (`docs/conductor/acceptance/sandbox.md`), заполнить
+   квитанцию по шаблону `docs/conductor/acceptance/TEMPLATE-slice1.md`.
+3. Установить App на репо флота; скопировать `deploy/conductor/conductor.toml.example`
+   в `/srv/conductor/conductor.toml` (`0600`), вписать `app_id` и `installation_id`.
+4. `sudo -u conductor uv run --frozen python -m conductor init-state --config /srv/conductor/conductor.toml`
+   (запускать из `/srv/conductor/devtools`; карантин записей — 65 минут).
+   `init-state`, `run --config` и `--recover` сами берут lock хоста
+   `/srv/conductor/state/conductor.lock` (`[run] lock` в конфиге): занят — команда
+   не выполняется (`run` — пропуск прогона с кодом 0, `init-state` — код 4).
+5. Тень: установить drop-in `deploy/conductor/writer.conf` (команда — в его шапке).
+   Он запускает `run --level 3 --config …` без внешнего `flock` (lock берёт сам
+   процесс). Без `--level` потолок прогона — 0 (О §2.4): ручной прогон для записи —
+   тоже с `--level`. Неделя ежечасных прогонов с `shadow = true`, `autonomy = 0`.
+6. Ступени: снять тень (`shadow = false`), затем правками `roadmap.toml` зонтика:
+   `autonomy = 1`, `enabled_actions` = `["owner_queue"]` → `+ notify_satisfied` →
+   `+ nudge, pr_nudge` → `+ close_shipped`. Перед каждой — показатели:
+   `uv run --frozen python -m conductor stage-report --out /srv/conductor/state/runs --since <ISO> --until <ISO>`.
+7. Откат: убрать действие или `autonomy = 0` (правка роадмапа), либо удалить drop-in,
+   либо удалить ключ App. Сделанные записи не отменяются.

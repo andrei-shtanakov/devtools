@@ -1,0 +1,11 @@
+# /srv/conductor/conductor.toml — конфиг хоста-писателя (спека среза 1, §4.2).
+# Владелец: пользователь conductor, права 0600. Ключ App — только на этом хосте.
+[app]
+app_id          = 123456
+installation_id = 7890123
+private_key     = "/srv/conductor/keys/conductor.pem"
+
+[run]
+profile   = "fleet"
+shadow    = true                      # неделя тени: всё, кроме отправки
+state_dir = "/srv/conductor/opstate"  # не state/: там runs/ и lock среза 0
