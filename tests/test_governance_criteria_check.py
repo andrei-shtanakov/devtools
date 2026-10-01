@@ -213,6 +213,30 @@ def test_schema_is_required():
     assert parsed is None and "схема" in why
 
 
+def _schema_violating_answer() -> str:
+    resp = json.loads(golden("answer"))
+    resp["protocol"] = 2
+    return json.dumps(resp)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "why"),
+    [
+        ("", "ответ пуст"),
+        ("   \n\t  ", "ответ пуст"),
+        ("not json", "ответ не JSON"),
+    ],
+)
+def test_parse_response_refuses_before_schema(stdout, why):
+    parsed, got = ck.parse_response(0, stdout, SCHEMA)
+    assert parsed is None and why in got
+
+
+def test_parse_response_refuses_schema_violation():
+    parsed, why = ck.parse_response(0, _schema_violating_answer(), SCHEMA)
+    assert parsed is None and "ответ не по схеме" in why
+
+
 def test_orphan_blocks_closure():
     beh = (
         BEH
