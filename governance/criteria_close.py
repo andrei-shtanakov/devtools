@@ -418,17 +418,84 @@ def _outside_py_digest(tree: criteria_product.Tree, files: tuple[str, ...]) -> s
     ответа, но ДОБАВЛЕНИЕ нового pytest.ini/tox.ini/setup.cfg не меняет ни
     content_sha256, ни .py-слепок — без этой ветки такая правка не покупала
     бы перемер."""
+    outside = _outside_entries(tree, files)
+    h = hashlib.sha256()
+    for path in sorted(outside, key=lambda p: p.encode()):
+        h.update(path.encode())
+        h.update(b"\0")
+        h.update(outside[path].encode())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _outside_entries(
+    tree: criteria_product.Tree, files: tuple[str, ...]
+) -> dict[str, str]:
+    """Путь → blob-sha входа вне ключа: отслеживаемые .py вне продукта и
+    `_MEASUREMENT_CONFIG` на `tree.sha` (то, что слепит `_outside_py_digest`)."""
     entries = tree.entries()
     config = {name for name in _MEASUREMENT_CONFIG if name in entries}
     candidates = set(criteria_product.tracked_py(tree)) | config
-    paths = sorted(candidates.difference(files), key=lambda p: p.encode())
-    h = hashlib.sha256()
-    for path in paths:
-        h.update(path.encode())
-        h.update(b"\0")
-        h.update(entries[path][1].encode())
-        h.update(b"\0")
-    return h.hexdigest()
+    return {p: entries[p][1] for p in candidates.difference(files)}
+
+
+def _changed_outside_key(
+    root: Path, prev_sha: str, product_sha: str
+) -> list[str] | None:
+    """Файлы вне ключа, чьи байты различаются между измеренным `prev_sha` и
+    `product_sha`; `None` — не установить (дерево недоступно/конфиг не читается)."""
+    found = []
+    try:
+        for sha in (prev_sha, product_sha):
+            tree = criteria_product.Tree(root, sha)
+            decl = criteria_product.read_declaration(tree)
+            found.append(
+                _outside_entries(tree, criteria_product.resolve_roots(tree, decl.roots))
+            )
+    except criteria_product.ProductError:
+        return None
+    before, after = found
+    return sorted(
+        p for p in before.keys() | after.keys() if before.get(p) != after.get(p)
+    )
+
+
+def _measured_sha(entry: dict | None, remote: dict | None, key: str) -> str | None:
+    """product_sha измерения ключа `key`: локальная запись (её frontmatter),
+    иначе закрытие на default-ветке (машина без локального состояния)."""
+    if entry and entry.get("text"):
+        try:
+            meta, _ = split_frontmatter(entry["text"])
+        except ValueError:
+            meta = {}
+        if isinstance(meta.get("product_sha"), str):
+            return meta["product_sha"]
+    if remote and remote.get("content_key") == key:
+        sha = remote.get("product_sha")
+        return sha if isinstance(sha, str) else None
+    return None
+
+
+def _key_measured_message(
+    root: Path, key: str, product_sha: str, prev_sha: str | None
+) -> str:
+    """Отказ «ключ измерен» (код 6). Изменились файлы вне ключа — назвать
+    их, не утверждая, что они решали исход (решение владельца по
+    `criteria-close-key-outside-helpers`: ограничение v1, ключ не расширяем)."""
+    head = f"criteria-close: ключ измерен ({key}) — §3.1 G6"
+    changed = _changed_outside_key(root, prev_sha, product_sha) if prev_sha else None
+    if changed is None:
+        return (
+            f"{head}: новый результат не опубликован; изменения вне ключа "
+            "измерения установить не удалось (прежний product_sha недоступен)"
+        )
+    if not changed:
+        return f"{head}: новый результат того же содержимого не публикуется"
+    return (
+        f"{head}. Изменились файлы вне ключа измерения: {', '.join(changed)}; "
+        "ключ остался прежним. Новый результат не опубликован "
+        "(ограничение v1: ключ не покрывает файлы вне продукта и тестов ответа)"
+    )
 
 
 def _test_named(path: str) -> bool:
@@ -712,10 +779,8 @@ def _measure(
     if known is not None and not known[1].get("merged"):
         return key, known[1]["closure"], known[1]["text"]  # первый результат
     if known is not None or (remote and remote.get("content_key") == key):
-        print(
-            f"criteria-close: ключ измерен ({key}) — §3.1 G6: новый результат "
-            "того же содержимого не публикуется; доработайте продукт"
-        )
+        prev = _measured_sha(known[1] if known else None, remote, key)
+        print(_key_measured_message(root, key, product_sha, prev))
         return 6
     text = render_closure(
         result,
