@@ -317,9 +317,10 @@ def _publish(state, ops: Ops, run_id: str, key: str, text: str, closure: str) ->
                 f"Файл закрытия воркстрима (срез 1 оракула). closure: {closure}.",
                 "criteria-close",
             )
-        except (subprocess.CalledProcessError, OSError) as exc:
+        except (subprocess.CalledProcessError, OSError, RuntimeError) as exc:
             # отказ шага с диагностикой, а не трейсбек (живая приёмка: в
-            # целевом репо не было метки criteria-close); ветка уже на origin —
+            # целевом репо не было метки criteria-close; RuntimeError — gh вышел 0
+            # без URL PR, ревью #537); ветка уже на origin —
             # повтор её усыновит
             detail = (getattr(exc, "stderr", "") or str(exc)).strip()
             raise CloseError(

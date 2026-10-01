@@ -1057,4 +1057,19 @@ def test_create_pr_failure_is_a_step_refusal_not_a_traceback(
     ops.create_pr = boom
     assert cc.run("run-1", ops) == 2
     out = capsys.readouterr().out
-    assert "gh pr create" in out and "criteria-close" in out
+    assert "gh pr create" in out and "could not add label" in out
+
+
+def test_create_pr_without_url_is_a_step_refusal(tmp_path, monkeypatch, capsys):
+    """Ревью #537: `gh` вышел 0 без URL PR — RuntimeError из RealOps тоже
+    отказ шага (2), а не трейсбек."""
+    _, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+
+    def no_url(*a, **k):
+        raise RuntimeError("create_pr: no PR URL in 'warning: ...'")
+
+    ops.create_pr = no_url
+    assert cc.run("run-1", ops) == 2
+    assert "no PR URL" in capsys.readouterr().out

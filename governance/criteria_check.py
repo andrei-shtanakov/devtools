@@ -427,5 +427,5 @@ def validate_answer(
     for bid, note in notes.items():
         if status.get(bid) == "traced":
             status[bid] = "unconfirmed"
-            reason[bid] = f"владелец не собран — {note}"
+            reason[bid] = note  # note сам называет причину понижения
     return Checked(out, status, notes, reason)

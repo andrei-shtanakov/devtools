@@ -516,6 +516,38 @@ def test_excluded_owner_downgrades_traced():
     got = ck.validate_answer(ok_request(), resp, **args)
     assert got.problems == [] and got.beh_status["BEH-01"] == "unconfirmed"
     assert "BEH-01" in got.notes
+    # причина — note как есть: не собран / снят с отбора / в исключённом
+    assert got.beh_reason["BEH-01"] == got.notes["BEH-01"]
+    assert "владелец не собран" in got.beh_reason["BEH-01"]
+
+
+def test_deselected_owner_reason_is_not_called_uncollected():
+    """Ревью #537: владелец собран, но его параметр снят с отбора — причина
+    называет отбор, а не «не собран»."""
+    resp = golden_answer()
+    resp["collection_excluded"].append(
+        {
+            "how": "deselected",
+            "node_id": "tests/test_mod.py::test_x[2]",
+            "definition": {
+                "file": "tests/test_mod.py",
+                "qualname": "test_x",
+                "line": 1,
+            },
+        }
+    )
+    args = ok_args(resp)
+    owner = sorted(args["owners_map"]["BEH-01"])[0]
+    resp["collection_excluded"][-1]["definition"] = {
+        "file": owner[0],
+        "qualname": owner[1],
+        "line": owner[2],
+    }
+    got = ck.validate_answer(ok_request(), resp, **args)
+    if got.beh_status.get("BEH-01") != "unconfirmed":
+        raise AssertionError((got.problems, got.beh_status))
+    assert "снят с отбора" in got.beh_reason["BEH-01"]
+    assert "не собран" not in got.beh_reason["BEH-01"]
 
 
 def test_beh_foreign_code_prefix_refused():
