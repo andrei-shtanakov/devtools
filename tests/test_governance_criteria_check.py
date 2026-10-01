@@ -565,3 +565,108 @@ def test_duplicate_selector_node_id_refused():
     ]
     resp = answer([item("tests/test_a.py::test_a")], dup_selectors)
     assert any("повтор" in f for f in ck.completeness_findings(resp, o))
+
+
+# Task 6: validate_answer — сверка ответа целиком против v1 golden-эталона.
+
+
+def golden_answer():
+    return json.loads(golden("answer"))
+
+
+def ok_args(resp):
+    return {
+        "declared_roots": ("pkg",),
+        "resolved_files": ("pkg/__init__.py", "pkg/mod.py"),
+        "groups": None,
+        "extras": (),
+        "lock_sha": "c" * 64,
+        "content_sha": "d" * 64,
+        "function_lines": {"pkg/mod.py": {3, 4}},
+        "owners_map": {
+            "BEH-01": {("tests/test_mod.py", "test_run", 4)},
+            "BEH-02": set(),
+        },
+        "installed": "4.5.0",
+    }
+
+
+def test_golden_answer_is_valid():
+    resp = golden_answer()
+    got = ck.validate_answer(resp["request"], resp, **ok_args(resp))
+    assert got.problems == []
+    assert got.beh_status == {"BEH-01": "traced", "BEH-02": "unconfirmed"}
+
+
+def ok_request():
+    return golden_answer()["request"]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "why"),
+    [
+        (lambda r, a: r["request"].update(code="XYZ"), "эхо request"),
+        (lambda r, a: a.update(declared_roots=("other",)), "product_roots.declared"),
+        (lambda r, a: a.update(resolved_files=("pkg/mod.py",)), "product_roots.files"),
+        (lambda r, a: a.update(groups=("test",)), "environment.groups"),
+        (lambda r, a: a.update(lock_sha="e" * 64), "lock_sha256"),
+        (lambda r, a: a.update(content_sha="e" * 64), "content_sha256"),
+        (lambda r, a: a.update(installed="4.4.0"), "spec_runner_version"),
+        (
+            lambda r, a: r["beh"][0]["selectors"][0]["runs"][1].update(
+                outcome="failed"
+            ),
+            "outcome",
+        ),
+        (
+            lambda r, a: r["beh"][0].update(status="unconfirmed", reason="not-passed"),
+            "статус",
+        ),
+        (
+            lambda r, a: r["beh"][0]["selectors"][0]["runs"][0].update(
+                product_line_count=5
+            ),
+            "product_line_count",
+        ),
+    ],
+)
+def test_answer_refusals(mutate, why):
+    resp = golden_answer()
+    args = ok_args(resp)
+    mutate(resp, args)
+    got = ck.validate_answer(ok_request(), resp, **args)
+    assert any(why in p for p in got.problems), got.problems
+
+
+@pytest.mark.parametrize(
+    ("run_idx", "collected"),
+    [
+        (0, []),
+        (1, []),
+        (0, ["tests/test_mod.py::test_other"]),
+        (1, ["tests/test_mod.py::test_run", "tests/test_mod.py::test_other"]),
+    ],
+)
+def test_run_must_collect_exactly_its_selector(run_idx, collected):
+    resp = golden_answer()
+    resp["beh"][0]["selectors"][0]["runs"][run_idx]["collected"] = collected
+    got = ck.validate_answer(ok_request(), resp, **ok_args(resp))
+    assert any("собрал" in p for p in got.problems), got.problems
+
+
+def test_product_overlapping_tests_is_refused():
+    resp = golden_answer()
+    args = ok_args(resp)
+    args["resolved_files"] = ("pkg/__init__.py", "pkg/mod.py", "tests/test_mod.py")
+    resp["product_roots"]["files"] = list(args["resolved_files"])
+    got = ck.validate_answer(ok_request(), resp, **args)
+    assert any("пересекается с тестами" in p for p in got.problems)
+
+
+def test_excluded_owner_downgrades_traced():
+    resp = golden_answer()
+    args = ok_args(resp)
+    args["owners_map"]["BEH-01"].add(("tests/test_mod.py", "test_gone", 9))
+    got = ck.validate_answer(ok_request(), resp, **args)
+    assert got.problems == [] and got.beh_status["BEH-01"] == "unconfirmed"
+    assert "BEH-01" in got.notes

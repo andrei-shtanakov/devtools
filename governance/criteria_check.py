@@ -424,3 +424,93 @@ def beh_status(
         return "error", errors[0]
     reasons = {reason for status, reason in selector_results if status == "unconfirmed"}
     return "unconfirmed", next(p for p in _BEH_PRECEDENCE if p in reasons)
+
+
+@dataclass(frozen=True)
+class Checked:
+    problems: list[str]
+    beh_status: dict[str, str]
+    notes: dict[str, str] = field(default_factory=dict)
+
+
+def validate_answer(
+    request: dict,
+    response: dict,
+    *,
+    declared_roots: tuple[str, ...],
+    resolved_files: tuple[str, ...],
+    groups: tuple[str, ...] | None,
+    extras: tuple[str, ...],
+    lock_sha: str,
+    content_sha: str,
+    function_lines: dict[str, set[int]],
+    owners_map: dict[str, set[tuple[str, str, int]]],
+    installed: str | None,
+) -> Checked:
+    """§5.3: ответ-вердикт сверяется по байтам devtools; статусы — свои."""
+    out: list[str] = []
+    if response["request"] != request:
+        out.append("эхо request не совпало с запросом")
+    if response["spec_runner_version"] != installed:
+        out.append(
+            f"spec_runner_version {response['spec_runner_version']} ≠ {installed}"
+        )
+    roots, env = response["product_roots"], response["environment"]
+    if tuple(roots["declared"]) != declared_roots:
+        out.append("product_roots.declared ≠ декларации на product_sha")
+    if tuple(roots["files"]) != resolved_files:
+        out.append("product_roots.files ≠ развёртке корней на product_sha")
+    want_groups = list(groups) if groups is not None else None
+    if env["groups"] != want_groups or env["extras"] != list(extras):
+        out.append("environment.groups/extras ≠ конфигу продукта")
+    if env["lock_sha256"] != lock_sha:
+        out.append("lock_sha256 ≠ uv.lock на product_sha")
+    if response["content_sha256"] != content_sha:
+        out.append("content_sha256 ≠ пересчёту §6.1")
+    want = sorted(c["id"] for c in request["test_criteria"])
+    got = sorted(b["id"] for b in response["beh"])
+    if got != want:
+        return Checked([*out, f"множество BEH {got} ≠ запросу {want}"], {})
+    tests_side = set(response["test_files"]) | {
+        i["definition"]["file"] for i in response["test_items"]
+    }
+    overlap = sorted(set(resolved_files) & tests_side)
+    if (
+        overlap
+    ):  # §3.4 product-roots-overlap-tests: исполнение теста ≠ исполнение продукта
+        out.append(f"продукт пересекается с тестами: {overlap}")
+    out += completeness_findings(response, owners_map)
+    status: dict[str, str] = {}
+    for b in response["beh"]:
+        bid = b["id"].split(":", 1)[1]
+        results = []
+        for s in b["selectors"]:
+            for i, r in enumerate(s["runs"]):
+                if r["result"] != "complete":
+                    continue
+                if r["collected"] != [s["node_id"]]:
+                    out.append(
+                        f"{bid}: прогон {i + 1} собрал {r['collected']} вместо [{s['node_id']}]"
+                    )
+                if run_outcome(r["phases"]) != r["outcome"]:
+                    out.append(
+                        f"{bid}: outcome прогона {i + 1} ≠ фазам ({s['node_id']})"
+                    )
+                if (
+                    sum(len(p["lines"]) for p in r["product_lines"])
+                    != r["product_line_count"]
+                ):
+                    out.append(f"{bid}: product_line_count ≠ строкам ({s['node_id']})")
+            mine = selector_status(s, function_lines)
+            if mine != (s["status"], s.get("reason")):
+                out.append(f"{bid}: статус селектора {s['node_id']} ≠ пересчёту {mine}")
+            results.append(mine)
+        mine_beh = beh_status(results)
+        if mine_beh != (b["status"], b.get("reason")):
+            out.append(f"{bid}: статус BEH ≠ пересчёту {mine_beh}")
+        status[bid] = mine_beh[0]
+    notes = excluded_owner_behs(response, owners_map)
+    for bid in notes:
+        if status.get(bid) == "traced":
+            status[bid] = "unconfirmed"
+    return Checked(out, status, notes)
