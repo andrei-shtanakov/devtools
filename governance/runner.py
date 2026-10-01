@@ -24,6 +24,7 @@ import os
 import re
 import shlex
 import shutil
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,6 +42,7 @@ from governance import (
     criteria_graph,
     decomposition_guard,
     design_guard,
+    halt_gate,
 )
 from governance import approval_ledger as al
 from governance import approve_node as an
@@ -389,6 +391,9 @@ def start(
             f"{blocker!r} без зелёного потомка — создайте verification-run "
             "(verify(...)) прежде чем начинать новый авторинг-прогон"
         )
+    # Последний отказ до резервирования: локальные проверки дешевле похода
+    # в GitHub и отвечают раньше (D2).
+    _refuse_if_halted(repo_slug)
     _reserve_run_id(run_id)
     brief_descriptor = None
     if brief_source is not None:
@@ -1131,6 +1136,7 @@ def reopen(run_id: str, node: str, ops: Ops, *, manual: bool = False) -> RunStat
         raise ValueError(
             "прогон прошёл последнюю волну — переоткрытие узла делается новым прогоном"
         )
+    _refuse_if_halted(state.repo_slug)  # D2: после локальных отказов
     if ops.is_dirty(state.target_dir):
         print(f"reopen: target_dir {state.target_dir!r} грязный — не начато")
         state.status = "stopped_dirty"
@@ -1427,6 +1433,7 @@ def verify(parent_run_id: str, ops: Ops, run_id: str | None = None) -> RunState:
         )
     if run_id is None:
         run_id = _next_verify_run_id(parent_run_id)
+    _refuse_if_halted(parent.repo_slug)  # D2: последний отказ до резервирования
     _reserve_run_id(run_id)
     child = new_run(
         subject=parent.subject,
@@ -3838,7 +3845,34 @@ _STEPS = (
 )
 
 
+#: Проверка стопа (D2); тесты подменяют, как `_SLEEP` (conftest — «пускать»).
+_HALT_GATE: Callable[[str], halt_gate.HaltedError | None] = halt_gate.refusal
+
+
+def _refuse_if_halted(repo_slug: str) -> None:
+    """D2: НОВАЯ работа не начинается под стопом — бросает HaltedError.
+
+    Зовётся из самих start / verify / reopen, а не из CLI: `spec_loop` и
+    консоль вызывают их напрямую, и гейт в `main()` они обходили (ревью
+    devtools#531). resume продолжает допущенный прогон — он дорабатывает
+    (спека плоскости управления §6.1), его мерж остановят форджа и
+    merge-pr.sh.
+    """
+    refusal = _HALT_GATE(repo_slug)
+    if refusal is not None:
+        raise refusal
+
+
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except halt_gate.HaltedError as err:
+        # Коды — как у merge-pr.sh: 6 стоп действует, 2 стоп не прочитан.
+        print(err, file=sys.stderr)
+        return err.exit_code
+
+
+def _main(argv: list[str] | None = None) -> int:
     """CLI: `python -m governance.runner start|resume|verify|status ...`.
 
     Все команды, кроме `status` (только читает `run.json`), строят `RealOps` —

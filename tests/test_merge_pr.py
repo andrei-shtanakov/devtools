@@ -38,6 +38,21 @@ GH_STUB = """#!/usr/bin/env bash
 # Стаб gh: логирует каждый вызов, отвечает по переменным GH_STUB_*.
 echo "GH_CONFIG_DIR=${GH_CONFIG_DIR:-} gh $*" >> "$GH_STUB_LOG"
 case "$*" in
+  *"rulesets?"*)
+    # Стоп-кран (D2): листинг наборов правил, как его печатает `--jq` —
+    # строка JSON на набор. По умолчанию — не взведено (`missing` →
+    # пускать), чтобы прежние кейсы шли как раньше.
+    case "${GH_STUB_HALT:-missing}" in
+      fail) echo "gh: HTTP 502" >&2; exit 1 ;;
+      missing) : ;;
+      *) echo '[1,"Default Branch Restriction"]'; echo '[7,"darkfactory-halt"]' ;;
+    esac ;;
+  *"/rulesets/"*)
+    case "${GH_STUB_HALT:-}" in
+      on) echo '{"id":7,"enforcement":"active"}' ;;
+      off) echo '{"id":7,"enforcement":"disabled"}' ;;
+      *) echo "gh: HTTP 502" >&2; exit 1 ;;
+    esac ;;
   *"api user"*)
     if [ -n "${GH_STUB_USER_FAIL:-}" ]; then
       echo "gh: authentication token expired" >&2
@@ -1013,6 +1028,8 @@ def test_shell_reads_authority_ssot_and_hardcodes_nothing() -> None:
         # сами authority-root и харнесс-пути (blocker ревью PR #344).
         "ssot_env.sh",
         "approval_branches.sh",
+        # Исполняемый вход стоп-крана (`python3 -I "$script_dir/…"`).
+        "governance/halt_gate.py",
     }
     checked = [p for p in authority_root.prefixes() if p not in own]
     assert checked, (
@@ -1175,3 +1192,34 @@ def test_guard_inputs_are_authority_root() -> None:
     # ветки, а область ревью. Одного `_HARNESS_PREFIXES` мало: он держит
     # стадию приёмки, а `merge-pr.sh` и S7 раннера решают по ЭТОМУ списку.
     assert "contracts/review-scope/" in prefixes
+
+
+# --- стоп-кран (D2, contracts/halt-admission/v1) ---------------------------
+
+
+@pytest.mark.parametrize(("halt", "code"), [("on", 6), ("fail", 2), ("detailfail", 2)])
+def test_a_halt_that_is_on_or_unreadable_refuses(
+    fleet: Fleet, halt: str, code: int
+) -> None:
+    """Включён — код 6; не читается — код 2 (факт не установлен, повтор
+    уместен; ревью devtools#531). В обоих случаях ни факты PR, ни merge API
+    не тронуты: стоп проверяется сразу после профиля."""
+    res = fleet.run(GH_STUB_HALT=halt)
+    assert res.returncode == code, res.stderr
+    assert "стоп-кран" in res.stderr
+    assert fleet.merge_calls() == []
+    assert "headRefName" not in fleet.gh_calls()
+
+
+@pytest.mark.parametrize("halt", ["off", "missing"])
+def test_an_off_or_unarmed_halt_lets_the_merge_through(fleet: Fleet, halt: str) -> None:
+    res = fleet.run(GH_STUB_HALT=halt)
+    assert res.returncode == 0, res.stderr
+    assert len(fleet.merge_calls()) == 1
+
+
+def test_the_halt_is_read_with_the_agents_profile(fleet: Fleet) -> None:
+    fleet.run(GH_STUB_HALT="off")
+    halt_reads = [ln for ln in fleet.gh_calls().splitlines() if "rulesets" in ln]
+    assert halt_reads, "the halt was not read at all"
+    assert all(f"GH_CONFIG_DIR={fleet.profile_dir} " in ln for ln in halt_reads)

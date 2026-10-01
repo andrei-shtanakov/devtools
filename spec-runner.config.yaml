@@ -61,6 +61,7 @@ harness_files:
   - attest-vendor.sh
   - ssot_env.sh
   - approval_branches.sh
+  - governance/halt_gate.py
   - scripts/review
   - workstreams/stray-md-disables-i8-for-legacy-v1-20260922/spec
   - workstreams/i5-traceless-noop-after-abandon-20260923/spec
