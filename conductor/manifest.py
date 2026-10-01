@@ -39,8 +39,8 @@ def _entries(text: str) -> list[tuple[str, dict[str, Any]]]:
     ]
 
 
-def fleet_repos(text: str) -> list[FleetRepo]:
-    """Не-member записи с repo_url, уникальные по git_dir, + зонтик."""
+def fleet_repos(text: str, umbrella: str = UMBRELLA) -> list[FleetRepo]:
+    """Не-member записи с repo_url, уникальные по git_dir, + зонтик профиля."""
     repos: dict[str, FleetRepo] = {}
     for key, entry in _entries(text):
         url, git_dir = entry.get("repo_url"), entry.get("git_dir")
@@ -48,7 +48,7 @@ def fleet_repos(text: str) -> list[FleetRepo]:
             continue
         if match := _URL_RE.search(url):
             repos.setdefault(git_dir, FleetRepo(key, git_dir, match.group(2)))
-    repos.setdefault(UMBRELLA, FleetRepo(UMBRELLA, UMBRELLA, UMBRELLA))
+    repos.setdefault(umbrella, FleetRepo(umbrella, umbrella, umbrella))
     return sorted(repos.values(), key=lambda r: r.key)
 
 
