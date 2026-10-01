@@ -38,6 +38,7 @@ from conductor.opstate import (
     StateError,
     init_state,
     open_state,
+    parse_ts,
     recover_state,
 )
 from conductor.reconcile import reconcile
@@ -46,10 +47,11 @@ from conductor.roadmap import Roadmap, parse_roadmap
 from conductor.snapshot import Result, evaluate, to_snapshot
 from conductor.sources_gh import run_gh
 from conductor.sources_git import default_ref, fetch, read_file_at_origin
+from conductor.stage_report import stage_report
 from conductor.writer import StopPoint, Writer
 
 EXIT_OK, EXIT_ARGS, EXIT_NO_SOURCE, EXIT_CONFIG, EXIT_STOP = 0, 2, 3, 4, 5
-COMMANDS = ("status", "why", "plan", "run", "record", "init-state")
+COMMANDS = ("status", "why", "plan", "run", "record", "init-state", "stage-report")
 # ежечасный таймер: неделя прогонов (~3 МБ каждый) — не растить диск общего VPS
 KEEP_RUNS = 168
 
@@ -66,6 +68,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--level", type=int, choices=range(4), default=0)
     p.add_argument("--config", type=Path)
     p.add_argument("--trigger", choices=("timer", "manual"), default="manual")
+    p.add_argument("--since")
+    p.add_argument("--until")
     p.add_argument("--recover", action="store_true")
     p.add_argument("command", nargs="?")
     p.add_argument("target", nargs="?")
@@ -385,6 +389,12 @@ def main(argv: list[str] | None = None) -> int:
         return _selftest()
     if args.command == "init-state":
         return _init_state(args)
+    if args.command == "stage-report":
+        if not args.since or not args.until:
+            return EXIT_ARGS
+        report = stage_report(args.out, parse_ts(args.since), parse_ts(args.until))
+        print(json.dumps(report, ensure_ascii=False, indent=1))
+        return EXIT_OK
     if args.command not in COMMANDS or (
         args.command in ("why", "record") and not args.target
     ):
