@@ -19,6 +19,7 @@ from typing import Any
 from conductor.actions import PlanContext, plan_records
 from conductor.app_calls import AppCalls, init_host
 from conductor.collect import collect, read_manifest
+from conductor.fresh import FreshReader, GitRepo
 from conductor.gh_app import AppClient, Blocked, JournalLost
 from conductor.graph import canonical_id, normalizer
 from conductor.host_config import (
@@ -32,17 +33,19 @@ from conductor.host_config import (
 )
 from conductor.inputs import Inputs, RepoTodo, load_inputs, save_inputs
 from conductor.journal import MutationLog, RunJournal
+from conductor.manifest import fleet_repos
 from conductor.opstate import (
     StateError,
     init_state,
     open_state,
     recover_state,
 )
+from conductor.reconcile import reconcile
 from conductor.render import render_plan, render_status, render_why
 from conductor.roadmap import Roadmap, parse_roadmap
 from conductor.snapshot import Result, evaluate, to_snapshot
 from conductor.sources_gh import run_gh
-from conductor.sources_git import fetch, read_file_at_origin
+from conductor.sources_git import default_ref, fetch, read_file_at_origin
 from conductor.writer import StopPoint, Writer
 
 EXIT_OK, EXIT_ARGS, EXIT_NO_SOURCE, EXIT_CONFIG, EXIT_STOP = 0, 2, 3, 4, 5
@@ -62,6 +65,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=Path, default=Path("out/conductor"))
     p.add_argument("--level", type=int, choices=range(4), default=0)
     p.add_argument("--config", type=Path)
+    p.add_argument("--trigger", choices=("timer", "manual"), default="manual")
     p.add_argument("--recover", action="store_true")
     p.add_argument("command", nargs="?")
     p.add_argument("target", nargs="?")
@@ -72,7 +76,7 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _inputs(args: argparse.Namespace) -> Inputs | None:
+def _inputs(args: argparse.Namespace, umbrella_dir: str) -> Inputs | None:
     if args.replay is not None:
         replayed = load_inputs(args.replay)
         if args.roadmap is not None:  # черновик роадмапа проверяется на записи
@@ -92,7 +96,7 @@ def _inputs(args: argparse.Namespace) -> Inputs | None:
         text: str | None = args.manifest.read_text(encoding="utf-8")
         origin: tuple[str, str | None] = (f"file:{args.manifest}", None)
     else:
-        text, origin, errors = read_manifest(args.root, not args.no_fetch)
+        text, origin, errors = read_manifest(args.root, not args.no_fetch, umbrella_dir)
     if text is None:
         print("; ".join(errors), file=sys.stderr)
         return None
@@ -106,6 +110,8 @@ def _inputs(args: argparse.Namespace) -> Inputs | None:
         socket.gethostname(),
         _now(),
         errors,
+        slice1=args.config is not None,
+        umbrella_dir=umbrella_dir,
     )
 
 
@@ -190,6 +196,22 @@ def _origin_roadmap(
     return parse_roadmap(text, epics) if state == "read" else None
 
 
+def _git_repo(root: Path, inputs: Inputs, umbrella_dir: str) -> GitRepo:
+    """Свежий клон репо флота для шага 8: fetch, затем origin/<default>."""
+    dirs = {r.key: r.git_dir for r in fleet_repos(inputs.manifest_text, umbrella_dir)}
+
+    def clone(key: str) -> tuple[Path, str] | None:
+        if key not in dirs:
+            return None
+        repo_dir = root / dirs[key]
+        if fetch(repo_dir) is not None:
+            return None
+        ref = default_ref(repo_dir)
+        return (repo_dir, ref) if ref is not None else None
+
+    return clone
+
+
 def _start_checks(client: Any, umbrella: str) -> str | None:
     """О §8.2 на старте: ключ, установка владельца, покрытие зонтика профиля."""
     try:
@@ -236,6 +258,13 @@ def _write_phase(
         reason = ", ".join([*findings, problem])
         return EXIT_CONFIG, {"is_writer": False, "reason": reason}, []
     umbrella_dir = umbrella_name(cfg)
+    git_repo = _git_repo(args.root, inputs, umbrella_dir)
+    bot = client.bot_login or ""
+    try:  # §5.3: найденный эффект закрывает попытку ДО планирования и задержки
+        settled = reconcile(opened.state, FreshReader(client, git_repo), bot, now)
+    except OSError:
+        opened.state.end_run(now)
+        return EXIT_CONFIG, {"is_writer": False, "reason": "OPSTATE-WRITE"}, []
     writer = Writer(
         cfg=cfg,
         client=client,
@@ -249,11 +278,25 @@ def _write_phase(
         level_cap=level_cap(args, inputs),
         partial=result.graph_state == "partial",
     )
-    ctx = PlanContext(cfg, umbrella, client.bot_login or "", opened.state)
+    ctx = PlanContext(
+        cfg,
+        umbrella,
+        bot,
+        opened.state,
+        client=client,
+        git_repo=git_repo,
+        owner_login=umbrella.split("/")[0],
+        now=datetime.now(UTC),
+        notes=list(settled),
+    )
     try:
         reports = writer.execute(plan_records(result, inputs, ctx))
     except StopPoint as stop:
-        block = {"is_writer": True, "reason": f"точка остановки {stop.name}"}
+        block = {
+            "is_writer": True,
+            "reason": f"точка остановки {stop.name}",
+            "notes": ctx.notes,
+        }
         return EXIT_STOP, block, [{"stop_point": stop.name}]
     if writer.stopped is not None and "OPSTATE-WRITE" in writer.stopped:
         findings.append("OPSTATE-WRITE")  # §4.6: находка в снимке и код 4
@@ -262,6 +305,7 @@ def _write_phase(
         "reason": "тень" if cfg.shadow else "запись",
         "level_cap": level_cap(args, inputs),
         "findings": findings,
+        "notes": ctx.notes,
     }
     return (EXIT_CONFIG if findings else EXIT_OK), block, [asdict(r) for r in reports]
 
@@ -275,6 +319,7 @@ def _run(
     result = evaluate(inputs, level_cap(args, inputs))
     run_id = inputs.captured_at.replace(":", "")
     snap = to_snapshot(result, inputs, run_id, _previous(args.out))
+    snap["trigger"] = args.trigger
     run_dir = args.out / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     save_inputs(inputs, run_dir / "inputs.json")
@@ -357,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
 def _command(
     args: argparse.Namespace, cfg: HostConfig | None, cfg_error: str | None
 ) -> int:
-    inputs = _inputs(args)
+    inputs = _inputs(args, umbrella_name(cfg))
     if inputs is None:
         return EXIT_NO_SOURCE
     if all(t.state == "error" for t in inputs.todos) and inputs.gh_state != "read":
