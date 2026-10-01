@@ -1034,3 +1034,42 @@ def test_new_pytest_ini_buys_remeasure_not_g6(tmp_path, monkeypatch):
     ops2 = _ops((0, json.dumps(resp)))
     assert cc.run("run-1", ops2, product_sha=new_sha) == 0
     assert any(c[0] == "criteria_verify" for c in ops2.calls)
+
+
+def test_create_pr_failure_is_a_step_refusal_not_a_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    """Живая приёмка (polygon): нет метки criteria-close → `gh pr create`
+    падает CalledProcessError. Это отказ шага (2) с диагностикой."""
+    import subprocess as sp
+
+    _, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+
+    def boom(*a, **k):
+        raise sp.CalledProcessError(
+            1,
+            ["gh", "pr", "create"],
+            stderr="could not add label: 'criteria-close' not found",
+        )
+
+    ops.create_pr = boom
+    assert cc.run("run-1", ops) == 2
+    out = capsys.readouterr().out
+    assert "gh pr create" in out and "could not add label" in out
+
+
+def test_create_pr_without_url_is_a_step_refusal(tmp_path, monkeypatch, capsys):
+    """Ревью #537: `gh` вышел 0 без URL PR — RuntimeError из RealOps тоже
+    отказ шага (2), а не трейсбек."""
+    _, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+
+    def no_url(*a, **k):
+        raise RuntimeError("create_pr: no PR URL in 'warning: ...'")
+
+    ops.create_pr = no_url
+    assert cc.run("run-1", ops) == 2
+    assert "no PR URL" in capsys.readouterr().out

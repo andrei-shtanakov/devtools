@@ -516,6 +516,38 @@ def test_excluded_owner_downgrades_traced():
     got = ck.validate_answer(ok_request(), resp, **args)
     assert got.problems == [] and got.beh_status["BEH-01"] == "unconfirmed"
     assert "BEH-01" in got.notes
+    # причина — note как есть: не собран / снят с отбора / в исключённом
+    assert got.beh_reason["BEH-01"] == got.notes["BEH-01"]
+    assert "владелец не собран" in got.beh_reason["BEH-01"]
+
+
+def test_deselected_owner_reason_is_not_called_uncollected():
+    """Ревью #537: владелец собран, но его параметр снят с отбора — причина
+    называет отбор, а не «не собран»."""
+    resp = golden_answer()
+    resp["collection_excluded"].append(
+        {
+            "how": "deselected",
+            "node_id": "tests/test_mod.py::test_x[2]",
+            "definition": {
+                "file": "tests/test_mod.py",
+                "qualname": "test_x",
+                "line": 1,
+            },
+        }
+    )
+    args = ok_args(resp)
+    owner = sorted(args["owners_map"]["BEH-01"])[0]
+    resp["collection_excluded"][-1]["definition"] = {
+        "file": owner[0],
+        "qualname": owner[1],
+        "line": owner[2],
+    }
+    got = ck.validate_answer(ok_request(), resp, **args)
+    if got.beh_status.get("BEH-01") != "unconfirmed":
+        raise AssertionError((got.problems, got.beh_status))
+    assert "снят с отбора" in got.beh_reason["BEH-01"]
+    assert "не собран" not in got.beh_reason["BEH-01"]
 
 
 def test_beh_foreign_code_prefix_refused():
@@ -604,3 +636,36 @@ def test_selector_mismatch_refused_even_when_beh_status_agrees():
     sel0["reason"] = "not-passed"
     got = ck.validate_answer(ok_request(), resp, **ok_args(resp))
     assert any("статус селектора" in p for p in got.problems), got.problems
+
+
+def test_outcome_lines_carry_the_reason_and_graph_violations_are_named():
+    """Живая приёмка §8.4 (polygon#2): стоп-строка без причины не говорит, что
+    чинить. Причина производителя — в строке; сирота и ошибки графа — под
+    «нарушение графа», отдельно от unconfirmed."""
+    beh = (
+        BEH
+        + "\n#### BEH-03: c\n`traces: [FR-01]`\n- **checked_by**: `status: planned` `kind: unit` `owner: qa` `target: t`\n"
+    )
+    g = cgr.build_graph(REQ, beh, ACC)
+    out = ck.outcome(
+        g,
+        {"BEH-01": "unconfirmed", "BEH-02": "unconfirmed", "BEH-03": "traced"},
+        {"BEH-01": "no-test", "BEH-02": "no-product-execution"},
+    )
+    assert out.closure == "blocked"
+    assert any(
+        r.startswith("BEH-01 (Must): unconfirmed — no-test") for r in out.stop_reasons
+    )
+    assert any(
+        "BEH-02" in r and "no-product-execution" in r
+        for r in [*out.stop_reasons, *out.report_rows]
+    )
+    assert any(
+        r.startswith("нарушение графа — BEH-03: сирота") for r in out.stop_reasons
+    )
+
+
+def test_validate_answer_returns_reasons():
+    resp = golden_answer()
+    got = ck.validate_answer(ok_request(), resp, **ok_args(resp))
+    assert got.beh_reason == {"BEH-02": "no-test"}
