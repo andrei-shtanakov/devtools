@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from conductor.host_config import LOCK_PATH, ConfigError, load_host_config
+from conductor.host_config import (
+    LOCK_PATH,
+    ConfigError,
+    load_host_config,
+    profile_fence,
+    umbrella_name,
+    umbrella_repo,
+)
 
 FLEET = """
 [app]
@@ -91,3 +98,23 @@ def test_lock_shared_by_profiles_and_outside_state(tmp_path: Path) -> None:
     assert not LOCK_PATH.is_relative_to(fleet.state_dir)
     custom = _load(tmp_path, FLEET.replace("[run]", '[run]\nlock = "/tmp/c.lock"'))
     assert custom.lock == Path("/tmp/c.lock")
+
+
+def test_fence_and_umbrella(tmp_path: Path) -> None:
+    fleet, acc = _load(tmp_path, FLEET), _load(tmp_path, ACCEPTANCE)
+    assert umbrella_repo(fleet, "own") == "own/ai-orchestrators-workspace"
+    assert umbrella_repo(acc, "own") == "own/conductor-sandbox"
+    assert profile_fence(fleet, "own", ["devtools", "prograph-vault"]) == {
+        "own/devtools",
+        "own/prograph-vault",
+        "own/ai-orchestrators-workspace",
+    }
+    assert profile_fence(acc, "own", ["conductor-sandbox-outside"]) == {
+        "own/conductor-sandbox"
+    }
+
+
+def test_umbrella_name_of_profile(tmp_path: Path) -> None:
+    assert umbrella_name(_load(tmp_path, FLEET)) == "ai-orchestrators-workspace"
+    assert umbrella_name(_load(tmp_path, ACCEPTANCE)) == "conductor-sandbox"
+    assert umbrella_name(None) == "ai-orchestrators-workspace"

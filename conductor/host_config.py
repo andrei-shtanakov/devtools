@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from conductor.manifest import UMBRELLA
+
 # state/ среза 0 занят runs/ и conductor.lock — init-state требует пустой каталог
 FLEET_STATE_DIR = Path("/srv/conductor/opstate")
 SHARED_DIR = Path("/srv/conductor/shared")
@@ -130,3 +132,31 @@ def load_host_config(path: Path) -> HostConfig:
         stop_points=frozenset(stops),
         **base,
     )
+
+
+def umbrella_name(cfg: HostConfig | None) -> str:
+    """Имя зонтика профиля (каталог клона и репо): в acceptance — песочница.
+
+    Мини-флот приёмки не читает настоящий зонтик: роадмап, эпики, манифест,
+    очередь и состав флота — из песочницы (§9.1).
+    """
+    if cfg is not None and cfg.profile == "acceptance" and cfg.sandbox:
+        return cfg.sandbox.split("/", 1)[1]
+    return UMBRELLA
+
+
+def umbrella_repo(cfg: HostConfig, owner: str) -> str:
+    """Репо очереди владельца: зонтик флота или песочница (§4.2, §9.1)."""
+    if cfg.profile == "acceptance" and cfg.sandbox:
+        return cfg.sandbox
+    return f"{owner}/{UMBRELLA}"
+
+
+def profile_fence(
+    cfg: HostConfig, owner: str, github_names: list[str]
+) -> frozenset[str]:
+    """Забор профиля (§5.1 шаг 1): fleet — репо манифеста ∪ зонтик;
+    acceptance — песочница."""
+    if cfg.profile == "acceptance":
+        return frozenset({cfg.sandbox}) if cfg.sandbox else frozenset()
+    return frozenset({f"{owner}/{n}" for n in github_names} | {f"{owner}/{UMBRELLA}"})
