@@ -28,9 +28,9 @@ def test_vendored_copy_is_intact():
 
 def test_fixtures_have_their_own_pin_independent_of_the_schema_contract():
     """PIN фикстур лежит в своём каталоге, отдельно от корневого PIN схем
-    (с B2a схемы v1 вендорены, `vendored()` — True; оракул всё равно
-    недоступен — его держит `MIN_SPEC_RUNNER_VERSION=pending`, B2b, проверено
-    в test_governance_criteria_contract.py)."""
+    (схемы v1 вендорены @ spec-runner v4.5.0, `vendored()` — True; доступность
+    оракула решает `MIN_SPEC_RUNNER_VERSION`, см.
+    test_governance_criteria_contract.py)."""
     assert (FIXTURES / "PIN").exists()
     assert (cc.CONTRACT_DIR / "PIN").exists()
     assert cc.vendored() is True

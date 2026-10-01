@@ -145,6 +145,18 @@ def test_responses_drift_against_upstream_checkout():
         pytest.skip(notes[0])
 
 
+def test_pending_min_version_keeps_oracle_unavailable(tmp_path):
+    """`pending` (вендоринг схем до релиза команды — штатно для будущего v2)
+    держит оракул недоступным при любом установленном spec-runner: ветка
+    `minimum.version is None` в oracle_available (ревью #534)."""
+    env = tmp_path / "min.env"
+    env.write_text("MIN_SPEC_RUNNER_VERSION=pending\n")
+    minimum = cc.read_min_version(env)
+    assert minimum.version is None
+    assert not cc.oracle_available("99.0.0", minimum, is_vendored=True)
+    assert not cc.oracle_available("99.0.0", cc.MinVersion(None), is_vendored=True)
+
+
 def test_released_min_version_enables_oracle_from_4_5_0():
     """spec-runner v4.5.0 (release X, B2b — `verify --criteria`) опубликовал
     min-spec-runner.env; копия вендорит его байты: оракул доступен при 4.5.0+
