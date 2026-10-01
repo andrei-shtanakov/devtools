@@ -15,6 +15,7 @@ git-объектов; продукт — только чистый чекаут 
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import shutil
@@ -419,17 +420,52 @@ def _outside_py_digest(tree: criteria_product.Tree, files: tuple[str, ...]) -> s
     return h.hexdigest()
 
 
+def _test_named(path: str) -> bool:
+    """Имена файлов, которые pytest собирает по умолчанию (`python_files`),
+    плюс conftest.py."""
+    name = path.rsplit("/", 1)[-1]
+    return (
+        name == "conftest.py"
+        or fnmatch.fnmatchcase(name, "test_*.py")
+        or fnmatch.fnmatchcase(name, "*_test.py")
+    )
+
+
+def _owner_candidates(
+    tree: criteria_product.Tree,
+    files: tuple[str, ...],
+    test_files: list[str],
+    excluded: list[str],
+) -> list[str]:
+    """Кандидаты во владельцы токена (§3.1, ревью #532): отслеживаемые .py
+    вне продукта, которые pytest в принципе мог бы собрать, — test_files
+    ответа ∪ .py под skipped/ignored-путями ∪ имена по шаблонам pytest по
+    умолчанию (`_test_named`). Владелец в файле вне этих границ не виден —
+    названная граница (иначе вендоренные фикстуры с токенами вечно
+    блокировали бы закрытие)."""
+    test_set = set(test_files)
+    return [
+        p
+        for p in criteria_product.tracked_py(tree)
+        if p not in files
+        and (
+            p in test_set
+            or _test_named(p)
+            or any(criteria_check._covers(e, p) for e in excluded)
+        )
+    ]
+
+
 def _recompute_measurement_key(
     bundle_pin: str, root: Path, product_sha: str, stored: object
 ) -> str | None:
-    """G6: пересчитывает `f"{bundle_pin}:v1:{content_sha256}:{outside_py[:16]}"`
-    на `product_sha` из `stored` — ранее сохранённый вход измерения
+    """G6: пересчитывает `f"{bundle_pin}:v1:{content_sha256}"` на
+    `product_sha` из `stored` — ранее сохранённый вход измерения
     (`measured_inputs`/локальный `inputs`: test_files/excluded/outside_py).
-    `outside_py` — часть ключа, не только пред-проверки (ревью раунд 2):
-    иначе правка вне продукта, не менявшая content_sha256 (напр. новый
-    файл без токена), пересчитывала бы заново, но под ТЕМ ЖЕ ключом —
-    коллизия с веткой/PR уже опубликованного закрытия того же
-    content_sha256. `None` — вход неприменим (форма `stored` не та, конфиг
+    `outside_py` — только вход пред-проверки, не часть ключа (ревью #532):
+    его сдвиг перевызывает spec-runner, но второй результат того же ключа
+    не публикуется — это держит пост-проверка в `_measure`. `None` — вход
+    неприменим (форма `stored` не та, конфиг
     на новом product_sha снесён/невалиден, или вне-продуктовый .py-слепок
     разошёлся, то есть появился/исчез тестовый файл — ревью I-2) —
     измерять заново. Форма `stored` — данные из committed frontmatter или
@@ -463,7 +499,7 @@ def _recompute_measurement_key(
         return None
     if _outside_py_digest(tree, files) != outside_py:
         return None
-    return f"{bundle_pin}:v1:{content}:{outside_py[:16]}"
+    return f"{bundle_pin}:v1:{content}"
 
 
 def _measure(
@@ -605,12 +641,8 @@ def _measure(
         except criteria_product.ProductError as exc:
             print(f"criteria-close: ответ spec-runner отвергнут — {exc}")
             return 2
-        # владельцы — по всем отслеживаемым .py вне продукта, не по инвентарю
-        # ответа: skipped/ignored/вне testpaths файлы в test_files не попадают
         sources: dict[str, str] = {}
-        for p in criteria_product.tracked_py(tree):
-            if p in files:
-                continue
+        for p in _owner_candidates(tree, files, resp["test_files"], excluded):
             blob = tree.blob(p)
             if blob is None:
                 # отслеживаемый путь без blob — сбой git-объекта, не «файла
@@ -644,19 +676,30 @@ def _measure(
         measured_inputs = {
             "test_files": resp["test_files"],
             "excluded": excluded,
-            # вне-продуктовый .py-слепок — часть входа измерения: новый
-            # тестовый файл с токеном обязан сдвинуть G6 (ревью I-2).
+            # вне-продуктовый .py-слепок — вход пред-проверки G6, не ключа:
+            # новый тестовый файл с токеном обязан её сдвинуть (ревью I-2).
             "outside_py": _outside_py_digest(tree, files),
         }
         closure, key, roots = (
             result.closure,
-            # outside_py — и в ключе, не только во входе G6 (ревью раунд 2):
-            # иначе правка вне продукта, не менявшая content_sha256,
-            # перемеряла бы под ТЕМ ЖЕ ключом — коллизия с веткой/PR уже
-            # опубликованного закрытия этого content_sha256.
-            f"{bundle_pin}:v1:{content}:{measured_inputs['outside_py'][:16]}",
+            f"{bundle_pin}:v1:{content}",
             list(decl.roots),
         )
+
+    # G6 пост-проверка (ревью #532): пред-проверка могла пропустить уже
+    # измеренный ключ (сдвинулся outside_py — новый/удалённый вне-продуктовый
+    # .py или конфиг измерения), но второй результат того же содержимого не
+    # публикуется и не затирает запись ключа (pr/branch/merged).
+    known = _known(run_id, [key])
+    if known is not None and not known[1].get("merged"):
+        return key, known[1]["closure"], known[1]["text"]  # первый результат
+    if known is not None or (remote and remote.get("content_key") == key):
+        print(
+            f"criteria-close: ключ измерен ({key}) — §3.1 G6: новый результат "
+            "того же содержимого не публикуется; доработайте продукт"
+        )
+        return 6
+    if measured_inputs is not None:
         data = _load(run_id)
         data["inputs"] = measured_inputs
         _save(run_id, data)

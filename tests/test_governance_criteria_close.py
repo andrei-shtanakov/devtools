@@ -100,9 +100,11 @@ def _ops(verify=(0, "")):
 
         def criteria_verify(self, target_dir, request_path):
             self.calls.append(("criteria_verify", request_path))
-            return verify
+            return self.verify
 
-    return _Ops()
+    ops = _Ops()
+    ops.verify = verify
+    return ops
 
 
 def _env(
@@ -421,7 +423,7 @@ def test_unparseable_outside_py_without_token_measures_clean(tmp_path, monkeypat
     токена BEH не прерывает измерение (раньше — необработанный SyntaxError
     из owners()/ast.parse) — closure traced, как если бы файла не было."""
     _, target, pin = _env(
-        tmp_path, monkeypatch, extra={"scripts/bad.py": "def f(:\n    pass\n"}
+        tmp_path, monkeypatch, extra={"tests/extra/test_bad.py": "def f(:\n    pass\n"}
     )
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin))))
@@ -437,10 +439,77 @@ def test_unparseable_outside_py_with_token_blocks_closure(tmp_path, monkeypatch)
     _, target, pin = _env(
         tmp_path,
         monkeypatch,
-        extra={"scripts/bad.py": "def f(:\n    # ENC:BEH-01\n    pass\n"},
+        extra={"tests/extra/test_bad.py": "def f(:\n    # ENC:BEH-01\n    pass\n"},
     )
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 0
+    meta, _ = split_frontmatter(_closure_on_origin(target, ops))
+    assert meta["closure"] == "blocked"
+
+
+@pytest.mark.parametrize(
+    "owner", ["tests/extra/test_b.py", "integration/b_test.py", "other/conftest.py"]
+)
+def test_test_named_owner_outside_test_files_blocks(tmp_path, monkeypatch, owner):
+    """Ревью #532: кандидаты во владельцы — по шаблонам pytest (test_*.py,
+    *_test.py, conftest.py) вне test_files ответа — владелец вне testpaths
+    по-прежнему блокирует."""
+    _, target, pin = _env(
+        tmp_path,
+        monkeypatch,
+        extra={owner: "def test_b():\n    # ENC:BEH-01\n    assert 1\n"},
+    )
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 0
+    meta, _ = split_frontmatter(_closure_on_origin(target, ops))
+    assert meta["closure"] == "blocked"
+
+
+def test_non_test_named_tracked_py_with_token_does_not_block(tmp_path, monkeypatch):
+    """Ревью #532: отслеживаемый .py не по шаблонам pytest и вне test_files/
+    исключений (как вендоренные фикстуры владения devtools с ENC-токенами)
+    — не кандидат во владельцы; закрытие traced."""
+    fixture = (
+        Path(__file__).resolve().parents[1]
+        / "contracts/criteria-closure/v1/fixtures/ownership"
+        / "19_module_helper_with_token.py"
+    ).read_text()
+    assert "ENC:BEH-01" in fixture
+    _, target, pin = _env(
+        tmp_path,
+        monkeypatch,
+        extra={"contracts/fx/19_module_helper_with_token.py": fixture},
+    )
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 0
+    meta, _ = split_frontmatter(_closure_on_origin(target, ops))
+    assert meta["closure"] == "traced"
+
+
+def test_token_under_skipped_path_still_blocks(tmp_path, monkeypatch):
+    """Ревью #532: .py под skipped/ignored-путём ответа — кандидат во
+    владельцы независимо от имени файла; токен там блокирует."""
+    _, target, pin = _env(
+        tmp_path,
+        monkeypatch,
+        extra={"legacy/helper.py": "def h():\n    # ENC:BEH-01\n    pass\n"},
+    )
+    _oracle_on(monkeypatch)
+    tree = cp.Tree(Path(target), pin)
+    decl = cp.read_declaration(tree)
+    lock_sha = hashlib.sha256((Path(target) / "uv.lock").read_bytes()).hexdigest()
+    resp = _response(
+        target,
+        pin,
+        collection_excluded=[{"how": "skipped", "path": "legacy", "reason": "x"}],
+        content_sha256=cp.content_sha256(
+            tree, decl, lock_sha, ["tests/test_a.py"], ["legacy"]
+        ),
+    )
+    ops = _ops((0, json.dumps(resp)))
     assert cc.run("run-1", ops) == 0
     meta, _ = split_frontmatter(_closure_on_origin(target, ops))
     assert meta["closure"] == "blocked"
@@ -565,12 +634,11 @@ def test_g6_pre_check_sees_new_test_file_cross_machine(tmp_path, monkeypatch):
     assert any(c[0] == "criteria_verify" for c in ops2.calls)
 
 
-def test_outside_py_change_without_content_change_gets_new_key(tmp_path, monkeypatch):
-    """Ревью раунд 2: outside_py входит в ключ измерения — непродуктовая
-    .py-правка (без изменения content_sha256, напр. scripts/tool.py без
-    токена) после смерженного закрытия пересчитывает G6 пред-проверкой
-    (I-2) и находит РАЗНЫЙ ключ, а не коллидирует веткой/PR уже
-    опубликованного закрытия того же content_sha256."""
+def test_noop_outside_py_edit_after_merged_closure_is_g6(tmp_path, monkeypatch):
+    """Ревью #532: ключ измерения — только `<pin>:v1:<content_sha256>`.
+    No-op правка непродуктовой .py (scripts/tool.py без токена) сдвигает
+    outside_py и может перевызвать spec-runner, но пост-проверка G6 видит
+    тот же ключ — 6, без нового закрытия/PR."""
     _state, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin))))
@@ -579,8 +647,61 @@ def test_outside_py_change_without_content_change_gets_new_key(tmp_path, monkeyp
     new_sha = _commit(target, "scripts/tool.py", "x = 1\n")
     _git(target, "push", "-q", "origin", "master")
     ops2 = _ops((0, json.dumps(_response(target, new_sha, bundle_pin=pin))))
-    assert cc.run("run-1", ops2, product_sha=new_sha) == 0
-    assert any(c[0] == "criteria_verify" for c in ops2.calls)
+    assert cc.run("run-1", ops2, product_sha=new_sha) == 6
+    assert not any(c[0] in ("create_pr", "review") for c in ops2.calls)
+    assert not ops2.merged
+
+
+def test_post_check_unpublished_key_publishes_first_result(tmp_path, monkeypatch):
+    """Ревью #532: пост-проверка нашла ключ, измеренный, но ещё не смерженный
+    (ревью упало) — публикуется ПЕРВЫЙ результат (текст на P1), второй не
+    пишется и запись ключа не затирается."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    ops.review_exit = 1
+    assert cc.run("run-1", ops) == 2
+    (key,) = cc._load("run-1")["measured"]
+    first = cc._entry("run-1", key)["text"]
+
+    new_sha = _commit(target, "scripts/tool.py", "x = 1\n")
+    _git(target, "push", "-q", "origin", "master")
+    ops.verify = (0, json.dumps(_response(target, new_sha, bundle_pin=pin)))
+    ops.review_exit = 0
+    assert cc.run("run-1", ops, product_sha=new_sha) == 0
+    assert list(cc._load("run-1")["measured"]) == [key]
+    assert cc._entry("run-1", key)["text"] == first and ops.merged
+
+
+def test_revert_of_outside_py_edit_keeps_measured_entry(tmp_path, monkeypatch):
+    """Ревью #532 (major): P1 измерен и смержен → scripts/tool.py добавлен →
+    удалён (дерево = P1). Ни один шаг не публикует второй результат того же
+    содержимого и не затирает запись K1 (pr/branch/merged)."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 0
+    (key,) = cc._load("run-1")["measured"]
+    before = dict(cc._entry("run-1", key))
+    assert before.get("merged") and before.get("pr") and before.get("branch")
+
+    added = _commit(target, "scripts/tool.py", "x = 1\n")
+    _git(target, "push", "-q", "origin", "master")
+    ops2 = _ops((0, json.dumps(_response(target, added, bundle_pin=pin))))
+    assert cc.run("run-1", ops2, product_sha=added) == 6
+
+    _git(target, "rm", "-q", "scripts/tool.py")
+    _git(target, "commit", "-qm", "revert tool")
+    _git(target, "push", "-q", "origin", "master")
+    reverted = _git(target, "rev-parse", "HEAD")
+    ops3 = _ops((0, json.dumps(_response(target, reverted, bundle_pin=pin))))
+    assert cc.run("run-1", ops3, product_sha=reverted) == 6
+
+    for o in (ops2, ops3):
+        assert not any(c[0] in ("create_pr", "review") for c in o.calls)
+        assert not o.merged
+    assert list(cc._load("run-1")["measured"]) == [key]
+    assert cc._entry("run-1", key) == before
 
 
 def test_foreign_echo_on_retryable_error_response_is_refused(tmp_path, monkeypatch):
@@ -648,12 +769,14 @@ def test_owners_missing_blob_is_step_refusal(tmp_path, monkeypatch):
     `ls-tree` только что перечислил среди отслеживаемых .py (сбой
     git-объекта, не «файла нет») — отказ шага, не пустой источник, который
     тихо теряет владельца токена."""
-    _, target, pin = _env(tmp_path, monkeypatch, extra={"scripts/extra.py": "x = 1\n"})
+    _, target, pin = _env(
+        tmp_path, monkeypatch, extra={"tests/extra/test_x.py": "x = 1\n"}
+    )
     _oracle_on(monkeypatch)
     real_blob = cp.Tree.blob
 
     def flaky_blob(self, path):
-        if path == "scripts/extra.py":
+        if path == "tests/extra/test_x.py":
             return None
         return real_blob(self, path)
 
@@ -881,7 +1004,9 @@ def test_new_measurement_config_file_buys_outside_py_digest_change(
 def test_new_pytest_ini_buys_remeasure_not_g6(tmp_path, monkeypatch):
     """Final review m-1, через весь путь измерения: закрытие уже измерено
     и смержено; добавление pytest.ini, которого не было, не отвечает G6
-    (6) — вызывает spec-runner заново."""
+    (6) — вызывает spec-runner заново. Честный ответ несёт новый inipath в
+    test_files (эталон answer.json), поэтому content_sha256 и ключ другие —
+    пост-проверка G6 (ревью #532) не отказывает."""
     _state, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin))))
@@ -889,6 +1014,18 @@ def test_new_pytest_ini_buys_remeasure_not_g6(tmp_path, monkeypatch):
 
     new_sha = _commit(target, "pytest.ini", "[pytest]\ntestpaths = tests\n")
     _git(target, "push", "-q", "origin", "master")
-    ops2 = _ops((0, json.dumps(_response(target, new_sha, bundle_pin=pin))))
+    tree = cp.Tree(Path(target), new_sha)
+    lock_sha = hashlib.sha256((Path(target) / "uv.lock").read_bytes()).hexdigest()
+    test_files = ["pytest.ini", "tests/test_a.py"]
+    resp = _response(
+        target,
+        new_sha,
+        bundle_pin=pin,
+        test_files=test_files,
+        content_sha256=cp.content_sha256(
+            tree, cp.read_declaration(tree), lock_sha, test_files, []
+        ),
+    )
+    ops2 = _ops((0, json.dumps(resp)))
     assert cc.run("run-1", ops2, product_sha=new_sha) == 0
     assert any(c[0] == "criteria_verify" for c in ops2.calls)

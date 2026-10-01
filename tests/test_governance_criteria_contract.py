@@ -6,6 +6,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from governance import criteria_contract as cc
 
 
@@ -113,6 +115,19 @@ def test_vendored_copy_is_consistent():
 
 def test_responses_copy_is_consistent():
     assert cc.integrity_findings(cc.RESPONSES_DIR) == []
+
+
+def test_responses_drift_against_upstream_checkout():
+    upstream = Path(__file__).resolve().parents[1].parent / "spec-runner"
+    errors, notes = cc.drift_findings(
+        cc.RESPONSES_DIR,
+        upstream if upstream.exists() else None,
+        ci=False,
+        upstream_path="tests/fixtures/criteria-closure/v1/responses",
+    )
+    assert errors == [], errors
+    if notes:
+        pytest.skip(notes[0])
 
 
 def test_pending_min_version_keeps_oracle_unavailable():
