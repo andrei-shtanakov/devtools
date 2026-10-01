@@ -2951,7 +2951,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     """S4: prospective-гейт публичным `gate-check --candidate` (steward#140).
 
     Миграция с internal content-check API (candidate_state поверх трёх
-    пинованных символов) на CLI-контракт steward @ 2c71ed7
+    пинованных символов) на CLI-контракт steward (введён steward#140; пин — `[tool.uv.sources]`)
     (docs/gate-check-candidate.md): коды 0 чисто / 1 error-находки /
     2 config error; ref-зависимые гейты честно объявляются not_evaluated.
     Оба ненулевых кода — стоп: config error (2) не тише находок, он значит
