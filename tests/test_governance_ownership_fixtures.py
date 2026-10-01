@@ -26,11 +26,14 @@ def test_vendored_copy_is_intact():
     assert cc.integrity_findings(FIXTURES) == []
 
 
-def test_fixtures_do_not_vendor_the_schema_contract():
-    """PIN фикстур лежит в своём каталоге: корневого PIN нет — схемы v1 ещё
-    не заморожены, и `vendored()` (оракул доступен) обязан оставаться False."""
-    assert not (cc.CONTRACT_DIR / "PIN").exists()
-    assert cc.vendored() is False
+def test_fixtures_have_their_own_pin_independent_of_the_schema_contract():
+    """PIN фикстур лежит в своём каталоге, отдельно от корневого PIN схем
+    (с B2a схемы v1 вендорены, `vendored()` — True; оракул всё равно
+    недоступен — его держит `MIN_SPEC_RUNNER_VERSION=pending`, B2b, проверено
+    в test_governance_criteria_contract.py)."""
+    assert (FIXTURES / "PIN").exists()
+    assert (cc.CONTRACT_DIR / "PIN").exists()
+    assert cc.vendored() is True
 
 
 def test_all_upstream_cases_are_present():

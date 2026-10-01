@@ -15,7 +15,7 @@ git-объектов; продукт — только чистый чекаут 
 from __future__ import annotations
 
 import argparse
-import ast
+import fnmatch
 import hashlib
 import json
 import shutil
@@ -30,6 +30,7 @@ from governance import (
     criteria_check,
     criteria_contract,
     criteria_graph,
+    criteria_product,
     run_state,
     runner,
     spec_runner_contract,
@@ -158,6 +159,7 @@ def render_closure(
     host,
     content_key: str | None = None,
     product_roots: list[str] | None = None,
+    measured_inputs: dict | None = None,
 ) -> str:
     """Текст файла закрытия; result — Outcome или строка причины not-applicable.
 
@@ -172,10 +174,13 @@ def render_closure(
         "response_sha256": response_sha,
         "spec_runner_version": spec_runner_version,
         "host": host,
-        # Защита от переброса видна в git (ревью I-4): ключ содержимого
-        # и корни, по которым он посчитан, — в файле закрытия.
+        # Защита от переброса видна в git (ревью I-4): ключ содержимого,
+        # корни и вход измерения (test_files/excluded ответа) — в файле
+        # закрытия, чтобы другая машина могла пересчитать content_sha256
+        # на новом product_sha и подтвердить G6 без вызова spec-runner.
         "content_key": content_key,
         "product_roots": product_roots,
+        "measured_inputs": measured_inputs,
     }
     if isinstance(result, str):
         meta.update(
@@ -328,71 +333,9 @@ def _publish(state, ops: Ops, run_id: str, key: str, text: str, closure: str) ->
 # ---- измерение --------------------------------------------------------------------
 
 
-def _py_files(root: Path, sub: str) -> dict[str, str]:
-    base = root / sub
-    if not base.exists():
-        return {}
-    return {
-        p.relative_to(root).as_posix(): p.read_text(encoding="utf-8", errors="replace")
-        for p in sorted(base.rglob("*.py"))
-    }
-
-
-def _content_sha(root: Path, subdirs: list[str]) -> str:
-    """sha256 по отсортированным (путь, байты) *.py продуктовых корней и тестов
-    — ключ измерения §3.1 G6 и независимый пересчёт `content_sha256` (§5.3)."""
-    files = sorted(
-        {p for s in subdirs if (root / s).exists() for p in (root / s).rglob("*.py")}
-    )
-    h = hashlib.sha256()
-    for p in files:
-        h.update(p.relative_to(root).as_posix().encode())
-        h.update(b"\0")
-        h.update(p.read_bytes())
-    return h.hexdigest()
-
-
-def _is_test_file(path: str) -> bool:
-    parts = path.split("/")
-    name = parts[-1]
-    return (
-        "tests" in parts[:-1]
-        or "test" in parts[:-1]
-        or name == "conftest.py"
-        or name.startswith("test_")
-        or name.endswith("_test.py")
-    )
-
-
-def _function_lines(root: Path, roots: list[str]) -> dict[str, set[int]]:
-    """Строки внутри тел функций/методов продуктовых корней (G0 rev 8)."""
-    out: dict[str, set[int]] = {}
-    for r in roots:
-        for path, src in _py_files(root, r).items():
-            if _is_test_file(path):
-                continue  # тесты внутри продуктового корня — не продукт (ревью I-2)
-            lines: set[int] = set()
-            try:
-                tree = ast.parse(src)
-            except SyntaxError:
-                continue
-            for node in ast.walk(tree):
-                if (
-                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and node.body
-                ):
-                    lines.update(range(node.body[0].lineno, (node.end_lineno or 0) + 1))
-            out[path] = lines
-    return out
-
-
 def _schema() -> dict | None:
     path = criteria_contract.CONTRACT_DIR / "response.schema.json"
     return json.loads(path.read_text()) if path.exists() else None
-
-
-def _key(pin: str, root: Path, roots: list[str]) -> str:
-    return f"{pin}:{_content_sha(root, [*roots, 'tests'])}"
 
 
 # Не-.py файлы, решающие исход измерения: ответ-ошибку (`lock-not-current`,
@@ -452,6 +395,113 @@ def _known(run_id: str, keys: list[str]) -> tuple[str, dict] | None:
     return None
 
 
+def _outside_py_digest(tree: criteria_product.Tree, files: tuple[str, ...]) -> str:
+    """sha256 отсортированных (путь, blob-sha) всех отслеживаемых .py вне
+    продуктовых файлов на `tree.sha`, плюс `_MEASUREMENT_CONFIG` файлов,
+    присутствующих на `tree.sha` — слепок владельцев токена (§1.4) и входа
+    измерения. blob-sha — из `Tree.entries()`, не из содержимого (ревью I-2:
+    новый тестовый файл с токеном обязан сдвинуть пред-проверку G6, не
+    только content_sha256, который его не видит — content_sha256 строится
+    по test_files ОТВЕТА). `_MEASUREMENT_CONFIG` входит тем же правилом
+    (ревью m-1): существующий inipath меняет content_sha256 через test_files
+    ответа, но ДОБАВЛЕНИЕ нового pytest.ini/tox.ini/setup.cfg не меняет ни
+    content_sha256, ни .py-слепок — без этой ветки такая правка не покупала
+    бы перемер."""
+    entries = tree.entries()
+    config = {name for name in _MEASUREMENT_CONFIG if name in entries}
+    candidates = set(criteria_product.tracked_py(tree)) | config
+    paths = sorted(candidates.difference(files), key=lambda p: p.encode())
+    h = hashlib.sha256()
+    for path in paths:
+        h.update(path.encode())
+        h.update(b"\0")
+        h.update(entries[path][1].encode())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _test_named(path: str) -> bool:
+    """Имена файлов, которые pytest собирает по умолчанию (`python_files`),
+    плюс conftest.py."""
+    name = path.rsplit("/", 1)[-1]
+    return (
+        name == "conftest.py"
+        or fnmatch.fnmatchcase(name, "test_*.py")
+        or fnmatch.fnmatchcase(name, "*_test.py")
+    )
+
+
+def _owner_candidates(
+    tree: criteria_product.Tree,
+    files: tuple[str, ...],
+    test_files: list[str],
+    excluded: list[str],
+) -> list[str]:
+    """Кандидаты во владельцы токена (§3.1, ревью #532): отслеживаемые .py
+    вне продукта, которые pytest в принципе мог бы собрать, — test_files
+    ответа ∪ .py под skipped/ignored-путями ∪ имена по шаблонам pytest по
+    умолчанию (`_test_named`). Владелец в файле вне этих границ не виден —
+    названная граница (иначе вендоренные фикстуры с токенами вечно
+    блокировали бы закрытие)."""
+    test_set = set(test_files)
+    return [
+        p
+        for p in criteria_product.tracked_py(tree)
+        if p not in files
+        and (
+            p in test_set
+            or _test_named(p)
+            or any(criteria_check._covers(e, p) for e in excluded)
+        )
+    ]
+
+
+def _recompute_measurement_key(
+    bundle_pin: str, root: Path, product_sha: str, stored: object
+) -> str | None:
+    """G6: пересчитывает `f"{bundle_pin}:v1:{content_sha256}"` на
+    `product_sha` из `stored` — ранее сохранённый вход измерения
+    (`measured_inputs`/локальный `inputs`: test_files/excluded/outside_py).
+    `outside_py` — только вход пред-проверки, не часть ключа (ревью #532):
+    его сдвиг перевызывает spec-runner, но второй результат того же ключа
+    не публикуется — это держит пост-проверка в `_measure`. `None` — вход
+    неприменим (форма `stored` не та, конфиг
+    на новом product_sha снесён/невалиден, или вне-продуктовый .py-слепок
+    разошёлся, то есть появился/исчез тестовый файл — ревью I-2) —
+    измерять заново. Форма `stored` — данные из committed frontmatter или
+    локального state.json, не доверяется побайтово (ревью M-1): любая
+    неверная форма отбрасывает кандидата, а не роняет KeyError/TypeError."""
+    if not isinstance(stored, dict):
+        return None
+    test_files, excluded, outside_py = (
+        stored.get("test_files"),
+        stored.get("excluded"),
+        stored.get("outside_py"),
+    )
+    if (
+        not isinstance(test_files, list)
+        or not all(isinstance(p, str) for p in test_files)
+        or not isinstance(excluded, list)
+        or not all(isinstance(p, str) for p in excluded)
+        or not isinstance(outside_py, str)
+    ):
+        return None
+    tree = criteria_product.Tree(root, product_sha)
+    try:
+        decl = criteria_product.read_declaration(tree)
+        files = criteria_product.resolve_roots(tree, decl.roots)
+        lock = tree.blob("uv.lock")
+        lock_sha = hashlib.sha256(lock).hexdigest() if lock is not None else ""
+        content = criteria_product.content_sha256(
+            tree, decl, lock_sha, test_files, excluded
+        )
+    except criteria_product.ProductError:
+        return None
+    if _outside_py_digest(tree, files) != outside_py:
+        return None
+    return f"{bundle_pin}:v1:{content}"
+
+
 def _measure(
     state,
     ops: Ops,
@@ -465,17 +515,31 @@ def _measure(
 ) -> tuple[str, str, str] | int:
     """→ (ключ, closure, текст) или код выхода (2 — отказ шага, 6 — ключ измерен)."""
     root = Path(state.target_dir)
+    # G6 пред-проверка (C.4): вход уже измеренного ответа пересчитывает
+    # content_sha256 на текущем product_sha — совпало с уже измеренным
+    # ключом, новый вызов spec-runner не нужен. Два источника входа:
+    # (а) этот run_id на этой машине (data["inputs"]); (б) закрытие уже на
+    # origin/<base> (I-4, ревью среза 1) — другая машина без локального
+    # state пересчитывает по `measured_inputs` из frontmatter и сверяет с
+    # его же `content_key`, без обращения к (а).
     remote = _remote_closure(state)
     cands = [_tree_key(bundle_pin, root, product_sha)]
-    prev_roots = _load(run_id).get("roots")
-    if prev_roots:
-        cands.insert(0, _key(bundle_pin, root, prev_roots))
+    inputs = _load(run_id).get("inputs")
+    if inputs:
+        k = _recompute_measurement_key(bundle_pin, root, product_sha, inputs)
+        if k is not None:
+            cands.insert(0, k)
     if (
         remote
         and remote.get("bundle_pin") == bundle_pin
         and remote.get("product_roots")
+        and remote.get("measured_inputs")
     ):
-        cands.insert(0, _key(bundle_pin, root, list(remote["product_roots"])))
+        k = _recompute_measurement_key(
+            bundle_pin, root, product_sha, remote["measured_inputs"]
+        )
+        if k is not None:
+            cands.insert(0, k)
     known = _known(run_id, cands)
     if known is not None:  # то же содержимое: без нового вызова spec-runner
         k, e = known
@@ -491,6 +555,7 @@ def _measure(
             "доработайте продукт"
         )
         return 6
+
     graph = criteria_graph.build_graph(
         nodes["10-requirements.md"],
         nodes["15-behaviour-spec.md"],
@@ -499,7 +564,7 @@ def _measure(
     tests = [b.id for b in criteria_graph.test_behs(graph)]
     request = {
         "protocol": 1,
-        "owner_repo": state.repo,
+        "owner_repo": state.repo_slug,
         "workstream": state.ws_id,
         "code": charter.code,
         "bundle_pin": bundle_pin,
@@ -512,58 +577,133 @@ def _measure(
     req_path.parent.mkdir(parents=True, exist_ok=True)
     req_path.write_text(json.dumps(request, indent=2))
     code, out = ops.criteria_verify(state.target_dir, str(req_path))
-    response, why = criteria_check.parse_response(code, out, _schema())
-    if response is None:
+    parsed, why = criteria_check.parse_response(code, out, _schema())
+    if parsed is None:
         print(f"criteria-close: отказ шага — {why}")
         return 2
-    roots = [str(r) for r in response.get("product_roots") or []]
-    bad_roots = criteria_check.roots_findings(roots) if roots else []
-    if bad_roots:  # до любого обхода файлов по корням (ревью #482)
-        print(
-            "criteria-close: ответ spec-runner отвергнут:\n  " + "\n  ".join(bad_roots)
-        )
+    resp = parsed.response
+    if "request" in resp:
+        if resp["request"] != request:
+            # §5.3: эхо не доверяется ни в одной ветке, включая ошибку —
+            # чужой/устаревший ответ (product_sha/code/bundle_pin не те) не
+            # должен сжигать G6 этого содержимого публикацией blocked под его
+            # ключом (review I-1). Ничего не пишется и не публикуется.
+            print("criteria-close: отказ шага — эхо request не совпало с запросом")
+            return 2
+    elif parsed.branch == "error" and not parsed.retryable:
+        # §5.3, поправлена этой веткой: эхо обязателен и на ветке ошибки без
+        # повтора (exit 3) — честный производитель опускает `request` только
+        # на `request-invalid` (exit 2, retryable, spec-runner
+        # criteria_measure.py). Без проверки чужой/устаревший exit-3 без эхо
+        # сжёг бы G6 правильного содержимого публикацией blocked под его
+        # ключом — ровно та дыра, которую должен был закрыть I-1 (review I-2).
+        print("criteria-close: отказ шага — ответ-ошибка (exit 3) без эхо request")
         return 2
-    lock = root / "uv.lock"
-    expected = criteria_check.expected_definitions(
-        _py_files(root, "tests"), charter.code, tests
-    )
-    problems = criteria_check.validate_response(
-        request,
-        response,
-        expected=expected,
-        function_lines=_function_lines(root, roots)
-        if not criteria_check.roots_findings(roots)
-        else {},
-        lock_sha=hashlib.sha256(lock.read_bytes()).hexdigest() if lock.exists() else "",
-        content_sha=_content_sha(root, [*roots, "tests"]) if roots else "",
-    )
-    if problems:
+    if parsed.branch == "error" and parsed.retryable:
+        e = resp["error"]
         print(
-            "criteria-close: ответ spec-runner отвергнут:\n  " + "\n  ".join(problems)
+            f"criteria-close: повторяемый отказ spec-runner — {e['kind']}: {e['detail']}"
         )
-        return 2
-    if response.get("not_applicable") is not None:
-        result: object = str(response["not_applicable"])
-        closure = "not-applicable"
-    elif response.get("error") is not None:
-        result = criteria_check.Outcome(
-            "blocked", {}, {}, [f"ошибка уровня ответа: {response['error']}"], []
+        return 2  # ключ не пишется: повтор — не второе измерение (C.4)
+    if parsed.branch == "error":
+        result: object = criteria_check.Outcome(
+            "blocked",
+            {},
+            {},
+            [f"ошибка ответа: {resp['error']['kind']}: {resp['error']['detail']}"],
+            [],
         )
-        closure = "blocked"
+        closure, key, roots, measured_inputs = (
+            "blocked",
+            _tree_key(bundle_pin, root, product_sha),
+            None,
+            None,
+        )
     else:
-        beh_status = {b["id"].split(":", 1)[1]: b["status"] for b in response["beh"]}
-        result = criteria_check.outcome(graph, beh_status)
-        closure = result.closure
-    key = (
-        _key(bundle_pin, root, roots)
-        if roots
-        else _tree_key(bundle_pin, root, product_sha)
-    )
+        tree = criteria_product.Tree(root, product_sha)
+        try:
+            decl = criteria_product.read_declaration(tree)
+            files = criteria_product.resolve_roots(tree, decl.roots)
+            lock = tree.blob("uv.lock")
+            excluded = [
+                e["path"]
+                for e in resp["collection_excluded"]
+                if e["how"] != "deselected"
+            ]
+            lock_sha = hashlib.sha256(lock).hexdigest() if lock is not None else ""
+            content = criteria_product.content_sha256(
+                tree, decl, lock_sha, resp["test_files"], excluded
+            )
+            # m-4: синтаксис продукта, который devtools не разбирает, —
+            # именованный ProductError, пойманный здесь же, а не тихий
+            # fallback снаружи try.
+            function_lines = criteria_product.function_body_lines(tree, list(files))
+        except criteria_product.ProductError as exc:
+            print(f"criteria-close: ответ spec-runner отвергнут — {exc}")
+            return 2
+        sources: dict[str, str] = {}
+        for p in _owner_candidates(tree, files, resp["test_files"], excluded):
+            blob = tree.blob(p)
+            if blob is None:
+                # отслеживаемый путь без blob — сбой git-объекта, не «файла
+                # нет» (ls-tree его только что перечислил); отказ шага, не
+                # пустой источник, который тихо теряет владельца (review m-2).
+                raise CloseError(
+                    f"{p}: blob недоступен на {product_sha[:12]} (git show)"
+                )
+            sources[p] = blob.decode("utf-8", errors="replace")
+        checked = criteria_check.validate_answer(
+            request,
+            resp,
+            declared_roots=decl.roots,
+            resolved_files=files,
+            groups=decl.groups,
+            extras=decl.extras,
+            lock_sha=lock_sha,
+            content_sha=content,
+            function_lines=function_lines,
+            owners_map=criteria_check.owners(sources, charter.code, tests),
+            installed=installed,
+        )
+        if checked.problems:
+            print(
+                "criteria-close: ответ spec-runner отвергнут:\n  "
+                + "\n  ".join(checked.problems)
+            )
+            return 2
+        result = criteria_check.outcome(graph, checked.beh_status)
+        result.report_rows.extend(f"{b}: {n}" for b, n in sorted(checked.notes.items()))
+        measured_inputs = {
+            "test_files": resp["test_files"],
+            "excluded": excluded,
+            # вне-продуктовый .py-слепок — вход пред-проверки G6, не ключа:
+            # новый тестовый файл с токеном обязан её сдвинуть (ревью I-2).
+            "outside_py": _outside_py_digest(tree, files),
+        }
+        closure, key, roots = (
+            result.closure,
+            f"{bundle_pin}:v1:{content}",
+            list(decl.roots),
+        )
+
+    # G6 пост-проверка (ревью #532): пред-проверка могла пропустить уже
+    # измеренный ключ (сдвинулся outside_py — новый/удалённый вне-продуктовый
+    # .py или конфиг измерения), но второй результат того же содержимого не
+    # публикуется и не затирает запись ключа (pr/branch/merged).
+    # Вход этого ответа сохраняется ДО пост-проверки: иначе на том же
+    # содержимом каждый следующий прогон снова платил бы измерение, чтобы
+    # ответить 6 (пред-проверка видела бы вход прошлого sha; ревью #532).
+    if measured_inputs is not None:
+        data = _load(run_id)
+        data["inputs"] = measured_inputs
+        _save(run_id, data)
     known = _known(run_id, [key])
-    if known is not None:
+    if known is not None and not known[1].get("merged"):
+        return key, known[1]["closure"], known[1]["text"]  # первый результат
+    if known is not None or (remote and remote.get("content_key") == key):
         print(
-            f"criteria-close: ключ измерен ({known[1].get('closure')}) — §3.1 G6: новый "
-            "результат того же содержимого не публикуется; доработайте продукт"
+            f"criteria-close: ключ измерен ({key}) — §3.1 G6: новый результат "
+            "того же содержимого не публикуется; доработайте продукт"
         )
         return 6
     text = render_closure(
@@ -576,11 +716,10 @@ def _measure(
         spec_runner_version=installed,
         host=host,
         content_key=key,
-        product_roots=roots or None,
+        product_roots=roots,
+        measured_inputs=measured_inputs,
     )
     data = _load(run_id)
-    if roots:
-        data["roots"] = roots
     data["measured"][key] = {"closure": closure, "text": text}
     _save(run_id, data)
     return key, closure, text

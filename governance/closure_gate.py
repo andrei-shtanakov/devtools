@@ -20,7 +20,18 @@ from governance.frontmatter import split_frontmatter
 _DONE = re.compile(r"^\s*[-*] \[[xX]\] .*?@id:([A-Za-z0-9_.-]+)", re.MULTILINE)
 
 
-def gate_findings(repo: Path, *, is_vendored: bool) -> tuple[list[str], list[str]]:
+def oracle_released(contract_dir: Path = criteria_contract.CONTRACT_DIR) -> bool:
+    """Оракул «выпущен» для гейта: контракт вендорен И `MIN_SPEC_RUNNER_VERSION`
+    не `pending`. CI гейта не ставит spec-runner, поэтому «installed» тут
+    непроверяем — вендоринг + выпущенная команда остаются единственной парой
+    условий, по которой можно отличить «оракул скоро» от «оракула нет»."""
+    if not criteria_contract.vendored(contract_dir):
+        return False
+    minimum = criteria_contract.read_min_version(contract_dir / "min-spec-runner.env")
+    return minimum.version is not None
+
+
+def gate_findings(repo: Path, *, oracle_released: bool) -> tuple[list[str], list[str]]:
     todo = repo / "TODO.md"
     done = set(_DONE.findall(todo.read_text())) if todo.exists() else set()
     errors: list[str] = []
@@ -51,9 +62,9 @@ def gate_findings(repo: Path, *, is_vendored: bool) -> tuple[list[str], list[str
             where = (
                 f"spec-runner {meta.get('spec_runner_version')} на {meta.get('host')}"
             )
-            if reason == "spec-runner-version" and is_vendored:
+            if reason == "spec-runner-version" and oracle_released:
                 errors.append(
-                    f"{ws}: not-applicable spec-runner-version ({where}) при вендоренном контракте — перегнать закрытие на машине с spec-runner ≥ min"
+                    f"{ws}: not-applicable spec-runner-version ({where}) при выпущенном оракуле — перегнать закрытие на машине с spec-runner ≥ min"
                 )
             elif reason == "spec-runner-version":
                 warns.append(f"{ws}: оракул не применим (spec-runner-version, {where})")
@@ -71,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", type=Path, default=Path("."))
     args = parser.parse_args(argv)
     errors, warns = gate_findings(
-        args.repo.resolve(), is_vendored=criteria_contract.vendored()
+        args.repo.resolve(), oracle_released=oracle_released()
     )
     for w in warns:
         print(f"closure_gate: warning: {w}")

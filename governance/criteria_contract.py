@@ -12,18 +12,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 CONTRACT_DIR = Path(__file__).resolve().parent.parent / "contracts/criteria-closure/v1"
+RESPONSES_DIR = CONTRACT_DIR / "fixtures/responses"
 
 
 @dataclass(frozen=True)
 class MinVersion:
-    version: str
+    version: str | None  # None — команда ещё не выпущена (`pending`)
 
 
 def read_min_version(path: Path = CONTRACT_DIR / "min-spec-runner.env") -> MinVersion:
     for line in path.read_text().splitlines():
         key, _, value = line.strip().partition("=")
         if key == "MIN_SPEC_RUNNER_VERSION":
-            return MinVersion(value.strip())
+            value = value.strip()
+            return MinVersion(None if value == "pending" else value)
     raise ValueError(f"{path}: нет MIN_SPEC_RUNNER_VERSION")
 
 
@@ -57,12 +59,12 @@ def drift_findings(
     upstream: Path | None,
     *,
     ci: bool,
-    upstream_path: str = "contracts/criteria-closure/v1",
+    upstream_path: str = "schemas/criteria-closure/v1",
 ) -> tuple[list[str], list[str]]:
     """Дрейф копии от апстрима по ref из PIN (вторая гарантия вендоринга).
 
     `upstream_path` — где копия лежит у производителя: схемы — в
-    `contracts/…`, общие фикстуры владения — в `tests/fixtures/…`.
+    `schemas/…`, эталоны и фикстуры владения — в `tests/fixtures/…`.
     """
     import subprocess
 
@@ -92,7 +94,8 @@ def drift_findings(
 def oracle_available(
     installed: str | None, minimum: MinVersion, *, is_vendored: bool
 ) -> bool:
-    """Оракул доступен: контракт вендорен и spec-runner машины не ниже."""
-    if not is_vendored or installed is None:
+    """Оракул доступен: контракт вендорен, команда выпущена и spec-runner
+    машины не ниже."""
+    if not is_vendored or installed is None or minimum.version is None:
         return False
     return _parts(installed) >= _parts(minimum.version)
