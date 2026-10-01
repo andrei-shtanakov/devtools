@@ -46,7 +46,7 @@ from pathlib import Path
 
 from governance import approval_facts as af
 from governance import approval_ledger as al
-from governance import bundle_dag, bundle_inputs, pr_checks
+from governance import brief_input, bundle_dag, bundle_inputs, pr_checks
 from governance import node_approval as na
 from governance.approval_facts import Disposition, Outcome
 from governance.frontmatter import split_frontmatter, update_frontmatter
@@ -1266,7 +1266,7 @@ def _sync_source_layer(state: RunState, ops: Ops, op: dict) -> list[str]:
     if source_sha is None or "charter" not in op["nodes"] or not state.brief:
         return []
     changed: list[str] = []
-    for rel_source in state.brief.get("source_paths") or []:
+    for rel_source in brief_input.descriptor_source_paths(state.brief):
         rel = f"{state.bundle_dir}/{rel_source}"
         fact = af.read_blob_bytes(ops, state.target_dir, source_sha, rel)
         if fact.outcome is not Outcome.FOUND or fact.value is None:

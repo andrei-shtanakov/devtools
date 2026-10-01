@@ -133,7 +133,6 @@ class FakeOps:
     existing_prs: dict[str, int] = field(default_factory=dict)
     review_exit: int = 0
     codes_elsewhere: dict[str, str] = field(default_factory=dict)
-    review_fresh_exit: int = 0
     review_body: str | None = None
     existing_files: set[str] = field(default_factory=set)
     ignored_paths: set[str] = field(default_factory=set)
@@ -290,9 +289,6 @@ class FakeOps:
         self.existing_prs[branch] = number
         return number
 
-    def mark_ready(self, repo_slug: str, pr: int) -> None:
-        self.calls.append(("mark_ready", pr))
-
     def review(self, repo_name: str, pr: int) -> int:
         self.calls.append(("review", pr))
         return self.review_exit
@@ -315,10 +311,6 @@ class FakeOps:
 
     def caller_login(self) -> str | None:
         return None
-
-    def pr_files(self, repo_slug: str, pr: int) -> list[str]:
-        self.calls.append(("pr_files", pr))
-        return self.files
 
     def unresolved_threads(self, repo_slug: str, pr: int) -> bool | None:
         self.calls.append(("unresolved_threads", pr))
@@ -501,10 +493,6 @@ class FakeOps:
         self.author_disp_calls.append((target_dir, task, config_path, slug))
         self.author_disp_resume.append(resume)
         return self.author_disp_exit
-
-    def review_fresh(self, repo_name: str, pr: int) -> int:
-        self.calls.append(("review_fresh", pr))
-        return self.review_fresh_exit
 
     def latest_review_body(self, repo_slug: str, pr: int) -> str | None:
         self.calls.append(("latest_review_body", pr))
@@ -1671,7 +1659,7 @@ def test_real_candidate_gate_accepts_materialized_brief_source(
 
 
 def _green_bundle(profile, bundle) -> bundle_state.BundleState:
-    return bundle_state.BundleState((), 0, None, (), ())
+    return bundle_state.BundleState((), 0, (), ())
 
 
 def _repin_bundle(bundle_dir: Path) -> None:
@@ -9322,3 +9310,37 @@ def test_config_surface_watches_scripts_that_hooks_reference(
     assert state.status == "stopped_author"
     reason = (rs.run_dir(state.run_id) / "stop-reason.txt").read_text(encoding="utf-8")
     assert "hook.sh" in reason
+
+
+def test_interview_of_without_coordinates_is_an_explicit_error() -> None:
+    state = SimpleNamespace(run_id="r-no-need", interview=None)
+    with pytest.raises(RuntimeError, match="r-no-need"):
+        runner._interview_of(state)
+
+
+def test_upstream_path_engineer_frame_needs_traces_to() -> None:
+    state = SimpleNamespace(run_id="r-eng")
+    spec = _need_spec(frame="engineer", traces_to=None)
+    with pytest.raises(ValueError, match="traces_to"):
+        runner._upstream_path(state, spec)
+    assert runner._upstream_path(state, _need_spec()) is None
+
+
+@pytest.mark.parametrize(
+    "brief",
+    [{}, {"source_paths": []}, {"source_blobs": {}}],
+)
+def test_source_layer_guard_stops_on_incomplete_descriptor(monkeypatch, brief) -> None:
+    """Ревью #530 (major): дескриптор без source_paths/source_blobs не должен
+    давать зелёный S3 — гвард останавливает шаг, ничего не сверив."""
+    from types import SimpleNamespace
+
+    stops: list[str] = []
+    monkeypatch.setattr(
+        runner, "_brief_stop", lambda state, msg: stops.append(msg) or False
+    )
+    state = SimpleNamespace(brief=brief, target_dir="t", bundle_dir="b", run_id="r")
+    ops = SimpleNamespace(rev_parse=lambda *a: "h", blob_in_commit=lambda *a: None)
+
+    assert runner._source_layer_committed(state, ops) is False
+    assert stops and "отсутствует" in stops[0]

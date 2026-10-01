@@ -98,7 +98,8 @@ except ImportError:  # pragma: no cover - exercised by humans, not the suite
         "The other devtools scripts stay stdlib/Python 3.11; only this one moved "
         "(ADR-ECO-005 PF-7).\n"
     )
-    raise SystemExit(2)
+    # исходный ImportError — шум: причина и лекарство уже в сообщении выше
+    raise SystemExit(2) from None
 
 # devtools severity policy — a thin projection of the package's stable codes.
 # A canonical stale (stable @id identity) is the only build-failing error; every
@@ -614,6 +615,7 @@ def resolve_graph(
     for d in canonical:
         prov = d.get("provenance") or {}
         repo, line = prov.get("repo"), prov.get("line")
+        repo_key = repo if isinstance(repo, str) else ""
         # An @id'd source with an issue-form ref still gets the canonical
         # "matches no item; migrate to an @id" nudge — noise for a ref whose
         # state IS resolved (by check_issue_blockers). The raw ref only
@@ -621,14 +623,14 @@ def resolve_graph(
         # pinned package (the characterization suite guards pin bumps).
         if d["code"] == "PF-LEGACY-AMBIGUOUS" and any(
             d["message"].startswith(f"legacy reference {raw} matches ")
-            for raw in excluded_by_repo.get(repo, ())
+            for raw in excluded_by_repo.get(repo_key, ())
         ):
             continue
         if isinstance(repo, str) and isinstance(line, int):
             by_item.setdefault((repo, line), set()).add(d["code"])
         hint = None
         if d["code"] == "PF-ID-MISSING" and isinstance(line, int):
-            hint = stray_tag_line(todo_by_repo.get(repo), line)
+            hint = stray_tag_line(todo_by_repo.get(repo_key), line)
         line = _canonical_line(d, hint)
         if line is None:
             continue

@@ -136,7 +136,7 @@ def direct_blobs(
             text = fact.value
         actual[name] = blob_sha1(text)
 
-    expected = state.brief.get("source_blobs", {}) if state.brief else {}
+    expected = brief_input.descriptor_source_blobs(state.brief) if state.brief else {}
     for source_name, expected_blob in expected.items():
         if source_name in actual and actual[source_name] != expected_blob:
             return Fact(

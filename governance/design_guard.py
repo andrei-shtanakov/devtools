@@ -49,8 +49,8 @@ def parse_requirements_questions(text: str) -> dict[str, str]:
 def _first_paragraph(block: str) -> str | None:
     """Первый непустой абзац `block` (текст до пустой строки), `None` —
     если абзацев нет вовсе (блок пуст/только whitespace)."""
-    for paragraph in re.split(r"\n\s*\n", block.strip()):
-        paragraph = paragraph.strip()
+    for raw in re.split(r"\n\s*\n", block.strip()):
+        paragraph = raw.strip()
         if paragraph:
             return paragraph
     return None

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import todo_context as tc
 
 
@@ -1422,3 +1424,15 @@ def test_render_survives_a_pack_without_plan_risks():
     assert "## Completeness" in text, "остаток отчёта не должен обрезаться"
     assert "не измерено" in text, "неизмеренное не должно печататься как 0"
     assert "пар во флоте: 0" not in text
+
+
+def test_missing_plan_fields_names_the_pinned_env(monkeypatch):
+    monkeypatch.setattr(tc, "_pf", None)
+    with pytest.raises(tc.ContextError, match="uv run --frozen"):
+        tc.build_inputs(Path("."), object())
+
+
+def test_docs_source_errors_when_git_grep_returns_nothing(monkeypatch, tmp_path):
+    monkeypatch.setattr(tc, "git_grep", lambda directory, needle: (None, "boom"))
+    _, source = tc.read_docs(tmp_path, {"id": "one", "body": ""})
+    assert source.state == "error" and source.detail == "boom"

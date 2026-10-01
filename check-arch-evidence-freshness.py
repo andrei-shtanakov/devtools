@@ -436,8 +436,9 @@ def run_sensor(
     findings: list[Finding] = []
     resolved: dict = {"workspace": str(workspace), "pins": {}}
     up, up_finding = resolve_upstream(workspace / "prograph")
-    if up_finding:
-        findings.append(up_finding)
+    if up is None:
+        if up_finding is not None:
+            findings.append(up_finding)
     else:
         resolved["upstream"] = up
         vendored_findings, pins = check_vendored(workspace, up)
