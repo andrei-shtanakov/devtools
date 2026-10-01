@@ -2,7 +2,11 @@
 
 devtools не принимает на веру корни, окружение и дайджест ответа: читает
 конфиг продукта тем же правилом, что производитель, из git-объектов
-`product_sha`, и пересчитывает сам (devtools#491, spec-runner#623).
+`product_sha`, и пересчитывает сам (devtools#491, spec-runner#623). Refusal
+rules are checked for parity with the producer's own reader
+(`spec-runner/src/spec_runner/criteria_config.py`): a divergence there would
+let devtools accept a declaration the producer itself would have refused, or
+the reverse (review round 1, 2026-09-30).
 """
 
 from __future__ import annotations
@@ -10,14 +14,17 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
 import subprocess
-from dataclasses import dataclass
+import tomllib
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 CONFIG_FILES = ("spec-runner.config.yaml", "spec/executor.config.yaml")
+_ENV_KEYS = frozenset({"groups", "extras"})
 _NAME = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 
@@ -29,10 +36,20 @@ class ProductError(ValueError):
 class Tree:
     repo: Path
     sha: str
+    _cache: dict[str, dict[str, tuple[str, str]]] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
     def _git(self, *args: str) -> subprocess.CompletedProcess[bytes]:
+        # Every inherited GIT_* is dropped: a hook's GIT_DIR/GIT_INDEX_FILE must
+        # not redirect reads elsewhere. --literal-pathspecs: every path argument
+        # is a literal path, never pathspec magic (":(top)", ":!x").
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         return subprocess.run(
-            ["git", "-C", str(self.repo), *args], capture_output=True, check=False
+            ["git", "-C", str(self.repo), "--literal-pathspecs", *args],
+            capture_output=True,
+            check=False,
+            env=env,
         )
 
     def blob(self, path: str) -> bytes | None:
@@ -40,6 +57,8 @@ class Tree:
         return proc.stdout if proc.returncode == 0 else None
 
     def entries(self) -> dict[str, tuple[str, str]]:
+        if "entries" in self._cache:
+            return self._cache["entries"]
         proc = self._git("ls-tree", "-r", "-z", self.sha)
         if proc.returncode != 0:
             raise ProductError(
@@ -51,7 +70,14 @@ class Tree:
                 continue
             meta, _, rel = raw.partition(b"\t")
             mode, _kind, obj = meta.decode().split()
-            out[rel.decode("utf-8", errors="surrogateescape")] = (mode, obj)
+            try:
+                path = rel.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ProductError(
+                    f"ls-tree {self.sha[:12]}: путь не UTF-8: {exc}"
+                ) from None
+            out[path] = (mode, obj)
+        self._cache["entries"] = out
         return out
 
 
@@ -62,10 +88,15 @@ class Declaration:
     extras: tuple[str, ...]
 
 
+def _normalise(name: str) -> str:
+    """PEP 503-style: lower-case, each run of `-`, `_`, `.` becomes one `-`."""
+    return re.sub(r"[-_.]+", "-", name.lower())
+
+
 def _norm_name(raw: object) -> str:
-    if not isinstance(raw, str) or not _NAME.match(raw):
+    if not isinstance(raw, str) or not _NAME.fullmatch(raw):
         raise ProductError(f"имя группы/extra {raw!r} не по PEP 735/685")
-    return re.sub(r"[-_.]+", "-", raw).lower()
+    return _normalise(raw)
 
 
 def _names(raw: object, what: str) -> tuple[str, ...]:
@@ -78,22 +109,82 @@ def _names(raw: object, what: str) -> tuple[str, ...]:
 
 
 def _norm_root(raw: object) -> str:
-    if not isinstance(raw, str) or not raw or raw.startswith("/"):
-        raise ProductError(f"product_root {raw!r}: пусто или абсолютный путь")
-    parts = [p for p in raw.replace("\\", "/").split("/") if p not in ("", ".")]
+    if not isinstance(raw, str) or not raw.strip():
+        raise ProductError(f"product_root {raw!r}: не путь")
+    stripped = raw.strip()
+    if stripped.startswith("/"):
+        raise ProductError(f"product_root {raw!r}: абсолютный путь")
+    # POSIX separators only — a backslash is part of the name, not rewritten,
+    # so it fails later as "not tracked at product_sha" like the producer.
+    parts = [p for p in stripped.split("/") if p not in ("", ".")]
     if not parts or ".." in parts:
         raise ProductError(f"product_root {raw!r}: вне репо")
     return "/".join(parts)
 
 
-def read_declaration(tree: Tree) -> Declaration:
+def _read_config_text(tree: Tree) -> str:
     for rel in CONFIG_FILES:
         raw = tree.blob(rel)
-        if raw is not None:
-            break
-    else:
-        raise ProductError("нет конфига spec-runner на product_sha")
-    data = yaml.safe_load(raw.decode("utf-8")) or {}
+        if raw is None:
+            continue
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ProductError(f"{rel}: не UTF-8: {exc}") from None
+    raise ProductError("нет конфига spec-runner на product_sha")
+
+
+def _parse_environment(raw: object) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
+    if raw is None:
+        return None, ()
+    if not isinstance(raw, dict) or not set(raw) <= _ENV_KEYS:
+        raise ProductError("criteria.environment — не мэппинг с ключами groups/extras")
+    groups = _names(raw["groups"], "groups") if "groups" in raw else None
+    extras = _names(raw["extras"], "extras") if "extras" in raw else ()
+    return groups, extras
+
+
+def _table(parent: dict[str, object], key: str) -> dict[str, object]:
+    """`parent[key]` as a table; absent is empty, a non-table is refused."""
+    value = parent.get(key, {})
+    if not isinstance(value, dict):
+        raise ProductError(f"pyproject.toml: `{key}` — не таблица")
+    return value
+
+
+def _check_selection(
+    tree: Tree, groups: tuple[str, ...] | None, extras: tuple[str, ...]
+) -> None:
+    """§3.3 pre-check: every declared group/extra must be a key in pyproject.toml."""
+    if groups is None and not extras:
+        return
+    raw = tree.blob("pyproject.toml")
+    if raw is None:
+        raise ProductError(
+            "criteria.environment объявлено, но pyproject.toml нет на product_sha"
+        )
+    try:
+        pyproject = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ProductError(f"pyproject.toml нечитаем: {exc}") from None
+    groups_table = _table(pyproject, "dependency-groups")
+    available_groups = {_normalise(k) for k in groups_table}
+    if "dev-dependencies" in _table(_table(pyproject, "tool"), "uv"):
+        available_groups.add("dev")
+    extras_table = _table(_table(pyproject, "project"), "optional-dependencies")
+    available_extras = {_normalise(k) for k in extras_table}
+    missing = [f"group {g}" for g in groups or () if g not in available_groups]
+    missing += [f"extra {e}" for e in extras if e not in available_extras]
+    if missing:
+        raise ProductError(f"не объявлено в pyproject.toml: {', '.join(missing)}")
+
+
+def read_declaration(tree: Tree) -> Declaration:
+    text = _read_config_text(tree)
+    try:
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        raise ProductError(f"некорректный YAML: {exc}") from None
     data = data.get("executor", data) if isinstance(data, dict) else {}
     crit = data.get("criteria") if isinstance(data, dict) else None
     if not isinstance(crit, dict) or not isinstance(crit.get("product_roots"), list):
@@ -103,11 +194,8 @@ def read_declaration(tree: Tree) -> Declaration:
         raise ProductError("criteria.product_roots пуст")
     if len(set(roots)) != len(roots):
         raise ProductError("criteria.product_roots: дубль после нормализации")
-    env = crit.get("environment") or {}
-    if not isinstance(env, dict):
-        raise ProductError("criteria.environment — не мэппинг")
-    groups = _names(env["groups"], "groups") if "groups" in env else None
-    extras = _names(env.get("extras", []), "extras")
+    groups, extras = _parse_environment(crit.get("environment"))
+    _check_selection(tree, groups, extras)
     return Declaration(tuple(sorted(roots)), groups, extras)
 
 
@@ -124,14 +212,18 @@ def resolve_roots(tree: Tree, roots: tuple[str, ...]) -> tuple[str, ...]:
                 raise ProductError(f"product_root {root!r}: симлинк {p}")
             if mode.startswith("100") and p.endswith(".py"):
                 out.add(p)
+    if not out:
+        raise ProductError(f"{', '.join(roots)}: ни одного .py файла")
     return tuple(sorted(out))
 
 
 def _under(entries: dict[str, tuple[str, str]], path: str) -> set[str]:
     return {
         p
-        for p in entries
-        if (p == path or p.startswith(path.rstrip("/") + "/")) and p.endswith(".py")
+        for p, (mode, _) in entries.items()
+        if (p == path or p.startswith(path.rstrip("/") + "/"))
+        and mode.startswith("100")
+        and p.endswith(".py")
     }
 
 
