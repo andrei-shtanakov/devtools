@@ -685,6 +685,8 @@ def test_fixed_helper_outside_key_is_explicit_refusal(tmp_path, monkeypatch, cap
     assert _OUTSIDE_KEY in out and "Новый результат не опубликован" in out
     assert "решающее" not in out and "доработайте продукт" not in out
     assert "--new-attempt" not in out
+    # перечисление не выдаёт себя за полное: не-.py данные тестов не видны (#540)
+    assert "не-.py данные тестов не отслеживаются" in out
     assert not any(c[0] in ("create_pr", "review") for c in ops2.calls)
     assert cc._entry("run-1", key) == before
 
