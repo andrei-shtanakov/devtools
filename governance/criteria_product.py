@@ -279,8 +279,10 @@ def content_sha256(
 
 
 def tracked_py(tree: Tree) -> tuple[str, ...]:
-    """Все отслеживаемые обычные .py — владельцев токена ищем по ним, а не по
-    test_files ответа: исключённый или невидимый сбору файл тоже владелец."""
+    """Все отслеживаемые обычные .py на product_sha. Кандидатов во владельцы
+    токена из них отбирает `criteria_close._owner_candidates` (test_files
+    ответа ∪ имена по умолчанию pytest и conftest.py ∪ пути skipped/ignored —
+    граница ревью #532, спека §5.3)."""
     return tuple(
         sorted(
             p

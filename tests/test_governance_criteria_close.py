@@ -650,6 +650,11 @@ def test_noop_outside_py_edit_after_merged_closure_is_g6(tmp_path, monkeypatch):
     assert cc.run("run-1", ops2, product_sha=new_sha) == 6
     assert not any(c[0] in ("create_pr", "review") for c in ops2.calls)
     assert not ops2.merged
+    # повторный прогон на том же содержимом не платит измерение заново:
+    # пост-проверка сохранила вход P2, пред-проверка упирается в G6 (#532)
+    ops3 = _ops((0, json.dumps(_response(target, new_sha, bundle_pin=pin))))
+    assert cc.run("run-1", ops3, product_sha=new_sha) == 6
+    assert not any(c[0] == "criteria_verify" for c in ops3.calls)
 
 
 def test_post_check_unpublished_key_publishes_first_result(tmp_path, monkeypatch):

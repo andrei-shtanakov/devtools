@@ -118,7 +118,22 @@ def test_responses_copy_is_consistent():
 
 
 def test_responses_drift_against_upstream_checkout():
+    """Локальный дрейф эталонов против соседнего клона spec-runner. Гейт —
+    шаг CI (ci=True); здесь недоступный апстрим или ревизия PIN, которой нет
+    в соседнем клоне (не фетчен), — not-checked, а не красный тест (#532)."""
+    import subprocess
+
     upstream = Path(__file__).resolve().parents[1].parent / "spec-runner"
+    sha = (cc.RESPONSES_DIR / "PIN").read_text().split("@")[-1].strip()
+    if (
+        upstream.exists()
+        and subprocess.run(
+            ["git", "-C", str(upstream), "cat-file", "-e", f"{sha}^{{commit}}"],
+            capture_output=True,
+            check=False,
+        ).returncode
+    ):
+        pytest.skip(f"ревизии PIN {sha[:7]} нет в соседнем клоне spec-runner")
     errors, notes = cc.drift_findings(
         cc.RESPONSES_DIR,
         upstream if upstream.exists() else None,

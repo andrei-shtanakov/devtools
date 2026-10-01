@@ -690,6 +690,13 @@ def _measure(
     # измеренный ключ (сдвинулся outside_py — новый/удалённый вне-продуктовый
     # .py или конфиг измерения), но второй результат того же содержимого не
     # публикуется и не затирает запись ключа (pr/branch/merged).
+    # Вход этого ответа сохраняется ДО пост-проверки: иначе на том же
+    # содержимом каждый следующий прогон снова платил бы измерение, чтобы
+    # ответить 6 (пред-проверка видела бы вход прошлого sha; ревью #532).
+    if measured_inputs is not None:
+        data = _load(run_id)
+        data["inputs"] = measured_inputs
+        _save(run_id, data)
     known = _known(run_id, [key])
     if known is not None and not known[1].get("merged"):
         return key, known[1]["closure"], known[1]["text"]  # первый результат
@@ -699,11 +706,6 @@ def _measure(
             "того же содержимого не публикуется; доработайте продукт"
         )
         return 6
-    if measured_inputs is not None:
-        data = _load(run_id)
-        data["inputs"] = measured_inputs
-        _save(run_id, data)
-
     text = render_closure(
         result,
         ws_id=state.ws_id,
