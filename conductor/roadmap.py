@@ -22,6 +22,14 @@ LIMIT_DEFAULTS: dict[str, tuple[int, int, int]] = {
     "stale_after_days": (3, 1, 60),
     "renudge_after_days": (7, 1, 60),
 }
+# Действия среза 1 (спека среза 1, §1): только они включаются роадмапом.
+ACTIONS: tuple[str, ...] = (
+    "owner_queue",
+    "notify_satisfied",
+    "nudge",
+    "pr_nudge",
+    "close_shipped",
+)
 Klass = Literal["focus", "parked", "background"]
 
 
@@ -48,6 +56,7 @@ class Roadmap:
     limits: dict[str, int] = field(
         default_factory=lambda: {k: v[0] for k, v in LIMIT_DEFAULTS.items()}
     )
+    enabled_actions: frozenset[str] = frozenset()
     valid: bool = False
     findings: tuple[Finding, ...] = ()
 
@@ -153,6 +162,20 @@ def _parked(raw: Any, epics: dict[str, dict], errors: list[Finding]) -> list[str
     return items
 
 
+def _enabled(raw: Any, errors: list[Finding]) -> frozenset[str]:
+    """enabled_actions (срез 1, §2.1): нет поля — ничего не включено."""
+    if raw is None:
+        return frozenset()
+    if not isinstance(raw, list) or not all(isinstance(a, str) for a in raw):
+        errors.append(_invalid("enabled_actions должен быть массивом строк"))
+        return frozenset()
+    for name in sorted(set(raw) - set(ACTIONS)):
+        errors.append(_invalid(f"enabled_actions: неизвестное действие {name!r}"))
+    for name in sorted({a for a in raw if raw.count(a) > 1}):
+        errors.append(_invalid(f"enabled_actions: {name!r} дважды"))
+    return frozenset(a for a in raw if a in ACTIONS)
+
+
 def parse_roadmap(text: str | None, epics: dict[str, dict]) -> Roadmap:
     """Разбор и валидация (§2.1–2.2); ошибки становятся RM-INVALID."""
     if text is None:
@@ -182,6 +205,7 @@ def parse_roadmap(text: str | None, epics: dict[str, dict]) -> Roadmap:
     for epic in sorted({e for e in seen if seen.count(e) > 1}):
         errors.append(_invalid(f"эпик {epic} встречается дважды"))
     limits = _limits(data.get("limits"), errors)
+    enabled = _enabled(data.get("enabled_actions"), errors)
     return Roadmap(
         autonomy=top,
         writer_host=writer,
@@ -189,6 +213,7 @@ def parse_roadmap(text: str | None, epics: dict[str, dict]) -> Roadmap:
         focus=focus,
         parked=frozenset(parked),
         limits=limits,
+        enabled_actions=enabled,
         valid=not errors,
         findings=tuple(errors + warnings),
     )
