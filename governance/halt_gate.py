@@ -28,6 +28,14 @@ EXIT_HALTED = 6
 Decision = tuple[bool, str, str]
 
 
+class HaltedError(ValueError):
+    """Отказ стоп-крана: новая работа не начинается (код выхода 6).
+
+    ValueError — как прочие отказы допуска раннера (`start` бросает их до
+    `_reserve_run_id`), чтобы любой вызывающий, ловящий отказы, ловил и этот.
+    """
+
+
 def decide(
     listing: list[dict[str, Any]] | None, detail: dict[str, Any] | None
 ) -> Decision:

@@ -391,6 +391,9 @@ def start(
             f"{blocker!r} без зелёного потомка — создайте verification-run "
             "(verify(...)) прежде чем начинать новый авторинг-прогон"
         )
+    # Последний отказ до резервирования: локальные проверки дешевле похода
+    # в GitHub и отвечают раньше (D2).
+    _refuse_if_halted(repo_slug)
     _reserve_run_id(run_id)
     brief_descriptor = None
     if brief_source is not None:
@@ -1133,6 +1136,7 @@ def reopen(run_id: str, node: str, ops: Ops, *, manual: bool = False) -> RunStat
         raise ValueError(
             "прогон прошёл последнюю волну — переоткрытие узла делается новым прогоном"
         )
+    _refuse_if_halted(state.repo_slug)  # D2: после локальных отказов
     if ops.is_dirty(state.target_dir):
         print(f"reopen: target_dir {state.target_dir!r} грязный — не начато")
         state.status = "stopped_dirty"
@@ -1429,6 +1433,7 @@ def verify(parent_run_id: str, ops: Ops, run_id: str | None = None) -> RunState:
         )
     if run_id is None:
         run_id = _next_verify_run_id(parent_run_id)
+    _refuse_if_halted(parent.repo_slug)  # D2: последний отказ до резервирования
     _reserve_run_id(run_id)
     child = new_run(
         subject=parent.subject,
@@ -3840,36 +3845,34 @@ _STEPS = (
 )
 
 
-#: Проверка стопа (D2); тесты подменяют, как `_SLEEP`.
+#: Проверка стопа (D2); тесты подменяют, как `_SLEEP` (conftest — «пускать»).
 _HALT_GATE: Callable[[str], str | None] = halt_gate.refusal
 
 
-def _halt_refusal(args: argparse.Namespace) -> str | None:
-    """Отказ стоп-крана для команды, начинающей НОВУЮ работу, иначе None.
+def _refuse_if_halted(repo_slug: str) -> None:
+    """D2: НОВАЯ работа не начинается под стопом — бросает HaltedError.
 
-    start / verify (дочерний прогон) / reopen (снова открывает одобренное) —
-    новая работа; resume продолжает допущенный прогон, он дорабатывает
-    (спека плоскости управления §6.1), а его мерж остановит сама форджа и
+    Зовётся из самих start / verify / reopen, а не из CLI: `spec_loop` и
+    консоль вызывают их напрямую, и гейт в `main()` они обходили (ревью
+    devtools#531). resume продолжает допущенный прогон — он дорабатывает
+    (спека плоскости управления §6.1), его мерж остановят форджа и
     merge-pr.sh.
     """
-    if args.command == "start":
-        slug = args.repo_slug
-    elif args.command == "verify":
-        slug = load(args.parent).repo_slug
-    elif args.command == "reopen":
-        slug = load(args.run_id).repo_slug
-    else:
-        return None
-    return _HALT_GATE(slug)
-
-
-def _refuse_halted(message: str) -> int:
-    """D2: новая работа не начинается под стопом; код — как у merge-pr.sh."""
-    print(message, file=sys.stderr)
-    return halt_gate.EXIT_HALTED
+    refusal = _HALT_GATE(repo_slug)
+    if refusal is not None:
+        raise halt_gate.HaltedError(refusal)
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except halt_gate.HaltedError as err:
+        # Код — как у merge-pr.sh: стоп-кран, повтор после снятия стопа.
+        print(err, file=sys.stderr)
+        return halt_gate.EXIT_HALTED
+
+
+def _main(argv: list[str] | None = None) -> int:
     """CLI: `python -m governance.runner start|resume|verify|status ...`.
 
     Все команды, кроме `status` (только читает `run.json`), строят `RealOps` —
@@ -3963,8 +3966,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.run_id is None:
             validate_id_component(args.ws_id, label="ws_id")
         run_id = args.run_id or f"{args.ws_id}-{os.urandom(3).hex()}"
-        if (halted := _halt_refusal(args)) is not None:
-            return _refuse_halted(halted)
         state = start(
             subject=args.subject,
             repo=args.repo,
@@ -3983,12 +3984,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "resume":
         state = resume(args.run_id, ops)
     elif args.command == "reopen":
-        if (halted := _halt_refusal(args)) is not None:
-            return _refuse_halted(halted)
         state = reopen(args.run_id, args.node, ops, manual=args.manual)
     else:
-        if (halted := _halt_refusal(args)) is not None:
-            return _refuse_halted(halted)
         state = verify(args.parent, ops, args.run_id)
 
     _print_status(state)

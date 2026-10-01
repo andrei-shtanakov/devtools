@@ -37,6 +37,8 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         # защищённой обвязки (blocker ревью PR #344).
         "ssot_env.sh",
         "approval_branches.sh",
+        # Стоп-кран: merge-pr.sh исполняет его из дерева (ревью devtools#531).
+        "governance/halt_gate.py",
         # Правило области ревью (devtools#271): решает, дойдёт ли диф до
         # модели вообще. Агентски смерженная правка `PROSE` сняла бы
         # ревью-гейт со всех последующих PR.
@@ -172,7 +174,14 @@ def test_every_module_sourced_by_the_merge_scripts_is_protected() -> None:
     for script in ("merge-pr.sh", "human-merge.sh"):
         text = (root / script).read_text(encoding="utf-8")
         sourced |= set(re.findall(r'^\. "\$script_dir/([^"]+)"', text, re.MULTILINE))
-    assert sourced == {"ssot_env.sh", "approval_branches.sh"}, sourced
+        # Исполнение, не только подключение (ревью devtools#531): любой
+        # `python3 … "$script_dir/…"` — тоже код обвязки из дерева.
+        sourced |= set(re.findall(r'python3[^"\n]*"\$script_dir/([^"]+)"', text))
+    assert sourced == {
+        "ssot_env.sh",
+        "approval_branches.sh",
+        "governance/halt_gate.py",
+    }, sourced
     for module in sourced:
         assert module in authority_root.prefixes(), module
         assert module in accept_pr._HARNESS_PREFIXES, module

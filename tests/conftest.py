@@ -60,3 +60,15 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         names = ", ".join(_skipped_for_governance)
         print(f"\nGOVERNANCE_REQUIRED=1, но группа governance недоступна: {names}")
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.fixture(autouse=True)
+def _halt_gate_admits(monkeypatch):
+    """Стоп-кран (D2) зовёт GitHub из start/verify/reopen; в тестах он по
+    умолчанию «пускает», а кейсы стопа подменяют его сами. Без группы
+    governance раннер не импортируется — тогда и подменять нечего."""
+    try:
+        from governance import runner
+    except ImportError:
+        return
+    monkeypatch.setattr(runner, "_HALT_GATE", lambda slug: None)

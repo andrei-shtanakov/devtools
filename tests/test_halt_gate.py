@@ -105,10 +105,34 @@ def test_runner_start_under_a_halt_refuses_before_anything(
     assert not runs_root.exists()
 
 
-def test_runner_resume_is_not_gated(monkeypatch) -> None:
+def test_a_direct_start_is_gated_too(monkeypatch, runs_root, tmp_path) -> None:
+    """Ревью devtools#531: spec_loop зовёт runner.start() напрямую, мимо
+    main() — гейт обязан стоять в самой функции."""
+    monkeypatch.setattr(runner, "_HALT_GATE", lambda slug: "стоп-кран (refuse_on): on")
+    with pytest.raises(halt_gate.HaltedError):
+        runner.start(
+            subject="s",
+            repo="alpha",
+            repo_slug="owner/alpha",
+            ws_id="ws-1",
+            target_dir=str(tmp_path),
+            bundle_dir="workstreams/ws-1/spec",
+            profile="default",
+            run_id="ws-1-aaaaaa",
+            ops=None,  # type: ignore[arg-type] — отказ раньше любого эффекта
+        )
+    assert not runs_root.exists()
+
+
+@pytest.mark.parametrize("fn", ["start", "verify", "reopen"])
+def test_every_new_work_entry_asks_the_halt(fn: str) -> None:
+    import inspect
+
+    assert "_refuse_if_halted(" in inspect.getsource(getattr(runner, fn))
+
+
+def test_resume_drains_and_does_not_ask() -> None:
     """Допущенный прогон дорабатывает: resume стоп не спрашивает."""
-    monkeypatch.setattr(
-        runner, "_HALT_GATE", lambda slug: pytest.fail("resume must not ask")
-    )
-    args = type("A", (), {"command": "resume"})()
-    assert runner._halt_refusal(args) is None
+    import inspect
+
+    assert "_refuse_if_halted" not in inspect.getsource(runner.resume)

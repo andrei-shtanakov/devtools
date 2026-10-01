@@ -1027,6 +1027,8 @@ def test_shell_reads_authority_ssot_and_hardcodes_nothing() -> None:
         # сами authority-root и харнесс-пути (blocker ревью PR #344).
         "ssot_env.sh",
         "approval_branches.sh",
+        # Исполняемый вход стоп-крана (`python3 -I "$script_dir/…"`).
+        "governance/halt_gate.py",
     }
     checked = [p for p in authority_root.prefixes() if p not in own]
     assert checked, (

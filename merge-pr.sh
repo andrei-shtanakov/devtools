@@ -90,8 +90,10 @@
 # агентом. НЕ приходят из дерева: `.git/config` (origin-URL, откуда
 # выводится slug — не часть worktree), бинарь `gh` (PATH оператора),
 # профиль `~/.config/review`, python-модули governance (импортированы до
-# материализации). Добавляя сюда чтение или исполнение чего-либо из
-# `$script_dir`, проверьте, что путь накрыт `_HARNESS_PREFIXES`.
+# материализации) — КРОМЕ `governance/halt_gate.py`: его merge-pr.sh
+# исполняет из дерева (`python3 -I`), и он в обоих перечнях. Добавляя сюда
+# чтение или исполнение чего-либо из `$script_dir`, проверьте, что путь
+# накрыт `_HARNESS_PREFIXES` и authority-root.
 #
 # Fail-closed везде: любой факт, который не удалось получить или разобрать,
 # трактуется против действия. Неполученный факт никогда не читается в
@@ -273,8 +275,13 @@ fi
 # --- Стоп-кран (D2) ---------------------------------------------------------
 # После профиля: читаем тем же агентским токеном, что будет мержить. Отказ
 # на всём, кроме «выключен» или «не взведён» (contracts/halt-admission/v1).
-if ! halt=$(GH_CONFIG_DIR="$MERGE_GH_CONFIG_DIR" PYTHONPATH="$script_dir" \
-    python3 -m governance.halt_gate "$slug" 2>&1); then
+# `python3 -I <файл>`: исполняется РОВНО этот файл — изолированный режим не
+# читает PYTHONPATH и user site и не кладёт каталоги дерева в sys.path, так
+# что ни `governance/__init__.py`, ни подброшенный PR-ом `sitecustomize.py`
+# не исполнятся (ревью devtools#531). Сам файл — в _HARNESS_PREFIXES и
+# authority-root.
+if ! halt=$(GH_CONFIG_DIR="$MERGE_GH_CONFIG_DIR" \
+    python3 -I "$script_dir/governance/halt_gate.py" "$slug" 2>&1); then
     die 6 "стоп-кран: $slug — $halt"
 fi
 

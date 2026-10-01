@@ -109,6 +109,11 @@ _HARNESS_PREFIXES = (
     # «добавляя чтение чего-либо из $script_dir, проверьте, что путь накрыт
     # _HARNESS_PREFIXES»; на devtools#270 чтение добавили, а проверку — нет.
     "contracts/review-scope/",
+    # Стоп-кран (D2): merge-pr.sh ИСПОЛНЯЕТ этот файл из дерева
+    # (`python3 -I`), то есть под агентским токеном на голове PR. PR,
+    # заменивший его на «всегда пускать», обезоружил бы стоп-кран и сам
+    # прошёл бы под ним (blocker ревью devtools#531).
+    "governance/halt_gate.py",
 )
 _PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED", ""}
 _GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
