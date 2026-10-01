@@ -500,3 +500,66 @@ def test_partially_deselected_parametrized_blocks_traced():
 def test_owner_outside_testpaths_blocks_traced():
     o = ck.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
     assert "BEH-01" in ck.excluded_owner_behs(answer([], []), o)
+
+
+# Review round 1: duplicate node_ids, null-definition deselect, path forms.
+
+
+def test_duplicate_test_item_node_id_refused():
+    """Риск (f): дублирующийся node_id в test_items схлопывается при
+    построении словаря-поиска — иначе владелец без селектора проходит
+    как «собранный» (ложный traced)."""
+    o = ck.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
+    dup = [
+        item("tests/test_a.py::test_a"),
+        item("tests/test_a.py::test_a", file="tests/other.py", qn="test_other"),
+    ]
+    resp = answer(dup, [])
+    findings = ck.completeness_findings(resp, o)
+    assert any("test_a" in f and "повтор" in f for f in findings)
+
+
+def test_deselected_null_definition_falls_back_to_node_id_file():
+    """Минор (c): `definition: null` у deselected (§3.5) — владелец всё
+    равно узнаётся по части node_id до `::`."""
+    o = ck.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
+    dropped = {
+        "how": "deselected",
+        "node_id": "tests/test_a.py::test_a[2]",
+        "definition": None,
+    }
+    resp = answer(
+        [item("tests/test_a.py::test_a[1]")],
+        [item("tests/test_a.py::test_a[1]")],
+        [dropped],
+    )
+    assert "BEH-01" in ck.excluded_owner_behs(resp, o)
+
+
+@pytest.mark.parametrize(
+    "excluded",
+    [
+        {"how": "skipped", "path": "tests/test_a.py/", "reason": "importorskip"},
+        {"how": "ignored", "path": "."},
+    ],
+)
+def test_covers_normalises_trailing_slash_and_root(excluded):
+    """Минор (b): завершающий `/` у файлового path и корень `.` тоже
+    покрывают владельца. Не просто «BEH исключён» (это даёт и общий фоллбэк
+    «не собран») — должна сработать именно явная причина `_covers`."""
+    o = ck.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
+    resp = answer([], [], [excluded])
+    msg = ck.excluded_owner_behs(resp, o)["BEH-01"]
+    assert "исключённом" in msg and excluded["how"] in msg
+
+
+def test_duplicate_selector_node_id_refused():
+    """Минор: повторяющийся node_id среди селекторов одного BEH молча
+    схлопывается в `set` — отказ должен его заметить."""
+    o = ck.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
+    dup_selectors = [
+        item("tests/test_a.py::test_a"),
+        item("tests/test_a.py::test_a"),
+    ]
+    resp = answer([item("tests/test_a.py::test_a")], dup_selectors)
+    assert any("повтор" in f for f in ck.completeness_findings(resp, o))

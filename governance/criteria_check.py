@@ -57,21 +57,40 @@ def _def(entry: dict) -> tuple[str, str, int]:
     return d["file"], d["qualname"], d["line"]
 
 
+def _dupes(node_ids: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for n in node_ids:
+        counts[n] = counts.get(n, 0) + 1
+    return {n: c for n, c in counts.items() if c > 1}
+
+
 def completeness_findings(
     response: dict, owners_map: dict[str, set[tuple[str, str, int]]]
 ) -> list[str]:
     """B.6: селекторы BEH = все node_id из test_items, чьё определение владеет
-    токеном; определение селектора = определение его node_id в test_items."""
-    items = {i["node_id"]: _def(i) for i in response["test_items"]}
-    out: list[str] = []
+    токеном; определение селектора = определение его node_id в test_items.
+
+    Дублирующийся `node_id` в `test_items` схлопывается при построении
+    словаря-поиска — отказ не может опираться на такой словарь, он
+    докладывается явно (review: ложный `traced` через неоднозначный owner).
+    """
+    items_list = response["test_items"]
+    out: list[str] = [
+        f"test_items: node_id {n} повторяется ({c} раз)"
+        for n, c in sorted(_dupes([i["node_id"] for i in items_list]).items())
+    ]
+    items = {i["node_id"]: _def(i) for i in items_list}
     for b in response["beh"]:
         bid = b["id"].split(":", 1)[1]
         want = {n for n, d in items.items() if d in owners_map.get(bid, set())}
-        got = {s["node_id"] for s in b["selectors"]}
+        selector_ids = [s["node_id"] for s in b["selectors"]]
+        got = set(selector_ids)
         for n in sorted(want - got):
             out.append(f"{bid}: нет селектора {n} (владелец токена собран)")
         for n in sorted(got - want):
             out.append(f"{bid}: лишний селектор {n}")
+        for n, c in sorted(_dupes(selector_ids).items()):
+            out.append(f"{bid}: селектор {n} повторяется ({c} раз)")
         for s in b["selectors"]:
             if s["node_id"] in items and _def(s) != items[s["node_id"]]:
                 out.append(f"{bid}: определение селектора {s['node_id']} ≠ test_items")
@@ -79,7 +98,10 @@ def completeness_findings(
 
 
 def _covers(path: str, file: str) -> bool:
-    return file == path or file.startswith(path.rstrip("/") + "/")
+    norm = path.rstrip("/")
+    if norm in ("", "."):
+        return True
+    return file == norm or file.startswith(norm + "/")
 
 
 def excluded_owner_behs(
@@ -98,8 +120,16 @@ def excluded_owner_behs(
             for e in excluded:
                 if e["how"] in ("skipped", "ignored") and _covers(e["path"], d[0]):
                     why = f"владелец в исключённом ({e['how']}) {e['path']}"
-                elif e["how"] == "deselected" and e["definition"] and _def(e) == d:
-                    why = f"тест владельца снят с отбора ({e['node_id']})"
+                elif e["how"] == "deselected":
+                    # §3.5: definition может быть null (нерасшифрован/не-Python);
+                    # узнаваем файл владельца по части node_id до "::" (fail-closed).
+                    owner_match = (
+                        _def(e) == d
+                        if e["definition"]
+                        else e["node_id"].split("::", 1)[0] == d[0]
+                    )
+                    if owner_match:
+                        why = f"тест владельца снят с отбора ({e['node_id']})"
                 if why:
                     break
             if why is None and d not in collected:
