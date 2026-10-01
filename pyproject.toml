@@ -14,6 +14,7 @@ dependencies = [
 
 [tool.uv]
 package = false
+default-groups = ["dev", "conductor"]
 
 [tool.uv.sources]
 # Pinned to an IMMUTABLE dispatcher commit, fetched by git — never a
@@ -39,6 +40,9 @@ dev = [
 # включения автономной ветки (§6, §12 п.7), правка одного из двух мест либо
 # уронит резолв, либо тихо выберет одну сторону (финальное ревью M-1).
 governance = ["steward", "textual>=1"]
+# conductor срез 1: JWT App (RS256). Входит в default-groups — CI (`uv sync`)
+# и служба (`uv run --frozen`) ставят её без правок .github/ и unit-файла.
+conductor = ["pyjwt[crypto]>=2.8"]
 selfcheck = [
     "actionlint-py==1.7.12.25",
     "deptry==0.25.1",
