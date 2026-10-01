@@ -670,3 +670,14 @@ def test_excluded_owner_downgrades_traced():
     got = ck.validate_answer(ok_request(), resp, **args)
     assert got.problems == [] and got.beh_status["BEH-01"] == "unconfirmed"
     assert "BEH-01" in got.notes
+
+
+def test_beh_foreign_code_prefix_refused():
+    """BEH-set check compares FULL ids: a response BEH id carrying the wrong
+    code prefix (`XYZ:BEH-01` instead of `ENC:BEH-01`) is not the same id as
+    the request's, even though `completeness_findings` strips the prefix
+    before matching against owners."""
+    resp = golden_answer()
+    resp["beh"][0]["id"] = "XYZ:BEH-01"
+    got = ck.validate_answer(ok_request(), resp, **ok_args(resp))
+    assert any("BEH" in p for p in got.problems), got.problems
