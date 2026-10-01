@@ -407,3 +407,96 @@ def test_beh_precedence():
     assert ck.beh_status(
         [("unconfirmed", "subprocess-only"), ("unconfirmed", "not-passed")]
     ) == ("unconfirmed", "not-passed")
+
+
+# B.6, #623 п.4: полнота по node_id и исключённые владельцы токена.
+
+SRC = "def test_a():\n    # ENC:BEH-01\n    assert 1\n"
+
+
+def answer(test_items, beh_selectors, excluded=()):
+    return {
+        "test_items": test_items,
+        "collection_excluded": list(excluded),
+        "beh": [{"id": "ENC:BEH-01", "status": "traced", "selectors": beh_selectors}],
+    }
+
+
+def item(node, line=1, file="tests/test_a.py", qn="test_a"):
+    return {"node_id": node, "definition": {"file": file, "qualname": qn, "line": line}}
+
+
+def test_owners_by_file_qualname_line():
+    assert ck.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"]) == {
+        "BEH-01": {("tests/test_a.py", "test_a", 1)}
+    }
+
+
+def test_lost_parametrized_node_id_refused():
+    o = ck.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
+    items = [item("tests/test_a.py::test_a[1]"), item("tests/test_a.py::test_a[2]")]
+    resp = answer(items, [item("tests/test_a.py::test_a[1]")])
+    assert any("test_a[2]" in f for f in ck.completeness_findings(resp, o))
+
+
+def test_selector_definition_must_equal_test_item():
+    o = ck.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
+    resp = answer(
+        [item("tests/test_a.py::test_a")], [item("tests/test_a.py::test_a", line=9)]
+    )
+    assert ck.completeness_findings(resp, o)
+
+
+def test_definition_from_other_branch_is_not_owner():
+    """Парсер (§1.4, «последнее определение побеждает») отдаёт токен def из
+    `else` (строка 6); pytest на рантайме собрал def из `if` (строка 3) —
+    владелец не собран, BEH не traced."""
+    src = (
+        "import sys\nif sys.version_info >= (3,):\n    def test_a():\n        assert 1\n"
+        "else:\n    def test_a():\n        # ENC:BEH-01\n        assert 1\n"
+    )
+    o = ck.owners({"tests/test_a.py": src}, "ENC", ["BEH-01"])
+    assert o == {"BEH-01": {("tests/test_a.py", "test_a", 6)}}
+    resp = answer([item("tests/test_a.py::test_a", line=3)], [])
+    assert "BEH-01" in ck.excluded_owner_behs(resp, o)
+    assert ck.completeness_findings(resp, o) == []
+
+
+@pytest.mark.parametrize(
+    "excluded",
+    [
+        {"how": "skipped", "path": "tests/test_a.py", "reason": "importorskip"},
+        {"how": "ignored", "path": "tests"},
+        {
+            "how": "deselected",
+            "node_id": "tests/test_a.py::test_a",
+            "definition": {"file": "tests/test_a.py", "qualname": "test_a", "line": 1},
+        },
+    ],
+)
+def test_excluded_owner_blocks_traced(excluded):
+    o = ck.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
+    resp = answer([], [], [excluded])
+    assert "BEH-01" in ck.excluded_owner_behs(resp, o)
+
+
+def test_partially_deselected_parametrized_blocks_traced():
+    """Один параметр собран, другой снят с отбора — у определения тот же
+    (file, qualname, line); собранный сосед не прячет исключение."""
+    o = ck.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
+    dropped = {
+        "how": "deselected",
+        "node_id": "tests/test_a.py::test_a[2]",
+        "definition": {"file": "tests/test_a.py", "qualname": "test_a", "line": 1},
+    }
+    resp = answer(
+        [item("tests/test_a.py::test_a[1]")],
+        [item("tests/test_a.py::test_a[1]")],
+        [dropped],
+    )
+    assert "BEH-01" in ck.excluded_owner_behs(resp, o)
+
+
+def test_owner_outside_testpaths_blocks_traced():
+    o = ck.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
+    assert "BEH-01" in ck.excluded_owner_behs(answer([], []), o)

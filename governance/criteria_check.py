@@ -39,6 +39,77 @@ def expected_definitions(
     return out
 
 
+def owners(
+    test_sources: dict[str, str], code: str, beh_ids: list[str]
+) -> dict[str, set[tuple[str, str, int]]]:
+    """BEH → определения-владельцы токена по парсеру devtools (§1.4)."""
+    out: dict[str, set[tuple[str, str, int]]] = {b: set() for b in beh_ids}
+    for path, src in test_sources.items():
+        for d in ct.owned_definitions(src):
+            for b in beh_ids:
+                if f"{code}:{b}" in d.tokens:
+                    out[b].add((path, d.qualname, d.line))
+    return out
+
+
+def _def(entry: dict) -> tuple[str, str, int]:
+    d = entry["definition"]
+    return d["file"], d["qualname"], d["line"]
+
+
+def completeness_findings(
+    response: dict, owners_map: dict[str, set[tuple[str, str, int]]]
+) -> list[str]:
+    """B.6: селекторы BEH = все node_id из test_items, чьё определение владеет
+    токеном; определение селектора = определение его node_id в test_items."""
+    items = {i["node_id"]: _def(i) for i in response["test_items"]}
+    out: list[str] = []
+    for b in response["beh"]:
+        bid = b["id"].split(":", 1)[1]
+        want = {n for n, d in items.items() if d in owners_map.get(bid, set())}
+        got = {s["node_id"] for s in b["selectors"]}
+        for n in sorted(want - got):
+            out.append(f"{bid}: нет селектора {n} (владелец токена собран)")
+        for n in sorted(got - want):
+            out.append(f"{bid}: лишний селектор {n}")
+        for s in b["selectors"]:
+            if s["node_id"] in items and _def(s) != items[s["node_id"]]:
+                out.append(f"{bid}: определение селектора {s['node_id']} ≠ test_items")
+    return out
+
+
+def _covers(path: str, file: str) -> bool:
+    return file == path or file.startswith(path.rstrip("/") + "/")
+
+
+def excluded_owner_behs(
+    response: dict, owners_map: dict[str, set[tuple[str, str, int]]]
+) -> dict[str, str]:
+    """spec-runner#623 п.4: владелец токена исключён из сбора или вне
+    test_items (вне testpaths) — BEH не получает traced."""
+    collected = {_def(i) for i in response["test_items"]}
+    excluded = response["collection_excluded"]
+    out: dict[str, str] = {}
+    for bid, defs in owners_map.items():
+        for d in sorted(defs):
+            # явные исключения — ДО проверки «собран»: снятый с отбора параметр
+            # не прячется за собранным соседом того же определения
+            why = None
+            for e in excluded:
+                if e["how"] in ("skipped", "ignored") and _covers(e["path"], d[0]):
+                    why = f"владелец в исключённом ({e['how']}) {e['path']}"
+                elif e["how"] == "deselected" and e["definition"] and _def(e) == d:
+                    why = f"тест владельца снят с отбора ({e['node_id']})"
+                if why:
+                    break
+            if why is None and d not in collected:
+                why = "владелец не собран (вне test_items и collection_excluded)"
+            if why is not None:
+                out[bid] = f"{d[0]}::{d[1]}@{d[2]}: {why}"
+                break
+    return out
+
+
 def roots_findings(roots: object) -> list[str]:
     """Продуктовые корни ответа — не доверенная цифра (ревью среза 1, I4)."""
     if not isinstance(roots, list) or not roots:
