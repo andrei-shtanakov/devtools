@@ -34,6 +34,9 @@ class ProductError(ValueError):
 
 @dataclass(frozen=True)
 class Tree:
+    """Отслеживаемое дерево git на `sha`: байты только из git-объектов, не
+    из рабочего дерева (§3.1). `_cache` держит один `ls-tree` на инстанс."""
+
     repo: Path
     sha: str
     _cache: dict[str, dict[str, tuple[str, str]]] = field(
@@ -53,10 +56,15 @@ class Tree:
         )
 
     def blob(self, path: str) -> bytes | None:
+        """Содержимое `path` на `sha`; `None` — `git show` не нашёл путь
+        (отсутствие пути не отличимо от сбоя git-объекта — решает вызывающий
+        код, ревью m-2)."""
         proc = self._git("show", f"{self.sha}:{path}")
         return proc.stdout if proc.returncode == 0 else None
 
     def entries(self) -> dict[str, tuple[str, str]]:
+        """Путь → (mode, blob-sha) для каждой записи `ls-tree -r` на `sha`,
+        закэшировано на инстанс."""
         if "entries" in self._cache:
             return self._cache["entries"]
         proc = self._git("ls-tree", "-r", "-z", self.sha)
@@ -83,6 +91,9 @@ class Tree:
 
 @dataclass(frozen=True)
 class Declaration:
+    """Декларация `criteria.*` конфига продукта: корни и выбор окружения,
+    нормализованные тем же правилом, что producer `criteria_config` (§3.3)."""
+
     roots: tuple[str, ...]
     groups: tuple[str, ...] | None
     extras: tuple[str, ...]
@@ -182,6 +193,8 @@ def _check_selection(
 
 
 def read_declaration(tree: Tree) -> Declaration:
+    """Читает и проверяет `criteria.*` конфиг продукта на `tree.sha` тем же
+    правилом, что `spec_runner.criteria_config` (§3.3); отказ — `ProductError`."""
     text = _read_config_text(tree)
     try:
         data = yaml.safe_load(text) or {}
@@ -202,6 +215,9 @@ def read_declaration(tree: Tree) -> Declaration:
 
 
 def resolve_roots(tree: Tree, roots: tuple[str, ...]) -> tuple[str, ...]:
+    """Развёртывает `roots` в отсортированный кортеж обычных `.py` файлов на
+    `tree.sha`; симлинк-корень или корень без ни одного `.py` — `ProductError`
+    (§3.4)."""
     entries = tree.entries()
     out: set[str] = set()
     for root in roots:
@@ -220,12 +236,13 @@ def resolve_roots(tree: Tree, roots: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _under(entries: dict[str, tuple[str, str]], path: str) -> set[str]:
+    """Отслеживаемые `.py` под `path` (включительно), без фильтра по mode —
+    паритет с producer `tracked_files`/`digest_paths` (spec-runner#603),
+    у которого фильтра по типу записи нет: симлинк `.py` под skipped/ignored
+    тоже входит в `files` §6.1 (review m-3)."""
+    prefix = path.rstrip("/") + "/"
     return {
-        p
-        for p, (mode, _) in entries.items()
-        if (p == path or p.startswith(path.rstrip("/") + "/"))
-        and mode.startswith("100")
-        and p.endswith(".py")
+        p for p in entries if (p == path or p.startswith(prefix)) and p.endswith(".py")
     }
 
 
@@ -274,7 +291,13 @@ def tracked_py(tree: Tree) -> tuple[str, ...]:
 
 
 def function_body_lines(tree: Tree, files: list[str]) -> dict[str, set[int]]:
-    """Строки тел функций/методов продукта (G0 rev 8) по байтам product_sha."""
+    """Строки тел функций/методов продукта (G0 rev 8) по байтам product_sha.
+
+    Синтаксис, который текущий Python devtools не разбирает (3.13+/3.14 и
+    т.п.), — именованный `ProductError` (ревью m-4), а не молчаливое пустое
+    множество: producer парсит Python-ом продукта (R-B16) и может сказать
+    `traced` там, где devtools тихо получил бы размытое «статус ≠
+    пересчёту»."""
     out: dict[str, set[int]] = {}
     for path in files:
         data = tree.blob(path)
@@ -282,9 +305,10 @@ def function_body_lines(tree: Tree, files: list[str]) -> dict[str, set[int]]:
             continue
         try:
             parsed = ast.parse(data)
-        except SyntaxError:
-            out[path] = set()
-            continue
+        except SyntaxError as exc:
+            raise ProductError(
+                f"{path}: не разбирается текущим Python: {exc}"
+            ) from None
         lines: set[int] = set()
         for node in ast.walk(parsed):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:

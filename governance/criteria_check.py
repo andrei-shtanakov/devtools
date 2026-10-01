@@ -16,10 +16,28 @@ from governance import criteria_tokens as ct
 def owners(
     test_sources: dict[str, str], code: str, beh_ids: list[str]
 ) -> dict[str, set[tuple[str, str, int]]]:
-    """BEH → определения-владельцы токена по парсеру devtools (§1.4)."""
+    """BEH → определения-владельцы токена по парсеру devtools (§1.4).
+
+    Неразбираемый исходник (синтаксис, NUL, предел рекурсии/памяти) не
+    прерывает измерение (review I-1): producer ловит тот же набор
+    исключений в `_owned_tokens` и отказывает только файлу коллекции, а
+    всякий отслеживаемый вне-продуктовый `.py` — кандидат на владение, не
+    только собранный pytest-ом. Если в тексте всё же есть квалифицированный
+    токен BEH, записывается синтетический владелец `(путь, "<unparseable>",
+    0)` — его нет ни в одном `test_items`, и `excluded_owner_behs`
+    заблокирует `traced` именованной причиной; иначе файл пропускается, как
+    недостижимый для сбора.
+    """
     out: dict[str, set[tuple[str, str, int]]] = {b: set() for b in beh_ids}
     for path, src in test_sources.items():
-        for d in ct.owned_definitions(src):
+        try:
+            definitions = ct.owned_definitions(src)
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            for b in beh_ids:
+                if ct.token_re(code, b).search(src):
+                    out[b].add((path, "<unparseable>", 0))
+            continue
+        for d in definitions:
             for b in beh_ids:
                 if f"{code}:{b}" in d.tokens:
                     out[b].add((path, d.qualname, d.line))
@@ -178,6 +196,10 @@ ERROR_KINDS: dict[str, tuple[bool, int]] = {
 
 @dataclass(frozen=True)
 class Parsed:
+    """Ответ производителя, разобранный и сверенный с кодом выхода (§5.3):
+    `branch` — `answer` или `error`; `retryable` — вид ошибки по
+    `ERROR_KINDS` (всегда `False` на ветке `answer`)."""
+
     response: dict
     branch: Literal["answer", "error"]
     retryable: bool
@@ -301,6 +323,10 @@ def beh_status(
 
 @dataclass(frozen=True)
 class Checked:
+    """Итог `validate_answer`: непустой `problems` — отказ шага; `beh_status`
+    — статусы BEH по пересчёту devtools, не по ответу; `notes` — причина
+    понижения `traced`→`unconfirmed` из `excluded_owner_behs`, по BEH."""
+
     problems: list[str]
     beh_status: dict[str, str]
     notes: dict[str, str] = field(default_factory=dict)

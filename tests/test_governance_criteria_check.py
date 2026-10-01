@@ -255,6 +255,29 @@ def test_owners_by_file_qualname_line():
     }
 
 
+def test_owners_skips_unparseable_file_without_token(tmp_path):
+    """Review I-1: неразбираемый вне-продуктовый .py без токена BEH не
+    роняет owners() — просто пропускается (как файл, недостижимый сбору)."""
+    bad = "def f(:\n    pass\n"
+    assert ck.owners({"scripts/bad.py": bad}, "ENC", ["BEH-01"]) == {"BEH-01": set()}
+
+
+def test_owners_unparseable_file_with_token_is_synthetic_owner():
+    """Review I-1: токен в неразбираемом файле всё же записывается
+    синтетическим владельцем — он никогда не попадёт в test_items,
+    excluded_owner_behs заблокирует traced именованной причиной."""
+    bad = "def f(:\n    # ENC:BEH-01\n    pass\n"
+    o = ck.owners({"scripts/bad.py": bad}, "ENC", ["BEH-01"])
+    assert o == {"BEH-01": {("scripts/bad.py", "<unparseable>", 0)}}
+    assert "BEH-01" in ck.excluded_owner_behs(answer([], []), o)
+
+
+def test_owners_unparseable_nul_byte_with_token_is_synthetic_owner():
+    bad = "\x00def test_a():\n    # ENC:BEH-01\n    pass\n"
+    o = ck.owners({"scripts/bad.py": bad}, "ENC", ["BEH-01"])
+    assert o == {"BEH-01": {("scripts/bad.py", "<unparseable>", 0)}}
+
+
 def test_lost_parametrized_node_id_refused():
     o = ck.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
     items = [item("tests/test_a.py::test_a[1]"), item("tests/test_a.py::test_a[2]")]

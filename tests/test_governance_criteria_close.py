@@ -341,6 +341,26 @@ def test_blocking_error_publishes_blocked(tmp_path, monkeypatch):
     assert meta["closure"] == "blocked"
 
 
+def test_echoless_exit3_is_refused_not_published(tmp_path, monkeypatch):
+    """Final review I-2: ответ-ошибка без ретрая (exit 3) без эхо `request`
+    — отказ шага (2), ничего не публикуется. Producer опускает эхо только
+    на `request-invalid` (exit 2, retryable); на exit 3 эхо всегда есть —
+    требовать его здесь ничего не стоит честному производителю, а чужой/
+    устаревший ответ без эхо не может сжечь G6 публикацией blocked под
+    деревянным ключом."""
+    _, _target, _pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    err = {
+        "protocol": 1,
+        "spec_runner_version": "4.5.0",
+        "error": {"kind": "lock-not-current", "retryable": False, "detail": "stale"},
+    }
+    ops = _ops((3, json.dumps(err)))
+    assert cc.run("run-1", ops) == 2
+    assert cc._load("run-1")["measured"] == {}
+    assert not any(c[0] == "create_pr" for c in ops.calls)
+
+
 def test_exit_code_contradicting_kind_is_refused(tmp_path, monkeypatch):
     _, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
@@ -388,6 +408,36 @@ def test_owner_missing_from_test_files_blocks_through_close(tmp_path, monkeypatc
         extra={
             "tests/extra/test_b.py": "def test_b():\n    # ENC:BEH-01\n    assert 1\n"
         },
+    )
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 0
+    meta, _ = split_frontmatter(_closure_on_origin(target, ops))
+    assert meta["closure"] == "blocked"
+
+
+def test_unparseable_outside_py_without_token_measures_clean(tmp_path, monkeypatch):
+    """Final review I-1: синтаксическая ошибка в вне-продуктовом .py без
+    токена BEH не прерывает измерение (раньше — необработанный SyntaxError
+    из owners()/ast.parse) — closure traced, как если бы файла не было."""
+    _, target, pin = _env(
+        tmp_path, monkeypatch, extra={"scripts/bad.py": "def f(:\n    pass\n"}
+    )
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 0
+    meta, _ = split_frontmatter(_closure_on_origin(target, ops))
+    assert meta["closure"] == "traced"
+
+
+def test_unparseable_outside_py_with_token_blocks_closure(tmp_path, monkeypatch):
+    """Final review I-1: токен BEH в неразбираемом .py — владелец, которого
+    pytest собрать не мог бы; BEH-01 (Must) не traced, закрытие blocked —
+    а не необработанный SyntaxError."""
+    _, target, pin = _env(
+        tmp_path,
+        monkeypatch,
+        extra={"scripts/bad.py": "def f(:\n    # ENC:BEH-01\n    pass\n"},
     )
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin))))
@@ -593,6 +643,44 @@ def test_validate_answer_refusal_records_nothing(tmp_path, monkeypatch):
     assert not any(c[0] == "create_pr" for c in ops.calls)
 
 
+def test_owners_missing_blob_is_step_refusal(tmp_path, monkeypatch):
+    """Final review m-2: `Tree.blob()` возвращает `None` для пути, который
+    `ls-tree` только что перечислил среди отслеживаемых .py (сбой
+    git-объекта, не «файла нет») — отказ шага, не пустой источник, который
+    тихо теряет владельца токена."""
+    _, target, pin = _env(tmp_path, monkeypatch, extra={"scripts/extra.py": "x = 1\n"})
+    _oracle_on(monkeypatch)
+    real_blob = cp.Tree.blob
+
+    def flaky_blob(self, path):
+        if path == "scripts/extra.py":
+            return None
+        return real_blob(self, path)
+
+    monkeypatch.setattr(cp.Tree, "blob", flaky_blob)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 2
+    assert cc._load("run-1")["measured"] == {}
+    assert not any(c[0] == "create_pr" for c in ops.calls)
+
+
+def test_product_syntax_devtools_cannot_parse_is_named_refusal(
+    tmp_path, monkeypatch, capsys
+):
+    """Final review m-4: продукт с синтаксисом, который Python devtools не
+    разбирает, — именованный отказ («не разбирается текущим Python»), а не
+    размытое «статус ≠ пересчёту» или необработанное исключение."""
+    _, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    (target / "pkg/m.py").write_text("def f(\n")
+    _git(target, "commit", "-qam", "break product syntax")
+    _git(target, "push", "-q", "origin", "master")
+    new_sha = _git(target, "rev-parse", "HEAD")
+    ops = _ops((0, json.dumps(_response(target, new_sha, bundle_pin=pin))))
+    assert cc.run("run-1", ops, product_sha=new_sha) == 2
+    assert "не разбирается текущим Python" in capsys.readouterr().out
+
+
 def test_dirty_tree_refused(tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch, dirty=True)
     _oracle_on(monkeypatch)
@@ -769,3 +857,38 @@ def test_error_key_reads_product_sha_not_worktree(tmp_path, monkeypatch):
     before = cc._tree_key(pin, root, pin)
     (root / "uv.lock").write_text("edited, not committed\n")
     assert cc._tree_key(pin, root, pin) == before
+
+
+def test_new_measurement_config_file_buys_outside_py_digest_change(
+    tmp_path, monkeypatch
+):
+    """Final review m-1: добавление pytest.ini, которого не было на старом
+    product_sha, обязано сдвинуть `_outside_py_digest` — иначе этот способ
+    починить «owner outside testpaths» не покупает перемер (нет изменения
+    ни в content_sha256, который видит только уже существующий inipath
+    через test_files ответа, ни в .py-слепке)."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    root = Path(target)
+    files = ("pkg/m.py",)
+    before = cc._outside_py_digest(cp.Tree(root, pin), files)
+
+    new_sha = _commit(target, "pytest.ini", "[pytest]\ntestpaths = tests\n")
+    after = cc._outside_py_digest(cp.Tree(root, new_sha), files)
+
+    assert before != after
+
+
+def test_new_pytest_ini_buys_remeasure_not_g6(tmp_path, monkeypatch):
+    """Final review m-1, через весь путь измерения: закрытие уже измерено
+    и смержено; добавление pytest.ini, которого не было, не отвечает G6
+    (6) — вызывает spec-runner заново."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 0
+
+    new_sha = _commit(target, "pytest.ini", "[pytest]\ntestpaths = tests\n")
+    _git(target, "push", "-q", "origin", "master")
+    ops2 = _ops((0, json.dumps(_response(target, new_sha, bundle_pin=pin))))
+    assert cc.run("run-1", ops2, product_sha=new_sha) == 0
+    assert any(c[0] == "criteria_verify" for c in ops2.calls)

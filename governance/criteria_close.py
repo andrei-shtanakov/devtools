@@ -396,16 +396,22 @@ def _known(run_id: str, keys: list[str]) -> tuple[str, dict] | None:
 
 def _outside_py_digest(tree: criteria_product.Tree, files: tuple[str, ...]) -> str:
     """sha256 отсортированных (путь, blob-sha) всех отслеживаемых .py вне
-    продуктовых файлов на `tree.sha` — слепок владельцев токена (§1.4).
-    `tracked_py` уже отдаёт пути отсортированными; blob-sha — из
-    `Tree.entries()`, не из содержимого (ревью I-2: новый тестовый файл с
-    токеном обязан сдвинуть пред-проверку G6, не только content_sha256,
-    который его не видит — content_sha256 строится по test_files ОТВЕТА)."""
+    продуктовых файлов на `tree.sha`, плюс `_MEASUREMENT_CONFIG` файлов,
+    присутствующих на `tree.sha` — слепок владельцев токена (§1.4) и входа
+    измерения. blob-sha — из `Tree.entries()`, не из содержимого (ревью I-2:
+    новый тестовый файл с токеном обязан сдвинуть пред-проверку G6, не
+    только content_sha256, который его не видит — content_sha256 строится
+    по test_files ОТВЕТА). `_MEASUREMENT_CONFIG` входит тем же правилом
+    (ревью m-1): существующий inipath меняет content_sha256 через test_files
+    ответа, но ДОБАВЛЕНИЕ нового pytest.ini/tox.ini/setup.cfg не меняет ни
+    content_sha256, ни .py-слепок — без этой ветки такая правка не покупала
+    бы перемер."""
     entries = tree.entries()
+    config = {name for name in _MEASUREMENT_CONFIG if name in entries}
+    candidates = set(criteria_product.tracked_py(tree)) | config
+    paths = sorted(candidates.difference(files), key=lambda p: p.encode())
     h = hashlib.sha256()
-    for path in criteria_product.tracked_py(tree):
-        if path in files:
-            continue
+    for path in paths:
         h.update(path.encode())
         h.update(b"\0")
         h.update(entries[path][1].encode())
@@ -540,12 +546,22 @@ def _measure(
         print(f"criteria-close: отказ шага — {why}")
         return 2
     resp = parsed.response
-    if "request" in resp and resp["request"] != request:
-        # §5.3: эхо не доверяется ни в одной ветке, включая ошибку — чужой/
-        # устаревший ответ (product_sha/code/bundle_pin не те) не должен
-        # сжигать G6 этого содержимого публикацией blocked под его ключом
-        # (review I-1). Ничего не пишется и не публикуется.
-        print("criteria-close: отказ шага — эхо request не совпало с запросом")
+    if "request" in resp:
+        if resp["request"] != request:
+            # §5.3: эхо не доверяется ни в одной ветке, включая ошибку —
+            # чужой/устаревший ответ (product_sha/code/bundle_pin не те) не
+            # должен сжигать G6 этого содержимого публикацией blocked под его
+            # ключом (review I-1). Ничего не пишется и не публикуется.
+            print("criteria-close: отказ шага — эхо request не совпало с запросом")
+            return 2
+    elif parsed.branch == "error" and not parsed.retryable:
+        # §5.3, поправлена этой веткой: эхо обязателен и на ветке ошибки без
+        # повтора (exit 3) — честный производитель опускает `request` только
+        # на `request-invalid` (exit 2, retryable, spec-runner
+        # criteria_measure.py). Без проверки чужой/устаревший exit-3 без эхо
+        # сжёг бы G6 правильного содержимого публикацией blocked под его
+        # ключом — ровно та дыра, которую должен был закрыть I-1 (review I-2).
+        print("criteria-close: отказ шага — ответ-ошибка (exit 3) без эхо request")
         return 2
     if parsed.branch == "error" and parsed.retryable:
         e = resp["error"]
@@ -582,16 +598,28 @@ def _measure(
             content = criteria_product.content_sha256(
                 tree, decl, lock_sha, resp["test_files"], excluded
             )
+            # m-4: синтаксис продукта, который devtools не разбирает, —
+            # именованный ProductError, пойманный здесь же, а не тихий
+            # fallback снаружи try.
+            function_lines = criteria_product.function_body_lines(tree, list(files))
         except criteria_product.ProductError as exc:
             print(f"criteria-close: ответ spec-runner отвергнут — {exc}")
             return 2
         # владельцы — по всем отслеживаемым .py вне продукта, не по инвентарю
         # ответа: skipped/ignored/вне testpaths файлы в test_files не попадают
-        sources = {
-            p: (tree.blob(p) or b"").decode("utf-8", errors="replace")
-            for p in criteria_product.tracked_py(tree)
-            if p not in files
-        }
+        sources: dict[str, str] = {}
+        for p in criteria_product.tracked_py(tree):
+            if p in files:
+                continue
+            blob = tree.blob(p)
+            if blob is None:
+                # отслеживаемый путь без blob — сбой git-объекта, не «файла
+                # нет» (ls-tree его только что перечислил); отказ шага, не
+                # пустой источник, который тихо теряет владельца (review m-2).
+                raise CloseError(
+                    f"{p}: blob недоступен на {product_sha[:12]} (git show)"
+                )
+            sources[p] = blob.decode("utf-8", errors="replace")
         checked = criteria_check.validate_answer(
             request,
             resp,
@@ -601,7 +629,7 @@ def _measure(
             extras=decl.extras,
             lock_sha=lock_sha,
             content_sha=content,
-            function_lines=criteria_product.function_body_lines(tree, list(files)),
+            function_lines=function_lines,
             owners_map=criteria_check.owners(sources, charter.code, tests),
             installed=installed,
         )

@@ -334,7 +334,12 @@ def test_content_sha256_excluded_path_without_py_files(tmp_path):
     assert got == want
 
 
-def test_content_sha256_excluded_path_symlink_only(tmp_path):
+def test_content_sha256_excluded_path_includes_symlink(tmp_path):
+    """Review m-3: паритет с producer `tracked_files`/`digest_paths`
+    (spec-runner#603 `criteria_select.py`/`criteria_workspace.py`) — там нет
+    фильтра по mode, симлинк `.py` под skipped/ignored тоже входит в files
+    §6.1 и сдвигает content_sha256 (раньше `_under` требовал mode 100* и
+    молча исключал симлинк, расходясь с producer)."""
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "a.py").write_text("x = 1\n")
     (tmp_path / "skip").mkdir()
@@ -347,8 +352,8 @@ def test_content_sha256_excluded_path_symlink_only(tmp_path):
     tree = _head_tree(tmp_path)
     decl = cp.read_declaration(tree)
     got = cp.content_sha256(tree, decl, "d" * 64, [], ["skip"])
-    want = cp.content_sha256(tree, decl, "d" * 64, [], [])
-    assert got == want
+    without = cp.content_sha256(tree, decl, "d" * 64, [], [])
+    assert got != without
 
 
 def test_tracked_py_lists_every_regular_py(tmp_path):
@@ -362,3 +367,13 @@ def test_function_body_lines(tmp_path):
     src = "X = 1\n\ndef f():\n    a = 1\n    return a\n"
     tree = _repo(tmp_path, {"pkg/a.py": src})
     assert cp.function_body_lines(tree, ["pkg/a.py"]) == {"pkg/a.py": {4, 5}}
+
+
+def test_function_body_lines_refuses_unparseable_syntax(tmp_path):
+    """Review m-4: синтаксис продукта, который текущий Python devtools не
+    разбирает (3.13+/3.14 и т.п.), — именованный `ProductError`, не
+    молчаливое пустое множество, которое дальше отвергается размытым
+    «статус ≠ пересчёту»."""
+    tree = _repo(tmp_path, {"pkg/a.py": "def f(\n"})
+    with pytest.raises(cp.ProductError, match="не разбирается текущим Python"):
+        cp.function_body_lines(tree, ["pkg/a.py"])
