@@ -47,7 +47,7 @@ ISSUE_EXTRAS = (
 )
 PINNED = (
     "query($o:String!,$n:String!,$k:Int!){repository(owner:$o,name:$n)"
-    "{issue(number:$k){isPinned}}}"
+    "{issue(number:$k){isPinned} pinnedIssues(first:3){totalCount}}}"
 )
 RED = {
     "FAILURE",
@@ -456,11 +456,10 @@ def queue_records(owner: str, name: str, runner: Runner) -> list[dict[str, Any]]
             + ["-f", f"n={name}", "-F", f"k={item['number']}"]
         )
         try:
-            rec["pinned"] = bool(
-                (_json(raw) if code == 0 else None)["data"]["repository"]["issue"][
-                    "isPinned"
-                ]
-            )
+            repository = (_json(raw) if code == 0 else None)["data"]["repository"]
+            rec["pinned"] = bool(repository["issue"]["isPinned"])
+            # мест закрепления в репо три (§6.1): занятость — для GR-QUEUE-UNPINNED
+            rec["pins_used"] = int(repository["pinnedIssues"]["totalCount"])
         except (KeyError, TypeError):
             return None
         rec["repo_full"] = f"{owner}/{name}"

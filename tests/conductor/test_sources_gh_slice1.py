@@ -241,7 +241,16 @@ def test_queue_records_any_state_with_pinned() -> None:
     search = json.dumps(
         [{"total_count": 1, "incomplete_results": False, "items": [{"number": 3}]}]
     )
-    pinned = json.dumps({"data": {"repository": {"issue": {"isPinned": True}}}})
+    pinned = json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "issue": {"isPinned": True},
+                    "pinnedIssues": {"totalCount": 2},
+                }
+            }
+        }
+    )
     run = fake(
         {
             "api -X GET search/issues -f q=user:own repo:own/ws label:owner-queue": [
@@ -254,6 +263,7 @@ def test_queue_records_any_state_with_pinned() -> None:
     )
     [rec] = queue_records("own", "ws", run) or [None]
     assert rec is not None and rec["pinned"] is True and rec["repo_full"] == "own/ws"
+    assert rec["pins_used"] == 2
     assert rec["state"] == "closed" and rec["closed_at"] == "2026-09-30T00:00:00Z"
 
 

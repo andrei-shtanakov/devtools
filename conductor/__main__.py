@@ -374,6 +374,17 @@ def _selftest() -> int:
     return EXIT_OK if ok else 1
 
 
+def _cli_ts(value: str | None) -> datetime | None:
+    """Момент из CLI: ISO 8601; без зоны — UTC; нет или не разобран — None."""
+    if not value:
+        return None
+    try:
+        ts = parse_ts(value)
+    except ValueError:
+        return None
+    return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
+
+
 def _config(args: argparse.Namespace) -> tuple[HostConfig | None, str | None]:
     """Конфиг хоста для run --config: (cfg, None) | (None, ошибка) | (None, None)."""
     if args.config is None or args.command != "run":
@@ -395,9 +406,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init-state":
         return _init_state(args)
     if args.command == "stage-report":
-        if not args.since or not args.until:
+        since, until = _cli_ts(args.since), _cli_ts(args.until)
+        if since is None or until is None:
+            print("stage-report: нужны --since и --until (ISO 8601)", file=sys.stderr)
             return EXIT_ARGS
-        report = stage_report(args.out, parse_ts(args.since), parse_ts(args.until))
+        report = stage_report(args.out, since, until)
         print(json.dumps(report, ensure_ascii=False, indent=1))
         return EXIT_OK
     if args.command not in COMMANDS or (

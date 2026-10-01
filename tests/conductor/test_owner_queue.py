@@ -159,3 +159,16 @@ def test_shipped_question_carries_period_and_basis_a_drops_it() -> None:
     assert all(
         q["reason"] != "GR-SHIPPED-OPEN" for q in queue_questions(result2, inp2, [])
     )
+
+
+def test_full_pin_slots_is_finding_without_pin_attempt() -> None:
+    """Ревью #542, §6.1 шаг 2: три места закрепления заняты — GR-QUEUE-UNPINNED,
+    шага pin нет (иначе безрезультатная попытка каждым прогоном)."""
+    full = _queue(body="старое", pinned=False)
+    full["pins_used"] = 3
+    recs, notes = _plan([Q1], [full])
+    assert ops(recs) == [["body", "comment"]]
+    assert any(n.get("finding") == "GR-QUEUE-UNPINNED" for n in notes)
+    free = _queue(body="старое", pinned=False)
+    free["pins_used"] = 2
+    assert ops(_plan([Q1], [free])[0]) == [["body", "pin", "comment"]]

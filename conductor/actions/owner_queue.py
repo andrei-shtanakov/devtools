@@ -146,6 +146,14 @@ def _question_text(q: dict[str, Any], owner_login: str) -> str:
     )
 
 
+PIN_SLOTS = 3  # предел закреплённых issues в репо GitHub
+
+
+def pins_full(queue: dict[str, Any]) -> bool:
+    """Все места закрепления репо заняты (по чтению очереди)."""
+    return int(queue.get("pins_used") or 0) >= PIN_SLOTS
+
+
 def queue_check(
     fresh: FreshReader,
     base: list[dict[str, Any]],
@@ -233,7 +241,15 @@ def plan_owner_queue(
                 revision=h1("rev", text),
             )
         )
-    if queue is None or not queue.get("pinned"):
+    if queue is not None and not queue.get("pinned") and pins_full(queue):
+        # §6.1 шаг 2: места заняты — находка, попыток нет, пока место не освободится
+        notes.append(
+            {
+                "finding": "GR-QUEUE-UNPINNED",
+                "status": "частично: очередь не закреплена — места закрепления заняты",
+            }
+        )
+    elif queue is None or not queue.get("pinned"):
         steps.append(
             Step(Mutation("pin", umbrella, number), "pin", "pin", optional=True)
         )

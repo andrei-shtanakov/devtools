@@ -1,6 +1,7 @@
 """CLI среза 1: поиск эффектов до плана (регрессия P2-3), заметки, trigger."""
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import conductor.__main__ as cli
 from conductor.gh_write import Mutation
@@ -88,3 +89,19 @@ def test_snapshot_writer_block_is_redacted_and_counts_executed(
     text = (next(out.iterdir()) / "snapshot.json").read_text(encoding="utf-8")
     assert secret not in text and "[REDACTED]" in text
     assert _snap(out)["metrics"]["actions_executed"] == 1
+
+
+def test_stage_report_cli_dates(tmp_path: Path, capsys) -> None:
+    """Ревью #542: дата без зоны — UTC; мусор — код 2, а не трейсбек."""
+    out = tmp_path / "runs"
+    run = out / "2026-10-01T010000Z"
+    run.mkdir(parents=True)
+    (run / "snapshot.json").write_text(
+        '{"started_at": "2026-10-01T01:00:00Z", "graph_state": "complete",'
+        ' "trigger": "timer", "actions": {"journal": []}}',
+        encoding="utf-8",
+    )
+    argv = ["stage-report", "--out", str(out)]
+    assert cli.main([*argv, "--since", "2026-10-01", "--until", "2026-10-02"]) == 0
+    assert '"timer_runs": 1' in capsys.readouterr().out
+    assert cli.main([*argv, "--since", "вчера", "--until", "2026-10-02"]) == 2
