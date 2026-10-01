@@ -308,14 +308,24 @@ def _publish(state, ops: Ops, run_id: str, key: str, text: str, closure: str) ->
         # (non-fast-forward запер бы ключ навсегда; ревью #482).
         if not _adopt_branch(state, branch, text):
             _push_closure(state, branch, text, closure)
-        pr = ops.create_pr(
-            state.target_dir,
-            state.repo_slug,
-            branch,
-            f"criteria-close: {state.ws_id} — {closure}",
-            f"Файл закрытия воркстрима (срез 1 оракула). closure: {closure}.",
-            "criteria-close",
-        )
+        try:
+            pr = ops.create_pr(
+                state.target_dir,
+                state.repo_slug,
+                branch,
+                f"criteria-close: {state.ws_id} — {closure}",
+                f"Файл закрытия воркстрима (срез 1 оракула). closure: {closure}.",
+                "criteria-close",
+            )
+        except (subprocess.CalledProcessError, OSError) as exc:
+            # отказ шага с диагностикой, а не трейсбек (живая приёмка: в
+            # целевом репо не было метки criteria-close); ветка уже на origin —
+            # повтор её усыновит
+            detail = (getattr(exc, "stderr", "") or str(exc)).strip()
+            raise CloseError(
+                f"gh pr create не удался для {branch} (метка criteria-close и "
+                f"права в {state.repo_slug}?): {detail[-300:]}"
+            ) from exc
     _record(run_id, key, pr=pr, branch=branch)
     if ops.review(state.repo, pr) != 0:
         return 2
@@ -671,7 +681,7 @@ def _measure(
                 + "\n  ".join(checked.problems)
             )
             return 2
-        result = criteria_check.outcome(graph, checked.beh_status)
+        result = criteria_check.outcome(graph, checked.beh_status, checked.beh_reason)
         result.report_rows.extend(f"{b}: {n}" for b, n in sorted(checked.notes.items()))
         measured_inputs = {
             "test_files": resp["test_files"],

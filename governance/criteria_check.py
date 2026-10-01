@@ -135,10 +135,19 @@ class Outcome:
     report_rows: list[str] = field(default_factory=list)
 
 
-def outcome(graph: cgr.Graph, beh_status: dict[str, str]) -> Outcome:
-    """Таблица §3.3: Must unconfirmed/error и любой error — стоп."""
-    stops = [f"граф: {e}" for e in graph.errors] + [
-        f"сирота: {o}" for o in cgr.orphan_findings(graph)
+def outcome(
+    graph: cgr.Graph,
+    beh_status: dict[str, str],
+    beh_reason: dict[str, str] | None = None,
+) -> Outcome:
+    """Таблица §3.3: Must unconfirmed/error и любой error — стоп.
+
+    Строка BEH несёт причину (`no-test`, `no-product-execution`, …) — без неё
+    закрытие не говорит, что чинить (живая приёмка §8.4). Сирота и ошибки
+    графа — «нарушение графа», отдельно от статусов измерения (§8.4 п.4)."""
+    reasons = beh_reason or {}
+    stops = [f"нарушение графа — {e}" for e in graph.errors] + [
+        f"нарушение графа — {o}" for o in cgr.orphan_findings(graph)
     ]
     rows: list[str] = []
     for beh in cgr.test_behs(graph):
@@ -146,6 +155,8 @@ def outcome(graph: cgr.Graph, beh_status: dict[str, str]) -> Outcome:
         if st == "traced":
             continue
         line = f"{beh.id} ({beh.priority}): {st}"
+        if reasons.get(beh.id):
+            line += f" — {reasons[beh.id]}"
         if st == "error" or beh.priority == "Must":
             stops.append(line)
         else:
@@ -330,6 +341,7 @@ class Checked:
     problems: list[str]
     beh_status: dict[str, str]
     notes: dict[str, str] = field(default_factory=dict)
+    beh_reason: dict[str, str] = field(default_factory=dict)
 
 
 def validate_answer(
@@ -380,6 +392,7 @@ def validate_answer(
         out.append(f"продукт пересекается с тестами: {overlap}")
     out += completeness_findings(response, owners_map)
     status: dict[str, str] = {}
+    reason: dict[str, str] = {}
     for b in response["beh"]:
         bid = b["id"].split(":", 1)[1]
         results = []
@@ -408,8 +421,11 @@ def validate_answer(
         if mine_beh != (b["status"], b.get("reason")):
             out.append(f"{bid}: статус BEH ≠ пересчёту {mine_beh}")
         status[bid] = mine_beh[0]
+        if mine_beh[1]:
+            reason[bid] = mine_beh[1]
     notes = excluded_owner_behs(response, owners_map)
-    for bid in notes:
+    for bid, note in notes.items():
         if status.get(bid) == "traced":
             status[bid] = "unconfirmed"
-    return Checked(out, status, notes)
+            reason[bid] = f"владелец не собран — {note}"
+    return Checked(out, status, notes, reason)
