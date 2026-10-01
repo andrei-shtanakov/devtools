@@ -3,6 +3,8 @@
 from datetime import UTC, datetime, timedelta
 
 import conductor.__main__ as cli
+from conductor.gh_write import Mutation
+from conductor.writer import PlanRecord, Step
 from tests.conductor.test_cli_writer import _live_world, _snap, env  # noqa: F401
 
 
@@ -53,3 +55,36 @@ def test_snapshot_carries_trigger_and_notes(env, monkeypatch) -> None:  # noqa: 
     assert cli.main([*argv, "--trigger", "timer"]) == 0
     snap = _snap(out)
     assert snap["trigger"] == "timer" and {"note": "x"} in snap["writer"]["notes"]
+
+
+def test_snapshot_writer_block_is_redacted_and_counts_executed(
+    env,  # noqa: F811
+    monkeypatch,
+) -> None:
+    """Ревью #538: блок writer и журнал действий в снимке проходят redact, как
+    journal.jsonl; metrics.actions_executed — число успешных записей."""
+    tmp, cfg, rep = _live_world(env, monkeypatch)
+    monkeypatch.setattr(cli, "level_cap", lambda args, inputs: 3)
+    secret = "ghs_" + "A" * 36
+    monkeypatch.setattr(
+        cli,
+        "plan_records",
+        lambda result, inputs, ctx: (
+            ctx.notes.append({"note": secret})
+            or [
+                PlanRecord(
+                    "nudge",
+                    "own/a#1",
+                    "r",
+                    1,
+                    (Step(Mutation("comment", "own/a", 1, text="x"), "k"),),
+                )
+            ]
+        ),
+    )
+    out = tmp / "out"
+    argv = ["run", "--replay", str(rep), "--out", str(out), "--config", str(cfg)]
+    assert cli.main(argv) == 0
+    text = (next(out.iterdir()) / "snapshot.json").read_text(encoding="utf-8")
+    assert secret not in text and "[REDACTED]" in text
+    assert _snap(out)["metrics"]["actions_executed"] == 1

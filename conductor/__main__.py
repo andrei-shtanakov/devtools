@@ -32,7 +32,7 @@ from conductor.host_config import (
     umbrella_repo,
 )
 from conductor.inputs import Inputs, RepoTodo, load_inputs, save_inputs
-from conductor.journal import MutationLog, RunJournal
+from conductor.journal import MutationLog, RunJournal, redact
 from conductor.manifest import fleet_repos
 from conductor.opstate import (
     StateError,
@@ -332,8 +332,13 @@ def _run(
         snap["writer"] = {"is_writer": False, "reason": f"CFG-INVALID: {cfg_error}"}
         code = EXIT_CONFIG
     elif cfg is not None:
-        write_code, snap["writer"], snap["actions"]["journal"] = _write_phase(
+        write_code, block, journal = _write_phase(
             args, cfg, result, inputs, run_dir, run_id
+        )
+        # как journal.jsonl: секреты не попадают и в снимок (§4.3, A11 §9.3)
+        snap["writer"], snap["actions"]["journal"] = redact(block), redact(journal)
+        snap["metrics"]["actions_executed"] = sum(
+            1 for j in journal if j.get("outcome") == "success"
         )
         code = max(code, write_code)
     _write_atomic(
