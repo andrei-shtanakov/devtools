@@ -515,6 +515,42 @@ def test_g6_pre_check_sees_new_test_file_cross_machine(tmp_path, monkeypatch):
     assert any(c[0] == "criteria_verify" for c in ops2.calls)
 
 
+def test_outside_py_change_without_content_change_gets_new_key(tmp_path, monkeypatch):
+    """Ревью раунд 2: outside_py входит в ключ измерения — непродуктовая
+    .py-правка (без изменения content_sha256, напр. scripts/tool.py без
+    токена) после смерженного закрытия пересчитывает G6 пред-проверкой
+    (I-2) и находит РАЗНЫЙ ключ, а не коллидирует веткой/PR уже
+    опубликованного закрытия того же content_sha256."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 0
+
+    new_sha = _commit(target, "scripts/tool.py", "x = 1\n")
+    _git(target, "push", "-q", "origin", "master")
+    ops2 = _ops((0, json.dumps(_response(target, new_sha, bundle_pin=pin))))
+    assert cc.run("run-1", ops2, product_sha=new_sha) == 0
+    assert any(c[0] == "criteria_verify" for c in ops2.calls)
+
+
+def test_foreign_echo_on_retryable_error_response_is_refused(tmp_path, monkeypatch):
+    """I-1 на ветке retryable (exit 2): чужой echo — отказ шага до ветвления
+    на retryable/blocking, ключ не пишется (симметрично exit-3 тесту)."""
+    _, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    foreign_req = _request(target, pin)
+    foreign_req["product_sha"] = "f" * 40
+    err = {
+        "protocol": 1,
+        "spec_runner_version": "4.5.0",
+        "request": foreign_req,
+        "error": {"kind": "clone-failed", "retryable": True, "detail": "x"},
+    }
+    ops = _ops((2, json.dumps(err)))
+    assert cc.run("run-1", ops) == 2
+    assert cc._load("run-1")["measured"] == {}
+
+
 @pytest.mark.parametrize(
     "bad_inputs",
     [

@@ -416,11 +416,15 @@ def _outside_py_digest(tree: criteria_product.Tree, files: tuple[str, ...]) -> s
 def _recompute_measurement_key(
     bundle_pin: str, root: Path, product_sha: str, stored: object
 ) -> str | None:
-    """G6: пересчитывает `f"{bundle_pin}:v1:{content_sha256}"` на
-    `product_sha` из `stored` — ранее сохранённый вход измерения
+    """G6: пересчитывает `f"{bundle_pin}:v1:{content_sha256}:{outside_py[:16]}"`
+    на `product_sha` из `stored` — ранее сохранённый вход измерения
     (`measured_inputs`/локальный `inputs`: test_files/excluded/outside_py).
-    `None` — вход неприменим (форма `stored` не та, конфиг на новом
-    product_sha снесён/невалиден, или вне-продуктовый .py-слепок
+    `outside_py` — часть ключа, не только пред-проверки (ревью раунд 2):
+    иначе правка вне продукта, не менявшая content_sha256 (напр. новый
+    файл без токена), пересчитывала бы заново, но под ТЕМ ЖЕ ключом —
+    коллизия с веткой/PR уже опубликованного закрытия того же
+    content_sha256. `None` — вход неприменим (форма `stored` не та, конфиг
+    на новом product_sha снесён/невалиден, или вне-продуктовый .py-слепок
     разошёлся, то есть появился/исчез тестовый файл — ревью I-2) —
     измерять заново. Форма `stored` — данные из committed frontmatter или
     локального state.json, не доверяется побайтово (ревью M-1): любая
@@ -453,7 +457,7 @@ def _recompute_measurement_key(
         return None
     if _outside_py_digest(tree, files) != outside_py:
         return None
-    return f"{bundle_pin}:v1:{content}"
+    return f"{bundle_pin}:v1:{content}:{outside_py[:16]}"
 
 
 def _measure(
@@ -618,7 +622,11 @@ def _measure(
         }
         closure, key, roots = (
             result.closure,
-            f"{bundle_pin}:v1:{content}",
+            # outside_py — и в ключе, не только во входе G6 (ревью раунд 2):
+            # иначе правка вне продукта, не менявшая content_sha256,
+            # перемеряла бы под ТЕМ ЖЕ ключом — коллизия с веткой/PR уже
+            # опубликованного закрытия этого content_sha256.
+            f"{bundle_pin}:v1:{content}:{measured_inputs['outside_py'][:16]}",
             list(decl.roots),
         )
         data = _load(run_id)
