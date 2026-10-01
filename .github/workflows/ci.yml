@@ -92,3 +92,12 @@ jobs:
           e, n = f(CONTRACT_DIR / 'fixtures/ownership', Path('spec-runner-upstream'), ci=True,
           upstream_path='tests/fixtures/criteria-closure/v1/ownership');
           print(*e, *n, sep='\n'); sys.exit(1 if e else 0)"
+      # Эталонные ответы v1 (devtools#532): своя копия со своим PIN; у
+      # производителя — tests/fixtures/criteria-closure/v1/responses.
+      - name: criteria-closure/v1 response goldens drift
+        run: >
+          uv run --frozen python -c "import sys; from pathlib import Path;
+          from governance.criteria_contract import RESPONSES_DIR, drift_findings as f;
+          e, n = f(RESPONSES_DIR, Path('spec-runner-upstream'), ci=True,
+          upstream_path='tests/fixtures/criteria-closure/v1/responses');
+          print(*e, *n, sep='\n'); sys.exit(1 if e else 0)"
