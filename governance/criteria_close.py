@@ -394,26 +394,64 @@ def _known(run_id: str, keys: list[str]) -> tuple[str, dict] | None:
     return None
 
 
-def _recompute_content_key(
-    bundle_pin: str,
-    root: Path,
-    product_sha: str,
-    test_files: list[str],
-    excluded: list[str],
+def _outside_py_digest(tree: criteria_product.Tree, files: tuple[str, ...]) -> str:
+    """sha256 отсортированных (путь, blob-sha) всех отслеживаемых .py вне
+    продуктовых файлов на `tree.sha` — слепок владельцев токена (§1.4).
+    `tracked_py` уже отдаёт пути отсортированными; blob-sha — из
+    `Tree.entries()`, не из содержимого (ревью I-2: новый тестовый файл с
+    токеном обязан сдвинуть пред-проверку G6, не только content_sha256,
+    который его не видит — content_sha256 строится по test_files ОТВЕТА)."""
+    entries = tree.entries()
+    h = hashlib.sha256()
+    for path in criteria_product.tracked_py(tree):
+        if path in files:
+            continue
+        h.update(path.encode())
+        h.update(b"\0")
+        h.update(entries[path][1].encode())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _recompute_measurement_key(
+    bundle_pin: str, root: Path, product_sha: str, stored: object
 ) -> str | None:
-    """`f"{bundle_pin}:v1:{content_sha256}"` на `product_sha` для заданного
-    входа (test_files/excluded уже ИЗМЕРЕННОГО ответа — локального или
-    чужой машины); `None` — вход на этом product_sha не применим (конфиг
-    снесён/невалиден), измерять заново."""
+    """G6: пересчитывает `f"{bundle_pin}:v1:{content_sha256}"` на
+    `product_sha` из `stored` — ранее сохранённый вход измерения
+    (`measured_inputs`/локальный `inputs`: test_files/excluded/outside_py).
+    `None` — вход неприменим (форма `stored` не та, конфиг на новом
+    product_sha снесён/невалиден, или вне-продуктовый .py-слепок
+    разошёлся, то есть появился/исчез тестовый файл — ревью I-2) —
+    измерять заново. Форма `stored` — данные из committed frontmatter или
+    локального state.json, не доверяется побайтово (ревью M-1): любая
+    неверная форма отбрасывает кандидата, а не роняет KeyError/TypeError."""
+    if not isinstance(stored, dict):
+        return None
+    test_files, excluded, outside_py = (
+        stored.get("test_files"),
+        stored.get("excluded"),
+        stored.get("outside_py"),
+    )
+    if (
+        not isinstance(test_files, list)
+        or not all(isinstance(p, str) for p in test_files)
+        or not isinstance(excluded, list)
+        or not all(isinstance(p, str) for p in excluded)
+        or not isinstance(outside_py, str)
+    ):
+        return None
     tree = criteria_product.Tree(root, product_sha)
     try:
         decl = criteria_product.read_declaration(tree)
+        files = criteria_product.resolve_roots(tree, decl.roots)
         lock = tree.blob("uv.lock")
         lock_sha = hashlib.sha256(lock).hexdigest() if lock is not None else ""
         content = criteria_product.content_sha256(
             tree, decl, lock_sha, test_files, excluded
         )
     except criteria_product.ProductError:
+        return None
+    if _outside_py_digest(tree, files) != outside_py:
         return None
     return f"{bundle_pin}:v1:{content}"
 
@@ -442,9 +480,7 @@ def _measure(
     cands = [_tree_key(bundle_pin, root, product_sha)]
     inputs = _load(run_id).get("inputs")
     if inputs:
-        k = _recompute_content_key(
-            bundle_pin, root, product_sha, inputs["test_files"], inputs["excluded"]
-        )
+        k = _recompute_measurement_key(bundle_pin, root, product_sha, inputs)
         if k is not None:
             cands.insert(0, k)
     if (
@@ -453,9 +489,8 @@ def _measure(
         and remote.get("product_roots")
         and remote.get("measured_inputs")
     ):
-        mi = remote["measured_inputs"]
-        k = _recompute_content_key(
-            bundle_pin, root, product_sha, mi["test_files"], mi["excluded"]
+        k = _recompute_measurement_key(
+            bundle_pin, root, product_sha, remote["measured_inputs"]
         )
         if k is not None:
             cands.insert(0, k)
@@ -501,6 +536,13 @@ def _measure(
         print(f"criteria-close: отказ шага — {why}")
         return 2
     resp = parsed.response
+    if "request" in resp and resp["request"] != request:
+        # §5.3: эхо не доверяется ни в одной ветке, включая ошибку — чужой/
+        # устаревший ответ (product_sha/code/bundle_pin не те) не должен
+        # сжигать G6 этого содержимого публикацией blocked под его ключом
+        # (review I-1). Ничего не пишется и не публикуется.
+        print("criteria-close: отказ шага — эхо request не совпало с запросом")
+        return 2
     if parsed.branch == "error" and parsed.retryable:
         e = resp["error"]
         print(
@@ -567,7 +609,13 @@ def _measure(
             return 2
         result = criteria_check.outcome(graph, checked.beh_status)
         result.report_rows.extend(f"{b}: {n}" for b, n in sorted(checked.notes.items()))
-        measured_inputs = {"test_files": resp["test_files"], "excluded": excluded}
+        measured_inputs = {
+            "test_files": resp["test_files"],
+            "excluded": excluded,
+            # вне-продуктовый .py-слепок — часть входа измерения: новый
+            # тестовый файл с токеном обязан сдвинуть G6 (ревью I-2).
+            "outside_py": _outside_py_digest(tree, files),
+        }
         closure, key, roots = (
             result.closure,
             f"{bundle_pin}:v1:{content}",

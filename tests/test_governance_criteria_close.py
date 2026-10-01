@@ -310,6 +310,22 @@ def test_retryable_error_is_step_failure_without_key(tmp_path, monkeypatch):
     assert cc.run("run-1", _ops((2, json.dumps(err)))) == 2  # повтор не упирается в G6
 
 
+def test_retryable_error_then_honest_answer_measures(tmp_path, monkeypatch):
+    """M-2(iii): exit 2 ничего не сжигает — честный exit 0 следом измеряет."""
+    _, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    err = {
+        "protocol": 1,
+        "spec_runner_version": "4.5.0",
+        "request": _request(target, pin),
+        "error": {"kind": "clone-failed", "retryable": True, "detail": "x"},
+    }
+    assert cc.run("run-1", _ops((2, json.dumps(err)))) == 2
+    ops2 = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops2) == 0
+    assert any(c[0] == "criteria_verify" for c in ops2.calls)
+
+
 def test_blocking_error_publishes_blocked(tmp_path, monkeypatch):
     _, target, pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
@@ -337,6 +353,31 @@ def test_exit_code_contradicting_kind_is_refused(tmp_path, monkeypatch):
     assert cc.run("run-1", _ops((2, json.dumps(err)))) == 2
 
 
+def test_foreign_echo_on_error_response_is_refused(tmp_path, monkeypatch):
+    """§5.3: эхо `request` не доверяется и в ветке ошибки — чужой
+    product_sha/code — отказ шага, а не blocked; ключ не пишется, PR не
+    создаётся, и G6 для настоящего содержимого этим не сжигается: честный
+    ответ позже всё ещё измеряет (review I-1)."""
+    _, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    foreign_req = _request(target, pin)
+    foreign_req["product_sha"] = "f" * 40
+    err = {
+        "protocol": 1,
+        "spec_runner_version": "4.5.0",
+        "request": foreign_req,
+        "error": {"kind": "lock-not-current", "retryable": False, "detail": "stale"},
+    }
+    ops = _ops((3, json.dumps(err)))
+    assert cc.run("run-1", ops) == 2
+    assert cc._load("run-1")["measured"] == {}
+    assert not any(c[0] == "create_pr" for c in ops.calls)
+
+    ops2 = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops2) == 0
+    assert any(c[0] == "criteria_verify" for c in ops2.calls)
+
+
 def test_owner_missing_from_test_files_blocks_through_close(tmp_path, monkeypatch):
     """Интеграция пробела 1: BEH-01 traced по tests/test_a.py, но второй
     владелец токена лежит в tests/extra/test_b.py, которого нет ни в
@@ -353,6 +394,24 @@ def test_owner_missing_from_test_files_blocks_through_close(tmp_path, monkeypatc
     assert cc.run("run-1", ops) == 0
     meta, _ = split_frontmatter(_closure_on_origin(target, ops))
     assert meta["closure"] == "blocked"
+
+
+def test_notes_reach_report_rows(tmp_path, monkeypatch):
+    """M-2(ii): понижение traced→unconfirmed из-за несобранного владельца
+    (excluded_owner_behs) оставляет след в `## Отчёт` опубликованного файла,
+    не только в возвращаемом статусе."""
+    _, target, pin = _env(
+        tmp_path,
+        monkeypatch,
+        extra={
+            "tests/extra/test_b.py": "def test_b():\n    # ENC:BEH-01\n    assert 1\n"
+        },
+    )
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 0
+    text = _closure_on_origin(target, ops)
+    assert "tests/extra/test_b.py" in text and "BEH-01" in text
 
 
 def test_same_content_second_measure_is_g6(tmp_path, monkeypatch):
@@ -405,6 +464,97 @@ def test_same_content_on_another_machine_refused(tmp_path, monkeypatch):
     ops3 = _ops((0, json.dumps(_response(target, changed, bundle_pin=pin))))
     assert cc.run("run-1", ops3, product_sha=changed) == 0
     assert any(c[0] == "criteria_verify" for c in ops3.calls)
+
+
+def test_g6_pre_check_sees_new_test_file_same_machine(tmp_path, monkeypatch):
+    """I-2: после blocked/unconfirmed-закрытия стандартное лекарство —
+    новый тестовый файл с токеном — не должно отказываться как «уже
+    измерено»; неизменное содержимое по-прежнему держит G6."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
+    assert cc.run("run-1", ops) == 0
+    calls_before = sum(1 for c in ops.calls if c[0] == "criteria_verify")
+    assert cc.run("run-1", ops) == 6  # неизменное содержимое — G6 держит
+    assert sum(1 for c in ops.calls if c[0] == "criteria_verify") == calls_before
+
+    new_sha = _commit(
+        target,
+        "tests/test_new.py",
+        "def test_new():\n    # ENC:BEH-01\n    assert 1\n",
+    )
+    _git(target, "push", "-q", "origin", "master")
+    ops2 = _ops((0, json.dumps(_response(target, new_sha, bundle_pin=pin))))
+    assert cc.run("run-1", ops2, product_sha=new_sha) == 0
+    assert any(c[0] == "criteria_verify" for c in ops2.calls)
+
+
+def test_g6_pre_check_sees_new_test_file_cross_machine(tmp_path, monkeypatch):
+    """I-2, другая машина: тот же новый тестовый файл после merge закрытия
+    на default — пред-проверка по `measured_inputs` тоже не должна его
+    прятать за совпавшим `content_key`."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
+    assert cc.run("run-1", ops) == 0
+    branch = next(c[1] for c in ops.calls if c[0] == "create_pr")
+    _git(target, "fetch", "-q", "origin", branch)
+    _git(target, "merge", "-q", "--ff-only", f"origin/{branch}")
+    _git(target, "push", "-q", "origin", "master")
+
+    new_sha = _commit(
+        target,
+        "tests/test_new.py",
+        "def test_new():\n    # ENC:BEH-01\n    assert 1\n",
+    )
+    _git(target, "push", "-q", "origin", "master")
+
+    monkeypatch.setattr(cc, "STATE_ROOT", tmp_path / "other-machine")
+    ops2 = _ops((0, json.dumps(_response(target, new_sha, bundle_pin=pin))))
+    assert cc.run("run-1", ops2, product_sha=new_sha) == 0
+    assert any(c[0] == "criteria_verify" for c in ops2.calls)
+
+
+@pytest.mark.parametrize(
+    "bad_inputs",
+    [
+        "not-a-dict",
+        {"test_files": ["tests/test_a.py"]},  # нет excluded/outside_py
+        {"test_files": "not-a-list", "excluded": [], "outside_py": "x"},
+        {"test_files": [], "excluded": [], "outside_py": 7},  # outside_py не str
+    ],
+)
+def test_malformed_remote_measured_inputs_drops_candidate_not_crash(
+    tmp_path, monkeypatch, bad_inputs
+):
+    """M-1: битый `measured_inputs` на origin (не словарь/не хватает ключей/
+    неверные типы) отбрасывает кандидата, а не роняет пред-проверку
+    KeyError/TypeError — измерение идёт заново."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    bad_meta = {
+        "bundle_pin": pin,
+        "product_roots": ["pkg"],
+        "measured_inputs": bad_inputs,
+        "content_key": f"{pin}:v1:deadbeef",
+    }
+    monkeypatch.setattr(cc, "_remote_closure", lambda state: bad_meta)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 0
+    assert any(c[0] == "criteria_verify" for c in ops.calls)
+
+
+def test_validate_answer_refusal_records_nothing(tmp_path, monkeypatch):
+    """M-2(i): отказ validate_answer (здесь — подделанный content_sha256) —
+    отказ шага, ничего не записывается в measured, PR не создаётся."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    resp = _response(target, pin)
+    resp["content_sha256"] = "0" * 64
+    ops = _ops((0, json.dumps(resp)))
+    assert cc.run("run-1", ops) == 2
+    assert cc._load("run-1")["measured"] == {}
+    assert not any(c[0] == "create_pr" for c in ops.calls)
 
 
 def test_dirty_tree_refused(tmp_path, monkeypatch):
