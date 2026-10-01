@@ -519,21 +519,23 @@ def test_duplicate_test_item_node_id_refused():
     assert any("test_a" in f and "повтор" in f for f in findings)
 
 
-def test_deselected_null_definition_falls_back_to_node_id_file():
-    """Минор (c): `definition: null` у deselected (§3.5) — владелец всё
-    равно узнаётся по части node_id до `::`."""
+def test_deselected_null_definition_never_blocks_an_owner():
+    """Round 2 ruling: `definition: null` (§3.5) значит «не функция/не
+    разобран» — такой элемент не может владеть токеном, поэтому снятый с
+    отбора посторонний элемент того же файла (напр. doctest) не должен
+    блокировать честно собранного и выбранного владельца."""
     o = ck.owners({"tests/test_a.py": SRC}, "ENC", ["BEH-01"])
-    dropped = {
+    unrelated = {
         "how": "deselected",
-        "node_id": "tests/test_a.py::test_a[2]",
+        "node_id": "tests/test_a.py::test_other",
         "definition": None,
     }
     resp = answer(
-        [item("tests/test_a.py::test_a[1]")],
-        [item("tests/test_a.py::test_a[1]")],
-        [dropped],
+        [item("tests/test_a.py::test_a")],
+        [item("tests/test_a.py::test_a")],
+        [unrelated],
     )
-    assert "BEH-01" in ck.excluded_owner_behs(resp, o)
+    assert "BEH-01" not in ck.excluded_owner_behs(resp, o)
 
 
 @pytest.mark.parametrize(

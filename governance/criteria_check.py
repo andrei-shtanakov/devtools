@@ -120,16 +120,10 @@ def excluded_owner_behs(
             for e in excluded:
                 if e["how"] in ("skipped", "ignored") and _covers(e["path"], d[0]):
                     why = f"владелец в исключённом ({e['how']}) {e['path']}"
-                elif e["how"] == "deselected":
-                    # §3.5: definition может быть null (нерасшифрован/не-Python);
-                    # узнаваем файл владельца по части node_id до "::" (fail-closed).
-                    owner_match = (
-                        _def(e) == d
-                        if e["definition"]
-                        else e["node_id"].split("::", 1)[0] == d[0]
-                    )
-                    if owner_match:
-                        why = f"тест владельца снят с отбора ({e['node_id']})"
+                elif e["how"] == "deselected" and e["definition"] and _def(e) == d:
+                    # definition: null (§3.5) — элемент не функция/не разобран,
+                    # токеном владеть не может, отбор по нему не блокирует.
+                    why = f"тест владельца снят с отбора ({e['node_id']})"
                 if why:
                     break
             if why is None and d not in collected:
