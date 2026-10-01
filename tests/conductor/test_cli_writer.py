@@ -12,7 +12,7 @@ import conductor.__main__ as cli
 from conductor.app_calls import AppCalls, init_host, journal_path
 from conductor.gh_write import Mutation
 from conductor.inputs import save_inputs
-from conductor.opstate import init_state
+from conductor.opstate import OpState, init_state
 from conductor.roadmap import parse_roadmap
 from conductor.writer import PlanRecord, Step
 from tests.conductor.fake_app import FakeClient
@@ -227,3 +227,21 @@ def test_init_state_of_new_profile_keeps_lost_ban(env) -> None:
     until = reopened.blocked_until()
     assert until is not None and until > datetime.now(UTC) + timedelta(minutes=55)
     assert [r["t"] for r in reopened.rows] == ["lost"]
+
+
+def test_opstate_write_failure_is_finding_and_exit_4(env, monkeypatch) -> None:
+    """Ревью #538: общий отзыв по OPSTATE-WRITE — находка в снимке и код 4
+    (§4.6), а не «успешный» прогон."""
+    tmp, cfg, rep = _live_world(env, monkeypatch)
+    monkeypatch.setattr(cli, "level_cap", lambda args, inputs: 3)
+
+    def boom(self, **_: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(OpState, "begin_attempt", boom)
+    out = tmp / "out"
+    argv = ["run", "--replay", str(rep), "--out", str(out), "--config", str(cfg)]
+    assert cli.main(argv) == 4
+    snap = _snap(out)
+    assert "OPSTATE-WRITE" in snap["writer"]["findings"]
+    assert [j["reason"] for j in snap["actions"]["journal"]] == ["OPSTATE-WRITE"]

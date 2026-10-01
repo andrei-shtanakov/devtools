@@ -86,7 +86,8 @@ def check_target(client: Caller, m: Mutation) -> TargetCheck:
     if data is None:
         return TargetCheck(False, "TARGET-UNREAD")
     if m.op == "create":
-        same = data.get("full_name") == m.repo
+        # имена репо на GitHub регистронезависимы — как у ветки issue ниже
+        same = str(data.get("full_name", "")).lower() == m.repo.lower()
         return TargetCheck(same, "" if same else "TARGET-MOVED")
     url = str(data.get("repository_url", "")).lower()
     if data.get("number") != m.number or not url.endswith(f"/repos/{m.repo.lower()}"):

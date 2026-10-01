@@ -108,3 +108,10 @@ def test_verify_unreadable_control_read_is_uncertain() -> None:
     client.override[("GET", "/repos/o/r/issues/1")] = CallResult("uncertain", None)
     assert verify(client, close, resp, bot) == "цель не прочитана после записи"
     assert verify(client, close, None, bot) == "ответ мутации не разобран"
+
+
+def test_check_target_create_repo_name_is_case_insensitive() -> None:
+    """Ревью #538: регистр owner/name в манифесте не делает репо «перенесённым»."""
+    client = FakeClient()
+    client.override[("GET", "/repos/Own/R")] = ok({"full_name": "own/r"})
+    assert check_target(client, Mutation("create", "Own/R", text="b", title="q")).ok

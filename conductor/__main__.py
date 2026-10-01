@@ -255,6 +255,8 @@ def _write_phase(
     except StopPoint as stop:
         block = {"is_writer": True, "reason": f"точка остановки {stop.name}"}
         return EXIT_STOP, block, [{"stop_point": stop.name}]
+    if writer.stopped is not None and "OPSTATE-WRITE" in writer.stopped:
+        findings.append("OPSTATE-WRITE")  # §4.6: находка в снимке и код 4
     block = {
         "is_writer": True,
         "reason": "тень" if cfg.shadow else "запись",
