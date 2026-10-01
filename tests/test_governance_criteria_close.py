@@ -657,6 +657,65 @@ def test_noop_outside_py_edit_after_merged_closure_is_g6(tmp_path, monkeypatch):
     assert not any(c[0] == "criteria_verify" for c in ops3.calls)
 
 
+_OUTSIDE_KEY = (
+    "Изменились файлы вне ключа измерения: tests/helpers.py; ключ остался прежним"
+)
+
+
+def test_fixed_helper_outside_key_is_explicit_refusal(tmp_path, monkeypatch, capsys):
+    """Решение владельца (criteria-close-key-outside-helpers): хелпер тестов
+    вне test_files исправлен, ответ вернул уже измеренный ключ — прежнее
+    закрытие остаётся, новый результат не публикуется, код 6. Диагностика
+    называет изменившиеся файлы вне ключа и не утверждает причинность."""
+    _state, target, pin = _env(
+        tmp_path, monkeypatch, extra={"tests/helpers.py": "OK = False\n"}
+    )
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
+    assert cc.run("run-1", ops) == 0
+    (key,) = cc._load("run-1")["measured"]
+    before = dict(cc._entry("run-1", key))
+    capsys.readouterr()
+
+    fixed = _commit(target, "tests/helpers.py", "OK = True\n")
+    _git(target, "push", "-q", "origin", "master")
+    ops2 = _ops((0, json.dumps(_response(target, fixed, "unconfirmed", pin))))
+    assert cc.run("run-1", ops2, product_sha=fixed) == 6
+    out = capsys.readouterr().out
+    assert _OUTSIDE_KEY in out and "Новый результат не опубликован" in out
+    assert "решающее" not in out and "доработайте продукт" not in out
+    assert "--new-attempt" not in out
+    # перечисление не выдаёт себя за полное: не-.py данные тестов не видны (#540)
+    assert "не-.py данные тестов не отслеживаются" in out
+    assert not any(c[0] in ("create_pr", "review") for c in ops2.calls)
+    assert cc._entry("run-1", key) == before
+
+
+def test_fixed_helper_refusal_from_another_machine(tmp_path, monkeypatch, capsys):
+    """Тот же отказ на машине без локального состояния: прежний product_sha —
+    из frontmatter закрытия на default-ветке."""
+    _state, target, pin = _env(
+        tmp_path, monkeypatch, extra={"tests/helpers.py": "OK = False\n"}
+    )
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
+    assert cc.run("run-1", ops) == 0
+    branch = next(c[1] for c in ops.calls if c[0] == "create_pr")
+    _git(target, "fetch", "-q", "origin", branch)
+    _git(target, "merge", "-q", "--ff-only", f"origin/{branch}")
+    _git(target, "push", "-q", "origin", "master")
+    capsys.readouterr()
+
+    fixed = _commit(target, "tests/helpers.py", "OK = True\n")
+    _git(target, "push", "-q", "origin", "master")
+    monkeypatch.setattr(cc, "STATE_ROOT", tmp_path / "other-machine")
+    ops2 = _ops((0, json.dumps(_response(target, fixed, "unconfirmed", pin))))
+    assert cc.run("run-1", ops2, product_sha=fixed) == 6
+    out = capsys.readouterr().out
+    assert _OUTSIDE_KEY in out and "Новый результат не опубликован" in out
+    assert not any(c[0] in ("create_pr", "review") for c in ops2.calls)
+
+
 def test_post_check_unpublished_key_publishes_first_result(tmp_path, monkeypatch):
     """Ревью #532: пост-проверка нашла ключ, измеренный, но ещё не смерженный
     (ревью упало) — публикуется ПЕРВЫЙ результат (текст на P1), второй не
