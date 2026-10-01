@@ -250,3 +250,82 @@ def parse_response(
     if code != 0:
         return None, f"код выхода {code} при ответе"
     return Parsed(resp, "answer", False), None
+
+
+_BEH_PRECEDENCE = (
+    "not-passed",
+    "nondeterministic",
+    "no-product-execution",
+    "subprocess-only",
+)
+
+
+def run_outcome(phases: dict[str, str]) -> str:
+    """§3.7: исход прогона по трём фазам, как решает pytest.
+
+    `passed` только если setup, call и teardown все `passed`. Иначе `failed`
+    (любая фаза `failed`), иначе `skipped` — пропущенный teardown никогда не
+    даёт `traced`.
+    """
+    values = [phases["setup"], phases["call"], phases["teardown"]]
+    if all(v == "passed" for v in values):
+        return "passed"
+    return "failed" if "failed" in values else "skipped"
+
+
+def _qualifying_lines(run: dict, function_lines: dict[str, set[int]]) -> int:
+    """Число строк продукта из прогона, попавших в тела функций-владельцев."""
+    return sum(
+        1
+        for block in run["product_lines"]
+        for line in block["lines"]
+        if line in function_lines.get(block["file"], set())
+    )
+
+
+def selector_status(
+    sel: dict, function_lines: dict[str, set[int]]
+) -> tuple[str, str | None]:
+    """§3.7 по порядку, первое подходящее решает; оба прогона обязаны пройти
+    каждую проверку — ни объединение, ни счёт по прогонам не прячут пустой
+    второй прогон за хорошим первым.
+    """
+    runs = sel["runs"]
+    for r in runs:
+        if r["result"] == "error":
+            return "error", r["reason"]
+    outcomes = [run_outcome(r["phases"]) for r in runs]
+    if any(o != "passed" for o in outcomes):
+        same = runs[0]["phases"] == runs[1]["phases"]
+        return (
+            ("unconfirmed", "not-passed")
+            if same
+            else ("unconfirmed", "nondeterministic")
+        )
+    for r in runs:
+        if _qualifying_lines(r, function_lines) == 0:
+            reason = (
+                "subprocess-only" if r["process_operations"] else "no-product-execution"
+            )
+            return "unconfirmed", reason
+    return "traced", None
+
+
+def beh_status(
+    selector_results: list[tuple[str, str | None]],
+) -> tuple[str, str | None]:
+    """§3.7: BEH `traced` только если каждый выбранный тест `traced` (норма
+    G3 «каждый»); иначе `error`, если есть хоть один селектор-`error`; иначе
+    `unconfirmed` с причиной первого проигравшего селектора по приоритету
+    `not-passed` > `nondeterministic` > `no-product-execution` >
+    `subprocess-only`.
+    """
+    if not selector_results:
+        return "unconfirmed", "no-test"
+    if all(status == "traced" for status, _ in selector_results):
+        return "traced", None
+    errors = [reason for status, reason in selector_results if status == "error"]
+    if errors:
+        return "error", errors[0]
+    reasons = {reason for status, reason in selector_results if status == "unconfirmed"}
+    return "unconfirmed", next(p for p in _BEH_PRECEDENCE if p in reasons)

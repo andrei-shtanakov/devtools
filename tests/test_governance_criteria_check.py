@@ -302,3 +302,108 @@ def test_traced_without_selectors_refused_even_when_no_test_expected():
 def test_repo_root_as_product_root_refused(roots):
     """I-2: корень `.` включает тесты — их тела засчитывались бы продуктом."""
     assert check(mutate(lambda r: r.update(product_roots=roots))) != []
+
+
+LINES_3_7 = {"pkg/mod.py": {3, 4}}
+
+
+def run_3_7(**over):
+    base = {
+        "result": "complete",
+        "collected": ["t::a"],
+        "phases": {"setup": "passed", "call": "passed", "teardown": "passed"},
+        "outcome": "passed",
+        "product_lines": [{"file": "pkg/mod.py", "lines": [3, 4]}],
+        "product_line_count": 2,
+        "process_operations": [],
+    }
+    return {**base, **over}
+
+
+def sel_3_7(*runs):
+    return {"node_id": "t::a", "runs": list(runs)}
+
+
+@pytest.mark.parametrize(
+    ("phases", "want"),
+    [
+        ({"setup": "passed", "call": "passed", "teardown": "passed"}, "passed"),
+        ({"setup": "passed", "call": "passed", "teardown": "failed"}, "failed"),
+        ({"setup": "passed", "call": "passed", "teardown": "skipped"}, "skipped"),
+        ({"setup": "skipped", "call": "not-reached", "teardown": "passed"}, "skipped"),
+    ],
+)
+def test_run_outcome_over_three_phases(phases, want):
+    assert ck.run_outcome(phases) == want
+
+
+def test_both_runs_traced():
+    assert ck.selector_status(sel_3_7(run_3_7(), run_3_7()), LINES_3_7) == (
+        "traced",
+        None,
+    )
+
+
+def test_empty_second_run_is_not_traced():
+    empty = run_3_7(product_lines=[], product_line_count=0)
+    assert ck.selector_status(sel_3_7(run_3_7(), empty), LINES_3_7) == (
+        "unconfirmed",
+        "no-product-execution",
+    )
+
+
+def test_lines_outside_function_bodies_do_not_qualify():
+    header = run_3_7(
+        product_lines=[{"file": "pkg/mod.py", "lines": [1]}], product_line_count=1
+    )
+    assert (
+        ck.selector_status(sel_3_7(header, header), LINES_3_7)[1]
+        == "no-product-execution"
+    )
+
+
+def test_subprocess_only():
+    child = run_3_7(
+        product_lines=[], product_line_count=0, process_operations=["subprocess.Popen"]
+    )
+    assert ck.selector_status(sel_3_7(child, child), LINES_3_7) == (
+        "unconfirmed",
+        "subprocess-only",
+    )
+
+
+def test_error_run_wins():
+    err = {"result": "error", "reason": "io", "detail": "x"}
+    assert ck.selector_status(sel_3_7(run_3_7(), err), LINES_3_7) == ("error", "io")
+
+
+def test_nondeterministic_vs_not_passed():
+    failed = run_3_7(
+        phases={"setup": "passed", "call": "failed", "teardown": "passed"},
+        outcome="failed",
+    )
+    assert ck.selector_status(sel_3_7(run_3_7(), failed), LINES_3_7) == (
+        "unconfirmed",
+        "nondeterministic",
+    )
+    assert ck.selector_status(sel_3_7(failed, failed), LINES_3_7) == (
+        "unconfirmed",
+        "not-passed",
+    )
+
+
+def test_teardown_skipped_never_traced():
+    t = run_3_7(
+        phases={"setup": "passed", "call": "passed", "teardown": "skipped"},
+        outcome="skipped",
+    )
+    assert ck.selector_status(sel_3_7(t, t), LINES_3_7) == ("unconfirmed", "not-passed")
+
+
+def test_beh_precedence():
+    assert ck.beh_status([]) == ("unconfirmed", "no-test")
+    assert ck.beh_status([("traced", None), ("traced", None)]) == ("traced", None)
+    assert ck.beh_status([("traced", None), ("error", "io")]) == ("error", "io")
+    assert ck.beh_status(
+        [("unconfirmed", "subprocess-only"), ("unconfirmed", "not-passed")]
+    ) == ("unconfirmed", "not-passed")
