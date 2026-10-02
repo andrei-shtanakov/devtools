@@ -9,11 +9,13 @@ from pathlib import Path
 
 import pytest
 
+from governance import approval_facts as af
 from governance import charter_guard as cg
+from governance import criteria_accept, run_state
 from governance import criteria_close as cc
 from governance import criteria_contract as ctr
 from governance import criteria_product as cp
-from governance import run_state
+from governance.facts import Fact, Outcome
 from governance.frontmatter import split_frontmatter
 
 MIN = ctr.MinVersion("4.3.0")
@@ -82,6 +84,41 @@ def _git(repo, *args):
     ).stdout.strip()
 
 
+SNAP = af.PolicySnapshot(
+    "owner/approval-policy",
+    "main",
+    "policy/approvers.env",
+    "a" * 40,
+    frozenset({"owner-human"}),
+    af.policy_fingerprint({"owner-human"}),
+)
+
+
+def _forge_merge(ops, pr, login):
+    """Мерж PR форджей: --no-ff ветки PR в master origin из отдельного клона."""
+    rec = ops.forge_prs[pr]
+    target = Path(rec["dir"])
+    clone = target.parent / "forge"
+    if not clone.exists():
+        origin = _git(target, "remote", "get-url", "origin")
+        subprocess.run(
+            ["git", "clone", "-q", origin, str(clone)], check=True, capture_output=True
+        )
+    _git(clone, "fetch", "-q", "origin")
+    _git(clone, "checkout", "-q", "-B", "master", "origin/master")
+    head = _git(clone, "rev-parse", f"origin/{rec['branch']}")
+    _git(clone, "merge", "-q", "--no-ff", "-m", f"Merge PR #{pr}", head)
+    _git(clone, "push", "-q", "origin", "master")
+    rec["facts"] = {
+        "state": "MERGED",
+        "headRefOid": head,
+        "baseRefName": "master",
+        "mergedBy": {"login": login},
+        "mergedAt": "2026-10-02T00:00:00Z",
+        "mergeCommit": {"oid": _git(clone, "rev-parse", "HEAD")},
+    }
+
+
 def _ops(verify=(0, "")):
     from tests.test_governance_runner import FakeOps
 
@@ -92,18 +129,69 @@ def _ops(verify=(0, "")):
             self.calls.append(("create_pr", branch, label))
             number = 100 + len(self.existing_prs)
             self.existing_prs[branch] = number
+            head = _git(target_dir, "ls-remote", "origin", f"refs/heads/{branch}")
+            self.forge_prs[number] = {
+                "dir": target_dir,
+                "branch": branch,
+                "facts": {
+                    "state": "OPEN",
+                    "headRefOid": head.split()[0],
+                    "baseRefName": "master",
+                },
+            }
             return number
+
+        def find_pr(self, repo_slug, branch):
+            """Как `gh pr list --state open`: закрытый/влитый PR не находится."""
+            self.calls.append(("find_pr", branch))
+            pr = self.existing_prs.get(branch)
+            if pr is None or pr not in self.forge_prs:
+                return pr
+            return pr if self.forge_prs[pr]["facts"]["state"] == "OPEN" else None
 
         def close_pr(self, repo_slug, pr, comment):
             self.calls.append(("close_pr", pr))
+            if pr in self.forge_prs:
+                self.forge_prs[pr]["facts"]["state"] = "CLOSED"
             return True
 
         def criteria_verify(self, target_dir, request_path):
             self.calls.append(("criteria_verify", request_path))
             return self.verify
 
+        def merge(self, repo_name, pr, sha, base=None):
+            self.calls.append(("merge", pr, sha))
+            if not self.merge_ok:
+                return self.merge_code
+            self.merged.append((pr, sha))
+            _forge_merge(self, pr, "ai-prosto")
+            return 0
+
+        def pr_facts(self, repo_slug, pr):
+            self.calls.append(("pr_facts", pr))
+            if self.pr_facts_error:
+                raise RuntimeError(self.pr_facts_error)
+            return dict(self.forge_prs[pr]["facts"])
+
+        def agent_login(self):
+            return "ai-prosto"
+
+        def prs_by_head_prefix(self, repo_slug, branch_prefix):
+            return list(self.approval_prs)
+
+        def is_ancestor(self, target_dir, sha, ref):
+            rc = subprocess.run(
+                ["git", "-C", target_dir, "merge-base", "--is-ancestor", sha, ref],
+                capture_output=True,
+                check=False,
+            ).returncode
+            return {0: True, 1: False}.get(rc)
+
     ops = _Ops()
     ops.verify = verify
+    ops.forge_prs = {}
+    ops.approval_prs = []
+    ops.pr_facts_error = None
     return ops
 
 
@@ -170,12 +258,22 @@ def _env(
     return state, target, pin
 
 
-def _oracle_on(monkeypatch):
+def _oracle_on(monkeypatch, snapshot=None):
     monkeypatch.setattr(cc.task_bridge, "spec_runner_version", lambda: "4.5.0")
     monkeypatch.setattr(cc.criteria_contract, "vendored", lambda *a: True)
     monkeypatch.setattr(
         cc.criteria_contract, "read_min_version", lambda *a: ctr.MinVersion("4.5.0")
     )
+    fact = snapshot or Fact(Outcome.FOUND, SNAP, "stub")
+    monkeypatch.setattr(
+        cc.approval_facts, "policy_snapshot", lambda ops, *, pinned_sha: fact
+    )
+
+
+def _land(target):
+    """Чекаут оператора догоняет origin/master (форджа влила закрытие/штамп)."""
+    _git(target, "pull", "-q", "--ff-only", "origin", "master")
+    return _git(target, "rev-parse", "HEAD")
 
 
 def _request(target, bundle_pin, product_sha=None):
@@ -539,6 +637,7 @@ def test_same_content_second_measure_is_g6(tmp_path, monkeypatch):
     ops = _ops((0, json.dumps(_response(target, pin))))
     assert cc.run("run-1", ops) == 0
     calls = sum(c[0] == "criteria_verify" for c in ops.calls)
+    _land(target)  # форджа влила закрытие; повтор на той же верхушке
     assert cc.run("run-1", ops) == 6
     assert sum(c[0] == "criteria_verify" for c in ops.calls) == calls  # G6 без вызова
 
@@ -551,6 +650,7 @@ def test_same_content_new_response_refused(tmp_path, monkeypatch):
     ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
     assert cc.run("run-1", ops) == 0
     calls = sum(1 for c in ops.calls if c[0] == "criteria_verify")
+    _land(target)  # форджа влила закрытие; повтор на той же верхушке
     assert cc.run("run-1", ops) == 6
     assert sum(1 for c in ops.calls if c[0] == "criteria_verify") == calls
 
@@ -566,11 +666,7 @@ def test_same_content_on_another_machine_refused(tmp_path, monkeypatch):
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin))))
     assert cc.run("run-1", ops) == 0
-    branch = next(c[1] for c in ops.calls if c[0] == "create_pr")
-    _git(target, "fetch", "-q", "origin", branch)
-    _git(target, "merge", "-q", "--ff-only", f"origin/{branch}")
-    _git(target, "push", "-q", "origin", "master")
-    merged = _git(target, "rev-parse", "HEAD")
+    merged = _land(target)
 
     monkeypatch.setattr(cc, "STATE_ROOT", tmp_path / "other-machine")
     ops2 = _ops((0, json.dumps(_response(target, merged, bundle_pin=pin))))
@@ -594,6 +690,7 @@ def test_g6_pre_check_sees_new_test_file_same_machine(tmp_path, monkeypatch):
     ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
     assert cc.run("run-1", ops) == 0
     calls_before = sum(1 for c in ops.calls if c[0] == "criteria_verify")
+    _land(target)  # форджа влила закрытие; повтор на той же верхушке
     assert cc.run("run-1", ops) == 6  # неизменное содержимое — G6 держит
     assert sum(1 for c in ops.calls if c[0] == "criteria_verify") == calls_before
 
@@ -616,10 +713,7 @@ def test_g6_pre_check_sees_new_test_file_cross_machine(tmp_path, monkeypatch):
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
     assert cc.run("run-1", ops) == 0
-    branch = next(c[1] for c in ops.calls if c[0] == "create_pr")
-    _git(target, "fetch", "-q", "origin", branch)
-    _git(target, "merge", "-q", "--ff-only", f"origin/{branch}")
-    _git(target, "push", "-q", "origin", "master")
+    _land(target)
 
     new_sha = _commit(
         target,
@@ -700,10 +794,7 @@ def test_fixed_helper_refusal_from_another_machine(tmp_path, monkeypatch, capsys
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
     assert cc.run("run-1", ops) == 0
-    branch = next(c[1] for c in ops.calls if c[0] == "create_pr")
-    _git(target, "fetch", "-q", "origin", branch)
-    _git(target, "merge", "-q", "--ff-only", f"origin/{branch}")
-    _git(target, "push", "-q", "origin", "master")
+    _land(target)
     capsys.readouterr()
 
     fixed = _commit(target, "tests/helpers.py", "OK = True\n")
@@ -939,7 +1030,9 @@ def test_new_measurement_closes_stale_pr(tmp_path, monkeypatch):
     ops.review_exit = 0
     assert cc.run("run-1", ops) == 0
     assert any(c[0] == "close_pr" for c in ops.calls)
-    assert len([c for c in ops.calls if c[0] == "create_pr"]) == 2
+    assert (
+        len([c for c in ops.calls if c[0] == "create_pr" and "-stamp" not in c[1]]) == 2
+    )
 
 
 def test_response_level_not_applicable_is_step_failure(tmp_path, monkeypatch):
@@ -997,6 +1090,7 @@ def test_response_level_error_publish_failure_is_retried_not_burned(
     err["error"]["detail"] = "x — другой текст того же содержимого"
     ops2 = _ops((3, json.dumps(err)))
     ops2.existing_prs = ops.existing_prs
+    ops2.forge_prs = ops.forge_prs
     assert cc.run("run-1", ops2) == 0
     assert not any(c[0] == "criteria_verify" for c in ops2.calls)  # не перемер
 
@@ -1016,6 +1110,7 @@ def test_republish_after_pr_closed_adopts_existing_branch(tmp_path, monkeypatch)
 
 
 def _commit(target, path, text):
+    _land(target)  # форджа могла влить PR: коммит поверх живой верхушки
     (Path(target) / path).parent.mkdir(parents=True, exist_ok=True)
     (Path(target) / path).write_text(text)
     _git(target, "add", path)
@@ -1132,3 +1227,658 @@ def test_create_pr_without_url_is_a_step_refusal(tmp_path, monkeypatch, capsys):
     ops.create_pr = no_url
     assert cc.run("run-1", ops) == 2
     assert "no PR URL" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("prs", "expected"),
+    [
+        ([], False),
+        ([{"state": "MERGED"}, {"state": "CLOSED"}], False),
+        ([{"state": "MERGED"}, {"state": "OPEN"}], True),
+        ([{"state": None}], None),
+    ],
+)
+def test_approval_pr_open(prs, expected):
+    class O:  # noqa: E742
+        def prs_by_head_prefix(self, slug, prefix):
+            assert prefix == "spec/ws-approve-"
+            return prs
+
+    class S:
+        ws_id = "ws"
+        repo_slug = "o/r"
+
+    assert cc._approval_pr_open(O(), S()) is expected
+
+
+def test_approval_pr_open_unavailable_on_error():
+    class O:  # noqa: E742
+        def prs_by_head_prefix(self, slug, prefix):
+            raise RuntimeError("gh api rc=1")
+
+    class S:
+        ws_id = "ws"
+        repo_slug = "o/r"
+
+    assert cc._approval_pr_open(O(), S()) is None
+
+
+TRACED = "---\nclosure: traced\nproduct_sha: abc\nhuman_criteria: {n}\n---\nтело\n"
+
+
+def test_render_writes_human_criteria():
+    from governance.criteria_check import Outcome as O
+
+    text = cc.render_closure(
+        O("traced", {"BEH-01": "traced"}, {"AC-01": "traced"}),
+        ws_id="ws",
+        code="ENC",
+        bundle_pin="p",
+        product_sha="s",
+        response_sha="r",
+        spec_runner_version="4.5.0",
+        host="h",
+        human_criteria=2,
+    )
+    assert split_frontmatter(text)[0]["human_criteria"] == 2
+
+
+@pytest.mark.parametrize(
+    "fake_result",
+    [
+        subprocess.CompletedProcess(("rev-parse", "HEAD"), 1, "", "боится"),
+        subprocess.CompletedProcess(("rev-parse", "HEAD"), 0, "", ""),
+    ],
+    ids=["nonzero-rc", "empty-stdout"],
+)
+def test_push_closure_rejects_unresolved_head(tmp_path, monkeypatch, fake_result):
+    """Minor 1: rev-parse после push не вернул sha — отказ шага, не пустая
+    голова (деферред T4)."""
+    state, _target, _pin = _env(tmp_path, monkeypatch)
+    real_git = cc._git
+
+    def fake_git(repo, *args):
+        if args == ("rev-parse", "HEAD"):
+            return fake_result
+        return real_git(repo, *args)
+
+    monkeypatch.setattr(cc, "_git", fake_git)
+    with pytest.raises(cc.CloseError):
+        cc._materialize(state, "criteria-close/x", "текст\n", "traced")
+
+
+def test_advance_refuses_unresolved_proposal_head(tmp_path, monkeypatch):
+    """Minor 1: отказ при нечитаемой голове предложения — ничего не
+    записано, PR не открыт (Global Constraint: незаписанная голова → отказ
+    шага, не публикация)."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    real_git = cc._git
+
+    def fake_git(repo, *args):
+        # только rev-parse HEAD в temp-worktree публикации (criteria-close-*),
+        # не в чекауте оператора (используется _verify_product).
+        if args == ("rev-parse", "HEAD") and "criteria-close-" in str(repo):
+            return subprocess.CompletedProcess(args, 1, "", "боится")
+        return real_git(repo, *args)
+
+    monkeypatch.setattr(cc, "_git", fake_git)
+    assert cc.run("run-1", ops) == 2
+    (key,) = cc._load("run-1")["measured"]
+    p = cc._entry("run-1", key)["proposal"]
+    assert not p.get("head")
+    assert not any(c[0] == "create_pr" for c in ops.calls)
+
+
+def test_adopt_refuses_merge_commit_tip(tmp_path, monkeypatch):
+    """Minor 2: голова-мерж не усыновляется, даже если первый-родительский
+    дифф — ровно файл закрытия (спека §7.2a п.1: один свой коммит, деферред
+    T4)."""
+    state, target, pin = _env(tmp_path, monkeypatch)
+    rel = "workstreams/ws/spec/90-acceptance-closure.md"
+    text = "текст\n"
+    (target / "other.txt").write_text("x\n")
+    _git(target, "add", "other.txt")
+    _git(target, "commit", "-qm", "advance master")
+    _git(target, "push", "-q", "origin", "master")
+    m2 = _git(target, "rev-parse", "HEAD")
+    _git(target, "checkout", "-q", pin)
+    _git(target, "checkout", "-q", "-b", "side")
+    (target / rel).write_text(text)
+    _git(target, "add", rel)
+    _git(target, "commit", "-qm", "closure")
+    tree_a = _git(target, "rev-parse", "HEAD^{tree}")
+    evil = _git(target, "commit-tree", tree_a, "-p", pin, "-p", m2, "-m", "evil merge")
+    _git(target, "push", "-q", "origin", f"{evil}:refs/heads/criteria-close/x")
+    _git(target, "checkout", "-q", "master")
+    with pytest.raises(cc.CloseError):
+        cc._materialize(state, "criteria-close/x", text, "traced")
+
+
+def test_materialize_pushes_own_single_file_commit(tmp_path, monkeypatch):
+    state, target, pin = _env(tmp_path, monkeypatch)
+    head = cc._materialize(state, "criteria-close/x", "текст\n", "traced")
+    _git(target, "fetch", "-q", "origin", "criteria-close/x")
+    rel = "workstreams/ws/spec/90-acceptance-closure.md"
+    assert _git(target, "diff", "--name-only", f"{head}^", head) == rel
+    assert _git(target, "rev-parse", f"{head}^") == pin
+    assert cc._materialize(state, "criteria-close/x", "текст\n", "traced") == head
+
+
+@pytest.mark.parametrize("extra_file", [True, False])
+def test_adopt_refuses_foreign_shape(tmp_path, monkeypatch, extra_file):
+    """Ревью пары M2: усыновляется только наш коммит формы §7.2a п.1."""
+    state, target, _pin = _env(tmp_path, monkeypatch)
+    rel = "workstreams/ws/spec/90-acceptance-closure.md"
+    _git(target, "checkout", "-q", "-b", "foreign")
+    (target / rel).write_text("текст\n" if extra_file else "другой\n")
+    if extra_file:
+        (target / "pkg/m.py").write_text("def f():\n    return 7\n")
+    _git(target, "add", "-A")
+    _git(target, "commit", "-qm", "foreign")
+    _git(target, "push", "-q", "origin", "HEAD:refs/heads/criteria-close/x")
+    _git(target, "checkout", "-q", "master")
+    with pytest.raises(cc.CloseError):
+        cc._materialize(state, "criteria-close/x", "текст\n", "traced")
+
+
+def test_propose_records_snapshot_and_human_flag(tmp_path, monkeypatch):
+    state, _target, _pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    p = cc._propose(state, _ops(), "run-1", "k", TRACED.format(n=0), human=True)
+    meta, _ = split_frontmatter(p["text"])
+    assert meta["status"] == "proposed" and meta["policy_source"] == SNAP.source
+    assert p["human"] is True and p["head"] is None and p["base"] == "master"
+    assert p["policy"]["accounts"] == ["owner-human"]
+    assert p["sha256"] == criteria_accept.text_sha256(p["text"])
+    _oracle_on(monkeypatch, snapshot=Fact(Outcome.UNAVAILABLE, None, "сеть"))
+    assert (
+        cc._propose(state, _ops(), "run-1", "k", TRACED.format(n=0), human=False) == p
+    )
+
+
+def test_propose_drops_inherited_slice1_pr(tmp_path, monkeypatch):
+    """Ревью круга 3 R3-m1: PR среза 1 в записи ключа — не PR предложения."""
+    state, _target, _pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    cc._record("run-1", "k", closure="traced", text="t", pr=7, attested=True)
+    p = cc._propose(state, _ops(), "run-1", "k", TRACED.format(n=0), human=True)
+    e = cc._entry("run-1", "k")
+    assert e["pr"] is None and e["attested"] is False and e["closed"] is False
+    assert e["slice1_pr"] == 7 and p["branch"].endswith("-proposal")
+
+
+def test_propose_flag_from_argument_not_from_text(tmp_path, monkeypatch):
+    """Ревью круга 2 B-M1: текст без human_criteria (запись до 2a) не
+    открывает test-only путь — флаг даёт граф."""
+    state, _target, _pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    legacy = "---\nclosure: traced\nproduct_sha: abc\n---\nтело\n"
+    assert cc._propose(state, _ops(), "run-1", "k", legacy, human=True)["human"] is True
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        af.POLICY_REFUSAL_ENV,
+        af.POLICY_REFUSAL_SOURCE,
+        af.POLICY_REFUSAL_ABSENT,
+        af.POLICY_REFUSAL_EMPTY,
+    ],
+)
+def test_propose_refuses_forbidden_policy(tmp_path, monkeypatch, kind):
+    state, _target, _pin = _env(tmp_path, monkeypatch)
+    refusal = Fact(Outcome.FORBIDDEN, af.PolicyRefusal(kind, "нет"), "нет")
+    _oracle_on(monkeypatch, snapshot=refusal)
+    with pytest.raises(cc.CloseError) as exc:
+        cc._propose(state, _ops(), "run-1", "k", TRACED.format(n=0), human=False)
+    waiting = kind in (af.POLICY_REFUSAL_ABSENT, af.POLICY_REFUSAL_EMPTY)
+    assert ("wait: policy" in str(exc.value)) is waiting
+    assert "proposal" not in (cc._entry("run-1", "k") or {})
+
+
+def test_propose_unavailable_policy_is_step_refusal(tmp_path, monkeypatch):
+    state, _target, _pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch, snapshot=Fact(Outcome.UNAVAILABLE, None, "сеть"))
+    with pytest.raises(cc.CloseError, match="не установлен"):
+        cc._propose(state, _ops(), "run-1", "k", TRACED.format(n=0), human=False)
+
+
+def test_policy_config_refusal(monkeypatch):
+    monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
+    assert cc._policy_config_refusal() is None
+    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "x")
+    assert "выставлена" in cc._policy_config_refusal()
+    monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV)
+
+    def broken():
+        raise RuntimeError("битый source.env")
+
+    monkeypatch.setattr(cc.approval_facts, "policy_source", broken)
+    assert "битый" in cc._policy_config_refusal()
+
+
+BEH_HUMAN = BEH + (
+    "#### BEH-02: оператор читает отчёт\n`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: manual` `owner: qa`\n"
+)
+ACC_HUMAN = ACC + (
+    "#### AC-02: отчёт · verification: manual\ntraces: [FR-01]\nscenarios: [BEH-02]\n"
+)
+REQ_SHOULD = "#### FR-01: A\n**Priority**: Should\n"
+BEH_MIXED = BEH + (
+    "#### BEH-02: ручной\n`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: manual` `owner: qa`\n"
+)
+ACC_MIXED = (
+    "#### AC-01: a · verification: test\ntraces: [FR-01]\nscenarios: [BEH-01, BEH-02]\n"
+)
+SPEC = "workstreams/ws/spec"
+
+
+def _env_human(tmp_path, monkeypatch):
+    return _env(
+        tmp_path,
+        monkeypatch,
+        extra={
+            f"{SPEC}/15-behaviour-spec.md": BEH_HUMAN,
+            f"{SPEC}/25-acceptance.md": ACC_HUMAN,
+        },
+    )
+
+
+def _proposal_pr(ops):
+    return min(ops.forge_prs)
+
+
+def _key():
+    (key,) = cc._load("run-1")["measured"]
+    return key
+
+
+def test_human_criterion_waits_for_human_merge(tmp_path, monkeypatch, capsys):
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    p = cc._entry("run-1", _key())["proposal"]
+    assert (
+        "create_pr",
+        p["branch"],
+        "criteria-close,human-merge-required",
+    ) in ops.calls
+    assert p["head"] == ops.forge_prs[_proposal_pr(ops)]["facts"]["headRefOid"]
+    assert any(c[0] == "review" for c in ops.calls) and not ops.merged
+    assert "человеком" in capsys.readouterr().out
+
+
+def test_human_flag_by_graph_not_ac_status(tmp_path, monkeypatch):
+    """Ревью пары M1: Should-AC unconfirmed + ручной BEH — всё равно человек."""
+    _state, target, pin = _env(
+        tmp_path,
+        monkeypatch,
+        extra={
+            f"{SPEC}/10-requirements.md": REQ_SHOULD,
+            f"{SPEC}/15-behaviour-spec.md": BEH_MIXED,
+            f"{SPEC}/25-acceptance.md": ACC_MIXED,
+        },
+    )
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
+    assert cc.run("run-1", ops) == 4
+    assert not ops.merged
+
+
+def test_human_flag_ignores_missing_field_in_text(tmp_path, monkeypatch):
+    """Ревью круга 2 B-M1: текст без human_criteria (как у записи среза 1) —
+    флаг всё равно из графа: выход 4, агент не мержит."""
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    real = cc.render_closure
+
+    def legacy(*a, **k):
+        k.pop("human_criteria", None)
+        return real(*a, **k)
+
+    monkeypatch.setattr(cc, "render_closure", legacy)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    assert not ops.merged
+
+
+def test_node_deleted_on_tip_supersedes(tmp_path, monkeypatch):
+    """Ревью круга 2 B-M3: узла нет на верхушке — superseded, не вечный отказ."""
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    pr = _proposal_pr(ops)
+    _forge_merge(ops, pr, "owner-human")
+    clone = Path(ops.forge_prs[pr]["dir"]).parent / "forge"
+    _git(clone, "rm", "-q", f"{SPEC}/25-acceptance.md")
+    _git(clone, "commit", "-qm", "drop node")
+    _git(clone, "push", "-q", "origin", "master")
+    assert cc.run("run-1", ops) == 5
+    acc = cc._entry("run-1", _key())["acceptance"]
+    assert acc["state"] == "superseded" and "bundle" in acc["reason"]
+
+
+def test_human_merge_by_snapshot_account_records_merge(tmp_path, monkeypatch):
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    _forge_merge(ops, _proposal_pr(ops), "owner-human")
+    cc.run("run-1", ops)
+    e = cc._entry("run-1", _key())
+    assert e["merge"]["by"] == "owner-human" and e["merged"] is True
+
+
+def test_resume_after_human_merge_needs_no_checkout(tmp_path, monkeypatch):
+    """Review Focus 1: верхушка ушла вперёд, чекаут на старом product_sha."""
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    _forge_merge(ops, _proposal_pr(ops), "owner-human")
+    calls = sum(1 for c in ops.calls if c[0] == "criteria_verify")
+    cc.run("run-1", ops)
+    assert _git(target, "rev-parse", "HEAD") == pin
+    assert sum(1 for c in ops.calls if c[0] == "criteria_verify") == calls
+    assert cc._entry("run-1", _key())["merge"]["by"] == "owner-human"
+
+
+def test_human_pr_still_open_keeps_waiting(tmp_path, monkeypatch):
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    assert cc.run("run-1", ops) == 4
+    assert sum(1 for c in ops.calls if c[0] == "create_pr") == 1
+    assert sum(1 for c in ops.calls if c[0] == "review") == 1  # аттестация записана
+
+
+def test_human_criterion_merged_by_outsider_is_rejected(tmp_path, monkeypatch):
+    """§8.4 п.5 тестом: на polygon третьей учётки нет."""
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    _forge_merge(ops, _proposal_pr(ops), "stranger")
+    assert cc.run("run-1", ops) == 5
+    assert cc._entry("run-1", _key())["acceptance"]["state"] == "rejected"
+    assert not any("-stamp" in c[1] for c in ops.calls if c[0] == "create_pr")
+
+
+@pytest.mark.parametrize("human", [True, False])
+def test_closed_proposal_is_rejected_on_both_paths(
+    tmp_path, monkeypatch, capsys, human
+):
+    """Review Focus 2 / ревью пары B1(б)."""
+    env = _env_human if human else _env
+    _state, target, pin = env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    ops.merge_ok = False  # test-only: обвязка отказала, PR остался открытым
+    assert cc.run("run-1", ops) == (4 if human else 2)
+    ops.forge_prs[_proposal_pr(ops)]["facts"]["state"] = "CLOSED"
+    assert cc.run("run-1", ops) == 5
+    assert cc.run("run-1", ops) == 5
+    assert sum(1 for c in ops.calls if c[0] == "create_pr") == 1
+    assert "closed" in capsys.readouterr().out
+
+
+def test_test_only_merged_by_human_goes_to_predicate(tmp_path, monkeypatch):
+    """Ревью пары B1(а): на polygon нет review-kit — PR предложения мержит человек."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    ops.merge_ok = False
+    assert cc.run("run-1", ops) == 2
+    _forge_merge(ops, _proposal_pr(ops), "owner-human")
+    cc.run("run-1", ops)
+    assert cc._entry("run-1", _key())["merge"]["by"] == "owner-human"
+    assert (
+        sum(1 for c in ops.calls if c[0] == "create_pr" and "-stamp" not in c[1]) == 1
+    )
+
+
+def test_review_failure_on_human_path_is_retried_not_buried(tmp_path, monkeypatch):
+    """Review Focus 3 / ревью пары B2."""
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    ops.review_exit = 1
+    assert cc.run("run-1", ops) == 2
+    assert cc._entry("run-1", _key())["proposal"]["head"]  # своя голова уже записана
+    ops.review_exit = 0
+    assert cc.run("run-1", ops) == 4
+    _forge_merge(ops, _proposal_pr(ops), "owner-human")
+    cc.run("run-1", ops)
+    e = cc._entry("run-1", _key())
+    assert e["merge"]["by"] == "owner-human"
+    assert e.get("acceptance", {}).get("state") != "rejected"
+
+
+def test_unreadable_pr_facts_is_step_refusal_then_resume(tmp_path, monkeypatch):
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    _forge_merge(ops, _proposal_pr(ops), "owner-human")
+    ops.pr_facts_error = "gh: network"
+    assert cc.run("run-1", ops) == 2
+    assert "acceptance" not in cc._entry("run-1", _key())
+    ops.pr_facts_error = None
+    cc.run("run-1", ops)
+    assert cc._entry("run-1", _key())["merge"]["by"] == "owner-human"
+
+
+def test_open_approval_pr_supersedes(tmp_path, monkeypatch):
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    ops.approval_prs = [{"state": "OPEN", "number": 9}]
+    assert cc.run("run-1", ops) == 5
+    acc = cc._entry("run-1", _key())["acceptance"]
+    assert acc["state"] == "superseded" and "approval" in acc["reason"]
+
+
+def test_policy_env_refuses_command_in_any_phase(tmp_path, monkeypatch, capsys):
+    """Ревью пары m1: FORBIDDEN env — отказ команды и после открытия PR."""
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    _forge_merge(ops, _proposal_pr(ops), "owner-human")
+    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "x")
+    assert cc.run("run-1", ops) == 2
+    assert "отказ команды" in capsys.readouterr().out
+    assert "merge" not in cc._entry("run-1", _key())
+
+
+def test_slice1_pr_close_failure_is_step_refusal(tmp_path, monkeypatch):
+    """R4-m3/R5 m-a: PR среза 1 не закрылся — отказ шага, повтор пробует снова."""
+    state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    nodes = cc._bundle_at_pin(state, pin)
+    charter = cc.charter_guard.read_charter(nodes["00-charter.md"])
+    key, closure, text = cc._measure(
+        state, ops, "run-1", charter, nodes, pin, pin, "4.5.0", "h"
+    )
+    ops.review_exit = 1
+    assert cc._publish(state, ops, "run-1", key, text, closure) == 2
+    old_pr = cc._entry("run-1", key)["pr"]
+    ops.review_exit = 0
+    ops.close_pr = lambda slug, pr, comment: False
+    assert cc.run("run-1", ops) == 2
+    assert not cc._entry("run-1", key).get("slice1_done")
+    assert cc._entry("run-1", key)["pr"] is None  # предложение ещё без PR
+    assert ops.forge_prs[old_pr]["facts"]["state"] == "OPEN"
+
+
+def test_new_content_after_rejection_measures_again(tmp_path, monkeypatch):
+    """Терминал — только на своём ключе (§7.2a п.5): прогон не запирается."""
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    ops.forge_prs[_proposal_pr(ops)]["facts"]["state"] = "CLOSED"
+    assert cc.run("run-1", ops) == 5
+    changed = _commit(target, "pkg/m.py", "def f():\n    return 99\n")
+    _git(target, "push", "-q", "origin", "master")
+    ops.verify = (0, json.dumps(_response(target, changed, bundle_pin=pin)))
+    assert cc.run("run-1", ops, product_sha=changed) == 4
+    assert sum(1 for c in ops.calls if c[0] == "create_pr") == 2
+
+
+CLOSURE_REL = "workstreams/ws/spec/90-acceptance-closure.md"
+
+
+def _stamp_prs(ops):
+    return [c for c in ops.calls if c[0] == "create_pr" and "-stamp" in c[1]]
+
+
+def test_test_only_honest_run_is_accepted(tmp_path, monkeypatch):
+    """§8.4 п.7: честный прогон → PR приёмки, мерж, stamp-PR → accepted."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 0
+    e = cc._entry("run-1", _key())
+    assert e["acceptance"]["state"] == "accepted"
+    _land(target)
+    meta, _ = split_frontmatter((target / CLOSURE_REL).read_text())
+    assert meta["status"] == "accepted" and meta["accepted_merge"] == e["merge"]["oid"]
+    assert len(_stamp_prs(ops)) == 1 and _stamp_prs(ops)[0][2] == "criteria-close"
+    stamp = e["stamp"]
+    assert any(c == ("merge", stamp["pr"], stamp["head"]) for c in ops.calls)
+    assert cc.run("run-1", ops) == 6
+
+
+def test_human_path_accepted_after_human_merge(tmp_path, monkeypatch):
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    _forge_merge(ops, _proposal_pr(ops), "owner-human")
+    assert cc.run("run-1", ops) == 0
+    assert cc._entry("run-1", _key())["acceptance"]["state"] == "accepted"
+
+
+def test_rerun_after_human_acceptance_publishes_nothing(tmp_path, monkeypatch):
+    """Review Focus 5 / ревью пары B1(в): не откат accepted → proposed."""
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    _forge_merge(ops, _proposal_pr(ops), "owner-human")
+    assert cc.run("run-1", ops) == 0
+    created = sum(1 for c in ops.calls if c[0] == "create_pr")
+    _land(target)
+    assert cc.run("run-1", ops) == 6
+    assert sum(1 for c in ops.calls if c[0] == "create_pr") == created
+
+
+def test_stamp_pr_review_failure_resumes(tmp_path, monkeypatch):
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    ops.fail_stamp_review = True
+
+    def review(repo, pr):
+        ops.calls.append(("review", pr))
+        stamp = "-stamp" in ops.forge_prs[pr]["branch"]
+        return 1 if stamp and ops.fail_stamp_review else 0
+
+    ops.review = review
+    assert cc.run("run-1", ops) == 2
+    ops.fail_stamp_review = False
+    assert cc.run("run-1", ops) == 0
+    assert len(_stamp_prs(ops)) == 1
+
+
+def test_stamp_merged_by_human_is_adopted(tmp_path, monkeypatch):
+    """На polygon нет review-kit: stamp-PR мержит человек — resume принимает."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+
+    def review(repo, pr):
+        ops.calls.append(("review", pr))
+        return 1 if "-stamp" in ops.forge_prs[pr]["branch"] else 0
+
+    ops.review = review
+    assert cc.run("run-1", ops) == 2
+    _forge_merge(ops, max(ops.forge_prs), "owner-human")
+    assert cc.run("run-1", ops) == 0
+
+
+def _tamper(ops, pr, how):
+    clone = Path(ops.forge_prs[pr]["dir"]).parent / "forge"
+    f = clone / CLOSURE_REL
+    if how == "edit":
+        f.write_text(f.read_text() + "правка\n")
+        _git(clone, "commit", "-qam", "tamper")
+    else:
+        _git(clone, "rm", "-q", CLOSURE_REL)
+        _git(clone, "commit", "-qm", "delete")
+    _git(clone, "push", "-q", "origin", "master")
+
+
+@pytest.mark.parametrize("old_merged_by_human", [False, True])
+def test_slice1_unfinished_closure_migrates_without_remeasure(
+    tmp_path, monkeypatch, old_merged_by_human
+):
+    """Решение владельца: опубликованное, не влитое агентом закрытие среза 1
+    (PR открыт или влит человеком — R4-m4) → предложение 2a на своей ветке →
+    подпись → штамп, без перемера."""
+    state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    nodes = cc._bundle_at_pin(state, pin)
+    charter = cc.charter_guard.read_charter(nodes["00-charter.md"])
+    key, closure, text = cc._measure(
+        state, ops, "run-1", charter, nodes, pin, pin, "4.5.0", "h"
+    )
+    ops.review_exit = 1
+    assert cc._publish(state, ops, "run-1", key, text, closure) == 2  # срез 1
+    old_pr = cc._entry("run-1", key)["pr"]
+    if old_merged_by_human:
+        _forge_merge(ops, old_pr, "owner-human")
+        _land(target)
+    ops.review_exit = 0
+    assert cc.run("run-1", ops) == 4
+    e = cc._entry("run-1", key)
+    assert e["slice1_pr"] == old_pr
+    assert (("close_pr", old_pr) in ops.calls) is not old_merged_by_human
+    assert e["proposal"]["branch"].endswith("-proposal") and e["pr"] != old_pr
+    _forge_merge(ops, e["pr"], "owner-human")
+    assert cc.run("run-1", ops) == 0
+    assert cc._entry("run-1", key)["acceptance"]["state"] == "accepted"
+    assert sum(1 for c in ops.calls if c[0] == "criteria_verify") == 1
+
+
+@pytest.mark.parametrize("how", ["edit", "delete"])
+def test_tampered_or_deleted_stamp_reissues_stamp_pr(tmp_path, monkeypatch, how):
+    """Review Focus 4 / ревью пары m4: иное содержимое или файла нет → новый stamp-PR."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    real_merge = ops.merge
+    done = {"x": False}
+
+    def merge(repo, pr, sha, base=None):
+        code = real_merge(repo, pr, sha, base)
+        if code == 0 and "-stamp" in ops.forge_prs[pr]["branch"] and not done["x"]:
+            done["x"] = True
+            _tamper(ops, pr, how)
+        return code
+
+    ops.merge = merge
+    assert cc.run("run-1", ops) == 2
+    assert cc.run("run-1", ops) == 0
+    stamps = [c[1] for c in _stamp_prs(ops)]
+    assert len(stamps) == 2 and stamps[1].endswith("-stamp-2")

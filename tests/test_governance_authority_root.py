@@ -8,6 +8,11 @@
 
 from __future__ import annotations
 
+import ast
+import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -42,6 +47,50 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         # Оракул правила стоп-крана: агент поправил бы векторы под свою
         # реализацию (ревью devtools#531, второй прогон).
         "contracts/halt-admission/",
+        # Оракул бандла, срез 2a: правило гейта [x] — подпись человека
+        # (решение владельца 2026-10-02). Модули, через которые правило
+        # гейта [x] можно ослабить:
+        # какие пункты [x] и как проверяются.
+        "governance/closure_gate",
+        # оракул бандла, срез 2a: правило гейта [x] — подпись человека
+        # (решение владельца 2026-10-02). происхождение штампа, пин —
+        # текущий бандл, подписант.
+        "governance/acceptance_provenance",
+        # оракул бандла, срез 2a: правило гейта [x] — подпись человека
+        # (решение владельца 2026-10-02). какие поля штамп вправе менять
+        # (`stamp_text`).
+        "governance/criteria_accept",
+        # оракул бандла, срез 2a: правило гейта [x] — подпись человека
+        # (решение владельца 2026-10-02). нужен ли человек
+        # (`human_criteria`, `build_graph`).
+        "governance/criteria_graph",
+        # оракул бандла, срез 2a: правило гейта [x] — подпись человека
+        # (решение владельца 2026-10-02). приоритеты требований → что
+        # Won't и выпадает из счёта.
+        "governance/acceptance_guard",
+        # оракул бандла, срез 2a: правило гейта [x] — подпись человека
+        # (решение владельца 2026-10-02). разбор/сериализация, на которых
+        # стоит сверка «штамп = предложение».
+        "governance/frontmatter",
+        # оракул бандла, срез 2a: правило гейта [x] — подпись человека
+        # (решение владельца 2026-10-02). какие charter'ы и пункты плана
+        # гейт видит.
+        "governance/charter_guard",
+        # оракул бандла, срез 2a: правило гейта [x] — подпись человека
+        # (решение владельца 2026-10-02). источник политики и состав
+        # подписантов (вынесено из `approval_facts`).
+        "governance/policy_rule",
+        # оракул бандла, срез 2a: правило гейта [x] — подпись человека
+        # (решение владельца 2026-10-02). парсер SSOT и файла политики.
+        "governance/ssot_env",
+        # оракул бандла, срез 2a: правило гейта [x] — подпись человека
+        # (решение владельца 2026-10-02). исполняется при любом импорте
+        # `governance.*`.
+        "governance/__init__",
+        # оракул бандла, срез 2a: правило гейта [x] — подпись человека
+        # (решение владельца 2026-10-02). кэш байткода: unchecked-hash
+        # `.pyc` подменял бы модуль без правки `.py` (M8-1).
+        "governance/__pycache__/",
         # Правило области ревью (devtools#271): решает, дойдёт ли диф до
         # модели вообще. Агентски смерженная правка `PROSE` сняла бы
         # ревью-гейт со всех последующих PR.
@@ -193,3 +242,112 @@ def test_every_module_sourced_by_the_merge_scripts_is_protected() -> None:
 def test_roadmap_is_authority_root() -> None:
     """ai-orchestrators-workspace#48: правку `roadmap.toml` мержит человек."""
     assert authority_root.touched(["roadmap.toml", "README.md"]) == ["roadmap.toml"]
+
+
+#: Сторонние в процессе гейта — замер Task 7b (dev-venv, `-I` пробa): yaml
+#: (frontmatter) и plan_fields с его импортами (`plan_fields/__init__` →
+#: validator → jsonschema → jsonschema_specifications, referencing, rpds) +
+#: attr/attrs, typing_extensions как их транзитивные зависимости.
+#: `_virtualenv` — артефакт `.pth` uv-venv, не код правила, исключён до
+#: сравнения. `yaml._yaml` — C-расширение внутри пакета `yaml`
+#: (`n.split(".")[0]` даёт `yaml`, не отдельный топ-левел `_yaml`) — в
+#: этом замере отдельного топ-левел `_yaml` не возникло. Рост набора —
+#: находка, не правка литерала.
+GATE_THIRD_PARTY = {
+    "yaml",
+    "plan_fields",
+    "jsonschema",
+    "jsonschema_specifications",
+    "referencing",
+    "rpds",
+    "attr",
+    "attrs",
+    "typing_extensions",
+}
+
+
+def _gate_process_modules(root: Path) -> list[tuple[str, str]]:
+    """(имя, файл) модулей, загруженных гейтом в форме запуска CI (Task 9):
+    `python -I` — без env, user site и cwd в sys.path; корень репо — В КОНЕЦ
+    sys.path, чтобы модуль в корне не затенял stdlib/`yaml` (M7-1)."""
+    probe = (
+        "import sys, runpy\n"
+        f"sys.path.append({str(root)!r})\n"
+        "import governance.closure_gate\n"
+        "for n, m in sorted(sys.modules.items()):\n"
+        "    f = getattr(m, '__file__', None)\n"
+        "    if f: print(n, f)\n"
+    )
+    with tempfile.TemporaryDirectory() as pyc:
+        out = subprocess.run(
+            [sys.executable, "-I", "-X", f"pycache_prefix={pyc}", "-c", probe],
+            cwd="/",
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+    return [tuple(line.split(" ", 1)) for line in out]
+
+
+def test_gate_import_closure_is_authority_root() -> None:
+    """Класс «незащищённый код в процессе гейта» (ревью кругов 6–8; модель
+    угроз 2a — defense-in-depth): модули репо, загруженные гейтом, ⊆
+    authority-root и из `.py`; сторонние — `GATE_THIRD_PARTY`;
+    stdlib не затенён модулем из репо. Новый импорт в модуле правила
+    краснеет здесь, а не уходит молча."""
+    root = Path(__file__).resolve().parent.parent
+    mods = _gate_process_modules(root)
+    in_repo = sorted(
+        os.path.relpath(f, root)
+        for _n, f in mods
+        if Path(f).resolve().is_relative_to(root)
+        and ".venv" not in Path(f).resolve().relative_to(root).parts
+    )
+    assert "governance/closure_gate.py" in in_repo
+    assert "governance/acceptance_provenance.py" in in_repo
+    unprotected = sorted(set(in_repo) - set(authority_root.touched(in_repo)))
+    assert unprotected == [], unprotected
+    assert all(rel.endswith(".py") for rel in in_repo), in_repo  # M8-1: не .so/.pyc
+    third = sorted(
+        {n.split(".")[0] for n, f in mods if "site-packages" in f} - {"_virtualenv"}
+    )
+    # Сторонние в процессе гейта: yaml (frontmatter) и plan_fields с его
+    # импортами (канонический разбор [x], M8-5). Литерал фиксируется по
+    # замеру пробы при исполнении задачи; рост — находка, не правка литерала.
+    assert set(third) <= GATE_THIRD_PARTY, third
+    # A5 (m7-4): ленивые импорты внутри функций модулей правила — тоже
+    for rel in in_repo:
+        tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module == "governance":
+                names = [f"governance.{a.name}" for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            for name in names:
+                if name.startswith("governance."):
+                    path = name.replace(".", "/") + ".py"
+                    assert authority_root.touched([path]) == [path], (rel, name)
+
+
+def test_root_module_does_not_shadow_stdlib_in_gate_launch(tmp_path) -> None:
+    """M7-1: в форме запуска CI модуль `re.py` в корне не исполняется."""
+    (tmp_path / "re.py").write_text("raise SystemExit('SHADOW')\n")
+    probe = (
+        f"import sys; sys.path.append({str(tmp_path)!r}); import re; print(re.__file__)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-I", "-c", probe],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert str(tmp_path) not in out
+
+
+def test_criteria_close_stays_agent_mergeable() -> None:
+    """Выпуск предложения/штампа — не правило гейта: его ослабление ловит гейт."""
+    assert authority_root.touched(["governance/criteria_close.py"]) == []
