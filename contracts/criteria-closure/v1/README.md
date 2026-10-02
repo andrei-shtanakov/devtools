@@ -12,8 +12,10 @@ spec-runner#603). devtools — потребитель: спека
 `MIN_SPEC_RUNNER_VERSION=4.5.0` — байты производителя, не наша правка.
 **Оракул доступен**, когда установленный spec-runner не ниже 4.5.0
 (`oracle_available()`); ниже — `criteria-close` отвечает `not-applicable:
-spec-runner-version`. `closure_gate` в CI (spec-runner не установлен)
-считает оракул выпущенным по вендорингу и числовой минимальной версии.
+spec-runner-version`. Начиная со среза 2a `closure_gate` не читает
+доступность оракула вовсе: `not_applicable_reason: spec-runner-version`
+всегда красный (оракул уже выпущен @ 4.5.0 — закрытие нужно перегнать на
+машине с установленным spec-runner ≥ min, не ждать от гейта зачёта).
 Значение `pending` в `min-spec-runner.env` (до релиза) `read_min_version()`
 по-прежнему читает как «команда не выпущена».
 
