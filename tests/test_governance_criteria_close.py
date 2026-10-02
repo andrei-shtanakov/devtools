@@ -1030,7 +1030,10 @@ def test_new_measurement_closes_stale_pr(tmp_path, monkeypatch):
     ops.review_exit = 0
     assert cc.run("run-1", ops) == 0
     assert any(c[0] == "close_pr" for c in ops.calls)
-    assert len([c for c in ops.calls if c[0] == "create_pr"]) == 2
+    assert (
+        len([c for c in ops.calls if c[0] == "create_pr" and "-stamp" not in c[1]])
+        == 2
+    )
 
 
 def test_response_level_not_applicable_is_step_failure(tmp_path, monkeypatch):
@@ -1657,3 +1660,153 @@ def test_new_content_after_rejection_measures_again(tmp_path, monkeypatch):
     ops.verify = (0, json.dumps(_response(target, changed, bundle_pin=pin)))
     assert cc.run("run-1", ops, product_sha=changed) == 4
     assert sum(1 for c in ops.calls if c[0] == "create_pr") == 2
+
+
+CLOSURE_REL = "workstreams/ws/spec/90-acceptance-closure.md"
+
+
+def _stamp_prs(ops):
+    return [c for c in ops.calls if c[0] == "create_pr" and "-stamp" in c[1]]
+
+
+def test_test_only_honest_run_is_accepted(tmp_path, monkeypatch):
+    """§8.4 п.7: честный прогон → PR приёмки, мерж, stamp-PR → accepted."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 0
+    e = cc._entry("run-1", _key())
+    assert e["acceptance"]["state"] == "accepted"
+    _land(target)
+    meta, _ = split_frontmatter((target / CLOSURE_REL).read_text())
+    assert meta["status"] == "accepted" and meta["accepted_merge"] == e["merge"]["oid"]
+    assert len(_stamp_prs(ops)) == 1 and _stamp_prs(ops)[0][2] == "criteria-close"
+    stamp = e["stamp"]
+    assert any(c == ("merge", stamp["pr"], stamp["head"]) for c in ops.calls)
+    assert cc.run("run-1", ops) == 6
+
+
+def test_human_path_accepted_after_human_merge(tmp_path, monkeypatch):
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    _forge_merge(ops, _proposal_pr(ops), "owner-human")
+    assert cc.run("run-1", ops) == 0
+    assert cc._entry("run-1", _key())["acceptance"]["state"] == "accepted"
+
+
+def test_rerun_after_human_acceptance_publishes_nothing(tmp_path, monkeypatch):
+    """Review Focus 5 / ревью пары B1(в): не откат accepted → proposed."""
+    _state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    assert cc.run("run-1", ops) == 4
+    _forge_merge(ops, _proposal_pr(ops), "owner-human")
+    assert cc.run("run-1", ops) == 0
+    created = sum(1 for c in ops.calls if c[0] == "create_pr")
+    _land(target)
+    assert cc.run("run-1", ops) == 6
+    assert sum(1 for c in ops.calls if c[0] == "create_pr") == created
+
+
+def test_stamp_pr_review_failure_resumes(tmp_path, monkeypatch):
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    ops.fail_stamp_review = True
+
+    def review(repo, pr):
+        ops.calls.append(("review", pr))
+        stamp = "-stamp" in ops.forge_prs[pr]["branch"]
+        return 1 if stamp and ops.fail_stamp_review else 0
+
+    ops.review = review
+    assert cc.run("run-1", ops) == 2
+    ops.fail_stamp_review = False
+    assert cc.run("run-1", ops) == 0
+    assert len(_stamp_prs(ops)) == 1
+
+
+def test_stamp_merged_by_human_is_adopted(tmp_path, monkeypatch):
+    """На polygon нет review-kit: stamp-PR мержит человек — resume принимает."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+
+    def review(repo, pr):
+        ops.calls.append(("review", pr))
+        return 1 if "-stamp" in ops.forge_prs[pr]["branch"] else 0
+
+    ops.review = review
+    assert cc.run("run-1", ops) == 2
+    _forge_merge(ops, max(ops.forge_prs), "owner-human")
+    assert cc.run("run-1", ops) == 0
+
+
+def _tamper(ops, pr, how):
+    clone = Path(ops.forge_prs[pr]["dir"]).parent / "forge"
+    f = clone / CLOSURE_REL
+    if how == "edit":
+        f.write_text(f.read_text() + "правка\n")
+        _git(clone, "commit", "-qam", "tamper")
+    else:
+        _git(clone, "rm", "-q", CLOSURE_REL)
+        _git(clone, "commit", "-qm", "delete")
+    _git(clone, "push", "-q", "origin", "master")
+
+
+@pytest.mark.parametrize("old_merged_by_human", [False, True])
+def test_slice1_unfinished_closure_migrates_without_remeasure(
+    tmp_path, monkeypatch, old_merged_by_human
+):
+    """Решение владельца: опубликованное, не влитое агентом закрытие среза 1
+    (PR открыт или влит человеком — R4-m4) → предложение 2a на своей ветке →
+    подпись → штамп, без перемера."""
+    state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    nodes = cc._bundle_at_pin(state, pin)
+    charter = cc.charter_guard.read_charter(nodes["00-charter.md"])
+    key, closure, text = cc._measure(
+        state, ops, "run-1", charter, nodes, pin, pin, "4.5.0", "h"
+    )
+    ops.review_exit = 1
+    assert cc._publish(state, ops, "run-1", key, text, closure) == 2  # срез 1
+    old_pr = cc._entry("run-1", key)["pr"]
+    if old_merged_by_human:
+        _forge_merge(ops, old_pr, "owner-human")
+        _land(target)
+    ops.review_exit = 0
+    assert cc.run("run-1", ops) == 4
+    e = cc._entry("run-1", key)
+    assert e["slice1_pr"] == old_pr
+    assert (("close_pr", old_pr) in ops.calls) is not old_merged_by_human
+    assert e["proposal"]["branch"].endswith("-proposal") and e["pr"] != old_pr
+    _forge_merge(ops, e["pr"], "owner-human")
+    assert cc.run("run-1", ops) == 0
+    assert cc._entry("run-1", key)["acceptance"]["state"] == "accepted"
+    assert sum(1 for c in ops.calls if c[0] == "criteria_verify") == 1
+
+
+@pytest.mark.parametrize("how", ["edit", "delete"])
+def test_tampered_or_deleted_stamp_reissues_stamp_pr(tmp_path, monkeypatch, how):
+    """Review Focus 4 / ревью пары m4: иное содержимое или файла нет → новый stamp-PR."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    real_merge = ops.merge
+    done = {"x": False}
+
+    def merge(repo, pr, sha, base=None):
+        code = real_merge(repo, pr, sha, base)
+        if code == 0 and "-stamp" in ops.forge_prs[pr]["branch"] and not done["x"]:
+            done["x"] = True
+            _tamper(ops, pr, how)
+        return code
+
+    ops.merge = merge
+    assert cc.run("run-1", ops) == 2
+    assert cc.run("run-1", ops) == 0
+    stamps = [c[1] for c in _stamp_prs(ops)]
+    assert len(stamps) == 2 and stamps[1].endswith("-stamp-2")

@@ -708,8 +708,90 @@ def _advance(state, ops: Ops, run_id: str, key: str, bundle_pin: str) -> int:
     return _stamp(state, ops, run_id, key)
 
 
+def _new_stamp(branch: str, n: int) -> dict:
+    suffix = "-stamp" + ("" if n == 1 else f"-{n}")
+    return {
+        "n": n,
+        "branch": branch + suffix,
+        "head": None,
+        "pr": None,
+        "attested": False,
+    }
+
+
+def _base_closure(state, base: str) -> str | None:
+    """Файл закрытия на верхушке default: текст; "" — файла нет (установлено);
+    None — fetch/чтение не удалось."""
+    if _git(state.target_dir, "fetch", "--quiet", "origin", base).returncode:
+        return None
+    return _path_fact(
+        state.target_dir, f"origin/{base}", f"{state.bundle_dir}/{CLOSURE_NAME}"
+    )
+
+
+def _check_and_accept(
+    state, run_id: str, key: str, expected: str, base: str
+) -> int | None:
+    """Проверка штампа §3.2: valid → accepted (0); unavailable → 2; invalid → None."""
+    check = criteria_accept.check_stamp(expected, _base_closure(state, base))
+    if check == "valid":
+        _record(run_id, key, acceptance={"state": "accepted", "reason": ""})
+        print("criteria-close: принято — status: accepted")
+        return 0
+    if check == "unavailable":
+        print(
+            "criteria-close: отказ шага — файл закрытия в default не прочитан; повторите"
+        )
+        return 2
+    return None
+
+
 def _stamp(state, ops: Ops, run_id: str, key: str) -> int:
-    raise CloseError("штамп — Task 6")
+    """Штамп (§3.2, §7.2a п.4): свой коммит, мерж по своей голове, проверка."""
+    e = _entry(run_id, key) or {}
+    p = e["proposal"]
+    expected = criteria_accept.stamp_text(
+        p["text"], merge_oid=e["merge"]["oid"], pr=e["pr"]
+    )
+    done = _check_and_accept(state, run_id, key, expected, p["base"])
+    if done is not None:
+        return done
+    s = e.get("stamp") or _new_stamp(p["branch"], 1)
+    if s["pr"] is not None:
+        st, _ = _pr_state(ops, state.repo_slug, s["pr"])
+        if st is None:
+            print(
+                f"criteria-close: отказ шага — состояние stamp-PR #{s['pr']} не прочитано"
+            )
+            return 2
+        if st in ("MERGED", "CLOSED"):  # влит без штампа в default или закрыт
+            s = _new_stamp(p["branch"], s["n"] + 1)
+    if not s["head"]:
+        s["head"] = _materialize(state, s["branch"], expected, "accepted")
+        _record(run_id, key, stamp=s)
+    if s["pr"] is None:
+        s["pr"] = _open_pr(
+            state,
+            ops,
+            s["branch"],
+            f"criteria-close: {state.ws_id} — штамп accepted",
+            f"Штамп приёмки (срез 2a): предложение PR #{e['pr']}, мерж "
+            f"{e['merge']['oid']}.",
+            criteria_accept.LABEL,
+        )
+        _record(run_id, key, stamp=s)
+    if not s["attested"]:
+        if ops.review(state.repo, s["pr"]) != 0:
+            return 2
+        s["attested"] = True
+        _record(run_id, key, stamp=s)
+    if ops.merge(state.repo, s["pr"], s["head"]) != 0:
+        return 2
+    done = _check_and_accept(state, run_id, key, expected, p["base"])
+    if done is not None:
+        return done
+    print("criteria-close: штамп в default не совпал — повторите: будет новый stamp-PR")
+    return 2
 
 
 # ---- измерение --------------------------------------------------------------------
