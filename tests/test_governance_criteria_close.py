@@ -1031,8 +1031,7 @@ def test_new_measurement_closes_stale_pr(tmp_path, monkeypatch):
     assert cc.run("run-1", ops) == 0
     assert any(c[0] == "close_pr" for c in ops.calls)
     assert (
-        len([c for c in ops.calls if c[0] == "create_pr" and "-stamp" not in c[1]])
-        == 2
+        len([c for c in ops.calls if c[0] == "create_pr" and "-stamp" not in c[1]]) == 2
     )
 
 
