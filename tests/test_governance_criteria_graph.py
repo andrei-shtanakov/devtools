@@ -97,3 +97,29 @@ def test_derive_ac_table():
     )
     manual = cgr.Ac("AC-09", "manual", ("FR-01",), (), "Must")
     assert cgr.derive_ac(manual, g2, {}) == "human"
+
+
+REQ_H = "#### FR-01: A\n**Priority**: Should\n#### FR-02: B\n**Priority**: Won't\n"
+BEH_H = (
+    "#### BEH-01: a\n`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: unit` `owner: qa`\n"
+    "#### BEH-02: b\n`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: manual` `owner: qa`\n"
+    "#### BEH-03: c\n`traces: [FR-01]`\n"
+    "- **checked_by**: `status: waived` `kind: unit` `owner: qa`\n"
+    "#### BEH-04: d\n`traces: [FR-02]`\n"
+    "- **checked_by**: `status: planned` `kind: manual` `owner: qa`\n"
+)
+ACC_H = (
+    "#### AC-01: a · verification: test\ntraces: [FR-01]\n"
+    "scenarios: [BEH-01, BEH-02, BEH-03]\n"
+    "#### AC-02: b · verification: manual\ntraces: [FR-02]\nscenarios: [BEH-04]\n"
+)
+
+
+def test_human_criteria_counts_graph_not_ac_status():
+    """Ревью пары M1: AC-01 со статусом unconfirmed не прячет ручной BEH-02 и
+    waived BEH-03; Won't (BEH-04, AC-02) не считается."""
+    g = cgr.build_graph(REQ_H, BEH_H, ACC_H)
+    assert cgr.derive_ac(g.acs["AC-01"], g, {"BEH-01": "unconfirmed"}) == "unconfirmed"
+    assert cgr.human_criteria(g) == 2

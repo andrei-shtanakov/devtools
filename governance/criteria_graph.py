@@ -121,6 +121,24 @@ def test_behs(graph: Graph) -> list[Beh]:
     return [b for b in graph.behs.values() if b.kind in EXEC_KINDS and not b.waived]
 
 
+def human_criteria(graph: Graph) -> int:
+    """Критерии, которые подписывает человек (спека §7.2a п.1): не-Won't BEH с
+    `waived` или неисполняемым `kind` и не-Won't AC с `verification ≠ test`.
+    Считается по графу, а не по производному статусу AC: `unconfirmed` в AC
+    стоит раньше `human` (`derive_ac`) и спрятал бы ручной критерий."""
+    behs = sum(
+        1
+        for b in graph.behs.values()
+        if b.priority != "Won't" and (b.waived or b.kind not in EXEC_KINDS)
+    )
+    acs = sum(
+        1
+        for a in graph.acs.values()
+        if a.priority != "Won't" and a.verification != "test"
+    )
+    return behs + acs
+
+
 def derive_ac(ac: Ac, graph: Graph, beh_status: dict[str, str]) -> str:
     """Таблица §5.2."""
     if ac.verification != "test":
