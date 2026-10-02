@@ -11,10 +11,10 @@ import pytest
 
 from governance import approval_facts as af
 from governance import charter_guard as cg
+from governance import criteria_accept, run_state
 from governance import criteria_close as cc
 from governance import criteria_contract as ctr
 from governance import criteria_product as cp
-from governance import run_state
 from governance.facts import Fact, Outcome
 from governance.frontmatter import split_frontmatter
 
@@ -265,12 +265,9 @@ def _oracle_on(monkeypatch, snapshot=None):
         cc.criteria_contract, "read_min_version", lambda *a: ctr.MinVersion("4.5.0")
     )
     fact = snapshot or Fact(Outcome.FOUND, SNAP, "stub")
-    # TODO(task-4): cc.approval_facts появится в модуле вместе с его
-    # импортом — снять `if hasattr`, подмена станет безусловной.
-    if hasattr(cc, "approval_facts"):
-        monkeypatch.setattr(
-            cc.approval_facts, "policy_snapshot", lambda ops, *, pinned_sha: fact
-        )
+    monkeypatch.setattr(
+        cc.approval_facts, "policy_snapshot", lambda ops, *, pinned_sha: fact
+    )
 
 
 def _land(target):
@@ -1262,3 +1259,126 @@ def test_approval_pr_open_unavailable_on_error():
         repo_slug = "o/r"
 
     assert cc._approval_pr_open(O(), S()) is None
+
+
+TRACED = "---\nclosure: traced\nproduct_sha: abc\nhuman_criteria: {n}\n---\nтело\n"
+
+
+def test_render_writes_human_criteria():
+    from governance.criteria_check import Outcome as O
+
+    text = cc.render_closure(
+        O("traced", {"BEH-01": "traced"}, {"AC-01": "traced"}),
+        ws_id="ws",
+        code="ENC",
+        bundle_pin="p",
+        product_sha="s",
+        response_sha="r",
+        spec_runner_version="4.5.0",
+        host="h",
+        human_criteria=2,
+    )
+    assert split_frontmatter(text)[0]["human_criteria"] == 2
+
+
+def test_materialize_pushes_own_single_file_commit(tmp_path, monkeypatch):
+    state, target, pin = _env(tmp_path, monkeypatch)
+    head = cc._materialize(state, "criteria-close/x", "текст\n", "traced")
+    _git(target, "fetch", "-q", "origin", "criteria-close/x")
+    rel = "workstreams/ws/spec/90-acceptance-closure.md"
+    assert _git(target, "diff", "--name-only", f"{head}^", head) == rel
+    assert _git(target, "rev-parse", f"{head}^") == pin
+    assert cc._materialize(state, "criteria-close/x", "текст\n", "traced") == head
+
+
+@pytest.mark.parametrize("extra_file", [True, False])
+def test_adopt_refuses_foreign_shape(tmp_path, monkeypatch, extra_file):
+    """Ревью пары M2: усыновляется только наш коммит формы §7.2a п.1."""
+    state, target, _pin = _env(tmp_path, monkeypatch)
+    rel = "workstreams/ws/spec/90-acceptance-closure.md"
+    _git(target, "checkout", "-q", "-b", "foreign")
+    (target / rel).write_text("текст\n" if extra_file else "другой\n")
+    if extra_file:
+        (target / "pkg/m.py").write_text("def f():\n    return 7\n")
+    _git(target, "add", "-A")
+    _git(target, "commit", "-qm", "foreign")
+    _git(target, "push", "-q", "origin", "HEAD:refs/heads/criteria-close/x")
+    _git(target, "checkout", "-q", "master")
+    with pytest.raises(cc.CloseError):
+        cc._materialize(state, "criteria-close/x", "текст\n", "traced")
+
+
+def test_propose_records_snapshot_and_human_flag(tmp_path, monkeypatch):
+    state, _target, _pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    p = cc._propose(state, _ops(), "run-1", "k", TRACED.format(n=0), human=True)
+    meta, _ = split_frontmatter(p["text"])
+    assert meta["status"] == "proposed" and meta["policy_source"] == SNAP.source
+    assert p["human"] is True and p["head"] is None and p["base"] == "master"
+    assert p["policy"]["accounts"] == ["owner-human"]
+    assert p["sha256"] == criteria_accept.text_sha256(p["text"])
+    _oracle_on(monkeypatch, snapshot=Fact(Outcome.UNAVAILABLE, None, "сеть"))
+    assert (
+        cc._propose(state, _ops(), "run-1", "k", TRACED.format(n=0), human=False) == p
+    )
+
+
+def test_propose_drops_inherited_slice1_pr(tmp_path, monkeypatch):
+    """Ревью круга 3 R3-m1: PR среза 1 в записи ключа — не PR предложения."""
+    state, _target, _pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    cc._record("run-1", "k", closure="traced", text="t", pr=7, attested=True)
+    p = cc._propose(state, _ops(), "run-1", "k", TRACED.format(n=0), human=True)
+    e = cc._entry("run-1", "k")
+    assert e["pr"] is None and e["attested"] is False and e["closed"] is False
+    assert e["slice1_pr"] == 7 and p["branch"].endswith("-proposal")
+
+
+def test_propose_flag_from_argument_not_from_text(tmp_path, monkeypatch):
+    """Ревью круга 2 B-M1: текст без human_criteria (запись до 2a) не
+    открывает test-only путь — флаг даёт граф."""
+    state, _target, _pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    legacy = "---\nclosure: traced\nproduct_sha: abc\n---\nтело\n"
+    assert cc._propose(state, _ops(), "run-1", "k", legacy, human=True)["human"] is True
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        af.POLICY_REFUSAL_ENV,
+        af.POLICY_REFUSAL_SOURCE,
+        af.POLICY_REFUSAL_ABSENT,
+        af.POLICY_REFUSAL_EMPTY,
+    ],
+)
+def test_propose_refuses_forbidden_policy(tmp_path, monkeypatch, kind):
+    state, _target, _pin = _env(tmp_path, monkeypatch)
+    refusal = Fact(Outcome.FORBIDDEN, af.PolicyRefusal(kind, "нет"), "нет")
+    _oracle_on(monkeypatch, snapshot=refusal)
+    with pytest.raises(cc.CloseError) as exc:
+        cc._propose(state, _ops(), "run-1", "k", TRACED.format(n=0), human=False)
+    waiting = kind in (af.POLICY_REFUSAL_ABSENT, af.POLICY_REFUSAL_EMPTY)
+    assert ("wait: policy" in str(exc.value)) is waiting
+    assert "proposal" not in (cc._entry("run-1", "k") or {})
+
+
+def test_propose_unavailable_policy_is_step_refusal(tmp_path, monkeypatch):
+    state, _target, _pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch, snapshot=Fact(Outcome.UNAVAILABLE, None, "сеть"))
+    with pytest.raises(cc.CloseError, match="не установлен"):
+        cc._propose(state, _ops(), "run-1", "k", TRACED.format(n=0), human=False)
+
+
+def test_policy_config_refusal(monkeypatch):
+    monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV, raising=False)
+    assert cc._policy_config_refusal() is None
+    monkeypatch.setenv(af.APPROVER_ALLOWLIST_ENV, "x")
+    assert "выставлена" in cc._policy_config_refusal()
+    monkeypatch.delenv(af.APPROVER_ALLOWLIST_ENV)
+
+    def broken():
+        raise RuntimeError("битый source.env")
+
+    monkeypatch.setattr(cc.approval_facts, "policy_source", broken)
+    assert "битый" in cc._policy_config_refusal()

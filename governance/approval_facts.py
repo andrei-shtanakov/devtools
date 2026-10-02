@@ -293,6 +293,21 @@ def _forbidden(kind: str, detail: str, **extra: str) -> PolicyFact:
     return Fact(Outcome.FORBIDDEN, PolicyRefusal(kind, detail, **extra), detail)
 
 
+def env_override_refusal() -> str | None:
+    """Отказ S7, если `APPROVER_ALLOWLIST_ENV` выставлена в окружении — без
+    сети и без форджи. Единственное место в devtools, читающее эту
+    переменную (страж — `test_no_module_reads_the_allowlist_from_the_environment`):
+    `policy_snapshot` и `criteria_close._policy_config_refusal` зовут эту
+    функцию, а не читают `os.environ` напрямую."""
+    if os.environ.get(APPROVER_ALLOWLIST_ENV) is None:
+        return None
+    return (
+        f"{APPROVER_ALLOWLIST_ENV} выставлена в окружении, но переменная "
+        "больше не источник политики подписи — источник репозиторий "
+        "approval-policy; снимите переменную и повторите"
+    )
+
+
 def policy_snapshot(ops: Ops, *, pinned_sha: str | None) -> PolicyFact:
     """Снимок политики из репозитория `approval-policy` (спека §4.2).
 
@@ -304,13 +319,9 @@ def policy_snapshot(ops: Ops, *, pinned_sha: str | None) -> PolicyFact:
     (`= , ,` проходит `read_key`) → `empty`. `FOUND` с пустым `accounts`
     невозможен по построению. Ни одно сообщение не упоминает учётку мержера.
     """
-    if os.environ.get(APPROVER_ALLOWLIST_ENV) is not None:
-        return _forbidden(
-            POLICY_REFUSAL_ENV,
-            f"{APPROVER_ALLOWLIST_ENV} выставлена в окружении, но переменная "
-            "больше не источник политики подписи — источник репозиторий "
-            "approval-policy; снимите переменную и повторите",
-        )
+    env_refusal = env_override_refusal()
+    if env_refusal is not None:
+        return _forbidden(POLICY_REFUSAL_ENV, env_refusal)
     try:
         repo, ref, path = policy_source()
     except RuntimeError as exc:

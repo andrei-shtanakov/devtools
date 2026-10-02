@@ -27,7 +27,9 @@ from pathlib import Path
 
 from governance import (
     approval_branches,
+    approval_facts,
     charter_guard,
+    criteria_accept,
     criteria_check,
     criteria_contract,
     criteria_graph,
@@ -37,6 +39,7 @@ from governance import (
     spec_runner_contract,
     task_bridge,
 )
+from governance.facts import Outcome
 from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.ops import Ops, RealOps
 
@@ -161,6 +164,7 @@ def render_closure(
     content_key: str | None = None,
     product_roots: list[str] | None = None,
     measured_inputs: dict | None = None,
+    human_criteria: int | None = None,
 ) -> str:
     """Текст файла закрытия; result — Outcome или строка причины not-applicable.
 
@@ -194,6 +198,8 @@ def render_closure(
         human = sum(1 for s in result.ac_status.values() if s == "human")
         traced = sum(1 for s in result.beh_status.values() if s == "traced")
         meta.update(closure=result.closure, human_pending=human)
+        if human_criteria is not None:
+            meta["human_criteria"] = human_criteria
         body = [
             f"Прослежено {traced} из {len(result.beh_status)} test-критериев; ждут человека {human}.",
             "`traced` не утверждает способность теста упасть (спека §4.1).",
@@ -219,7 +225,7 @@ def _branch(state, key: str) -> str:
     )
 
 
-def _push_closure(state, branch: str, text: str, closure: str) -> None:
+def _push_closure(state, branch: str, text: str, closure: str) -> str:
     """Коммит файла закрытия во временном worktree от origin/<base>."""
     base = state.base_ref or "master"
     tmp = Path(tempfile.mkdtemp(prefix="criteria-close-"))
@@ -251,37 +257,60 @@ def _push_closure(state, branch: str, text: str, closure: str) -> None:
             proc = _git(wt, *args)
             if proc.returncode != 0:
                 raise CloseError(f"git {args[0]}: {proc.stderr.strip()}")
+        return _git(wt, "rev-parse", "HEAD").stdout.strip()
     finally:
         _git(state.target_dir, "worktree", "remove", "--force", str(wt))
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _adopt_branch(state, branch: str, text: str) -> bool:
-    """True — ветка ключа уже на origin и несёт ровно этот файл закрытия."""
+def _adopt_branch(state, branch: str, text: str) -> str | None:
+    """Голова ветки на origin, если это наш коммит (§7.2a п.1): один коммит
+    поверх предка origin/<base>, правящий только файл закрытия, ровно с этим
+    текстом. Ветки нет — None; иная форма — отказ (ревью пары M2: «голова
+    совпала» доказывает «дифф — только этот файл» лишь для своего коммита)."""
     ref = f"refs/heads/{branch}"
     if not _git(
         state.target_dir, "ls-remote", "--exit-code", "origin", ref
     ).stdout.strip():
-        return False
+        return None
+    base = state.base_ref or "master"
+    local = f"refs/criteria-close/{branch}"
     if _git(
-        state.target_dir,
-        "fetch",
-        "--quiet",
-        "origin",
-        f"+{ref}:refs/criteria-close/{branch}",
+        state.target_dir, "fetch", "--quiet", "origin", f"+{ref}:{local}", base
     ).returncode:
         raise CloseError(f"fetch {branch} не удался")
-    shown = _git(
-        state.target_dir,
-        "show",
-        f"refs/criteria-close/{branch}:{state.bundle_dir}/{CLOSURE_NAME}",
+    rel = f"{state.bundle_dir}/{CLOSURE_NAME}"
+    shown = _git(state.target_dir, "show", f"{local}:{rel}")
+    names = _git(state.target_dir, "diff", "--name-only", f"{local}^", local)
+    parent_ok = (
+        _git(
+            state.target_dir,
+            "merge-base",
+            "--is-ancestor",
+            f"{local}^",
+            f"origin/{base}",
+        ).returncode
+        == 0
     )
-    if shown.returncode != 0 or shown.stdout != text:
+    if (
+        shown.returncode != 0
+        or shown.stdout != text
+        or names.returncode != 0
+        or names.stdout.split() != [rel]
+        or not parent_ok
+    ):
         raise CloseError(
-            f"ветка {branch} на origin несёт другой файл закрытия — удалите её "
+            f"ветка {branch} на origin — не наш коммит (один коммит поверх "
+            f"origin/{base}, только {rel}, этот текст) — удалите её "
             f"(`git push origin --delete {branch}`) и повторите"
         )
-    return True
+    return _git(state.target_dir, "rev-parse", local).stdout.strip()
+
+
+def _materialize(state, branch: str, text: str, closure: str) -> str:
+    """Ветка с собственным коммитом формы §7.2a п.1: усыновить или запушить."""
+    head = _adopt_branch(state, branch, text)
+    return head if head is not None else _push_closure(state, branch, text, closure)
 
 
 def _publish(state, ops: Ops, run_id: str, key: str, text: str, closure: str) -> int:
@@ -307,7 +336,7 @@ def _publish(state, ops: Ops, run_id: str, key: str, text: str, closure: str) ->
         # Ветка уже на origin (PR закрыт или create_pr упал после push) —
         # усыновить её при совпадении содержимого, а не пушить новый коммит
         # (non-fast-forward запер бы ключ навсегда; ревью #482).
-        if not _adopt_branch(state, branch, text):
+        if _adopt_branch(state, branch, text) is None:
             _push_closure(state, branch, text, closure)
         try:
             pr = ops.create_pr(
@@ -357,6 +386,84 @@ def _approval_pr_open(ops: Ops, state) -> bool | None:
     if any(s not in ("OPEN", "CLOSED", "MERGED") for s in states):
         return None
     return "OPEN" in states
+
+
+def _policy_config_refusal() -> str | None:
+    """`FORBIDDEN env`/`source` в любой фазе, и после мержа (§3.2, §7.2a п.3):
+    обе проверки локальные и сеть не трогают. Env-проверка делегирована
+    `approval_facts.env_override_refusal` (страж
+    `test_no_module_reads_the_allowlist_from_the_environment`:
+    `AUTHORIZED_APPROVER_ACCOUNTS` читает только approval_facts.py)."""
+    refusal = approval_facts.env_override_refusal()
+    if refusal is not None:
+        return refusal
+    try:
+        approval_facts.policy_source()
+    except RuntimeError as exc:
+        return f"конфигурация источника политики не читается: {exc}"
+    return None
+
+
+def _snapshot_record(snap: approval_facts.PolicySnapshot) -> dict:
+    """Полный снимок (§3.5, Р3′): `as_record()` состав не пишет — пишем сами."""
+    return {
+        **snap.as_record(),
+        "source": snap.source,
+        "accounts": sorted(snap.accounts),
+    }
+
+
+def _propose(state, ops: Ops, run_id: str, key: str, text: str, *, human: bool) -> dict:
+    """Предложение до push (§7.2a п.1): write-ahead, неизменяемое. `human` —
+    по графу узлов на пине (вызывающий), не по полю файла: запись, измеренная
+    до 2a, поля не несёт, и его отсутствие открыло бы test-only путь."""
+    entry = _entry(run_id, key) or {}
+    if entry.get("proposal"):
+        return entry["proposal"]
+    fact = approval_facts.policy_snapshot(ops, pinned_sha=None)
+    if fact.outcome is Outcome.UNAVAILABLE:
+        raise CloseError(f"снимок политики не установлен: {fact.detail}")
+    snap = fact.value
+    if fact.outcome is not Outcome.FOUND or not isinstance(
+        snap, approval_facts.PolicySnapshot
+    ):
+        kind = getattr(snap, "kind", "")
+        waiting = kind in (
+            approval_facts.POLICY_REFUSAL_ABSENT,
+            approval_facts.POLICY_REFUSAL_EMPTY,
+        )
+        raise CloseError(
+            ("wait: policy — " if waiting else "") + f"политика подписи: {fact.detail}"
+        )
+    body = criteria_accept.proposal_text(text, snap.source)
+    proposal = {
+        "text": body,
+        "sha256": criteria_accept.text_sha256(body),
+        "human": human,
+        "base": state.base_ref or "master",
+        "branch": _proposal_branch(state, key),
+        "head": None,
+        "policy": _snapshot_record(snap),
+    }
+    # Запись, опубликованная срезом 1, несёт `pr` PR среза 1 на ветке ключа —
+    # у предложения своя ветка и свой PR (решение владельца: миграция). Старый
+    # PR запоминается (`slice1_pr`), его обработает `_advance`.
+    _record(
+        run_id,
+        key,
+        proposal=proposal,
+        slice1_pr=entry.get("pr"),
+        pr=None,
+        attested=False,
+        closed=False,
+    )
+    return proposal
+
+
+def _proposal_branch(state, key: str) -> str:
+    """Ветка предложения 2a — не ветка ключа среза 1 (там может лежать
+    опубликованный файл среза 1, и `_materialize` его не усыновит)."""
+    return _branch(state, key) + "-proposal"
 
 
 # ---- измерение --------------------------------------------------------------------
@@ -814,6 +921,9 @@ def _measure(
         content_key=key,
         product_roots=roots,
         measured_inputs=measured_inputs,
+        human_criteria=criteria_graph.human_criteria(graph)
+        if roots is not None
+        else None,
     )
     data = _load(run_id)
     data["measured"][key] = {"closure": closure, "text": text}
