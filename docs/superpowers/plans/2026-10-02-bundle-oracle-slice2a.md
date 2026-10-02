@@ -4,7 +4,7 @@
 
 **Goal:** Закрытие `traced` перестаёт быть приёмкой само по себе: предложение со снимком политики, мерж PR предложения (человеком из снимка, если есть человеческие критерии), предикат §3.5 по фактам форджи, агентский stamp-PR `status: accepted`; гейт `[x]` требует штампа.
 
-**Architecture:** Чистые решения — новый модуль `governance/criteria_accept.py` (тексты предложения и штампа, предикат по собранным фактам, проверка штампа) и `criteria_graph.human_criteria`. Приёмку ведёт **одна функция `_advance` по фактам форджи** в `governance/criteria_close.py`: каждый вызов читает состояние PR и делает следующий шаг; локальное состояние — только write-ahead намерений (собственная голова коммита, номер PR, факт аттестации) и записанные исходы. Гейт — `governance/closure_gate.py`. Ops получает одно поле (`state`) в `prs_by_head_prefix`.
+**Architecture:** Гейт `[x]` проверяет происхождение штампа модулем `governance/acceptance_provenance.py` (факты форджи и истории git, политика из доверенного источника по пину, граф по пину). Чистые решения — новый модуль `governance/criteria_accept.py` (тексты предложения и штампа, предикат по собранным фактам, проверка штампа) и `criteria_graph.human_criteria`. Приёмку ведёт **одна функция `_advance` по фактам форджи** в `governance/criteria_close.py`: каждый вызов читает состояние PR и делает следующий шаг; локальное состояние — только write-ahead намерений (собственная голова коммита, номер PR, факт аттестации) и записанные исходы. Гейт — `governance/closure_gate.py`. Ops получает одно поле (`state`) в `prs_by_head_prefix`.
 
 **Tech Stack:** Python 3.12+, pytest, настоящий git во временных каталогах (тестовая «форджа»), uv.
 
@@ -12,9 +12,11 @@
 
 **Ревью пары, круг 1** (`scratchpad/s2a-review-r1.md`, свежий ревьюер Claude: Codex заблокирован классификатором разрешений, решение владельца 2026-10-02): B1 (resume по локальному флагу `merged`, три формы) → механизм заменён — `_advance` по фактам форджи; B2/M2 (голова из `ls-remote`, не своя) → голова — собственный коммит, пишется до создания PR, усыновление только той же формы; M1 (флаг из `human_pending`) → `human_criteria` по графу; M3 (ломаются существующие тесты) → Task 3 только фикстура и явный перечень адаптаций до кода продукта; M4 (гейт доверяет тексту) → названная граница в спеке + проверка полей штампа, происхождение в CI — 2b; m1–m5 — учтены по месту.
 
+**Вычитка владельцем 2026-10-02** (#544): проверка происхождения — в 2a (Task 7 переписана: гейт проверяет акт, связанный с закрытием; Task 9 — CI-проводка через `.github/`, мерж человеком); обход старым форматом убран (файл среза 1 без `status` зелёный только при графе на пине без человеческих критериев; непрочитанный граф — красный); миграция незавершённого закрытия среза 1 — отдельная ветка предложения, обработка прежнего PR, сквозной тест без перемера (Tasks 4–6).
+
 **Круг 3** (`scratchpad/s2a-review-r3.md`): `VERDICT: converged`; minor R3-m1 (унаследованный `pr` среза 1) исправлен без нового круга — `_propose` сбрасывает `pr`/`attested`/`closed`; граница пути к штампу для красного файла среза 1 названа в §7.2a п.6.
 
-**Круг 2** (`scratchpad/s2a-review-r2.md`, 0 blocker / 3 major): B-M1 (флаг human из текста, fail-open без поля) → флаг передаётся в `_propose` из графа узлов на пине; B-M2 (после Task 6 падает `test_new_measurement_closes_stale_pr`) → адаптация названа в Task 6; B-M3 (отсутствие файла/узла свёрнуто в «не установлено», прогон запирается) → `_path_fact` различает «нет» и «не прочитано», голова сверяется первой; minor: Task 9 Step 3 (выход 2, не 4, на polygon), `_close_stale` пропускает ключи с исходом, исключения `find_pr`/`candidate_template` → отказ шага, «Update branch» названа границей и предупреждением в PR, граница гейта для файлов среза 1 и «нет исполнителя» в 2a — в спеке.
+**Круг 2** (`scratchpad/s2a-review-r2.md`, 0 blocker / 3 major): B-M1 (флаг human из текста, fail-open без поля) → флаг передаётся в `_propose` из графа узлов на пине; B-M2 (после Task 6 падает `test_new_measurement_closes_stale_pr`) → адаптация названа в Task 6; B-M3 (отсутствие файла/узла свёрнуто в «не установлено», прогон запирается) → `_path_fact` различает «нет» и «не прочитано», голова сверяется первой; minor: живая приёмка Step 3 (выход 2, не 4, на polygon; теперь Task 10), `_close_stale` пропускает ключи с исходом, исключения `find_pr`/`candidate_template` → отказ шага, «Update branch» названа границей и предупреждением в PR, граница гейта для файлов среза 1 и «нет исполнителя» в 2a — в спеке.
 
 ## Global Constraints
 
@@ -40,8 +42,9 @@
 ## Исполнение
 
 - Отдельный worktree от `origin/master`, ветка `feat/bundle-oracle-slice2a` (не основной чекаут `devtools/` — параллельные сессии).
-- Зависимости: 2 после 1; 3 независима (только тесты); 4 после 1 и 3; 5 после 2 и 4; 6 после 5; 7 после 1; 8 после 6 и 7; 9 — после мержа PR кода (живая приёмка, акты владельца).
-- Один PR на Tasks 1–8 (`.github/` не трогается — мерж агентом после approve).
+- Исполнение (решение владельца): **через субагентов** — свежий исполнитель и ревьюер на каждую задачу; Tasks 4–6 строго последовательно; после Task 8 — общее интеграционное ревью всей ветки (самая сильная модель).
+- Зависимости: 2 после 1; 3 независима (только тесты); 4 после 1 и 3; 5 после 2 и 4; 6 после 5; 7 после 1; 8 после 6 и 7; 9 после мержа PR кода; 10 — после мержа Task 9 (живая приёмка, акты владельца).
+- **Два PR.** Код (Tasks 1–8) `.github/` не трогает — мерж агентом после approve (CI devtools зелёный и без токена: в devtools нет charter'ов схемы 2 с `[x]`, проверка происхождения там не срабатывает). Task 9 правит `.github/workflows/ci.yml` — отдельный PR с меткой `human-merge-required`, **мерж человеком**.
 
 ---
 
@@ -780,7 +783,8 @@ git commit -m "tests: форджа на настоящем git для criteria_c
   - `_push_closure(state, branch, text, closure) -> str` — голова собственного коммита;
   - `_adopt_branch(state, branch, text) -> str | None` — голова ветки на origin, если это один коммит поверх предка `origin/<base>`, правящий только файл закрытия, с ровно этим текстом; ветки нет — None; иная форма — `CloseError`;
   - `_materialize(state, branch, text, closure) -> str` — усыновить или запушить, вернуть голову;
-  - `_propose(state, ops, run_id, key, text, *, human: bool) -> dict` — `human` считает вызывающий по графу узлов на пине (спека §7.2a п.1; поле файла не источник — ревью круга 2 B-M1); запись `measured[key]["proposal"] = {"text", "sha256", "human", "base", "branch", "head": None, "policy": {repo, ref, path, sha, fingerprint, source, accounts: [...]}}` (write-ahead, неизменяемая; повтор возвращает записанное);
+  - `_proposal_branch(state, key) -> str` — `<ветка ключа>-proposal`;
+  - `_propose(state, ops, run_id, key, text, *, human: bool) -> dict` — пишет и `slice1_pr` (номер PR среза 1 из записи или None); `human` считает вызывающий по графу узлов на пине (спека §7.2a п.1; поле файла не источник — ревью круга 2 B-M1); запись `measured[key]["proposal"] = {"text", "sha256", "human", "base", "branch", "head": None, "policy": {repo, ref, path, sha, fingerprint, source, accounts: [...]}}` (write-ahead, неизменяемая; повтор возвращает записанное);
   - `_policy_config_refusal() -> str | None` — `FORBIDDEN env`/`source` локально, без сети.
 
 - [ ] **Step 1: Write the failing tests**
@@ -851,9 +855,10 @@ def test_propose_drops_inherited_slice1_pr(tmp_path, monkeypatch):
     state, _target, _pin = _env(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     cc._record("run-1", "k", closure="traced", text="t", pr=7, attested=True)
-    cc._propose(state, _ops(), "run-1", "k", TRACED.format(n=0), human=True)
+    p = cc._propose(state, _ops(), "run-1", "k", TRACED.format(n=0), human=True)
     e = cc._entry("run-1", "k")
     assert e["pr"] is None and e["attested"] is False and e["closed"] is False
+    assert e["slice1_pr"] == 7 and p["branch"].endswith("-proposal")
 
 
 def test_propose_flag_from_argument_not_from_text(tmp_path, monkeypatch):
@@ -1037,15 +1042,29 @@ def _propose(state, ops: Ops, run_id: str, key: str, text: str, *, human: bool) 
         "sha256": criteria_accept.text_sha256(body),
         "human": human,
         "base": state.base_ref or "master",
-        "branch": _branch(state, key),
+        "branch": _proposal_branch(state, key),
         "head": None,
         "policy": _snapshot_record(snap),
     }
-    # Запись, измеренная срезом 1, может нести `pr`/`attested`/`closed` PR
-    # среза 1 — у предложения свой PR (ревью круга 3 R3-m1: иначе `_advance`
-    # читал бы чужой PR и уводил ключ в rejected без единого акта).
-    _record(run_id, key, proposal=proposal, pr=None, attested=False, closed=False)
+    # Запись, опубликованная срезом 1, несёт `pr` PR среза 1 на ветке ключа —
+    # у предложения своя ветка и свой PR (решение владельца: миграция). Старый
+    # PR запоминается (`slice1_pr`), его обработает `_advance`.
+    _record(
+        run_id,
+        key,
+        proposal=proposal,
+        slice1_pr=entry.get("pr"),
+        pr=None,
+        attested=False,
+        closed=False,
+    )
     return proposal
+
+
+def _proposal_branch(state, key: str) -> str:
+    """Ветка предложения 2a — не ветка ключа среза 1 (там может лежать
+    опубликованный файл среза 1, и `_materialize` его не усыновит)."""
+    return _branch(state, key) + "-proposal"
 ```
 
 - [ ] **Step 4: Run tests**
@@ -1495,6 +1514,19 @@ def _advance(state, ops: Ops, run_id: str, key: str, bundle_pin: str) -> int:
     if e.get("merge"):
         return _stamp(state, ops, run_id, key)
     p = e["proposal"]
+    if e.get("slice1_pr") and not e.get("slice1_done"):
+        # миграция среза 1: прежний PR на ветке ключа заменён предложением
+        st, _ = _pr_state(ops, state.repo_slug, e["slice1_pr"])
+        if st is None:
+            print(f"criteria-close: отказ шага — PR среза 1 #{e['slice1_pr']} не прочитан")
+            return 2
+        if st == "OPEN":
+            ops.close_pr(
+                state.repo_slug,
+                e["slice1_pr"],
+                f"заменён предложением приёмки {p['branch']} (срез 2a)",
+            )
+        _record(run_id, key, slice1_done=True)
     if not p.get("head"):
         p["head"] = _materialize(state, p["branch"], p["text"], "traced")
         _record(run_id, key, proposal=p)
@@ -1733,6 +1765,31 @@ def _tamper(ops, pr, how):
     _git(clone, "push", "-q", "origin", "master")
 
 
+def test_slice1_unfinished_closure_migrates_without_remeasure(tmp_path, monkeypatch):
+    """Решение владельца: опубликованное, не влитое закрытие среза 1 →
+    предложение 2a на своей ветке → подпись → штамп, без перемера."""
+    state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    nodes = cc._bundle_at_pin(state, pin)
+    charter = cc.charter_guard.read_charter(nodes["00-charter.md"])
+    key, closure, text = cc._measure(
+        state, ops, "run-1", charter, nodes, pin, pin, "4.5.0", "h"
+    )
+    ops.review_exit = 1
+    assert cc._publish(state, ops, "run-1", key, text, closure) == 2  # срез 1
+    old_pr = cc._entry("run-1", key)["pr"]
+    ops.review_exit = 0
+    assert cc.run("run-1", ops) == 4
+    e = cc._entry("run-1", key)
+    assert e["slice1_pr"] == old_pr and ("close_pr", old_pr) in ops.calls
+    assert e["proposal"]["branch"].endswith("-proposal") and e["pr"] != old_pr
+    _forge_merge(ops, e["pr"], "owner-human")
+    assert cc.run("run-1", ops) == 0
+    assert cc._entry("run-1", key)["acceptance"]["state"] == "accepted"
+    assert sum(1 for c in ops.calls if c[0] == "criteria_verify") == 1
+
+
 @pytest.mark.parametrize("how", ["edit", "delete"])
 def test_tampered_or_deleted_stamp_reissues_stamp_pr(tmp_path, monkeypatch, how):
     """Review Focus 4 / ревью пары m4: иное содержимое или файла нет → новый stamp-PR."""
@@ -1758,7 +1815,7 @@ def test_tampered_or_deleted_stamp_reissues_stamp_pr(tmp_path, monkeypatch, how)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run -q --frozen --group governance pytest tests/test_governance_criteria_close.py -q -p no:cacheprovider -k "accepted or stamp or publishes_nothing"`
+Run: `uv run -q --frozen --group governance pytest tests/test_governance_criteria_close.py -q -p no:cacheprovider -k "accepted or stamp or publishes_nothing or migrates"`
 Expected: FAIL — заглушка `_stamp` («штамп — Task 6», код 2).
 
 - [ ] **Step 3: Implement** (заменить заглушку)
@@ -1868,121 +1925,567 @@ git commit -m "criteria_close: штамп — свой коммит, мерж п
 
 ---
 
-### Task 7: гейт `[x]` читает `status`, поля штампа и `human_criteria`
+### Task 7: гейт `[x]` — происхождение штампа и граф по пину
+
+Решение владельца 2026-10-02: проверка происхождения — в 2a. Гейт проверяет
+акт, связанный с этим закрытием (спека §7.2a п.6), а не текст.
 
 **Files:**
-- Modify: `governance/closure_gate.py` (ветка `state == "traced"` в `gate_findings`, docstring)
-- Test: `tests/test_governance_closure_gate.py`
+- Create: `governance/acceptance_provenance.py`
+- Modify: `governance/approval_facts.py` (`policy_accounts`), `governance/closure_gate.py` (ветка `traced`, `main`: `--repo-slug`, `RealForge`)
+- Test: `tests/test_governance_acceptance_provenance.py`, `tests/test_governance_closure_gate.py`
 
 **Interfaces:**
-- Consumes: frontmatter файла закрытия (`status`, `accepted_merge`, `accepted_pr`, `policy_source`, `human_criteria`, `human_pending`).
-- Produces: правило §7.2a п.6.
+- Consumes: `criteria_accept.stamp_text`, `criteria_graph.build_graph/human_criteria`, `approval_facts.policy_source/APPROVER_ALLOWLIST_ENV`, `ssot_env.definition_lines`, `ops.REVIEW_LOGIN_DEFAULT` (учётка агента), `RealOps.pr_facts/repo_file_fact`.
+- Produces:
+  - `approval_facts.policy_accounts(content: str) -> frozenset[str] | None` — состав из `approvers.env`; ключа нет/дубль/пусто — None;
+  - `acceptance_provenance.Forge` (Protocol): `pr_facts(slug, pr) -> dict | None`, `pr_files(slug, pr) -> list[str] | None`, `default_branch(slug) -> str | None`, `policy_file(repo, sha, path) -> str | None` — None всегда «не установлено»;
+  - `RealForge` — через `gh` (`RealOps.pr_facts`, `repo_file_fact`, `gh pr view --json files`, `gh repo view --json defaultBranchRef`);
+  - `human_needed(repo: Path, spec_dir: str, bundle_pin: object) -> bool | None` — по графу узлов на пине;
+  - `stamp_findings(repo: Path, spec_dir: str, text: str, *, slug: str | None, forge: Forge | None, agent: str = REVIEW_LOGIN_DEFAULT) -> list[str]` — пусто = штамп доказан;
+  - `closure_gate.gate_findings(repo, *, oracle_released, slug=None, forge=None)`.
 
-- [ ] **Step 1: Write the failing tests** (хелпер `make` этого файла пишет charter, `TODO.md` с `[x]` и frontmatter закрытия из строки)
+- [ ] **Step 1: Write the failing tests** — `tests/test_governance_acceptance_provenance.py`
 
 ```python
-STAMP = "status: accepted\naccepted_merge: m\naccepted_pr: 7\npolicy_source: s"
+"""Гейт [x]: происхождение штампа (спека §7.2a п.6, решение владельца 2026-10-02)."""
 
+from __future__ import annotations
 
-@pytest.mark.parametrize(
-    ("closure", "red", "warn"),
-    [
-        (f"closure: traced\n{STAMP}\nhuman_criteria: 1", False, False),
-        (f"closure: traced\n{STAMP}\nhuman_criteria: 0", False, False),
-        ("closure: traced\nstatus: accepted\nhuman_criteria: 1", True, False),
-        ("closure: traced\nstatus: proposed\nhuman_criteria: 0", True, False),
-        ("closure: traced\nstatus: proposed\nhuman_criteria: 2", True, False),
-        ("closure: traced\nhuman_pending: 2", True, False),  # срез 1, без подписи
-        ("closure: traced\nhuman_criteria: 1\nhuman_pending: 0", True, False),  # M1
-        ("closure: traced\nhuman_pending: 0", False, True),  # срез 1, только test
-        ("closure: traced\nstatus: weird\nhuman_criteria: 0", True, False),
-    ],
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from governance import acceptance_provenance as ap
+from governance import approval_facts as af
+from governance import criteria_accept as ca
+
+SPEC = "workstreams/ws/spec"
+REL = f"{SPEC}/90-acceptance-closure.md"
+REQ = "#### FR-01: A\n**Priority**: Must\n"
+BEH_TEST = (
+    "#### BEH-01: a\n`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: unit` `owner: qa`\n"
 )
-def test_traced_status_rules(tmp_path, closure, red, warn):
-    errors, warns = g.gate_findings(
-        make(tmp_path, done=True, closure=closure), oracle_released=True
-    )
-    assert bool(errors) is red
-    assert bool(warns) is warn
+BEH_HUMAN = BEH_TEST + (
+    "#### BEH-02: b\n`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: manual` `owner: qa`\n"
+)
+ACC_TEST = "#### AC-01: a · verification: test\ntraces: [FR-01]\nscenarios: [BEH-01]\n"
+ACC_HUMAN = ACC_TEST + (
+    "#### AC-02: b · verification: manual\ntraces: [FR-01]\nscenarios: [BEH-02]\n"
+)
+SHA = "a" * 40
+
+
+def _git(repo, *args):
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _source():
+    repo, _ref, path = af.policy_source()
+    return f"github:{repo}@{SHA}:{path}"
+
+
+class FakeForge:
+    def __init__(self, merge, login, files=None, default="master", base="master"):
+        self.facts = {
+            "state": "MERGED",
+            "baseRefName": base,
+            "mergeCommit": {"oid": merge},
+            "mergedBy": {"login": login},
+        }
+        self.files = files if files is not None else [REL]
+        self.default = default
+        self.down = False
+
+    def pr_facts(self, slug, pr):
+        return None if self.down else dict(self.facts)
+
+    def pr_files(self, slug, pr):
+        return None if self.down else list(self.files)
+
+    def default_branch(self, slug):
+        return None if self.down else self.default
+
+    def policy_file(self, repo, sha, path):
+        if self.down or sha != SHA:
+            return None
+        return f"{af.APPROVER_ALLOWLIST_ENV}=owner-human\n"
+
+
+def _signed(tmp_path, human=True):
+    """Репо: бандл на пине → предложение (merge) → штамп. → (repo, merge, stamp)."""
+    repo = tmp_path / "r"
+    subprocess.run(["git", "init", "-q", "-b", "master", str(repo)], check=True)
+    spec = repo / SPEC
+    spec.mkdir(parents=True)
+    (spec / "10-requirements.md").write_text(REQ)
+    (spec / "15-behaviour-spec.md").write_text(BEH_HUMAN if human else BEH_TEST)
+    (spec / "25-acceptance.md").write_text(ACC_HUMAN if human else ACC_TEST)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "bundle")
+    pin = _git(repo, "rev-parse", "HEAD")
+    closure = f"---\nclosure: traced\nbundle_pin: {pin}\n---\nтело\n"
+    proposal = ca.proposal_text(closure, _source())
+    (repo / REL).write_text(proposal)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "proposal")
+    merge = _git(repo, "rev-parse", "HEAD")
+    stamp = ca.stamp_text(proposal, merge_oid=merge, pr=7)
+    (repo / REL).write_text(stamp)
+    _git(repo, "commit", "-qam", "stamp")
+    return repo, merge, stamp
+
+
+def _check(repo, text, forge, slug="o/r"):
+    return ap.stamp_findings(repo, SPEC, text, slug=slug, forge=forge)
+
+
+def test_human_signed_stamp_is_green(tmp_path):
+    repo, merge, stamp = _signed(tmp_path)
+    assert _check(repo, stamp, FakeForge(merge, "owner-human")) == []
+
+
+def test_test_only_agent_merge_is_green(tmp_path):
+    repo, merge, stamp = _signed(tmp_path, human=False)
+    assert _check(repo, stamp, FakeForge(merge, "ai-prosto")) == []
+
+
+def test_agent_merge_with_human_criterion_is_red(tmp_path):
+    repo, merge, stamp = _signed(tmp_path)
+    assert _check(repo, stamp, FakeForge(merge, "ai-prosto"))
+
+
+def test_outsider_merge_is_red(tmp_path):
+    repo, merge, stamp = _signed(tmp_path, human=False)
+    assert _check(repo, stamp, FakeForge(merge, "stranger"))
+
+
+def test_fabricated_stamp_is_red(tmp_path):
+    """Выдуманный штамп: accepted_merge указывает не на предложение."""
+    repo, merge, stamp = _signed(tmp_path)
+    pin = _git(repo, "rev-parse", "HEAD~2")
+    fake = stamp.replace(merge, pin)
+    assert _check(repo, fake, FakeForge(pin, "owner-human"))
+
+
+def test_foreign_pr_is_red(tmp_path):
+    """Ссылка на чужое предложение: PR влит человеком, но правит иной файл
+    или его мерж-коммит — не accepted_merge."""
+    repo, merge, stamp = _signed(tmp_path)
+    assert _check(repo, stamp, FakeForge(merge, "owner-human", files=["other.md"]))
+    assert _check(repo, stamp, FakeForge("b" * 40, "owner-human"))
+
+
+def test_edited_after_signature_is_red(tmp_path):
+    repo, merge, stamp = _signed(tmp_path)
+    assert _check(repo, stamp.replace("тело", "другое тело"), FakeForge(merge, "owner-human"))
+
+
+def test_pr_into_other_branch_or_not_merged_is_red(tmp_path):
+    repo, merge, stamp = _signed(tmp_path)
+    assert _check(repo, stamp, FakeForge(merge, "owner-human", base="dev"))
+    forge = FakeForge(merge, "owner-human")
+    forge.facts["state"] = "CLOSED"
+    assert _check(repo, stamp, forge)
+
+
+def test_unavailable_forge_is_red(tmp_path):
+    repo, merge, stamp = _signed(tmp_path)
+    forge = FakeForge(merge, "owner-human")
+    forge.down = True
+    assert _check(repo, stamp, forge)
+    assert _check(repo, stamp, None)
+    assert _check(repo, stamp, FakeForge(merge, "owner-human"), slug=None)
+
+
+def test_untrusted_policy_source_is_red(tmp_path):
+    repo, merge, stamp = _signed(tmp_path)
+    forged = stamp.replace(_source(), f"github:evil/policy@{SHA}:policy/approvers.env")
+    assert _check(repo, forged, FakeForge(merge, "owner-human"))
+
+
+@pytest.mark.parametrize(("human", "need"), [(True, True), (False, False)])
+def test_human_needed_by_graph_at_pin(tmp_path, human, need):
+    repo, _merge, _stamp = _signed(tmp_path, human=human)
+    pin = _git(repo, "rev-parse", "HEAD~2")
+    assert ap.human_needed(repo, SPEC, pin) is need
+    assert ap.human_needed(repo, SPEC, "f" * 40) is None
+    assert ap.human_needed(repo, SPEC, None) is None
+
+
+def test_policy_accounts():
+    key = af.APPROVER_ALLOWLIST_ENV
+    assert af.policy_accounts(f"{key}=a, b\n") == frozenset({"a", "b"})
+    assert af.policy_accounts("") is None
+    assert af.policy_accounts(f"{key}= , \n") is None
+    assert af.policy_accounts(f"{key}=a\n{key}=b\n") is None
 ```
 
-Существующий `test_warnings_visible_for_human_pending` (вход
-`closure: traced\nhuman_pending: 2`) заменить — теперь это ошибка:
+В `tests/test_governance_closure_gate.py` — правило без `status` теперь по графу
+(в `make` гит-репо нет → граф не прочитан → **красный**: «непрочитанный граф не
+означает “ручных критериев нет”»). Строку таблицы `test_gate_table`
+`("closure: traced\nhuman_pending: 0", False, False)` заменить на
+`("closure: traced\nhuman_pending: 0", False, True)`; `test_warnings_visible_for_human_pending`
+заменить на `test_slice1_closure_without_graph_is_red` (ожидание: ошибка
+«граф бандла на пине не прочитан»). Добавить:
 
 ```python
-def test_slice1_closure_with_human_pending_is_red(tmp_path):
+def test_slice1_test_only_closure_green_with_warning_by_graph(tmp_path, monkeypatch):
+    monkeypatch.setattr(g.acceptance_provenance, "human_needed", lambda *a: False)
+    errors, warns = g.gate_findings(
+        make(tmp_path, done=True, closure="closure: traced\nbundle_pin: p"),
+        oracle_released=False,
+    )
+    assert errors == [] and any("без штампа" in w for w in warns)
+
+
+def test_slice1_closure_with_human_criteria_by_graph_is_red(tmp_path, monkeypatch):
+    monkeypatch.setattr(g.acceptance_provenance, "human_needed", lambda *a: True)
     errors, _ = g.gate_findings(
-        make(tmp_path, done=True, closure="closure: traced\nhuman_pending: 2"),
+        make(tmp_path, done=True, closure="closure: traced\nhuman_pending: 0"),
         oracle_released=False,
     )
     assert any("подпись человека не получена" in e for e in errors)
-```
 
-Строка `test_gate_table` `("closure: traced\nhuman_pending: 0", False, False)` остаётся зелёной (предупреждение красным не считается).
+
+@pytest.mark.parametrize(
+    ("closure", "red"),
+    [
+        ("closure: traced\nstatus: proposed", True),
+        ("closure: traced\nstatus: weird", True),
+    ],
+)
+def test_traced_non_accepted_status_is_red(tmp_path, closure, red):
+    errors, _ = g.gate_findings(
+        make(tmp_path, done=True, closure=closure), oracle_released=False
+    )
+    assert bool(errors) is red
+
+
+def test_accepted_delegates_to_provenance(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake(repo, spec_dir, text, *, slug, forge, **kw):
+        seen.update(spec_dir=spec_dir, slug=slug, forge=forge)
+        return ["нет акта"]
+
+    monkeypatch.setattr(g.acceptance_provenance, "stamp_findings", fake)
+    errors, _ = g.gate_findings(
+        make(tmp_path, done=True, closure="closure: traced\nstatus: accepted"),
+        oracle_released=False,
+        slug="o/r",
+        forge="F",
+    )
+    assert any("нет акта" in e for e in errors)
+    assert seen == {"spec_dir": "workstreams/ws-a/spec", "slug": "o/r", "forge": "F"}
+```
 
 - [ ] **Step 2: Run to verify fail**
 
-Run: `uv run -q --frozen --group governance pytest tests/test_governance_closure_gate.py -q -p no:cacheprovider`
-Expected: FAIL на строках с `proposed`, `weird`, штампом без полей, `human_criteria: 1` без `status`, `human_pending: 2` без `status`.
+Run: `uv run -q --frozen --group governance pytest tests/test_governance_acceptance_provenance.py tests/test_governance_closure_gate.py -q -p no:cacheprovider`
+Expected: FAIL — нет модуля `acceptance_provenance`, нет `policy_accounts`; гейт без `status` ещё по `human_pending`.
 
-- [ ] **Step 3: Implement** — ветку `elif state == "traced":` заменить:
+- [ ] **Step 3: Implement**
+
+`governance/approval_facts.py`, после `policy_fingerprint`:
+
+```python
+def policy_accounts(content: str) -> frozenset[str] | None:
+    """Состав политики из `approvers.env` (тем же правилом, что `policy_snapshot`):
+    ключа нет, дубль или ни одного логина — None."""
+    lines = ssot_env.definition_lines(content, APPROVER_ALLOWLIST_ENV)
+    if len(lines) != 1 or not lines[0]:
+        return None
+    accounts = frozenset(p.strip() for p in lines[0].split(",") if p.strip())
+    return accounts or None
+```
+
+`governance/acceptance_provenance.py`:
+
+```python
+"""acceptance_provenance — происхождение штампа для гейта [x] (спека §7.2a п.6).
+
+Зелёный только при установленном акте, связанном с ЭТИМ закрытием:
+штамп = подписанное предложение (в accepted_merge) с разрешёнными правками;
+PR accepted_pr этого репо влит в default, его мерж-коммит = accepted_merge,
+правит ровно этот файл; политика — из доверенного источника по пину
+предложения; нужен ли человек — по графу на bundle_pin; подписант
+предложения — человек из снимка (или, только test, агент). Любой
+неустановленный факт — находка (красный).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+from pathlib import Path
+from typing import Protocol
+
+from governance import approval_facts, criteria_accept, criteria_graph
+from governance.facts import Outcome
+from governance.frontmatter import split_frontmatter
+from governance.ops import REVIEW_LOGIN_DEFAULT, RealOps
+
+CLOSURE_NAME = "90-acceptance-closure.md"
+_NODES = ("10-requirements.md", "15-behaviour-spec.md", "25-acceptance.md")
+_SOURCE = re.compile(r"^github:(?P<repo>[^@]+)@(?P<sha>[0-9a-f]{40}):(?P<path>.+)$")
+
+
+class Forge(Protocol):
+    """Факты форджи для гейта; None — не установлено."""
+
+    def pr_facts(self, slug: str, pr: int) -> dict | None: ...
+
+    def pr_files(self, slug: str, pr: int) -> list[str] | None: ...
+
+    def default_branch(self, slug: str) -> str | None: ...
+
+    def policy_file(self, repo: str, sha: str, path: str) -> str | None: ...
+
+
+def _gh(*args: str) -> str | None:
+    try:
+        done = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
+    except OSError:
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+class RealForge:
+    """Форджа через `gh` (в CI — `GH_TOKEN`); любой сбой — None."""
+
+    def __init__(self) -> None:
+        self._ops = RealOps()
+
+    def pr_facts(self, slug: str, pr: int) -> dict | None:
+        try:
+            facts = self._ops.pr_facts(slug, pr)
+        except (subprocess.SubprocessError, OSError, ValueError, RuntimeError):
+            return None
+        return facts if isinstance(facts, dict) else None
+
+    def pr_files(self, slug: str, pr: int) -> list[str] | None:
+        out = _gh("pr", "view", str(pr), "-R", slug, "--json", "files")
+        try:
+            files = json.loads(out)["files"] if out is not None else None
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return None
+        if not isinstance(files, list):
+            return None
+        paths = [f.get("path") for f in files if isinstance(f, dict)]
+        return paths if all(isinstance(p, str) for p in paths) else None
+
+    def default_branch(self, slug: str) -> str | None:
+        out = _gh("repo", "view", slug, "--json", "defaultBranchRef")
+        try:
+            name = json.loads(out)["defaultBranchRef"]["name"] if out else None
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return None
+        return name if isinstance(name, str) and name else None
+
+    def policy_file(self, repo: str, sha: str, path: str) -> str | None:
+        fact = self._ops.repo_file_fact(repo, sha, path)
+        if fact.outcome is Outcome.FOUND and isinstance(fact.value, str):
+            return fact.value
+        return None
+
+
+def _show(repo: Path, ref: str, path: str) -> str | None:
+    done = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{ref}:{path}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return done.stdout if done.returncode == 0 else None
+
+
+def human_needed(repo: Path, spec_dir: str, bundle_pin: object) -> bool | None:
+    """Нужен ли человек — по графу узлов на пине (§7.2a п.1); None — не прочитан."""
+    if not isinstance(bundle_pin, str) or not bundle_pin:
+        return None
+    texts = [_show(repo, bundle_pin, f"{spec_dir}/{n}") for n in _NODES]
+    if any(t is None for t in texts):
+        return None
+    req, beh, acc = (t or "" for t in texts)
+    return criteria_graph.human_criteria(criteria_graph.build_graph(req, beh, acc)) > 0
+
+
+def _trusted_accounts(source: object, forge: Forge) -> frozenset[str] | None:
+    """Состав политики по пину предложения — только из SSOT-источника."""
+    m = _SOURCE.match(source) if isinstance(source, str) else None
+    if m is None:
+        return None
+    try:
+        repo, _ref, path = approval_facts.policy_source()
+    except RuntimeError:
+        return None
+    if (m["repo"], m["path"]) != (repo, path):
+        return None
+    content = forge.policy_file(repo, m["sha"], path)
+    return approval_facts.policy_accounts(content) if content is not None else None
+
+
+def stamp_findings(
+    repo: Path,
+    spec_dir: str,
+    text: str,
+    *,
+    slug: str | None,
+    forge: Forge | None,
+    agent: str = REVIEW_LOGIN_DEFAULT,
+) -> list[str]:
+    """Пусто — штамп доказан актом, связанным с этим закрытием."""
+    rel = f"{spec_dir}/{CLOSURE_NAME}"
+    meta, _ = split_frontmatter(text)
+    merge, pr = meta.get("accepted_merge"), meta.get("accepted_pr")
+    if not isinstance(merge, str) or not merge or not isinstance(pr, int):
+        return ["штамп без accepted_merge/accepted_pr"]
+    proposal = _show(repo, merge, rel)
+    if proposal is None:
+        return [f"предложение в {merge[:12]} не прочитано (история git?)"]
+    try:
+        expected = criteria_accept.stamp_text(proposal, merge_oid=merge, pr=pr)
+    except ValueError:
+        return [f"в {merge[:12]} не предложение (status ≠ proposed)"]
+    if expected != text:
+        return ["штамп ≠ подписанному предложению (правка после подписи?)"]
+    if slug is None or forge is None:
+        return ["форджа/репозиторий не установлены — происхождение не проверить"]
+    facts = forge.pr_facts(slug, pr)
+    files = forge.pr_files(slug, pr)
+    default = forge.default_branch(slug)
+    if facts is None or files is None or default is None:
+        return [f"факты PR #{pr} не получены"]
+    oid = (facts.get("mergeCommit") or {}).get("oid")
+    out = [
+        why
+        for bad, why in (
+            (facts.get("state") != "MERGED", f"PR #{pr} не влит"),
+            (facts.get("baseRefName") != default, f"PR #{pr} влит не в {default}"),
+            (oid != merge, f"accepted_merge ≠ мерж-коммиту PR #{pr}"),
+            (files != [rel], f"PR #{pr} правит не только {rel}: {files}"),
+        )
+        if bad
+    ]
+    if out:
+        return out
+    pmeta, _ = split_frontmatter(proposal)
+    accounts = _trusted_accounts(pmeta.get("policy_source"), forge)
+    if accounts is None:
+        return ["политика по пину предложения не прочитана из доверенного источника"]
+    need = human_needed(repo, spec_dir, pmeta.get("bundle_pin"))
+    if need is None:
+        return ["граф бандла на пине не прочитан"]
+    login = (facts.get("mergedBy") or {}).get("login")
+    if not isinstance(login, str) or not login:
+        return [f"подписант PR #{pr} не установлен"]
+    if need and (login == agent or login not in accounts):
+        return [f"PR #{pr} влит {login} — не человек из снимка политики"]
+    if not need and login != agent and login not in accounts:
+        return [f"PR #{pr} влит {login} — ни агент, ни учётка снимка"]
+    return []
+```
+
+`governance/closure_gate.py`: импорты `os`, `subprocess`, `from governance import acceptance_provenance`. Сигнатура
+`gate_findings(repo: Path, *, oracle_released: bool, slug: str | None = None, forge: acceptance_provenance.Forge | None = None)`.
+Ветку `elif state == "traced":` заменить:
 
 ```python
         elif state == "traced":
             status = meta.get("status")
-            human = int(meta.get("human_criteria", meta.get("human_pending")) or 0)
+            spec_dir = charter_path.parent.relative_to(repo).as_posix()
             if status == "accepted":
-                missing = [
-                    f
-                    for f in ("accepted_merge", "accepted_pr", "policy_source")
-                    if not meta.get(f)
-                ]
-                if missing:
-                    errors.append(
-                        f"{ws}: штамп accepted без полей {', '.join(missing)}"
+                errors += [
+                    f"{ws}: {why}"
+                    for why in acceptance_provenance.stamp_findings(
+                        repo,
+                        spec_dir,
+                        closure_path.read_text(),
+                        slug=slug,
+                        forge=forge,
                     )
-            elif status == "proposed":
+                ]
+            elif status is not None:
                 errors.append(
                     f"@id:{m.group(2)} [x], но приёмка {ws} не завершена "
-                    "(status: proposed — нет штампа accepted)"
-                )
-            elif status is not None:
-                errors.append(f"{ws}: status {status!r} вне словаря proposed|accepted")
-            elif human > 0:
-                errors.append(
-                    f"@id:{m.group(2)} [x], но у {ws} человеческих критериев "
-                    f"{human} — подпись человека не получена (закрытие среза 1 без "
-                    "штампа)"
+                    f"(status: {status!r} — нет штампа accepted)"
                 )
             else:
-                warns.append(f"{ws}: закрытие среза 1 без штампа (только test-критерии)")
+                need = acceptance_provenance.human_needed(
+                    repo, spec_dir, meta.get("bundle_pin")
+                )
+                if need is None:
+                    errors.append(f"{ws}: граф бандла на пине не прочитан — закрытие среза 1 без штампа")
+                elif need:
+                    errors.append(
+                        f"@id:{m.group(2)} [x], но у {ws} есть человеческие критерии — "
+                        "подпись человека не получена (закрытие среза 1 без штампа)"
+                    )
+                else:
+                    warns.append(f"{ws}: закрытие среза 1 без штампа (только test-критерии)")
 ```
 
-Docstring модуля дополнить: «С 2a `traced` зелёный только со штампом
-`status: accepted` и его полями (спека §7.2a п.6); файл среза 1 без `status` —
-зелёный с предупреждением лишь без человеческих критериев (`human_criteria`,
-в старом файле — `human_pending`). Гейт проверяет форму штампа, не
-происхождение акта — названная граница §7.2a п.6.»
+`main`: аргумент `--repo-slug` (умолчание — `GITHUB_REPOSITORY`, иначе `owner/name` из `git remote get-url origin`, иначе None) и `forge=acceptance_provenance.RealForge()`:
+
+```python
+def _origin_slug(repo: Path) -> str | None:
+    done = subprocess.run(
+        ["git", "-C", str(repo), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", done.stdout.strip())
+    return m.group(1) if done.returncode == 0 and m else None
+```
+
+```python
+    parser.add_argument("--repo-slug")
+    args = parser.parse_args(argv)
+    repo = args.repo.resolve()
+    slug = args.repo_slug or os.environ.get("GITHUB_REPOSITORY") or _origin_slug(repo)
+    errors, warns = gate_findings(
+        repo,
+        oracle_released=oracle_released(),
+        slug=slug,
+        forge=acceptance_provenance.RealForge(),
+    )
+```
+
+Docstring модуля: «С 2a `traced` зелёный только со штампом, доказанным актом
+(`acceptance_provenance`, спека §7.2a п.6); файл среза 1 без `status` —
+зелёный с предупреждением лишь при графе на пине без человеческих критериев.
+Нужны история git и чтение форджи (в CI — Task 9).»
 
 - [ ] **Step 4: Run tests** — команда Step 2. Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add governance/closure_gate.py tests/test_governance_closure_gate.py
-git commit -m "closure_gate: [x] на traced требует штамп accepted (срез 2a)"
+git add governance/acceptance_provenance.py governance/approval_facts.py governance/closure_gate.py tests/test_governance_acceptance_provenance.py tests/test_governance_closure_gate.py
+git commit -m "closure_gate: происхождение штампа — акт, связанный с закрытием (срез 2a)"
 ```
 
 ---
 
-### Task 8: документация, полный прогон, PR
+### Task 8: документация, полный прогон, PR кода
 
 **Files:**
 - Modify: `CLAUDE.md` (строка `governance/criteria_close.py` в таблице инструментов), `Makefile` (строка help `criteria-close`)
 
 - [ ] **Step 1: Docs**
 
-`CLAUDE.md`, строка `governance/criteria_close.py`: после «файл `90-acceptance-closure.md` агентским PR …» вставить: «Срез 2a (спека §7.2a): закрытие `traced` — предложение (`status: proposed`, снимок политики, свой коммит); PR с человеческими критериями (`human_criteria` по графу) — метка `human-merge-required`, мержит человек из снимка (выход 4 — ждём); приёмку ведёт `_advance` по фактам форджи: предикат §3.5, stamp-PR `status: accepted`; выходы 0/2/4/5/6. Гейт `[x]` на `traced` требует штампа (форма, не происхождение — граница названа).»
+`CLAUDE.md`, строка `governance/criteria_close.py`: после «файл `90-acceptance-closure.md` агентским PR …» вставить: «Срез 2a (спека §7.2a): закрытие `traced` — предложение (`status: proposed`, снимок политики, свой коммит на ветке `…-proposal`); PR с человеческими критериями (`human_criteria` по графу) — метка `human-merge-required`, мержит человек из снимка (выход 4 — ждём); приёмку ведёт `_advance` по фактам форджи: предикат §3.5, stamp-PR `status: accepted`; выходы 0/2/4/5/6; незавершённое закрытие среза 1 мигрирует в предложение без перемера. Гейт `[x]` на `traced` проверяет происхождение штампа (`acceptance_provenance`: акт, связанный с закрытием; политика по пину из SSOT; граф по пину) — нужны история git и чтение форджи.»
 
 `Makefile`, help `criteria-close`: «(срез 1: файл закрытия агентским PR; флага обхода нет)» → «(срез 2a: предложение → мерж (человеком при ручных критериях) → штамп accepted; выходы 0/2/4/5/6; флага обхода нет)».
 
@@ -1990,33 +2493,82 @@ git commit -m "closure_gate: [x] на traced требует штамп accepted 
 
 Run:
 ```bash
-uv run -q --frozen --group=selfcheck ruff format --check . && uv run -q --frozen --group=selfcheck ruff check . && uv run -q --frozen --group selfcheck pyrefly check governance/criteria_accept.py governance/criteria_close.py governance/criteria_graph.py governance/closure_gate.py governance/ops.py
+uv run -q --frozen --group=selfcheck ruff format --check . && uv run -q --frozen --group=selfcheck ruff check . && uv run -q --frozen --group selfcheck pyrefly check governance/criteria_accept.py governance/criteria_close.py governance/criteria_graph.py governance/closure_gate.py governance/acceptance_provenance.py governance/approval_facts.py governance/ops.py
 GOVERNANCE_REQUIRED=1 uv run --frozen --group governance pytest -q -p no:cacheprovider
 ```
 Expected: всё чисто, набор зелёный.
 
-- [ ] **Step 3: Commit, PR, review**
+- [ ] **Step 3: Integration review, commit, PR, review**
+
+До PR — общее интеграционное ревью всей ветки (решение владельца): свежий ревьюер, самая сильная модель, на `review-package` от `origin/master`; находки Critical/Important — один проход фиксов с RED→GREEN.
 
 ```bash
 git add CLAUDE.md Makefile
-git commit -m "docs: criteria-close срез 2a — предложение, подпись человека, штамп"
+git commit -m "docs: criteria-close срез 2a — предложение, подпись человека, штамп, происхождение в гейте"
 git push -u origin feat/bundle-oracle-slice2a
-gh pr create --base master --title "criteria-close: срез 2a — подпись человека и штамп accepted" --body "Срез 2a оракула (спека §7.2a, план docs/superpowers/plans/2026-10-02-bundle-oracle-slice2a.md): criteria_accept (предложение, предикат §3.5, штамп) и human_criteria по графу; предложение — свой коммит со снимком политики и human-merge-required; _advance — приёмка по фактам форджи; stamp-PR status: accepted; гейт [x] по штампу. Выходы 0/2/4/5/6."
+gh pr create --base master --title "criteria-close: срез 2a — подпись человека, штамп accepted, происхождение в гейте" --body "Срез 2a оракула (спека §7.2a, план docs/superpowers/plans/2026-10-02-bundle-oracle-slice2a.md): criteria_accept и human_criteria по графу; предложение — свой коммит на ветке -proposal со снимком политики и human-merge-required; _advance — приёмка по фактам форджи; миграция незавершённого закрытия среза 1; stamp-PR status: accepted; гейт [x] — происхождение штампа (acceptance_provenance). Выходы 0/2/4/5/6. CI-проводка гейта (.github) — отдельный PR, мерж человеком."
 ```
-Ревью — `review-pr.sh` двухфазно (`--dry-run --write-verdict F`, затем `--use-verdict F`), мерж — `merge-pr.sh --squash --delete-branch --expect-head --expect-base`.
+Ревью — `review-pr.sh` двухфазно (`--dry-run --write-verdict F`, затем `--use-verdict F`), мерж — `merge-pr.sh --squash --delete-branch --expect-head --expect-base` (PR `.github/` не трогает).
 
 ---
 
-### Task 9: живая приёмка 2a на polygon (после мержа кода; акты — владельца)
+### Task 9: CI-проводка гейта — `.github/`, отдельный PR, мерж человеком
+
+Гейту в CI нужны чтение форджи (PR, их файлы, default-ветка, файл политики) и
+история git. История уже есть (`fetch-depth: 0` в `oracle-gates`).
+
+**Files:**
+- Modify: `.github/workflows/ci.yml` (job `oracle-gates`: `permissions`, `env` шага `closure_gate`)
+
+- [ ] **Step 1: Edit**
+
+В job `oracle-gates` добавить права только на чтение и токен в шаг гейта:
+
+```yaml
+  oracle-gates:
+    runs-on: ubuntu-latest
+    # Гейт [x] проверяет происхождение штампа по фактам форджи (спека §7.2a п.6).
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      ...
+      - name: closure_gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --frozen python -m governance.closure_gate --repo .
+```
+
+(`GITHUB_REPOSITORY` Actions выставляет сами — `--repo-slug` не нужен.)
+
+- [ ] **Step 2: Verify locally**
+
+Run: `uv run -q --frozen --group selfcheck zizmor .github/workflows/ci.yml` (если zizmor в группе selfcheck; иначе — `actionlint`). Expected: без новых находок уровня error.
+
+- [ ] **Step 3: PR с человеческим мержем**
+
+```bash
+git switch -c ci/closure-gate-forge-read origin/master
+git add .github/workflows/ci.yml
+git commit -m "ci: гейт [x] читает форджу — pull-requests: read и GH_TOKEN (срез 2a)"
+git push -u origin ci/closure-gate-forge-read
+gh pr create --base master --label human-merge-required --title "ci: closure_gate читает форджу (срез 2a)" --body "Проверке происхождения штампа (acceptance_provenance) нужны факты PR и файл политики: permissions pull-requests: read и GH_TOKEN в шаге closure_gate. .github/ — мерж человеком."
+```
+Ревью — `review-pr.sh`; мерж — **человек** (агент PR с `.github/` и меткой `human-merge-required` не мержит).
+
+---
+
+### Task 10: живая приёмка 2a на polygon (после мержа Tasks 1–9; акты — владельца)
 
 Не код — прогон. Бандлы готовит агент PR-ами в polygon (вариант B, журнал
-`completed` вручную), мержи — владелец (на polygon нет review-kit, поэтому и
+`completed` вручную), мержи — владелец (на polygon нет review-kit, поэтому
 агентские мержи PR предложения/штампа там упираются в ревью: выход 2, мерж
 владельцем, resume — путь `test_test_only_merged_by_human_goes_to_predicate`
-и `test_stamp_merged_by_human_is_adopted`).
+и `test_stamp_merged_by_human_is_adopted`). **Автоматический агентский мерж на
+polygon не проверяется** — это отдельно указать в итоговой записи.
 
 - [ ] **Step 1: Метка.** `gh label create human-merge-required -R DarkFactory-polygon/polygon` (если нет).
-- [ ] **Step 2: Бандл test-only** `oracle-stamp` (код `PLS`, 1 Must-BEH `kind: unit` с тестом, вызывающим `greet`) → PR → мерж владельцем → журнал `polygon-oracle-stamp-<дата>` → `make criteria-close` → предложение `status: proposed` (выход 2 на ревью) → владелец мержит PR предложения → resume → stamp-PR (выход 2 на ревью) → владелец мержит → resume → `accepted`, выход 0. `mergedBy` владельца ∈ снимок — test-only путь допускает.
+- [ ] **Step 2: Бандл test-only** `oracle-stamp` (код `PLS`, 1 Must-BEH `kind: unit` с тестом, вызывающим `greet`) → PR → мерж владельцем → журнал `polygon-oracle-stamp-<дата>` → `make criteria-close` → предложение `status: proposed` на ветке `…-proposal` (выход 2 на ревью) → владелец мержит PR предложения → resume → stamp-PR (выход 2 на ревью) → владелец мержит → resume → `accepted`, выход 0. `mergedBy` владельца ∈ снимок — test-only путь допускает.
 - [ ] **Step 3: Бандл с человеком** `oracle-human` (код `PLH`, BEH-01 `kind: unit` + BEH-02 `kind: manual` в AC `verification: manual`) → PR → мерж → журнал → `make criteria-close` → PR с метками `criteria-close` и `human-merge-required` создан, аттестация на polygon падает (нет review-kit) → выход **2**, не 4 (на репо с review-kit было бы 4) → владелец мержит PR предложения → resume → stamp-PR → владелец мержит → resume → `accepted`.
-- [ ] **Step 4: Гейт.** Пункты TODO polygon обоих воркстримов `[x]` → `closure_gate --repo polygon` = 0; контрольно: `oracle-positive` (файл среза 1 без `status`, без человеческих критериев) — зелёный с предупреждением.
-- [ ] **Step 5: Закрыть** `bundle-oracle-slice2` в devtools TODO формулировкой с номерами PR polygon и пином; п.5 §8.4 — «тестами (`test_human_criterion_merged_by_outsider_is_rejected`), на polygon нет третьей учётки»; п.6 — в 2b.
+- [ ] **Step 4: Гейт с происхождением.** Пункты TODO polygon обоих воркстримов `[x]` → `uv run python -m governance.closure_gate --repo <polygon>` (slug — из origin) = 0. Контрольно (не коммитить): правка тела штампа `oracle-human` в рабочем дереве → красный «штамп ≠ подписанному предложению»; `oracle-positive` (файл среза 1 без `status`, граф на пине без человеческих критериев) — зелёный с предупреждением.
+- [ ] **Step 5: Закрыть** `bundle-oracle-slice2` в devtools TODO формулировкой с номерами PR polygon и пином; отдельно: «автоматический агентский мерж на polygon не проверялся (нет review-kit; мержи PR предложения и штампа — владельцем)»; п.5 §8.4 — тестами (`test_human_criterion_merged_by_outsider_is_rejected`, `test_agent_merge_with_human_criterion_is_red`), на polygon нет третьей учётки; п.6 — в 2b.
