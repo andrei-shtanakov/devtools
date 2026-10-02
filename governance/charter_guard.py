@@ -143,6 +143,24 @@ def code_change_findings(
     return [f"code неизменяем: {base.code} → {head.code}"]
 
 
+def plan_item_change_findings(
+    ws_id: str, base: Charter | None, head: Charter
+) -> list[str]:
+    """`plan_item` charter'а схемы 2 неизменяем против базы, как `code`
+    (ревью круга 7 M7-2): перепривязка снимала гейт [x] с пункта, ради
+    которого бандл существует, — `[x]` без подписи одним агентским PR."""
+    if base is None or base.schema != 2 or head.schema != 2:
+        return []
+    if base.plan_item == head.plan_item:
+        return []
+    return [
+        (
+            f"{ws_id}: plan_item схемы 2 неизменяем ({base.plan_item} → "
+            f"{head.plan_item}); новый пункт — новый воркстрим"
+        )
+    ]
+
+
 def stamp_charter(text: str, *, code: str, plan_item: str) -> str:
     """Вписать схему 2 (идемпотентно); битый frontmatter — ValueError."""
     updates = {"schema": 2, "code": code, "plan_item": plan_item}
@@ -233,6 +251,7 @@ def repo_findings(repo: Path, base_ref: str | None) -> list[str]:
             out += code_change_findings(
                 base.get(path), ch, violator_in_base=_ws(path) in base_violators
             )
+            out += plan_item_change_findings(_ws(path), base.get(path), ch)
     return out + collisions
 
 

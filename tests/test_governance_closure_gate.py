@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from pathlib import Path
 
 import pytest
@@ -11,18 +9,6 @@ import pytest
 from governance import closure_gate as g
 
 CH2 = "---\nschema: 2\ncode: {code}\nplan_item: todo://repo/{item}\n---\n"
-
-
-def vendor(d: Path, *, min_version: str) -> None:
-    """Собирает минимальный вендоренный контракт (PIN+manifest+схема+min)."""
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "min-spec-runner.env").write_text(f"MIN_SPEC_RUNNER_VERSION={min_version}\n")
-    schema = d / "response.schema.json"
-    schema.write_bytes(b"{}")
-    (d / "PIN").write_text("SOURCE: spec-runner @ " + "a" * 40 + "\n")
-    (d / "manifest.json").write_text(
-        json.dumps({"response.schema.json": hashlib.sha256(b"{}").hexdigest()})
-    )
 
 
 def make(
@@ -48,43 +34,37 @@ def make(
     return repo
 
 
-NA_SR = "closure: not-applicable\nnot_applicable_reason: spec-runner-version\nspec_runner_version: 4.2.0\nhost: mac"
+NA_SR = (
+    "closure: not-applicable\nnot_applicable_reason: spec-runner-version\n"
+    "spec_runner_version: 4.2.0\nhost: mac"
+)
 
 
 @pytest.mark.parametrize(
-    "closure,oracle_released,red",
+    "closure,red",
     [
-        (None, False, True),
-        ("closure: blocked", False, True),
-        ("closure: traced\nhuman_pending: 0", False, False),
-        ("closure: not-applicable\nnot_applicable_reason: schema-1", True, False),
-        (NA_SR, False, False),
-        (NA_SR, True, True),
+        (None, True),
+        ("closure: blocked", True),
+        ("closure: traced\nhuman_pending: 0", True),
+        ("closure: not-applicable\nnot_applicable_reason: schema-1", True),
+        (NA_SR, True),
     ],
 )
-def test_gate_table(tmp_path, closure, oracle_released, red):
-    errors, _ = g.gate_findings(
-        make(tmp_path, done=True, closure=closure), oracle_released=oracle_released
-    )
+def test_gate_table(tmp_path, closure, red):
+    errors, _ = g.gate_findings(make(tmp_path, done=True, closure=closure))
     assert bool(errors) is red
 
 
 def test_na_version_names_version_and_host_in_error_and_warning(tmp_path):
-    errors, _ = g.gate_findings(
-        make(tmp_path, done=True, closure=NA_SR), oracle_released=True
-    )
+    errors, _ = g.gate_findings(make(tmp_path, done=True, closure=NA_SR))
     assert any("4.2.0" in e and "mac" in e for e in errors)
-    _, warns = g.gate_findings(
-        make(tmp_path, done=True, closure=NA_SR), oracle_released=False
-    )
-    assert any("4.2.0" in w and "mac" in w for w in warns)
 
 
-def test_language_is_green_with_visible_warning(tmp_path):
+def test_language_is_green_with_visible_warning(tmp_path, monkeypatch):
+    monkeypatch.setattr(g.acceptance_provenance, "pin_current", lambda *a: True)
+    monkeypatch.setattr(g.acceptance_provenance, "human_needed", lambda *a: False)
     na = "closure: not-applicable\nnot_applicable_reason: language"
-    errors, warns = g.gate_findings(
-        make(tmp_path, done=True, closure=na), oracle_released=True
-    )
+    errors, warns = g.gate_findings(make(tmp_path, done=True, closure=na))
     assert errors == [] and any("language" in w for w in warns)
 
 
@@ -103,73 +83,138 @@ def test_gate_reads_a_real_rendered_closure(tmp_path):
         host="mac",
     )
     (repo / "workstreams/ws-a/spec/90-acceptance-closure.md").write_text(text)
-    errors, warns = g.gate_findings(repo, oracle_released=False)
-    assert errors == [] and warns
+    errors, _ = g.gate_findings(repo)
+    assert errors  # n/a spec-runner-version — всегда перегнать
 
 
 def test_open_item_is_not_checked(tmp_path):
-    errors, _ = g.gate_findings(
-        make(tmp_path, done=False, closure=None), oracle_released=False
-    )
+    errors, _ = g.gate_findings(make(tmp_path, done=False, closure=None))
     assert errors == []
 
 
-def test_warnings_visible_for_human_pending(tmp_path):
-    _, warns = g.gate_findings(
+def test_slice1_closure_without_graph_is_red(tmp_path):
+    """Непрочитанный граф не означает «ручных критериев нет»."""
+    errors, _ = g.gate_findings(
         make(tmp_path, done=True, closure="closure: traced\nhuman_pending: 2"),
-        oracle_released=False,
     )
-    assert any("human" in w for w in warns)
+    assert any("граф бандла на пине не прочитан" in e for e in errors)
 
 
 def test_two_charters_same_item_both_checked(tmp_path):
     repo = make(tmp_path, done=True, closure="closure: traced\nhuman_pending: 0")
     make(tmp_path, done=True, closure=None, ws="ws-b", code="ABC")
-    errors, _ = g.gate_findings(repo, oracle_released=False)
+    errors, _ = g.gate_findings(repo)
     assert any("ws-b" in e for e in errors)
 
 
-@pytest.mark.parametrize("mark", ["- [X]", "* [x]", "* [X]"])
-def test_done_forms_match_plan_fields(tmp_path, mark):
-    """I-5: гейт видит `[x]` в тех же формах, что check-plan-fields."""
+@pytest.mark.parametrize(
+    "line",
+    [
+        "- [X] пункт @id:oracle",
+        "* [x] пункт @id:oracle",
+        "-  [x] два пробела @id:oracle",
+        "-\t[x] таб @id:oracle",
+        "- [x] cf. `@id:other` @id:oracle",
+        "- [x] пункт @id:other @id:oracle",
+    ],
+)
+def test_done_forms_match_plan_fields(tmp_path, line):
+    """M8-5: гейт видит `[x]` ровно там, где `plan_fields` — closed."""
+    from plan_fields.parser import parse_todo
+
     repo = make(tmp_path, done=True, closure=None)
-    (repo / "TODO.md").write_text(f"{mark} пункт @id:oracle\n")
-    errors, _ = g.gate_findings(repo, oracle_released=False)
+    (repo / "TODO.md").write_text(line + "\n")
+    closed = {
+        n["id"]
+        for n in parse_todo(line + "\n", repo="repo")["nodes"]
+        if n["declared_status"] == "closed"
+    }
+    assert g._closed_ids(repo) == closed
+    errors, _ = g.gate_findings(repo)
+    assert bool(errors) is ("oracle" in closed)
+
+
+def test_na_spec_runner_version_always_red(tmp_path):
+    errors, _ = g.gate_findings(make(tmp_path, done=True, closure=NA_SR))
     assert errors
 
 
-def test_oracle_released_false_when_min_version_pending(tmp_path):
-    """Схемы вендорены, но verify --criteria ещё нет (B2b) — gate_findings
-    не должен путать «вендорен» с «выпущен» (ruling after Task 1)."""
-    vendor(tmp_path, min_version="pending")
-    assert g.oracle_released(tmp_path) is False
+@pytest.mark.parametrize(
+    ("current", "need", "red"),
+    [
+        (True, False, False),
+        (True, True, True),
+        (True, None, True),
+        (False, None, True),
+        (None, None, True),
+    ],
+)
+def test_language_na_checks_graph(tmp_path, monkeypatch, current, need, red):
+    monkeypatch.setattr(g.acceptance_provenance, "pin_current", lambda *a: current)
+    monkeypatch.setattr(g.acceptance_provenance, "human_needed", lambda *a: need)
+    na = "closure: not-applicable\nnot_applicable_reason: language\nbundle_pin: p"
+    errors, _ = g.gate_findings(make(tmp_path, done=True, closure=na))
+    assert bool(errors) is red
 
 
-def test_oracle_released_true_when_min_version_numeric(tmp_path):
-    vendor(tmp_path, min_version="4.3.0")
-    assert g.oracle_released(tmp_path) is True
+@pytest.mark.parametrize("reason", ["foo", "null", "''"])
+def test_unknown_na_reason_is_red(tmp_path, reason):
+    na = f"closure: not-applicable\nnot_applicable_reason: {reason}"
+    errors, _ = g.gate_findings(make(tmp_path, done=True, closure=na))
+    assert errors
 
 
-def test_oracle_released_false_when_not_vendored(tmp_path):
-    assert g.oracle_released(tmp_path / "missing") is False
-
-
-def test_na_spec_runner_version_not_flagged_while_oracle_pending(tmp_path):
-    """Срез 1 (C.3/ruling): схемы вендорены, команда `pending` — закрытие
-    `not-applicable: spec-runner-version` не красится ошибкой."""
-    contract_dir = tmp_path / "contract"
-    vendor(contract_dir, min_version="pending")
-    repo = make(tmp_path, done=True, closure=NA_SR)
+def test_slice1_test_only_closure_green_with_warning_by_graph(tmp_path, monkeypatch):
+    monkeypatch.setattr(g.acceptance_provenance, "pin_current", lambda *a: True)
+    monkeypatch.setattr(g.acceptance_provenance, "human_needed", lambda *a: False)
     errors, warns = g.gate_findings(
-        repo, oracle_released=g.oracle_released(contract_dir)
+        make(tmp_path, done=True, closure="closure: traced\nbundle_pin: p"),
     )
-    assert errors == []
-    assert any("spec-runner-version" in w for w in warns)
+    assert errors == [] and any("без штампа" in w for w in warns)
 
 
-def test_na_spec_runner_version_flagged_once_oracle_released(tmp_path):
-    contract_dir = tmp_path / "contract"
-    vendor(contract_dir, min_version="4.3.0")
-    repo = make(tmp_path, done=True, closure=NA_SR)
-    errors, _ = g.gate_findings(repo, oracle_released=g.oracle_released(contract_dir))
-    assert errors
+def test_slice1_closure_with_human_criteria_by_graph_is_red(tmp_path, monkeypatch):
+    monkeypatch.setattr(g.acceptance_provenance, "pin_current", lambda *a: True)
+    monkeypatch.setattr(g.acceptance_provenance, "human_needed", lambda *a: True)
+    errors, _ = g.gate_findings(
+        make(tmp_path, done=True, closure="closure: traced\nhuman_pending: 0"),
+    )
+    assert any("подпись человека не получена" in e for e in errors)
+
+
+def test_slice1_closure_for_stale_bundle_is_red(tmp_path, monkeypatch):
+    """R4-B1 в старом формате: пин не на текущий бандл — красный."""
+    monkeypatch.setattr(g.acceptance_provenance, "pin_current", lambda *a: False)
+    errors, _ = g.gate_findings(
+        make(tmp_path, done=True, closure="closure: traced\nbundle_pin: p"),
+    )
+    assert any("не для текущего бандла" in e for e in errors)
+
+
+@pytest.mark.parametrize(
+    ("closure", "red"),
+    [
+        ("closure: traced\nstatus: proposed", True),
+        ("closure: traced\nstatus: weird", True),
+    ],
+)
+def test_traced_non_accepted_status_is_red(tmp_path, closure, red):
+    errors, _ = g.gate_findings(make(tmp_path, done=True, closure=closure))
+    assert bool(errors) is red
+
+
+def test_accepted_delegates_to_provenance(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake(repo, spec_dir, text, *, slug, forge, **kw):
+        seen.update(spec_dir=spec_dir, slug=slug, forge=forge)
+        return ["нет акта"]
+
+    monkeypatch.setattr(g.acceptance_provenance, "stamp_findings", fake)
+    errors, _ = g.gate_findings(
+        make(tmp_path, done=True, closure="closure: traced\nstatus: accepted"),
+        slug="o/r",
+        forge="F",
+    )
+    assert any("нет акта" in e for e in errors)
+    assert seen == {"spec_dir": "workstreams/ws-a/spec", "slug": "o/r", "forge": "F"}
