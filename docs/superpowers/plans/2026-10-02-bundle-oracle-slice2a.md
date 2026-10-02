@@ -16,7 +16,7 @@
 
 **Круги 4–5 и решение по authority-root** (`s2a-review-r4.md`, `r5.md`): R4-B1 (пин из файла агента прятал ручные критерии) → правило «пин — текущий бандл» в обеих ветках `traced`; R5-M1 (перевёрнутая семантика compare) → `ahead`/`identical` = в истории ref + unit-тест; владелец 2026-10-02 — гейт и модули его правила в authority-root (Task 7b), гейт развязан от `ops.py`, **PR кода мержит человек**.
 
-**Модель угроз 2a — решение владельца 2026-10-02 (после круга 8):** гейт защищает от ошибок агента и нарушений штатного процесса. Он не является границей безопасности против агента, намеренно изменяющего среду исполнения CI. Authority-root и изоляция запуска — дополнительные меры защиты. Закрытие отдельных способов намеренной подмены среды прекращено: в 2a — M8-1 (имя модуля, `__pycache__`, `pycache_prefix`), M8-2 (`--no-config`), M8-4 (`charter_guard` той же формой), M8-5 (`[x]` каноническим разбором); M8-3 и последующие способы подмены — вход структурной задачи `bundle-oracle-trusted-gate` (TODO, §7.2b), 2a не блокируют. Защита форджи против злонамеренного агента на 2026-10-02 не обеспечена (сверено: одобрение закрывает `ai-prosto`, `oracle-gates` не обязательна, admin-обход `always`) — спека §7.2a п.6.
+**Модель угроз 2a — решение владельца 2026-10-02 (после круга 8):** гейт защищает от ошибок агента и нарушений штатного процесса. Он не является границей безопасности против агента, намеренно изменяющего среду исполнения CI. Authority-root и изоляция запуска — дополнительные меры защиты. Закрытие отдельных способов намеренной подмены среды прекращено: в 2a — M8-1 (имя модуля, `__pycache__`, `pycache_prefix`), M8-2 (`--no-config`), M8-4 (`charter_guard` той же формой), M8-5 (`[x]` каноническим разбором); M8-3 и последующие способы подмены — вход структурной задачи `bundle-oracle-trusted-gate` (TODO, §7.2b), 2a не блокируют. Защита форджи против злонамеренного агента на 2026-10-02 не обеспечена (сверено: одобрение закрывает `ai-prosto`, `oracle-gates` не обязательна, обход `always` у роли admin и трёх приложений) — спека §7.2a п.6.
 
 **Круг 7 — перебор форм** (`s2a-review-r7.md`; вторая находка класса «незащищённый код в процессе гейта» → стоп, механизм вместо экземпляра). Класс A (код в процессе гейта): A1 `governance.*` — инвариант; A2 модуль в корне репо затеняет stdlib/`yaml` через `sys.path[0]` (M7-1) — запуск `python -I` с корнем репо **в конце** `sys.path`; A3 зависимости репо (`pyproject.toml`/`uv.lock`, их `.pth`) — гейт в изолированном окружении: stdlib + `pyyaml==6.0.3`, версии в защищённом workflow; A4 env/`sitecustomize` — `-I` + защищённый workflow; A5 ленивый импорт (m7-4) — AST-скан. Инвариант 7b — той же формой запуска: модули репо в процессе гейта ⊆ authority-root, сторонние ⊆ {`yaml`}. Класс B (путь к `[x]` без подписи): n/a, `status`, устаревший пин, понижение/удаление/переименование charter'а (`deletion_findings`), два charter'а, переименование `@id`, битый frontmatter — закрыты; перепривязка `plan_item` (M7-2) — `plan_item` неизменяем у charter'а схемы 2 против базы, как `code` (Task 7, `charter_guard`).
 
@@ -2771,7 +2771,9 @@ def plan_item_change_findings(ws_id: str, base: Charter | None, head: Charter) -
 
 `[x]` — каноническим разбором экосистемы (ревью круга 8 M8-5: регэксп
 `_DONE` пропускал строки, которые `plan_fields` считает закрытием — два
-пробела, таб, второй `@id`). Удалить `_DONE`; в начале `gate_findings`:
+пробела, таб, второй `@id`). Удалить `_DONE`; импорт `from plan_fields.parser import parse_todo` — в шапку модуля
+(к остальным импортам, ruff I001), функция — на уровне модуля перед
+`gate_findings`:
 
 ```python
 from plan_fields.parser import parse_todo
@@ -2952,18 +2954,33 @@ git commit -m "closure_gate: происхождение штампа — акт,
 (выпускает предложение и штамп, но его ослабление ловит сам гейт по фактам
 форджи); `approval_facts.py`, `ops.py`, `facts.py`, `criteria_contract.py` —
 вне замыкания импорта гейта (Task 7: `policy_rule`, собственные вызовы `gh`,
-`oracle_released` снят). Полнота — не таблицей, а инвариантом: замыкание
-`governance.*` гейта ⊆ authority-root. Названная граница (не защищается):
-сторонние пакеты (`yaml`) и их версии (`pyproject.toml`/`uv.lock`), запуск
-интерпретатора (`.pth`, `sitecustomize`) — цепочка поставки. Цена: будущие правки
+`oracle_released` снят). Замыкание проверяет инвариант (defense-in-depth).
+Названная граница: интерпретатор, `pyyaml` и `plan-fields` (по пину) с их
+**незакреплёнными** транзитивными зависимостями (`jsonschema`, `referencing`,
+`rpds-py`, `attrs`, `typing_extensions`) — цепочка поставки, вход
+`bundle-oracle-trusted-gate`. Цена: будущие правки
 `frontmatter.py`, `charter_guard.py`, `criteria_graph.py` (ими пользуются
 раннер и мост) тоже мержит человек.
 
-- [ ] **Step 1: Write the failing test** — в `tests/test_governance_authority_root.py` в поимённый перечень (рядом с `"governance/halt_gate.py"`) добавить десять строк таблицы с комментарием «оракул бандла, срез 2a: правило гейта [x] — подпись человека (решение владельца 2026-10-02)», и инвариант (ревью круга 6 M6-1: полнота — механически, не таблицей):
+- [ ] **Step 1: Write the failing test** — в `tests/test_governance_authority_root.py` в поимённый перечень (рядом с `"governance/halt_gate.py"`; тест `test_prefixes_read_from_the_ssot_file` сверяет **равенство множеств** с `paths.env`) добавить ровно те префиксы, что Step 3 пишет в `paths.env`: имена модулей таблицы **без `.py`** (`governance/closure_gate`, …, `governance/__init__`) и `governance/__pycache__/` — по комментарию на строку, «оракул бандла, срез 2a: правило гейта [x] — подпись человека (решение владельца 2026-10-02)», и инвариант (ревью круга 6 M6-1: полнота — механически, не таблицей):
 
 ```python
-#: Замер пробы при исполнении Task 7b (заполнить фактом, `Ruling:` в леджер).
-GATE_THIRD_PARTY = {"yaml", "_yaml", "plan_fields"}
+#: Сторонние в процессе гейта — замер круга 9 (dev-venv): yaml (frontmatter)
+#: и plan_fields с его импортами (`plan_fields/__init__` → validator →
+#: jsonschema). `_virtualenv` — артефакт `.pth` uv-venv, не код правила.
+#: Рост набора — находка, не правка литерала.
+GATE_THIRD_PARTY = {
+    "yaml",
+    "_yaml",
+    "plan_fields",
+    "jsonschema",
+    "jsonschema_specifications",
+    "referencing",
+    "rpds",
+    "attr",
+    "attrs",
+    "typing_extensions",
+}
 
 
 def _gate_process_modules(root: Path) -> list[tuple[str, str]]:
@@ -2990,8 +3007,9 @@ def _gate_process_modules(root: Path) -> list[tuple[str, str]]:
 
 
 def test_gate_import_closure_is_authority_root() -> None:
-    """Класс «незащищённый код в процессе гейта» (ревью кругов 6–7): модули
-    репо, загруженные гейтом, ⊆ authority-root; сторонние — только `yaml`;
+    """Класс «незащищённый код в процессе гейта» (ревью кругов 6–8; модель
+    угроз 2a — defense-in-depth): модули репо, загруженные гейтом, ⊆
+    authority-root и из `.py`; сторонние — `GATE_THIRD_PARTY`;
     stdlib не затенён модулем из репо. Новый импорт в модуле правила
     краснеет здесь, а не уходит молча."""
     root = Path(__file__).resolve().parent.parent
@@ -3008,7 +3026,7 @@ def test_gate_import_closure_is_authority_root() -> None:
     assert unprotected == [], unprotected
     assert all(rel.endswith(".py") for rel in in_repo), in_repo  # M8-1: не .so/.pyc
     third = sorted(
-        {n.split(".")[0] for n, f in mods if "site-packages" in f}
+        {n.split(".")[0] for n, f in mods if "site-packages" in f} - {"_virtualenv"}
     )
     # Сторонние в процессе гейта: yaml (frontmatter) и plan_fields с его
     # импортами (канонический разбор [x], M8-5). Литерал фиксируется по
@@ -3079,6 +3097,12 @@ git commit -m "authority-root: гейт [x] и модули его правил�
 
 `CLAUDE.md`, строка `governance/criteria_close.py`: после «файл `90-acceptance-closure.md` агентским PR …» вставить: «Срез 2a (спека §7.2a): закрытие `traced` — предложение (`status: proposed`, снимок политики, свой коммит на ветке `…-proposal`); PR с человеческими критериями (`human_criteria` по графу) — метка `human-merge-required`, мержит человек из снимка (выход 4 — ждём); приёмку ведёт `_advance` по фактам форджи: предикат §3.5, stamp-PR `status: accepted`; выходы 0/2/4/5/6; незавершённое закрытие среза 1 мигрирует в предложение без перемера. Гейт `[x]` на `traced` проверяет происхождение штампа (`acceptance_provenance`: акт, связанный с закрытием; политика по пину из SSOT; граф по пину) — нужны история git и чтение форджи.»
 
+`CLAUDE.md`, раздел «Git workflow», абзац «Мерж — агент по умолчанию»: «при
+approve от ревью-контура и зелёных обязательных проверках» → «при approve от
+ревью-контура, зелёных обязательных проверках **и зелёной `oracle-gates`**
+(гейт `[x]` и `charter_guard`; пока она не обязательна в ruleset — правилом,
+спека оракула §7.2a п.6)».
+
 `Makefile`, help `criteria-close`: «(срез 1: файл закрытия агентским PR; флага обхода нет)» → «(срез 2a: предложение → мерж (человеком при ручных критериях) → штамп accepted; выходы 0/2/4/5/6; флага обхода нет)».
 
 - [ ] **Step 2: Full verification**
@@ -3092,13 +3116,17 @@ Expected: всё чисто, набор зелёный.
 
 - [ ] **Step 3: Integration review, commit, PR, review**
 
+Описание PR кода и PR CI (Task 9) **обязано нести дословно** формулу модели
+угроз и статус защиты форджи (решение владельца) — они уже в `--body` ниже;
+не сокращать.
+
 До PR — общее интеграционное ревью всей ветки (решение владельца): свежий ревьюер, самая сильная модель, на `review-package` от `origin/master`; находки Critical/Important — один проход фиксов с RED→GREEN.
 
 ```bash
 git add CLAUDE.md Makefile
 git commit -m "docs: criteria-close срез 2a — предложение, подпись человека, штамп, происхождение в гейте"
 git push -u origin feat/bundle-oracle-slice2a
-gh pr create --base master --label human-merge-required --title "criteria-close: срез 2a — подпись человека, штамп accepted, происхождение в гейте" --body "Срез 2a оракула (спека §7.2a, план docs/superpowers/plans/2026-10-02-bundle-oracle-slice2a.md): criteria_accept и human_criteria по графу; предложение — свой коммит на ветке -proposal со снимком политики и human-merge-required; _advance — приёмка по фактам форджи; миграция незавершённого закрытия среза 1; stamp-PR status: accepted; гейт [x] — происхождение штампа (acceptance_provenance). Выходы 0/2/4/5/6. CI-проводка гейта (.github) — отдельный PR, мерж человеком."
+gh pr create --base master --label human-merge-required --title "criteria-close: срез 2a — подпись человека, штамп accepted, происхождение в гейте" --body "Срез 2a оракула (спека §7.2a, план docs/superpowers/plans/2026-10-02-bundle-oracle-slice2a.md): criteria_accept и human_criteria по графу; предложение — свой коммит на ветке -proposal со снимком политики и human-merge-required; _advance — приёмка по фактам форджи; миграция незавершённого закрытия среза 1; stamp-PR status: accepted; гейт [x] — происхождение штампа (acceptance_provenance). Выходы 0/2/4/5/6. CI-проводка гейта (.github) — отдельный PR, мерж человеком. Модель угроз: Гейт защищает от ошибок агента и нарушений штатного процесса. Он не является границей безопасности против агента, намеренно изменяющего среду исполнения CI. Authority-root и изоляция запуска — дополнительные меры защиты. Защита от злонамеренного агента пока не обеспечена: одобрение по ruleset закрывает ai-prosto, oracle-gates не обязательна, обход always у роли admin и трёх приложений; структурная задача — bundle-oracle-trusted-gate."
 ```
 Ревью — `review-pr.sh` двухфазно (`--dry-run --write-verdict F`, затем `--use-verdict F`); PR — с меткой `human-merge-required`, **мерж человеком** (правит authority-root: Task 7b).
 
@@ -3128,8 +3156,8 @@ gh pr create --base master --label human-merge-required --title "criteria-close:
       - name: closure_gate
         env:
           GH_TOKEN: ${{ github.token }}
-        # Изолированный процесс гейта (ревью круга 7, класс A): окружение —
-        # только stdlib + pyyaml, версия закреплена ЗДЕСЬ (защищённый путь),
+        # Изолированный процесс гейта (ревью кругов 7–8): окружение — stdlib +
+        # pyyaml + plan-fields, версии закреплены ЗДЕСЬ (защищённый путь),
         # а не pyproject/uv.lock репо; `python -I` — без env, user site и cwd в
         # sys.path; корень репо — в конец sys.path (модуль в корне не затеняет
         # stdlib). Замыкание модулей в этой форме проверяет инвариант
@@ -3165,9 +3193,22 @@ gh pr create --base master --label human-merge-required --title "criteria-close:
 
 (`GITHUB_REPOSITORY` Actions выставляет сами — `--repo-slug` не нужен. Если
 `uv run --isolated --no-project --with` в версии uv из `setup-uv` недоступен —
-эквивалент: отдельный `uv venv` + `uv pip install pyyaml==6.0.3` в каталоге вне
-репо и `<venv>/bin/python -I -c …`; правило то же: окружение гейта задаёт
-workflow, не репо.)
+эквивалент: `uv venv --no-config` и `uv pip install --no-config pyyaml==6.0.3
+"plan-fields @ git+…"` **с cwd вне репо**, затем `<venv>/bin/python -I -X
+pycache_prefix=… -c …`; правило то же: окружение гейта задаёт workflow, не репо.)
+
+- [ ] **Step 1b: Test** — в `tests/test_governance_authority_root.py`:
+
+```python
+def test_ci_plan_fields_pin_matches_pyproject() -> None:
+    """m9-8: пин plan-fields в ci.yml (защищён) = пину в pyproject (правим)."""
+    root = Path(__file__).resolve().parent.parent
+    ci = set(re.findall(r"dispatcher@([0-9a-f]{40})", (root / ".github/workflows/ci.yml").read_text()))
+    py = set(re.findall(r'rev = "([0-9a-f]{40})"', (root / "pyproject.toml").read_text()))
+    assert ci and ci <= py, (ci, py)
+```
+
+(тест входит в PR Task 9 — до него в `ci.yml` пина нет.)
 
 - [ ] **Step 2: Verify locally**
 
@@ -3178,9 +3219,9 @@ Run (из корня devtools) обе формы шагов, подставив 
 ```bash
 git switch -c ci/closure-gate-forge-read origin/master
 git add .github/workflows/ci.yml
-git commit -m "ci: гейт [x] читает форджу — pull-requests: read и GH_TOKEN (срез 2a)"
+git commit -m "ci: гейт [x] читает форджу; closure_gate и charter_guard — изолированная форма запуска (срез 2a)"
 git push -u origin ci/closure-gate-forge-read
-gh pr create --base master --label human-merge-required --title "ci: closure_gate читает форджу (срез 2a)" --body "Проверке происхождения штампа (acceptance_provenance) нужны факты PR и файл политики: permissions pull-requests: read и GH_TOKEN в шаге closure_gate. .github/ — мерж человеком."
+gh pr create --base master --label human-merge-required --title "ci: closure_gate читает форджу (срез 2a)" --body "Проверке происхождения штампа (acceptance_provenance) нужны факты PR и файл политики: permissions pull-requests: read и GH_TOKEN в шаге closure_gate. Обе проверки — изолированная форма запуска (--no-config, python -I, pycache_prefix вне репо, корень в конце sys.path). .github/ — мерж человеком. Модель угроз: Гейт защищает от ошибок агента и нарушений штатного процесса. Он не является границей безопасности против агента, намеренно изменяющего среду исполнения CI. Authority-root и изоляция запуска — дополнительные меры защиты. Защита от злонамеренного агента пока не обеспечена: одобрение по ruleset закрывает ai-prosto, oracle-gates не обязательна, обход always у роли admin и трёх приложений; структурная задача — bundle-oracle-trusted-gate."
 ```
 Ревью — `review-pr.sh`; мерж — **человек** (агент PR с `.github/` и меткой `human-merge-required` не мержит).
 
