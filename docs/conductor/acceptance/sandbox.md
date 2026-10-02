@@ -3,8 +3,9 @@
 ## Что создаёт владелец
 
 1. Репо `<owner>/conductor-sandbox` (приватное) и `<owner>/conductor-sandbox-outside`.
-2. GitHub App `conductor`: права `issues: write`, `pull_requests: write`, `contents: write`,
-   `checks: read`, `statuses: read`, `metadata: read`; установка **только** на
+2. GitHub App `conductor` (пошагово — `github-app.md`): права `issues: write`,
+   `pull_requests: write`, `metadata: read` — минимум по коду (сужено 2026-10-03:
+   `contents`/`checks`/`statuses` App не использует); установка **только** на
    `conductor-sandbox`. Ключ App — на VPS в `/srv/conductor/keys/conductor.pem`
    (владелец `conductor`, `0600`).
 3. Учётные данные чтения хоста (`/srv/conductor/gh/hosts.yml`) видят оба репо.
