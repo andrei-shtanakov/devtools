@@ -1520,12 +1520,15 @@ def _advance(state, ops: Ops, run_id: str, key: str, bundle_pin: str) -> int:
         if st is None:
             print(f"criteria-close: отказ шага — PR среза 1 #{e['slice1_pr']} не прочитан")
             return 2
-        if st == "OPEN":
-            ops.close_pr(
-                state.repo_slug,
-                e["slice1_pr"],
-                f"заменён предложением приёмки {p['branch']} (срез 2a)",
-            )
+        if st == "OPEN" and not ops.close_pr(
+            state.repo_slug,
+            e["slice1_pr"],
+            f"заменён предложением приёмки {p['branch']} (срез 2a)",
+        ):
+            # R4-m3: открытый PR среза 1 мог бы влить человек — конфликт с
+            # предложением и head-moved; без подтверждённого закрытия — повтор
+            print(f"criteria-close: отказ шага — PR среза 1 #{e['slice1_pr']} не закрыт")
+            return 2
         _record(run_id, key, slice1_done=True)
     if not p.get("head"):
         p["head"] = _materialize(state, p["branch"], p["text"], "traced")
@@ -1765,9 +1768,13 @@ def _tamper(ops, pr, how):
     _git(clone, "push", "-q", "origin", "master")
 
 
-def test_slice1_unfinished_closure_migrates_without_remeasure(tmp_path, monkeypatch):
-    """Решение владельца: опубликованное, не влитое закрытие среза 1 →
-    предложение 2a на своей ветке → подпись → штамп, без перемера."""
+@pytest.mark.parametrize("old_merged_by_human", [False, True])
+def test_slice1_unfinished_closure_migrates_without_remeasure(
+    tmp_path, monkeypatch, old_merged_by_human
+):
+    """Решение владельца: опубликованное, не влитое агентом закрытие среза 1
+    (PR открыт или влит человеком — R4-m4) → предложение 2a на своей ветке →
+    подпись → штамп, без перемера."""
     state, target, pin = _env_human(tmp_path, monkeypatch)
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin))))
@@ -1779,10 +1786,14 @@ def test_slice1_unfinished_closure_migrates_without_remeasure(tmp_path, monkeypa
     ops.review_exit = 1
     assert cc._publish(state, ops, "run-1", key, text, closure) == 2  # срез 1
     old_pr = cc._entry("run-1", key)["pr"]
+    if old_merged_by_human:
+        _forge_merge(ops, old_pr, "owner-human")
+        _land(target)
     ops.review_exit = 0
     assert cc.run("run-1", ops) == 4
     e = cc._entry("run-1", key)
-    assert e["slice1_pr"] == old_pr and ("close_pr", old_pr) in ops.calls
+    assert e["slice1_pr"] == old_pr
+    assert (("close_pr", old_pr) in ops.calls) is not old_merged_by_human
     assert e["proposal"]["branch"].endswith("-proposal") and e["pr"] != old_pr
     _forge_merge(ops, e["pr"], "owner-human")
     assert cc.run("run-1", ops) == 0
@@ -2004,6 +2015,7 @@ class FakeForge:
         self.files = files if files is not None else [REL]
         self.default = default
         self.down = False
+        self.on_ref = True
 
     def pr_facts(self, slug, pr):
         return None if self.down else dict(self.facts)
@@ -2015,12 +2027,15 @@ class FakeForge:
         return None if self.down else self.default
 
     def policy_file(self, repo, sha, path):
-        if self.down or sha != SHA:
+        if self.down or sha != SHA or repo != af.policy_source()[0]:
             return None
         return f"{af.APPROVER_ALLOWLIST_ENV}=owner-human\n"
 
+    def policy_on_ref(self, repo, sha, ref):
+        return None if self.down else self.on_ref
 
-def _signed(tmp_path, human=True):
+
+def _signed(tmp_path, human=True, source=None):
     """Репо: бандл на пине → предложение (merge) → штамп. → (repo, merge, stamp)."""
     repo = tmp_path / "r"
     subprocess.run(["git", "init", "-q", "-b", "master", str(repo)], check=True)
@@ -2033,7 +2048,7 @@ def _signed(tmp_path, human=True):
     _git(repo, "commit", "-qm", "bundle")
     pin = _git(repo, "rev-parse", "HEAD")
     closure = f"---\nclosure: traced\nbundle_pin: {pin}\n---\nтело\n"
-    proposal = ca.proposal_text(closure, _source())
+    proposal = ca.proposal_text(closure, source or _source())
     (repo / REL).write_text(proposal)
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "proposal")
@@ -2107,9 +2122,59 @@ def test_unavailable_forge_is_red(tmp_path):
 
 
 def test_untrusted_policy_source_is_red(tmp_path):
+    """Ревью круга 4 R4-m2: чужой источник — в самом ПРЕДЛОЖЕНИИ (штамп честный)."""
+    evil = f"github:evil/policy@{SHA}:policy/approvers.env"
+    repo, merge, stamp = _signed(tmp_path, source=evil)
+    assert _check(repo, stamp, FakeForge(merge, "owner-human"))
+
+
+def test_policy_sha_off_ref_is_red(tmp_path):
+    """R4-m1: SHA политики не в истории APPROVAL_POLICY_REF (ветка, форк)."""
     repo, merge, stamp = _signed(tmp_path)
-    forged = stamp.replace(_source(), f"github:evil/policy@{SHA}:policy/approvers.env")
-    assert _check(repo, forged, FakeForge(merge, "owner-human"))
+    forge = FakeForge(merge, "owner-human")
+    forge.on_ref = False
+    assert _check(repo, stamp, forge)
+
+
+def _add_manual_ac(repo):
+    spec = repo / SPEC
+    (spec / "15-behaviour-spec.md").write_text(BEH_HUMAN)
+    (spec / "25-acceptance.md").write_text(ACC_HUMAN)
+    _git(repo, "commit", "-qam", "manual AC")
+
+
+def test_stale_test_only_stamp_after_manual_ac_is_red(tmp_path):
+    """Ревью круга 4 R4-B1: штамп test-only версии, затем в бандл добавлен
+    ручной AC — штамп не для текущего бандла."""
+    repo, merge, stamp = _signed(tmp_path, human=False)
+    _add_manual_ac(repo)
+    assert _check(repo, stamp, FakeForge(merge, "ai-prosto"))
+
+
+def test_old_test_only_pin_in_new_proposal_is_red(tmp_path):
+    """R4-B1, атака: бандл уже с ручным AC, агент пишет предложение со старым
+    test-only пином и мержит его сам."""
+    repo, _merge, _stamp = _signed(tmp_path, human=False)
+    old_pin = _git(repo, "rev-parse", "HEAD~2")
+    _add_manual_ac(repo)
+    closure = f"---\nclosure: traced\nbundle_pin: {old_pin}\n---\nтело\n"
+    proposal = ca.proposal_text(closure, _source())
+    (repo / REL).write_text(proposal)
+    _git(repo, "commit", "-qam", "proposal with old pin")
+    merge = _git(repo, "rev-parse", "HEAD")
+    stamp = ca.stamp_text(proposal, merge_oid=merge, pr=8)
+    (repo / REL).write_text(stamp)
+    _git(repo, "commit", "-qam", "stamp")
+    assert _check(repo, stamp, FakeForge(merge, "ai-prosto"))
+    assert ap.pin_current(repo, SPEC, old_pin) is False
+
+
+def test_non_sha_refs_never_reach_git(tmp_path):
+    """R4-m5: ссылка из файла — только SHA (не опция git)."""
+    repo, merge, stamp = _signed(tmp_path)
+    assert _check(repo, stamp.replace(merge, "--output=x"), FakeForge(merge, "owner-human"))
+    assert ap.human_needed(repo, SPEC, "--output=x") is None
+    assert ap.pin_current(repo, SPEC, "--output=x") is None
 
 
 @pytest.mark.parametrize(("human", "need"), [(True, True), (False, False)])
@@ -2139,6 +2204,7 @@ def test_policy_accounts():
 
 ```python
 def test_slice1_test_only_closure_green_with_warning_by_graph(tmp_path, monkeypatch):
+    monkeypatch.setattr(g.acceptance_provenance, "pin_current", lambda *a: True)
     monkeypatch.setattr(g.acceptance_provenance, "human_needed", lambda *a: False)
     errors, warns = g.gate_findings(
         make(tmp_path, done=True, closure="closure: traced\nbundle_pin: p"),
@@ -2148,12 +2214,23 @@ def test_slice1_test_only_closure_green_with_warning_by_graph(tmp_path, monkeypa
 
 
 def test_slice1_closure_with_human_criteria_by_graph_is_red(tmp_path, monkeypatch):
+    monkeypatch.setattr(g.acceptance_provenance, "pin_current", lambda *a: True)
     monkeypatch.setattr(g.acceptance_provenance, "human_needed", lambda *a: True)
     errors, _ = g.gate_findings(
         make(tmp_path, done=True, closure="closure: traced\nhuman_pending: 0"),
         oracle_released=False,
     )
     assert any("подпись человека не получена" in e for e in errors)
+
+
+def test_slice1_closure_for_stale_bundle_is_red(tmp_path, monkeypatch):
+    """R4-B1 в старом формате: пин не на текущий бандл — красный."""
+    monkeypatch.setattr(g.acceptance_provenance, "pin_current", lambda *a: False)
+    errors, _ = g.gate_findings(
+        make(tmp_path, done=True, closure="closure: traced\nbundle_pin: p"),
+        oracle_released=False,
+    )
+    assert any("не для текущего бандла" in e for e in errors)
 
 
 @pytest.mark.parametrize(
@@ -2238,6 +2315,7 @@ from governance.ops import REVIEW_LOGIN_DEFAULT, RealOps
 CLOSURE_NAME = "90-acceptance-closure.md"
 _NODES = ("10-requirements.md", "15-behaviour-spec.md", "25-acceptance.md")
 _SOURCE = re.compile(r"^github:(?P<repo>[^@]+)@(?P<sha>[0-9a-f]{40}):(?P<path>.+)$")
+_SHA = re.compile(r"^[0-9a-f]{40}$")  # ссылки из файла — только SHA, не опции git
 
 
 class Forge(Protocol):
@@ -2250,6 +2328,8 @@ class Forge(Protocol):
     def default_branch(self, slug: str) -> str | None: ...
 
     def policy_file(self, repo: str, sha: str, path: str) -> str | None: ...
+
+    def policy_on_ref(self, repo: str, sha: str, ref: str) -> bool | None: ...
 
 
 def _gh(*args: str) -> str | None:
@@ -2293,10 +2373,24 @@ class RealForge:
         return name if isinstance(name, str) and name else None
 
     def policy_file(self, repo: str, sha: str, path: str) -> str | None:
-        fact = self._ops.repo_file_fact(repo, sha, path)
+        try:
+            fact = self._ops.repo_file_fact(repo, sha, path)
+        except (subprocess.SubprocessError, OSError, ValueError, RuntimeError):
+            return None
         if fact.outcome is Outcome.FOUND and isinstance(fact.value, str):
             return fact.value
         return None
+
+    def policy_on_ref(self, repo: str, sha: str, ref: str) -> bool | None:
+        """SHA политики — в истории `ref` (не непринятая ветка, не объект форка)."""
+        out = _gh("api", f"repos/{repo}/compare/{sha}...{ref}")
+        try:
+            status = json.loads(out)["status"] if out else None
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return None
+        if status in ("behind", "identical"):
+            return True
+        return False if status in ("ahead", "diverged") else None
 
 
 def _show(repo: Path, ref: str, path: str) -> str | None:
@@ -2309,9 +2403,27 @@ def _show(repo: Path, ref: str, path: str) -> str | None:
     return done.stdout if done.returncode == 0 else None
 
 
+def pin_current(repo: Path, spec_dir: str, bundle_pin: object) -> bool | None:
+    """Узлы на пине = узлам проверяемой ревизии (рабочее дерево гейта).
+
+    Пин пишет автор файла (для test-only — агент): без этой сверки старый
+    test-only пин или устаревший штамп прятали бы ручные критерии текущего
+    бандла (ревью круга 4 R4-B1). None — не прочитано."""
+    if not isinstance(bundle_pin, str) or not _SHA.match(bundle_pin):
+        return None
+    for n in _NODES:
+        at_pin = _show(repo, bundle_pin, f"{spec_dir}/{n}")
+        here = repo / spec_dir / n
+        if at_pin is None or not here.is_file():
+            return None
+        if at_pin != here.read_text():
+            return False
+    return True
+
+
 def human_needed(repo: Path, spec_dir: str, bundle_pin: object) -> bool | None:
     """Нужен ли человек — по графу узлов на пине (§7.2a п.1); None — не прочитан."""
-    if not isinstance(bundle_pin, str) or not bundle_pin:
+    if not isinstance(bundle_pin, str) or not _SHA.match(bundle_pin):
         return None
     texts = [_show(repo, bundle_pin, f"{spec_dir}/{n}") for n in _NODES]
     if any(t is None for t in texts):
@@ -2331,6 +2443,8 @@ def _trusted_accounts(source: object, forge: Forge) -> frozenset[str] | None:
         return None
     if (m["repo"], m["path"]) != (repo, path):
         return None
+    if forge.policy_on_ref(repo, m["sha"], _ref) is not True:
+        return None
     content = forge.policy_file(repo, m["sha"], path)
     return approval_facts.policy_accounts(content) if content is not None else None
 
@@ -2344,12 +2458,19 @@ def stamp_findings(
     forge: Forge | None,
     agent: str = REVIEW_LOGIN_DEFAULT,
 ) -> list[str]:
-    """Пусто — штамп доказан актом, связанным с этим закрытием."""
+    """Пусто — штамп доказан актом, связанным с этим закрытием.
+
+    `agent` — константа учётки агента (`REVIEW_LOGIN_DEFAULT`); предикат
+    `criteria_close` берёт её из профиля (`ops.agent_login()`). Разойтись они
+    могут только в ложный красный, не в зелёный (ревью круга 4 R4-m7)."""
     rel = f"{spec_dir}/{CLOSURE_NAME}"
-    meta, _ = split_frontmatter(text)
+    try:
+        meta, _ = split_frontmatter(text)
+    except ValueError:
+        return ["frontmatter штампа не разбирается"]
     merge, pr = meta.get("accepted_merge"), meta.get("accepted_pr")
-    if not isinstance(merge, str) or not merge or not isinstance(pr, int):
-        return ["штамп без accepted_merge/accepted_pr"]
+    if not isinstance(merge, str) or not _SHA.match(merge) or not isinstance(pr, int):
+        return ["штамп без accepted_merge (SHA) / accepted_pr"]
     proposal = _show(repo, merge, rel)
     if proposal is None:
         return [f"предложение в {merge[:12]} не прочитано (история git?)"]
@@ -2366,7 +2487,8 @@ def stamp_findings(
     default = forge.default_branch(slug)
     if facts is None or files is None or default is None:
         return [f"факты PR #{pr} не получены"]
-    oid = (facts.get("mergeCommit") or {}).get("oid")
+    commit = facts.get("mergeCommit")
+    oid = commit.get("oid") if isinstance(commit, dict) else None
     out = [
         why
         for bad, why in (
@@ -2380,13 +2502,19 @@ def stamp_findings(
     if out:
         return out
     pmeta, _ = split_frontmatter(proposal)
+    current = pin_current(repo, spec_dir, pmeta.get("bundle_pin"))
+    if current is None:
+        return ["узлы бандла на пине предложения не прочитаны"]
+    if not current:
+        return ["штамп не для текущего бандла: узлы на пине ≠ узлам ревизии"]
     accounts = _trusted_accounts(pmeta.get("policy_source"), forge)
     if accounts is None:
         return ["политика по пину предложения не прочитана из доверенного источника"]
     need = human_needed(repo, spec_dir, pmeta.get("bundle_pin"))
     if need is None:
         return ["граф бандла на пине не прочитан"]
-    login = (facts.get("mergedBy") or {}).get("login")
+    by = facts.get("mergedBy")
+    login = by.get("login") if isinstance(by, dict) else None
     if not isinstance(login, str) or not login:
         return [f"подписант PR #{pr} не установлен"]
     if need and (login == agent or login not in accounts):
@@ -2421,10 +2549,16 @@ def stamp_findings(
                     f"(status: {status!r} — нет штампа accepted)"
                 )
             else:
-                need = acceptance_provenance.human_needed(
-                    repo, spec_dir, meta.get("bundle_pin")
+                pin = meta.get("bundle_pin")
+                current = acceptance_provenance.pin_current(repo, spec_dir, pin)
+                need = (
+                    acceptance_provenance.human_needed(repo, spec_dir, pin)
+                    if current
+                    else None
                 )
-                if need is None:
+                if current is False:
+                    errors.append(f"{ws}: закрытие не для текущего бандла (узлы на пине ≠ ревизии)")
+                elif need is None:
                     errors.append(f"{ws}: граф бандла на пине не прочитан — закрытие среза 1 без штампа")
                 elif need:
                     errors.append(
