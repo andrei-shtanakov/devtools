@@ -203,6 +203,29 @@ def test_traced_non_accepted_status_is_red(tmp_path, closure, red):
     assert bool(errors) is red
 
 
+def test_proposed_status_error_names_remedy(tmp_path):
+    """Review PR #545: status: proposed красит oracle-gates на самом PR
+    предложения — ошибка обязана назвать выход (снять [x] до штампа)."""
+    errors, _ = g.gate_findings(
+        make(tmp_path, done=True, closure="closure: traced\nstatus: proposed"),
+    )
+    assert any("снимите [x]" in e for e in errors)
+
+
+def test_unknown_declared_status_is_done_fail_closed(tmp_path, monkeypatch):
+    """Review PR #545: declared_status неизвестного значения — не open,
+    значит done, и гейт его проверяет (unknown-as-green был бы дырой)."""
+    monkeypatch.setattr(
+        g,
+        "parse_todo",
+        lambda text, *, repo: {"nodes": [{"id": "oracle", "declared_status": "weird"}]},
+    )
+    repo = make(tmp_path, done=True, closure=None)
+    assert "oracle" in g._closed_ids(repo)
+    errors, _ = g.gate_findings(repo)
+    assert errors
+
+
 def test_accepted_delegates_to_provenance(tmp_path, monkeypatch):
     seen = {}
 

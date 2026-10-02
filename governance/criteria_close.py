@@ -680,7 +680,9 @@ def _advance(state, ops: Ops, run_id: str, key: str, bundle_pin: str) -> int:
             f"criteria-close: {state.ws_id} — предложение приёмки",
             "Предложение приёмки (срез 2a): status: proposed, снимок "
             f"{p['policy']['source']}. Не нажимайте «Update branch»: новая "
-            "голова — rejected (head-moved), выход только --repropose (2b).",
+            "голова — rejected (head-moved), выход только --repropose (2b). "
+            "Пункт плана не отмечать [x] до штампа accepted: гейт красит "
+            "status: proposed.",
             labels,
         )
         _record(run_id, key, pr=pr, branch=p["branch"])

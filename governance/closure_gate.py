@@ -34,7 +34,13 @@ def _closed_ids(repo: Path) -> set[str]:
         return set()
     doc = parse_todo(todo.read_text(encoding="utf-8"), repo=repo.name)
     return {
-        n["id"] for n in doc.get("nodes", []) if n.get("declared_status") == "closed"
+        n["id"]
+        for n in doc.get("nodes", [])
+        # fail-closed: неизвестный declared_status — не open, значит done и
+        # гейт его проверяет (unknown-as-green был бы дырой); тем же правилом,
+        # что conductor/facts.py, conductor/graph.py, conductor/collect.py,
+        # todo_context.py (review PR #545).
+        if n.get("declared_status") != "open"
     }
 
 
@@ -81,7 +87,10 @@ def gate_findings(
             elif status is not None:
                 errors.append(
                     f"@id:{m.group(2)} [x], но приёмка {ws} не завершена "
-                    f"(status: {status!r} — нет штампа accepted)"
+                    f"(status: {status!r} — нет штампа accepted); "
+                    "снимите [x] пункта до штампа accepted и верните после — "
+                    "иначе обязательная oracle-gates не пустит мерж самого "
+                    "PR предложения"
                 )
             else:
                 pin = meta.get("bundle_pin")
