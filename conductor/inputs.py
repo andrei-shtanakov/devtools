@@ -54,6 +54,13 @@ class Inputs:
     authority_prefixes: list[str] = field(default_factory=list)
     manifest_source: str = "file"
     manifest_sha: str | None = None
+    done_facts: dict[str, str] = field(default_factory=dict)
+    edge_periods: dict[str, list[str]] = field(default_factory=dict)
+    path_added: dict[str, str] = field(default_factory=dict)
+    issue_extras: dict[str, dict[str, Any]] = field(default_factory=dict)
+    closed_events: dict[str, str] = field(default_factory=dict)
+    queue_records: list[dict[str, Any]] = field(default_factory=list)
+    umbrella_full: str = ""
 
 
 def save_inputs(inputs: Inputs, path: Path) -> None:

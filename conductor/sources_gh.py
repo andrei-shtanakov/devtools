@@ -20,16 +20,34 @@ from conductor.model import SourceState
 
 GH_TIMEOUT = 120
 Runner = Callable[[list[str]], tuple[int, str, str]]
-ISSUE_FIELDS = "title,body,state,stateReason,author,labels,updatedAt,url"
+ISSUE_FIELDS = "title,body,state,stateReason,author,labels,updatedAt,url,closedAt"
 PR_FIELDS = (
     "title,body,state,mergedAt,author,labels,updatedAt,url,"
-    "closingIssuesReferences,headRefOid,reviewDecision,statusCheckRollup"
+    "closingIssuesReferences,headRefOid,reviewDecision,statusCheckRollup,"
+    "mergeCommit,isDraft,createdAt"
 )
 PR_EXTRA = (
     "query($o:String!,$n:String!,$k:Int!){repository(owner:$o,name:$n)"
     "{pullRequest(number:$k){headRefOid latestReviews(first:50)"
-    "{totalCount nodes{state commit{oid}}}"
-    " files(first:100){totalCount nodes{path}}}}}"
+    "{totalCount nodes{state submittedAt author{login} commit{oid}}}"
+    " files(first:100){totalCount nodes{path}}"
+    " commits(last:1){nodes{commit{committedDate}}}"
+    " timelineItems(itemTypes:[READY_FOR_REVIEW_EVENT],last:1)"
+    "{nodes{... on ReadyForReviewEvent{createdAt}}}}}}"
+)
+ISSUE_EXTRAS = (
+    "query($o:String!,$n:String!,$c:String){repository(owner:$o,name:$n)"
+    "{defaultBranchRef{name} issues(states:OPEN,first:50,after:$c)"
+    "{pageInfo{hasNextPage endCursor} nodes{number createdAt"
+    " closedByPullRequestsReferences(first:20,includeClosedPrs:true)"
+    "{totalCount nodes{number merged mergedAt mergeCommit{oid} baseRefName"
+    " baseRepository{defaultBranchRef{name}} repository{name}}}"
+    " timelineItems(itemTypes:[REOPENED_EVENT],last:1)"
+    "{nodes{... on ReopenedEvent{id createdAt}}}}}}}"
+)
+PINNED = (
+    "query($o:String!,$n:String!,$k:Int!){repository(owner:$o,name:$n)"
+    "{issue(number:$k){isPinned} pinnedIssues(first:3){totalCount}}}"
 )
 RED = {
     "FAILURE",
@@ -84,6 +102,26 @@ def ci_state(rollup: list[dict[str, Any]] | None) -> str:
     if any(s in RED for s in states):
         return "red"
     return "green" if all(s in GREEN for s in states) else "pending"
+
+
+def red_checks(rollup: list[dict[str, Any]] | None) -> list[dict[str, str]]:
+    """Упавшие проверки head SHA: имя и ссылка (лог не читается, §7.4)."""
+    out = []
+    for c in rollup or []:
+        state = (
+            (
+                c.get("state")
+                if c.get("__typename") == "StatusContext"
+                else c.get("conclusion") or c.get("status")
+            )
+            or ""
+        ).upper()
+        if state in RED:
+            name = c.get("name") or c.get("context") or "?"
+            out.append(
+                {"name": name, "url": c.get("detailsUrl") or c.get("targetUrl") or ""}
+            )
+    return out
 
 
 def _json(out: str | None, default: str = "null") -> Any:
@@ -156,9 +194,11 @@ def _comments(
         return None
     return [
         {
+            "id": c.get("id"),
             "author": (c.get("user") or {}).get("login", ""),
             "body": c.get("body") or "",
             "created_at": c.get("created_at", ""),
+            "updated_at": c.get("updated_at", ""),
         }
         for page in pages
         for c in page
@@ -196,12 +236,23 @@ def _pr_extra(
         for r in reviews
     ) and not any(r["state"] == "CHANGES_REQUESTED" for r in reviews)
     files = [f["path"] for f in pr["files"]["nodes"]]
+    commits = (pr.get("commits") or {}).get("nodes") or []
+    ready = (pr.get("timelineItems") or {}).get("nodes") or []
     return {
         "extra_head": head,
         "approved_at_head": approved,
         "files": files,
         "complete": pr["files"]["totalCount"] <= len(files)
         and pr["latestReviews"]["totalCount"] <= len(reviews),
+        "last_commit_at": commits[-1]["commit"]["committedDate"] if commits else None,
+        "ready_at": ready[-1].get("createdAt") if ready else None,
+        "reviews": [
+            {
+                "author": (r.get("author") or {}).get("login", ""),
+                "submitted_at": r.get("submittedAt") or "",
+            }
+            for r in reviews
+        ],
     }
 
 
@@ -233,6 +284,7 @@ def fetch_record(
         "labels": [lab["name"] for lab in raw.get("labels", [])],
         "updated_at": raw.get("updatedAt", ""),
         "url": raw.get("url", ""),
+        "closed_at": raw.get("closedAt"),
         "comments": comments,
         "closing_refs": [
             f"{r['repository']['name']}#{r['number']}"
@@ -249,6 +301,10 @@ def fetch_record(
             head_sha=raw.get("headRefOid"),
             review_decision=raw.get("reviewDecision"),
             ci=ci_state(raw.get("statusCheckRollup")),
+            merge_sha=(raw.get("mergeCommit") or {}).get("oid"),
+            is_draft=bool(raw.get("isDraft")),
+            created_at=raw.get("createdAt", ""),
+            red_checks=red_checks(raw.get("statusCheckRollup")),
             **extra,
         )
     return record
@@ -332,3 +388,104 @@ def collect_gh(
     return GhResult(
         list(records.values()), "error", f"ссылки не сошлись за {max_hops} шага"
     )
+
+
+def _extras_node(node: dict[str, Any]) -> dict[str, Any] | None:
+    refs = node["closedByPullRequestsReferences"]
+    if refs["totalCount"] > len(refs["nodes"]):
+        return None  # усечено — основание не доказано (§7.5)
+    reopened = node["timelineItems"]["nodes"]
+    return {
+        "created_at": node["createdAt"],
+        "period": reopened[-1]["id"] if reopened else "0",
+        "period_start": reopened[-1]["createdAt"] if reopened else node["createdAt"],
+        "closed_by": [
+            {
+                "repo": r["repository"]["name"],
+                "number": r["number"],
+                "merged": bool(r["merged"]),
+                "merged_at": r.get("mergedAt"),
+                "merge_sha": (r.get("mergeCommit") or {}).get("oid"),
+                "base_is_default": r["baseRefName"]
+                == ((r.get("baseRepository") or {}).get("defaultBranchRef") or {}).get(
+                    "name"
+                ),
+            }
+            for r in refs["nodes"]
+        ],
+    }
+
+
+def issue_extras(
+    owner: str, name: str, runner: Runner
+) -> dict[int, dict[str, Any]] | None:
+    """Открытые issues репо: период открытия и закрывающие PR (§7.5); сбой — None."""
+    extras: dict[int, dict[str, Any]] = {}
+    cursor: str | None = None
+    for _ in range(50):
+        args = ["api", "graphql", "-f", f"query={ISSUE_EXTRAS}", "-f", f"o={owner}"]
+        args += ["-f", f"n={name}"] + (["-f", f"c={cursor}"] if cursor else [])
+        code, out, _ = runner(args)
+        try:
+            page = (_json(out) if code == 0 else None)["data"]["repository"]["issues"]
+        except (KeyError, TypeError):
+            return None
+        for node in page["nodes"]:
+            extra = _extras_node(node)
+            if extra is None:
+                return None
+            extras[node["number"]] = extra
+        if not page["pageInfo"]["hasNextPage"]:
+            return extras
+        cursor = page["pageInfo"]["endCursor"]
+    return None
+
+
+def queue_records(owner: str, name: str, runner: Runner) -> list[dict[str, Any]] | None:
+    """Issues очереди владельца в любом состоянии (§6.1); сбой — None."""
+    items, _ = _search(owner, f"repo:{owner}/{name} label:owner-queue is:issue", runner)
+    if items is None:
+        return None
+    out = []
+    for item in items:
+        rec = fetch_record(owner, name, item["number"], False, runner)
+        if rec is None:
+            return None
+        code, raw, _ = runner(
+            ["api", "graphql", "-f", f"query={PINNED}", "-f", f"o={owner}"]
+            + ["-f", f"n={name}", "-F", f"k={item['number']}"]
+        )
+        try:
+            repository = (_json(raw) if code == 0 else None)["data"]["repository"]
+            rec["pinned"] = bool(repository["issue"]["isPinned"])
+            # мест закрепления в репо три (§6.1): занятость — для GR-QUEUE-UNPINNED
+            rec["pins_used"] = int(repository["pinnedIssues"]["totalCount"])
+        except (KeyError, TypeError):
+            return None
+        rec["repo_full"] = f"{owner}/{name}"
+        out.append(rec)
+    return out
+
+
+def closed_event(owner: str, name: str, number: int, runner: Runner) -> str | None:
+    """id (node_id) последнего события `closed` timeline issue — fact_id
+    закрытия (§7.1, решение владельца 2026-10-01: не `closedAt`); нет
+    события — "", сбой — None."""
+    code, out, _ = runner(
+        [
+            "api",
+            "--paginate",
+            "--slurp",
+            f"repos/{owner}/{name}/issues/{number}/timeline?per_page=100",
+        ]
+    )
+    pages = _json(out, "[]") if code == 0 else None
+    if not isinstance(pages, list):
+        return None
+    ids = [
+        e.get("node_id") or ""
+        for page in pages
+        for e in page
+        if isinstance(e, dict) and e.get("event") == "closed"
+    ]
+    return ids[-1] if ids else ""

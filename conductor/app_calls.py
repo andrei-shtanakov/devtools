@@ -69,41 +69,65 @@ def _known_term(now: datetime, outcome: str, rate: RateInfo) -> datetime | None:
     return None
 
 
-def derive(rows: list[dict[str, Any]]) -> datetime | None:
-    """Действующий запрет: максимум известных сроков и сроков неизвестных."""
-    k = dict.fromkeys(CLASSES, 0)
-    until: datetime | None = None
-    opened: dict[int, dict[str, Any]] = {}
+class Derivation:
+    """Свёртка журнала установки в запрет — инкрементально, по строке.
 
-    def push(term: datetime) -> None:
-        nonlocal until
-        until = term if until is None else max(until, term)
+    `add` — строка журнала по порядку; `result` — действующий запрет с учётом
+    ещё открытых `begin` (без изменения свёртки). Журнал на хосте не
+    подрезается, поэтому запрет НЕ пересчитывается по всему журналу перед
+    каждым вызовом (ревью #538): AppCalls дополняет свёртку при записи.
+    """
 
-    def unknown(at: str, klass: str) -> None:
+    def __init__(self) -> None:
+        self.k = dict.fromkeys(CLASSES, 0)
+        self.until: datetime | None = None
+        self.opened: dict[int, dict[str, Any]] = {}
+
+    @staticmethod
+    def _unknown(
+        k: dict[str, int], until: datetime | None, at: str, klass: str
+    ) -> datetime:
         classes = CLASSES if klass not in k else (klass,)
         level = max(k[c] for c in classes)
         for c in classes:
             k[c] = min(k[c] + 1, MAX_K)
-        push(parse_ts(at) + HOUR * 2 ** min(level, MAX_K))
+        term = parse_ts(at) + HOUR * 2 ** min(level, MAX_K)
+        return term if until is None else max(until, term)
 
-    for row in rows:
+    def _push(self, term: datetime) -> None:
+        self.until = term if self.until is None else max(self.until, term)
+
+    def add(self, row: dict[str, Any]) -> None:
+        """Учесть строку журнала (в порядке записи)."""
         kind = row["t"]
         if kind == "begin":
-            opened[row["seq"]] = row
+            self.opened[row["seq"]] = row
         elif kind == "end":
-            begin = opened.pop(row["seq"], None) or {}
+            begin = self.opened.pop(row["seq"], None) or {}
             klass = row.get("class") or begin.get("class", ANY_CLASS)
-            if row["outcome"] == "ok" and klass in k:
-                k[klass] = 0
+            if row["outcome"] == "ok" and klass in self.k:
+                self.k[klass] = 0
             if row.get("blocked_until"):
-                push(parse_ts(row["blocked_until"]))
+                self._push(parse_ts(row["blocked_until"]))
             if row.get("unknown_term"):
-                unknown(row["at"], klass)
+                self.until = self._unknown(self.k, self.until, row["at"], klass)
         elif kind in ("lost", "orphan"):
-            unknown(row["at"], ANY_CLASS)
-    for begin in opened.values():
-        unknown(begin["at"], begin["class"])
-    return until
+            self.until = self._unknown(self.k, self.until, row["at"], ANY_CLASS)
+
+    def result(self) -> datetime | None:
+        """Запрет: свёртка + открытые begin как события неизвестного срока."""
+        k, until = dict(self.k), self.until
+        for begin in self.opened.values():
+            until = self._unknown(k, until, begin["at"], begin["class"])
+        return until
+
+
+def derive(rows: list[dict[str, Any]]) -> datetime | None:
+    """Действующий запрет: максимум известных сроков и сроков неизвестных."""
+    fold = Derivation()
+    for row in rows:
+        fold.add(row)
+    return fold.result()
 
 
 class AppCalls:
@@ -112,6 +136,9 @@ class AppCalls:
     def __init__(self, path: Path, rows: list[dict[str, Any]]) -> None:
         self.path = path
         self.rows = rows
+        self._fold = Derivation()
+        for row in rows:
+            self._fold.add(row)
         self._seq = max((r.get("seq", 0) for r in rows), default=0)
 
     @classmethod
@@ -153,7 +180,7 @@ class AppCalls:
 
     def blocked_until(self) -> datetime | None:
         """Срок действующего запрета или None."""
-        return derive(self.rows)
+        return self._fold.result()
 
     def begin(self, klass: str, now: datetime) -> int:
         """Строка begin до отправки; сбой — OSError (вызова нет)."""
@@ -161,6 +188,7 @@ class AppCalls:
         row = {"t": "begin", "seq": self._seq, "class": klass, "at": iso(now)}
         append_line(self.path, row)
         self.rows.append(row)
+        self._fold.add(row)
         return self._seq
 
     def end(
@@ -189,3 +217,4 @@ class AppCalls:
         }
         append_line(self.path, row)
         self.rows.append(row)
+        self._fold.add(row)

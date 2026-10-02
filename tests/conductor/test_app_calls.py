@@ -151,3 +151,33 @@ def test_truncated_tail_repair_failure_is_rate_state_lost(
 
     monkeypatch.setattr(app_calls, "write_atomic", boom)
     assert AppCalls.open(tmp_path, 1, 2, T0) == (None, "RATE-STATE-LOST")
+
+
+def test_incremental_ban_equals_full_derivation(tmp_path: Path, monkeypatch) -> None:
+    """Ревью #538: запрет считается свёрткой по мере записи и совпадает с
+    полным пересчётом; полный пересчёт журнала на вызов не выполняется."""
+    import random
+
+    import conductor.app_calls as app_calls
+
+    calls = _calls(tmp_path)
+    rnd = random.Random(538)
+    outcomes = ["ok", "rate_limited", "failed", "uncertain"]
+    for step in range(200):
+        at = T0 + timedelta(minutes=step)
+        klass = rnd.choice(["create", "update", "service"])
+        seq = calls.begin(klass, at)
+        if rnd.random() < 0.9:  # иногда begin остаётся без end
+            rate = RateInfo(
+                retry_after_s=rnd.choice([None, 120]),
+                reset=rnd.choice([None, int((at + H).timestamp())]),
+                remaining=rnd.choice([None, 0, 5]),
+            )
+            calls.end(seq, at, rnd.choice(outcomes), 200, rate, klass)
+        assert calls.blocked_until() == app_calls.derive(calls.rows)
+
+    def boom(rows: list) -> None:
+        raise AssertionError("полный пересчёт журнала")
+
+    monkeypatch.setattr(app_calls, "derive", boom)
+    calls.blocked_until()  # не вызывает derive

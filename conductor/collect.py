@@ -14,9 +14,11 @@ from typing import Any
 
 import plan_fields as pf
 
+from conductor import facts
 from conductor.graph import local_refs, referenced_issues
 from conductor.inputs import Inputs, RepoTodo
 from conductor.manifest import (
+    _URL_RE,
     UMBRELLA,
     FleetRepo,
     fleet_repos,
@@ -24,12 +26,19 @@ from conductor.manifest import (
     manifest_index,
 )
 from conductor.model import SourceState
-from conductor.sources_gh import Runner, collect_gh
+from conductor.sources_gh import (
+    Runner,
+    closed_event,
+    collect_gh,
+    issue_extras,
+    queue_records,
+)
 from conductor.sources_git import (
     GitError,
     default_ref,
     ever_had,
     fetch,
+    git,
     last_commit_mentioning,
     line_since,
     path_fact,
@@ -53,10 +62,10 @@ AUTHORITY_ROOT_ENV = (
 
 
 def read_epics(
-    root: Path,
+    root: Path, umbrella_dir: str = UMBRELLA
 ) -> tuple[dict[str, dict[str, Any]], SourceState, str, str | None]:
     """epics.toml зонтика с origin/<default>; ошибки реестра → error."""
-    umbrella = root / UMBRELLA
+    umbrella = root / umbrella_dir
     if not (umbrella / ".git").exists():
         return {}, "error", f"нет клона {umbrella}", None
     text, sha, state, detail = read_file_at_origin(umbrella, "epics.toml")
@@ -75,21 +84,21 @@ def read_epics(
 
 
 def read_manifest(
-    root: Path, do_fetch: bool
+    root: Path, do_fetch: bool, umbrella_dir: str = UMBRELLA
 ) -> tuple[str | None, tuple[str, str | None], list[str]]:
     """Манифест с origin зонтика; fetch — ДО чтения, иначе состав флота устарел.
 
     Сбой fetch — деградация (ошибка в источнике history), а не отказ: читается
     последний известный origin, и граф будет partial.
     """
-    umbrella = root / UMBRELLA
+    umbrella = root / umbrella_dir
     errors: list[str] = []
     if (
         do_fetch
         and (umbrella / ".git").exists()
         and (problem := fetch(umbrella)) is not None
     ):
-        errors.append(f"{UMBRELLA}: fetch: {problem}")
+        errors.append(f"{umbrella_dir}: fetch: {problem}")
     text, sha, state, detail = read_file_at_origin(umbrella, "workspace-manifest.toml")
     if state != "read":
         return None, ("origin", sha), [f"манифест не прочитан: {detail}"]
@@ -206,7 +215,7 @@ def _human_merge(
 
 
 def _roadmap(
-    root: Path, roadmap_path: Path | None
+    root: Path, roadmap_path: Path | None, umbrella_dir: str = UMBRELLA
 ) -> tuple[str | None, str | None, SourceState, str]:
     if roadmap_path is not None:
         source = f"file:{roadmap_path}"
@@ -214,7 +223,7 @@ def _roadmap(
             return roadmap_path.read_text(encoding="utf-8"), None, "read", source
         except OSError as exc:  # нет файла, каталог, права — состояние, не падение
             return None, None, "error", f"{source}: {exc.strerror or exc}"
-    umbrella = root / UMBRELLA
+    umbrella = root / umbrella_dir
     if not (umbrella / ".git").exists():
         return None, None, "error", "origin"
     text, sha, state, _ = read_file_at_origin(umbrella, "roadmap.toml")
@@ -230,6 +239,90 @@ def truncated_prs(records: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def umbrella_full(root: Path, owner: str, umbrella_dir: str = UMBRELLA) -> str:
+    """owner/name зонтика по remote клона (в acceptance зонтик — песочница)."""
+    code, url, _ = git(root / umbrella_dir, "remote", "get-url", "origin")
+    match = _URL_RE.search(url.strip()) if code == 0 else None
+    if match:
+        return f"{match.group(1)}/{match.group(2)}"
+    return f"{owner}/{umbrella_dir}"
+
+
+def _slice1(
+    root: Path,
+    repos: dict[str, FleetRepo],
+    snapshot: dict[str, Any],
+    readable: set[str],
+    owner: str,
+    runner: Runner,
+    errors: list[str],
+    umbrella_dir: str = UMBRELLA,
+    records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Чтения среза 1: периоды рёбер, факты выполнения, появления путей,
+    extras открытых issues, очередь владельца. Сбой — ошибка источника."""
+    out: dict[str, Any] = {
+        "done_facts": {},
+        "edge_periods": {},
+        "path_added": {},
+        "issue_extras": {},
+        "closed_events": {},
+        "queue_records": [],
+        "umbrella_full": umbrella_full(root, owner, umbrella_dir),
+    }
+    nodes = {n["node_id"]: n for n in snapshot["nodes"]}
+    for ref in snapshot["references"]:
+        repo = ref["provenance"]["repo"]
+        if ref["kind"] != "blocked_by" or repo not in readable:
+            continue
+        repo_dir = root / repos[repo].git_dir
+        item = ref["source_node_id"].rsplit("/", 1)[-1]
+        raw = ref.get("raw_ref") or ""
+        try:
+            period = facts.edge_period(
+                repo_dir, default_ref(repo_dir) or "", repo, item, raw
+            )
+            if period is not None:
+                out["edge_periods"][f"{ref['source_node_id']}|{raw}"] = list(period)
+            target = nodes.get(ref.get("resolved_target") or "")
+            if target is not None and target["declared_status"] != "open":
+                t_repo = target["repo"]
+                t_dir = root / repos[t_repo].git_dir
+                sha = facts.first_done_commit(
+                    t_dir,
+                    default_ref(t_dir) or "",
+                    t_repo,
+                    target["node_id"].rsplit("/", 1)[-1],
+                )
+                if sha is not None:
+                    out["done_facts"][target["node_id"]] = sha
+        except GitError as exc:
+            errors.append(str(exc))
+    for name, key in {r.github_name: r.key for r in repos.values()}.items():
+        extras = issue_extras(owner, name, runner)
+        if extras is None:
+            errors.append(f"{name}: extras открытых issues не прочитаны")
+            continue
+        out["issue_extras"].update({f"{key}#{n}": v for n, v in extras.items()})
+    names = {r.key: r.github_name for r in repos.values()}
+    for rec in records or []:
+        if rec["is_pr"] or rec["state"] != "closed":
+            continue
+        name = names.get(rec["repo"], rec["repo"])
+        event = closed_event(owner, name, rec["number"], runner)
+        if event is None:
+            errors.append(f"{name}#{rec['number']}: timeline закрытия не прочитан")
+        elif event:
+            out["closed_events"][f"{rec['repo']}#{rec['number']}"] = event
+    umbrella_owner, _, umbrella_name = out["umbrella_full"].partition("/")
+    queue = queue_records(umbrella_owner, umbrella_name, runner)
+    if queue is None:
+        errors.append("очередь владельца не прочитана")
+    else:
+        out["queue_records"] = queue
+    return out
+
+
 def collect(
     root: Path,
     manifest_text: str,
@@ -240,9 +333,14 @@ def collect(
     host: str,
     now: str,
     prior_errors: list[str] | None = None,
+    slice1: bool = False,
+    umbrella_dir: str = UMBRELLA,
 ) -> Inputs:
-    """Прочитать флот; сбои — состояния источников, не исключения."""
-    repos = {r.key: r for r in fleet_repos(manifest_text)}
+    """Прочитать флот; сбои — состояния источников, не исключения.
+
+    umbrella_dir — зонтик профиля: в acceptance — песочница (§9.1).
+    """
+    repos = {r.key: r for r in fleet_repos(manifest_text, umbrella_dir)}
     todos = [read_todo(r, root, do_fetch) for r in repos.values()]
     names = {r.github_name: r.key for r in repos.values()}
     norm = {**{k: k for k in repos}, **names}
@@ -254,8 +352,8 @@ def collect(
         runner,
         weak_refs=lambda recs: local_refs(recs, norm),
     )
-    rm_text, rm_sha, rm_state, rm_source = _roadmap(root, roadmap_path)
-    epics, epics_state, epics_detail, epics_sha = read_epics(root)
+    rm_text, rm_sha, rm_state, rm_source = _roadmap(root, roadmap_path, umbrella_dir)
+    epics, epics_state, epics_detail, epics_sha = read_epics(root, umbrella_dir)
     snapshot = pf.parse_fleet(
         [
             pf.RepoInput(
@@ -271,7 +369,36 @@ def collect(
     hist = _History(root, repos)
     hist.errors += prior_errors or []
     hist.collect(snapshot, {t.repo for t in todos if t.state == "read"})
-    facts = _trigger_facts(root, repos, todos, hist.errors)
+    trigger_facts = _trigger_facts(root, repos, todos, hist.errors)
+    extra = (
+        _slice1(
+            root,
+            repos,
+            snapshot,
+            {t.repo for t in todos if t.state == "read"},
+            owner,
+            runner,
+            hist.errors,
+            umbrella_dir,
+            gh.records,
+        )
+        if slice1
+        else {}
+    )
+    if slice1:
+        for text, fact in trigger_facts.items():
+            m = EXISTS_RE.match(text)
+            if m and fact.get("exists"):
+                repo_dir = root / repos[m.group(1)].git_dir
+                try:
+                    sha = facts.path_added(
+                        repo_dir, default_ref(repo_dir) or "", m.group(2)
+                    )
+                except GitError as exc:
+                    hist.errors.append(str(exc))
+                    continue
+                if sha is not None:
+                    extra.setdefault("path_added", {})[text] = sha
     human = _human_merge(root, repos, hist.errors)
     prefixes = read_authority_prefixes()
     if prefixes is None:
@@ -297,7 +424,7 @@ def collect(
         movement=hist.movement,
         wait_since=hist.since,
         history=hist.history,
-        trigger_facts=facts,
+        trigger_facts=trigger_facts,
         epics_sha=epics_sha,
         aux_state="error" if hist.errors else "read",
         aux_detail="; ".join(hist.errors[:5]),
@@ -305,4 +432,5 @@ def collect(
         authority_prefixes=prefixes or [],
         manifest_source=manifest_origin[0],
         manifest_sha=manifest_origin[1],
+        **extra,
     )

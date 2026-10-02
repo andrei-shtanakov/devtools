@@ -12,4 +12,4 @@ UMask=0027
 TimeoutStartSec=55min
 Environment=GH_CONFIG_DIR=/srv/conductor/gh
 WorkingDirectory=/srv/conductor/devtools
-ExecStart=/usr/bin/flock -n -E 0 /srv/conductor/state/conductor.lock /usr/local/bin/uv run --frozen python -m conductor run --root /srv/conductor/workspace --out /srv/conductor/state/runs
+ExecStart=/usr/bin/flock -n -E 0 /srv/conductor/state/conductor.lock /usr/local/bin/uv run --frozen python -m conductor run --root /srv/conductor/workspace --out /srv/conductor/state/runs --trigger timer
