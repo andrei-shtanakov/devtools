@@ -202,6 +202,18 @@ def test_ci_plan_fields_pin_matches_pyproject() -> None:
     root = Path(__file__).resolve().parent.parent
     ci_text = (root / ".github/workflows/ci.yml").read_text()
     py_text = (root / "pyproject.toml").read_text()
-    ci = set(re.findall(r"dispatcher@([0-9a-f]{40})", ci_text))
-    py = set(re.findall(r'rev = "([0-9a-f]{40})"', py_text))
-    assert ci and ci <= py, (ci, py)
+
+    # Extract plan-fields rev from pyproject.toml, anchored on plan-fields key
+    py_match = re.search(
+        r'plan-fields\s*=\s*\{\s*git\s*=\s*"[^"]+",\s*rev\s*=\s*"([0-9a-f]{40})"',
+        py_text,
+    )
+    assert py_match, "plan-fields rev not found in pyproject.toml"
+    py_rev = py_match.group(1)
+
+    # Extract plan-fields SHA(s) from ci.yml, anchored on plan-fields package
+    ci_shas = set(
+        re.findall(r"plan-fields\s*@\s*git\+[^@]+dispatcher@([0-9a-f]{40})", ci_text)
+    )
+    assert ci_shas, "plan-fields pin not found in ci.yml"
+    assert ci_shas == {py_rev}, f"ci.yml pins {ci_shas} != pyproject.toml rev {py_rev}"
