@@ -9,11 +9,13 @@ from pathlib import Path
 
 import pytest
 
+from governance import approval_facts as af
 from governance import charter_guard as cg
 from governance import criteria_close as cc
 from governance import criteria_contract as ctr
 from governance import criteria_product as cp
 from governance import run_state
+from governance.facts import Fact, Outcome
 from governance.frontmatter import split_frontmatter
 
 MIN = ctr.MinVersion("4.3.0")
@@ -82,6 +84,41 @@ def _git(repo, *args):
     ).stdout.strip()
 
 
+SNAP = af.PolicySnapshot(
+    "owner/approval-policy",
+    "main",
+    "policy/approvers.env",
+    "a" * 40,
+    frozenset({"owner-human"}),
+    af.policy_fingerprint({"owner-human"}),
+)
+
+
+def _forge_merge(ops, pr, login):
+    """Мерж PR форджей: --no-ff ветки PR в master origin из отдельного клона."""
+    rec = ops.forge_prs[pr]
+    target = Path(rec["dir"])
+    clone = target.parent / "forge"
+    if not clone.exists():
+        origin = _git(target, "remote", "get-url", "origin")
+        subprocess.run(
+            ["git", "clone", "-q", origin, str(clone)], check=True, capture_output=True
+        )
+    _git(clone, "fetch", "-q", "origin")
+    _git(clone, "checkout", "-q", "-B", "master", "origin/master")
+    head = _git(clone, "rev-parse", f"origin/{rec['branch']}")
+    _git(clone, "merge", "-q", "--no-ff", "-m", f"Merge PR #{pr}", head)
+    _git(clone, "push", "-q", "origin", "master")
+    rec["facts"] = {
+        "state": "MERGED",
+        "headRefOid": head,
+        "baseRefName": "master",
+        "mergedBy": {"login": login},
+        "mergedAt": "2026-10-02T00:00:00Z",
+        "mergeCommit": {"oid": _git(clone, "rev-parse", "HEAD")},
+    }
+
+
 def _ops(verify=(0, "")):
     from tests.test_governance_runner import FakeOps
 
@@ -92,18 +129,69 @@ def _ops(verify=(0, "")):
             self.calls.append(("create_pr", branch, label))
             number = 100 + len(self.existing_prs)
             self.existing_prs[branch] = number
+            head = _git(target_dir, "ls-remote", "origin", f"refs/heads/{branch}")
+            self.forge_prs[number] = {
+                "dir": target_dir,
+                "branch": branch,
+                "facts": {
+                    "state": "OPEN",
+                    "headRefOid": head.split()[0],
+                    "baseRefName": "master",
+                },
+            }
             return number
+
+        def find_pr(self, repo_slug, branch):
+            """Как `gh pr list --state open`: закрытый/влитый PR не находится."""
+            self.calls.append(("find_pr", branch))
+            pr = self.existing_prs.get(branch)
+            if pr is None or pr not in self.forge_prs:
+                return pr
+            return pr if self.forge_prs[pr]["facts"]["state"] == "OPEN" else None
 
         def close_pr(self, repo_slug, pr, comment):
             self.calls.append(("close_pr", pr))
+            if pr in self.forge_prs:
+                self.forge_prs[pr]["facts"]["state"] = "CLOSED"
             return True
 
         def criteria_verify(self, target_dir, request_path):
             self.calls.append(("criteria_verify", request_path))
             return self.verify
 
+        def merge(self, repo_name, pr, sha, base=None):
+            self.calls.append(("merge", pr, sha))
+            if not self.merge_ok:
+                return self.merge_code
+            self.merged.append((pr, sha))
+            _forge_merge(self, pr, "ai-prosto")
+            return 0
+
+        def pr_facts(self, repo_slug, pr):
+            self.calls.append(("pr_facts", pr))
+            if self.pr_facts_error:
+                raise RuntimeError(self.pr_facts_error)
+            return dict(self.forge_prs[pr]["facts"])
+
+        def agent_login(self):
+            return "ai-prosto"
+
+        def prs_by_head_prefix(self, repo_slug, branch_prefix):
+            return list(self.approval_prs)
+
+        def is_ancestor(self, target_dir, sha, ref):
+            rc = subprocess.run(
+                ["git", "-C", target_dir, "merge-base", "--is-ancestor", sha, ref],
+                capture_output=True,
+                check=False,
+            ).returncode
+            return {0: True, 1: False}.get(rc)
+
     ops = _Ops()
     ops.verify = verify
+    ops.forge_prs = {}
+    ops.approval_prs = []
+    ops.pr_facts_error = None
     return ops
 
 
@@ -170,12 +258,25 @@ def _env(
     return state, target, pin
 
 
-def _oracle_on(monkeypatch):
+def _oracle_on(monkeypatch, snapshot=None):
     monkeypatch.setattr(cc.task_bridge, "spec_runner_version", lambda: "4.5.0")
     monkeypatch.setattr(cc.criteria_contract, "vendored", lambda *a: True)
     monkeypatch.setattr(
         cc.criteria_contract, "read_min_version", lambda *a: ctr.MinVersion("4.5.0")
     )
+    fact = snapshot or Fact(Outcome.FOUND, SNAP, "stub")
+    # TODO(task-4): cc.approval_facts появится в модуле вместе с его
+    # импортом — снять `if hasattr`, подмена станет безусловной.
+    if hasattr(cc, "approval_facts"):
+        monkeypatch.setattr(
+            cc.approval_facts, "policy_snapshot", lambda ops, *, pinned_sha: fact
+        )
+
+
+def _land(target):
+    """Чекаут оператора догоняет origin/master (форджа влила закрытие/штамп)."""
+    _git(target, "pull", "-q", "--ff-only", "origin", "master")
+    return _git(target, "rev-parse", "HEAD")
 
 
 def _request(target, bundle_pin, product_sha=None):
@@ -539,6 +640,7 @@ def test_same_content_second_measure_is_g6(tmp_path, monkeypatch):
     ops = _ops((0, json.dumps(_response(target, pin))))
     assert cc.run("run-1", ops) == 0
     calls = sum(c[0] == "criteria_verify" for c in ops.calls)
+    _land(target)  # форджа влила закрытие; повтор на той же верхушке
     assert cc.run("run-1", ops) == 6
     assert sum(c[0] == "criteria_verify" for c in ops.calls) == calls  # G6 без вызова
 
@@ -551,6 +653,7 @@ def test_same_content_new_response_refused(tmp_path, monkeypatch):
     ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
     assert cc.run("run-1", ops) == 0
     calls = sum(1 for c in ops.calls if c[0] == "criteria_verify")
+    _land(target)  # форджа влила закрытие; повтор на той же верхушке
     assert cc.run("run-1", ops) == 6
     assert sum(1 for c in ops.calls if c[0] == "criteria_verify") == calls
 
@@ -566,11 +669,7 @@ def test_same_content_on_another_machine_refused(tmp_path, monkeypatch):
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin))))
     assert cc.run("run-1", ops) == 0
-    branch = next(c[1] for c in ops.calls if c[0] == "create_pr")
-    _git(target, "fetch", "-q", "origin", branch)
-    _git(target, "merge", "-q", "--ff-only", f"origin/{branch}")
-    _git(target, "push", "-q", "origin", "master")
-    merged = _git(target, "rev-parse", "HEAD")
+    merged = _land(target)
 
     monkeypatch.setattr(cc, "STATE_ROOT", tmp_path / "other-machine")
     ops2 = _ops((0, json.dumps(_response(target, merged, bundle_pin=pin))))
@@ -594,6 +693,7 @@ def test_g6_pre_check_sees_new_test_file_same_machine(tmp_path, monkeypatch):
     ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
     assert cc.run("run-1", ops) == 0
     calls_before = sum(1 for c in ops.calls if c[0] == "criteria_verify")
+    _land(target)  # форджа влила закрытие; повтор на той же верхушке
     assert cc.run("run-1", ops) == 6  # неизменное содержимое — G6 держит
     assert sum(1 for c in ops.calls if c[0] == "criteria_verify") == calls_before
 
@@ -616,10 +716,7 @@ def test_g6_pre_check_sees_new_test_file_cross_machine(tmp_path, monkeypatch):
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
     assert cc.run("run-1", ops) == 0
-    branch = next(c[1] for c in ops.calls if c[0] == "create_pr")
-    _git(target, "fetch", "-q", "origin", branch)
-    _git(target, "merge", "-q", "--ff-only", f"origin/{branch}")
-    _git(target, "push", "-q", "origin", "master")
+    _land(target)
 
     new_sha = _commit(
         target,
@@ -700,10 +797,7 @@ def test_fixed_helper_refusal_from_another_machine(tmp_path, monkeypatch, capsys
     _oracle_on(monkeypatch)
     ops = _ops((0, json.dumps(_response(target, pin, status="unconfirmed"))))
     assert cc.run("run-1", ops) == 0
-    branch = next(c[1] for c in ops.calls if c[0] == "create_pr")
-    _git(target, "fetch", "-q", "origin", branch)
-    _git(target, "merge", "-q", "--ff-only", f"origin/{branch}")
-    _git(target, "push", "-q", "origin", "master")
+    _land(target)
     capsys.readouterr()
 
     fixed = _commit(target, "tests/helpers.py", "OK = True\n")
@@ -997,6 +1091,7 @@ def test_response_level_error_publish_failure_is_retried_not_burned(
     err["error"]["detail"] = "x — другой текст того же содержимого"
     ops2 = _ops((3, json.dumps(err)))
     ops2.existing_prs = ops.existing_prs
+    ops2.forge_prs = ops.forge_prs
     assert cc.run("run-1", ops2) == 0
     assert not any(c[0] == "criteria_verify" for c in ops2.calls)  # не перемер
 
@@ -1016,6 +1111,7 @@ def test_republish_after_pr_closed_adopts_existing_branch(tmp_path, monkeypatch)
 
 
 def _commit(target, path, text):
+    _land(target)  # форджа могла влить PR: коммит поверх живой верхушки
     (Path(target) / path).parent.mkdir(parents=True, exist_ok=True)
     (Path(target) / path).write_text(text)
     _git(target, "add", path)
