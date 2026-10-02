@@ -26,6 +26,7 @@ import tempfile
 from pathlib import Path
 
 from governance import (
+    approval_branches,
     charter_guard,
     criteria_check,
     criteria_contract,
@@ -339,6 +340,23 @@ def _publish(state, ops: Ops, run_id: str, key: str, text: str, closure: str) ->
         return 2
     _record(run_id, key, merged=True)
     return 0
+
+
+def _approval_pr_open(ops: Ops, state) -> bool | None:
+    """Открыт ли PR ветки одобрения воркстрима (§3.5 п.2); None — не установлено.
+
+    Префикс — из SSOT шаблона ветки одобрения (`approval_branches`), общий у
+    candidate и finalize; незнакомое состояние PR — не «закрыт», а None."""
+    try:
+        template = approval_branches.candidate_template()
+        prefix = template[: template.index("{wave}")].replace("{ws_id}", state.ws_id)
+        prs = ops.prs_by_head_prefix(state.repo_slug, prefix)
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+        return None
+    states = [pr.get("state") for pr in prs]
+    if any(s not in ("OPEN", "CLOSED", "MERGED") for s in states):
+        return None
+    return "OPEN" in states
 
 
 # ---- измерение --------------------------------------------------------------------

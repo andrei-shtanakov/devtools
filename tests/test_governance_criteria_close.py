@@ -1132,3 +1132,37 @@ def test_create_pr_without_url_is_a_step_refusal(tmp_path, monkeypatch, capsys):
     ops.create_pr = no_url
     assert cc.run("run-1", ops) == 2
     assert "no PR URL" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("prs", "expected"),
+    [
+        ([], False),
+        ([{"state": "MERGED"}, {"state": "CLOSED"}], False),
+        ([{"state": "MERGED"}, {"state": "OPEN"}], True),
+        ([{"state": None}], None),
+    ],
+)
+def test_approval_pr_open(prs, expected):
+    class O:  # noqa: E742
+        def prs_by_head_prefix(self, slug, prefix):
+            assert prefix == "spec/ws-approve-"
+            return prs
+
+    class S:
+        ws_id = "ws"
+        repo_slug = "o/r"
+
+    assert cc._approval_pr_open(O(), S()) is expected
+
+
+def test_approval_pr_open_unavailable_on_error():
+    class O:  # noqa: E742
+        def prs_by_head_prefix(self, slug, prefix):
+            raise RuntimeError("gh api rc=1")
+
+    class S:
+        ws_id = "ws"
+        repo_slug = "o/r"
+
+    assert cc._approval_pr_open(O(), S()) is None

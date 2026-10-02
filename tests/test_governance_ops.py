@@ -192,6 +192,7 @@ def test_prs_by_head_prefix_paginates_all_states_and_filters(monkeypatch):
                                 "title": "new",
                                 "body": "body",
                                 "headRefName": "spec/fleet-20260901-behaviour",
+                                "state": "OPEN",
                             },
                             {
                                 "number": 40,
@@ -214,6 +215,7 @@ def test_prs_by_head_prefix_paginates_all_states_and_filters(monkeypatch):
                                 "title": "old",
                                 "body": "body",
                                 "headRefName": "spec/fleet-20260801-behaviour",
+                                "state": "MERGED",
                             },
                         ]
                     }
@@ -232,6 +234,9 @@ def test_prs_by_head_prefix_paginates_all_states_and_filters(monkeypatch):
     assert "-f" in argv
     assert f"owner={REPO_SLUG.split('/')[0]}" in argv
     assert f"name={REPO_SLUG.split('/')[1]}" in argv
+    assert [item["state"] for item in result] == ["OPEN", "MERGED"]
+    query = next(a for a in argv if a.startswith("query="))
+    assert "headRefName state" in query
 
 
 @pytest.mark.parametrize("stdout", ["not json", "{}", '[{"number": 1}]'])
