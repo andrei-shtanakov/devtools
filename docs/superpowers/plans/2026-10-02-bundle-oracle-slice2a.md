@@ -16,6 +16,8 @@
 
 **Круги 4–5 и решение по authority-root** (`s2a-review-r4.md`, `r5.md`): R4-B1 (пин из файла агента прятал ручные критерии) → правило «пин — текущий бандл» в обеих ветках `traced`; R5-M1 (перевёрнутая семантика compare) → `ahead`/`identical` = в истории ref + unit-тест; владелец 2026-10-02 — гейт и модули его правила в authority-root (Task 7b), гейт развязан от `ops.py`, **PR кода мержит человек**.
 
+**Модель угроз 2a — решение владельца 2026-10-02 (после круга 8):** гейт защищает от ошибок агента и нарушений штатного процесса. Он не является границей безопасности против агента, намеренно изменяющего среду исполнения CI. Authority-root и изоляция запуска — дополнительные меры защиты. Закрытие отдельных способов намеренной подмены среды прекращено: в 2a — M8-1 (имя модуля, `__pycache__`, `pycache_prefix`), M8-2 (`--no-config`), M8-4 (`charter_guard` той же формой), M8-5 (`[x]` каноническим разбором); M8-3 и последующие способы подмены — вход структурной задачи `bundle-oracle-trusted-gate` (TODO, §7.2b), 2a не блокируют. Защита форджи против злонамеренного агента на 2026-10-02 не обеспечена (сверено: одобрение закрывает `ai-prosto`, `oracle-gates` не обязательна, admin-обход `always`) — спека §7.2a п.6.
+
 **Круг 7 — перебор форм** (`s2a-review-r7.md`; вторая находка класса «незащищённый код в процессе гейта» → стоп, механизм вместо экземпляра). Класс A (код в процессе гейта): A1 `governance.*` — инвариант; A2 модуль в корне репо затеняет stdlib/`yaml` через `sys.path[0]` (M7-1) — запуск `python -I` с корнем репо **в конце** `sys.path`; A3 зависимости репо (`pyproject.toml`/`uv.lock`, их `.pth`) — гейт в изолированном окружении: stdlib + `pyyaml==6.0.3`, версии в защищённом workflow; A4 env/`sitecustomize` — `-I` + защищённый workflow; A5 ленивый импорт (m7-4) — AST-скан. Инвариант 7b — той же формой запуска: модули репо в процессе гейта ⊆ authority-root, сторонние ⊆ {`yaml`}. Класс B (путь к `[x]` без подписи): n/a, `status`, устаревший пин, понижение/удаление/переименование charter'а (`deletion_findings`), два charter'а, переименование `@id`, битый frontmatter — закрыты; перепривязка `plan_item` (M7-2) — `plan_item` неизменяем у charter'а схемы 2 против базы, как `code` (Task 7, `charter_guard`).
 
 **Круг 6** (`s2a-review-r6.md`, 0/2 major): M6-1 (гейт тянул `ops`/`facts` через `approval_facts` — незащищённый код в процессе гейта) → `policy_rule.py`, `governance/__init__.py` в перечне, инвариант «замыкание импорта ⊆ authority-root»; M6-2 (n/a — путь к `[x]` без подписи, исход решал незащищённый `criteria_contract`) → словарь причин закрыт, `spec-runner-version`/`schema-1` всегда красные, `language` — сверка графа по пину, `oracle_released` снят с гейта; m6-2 CRLF, m6-1/m6-5 — по месту.
@@ -2264,7 +2266,38 @@ def test_policy_accounts():
     assert af.policy_accounts(f"{key}=a\n{key}=b\n") is None
 ```
 
-В `tests/test_governance_closure_gate.py` — снять `oracle_released` (M6-2):
+В `tests/test_governance_closure_gate.py` — `test_done_forms_match_plan_fields`
+переписать на сверку с каноническим разбором (M8-5):
+
+```python
+@pytest.mark.parametrize(
+    "line",
+    [
+        "- [X] пункт @id:oracle",
+        "* [x] пункт @id:oracle",
+        "-  [x] два пробела @id:oracle",
+        "-\t[x] таб @id:oracle",
+        "- [x] cf. `@id:other` @id:oracle",
+        "- [x] пункт @id:other @id:oracle",
+    ],
+)
+def test_done_forms_match_plan_fields(tmp_path, line):
+    """M8-5: гейт видит `[x]` ровно там, где `plan_fields` — closed."""
+    from plan_fields.parser import parse_todo
+
+    repo = make(tmp_path, done=True, closure=None)
+    (repo / "TODO.md").write_text(line + "\n")
+    closed = {
+        n["id"]
+        for n in parse_todo(line + "\n", repo="repo")["nodes"]
+        if n["declared_status"] == "closed"
+    }
+    assert g._closed_ids(repo) == closed
+    errors, _ = g.gate_findings(repo)
+    assert bool(errors) is ("oracle" in closed)
+```
+
+Далее — снять `oracle_released` (M6-2):
 удалить `test_oracle_released_false_when_min_version_pending`,
 `…_true_when_min_version_numeric`, `…_false_when_not_vendored`,
 `test_na_spec_runner_version_not_flagged_while_oracle_pending` и хелпер
@@ -2736,6 +2769,28 @@ def plan_item_change_findings(ws_id: str, base: Charter | None, head: Charter) -
 `governance/closure_gate.py`: импорты `os`, `subprocess`; `from governance import charter_guard, criteria_contract` → `from governance import acceptance_provenance, charter_guard` (гейту `criteria_contract` больше не нужен — M6-2); функцию `oracle_released()` удалить. Сигнатура
 `gate_findings(repo: Path, *, slug: str | None = None, forge: acceptance_provenance.Forge | None = None)`.
 
+`[x]` — каноническим разбором экосистемы (ревью круга 8 M8-5: регэксп
+`_DONE` пропускал строки, которые `plan_fields` считает закрытием — два
+пробела, таб, второй `@id`). Удалить `_DONE`; в начале `gate_findings`:
+
+```python
+from plan_fields.parser import parse_todo
+
+
+def _closed_ids(repo: Path) -> set[str]:
+    """Закрытые пункты TODO.md — тем же разбором, что dispatcher/fleet-граф
+    (`declared_status: closed`), а не своим регэкспом."""
+    todo = repo / "TODO.md"
+    if not todo.exists():
+        return set()
+    doc = parse_todo(todo.read_text(encoding="utf-8"), repo=repo.name)
+    return {
+        n["id"] for n in doc.get("nodes", []) if n.get("declared_status") == "closed"
+    }
+```
+
+и `done = _closed_ids(repo)` вместо `set(_DONE.findall(...))`.
+
 Ветку `elif state == "not-applicable":` заменить (M6-2: «не применим» — путь
 к `[x]` без подписи, поэтому словарь закрыт и граф сверяется так же):
 
@@ -2884,6 +2939,14 @@ git commit -m "closure_gate: происхождение штампа — акт,
 | `governance/policy_rule.py` | источник политики и состав подписантов (вынесено из `approval_facts`) |
 | `governance/ssot_env.py` | парсер SSOT и файла политики |
 | `governance/__init__.py` | исполняется при любом импорте `governance.*` |
+| `governance/__pycache__/` | кэш байткода: unchecked-hash `.pyc` подменял бы модуль без правки `.py` (M8-1) |
+
+Префиксы в `paths.env` — **имя модуля без `.py`** (`governance/closure_gate`,
+`governance/acceptance_provenance`, …, `governance/__init__`): префикс
+покрывает и `.py`, и каталог-пакет `governance/closure_gate/`, и расширение
+`governance/closure_gate.abi3.so` (M8-1). Побочный эффект — защищаются и
+файлы с тем же началом имени (`governance/criteria_graph_x.py`); это строже,
+не слабее.
 
 Сознательно вне перечня (назвать в абзаце `paths.env`): `criteria_close.py`
 (выпускает предложение и штамп, но его ослабление ловит сам гейт по фактам
@@ -2899,6 +2962,10 @@ git commit -m "closure_gate: происхождение штампа — акт,
 - [ ] **Step 1: Write the failing test** — в `tests/test_governance_authority_root.py` в поимённый перечень (рядом с `"governance/halt_gate.py"`) добавить десять строк таблицы с комментарием «оракул бандла, срез 2a: правило гейта [x] — подпись человека (решение владельца 2026-10-02)», и инвариант (ревью круга 6 M6-1: полнота — механически, не таблицей):
 
 ```python
+#: Замер пробы при исполнении Task 7b (заполнить фактом, `Ruling:` в леджер).
+GATE_THIRD_PARTY = {"yaml", "_yaml", "plan_fields"}
+
+
 def _gate_process_modules(root: Path) -> list[tuple[str, str]]:
     """(имя, файл) модулей, загруженных гейтом в форме запуска CI (Task 9):
     `python -I` — без env, user site и cwd в sys.path; корень репо — В КОНЕЦ
@@ -2911,13 +2978,14 @@ def _gate_process_modules(root: Path) -> list[tuple[str, str]]:
         "    f = getattr(m, '__file__', None)\n"
         "    if f: print(n, f)\n"
     )
-    out = subprocess.run(
-        [sys.executable, "-I", "-c", probe],
-        cwd="/",
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.splitlines()
+    with tempfile.TemporaryDirectory() as pyc:
+        out = subprocess.run(
+            [sys.executable, "-I", "-X", f"pycache_prefix={pyc}", "-c", probe],
+            cwd="/",
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
     return [tuple(line.split(" ", 1)) for line in out]
 
 
@@ -2938,10 +3006,14 @@ def test_gate_import_closure_is_authority_root() -> None:
     assert "governance/acceptance_provenance.py" in in_repo
     unprotected = sorted(set(in_repo) - set(authority_root.touched(in_repo)))
     assert unprotected == [], unprotected
+    assert all(rel.endswith(".py") for rel in in_repo), in_repo  # M8-1: не .so/.pyc
     third = sorted(
         {n.split(".")[0] for n, f in mods if "site-packages" in f}
     )
-    assert set(third) <= {"yaml", "_yaml"}, third
+    # Сторонние в процессе гейта: yaml (frontmatter) и plan_fields с его
+    # импортами (канонический разбор [x], M8-5). Литерал фиксируется по
+    # замеру пробы при исполнении задачи; рост — находка, не правка литерала.
+    assert set(third) <= GATE_THIRD_PARTY, third
     # A5 (m7-4): ленивые импорты внутри функций модулей правила — тоже
     for rel in in_repo:
         tree = ast.parse((root / rel).read_text(encoding="utf-8"))
@@ -2978,14 +3050,14 @@ def test_criteria_close_stays_agent_mergeable() -> None:
     assert authority_root.touched(["governance/criteria_close.py"]) == []
 ```
 
-(Импорты в тест-файле: `ast`, `os`, `subprocess`, `sys`, `Path` — добавить, если их нет.)
+(Импорты в тест-файле: `ast`, `os`, `subprocess`, `sys`, `tempfile`, `Path` — добавить, если их нет.)
 
 - [ ] **Step 2: Run to verify fail**
 
 Run: `uv run -q --frozen --group governance pytest tests/test_governance_authority_root.py tests/test_merge_pr.py -q -p no:cacheprovider`
 Expected: FAIL — пути не в перечне.
 
-- [ ] **Step 3: Implement** — в `paths.env` дописать десять префиксов таблицы в `AUTHORITY_ROOT_PREFIXES` и абзац комментария (что решает каждый, что сознательно вне перечня и почему, инвариант замыкания, названная граница цепочки поставки, цена). Если инвариант покажет модуль вне таблицы — это находка: либо развязать гейт от него, либо внести с обоснованием (`Ruling:` в леджер).
+- [ ] **Step 3: Implement** — в `paths.env` дописать префиксы таблицы (имена модулей без `.py` и `governance/__pycache__/`) в `AUTHORITY_ROOT_PREFIXES` и абзац комментария (что решает каждый, что сознательно вне перечня и почему, инвариант замыкания, названная граница цепочки поставки, цена). Если инвариант покажет модуль вне таблицы — это находка: либо развязать гейт от него, либо внести с обоснованием (`Ruling:` в леджер).
 
 - [ ] **Step 4: Run tests** — команда Step 2, затем `GOVERNANCE_REQUIRED=1 uv run --frozen --group governance pytest -q -p no:cacheprovider` (перечень читают `accept_pr`, раннер и `merge-pr.sh`). Expected: PASS; `test_merge_pr` — новые пути в `merge-pr.sh` литералами не упоминаются.
 
@@ -3038,7 +3110,7 @@ gh pr create --base master --label human-merge-required --title "criteria-close:
 история git. История уже есть (`fetch-depth: 0` в `oracle-gates`).
 
 **Files:**
-- Modify: `.github/workflows/ci.yml` (job `oracle-gates`: `permissions`; шаг `closure_gate` — `GH_TOKEN` и изолированная форма запуска)
+- Modify: `.github/workflows/ci.yml` (job `oracle-gates`: `permissions`; шаги `closure_gate` (+`GH_TOKEN`) и `charter_guard` — изолированная форма запуска)
 
 - [ ] **Step 1: Edit**
 
@@ -3060,13 +3132,36 @@ gh pr create --base master --label human-merge-required --title "criteria-close:
         # только stdlib + pyyaml, версия закреплена ЗДЕСЬ (защищённый путь),
         # а не pyproject/uv.lock репо; `python -I` — без env, user site и cwd в
         # sys.path; корень репо — в конец sys.path (модуль в корне не затеняет
-        # stdlib). Форму проверяет инвариант tests/test_governance_authority_root.py.
+        # stdlib). Замыкание модулей в этой форме проверяет инвариант
+        # tests/test_governance_authority_root.py (саму форму в ci.yml — нет).
         run: >
-          uv run --isolated --no-project --python 3.12 --with pyyaml==6.0.3
-          python -I -c "import runpy, sys; sys.path.append('.');
-          sys.argv = ['closure_gate', '--repo', '.'];
+          uv run --no-config --isolated --no-project --python 3.12
+          --with pyyaml==6.0.3
+          --with "plan-fields @ git+https://github.com/andrei-shtanakov/dispatcher@f7f2cbcbbffc8d83870848317228c0a3487780ec#subdirectory=packages/plan-fields"
+          python -I -X pycache_prefix="$RUNNER_TEMP/pyc" -c "import runpy, sys;
+          sys.path.append('.'); sys.argv = ['closure_gate', '--repo', '.'];
           runpy.run_module('governance.closure_gate', run_name='__main__')"
 ```
+
+Шаг `charter_guard` (на нём держатся `plan_item`/надгробия/`code` — M8-4) —
+той же формой:
+
+```yaml
+      - name: charter_guard
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: >
+          uv run --no-config --isolated --no-project --python 3.12
+          --with pyyaml==6.0.3
+          python -I -X pycache_prefix="$RUNNER_TEMP/pyc" -c "import os, runpy, sys;
+          sys.path.append('.');
+          sys.argv = ['charter_guard', '--repo', '.', '--base', os.environ['BASE_SHA']];
+          runpy.run_module('governance.charter_guard', run_name='__main__')"
+```
+
+(`--no-config` — M8-2: без него uv читает `uv.toml`/`[tool.uv]` репо и
+ставит колесо из индекса/`find-links` репо. Пин `plan-fields` — тот же SHA,
+что в `[tool.uv.sources]` devtools; расхождение пинов — находка.)
 
 (`GITHUB_REPOSITORY` Actions выставляет сами — `--repo-slug` не нужен. Если
 `uv run --isolated --no-project --with` в версии uv из `setup-uv` недоступен —
@@ -3076,7 +3171,7 @@ workflow, не репо.)
 
 - [ ] **Step 2: Verify locally**
 
-Run (из корня devtools): `uv run --isolated --no-project --python 3.12 --with pyyaml==6.0.3 python -I -c "import runpy, sys; sys.path.append('.'); sys.argv = ['closure_gate', '--repo', '.']; runpy.run_module('governance.closure_gate', run_name='__main__')"` — Expected: rc 0 (в devtools нет charter'ов схемы 2 с `[x]`). Затем `uv run -q --frozen --group selfcheck zizmor .github/workflows/ci.yml` (или `actionlint`) — без новых находок уровня error.
+Run (из корня devtools) обе формы шагов, подставив `$RUNNER_TEMP` → временный каталог и `BASE_SHA` → `origin/master` — Expected: rc 0 у обоих (в devtools нет charter'ов схемы 2 с `[x]`; charter'ы не менялись). Затем `uv run -q --frozen --group selfcheck zizmor .github/workflows/ci.yml` (или `actionlint`) — без новых находок уровня error.
 
 - [ ] **Step 3: PR с человеческим мержем**
 
