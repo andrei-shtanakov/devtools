@@ -193,3 +193,15 @@ def test_every_module_sourced_by_the_merge_scripts_is_protected() -> None:
 def test_roadmap_is_authority_root() -> None:
     """ai-orchestrators-workspace#48: правку `roadmap.toml` мержит человек."""
     assert authority_root.touched(["roadmap.toml", "README.md"]) == ["roadmap.toml"]
+
+
+def test_ci_plan_fields_pin_matches_pyproject() -> None:
+    """m9-8: пин plan-fields в ci.yml (защищён) = пину в pyproject (правим)."""
+    import re
+
+    root = Path(__file__).resolve().parent.parent
+    ci_text = (root / ".github/workflows/ci.yml").read_text()
+    py_text = (root / "pyproject.toml").read_text()
+    ci = set(re.findall(r"dispatcher@([0-9a-f]{40})", ci_text))
+    py = set(re.findall(r'rev = "([0-9a-f]{40})"', py_text))
+    assert ci and ci <= py, (ci, py)
