@@ -16,6 +16,8 @@
 
 **Круги 4–5 и решение по authority-root** (`s2a-review-r4.md`, `r5.md`): R4-B1 (пин из файла агента прятал ручные критерии) → правило «пин — текущий бандл» в обеих ветках `traced`; R5-M1 (перевёрнутая семантика compare) → `ahead`/`identical` = в истории ref + unit-тест; владелец 2026-10-02 — гейт и модули его правила в authority-root (Task 7b), гейт развязан от `ops.py`, **PR кода мержит человек**.
 
+**Круг 6** (`s2a-review-r6.md`, 0/2 major): M6-1 (гейт тянул `ops`/`facts` через `approval_facts` — незащищённый код в процессе гейта) → `policy_rule.py`, `governance/__init__.py` в перечне, инвариант «замыкание импорта ⊆ authority-root»; M6-2 (n/a — путь к `[x]` без подписи, исход решал незащищённый `criteria_contract`) → словарь причин закрыт, `spec-runner-version`/`schema-1` всегда красные, `language` — сверка графа по пину, `oracle_released` снят с гейта; m6-2 CRLF, m6-1/m6-5 — по месту.
+
 **Круг 3** (`scratchpad/s2a-review-r3.md`): `VERDICT: converged`; minor R3-m1 (унаследованный `pr` среза 1) исправлен без нового круга — `_propose` сбрасывает `pr`/`attested`/`closed`; граница пути к штампу для красного файла среза 1 названа в §7.2a п.6.
 
 **Круг 2** (`scratchpad/s2a-review-r2.md`, 0 blocker / 3 major): B-M1 (флаг human из текста, fail-open без поля) → флаг передаётся в `_propose` из графа узлов на пине; B-M2 (после Task 6 падает `test_new_measurement_closes_stale_pr`) → адаптация названа в Task 6; B-M3 (отсутствие файла/узла свёрнуто в «не установлено», прогон запирается) → `_path_fact` различает «нет» и «не прочитано», голова сверяется первой; minor: живая приёмка Step 3 (выход 2, не 4, на polygon; теперь Task 10), `_close_stale` пропускает ключи с исходом, исключения `find_pr`/`candidate_template` → отказ шага, «Update branch» названа границей и предупреждением в PR, граница гейта для файлов среза 1 и «нет исполнителя» в 2a — в спеке.
@@ -1965,19 +1967,19 @@ git commit -m "criteria_close: штамп — свой коммит, мерж п
 акт, связанный с этим закрытием (спека §7.2a п.6), а не текст.
 
 **Files:**
-- Create: `governance/acceptance_provenance.py`
-- Modify: `governance/approval_facts.py` (`policy_accounts`), `governance/closure_gate.py` (ветка `traced`, `main`: `--repo-slug`, `RealForge`)
+- Create: `governance/acceptance_provenance.py`, `governance/policy_rule.py`
+- Modify: `governance/approval_facts.py` (константы и `policy_source` — реэкспорт из `policy_rule`), `governance/closure_gate.py` (ветки `traced` и `not-applicable`, `main`: `--repo-slug`, `RealForge`; без `criteria_contract`/`oracle_released`)
 - Test: `tests/test_governance_acceptance_provenance.py`, `tests/test_governance_closure_gate.py`
 
 **Interfaces:**
-- Consumes: `criteria_accept.stamp_text`, `criteria_graph.build_graph/human_criteria`, `approval_facts.policy_source/policy_accounts`, `ssot_env.definition_lines`, `frontmatter.split_frontmatter`. **Не** `ops.py` и **не** `facts.py`: зависимости правила гейта уходят под authority-root (Task 7b), а `ops.py` туда не входит — форджа читается собственными вызовами `gh`, учётка агента — константа `AGENT_LOGIN` в модуле.
+- Consumes: `criteria_accept.stamp_text`, `criteria_graph.build_graph/human_criteria`, `policy_rule.policy_source/policy_accounts`, `frontmatter.split_frontmatter`. **Не** `approval_facts`, `ops.py`, `facts.py`, `criteria_contract`: всё замыкание импорта гейта уходит под authority-root и проверяется инвариантом (Task 7b; ревью круга 6 M6-1 — `approval_facts` на уровне модуля тянул `ops.py` и цепочку незащищённых модулей, тела которых исполняются в процессе гейта). Форджа — собственными вызовами `gh`, учётка агента — константа `AGENT_LOGIN`.
 - Produces:
-  - `approval_facts.policy_accounts(content: str) -> frozenset[str] | None` — состав из `approvers.env`; ключа нет/дубль/пусто — None;
+  - `governance/policy_rule.py` (зависит только от `ssot_env`): `APPROVER_ALLOWLIST_ENV`, `POLICY_SOURCE_FILE`, `policy_source() -> (repo, ref, path)`, `policy_accounts(content) -> frozenset[str] | None`; `approval_facts` реэкспортирует первые три (его потребители не меняются);
   - `acceptance_provenance.Forge` (Protocol): `pr_facts(slug, pr) -> dict | None`, `pr_files(slug, pr) -> list[str] | None`, `default_branch(slug) -> str | None`, `policy_file(repo, sha, path) -> str | None` — None всегда «не установлено»;
   - `RealForge` — через `gh` (`pr view --json state,baseRefName,mergeCommit,mergedBy|files`, `repo view --json defaultBranchRef`, `api repos/{repo}/contents/{path}?ref={sha}`, `api repos/{repo}/compare/{sha}...{ref}`);
   - `human_needed(repo: Path, spec_dir: str, bundle_pin: object) -> bool | None` — по графу узлов на пине;
-  - `stamp_findings(repo: Path, spec_dir: str, text: str, *, slug: str | None, forge: Forge | None, agent: str = REVIEW_LOGIN_DEFAULT) -> list[str]` — пусто = штамп доказан;
-  - `closure_gate.gate_findings(repo, *, oracle_released, slug=None, forge=None)`.
+  - `stamp_findings(repo: Path, spec_dir: str, text: str, *, slug: str | None, forge: Forge | None, agent: str = AGENT_LOGIN) -> list[str]` — пусто = штамп доказан;
+  - `closure_gate.gate_findings(repo, *, slug=None, forge=None)` — параметр `oracle_released` и функция `oracle_released()` удалены (M6-2).
 
 - [ ] **Step 1: Write the failing tests** — `tests/test_governance_acceptance_provenance.py`
 
@@ -2217,9 +2219,19 @@ def test_real_forge_policy_file_decodes_base64(monkeypatch):
     monkeypatch.setattr(
         ap, "_gh", lambda *a: f'{{"encoding": "base64", "content": "{body}"}}'
     )
-    assert ap.RealForge().policy_file("o/p", SHA, "p") == f"{af.APPROVER_ALLOWLIST_ENV}=x\n"
+    expected = f"{af.APPROVER_ALLOWLIST_ENV}=x\n"
+    assert ap.RealForge().policy_file("o/p", SHA, "p") == expected
     monkeypatch.setattr(ap, "_gh", lambda *a: None)
     assert ap.RealForge().policy_file("o/p", SHA, "p") is None
+
+
+def test_crlf_nodes_are_current(tmp_path):
+    """Ревью круга 6 m6-2: узел с CRLF — не ложный «не текущий бандл»."""
+    repo, _merge, _stamp = _signed(tmp_path)
+    node = repo / SPEC / "10-requirements.md"
+    node.write_bytes(REQ.replace("\n", "\r\n").encode())
+    _git(repo, "commit", "-qam", "crlf")
+    assert ap.pin_current(repo, SPEC, _git(repo, "rev-parse", "HEAD")) is True
 
 
 def test_non_sha_refs_never_reach_git(tmp_path):
@@ -2247,7 +2259,42 @@ def test_policy_accounts():
     assert af.policy_accounts(f"{key}=a\n{key}=b\n") is None
 ```
 
-В `tests/test_governance_closure_gate.py` — правило без `status` теперь по графу
+В `tests/test_governance_closure_gate.py` — снять `oracle_released` (M6-2):
+удалить `test_oracle_released_false_when_min_version_pending`,
+`…_true_when_min_version_numeric`, `…_false_when_not_vendored`,
+`test_na_spec_runner_version_not_flagged_while_oracle_pending` и хелпер
+`vendor`, если он больше не используется; во всех вызовах `gate_findings`
+убрать аргумент `oracle_released=`; `test_gate_table` — без колонки
+`oracle_released`, строки: нет файла → красный; `blocked` → красный;
+`traced` + `human_pending: 0` → красный (граф не прочитан); n/a `schema-1` →
+красный; `NA_SR` → красный; `test_na_spec_runner_version_flagged_once_oracle_released`
+переименовать в `test_na_spec_runner_version_always_red`;
+`test_na_version_names_version_and_host_in_error_and_warning` — только
+ошибка (одним вызовом); `test_gate_reads_a_real_rendered_closure` — ожидание
+`errors` непусто (n/a `spec-runner-version`); `test_language_is_green_with_visible_warning`
+— с подменой `pin_current → True`, `human_needed → False`. Новые:
+
+```python
+@pytest.mark.parametrize(
+    ("current", "need", "red"),
+    [(True, False, False), (True, True, True), (True, None, True), (False, None, True), (None, None, True)],
+)
+def test_language_na_checks_graph(tmp_path, monkeypatch, current, need, red):
+    monkeypatch.setattr(g.acceptance_provenance, "pin_current", lambda *a: current)
+    monkeypatch.setattr(g.acceptance_provenance, "human_needed", lambda *a: need)
+    na = "closure: not-applicable\nnot_applicable_reason: language\nbundle_pin: p"
+    errors, _ = g.gate_findings(make(tmp_path, done=True, closure=na))
+    assert bool(errors) is red
+
+
+@pytest.mark.parametrize("reason", ["foo", "null", "''"])
+def test_unknown_na_reason_is_red(tmp_path, reason):
+    na = f"closure: not-applicable\nnot_applicable_reason: {reason}"
+    errors, _ = g.gate_findings(make(tmp_path, done=True, closure=na))
+    assert errors
+```
+
+Далее — правило без `status` теперь по графу
 (в `make` гит-репо нет → граф не прочитан → **красный**: «непрочитанный граф не
 означает “ручных критериев нет”»). Строку таблицы `test_gate_table`
 `("closure: traced\nhuman_pending: 0", False, False)` заменить на
@@ -2261,7 +2308,6 @@ def test_slice1_test_only_closure_green_with_warning_by_graph(tmp_path, monkeypa
     monkeypatch.setattr(g.acceptance_provenance, "human_needed", lambda *a: False)
     errors, warns = g.gate_findings(
         make(tmp_path, done=True, closure="closure: traced\nbundle_pin: p"),
-        oracle_released=False,
     )
     assert errors == [] and any("без штампа" in w for w in warns)
 
@@ -2271,7 +2317,6 @@ def test_slice1_closure_with_human_criteria_by_graph_is_red(tmp_path, monkeypatc
     monkeypatch.setattr(g.acceptance_provenance, "human_needed", lambda *a: True)
     errors, _ = g.gate_findings(
         make(tmp_path, done=True, closure="closure: traced\nhuman_pending: 0"),
-        oracle_released=False,
     )
     assert any("подпись человека не получена" in e for e in errors)
 
@@ -2281,7 +2326,6 @@ def test_slice1_closure_for_stale_bundle_is_red(tmp_path, monkeypatch):
     monkeypatch.setattr(g.acceptance_provenance, "pin_current", lambda *a: False)
     errors, _ = g.gate_findings(
         make(tmp_path, done=True, closure="closure: traced\nbundle_pin: p"),
-        oracle_released=False,
     )
     assert any("не для текущего бандла" in e for e in errors)
 
@@ -2295,7 +2339,7 @@ def test_slice1_closure_for_stale_bundle_is_red(tmp_path, monkeypatch):
 )
 def test_traced_non_accepted_status_is_red(tmp_path, closure, red):
     errors, _ = g.gate_findings(
-        make(tmp_path, done=True, closure=closure), oracle_released=False
+        make(tmp_path, done=True, closure=closure)
     )
     assert bool(errors) is red
 
@@ -2310,7 +2354,6 @@ def test_accepted_delegates_to_provenance(tmp_path, monkeypatch):
     monkeypatch.setattr(g.acceptance_provenance, "stamp_findings", fake)
     errors, _ = g.gate_findings(
         make(tmp_path, done=True, closure="closure: traced\nstatus: accepted"),
-        oracle_released=False,
         slug="o/r",
         forge="F",
     )
@@ -2325,9 +2368,47 @@ Expected: FAIL — нет модуля `acceptance_provenance`, нет `policy_a
 
 - [ ] **Step 3: Implement**
 
-`governance/approval_facts.py`, после `policy_fingerprint`:
+`governance/policy_rule.py` (новый; под authority-root, импортирует только `ssot_env`):
 
 ```python
+"""policy_rule — источник и состав политики подписи (правило гейта [x]).
+
+Вынесено из `approval_facts` (ревью круга 6 M6-1): тот на уровне модуля
+импортирует `ops`/`facts`, и гейт, читая политику через него, исполнял бы
+незащищённый код. Здесь — только то, что решает доверие: координаты
+источника из SSOT под authority-root и разбор состава.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from governance import ssot_env
+
+#: Ключ политики в `policy/approvers.env` и имя переменной, выставление
+#: которой — отказ (approval-policy S7). Одно имя в двух местах — намеренно.
+APPROVER_ALLOWLIST_ENV = "AUTHORIZED_APPROVER_ACCOUNTS"
+
+#: Координаты источника политики — SSOT под authority-root (S8).
+POLICY_SOURCE_FILE = (
+    Path(__file__).resolve().parent.parent
+    / "contracts"
+    / "approval-policy-source"
+    / "v1"
+    / "source.env"
+)
+
+
+def policy_source() -> tuple[str, str, str]:
+    """(repo, ref, path) из SSOT под authority-root; RuntimeError на битом файле."""
+    what = "SSOT источника политики подписи"
+    return (
+        ssot_env.read_key(POLICY_SOURCE_FILE, "APPROVAL_POLICY_REPO", what),
+        ssot_env.read_key(POLICY_SOURCE_FILE, "APPROVAL_POLICY_REF", what),
+        ssot_env.read_key(POLICY_SOURCE_FILE, "APPROVAL_POLICY_PATH", what),
+    )
+
+
 def policy_accounts(content: str) -> frozenset[str] | None:
     """Состав политики из `approvers.env` (тем же правилом, что `policy_snapshot`):
     ключа нет, дубль или ни одного логина — None."""
@@ -2337,6 +2418,24 @@ def policy_accounts(content: str) -> frozenset[str] | None:
     accounts = frozenset(p.strip() for p in lines[0].split(",") if p.strip())
     return accounts or None
 ```
+
+`governance/approval_facts.py`: определения `APPROVER_ALLOWLIST_ENV`,
+`POLICY_SOURCE_FILE` и `policy_source` заменить реэкспортом (комментарии к
+ним перенести в `policy_rule`):
+
+```python
+from governance.policy_rule import (  # noqa: F401 — реэкспорт для потребителей
+    APPROVER_ALLOWLIST_ENV,
+    POLICY_SOURCE_FILE,
+    policy_accounts,
+    policy_source,
+)
+```
+
+Потребители `approval_facts.policy_source`/`APPROVER_ALLOWLIST_ENV`
+(`criteria_close`, `approve_node`, тесты) не меняются. Тесты, подменяющие
+`approval_facts.policy_source` через `monkeypatch.setattr`, продолжают работать
+для кода, читающего его через `approval_facts` (в т.ч. `policy_snapshot`).
 
 `governance/acceptance_provenance.py`:
 
@@ -2361,7 +2460,7 @@ import subprocess
 from pathlib import Path
 from typing import Protocol
 
-from governance import approval_facts, criteria_accept, criteria_graph
+from governance import criteria_accept, criteria_graph, policy_rule
 from governance.frontmatter import split_frontmatter
 
 #: Учётка агента. Здесь, а не из `ops.py`: модуль и всё, что решает правило
@@ -2453,17 +2552,19 @@ class RealForge:
 
 
 def _show(repo: Path, ref: str, path: str) -> str | None:
-    done = subprocess.run(
-        ["git", "-C", str(repo), "show", f"{ref}:{path}"],
-        capture_output=True,
-        check=False,
-    )
-    if done.returncode != 0:
-        return None
     try:
-        return done.stdout.decode("utf-8")
+        # text=True — universal newlines, как у `read_text` в `pin_current`
+        # (ревью круга 6 m6-2: иначе CRLF-узел давал ложный красный)
+        done = subprocess.run(
+            ["git", "-C", str(repo), "show", f"{ref}:{path}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
     except UnicodeDecodeError:  # R5 m-c: находка, не трейсбек
         return None
+    return done.stdout if done.returncode == 0 else None
 
 
 def pin_current(repo: Path, spec_dir: str, bundle_pin: object) -> bool | None:
@@ -2505,7 +2606,7 @@ def _trusted_accounts(source: object, forge: Forge) -> frozenset[str] | None:
     if m is None:
         return None
     try:
-        repo, _ref, path = approval_facts.policy_source()
+        repo, _ref, path = policy_rule.policy_source()
     except RuntimeError:
         return None
     if (m["repo"], m["path"]) != (repo, path):
@@ -2513,7 +2614,7 @@ def _trusted_accounts(source: object, forge: Forge) -> frozenset[str] | None:
     if forge.policy_on_ref(repo, m["sha"], _ref) is not True:
         return None
     content = forge.policy_file(repo, m["sha"], path)
-    return approval_facts.policy_accounts(content) if content is not None else None
+    return policy_rule.policy_accounts(content) if content is not None else None
 
 
 def stamp_findings(
@@ -2591,8 +2692,52 @@ def stamp_findings(
     return []
 ```
 
-`governance/closure_gate.py`: импорты `os`, `subprocess`, `from governance import acceptance_provenance`. Сигнатура
-`gate_findings(repo: Path, *, oracle_released: bool, slug: str | None = None, forge: acceptance_provenance.Forge | None = None)`.
+`governance/closure_gate.py`: импорты `os`, `subprocess`; `from governance import charter_guard, criteria_contract` → `from governance import acceptance_provenance, charter_guard` (гейту `criteria_contract` больше не нужен — M6-2); функцию `oracle_released()` удалить. Сигнатура
+`gate_findings(repo: Path, *, slug: str | None = None, forge: acceptance_provenance.Forge | None = None)`.
+
+Ветку `elif state == "not-applicable":` заменить (M6-2: «не применим» — путь
+к `[x]` без подписи, поэтому словарь закрыт и граф сверяется так же):
+
+```python
+        elif state == "not-applicable":
+            reason = meta.get("not_applicable_reason")
+            where = f"spec-runner {meta.get('spec_runner_version')} на {meta.get('host')}"
+            spec_dir = charter_path.parent.relative_to(repo).as_posix()
+            if reason == "spec-runner-version":
+                # оракул выпущен с spec-runner v4.5.0 — всегда перегнать
+                errors.append(
+                    f"{ws}: not-applicable spec-runner-version ({where}) — перегнать "
+                    "закрытие на машине с spec-runner ≥ min"
+                )
+            elif reason == "schema-1":
+                errors.append(
+                    f"{ws}: charter схемы 2, а закрытие — schema-1: перегнать закрытие"
+                )
+            elif reason == "language":
+                pin = meta.get("bundle_pin")
+                current = acceptance_provenance.pin_current(repo, spec_dir, pin)
+                need = (
+                    acceptance_provenance.human_needed(repo, spec_dir, pin)
+                    if current
+                    else None
+                )
+                if current is False:
+                    errors.append(f"{ws}: закрытие не для текущего бандла")
+                elif need is None:
+                    errors.append(f"{ws}: граф бандла на пине не прочитан")
+                elif need:
+                    errors.append(
+                        f"@id:{m.group(2)} [x], но у {ws} есть человеческие критерии, "
+                        "а оракул не применим (language) — путь подписи для n/a в 2b"
+                    )
+                else:
+                    warns.append(f"{ws}: оракул не применим (language)")
+            else:
+                errors.append(
+                    f"{ws}: not_applicable_reason {reason!r} вне словаря "
+                    "language|schema-1|spec-runner-version"
+                )
+```
 Ветку `elif state == "traced":` заменить:
 
 ```python
@@ -2656,10 +2801,7 @@ def _origin_slug(repo: Path) -> str | None:
     repo = args.repo.resolve()
     slug = args.repo_slug or os.environ.get("GITHUB_REPOSITORY") or _origin_slug(repo)
     errors, warns = gate_findings(
-        repo,
-        oracle_released=oracle_released(),
-        slug=slug,
-        forge=acceptance_provenance.RealForge(),
+        repo, slug=slug, forge=acceptance_provenance.RealForge()
     )
 ```
 
@@ -2687,7 +2829,7 @@ git commit -m "closure_gate: происхождение штампа — акт,
 
 **Files:**
 - Modify: `contracts/authority-root/v1/paths.env` (префиксы + абзац обоснования)
-- Modify: `tests/test_governance_authority_root.py` (поимённый перечень с комментарием на каждую строку)
+- Modify: `tests/test_governance_authority_root.py` (поимённый перечень с комментарием на каждую строку; инвариант замыкания импорта)
 
 | модуль | что решает в правиле гейта |
 |---|---|
@@ -2698,41 +2840,61 @@ git commit -m "closure_gate: происхождение штампа — акт,
 | `governance/acceptance_guard.py` | приоритеты требований → что Won't и выпадает из счёта |
 | `governance/frontmatter.py` | разбор/сериализация, на которых стоит сверка «штамп = предложение» |
 | `governance/charter_guard.py` | какие charter'ы и пункты плана гейт видит |
-| `governance/approval_facts.py` | источник политики и состав подписантов (закрывает и §I12) |
+| `governance/policy_rule.py` | источник политики и состав подписантов (вынесено из `approval_facts`) |
 | `governance/ssot_env.py` | парсер SSOT и файла политики |
+| `governance/__init__.py` | исполняется при любом импорте `governance.*` |
 
 Сознательно вне перечня (назвать в абзаце `paths.env`): `criteria_close.py`
 (выпускает предложение и штамп, но его ослабление ловит сам гейт по фактам
-форджи), `criteria_contract.py` (решает «оракул не применим», не подпись),
-`ops.py` (гейт от него развязан — Task 7). Цена: будущие правки
+форджи); `approval_facts.py`, `ops.py`, `facts.py`, `criteria_contract.py` —
+вне замыкания импорта гейта (Task 7: `policy_rule`, собственные вызовы `gh`,
+`oracle_released` снят). Полнота — не таблицей, а инвариантом: замыкание
+`governance.*` гейта ⊆ authority-root. Названная граница (не защищается):
+сторонние пакеты (`yaml`) и их версии (`pyproject.toml`/`uv.lock`), запуск
+интерпретатора (`.pth`, `sitecustomize`) — цепочка поставки. Цена: будущие правки
 `frontmatter.py`, `charter_guard.py`, `criteria_graph.py` (ими пользуются
 раннер и мост) тоже мержит человек.
 
-- [ ] **Step 1: Write the failing test** — в `tests/test_governance_authority_root.py` в поимённый перечень (рядом с `"governance/halt_gate.py"`) добавить девять строк с комментарием «оракул бандла, срез 2a: правило гейта [x] — подпись человека (решение владельца 2026-10-02)», и отдельный тест:
+- [ ] **Step 1: Write the failing test** — в `tests/test_governance_authority_root.py` в поимённый перечень (рядом с `"governance/halt_gate.py"`) добавить десять строк таблицы с комментарием «оракул бандла, срез 2a: правило гейта [x] — подпись человека (решение владельца 2026-10-02)», и инвариант (ревью круга 6 M6-1: полнота — механически, не таблицей):
 
 ```python
-def test_gate_rule_modules_are_authority_root() -> None:
-    """Срез 2a: гейт [x] и модули, решающие его правило, мержит человек."""
-    gate = [
-        "governance/closure_gate.py",
-        "governance/acceptance_provenance.py",
-        "governance/criteria_accept.py",
-        "governance/criteria_graph.py",
-        "governance/acceptance_guard.py",
-        "governance/frontmatter.py",
-        "governance/charter_guard.py",
-        "governance/approval_facts.py",
-        "governance/ssot_env.py",
-    ]
-    assert authority_root.touched(gate + ["governance/criteria_close.py"]) == gate
+def test_gate_import_closure_is_authority_root() -> None:
+    """Замыкание импорта гейта [x] ⊆ authority-root: новый импорт в модуле
+    правила (`from governance.ops import …`) краснеет здесь, а не уходит молча."""
+    root = Path(__file__).resolve().parent.parent
+    code = (
+        "import os, sys, governance.closure_gate\n"
+        "for name, mod in sorted(sys.modules.items()):\n"
+        "    f = getattr(mod, '__file__', None)\n"
+        "    if (name == 'governance' or name.startswith('governance.')) and f:\n"
+        "        print(os.path.relpath(f, os.getcwd()))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert "governance/closure_gate.py" in out
+    assert "governance/acceptance_provenance.py" in out
+    unprotected = sorted(set(out) - set(authority_root.touched(out)))
+    assert unprotected == [], unprotected
+
+
+def test_criteria_close_stays_agent_mergeable() -> None:
+    """Выпуск предложения/штампа — не правило гейта: его ослабление ловит гейт."""
+    assert authority_root.touched(["governance/criteria_close.py"]) == []
 ```
+
+(Импорты в тест-файле: `subprocess`, `sys`, `Path` — добавить, если их нет.)
 
 - [ ] **Step 2: Run to verify fail**
 
 Run: `uv run -q --frozen --group governance pytest tests/test_governance_authority_root.py tests/test_merge_pr.py -q -p no:cacheprovider`
 Expected: FAIL — пути не в перечне.
 
-- [ ] **Step 3: Implement** — в `paths.env` дописать девять префиксов в `AUTHORITY_ROOT_PREFIXES` и абзац комментария (что решает каждый, что сознательно вне перечня и почему, цена — по таблице выше).
+- [ ] **Step 3: Implement** — в `paths.env` дописать десять префиксов таблицы в `AUTHORITY_ROOT_PREFIXES` и абзац комментария (что решает каждый, что сознательно вне перечня и почему, инвариант замыкания, названная граница цепочки поставки, цена). Если инвариант покажет модуль вне таблицы — это находка: либо развязать гейт от него, либо внести с обоснованием (`Ruling:` в леджер).
 
 - [ ] **Step 4: Run tests** — команда Step 2, затем `GOVERNANCE_REQUIRED=1 uv run --frozen --group governance pytest -q -p no:cacheprovider` (перечень читают `accept_pr`, раннер и `merge-pr.sh`). Expected: PASS; `test_merge_pr` — новые пути в `merge-pr.sh` литералами не упоминаются.
 
