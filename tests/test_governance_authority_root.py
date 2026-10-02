@@ -244,6 +244,30 @@ def test_roadmap_is_authority_root() -> None:
     assert authority_root.touched(["roadmap.toml", "README.md"]) == ["roadmap.toml"]
 
 
+def test_ci_plan_fields_pin_matches_pyproject() -> None:
+    """m9-8: пин plan-fields в ci.yml (защищён) = пину в pyproject (правим)."""
+    import re
+
+    root = Path(__file__).resolve().parent.parent
+    ci_text = (root / ".github/workflows/ci.yml").read_text()
+    py_text = (root / "pyproject.toml").read_text()
+
+    # Extract plan-fields rev from pyproject.toml, anchored on plan-fields key
+    py_match = re.search(
+        r'plan-fields\s*=\s*\{\s*git\s*=\s*"[^"]+",\s*rev\s*=\s*"([0-9a-f]{40})"',
+        py_text,
+    )
+    assert py_match, "plan-fields rev not found in pyproject.toml"
+    py_rev = py_match.group(1)
+
+    # Extract plan-fields SHA(s) from ci.yml, anchored on plan-fields package
+    ci_shas = set(
+        re.findall(r"plan-fields\s*@\s*git\+[^@]+dispatcher@([0-9a-f]{40})", ci_text)
+    )
+    assert ci_shas, "plan-fields pin not found in ci.yml"
+    assert ci_shas == {py_rev}, f"ci.yml pins {ci_shas} != pyproject.toml rev {py_rev}"
+
+
 #: Сторонние в процессе гейта — замер Task 7b (dev-venv, `-I` пробa): yaml
 #: (frontmatter) и plan_fields с его импортами (`plan_fields/__init__` →
 #: validator → jsonschema → jsonschema_specifications, referencing, rpds) +

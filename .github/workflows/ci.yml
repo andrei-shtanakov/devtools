@@ -52,6 +52,10 @@ jobs:
   # пункта плана, целостность и дрейф вендоренного criteria-closure/v1.
   oracle-gates:
     runs-on: ubuntu-latest
+    # Гейт [x] проверяет происхождение штампа по фактам форджи (спека §7.2a п.6).
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,9 +67,29 @@ jobs:
       - name: charter_guard
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: uv run --frozen python -m governance.charter_guard --repo . --base "$BASE_SHA"
+        # Изолированный процесс гейта (ревью кругов 7–8): окружение — stdlib +
+        # pyyaml + plan-fields, версии закреплены ЗДЕСЬ (защищённый путь),
+        # а не pyproject/uv.lock репо; `python -I` — без env, user site и cwd в
+        # sys.path; корень репо — в конец sys.path (модуль в корне не затеняет
+        # stdlib). Замыкание модулей в этой форме проверяет инвариант
+        # tests/test_governance_authority_root.py (саму форму в ci.yml — нет).
+        run: >
+          uv run --no-config --isolated --no-project --python 3.12
+          --with pyyaml==6.0.3
+          python -I -X pycache_prefix="$RUNNER_TEMP/pyc" -c "import os, runpy, sys;
+          sys.path.append('.');
+          sys.argv = ['charter_guard', '--repo', '.', '--base', os.environ['BASE_SHA']];
+          runpy.run_module('governance.charter_guard', run_name='__main__')"
       - name: closure_gate
-        run: uv run --frozen python -m governance.closure_gate --repo .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          uv run --no-config --isolated --no-project --python 3.12
+          --with pyyaml==6.0.3
+          --with "plan-fields @ git+https://github.com/andrei-shtanakov/dispatcher@f7f2cbcbbffc8d83870848317228c0a3487780ec#subdirectory=packages/plan-fields"
+          python -I -X pycache_prefix="$RUNNER_TEMP/pyc" -c "import runpy, sys;
+          sys.path.append('.'); sys.argv = ['closure_gate', '--repo', '.'];
+          runpy.run_module('governance.closure_gate', run_name='__main__')"
       - name: criteria-closure/v1 integrity
         run: >
           uv run --frozen python -c "import sys;
