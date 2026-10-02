@@ -14,6 +14,8 @@
 
 **Вычитка владельцем 2026-10-02** (#544): проверка происхождения — в 2a (Task 7 переписана: гейт проверяет акт, связанный с закрытием; Task 9 — CI-проводка через `.github/`, мерж человеком); обход старым форматом убран (файл среза 1 без `status` зелёный только при графе на пине без человеческих критериев; непрочитанный граф — красный); миграция незавершённого закрытия среза 1 — отдельная ветка предложения, обработка прежнего PR, сквозной тест без перемера (Tasks 4–6).
 
+**Круги 4–5 и решение по authority-root** (`s2a-review-r4.md`, `r5.md`): R4-B1 (пин из файла агента прятал ручные критерии) → правило «пин — текущий бандл» в обеих ветках `traced`; R5-M1 (перевёрнутая семантика compare) → `ahead`/`identical` = в истории ref + unit-тест; владелец 2026-10-02 — гейт и модули его правила в authority-root (Task 7b), гейт развязан от `ops.py`, **PR кода мержит человек**.
+
 **Круг 3** (`scratchpad/s2a-review-r3.md`): `VERDICT: converged`; minor R3-m1 (унаследованный `pr` среза 1) исправлен без нового круга — `_propose` сбрасывает `pr`/`attested`/`closed`; граница пути к штампу для красного файла среза 1 названа в §7.2a п.6.
 
 **Круг 2** (`scratchpad/s2a-review-r2.md`, 0 blocker / 3 major): B-M1 (флаг human из текста, fail-open без поля) → флаг передаётся в `_propose` из графа узлов на пине; B-M2 (после Task 6 падает `test_new_measurement_closes_stale_pr`) → адаптация названа в Task 6; B-M3 (отсутствие файла/узла свёрнуто в «не установлено», прогон запирается) → `_path_fact` различает «нет» и «не прочитано», голова сверяется первой; minor: живая приёмка Step 3 (выход 2, не 4, на polygon; теперь Task 10), `_close_stale` пропускает ключи с исходом, исключения `find_pr`/`candidate_template` → отказ шага, «Update branch» названа границей и предупреждением в PR, граница гейта для файлов среза 1 и «нет исполнителя» в 2a — в спеке.
@@ -43,8 +45,8 @@
 
 - Отдельный worktree от `origin/master`, ветка `feat/bundle-oracle-slice2a` (не основной чекаут `devtools/` — параллельные сессии).
 - Исполнение (решение владельца): **через субагентов** — свежий исполнитель и ревьюер на каждую задачу; Tasks 4–6 строго последовательно; после Task 8 — общее интеграционное ревью всей ветки (самая сильная модель).
-- Зависимости: 2 после 1; 3 независима (только тесты); 4 после 1 и 3; 5 после 2 и 4; 6 после 5; 7 после 1; 8 после 6 и 7; 9 после мержа PR кода; 10 — после мержа Task 9 (живая приёмка, акты владельца).
-- **Два PR.** Код (Tasks 1–8) `.github/` не трогает — мерж агентом после approve (CI devtools зелёный и без токена: в devtools нет charter'ов схемы 2 с `[x]`, проверка происхождения там не срабатывает). Task 9 правит `.github/workflows/ci.yml` — отдельный PR с меткой `human-merge-required`, **мерж человеком**.
+- Зависимости: 2 после 1; 3 независима (только тесты); 4 после 1 и 3; 5 после 2 и 4; 6 после 5; 7 после 1; 7b после 7; 8 после 6 и 7b; 9 после мержа PR кода; 10 — после мержа Task 9 (живая приёмка, акты владельца).
+- **Два PR, оба мержит человек.** Код (Tasks 1–8, 7b) правит authority-root (`contracts/authority-root/`, `governance/` модули правила гейта — Task 7b) — `merge-pr.sh` отказывает категорически, **мерж человеком** (CI devtools зелёный и без токена: в devtools нет charter'ов схемы 2 с `[x]`, проверка происхождения там не срабатывает). Task 9 правит `.github/workflows/ci.yml` — отдельный PR с меткой `human-merge-required`, **мерж человеком**.
 
 ---
 
@@ -1321,6 +1323,27 @@ def test_policy_env_refuses_command_in_any_phase(tmp_path, monkeypatch, capsys):
     assert "merge" not in cc._entry("run-1", _key())
 
 
+def test_slice1_pr_close_failure_is_step_refusal(tmp_path, monkeypatch):
+    """R4-m3/R5 m-a: PR среза 1 не закрылся — отказ шага, повтор пробует снова."""
+    state, target, pin = _env_human(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    nodes = cc._bundle_at_pin(state, pin)
+    charter = cc.charter_guard.read_charter(nodes["00-charter.md"])
+    key, closure, text = cc._measure(
+        state, ops, "run-1", charter, nodes, pin, pin, "4.5.0", "h"
+    )
+    ops.review_exit = 1
+    assert cc._publish(state, ops, "run-1", key, text, closure) == 2
+    old_pr = cc._entry("run-1", key)["pr"]
+    ops.review_exit = 0
+    ops.close_pr = lambda slug, pr, comment: False
+    assert cc.run("run-1", ops) == 2
+    assert not cc._entry("run-1", key).get("slice1_done")
+    assert cc._entry("run-1", key)["pr"] is None  # предложение ещё без PR
+    assert ops.forge_prs[old_pr]["facts"]["state"] == "OPEN"
+
+
 def test_new_content_after_rejection_measures_again(tmp_path, monkeypatch):
     """Терминал — только на своём ключе (§7.2a п.5): прогон не запирается."""
     _state, target, pin = _env_human(tmp_path, monkeypatch)
@@ -1947,11 +1970,11 @@ git commit -m "criteria_close: штамп — свой коммит, мерж п
 - Test: `tests/test_governance_acceptance_provenance.py`, `tests/test_governance_closure_gate.py`
 
 **Interfaces:**
-- Consumes: `criteria_accept.stamp_text`, `criteria_graph.build_graph/human_criteria`, `approval_facts.policy_source/APPROVER_ALLOWLIST_ENV`, `ssot_env.definition_lines`, `ops.REVIEW_LOGIN_DEFAULT` (учётка агента), `RealOps.pr_facts/repo_file_fact`.
+- Consumes: `criteria_accept.stamp_text`, `criteria_graph.build_graph/human_criteria`, `approval_facts.policy_source/policy_accounts`, `ssot_env.definition_lines`, `frontmatter.split_frontmatter`. **Не** `ops.py` и **не** `facts.py`: зависимости правила гейта уходят под authority-root (Task 7b), а `ops.py` туда не входит — форджа читается собственными вызовами `gh`, учётка агента — константа `AGENT_LOGIN` в модуле.
 - Produces:
   - `approval_facts.policy_accounts(content: str) -> frozenset[str] | None` — состав из `approvers.env`; ключа нет/дубль/пусто — None;
   - `acceptance_provenance.Forge` (Protocol): `pr_facts(slug, pr) -> dict | None`, `pr_files(slug, pr) -> list[str] | None`, `default_branch(slug) -> str | None`, `policy_file(repo, sha, path) -> str | None` — None всегда «не установлено»;
-  - `RealForge` — через `gh` (`RealOps.pr_facts`, `repo_file_fact`, `gh pr view --json files`, `gh repo view --json defaultBranchRef`);
+  - `RealForge` — через `gh` (`pr view --json state,baseRefName,mergeCommit,mergedBy|files`, `repo view --json defaultBranchRef`, `api repos/{repo}/contents/{path}?ref={sha}`, `api repos/{repo}/compare/{sha}...{ref}`);
   - `human_needed(repo: Path, spec_dir: str, bundle_pin: object) -> bool | None` — по графу узлов на пине;
   - `stamp_findings(repo: Path, spec_dir: str, text: str, *, slug: str | None, forge: Forge | None, agent: str = REVIEW_LOGIN_DEFAULT) -> list[str]` — пусто = штамп доказан;
   - `closure_gate.gate_findings(repo, *, oracle_released, slug=None, forge=None)`.
@@ -2169,6 +2192,36 @@ def test_old_test_only_pin_in_new_proposal_is_red(tmp_path):
     assert ap.pin_current(repo, SPEC, old_pin) is False
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ('{"status": "ahead"}', True),
+        ('{"status": "identical"}', True),
+        ('{"status": "behind"}', False),
+        ('{"status": "diverged"}', False),
+        ('{"status": "weird"}', None),
+        ("not json", None),
+        (None, None),
+    ],
+)
+def test_real_forge_policy_on_ref_semantics(monkeypatch, payload, expected):
+    """R5-M1: sha...ref — `ahead`/`identical` значат «sha в истории ref»."""
+    monkeypatch.setattr(ap, "_gh", lambda *a: payload)
+    assert ap.RealForge().policy_on_ref("o/p", SHA, "main") is expected
+
+
+def test_real_forge_policy_file_decodes_base64(monkeypatch):
+    import base64 as b64
+
+    body = b64.b64encode(f"{af.APPROVER_ALLOWLIST_ENV}=x\n".encode()).decode()
+    monkeypatch.setattr(
+        ap, "_gh", lambda *a: f'{{"encoding": "base64", "content": "{body}"}}'
+    )
+    assert ap.RealForge().policy_file("o/p", SHA, "p") == f"{af.APPROVER_ALLOWLIST_ENV}=x\n"
+    monkeypatch.setattr(ap, "_gh", lambda *a: None)
+    assert ap.RealForge().policy_file("o/p", SHA, "p") is None
+
+
 def test_non_sha_refs_never_reach_git(tmp_path):
     """R4-m5: ссылка из файла — только SHA (не опция git)."""
     repo, merge, stamp = _signed(tmp_path)
@@ -2301,6 +2354,7 @@ PR accepted_pr этого репо влит в default, его мерж-комм
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import subprocess
@@ -2308,9 +2362,12 @@ from pathlib import Path
 from typing import Protocol
 
 from governance import approval_facts, criteria_accept, criteria_graph
-from governance.facts import Outcome
 from governance.frontmatter import split_frontmatter
-from governance.ops import REVIEW_LOGIN_DEFAULT, RealOps
+
+#: Учётка агента. Здесь, а не из `ops.py`: модуль и всё, что решает правило
+#: гейта, — под authority-root (решение владельца 2026-10-02); `ops.py` туда
+#: не входит, и константа в нём ослаблялась бы агентским PR.
+AGENT_LOGIN = "ai-prosto"
 
 CLOSURE_NAME = "90-acceptance-closure.md"
 _NODES = ("10-requirements.md", "15-behaviour-spec.md", "25-acceptance.md")
@@ -2340,67 +2397,73 @@ def _gh(*args: str) -> str | None:
     return done.stdout if done.returncode == 0 else None
 
 
-class RealForge:
-    """Форджа через `gh` (в CI — `GH_TOKEN`); любой сбой — None."""
+def _gh_json(*args: str) -> object | None:
+    out = _gh(*args)
+    try:
+        return json.loads(out) if out is not None else None
+    except json.JSONDecodeError:
+        return None
 
-    def __init__(self) -> None:
-        self._ops = RealOps()
+
+class RealForge:
+    """Форджа через `gh` (в CI — `GH_TOKEN`); любой сбой — None. Собственные
+    вызовы, не `ops.py`: зависимости правила гейта — под authority-root."""
 
     def pr_facts(self, slug: str, pr: int) -> dict | None:
-        try:
-            facts = self._ops.pr_facts(slug, pr)
-        except (subprocess.SubprocessError, OSError, ValueError, RuntimeError):
-            return None
-        return facts if isinstance(facts, dict) else None
+        v = _gh_json(
+            "pr", "view", str(pr), "-R", slug,
+            "--json", "state,baseRefName,mergeCommit,mergedBy",
+        )
+        return v if isinstance(v, dict) else None
 
     def pr_files(self, slug: str, pr: int) -> list[str] | None:
-        out = _gh("pr", "view", str(pr), "-R", slug, "--json", "files")
-        try:
-            files = json.loads(out)["files"] if out is not None else None
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return None
+        v = _gh_json("pr", "view", str(pr), "-R", slug, "--json", "files")
+        files = v.get("files") if isinstance(v, dict) else None
         if not isinstance(files, list):
             return None
         paths = [f.get("path") for f in files if isinstance(f, dict)]
         return paths if all(isinstance(p, str) for p in paths) else None
 
     def default_branch(self, slug: str) -> str | None:
-        out = _gh("repo", "view", slug, "--json", "defaultBranchRef")
-        try:
-            name = json.loads(out)["defaultBranchRef"]["name"] if out else None
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return None
+        v = _gh_json("repo", "view", slug, "--json", "defaultBranchRef")
+        ref = v.get("defaultBranchRef") if isinstance(v, dict) else None
+        name = ref.get("name") if isinstance(ref, dict) else None
         return name if isinstance(name, str) and name else None
 
     def policy_file(self, repo: str, sha: str, path: str) -> str | None:
-        try:
-            fact = self._ops.repo_file_fact(repo, sha, path)
-        except (subprocess.SubprocessError, OSError, ValueError, RuntimeError):
+        v = _gh_json("api", f"repos/{repo}/contents/{path}?ref={sha}")
+        if not isinstance(v, dict) or v.get("encoding") != "base64":
             return None
-        if fact.outcome is Outcome.FOUND and isinstance(fact.value, str):
-            return fact.value
-        return None
+        try:
+            return base64.b64decode(str(v.get("content", ""))).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
 
     def policy_on_ref(self, repo: str, sha: str, ref: str) -> bool | None:
-        """SHA политики — в истории `ref` (не непринятая ветка, не объект форка)."""
-        out = _gh("api", f"repos/{repo}/compare/{sha}...{ref}")
-        try:
-            status = json.loads(out)["status"] if out else None
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return None
-        if status in ("behind", "identical"):
+        """SHA политики — в истории `ref`. GitHub compare `BASE...HEAD` даёт
+        статус HEAD относительно BASE: при BASE=sha, HEAD=ref «sha — предок
+        ref» ⇔ `ahead`/`identical` (ревью круга 5 R5-M1: было перевёрнуто)."""
+        v = _gh_json("api", f"repos/{repo}/compare/{sha}...{ref}?per_page=1")
+        status = v.get("status") if isinstance(v, dict) else None
+        if status in ("ahead", "identical"):
             return True
-        return False if status in ("ahead", "diverged") else None
+        if status in ("behind", "diverged"):
+            return False
+        return None
 
 
 def _show(repo: Path, ref: str, path: str) -> str | None:
     done = subprocess.run(
         ["git", "-C", str(repo), "show", f"{ref}:{path}"],
         capture_output=True,
-        text=True,
         check=False,
     )
-    return done.stdout if done.returncode == 0 else None
+    if done.returncode != 0:
+        return None
+    try:
+        return done.stdout.decode("utf-8")
+    except UnicodeDecodeError:  # R5 m-c: находка, не трейсбек
+        return None
 
 
 def pin_current(repo: Path, spec_dir: str, bundle_pin: object) -> bool | None:
@@ -2416,7 +2479,11 @@ def pin_current(repo: Path, spec_dir: str, bundle_pin: object) -> bool | None:
         here = repo / spec_dir / n
         if at_pin is None or not here.is_file():
             return None
-        if at_pin != here.read_text():
+        try:
+            current = here.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return None
+        if at_pin != current:
             return False
     return True
 
@@ -2456,11 +2523,11 @@ def stamp_findings(
     *,
     slug: str | None,
     forge: Forge | None,
-    agent: str = REVIEW_LOGIN_DEFAULT,
+    agent: str = AGENT_LOGIN,
 ) -> list[str]:
     """Пусто — штамп доказан актом, связанным с этим закрытием.
 
-    `agent` — константа учётки агента (`REVIEW_LOGIN_DEFAULT`); предикат
+    `agent` — константа учётки агента (`AGENT_LOGIN`); предикат
     `criteria_close` берёт её из профиля (`ops.agent_login()`). Разойтись они
     могут только в ложный красный, не в зелёный (ревью круга 4 R4-m7)."""
     rel = f"{spec_dir}/{CLOSURE_NAME}"
@@ -2612,6 +2679,72 @@ git commit -m "closure_gate: происхождение штампа — акт,
 
 ---
 
+### Task 7b: authority-root — гейт и модули, определяющие его правило
+
+Решение владельца 2026-10-02: гейт обеспечивает обязательность человеческой
+подписи, поэтому изменение его правил мержит человек; вместе с ним — модули,
+через которые правило можно ослабить.
+
+**Files:**
+- Modify: `contracts/authority-root/v1/paths.env` (префиксы + абзац обоснования)
+- Modify: `tests/test_governance_authority_root.py` (поимённый перечень с комментарием на каждую строку)
+
+| модуль | что решает в правиле гейта |
+|---|---|
+| `governance/closure_gate.py` | какие пункты `[x]` и как проверяются |
+| `governance/acceptance_provenance.py` | происхождение штампа, пин — текущий бандл, подписант |
+| `governance/criteria_accept.py` | какие поля штамп вправе менять (`stamp_text`) |
+| `governance/criteria_graph.py` | нужен ли человек (`human_criteria`, `build_graph`) |
+| `governance/acceptance_guard.py` | приоритеты требований → что Won't и выпадает из счёта |
+| `governance/frontmatter.py` | разбор/сериализация, на которых стоит сверка «штамп = предложение» |
+| `governance/charter_guard.py` | какие charter'ы и пункты плана гейт видит |
+| `governance/approval_facts.py` | источник политики и состав подписантов (закрывает и §I12) |
+| `governance/ssot_env.py` | парсер SSOT и файла политики |
+
+Сознательно вне перечня (назвать в абзаце `paths.env`): `criteria_close.py`
+(выпускает предложение и штамп, но его ослабление ловит сам гейт по фактам
+форджи), `criteria_contract.py` (решает «оракул не применим», не подпись),
+`ops.py` (гейт от него развязан — Task 7). Цена: будущие правки
+`frontmatter.py`, `charter_guard.py`, `criteria_graph.py` (ими пользуются
+раннер и мост) тоже мержит человек.
+
+- [ ] **Step 1: Write the failing test** — в `tests/test_governance_authority_root.py` в поимённый перечень (рядом с `"governance/halt_gate.py"`) добавить девять строк с комментарием «оракул бандла, срез 2a: правило гейта [x] — подпись человека (решение владельца 2026-10-02)», и отдельный тест:
+
+```python
+def test_gate_rule_modules_are_authority_root() -> None:
+    """Срез 2a: гейт [x] и модули, решающие его правило, мержит человек."""
+    gate = [
+        "governance/closure_gate.py",
+        "governance/acceptance_provenance.py",
+        "governance/criteria_accept.py",
+        "governance/criteria_graph.py",
+        "governance/acceptance_guard.py",
+        "governance/frontmatter.py",
+        "governance/charter_guard.py",
+        "governance/approval_facts.py",
+        "governance/ssot_env.py",
+    ]
+    assert authority_root.touched(gate + ["governance/criteria_close.py"]) == gate
+```
+
+- [ ] **Step 2: Run to verify fail**
+
+Run: `uv run -q --frozen --group governance pytest tests/test_governance_authority_root.py tests/test_merge_pr.py -q -p no:cacheprovider`
+Expected: FAIL — пути не в перечне.
+
+- [ ] **Step 3: Implement** — в `paths.env` дописать девять префиксов в `AUTHORITY_ROOT_PREFIXES` и абзац комментария (что решает каждый, что сознательно вне перечня и почему, цена — по таблице выше).
+
+- [ ] **Step 4: Run tests** — команда Step 2, затем `GOVERNANCE_REQUIRED=1 uv run --frozen --group governance pytest -q -p no:cacheprovider` (перечень читают `accept_pr`, раннер и `merge-pr.sh`). Expected: PASS; `test_merge_pr` — новые пути в `merge-pr.sh` литералами не упоминаются.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add contracts/authority-root/v1/paths.env tests/test_governance_authority_root.py
+git commit -m "authority-root: гейт [x] и модули его правила — мерж человеком (срез 2a)"
+```
+
+---
+
 ### Task 8: документация, полный прогон, PR кода
 
 **Files:**
@@ -2640,9 +2773,9 @@ Expected: всё чисто, набор зелёный.
 git add CLAUDE.md Makefile
 git commit -m "docs: criteria-close срез 2a — предложение, подпись человека, штамп, происхождение в гейте"
 git push -u origin feat/bundle-oracle-slice2a
-gh pr create --base master --title "criteria-close: срез 2a — подпись человека, штамп accepted, происхождение в гейте" --body "Срез 2a оракула (спека §7.2a, план docs/superpowers/plans/2026-10-02-bundle-oracle-slice2a.md): criteria_accept и human_criteria по графу; предложение — свой коммит на ветке -proposal со снимком политики и human-merge-required; _advance — приёмка по фактам форджи; миграция незавершённого закрытия среза 1; stamp-PR status: accepted; гейт [x] — происхождение штампа (acceptance_provenance). Выходы 0/2/4/5/6. CI-проводка гейта (.github) — отдельный PR, мерж человеком."
+gh pr create --base master --label human-merge-required --title "criteria-close: срез 2a — подпись человека, штамп accepted, происхождение в гейте" --body "Срез 2a оракула (спека §7.2a, план docs/superpowers/plans/2026-10-02-bundle-oracle-slice2a.md): criteria_accept и human_criteria по графу; предложение — свой коммит на ветке -proposal со снимком политики и human-merge-required; _advance — приёмка по фактам форджи; миграция незавершённого закрытия среза 1; stamp-PR status: accepted; гейт [x] — происхождение штампа (acceptance_provenance). Выходы 0/2/4/5/6. CI-проводка гейта (.github) — отдельный PR, мерж человеком."
 ```
-Ревью — `review-pr.sh` двухфазно (`--dry-run --write-verdict F`, затем `--use-verdict F`), мерж — `merge-pr.sh --squash --delete-branch --expect-head --expect-base` (PR `.github/` не трогает).
+Ревью — `review-pr.sh` двухфазно (`--dry-run --write-verdict F`, затем `--use-verdict F`); PR — с меткой `human-merge-required`, **мерж человеком** (правит authority-root: Task 7b).
 
 ---
 
@@ -2704,5 +2837,5 @@ polygon не проверяется** — это отдельно указать
 - [ ] **Step 1: Метка.** `gh label create human-merge-required -R DarkFactory-polygon/polygon` (если нет).
 - [ ] **Step 2: Бандл test-only** `oracle-stamp` (код `PLS`, 1 Must-BEH `kind: unit` с тестом, вызывающим `greet`) → PR → мерж владельцем → журнал `polygon-oracle-stamp-<дата>` → `make criteria-close` → предложение `status: proposed` на ветке `…-proposal` (выход 2 на ревью) → владелец мержит PR предложения → resume → stamp-PR (выход 2 на ревью) → владелец мержит → resume → `accepted`, выход 0. `mergedBy` владельца ∈ снимок — test-only путь допускает.
 - [ ] **Step 3: Бандл с человеком** `oracle-human` (код `PLH`, BEH-01 `kind: unit` + BEH-02 `kind: manual` в AC `verification: manual`) → PR → мерж → журнал → `make criteria-close` → PR с метками `criteria-close` и `human-merge-required` создан, аттестация на polygon падает (нет review-kit) → выход **2**, не 4 (на репо с review-kit было бы 4) → владелец мержит PR предложения → resume → stamp-PR → владелец мержит → resume → `accepted`.
-- [ ] **Step 4: Гейт с происхождением.** Пункты TODO polygon обоих воркстримов `[x]` → `uv run python -m governance.closure_gate --repo <polygon>` (slug — из origin) = 0. Контрольно (не коммитить): правка тела штампа `oracle-human` в рабочем дереве → красный «штамп ≠ подписанному предложению»; `oracle-positive` (файл среза 1 без `status`, граф на пине без человеческих критериев) — зелёный с предупреждением.
+- [ ] **Step 4: Гейт с происхождением.** Пункты TODO polygon обоих воркстримов `[x]` → `uv run python -m governance.closure_gate --repo <polygon>` (slug — из origin) = 0. Контрольно (не коммитить): правка тела штампа `oracle-human` в рабочем дереве → красный «штамп ≠ подписанному предложению»; `oracle-positive` (файл среза 1 без `status`, граф на пине без человеческих критериев) — зелёный с предупреждением, если узлы его бандла на `main` polygon не правились после пина `387d507` (сверить `git diff 387d507 HEAD -- workstreams/oracle-positive/spec/1* workstreams/oracle-positive/spec/2*` до шага; иначе ожидаем красный «не для текущего бандла» — правило R4-B1).
 - [ ] **Step 5: Закрыть** `bundle-oracle-slice2` в devtools TODO формулировкой с номерами PR polygon и пином; отдельно: «автоматический агентский мерж на polygon не проверялся (нет review-kit; мержи PR предложения и штампа — владельцем)»; п.5 §8.4 — тестами (`test_human_criterion_merged_by_outsider_is_rejected`, `test_agent_merge_with_human_criterion_is_red`), на polygon нет третьей учётки; п.6 — в 2b.
