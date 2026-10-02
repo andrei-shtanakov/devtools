@@ -1283,6 +1283,79 @@ def test_render_writes_human_criteria():
     assert split_frontmatter(text)[0]["human_criteria"] == 2
 
 
+@pytest.mark.parametrize(
+    "fake_result",
+    [
+        subprocess.CompletedProcess(("rev-parse", "HEAD"), 1, "", "боится"),
+        subprocess.CompletedProcess(("rev-parse", "HEAD"), 0, "", ""),
+    ],
+    ids=["nonzero-rc", "empty-stdout"],
+)
+def test_push_closure_rejects_unresolved_head(tmp_path, monkeypatch, fake_result):
+    """Minor 1: rev-parse после push не вернул sha — отказ шага, не пустая
+    голова (деферред T4)."""
+    state, _target, _pin = _env(tmp_path, monkeypatch)
+    real_git = cc._git
+
+    def fake_git(repo, *args):
+        if args == ("rev-parse", "HEAD"):
+            return fake_result
+        return real_git(repo, *args)
+
+    monkeypatch.setattr(cc, "_git", fake_git)
+    with pytest.raises(cc.CloseError):
+        cc._materialize(state, "criteria-close/x", "текст\n", "traced")
+
+
+def test_advance_refuses_unresolved_proposal_head(tmp_path, monkeypatch):
+    """Minor 1: отказ при нечитаемой голове предложения — ничего не
+    записано, PR не открыт (Global Constraint: незаписанная голова → отказ
+    шага, не публикация)."""
+    _state, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    ops = _ops((0, json.dumps(_response(target, pin))))
+    real_git = cc._git
+
+    def fake_git(repo, *args):
+        # только rev-parse HEAD в temp-worktree публикации (criteria-close-*),
+        # не в чекауте оператора (используется _verify_product).
+        if args == ("rev-parse", "HEAD") and "criteria-close-" in str(repo):
+            return subprocess.CompletedProcess(args, 1, "", "боится")
+        return real_git(repo, *args)
+
+    monkeypatch.setattr(cc, "_git", fake_git)
+    assert cc.run("run-1", ops) == 2
+    (key,) = cc._load("run-1")["measured"]
+    p = cc._entry("run-1", key)["proposal"]
+    assert not p.get("head")
+    assert not any(c[0] == "create_pr" for c in ops.calls)
+
+
+def test_adopt_refuses_merge_commit_tip(tmp_path, monkeypatch):
+    """Minor 2: голова-мерж не усыновляется, даже если первый-родительский
+    дифф — ровно файл закрытия (спека §7.2a п.1: один свой коммит, деферред
+    T4)."""
+    state, target, pin = _env(tmp_path, monkeypatch)
+    rel = "workstreams/ws/spec/90-acceptance-closure.md"
+    text = "текст\n"
+    (target / "other.txt").write_text("x\n")
+    _git(target, "add", "other.txt")
+    _git(target, "commit", "-qm", "advance master")
+    _git(target, "push", "-q", "origin", "master")
+    m2 = _git(target, "rev-parse", "HEAD")
+    _git(target, "checkout", "-q", pin)
+    _git(target, "checkout", "-q", "-b", "side")
+    (target / rel).write_text(text)
+    _git(target, "add", rel)
+    _git(target, "commit", "-qm", "closure")
+    tree_a = _git(target, "rev-parse", "HEAD^{tree}")
+    evil = _git(target, "commit-tree", tree_a, "-p", pin, "-p", m2, "-m", "evil merge")
+    _git(target, "push", "-q", "origin", f"{evil}:refs/heads/criteria-close/x")
+    _git(target, "checkout", "-q", "master")
+    with pytest.raises(cc.CloseError):
+        cc._materialize(state, "criteria-close/x", text, "traced")
+
+
 def test_materialize_pushes_own_single_file_commit(tmp_path, monkeypatch):
     state, target, pin = _env(tmp_path, monkeypatch)
     head = cc._materialize(state, "criteria-close/x", "текст\n", "traced")

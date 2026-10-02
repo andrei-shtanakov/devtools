@@ -19,6 +19,7 @@ import argparse
 import fnmatch
 import hashlib
 import json
+import re
 import shutil
 import socket
 import subprocess
@@ -112,6 +113,20 @@ def _git(repo: str | Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(repo), *args], capture_output=True, text=True, check=False
     )
+
+
+_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def _resolved_sha(repo: str | Path, branch: str, *args: str) -> str:
+    """`git rev-parse` проверенный: rc=0 и ровно 40-hex sha, иначе отказ
+    шага по имени ветки (Minor 1: пустая/неудавшаяся голова не записывается
+    и PR по ней не открывается)."""
+    proc = _git(repo, "rev-parse", *args)
+    sha = proc.stdout.strip()
+    if proc.returncode != 0 or not _SHA_RE.fullmatch(sha):
+        raise CloseError(f"{branch}: git rev-parse {' '.join(args)} не вернул sha")
+    return sha
 
 
 def _show(repo: str, ref: str, path: str) -> str:
@@ -258,7 +273,7 @@ def _push_closure(state, branch: str, text: str, closure: str) -> str:
             proc = _git(wt, *args)
             if proc.returncode != 0:
                 raise CloseError(f"git {args[0]}: {proc.stderr.strip()}")
-        return _git(wt, "rev-parse", "HEAD").stdout.strip()
+        return _resolved_sha(wt, branch, "HEAD")
     finally:
         _git(state.target_dir, "worktree", "remove", "--force", str(wt))
         shutil.rmtree(tmp, ignore_errors=True)
@@ -283,6 +298,11 @@ def _adopt_branch(state, branch: str, text: str) -> str | None:
     rel = f"{state.bundle_dir}/{CLOSURE_NAME}"
     shown = _git(state.target_dir, "show", f"{local}:{rel}")
     names = _git(state.target_dir, "diff", "--name-only", f"{local}^", local)
+    parents = _git(state.target_dir, "rev-list", "--parents", "-n1", local)
+    # ровно коммит + один родитель (Minor 2: голова-мерж не усыновляется —
+    # спека §7.2a п.1 требует один свой коммит, не дифф против первого
+    # родителя, которого вторая голова мерджа может скрывать).
+    single_parent = parents.returncode == 0 and len(parents.stdout.split()) == 2
     parent_ok = (
         _git(
             state.target_dir,
@@ -298,6 +318,7 @@ def _adopt_branch(state, branch: str, text: str) -> str | None:
         or shown.stdout != text
         or names.returncode != 0
         or names.stdout.split() != [rel]
+        or not single_parent
         or not parent_ok
     ):
         raise CloseError(
@@ -305,7 +326,7 @@ def _adopt_branch(state, branch: str, text: str) -> str | None:
             f"origin/{base}, только {rel}, этот текст) — удалите её "
             f"(`git push origin --delete {branch}`) и повторите"
         )
-    return _git(state.target_dir, "rev-parse", local).stdout.strip()
+    return _resolved_sha(state.target_dir, branch, local)
 
 
 def _materialize(state, branch: str, text: str, closure: str) -> str:
